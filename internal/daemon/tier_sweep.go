@@ -137,6 +137,19 @@ const (
 	// landing cannot loop faster than this.
 	tierSweepRetryMinGap = 10 * time.Minute
 
+	// tierSweepImagesRetryGap is the least time between a cycle whose images
+	// stage failed and the re-run that retries it. The images build is
+	// remote: a failure is often a runner or network fault that clears on its
+	// own, so the sweep retries it well before the hourly interval instead of
+	// letting the green tip wait an hour (gt-bfvhqt).
+	tierSweepImagesRetryGap = 15 * time.Minute
+
+	// tierSweepImagesRetryMax caps the images retries recorded for one green
+	// sha. A failure that survives this many re-runs is not the transient kind
+	// the early retry is for, so the sweep waits for the interval and the
+	// attention item instead of looping (gt-bfvhqt).
+	tierSweepImagesRetryMax = 3
+
 	// defaultTierSweepStaleAfter is how old the last sweep may be before a
 	// pending upgrade restart stops deferring the next one (gt-zvqn8). Every
 	// landing that changes the binary leaves a restart pending, so during a run
@@ -234,6 +247,14 @@ type tierSweepState struct {
 	// green throughout. It is the skip key: while origin/main equals it there
 	// is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
+	// ImagesRetries counts the re-runs an images failure at ImagesRetrySHA has
+	// already cost. The pair belongs together: the count is read only while
+	// ImagesRetrySHA equals LastGreenSHA, so a green sweep that moves the tip
+	// starts the new sha at zero without an explicit reset.
+	ImagesRetries int `json:"images_retries,omitempty"`
+	// ImagesRetrySHA is the green tip the ImagesRetries count belongs to. An
+	// empty value, or one naming another tip, reads as zero retries.
+	ImagesRetrySHA string `json:"images_retry_sha,omitempty"`
 	// Tiers is the last verdict per tier, each carrying the tip it was taken
 	// at.
 	Tiers map[string]tierSweepTierResult `json:"tiers"`
@@ -855,6 +876,29 @@ func (d *Daemon) logTierSweepStuck(now time.Time) {
 // origin/main are the other two conditions, checked by runTierSweepEarly.
 func tierSweepEarlyDue(st tierSweepState, now time.Time) bool {
 	return st.LastSHA != "" && st.LastSHA != st.LastGreenSHA && now.Sub(st.LastRun) >= tierSweepRetryMinGap
+}
+
+// tierSweepImagesRetryDue reports whether st should re-run now because the
+// images build at the last green tip failed: the images stage failed, a green
+// tip is recorded, fewer than tierSweepImagesRetryMax re-runs are recorded for
+// that tip, and tierSweepImagesRetryGap has passed since the last run. A count
+// recorded for another tip does not count.
+//
+// Unlike tierSweepEarlyDue the tip has not moved: the sweep is green in every
+// local tier and only the remote images build failed, so the green tip waits
+// for the hourly interval unless this rule re-runs it early (gt-bfvhqt).
+func tierSweepImagesRetryDue(st tierSweepState, now time.Time, imagesFailed bool) bool {
+	if !imagesFailed || st.LastGreenSHA == "" {
+		return false
+	}
+	retries := 0
+	if st.ImagesRetrySHA == st.LastGreenSHA {
+		retries = st.ImagesRetries
+	}
+	if retries >= tierSweepImagesRetryMax {
+		return false
+	}
+	return now.Sub(st.LastRun) >= tierSweepImagesRetryGap
 }
 
 // tierSweepEarlyCandidates lists the configured rigs whose record passes
