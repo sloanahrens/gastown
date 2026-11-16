@@ -456,6 +456,22 @@ func TestLandReworkStatsRefusals(t *testing.T) {
 	}
 }
 
+// TestLandReworkStatsWeeksRefusedBeforeTheTown: a window below one week is
+// refused before the command resolves the town or reads a ledger, so a bad
+// --weeks fails on the flag, not on the town.
+func TestLandReworkStatsWeeksRefusedBeforeTheTown(t *testing.T) {
+	t.Parallel()
+	resolve := func() (string, error) {
+		t.Error("--weeks 0 resolved the town")
+		return "", errors.New("not in a town")
+	}
+	var out bytes.Buffer
+	err := landReworkStatsReportFrom(resolve, &out, landReworkStatsNow, 0, false)
+	if err == nil || !strings.Contains(err.Error(), "want at least 1") {
+		t.Fatalf("error = %v, want the --weeks refusal", err)
+	}
+}
+
 // weekOfOnCall is metrics.WeekOf, except that its nth call returns week and err
 // instead, so a case picks which week the report cannot name: 1 is the current
 // week, 2 the window's first day, 3 the landing's week.

@@ -87,6 +87,11 @@ func landReworkStatsReportFrom(findTown func() (string, error), out io.Writer, n
 // landReworkStatsFromTown reads the town's landing ledgers and review log and
 // folds them into the report.
 func landReworkStatsFromTown(findTown func() (string, error), now time.Time, weeks int, weekOf func(string) (string, error)) (reworkstats.Report, error) {
+	// The flag is refused before the town is resolved and its ledgers read, so
+	// a bad --weeks fails on the flag rather than on a town.
+	if weeks < 1 {
+		return reworkstats.Report{}, fmt.Errorf("--weeks %d: want at least 1", weeks)
+	}
 	town, err := findTown()
 	if err != nil {
 		return reworkstats.Report{}, fmt.Errorf("resolving the town: %w", err)
