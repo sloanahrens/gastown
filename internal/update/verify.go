@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 	"unicode"
@@ -45,6 +46,33 @@ type PairProbes interface {
 	DevTagDigest(ctx context.Context) (string, error)
 }
 
+// CrashProbes is the optional extension of VerifyProbes a run implements when it
+// can tell whether the daemon's newest pod is crash-looping.
+type CrashProbes interface {
+	// PodCrashing reports whether the daemon's newest pod is crash-looping and,
+	// when it is, why: the container and the reason, for example
+	// "gt: CrashLoopBackOff".
+	PodCrashing(ctx context.Context) (crashing bool, why string, err error)
+}
+
+// CrashLoopError is why a restart wait ended before its bound: the daemon's
+// newest pod is crash-looping, so it cannot report the new build however long
+// the wait lasts. The caller tells it apart from a canceled or failed sleep
+// with errors.As, because the wait is over either way but only this one means
+// the new build cannot come up.
+type CrashLoopError struct {
+	// Why is the container and the reason the crash probe reported, for
+	// example "gt: CrashLoopBackOff". It may be empty.
+	Why string
+}
+
+func (e *CrashLoopError) Error() string {
+	if why := strings.TrimSpace(e.Why); why != "" {
+		return "the daemon's new pod is crash-looping: " + why
+	}
+	return "the daemon's new pod is crash-looping"
+}
+
 // Check is one result of Verify: the fact checked, whether it matched, and
 // what the probe reported.
 type Check struct {
@@ -78,9 +106,20 @@ func Verify(ctx context.Context, p VerifyProbes, want string) []Check {
 // WaitForRestart polls the daemon until it reports want or timeout passes,
 // which is measured from the first poll. The poll that finds the timeout passed
 // is the last one, so a sleep that ends on the timeout still gets its poll; a
-// canceled context or a failing sleep returns that error.
+// canceled context or a failing sleep returns that error. A poll first asks the
+// daemon for its version: a version that matches want ends the wait as a
+// restart, before anything else, so a crash reading from a pod that has not
+// been re-read cannot fail a restart that has already happened. A probe set
+// that also implements CrashProbes is asked after that, on every poll that did
+// not see want: a pod reported crash-looping ends the wait at once with healthy
+// false and a *CrashLoopError carrying why, because a pod that cannot come up
+// cannot report want inside the bound. A crash probe error leaves the wait
+// running, since the pod is briefly unreadable while it starts or restarts, and
+// is logged once for a pod that stays unreadable rather than on every poll.
 func WaitForRestart(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p VerifyProbes, want string, timeout, poll time.Duration) (bool, error) {
 	start := clock.Now()
+	crash, watchesCrash := p.(CrashProbes)
+	probeErrored := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return false, err
@@ -89,6 +128,20 @@ func WaitForRestart(ctx context.Context, clock Clock, sleep func(context.Context
 		// only a version that matches ends the wait.
 		if version, err := p.DaemonVersion(ctx); err == nil && sameCommit(version, want) {
 			return true, nil
+		}
+		if watchesCrash {
+			crashing, why, err := crash.PodCrashing(ctx)
+			switch {
+			case err != nil:
+				if !probeErrored {
+					log.Printf("update: waiting for the daemon restart: the crash probe failed: %v", err)
+					probeErrored = true
+				}
+			case crashing:
+				return false, &CrashLoopError{Why: why}
+			default:
+				probeErrored = false
+			}
 		}
 		if clock.Now().Sub(start) >= timeout {
 			return false, nil
