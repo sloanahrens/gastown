@@ -1124,7 +1124,18 @@ type primeSeatDeps struct {
 // returns the failure instead of printing a task or opening the store
 // (gt-w1mzol).
 func primeSeatWork(ctx RoleContext, deps primeSeatDeps) (primeWork, error) {
-	files, err := taskfile.ReadFileMode(filepath.Dir(deps.taskPath))
+	taskDir := filepath.Dir(deps.taskPath)
+	files, err := taskfile.ReadFileMode(taskDir)
+	if err != nil {
+		// Only a seat whose task directory is there can have a marker it cannot
+		// read. A directory that cannot be reached at all (absent, a parent that
+		// is not a directory, a parent that cannot be searched) is a host or
+		// dolt-mode run, which prime must treat exactly as before this check
+		// existed.
+		if _, statErr := os.Stat(taskDir); statErr != nil {
+			files, err = false, nil
+		}
+	}
 	if err != nil {
 		return primeWork{fileMode: true, taskPath: deps.taskPath},
 			fmt.Errorf("gt prime: the seat's bead access is unknown, so it reads neither its task file nor the bead store: %w", err)
