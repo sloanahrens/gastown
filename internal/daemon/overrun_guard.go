@@ -139,6 +139,13 @@ type overrunSeams struct {
 	// the seat because the bead's last submission is read with it (the seat's
 	// bead read), so the clock and the run end it started after are one read.
 	slungAt func(seat overrunSeat) (time.Time, bool)
+	// addedLines counts the lines the seat's handle adds over origin/main, so
+	// the guard can weigh how much work a seat has done. It opens the same
+	// handle overrunSeatGit picks for the stop's save, dirty check, push and
+	// reset, so the count reads the worktree those act on. An error comes with
+	// no count: a zero reads as a seat that added nothing. nil means the
+	// reading is off.
+	addedLines func(seat overrunSeat) (int, error)
 	// nudged is told each seat the guard marks at the nudge threshold, and when,
 	// so the progress battery can ask about the seat (jev_progress.go). nil
 	// means nothing is asked.
@@ -608,16 +615,28 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 }
 
 // overrunProdSeams returns the production seams: the daemon's rigs, event
-// log and notifier, the gate reader, and the stop's pause, session, checkpoint
-// and hand-back.
+// log and notifier, the gate reader, the seat's added-lines reading, and the
+// stop's pause, session, checkpoint and hand-back.
 func (d *Daemon) overrunProdSeams() overrunSeams {
 	sl := &overrunSlungReader{d: d}
 	gate := newOverrunGateReader(d)
 	escalation := newOverrunEscalationReader(d)
+	// addedLines opens the seat's handle through the one seam that picks it for
+	// the stop too, so the count reads the worktree the save, dirty check, push
+	// and reset act on. A handle the seam refuses comes back as its error with
+	// no count.
+	addedLines := func(seat overrunSeat) (int, error) {
+		g, err := d.overrunSeatGit(seat)
+		if err != nil {
+			return 0, err
+		}
+		return overrunSeatAddedLines(g, "origin/main")
+	}
 	return d.overrunStopSeams(overrunSeams{
 		now:                  time.Now,
 		workingSeats:         d.overrunWorkingSeats,
 		slungAt:              sl.slungAt,
+		addedLines:           addedLines,
 		gateRunning:          gate.running,
 		escalationWaiting:    escalation.waiting,
 		escalationAnsweredAt: escalation.answeredAt,
