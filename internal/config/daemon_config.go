@@ -1090,6 +1090,13 @@ type OverrunGuardConfig struct {
 	// saving it is refused.
 	ScheduledStopAfter string `json:"scheduled_stop_after,omitempty"`
 
+	// GateAllowance is the ceiling on the gate time one sling may bank
+	// against the guard's stop clock, as a duration (e.g., "5m"). Unset,
+	// empty or unparseable means twice StopAfter — the ceiling gt-vfwuc chose
+	// for the devops suite's 10 to 25 minute gate. "0" banks no gate time: a
+	// seat inside its own gate counts as working.
+	GateAllowance string `json:"gate_allowance,omitempty"`
+
 	// DryRun logs what a stop would do and sends nothing.
 	DryRun bool `json:"dry_run,omitempty"`
 }

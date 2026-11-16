@@ -51,6 +51,22 @@ func overrunMaxGateCharge(interval time.Duration) time.Duration { return 2 * int
 // host) that keeps a long gate from counting as the seat's own time (gt-vfwuc).
 func overrunMaxGateTotal(stopAfter time.Duration) time.Duration { return 2 * stopAfter }
 
+// overrunGateAllowance is the configured ceiling on the gate time one sling may
+// bank (gate_allowance), or overrunMaxGateTotal when it is unset, empty,
+// unparseable or negative. "0" is a real setting: the sling banks no gate time,
+// and a seat inside its own gate counts as working.
+func overrunGateAllowance(c *DaemonPatrolConfig, stopAfter time.Duration) time.Duration {
+	cfg := overrunGuardConfig(c)
+	if cfg == nil || cfg.GateAllowance == "" {
+		return overrunMaxGateTotal(stopAfter)
+	}
+	d, err := time.ParseDuration(cfg.GateAllowance)
+	if err != nil || d < 0 {
+		return overrunMaxGateTotal(stopAfter)
+	}
+	return d
+}
+
 // overrunMaxEscalationTotal is the ceiling on the escalation time one sling may
 // bank, the gate's shape: twice the stop threshold. An escalation nobody answers
 // is a seat held for a person, and past this ceiling the clock runs again even
