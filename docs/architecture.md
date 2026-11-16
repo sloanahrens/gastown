@@ -187,7 +187,10 @@ Each credential is a Kubernetes Secret created from a file named in a manifest (
 - the review (om) daemon token;
 - the OpenShell gateway material;
 - the jev environment, a ledger reader connection string and a Dolt archive key;
-- the read-only cloud auditor key used by the cloud check.
+- the read-only cloud auditor key used by the cloud check;
+- the DeepSeek balance key the `deepseek_balance` patrol reads.
+
+The DeepSeek balance key is created from `deepseek.env` in the operator's config directory rather than from a `deploy/daemon/secrets.yaml` entry: `gt town cluster render` mounts it at the patrol's default key file, and prints its create line, only when that file is present, so a town without the key runs the patrol unconfigured.
 
 The bd gateway tokens are the exception to "created from a file named in a manifest": the operator creates each token's Secret before the apply, and the render only names it. The dashboard's read-class token is one of them (see [The dashboard](#the-dashboard)).
 

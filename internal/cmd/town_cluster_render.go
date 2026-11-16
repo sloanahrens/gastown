@@ -628,13 +628,15 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 	if err != nil {
 		return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 	}
-	deepSeekBalanceKey, err := deepSeekBalanceKeyConfigured(f.configDir, d.lstat)
-	if err != nil {
-		return k8sdaemon.Values{}, imagevalues.Values{}, "", err
-	}
 	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
 	hmConfig := false
+	// A rehearsal never mounts the DeepSeek balance key (withDefaults clears it),
+	// so the key file cannot change its manifest and the render does not read it.
+	deepSeekBalanceKey := false
 	if !f.rehearsal {
+		if deepSeekBalanceKey, err = deepSeekBalanceKeyConfigured(f.configDir, d.lstat); err != nil {
+			return k8sdaemon.Values{}, imagevalues.Values{}, "", err
+		}
 		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
 			return k8sdaemon.Values{}, imagevalues.Values{}, "", err
 		}

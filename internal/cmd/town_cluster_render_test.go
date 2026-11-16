@@ -531,6 +531,38 @@ func TestTownClusterRenderMountsTheDeepSeekBalanceKeyOnlyWhenPresent(t *testing.
 	})
 }
 
+// TestTownClusterRenderRehearsalIgnoresAnUnreadableDeepSeekKeyFile: a rehearsal
+// never mounts the DeepSeek balance key, so an unreadable key file cannot change
+// its manifest and the render must not refuse on it (gt-hfcssw).
+func TestTownClusterRenderRehearsalIgnoresAnUnreadableDeepSeekKeyFile(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.rehearsal = true
+	f.forgeHost = ""
+	f.confirmStopped = false
+	f.namespace = "gt-rehearsal"
+	keyPath := filepath.Join(f.configDir, k8sdaemon.DeepSeekBalanceFile)
+	var out bytes.Buffer
+	deps := clusterRenderTestDeps(t, &out)
+	deps.lstat = func(path string) (fs.FileInfo, error) {
+		if path == keyPath {
+			return nil, fs.ErrPermission
+		}
+		return os.Lstat(path)
+	}
+	if err := runClusterRender(deps, f); err != nil {
+		t.Fatalf("a rehearsal refused on the deepseek balance key file it never mounts: %v", err)
+	}
+	if body := deploymentBody(t, f.out); strings.Contains(body, k8sdaemon.DeepSeekBalanceSecretName) {
+		t.Errorf("the rehearsal names %s:\n%s", k8sdaemon.DeepSeekBalanceSecretName, body)
+	}
+	for _, line := range createLines(out.String()) {
+		if strings.Contains(line, k8sdaemon.DeepSeekBalanceSecretName) {
+			t.Errorf("a rehearsal create line names %s: %s", k8sdaemon.DeepSeekBalanceSecretName, line)
+		}
+	}
+}
+
 // TestTownClusterRenderPinsTheDeepSeekKeyPath: the mount path the render writes
 // is the path the patrol reads when the town names no key_file, so the mount
 // alone configures a pod (gt-hfcssw).
