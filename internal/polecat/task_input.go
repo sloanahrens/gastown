@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/taskfile"
 )
 
@@ -18,6 +19,15 @@ type beadTaskFields struct {
 	Acceptance  string
 	Notes       []string
 	Comments    []beadTaskComment
+	// Rejections are the bead's MERGE REJECTION blocks in the order Land wrote
+	// them. The caller parses them with land's own reader, so a finding TASK.md
+	// shows is the finding the bead holds.
+	Rejections []land.RejectionNote
+	// UnchangedRejection is the latest of Rejections whose Head names the
+	// commit the seat's branch sits on, nil when the branch moved past every
+	// refusal. The caller computes it once at spawn: without bead access the
+	// seat cannot compare its branch with the refusals later.
+	UnchangedRejection *land.RejectionNote
 }
 
 // beadTaskComment is one bead comment as TASK.md shows it.
@@ -44,7 +54,49 @@ func taskInputFromBead(f beadTaskFields) taskfile.Input {
 	for _, c := range f.Comments {
 		in.Comments = append(in.Comments, taskfile.Comment{Author: c.Author, Time: c.Time, Text: c.Text})
 	}
+	if len(f.Rejections) > 0 {
+		in.Rework = taskRework(f.Rejections, f.UnchangedRejection)
+	}
 	return in
+}
+
+// taskRework maps the bead's refusal blocks, and the one naming the seat's
+// starting commit, onto the TASK.md rework section. A first-time seat has no
+// block and gets no section at all.
+func taskRework(rejections []land.RejectionNote, unchanged *land.RejectionNote) *taskfile.Rework {
+	rw := &taskfile.Rework{Attempts: make([]taskfile.Rejection, 0, len(rejections))}
+	for _, note := range rejections {
+		rejection := taskfile.Rejection{Attempt: note.Attempt, Kind: note.Kind, Reason: note.Reason}
+		for _, f := range note.Findings {
+			rejection.Findings = append(rejection.Findings, taskfile.Finding{
+				ID: f.ID, Severity: f.Severity, Path: f.Path, Line: f.Line, Title: f.Title,
+			})
+		}
+		rw.Attempts = append(rw.Attempts, rejection)
+	}
+	if unchanged != nil {
+		rw.Unchanged = &taskfile.UnchangedRejection{Attempt: unchanged.Attempt, Kind: unchanged.Kind, Head: unchanged.Head}
+	}
+	return rw
+}
+
+// unchangedRejectedHead returns the latest rejection in rejections whose Head
+// names the commit head is, or nil when none does. A refusal is matched by the
+// commit its note recorded, not by its diff: a resumed branch stands on that
+// commit, and the patch-id question ("same diff, different commit") is gt
+// done's to answer live. An unreadable or absent head matches nothing, so the
+// seat is left without the unchanged fact rather than told something the host
+// could not establish.
+func unchangedRejectedHead(rejections []land.RejectionNote, head string) *land.RejectionNote {
+	if strings.TrimSpace(head) == "" {
+		return nil
+	}
+	for i := len(rejections) - 1; i >= 0; i-- {
+		if land.HeadsEqual(rejections[i].Head, head) {
+			return &rejections[i]
+		}
+	}
+	return nil
 }
 
 // noteLines splits a bead's notes text into one note per non-blank line: the

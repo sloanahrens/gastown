@@ -359,3 +359,96 @@ func TestAssembleCommentTimeIsUTC(t *testing.T) {
 		t.Errorf("same instant in another zone assembled differently\ngot:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// The rework text carries every earlier attempt and, for each, the findings its
+// note recorded: id, severity, path, line and title, in the shape the bead
+// holds them.
+func TestNoBeadAccessAssembleRendersEveryAttemptsFindings(t *testing.T) {
+	t.Parallel()
+	out := Assemble(Input{
+		BeadID: "gt-abc1",
+		Title:  "A re-slung bead",
+		Rework: &Rework{Attempts: []Rejection{
+			{
+				Attempt: 1,
+				Kind:    "review",
+				Reason:  "om requested changes (score 0.70)",
+				Findings: []Finding{
+					{ID: "gt-abc.1", Severity: "major", Path: "internal/foo.go", Line: 42, Title: "the retry never resets its counter"},
+					{ID: "gt-abc.2", Severity: "minor", Path: "README.md", Line: 7, Title: "a claim the code does not make"},
+				},
+			},
+			{
+				Attempt:  2,
+				Kind:     "gate",
+				Reason:   "gate failed",
+				Findings: []Finding{{ID: "gt-abc.3", Severity: "blocker", Path: "internal/baz.go", Line: 1, Title: "the build fails"}},
+			},
+		}},
+	})
+	for _, want := range []string{
+		"## Earlier rejections",
+		"### Attempt 1: review — om requested changes (score 0.70)",
+		"- id:gt-abc.1 sev:major internal/foo.go:42 — the retry never resets its counter",
+		"- id:gt-abc.2 sev:minor README.md:7 — a claim the code does not make",
+		"### Attempt 2: gate — gate failed",
+		"- id:gt-abc.3 sev:blocker internal/baz.go:1 — the build fails",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Assemble(...) = %q, want it to carry %q", out, want)
+		}
+	}
+}
+
+// The rejection-unchanged fact appears only when the host established it, and a
+// first-time seat's text carries no rework section at all.
+func TestNoBeadAccessAssembleRejectionUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		rework  *Rework
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "a branch on the rejected commit carries the fact",
+			rework: &Rework{
+				Attempts:  []Rejection{{Attempt: 2, Kind: "review"}},
+				Unchanged: &UnchangedRejection{Attempt: 2, Kind: "review", Head: "3f2a1b9cdef0123456789abcdef0123456789abcd"},
+			},
+			want: []string{"## Rejection unchanged", "on 3f2a1b9, the commit that attempt 2 (review) refused"},
+		},
+		{
+			name:    "a branch that moved past the refusal carries no fact",
+			rework:  &Rework{Attempts: []Rejection{{Attempt: 2, Kind: "review"}}},
+			want:    []string{"## Earlier rejections"},
+			notWant: []string{"## Rejection unchanged"},
+		},
+		{
+			name:    "a first-time seat carries no rework section",
+			rework:  nil,
+			notWant: []string{"## Earlier rejections", "## Rejection unchanged"},
+		},
+		{
+			name:   "an unclassified refusal is named without a class",
+			rework: &Rework{Attempts: []Rejection{{Attempt: 1}}, Unchanged: &UnchangedRejection{Attempt: 1, Head: "abc1234"}},
+			want:   []string{"on abc1234, the commit that attempt 1 refused"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out := Assemble(Input{BeadID: "gt-abc1", Title: "t", Rework: tt.rework})
+			for _, want := range tt.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("Assemble(...) = %q, want it to carry %q", out, want)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if strings.Contains(out, notWant) {
+					t.Errorf("Assemble(...) = %q, want no %q", out, notWant)
+				}
+			}
+		})
+	}
+}

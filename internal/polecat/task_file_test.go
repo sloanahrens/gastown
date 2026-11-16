@@ -54,10 +54,22 @@ type taskFileLaunch struct {
 	err      error
 }
 
+// taskFilePrep runs after the worktree is set up and before the launch reads
+// the work bead, so a test can commit the branch and record a refusal naming
+// the commit. A non-nil opener replaces the world's for the launch.
+type taskFilePrep func(t *testing.T, db beads.Client, workDir string, w *world) *gitOpener
+
 // launchForTaskFile starts Toast on a recording sandbox backend with issue as
 // its work bead, reading beads through db. The backend fails after Prepare, so
 // the launch stops there with the SpawnSpec in hand.
 func launchForTaskFile(t *testing.T, db beads.Client, issue string) *taskFileLaunch {
+	t.Helper()
+	return launchForTaskFilePrepared(t, db, issue, nil)
+}
+
+// launchForTaskFilePrepared is launchForTaskFile with prep run against the
+// worktree before the bead is read.
+func launchForTaskFilePrepared(t *testing.T, db beads.Client, issue string, prep taskFilePrep) *taskFileLaunch {
 	t.Helper()
 	town := t.TempDir()
 	rigPath := filepath.Join(town, "gastown")
@@ -70,11 +82,17 @@ func launchForTaskFile(t *testing.T, db beads.Client, issue string) *taskFileLau
 		t.Fatal(err)
 	}
 	workDir, _, w := setupSessionBranchTestRepo(t)
+	opener := w.opener()
+	if prep != nil {
+		if custom := prep(t, db, workDir, w); custom != nil {
+			opener = *custom
+		}
+	}
 	out := &taskFileLaunch{}
 	m := &SessionManager{
 		tmux: newFakeSessionTmux(),
 		rig:  &rig.Rig{Name: "gastown", Path: rigPath},
-		gits: w.opener(),
+		gits: opener,
 		warn: func(format string, args ...any) {
 			out.warnings = append(out.warnings, fmt.Sprintf(format, args...))
 		},
@@ -303,5 +321,110 @@ func TestSessionManagerTaskFileKeepsACommentWithAnUnreadableTime(t *testing.T) {
 	}
 	if got := len(out.warnings); got != 0 {
 		t.Errorf("warnings = %q, want none", out.warnings)
+	}
+}
+
+// rejectedNote is the refusal a rework sling hands the spawn: one review
+// attempt naming the commit it refused, and the finding it filed.
+func rejectedNote(head string) string {
+	return "MERGE REJECTION (attempt 1): review - om requested changes\n" +
+		"Branch: polecat/rictus/gt-abc\n" +
+		"Target: main\n" +
+		"MR: gt-mr1\n" +
+		"- id:gt-abc.1 sev:major internal/x.go:12 — the retry never resets its counter\n" +
+		"Head: " + head + "\n"
+}
+
+// A re-slung sandbox seat's TASK.md carries the refusal's findings, and the
+// unchanged fact only while the branch it starts on is the commit the refusal
+// named: the seat has no bead access to recompute it.
+func TestNoBeadAccessTaskFileCarriesTheRejection(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		fixAfterwards bool
+		wantUnchanged bool
+	}{
+		{name: "the branch still sits on the rejected commit", wantUnchanged: true},
+		{name: "the branch moved past the rejected commit", fixAfterwards: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			issue := slungBead(t, db, spawnBead())
+			prep := func(t *testing.T, db beads.Client, workDir string, w *world) *gitOpener {
+				rejected := w.writeAndCommit(t, workDir, "the rejected attempt", map[string]string{"internal/x.go": "package x\n"})
+				if tt.fixAfterwards {
+					w.writeAndCommit(t, workDir, "the fix", map[string]string{"internal/x.go": "package x\n\n// fixed\n"})
+				}
+				if err := db.Update(issue.ID, beads.UpdateOptions{AppendNotes: rejectedNote(rejected)}); err != nil {
+					t.Fatalf("append the rejection note: %v", err)
+				}
+				return nil
+			}
+			out := launchForTaskFilePrepared(t, db, issue.ID, prep)
+			if out.err == nil || !strings.Contains(out.err.Error(), "stop after prepare") {
+				t.Fatalf("launch = %v, want the backend's stop error after Prepare", out.err)
+			}
+			text := string(preparedSpawnSpec(t, out).TaskFile)
+			for _, want := range []string{
+				"## Earlier rejections",
+				"### Attempt 1: review — om requested changes",
+				"- id:gt-abc.1 sev:major internal/x.go:12 — the retry never resets its counter",
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("SpawnSpec.TaskFile = %q, want it to carry %q", text, want)
+				}
+			}
+			const fact = "## Rejection unchanged"
+			if got := strings.Contains(text, fact); got != tt.wantUnchanged {
+				t.Errorf("SpawnSpec.TaskFile carries the unchanged fact = %v, want %v\n%s", got, tt.wantUnchanged, text)
+			}
+		})
+	}
+}
+
+// headUnreadableRepo is a repository whose HEAD cannot be read; every other
+// read reaches the world's own handle.
+type headUnreadableRepo struct {
+	gitRepo
+}
+
+func (r headUnreadableRepo) Rev(ref string) (string, error) {
+	if ref == "HEAD" {
+		return "", errors.New("HEAD is unreadable")
+	}
+	return r.gitRepo.Rev(ref)
+}
+
+// A head the spawn cannot read costs the unchanged fact, not the task file: the
+// seat still reads the findings, and the daemon log names the read that failed.
+func TestNoBeadAccessTaskFileSurvivesAnUnreadableHead(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	issue := slungBead(t, db, spawnBead())
+	prep := func(t *testing.T, db beads.Client, workDir string, w *world) *gitOpener {
+		if err := db.Update(issue.ID, beads.UpdateOptions{AppendNotes: rejectedNote("1111111111111111111111111111111111111111")}); err != nil {
+			t.Fatalf("append the rejection note: %v", err)
+		}
+		opener := w.opener()
+		base := opener.open
+		opener.open = func(dir string) gitRepo { return headUnreadableRepo{base(dir)} }
+		return &opener
+	}
+	out := launchForTaskFilePrepared(t, db, issue.ID, prep)
+	if out.err == nil || !strings.Contains(out.err.Error(), "stop after prepare") {
+		t.Fatalf("launch = %v, want the backend's stop error after Prepare", out.err)
+	}
+	text := string(preparedSpawnSpec(t, out).TaskFile)
+	if !strings.Contains(text, "## Earlier rejections") {
+		t.Errorf("SpawnSpec.TaskFile = %q, want the findings even without the head", text)
+	}
+	if strings.Contains(text, "## Rejection unchanged") {
+		t.Errorf("SpawnSpec.TaskFile = %q, want no unchanged fact from a head it could not read", text)
+	}
+	if len(out.warnings) != 1 || !strings.Contains(out.warnings[0], issue.ID) || !strings.Contains(out.warnings[0], "head") {
+		t.Errorf("warnings = %q, want one naming the bead %s and the head read", out.warnings, issue.ID)
 	}
 }
