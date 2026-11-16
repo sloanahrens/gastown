@@ -15,123 +15,256 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
-// Image pin durability (gt-3sgdk9): a caller that must verify every digest pin
-// reads DigestPinnedImages, so the list has to hold each distinct pin once, in
-// a well-formed reference, and nothing the package pins may stay out of it.
+// Image pin durability (gt-3sgdk9): a preflight that verifies every digest pin
+// reads DigestPinnedImages, so the list must hold each package pin once, in a
+// shape a pull accepts, and the scan that reads images.go must fail closed
+// rather than let an unreadable pin read as absent.
 
-// TestImagePinDurabilityListIsDistinctAndSorted pins the list against the
-// package's digest-pinned image constants: each distinct value appears once and
-// the result is sorted.
-func TestImagePinDurabilityListIsDistinctAndSorted(t *testing.T) {
+// TestImagePinDurabilityListHoldsEachPinOnceSorted is a table over the package
+// constants that pin an image by digest: the list holds each distinct value
+// once, and the whole list is sorted.
+func TestImagePinDurabilityListHoldsEachPinOnceSorted(t *testing.T) {
 	t.Parallel()
-	want := []string{templates.DindImage, templates.SweepDindImage, templates.DoltServerImage}
-	slices.Sort(want)
-	want = slices.Compact(want)
+	images := templates.DigestPinnedImages()
 
-	got := templates.DigestPinnedImages()
-	if !slices.Equal(got, want) {
-		t.Fatalf("DigestPinnedImages() = %q, want the sorted distinct pins %q", got, want)
+	tests := []struct {
+		name string
+		ref  string
+	}{
+		{"DindImage", templates.DindImage},
+		{"SweepDindImage", templates.SweepDindImage},
+		{"DoltServerImage", templates.DoltServerImage},
+	}
+	distinct := map[string]bool{}
+	for _, tt := range tests {
+		if got := countOf(images, tt.ref); got != 1 {
+			t.Errorf("%s: DigestPinnedImages() holds %q %d times, want once", tt.name, tt.ref, got)
+		}
+		distinct[tt.ref] = true
+	}
+	if !slices.IsSorted(images) {
+		t.Errorf("DigestPinnedImages() = %q, not sorted", images)
+	}
+	if len(images) != len(distinct) {
+		t.Errorf("DigestPinnedImages() holds %d references, want the %d distinct package pins", len(images), len(distinct))
 	}
 }
 
-// TestImagePinDurabilityReferencesAreWellFormed: every reference the list
-// returns names a host and repository and carries a sha256 digest of 64
-// lower-case hex digits, so a verifier can pull it by digest.
+func countOf(values []string, want string) int {
+	n := 0
+	for _, value := range values {
+		if value == want {
+			n++
+		}
+	}
+	return n
+}
+
+// TestImagePinDurabilityReferencesAreWellFormed is a table over the references
+// the list actually returns: each names a host, repository and digest, so a
+// verifier can pull it by digest.
 func TestImagePinDurabilityReferencesAreWellFormed(t *testing.T) {
 	t.Parallel()
 	images := templates.DigestPinnedImages()
 	if len(images) == 0 {
 		t.Fatal("DigestPinnedImages() is empty; no pin is verified")
 	}
-	for _, ref := range images {
-		if problem := imageRefProblem(ref); problem != "" {
-			t.Errorf("%q %s", ref, problem)
+
+	tests := make([]struct {
+		name string
+		ref  string
+	}, len(images))
+	for i, ref := range images {
+		tests[i].name = fmt.Sprintf("reference %d", i)
+		tests[i].ref = ref
+	}
+	for _, tt := range tests {
+		if problem := imageRefProblem(tt.ref); problem != "" {
+			t.Errorf("%s: %q %s", tt.name, tt.ref, problem)
 		}
 	}
 }
 
-// TestImagePinDurabilityReferenceCheckRejectsBadShapes proves the shape check
-// is not vacuous: each malformed sample is refused, so a pin drifting into one
-// of these shapes fails the list test above.
-func TestImagePinDurabilityReferenceCheckRejectsBadShapes(t *testing.T) {
+// TestImagePinDurabilityReferenceCheck is a table of accepted and refused
+// shapes: the check refuses a reference without a digest or with a malformed
+// host, repository or tag, so a pin drifting into one of those shapes fails the
+// list test above. A tag beside the digest is accepted because DoltServerImage
+// carries one; the digest is what docker pulls.
+func TestImagePinDurabilityReferenceCheck(t *testing.T) {
 	t.Parallel()
+	digest := "@sha256:" + strings.Repeat("a", 64)
+
 	tests := []struct {
 		name string
 		ref  string
+		ok   bool
 	}{
-		{"tag only", "docker:29.8.2"},
-		{"no repository", "@sha256:" + strings.Repeat("a", 64)},
-		{"short digest", "example.com/img@sha256:" + strings.Repeat("a", 63)},
-		{"upper-case hex", "example.com/img@sha256:" + strings.Repeat("A", 64)},
-		{"empty host", "/img@sha256:" + strings.Repeat("a", 64)},
+		{"host and repository with digest", "example.com/img" + digest, true},
+		{"tag beside the digest", "example.com/img:2.3.2" + digest, true},
+		{"port in the host", "example.com:5000/img" + digest, true},
+		{"tag only", "docker:29.8.2", false},
+		{"no host", "/img" + digest, false},
+		{"no repository", "example.com" + digest, false},
+		{"short digest", "example.com/img@sha256:" + strings.Repeat("a", 63), false},
+		{"upper-case digest", "example.com/img@sha256:" + strings.Repeat("A", 64), false},
+		{"upper-case repository", "example.com/IMG" + digest, false},
+		{"empty tag", "example.com/img:" + digest, false},
+		{"space in repository", "example.com/my img" + digest, false},
 	}
 	for _, tt := range tests {
-		if imageRefProblem(tt.ref) == "" {
-			t.Errorf("%s: %q accepted, want refused", tt.name, tt.ref)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			problem := imageRefProblem(tt.ref)
+			if tt.ok && problem != "" {
+				t.Errorf("%q refused: %s", tt.ref, problem)
+			}
+			if !tt.ok && problem == "" {
+				t.Errorf("%q accepted, want refused", tt.ref)
+			}
+		})
 	}
 }
 
-var (
-	imageDigestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	imageHostRE   = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$`)
-)
+var imageRefRE = regexp.MustCompile(
+	`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)+(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?@sha256:[0-9a-f]{64}$`)
 
-// imageRefProblem returns why ref is not a host/repo@sha256:<64 hex> reference,
-// or "" when it is one.
+// imageRefProblem returns why ref is not a host/repo[:tag]@sha256:<64 hex>
+// reference, or "" when it is one.
 func imageRefProblem(ref string) string {
-	repo, digest, ok := strings.Cut(ref, "@")
-	if !ok {
-		return "carries no @sha256: digest"
+	if imageRefRE.MatchString(ref) {
+		return ""
 	}
-	if !imageDigestRE.MatchString(digest) {
-		return "digest is not sha256: followed by 64 lower-case hex digits"
-	}
-	host, _, ok := strings.Cut(repo, "/")
-	if !ok {
-		return "names no host and repository"
-	}
-	if !imageHostRE.MatchString(host) {
-		return "does not start with a host name"
-	}
-	return ""
+	return "is not a host/repo[:tag]@sha256:<64 lower-case hex> reference"
 }
 
-// TestImagePinDurabilityListCoversEveryPinnedConstant reads every string
-// constant declared in images.go, and fails when one carries a digest but the
-// list omits it: a new pin must join the list, not sit beside it. A constant
-// carrying "@sha256:" whose value cannot be evaluated fails too, so the scan
-// never reads an unreadable pin as absent.
+// TestImagePinDurabilityCoverageAlarm is a table over synthetic images.go
+// sources: a digest pin the list omits raises a problem, a listed reference the
+// source does not name raises one, and a constant whose value the scan cannot
+// read is an error rather than a silent skip.
+func TestImagePinDurabilityCoverageAlarm(t *testing.T) {
+	t.Parallel()
+	digest := "@sha256:" + strings.Repeat("a", 64)
+	pinned := "example.com/img" + digest
+
+	tests := []struct {
+		name        string
+		src         string
+		listed      []string
+		wantProblem string // substring of the alarm; "" when the scan is clean
+		wantErr     string // substring of the error; "" when the scan succeeds
+	}{
+		{
+			name:   "every pin is listed",
+			src:    "package templates\nconst Pinned = \"example.com/img" + digest + "\"",
+			listed: []string{pinned},
+		},
+		{
+			name:        "a pin the list omits alarms",
+			src:         "package templates\nconst Pinned = \"example.com/img" + digest + "\"",
+			listed:      nil,
+			wantProblem: "omits it",
+		},
+		{
+			name:        "a listed pin the source does not name alarms",
+			src:         "package templates\nconst Unrelated = \"ubuntu:24.04\"",
+			listed:      []string{pinned},
+			wantProblem: "no constant in images.go names",
+		},
+		{
+			name:   "a pin built by concatenation is read",
+			src:    "package templates\nconst (\nVersion = \"2.3.2\"\nPinned = \"dolthub/dolt-sql-server:\" + Version + \"" + digest + "\"\n)",
+			listed: []string{"dolthub/dolt-sql-server:2.3.2" + digest},
+		},
+		{
+			name:   "a pin repeated by omission is read",
+			src:    "package templates\nconst (\nPinned = \"example.com/img" + digest + "\"\nAlias\n)",
+			listed: []string{pinned},
+		},
+		{
+			name:    "a constant the scan cannot follow fails closed",
+			src:     "package templates\nconst Pinned = pinFromAnotherFile",
+			wantErr: "cannot evaluate",
+		},
+		{
+			name:    "a digest built by a call fails closed",
+			src:     "package templates\nconst Pinned = pin(\"" + digest + "\")",
+			wantErr: "cannot evaluate",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			problems, err := imagePinProblemsIn([]byte(tt.src), tt.listed)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one naming %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			got := strings.Join(problems, "; ")
+			if tt.wantProblem == "" {
+				if len(problems) != 0 {
+					t.Errorf("problems = %q, want none", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantProblem) {
+				t.Errorf("problems = %q, want one naming %q", got, tt.wantProblem)
+			}
+		})
+	}
+}
+
+// TestImagePinDurabilityListCoversEveryPinnedConstant runs the scan on the real
+// images.go: a digest pin added there without joining DigestPinnedImages, or a
+// listed reference the file does not name, fails here.
 func TestImagePinDurabilityListCoversEveryPinnedConstant(t *testing.T) {
 	t.Parallel()
 	src, err := os.ReadFile("images.go")
 	if err != nil {
 		t.Fatalf("reading images.go: %v", err)
 	}
-	pins, err := digestPinsInSource(src)
+	problems, err := imagePinProblemsIn(src, templates.DigestPinnedImages())
 	if err != nil {
-		t.Fatalf("scanning images.go for digest pins: %v", err)
+		t.Fatalf("scanning images.go: %v", err)
 	}
-	if len(pins) == 0 {
-		t.Fatal("no digest-pinned constant found in images.go; the scan is not reading the pins")
-	}
-
-	listed := map[string]bool{}
-	for _, ref := range templates.DigestPinnedImages() {
-		listed[ref] = true
-		if !pins[ref] {
-			t.Errorf("DigestPinnedImages() lists %q, which no constant in images.go names", ref)
-		}
-	}
-	for ref := range pins {
-		if !listed[ref] {
-			t.Errorf("images.go pins %q by digest but DigestPinnedImages() omits it", ref)
-		}
+	for _, problem := range problems {
+		t.Error(problem)
 	}
 }
 
+// imagePinProblemsIn returns why the source and listed disagree: a digest pin
+// the source declares but listed omits, or a reference listed does not declare.
+// An error means the source's constants could not all be read, never that they
+// were absent.
+func imagePinProblemsIn(src []byte, listed []string) ([]string, error) {
+	pins, err := digestPinsInSource(src)
+	if err != nil {
+		return nil, err
+	}
+
+	var problems []string
+	named := map[string]bool{}
+	for _, ref := range listed {
+		named[ref] = true
+		if !pins[ref] {
+			problems = append(problems, fmt.Sprintf("DigestPinnedImages() lists %q, which no constant in images.go names", ref))
+		}
+	}
+	for ref := range pins {
+		if !named[ref] {
+			problems = append(problems, fmt.Sprintf("images.go pins %q by digest but DigestPinnedImages() omits it", ref))
+		}
+	}
+	slices.Sort(problems)
+	return problems, nil
+}
+
 // digestPinsInSource returns the value of every string constant declared in one
-// source file whose value carries an "@sha256:" digest.
+// source file whose value carries an "@sha256:" digest. A constant whose value
+// it cannot read fails the scan unless the value is a provably non-string
+// literal, so an unreadable pin never reads as absent.
 func digestPinsInSource(src []byte) (map[string]bool, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "images.go", src, parser.SkipObjectResolution)
@@ -146,16 +279,20 @@ func digestPinsInSource(src []byte) (map[string]bool, error) {
 		if !ok || gen.Tok != token.CONST {
 			continue
 		}
+		var inherited []ast.Expr
 		for _, spec := range gen.Specs {
 			values, ok := spec.(*ast.ValueSpec)
 			if !ok {
 				continue
 			}
+			if len(values.Values) > 0 {
+				inherited = values.Values
+			}
 			for i, name := range values.Names {
-				if i >= len(values.Values) {
-					continue
+				if i >= len(inherited) {
+					return nil, fmt.Errorf("constant %s has no value the scan can follow", name.Name)
 				}
-				exprs[name.Name] = values.Values[i]
+				exprs[name.Name] = inherited[i]
 				names = append(names, name.Name)
 			}
 		}
@@ -166,18 +303,30 @@ func digestPinsInSource(src []byte) (map[string]bool, error) {
 		expr := exprs[name]
 		value, ok := evalConstString(expr, exprs, map[string]bool{})
 		if !ok {
-			start := fset.Position(expr.Pos()).Offset
-			end := fset.Position(expr.End()).Offset
-			if strings.Contains(string(src[start:end]), "@sha256:") {
-				return nil, fmt.Errorf("constant %s carries a digest whose value cannot be read", name)
+			if isNonStringLiteral(expr) {
+				continue
 			}
-			continue
+			return nil, fmt.Errorf("constant %s has a value the scan cannot evaluate, so a digest pin in it could go unlisted", name)
 		}
 		if strings.Contains(value, "@sha256:") {
 			pins[value] = true
 		}
 	}
 	return pins, nil
+}
+
+// isNonStringLiteral reports whether expr is, through parentheses, a literal
+// that cannot be a string constant.
+func isNonStringLiteral(expr ast.Expr) bool {
+	for {
+		paren, ok := expr.(*ast.ParenExpr)
+		if !ok {
+			break
+		}
+		expr = paren.X
+	}
+	lit, ok := expr.(*ast.BasicLit)
+	return ok && lit.Kind != token.STRING
 }
 
 // evalConstString evaluates a string constant expression built from literals,

@@ -80,22 +80,13 @@ const (
 	ForgejoRunnerImage = "data.forgejo.org/forgejo/runner:13.2.0"
 )
 
-// DigestPinnedImages returns every image reference the town pins by digest,
-// each distinct reference once and sorted. A caller that must verify the pins
-// (a preflight, a patrol) reads this one list instead of naming the constants
-// itself, so a pin it has not been taught about is still checked. The list
-// holds DindImage and SweepDindImage once while they name the same digest.
+// DigestPinnedImages returns every image reference the package pins by digest,
+// each distinct reference once and sorted, for a verifier that checks one list
+// rather than naming the constants itself.
 func DigestPinnedImages() []string {
-	candidates := []string{DoltServerImage, DindImage, SweepDindImage}
-	images := make([]string, 0, len(candidates))
-	for _, ref := range candidates {
-		if slices.Contains(images, ref) {
-			continue
-		}
-		images = append(images, ref)
-	}
+	images := []string{DoltServerImage, DindImage, SweepDindImage}
 	slices.Sort(images)
-	return images
+	return slices.Compact(images)
 }
 
 // ClientToolPin is one pinned client program of the daemon image (see
