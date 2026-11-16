@@ -2153,3 +2153,32 @@ func TestReworkProgramOmLessonsInterval(t *testing.T) {
 		})
 	}
 }
+
+// TestImagePinDurabilityImagePinLayersConfigKey: daemon.patrols.image_pin_layers
+// carries one switch, an unknown key is refused, and a town that names no block
+// leaves the patrol off.
+func TestImagePinDurabilityImagePinLayersConfigKey(t *testing.T) {
+	t.Parallel()
+
+	var cfg DaemonPatrolConfig
+	doc := `{"patrols":{"image_pin_layers":{"enabled":true}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(doc), &cfg); err != nil {
+		t.Fatalf("the block does not decode: %v", err)
+	}
+	if cfg.Patrols == nil || cfg.Patrols.ImagePinLayers == nil || !cfg.Patrols.ImagePinLayers.Enabled {
+		t.Fatalf("decoded %+v, want the block's enabled:true", cfg.Patrols)
+	}
+
+	var absent DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{}}`), &absent); err != nil {
+		t.Fatalf("an empty patrols block does not decode: %v", err)
+	}
+	if absent.Patrols != nil && absent.Patrols.ImagePinLayers != nil {
+		t.Errorf("an absent image_pin_layers block decoded as %+v, want nothing", absent.Patrols.ImagePinLayers)
+	}
+
+	var refused DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"image_pin_layers":{"enaabled":true}}}`), &refused); err == nil {
+		t.Fatal("an unknown key decoded, want a refusal naming it")
+	}
+}
