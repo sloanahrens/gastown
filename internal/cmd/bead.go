@@ -7,15 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/taskfile"
 )
 
 // bead.go is `gt bead`, the agent's write surface on beads (deep review D1
@@ -363,6 +370,13 @@ type beadVerbs struct {
 	// clock over instead of being dated from the dispatch of the run that was
 	// closed (events.DispatchStart). nil records nothing.
 	recordClosed func(ids []string)
+	// seatDir returns the directory the caller's commands run in. A sandbox
+	// seat in file mode is found by walking up from it to the runtime archive's
+	// marker, and that seat's writes go to its outbox instead of a bead
+	// (gt-w9male). nil means no seat: dolt mode.
+	seatDir func() string
+	// outboxFS is the filesystem a file-mode write runs on. nil is the real one.
+	outboxFS outboxFS
 }
 
 // newBeadVerbs builds the verbs for this session: a client on the caller's
@@ -392,6 +406,7 @@ func newBeadVerbs(cmd *cobra.Command) (*beadVerbs, error) {
 			return landedOverseerHead(townRoot, id, sha)
 		},
 		recordClosed: func(ids []string) { logClosedBeads(beads.FindTownRoot(cwd), actor, ids) },
+		seatDir:      func() string { return cwd },
 	}, nil
 }
 
@@ -484,11 +499,251 @@ func (v *beadVerbs) note(id, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("nothing to note: the text is empty")
 	}
+	seat, err := v.fileOutbox()
+	if err != nil {
+		return err
+	}
+	if seat != nil {
+		return v.noteToOutbox(seat, id, text)
+	}
 	if err := v.client.AppendNotes(id, text); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(v.out, "✓ Noted on %s\n", id)
+	return err
+}
+
+// noteToOutbox appends a note to a file-mode seat's outbox rather than to a
+// bead. The seat writes only the bead its TASK.md names for it, and the write
+// is one atomic append, so a seat killed partway through loses the note it was
+// writing and never the notes before it (gt-w9male).
+func (v *beadVerbs) noteToOutbox(seat *seatOutbox, id, text string) error {
+	if id != seat.beadID {
+		return fmt.Errorf("not noting %s: a file-mode seat writes only its own bead, %s", id, seat.beadID)
+	}
+	if err := v.appendOutboxLine(seat, text); err != nil {
 		return err
 	}
 	_, err := fmt.Fprintf(v.out, "✓ Noted on %s\n", id)
 	return err
+}
+
+// seatTaskPath and seatTaskFilePath are the task directory and task file under
+// a seat's root, which the runtime archive stages at .gt/task
+// (internal/session's runtimeTaskDir and runtimeTaskFile; escalate's
+// seatTaskDirName and seatTaskFile name the same entries inside .gt).
+// seatTownDir is the sandbox town root under that root: the archive lays its
+// checkout out at <root>/gt (internal/session's sandboxTownRoot is
+// "/sandbox/gt").
+const (
+	seatTaskPath     = ".gt/" + seatTaskDirName
+	seatTaskFilePath = seatTaskPath + "/" + seatTaskFile
+	seatTownDir      = "gt"
+)
+
+// seatOutbox is the outbox of a seat in file mode: the one bead it may write
+// and the directory its notes go in.
+type seatOutbox struct {
+	// beadID is the seat's own bead, read from TASK.md's heading.
+	beadID string
+	// dir is the outbox directory.
+	dir string
+}
+
+// findSeatRoot returns the root of the file-mode seat whose worktree holds dir:
+// the nearest ancestor whose runtime archive marker reads taskfile.ModeFiles, or
+// "" when there is none, which is every caller outside a sandbox. The archive
+// stages the marker only for files mode, so a marker naming another value is
+// not the archive's and the walk goes on: stopping at one inside dir's town
+// tree would let a file there turn a file-mode seat's writes back into bead
+// writes.
+//
+// Two states are errors rather than a fall-through to a bead write, which file
+// mode forbids (gt-w9male). A marker that cannot be read leaves the mode
+// unknown, so the caller refuses instead of assuming dolt mode. A files marker
+// whose root does not hold dir under its sandbox town root is some other run's
+// left-over and not this caller's seat: the archive stages the checkout at
+// <root>/gt, so a marker anywhere else cannot be the seat holding dir.
+func findSeatRoot(dir string) (string, error) {
+	marker := filepath.Join(seatTaskPath, taskfile.ModeFile)
+	for cur := dir; ; {
+		markerPath := filepath.Join(cur, marker)
+		data, err := os.ReadFile(markerPath)
+		switch {
+		case err == nil:
+			if strings.TrimSpace(string(data)) == taskfile.ModeFiles {
+				if !inSeatTown(cur, dir) {
+					return "", fmt.Errorf("not writing the outbox: %s holds a file-mode marker but %s is not under its sandbox town root, so the marker belongs to another run", markerPath, dir)
+				}
+				return cur, nil
+			}
+		case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+			// No marker at cur; a component of the path being a file is no
+			// marker either.
+		default:
+			return "", fmt.Errorf("not writing the outbox: the file-mode marker %s cannot be read, so the caller cannot tell whether it writes a bead or its outbox: %w", markerPath, err)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", nil
+		}
+		cur = parent
+	}
+}
+
+// inSeatTown reports whether dir is inside root's sandbox town root, the
+// checkout the runtime archive stages at <root>/gt.
+func inSeatTown(root, dir string) bool {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return false
+	}
+	return rel == seatTownDir || strings.HasPrefix(rel, seatTownDir+string(filepath.Separator))
+}
+
+// fileOutbox returns the outbox the caller's seat writes, or nil when the
+// caller is not in a file-mode seat. The seat's own bead is the id TASK.md's
+// heading names, and a TASK.md it cannot read or that names no id is an error:
+// without that id the seat cannot tell which bead it may write (gt-w9male).
+func (v *beadVerbs) fileOutbox() (*seatOutbox, error) {
+	if v.seatDir == nil {
+		return nil, nil
+	}
+	root, err := findSeatRoot(v.seatDir())
+	if err != nil {
+		return nil, err
+	}
+	if root == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(root, seatTaskFilePath))
+	if err != nil {
+		return nil, fmt.Errorf("not writing the outbox: a file-mode seat reads its own bead from TASK.md, which cannot be read: %w", err)
+	}
+	id, err := taskBeadID(string(data))
+	if err != nil {
+		return nil, err
+	}
+	return &seatOutbox{beadID: id, dir: filepath.Join(root, outbox.Dir)}, nil
+}
+
+// taskBeadID reads the bead id from TASK.md's first line, which
+// taskfile.Assemble writes as "# TASK <id>" or "# TASK <id>: <title>". A first
+// line of any other shape names no bead, and the seat refuses rather than guess
+// which bead it may write (gt-w9male).
+func taskBeadID(text string) (string, error) {
+	noBead := fmt.Errorf("not writing the outbox: TASK.md's heading names no bead, so the seat cannot tell which bead it may write")
+	line, _, _ := strings.Cut(text, "\n")
+	rest, ok := strings.CutPrefix(line, "# TASK ")
+	if !ok || strings.HasPrefix(rest, ":") {
+		return "", noBead
+	}
+	id, _, _ := strings.Cut(rest, ":")
+	id = strings.TrimSpace(id)
+	if id == "" || strings.ContainsAny(id, " \t") {
+		return "", noBead
+	}
+	return id, nil
+}
+
+// outboxFS is the filesystem a file-mode write runs on: the production value
+// is osOutboxFS, and a test supplies one that fails a step the way a killed
+// seat would leave it.
+type outboxFS interface {
+	ReadFile(name string) ([]byte, error)
+	MkdirAll(path string, perm fs.FileMode) error
+	WriteFile(name string, data []byte, perm fs.FileMode) error
+	Rename(oldpath, newpath string) error
+	Remove(name string) error
+}
+
+// osOutboxFS is the filesystem a file-mode write runs on in production.
+type osOutboxFS struct{}
+
+func (osOutboxFS) ReadFile(name string) ([]byte, error) { return os.ReadFile(name) }
+
+func (osOutboxFS) MkdirAll(path string, perm fs.FileMode) error { return os.MkdirAll(path, perm) }
+
+func (osOutboxFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
+	return os.WriteFile(name, data, perm)
+}
+
+func (osOutboxFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+
+func (osOutboxFS) Remove(name string) error { return os.Remove(name) }
+
+// outboxLockFile is the flock file that serializes the notes appends of one
+// seat. It sits beside the outbox, outside it, for the reason the temporary
+// file does.
+const outboxLockFile = ".outbox-notes.lock"
+
+// appendOutboxLine appends one line to a file-mode seat's outbox notes. The new
+// notes are composed and validated first, then written to a temporary file and
+// renamed over notes.md, so a seat killed partway through leaves the previous
+// notes, never half of the new one. A lock serializes the appends of one seat,
+// whose own tool calls can run together, and a killed seat drops its flock when
+// the process ends. The temporary and lock files sit in .gt beside the outbox,
+// not in it: the host's copy refuses any name in the outbox directory but
+// result.json and notes.md, so a kill must not leave one there.
+func (v *beadVerbs) appendOutboxLine(seat *seatOutbox, text string) error {
+	fsys := outboxFS(osOutboxFS{})
+	if v.outboxFS != nil {
+		fsys = v.outboxFS
+	}
+	unlock, err := lock.FlockAcquire(filepath.Join(filepath.Dir(seat.dir), outboxLockFile))
+	if err != nil {
+		return fmt.Errorf("not noting on %s: the outbox lock cannot be taken: %w", seat.beadID, err)
+	}
+	defer unlock()
+	notesPath := filepath.Join(seat.dir, outbox.NotesFile)
+	previous, err := fsys.ReadFile(notesPath)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("not noting on %s: its outbox notes cannot be read: %w", seat.beadID, err)
+	}
+	next := appendNoteLine(previous, text)
+	// The host validates notes.md with outbox.Validate at seat end. Running the
+	// same rules now refuses a note the host would refuse while the seat can
+	// still report it, instead of at seat end, where the outbox is all there is.
+	raw := []byte(fmt.Sprintf(`{"bead_id":%s,"status":"done"}`, strconv.Quote(seat.beadID)))
+	if _, err := outbox.Validate(raw, next, seat.beadID); err != nil {
+		return fmt.Errorf("not noting on %s: %w", seat.beadID, err)
+	}
+	if err := fsys.MkdirAll(seat.dir, 0o755); err != nil {
+		return fmt.Errorf("not noting on %s: its outbox directory cannot be made: %w", seat.beadID, err)
+	}
+	tmp := filepath.Join(filepath.Dir(seat.dir), "."+outbox.NotesFile+"."+strconv.Itoa(os.Getpid())+".tmp")
+	if err := fsys.WriteFile(tmp, next, 0o644); err != nil {
+		return removeOutboxTemp(fsys, tmp,
+			fmt.Errorf("not noting on %s: the outbox write failed, so it keeps its previous notes: %w", seat.beadID, err))
+	}
+	if err := fsys.Rename(tmp, notesPath); err != nil {
+		return removeOutboxTemp(fsys, tmp,
+			fmt.Errorf("not noting on %s: the outbox write did not land, so it keeps its previous notes: %w", seat.beadID, err))
+	}
+	return nil
+}
+
+// removeOutboxTemp removes a temporary file the outbox write left, naming the
+// failure in err rather than replacing it.
+func removeOutboxTemp(fsys outboxFS, tmp string, err error) error {
+	if rmErr := fsys.Remove(tmp); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+		return fmt.Errorf("%w (and the temporary file %s could not be removed: %v)", err, tmp, rmErr)
+	}
+	return err
+}
+
+// appendNoteLine returns previous notes with text on a new line after them. A
+// previous text with no final newline still gets the new note on its own line.
+func appendNoteLine(previous []byte, text string) []byte {
+	next := previous
+	if len(next) > 0 && next[len(next)-1] != '\n' {
+		next = append(next, '\n')
+	}
+	next = append(next, text...)
+	if !strings.HasSuffix(text, "\n") {
+		next = append(next, '\n')
+	}
+	return next
 }
 
 func (v *beadVerbs) update(id string, opts beads.UpdateOptions) error {

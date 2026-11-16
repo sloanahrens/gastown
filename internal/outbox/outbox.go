@@ -29,6 +29,17 @@ import (
 	"unicode/utf8"
 )
 
+// The names a seat's outbox lives under, under the seat's root: the directory
+// the host copies out of a sandbox and the notes file a file-mode write
+// appends to.
+const (
+	// Dir is the outbox directory under a seat's root.
+	Dir = ".gt/outbox"
+	// NotesFile is the seat's notes inside Dir, which `gt bead note` appends
+	// to in file mode.
+	NotesFile = "notes.md"
+)
+
 const (
 	// maxFindings is the most findings one outbox may carry.
 	maxFindings = 5
