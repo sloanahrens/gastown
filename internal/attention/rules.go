@@ -179,6 +179,11 @@ const (
 	// RuleImagePinsRefreshStuck is the refresh bead the patrol filed, sitting
 	// unlanded past its bound, so the pins wait for it (gt-01lcq2).
 	RuleImagePinsRefreshStuck = "image_pins.refresh_stuck"
+
+	// RuleImagePinsDeadLayer is a layer of a digest-pinned image that its
+	// registry no longer serves: the pin names an image a fresh pull cannot
+	// fetch until someone re-pins it (gt-kyomsc).
+	RuleImagePinsDeadLayer = "image_pins.dead_layer"
 )
 
 var (
@@ -337,6 +342,10 @@ var ruleFlags = map[string]RuleFlags{
 	// landing.queue_stuck wakes for; this item names the bead the pins wait
 	// on (gt-01lcq2).
 	RuleImagePinsRefreshStuck: flagsAsk,
+	// A dead layer is the pin itself no longer pulling rather than a run
+	// that failed: the overseer re-pins the image on their next look, so it
+	// queues with the other image pin rows and wakes no one (gt-kyomsc).
+	RuleImagePinsDeadLayer: flagsAsk,
 }
 
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
@@ -424,6 +433,7 @@ var kindRules = map[Kind]string{
 	KindImagePinsStale:           RuleImagePinsStale,
 	KindImagePinsUnreadable:      RuleImagePinsUnreadable,
 	KindImagePinsRefreshStuck:    RuleImagePinsRefreshStuck,
+	KindImagePinsDeadLayer:       RuleImagePinsDeadLayer,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule
