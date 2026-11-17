@@ -12,9 +12,12 @@
 // commit with `gt update images`, and its container runs `gt update` against them
 // in the cluster the Job runs in, as the ServiceAccount gt-update. The town-state
 // claim is mounted read-write, because the run's lock, state and values live under
-// <town>/.runtime/update. The viewer token is the only Secret, mounted read-only
-// where the dashboard reads it. The RBAC the pod is granted is in
-// deploy/k8s/update-rbac.yaml, and nothing here applies it.
+// <town>/.runtime/update. The viewer token is mounted read-only where the dashboard
+// reads it, and when Values.BdGatewayURL is set the daemon-class bd gateway token
+// Secret joins it, read-only at the path the daemon's pod mounts it, so the Job's bd
+// answers the pre-swap handshake instead of waiting out its deadline (gt-15dkai).
+// The RBAC the pod is granted is in deploy/k8s/update-rbac.yaml, and nothing here
+// applies it.
 package updatejob
 
 import (
@@ -109,6 +112,11 @@ type Values struct {
 	// MaxRuntime bounds one run: the pod's activeDeadlineSeconds, which the caller
 	// reads from patrols.update.max_runtime. It must be a whole number of seconds.
 	MaxRuntime time.Duration
+	// BdGatewayURL is the bd gateway's base URL. When set, both containers carry the
+	// forwarder's two environment names and the pod mounts the daemon-class token
+	// Secret, so the Job's bd reaches the gateway the pre-swap handshake waits on
+	// (gt-15dkai). Empty renders the Job without a gateway.
+	BdGatewayURL string
 }
 
 // Manifests is what Build returns: the Job, and the CronJob that carries the same
@@ -166,6 +174,11 @@ func (v Values) validate() error {
 	if v.MaxRuntime%time.Second != 0 {
 		return fmt.Errorf("Values.MaxRuntime %s: want a whole number of seconds, since activeDeadlineSeconds takes seconds", v.MaxRuntime)
 	}
+	if v.BdGatewayURL != "" {
+		if err := k8sdaemon.ValidateBdGatewayURL("Values.BdGatewayURL", v.BdGatewayURL); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -186,13 +199,23 @@ func jobSpec(v Values) JobSpec {
 				RestartPolicy:                "Never",
 				InitContainers:               []Container{imagesContainer(v)},
 				Containers:                   []Container{updateContainer(v)},
-				Volumes: []Volume{
-					{Name: TownStateVolume, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: k8sdaemon.TownStateClaim}},
-					{Name: ViewerTokenVolume, Secret: &SecretVolumeSource{SecretName: ViewerTokenSecret, DefaultMode: int32Ptr(ViewerTokenMode)}},
-				},
+				Volumes:                      volumes(v),
 			},
 		},
 	}
+}
+
+// volumes are the pod's: the town-state claim, the viewer token Secret, and when
+// the gateway is set the daemon-class token Secret both containers mount.
+func volumes(v Values) []Volume {
+	vols := []Volume{
+		{Name: TownStateVolume, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: k8sdaemon.TownStateClaim}},
+		{Name: ViewerTokenVolume, Secret: &SecretVolumeSource{SecretName: ViewerTokenSecret, DefaultMode: int32Ptr(ViewerTokenMode)}},
+	}
+	if v.BdGatewayURL != "" {
+		vols = append(vols, k8sdaemon.BdGatewayVolume(k8sdaemon.BdGatewayDaemonSecretName))
+	}
+	return vols
 }
 
 // imagesContainer records the images of the green commit into the values file. It
@@ -205,8 +228,8 @@ func imagesContainer(v Values) Container {
 		Args:    []string{"update", "images", "--sha", v.GreenCommit, "--out", ValuesPath},
 		// `gt update images` finds the town from its working directory.
 		WorkingDir:   k8sdaemon.TownRootPath,
-		Env:          containerEnv(),
-		VolumeMounts: mounts(),
+		Env:          containerEnv(v),
+		VolumeMounts: mounts(v),
 	}
 }
 
@@ -223,26 +246,35 @@ func updateContainer(v Values) Container {
 			"--pod-in-cluster", "--pod-namespace", v.Namespace,
 		},
 		WorkingDir:   k8sdaemon.TownRootPath,
-		Env:          containerEnv(),
-		VolumeMounts: mounts(),
+		Env:          containerEnv(v),
+		VolumeMounts: mounts(v),
 	}
 }
 
 // mounts are the town-state claim read-write and the viewer token read-only, at the
-// paths the daemon and the dashboard use.
-func mounts() []VolumeMount {
-	return []VolumeMount{
+// paths the daemon and the dashboard use, and with the gateway set its token
+// directory read-only at the path the daemon's pod mounts it.
+func mounts(v Values) []VolumeMount {
+	m := []VolumeMount{
 		{Name: TownStateVolume, MountPath: k8sdaemon.TownRootPath},
 		{Name: ViewerTokenVolume, MountPath: ViewerTokenPath, SubPath: k8sdaemon.ViewerTokenFile, ReadOnly: true},
 	}
+	if v.BdGatewayURL != "" {
+		m = append(m, k8sdaemon.BdGatewayMount())
+	}
+	return m
 }
 
 // containerEnv points XDG_CONFIG_HOME at the directory the viewer token is mounted
 // under, as the daemon's containers do, and gives git the credential helper line
-// its main-tip read needs.
-func containerEnv() []EnvVar {
+// its main-tip read needs. With the gateway set it adds the forwarder's pair last.
+func containerEnv(v Values) []EnvVar {
 	env := []EnvVar{{Name: k8sdaemon.ConfigHomeEnv, Value: manifestdata.LiveOpenShellConfigHome}}
-	return append(env, gitCredentialEnv()...)
+	env = append(env, gitCredentialEnv()...)
+	if v.BdGatewayURL != "" {
+		env = append(env, k8sdaemon.BdGatewayEnv(v.BdGatewayURL)...)
+	}
+	return env
 }
 
 // forgeHost is the Forgejo Service host:port the pod's git asks for credentials:
@@ -374,34 +406,17 @@ type Container struct {
 	VolumeMounts []VolumeMount `yaml:"volumeMounts"`
 }
 
-// EnvVar is a name and a literal value.
-type EnvVar struct {
-	Name  string `yaml:"name"`
-	Value string `yaml:"value"`
-}
-
-// VolumeMount is one path a container mounts a volume at.
-type VolumeMount struct {
-	Name      string `yaml:"name"`
-	MountPath string `yaml:"mountPath"`
-	SubPath   string `yaml:"subPath,omitempty"`
-	ReadOnly  bool   `yaml:"readOnly,omitempty"`
-}
-
-// Volume is a pod volume: a claim or a Secret.
-type Volume struct {
-	Name                  string              `yaml:"name"`
-	PersistentVolumeClaim *PVCVolumeSource    `yaml:"persistentVolumeClaim,omitempty"`
-	Secret                *SecretVolumeSource `yaml:"secret,omitempty"`
-}
-
-// PVCVolumeSource names the claim a volume is.
-type PVCVolumeSource struct {
-	ClaimName string `yaml:"claimName"`
-}
-
-// SecretVolumeSource names the Secret a volume is, and the mode its files take.
-type SecretVolumeSource struct {
-	SecretName  string `yaml:"secretName"`
-	DefaultMode *int32 `yaml:"defaultMode,omitempty"`
-}
+// The daemon renderer's pod types, aliased rather than copied so its exported
+// gateway helpers drop into this pod's spec unchanged.
+type (
+	// EnvVar is one environment entry: a literal value or a Secret key reference.
+	EnvVar = k8sdaemon.EnvVar
+	// VolumeMount is one path a container mounts a volume at.
+	VolumeMount = k8sdaemon.VolumeMount
+	// Volume is a pod volume; this package sets only its claim and Secret forms.
+	Volume = k8sdaemon.Volume
+	// PVCVolumeSource names the claim a volume is.
+	PVCVolumeSource = k8sdaemon.PVCVolumeSource
+	// SecretVolumeSource names the Secret a volume is, and the mode its files take.
+	SecretVolumeSource = k8sdaemon.SecretVolumeSource
+)
