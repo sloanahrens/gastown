@@ -1,5 +1,5 @@
 {
-  "source": "docs/design/bd-container.md, 'The verb allowlist' (gt-m76aet); from the internal/bdshim handlers, the daemon call census in the design, and bd 1.2.2 (internal/cmdtree/bd-command-tree.json)",
+  "source": "docs/design/bd-container.md, 'The verb allowlist' (gt-m76aet); from the internal/bdshim handlers, the daemon call census in the design, and bd 1.2.2 (internal/cmdtree/bd-command-tree.json), plus sample add/list from bd b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f (be-1qqu), which the snapshot tree predates",
   "refused_flags": [
     "C",
     "cpu-profile",
@@ -30,6 +30,7 @@
     {"path": "mol wisp list", "class": "read"},
     {"path": "query", "class": "read"},
     {"path": "ready", "class": "read"},
+    {"path": "sample list", "class": "read"},
     {"path": "search", "class": "read"},
     {"path": "show", "class": "read"},
     {"path": "stats", "class": "read"},
@@ -52,6 +53,7 @@
     {"path": "note", "class": "write"},
     {"path": "purge", "class": "write"},
     {"path": "reopen", "class": "write"},
+    {"path": "sample add", "class": "write"},
     {"path": "unclaim", "class": "write"},
     {"path": "undefer", "class": "write"},
     {"path": "update", "class": "write"},
