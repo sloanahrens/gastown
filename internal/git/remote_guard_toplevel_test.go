@@ -6,21 +6,16 @@ import (
 	"testing"
 )
 
-// sandboxRefusingRunner answers the top-level read in a call's own directory
-// with top, and refuses the two shapes an in-sandbox runner refuses before it
-// sends anything: a call whose directory is empty, and any -C argument. With
-// failRead, the top-level read itself fails, as a sandbox that cannot answer.
-func sandboxRefusingRunner(top string, failRead bool, calls *[]gitCall) runFunc {
+// sandboxRunner answers a top-level read in the call's own directory with top,
+// and every other call with nothing. It states no rule of its own: the tests
+// check the call the remote guard makes, so the form the in-sandbox runner
+// accepts is checked against what the guard sends instead of being stated
+// twice. With failRead the read fails, as a sandbox that cannot answer; an
+// empty top answers the read with an empty path, as a sandbox that could not
+// report one.
+func sandboxRunner(top string, failRead bool, calls *[]gitCall) runFunc {
 	return func(c gitCall) (string, string, error) {
 		*calls = append(*calls, c)
-		if c.dir == "" {
-			return "", "", errors.New("refusing a git call whose directory is empty")
-		}
-		for _, arg := range c.args {
-			if arg == "-C" {
-				return "", "", errors.New("refusing the -C argument")
-			}
-		}
 		if len(c.args) == 2 && c.args[0] == "rev-parse" && c.args[1] == "--show-toplevel" {
 			if failRead {
 				return "", "", errors.New("the sandbox could not answer")
@@ -31,12 +26,35 @@ func sandboxRefusingRunner(top string, failRead bool, calls *[]gitCall) runFunc 
 	}
 }
 
-// TestRunawayBeadRemoteGuardTopLevelRead: a runner that refuses an empty
-// directory and any -C argument allows a reset through a remote Git whose top
-// level is its clone, refuses the same reset when the top level it reads is a
-// configured town root, and refuses it again when the read itself fails. The
-// guard reads the top level in the call's own directory, so the read is one the
+// checkTopLevelRead fails unless the run made exactly one top-level read, and
+// made it in the clone's own directory with no -C argument: the call the
 // in-sandbox runner accepts.
+func checkTopLevelRead(t *testing.T, calls []gitCall, clone string) {
+	t.Helper()
+	var reads []gitCall
+	for _, c := range calls {
+		if len(c.args) > 0 && c.args[len(c.args)-1] == "--show-toplevel" {
+			reads = append(reads, c)
+		}
+	}
+	if len(reads) != 1 {
+		t.Fatalf("top-level reads = %d, want 1 (%v)", len(reads), calls)
+	}
+	read := reads[0]
+	if read.dir != clone {
+		t.Errorf("top-level read ran in %q, want the clone %q", read.dir, clone)
+	}
+	if got, want := strings.Join(read.args, " "), "rev-parse --show-toplevel"; got != want {
+		t.Errorf("top-level read args = %q, want %q", got, want)
+	}
+}
+
+// TestRunawayBeadRemoteGuardTopLevelRead: a reset through a remote Git whose
+// top level is its clone is allowed, is refused when the top level it reads is
+// a configured town root, and is refused when the read fails or reports an
+// empty path, which the remote guard refuses rather than pass as checked. Each
+// run also checks the guard read the top level in the clone's own directory
+// with no -C.
 func TestRunawayBeadRemoteGuardTopLevelRead(t *testing.T) {
 	t.Parallel()
 	const townRoot = "/sandbox/gt"
@@ -50,13 +68,16 @@ func TestRunawayBeadRemoteGuardTopLevelRead(t *testing.T) {
 		{"a clone below the town root allows the reset", clone, false, ""},
 		{"the town root itself refuses the reset", townRoot, false, "resolves to town root git worktree"},
 		{"a top level the runner cannot read refuses the reset", "", true, "could not read the repository top level"},
+		{"an empty top level refuses the reset", "", false, "could not read the repository top level"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var calls []gitCall
-			g := NewGitWithRemoteExec(clone, sandboxRefusingRunner(tc.topLevel, tc.failRead, &calls), townRoot)
+			g := NewGitWithRemoteExec(clone, sandboxRunner(tc.topLevel, tc.failRead, &calls), townRoot)
 			err := g.ResetHard("origin/main")
+
+			checkTopLevelRead(t, calls, clone)
 
 			if tc.wantRefusal == "" {
 				if err != nil {
