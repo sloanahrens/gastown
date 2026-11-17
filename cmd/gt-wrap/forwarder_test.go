@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/gtwrap"
 )
 
 // imageDir is where the daemon image ships the wrapper and bd.real side by side.
@@ -155,6 +157,85 @@ func TestForwarderNoGatewayExit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// realForwarderTarget wires the harness's injected reads into gtwrap.Forwarder as
+// osSurface does, so a test drives the forwarder's own decision without a process.
+func realForwarderTarget(h *harness) {
+	h.surface.newForwarder = func(town string, cfg bdGatewayConfig) target {
+		h.builtTown, h.fwdBuilt, h.fwdCfg = town, true, cfg
+		return gtwrap.Forwarder{In: gtwrap.ForwarderInputs{
+			Tool:       bdTool,
+			Executable: h.surface.executable,
+			Stat:       h.surface.stat,
+			ReadFile:   h.surface.readFile,
+			GatewayURL: cfg.URL,
+			TokenFile:  cfg.TokenFile,
+		}}
+	}
+}
+
+// noTown makes the harness find no town: GT_TOWN_ROOT is unset and the working
+// directory sits under a temp dir with no marker above it or at $HOME/gt.
+func noTown(h *harness, t *testing.T) {
+	t.Helper()
+	cwd := t.TempDir()
+	h.surface.getwd = func() (string, error) { return cwd, nil }
+}
+
+// TestForwarderNoGatewayNeedsNoTown: a forwarder with no gateway refuses with bd's
+// 125 status before it could use a town, so a failed town lookup cannot mask the
+// refusal; a forwarder with a gateway still needs its town (f8cefae660a9).
+func TestForwarderNoGatewayNeedsNoTown(t *testing.T) {
+	t.Parallel()
+	t.Run("no gateway refuses with 125", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		realBdBeside(h)
+		realForwarderTarget(h)
+		h.writeConfig(t, `{"target": "forwarder"}`)
+		noTown(h, t)
+		if exit := h.run("bd", "show", "gt-x"); exit != 125 {
+			t.Fatalf("run = %d, want bd's refusal status 125; stderr: %s", exit, h.stderr)
+		}
+		if !strings.Contains(h.stderr.String(), "BD_GATEWAY_URL") {
+			t.Fatalf("stderr %q does not name BD_GATEWAY_URL", h.stderr)
+		}
+		if !h.fwdBuilt {
+			t.Fatal("the forwarder target was not built")
+		}
+		if h.builtTown != "" {
+			t.Fatalf("the forwarder was built for town %q, want no town for a call that refuses", h.builtTown)
+		}
+	})
+
+	t.Run("a gateway still needs the town", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		realBdBeside(h)
+		token := tokenFile(t)
+		h.surface.getenv = func(name string) string {
+			switch name {
+			case "HOME":
+				return h.home
+			case "BD_GATEWAY_URL":
+				return "http://host.docker.internal:7440"
+			case "BD_GATEWAY_TOKEN_FILE":
+				return token
+			}
+			return ""
+		}
+		noTown(h, t)
+		if exit := h.run("bd", "show", "gt-x"); exit != 1 {
+			t.Fatalf("run = %d, want 1", exit)
+		}
+		if !strings.Contains(h.stderr.String(), "no town root") {
+			t.Fatalf("stderr %q does not say no town root was found", h.stderr)
+		}
+		if h.fwdBuilt || h.fake.launched {
+			t.Fatal("a gateway call ran with no town")
+		}
+	})
 }
 
 // TestRunBdWithoutRealBdKeepsTheDockerDefault: with no bd.real beside the wrapper
