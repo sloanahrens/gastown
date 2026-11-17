@@ -283,6 +283,13 @@ type attentionSources struct {
 	// is no exemption; an error means the gate state could not be read, and
 	// the item is raised.
 	gateRunning func(rig, name string) (bool, error)
+	// gateExemptFor is how long a seat inside its gate is exempt from the
+	// stall item: the gate time one sling may bank (overrunGateAllowance), the
+	// same ceiling the overrun guard applies. A gate that has not returned
+	// past it is a stuck seat, so the exemption ends there and the quiet is an
+	// item again; a gate_allowance of "0" banks no gate time, so it exempts
+	// nothing (gt-mcvyw0).
+	gateExemptFor time.Duration
 	// remoteTip reads the rig's landing target from origin with git ls-remote.
 	// It never fetches: the rig repo is the landing worker's and
 	// <town>/gastown/mayor/rig is install-gt's, so a fetch here would race them.
@@ -775,6 +782,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		host:          d.hostProbes,
 		envShadowed:   d.envShadowed,
 		patrolFailure: d.currentPatrolFailure(),
+		gateExemptFor: d.attentionGateExemptFor(),
 	}
 	if s.host == nil {
 		forgejoBaseURL := d.forgejoBaseURL
@@ -1027,6 +1035,17 @@ func (d *Daemon) attentionLandingLimits() townhealth.Limits {
 		th = townhealth.DefaultThresholds()
 	}
 	return th.Landing
+}
+
+// attentionGateExemptFor is the ceiling on the polecat-stall item's gate
+// exemption: the gate time one sling may bank, the ceiling the overrun guard
+// applies (overrunGateAllowance). The two read the same configured bound, so a
+// gate the guard counts as stuck is one this item reports too; a gate that
+// does not return is a stuck seat, not an infinite silence (gt-mcvyw0).
+func (d *Daemon) attentionGateExemptFor() time.Duration {
+	pc := d.patrol()
+	_, stopAfter := overrunGuardThresholds(pc)
+	return overrunGateAllowance(pc, stopAfter)
 }
 
 // attentionLandingStuckBudget is how long the in-flight landing's stage may
@@ -1725,16 +1744,19 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 		}
 		// A gate runs go test plus make lint for several minutes, longer with
 		// four seats compiling at once, so a seat that is quiet inside its own
-		// gate is doing what its bead told it to do (gt-nh2dgf). A gate state
-		// that cannot be read is not an exemption: the item is raised, the
-		// direction the overrun guard takes.
+		// gate is doing what its bead told it to do (gt-nh2dgf). The exemption
+		// is bounded by the gate time one sling may bank, the overrun guard's
+		// ceiling: past it a gate that has not returned is a stuck seat, and
+		// the quiet is an item again (gt-mcvyw0). A gate state that cannot be
+		// read is not an exemption: the item is raised, the direction the
+		// overrun guard takes.
 		if s.gateRunning != nil {
 			inGate, err := s.gateRunning(seat.Rig, name)
 			if err != nil {
 				s.d.logger.Printf("attention: cannot read the gate state for %s/%s, raising its stall: %v", seat.Rig, name, err)
 				inGate = false
 			}
-			if inGate {
+			if inGate && quiet <= s.gateExemptFor {
 				continue
 			}
 		}
