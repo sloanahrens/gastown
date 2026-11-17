@@ -58,8 +58,8 @@ func tokenFile(t *testing.T) string {
 }
 
 // TestRunForwarderWithoutConfig: a bd call with no config file is the daemon
-// image's forwarder when bd.real sits beside the wrapper: the gateway BD_GATEWAY_URL
-// names carries it, and with no URL the local bd runs.
+// image's forwarder when bd.real sits beside the wrapper, and the gateway
+// BD_GATEWAY_URL names carries it.
 func TestRunForwarderWithoutConfig(t *testing.T) {
 	t.Parallel()
 	t.Run("the gateway BD_GATEWAY_URL names", func(t *testing.T) {
@@ -86,27 +86,6 @@ func TestRunForwarderWithoutConfig(t *testing.T) {
 		}
 		if h.builtTown != h.town {
 			t.Fatalf("built the forwarder for town %q, want %q", h.builtTown, h.town)
-		}
-	})
-
-	t.Run("no gateway runs the local bd", func(t *testing.T) {
-		t.Parallel()
-		h := newHarness(t)
-		realBdBeside(h)
-		forwarderEnv(h, "", "")
-		// The local bd needs no town root, so the caller's directory is no town.
-		h.surface.getwd = func() (string, error) { return t.TempDir(), nil }
-		if exit := h.run("bd", "status"); exit != 0 {
-			t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
-		}
-		if !h.fwdBuilt {
-			t.Fatal("no forwarder target was built")
-		}
-		if h.fwdCfg.URL != "" || h.fwdCfg.TokenFile != "" {
-			t.Fatalf("forwarder config = %+v, want no gateway", h.fwdCfg)
-		}
-		if h.builtTown != "" {
-			t.Fatalf("built the forwarder for town %q; the local bd needs none", h.builtTown)
 		}
 	})
 
@@ -142,6 +121,40 @@ func TestRunForwarderWithoutConfig(t *testing.T) {
 			t.Fatal("the docker default was not built for a gt call with no config file")
 		}
 	})
+}
+
+// TestForwarderNoGatewayExit: a bd call in forwarder mode with BD_GATEWAY_URL
+// unset or empty prints the refusal on stderr and exits 125, and no target is built,
+// so nothing runs in place of the gateway (gt-q1beru).
+func TestForwarderNoGatewayExit(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		token func(*testing.T) string
+	}{
+		{name: "no gateway configured"},
+		{name: "an empty URL with a token file", token: tokenFile},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			realBdBeside(h)
+			token := ""
+			if tt.token != nil {
+				token = tt.token(t)
+			}
+			forwarderEnv(h, "", token)
+			if exit := h.run("bd", "show", "gt-x"); exit != 125 {
+				t.Fatalf("run = %d, want bd's refusal status 125; stderr: %s", exit, h.stderr)
+			}
+			if !strings.Contains(h.stderr.String(), "BD_GATEWAY_URL") {
+				t.Fatalf("stderr %q does not name BD_GATEWAY_URL", h.stderr)
+			}
+			if h.fwdBuilt || h.targetSet || h.fake.launched {
+				t.Fatal("a forwarder call with no gateway reached a target")
+			}
+		})
+	}
 }
 
 // TestRunBdWithoutRealBdKeepsTheDockerDefault: with no bd.real beside the wrapper
@@ -220,7 +233,7 @@ func TestRunRefusesAnUnwiredForwarder(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	realBdBeside(h)
-	forwarderEnv(h, "", "")
+	forwarderEnv(h, "http://host.docker.internal:7440", tokenFile(t))
 	h.surface.newForwarder = nil
 	if exit := h.run("bd", "show", "gt-x"); exit != 1 {
 		t.Fatalf("run = %d, want 1", exit)
