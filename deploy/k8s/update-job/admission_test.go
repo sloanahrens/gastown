@@ -60,6 +60,37 @@ func admissionValues() Values {
 	return v
 }
 
+// admissionBdGatewayURL is the gateway address the policy test renders: the
+// address form the daemon hands the Job, not the name it configures its own
+// forwarder with. gatewayURLForJob (internal/daemon/update_job.go) resolves the
+// daemon's gateway name to an IPv4 address before the Job is created, and the
+// policy refuses hostAliases, so the Job always carries an address.
+const admissionBdGatewayURL = "http://192.168.5.2:7440"
+
+// admissionGatewayValues is admissionValues with the bd gateway set: the Job the
+// daemon renders when bd answers its pre-swap handshake through the gateway
+// (gt-15dkai). It is the one Job the policy admits beyond the gateway-off render.
+func admissionGatewayValues() Values {
+	v := admissionValues()
+	v.BdGatewayURL = admissionBdGatewayURL
+	return v
+}
+
+// admissionGatewayURLRE is admissionGatewayURLForm as a Go regexp, for holding the
+// rendered gateway Job's URL to the bound the expressions state.
+var admissionGatewayURLRE = regexp.MustCompile(admissionGatewayURLForm)
+
+// admissionGatewayURLForm is the BD_GATEWAY_URL the policy admits: an http or https
+// URL whose host is the IPv4 address the daemon resolved the gateway name to. The
+// port, path and refusal of user information, a query and a fragment are the form
+// k8sdaemon.ValidateBdGatewayURL accepts (deploy/k8s/daemon/bdgateway.go restates it
+// and does not export it); TestAdmissionGatewayURLFormAgainstValidator holds the two
+// together. The host is pinned to an address and not the naming form the renderer's
+// own check takes because a name would let the Job's bd send the daemon-class token
+// it mounts to whatever that name resolves to, and the policy cannot read the
+// daemon's configured address to compare.
+const admissionGatewayURLForm = `^https?://(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[^?#\s]*)?$`
+
 // celString is s as a CEL string literal. A value holding a quote or backslash
 // cannot travel in the policy's single-quoted literals, so it fails the test
 // rather than producing a manifest the API server would refuse.
@@ -69,6 +100,17 @@ func celString(t *testing.T, s string) string {
 		t.Fatalf("%q holds a quote or backslash, which a single-quoted CEL literal cannot carry", s)
 	}
 	return "'" + s + "'"
+}
+
+// celPattern is re as a CEL string literal a `matches` call takes: a single-quoted
+// CEL string processes backslash escapes, so each backslash is doubled to reach the
+// regexp as written.
+func celPattern(t *testing.T, re string) string {
+	t.Helper()
+	if strings.ContainsRune(re, '\'') {
+		t.Fatalf("the regexp %q holds a quote, which a single-quoted CEL literal cannot carry", re)
+	}
+	return "'" + strings.ReplaceAll(re, `\`, `\\`) + "'"
 }
 
 // celList is vs as a CEL list literal.
@@ -97,8 +139,10 @@ func admissionArgsExpr(t *testing.T, args []string) string {
 	return strings.Join(parts, " && ")
 }
 
-// admissionEnvExpr pins the environment to every variable containerEnv sets, with
-// its literal value, and refuses envFrom. A volume pin alone does not stop a Secret
+// admissionEnvExpr pins the environment to every variable containerEnv sets for v,
+// and refuses envFrom. A variable the renderer gives a constant is pinned to its
+// value; the gateway URL is the daemon's configured address, so its value is held to
+// the form the renderer's check accepts. A volume pin alone does not stop a Secret
 // entering through the environment, and GIT_CONFIG_VALUE_0 runs a command, so both
 // are pinned rather than only bounded.
 func admissionEnvExpr(t *testing.T, v Values) string {
@@ -106,6 +150,11 @@ func admissionEnvExpr(t *testing.T, v Values) string {
 	env := containerEnv(v)
 	parts := []string{"has(c.env)", fmt.Sprintf("size(c.env) == %d", len(env))}
 	for _, e := range env {
+		if e.Name == k8sdaemon.BdGatewayURLEnv {
+			parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value.matches(%s))",
+				celString(t, e.Name), celPattern(t, admissionGatewayURLForm)))
+			continue
+		}
 		parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value == %s)",
 			celString(t, e.Name), celString(t, e.Value)))
 	}
@@ -157,23 +206,33 @@ func admissionMountsExpr(t *testing.T, mounts []VolumeMount) string {
 	return strings.Join(parts, " && ")
 }
 
-// admissionContainerExpr is the bound on one container bound to c: the renderer's
-// name, the admitted image, the renderer's command and arguments, the pinned
-// environment, no envFrom, no elevation, no hook or probe, and the renderer's
-// mounts.
-func admissionContainerExpr(t *testing.T, v Values, c Container) string {
+// admissionEnvMountsExpr is one render's environment and mounts as one conjunct, so
+// the gateway pair and the gateway mount are admitted together and not one without
+// the other.
+func admissionEnvMountsExpr(t *testing.T, v Values, c Container) string {
 	t.Helper()
+	return "(" + admissionEnvExpr(t, v) + " && " + admissionMountsExpr(t, c.VolumeMounts) + ")"
+}
+
+// admissionContainerExpr is the bound on one container the renderer builds from off
+// and from on: the renderer's name, command and arguments, the admitted image, no
+// envFrom, no ports, no elevation, no hook or probe, and then either the gateway-off
+// or the gateway-on environment and mounts. The disjunction is parenthesized whole,
+// because && binds tighter than || and an unwrapped branch would admit a container
+// that skipped every pin before it.
+func admissionContainerExpr(t *testing.T, off, on Values, container func(Values) Container) string {
+	t.Helper()
+	offC, onC := container(off), container(on)
 	return strings.Join([]string{
-		"c.name == " + celString(t, c.Name),
+		"c.name == " + celString(t, offC.Name),
 		"c.image.matches(" + celString(t, admissionImagePattern()) + ")",
-		"c.command == [" + celList(t, c.Command) + "]",
-		admissionArgsExpr(t, c.Args),
-		admissionEnvExpr(t, v),
+		"c.command == [" + celList(t, offC.Command) + "]",
+		admissionArgsExpr(t, offC.Args),
 		"!has(c.envFrom)",
 		"!has(c.ports)",
 		admissionNoElevationExpr(),
 		admissionNoExecExpr(),
-		admissionMountsExpr(t, c.VolumeMounts),
+		"(" + admissionEnvMountsExpr(t, off, offC) + " || " + admissionEnvMountsExpr(t, on, onC) + ")",
 	}, " && ")
 }
 
@@ -217,6 +276,45 @@ func admissionPodExpr(t *testing.T, pod PodSpec) string {
 		"object.spec.template.spec.restartPolicy == "+celString(t, pod.RestartPolicy)), " && ")
 }
 
+// admissionVolumeClause is one volume the renderer sets, as a clause over v: its
+// name, the claim or Secret it is, and no hostPath.
+func admissionVolumeClause(t *testing.T, v Volume) string {
+	switch {
+	case v.PersistentVolumeClaim != nil:
+		return fmt.Sprintf("v.name == %s && has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == %s && !has(v.hostPath)",
+			celString(t, v.Name), celString(t, v.PersistentVolumeClaim.ClaimName))
+	case v.Secret != nil:
+		return fmt.Sprintf("v.name == %s && has(v.secret) && v.secret.secretName == %s && !has(v.hostPath)",
+			celString(t, v.Name), celString(t, v.Secret.SecretName))
+	default:
+		t.Fatalf("volume %q is neither a claim nor a Secret, which the policy does not state", v.Name)
+		return ""
+	}
+}
+
+// admissionVolumeExpr is the volume bound: the renderer's volumes for the gateway-off
+// render or for the gateway-on one, and nothing else. Each branch pins the count,
+// requires every volume to be one of that render's, and requires each of the
+// render's volumes by name, so the third volume a gateway Job has is the
+// daemon-class gateway Secret and not a second claim under another name.
+func admissionVolumeExpr(t *testing.T, off, on Values) string {
+	t.Helper()
+	branch := func(vols []Volume) string {
+		clauses := make([]string, len(vols))
+		named := make([]string, len(vols))
+		for i, v := range vols {
+			clause := admissionVolumeClause(t, v)
+			clauses[i] = "(" + clause + ")"
+			named[i] = "object.spec.template.spec.volumes.exists(v, " + clause + ")"
+		}
+		return fmt.Sprintf("(size(object.spec.template.spec.volumes) == %d && "+
+			"object.spec.template.spec.volumes.all(v, %s) && %s)",
+			len(vols), strings.Join(clauses, " || "), strings.Join(named, " && "))
+	}
+	return "has(object.spec.template.spec.volumes) && (" +
+		branch(volumes(off)) + " || " + branch(volumes(on)) + ")"
+}
+
 // admissionValidations is every validation the policy must carry, in order, built
 // from the renderer's own output. The check compares each stored expression to this
 // list exactly (whitespace aside), so a weakened comparison, a dropped validation or
@@ -224,6 +322,7 @@ func admissionPodExpr(t *testing.T, pod PodSpec) string {
 func admissionValidations(t *testing.T) []string {
 	t.Helper()
 	v := admissionValues()
+	gateway := admissionGatewayValues()
 	pod := jobSpec(v).Template.Spec
 	return []string{
 		fmt.Sprintf("object.metadata.name.startsWith(%s)", celString(t, JobNamePrefix)),
@@ -234,16 +333,11 @@ func admissionValidations(t *testing.T) []string {
 			"(!has(object.spec.template.spec.hostPID) || !object.spec.template.spec.hostPID) && " +
 			"(!has(object.spec.template.spec.hostIPC) || !object.spec.template.spec.hostIPC)",
 		"size(object.spec.template.spec.containers) == 1 && " +
-			"object.spec.template.spec.containers.all(c, " + admissionContainerExpr(t, v, updateContainer(v)) + ")",
+			"object.spec.template.spec.containers.all(c, " + admissionContainerExpr(t, v, gateway, updateContainer) + ")",
 		"has(object.spec.template.spec.initContainers) && " +
 			"size(object.spec.template.spec.initContainers) == 1 && " +
-			"object.spec.template.spec.initContainers.all(c, " + admissionContainerExpr(t, v, imagesContainer(v)) + ")",
-		fmt.Sprintf("has(object.spec.template.spec.volumes) && size(object.spec.template.spec.volumes) == 2 && "+
-			"object.spec.template.spec.volumes.all(v, "+
-			"(v.name == %[1]s && has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == %[2]s && !has(v.hostPath)) || "+
-			"(v.name == %[3]s && has(v.secret) && v.secret.secretName == %[4]s && !has(v.hostPath)))",
-			celString(t, TownStateVolume), celString(t, k8sdaemon.TownStateClaim),
-			celString(t, ViewerTokenVolume), celString(t, ViewerTokenSecret)),
+			"object.spec.template.spec.initContainers.all(c, " + admissionContainerExpr(t, v, gateway, imagesContainer) + ")",
+		admissionVolumeExpr(t, v, gateway),
 		admissionPodExpr(t, pod),
 	}
 }
@@ -716,12 +810,12 @@ func admissionEncodedVolumeProblems(pod map[string]any) []string {
 // updateAdmissionJobProblems names every way the rendered Job departs from what
 // the policy's expressions require: the daemon's name, the ServiceAccount and the
 // other pod fields the renderer sets, the one container and one init container the
-// renderer sets with their image, command, arguments and environment, exactly the
-// two volumes, and no pod field the policy refuses in the encoded Job.
-func updateAdmissionJobProblems(job Job) []string {
+// renderer sets for v with their image, command, arguments, environment and mounts,
+// exactly the renderer's volumes for v, and no pod field the policy refuses in the
+// encoded Job.
+func updateAdmissionJobProblems(job Job, v Values) []string {
 	var problems []string
 	pod := job.Spec.Template.Spec
-	v := admissionValues()
 	if !strings.HasPrefix(job.Metadata.Name, JobNamePrefix) {
 		problems = append(problems, fmt.Sprintf("the Job's name %q does not start %q", job.Metadata.Name, JobNamePrefix))
 	}
@@ -739,7 +833,7 @@ func updateAdmissionJobProblems(job Job) []string {
 	} else {
 		problems = append(problems, admissionJobContainerProblems(pod.InitContainers[0], imagesContainer(v))...)
 	}
-	problems = append(problems, admissionJobVolumeProblems(pod)...)
+	problems = append(problems, admissionJobVolumeProblems(pod, v)...)
 	var buf bytes.Buffer
 	if err := YAML(&buf, job); err != nil {
 		return append(problems, fmt.Sprintf("encoding the Job: %v", err))
@@ -747,36 +841,51 @@ func updateAdmissionJobProblems(job Job) []string {
 	return append(problems, admissionEncodedProblems(buf.Bytes())...)
 }
 
-// admissionJobVolumeProblems holds the rendered Job's volumes to the two the policy
-// names.
-func admissionJobVolumeProblems(pod PodSpec) []string {
+// admissionJobVolumeProblems holds the rendered Job's volumes to the renderer's for
+// v: the town-state claim and the viewer-token Secret, and with the gateway set the
+// daemon-class gateway Secret as the third.
+func admissionJobVolumeProblems(pod PodSpec, v Values) []string {
+	want := volumes(v)
 	var problems []string
-	if len(pod.Volumes) != 2 {
-		problems = append(problems, fmt.Sprintf("the Job mounts %d volumes, want the town-state claim and the viewer-token Secret only", len(pod.Volumes)))
+	if len(pod.Volumes) != len(want) {
+		problems = append(problems, fmt.Sprintf("the Job mounts %d volumes, want the renderer's %d", len(pod.Volumes), len(want)))
 	}
 	seen := map[string]bool{}
-	for _, v := range pod.Volumes {
-		switch v.Name {
-		case TownStateVolume:
-			seen[v.Name] = true
-			if v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != k8sdaemon.TownStateClaim || v.Secret != nil {
-				problems = append(problems, fmt.Sprintf("volume %q is not the %q claim", v.Name, k8sdaemon.TownStateClaim))
+	for _, got := range pod.Volumes {
+		var named bool
+		for _, w := range want {
+			if got.Name != w.Name {
+				continue
 			}
-		case ViewerTokenVolume:
-			seen[v.Name] = true
-			if v.Secret == nil || v.Secret.SecretName != ViewerTokenSecret || v.PersistentVolumeClaim != nil {
-				problems = append(problems, fmt.Sprintf("volume %q is not the %q Secret", v.Name, ViewerTokenSecret))
-			}
-		default:
-			problems = append(problems, fmt.Sprintf("volume %q is neither the town-state claim nor the viewer-token Secret", v.Name))
+			named, seen[got.Name] = true, true
+			problems = append(problems, admissionJobVolumeProblemsFor(got, w)...)
+		}
+		if !named {
+			problems = append(problems, fmt.Sprintf("volume %q is not one the renderer sets", got.Name))
 		}
 	}
-	for _, name := range []string{TownStateVolume, ViewerTokenVolume} {
-		if !seen[name] {
-			problems = append(problems, fmt.Sprintf("the Job mounts no %q volume", name))
+	for _, w := range want {
+		if !seen[w.Name] {
+			problems = append(problems, fmt.Sprintf("the Job mounts no %q volume", w.Name))
 		}
 	}
 	return problems
+}
+
+// admissionJobVolumeProblemsFor holds one volume to the renderer's volume of the same
+// name: the same claim, or the same Secret, and not the other kind as well.
+func admissionJobVolumeProblemsFor(got, want Volume) []string {
+	switch {
+	case want.PersistentVolumeClaim != nil:
+		if got.PersistentVolumeClaim == nil || got.PersistentVolumeClaim.ClaimName != want.PersistentVolumeClaim.ClaimName || got.Secret != nil {
+			return []string{fmt.Sprintf("volume %q is not the %q claim", got.Name, want.PersistentVolumeClaim.ClaimName)}
+		}
+	case want.Secret != nil:
+		if got.Secret == nil || got.Secret.SecretName != want.Secret.SecretName || got.PersistentVolumeClaim != nil {
+			return []string{fmt.Sprintf("volume %q is not the %q Secret", got.Name, want.Secret.SecretName)}
+		}
+	}
+	return nil
 }
 
 // admissionJobPodProblems holds the Job's token automount, priority class and
@@ -806,19 +915,107 @@ func admissionBool(p *bool) string {
 }
 
 // TestUpdateAdmissionPolicy holds the manifest to its shape: the policy and binding
-// as deployed admit Job creation in gt only as the daemon's ServiceAccount, and the
-// real rendered Job is the Job those expressions admit.
+// as deployed admit Job creation in gt only as the daemon's ServiceAccount, and both
+// Jobs the renderer makes (without the gateway, and with it) are the Jobs those
+// expressions admit.
 func TestUpdateAdmissionPolicy(t *testing.T) {
 	t.Parallel()
 	if problems := updateAdmissionProblems(t, loadUpdateAdmission(t)); len(problems) > 0 {
 		t.Errorf("%s: %s", updateAdmissionManifest, strings.Join(problems, "; "))
 	}
-	job := mustBuild(t, goldenValues()).Job
-	// The daemon renames the rendered Job before it creates it (updateJobName in
-	// internal/daemon): the name the policy admits is that renamed one.
-	job.Metadata.Name = JobNamePrefix + "0123456789ab"
-	if problems := updateAdmissionJobProblems(job); len(problems) > 0 {
-		t.Errorf("the rendered Job: %s", strings.Join(problems, "; "))
+	for _, tc := range []struct {
+		name   string
+		values Values
+	}{
+		{name: "gateway off", values: admissionValues()},
+		{name: "gateway on", values: admissionGatewayValues()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			job := mustBuild(t, tc.values).Job
+			// The daemon renames the rendered Job before it creates it (updateJobName
+			// in internal/daemon): the name the policy admits is that renamed one.
+			job.Metadata.Name = JobNamePrefix + "0123456789ab"
+			if problems := updateAdmissionJobProblems(job, tc.values); len(problems) > 0 {
+				t.Errorf("the rendered Job: %s", strings.Join(problems, "; "))
+			}
+		})
+	}
+	// The gateway URL is the one admitted value the policy bounds by form rather than
+	// pinning: it must admit the address the daemon hands the Job.
+	if !admissionGatewayURLRE.MatchString(admissionBdGatewayURL) {
+		t.Errorf("the admitted gateway URL form refuses the rendered address %q", admissionBdGatewayURL)
+	}
+}
+
+// TestUpdateAdmissionVolumeExprNamesEveryVolume holds the deployed volume
+// validation to one exists clause per renderer volume in each render's branch, so
+// a branch that pinned only the count and the set of allowed kinds cannot admit a
+// render's volume missing with a second of another kind in its place.
+func TestUpdateAdmissionVolumeExprNamesEveryVolume(t *testing.T) {
+	t.Parallel()
+	expr := admissionPolicyValidationText(t, 5)
+	want := map[string]int{}
+	for _, v := range volumes(admissionValues()) {
+		want[v.Name]++
+	}
+	for _, v := range volumes(admissionGatewayValues()) {
+		want[v.Name]++
+	}
+	for name, n := range want {
+		needle := "object.spec.template.spec.volumes.exists(v, v.name == " + celString(t, name)
+		if got := strings.Count(expr, needle); got != n {
+			t.Errorf("the volume validation names %q in %d exists clauses, want %d, one for each render that has it: %q",
+				name, got, n, expr)
+		}
+	}
+}
+
+// TestAdmissionGatewayURLFormAgainstValidator holds the policy's copy of the gateway
+// URL form to the daemon's own check, k8sdaemon.ValidateBdGatewayURL, over a corpus
+// wide enough that a change to either turns a row red: the two must agree on the
+// address form, the policy must refuse a name (the daemon resolves one before the Job
+// is created and the policy refuses hostAliases), and the policy must never admit a
+// URL the daemon's check refuses.
+func TestAdmissionGatewayURLFormAgainstValidator(t *testing.T) {
+	t.Parallel()
+	for _, r := range []struct {
+		url       string
+		admitted  bool
+		validated bool
+		why       string
+	}{
+		{"http://192.168.5.2:7440", true, true, "the address the daemon resolves the gateway name to"},
+		{"http://192.168.5.2", true, true, "a URL with no port"},
+		{"https://10.0.0.1", true, true, "the renderer takes https"},
+		{"http://192.168.5.2:7440/bd", true, true, "the renderer takes a path"},
+		{"http://127.0.0.1:7440", true, true, "a loopback address"},
+		{"http://host.docker.internal:7440", false, true, "a name: the daemon resolves it before the Job is created"},
+		{"http://gateway:hunter2@192.168.5.2:7440", false, false, "user information"},
+		{"http://192.168.5.2:7440?x=1", false, false, "a query"},
+		{"http://192.168.5.2:7440#f", false, false, "a fragment"},
+		{"http://192.168.5.2:0", false, false, "port 0"},
+		{"http://192.168.5.2:65536", false, false, "a port above 65535"},
+		{"http://192.168.5.2 ", false, false, "a trailing space"},
+		{"http://192.168.5.2:7440/x y", false, false, "a space in the path"},
+		{"http://999.1.1.1:7440", false, true, "not an address: the policy admits only four octets"},
+		{"http://192.168.005.2:7440", false, true, "a zero-padded octet is not an address the daemon resolves to"},
+	} {
+		t.Run(r.url, func(t *testing.T) {
+			t.Parallel()
+			admitted := admissionGatewayURLRE.MatchString(r.url)
+			validated := k8sdaemon.ValidateBdGatewayURL("test", r.url) == nil
+			if admitted != r.admitted {
+				t.Errorf("the policy admits %q = %t, want %t (%s)", r.url, admitted, r.admitted, r.why)
+			}
+			if validated != r.validated {
+				t.Errorf("k8sdaemon.ValidateBdGatewayURL refuses %q = %t, want %t (%s): the validator changed",
+					r.url, !validated, r.validated, r.why)
+			}
+			if admitted && !validated {
+				t.Errorf("the policy admits %q, which k8sdaemon.ValidateBdGatewayURL refuses: the copies have drifted", r.url)
+			}
+		})
 	}
 }
 
@@ -1044,6 +1241,78 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 			return docs
 		},
 		want: "validation 6",
+	},
+	{
+		name: "a fourth volume admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[5].Expression = strings.Replace(docs[0].Spec.Validations[5].Expression,
+				"size(object.spec.template.spec.volumes) == 3", "size(object.spec.template.spec.volumes) <= 4", 1)
+			return docs
+		},
+		want: "validation 6",
+	},
+	{
+		name: "a dropped viewer-token volume pin",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			clause := " && object.spec.template.spec.volumes.exists(v, " +
+				admissionVolumeClause(t, volumes(admissionGatewayValues())[1]) + ")"
+			expr := docs[0].Spec.Validations[5].Expression
+			if !strings.Contains(expr, clause) {
+				t.Fatalf("the volume validation does not carry the viewer-token name pin %q", clause)
+			}
+			docs[0].Spec.Validations[5].Expression = strings.Replace(expr, clause, "", 1)
+			return docs
+		},
+		want: "validation 6",
+	},
+	{
+		name: "a differently named gateway Secret admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[5].Expression = strings.Replace(docs[0].Spec.Validations[5].Expression,
+				"v.secret.secretName == '"+k8sdaemon.BdGatewayDaemonSecretName+"'", "true", 1)
+			return docs
+		},
+		want: "validation 6",
+	},
+	{
+		name: "a gateway URL matched by any value",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			pattern := "e.value.matches(" + celPattern(t, admissionGatewayURLForm) + ")"
+			expr := docs[0].Spec.Validations[3].Expression
+			if !strings.Contains(expr, pattern) {
+				t.Fatalf("the container validation does not carry the gateway URL form %q", pattern)
+			}
+			docs[0].Spec.Validations[3].Expression = strings.Replace(expr, pattern, "e.value.matches('.*')", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "a seventh environment variable admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"size(c.env) == 6", "size(c.env) >= 6", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "a fourth mount admitted",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"size(c.volumeMounts) == 3", "size(c.volumeMounts) >= 3", 1)
+			return docs
+		},
+		want: "validation 4",
+	},
+	{
+		name: "the gateway token at another path",
+		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
+			docs[0].Spec.Validations[3].Expression = strings.Replace(docs[0].Spec.Validations[3].Expression,
+				"m.mountPath == '"+k8sdaemon.BdGatewayTokenDir+"'", "true", 1)
+			return docs
+		},
+		want: "validation 4",
 	},
 	{
 		name: "a container port admitted",
@@ -1421,12 +1690,149 @@ func TestUpdateAdmissionJobRefusesAnotherJob(t *testing.T) {
 			job := mustBuild(t, goldenValues()).Job
 			job.Metadata.Name = JobNamePrefix + "0123456789ab"
 			r.edit(&job)
-			problems := strings.Join(updateAdmissionJobProblems(job), "; ")
+			problems := strings.Join(updateAdmissionJobProblems(job, admissionValues()), "; ")
 			if !strings.Contains(problems, r.want) {
 				t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
 			}
 		})
 	}
+}
+
+// admissionPolicyValidationText is the deployed policy's validation i with its
+// whitespace collapsed. The mutation tests read the clauses from the manifest the
+// cluster applies, so a gateway pin the Go mirror also enforces is shown in the
+// expression itself, not only in the mirror.
+func admissionPolicyValidationText(t *testing.T, i int) string {
+	t.Helper()
+	policy, problems := admissionDocNamed(loadUpdateAdmission(t), "ValidatingAdmissionPolicy")
+	if len(problems) > 0 {
+		t.Fatalf("%s", strings.Join(problems, "; "))
+	}
+	if i >= len(policy.Spec.Validations) {
+		t.Fatalf("the policy holds %d validations, want one at %d", len(policy.Spec.Validations), i+1)
+	}
+	return admissionText(policy.Spec.Validations[i].Expression)
+}
+
+// TestUpdateAdmissionPolicyRefusesGatewayMutations holds the gateway Job to the
+// policy's bounds: the widening admits the gateway pair, the one Secret and the one
+// extra mount, and a Job that adds a second Secret, a hostAlias, a stray variable or
+// another mount is a Job the renderer never makes. Each case is named by the check
+// that mirrors the expressions and by the deployed expression's own pin, so the
+// policy text and the mirror cannot drift apart.
+func TestUpdateAdmissionPolicyRefusesGatewayMutations(t *testing.T) {
+	t.Parallel()
+	for _, r := range []struct {
+		name       string
+		edit       func(*Job)
+		want       string
+		validation int
+		pins       []string
+	}{
+		{
+			name: "a second Secret volume",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Volumes = append(j.Spec.Template.Spec.Volumes,
+					Volume{Name: "extra-secret", Secret: &SecretVolumeSource{SecretName: "another"}})
+			},
+			want:       "volumes",
+			validation: 5,
+			pins: []string{
+				"size(object.spec.template.spec.volumes) == 3",
+				"v.secret.secretName == 'bd-gateway-daemon'",
+			},
+		},
+		{
+			name: "a second town-state claim and no viewer-token Secret",
+			edit: func(j *Job) {
+				// Every volume still names one the policy's clause allows, and the
+				// count is the gateway render's, so only the named-volume pins
+				// refuse this Job: a count and an `all` alone would admit it.
+				j.Spec.Template.Spec.Volumes = []Volume{
+					{Name: TownStateVolume, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: k8sdaemon.TownStateClaim}},
+					{Name: TownStateVolume, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: k8sdaemon.TownStateClaim}},
+					k8sdaemon.BdGatewayVolume(k8sdaemon.BdGatewayDaemonSecretName),
+				}
+			},
+			want:       "mounts no",
+			validation: 5,
+			pins: []string{
+				"object.spec.template.spec.volumes.exists(v, v.name == 'viewer-token'",
+				"object.spec.template.spec.volumes.exists(v, v.name == 'bd-gateway-token'",
+			},
+		},
+		{
+			name: "a stray environment variable",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].Env = append(j.Spec.Template.Spec.Containers[0].Env, EnvVar{Name: "EXTRA", Value: "x"})
+			},
+			want:       "environment",
+			validation: 3,
+			pins: []string{
+				"size(c.env) == 6",
+				"e.name == 'BD_GATEWAY_URL'",
+				"e.name == 'BD_GATEWAY_TOKEN_FILE'",
+			},
+		},
+		{
+			name: "an extra mount",
+			edit: func(j *Job) {
+				j.Spec.Template.Spec.Containers[0].VolumeMounts = append(j.Spec.Template.Spec.Containers[0].VolumeMounts,
+					VolumeMount{Name: TownStateVolume, MountPath: "/tmp"})
+			},
+			want:       "mounts",
+			validation: 3,
+			pins: []string{
+				"size(c.volumeMounts) == 3",
+				"m.name == 'bd-gateway-token'",
+				"m.mountPath == '/run/gt/bd-gateway'",
+			},
+		},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			job := mustBuild(t, admissionGatewayValues()).Job
+			job.Metadata.Name = JobNamePrefix + "0123456789ab"
+			r.edit(&job)
+			problems := strings.Join(updateAdmissionJobProblems(job, admissionGatewayValues()), "; ")
+			if !strings.Contains(problems, r.want) {
+				t.Errorf("%s: problems %q do not name %q", r.name, problems, r.want)
+			}
+			expr := admissionPolicyValidationText(t, r.validation)
+			for _, pin := range r.pins {
+				if !strings.Contains(expr, pin) {
+					t.Errorf("%s: the deployed validation %d does not carry the pin %q: %q", r.name, r.validation+1, pin, expr)
+				}
+			}
+		})
+	}
+	// hostAliases has no field in the renderer's PodSpec, so it is added to the
+	// encoded Job, the path the policy's clause on it is checked through.
+	t.Run("a hostAlias", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		if err := YAML(&buf, mustBuild(t, admissionGatewayValues()).Job); err != nil {
+			t.Fatalf("encoding the Job: %v", err)
+		}
+		var doc map[string]any
+		if err := yaml.Unmarshal(buf.Bytes(), &doc); err != nil {
+			t.Fatalf("decoding the Job: %v", err)
+		}
+		admissionTestPod(t, doc)["hostAliases"] = []any{
+			map[string]any{"ip": "10.0.0.1", "hostnames": []any{"gateway.example.test"}},
+		}
+		mutated, err := yaml.Marshal(doc)
+		if err != nil {
+			t.Fatalf("encoding the mutated Job: %v", err)
+		}
+		problems := strings.Join(admissionEncodedProblems(mutated), "; ")
+		if !strings.Contains(problems, "hostAliases") {
+			t.Errorf("a hostAlias: problems %q do not name %q", problems, "hostAliases")
+		}
+		if expr := admissionPolicyValidationText(t, 6); !strings.Contains(expr, "!has(object.spec.template.spec.hostAliases)") {
+			t.Errorf("the deployed validation 7 does not refuse hostAliases: %q", expr)
+		}
+	})
 }
 
 // admissionTestPod returns the decoded Job's pod spec for a mutation.
