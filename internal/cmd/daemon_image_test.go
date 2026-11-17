@@ -476,6 +476,26 @@ func TestDaemonImageGatewayContext(t *testing.T) {
 			t.Errorf("a failed stage printed a listing:\n%s", out)
 		}
 	})
+	t.Run("a listing that cannot be written returns the error", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply, r.flags.contextOnly, r.flags.gateway = true, true, true
+		paths := []string{
+			filepath.Join(r.flags.out, "bd.real"),
+			filepath.Join(r.flags.out, "bdgw"),
+			filepath.Join(r.flags.out, "verbs.json"),
+		}
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &[]string{}, gatewayPaths: paths, gatewayBDCommit: imageTestBDCommit}
+		}
+		r.deps.out = failingWriter{}
+
+		err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+		if err == nil || !strings.Contains(err.Error(), "printing the gt-bd build context listing") {
+			t.Fatalf("error = %v, want the failed listing write", err)
+		}
+	})
 }
 
 // TestDaemonImageGatewayFlagRules: --gateway is refused unless --apply and
