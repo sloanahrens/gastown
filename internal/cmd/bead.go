@@ -704,9 +704,9 @@ func (osOutboxFS) Rename(oldpath, newpath string) error { return os.Rename(oldpa
 func (osOutboxFS) Remove(name string) error { return os.Remove(name) }
 
 // outboxLockFile is the flock file that serializes the outbox writes of one
-// seat. It sits beside the outbox, outside it, for the reason the temporary
-// file does.
-const outboxLockFile = ".outbox-notes.lock"
+// seat, notes.md and result.json alike. It sits beside the outbox, outside it,
+// for the reason the temporary file does.
+const outboxLockFile = ".outbox-write.lock"
 
 // outboxFilesystem is the filesystem the caller's outbox writes run on.
 func (v *beadVerbs) outboxFilesystem() outboxFS {
