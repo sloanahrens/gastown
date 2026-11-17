@@ -416,10 +416,8 @@ type PatrolsConfig struct {
 
 	// ReworkNumbers runs the rework program's weekly numbers step: one document
 	// under .runtime holding the program's two numbers and each lever's deltas
-	// (internal/daemon/rework_numbers.go, gt-2232t4). Off when absent: the
-	// document serves the rework program, so a town that has not started the
-	// program gains nothing from a step that writes it, and turns it on rather
-	// than an upgrade.
+	// (internal/daemon/rework_numbers.go, gt-2232t4). Read ReworkNumbersConfig
+	// for the block and why the patrol is off when absent.
 	ReworkNumbers *ReworkNumbersConfig `json:"rework_numbers,omitempty"`
 
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
