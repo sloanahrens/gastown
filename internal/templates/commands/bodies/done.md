@@ -60,7 +60,9 @@ gt done
 the loop shape. If it exits non-zero it names what failed (exit codes 10-16,
 `gt done --help`) and your session stays up: fix it, commit, and run `gt done`
 once more. If you believe a gate failure is not caused by your change, add a
-bead comment with the error, then `gt escalate -s medium`, and wait.
+bead comment with the error, then `gt escalate -s medium`, and wait. In a
+file-mode seat the comment is appended to the seat's outbox, and the host
+applies it to the bead when the seat ends.
 No flag skips the gate.
 
 Before you run `gt slot run`, read the container-gate rule in `docs/reference.md`.
