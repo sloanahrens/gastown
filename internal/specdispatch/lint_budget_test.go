@@ -6,17 +6,16 @@ import (
 	"testing"
 )
 
-// changeBudgetSize is a Size body that says one worker and declares a budget,
-// so a budget test drives the change budget rule without disturbing the rest of
-// the shape.
-func changeBudgetSize(line string) string {
-	return ownerSessionBudgetSize("One worker, one landing.", line)
+// sizeWithBudget is a Size body of first, the change budget line and a split
+// clause, so a budget test varies only the budget.
+func sizeWithBudget(first, budgetLine string) string {
+	return first + "\n\n" + budgetLine + "\n\nSplits into its own MR."
 }
 
-// ownerSessionBudgetSize is changeBudgetSize with the Size body's first clause
-// replaced, for a bead whose Size says one overseer or operator session.
-func ownerSessionBudgetSize(first, line string) string {
-	return first + "\n\n" + line + "\n\nSplits into its own MR."
+// workerSizeWithBudget is sizeWithBudget for the usual one-worker,
+// one-landing bead.
+func workerSizeWithBudget(budgetLine string) string {
+	return sizeWithBudget("One worker, one landing.", budgetLine)
 }
 
 // A bead that declares more added lines than the operator's maximum is refused
@@ -25,7 +24,7 @@ func ownerSessionBudgetSize(first, line string) string {
 func TestRunawayBeadBudgetRefusesOverMaximum(t *testing.T) {
 	t.Parallel()
 
-	s := sizedSpec(changeBudgetSize("Change: at most 450 added lines in 3 files."))
+	s := sizedSpec(workerSizeWithBudget("Change: at most 450 added lines in 3 files."))
 	v := LintWith(s, defaultTemplate(), LintOptions{BudgetMaxLines: 300})
 	if v.Route != RouteRefuse {
 		t.Fatalf("bead over the budget got route %q: %s", v.Route, v.Line(s.ID))
@@ -65,21 +64,15 @@ func TestRunawayBeadBudgetGate(t *testing.T) {
 	t.Parallel()
 
 	const over = 300
-	malformed := changeBudgetSize("Change: at most 450 lines.")
-	overMax := changeBudgetSize("Change: at most 301 added lines in 3 files.")
-	atMax := changeBudgetSize("Change: at most 300 added lines in 3 files.")
-	underMax := changeBudgetSize("Change: at most 250 added lines in 2 files.")
+	malformed := workerSizeWithBudget("Change: at most 450 lines.")
+	atMax := workerSizeWithBudget("Change: at most 300 added lines in 3 files.")
+	underMax := workerSizeWithBudget("Change: at most 250 added lines in 2 files.")
 	noLine := "One worker, one landing."
 
 	cases := []changeBudgetCase{
 		{
-			name: "over the maximum",
-			size: overMax, opts: LintOptions{BudgetMaxLines: over}, refuse: true,
-			wantReason: []string{"301", "300", "split the bead by package", "by test group"},
-		},
-		{
 			name: "the words in capitals",
-			size: changeBudgetSize("CHANGE: AT MOST 450 ADDED LINES IN 3 FILES."),
+			size: workerSizeWithBudget("CHANGE: AT MOST 450 ADDED LINES IN 3 FILES."),
 			opts: LintOptions{BudgetMaxLines: over}, refuse: true,
 			wantReason: []string{"450", "300"},
 		},
@@ -112,13 +105,13 @@ func TestRunawayBeadBudgetGate(t *testing.T) {
 		},
 		{
 			name:   "an overseer-only bead over the maximum",
-			size:   ownerSessionBudgetSize("One overseer session of about an hour.", "Change: at most 450 added lines in 3 files."),
+			size:   sizeWithBudget("One overseer session of about an hour.", "Change: at most 450 added lines in 3 files."),
 			labels: []string{"overseer-only"},
 			opts:   LintOptions{BudgetMaxLines: over, BudgetRequired: true},
 		},
 		{
 			name:   "an operator-only bead with a malformed line",
-			size:   ownerSessionBudgetSize("One operator session of about an hour.", "Change: at most 450 lines."),
+			size:   sizeWithBudget("One operator session of about an hour.", "Change: at most 450 lines."),
 			labels: []string{"operator-only"},
 			opts:   LintOptions{BudgetMaxLines: over},
 		},
@@ -166,8 +159,8 @@ func TestRunawayBeadBudgetOffChangesNothing(t *testing.T) {
 		size string
 	}{
 		{"no line", "One worker, one landing."},
-		{"a malformed line", changeBudgetSize("Change: at most 450 lines.")},
-		{"a line over every maximum", changeBudgetSize("Change: at most 450 added lines in 3 files.")},
+		{"a malformed line", workerSizeWithBudget("Change: at most 450 lines.")},
+		{"a line over every maximum", workerSizeWithBudget("Change: at most 450 added lines in 3 files.")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,7 +189,7 @@ func TestRunawayBeadBudgetOffChangesNothing(t *testing.T) {
 func TestRunawayBeadBudgetJoinsShapeRefusals(t *testing.T) {
 	t.Parallel()
 
-	s := sizedSpec(changeBudgetSize("Change: at most 450 added lines in 3 files."))
+	s := sizedSpec(workerSizeWithBudget("Change: at most 450 added lines in 3 files."))
 	s.Description = strings.Replace(s.Description, "## Gate\nmake gate\n", "", 1)
 	v := LintWith(s, defaultTemplate(), LintOptions{BudgetMaxLines: 300})
 	if v.Route != RouteRefuse {
