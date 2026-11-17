@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,11 +48,13 @@ func jobArgs(envPath string) []string {
 func greenVersion() (string, error) { return preflight.JQVersion, nil }
 
 // The blobs every fake manifest names, so a dead one is a digest a test chose
-// rather than a real layer.
+// rather than a real layer. indexChild is the digest fakeRegistry's index names
+// and is not a pin's digest, so the fake can tell the index from its child.
 var (
 	liveConfig = digestFor(0x01)
 	liveLayer  = digestFor(0x02)
 	deadLayer  = digestFor(0x03)
+	indexChild = digestFor(0x11)
 )
 
 // digestFor is a digest of the byte k repeated, so each fake blob has its own.
@@ -59,29 +62,58 @@ func digestFor(k byte) string {
 	return "sha256:" + strings.Repeat(fmt.Sprintf("%02x", k), 32)
 }
 
-// fakeRegistry answers every reference with one image manifest and serves every
-// blob but Dead, which it reports unserved for the repositories naming In.
-// Checking a layer's durability needs no socket: pincheck reads the Registry
-// interface, and this is one.
+// fakeRegistry answers the reference with an image manifest, except that Index
+// makes it answer an index at its top reference whose linux/arm64 child is
+// indexChild. It serves every blob but Dead, which it reports unserved for the
+// repositories naming In; a ManifestErr or BlobErr is a transport failure it
+// reports instead of an answer. Checking a layer's durability needs no socket:
+// pincheck reads the Registry interface, and this is one.
 type fakeRegistry struct {
+	// Dead is the digest the fake reports unserved, for the repositories
+	// naming In.
 	Dead string
 	In   string
+	// Index answers an index rather than an image manifest, the shape every
+	// pin in templates.DigestPinnedImages has upstream.
+	Index bool
+	// ManifestErr and BlobErr are transport failures the fake reports, so the
+	// command's refusal of a registry that does not answer is driven through
+	// it.
+	ManifestErr error
+	BlobErr     error
 }
 
-func (f fakeRegistry) Manifest(_ context.Context, repo, _ string) ([]byte, string, error) {
+func (f fakeRegistry) Manifest(_ context.Context, repo, ref string) ([]byte, string, error) {
+	if f.ManifestErr != nil {
+		return nil, "", f.ManifestErr
+	}
+	if f.Index && ref != indexChild {
+		return indexManifest(indexChild, pinnedPlatform), ociIndexType, nil
+	}
+	dead := f.Dead != "" && strings.Contains(repo, f.In)
+	if f.Index {
+		// An index has no layers of its own: Dead is in the child it names.
+		dead = dead && ref == indexChild
+	}
 	layers := []string{liveLayer}
-	if f.Dead != "" && strings.Contains(repo, f.In) {
+	if dead {
 		layers = append(layers, f.Dead)
 	}
 	return imageManifest(liveConfig, layers...), ociManifestType, nil
 }
 
 func (f fakeRegistry) BlobExists(_ context.Context, _ string, digest string) (bool, error) {
+	if f.BlobErr != nil {
+		return false, f.BlobErr
+	}
 	return digest != f.Dead, nil
 }
 
-// ociManifestType is the media type of the body fakeRegistry answers.
-const ociManifestType = "application/vnd.oci.image.manifest.v1+json"
+// The media types of the bodies fakeRegistry answers.
+const (
+	ociManifestType = "application/vnd.oci.image.manifest.v1+json"
+	ociIndexType    = "application/vnd.oci.image.index.v1+json"
+)
 
 // imageManifest is the body a registry answers for an image manifest.
 func imageManifest(config string, layers ...string) []byte {
@@ -91,6 +123,14 @@ func imageManifest(config string, layers ...string) []byte {
 	}
 	return []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"config":{"digest":%q,"size":1},"layers":[%s]}`,
 		ociManifestType, config, strings.Join(entries, ",")))
+}
+
+// indexManifest is the body a registry answers for an index naming one child
+// for the platform.
+func indexManifest(child, platform string) []byte {
+	osName, arch, _ := strings.Cut(platform, "/")
+	return []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"manifests":[{"digest":%q,"size":1,"platform":{"os":%q,"architecture":%q}}]}`,
+		ociIndexType, child, osName, arch))
 }
 
 // TestRunAcceptsTheGreenCommit holds the passing branch: the command exits
@@ -181,14 +221,16 @@ func TestJQVersionRefusesAProgramThatIsNotThere(t *testing.T) {
 // TestImagePinDurabilityRefusesADeadLayer is the command's pin rule: a pinned
 // image whose layer the registry no longer serves exits non-zero naming the
 // image and the digest, with no commit left for the later steps, and every
-// layer served exits zero.
+// layer served exits zero. The index rows read the pin's index through its
+// child, the shape every pin in templates.DigestPinnedImages has upstream.
 func TestImagePinDurabilityRefusesADeadLayer(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		reg  pincheck.Registry
 		want []string
-		// refuse rows exit non-zero; the last row is the job that may build.
+		// refuse rows exit non-zero; the rows without refuse are the jobs
+		// that may build.
 		refuse bool
 	}{
 		{
@@ -198,12 +240,19 @@ func TestImagePinDurabilityRefusesADeadLayer(t *testing.T) {
 			refuse: true,
 		},
 		{
+			name:   "a layer of an index pin",
+			reg:    fakeRegistry{Dead: deadLayer, In: "oci/docker", Index: true},
+			want:   []string{templates.DindImage, deadLayer + " (linux/arm64 layer 2)"},
+			refuse: true,
+		},
+		{
 			name:   "no registry",
 			reg:    nil,
 			want:   []string{templates.DindImage, "no registry to ask"},
 			refuse: true,
 		},
 		{"every layer served", fakeRegistry{}, nil, false},
+		{"every layer of an index served", fakeRegistry{Index: true}, nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,6 +283,44 @@ func TestImagePinDurabilityRefusesADeadLayer(t *testing.T) {
 				}
 			}
 			if len(got) != 0 {
+				t.Errorf("the environment file holds %q for a refused job", got)
+			}
+		})
+	}
+}
+
+// TestImagePinDurabilityRefusesARegistryThatDoesNotAnswer is the command's
+// transport rule: a registry whose manifest or blob request fails exits
+// non-zero naming the pinned image and the failure, with no commit left for
+// the later steps, rather than a build that started unverified.
+func TestImagePinDurabilityRefusesARegistryThatDoesNotAnswer(t *testing.T) {
+	t.Parallel()
+	unreachable := errors.New("connection refused")
+	cases := []struct {
+		name string
+		reg  fakeRegistry
+	}{
+		{"a manifest request", fakeRegistry{ManifestErr: unreachable}},
+		{"a blob request", fakeRegistry{BlobErr: unreachable}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			envPath := filepath.Join(t.TempDir(), envFile)
+			var stdout, stderr strings.Builder
+
+			code := run(jobArgs(envPath), &stdout, &stderr, installed, greenVersion, tc.reg)
+			if code == 0 {
+				t.Fatalf("run exited 0 with a registry that does not answer, stdout %q", stdout.String())
+			}
+			for _, want := range []string{templates.DindImage, unreachable.Error()} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+			if got, err := os.ReadFile(envPath); err != nil {
+				t.Fatalf("reading the environment file: %v", err)
+			} else if len(got) != 0 {
 				t.Errorf("the environment file holds %q for a refused job", got)
 			}
 		})

@@ -1,10 +1,7 @@
-// Command imagepreflight runs the images workflow's preflight
-// (gt-gg9hv.62): the ci-base runner carries jq, go, docker and git, jq is
-// 1.7.1, every digest-pinned image still has every layer its registry serves,
-// the mango pin names a source on the Forgejo host, and GITHUB_SHA is the
-// full green commit. On success it appends SHA= and TAG= to $GITHUB_ENV for
-// the later steps. The workflow at deploy/ci/images.workflow.yml calls it;
-// the checks and their refusal tests live in internal/ci/preflight.
+// Command imagepreflight runs the images workflow's preflight (gt-gg9hv.62),
+// which deploy/ci/images.workflow.yml calls: the rules it enforces and their
+// refusal tests are internal/ci/preflight's package doc. On success it appends
+// SHA= and TAG= to $GITHUB_ENV for the later steps.
 //
 //	imagepreflight -sha <full sha> -mango-url <url> -mango-commit <full sha> -host <host:port> -env-out <$GITHUB_ENV>
 package main
