@@ -37,7 +37,9 @@ func specLintBudgetSpec(id, line string) specdispatch.Spec {
 // budget gate from patrols.spec_dispatch.story_points, so a bead over the
 // declared maximum and a bead that declares none are both refused through the
 // town's own config read, and an unset block leaves both settings off and the
-// same beads clean (gt-muzkwi).
+// same beads clean. The command's options and the dispatcher tick's options are
+// built from the same config and carry the same settings, so a candidate the
+// seat's lint would refuse is refused at the tick too (gt-muzkwi).
 func TestRunawayBeadBudgetLintReadsTheDaemonConfig(t *testing.T) {
 	t.Parallel()
 	over := specLintBudgetSpec("gt-over", "Change: at most 450 added lines in 3 files.")
@@ -55,8 +57,12 @@ func TestRunawayBeadBudgetLintReadsTheDaemonConfig(t *testing.T) {
 			daemon: specLintBudgetDaemon,
 			want:   specdispatch.LintOptions{BudgetMaxLines: 300, BudgetRequired: true},
 			refusals: [][]string{
-				{"450", "300"},
-				{"no change budget"},
+				{
+					"declares at most 450 added lines",
+					"change budget maximum of 300",
+					"split the bead by package",
+				},
+				{"states no change budget"},
 			},
 		},
 		{
@@ -77,8 +83,16 @@ func TestRunawayBeadBudgetLintReadsTheDaemonConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("specLintOptsFrom: %v", err)
 			}
-			if got := opts.lintOptions(); got != tc.want {
-				t.Errorf("gt spec lint's options = %+v, want %+v", got, tc.want)
+			fromConfig := opts.lintOptions()
+			if fromConfig != tc.want {
+				t.Errorf("gt spec lint's options = %+v, want %+v", fromConfig, tc.want)
+			}
+			var env specDispatchEnv
+			if err := specWireStoryPoints(&env, sd, root); err != nil {
+				t.Fatalf("specWireStoryPoints: %v", err)
+			}
+			if tick := env.lintOptions(); tick != tc.want {
+				t.Errorf("the tick's options = %+v, want %+v", tick, tc.want)
 			}
 			for i, spec := range []specdispatch.Spec{over, none} {
 				wantOut := tc.refusals[i]
@@ -96,39 +110,6 @@ func TestRunawayBeadBudgetLintReadsTheDaemonConfig(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// TestRunawayBeadBudgetEverySitePassesTheSameValues: the command's options and
-// the dispatcher tick's options are built from the same config and carry the
-// same change budget settings, so a candidate the seat's lint would refuse is
-// refused at the tick too (gt-muzkwi).
-func TestRunawayBeadBudgetEverySitePassesTheSameValues(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, specTickSettings, specLintBudgetDaemon)
-	_, sd, err := specTickTown(root)
-	if err != nil {
-		t.Fatalf("specTickTown: %v", err)
-	}
-	want := specdispatch.LintOptions{BudgetMaxLines: 300, BudgetRequired: true}
-	opts, err := specLintOptsFrom(sd)
-	if err != nil {
-		t.Fatalf("specLintOptsFrom: %v", err)
-	}
-	fromConfig := opts.lintOptions()
-	if fromConfig != want {
-		t.Errorf("gt spec lint's options = %+v, want %+v", fromConfig, want)
-	}
-	var env specDispatchEnv
-	if err := specWireStoryPoints(&env, sd, root); err != nil {
-		t.Fatalf("specWireStoryPoints: %v", err)
-	}
-	tick := env.lintOptions()
-	if tick != want {
-		t.Errorf("the tick's options = %+v, want %+v", tick, want)
-	}
-	if fromConfig != tick {
-		t.Errorf("the two sites disagree: gt spec lint %+v, the tick %+v", fromConfig, tick)
 	}
 }
 
