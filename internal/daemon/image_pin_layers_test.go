@@ -265,6 +265,37 @@ func TestImagePinDurabilityImagePinLayersRecordItCannotWriteIsAnError(t *testing
 	}
 }
 
+// TestImagePinDurabilityImagePinLayersNoRunSeamRunsNothing: this build installs
+// no run seam, so a tick with none runs nothing, reports no completed run and
+// records no day: the next tick still reads the day as due.
+func TestImagePinDurabilityImagePinLayersNoRunSeamRunsNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var logged bytes.Buffer
+	d := imagePinDurabilityTestDaemon(t, town, &logged)
+
+	ran, note, err := d.runImagePinLayersTick(imagePinDurabilityNoon(t, "2026-11-16"))
+	if ran || err != nil {
+		t.Fatalf("a tick with no run seam = %v, %v; want no run and no error", ran, err)
+	}
+	if !strings.Contains(note, "nothing ran") {
+		t.Errorf("a tick with no run seam said %q, want it to say nothing ran", note)
+	}
+
+	d.startImagePinLayersTick()
+	d.imagePinLayersCycles.Wait()
+
+	if strings.Contains(logged.String(), "today's run completed") {
+		t.Errorf("a tick with no run seam logged a completed run: %q", logged.String())
+	}
+	if !strings.Contains(logged.String(), "nothing ran") {
+		t.Errorf("a tick with no run seam logged %q, want it to say nothing ran", logged.String())
+	}
+	if _, err := os.Stat(imagePinLayersLastRunPath(town)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a tick with no run seam wrote a last-run record (%v), want none so the day stays due", err)
+	}
+}
+
 // TestImagePinDurabilityImagePinLayersTickRunsTheSeamOnce: one started tick
 // calls the run seam once and frees the guard; a tick while a run is going is
 // skipped and logged; and a failed run is logged, not recorded as done.
@@ -405,7 +436,10 @@ func TestImagePinDurabilityImagePinLayersStopJoinsTheRun(t *testing.T) {
 	t.Run("the run the ticker started is joined", func(t *testing.T) {
 		t.Parallel()
 		d, reached, unblock := blocking(t, io.Discard)
-		d.imagePinLayersJoinWait = time.Hour
+		held := make(chan time.Time)
+		d.imagePinLayersJoinTimer = func(time.Duration) (<-chan time.Time, func()) {
+			return held, func() {}
+		}
 
 		d.startImagePinLayersTick()
 		waitForSignal(t, reached, "the run never reached the run seam")
@@ -433,7 +467,13 @@ func TestImagePinDurabilityImagePinLayersStopJoinsTheRun(t *testing.T) {
 		t.Parallel()
 		var logged bytes.Buffer
 		d, reached, unblock := blocking(t, &logged)
-		d.imagePinLayersJoinWait = 30 * time.Millisecond
+		expired := make(chan time.Time)
+		var gotBound atomic.Int64
+		var boundStopped atomic.Int32
+		d.imagePinLayersJoinTimer = func(wait time.Duration) (<-chan time.Time, func()) {
+			gotBound.Store(int64(wait))
+			return expired, func() { boundStopped.Add(1) }
+		}
 
 		d.startImagePinLayersTick()
 		waitForSignal(t, reached, "the run never reached the run seam")
@@ -443,9 +483,16 @@ func TestImagePinDurabilityImagePinLayersStopJoinsTheRun(t *testing.T) {
 			d.stopImagePinLayersPatrol(nil)
 			close(stopped)
 		}()
+		close(expired)
 		waitForSignal(t, stopped, "stopImagePinLayersPatrol never returned past the bound")
 		if !strings.Contains(logged.String(), "still going") {
 			t.Errorf("a run left past the bound was not logged: %q", logged.String())
+		}
+		if got := time.Duration(gotBound.Load()); got != imagePinLayersJoinWait {
+			t.Errorf("the bound's timer was started for %v, want the %v join bound", got, imagePinLayersJoinWait)
+		}
+		if got := boundStopped.Load(); got != 1 {
+			t.Errorf("the bound's timer was stopped %d times, want once", got)
 		}
 		unblock()
 		d.imagePinLayersCycles.Wait()

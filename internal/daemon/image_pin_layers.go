@@ -4,8 +4,9 @@ package daemon
 // digest-pinned image against its registry, so a layer the registry no longer
 // serves is found before the next images build. This file is the patrol's
 // skeleton: its config key and off-by-default ticker, its last-run record under
-// .runtime, and the run seam a later bead fills with the check (gt-hpmk5n). The
-// seam reads nothing yet and returns nil.
+// .runtime, and the run seam a later bead fills with the check (gt-hpmk5n). No
+// seam is installed in this build yet, so a tick runs nothing and records no
+// day: only a completed check marks the day run.
 //
 // The ticker is a check cadence, not a run cadence: an in-process ticker resets
 // its countdown on every daemon start, so a ticker set to a day would never fire
@@ -63,8 +64,8 @@ func imagePinLayersDay(at time.Time) string {
 	return at.UTC().Format(time.DateOnly)
 }
 
-// imagePinLayersLastRunPath is the record's path in town: under the patrol's
-// own directory in .runtime, beside nothing else the town writes.
+// imagePinLayersLastRunPath returns the path of the last-run record: the
+// patrol's own directory under the town's .runtime.
 func imagePinLayersLastRunPath(townRoot string) string {
 	return filepath.Join(constants.TownRuntimePath(townRoot), imagePinLayersDir, imagePinLayersLastRunFile)
 }
@@ -143,12 +144,6 @@ func imagePinLayersDue(recordPath string, now time.Time) imagePinLayersDueDecisi
 // single-flight guard.
 type imagePinLayersRunFunc func(ctx context.Context, at time.Time) error
 
-// imagePinLayersRunSkeleton is this build's run: the check itself is a later
-// bead's (gt-hpmk5n), so it reads no registry and raises nothing.
-func imagePinLayersRunSkeleton(context.Context, time.Time) error {
-	return nil
-}
-
 // startImagePinLayersTicker starts the patrol's own ticker when the patrol is
 // active, and returns a nil channel and stop func when it is not: a town that
 // names no key starts nothing.
@@ -210,13 +205,20 @@ func (d *Daemon) triggerImagePinLayers() {
 
 // runImagePinLayersTick is one tick: it asks whether at falls on a day the town
 // has not run in, and calls the run seam only when it does, so a tick inside the
-// day reads nothing. A run that cannot record its day is an error: without the
-// record the next tick reads the day as due and runs the check again.
+// day reads nothing. A tick with no run seam installed runs nothing and records
+// no day, saying so: only a completed check marks the day run, and a day marked
+// without one would skip its check for the rest of the day. A run that cannot
+// record its day is an error: without the record the next tick reads the day as
+// due and runs the check again.
 func (d *Daemon) runImagePinLayersTick(at time.Time) (bool, string, error) {
 	record := imagePinLayersLastRunPath(d.config.TownRoot)
 	decision := imagePinLayersDue(record, at)
 	if !decision.due {
 		return false, decision.note, nil
+	}
+	run := d.imagePinLayersRun
+	if run == nil {
+		return false, fmt.Sprintf("%s, but this build installs no image pin layers check, so nothing ran and no day was recorded", decision.note), nil
 	}
 	ctx := d.ctx
 	if ctx == nil {
@@ -224,10 +226,6 @@ func (d *Daemon) runImagePinLayersTick(at time.Time) (bool, string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, imagePinLayersTickTimeout)
 	defer cancel()
-	run := d.imagePinLayersRun
-	if run == nil {
-		run = imagePinLayersRunSkeleton
-	}
 	if err := run(ctx, at); err != nil {
 		return false, decision.note, err
 	}
@@ -249,15 +247,18 @@ func (d *Daemon) stopImagePinLayersPatrol(stop func()) {
 		d.imagePinLayersCycles.Wait()
 		close(done)
 	}()
-	bound := d.imagePinLayersJoinWait
-	if bound <= 0 {
-		bound = imagePinLayersJoinWait
+	newTimer := d.imagePinLayersJoinTimer
+	if newTimer == nil {
+		newTimer = func(wait time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(wait)
+			return timer.C, func() { timer.Stop() }
+		}
 	}
-	timer := time.NewTimer(bound)
-	defer timer.Stop()
+	bound, stopBound := newTimer(imagePinLayersJoinWait)
+	defer stopBound()
 	select {
 	case <-done:
-	case <-timer.C:
-		d.logger.Printf("image_pin_layers: a run is still going %s after the ticker stopped; Run leaves without it", bound)
+	case <-bound:
+		d.logger.Printf("image_pin_layers: a run is still going %s after the ticker stopped; Run leaves without it", imagePinLayersJoinWait)
 	}
 }
