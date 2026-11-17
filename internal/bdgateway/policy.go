@@ -394,16 +394,16 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 
 // checkSQLStatement applies the read-only rule to a sql call before bd starts.
 // The statement is the one operand after bd's flags, which scanArgs read: bd's
-// sql verb takes one <query> and runs its text as written. The single-operand
-// rule is safe because sql's only own flag is the boolean --csv (`bd sql
-// --help`, bd 1.2.2): every flag that takes a value is a root flag
-// bdRootFlags places, so its value is consumed and never read as the query,
-// and the one operand is what bd runs. A call naming no operand — the empty
-// statement, or a query that was really a value-taking flag's argument — is
-// refused, and one naming more than one is refused rather than letting the
-// gateway check an argument bd may not run. beadsql.ReadOnly carries the rule
-// itself, so a write, DDL, a multi-statement string or a dolt_* procedure is
-// refused with the reason.
+// sql verb takes one <query> and runs its text as written. sql's only own flag
+// is the boolean --csv (`bd sql --help`, bd 1.2.2), so once the verb is settled
+// scanArgs reads an unknown command flag as boolean, consuming nothing, and the
+// statement is the one operand. Every flag that takes a value is a root flag
+// bdRootFlags places, so its value is consumed and never read as the query. A
+// call naming no operand — the empty statement, or a query that was really a
+// value-taking flag's argument — is refused, and one naming more than one
+// operand is refused rather than letting the gateway check an argument bd may
+// not run. beadsql.ReadOnly carries the rule itself, so a write, DDL, a
+// multi-statement string or a dolt_* procedure is refused with the reason.
 func checkSQLStatement(operands []string) error {
 	switch len(operands) {
 	case 0:

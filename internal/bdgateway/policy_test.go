@@ -233,18 +233,68 @@ func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 		}
 	}
 
-	// A refused command flag behind an unknown one is still caught: the unknown
-	// flag is boolean, so --force is scanned as a flag in its own right.
+	// A flag behind an unknown one is still caught: the unknown flag is
+	// boolean, so each later token is scanned as a flag in its own right and
+	// counts for the refused-flag check. The dash-prefixed next token is read
+	// the same whether it is a refused command flag (--force), a root flag
+	// carrying its value (--db=/x) or a boolean root flag (--readonly).
 	p, err := ParsePolicy(strings.NewReader(`{
-		"refused_flags": ["force"],
+		"refused_flags": ["force", "db", "readonly"],
 		"verbs": [{"path": "list", "class": "read"}]
 	}`))
 	if err != nil {
 		t.Fatalf("ParsePolicy: %v", err)
 	}
-	argv := []string{"list", "--include-infra", "--force"}
-	if _, err := p.Authorize(TokenRead, argv); !errors.Is(err, ErrFlagRefused) {
-		t.Fatalf("Authorize(read, %q) = %v, want ErrFlagRefused", argv, err)
+	refused := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"unknown command flag behind an unknown flag", []string{"list", "--include-infra", "--force"}, "refused: --force on list"},
+		{"root flag carrying its value behind an unknown flag", []string{"list", "--include-infra", "--db=/x"}, "refused: --db on list"},
+		{"boolean root flag behind an unknown flag", []string{"list", "--include-infra", "--readonly"}, "refused: --readonly on list"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := p.Authorize(TokenRead, tc.argv)
+			if !errors.Is(err, ErrFlagRefused) {
+				t.Fatalf("Authorize(read, %q) = %v, want ErrFlagRefused", tc.argv, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Authorize(read, %q) error = %q, want it to name %s", tc.argv, err, tc.want)
+			}
+		})
+	}
+
+	// The same shape is accepted when the flag behind the unknown one is not
+	// refused: the flag is still scanned as a flag, but no refusal names it.
+	permissive, err := ParsePolicy(strings.NewReader(`{
+		"refused_flags": ["C"],
+		"verbs": [{"path": "list", "class": "read"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	accepted := []struct {
+		name string
+		argv []string
+	}{
+		{"unknown command flag behind an unknown flag", []string{"list", "--include-infra", "--force"}},
+		{"root flag carrying its value behind an unknown flag", []string{"list", "--include-infra", "--db=/x"}},
+		{"boolean root flag behind an unknown flag", []string{"list", "--include-infra", "--readonly"}},
+	}
+	for _, tc := range accepted {
+		t.Run("accepted: "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := permissive.Authorize(TokenRead, tc.argv)
+			if err != nil {
+				t.Fatalf("Authorize(read, %q) = %v, want it allowed", tc.argv, err)
+			}
+			if v.Name() != "list" {
+				t.Errorf("Authorize(read, %q) matched %q, want list", tc.argv, v.Name())
+			}
+		})
 	}
 }
 
