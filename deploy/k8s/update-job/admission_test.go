@@ -101,9 +101,9 @@ func admissionArgsExpr(t *testing.T, args []string) string {
 // its literal value, and refuses envFrom. A volume pin alone does not stop a Secret
 // entering through the environment, and GIT_CONFIG_VALUE_0 runs a command, so both
 // are pinned rather than only bounded.
-func admissionEnvExpr(t *testing.T) string {
+func admissionEnvExpr(t *testing.T, v Values) string {
 	t.Helper()
-	env := containerEnv()
+	env := containerEnv(v)
 	parts := []string{"has(c.env)", fmt.Sprintf("size(c.env) == %d", len(env))}
 	for _, e := range env {
 		parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value == %s)",
@@ -161,14 +161,14 @@ func admissionMountsExpr(t *testing.T, mounts []VolumeMount) string {
 // name, the admitted image, the renderer's command and arguments, the pinned
 // environment, no envFrom, no elevation, no hook or probe, and the renderer's
 // mounts.
-func admissionContainerExpr(t *testing.T, c Container) string {
+func admissionContainerExpr(t *testing.T, v Values, c Container) string {
 	t.Helper()
 	return strings.Join([]string{
 		"c.name == " + celString(t, c.Name),
 		"c.image.matches(" + celString(t, admissionImagePattern()) + ")",
 		"c.command == [" + celList(t, c.Command) + "]",
 		admissionArgsExpr(t, c.Args),
-		admissionEnvExpr(t),
+		admissionEnvExpr(t, v),
 		"!has(c.envFrom)",
 		"!has(c.ports)",
 		admissionNoElevationExpr(),
@@ -234,10 +234,10 @@ func admissionValidations(t *testing.T) []string {
 			"(!has(object.spec.template.spec.hostPID) || !object.spec.template.spec.hostPID) && " +
 			"(!has(object.spec.template.spec.hostIPC) || !object.spec.template.spec.hostIPC)",
 		"size(object.spec.template.spec.containers) == 1 && " +
-			"object.spec.template.spec.containers.all(c, " + admissionContainerExpr(t, updateContainer(v)) + ")",
+			"object.spec.template.spec.containers.all(c, " + admissionContainerExpr(t, v, updateContainer(v)) + ")",
 		"has(object.spec.template.spec.initContainers) && " +
 			"size(object.spec.template.spec.initContainers) == 1 && " +
-			"object.spec.template.spec.initContainers.all(c, " + admissionContainerExpr(t, imagesContainer(v)) + ")",
+			"object.spec.template.spec.initContainers.all(c, " + admissionContainerExpr(t, v, imagesContainer(v)) + ")",
 		fmt.Sprintf("has(object.spec.template.spec.volumes) && size(object.spec.template.spec.volumes) == 2 && "+
 			"object.spec.template.spec.volumes.all(v, "+
 			"(v.name == %[1]s && has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == %[2]s && !has(v.hostPath)) || "+

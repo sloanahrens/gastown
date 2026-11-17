@@ -1396,7 +1396,7 @@ func containerEnvironment(v Values) []EnvVar {
 	// The forwarder reads the daemon's gateway from these two names, so the pod
 	// names the gateway and the token file only when the render mounts the token.
 	if v.DaemonBdGatewayURL != "" {
-		env = append(env, bdGatewayEnv(v.DaemonBdGatewayURL)...)
+		env = append(env, BdGatewayEnv(v.DaemonBdGatewayURL)...)
 	}
 	kept := make(map[string]string, len(v.Env)+1)
 	for name, value := range v.Env {
@@ -1515,7 +1515,7 @@ func dashboardContainer(v Values) Container {
 	// The gateway names are the dashboard's own, added after the shared environment,
 	// so with the URL unset the list is the daemon's exactly.
 	if v.BdGatewayURL != "" {
-		env = append(env, bdGatewayEnv(v.BdGatewayURL)...)
+		env = append(env, BdGatewayEnv(v.BdGatewayURL)...)
 	}
 	return Container{
 		Name:           DashboardName,
@@ -1562,7 +1562,7 @@ func dashboardMounts(v Values) []VolumeMount {
 		m = append(m, VolumeMount{Name: DashboardClaudeVolume, MountPath: ClaudeHomePath, ReadOnly: true})
 	}
 	if v.BdGatewayURL != "" {
-		m = append(m, bdGatewayMount())
+		m = append(m, BdGatewayMount())
 	}
 	return m
 }
@@ -1589,7 +1589,7 @@ func dashboardVolumes(v Values) ([]Volume, error) {
 		vols = append(vols, claudeDirVolume(DashboardClaudeVolume, v.DashboardClaudeDir))
 	}
 	if v.BdGatewayURL != "" {
-		vols = append(vols, bdGatewayVolume(BdGatewayDashboardSecretName))
+		vols = append(vols, BdGatewayVolume(BdGatewayDashboardSecretName))
 	}
 	return vols, nil
 }
@@ -1895,7 +1895,7 @@ func volumes(v Values) ([]Volume, error) {
 		})
 	}
 	if v.DaemonBdGatewayURL != "" {
-		vols = append(vols, bdGatewayVolume(BdGatewayDaemonSecretName))
+		vols = append(vols, BdGatewayVolume(BdGatewayDaemonSecretName))
 	}
 	return vols, nil
 }
@@ -2049,7 +2049,7 @@ func mounts(v Values) []VolumeMount {
 		})
 	}
 	if v.DaemonBdGatewayURL != "" {
-		m = append(m, bdGatewayMount())
+		m = append(m, BdGatewayMount())
 	}
 	return m
 }

@@ -42,7 +42,7 @@ func (v Values) validateBdGateway() error {
 	if !v.Dashboard {
 		return errors.New("Values.BdGatewayURL is set but Values.Dashboard is not: nothing in the pod reads the gateway settings, so the URL would be dropped")
 	}
-	return validateGatewayURL("Values.BdGatewayURL", v.BdGatewayURL)
+	return ValidateBdGatewayURL("Values.BdGatewayURL", v.BdGatewayURL)
 }
 
 // validateDaemonBdGateway refuses the daemon's gateway value a pod cannot use. A
@@ -55,7 +55,7 @@ func (v Values) validateDaemonBdGateway() error {
 	if v.Rehearsal {
 		return errors.New("Values.DaemonBdGatewayURL is set with Values.Rehearsal: the gateway token is a live-pod credential, and a rehearsal mounts none")
 	}
-	return validateGatewayURL("Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL)
+	return ValidateBdGatewayURL("Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL)
 }
 
 // bdGatewayURL matches an http or https URL whose authority is a host name or an
@@ -64,10 +64,11 @@ func (v Values) validateDaemonBdGateway() error {
 // renderer may not import net/url (imports_test.go), so the form is matched here.
 var bdGatewayURL = regexp.MustCompile(`^https?://[A-Za-z0-9.-]+(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[^?#\s]*)?$`)
 
-// validateGatewayURL accepts a URL of bdGatewayURL's form for the named field. The
+// ValidateBdGatewayURL accepts a gateway URL of the forwarder's form for the named
+// field, so a render that carries the gateway refuses one the pod cannot use. The
 // URL is not echoed in the error: a credential may sit in it, and the token file
 // is the only credential the pod should carry.
-func validateGatewayURL(field, raw string) error {
+func ValidateBdGatewayURL(field, raw string) error {
 	_, rest, _ := strings.Cut(raw, "://")
 	authority, _, _ := strings.Cut(rest, "/")
 	if strings.Contains(authority, "@") {
@@ -79,19 +80,19 @@ func validateGatewayURL(field, raw string) error {
 	return nil
 }
 
-// bdGatewayEnv is the forwarder's environment pair for a pod whose gateway URL is
-// url: the URL, and the token file the mount puts in place.
-func bdGatewayEnv(url string) []EnvVar {
+// BdGatewayEnv is the forwarder's environment pair for a pod whose gateway URL is
+// url: the URL, and the token file BdGatewayMount puts in place.
+func BdGatewayEnv(url string) []EnvVar {
 	return []EnvVar{
 		{Name: BdGatewayURLEnv, Value: url},
 		{Name: BdGatewayTokenFileEnv, Value: BdGatewayTokenPath},
 	}
 }
 
-// bdGatewayVolume is the Secret volume that carries one gateway token. Its items
+// BdGatewayVolume is the Secret volume that carries one gateway token. Its items
 // name only BdGatewayTokenKey, so a key added to the Secret later is not mounted,
 // and its mode is owner-read only.
-func bdGatewayVolume(secret string) Volume {
+func BdGatewayVolume(secret string) Volume {
 	mode := bdGatewayTokenMode
 	return Volume{
 		Name: bdGatewayVolumeName,
@@ -103,7 +104,7 @@ func bdGatewayVolume(secret string) Volume {
 	}
 }
 
-// bdGatewayMount places the token directory read-only in the container.
-func bdGatewayMount() VolumeMount {
+// BdGatewayMount places the token directory read-only in the container.
+func BdGatewayMount() VolumeMount {
 	return VolumeMount{Name: bdGatewayVolumeName, MountPath: BdGatewayTokenDir, ReadOnly: true}
 }
