@@ -305,9 +305,9 @@ type updateSeams struct {
 	WriteTownValues func(path string, v imagevalues.Values) error
 	// Preflight runs the daemon's pre-roll checks over a town root. A digest
 	// install runs it before anything is installed or swapped, in this process,
-	// so it is the new image's own gt and bd that are checked. A digest install
-	// built with no seam wired is refused: a skipped preflight lets a pair the
-	// checks refuse be installed.
+	// so it is the new image's own gt and bd that are checked. The install
+	// builds with no seam wired, and its pre-swap gate refuses when it runs: a
+	// skipped preflight lets a pair the checks refuse be installed.
 	Preflight func(ctx context.Context, townRoot string) []PreflightResult
 }
 
