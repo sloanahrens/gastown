@@ -410,9 +410,8 @@ type PatrolsConfig struct {
 
 	// OmLessons runs the om-lessons pass: the rework program's lever 3, which
 	// turns a week of om review records into draft directive-edit beads
-	// (internal/daemon/om_lessons_patrol.go, gt-vdy9do). Off when absent: its
-	// pass proposes directive-edit beads on the operator's behalf, so a town
-	// turns it on rather than an upgrade.
+	// (internal/daemon/om_lessons_patrol.go, gt-vdy9do). Read OmLessonsConfig
+	// for the block and why the patrol is off when absent.
 	OmLessons *OmLessonsConfig `json:"om_lessons,omitempty"`
 
 	// ReworkNumbers runs the rework program's weekly numbers step: one document
