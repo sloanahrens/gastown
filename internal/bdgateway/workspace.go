@@ -53,7 +53,7 @@ var (
 	// the workspace: absolute, a backslash, an empty, "." or ".." component, or
 	// a spelling path.Clean would change.
 	ErrWorkspacePath = errors.New("bdgateway: workspace path refused")
-	// ErrWorkspaceFileName is a file name outside the five names the gateway
+	// ErrWorkspaceFileName is a file name outside the names the gateway
 	// serves, or one not directly under a .beads directory.
 	ErrWorkspaceFileName = errors.New("bdgateway: workspace file name refused")
 	// ErrWorkspaceFileTooLarge is one file over MaxWorkspaceFileBytes.
@@ -85,13 +85,17 @@ var (
 
 // workspaceFileNames is every file the workspace holds, by base name. bd reads
 // no other file from it, so a document naming another name is refused rather
-// than written where nothing reads it.
+// than written where nothing reads it. The pushed set is the five configuration
+// files; ".local_version" is here because bd itself writes it into a rig's
+// .beads directory while the gateway serves calls, so the readiness check reads
+// a tree that holds it.
 var workspaceFileNames = map[string]bool{
 	"metadata.json":    true,
 	"config.yaml":      true,
 	"redirect":         true,
 	"dolt-server.port": true,
 	"routes.jsonl":     true,
+	".local_version":   true,
 }
 
 // WorkspaceDocument is the body of PUT /v1/workspace: every file of the tree,
@@ -160,9 +164,9 @@ func validatedManifest(doc WorkspaceDocument) (string, error) {
 }
 
 // validateWorkspacePath checks one relative path. The rules are the design's
-// ("relative, no .., only the five file names above") plus the `.beads` parent
-// every one of the five files sits under, which keeps a path from landing in a
-// directory bd does not read or beside the tree's root.
+// ("relative, no .., only the workspace file names above") plus the `.beads`
+// parent every one of those files sits under, which keeps a path from landing
+// in a directory bd does not read or beside the tree's root.
 func validateWorkspacePath(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty path", ErrWorkspacePath)

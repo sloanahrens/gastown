@@ -217,6 +217,17 @@ func TestWorkspaceValidation(t *testing.T) {
 			want: ErrWorkspaceFileName,
 		},
 		{
+			// Only .local_version itself is allowed: another unknown name
+			// directly beside the town's .beads files is still refused.
+			name: "an unknown name beside the town's .beads files",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/other.txt"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
 			name: "a workspace file outside a .beads directory",
 			files: func() map[string]string {
 				files := maps.Clone(base)
@@ -320,6 +331,23 @@ func TestWorkspaceValidation(t *testing.T) {
 			t.Errorf("the refusal echoed %d bytes of the caller's name", len(err.Error()))
 		}
 	})
+}
+
+// TestWorkspaceLocalVersionPush: a document that names a rig's .local_version
+// is accepted, and the pushed tree holds the marker. bd writes that file itself,
+// and the gateway serves the name so the readiness check reads a tree with it.
+func TestWorkspaceLocalVersionPush(t *testing.T) {
+	t.Parallel()
+	files := testWorkspaceFiles("local-version")
+	files["gt/.beads/.local_version"] = "6"
+	s, root := openTestStore(t)
+	want := pushWorkspace(t, s, files)
+	if got := s.Manifest(); got != want {
+		t.Errorf("Manifest() = %s, want the pushed %s", got, want)
+	}
+	if got := readWorkspace(t, root); !maps.Equal(got, files) {
+		t.Errorf("the pushed tree = %v, want %v", got, files)
+	}
 }
 
 // TestWorkspaceAtomicSwap checks that a push replaces the whole tree and that a
@@ -1039,6 +1067,25 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		}
 	})
 
+	// bd writes .local_version into a rig's .beads directory while the gateway
+	// serves calls, so a tree the readiness check reads holds it. Opening that
+	// tree must succeed, and the marker is served like any other workspace file.
+	t.Run("a tree holding bd's version marker in a rig directory", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, ".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+		writeFileIn(t, root, "gt/.beads/redirect", "/ws/gt/mayor/rig/.beads\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/.local_version", "6")
+		s, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("opening a tree with .local_version: %v", err)
+		}
+		want := WorkspaceManifest(readWorkspace(t, root))
+		if got := s.Manifest(); got != want {
+			t.Errorf("Manifest() = %s, want the tree's %s", got, want)
+		}
+	})
+
 	t.Run("an empty root path", func(t *testing.T) {
 		if _, err := OpenWorkspaceStore(""); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf(`OpenWorkspaceStore("") error = %v, want %v`, err, ErrWorkspaceRoot)
@@ -1061,6 +1108,15 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			name: "a tree with a file the store does not serve",
 			build: func(t *testing.T, root string) {
 				writeFileIn(t, root, "gt/.beads/README", "x")
+			},
+		},
+		{
+			// Allowing bd's .local_version widens the name rule by that one
+			// base name only: another file directly under a .beads directory
+			// is still refused.
+			name: "a tree with an unknown file name under the town's .beads",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, ".beads/other.txt", "x")
 			},
 		},
 		{
