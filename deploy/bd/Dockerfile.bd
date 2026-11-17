@@ -1,21 +1,25 @@
-# The bd gateway image gt-bd: the beads bd image with bdgw added
-# (docs/design/bd-container.md, Images and CI, layer 2).
+# The bd gateway image gt-bd: the real bd with the gateway bdgw in front of it
+# (docs/design/bd-container.md, Architecture).
 #
-# Built from the bdgw binary daemonimage.BuildGateway cross-compiles for
-# linux/arm64, which the build context holds under that name.
-#
-# FROM names the base by digest. deploy/bd/base-pin holds the same reference, and
-# TestDockerfileBdShape fails when the two differ; a Dockerfile cannot read that
-# file, so the line is kept equal by that test. No tag is used.
-FROM forgejo:3000/bot-registry/beads-bd@sha256:0000000000000000000000000000000000000000000000000000000000000000
+# It builds in one stage on the daemon image's base. The build context holds
+# bd.real (the real bd), bdgw (the gateway daemonimage.BuildGateway
+# cross-compiles for linux/arm64) and verbs.json (the gateway's policy), so this
+# file copies what it runs and builds nothing.
+FROM ubuntu:24.04
 
-# The base puts the real bd at /usr/local/bin/bd.real. Refuse to build when it is
-# missing, rather than link bd to a path the base never named.
-RUN test -x /usr/local/bin/bd.real
+# ca-certificates is what bd's HTTPS calls verify against; git is what bd runs
+# for the repository operations a rig's commands need; tini is the init the
+# entrypoint puts in front of the gateway, so it reaps the children the gateway
+# leaves and forwards the container's signals. These three are the only things
+# installed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git tini \
+    && rm -rf /var/lib/apt/lists/*
 
-# The gateway runs /usr/local/bin/bd, so the real bd takes that name. The tracker
-# program is deferred: bd.real stays, and bd is a link to it. -f replaces a bd
-# whose base already put one at that path.
+# The real bd, copied from the build context. The gateway runs /usr/local/bin/bd,
+# so the real bd takes that name: the tracker program is deferred and no shim
+# sits in front of it, so bd is a link to bd.real (gt-gi5lhe).
+COPY --chmod=0755 bd.real /usr/local/bin/bd.real
 RUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd
 
 # The gateway is the container's entrypoint. This file sets no flags for it.
@@ -41,4 +45,5 @@ RUN ln -s /var/lib/bdgw/ws /ws
 # not define.
 USER 65532:65532
 
-ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]
+# tini is PID 1: it runs the gateway and reaps the children it leaves.
+ENTRYPOINT ["tini", "--", "/usr/local/bin/bdgw", "serve"]
