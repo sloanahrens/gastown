@@ -63,15 +63,15 @@ They deny the question tool too (`gt tap guard question-tool`, gt-163k8, matcher
 `AskUserQuestion`): it parks the session while it reads as running — a polecat
 sat 4h26m on one.
 
-It also carries `gt tap nudge-drain` (gt-drwph), a `PostToolUse` hook on the
+It also carries `gt tap nudge-drain` (gt-drwph) as a `PostToolUse` hook on the
 empty `""` matcher, so it runs after every tool call: it drains the session's
 queued nudges, hands them to the model once as hook `additionalContext` (a
 drained nudge leaves the queue) and exits 0. The `UserPromptSubmit` hook below
-is the only other drain and never fires while a seat runs tool turns; the
-overrun guard's queued split-proposal nudge expired unseen in 2026-10
-(gt-drwph). Since 2026-11-16 the guard marks the run and sends no message
-(gt-fe0gj8). Hooks arrive only in the `--settings` file: the Claude CLI is their
-only runtime (gt-be0z).
+is the only other drain and never fires while a seat runs tool turns, so the
+overrun guard's queued split-proposal nudge expired unseen (gt-drwph, filed
+2026-10); the guard now sends no message (gt-fe0gj8). Hooks arrive only in
+the `--settings` file, a Claude CLI flag: the Claude CLI is the only runtime
+(gt-be0z).
 
 The `bd-close-invariant` guard (`gt tap guard bd-close-invariant`, gt-arno) runs
 on the `Bash|Monitor` matcher for every role, from `DefaultBase()`. It is the
