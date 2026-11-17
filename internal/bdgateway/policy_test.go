@@ -118,7 +118,8 @@ func TestPolicyRefusedFlags(t *testing.T) {
 		{"refused shorthand after a separator that is a value", TokenRead, []string{"--format", "--", "-C", "/x", "show"}, ErrFlagRefused, "refused: -C on show"},
 		{"refused flag attached after a separator that is a value", TokenRead, []string{"--format", "--", "--db=/x", "show"}, ErrFlagRefused, "refused: --db on show"},
 		{"refused shorthand whose value is a separator", TokenRead, []string{"show", "-C", "--", "dir"}, ErrFlagRefused, "refused: -C on show"},
-		{"unknown flag after the verb, next flag still refused", TokenRead, []string{"show", "--thread", "--db"}, ErrFlagRefused, "refused: --db on show"},
+		{"unknown flag before a root flag that would take a value is refused as unplaceable", TokenRead, []string{"show", "--thread", "--db"}, ErrAmbiguousVerb, "--thread"},
+		{"unknown flag after the verb, next flag with an attached value still refused", TokenRead, []string{"show", "--thread", "--db=beads"}, ErrFlagRefused, "refused: --db on show"},
 		{"unknown flag after the verb is boolean before another flag", TokenRead, []string{"show", "--include-infra", "--json"}, nil, ""},
 	}
 	for _, tc := range cases {
@@ -246,6 +247,33 @@ func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
 			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
 		}
+	}
+
+	// A value-taking root flag written without its value, behind an unknown
+	// flag, is refused too: the scan would give it the next token as its value,
+	// while bd, reading the root flag as the unknown flag's value, still parses
+	// that next token as a flag. The same flags with an attached value, and
+	// boolean root flags, are scanned on their own and pass.
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--db", "--force"},
+		{"list", "--include-infra", "-C", "--force"},
+		{"list", "--include-infra", "--format", "--force"},
+		{"list", "--include-infra", "--actor", "--readonly"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--db=/x"},
+		{"list", "--include-infra", "-C/x"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrFlagRefused) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrFlagRefused: the attached flag is counted", argv, err)
+		}
+	}
+	if _, err := deploy.Authorize(TokenRead, []string{"list", "--include-infra", "--json"}); err != nil {
+		t.Errorf("Authorize(read, list --include-infra --json) = %v, want it allowed", err)
 	}
 
 	// A flag behind an unknown one is still caught: the unknown flag is
