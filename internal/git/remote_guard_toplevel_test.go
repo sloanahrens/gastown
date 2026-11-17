@@ -4,22 +4,21 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/sandboxgit"
 )
 
 // sandboxRefusingRunner answers the top-level read in a call's own directory
-// with top, and refuses the two shapes an in-sandbox runner refuses before it
-// sends anything: a call whose directory is empty, and any -C argument. With
-// failRead, the top-level read itself fails, as a sandbox that cannot answer.
+// with top, and refuses a call by the rule the in-sandbox runner applies before
+// it sends anything (sandboxgit.Refusal), so the fake cannot drift from the
+// runner it models. With failRead, the top-level read itself fails, as a
+// sandbox that cannot answer; an empty top makes the runner answer with an
+// empty path, as a sandbox that could not report one.
 func sandboxRefusingRunner(top string, failRead bool, calls *[]gitCall) runFunc {
 	return func(c gitCall) (string, string, error) {
 		*calls = append(*calls, c)
-		if c.dir == "" {
-			return "", "", errors.New("refusing a git call whose directory is empty")
-		}
-		for _, arg := range c.args {
-			if arg == "-C" {
-				return "", "", errors.New("refusing the -C argument")
-			}
+		if err := sandboxgit.Refusal("sandbox-one", c.dir, c.args); err != nil {
+			return "", "", err
 		}
 		if len(c.args) == 2 && c.args[0] == "rev-parse" && c.args[1] == "--show-toplevel" {
 			if failRead {
@@ -31,12 +30,12 @@ func sandboxRefusingRunner(top string, failRead bool, calls *[]gitCall) runFunc 
 	}
 }
 
-// TestRunawayBeadRemoteGuardTopLevelRead: a runner that refuses an empty
-// directory and any -C argument allows a reset through a remote Git whose top
-// level is its clone, refuses the same reset when the top level it reads is a
-// configured town root, and refuses it again when the read itself fails. The
-// guard reads the top level in the call's own directory, so the read is one the
-// in-sandbox runner accepts.
+// TestRunawayBeadRemoteGuardTopLevelRead: a runner that applies the in-sandbox
+// refusal rule allows a reset through a remote Git whose top level is its
+// clone, refuses the same reset when the top level it reads is a configured
+// town root, and refuses it again when the read itself fails or reports an
+// empty path. The guard reads the top level in the call's own directory, so the
+// read is one the in-sandbox runner accepts.
 func TestRunawayBeadRemoteGuardTopLevelRead(t *testing.T) {
 	t.Parallel()
 	const townRoot = "/sandbox/gt"
@@ -50,6 +49,7 @@ func TestRunawayBeadRemoteGuardTopLevelRead(t *testing.T) {
 		{"a clone below the town root allows the reset", clone, false, ""},
 		{"the town root itself refuses the reset", townRoot, false, "resolves to town root git worktree"},
 		{"a top level the runner cannot read refuses the reset", "", true, "could not read the repository top level"},
+		{"an empty top level refuses the reset", "", false, "could not read the repository top level"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
