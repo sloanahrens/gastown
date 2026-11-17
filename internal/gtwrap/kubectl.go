@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -25,6 +27,15 @@ const podTownRoot = manifestdata.PodTownRoot
 // podNameRE matches a pod name as kubectl prints it. A name read from the cluster
 // goes into argv, so it is checked before any command uses it.
 var podNameRE = regexp.MustCompile(`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`)
+
+const (
+	// beadsDirVar is the variable a bd call names its .beads directory in. The
+	// pod's bd reads it to tell which rig the call runs in.
+	beadsDirVar = "BEADS_DIR"
+	// beadsDirName is the directory name bd looks for at each step of its walk up
+	// from the working directory.
+	beadsDirName = ".beads"
+)
 
 // Kubectl reaches the daemon pod through the kubectl CLI: the kubernetes target.
 // It execs into the one Running pod of a Deployment, looked up on every call, and
@@ -56,6 +67,10 @@ type Kubectl struct {
 	// Note receives the stderr note for a working directory the pod cannot see.
 	// Nil refuses the call, so a mapped directory is never silent.
 	Note io.Writer
+	// Stat checks for a .beads directory when a bd call sets no BEADS_DIR. Nil
+	// uses os.Stat. A .beads entry that cannot be read refuses the call, so an
+	// unreadable candidate is never read as absent and routed to another rig.
+	Stat func(string) (fs.FileInfo, error)
 	// Stdout and Stderr receive the tool's output when the pod town root and the
 	// Mac town differ: the tool prints pod paths, and the wrapper rewrites them to
 	// the Mac's. They are the wrapper's own streams. When the roots are equal, the
@@ -79,7 +94,9 @@ type kubeLadder struct {
 // doctor's reason when no rung holds. A working directory the pod cannot see is
 // mapped onto the pod root with a note on Note. A mapped directory the pod lacks
 // runs in the nearest existing ancestor under the pod root, and the tool is told
-// the caller's directory in GT_CALLER_CWD. A credential in the environment is
+// the caller's directory in GT_CALLER_CWD. A bd call that sets no BEADS_DIR is
+// given the .beads directory nearest its working directory, inside the town, so
+// bd finds the same rig it did on the Mac. A credential in the environment is
 // dropped with a note, since the environment travels in the kubectl argv.
 func (k Kubectl) Launch(call Call) (int, error) {
 	if err := k.validate(); err != nil {
@@ -96,6 +113,10 @@ func (k Kubectl) Launch(call Call) (int, error) {
 	if err != nil {
 		return exitDown, err
 	}
+	call.Env = env
+	if err := k.settleBeadsDir(&call); err != nil {
+		return exitDown, err
+	}
 	dir, under := podDir(k.Town, k.podRoot(), call.Dir)
 	if !under {
 		fmt.Fprintf(k.Note, "gt-wrap: %s is outside the town %s, which the pod cannot see, so the tool runs in %s\n", call.Dir, k.Town, k.podRoot())
@@ -103,7 +124,6 @@ func (k Kubectl) Launch(call Call) (int, error) {
 	if len(dropped) > 0 {
 		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
 	}
-	call.Env = env
 	return k.attach(l.pod, call, dir)
 }
 
@@ -342,6 +362,62 @@ func podDir(town, root, dir string) (string, bool) {
 		return root, false
 	}
 	return path.Join(root, filepath.ToSlash(rel)), true
+}
+
+// settleBeadsDir gives a bd call that sets no BEADS_DIR the .beads directory
+// nearest at or above its working directory, the same walk bd itself made before
+// the pod's bd became a forwarder (gt-iy4cpy). The forwarder needs the variable
+// to tell which rig the call runs in. A caller's BEADS_DIR is never overridden,
+// and a working directory outside the town is left alone, so the forwarder's own
+// refusal stands.
+func (k Kubectl) settleBeadsDir(call *Call) error {
+	if call.Argv[0] != nativeBdTool {
+		return nil
+	}
+	if _, ok := envValue(call.Env, beadsDirVar); ok {
+		return nil
+	}
+	podBeads, ok, err := k.nearestBeadsDir(call.Dir)
+	if err != nil || !ok {
+		return err
+	}
+	call.Env = append(call.Env, beadsDirVar+"="+podBeads)
+	return nil
+}
+
+// nearestBeadsDir walks from dir up to the town root and returns the .beads
+// directory nearest at or above it, named inside the pod. A directory outside
+// the town yields ok false. The town's own .beads answers a walk that finds none,
+// since the town always has beads. A .beads entry the stat cannot read refuses:
+// read as absent, it would send the call to another rig's database.
+func (k Kubectl) nearestBeadsDir(dir string) (string, bool, error) {
+	rel, err := filepath.Rel(k.Town, dir)
+	if err != nil {
+		return "", false, fmt.Errorf("gtwrap: compare the working directory %s with the town %s, so the bd call cannot be told which rig it runs in: %w", dir, k.Town, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false, nil
+	}
+	stat := k.Stat
+	if stat == nil {
+		stat = os.Stat
+	}
+	town := filepath.Clean(k.Town)
+	for {
+		candidate := filepath.Join(town, rel, beadsDirName)
+		info, err := stat(candidate)
+		if err == nil && info.IsDir() {
+			return path.Join(k.podRoot(), filepath.ToSlash(rel), beadsDirName), true, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", false, fmt.Errorf("gtwrap: read the .beads entry %s, so the bd call cannot be told which rig it runs in: %w", candidate, err)
+		}
+		if rel == "." {
+			break
+		}
+		rel = filepath.Dir(rel)
+	}
+	return path.Join(k.podRoot(), beadsDirName), true, nil
 }
 
 // probe runs one kubectl command that only reads state, with the context flag set
