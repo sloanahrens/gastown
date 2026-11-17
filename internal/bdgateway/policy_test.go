@@ -2,8 +2,12 @@ package bdgateway
 
 import (
 	"errors"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // fixturePolicy is the policy the unit tables drive: a verb of each class, a
@@ -279,7 +283,14 @@ func TestAuthorizeRootHelpDoesNotWiden(t *testing.T) {
 	classes := []TokenClass{TokenRead, TokenDaemon, TokenOperator}
 	for _, class := range classes {
 		for name, verb := range p.verbs {
-			v, err := p.Authorize(class, verb.Path)
+			// sql carries its own rule on the operand (checkSQLStatement), so
+			// the argv that exercises its class is a read-only statement, not
+			// the bare path: the class check is what this loop holds.
+			argv := append([]string(nil), verb.Path...)
+			if name == sqlVerb {
+				argv = append(argv, "SELECT 1")
+			}
+			v, err := p.Authorize(class, argv)
 			if !Allowed(class, verb.Class) {
 				if !errors.Is(err, ErrClassDenied) {
 					t.Errorf("%s token, %q = %v, want ErrClassDenied", class, name, err)
@@ -350,5 +361,143 @@ func TestParsePolicyRefusals(t *testing.T) {
 
 	if _, err := ParsePolicy(strings.NewReader(valid)); err != nil {
 		t.Fatalf("ParsePolicy(valid) = %v, want it to load", err)
+	}
+}
+
+// TestAuthorizeSQLReadOnly: deploy/bd/verbs.json serves bd sql at the write
+// class, the narrowest class the daemon and operator tokens hold and the read
+// token does not, so the schema-level read internal/deps runs at startup and
+// the externalMolecules read are authorized for those classes and refused for
+// a read token.
+func TestAuthorizeSQLReadOnly(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+	// The argv the handshake sends: internal/beads/version.go builds it the
+	// same way for its bd sql call.
+	handshake, err := beadsql.SchemaLevel().BdArgs("--json")
+	if err != nil {
+		t.Fatalf("beadsql.SchemaLevel().BdArgs: %v", err)
+	}
+	cases := []struct {
+		name    string
+		class   TokenClass
+		argv    []string
+		wantErr error
+	}{
+		{"daemon token runs the schema-level read", TokenDaemon, handshake, nil},
+		{"operator token runs the schema-level read", TokenOperator, handshake, nil},
+		{"read token cannot run sql", TokenRead, handshake, ErrClassDenied},
+		{"daemon token runs a plain SELECT", TokenDaemon, []string{"sql", "SELECT 1"}, nil},
+		{"operator token runs a SELECT behind bd's flags", TokenOperator, []string{"sql", "--json", "SELECT 1"}, nil},
+		{"a trailing semicolon is one statement", TokenDaemon, []string{"sql", "--csv", "SELECT 1;"}, nil},
+		// sql's only own flag is the bool --csv, so it consumes no operand
+		// whichever side of the statement it is written: the SELECT stays the
+		// one argument bd runs.
+		{"--csv before the statement", TokenDaemon, []string{"sql", "--csv", "SELECT 1"}, nil},
+		{"--csv after the statement", TokenDaemon, []string{"sql", "SELECT 1", "--csv"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := p.Authorize(tc.class, tc.argv)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Authorize(%q, %q) = %v, want %v", tc.class, tc.argv, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Authorize(%q, %q) = %v, want it allowed", tc.class, tc.argv, err)
+			}
+			if v.Name() != "sql" || v.Class != ClassWrite {
+				t.Errorf("Authorize(%q, %q) matched %q (%s), want sql (write)", tc.class, tc.argv, v.Name(), v.Class)
+			}
+		})
+	}
+}
+
+// TestSQLRefusesWrites: bd's sql verb runs the statement it is handed, so an
+// INSERT, an UPDATE, a DELETE, DDL, a multi-statement string, an empty
+// statement and a call naming two arguments are each refused with a refusal
+// naming the read-only rule. The cases that put a value-taking root flag before
+// the statement pin the operand placement: the flag consumes its value, so the
+// query cannot be smuggled into that position. The gateway handler drives the
+// same calls and sees the runner never asked to start bd for a refusal, while
+// a read reaches it with its argv intact.
+func TestSQLRefusesWrites(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+	cases := []struct {
+		name string
+		argv []string
+	}{
+		{"an INSERT", []string{"sql", "INSERT INTO beads (id) VALUES ('gt-x')"}},
+		{"an UPDATE", []string{"sql", "UPDATE beads SET status = 'closed'"}},
+		{"a DELETE", []string{"sql", "DELETE FROM beads"}},
+		{"DDL", []string{"sql", "DROP TABLE beads"}},
+		{"a multi-statement string", []string{"sql", "SELECT 1; DROP TABLE beads"}},
+		{"an empty statement", []string{"sql"}},
+		{"an empty string argument", []string{"sql", ""}},
+		{"an empty statement behind bd's flags", []string{"sql", "--json"}},
+		{"two statements as two arguments", []string{"sql", "SELECT 1", "DROP TABLE beads"}},
+		// --format takes a value, so the SELECT is its argument and the call
+		// names no operand: refused rather than read as a statement.
+		{"a flag value mistaken for the query", []string{"sql", "--format", "SELECT 1"}},
+		{"no statement behind a sql flag", []string{"sql", "--csv"}},
+		{"two statements behind a sql flag", []string{"sql", "--csv", "SELECT 1", "SELECT 2"}},
+		// An attached value is never an operand either, so a query cannot ride
+		// in it whatever flag bd learns next.
+		{"a statement in an attached flag value", []string{"sql", "--query=DELETE FROM issues"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := p.Authorize(TokenDaemon, tc.argv)
+			if !errors.Is(err, ErrSQLNotReadOnly) {
+				t.Fatalf("Authorize(daemon, %q) = %v, want ErrSQLNotReadOnly", tc.argv, err)
+			}
+			if !strings.Contains(err.Error(), "read-only") {
+				t.Errorf("Authorize(daemon, %q) error = %q, want it to name the read-only rule", tc.argv, err)
+			}
+		})
+	}
+
+	gatewayCases := []struct {
+		name    string
+		argv    []string
+		want    int
+		wantRan bool
+	}{
+		{"a read is served", []string{"sql", "--json", "SELECT 1"}, http.StatusOK, true},
+		{"an INSERT is refused", []string{"sql", "INSERT INTO beads (id) VALUES ('gt-x')"}, http.StatusForbidden, false},
+		{"DDL is refused", []string{"sql", "DROP TABLE beads"}, http.StatusForbidden, false},
+		{"a multi-statement string is refused", []string{"sql", "SELECT 1; DROP TABLE beads"}, http.StatusForbidden, false},
+		{"an empty statement is refused", []string{"sql"}, http.StatusForbidden, false},
+		{"two operands are refused", []string{"sql", "SELECT 1", "DROP TABLE beads"}, http.StatusForbidden, false},
+	}
+	for _, tc := range gatewayCases {
+		t.Run("gateway: "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := &stubRunner{}
+			g, err := NewGateway(GatewayOptions{
+				Auth:       testAuthenticator(t),
+				Policy:     p,
+				Workspaces: mustStore(t),
+				Log:        newTestCallLog(t),
+				Runner:     stub,
+			})
+			if err != nil {
+				t.Fatalf("NewGateway: %v", err)
+			}
+			if code := postExec(t, g, testDaemonToken, Request{Argv: tc.argv}); code != tc.want {
+				t.Fatalf("sql call %q through the gateway = %d, want %d", tc.argv, code, tc.want)
+			}
+			if stub.ran != tc.wantRan {
+				t.Fatalf("sql call %q started the runner = %v, want %v", tc.argv, stub.ran, tc.wantRan)
+			}
+			if tc.wantRan && !slices.Equal(stub.req.Argv, tc.argv) {
+				t.Errorf("runner got argv %q, want %q", stub.req.Argv, tc.argv)
+			}
+		})
 	}
 }
