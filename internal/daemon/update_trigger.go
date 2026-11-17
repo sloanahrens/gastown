@@ -73,6 +73,15 @@ type updateTriggerState struct {
 	// notDueReason is the last not-due reason printed, so a hold that stands
 	// logs once rather than once per heartbeat.
 	notDueReason string
+	// ledgerErr is the last image-ledger read error printed, so a damaged
+	// record logs once rather than once per heartbeat.
+	ledgerErr string
+	// refusedCommit and refusedReason are the pair the last readable image
+	// record named as refused, with the reason it gave. A damaged record
+	// leaves them in force, so an unreadable read neither drops the
+	// refused-pair hold nor blocks a newer pair (gt-naf038).
+	refusedCommit string
+	refusedReason string
 	// remoteFailedAt is the clock reading of the last failed main-tip read,
 	// zero when the last read succeeded or none has run. While now is inside
 	// updateRemoteBackoff of it, the hold makes no new read and reads main as
@@ -225,6 +234,47 @@ func (d *Daemon) clearUpdateNotDue() {
 	d.updateTrigger.mu.Unlock()
 }
 
+// noteUpdateLedgerUnreadable logs a damaged image record once per distinct
+// message, so the outage is visible without one line per heartbeat
+// (gt-naf038).
+func (d *Daemon) noteUpdateLedgerUnreadable(msg string) {
+	d.updateTrigger.mu.Lock()
+	seen := d.updateTrigger.ledgerErr == msg
+	if !seen {
+		d.updateTrigger.ledgerErr = msg
+	}
+	d.updateTrigger.mu.Unlock()
+	if !seen {
+		d.logger.Printf("update: the image ledger could not be read: %s; deciding without the refused-pair hold", msg)
+	}
+}
+
+// clearUpdateLedgerUnreadable forgets the ledger error once the record reads
+// again, so a later recurrence is reported.
+func (d *Daemon) clearUpdateLedgerUnreadable() {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.ledgerErr = ""
+	d.updateTrigger.mu.Unlock()
+}
+
+// imageRefusal is the pair the last readable image record named as refused,
+// with the reason it gave; both empty when that record named none, or when no
+// record has read.
+func (d *Daemon) imageRefusal() (commit, reason string) {
+	d.updateTrigger.mu.Lock()
+	defer d.updateTrigger.mu.Unlock()
+	return d.updateTrigger.refusedCommit, d.updateTrigger.refusedReason
+}
+
+// noteImageRefusal keeps the refusal a readable image record names, replacing
+// the one remembered before it: a record that names no refusal forgets the
+// remembered pair, so a pair a later install cleared is due again.
+func (d *Daemon) noteImageRefusal(commit, reason string) {
+	d.updateTrigger.mu.Lock()
+	d.updateTrigger.refusedCommit, d.updateTrigger.refusedReason = commit, reason
+	d.updateTrigger.mu.Unlock()
+}
+
 // noteUpdateLaunch records the launch so the next heartbeat waits out
 // updateLaunchSuppression before deciding again.
 func (d *Daemon) noteUpdateLaunch(now time.Time) {
@@ -260,9 +310,10 @@ func (d *Daemon) lastUpdateLaunch() time.Time {
 
 // updateFacts gathers what the due check knows, from the same sources the
 // rebuild_gt cycle reads: the update job's state file, the pending-install
-// marker, the installed build's staleness against main, and the landing
-// records of the rig whose checkout the binary is built from. An unreadable
-// source is an error, never an empty value.
+// marker, the installed build's staleness against main, the image ledger the
+// update command writes, and the landing records of the rig whose checkout the
+// binary is built from. An unreadable source is an error, never an empty value,
+// except the image ledger, whose hold survives a damaged read (gt-naf038).
 func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 	facts := UpdateFacts{Standby: d.standbyReason(now)}
 
@@ -320,6 +371,25 @@ func (d *Daemon) updateFacts(now time.Time) (UpdateFacts, error) {
 		// the same failed run cannot restart (gt-tb5vx).
 		facts.MainSHA = d.updateRemoteMainSHA(now, d.config.TownRoot)
 	}
+
+	// The image ledger holds the pair a pre-swap check refused, read through the
+	// ledger the update command writes so the patrol and the run agree on the
+	// record. A missing file is the ledger's empty record, no refusal. A file
+	// that cannot be read cannot show whether the target is the refused pair,
+	// so the hold stays where the last readable record left it: dropping it
+	// would launch a pair that record refused, and holding every target would
+	// stall a newer pair that is due (gt-naf038). A daemon whose first read
+	// fails has no refusal to keep, so the decision goes on the facts that
+	// read, and the run's pre-swap check refuses a bad pair before any swap.
+	rec, err := update.FileImageLedger{Dir: update.Dir(d.config.TownRoot)}.Read()
+	if err != nil {
+		d.noteUpdateLedgerUnreadable(err.Error())
+	} else {
+		d.clearUpdateLedgerUnreadable()
+		d.noteImageRefusal(rec.Refused.Commit, rec.RefusedReason)
+	}
+	facts.RefusedCommit, facts.RefusedReason = d.imageRefusal()
+
 	facts.MainMoved = info.IsStale
 	if !info.IsStale {
 		return facts, nil

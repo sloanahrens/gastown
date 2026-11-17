@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -39,6 +40,13 @@ type UpdateFacts struct {
 	// MainSHA is main's current sha, the target a new run would set out to
 	// install; empty when it could not be read.
 	MainSHA string
+	// RefusedCommit is the pair commit the image ledger records as refused by
+	// a pre-swap check, with the failure the check named; both empty when the
+	// record names none. When the record cannot be read, the pair the last
+	// readable record named stands. A run for that commit meets the same
+	// refusal.
+	RefusedCommit string
+	RefusedReason string
 }
 
 // updateDue reports whether an update is due at now and why. It is pure: the
@@ -75,6 +83,16 @@ func updateDue(now time.Time, s config.UpdateSettings, f UpdateFacts) (due bool,
 		if f.LastTarget == f.MainSHA {
 			return false, "last run failed on this target; run gt update by hand"
 		}
+	}
+
+	// The image ledger holds the pair a pre-swap check refused. A run for that
+	// same commit would meet the same refusal, so it is not due until main
+	// moves to another commit: the refusal clears itself when a newer green
+	// pair is published. An unknown main sha cannot show the target is the
+	// refused pair, so it holds nothing here (gt-naf038).
+	if f.RefusedCommit != "" && f.MainSHA == f.RefusedCommit {
+		return false, fmt.Sprintf("pair %s was refused by %s",
+			greenRefShortSHA(f.RefusedCommit), reasonOr(f.RefusedReason, "the pre-swap check"))
 	}
 
 	// The nightly rule: one run per day, and only inside the hour that opens
