@@ -2113,10 +2113,11 @@ func (b *Beads) runBdOnce(callCtx context.Context, stdinData []byte, runEnv []st
 	return stripStdoutWarnings(stdout.Bytes()), nil
 }
 
-// runWithRouting executes a bd command without setting BEADS_DIR, allowing bd's
-// native prefix-based routing via routes.jsonl to resolve cross-prefix beads.
-// This is needed for slot operations that reference beads with different prefixes
-// (e.g., setting an hq-* hook bead on a gt-* agent bead).
+// runWithRouting executes a bd command under bd's prefix routing rather than
+// pinned to one database: buildRoutingEnv names the town's .beads, whose
+// routes.jsonl sends a bead of a listed prefix to the rig database that holds
+// it. `gt escalate list` reads this way because escalations live in the
+// database of the rig that filed them (gt-wbxb).
 // See: sling_helpers.go verifyBeadExists/hookBeadWithRetry for the same pattern.
 func (b *Beads) runWithRouting(args ...string) ([]byte, error) {
 	// Same --flat handling as run/runWithStdin: routed call sites are "list ...
@@ -2498,9 +2499,15 @@ func (b *Beads) buildRunEnv() []string {
 	return env
 }
 
-// buildRoutingEnv builds the environment for runWithRouting() calls.
-// Always strips BEADS_DIR so bd uses native routing.
-// In isolated mode: also strips BD_ACTOR, BEADS_*, GT_ROOT, HOME.
+// buildRoutingEnv builds the environment for runWithRouting() calls: bd's
+// prefix routing, told which workspace it runs in.
+// Non-isolated: strips every inherited target selector, then names the town's
+// own .beads, whose routes.jsonl routes each prefix to its rig's database. The
+// bd gateway forwarder refuses a call that sets no BEADS_DIR, since it cannot
+// tell which rig it runs in (gt-judxkm); a Beads with no town above its workDir
+// still names nothing, and the forwarder refuses that call rather than guessing.
+// In isolated mode: strips BEADS_DIR with the rest (BD_ACTOR, BEADS_*, GT_ROOT,
+// HOME), because a test must never be handed a workspace to write.
 func (b *Beads) buildRoutingEnv() []string {
 	if b.isolated {
 		// filterBeadsEnv keeps BD_* variables, and an inherited
@@ -2527,7 +2534,11 @@ func (b *Beads) buildRoutingEnv() []string {
 		}
 		return SuppressBDSideEffects(env)
 	}
-	return BuildRoutingBDEnv(b.processEnv(), b.getResolvedBeadsDir())
+	env := BuildRoutingBDEnv(b.processEnv(), b.getResolvedBeadsDir())
+	if townRoot := b.getTownRoot(); townRoot != "" {
+		env = append(env, "BEADS_DIR="+GetTownBeadsPath(townRoot))
+	}
+	return env
 }
 
 // processEnv is the environment a non-isolated call starts from.

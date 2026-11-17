@@ -5609,7 +5609,8 @@ func TestBuildRunEnv(t *testing.T) {
 }
 
 // TestBuildRoutingEnv verifies buildRoutingEnv() returns the correct environment
-// for each mode: default (strip BEADS_DIR only) and isolated (strip all beads vars).
+// for each mode: default (strip the inherited BEADS_DIR; /tmp has no town above
+// it, so none is named) and isolated (strip all beads vars).
 func TestBuildRoutingEnv(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -5619,7 +5620,7 @@ func TestBuildRoutingEnv(t *testing.T) {
 		mustNotContain []string
 	}{
 		{
-			name:           "default strips BEADS_DIR only",
+			name:           "default strips the inherited BEADS_DIR when no town is above the workDir",
 			envVars:        map[string]string{"BEADS_DIR": "/tmp/beads", "PATH": "/usr/bin"},
 			mustContain:    []string{"PATH="},
 			mustNotContain: []string{"BEADS_DIR=", "BD_JSON_ENVELOPE="},
@@ -5658,6 +5659,45 @@ func TestBuildRoutingEnv(t *testing.T) {
 						t.Errorf("expected %s to be absent, got %s", prefix, e)
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestBuildRoutingEnvNamesTheTownBeadsDir pins gt-judxkm: the bd gateway
+// forwarder refuses a routed call that sets no BEADS_DIR, because it cannot
+// tell which rig the call runs in. A routed call therefore names the town's own
+// .beads — the workspace a bd run from the town root reads, whose routes.jsonl
+// sends each prefix to its rig's database. A wrapper with no town above its
+// workDir still names nothing, so the forwarder refuses that call rather than
+// the wrapper guessing a workspace; isolated mode never names one either.
+func TestBuildRoutingEnvNamesTheTownBeadsDir(t *testing.T) {
+	townRoot, rigWorktree := townWithRoutes(t)
+	wantBeadsDir := filepath.Join(townRoot, ".beads")
+
+	tests := []struct {
+		name     string
+		workDir  string
+		isolated bool
+		want     string
+	}{
+		{name: "town root", workDir: townRoot, want: wantBeadsDir},
+		{name: "polecat worktree", workDir: rigWorktree, want: wantBeadsDir},
+		{name: "no town above the workDir names none", workDir: t.TempDir()},
+		{name: "isolated names none", workDir: townRoot, isolated: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := (&Beads{workDir: tc.workDir, isolated: tc.isolated}).buildRoutingEnv()
+			got, ok := lastEnvValue(env, "BEADS_DIR")
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("BEADS_DIR = %q, want no BEADS_DIR in a routing env", got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Fatalf("BEADS_DIR = %q (set %v), want %q", got, ok, tc.want)
 			}
 		})
 	}
