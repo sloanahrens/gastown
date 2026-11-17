@@ -28,6 +28,15 @@ COPY --chmod=0755 bdgw /usr/local/bin/bdgw
 RUN mkdir -p /etc/bdgw && chmod 0755 /etc/bdgw
 COPY --chmod=0444 verbs.json /etc/bdgw/verbs.json
 
+# The gateway swaps its workspace tree by renaming a directory beside the root,
+# so the root's parent must be writable by the user the image runs. The store
+# root is /var/lib/bdgw/ws, under /var/lib/bdgw, which this line owns.
+RUN mkdir -p /var/lib/bdgw && chown 65532:65532 /var/lib/bdgw
+
+# gt writes workspace redirects under /ws, and that path must keep resolving to
+# the store's tree now that the root lives under /var/lib/bdgw.
+RUN ln -s /var/lib/bdgw/ws /ws
+
 # A numeric non-root user, so the image does not depend on a name the base may
 # not define.
 USER 65532:65532

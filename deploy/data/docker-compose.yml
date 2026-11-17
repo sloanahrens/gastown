@@ -49,7 +49,7 @@ services:
       - --log-dir
       - /var/log/bdgw
       - --workspace
-      - /ws
+      - /var/lib/bdgw/ws
     environment:
       HOME: /home/bdgw
       TRACKER_URL: "${GT_TRACKER_URL:-}"
@@ -61,11 +61,10 @@ services:
     volumes:
       - "${GT_BD_TOKEN_DIR:?set GT_BD_TOKEN_DIR to the gateway token directory}:/run/bdgw/tokens:ro"
       - bd-logs:/var/log/bdgw
-      - bd-ws:/ws
     mem_limit: 1g
     cpus: 1
     healthcheck:
-      test: ["CMD", "/usr/local/bin/bdgw", "ready", "--tokens-dir", "/run/bdgw/tokens", "--verbs", "/etc/bdgw/verbs.json", "--workspace", "/ws"]
+      test: ["CMD", "/usr/local/bin/bdgw", "ready", "--tokens-dir", "/run/bdgw/tokens", "--verbs", "/etc/bdgw/verbs.json", "--workspace", "/var/lib/bdgw/ws"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -73,4 +72,3 @@ services:
 volumes:
   dolt-var:
   bd-logs:
-  bd-ws:
