@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -120,8 +121,9 @@ func TestRunawayBeadTripwireLeavesTheMark(t *testing.T) {
 }
 
 // TestRunawayBeadTripwireCountFailsLeavesTheMark: a count that fails is logged
-// and stops nothing. The mark is already saved, so the seat runs on to the 20
-// minute threshold (gt-uj5a1i).
+// and alerted, and stops nothing. The mark is already saved, so the seat runs
+// on to the 20 minute threshold (gt-uj5a1i); the alert is what keeps the blind
+// tripwire from living in the log alone (gt-eb7bzu).
 func TestRunawayBeadTripwireCountFailsLeavesTheMark(t *testing.T) {
 	t.Parallel()
 	d, buf := tripwireDaemon(t, false, 300)
@@ -129,6 +131,13 @@ func TestRunawayBeadTripwireCountFailsLeavesTheMark(t *testing.T) {
 	seams := f.seams()
 	seams.addedLines = func(overrunSeat) (int, error) {
 		return 0, errors.New("git diff: no such ref")
+	}
+	var alerted []string
+	seams.countFailed = func(seat overrunSeat, err error) {
+		if seat != stopSeat {
+			t.Errorf("count failure alerted for %+v, want the seat %+v", seat, stopSeat)
+		}
+		alerted = append(alerted, err.Error())
 	}
 
 	d.runOverrunGuard(seams)
@@ -141,6 +150,9 @@ func TestRunawayBeadTripwireCountFailsLeavesTheMark(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Errorf("log lacks %q:\n%s", want, log)
 		}
+	}
+	if want := []string{"git diff: no such ref"}; !slices.Equal(alerted, want) {
+		t.Errorf("count failure alerted %q, want %q", alerted, want)
 	}
 	st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead)
 	if err != nil {
@@ -171,5 +183,70 @@ func TestRunawayBeadTripwireDryRunLogsOnly(t *testing.T) {
 	}
 	if st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead); err != nil || !st.NudgedAt.IsZero() {
 		t.Errorf("dry run wrote state %+v (err %v), want none", st, err)
+	}
+}
+
+// TestRunawayBeadTripwireDryRunCountFailureLogsOnly: a dry run whose count
+// fails logs it as a dry run, claiming no mark it never wrote, and raises no
+// alert, because a dry run writes nothing (gt-eb7bzu).
+func TestRunawayBeadTripwireDryRunCountFailureLogsOnly(t *testing.T) {
+	t.Parallel()
+	d, buf := tripwireDaemon(t, true, 300)
+	f := newOverrunFake(12*time.Minute, stopSeat)
+	seams := f.seams()
+	seams.addedLines = func(overrunSeat) (int, error) {
+		return 0, errors.New("git diff: no such ref")
+	}
+	alerted := 0
+	seams.countFailed = func(overrunSeat, error) { alerted++ }
+
+	d.runOverrunGuard(seams)
+
+	if len(f.nudges) != 0 || len(f.stops) != 0 || len(f.handedBack) != 0 {
+		t.Errorf("dry run acted: nudges %v, stops %v, hand-backs %v", f.nudges, f.stops, f.handedBack)
+	}
+	if alerted != 0 {
+		t.Errorf("dry run alerted %d times, want none: a dry run writes nothing", alerted)
+	}
+	log := buf.String()
+	want := "dry run: gastown/capable: cannot count the lines added on gt-aaa11"
+	if !strings.Contains(log, want) {
+		t.Errorf("log lacks %q:\n%s", want, log)
+	}
+	if strings.Contains(log, "leaving the mark") {
+		t.Errorf("dry-run count failure claims a mark that was never written:\n%s", log)
+	}
+	if st, err := readOverrunState(d.config.TownRoot, stopSeat.Bead); err != nil || !st.NudgedAt.IsZero() {
+		t.Errorf("dry run wrote state %+v (err %v), want none", st, err)
+	}
+}
+
+// TestRunawayBeadTripwireCountsThroughTheProductionSeam: the tripwire weighs a
+// seat through the production addedLines seam, the same handle selection the
+// stop's save, dirty check, push and reset use, and counts its lines over
+// origin/main. The count side is production and the side-effect seams are the
+// fake, so the tripwire's production wiring is covered in the unit tier, which
+// the gate runs (gt-eb7bzu).
+func TestRunawayBeadTripwireCountsThroughTheProductionSeam(t *testing.T) {
+	t.Parallel()
+	d, _ := tripwireDaemon(t, false, 300)
+	seedHostWorktreeStub(t, d)
+	handle := &addedLinesStubGit{lines: 350}
+	d.openGitFn = func(string) daemonGit { return handle }
+
+	f := newOverrunFake(12*time.Minute, stopSeat)
+	seams := f.seams()
+	seams.addedLines = d.overrunProdSeams().addedLines
+
+	d.runOverrunGuard(seams)
+
+	if len(f.stops) != 1 || f.stops[0] != "gastown/capable" {
+		t.Fatalf("stops = %v, want one of gastown/capable", f.stops)
+	}
+	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != tripwireReason+"." {
+		t.Errorf("hand-back notes = %q, want %q", f.handBackNotes, tripwireReason+".")
+	}
+	if want := []string{"origin/main"}; !slices.Equal(handle.bases, want) {
+		t.Errorf("production seam counted added lines over %q, want %q", handle.bases, want)
 	}
 }
