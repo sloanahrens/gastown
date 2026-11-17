@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -247,6 +248,37 @@ func TestNoBeadAccessCommentLeavesDoltModeAlone(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, outbox.Dir)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("a dolt-mode comment wrote an outbox: %v", err)
+	}
+}
+
+// The command's own wiring reaches a file-mode seat's outbox. The tests above
+// drive the verb with a beadVerbs built by hand; this one runs the production
+// comment command from a worktree inside the seat, so newBeadVerbs resolving
+// the seat from the caller's working directory is exercised too (gt-8q5x67).
+//
+//testpolicy:allow parallel — newBeadVerbs resolves the seat from the process working directory, which the test sets
+func TestNoBeadAccessCommentCommandReachesTheOutbox(t *testing.T) {
+	root := newNoteSeat(t, "gt-own1")
+	worktree := filepath.Join(root, "gt", "gastown", "polecats", "slit", "gastown")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-chdir — the working directory is the input under test: newBeadVerbs finds the seat by walking up from it
+	t.Chdir(worktree)
+
+	var out bytes.Buffer
+	c := newBeadCommentCmd()
+	c.SetArgs([]string{"gt-own1", "the gate is green"})
+	c.SetOut(&out)
+	c.SetErr(io.Discard)
+	if err := c.Execute(); err != nil {
+		t.Fatalf("gt bead comment in a file-mode seat: %v", err)
+	}
+	if got, want := string(outboxNotes(t, root)), "the gate is green\n"; got != want {
+		t.Errorf("outbox notes = %q, want %q", got, want)
+	}
+	if got, want := out.String(), "✓ Commented on gt-own1\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
 	}
 }
 
