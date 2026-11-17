@@ -191,11 +191,13 @@ func TestPolicyVerbResolution(t *testing.T) {
 }
 
 // TestUnknownCommandFlagAfterVerb: bd's command flags are not in the root flag
-// set, so once the verb is settled their arity cannot change the verb or hide a
-// flag. The scan reads such a flag as a boolean that consumes nothing, which is
-// what lets the escalation collector's and the plugin run ledger's calls
-// through, while before the verb is settled the same flag is still refused and
-// a refused flag behind it is still caught.
+// set, so once the verb is settled their arity cannot change the verb, and the
+// scan reads such a flag as a boolean that consumes nothing. That is what lets
+// the escalation collector's and the plugin run ledger's calls through, while
+// before the verb is settled the same flag is still refused and a refused flag
+// behind it is still caught. One shape is still refused after the verb: an
+// unknown flag followed by "--", because if the flag takes a value then "--"
+// is that value and bd reads the flags after it as flags.
 func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 	t.Parallel()
 
@@ -227,6 +229,19 @@ func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 	for _, argv := range [][]string{
 		{"--bogus", "--json", "list"},
 		{"--include-infra", "--all", "query"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+
+	// After the verb is settled an unknown flag is boolean except before "--":
+	// if the flag takes a value, "--" is that value and bd reads the flags
+	// after it as flags, so a boolean reading would end the options early and
+	// hide them. The call is refused rather than guessed.
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--", "--force"},
+		{"list", "--include-infra", "--"},
 	} {
 		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
 			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
@@ -265,6 +280,18 @@ func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 				t.Errorf("Authorize(read, %q) error = %q, want it to name %s", tc.argv, err, tc.want)
 			}
 		})
+	}
+
+	// The unknown flag before "--" is refused, so a refused root flag bd would
+	// read behind it never runs: the scan stops at the unknown flag instead of
+	// ending the options at "--" and reading the flag as an operand.
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--", "--force"},
+		{"list", "--include-infra", "--", "--db=/x"},
+	} {
+		if _, err := p.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
 	}
 
 	// The same shape is accepted when the flag behind the unknown one is not

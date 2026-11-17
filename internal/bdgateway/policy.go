@@ -395,9 +395,9 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 // checkSQLStatement applies the read-only rule to a sql call before bd starts.
 // The statement is the one operand after bd's flags, which scanArgs read: bd's
 // sql verb takes one <query> and runs its text as written. sql's only own flag
-// is the boolean --csv (`bd sql --help`, bd 1.2.2), so once the verb is settled
-// scanArgs reads an unknown command flag as boolean, consuming nothing, and the
-// statement is the one operand. Every flag that takes a value is a root flag
+// is the boolean --csv (`bd sql --help`, bd 1.2.2), so a settled unknown
+// command flag consumes nothing in scanArgs — one followed by "--" is refused
+// before this check — and the statement is the one operand. Every flag that takes a value is a root flag
 // bdRootFlags places, so its value is consumed and never read as the query. A
 // call naming no operand — the empty statement, or a query that was really a
 // value-taking flag's argument — is refused, and one naming more than one
@@ -448,9 +448,13 @@ type scanResult struct {
 // record. While a listed verb path still extends the words read, its value
 // cannot be told from a verb word, so the call is refused. Once the verb is
 // settled, it is read as a boolean: it consumes nothing, and the next token is
-// scanned on its own. That can neither change the verb — no later word is a
-// command word once no listed path extends — nor hide a flag, because every
-// later token is still read as a flag or an operand.
+// scanned on its own. That cannot change the verb, since no later word is a
+// command word once no listed path extends. It also cannot hide a flag behind
+// a later dash token, which is scanned as a flag in its own right, but it can
+// hide one behind "--": if the flag takes a value, "--" is that value rather
+// than the end of the options, and bd reads the flags after it as flags, while
+// the boolean reading calls them operands. A settled unknown flag followed by
+// "--" is therefore refused too.
 func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 	var res scanResult
 	res.words = make([]string, 0, maxPathWords)
@@ -484,6 +488,11 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 		case p.extends(res.words):
 			// A listed verb path can still claim the next word, so an unknown
 			// flag here could be taking that word as its value.
+			return scanResult{}, ambiguousFlag(arg)
+		case i+1 < len(argv) && argv[i+1] == "--":
+			// If the flag takes a value, "--" is that value and bd still reads
+			// the tokens after it as flags. Read as boolean, the scan would end
+			// the options there and miss a refused flag behind it.
 			return scanResult{}, ambiguousFlag(arg)
 		}
 	}
