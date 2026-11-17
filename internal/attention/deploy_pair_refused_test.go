@@ -2,12 +2,12 @@ package attention
 
 import "testing"
 
-// TestPreRollGuardDeployPairRefusedIsTheOverseersWakingRule: a refused pair
-// resolves to deploy.pair_refused, which wakes the overseer for an operator
-// action and belongs to it. A rule that fell to info would leave a commit the
-// pre-swap check refused waiting until someone looked, and a kind missing from
+// TestPreRollGuardDeployPairKindsResolveToTheirRulesAndOverseer: each deploy
+// pair kind in the table resolves to its rule, whose wake flag and handled kind
+// the table pins, and every rule belongs to the overseer. A rule that fell to
+// info would leave a pair waiting until someone looked, and a kind missing from
 // Kinds() is skipped by the rule and owner checks (gt-d6ok4r).
-func TestPreRollGuardDeployPairRefusedIsTheOverseersWakingRule(t *testing.T) {
+func TestPreRollGuardDeployPairKindsResolveToTheirRulesAndOverseer(t *testing.T) {
 	t.Parallel()
 
 	listed := false
