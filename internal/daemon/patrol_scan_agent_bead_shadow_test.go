@@ -2,9 +2,8 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,27 +11,70 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/seatfacts"
 )
 
+// agentBeadRetireBead is the agent bead every row of the shadow table reads:
+// a finished turn whose state, exit and cleanup the intent record can be held
+// against.
+var agentBeadRetireBead = patrolscan.AgentRecord{
+	State:           "stuck",
+	ExitType:        "DEFERRED",
+	CleanupStatus:   "has_unpushed",
+	HookBead:        "gt-hook",
+	LastSourceIssue: "gt-last",
+}
+
+// agentBeadRetireFields is the same bead in the fields the fake beads database
+// answers AgentRecord with.
+var agentBeadRetireFields = beads.AgentFields{
+	RoleType:        constants.RolePolecat,
+	ExitType:        "DEFERRED",
+	CleanupStatus:   "has_unpushed",
+	HookBead:        "gt-hook",
+	LastSourceIssue: "gt-last",
+	AgentState:      "stuck",
+}
+
+// seatFactsAnswer is one answer the fake intent-record read gives.
+type seatFactsAnswer struct {
+	facts seatfacts.Facts
+	err   error
+}
+
 // agentBeadRetireHost is a host over a temp town holding one agent bead in the
-// fake beads database, with the daemon's log captured. The shadow lines are
-// remembered for the whole daemon process, so the seat's entries are dropped
-// before and after the test: a line this test's seat logged in another test
-// must not stand in for one it should write here.
-func agentBeadRetireHost(t *testing.T, rig, name string, fields beads.AgentFields) (*patrolScanHost, *bytes.Buffer) {
+// fake beads database, whose intent-record read is the fake answering answers
+// in order, with the daemon's log captured. The shadow lines are remembered
+// for the whole daemon process, so the seat's entries are dropped before and
+// after the test: a line this test's seat logged in another test must not stand
+// in for one it should write here.
+func agentBeadRetireHost(t *testing.T, rig, name string, answers []seatFactsAnswer) (*patrolScanHost, *bytes.Buffer) {
 	t.Helper()
 	town := t.TempDir()
+	fields := agentBeadRetireFields
+	fields.Rig = rig
 	bd := newWorkBD(t)
 	bd.db.Seed(beads.Issue{
 		ID:          beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, rig), rig, name),
 		Description: beads.FormatAgentDescription(name, &fields),
 	})
 	logs := &bytes.Buffer{}
-	h := &patrolScanHost{d: &Daemon{
-		config:        &Config{TownRoot: town},
-		openWorkBeads: bd.open,
-		logger:        log.New(logs, "", 0),
-	}}
+	calls := 0
+	h := &patrolScanHost{
+		d: &Daemon{
+			config:        &Config{TownRoot: town},
+			openWorkBeads: bd.open,
+			logger:        log.New(logs, "", 0),
+		},
+		seatFacts: func(string, intent.Seat) (seatfacts.Facts, error) {
+			calls++
+			if calls > len(answers) {
+				t.Fatalf("the seat's record was read %d times, more than the %d the test scripts", calls, len(answers))
+			}
+			a := answers[calls-1]
+			return a.facts, a.err
+		},
+	}
 	seat := rig + "/" + name
 	forgetAgentBeadShadow(seat)
 	t.Cleanup(func() { forgetAgentBeadShadow(seat) })
@@ -51,153 +93,151 @@ func forgetAgentBeadShadow(seat string) {
 	}
 }
 
-// writeAgentBeadRetireRecord writes the seat's intent record.
-func writeAgentBeadRetireRecord(t *testing.T, h *patrolScanHost, rig, name string, rec intent.Record) {
-	t.Helper()
-	writeJSONFile(t, intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name}.Path(h.town()), rec)
-}
-
-// TestAgentBeadRetireLogsEachDisagreementOnce holds the shadow log to one line
-// per seat, field and value pair: a second read of the same disagreement
-// writes nothing, and a record whose value changes writes again. Without the
-// remembered set the window would log the same drift on every tick and drown
-// the change the reader is looking for.
-func TestAgentBeadRetireLogsEachDisagreementOnce(t *testing.T) {
-	t.Parallel()
-	const rig, name = "retire", "shadow-once"
-	h, logs := agentBeadRetireHost(t, rig, name, beads.AgentFields{
-		RoleType:   constants.RolePolecat,
-		Rig:        rig,
-		AgentState: "stuck",
-		ExitType:   "DEFERRED",
-	})
-	read := func() {
-		t.Helper()
-		if _, err := h.AgentRecord(rig, name); err != nil {
-			t.Fatalf("AgentRecord: %v", err)
-		}
-	}
-	// The record agrees on every other fact, so exit_type is the one
-	// disagreement these reads find.
-	writeAgentBeadRetireRecord(t, h, rig, name, intent.Record{TurnState: "stuck", ExitType: "COMPLETED"})
-
-	read()
-	want := "agentbead_shadow: retire/shadow-once exit_type intent=COMPLETED bead=DEFERRED\n"
-	if got := logs.String(); got != want {
-		t.Fatalf("first read logged %q, want %q", got, want)
-	}
-
-	read()
-	if got := logs.String(); got != want {
-		t.Fatalf("a repeated read logged again: %q, want %q", got, want)
-	}
-
-	writeAgentBeadRetireRecord(t, h, rig, name, intent.Record{TurnState: "stuck", ExitType: "ESCALATED"})
-	read()
-	want += "agentbead_shadow: retire/shadow-once exit_type intent=ESCALATED bead=DEFERRED\n"
-	if got := logs.String(); got != want {
-		t.Fatalf("a changed value logged %q, want %q", got, want)
+// agreeingFacts is the record whose every fact the agent bead answers the same
+// way; a row changes the facts it wants to disagree.
+func agreeingFacts() seatfacts.Facts {
+	return seatfacts.Facts{
+		TurnState:     "stuck",
+		ExitType:      "DEFERRED",
+		CleanupStatus: "has_unpushed",
+		WorkBead:      "gt-hook",
+		LastWorkBead:  "gt-last",
 	}
 }
 
-// TestAgentBeadRetireReturnsTheBeadValues holds AgentRecord to the bead's
-// values whether the intent record agrees with it or not: while the shadow
-// window runs, the bead is the source and the record only what is compared
-// against it.
-func TestAgentBeadRetireReturnsTheBeadValues(t *testing.T) {
+// TestAgentBeadRetireShadow drives AgentRecord over a fake intent-record read
+// and holds the shadow log to its contract, one row per case: a disagreement
+// logs once per seat, field and value pair in the daemon process and again when
+// a value changes; an absent record is compared and logged like any other; an
+// unreadable one logs once and never changes the return; a value is made safe
+// for one line before it is logged; and a host with no logger writes nothing
+// and spends no entry. Every read must return the bead's values.
+func TestAgentBeadRetireShadow(t *testing.T) {
 	t.Parallel()
 	const rig = "retire"
-	fields := beads.AgentFields{
-		RoleType:        constants.RolePolecat,
-		Rig:             rig,
-		AgentState:      "stuck",
-		ExitType:        "DEFERRED",
-		CleanupStatus:   "has_unpushed",
-		HookBead:        "gt-hook",
-		LastSourceIssue: "gt-last",
-	}
-	want := patrolscan.AgentRecord{
-		State:           "stuck",
-		ExitType:        "DEFERRED",
-		CleanupStatus:   "has_unpushed",
-		HookBead:        "gt-hook",
-		LastSourceIssue: "gt-last",
-	}
+	line := func(seat, body string) string { return agentBeadShadowLogPrefix + rig + "/" + seat + " " + body + "\n" }
 	tests := []struct {
-		name   string
-		record intent.Record
+		name string
+		seat string
+		// answers is what the fake record read returns, one per read, and the
+		// row makes one read for each.
+		answers []seatFactsAnswer
+		// loggerFromRead is the first read, counting from 1, made with the host's
+		// logger attached; 0 means every read has one. Before it the host has
+		// none, as a host without one would.
+		loggerFromRead int
+		want           string
 	}{
 		{
-			name: "a record that agrees",
-			record: intent.Record{TurnState: "stuck", ExitType: "DEFERRED", CleanupStatus: "has_unpushed",
-				WorkBead: "gt-hook", LastWorkBead: "gt-last"},
+			name:    "an agreeing record logs nothing",
+			seat:    "shadow-agreeing",
+			answers: []seatFactsAnswer{{facts: agreeingFacts()}},
 		},
 		{
-			name: "a record that disagrees",
-			record: intent.Record{TurnState: "done", ExitType: "COMPLETED", CleanupStatus: "clean",
-				WorkBead: "gt-other", LastWorkBead: "gt-earlier"},
+			name: "a disagreement logs once however many reads find it",
+			seat: "shadow-once",
+			answers: []seatFactsAnswer{
+				{facts: func() seatfacts.Facts { f := agreeingFacts(); f.ExitType = "COMPLETED"; return f }()},
+				{facts: func() seatfacts.Facts { f := agreeingFacts(); f.ExitType = "COMPLETED"; return f }()},
+			},
+			want: line("shadow-once", "exit_type intent=COMPLETED bead=DEFERRED"),
+		},
+		{
+			name: "a changed value logs again",
+			seat: "shadow-changed",
+			answers: []seatFactsAnswer{
+				{facts: func() seatfacts.Facts { f := agreeingFacts(); f.ExitType = "COMPLETED"; return f }()},
+				{facts: func() seatfacts.Facts { f := agreeingFacts(); f.ExitType = "ESCALATED"; return f }()},
+			},
+			want: line("shadow-changed", "exit_type intent=COMPLETED bead=DEFERRED") +
+				line("shadow-changed", "exit_type intent=ESCALATED bead=DEFERRED"),
+		},
+		{
+			name:    "an absent record is compared as the zero facts",
+			seat:    "shadow-absent",
+			answers: []seatFactsAnswer{{}},
+			want: line("shadow-absent", "exit_type intent= bead=DEFERRED") +
+				line("shadow-absent", "cleanup_status intent= bead=has_unpushed") +
+				line("shadow-absent", "work_bead intent= bead=gt-hook") +
+				line("shadow-absent", "last_work_bead intent= bead=gt-last") +
+				line("shadow-absent", "turn_state intent= bead=stuck"),
+		},
+		{
+			name: "an unreadable record logs once and leaves the bead standing",
+			seat: "shadow-broken",
+			answers: []seatFactsAnswer{
+				{err: errors.New("not a record")},
+				{err: errors.New("not a record")},
+			},
+			want: line("shadow-broken", "intent record unreadable, the bead's values stand: not a record"),
+		},
+		{
+			name: "a value is made safe for one line",
+			seat: "shadow-control",
+			answers: []seatFactsAnswer{{facts: func() seatfacts.Facts {
+				f := agreeingFacts()
+				f.ExitType = "COMP\tLETED\nforged"
+				return f
+			}()}},
+			want: line("shadow-control", "exit_type intent=COMP LETED forged bead=DEFERRED"),
+		},
+		{
+			name: "an overlong value is cut",
+			seat: "shadow-long",
+			answers: []seatFactsAnswer{{facts: func() seatfacts.Facts {
+				f := agreeingFacts()
+				f.ExitType = strings.Repeat("x", agentBeadShadowValueRunes+50)
+				return f
+			}()}},
+			want: line("shadow-long", "exit_type intent="+strings.Repeat("x", agentBeadShadowValueRunes)+" bead=DEFERRED"),
+		},
+		{
+			name: "a value differing only in space keeps its space on the line",
+			seat: "shadow-space",
+			answers: []seatFactsAnswer{{facts: func() seatfacts.Facts {
+				f := agreeingFacts()
+				f.ExitType = " DEFERRED"
+				return f
+			}()}},
+			want: line("shadow-space", "exit_type intent= DEFERRED bead=DEFERRED"),
+		},
+		{
+			name: "a host with no logger writes nothing and spends no entry",
+			seat: "shadow-nil-logger",
+			answers: []seatFactsAnswer{
+				{facts: func() seatfacts.Facts { f := agreeingFacts(); f.ExitType = "COMPLETED"; return f }()},
+				{facts: func() seatfacts.Facts { f := agreeingFacts(); f.ExitType = "COMPLETED"; return f }()},
+			},
+			loggerFromRead: 2,
+			// The line the second read writes: the row is red if the logger-less
+			// first read spent the entry that would spare it.
+			want: line("shadow-nil-logger", "exit_type intent=COMPLETED bead=DEFERRED"),
 		},
 	}
-	for i, tc := range tests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			name := []string{"bead-return-agreeing", "bead-return-disagreeing"}[i]
-			h, _ := agentBeadRetireHost(t, rig, name, fields)
-			writeAgentBeadRetireRecord(t, h, rig, name, tc.record)
-			got, err := h.AgentRecord(rig, name)
-			if err != nil {
-				t.Fatalf("AgentRecord: %v", err)
+			h, logs := agentBeadRetireHost(t, rig, tc.seat, tc.answers)
+			for read := 1; read <= len(tc.answers); read++ {
+				if read >= tc.loggerFromRead {
+					h.d.logger = log.New(logs, "", 0)
+				} else {
+					h.d.logger = nil
+				}
+				got, err := h.AgentRecord(rig, tc.seat)
+				if err != nil {
+					t.Fatalf("read %d: AgentRecord: %v", read, err)
+				}
+				if got != agentBeadRetireBead {
+					t.Fatalf("read %d: AgentRecord = %+v, want the bead's %+v", read, got, agentBeadRetireBead)
+				}
 			}
-			if got != want {
-				t.Fatalf("AgentRecord = %+v, want the bead's %+v", got, want)
+			if got := logs.String(); got != tc.want {
+				t.Fatalf("logged %q, want %q", got, tc.want)
+			}
+			if n := strings.Count(logs.String(), "\n"); n != strings.Count(tc.want, "\n") {
+				t.Fatalf("logged %d lines, want %d: %q", n, strings.Count(tc.want, "\n"), logs.String())
 			}
 		})
-	}
-}
-
-// TestAgentBeadRetireUnreadableRecordLogsOnce holds the fail-closed read to the
-// shadow's contract: a record that cannot be parsed is reported once, and the
-// bead's record is still returned rather than an error the tick would read as
-// no answer.
-func TestAgentBeadRetireUnreadableRecordLogsOnce(t *testing.T) {
-	t.Parallel()
-	const rig, name = "retire", "shadow-broken"
-	h, logs := agentBeadRetireHost(t, rig, name, beads.AgentFields{
-		RoleType:        constants.RolePolecat,
-		Rig:             rig,
-		AgentState:      "stuck",
-		ExitType:        "DEFERRED",
-		CleanupStatus:   "has_unpushed",
-		HookBead:        "gt-hook",
-		LastSourceIssue: "gt-last",
-	})
-	path := intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name}.Path(h.town())
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("{not a record"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	want := patrolscan.AgentRecord{
-		State:           "stuck",
-		ExitType:        "DEFERRED",
-		CleanupStatus:   "has_unpushed",
-		HookBead:        "gt-hook",
-		LastSourceIssue: "gt-last",
-	}
-	for read := 1; read <= 2; read++ {
-		got, err := h.AgentRecord(rig, name)
-		if err != nil {
-			t.Fatalf("read %d: AgentRecord: %v", read, err)
-		}
-		if got != want {
-			t.Fatalf("read %d: AgentRecord = %+v, want the bead's %+v", read, got, want)
-		}
-	}
-	if n := strings.Count(logs.String(), agentBeadShadowLogPrefix); n != 1 {
-		t.Fatalf("logged %d lines, want 1: %q", n, logs.String())
-	}
-	if line := logs.String(); !strings.Contains(line, "agentbead_shadow: retire/shadow-broken intent record unreadable") {
-		t.Fatalf("the line does not name the seat and the unreadable record: %q", line)
 	}
 }
