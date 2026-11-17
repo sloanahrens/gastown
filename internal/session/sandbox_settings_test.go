@@ -3,12 +3,22 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
+
+var updateSandboxSettingsGolden = flag.Bool("update-sandbox-settings-golden", false,
+	"rewrite testdata/polecat_settings_dolt.golden.json")
+
+// doltModeSettingsFixture is the dolt-mode seat's render of polecatHostSettings,
+// checked in so that the render is pinned to fixed bytes rather than to a
+// second call of the renderer under test.
+const doltModeSettingsFixture = "testdata/polecat_settings_dolt.golden.json"
 
 // openshellHostSettings is a host polecat settings.json: gt hooks at the
 // host's gt, the host-only python path guard, and keys outside "hooks".
@@ -323,12 +333,27 @@ func TestNoBeadAccessFileModeSeatSettingsDropMailAndKeepEveryGuard(t *testing.T)
 
 // TestNoBeadAccessDoltModeSeatSettingsUnchanged pins that bead access other
 // than files renders the settings exactly as before (gt-1m0kb F6): byte for
-// byte the unchanged render, mail hooks and stop hook intact.
+// byte the checked-in fixture, which holds the unchanged render with the mail
+// check, the mail inbox and the stop hook intact. A change to the render or to
+// the drop rule moves the output away from the fixture and fails here.
+// Rewrite the fixture with -update-sandbox-settings-golden.
 func TestNoBeadAccessDoltModeSeatSettingsUnchanged(t *testing.T) {
 	t.Parallel()
-	plain, err := renderSandboxSettings([]byte(polecatHostSettings))
+	if *updateSandboxSettingsGolden {
+		want, err := renderSandboxSettingsForSeat([]byte(polecatHostSettings), config.SandboxBeadAccessDolt)
+		if err != nil {
+			t.Fatalf("renderSandboxSettingsForSeat(dolt): %v", err)
+		}
+		if err := os.MkdirAll("testdata", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(doltModeSettingsFixture, want, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(doltModeSettingsFixture)
 	if err != nil {
-		t.Fatalf("renderSandboxSettings: %v", err)
+		t.Fatalf("reading the dolt-mode fixture: %v", err)
 	}
 	for _, beadAccess := range []string{config.SandboxBeadAccessDolt, ""} {
 		t.Run("bead_access="+beadAccess, func(t *testing.T) {
@@ -337,17 +362,9 @@ func TestNoBeadAccessDoltModeSeatSettingsUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatalf("renderSandboxSettingsForSeat(%q): %v", beadAccess, err)
 			}
-			if !bytes.Equal(got, plain) {
-				t.Errorf("bead_access %q changed the rendered settings:\ngot:\n%s\nwant:\n%s", beadAccess, got, plain)
-			}
-			commands := hookCommands(t, got)
-			for event, want := range map[string]string{
-				"Stop":             "/usr/local/bin/gt tap polecat-stop-check",
-				"UserPromptSubmit": "/usr/local/bin/gt mail check --inject",
-			} {
-				if !slices.Contains(commands[event], want) {
-					t.Errorf("bead_access %q lost the %s hook %q, got %q", beadAccess, event, want, commands[event])
-				}
+			if !bytes.Equal(got, want) {
+				t.Errorf("bead_access %q changed the rendered settings:\ngot:\n%s\nwant (%s):\n%s",
+					beadAccess, got, doltModeSettingsFixture, want)
 			}
 		})
 	}

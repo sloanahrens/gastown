@@ -1,0 +1,117 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt tap guard permission-request",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Monitor"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt tap nudge-drain",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt tap guard pr-workflow",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt tap guard dangerous-command",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt tap guard container-suite",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt tap guard bd-close-invariant",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt tap guard bd-create-store",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt tap guard sandbox-secrets",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Monitor"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt tap guard polecat-paths",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt tap guard script-files",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt tap guard question-tool",
+            "type": "command"
+          }
+        ],
+        "matcher": "AskUserQuestion"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt prime --hook",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt tap polecat-stop-check",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/gt mail check --inject",
+            "type": "command"
+          },
+          {
+            "command": "/usr/local/bin/gt mail inbox",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  },
+  "theme": "dark"
+}
