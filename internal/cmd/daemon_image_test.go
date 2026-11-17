@@ -53,6 +53,9 @@ type imageRig struct {
 	deps  daemonImageDeps
 	out   *bytes.Buffer
 	calls []string
+	// root is the temporary directory the rig's paths sit under; the listing
+	// golden writes it as a placeholder so the text does not depend on it.
+	root string
 }
 
 func newImageRig(t *testing.T) *imageRig {
@@ -75,7 +78,7 @@ func newImageRig(t *testing.T) *imageRig {
 	if err := os.WriteFile(filepath.Join(gtSrc, "deploy", "daemon", daemonimage.KnownHostsName), []byte("x\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	r := &imageRig{out: &bytes.Buffer{}}
+	r := &imageRig{out: &bytes.Buffer{}, root: root}
 	r.flags = daemonImageFlags{
 		rev: imageTestRev, out: mk("out"), gtSrc: gtSrc, bdSrc: mk("beads"),
 		omSrc: mk("om"), hmSrc: mk("hm"), devopsSrc: mk("devops"),
@@ -119,6 +122,10 @@ type fakeImageBuilder struct {
 	calls  *[]string
 	failAt string
 	bins   []string
+	// gatewayPaths and gatewayBDCommit are what the gt-bd context stage
+	// answers: the files it staged and the full bd commit.
+	gatewayPaths    []string
+	gatewayBDCommit string
 }
 
 func (f fakeImageBuilder) step(name string) error {
@@ -127,6 +134,13 @@ func (f fakeImageBuilder) step(name string) error {
 		return errors.New(name + " failed")
 	}
 	return nil
+}
+
+func (f fakeImageBuilder) StageGatewayContext(_ context.Context, rev string) ([]string, string, error) {
+	if err := f.step("gateway " + rev); err != nil {
+		return nil, "", err
+	}
+	return f.gatewayPaths, f.gatewayBDCommit, nil
 }
 
 func (f fakeImageBuilder) BuildBinaries(_ context.Context, rev string) ([]string, error) {
@@ -401,6 +415,125 @@ func TestDaemonImageContextOnly(t *testing.T) {
 	}
 }
 
+// TestDaemonImageGatewayContext: with --apply, --context-only and --gateway the
+// command stages the gt-bd image's build context through the Builder and prints
+// its listing -- the context directory, each staged file with its path, and the
+// full bd commit under the label internal/ci/ctxlabels reads -- running none of
+// the daemon build's steps. A failed stage returns its error and prints no
+// listing.
+func TestDaemonImageGatewayContext(t *testing.T) {
+	t.Parallel()
+	listing := func(r *imageRig, paths []string) []string {
+		return []string{
+			daemonimage.ContextLine(r.flags.out),
+			"staged bd.real: " + paths[0],
+			"staged bdgw: " + paths[1],
+			"staged verbs.json: " + paths[2],
+			"label: " + gatewayBDCommitLabel + "=" + imageTestBDCommit,
+		}
+	}
+	t.Run("stages and lists", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply, r.flags.contextOnly, r.flags.gateway = true, true, true
+		paths := []string{
+			filepath.Join(r.flags.out, "bd.real"),
+			filepath.Join(r.flags.out, "bdgw"),
+			filepath.Join(r.flags.out, "verbs.json"),
+		}
+		var calls []string
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &calls, gatewayPaths: paths, gatewayBDCommit: imageTestBDCommit}
+		}
+
+		if err := runDaemonImage(context.Background(), r.flags, r.deps); err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+
+		if want := "gateway " + imageTestRev; strings.Join(calls, "|") != want {
+			t.Errorf("steps = %v, want only the gt-bd context stage %q", calls, want)
+		}
+		got := strings.Split(strings.TrimRight(r.out.String(), "\n"), "\n")
+		want := listing(r, paths)
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("listing =\n%s\nwant exactly:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+		}
+	})
+	t.Run("a failed stage returns the error and prints no listing", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply, r.flags.contextOnly, r.flags.gateway = true, true, true
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &[]string{}, failAt: "gateway " + imageTestRev}
+		}
+
+		err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+		if err == nil || !strings.Contains(err.Error(), "gateway "+imageTestRev+" failed") {
+			t.Fatalf("error = %v, want the stage's failure", err)
+		}
+		if out := r.out.String(); out != "" {
+			t.Errorf("a failed stage printed a listing:\n%s", out)
+		}
+	})
+}
+
+// TestDaemonImageGatewayFlagRules: --gateway is refused unless --apply and
+// --context-only are both set, each refusal names the flag or flags the run
+// lacks and no flag it has, and nothing is built or printed.
+func TestDaemonImageGatewayFlagRules(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		apply       bool
+		contextOnly bool
+		want        string
+		absent      string
+	}{
+		{"--gateway alone", false, false, "--gateway is valid only with --apply and --context-only: ", ""},
+		{"--gateway without --apply", false, true, "--gateway is valid only with --apply: ", "--context-only"},
+		{"--gateway without --context-only", true, false, "--gateway is valid only with --context-only: ", "--apply"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newImageRig(t)
+			r.flags.apply, r.flags.contextOnly, r.flags.gateway = tc.apply, tc.contextOnly, true
+			r.deps.builder = func(daemonimage.Builder) imageBuilder {
+				t.Error("the builder was reached after a refused --gateway")
+				return fakeImageBuilder{calls: &[]string{}}
+			}
+
+			err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.want)
+			}
+			if tc.absent != "" && strings.Contains(err.Error(), tc.absent) {
+				t.Errorf("the refusal names %s, which the run sets: %v", tc.absent, err)
+			}
+			if r.out.Len() != 0 {
+				t.Errorf("a refused --gateway printed a plan:\n%s", r.out.String())
+			}
+		})
+	}
+	t.Run("the flag parses", func(t *testing.T) {
+		t.Parallel()
+		var got daemonImageFlags
+		c := newDaemonImageCmd(func(_ context.Context, _ io.Writer, f daemonImageFlags) error {
+			got = f
+			return nil
+		})
+		c.SetArgs([]string{"--apply", "--context-only", "--gateway"})
+		c.SilenceUsage, c.SilenceErrors = true, true
+		if err := c.Execute(); err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+		if !got.gateway || !got.apply || !got.contextOnly {
+			t.Errorf("flags = %+v, want --gateway, --apply and --context-only set", got)
+		}
+	})
+}
+
 // Every refusal comes before any step runs (the rig's deps fail the test if one
 // does), with --apply as well as without. Each row removes one thing; a test
 // fails if any one refusal is removed.
@@ -495,6 +628,102 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 			})
 		}
 	}
+}
+
+// daemonModePlan is the plan a daemon build prints, recorded from the command
+// before --gateway was added; the rig's temporary root is written "<tmp>".
+const daemonModePlan = `pins: <tmp>/image-pins
+pin bd: http://forgejo:3000/owner/beads.git at fedcba9876543210fedcba9876543210fedcba98
+pin om: http://forgejo:3000/owner/organic-mechanic.git at 00112233445566778899aabbccddeeff00112233
+pin hm: http://forgejo:3000/owner/history-man.git at abcdef0123456789abcdef0123456789abcdef01
+pin devops: http://forgejo:3000/owner/devops.git at 1234567890abcdef1234567890abcdef12345678
+build gt: go build -trimpath -ldflags -X github.com/steveyegge/gastown/internal/cmd.Version=012345678 -X github.com/steveyegge/gastown/internal/cmd.Commit=012345678 -o <tmp>/out/gt ./cmd/gt   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build bd: go build -trimpath -ldflags -X main.Build=short_sha_read_in_worktree -X main.Commit=fedcba9876543210fedcba9876543210fedcba98 -o <tmp>/out/bd ./cmd/bd   (clean worktree of <tmp>/beads at fedcba9876543210fedcba9876543210fedcba98)
+build om: go build -trimpath -o <tmp>/out/om ./cmd/om   (clean worktree of <tmp>/om at 00112233445566778899aabbccddeeff00112233)
+build gt-wrap: go build -trimpath -o <tmp>/out/gt-wrap ./cmd/gt-wrap   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build trackerd: go build -trimpath -o <tmp>/out/trackerd ./cmd/trackerd   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build trackerbackup: go build -trimpath -o <tmp>/out/trackerbackup ./cmd/trackerbackup   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build app-promote: go build -trimpath -o <tmp>/out/plugins/app-promote/app-promote ./plugins/app-promote   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build town-metrics: go build -trimpath -o <tmp>/out/plugins/town-metrics/town-metrics ./plugins/town-metrics   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build hm: go build -trimpath -o <tmp>/out/hm ./cmd/hm   (clean worktree of <tmp>/hm at abcdef0123456789abcdef0123456789abcdef01)
+build devops-reporter: go build -trimpath -o <tmp>/out/devops-reporter ./cmd/reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
+build release-reporter: go build -trimpath -o <tmp>/out/release-reporter ./cmd/release-reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
+build cloudcheck: go build -trimpath -o <tmp>/out/cloudcheck ./cmd/cloudcheck   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
+check release-reporter: go version -m <tmp>/out/release-reporter   (refused unless vMAJOR.MINOR.PATCH[-pre])
+stage cloud-check.apps: git show 1234567890abcdef1234567890abcdef12345678:ops/cloud-check.apps -> <tmp>/out/cloud-check.apps
+build mango: docker --context desktop-linux run --rm --platform linux/arm64 -v mango_worktree:/src -v mango_stage:/out -w /src/go-api golang:1.27-bookworm sh -c apt-get update && apt-get install -y --no-install-recommends gcc g++ && CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-w -s" -o /out/mango ./cmd/mango   (clean worktree of <tmp>/mango at 2233445566778899aabbccddeeff001122334455)
+fetch claude: GET https://downloads.claude.ai/claude-code-releases/2.1.314/linux-arm64/claude -> <tmp>/out/claude   (sha256 a66c0a8f5d0c87a439953d797985192bbcbaefbce2e0d7b2eaa8df30ef0f3ef2)
+fetch openshell: GET https://github.com/NVIDIA/OpenShell/releases/download/v0.1.5/openshell-aarch64-unknown-linux-musl.tar.gz -> <tmp>/out/openshell   (sha256 30c949b4ac07a9c8245c1248eb82e4eb241615134fcabf3c9bf30dec7d00addf)
+fetch docker: GET https://download.docker.com/linux/static/stable/aarch64/docker-29.8.2.tgz -> <tmp>/out/docker   (sha256 76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50)
+fetch kubectl: GET https://dl.k8s.io/release/v1.37.0/bin/linux/arm64/kubectl -> <tmp>/out/kubectl   (sha256 922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3)
+image: docker --context desktop-linux build -f <tmp>/gt/deploy/daemon/Dockerfile -t gt-daemon:0123456789abcdef0123456789abcdef01234567 <tmp>/out
+`
+
+// The daemon mode's listings after the plan: the dry run's footer, or the tag
+// the apply prints.
+const (
+	daemonImageDryRunFooter = "dry run: nothing was run. Pass --apply to build.\n"
+	daemonModeDryRunListing = daemonModePlan + daemonImageDryRunFooter
+	daemonModeApplyListing  = daemonModePlan + "gt-daemon:" + imageTestRev + "\n"
+)
+
+// TestDaemonImageDaemonModeUnchanged latches what the daemon mode prints and
+// what it exits with: the dry-run listing, the apply listing, and a failed
+// step's error, byte for byte as recorded before --gateway existed. The temp
+// root the rig builds in is written as a placeholder.
+func TestDaemonImageDaemonModeUnchanged(t *testing.T) {
+	t.Parallel()
+	t.Run("dry run", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+
+		if err := runDaemonImage(context.Background(), r.flags, r.deps); err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+
+		got := strings.ReplaceAll(r.out.String(), r.root, "<tmp>")
+		if got != daemonModeDryRunListing {
+			t.Fatalf("the daemon dry-run listing changed. got:\n%s\nwant:\n%s", got, daemonModeDryRunListing)
+		}
+	})
+	t.Run("apply", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply = true
+		var calls []string
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &calls}
+		}
+
+		err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+		if err != nil {
+			t.Fatalf("runDaemonImage: %v", err)
+		}
+		got := strings.ReplaceAll(r.out.String(), r.root, "<tmp>")
+		if got != daemonModeApplyListing {
+			t.Fatalf("the daemon apply listing changed. got:\n%s\nwant:\n%s", got, daemonModeApplyListing)
+		}
+	})
+	t.Run("a failed step exits non-zero", func(t *testing.T) {
+		t.Parallel()
+		r := newImageRig(t)
+		r.flags.apply = true
+		var calls []string
+		r.deps.builder = func(daemonimage.Builder) imageBuilder {
+			return fakeImageBuilder{calls: &calls, failAt: "binaries " + imageTestRev}
+		}
+
+		err := runDaemonImage(context.Background(), r.flags, r.deps)
+
+		if err == nil {
+			t.Fatal("a failed build step returned no error, so the command would exit 0")
+		}
+		got := strings.ReplaceAll(r.out.String(), r.root, "<tmp>")
+		if got != daemonModePlan {
+			t.Fatalf("a failed step printed:\n%s\nwant the plan alone:\n%s", got, daemonModePlan)
+		}
+	})
 }
 
 // The docker build argv names the explicit context and the process environment
