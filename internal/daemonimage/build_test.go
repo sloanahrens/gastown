@@ -52,8 +52,11 @@ type fakeRunner struct {
 	shortDirs []string
 	// shortOut, when set, is what git answers a `rev-parse --short`; shortErr
 	// makes that call fail instead.
-	shortOut   string
-	shortErr   error
+	shortOut string
+	shortErr error
+	// files maps "<rev>:<path>" to the bytes the checkout holds at that commit,
+	// the answer a `git show` of one file at a commit returns.
+	files      map[string][]byte
 	failPkg    string
 	failAdd    bool
 	failDocker bool
@@ -121,6 +124,13 @@ func (f *fakeRunner) git(known map[string]string) bdbuild.Git {
 				return nil, errors.New("fake git: " + args[3] + " is not a worktree this fake added; nothing is removed")
 			}
 			return nil, os.RemoveAll(args[3])
+		}
+		if len(args) == 2 && args[0] == "show" {
+			data, ok := f.files[args[1]]
+			if !ok {
+				return nil, errors.New("fatal: path '" + args[1] + "' does not exist in the commit")
+			}
+			return data, nil
 		}
 		if len(args) == 3 && args[0] == "rev-parse" && args[1] == "--short" {
 			f.shortDirs = append(f.shortDirs, dir)
