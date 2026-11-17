@@ -445,8 +445,12 @@ type scanResult struct {
 // counts for the refusal.
 //
 // A flag outside bdRootFlags is a command flag whose arity the tree does not
-// record. Before the verb is settled, or with a following token that starts
-// with "-", its value cannot be told from a flag, so the call is refused.
+// record. While a listed verb path still extends the words read, its value
+// cannot be told from a verb word, so the call is refused. Once the verb is
+// settled, it is read as a boolean: it consumes nothing, and the next token is
+// scanned on its own. That can neither change the verb — no later word is a
+// command word once no listed path extends — nor hide a flag, because every
+// later token is still read as a flag or an operand.
 func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 	var res scanResult
 	res.words = make([]string, 0, maxPathWords)
@@ -477,9 +481,9 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 			i++ // the value is the next argument, whatever it looks like
 		case known:
 			// A boolean root flag: the next argument is not its value.
-		case i+1 < len(argv) && strings.HasPrefix(argv[i+1], "-"):
-			return scanResult{}, ambiguousFlag(arg)
 		case p.extends(res.words):
+			// A listed verb path can still claim the next word, so an unknown
+			// flag here could be taking that word as its value.
 			return scanResult{}, ambiguousFlag(arg)
 		}
 	}
