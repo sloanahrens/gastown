@@ -60,36 +60,22 @@ func admissionValues() Values {
 	return v
 }
 
-// admissionBdGatewayURL is the gateway address the policy test renders: the
-// address form the daemon hands the Job, not the name it configures its own
-// forwarder with. gatewayURLForJob (internal/daemon/update_job.go) resolves the
-// daemon's gateway name to an IPv4 address before the Job is created, and the
-// policy refuses hostAliases, so the Job always carries an address.
-const admissionBdGatewayURL = "http://192.168.5.2:7440"
+// PinnedBdGatewayURL is the only gateway address the policy admits: the address the
+// daemon hands the Job, not the name it configures its own forwarder with.
+// gatewayURLForJob (internal/daemon/update_job.go) resolves the daemon's gateway name
+// to an address before the Job is created, and the policy refuses hostAliases, so
+// every Job the daemon makes carries an address. The policy repeats this literal, and
+// TestAdmissionGatewayPinMatchesRenderer holds the two equal.
+const PinnedBdGatewayURL = "http://192.168.5.2:7440"
 
 // admissionGatewayValues is admissionValues with the bd gateway set: the Job the
 // daemon renders when bd answers its pre-swap handshake through the gateway
 // (gt-15dkai). It is the one Job the policy admits beyond the gateway-off render.
 func admissionGatewayValues() Values {
 	v := admissionValues()
-	v.BdGatewayURL = admissionBdGatewayURL
+	v.BdGatewayURL = PinnedBdGatewayURL
 	return v
 }
-
-// admissionGatewayURLRE is admissionGatewayURLForm as a Go regexp, for holding the
-// rendered gateway Job's URL to the bound the expressions state.
-var admissionGatewayURLRE = regexp.MustCompile(admissionGatewayURLForm)
-
-// admissionGatewayURLForm is the BD_GATEWAY_URL the policy admits: an http or https
-// URL whose host is the IPv4 address the daemon resolved the gateway name to. The
-// port, path and refusal of user information, a query and a fragment are the form
-// k8sdaemon.ValidateBdGatewayURL accepts (deploy/k8s/daemon/bdgateway.go restates it
-// and does not export it); TestAdmissionGatewayURLFormAgainstValidator holds the two
-// together. The host is pinned to an address and not the naming form the renderer's
-// own check takes because a name would let the Job's bd send the daemon-class token
-// it mounts to whatever that name resolves to, and the policy cannot read the
-// daemon's configured address to compare.
-const admissionGatewayURLForm = `^https?://(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[^?#\s]*)?$`
 
 // celString is s as a CEL string literal. A value holding a quote or backslash
 // cannot travel in the policy's single-quoted literals, so it fails the test
@@ -100,17 +86,6 @@ func celString(t *testing.T, s string) string {
 		t.Fatalf("%q holds a quote or backslash, which a single-quoted CEL literal cannot carry", s)
 	}
 	return "'" + s + "'"
-}
-
-// celPattern is re as a CEL string literal a `matches` call takes: a single-quoted
-// CEL string processes backslash escapes, so each backslash is doubled to reach the
-// regexp as written.
-func celPattern(t *testing.T, re string) string {
-	t.Helper()
-	if strings.ContainsRune(re, '\'') {
-		t.Fatalf("the regexp %q holds a quote, which a single-quoted CEL literal cannot carry", re)
-	}
-	return "'" + strings.ReplaceAll(re, `\`, `\\`) + "'"
 }
 
 // celList is vs as a CEL list literal.
@@ -140,9 +115,9 @@ func admissionArgsExpr(t *testing.T, args []string) string {
 }
 
 // admissionEnvExpr pins the environment to every variable containerEnv sets for v,
-// and refuses envFrom. A variable the renderer gives a constant is pinned to its
-// value; the gateway URL is the daemon's configured address, so its value is held to
-// the form the renderer's check accepts. A volume pin alone does not stop a Secret
+// each to its one value, and refuses envFrom. The gateway URL is pinned by equality
+// because the daemon-class token the Job mounts follows it: any other destination
+// would carry that token off the host. A volume pin alone does not stop a Secret
 // entering through the environment, and GIT_CONFIG_VALUE_0 runs a command, so both
 // are pinned rather than only bounded.
 func admissionEnvExpr(t *testing.T, v Values) string {
@@ -150,11 +125,6 @@ func admissionEnvExpr(t *testing.T, v Values) string {
 	env := containerEnv(v)
 	parts := []string{"has(c.env)", fmt.Sprintf("size(c.env) == %d", len(env))}
 	for _, e := range env {
-		if e.Name == k8sdaemon.BdGatewayURLEnv {
-			parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value.matches(%s))",
-				celString(t, e.Name), celPattern(t, admissionGatewayURLForm)))
-			continue
-		}
 		parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value == %s)",
 			celString(t, e.Name), celString(t, e.Value)))
 	}
@@ -941,11 +911,6 @@ func TestUpdateAdmissionPolicy(t *testing.T) {
 			}
 		})
 	}
-	// The gateway URL is the one admitted value the policy bounds by form rather than
-	// pinning: it must admit the address the daemon hands the Job.
-	if !admissionGatewayURLRE.MatchString(admissionBdGatewayURL) {
-		t.Errorf("the admitted gateway URL form refuses the rendered address %q", admissionBdGatewayURL)
-	}
 }
 
 // TestUpdateAdmissionVolumeExprNamesEveryVolume holds the deployed volume
@@ -971,51 +936,66 @@ func TestUpdateAdmissionVolumeExprNamesEveryVolume(t *testing.T) {
 	}
 }
 
-// TestAdmissionGatewayURLFormAgainstValidator holds the policy's copy of the gateway
-// URL form to the daemon's own check, k8sdaemon.ValidateBdGatewayURL, over a corpus
-// wide enough that a change to either turns a row red: the two must agree on the
-// address form, the policy must refuse a name (the daemon resolves one before the Job
-// is created and the policy refuses hostAliases), and the policy must never admit a
-// URL the daemon's check refuses.
-func TestAdmissionGatewayURLFormAgainstValidator(t *testing.T) {
+// TestUpdateAdmissionPolicyPinsGatewayURL holds BD_GATEWAY_URL to the one address:
+// the pinned URL is admitted, and another IPv4 address, a host name, another port
+// and an https URL are each refused. The refusals drive the same bound the policy's
+// expression states, and the deployed expressions are read to show the pin itself.
+func TestUpdateAdmissionPolicyPinsGatewayURL(t *testing.T) {
 	t.Parallel()
+	admitted := mustBuild(t, admissionGatewayValues()).Job
+	admitted.Metadata.Name = JobNamePrefix + "0123456789ab"
+	if problems := updateAdmissionJobProblems(admitted, admissionGatewayValues()); len(problems) > 0 {
+		t.Errorf("the Job whose BD_GATEWAY_URL is the pinned URL is refused: %s", strings.Join(problems, "; "))
+	}
 	for _, r := range []struct {
-		url       string
-		admitted  bool
-		validated bool
-		why       string
+		url string
+		why string
 	}{
-		{"http://192.168.5.2:7440", true, true, "the address the daemon resolves the gateway name to"},
-		{"http://192.168.5.2", true, true, "a URL with no port"},
-		{"https://10.0.0.1", true, true, "the renderer takes https"},
-		{"http://192.168.5.2:7440/bd", true, true, "the renderer takes a path"},
-		{"http://127.0.0.1:7440", true, true, "a loopback address"},
-		{"http://host.docker.internal:7440", false, true, "a name: the daemon resolves it before the Job is created"},
-		{"http://gateway:hunter2@192.168.5.2:7440", false, false, "user information"},
-		{"http://192.168.5.2:7440?x=1", false, false, "a query"},
-		{"http://192.168.5.2:7440#f", false, false, "a fragment"},
-		{"http://192.168.5.2:0", false, false, "port 0"},
-		{"http://192.168.5.2:65536", false, false, "a port above 65535"},
-		{"http://192.168.5.2 ", false, false, "a trailing space"},
-		{"http://192.168.5.2:7440/x y", false, false, "a space in the path"},
-		{"http://999.1.1.1:7440", false, true, "not an address: the policy admits only four octets"},
-		{"http://192.168.005.2:7440", false, true, "a zero-padded octet is not an address the daemon resolves to"},
+		{"http://192.168.5.3:7440", "another IPv4 address"},
+		{"http://host.docker.internal:7440", "a host name"},
+		{"http://192.168.5.2:7441", "another port"},
+		{"https://192.168.5.2:7440", "an https URL"},
 	} {
-		t.Run(r.url, func(t *testing.T) {
+		t.Run(r.why, func(t *testing.T) {
 			t.Parallel()
-			admitted := admissionGatewayURLRE.MatchString(r.url)
-			validated := k8sdaemon.ValidateBdGatewayURL("test", r.url) == nil
-			if admitted != r.admitted {
-				t.Errorf("the policy admits %q = %t, want %t (%s)", r.url, admitted, r.admitted, r.why)
-			}
-			if validated != r.validated {
-				t.Errorf("k8sdaemon.ValidateBdGatewayURL refuses %q = %t, want %t (%s): the validator changed",
-					r.url, !validated, r.validated, r.why)
-			}
-			if admitted && !validated {
-				t.Errorf("the policy admits %q, which k8sdaemon.ValidateBdGatewayURL refuses: the copies have drifted", r.url)
+			values := admissionGatewayValues()
+			values.BdGatewayURL = r.url
+			job := mustBuild(t, values).Job
+			job.Metadata.Name = JobNamePrefix + "0123456789ab"
+			problems := strings.Join(updateAdmissionJobProblems(job, admissionGatewayValues()), "; ")
+			if !strings.Contains(problems, k8sdaemon.BdGatewayURLEnv) {
+				t.Errorf("%s (%q) is admitted: problems %q do not name %s",
+					r.why, r.url, problems, k8sdaemon.BdGatewayURLEnv)
 			}
 		})
+	}
+	// The renderer's own check accepts all four refused URLs, so only the policy's
+	// pin stands between the daemon-class token and another destination.
+	for _, i := range []int{3, 4} {
+		expr := admissionPolicyValidationText(t, i)
+		pin := "e.name == " + celString(t, k8sdaemon.BdGatewayURLEnv) + " && has(e.value) && e.value == " + celString(t, PinnedBdGatewayURL)
+		if !strings.Contains(expr, pin) {
+			t.Errorf("the deployed validation %d does not pin %s to %q: %q", i+1, k8sdaemon.BdGatewayURLEnv, PinnedBdGatewayURL, expr)
+		}
+	}
+}
+
+// TestAdmissionGatewayPinMatchesRenderer holds the policy's gateway literal to the
+// one Go constant the tests render, in both container validations, so the two copies
+// cannot drift. It fails when the literal in the manifest is another URL.
+func TestAdmissionGatewayPinMatchesRenderer(t *testing.T) {
+	t.Parallel()
+	pin := regexp.MustCompile(`e\.name == '` + k8sdaemon.BdGatewayURLEnv + `' && has\(e\.value\) && e\.value == '([^']*)'`)
+	for _, i := range []int{3, 4} {
+		expr := admissionPolicyValidationText(t, i)
+		matches := pin.FindAllStringSubmatch(expr, -1)
+		if len(matches) != 1 {
+			t.Errorf("the deployed validation %d pins %s in %d clauses, want 1: %q", i+1, k8sdaemon.BdGatewayURLEnv, len(matches), expr)
+			continue
+		}
+		if got := matches[0][1]; got != PinnedBdGatewayURL {
+			t.Errorf("the deployed validation %d pins %s to %q, want the renderer's %q", i+1, k8sdaemon.BdGatewayURLEnv, got, PinnedBdGatewayURL)
+		}
 	}
 }
 
@@ -1277,12 +1257,12 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 	{
 		name: "a gateway URL matched by any value",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			pattern := "e.value.matches(" + celPattern(t, admissionGatewayURLForm) + ")"
+			pin := "e.value == " + celString(t, PinnedBdGatewayURL)
 			expr := docs[0].Spec.Validations[3].Expression
-			if !strings.Contains(expr, pattern) {
-				t.Fatalf("the container validation does not carry the gateway URL form %q", pattern)
+			if !strings.Contains(expr, pin) {
+				t.Fatalf("the container validation does not carry the gateway URL pin %q", pin)
 			}
-			docs[0].Spec.Validations[3].Expression = strings.Replace(expr, pattern, "e.value.matches('.*')", 1)
+			docs[0].Spec.Validations[3].Expression = strings.Replace(expr, pin, "e.value.matches('.*')", 1)
 			return docs
 		},
 		want: "validation 4",

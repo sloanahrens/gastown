@@ -25,14 +25,12 @@
 # mount and volume stays refused. They are here because bd runs only in the container
 # (the operator's order of 2026-11-17), so the Job's bd answers the pre-swap handshake
 # through the gateway, and the renderer carries the pair and that Secret for it
-# (gt-15dkai). The token file is pinned to its one path. The URL's host is pinned to an
-# IPv4 address, not a name: the daemon resolves the gateway's name to an address
-# before it creates the Job (gatewayURLForJob in internal/daemon), because the policy
-# refuses hostAliases, so every Job the daemon makes carries one; a name here could be
-# redirected at the pod and would send the daemon-class token the Job mounts wherever
-# it pointed, and the policy cannot read the daemon's configured address to compare.
-# The port and path keep the renderer's form, and user information, a query and a
-# fragment stay refused.
+# (gt-15dkai). The token file is pinned to its one path, and BD_GATEWAY_URL to the one
+# URL http://192.168.5.2:7440, the address the daemon resolves the gateway name to
+# before it creates the Job (gatewayURLForJob in internal/daemon): the policy refuses
+# hostAliases, so a name here could be redirected at the pod and would send the
+# daemon-class token the Job mounts wherever it pointed. Any other address, port or
+# scheme is refused, and so are user information, a query and a fragment.
 #
 # The command and the environment are bounded for the same reason as the volumes:
 # the daemon image carries kubectl and git, and the renderer sets GIT_CONFIG_VALUE_0
@@ -122,8 +120,8 @@ spec:
     # forgejo:3000/bot-registry/gastown-daemon, since the renderer accepts any
     # repo@sha256 reference. The environment and mounts are pinned to what
     # containerEnv and mounts set: the gateway-off render's four variables and two
-    # mounts, or the gateway-on render's six and three, with the gateway URL held to
-    # the address form the daemon resolves and the token file to its one path.
+    # mounts, or the gateway-on render's six and three, with the gateway URL pinned
+    # to the one address the daemon resolves and the token file to its one path.
     # envFrom is refused, so no Secret can enter through the environment.
     - expression: >-
         size(object.spec.template.spec.containers) == 1 &&
@@ -168,7 +166,7 @@ spec:
         c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
         c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
         c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
-        c.env.exists(e, e.name == 'BD_GATEWAY_URL' && has(e.value) && e.value.matches('^https?://(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[^?#\\s]*)?$')) &&
+        c.env.exists(e, e.name == 'BD_GATEWAY_URL' && has(e.value) && e.value == 'http://192.168.5.2:7440') &&
         c.env.exists(e, e.name == 'BD_GATEWAY_TOKEN_FILE' && has(e.value) && e.value == '/run/gt/bd-gateway/token') &&
         size(c.volumeMounts) == 3 &&
         c.volumeMounts.exists(m, m.name == 'town-state' &&
@@ -231,7 +229,7 @@ spec:
         c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
         c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
         c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
-        c.env.exists(e, e.name == 'BD_GATEWAY_URL' && has(e.value) && e.value.matches('^https?://(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}(:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3}))?(/[^?#\\s]*)?$')) &&
+        c.env.exists(e, e.name == 'BD_GATEWAY_URL' && has(e.value) && e.value == 'http://192.168.5.2:7440') &&
         c.env.exists(e, e.name == 'BD_GATEWAY_TOKEN_FILE' && has(e.value) && e.value == '/run/gt/bd-gateway/token') &&
         size(c.volumeMounts) == 3 &&
         c.volumeMounts.exists(m, m.name == 'town-state' &&
