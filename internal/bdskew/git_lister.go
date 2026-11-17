@@ -38,7 +38,9 @@ type GitLister struct {
 var _ Lister = GitLister{}
 
 // ListTree returns the base names of the entries directly under dir at commit,
-// asking git for `-C Repo ls-tree --name-only commit dir/` in Repo.
+// asking git for `-C Repo ls-tree --name-only -z commit dir/` in Repo; -z makes
+// git print each entry NUL-terminated and unquoted, so a name that holds a
+// newline, tab or non-ASCII byte comes back as itself.
 //
 // Both commit and dir reach git's argv, so a commit that is not a full
 // lowercase sha and a dir that is not a relative tree path are refused first. A
@@ -58,27 +60,36 @@ func (g GitLister) ListTree(ctx context.Context, commit, dir string) ([]string, 
 	if !treeDirOK(dir) {
 		return nil, fmt.Errorf("%w: %q", ErrBadDir, dir)
 	}
-	out, err := g.Run(ctx, g.Repo, "-C", g.Repo, "ls-tree", "--name-only", commit, dir+"/")
+	out, err := g.Run(ctx, g.Repo, "-C", g.Repo, "ls-tree", "--name-only", "-z", commit, dir+"/")
 	if err != nil {
-		return nil, fmt.Errorf("git ls-tree --name-only %s %s/: %w", commit, dir, err)
+		return nil, fmt.Errorf("git ls-tree --name-only -z %s %s/: %w", commit, dir, err)
 	}
 	var names []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if line == "" {
+	for _, entry := range strings.Split(string(out), "\x00") {
+		if entry == "" {
 			continue
 		}
-		names = append(names, path.Base(line))
+		names = append(names, path.Base(entry))
 	}
 	if len(names) == 0 {
-		return nil, fmt.Errorf("git ls-tree --name-only %s %s/ printed no entry: %w", commit, dir, ErrEmptyListing)
+		return nil, fmt.Errorf("git ls-tree --name-only -z %s %s/ printed no entry: %w", commit, dir, ErrEmptyListing)
 	}
 	return names, nil
 }
 
 // treeDirOK reports whether dir is a relative tree path this lister may hand
-// git as a pathspec: not empty, not absolute, and not shaped like an option.
+// git as a pathspec: not empty, not absolute, not shaped like an option, and
+// without a `..` segment, which would walk the listing out of the tree.
 func treeDirOK(dir string) bool {
-	return dir != "" && !path.IsAbs(dir) && !strings.HasPrefix(dir, "-")
+	if dir == "" || path.IsAbs(dir) || strings.HasPrefix(dir, "-") {
+		return false
+	}
+	for _, segment := range strings.Split(dir, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // BeadsRigRepo returns the bare clone of the beads rig under townRoot, the

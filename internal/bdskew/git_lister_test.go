@@ -24,9 +24,9 @@ func TestPreRollGuardGitListerListsTree(t *testing.T) {
 		{
 			reason: "the migrations directory of the pinned commit",
 			dir:    MigrationsDir,
-			out: "internal/storage/schema/migrations/0066_add_events_journal_actor.up.sql\n" +
-				"internal/storage/schema/migrations/0067_create_samples.up.sql\n" +
-				"internal/storage/schema/migrations/0067_create_samples.down.sql\n",
+			out: "internal/storage/schema/migrations/0066_add_events_journal_actor.up.sql\x00" +
+				"internal/storage/schema/migrations/0067_create_samples.up.sql\x00" +
+				"internal/storage/schema/migrations/0067_create_samples.down.sql\x00",
 			want: []string{
 				"0066_add_events_journal_actor.up.sql",
 				"0067_create_samples.up.sql",
@@ -36,16 +36,34 @@ func TestPreRollGuardGitListerListsTree(t *testing.T) {
 		{
 			reason: "a second directory prints full paths and base names come back",
 			dir:    "internal/storage/schema",
-			out:    "internal/storage/schema/schema.txt\n",
+			out:    "internal/storage/schema/schema.txt\x00",
 			want:   []string{"schema.txt"},
 		},
 		{
-			reason: "blank lines in the output are not entries",
+			reason: "empty NUL-separated records are not entries",
 			dir:    MigrationsDir,
-			out: "internal/storage/schema/migrations/a.up.sql\n" +
-				"\n" +
-				"internal/storage/schema/migrations/b.up.sql\n",
+			out: "internal/storage/schema/migrations/a.up.sql\x00" +
+				"\x00" +
+				"internal/storage/schema/migrations/b.up.sql\x00",
 			want: []string{"a.up.sql", "b.up.sql"},
+		},
+		{
+			reason: "a name holding a newline comes back as one unquoted entry",
+			dir:    MigrationsDir,
+			out:    "internal/storage/schema/migrations/a\nb.up.sql\x00",
+			want:   []string{"a\nb.up.sql"},
+		},
+		{
+			reason: "a name holding a tab and a non-ASCII byte comes back as itself",
+			dir:    MigrationsDir,
+			out:    "internal/storage/schema/migrations/café\tx.up.sql\x00",
+			want:   []string{"café\tx.up.sql"},
+		},
+		{
+			reason: "a dir whose name holds dots is a relative tree path",
+			dir:    "internal/storage/.schema",
+			out:    "internal/storage/.schema/schema.txt\x00",
+			want:   []string{"schema.txt"},
 		},
 	}
 	for _, tt := range tests {
@@ -61,7 +79,7 @@ func TestPreRollGuardGitListerListsTree(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ListTree returned error %v", err)
 			}
-			wantArgs := []string{"-C", testGitRepo, "ls-tree", "--name-only", testPinnedCommit, tt.dir + "/"}
+			wantArgs := []string{"-C", testGitRepo, "ls-tree", "--name-only", "-z", testPinnedCommit, tt.dir + "/"}
 			if !slices.Equal(gotArgs, wantArgs) {
 				t.Errorf("git args = %q, want %q", gotArgs, wantArgs)
 			}
@@ -138,6 +156,21 @@ func TestPreRollGuardGitListerRefuses(t *testing.T) {
 			wantErr: ErrBadDir,
 		},
 		{
+			reason: "a dir that is only parent traversal", hasRun: true, repo: testGitRepo,
+			commit: testPinnedCommit, dir: "..",
+			wantErr: ErrBadDir,
+		},
+		{
+			reason: "a dir that starts with parent traversal", hasRun: true, repo: testGitRepo,
+			commit: testPinnedCommit, dir: "../" + MigrationsDir,
+			wantErr: ErrBadDir,
+		},
+		{
+			reason: "a dir with parent traversal inside it", hasRun: true, repo: testGitRepo,
+			commit: testPinnedCommit, dir: "internal/../../etc",
+			wantErr: ErrBadDir,
+		},
+		{
 			reason: "git fails", hasRun: true, repo: testGitRepo,
 			commit: testPinnedCommit, dir: MigrationsDir,
 			runErr: runErr, wantErr: runErr, wantCalls: 1,
@@ -148,9 +181,9 @@ func TestPreRollGuardGitListerRefuses(t *testing.T) {
 			out: "", wantErr: ErrEmptyListing, wantCalls: 1,
 		},
 		{
-			reason: "git lists only blank lines", hasRun: true, repo: testGitRepo,
+			reason: "git lists only empty records", hasRun: true, repo: testGitRepo,
 			commit: testPinnedCommit, dir: MigrationsDir,
-			out: "\n\n", wantErr: ErrEmptyListing, wantCalls: 1,
+			out: "\x00\x00", wantErr: ErrEmptyListing, wantCalls: 1,
 		},
 	}
 	for _, tt := range tests {
@@ -191,9 +224,9 @@ func TestPreRollGuardLevelAtCommitOverGitLister(t *testing.T) {
 	}{
 		{
 			reason: "the samples build is level 67",
-			out: "internal/storage/schema/migrations/0066_add_events_journal_actor.up.sql\n" +
-				"internal/storage/schema/migrations/0067_create_samples.up.sql\n" +
-				"internal/storage/schema/migrations/0067_create_samples.down.sql\n",
+			out: "internal/storage/schema/migrations/0066_add_events_journal_actor.up.sql\x00" +
+				"internal/storage/schema/migrations/0067_create_samples.up.sql\x00" +
+				"internal/storage/schema/migrations/0067_create_samples.down.sql\x00",
 			want: 67,
 		},
 		{
