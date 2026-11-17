@@ -45,7 +45,8 @@ type Result struct {
 // imageRef is host/repo@sha256:<64 hex>; an index is followed to the manifests
 // of platforms, each "os/arch" or "os/arch/variant". Anything Check cannot
 // decide is an error, never Dead: a reference that does not resolve, a platform
-// the index lacks, a manifest it cannot read and a registry error.
+// the index lacks, a manifest it cannot read and a registry error. A platform
+// named more than once is asked for and reported once.
 func Check(ctx context.Context, reg Registry, imageRef string, platforms []string) (Result, error) {
 	if reg == nil {
 		return Result{}, fmt.Errorf("pincheck: %s: no registry to ask", imageRef)
@@ -58,11 +59,16 @@ func Check(ctx context.Context, reg Registry, imageRef string, platforms []strin
 		return Result{}, fmt.Errorf("pincheck: %s: no platform was named to check", imageRef)
 	}
 	requested := make([]platform, 0, len(platforms))
+	named := make(map[platform]bool, len(platforms))
 	for _, name := range platforms {
 		p, err := parsePlatform(name)
 		if err != nil {
 			return Result{}, fmt.Errorf("pincheck: %s: %w", imageRef, err)
 		}
+		if named[p] {
+			continue
+		}
+		named[p] = true
 		requested = append(requested, p)
 	}
 
