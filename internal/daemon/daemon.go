@@ -218,9 +218,15 @@ type Daemon struct {
 	cloudDSN cloudDSNWatch
 
 	// getenv reads the environment the start names its owner from
-	// (DetectSelf); nil reads the process environment. Tests set it so a
-	// start runs under an environment fixture.
+	// (DetectSelf) and the gateway URL the pod roll's Job is given; nil reads the
+	// process environment. Tests set it so a start and a launch run under an
+	// environment fixture.
 	getenv func(string) string
+
+	// lookupHost resolves the gateway host name a pod roll's Job is given (see
+	// gatewayURLForJob); nil is net.LookupHost. Tests set it so no test reaches a
+	// resolver.
+	lookupHost func(string) ([]string, error)
 
 	// hostname names the host a manual owner's id carries (see
 	// hostnameOrOS); nil reads os.Hostname. Tests set it to drive the failed
