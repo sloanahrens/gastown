@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -24,6 +25,26 @@ func loadSpecDispatch(t *testing.T, body string) (*SpecDispatchConfig, error) {
 		t.Fatal("patrols = nil, want the spec_dispatch block")
 	}
 	return cfg.Patrols.SpecDispatch, nil
+}
+
+// loadSpecDispatchWarn loads body through the production load path with the
+// warnings it emits captured, so a row can assert both the decoded block and
+// what the operator is told.
+func loadSpecDispatchWarn(t *testing.T, body string) (*SpecDispatchConfig, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "daemon.json")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var warn strings.Builder
+	cfg, err := loadDaemonPatrolConfig(path, &warn)
+	if err != nil {
+		t.Fatalf("loadDaemonPatrolConfig: %v", err)
+	}
+	if cfg.Patrols == nil || cfg.Patrols.SpecDispatch == nil {
+		t.Fatal("spec_dispatch = nil, want the block")
+	}
+	return cfg.Patrols.SpecDispatch, warn.String()
 }
 
 // An absent lint_budget_max_lines and lint_budget_required leave the change
@@ -82,20 +103,79 @@ func TestRunawayBeadLintBudgetReadsValues(t *testing.T) {
 	}
 }
 
-// A negative lint_budget_max_lines is refused at decode, naming the key: a
-// ceiling below zero is a typo, and read as written it would refuse every bead.
-func TestRunawayBeadLintBudgetRefusesNegative(t *testing.T) {
+// A negative lint_budget_max_lines loads the way its sibling duration fields
+// do: the load warns naming the key and keeps the operator's value as written,
+// and StoryPointsLintBudgetMaxLines reads it as off, so a typo cannot fail the
+// whole load or refuse every bead the lint sees.
+func TestRunawayBeadLintBudgetWarnsNegative(t *testing.T) {
 	t.Parallel()
-	for _, value := range []string{"-1", "-300"} {
-		t.Run(value, func(t *testing.T) {
+	for _, value := range []int{-1, -300} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
 			t.Parallel()
-			_, err := loadSpecDispatch(t, `{"patrols":{"spec_dispatch":{"story_points":{`+
-				`"lint_budget_max_lines":`+value+`}}}}`)
-			if err == nil {
-				t.Fatalf("LoadDaemonPatrolConfig accepted lint_budget_max_lines %s", value)
+			sd, warn := loadSpecDispatchWarn(t, `{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"story_points":{`+
+				`"lint_budget_max_lines":`+strconv.Itoa(value)+`,"lint_budget_required":true}}}}`)
+			if sd.StoryPoints.LintBudgetMaxLines != value {
+				t.Errorf("LintBudgetMaxLines = %d, want the operator's %d kept", sd.StoryPoints.LintBudgetMaxLines, value)
 			}
-			if !strings.Contains(err.Error(), "spec_dispatch.story_points.lint_budget_max_lines") {
-				t.Errorf("error = %v, want it to name spec_dispatch.story_points.lint_budget_max_lines", err)
+			if !sd.StoryPoints.LintBudgetRequired {
+				t.Error("LintBudgetRequired = false, want the block's other settings kept")
+			}
+			if got := sd.StoryPointsLintBudgetMaxLines(); got != 0 {
+				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want 0 (off)", got)
+			}
+			if !strings.Contains(warn, "daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines") {
+				t.Errorf("warning = %q, want it to name daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines", warn)
+			}
+			if !strings.Contains(warn, strconv.Itoa(value)) {
+				t.Errorf("warning = %q, want it to name the value %d", warn, value)
+			}
+		})
+	}
+}
+
+// A negative lint_budget_max_lines is refused on save, naming the key, so a
+// writer cannot persist a ceiling the load only warns about.
+func TestSaveDaemonPatrolConfigRefusesNegativeLintBudget(t *testing.T) {
+	t.Parallel()
+	for _, value := range []int{-1, -300} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			cfg := &DaemonPatrolConfig{
+				Type:    "daemon-patrol-config",
+				Version: 1,
+				Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{
+					StoryPoints: &StoryPointsConfig{LintBudgetMaxLines: value},
+				}},
+			}
+			err := SaveDaemonPatrolConfig(path, cfg)
+			if err == nil {
+				t.Fatalf("SaveDaemonPatrolConfig accepted lint_budget_max_lines %d", value)
+			}
+			if !strings.Contains(err.Error(), "daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines") {
+				t.Errorf("error = %v, want it to name daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines", err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("a refused save left a file behind: %v", err)
+			}
+		})
+	}
+}
+
+// A usable lint_budget_max_lines loads without a word: only a value below zero
+// is a typo the load reports.
+func TestRunawayBeadLintBudgetGoodValueWarnsNothing(t *testing.T) {
+	t.Parallel()
+	for _, value := range []int{0, 300} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			t.Parallel()
+			sd, warn := loadSpecDispatchWarn(t, `{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"story_points":{`+
+				`"lint_budget_max_lines":`+strconv.Itoa(value)+`}}}}`)
+			if warn != "" {
+				t.Errorf("a usable lint_budget_max_lines %d warned: %q", value, warn)
+			}
+			if got := sd.StoryPointsLintBudgetMaxLines(); got != value {
+				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want %d", got, value)
 			}
 		})
 	}
@@ -123,8 +203,9 @@ func TestRunawayBeadLintBudgetNilIsOff(t *testing.T) {
 	}
 }
 
-// A block built in code around a negative lint_budget_max_lines still reads as
-// off: the accessor is the one reader, and it clamps to zero.
+// A block built in code around a negative lint_budget_max_lines reads as off:
+// the accessor is the one reader and clamps to zero, so the loader's warning
+// and the save's refusal are the signals such a value gets (gt-p2zuge).
 func TestRunawayBeadLintBudgetNegativeInMemoryIsOff(t *testing.T) {
 	t.Parallel()
 	sd := &SpecDispatchConfig{StoryPoints: &StoryPointsConfig{LintBudgetMaxLines: -5}}

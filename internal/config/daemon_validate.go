@@ -4,10 +4,11 @@ import "fmt"
 
 // ValidateDaemonPatrolConfig runs every check the daemon's schema applies to a
 // daemon patrol document: the type and version, the overrun guard's
-// scheduled_stop_after, gate_allowance and split_added_lines, the container
-// names, the polecat image source, the container_off names the step audit does
-// not classify, the tier_sweep runner, the disk maintenance cadences and
-// percent, and every scheduled_slings entry.
+// scheduled_stop_after, gate_allowance and split_added_lines, the story points
+// change budget's lint_budget_max_lines, the container names, the polecat image
+// source, the container_off names the step audit does not classify, the
+// tier_sweep runner, the disk maintenance cadences and percent, and every
+// scheduled_slings entry.
 // The writer paths and the command that edits settings/config.json call it
 // before a document is saved, so neither can save one the other refuses
 // (gt-yjzepk.4).
