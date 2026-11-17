@@ -615,10 +615,10 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 }
 
 // loadDaemonPatrolConfig is LoadDaemonPatrolConfig with the warnings it emits
-// on a bad overrun guard duration written to warn. The daemon's own reader
-// (ReadPatrolConfig) goes through here, so a typo in a duration setting is
-// reported each time the config is read rather than silently replaced by the
-// default.
+// on a bad overrun guard value written to warn. The daemon's own reader
+// (ReadPatrolConfig) goes through here, so a typo in a duration or line-count
+// setting is reported each time the config is read rather than silently
+// replaced by the default.
 func loadDaemonPatrolConfig(path string, warn io.Writer) (*DaemonPatrolConfig, error) {
 	data, label, err := readConfigFile(path)
 	if err != nil {
@@ -635,6 +635,7 @@ func loadDaemonPatrolConfig(path string, warn io.Writer) (*DaemonPatrolConfig, e
 
 	warnBadScheduledStopAfter(warn, &config)
 	warnBadGateAllowance(warn, &config)
+	warnBadSplitAddedLines(warn, &config)
 	if err := validateDaemonPatrolConfigIdentity(&config); err != nil {
 		return nil, err
 	}
@@ -653,8 +654,8 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 }
 
 // validateDaemonPatrolConfigIdentity checks the type and version: all a load
-// requires, since a bad scheduled_stop_after or gate_allowance loads with a
-// warning.
+// requires, since a bad scheduled_stop_after, gate_allowance or
+// split_added_lines loads with a warning.
 func validateDaemonPatrolConfigIdentity(c *DaemonPatrolConfig) error {
 	if c.Type != "daemon-patrol-config" && c.Type != "" {
 		return fmt.Errorf("%w: expected type 'daemon-patrol-config', got '%s'", ErrInvalidType, c.Type)
@@ -674,6 +675,9 @@ func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	}
 	if s := badGateAllowance(c); s != "" {
 		return fmt.Errorf("daemon.patrols.overrun_guard.gate_allowance %q: want a duration of zero or more, such as \"5m\"", s)
+	}
+	if n, bad := badSplitAddedLines(c); bad {
+		return fmt.Errorf("daemon.patrols.overrun_guard.split_added_lines %d: want zero or more added lines, or absent for off", n)
 	}
 	return nil
 }
@@ -710,6 +714,18 @@ func badGateAllowance(c *DaemonPatrolConfig) string {
 	return badOverrunDuration(c.Patrols.OverrunGuard.GateAllowance)
 }
 
+// badSplitAddedLines returns the overrun guard's split_added_lines and whether
+// it is set below zero. Zero is off; a negative line count has no reading and,
+// taken as written, would stop every seat that reached the mark, so it counts
+// as bad.
+func badSplitAddedLines(c *DaemonPatrolConfig) (int, bool) {
+	if c.Patrols == nil || c.Patrols.OverrunGuard == nil {
+		return 0, false
+	}
+	n := c.Patrols.OverrunGuard.SplitAddedLines
+	return n, n < 0
+}
+
 // warnBadScheduledStopAfter says on warn that scheduled_stop_after is not a
 // usable duration and leaves the value in place: the overrun guard falls back
 // to its default limit on one it cannot use (overrunScheduledStopAfter), and a
@@ -728,6 +744,16 @@ func warnBadScheduledStopAfter(warn io.Writer, c *DaemonPatrolConfig) {
 func warnBadGateAllowance(warn io.Writer, c *DaemonPatrolConfig) {
 	if s := badGateAllowance(c); s != "" {
 		fmt.Fprintf(warn, "warning: daemon.patrols.overrun_guard.gate_allowance %q is not a duration of zero or more, using the default\n", s)
+	}
+}
+
+// warnBadSplitAddedLines is warnBadScheduledStopAfter for split_added_lines:
+// the guard's tripwire reads a line count below zero as off
+// (SplitAddedLinesOrOff), so a typo must be reported, not applied in silence.
+// The value stays as written and Save refuses it, as for the durations.
+func warnBadSplitAddedLines(warn io.Writer, c *DaemonPatrolConfig) {
+	if n, bad := badSplitAddedLines(c); bad {
+		fmt.Fprintf(warn, "warning: daemon.patrols.overrun_guard.split_added_lines %d is below zero, using the default (off)\n", n)
 	}
 }
 

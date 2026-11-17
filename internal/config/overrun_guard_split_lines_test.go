@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -77,21 +78,98 @@ func TestRunawayBeadSplitAddedLinesReadsValue(t *testing.T) {
 	}
 }
 
-// A negative split_added_lines is refused at decode, naming the key: a line
-// count below zero is a typo, and read as written it would stop every seat that
-// reached the mark.
-func TestRunawayBeadSplitAddedLinesRefusesNegative(t *testing.T) {
+// A negative split_added_lines loads the way its sibling durations do: the
+// load warns naming the key and keeps the operator's value as written, and the
+// tripwire reads it as off, so a typo cannot fail the whole load or stop every
+// seat that reached the mark.
+func TestRunawayBeadSplitAddedLinesWarnsNegative(t *testing.T) {
 	t.Parallel()
-	for _, value := range []string{"-1", "-300"} {
-		t.Run(value, func(t *testing.T) {
+	for _, value := range []int{-1, -300} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
 			t.Parallel()
-			_, err := loadOverrunGuardBlock(t, `{"type":"daemon-patrol-config","version":1,"patrols":{`+
-				`"overrun_guard":{"enabled":true,"split_added_lines":`+value+`}}}`)
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			raw := `{"type":"daemon-patrol-config","version":1,"patrols":{` +
+				`"overrun_guard":{"enabled":true,"split_added_lines":` + strconv.Itoa(value) + `}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var warn strings.Builder
+			cfg, err := loadDaemonPatrolConfig(path, &warn)
+			if err != nil {
+				t.Fatalf("loadDaemonPatrolConfig refused split_added_lines %d: %v", value, err)
+			}
+			og := cfg.Patrols.OverrunGuard
+			if og == nil {
+				t.Fatal("overrun_guard = nil, want the block")
+			}
+			if !og.Enabled {
+				t.Error("Enabled = false, want the block's other settings kept")
+			}
+			if og.SplitAddedLines != value {
+				t.Errorf("SplitAddedLines = %d, want the operator's %d kept", og.SplitAddedLines, value)
+			}
+			if got := og.SplitAddedLinesOrOff(); got != 0 {
+				t.Errorf("SplitAddedLinesOrOff() = %d, want 0 (off)", got)
+			}
+			got := warn.String()
+			if !strings.Contains(got, "daemon.patrols.overrun_guard.split_added_lines") {
+				t.Errorf("warning = %q, want it to name daemon.patrols.overrun_guard.split_added_lines", got)
+			}
+			if !strings.Contains(got, strconv.Itoa(value)) {
+				t.Errorf("warning = %q, want it to name the value %d", got, value)
+			}
+		})
+	}
+}
+
+// A negative split_added_lines is refused on save, naming the key, so a writer
+// cannot persist a line count the load only warns about.
+func TestSaveDaemonPatrolConfigRefusesNegativeSplitAddedLines(t *testing.T) {
+	t.Parallel()
+	for _, value := range []int{-1, -300} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			cfg := &DaemonPatrolConfig{
+				Type:    "daemon-patrol-config",
+				Version: 1,
+				Patrols: &PatrolsConfig{OverrunGuard: &OverrunGuardConfig{Enabled: true, SplitAddedLines: value}},
+			}
+			err := SaveDaemonPatrolConfig(path, cfg)
 			if err == nil {
-				t.Fatalf("LoadDaemonPatrolConfig accepted split_added_lines %s", value)
+				t.Fatalf("SaveDaemonPatrolConfig accepted split_added_lines %d", value)
 			}
 			if !strings.Contains(err.Error(), "daemon.patrols.overrun_guard.split_added_lines") {
 				t.Errorf("error = %v, want it to name daemon.patrols.overrun_guard.split_added_lines", err)
+			}
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("a refused save left a file behind: %v", err)
+			}
+		})
+	}
+}
+
+// A usable split_added_lines loads without a word: only a value below zero is
+// a typo the load reports.
+func TestRunawayBeadSplitAddedLinesGoodValueWarnsNothing(t *testing.T) {
+	t.Parallel()
+	for _, value := range []int{0, 300} {
+		t.Run(strconv.Itoa(value), func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "daemon.json")
+			raw := `{"type":"daemon-patrol-config","version":1,"patrols":{` +
+				`"overrun_guard":{"enabled":true,"split_added_lines":` + strconv.Itoa(value) + `}}}`
+			if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			var warn strings.Builder
+			if _, err := loadDaemonPatrolConfig(path, &warn); err != nil {
+				t.Fatalf("loadDaemonPatrolConfig: %v", err)
+			}
+			if warn.Len() != 0 {
+				t.Errorf("a usable split_added_lines %d warned: %q", value, warn.String())
 			}
 		})
 	}
@@ -107,9 +185,8 @@ func TestRunawayBeadSplitAddedLinesNilIsOff(t *testing.T) {
 	}
 }
 
-// The block decodes its own JSON, so it repeats the kernel's unknown-key
-// refusal: a key that is not split_added_lines is a typo, never an ignored
-// setting.
+// The kernel's strict decode walks the block, so a key that is not one of its
+// own is a typo, never an ignored setting.
 func TestRunawayBeadSplitAddedLinesRefusesUnknownKey(t *testing.T) {
 	t.Parallel()
 	_, err := loadOverrunGuardBlock(t, `{"type":"daemon-patrol-config","version":1,"patrols":{`+
@@ -122,8 +199,8 @@ func TestRunawayBeadSplitAddedLinesRefusesUnknownKey(t *testing.T) {
 	}
 }
 
-// The block's other keys still load through its custom decoder, so adding
-// split_added_lines takes nothing away from them.
+// The block's other keys still load, so adding split_added_lines takes nothing
+// away from them.
 func TestRunawayBeadOverrunGuardBlockStillDecodes(t *testing.T) {
 	t.Parallel()
 	og, err := loadOverrunGuardBlock(t, `{"type":"daemon-patrol-config","version":1,"patrols":{`+
