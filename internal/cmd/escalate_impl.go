@@ -116,8 +116,14 @@ func (r escalateRun) escalate(args []string) error {
 
 	// A seat with no bead access reports its escalation through its outbox
 	// instead of filing a bead; the host raises it from there (plan row F4,
-	// gt-9jrzm7).
-	if r.inFileMode() {
+	// gt-9jrzm7). A marker that is there but unreadable is refused here: such a
+	// seat cannot tell whether it has a bead route, so the dolt path below is a
+	// door it may not have (gt-w1mzol).
+	fileMode, err := r.inFileMode()
+	if err != nil {
+		return fmt.Errorf("gt escalate: %w", err)
+	}
+	if fileMode {
 		return r.escalateToOutbox(description, severity)
 	}
 
@@ -212,9 +218,11 @@ func (r escalateRun) dataDir() string {
 
 // inFileMode reports whether this seat reads its task from files rather than
 // from its bead: the MODE marker the runtime archive stages beside TASK.md says
-// so (taskfile.FileMode). A seat without the marker reads dolt mode.
-func (r escalateRun) inFileMode() bool {
-	return taskfile.FileMode(filepath.Join(r.dataDir(), seatTaskDirName))
+// so (taskfile.ReadFileMode). A seat without the marker reads dolt mode; a
+// marker that is there but cannot be read is an error, because such a seat
+// cannot tell whether it has a bead route (gt-w1mzol).
+func (r escalateRun) inFileMode() (bool, error) {
+	return taskfile.ReadFileMode(filepath.Join(r.dataDir(), seatTaskDirName))
 }
 
 // escalateToOutbox writes the escalation request into the seat's outbox,
