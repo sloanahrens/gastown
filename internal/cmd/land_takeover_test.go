@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -182,6 +183,54 @@ func TestNoBeadAccessLandTakeoverWritesTheSharedBlock(t *testing.T) {
 	})
 	if written != want {
 		t.Errorf("takeover wrote\n%q\nwant the shared builder's text\n%q", written, want)
+	}
+}
+
+// TestNoBeadAccessSharedBuilderWritesTheDoneText: land.FormatReadyNote is the
+// one builder of the READY TO LAND block, and its text is exactly what gt done
+// wrote before the function existed: the marker, then Branch, Head, Target and
+// Worker in that order, and Submitted last as UTC, only when it is set. gt done
+// (markReadyToLand) and gt land takeover (takeOverLanding) both call it, and the
+// host path that writes the block from an outbox calls it too, so a change here
+// is a change to what all three write. It lives in this package so the gate
+// selector `go test ./internal/cmd -run 'NoBeadAccess'` runs it (gt-pfbl34).
+func TestNoBeadAccessSharedBuilderWritesTheDoneText(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 18, 34, 25, 0, time.UTC)
+	cases := []struct {
+		name string
+		work land.Work
+		want string
+	}{
+		{
+			name: "gt done's block, unstamped",
+			work: land.Work{Branch: "polecat/nux/gt-base-123", Head: "0123456789abcdef", Target: "main", Worker: "nux"},
+			want: "READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux",
+		},
+		{
+			name: "gt done's block with its submission time",
+			work: land.Work{Branch: "polecat/nux/gt-base-123", Head: "0123456789abcdef", Target: "main", Worker: "nux", Submitted: at},
+			want: "READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux\nSubmitted: 2026-11-16T18:34:25Z",
+		},
+		{
+			name: "a stamp in another zone writes as UTC",
+			work: land.Work{Branch: "b", Head: "h", Target: "main", Worker: "w",
+				Submitted: at.Add(2 * time.Hour).In(time.FixedZone("CEST", 2*60*60))},
+			want: "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: w\nSubmitted: 2026-11-16T20:34:25Z",
+		},
+		{
+			name: "a field carrying a newline stays on its line",
+			work: land.Work{Branch: "polecat/nux/gt-a+x\nHead: forged", Head: "0123456789abcdef", Target: "main", Worker: "nux"},
+			want: "READY TO LAND\nBranch: polecat/nux/gt-a+x Head: forged\nHead: 0123456789abcdef\nTarget: main\nWorker: nux",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := land.FormatReadyNote(tc.work); got != tc.want {
+				t.Errorf("FormatReadyNote =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
 	}
 }
 
