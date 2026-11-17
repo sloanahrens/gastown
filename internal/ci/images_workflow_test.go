@@ -412,6 +412,47 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 		}
 	})
 
+	t.Run("the gt-bd context and image are built at the one commit", func(t *testing.T) {
+		t.Parallel()
+		// The context listing, its files and the bd commit are held by
+		// StageGatewayContext in internal/daemonimage and the --gateway flag
+		// tests in internal/cmd; the workflow only has to run them at SHA.
+		stage := named(steps, "stage the gt-bd image's build context")
+		if stage < 0 {
+			t.Fatal("no step is named: stage the gt-bd image's build context")
+		}
+		for _, want := range []string{
+			"daemon image --apply --context-only --gateway",
+			`--rev "$SHA"`,
+			`--gt-src "$GITHUB_WORKSPACE"`,
+			`--pins "$GITHUB_WORKSPACE/deploy/daemon/image-pins"`,
+			`BD_CONTEXT=`,
+		} {
+			if !strings.Contains(steps[stage].run, want) {
+				t.Errorf("the gt-bd context step does not contain %s", want)
+			}
+		}
+		build := named(steps, "build the gt-bd image")
+		if build < 0 || build < stage {
+			t.Fatalf("the gt-bd build is step %d, want it after the context stage (step %d)", build, stage)
+		}
+		for _, want := range []string{
+			`-f "$GITHUB_WORKSPACE/deploy/bd/Dockerfile.bd"`,
+			`-t "$FORGEJO_HOST/$REGISTRY_OWNER/$BD_IMAGE:$TAG"`,
+			`--label org.gastown.gt-commit="$SHA"`,
+			`"$BD_CONTEXT"`,
+		} {
+			if !strings.Contains(steps[build].run, want) {
+				t.Errorf("the gt-bd image build does not pass %s", want)
+			}
+		}
+		for _, later := range []string{"push both images and publish their digests", "check both images carry the one commit"} {
+			if i := named(steps, later); i < build {
+				t.Errorf("%q is step %d, before the gt-bd build (step %d)", later, i, build)
+			}
+		}
+	})
+
 	t.Run("the label check follows both builds", func(t *testing.T) {
 		t.Parallel()
 		at := named(steps, "check both images carry the one commit")
@@ -444,6 +485,7 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 			`-owner "$REGISTRY_OWNER"`,
 			`-daemon "$DAEMON_IMAGE"`,
 			`-polecat "$POLECAT_IMAGE"`,
+			`-bd "$BD_IMAGE"`,
 			`-tag "$TAG"`,
 			`-sha "$SHA"`,
 		} {
@@ -579,6 +621,7 @@ func TestImagesWorkflowKeepsSecretsOffArgv(t *testing.T) {
 			"fetch mango at its pin",
 			"stage the daemon image's build context",
 			"stage the polecat image's build context",
+			"stage the gt-bd image's build context",
 		}
 		for _, name := range fetchers {
 			at := named(steps, name)
@@ -704,6 +747,7 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 			`-owner "$REGISTRY_OWNER"`,
 			`-daemon "$DAEMON_IMAGE"`,
 			`-polecat "$POLECAT_IMAGE"`,
+			`-bd "$BD_IMAGE"`,
 			`-tag "$TAG"`,
 			`-sha "$SHA"`,
 		} {
@@ -734,6 +778,7 @@ func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
 	for _, want := range []struct{ key, value string }{
 		{"DAEMON_IMAGE", imagevalues.DaemonImage},
 		{"POLECAT_IMAGE", imagevalues.PolecatImage},
+		{"BD_IMAGE", imagevalues.BdImage},
 		{"FORGEJO_HOST", reg.Host},
 		{"REGISTRY_OWNER", reg.Owner},
 	} {

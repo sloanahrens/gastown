@@ -1,6 +1,6 @@
 # The image build: runs on a push to green/<sha12>, the ref a fully green tier
-# sweep publishes (gt-gg9hv.61), and builds and pushes the daemon and the
-# polecat image at that one commit (gt-gg9hv.62).
+# sweep publishes (gt-gg9hv.61), and builds and pushes the daemon, the
+# polecat and the gt-bd gateway image at that one commit (gt-gg9hv.62).
 #
 # This file is the reviewed text of the images workflow. The live copy is
 # .forgejo/workflows/images.yml: the operator copies this file there byte for
@@ -41,6 +41,9 @@ env:
   REGISTRY_OWNER: bot-registry
   DAEMON_IMAGE: gastown-daemon
   POLECAT_IMAGE: gastown-polecat
+  # The bd gateway image gt-bd (docs/design/bd-container.md, Images and CI),
+  # internal/imagevalues' BdImage; the same test holds it equal.
+  BD_IMAGE: gastown-bd
   # The account REGISTRY_TOKEN was minted for: the bot the provisioner gives
   # write:package (scripts/forgejo-provision.sh, role registry).
   REGISTRY_USER: bot-registry
@@ -198,6 +201,32 @@ jobs:
             --label org.gastown.bd-commit="$BD_COMMIT" \
             --build-arg GO_FLOOR="$GO_FLOOR" \
             "$POLECAT_CONTEXT"
+      - name: stage the gt-bd image's build context
+        env:
+          SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/gitconfig
+        run: |
+          set -euo pipefail
+          ctx=$(mktemp -d "$RUNNER_TEMP/bd-context.XXXXXX")
+          # --gateway stages bd.real, bdgw and verbs.json, the three files
+          # deploy/bd/Dockerfile.bd copies, and prints their listing.
+          go run ./cmd/gt daemon image --apply --context-only --gateway \
+            --rev "$SHA" \
+            --out "$ctx" \
+            --gt-src "$GITHUB_WORKSPACE" \
+            --mango-src "$MANGO_SRC" \
+            --mango-commit "$MANGO_COMMIT" \
+            --pins "$GITHUB_WORKSPACE/deploy/daemon/image-pins"
+          echo "BD_CONTEXT=$ctx" >> "$GITHUB_ENV"
+      - name: build the gt-bd image
+        run: |
+          set -euo pipefail
+          docker build \
+            --platform linux/arm64 \
+            -f "$GITHUB_WORKSPACE/deploy/bd/Dockerfile.bd" \
+            -t "$FORGEJO_HOST/$REGISTRY_OWNER/$BD_IMAGE:$TAG" \
+            --label org.gastown.gt-commit="$SHA" \
+            "$BD_CONTEXT"
       - name: push both images and publish their digests
         run: |
           set -euo pipefail
@@ -211,6 +240,7 @@ jobs:
             -owner "$REGISTRY_OWNER" \
             -daemon "$DAEMON_IMAGE" \
             -polecat "$POLECAT_IMAGE" \
+            -bd "$BD_IMAGE" \
             -tag "$TAG" \
             -sha "$SHA"
       - name: check both images carry the one commit
@@ -224,6 +254,7 @@ jobs:
             -owner "$REGISTRY_OWNER" \
             -daemon "$DAEMON_IMAGE" \
             -polecat "$POLECAT_IMAGE" \
+            -bd "$BD_IMAGE" \
             -tag "$TAG" \
             -sha "$SHA"
       # Runs last, even after a failed step, so the login's token does not stay
