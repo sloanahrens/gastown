@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
@@ -822,12 +823,15 @@ func TestReworkProgramRunReportsARecordItCannotWrite(t *testing.T) {
 // TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled is the bead's
 // second acceptance: the patrol's own ticker exists only when
 // daemon.patrols.rework_numbers.enabled is true, and a town that names no key
-// starts nothing.
+// starts nothing. The ticker is the fake clock's, so the test drives the tick
+// itself rather than waiting on a real timer.
 func TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	t.Parallel()
+	clock := clockwork.NewFakeClockAt(reworkProgramNow())
 	d := &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(io.Discard, "", 0),
+		clock:  clock,
 	}
 	if channel, stop := d.startReworkNumbersTicker(); channel != nil || stop != nil {
 		t.Error("a town that names no rework_numbers started its ticker")
@@ -846,6 +850,20 @@ func TestReworkProgramReworkNumbersPatrolStartsOnlyWhenEnabled(t *testing.T) {
 	channel, stop := d.startReworkNumbersTicker()
 	if channel == nil || stop == nil {
 		t.Fatal("an enabled rework_numbers started no ticker")
+	}
+	// The ticker asks on the check cadence, not on the week: nothing arrives
+	// before one check interval, and one tick arrives at it.
+	clock.Advance(reworkNumbersCheckTick - time.Second)
+	select {
+	case <-channel:
+		t.Error("the ticker fired before one check interval passed")
+	default:
+	}
+	clock.Advance(time.Second)
+	select {
+	case <-channel:
+	default:
+		t.Error("no tick arrived one check interval after the start")
 	}
 	stop()
 }
@@ -964,8 +982,9 @@ func TestReworkProgramReworkNumbersStopJoinsTheRun(t *testing.T) {
 
 	t.Run("the run the ticker started is joined", func(t *testing.T) {
 		t.Parallel()
+		// The release below is what ends the join, so the production bound is
+		// only its fail-safe and the subtest leaves it in place.
 		d, reached, unblock := blocking(t, io.Discard)
-		d.reworkNumbersJoinWait = time.Hour
 
 		d.startReworkNumbersTick()
 		waitForSignal(t, reached, "the run never read the records")
