@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,8 +69,8 @@ func TestRunawayBeadLintBudgetOffByDefault(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadDaemonPatrolConfig: %v", err)
 			}
-			if got := sd.StoryPointsLintBudgetMaxLines(); got != 0 {
-				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want 0 (off)", got)
+			if got, err := sd.StoryPointsLintBudgetMaxLines(); err != nil || got != 0 {
+				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, %v; want 0, nil (off)", got, err)
 			}
 			if sd.StoryPointsLintBudgetRequired() {
 				t.Error("StoryPointsLintBudgetRequired() = true, want false (off)")
@@ -95,8 +97,8 @@ func TestRunawayBeadLintBudgetReadsValues(t *testing.T) {
 	if !sd.StoryPoints.LintBudgetRequired {
 		t.Error("LintBudgetRequired = false, want true")
 	}
-	if got := sd.StoryPointsLintBudgetMaxLines(); got != 300 {
-		t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want 300", got)
+	if got, err := sd.StoryPointsLintBudgetMaxLines(); err != nil || got != 300 {
+		t.Errorf("StoryPointsLintBudgetMaxLines() = %d, %v; want 300, nil", got, err)
 	}
 	if !sd.StoryPointsLintBudgetRequired() {
 		t.Error("StoryPointsLintBudgetRequired() = false, want true")
@@ -105,8 +107,8 @@ func TestRunawayBeadLintBudgetReadsValues(t *testing.T) {
 
 // A negative lint_budget_max_lines loads the way its sibling duration fields
 // do: the load warns naming the key and keeps the operator's value as written,
-// and StoryPointsLintBudgetMaxLines reads it as off, so a typo cannot fail the
-// whole load or refuse every bead the lint sees.
+// and StoryPointsLintBudgetMaxLines refuses it naming the key, so a typo cannot
+// fail the whole load and cannot read as off in silence.
 func TestRunawayBeadLintBudgetWarnsNegative(t *testing.T) {
 	t.Parallel()
 	for _, value := range []int{-1, -300} {
@@ -120,8 +122,12 @@ func TestRunawayBeadLintBudgetWarnsNegative(t *testing.T) {
 			if !sd.StoryPoints.LintBudgetRequired {
 				t.Error("LintBudgetRequired = false, want the block's other settings kept")
 			}
-			if got := sd.StoryPointsLintBudgetMaxLines(); got != 0 {
-				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want 0 (off)", got)
+			got, err := sd.StoryPointsLintBudgetMaxLines()
+			if err == nil {
+				t.Fatalf("StoryPointsLintBudgetMaxLines() = %d, nil; want the negative refused", got)
+			}
+			if !strings.Contains(err.Error(), "daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines") {
+				t.Errorf("error = %v, want it to name daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines", err)
 			}
 			if !strings.Contains(warn, "daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines") {
 				t.Errorf("warning = %q, want it to name daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines", warn)
@@ -174,8 +180,8 @@ func TestRunawayBeadLintBudgetGoodValueWarnsNothing(t *testing.T) {
 			if warn != "" {
 				t.Errorf("a usable lint_budget_max_lines %d warned: %q", value, warn)
 			}
-			if got := sd.StoryPointsLintBudgetMaxLines(); got != value {
-				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want %d", got, value)
+			if got, err := sd.StoryPointsLintBudgetMaxLines(); err != nil || got != value {
+				t.Errorf("StoryPointsLintBudgetMaxLines() = %d, %v; want %d, nil", got, err, value)
 			}
 		})
 	}
@@ -187,36 +193,44 @@ func TestRunawayBeadLintBudgetGoodValueWarnsNothing(t *testing.T) {
 func TestRunawayBeadLintBudgetNilIsOff(t *testing.T) {
 	t.Parallel()
 	var nilBlock *SpecDispatchConfig
-	if got := nilBlock.StoryPointsLintBudgetMaxLines(); got != 0 {
-		t.Errorf("StoryPointsLintBudgetMaxLines() on a nil block = %d, want 0", got)
+	if got, err := nilBlock.StoryPointsLintBudgetMaxLines(); err != nil || got != 0 {
+		t.Errorf("StoryPointsLintBudgetMaxLines() on a nil block = %d, %v; want 0, nil", got, err)
 	}
 	if nilBlock.StoryPointsLintBudgetRequired() {
 		t.Error("StoryPointsLintBudgetRequired() on a nil block = true, want false")
 	}
 
 	var noStoryPoints SpecDispatchConfig
-	if got := noStoryPoints.StoryPointsLintBudgetMaxLines(); got != 0 {
-		t.Errorf("StoryPointsLintBudgetMaxLines() with no story_points = %d, want 0", got)
+	if got, err := noStoryPoints.StoryPointsLintBudgetMaxLines(); err != nil || got != 0 {
+		t.Errorf("StoryPointsLintBudgetMaxLines() with no story_points = %d, %v; want 0, nil", got, err)
 	}
 	if noStoryPoints.StoryPointsLintBudgetRequired() {
 		t.Error("StoryPointsLintBudgetRequired() with no story_points = true, want false")
 	}
 }
 
-// A block built in code around a negative lint_budget_max_lines reads as off:
-// the accessor is the one reader and clamps to zero, so the loader's warning
-// and the save's refusal are the signals such a value gets (gt-p2zuge).
-func TestRunawayBeadLintBudgetNegativeInMemoryIsOff(t *testing.T) {
+// A block built in code around a negative lint_budget_max_lines is refused by
+// the accessor too, not read as off: a ceiling below zero has no reading, and a
+// reader that took it for off would turn the gate the operator meant to set
+// silently off (gt-p2zuge).
+func TestRunawayBeadLintBudgetNegativeInMemoryRefused(t *testing.T) {
 	t.Parallel()
 	sd := &SpecDispatchConfig{StoryPoints: &StoryPointsConfig{LintBudgetMaxLines: -5}}
-	if got := sd.StoryPointsLintBudgetMaxLines(); got != 0 {
-		t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want 0 for a negative value", got)
+	got, err := sd.StoryPointsLintBudgetMaxLines()
+	if err == nil {
+		t.Fatalf("StoryPointsLintBudgetMaxLines() = %d, nil; want the negative refused", got)
+	}
+	if got != 0 {
+		t.Errorf("StoryPointsLintBudgetMaxLines() = %d, want 0 alongside the error", got)
+	}
+	if !strings.Contains(err.Error(), "daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines -5") {
+		t.Errorf("error = %v, want it to name daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines -5", err)
 	}
 }
 
-// The block decodes its own JSON, so it repeats the kernel's unknown-key
-// refusal: a key that is not one of its settings is a typo, never an ignored
-// setting.
+// The config kernel's strict key walk reaches inside story_points, so a key
+// that is not one of its settings is a parse error naming the dotted path,
+// never an ignored setting.
 func TestRunawayBeadStoryPointsUnknownKeyRefused(t *testing.T) {
 	t.Parallel()
 	_, err := loadSpecDispatch(t, `{"patrols":{"spec_dispatch":{"story_points":{`+
@@ -224,13 +238,17 @@ func TestRunawayBeadStoryPointsUnknownKeyRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("LoadDaemonPatrolConfig accepted lint_budget_max_line")
 	}
-	if !strings.Contains(err.Error(), "lint_budget_max_line") {
-		t.Errorf("error = %v, want it to name lint_budget_max_line", err)
+	var pe *ParseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v (%T), want the strict key walk's *ParseError", err, err)
+	}
+	if want := "patrols.spec_dispatch.story_points.lint_budget_max_line"; !slices.Contains(pe.Keys, want) {
+		t.Errorf("ParseError.Keys = %v, want %q", pe.Keys, want)
 	}
 }
 
-// The block's other settings still load through its custom decoder, so adding
-// the change budget keys takes nothing away from them.
+// The block's other settings still decode, so adding the change budget keys
+// takes nothing away from them.
 func TestRunawayBeadStoryPointsBlockStillDecodes(t *testing.T) {
 	t.Parallel()
 	sd, err := loadSpecDispatch(t, `{"patrols":{"spec_dispatch":{"story_points":{`+

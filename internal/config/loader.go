@@ -774,13 +774,13 @@ func warnBadSplitAddedLines(warn io.Writer, c *DaemonPatrolConfig) {
 }
 
 // warnBadStoryPointsLintBudgetMaxLines is warnBadScheduledStopAfter for
-// story_points.lint_budget_max_lines: the lint reads a ceiling below zero as
-// off (StoryPointsLintBudgetMaxLines), so a typo must be reported, not applied
-// in silence. The value stays as written and Save refuses it, as for the other
-// line-count settings.
+// story_points.lint_budget_max_lines: StoryPointsLintBudgetMaxLines refuses a
+// ceiling below zero rather than reading it as off, so the operator is told at
+// load, before a lint or a dispatch tick stops on it. The value stays as
+// written and Save refuses it, as for the other line-count settings.
 func warnBadStoryPointsLintBudgetMaxLines(warn io.Writer, c *DaemonPatrolConfig) {
 	if n, bad := badStoryPointsLintBudgetMaxLines(c); bad {
-		fmt.Fprintf(warn, "warning: daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines %d is below zero, using the default (off)\n", n)
+		fmt.Fprintf(warn, "warning: daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines %d is below zero: want zero or more added lines, or absent for off; every reader refuses it\n", n)
 	}
 }
 
