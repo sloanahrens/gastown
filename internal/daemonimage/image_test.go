@@ -52,7 +52,25 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 
 // imageBinaryNames is the binaries the image copies from the root of its build
 // context.
-var imageBinaryNames = []string{"gt", "bd", "om", "trackerd", "trackerbackup", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
+var imageBinaryNames = []string{"gt", "bd", "om", "trackerd", "trackerbackup", "gt-wrap", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
+
+// imageBinaryDestinations is where each binary copied from the build context is
+// installed in the image, for the binaries not installed under the name they
+// were built as. The bd pair is the one case (gt-p4xncz): before changing
+// either destination, read docs/architecture.md, which owns the layout.
+var imageBinaryDestinations = map[string]string{
+	"gt-wrap": "/usr/local/bin/bd",
+	"bd":      "/usr/local/bin/bd.real",
+}
+
+// installPath is where src, a binary of the build context, is installed in the
+// image.
+func installPath(src string) string {
+	if dst, ok := imageBinaryDestinations[src]; ok {
+		return dst
+	}
+	return "/usr/local/bin/" + src
+}
 
 // imageBinaries is the list of the image's binaries, plugin binaries and mango
 // files in b.Out, in the order the Dockerfile copies them from its context.
@@ -222,8 +240,11 @@ func TestBuildImageRefusesBeforeDockerRuns(t *testing.T) {
 		{name: "a binary missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
 			*bins = (*bins)[:2]
 		}, want: "no om binary"},
+		{name: "the gt-wrap binary missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
+			*bins = slices.DeleteFunc(*bins, func(p string) bool { return filepath.Base(p) == "gt-wrap" })
+		}, want: "no gt-wrap binary"},
 		{name: "the claude CLI missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
-			*bins = (*bins)[:5]
+			*bins = (*bins)[:6]
 		}, want: "no claude binary"},
 		{name: "the mango files missing from the list", rev: testRev, breakIt: func(_ *testing.T, _ *Builder, bins *[]string) {
 			*bins = (*bins)[:len(*bins)-len(mangoNames)]
@@ -505,11 +526,12 @@ func gitConfigGlobal(in dockerfileInstruction) (key, value string, ok bool) {
 // TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt: every COPY is one of three
 // kinds. The Dolt client is copied from the dolt stage, and nothing else is.
 // Each of the image binaries (imageBinaryNames) is copied from the build context
-// by its bare name to /usr/local/bin, once each; each plugin binary is copied
-// from its plugin directory to the image's plugin directory, once each; and each
-// of mangoNames is copied from mango/ to /usr/local/lib/gt/mango, once each. A
-// COPY from any other source, or a second copy of a name, fails, so the image
-// cannot ship a binary the deployer did not build or fetch, or miss one it did.
+// by its bare name, once each, to the path installPath gives it; each plugin
+// binary is copied from its plugin directory to the image's plugin directory,
+// once each; and each of mangoNames is copied from mango/ to
+// /usr/local/lib/gt/mango, once each. A COPY from any other source, or a second
+// copy of a name, fails, so the image cannot ship a binary the deployer did not
+// build or fetch, or miss one it did.
 func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 	t.Parallel()
 	wantOther := map[string]string{}
@@ -535,11 +557,11 @@ func TestDaemonDockerfileCopiesOnlyTheBinariesAndDolt(t *testing.T) {
 					otherCopied[src]++
 					continue
 				}
-				t.Errorf("%s COPY %q reads %q from the build context; want one of the image's binaries by its bare name to /usr/local/bin, a plugin's binary to the image's plugin directory, or a mango file to /usr/local/lib/gt/mango", DockerfilePath, in.args, src)
+				t.Errorf("%s COPY %q reads %q from the build context; want one of the image's binaries by its bare name to its install path, a plugin's binary to the image's plugin directory, or a mango file to /usr/local/lib/gt/mango", DockerfilePath, in.args, src)
 				continue
 			}
-			if dst != "/usr/local/bin/"+src {
-				t.Errorf("%s COPY %q reads %s to %q; want it to /usr/local/bin/%s", DockerfilePath, in.args, src, dst, src)
+			if want := installPath(src); dst != want {
+				t.Errorf("%s COPY %q reads %s to %q; want it to %s", DockerfilePath, in.args, src, dst, want)
 				continue
 			}
 			contextCopies[src]++
