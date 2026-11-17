@@ -147,14 +147,22 @@ func TestSpecLintEstimateRecordedNoneIsRefused(t *testing.T) {
 func TestSpecLintWithoutEstimateNeverEstimates(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	if specLintOptsFor(nil, root, false, io.Discard).Estimate != nil {
+	off, err := specLintOptsFor(nil, root, false, io.Discard)
+	if err != nil {
+		t.Fatalf("specLintOptsFor(off): %v", err)
+	}
+	if off.Estimate != nil {
 		t.Fatal("--estimate off attached an estimate run")
 	}
-	if specLintOptsFor(nil, root, true, io.Discard).Estimate == nil {
+	on, err := specLintOptsFor(nil, root, true, io.Discard)
+	if err != nil {
+		t.Fatalf("specLintOptsFor(on): %v", err)
+	}
+	if on.Estimate == nil {
 		t.Fatal("--estimate on attached no estimate run")
 	}
 	spec := cleanSpec("gt-noestimate", 2, "2026-01-01")
-	opts := specLintOptsFor(nil, root, false, io.Discard)
+	opts := off
 	opts.LintOverMinutes = 11
 	var out, errOut bytes.Buffer
 	if err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts); err != nil {
@@ -274,7 +282,10 @@ func TestSpecLintEstimateRunsUnderTheLintsBound(t *testing.T) {
 // bead, so a filer's --estimate must run under a live deadline (gt-floskq).
 func TestSpecLintDefaultEstimateWaitIsABound(t *testing.T) {
 	t.Parallel()
-	opts := specLintOptsFor(nil, t.TempDir(), true, io.Discard)
+	opts, err := specLintOptsFor(nil, t.TempDir(), true, io.Discard)
+	if err != nil {
+		t.Fatalf("specLintOptsFor: %v", err)
+	}
 	opts.LintOverMinutes = 11
 	opts.Estimate = specLintEstimateRunFor(
 		func(string) specEstimateStore { return specEstimateSeed() },
