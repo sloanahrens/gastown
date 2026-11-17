@@ -33,7 +33,13 @@ func newFileModeSeat(t *testing.T, taskText string) *fileModeSeat {
 	gt := filepath.Join(t.TempDir(), ".gt")
 	writeSeatFile(t, filepath.Join(gt, "task", taskfile.ModeFile), taskfile.ModeFiles+"\n")
 	writeSeatFile(t, filepath.Join(gt, "task", "TASK.md"), taskText)
+	return newFileModeSeatAt(t, gt)
+}
 
+// newFileModeSeatAt is newFileModeSeat on a seat .gt directory the test laid
+// out itself, so a run can start from what another command wrote there.
+func newFileModeSeatAt(t *testing.T, gt string) *fileModeSeat {
+	t.Helper()
 	seat := &fileModeSeat{gt: gt, out: &strings.Builder{}}
 	record := func(name string) { seat.beadCalls = append(seat.beadCalls, name) }
 	seat.r = escalateRun{
@@ -161,18 +167,26 @@ func TestNoBeadAccessFileModeEscalateKeepsTheSeatsEarlierResult(t *testing.T) {
 // TestNoBeadAccessFileModeEscalateKeepsTheSeatsUpdate: the result.json a
 // file-mode update wrote carries a title and an acceptance block, and writing
 // the escalation's request over it must keep them, or the host applies the
-// request and loses the update (gt-pm55bt).
+// request and loses the update (gt-pm55bt). The result is the one the update's
+// own path writes, not a hand-written copy of it, so a drift between the two
+// commands' encoders shows up here; the test is untagged, so it runs in the
+// unit tier as well as under the integration tag (gt-1xcanb).
 func TestNoBeadAccessFileModeEscalateKeepsTheSeatsUpdate(t *testing.T) {
 	t.Parallel()
-	seat := newFileModeSeat(t, fileModeTask)
-	writeSeatFile(t, seat.resultPath(), `{
-  "bead_id": "gt-abc1",
-  "status": "deferred",
-  "title": "DISPROVEN: the retry resets",
-  "acceptance": "- [x] the refusal names the verb"
-}
-`)
+	root := newNoteSeat(t, "gt-abc1")
+	v, store, _ := seatVerbs(t, root)
+	updated := beads.UpdateOptions{
+		Title:      strPtr("DISPROVEN: the retry resets"),
+		Acceptance: strPtr("- [x] the refusal names the verb"),
+	}
+	if err := v.update("gt-abc1", updated); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if len(store.calls) != 0 {
+		t.Fatalf("a file-mode update reached for a bead: %v", store.calls)
+	}
 
+	seat := newFileModeSeatAt(t, filepath.Join(root, ".gt"))
 	if err := seat.r.escalate([]string{"HELP: blocked"}); err != nil {
 		t.Fatalf("escalate: %v", err)
 	}
