@@ -118,7 +118,9 @@ func TestPolicyRefusedFlags(t *testing.T) {
 		{"refused shorthand after a separator that is a value", TokenRead, []string{"--format", "--", "-C", "/x", "show"}, ErrFlagRefused, "refused: -C on show"},
 		{"refused flag attached after a separator that is a value", TokenRead, []string{"--format", "--", "--db=/x", "show"}, ErrFlagRefused, "refused: --db on show"},
 		{"refused shorthand whose value is a separator", TokenRead, []string{"show", "-C", "--", "dir"}, ErrFlagRefused, "refused: -C on show"},
-		{"unknown flag before a dash argument is ambiguous", TokenRead, []string{"show", "--thread", "--db"}, ErrAmbiguousVerb, ""},
+		{"unknown flag before a root flag that would take a value is refused as unplaceable", TokenRead, []string{"show", "--thread", "--db"}, ErrAmbiguousVerb, "--thread"},
+		{"unknown flag after the verb, next flag with an attached value still refused", TokenRead, []string{"show", "--thread", "--db=beads"}, ErrFlagRefused, "refused: --db on show"},
+		{"unknown flag after the verb is boolean before another flag", TokenRead, []string{"show", "--include-infra", "--json"}, nil, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,6 +188,168 @@ func TestPolicyVerbResolution(t *testing.T) {
 	// The refusal names the verb word, so an operator can see what was refused.
 	if _, err := p.Authorize(TokenOperator, []string{"dolt", "push"}); err == nil || !strings.Contains(err.Error(), "\"dolt\"") {
 		t.Errorf("unknown-verb error = %v, want it to name dolt", err)
+	}
+}
+
+// TestUnknownCommandFlagAfterVerb: bd's command flags are not in the root flag
+// set, so once the verb is settled their arity cannot change the verb, and the
+// scan reads such a flag as a boolean that consumes nothing. That is what lets
+// the escalation collector's and the plugin run ledger's calls through, while
+// before the verb is settled the same flag is still refused and a refused flag
+// behind it is still caught. One shape is still refused after the verb: an
+// unknown flag followed by "--", because if the flag takes a value then "--"
+// is that value and bd reads the flags after it as flags.
+func TestUnknownCommandFlagAfterVerb(t *testing.T) {
+	t.Parallel()
+
+	deploy := loadDeployPolicy(t)
+	authorized := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"escalation collector list", []string{"list", "--json", "--status=open", "--label=gt:escalation", "--include-infra", "--limit=0", "--flat"}, "list"},
+		{"plugin run ledger query", []string{"query", "--json", "ephemeral=true", "--all", "--limit=0"}, "query"},
+		{"unknown flag before the last flag", []string{"list", "--include-infra", "--flat"}, "list"},
+	}
+	for _, tc := range authorized {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := deploy.Authorize(TokenRead, tc.argv)
+			if err != nil {
+				t.Fatalf("Authorize(read, %q) = %v, want it allowed", tc.argv, err)
+			}
+			if v.Name() != tc.want || v.Class != ClassRead {
+				t.Errorf("Authorize(read, %q) matched %q (%s), want %s (read)", tc.argv, v.Name(), v.Class, tc.want)
+			}
+		})
+	}
+
+	// Before the verb is settled the flag could be taking the word it is
+	// followed by, so the call is still refused rather than guessed.
+	for _, argv := range [][]string{
+		{"--bogus", "--json", "list"},
+		{"--include-infra", "--all", "query"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+
+	// After the verb is settled an unknown flag is boolean except before "--":
+	// if the flag takes a value, "--" is that value and bd reads the flags
+	// after it as flags, so a boolean reading would end the options early and
+	// hide them. The call is refused rather than guessed.
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--", "--force"},
+		{"list", "--include-infra", "--"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+
+	// A value-taking root flag written without its value, behind an unknown
+	// flag, is refused too: the scan would give it the next token as its value,
+	// while bd, reading the root flag as the unknown flag's value, still parses
+	// that next token as a flag. The same flags with an attached value, and
+	// boolean root flags, are scanned on their own and pass.
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--db", "--force"},
+		{"list", "--include-infra", "-C", "--force"},
+		{"list", "--include-infra", "--format", "--force"},
+		{"list", "--include-infra", "--actor", "--readonly"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--db=/x"},
+		{"list", "--include-infra", "-C/x"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrFlagRefused) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrFlagRefused: the attached flag is counted", argv, err)
+		}
+	}
+	if _, err := deploy.Authorize(TokenRead, []string{"list", "--include-infra", "--json"}); err != nil {
+		t.Errorf("Authorize(read, list --include-infra --json) = %v, want it allowed", err)
+	}
+
+	// A flag behind an unknown one is still caught: the unknown flag is
+	// boolean, so each later token is scanned as a flag in its own right and
+	// counts for the refused-flag check. The dash-prefixed next token is read
+	// the same whether it is a refused command flag (--force), a root flag
+	// carrying its value (--db=/x) or a boolean root flag (--readonly).
+	p, err := ParsePolicy(strings.NewReader(`{
+		"refused_flags": ["force", "db", "readonly"],
+		"verbs": [{"path": "list", "class": "read"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	refused := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"unknown command flag behind an unknown flag", []string{"list", "--include-infra", "--force"}, "refused: --force on list"},
+		{"root flag carrying its value behind an unknown flag", []string{"list", "--include-infra", "--db=/x"}, "refused: --db on list"},
+		{"boolean root flag behind an unknown flag", []string{"list", "--include-infra", "--readonly"}, "refused: --readonly on list"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := p.Authorize(TokenRead, tc.argv)
+			if !errors.Is(err, ErrFlagRefused) {
+				t.Fatalf("Authorize(read, %q) = %v, want ErrFlagRefused", tc.argv, err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Authorize(read, %q) error = %q, want it to name %s", tc.argv, err, tc.want)
+			}
+		})
+	}
+
+	// The unknown flag before "--" is refused, so a refused root flag bd would
+	// read behind it never runs: the scan stops at the unknown flag instead of
+	// ending the options at "--" and reading the flag as an operand.
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--", "--force"},
+		{"list", "--include-infra", "--", "--db=/x"},
+	} {
+		if _, err := p.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+
+	// The same shape is accepted when the flag behind the unknown one is not
+	// refused: the flag is still scanned as a flag, but no refusal names it.
+	permissive, err := ParsePolicy(strings.NewReader(`{
+		"refused_flags": ["C"],
+		"verbs": [{"path": "list", "class": "read"}]
+	}`))
+	if err != nil {
+		t.Fatalf("ParsePolicy: %v", err)
+	}
+	accepted := []struct {
+		name string
+		argv []string
+	}{
+		{"unknown command flag behind an unknown flag", []string{"list", "--include-infra", "--force"}},
+		{"root flag carrying its value behind an unknown flag", []string{"list", "--include-infra", "--db=/x"}},
+		{"boolean root flag behind an unknown flag", []string{"list", "--include-infra", "--readonly"}},
+	}
+	for _, tc := range accepted {
+		t.Run("accepted: "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := permissive.Authorize(TokenRead, tc.argv)
+			if err != nil {
+				t.Fatalf("Authorize(read, %q) = %v, want it allowed", tc.argv, err)
+			}
+			if v.Name() != "list" {
+				t.Errorf("Authorize(read, %q) matched %q, want list", tc.argv, v.Name())
+			}
+		})
 	}
 }
 

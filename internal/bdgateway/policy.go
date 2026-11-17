@@ -394,16 +394,16 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 
 // checkSQLStatement applies the read-only rule to a sql call before bd starts.
 // The statement is the one operand after bd's flags, which scanArgs read: bd's
-// sql verb takes one <query> and runs its text as written. The single-operand
-// rule is safe because sql's only own flag is the boolean --csv (`bd sql
-// --help`, bd 1.2.2): every flag that takes a value is a root flag
-// bdRootFlags places, so its value is consumed and never read as the query,
-// and the one operand is what bd runs. A call naming no operand — the empty
-// statement, or a query that was really a value-taking flag's argument — is
-// refused, and one naming more than one is refused rather than letting the
-// gateway check an argument bd may not run. beadsql.ReadOnly carries the rule
-// itself, so a write, DDL, a multi-statement string or a dolt_* procedure is
-// refused with the reason.
+// sql verb takes one <query> and runs its text as written. sql's only own flag
+// is the boolean --csv (`bd sql --help`, bd 1.2.2), so a settled unknown
+// command flag consumes nothing in scanArgs — one followed by "--" is refused
+// before this check — and the statement is the one operand. Every flag that takes a value is a root flag
+// bdRootFlags places, so its value is consumed and never read as the query. A
+// call naming no operand — the empty statement, or a query that was really a
+// value-taking flag's argument — is refused, and one naming more than one
+// operand is refused rather than letting the gateway check an argument bd may
+// not run. beadsql.ReadOnly carries the rule itself, so a write, DDL, a
+// multi-statement string or a dolt_* procedure is refused with the reason.
 func checkSQLStatement(operands []string) error {
 	switch len(operands) {
 	case 0:
@@ -445,8 +445,18 @@ type scanResult struct {
 // counts for the refusal.
 //
 // A flag outside bdRootFlags is a command flag whose arity the tree does not
-// record. Before the verb is settled, or with a following token that starts
-// with "-", its value cannot be told from a flag, so the call is refused.
+// record. While a listed verb path still extends the words read, its value
+// cannot be told from a verb word, so the call is refused. Once the verb is
+// settled, it is read as a boolean: it consumes nothing, and the next token is
+// scanned on its own. That cannot change the verb, since no later word is a
+// command word once no listed path extends. It also cannot hide a flag behind
+// a later dash token, which is scanned as a flag in its own right, with two
+// exceptions that swallowsNextFlag names: if the flag takes a value, "--" is
+// that value rather than the end of the options, and a value-taking root flag
+// without an attached value ("--db", "-C", "--format") is that value rather
+// than a flag taking the token after it. bd then reads the following tokens as
+// flags, while the boolean reading calls them operands or a root flag's value.
+// A settled unknown flag followed by either is therefore refused too.
 func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 	var res scanResult
 	res.words = make([]string, 0, maxPathWords)
@@ -477,13 +487,36 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 			i++ // the value is the next argument, whatever it looks like
 		case known:
 			// A boolean root flag: the next argument is not its value.
-		case i+1 < len(argv) && strings.HasPrefix(argv[i+1], "-"):
-			return scanResult{}, ambiguousFlag(arg)
 		case p.extends(res.words):
+			// A listed verb path can still claim the next word, so an unknown
+			// flag here could be taking that word as its value.
+			return scanResult{}, ambiguousFlag(arg)
+		case i+1 < len(argv) && swallowsNextFlag(argv[i+1]):
+			// If the unknown flag takes a value, bd takes this next token as
+			// that value and still reads the tokens after it as flags. Read as
+			// boolean, the scan would let the token end the options ("--") or
+			// take the following token as its own value (a root flag without an
+			// attached value), and miss a refused flag behind it.
 			return scanResult{}, ambiguousFlag(arg)
 		}
 	}
 	return res, nil
+}
+
+// swallowsNextFlag reports whether next, read as the value of an unknown
+// command flag, would change how the tokens after it are read. "--" ends the
+// options in the scan, and a value-taking root flag without an attached value
+// ("--db", "-C", "--format") takes the next token as its own value, so either
+// would hide a refused flag that bd, reading next as the unknown flag's value,
+// still parses as a flag. Every other next token is read as a flag or an
+// operand on its own, so a boolean reading of the unknown flag only counts more
+// flags, never fewer.
+func swallowsNextFlag(next string) bool {
+	if next == "--" {
+		return true
+	}
+	kind, known, attached := rootFlag(next)
+	return known && kind == flagValue && !attached
 }
 
 // ambiguousFlag is the refusal for a flag the scan cannot place.
