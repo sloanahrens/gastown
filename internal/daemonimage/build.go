@@ -164,26 +164,29 @@ type Builder struct {
 	Fetch Fetcher
 
 	// The fields below are test seams for the filesystem calls the plugin,
-	// mango and gateway moves and their rollbacks make; nil means the os
-	// function of the same shape.
-	rename func(oldpath, newpath string) error
-	remove func(path string) error
-	lstat  func(path string) (os.FileInfo, error)
+	// mango and gateway moves and their rollbacks make, and the write the
+	// gateway's policy file is staged with; nil means the os function of the
+	// same shape.
+	rename    func(oldpath, newpath string) error
+	remove    func(path string) error
+	lstat     func(path string) (os.FileInfo, error)
+	writeFile func(name string, data []byte, perm os.FileMode) error
 }
 
 // fileOps is the filesystem the plugin, mango and gateway moves publish and
-// roll back with: the os functions of the same shape, or the test seams
-// standing in for them.
+// roll back with, and the gateway's policy file is staged in: the os functions
+// of the same shape, or the test seams standing in for them.
 type fileOps struct {
-	rename func(oldpath, newpath string) error
-	remove func(path string) error
-	lstat  func(path string) (os.FileInfo, error)
+	rename    func(oldpath, newpath string) error
+	remove    func(path string) error
+	lstat     func(path string) (os.FileInfo, error)
+	writeFile func(name string, data []byte, perm os.FileMode) error
 }
 
 // fileOps returns b's filesystem, with the os functions filling any seam b
 // leaves nil.
 func (b Builder) fileOps() fileOps {
-	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat}
+	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat, writeFile: os.WriteFile}
 	if b.rename != nil {
 		ops.rename = b.rename
 	}
@@ -192,6 +195,9 @@ func (b Builder) fileOps() fileOps {
 	}
 	if b.lstat != nil {
 		ops.lstat = b.lstat
+	}
+	if b.writeFile != nil {
+		ops.writeFile = b.writeFile
 	}
 	return ops
 }

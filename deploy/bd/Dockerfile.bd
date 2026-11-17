@@ -21,6 +21,13 @@ RUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd
 # The gateway is the container's entrypoint. This file sets no flags for it.
 COPY --chmod=0755 bdgw /usr/local/bin/bdgw
 
+# The gateway's policy file, at the path the compose unit starts it with
+# (`--verbs /etc/bdgw/verbs.json`). The image build stages it into the build
+# context beside bdgw. The directory is made first: a COPY that creates it gives
+# it the copied file's mode, so the non-root user could not traverse it.
+RUN mkdir -p /etc/bdgw && chmod 0755 /etc/bdgw
+COPY --chmod=0444 verbs.json /etc/bdgw/verbs.json
+
 # A numeric non-root user, so the image does not depend on a name the base may
 # not define.
 USER 65532:65532

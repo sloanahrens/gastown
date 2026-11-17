@@ -8,11 +8,18 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
 	dockerfileName = "Dockerfile.bd"
 	basePinName    = "base-pin"
+
+	// composeFile is the compose unit the gateway runs under, from this
+	// package's directory: the file whose --verbs value names where the image
+	// must carry its policy file.
+	composeFile = "../data/docker-compose.yml"
 
 	// zeroDigest is the all-zero sha256 digest, which is no image's digest.
 	zeroDigest = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -96,6 +103,34 @@ func readBasePin(t *testing.T) string {
 	return strings.TrimSpace(string(raw))
 }
 
+// composeVerbsPath returns the --verbs value the compose unit starts the
+// gateway with: the path inside the image its policy file must reach.
+func composeVerbsPath(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(composeFile)
+	if err != nil {
+		t.Fatalf("reading %s: %v", composeFile, err)
+	}
+	var unit struct {
+		Services struct {
+			BD struct {
+				Command []string `yaml:"command"`
+			} `yaml:"bd"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(raw, &unit); err != nil {
+		t.Fatalf("%s is not valid YAML: %v", composeFile, err)
+	}
+	cmd := unit.Services.BD.Command
+	for i := 0; i+1 < len(cmd); i++ {
+		if cmd[i] == "--verbs" {
+			return cmd[i+1]
+		}
+	}
+	t.Fatalf("%s: the bd service's command has no --verbs value", composeFile)
+	return ""
+}
+
 func TestDockerfileBdShape(t *testing.T) {
 	t.Parallel()
 	lines := readInstructions(t)
@@ -105,6 +140,8 @@ func TestDockerfileBdShape(t *testing.T) {
 		{"the real bd is checked in place", "RUN test -x /usr/local/bin/bd.real"},
 		{"the real bd is bd on PATH", "RUN ln -sf /usr/local/bin/bd.real /usr/local/bin/bd"},
 		{"the gateway is copied in", "COPY --chmod=0755 bdgw /usr/local/bin/bdgw"},
+		{"the policy directory is traversable by the non-root user", "RUN mkdir -p /etc/bdgw && chmod 0755 /etc/bdgw"},
+		{"the policy file is copied where the compose unit reads it", "COPY --chmod=0444 verbs.json " + composeVerbsPath(t)},
 		{"the gateway is the entrypoint", `ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -114,6 +151,19 @@ func TestDockerfileBdShape(t *testing.T) {
 			}
 		})
 	}
+	t.Run("the policy directory is made before the policy is copied", func(t *testing.T) {
+		t.Parallel()
+		// A COPY that creates /etc/bdgw gives it the copied file's mode, 0444,
+		// and the non-root user cannot traverse it.
+		dirAt := indexOf(lines, "RUN mkdir -p /etc/bdgw && chmod 0755 /etc/bdgw")
+		copyAt := indexOf(lines, "COPY --chmod=0444 verbs.json "+composeVerbsPath(t))
+		if dirAt < 0 || copyAt < 0 {
+			t.Fatalf("%s has no policy directory line (%d) or policy COPY line (%d), want both", dockerfileName, dirAt, copyAt)
+		}
+		if dirAt > copyAt {
+			t.Errorf("%s copies the policy before it makes /etc/bdgw, want the directory made first", dockerfileName)
+		}
+	})
 	t.Run("no instruction names the shim", func(t *testing.T) {
 		t.Parallel()
 		if got := shimInstructions(lines); len(got) != 0 {
@@ -212,14 +262,20 @@ func TestBasePinIsDigest(t *testing.T) {
 
 // contains reports whether want is one of lines.
 func contains(lines []string, want string) bool {
-	// want is canonicalized here; lines come from readInstructions, already canonical.
+	return indexOf(lines, want) >= 0
+}
+
+// indexOf returns the position of want in lines, or -1 when lines has no such
+// instruction. want is canonicalized here; lines come from readInstructions,
+// already canonical.
+func indexOf(lines []string, want string) int {
 	want = canonicalInstruction(want)
-	for _, l := range lines {
+	for i, l := range lines {
 		if l == want {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // canonicalInstruction returns an instruction line in one spelling: the keyword
