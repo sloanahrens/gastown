@@ -104,7 +104,7 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if call.Argv[0] != "bd" {
 		return exitDown, fmt.Errorf("gtwrap: the bdgateway target runs bd, but the call names %q", call.Argv[0])
 	}
-	rig, err := beadRig(g.Town, call.Env)
+	rig, err := beadRig(g.Town, call.Env, call.Argv)
 	if err != nil {
 		return exitDown, err
 	}
@@ -269,11 +269,18 @@ func (g BdGateway) validate() error {
 // removed, which is "" for the town's own beads. The absolute path never crosses;
 // the gateway joins the rig onto its own workspace. A BEADS_DIR the workspace
 // cannot hold is refused rather than sent, so the gateway never runs in the wrong
-// database. The bdgateway and bddocker targets share it, so the two cannot
+// database. A call that sets no BEADS_DIR gets the town workspace ("") when it
+// reads no database (bd's version command or its root help probe); every other
+// call without BEADS_DIR is refused, since the gateway cannot otherwise be told
+// which rig it runs in. argv is the call's argv, whose first word the caller has
+// checked is "bd". The bdgateway and bddocker targets share it, so the two cannot
 // translate a call differently.
-func beadRig(town string, env []string) (string, error) {
+func beadRig(town string, env, argv []string) (string, error) {
 	beadsDir, ok := envValue(env, "BEADS_DIR")
 	if !ok || beadsDir == "" {
+		if readsNoDatabase(argv[1:]) {
+			return "", nil
+		}
 		return "", errors.New("gtwrap: the call sets no BEADS_DIR, so the bd gateway cannot be told which rig it runs in; set BEADS_DIR to the town's or a rig's .beads directory")
 	}
 	if !filepath.IsAbs(beadsDir) {
@@ -291,6 +298,18 @@ func beadRig(town string, env []string) (string, error) {
 		return "", nil
 	}
 	return filepath.ToSlash(rig), nil
+}
+
+// readsNoDatabase reports whether a bd call reads no database, so it may run in
+// the town workspace when the caller sets no BEADS_DIR: bd's version command and
+// its root help probe. words is the call's argv after "bd". The match is exact, so
+// a version or help request carrying any other word, which may reach a database,
+// is not one of these calls.
+func readsNoDatabase(words []string) bool {
+	if slices.Equal(words, []string{"version"}) || slices.Equal(words, []string{"version", "--json"}) {
+		return true
+	}
+	return len(words) == 1 && (words[0] == "--help" || words[0] == "help")
 }
 
 // dirRelative maps the caller's working directory onto the bd gateway's

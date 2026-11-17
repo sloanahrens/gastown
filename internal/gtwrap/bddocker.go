@@ -65,7 +65,7 @@ func (b BdDocker) Launch(call Call) (int, error) {
 	if call.Argv[0] != "bd" {
 		return exitDown, fmt.Errorf("gtwrap: the bddocker target runs bd, but the call names %q", call.Argv[0])
 	}
-	rig, err := beadRig(b.Town, call.Env)
+	rig, err := beadRig(b.Town, call.Env, call.Argv)
 	if err != nil {
 		return exitDown, err
 	}

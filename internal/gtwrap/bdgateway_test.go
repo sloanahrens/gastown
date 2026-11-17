@@ -173,7 +173,8 @@ func TestBdGatewayTarget(t *testing.T) {
 // TestBdGatewayTranslation: BEADS_DIR names the rig and the working directory is
 // sent relative to the town; a directory outside the town runs in the town root
 // with a note; a BEADS_DIR the workspace cannot hold is refused before any
-// request.
+// request; a call that sets none runs in the town workspace only for bd version
+// and the root help probe, and is refused otherwise.
 func TestBdGatewayTranslation(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -181,6 +182,7 @@ func TestBdGatewayTranslation(t *testing.T) {
 	outside := t.TempDir()
 	tests := []struct {
 		name     string
+		argv     []string // nil means "bd show gt-x"
 		env      []string
 		dir      string
 		wantRig  string
@@ -206,6 +208,40 @@ func TestBdGatewayTranslation(t *testing.T) {
 		{
 			name: "no BEADS_DIR",
 			env:  nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "version without BEADS_DIR",
+			argv: []string{"bd", "version"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "version with --json without BEADS_DIR",
+			argv: []string{"bd", "version", "--json"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "--help without BEADS_DIR",
+			argv: []string{"bd", "--help"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "help without BEADS_DIR",
+			argv: []string{"bd", "help"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "list without BEADS_DIR",
+			argv: []string{"bd", "list", "--json"}, env: nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "version with another flag without BEADS_DIR",
+			argv: []string{"bd", "version", "--verbose"}, env: nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "--help with another word without BEADS_DIR",
+			argv: []string{"bd", "--help", "show"}, env: nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "version with a BEADS_DIR outside the town",
+			argv: []string{"bd", "version"},
+			env:  []string{"BEADS_DIR=" + filepath.Join(outside, "gastown", ".beads")},
+			dir:  inside, wantErr: "outside the town",
 		},
 		{
 			name: "relative BEADS_DIR",
@@ -240,7 +276,11 @@ func TestBdGatewayTranslation(t *testing.T) {
 				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
 			})
 			g, _, _, note := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
-			exit, err := g.Launch(Call{Argv: []string{"bd", "show", "gt-x"}, Env: tt.env, Dir: tt.dir})
+			argv := tt.argv
+			if argv == nil {
+				argv = []string{"bd", "show", "gt-x"}
+			}
+			exit, err := g.Launch(Call{Argv: argv, Env: tt.env, Dir: tt.dir})
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("Launch error = %v, want it to name %q", err, tt.wantErr)
