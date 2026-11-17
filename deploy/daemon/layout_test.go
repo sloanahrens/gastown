@@ -7,11 +7,8 @@ import (
 	"testing"
 )
 
-// The bd layout the image ships (gt-p4xncz): the gt-wrap forwarder is installed
-// as /usr/local/bin/bd, and the real bd as /usr/local/bin/bd.real beside it, the
-// names internal/gtwrap/forwarder.go looks for. A real bd at /usr/local/bin/bd
-// would be the binary an in-cluster caller runs, and BD_GATEWAY_URL would reach
-// nothing.
+// The bd layout the image ships (gt-p4xncz): this test holds the Dockerfile to
+// the two paths docs/architecture.md states.
 const (
 	dockerfileName = "Dockerfile"
 	bdWrapperBuild = "gt-wrap"

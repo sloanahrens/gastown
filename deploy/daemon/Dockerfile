@@ -3,9 +3,9 @@
 #
 # Built by internal/daemonimage's Builder.BuildImage, which passes this file with
 # -f, the directory of the binaries as the context, and the tag gt-daemon:<rev>.
-# Nothing is compiled here: the deployer cross-compiles gt, bd and om on this Mac
-# and fetches the pinned claude CLI and the pinned client tools, then COPYs them
-# in, so the image is exactly the code the tag's rev names.
+# Nothing is compiled here: the deployer cross-compiles the town's binaries on
+# this Mac and fetches the pinned claude CLI and the pinned client tools, then
+# COPYs them in, so the image is exactly the code the tag's rev names.
 #
 # The base image and the Dolt version are internal/templates/images.go's
 # DaemonBaseImage and DoltVersion. TestDaemonDockerfileMatchesTheImageTable fails
@@ -51,10 +51,9 @@ COPY --from=dolt /usr/local/bin/dolt /usr/local/bin/dolt
 # COPY sources are entries of the build context, which BuildImage sets to the
 # output directory BuildBinaries wrote them to.
 COPY --chmod=0755 gt /usr/local/bin/gt
-# The bd a caller in the pod runs is the gt-wrap forwarder (gt-p4xncz), and the
-# real bd sits beside it as bd.real, the layout the forwarder looks for
-# (internal/gtwrap/forwarder.go). With the wrapper anywhere else, an in-cluster
-# bd call runs the real bd and BD_GATEWAY_URL changes nothing.
+# The bd a caller in the pod runs: before changing either path, read
+# docs/architecture.md, which owns the layout, and internal/gtwrap/forwarder.go,
+# which resolves bd.real beside the wrapper (gt-p4xncz).
 COPY --chmod=0755 gt-wrap /usr/local/bin/bd
 COPY --chmod=0755 bd /usr/local/bin/bd.real
 COPY --chmod=0755 om /usr/local/bin/om

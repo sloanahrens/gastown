@@ -56,10 +56,8 @@ var imageBinaryNames = []string{"gt", "bd", "om", "trackerd", "trackerbackup", "
 
 // imageBinaryDestinations is where each binary copied from the build context is
 // installed in the image, for the binaries not installed under the name they
-// were built as. The bd pair is the one case (gt-p4xncz): the gt-wrap forwarder
-// ships as /usr/local/bin/bd and the real bd as /usr/local/bin/bd.real beside
-// it, the layout the forwarder looks for. deploy/daemon's layout test pins the
-// two to internal/gtwrap's forwarder.
+// were built as. The bd pair is the one case (gt-p4xncz): before changing
+// either destination, read docs/architecture.md, which owns the layout.
 var imageBinaryDestinations = map[string]string{
 	"gt-wrap": "/usr/local/bin/bd",
 	"bd":      "/usr/local/bin/bd.real",
