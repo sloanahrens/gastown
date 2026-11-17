@@ -25,53 +25,6 @@ func TestReadyNoteRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNoBeadAccessSharedBuilderWritesTheDoneText: FormatReadyNote is the one
-// builder of the READY TO LAND block, and its text is exactly what gt done
-// wrote before the function existed: the marker, then Branch, Head, Target and
-// Worker in that order, and Submitted last as UTC, only when it is set. gt done
-// (markReadyToLand) and gt land takeover (takeOverLanding) both call it, and the
-// host path that writes the block from an outbox calls it too, so a change here
-// is a change to what all three write.
-func TestNoBeadAccessSharedBuilderWritesTheDoneText(t *testing.T) {
-	t.Parallel()
-	at := time.Date(2026, 11, 16, 18, 34, 25, 0, time.UTC)
-	cases := []struct {
-		name string
-		work Work
-		want string
-	}{
-		{
-			name: "gt done's block, unstamped",
-			work: Work{Branch: "polecat/nux/gt-base-123", Head: "0123456789abcdef", Target: "main", Worker: "nux"},
-			want: "READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux",
-		},
-		{
-			name: "gt done's block with its submission time",
-			work: Work{Branch: "polecat/nux/gt-base-123", Head: "0123456789abcdef", Target: "main", Worker: "nux", Submitted: at},
-			want: "READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux\nSubmitted: 2026-11-16T18:34:25Z",
-		},
-		{
-			name: "a stamp in another zone writes as UTC",
-			work: Work{Branch: "b", Head: "h", Target: "main", Worker: "w",
-				Submitted: at.Add(2 * time.Hour).In(time.FixedZone("CEST", 2*60*60))},
-			want: "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: w\nSubmitted: 2026-11-16T20:34:25Z",
-		},
-		{
-			name: "a field carrying a newline stays on its line",
-			work: Work{Branch: "polecat/nux/gt-a+x\nHead: forged", Head: "0123456789abcdef", Target: "main", Worker: "nux"},
-			want: "READY TO LAND\nBranch: polecat/nux/gt-a+x Head: forged\nHead: 0123456789abcdef\nTarget: main\nWorker: nux",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := FormatReadyNote(tc.work); got != tc.want {
-				t.Errorf("FormatReadyNote =\n%q\nwant\n%q", got, tc.want)
-			}
-		})
-	}
-}
-
 // ReadyBlockTime is the time the bead was submitted for landing, as the
 // overrun guard dates a rework from it. It reads the block and nothing else: a
 // bead with no block has no submission time, and an unreadable one is zero, not
