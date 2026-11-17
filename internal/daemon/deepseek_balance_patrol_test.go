@@ -529,6 +529,28 @@ func TestDeepSeekPatrolFailedWriteIsLogged(t *testing.T) {
 	}
 }
 
+// TestDeepSeekPatrolRefusesTheLiveStoreUnderTest: a test that leaves the row
+// store seam nil must not write into the live town database. The tick refuses
+// and names the seam it was not given, rather than opening the town store.
+func TestDeepSeekPatrolRefusesTheLiveStoreUnderTest(t *testing.T) {
+	t.Parallel()
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY=sk-no-store-6f2a\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	fetches := &deepSeekBalanceFetches{reading: deepseekbalance.Sample{Total: 10, Granted: 4, ToppedUp: 6}}
+	d := deepSeekBalanceTestDaemon(t, io.Discard, keyFile)
+	d.openCostSampleBeads = nil
+
+	err := d.runDeepSeekBalanceTick(context.Background(), fetches.seams(), keyFile)
+	if err == nil {
+		t.Fatal("a tick with no row store returned no error, so it passed a write to the live town database")
+	}
+	if !strings.Contains(err.Error(), "openCostSampleBeads") {
+		t.Errorf("a tick with no row store returned %q, want the seam it was not given named", err)
+	}
+}
+
 // deepSeekBalanceAlertDaemon is a daemon whose balance endpoint answers the
 // readings in order, one per good tick, and whose rows, escalations and clears
 // are recorded in memory.
@@ -814,6 +836,35 @@ func TestDeepSeekPatrolUnknownAlertLineIsReported(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Note != line {
 		t.Errorf("the reading's rows = %+v, want one row noting %q", rows, line)
+	}
+}
+
+// TestDeepSeekPatrolFailedEscalationIsReported: a line whose key the map names
+// but whose filing the tick could not make is reported as a failed tick, not
+// passed as one that raised its alerts. The pass's context is over, which is
+// how a send nobody is waiting for is refused: without a retry, and by the
+// error the tick returns (gt-qxok9x).
+func TestDeepSeekPatrolFailedEscalationIsReported(t *testing.T) {
+	t.Parallel()
+	const key = "sk-escalation-refused-5d7a"
+	keyFile := filepath.Join(t.TempDir(), "deepseek.env")
+	if err := os.WriteFile(keyFile, []byte("DEEPSEEK_API_KEY="+key+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	d := deepSeekBalanceTestDaemon(t, io.Discard, keyFile)
+	// $15.00 is under the $20.00 floor, so Evaluate raises exactly the one
+	// line this tick files.
+	fetches := &deepSeekBalanceFetches{reading: deepseekbalance.Sample{Total: 15}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := d.runDeepSeekBalanceTick(ctx, fetches.seams(), keyFile)
+
+	if err == nil {
+		t.Fatal("a refused escalation returned no error, so the tick passed as clean")
+	}
+	if want := "filing the " + alertKeyDeepSeekLowBalance + " alert"; !strings.Contains(err.Error(), want) {
+		t.Errorf("a refused escalation returned %q, want it to name %q", err, want)
 	}
 }
 

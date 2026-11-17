@@ -395,6 +395,13 @@ type PatrolsConfig struct {
 	// four compares, so a town turns it on rather than an upgrade.
 	ImagePins *PatrolConfig `json:"image_pins,omitempty"`
 
+	// ImagePinLayers checks every digest-pinned image's layers once a day, so a
+	// layer a registry no longer serves is found before the next images build
+	// (internal/daemon/image_pin_layers.go, gt-rhrbyd). Off when absent: the
+	// check reads every pin from its registry, so a town turns it on rather
+	// than an upgrade.
+	ImagePinLayers *ImagePinLayersConfig `json:"image_pin_layers,omitempty"`
+
 	// DeepSeekBalance reads the DeepSeek account balance every interval, from
 	// the key file its block names (internal/daemon/deepseek_balance_patrol.go,
 	// gt-whaxw7). Off when absent: each tick spends one request against the
@@ -403,17 +410,14 @@ type PatrolsConfig struct {
 
 	// OmLessons runs the om-lessons pass: the rework program's lever 3, which
 	// turns a week of om review records into draft directive-edit beads
-	// (internal/daemon/om_lessons_patrol.go, gt-vdy9do). Off when absent: its
-	// pass proposes directive-edit beads on the operator's behalf, so a town
-	// turns it on rather than an upgrade.
+	// (internal/daemon/om_lessons_patrol.go, gt-vdy9do). Read OmLessonsConfig
+	// for the block and why the patrol is off when absent.
 	OmLessons *OmLessonsConfig `json:"om_lessons,omitempty"`
 
 	// ReworkNumbers runs the rework program's weekly numbers step: one document
 	// under .runtime holding the program's two numbers and each lever's deltas
-	// (internal/daemon/rework_numbers.go, gt-2232t4). Off when absent: the
-	// document serves the rework program, so a town that has not started the
-	// program gains nothing from a step that writes it, and turns it on rather
-	// than an upgrade.
+	// (internal/daemon/rework_numbers.go, gt-2232t4). Read ReworkNumbersConfig
+	// for the block and why the patrol is off when absent.
 	ReworkNumbers *ReworkNumbersConfig `json:"rework_numbers,omitempty"`
 
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
@@ -1109,8 +1113,9 @@ type OverrunGuardConfig struct {
 
 	// SplitAddedLines is the runaway-bead tripwire: once the mark has gone out,
 	// a seat whose clone has added at least this many lines is stopped early
-	// and its bead handed back to be split (gt-1eg5u3). Zero or absent is off;
-	// a negative value is refused at decode. Read it through
+	// and its bead handed back to be split (gt-1eg5u3). Zero or absent is off.
+	// A negative value loads with a warning and is kept as written; the guard
+	// reads it as off, and saving it is refused. Read it through
 	// SplitAddedLinesOrOff.
 	SplitAddedLines int `json:"split_added_lines,omitempty"`
 
@@ -1119,33 +1124,13 @@ type OverrunGuardConfig struct {
 }
 
 // SplitAddedLinesOrOff returns the runaway-bead tripwire's line count, or 0
-// (off) when the block is nil or sets none.
+// (off) when the block is nil or sets none: an absent key, an explicit 0 and
+// the negative value the loader warns about all read as off (gt-1eg5u3).
 func (c *OverrunGuardConfig) SplitAddedLinesOrOff() int {
 	if c == nil || c.SplitAddedLines <= 0 {
 		return 0
 	}
 	return c.SplitAddedLines
-}
-
-// UnmarshalJSON decodes the patrol's block strictly, refusing a negative
-// split_added_lines: the tripwire counts lines a clone adds, so a negative
-// value is a typo with no reading, and it must not reach a seat as an instant
-// stop (gt-1eg5u3). The unknown-field check is repeated here because a type
-// that decodes itself is decoded by the config kernel's strict decoder
-// opaquely.
-func (c *OverrunGuardConfig) UnmarshalJSON(data []byte) error {
-	type plain OverrunGuardConfig
-	var p plain
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&p); err != nil {
-		return fmt.Errorf("patrols.overrun_guard: %w", err)
-	}
-	if p.SplitAddedLines < 0 {
-		return fmt.Errorf("daemon.patrols.overrun_guard.split_added_lines %d: want zero or more added lines, or absent for off", p.SplitAddedLines)
-	}
-	*c = OverrunGuardConfig(p)
-	return nil
 }
 
 // ScheduledMaintenanceConfig holds configuration for the scheduled_maintenance
@@ -2256,6 +2241,16 @@ type ReworkNumbersConfig struct {
 	Enabled bool `json:"enabled"`
 }
 
+// ImagePinLayersConfig configures the image_pin_layers patrol: whether the town
+// checks every digest-pinned image's layers once a day
+// (internal/daemon/image_pin_layers.go).
+//
+// The patrol is opt-in. Each run reads every pin from its registry, so a town
+// that has not asked for it must not get it from a default.
+type ImagePinLayersConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 // OmLessonsConfig configures the om_lessons patrol: the interval between its
 // passes over the week's om review records
 // (internal/daemon/om_lessons_patrol.go, docs/design/rework-program.md lever 3).
@@ -3190,6 +3185,10 @@ type SpecDispatchConfig struct {
 // embedding ridge's embedder runs. The URL is an ollama server, and the URL
 // needs a model next to it. The checked-in weights were fitted on
 // qwen3-embedding:4b-q8_0; another model's vectors are not what the ridge reads.
+//
+// The block decodes by the config kernel's strict walk, so an unknown key
+// inside it is refused like any other; a type with its own unmarshaler would be
+// opaque to that walk (TestRunawayBeadStoryPointsUnknownKeyRefused).
 type StoryPointsConfig struct {
 	EmbedderURL   string `json:"embedder_url,omitempty"`
 	EmbedderModel string `json:"embedder_model,omitempty"`
@@ -3215,36 +3214,15 @@ type StoryPointsConfig struct {
 	// LintBudgetMaxLines is the change budget's ceiling in added lines: gt spec
 	// lint refuses a bead whose Size section declares a Change line over it and
 	// says how to split the bead (gt-j0xfx5). Zero or absent, the default,
-	// leaves the ceiling off; a negative value is refused at decode, since a
-	// budget below zero is a typo that would refuse every bead. Read it through
-	// StoryPointsLintBudgetMaxLines.
+	// leaves the ceiling off. A negative value loads with a warning and is kept
+	// as written, and StoryPointsLintBudgetMaxLines refuses it, as saving one
+	// is. Read it through StoryPointsLintBudgetMaxLines.
 	LintBudgetMaxLines int `json:"lint_budget_max_lines,omitempty"`
 
 	// LintBudgetRequired requires a bead to declare its Change line in the Size
 	// section, so the ceiling above has a number to judge (gt-j0xfx5). Absent
 	// is off. Read it through StoryPointsLintBudgetRequired.
 	LintBudgetRequired bool `json:"lint_budget_required,omitempty"`
-}
-
-// UnmarshalJSON decodes the story_points block strictly, refusing a negative
-// lint_budget_max_lines: the ceiling counts lines a bead may add, so a negative
-// value has no reading, and read as written it would refuse every bead the lint
-// sees (gt-svfrrr). The unknown-field check is repeated here because a type
-// that decodes itself is decoded by the config kernel's strict decoder
-// opaquely.
-func (c *StoryPointsConfig) UnmarshalJSON(data []byte) error {
-	type plain StoryPointsConfig
-	var p plain
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&p); err != nil {
-		return fmt.Errorf("patrols.spec_dispatch.story_points: %w", err)
-	}
-	if p.LintBudgetMaxLines < 0 {
-		return fmt.Errorf("daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines %d: want zero or more added lines, or absent for off", p.LintBudgetMaxLines)
-	}
-	*c = StoryPointsConfig(p)
-	return nil
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
@@ -3288,13 +3266,20 @@ func (c *SpecDispatchConfig) StoryPointsLintOver() float64 {
 }
 
 // StoryPointsLintBudgetMaxLines is the change budget's ceiling in added lines
-// (story_points.lint_budget_max_lines). A nil block, or a zero or negative
-// value, is 0, which leaves the ceiling off.
-func (c *SpecDispatchConfig) StoryPointsLintBudgetMaxLines() int {
-	if c == nil || c.StoryPoints == nil || c.StoryPoints.LintBudgetMaxLines <= 0 {
-		return 0
+// (story_points.lint_budget_max_lines), 0 when the block, the block's
+// story_points or the ceiling is absent, which leaves the ceiling off. A
+// negative ceiling has no reading and is refused naming the key (gt-p2zuge):
+// read as off it would silently disable the gate the operator meant to set,
+// and read as written it would refuse every bead the lint sees.
+func (c *SpecDispatchConfig) StoryPointsLintBudgetMaxLines() (int, error) {
+	if c == nil || c.StoryPoints == nil {
+		return 0, nil
 	}
-	return c.StoryPoints.LintBudgetMaxLines
+	n := c.StoryPoints.LintBudgetMaxLines
+	if n < 0 {
+		return 0, fmt.Errorf("daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines %d: want zero or more added lines, or absent for off", n)
+	}
+	return n, nil
 }
 
 // StoryPointsLintBudgetRequired reports whether a bead must declare its Change

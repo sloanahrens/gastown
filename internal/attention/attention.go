@@ -128,6 +128,19 @@ const (
 	// commit, a rig's green branches or its images, so it judged nothing
 	// (gt-4nlpw8).
 	KindDeployPairUnreadable Kind = "deploy-pair-unreadable"
+	// KindDeployPairStuck: a green ref newer than the running daemon commit is
+	// past the stuck bound with its daemon and polecat images not both
+	// published, whether or not an images run exists, so no roll can start
+	// from it (gt-afwjb4).
+	KindDeployPairStuck Kind = "deploy-pair-stuck"
+	// KindDeployPairRefused: the update ledger records a green commit's pair as
+	// refused by the pre-swap check, so no roll can start from that commit and
+	// nothing retries it (gt-d6ok4r, gt-t8vf15).
+	KindDeployPairRefused Kind = "deploy-pair-refused"
+	// KindDeployPairSkew: the bd commit a green commit's deploy image pins
+	// carries a schema level the live database does not, so the daemon the roll
+	// starts would be refused at its startup handshake (gt-qnjuqp).
+	KindDeployPairSkew Kind = "deploy-pair-skew"
 	// KindImagesFailed: the images workflow's newest run for a green commit
 	// finished failed or canceled, so that commit's daemon and polecat images
 	// were never published and no roll can start from it (gt-3vafwr).
@@ -136,6 +149,11 @@ const (
 	// pair is missing could not be read, so whether its build failed is unknown
 	// (gt-3vafwr). It is not a clean commit, and the next readable list clears it.
 	KindImagesUnknown Kind = "images-unknown"
+	// KindTierSweepImagesRetryExhausted: the sweep spent every early re-run on a
+	// green commit whose images build kept failing, so it stopped retrying and
+	// that commit still has no daemon and polecat images to roll onto
+	// (gt-j6cwqr).
+	KindTierSweepImagesRetryExhausted Kind = "tier-sweep-images-retry-exhausted"
 	// KindConfigEnvShadowed: a settings daemon.env key was not applied at
 	// start, because the container's environment already sets it to another
 	// value (gt-ih19g6).
@@ -201,7 +219,9 @@ func Kinds() []Kind {
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
-		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
+		KindDeployPairReady, KindDeployPairUnreadable, KindDeployPairStuck,
+		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
+		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,

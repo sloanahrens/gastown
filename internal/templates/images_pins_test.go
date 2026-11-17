@@ -261,19 +261,19 @@ func imagePinProblemsIn(src []byte, listed []string) ([]string, error) {
 	return problems, nil
 }
 
-// digestPinsInSource returns the value of every string constant declared in one
-// source file whose value carries an "@sha256:" digest. A constant whose value
-// it cannot read fails the scan unless the value is a provably non-string
-// literal, so an unreadable pin never reads as absent.
-func digestPinsInSource(src []byte) (map[string]bool, error) {
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "images.go", src, parser.SkipObjectResolution)
+// constDeclsInSource parses one source file's const declarations into the
+// expression that gives each declared name its value, the names in declaration
+// order, and which declarations mark their names as images. A declaration that
+// inherits the previous expression list is followed; a name with no value to
+// inherit is an error, never a skipped constant.
+func constDeclsInSource(src []byte) (exprs map[string]ast.Expr, names []string, image map[string]bool, err error) {
+	file, err := parser.ParseFile(token.NewFileSet(), "images.go", src, parser.SkipObjectResolution)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 
-	exprs := map[string]ast.Expr{}
-	var names []string
+	exprs = map[string]ast.Expr{}
+	image = map[string]bool{}
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.CONST {
@@ -288,14 +288,46 @@ func digestPinsInSource(src []byte) (map[string]bool, error) {
 			if len(values.Values) > 0 {
 				inherited = values.Values
 			}
+			isImage := declaresAnImage(values.Names)
 			for i, name := range values.Names {
 				if i >= len(inherited) {
-					return nil, fmt.Errorf("constant %s has no value the scan can follow", name.Name)
+					return nil, nil, nil, fmt.Errorf("constant %s has no value the scan can follow", name.Name)
 				}
 				exprs[name.Name] = inherited[i]
 				names = append(names, name.Name)
+				if isImage {
+					image[name.Name] = true
+				}
 			}
 		}
+	}
+	return exprs, names, image, nil
+}
+
+// declaresAnImage reports whether every name in a const declaration marks its
+// value as an image. A declaration that mixes the two is skipped whole; the
+// caller's DaemonBaseImage guard then fails if the skipped declaration held the
+// image it needed, so a mixed block cannot quietly pin nothing.
+func declaresAnImage(names []*ast.Ident) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if !strings.HasSuffix(name.Name, "Image") {
+			return false
+		}
+	}
+	return true
+}
+
+// digestPinsInSource returns the value of every string constant declared in one
+// source file whose value carries an "@sha256:" digest. A constant whose value
+// it cannot read fails the scan unless the value is a provably non-string
+// literal, so an unreadable pin never reads as absent.
+func digestPinsInSource(src []byte) (map[string]bool, error) {
+	exprs, names, _, err := constDeclsInSource(src)
+	if err != nil {
+		return nil, err
 	}
 
 	pins := map[string]bool{}

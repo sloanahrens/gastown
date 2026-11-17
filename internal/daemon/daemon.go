@@ -88,10 +88,10 @@ type Daemon struct {
 	// per state, not every heartbeat (gt tail noise).
 	crashSkipLog logLatch
 
-	// seatShadowLog logs a seat's agentbead_shadow disagreement once per pair
-	// of values, not once per patrol tick: the seat cap reads the intent
-	// record beside the agent bead for the shadow window, and the host that
-	// reads it lives one tick (gt-eyph71).
+	// seatShadowLog logs a seat's agentbead_shadow disagreement when it starts
+	// or changes, not once per patrol tick: each tick builds a fresh
+	// patrolScanHost, so the latch lives on the Daemon the host reads
+	// (gt-eyph71).
 	seatShadowLog logLatch
 
 	// promoteViaLog logs a rig's promote_via opt-out once, not on every
@@ -218,9 +218,15 @@ type Daemon struct {
 	cloudDSN cloudDSNWatch
 
 	// getenv reads the environment the start names its owner from
-	// (DetectSelf); nil reads the process environment. Tests set it so a
-	// start runs under an environment fixture.
+	// (DetectSelf) and the gateway URL the pod roll's Job is given; nil reads the
+	// process environment. Tests set it so a start and a launch run under an
+	// environment fixture.
 	getenv func(string) string
+
+	// lookupHost resolves the gateway host name a pod roll's Job is given (see
+	// gatewayURLForJob); nil is net.LookupHost. Tests set it so no test reaches a
+	// resolver.
+	lookupHost func(string) ([]string, error)
 
 	// hostname names the host a manual owner's id carries (see
 	// hostnameOrOS); nil reads os.Hostname. Tests set it to drive the failed
@@ -268,8 +274,10 @@ type Daemon struct {
 	openRecoveryBeads func(env []string) beads.Client
 
 	// openUsageRecords opens the town's usage_records store the seat-end and
-	// om-review writers file each record's row in (see usageRecords); nil is
-	// bd against the town database. Tests answer from a beadsfake.
+	// om-review writers file each record's row in (see usageRecords). It has no
+	// default: nil opens nothing, so a daemon a test builds reaches no database
+	// and its writers report the row not written. New wires bd against the town
+	// database; tests answer from a beadsfake.
 	openUsageRecords func() usageRecordStore
 
 	// openOverrunBeads opens the store the overrun stop's ownership re-check
@@ -1416,7 +1424,7 @@ type Daemon struct {
 	// default client, and a test hands it a transport that answers in process.
 	deepSeekBalanceHTTP *http.Client
 	// openCostSampleBeads opens the store the balance row is written to: nil is
-	// the town database, and a test hands it a beadsfake.
+	// the town database, and a test hands it a beadsfake (costSampleBeads).
 	openCostSampleBeads func() beads.Client
 
 	// omLessonsRunning and omLessonsCycles are the om_lessons pass's
@@ -1424,8 +1432,8 @@ type Daemon struct {
 	// and Run's return joins one it left (om_lessons_patrol.go).
 	omLessonsRunning atomic.Bool
 	omLessonsCycles  sync.WaitGroup
-	// omLessonsJoinWait overrides omLessonsJoinWait in tests.
-	omLessonsJoinWait time.Duration
+	// omLessonsJoinGrace overrides omLessonsJoinWait in tests.
+	omLessonsJoinGrace time.Duration
 	// omLessonsRun is the patrol's run seam: nil is omLessonsRunSkeleton,
 	// which proposes nothing until a later bead fills the body, and a test sets
 	// it to count the passes.
@@ -1446,6 +1454,25 @@ type Daemon struct {
 	// newReworkNumbersStep, and a test sets it to hand the tick a fake record
 	// source.
 	reworkNumbersStepFor reworkNumbersStepFunc
+
+	// imagePinLayersRunning and imagePinLayersCycles are the image_pin_layers
+	// run's single-flight guard and cycle count: a due run reads every pin from
+	// its registry off the select loop, and Run's return joins one it left
+	// (image_pin_layers.go).
+	imagePinLayersRunning atomic.Bool
+	imagePinLayersCycles  sync.WaitGroup
+	// imagePinLayersJoinTimer starts the bound stopImagePinLayersPatrol waits
+	// for a run still going: its channel receives when the bound passes, and
+	// stop ends it. Nil is a time.NewTimer of the bound, and a test sets it to
+	// expire or hold the bound itself, so no test waits on the wall clock.
+	imagePinLayersJoinTimer func(wait time.Duration) (bound <-chan time.Time, stop func())
+	// imagePinLayersRun is the patrol's run seam: nil is no seam installed, so
+	// a tick runs nothing and records no day, and a test sets it to count the
+	// runs.
+	imagePinLayersRun imagePinLayersRunFunc
+	// newImagePinLayersTicker is where the patrol's ticker comes from: nil is
+	// time.NewTicker, and a test sets it to record the cadence.
+	newImagePinLayersTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
 
 	// burst is the burst sampler (burst_sampler.go), built on its first
 	// start; burstSeams replaces its sample, its wait and its Env in tests,
@@ -1829,6 +1856,13 @@ func New(config *Config) (*Daemon, error) {
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {
 		doltServer.SetRestartSuppressor(d.doltRestartHeldForGC)
+	}
+
+	// The town's usage_records rows: the seat-end and om-review writers file
+	// their rows here, and this is the one place the production store is wired
+	// (see usageRecords).
+	d.openUsageRecords = func() usageRecordStore {
+		return beads.New(d.config.TownRoot, beads.WithBin(d.bdPathOrDefault()))
 	}
 
 	return d, nil
@@ -2476,6 +2510,16 @@ func (d *Daemon) Run() (err error) {
 		defer d.stopReworkNumbersPatrol(stopReworkNumbers)
 	}
 
+	// Start the image pin layers ticker if enabled (default off, gt-rhrbyd;
+	// its config block says why). The ticker checks whether today's run is
+	// due; the last-run record under .runtime decides, so a restart inside the
+	// day reruns nothing. The defer stops the ticker and joins a run it left
+	// going.
+	imagePinLayersChan, stopImagePinLayers := d.startImagePinLayersTicker()
+	if stopImagePinLayers != nil {
+		defer d.stopImagePinLayersPatrol(stopImagePinLayers)
+	}
+
 	// The burst sampler runs beside it (gt-ztem6): its own goroutine, paced by
 	// the row's own cadence, so bursts.jsonl fills while the host is pressed.
 	// stopBurst cancels and joins the loop, so Run's return leaves no sample
@@ -2694,6 +2738,14 @@ func (d *Daemon) Run() (err error) {
 			// decides whether this tick is the week's run (gt-2232t4).
 			if !d.isShutdownInProgress() {
 				d.startReworkNumbersTick()
+			}
+
+		case <-imagePinLayersChan:
+			// image_pin_layers — a due run checks every digest pin against its
+			// registry, on its own goroutine; the last-run record under
+			// .runtime decides whether this tick is today's run (gt-rhrbyd).
+			if !d.isShutdownInProgress() {
+				d.startImagePinLayersTick()
 			}
 
 		case <-findingsFilerChan:

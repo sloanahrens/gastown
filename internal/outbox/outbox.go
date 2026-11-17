@@ -12,13 +12,16 @@
 //	  "acceptance": "## Acceptance\n- [x] the refusal names the verb",
 //	  "ticked_boxes": [0, 2],
 //	  "findings": ["the retry never resets its counter"],
-//	  "escalation": {"text": "HELP: the acceptance list names a missing file"}
+//	  "escalation": {"text": "HELP: the acceptance list names a missing file"},
+//	  "submission": {"branch": "polecat/capable/gt-swfo9e", "head": "0123abcd", "target": "main",
+//	                 "submitted_at": "2026-11-16T18:40:48Z"}
 //	}
 //
 // bead_id is the bead the seat was given. The seat omits a field it has nothing
 // to report for. title and acceptance are the edits a file-mode `gt bead
 // update` makes: the new title, and the whole replacement criteria block, as
-// bd's --acceptance means it.
+// bd's --acceptance means it. submission is the branch a file-mode `gt done`
+// pushed for landing, which the host writes as the READY TO LAND block.
 //
 // The package does no I/O: the host reads the two files and hands their contents
 // to Validate.
@@ -31,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -86,8 +90,33 @@ type Result struct {
 	Findings []string
 	// Escalation is the seat's request for help, or nil when it asked for none.
 	Escalation *Escalation
+	// Submission is the branch the seat pushed for landing, or nil when it
+	// submitted none.
+	Submission *Submission
 	// Notes is the text of the seat's notes.md.
 	Notes string
+}
+
+// Submission is what a seat pushed for landing: the branch, its head on the
+// seat's remote and the branch it lands onto. The worker that submitted it is
+// not part of it: the host names the seat the outbox is applied for, so a
+// result.json cannot claim another worker's submission (gt-1m9gr).
+type Submission struct {
+	Branch string
+	Head   string
+	Target string
+	// SubmittedAt is the seat's own stamp for the submission. Zero when the
+	// seat wrote none; the READY TO LAND block then carries no Submitted line
+	// and the landing worker orders the bead by its update time.
+	SubmittedAt time.Time
+}
+
+// wireSubmission is the submission object's shape as the seat writes it.
+type wireSubmission struct {
+	Branch      string `json:"branch"`
+	Head        string `json:"head"`
+	Target      string `json:"target"`
+	SubmittedAt string `json:"submitted_at"`
 }
 
 // Escalation is a seat's request that the host raise an escalation for it.
@@ -98,13 +127,14 @@ type Escalation struct {
 
 // wireResult is result.json's shape as the seat writes it.
 type wireResult struct {
-	BeadID      string      `json:"bead_id"`
-	Status      Status      `json:"status"`
-	Title       *string     `json:"title"`
-	Acceptance  *string     `json:"acceptance"`
-	TickedBoxes []int       `json:"ticked_boxes"`
-	Findings    []string    `json:"findings"`
-	Escalation  *Escalation `json:"escalation"`
+	BeadID      string          `json:"bead_id"`
+	Status      Status          `json:"status"`
+	Title       *string         `json:"title"`
+	Acceptance  *string         `json:"acceptance"`
+	TickedBoxes []int           `json:"ticked_boxes"`
+	Findings    []string        `json:"findings"`
+	Escalation  *Escalation     `json:"escalation"`
+	Submission  *wireSubmission `json:"submission"`
 }
 
 // Validate decodes the seat's result.json (raw) and notes.md (notes) into a
@@ -116,8 +146,11 @@ type wireResult struct {
 // gives; an unknown field, which is how it refuses a label, assignee, close or
 // other-bead field; a bead_id that is not beadID; a status other than StatusDone
 // or StatusDeferred; a title or acceptance that is empty or only spaces; more
-// than 5 findings; a finding over 2 KB; a negative or repeated ticked box; and
-// an escalation whose text is empty.
+// than 5 findings; a finding over 2 KB; a negative or repeated ticked box; an
+// escalation whose text is empty; and a submission with a status other than
+// StatusDone, an empty branch, head or target, a branch or target git would not
+// accept as a ref, a head that is not an abbreviated or full commit sha, or a
+// submitted_at that is not an RFC 3339 time.
 func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	if beadID == "" {
 		return Result{}, errors.New("outbox: no bead id was given to validate against")
@@ -185,6 +218,24 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	if wire.Escalation != nil && wire.Escalation.Text == "" {
 		return Result{}, errors.New("outbox: result.json escalation text is empty")
 	}
+	var submission *Submission
+	if wire.Submission != nil {
+		submission = &Submission{
+			Branch: strings.TrimSpace(wire.Submission.Branch),
+			Head:   strings.TrimSpace(wire.Submission.Head),
+			Target: strings.TrimSpace(wire.Submission.Target),
+		}
+		if err := submissionProblem(submission, wire.Status); err != nil {
+			return Result{}, fmt.Errorf("outbox: result.json %w", err)
+		}
+		if wire.Submission.SubmittedAt != "" {
+			at, err := time.Parse(time.RFC3339, wire.Submission.SubmittedAt)
+			if err != nil {
+				return Result{}, errors.New("outbox: result.json submission submitted_at is not an RFC 3339 time")
+			}
+			submission.SubmittedAt = at
+		}
+	}
 	return Result{
 		Status:     wire.Status,
 		Title:      wire.Title,
@@ -192,8 +243,93 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 		Ticked:     wire.TickedBoxes,
 		Findings:   wire.Findings,
 		Escalation: wire.Escalation,
+		Submission: submission,
 		Notes:      string(notes),
 	}, nil
+}
+
+// submissionProblem returns why s is not a landing the host can write, or nil
+// when it is one. Validate refuses through it what a seat wrote, and Apply
+// through it what a hand-built Result carries, so neither path marks a bead
+// ready to land for a branch or target git would refuse or a head that is not a
+// commit sha: the block's values reach git as a ref to fetch and a commit to
+// merge, and a seat is not the authority on what git accepts.
+func submissionProblem(s *Submission, status Status) error {
+	if s == nil {
+		return nil
+	}
+	// A deferred seat submits nothing: gt done with DEFERRED pushes no branch,
+	// and a block written for one would queue a landing the seat never asked
+	// for.
+	if status != StatusDone {
+		return fmt.Errorf("a submission under status %q; only a %q result submits a branch", status, StatusDone)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"branch", s.Branch},
+		{"head", s.Head},
+		{"target", s.Target},
+	} {
+		if strings.TrimSpace(field.value) == "" {
+			return fmt.Errorf("the submission names no %s", field.name)
+		}
+	}
+	if !validBranch(s.Branch) {
+		return fmt.Errorf("the submission's branch %q is not a name git accepts", s.Branch)
+	}
+	if !validBranch(s.Target) {
+		return fmt.Errorf("the submission's target %q is not a name git accepts", s.Target)
+	}
+	if !validHead(s.Head) {
+		return fmt.Errorf("the submission's head %q is not a git commit sha", s.Head)
+	}
+	return nil
+}
+
+// validBranch reports whether branch is a name git accepts for a branch, so a
+// seat-written result.json never reaches git as an option or a malformed ref.
+// It follows git check-ref-format --branch: not "HEAD" or "@", no leading '-',
+// no control character or space, none of "~^:?*[\\", no "..", "@{" or "//", no
+// leading or trailing '/', no component starting with '.', and no component
+// ending in ".lock".
+func validBranch(branch string) bool {
+	if branch == "" || branch == "HEAD" || branch == "@" || strings.HasPrefix(branch, "-") {
+		return false
+	}
+	for _, r := range branch {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune(" ~^:?*[\\", r) {
+			return false
+		}
+	}
+	if strings.Contains(branch, "..") || strings.Contains(branch, "//") || strings.Contains(branch, "@{") {
+		return false
+	}
+	if strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") || strings.HasSuffix(branch, ".") {
+		return false
+	}
+	for _, component := range strings.Split(branch, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// validHead reports whether head is a commit sha a landing can fetch: 7 to 64
+// lowercase hex digits, the shortest prefix this code accepts a landing head by
+// and the widest object id git writes.
+func validHead(head string) bool {
+	if len(head) < 7 || len(head) > 64 {
+		return false
+	}
+	for _, r := range head {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // Encode returns the result.json bytes for beadID: every field of r, in the
@@ -202,12 +338,12 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 // an earlier one recorded: an escalation raised after an update still carries
 // the update.
 //
-// Every field of the shape is a string, a string pointer, an int list or a list
-// of strings, so the encoding has no failure to report; a caller validates the
-// bytes it gets, and Validate refuses what the encoder could not have written
-// as a result the host applies.
+// Every field of the shape is a string, a string pointer, an int list, a list
+// of strings or a submission of strings, so the encoding has no failure to
+// report; a caller validates the bytes it gets, and Validate refuses what the
+// encoder could not have written as a result the host applies.
 func Encode(beadID string, r Result) []byte {
-	raw, _ := json.MarshalIndent(wireResult{ //nolint:errcheck // wireResult holds only strings and ints; MarshalIndent cannot fail for it
+	wire := wireResult{
 		BeadID:      beadID,
 		Status:      r.Status,
 		Title:       r.Title,
@@ -215,6 +351,17 @@ func Encode(beadID string, r Result) []byte {
 		TickedBoxes: r.Ticked,
 		Findings:    r.Findings,
 		Escalation:  r.Escalation,
-	}, "", "  ")
+	}
+	if r.Submission != nil {
+		wire.Submission = &wireSubmission{
+			Branch: r.Submission.Branch,
+			Head:   r.Submission.Head,
+			Target: r.Submission.Target,
+		}
+		if !r.Submission.SubmittedAt.IsZero() {
+			wire.Submission.SubmittedAt = r.Submission.SubmittedAt.UTC().Format(time.RFC3339)
+		}
+	}
+	raw, _ := json.MarshalIndent(wire, "", "  ") //nolint:errcheck // wireResult holds only strings and ints; MarshalIndent cannot fail for it
 	return append(raw, '\n')
 }

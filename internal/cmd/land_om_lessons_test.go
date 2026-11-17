@@ -372,10 +372,13 @@ func omLessonsProposeRecords() []land.ReviewRecord {
 	}
 }
 
-// TestLandOmLessonsProposeGolden pins the drafts: a class with enough findings
-// gets one, with its coverage, counts and examples; a class under the threshold
-// is a too-few line with no draft.
-func TestLandOmLessonsProposeGolden(t *testing.T) {
+// TestReworkProgramOmLessonsProposeGolden pins the drafts: a class with enough
+// findings gets one, with its coverage, counts and examples; a class under the
+// threshold is a too-few line with no draft. It drives the command body end to
+// end over omlessons.Proposals, and its ReworkProgram prefix is what the gate
+// filter `go test ./internal/cmd -run ReworkProgram` selects; renaming it into
+// the TestLandOmLessons family hides it from that filter (gt-7y59hl).
+func TestReworkProgramOmLessonsProposeGolden(t *testing.T) {
 	t.Parallel()
 	path := writeLandOmLessonsRecords(t, t.TempDir(), omLessonsProposeRecords())
 	var out bytes.Buffer

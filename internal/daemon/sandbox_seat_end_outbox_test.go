@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -305,6 +306,21 @@ type failingListClient struct {
 
 func (c failingListClient) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return nil, c.err
+}
+
+// failingNotesClient is the town's bead store refusing the notes write, every
+// other write answering as the fake does. A nil err stops refusing, the store
+// of a later pass that answers again.
+type failingNotesClient struct {
+	beads.Client
+	err error
+}
+
+func (c *failingNotesClient) AppendNotes(id, note string) error {
+	if c.err != nil {
+		return c.err
+	}
+	return c.Client.AppendNotes(id, note)
 }
 
 // seatOutboxEscalation is result.json carrying a HELP request, the shape a
@@ -779,5 +795,140 @@ func TestNoBeadAccessSeatEndUnreadableOutboxKeepsTheSeat(t *testing.T) {
 	}
 	if !strings.HasPrefix(kept.Reason, outboxNotReadReason) {
 		t.Errorf("kept record reason = %q, want %q", kept.Reason, outboxNotReadReason)
+	}
+}
+
+// A second, different HELP request about the same bead is a second ask: the
+// first request's open escalation does not stand for it, so it files its own
+// bead rather than being dropped as a repeat (gt-kj60e4).
+func TestNoBeadAccessSeatEndFilesASecondDistinctRequest(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	seedSeatBead(t, f, "")
+	const first = `{"bead_id":"` + endBead + `","status":"done",` +
+		`"escalation":{"text":"HELP: the retry loop never ends\n\nSeverity: high"}}`
+	const second = `{"bead_id":"` + endBead + `","status":"done",` +
+		`"escalation":{"text":"HELP: the acceptance list names a missing file\n\nSeverity: high"}}`
+
+	writeSeatOutbox(t, f.town, first, "")
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+		t.Fatalf("the first request kept the seat: %s", reason)
+	}
+	writeSeatOutbox(t, f.town, second, "")
+	if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+		t.Fatalf("the second request kept the seat: %s", reason)
+	}
+
+	escalations, err := beads.ListEscalations(f.agentDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(escalations) != 2 {
+		t.Fatalf("two requests about one bead filed %d escalation beads, want one each: %+v", len(escalations), escalations)
+	}
+	titles := make(map[string]bool, len(escalations))
+	for _, escalation := range escalations {
+		titles[escalation.Title] = true
+	}
+	for _, want := range []string{
+		"HELP: the retry loop never ends",
+		"HELP: the acceptance list names a missing file",
+	} {
+		if !titles[want] {
+			t.Errorf("escalation titles = %v, want %q among them", titles, want)
+		}
+	}
+}
+
+// A note its store refused keeps the seat: the bead does not carry what the seat
+// wrote, and the copy the end read is the host's only remaining one (gt-kj60e4).
+func TestNoBeadAccessSeatEndFailedNoteWriteKeepsTheSeat(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	seedSeatBead(t, f, "")
+	writeSeatOutbox(t, f.town, `{"bead_id":"`+endBead+`","status":"done"}`, "the seat's note\n")
+	f.host.openRecoveryBeads = func([]string) beads.Client {
+		return &failingNotesClient{Client: f.agentDB, err: errors.New("dolt unavailable")}
+	}
+	removed := 0
+	f.host.removeSandboxSeatDirs = func(string, string, string) (bool, error) {
+		removed++
+		return true, nil
+	}
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end removed a seat whose note its store refused")
+	}
+	if removed != 0 {
+		t.Errorf("the seat's directories were removed %d times, want the seat kept", removed)
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed, want it kept")
+	}
+	want := outboxApplyReason + ": outbox: append notes to " + endBead + ": dolt unavailable"
+	if !strings.Contains(logs.String(), "kept: "+want) {
+		t.Errorf("log %q does not name the refused note %q", logs.String(), want)
+	}
+	path, err := keptSandboxSeatPath(f.town, endRig, endPolecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := readKeptSandboxSeatRecord(path)
+	if err != nil {
+		t.Fatalf("reading the kept record: %v", err)
+	}
+	if kept.Reason != want {
+		t.Errorf("kept record reason = %q, want %q", kept.Reason, want)
+	}
+}
+
+// A seat kept for a refused write is offered again, and the retry writes the
+// note the bead never got without repeating the finding the first pass wrote
+// (gt-kj60e4).
+func TestNoBeadAccessSeatEndRetriesOnlyTheRefusedWrite(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	f.seatDirs()
+	seedSeatBead(t, f, "")
+	const result = `{"bead_id":"` + endBead + `","status":"done",` +
+		`"findings":["the retry never resets its counter"]}`
+	writeSeatOutbox(t, f.town, result, "the seat's note\n")
+	f.host.d.logger = log.New(io.Discard, "", 0)
+	refusing := &failingNotesClient{Client: f.agentDB, err: errors.New("dolt unavailable")}
+	f.host.openRecoveryBeads = func([]string) beads.Client { return refusing }
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the first pass finished a seat whose note its store refused")
+	}
+
+	// The store answers again, and the patrol offers the kept seat its end.
+	refusing.err = nil
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the second pass did not finish a seat whose note it wrote")
+	}
+	issue, err := f.agentDB.Show(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(issue.Notes, "the seat's note"); got != 1 {
+		t.Errorf("the seat's note is on the bead %d times, want the one the retry wrote: %q", got, issue.Notes)
+	}
+	comments, err := f.agentDB.Comments(endBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 {
+		t.Errorf("the bead carries %d findings, want the seat's one: %+v", len(comments), comments)
 	}
 }

@@ -38,6 +38,16 @@ func goldenValues() Values {
 	}
 }
 
+// testBdGatewayURL is the gateway address the gateway goldens record.
+const testBdGatewayURL = "http://host.docker.internal:7440"
+
+// bdGatewayValues is goldenValues with the bd gateway set.
+func bdGatewayValues() Values {
+	v := goldenValues()
+	v.BdGatewayURL = testBdGatewayURL
+	return v
+}
+
 func mustBuild(t *testing.T, v Values) Manifests {
 	t.Helper()
 	m, err := Build(v)
@@ -105,6 +115,97 @@ func TestRenderCronJobGolden(t *testing.T) {
 		t.Fatalf("YAML: %v", err)
 	}
 	compareGolden(t, "cronjob.yaml", buf.Bytes())
+}
+
+// TestBuildBdGateway renders the Job and the CronJob with the gateway set and holds
+// them to their goldens. Both containers carry the forwarder's pair naming the token
+// file, and the pod's third volume is the daemon-class token Secret, read-only at
+// the directory the daemon's pod mounts it.
+func TestBuildBdGateway(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayValues())
+	for _, tc := range []struct {
+		file string
+		doc  any
+	}{
+		{file: "job-bdgateway.yaml", doc: m.Job},
+		{file: "cronjob-bdgateway.yaml", doc: m.CronJob},
+	} {
+		var buf bytes.Buffer
+		if err := YAML(&buf, tc.doc); err != nil {
+			t.Fatalf("YAML of %s: %v", tc.file, err)
+		}
+		compareGolden(t, tc.file, buf.Bytes())
+	}
+
+	pod := podOf(m)
+	wantEnv := []EnvVar{
+		{Name: "BD_GATEWAY_URL", Value: testBdGatewayURL},
+		{Name: "BD_GATEWAY_TOKEN_FILE", Value: "/run/gt/bd-gateway/token"},
+	}
+	wantMount := VolumeMount{Name: "bd-gateway-token", MountPath: "/run/gt/bd-gateway", ReadOnly: true}
+	for _, name := range []string{InitContainerName, ContainerName} {
+		c := containerNamed(t, pod, name)
+		for _, want := range wantEnv {
+			got, ok := envNamed(c.Env, want.Name)
+			if !ok || got.Value != want.Value {
+				t.Errorf("%s %s = %q (set %v), want %q", c.Name, want.Name, got.Value, ok, want.Value)
+			}
+		}
+		if !slices.Contains(c.VolumeMounts, wantMount) {
+			t.Errorf("%s volumeMounts = %+v, want %+v among them", c.Name, c.VolumeMounts, wantMount)
+		}
+	}
+
+	if len(pod.Volumes) != 3 {
+		t.Fatalf("the pod has %d volumes, want the town-state claim, the viewer token and the gateway token", len(pod.Volumes))
+	}
+	gw := volumeNamed(t, pod.Volumes, "bd-gateway-token")
+	if gw.Secret == nil || gw.Secret.SecretName != "bd-gateway-daemon" || gw.PersistentVolumeClaim != nil {
+		t.Fatalf("gateway volume = %+v, want the bd-gateway-daemon Secret", gw)
+	}
+	if gw.Secret.DefaultMode == nil || *gw.Secret.DefaultMode != 0o400 {
+		t.Errorf("gateway token defaultMode = %v, want 0400", gw.Secret.DefaultMode)
+	}
+	if len(gw.Secret.Items) != 1 || gw.Secret.Items[0].Key != "token" || gw.Secret.Items[0].Path != "token" {
+		t.Errorf("gateway volume items = %+v, want only the token key", gw.Secret.Items)
+	}
+}
+
+// TestBuildNoBdGateway holds an empty BdGatewayURL to the goldens the renderer has
+// always had and to a pod that carries none of the gateway's parts: the Job and the
+// CronJob are byte-identical.
+func TestBuildNoBdGateway(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues())
+	for _, tc := range []struct {
+		file string
+		doc  any
+	}{
+		{file: "job.yaml", doc: m.Job},
+		{file: "cronjob.yaml", doc: m.CronJob},
+	} {
+		var buf bytes.Buffer
+		if err := YAML(&buf, tc.doc); err != nil {
+			t.Fatalf("YAML of %s: %v", tc.file, err)
+		}
+		compareGolden(t, tc.file, buf.Bytes())
+	}
+
+	pod := podOf(m)
+	if len(pod.Volumes) != 2 {
+		t.Errorf("the pod has %d volumes, want only the town-state claim and the viewer token", len(pod.Volumes))
+	}
+	for _, c := range append(slices.Clone(pod.InitContainers), pod.Containers...) {
+		for _, name := range []string{"BD_GATEWAY_URL", "BD_GATEWAY_TOKEN_FILE"} {
+			if _, ok := envNamed(c.Env, name); ok {
+				t.Errorf("%s sets %s with BdGatewayURL empty", c.Name, name)
+			}
+		}
+		if slices.Contains(c.VolumeMounts, VolumeMount{Name: "bd-gateway-token", MountPath: "/run/gt/bd-gateway", ReadOnly: true}) {
+			t.Errorf("%s mounts the gateway token with BdGatewayURL empty", c.Name)
+		}
+	}
 }
 
 // TestCronJobIsSuspendedAndSharesTheJobPodTemplate holds the CronJob to the Job: it
@@ -304,6 +405,39 @@ func TestBuildRefusesWhatThePodCannotRun(t *testing.T) {
 		if !strings.Contains(err.Error(), r.wantIn) {
 			t.Errorf("%s: error %q does not name %s", r.name, err, r.wantIn)
 		}
+	}
+}
+
+// TestBuildBdGatewayRefusesABadURL drives each malformed gateway URL to a refusal
+// that names Values.BdGatewayURL, and holds a URL carrying credentials to one that
+// does not echo them.
+func TestBuildBdGatewayRefusesABadURL(t *testing.T) {
+	t.Parallel()
+	const secret = "gateway-password-sentinel"
+	for _, r := range []struct {
+		name string
+		url  string
+	}{
+		{name: "no scheme", url: "host.docker.internal:7440"},
+		{name: "a non-http scheme", url: "ftp://host:7440"},
+		{name: "no host", url: "http://:7440"},
+		{name: "credentials", url: "http://gt:" + secret + "@host:7440"},
+	} {
+		t.Run(r.name, func(t *testing.T) {
+			t.Parallel()
+			v := goldenValues()
+			v.BdGatewayURL = r.url
+			_, err := Build(v)
+			if err == nil {
+				t.Fatalf("Build accepted the URL with %s", r.name)
+			}
+			if !strings.Contains(err.Error(), "Values.BdGatewayURL") {
+				t.Errorf("the refusal %q does not name Values.BdGatewayURL", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Errorf("the refusal %q echoes the credentials", err)
+			}
+		})
 	}
 }
 

@@ -417,10 +417,10 @@ container.
    `read`. Rollback: the Deployment's previous image tag (its own bd is still in
    the image until Stage 6).
 5. **Daemon.** The daemon Deployment gets `BD_GATEWAY_URL`, the token Secret, and
-   the forwarder first on PATH. The image still carries bd, so rollback is
-   deleting the env variable: the forwarder runs the local bd when no gateway is
-   configured. Roll in a quiet gap and watch `/v1/stats` and the daemon's own
-   census lines for a tick.
+   the forwarder first on PATH. Rollback is the previous Deployment render, which
+   does not run the forwarder: deleting `BD_GATEWAY_URL` is not a rollback, since
+   the forwarder refuses every bd call with no gateway (gt-q1beru). Roll in a
+   quiet gap and watch `/v1/stats` and the daemon's own census lines for a tick.
 6. **Clean up** after one week of clean `/v1/stats` (no 5xx, p95 inside budget):
    [Deletions](#what-is-deleted-afterwards).
 
@@ -449,10 +449,12 @@ change, not a rebuild.
 ## Risks
 
 - **The gateway is every bd call's single point of failure.** Mitigation: restart
-  policy, the health check, the fallback to local bd in the daemon image until
-  Stage 6, and the daemon's doctor check. After Stage 6 a down gateway stops the
-  daemon's reads; that is the price of decision 1 and it makes the health check
-  and the Docker Desktop restart ordering part of the town's availability.
+  policy, the health check, and the daemon's doctor check. The forwarder has no
+  local bd to fall back to: with `BD_GATEWAY_URL` unset it refuses every call with
+  status 125, and a gateway that cannot answer is reported by its URL. A down
+  gateway stops the daemon's reads; that is the price of decision 1 and it makes
+  the health check and the Docker Desktop restart ordering part of the town's
+  availability.
 - **The workspace goes stale.** A route flip or a rig add changes files the
   container must see. Mitigation: push on every writer, a five-minute reconcile,
   the manifest hash on every response, doctor drift. Residual risk: a caller
@@ -553,9 +555,9 @@ G2, G3, G4, G5 and G7 touch different files and can run in parallel after G1.
   exec`, the same translation, the doctor ladder for a stopped container (no
   throwaway rung for bd). Needs: G6, G9.
 - **G11 [gt]** The forwarder as `bd` in the daemon image: install gt-wrap under the
-  name `bd` ahead of the real bd on PATH, `BD_GATEWAY_URL` and the token file
-  from the environment, with the fallback to the local bd when no gateway is
-  configured. Needs: G9.
+  name `bd` ahead of the real bd on PATH, with `BD_GATEWAY_URL` and the token file
+  from the environment; a missing URL refuses the call with status 125 rather than
+  running the local bd (gt-q1beru). Needs: G9.
 
 ## Phase 3: images, compose, doctor
 

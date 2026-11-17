@@ -210,7 +210,7 @@ func (d *Daemon) stopOmLessonsPatrol(stop func()) {
 		d.omLessonsCycles.Wait()
 		close(done)
 	}()
-	bound := d.omLessonsJoinWait
+	bound := d.omLessonsJoinGrace
 	if bound <= 0 {
 		bound = omLessonsJoinWait
 	}

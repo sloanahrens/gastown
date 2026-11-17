@@ -227,7 +227,9 @@ func TestSpecDispatchWireStoryPointShadowReadsTheDaemonConfig(t *testing.T) {
 				t.Fatalf("specTickTown: %v", err)
 			}
 			var env specDispatchEnv
-			specWireStoryPoints(&env, sd, root)
+			if err := specWireStoryPoints(&env, sd, root); err != nil {
+				t.Fatalf("specWireStoryPoints: %v", err)
+			}
 			if env.StoryPointShadow != tc.want {
 				t.Errorf("StoryPointShadow = %v, want %v", env.StoryPointShadow, tc.want)
 			}

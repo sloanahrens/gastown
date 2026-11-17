@@ -918,8 +918,8 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 
 	// The profile travels in the spec: the runtime archive reads its bead
-	// access to stage the files-mode marker, and no other caller fills
-	// SpawnSpec.Profile (gt-3qkaws).
+	// access to stage the files-mode marker, and the backend sets it here from
+	// its own profile (gt-3qkaws).
 	spec.Profile = b.profile
 
 	// Also before anything is pushed or created: the agent command names these

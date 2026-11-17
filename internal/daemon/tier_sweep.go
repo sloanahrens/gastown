@@ -249,8 +249,12 @@ type tierSweepState struct {
 	LastGreenSHA string `json:"last_green_sha"`
 	// ImagesRetries counts the re-runs an images failure at ImagesRetrySHA has
 	// already cost. The pair belongs together: the count is read only while
-	// ImagesRetrySHA equals LastGreenSHA, so a green sweep that moves the tip
-	// starts the new sha at zero without an explicit reset.
+	// ImagesRetrySHA equals LastGreenSHA, and every cycle rewrites the pair
+	// (tierSweepImagesRetryRecorded), so a green sweep that moves the tip and a
+	// green tip whose images are published both clear it. A tip whose images
+	// answer the pair check does not hold keeps the count, so a daemon restart
+	// reads back what the loop has already spent instead of lifting the cap
+	// (gt-opkfch).
 	ImagesRetries int `json:"images_retries,omitempty"`
 	// ImagesRetrySHA is the green tip the ImagesRetries count belongs to. An
 	// empty value, or one naming another tip, reads as zero retries.
@@ -687,6 +691,53 @@ type tierSweepSeams struct {
 	// one that holds a digest at the default path, so the default is exercised
 	// without a file under /run.
 	readImageFile func(path string) ([]byte, error)
+	// imagesAnswer reports what the sweep knows about the images run for rig's
+	// green commit sha. Nil is the pair check's answer; a test sets one to steer
+	// it. A commit the answer's source holds nothing for is
+	// tierSweepImagesUnanswered, never a success (gt-ogt6jh, gt-opkfch).
+	imagesAnswer func(rig, sha string) tierSweepImagesAnswer
+}
+
+// tierSweepImagesAnswer is what the sweep knows about the images run for a
+// green commit: the run failed, the run succeeded and its pair is published, or
+// the pair check holds no answer for the commit.
+type tierSweepImagesAnswer int
+
+const (
+	// tierSweepImagesUnanswered is a commit the pair check holds no answer for:
+	// it has not read the commit's pair, or its read did not reach it. It is not
+	// a success: the sweep cannot tell a failed build from one it never saw, so a
+	// record the answer would clear keeps what it has (gt-opkfch).
+	tierSweepImagesUnanswered tierSweepImagesAnswer = iota
+	// tierSweepImagesFailed is a commit whose newest images run ended failed or
+	// canceled.
+	tierSweepImagesFailed
+	// tierSweepImagesPublished is a commit whose daemon and polecat images are
+	// in the registry at its stamp: its images run succeeded.
+	tierSweepImagesPublished
+)
+
+// tierSweepImagesAnswerFor answers what the sweep knows about the images run for
+// rig's green commit sha: the seam when a test set one, the pair check otherwise.
+func (d *Daemon) tierSweepImagesAnswerFor(rig, sha string) tierSweepImagesAnswer {
+	if f := d.tierSweepSeams.imagesAnswer; f != nil {
+		return f(rig, sha)
+	}
+	failed, published := d.pairReady.imagesAnswerFor(rig, sha)
+	switch {
+	case failed:
+		return tierSweepImagesFailed
+	case published:
+		return tierSweepImagesPublished
+	}
+	return tierSweepImagesUnanswered
+}
+
+// tierSweepImagesFailedFor answers whether the images build for rig's green
+// commit sha is known to have failed. An answer the sweep does not hold is not
+// failed, so it lists no retry (gt-ogt6jh).
+func (d *Daemon) tierSweepImagesFailedFor(rig, sha string) bool {
+	return d.tierSweepImagesAnswerFor(rig, sha) == tierSweepImagesFailed
 }
 
 // tierSweepPolecatImageFile is where a daemon pod finds the polecat image its
@@ -888,7 +939,16 @@ func tierSweepEarlyDue(st tierSweepState, now time.Time) bool {
 // local tier and only the remote images build failed, so the green tip waits
 // for the hourly interval unless this rule re-runs it early (gt-bfvhqt).
 func tierSweepImagesRetryDue(st tierSweepState, now time.Time, imagesFailed bool) bool {
-	if !imagesFailed || st.LastGreenSHA == "" {
+	return imagesFailed && tierSweepImagesRetryRecordDue(st, now)
+}
+
+// tierSweepImagesRetryRecordDue reports whether the record alone still allows
+// an images retry: a green tip, fewer than tierSweepImagesRetryMax retries
+// recorded for it, and tierSweepImagesRetryGap since the last run. The images
+// answer is the other half of tierSweepImagesRetryDue, and a caller asks for it
+// only once this holds.
+func tierSweepImagesRetryRecordDue(st tierSweepState, now time.Time) bool {
+	if st.LastGreenSHA == "" {
 		return false
 	}
 	retries := 0
@@ -901,8 +961,47 @@ func tierSweepImagesRetryDue(st tierSweepState, now time.Time, imagesFailed bool
 	return now.Sub(st.LastRun) >= tierSweepImagesRetryGap
 }
 
+// tierSweepImagesRetryRecorded returns the images retry pair a cycle leaves in
+// the rig's record: the retries a failed images run at the green tip has cost,
+// and the tip they belong to (gt-opkfch). prior is the record the cycle read,
+// greenSHA the green tip it recorded (empty when it recorded none), early whether
+// the cycle is an early re-run, and now when it started.
+//
+// The pair is cleared by a tip the cycle moved and by a tip whose images are
+// published, since neither leaves a failed run for a count to belong to. A tip
+// whose images run failed keeps the count recorded for that tip, and an early
+// re-run the record still allows a retry on adds one, which is how
+// tierSweepImagesRetryMax bounds the loop across a daemon restart. A tip the
+// pair check holds no answer for keeps its count: a cycle that cannot see the
+// images failure has spent no retry, and an absent answer must not lift the cap.
+func (d *Daemon) tierSweepImagesRetryRecorded(rig string, prior tierSweepState, greenSHA string, early bool, now time.Time) (int, string) {
+	if greenSHA != prior.LastGreenSHA {
+		return 0, ""
+	}
+	// The count is only the green tip's own: a pair recorded for another sha
+	// counts for nothing.
+	retries := 0
+	if prior.ImagesRetrySHA == greenSHA {
+		retries = prior.ImagesRetries
+	}
+	answer := d.tierSweepImagesAnswerFor(rig, greenSHA)
+	if answer == tierSweepImagesPublished {
+		return 0, ""
+	}
+	if answer == tierSweepImagesFailed && early && tierSweepImagesRetryRecordDue(prior, now) {
+		return retries + 1, greenSHA
+	}
+	if retries == 0 {
+		// No count left to keep, so the tip it would name is not written either.
+		return 0, ""
+	}
+	return retries, greenSHA
+}
+
 // tierSweepEarlyCandidates lists the configured rigs whose record passes
-// tierSweepEarlyDue.
+// tierSweepEarlyDue, or whose green commit's images build failed and whose
+// origin/main has moved off that tip so the re-run would sweep new work
+// (gt-heqwuy).
 func (d *Daemon) tierSweepEarlyCandidates(now time.Time) []string {
 	var out []string
 	for _, rig := range tierSweepRigs(d.patrol(), d.getKnownRigs()) {
@@ -910,11 +1009,50 @@ func (d *Daemon) tierSweepEarlyCandidates(now time.Time) []string {
 		if err != nil {
 			continue
 		}
-		if tierSweepEarlyDue(st, now) {
+		if tierSweepEarlyDue(st, now) || d.tierSweepImagesRetryWanted(rig, st, now) {
 			out = append(out, rig)
 		}
 	}
 	return out
+}
+
+// tierSweepImagesRetryWanted reports whether rig is listed for an images retry:
+// the record's own conditions hold, the images build at its green tip failed,
+// and origin/main has moved off that tip. The moved tip is the run's own
+// condition, and it is asked here too because a retry at the green tip would
+// rebuild the images that just failed, sweeping nothing new (gt-heqwuy).
+//
+// Only a rig with a failed images build pays for the read: the red reason is
+// settled by the record alone. An origin/main this read cannot resolve lists
+// the rig, so a transient failure defers the decision to the run's own fresh
+// read rather than starving the retry.
+func (d *Daemon) tierSweepImagesRetryWanted(rig string, st tierSweepState, now time.Time) bool {
+	if !tierSweepImagesRetryRecordDue(st, now) {
+		return false
+	}
+	if !d.tierSweepImagesFailedFor(rig, st.LastGreenSHA) {
+		return false
+	}
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig))
+	if _, err := os.Stat(repo); err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), git.RemoteQueryTimeout)
+	defer cancel()
+	sha, err := d.tierSweepMainReader()(ctx, repo)
+	if err != nil {
+		return true
+	}
+	return sha != "" && sha != st.LastGreenSHA
+}
+
+// tierSweepMainReader is the origin/main read the early candidates and the
+// early re-run share: the test seam when one is set, the fetch otherwise.
+func (d *Daemon) tierSweepMainReader() func(context.Context, string) (string, error) {
+	if f := d.tierSweepSeams.mainSHA; f != nil {
+		return f
+	}
+	return tierSweepMainSHA
 }
 
 // tierSweepRedBeadsOpen reports whether rig has a sweep bead that is open or
@@ -938,6 +1076,8 @@ func tierSweepRedBeadsOpen(bd tierSweepBeadStore, rig string) (bool, error) {
 // runTierSweepEarly re-runs the candidate rigs whose red beads have all
 // closed and whose origin/main has moved since their last cycle. A rig that
 // fails either test is left to the normal interval, without a word in the log.
+// A rig listed for a failed images build is held to the same two tests, so the
+// re-run sweeps a tip a fix could have landed on (gt-heqwuy).
 func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 	if d.tierSweepDeferForRestart(now) {
 		return
@@ -956,7 +1096,19 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 			return
 		}
 		state, err := readTierSweepState(d.config.TownRoot, rig)
-		if err != nil || !tierSweepEarlyDue(state, now) {
+		if err != nil {
+			continue
+		}
+		// The record is re-read here because the cycle is what re-runs it: a
+		// red sweep is due by its own record, and a failed images build is due
+		// once its images answer says so. The red-beads and moved-main tests
+		// below are the same for both reasons.
+		redDue := tierSweepEarlyDue(state, now)
+		imagesDue := false
+		if !redDue && tierSweepImagesRetryRecordDue(state, now) {
+			imagesDue = d.tierSweepImagesFailedFor(rig, state.LastGreenSHA)
+		}
+		if !redDue && !imagesDue {
 			continue
 		}
 		bd := d.tierSweepBeads(rig)
@@ -975,13 +1127,9 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if _, err := os.Stat(repo); err != nil {
 			continue
 		}
-		mainSHA := d.tierSweepSeams.mainSHA
-		if mainSHA == nil {
-			mainSHA = tierSweepMainSHA
-		}
 		stepStart := d.clk().Now()
 		d.setTierSweepStep("fetch")
-		sha, err := mainSHA(ctx, repo)
+		sha, err := d.tierSweepMainReader()(ctx, repo)
 		d.logger.Printf("tier_sweep: %s: fetch in %s", rig, d.clk().Now().Sub(stepStart))
 		if err != nil {
 			d.logger.Printf("tier_sweep: %s: cannot read origin/main (%v); deferring the early re-run", rig, err)
@@ -992,7 +1140,11 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if sha == "" || sha == state.LastGreenSHA || tierSweepTipJudged(state, sha) {
 			continue
 		}
-		d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
+		if redDue {
+			d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
+		} else {
+			d.logger.Printf("tier_sweep: %s: images build failed at the green tip and main moved; re-running now", rig)
+		}
 		if cycle == nil {
 			cycle = d.startDogCycle("tier_sweep")
 		}
@@ -1540,11 +1692,13 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		return false
 	}
 
+	// The record this cycle replaces, read before any field below rebinds it:
+	// its LastRun dates the images retry gap the cycle is held to
+	// (tierSweepImagesRetryRecorded), and its LastSHA dates the verdicts the
+	// cycle carries forward.
+	prior := state
 	state.LastRun = now
 	state.EarlyRun = bool(kind)
-	// The record this cycle replaces, read before the fields below rebind it:
-	// its LastSHA dates the verdicts the cycle carries forward.
-	prior := state
 	// partial covers both kinds of incomplete cycle: one that deferred, and one
 	// whose multi-tier stage was starved before its later tiers could print
 	// (gt-34r68). Neither says anything about the tiers it did not judge.
@@ -1570,6 +1724,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		// retires the restart's deferral (gt-icmdq).
 		state.OwedSince = now
 	}
+	// The retries this cycle spent on a failed images run, written beside the
+	// tip they belong to in the same atomic record (gt-opkfch). A cycle that
+	// produced a new green sha owns no retry at the old one, and neither does
+	// one whose images are published.
+	state.ImagesRetries, state.ImagesRetrySHA = d.tierSweepImagesRetryRecorded(rig, prior, state.LastGreenSHA, kind == tierSweepEarlyRun, now)
 	if err := writeTierSweepState(d.config.TownRoot, rig, state); err != nil {
 		d.logger.Printf("tier_sweep: %s: writing the sweep record: %v", rig, err)
 		d.logger.Print(tierSweepAbortedLine(rig, sha, "sweep record not written"))

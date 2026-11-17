@@ -27,7 +27,10 @@ import (
 // The patrol that schedules it (gt-2232t4) is off unless
 // daemon.patrols.rework_numbers.enabled asks for it, and its due-ness comes from
 // a last-run record beside the document rather than from the ticker: a restart
-// inside the week reruns nothing.
+// inside the week reruns nothing. A patrol cannot be wired from the step's own
+// file: its tick has to start and join in Run's select loop, and its opt-in key
+// has to sit beside the other patrol keys in internal/config, so this file holds
+// the step and the due check, and daemon.go starts, guards and joins the tick.
 
 const (
 	// reworkNumbersDir is the document's directory under the town's .runtime,
@@ -195,12 +198,12 @@ type reworkNumbersDueDecision struct {
 }
 
 // reworkNumbersDue decides whether now falls in a week the town has not run in.
-// The week is the calendar week the document's window names as its last, and
-// the record is the file beside the document, so a daemon that restarts inside
-// the week decides as the one that ran did (gt-2232t4). A record that cannot be
-// read makes the week due, and says so: a week skipped on a broken record
-// starves the numbers silently, while a run only recomputes a document from the
-// town's records.
+// The week is the calendar week now falls in, which the document a run writes
+// names as its window's last, and the record is the file beside the document,
+// so a daemon that restarts inside the week decides as the one that ran did
+// (gt-2232t4). A record that cannot be read makes the week due, and says so: a
+// week skipped on a broken record starves the numbers silently, while a run
+// only recomputes a document from the town's records.
 func reworkNumbersDue(lastRunPath string, now time.Time, weekOf func(string) (string, error)) (reworkNumbersDueDecision, error) {
 	week, err := weekOf(now.Format(time.RFC3339Nano))
 	if err != nil {
@@ -491,14 +494,15 @@ type reworkNumbersStepFunc func(town string, now func() time.Time) *reworkNumber
 
 // startReworkNumbersTicker starts the patrol's own ticker when the patrol is
 // active, and returns a nil channel and stop func when it is not: a town that
-// names no key starts nothing.
+// names no key starts nothing. The ticker comes from the daemon's clock, so a
+// test drives the tick from a fake one instead of waiting on a real timer.
 func (d *Daemon) startReworkNumbersTicker() (<-chan time.Time, func()) {
 	if !d.isPatrolActive(reworkNumbersPatrol) {
 		return nil, nil
 	}
-	ticker := time.NewTicker(reworkNumbersCheckTick)
+	ticker := d.clk().NewTicker(reworkNumbersCheckTick)
 	d.logger.Printf("Rework numbers ticker started (check interval %v)", reworkNumbersCheckTick)
-	return ticker.C, ticker.Stop
+	return ticker.Chan(), ticker.Stop
 }
 
 // startReworkNumbersTick runs one check on its own goroutine: a due run reads

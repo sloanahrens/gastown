@@ -123,6 +123,18 @@ const outboxNotReadReason = "its outbox copy or its bead cannot be read, so the 
 // (gt-s4gfph).
 const outboxEscalationReason = "its outbox's escalation request is not filed as an escalation bead"
 
+// outboxReadyReason is the keep reason of a seat whose outbox's submission is
+// not marked ready to land. The landing worker finds a submission by that block
+// and the ready label, so a seat whose write failed stays until a later pass
+// makes it rather than ending with the submission dropped (gt-qk3ppr).
+const outboxReadyReason = "its outbox's submission is not marked ready to land"
+
+// outboxApplyReason is the keep reason of a seat whose outbox the bead store
+// did not write in full. A write the store refused is retried by a later pass,
+// so the sandbox stays until the bead carries the seat's result rather than
+// ending with the refusal named only in a log (gt-kj60e4).
+const outboxApplyReason = "its outbox's result is not written to its bead in full"
+
 // keepReason names why the seat's host directories must stay, or "" when they
 // may be removed. Every reason is a fact someone else measured; the first one
 // this file can answer decides. A missing fact keeps the seat: the removal
@@ -218,13 +230,11 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		h.clearKeptSeat(rig, name)
 		return false
 	}
-	// The end keeps deciding on the agent bead's hook, and reads the hook the
-	// seat's intent record names beside it, so the shadow window measures the
-	// fact the decision moves onto the record (P1.7 of
-	// docs/plans/2026-11-15-agent-bead-retirement-plan.md). The line is logged
-	// once per seat through the daemon's latch, and a record the read cannot
-	// parse is logged there too: the shadow answers with nothing the decision
-	// can see (gt-xoj72t).
+	// The end keeps deciding on the agent bead's hook; the shadow line measures
+	// it against the seat's intent record, so the two can be compared over the
+	// shadow window P1.7 opens before the decision moves onto the record
+	// (docs/plans/2026-11-15-agent-bead-retirement-plan.md). Nothing it logs
+	// changes what this function returns (gt-xoj72t).
 	h.shadowWorkBead(rig, name, strings.TrimSpace(fields.HookBead))
 	rigPath := filepath.Join(h.town(), rig)
 	var (
@@ -659,12 +669,20 @@ const seatEscalationSource = "sandbox-seat-end"
 // appliedSeatOutbox records what a pass applied from a seat's outbox, so a seat
 // end that runs again for the same seat writes nothing twice: the notes, the
 // ticks and the findings a pass wrote are not written again, and neither is an
-// escalation a pass filed. A record of another bead, or of other bytes, is
-// another run of the same polecat name and is applied (gt-s4gfph).
+// escalation a pass filed. Ready says the submission was marked ready to land
+// (it is true for an outbox that submitted nothing). A record of another bead,
+// or of other bytes, is another run of the same polecat name and is applied
+// (gt-s4gfph, gt-qk3ppr).
 type appliedSeatOutbox struct {
 	Bead      string `json:"bead"`
 	Digest    string `json:"digest"`
 	Escalated bool   `json:"escalated"`
+	Ready     bool   `json:"ready"`
+	// Pending names the writes the store refused, so a later pass makes those
+	// alone rather than repeating the notes and findings an earlier pass wrote.
+	// A record without it predates the field: only the two writes above are
+	// pending then (gt-kj60e4).
+	Pending []string `json:"pending,omitempty"`
 }
 
 // appliedSeatOutboxDir is <town>/.runtime/sandbox-seat-outbox.
@@ -723,14 +741,13 @@ func seatOutboxDigest(result, notes []byte) string {
 // them the same way, and the copy the end read stays on the host for an
 // operator.
 //
-// The writes happen once per outbox. A pass that filed the escalation records
-// it, so a seat the patrol offers again writes nothing twice; the writes a
-// partial failure left undone stay undone and the log names them. A pass that
-// could not file the escalation records that too, and a later pass files only
-// the escalation, so the retry does not repeat the notes and findings the
-// earlier pass wrote. A failed escalation is the one write that keeps the seat:
-// the seat's result is on the host copy, while a request for help nobody files
-// is gone with the sandbox (gt-s4gfph).
+// The writes happen once per outbox. A pass records which ones it made and
+// which the store refused, so a seat the patrol offers again makes only the
+// ones still pending and does not repeat the notes and findings the earlier
+// pass wrote. A failed escalation, a failed ready write, or any other write the
+// store refused keeps the seat: the seat's result is on the host copy, while a
+// request for help nobody files, a submission nothing marks, and a note nothing
+// writes are gone with the sandbox (gt-s4gfph, gt-qk3ppr, gt-kj60e4).
 func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
 	dir := session.SandboxOutboxCopyDir(h.town(), rig, name)
 	result, err := os.ReadFile(filepath.Join(dir, seatOutboxResultFile))
@@ -764,16 +781,19 @@ func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
 		h.d.logger.Printf("sandbox seat end %s/%s: its applied record cannot be read, so its outbox is applied again: %v", rig, name, appliedErr)
 	}
 	if appliedErr == nil && haveApplied && applied.Bead == beadID && applied.Digest == digest {
-		if applied.Escalated || decoded.Escalation == nil {
+		// An earlier pass applied this outbox. Its record names which writes are
+		// still pending; the others are not repeated (gt-s4gfph, gt-qk3ppr).
+		rec := appliedSeatOutbox{
+			Bead:      beadID,
+			Digest:    digest,
+			Escalated: applied.Escalated || decoded.Escalation == nil,
+			Ready:     applied.Ready || decoded.Submission == nil,
+			Pending:   applied.Pending,
+		}
+		if rec.Escalated && rec.Ready && len(rec.Pending) == 0 {
 			return "" // this outbox was applied whole on an earlier pass
 		}
-		// The earlier pass wrote everything but the escalation, so only that is
-		// left to write.
-		if err := h.fileSeatEscalation(beadID, seat.Address(), decoded.Escalation.Text); err != nil {
-			return outboxEscalationReason + ": " + err.Error()
-		}
-		h.recordAppliedSeatOutbox(rig, name, appliedSeatOutbox{Bead: beadID, Digest: digest, Escalated: true})
-		return ""
+		return h.finishSeatOutbox(rig, name, beadID, seat, decoded, rec)
 	}
 	bd := h.recoveryBeads()
 	issue, err := bd.Show(beadID)
@@ -781,17 +801,88 @@ func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
 		return outboxNotReadReason + ": cannot read its bead: " + err.Error()
 	}
 	store := &seatOutboxStore{bd: bd, escalate: h.fileSeatEscalation}
-	if err := outbox.Apply(store, beadID, seat.Address(), beads.AcceptanceText(issue), decoded); err != nil {
+	applyErr := outbox.Apply(store, beadID, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, beads.AcceptanceText(issue), decoded)
+	if applyErr != nil {
 		// Never swallowed: the copy on the host is where an operator finds what
-		// the bead did not get. Only the escalation keeps the seat, and the
-		// record below leaves it to be filed again.
-		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not applied in full: %v; the copy it was read from stays at %s", rig, name, err, dir)
+		// the bead did not get. Every write the store refused keeps the seat, and
+		// the record below names each one a later pass makes again.
+		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not applied in full: %v; the copy it was read from stays at %s", rig, name, applyErr, dir)
 	}
-	h.recordAppliedSeatOutbox(rig, name, appliedSeatOutbox{Bead: beadID, Digest: digest, Escalated: store.escalationErr == nil})
+	h.recordAppliedSeatOutbox(rig, name, appliedSeatOutbox{
+		Bead:      beadID,
+		Digest:    digest,
+		Escalated: store.escalationErr == nil,
+		Ready:     store.readyErr == nil,
+		Pending:   store.pending,
+	})
 	if store.escalationErr != nil {
 		return outboxEscalationReason + ": " + store.escalationErr.Error()
 	}
+	if store.readyErr != nil {
+		return outboxReadyReason + ": " + store.readyErr.Error()
+	}
+	// A failure that left no write pending is the outbox's own values being
+	// refused, not a write the store lost: a later pass would refuse them the
+	// same way, so the seat is not kept for it, as for the validator's refusal.
+	if len(store.pending) > 0 {
+		return outboxApplyReason + ": " + applyErr.Error()
+	}
 	return ""
+}
+
+// finishSeatOutbox makes the writes an earlier pass recorded as unwritten: the
+// outbox's escalation request, the READY TO LAND block of its submission, and
+// the writes its Pending names. rec is recorded again with the ones this pass
+// made. It returns the keep reason of a write that failed again, or "" when each
+// pending write is written. The notes, ticks, findings and status the earlier
+// pass wrote are not written again: the retry applies the outbox through a store
+// that skips every write outside Pending (gt-s4gfph, gt-kj60e4).
+func (h *patrolScanHost) finishSeatOutbox(rig, name, beadID string, seat supervisor.Seat, decoded outbox.Result, rec appliedSeatOutbox) string {
+	if !rec.Escalated {
+		if err := h.fileSeatEscalation(beadID, seat.Address(), decoded.Escalation.Text); err != nil {
+			return outboxEscalationReason + ": " + err.Error()
+		}
+		rec.Escalated = true
+	}
+	if !rec.Ready {
+		store := &seatOutboxStore{bd: h.recoveryBeads(), escalate: h.fileSeatEscalation}
+		who := outbox.Seat{Actor: seat.Address(), Worker: seat.Name}
+		if err := outbox.MarkReady(store, beadID, who, decoded); err != nil {
+			// The record keeps the ready write pending, so the next pass
+			// retries it; the escalation this pass filed stays recorded.
+			h.recordAppliedSeatOutbox(rig, name, rec)
+			return outboxReadyReason + ": " + err.Error()
+		}
+		rec.Ready = true
+	}
+	if len(rec.Pending) > 0 {
+		bd := h.recoveryBeads()
+		issue, err := bd.Show(beadID)
+		if err != nil {
+			return outboxNotReadReason + ": cannot read its bead: " + err.Error()
+		}
+		store := &seatOutboxStore{bd: bd, escalate: h.fileSeatEscalation, only: seatOutboxWriteSet(rec.Pending)}
+		who := outbox.Seat{Actor: seat.Address(), Worker: seat.Name}
+		if err := outbox.Apply(store, beadID, who, beads.AcceptanceText(issue), decoded); err != nil {
+			// The record keeps the writes this pass could not make pending, so
+			// the next pass makes those alone; those it made stay recorded.
+			rec.Pending = store.pending
+			h.recordAppliedSeatOutbox(rig, name, rec)
+			return outboxApplyReason + ": " + err.Error()
+		}
+		rec.Pending = nil
+	}
+	h.recordAppliedSeatOutbox(rig, name, rec)
+	return ""
+}
+
+// seatOutboxWriteSet is the lookup a retry store skips every write outside of.
+func seatOutboxWriteSet(pending []string) map[string]bool {
+	set := make(map[string]bool, len(pending))
+	for _, write := range pending {
+		set[write] = true
+	}
+	return set
 }
 
 // recordAppliedSeatOutbox records what a pass applied. A write that fails is
@@ -810,48 +901,176 @@ func (h *patrolScanHost) recordAppliedSeatOutbox(rig, name string, rec appliedSe
 
 // seatOutboxStore is outbox.Store over the town's bead store: the writes a
 // copied-out outbox asks for, and the seat's HELP request filed as an escalation
-// bead. escalationErr is the escalation write's own failure, which Apply joins
-// with the others and which alone keeps the seat (gt-s4gfph).
+// bead. escalationErr is the escalation write's own failure and readyErr the
+// ready write's; Apply joins them with the others, and each one alone keeps the
+// seat, so a write the bead did not get is made again (gt-s4gfph, gt-qk3ppr).
+// pending names the other writes the store refused, for the applied record that
+// keeps the seat for them (gt-kj60e4).
 type seatOutboxStore struct {
 	bd            beads.Client
 	escalate      func(beadID, actor, text string) error
 	escalationErr error
+	readyErr      error
+	// only names the writes a retry makes. When it is set, every write outside
+	// it is skipped, so the retry does not repeat what an earlier pass wrote.
+	only map[string]bool
+	// pending names the writes that returned an error, in the order Apply made
+	// them.
+	pending []string
+	// findings counts AddComment calls, so a refused finding is named by the
+	// index Apply read it at.
+	findings int
+}
+
+// The writes an outbox application makes, as the applied record names the ones
+// a retry still has to make (gt-kj60e4).
+const (
+	seatOutboxTitleWrite      = "title"
+	seatOutboxNotesWrite      = "notes"
+	seatOutboxAcceptanceWrite = "acceptance"
+	seatOutboxStatusWrite     = "status"
+	// seatOutboxFindingWrite is suffixed with the finding's index in the
+	// result, since each finding is a write of its own.
+	seatOutboxFindingWrite = "finding"
+)
+
+// write makes one write of the outbox, skips it when a retry names others, and
+// records a failure so a later pass makes just that one again.
+func (s *seatOutboxStore) write(kind string, fn func() error) error {
+	if s.only != nil && !s.only[kind] {
+		return nil
+	}
+	if err := fn(); err != nil {
+		s.pending = append(s.pending, kind)
+		return err
+	}
+	return nil
 }
 
 // SetTitle replaces the bead's title with the one the seat ended with.
 func (s *seatOutboxStore) SetTitle(beadID, title string) error {
-	return s.bd.Update(beadID, beads.UpdateOptions{Title: &title})
+	return s.write(seatOutboxTitleWrite, func() error {
+		return s.bd.Update(beadID, beads.UpdateOptions{Title: &title})
+	})
 }
 
 // AppendNotes appends the seat's notes to its bead.
 func (s *seatOutboxStore) AppendNotes(beadID, text string) error {
-	return s.bd.AppendNotes(beadID, text)
+	return s.write(seatOutboxNotesWrite, func() error {
+		return s.bd.AppendNotes(beadID, text)
+	})
 }
 
 // SetAcceptance replaces the bead's acceptance text, with the boxes the seat
 // ticked ticked.
 func (s *seatOutboxStore) SetAcceptance(beadID, text string) error {
-	return s.bd.Update(beadID, beads.UpdateOptions{Acceptance: &text})
+	return s.write(seatOutboxAcceptanceWrite, func() error {
+		return s.bd.Update(beadID, beads.UpdateOptions{Acceptance: &text})
+	})
 }
 
 // AddComment adds one of the seat's findings, under the seat's name.
 func (s *seatOutboxStore) AddComment(beadID, author, text string) error {
-	return s.bd.AddCommentAs(beadID, author, text)
+	i := s.findings
+	s.findings++
+	return s.write(fmt.Sprintf("%s:%d", seatOutboxFindingWrite, i), func() error {
+		return s.bd.AddCommentAs(beadID, author, text)
+	})
 }
 
 // SetStatus sets the bead's status, the seat's deferred result.
 func (s *seatOutboxStore) SetStatus(beadID, status string) error {
-	return s.bd.Update(beadID, beads.UpdateOptions{Status: &status})
+	return s.write(seatOutboxStatusWrite, func() error {
+		return s.bd.Update(beadID, beads.UpdateOptions{Status: &status})
+	})
 }
 
 // Escalate files the seat's HELP request as an escalation bead, remembering a
-// failure so the caller can keep the seat for it.
+// failure so the caller can keep the seat for it. A retry store makes only the
+// writes its record left pending, so the escalation it skips is finishSeatOutbox's
+// own write (gt-s4gfph).
 func (s *seatOutboxStore) Escalate(beadID, actor, text string) error {
+	if s.only != nil {
+		return nil
+	}
 	err := s.escalate(beadID, actor, text)
 	if err != nil {
 		s.escalationErr = err
 	}
 	return err
+}
+
+// MarkReadyToLand appends the seat's READY TO LAND block and adds the label the
+// landing worker picks the bead by in one update, as gt done marks its own
+// submission: the block and the label land together or not at all. The rework
+// and overseer-review labels are removed with it, because a new head must face
+// om again (gt-g8t3m). A write the store reported is read back for the label,
+// since bd reporting success is not proof the write persisted (GH#1945): a lost
+// label is a submission nothing picks up, and only a later pass retrying this
+// write repairs it.
+//
+// A retry makes this same write — a pass kept the seat for it, or its applied
+// record was lost — so the block is appended only when the notes do not already
+// carry this submission's block: a second copy would only grow the bead, and the
+// label write is made either way. The failure is remembered so the seat's end
+// keeps the seat for it, and the retry knows the write is still pending. A retry
+// store that names only the other pending writes skips this one, which
+// finishSeatOutbox makes itself (gt-s4gfph).
+func (s *seatOutboxStore) MarkReadyToLand(beadID, note string) error {
+	if s.only != nil {
+		return nil
+	}
+	err := s.markReadyToLand(beadID, note)
+	if err != nil {
+		s.readyErr = err
+	}
+	return err
+}
+
+// markReadyToLand is MarkReadyToLand without the failure kept.
+func (s *seatOutboxStore) markReadyToLand(beadID, note string) error {
+	// The block says what a retry must not write twice, and a note this code
+	// cannot read as one cannot be checked: refuse it rather than append it
+	// blind.
+	want, ok := land.ParseReadyNote(note)
+	if !ok {
+		return fmt.Errorf("the %s block for %s cannot be read as one", land.ReadyNoteMarker, beadID)
+	}
+	// The bead is read before the write, not only after it: a store that cannot
+	// read it refuses here rather than appending a block it cannot check.
+	issue, err := s.bd.Show(beadID)
+	if err != nil {
+		return fmt.Errorf("reading %s before the ready write: %w", beadID, err)
+	}
+	opts := beads.UpdateOptions{
+		AddLabels:    []string{land.LabelReadyToLand},
+		RemoveLabels: []string{land.LabelRework, land.LabelOverseerReviewed},
+	}
+	if !readyBlockWritten(issue.Notes, want) {
+		opts.AppendNotes = note
+	}
+	if err := s.bd.Update(beadID, opts); err != nil {
+		return fmt.Errorf("adding %s: %w", land.LabelReadyToLand, err)
+	}
+	issue, err = s.bd.Show(beadID)
+	if err != nil {
+		return fmt.Errorf("reading %s back: %w", beadID, err)
+	}
+	if !beads.HasLabel(issue, land.LabelReadyToLand) {
+		return fmt.Errorf("%s does not carry %s after the write", beadID, land.LabelReadyToLand)
+	}
+	return nil
+}
+
+// readyBlockWritten reports whether the notes' last READY TO LAND block is
+// this submission's: the branch, head, target and worker match, so a block a
+// retrying pass rebuilds from the same outbox matches the one an earlier pass
+// wrote whatever its submitted stamp. The stamp is not part of a submission's
+// identity; the head is the commit that lands.
+func readyBlockWritten(notes string, want land.Work) bool {
+	have, ok := land.ParseReadyNote(notes)
+	return ok && have.Branch == want.Branch && have.Head == want.Head &&
+		have.Target == want.Target && have.Worker == want.Worker
 }
 
 // fileSeatEscalation files one outbox escalation request as an escalation bead
@@ -860,14 +1079,15 @@ func (s *seatOutboxStore) Escalate(beadID, actor, text string) error {
 // severity is the one the seat's `gt escalate` wrote into the text (a request
 // that names none the config accepts is medium, gt escalate's default).
 //
-// One open escalation stands for one bead's request, which its fingerprint
-// keys: a raise that finds one already open writes nothing, so a pass whose
-// applied record was lost, or the patrol's own outbox poll, adds no second bead
-// for the same request (gt-vwry).
+// One open escalation stands for one request about one bead, which its
+// fingerprint keys: a raise that finds the same request already open writes
+// nothing, so a pass whose applied record was lost, or the patrol's own outbox
+// poll, adds no second bead for it (gt-vwry). A later, different request about
+// the same bead is a second ask and files its own bead (gt-kj60e4).
 func (h *patrolScanHost) fileSeatEscalation(beadID, actor, text string) error {
 	bd := h.recoveryBeads()
 	title := seatEscalationHeadline(text)
-	fingerprint := notify.FingerprintLabel(seatEscalationKey(beadID))
+	fingerprint := notify.FingerprintLabel(seatEscalationKey(beadID, text))
 	open, err := beads.ListEscalationsByFingerprint(bd, fingerprint)
 	if err != nil {
 		return fmt.Errorf("looking for the bead's open escalation: %w", err)
@@ -890,9 +1110,14 @@ func (h *patrolScanHost) fileSeatEscalation(beadID, actor, text string) error {
 	return nil
 }
 
-// seatEscalationKey is the alert key one bead's outbox escalation is filed
-// under, whoever files it.
-func seatEscalationKey(beadID string) string { return seatEscalationSource + ":" + beadID }
+// seatEscalationKey is the alert key one outbox escalation request is filed
+// under, whoever files it: the bead it is about and the request's own text. A
+// key of the bead alone would take a second, different request for a repeat of
+// the first and drop it (gt-kj60e4). The NUL separator keeps the two apart: no
+// bead id holds one, so two requests can never spell the same key.
+func seatEscalationKey(beadID, text string) string {
+	return seatEscalationSource + ":" + beadID + "\x00" + text
+}
 
 // seatEscalationHeadline is a request's first line: an escalation bead's title
 // is one line, and the whole request travels as its reason.

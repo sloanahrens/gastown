@@ -167,6 +167,70 @@ func TestRejectionsOfKindReadsEachBlockOfTheKind(t *testing.T) {
 	}
 }
 
+// TestRejectionsReadsEveryBlockInWriteOrder is the reader the reslung seat's
+// task file uses for the bead's whole refusal history: every block, every
+// class included, in the order written, each read up to the next header so a
+// later block's score and gate tail stay out of it (gt-d3hisb).
+func TestRejectionsReadsEveryBlockInWriteOrder(t *testing.T) {
+	t.Parallel()
+	notes := "prose before the first refusal\n" + strings.Join([]string{
+		FormatRejectionNote(RejectionNote{Attempt: 1, Kind: "review", Reason: "r1", Branch: "crew/a/x", Receipt: &Receipt{Score: 0.1}}),
+		FormatRejectionNote(RejectionNote{Attempt: 1, Kind: "gate", Reason: "g1", Branch: "crew/a/x", GateTail: "FAIL\tpkg"}),
+		FormatRejectionNote(RejectionNote{Attempt: 2, Kind: "review", Reason: "r2", Branch: "crew/a/x", Receipt: &Receipt{Score: 0.9}}),
+		FormatRejectionNote(RejectionNote{Attempt: 3, Reason: "legacy", Branch: "crew/a/x"}),
+	}, "\n")
+	got := Rejections(notes)
+	want := []struct {
+		attempt        int
+		kind, reason   string
+		score          float64
+		scored         bool
+		gateTailIsHere bool
+	}{
+		{1, "review", "r1", 0.1, true, false},
+		{1, "gate", "g1", 0, false, true},
+		{2, "review", "r2", 0.9, true, false},
+		{3, "", "legacy", 0, false, false},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Rejections = %d blocks, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		rej := got[i]
+		if rej.Attempt != w.attempt || rej.Kind != w.kind || rej.Reason != w.reason {
+			t.Errorf("block %d = attempt %d kind %q reason %q, want attempt %d kind %q reason %q",
+				i, rej.Attempt, rej.Kind, rej.Reason, w.attempt, w.kind, w.reason)
+		}
+		if (rej.Receipt != nil) != w.scored || (w.scored && rej.Receipt.Score != w.score) {
+			t.Errorf("block %d receipt = %+v, want score %v scored %v", i, rej.Receipt, w.score, w.scored)
+		}
+		if gotTail := rej.GateTail != ""; gotTail != w.gateTailIsHere {
+			t.Errorf("block %d gate tail = %q, want present %v", i, rej.GateTail, w.gateTailIsHere)
+		}
+	}
+	if none := Rejections("no refusal here\n"); len(none) != 0 {
+		t.Errorf("Rejections over no block = %+v, want none", none)
+	}
+}
+
+// TestRejectionsKeepsAnUnclassifiedClass: a block written before kinds
+// existed reads as "" here, the class the notes hold, not as the review
+// RejectionsOfKind counts it as (gt-1jig).
+func TestRejectionsKeepsAnUnclassifiedClass(t *testing.T) {
+	t.Parallel()
+	notes := FormatRejectionNote(RejectionNote{Attempt: 2, Reason: "legacy refusal", Branch: "b", Target: "main", MR: "gt-x"})
+	got := Rejections(notes)
+	if len(got) != 1 {
+		t.Fatalf("Rejections = %d blocks, want 1", len(got))
+	}
+	if got[0].Kind != "" {
+		t.Errorf("Rejections put the unclassified block under kind %q, want the written empty class", got[0].Kind)
+	}
+	if reviews := RejectionsOfKind(notes, string(RejectReview)); len(reviews) != 1 {
+		t.Errorf("RejectionsOfKind(review) = %d blocks, want the unclassified block counted as a review", len(reviews))
+	}
+}
+
 // TestFormatRejectionNoteDefusesReasonAndTitle: the reason and each finding
 // title are stripped of the block markers too, so agent text cannot forge a
 // block or a field through them (gt-zqqcr).

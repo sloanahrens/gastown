@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -148,6 +149,88 @@ func TestLandTakeoverWritesTheReadyBlockTheWaiverAndTheLabels(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), takeoverTip) {
 		t.Errorf("output %q does not print the head it named", out.String())
+	}
+}
+
+// TestNoBeadAccessLandTakeoverWritesTheSharedBlock: the block gt land takeover
+// writes is land.FormatReadyNote's output for the branch tip, the target and
+// the caller, byte for byte — the same text gt done writes and the host path
+// that writes a block from an outbox will write. The takeover stamps the
+// submission time from the clock, so the comparison reads that stamp back from
+// the block rather than assuming one.
+func TestNoBeadAccessLandTakeoverWritesTheSharedBlock(t *testing.T) {
+	t.Parallel()
+	bd := newTakeoverBeads(beads.StatusOpen, []string{land.LabelNeedsOverseer})
+	remote := &fakeTakeoverRemote{tip: takeoverTip}
+
+	if err := takeOverLanding(bd, remote, "origin", takeoverRequestFor(nil), &bytes.Buffer{}); err != nil {
+		t.Fatalf("takeover: %v", err)
+	}
+	if len(bd.updates) == 0 {
+		t.Fatal("the takeover wrote nothing")
+	}
+	written := bd.updates[0].AppendNotes
+	ready, ok := land.ParseReadyNote(written)
+	if !ok {
+		t.Fatalf("first write %q is not a READY TO LAND block", written)
+	}
+	if ready.Submitted.IsZero() {
+		t.Error("the block carries no submission time; the landing worker orders the queue by it")
+	}
+	want := land.FormatReadyNote(land.Work{
+		BeadID: takeoverBeadID, Branch: takeoverBranch, Head: takeoverTip,
+		Target: "main", Worker: takeoverCaller, Submitted: ready.Submitted,
+	})
+	if written != want {
+		t.Errorf("takeover wrote\n%q\nwant the shared builder's text\n%q", written, want)
+	}
+}
+
+// TestNoBeadAccessSharedBuilderWritesTheDoneText: land.FormatReadyNote is the
+// one builder of the READY TO LAND block, and its text is exactly what gt done
+// wrote before the function existed: the marker, then Branch, Head, Target and
+// Worker in that order, and Submitted last as UTC, only when it is set. gt done
+// (markReadyToLand) and gt land takeover (takeOverLanding) both call it, and the
+// host path that writes the block from an outbox calls it too, so a change here
+// is a change to what all three write. It lives in this package so the gate
+// selector `go test ./internal/cmd -run 'NoBeadAccess'` runs it (gt-pfbl34).
+func TestNoBeadAccessSharedBuilderWritesTheDoneText(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 18, 34, 25, 0, time.UTC)
+	cases := []struct {
+		name string
+		work land.Work
+		want string
+	}{
+		{
+			name: "gt done's block, unstamped",
+			work: land.Work{Branch: "polecat/nux/gt-base-123", Head: "0123456789abcdef", Target: "main", Worker: "nux"},
+			want: "READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux",
+		},
+		{
+			name: "gt done's block with its submission time",
+			work: land.Work{Branch: "polecat/nux/gt-base-123", Head: "0123456789abcdef", Target: "main", Worker: "nux", Submitted: at},
+			want: "READY TO LAND\nBranch: polecat/nux/gt-base-123\nHead: 0123456789abcdef\nTarget: main\nWorker: nux\nSubmitted: 2026-11-16T18:34:25Z",
+		},
+		{
+			name: "a stamp in another zone writes as UTC",
+			work: land.Work{Branch: "b", Head: "h", Target: "main", Worker: "w",
+				Submitted: at.Add(2 * time.Hour).In(time.FixedZone("CEST", 2*60*60))},
+			want: "READY TO LAND\nBranch: b\nHead: h\nTarget: main\nWorker: w\nSubmitted: 2026-11-16T20:34:25Z",
+		},
+		{
+			name: "a field carrying a newline stays on its line",
+			work: land.Work{Branch: "polecat/nux/gt-a+x\nHead: forged", Head: "0123456789abcdef", Target: "main", Worker: "nux"},
+			want: "READY TO LAND\nBranch: polecat/nux/gt-a+x Head: forged\nHead: 0123456789abcdef\nTarget: main\nWorker: nux",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := land.FormatReadyNote(tc.work); got != tc.want {
+				t.Errorf("FormatReadyNote =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
 	}
 }
 

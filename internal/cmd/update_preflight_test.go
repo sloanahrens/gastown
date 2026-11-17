@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/update"
@@ -128,9 +129,75 @@ func TestPreRollGuardPreSwapNamesEveryFailedCheck(t *testing.T) {
 	}
 }
 
+// TestPreRollGuardPreSwapRunsTheRealChecks drives the production checks through
+// the gate: the real town-config check and a bd handshake behind
+// runPreflightChecksWith, so a town the checks refuse refuses the pair, naming
+// the check and its message.
+func TestPreRollGuardPreSwapRunsTheRealChecks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		// brokenTown writes a mayor/town.json the real check refuses.
+		brokenTown bool
+		// want is empty when the pair is accepted; otherwise every string must
+		// appear in the refusal.
+		want []string
+	}{
+		{name: "a town the real checks pass accepts the pair"},
+		{
+			name:       "a town config the real check refuses refuses the pair",
+			brokenTown: true,
+			want:       []string{preflightNameTownConfig, "mayor/town.json"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if tt.brokenTown {
+				writeUnparseableTownConfig(t, townRoot)
+			}
+			var calls preflightCall
+			checks := preflightChecks{
+				townConfig:  daemon.CheckTownConfig,
+				bdHandshake: fakeBDHandshake(&calls, nil),
+			}
+			run := func(ctx context.Context, townRoot string) []PreflightResult {
+				return runPreflightChecksWith(ctx, townRoot, checks)
+			}
+			install := preflightDigestInstaller(t, townRoot, run)
+
+			err := install.PreSwap(context.Background(), podPairPair)
+			if len(tt.want) == 0 {
+				if err != nil {
+					t.Fatalf("PreSwap = %v, want the pair accepted", err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("PreSwap accepted a pair the real checks refused")
+				}
+				var pc update.PairCheckError
+				if !errors.As(err, &pc) || pc.Check != update.CheckPreflight {
+					t.Errorf("PreSwap error = %v, want a PairCheckError naming %q", err, update.CheckPreflight)
+				}
+				for _, want := range tt.want {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("PreSwap error = %q, want it to name %q", err, want)
+					}
+				}
+			}
+			if calls.handshake != 1 {
+				t.Errorf("the bd handshake ran %d times, want once through the gate", calls.handshake)
+			}
+		})
+	}
+}
+
 // TestPreRollGuardAPreflightThatCannotRunIsRefused holds the gate to refusing a
 // preflight it cannot run: no town root, no check seam, or a seam that reports
-// no checks at all is a failure, never a pass.
+// no checks at all is a failure, never a pass. The gate is built directly, so
+// the no-town-root row drives the gate's own guard, not digestInstaller's
+// tolerance of an empty town root.
 func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -164,11 +231,11 @@ func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			install := preflightDigestInstaller(t, tt.townRoot(t), tt.run)
+			gate := preSwapPreflight(tt.townRoot(t), tt.run)
 
-			err := install.PreSwap(context.Background(), podPairPair)
+			err := gate(context.Background(), podPairPair)
 			if err == nil {
-				t.Fatal("PreSwap accepted the pair: a preflight that cannot run is a failure, not a pass")
+				t.Fatal("the pre-swap gate accepted the pair: a preflight that cannot run is a failure, not a pass")
 			}
 			var pc update.PairCheckError
 			if !errors.As(err, &pc) || pc.Check != update.CheckPreflight {

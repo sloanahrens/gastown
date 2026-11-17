@@ -54,6 +54,48 @@ func untarRuntime(t *testing.T, data []byte) map[string]runtimeEntry {
 	}
 }
 
+// extractRuntime writes the archive's members under root the way the sandbox's
+// `tar xzf … -C root` does, so a test reads the layout the seat meets instead
+// of one it builds itself (gt-mgh2ga). A header the builder does not emit fails
+// the test rather than landing as a shape the sandbox would not produce.
+func extractRuntime(t *testing.T, data []byte, root string) {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(root, filepath.FromSlash(h.Name))
+		switch h.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(target, os.FileMode(h.Mode).Perm()); err != nil {
+				t.Fatal(err)
+			}
+		case tar.TypeReg:
+			body, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, body, os.FileMode(h.Mode).Perm()); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatalf("archive member %s has type %q, which this extraction does not write", h.Name, h.Typeflag)
+		}
+	}
+}
+
 // The sandbox copy of the system prompt ends with the rule that keeps a
 // placeholder out of the conversation.
 func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
@@ -739,7 +781,8 @@ func TestNoBeadAccessRuntimeArchiveStagesTheFileModeMarker(t *testing.T) {
 			spec := openshellSpawn(town, work)
 			spec.Profile = Profile{BeadAccess: tc.beadAccess}
 			spec.TaskFile = tc.task
-			entries := untarRuntime(t, openshellArchiveBytes(t, spec, sandboxTracker{}))
+			archive := openshellArchiveBytes(t, spec, sandboxTracker{})
+			entries := untarRuntime(t, archive)
 
 			marker, ok := entries[runtimeModeFile]
 			if ok != tc.want {
@@ -757,31 +800,20 @@ func TestNoBeadAccessRuntimeArchiveStagesTheFileModeMarker(t *testing.T) {
 			if wantDir := tc.want || len(tc.task) > 0; dirOK != wantDir {
 				t.Errorf("the archive stages %s/ = %v, want %v", runtimeTaskDir, dirOK, wantDir)
 			}
-			// The marker the archive stages is the one the seat's reader takes
-			// as file mode.
-			if tc.want {
-				root := t.TempDir()
-				writeTaskModeMarker(t, root, marker.body)
-				if !taskfile.FileMode(root) {
-					t.Errorf("FileMode = false on the marker the archive stages")
-				}
+			// The marker the archive stages is the one the seat's reader finds
+			// where the archive extracts it.
+			root := t.TempDir()
+			extractRuntime(t, archive, root)
+			if got := taskfile.FileMode(filepath.Join(root, runtimeTaskDir)); got != tc.want {
+				t.Errorf("FileMode on the extracted %s = %v, want %v", runtimeTaskDir, got, tc.want)
 			}
 		})
 	}
 }
 
-// writeTaskModeMarker lays the archive's marker into a task directory the way
-// the archive extracts it.
-func writeTaskModeMarker(t *testing.T, root, body string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(root, taskfile.ModeFile), []byte(body), 0o444); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// Prepare stages the marker from the profile the backend was built with: no
-// production caller fills SpawnSpec.Profile, so a Prepare that read only the
-// spec would stage no marker on any real spawn (gt-3qkaws).
+// Prepare stages the marker from the profile the backend was built with: the
+// runtime archive reads spec.Profile, which Prepare fills from its own profile
+// rather than trusting the spec's (gt-3qkaws).
 func TestNoBeadAccessPrepareStagesTheFileModeMarkerFromTheProfile(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

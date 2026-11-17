@@ -246,13 +246,20 @@ Example:
 	},
 }
 
-var beadCommentCmd = &cobra.Command{
-	Use:   "comment <id> <text>",
-	Short: "Add a comment to a bead",
-	Args:  cobra.ExactArgs(2),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.comment(args[0], args[1]) })
-	},
+// beadCommentCmd is the comment verb registered under gt bead. It is built by
+// newBeadCommentCmd so the test that drives a comment from the command to a
+// file-mode seat's outbox runs the production command, not a rebuild of it.
+var beadCommentCmd = newBeadCommentCmd()
+
+func newBeadCommentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "comment <id> <text>",
+		Short: "Add a comment to a bead",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.comment(args[0], args[1]) })
+		},
+	}
 }
 
 var beadDepCmd = &cobra.Command{
@@ -697,9 +704,9 @@ func (osOutboxFS) Rename(oldpath, newpath string) error { return os.Rename(oldpa
 func (osOutboxFS) Remove(name string) error { return os.Remove(name) }
 
 // outboxLockFile is the flock file that serializes the outbox writes of one
-// seat. It sits beside the outbox, outside it, for the reason the temporary
-// file does.
-const outboxLockFile = ".outbox-notes.lock"
+// seat, notes.md and result.json alike. It sits beside the outbox, outside it,
+// for the reason the temporary file does.
+const outboxLockFile = ".outbox-write.lock"
 
 // outboxFilesystem is the filesystem the caller's outbox writes run on.
 func (v *beadVerbs) outboxFilesystem() outboxFS {

@@ -118,6 +118,18 @@ var ruleOwners = map[string]Owner{
 	// A pair check that cannot read is the overseer's to look at: while it is
 	// broken, no roll is reported as ready (gt-4nlpw8).
 	RuleDeployPairUnreadable: OwnerOverseer,
+	// A pair unpublished past the stuck bound is the town's own image build to
+	// start or repair: the overseer acts on it before a person is woken
+	// (gt-afwjb4).
+	RuleDeployPairStuck: OwnerOverseer,
+	// A pair the pre-swap check refused is the town's own update to fix: the
+	// overseer finds what failed the check before a person is woken
+	// (gt-d6ok4r).
+	RuleDeployPairRefused: OwnerOverseer,
+	// A pair whose bd schema level the database does not carry is the town's own
+	// pin or migration to fix: the overseer acts on it before a person is woken
+	// (gt-qnjuqp).
+	RuleDeployPairSkew: OwnerOverseer,
 	// A green commit whose image build failed is the town's own workflow to
 	// look at: the overseer re-runs it or finds what stopped it before a person
 	// is woken (gt-3vafwr).
@@ -125,6 +137,11 @@ var ruleOwners = map[string]Owner{
 	// A green commit whose build status could not be read is the overseer's to
 	// look at, the same as the unreadable pair check (gt-3vafwr).
 	RuleImagesUnknown: OwnerOverseer,
+	// A green commit whose images build outlived every early re-run is the
+	// town's own workflow to look at, the same as its first failure: the
+	// overseer re-runs it or finds what stopped it before a person is woken
+	// (gt-j6cwqr).
+	RuleTierSweepImagesRetryExhausted: OwnerOverseer,
 	// A stale daemon.env entry the container shadows is the overseer's to
 	// remove from settings; the person is not woken for it (gt-ih19g6).
 	RuleConfigEnvShadowed: OwnerOverseer,

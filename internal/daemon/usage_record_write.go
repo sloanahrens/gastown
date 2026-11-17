@@ -41,16 +41,21 @@ func (e *usageRowNotWrittenError) Unwrap() error { return e.err }
 // written without its row is never reported as filed whole; that case's error
 // is a *usageRowNotWrittenError, so the caller can report the path it wrote.
 //
-// The row's sample time is the run's end: the record is built when the run
-// returns, so bd's newest-built order is the run order.
+// The row carries the record the file holds, which is the bead's merged record
+// and not this run's alone: the dashboard drops the file of a bead and kind a
+// row holds, so a row of this run alone would lose every earlier run as soon as
+// one run's row was not written. The row's sample time is the run's end: the
+// record is built when the run returns, so bd's newest-built order is the run
+// order.
 func writeUsageRecord(ctx context.Context, store usageRecordStore, usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
-	if fileErr := usageattrib.Write(usageDir, rec, sessionIDs); fileErr != nil {
+	stored, fileErr := usageattrib.Merge(usageDir, rec, sessionIDs)
+	if fileErr != nil {
 		return fmt.Errorf("its record file is not written: %w", fileErr)
 	}
 	if store == nil {
 		return &usageRowNotWrittenError{fmt.Errorf("its usage_records row is not written: %w", errNoUsageStore)}
 	}
-	row := beads.UsageRecordRow{BuiltAt: rec.End, Record: rec, Sessions: sessionIDs}
+	row := beads.UsageRecordRow{BuiltAt: rec.End, Record: stored.Record, Sessions: stored.Sessions}
 	if rowErr := store.WriteUsageRecord(ctx, row); rowErr != nil {
 		return &usageRowNotWrittenError{fmt.Errorf("its usage_records row is not written: %w", rowErr)}
 	}
@@ -59,10 +64,12 @@ func writeUsageRecord(ctx context.Context, store usageRecordStore, usageDir stri
 
 // usageRecords is the town's usage_records store: the rows live in the town's
 // own database, beside the cost samples, which is the database the dashboard
-// reads back from the town root.
+// reads back from the town root. It has no default: a daemon whose store was not
+// wired opens none, so a writer reports the row not written rather than reaching
+// a database no caller named. New wires the town's store.
 func (d *Daemon) usageRecords() usageRecordStore {
-	if d.openUsageRecords != nil {
-		return d.openUsageRecords()
+	if d.openUsageRecords == nil {
+		return nil
 	}
-	return beads.New(d.config.TownRoot, beads.WithBin(d.bdPathOrDefault()))
+	return d.openUsageRecords()
 }

@@ -112,11 +112,17 @@ func TestStoryPointsLintWireReadsTheDaemonConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("specTickTown: %v", err)
 			}
-			if got := specLintOptsFrom(sd).LintOverMinutes; got != tc.want {
+			opts, err := specLintOptsFrom(sd)
+			if err != nil {
+				t.Fatalf("specLintOptsFrom: %v", err)
+			}
+			if got := opts.LintOverMinutes; got != tc.want {
 				t.Errorf("gt spec lint's LintOverMinutes = %v, want %v", got, tc.want)
 			}
 			var env specDispatchEnv
-			specWireStoryPoints(&env, sd, root)
+			if err := specWireStoryPoints(&env, sd, root); err != nil {
+				t.Fatalf("specWireStoryPoints: %v", err)
+			}
 			if env.StoryPointLintOver != tc.want {
 				t.Errorf("the tick's StoryPointLintOver = %v, want %v", env.StoryPointLintOver, tc.want)
 			}

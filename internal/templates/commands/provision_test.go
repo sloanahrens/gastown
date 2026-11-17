@@ -124,6 +124,34 @@ func TestDoneBodyCarriesTheSlotLoopRule(t *testing.T) {
 	}
 }
 
+// A file-mode seat holds no bead access: `gt bead comment` appends to the
+// seat's outbox and the host applies it to the bead when the seat ends
+// (gt-jqo63z). The /done body tells a polecat whose gate failure it did not
+// cause to comment on the bead and then wait, so its gate-failure paragraph has
+// to say where the comment goes. Without that the paragraph reads as a write the
+// bead shows while the seat still runs (gt-cpz4kn).
+func TestDoneBodySaysWhenAFileModeCommentReachesTheBead(t *testing.T) {
+	t.Parallel()
+	body, err := bodiesFS.ReadFile("bodies/done.md")
+	if err != nil {
+		t.Fatalf("reading the embedded done body: %v", err)
+	}
+	text := string(body)
+	start := strings.Index(text, "If you believe a gate failure is not caused by your change")
+	if start < 0 {
+		t.Fatal("the /done body lacks the gate-failure paragraph")
+	}
+	paragraph := text[start:]
+	if end := strings.Index(paragraph, "No flag skips the gate."); end >= 0 {
+		paragraph = paragraph[:end]
+	}
+	for _, want := range []string{"outbox", "when the seat ends"} {
+		if !strings.Contains(paragraph, want) {
+			t.Errorf("the gate-failure paragraph does not say the comment reaches the bead after the seat ends: it lacks %q", want)
+		}
+	}
+}
+
 func TestProvisionAndMissing(t *testing.T) {
 	t.Parallel()
 	ws := t.TempDir()

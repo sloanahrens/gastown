@@ -240,6 +240,77 @@ func TestImagePinDurabilityPlatformVariant(t *testing.T) {
 	}
 }
 
+// TestImagePinDurabilityDuplicatePlatform names one platform twice: it is
+// followed through its manifest once and its dead digests are reported once.
+func TestImagePinDurabilityDuplicatePlatform(t *testing.T) {
+	t.Parallel()
+	t.Run("blobs asked once", func(t *testing.T) {
+		t.Parallel()
+		indexDigest, child := digestFor(0x01), digestFor(0x11)
+		config, layer := digestFor(0x12), digestFor(0x13)
+		reg := &fakeRegistry{
+			manifests: map[string]fakeManifest{
+				indexDigest: {body: indexBody(mediaTypeOCIIndex,
+					entry{digest: child, platform: "linux/amd64"},
+				), mediaType: mediaTypeOCIIndex},
+				child: {body: imageBody(mediaTypeOCIManifest, config, layer), mediaType: mediaTypeOCIManifest},
+			},
+			blobs: map[string]bool{config: true, layer: true},
+		}
+
+		_, err := Check(context.Background(), reg, "example.test/oci/docker@"+indexDigest, []string{"linux/amd64", "linux/amd64"})
+		if err != nil {
+			t.Fatalf("Check = error %v, want no error", err)
+		}
+		wantAsked := []string{config, layer}
+		if got := reg.blobsAsked(); !slices.Equal(got, wantAsked) {
+			t.Errorf("BlobExists was asked for %v, want the platform named twice asked for once %v", got, wantAsked)
+		}
+	})
+	t.Run("dead digest reported once", func(t *testing.T) {
+		t.Parallel()
+		indexDigest, child := digestFor(0x01), digestFor(0x11)
+		config, layer := digestFor(0x12), digestFor(0x13)
+		reg := &fakeRegistry{
+			manifests: map[string]fakeManifest{
+				indexDigest: {body: indexBody(mediaTypeOCIIndex,
+					entry{digest: child, platform: "linux/amd64"},
+				), mediaType: mediaTypeOCIIndex},
+				child: {body: imageBody(mediaTypeOCIManifest, config, layer), mediaType: mediaTypeOCIManifest},
+			},
+			blobs: map[string]bool{layer: true},
+		}
+
+		res, err := Check(context.Background(), reg, "example.test/oci/docker@"+indexDigest, []string{"linux/amd64", "linux/amd64"})
+		if err != nil {
+			t.Fatalf("Check = error %v, want no error", err)
+		}
+		want := []string{config + " (linux/amd64 config)"}
+		if !slices.Equal(res.Dead, want) {
+			t.Errorf("Result.Dead = %v, want the platform named twice reported once %v", res.Dead, want)
+		}
+	})
+	t.Run("image ref with the same name twice", func(t *testing.T) {
+		t.Parallel()
+		imageDigest := digestFor(0x01)
+		config, layer := digestFor(0x12), digestFor(0x13)
+		reg := &fakeRegistry{
+			manifests: map[string]fakeManifest{
+				imageDigest: {body: imageBody(mediaTypeOCIManifest, config, layer), mediaType: mediaTypeOCIManifest},
+			},
+			blobs: map[string]bool{config: true, layer: true},
+		}
+
+		res, err := Check(context.Background(), reg, "example.test/oci/docker@"+imageDigest, []string{"linux/arm64", "linux/arm64"})
+		if err != nil {
+			t.Fatalf("Check = error %v, want the one platform named twice checked", err)
+		}
+		if len(res.Dead) != 0 {
+			t.Errorf("Result.Dead = %v, want none: every blob is served", res.Dead)
+		}
+	})
+}
+
 // TestImagePinDurabilityRefusals drives every refusal: what Check cannot
 // decide is an error, never a dead digest and never a clean result.
 func TestImagePinDurabilityRefusals(t *testing.T) {

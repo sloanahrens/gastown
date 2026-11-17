@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -171,6 +172,87 @@ func TestDaemonBdGatewayRefusesABadURL(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), secret) {
 				t.Errorf("the refusal %q echoes the credentials", err)
+			}
+		})
+	}
+}
+
+// TestBdGatewayHelpersMatchTheRenderedPods holds the exported helpers the update
+// Job calls (deploy/k8s/update-job) to the daemon's gateway manifest as it stands:
+// each returns the pairs, secret volume and mount the pods carry, against literals
+// rather than its own output, so a change to a helper fails here as it fails the
+// goldens.
+func TestBdGatewayHelpersMatchTheRenderedPods(t *testing.T) {
+	t.Parallel()
+	const (
+		url   = "http://host.docker.internal:7440"
+		token = "token"
+	)
+	wantEnv := []EnvVar{
+		{Name: "BD_GATEWAY_URL", Value: url},
+		{Name: "BD_GATEWAY_TOKEN_FILE", Value: "/run/gt/bd-gateway/" + token},
+	}
+	wantMount := VolumeMount{Name: "bd-gateway-token", MountPath: "/run/gt/bd-gateway", ReadOnly: true}
+	if got := BdGatewayEnv(url); !reflect.DeepEqual(got, wantEnv) {
+		t.Errorf("BdGatewayEnv = %+v, want %+v", got, wantEnv)
+	}
+	if got := BdGatewayMount(); got != wantMount {
+		t.Errorf("BdGatewayMount = %+v, want %+v", got, wantMount)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		pod    PodSpec
+		secret string
+	}{
+		{name: "the daemon pod", pod: mustBuild(t, daemonBdGatewayValues(t)).Deployment.Spec.Template.Spec, secret: "bd-gateway-daemon"},
+		{name: "the dashboard pod", pod: mustBuild(t, bdGatewayDashboardValues(t)).DashboardDeployment.Spec.Template.Spec, secret: "bd-gateway-dashboard"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mode := int32(0o400)
+			wantVolume := Volume{
+				Name: "bd-gateway-token",
+				Secret: &SecretVolumeSource{
+					SecretName:  tc.secret,
+					DefaultMode: &mode,
+					Items:       []KeyToPath{{Key: token, Path: token}},
+				},
+			}
+			if got := BdGatewayVolume(tc.secret); !reflect.DeepEqual(got, wantVolume) {
+				t.Errorf("BdGatewayVolume(%q) = %+v, want %+v", tc.secret, got, wantVolume)
+			}
+
+			container := tc.pod.Containers[0]
+			for _, want := range wantEnv {
+				var got EnvVar
+				var ok bool
+				for _, e := range container.Env {
+					if e.Name == want.Name {
+						got, ok = e, true
+					}
+				}
+				if !ok || !reflect.DeepEqual(got, want) {
+					t.Errorf("%s env %s = %+v (set %v), want %+v", tc.name, want.Name, got, ok, want)
+				}
+			}
+			var gotVolume *Volume
+			for i := range tc.pod.Volumes {
+				if tc.pod.Volumes[i].Name == wantVolume.Name {
+					gotVolume = &tc.pod.Volumes[i]
+				}
+			}
+			if gotVolume == nil || !reflect.DeepEqual(*gotVolume, wantVolume) {
+				t.Errorf("%s volume = %+v, want %+v", tc.name, gotVolume, wantVolume)
+			}
+			var gotMount *VolumeMount
+			for i := range container.VolumeMounts {
+				if container.VolumeMounts[i].MountPath == wantMount.MountPath {
+					gotMount = &container.VolumeMounts[i]
+				}
+			}
+			if gotMount == nil || *gotMount != wantMount {
+				t.Errorf("%s mount = %+v, want %+v", tc.name, gotMount, wantMount)
 			}
 		})
 	}

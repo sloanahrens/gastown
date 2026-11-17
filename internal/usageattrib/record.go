@@ -246,7 +246,15 @@ type writer struct {
 // refused. A record that mixes counted and new sessions is refused, since its totals cannot
 // be split.
 func Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
-	return writer{create: os.CreateTemp}.Write(usageDir, rec, sessionIDs)
+	_, err := Merge(usageDir, rec, sessionIDs)
+	return err
+}
+
+// Merge is Write, returning the record the file holds once the merge is done and the sessions
+// it counts. A caller that files the run a second way, its row beside its file, writes that
+// copy from the returned record so a bead's earlier runs are not lost.
+func Merge(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) (Stored, error) {
+	return writer{create: os.CreateTemp}.merge(usageDir, rec, sessionIDs)
 }
 
 // checkRecord refuses a record that cannot be filed: no bead, no workspace, or a kind neither
@@ -371,7 +379,7 @@ func (w writer) Replace(usageDir string, rec dashboard.UsageRecord, sessionIDs [
 	return w.writeFileAtomic(path, append(out, '\n'))
 }
 
-// Stored is a bead's work record as its file holds it.
+// Stored is a bead's record as its file holds it.
 type Stored struct {
 	Record   dashboard.UsageRecord
 	Sessions []string
@@ -397,18 +405,23 @@ func ReadWork(usageDir, bead string) (Stored, error) {
 }
 
 func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+	_, err := w.merge(usageDir, rec, sessionIDs)
+	return err
+}
+
+func (w writer) merge(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) (Stored, error) {
 	if err := checkRecord(rec); err != nil {
-		return err
+		return Stored{}, err
 	}
 	ids, err := distinctIDs(rec.Bead, sessionIDs)
 	if err != nil {
-		return err
+		return Stored{}, err
 	}
 	if len(ids) == 0 {
 		if rec.Totals.Calls != 0 {
-			return fmt.Errorf("usageattrib: %s: mismatch: the record counts %d calls but names no session", rec.Bead, rec.Totals.Calls)
+			return Stored{}, fmt.Errorf("usageattrib: %s: mismatch: the record counts %d calls but names no session", rec.Bead, rec.Totals.Calls)
 		}
-		return fmt.Errorf("usageattrib: %s: no sessions to count", rec.Bead)
+		return Stored{}, fmt.Errorf("usageattrib: %s: no sessions to count", rec.Bead)
 	}
 	acct := accountingOf(rec)
 
@@ -424,17 +437,17 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 	case errors.Is(err, fs.ErrNotExist):
 		// The first write for this bead and kind.
 	case err != nil:
-		return fmt.Errorf("usageattrib: reading %s: %w", path, err)
+		return Stored{}, fmt.Errorf("usageattrib: reading %s: %w", path, err)
 	default:
 		var cur storedRecord
 		if err := json.Unmarshal(data, &cur); err != nil {
-			return fmt.Errorf("usageattrib: %s is not a record this package wrote, left as it is: %w", path, err)
+			return Stored{}, fmt.Errorf("usageattrib: %s is not a record this package wrote, left as it is: %w", path, err)
 		}
 		if cur.Sessions == nil {
-			return fmt.Errorf("usageattrib: %s has no sessions list, so its sessions cannot be told apart: left as it is", path)
+			return Stored{}, fmt.Errorf("usageattrib: %s has no sessions list, so its sessions cannot be told apart: left as it is", path)
 		}
 		if err := sameRun(cur.UsageRecord, rec); err != nil {
-			return err
+			return Stored{}, err
 		}
 		var fresh []string
 		for _, id := range ids {
@@ -443,10 +456,13 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 			}
 		}
 		if len(fresh) == 0 {
-			return repeatMatches(cur, rec.Bead, ids, acct)
+			if err := repeatMatches(cur, rec.Bead, ids, acct); err != nil {
+				return Stored{}, err
+			}
+			return storedOf(cur), nil
 		}
 		if len(fresh) != len(ids) {
-			return fmt.Errorf("usageattrib: %s: %d of %d sessions are already counted; build the record from the new sessions only",
+			return Stored{}, fmt.Errorf("usageattrib: %s: %d of %d sessions are already counted; build the record from the new sessions only",
 				rec.Bead, len(ids)-len(fresh), len(ids))
 		}
 		merged = storedRecord{
@@ -459,12 +475,19 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 
 	out, err := json.MarshalIndent(merged, "", " ")
 	if err != nil {
-		return fmt.Errorf("usageattrib: encoding the record for %s: %w", rec.Bead, err)
+		return Stored{}, fmt.Errorf("usageattrib: encoding the record for %s: %w", rec.Bead, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("usageattrib: creating the beads directory: %w", err)
+		return Stored{}, fmt.Errorf("usageattrib: creating the beads directory: %w", err)
 	}
-	return w.writeFileAtomic(path, append(out, '\n'))
+	if err := w.writeFileAtomic(path, append(out, '\n')); err != nil {
+		return Stored{}, err
+	}
+	return storedOf(merged), nil
+}
+
+func storedOf(s storedRecord) Stored {
+	return Stored{Record: s.UsageRecord, Sessions: s.Sessions, Error: s.Error}
 }
 
 // repeatMatches is the write of sessions the record has already counted: it is a no-op when
