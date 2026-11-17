@@ -247,8 +247,8 @@ type podCrashProbes struct {
 	podImageLabelProbes
 	target podDaemonTarget
 	run    update.RunFunc
-	// Clock stamps the reviewed pod's age. Nil is the real clock.
-	Clock update.Clock
+	// clock stamps the reviewed pod's age. Nil is the real clock.
+	clock update.Clock
 }
 
 var _ update.CrashProbes = podCrashProbes{}
@@ -258,8 +258,8 @@ var _ update.PairProbes = podCrashProbes{}
 // podProbeBound and judged by podDaemonCrashing.
 func (p podCrashProbes) PodCrashing(ctx context.Context) (bool, string, error) {
 	now := time.Now()
-	if p.Clock != nil {
-		now = p.Clock.Now()
+	if p.clock != nil {
+		now = p.clock.Now()
 	}
 	return podDaemonCrashing(ctx, p.run, p.target, now)
 }
@@ -469,6 +469,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 		// The crash probe wraps those probes: the restart wait reads the daemon
 		// Deployment's newest pod through it, so a pod that cannot come up ends
 		// the wait at once.
+		// It is set on deps.Verify here, before digestInstaller reads it into the
+		// digest install's probes, because imageDeps is shared with rollback and a
+		// probe set there would reach the restore too.
 		deps.Verify = podCrashProbes{
 			podImageLabelProbes: podImageLabelProbes{
 				VerifyProbes: deps.Verify,
@@ -479,7 +482,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 			},
 			target: *pod,
 			run:    seams.PodRun,
-			Clock:  deps.Clock,
+			clock:  deps.Clock,
 		}
 	}
 	if req.Images != "" {

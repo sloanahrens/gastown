@@ -642,6 +642,12 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 		} else if reading.Namespace != podSwapNamespace {
 			t.Errorf("running pair read names namespace %q, want %q", reading.Namespace, podSwapNamespace)
 		}
+		// The digest install builds its own probes from deps.Verify, so the crash
+		// probe must be on deps before digestInstaller runs: the install's restart
+		// wait ends on a crash loop only if its probes carry it.
+		if _, ok := inst.Images.Verify.(update.CrashProbes); !ok {
+			t.Errorf("digest install verify probe = %T, want the pod run's crash probe", inst.Images.Verify)
+		}
 		// The image label of a pod run is read from the registry the --images file
 		// names: this fake registry serves no digest, so the read is refused there,
 		// and the refusal names the target pair's read rather than a docker inspect.
