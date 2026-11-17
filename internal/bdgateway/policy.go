@@ -22,7 +22,9 @@ import (
 // refused by name, and a token class or verb class the code does not know is
 // refused too, so a typo in the file narrows the surface rather than widening
 // it. The verb comes from argv read the way bd's own root parse reads it
-// (scanArgs), so the class check applies to the verb bd will run.
+// (scanArgs), so the class check applies to the verb bd will run. The one verb
+// no file row can name is bd's root help probe, whose argv holds no verb word;
+// the policy carries that row itself (rootHelpVerb).
 
 // VerbClass is what running a bd verb may do to the store.
 type VerbClass string
@@ -139,6 +141,36 @@ type Verb struct {
 
 // Name returns the verb path as one string, for logs and error messages.
 func (v Verb) Name() string { return strings.Join(v.Path, " ") }
+
+// rootHelpVerb is the policy's row for bd's root help probe. beads.sampleOffersVerb
+// runs the probe before every sample write to learn whether the bd behind the
+// gateway offers the verb (gt-qe1cb5), and no verbs file row can match it: a row
+// names command words, and the probe names none. It is a read, so every token
+// class may run it, and the gateway forwards the probe unchanged, so bd's own
+// help is the only thing it runs.
+var rootHelpVerb = Verb{Path: []string{"help"}, Class: ClassRead}
+
+// rootHelpRequest reports whether argv asks bd for its root help: its first
+// non-empty argument is "--help" or the help command. probe is true when that
+// argument is the whole of argv. A help request carrying any other word or flag
+// asks for more than the root help the gateway serves, so it is not the probe.
+func rootHelpRequest(argv []string) (isHelp, probe bool) {
+	seen := 0
+	first := ""
+	for _, arg := range argv {
+		if arg == "" {
+			continue
+		}
+		if seen == 0 {
+			first = arg
+		}
+		seen++
+	}
+	if first != "--help" && first != "help" {
+		return false, false
+	}
+	return true, seen == 1
+}
 
 // Policy is a loaded verbs file: the allowlist, its classes and the refused
 // flags. It is read-only after loading.
@@ -305,12 +337,26 @@ func parseVerbClass(s string) (VerbClass, error) {
 
 // Authorize checks one call: argv names a listed verb, class may run that
 // verb's class, and no flag on argv is refused for the verb or for every verb.
-// It returns the matched verb so the caller can log its path and class.
+// It returns the matched verb so the caller can log its path and class. The
+// root help probe is the one argv authorized without a file row (rootHelpVerb).
 //
 // argv is bd's arguments, never "bd" and never a shell string. One scan
 // (scanArgs) reads both the verb words and the flags, so the class check and
 // the flag check cannot disagree about which tokens are flags.
 func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
+	if isHelp, probe := rootHelpRequest(argv); isHelp {
+		if !probe {
+			// It names no verb the policy lists, so it is refused the way any
+			// unknown verb is, not by the scan's ambiguity refusal.
+			return Verb{}, fmt.Errorf("%w: %q", ErrVerbNotAllowed, rootHelpVerb.Name())
+		}
+		// The probe is a read, which every class the gateway knows may run; an
+		// unknown token class still fails the check rather than passing it.
+		if !Allowed(class, rootHelpVerb.Class) {
+			return Verb{}, fmt.Errorf("%w: %s token may not run %s (%s)", ErrClassDenied, class, rootHelpVerb.Name(), rootHelpVerb.Class)
+		}
+		return rootHelpVerb, nil
+	}
 	scan, err := p.scanArgs(argv)
 	if err != nil {
 		return Verb{}, err
