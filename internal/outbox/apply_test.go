@@ -530,6 +530,54 @@ func TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText(t *testing.T) {
 	}
 }
 
+// TestNoBeadAccessApplyWritesTheTitleAndAcceptanceOfAValidatedOutbox: a
+// file-mode seat reports a `gt bead update` through its outbox, and the host
+// writes the title and the acceptance block it decoded, in Apply's order. A
+// tick the decoded outbox carries indexes into the replacement block, not the
+// block the host read (gt-pm55bt, gt-htwlio).
+func TestNoBeadAccessApplyWritesTheTitleAndAcceptanceOfAValidatedOutbox(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		want []storeCall
+	}{
+		{
+			name: "the title and the replacement acceptance are written",
+			raw:  `{"bead_id": "gt-swfo9e", "status": "deferred", "title": "DISPROVEN: the retry resets", "acceptance": "- [ ] the refusal names the verb"}`,
+			want: []storeCall{
+				{op: "SetTitle", beadID: testBead, text: "DISPROVEN: the retry resets"},
+				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the refusal names the verb"},
+				{op: "SetStatus", beadID: testBead, status: "deferred"},
+			},
+		},
+		{
+			name: "a tick indexes into the acceptance block the outbox carries",
+			raw:  `{"bead_id": "gt-swfo9e", "status": "deferred", "acceptance": "- [ ] the first of the new block\n- [ ] the second of the new block", "ticked_boxes": [1]}`,
+			want: []storeCall{
+				{op: "SetAcceptance", beadID: testBead, text: "- [ ] the first of the new block\n- [x] the second of the new block"},
+				{op: "SetStatus", beadID: testBead, status: "deferred"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r, err := Validate([]byte(tt.raw), nil, testBead)
+			if err != nil {
+				t.Fatalf("Validate() error = %v, want nil", err)
+			}
+			store := &fakeStore{}
+			if err := Apply(store, testBead, testSeat, acceptance, r); err != nil {
+				t.Fatalf("Apply() error = %v, want nil", err)
+			}
+			if !reflect.DeepEqual(store.calls, tt.want) {
+				t.Errorf("Apply() calls = %#v, want %#v", store.calls, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyRefusedStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -586,10 +634,12 @@ func TestApplyRefusedStatus(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesAnEmptyTitleOrAcceptance: Validate refuses both, and a
-// hand-built Result must not write them either, because either write replaces
-// what the bead has with nothing (gt-9smgr).
-func TestApplyRefusesAnEmptyTitleOrAcceptance(t *testing.T) {
+// TestNoBeadAccessApplyRefusesAnEmptyTitleOrAcceptance: Validate refuses both,
+// and a hand-built Result must not write them either, because either write
+// replaces what the bead has with nothing (gt-9smgr). The test is named inside
+// the no-bead-access selection so the gate that runs those names runs it
+// (gt-htwlio).
+func TestNoBeadAccessApplyRefusesAnEmptyTitleOrAcceptance(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
