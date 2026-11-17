@@ -222,6 +222,97 @@ func TestPolicyShorthandValue(t *testing.T) {
 	}
 }
 
+// TestAuthorizeRootHelp: bd's root help probe — the argv beads.sampleOffersVerb
+// runs before a sample write — is authorized as the policy's own read row for
+// every token class, and a help request carrying a word or flag is refused the
+// way an unknown verb is.
+func TestAuthorizeRootHelp(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+
+	classes := []TokenClass{TokenRead, TokenDaemon, TokenOperator}
+	for _, class := range classes {
+		for _, argv := range [][]string{{"--help"}, {"help"}} {
+			v, err := p.Authorize(class, argv)
+			if err != nil {
+				t.Fatalf("Authorize(%q, %q) = %v, want the help probe allowed", class, argv, err)
+			}
+			if v.Name() != "help" || v.Class != ClassRead {
+				t.Errorf("Authorize(%q, %q) matched %q (%s), want help (read)", class, argv, v.Name(), v.Class)
+			}
+		}
+	}
+
+	// An unknown verb is refused with ErrVerbNotAllowed; the help requests
+	// below must get that same refusal.
+	if _, err := p.Authorize(TokenOperator, []string{"dolt", "push"}); !errors.Is(err, ErrVerbNotAllowed) {
+		t.Fatalf("Authorize(dolt push) = %v, want ErrVerbNotAllowed", err)
+	}
+	for _, argv := range [][]string{
+		{"--help", "show"},
+		{"help", "show"},
+		{"--help", "--json"},
+	} {
+		for _, class := range classes {
+			if _, err := p.Authorize(class, argv); !errors.Is(err, ErrVerbNotAllowed) {
+				t.Errorf("Authorize(%q, %q) = %v, want ErrVerbNotAllowed", class, argv, err)
+			}
+		}
+	}
+
+	if _, err := p.Authorize(TokenClass("root"), []string{"--help"}); !errors.Is(err, ErrClassDenied) {
+		t.Errorf("Authorize(unknown class, --help) = %v, want ErrClassDenied", err)
+	}
+}
+
+// TestAuthorizeRootHelpDoesNotWiden: the probe is the only verb the class check
+// gains. "help" is no row of the file, every listed verb still authorizes
+// exactly when its class allows the token, and an argv naming no listed verb is
+// still refused for every class.
+func TestAuthorizeRootHelpDoesNotWiden(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+	if _, listed := p.verbs["help"]; listed {
+		t.Fatal(`deploy/bd/verbs.json lists "help": the probe must be the policy's own row`)
+	}
+
+	classes := []TokenClass{TokenRead, TokenDaemon, TokenOperator}
+	for _, class := range classes {
+		for name, verb := range p.verbs {
+			v, err := p.Authorize(class, verb.Path)
+			if !Allowed(class, verb.Class) {
+				if !errors.Is(err, ErrClassDenied) {
+					t.Errorf("%s token, %q = %v, want ErrClassDenied", class, name, err)
+				}
+				continue
+			}
+			if err != nil {
+				t.Errorf("%s token, %q = %v, want it allowed", class, name, err)
+				continue
+			}
+			if v.Name() != name {
+				t.Errorf("%s token, %q matched %q, want it unchanged", class, name, v.Name())
+			}
+		}
+
+		for _, argv := range [][]string{
+			{},
+			{"dolt", "push"},
+			{"sample", "purge"},
+			{"new", "gt-abc"},
+			{"help", "show"},
+			{"--help", "show"},
+			{"--help", "--json"},
+			{"--json", "--help"},
+			{"--help=true"},
+		} {
+			if _, err := p.Authorize(class, argv); err == nil {
+				t.Errorf("%s token, %q = allowed, want it refused", class, argv)
+			}
+		}
+	}
+}
+
 // TestParsePolicyRefusals: every way a document can be untrustworthy is an
 // error, never a policy with a narrower or wider surface than its author meant.
 func TestParsePolicyRefusals(t *testing.T) {
