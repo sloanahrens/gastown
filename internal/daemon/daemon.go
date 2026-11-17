@@ -1461,11 +1461,14 @@ type Daemon struct {
 	// (image_pin_layers.go).
 	imagePinLayersRunning atomic.Bool
 	imagePinLayersCycles  sync.WaitGroup
-	// imagePinLayersJoinWait overrides imagePinLayersJoinWait in tests.
-	imagePinLayersJoinWait time.Duration
-	// imagePinLayersRun is the patrol's run seam: nil is
-	// imagePinLayersRunSkeleton, which reads nothing until a later bead fills
-	// the body, and a test sets it to count the runs.
+	// imagePinLayersJoinTimer starts the bound stopImagePinLayersPatrol waits
+	// for a run still going: its channel receives when the bound passes, and
+	// stop ends it. Nil is a time.NewTimer of the bound, and a test sets it to
+	// expire or hold the bound itself, so no test waits on the wall clock.
+	imagePinLayersJoinTimer func(wait time.Duration) (bound <-chan time.Time, stop func())
+	// imagePinLayersRun is the patrol's run seam: nil is no seam installed, so
+	// a tick runs nothing and records no day, and a test sets it to count the
+	// runs.
 	imagePinLayersRun imagePinLayersRunFunc
 	// newImagePinLayersTicker is where the patrol's ticker comes from: nil is
 	// time.NewTicker, and a test sets it to record the cadence.
