@@ -462,7 +462,13 @@ func openTarget(cfg targetConfig, town, tool string, s surface) (target, error) 
 // needs no town marker, and a directory outside it is mapped with a note, not
 // refused, so the target runs from any directory. The forwarder's gateway needs the
 // town too, since the translation is relative to it.
+// A forwarder with no gateway refuses before it could use a town, so it needs none.
 func townFor(cfg targetConfig, s surface) (string, error) {
+	if cfg.Target == forwarderTarget && cfg.BdGateway.URL == "" {
+		// The refusal is bd's 125 status, and a town lookup that failed first would
+		// replace it with the wrapper's own failure status (f8cefae660a9).
+		return "", nil
+	}
 	if cfg.Target != kubernetesTarget {
 		return findTown(s)
 	}
