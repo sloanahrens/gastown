@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -998,5 +1000,173 @@ func TestPodAttachesStdinWithoutTTY(t *testing.T) {
 	}
 	if len(g.stdins) != 0 || !strings.Contains(strings.Join(g.attached[0], " "), " -t ") {
 		t.Errorf("a call with no reader attached stdins %v and %q; want the caller's stdin and -t", g.stdins, g.attached)
+	}
+}
+
+// beadsTownKube is the target the cluster fake drives for a bd call, with the
+// town built as real directories under the test's own temp dir, so the walk sees
+// the filesystem the wrapper sees.
+func beadsTownKube(t *testing.T, f *fakeKube, note *bytes.Buffer, town string) Kubectl {
+	t.Helper()
+	k := testKubectl(f, note)
+	k.Town = town
+	k.PodRoot = town
+	k.Tool = "bd"
+	return k
+}
+
+// kubeBdCall is the call the wrapper makes for `bd list` from dir, through Plan, so
+// the target sees the filtered environment.
+func kubeBdCall(t *testing.T, dir string, env []string) Call {
+	t.Helper()
+	call, err := Plan("bd", []string{"list"}, env, dir, false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	return call
+}
+
+// mkdirTownDir creates dir and its parents under the test's temp tree.
+func mkdirTownDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create %s: %v", dir, err)
+	}
+}
+
+// beadsDirsIn returns the BEADS_DIR entries of an exec argv.
+func beadsDirsIn(argv []string) []string {
+	var out []string
+	for _, entry := range argv {
+		if strings.HasPrefix(entry, beadsDirVar+"=") {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// TestKubectlSettlesBeadsDir: a bd call that sets no BEADS_DIR is given the
+// .beads directory nearest at or above its working directory, inside the town,
+// so the pod's bd forwarder names the rig the caller meant (gt-iy4cpy). The
+// nearest directory wins, the town's own .beads answers a walk that finds none,
+// a caller's BEADS_DIR is kept, and a directory outside the town gets none.
+func TestKubectlSettlesBeadsDir(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, ".beads"))
+	mkdirTownDir(t, filepath.Join(town, "gastown", ".beads"))
+	mkdirTownDir(t, filepath.Join(town, "gastown", "crew", "nux"))
+	mkdirTownDir(t, filepath.Join(town, "crew"))
+	outside := t.TempDir()
+	setDir := filepath.Join(town, "crew", ".beads")
+
+	cases := []struct {
+		name string
+		dir  string
+		env  []string
+		want string
+	}{
+		{"nearest rig", filepath.Join(town, "gastown"), nil, filepath.Join(town, "gastown", ".beads")},
+		{"nearest above", filepath.Join(town, "gastown", "crew", "nux"), nil, filepath.Join(town, "gastown", ".beads")},
+		{"town root", filepath.Join(town, "crew"), nil, filepath.Join(town, ".beads")},
+		{"set", filepath.Join(town, "gastown"), []string{"BEADS_DIR=" + setDir}, setDir},
+		{"outside", outside, nil, ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthyKube()
+			var note bytes.Buffer
+			exit, err := beadsTownKube(t, f, &note, town).Launch(kubeBdCall(t, tt.dir, tt.env))
+			if exit != 0 || err != nil {
+				t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+			}
+			if len(f.attached) != 1 {
+				t.Fatalf("attached %d commands, want 1", len(f.attached))
+			}
+			got := beadsDirsIn(f.attached[0])
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("argv carries BEADS_DIR entries %q; want none for a directory outside the town", got)
+				}
+				return
+			}
+			want := []string{"BEADS_DIR=" + tt.want}
+			if !slices.Equal(got, want) {
+				t.Fatalf("argv carries BEADS_DIR entries %q; want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestKubectlSettlesBeadsDirMapsOntoThePodRoot: when the pod's town root differs
+// from the Mac's, the discovered .beads directory is named inside the pod, since
+// that is the path the pod's bd reads.
+func TestKubectlSettlesBeadsDirMapsOntoThePodRoot(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, "gastown", ".beads"))
+	f := healthyKube()
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	k.PodRoot = "/pod/town"
+	// The roots differ, so the call rewrites the tool's output and needs the
+	// wrapper's streams wired.
+	k.Stdout, k.Stderr = io.Discard, io.Discard
+	exit, err := k.Launch(kubeBdCall(t, filepath.Join(town, "gastown"), nil))
+	if exit != 0 || err != nil {
+		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+	}
+	want := []string{"BEADS_DIR=/pod/town/gastown/.beads"}
+	if got := beadsDirsIn(f.attached[0]); !slices.Equal(got, want) {
+		t.Fatalf("argv carries BEADS_DIR entries %q; want %q", got, want)
+	}
+}
+
+// TestKubectlSettlesBeadsDirRefusesUncomparableDir: a working directory the town
+// cannot be compared with refuses the call, rather than the failed comparison
+// being read as a directory outside the town.
+func TestKubectlSettlesBeadsDirRefusesUncomparableDir(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f := healthyKube()
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	exit, err := k.Launch(kubeBdCall(t, "relative/dir", nil))
+	if exit != exitDown || err == nil {
+		t.Fatalf("Launch = %d, %v; want %d and an error", exit, err, exitDown)
+	}
+	if !strings.Contains(err.Error(), "cannot be told which rig") {
+		t.Fatalf("error %v does not name the failed comparison", err)
+	}
+	if len(f.attached) != 0 {
+		t.Fatalf("attached %q after a refused comparison; want no call run", f.attached)
+	}
+}
+
+// TestKubectlSettlesBeadsDirRefusesUnreadable: a .beads entry the stat cannot
+// read refuses the call before bd runs, rather than being read as absent and
+// routing the call to another rig's database.
+func TestKubectlSettlesBeadsDirRefusesUnreadable(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	f := healthyKube()
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	k.Stat = func(name string) (fs.FileInfo, error) {
+		if name == filepath.Join(town, ".beads") {
+			return nil, fs.ErrPermission
+		}
+		return nil, fs.ErrNotExist
+	}
+	exit, err := k.Launch(kubeBdCall(t, town, nil))
+	if exit != exitDown || err == nil {
+		t.Fatalf("Launch = %d, %v; want %d and an error", exit, err, exitDown)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("error %v does not carry the stat failure", err)
+	}
+	if len(f.attached) != 0 {
+		t.Fatalf("attached %q after a refused walk; want no call run", f.attached)
 	}
 }
