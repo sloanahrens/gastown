@@ -3,12 +3,18 @@ package session
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
+
+// doltModeSettingsFixture is the dolt-mode seat's render of polecatHostSettings,
+// checked in so that the render is pinned to fixed bytes rather than to a
+// second call of the renderer under test.
+const doltModeSettingsFixture = "testdata/polecat_settings_dolt.golden.json"
 
 // openshellHostSettings is a host polecat settings.json: gt hooks at the
 // host's gt, the host-only python path guard, and keys outside "hooks".
@@ -116,6 +122,32 @@ func hookCommands(t *testing.T, settings []byte) map[string][]string {
 		}
 	}
 	return out
+}
+
+// assertDoltModeHookSet checks settings still hold every hook a dolt-mode seat
+// runs (gt-1m0kb F6), so a hook dropped from the render is caught even when the
+// fixture was rewritten to match it.
+func assertDoltModeHookSet(t *testing.T, settings []byte) {
+	t.Helper()
+	got := hookCommands(t, settings)
+	for _, guard := range polecatGuardCommands {
+		if !slices.Contains(got["PreToolUse"], guard) && !slices.Contains(got["PermissionRequest"], guard) {
+			t.Errorf("dolt-mode seat lost the guard %q", guard)
+		}
+	}
+	for _, want := range []struct {
+		event, command string
+	}{
+		{"SessionStart", "/usr/local/bin/gt prime --hook"},
+		{"PostToolUse", "/usr/local/bin/gt tap nudge-drain"},
+		{"Stop", "/usr/local/bin/gt tap polecat-stop-check"},
+		{"UserPromptSubmit", "/usr/local/bin/gt mail check --inject"},
+		{"UserPromptSubmit", "/usr/local/bin/gt mail inbox"},
+	} {
+		if !slices.Contains(got[want.event], want.command) {
+			t.Errorf("dolt-mode seat lost the %s hook %q, got %q", want.event, want.command, got[want.event])
+		}
+	}
 }
 
 func TestRenderSandboxSettingsKeepsGtHooksAndDropsOnlyThePathGuard(t *testing.T) {
@@ -323,13 +355,16 @@ func TestNoBeadAccessFileModeSeatSettingsDropMailAndKeepEveryGuard(t *testing.T)
 
 // TestNoBeadAccessDoltModeSeatSettingsUnchanged pins that bead access other
 // than files renders the settings exactly as before (gt-1m0kb F6): byte for
-// byte the unchanged render, mail hooks and stop hook intact.
+// byte the checked-in fixture, which holds the mail check, the mail inbox and
+// the stop hook intact. The hook-presence check runs against the fixture too,
+// so a hook edited out of both the render and the fixture still fails.
 func TestNoBeadAccessDoltModeSeatSettingsUnchanged(t *testing.T) {
 	t.Parallel()
-	plain, err := renderSandboxSettings([]byte(polecatHostSettings))
+	want, err := os.ReadFile(doltModeSettingsFixture)
 	if err != nil {
-		t.Fatalf("renderSandboxSettings: %v", err)
+		t.Fatalf("reading the dolt-mode fixture: %v", err)
 	}
+	assertDoltModeHookSet(t, want)
 	for _, beadAccess := range []string{config.SandboxBeadAccessDolt, ""} {
 		t.Run("bead_access="+beadAccess, func(t *testing.T) {
 			t.Parallel()
@@ -337,17 +372,10 @@ func TestNoBeadAccessDoltModeSeatSettingsUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatalf("renderSandboxSettingsForSeat(%q): %v", beadAccess, err)
 			}
-			if !bytes.Equal(got, plain) {
-				t.Errorf("bead_access %q changed the rendered settings:\ngot:\n%s\nwant:\n%s", beadAccess, got, plain)
-			}
-			commands := hookCommands(t, got)
-			for event, want := range map[string]string{
-				"Stop":             "/usr/local/bin/gt tap polecat-stop-check",
-				"UserPromptSubmit": "/usr/local/bin/gt mail check --inject",
-			} {
-				if !slices.Contains(commands[event], want) {
-					t.Errorf("bead_access %q lost the %s hook %q, got %q", beadAccess, event, want, commands[event])
-				}
+			assertDoltModeHookSet(t, got)
+			if !bytes.Equal(got, want) {
+				t.Errorf("bead_access %q changed the rendered settings:\ngot:\n%s\nwant (%s):\n%s",
+					beadAccess, got, doltModeSettingsFixture, want)
 			}
 		})
 	}
