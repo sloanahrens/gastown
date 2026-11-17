@@ -157,37 +157,48 @@ func TestEventWithoutNewFieldsReadsAsInfo(t *testing.T) {
 	}
 }
 
-// TestImagePinDurabilityDeadLayerKind is the dead-layer item's place in the
-// tables: a kind listed for readers, one rule of its own, and the same severity
-// class as the unreadable read it is raised beside (gt-kyomsc).
+// TestImagePinDurabilityDeadLayerKind is the image pin kinds' place in the
+// tables, as one row per kind: each is listed for readers, resolves to a rule
+// of its own, and carries the severity class of the unreadable read the patrol
+// raises it beside. A kind missing from Kinds() is skipped by the rules and
+// owners checks, and a rule with no flags row has no class at all (gt-kyomsc).
 func TestImagePinDurabilityDeadLayerKind(t *testing.T) {
 	t.Parallel()
 
-	found := false
+	listed := make(map[Kind]bool, len(Kinds()))
 	for _, k := range Kinds() {
-		if k == KindImagePinsDeadLayer {
-			found = true
-			break
-		}
+		listed[k] = true
 	}
-	if !found {
-		t.Errorf("Kinds() does not list %q, so readers and the rule check skip it", KindImagePinsDeadLayer)
-	}
-
-	item := Item{Kind: KindImagePinsDeadLayer, Key: "image-pins-dead-layer:pin"}
-	if got := RuleFor(item); got != RuleImagePinsDeadLayer {
-		t.Errorf("RuleFor(%q) = %q, want %q", item.Kind, got, RuleImagePinsDeadLayer)
-	}
-
 	want, ok := Flags(RuleImagePinsUnreadable)
 	if !ok {
 		t.Fatalf("Flags(%q) has no row, so there is no severity class to match", RuleImagePinsUnreadable)
 	}
-	got, ok := Flags(RuleImagePinsDeadLayer)
-	if !ok {
-		t.Fatalf("Flags(%q) has no row", RuleImagePinsDeadLayer)
-	}
-	if got != want {
-		t.Errorf("Flags(%q) = %+v, want the unreadable read's class %+v", RuleImagePinsDeadLayer, got, want)
+
+	for _, tc := range []struct {
+		name     string
+		kind     Kind
+		wantRule string
+	}{
+		{"stale", KindImagePinsStale, RuleImagePinsStale},
+		{"unreadable", KindImagePinsUnreadable, RuleImagePinsUnreadable},
+		{"refresh stuck", KindImagePinsRefreshStuck, RuleImagePinsRefreshStuck},
+		{"dead layer", KindImagePinsDeadLayer, RuleImagePinsDeadLayer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !listed[tc.kind] {
+				t.Errorf("Kinds() does not list %q, so readers and the rule check skip it", tc.kind)
+			}
+			item := Item{Kind: tc.kind, Key: string(tc.kind) + ":pin"}
+			if got := RuleFor(item); got != tc.wantRule {
+				t.Fatalf("RuleFor(%q) = %q, want %q", tc.kind, got, tc.wantRule)
+			}
+			got, ok := Flags(tc.wantRule)
+			if !ok {
+				t.Fatalf("Flags(%q) has no row", tc.wantRule)
+			}
+			if got != want {
+				t.Errorf("Flags(%q) = %+v, want the unreadable read's class %+v", tc.wantRule, got, want)
+			}
+		})
 	}
 }
