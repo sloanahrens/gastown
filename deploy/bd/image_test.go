@@ -142,6 +142,8 @@ func TestDockerfileBdShape(t *testing.T) {
 		{"the gateway is copied in", "COPY --chmod=0755 bdgw /usr/local/bin/bdgw"},
 		{"the policy directory is traversable by the non-root user", "RUN mkdir -p /etc/bdgw && chmod 0755 /etc/bdgw"},
 		{"the policy file is copied where the compose unit reads it", "COPY --chmod=0444 verbs.json " + composeVerbsPath(t)},
+		{"the workspace parent is owned by the gateway user", "RUN mkdir -p /var/lib/bdgw && chown 65532:65532 /var/lib/bdgw"},
+		{"the workspace root keeps its /ws name", "RUN ln -s /var/lib/bdgw/ws /ws"},
 		{"the gateway is the entrypoint", `ENTRYPOINT ["/usr/local/bin/bdgw", "serve"]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
