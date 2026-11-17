@@ -38,12 +38,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // proofTimeout bounds the one bd process the proof starts. bd's first call of
@@ -464,6 +467,66 @@ func TestIntegrationWorkspaceProofLayout(t *testing.T) {
 		if !strings.Contains(string(routes), want) {
 			t.Errorf("routes.jsonl does not contain %s:\n%s", want, routes)
 		}
+	}
+}
+
+// TestIntegrationSQLRefusalRunsRealBd is the sql rule at the integration tier:
+// the gateway's own handler, policy and executor run a real bd against the
+// proof workspace, so a write statement is refused with 403 before bd starts
+// and the handshake's schema-level read is served by bd itself. It skips with
+// the workspace proof's prerequisites, and the overseer's host run exercises it
+// when BD_PROOF_BEAD and the Dolt endpoint are set.
+func TestIntegrationSQLRefusalRunsRealBd(t *testing.T) {
+	setup, skip, err := proofPrereqs(os.Getenv, exec.LookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skip != "" {
+		t.Skip(skip)
+	}
+	tree := writeProofWorkspace(t, t.TempDir(), setup)
+	executor, err := New(Options{
+		Binary:        setup.bdPath,
+		WorkspaceRoot: tree.root,
+		Home:          t.TempDir(),
+		Path:          "/usr/local/bin:/usr/bin:/bin",
+		DoltHost:      setup.host,
+		DoltPort:      setup.port,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	log, calls := newCapturingCallLog(t)
+	g, err := NewGateway(GatewayOptions{
+		Auth:       testAuthenticator(t),
+		Policy:     loadDeployPolicy(t),
+		Workspaces: mustStore(t),
+		Log:        log,
+		Runner:     executor,
+	})
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+
+	if code := postExec(t, g, testDaemonToken, Request{Argv: []string{"sql", "DELETE FROM issues"}, Rig: setup.rig}); code != http.StatusForbidden {
+		t.Fatalf("write sql through the gateway = %d, want 403", code)
+	}
+	argv, err := beadsql.SchemaLevel().BdArgs("--json")
+	if err != nil {
+		t.Fatalf("beadsql.SchemaLevel().BdArgs: %v", err)
+	}
+	if code := postExec(t, g, testDaemonToken, Request{Argv: argv, Rig: setup.rig}); code != http.StatusOK {
+		t.Fatalf("schema-level read through the gateway = %d, want 200", code)
+	}
+	// Only the read reached the log, and bd's own exit status says the real
+	// schema level was read; a start failure writes an error frame the 200
+	// alone would not tell apart.
+	entries := calls()
+	if len(entries) != 1 {
+		t.Fatalf("the call log holds %d calls, want only the read", len(entries))
+	}
+	if e := entries[0]; e.Verb != "sql" || e.ExitCode != 0 {
+		t.Fatalf("schema-level read logged verb %q exit %d, want sql exit 0", e.Verb, e.ExitCode)
 	}
 }
 

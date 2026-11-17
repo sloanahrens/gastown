@@ -54,6 +54,7 @@
     {"path": "purge", "class": "write"},
     {"path": "reopen", "class": "write"},
     {"path": "sample add", "class": "write"},
+    {"path": "sql", "class": "write"},
     {"path": "unclaim", "class": "write"},
     {"path": "undefer", "class": "write"},
     {"path": "update", "class": "write"},

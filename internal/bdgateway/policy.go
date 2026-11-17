@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // The policy answers one question: may this caller run this bd call. It is the
@@ -75,7 +77,17 @@ var (
 	// reads a value (or the reverse) would class-check one verb while bd runs
 	// another.
 	ErrAmbiguousVerb = errors.New("bdgateway: cannot tell which verb these arguments run")
+	// ErrSQLNotReadOnly is a sql call whose statement is not one read-only
+	// statement: bd's sql verb runs whatever text it is handed, so the policy
+	// refuses a write, DDL, a multi-statement string or an empty statement
+	// before bd starts (beadsql.ReadOnly is the rule).
+	ErrSQLNotReadOnly = errors.New("bdgateway: sql serves one read-only statement")
 )
+
+// sqlVerb is bd's raw-SQL verb, the one verb whose operand is a statement. The
+// file gives it its class; the rule on the statement itself is the code's,
+// like the root help row.
+const sqlVerb = "sql"
 
 // maxPathWords bounds a verb path. bd's deepest verb gt calls is three words
 // ("mol wisp list"), and the resolver tries at most this many words.
@@ -372,7 +384,38 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 	if flag, ok := p.refusedFlag(v, scan.flags); ok {
 		return Verb{}, fmt.Errorf("%w: %s on %s", ErrFlagRefused, flag.spelling, v.Name())
 	}
+	if name == sqlVerb {
+		if err := checkSQLStatement(scan.operands); err != nil {
+			return Verb{}, err
+		}
+	}
 	return v, nil
+}
+
+// checkSQLStatement applies the read-only rule to a sql call before bd starts.
+// The statement is the one operand after bd's flags, which scanArgs read: bd's
+// sql verb takes one <query> and runs its text as written. The single-operand
+// rule is safe because sql's only own flag is the boolean --csv (`bd sql
+// --help`, bd 1.2.2): every flag that takes a value is a root flag
+// bdRootFlags places, so its value is consumed and never read as the query,
+// and the one operand is what bd runs. A call naming no operand — the empty
+// statement, or a query that was really a value-taking flag's argument — is
+// refused, and one naming more than one is refused rather than letting the
+// gateway check an argument bd may not run. beadsql.ReadOnly carries the rule
+// itself, so a write, DDL, a multi-statement string or a dolt_* procedure is
+// refused with the reason.
+func checkSQLStatement(operands []string) error {
+	switch len(operands) {
+	case 0:
+		return fmt.Errorf("%w: no statement", ErrSQLNotReadOnly)
+	case 1:
+	default:
+		return fmt.Errorf("%w: %d statements, want one", ErrSQLNotReadOnly, len(operands))
+	}
+	if err := beadsql.ReadOnly(operands[0]); err != nil {
+		return fmt.Errorf("%w: %v", ErrSQLNotReadOnly, err)
+	}
+	return nil
 }
 
 // scanResult is what one scanArgs pass read from argv. words are the command
