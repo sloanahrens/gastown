@@ -1,6 +1,6 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
-// host: the linux/arm64 gt, bd, om, trackerd and trackerbackup binaries the
-// image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned
+// host: the linux/arm64 gt, bd, om, gt-wrap, trackerd and trackerbackup binaries
+// the image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned
 // claude CLI om's reviewer runs (gt-qpeei.35), and the image built from them
 // (gt-qpeei.16).
 // Every command it runs and every download it makes is one injected call, so the
@@ -42,13 +42,15 @@ const DockerContext = "desktop-linux"
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
 // to the package polecat-image builds, and BDPackage to bdbuild.Package.
 // TrackerdPackage and TrackerbackupPackage are main packages in the tracker
-// module, built in TrackerdModuleDir rather than at the checkout root.
+// module, built in TrackerdModuleDir rather than at the checkout root. GtWrap
+// is the forwarder the image installs as bd (gt-p4xncz).
 const (
 	GTPackage            = "./cmd/gt"
 	BDPackage            = "./cmd/bd"
 	OMPackage            = "./cmd/om"
 	TrackerdPackage      = "./cmd/trackerd"
 	TrackerbackupPackage = "./cmd/trackerbackup"
+	GtWrapPackage        = "./cmd/gt-wrap"
 )
 
 // TrackerdModuleDir is the gt checkout's directory that trackerd and
@@ -226,8 +228,8 @@ var imagePlugins = []plugin{
 	{name: "town-metrics", pkg: "./plugins/town-metrics"},
 }
 
-// BuildBinaries writes gt, bd, om, trackerd and trackerbackup to b.Out and
-// returns their paths in that order. Every refusal comes before the first build
+// BuildBinaries writes gt, bd, om, gt-wrap, trackerd and trackerbackup to b.Out
+// and returns their paths in that order. Every refusal comes before the first build
 // runs, so a refused call writes nothing. Each binary is built in a clean
 // worktree of its commit and is staged under b.Out until every binary has built,
 // so a build that fails returns its error and no paths, and leaves nothing in
@@ -274,6 +276,10 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
+		// gt-wrap is the forwarder the image installs as bd, with the real bd
+		// beside it as bd.real (gt-p4xncz): an in-cluster bd call must reach
+		// this binary, or BD_GATEWAY_URL changes nothing.
+		{name: "gt-wrap", src: b.GTSrc, commit: gtCommit, pkg: GtWrapPackage},
 		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage, moduleDir: TrackerdModuleDir},
 		{name: "trackerbackup", src: b.GTSrc, commit: gtCommit, pkg: TrackerbackupPackage, moduleDir: TrackerdModuleDir},
 	}
@@ -772,6 +778,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
 	lines = append(lines, om.fetch...)
 	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
+	lines = append(lines, fmt.Sprintf("build gt-wrap: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt-wrap"), GtWrapPackage, ""), " "), b.GTSrc, rev))
 	lines = append(lines, fmt.Sprintf("build trackerd: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	lines = append(lines, fmt.Sprintf("build trackerbackup: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerbackup"), TrackerbackupPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	for _, p := range imagePlugins {
@@ -1093,17 +1100,17 @@ func (b Builder) stageKnownHosts() error {
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: each of the image's binaries (gt, bd, om, trackerd, trackerbackup,
-// claude, the toolNames and ClientToolNames), each of imagePlugins and each of
-// mangoNames once, at the path under b.Out its COPY reads. Docker would report a
-// missing or misplaced one only after the package install ran, so it is caught
-// here first, against what the caller passed.
+// not read: each of the image's binaries (gt, bd, om, gt-wrap, trackerd,
+// trackerbackup, claude, the toolNames and ClientToolNames), each of imagePlugins
+// and each of mangoNames once, at the path under b.Out its COPY reads. Docker would
+// report a missing or misplaced one only after the package install ran, so it is
+// caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
 	// rels is each binary's COPY source relative to the build context; want holds
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append(append([]string{"gt", "bd", "om", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
+	for _, name := range append(append([]string{"gt", "bd", "om", "gt-wrap", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
 		rels[name] = name
 		want = append(want, name)
 	}

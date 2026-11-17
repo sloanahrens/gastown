@@ -51,7 +51,12 @@ COPY --from=dolt /usr/local/bin/dolt /usr/local/bin/dolt
 # COPY sources are entries of the build context, which BuildImage sets to the
 # output directory BuildBinaries wrote them to.
 COPY --chmod=0755 gt /usr/local/bin/gt
-COPY --chmod=0755 bd /usr/local/bin/bd
+# The bd a caller in the pod runs is the gt-wrap forwarder (gt-p4xncz), and the
+# real bd sits beside it as bd.real, the layout the forwarder looks for
+# (internal/gtwrap/forwarder.go). With the wrapper anywhere else, an in-cluster
+# bd call runs the real bd and BD_GATEWAY_URL changes nothing.
+COPY --chmod=0755 gt-wrap /usr/local/bin/bd
+COPY --chmod=0755 bd /usr/local/bin/bd.real
 COPY --chmod=0755 om /usr/local/bin/om
 COPY --chmod=0755 trackerd /usr/local/bin/trackerd
 COPY --chmod=0755 trackerbackup /usr/local/bin/trackerbackup

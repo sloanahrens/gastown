@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -202,19 +203,34 @@ func builderFor(t *testing.T) (Builder, *fakeRunner) {
 	return validBuilder(run, t.TempDir()), run
 }
 
-func TestBuildBinariesReturnsTheFivePathsUnderOut(t *testing.T) {
+// wantBinaryNames is the six binaries BuildBinaries writes, in the order it
+// returns their paths. gt-wrap is the bd the image puts on PATH, with the real
+// bd beside it as bd.real (gt-p4xncz).
+var wantBinaryNames = []string{"gt", "bd", "om", "gt-wrap", "trackerd", "trackerbackup"}
+
+// checkBinaryNames fails the test unless paths name wantBinaryNames in order. A
+// count alone cannot say which binary was added or dropped.
+func checkBinaryNames(t *testing.T, paths []string) {
+	t.Helper()
+	got := make([]string, 0, len(paths))
+	for _, p := range paths {
+		got = append(got, filepath.Base(p))
+	}
+	if !reflect.DeepEqual(got, wantBinaryNames) {
+		t.Errorf("BuildBinaries returned the binaries %v, want %v", got, wantBinaryNames)
+	}
+}
+
+func TestBuildBinariesReturnsTheSixPathsUnderOut(t *testing.T) {
 	t.Parallel()
 	b, _ := builderFor(t)
 	paths, err := b.BuildBinaries(context.Background(), testRev)
 	if err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := []string{
-		filepath.Join(b.Out, "gt"),
-		filepath.Join(b.Out, "bd"),
-		filepath.Join(b.Out, "om"),
-		filepath.Join(b.Out, "trackerd"),
-		filepath.Join(b.Out, "trackerbackup"),
+	want := make([]string, 0, len(wantBinaryNames))
+	for _, name := range wantBinaryNames {
+		want = append(want, filepath.Join(b.Out, name))
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("BuildBinaries paths = %q, want %q", paths, want)
@@ -229,7 +245,7 @@ func TestBuildBinariesReturnsTheFivePathsUnderOut(t *testing.T) {
 		t.Fatalf("reading the output directory: %v", err)
 	}
 	if got := len(entries); got != len(want) {
-		t.Errorf("the output directory holds %d entries after a build, want the five binaries only", got)
+		t.Errorf("the output directory holds %d entries after a build, want the six binaries only", got)
 	}
 }
 
@@ -239,8 +255,8 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	names := []string{"gt", "bd", "om", "trackerd", "trackerbackup"}
-	pkgs := []string{GTPackage, BDPackage, OMPackage, TrackerdPackage, TrackerbackupPackage}
+	names := []string{"gt", "bd", "om", "gt-wrap", "trackerd", "trackerbackup"}
+	pkgs := []string{GTPackage, BDPackage, OMPackage, GtWrapPackage, TrackerdPackage, TrackerbackupPackage}
 	if len(run.calls) != len(names) {
 		t.Fatalf("recorded %d builds, want %d", len(run.calls), len(names))
 	}
@@ -257,6 +273,40 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 	}
 }
 
+// TestBuildBinariesBuildsGtWrap: the image's bd is the gt-wrap forwarder, so
+// BuildBinaries builds cmd/gt-wrap from the gt checkout at rev for linux/arm64,
+// beside the five binaries, with no -ldflags stamp and from the worktree root
+// rather than the tracker module (gt-p4xncz).
+func TestBuildBinariesBuildsGtWrap(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	paths, err := b.BuildBinaries(context.Background(), testRev)
+	if err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	at := slices.Index(paths, filepath.Join(b.Out, "gt-wrap"))
+	if at < 0 {
+		t.Fatalf("BuildBinaries paths = %q, want them to hold %s", paths, filepath.Join(b.Out, "gt-wrap"))
+	}
+	call := run.calls[at]
+	wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", GtWrapPackage}
+	if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
+		t.Errorf("gt-wrap build argv = %q, want %q", call.argv, wantArgv)
+	}
+	for _, want := range []string{"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0"} {
+		if !contains(call.env, want) {
+			t.Errorf("gt-wrap build env = %q, want %s among them", call.env, want)
+		}
+	}
+	add := run.adds[at]
+	if add.src != b.GTSrc || add.commit != testRev {
+		t.Errorf("gt-wrap worktree = checkout %s at %s, want the gt checkout %s at %s", add.src, add.commit, b.GTSrc, testRev)
+	}
+	if call.dir != add.dir {
+		t.Errorf("gt-wrap build ran in %q, want the worktree root %q", call.dir, add.dir)
+	}
+}
+
 // TestBuildBinariesBuildsEachAtItsStampedCommit: each binary is compiled in a
 // clean worktree of its own checkout at the commit it stamps, never in the
 // checkout's working tree, and the worktree is removed after the build.
@@ -270,6 +320,7 @@ func TestBuildBinariesBuildsEachAtItsStampedCommit(t *testing.T) {
 		{src: b.GTSrc, commit: testRev},
 		{src: b.BDSrc, commit: testBDCommit},
 		{src: b.OMSrc, commit: testOMCommit},
+		{src: b.GTSrc, commit: testRev},
 		{src: b.GTSrc, commit: testRev},
 		{src: b.GTSrc, commit: testRev},
 	}
