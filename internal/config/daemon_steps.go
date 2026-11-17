@@ -83,7 +83,7 @@ var daemonSteps = []DaemonStep{
 	{"image_pin_layers", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the tick calls the patrol's run seam and writes one record under .runtime, so it execs no program (gt-rhrbyd)"},
 	{"deepseek_balance", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the tick reads the mounted key file and the account request is its own HTTP call, so it execs no program (gt-whaxw7)"},
 	{"om_lessons", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the tick calls the patrol's run seam and execs no program (gt-vdy9do)"},
-	{"rework_numbers", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the step reads the town's landing ledgers and review log and writes one file under .runtime, so it execs no program (gt-2232t4)"},
+	{"rework_numbers", DaemonStepPatrol, DaemonStepRuns, nil, "in process: the step reads the town's landing ledgers and review log and writes the document and its last-run record under .runtime, so it execs no program (gt-2232t4)"},
 
 	{"handler", DaemonStepPatrol, DaemonStepRuns, []string{"bash"}, "dispatches the plugins that run here"},
 	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},
