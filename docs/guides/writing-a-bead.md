@@ -35,8 +35,8 @@ Change: at most N added lines in M files.
 
 N counts every added line, tests included, and M counts the files the diff
 touches. A bead that cannot fit its budget is split by package or by test
-group, one deliverable each. When the lint's maximum is on,
-`lint_budget_max_lines` caps N at 300.
+group, one deliverable each. The lint's maximum is the operator's
+`lint_budget_max_lines` setting; with the key absent or zero, the lint has none.
 
 The landed diff predicts both the wait and the rework. Across the 3,047 beads
 the daemon landed since 2026-10-26, the size of the diff and the time to land
