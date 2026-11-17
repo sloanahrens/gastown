@@ -220,6 +220,15 @@ type binary struct {
 	stampsBuildID bool
 }
 
+// bdBinary is the image's bd, built from src at commit and staged under name:
+// BuildBinaries stages it as bd and StageGatewayContext as bd.real, both with
+// the stamps the two images' bd report one build id under (gt-glsx8):
+// main.Build from git's abbreviation of the commit in the worktree, then
+// main.Commit with the full sha.
+func bdBinary(src, commit, name string) binary {
+	return binary{name: name, src: src, commit: commit, pkg: BDPackage, ldflags: bdCommitFlag + commit, stampsBuildID: true}
+}
+
 // plugin is one plugin the image carries: its directory name in the town's
 // plugins/ and the package under the gt checkout it is built from.
 type plugin struct{ name, pkg string }
@@ -280,7 +289,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	}
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
-		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
+		bdBinary(bdSrc, bdCommit, "bd"),
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
 		// gt-wrap is the forwarder the image installs as bd, with the real bd
 		// beside it as bd.real (gt-p4xncz): an in-cluster bd call must reach
