@@ -20,7 +20,7 @@ import (
 
 // TestExecutorPathMapping: rig and cwd select the directory bd runs in and the
 // BEADS_DIR it reads, and a cwd that leaves the workspace or a rig that is not
-// one path element is refused before any process starts.
+// a local relative path is refused before any process starts.
 func TestExecutorPathMapping(t *testing.T) {
 	t.Parallel()
 	root := testWorkspace(t)
@@ -50,9 +50,12 @@ func TestExecutorPathMapping(t *testing.T) {
 		{name: "cwd is the parent", rig: "gastown", cwd: "..", wantErr: ErrCwdOutsideWorkspace},
 		{name: "cwd escapes upward", rig: "gastown", cwd: "gastown/../../elsewhere", wantErr: ErrCwdOutsideWorkspace},
 		{name: "cwd is absolute", rig: "gastown", cwd: "/gastown", wantErr: ErrCwdOutsideWorkspace},
-		{name: "rig names two elements", rig: "gastown/crew", wantErr: ErrBadRig},
+		{name: "rig has an empty element", rig: "gastown//crew", wantErr: ErrBadRig},
 		{name: "rig is the parent", rig: "..", wantErr: ErrBadRig},
+		{name: "rig leaves the workspace", rig: "../x", wantErr: ErrBadRig},
+		{name: "rig is absolute", rig: "/abs", wantErr: ErrBadRig},
 		{name: "rig is the current directory", rig: ".", wantErr: ErrBadRig},
+		{name: "rig climbs out between elements", rig: "a/../../x", wantErr: ErrBadRig},
 		{name: "rig has no workspace", rig: "elsewhere", wantErr: ErrNoWorkspace},
 	}
 	for _, tc := range cases {
@@ -88,6 +91,65 @@ func TestExecutorPathMapping(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a multi-element rig resolves its own nested tree", func(t *testing.T) {
+		root := t.TempDir()
+		beads := filepath.Join(root, "om", "mayor", "rig", ".beads")
+		if err := os.MkdirAll(beads, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, root, runner)
+		if err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "om/mayor/rig"}, nil, io.Discard); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+		call := runner.only(t)
+		if call.dir != root {
+			t.Errorf("bd's directory = %q, want %q", call.dir, root)
+		}
+		if got := envMap(call.env)["BEADS_DIR"]; got != beads {
+			t.Errorf("BEADS_DIR = %q, want %q", got, beads)
+		}
+	})
+
+	t.Run("a symbolic link at an element of a multi-element rig", func(t *testing.T) {
+		// Every element below the root is the rig's own path, so a link at any
+		// of them is refused as a bad rig before bd starts.
+		for _, link := range []string{"om", "om/mayor", "om/mayor/rig"} {
+			t.Run(link, func(t *testing.T) {
+				root := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(root, filepath.Dir(link)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), filepath.Join(root, link)); err != nil {
+					t.Fatal(err)
+				}
+				runner := &fakeRunner{}
+				e := newTestExecutor(t, root, runner)
+				err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "om/mayor/rig"}, nil, io.Discard)
+				if !errors.Is(err, ErrBadRig) {
+					t.Fatalf("Exec = %v, want ErrBadRig", err)
+				}
+				if got := len(runner.records()); got != 0 {
+					t.Errorf("runner started %d calls, want 0", got)
+				}
+			})
+		}
+	})
+
+	t.Run("a rig element that is not a path", func(t *testing.T) {
+		// A NUL byte cannot name an element, so the workspace walk refuses the
+		// rig instead of handing it to bd as if the element had been checked.
+		runner := &fakeRunner{}
+		e := newTestExecutor(t, t.TempDir(), runner)
+		err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "a\x00b/x"}, nil, io.Discard)
+		if !errors.Is(err, ErrNoWorkspace) {
+			t.Fatalf("Exec = %v, want ErrNoWorkspace", err)
+		}
+		if got := len(runner.records()); got != 0 {
+			t.Errorf("runner started %d calls, want 0", got)
+		}
+	})
 
 	t.Run("a beads path that is not a directory", func(t *testing.T) {
 		root := t.TempDir()
