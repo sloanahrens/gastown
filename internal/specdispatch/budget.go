@@ -25,7 +25,7 @@ const changeBudgetPrefix = "change:"
 // not match rather than a budget of no lines.
 var changeBudgetRe = regexp.MustCompile(`(?i)^change:\s+at\s+most\s+([1-9][0-9]*)\s+added\s+lines(?:\s+in\s+([1-9][0-9]*)\s+files)?\.?$`)
 
-// budgetEmphasis removes the characters that mark emphasised text, so
+// budgetEmphasis removes the characters that mark emphasized text, so
 // **bold**, __bold__ and *italic* read as the words they decorate.
 var budgetEmphasis = strings.NewReplacer("*", "", "_", "")
 
@@ -80,7 +80,7 @@ func ParseChangeBudget(size string) (ChangeBudget, bool, error) {
 
 // budgetLineText returns a Size body line without the markdown that decorates
 // it: the leading "- ", "* " or "+ " of a list bullet, and the * and _
-// characters that mark emphasised text. A bullet marker counts only when a
+// characters that mark emphasized text. A bullet marker counts only when a
 // space follows it, as markdown writes one. The words, the numbers and the
 // punctuation the grammar reads are left as written, so
 // "- **Change:** at most 80 added lines." reads as the grammar's line. A
