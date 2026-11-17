@@ -14,7 +14,7 @@ import (
 func budgetWarnSpec(line string, boxes int) Spec {
 	size := "One worker, one landing."
 	if line != "" {
-		size = changeBudgetSize(line)
+		size = workerSizeWithBudget(line)
 	}
 	s := sizedSpec(size)
 	items := make([]string, boxes)
