@@ -149,9 +149,10 @@ type overrunSeams struct {
 	// countFailed is told when addedLines fails, so a count that could not be
 	// read is not left to the daemon log alone: production raises an alert for
 	// the seat. It changes no decision — the mark stands and the seat runs on to
-	// the stop threshold. The dry run never calls it, as it writes nothing. nil
-	// means no alert (gt-eb7bzu).
-	countFailed func(seat overrunSeat, err error)
+	// the stop threshold. Its error is the alert's delivery outcome, which the
+	// guard logs rather than swallows. The dry run never calls it, as it writes
+	// nothing. nil means no alert (gt-eb7bzu).
+	countFailed func(seat overrunSeat, err error) error
 	// nudged is told each seat the guard marks at the nudge threshold, and when,
 	// so the progress battery can ask about the seat (jev_progress.go). nil
 	// means nothing is asked.
@@ -644,8 +645,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 // so is a count under the limit. A count that fails is no reason either: the
 // mark stands, and the seat runs on to the stop threshold. It is not left to
 // the log alone, though: outside a dry run the countFailed seam alerts on it,
-// because the tripwire cannot weigh the seat while its worktree cannot be read
-// (gt-eb7bzu). dry says no mark was written, so the log makes no claim to one.
+// because the tripwire cannot weigh the seat while its worktree cannot be read;
+// an alert that could not be delivered is logged too, so the guard's blindness
+// is never silent (gt-eb7bzu). dry says no mark was written, so the log makes
+// no claim to one.
 func (d *Daemon) overrunTripwireReason(s overrunSeams, seat overrunSeat, elapsed time.Duration, limit int, dry bool) string {
 	if limit <= 0 || s.addedLines == nil {
 		return ""
@@ -659,7 +662,9 @@ func (d *Daemon) overrunTripwireReason(s overrunSeams, seat overrunSeat, elapsed
 		}
 		d.logger.Printf("overrun_guard: %s: cannot count the lines added on %s, so no tripwire stop; the mark stands and the seat runs on to the stop threshold: %v", who, seat.Bead, err)
 		if s.countFailed != nil {
-			s.countFailed(seat, err)
+			if alertErr := s.countFailed(seat, err); alertErr != nil {
+				d.logger.Printf("overrun_guard: %s: the count-failure alert on %s was not delivered: %v", who, seat.Bead, alertErr)
+			}
 		}
 		return ""
 	}
@@ -696,10 +701,12 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		// A count that fails leaves the tripwire blind on this seat, so it is
 		// raised rather than left in the log alone (gt-eb7bzu). The key names
 		// the bead as well as the seat: `gt escalate` records a repeat on the
-		// open bead, and a bead handed to a new seat is a new condition.
-		countFailed: func(seat overrunSeat, err error) {
+		// open bead, and a bead handed to a new seat is a new condition. The
+		// delivery outcome is returned so the guard does not report a blind
+		// tripwire as alerted when the alert never landed.
+		countFailed: func(seat overrunSeat, err error) error {
 			who := seat.Rig + "/" + seat.Polecat
-			d.escalateAlert("overrun-count-failed:"+who+":"+seat.Bead, overrunActor, fmt.Sprintf(
+			return d.escalateAlertErr("overrun-count-failed:"+who+":"+seat.Bead, overrunActor, fmt.Sprintf(
 				"the overrun guard could not count the lines %s added on %s, so the split_added_lines tripwire cannot weigh the seat; the mark stands and the seat runs on to the stop threshold: %v",
 				who, seat.Bead, err))
 		},
