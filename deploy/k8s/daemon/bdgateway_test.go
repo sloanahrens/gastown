@@ -54,6 +54,123 @@ func TestDashboardBdGateway(t *testing.T) {
 	}
 }
 
+// TestDashboardBdGatewayEnvNoDuplicates holds the dashboard to one gateway pair
+// however the two gateway flags combine. With both set, as the bd container
+// cutover sets them, the container lists each name once and the pair holds the
+// dashboard's own URL; with only the daemon's value set it names neither, since
+// the daemon's token Secret is never mounted into the dashboard.
+func TestDashboardBdGatewayEnvNoDuplicates(t *testing.T) {
+	t.Parallel()
+	const daemonURL = "http://host.docker.internal:7441"
+
+	t.Run("both gateway values", func(t *testing.T) {
+		t.Parallel()
+		v := bdGatewayDashboardValues(t)
+		v.DaemonBdGatewayURL = daemonURL
+		c := mustBuild(t, v).DashboardDeployment.Spec.Template.Spec.Containers[0]
+		for _, tc := range []struct{ name, want string }{
+			{BdGatewayURLEnv, testBdGatewayURL},
+			{BdGatewayTokenFileEnv, BdGatewayTokenPath},
+		} {
+			if got := envValuesNamed(c, tc.name); len(got) != 1 || got[0] != tc.want {
+				t.Errorf("the dashboard's %s = %q, want exactly [%q]: the daemon's pair belongs to the daemon container", tc.name, got, tc.want)
+			}
+		}
+	})
+
+	t.Run("only the daemon's gateway", func(t *testing.T) {
+		t.Parallel()
+		v := dashboardValues(t)
+		v.DaemonBdGatewayURL = daemonURL
+		c := mustBuild(t, v).DashboardDeployment.Spec.Template.Spec.Containers[0]
+		for _, name := range []string{BdGatewayURLEnv, BdGatewayTokenFileEnv} {
+			if got := envValuesNamed(c, name); len(got) != 0 {
+				t.Errorf("the dashboard names %s = %q with only the daemon's gateway set, want none", name, got)
+			}
+		}
+	})
+}
+
+// renderedPods is every pod the render writes, in the order Manifests holds them:
+// the daemon's Deployment, the dashboard's, the tracker's and the tracker backup's.
+func renderedPods(m Manifests) []PodSpec {
+	return []PodSpec{
+		m.Deployment.Spec.Template.Spec,
+		m.DashboardDeployment.Spec.Template.Spec,
+		m.TrackerDeployment.Spec.Template.Spec,
+		m.TrackerBackupCronJob.Spec.JobTemplate.Spec.Template.Spec,
+	}
+}
+
+// envNamesNamedTwice returns one "container: name" line per environment variable
+// a rendered container lists twice, so an empty result means no container names
+// one twice. kubectl refuses such a pod: a patch fails its $setElementOrder check
+// and an apply rejects the duplicate name, so a render that wrote one could not
+// be applied.
+func envNamesNamedTwice(m Manifests) []string {
+	var out []string
+	for _, pod := range renderedPods(m) {
+		for _, containers := range [][]Container{pod.InitContainers, pod.Containers} {
+			for _, c := range containers {
+				seen := make(map[string]struct{}, len(c.Env))
+				for _, e := range c.Env {
+					if _, ok := seen[e.Name]; ok {
+						out = append(out, c.Name+": "+e.Name)
+					}
+					seen[e.Name] = struct{}{}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestRenderedContainersHaveUniqueEnvNames renders every combination of the two
+// gateway values and holds every rendered container's environment to unique
+// names. The last case feeds a name appended twice to the same check, so the
+// check cannot pass a duplicate unnoticed.
+func TestRenderedContainersHaveUniqueEnvNames(t *testing.T) {
+	t.Parallel()
+	const daemonURL = "http://host.docker.internal:7441"
+
+	for _, tc := range []struct {
+		name         string
+		dashboardURL string
+		daemonURL    string
+	}{
+		{name: "neither gateway"},
+		{name: "the dashboard's gateway only", dashboardURL: testBdGatewayURL},
+		{name: "the daemon's gateway only", daemonURL: daemonURL},
+		{name: "both gateways", dashboardURL: testBdGatewayURL, daemonURL: daemonURL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := dashboardValues(t)
+			v.BdGatewayURL = tc.dashboardURL
+			v.DaemonBdGatewayURL = tc.daemonURL
+			m := mustBuild(t, v)
+			if dup := envNamesNamedTwice(m); len(dup) != 0 {
+				t.Errorf("the render names environment variables twice: %q", dup)
+			}
+		})
+	}
+
+	// The shape the check exists to catch, fed to it directly: no Values renders a
+	// duplicate, so the negative case cannot come through Build.
+	dup := Manifests{}
+	dup.DashboardDeployment.Spec.Template.Spec.Containers = []Container{{
+		Name: DashboardName,
+		Env: []EnvVar{
+			{Name: BdGatewayURLEnv, Value: testBdGatewayURL},
+			{Name: BdGatewayURLEnv, Value: testBdGatewayURL},
+		},
+	}}
+	got := envNamesNamedTwice(dup)
+	if len(got) != 1 || !strings.Contains(got[0], DashboardName) || !strings.Contains(got[0], BdGatewayURLEnv) {
+		t.Fatalf("the check saw %q, want one line naming container %q and %s", got, DashboardName, BdGatewayURLEnv)
+	}
+}
+
 // TestDashboardBdGatewayOff holds the flag-absent render to the dashboard golden it
 // had before the gateway: with BdGatewayURL unset the Deployment is byte-identical.
 func TestDashboardBdGatewayOff(t *testing.T) {

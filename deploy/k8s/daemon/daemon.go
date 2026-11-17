@@ -1350,31 +1350,52 @@ func daemonArgs(v Values) []string {
 }
 
 // daemonEnvironment is the daemon container's environment: the shared pod
-// environment plus the Ollama endpoint its weekly story-points retrain embeds
-// with. The dashboard runs no retrain, so its container takes containerEnvironment
-// alone (gt-mu7e87).
+// environment, the daemon's own bd gateway pair, then the caller's names, and
+// last the Ollama endpoint its weekly story-points retrain embeds with. The
+// dashboard runs no retrain and reads no daemon gateway, so its container takes
+// containerEnvironment and its own pair (dashboardContainer) (gt-mu7e87,
+// gt-2bi7es).
 //
 // A pod with no gateway alias carries no endpoint: DoltHostName resolves in the
 // pod only through that alias, so a rehearsal, or a live render with no gateway
 // address, would point the retrain at a name it cannot look up.
 func daemonEnvironment(v Values) []EnvVar {
-	env := containerEnvironment(v)
+	env := sharedEnvironment(v)
+	// The forwarder reads the daemon's gateway from these two names, so the
+	// container names the gateway and the token file only when the render mounts
+	// the token. The pair is the daemon's alone: the dashboard mounts its own
+	// token Secret and names only its own pair, and a container that carried
+	// both would list each name twice, which kubectl refuses.
+	if v.DaemonBdGatewayURL != "" {
+		env = append(env, BdGatewayEnv(v.DaemonBdGatewayURL)...)
+	}
+	env = append(env, callerEnvironment(v)...)
 	if len(hostAliases(v)) == 0 {
 		return env
 	}
 	return append(env, EnvVar{Name: storypointsEmbedURLEnv, Value: StorypointsEmbedURL})
 }
 
-// containerEnvironment is the pod's environment: the render-owned names at the
-// mounted paths, the pod's identity and clock, then every caller name the
-// decision table keeps, sorted. The daemon resolves its config directory
+// containerEnvironment is the environment both containers share: the render-owned
+// names at the mounted paths, the pod's identity and clock, then every caller
+// name the decision table keeps, sorted. The daemon resolves its config directory
 // through XDG_CONFIG_HOME, which is where the Secrets are mounted.
+//
+// It carries no bd gateway pair: the daemon's is daemonEnvironment's and the
+// dashboard's is dashboardContainer's, since each names its own token Secret.
 //
 // Values.Env is the same map the compose writer renders as its daemon service's
 // Env. TestPodEnvEqualsTheComposeEnv holds the two services equal but for the
-// names composeOnlyEnv drops, and containerEnvironment applies podEnvDecisions
+// names composeOnlyEnv drops, and callerEnvironment applies podEnvDecisions
 // to the names that stay.
 func containerEnvironment(v Values) []EnvVar {
+	return append(sharedEnvironment(v), callerEnvironment(v)...)
+}
+
+// sharedEnvironment is the part of the pod's environment every container carries:
+// the render-owned names at the mounted paths, the pod's identity and clock, and
+// the two Service URLs the render derives from Values.
+func sharedEnvironment(v Values) []EnvVar {
 	env := []EnvVar{
 		{Name: TownRootEnv, Value: TownRootPath},
 		{Name: ConfigHomeEnv, Value: manifestdata.LiveOpenShellConfigHome},
@@ -1393,11 +1414,14 @@ func containerEnvironment(v Values) []EnvVar {
 	if v.Tracker {
 		env = append(env, EnvVar{Name: TrackerURLEnv, Value: trackerURL()})
 	}
-	// The forwarder reads the daemon's gateway from these two names, so the pod
-	// names the gateway and the token file only when the render mounts the token.
-	if v.DaemonBdGatewayURL != "" {
-		env = append(env, BdGatewayEnv(v.DaemonBdGatewayURL)...)
-	}
+	return env
+}
+
+// callerEnvironment is the tail of the pod's environment: every caller name the
+// decision table keeps, sorted, then HM_CONFIG when the render mounts the derived
+// hm config.
+func callerEnvironment(v Values) []EnvVar {
+	env := []EnvVar{}
 	kept := make(map[string]string, len(v.Env)+1)
 	for name, value := range v.Env {
 		kept[name] = value
@@ -1505,7 +1529,8 @@ func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 // shared pod environment, so GT_DAEMON_SUPERVISOR resolves Dolt to the container
 // host here as it does in the daemon; it carries no STORYPOINTS_EMBED_URL, which
 // only the daemon's retrain reads (daemonEnvironment). Set, Values.BdGatewayURL
-// adds the dashboard's own gateway pair after that list.
+// adds the dashboard's own gateway pair after that list; the daemon's pair is
+// never carried here, since the dashboard mounts no daemon token (gt-2bi7es).
 //
 // Its probes are curl on the index. The index is static HTML that reads no Dolt
 // (internal/dashboard/server.go), so a Dolt outage on the Mac does not restart the
@@ -1513,7 +1538,7 @@ func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 func dashboardContainer(v Values) Container {
 	env := containerEnvironment(v)
 	// The gateway names are the dashboard's own, added after the shared environment,
-	// so with the URL unset the list is the daemon's exactly.
+	// so with the URL unset the container carries no gateway pair at all.
 	if v.BdGatewayURL != "" {
 		env = append(env, BdGatewayEnv(v.BdGatewayURL)...)
 	}
@@ -2524,7 +2549,7 @@ func (v Values) validateEnv() error {
 		case name == TrackerURLEnv:
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.Tracker when the tracker is rendered, so a caller's value would be dropped", name)
 		case name == BdGatewayURLEnv || name == BdGatewayTokenFileEnv:
-			return fmt.Errorf("Values.Env[%q]: the pod names this variable itself from Values.DaemonBdGatewayURL, so a caller's value is refused, not mixed with it", name)
+			return fmt.Errorf("Values.Env[%q]: the pod names this variable itself from Values.BdGatewayURL or Values.DaemonBdGatewayURL, so a caller's value is refused, not mixed with it", name)
 		case name == storypointsEmbedURLEnv:
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, to the host's Ollama, so a caller's value would be dropped", name)
 		case decision.value != "":
