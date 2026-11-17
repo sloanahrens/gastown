@@ -8,7 +8,8 @@ import (
 
 // The optional parts of the grammar and the case of its words change neither
 // the numbers nor whether the line is found: the full line, the line without
-// the files clause and the line without the full stop all parse.
+// the files clause and the line without the full stop all parse. A bead's prose
+// is markdown, so a bulleted or bolded budget line is the same line.
 func TestRunawayBeadParsesTheChangeBudget(t *testing.T) {
 	t.Parallel()
 
@@ -28,6 +29,18 @@ func TestRunawayBeadParsesTheChangeBudget(t *testing.T) {
 		{
 			"among the Size prose",
 			"One worker, one landing.\n\nChange: at most 80 added lines in 2 files.\n\nSplits into one MR.",
+			ChangeBudget{Lines: 80, Files: 2},
+		},
+		{"a dashed bullet", "- Change: at most 80 added lines in 2 files.", ChangeBudget{Lines: 80, Files: 2}},
+		{"a starred bullet", "* Change: at most 80 added lines.", ChangeBudget{Lines: 80}},
+		{"a plus bullet", "+ Change: at most 80 added lines in 2 files.", ChangeBudget{Lines: 80, Files: 2}},
+		{"a bolded label", "**Change:** at most 80 added lines in 2 files.", ChangeBudget{Lines: 80, Files: 2}},
+		{"a bolded word, plain colon", "**Change**: at most 80 added lines.", ChangeBudget{Lines: 80}},
+		{"bold around the whole line", "**Change: at most 80 added lines in 2 files.**", ChangeBudget{Lines: 80, Files: 2}},
+		{"an underscored label", "__Change:__ at most 80 added lines.", ChangeBudget{Lines: 80}},
+		{
+			"a bulleted bold line among the Size prose",
+			"One worker, one landing.\n\n- **Change:** at most 80 added lines in 2 files.\n\nSplits into one MR.",
 			ChangeBudget{Lines: 80, Files: 2},
 		},
 	} {
@@ -58,6 +71,8 @@ func TestRunawayBeadSizeWithoutChangeLine(t *testing.T) {
 		"Two workers, two landings.\nEach takes half the files.",
 		"A budget stated without the word: at most 80 added lines in 2 files.",
 		"Changes: at most 80 added lines in 2 files.",
+		"- One worker, one landing.",
+		"* Two workers, two landings.",
 	} {
 		got, found, err := ParseChangeBudget(size)
 		if err != nil {
@@ -89,6 +104,8 @@ func TestRunawayBeadMalformedChangeLineRefuses(t *testing.T) {
 		"Change: at most -5 added lines in 2 files.",
 		"Change: at most 80 added lines in 2 files, and no more.",
 		"Change: at most 99999999999999999999 added lines.",
+		"- Change: at most eighty added lines in 2 files.",
+		"**Change:** at most 80 lines in 2 files.",
 	} {
 		size := "One worker, one landing.\n" + line
 		got, found, err := ParseChangeBudget(size)
