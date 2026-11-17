@@ -320,6 +320,7 @@ func TestNoBeadAccessFileModeEscalateRefusesAnUnreadableSeat(t *testing.T) {
 			t.Parallel()
 			seat := newFileModeSeat(t, fileModeTask)
 			tt.corrupt(t, seat)
+			before := resultState(t, seat)
 
 			err := seat.r.escalate([]string{"HELP: the request"})
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -328,12 +329,41 @@ func TestNoBeadAccessFileModeEscalateRefusesAnUnreadableSeat(t *testing.T) {
 			if len(seat.beadCalls) != 0 {
 				t.Errorf("a refused request reached for a bead: %v", seat.beadCalls)
 			}
-			// Nothing was written over what the seat had: whatever sits at
-			// result.json is the row's own file, not a request.
-			if raw, readErr := os.ReadFile(seat.resultPath()); readErr == nil && strings.Contains(string(raw), "the request") {
-				t.Errorf("the refused request was written to result.json:\n%s", raw)
+			if after := resultState(t, seat); after != before {
+				t.Errorf("the refused request changed result.json: before %+v, after %+v", before, after)
 			}
 		})
+	}
+}
+
+// TestNoBeadAccessFileModeEscalateRefusesAnUnreadableMarker: a MODE marker that
+// is there but cannot be read stops the command instead of reading as dolt
+// mode, whose path opens the bead store, a door the seat may not have
+// (gt-w1mzol, gt-cobce7).
+func TestNoBeadAccessFileModeEscalateRefusesAnUnreadableMarker(t *testing.T) {
+	t.Parallel()
+	seat := newFileModeSeat(t, fileModeTask)
+	marker := filepath.Join(seat.gt, "task", taskfile.ModeFile)
+	deleteSeatFile(t, marker)
+	// A directory at the marker path fails the read whatever the test's user
+	// may do to a file's permissions.
+	if err := os.Mkdir(marker, 0o755); err != nil {
+		t.Fatalf("make a directory where the marker goes: %v", err)
+	}
+	before := resultState(t, seat)
+
+	err := seat.r.escalate([]string{"HELP: the request"})
+	if err == nil || !strings.Contains(err.Error(), "reading the bead-access marker") {
+		t.Fatalf("err = %v, want the unreadable-marker refusal", err)
+	}
+	if !strings.Contains(err.Error(), marker) {
+		t.Errorf("err = %v, want it to name the marker %s", err, marker)
+	}
+	if len(seat.beadCalls) != 0 {
+		t.Errorf("an unreadable marker reached for a bead: %v", seat.beadCalls)
+	}
+	if after := resultState(t, seat); after != before {
+		t.Errorf("an unreadable marker changed result.json: before %+v, after %+v", before, after)
 	}
 }
 
@@ -373,6 +403,38 @@ func TestNoBeadAccessFileModeEscalateRefusesAFailedOutboxWrite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// resultFile is what sits at the seat's result.json: absent, a directory, or a
+// file with these bytes. Two reads compare equal only when the path holds the
+// same thing, so a refused run is shown to leave the seat's outbox as it found
+// it rather than to leave no request text in it.
+type resultFile struct {
+	missing bool
+	isDir   bool
+	content string
+}
+
+// resultState reads what sits at the seat's result.json. A path it cannot
+// classify fails the test: a post-condition that cannot look must not pass.
+func resultState(t *testing.T, seat *fileModeSeat) resultFile {
+	t.Helper()
+	path := seat.resultPath()
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return resultFile{missing: true}
+	}
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if info.IsDir() {
+		return resultFile{isDir: true}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return resultFile{content: string(data)}
 }
 
 func deleteSeatFile(t *testing.T, path string) {
