@@ -105,11 +105,12 @@ type workspaceRoute struct {
 }
 
 // BuildWorkspaceDocument reads the town copy under townRoot and returns the
-// document PUT /v1/workspace takes: the town's routes.jsonl, each registered
-// rig's redirect, and each rig's beads metadata files, with every path
-// rewritten into the gateway's workspace form. It runs the document through the
-// gateway's own validation and hash, so a document it returns is one the
-// gateway accepts and carries the manifest the gateway computes.
+// document PUT /v1/workspace takes: the town's routes.jsonl and formulas, each
+// registered rig's redirect, and each rig's beads metadata files, with every
+// path that carries a host path rewritten into the gateway's workspace form. It
+// runs the document through the gateway's own validation and hash, so a document
+// it returns is one the gateway accepts and carries the manifest the gateway
+// computes.
 //
 // A town that cannot be read whole is refused rather than pushed in part: bd
 // would route prefixes to a workspace holding no database for them, and the
@@ -145,6 +146,11 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: the town's .beads resolves outside the town")
 	}
 	if err := addBeadsFiles(files, root, townBeads, ".beads"); err != nil {
+		return WorkspaceDocument{}, err
+	}
+	// The town's formulas: bd cooks a formula from `<beads>/formulas`, and a
+	// sling through the gateway fails with "issue not found" without them.
+	if err := addTownFormulas(files, root, townBeads, ".beads"); err != nil {
 		return WorkspaceDocument{}, err
 	}
 	// The route table: one line per route, with every path bd resolves inside
@@ -289,6 +295,66 @@ func addBeadsFiles(files map[string]string, townRoot, beadsDir, prefix string) e
 			return fmt.Errorf("bdgateway: reading %s: %w", filepath.Join(beadsDir, name), err)
 		}
 		files[path.Join(prefix, name)] = string(data)
+	}
+	return nil
+}
+
+// addTownFormulas adds the town's formulas, each regular file
+// `<beads>/formulas/<name>.formula.toml`, keyed under prefix/formulas. bd
+// cooks a formula from its beads directory's formulas/, so a sling through the
+// gateway finds none without them. It is called for the town's own beads
+// directory only: a rig-level formulas directory is not part of the workspace.
+//
+// Only regular files are read: an entry named like a formula that is a link, a
+// subdirectory or a device is refused rather than followed or descended, and a
+// file over the per-file cap is refused as the fixed files are. A town with no
+// formulas directory pushes none; a formulas directory that is a link out of the
+// town, or names nothing, is refused rather than read as absent.
+func addTownFormulas(files map[string]string, townRoot, beadsDir, prefix string) error {
+	dir := filepath.Join(beadsDir, formulaDirName)
+	// Resolve before reading: a formulas directory that is a link out of the
+	// town would carry files from outside it into the pushed tree.
+	if !insideTown(townRoot, dir) {
+		return fmt.Errorf("bdgateway: the town's formulas directory %s resolves outside the town", shown(dir))
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		// A link that names nothing may have named the formulas, and a workspace
+		// without them fails only when a sling cooks one, so it is refused here.
+		// A path Lstat cannot describe is the absence ReadDir reported.
+		if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: the town's formulas directory %s names nothing", ErrLinkOutsideTown, shown(dir))
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("bdgateway: the town's formulas directory %s: %w", shown(dir), err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		// bd reads only formula files here: the installed record, a README and a
+		// nested directory are not formulas and are not carried.
+		if !isFormulaFileName(name) {
+			continue
+		}
+		formulaPath := filepath.Join(dir, name)
+		// Lstat rather than the directory entry's type: a filesystem that reports
+		// no entry type presents a link as a regular file, and a link must be
+		// refused whatever it names, never read through into the pushed tree. An
+		// entry the stat cannot describe is refused with it: the builder cannot
+		// show it to be one.
+		info, statErr := os.Lstat(formulaPath)
+		if statErr != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: %s is not a regular file", ErrWorkspaceFileName, shown(formulaPath))
+		}
+		if info.Size() > MaxWorkspaceFileBytes {
+			return fmt.Errorf("%w: %s is %d bytes, cap %d", ErrWorkspaceFileTooLarge, shown(formulaPath), info.Size(), MaxWorkspaceFileBytes)
+		}
+		data, err := os.ReadFile(formulaPath) //nolint:gosec // G304: a regular file in the town's formulas directory
+		if err != nil {
+			return fmt.Errorf("bdgateway: reading %s: %w", formulaPath, err)
+		}
+		files[path.Join(prefix, formulaDirName, name)] = string(data)
 	}
 	return nil
 }

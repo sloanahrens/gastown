@@ -17,7 +17,8 @@ import (
 )
 
 // The workspace is the small tree of bd's own files the gateway owns and gt
-// pushes: the town's .beads/routes.jsonl, each rig's .beads/redirect, and each
+// pushes: the town's .beads/routes.jsonl, the town's
+// .beads/formulas/<name>.formula.toml, each rig's .beads/redirect, and each
 // rig's .beads/{metadata.json,config.yaml,dolt-server.port}. The design is
 // docs/design/bd-container.md ("The workspace"); the tree layout it pushes is
 // the one the Phase 0 proof (workspace_proof_integration_test.go) showed a real
@@ -31,11 +32,12 @@ const (
 	WorkspaceHashHeader = "X-Bd-Workspace"
 
 	// MaxWorkspaceFileBytes bounds one workspace file. Every file here is bd
-	// configuration: a few lines, or for routes.jsonl one short line per rig.
+	// configuration or a formula: a few lines, or for routes.jsonl one short line
+	// per rig.
 	MaxWorkspaceFileBytes = 256 << 10
 
 	// MaxWorkspaceTotalBytes bounds the whole tree. A document over it would mean
-	// a caller that is not pushing bd's five files.
+	// a caller that is not pushing bd's files and the town's formulas.
 	MaxWorkspaceTotalBytes = 1 << 20
 
 	// MaxWorkspaceDocumentBytes bounds the JSON body of a push. JSON escaping can
@@ -53,8 +55,9 @@ var (
 	// the workspace: absolute, a backslash, an empty, "." or ".." component, or
 	// a spelling path.Clean would change.
 	ErrWorkspacePath = errors.New("bdgateway: workspace path refused")
-	// ErrWorkspaceFileName is a file name outside the names the gateway
-	// serves, or one not directly under a .beads directory.
+	// ErrWorkspaceFileName is a file name outside the names the gateway serves:
+	// the fixed names below, each directly under a .beads directory, or a town
+	// formula. It is also a formula entry that is not a regular file.
 	ErrWorkspaceFileName = errors.New("bdgateway: workspace file name refused")
 	// ErrWorkspaceFileTooLarge is one file over MaxWorkspaceFileBytes.
 	ErrWorkspaceFileTooLarge = errors.New("bdgateway: workspace file over the size cap")
@@ -83,12 +86,13 @@ var (
 	ErrWorkspaceLiveTreeLost = errors.New("bdgateway: workspace live tree lost")
 )
 
-// workspaceFileNames is every file the workspace holds, by base name. bd reads
-// no other file from it, so a document naming another name is refused rather
-// than written where nothing reads it. The pushed set is the five configuration
-// files; ".local_version" is here because bd itself writes it into a rig's
-// .beads directory while the gateway serves calls, so the readiness check reads
-// a tree that holds it.
+// workspaceFileNames is every fixed file the workspace holds, by base name. bd
+// reads no other file from it, so a document naming another name is refused
+// rather than written where nothing reads it. The pushed set is the five
+// configuration files; ".local_version" is here because bd itself writes it
+// into a rig's .beads directory while the gateway serves calls, so the
+// readiness check reads a tree that holds it. The town's formulas are the one
+// set of names that varies; townFormulaPath admits them.
 var workspaceFileNames = map[string]bool{
 	"metadata.json":    true,
 	"config.yaml":      true,
@@ -96,6 +100,29 @@ var workspaceFileNames = map[string]bool{
 	"dolt-server.port": true,
 	"routes.jsonl":     true,
 	".local_version":   true,
+}
+
+// formulaDirName and formulaSuffix name a formula's place in a beads
+// directory: bd cooks `<beads>/formulas/<name>.formula.toml`. internal/formula
+// keeps the same suffix unexported, so it is repeated here for both sides of the
+// workspace to share.
+const (
+	formulaDirName = "formulas"
+	formulaSuffix  = ".formula.toml"
+)
+
+// isFormulaFileName reports whether name is a formula's file name: a formula
+// name followed by .formula.toml. The bare suffix names no formula.
+func isFormulaFileName(name string) bool {
+	return len(name) > len(formulaSuffix) && strings.HasSuffix(name, formulaSuffix)
+}
+
+// townFormulaPath reports whether a path's parts are the one shape a town
+// formula takes: `.beads/formulas/<name>.formula.toml`, exactly one directory
+// under the town's own beads directory, where bd looks for the formula a sling
+// cooks. A rig's formulas directory is not carried, so a deeper path is not one.
+func townFormulaPath(parts []string) bool {
+	return len(parts) == 3 && parts[0] == ".beads" && parts[1] == formulaDirName && isFormulaFileName(parts[2])
 }
 
 // WorkspaceDocument is the body of PUT /v1/workspace: every file of the tree,
@@ -165,8 +192,11 @@ func validatedManifest(doc WorkspaceDocument) (string, error) {
 
 // validateWorkspacePath checks one relative path. The rules are the design's
 // ("relative, no .., only the workspace file names above") plus the `.beads`
-// parent every one of those files sits under, which keeps a path from landing
-// in a directory bd does not read or beside the tree's root.
+// parent every one of those files sits under, which keeps a path from landing in
+// a directory bd does not read or beside the tree's root. The town's formulas
+// are the one other shape: `.beads/formulas/<name>.formula.toml`, exactly one
+// level, which is where bd looks for a formula; every other depth and name is
+// refused.
 func validateWorkspacePath(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty path", ErrWorkspacePath)
@@ -189,8 +219,11 @@ func validateWorkspacePath(name string) error {
 			return fmt.Errorf("%w: %q has a %q component", ErrWorkspacePath, shown(name), part)
 		}
 	}
+	if townFormulaPath(parts) {
+		return nil
+	}
 	if len(parts) < 2 || parts[len(parts)-2] != ".beads" {
-		return fmt.Errorf("%w: %q is not directly under a .beads directory", ErrWorkspaceFileName, shown(name))
+		return fmt.Errorf("%w: %q is not directly in a .beads directory and is not a town formula", ErrWorkspaceFileName, shown(name))
 	}
 	if base := parts[len(parts)-1]; !workspaceFileNames[base] {
 		return fmt.Errorf("%w: %q is not one of the workspace's files", ErrWorkspaceFileName, shown(base))
