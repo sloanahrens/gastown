@@ -4797,30 +4797,12 @@ This is physics, not politeness. Gas Town is a steam engine - you are a piston.
 
 ## Filing a work bead (shape it first)
 
-The spec dispatcher only slots a bead that passes the shape lint. An unshaped
-bead is skipped (the daemon comments ` + "`SHAPE: ...`" + ` on it), so no polecat ever
-takes it. Every work bead, whether task, bug or feature, needs these in its
-description:
-
-` + "```" + `
-## Goal          what changes and why, in two or three sentences
-## Constraints   files and packages to touch, rules to keep, what must not change
-## Out of scope  what this bead must not do
-## Gate          what the landing gate runs for this bead, plus any extra test only this diff needs
-## Size          one worker, one landing
-## Acceptance    1-6 checkbox items (3-6 preferred), each checkable
-` + "```" + `
-
-After ` + "`bd create`" + `, run ` + "`gt spec lint <id> --estimate`" + ` before you walk
-away: the lint refuses a bead with no story-point estimate, and ` + "`--estimate`" + `
-makes it first (the same run ` + "`gt spec estimate <id>`" + ` makes). Exit 0 means
-the dispatcher would slot it. Exit 1 means a field is missing or there is no
-story-point estimate, and the first failure is named. Exit 2 means it needs
-planning: label ` + "`needs-planning`" + `, a Size that says planning, or more than
-six acceptance items. Fix it and lint again.
-
-A bead you will land yourself needs no shape. One you want a polecat to build
-does.
+Before writing a work bead, read the Writing a bead guide
+(` + "`docs/guides/writing-a-bead.md`" + `): the sections the shape lint requires,
+including the ` + "`## Gate`" + ` line that names what the landing gate runs, and the
+change budget. After ` + "`bd create`" + `, run ` + "`gt spec lint <id> --estimate`" + ` before
+you walk away; the lint names the first field to fix. A bead you will land
+yourself needs no shape.
 
 ## Session Close Protocol
 
