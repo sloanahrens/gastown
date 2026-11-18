@@ -17,9 +17,9 @@ import (
 // The pod daemon's kubectl calls are written down in deploy/k8s/update-rbac.yaml
 // and held to testdata/pod-update-reads.golden, which lists one line per distinct
 // call as `verb resource` in the gt namespace. The gt-update Role must grant every
-// golden line and nothing else, and its Deployment rule is bound to the two
-// Deployments the roll moves (gt-360i18). The gt-update-launch Role grants the
-// daemon's Job verbs and nothing else (gt-1qnr01).
+// golden line and nothing else, and its Deployment rule is bound to the three
+// Deployments the roll moves (gt-360i18, gt-mmr0vo). The gt-update-launch Role grants
+// the daemon's Job verbs and nothing else (gt-1qnr01).
 const (
 	podRBACManifest   = "../../deploy/k8s/update-rbac.yaml"
 	podReadsGolden    = "testdata/pod-update-reads.golden"
@@ -39,10 +39,12 @@ var podRBACGroup = map[string]string{
 }
 
 // podRBACBoundNames are the resources a rule may bind by resourceNames, and the names
-// the gt-update Role binds each to: the two Deployments the roll moves. A rule on a
-// bound resource must name exactly these, and a rule on any other resource names none.
+// the gt-update Role binds each to: the three Deployments the roll moves, the bd
+// gateway first among them because the gateway step reads, patches and waits on it
+// before the daemon is touched. A rule on a bound resource must name exactly these,
+// and a rule on any other resource names none.
 var podRBACBoundNames = map[string][]string{
-	"deployments": {"daemon", "dashboard"},
+	"deployments": {"daemon", "dashboard", "bd-gateway"},
 }
 
 // podRBACLaunchGrants is every grant the gt-update-launch Role needs: the Job verbs
@@ -614,7 +616,7 @@ var podRBACGrantWidenings = []podRBACRefusal{
 		want: "not bound to resourceNames",
 	},
 	{
-		name: "a deployments rule bound to one Deployment of the two",
+		name: "a deployments rule bound to one of the three Deployments",
 		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
 			podRBACRuleNamed(t, docs, "deployments").ResourceNames = []string{"daemon"}
 			return docs
@@ -781,6 +783,98 @@ func TestPodUpdateRBACGrantsNothingElse(t *testing.T) {
 	for _, r := range podRBACGrantWidenings {
 		docs := r.edit(t, loadPodRBAC(t))
 		podRBACRefused(t, r.name, podRBACAllProblems(docs, golden), r.want)
+	}
+}
+
+// podRBACGatewayName is the bd gateway Deployment the swap moves, as
+// podDaemonSwap.Apply and RunningPair name it in internal/cmd/update_pod_swap.go.
+const podRBACGatewayName = "bd-gateway"
+
+// podRBACGatewayVerbs are the verbs the gateway step sends to deployment/bd-gateway:
+// the existence get in Apply and the running pair's gateway image read in RunningPair,
+// the strategic patch, and the rollout status wait's get, list and watch. Each is a
+// golden line, and the deployments rule must grant each while binding the gateway by
+// name, or the first step of the roll is refused as forbidden (gt-mmr0vo).
+var podRBACGatewayVerbs = []string{"get", "list", "watch", "patch"}
+
+// TestPodUpdateRBACGatewayReadsAreInCoveredSet holds the Role to the gateway step:
+// every verb the step sends to deployment/bd-gateway is a line of the golden and is
+// granted by the gt-update Role, and the deployments rule names bd-gateway so those
+// grants reach it. Dropping the gateway from resourceNames fails the binding check.
+func TestPodUpdateRBACGatewayReadsAreInCoveredSet(t *testing.T) {
+	t.Parallel()
+	golden := loadPodReadsGolden(t)
+	docs := loadPodRBAC(t)
+	rule := podRBACRuleNamed(t, docs, "deployments")
+	if !slices.Contains(rule.ResourceNames, podRBACGatewayName) {
+		t.Errorf("%s: the deployments rule does not name %s, so the gateway step's reads would be forbidden", podRBACManifest, podRBACGatewayName)
+	}
+	grants, problems := podRBACGrantsOf(golden)
+	if len(problems) > 0 {
+		t.Fatalf("%s: %s", podReadsGolden, strings.Join(problems, "; "))
+	}
+	var needed []podRBACGrant
+	for _, verb := range podRBACGatewayVerbs {
+		g := podRBACGrant{group: podRBACGroup["deployments"], resource: "deployments", verb: verb}
+		if !slices.Contains(grants, g) {
+			t.Errorf("%s: the golden does not list the gateway step's %q, so it is not in the covered set", podReadsGolden, g)
+		}
+		needed = append(needed, g)
+	}
+	if problems := podRBACGrantCoverage(podRBACRoleNamed(docs, podRBACName), needed); len(problems) > 0 {
+		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
+	}
+}
+
+// podRBACGatewayRefusals are Role edits that take the gateway step's reads out of the
+// Role's reach, and the problem the whole-manifest check must name: the gateway
+// dropped from resourceNames, a fourth Deployment added, or one of the gateway's
+// verbs no longer granted.
+var podRBACGatewayRefusals = []podRBACRefusal{
+	{
+		name: "a deployments rule without the gateway",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").ResourceNames = []string{"daemon", "dashboard"}
+			return docs
+		},
+		want: "not bound to resourceNames",
+	},
+	{
+		name: "a deployments rule naming a fourth Deployment",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").ResourceNames = []string{"daemon", "dashboard", podRBACGatewayName, "gt-other"}
+			return docs
+		},
+		want: "not bound to resourceNames",
+	},
+	{
+		name: "a gateway that is patched but never read",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").Verbs = []string{"patch"}
+			return docs
+		},
+		want: `grant "get deployments"`,
+	},
+	{
+		name: "a gateway whose patch is not granted",
+		edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+			podRBACRuleNamed(t, docs, "deployments").Verbs = []string{"get", "list", "watch"}
+			return docs
+		},
+		want: `grant "patch deployments"`,
+	},
+}
+
+// TestPodUpdateRBACGatewayRefusals holds the gateway binding to its refusals: a
+// deployments rule that drops the gateway, adds a fourth Deployment, or stops granting
+// one of the gateway step's verbs is refused by name, not passed.
+func TestPodUpdateRBACGatewayRefusals(t *testing.T) {
+	t.Parallel()
+	golden := loadPodReadsGolden(t)
+	for _, r := range podRBACGatewayRefusals {
+		docs := r.edit(t, loadPodRBAC(t))
+		problems := podRBACCoverageProblems(podRBACRoleNamed(docs, podRBACName), golden)
+		podRBACRefused(t, r.name, append(problems, podRBACAllProblems(docs, golden)...), r.want)
 	}
 }
 
