@@ -48,13 +48,15 @@ func credentialName(name string) bool {
 // isSecret reports whether value, held under a credential name, is reportable.
 // Empty values and placeholders are not. The one shape exemption is a setting
 // that counts or switches tokens: the plural word "tokens" as a whole name
-// segment (MAX_OUTPUT_TOKENS) with a number or on/off/true/false. Under key,
-// secret, password or the singular token, no value is exempt by shape.
+// segment (MAX_OUTPUT_TOKENS) with a number or on/off/true/false, and no other
+// credential word in the name (API_KEY_TOKENS is not exempt). Under key, secret,
+// password or the singular token, no value is exempt by shape.
 func isSecret(name, value string) bool {
 	if value == "" || strings.EqualFold(value, redactedMarker) || strings.EqualFold(value, "redacted") {
 		return false
 	}
-	return !(tokensSegment.MatchString(name) && countOrFlag.MatchString(value))
+	return !(tokensSegment.MatchString(name) && countOrFlag.MatchString(value) &&
+		!credentialName(tokensSegment.ReplaceAllString(name, "_")))
 }
 
 // hit is one credential value in valid JSON: its rule and the byte span of its string literal.
@@ -64,7 +66,7 @@ type hit struct {
 }
 
 // jsonHits walks valid JSON token by token, so every occurrence of a key is seen
-// (duplicates included) and a string in an array under a credential key is a finding.
+// (duplicates included); only string members of objects are findings.
 func jsonHits(data []byte) ([]hit, error) {
 	type frame struct {
 		object  bool
@@ -92,9 +94,6 @@ func jsonHits(data []byte) ([]hit, error) {
 			switch d {
 			case '{', '[':
 				f := &frame{object: d == '{', wantKey: d == '{'}
-				if top != nil && d == '[' {
-					f.cred, f.key = top.cred, top.key
-				}
 				stack = append(stack, f)
 			default:
 				stack = stack[:len(stack)-1]
@@ -107,15 +106,14 @@ func jsonHits(data []byte) ([]hit, error) {
 		s, isString := tok.(string)
 		switch {
 		case top == nil:
-		case top.object && top.wantKey:
+		case !top.object:
+		case top.wantKey:
 			top.key, top.cred, top.wantKey = s, credentialName(s), false
 		default:
 			if isString && top.cred && isSecret(top.key, s) {
 				out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
 			}
-			if top.object {
-				top.wantKey = true
-			}
+			top.wantKey = true
 		}
 	}
 }
@@ -141,8 +139,7 @@ func stringStart(data []byte, end int) int {
 // Valid JSON is walked; anything else is scanned for NAME=value and "key": "value".
 func FindCredentials(data []byte) []string {
 	var found []string
-	if json.Valid(data) {
-		hits, _ := jsonHits(data)
+	if hits, err := jsonHits(data); json.Valid(data) && err == nil {
 		for _, h := range hits {
 			found = append(found, h.rule)
 		}

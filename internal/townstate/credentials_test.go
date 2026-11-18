@@ -26,7 +26,8 @@ func TestFindCredentials(t *testing.T) {
 		{"duplicate key, secret first", `{"api_key":"real","api_key":"x"}`, []string{"json:api_key", "json:api_key"}},
 		{"duplicate key, secret last", `{"api_key":"","api_key":"real"}`, []string{"json:api_key"}},
 		{"value shape never exempts", `{"api_key":"12345","token":"on"}`, []string{"json:api_key", "json:token"}},
-		{"nested object and array", `{"a":[{"password":"p"}],"tokens":["s1","s2"]}`, []string{"json:password", "json:tokens", "json:tokens"}},
+		{"nested object; strings in an array are not members", `{"a":[{"password":"p"}],"tokens":["s1","s2"]}`, []string{"json:password"}},
+		{"tokens exemption needs no other credential word", `{"api_key_tokens":"123","secret_tokens":"on","password_tokens":"1"}`, []string{"json:api_key_tokens", "json:secret_tokens", "json:password_tokens"}},
 		{"already redacted", `{"api_key":"` + redactedMarker + `"}`, nil},
 		{"placeholder is not a secret", `{"ANTHROPIC_AUTH_TOKEN":"REDACTED"}`, nil},
 		{"plural tokens count or flag is exempt", `{"CLAUDE_CODE_MAX_OUTPUT_TOKENS":"8192","CLAUDE_CODE_TOTAL_TOKENS_REMINDER":"off"}`, nil},
@@ -57,7 +58,7 @@ func TestRedactJSON(t *testing.T) {
 			"{ \"a\": 1,  \"api_key\": \"<redacted>\" , \"b\":[\"x\"], \"token\":\"<redacted>\"}", 2},
 		{"duplicate keys", `{"api_key":"one","api_key":"two"}`, `{"api_key":"<redacted>","api_key":"<redacted>"}`, 2},
 		{"escaped quote and backslash in the value", `{"password":"p\"q\\","k":"v"}`, `{"password":"<redacted>","k":"v"}`, 1},
-		{"array under a credential key", `{"tokens":["a","b"]}`, `{"tokens":["<redacted>","<redacted>"]}`, 2},
+		{"strings in an array are not members", `{"tokens":["a","b"]}`, `{"tokens":["a","b"]}`, 0},
 		{"nothing to redact", `{"api_key_file":"/x","n":1}`, `{"api_key_file":"/x","n":1}`, 0},
 	}
 	for _, c := range cases {
@@ -86,7 +87,7 @@ func TestRedactJSONRefusesWhatIsNotJSON(t *testing.T) {
 	}
 }
 
-func TestLivetownFixtureSettingsHaveNoCredentials(t *testing.T) {
+func TestFindCredentialsLivetownSettings(t *testing.T) {
 	t.Parallel()
 	files, err := filepath.Glob(filepath.Join("..", "config", "testdata", "livetown", "settings", "*"))
 	if err != nil || len(files) == 0 {
