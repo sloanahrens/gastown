@@ -2,6 +2,7 @@ package bd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"regexp"
@@ -111,9 +112,7 @@ func TestDockerfileBdShape(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if !contains(lines, tc.want) {
-				t.Errorf("%s has no line %q", dockerfileName, tc.want)
-			}
+			checkContains(t, lines, tc.want)
 		})
 	}
 	t.Run("the policy directory is made before the policy is copied", func(t *testing.T) {
@@ -152,12 +151,7 @@ func TestDockerfileBdShape(t *testing.T) {
 		// The image is built from ubuntu:24.04 and the build context, so no
 		// comment or instruction may name the beads repo's base or its pin file
 		// as something this build reads.
-		raw := readDockerfile(t)
-		for _, ref := range []string{"beads-bd", "base-pin"} {
-			if strings.Contains(raw, ref) {
-				t.Errorf("%s mentions %q, want the image built from ubuntu:24.04 with the build context", dockerfileName, ref)
-			}
-		}
+		checkNoBaseRef(t, readDockerfile(t))
 	})
 	t.Run("the user is a non-root uid", func(t *testing.T) {
 		t.Parallel()
@@ -206,6 +200,87 @@ func TestShimInstructions(t *testing.T) {
 			got := shimInstructions(instructionLines(tc.dockerfile))
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("shimInstructions(%q) = %q, want %q", tc.dockerfile, got, tc.want)
+			}
+		})
+	}
+}
+
+// reporter is the part of *testing.T the shape checks report through, so a test
+// can run a check on a Dockerfile that breaks the shape and count what it reports.
+type reporter interface {
+	Errorf(format string, args ...any)
+}
+
+// recorder is a reporter that keeps the messages it is given.
+type recorder struct{ errors []string }
+
+func (r *recorder) Errorf(format string, args ...any) {
+	r.errors = append(r.errors, fmt.Sprintf(format, args...))
+}
+
+// checkContains reports to r when want is not one of lines.
+func checkContains(r reporter, lines []string, want string) {
+	if !contains(lines, want) {
+		r.Errorf("%s has no line %q", dockerfileName, want)
+	}
+}
+
+// checkNoBaseRef reports to r each beads base name that raw mentions, comments
+// included: the image is built from ubuntu:24.04 and the build context.
+func checkNoBaseRef(r reporter, raw string) {
+	for _, ref := range []string{"beads-bd", "base-pin"} {
+		if strings.Contains(raw, ref) {
+			r.Errorf("%s mentions %q, want the image built from ubuntu:24.04 with the build context", dockerfileName, ref)
+		}
+	}
+}
+
+// TestCheckContainsReports: a wanted instruction that is missing is reported
+// once, and the same instruction in another spelling is not reported.
+func TestCheckContainsReports(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, dockerfile, want string
+		wantErrors             int
+	}{
+		{"the line is missing", "FROM ubuntu:24.04\n", "USER 65532:65532", 1},
+		{"the line is there in another spelling", "from ubuntu:24.04\nuser   65532:65532\n", "USER 65532:65532", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rec recorder
+			checkContains(&rec, instructionLines(tc.dockerfile), tc.want)
+			if len(rec.errors) != tc.wantErrors {
+				t.Errorf("checkContains reported %d errors %q, want %d", len(rec.errors), rec.errors, tc.wantErrors)
+			}
+		})
+	}
+}
+
+// TestCheckNoBaseRefReports: each beads base name in the Dockerfile is reported
+// once, in a comment or an instruction alike, and a clean image is not reported.
+func TestCheckNoBaseRefReports(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, dockerfile string
+		refs             []string
+	}{
+		{"a clean image names no base", "FROM ubuntu:24.04\nRUN true\n", nil},
+		{"a comment names the beads base", "# built from beads-bd\nFROM ubuntu:24.04\n", []string{"beads-bd"}},
+		{"an instruction names the pin", "FROM ubuntu:24.04\nCOPY base-pin /tmp/\n", []string{"base-pin"}},
+		{"both are named", "FROM beads-bd\nCOPY base-pin /tmp/\n", []string{"beads-bd", "base-pin"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var rec recorder
+			checkNoBaseRef(&rec, tc.dockerfile)
+			if len(rec.errors) != len(tc.refs) {
+				t.Fatalf("checkNoBaseRef reported %d errors %q, want %d", len(rec.errors), rec.errors, len(tc.refs))
+			}
+			for i, ref := range tc.refs {
+				if !strings.Contains(rec.errors[i], `"`+ref+`"`) {
+					t.Errorf("error %d = %q, want it to name %q", i, rec.errors[i], ref)
+				}
 			}
 		})
 	}
