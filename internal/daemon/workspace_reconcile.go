@@ -161,13 +161,16 @@ func (c *workspaceDriftCheck) stored(hash string) {
 // A drift signal pushes before the next tick: at once when the last push is at
 // least workspaceDriftGap old, else at the end of that gap. A drift that an absent
 // refusal caused also waits until workspaceAbsentFloor has passed since the last
-// push an absent refusal caused. Signals inside one wait share one push. Every push
+// push an absent refusal caused, and a drift after a push that failed waits
+// workspaceAbsentFloor from that push too, so a gateway that keeps refusing is
+// not pushed to every probe. Signals inside one wait share one push. Every push
 // resets the tick and drops the deferred push, so the interval runs from the last
 // push whatever sent it.
 func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval func() time.Duration, push func(context.Context, string) (string, error), probe func(context.Context) error, townRoot string, logf func(string, ...any), drift *workspaceDriftCheck) {
 	var (
 		pushedAt       time.Time
 		absentAt       time.Time
+		failedAt       time.Time
 		tick           clockwork.Timer
 		deferred       clockwork.Timer
 		deferredC      <-chan time.Time
@@ -205,6 +208,12 @@ func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval fu
 			drift.stored(hash)
 		}
 		pushedAt = clk.Now()
+		// A failed push stored nothing, so the next probe sees the same drift: the
+		// next drift-triggered push waits the floor, and a good push clears it.
+		failedAt = time.Time{}
+		if err != nil {
+			failedAt = pushedAt
+		}
 		if absent {
 			absentAt = pushedAt
 		}
@@ -250,6 +259,9 @@ func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval fu
 			due := pushedAt.Add(workspaceDriftGap)
 			if absent && absentAt.Add(workspaceAbsentFloor).After(due) {
 				due = absentAt.Add(workspaceAbsentFloor)
+			}
+			if !failedAt.IsZero() && failedAt.Add(workspaceAbsentFloor).After(due) {
+				due = failedAt.Add(workspaceAbsentFloor)
 			}
 			if deferred != nil && !due.After(deferredDue) {
 				// The deferred push is due no later than this drift needs, so it covers it.

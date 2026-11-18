@@ -234,3 +234,45 @@ func TestWorkspaceDriftAbsentFloor(t *testing.T) {
 		t.Errorf("second absent push at %s after the first, want %s", got, workspaceAbsentFloor)
 	}
 }
+
+// TestWorkspaceDriftFailedPushFloor: a push that fails stores nothing, so the
+// next probe sees the same drift. The next drift push waits workspaceAbsentFloor
+// from the failed push, not workspaceDriftGap, and a push that succeeds clears
+// the floor so the next drift pushes after the gap alone.
+func TestWorkspaceDriftFailedPushFloor(t *testing.T) {
+	t.Parallel()
+	r := startDriftRun(t)
+	r.pusher.fail = func(call int) error {
+		if call == 2 {
+			return context.DeadlineExceeded
+		}
+		return nil
+	}
+	r.clk.Advance(time.Minute)
+	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Hash: "other"})
+	if got := awaitPush(t, r.pusher.calls); got != 2 {
+		t.Fatalf("push = call %d, want the failing push 2", got)
+	}
+	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Hash: "other"})
+	awaitWaits(t, r.clk, 2)
+	r.clk.Advance(workspaceDriftGap)
+	// The drift gap has ended but the floor from the failed push has not.
+	awaitWaits(t, r.clk, 2)
+	r.clk.Advance(workspaceAbsentFloor - workspaceDriftGap)
+	if got := awaitPush(t, r.pusher.calls); got != 3 {
+		t.Fatalf("push = call %d, want the floored push 3", got)
+	}
+	if got := r.at[2].Sub(r.at[1]); got != workspaceAbsentFloor {
+		t.Errorf("push after a failed push came %s later, want %s", got, workspaceAbsentFloor)
+	}
+	// Push 3 succeeded, so the floor is cleared: the next drift needs only the gap.
+	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Hash: "another"})
+	awaitWaits(t, r.clk, 2)
+	r.clk.Advance(workspaceDriftGap)
+	if got := awaitPush(t, r.pusher.calls); got != 4 {
+		t.Fatalf("push = call %d, want the unfloored push 4", got)
+	}
+	if got := r.at[3].Sub(r.at[2]); got != workspaceDriftGap {
+		t.Errorf("push after a good push came %s later, want %s", got, workspaceDriftGap)
+	}
+}
