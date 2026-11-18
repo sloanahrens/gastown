@@ -1,19 +1,35 @@
 package daemon
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
-// The bd gateway's pod: one replica of bdgw serve, reading its tokens from the
-// token Secret the operator creates and keeping its workspace on a claim. It runs
-// as user and group 65532 and may not gain privilege.
+// The bd gateway's pod: one replica of bdgw serve, reading its tokens from a
+// directory an init container fills from the token Secret the operator creates, and
+// keeping its workspace on a claim. It runs as user and group 65532 and may not gain
+// privilege.
 //
-// fsGroup is 65532 as well, and the token volume is group-readable (0440): the
-// Secret is root-owned, so the non-root gateway reads its tokens through the group,
-// not the owner. A 0400 volume would leave the gateway unable to read any token.
+// fsGroup is 65532 as well, and the token Secret volume is group-readable (0440): the
+// Secret is root-owned, so the init container, which runs as 65532, reads the tokens
+// through the group, not the owner. A 0400 volume would leave that copy unable to
+// read any token.
+//
+// The gateway's token loader refuses any token file whose mode is not exactly 0600,
+// and the 0440 Secret mode is the one fsGroup needs. So the init container copies
+// each token into an emptyDir at 0600, and the gateway reads that copy.
 const (
 	// bdGatewayIdentity is the uid and gid the gateway runs as.
 	bdGatewayIdentity = int64(65532)
-	// bdGatewayTokensDir is where the token Secret is mounted, read-only.
+	// bdGatewayTokensDir is where the gateway reads its tokens: the emptyDir the init
+	// container fills, mounted read-only.
 	bdGatewayTokensDir = "/run/bdgw/tokens" //nolint:gosec // a directory path, not a credential
+	// bdGatewayTokenSecretDir is where the token Secret is mounted, read-only, in the
+	// init container only; bdGatewayTokenCopyDir is the emptyDir it copies into.
+	bdGatewayTokenSecretDir = "/secrets"
+	bdGatewayTokenCopyDir   = "/tokens"
+	// bdGatewayTokenInit names the init container that copies the tokens at 0600.
+	bdGatewayTokenInit = "tokens-0600" //nolint:gosec // a container name, not a credential
 	// bdGatewayLogDir is an emptyDir for the gateway's logs.
 	bdGatewayLogDir = "/var/log/bdgw"
 	// bdGatewayWorkspaceMount is the claim's mount; the gateway's workspace is the
@@ -22,19 +38,23 @@ const (
 	bdGatewayWorkspaceDir   = bdGatewayWorkspaceMount + "/ws"
 	// bdGatewayVerbs is the verb table the command reads.
 	bdGatewayVerbs = "/etc/bdgw/verbs.json"
-	// bdGatewayTokensVolume and bdGatewayLogVolume name the two volumes the
-	// container mounts; the claim is named by BdGatewayWorkspaceClaim.
-	bdGatewayTokensVolume = "bd-gateway-tokens" //nolint:gosec // a volume name, not a credential
-	bdGatewayLogVolume    = "bd-gateway-log"
-	// bdGatewayTokensMode is owner and group read, so fsGroup lets the gateway read.
-	bdGatewayTokensMode = int32(0o440)
+	// bdGatewayTokenSecretVolume is the Secret the init container reads, and
+	// bdGatewayTokensVolume the emptyDir it fills and the gateway mounts; bdGatewayLogVolume
+	// is the log emptyDir, and the claim is named by BdGatewayWorkspaceClaim.
+	bdGatewayTokenSecretVolume = "bd-gateway-token-secret" //nolint:gosec // a volume name, not a credential
+	bdGatewayTokensVolume      = "bd-gateway-tokens"       //nolint:gosec // a volume name, not a credential
+	bdGatewayLogVolume         = "bd-gateway-log"
+	// bdGatewayTokenSecretMode is owner and group read, so fsGroup lets the init
+	// container read the Secret.
+	bdGatewayTokenSecretMode = int32(0o440)
 	// bdGatewayDoltPort is the Dolt port the gateway dials at DoltHostName.
 	bdGatewayDoltPort = 3307
 )
 
-// bdGatewayDeployment is the gateway's pod: one container running bdgw serve, the
-// token Secret read-only, the emptyDir for logs, and the workspace claim. It takes
-// no ServiceAccount token, as the dashboard's pod does not.
+// bdGatewayDeployment is the gateway's pod: an init container that copies the tokens
+// to 0600, one container running bdgw serve, the emptyDir for tokens and logs, and
+// the workspace claim. It takes no ServiceAccount token, as the dashboard's pod does
+// not.
 //
 // Its strategy is Recreate: the old gateway stops before the new one starts, so the
 // two never write the workspace together.
@@ -59,25 +79,51 @@ func bdGatewayDeployment(v Values, namespace string) Deployment {
 						RunAsGroup: &group,
 						FSGroup:    &fsGroup,
 					},
-					HostAliases: hostAliases(v),
-					Containers:  []Container{bdGatewayContainer(v)},
-					Volumes:     bdGatewayVolumes(v),
+					HostAliases:    hostAliases(v),
+					InitContainers: []Container{bdGatewayTokenCopy(v)},
+					Containers:     []Container{bdGatewayContainer(v)},
+					Volumes:        bdGatewayVolumes(v),
 				},
 			},
 		},
 	}
 }
 
+// bdGatewayTokenCopy is the init container that copies each token from the Secret
+// into the emptyDir at mode 0600, the mode the gateway's token loader requires. It
+// runs Values.ProxyImage, the image the daemon's relays already run, and as the pod's
+// user, so it reads the Secret through its group.
+func bdGatewayTokenCopy(v Values) Container {
+	allowEscalation := false
+	return Container{
+		Name:    bdGatewayTokenInit,
+		Image:   v.ProxyImage,
+		Command: []string{"sh", "-c", fmt.Sprintf("cp %s/* %s/ && chmod 0600 %s/*", bdGatewayTokenSecretDir, bdGatewayTokenCopyDir, bdGatewayTokenCopyDir)},
+		SecurityContext: &ContainerSecurityContext{
+			AllowPrivilegeEscalation: &allowEscalation,
+		},
+		VolumeMounts: []VolumeMount{
+			{Name: bdGatewayTokenSecretVolume, MountPath: bdGatewayTokenSecretDir, ReadOnly: true},
+			{Name: bdGatewayTokensVolume, MountPath: bdGatewayTokenCopyDir},
+		},
+	}
+}
+
 // bdGatewayContainer runs bdgw serve with the command the gateway's image expects.
 // Its Dolt endpoint is DoltHostName, which the pod's hostAliases entry resolves when
-// the render has a host gateway address. Its readiness is bdgw ready on the
-// workspace, so a gateway whose workspace is not ready stays out of the Service.
+// the render has a host gateway address. Its readiness is bdgw ready on the tokens,
+// the verb table and the workspace, the three flags bdgw ready requires, so a gateway
+// whose workspace is not ready stays out of the Service.
 func bdGatewayContainer(v Values) Container {
 	allowEscalation := false
+	command := []string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir, "--dolt-host", DoltHostName, "--dolt-port", strconv.Itoa(bdGatewayDoltPort)}
+	if v.BdGatewayMaxConcurrent > 0 {
+		command = append(command, "--max-concurrent", strconv.Itoa(v.BdGatewayMaxConcurrent))
+	}
 	return Container{
 		Name:    BdGatewayName,
 		Image:   v.BdGatewayImage,
-		Command: []string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir, "--dolt-host", DoltHostName, "--dolt-port", strconv.Itoa(bdGatewayDoltPort)},
+		Command: command,
 		SecurityContext: &ContainerSecurityContext{
 			AllowPrivilegeEscalation: &allowEscalation,
 		},
@@ -87,7 +133,7 @@ func bdGatewayContainer(v Values) Container {
 			{Name: BdGatewayWorkspaceClaim, MountPath: bdGatewayWorkspaceMount},
 		},
 		ReadinessProbe: &Probe{
-			Exec:                &ExecAction{Command: []string{"bdgw", "ready", "--workspace", bdGatewayWorkspaceDir}},
+			Exec:                &ExecAction{Command: []string{"bdgw", "ready", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--workspace", bdGatewayWorkspaceDir}},
 			InitialDelaySeconds: 10,
 			PeriodSeconds:       15,
 			TimeoutSeconds:      10,
@@ -97,12 +143,14 @@ func bdGatewayContainer(v Values) Container {
 }
 
 // bdGatewayVolumes are the gateway's volumes: the token Secret at the group-readable
-// mode, the log emptyDir, and the workspace claim. The token Secret is mounted
-// whole, since the gateway reads a directory of tokens.
+// mode, the emptyDir the init container fills with the 0600 copies, the log emptyDir,
+// and the workspace claim. The Secret is mounted whole, since the init container
+// copies a directory of tokens.
 func bdGatewayVolumes(v Values) []Volume {
-	mode := bdGatewayTokensMode
+	mode := bdGatewayTokenSecretMode
 	return []Volume{
-		{Name: bdGatewayTokensVolume, Secret: &SecretVolumeSource{SecretName: v.BdGatewayTokenSecret, DefaultMode: &mode}},
+		{Name: bdGatewayTokenSecretVolume, Secret: &SecretVolumeSource{SecretName: v.BdGatewayTokenSecret, DefaultMode: &mode}},
+		{Name: bdGatewayTokensVolume, EmptyDir: &EmptyDirVolumeSource{}},
 		{Name: bdGatewayLogVolume, EmptyDir: &EmptyDirVolumeSource{}},
 		{Name: BdGatewayWorkspaceClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: BdGatewayWorkspaceClaim}},
 	}
