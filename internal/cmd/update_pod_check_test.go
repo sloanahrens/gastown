@@ -175,6 +175,11 @@ func (k *podPairKubectl) run(ctx context.Context, _ string, _ []string, _ string
 		// The running pair read: the Deployment's daemon image and polecat
 		// annotation.
 		return k.image + "\n" + k.polecat, 0, nil
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.BdGatewayName):
+		// The bd gateway image read: this fake's cluster has no gateway
+		// Deployment yet, as a town before the cutover, so the swap's pair names
+		// no gateway image.
+		return "", 0, nil
 	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
 		// The dashboard's existence read the swap makes: the town has a dashboard.
 		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil

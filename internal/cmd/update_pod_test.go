@@ -42,6 +42,10 @@ type podDaemonKubectl struct {
 	// its daemon container's image and its polecat image annotation. A patch of
 	// the daemon Deployment sets them to the pair it carries.
 	image, polecat string
+	// bd is the image the bd-gateway Deployment runs. Empty means the cluster has
+	// no gateway Deployment yet, as a town before the cutover, and the read
+	// prints nothing for --ignore-not-found.
+	bd string
 	// readErr and readExit fail the running pair read; the knobs above fail a
 	// patch, the rollout wait or the pod list instead.
 	readErr  error
@@ -68,6 +72,13 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 			return "SECRET-TOKEN in the pair read", k.readExit, k.readErr
 		}
 		return k.image + "\n" + k.polecat, 0, nil
+	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.BdGatewayName):
+		// The bd gateway image read: the Deployment's name and container image
+		// on the two lines the swap reads, or nothing when the cluster has none.
+		if k.bd == "" {
+			return "", 0, nil
+		}
+		return k8sdaemon.BdGatewayName + "\n" + k.bd, 0, nil
 	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):
 		// The dashboard's existence read: the town this fake stands in for has one.
 		return "deployment.apps/" + k8sdaemon.DashboardName + "\n", 0, nil
@@ -300,6 +311,52 @@ func TestUpdatePodTargetSkipsTheHostInstall(t *testing.T) {
 		}
 	})
 
+}
+
+// TestImagePairBdGatewayReachesTheDigestInstaller holds the gateway half of the
+// pair check in production: the pod's running pair read reaches the bd-gateway
+// Deployment through the kubectl seam, so a cluster on all three images is
+// already running the pair, and a cluster whose gateway image differs is moved to
+// it even when the other two images match.
+func TestImagePairBdGatewayReachesTheDigestInstaller(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a cluster on all three images is already running the pair", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		got.kube.image, got.kube.polecat, got.kube.bd = podSwapDigestRef, podPairPolecatRef, podSwapBdRef
+
+		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if verdict := update.ClassifyInstall(res); verdict != update.ResultOK {
+			t.Fatalf("ClassifyInstall = %q, want %q: %+v", verdict, update.ResultOK, res)
+		}
+		for _, args := range got.kube.calls {
+			if containsArg(args, "patch") {
+				t.Fatalf("kubectl ran a patch %q, want none: the cluster already runs all three images", args)
+			}
+		}
+	})
+
+	t.Run("a cluster on another gateway image is moved to the pair", func(t *testing.T) {
+		t.Parallel()
+		got := captureWiredInstall(t, "--pod-context", podSwapContext, "--pod-namespace", podSwapNamespace)
+		got.kube.image, got.kube.polecat = podSwapDigestRef, podPairPolecatRef
+		got.kube.bd = "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)
+
+		res, err := got.deps.Installer.Install(context.Background(), rollbackNewCommit)
+		if err != nil {
+			t.Fatalf("Install: %v", err)
+		}
+		if verdict := update.ClassifyInstall(res); verdict != update.ResultOK {
+			t.Fatalf("ClassifyInstall = %q, want %q: %+v", verdict, update.ResultOK, res)
+		}
+		// patchBody fails the test when no patch ran, so the swap is checked by
+		// the call that reads it.
+		got.kube.patchBody(t)
+	})
 }
 
 // TestUpdatePodTargetWithoutImagesStillMarksThePlan: --skip install is the one

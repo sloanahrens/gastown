@@ -80,12 +80,19 @@ const dashboardAbsentLine = "dashboard Deployment not found; not moved"
 var runningPairJSONPath = `{.spec.template.spec.containers[?(@.name=="` + k8sdaemon.Name + `")].image}{"\n"}{.spec.template.metadata.annotations.` +
 	strings.ReplaceAll(k8sdaemon.PolecatImageAnnotation, ".", `\.`) + `}`
 
-// RunningPair reads the pair the daemon's Deployment runs now: its daemon
-// container's image and its pod template's polecat image annotation. An install
-// records the result before it swaps, so a failed install puts back the pair the
-// cluster ran. The pair names no commit, since a Deployment carries no build.
-// A command that fails, prints no pair, or names a half that is not a digest
-// reference is an error naming the step; the command's output is not.
+// gatewayImageJSONPath reads the bd gateway Deployment's name and the image its
+// container runs, on two lines. The name line is what tells a missing Deployment
+// (kubectl prints nothing for --ignore-not-found) from one whose gateway
+// container names no image, which is an error, never an absent gateway.
+var gatewayImageJSONPath = `{.metadata.name}{"\n"}{.spec.template.spec.containers[?(@.name=="` + k8sdaemon.BdGatewayName + `")].image}`
+
+// RunningPair reads the pair the daemon runs now: its Deployment's daemon
+// container image and polecat image annotation, and the bd gateway image the
+// cluster runs, which is empty until the town has a bd-gateway Deployment. An
+// install records the result before it swaps, so a failed install puts back the
+// pair the cluster ran. The pair names no commit, since a Deployment carries no
+// build. A command that fails, prints no pair, or names a half that is not a
+// digest reference is an error naming the step; the command's output is not.
 // A Deployment with no polecat annotation is refused on purpose: the update flow
 // is pair-based, and a roll without the polecat half would stop dispatch, so an
 // unannotated daemon is not a supported install target.
@@ -111,7 +118,34 @@ func (s podDaemonSwap) RunningPair(ctx context.Context) (update.ImagePair, error
 			return update.ImagePair{}, fmt.Errorf("%s found %s image %q, which is not a digest reference, so the pair cannot be restored to it", step, half.what, half.ref)
 		}
 	}
+	if pair.Bd, err = s.gatewayImage(ctx); err != nil {
+		return update.ImagePair{}, err
+	}
 	return pair, nil
+}
+
+// gatewayImage reads the bd gateway image the cluster runs, empty when the
+// cluster has no bd-gateway Deployment yet (the town before the cutover). A
+// Deployment that exists but names no digest image is an error: a gateway the
+// cluster runs names the image the pair compares and can restore.
+func (s podDaemonSwap) gatewayImage(ctx context.Context) (string, error) {
+	const step = "the bd gateway image read"
+	out, err := s.kubectlOutput(ctx, step, "get", "deployment/"+k8sdaemon.BdGatewayName, "-o", "jsonpath="+gatewayImageJSONPath, "--ignore-not-found")
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out) == "" {
+		return "", nil
+	}
+	name, image, found := strings.Cut(out, "\n")
+	if !found || strings.TrimSpace(name) != k8sdaemon.BdGatewayName {
+		return "", fmt.Errorf("%s printed no %s image", step, k8sdaemon.BdGatewayName)
+	}
+	image = strings.TrimSpace(image)
+	if !imagevalues.ValidRef(image) {
+		return "", fmt.Errorf("%s found bd gateway image %q, which is not a digest reference, so the pair cannot be restored to it", step, image)
+	}
+	return image, nil
 }
 
 // Apply patches the daemon's Deployment, then the dashboard's when the cluster has

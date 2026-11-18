@@ -35,19 +35,28 @@ type podSwapCall struct {
 // The running pair read (a get of the daemon Deployment) answers the swap's pair
 // by default. pairOut, when set, is its whole answer, and pairExit and pairErr
 // fail it.
+//
+// The bd gateway image read (a get of the gateway Deployment) names no gateway by
+// default, as a cluster before the cutover: kubectl prints nothing for
+// --ignore-not-found. gateway, when set, is the image it prints, and gatewayOut,
+// gatewayExit and gatewayErr answer or fail the read instead.
 type podSwapFake struct {
-	calls      []podSwapCall
-	verb       string
-	deployment string
-	exit       int
-	err        error
-	absent     bool
-	readExit   int
-	readErr    error
-	readOut    string
-	pairOut    string
-	pairExit   int
-	pairErr    error
+	calls       []podSwapCall
+	verb        string
+	deployment  string
+	exit        int
+	err         error
+	absent      bool
+	readExit    int
+	readErr     error
+	readOut     string
+	pairOut     string
+	pairExit    int
+	pairErr     error
+	gateway     string
+	gatewayOut  string
+	gatewayExit int
+	gatewayErr  error
 }
 
 func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
@@ -57,6 +66,12 @@ func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, 
 			return podSwapOutput, f.pairExit, f.pairErr
 		}
 		return f.pairAnswer(), 0, nil
+	}
+	if containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.BdGatewayName) {
+		if f.gatewayErr != nil || f.gatewayExit != 0 {
+			return podSwapOutput, f.gatewayExit, f.gatewayErr
+		}
+		return f.gatewayAnswer(), 0, nil
 	}
 	if containsArg(args, "get") {
 		if f.readErr != nil || f.readExit != 0 {
@@ -93,6 +108,20 @@ func (f *podSwapFake) pairAnswer() string {
 		return f.pairOut
 	}
 	return podSwapPair.Daemon + "\n" + podSwapPair.Polecat
+}
+
+// gatewayAnswer is what the bd gateway image read prints: gatewayOut when a test
+// sets one, nothing when the cluster has no gateway Deployment, else the
+// Deployment's name and gateway, the two lines the read's jsonpath prints.
+func (f *podSwapFake) gatewayAnswer() string {
+	switch {
+	case f.gatewayOut != "":
+		return f.gatewayOut
+	case f.gateway == "":
+		return ""
+	default:
+		return k8sdaemon.BdGatewayName + "\n" + f.gateway
+	}
 }
 
 const (
@@ -296,10 +325,10 @@ func TestPodDaemonSwapRefusesAnUnreadableDashboardRead(t *testing.T) {
 }
 
 // TestPodDaemonSwapReadsTheRunningPair holds the read an install records before
-// it swaps: one kubectl get of the daemon's Deployment, in the swap's context and
+// it swaps: a kubectl get of the daemon's Deployment, in the swap's context and
 // namespace, whose two lines are the daemon container's image and the pod
-// template's polecat annotation. The pair names no commit, since a Deployment
-// carries no build.
+// template's polecat annotation, then a get of the bd-gateway Deployment for the
+// gateway image. The pair names no commit, since a Deployment carries no build.
 func TestPodDaemonSwapReadsTheRunningPair(t *testing.T) {
 	t.Parallel()
 
@@ -316,7 +345,7 @@ func TestPodDaemonSwapReadsTheRunningPair(t *testing.T) {
 		}
 	})
 
-	t.Run("the read names the Deployment in the swap's context and namespace", func(t *testing.T) {
+	t.Run("the read names both Deployments in the swap's context and namespace", func(t *testing.T) {
 		t.Parallel()
 		fake := &podSwapFake{}
 		pair, err := podSwapFor(fake).RunningPair(context.Background())
@@ -324,22 +353,42 @@ func TestPodDaemonSwapReadsTheRunningPair(t *testing.T) {
 			t.Fatalf("RunningPair: %v", err)
 		}
 		if want := (update.ImagePair{Daemon: podSwapPair.Daemon, Polecat: podSwapPair.Polecat}); pair != want {
-			t.Errorf("RunningPair = %+v, want %+v", pair, want)
+			t.Errorf("RunningPair = %+v, want %+v with no gateway image", pair, want)
 		}
-		if len(fake.calls) != 1 {
-			t.Fatalf("commands = %+v, want one read", fake.calls)
+		if len(fake.calls) != 2 {
+			t.Fatalf("commands = %+v, want the daemon read and the gateway read", fake.calls)
 		}
-		want := []string{
-			"--context", podSwapContext, "-n", podSwapNamespace,
-			"get", "deployment/" + k8sdaemon.Name,
-			"-o", "jsonpath=" + runningPairJSONPath,
-		}
+		prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
+		want := append(slices.Clone(prefix),
+			"get", "deployment/"+k8sdaemon.Name,
+			"-o", "jsonpath="+runningPairJSONPath,
+		)
 		if !slices.Equal(fake.calls[0].args, want) {
-			t.Errorf("read argv = %q, want %q", fake.calls[0].args, want)
+			t.Errorf("daemon read argv = %q, want %q", fake.calls[0].args, want)
+		}
+		want = append(slices.Clone(prefix),
+			"get", "deployment/"+k8sdaemon.BdGatewayName,
+			"-o", "jsonpath="+gatewayImageJSONPath,
+			"--ignore-not-found",
+		)
+		if !slices.Equal(fake.calls[1].args, want) {
+			t.Errorf("gateway read argv = %q, want %q", fake.calls[1].args, want)
 		}
 	})
 
-	t.Run("in-cluster the read names no context", func(t *testing.T) {
+	t.Run("a cluster with a bd-gateway Deployment names its image", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{gateway: podSwapBdRef}
+		pair, err := podSwapFor(fake).RunningPair(context.Background())
+		if err != nil {
+			t.Fatalf("RunningPair: %v", err)
+		}
+		if want := (update.ImagePair{Daemon: podSwapPair.Daemon, Polecat: podSwapPair.Polecat, Bd: podSwapBdRef}); pair != want {
+			t.Errorf("RunningPair = %+v, want %+v with the gateway image", pair, want)
+		}
+	})
+
+	t.Run("in-cluster the reads name no context", func(t *testing.T) {
 		t.Parallel()
 		fake := &podSwapFake{}
 		swap := podSwapFor(fake)
@@ -347,10 +396,72 @@ func TestPodDaemonSwapReadsTheRunningPair(t *testing.T) {
 		if _, err := swap.RunningPair(context.Background()); err != nil {
 			t.Fatalf("RunningPair: %v", err)
 		}
-		if want := []string{"-n", podSwapNamespace}; !slices.Equal(fake.calls[0].args[:2], want) {
-			t.Errorf("read argv = %q, want it to start with %q", fake.calls[0].args, want)
+		for _, call := range fake.calls {
+			if want := []string{"-n", podSwapNamespace}; !slices.Equal(call.args[:2], want) {
+				t.Errorf("read argv = %q, want it to start with %q", call.args, want)
+			}
 		}
 	})
+}
+
+// TestPodSwapRefusesAnUnreadableGatewayImage holds the gateway read's refusals: a
+// command that fails or exits nonzero, an answer that names no gateway, and one
+// whose image is not a digest are each an error naming the step. An unreadable or
+// unfamiliar cluster is never a cluster without a gateway.
+func TestPodSwapRefusesAnUnreadableGatewayImage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fake podSwapFake
+		want string
+	}{
+		{
+			name: "a read that exits nonzero fails the step",
+			fake: podSwapFake{gatewayExit: 1},
+			want: "the bd gateway image read exited 1",
+		},
+		{
+			name: "a read the runner cannot run fails the step",
+			fake: podSwapFake{gatewayErr: errors.New("kubectl not found")},
+			want: "running kubectl for the bd gateway image read",
+		},
+		{
+			name: "an answer that names no gateway image fails the step",
+			fake: podSwapFake{gatewayOut: k8sdaemon.BdGatewayName},
+			want: "printed no bd-gateway image",
+		},
+		{
+			name: "an answer naming another Deployment fails the step",
+			fake: podSwapFake{gatewayOut: k8sdaemon.DashboardName + "\n" + podSwapBdRef},
+			want: "printed no bd-gateway image",
+		},
+		{
+			name: "a gateway Deployment with no gateway container fails the step",
+			fake: podSwapFake{gatewayOut: k8sdaemon.BdGatewayName + "\n"},
+			want: "bd gateway image",
+		},
+		{
+			name: "a gateway image that is a tag is refused",
+			fake: podSwapFake{gatewayOut: k8sdaemon.BdGatewayName + "\ngt-bd:latest"},
+			want: `bd gateway image "gt-bd:latest"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := tt.fake
+			pair, err := podSwapFor(&fake).RunningPair(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("RunningPair error = %v, want one containing %q", err, tt.want)
+			}
+			if pair != (update.ImagePair{}) {
+				t.Errorf("RunningPair returned %+v with the error, want no pair", pair)
+			}
+			if strings.Contains(err.Error(), podSwapOutput) {
+				t.Errorf("RunningPair error carries the command's output: %v", err)
+			}
+		})
+	}
 }
 
 // TestPodSwapRefusesWhenCurrentPairUnreadable holds the read's refusals: a
