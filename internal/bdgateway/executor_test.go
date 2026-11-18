@@ -94,7 +94,7 @@ func TestExecutorPathMapping(t *testing.T) {
 	}
 
 	t.Run("a multi-element rig resolves its own nested tree", func(t *testing.T) {
-		root := t.TempDir()
+		root := testWorkspace(t)
 		beads := filepath.Join(root, "om", "mayor", "rig", ".beads")
 		if err := os.MkdirAll(beads, 0o755); err != nil {
 			t.Fatal(err)
