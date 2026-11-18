@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -410,7 +412,8 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 		return bdgateway.NewGateway(opts)
 	}
 	pl := newPipeListener()
-	sc.listen = func(string) (net.Listener, error) { return pl, nil }
+	pushPl := newPipeListener()
+	sc.listen = listenByAddr(sc.addr, pl, sc.pushAddr, pushPl)
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return pl.dial(ctx) },
 	}}
@@ -587,6 +590,353 @@ func TestBdgwServeListenFailure(t *testing.T) {
 	sc.workspaceRoot = t.TempDir()
 	if err := serve(context.Background(), sc); err == nil {
 		t.Fatal("serve with a listener that cannot bind = nil, want its error")
+	}
+}
+
+// listenByAddr is a serve listen seam that hands each of the two addresses its
+// own in-memory listener and refuses any other, so a test sees every listener
+// serve opens.
+func listenByAddr(mainAddr string, mainPl *pipeListener, pushAddr string, pushPl *pipeListener) func(string) (net.Listener, error) {
+	return func(addr string) (net.Listener, error) {
+		switch addr {
+		case mainAddr:
+			return mainPl, nil
+		case pushAddr:
+			return pushPl, nil
+		default:
+			return nil, fmt.Errorf("bdgw serve listened on %q, want %q or %q", addr, mainAddr, pushAddr)
+		}
+	}
+}
+
+// newServeTestConfig is a serveConfig whose pieces load from temp directories,
+// with an exit runner behind the gateway.
+func newServeTestConfig(t *testing.T) *serveConfig {
+	t.Helper()
+	sc := newServeConfig()
+	sc.tokensDir = t.TempDir()
+	writeFile(t, filepath.Join(sc.tokensDir, "read.dash.token"), testReadToken, 0o600)
+	writeFile(t, filepath.Join(sc.tokensDir, "daemon.dipper.token"), testDaemonToken, 0o600)
+	sc.verbsPath = filepath.Join(t.TempDir(), "verbs.json")
+	writeFile(t, sc.verbsPath, cmdPolicy, 0o644)
+	sc.logDir = t.TempDir()
+	sc.workspaceRoot = t.TempDir()
+	sc.newGateway = func(opts bdgateway.GatewayOptions) (*bdgateway.Gateway, error) {
+		opts.Runner = exitRunner{}
+		return bdgateway.NewGateway(opts)
+	}
+	return sc
+}
+
+// dialClient returns a client whose connections reach the given in-memory
+// listener.
+func dialClient(t *testing.T, pl *pipeListener) *http.Client {
+	t.Helper()
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return pl.dial(ctx) },
+	}}
+	t.Cleanup(client.CloseIdleConnections)
+	return client
+}
+
+// acceptsNow reports whether the listener takes a new connection right now.
+func acceptsNow(t *testing.T, bound context.Context, pl *pipeListener) bool {
+	t.Helper()
+	c, err := pl.dial(bound)
+	if err != nil {
+		return false
+	}
+	if err := c.Close(); err != nil {
+		t.Errorf("close the probe connection: %v", err)
+	}
+	return true
+}
+
+// execHead is a valid POST /v1/exec head for the read verb show.
+func execHead(t *testing.T) string {
+	t.Helper()
+	head, err := json.Marshal(bdgateway.Request{Argv: []string{"show"}})
+	if err != nil {
+		t.Fatalf("marshal head: %v", err)
+	}
+	return string(head) + "\n"
+}
+
+// httpReply is one request's status, body or transport error.
+type httpReply struct {
+	status int
+	body   []byte
+	err    error
+}
+
+// send makes one request against the gateway through an in-memory listener.
+func send(bound context.Context, client *http.Client, method, path, token string, body io.Reader) httpReply {
+	req, err := http.NewRequestWithContext(bound, method, "http://bdgw.test"+path, body)
+	if err != nil {
+		return httpReply{err: err}
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return httpReply{err: err}
+	}
+	defer func() { _ = resp.Body.Close() }()
+	got, err := io.ReadAll(resp.Body)
+	return httpReply{status: resp.StatusCode, body: got, err: err}
+}
+
+// brokenListener is a net.Listener whose Accept fails at once, so a server on it
+// ends serving with the error.
+type brokenListener struct{ err error }
+
+func (l brokenListener) Accept() (net.Conn, error) { return nil, l.err }
+func (l brokenListener) Close() error              { return nil }
+func (l brokenListener) Addr() net.Addr            { return pipeAddr{} }
+
+// TestServePushListenerRoutes: with the default flags the push listener serves
+// PUT /v1/workspace and answers /v1/exec 404, while the main listener still runs
+// a call. The gateway is the production one; only the listener is in memory.
+func TestServePushListenerRoutes(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := newServeTestConfig(t)
+	mainPl, pushPl := newPipeListener(), newPipeListener()
+	sc.listen = listenByAddr(sc.addr, mainPl, sc.pushAddr, pushPl)
+	mainClient, pushClient := dialClient(t, mainPl), dialClient(t, pushPl)
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	waitFor(t, bound, "both listeners accept", func() bool {
+		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+	})
+
+	pushed := send(bound, pushClient, http.MethodPut, "/v1/workspace", testDaemonToken, strings.NewReader(pushBody(t)))
+	if pushed.err != nil || pushed.status != http.StatusOK {
+		t.Fatalf("push listener PUT /v1/workspace = %d (%v), want 200; body %s", pushed.status, pushed.err, pushed.body)
+	}
+	pushExec := send(bound, pushClient, http.MethodPost, "/v1/exec", testReadToken, strings.NewReader(execHead(t)))
+	if pushExec.err != nil || pushExec.status != http.StatusNotFound {
+		t.Fatalf("push listener POST /v1/exec = %d (%v), want 404; body %s", pushExec.status, pushExec.err, pushExec.body)
+	}
+	mainExec := send(bound, mainClient, http.MethodPost, "/v1/exec", testReadToken, strings.NewReader(execHead(t)))
+	if mainExec.err != nil || mainExec.status != http.StatusOK {
+		t.Fatalf("main listener POST /v1/exec = %d (%v), want 200; body %s", mainExec.status, mainExec.err, mainExec.body)
+	}
+
+	stop()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("serve after the drain = %v, want nil", err)
+		}
+	case <-bound.Done():
+		t.Fatal("serve did not return after the drain")
+	}
+}
+
+// TestServePushListenerOff: --push-addr "" binds the main listener only.
+func TestServePushListenerOff(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := newServeTestConfig(t)
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	bindServe(fs, sc)
+	if err := fs.Parse([]string{"--push-addr", ""}); err != nil {
+		t.Fatalf(`parse --push-addr "": %v`, err)
+	}
+	if sc.pushAddr != "" {
+		t.Fatalf(`--push-addr "" left pushAddr = %q, want empty`, sc.pushAddr)
+	}
+
+	mainPl := newPipeListener()
+	var mu sync.Mutex
+	var listened []string
+	sc.listen = func(addr string) (net.Listener, error) {
+		mu.Lock()
+		listened = append(listened, addr)
+		mu.Unlock()
+		if addr != sc.addr {
+			return nil, fmt.Errorf("bdgw serve listened on %q, want only %q", addr, sc.addr)
+		}
+		return mainPl, nil
+	}
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	waitFor(t, bound, "the main listener accepts", func() bool {
+		return acceptsNow(t, bound, mainPl)
+	})
+
+	stop()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("serve with the push listener off = %v, want nil", err)
+		}
+	case <-bound.Done():
+		t.Fatal("serve did not return after the drain")
+	}
+	mu.Lock()
+	got := append([]string(nil), listened...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != sc.addr {
+		t.Errorf("listeners opened = %v, want only %q", got, sc.addr)
+	}
+}
+
+// TestServePushListenerDrain: cancelling the context drains both listeners
+// within the grace. A call already running finishes, and serve returns nil only
+// after it does.
+func TestServePushListenerDrain(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := newServeTestConfig(t)
+	runner := newBlockingRunner()
+	sc.newGateway = func(opts bdgateway.GatewayOptions) (*bdgateway.Gateway, error) {
+		opts.Runner = runner
+		return bdgateway.NewGateway(opts)
+	}
+	mainPl, pushPl := newPipeListener(), newPipeListener()
+	sc.listen = listenByAddr(sc.addr, mainPl, sc.pushAddr, pushPl)
+	mainClient := dialClient(t, mainPl)
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	waitFor(t, bound, "both listeners accept", func() bool {
+		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+	})
+
+	inFlight := make(chan httpReply, 1)
+	go func() {
+		inFlight <- send(bound, mainClient, http.MethodPost, "/v1/exec", testReadToken, strings.NewReader(execHead(t)))
+	}()
+	select {
+	case <-runner.started:
+	case <-bound.Done():
+		t.Fatal("the call did not reach the executor within the test's bound")
+	}
+
+	stop()
+	waitFor(t, bound, "the drain closes both listeners", func() bool {
+		return !acceptsNow(t, bound, mainPl) && !acceptsNow(t, bound, pushPl)
+	})
+	select {
+	case err := <-served:
+		t.Fatalf("serve returned while a call was still in flight: %v", err)
+	default:
+	}
+
+	close(runner.release)
+	var got httpReply
+	select {
+	case got = <-inFlight:
+	case <-bound.Done():
+		t.Fatal("the in-flight call did not finish within the test's bound")
+	}
+	if got.err != nil || got.status != http.StatusOK {
+		t.Fatalf("the in-flight call = %d (%v), want 200", got.status, got.err)
+	}
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("serve after the drain = %v, want nil", err)
+		}
+	case <-bound.Done():
+		t.Fatal("serve did not return after the drain")
+	}
+}
+
+// TestServePushListenerFailure: a listener that cannot bind or fails while
+// serving ends serve with that error, and the other listener does not keep
+// accepting.
+func TestServePushListenerFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// listen hands each address the listener the case wants for it.
+		listen func(sc *serveConfig, mainPl, pushPl *pipeListener) func(string) (net.Listener, error)
+		// probe is the listener that must be closed once serve returns.
+		probe func(mainPl, pushPl *pipeListener) *pipeListener
+		want  string
+	}{
+		{
+			name: "push cannot bind",
+			listen: func(sc *serveConfig, mainPl, _ *pipeListener) func(string) (net.Listener, error) {
+				return func(addr string) (net.Listener, error) {
+					if addr == sc.pushAddr {
+						return nil, errors.New("the push address is taken")
+					}
+					return mainPl, nil
+				}
+			},
+			probe: func(mainPl, _ *pipeListener) *pipeListener { return mainPl },
+			want:  "the push address is taken",
+		},
+		{
+			name: "push fails while serving",
+			listen: func(sc *serveConfig, mainPl, _ *pipeListener) func(string) (net.Listener, error) {
+				return func(addr string) (net.Listener, error) {
+					if addr == sc.pushAddr {
+						return brokenListener{err: errors.New("the push listener broke")}, nil
+					}
+					return mainPl, nil
+				}
+			},
+			probe: func(mainPl, _ *pipeListener) *pipeListener { return mainPl },
+			want:  "the push listener broke",
+		},
+		{
+			name: "main fails while serving",
+			listen: func(sc *serveConfig, _, pushPl *pipeListener) func(string) (net.Listener, error) {
+				return func(addr string) (net.Listener, error) {
+					if addr == sc.addr {
+						return brokenListener{err: errors.New("the main listener broke")}, nil
+					}
+					return pushPl, nil
+				}
+			},
+			probe: func(_, pushPl *pipeListener) *pipeListener { return pushPl },
+			want:  "the main listener broke",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			t.Cleanup(cancel)
+			sc := newServeTestConfig(t)
+			mainPl, pushPl := newPipeListener(), newPipeListener()
+			sc.listen = tc.listen(sc, mainPl, pushPl)
+
+			served := make(chan error, 1)
+			go func() { served <- serve(context.Background(), sc) }()
+			var serveErr error
+			select {
+			case serveErr = <-served:
+			case <-bound.Done():
+				t.Fatal("serve did not end when a listener failed")
+			}
+			if serveErr == nil || !strings.Contains(serveErr.Error(), tc.want) {
+				t.Fatalf("serve = %v, want a refusal naming %q", serveErr, tc.want)
+			}
+			if _, err := tc.probe(mainPl, pushPl).dial(bound); err == nil {
+				t.Error("a listener stayed open after serve returned")
+			}
+		})
 	}
 }
 
