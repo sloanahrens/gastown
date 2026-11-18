@@ -347,7 +347,7 @@ var treeWideGuards = []treeWideGuard{
 		// always: its input is every test file in the tree (gt-t4rchq).
 		pkg: "internal/testpolicy",
 		tests: []string{"TestPolicy", "TestUnitTierMain", "TestAllowedTools", "TestRealGit",
-			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists"},
+			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists", "TestEnvArgsGuardOnTree"},
 		always: true,
 	},
 	{

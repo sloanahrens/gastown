@@ -156,10 +156,10 @@ func TestCheckedInServicesAreTheRenderOfTheirHostsFile(t *testing.T) {
 		dir := "../../deploy/k8s/values/" + env + "/"
 		want, err := RenderServices(env, []byte(readRepoFile(t, dir+"hosts.yaml")))
 		if err != nil {
-			t.Fatalf("%s: %v", env, err)
+			t.Fatalf("RenderServices: %v", err)
 		}
 		if got := readRepoFile(t, dir+"control-plane-services.yaml"); got != want {
-			t.Errorf("%s: control-plane-services.yaml is not the render of hosts.yaml; run: go run ./cmd/render-services deploy/k8s/values/%s/hosts.yaml > deploy/k8s/values/%s/control-plane-services.yaml", env, env, env)
+			t.Errorf("control-plane-services.yaml is not the render of hosts.yaml in a values directory; run cmd/render-services on that directory's hosts.yaml and commit the output")
 		}
 	}
 }

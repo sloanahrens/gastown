@@ -150,15 +150,15 @@ An exemption is a comment on the offending line or the line above it:
 
 ### The env-print rule
 
-`TestEnvPrintGuardOnTree` in `internal/testpolicy` walks every `*_test.go` under `internal` and `cmd` and reports a `Fatal`, `Fatalf`, `Error`, `Errorf`, `Log`, `Logf`, `Skip` or `Skipf` call whose arguments print an environment (gt-b5s9bg). A failure message reaches an agent's conversation, and a credential placeholder there ends the seat, so the message names the key or a count instead: `t.Errorf("env has %d entries, want %d", len(env), len(want))`. The scan follows a value into an index, a slice and a formatting call such as `fmt.Sprintf` or `strings.Join`, and treats `os.Environ()`, a field ending in `.Env`, a name such as `env`, `cmdEnv` or `dockerEnv`, and a `[]string` function named for an environment (`childEnv`) as environments. `len` and `cap`, a single value, and a slice built only from literals in the test pass: none can carry a host value.
+`TestEnvArgsGuardOnTree` in `internal/testpolicy` walks every `*_test.go` under `internal` and `cmd`, build-tagged files included, and reports a `Fatal`, `Fatalf`, `Error`, `Errorf`, `Log` or `Logf` call whose arguments print an environment: an argument that is `os.Environ()`, a plain identifier named `env`, `environ`, `cmdEnv` or `gotEnv`, or one of those passed to a `fmt.Sprintf` in that argument (gt-0wddch). A failure message reaches an agent's conversation, and a credential placeholder there ends the seat, so the message names the key or a count instead: `t.Errorf("env has %d entries, want %d", len(env), len(want))`. The scan does not follow a value: an index, a field, a slice or a variable reached any other way is out of scope.
 
-A call that must print an environment carries the marker trailing it on the call's line, or alone on the line directly above it. The marker exempts that one call and no other: a second call on a later line is judged on its own. The reason names the value printed in its place:
+A call that must print an environment carries the marker trailing it on the call's line. The marker exempts that one call and no other: another call on the same line, or a call on a later line, is judged on its own. The reason names the value printed in its place:
 
 ```go
 t.Errorf("endpoint = %v", env) // testpolicy:env-print-ok a host and a port
 ```
 
-The marker is separate from `//testpolicy:allow`: `TestPolicy` does not read it, and `TestEnvPrintGuardOnTree` does not read `allow`.
+The marker is separate from `//testpolicy:allow`: `TestPolicy` does not read it, and `TestEnvArgsGuardOnTree` does not read `allow`.
 
 ## Seams
 
