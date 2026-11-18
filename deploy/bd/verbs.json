@@ -44,6 +44,7 @@
     {"path": "defer", "class": "write"},
     {"path": "dep add", "class": "write"},
     {"path": "dep remove", "class": "write"},
+    {"path": "gate check", "class": "write"},
     {"path": "kv set", "class": "write"},
     {"path": "label add", "class": "write"},
     {"path": "label remove", "class": "write"},
