@@ -967,6 +967,36 @@ func TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap(t *testing.T) {
 	})
 }
 
+// TestBuildWorkspaceDocumentNamesTheFormulaCopiesWhenTheyFillTheCap: a formula
+// set that fits as the town's own copy is refused once the copies under the
+// registered rigs are added, and the refusal names the arithmetic — the formula
+// count, the copy count and the cap — so a town that grew past the cap (more
+// formulas, more rigs, or both) reports the growth instead of one formula path
+// the running total happened to reach.
+func TestBuildWorkspaceDocumentNamesTheFormulaCopiesWhenTheyFillTheCap(t *testing.T) {
+	t.Parallel()
+	const (
+		rigCount     = 2
+		formulaCount = 6
+		copies       = rigCount + 1
+	)
+	// Six formulas at the per-file cap are 1.5 MiB: the town's copy fits under
+	// the 4 MiB cap, and the three copies the workspace carries do not.
+	if townBytes := formulaCount * MaxWorkspaceFileBytes; townBytes*copies <= MaxWorkspaceTotalBytes {
+		t.Fatalf("the fixture is %d town formula bytes, not over the cap with %d copies", townBytes, copies)
+	}
+	root := formulaTown(t, rigCount, formulaCount, MaxWorkspaceFileBytes)
+	_, err := BuildWorkspaceDocument(root)
+	if !errors.Is(err, ErrWorkspaceTooLarge) {
+		t.Fatalf("BuildWorkspaceDocument error = %v, want %v", err, ErrWorkspaceTooLarge)
+	}
+	for _, want := range []string{"6 formulas", "3 copies", fmt.Sprint(MaxWorkspaceTotalBytes)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %q", err, want)
+		}
+	}
+}
+
 // TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig: the town's
 // formula set is carried under the town's beads directory and under each
 // registered rig's, so a town with ten rigs pushes eleven copies, about 1.74 MiB
