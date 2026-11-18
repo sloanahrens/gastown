@@ -77,6 +77,7 @@ for arg in "$@"; do
     --description=*no_merge:*true*review_only:*true*) arg="--description=<review-only-fields>" ;;
     --description=*review_only:*true*no_merge:*true*) arg="--description=<review-only-fields>" ;;
     --description=*) arg="--description=<redacted>" ;;
+    "SP ESTIMATE v1"*) arg="SP ESTIMATE v1 <estimate-note>" ;;
   esac
   log_args="${log_args}${log_args:+ }${arg}"
 done
@@ -104,6 +105,12 @@ case "$cmd" in
     ;;
   cook)
     echo '{"schema_version":1,"contract_version":1,"data":{"formula":"mol-polecat-work","vars":[],"steps":[]},"error":null}'
+    ;;
+  comments)
+    # The story-point estimate reads the bead's comments before it hooks a
+    # bead with no sp-minutes label (gt-t9kwfu): an empty list is a bead
+    # nobody has estimated yet.
+    echo '[]'
     ;;
 	  mol)
 		sub="$1"
@@ -374,6 +381,19 @@ exit /b 0
 			// seam's DepListUp, which is this bd call (gt-p85pw.106): it is a read
 			// of the target bead and must be pinned to the target rig like the rest.
 			assertTargetRig("dependents read", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
+		case strings.Contains(args, "comments "+newBeadID+" "):
+			// The story-point estimate a sling makes before it hooks a bead with no
+			// estimate reads that bead's comments (gt-t9kwfu): a read of the target
+			// bead, pinned to the target rig like every other call on it.
+			assertTargetRig("comments read", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
+		case strings.Contains(args, "update "+newBeadID+" ") && strings.Contains(args, "--add-label=sp"):
+			// The estimate writes its sp labels on the bead it sized (gt-t9kwfu):
+			// a write to the target bead, pinned to the target rig.
+			assertTargetRig("estimate label write", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
+		case strings.Contains(args, "comments add "+newBeadID+" SP ESTIMATE"):
+			// The estimate records its note as a comment on the bead it sized
+			// (gt-t9kwfu): a write to the target bead, pinned to the target rig.
+			assertTargetRig("estimate note write", dir, beadsDir, database, beadsDB, bdDB, dataDir, gtData, args)
 		case args == "--version" || strings.HasPrefix(args, "version") || strings.Contains(args, " version") || strings.Contains(args, "show gt-rig-") || strings.Contains(args, "show mol-"):
 			// Explicitly exempt non-target-bead lookups; every gt-new123 operation
 			// above must still prove it is pinned to the gastown database.
