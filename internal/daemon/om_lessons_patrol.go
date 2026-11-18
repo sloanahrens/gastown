@@ -8,7 +8,8 @@ package daemon
 // The seam reads the review records of the window ending at the pass's clock,
 // and the numbered rules of the town's directives, and returns one proposal per
 // rejection class. Each proposal with enough findings is then filed as one
-// overseer-only bead through the town's beads client (gt-pawdfa).
+// overseer-only bead through the town's beads client (gt-pawdfa), at most once
+// per class and ISO week (gt-ygtazd).
 //
 // The ticker is a check cadence, not a run cadence: an in-process ticker resets
 // its countdown on every daemon start, so a ticker set to the 168h interval
@@ -18,16 +19,19 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -338,12 +342,86 @@ func (d *Daemon) runOmLessonsTick(ctx context.Context, at time.Time) ([]omlesson
 // `gt land om-lessons` report does.
 const omLessonsDayLayout = "2006-01-02"
 
+// omLessonsFiledFileName is the record of which proposal classes the current
+// ISO week already filed. It lives in the town's daemon directory beside the
+// patrol last-run record, so a restarted daemon reads what the town filed
+// before it.
+const omLessonsFiledFileName = "om_lessons_filed.json"
+
+// omLessonsFiledPath returns the path of the town's filed-classes record.
+func omLessonsFiledPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", omLessonsFiledFileName)
+}
+
+// omLessonsFiledRecord is the on-disk shape: the ISO week the classes belong
+// to and the classes filed in it. A record of another week reads as nothing
+// filed, so the file holds one week at a time.
+type omLessonsFiledRecord struct {
+	Week    string   `json:"week"`
+	Classes []string `json:"classes"`
+}
+
+// omLessonsISOWeek names the ISO week at falls in, such as "2026-W47". The ISO
+// year is used rather than the calendar year, so the days after New Year that
+// still belong to the previous week count with it.
+func omLessonsISOWeek(at time.Time) string {
+	year, week := at.ISOWeek()
+	return fmt.Sprintf("%d-W%02d", year, week)
+}
+
+// loadOmLessonsFiled returns the classes the record says week already filed. A
+// missing record is an empty set, the first pass of the town's life. A record
+// that cannot be read or parsed is an error rather than an empty set: an
+// unreadable record might have filed every class, and reading it as none would
+// file them all a second time.
+func loadOmLessonsFiled(townRoot, week string) (map[string]bool, error) {
+	data, err := os.ReadFile(omLessonsFiledPath(townRoot))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return map[string]bool{}, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", omLessonsFiledPath(townRoot), err)
+	}
+	var record omLessonsFiledRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return nil, fmt.Errorf("%s is not readable: %w", omLessonsFiledFileName, err)
+	}
+	filed := map[string]bool{}
+	if record.Week != week {
+		return filed, nil
+	}
+	for _, id := range record.Classes {
+		filed[id] = true
+	}
+	return filed, nil
+}
+
+// saveOmLessonsFiled records the classes filed in week, replacing the week the
+// record held before.
+func saveOmLessonsFiled(townRoot, week string, filed map[string]bool) error {
+	classes := make([]string, 0, len(filed))
+	for id := range filed {
+		classes = append(classes, id)
+	}
+	sort.Strings(classes)
+	path := omLessonsFiledPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return atomicfile.WriteJSON(path, omLessonsFiledRecord{Week: week, Classes: classes})
+}
+
 // fileOmLessonsProposals files one overseer-only bead for each proposal with
-// enough findings to draft an edit. A too-few class has no draft and files
-// nothing. The counts named in each bead are read over a window of days ending
-// on at's day, the window the pass read. Dedupe by class and ISO week is not
-// here yet (gt-ygtazd), so a pass that runs twice in one week files its
-// proposals twice.
+// enough findings to draft an edit, at most once per class and ISO week. A
+// too-few class has no draft and files nothing. The counts named in each bead
+// are read over a window of days ending on at's day, the window the pass read.
+//
+// A class the week already filed is skipped and named in the log, so a second
+// pass in the week — a restart, a shorter configured interval, a rerun — files
+// nothing twice. A class whose create fails is logged and left out of the
+// record, so the proposals after it still file and the next pass of the week
+// tries it again; every failure is returned together, so a pass that lost a
+// bead never reads as clean.
 func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omlessons.Proposal) error {
 	var drafts []omlessons.Proposal
 	for _, p := range proposals {
@@ -357,14 +435,29 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 	if d.config == nil {
 		return errors.New("om_lessons: the daemon names no town, so the proposals have no directory to name")
 	}
+	townRoot := strings.TrimSpace(d.config.TownRoot)
+	if townRoot == "" {
+		return errors.New("om_lessons: the daemon names no town root, so the filed classes have no record to live in")
+	}
 	span, err := omlessons.Windows(at, time.Time{}, days)
 	if err != nil {
 		return fmt.Errorf("om_lessons: %w", err)
 	}
 	window := omLessonsWindowLine(span)
-	directives := agentconfig.CentralDirectiveDir(d.config.TownRoot)
+	directives := agentconfig.CentralDirectiveDir(townRoot)
+	week := omLessonsISOWeek(at)
+	filed, err := loadOmLessonsFiled(townRoot, week)
+	if err != nil {
+		return fmt.Errorf("om_lessons: reading the classes filed in %s: %w", week, err)
+	}
 	writer := d.noticeBeads()
+	var failures []error
+	filedNow := false
 	for _, p := range drafts {
+		if filed[p.ID] {
+			d.logger.Printf("om_lessons: %s was already filed in %s, skipping", p.ID, week)
+			continue
+		}
 		_, err := writer.Create(beads.CreateOptions{
 			Title:       fmt.Sprintf("om lessons: %s (%s)", p.Name, p.ID),
 			Labels:      []string{dispatch.OverseerOnlyLabel},
@@ -373,10 +466,20 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 			Actor:       daemonActor,
 		})
 		if err != nil {
-			return fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err)
+			failure := fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err)
+			d.logger.Printf("%v", failure)
+			failures = append(failures, failure)
+			continue
+		}
+		filed[p.ID] = true
+		filedNow = true
+	}
+	if filedNow {
+		if err := saveOmLessonsFiled(townRoot, week, filed); err != nil {
+			failures = append(failures, fmt.Errorf("om_lessons: recording the classes filed in %s: %w", week, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // omLessonsWindowLine names the two windows a proposal's counts are read over.
