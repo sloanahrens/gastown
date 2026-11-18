@@ -105,6 +105,12 @@ case "$cmd" in
   cook)
     echo '{"schema_version":1,"contract_version":1,"data":{"formula":"mol-polecat-work","vars":[],"steps":[]},"error":null}'
     ;;
+  comments)
+    # The story-point estimate reads the bead's comments before it hooks a
+    # bead with no sp-minutes label (gt-t9kwfu): an empty list is a bead
+    # nobody has estimated yet.
+    echo '[]'
+    ;;
 	  mol)
 		sub="$1"
 		shift || true
