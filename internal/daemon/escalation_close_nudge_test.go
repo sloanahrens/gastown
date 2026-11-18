@@ -1026,6 +1026,80 @@ func TestEscalationCloseFailureBranchesLogged(t *testing.T) {
 	}
 }
 
+// Each settle branch logs one line naming the escalation, the seat and the
+// reason, so a close that was not nudged can be told from one that was. A
+// nudged close logs no settle line.
+func TestEscalationCloseSettleLogsSeatAndReason(t *testing.T) {
+	t.Parallel()
+	const settle = "settled without a nudge"
+	closed := func(escalatedBy, relatedBead string) patrolscan.Escalation {
+		return patrolscan.Escalation{ID: closeTestEscID, EscalatedBy: escalatedBy,
+			RelatedBead: relatedBead, CloseReason: closeTestReason}
+	}
+	tests := []struct {
+		name  string
+		esc   patrolscan.Escalation
+		holds string
+		live  bool
+		// wantLine is the one settle line; empty for a nudged close.
+		wantLine string
+		wantSent int
+	}{
+		{"escalated_by names no seat of the rig", closed("gastown/polecats/capable/x", closeTestBead),
+			closeTestBead, true,
+			"escalation_close: gastown/polecats/capable/x: hq-esc1 " + settle + ": escalated_by names no polecat seat of gastown", 0},
+		{"escalated_by names another rig", closed("mayor/x", closeTestBead),
+			closeTestBead, true,
+			"escalation_close: mayor/x: hq-esc1 " + settle + ": escalated_by names no polecat seat of gastown", 0},
+		{"escalation names no related bead", closed(closeTestSeat, ""),
+			closeTestBead, true,
+			"escalation_close: gastown/capable: hq-esc1 " + settle + ": it names no related bead", 0},
+		{"seat holds another bead", closed(closeTestSeat, closeTestBead),
+			"gt-work2", true,
+			"escalation_close: gastown/capable: hq-esc1 " + settle + ": seat no longer holds related bead gt-work1", 0},
+		{"seat session is not live", closed(closeTestSeat, closeTestBead),
+			closeTestBead, false,
+			"escalation_close: gastown/capable: hq-esc1 " + settle + ": seat session is not live", 0},
+		{"live idle seat is nudged and logs no settle line", closed(closeTestSeat, closeTestBead),
+			closeTestBead, true, "", 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var sent []string
+			logs := &recordingLogger{}
+			seams := escalationCloseSeams{
+				escalations: func(string) ([]patrolscan.Escalation, error) { return []patrolscan.Escalation{tt.esc}, nil },
+				holding:     func(string, string) (string, error) { return tt.holds, nil },
+				seat: func(string, string) (escalationSeat, error) {
+					return escalationSeat{Live: tt.live, Idle: true}, nil
+				},
+				nudge: func(target, msg string, _ time.Duration) error {
+					sent = append(sent, target)
+					return nil
+				},
+				now:  time.Now,
+				save: func(escalationCloseState) error { return nil },
+				logf: logs.Printf,
+			}
+			runEscalationCloseNudges(seams, escalationCloseState{Watch: map[string]bool{closeTestEscID: true}}, []string{"gastown"})
+			if len(sent) != tt.wantSent {
+				t.Errorf("sent %d nudges, want %d", len(sent), tt.wantSent)
+			}
+			n := countLogLines(logs.lines, settle)
+			if tt.wantLine == "" {
+				if n != 0 {
+					t.Errorf("%d settle lines for a nudged close, want none: %q", n, logs.lines)
+				}
+				return
+			}
+			if n != 1 || !hasLogLine(logs.lines, tt.wantLine) {
+				t.Errorf("want one settle line %q, got %d settle lines: %q", tt.wantLine, n, logs.lines)
+			}
+		})
+	}
+}
+
 // A pane that cannot be read is not a busy seat: the pass logs the failed probe
 // once per seat per tick, however many of the seat's escalations closed, keeps
 // each owed, and nudges each once the probe recovers.

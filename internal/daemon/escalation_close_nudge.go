@@ -342,10 +342,23 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 // send budget, and one that starts after the budget is spent waits for the next
 // tick.
 func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escalation, budget *escalationSendBudget) escalationOutcome {
-	name, ok := strings.CutPrefix(strings.TrimSpace(e.EscalatedBy), rig+"/polecats/")
-	if !ok || name == "" || strings.ContainsAny(name, "/ \t\r\n") || strings.TrimSpace(e.RelatedBead) == "" {
+	raw := strings.TrimSpace(e.EscalatedBy)
+	name, ok := strings.CutPrefix(raw, rig+"/polecats/")
+	named := ok && name != "" && !strings.ContainsAny(name, "/ \t\r\n")
+	// The seat as the log names it: rig/name, or the raw escalated_by when it
+	// names no seat of the rig.
+	seat := raw
+	if named {
+		seat = rig + "/" + name
+	}
+	if !named || strings.TrimSpace(e.RelatedBead) == "" {
 		// The name becomes a session name and a nudge target, so one that is
 		// not a single path element names no seat.
+		reason := "it names no related bead"
+		if !named {
+			reason = "escalated_by names no polecat seat of " + rig
+		}
+		s.logf("escalation_close: %s: %s settled without a nudge: %s", seat, e.ID, reason)
 		return escalationSettled
 	}
 	holds, err := s.holding(rig, name)
@@ -354,18 +367,20 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 		return escalationPending
 	}
 	if strings.TrimSpace(holds) != strings.TrimSpace(e.RelatedBead) {
+		s.logf("escalation_close: %s: %s settled without a nudge: seat no longer holds related bead %s", seat, e.ID, e.RelatedBead)
 		return escalationSettled
 	}
-	seat, err := s.seat(rig, name)
+	seatState, err := s.seat(rig, name)
 	if err != nil {
 		// readSeatOncePerPass has logged the failed read.
 		return escalationPending
 	}
-	if !seat.Live {
+	if !seatState.Live {
 		// An ended seat is resumed by patrol_scan (gt-4hduq), not nudged.
+		s.logf("escalation_close: %s: %s settled without a nudge: seat session is not live", seat, e.ID)
 		return escalationSettled
 	}
-	if !seat.Idle {
+	if !seatState.Idle {
 		return escalationPending
 	}
 	target := rig + "/" + name
