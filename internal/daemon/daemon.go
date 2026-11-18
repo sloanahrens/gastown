@@ -1461,6 +1461,22 @@ type Daemon struct {
 	// time.NewTicker, and a test sets it to record the cadence.
 	newOmLessonsTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
 
+	// outboxPollRunning and outboxPollCycles are the outbox poll's
+	// single-flight guard and cycle count: one tick reads every running seat's
+	// outbox off the select loop, and Run's return joins one it left
+	// (outbox_poll.go).
+	outboxPollRunning atomic.Bool
+	outboxPollCycles  sync.WaitGroup
+	// outboxPollJoinWait overrides outboxPollJoinWait in tests.
+	outboxPollJoinWait time.Duration
+	// outboxPollTick is the patrol's one seam per tick: nil is
+	// outboxPollNoopTick, which reads nothing until the next bead fills the
+	// body (gt-dq4ce6), and a test sets it to count the ticks.
+	outboxPollTick outboxPollTickFunc
+	// newOutboxPollTicker is where the patrol's ticker comes from: nil is
+	// time.NewTicker, and a test sets it to record the cadence.
+	newOutboxPollTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
+
 	// reworkNumbersRunning and reworkNumbersCycles are the rework numbers
 	// step's single-flight guard and cycle count: a due run reads the town's
 	// landing ledgers off the select loop, and Run's return joins one it left
@@ -2519,6 +2535,14 @@ func (d *Daemon) Run() (err error) {
 		defer d.stopOmLessonsPatrol(stopOmLessons)
 	}
 
+	// Start the outbox poll ticker if enabled (default off, gt-0hkj0c; its
+	// config block says why). The defer stops the ticker and joins a tick it
+	// left running.
+	outboxPollChan, stopOutboxPoll := d.startOutboxPollTicker()
+	if stopOutboxPoll != nil {
+		defer d.stopOutboxPollPatrol(stopOutboxPoll)
+	}
+
 	// Start the rework numbers ticker if enabled (default off, gt-2232t4; its
 	// config block says why). The ticker checks whether the week's run is due;
 	// the last-run record beside the document decides, so a restart inside the
@@ -2749,6 +2773,14 @@ func (d *Daemon) Run() (err error) {
 			// loop (gt-vdy9do).
 			if !d.isShutdownInProgress() {
 				d.startOmLessonsTick()
+			}
+
+		case <-outboxPollChan:
+			// Outbox poll — reads each running seat's outbox through the
+			// sandbox gateway on its own goroutine, so the read never holds
+			// the select loop (gt-0hkj0c).
+			if !d.isShutdownInProgress() {
+				d.startOutboxPollTick()
 			}
 
 		case <-reworkNumbersChan:
