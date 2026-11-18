@@ -174,6 +174,74 @@ func TestPushHandlerRoutes(t *testing.T) {
 	}
 }
 
+// TestPushHandlerKeepsMethodRefusal: a method either route does not take keeps
+// the gateway's own 405, Allow header and refusal body instead of reaching the
+// route's handler.
+func TestPushHandlerKeepsMethodRefusal(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		want   string
+	}{
+		{name: "GET on the push", method: http.MethodGet, path: workspacePath, want: http.MethodPut},
+		{name: "POST on the push", method: http.MethodPost, path: workspacePath, want: http.MethodPut},
+		{name: "POST on the stats read", method: http.MethodPost, path: statsPath, want: http.MethodGet},
+		{name: "PUT on the stats read", method: http.MethodPut, path: statsPath, want: http.MethodGet},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := pushHandlerResponse(t, tc.method, tc.path, testDaemonToken, pushBody(t))
+
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want 405; body %s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Allow"); got != tc.want {
+				t.Errorf("Allow = %q, want %q", got, tc.want)
+			}
+			var payload ErrorPayload
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode refusal: %v; body %s", err, rec.Body.String())
+			}
+			if want := "this endpoint takes " + tc.want; payload.Code != codeMethod || payload.Message != want {
+				t.Errorf("refusal = %+v, want code %q and message %q", payload, codeMethod, want)
+			}
+			if got := rec.Header().Get(WorkspaceHashHeader); got == "" {
+				t.Error("the refusal carries no workspace hash")
+			}
+		})
+	}
+}
+
+// TestPushHandlerRefusesPushWhileShuttingDown: a gateway draining its calls
+// refuses a repair push through the push handler, so a tree cannot land under a
+// process that is stopping.
+func TestPushHandlerRefusesPushWhileShuttingDown(t *testing.T) {
+	t.Parallel()
+	store := mustStore(t)
+	g := newTestGateway(t, store, newTestCallLog(t), &stubRunner{exit: 0})
+	g.BeginShutdown()
+
+	rec := httptest.NewRecorder()
+	NewPushHandler(g).ServeHTTP(rec, pushRequestFor(http.MethodPut, workspacePath, testDaemonToken, pushBody(t)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("push while shutting down = %d, want 503; body %s", rec.Code, rec.Body.String())
+	}
+	var payload ErrorPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode refusal: %v; body %s", err, rec.Body.String())
+	}
+	if payload.Code != codeUnavailable || payload.Message != "the gateway is shutting down" {
+		t.Errorf("refusal = %+v, want code %q and message %q", payload, codeUnavailable, "the gateway is shutting down")
+	}
+	if store.Loaded() {
+		t.Error("the store loaded a tree the gateway refused while shutting down")
+	}
+}
+
 // TestPushHandlerWithoutGateway: a push handler built with no gateway refuses
 // every request with a 500 rather than panicking.
 func TestPushHandlerWithoutGateway(t *testing.T) {
