@@ -175,6 +175,65 @@ func TestVMStartRegistryOwnerReadError(t *testing.T) {
 	}
 }
 
+// TestVMStartRegistryOwnerWrappedExit: the exit status reaches the read through
+// whatever wraps the error, as a real Runner's error can be; a wrapped exit 1
+// is still the no-match answer and a wrapped other code or a plain error is
+// still a failed read.
+func TestVMStartRegistryOwnerWrappedExit(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		lsofOut, psOut string
+		lsofErr, psErr error
+		wantErr        bool
+		wantCalls      int
+		want           Owner
+	}{
+		"a wrapped lsof exit 1 is nothing listening": {
+			lsofErr:   fmt.Errorf("run lsof: %w", exitStatus(1)),
+			wantCalls: 2,
+			want:      Owner{Healthy: true},
+		},
+		"a wrapped ps exit 1 is a listener that has gone": {
+			lsofOut:   "p4242\n",
+			psErr:     fmt.Errorf("run ps: %w", exitStatus(1)),
+			wantCalls: 3,
+			want:      Owner{Healthy: true},
+		},
+		"a wrapped lsof exit 2 is a failed read": {
+			lsofErr:   fmt.Errorf("run lsof: %w", exitStatus(2)),
+			wantErr:   true,
+			wantCalls: 1,
+		},
+		"a wrapped error with no exit status is a failed read": {
+			lsofErr:   fmt.Errorf("run lsof: %w", errors.New("permission denied")),
+			wantErr:   true,
+			wantCalls: 1,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			script := &registryRun{lsofOut: tc.lsofOut, psOut: tc.psOut, curlOut: "200",
+				lsofErr: tc.lsofErr, psErr: tc.psErr}
+			got, err := RegistryOwner(context.Background(), script.run)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("RegistryOwner read a wrapped failure as %+v", got)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("RegistryOwner: %v", err)
+				}
+				if got != tc.want {
+					t.Fatalf("owner = %+v, want %+v", got, tc.want)
+				}
+			}
+			if len(script.calls) != tc.wantCalls {
+				t.Fatalf("calls = %q, want %d", script.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
 // TestVMStartRegistryOwnerPID: a pid lsof did not print as a decimal number is
 // refused before it reaches ps's argv.
 func TestVMStartRegistryOwnerPID(t *testing.T) {

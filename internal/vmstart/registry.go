@@ -89,10 +89,19 @@ func profileOf(command string) string {
 	return ""
 }
 
+// exitCoder is the error shape Runner's contract gives a command that exited
+// non-zero: the exit status as a method, as *exec.ExitError has it. errors.As
+// reads it through any wrapping, so a wrapped exit error is read the same way
+// as the error the command returned.
+type exitCoder interface {
+	ExitCode() int
+}
+
 // exitsWithoutMatch reports whether err is a tool's exit 1: lsof exits 1 when
 // nothing holds the port and ps exits 1 when the pid is gone, which are
-// answers. An error with no exit code to read is a failure, not an answer.
+// answers. An error carrying no exit status is a failure, not an answer, so a
+// Runner that does not meet its contract fails closed.
 func exitsWithoutMatch(err error) bool {
-	var coded interface{ ExitCode() int }
+	var coded exitCoder
 	return errors.As(err, &coded) && coded.ExitCode() == 1
 }
