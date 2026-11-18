@@ -39,6 +39,9 @@ const (
 	// WorkspaceURLEnv names the gateway's base URL for `gt bd workspace push`,
 	// the same name gt-wrap's bdgateway target reads.
 	WorkspaceURLEnv = "BD_GATEWAY_URL"
+	// WorkspacePushURLEnv names the base URL GatewayPusher.PushURL takes, for the
+	// two routes the push listener serves.
+	WorkspacePushURLEnv = "BD_GATEWAY_PUSH_URL"
 	// WorkspaceTokenEnv names the file holding the pusher's bearer token, the
 	// same name gt-wrap's bdgateway target reads.
 	WorkspaceTokenEnv = "BD_GATEWAY_TOKEN_FILE"
@@ -760,6 +763,9 @@ func IsOwnPush(ctx context.Context) bool {
 type GatewayPusher struct {
 	// URL is the gateway's base URL, such as http://host.docker.internal:7440.
 	URL string
+	// PushURL is the base URL Push, Probe and ReportedHash go to when it is
+	// non-empty. Empty uses URL.
+	PushURL string
 	// TokenFile is the file holding the pusher's bearer token. It is read on
 	// every push, so a rotated token needs no restart.
 	TokenFile string
@@ -803,7 +809,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so the workspace was not pushed: %w", shown(redactedURL(g.URL)), err)
+		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so the workspace was not pushed: %w", shown(redactedURL(g.effectiveURL())), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
@@ -833,11 +839,11 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	return result.ManifestSHA, nil
 }
 
-// Probe asks the gateway for its counters with GET /v1/stats, using the same URL,
-// token and client as a push, and observes the answer. Every gateway response
-// carries the live tree's hash, so a probe finds a gateway whose workspace drifted
-// (an empty one, say) without sending a document. A probe that gets no answer
-// returns an error and observes nothing.
+// Probe asks the gateway for its counters with GET /v1/stats, using the same
+// endpoint, token and client as a push, and observes the answer. Every gateway
+// response carries the live tree's hash, so a probe finds a gateway whose
+// workspace drifted (an empty one, say) without sending a document. A probe that
+// gets no answer returns an error and observes nothing.
 func (g GatewayPusher) Probe(ctx context.Context) error {
 	endpoint, err := g.endpoint(statsPath)
 	if err != nil {
@@ -858,7 +864,7 @@ func (g GatewayPusher) Probe(ctx context.Context) error {
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return fmt.Errorf("bdgateway: the gateway at %s did not answer the probe: %w", shown(redactedURL(g.URL)), err)
+		return fmt.Errorf("bdgateway: the gateway at %s did not answer the probe: %w", shown(redactedURL(g.effectiveURL())), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
@@ -904,48 +910,59 @@ func (g GatewayPusher) ReportedHash(ctx context.Context) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so its workspace hash was not read: %w", shown(redactedURL(g.URL)), err)
+		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so its workspace hash was not read: %w", shown(redactedURL(g.effectiveURL())), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return "", fmt.Errorf("%w: %s answered %d", ErrReportedHashRefused, shown(redactedURL(g.URL)), resp.StatusCode)
+		return "", fmt.Errorf("%w: %s answered %d", ErrReportedHashRefused, shown(redactedURL(g.effectiveURL())), resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
-		return "", fmt.Errorf("bdgateway: the gateway at %s answered %d to the workspace hash read, so its hash was not read", shown(redactedURL(g.URL)), resp.StatusCode)
+		return "", fmt.Errorf("bdgateway: the gateway at %s answered %d to the workspace hash read, so its hash was not read", shown(redactedURL(g.effectiveURL())), resp.StatusCode)
 	}
 	hash := resp.Header.Get(WorkspaceHashHeader)
 	if hash == "" {
-		return "", fmt.Errorf("%w: the answer from %s carries no %s header", ErrNoReportedHash, shown(redactedURL(g.URL)), WorkspaceHashHeader)
+		return "", fmt.Errorf("%w: the answer from %s carries no %s header", ErrNoReportedHash, shown(redactedURL(g.effectiveURL())), WorkspaceHashHeader)
 	}
 	return hash, nil
+}
+
+// effectiveURL is the base URL a request goes to: PushURL when the pusher has
+// one, URL otherwise. A PushURL that is set is never skipped for a good URL, so
+// the URL a caller named for the push is the one validated and the one used.
+func (g GatewayPusher) effectiveURL() string {
+	if g.PushURL != "" {
+		return g.PushURL
+	}
+	return g.URL
 }
 
 // endpoint is the URL a request to path goes to, refusing a URL that is not http(s)
 // with a host, that carries credentials or a query or fragment the endpoint does
 // not take, or that would send the bearer token in the clear to another machine.
 func (g GatewayPusher) endpoint(path string) (string, error) {
-	if g.URL == "" {
-		return "", fmt.Errorf("%w: set --gateway-url or %s", ErrNoGatewayURL, WorkspaceURLEnv)
+	raw := g.effectiveURL()
+	if raw == "" {
+		return "", fmt.Errorf("%w: set --gateway-url or %s, or %s for the push service", ErrNoGatewayURL, WorkspaceURLEnv, WorkspacePushURLEnv)
 	}
-	u, err := url.Parse(g.URL)
+	u, err := url.Parse(raw)
 	if err != nil {
 		// url.Parse's error quotes the whole URL, which may carry credentials, so
 		// it is dropped rather than wrapped.
 		return "", errors.New("bdgateway: invalid gateway URL")
 	}
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("bdgateway: the gateway url %s is not an http or https URL with a host", shown(redactedURL(g.URL)))
+		return "", fmt.Errorf("bdgateway: the gateway url %s is not an http or https URL with a host", shown(redactedURL(raw)))
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("bdgateway: the gateway url %s carries credentials, which the workspace endpoint does not take; the bearer token comes from the token file", shown(redactedURL(g.URL)))
+		return "", fmt.Errorf("bdgateway: the gateway url %s carries credentials, which the workspace endpoint does not take; the bearer token comes from the token file", shown(redactedURL(raw)))
 	}
 	if u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(g.URL)))
+		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(raw)))
 	}
 	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
-		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or the bd gateway's in-cluster Service name (bd-gateway.gt.svc)", shown(redactedURL(g.URL)))
+		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or the bd gateway's in-cluster Service name (bd-gateway.gt.svc)", shown(redactedURL(raw)))
 	}
-	return strings.TrimSuffix(g.URL, "/") + path, nil
+	return strings.TrimSuffix(raw, "/") + path, nil
 }
 
 // localGatewayHosts are the names a container uses for the machine its Docker
