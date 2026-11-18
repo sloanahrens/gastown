@@ -98,6 +98,91 @@ func TestVMStartRegistryRepairOrder(t *testing.T) {
 	}
 }
 
+// TestVMStartRegistryRepairUnhealthySandbox: a gt-sbx forward that holds the
+// port while the registry does not answer is repaired by the restart alone —
+// no gt-control forward is there to cancel and no log port is needed — so the
+// restart runs and the log is never read (gt-77zpql).
+func TestVMStartRegistryRepairUnhealthySandbox(t *testing.T) {
+	t.Parallel()
+	table := registryOwnerReplies(listenerSandbox, "503")
+	table[cmdKey(repairRestartArgv)] = reply{}
+	r := &replyRunner{table: table}
+	steps, err := RepairRegistry(context.Background(), r.run, repairHome)
+	if err != nil {
+		t.Fatalf("RepairRegistry: %v", err)
+	}
+	wantSteps := []Step{{Command: cmdKey(repairRestartArgv)}}
+	if !reflect.DeepEqual(steps, wantSteps) {
+		t.Fatalf("steps = %v, want %v", steps, wantSteps)
+	}
+	want := [][]string{registryLsofArgv, repairPSArgv("4242"), registryCurlArgv, repairRestartArgv}
+	if !reflect.DeepEqual(r.calls, want) {
+		t.Fatalf("calls = %q, want %q", r.calls, want)
+	}
+}
+
+// TestVMStartRegistryRepairPort: the cancel carries the log's port only when
+// the run is a TCP port, and the smallest and largest ports are accepted in
+// their written form; any other run is refused with the log named and no
+// command after the read (gt-77zpql).
+func TestVMStartRegistryRepairPort(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  string
+		port string // the port the cancel carries; "" for a refusal
+	}{
+		{name: "the smallest port", run: "1", port: "1"},
+		{name: "the largest port", run: "65535", port: "65535"},
+		{name: "zero", run: "0"},
+		{name: "one past the largest port", run: "65536"},
+		{name: "a digit run too long for an int", run: "999999999999999999999999"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			log := `time="2026-11-12T09:58:02Z" level=info msg="forwarding" argv=[ssh -S /Users/me/.colima/_lima/colima-gt-control/ssh.sock -O forward -L 127.0.0.1:5001:127.0.0.1:5001 -p ` + tc.run + ` 127.0.0.1]` + "\n"
+			table := registryOwnerReplies(listenerControl, "200")
+			table[cmdKey(repairTailArgv)] = reply{out: log}
+			if tc.port != "" {
+				table[cmdKey(repairCancelArgv(tc.port))] = reply{}
+				table[cmdKey(repairRestartArgv)] = reply{}
+			}
+			r := &replyRunner{table: table}
+			steps, err := RepairRegistry(context.Background(), r.run, repairHome)
+			if tc.port == "" {
+				if err == nil {
+					t.Fatal("RepairRegistry put a run outside 1..65535 in the cancel's argv")
+				}
+				if !strings.Contains(err.Error(), "ha.stderr.log") {
+					t.Fatalf("error = %q, want it to name ha.stderr.log", err)
+				}
+				if steps != nil {
+					t.Fatalf("steps = %v, want none", steps)
+				}
+				want := [][]string{registryLsofArgv, repairPSArgv("4242"), registryCurlArgv, repairTailArgv}
+				if !reflect.DeepEqual(r.calls, want) {
+					t.Fatalf("calls = %q, want %q and no repair", r.calls, want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RepairRegistry: %v", err)
+			}
+			cancel := repairCancelArgv(tc.port)
+			wantSteps := []Step{{Command: cmdKey(cancel)}, {Command: cmdKey(repairRestartArgv)}}
+			if !reflect.DeepEqual(steps, wantSteps) {
+				t.Fatalf("steps = %v, want %v", steps, wantSteps)
+			}
+			want := [][]string{registryLsofArgv, repairPSArgv("4242"), registryCurlArgv,
+				repairTailArgv, cancel, repairRestartArgv}
+			if !reflect.DeepEqual(r.calls, want) {
+				t.Fatalf("calls = %q, want %q", r.calls, want)
+			}
+		})
+	}
+}
+
 // TestVMStartRegistryRepairNoPort: a log with no matching line is an error
 // naming the file, and the repair runs no cancel.
 func TestVMStartRegistryRepairNoPort(t *testing.T) {
