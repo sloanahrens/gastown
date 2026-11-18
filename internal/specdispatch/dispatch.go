@@ -178,8 +178,9 @@ func Eligible(s Spec, maxPriority int) (bool, string) {
 	// The shared hold rule, over the bead's own fields. A decision recorded
 	// there — a routing label, gt:needs-human (the old spelling of
 	// gt:needs-overseer, which internal/land now writes; excludedLabels never
-	// carried it), the operator's reservation, or a do-not-redispatch ruling
-	// in design or notes — takes the bead off every automatic dispatch path,
+	// carried it), a hold: label the birds wrote for the overseer to vet, the
+	// operator's reservation, or a do-not-redispatch ruling in design or notes
+	// — takes the bead off every automatic dispatch path,
 	// so the dispatcher must not re-sling it (gt-lxxo4). Reading the rule
 	// here is what keeps the dispatcher's draw and the sling guard's the same
 	// line.

@@ -341,3 +341,41 @@ func TestDispatchHoldLabelPrefixVerdicts(t *testing.T) {
 		}
 	})
 }
+
+// TestDispatchHoldLabelPrefixLeavesWorkingBeadsAlone pins the blast-radius
+// limit on the hold: arm (gt-la0djc): DispatchHoldFields is also the patrol
+// scan's restart read of a seat's hooked bead (internal/daemon/patrol_scan.go,
+// gt-n38c6), so a bead already worked must not be held by its hold: label. The
+// arm applies only to an open, unassigned bead; a hooked or in_progress bead,
+// or an assigned one, returns no hold from the patrol scan's verdict. A sling
+// re-read under --force keeps the same rule for an assigned bead.
+func TestDispatchHoldLabelPrefixLeavesWorkingBeadsAlone(t *testing.T) {
+	t.Parallel()
+	const seat = "gastown/polecats/ace"
+	cases := []struct {
+		name     string
+		status   string
+		assignee string
+	}{
+		{"hooked and assigned", "hooked", seat},
+		{"in_progress and assigned", "in_progress", seat},
+		{"in_progress and unassigned", "in_progress", ""},
+		{"open and assigned", "open", seat},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, label := range []string{"hold:decision", "hold:vet", "hold:order"} {
+				if got := DispatchHoldFields(tc.status, []string{label}, tc.assignee, "", "", nil); got != "" {
+					t.Errorf("patrol scan DispatchHoldFields(%q, assignee %q) with %q = %q, want no hold", tc.status, tc.assignee, label, got)
+				}
+			}
+		})
+	}
+	t.Run("sling re-read of an assigned bead", func(t *testing.T) {
+		t.Parallel()
+		if got := SlingHoldFields([]string{"hold:vet"}, seat, "", "", nil); got != "" {
+			t.Errorf("SlingHoldFields with hold:vet on assigned bead = %q, want no hold", got)
+		}
+	})
+}
