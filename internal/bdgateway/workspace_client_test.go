@@ -999,7 +999,7 @@ func TestBuildWorkspaceDocumentNamesTheFormulaCopiesWhenTheyFillTheCap(t *testin
 
 // TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig: the town's
 // formula set is carried under the town's beads directory and under each
-// registered rig's, so a town with ten rigs pushes eleven copies, about 1.74 MiB
+// registered rig's, so a town with ten rigs pushes eleven copies, about 1.74 MB
 // for the town's 21 formulas, and the gateway accepts the document whole. The
 // per-file cap still bounds each file; the total cap admits the copies the
 // workspace now carries.

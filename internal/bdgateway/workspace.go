@@ -42,7 +42,7 @@ const (
 	// MaxWorkspaceTotalBytes bounds the whole tree. The tree carries the town's
 	// formulas under the town's beads directory and under each registered rig's,
 	// one copy per rig: the town's 21 formulas are about 160 KiB, so a town with
-	// ten rigs carries eleven copies, about 1.74 MiB, and this cap leaves room
+	// ten rigs carries eleven copies, about 1.74 MB, and this cap leaves room
 	// for more formulas and rigs. A document over it would mean a caller that is
 	// not pushing bd's files and the town's formulas.
 	MaxWorkspaceTotalBytes = 4 << 20
