@@ -7,8 +7,8 @@ import "fmt"
 // scheduled_stop_after, gate_allowance and split_added_lines, the story points
 // change budget's lint_budget_max_lines, the container names, the polecat image
 // source, the container_off names the step audit does not classify, the
-// tier_sweep runner, the disk maintenance cadences and percent, and every
-// scheduled_slings entry.
+// tier_sweep runner, the disk maintenance cadences and percent, the update
+// patrol's min_interval, and every scheduled_slings entry.
 // The writer paths and the command that edits settings/config.json call it
 // before a document is saved, so neither can save one the other refuses
 // (gt-yjzepk.4).
@@ -40,6 +40,11 @@ func ValidateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	}
 	if dm := c.Patrols.DiskMaintenance; dm != nil {
 		if err := dm.validate(); err != nil {
+			return err
+		}
+	}
+	if u := c.Patrols.Update; u != nil {
+		if _, err := parseBoundedDuration(UpdateMinIntervalKey, u.MinInterval, DefaultUpdateMinInterval, MinUpdateMinInterval, MaxUpdateMinInterval); err != nil {
 			return err
 		}
 	}

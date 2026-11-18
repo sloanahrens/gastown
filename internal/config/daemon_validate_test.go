@@ -175,3 +175,91 @@ func TestValidateDaemonPatrolConfig(t *testing.T) {
 		})
 	}
 }
+
+// ValidateDaemonPatrolConfig refuses an update min_interval the update patrol
+// would refuse at run time, naming the key and the allowed range, so the
+// config write is refused and nothing is saved (gt-wv6e29).
+func TestValidateDaemonPatrolConfigUpdateMinIntervalRange(t *testing.T) {
+	t.Parallel()
+
+	update := func(minInterval string) *DaemonPatrolConfig {
+		return &DaemonPatrolConfig{
+			Type:    "daemon-patrol-config",
+			Version: 1,
+			Patrols: &PatrolsConfig{Update: &UpdateConfig{Enabled: true, MinInterval: minInterval}},
+		}
+	}
+
+	refused := []struct {
+		name        string
+		minInterval string
+	}{
+		{"below the 30 minute floor", "5m"},
+		{"above the 24 hour ceiling", "25h"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateDaemonPatrolConfig(update(tc.minInterval))
+			if err == nil {
+				t.Fatalf("ValidateDaemonPatrolConfig(min_interval %q) accepted, want refused", tc.minInterval)
+			}
+			for _, want := range []string{UpdateMinIntervalKey, "30m0s to 24h0m0s"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("ValidateDaemonPatrolConfig(min_interval %q) = %q, want it to contain %q", tc.minInterval, err, want)
+				}
+			}
+		})
+	}
+
+	accepted := []string{"30m", "3h", "24h"}
+	for _, minInterval := range accepted {
+		t.Run("accepts "+minInterval, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateDaemonPatrolConfig(update(minInterval)); err != nil {
+				t.Fatalf("ValidateDaemonPatrolConfig(min_interval %q) = %v, want accepted", minInterval, err)
+			}
+		})
+	}
+}
+
+// ValidateDaemonPatrolConfig passes an update block with no min_interval, since
+// the default applies, and refuses a min_interval that is not a duration,
+// naming the key (gt-wv6e29).
+func TestValidateDaemonPatrolConfigUpdateMinIntervalUnset(t *testing.T) {
+	t.Parallel()
+
+	withUpdate := func(u *UpdateConfig) *DaemonPatrolConfig {
+		return &DaemonPatrolConfig{
+			Type:    "daemon-patrol-config",
+			Version: 1,
+			Patrols: &PatrolsConfig{Update: u},
+		}
+	}
+
+	accepted := []struct {
+		name string
+		doc  *DaemonPatrolConfig
+	}{
+		{"no update block", &DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1, Patrols: &PatrolsConfig{}}},
+		{"update block with no min_interval", withUpdate(&UpdateConfig{Enabled: true})},
+		{"update block with an empty min_interval", withUpdate(&UpdateConfig{Enabled: true, MinInterval: ""})},
+		{"update block with a blank min_interval", withUpdate(&UpdateConfig{Enabled: true, MinInterval: "   "})},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := ValidateDaemonPatrolConfig(tc.doc); err != nil {
+				t.Fatalf("ValidateDaemonPatrolConfig = %v, want accepted", err)
+			}
+		})
+	}
+
+	t.Run("a min_interval that is not a duration", func(t *testing.T) {
+		t.Parallel()
+		err := ValidateDaemonPatrolConfig(withUpdate(&UpdateConfig{Enabled: true, MinInterval: "soon"}))
+		if err == nil || !strings.Contains(err.Error(), UpdateMinIntervalKey) {
+			t.Fatalf("ValidateDaemonPatrolConfig(min_interval \"soon\") = %v, want refused naming %s", err, UpdateMinIntervalKey)
+		}
+	})
+}
