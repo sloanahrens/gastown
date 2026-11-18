@@ -429,7 +429,7 @@ func TestDaemonImageGatewayContext(t *testing.T) {
 			"staged bd.real: " + paths[0],
 			"staged bdgw: " + paths[1],
 			"staged verbs.json: " + paths[2],
-			"label: " + gatewayBDCommitLabel + "=" + imageTestBDCommit,
+			"label: org.gastown.bd-commit=" + imageTestBDCommit,
 		}
 	}
 	t.Run("stages and lists", func(t *testing.T) {

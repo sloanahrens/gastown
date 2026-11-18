@@ -16,8 +16,11 @@ import (
 // writes them.
 const (
 	gtCommit = "org.gastown.gt-commit"
-	bdCommit = "org.gastown.bd-commit"
-	goFloor  = "go-floor"
+	// BDCommitLabel is the key the bd commit is printed under. It is exported
+	// because the daemon image's gateway listing, in internal/cmd, writes the
+	// same line this package reads, so the two sides name one constant.
+	BDCommitLabel = "org.gastown.bd-commit"
+	goFloor       = "go-floor"
 
 	labelPrefix = "label: "
 )
@@ -60,7 +63,7 @@ func Parse(listing, sha string) (Labels, error) {
 		target  *string
 		setting string
 	}{
-		{bdCommit, &out.BDCommit, "bd commit"},
+		{BDCommitLabel, &out.BDCommit, "bd commit"},
 		{goFloor, &out.GoFloor, "Go floor"},
 	} {
 		value, ok := values[field.key]
