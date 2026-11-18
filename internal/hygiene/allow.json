@@ -567,6 +567,102 @@
     "reason": "golden file: the host Dolt backup directory the backup job mounts"
   },
   {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "home directory path",
+    "line": "456864531eadd33b",
+    "reason": "golden file: the comment records that the pod mounts no host Claude beads root"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "blocked word",
+    "line": "456864531eadd33b",
+    "reason": "golden file: the comment records that the pod mounts no host Claude beads root"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "home directory path",
+    "line": "4cc21262f48fa776",
+    "reason": "golden file: the pipeline's host Dolt backup path in the GT_DOLT_BACKUP_ROOT value"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "blocked word",
+    "line": "4cc21262f48fa776",
+    "reason": "golden file: the pipeline's host Dolt backup path in the GT_DOLT_BACKUP_ROOT value"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "home directory path",
+    "line": "24305b09588ea1a0",
+    "reason": "golden file: the host landing work claim's mount in the pod"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "blocked word",
+    "line": "24305b09588ea1a0",
+    "reason": "golden file: the host landing work claim's mount in the pod"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "home directory path",
+    "line": "1a68e1a4a690deaa",
+    "reason": "golden file: the host Dolt backup directory the backup job mounts"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream-include-static.yaml",
+    "rule": "blocked word",
+    "line": "1a68e1a4a690deaa",
+    "reason": "golden file: the host Dolt backup directory the backup job mounts"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "home directory path",
+    "line": "456864531eadd33b",
+    "reason": "golden file: the comment records that the pod mounts no host Claude beads root"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "blocked word",
+    "line": "456864531eadd33b",
+    "reason": "golden file: the comment records that the pod mounts no host Claude beads root"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "home directory path",
+    "line": "4cc21262f48fa776",
+    "reason": "golden file: the pipeline's host Dolt backup path in the GT_DOLT_BACKUP_ROOT value"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "blocked word",
+    "line": "4cc21262f48fa776",
+    "reason": "golden file: the pipeline's host Dolt backup path in the GT_DOLT_BACKUP_ROOT value"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "home directory path",
+    "line": "24305b09588ea1a0",
+    "reason": "golden file: the host landing work claim's mount in the pod"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "blocked word",
+    "line": "24305b09588ea1a0",
+    "reason": "golden file: the host landing work claim's mount in the pod"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "home directory path",
+    "line": "1a68e1a4a690deaa",
+    "reason": "golden file: the host Dolt backup directory the backup job mounts"
+  },
+  {
+    "path": "deploy/k8s/daemon/testdata/stream.yaml",
+    "rule": "blocked word",
+    "line": "1a68e1a4a690deaa",
+    "reason": "golden file: the host Dolt backup directory the backup job mounts"
+  },
+  {
     "path": "internal/forgejoprov/workflow_list.go",
     "rule": "home directory path",
     "line": "3d95c5d948268378",
