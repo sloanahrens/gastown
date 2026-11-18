@@ -2814,6 +2814,8 @@ func filledRenderFlagsRecord(t *testing.T) renderFlagsRecord {
 			field.SetString(strings.ToLower(value.Type().Field(i).Name))
 		case reflect.Bool:
 			field.SetBool(true)
+		case reflect.Int:
+			field.SetInt(7)
 		default:
 			t.Fatalf("renderFlagsRecord.%s is a %s, which this test cannot fill", value.Type().Field(i).Name, field.Kind())
 		}
@@ -2864,6 +2866,10 @@ func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 		case reflect.Bool:
 			if want.Bool() != g.Bool() {
 				t.Errorf("withRecorded drops %s: nothing was named, so the record's %v should be the replay's, got %v", name, want.Bool(), g.Bool())
+			}
+		case reflect.Int:
+			if want.Int() != g.Int() {
+				t.Errorf("withRecorded drops %s: nothing was named, so the record's %d should be the replay's, got %d", name, want.Int(), g.Int())
 			}
 		}
 	}
