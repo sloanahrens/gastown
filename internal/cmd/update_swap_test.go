@@ -424,7 +424,7 @@ func TestDigestInstallEscalatesWhenTheSwapCannotBePutBack(t *testing.T) {
 		t.Fatalf("record the running pair: %v", err)
 	}
 	values := filepath.Join(townRoot, "images.yaml")
-	if err := imagevalues.Write(values, imagevalues.Values{Daemon: newPair.Daemon, Polecat: newPair.Polecat, Commit: newPair.Commit}); err != nil {
+	if err := imagevalues.Write(values, imagevalues.Values{Daemon: newPair.Daemon, Polecat: newPair.Polecat, Bd: podSwapBdRef, Commit: newPair.Commit}); err != nil {
 		t.Fatalf("write the values file: %v", err)
 	}
 
@@ -535,7 +535,7 @@ func TestUpdateImagesFlagInstallsThePairThroughRunUpdate(t *testing.T) {
 		t.Fatalf("record the running pair: %v", err)
 	}
 	values := filepath.Join(townRoot, "images.yaml")
-	if err := imagevalues.Write(values, imagevalues.Values{Daemon: newPair.Daemon, Polecat: newPair.Polecat, Commit: newPair.Commit}); err != nil {
+	if err := imagevalues.Write(values, imagevalues.Values{Daemon: newPair.Daemon, Polecat: newPair.Polecat, Bd: podSwapBdRef, Commit: newPair.Commit}); err != nil {
 		t.Fatalf("write the values file: %v", err)
 	}
 

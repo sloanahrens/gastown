@@ -34,6 +34,7 @@ spec:
                 - abababababababababababababababababababab
                 - --out
                 - /Users/sloan/gt/.runtime/update/images.yaml
+                - --bd
               workingDir: /Users/sloan/gt
               env:
                 - name: XDG_CONFIG_HOME

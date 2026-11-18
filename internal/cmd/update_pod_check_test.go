@@ -273,7 +273,7 @@ func podPairTarget() podDaemonTarget {
 func podPairValuesFile(t *testing.T) (string, []byte) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "images.yaml")
-	if err := imagevalues.Write(path, imagevalues.Values{Daemon: podPairPair.Daemon, Polecat: podPairPair.Polecat, Commit: podPairPair.Commit}); err != nil {
+	if err := imagevalues.Write(path, imagevalues.Values{Daemon: podPairPair.Daemon, Polecat: podPairPair.Polecat, Bd: podSwapBdRef, Commit: podPairPair.Commit}); err != nil {
 		t.Fatalf("write the values file: %v", err)
 	}
 	data, err := os.ReadFile(path)

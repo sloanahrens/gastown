@@ -168,6 +168,18 @@ func refusePodInstallWithoutImages(pod *podDaemonTarget, images string, skip, on
 	return errors.New(podImagesRequiredMessage)
 }
 
+// refusePodImagesWithoutBd refuses a pod-target run whose --images values file
+// records no bd gateway image. An ok pod roll writes the town's own copy of that file,
+// and the town's compose unit takes its bd image from the copy and refuses to start
+// without the key (doltComposeUnitFor), so the run would leave the town unable to start
+// its bd. A run with no pod target is not refused, with or without the key.
+func refusePodImagesWithoutBd(pod *podDaemonTarget, images string, values imagevalues.Values) error {
+	if pod == nil || images == "" || values.Bd != "" {
+		return nil
+	}
+	return fmt.Errorf("the --images values file %s records no bd key: a pod target needs the bd gateway image the file names, so the pod's bd is the one the gateway runs; re-run gt update images --bd for commit %s so the file records bd", images, values.Commit)
+}
+
 // podProbeBound bounds one kubectl exec the pod probe makes. It is far under the
 // restart wait, so a hung exec is one failed poll inside the wait, not a hang past it.
 const podProbeBound = time.Minute
@@ -434,6 +446,20 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err := refusePodInstallWithoutImages(pod, req.Images, skip, only); err != nil {
 		return err
 	}
+	// imagesValues is the pair the run installs: the pod probes check against it,
+	// and an ok pod roll writes the town's own copy of the file from it. It is read
+	// before any town or cluster work, so a pod target whose file records no bd key
+	// is refused before the run touches anything.
+	var imagesValues imagevalues.Values
+	if pod != nil && req.Images != "" {
+		imagesValues, err = imagevalues.Load(req.Images)
+		if err != nil {
+			return fmt.Errorf("the --images values file: %w", err)
+		}
+		if err := refusePodImagesWithoutBd(pod, req.Images, imagesValues); err != nil {
+			return err
+		}
+	}
 
 	townRoot, err := seams.FindTownRoot()
 	if err != nil {
@@ -447,18 +473,9 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return fmt.Errorf("preparing the pod daemon: %w", err)
 	}
-	// imagesValues is the pair the run installs: the pod probes check against it,
-	// and an ok pod roll writes the town's own copy of the file from it. A pod
-	// target installs the commit its images file records: main's tip keeps moving
-	// while the pair for one green commit is rolled, and the digest install
+	// A pod target installs the commit its images file records: main's tip keeps
+	// moving while the pair for one green commit is rolled, and the digest install
 	// refuses a file for any other commit than the run's target.
-	var imagesValues imagevalues.Values
-	if pod != nil && req.Images != "" {
-		imagesValues, err = imagevalues.Load(req.Images)
-		if err != nil {
-			return fmt.Errorf("the --images values file: %w", err)
-		}
-	}
 	if pod != nil {
 		// The Job runs in a pod with no docker, so the image label of the target
 		// pair is read from the registry the --images file names, and the pair's
