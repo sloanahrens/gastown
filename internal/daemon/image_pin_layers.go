@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -150,7 +151,17 @@ func imagePinLayersObserved(path string) ([]attention.Item, error) {
 			Summary:  fmt.Sprintf("%s: the registry no longer serves %s", ref, strings.Join(dead, "; ")),
 		})
 	}
+	slices.SortFunc(items, func(a, b attention.Item) int { return strings.Compare(a.Key, b.Key) })
 	return items, nil
+}
+
+// collectImagePinLayersDeadLayer is the attention queue's read of the dead-layer
+// record: no items while the patrol is off, so its items clear.
+func (s *attentionSources) collectImagePinLayersDeadLayer(context.Context) ([]attention.Item, error) {
+	if s.imagePinLayers == nil {
+		return nil, nil
+	}
+	return s.imagePinLayers()
 }
 
 // imagePinLayersRegistryRef is the reference pincheck reads for a pinned image:
@@ -173,9 +184,9 @@ func imagePinLayersRegistryRef(pinned string) string {
 // runImagePinLayers is one day's check: every digest-pinned image is asked of
 // its registry at linux/arm64 and the dead digests replace the record, so a pin
 // found whole clears. A check that cannot decide writes nothing and fails.
-func runImagePinLayers(ctx context.Context, recordPath string, reg pincheck.Registry) error {
+func runImagePinLayers(ctx context.Context, recordPath string, pins []string, reg pincheck.Registry) error {
 	findings := imagePinLayersFindings{}
-	for _, pinned := range templates.DigestPinnedImages() {
+	for _, pinned := range pins {
 		res, err := pincheck.Check(ctx, reg, imagePinLayersRegistryRef(pinned), []string{imagePinLayersPlatform})
 		if err != nil {
 			return fmt.Errorf("checking the layers of %s: %w", pinned, err)
@@ -249,7 +260,7 @@ func (d *Daemon) startImagePinLayersTicker() (<-chan time.Time, func()) {
 	if d.imagePinLayersRun == nil {
 		townRoot := d.config.TownRoot
 		d.imagePinLayersRun = func(ctx context.Context, _ time.Time) error {
-			return runImagePinLayers(ctx, imagePinLayersFindingsPath(townRoot), pincheck.HTTP{})
+			return runImagePinLayers(ctx, imagePinLayersFindingsPath(townRoot), templates.DigestPinnedImages(), pincheck.HTTP{})
 		}
 	}
 	d.logger.Printf("Image pin layers ticker started (check interval %v)", imagePinLayersCheckTick)
