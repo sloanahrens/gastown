@@ -115,6 +115,13 @@ const (
 	// deploy-pair-refused:<rig>:<sha12>, one per commit the update ledger
 	// records as refused.
 	pairReadyRefusedPrefix = "deploy-pair-refused:"
+	// pairReadyStuckPrefix keys one item: deploy-pair-stuck:<rig>:<sha12>, one
+	// per commit whose pair is still unpublished past the stuck bound.
+	pairReadyStuckPrefix = "deploy-pair-stuck:"
+	// pairReadyStuckAfter is how long a green commit newer than the running one
+	// may wait for its pair before the check raises deploy-pair-stuck: past it
+	// no roll starts from the commit by itself (gt-afwjb4).
+	pairReadyStuckAfter = 90 * time.Minute
 )
 
 // pairReadyAPI is the viewer's read of a rig's Forgejo repository: its green
@@ -140,6 +147,13 @@ type pairReadyRegistry interface {
 type pairReadyGit interface {
 	HasObject(sha string) (bool, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+}
+
+// pairReadyAged is the clone's read of a commit's time, which ages a green ref
+// whose pair is missing. daemonGit offers it; a clone that does not leaves
+// every green unaged, which the age read logs.
+type pairReadyAged interface {
+	CommitTime(rev string) (time.Time, error)
 }
 
 // pairReadyRig is one image rig as the check reads it: its repository, the
@@ -246,7 +260,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 			carryFailedRuns(nextFailed, failed, out[r.Rig])
 			continue
 		}
-		items, found, scanErr, err := pairReadyItems(ctx, r, running, prev[r.Rig], failed, refused, logf)
+		items, found, scanErr, err := pairReadyItems(ctx, r, running, now, prev[r.Rig], failed, refused, logf)
 		for key, f := range found {
 			nextFailed[key] = f
 		}
@@ -335,10 +349,12 @@ func (c *pairReadyCheck) townFailed(key string, err error) {
 }
 
 // pairReadyCommitItem reports whether kind is one of the per-commit items the
-// check raises: a pair ready to roll, a pair the update ledger refuses, or an
-// image build that failed or whose status is unknown for the commit.
+// check raises: a pair ready to roll or stuck, a pair the update ledger
+// refuses, or an image build that failed or whose status is unknown for the
+// commit.
 func pairReadyCommitItem(kind attention.Kind) bool {
-	return kind == attention.KindDeployPairReady || kind == attention.KindDeployPairRefused ||
+	return kind == attention.KindDeployPairReady || kind == attention.KindDeployPairStuck ||
+		kind == attention.KindDeployPairRefused ||
 		kind == attention.KindImagesFailed || kind == attention.KindImagesUnknown
 }
 
@@ -455,7 +471,8 @@ type pairReadyGreen struct {
 // pairReadyItems reads one rig and returns the items it raises: one for each
 // green commit newer than running whose daemon and polecat images are both in
 // the registry at its stamp, one for each green commit newer than running that
-// the update ledger records as refused, and one for each commit whose pair is
+// the update ledger records as refused, one for each commit whose pair is
+// missing past pairReadyStuckAfter, and one for each commit whose pair is
 // missing and whose images workflow run ended failed or canceled. A read that
 // cannot list the branches returns an error, so the caller keeps what the rig
 // held until the failure bound. A listing that ended early or a branch whose
@@ -469,7 +486,7 @@ type pairReadyGreen struct {
 // published pair may be the one the pre-swap check refused; a refused item the
 // rig holds stays. found is the failed runs this read settled, for the next read
 // to reuse.
-func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
+func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now time.Time, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
 		return nil, nil, nil, err
@@ -483,6 +500,7 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 	seen := make(map[string]bool, len(scan.greens)*2)
 	mark := func(sha12 string) {
 		seen[pairReadyKey(r.Rig, sha12)] = true
+		seen[pairReadyStuckKey(r.Rig, sha12)] = true
 		seen[imagesFailedKey(r.Rig, sha12)] = true
 		seen[imagesUnknownKey(r.Rig, sha12)] = true
 	}
@@ -541,10 +559,14 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 			out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v))
 			continue
 		}
-		// The pair is missing, so the commit's images run is what says whether one
-		// can still arrive. Only such a commit asks Forgejo about its run. The
-		// check settles the commit's build items here, so the incomplete path below
-		// never has to.
+		// The pair is missing. A commit past the stuck bound raises its stuck item
+		// before the run is read, so it is raised whether or not an images run
+		// exists; the commit's images run then says whether the pair can still
+		// arrive. Only such a commit asks Forgejo about its run. The check settles
+		// the commit's build items here, so the incomplete path below never has to.
+		if age, ok := pairReadyGreenAge(r, g, now, logf); ok && age >= pairReadyStuckAfter {
+			out = append(out, pairReadyStuckItem(r.Rig, g, age))
+		}
 		items, settled := pairReadyImagesFailed(ctx, r, g, prev, runs, logf)
 		out = append(out, items...)
 		if settled != nil {
@@ -749,6 +771,51 @@ func pairReadyRefusedItem(rig string, g pairReadyGreen, reason string) attention
 		Rig:      rig,
 		SHA:      g.sha,
 		Summary:  fmt.Sprintf("green/%s was refused: %s; no roll starts from it", g.sha12, why),
+	}
+}
+
+// pairReadyStuckKey is one stuck pair's key: deploy-pair-stuck:<rig>:<sha12>.
+// The commit is what it names, so the same commit re-scanned keeps one item and
+// the pass after the pair publishes stops raising it.
+func pairReadyStuckKey(rig, sha12 string) string {
+	return pairReadyStuckPrefix + rig + ":" + sha12
+}
+
+// pairReadyGreenAge is how long before now the green commit was made, read
+// from the commit the ref points at: the green ref is the landing worker's own
+// merge commit, made minutes before CI makes the ref, so its commit time stands
+// in for the push time. ok is false for a ref the rig's clone cannot date —
+// no clone, a read that failed, or a commit carrying no time — and such a ref
+// is not aged, so it raises no stuck item, and the pass logs why.
+func pairReadyGreenAge(r pairReadyRig, g pairReadyGreen, now time.Time, logf func(string, ...any)) (time.Duration, bool) {
+	git, ok := r.Git.(pairReadyAged)
+	if r.Git == nil || !ok {
+		logf("deploy pair check: %s: green/%s is not aged, since the rig has no local clone that dates a commit", r.Rig, g.sha12)
+		return 0, false
+	}
+	at, err := git.CommitTime(g.sha)
+	if err != nil {
+		logf("deploy pair check: %s: green/%s is not aged, since its commit time could not be read: %v", r.Rig, g.sha12, err)
+		return 0, false
+	}
+	if at.IsZero() {
+		logf("deploy pair check: %s: green/%s is not aged, since its commit carries no time", r.Rig, g.sha12)
+		return 0, false
+	}
+	return now.Sub(at), true
+}
+
+// pairReadyStuckItem is the item for a green commit whose pair is still
+// unpublished past pairReadyStuckAfter, naming the commit and its age.
+func pairReadyStuckItem(rig string, g pairReadyGreen, age time.Duration) attention.Item {
+	return attention.Item{
+		Key:      pairReadyStuckKey(rig, g.sha12),
+		Kind:     attention.KindDeployPairStuck,
+		Severity: attention.SeverityHigh,
+		Rig:      rig,
+		SHA:      g.sha,
+		Summary: fmt.Sprintf("green/%s is %d minutes old and its pair is not published; no roll can start from it",
+			g.sha12, int(age/time.Minute)),
 	}
 }
 
@@ -1165,6 +1232,14 @@ func (s *attentionSources) collectImagesFailed(context.Context) ([]attention.Ite
 // the failed builds (gt-3vafwr).
 func (s *attentionSources) collectImagesUnknown(context.Context) ([]attention.Item, error) {
 	return s.pairReadyItemsOfKind(attention.KindImagesUnknown), nil
+}
+
+// collectPairStuck returns the stuck pairs the same read finds: one per green
+// commit newer than the running one whose pair is still unpublished past
+// pairReadyStuckAfter (gt-afwjb4). It is a collector of its own, like the
+// failed builds.
+func (s *attentionSources) collectPairStuck(context.Context) ([]attention.Item, error) {
+	return s.pairReadyItemsOfKind(attention.KindDeployPairStuck), nil
 }
 
 // collectPairRefused returns the refused pairs the same read finds: one per

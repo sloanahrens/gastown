@@ -531,6 +531,9 @@ func TestPairReadyOneImageAloneRaisesNothing(t *testing.T) {
 			t.Parallel()
 			fx := newPairFixture(t)
 			delete(fx.reg.(*fakePairRegistry).digests, tc.missing+"@"+pairGreen12)
+			// The clone dates green at the read, since this case is about the
+			// images alone and not about an unaged ref.
+			fx.git = pairDatedClone{fx.git, pairT0}
 
 			fx.run(pairT0)
 
@@ -1399,6 +1402,9 @@ func TestImagesUnknownLogsOncePerStreak(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
 	fx.reg = &fakePairRegistry{}
+	// The clone dates green at the read, so the one log this case counts is the
+	// run list's.
+	fx.git = pairDatedClone{fx.git, pairT0}
 	fx.api.runErr = errors.New("forgejo answered 500 on the run list")
 
 	fx.run(pairT0)
