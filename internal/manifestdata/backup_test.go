@@ -56,4 +56,14 @@ func TestManifestBackup(t *testing.T) {
 				i, got[i].Path, got[i].Owner, row.path, row.owner)
 		}
 	}
+
+	// The backup export walks what Backup returns (gt-4kf6kk), so the property
+	// is asserted on those rows rather than inferred from the table: every row
+	// it names is a row the manifest carries, and no tagged path is skipped
+	// without a word.
+	for _, e := range got {
+		if !m.Names(e.Path) {
+			t.Errorf("Backup() row %q is not a row of the manifest", e.Path)
+		}
+	}
 }
