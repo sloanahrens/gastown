@@ -1,5 +1,6 @@
-// Package vmstart reads and repairs the DNS state of a Colima VM, so the start
-// command and the reboot check share one definition (gt-6ggud7, gt-x5a7bz).
+// Package vmstart reads and repairs the DNS state of a Colima VM and reads the
+// owner of the Mac's registry port, so the start command and the reboot check
+// share one definition (gt-6ggud7, gt-x5a7bz, gt-8e43fp).
 package vmstart
 
 import (
@@ -9,8 +10,10 @@ import (
 )
 
 // Runner runs one command and returns its standard output. An error means the
-// command exited non-zero; it must not carry the command's output, which can
-// hold a secret.
+// command exited non-zero, and it carries the exit status as an ExitCode() int
+// method, as *exec.ExitError does, wrapped or not; it must not carry the
+// command's output, which can hold a secret. RegistryOwner reads that status to
+// tell a tool's exit 1, which can be an answer, from a failed read.
 type Runner func(ctx context.Context, name string, args ...string) ([]byte, error)
 
 // LimaGateway is the address the Lima gateway answers DNS on from inside a
