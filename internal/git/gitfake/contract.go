@@ -257,6 +257,25 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("DiffNumstat counts the lines each changed file adds and removes", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		g := fx.env.Open(fx.clone)
+		// The branch adds b.txt with one line, so the change base..head is one
+		// added line in one file.
+		if got, err := g.DiffNumstat(fx.base, fx.head); err != nil || got != "1\t0\tb.txt" {
+			t.Errorf("DiffNumstat = %q, %v; want one added line in b.txt", got, err)
+		}
+		if got, err := g.DiffNumstat(fx.head, fx.head); err != nil || got != "" {
+			t.Errorf("DiffNumstat of an empty range = %q, %v; want nothing", got, err)
+		}
+		// A directory that is no repository fails the read rather than
+		// answering an empty diff.
+		if got, err := fx.env.Open(t.TempDir()).DiffNumstat(fx.base, fx.head); err == nil {
+			t.Errorf("DiffNumstat outside a repository = %q, nil; want an error", got)
+		}
+	})
+
 	t.Run("CommitMessages lists base..head newest first with bodies", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))

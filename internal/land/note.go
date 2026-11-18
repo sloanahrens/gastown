@@ -628,6 +628,13 @@ type LandingRecord struct {
 	PolecatAttempts   []PolecatAttempt `json:"polecat_attempts,omitempty"`
 	PolecatLowerBound bool             `json:"polecat_lower_bound,omitempty"`
 	PolecatUpperBound bool             `json:"polecat_upper_bound,omitempty"`
+	// AddedLines and FilesChanged are the landed change's added lines, tests
+	// included, and its changed files, read from the landed diff's numstat
+	// when the record is written. They go to the landings file only, not the
+	// note block. A diff that could not be read leaves both zero, and a zero
+	// is left out of the JSON (gt-8ldz1g).
+	AddedLines   int `json:"added_lines,omitempty"`
+	FilesChanged int `json:"files_changed,omitempty"`
 }
 
 // PolecatAttempt is one seat's time on the landing's bead, an entry of
