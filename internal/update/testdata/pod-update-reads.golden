@@ -3,14 +3,17 @@
 # which command each line serves, read from the code:
 #
 # patch deployments: podDaemonSwap.Apply in internal/cmd/update_pod_swap.go, the
-#   strategic patches of the daemon's Deployment and the dashboard's
-#   (kubectl patch deployment/<name>).
+#   strategic patches of the bd gateway's Deployment, the daemon's and the
+#   dashboard's (kubectl patch deployment/<name>).
 #
 # get deployments, list deployments, watch deployments: podDaemonSwap.Apply's
-#   rollout waits on both Deployments (kubectl rollout status deployment/<name>).
-#   The get also serves the dashboard's existence read in Apply
-#   (kubectl get deployment/dashboard -o name --ignore-not-found) and the Deployment
-#   read in the exec below.
+#   rollout waits on all three Deployments (kubectl rollout status
+#   deployment/<name>). The get also serves the dashboard's and the bd gateway's
+#   existence reads in Apply (kubectl get deployment/<name> -o name
+#   --ignore-not-found), the running pair's gateway image read
+#   (podDaemonSwap.RunningPair's gatewayImage), and the Deployment read in the exec
+#   below. The gateway step's reads are these same lines: the Role's deployments
+#   rule binds them to bd-gateway by resourceNames.
 #
 # get pods, list pods, create pods/exec: podDaemonCommit in
 #   internal/cmd/update_pod_probe.go (kubectl exec deployment/<name> -- gt version).
