@@ -31,11 +31,13 @@ import (
 // sandbox seat's hooks read a different filesystem, so a queued answer never
 // reaches it (gt-700w3u).
 //
-// A close is a move from open to closed between two ticks, so the pass only
-// announces an escalation whose id it saw open on an earlier tick. That state
-// lives in the daemon's state directory, so a restarted daemon neither forgets
-// an escalation that closed while it was down nor nudges again one it already
-// announced.
+// A close is a move from open to closed between two ticks, so the pass announces
+// an escalation whose id it saw open on an earlier tick. An escalation that
+// opened and closed between two ticks was never seen open, so the pass also
+// announces one that closed after the last complete pass began (CheckedAt,
+// gt-nanhzn). That state lives in the daemon's state directory, so a restarted
+// daemon neither forgets an escalation that closed while it was down nor nudges
+// again one it already announced.
 
 // escalationCloseNudgeFile is the state file, under <town>/daemon.
 const escalationCloseNudgeFile = "escalation_close_nudge.json"
@@ -108,7 +110,9 @@ type escalationSendBudget struct {
 	// remaining is how many escalations the pass may still nudge. It starts as
 	// the watched set, which holds every close the pass could reach, and is
 	// taken down as each close is judged, so a send's share of what is left
-	// grows as the pass works through them.
+	// grows as the pass works through them. A close the pass finds unwatched
+	// (closedSince) joins the count when it is found, so the count does not
+	// fall below the closes still to judge.
 	//
 	// An id is judged at most once per pass: the escalations come from a bead
 	// store list keyed by id (one record per escalation bead), and an escalation
@@ -167,6 +171,11 @@ type escalationCloseState struct {
 	// nudge because the seat no longer held their bead or had no live session.
 	// Oldest first; only the newest escalationCloseAnnouncedMax are kept.
 	Announced []string `json:"announced,omitempty"`
+	// CheckedAt is when the last pass that read every rig began. A closed
+	// escalation the pass never saw open is judged only when it closed after
+	// this time (closedSince). Zero until a complete pass records it, so a
+	// first pass judges no such close.
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 // escalationSeat is what the pass reads of a polecat's session.
@@ -272,8 +281,13 @@ func (d *Daemon) nudgeClosedEscalations(h *patrolScanHost, rigs []string) {
 // later close waiting: a close the pass cannot reach before the budget is spent
 // stays owed for the next tick, since a slow send must not hold the patrol tick
 // once per escalation (escalationCloseSendBudget).
+//
+// The pass's start is read before any rig, and a complete pass records it as
+// CheckedAt. A close made while the rigs are read is then after CheckedAt, so
+// the next pass judges it; recording the end of the pass would skip it.
 func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, rigs []string) escalationCloseState {
 	s.seat = readSeatOncePerPass(s.seat, s.logf)
+	passAt := s.now()
 	budget := &escalationSendBudget{now: s.now, remaining: len(st.Watch)}
 	cur, saved := st.clone(), st.clone()
 	listed := map[string]bool{}
@@ -304,10 +318,16 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 				cur.Watch[e.ID] = true
 			case slices.Contains(cur.Announced, e.ID):
 				delete(cur.Watch, e.ID)
-			case cur.Watch[e.ID]:
+			case cur.Watch[e.ID], cur.closedSince(e):
+				if !cur.Watch[e.ID] {
+					budget.remaining++
+				}
 				outcome := judgeEscalationClose(s, rig, e, budget)
 				budget.judged()
 				if outcome == escalationPending {
+					// Owed: the next tick judges it from the watch, since its
+					// close may now be before CheckedAt.
+					cur.Watch[e.ID] = true
 					continue
 				}
 				cur.announce(e.ID)
@@ -326,8 +346,10 @@ func runEscalationCloseNudges(s escalationCloseSeams, st escalationCloseState, r
 		}
 	}
 	if complete {
-		// Only a pass that read every rig knows which ids are gone.
+		// Only a pass that read every rig knows which ids are gone, and only
+		// such a pass has seen every close up to passAt.
 		cur.prune(listed)
+		cur.CheckedAt = passAt
 	}
 	if !writeFailed && !cur.equal(saved) {
 		persist()
@@ -531,14 +553,25 @@ func readSeatOncePerPass(read func(rig, name string) (escalationSeat, error), lo
 
 // clone returns a copy that shares no map or slice with st.
 func (st escalationCloseState) clone() escalationCloseState {
-	c := escalationCloseState{Watch: map[string]bool{}, Announced: slices.Clone(st.Announced)}
+	c := escalationCloseState{Watch: map[string]bool{}, Announced: slices.Clone(st.Announced), CheckedAt: st.CheckedAt}
 	maps.Copy(c.Watch, st.Watch)
 	return c
 }
 
-// equal reports whether two states hold the same watched and announced ids.
+// equal reports whether two states hold the same watched and announced ids and
+// the same CheckedAt.
 func (st escalationCloseState) equal(o escalationCloseState) bool {
-	return maps.Equal(st.Watch, o.Watch) && slices.Equal(st.Announced, o.Announced)
+	return maps.Equal(st.Watch, o.Watch) && slices.Equal(st.Announced, o.Announced) && st.CheckedAt.Equal(o.CheckedAt)
+}
+
+// closedSince reports whether e is closed after the last complete pass began.
+// The pass consults it only for an escalation it neither watches nor has
+// announced (the switch in runEscalationCloseNudges orders those cases first).
+// It is the close an escalation that opened and closed between two ticks
+// leaves: the pass never saw it open. With no recorded pass (CheckedAt zero)
+// nothing qualifies, so the first pass judges no close it did not watch.
+func (st escalationCloseState) closedSince(e patrolscan.Escalation) bool {
+	return !e.Open && !st.CheckedAt.IsZero() && e.ClosedAt.After(st.CheckedAt)
 }
 
 // announce records id as nudged or settled: it is no longer watched, and it is
