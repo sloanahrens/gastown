@@ -510,8 +510,12 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 		name := path.Join(prefix, entry.Name())
 		if entry.IsDir() {
 			// A directory named like a file bd writes is not one of them, and
-			// descending into it would admit its files under a runtime name.
-			if isBDRuntimeFile(name, besideBeads) {
+			// descending into it would admit its files under a runtime name: a
+			// ".beads.gate.lock" directory holding a ".beads" of its own passes
+			// the push rules for the files beneath it. The name alone refuses it
+			// wherever the directory stands, since no place makes it a file bd
+			// writes.
+			if bdRuntimeFileNames[entry.Name()] {
 				return fmt.Errorf("%w: %q is a directory, not a file bd writes", ErrWorkspacePath, shown(name))
 			}
 			if err := s.readTreeDir(filepath.Join(dir, entry.Name()), name, files, total); err != nil {
