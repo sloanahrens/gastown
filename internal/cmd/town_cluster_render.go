@@ -132,7 +132,7 @@ const defaultBdGatewayTokenSecret = "bd-gateway-tokens" //nolint:gosec // a Secr
 
 // defaultBdGatewayMaxConcurrent is the bd gateway's concurrency cap when
 // --bd-gateway-max-concurrent is not given. It is above the gateway's own default
-// of 16, which the operator found too low.
+// of 16 (gt-jz9gn7).
 const defaultBdGatewayMaxConcurrent = 32
 
 // clusterRenderRecordOptions are the two flags that tie a run to the recorded-flags
