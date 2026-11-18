@@ -165,6 +165,8 @@ func assertNoDrift(t *testing.T, d *Daemon) {
 // TestWorkspaceDriftProbePushesOnDifferingHeader: a gateway whose probe answer
 // shows a hash other than the stored tree is pushed to at the probe, not at the next
 // tick. The push stores, and the next probe, which matches it, pushes nothing.
+//
+//testpolicy:allow parallel — installs the process-wide workspace pusher the reconcile loop pushes through, which another test must not see mid-run
 func TestWorkspaceDriftProbePushesOnDifferingHeader(t *testing.T) {
 	r := startProbeRun(t)
 	start := r.clk.Now()
@@ -190,6 +192,8 @@ func TestWorkspaceDriftProbePushesOnDifferingHeader(t *testing.T) {
 // TestWorkspaceDriftProbeAbsentPushesOnce: a probe answer that refuses because the
 // workspace is not present pushes once. The push clears the absent state, so the
 // probe after it is quiet.
+//
+//testpolicy:allow parallel — installs the process-wide workspace pusher the reconcile loop pushes through, which another test must not see mid-run
 func TestWorkspaceDriftProbeAbsentPushesOnce(t *testing.T) {
 	r := startProbeRun(t)
 	r.gw.setAbsent(true)
@@ -207,6 +211,8 @@ func TestWorkspaceDriftProbeAbsentPushesOnce(t *testing.T) {
 
 // TestWorkspaceDriftProbeMatchingHashIsQuiet: probes that report the stored tree
 // record no drift and push nothing, however many there are.
+//
+//testpolicy:allow parallel — installs the process-wide workspace pusher the reconcile loop pushes through, which another test must not see mid-run
 func TestWorkspaceDriftProbeMatchingHashIsQuiet(t *testing.T) {
 	r := startProbeRun(t)
 	for range 3 {
@@ -222,6 +228,8 @@ func TestWorkspaceDriftProbeMatchingHashIsQuiet(t *testing.T) {
 // TestWorkspaceDriftProbeUnreachableLogsOnce: a gateway that does not answer its
 // probe triggers no push, and is logged once for the failing state, not on every
 // probe. Its first answer after that is logged once too.
+//
+//testpolicy:allow parallel — installs the process-wide workspace pusher the reconcile loop pushes through, which another test must not see mid-run
 func TestWorkspaceDriftProbeUnreachableLogsOnce(t *testing.T) {
 	r := startProbeRun(t)
 	r.gw.setDown(true)
