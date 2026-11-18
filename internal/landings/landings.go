@@ -63,8 +63,9 @@ type Record struct {
 	PolecatLowerBound bool                  `json:"polecat_lower_bound,omitempty"`
 	PolecatUpperBound bool                  `json:"polecat_upper_bound,omitempty"`
 	// AddedLines and FilesChanged are the landed change's added lines, tests
-	// included, and its changed files. Nothing fills them yet (gt-wr3rin), so
-	// a record reads zero, as one written before the fields existed does
+	// included, and its changed files, written by the landing worker from the
+	// landed diff's numstat (gt-8ldz1g). A record written before the fields
+	// existed, or for a landing whose diff could not be read, reads zero
 	// (gt-9bkhff).
 	AddedLines   int `json:"added_lines,omitempty"`
 	FilesChanged int `json:"files_changed,omitempty"`

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,10 @@ type Repo interface {
 	// file at a revision. RiskPaths uses both to label a landing that touched
 	// a risk path without holding it (gt-vsct7.4).
 	DiffNameOnly(base, head string) ([]string, error)
+	// DiffNumstat is `git diff --numstat --no-renames base..head`, the landed
+	// change's size: one line per changed path, "-" counts for a binary file.
+	// The landing records its sum (gt-8ldz1g).
+	DiffNumstat(base, head string) (string, error)
 	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
 	// PatchIDZeroContext is PatchID over a diff with no context lines, so an
@@ -2597,6 +2602,7 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 		Route: route, Agent: w.Agent, Priority: w.Priority, SPEstimate: w.SPEstimate, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
 		RiskPathReviewSkippedBy: res.RiskPathReviewSkippedBy,
 	}
+	l.landingSize(g, &rec, res.Base, res.LandedCommit)
 	if err := l.writeLandedRef(g, rec); err != nil {
 		return err
 	}
@@ -2604,6 +2610,62 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 		return fmt.Errorf("landings file: %w", err)
 	}
 	return l.recordBead(w, rec)
+}
+
+// landingSize fills rec's added lines and files changed from the landed
+// change's numstat. A diff that cannot be read leaves both zero and is
+// logged, and the landing stands either way; a landing that changed nothing
+// records the same zeros (gt-8ldz1g).
+func (l *Lander) landingSize(g Repo, rec *LandingRecord, base, landed string) {
+	out, err := g.DiffNumstat(base, landed)
+	if err != nil {
+		l.logf("%s: landing size not recorded: %v", rec.BeadID, err)
+		return
+	}
+	added, files, err := numstatSize(out)
+	if err != nil {
+		l.logf("%s: landing size not recorded: %v", rec.BeadID, err)
+		return
+	}
+	rec.AddedLines, rec.FilesChanged = added, files
+}
+
+// numstatSize sums the added column of `git diff --numstat` output and counts
+// its files. A binary file's "-" adds no lines and still counts as a file, and
+// a path git quotes (a space or a non-ASCII name) stays one tab-separated
+// field, so it counts as one file too. A line that is not three tab-separated
+// fields, or whose added count is neither "-" nor an integer, is an error:
+// output that is not numstat records no size rather than a partial sum.
+func numstatSize(out string) (added, files int, err error) {
+	for i, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, "\t", 3)
+		if len(fields) != 3 {
+			return 0, 0, fmt.Errorf("numstat line %d: %d tab-separated fields, want 3", i+1, len(fields))
+		}
+		n, err := numstatAdded(fields[0])
+		if err != nil {
+			return 0, 0, fmt.Errorf("numstat line %d: %w", i+1, err)
+		}
+		added += n
+		files++
+	}
+	return added, files, nil
+}
+
+// numstatAdded is one numstat line's added column: a count, or "-" for a
+// binary file, which adds no lines.
+func numstatAdded(s string) (int, error) {
+	if s == "-" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("added count %q is not an integer", s)
+	}
+	return n, nil
 }
 
 // recordBead writes the landing onto the work bead: the LANDING RECORD block,

@@ -28,6 +28,7 @@ type Repo interface {
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
 	CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error)
 	DiffNameOnly(base, head string) ([]string, error)
+	DiffNumstat(base, head string) (string, error)
 	DiffPathsNameOnly(a, b string, paths []string) ([]string, error)
 	ShowFileAtRev(ref, path string) (string, error)
 	ShowFileBytesAtRev(ref, path string) ([]byte, error)
@@ -311,6 +312,35 @@ func (h *handle) DiffNameOnly(base, head string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// DiffNumstat returns base..head as `git diff --numstat --no-renames` does:
+// one "added<TAB>removed<TAB>path" line per changed path. The fake's files
+// hold text, so no line ever carries the "-" of a binary file.
+func (h *handle) DiffNumstat(base, head string) (string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"diff", "--numstat", "--no-renames", base + ".." + head}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return "", err
+	}
+	b, ok := h.resolve(r, wt, base)
+	if !ok {
+		return "", unknownRevision(base+".."+head, args...)
+	}
+	hd, ok := h.resolve(r, wt, head)
+	if !ok {
+		return "", unknownRevision(base+".."+head, args...)
+	}
+	from, to := h.f.treeOf(b), h.f.treeOf(hd)
+	var lines []string
+	for _, p := range changedPaths(from, to) {
+		removed, added := lineDiff(from[p], to[p])
+		lines = append(lines, fmt.Sprintf("%d\t%d\t%s", len(added), len(removed), p))
+	}
+	// git.Git trims the command's output, so no line ends in a newline.
+	return strings.Join(lines, "\n"), nil
 }
 
 // DiffPathsNameOnly is *git.Git's direct two-ref diff restricted to paths:
