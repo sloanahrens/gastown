@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
@@ -20,11 +19,15 @@ type SlingContextRecord struct {
 // contexts: the town root plus every registered rig's directory (and its
 // mayor/rig) that has a .beads directory.
 //
-// The rigs come from the town's registry, the same one the bd gateway's
-// workspace holds, so a folder that merely has a .beads is not searched: a
-// stale leftover or a route target is not a rig, and reading one fails the
-// scan where the gateway has no workspace for it. A registry that cannot be
-// read is returned as an error, never treated as an empty rig list.
+// The rigs come from the town's registry, read through townconfig.Load: the
+// same load the bd gateway's BuildWorkspaceDocument makes, so the scan holds
+// exactly the rigs the gateway workspace does. A folder that merely has a
+// .beads is not searched: a stale leftover or a route target is not a rig, and
+// reading one fails the scan where the gateway has no workspace for it. The
+// load is the town's whole config kernel, so a root that is not a town, or
+// whose kernel files do not load, is returned as an error too; the scan never
+// falls back to the folders on disk, and a registry it cannot read is never
+// treated as an empty rig list.
 func SlingContextSearchDirs(townRoot string) ([]string, error) {
 	town, err := townconfig.Load(townRoot)
 	if err != nil {
@@ -34,8 +37,9 @@ func SlingContextSearchDirs(townRoot string) ([]string, error) {
 	seen := map[string]bool{townRoot: true}
 	for _, rig := range town.RigNames() {
 		// The registry's name reaches the filesystem, so it must be one path
-		// element: a name with a separator would search outside the town.
-		if !filepath.IsLocal(rig) || strings.ContainsRune(rig, filepath.Separator) {
+		// element: a name that escapes the town, or one with a separator in
+		// it, would search a directory the registry does not name.
+		if !filepath.IsLocal(rig) || filepath.Base(rig) != rig {
 			return nil, fmt.Errorf("discovering scheduler beads search dirs: rig %q in the town registry is not one path element", rig)
 		}
 		rigDir := filepath.Join(townRoot, rig)

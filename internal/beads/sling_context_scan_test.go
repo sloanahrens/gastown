@@ -144,17 +144,88 @@ func TestSlingContextSearchDirsFailsOnUnreadableRegistry(t *testing.T) {
 	}
 }
 
-func TestSlingContextSearchDirsRefusesARigNameOutsideTheTown(t *testing.T) {
+// The registry's name reaches the filesystem, so only a name that is one path
+// element is accepted: a name that escapes the town, and a name that is a
+// path of more than one element, are both refused before any stat.
+func TestSlingContextSearchDirsRefusesARigNameThatIsNotOnePathElement(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	writeTownRegistry(t, town, "../elsewhere")
-
-	got, err := SlingContextSearchDirs(town)
-	if err == nil {
-		t.Fatalf("SlingContextSearchDirs with a rig name %q = %v, want an error", "../elsewhere", got)
+	tests := []struct {
+		name string
+		rig  string
+	}{
+		{name: "a name that escapes the town", rig: "../elsewhere"},
+		{name: "a name with a separator", rig: "alpha/beta"},
 	}
-	if got != nil {
-		t.Errorf("SlingContextSearchDirs returned %v beside its error; a refused name must return no directories", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTownRegistry(t, town, tc.rig)
+
+			got, err := SlingContextSearchDirs(town)
+			if err == nil {
+				t.Fatalf("SlingContextSearchDirs with a rig name %q = %v, want an error", tc.rig, got)
+			}
+			if got != nil {
+				t.Errorf("SlingContextSearchDirs returned %v beside its error; a refused name must return no directories", got)
+			}
+		})
+	}
+}
+
+// townconfig.Load requires mayor/town.json and decodes every kernel file, so
+// the scan refuses a root that is not a town, and a town whose kernel does not
+// load, exactly as the bd gateway does with the same load: it never falls back
+// to searching the folders on disk. Both roots hold a store in a folder, which
+// the old glob searched.
+func TestSlingContextSearchDirsRefusesATownItCannotLoad(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		build func(t *testing.T, town string)
+	}{
+		{
+			name: "a root that is not a town",
+			build: func(t *testing.T, town string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(town, "gastown", ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a town whose kernel file does not load",
+			build: func(t *testing.T, town string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Join(town, "gastown", ".beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeTownRegistry(t, town, "gastown")
+				// An unrelated kernel file, not the registry: the load fails as
+				// a whole, so the scan must not answer from the folders.
+				if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tc.build(t, town)
+
+			got, err := SlingContextSearchDirs(town)
+			if err == nil {
+				t.Fatalf("SlingContextSearchDirs(%s) = %v, want an error", tc.name, got)
+			}
+			if got != nil {
+				t.Errorf("SlingContextSearchDirs returned %v beside its error; a failed load must not fall back to the folders on disk", got)
+			}
+		})
 	}
 }
 
