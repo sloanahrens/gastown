@@ -979,7 +979,11 @@ func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget, o
 			Deployment:     pod.Deployment,
 			Run:            seams.PodRun,
 			RolloutTimeout: updateRestartWait,
-			Out:            out,
+			// The gateway's own bound is wired here, as the restart bound is, so
+			// every swap the installer builds carries it and none waits on a
+			// default it did not choose.
+			GatewayRolloutTimeout: gatewayRolloutTimeout,
+			Out:                   out,
 		}
 		return swap, swap, nil
 	}
