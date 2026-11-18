@@ -1,6 +1,9 @@
 package manifestdata
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // TestManifestBackup pins the backup set: Manifest.Backup returns exactly the
 // tagged rows, in manifest order, and every row it names is a row of the
@@ -57,13 +60,14 @@ func TestManifestBackup(t *testing.T) {
 		}
 	}
 
-	// The backup export walks what Backup returns (gt-4kf6kk), so the property
-	// is asserted on those rows rather than inferred from the table: every row
-	// it names is a row the manifest carries, and no tagged path is skipped
-	// without a word.
-	for _, e := range got {
-		if !m.Names(e.Path) {
-			t.Errorf("Backup() row %q is not a row of the manifest", e.Path)
+	// Each returned row must be the tagged manifest row itself, not one rebuilt
+	// from its path: the table above compares only path and owner.
+	for _, e := range m.Entries {
+		if !e.Backup {
+			continue
+		}
+		if !slices.Contains(got, e) {
+			t.Errorf("Backup() does not return the manifest row %+v", e)
 		}
 	}
 }
