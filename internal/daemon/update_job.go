@@ -255,10 +255,12 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 }
 
 // bdGatewayServiceHost is the host name of the bd gateway's in-cluster Service in the
-// namespace the Job lands in: bd-gateway.gt.svc. The Job resolves it through cluster
-// DNS, so the daemon hands it on unchanged. The admission policy pins the same URL
+// namespace the Job lands in: bd-gateway.gt.svc. updatejob.Build gives the Job that
+// namespace by default, and the daemon's kubectl calls name the same one, so the host
+// is spelled from that constant. The Job resolves it through cluster DNS, so the
+// daemon hands it on unchanged. The admission policy pins the same URL
 // (deploy/k8s/update-admission.yaml), and a test holds the two equal.
-const bdGatewayServiceHost = k8sdaemon.BdGatewayName + "." + k8sdaemon.DefaultNamespace + ".svc"
+const bdGatewayServiceHost = k8sdaemon.BdGatewayName + "." + updatejob.DefaultNamespace + ".svc"
 
 // gatewayURLForJob is the gateway URL the update Job is given: the daemon's own
 // BD_GATEWAY_URL with its host name, when it is a name, replaced by the address the

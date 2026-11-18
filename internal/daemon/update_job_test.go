@@ -1491,6 +1491,26 @@ func TestUpdateJobGatewayServicePolicyPinsBothURLs(t *testing.T) {
 	}
 }
 
+// TestUpdateJobGatewayServiceHostIsJobNamespace holds the Service host the daemon hands
+// the Job to the namespace the Job it creates lands in, so the name the Job resolves is
+// the gateway Service in the Job's own namespace.
+func TestUpdateJobGatewayServiceHostIsJobNamespace(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.d.getenv = gatewayURLEnv("http://bd-gateway.gt.svc:7440")
+	sha := r.commits[2]
+
+	require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, sha))
+
+	job := decodeUpdateJob(t, r.cluster.made["gt-update-"+sha[:12]])
+	got, ok := jobEnvValue(job.Spec.Template.Spec.Containers[0], k8sdaemon.BdGatewayURLEnv)
+	require.True(t, ok, "the Job carries no %s", k8sdaemon.BdGatewayURLEnv)
+	u, err := url.Parse(got)
+	require.NoError(t, err)
+	assert.Equal(t, k8sdaemon.BdGatewayName+"."+job.Metadata.Namespace+".svc", u.Hostname(),
+		"the host handed to the Job is not the gateway Service in the Job's namespace %q", job.Metadata.Namespace)
+}
+
 // updateAdmissionDoc is the part of one document of deploy/k8s/update-admission.yaml
 // the gateway policy test reads: its kind and the expressions of a policy.
 type updateAdmissionDoc struct {

@@ -179,11 +179,82 @@ func TestKindValuesPullSandboxImageAlways(t *testing.T) {
 
 func TestStaticManifestsParse(t *testing.T) {
 	t.Parallel()
-	for _, rel := range []string{"kind/gateway-nodeport.yaml", "values/kind/control-plane-services.yaml", "values/kind/hosts.yaml", "values/cloud/control-plane-services.yaml", "values/cloud/hosts.yaml", "policy/kind.yaml"} {
+	for _, rel := range []string{"kind/gateway-nodeport.yaml", "values/kind/control-plane-services.yaml", "values/kind/hosts.yaml", "values/cloud/control-plane-services.yaml", "values/cloud/hosts.yaml", "policy/kind.yaml", "bd-gateway-service-admission.yaml"} {
 		if len(decodeDocs(t, rel)) == 0 {
 			t.Errorf("%s has no documents", rel)
 		}
 	}
+}
+
+// TestBdGatewayServiceAdmissionBindsGt holds the bd gateway Service guard to the shape
+// the operator applies: one policy over Service creates and updates in the core group,
+// and one binding that names that policy and selects namespace gt, so the guard reaches
+// the bd-gateway Service and no Service in another namespace.
+func TestBdGatewayServiceAdmissionBindsGt(t *testing.T) {
+	t.Parallel()
+	const rel = "bd-gateway-service-admission.yaml"
+	var policies, bindings []map[string]any
+	for _, d := range decodeDocs(t, rel) {
+		switch d["kind"] {
+		case "ValidatingAdmissionPolicy":
+			policies = append(policies, d)
+		case "ValidatingAdmissionPolicyBinding":
+			bindings = append(bindings, d)
+		}
+	}
+	if len(policies) != 1 || len(bindings) != 1 {
+		t.Fatalf("%s holds %d policies and %d bindings, want one of each", rel, len(policies), len(bindings))
+	}
+	policy, binding := policies[0], bindings[0]
+
+	if got, want := at(t, binding, "spec", "policyName"), at(t, policy, "metadata", "name"); got != want {
+		t.Errorf("the binding names policy %v, want the policy %v", got, want)
+	}
+	if got := at(t, binding, "spec", "matchResources", "namespaceSelector", "matchLabels", "kubernetes.io/metadata.name"); got != "gt" {
+		t.Errorf("the binding selects namespace %v, want gt", got)
+	}
+	rules, ok := at(t, policy, "spec", "matchConstraints", "resourceRules").([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("the policy has %d resource rules, want one", len(rules))
+	}
+	rule, ok := rules[0].(map[string]any)
+	if !ok {
+		t.Fatalf("the policy's resource rule is %T, want a map", rules[0])
+	}
+	if got := rule["resources"]; !sameStrings(got, "services") {
+		t.Errorf("the policy's resources are %v, want services", got)
+	}
+	if got := rule["apiGroups"]; !sameStrings(got, "") {
+		t.Errorf("the policy's apiGroups are %v, want the core group", got)
+	}
+	if got := rule["operations"]; !sameStrings(got, "CREATE", "UPDATE") {
+		t.Errorf("the policy's operations are %v, want CREATE and UPDATE", got)
+	}
+}
+
+// sameStrings reports whether v is a list of strings holding exactly want, in any order.
+func sameStrings(v any, want ...string) bool {
+	list, ok := v.([]any)
+	if !ok || len(list) != len(want) {
+		return false
+	}
+	have := map[string]int{}
+	for _, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return false
+		}
+		have[s]++
+	}
+	for _, w := range want {
+		have[w]--
+	}
+	for _, n := range have {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func TestControlPlaneServicesAreExternalNames(t *testing.T) {
