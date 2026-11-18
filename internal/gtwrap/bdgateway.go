@@ -351,6 +351,11 @@ func (g BdGateway) settleBeadsDir(call *Call) error {
 	if _, ok := envValue(call.Env, beadsDirVar); ok {
 		return nil
 	}
+	// A directory that is not absolute cannot be compared with the town, so it is
+	// left alone and beadRig's refusal stands, as it does for one outside the town.
+	if !filepath.IsAbs(call.Dir) {
+		return nil
+	}
 	rel, _, err := nearestBeadsRel(g.Town, call.Dir, statDir(g.Stat))
 	if err != nil || rel == "" {
 		return err
@@ -365,11 +370,15 @@ func (g BdGateway) settleBeadsDir(call *Call) error {
 // the gateway joins the rig onto its own workspace. A BEADS_DIR the workspace
 // cannot hold is refused rather than sent, so the gateway never runs in the wrong
 // database. A call that sets no BEADS_DIR gets the town workspace ("") when it
-// reads no database (bd's version command or its root help probe); every other
-// call without BEADS_DIR is refused, since the gateway cannot otherwise be told
-// which rig it runs in. argv is the call's argv, whose first word the caller has
-// checked is "bd". The bdgateway and bddocker targets share it, so the two cannot
-// translate a call differently.
+// reads no database (bd's version command or its root help probe). The gateway
+// settles a missing BEADS_DIR to the nearest .beads above the call's directory
+// before this runs (settleBeadsDir), so a call that still has none here has no
+// .beads at or above a working directory inside the town, and is refused, since
+// the gateway cannot otherwise be told which rig it runs in. argv is the call's
+// argv, whose first word the caller has checked is "bd". The bdgateway and
+// bddocker targets share the naming, so the two cannot name a rig differently;
+// bddocker settles nothing, so it refuses a call that reads a database and sets
+// no BEADS_DIR.
 func beadRig(town string, env, argv []string) (string, error) {
 	beadsDir, ok := envValue(env, "BEADS_DIR")
 	if !ok || beadsDir == "" {
