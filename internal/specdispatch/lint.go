@@ -312,12 +312,13 @@ type LintOptions struct {
 	// budget line at all. Off (false) is the default: a bead that declares no
 	// budget is not judged on one (gt-j0xfx5).
 	BudgetRequired bool
-	// RequireEstimate refuses a work bead that carries no sp-minutes label, so
-	// a bead filed before any estimate ran its gate is refused rather than
-	// passing in silence (gt-1cx0o0). Off (false) is the default: a library
-	// caller that is not the filer's lint reads no estimate requirement. A bead
-	// whose sp-rung is none carries the estimate's own answer that no estimate
-	// could be made, so it passes.
+	// RequireEstimate refuses a work bead that carries no sp-minutes label, or
+	// one whose sp-minutes labels do not read, so a bead filed before any
+	// estimate ran its gate is refused rather than passing in silence
+	// (gt-1cx0o0, gt-uffeik). Off (false) is the default: a library caller that
+	// is not the filer's lint reads no estimate requirement. A bead whose
+	// sp-rung is none carries the estimate's own answer that no estimate could
+	// be made, so it passes.
 	RequireEstimate bool
 }
 
@@ -784,8 +785,9 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //     rung is none passes (gt-mtzx6s)
 //  9. a bead carrying no sp-minutes label at all is refused when
 //     LintOptions.RequireEstimate asks for one, naming the two commands that
-//     write it; a bead whose rung is none, or whose label does not read,
-//     passes (gt-1cx0o0)
+//     write it; a bead whose label does not read, or whose labels disagree, is
+//     refused too, naming the estimate run that rewrites it; a bead whose rung
+//     is none with no sp-minutes label passes (gt-1cx0o0, gt-uffeik)
 //  10. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused. A bead labeled overseer-only or operator-only may
@@ -974,22 +976,30 @@ func storyPointsSizeRefusal(s Spec, overMinutes float64) (Refusal, bool) {
 }
 
 // storyPointsEstimateRefusal is the estimate requirement's verdict on a spec:
-// the refusal when the bead carries no sp-minutes label, false otherwise. Off
-// (required false) reads no label. A bead whose sp-rung is none passes: the
-// estimate answered that none could be made, which is an estimate's answer and
-// not a missing one. A label that does not parse is still a label the filer
-// wrote — the size gate owns that reading when it is on — so it is not a
-// missing estimate either.
+// the refusal when the bead carries no sp-minutes label or one that cannot be
+// read, false otherwise. Off (required false) reads no label. A bead whose
+// sp-rung is none passes: the estimate answered that none could be made, which
+// is an estimate's answer and not a missing one. A label that does not parse,
+// or two labels that disagree, is refused rather than passed: with the size gate
+// off, nothing else reads it, and a requirement that cannot check the estimate
+// must not answer that it did (gt-uffeik). The none rung does not excuse it — the
+// estimator writes that label with the sp-minutes ones removed, so a bead
+// carrying both holds a broken record, not an answer.
 func storyPointsEstimateRefusal(s Spec, required bool) (Refusal, bool) {
-	if !required || s.HasLabel(noneRungLabel) {
-		return Refusal{}, false
-	}
-	if _, _, found, err := storyPointsMinutes(s.Labels); found || err != nil {
+	if !required {
 		return Refusal{}, false
 	}
 	id := s.ID
 	if id == "" {
 		id = "<bead-id>"
+	}
+	_, _, found, err := storyPointsMinutes(s.Labels)
+	if err != nil {
+		return Refusal{Field: "estimate", Reason: fmt.Sprintf(
+			"%s: run gt spec estimate %s to rewrite the estimate, or delete the sp-minutes estimate and record %s with the reason", err, id, noneRungLabel)}, true
+	}
+	if found || s.HasLabel(noneRungLabel) {
+		return Refusal{}, false
 	}
 	return Refusal{Field: "estimate", Reason: fmt.Sprintf(
 		"no story-point estimate (no sp-minutes label): run gt spec lint --estimate %s, or gt spec estimate %s", id, id)}, true

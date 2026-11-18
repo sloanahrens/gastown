@@ -139,8 +139,9 @@ checked instead: Goal, Constraints, Out of scope, Gate and Size.
 A work bead carrying no sp-minutes label at all is refused: the filer is told
 to run gt spec lint <bead-id> --estimate or gt spec estimate <bead-id>. A bead
 whose sp-rung is none passes — the estimate answered that no estimate could be
-made — and so does a label that does not read. --allow-unestimated turns that
-refusal off for a caller linting a bead that cannot have an estimate yet.
+made. A label that does not read, or two that disagree, is refused too, naming
+the estimate run that rewrites it. --allow-unestimated turns those refusals off
+for a caller linting a bead that cannot have an estimate yet.
 
 To have the estimate made first, run gt spec lint <bead-id> --estimate: it runs
 the same estimate gt spec estimate makes (writing the sp: labels and the note),
@@ -271,7 +272,7 @@ func init() {
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead of one line")
 	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
 	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, fmt.Sprintf("Run the bead's story-point estimate first (the same run gt spec estimate makes) and check the sp-minutes label it writes; the run is cut off at %s and refused as a timeout, and a failing estimate is a refusal naming its error", specLintEstimateWait))
-	specLintCmd.Flags().BoolVar(&specLintAllowUnestimated, "allow-unestimated", false, "Accept a bead carrying no sp-minutes label instead of refusing it: for a caller that lints a bead which cannot have an estimate yet")
+	specLintCmd.Flags().BoolVar(&specLintAllowUnestimated, "allow-unestimated", false, "Accept a bead carrying no readable sp-minutes label instead of refusing it: for a caller that lints a bead which cannot have an estimate yet")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1463,10 +1464,11 @@ type specLintOpts struct {
 	// (gt-muzkwi).
 	BudgetRequired bool
 	// RequireEstimate is the lint's default: a work bead carrying no sp-minutes
-	// label is refused so the filer hears about the missing estimate now
-	// (gt-1cx0o0). --allow-unestimated turns it off for a caller linting a bead
-	// that cannot have an estimate yet. False is the zero value, so a test seam
-	// or another caller of the lint reads no requirement.
+	// label, or one whose labels do not read, is refused so the filer hears
+	// about the missing estimate now (gt-1cx0o0, gt-uffeik).
+	// --allow-unestimated turns it off for a caller linting a bead that cannot
+	// have an estimate yet. False is the zero value, so a test seam or another
+	// caller of the lint reads no requirement.
 	RequireEstimate bool
 	// Estimate is --estimate's run of one bead's estimate, nil when the flag
 	// is off. It writes the labels and the note before the check, and the lint
