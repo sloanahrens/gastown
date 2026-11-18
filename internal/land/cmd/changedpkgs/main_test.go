@@ -119,7 +119,8 @@ func TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff(t *testing.T) {
 			// and internal/testpolicy, with their tests in one -run union.
 			name:       "a docs-only diff still runs the always guards",
 			nameStatus: nameStatus("M docs/testing.md"),
-			want: "-run ^(TestAllowedTools|TestDockerTier|TestEveryEngineSiteHasARowPerFunction|" +
+			want: "-run ^(TestAllowedTools|TestDockerTier|TestEnvArgsGuardOnTree|" +
+				"TestEveryEngineSiteHasARowPerFunction|" +
 				"TestGitFree|TestPolicy|TestRealGit|TestRepoMayorRig|" +
 				"TestUnionMergeOnlyOnGrowOnlyLists|TestUnitTierMain)$ " +
 				"./internal/mayorrig ./internal/podengine ./internal/testpolicy\n",

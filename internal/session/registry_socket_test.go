@@ -13,7 +13,7 @@ func TestSocketName(t *testing.T) {
 	derived := townSocketName(townRoot)
 	for _, env := range []string{"", "default", "auto"} {
 		if got := socketName(townRoot, env); got != derived {
-			t.Errorf("socketName(%q, %q) = %q, want the derived %q", townRoot, env, got, derived)
+			t.Errorf("socketName(%q, override) = %q, want the derived %q", townRoot, got, derived)
 		}
 	}
 	if got := socketName(townRoot, "mysocket"); got != "mysocket" {
