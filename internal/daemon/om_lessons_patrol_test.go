@@ -524,6 +524,22 @@ func (w *omLessonsFailFirstWriter) Create(opts beads.CreateOptions) (*beads.Issu
 	return w.inner.Create(opts)
 }
 
+// omLessonsSwitchableWriter refuses creates while refuse is set and passes
+// every other one to inner, so a test can break the beads store and repair it
+// between checks.
+type omLessonsSwitchableWriter struct {
+	inner  notifyBeadWriter
+	refuse atomic.Bool
+	err    error
+}
+
+func (w *omLessonsSwitchableWriter) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	if w.refuse.Load() {
+		return nil, w.err
+	}
+	return w.inner.Create(opts)
+}
+
 // omLessonsSelectiveWriter is a beads client that refuses the create of one
 // class's proposal and passes every other create to inner.
 type omLessonsSelectiveWriter struct {
@@ -901,6 +917,156 @@ func TestReworkProgramOmLessonsAFailedFilingIsRetriedOnTheNextCheck(t *testing.T
 	omLessonsOneCheck(t, d)
 	if got := calls.Load(); got != 2 {
 		t.Errorf("the check after the retry called the run seam %d times, want the week's pass skipped", got)
+	}
+}
+
+// TestReworkProgramOmLessonsAFilingFailureRetryIsBounded: a beads store that
+// keeps refusing the create is retried on the next check at most
+// omLessonsFilingRetryLimit times; the failure that exhausts the bound spends
+// the week, so a broken store costs a bounded number of passes instead of one
+// per check (gt-f5oavm).
+func TestReworkProgramOmLessonsAFilingFailureRetryIsBounded(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC) // 2026-W47
+	fake := clockwork.NewFakeClockAt(base)
+	town := t.TempDir()
+	refused := errors.New("the beads client refused the create")
+	feed := &feedCapture{}
+	var logged bytes.Buffer
+	var calls atomic.Int32
+
+	d := omLessonsTestDaemon(t, &logged)
+	d.config.TownRoot = town
+	d.clock = fake
+	d.omLessonsFeedFn = feed.record
+	d.openNoticeBeads = func() notifyBeadWriter {
+		return omLessonsRefusingWriter{err: refused}
+	}
+	d.omLessonsRun = func(context.Context, time.Time) ([]omlessons.Proposal, error) {
+		calls.Add(1)
+		return []omlessons.Proposal{{ID: "fail-open", Name: "an error reads as success"}}, nil
+	}
+
+	for i := int32(1); i <= omLessonsFilingRetryLimit; i++ {
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != i {
+			t.Fatalf("check %d called the run seam %d times, want the retry", i, got)
+		}
+	}
+	if _, found, err := loadPatrolLastRun(town, omLessonsPatrol); err != nil || !found {
+		t.Fatalf("the check that exhausted the retry bound recorded no last-run time (found=%v, err=%v), want the week spent", found, err)
+	}
+	if got := len(feed.types); got != int(omLessonsFilingRetryLimit) {
+		t.Fatalf("the feed holds %d event(s), want one per failed check within the bound", got)
+	}
+	if note, _ := feed.payloads[len(feed.payloads)-1]["retry"].(string); !strings.Contains(note, "limit is spent") {
+		t.Errorf("the last feed event's retry note = %q, want the spent limit named", note)
+	}
+
+	omLessonsOneCheck(t, d)
+	if got := calls.Load(); got != omLessonsFilingRetryLimit {
+		t.Errorf("a check after the bound called the run seam %d times, want the spent week to hold", got)
+	}
+
+	fake.Advance(168 * time.Hour)
+	omLessonsOneCheck(t, d)
+	if got := calls.Load(); got != omLessonsFilingRetryLimit+1 {
+		t.Errorf("a check in the next interval called the run seam %d times, want the next week's pass", got)
+	}
+	omLessonsOneCheck(t, d)
+	if got := calls.Load(); got != omLessonsFilingRetryLimit+2 {
+		t.Errorf("the next interval's second check called the run seam %d times, want the count to start at zero after the spent week", got)
+	}
+}
+
+// TestReworkProgramOmLessonsAFilingFailureCountResetsOnASuccess: the retry bound
+// counts failures in a row, so a week whose filing succeeded starts the next
+// week's failures at zero instead of spending its week early (gt-f5oavm).
+func TestReworkProgramOmLessonsAFilingFailureCountResetsOnASuccess(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC) // 2026-W47
+	fake := clockwork.NewFakeClockAt(base)
+	town := t.TempDir()
+	refused := errors.New("the beads client refused the create")
+	writer := &omLessonsSwitchableWriter{inner: beadsfake.New(), err: refused}
+	writer.refuse.Store(true)
+	var logged bytes.Buffer
+	var calls atomic.Int32
+
+	d := omLessonsTestDaemon(t, &logged)
+	d.config.TownRoot = town
+	d.clock = fake
+	d.omLessonsFeedFn = (&feedCapture{}).record
+	d.openNoticeBeads = func() notifyBeadWriter { return writer }
+	d.omLessonsRun = func(context.Context, time.Time) ([]omlessons.Proposal, error) {
+		calls.Add(1)
+		return []omlessons.Proposal{{ID: "fail-open", Name: "an error reads as success"}}, nil
+	}
+
+	omLessonsOneCheck(t, d) // one failed check: one failure counted
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("the first check called the run seam %d times, want the week's pass", got)
+	}
+
+	writer.refuse.Store(false)
+	omLessonsOneCheck(t, d) // the retry files the class and ends the streak
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("the check after the store recovered called the run seam %d times, want the retry", got)
+	}
+
+	fake.Advance(168 * time.Hour)
+	writer.refuse.Store(true)
+	for i := int32(3); i <= omLessonsFilingRetryLimit+2; i++ {
+		omLessonsOneCheck(t, d)
+		if got := calls.Load(); got != i {
+			t.Fatalf("the next week's check %d called the run seam %d times, want the retry to start at zero failures", i-2, got)
+		}
+	}
+}
+
+// TestReworkProgramOmLessonsAFailedFeedWriteIsLoggedAndStillRetried: a feed
+// write that refuses the failure is logged and changes nothing else — no
+// last-run time is recorded, so the next check retries the class it lost
+// (gt-f5oavm).
+func TestReworkProgramOmLessonsAFailedFeedWriteIsLoggedAndStillRetried(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	refused := errors.New("the beads client refused the create")
+	feedErr := errors.New("the town feed is unwritable")
+	bd := beadsfake.New()
+	writer := &omLessonsFailFirstWriter{inner: bd, err: refused}
+	var logged bytes.Buffer
+	var calls atomic.Int32
+
+	d := omLessonsTestDaemon(t, &logged)
+	d.config.TownRoot = town
+	d.clock = clockwork.NewFakeClockAt(base)
+	d.omLessonsFeedFn = (&feedCapture{err: feedErr}).record
+	d.openNoticeBeads = func() notifyBeadWriter { return writer }
+	d.omLessonsRun = func(context.Context, time.Time) ([]omlessons.Proposal, error) {
+		calls.Add(1)
+		return []omlessons.Proposal{{ID: "fail-open", Name: "an error reads as success"}}, nil
+	}
+
+	omLessonsOneCheck(t, d)
+
+	if !strings.Contains(logged.String(), "recording the filing failure in the feed failed: "+feedErr.Error()) {
+		t.Errorf("the refused feed write was not logged; log:\n%s", logged.String())
+	}
+	if _, found, err := loadPatrolLastRun(town, omLessonsPatrol); err != nil || found {
+		t.Errorf("a failed feed write recorded a last-run time (found=%v, err=%v), want the next check to retry", found, err)
+	}
+
+	omLessonsOneCheck(t, d)
+
+	if got := calls.Load(); got != 2 {
+		t.Errorf("the check after a failed feed write called the run seam %d times, want the retry", got)
+	}
+	if filed, err := bd.List(beads.ListOptions{Status: "all"}); err != nil {
+		t.Fatalf("listing the beads the retry filed: %v", err)
+	} else if len(filed) != 1 {
+		t.Errorf("the retry filed %d bead(s), want the class the failed feed left unfiled", len(filed))
 	}
 }
 

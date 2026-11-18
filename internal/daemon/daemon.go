@@ -1446,6 +1446,11 @@ type Daemon struct {
 	// and Run's return joins one it left (om_lessons_patrol.go).
 	omLessonsRunning atomic.Bool
 	omLessonsCycles  sync.WaitGroup
+	// omLessonsFilingFailures counts the checks in a row whose filing failed, so
+	// a beads store that keeps refusing create is retried a bounded number of
+	// times before the week is spent (om_lessons_patrol.go, gt-f5oavm). It is
+	// per process: a restart retries the bound again.
+	omLessonsFilingFailures atomic.Int32
 	// omLessonsJoinGrace overrides omLessonsJoinWait in tests.
 	omLessonsJoinGrace time.Duration
 	// omLessonsRun is the patrol's run seam: nil is omLessonsRunSkeleton,

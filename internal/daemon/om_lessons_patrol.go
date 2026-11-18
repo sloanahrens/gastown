@@ -53,6 +53,15 @@ const (
 	// after the ticker stopped. A pass left past it finishes its own bounded
 	// read, and the next start needs nothing it wrote.
 	omLessonsJoinWait = 10 * time.Second
+
+	// omLessonsFilingRetryLimit bounds how many checks in a row a filing failure
+	// may retry. A filing failure leaves no last-run time, so a check a few
+	// minutes apart would otherwise rerun the whole pass — its review-log and
+	// directive reads included — for as long as the beads store stayed broken.
+	// This many failed checks spend the interval instead: a broken store costs at
+	// most this many passes per process per interval, and the classes they lost
+	// wait for the next interval (gt-f5oavm).
+	omLessonsFilingRetryLimit = 3
 )
 
 // omLessonsInterval returns the period between two passes, from the config the
@@ -301,9 +310,12 @@ func (d *Daemon) startOmLessonsTick() {
 // "attempted" convention checkpoint_dog and jsonl_git_backup follow: a broken
 // pass costs one line per week, not one per check. A filing failure does not:
 // the classes whose create failed are in no filed record, so the week is not
-// spent, and the next check is due and retries them. The failure is also
-// recorded in the town feed, so it reaches a reader who never reads the daemon
-// log, as a failed dog cycle's does (gt-f5oavm).
+// spent, and the next check is due and retries them — up to
+// omLessonsFilingRetryLimit failed checks in a row, after which the week is
+// spent and the lost classes wait for the next interval, so a broken beads
+// store is retried a bounded number of times rather than on every check
+// (gt-f5oavm). The failure is also recorded in the town feed, so it reaches a
+// reader who never reads the daemon log, as a failed dog cycle's does.
 func (d *Daemon) triggerOmLessons() {
 	if d.config == nil || !d.isPatrolActive(omLessonsPatrol) {
 		return
@@ -318,24 +330,40 @@ func (d *Daemon) triggerOmLessons() {
 	proposals, err := d.runOmLessonsTick(ctx, at)
 	if err == nil {
 		d.logger.Printf("om_lessons: the pass built %d proposal(s)", len(proposals))
-		d.recordPatrolRun(d.omLessonsLastRun(), omLessonsPatrol, at)
+		d.recordOmLessonsWeek(at)
 		return
 	}
 	d.logger.Printf("om_lessons: %v", err)
 	var filing *omLessonsFilingError
 	if errors.As(err, &filing) {
-		d.recordOmLessonsFilingFailure(filing)
-		d.logger.Printf("om_lessons: %d filing failure(s) left for the next check to retry", len(filing.failures))
+		willRetry := d.omLessonsFilingFailures.Add(1) < omLessonsFilingRetryLimit
+		d.recordOmLessonsFilingFailure(filing, willRetry)
+		if willRetry {
+			d.logger.Printf("om_lessons: %d filing failure(s) left for the next check to retry", len(filing.failures))
+			return
+		}
+		d.logger.Printf("om_lessons: WARNING: %d filing failure(s) on %d consecutive checks — spending the week; the unfiled classes wait for the next interval",
+			len(filing.failures), omLessonsFilingRetryLimit)
+		d.recordOmLessonsWeek(at)
 		return
 	}
+	d.recordOmLessonsWeek(at)
+}
+
+// recordOmLessonsWeek ends the week's pass: it clears the consecutive filing
+// failures and records the completion time, so the next check inside the week
+// is not due.
+func (d *Daemon) recordOmLessonsWeek(at time.Time) {
+	d.omLessonsFilingFailures.Store(0)
 	d.recordPatrolRun(d.omLessonsLastRun(), omLessonsPatrol, at)
 }
 
 // recordOmLessonsFilingFailure records a failed filing in the town feed, so the
-// failure reaches a reader who never reads the daemon log. The write is
-// best-effort: the daemon log line is already written, and a feed that refuses
-// it must not fail the pass again.
-func (d *Daemon) recordOmLessonsFilingFailure(filing *omLessonsFilingError) {
+// failure reaches a reader who never reads the daemon log. willRetry says
+// whether the next check tries the unfiled classes again, and the payload tells
+// the reader which. The write is best-effort: the daemon log line is already
+// written, and a feed that refuses it must not fail the pass again.
+func (d *Daemon) recordOmLessonsFilingFailure(filing *omLessonsFilingError, willRetry bool) {
 	feed := d.omLessonsFeedFn
 	if feed == nil {
 		townRoot := d.config.TownRoot
@@ -343,10 +371,14 @@ func (d *Daemon) recordOmLessonsFilingFailure(filing *omLessonsFilingError) {
 			return events.LogFeedTo(townRoot, eventType, events.ActorDaemon, payload)
 		}
 	}
+	retry := "the next check retries the unfiled classes"
+	if !willRetry {
+		retry = "the retry limit is spent, so the unfiled classes wait for the next interval"
+	}
 	payload := map[string]interface{}{
 		"patrol": omLessonsPatrol,
 		"error":  filing.Error(),
-		"retry":  "the next check retries the unfiled classes",
+		"retry":  retry,
 	}
 	if err := feed(events.TypePatrolFailed, payload); err != nil {
 		d.logger.Printf("om_lessons: recording the filing failure in the feed failed: %v", err)
@@ -451,7 +483,8 @@ func saveOmLessonsFiled(townRoot, week string, filed map[string]bool) error {
 // omLessonsFilingError is the error a pass returns when one or more of its
 // proposal creates failed. The classes it names are in no filed record, so the
 // week is not spent: triggerOmLessons leaves the last-run time alone and the
-// next check retries them (gt-f5oavm).
+// next check retries them, up to omLessonsFilingRetryLimit failed checks in a
+// row (gt-f5oavm).
 type omLessonsFilingError struct {
 	failures []error
 }
