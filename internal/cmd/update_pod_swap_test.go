@@ -324,20 +324,23 @@ func podSwapBdPair() update.ImagePair {
 	return pair
 }
 
-// TestPodDaemonSwapMovesTheGatewayFirst holds the gateway step: when the cluster
-// has a bd-gateway Deployment and the pair names its image, Apply patches the
-// gateway and waits for its rollout, with the gateway's own bound, before the
-// daemon's patch. A cluster with no gateway, or a pair that names no gateway
-// image, moves the daemon alone and leaves the gateway as it is.
-func TestPodDaemonSwapMovesTheGatewayFirst(t *testing.T) {
+// TestDigestInstallerGatewayMovesTheGatewayFirst holds the gateway step: when
+// the cluster has a bd-gateway Deployment and the pair names its image, Apply
+// patches the gateway and waits for its rollout, with the swap's gateway bound,
+// before the daemon's patch. A cluster with no gateway, or a pair that names no
+// gateway image, moves the daemon alone and leaves the gateway as it is.
+func TestDigestInstallerGatewayMovesTheGatewayFirst(t *testing.T) {
 	t.Parallel()
 
 	t.Run("a cluster with a gateway moves it before the daemon", func(t *testing.T) {
 		t.Parallel()
 		prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
 		fake := &podSwapFake{gateway: "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)}
+		const bound = 7 * time.Minute
+		swap := podSwapFor(fake)
+		swap.GatewayRolloutTimeout = bound
 
-		if err := podSwapFor(fake).Apply(context.Background(), podSwapBdPair()); err != nil {
+		if err := swap.Apply(context.Background(), podSwapBdPair()); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
 		if len(fake.calls) != 8 {
@@ -357,13 +360,30 @@ func TestPodDaemonSwapMovesTheGatewayFirst(t *testing.T) {
 		if got := body.Spec.Template.Metadata.Annotations; len(got) != 0 {
 			t.Errorf("gateway annotations = %v, want none, so the pod template's own annotations are kept", got)
 		}
-		want = append(slices.Clone(prefix), "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, "--timeout=3m0s")
+		want = append(slices.Clone(prefix), "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, "--timeout="+bound.String())
 		if got := fake.calls[3].args; !slices.Equal(got, want) {
 			t.Errorf("fourth command = %q, want the gateway's rollout wait %q", got, want)
 		}
 		want = append(slices.Clone(prefix), "patch", "deployment/"+k8sdaemon.Name, "--type=strategic", "-p")
 		if got := fake.calls[4].args; len(got) != len(want)+1 || !slices.Equal(got[:len(want)], want) {
 			t.Errorf("fifth command = %q, want the daemon's patch %q, which waits for the gateway rollout", got, want)
+		}
+	})
+
+	t.Run("a gateway wait with no bound set uses the install's bound", func(t *testing.T) {
+		t.Parallel()
+		prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
+		fake := &podSwapFake{gateway: "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)}
+
+		if err := podSwapFor(fake).Apply(context.Background(), podSwapBdPair()); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		if len(fake.calls) < 4 {
+			t.Fatalf("commands = %+v, want the gateway's rollout wait as the fourth", fake.calls)
+		}
+		want := append(slices.Clone(prefix), "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, "--timeout=3m0s")
+		if got := fake.calls[3].args; !slices.Equal(got, want) {
+			t.Errorf("fourth command = %q, want the gateway's rollout wait %q at the install's bound", got, want)
 		}
 	})
 
@@ -416,11 +436,11 @@ func assertDaemonMovedWithoutGateway(t *testing.T, fake *podSwapFake) {
 	}
 }
 
-// TestPodDaemonSwapFailsTheGatewayStep holds a gateway step that fails: the
-// failure is an update.GatewayStepError naming the step, no daemon patch runs, and
-// the command's output is never carried. The daemon's image is therefore not set
-// until the gateway's rollout reports ready.
-func TestPodDaemonSwapFailsTheGatewayStep(t *testing.T) {
+// TestDigestInstallerGatewayFailsTheGatewayStep holds a gateway step that fails:
+// the failure is an update.GatewayStepError naming the step, no daemon patch
+// runs, and the command's output is never carried. The daemon's image is
+// therefore not set until the gateway's rollout reports ready.
+func TestDigestInstallerGatewayFailsTheGatewayStep(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -473,10 +493,10 @@ func TestPodDaemonSwapFailsTheGatewayStep(t *testing.T) {
 	}
 }
 
-// TestPodDaemonSwapStopsOnAnUnreadableGatewayRead: a gateway read that fails stops
-// the swap before any patch, so an unreadable cluster never reads as a gateway
-// that is not there and nothing moves past it.
-func TestPodDaemonSwapStopsOnAnUnreadableGatewayRead(t *testing.T) {
+// TestDigestInstallerGatewayStopsOnAnUnreadableGatewayRead: a gateway read that
+// fails stops the swap before any patch, so an unreadable cluster never reads as
+// a gateway that is not there and nothing moves past it.
+func TestDigestInstallerGatewayStopsOnAnUnreadableGatewayRead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -990,11 +1010,11 @@ func TestPodDaemonSwapStopsWhenTheDashboardPatchCannotEncode(t *testing.T) {
 	}
 }
 
-// TestPodDaemonSwapStopsWhenTheGatewayPatchCannotEncode holds the gateway body's
-// encoding: the daemon's and the dashboard's bodies encode, the gateway's does
-// not, and no command runs, so no Deployment moves before every body is known to
-// build.
-func TestPodDaemonSwapStopsWhenTheGatewayPatchCannotEncode(t *testing.T) {
+// TestDigestInstallerGatewayStopsWhenTheGatewayPatchCannotEncode holds the
+// gateway body's encoding: the daemon's and the dashboard's bodies encode, the
+// gateway's does not, and no command runs, so no Deployment moves before every
+// body is known to build.
+func TestDigestInstallerGatewayStopsWhenTheGatewayPatchCannotEncode(t *testing.T) {
 	t.Parallel()
 	fake := &podSwapFake{}
 	swap := podSwapFor(fake)

@@ -64,6 +64,9 @@ type podDaemonSwap struct {
 	Run update.RunFunc
 	// RolloutTimeout bounds the wait for the rollout. Required; zero is refused.
 	RolloutTimeout time.Duration
+	// GatewayRolloutTimeout bounds the bd gateway's rollout wait; a non-positive
+	// value means gatewayRolloutTimeout, the bound a digest install runs with.
+	GatewayRolloutTimeout time.Duration
 	// Out receives the one line Apply prints when the cluster has no dashboard
 	// Deployment and the dashboard is not moved. Nil discards it.
 	Out io.Writer
@@ -201,7 +204,7 @@ func (s podDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) error {
 		if err := s.kubectl(ctx, "the bd gateway's patch", "patch", "deployment/"+k8sdaemon.BdGatewayName, "--type=strategic", "-p", gatewayPatch); err != nil {
 			return update.GatewayStepError{Err: err}
 		}
-		timeout := "--timeout=" + gatewayRolloutTimeout.String()
+		timeout := "--timeout=" + s.gatewayTimeout().String()
 		if err := s.kubectl(ctx, "the bd gateway's rollout status", "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, timeout); err != nil {
 			return update.GatewayStepError{Err: err}
 		}
@@ -269,6 +272,15 @@ func (s podDaemonSwap) gatewayPresent(ctx context.Context) (bool, error) {
 	default:
 		return false, fmt.Errorf("%s printed a name other than the bd gateway's", step)
 	}
+}
+
+// gatewayTimeout is the bound the gateway's rollout wait carries: the field when
+// it is positive, else the bound a digest install runs with.
+func (s podDaemonSwap) gatewayTimeout() time.Duration {
+	if s.GatewayRolloutTimeout > 0 {
+		return s.GatewayRolloutTimeout
+	}
+	return gatewayRolloutTimeout
 }
 
 // out is the writer Apply's line goes to: Out when set, else nowhere.
