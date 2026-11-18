@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -27,15 +26,6 @@ const podTownRoot = manifestdata.PodTownRoot
 // podNameRE matches a pod name as kubectl prints it. A name read from the cluster
 // goes into argv, so it is checked before any command uses it.
 var podNameRE = regexp.MustCompile(`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`)
-
-const (
-	// beadsDirVar is the variable a bd call names its .beads directory in. The
-	// pod's bd reads it to tell which rig the call runs in.
-	beadsDirVar = "BEADS_DIR"
-	// beadsDirName is the directory name bd looks for at each step of its walk up
-	// from the working directory.
-	beadsDirName = ".beads"
-)
 
 // Kubectl reaches the daemon pod through the kubectl CLI: the kubernetes target.
 // It execs into the one Running pod of a Deployment, looked up on every call, and
@@ -391,33 +381,14 @@ func (k Kubectl) settleBeadsDir(call *Call) error {
 // since the town always has beads. A .beads entry the stat cannot read refuses:
 // read as absent, it would send the call to another rig's database.
 func (k Kubectl) nearestBeadsDir(dir string) (string, bool, error) {
-	rel, err := filepath.Rel(k.Town, dir)
-	if err != nil {
-		return "", false, fmt.Errorf("gtwrap: compare the working directory %s with the town %s, so the bd call cannot be told which rig it runs in: %w", dir, k.Town, err)
+	rel, inside, err := nearestBeadsRel(k.Town, dir, statDir(k.Stat))
+	if err != nil || !inside {
+		return "", inside, err
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", false, nil
+	if rel == "" {
+		rel = beadsDirName
 	}
-	stat := k.Stat
-	if stat == nil {
-		stat = os.Stat
-	}
-	town := filepath.Clean(k.Town)
-	for {
-		candidate := filepath.Join(town, rel, beadsDirName)
-		info, err := stat(candidate)
-		if err == nil && info.IsDir() {
-			return path.Join(k.podRoot(), filepath.ToSlash(rel), beadsDirName), true, nil
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return "", false, fmt.Errorf("gtwrap: read the .beads entry %s, so the bd call cannot be told which rig it runs in: %w", candidate, err)
-		}
-		if rel == "." {
-			break
-		}
-		rel = filepath.Dir(rel)
-	}
-	return path.Join(k.podRoot(), beadsDirName), true, nil
+	return path.Join(k.podRoot(), filepath.ToSlash(rel)), true, nil
 }
 
 // probe runs one kubectl command that only reads state, with the context flag set

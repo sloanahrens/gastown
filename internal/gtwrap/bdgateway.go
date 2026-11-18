@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -89,6 +90,10 @@ type BdGateway struct {
 	// town and runs in the town root instead. Nil refuses the call, so a mapped
 	// directory is never silent.
 	Note io.Writer
+	// Stat checks for a .beads directory when a bd call sets no BEADS_DIR. Nil
+	// uses os.Stat. A .beads entry that cannot be read refuses the call, so an
+	// unreadable candidate is never read as absent and routed to another rig.
+	Stat func(string) (fs.FileInfo, error)
 }
 
 // Launch runs call through the gateway and returns bd's exit status. An error
@@ -104,6 +109,9 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	}
 	if call.Argv[0] != "bd" {
 		return exitDown, fmt.Errorf("gtwrap: the bdgateway target runs bd, but the call names %q", call.Argv[0])
+	}
+	if err := g.settleBeadsDir(&call); err != nil {
+		return exitDown, err
 	}
 	rig, err := beadRig(g.Town, call.Env, call.Argv)
 	if err != nil {
@@ -269,6 +277,29 @@ func (g BdGateway) validate() error {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("gtwrap: the bdgateway target's url %q carries a query or fragment, which the gateway endpoint does not take", g.URL)
 	}
+	return nil
+}
+
+// settleBeadsDir gives a bd call that sets no BEADS_DIR the .beads directory
+// nearest at or above its working directory inside the town, the walk bd itself
+// makes and the Mac wrapper already makes before the pod runs the call
+// (gt-6ac6li). The gateway needs the variable to tell which rig the call runs
+// in. A call that reads no database (bd's version command and its root help
+// probe) needs none, and an explicit BEADS_DIR is used unchanged. A working
+// directory outside the town, or one with no .beads above it up to the town
+// root, is left alone, so beadRig's refusal stands.
+func (g BdGateway) settleBeadsDir(call *Call) error {
+	if readsNoDatabase(call.Argv[1:]) {
+		return nil
+	}
+	if _, ok := envValue(call.Env, beadsDirVar); ok {
+		return nil
+	}
+	rel, _, err := nearestBeadsRel(g.Town, call.Dir, statDir(g.Stat))
+	if err != nil || rel == "" {
+		return err
+	}
+	call.Env = append(call.Env, beadsDirVar+"="+filepath.Join(g.Town, rel))
 	return nil
 }
 

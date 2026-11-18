@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -319,8 +320,10 @@ func TestBdGatewaySendsStdinWhenTheCallReadsIt(t *testing.T) {
 // TestBdGatewayTranslation: BEADS_DIR names the rig and the working directory is
 // sent relative to the town; a directory outside the town runs in the town root
 // with a note; a BEADS_DIR the workspace cannot hold is refused before any
-// request; a call that sets none runs in the town workspace only for bd version
-// and the root help probe, and is refused otherwise.
+// request; a call that sets none and has no .beads above its working directory
+// runs in the town workspace only for bd version and the root help probe, and is
+// refused otherwise; the walk that settles a missing BEADS_DIR has its own test,
+// TestBdGatewaySettlesBeadsDir.
 func TestBdGatewayTranslation(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -457,6 +460,157 @@ func TestBdGatewayTranslation(t *testing.T) {
 				}
 			} else if !strings.Contains(note.String(), tt.wantNote) {
 				t.Errorf("note = %q, want it to name %q", note, tt.wantNote)
+			}
+		})
+	}
+}
+
+// mkdirBeads makes the .beads directory under dir, standing in for a rig's or
+// the town's beads directory.
+func mkdirBeads(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, beadsDirName), 0o755); err != nil {
+		t.Fatalf("make the .beads directory under %s: %v", dir, err)
+	}
+}
+
+// TestBdGatewaySettlesBeadsDir: a bd call that sets no BEADS_DIR runs against
+// the .beads directory nearest at or above its working directory inside the
+// town, the walk bd itself makes; a working directory outside the town, or one
+// with no .beads above it up to the town root, still refuses with the same
+// message; an explicit BEADS_DIR is never overridden; and a .beads entry the
+// stat cannot read refuses rather than being read as absent.
+func TestBdGatewaySettlesBeadsDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, town string) (Call, func(*BdGateway))
+		wantRig   string
+		wantErr   string
+		wantErrIs error
+	}{
+		{
+			name: "a rig's mayor/rig gets that rig's .beads",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				mkdirBeads(t, filepath.Join(town, "gastown"))
+				return Call{Argv: []string{"bd", "list", "--json"}, Dir: filepath.Join(town, "gastown", "mayor", "rig")}, nil
+			},
+			wantRig: "gastown",
+		},
+		{
+			name: "the town root gets the town's .beads",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				mkdirBeads(t, town)
+				return Call{Argv: []string{"bd", "list", "--json"}, Dir: town}, nil
+			},
+			wantRig: "",
+		},
+		{
+			name: "a working directory outside the town is refused",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				mkdirBeads(t, filepath.Join(town, "gastown"))
+				return Call{Argv: []string{"bd", "list"}, Dir: t.TempDir()}, nil
+			},
+			wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "no .beads on the way up is refused",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				return Call{Argv: []string{"bd", "list"}, Dir: filepath.Join(town, "gastown", "crew", "dipper")}, nil
+			},
+			wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "an explicit BEADS_DIR is used as it is, with no walk",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				mkdirBeads(t, filepath.Join(town, "crew"))
+				return Call{
+					Argv: []string{"bd", "list"},
+					Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+					Dir:  filepath.Join(town, "crew"),
+				}, func(g *BdGateway) {
+					// The walk from the working directory would read this rig's
+					// entry; an explicit BEADS_DIR means no walk runs at all, so
+					// an entry the stat cannot read cannot refuse the call.
+					g.Stat = func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+				}
+			},
+			wantRig: "gastown",
+		},
+		{
+			name: "the version probe runs with none",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				mkdirBeads(t, filepath.Join(town, "gastown"))
+				return Call{Argv: []string{"bd", "version"}, Dir: filepath.Join(town, "gastown", "crew")}, nil
+			},
+			wantRig: "",
+		},
+		{
+			name: "an unreadable .beads entry refuses",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				return Call{Argv: []string{"bd", "list"}, Dir: filepath.Join(town, "gastown", "crew")}, func(g *BdGateway) {
+					g.Stat = func(name string) (fs.FileInfo, error) {
+						if name == filepath.Join(town, "gastown", ".beads") {
+							return nil, fs.ErrPermission
+						}
+						return nil, fs.ErrNotExist
+					}
+				}
+			},
+			wantErr: "read the .beads entry", wantErrIs: fs.ErrPermission,
+		},
+		{
+			name: "a working directory that cannot be compared refuses",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				return Call{Argv: []string{"bd", "list"}, Dir: "relative/dir"}, nil
+			},
+			wantErr: "compare the working directory",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			call, mutate := tt.setup(t, town)
+			var head bdgateway.Request
+			called := false
+			doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+				called = true
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				line, _, _ := bytes.Cut(body, []byte("\n"))
+				if err := json.Unmarshal(line, &head); err != nil {
+					t.Fatalf("head is not JSON: %v", err)
+				}
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			})
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			if mutate != nil {
+				mutate(&g)
+			}
+			exit, err := g.Launch(call)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Launch error = %v, want it to name %q", err, tt.wantErr)
+				}
+				if tt.wantErrIs != nil && !errors.Is(err, tt.wantErrIs) {
+					t.Errorf("error %v does not carry %v", err, tt.wantErrIs)
+				}
+				if exit != exitDown {
+					t.Errorf("exit = %d, want %d", exit, exitDown)
+				}
+				if called {
+					t.Error("a refused call still reached the gateway")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if head.Rig != tt.wantRig {
+				t.Errorf("head rig = %q, want %q", head.Rig, tt.wantRig)
 			}
 		})
 	}
