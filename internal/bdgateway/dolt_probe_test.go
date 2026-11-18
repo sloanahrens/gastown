@@ -70,4 +70,14 @@ func TestGatewayReadyDoltProbe(t *testing.T) {
 			t.Fatal("a probe with no dialer passed, want a refusal")
 		}
 	})
+
+	t.Run("nil connection with no error refuses", func(t *testing.T) {
+		t.Parallel()
+		probe := NewDoltProbe("127.0.0.1", "3307", func(context.Context, string, string) (net.Conn, error) {
+			return nil, nil
+		})
+		if err := probe(context.Background()); err == nil {
+			t.Fatal("a dial that answered with no connection and no error passed, want a refusal")
+		}
+	})
 }
