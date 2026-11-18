@@ -12,9 +12,9 @@ import (
 const backupStamp = "20060102-150405"
 
 // restartCommands names what reads the resolver once at startup on each VM, so
-// it has to restart after the file is rewritten (gt-x5a7bz). Every profile
-// CheckDNS accepts needs an entry: the repair writes the file even when the
-// restart is missing.
+// it has to restart after the file is rewritten (gt-x5a7bz). A profile CheckDNS
+// accepts with no entry here would write the file and then index a nil command,
+// so TestVMStartDNSRepairProfiles keeps the two profile sets equal.
 var restartCommands = map[string][]string{
 	"gt-control": {"kubectl", "--context", "colima-gt-control", "-n", "kube-system", "rollout", "restart", "deploy/coredns"},
 	"gt-sbx":     {"docker", "--context", "colima-gt-sbx", "restart", "gt-sbx-control-plane", "gt-sbx-worker", "gt-sbx-worker2"},
