@@ -99,11 +99,12 @@ const (
 )
 
 var (
-	specDispatchJSON   bool
-	specDispatchDryRun bool
-	specLintJSON       bool
-	specLintTemplate   string
-	specLintEstimate   bool
+	specDispatchJSON         bool
+	specDispatchDryRun       bool
+	specLintJSON             bool
+	specLintTemplate         string
+	specLintEstimate         bool
+	specLintAllowUnestimated bool
 )
 
 var specCmd = &cobra.Command{
@@ -134,6 +135,12 @@ checked instead: Goal, Constraints, Out of scope, Gate and Size.
     bead labeled size-ok, or whose sp-rung is none, passes, and so does a label
     that does not read (the lint warns that the gate did not run). The lint
     reads the label already on the bead and never estimates by itself.
+
+A work bead carrying no sp-minutes label at all is refused: the filer is told
+to run gt spec lint <bead-id> --estimate or gt spec estimate <bead-id>. A bead
+whose sp-rung is none passes — the estimate answered that no estimate could be
+made — and so does a label that does not read. --allow-unestimated turns that
+refusal off for a caller linting a bead that cannot have an estimate yet.
 
 To have the estimate made first, run gt spec lint <bead-id> --estimate: it runs
 the same estimate gt spec estimate makes (writing the sp: labels and the note),
@@ -264,6 +271,7 @@ func init() {
 	specLintCmd.Flags().BoolVar(&specLintJSON, "json", false, "Print {id, ok, needs_planning, refusals[], advice[], warnings[], hints[]} instead of one line")
 	specLintCmd.Flags().BoolVar(&specLintGraph, "graph", false, "Treat <bead-id> as an epic: print one line per cross-bead finding in its children and exit 1 on any finding but a duplicate test name (--json prints {epic, findings[]})")
 	specLintCmd.Flags().BoolVar(&specLintEstimate, "estimate", false, fmt.Sprintf("Run the bead's story-point estimate first (the same run gt spec estimate makes) and check the sp-minutes label it writes; the run is cut off at %s and refused as a timeout, and a failing estimate is a refusal naming its error", specLintEstimateWait))
+	specLintCmd.Flags().BoolVar(&specLintAllowUnestimated, "allow-unestimated", false, "Accept a bead carrying no sp-minutes label instead of refusing it: for a caller that lints a bead which cannot have an estimate yet")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
 	specCmd.AddCommand(specLintCmd, specDispatchCmd)
@@ -1083,12 +1091,13 @@ func runSpecLint(cmd *cobra.Command, args []string) error {
 // runSpecLintOn is runSpecLint with the town root, the --graph flag and the
 // stores given, so a test can drive the graph branch through fake stores.
 func runSpecLintOn(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores) error {
-	return runSpecLintOnWith(cmd, args, townRoot, graph, stores, specLintEstimate)
+	return runSpecLintOnWith(cmd, args, townRoot, graph, stores, specLintEstimate, specLintAllowUnestimated)
 }
 
-// runSpecLintOnWith is runSpecLintOn with --estimate's flag value given, so a
-// test drives the flag pair without swapping the package variable.
-func runSpecLintOnWith(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores, withEstimate bool) error {
+// runSpecLintOnWith is runSpecLintOn with --estimate's and --allow-unestimated's
+// flag values given, so a test drives the flags without swapping the package
+// variables.
+func runSpecLintOnWith(cmd *cobra.Command, args []string, townRoot string, graph bool, stores slingStores, withEstimate, allowUnestimated bool) error {
 	if graph {
 		// --graph checks an epic's children, so there is no one bead for
 		// --estimate to estimate; the pair is refused rather than silently
@@ -1107,7 +1116,7 @@ func runSpecLintOnWith(cmd *cobra.Command, args []string, townRoot string, graph
 	}
 	// The settings are read before the bead: a config the accessor refuses is
 	// the answer the lint has, and no bead read changes it (gt-p2zuge).
-	opts, err := specLintOptsFor(sd, townRoot, withEstimate, cmd.ErrOrStderr())
+	opts, err := specLintOptsFor(sd, townRoot, withEstimate, allowUnestimated, cmd.ErrOrStderr())
 	if err != nil {
 		return err
 	}
@@ -1453,6 +1462,12 @@ type specLintOpts struct {
 	// bead whose Size section declares no change budget at all. False is off
 	// (gt-muzkwi).
 	BudgetRequired bool
+	// RequireEstimate is the lint's default: a work bead carrying no sp-minutes
+	// label is refused so the filer hears about the missing estimate now
+	// (gt-1cx0o0). --allow-unestimated turns it off for a caller linting a bead
+	// that cannot have an estimate yet. False is the zero value, so a test seam
+	// or another caller of the lint reads no requirement.
+	RequireEstimate bool
 	// Estimate is --estimate's run of one bead's estimate, nil when the flag
 	// is off. It writes the labels and the note before the check, and the lint
 	// reads the size that run wrote (gt-5ynb86).
@@ -1486,14 +1501,16 @@ func specLintOptsFrom(sd *config.SpecDispatchConfig) (specLintOpts, error) {
 }
 
 // specLintOptsFor is the settings and flags one gt spec lint run reads: the
-// size gate from the town's spec_dispatch block, and --estimate's run when the
-// flag is set (gt-5ynb86). The estimate is attached only when asked for: the
+// size gate from the town's spec_dispatch block, --estimate's run when the flag
+// is set (gt-5ynb86), and the estimate requirement unless --allow-unestimated
+// turns it off (gt-1cx0o0). The estimate is attached only when asked for: the
 // lint never makes one by default.
-func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimate bool, errw io.Writer) (specLintOpts, error) {
+func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimate, allowUnestimated bool, errw io.Writer) (specLintOpts, error) {
 	opts, err := specLintOptsFrom(sd)
 	if err != nil {
 		return specLintOpts{}, err
 	}
+	opts.RequireEstimate = !allowUnestimated
 	if withEstimate {
 		opts.Estimate = specLintEstimateRun(townRoot, errw)
 	}
@@ -1506,6 +1523,7 @@ func (o specLintOpts) lintOptions() specdispatch.LintOptions {
 		LintOverMinutes: o.LintOverMinutes,
 		BudgetMaxLines:  o.BudgetMaxLines,
 		BudgetRequired:  o.BudgetRequired,
+		RequireEstimate: o.RequireEstimate,
 	}
 }
 

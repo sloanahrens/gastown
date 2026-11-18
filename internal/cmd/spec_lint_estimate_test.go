@@ -147,22 +147,33 @@ func TestSpecLintEstimateRecordedNoneIsRefused(t *testing.T) {
 func TestSpecLintWithoutEstimateNeverEstimates(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	off, err := specLintOptsFor(nil, root, false, io.Discard)
+	off, err := specLintOptsFor(nil, root, false, false, io.Discard)
 	if err != nil {
 		t.Fatalf("specLintOptsFor(off): %v", err)
 	}
 	if off.Estimate != nil {
 		t.Fatal("--estimate off attached an estimate run")
 	}
-	on, err := specLintOptsFor(nil, root, true, io.Discard)
+	on, err := specLintOptsFor(nil, root, true, false, io.Discard)
 	if err != nil {
 		t.Fatalf("specLintOptsFor(on): %v", err)
 	}
 	if on.Estimate == nil {
 		t.Fatal("--estimate on attached no estimate run")
 	}
+	// The bead carries no sp-minutes label. Without --estimate nothing can
+	// fill it in, so the requirement would refuse it; --allow-unestimated is
+	// the caller that says this bead cannot have an estimate yet. Either way
+	// the lint itself makes no estimate (gt-1cx0o0).
+	allowed, err := specLintOptsFor(nil, root, false, true, io.Discard)
+	if err != nil {
+		t.Fatalf("specLintOptsFor(allow-unestimated): %v", err)
+	}
+	if allowed.Estimate != nil {
+		t.Fatal("--allow-unestimated attached an estimate run")
+	}
 	spec := cleanSpec("gt-noestimate", 2, "2026-01-01")
-	opts := off
+	opts := allowed
 	opts.LintOverMinutes = 11
 	var out, errOut bytes.Buffer
 	if err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts); err != nil {
@@ -282,7 +293,7 @@ func TestSpecLintEstimateRunsUnderTheLintsBound(t *testing.T) {
 // bead, so a filer's --estimate must run under a live deadline (gt-floskq).
 func TestSpecLintDefaultEstimateWaitIsABound(t *testing.T) {
 	t.Parallel()
-	opts, err := specLintOptsFor(nil, t.TempDir(), true, io.Discard)
+	opts, err := specLintOptsFor(nil, t.TempDir(), true, false, io.Discard)
 	if err != nil {
 		t.Fatalf("specLintOptsFor: %v", err)
 	}
@@ -393,8 +404,121 @@ func TestSpecLintEstimateFailureStillRecordsNone(t *testing.T) {
 // silently dropping the estimate (gt-5ynb86).
 func TestSpecLintEstimateWithGraphIsRefused(t *testing.T) {
 	t.Parallel()
-	err := runSpecLintOnWith(&cobra.Command{}, []string{"gt-epic"}, t.TempDir(), true, slingStores{}, true)
+	err := runSpecLintOnWith(&cobra.Command{}, []string{"gt-epic"}, t.TempDir(), true, slingStores{}, true, false)
 	if err == nil || !strings.Contains(err.Error(), "--estimate") {
 		t.Fatalf("runSpecLintOnWith(--graph --estimate) = %v, want a refusal naming --estimate", err)
+	}
+}
+
+// TestSpecLintEstimateRequiredRefusesMissingLabel: gt spec lint refuses a work
+// bead carrying no sp-minutes label by default, and the refusal names the bead
+// and the two commands a filer runs to write the estimate (gt-1cx0o0).
+func TestSpecLintEstimateRequiredRefusesMissingLabel(t *testing.T) {
+	t.Parallel()
+	opts, err := specLintOptsFor(nil, t.TempDir(), false, false, io.Discard)
+	if err != nil {
+		t.Fatalf("specLintOptsFor: %v", err)
+	}
+	if !opts.RequireEstimate {
+		t.Fatal("gt spec lint does not require an estimate by default")
+	}
+	spec := cleanSpec("gt-noest", 2, "2026-01-01")
+	var out, errOut bytes.Buffer
+	err = runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+	if code, _ := IsSilentExit(err); code != specLintExitRefused {
+		t.Fatalf("exit code = %d, want %d (err %v, out %q)", code, specLintExitRefused, err, out.String())
+	}
+	for _, want := range []string{
+		"gt-noest",
+		"no story-point estimate (no sp-minutes label)",
+		"gt spec lint --estimate gt-noest",
+		"gt spec estimate gt-noest",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("verdict %q does not name %q", out.String(), want)
+		}
+	}
+}
+
+// TestSpecLintEstimateRequiredEstimateFlag: --estimate writes the label the
+// requirement reads and the lint then passes; a bead that already carries the
+// label passes with no estimator attached (gt-1cx0o0).
+func TestSpecLintEstimateRequiredEstimateFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		labels    []string
+		estimate  bool
+		wantCalls int
+	}{
+		{name: "no label, --estimate makes one", estimate: true, wantCalls: 1},
+		{name: "the label is already on the bead", labels: []string{"sp-minutes:8.8"}, wantCalls: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stub := &specEstimateStub{result: estimate.Result{Points: 5, Minutes: 8.8, Inputs: []string{"shape"}, Rung: "all"}}
+			opts, err := specLintOptsFor(nil, t.TempDir(), tc.estimate, false, io.Discard)
+			if err != nil {
+				t.Fatalf("specLintOptsFor: %v", err)
+			}
+			if !opts.RequireEstimate {
+				t.Fatal("specLintOptsFor dropped the estimate requirement")
+			}
+			if tc.estimate {
+				opts.Estimate = specLintEstimateRunFor(
+					func(string) specEstimateStore { return specEstimateSeed() },
+					func(string) specEstimateRunner { return specEstimateRunnerFor(stub) })
+			}
+			spec := cleanSpec("gt-est", 2, "2026-01-01")
+			spec.Labels = tc.labels
+			var out, errOut bytes.Buffer
+			err = runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+			if stub.calls != tc.wantCalls {
+				t.Errorf("the estimator ran %d times, want %d", stub.calls, tc.wantCalls)
+			}
+			if err != nil {
+				t.Fatalf("lint = %v, out %q, stderr %q", err, out.String(), errOut.String())
+			}
+			if !strings.Contains(out.String(), "spec lint ok") {
+				t.Errorf("verdict %q, want the clean line", out.String())
+			}
+		})
+	}
+}
+
+// TestSpecLintEstimateRequiredAllowUnestimated: --allow-unestimated turns the
+// refusal off for a bead that cannot have an estimate yet, and a bead whose
+// rung is none or whose label does not read is not refused for a missing
+// estimate (gt-1cx0o0).
+func TestSpecLintEstimateRequiredAllowUnestimated(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		allow  bool
+	}{
+		{name: "no label, --allow-unestimated", allow: true},
+		{name: "the rung is none", labels: []string{"sp-rung:none"}},
+		{name: "the label does not read", labels: []string{"sp-minutes:soon"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts, err := specLintOptsFor(nil, t.TempDir(), false, tc.allow, io.Discard)
+			if err != nil {
+				t.Fatalf("specLintOptsFor: %v", err)
+			}
+			if opts.RequireEstimate == tc.allow {
+				t.Fatalf("RequireEstimate = %v with --allow-unestimated %v, want them opposite", opts.RequireEstimate, tc.allow)
+			}
+			spec := cleanSpec("gt-noest", 2, "2026-01-01")
+			spec.Labels = tc.labels
+			var out, errOut bytes.Buffer
+			if err := runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts); err != nil {
+				t.Fatalf("lint = %v, out %q, stderr %q", err, out.String(), errOut.String())
+			}
+			if !strings.Contains(out.String(), "spec lint ok") {
+				t.Errorf("verdict %q, want the clean line", out.String())
+			}
+		})
 	}
 }

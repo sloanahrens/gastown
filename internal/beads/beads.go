@@ -4811,11 +4811,13 @@ description:
 ## Acceptance    1-6 checkbox items (3-6 preferred), each checkable
 ` + "```" + `
 
-After ` + "`bd create`" + `, run ` + "`gt spec lint <id>`" + ` before you walk away. Exit 0 means
-the dispatcher would slot it. Exit 1 means a field is missing, and the first
-missing one is named. Exit 2 means it needs planning: label ` + "`needs-planning`" + `,
-a Size that says planning, or more than six acceptance items. Fix it and lint
-again.
+After ` + "`bd create`" + `, run ` + "`gt spec lint <id> --estimate`" + ` before you walk
+away: the lint refuses a bead with no story-point estimate, and ` + "`--estimate`" + `
+makes it first (the same run ` + "`gt spec estimate <id>`" + ` makes). Exit 0 means
+the dispatcher would slot it. Exit 1 means a field is missing or there is no
+story-point estimate, and the first failure is named. Exit 2 means it needs
+planning: label ` + "`needs-planning`" + `, a Size that says planning, or more than
+six acceptance items. Fix it and lint again.
 
 A bead you will land yourself needs no shape. One you want a polecat to build
 does.

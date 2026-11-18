@@ -159,7 +159,7 @@ const specNegativeBudgetDaemon = `{"type":"daemon-patrol-config","version":1,` +
 func TestRunawayBeadBudgetNegativeStopsTheSpecLintCommand(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, specTickSettings, specNegativeBudgetDaemon)
-	err := runSpecLintOnWith(&cobra.Command{}, []string{"gt-any"}, root, false, slingStores{}, false)
+	err := runSpecLintOnWith(&cobra.Command{}, []string{"gt-any"}, root, false, slingStores{}, false, false)
 	if err == nil {
 		t.Fatal("gt spec lint ran on a town whose lint_budget_max_lines is -5")
 	}
