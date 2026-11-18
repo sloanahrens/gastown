@@ -333,6 +333,10 @@ func TestBdGatewayRenderMaxConcurrentRefusal(t *testing.T) {
 	}
 }
 
+// bdgwReadyRequires is the flag set cmd/bdgw/ready.go's require call names: bdgw
+// ready exits 2 without any of them, so the probe must pass each one.
+var bdgwReadyRequires = []string{"--tokens-dir", "--verbs", "--workspace"}
+
 // TestBdGatewayRenderReadiness holds the readiness probe to what bdgw ready requires:
 // --tokens-dir, --verbs and --workspace, each carrying the path the serve command
 // names, so the probe checks the same tokens, verbs and workspace the gateway runs on.
@@ -349,8 +353,11 @@ func TestBdGatewayRenderReadiness(t *testing.T) {
 	if got := strings.Join(probe, " "); got != wantProbe {
 		t.Errorf("the readiness probe is\n%s\nwant\n%s", got, wantProbe)
 	}
-	for _, flag := range []string{"--tokens-dir", "--verbs", "--workspace"} {
-		if got, want := flagValue(probe, flag), flagValue(c.Command, flag); got == "" || got != want {
+	for _, flag := range bdgwReadyRequires {
+		if got := flagValue(probe, flag); got == "" {
+			t.Errorf("the readiness probe has no %s, which bdgw ready requires", flag)
+		}
+		if got, want := flagValue(probe, flag), flagValue(c.Command, flag); got != want {
 			t.Errorf("the probe's %s is %q, the serve command's is %q", flag, got, want)
 		}
 	}

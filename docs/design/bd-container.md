@@ -129,6 +129,15 @@ image is a digest from the values file's `bd` key. Its workspace lives on the
 `bd-gateway-workspace` claim (1Gi). It reaches Dolt through the host alias the
 render builds from the host gateway IP.
 
+The token Secret is mounted only by an init container, `tokens-0600`, which runs
+the proxy image as the pod's user and copies each token file into an emptyDir at
+mode 0600. The gateway mounts that emptyDir read-only at `/run/bdgw/tokens`. The
+Secret volume is 0440, which the pod's fsGroup needs for the copy to read it, but
+the gateway's token loader refuses any mode other than 0600. `Values.BdGatewayMaxConcurrent`
+passes `--max-concurrent` to `bdgw serve`; zero leaves the gateway's own default.
+The readiness probe is `bdgw ready` with the same `--tokens-dir`, `--verbs` and
+`--workspace` paths the serve command uses, the three flags `bdgw ready` requires.
+
 The update order is gateway first. The gateway's Deployment is patched and its
 rollout is waited on (three minutes at most, so its pod is Ready) before the
 daemon's Deployment is patched, and the dashboard's comes last. A Deployment
