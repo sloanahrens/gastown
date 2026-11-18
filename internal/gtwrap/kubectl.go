@@ -61,6 +61,10 @@ type Kubectl struct {
 	// uses os.Stat. A .beads entry that cannot be read refuses the call, so an
 	// unreadable candidate is never read as absent and routed to another rig.
 	Stat func(string) (fs.FileInfo, error)
+	// ReadFile reads the redirect file a walked .beads directory may hold. Nil
+	// uses os.ReadFile. A redirect that exists but cannot be read refuses the
+	// call, since read as absent it would name the worktree's own .beads.
+	ReadFile func(string) ([]byte, error)
 	// Stdout and Stderr receive the tool's output when the pod town root and the
 	// Mac town differ: the tool prints pod paths, and the wrapper rewrites them to
 	// the Mac's. They are the wrapper's own streams. When the roots are equal, the
@@ -394,7 +398,7 @@ func (k Kubectl) settleBeadsDir(call *Call) error {
 // cannot read refuses: read as absent, it would send the call to another rig's
 // database.
 func (k Kubectl) nearestBeadsDir(dir string) (string, bool, error) {
-	rel, inside, err := nearestBeadsRel(k.Town, dir, statDir(k.Stat))
+	rel, inside, err := nearestBeadsRel(k.Town, dir, statDir(k.Stat), readFileOf(k.ReadFile))
 	if err != nil || !inside {
 		return "", inside, err
 	}

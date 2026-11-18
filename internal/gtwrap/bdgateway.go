@@ -96,6 +96,10 @@ type BdGateway struct {
 	// and routed to another rig; a -C directory that cannot be read is refused
 	// too.
 	Stat func(string) (fs.FileInfo, error)
+	// ReadFile reads the redirect file a walked .beads directory may hold. Nil
+	// uses os.ReadFile. A redirect that exists but cannot be read refuses the
+	// call, since read as absent it would name the worktree's own .beads.
+	ReadFile func(string) ([]byte, error)
 }
 
 // Launch runs call through the gateway and returns bd's exit status. An error
@@ -376,7 +380,7 @@ func (g BdGateway) settleBeadsDir(call *Call) error {
 	if !filepath.IsAbs(call.Dir) {
 		return nil
 	}
-	rel, _, err := nearestBeadsRel(g.Town, call.Dir, statDir(g.Stat))
+	rel, _, err := nearestBeadsRel(g.Town, call.Dir, statDir(g.Stat), readFileOf(g.ReadFile))
 	if err != nil || rel == "" {
 		return err
 	}

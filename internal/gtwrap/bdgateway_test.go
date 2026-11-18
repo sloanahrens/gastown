@@ -635,8 +635,11 @@ func writeRedirect(t *testing.T, dir, target string) {
 // rig's directory, never the worktree's, so a call with no BEADS_DIR from the
 // worktree must name the target (gt-8y5mcn). A redirect the walk cannot follow
 // keeps the worktree's .beads, and the gateway's existing refusal names that
-// directory; a .beads with no redirect is named as it was; and an explicit
-// BEADS_DIR wins with no walk at all.
+// directory; a redirect that exists but cannot be read refuses; containment is
+// checked on the target with its symlinks resolved, so a symlink that leaves the
+// town is not followed and one inside it names the canonical rig (gt-x43caq); a
+// .beads with no redirect is named as it was; and an explicit BEADS_DIR wins with
+// no walk at all.
 func TestBdGatewayFollowsTheWorktreeRedirect(t *testing.T) {
 	t.Parallel()
 	// newTown builds a town with the town's beads and the gastown rig's
@@ -651,6 +654,7 @@ func TestBdGatewayFollowsTheWorktreeRedirect(t *testing.T) {
 	tests := []struct {
 		name      string
 		setup     func(t *testing.T) (town string, call Call)
+		inject    func(*BdGateway, Call)
 		wantRig   string
 		wantErr   string
 		wantErrIn string
@@ -721,7 +725,7 @@ func TestBdGatewayFollowsTheWorktreeRedirect(t *testing.T) {
 			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
 		},
 		{
-			name: "a redirect that cannot be read is not followed",
+			name: "a redirect that cannot be read refuses",
 			setup: func(t *testing.T) (string, Call) {
 				town, worktree := newTown(t)
 				// A directory in the redirect's place makes the read fail with
@@ -731,7 +735,71 @@ func TestBdGatewayFollowsTheWorktreeRedirect(t *testing.T) {
 				}
 				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
 			},
+			wantErr: "read the .beads redirect file", wantErrIn: "gastown/polecats/nux/gastown/.beads/redirect",
+		},
+		{
+			name: "the redirect is read through the injected filesystem",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				mkdirBeads(t, worktree)
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			inject: func(g *BdGateway, call Call) {
+				g.ReadFile = func(name string) ([]byte, error) {
+					if name == filepath.Join(call.Dir, beadsDirName, beadsRedirectName) {
+						return []byte("../../../mayor/rig/.beads\n"), nil
+					}
+					return nil, fs.ErrNotExist
+				}
+			},
+			wantRig: "gastown/mayor/rig",
+		},
+		{
+			name: "a town root that cannot be resolved refuses",
+			setup: func(t *testing.T) (string, Call) {
+				// The town is named but absent, and the injected stat and read
+				// report the walk's entries, so only the root's resolution fails.
+				town := filepath.Join(t.TempDir(), "missing")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: town}
+			},
+			inject: func(g *BdGateway, call Call) {
+				g.Stat = fakeStat(map[string]fs.FileMode{
+					filepath.Join(call.Dir, beadsDirName):        fs.ModeDir | 0o755,
+					filepath.Join(call.Dir, "rig", beadsDirName): fs.ModeDir | 0o755,
+				})
+				g.ReadFile = func(string) ([]byte, error) { return []byte("rig/.beads\n"), nil }
+			},
+			wantErr: "resolve the symlinks of the town root", wantErrIn: "missing",
+		},
+		{
+			name: "a redirect through a symlink that leaves the town keeps the worktree's .beads",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				outside := t.TempDir()
+				if err := os.MkdirAll(filepath.Join(outside, beadsDirName), 0o755); err != nil {
+					t.Fatalf("make a beads directory outside the town: %v", err)
+				}
+				link := filepath.Join(town, "gastown", "outside")
+				if err := os.Symlink(outside, link); err != nil {
+					t.Fatalf("link %s to %s: %v", link, outside, err)
+				}
+				writeRedirect(t, worktree, link+"/.beads\n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
 			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a redirect through a symlink inside the town names the canonical rig",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				link := filepath.Join(town, "gastown", "alias")
+				if err := os.Symlink(filepath.Join(town, "gastown", "mayor"), link); err != nil {
+					t.Fatalf("link %s: %v", link, err)
+				}
+				writeRedirect(t, worktree, link+"/rig/.beads\n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantRig: "gastown/mayor/rig",
 		},
 		{
 			name: "a .beads with no redirect is named as it was",
@@ -788,6 +856,9 @@ func TestBdGatewayFollowsTheWorktreeRedirect(t *testing.T) {
 				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
 			})
 			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			if tt.inject != nil {
+				tt.inject(&g, call)
+			}
 			exit, err := g.Launch(call)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
