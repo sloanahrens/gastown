@@ -268,6 +268,20 @@ func TestEnvPrintGuardRefusesAnUnparsableFile(t *testing.T) {
 	}
 }
 
+// TestEnvPrintGuardRefusesAnUnreadableFile pins that a test file the walk lists
+// but cannot read is an error, not a clean result. A dangling symlink is the one
+// entry a walk lists and a read always fails on, whatever the user can read.
+func TestEnvPrintGuardRefusesAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(dir, "missing.go"), filepath.Join(dir, "x_test.go")); err != nil {
+		t.Fatalf("creating the dangling symlink: %v", err)
+	}
+	if _, err := CheckEnvPrints(dir); err == nil {
+		t.Fatal("CheckEnvPrints returned no error for an unreadable test file")
+	}
+}
+
 // TestEnvPrintGuardRefusesAnUnparsableSibling pins that a package file the scan
 // cannot read is an error, not a package with fewer names to judge.
 func TestEnvPrintGuardRefusesAnUnparsableSibling(t *testing.T) {
