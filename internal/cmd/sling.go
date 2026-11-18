@@ -620,7 +620,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		target = args[1]
 	}
 	if rigName, isRig := r.isRigName(target); isRig && !r.opts.dryRun {
-		return r.runRigTarget(rigName, beadID, formulaName, townRoot)
+		return r.runRigTarget(ctx, rigName, beadID, formulaName, townRoot)
 	}
 
 	// Serialize assignment writes per bead to prevent concurrent sling races from
@@ -822,7 +822,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	}
 
 	// The bead is sized before anything below spawns or hooks it (gt-t9kwfu).
-	if err := r.slingEstimateFirst(townRoot, beadID, info.Labels); err != nil {
+	if err := r.slingEstimateFirst(ctx, townRoot, beadID, info.Labels); err != nil {
 		return err
 	}
 
@@ -1278,8 +1278,14 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 // internal/sling — the one path batch sling, the scheduler and the spec
 // dispatcher dispatch on (gt-hk555) — and boots the rig's agents the way
 // the engine's callers must once the dispatch lands.
-func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) error {
-	if held, err := r.rigTargetHeld(rigName, beadID, formulaName); err != nil || held {
+func (r *slingRun) runRigTarget(ctx context.Context, rigName, beadID, formulaName, townRoot string) error {
+	// The bead is read once for the whole dispatch: the held check and the
+	// estimate below answer from the same copy (gt-8oi0dz).
+	info, err := r.beadInfo(beadID)
+	if err != nil {
+		return fmt.Errorf("checking bead status: %w", err)
+	}
+	if held, err := r.rigTargetHeld(rigName, beadID, formulaName, info); err != nil || held {
 		return err
 	}
 	// The guard the engine documents as its caller's: it checks the bead's
@@ -1292,11 +1298,7 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 	}
 	// The bead is sized before the engine hooks it, so no hand sling starts work
 	// that has no estimate (gt-t9kwfu). A refusal here spends no seat.
-	info, err := r.beadInfo(beadID)
-	if err != nil {
-		return fmt.Errorf("checking bead status: %w", err)
-	}
-	if err := r.slingEstimateFirst(townRoot, beadID, info.Labels); err != nil {
+	if err := r.slingEstimateFirst(ctx, townRoot, beadID, info.Labels); err != nil {
 		return err
 	}
 	if formulaName == "" {
@@ -1386,13 +1388,9 @@ func (r *slingRun) rigTargetParams(rigName, beadID, formulaName, townRoot, mode 
 //
 // A dead holder is not held: the dispatch below auto-forces past it, and the
 // engine asks the surviving-work guard before it does.
-func (r *slingRun) rigTargetHeld(rigName, beadID, formulaName string) (bool, error) {
+func (r *slingRun) rigTargetHeld(rigName, beadID, formulaName string, info *beadInfo) (bool, error) {
 	if r.opts.force || formulaName != "" {
 		return false, nil
-	}
-	info, err := r.beadInfo(beadID)
-	if err != nil {
-		return false, fmt.Errorf("checking bead status: %w", err)
 	}
 	switch info.Status {
 	case "pinned", "hooked", "in_progress":

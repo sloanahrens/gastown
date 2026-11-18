@@ -117,10 +117,59 @@ func TestSlingEstimateRefusesWithoutHook(t *testing.T) {
 	}
 }
 
-// TestSlingEstimateRefusesWhenBeadUnreadable: a forced rig sling whose bead
-// cannot be read is refused before the estimate runs, and nothing is hooked.
-// Only a forced sling reaches this read first: an unforced one reads the bead
-// in rigTargetHeld, which refuses on the same failure.
+// slingCtxKey marks a caller's context so a test can tell it from a fresh
+// Background.
+type slingCtxKey struct{}
+
+// TestSlingEstimateRunsOnCallerContext: the estimate runs on the context the
+// sling was given, not a fresh Background, on either route (gt-8oi0dz).
+func TestSlingEstimateRunsOnCallerContext(t *testing.T) {
+	t.Parallel()
+	for _, route := range slingEstimateRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead("gt-est", beadInfo{})
+			var seen any = "the estimate did not run"
+			h.run.estimateFirst = func(ctx context.Context, _, _ string) (specEstimateOutcome, error) {
+				seen = ctx.Value(slingCtxKey{})
+				return specEstimateOutcome{Action: "estimated", Points: 5, Rung: "all", Minutes: 6}, nil
+			}
+			ctx := context.WithValue(context.Background(), slingCtxKey{}, "the caller")
+
+			if err := h.run.run(ctx, nil, []string{"gt-est", route.target}); err != nil {
+				t.Fatalf("sling: %v", err)
+			}
+			if seen != "the caller" {
+				t.Errorf("the estimate ran on a context carrying %v, want the caller's", seen)
+			}
+		})
+	}
+}
+
+// TestSlingRigTargetReadsBeadOnce: a rig-target sling reads the bead once: the
+// held check and the estimate answer from the same read (gt-8oi0dz).
+func TestSlingRigTargetReadsBeadOnce(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead("gt-est", beadInfo{})
+	reads := 0
+	read := h.run.beadInfo
+	h.run.beadInfo = func(id string) (*beadInfo, error) {
+		reads++
+		return read(id)
+	}
+
+	if err := h.sling("gt-est", "gastown"); err != nil {
+		t.Fatalf("sling: %v", err)
+	}
+	if reads != 1 {
+		t.Errorf("the sling read the bead %d times, want once", reads)
+	}
+}
+
+// TestSlingEstimateRefusesWhenBeadUnreadable: a rig sling whose bead cannot be
+// read is refused before the estimate runs, and nothing is hooked.
 func TestSlingEstimateRefusesWhenBeadUnreadable(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
