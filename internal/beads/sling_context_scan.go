@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
 // SlingContextRecord is one open sling context and the store it came from.
@@ -15,20 +17,28 @@ type SlingContextRecord struct {
 }
 
 // SlingContextSearchDirs returns the directories that can hold sling
-// contexts: the town root plus every rig directory (and its mayor/rig) that
-// has a .beads directory.
+// contexts: the town root plus every registered rig's directory (and its
+// mayor/rig) that has a .beads directory.
+//
+// The rigs come from the town's registry, the same one the bd gateway's
+// workspace holds, so a folder that merely has a .beads is not searched: a
+// stale leftover or a route target is not a rig, and reading one fails the
+// scan where the gateway has no workspace for it. A registry that cannot be
+// read is returned as an error, never treated as an empty rig list.
 func SlingContextSearchDirs(townRoot string) ([]string, error) {
-	dirs := []string{townRoot}
-	seen := map[string]bool{townRoot: true}
-	entries, err := os.ReadDir(townRoot)
+	town, err := townconfig.Load(townRoot)
 	if err != nil {
 		return nil, fmt.Errorf("discovering scheduler beads search dirs: %w", err)
 	}
-	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == "mayor" || e.Name() == "settings" {
-			continue
+	dirs := []string{townRoot}
+	seen := map[string]bool{townRoot: true}
+	for _, rig := range town.RigNames() {
+		// The registry's name reaches the filesystem, so it must be one path
+		// element: a name with a separator would search outside the town.
+		if !filepath.IsLocal(rig) || strings.ContainsRune(rig, filepath.Separator) {
+			return nil, fmt.Errorf("discovering scheduler beads search dirs: rig %q in the town registry is not one path element", rig)
 		}
-		rigDir := filepath.Join(townRoot, e.Name())
+		rigDir := filepath.Join(townRoot, rig)
 		beadsDir := filepath.Join(rigDir, ".beads")
 		if _, err := os.Stat(beadsDir); err == nil && !seen[rigDir] {
 			dirs = append(dirs, rigDir)
@@ -46,8 +56,8 @@ func SlingContextSearchDirs(townRoot string) ([]string, error) {
 
 // ListOpenSlingContextRecords returns every open sling context across the
 // town's stores. Sling contexts are created in the target rig's beads dir
-// (GH#3468), so it scans the town plus every rig. It does not filter by
-// readiness or circuit breaker.
+// (GH#3468), so it scans the town plus every registered rig. It does not
+// filter by readiness or circuit breaker.
 //
 // Each database is read once: two search dirs can resolve to one database
 // (a rig's top-level .beads redirecting to mayor/rig/.beads, or the reverse),

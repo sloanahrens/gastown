@@ -6,8 +6,31 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+// writeTownRegistry writes the town config townconfig.Load reads: mayor/town.json
+// and mayor/rigs.json, registering exactly rigs.
+func writeTownRegistry(t *testing.T, town string, rigs ...string) {
+	t.Helper()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(town, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("mayor/town.json", `{"type":"town","version":1,"name":"testtown"}`)
+	entries := make([]string, 0, len(rigs))
+	for _, rig := range rigs {
+		entries = append(entries, fmt.Sprintf("%q:{}", rig))
+	}
+	write("mayor/rigs.json", fmt.Sprintf(`{"version":1,"rigs":{%s}}`, strings.Join(entries, ",")))
+}
 
 func TestSlingContextSearchDirs_TownRigsAndMayorRigsOnly(t *testing.T) {
 	t.Parallel()
@@ -15,7 +38,7 @@ func TestSlingContextSearchDirs_TownRigsAndMayorRigsOnly(t *testing.T) {
 	for _, dir := range []string{
 		"gastown/.beads",         // a rig with its own store
 		"beads/mayor/rig/.beads", // a rig whose store is under mayor/rig
-		"norig",                  // no store: skipped
+		"norig",                  // registered but no store: skipped
 		".hidden/.beads",         // dot dirs are skipped
 		"mayor/.beads",           // the mayor's dir is skipped
 		"settings/.beads",        // so is settings
@@ -24,12 +47,13 @@ func TestSlingContextSearchDirs_TownRigsAndMayorRigsOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	writeTownRegistry(t, town, "beads", "gastown", "norig")
 
 	got, err := SlingContextSearchDirs(town)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// os.ReadDir sorts by name, so the order is stable.
+	// RigNames sorts by name, so the order is stable.
 	want := []string{
 		town,
 		filepath.Join(town, "beads", "mayor", "rig"),
@@ -37,6 +61,100 @@ func TestSlingContextSearchDirs_TownRigsAndMayorRigsOnly(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("SlingContextSearchDirs = %v, want %v", got, want)
+	}
+}
+
+// The scan searches the registered rigs, not every folder with a .beads: a
+// stale leftover and a route target both hold a store, and the bd gateway's
+// workspace holds neither, so reading one fails the dispatch (gt-qczeve).
+func TestSlingContextSearchDirsReadsRegisteredRigsOnly(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	for _, dir := range []string{
+		"gastown/.beads",
+		"beads/.beads",
+		"claude/.beads",       // a stale non-rig leftover
+		"claude-beads/.beads", // a route target, not a rig
+	} {
+		if err := os.MkdirAll(filepath.Join(town, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTownRegistry(t, town, "gastown", "beads")
+
+	got, err := SlingContextSearchDirs(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		town,
+		filepath.Join(town, "beads"),
+		filepath.Join(town, "gastown"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SlingContextSearchDirs = %v, want the registered rigs only %v", got, want)
+	}
+}
+
+func TestSlingContextSearchDirsSkipsMayorRigWithoutBeads(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	for _, dir := range []string{
+		"hasstore/mayor/rig/.beads", // a registered rig whose store is under mayor/rig
+		"nostore/mayor/rig",         // the same shape, no store
+	} {
+		if err := os.MkdirAll(filepath.Join(town, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTownRegistry(t, town, "hasstore", "nostore")
+
+	got, err := SlingContextSearchDirs(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		town,
+		filepath.Join(town, "hasstore", "mayor", "rig"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("SlingContextSearchDirs = %v, want %v", got, want)
+	}
+}
+
+func TestSlingContextSearchDirsFailsOnUnreadableRegistry(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "gastown", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTownRegistry(t, town, "gastown")
+	// A corrupt registry must fail the scan rather than fall back to the
+	// folders on disk.
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := SlingContextSearchDirs(town)
+	if err == nil {
+		t.Fatalf("SlingContextSearchDirs with a corrupt registry = %v, want an error", got)
+	}
+	if got != nil {
+		t.Errorf("SlingContextSearchDirs returned %v beside its error; a failed read must return no directories", got)
+	}
+}
+
+func TestSlingContextSearchDirsRefusesARigNameOutsideTheTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownRegistry(t, town, "../elsewhere")
+
+	got, err := SlingContextSearchDirs(town)
+	if err == nil {
+		t.Fatalf("SlingContextSearchDirs with a rig name %q = %v, want an error", "../elsewhere", got)
+	}
+	if got != nil {
+		t.Errorf("SlingContextSearchDirs returned %v beside its error; a refused name must return no directories", got)
 	}
 }
 
@@ -115,6 +233,13 @@ func newSlingScanFixture(t *testing.T) (string, map[string][]*Issue) {
 		hold(rig+"-rig", mkdir(filepath.Join(rig, ".beads")), 1)
 		hold(rig+"-mayor", mkdir(filepath.Join(rig, "mayor", "rig", ".beads")), 1)
 	}
+	// Every rig the fixture builds is registered: the scan reads the registry,
+	// not the folders.
+	rigs := make([]string, 0, 11)
+	for i := 0; i < 11; i++ {
+		rigs = append(rigs, fmt.Sprintf("rig%02d", i))
+	}
+	writeTownRegistry(t, town, rigs...)
 	return town, contexts
 }
 

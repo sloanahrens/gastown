@@ -297,6 +297,8 @@ func TestMergeReadyGateComposesWithStatusBasedGates(t *testing.T) {
 
 // townWithRigDirs builds a town root whose search dirs are the root plus one
 // per named rig, so a scan of it has one store per rig to read.
+// townWithRigDirs builds a town whose .beads holds the rigs, and registers
+// them: the scan reads the town's registry, not the folders (gt-qczeve).
 func townWithRigDirs(t *testing.T, rigs ...string) string {
 	t.Helper()
 	townRoot := t.TempDir()
@@ -309,6 +311,19 @@ func townWithRigDirs(t *testing.T, rigs ...string) string {
 			t.Fatalf("mkdir beads dir for %s: %v", dir, err)
 		}
 	}
+	writeJSONFile(t, filepath.Join(townRoot, "mayor", "town.json"), config.TownConfig{
+		Type:    "town",
+		Name:    "test",
+		Version: config.CurrentTownVersion,
+	})
+	entries := make(map[string]config.RigEntry, len(rigs))
+	for _, rig := range rigs {
+		entries[rig] = config.RigEntry{}
+	}
+	writeJSONFile(t, filepath.Join(townRoot, "mayor", "rigs.json"), config.RigsConfig{
+		Version: config.CurrentRigsVersion,
+		Rigs:    entries,
+	})
 	return townRoot
 }
 
