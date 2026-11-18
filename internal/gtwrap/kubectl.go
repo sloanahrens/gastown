@@ -84,10 +84,11 @@ type kubeLadder struct {
 // doctor's reason when no rung holds. A working directory the pod cannot see is
 // mapped onto the pod root with a note on Note. A mapped directory the pod lacks
 // runs in the nearest existing ancestor under the pod root, and the tool is told
-// the caller's directory in GT_CALLER_CWD. A bd call that sets no BEADS_DIR is
-// given the .beads directory nearest its working directory, inside the town, so
-// bd finds the same rig it did on the Mac. A credential in the environment is
-// dropped with a note, since the environment travels in the kubectl argv.
+// the caller's directory in GT_CALLER_CWD. A bd call that sets no BEADS_DIR, or
+// an empty one, is given the .beads directory nearest its working directory,
+// inside the town, so bd finds the same rig it did on the Mac. A credential in the
+// environment is dropped with a note, since the environment travels in the
+// kubectl argv.
 func (k Kubectl) Launch(call Call) (int, error) {
 	if err := k.validate(); err != nil {
 		return exitDown, err
@@ -357,21 +358,31 @@ func podDir(town, root, dir string) (string, bool) {
 // settleBeadsDir gives a bd call that sets no BEADS_DIR the .beads directory
 // nearest at or above its working directory, the same walk bd itself made before
 // the pod's bd became a forwarder (gt-iy4cpy). The forwarder needs the variable
-// to tell which rig the call runs in. A caller's BEADS_DIR is never overridden,
-// and a working directory outside the town is left alone, so the forwarder's own
-// refusal stands.
+// to tell which rig the call runs in. A caller's BEADS_DIR that names a directory
+// is never overridden, and a working directory outside the town is left alone, so
+// the forwarder's own refusal stands. An empty BEADS_DIR names no directory, and
+// the forwarder reads it as no rig, so the walk answers it too (gt-icl6ru); every
+// entry naming the variable is dropped first, so the pod's env sees only the
+// walked value.
 func (k Kubectl) settleBeadsDir(call *Call) error {
 	if call.Argv[0] != nativeBdTool {
 		return nil
 	}
-	if _, ok := envValue(call.Env, beadsDirVar); ok {
+	if dir, ok := envValue(call.Env, beadsDirVar); ok && dir != "" {
 		return nil
 	}
 	podBeads, ok, err := k.nearestBeadsDir(call.Dir)
 	if err != nil || !ok {
 		return err
 	}
-	call.Env = append(call.Env, beadsDirVar+"="+podBeads)
+	kept := make([]string, 0, len(call.Env)+1)
+	for _, entry := range call.Env {
+		if name, _, ok := strings.Cut(entry, "="); ok && name == beadsDirVar {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	call.Env = append(kept, beadsDirVar+"="+podBeads)
 	return nil
 }
 

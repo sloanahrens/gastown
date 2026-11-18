@@ -1050,7 +1050,8 @@ func beadsDirsIn(argv []string) []string {
 // so the pod's bd forwarder names the rig the caller meant (gt-iy4cpy). The
 // nearest directory wins, a worktree's redirect is followed to the rig's beads
 // directory (gt-8y5mcn), the town's own .beads answers a walk that finds none, a
-// caller's BEADS_DIR is kept, and a directory outside the town gets none.
+// caller's BEADS_DIR is kept, an empty one is walked as if unset (gt-icl6ru), and
+// a directory outside the town gets none.
 func TestKubectlSettlesBeadsDir(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -1075,6 +1076,7 @@ func TestKubectlSettlesBeadsDir(t *testing.T) {
 		{"worktree redirect", worktree, nil, filepath.Join(town, "gastown", "mayor", "rig", ".beads")},
 		{"town root", filepath.Join(town, "crew"), nil, filepath.Join(town, ".beads")},
 		{"set", filepath.Join(town, "gastown"), []string{"BEADS_DIR=" + setDir}, setDir},
+		{"empty", filepath.Join(town, "gastown"), []string{"BEADS_DIR="}, filepath.Join(town, "gastown", ".beads")},
 		{"outside", outside, nil, ""},
 	}
 	for _, tt := range cases {
