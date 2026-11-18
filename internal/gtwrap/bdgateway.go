@@ -78,7 +78,8 @@ type BdGateway struct {
 	// HTTP sends the requests. Nil uses an http.Client bounded by the call's
 	// timeout, or by the probe bound for a doctor.
 	HTTP HTTPDoer
-	// Stdin is the caller's stdin, streamed after the head line. Nil sends none.
+	// Stdin is the caller's stdin, streamed after the head line only when the
+	// call reads stdin, and never otherwise. Nil sends none.
 	Stdin io.Reader
 	// Stdout and Stderr receive bd's own streams. Nil refuses the call, so the
 	// tool's output is never dropped.
@@ -125,11 +126,18 @@ func (g BdGateway) Launch(call Call) (int, error) {
 		Cwd:       dirRelative(g.Town, call.Dir, g.Note),
 		TimeoutMS: g.timeoutMS(),
 	})
-	stdin := g.Stdin
-	if call.Stdin != nil {
+	// The body after the head is the caller's stdin only when the call reads it: a
+	// caller whose stdin is a pipe that never closes would otherwise hold the
+	// request open until the gateway's read deadline (gt-vojyy8). A stdin the call
+	// itself carries is always sent, since the caller that supplied it means bd to
+	// read it.
+	var stdin io.Reader
+	switch {
+	case call.Stdin != nil:
 		stdin = call.Stdin
-	}
-	if stdin == nil {
+	case g.Stdin != nil && bdReadsStdin(call.Argv[1:]):
+		stdin = g.Stdin
+	default:
 		stdin = strings.NewReader("")
 	}
 	body := io.MultiReader(bytes.NewReader(append(head, '\n')), stdin)
@@ -310,6 +318,30 @@ func readsNoDatabase(words []string) bool {
 		return true
 	}
 	return len(words) == 1 && (words[0] == "--help" || words[0] == "help")
+}
+
+// bdReadsStdin reports whether a bd call reads the caller's stdin, so its bytes
+// may follow the head line. bd takes stdin as a "-" value, either as a token of
+// its own ("bd update gt-x --body-file -", "bd comments add gt-x -f -", or a
+// positional "-") or attached to its flag ("--body-file=-", "-f=-", "-f-"), and
+// through its --stdin flag. A file the wrapper carries reaches bd as one of those
+// "-" forms, since filearg.go rewrites the flag's value. words is the call's argv
+// after "bd", and nothing after "--" is a flag. Any other call sends no stdin, so
+// a caller whose stdin is a pipe that never closes does not stall it (gt-vojyy8).
+func bdReadsStdin(words []string) bool {
+	for _, word := range words {
+		switch {
+		case word == "--":
+			return false
+		case word == "-" || word == "--stdin":
+			return true
+		case strings.HasSuffix(word, "=-"):
+			return true
+		case len(word) > 2 && word[0] == '-' && word[1] != '-' && word[len(word)-1] == '-' && shorthandGroup(word):
+			return true
+		}
+	}
+	return false
 }
 
 // dirRelative maps the caller's working directory onto the bd gateway's

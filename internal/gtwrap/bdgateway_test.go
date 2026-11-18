@@ -79,8 +79,9 @@ func gatewayTarget(t *testing.T, town, tokenFile string, doer HTTPDoer) (BdGatew
 
 // TestBdGatewayTarget drives one whole call through the target: the head names
 // the bd arguments after bd, the screened env, the rig and the town-relative
-// directory; the token travels as the bearer header; the frames reach the
-// caller's streams; and the exit frame's status is returned unchanged.
+// directory; the token travels as the bearer header; the caller's stdin, which
+// the call reads, follows the head; the frames reach the caller's streams; and
+// the exit frame's status is returned unchanged.
 func TestBdGatewayTarget(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -116,7 +117,7 @@ func TestBdGatewayTarget(t *testing.T) {
 	})
 	g, stdout, stderr, _ := gatewayTarget(t, town, tokenFile, doer)
 	call := Call{
-		Argv: []string{"bd", "--allow-stale", "show", "gt-abc", "--json"},
+		Argv: []string{"bd", "--allow-stale", "comments", "add", "gt-abc", "-f", "-"},
 		Env: []string{
 			"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads"),
 			"BD_ACTOR=town/crew/dipper",
@@ -134,7 +135,7 @@ func TestBdGatewayTarget(t *testing.T) {
 	if exit != 7 {
 		t.Fatalf("exit = %d, want the exit frame's 7", exit)
 	}
-	if got, want := head.Argv, []string{"--allow-stale", "show", "gt-abc", "--json"}; !slices.Equal(got, want) {
+	if got, want := head.Argv, []string{"--allow-stale", "comments", "add", "gt-abc", "-f", "-"}; !slices.Equal(got, want) {
 		t.Errorf("head argv = %q, want %q (bd itself is never sent)", got, want)
 	}
 	wantEnv := map[string]string{"BD_ACTOR": "town/crew/dipper", "BD_READONLY": "1"}
@@ -167,6 +168,154 @@ func TestBdGatewayTarget(t *testing.T) {
 	}
 	if got, want := stderr.String(), "a warning\n"; got != want {
 		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// blockingStdin is a caller's stdin a call must not read: a read reports itself
+// on read and then blocks until a test receives it, so a call that reads it
+// cannot finish unnoticed.
+type blockingStdin struct{ read chan struct{} }
+
+func (r blockingStdin) Read([]byte) (int, error) {
+	r.read <- struct{}{}
+	return 0, io.EOF
+}
+
+// TestBdGatewaySendsNoStdinWhenTheCallReadsNone: a call that names no "-" value
+// sends the head line alone, and the caller's stdin is never read even when it
+// is a pipe that never closes, so the call is not held to the gateway's read
+// deadline (gt-vojyy8). Nothing after "--" is a flag, so a "-" value there reads
+// no stdin either.
+func TestBdGatewaySendsNoStdinWhenTheCallReadsNone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name string
+		argv []string
+	}{
+		{name: "no argument reads stdin", argv: []string{"bd", "show", "gt-x", "--json"}},
+		{name: "a dash value after --", argv: []string{"bd", "show", "gt-x", "--", "--body-file", "-"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stdin := blockingStdin{read: make(chan struct{})}
+			var body []byte
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(req *http.Request) (*http.Response, error) {
+				var err error
+				body, err = io.ReadAll(req.Body)
+				if err != nil {
+					t.Errorf("read the request body: %v", err)
+				}
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			}))
+			g.Stdin = stdin
+			call := Call{
+				Argv: tt.argv,
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  town,
+			}
+			done := make(chan error, 1)
+			go func() {
+				_, err := g.Launch(call)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Launch: %v", err)
+				}
+			case <-stdin.read:
+				t.Fatal("the call read the caller's stdin")
+			}
+			_, rest, ok := bytes.Cut(body, []byte("\n"))
+			if !ok {
+				t.Fatalf("request body %q has no head line", body)
+			}
+			if len(rest) != 0 {
+				t.Errorf("body after the head = %q, want none", rest)
+			}
+		})
+	}
+}
+
+// TestBdGatewaySendsStdinWhenTheCallReadsIt: every form bd takes its stdin in
+// carries the caller's stdin bytes after the head line, and a stdin the call
+// itself carries is sent whatever the arguments say.
+func TestBdGatewaySendsStdinWhenTheCallReadsIt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name string
+		argv []string
+		// callStdin is the stdin the call struct carries; empty uses the target's.
+		callStdin string
+		want      string
+	}{
+		{
+			name: "--body-file -",
+			argv: []string{"bd", "update", "gt-x", "--body-file", "-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "-f - under comments add",
+			argv: []string{"bd", "comments", "add", "gt-x", "-f", "-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "-f- attached to the shorthand",
+			argv: []string{"bd", "comments", "add", "gt-x", "-f-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "--description-file=-",
+			argv: []string{"bd", "update", "gt-x", "--description-file=-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "--stdin",
+			argv: []string{"bd", "create", "--stdin", "--title", "t"},
+			want: "the caller's stdin",
+		},
+		{
+			name:      "the call's own stdin",
+			argv:      []string{"bd", "update", "gt-x"},
+			callStdin: "the call's stdin",
+			want:      "the call's stdin",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read the request body: %v", err)
+				}
+				_, rest, ok := bytes.Cut(body, []byte("\n"))
+				if !ok {
+					t.Fatalf("request body %q has no head line", body)
+				}
+				got = string(rest)
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			}))
+			g.Stdin = strings.NewReader("the caller's stdin")
+			call := Call{
+				Argv: tt.argv,
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  town,
+			}
+			if tt.callStdin != "" {
+				call.Stdin = strings.NewReader(tt.callStdin)
+			}
+			if _, err := g.Launch(call); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("stdin after the head = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
