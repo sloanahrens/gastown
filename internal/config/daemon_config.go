@@ -420,6 +420,14 @@ type PatrolsConfig struct {
 	// for the block and why the patrol is off when absent.
 	ReworkNumbers *ReworkNumbersConfig `json:"rework_numbers,omitempty"`
 
+	// OutboxPoll reads each running sandbox seat's outbox on a cadence of its
+	// own, so an escalation request reaches the host while the seat still runs
+	// rather than only at the seat's end (internal/daemon/outbox_poll.go, plan
+	// O4). Off when absent: the patrol's tick reads every running seat through
+	// the sandbox gateway (gt-dq4ce6), so a town turns it on rather than an
+	// upgrade.
+	OutboxPoll *OutboxPollConfig `json:"outbox_poll,omitempty"`
+
 	// JevDedupe asks Jev which existing bead each new finding duplicates and
 	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
 	// calls, so only an explicit enabled:true turns it on.
@@ -2248,6 +2256,18 @@ type ReworkNumbersConfig struct {
 // The patrol is opt-in. Each run reads every pin from its registry, so a town
 // that has not asked for it must not get it from a default.
 type ImagePinLayersConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
+// OutboxPollConfig configures the outbox_poll patrol: whether the daemon reads
+// each running sandbox seat's outbox on its own cadence
+// (internal/daemon/outbox_poll.go, docs/plans/2026-11-14-no-bead-access-plan.md
+// O4).
+//
+// The patrol is opt-in. Each tick reads every running seat through the sandbox
+// gateway (gt-dq4ce6), so a town that has not asked for it must not get it from
+// a default.
+type OutboxPollConfig struct {
 	Enabled bool `json:"enabled"`
 }
 

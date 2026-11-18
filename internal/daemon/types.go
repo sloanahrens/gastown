@@ -616,6 +616,16 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.ImagePinLayers.Enabled
 	}
+	// outbox_poll is opt-in, and its key absent means off: each tick reads
+	// every running seat's outbox through the sandbox gateway (gt-dq4ce6), so a
+	// town must ask for it (gt-0hkj0c; the PatrolsConfig.OutboxPoll field says
+	// why).
+	if patrol == "outbox_poll" {
+		if config == nil || config.Patrols == nil || config.Patrols.OutboxPoll == nil {
+			return false
+		}
+		return config.Patrols.OutboxPoll.Enabled
+	}
 	// deepseek_balance is opt-in; its config block says why (gt-whaxw7).
 	if patrol == "deepseek_balance" {
 		if config == nil || config.Patrols == nil || config.Patrols.DeepSeekBalance == nil {
