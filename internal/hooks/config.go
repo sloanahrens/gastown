@@ -1103,20 +1103,13 @@ func runsRetiredGTSubcommand(command string) bool {
 }
 
 // FileModeDropsCommand reports whether a no-bead-access seat must not run a
-// hook command, because it reads bead state a file-mode seat does not have
-// (gt-1m0kb, F6). Two hooks are dropped:
-//
-//   - `gt mail check` and `gt mail inbox` list the seat's mail, which comes
-//     from the bead store; the design drops inbound mail for a file-mode seat.
-//   - `gt tap polecat-stop-check` reads the seat's agent bead in a sandbox to
-//     decide the session is finished; in file mode the host reads its own
-//     agent bead at seat end instead.
-//
-// Guards stay: `gt tap guard` makes no bead call, so every guard still runs.
-// The program word is matched by base name, as runsRetiredGTSubcommand matches
-// it, so the host's absolute path to gt and a bare `gt` both match.
+// hook command, judged by the first word that is not a leading NAME=value
+// assignment, because such a command reads bead state the seat does not have.
 func FileModeDropsCommand(command string) bool {
 	fields := strings.Fields(command)
+	for len(fields) > 0 && isEnvAssignment(fields[0]) {
+		fields = fields[1:]
+	}
 	if len(fields) < 3 || filepath.Base(fields[0]) != "gt" {
 		return false
 	}
@@ -1127,6 +1120,27 @@ func FileModeDropsCommand(command string) bool {
 		return fields[2] == "polecat-stop-check"
 	}
 	return false
+}
+
+// isEnvAssignment reports whether word is a NAME=value environment assignment,
+// where NAME is an identifier (letter or underscore, then letters, digits or
+// underscores), the form a shell strips from a command's leading words.
+func isEnvAssignment(word string) bool {
+	name, _, found := strings.Cut(word, "=")
+	if !found || name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
+			continue
+		}
+		if i > 0 && '0' <= c && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // dropRetiredCommandHooks removes hooks that run a retired gt subcommand from
