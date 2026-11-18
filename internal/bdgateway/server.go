@@ -48,6 +48,9 @@ const (
 	// largeReadTimeoutCap is the maximum for the two reads that grow with a
 	// rig: list and ready on a large rig take longer than a show.
 	largeReadTimeoutCap = 120 * time.Second
+	// doltProbeTimeout bounds the Dolt check /readyz makes: a dial that has not
+	// answered inside it is Dolt not reachable for this readiness check.
+	doltProbeTimeout = 2 * time.Second
 	// statusClientClosed is nginx's 499: the caller ended the request before
 	// the gateway answered. It is only sent when the executor refused before
 	// starting bd because the request was already over; nobody reads it.
@@ -75,6 +78,11 @@ type GatewayOptions struct {
 	Log *CallLog
 	// Runner runs the calls. The production value is New's *Executor.
 	Runner CallRunner
+	// DoltProbe reports whether Dolt answers at the endpoint the calls run
+	// against. Ready does not cover it: every file can be loaded while Dolt is
+	// still starting after a reboot, and then each call fails. serveReady calls
+	// it; Ready and the push routes never do. Nil means no check.
+	DoltProbe func(context.Context) error
 }
 
 // Gateway is the HTTP handler: it authenticates a request, applies the policy,
@@ -87,6 +95,7 @@ type Gateway struct {
 	workspaces *WorkspaceStore
 	log        *CallLog
 	runner     CallRunner
+	doltProbe  func(context.Context) error
 	closing    atomic.Bool
 }
 
@@ -114,6 +123,7 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 		workspaces: opts.Workspaces,
 		log:        opts.Log,
 		runner:     opts.Runner,
+		doltProbe:  opts.DoltProbe,
 	}, nil
 }
 
@@ -181,7 +191,7 @@ func (g *Gateway) serveHealth(w http.ResponseWriter, r *http.Request) {
 
 // serveReady answers 200 only when the gateway can serve a call: a read-class
 // token authenticates, the token table, the verbs file and a workspace are
-// loaded, and no shutdown is under way.
+// loaded, no shutdown is under way, and Dolt answers when a probe is wired.
 func (g *Gateway) serveReady(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -202,6 +212,18 @@ func (g *Gateway) serveReady(w http.ResponseWriter, r *http.Request) {
 	if err := g.Ready(); err != nil {
 		refuse(w, http.StatusServiceUnavailable, codeUnavailable, err.Error())
 		return
+	}
+	// The Dolt check runs last, and only for readiness: a gateway whose files
+	// are loaded but whose Dolt is still starting would otherwise answer ready
+	// and then fail every call.
+	if g.doltProbe != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), doltProbeTimeout)
+		defer cancel()
+		if err := g.doltProbe(ctx); err != nil {
+			refuse(w, http.StatusServiceUnavailable, codeUnavailable,
+				fmt.Sprintf("bdgateway: dolt is not reachable: %v", err))
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
