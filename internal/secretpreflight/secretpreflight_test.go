@@ -57,8 +57,9 @@ func secretTable(name string) []byte {
 }
 
 // TestSecretPreflightMissing checks the one answer read as missing: exit status
-// 1 with NotFound, in the output or in the error text. A table that names the
-// Secret is present and is not listed, and the result is sorted.
+// 1 with NotFound, in the output or in the error text. A table whose data row
+// names the Secret — even with a warning line above the header — is present and
+// is not listed, and the result is sorted.
 func TestSecretPreflightMissing(t *testing.T) {
 	t.Parallel()
 	run := &fakeRunner{answers: map[string]answer{
@@ -70,9 +71,10 @@ func TestSecretPreflightMissing(t *testing.T) {
 		"charlie": {
 			err: kubectlExit{code: 1, text: `exit status 1: Error from server (NotFound): secrets "charlie" not found`},
 		},
+		"delta": {out: []byte("Warning: v1 Secret is deprecated\n" + string(secretTable("delta")))},
 	}}
 
-	got, err := Missing(context.Background(), run.run, "gt-sbx", "gt", []string{"charlie", "alpha", "bravo"})
+	got, err := Missing(context.Background(), run.run, "gt-sbx", "gt", []string{"charlie", "alpha", "bravo", "delta"})
 	if err != nil {
 		t.Fatalf("Missing = %v, want no error", err)
 	}
@@ -175,8 +177,8 @@ func TestSecretPreflightErrors(t *testing.T) {
 
 // TestSecretPreflightRefuses holds the answers and inputs the check refuses
 // before or after the read: nothing is passed to kubectl for an unnamed
-// cluster, namespace or Secret, and a successful get that names another Secret
-// is not read as present.
+// cluster, namespace or Secret, and a successful get is read as present only
+// when its data row's first cell is the name.
 func TestSecretPreflightRefuses(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -215,11 +217,38 @@ func TestSecretPreflightRefuses(t *testing.T) {
 			wantInErr: "Secret name",
 		},
 		{
+			name:      "a name kubectl reads as a flag after a valid name",
+			kube:      "gt-sbx",
+			namespace: "gt",
+			names:     []string{"alpha", "--raw"},
+			answers:   map[string]answer{"alpha": {out: secretTable("alpha")}},
+			wantInErr: "Secret name",
+			wantCalls: 0,
+		},
+		{
 			name:      "an answer that names another Secret",
 			kube:      "gt-sbx",
 			namespace: "gt",
 			names:     []string{"alpha"},
 			answers:   map[string]answer{"alpha": {out: secretTable("bravo")}},
+			wantInErr: "alpha",
+			wantCalls: 1,
+		},
+		{
+			name:      "the name on a line above the table",
+			kube:      "gt-sbx",
+			namespace: "gt",
+			names:     []string{"alpha"},
+			answers:   map[string]answer{"alpha": {out: []byte("alpha is not a table row\n" + string(secretTable("bravo")))}},
+			wantInErr: "alpha",
+			wantCalls: 1,
+		},
+		{
+			name:      "the name in a later column of the data row",
+			kube:      "gt-sbx",
+			namespace: "gt",
+			names:     []string{"alpha"},
+			answers:   map[string]answer{"alpha": {out: []byte("NAME      TYPE     DATA   AGE\nbravo     alpha    4      12d\n")}},
 			wantInErr: "alpha",
 			wantCalls: 1,
 		},
