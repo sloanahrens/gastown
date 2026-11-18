@@ -195,6 +195,13 @@ const (
 	// fills the town-state volume, and the off-box copy is made from the pod
 	// (gt-gg9hv.30).
 	DoltBackupClaim = "dolt-backup"
+	// TownStateBackupVolume is the pod volume that carries the host's town-state
+	// backups: a hostPath at the directory Values.TownStateBackupHostPath names.
+	// The live pod mounts it read-write and a rehearsal read-only, so a
+	// rehearsal can read the archives it restores but never write them. It has
+	// no claim, since the archives are the host's, not the volume seed's
+	// (gt-a5u9ts).
+	TownStateBackupVolume = "town-state-backup"
 	// TempVolume is the pod's scratch volume: an emptyDir at TempPath carrying
 	// GOTMPDIR and TMPDIR.
 	TempVolume = "gotmp"
@@ -687,6 +694,13 @@ type Values struct {
 	// Dolt container writes its backups to (gt-cbsx3k). Empty, the claim carries
 	// the backups. It must equal DoltBackupPath, and a rehearsal refuses it.
 	DoltBackupHostPath string
+	// TownStateBackupHostPath is the host directory the live pod mounts
+	// read-write at the same path, so the town-state backups land where the host
+	// keeps them; a rehearsal mounts it read-only, since a rehearsal is the pod
+	// that proves a restore (gt-a5u9ts). The mount is TownStateBackupVolume. Set,
+	// the path must be clean, absolute and no other mount's path; empty, the pod
+	// mounts nothing and the Deployment is the one before the volume.
+	TownStateBackupHostPath string
 	// StorageClass is the claims' storage class; DefaultStorageClass when
 	// empty.
 	StorageClass string
@@ -1892,6 +1906,11 @@ func volumes(v Values) ([]Volume, error) {
 		doltBackupVolume(v),
 		Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}},
 	)
+	// The town-state archives are the host's, so the pod mounts the host
+	// directory read-write when Values names one (gt-a5u9ts).
+	if v.TownStateBackupHostPath != "" {
+		vols = append(vols, townStateBackupVolume(v))
+	}
 	for i, file := range v.Secrets {
 		vol, err := secretVolume(file)
 		if err != nil {
@@ -1960,6 +1979,13 @@ func doltBackupVolume(v Values) Volume {
 	return Volume{Name: DoltBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: DoltBackupClaim}}
 }
 
+// townStateBackupVolume is the hostPath volume that carries the host's
+// town-state backups. The type is Directory, so a host directory the operator
+// has not created fails the pod rather than being created on the host.
+func townStateBackupVolume(v Values) Volume {
+	return Volume{Name: TownStateBackupVolume, HostPath: &HostPathVolumeSource{Path: v.TownStateBackupHostPath, Type: hostPathDirectory}}
+}
+
 // secretVolume is the pod volume that carries file's Secret, at the entry's
 // manifest mode.
 func secretVolume(file manifestdata.SecretFile) (Volume, error) {
@@ -2019,6 +2045,12 @@ func mounts(v Values) []VolumeMount {
 		VolumeMount{Name: DoltBackupClaim, MountPath: DoltBackupPath, ReadOnly: v.Rehearsal},
 		VolumeMount{Name: TempVolume, MountPath: TempPath},
 	)
+	// The mount path is the host path itself, so what the pod writes there lands
+	// in the host directory. A rehearsal reads the archives and never writes
+	// them, as its dolt-backup claim is read-only (gt-a5u9ts).
+	if v.TownStateBackupHostPath != "" {
+		m = append(m, VolumeMount{Name: TownStateBackupVolume, MountPath: v.TownStateBackupHostPath, ReadOnly: v.Rehearsal})
+	}
 	for _, file := range v.Secrets {
 		m = append(m, VolumeMount{
 			Name:      secretVolumeName(file.Name),
@@ -2221,6 +2253,9 @@ func (v Values) validate() error {
 	if err := v.validateDoltBackupHostPath(); err != nil {
 		return err
 	}
+	if err := v.validateTownStateBackupHostPath(); err != nil {
+		return err
+	}
 	if err := v.validateSecrets(); err != nil {
 		return err
 	}
@@ -2353,6 +2388,31 @@ func (v Values) validateDoltBackupHostPath() error {
 		return errors.New("Values.DoltBackupHostPath is for a live render: a rehearsal mounts the dolt-backup claim read-only")
 	case v.DoltBackupHostPath != DoltBackupPath:
 		return fmt.Errorf("Values.DoltBackupHostPath %q: want %q, the host directory the Dolt container writes its backups to", v.DoltBackupHostPath, DoltBackupPath)
+	}
+	return nil
+}
+
+// validateTownStateBackupHostPath refuses a path the pod cannot mount: a
+// relative one, since the volume is a hostPath and names a directory on the
+// host; one that is not clean, since two spellings of a path would name two
+// volumes; and one another mount already holds, since a container cannot mount
+// two volumes at the same path. Empty means the pod mounts nothing, leaving the
+// Deployment as it was (gt-a5u9ts).
+func (v Values) validateTownStateBackupHostPath() error {
+	path := v.TownStateBackupHostPath
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("Values.TownStateBackupHostPath %q: want an absolute path, since the pod mounts the host directory", path)
+	}
+	if cleaned := filepath.Clean(path); cleaned != path {
+		return fmt.Errorf("Values.TownStateBackupHostPath %q: want the clean path %q, since the pod mounts the directory at that exact path", path, cleaned)
+	}
+	for _, m := range mounts(v) {
+		if m.Name != TownStateBackupVolume && m.MountPath == path {
+			return fmt.Errorf("Values.TownStateBackupHostPath %q is the %s mount's path: name a host directory no other mount uses", path, m.Name)
+		}
 	}
 	return nil
 }
