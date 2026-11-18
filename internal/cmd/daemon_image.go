@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
@@ -46,11 +47,6 @@ type daemonImageFlags struct {
 	contextOnly bool // stop after the staged build context, before any engine step
 	gateway     bool // with apply and contextOnly, stage the gt-bd image's context instead
 }
-
-// gatewayBDCommitLabel is the label a gateway listing prints the bd commit
-// under. It is the key internal/ci/ctxlabels reads a bd commit from, so the
-// line has the shape that reader parses.
-const gatewayBDCommitLabel = "org.gastown.bd-commit"
 
 // imageBuilder is the build's steps: the daemon build's, in the order they run,
 // and the gt-bd context stage a --gateway run takes instead. A
@@ -372,8 +368,8 @@ func validateGatewayFlags(f daemonImageFlags) error {
 
 // runGatewayContext stages the gt-bd image's build context through build and
 // prints its listing: the context directory, each staged file with its path,
-// and the full bd commit as a label line, the shape internal/ci/ctxlabels reads
-// a bd commit from.
+// and the full bd commit under ctxlabels.BDCommitLabel, the key
+// internal/ci/ctxlabels reads a bd commit from.
 func runGatewayContext(ctx context.Context, build imageBuilder, rev, ctxDir string, out io.Writer) error {
 	paths, bdCommit, err := build.StageGatewayContext(ctx, rev)
 	if err != nil {
@@ -383,7 +379,7 @@ func runGatewayContext(ctx context.Context, build imageBuilder, rev, ctxDir stri
 	for _, p := range paths {
 		lines = append(lines, "staged "+filepath.Base(p)+": "+p)
 	}
-	lines = append(lines, "label: "+gatewayBDCommitLabel+"="+bdCommit)
+	lines = append(lines, "label: "+ctxlabels.BDCommitLabel+"="+bdCommit)
 	for _, line := range lines {
 		if _, err := fmt.Fprintln(out, line); err != nil {
 			return fmt.Errorf("printing the gt-bd build context listing: %w", err)
