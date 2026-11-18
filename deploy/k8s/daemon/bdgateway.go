@@ -58,6 +58,41 @@ func (v Values) validateDaemonBdGateway() error {
 	return ValidateBdGatewayURL("Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL)
 }
 
+// The gateway's own workload, rendered when Values.BdGatewayImage is set
+// (bdgateway_workload.go). Its tokens are one Secret the operator creates, named by
+// Values.BdGatewayTokenSecret; the render names it and never creates it.
+const (
+	// BdGatewayName names the gateway's Deployment, its container and its Service.
+	BdGatewayName = "bd-gateway"
+	// BdGatewayPort is the port the gateway's Service publishes in the cluster.
+	BdGatewayPort = 7440
+	// BdGatewayWorkspaceClaim is the claim the gateway's workspace lives on, and
+	// BdGatewayWorkspaceSize is its request.
+	BdGatewayWorkspaceClaim = "bd-gateway-workspace"
+	BdGatewayWorkspaceSize  = "1Gi"
+)
+
+// validateBdGatewayWorkload refuses the gateway workload values the cluster cannot
+// run. The image is a digest, as the daemon's is, so a tag cannot roll a build the
+// values file does not name. The token Secret is required with the image: without
+// it the gateway starts with no tokens and refuses every client. With no image the
+// workload is not rendered, and the token Secret name is not read.
+func (v Values) validateBdGatewayWorkload() error {
+	if v.BdGatewayImage == "" {
+		return nil
+	}
+	if !imageRefRE.MatchString(v.BdGatewayImage) {
+		return fmt.Errorf("Values.BdGatewayImage %q: want the bd gateway image by digest (repo@sha256:<64 lowercase hex>), as Values.Image is; a tag is refused so the gateway runs the build the values file records", v.BdGatewayImage)
+	}
+	if v.BdGatewayTokenSecret == "" {
+		return errors.New("Values.BdGatewayTokenSecret is empty while Values.BdGatewayImage is set: the gateway reads its tokens from that Secret, and with none it refuses every client")
+	}
+	if !validDNS1123Subdomain(v.BdGatewayTokenSecret) {
+		return fmt.Errorf("Values.BdGatewayTokenSecret %q: want a Secret name, a DNS-1123 subdomain", v.BdGatewayTokenSecret)
+	}
+	return nil
+}
+
 // bdGatewayURL matches an http or https URL whose authority is a host name or an
 // IPv4 address with an optional port in 1 to 65535. A path is allowed; a query, a
 // fragment, a space, user information and a bracketed IPv6 literal are not. The
