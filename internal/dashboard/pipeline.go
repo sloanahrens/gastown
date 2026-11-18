@@ -89,6 +89,14 @@ type GastownPipelineReader struct {
 
 	mu   sync.Mutex
 	last *GastownPipeline
+
+	// started numbers the reads in the order they begin, and published is the
+	// number of the read whose runs the block shows. A read that begins after
+	// another and finishes before it is the newer snapshot; the older one,
+	// finishing later, must not replace it, so the two numbers decide which
+	// read the block keeps, not the order the lock is taken in.
+	started   uint64
+	published uint64
 }
 
 // NewGastownPipelineReader builds a reader over api, the same client the Deploys
@@ -102,8 +110,18 @@ func NewGastownPipelineReader(api deployAPI, repo string) *GastownPipelineReader
 // Read refreshes the block. A refresh that fails returns the last good runs with
 // the error class set and their read time unchanged; one that fails before any
 // good read returns no runs and the error alone.
+//
+// A refresh that began before the read the block now shows answers with that
+// read's snapshot rather than publishing its own: the runs it fetched may
+// predate the published ones.
 func (r *GastownPipelineReader) Read() *GastownPipeline {
+	r.mu.Lock()
+	r.started++
+	seq := r.started
+	r.mu.Unlock()
+
 	runs, err := r.fetch()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err != nil {
@@ -113,7 +131,11 @@ func (r *GastownPipelineReader) Read() *GastownPipeline {
 		}
 		return &GastownPipeline{Runs: r.last.Runs, At: r.last.At, Error: class}
 	}
+	if seq < r.published {
+		return &GastownPipeline{Runs: r.last.Runs, At: r.last.At}
+	}
 	r.last = &GastownPipeline{Runs: runs, At: r.now()}
+	r.published = seq
 	return &GastownPipeline{Runs: runs, At: r.last.At}
 }
 

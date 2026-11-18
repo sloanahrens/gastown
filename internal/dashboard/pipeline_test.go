@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"sync"
 	"testing"
 	"time"
 
@@ -244,6 +245,157 @@ func TestGastownPipelineUnreadableRepoKeepsLastGood(t *testing.T) {
 	assert.Empty(t, recovered.Error)
 	assert.Len(t, recovered.Runs, 3)
 	assert.Equal(t, now, recovered.At)
+}
+
+// pipelineGateBound bounds each wait on the gate. It is a hang guard, not a
+// delay: a correct read passes through the channel at once, and only a
+// regression that never reaches it waits this long, then fails the test.
+const pipelineGateBound = 10 * time.Second
+
+// pipelineAwait waits for ch to close and fails the test if it does not, so a
+// regression reports instead of hanging the package.
+func pipelineAwait(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(pipelineGateBound): //testpolicy:allow no-sleep — a hang guard only: a correct read closes ch at once, and the bound turns a regression into a named failure instead of a hung package
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// pipelineURLs is each run's URL, in order: which snapshot a read answered with.
+func pipelineURLs(p *GastownPipeline) []string {
+	var out []string
+	for _, run := range p.Runs {
+		out = append(out, run.URL)
+	}
+	return out
+}
+
+// pipelineGateStub parks the first read's first run query until release is
+// closed, so that read's fetch stays in flight while a second read completes.
+// It answers newerRuns to the second read, whose queries arrive while the first
+// is parked, and olderRuns to the parked query and to every query after the
+// release, when the first read is the only one left. Which read a query belongs
+// to is decided by the release, not by how many queries a read makes or the
+// order the reader asks its workflows in.
+type pipelineGateStub struct {
+	olderRuns []forgejo.ActionRun
+	newerRuns []forgejo.ActionRun
+
+	mu      sync.Mutex
+	err     error
+	parked  bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+// fail makes every later query fail.
+func (s *pipelineGateStub) fail(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err
+}
+
+func (s *pipelineGateStub) ListUserRepos(context.Context) ([]forgejo.Repository, error) {
+	return nil, errors.New("not used by the pipeline reader")
+}
+
+func (s *pipelineGateStub) ListRunJobs(context.Context, string, string, int64) ([]forgejo.ActionRunJob, error) {
+	return nil, errors.New("not used by the pipeline reader")
+}
+
+func (s *pipelineGateStub) ListRuns(_ context.Context, _ string, _ string, f forgejo.RunFilter) (*forgejo.RunList, error) {
+	s.mu.Lock()
+	err, first := s.err, !s.parked
+	s.parked = true
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if first {
+		close(s.entered)
+		select {
+		case <-s.release:
+		case <-time.After(pipelineGateBound): //testpolicy:allow no-sleep — a hang guard only: the test releases the gate once the other read is done, and a read that never reaches it must fail rather than hang
+			return nil, errors.New("the gate was never released")
+		}
+	}
+	runs := s.newerRuns
+	select {
+	case <-s.release:
+		runs = s.olderRuns
+	default:
+	}
+	var out []forgejo.ActionRun
+	for _, run := range runs {
+		if path.Base(run.WorkflowID) == f.WorkflowID {
+			out = append(out, run)
+		}
+	}
+	return &forgejo.RunList{Runs: out}, nil
+}
+
+// A read that began first but finished last is the older snapshot: the read
+// that began after it and finished before it has already published the newer
+// runs, so the late one must not write its own over them, and it answers with
+// what the block now shows.
+func TestGastownPipelineOlderReadDoesNotPublishLast(t *testing.T) {
+	t.Parallel()
+	stub := &pipelineGateStub{
+		olderRuns: []forgejo.ActionRun{pipelineTestRun(1, postLandWorkflow, "success", 1)},
+		newerRuns: []forgejo.ActionRun{pipelineTestRun(2, postLandWorkflow, "success", 2)},
+		entered:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+	now := deployNow
+	r := NewGastownPipelineReader(stub, pipelineTestRepo)
+	r.now = func() time.Time { return now }
+
+	var older *GastownPipeline
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		older = r.Read()
+	}()
+	pipelineAwait(t, stub.entered, "the first read to enter its first query")
+
+	// The clock moves on for the read that begins later, so a snapshot that got
+	// its read time at publish time cannot be told apart by At alone.
+	now = deployNow.Add(time.Minute)
+	newer := r.Read()
+	close(stub.release)
+	pipelineAwait(t, done, "the first read to finish")
+
+	want := []string{pipelineTestURL + "2"}
+	require.Empty(t, newer.Error)
+	assert.Equal(t, want, pipelineURLs(newer), "the read that began later is the one published")
+	require.Empty(t, older.Error)
+	assert.Equal(t, want, pipelineURLs(older), "the read that began earlier answers with the published snapshot")
+	assert.Equal(t, newer.At, older.At, "and its read time")
+
+	// A failed refresh answers with the runs the block holds, so it shows
+	// whether the late read wrote its own snapshot through the published one.
+	stub.fail(errors.New("connection refused"))
+	failed := r.Read()
+	assert.Equal(t, "unreachable", failed.Error)
+	assert.Equal(t, want, pipelineURLs(failed), "the older read did not overwrite the published snapshot")
+}
+
+// The guard is on the order the reads began, not on the clock: a refresh that
+// follows a published one is kept even when the injected clock has not moved.
+func TestGastownPipelineLaterReadPublishesOnTheSameClock(t *testing.T) {
+	t.Parallel()
+	stub := &pipelineStub{runs: []forgejo.ActionRun{pipelineTestRun(1, postLandWorkflow, "success", 1)}}
+	now := deployNow
+	r := newPipelineTestReader(stub, &now)
+	require.Len(t, r.Read().Runs, 1)
+
+	stub.runs = append(stub.runs, pipelineTestRun(2, imagesWorkflow, "success", 2))
+	got := r.Read()
+	require.Empty(t, got.Error)
+	require.Len(t, got.Runs, 2, "the later read is published")
+	assert.Equal(t, now, got.At)
 }
 
 func TestGastownPipelineUnreadableBeforeAnyGoodReadIsEmptyWithError(t *testing.T) {
