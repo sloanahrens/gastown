@@ -163,6 +163,12 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	if err != nil {
 		return WorkspaceDocument{}, err
 	}
+	rigs := town.RigNames()
+	// The copies share the workspace's total cap, so a town that grew past it
+	// is refused here, before the copies are built, with the growth named.
+	if err := checkFormulaCopiesFit(formulas, len(rigs)); err != nil {
+		return WorkspaceDocument{}, err
+	}
 	for name, data := range formulas {
 		files[path.Join(".beads", formulaDirName, name)] = data
 	}
@@ -174,7 +180,7 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	}
 	files[path.Join(".beads", routesFileName)] = routes
 
-	for _, rig := range town.RigNames() {
+	for _, rig := range rigs {
 		if err := addRigFiles(files, root, rig); err != nil {
 			return WorkspaceDocument{}, err
 		}
@@ -435,6 +441,34 @@ func readTownFormulas(townRoot, beadsDir string) (map[string]string, error) {
 		formulas[name] = string(data)
 	}
 	return formulas, nil
+}
+
+// checkFormulaCopiesFit refuses a formula set whose copies fill more than the
+// workspace's total byte cap. bd reads a rig-scoped cook's formulas from that
+// rig's beads directory, so the set is carried once under the town's beads
+// directory and once under each registered rig's, and every copy counts toward
+// MaxWorkspaceTotalBytes: a set whose copies fill the cap leaves no room for
+// the metadata files beside them, and the push is refused whole. The refusal
+// names the formula bytes, the copy count and the cap, so a town that grew past
+// it — more formulas, or more rigs, or both — names the growth and not one
+// formula path the total happened to reach. With no rigs there is one copy,
+// which the total check on the whole document reports on its own.
+func checkFormulaCopiesFit(formulas map[string]string, rigs int) error {
+	copies := int64(rigs) + 1
+	if copies <= 1 {
+		return nil
+	}
+	var bytes int64
+	for _, data := range formulas {
+		bytes += int64(len(data))
+	}
+	// Divide rather than multiply: the set's size is not bounded here, and a
+	// product of it and the copy count could overflow.
+	if bytes <= int64(MaxWorkspaceTotalBytes)/copies {
+		return nil
+	}
+	return fmt.Errorf("%w: the town's %d formulas are %d bytes and the workspace carries %d copies of them (the town's and one per rig), over the %d-byte cap",
+		ErrWorkspaceTooLarge, len(formulas), bytes, copies, MaxWorkspaceTotalBytes)
 }
 
 // addRigFormulas carries the town's formulas under a registered rig's beads
