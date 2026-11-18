@@ -265,11 +265,39 @@ func TestWorkspaceValidation(t *testing.T) {
 			want: ErrWorkspaceFileName,
 		},
 		{
-			// A rig's formulas directory is not part of the workspace.
-			name: "a formula under a rig's beads directory",
+			name: "a rig formula with another extension",
 			files: func() map[string]string {
 				files := maps.Clone(base)
-				files["gt/.beads/formulas/x.formula.toml"] = "x"
+				files["gt/.beads/formulas/x.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a rig formula one level too deep",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/.beads/formulas/a/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a formula under a rig's own formulas directory, not its beads directory",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/formulas/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			// A rig's own beads tree lives deeper down the redirect path; the copy
+			// is only at `<rig>/.beads/formulas`, so the deeper shape is no formula.
+			name: "a formula under a rig's redirected beads directory",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/mayor/rig/.beads/formulas/x.formula.toml"] = "x"
 				return files
 			},
 			want: ErrWorkspaceFileName,
@@ -417,6 +445,34 @@ func TestWorkspaceAcceptsTownFormulas(t *testing.T) {
 	}
 	if got := rec.Header().Get(WorkspaceHashHeader); got != manifest {
 		t.Errorf("header = %q, want the pushed hash %q", got, manifest)
+	}
+	if got := readWorkspace(t, root); !maps.Equal(files, got) {
+		t.Errorf("the live tree = %v, want the pushed files %v", got, files)
+	}
+	// A restart reads the tree back through the same path rules, so a path the
+	// store accepted must also be one it can serve after Open.
+	reopened, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("reopening the store: %v", err)
+	}
+	if got := reopened.Manifest(); got != manifest {
+		t.Errorf("the reopened store's manifest = %s, want %s", got, manifest)
+	}
+}
+
+// TestWorkspaceAcceptsRigFormulas: the gateway stores a town formula's copy under
+// a registered rig at `<rig>/.beads/formulas/<name>.formula.toml`, serves it from
+// the live tree, and reads it back on Open, so a rig-scoped bd cooking through
+// the gateway finds it.
+func TestWorkspaceAcceptsRigFormulas(t *testing.T) {
+	t.Parallel()
+	s, root := openTestStore(t)
+	files := testWorkspaceFiles("one")
+	files["gt/.beads/formulas/mol-sample.formula.toml"] = "formula = \"mol-sample\"\ntype = \"workflow\"\n"
+	manifest := WorkspaceManifest(files)
+
+	if _, err := s.Put(WorkspaceDocument{ManifestSHA: manifest, Files: files}); err != nil {
+		t.Fatalf("a push carrying a rig formula was refused: %v", err)
 	}
 	if got := readWorkspace(t, root); !maps.Equal(files, got) {
 		t.Errorf("the live tree = %v, want the pushed files %v", got, files)

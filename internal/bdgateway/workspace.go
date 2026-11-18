@@ -18,13 +18,15 @@ import (
 
 // The workspace is the small tree of bd's own files the gateway owns and gt
 // pushes: the town's .beads/routes.jsonl, the town's
-// .beads/formulas/<name>.formula.toml, each rig's .beads/redirect, and every
-// .beads/{metadata.json,config.yaml,dolt-server.port} set the document carries —
-// one per rig, and one per folder a route names that is not a rig. The design
-// is docs/design/bd-container.md ("The workspace"); the tree layout it pushes is
-// the one the Phase 0 proof (workspace_proof_integration_test.go) showed a real
-// bd reading. G6 mounts the volume and routes PUT /v1/workspace to the store
-// below; G8 builds the document from the town copy.
+// .beads/formulas/<name>.formula.toml, a copy of those formulas at
+// <rig>/.beads/formulas/<name>.formula.toml for each registered rig, each rig's
+// .beads/redirect, and every .beads/{metadata.json,config.yaml,dolt-server.port}
+// set the document carries — one per rig, and one per folder a route names that
+// is not a rig. The design is docs/design/bd-container.md ("The workspace");
+// the tree layout it pushes is the one the Phase 0 proof
+// (workspace_proof_integration_test.go) showed a real bd reading. G6 mounts the
+// volume and routes PUT /v1/workspace to the store below; G8 builds the document
+// from the town copy.
 
 const (
 	// WorkspaceHashHeader carries the live tree's manifest hash on every gateway
@@ -160,9 +162,19 @@ func isFormulaFileName(name string) bool {
 // townFormulaPath reports whether a path's parts are the one shape a town
 // formula takes: `.beads/formulas/<name>.formula.toml`, exactly one directory
 // under the town's own beads directory, where bd looks for the formula a sling
-// cooks. A rig's formulas directory is not carried, so a deeper path is not one.
+// cooks.
 func townFormulaPath(parts []string) bool {
 	return len(parts) == 3 && parts[0] == ".beads" && parts[1] == formulaDirName && isFormulaFileName(parts[2])
+}
+
+// rigFormulaPath reports whether a path's parts are the one shape a town
+// formula's copy under a rig takes: `<rig>/.beads/formulas/<name>.formula.toml`,
+// the rig one path element, exactly one directory under the rig's beads
+// directory. That is where a bd whose BEADS_DIR names the rig reads formulas, so
+// the builder pushes a copy there. A deeper path and any other name are refused
+// by validateWorkspacePath.
+func rigFormulaPath(parts []string) bool {
+	return len(parts) == 4 && parts[1] == ".beads" && parts[2] == formulaDirName && isFormulaFileName(parts[3])
 }
 
 // WorkspaceDocument is the body of PUT /v1/workspace: every file of the tree,
@@ -234,9 +246,10 @@ func validatedManifest(doc WorkspaceDocument) (string, error) {
 // ("relative, no .., only the workspace file names above") plus the `.beads`
 // parent every one of those files sits under, which keeps a path from landing in
 // a directory bd does not read or beside the tree's root. The town's formulas
-// are the one other shape: `.beads/formulas/<name>.formula.toml`, exactly one
-// level, which is where bd looks for a formula; every other depth and name is
-// refused.
+// are the one other kind of name, in the two shapes a cook reads them from:
+// `.beads/formulas/<name>.formula.toml` for the town's own beads directory and
+// `<rig>/.beads/formulas/<name>.formula.toml` for a registered rig's, each
+// exactly one level under formulas. Every other depth and name is refused.
 func validateWorkspacePath(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty path", ErrWorkspacePath)
@@ -259,7 +272,7 @@ func validateWorkspacePath(name string) error {
 			return fmt.Errorf("%w: %q has a %q component", ErrWorkspacePath, shown(name), part)
 		}
 	}
-	if townFormulaPath(parts) {
+	if townFormulaPath(parts) || rigFormulaPath(parts) {
 		return nil
 	}
 	if len(parts) < 2 || parts[len(parts)-2] != ".beads" {
