@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -151,10 +152,12 @@ func resultKinds(results *ast.FieldList) []valueKind {
 // name a constant or a literal initializer of the package resolves: neither can
 // carry a credential from the host.
 //
-// A call carrying a "// testpolicy:env-print-ok <reason>" comment on the same
-// line or the line above is skipped; a reason is required. The reason names the
-// value the message prints in place of the environment, so a reviewer can check
-// the claim against the code.
+// A "// testpolicy:env-print-ok <reason>" comment exempts exactly one call: the
+// call it trails on its own line, or the first call starting on the line below
+// a marker that stands alone on its line. A second call is judged on its own,
+// so a bare environment print below a marked call is still reported. A reason is
+// required; it names the value the message prints in place of the environment,
+// so a reviewer can check the claim against the code.
 func CheckEnvPrints(root string) ([]Violation, error) {
 	fset := token.NewFileSet()
 	// The walk names every file once, so the package of a test file is read
@@ -181,13 +184,18 @@ func CheckEnvPrints(root string) ([]Violation, error) {
 	pkgCache := map[string]*pkgInfo{}
 	var vs []Violation
 	for _, path := range tests {
-		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		f, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 		if err != nil {
 			return nil, err
 		}
 		dir := filepath.Dir(path)
-		exempt, reasoned := envPrintExemptLines(fset, f)
-		for _, line := range reasoned {
+		calls := failureCalls(f)
+		exempt, unreasoned := envPrintExemptions(fset, f, src, calls)
+		for _, line := range unreasoned {
 			vs = append(vs, Violation{
 				Pos:  token.Position{Filename: path, Line: line},
 				Rule: RuleEnvPrint,
@@ -199,34 +207,47 @@ func CheckEnvPrints(root string) ([]Violation, error) {
 			return nil, err
 		}
 		ef := newEnvFile(f, pkg)
-		ast.Inspect(f, func(n ast.Node) bool {
-			c, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
+		for _, c := range calls {
+			if exempt[c.call] {
+				continue
 			}
-			sel, ok := c.Fun.(*ast.SelectorExpr)
-			if !ok || !failureMethods[sel.Sel.Name] {
-				return true
-			}
-			pos := fset.Position(c.Pos())
-			if exempt[pos.Line] {
-				return true
-			}
-			for i, arg := range c.Args {
+			pos := fset.Position(c.call.Pos())
+			for i, arg := range c.call.Args {
 				if !ef.printsEnv(arg) {
 					continue
 				}
 				vs = append(vs, Violation{
 					Pos:  pos,
 					Rule: RuleEnvPrint,
-					Msg:  fmt.Sprintf("%s prints the environment in argument %d; name the key or a count instead, or declare the value safe with %q", sel.Sel.Name, i+1, "// "+envPrintMarker+" <reason>"),
+					Msg:  fmt.Sprintf("%s prints the environment in argument %d; name the key or a count instead, or declare the value safe with %q", c.method, i+1, "// "+envPrintMarker+" <reason>"),
 				})
 				break
 			}
-			return true
-		})
+		}
 	}
 	return vs, nil
+}
+
+// failureCall is one testing failure call and the method that makes it one.
+type failureCall struct {
+	call   *ast.CallExpr
+	method string
+}
+
+// failureCalls returns the testing failure calls of one file in source order.
+func failureCalls(f *ast.File) []failureCall {
+	var calls []failureCall
+	ast.Inspect(f, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := c.Fun.(*ast.SelectorExpr); ok && failureMethods[sel.Sel.Name] {
+			calls = append(calls, failureCall{call: c, method: sel.Sel.Name})
+		}
+		return true
+	})
+	return calls
 }
 
 // newEnvFile records the kinds of one file's parameters, named results,
@@ -404,10 +425,24 @@ func (ef *envFile) exprKind(e ast.Expr) valueKind {
 	return kindUnknown
 }
 
-// litKind classifies a composite literal. A literal is written in the test
-// source, so its text cannot carry a credential from the environment; it is a
-// []string or map of strings, never an environment value.
-func (ef *envFile) litKind(lit *ast.CompositeLit) valueKind { return compositeKind(lit) }
+// litKind classifies a composite literal. A []string or map of strings written
+// in the test source cannot carry a host value unless an element is read from
+// the environment, so such an element makes the literal an environment value.
+func (ef *envFile) litKind(lit *ast.CompositeLit) valueKind {
+	k := compositeKind(lit)
+	if k != kindSafeStrings {
+		return k
+	}
+	for _, elt := range lit.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			elt = kv.Value
+		}
+		if ef.printsEnv(elt) {
+			return kindEnv
+		}
+	}
+	return k
+}
 
 // compositeKind classifies a literal by its type alone.
 func compositeKind(lit *ast.CompositeLit) valueKind {
@@ -612,11 +647,15 @@ func isStringType(e ast.Expr) bool {
 	return ok && id.Name == "string"
 }
 
-// envPrintExemptLines returns the call line and the line above it for each
-// env-print-ok comment, so the comment may sit on the call or on its own line.
-// reasoned lists the marker lines that carry no reason.
-func envPrintExemptLines(fset *token.FileSet, f *ast.File) (exempt map[int]bool, reasoned []int) {
-	exempt = map[int]bool{}
+// envPrintExemptions returns the one call each env-print-ok comment exempts and
+// the marker lines that carry no reason. A marker trailing a call exempts the
+// call it trails on its own line; one standing alone on its line exempts only
+// the first call that starts on the line below. No marker exempts a second
+// call, so an unmarked print beside a marked one is reported on its own.
+func envPrintExemptions(fset *token.FileSet, f *ast.File, src []byte, calls []failureCall) (map[*ast.CallExpr]bool, []int) {
+	exempt := map[*ast.CallExpr]bool{}
+	var unreasoned []int
+	lines := strings.Split(string(src), "\n")
 	for _, cg := range f.Comments {
 		for _, c := range cg.List {
 			text := strings.TrimSpace(strings.TrimPrefix(c.Text, "//"))
@@ -624,13 +663,47 @@ func envPrintExemptLines(fset *token.FileSet, f *ast.File) (exempt map[int]bool,
 			if !ok {
 				continue
 			}
-			line := fset.Position(c.Pos()).Line
-			exempt[line] = true
-			exempt[line+1] = true
+			cpos := fset.Position(c.Pos())
 			if strings.TrimSpace(rest) == "" {
-				reasoned = append(reasoned, line)
+				unreasoned = append(unreasoned, cpos.Line)
+			}
+			var cand *ast.CallExpr
+			if commentStandsAlone(lines, cpos) {
+				// The call the marker introduces: the first one starting on
+				// the line below, and only that one.
+				for _, call := range calls {
+					if fset.Position(call.call.Pos()).Line == cpos.Line+1 && call.call.Pos() >= c.End() {
+						cand = call.call
+						break
+					}
+				}
+			} else {
+				// The call the marker trails: the nearest one ending before it
+				// on the same line. A call starting on an earlier line is not
+				// exempt, per the same-line rule.
+				for _, call := range calls {
+					if fset.Position(call.call.Pos()).Line != cpos.Line || call.call.End() > c.Pos() {
+						continue
+					}
+					if cand == nil || call.call.End() > cand.End() {
+						cand = call.call
+					}
+				}
+			}
+			if cand != nil {
+				exempt[cand] = true
 			}
 		}
 	}
-	return exempt, reasoned
+	return exempt, unreasoned
+}
+
+// commentStandsAlone reports whether nothing but whitespace precedes the
+// comment on its own line.
+func commentStandsAlone(lines []string, pos token.Position) bool {
+	i := pos.Line - 1
+	if i < 0 || i >= len(lines) || pos.Column-1 > len(lines[i]) {
+		return false
+	}
+	return strings.TrimSpace(lines[i][:pos.Column-1]) == ""
 }

@@ -134,6 +134,16 @@ func TestX(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "a slice literal holding an environment entry",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	expected := []string{env[0]}
+	t.Errorf("expected %v", expected)
+}`,
+			want: []string{"5:env-print"},
+		},
+		{
 			name: "a function that builds a []string for an environment",
 			src: `package p
 import "testing"
@@ -172,6 +182,37 @@ func helper(t *testing.T, env []string) {
 	t.Fatalf("endpoint = %v", env)
 }`,
 			want: nil,
+		},
+		{
+			name: "a marked call does not exempt the call below it",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	t.Fatalf("endpoint = %v", env) // testpolicy:env-print-ok a host and a port
+	t.Fatalf("env = %v", env)
+}`,
+			want: []string{"5:env-print"},
+		},
+		{
+			name: "a marker above one call does not exempt the next call",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	// testpolicy:env-print-ok a host and a port
+	t.Fatalf("endpoint = %v", env)
+	t.Fatalf("env = %v", env)
+}`,
+			want: []string{"6:env-print"},
+		},
+		{
+			name: "a marker above a line exempts only its first call",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	// testpolicy:env-print-ok a host and a port
+	t.Fatalf("endpoint = %v", env); t.Fatalf("env = %v", env)
+}`,
+			want: []string{"5:env-print"},
 		},
 		{
 			name: "an exemption without a reason is reported",
