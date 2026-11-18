@@ -150,6 +150,15 @@ func TestEnvPrintGuardRefusesAnUnparsableFile(t *testing.T) {
 	}
 }
 
+// TestEnvPrintGuardRefusesAMissingRoot pins that a root the walk cannot enter
+// is an error, not a clean result.
+func TestEnvPrintGuardRefusesAMissingRoot(t *testing.T) {
+	t.Parallel()
+	if _, err := CheckEnvPrints(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("CheckEnvPrints returned no error for a missing root")
+	}
+}
+
 // TestEnvPrintGuardOnTree runs the guard over every test file under internal
 // and cmd. It is the gate that keeps an environment slice out of a failure
 // message anywhere in the tree.
