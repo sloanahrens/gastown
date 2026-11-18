@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,16 +56,41 @@ func TestUpdateJobBdPodTargetRefusesImagesWithoutBd(t *testing.T) {
 	}
 }
 
-// TestUpdateJobBdNonPodTargetKeepsImagesWithoutBd holds the runs the refusal leaves
-// alone: a run with no pod target and an images file with no bd key, the file a
-// `gt update images` run without --bd writes, reaches the orchestrator as it did before.
-func TestUpdateJobBdNonPodTargetKeepsImagesWithoutBd(t *testing.T) {
+// TestUpdateJobBdRehearsalImagesFileUnchanged holds the runs the refusal leaves alone:
+// a run with no pod target and an images file with no bd key, the file a rehearsal
+// writes, is accepted and the file's bytes are left as they were.
+func TestUpdateJobBdRehearsalImagesFileUnchanged(t *testing.T) {
 	t.Parallel()
-	got, err := runCountedPodCommand(t, false, "--images", writeBdlessImages(t))
-	if err != nil {
-		t.Fatalf("gt update with no pod target and a bd-less images file was refused: %v", err)
+	tests := []struct {
+		name     string
+		args     []string
+		wantRuns int
+	}{
+		{name: "run", args: nil, wantRuns: 1},
+		{name: "--dry-run", args: []string{"--dry-run"}, wantRuns: 1},
 	}
-	if got.runs != 1 {
-		t.Errorf("orchestrator called %d times, want 1", got.runs)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := writeBdlessImages(t)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read the values file: %v", err)
+			}
+			got, err := runCountedPodCommand(t, false, append([]string{"--images", path}, tt.args...)...)
+			if err != nil {
+				t.Fatalf("gt update with no pod target and a bd-less images file was refused: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read the values file after the run: %v", err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Errorf("images file changed under a non-pod run:\nbefore %q\nafter  %q", before, after)
+			}
+			if got.runs != tt.wantRuns {
+				t.Errorf("orchestrator called %d times, want %d", got.runs, tt.wantRuns)
+			}
+		})
 	}
 }
