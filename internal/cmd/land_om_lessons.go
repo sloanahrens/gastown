@@ -197,19 +197,7 @@ func writeLandOmLessonsProposals(w io.Writer, report omlessons.Report, rules map
 			continue
 		}
 		fmt.Fprintf(&b, "\n--- %s (%s)\n", p.Name, p.ID)
-		fmt.Fprintf(&b, "Coverage: %s\n", p.Coverage)
-		fmt.Fprintf(&b, "Counts: %d finding(s) on %d bead(s), %d round(s) burned; prior window %d finding(s) on %d bead(s), %d round(s)\n",
-			p.Current.Findings, p.Current.Beads, p.Current.Rounds,
-			p.Prior.Findings, p.Prior.Beads, p.Prior.Rounds)
-		fmt.Fprintf(&b, "Examples: %s\n", strings.Join(p.Examples, ", "))
-		fmt.Fprintln(&b, "\nGoal: a directive edit that stops om raising this class.")
-		fmt.Fprintf(&b, "Constraints: the edit goes to the directive files in %s; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.\n", directivesDir)
-		fmt.Fprintln(&b, "Out of scope: om's bar or threshold; turning anything on.")
-		fmt.Fprintln(&b, "Gate: go test ./internal/cmd -run TestLandOmLessons -count=1")
-		fmt.Fprintln(&b, "Size: one directive edit, one landing.")
-		fmt.Fprintln(&b, "Acceptance:")
-		fmt.Fprintln(&b, "- [ ] the rule for this class says what the case is and what to do instead")
-		fmt.Fprintln(&b, "- [ ] the next weekly pass counts fewer findings of this class than this window")
+		b.WriteString(omlessons.ProposalDraft(p, directivesDir))
 	}
 	_, err := io.WriteString(w, b.String())
 	return err

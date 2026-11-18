@@ -639,6 +639,11 @@ type Daemon struct {
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
 
+	// omLessonsFeedFn records a failed om_lessons filing in the town feed, so
+	// the failure reaches a reader who never reads the daemon log. Nil writes
+	// the real feed; tests capture the event instead.
+	omLessonsFeedFn func(eventType string, payload map[string]interface{}) error
+
 	// rebuildGTStaleFn reads binary staleness for the rebuild_gt job (see
 	// rebuild_gt.go); nil is version.CheckStaleBinaryFresh, which shells out
 	// to git. rebuildGTGateFn reads the container-gate picture; nil is the

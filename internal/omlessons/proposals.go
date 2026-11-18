@@ -3,6 +3,7 @@ package omlessons
 import (
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // ProposeMinFindings is how many findings a class needs in the window before a
@@ -48,6 +49,33 @@ func Proposals(report Report, rules map[string]bool) []Proposal {
 		out = append(out, p)
 	}
 	return out
+}
+
+// ProposalDraft returns one proposal's draft text: its rule coverage, its
+// counts, three example beads, and the directive edit the overseer writes.
+// directivesDir is the directory the edit goes to, named in the Constraints
+// line.
+//
+// The daemon files this text in its weekly bead and `gt land om-lessons
+// --propose` prints it, so the two read the same. Callers print the heading
+// that names the class themselves; a too-few proposal has no draft and is
+// left out before this is called.
+func ProposalDraft(p Proposal, directivesDir string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Coverage: %s\n", p.Coverage)
+	fmt.Fprintf(&b, "Counts: %d finding(s) on %d bead(s), %d round(s) burned; prior window %d finding(s) on %d bead(s), %d round(s)\n",
+		p.Current.Findings, p.Current.Beads, p.Current.Rounds,
+		p.Prior.Findings, p.Prior.Beads, p.Prior.Rounds)
+	fmt.Fprintf(&b, "Examples: %s\n", strings.Join(p.Examples, ", "))
+	fmt.Fprintln(&b, "\nGoal: a directive edit that stops om raising this class.")
+	fmt.Fprintf(&b, "Constraints: the edit goes to the directive files in %s; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.\n", directivesDir)
+	fmt.Fprintln(&b, "Out of scope: om's bar or threshold; turning anything on.")
+	fmt.Fprintln(&b, "Gate: go test ./internal/cmd -run TestLandOmLessons -count=1")
+	fmt.Fprintln(&b, "Size: one directive edit, one landing.")
+	fmt.Fprintln(&b, "Acceptance:")
+	fmt.Fprintln(&b, "- [ ] the rule for this class says what the case is and what to do instead")
+	fmt.Fprintln(&b, "- [ ] the next weekly pass counts fewer findings of this class than this window")
+	return b.String()
 }
 
 // coverage names a class's coverage. A class whose rule is in the directive is

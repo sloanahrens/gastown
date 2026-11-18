@@ -35,6 +35,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
 )
@@ -258,9 +259,10 @@ func (d *Daemon) forgetOmLessonsLastRun() {
 // startOmLessonsTick runs one pass on its own goroutine when the week's record
 // says it is due: a pass reads the week's review records, which does not belong
 // on the main select loop. A tick that arrives before the record says a week has
-// passed is skipped, and one that arrives while the previous pass still runs is
-// skipped and logged, since two passes at once would propose the same window
-// twice.
+// passed is skipped — except after a filing failure, which records no last-run
+// time, so the next tick retries the unfiled classes (gt-f5oavm). A tick that
+// arrives while the previous pass still runs is skipped and logged, since two
+// passes at once would propose the same window twice.
 func (d *Daemon) startOmLessonsTick() {
 	if d.config == nil || !d.isPatrolActive(omLessonsPatrol) {
 		return
@@ -293,9 +295,15 @@ func (d *Daemon) startOmLessonsTick() {
 }
 
 // triggerOmLessons runs one pass over the town's own run seam and logs what it
-// built, or the error that ended it. The pass records its start time whatever
-// the outcome, the "attempted" convention checkpoint_dog and jsonl_git_backup
-// follow: a broken pass costs one line per week, not one per check.
+// built, or the error that ended it.
+//
+// A pass that failed before filing records its start time anyway, the
+// "attempted" convention checkpoint_dog and jsonl_git_backup follow: a broken
+// pass costs one line per week, not one per check. A filing failure does not:
+// the classes whose create failed are in no filed record, so the week is not
+// spent, and the next check is due and retries them. The failure is also
+// recorded in the town feed, so it reaches a reader who never reads the daemon
+// log, as a failed dog cycle's does (gt-f5oavm).
 func (d *Daemon) triggerOmLessons() {
 	if d.config == nil || !d.isPatrolActive(omLessonsPatrol) {
 		return
@@ -307,13 +315,42 @@ func (d *Daemon) triggerOmLessons() {
 	ctx, cancel := context.WithTimeout(ctx, omLessonsTickTimeout)
 	defer cancel()
 	at := d.clk().Now()
-	defer d.recordPatrolRun(d.omLessonsLastRun(), omLessonsPatrol, at)
 	proposals, err := d.runOmLessonsTick(ctx, at)
-	if err != nil {
-		d.logger.Printf("om_lessons: %v", err)
+	if err == nil {
+		d.logger.Printf("om_lessons: the pass built %d proposal(s)", len(proposals))
+		d.recordPatrolRun(d.omLessonsLastRun(), omLessonsPatrol, at)
 		return
 	}
-	d.logger.Printf("om_lessons: the pass built %d proposal(s)", len(proposals))
+	d.logger.Printf("om_lessons: %v", err)
+	var filing *omLessonsFilingError
+	if errors.As(err, &filing) {
+		d.recordOmLessonsFilingFailure(filing)
+		d.logger.Printf("om_lessons: %d filing failure(s) left for the next check to retry", len(filing.failures))
+		return
+	}
+	d.recordPatrolRun(d.omLessonsLastRun(), omLessonsPatrol, at)
+}
+
+// recordOmLessonsFilingFailure records a failed filing in the town feed, so the
+// failure reaches a reader who never reads the daemon log. The write is
+// best-effort: the daemon log line is already written, and a feed that refuses
+// it must not fail the pass again.
+func (d *Daemon) recordOmLessonsFilingFailure(filing *omLessonsFilingError) {
+	feed := d.omLessonsFeedFn
+	if feed == nil {
+		townRoot := d.config.TownRoot
+		feed = func(eventType string, payload map[string]interface{}) error {
+			return events.LogFeedTo(townRoot, eventType, events.ActorDaemon, payload)
+		}
+	}
+	payload := map[string]interface{}{
+		"patrol": omLessonsPatrol,
+		"error":  filing.Error(),
+		"retry":  "the next check retries the unfiled classes",
+	}
+	if err := feed(events.TypePatrolFailed, payload); err != nil {
+		d.logger.Printf("om_lessons: recording the filing failure in the feed failed: %v", err)
+	}
 }
 
 // runOmLessonsTick runs one pass: it calls the run seam once, then files the
@@ -411,6 +448,23 @@ func saveOmLessonsFiled(townRoot, week string, filed map[string]bool) error {
 	return atomicfile.WriteJSON(path, omLessonsFiledRecord{Week: week, Classes: classes})
 }
 
+// omLessonsFilingError is the error a pass returns when one or more of its
+// proposal creates failed. The classes it names are in no filed record, so the
+// week is not spent: triggerOmLessons leaves the last-run time alone and the
+// next check retries them (gt-f5oavm).
+type omLessonsFilingError struct {
+	failures []error
+}
+
+func (e *omLessonsFilingError) Error() string {
+	return errors.Join(e.failures...).Error()
+}
+
+// Unwrap lets errors.Is and errors.As reach the client's own error.
+func (e *omLessonsFilingError) Unwrap() []error {
+	return e.failures
+}
+
 // fileOmLessonsProposals files one overseer-only bead for each proposal with
 // enough findings to draft an edit, at most once per class and ISO week. A
 // too-few class has no draft and files nothing. The counts named in each bead
@@ -421,8 +475,11 @@ func saveOmLessonsFiled(townRoot, week string, filed map[string]bool) error {
 // nothing twice. The record is written as each class is filed, so a pass that
 // ends between two creates leaves the classes it already filed recorded. A
 // class whose create fails is left out of the record, so the proposals after
-// it still file and the next pass of the week tries it again; every failure is
-// returned together, so a pass that lost a bead never reads as clean.
+// it still file and the next check retries it; those failures are returned
+// together as an *omLessonsFilingError. A failed write of the week's record is
+// returned as a plain error and is never retried: the beads it would have
+// named were already filed, and a rerun that cannot read the record would file
+// them again.
 func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omlessons.Proposal) error {
 	var drafts []omlessons.Proposal
 	for _, p := range proposals {
@@ -452,7 +509,8 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 		return fmt.Errorf("om_lessons: reading the classes filed in %s: %w", week, err)
 	}
 	writer := d.noticeBeads()
-	var failures []error
+	var createFailures []error
+	var recordFailures []error
 	for _, p := range drafts {
 		if filed[p.ID] {
 			d.logger.Printf("om_lessons: %s was already filed in %s, skipping", p.ID, week)
@@ -466,7 +524,7 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 			Actor:       daemonActor,
 		})
 		if err != nil {
-			failures = append(failures, fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err))
+			createFailures = append(createFailures, fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err))
 			continue
 		}
 		filed[p.ID] = true
@@ -475,10 +533,21 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 		// recorded, and a write that fails here is retried by the next class's
 		// write, which carries the accumulated set.
 		if err := saveOmLessonsFiled(townRoot, week, filed); err != nil {
-			failures = append(failures, fmt.Errorf("om_lessons: recording the classes filed in %s: %w", week, err))
+			recordFailures = append(recordFailures, fmt.Errorf("om_lessons: recording the classes filed in %s: %w", week, err))
 		}
 	}
-	return errors.Join(failures...)
+	// A record write that failed may have left a filed class unrecorded, so
+	// the week is not retried even if creates also failed: a rerun that read
+	// the stale record would file the classes it is missing a second time.
+	// The cost of a write a later class repaired is a lost retry, never a
+	// duplicate bead.
+	if len(recordFailures) > 0 {
+		return errors.Join(append(createFailures, recordFailures...)...)
+	}
+	if len(createFailures) > 0 {
+		return &omLessonsFilingError{failures: createFailures}
+	}
+	return nil
 }
 
 // omLessonsWindowLine names the two windows a proposal's counts are read over.
@@ -489,27 +558,15 @@ func omLessonsWindowLine(span omlessons.Span) string {
 		first(span.Current), last(span.Current), span.Days, first(span.Prior), last(span.Prior))
 }
 
-// omLessonsProposalBody is the text of the bead a proposal files: the class, its
-// counts, its three example beads and the directive edit the overseer writes.
-// It reads as writeLandOmLessonsProposals in internal/cmd does, so the bead and
-// the `gt land om-lessons --propose` draft say the same thing.
+// omLessonsProposalBody is the text of the bead a proposal files: the window
+// it read, the class, and the draft an overseer works from. The draft is
+// omlessons.ProposalDraft, the same text `gt land om-lessons --propose`
+// prints, so the bead and the printed draft cannot drift (gt-f5oavm).
 func omLessonsProposalBody(p omlessons.Proposal, window, directives string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\n\n", window)
 	fmt.Fprintf(&b, "Class: %s (%s)\n", p.Name, p.ID)
-	fmt.Fprintf(&b, "Coverage: %s\n", p.Coverage)
-	fmt.Fprintf(&b, "Counts: %d finding(s) on %d bead(s), %d round(s) burned; prior window %d finding(s) on %d bead(s), %d round(s)\n",
-		p.Current.Findings, p.Current.Beads, p.Current.Rounds,
-		p.Prior.Findings, p.Prior.Beads, p.Prior.Rounds)
-	fmt.Fprintf(&b, "Examples: %s\n", strings.Join(p.Examples, ", "))
-	fmt.Fprintln(&b, "\nGoal: a directive edit that stops om raising this class.")
-	fmt.Fprintf(&b, "Constraints: the edit goes to the directive files in %s; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.\n", directives)
-	fmt.Fprintln(&b, "Out of scope: om's bar or threshold; turning anything on.")
-	fmt.Fprintln(&b, "Gate: go test ./internal/cmd -run TestLandOmLessons -count=1")
-	fmt.Fprintln(&b, "Size: one directive edit, one landing.")
-	fmt.Fprintln(&b, "Acceptance:")
-	fmt.Fprintln(&b, "- [ ] the rule for this class says what the case is and what to do instead")
-	fmt.Fprintln(&b, "- [ ] the next weekly pass counts fewer findings of this class than this window")
+	b.WriteString(omlessons.ProposalDraft(p, directives))
 	return b.String()
 }
 
