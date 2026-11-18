@@ -1,5 +1,6 @@
-// Package vmstart reads and repairs the DNS state of a Colima VM, so the start
-// command and the reboot check share one definition (gt-6ggud7, gt-x5a7bz).
+// Package vmstart reads and repairs the DNS state of a Colima VM and reads the
+// owner of the Mac's registry port, so the start command and the reboot check
+// share one definition (gt-6ggud7, gt-x5a7bz, gt-8e43fp).
 package vmstart
 
 import (
