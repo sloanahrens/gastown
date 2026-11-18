@@ -51,6 +51,10 @@ const (
 	// doltProbeTimeout bounds the Dolt check /readyz makes: a dial that has not
 	// answered inside it is Dolt not reachable for this readiness check.
 	doltProbeTimeout = 2 * time.Second
+	// doltUnreachableMessage is what /readyz answers when the probe fails. It is
+	// fixed: the probe's error names the endpoint's host and port, which the
+	// readiness body does not carry.
+	doltUnreachableMessage = "bdgateway: dolt is not reachable"
 	// statusClientClosed is nginx's 499: the caller ended the request before
 	// the gateway answered. It is only sent when the executor refused before
 	// starting bd because the request was already over; nobody reads it.
@@ -219,13 +223,27 @@ func (g *Gateway) serveReady(w http.ResponseWriter, r *http.Request) {
 	if g.doltProbe != nil {
 		ctx, cancel := context.WithTimeout(r.Context(), doltProbeTimeout)
 		defer cancel()
-		if err := g.doltProbe(ctx); err != nil {
-			refuse(w, http.StatusServiceUnavailable, codeUnavailable,
-				fmt.Sprintf("bdgateway: dolt is not reachable: %v", err))
+		if err := doltProbeWithin(ctx, g.doltProbe); err != nil {
+			refuse(w, http.StatusServiceUnavailable, codeUnavailable, doltUnreachableMessage)
 			return
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+// doltProbeWithin returns within ctx's deadline even when the probe's dial
+// ignores the context: the probe answers on its own goroutine, and whichever of
+// that answer and ctx's end comes first is the readiness result. A dial that
+// never returns parks its goroutine; the readiness answer no longer waits on it.
+func doltProbeWithin(ctx context.Context, probe func(context.Context) error) error {
+	done := make(chan error, 1)
+	go func() { done <- probe(ctx) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // serveExec is POST /v1/exec: authenticate, apply the policy, run the call and

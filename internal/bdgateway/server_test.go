@@ -522,8 +522,8 @@ func getReady(t *testing.T, g *Gateway) *httptest.ResponseRecorder {
 }
 
 // TestGatewayReadyDoltServe: /readyz is 200 when the Dolt probe answers and 503
-// naming Dolt when it fails. A call and Ready itself never touch the probe, so
-// only readiness reports the Dolt reason.
+// naming Dolt, in a fixed message, when it fails. A call and Ready itself never
+// touch the probe, so only readiness reports the Dolt reason.
 func TestGatewayReadyDoltServe(t *testing.T) {
 	t.Parallel()
 	probeErr := errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
@@ -532,10 +532,13 @@ func TestGatewayReadyDoltServe(t *testing.T) {
 		probe   func(context.Context) error
 		want    int
 		message string
+		// notInBody is text the probe's error carries that the body must not:
+		// the readiness body names no endpoint.
+		notInBody string
 	}{
 		{name: "dolt answers", probe: func(context.Context) error { return nil }, want: http.StatusOK},
 		{name: "dolt unreachable", probe: func(context.Context) error { return probeErr }, want: http.StatusServiceUnavailable,
-			message: "bdgateway: dolt is not reachable: dial tcp 127.0.0.1:3307: connect: connection refused"},
+			message: doltUnreachableMessage, notInBody: "127.0.0.1:3307"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -554,8 +557,40 @@ func TestGatewayReadyDoltServe(t *testing.T) {
 			if payload.Message != tc.message {
 				t.Errorf("message = %q, want %q", payload.Message, tc.message)
 			}
+			if tc.notInBody != "" && strings.Contains(rec.Body.String(), tc.notInBody) {
+				t.Errorf("body %q carries %q, want it left out", rec.Body.String(), tc.notInBody)
+			}
 		})
 	}
+
+	// The probe's budget belongs to the handler, not the dialer: the request's
+	// context has already ended here, so a handler that waits for the probe
+	// hangs instead of refusing.
+	t.Run("a probe that ignores its context is bounded", func(t *testing.T) {
+		t.Parallel()
+		blocked := make(chan struct{})
+		t.Cleanup(func() { close(blocked) })
+		g := loadedGatewayWithProbe(t, func(context.Context) error {
+			<-blocked
+			return nil
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, readyPath, nil).WithContext(ctx)
+		req.Header.Set("Authorization", "Bearer "+testReadToken)
+		g.ServeHTTP(rec, req)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503; body %s", rec.Code, rec.Body.String())
+		}
+		var payload ErrorPayload
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("body %q is not an error payload: %v", rec.Body.String(), err)
+		}
+		if payload.Message != doltUnreachableMessage {
+			t.Errorf("message = %q, want %q", payload.Message, doltUnreachableMessage)
+		}
+	})
 
 	// The Dolt reason belongs to /readyz alone: a call and the Ready check must
 	// not run the probe, or a slow dial would land in every push path.
