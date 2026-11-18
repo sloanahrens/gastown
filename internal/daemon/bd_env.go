@@ -28,24 +28,42 @@ func bdReadOnlyRoutingEnv(townRoot string) []string {
 }
 
 // bdReadOnlyRoutingEnvFrom is bdReadOnlyRoutingEnv over base instead of the
-// daemon's own environment.
+// daemon's own environment. It is a town-level call, so it names the town's
+// .beads (none when townRoot is empty).
 func bdReadOnlyRoutingEnvFrom(base []string, townRoot string) []string {
-	fallback := ""
 	if townRoot != "" {
-		fallback = filepath.Join(townRoot, ".beads")
 		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
-	return beads.BuildReadOnlyRoutingBDEnv(base, fallback)
+	return beads.BuildReadOnlyRoutingBDEnv(base, routingFallbackBeadsDir(townRoot, ""))
 }
 
 func bdMutationRoutingEnv(townRoot string) []string {
-	fallback := ""
-	base := os.Environ()
+	return bdMutationRoutingEnvOver(os.Environ(), townRoot, "")
+}
+
+// bdMutationRoutingEnvOver is bdMutationRoutingEnv over base for a call over
+// beadsDir, the .beads directory of the store the call reads. A caller whose
+// client is over a rig's database names that rig's .beads, so the routed call
+// lands in the rig and not in the town database (gt-dl9ug0). An empty beadsDir
+// names the town's .beads.
+func bdMutationRoutingEnvOver(base []string, townRoot, beadsDir string) []string {
 	if townRoot != "" {
-		fallback = filepath.Join(townRoot, ".beads")
 		base = agentconfig.NormalizeConfiguredDoltEnv(base, townRoot)
 	}
-	return beads.BuildMutationRoutingBDEnv(base, fallback)
+	return beads.BuildMutationRoutingBDEnv(base, routingFallbackBeadsDir(townRoot, beadsDir))
+}
+
+// routingFallbackBeadsDir returns the workspace a routed call names as
+// BEADS_DIR: beadsDir when the caller names the store the call reads, the
+// town's own .beads otherwise. An empty town names none, as before.
+func routingFallbackBeadsDir(townRoot, beadsDir string) string {
+	if beadsDir != "" {
+		return beadsDir
+	}
+	if townRoot == "" {
+		return ""
+	}
+	return filepath.Join(townRoot, ".beads")
 }
 
 func bdReadOnlyPinnedEnv(beadsDir string) []string {

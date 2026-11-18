@@ -1108,9 +1108,9 @@ type bdCallRecord struct {
 // (gt-fu9c8a): the patrol panicked the daemon on its first tick because
 // imagePinsBeads called WithTimeout on a NewPinned wrapper, so this test calls
 // the constructor itself and drives one bd call through the client it returns.
-// That call must run in the gt source rig's .beads directory, where the refresh
-// bead is filed and looked up, and a client whose copies dropped its bd seam
-// would not answer at all.
+// That call must run in the gt source rig's .beads directory, and a client whose
+// copies dropped its bd seam would not answer at all. The env that call carries
+// is TestImagePinsBeadsRoutesWithTheRigsBeadsDir's subject.
 func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -1135,12 +1135,15 @@ func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
 	}
 }
 
-// TestImagePinsBeadsRoutesWithTheTownsMutationEnv: the client's bd calls start
-// from the town's mutation routing environment, not the process one
-// (gt-ff9cxi). No BEADS_DIR and no database pin reach bd, so the working
-// directory chooses the database the refresh bead is filed into, and the
-// endpoint the town names is the server the call dials.
-func TestImagePinsBeadsRoutesWithTheTownsMutationEnv(t *testing.T) {
+// TestImagePinsBeadsRoutesWithTheRigsBeadsDir: the client's bd calls start from
+// the town's mutation routing environment over the gt source rig's .beads, not
+// the process one (gt-ff9cxi). BEADS_DIR names that rig's .beads — the store
+// the call reads, which the gateway forwarder places the call in — so a refresh
+// bead created with no ID prefix files into the rig's database, not the town's
+// (gt-dl9ug0). No database pin reaches bd, so prefix routing chooses the
+// database the refresh bead is filed into, and the endpoint the town names is
+// the server the call dials.
+func TestImagePinsBeadsRoutesWithTheRigsBeadsDir(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeImagePinsTownDolt(t, townRoot, `,"dolt":{"host":"127.0.0.8","port":4507}`)
@@ -1158,9 +1161,17 @@ func TestImagePinsBeadsRoutesWithTheTownsMutationEnv(t *testing.T) {
 		t.Fatalf("bd calls = %d, want the one List", len(calls))
 	}
 
-	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE"} {
+	wantBeadsDir := beads.ResolveBeadsDir(filepath.Join(townRoot, rebuildGTSourceRig, ".beads"))
+	got, ok := lookupEnvIn(calls[0].env, "BEADS_DIR")
+	if !ok || got != wantBeadsDir {
+		t.Errorf("the bd call's BEADS_DIR = %q (set %v), want the gt source rig's .beads %q", got, ok, wantBeadsDir)
+	}
+	if got == beads.ResolveBeadsDir(townRoot) {
+		t.Errorf("the bd call's BEADS_DIR names the town's .beads, so the refresh bead is filed in the town database")
+	}
+	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE"} {
 		if value, ok := lookupEnvIn(calls[0].env, key); ok {
-			t.Errorf("the bd call carries %s=%s, so the env, not the working directory, chooses the database", key, value)
+			t.Errorf("the bd call carries %s=%s, so the env, not the route table, pins the database", key, value)
 		}
 	}
 	for key, want := range map[string]string{

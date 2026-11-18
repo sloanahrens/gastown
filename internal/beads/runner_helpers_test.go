@@ -95,6 +95,18 @@ func newRecordedBeads(dir string, r *recorder) *Beads {
 	return newBeads(beadsFields{workDir: dir, isolated: true, noRoute: true, exec: r.exec})
 }
 
+// firstEnvValue returns the first value of key in env, and whether it was set.
+// The bd gateway forwarder reads the first entry of a duplicated name, so this
+// is the entry it places a call by.
+func firstEnvValue(env []string, key string) (string, bool) {
+	for _, kv := range env {
+		if k, v, found := strings.Cut(kv, "="); found && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
 // lastEnvValue returns the last value of key in env, and whether it was set.
 func lastEnvValue(env []string, key string) (string, bool) {
 	val, ok := "", false
