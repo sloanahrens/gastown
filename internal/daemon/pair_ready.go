@@ -115,12 +115,10 @@ const (
 	// deploy-pair-refused:<rig>:<sha12>, one per commit the update ledger
 	// records as refused.
 	pairReadyRefusedPrefix = "deploy-pair-refused:"
-	// pairReadyStuckPrefix keys one item: deploy-pair-stuck:<rig>:<sha12>, one
-	// per commit whose pair is still unpublished past the stuck bound.
+	// pairReadyStuckPrefix keys one item: deploy-pair-stuck:<rig>:<sha12>.
 	pairReadyStuckPrefix = "deploy-pair-stuck:"
 	// pairReadyStuckAfter is how long a green commit newer than the running one
-	// may wait for its pair before the check raises deploy-pair-stuck: past it
-	// no roll starts from the commit by itself (gt-afwjb4).
+	// may wait for its pair before the check raises deploy-pair-stuck (gt-afwjb4).
 	pairReadyStuckAfter = 90 * time.Minute
 )
 
@@ -150,8 +148,7 @@ type pairReadyGit interface {
 }
 
 // pairReadyAged is the clone's read of a commit's time, which ages a green ref
-// whose pair is missing. daemonGit offers it; a clone that does not leaves
-// every green unaged, which the age read logs.
+// whose pair is missing.
 type pairReadyAged interface {
 	CommitTime(rev string) (time.Time, error)
 }
@@ -559,11 +556,10 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 			out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v))
 			continue
 		}
-		// The pair is missing. A commit past the stuck bound raises its stuck item
-		// before the run is read, so it is raised whether or not an images run
-		// exists; the commit's images run then says whether the pair can still
-		// arrive. Only such a commit asks Forgejo about its run. The check settles
-		// the commit's build items here, so the incomplete path below never has to.
+		// The pair is missing, so the commit is aged before its run is read: a
+		// commit past the stuck bound raises its stuck item whether or not a run
+		// exists. Only such a commit asks Forgejo about its run, and the check
+		// settles the commit's build items here so the incomplete path never has to.
 		if age, ok := pairReadyGreenAge(r, g, now, logf); ok && age >= pairReadyStuckAfter {
 			out = append(out, pairReadyStuckItem(r.Rig, g, age))
 		}
@@ -775,30 +771,27 @@ func pairReadyRefusedItem(rig string, g pairReadyGreen, reason string) attention
 }
 
 // pairReadyStuckKey is one stuck pair's key: deploy-pair-stuck:<rig>:<sha12>.
-// The commit is what it names, so the same commit re-scanned keeps one item and
-// the pass after the pair publishes stops raising it.
 func pairReadyStuckKey(rig, sha12 string) string {
 	return pairReadyStuckPrefix + rig + ":" + sha12
 }
 
-// pairReadyGreenAge is how long before now the green commit was made, read
-// from the commit the ref points at: the green ref is the landing worker's own
-// merge commit, made minutes before CI makes the ref, so its commit time stands
-// in for the push time. ok is false for a ref the rig's clone cannot date —
-// no clone, a read that failed, or a commit carrying no time — and such a ref
-// is not aged, so it raises no stuck item, and the pass logs why.
+// pairReadyGreenAge is how long before now the green commit was made, read from
+// the commit the ref points at, whose time stands in for the push time since
+// the ref is the landing worker's own merge commit. ok is false for a ref the
+// clone cannot date — no clone, a failed read, or no time — which raises no
+// stuck item and is logged.
 func pairReadyGreenAge(r pairReadyRig, g pairReadyGreen, now time.Time, logf func(string, ...any)) (time.Duration, bool) {
 	git, ok := r.Git.(pairReadyAged)
-	if r.Git == nil || !ok {
+	if !ok {
 		logf("deploy pair check: %s: green/%s is not aged, since the rig has no local clone that dates a commit", r.Rig, g.sha12)
 		return 0, false
 	}
 	at, err := git.CommitTime(g.sha)
-	if err != nil {
+	switch {
+	case err != nil:
 		logf("deploy pair check: %s: green/%s is not aged, since its commit time could not be read: %v", r.Rig, g.sha12, err)
 		return 0, false
-	}
-	if at.IsZero() {
+	case at.IsZero():
 		logf("deploy pair check: %s: green/%s is not aged, since its commit carries no time", r.Rig, g.sha12)
 		return 0, false
 	}
@@ -806,7 +799,7 @@ func pairReadyGreenAge(r pairReadyRig, g pairReadyGreen, now time.Time, logf fun
 }
 
 // pairReadyStuckItem is the item for a green commit whose pair is still
-// unpublished past pairReadyStuckAfter, naming the commit and its age.
+// unpublished past pairReadyStuckAfter.
 func pairReadyStuckItem(rig string, g pairReadyGreen, age time.Duration) attention.Item {
 	return attention.Item{
 		Key:      pairReadyStuckKey(rig, g.sha12),
@@ -1235,9 +1228,7 @@ func (s *attentionSources) collectImagesUnknown(context.Context) ([]attention.It
 }
 
 // collectPairStuck returns the stuck pairs the same read finds: one per green
-// commit newer than the running one whose pair is still unpublished past
-// pairReadyStuckAfter (gt-afwjb4). It is a collector of its own, like the
-// failed builds.
+// commit whose pair is still unpublished past pairReadyStuckAfter (gt-afwjb4).
 func (s *attentionSources) collectPairStuck(context.Context) ([]attention.Item, error) {
 	return s.pairReadyItemsOfKind(attention.KindDeployPairStuck), nil
 }

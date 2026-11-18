@@ -3,7 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
-	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,7 +15,7 @@ import (
 )
 
 // pairDatedClone dates every commit at at, so a case about another part of the
-// pass raises no stuck item and logs no unaged ref.
+// pass reads green as young and logs no unaged ref.
 type pairDatedClone struct {
 	pairReadyGit
 	at time.Time
@@ -46,77 +46,72 @@ func stuckFixture(t *testing.T) (fx *pairFixture, green, running string, greenAt
 	return fx, c[2], c[0], greenAt
 }
 
-// publish makes green's pair available in the fixture's registry.
-func (fx *pairFixture) publish(green string) {
-	fx.reg = &fakePairRegistry{digests: map[string]string{
-		imagevalues.DaemonImage + "@" + green[:12]:  fx.daemon,
-		imagevalues.PolecatImage + "@" + green[:12]: fx.polecat,
-	}}
+// stuckAt91 is stuckFixture read once at 91 minutes, so the item stands.
+func stuckAt91(t *testing.T) (fx *pairFixture, green string, greenAt time.Time) {
+	t.Helper()
+	fx, green, _, greenAt = stuckFixture(t)
+	fx.run(greenAt.Add(91 * time.Minute))
+	require.Len(t, fx.check.observed(), 1)
+	return fx, green, greenAt
 }
 
 // TestDeployPairStuckAtTheBound: a green commit newer than the running one whose
 // pair is unpublished raises the item once it is pairReadyStuckAfter old, naming
-// the rig, the commit and its age, and not a minute before.
+// the rig, the commit and its age, and not a minute before. It is raised beside
+// a failed images run, so no images run is needed for it.
 func TestDeployPairStuckAtTheBound(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		age  time.Duration
-		want bool
+		name      string
+		age       time.Duration
+		failedRun bool
+		want      []attention.Kind
 	}{
-		{"89 minutes", 89 * time.Minute, false},
-		{"90 minutes", 90 * time.Minute, true},
-		{"91 minutes", 91 * time.Minute, true},
+		{"89 minutes", 89 * time.Minute, false, nil},
+		{"90 minutes", 90 * time.Minute, false, []attention.Kind{attention.KindDeployPairStuck}},
+		{"91 minutes", 91 * time.Minute, false, []attention.Kind{attention.KindDeployPairStuck}},
+		{"90 minutes with a failed images run", 90 * time.Minute, true,
+			[]attention.Kind{attention.KindDeployPairStuck, attention.KindImagesFailed}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fx, green, _, greenAt := stuckFixture(t)
+			if tc.failedRun {
+				fx.setImagesRun(green, deployRunFailed)
+			}
 			fx.run(greenAt.Add(tc.age))
 
 			items := fx.check.observed()
-			if !tc.want {
-				assert.Empty(t, items, "a green commit younger than the stuck bound raised an item")
+			var kinds []attention.Kind
+			for _, it := range items {
+				kinds = append(kinds, it.Kind)
+			}
+			require.Equal(t, tc.want, kinds)
+			if len(tc.want) == 0 {
 				return
 			}
-			require.Len(t, items, 1)
 			it := items[0]
-			assert.Equal(t, attention.KindDeployPairStuck, it.Kind)
 			assert.Equal(t, "deploy-pair-stuck:gastown:"+green[:12], it.Key)
 			assert.Equal(t, "gastown", it.Rig)
 			assert.Equal(t, green, it.SHA)
-			assert.Contains(t, it.Summary, fmt.Sprint(int(tc.age/time.Minute))+" minutes old")
+			assert.Contains(t, it.Summary, strconv.Itoa(int(tc.age/time.Minute))+" minutes old")
 			assert.Contains(t, it.Summary, "pair is not published")
 		})
 	}
 }
 
-// TestDeployPairStuckRaisesBesideAFailedImagesRun: the item names a pair no roll
-// can start from whether or not an images run exists.
-func TestDeployPairStuckRaisesBesideAFailedImagesRun(t *testing.T) {
-	t.Parallel()
-	fx, green, _, greenAt := stuckFixture(t)
-	fx.setImagesRun(green, deployRunFailed)
-
-	fx.run(greenAt.Add(pairReadyStuckAfter))
-
-	items := fx.check.observed()
-	require.Len(t, items, 2)
-	assert.Equal(t, attention.KindDeployPairStuck, items[0].Kind)
-	assert.Equal(t, attention.KindImagesFailed, items[1].Kind)
-}
-
-// TestDeployPairStuckClears: the item clears when the pair publishes, even on a
-// scan that breaks on another branch after judging green, and when the running
-// commit reaches green.
-func TestDeployPairStuckClears(t *testing.T) {
+// TestDeployPairStuckNextRead: the item clears when the pair publishes, on a scan
+// that breaks on another branch after judging green, and when the running commit
+// reaches green; a read that did not answer keeps it beside the unreadable item.
+func TestDeployPairStuckNextRead(t *testing.T) {
 	t.Parallel()
 	t.Run("when the pair is published", func(t *testing.T) {
 		t.Parallel()
-		fx, green, _, greenAt := stuckFixture(t)
-		fx.run(greenAt.Add(91 * time.Minute))
-		require.Len(t, fx.check.observed(), 1)
-
-		fx.publish(green)
+		fx, green, greenAt := stuckAt91(t)
+		fx.reg = &fakePairRegistry{digests: map[string]string{
+			imagevalues.DaemonImage + "@" + green[:12]:  fx.daemon,
+			imagevalues.PolecatImage + "@" + green[:12]: fx.polecat,
+		}}
 		// A second green the clone does not hold and Forgejo has no comparison
 		// for stops the scan after green was judged.
 		fx.api.branches = append(fx.api.branches, pairBranch(pairOther))
@@ -129,14 +124,22 @@ func TestDeployPairStuckClears(t *testing.T) {
 	})
 	t.Run("when the running commit reaches green", func(t *testing.T) {
 		t.Parallel()
-		fx, green, _, greenAt := stuckFixture(t)
-		fx.run(greenAt.Add(91 * time.Minute))
-		require.Len(t, fx.check.observed(), 1)
-
+		fx, green, greenAt := stuckAt91(t)
 		fx.writeRunning(t, green)
 		fx.run(greenAt.Add(91*time.Minute + pairReadyInterval))
 
 		assert.Empty(t, fx.check.observed(), "a green commit the running one reached left its stuck item standing")
+	})
+	t.Run("when the read fails", func(t *testing.T) {
+		t.Parallel()
+		fx, _, greenAt := stuckAt91(t)
+		fx.api.branchErr = errors.New("forgejo answered 500")
+		fx.run(greenAt.Add(91*time.Minute + pairReadyInterval))
+
+		items := fx.check.observed()
+		require.Len(t, items, 2)
+		assert.Equal(t, attention.KindDeployPairStuck, items[0].Kind)
+		assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
 	})
 }
 
@@ -170,39 +173,21 @@ func TestDeployPairStuckUnagedRefRaisesNothing(t *testing.T) {
 	}
 }
 
-// TestDeployPairStuckSurvivesAFailedRead: a read that did not answer cannot say
-// the pair published, so the item stands beside the unreadable item.
-func TestDeployPairStuckSurvivesAFailedRead(t *testing.T) {
-	t.Parallel()
-	fx, _, _, greenAt := stuckFixture(t)
-	fx.run(greenAt.Add(91 * time.Minute))
-	require.Len(t, fx.check.observed(), 1)
-
-	fx.api.branchErr = errors.New("forgejo answered 500")
-	fx.run(greenAt.Add(91*time.Minute + pairReadyInterval))
-
-	items := fx.check.observed()
-	require.Len(t, items, 2)
-	assert.Equal(t, attention.KindDeployPairStuck, items[0].Kind)
-	assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
-}
-
-// TestDeployPairStuckHasItsOwnCollector: the item is a kind of its own from the
-// pair check's read, so it needs a collector of its own to reach the queue.
-func TestDeployPairStuckHasItsOwnCollector(t *testing.T) {
+// TestDeployPairStuckReachesTheQueue: the stuck item is a kind of its own from
+// the pair check's read, so the queue reads it through a collector of its own.
+func TestDeployPairStuckReachesTheQueue(t *testing.T) {
 	t.Parallel()
 	stuck := attention.Item{Key: "deploy-pair-stuck:gastown:" + pairGreen12, Kind: attention.KindDeployPairStuck}
 	s := &attentionSources{pairReady: func() []attention.Item { return []attention.Item{stuck} }}
 
+	var own []attentionCollector
 	for _, c := range s.collectors() {
-		if c.kind != attention.KindDeployPairStuck {
-			continue
+		if c.kind == attention.KindDeployPairStuck {
+			own = append(own, c)
 		}
-		items, err := c.collect(context.Background())
-		require.NoError(t, err)
-		assert.Equal(t, []attention.Item{stuck}, items)
-		assert.Equal(t, []attention.Item{stuck}, c.kept(attention.State{Items: []attention.Item{stuck}}))
-		return
 	}
-	t.Fatal("no collector raises the deploy-pair-stuck kind, so its items never reach the queue")
+	require.Len(t, own, 1, "no collector is registered for %q, so its items never reach the queue", attention.KindDeployPairStuck)
+
+	observed := collectAttention(context.Background(), attention.State{}, own, func(string, ...any) {})
+	assert.Equal(t, []attention.Item{stuck}, observed)
 }
