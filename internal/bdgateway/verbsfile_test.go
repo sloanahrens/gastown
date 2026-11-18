@@ -260,6 +260,46 @@ func TestAuthorizeSample(t *testing.T) {
 	}
 }
 
+// TestAuthorizeGateCheck: the file the gateway image ships allows bd gate
+// check, the call the daemon's patrol scan runs for every rig on every tick
+// ("gate check --type=timer"), for the daemon and operator classes only. It
+// evaluates timer gates and closes resolved ones, so the read class is
+// refused with the class error.
+func TestAuthorizeGateCheck(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+	cases := []struct {
+		name      string
+		class     TokenClass
+		argv      []string
+		wantErr   error
+		wantVerb  string
+		wantClass VerbClass
+	}{
+		{"daemon token checks timer gates", TokenDaemon, []string{"gate", "check", "--type=timer"}, nil, "gate check", ClassWrite},
+		{"operator token checks timer gates", TokenOperator, []string{"gate", "check"}, nil, "gate check", ClassWrite},
+		{"read token cannot check gates", TokenRead, []string{"gate", "check", "--type=timer"}, ErrClassDenied, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := p.Authorize(tc.class, tc.argv)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Authorize(%q, %q) = %v, want %v", tc.class, tc.argv, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Authorize(%q, %q) = %v, want it allowed", tc.class, tc.argv, err)
+			}
+			if v.Name() != tc.wantVerb || v.Class != tc.wantClass {
+				t.Errorf("Authorize(%q, %q) matched %q (%s), want %q (%s)", tc.class, tc.argv, v.Name(), v.Class, tc.wantVerb, tc.wantClass)
+			}
+		})
+	}
+}
+
 // TestRefusedFlagsExistInCommandTree: every refused flag is a persistent bd
 // flag, so the refusal names something bd would otherwise accept. -C is the
 // shorthand of --directory and is listed by its letter because that is how it
