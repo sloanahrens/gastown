@@ -106,11 +106,11 @@ type workspaceRoute struct {
 
 // BuildWorkspaceDocument reads the town copy under townRoot and returns the
 // document PUT /v1/workspace takes: the town's routes.jsonl and formulas, each
-// registered rig's redirect, and each rig's beads metadata files, with every
-// path that carries a host path rewritten into the gateway's workspace form. It
-// runs the document through the gateway's own validation and hash, so a document
-// it returns is one the gateway accepts and carries the manifest the gateway
-// computes.
+// registered rig's redirect and beads metadata files, and the beads metadata
+// files of every folder the routes name, with every path that carries a host
+// path rewritten into the gateway's workspace form. It runs the document
+// through the gateway's own validation and hash, so a document it returns is one
+// the gateway accepts and carries the manifest the gateway computes.
 //
 // A town that cannot be read whole is refused rather than pushed in part: bd
 // would route prefixes to a workspace holding no database for them, and the
@@ -155,7 +155,7 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	}
 	// The route table: one line per route, with every path bd resolves inside
 	// the container made relative to the workspace root.
-	routes, err := rewrittenRoutes(filepath.Join(townBeads, routesFileName), root)
+	routes, targets, err := rewrittenRoutes(filepath.Join(townBeads, routesFileName), root)
 	if err != nil {
 		return WorkspaceDocument{}, err
 	}
@@ -163,6 +163,14 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 
 	for _, rig := range town.RigNames() {
 		if err := addRigFiles(files, root, rig); err != nil {
+			return WorkspaceDocument{}, err
+		}
+	}
+	// Routes name folders that need not be registered rigs. bd resolves a
+	// route's path to the .beads directory inside it, so the database a
+	// non-rig route names is in the workspace only if its files are pushed.
+	for _, target := range targets {
+		if err := addRouteTargetFiles(files, root, target); err != nil {
 			return WorkspaceDocument{}, err
 		}
 	}
@@ -219,6 +227,60 @@ func addRigFiles(files map[string]string, townRoot, rig string) error {
 	// metadata.json names no database, and pushing it would send bd a rig that
 	// cannot open.
 	return addBeadsFiles(files, townRoot, filepath.Join(townRoot, filepath.FromSlash(target)), target)
+}
+
+// addRouteTargetFiles adds the beads metadata files of the folder a route's
+// path names. bd resolves a route's path to the .beads directory inside that
+// folder, so a folder that is not a registered rig — the town's claude- route is
+// one — needs its database files in the workspace as much as a rig does.
+//
+// target is the path rewrittenRoutes wrote, so it is town-relative and its links
+// are already resolved: a target that leaves the town was refused there. The
+// town's own route is "." and its files are pushed as the town's .beads. A
+// target whose files are already in the document — a registered rig that is
+// also a route target — is skipped, so it is pushed once. A target that is
+// missing on disk, is not a folder, or holds no metadata.json is skipped and the
+// route stays in routes.jsonl: bd reports the missing database for that prefix
+// as it does on the host, and a route written before its folder exists does not
+// fail the whole push. A target that is a link naming nothing is refused, as
+// every other dangling link is. What is read goes through addBeadsFiles, so the
+// rig rules for links, regular files and the per-file cap apply unchanged.
+func addRouteTargetFiles(files map[string]string, townRoot, target string) error {
+	if target == "." {
+		return nil
+	}
+	prefix := path.Join(target, ".beads")
+	if _, pushed := files[path.Join(prefix, "metadata.json")]; pushed {
+		return nil
+	}
+	dir := filepath.Join(townRoot, filepath.FromSlash(target))
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		// An entry that is a link naming nothing is refused, as every other
+		// dangling link is: it is a broken route, not a folder the town has not
+		// made yet.
+		if fi, lerr := os.Lstat(dir); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: route target %s names nothing", ErrLinkOutsideTown, shown(target))
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("bdgateway: reading route target %s: %w", shown(target), err)
+	}
+	if !info.IsDir() {
+		return nil
+	}
+	// metadata.json is the file that names the database. Its absence is a
+	// target with no database yet, which is skipped like a missing target; a
+	// stat that fails for another reason refuses the push here. A metadata file
+	// that exists is read by addBeadsFiles, which refuses a link that names
+	// nothing or leaves the town.
+	if _, err := os.Lstat(filepath.Join(dir, ".beads", "metadata.json")); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("bdgateway: reading route target %s: %w", shown(target), err)
+	}
+	return addBeadsFiles(files, townRoot, filepath.Join(dir, ".beads"), prefix)
 }
 
 // insideTown reports whether p, with symlinks resolved, is a path inside the
@@ -410,18 +472,21 @@ func holdsBeadsMetadata(dir string) bool {
 
 // rewrittenRoutes reads a town's routes.jsonl and returns it in the workspace
 // form: one JSON object per route, in the file's order, with each path made
-// town-relative. A path the town copy already expresses relative to the town
-// root is unchanged, because the workspace mirrors the town root; an absolute
-// path inside the town — which bd resolves but the container never sees at that
-// location — is rewritten. Blank lines and comments are dropped, since bd reads
-// only route lines; a line that is neither is refused rather than dropped, so a
-// route gt cannot read does not silently vanish from the workspace.
-func rewrittenRoutes(routesPath, townRoot string) (string, error) {
+// town-relative, and the rewritten path of every route in that same order, so
+// the caller can carry the files at each target. A path the town copy already
+// expresses relative to the town root is unchanged, because the workspace
+// mirrors the town root; an absolute path inside the town — which bd resolves
+// but the container never sees at that location — is rewritten. Blank lines and
+// comments are dropped, since bd reads only route lines; a line that is neither
+// is refused rather than dropped, so a route gt cannot read does not silently
+// vanish from the workspace.
+func rewrittenRoutes(routesPath, townRoot string) (string, []string, error) {
 	data, err := readTownFile(townRoot, routesPath)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: reading %s: %w", routesPath, err)
+		return "", nil, fmt.Errorf("bdgateway: reading %s: %w", routesPath, err)
 	}
 	var out strings.Builder
+	var targets []string
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -429,21 +494,22 @@ func rewrittenRoutes(routesPath, townRoot string) (string, error) {
 		}
 		var route workspaceRoute
 		if err := json.Unmarshal([]byte(line), &route); err != nil {
-			return "", fmt.Errorf("bdgateway: %s holds a line that is not a route: %s: %w", routesPath, shown(line), err)
+			return "", nil, fmt.Errorf("bdgateway: %s holds a line that is not a route: %s: %w", routesPath, shown(line), err)
 		}
 		if route.Prefix == "" || route.Path == "" {
-			return "", fmt.Errorf("bdgateway: %s holds a route with no prefix or path: %s", routesPath, shown(line))
+			return "", nil, fmt.Errorf("bdgateway: %s holds a route with no prefix or path: %s", routesPath, shown(line))
 		}
 		route.Path, err = workspaceRoutePath(townRoot, route.Path)
 		if err != nil {
-			return "", fmt.Errorf("bdgateway: route %q in %s: %w", shown(route.Prefix), routesPath, err)
+			return "", nil, fmt.Errorf("bdgateway: route %q in %s: %w", shown(route.Prefix), routesPath, err)
 		}
+		targets = append(targets, route.Path)
 		// A route is three strings, so marshaling it cannot fail.
 		encoded, _ := json.Marshal(route)
 		out.Write(encoded)
 		out.WriteByte('\n')
 	}
-	return out.String(), nil
+	return out.String(), targets, nil
 }
 
 // workspaceRoutePath rewrites one route path into the town-relative slash form

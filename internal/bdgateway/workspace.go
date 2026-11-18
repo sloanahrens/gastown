@@ -18,9 +18,10 @@ import (
 
 // The workspace is the small tree of bd's own files the gateway owns and gt
 // pushes: the town's .beads/routes.jsonl, the town's
-// .beads/formulas/<name>.formula.toml, each rig's .beads/redirect, and each
-// rig's .beads/{metadata.json,config.yaml,dolt-server.port}. The design is
-// docs/design/bd-container.md ("The workspace"); the tree layout it pushes is
+// .beads/formulas/<name>.formula.toml, each rig's .beads/redirect, and every
+// .beads/{metadata.json,config.yaml,dolt-server.port} set the document carries —
+// one per rig, and one per folder a route names that is not a rig. The design
+// is docs/design/bd-container.md ("The workspace"); the tree layout it pushes is
 // the one the Phase 0 proof (workspace_proof_integration_test.go) showed a real
 // bd reading. G6 mounts the volume and routes PUT /v1/workspace to the store
 // below; G8 builds the document from the town copy.
