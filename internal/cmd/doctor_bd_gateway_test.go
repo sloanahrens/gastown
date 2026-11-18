@@ -268,15 +268,54 @@ func TestDoctorBdGatewayUnreadableIsNotAbsent(t *testing.T) {
 // refuses by name, rather than passing an unread gateway.
 func TestDoctorBdGatewayUnwiredSeamRefuses(t *testing.T) {
 	t.Parallel()
-	f := healthyBdGatewayFake()
-	cluster := f.deps()
-	cluster.kube = nil
-	res, _ := runBdGatewayCheck(t, []string{doctor.DataUnitCheckName}, cluster)
-	if res.Status != doctor.StatusError {
-		t.Fatalf("status = %v, want error; message %q", res.Status, res.Message)
+	tests := []struct {
+		name     string
+		unwire   func(c *bdGatewayClusterDeps)
+		wantText string
+	}{
+		{name: "kubectl", unwire: func(c *bdGatewayClusterDeps) { c.kube = nil }, wantText: "kubectl is not wired"},
+		{name: "town hash", unwire: func(c *bdGatewayClusterDeps) { c.townHash = nil }, wantText: "the town copy's workspace hash is not wired"},
+		{name: "reported hash", unwire: func(c *bdGatewayClusterDeps) { c.reportedHash = nil }, wantText: "the gateway's reported workspace hash is not wired"},
 	}
-	if !strings.Contains(res.Message, "kubectl is not wired") {
-		t.Errorf("message = %q, want it to name the unwired kubectl", res.Message)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cluster := healthyBdGatewayFake().deps()
+			tt.unwire(&cluster)
+			res, _ := runBdGatewayCheck(t, []string{doctor.DataUnitCheckName}, cluster)
+			if res.Status != doctor.StatusError {
+				t.Fatalf("status = %v, want error; message %q", res.Status, res.Message)
+			}
+			if !strings.Contains(res.Message, tt.wantText) {
+				t.Errorf("message = %q, want it to name %q", res.Message, tt.wantText)
+			}
+		})
+	}
+}
+
+// TestDoctorBdGatewayTownHashRefusesANonTown: the town copy's hash is an error for a
+// directory that is not a town, so a check never compares against a hash it did not
+// compute.
+func TestDoctorBdGatewayTownHashRefusesANonTown(t *testing.T) {
+	t.Parallel()
+	if _, err := townWorkspaceHash(t.TempDir()); err == nil {
+		t.Fatal("townWorkspaceHash of a directory that is not a town = nil error, want a refusal")
+	}
+}
+
+// TestDoctorBdGatewayReportedHashRefuses: the reported hash has no kubectl read path,
+// so it refuses by name instead of reporting a hash it did not read.
+func TestDoctorBdGatewayReportedHashRefuses(t *testing.T) {
+	t.Parallel()
+	hash, err := bdGatewayReportedHash(context.Background())
+	if err == nil {
+		t.Fatalf("bdGatewayReportedHash = %q, nil error; want a refusal naming the header", hash)
+	}
+	if hash != "" {
+		t.Errorf("hash = %q with an error, want empty", hash)
+	}
+	if !strings.Contains(err.Error(), "X-Bd-Workspace") {
+		t.Errorf("error = %q, want it to name the response header the hash rides on", err)
 	}
 }
 
