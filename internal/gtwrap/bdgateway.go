@@ -78,7 +78,8 @@ type BdGateway struct {
 	// HTTP sends the requests. Nil uses an http.Client bounded by the call's
 	// timeout, or by the probe bound for a doctor.
 	HTTP HTTPDoer
-	// Stdin is the caller's stdin, streamed after the head line. Nil sends none.
+	// Stdin is the caller's stdin, streamed after the head line only when the
+	// call reads stdin, and never otherwise. Nil sends none.
 	Stdin io.Reader
 	// Stdout and Stderr receive bd's own streams. Nil refuses the call, so the
 	// tool's output is never dropped.
@@ -125,11 +126,18 @@ func (g BdGateway) Launch(call Call) (int, error) {
 		Cwd:       dirRelative(g.Town, call.Dir, g.Note),
 		TimeoutMS: g.timeoutMS(),
 	})
-	stdin := g.Stdin
-	if call.Stdin != nil {
+	// The body after the head is the caller's stdin only when the call reads it: a
+	// caller whose stdin is a pipe that never closes would otherwise hold the
+	// request open until the gateway's read deadline (gt-vojyy8). A stdin the call
+	// itself carries is always sent, since the caller that supplied it means bd to
+	// read it.
+	var stdin io.Reader
+	switch {
+	case call.Stdin != nil:
 		stdin = call.Stdin
-	}
-	if stdin == nil {
+	case g.Stdin != nil && bdReadsStdin(call.Argv[1:]):
+		stdin = g.Stdin
+	default:
 		stdin = strings.NewReader("")
 	}
 	body := io.MultiReader(bytes.NewReader(append(head, '\n')), stdin)
@@ -310,6 +318,55 @@ func readsNoDatabase(words []string) bool {
 		return true
 	}
 	return len(words) == 1 && (words[0] == "--help" || words[0] == "help")
+}
+
+// bdReadsStdin reports whether a bd call reads the caller's stdin, so its bytes
+// may follow the head line. bd takes stdin as a "-" value of a file flag: the
+// four flags in bdStdinFlags under any command, and -f/--file under a command
+// whose -f reads stdin (bdFileCommands), either as the next token ("bd update
+// gt-x --body-file -", "bd comments add gt-x -f -") or attached ("--body-file=-",
+// "-f=-", "-f-"), and through its --stdin flag. A file the wrapper carries
+// reaches bd as one of those "-" forms, since filearg.go rewrites the flag's
+// value. words is the call's argv after "bd", and nothing after "--" is a flag.
+//
+// A "-" value of any other flag, and a positional "-", read no stdin: sending
+// one would hold the call to the gateway's read deadline for a caller whose
+// stdin is a pipe that never closes (gt-vojyy8).
+func bdReadsStdin(words []string) bool {
+	command, sub := commandWords(words)
+	// readsStdin reports whether flag's "-" value makes bd read stdin.
+	readsStdin := func(flag string) bool {
+		return classifyBd(command, sub, flag, "-") == argStdin
+	}
+	for i, word := range words {
+		switch {
+		case word == "--":
+			return false
+		case word == "--stdin":
+			return true
+		case strings.HasPrefix(word, "--"):
+			flag, value, attached := strings.Cut(word, "=")
+			if attached && value == "-" && readsStdin(flag) {
+				return true
+			}
+		case len(word) > 2 && shorthandGroup(word):
+			// An attached shorthand value: -f- or -f=-. A group such as -xf-
+			// is refused by ScanFileArgs, so only the flag's own letter is read.
+			flag, value := word[:2], word[2:]
+			if rest, ok := strings.CutPrefix(value, "="); ok {
+				value = rest
+			}
+			if value == "-" && readsStdin(flag) {
+				return true
+			}
+		case word == "-":
+			// The separate value form: the token before it is the flag.
+			if i > 0 && readsStdin(words[i-1]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dirRelative maps the caller's working directory onto the bd gateway's

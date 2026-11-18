@@ -38,6 +38,31 @@ var bdFileCommands = map[string]bool{
 	"comments add": true, "note": true, "human respond": true, "dep add": true,
 }
 
+// commandWords is the command and subcommand of args: the first two non-flag
+// words, not counting the values of the file flags in valueFlags. Nothing after
+// "--" is a flag, so no word after it is read.
+func commandWords(args []string) (command, sub string) {
+	var words []string
+	for i := 0; i < len(args) && len(words) < 2; i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			i = len(args)
+		case valueFlags[a]:
+			i++
+		case !strings.HasPrefix(a, "-"):
+			words = append(words, a)
+		}
+	}
+	if len(words) > 0 {
+		command = words[0]
+	}
+	if len(words) > 1 {
+		sub = words[1]
+	}
+	return command, sub
+}
+
 // classify says what the call does with flag. command is the first non-flag
 // word of the arguments and sub the second; value is the flag's value, for
 // --metadata, which names a file only as "@file".
@@ -154,25 +179,7 @@ func ScanFileArgs(tool string, args []string) (rewritten []string, file *FileArg
 	if tool != "bd" && tool != "gt" {
 		return args, nil, nil
 	}
-	var words []string
-	for i := 0; i < len(args) && len(words) < 2; i++ {
-		a := args[i]
-		switch {
-		case a == "--":
-			i = len(args)
-		case valueFlags[a]:
-			i++
-		case !strings.HasPrefix(a, "-"):
-			words = append(words, a)
-		}
-	}
-	command, sub := "", ""
-	if len(words) > 0 {
-		command = words[0]
-	}
-	if len(words) > 1 {
-		sub = words[1]
-	}
+	command, sub := commandWords(args)
 	shorthands := fileShorthands(tool, command, sub)
 
 	out := append([]string(nil), args...)
