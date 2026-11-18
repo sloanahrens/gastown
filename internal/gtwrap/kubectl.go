@@ -376,10 +376,12 @@ func (k Kubectl) settleBeadsDir(call *Call) error {
 }
 
 // nearestBeadsDir walks from dir up to the town root and returns the .beads
-// directory nearest at or above it, named inside the pod. A directory outside
-// the town yields ok false. The town's own .beads answers a walk that finds none,
-// since the town always has beads. A .beads entry the stat cannot read refuses:
-// read as absent, it would send the call to another rig's database.
+// directory nearest at or above it, named inside the pod, following the redirect
+// a worktree's .beads holds to the rig's beads directory (gt-8y5mcn). A
+// directory outside the town yields ok false. The town's own .beads answers a
+// walk that finds none, since the town always has beads. A .beads entry the stat
+// cannot read refuses: read as absent, it would send the call to another rig's
+// database.
 func (k Kubectl) nearestBeadsDir(dir string) (string, bool, error) {
 	rel, inside, err := nearestBeadsRel(k.Town, dir, statDir(k.Stat))
 	if err != nil || !inside {

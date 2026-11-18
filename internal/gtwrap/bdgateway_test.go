@@ -616,6 +616,203 @@ func TestBdGatewaySettlesBeadsDir(t *testing.T) {
 	}
 }
 
+// writeRedirect puts a redirect file in the .beads directory under dir, the way
+// a polecat worktree shares its rig's beads.
+func writeRedirect(t *testing.T, dir, target string) {
+	t.Helper()
+	beads := filepath.Join(dir, beadsDirName)
+	if err := os.MkdirAll(beads, 0o755); err != nil {
+		t.Fatalf("make the .beads directory under %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(beads, beadsRedirectName), []byte(target), 0o644); err != nil {
+		t.Fatalf("write the redirect under %s: %v", dir, err)
+	}
+}
+
+// TestBdGatewayFollowsTheWorktreeRedirect: a polecat worktree's .beads holds a
+// redirect to its rig's beads directory, and the gateway workspace holds the
+// rig's directory, never the worktree's, so a call with no BEADS_DIR from the
+// worktree must name the target (gt-8y5mcn). A redirect the walk cannot follow
+// keeps the worktree's .beads, and the gateway's existing refusal names that
+// directory; a .beads with no redirect is named as it was; and an explicit
+// BEADS_DIR wins with no walk at all.
+func TestBdGatewayFollowsTheWorktreeRedirect(t *testing.T) {
+	t.Parallel()
+	// newTown builds a town with the town's beads and the gastown rig's
+	// mayor/rig beads, and returns its root and the polecat worktree under it.
+	newTown := func(t *testing.T) (town, worktree string) {
+		t.Helper()
+		town = t.TempDir()
+		mkdirBeads(t, town)
+		mkdirBeads(t, filepath.Join(town, "gastown", "mayor", "rig"))
+		return town, filepath.Join(town, "gastown", "polecats", "nux", "gastown")
+	}
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T) (town string, call Call)
+		wantRig   string
+		wantErr   string
+		wantErrIn string
+	}{
+		{
+			name: "a worktree redirect is followed to the rig's beads",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				writeRedirect(t, worktree, "../../../mayor/rig/.beads\n")
+				return town, Call{Argv: []string{"bd", "list", "--json"}, Dir: worktree}
+			},
+			wantRig: "gastown/mayor/rig",
+		},
+		{
+			name: "a redirect that leaves the town keeps the worktree's .beads",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				outside := filepath.Join(t.TempDir(), ".beads")
+				if err := os.MkdirAll(outside, 0o755); err != nil {
+					t.Fatalf("make a beads directory outside the town: %v", err)
+				}
+				writeRedirect(t, worktree, outside+"\n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a redirect that does not resolve keeps the worktree's .beads",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				writeRedirect(t, worktree, "../missing/.beads\n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a redirect to an entry that is not a directory is not followed",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				entry := filepath.Join(town, "gastown", "other", beadsDirName)
+				if err := os.MkdirAll(filepath.Dir(entry), 0o755); err != nil {
+					t.Fatalf("make the entry's directory: %v", err)
+				}
+				if err := os.WriteFile(entry, []byte("not a directory"), 0o644); err != nil {
+					t.Fatalf("write the .beads entry: %v", err)
+				}
+				writeRedirect(t, worktree, "../../../other/.beads\n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a redirect that does not name a .beads directory is not followed",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				writeRedirect(t, worktree, "../../../mayor/rig\n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a redirect that names nothing is not followed",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				writeRedirect(t, worktree, " \n")
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a redirect that cannot be read is not followed",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				// A directory in the redirect's place makes the read fail with
+				// something other than a missing file.
+				if err := os.MkdirAll(filepath.Join(worktree, beadsDirName, beadsRedirectName), 0o755); err != nil {
+					t.Fatalf("make a directory in the redirect's place: %v", err)
+				}
+				return town, Call{Argv: []string{"bd", "list"}, Dir: worktree}
+			},
+			wantErr: "workspace is not present", wantErrIn: "gastown/polecats/nux/gastown/.beads",
+		},
+		{
+			name: "a .beads with no redirect is named as it was",
+			setup: func(t *testing.T) (string, Call) {
+				town := t.TempDir()
+				mkdirBeads(t, town)
+				mkdirBeads(t, filepath.Join(town, "gastown"))
+				return town, Call{Argv: []string{"bd", "list"}, Dir: filepath.Join(town, "gastown", "crew", "nux")}
+			},
+			wantRig: "gastown",
+		},
+		{
+			name: "an explicit BEADS_DIR wins and the redirect is not read",
+			setup: func(t *testing.T) (string, Call) {
+				town, worktree := newTown(t)
+				writeRedirect(t, worktree, "../../../mayor/rig/.beads\n")
+				return town, Call{
+					Argv: []string{"bd", "list"},
+					Env:  []string{"BEADS_DIR=" + filepath.Join(town, ".beads")},
+					Dir:  worktree,
+				}
+			},
+			wantRig: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town, call := tt.setup(t)
+			var head bdgateway.Request
+			// The fake gateway holds the town's beads and the rig's, in the
+			// workspace document's layout, and refuses every other rig with the
+			// real gateway's message, naming the workspace it lacks.
+			held := map[string]bool{"": true, "gastown": true, "gastown/mayor/rig": true}
+			doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				line, _, _ := bytes.Cut(body, []byte("\n"))
+				if err := json.Unmarshal(line, &head); err != nil {
+					t.Fatalf("head is not JSON: %v", err)
+				}
+				if !held[head.Rig] {
+					payload, err := json.Marshal(bdgateway.ErrorPayload{
+						Code:    "bad_request",
+						Message: "bdgateway: the workspace is not present: stat /ws/" + head.Rig + "/.beads: no such file or directory",
+					})
+					if err != nil {
+						t.Fatalf("marshal the refusal: %v", err)
+					}
+					return statusResponse(http.StatusBadRequest, string(payload)), nil
+				}
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			})
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			exit, err := g.Launch(call)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("Launch error = %v, want it to name %q", err, tt.wantErr)
+				}
+				if !strings.Contains(err.Error(), tt.wantErrIn) {
+					t.Errorf("error %v does not name %q", err, tt.wantErrIn)
+				}
+				if exit != exitDown {
+					t.Errorf("exit = %d, want %d", exit, exitDown)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if exit != 0 {
+				t.Errorf("exit = %d, want 0", exit)
+			}
+			if head.Rig != tt.wantRig {
+				t.Errorf("head rig = %q, want %q", head.Rig, tt.wantRig)
+			}
+		})
+	}
+}
+
 // TestBdGatewaySettlesDirectory: a call that begins with bd's root flag
 // "-C <dir>" runs in that directory. The two tokens leave the argv, the
 // directory (resolved against the call's own working directory when relative)
