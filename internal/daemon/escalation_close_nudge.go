@@ -46,6 +46,10 @@ const escalationCloseNudgeFile = "escalation_close_nudge.json"
 // runes, after it is sanitized.
 const escalationCloseReasonMax = 400
 
+// escalationLogFieldMax bounds a value the daemon logs, in runes, after it is
+// sanitized.
+const escalationLogFieldMax = 120
+
 // escalationCloseAnnouncedMax bounds the announced ids the state keeps. The
 // oldest are dropped first: a closed escalation is watched only while open, so
 // a dropped id cannot be nudged again.
@@ -367,11 +371,16 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	raw := strings.TrimSpace(e.EscalatedBy)
 	name, ok := strings.CutPrefix(raw, rig+"/polecats/")
 	named := ok && name != "" && !strings.ContainsAny(name, "/ \t\r\n")
-	// The seat as the log names it: rig/name, or the raw escalated_by when it
-	// names no seat of the rig.
+	// The seat as the log names it: rig/name, or the escalated_by the rig did
+	// not name, rendered on one line because the value is text another agent
+	// wrote.
 	seat := raw
 	if named {
 		seat = rig + "/" + name
+	}
+	seat = sanitizeEscalationLogField(seat)
+	if seat == "" {
+		seat = "(blank escalated_by)"
 	}
 	if !named || strings.TrimSpace(e.RelatedBead) == "" {
 		// The name becomes a session name and a nudge target, so one that is
@@ -385,7 +394,7 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	}
 	holds, err := s.holding(rig, name)
 	if err != nil {
-		s.logf("escalation_close: %s/%s: cannot read the held bead for %s, will retry: %v", rig, name, e.ID, err)
+		s.logf("escalation_close: %s: cannot read the held bead for %s, will retry: %s", seat, e.ID, sanitizeEscalationLogField(err.Error()))
 		return escalationPending
 	}
 	if strings.TrimSpace(holds) != strings.TrimSpace(e.RelatedBead) {
@@ -408,7 +417,7 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	target := rig + "/" + name
 	timeout := budget.timeout()
 	if timeout <= 0 {
-		s.logf("escalation_close: %s: this tick's send budget is spent; the nudge for %s waits, will retry", target, e.ID)
+		s.logf("escalation_close: %s: this tick's send budget is spent; the nudge for %s waits, will retry", seat, e.ID)
 		return escalationPending
 	}
 	start := s.now()
@@ -417,13 +426,14 @@ func judgeEscalationClose(s escalationCloseSeams, rig string, e patrolscan.Escal
 	budget.spend(start)
 	if err != nil {
 		if escalationCloseSendCommitted(err, ran) {
-			s.logf("escalation_close: %s: nudge for %s ended at its deadline after %s with the message typed or queued; not retrying", target, e.ID, ran)
+			s.logf("escalation_close: %s: nudge for %s ended at its deadline after %s with the message typed or queued; not retrying", seat, e.ID, ran)
 			return escalationNudged
 		}
-		s.logf("escalation_close: %s: nudge for %s failed, will retry: %v", target, e.ID, err)
+		// The nudge error quotes the target, which is built from escalated_by.
+		s.logf("escalation_close: %s: nudge for %s failed, will retry: %s", seat, e.ID, sanitizeEscalationLogField(err.Error()))
 		return escalationPending
 	}
-	s.logf("escalation_close: nudged %s: escalation %s closed", target, e.ID)
+	s.logf("escalation_close: nudged %s: escalation %s closed", seat, e.ID)
 	return escalationNudged
 }
 
@@ -469,6 +479,38 @@ func sanitizeEscalationCloseReason(reason string) string {
 	out := []rune(b.String())
 	if len(out) > escalationCloseReasonMax {
 		out = out[:escalationCloseReasonMax]
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// sanitizeEscalationLogField makes a value safe for one log line: escape
+// sequences and control characters are dropped and each run of whitespace
+// becomes one space, since the value is text another agent wrote. The seat and
+// the error that quotes it both go through it. The result is cut to
+// escalationLogFieldMax runes.
+func sanitizeEscalationLogField(s string) string {
+	runes := []rune(s)
+	var b strings.Builder
+	pendingSpace := false
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case r == '\x1b':
+			i = escapeSequenceEnd(runes, i)
+		case unicode.IsSpace(r):
+			pendingSpace = true
+		case unicode.IsControl(r):
+		default:
+			if pendingSpace && b.Len() > 0 {
+				b.WriteRune(' ')
+			}
+			pendingSpace = false
+			b.WriteRune(r)
+		}
+	}
+	out := []rune(b.String())
+	if len(out) > escalationLogFieldMax {
+		out = out[:escalationLogFieldMax]
 	}
 	return strings.TrimSpace(string(out))
 }
@@ -544,7 +586,10 @@ func readSeatOncePerPass(read func(rig, name string) (escalationSeat, error), lo
 			r.seat, r.err = read(rig, name)
 			seen[key] = r
 			if r.err != nil {
-				logf("escalation_close: %s: cannot read the session, will retry: %v", key, r.err)
+				// Both the key and the error can quote the name, which is
+				// text another agent wrote.
+				logf("escalation_close: %s: cannot read the session, will retry: %s",
+					sanitizeEscalationLogField(key), sanitizeEscalationLogField(r.err.Error()))
 			}
 		}
 		return r.seat, r.err

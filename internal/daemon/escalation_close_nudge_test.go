@@ -1157,6 +1157,224 @@ func TestEscalationCloseSettleLogsSeatAndReason(t *testing.T) {
 	}
 }
 
+// The log lines that render escalated_by draw it on one line: the value is
+// text another agent wrote, so an escape sequence or line break in it is
+// dropped rather than written to the daemon log as typed (gt-x2r61g).
+func TestEscalationCloseLogDoesNotEmitRawEscalatedBy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		escalatedBy string
+		// holdingErr makes the held-bead read fail, so the pass logs the retry
+		// line instead of settling.
+		holdingErr bool
+		wantLine   string
+	}{
+		{"an unnamed escalated_by loses its line break and escape sequence",
+			"gastown/polecats/cap\nyour task changes\x1b[31m", false,
+			"escalation_close: gastown/polecats/cap your task changes: " + closeTestEscID + " settled without a nudge: escalated_by names no polecat seat of gastown"},
+		{"a named seat loses its escape sequence",
+			"gastown/polecats/cap\x1b[2Jable", false,
+			"escalation_close: gastown/capable: " + closeTestEscID + " settled without a nudge: seat session is not live"},
+		{"an escalated_by of only control characters is named as blank",
+			"\x07\x1b[2J", false,
+			"escalation_close: (blank escalated_by): " + closeTestEscID + " settled without a nudge: escalated_by names no polecat seat of gastown"},
+		{"a named seat loses its escape sequence on the retry line",
+			"gastown/polecats/cap\x1b[2Jable", true,
+			"escalation_close: gastown/capable: cannot read the held bead for " + closeTestEscID + ", will retry: boom"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			esc := patrolscan.Escalation{ID: closeTestEscID, EscalatedBy: tt.escalatedBy,
+				RelatedBead: closeTestBead, CloseReason: closeTestReason}
+			logs := &recordingLogger{}
+			seams := escalationCloseSeams{
+				escalations: func(string) ([]patrolscan.Escalation, error) {
+					return []patrolscan.Escalation{esc}, nil
+				},
+				holding: func(string, string) (string, error) {
+					if tt.holdingErr {
+						return "", errors.New("boom")
+					}
+					return closeTestBead, nil
+				},
+				// No live session settles every case that reads the seat.
+				seat: func(string, string) (escalationSeat, error) { return escalationSeat{Idle: true}, nil },
+				nudge: func(string, string, time.Duration) error {
+					t.Error("nudged a close that never read a live idle seat")
+					return nil
+				},
+				now:  time.Now,
+				save: func(escalationCloseState) error { return nil },
+				logf: logs.Printf,
+			}
+			runEscalationCloseNudges(seams, escalationCloseState{Watch: map[string]bool{closeTestEscID: true}}, []string{"gastown"})
+			if !slices.Contains(logs.lines, tt.wantLine) {
+				t.Errorf("want log line %q, got %q", tt.wantLine, logs.lines)
+			}
+			for _, l := range logs.lines {
+				if strings.ContainsAny(l, "\x1b\n\r") {
+					t.Errorf("log line carries raw escape or control text: %q", l)
+				}
+			}
+		})
+	}
+}
+
+// The lines the pass logs once it has read a named seat's session and sent the
+// nudge name that seat, sanitized, not the nudge target built from the raw
+// escalated_by. The send itself keeps the raw address, which is the session
+// name the seat read matched (gt-x2r61g).
+func TestEscalationCloseNudgeLogsSanitiseSeat(t *testing.T) {
+	t.Parallel()
+	const (
+		escapedBy = "gastown/polecats/cap\x1b[2Jable"
+		rawTarget = "gastown/cap\x1b[2Jable"
+	)
+	clean := patrolscan.Escalation{ID: "hq-esc1", EscalatedBy: closeTestSeat,
+		RelatedBead: closeTestBead, CloseReason: closeTestReason}
+	escaped := patrolscan.Escalation{ID: "hq-esc2", EscalatedBy: escapedBy,
+		RelatedBead: closeTestBead, CloseReason: closeTestReason}
+
+	tests := []struct {
+		name  string
+		escs  []patrolscan.Escalation
+		watch map[string]bool
+		// A set read or send error makes the pass log the line its case name
+		// names.
+		holdingErr error
+		seatErr    error
+		nudgeErr   error
+		// spendBudget sends the first close for the whole pass budget, so the
+		// escaped close waits.
+		spendBudget bool
+		// deadline ends the send after its commit point.
+		deadline bool
+		wantLine string
+		// wantTargets are the addresses the sends went to.
+		wantTargets []string
+	}{
+		{
+			name:        "a nudged seat",
+			escs:        []patrolscan.Escalation{escaped},
+			watch:       map[string]bool{"hq-esc2": true},
+			wantLine:    "escalation_close: nudged gastown/capable: escalation hq-esc2 closed",
+			wantTargets: []string{rawTarget},
+		},
+		{
+			name:        "a send that failed",
+			escs:        []patrolscan.Escalation{escaped},
+			watch:       map[string]bool{"hq-esc2": true},
+			nudgeErr:    errors.New("gt nudge: session \"gastown-cap\x1b[2Jable\" not found"),
+			wantLine:    "escalation_close: gastown/capable: nudge for hq-esc2 failed, will retry: gt nudge: session \"gastown-capable\" not found",
+			wantTargets: []string{rawTarget},
+		},
+		{
+			name:        "a send that ended at its deadline",
+			escs:        []patrolscan.Escalation{escaped},
+			watch:       map[string]bool{"hq-esc2": true},
+			deadline:    true,
+			wantLine:    fmt.Sprintf("escalation_close: gastown/capable: nudge for hq-esc2 ended at its deadline after %s with the message typed or queued; not retrying", escalationCloseSendCommitPoint),
+			wantTargets: []string{rawTarget},
+		},
+		{
+			name:        "a send budget already spent",
+			escs:        []patrolscan.Escalation{clean, escaped},
+			watch:       map[string]bool{"hq-esc1": true, "hq-esc2": true},
+			spendBudget: true,
+			wantLine:    "escalation_close: gastown/capable: this tick's send budget is spent; the nudge for hq-esc2 waits, will retry",
+			wantTargets: []string{"gastown/capable"},
+		},
+		{
+			name:     "a seat read that failed",
+			escs:     []patrolscan.Escalation{escaped},
+			watch:    map[string]bool{"hq-esc2": true},
+			seatErr:  errors.New("tmux: session \"gastown-cap\x1b[2Jable\" not found"),
+			wantLine: "escalation_close: gastown/capable: cannot read the session, will retry: tmux: session \"gastown-capable\" not found",
+		},
+		{
+			name:       "a held-bead read that failed",
+			escs:       []patrolscan.Escalation{escaped},
+			watch:      map[string]bool{"hq-esc2": true},
+			holdingErr: errors.New("bd: assignee gastown/polecats/cap\x1b[2Jable: no such database"),
+			wantLine:   "escalation_close: gastown/capable: cannot read the held bead for hq-esc2, will retry: bd: assignee gastown/polecats/capable: no such database",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+			logs := &recordingLogger{}
+			var targets []string
+			seams := escalationCloseSeams{
+				escalations: func(string) ([]patrolscan.Escalation, error) { return tt.escs, nil },
+				holding: func(string, string) (string, error) {
+					if tt.holdingErr != nil {
+						return "", tt.holdingErr
+					}
+					return closeTestBead, nil
+				},
+				seat: func(string, string) (escalationSeat, error) {
+					if tt.seatErr != nil {
+						return escalationSeat{}, tt.seatErr
+					}
+					return escalationSeat{Live: true, Idle: true}, nil
+				},
+				nudge: func(target, _ string, _ time.Duration) error {
+					targets = append(targets, target)
+					switch {
+					case tt.spendBudget:
+						clk.Advance(escalationCloseSendBudget)
+						return nil
+					case tt.deadline:
+						clk.Advance(escalationCloseSendCommitPoint)
+						return context.DeadlineExceeded
+					}
+					return tt.nudgeErr
+				},
+				now:  clk.Now,
+				save: func(escalationCloseState) error { return nil },
+				logf: logs.Printf,
+			}
+			runEscalationCloseNudges(seams, escalationCloseState{Watch: tt.watch}, []string{"gastown"})
+			if !slices.Contains(logs.lines, tt.wantLine) {
+				t.Errorf("want log line %q, got %q", tt.wantLine, logs.lines)
+			}
+			for _, l := range logs.lines {
+				if strings.ContainsAny(l, "\x1b\n\r") {
+					t.Errorf("log line carries raw escape or control text: %q", l)
+				}
+			}
+			if !slices.Equal(targets, tt.wantTargets) {
+				t.Errorf("sent to %q, want %q", targets, tt.wantTargets)
+			}
+		})
+	}
+}
+
+func TestSanitizeEscalationLogField(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, in, want string }{
+		{"plain text is kept", "gastown/Toast: a reason", "gastown/Toast: a reason"},
+		{"a CSI escape sequence is dropped", "before\x1b[31mafter", "beforeafter"},
+		{"an OSC escape sequence is dropped", "before\x1b]0;title\x07after", "beforeafter"},
+		{"a line break and tabs become one space", "one\ntwo\t\tthree", "one two three"},
+		{"a stray control character is dropped", "a\x07b", "ab"},
+		{"leading and trailing space is trimmed", "  seat  ", "seat"},
+		{"the field is cut at the cap", strings.Repeat("a", escalationLogFieldMax+20), strings.Repeat("a", escalationLogFieldMax)},
+		{"a wide rune counts as one rune", strings.Repeat("Ü", escalationLogFieldMax+20), strings.Repeat("Ü", escalationLogFieldMax)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sanitizeEscalationLogField(tt.in); got != tt.want {
+				t.Errorf("sanitizeEscalationLogField(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 // A pane that cannot be read is not a busy seat: the pass logs the failed probe
 // once per seat per tick, however many of the seat's escalations closed, keeps
 // each owed, and nudges each once the probe recovers.
