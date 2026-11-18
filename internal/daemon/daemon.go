@@ -422,6 +422,11 @@ type Daemon struct {
 	// Tests set it to record the install without touching the process-wide slot.
 	installWorkspacePusher func(bdgateway.WorkspacePusher)
 
+	// workspaceDrift checks each gateway answer for drift and signals the reconcile
+	// loop. startWorkspaceReconcile creates it; the installed pusher feeds it, and a
+	// test calls observe on it to stand in for a gateway answer.
+	workspaceDrift *workspaceDriftCheck
+
 	// maint replaces scheduled maintenance's side effects in tests (see
 	// maintenanceSeams); the zero value is production.
 	maint maintenanceSeams

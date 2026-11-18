@@ -647,6 +647,16 @@ func PushWorkspace(ctx context.Context, townRoot string) (string, error) {
 	return installed.push(ctx, townRoot)
 }
 
+// WorkspaceAnswer is what one gateway answer says about the workspace the gateway
+// serves now. The daemon's drift check compares it with the push that last stored.
+type WorkspaceAnswer struct {
+	// Hash is the X-Bd-Workspace header: the manifest hash of the live tree. It is
+	// empty when the answer carries no header, and an empty hash says nothing.
+	Hash string
+	// Absent reports a refusal that says the workspace is not present.
+	Absent bool
+}
+
 // GatewayPusher is the WorkspacePusher that sends the document to a running bd
 // gateway with its bearer token.
 type GatewayPusher struct {
@@ -657,6 +667,9 @@ type GatewayPusher struct {
 	TokenFile string
 	// HTTP sends the request; nil uses an http.Client bounded by pushTimeout.
 	HTTP HTTPDoer
+	// Observe receives what each answer says about the workspace, whether the push
+	// stored or was refused. Nil observes nothing.
+	Observe func(WorkspaceAnswer)
 }
 
 // Push builds the town's document and sends it with PUT /v1/workspace. It
@@ -697,6 +710,12 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
 	if err != nil {
 		return "", fmt.Errorf("bdgateway: reading the gateway's answer: %w", err)
+	}
+	if g.Observe != nil {
+		g.Observe(WorkspaceAnswer{
+			Hash:   resp.Header.Get(WorkspaceHashHeader),
+			Absent: workspaceAbsent(resp.StatusCode, data),
+		})
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", g.refusal(resp.StatusCode, data)
@@ -837,6 +856,17 @@ func (g GatewayPusher) refusal(status int, data []byte) error {
 		return fmt.Errorf("%w with HTTP %d: %s: %s", ErrGatewayRefused, status, payload.Code, payload.Message)
 	}
 	return fmt.Errorf("%w with HTTP %d, so the workspace was not stored", ErrGatewayRefused, status)
+}
+
+// workspaceAbsent reports whether an answer refuses because the workspace is not
+// present. The gateway sends ErrNoWorkspace as a bad_request whose message names
+// it, so the message is what the answer carries.
+func workspaceAbsent(status int, data []byte) bool {
+	var payload ErrorPayload
+	return status == http.StatusBadRequest &&
+		json.Unmarshal(data, &payload) == nil &&
+		payload.Code == codeBadRequest &&
+		strings.Contains(payload.Message, "the workspace is not present")
 }
 
 // readTokenFile reads the bearer token from path: the file's content without

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/jonboulle/clockwork"
@@ -30,6 +31,8 @@ func (d *Daemon) startWorkspaceReconcile() bool {
 	if url == "" {
 		return false
 	}
+	drift := newWorkspaceDriftCheck()
+	d.workspaceDrift = drift
 	push := bdgateway.PushWorkspace
 	if d.workspacePusher != nil {
 		push = d.workspacePusher.Push
@@ -40,9 +43,9 @@ func (d *Daemon) startWorkspaceReconcile() bool {
 		if install == nil {
 			install = bdgateway.SetWorkspacePusher
 		}
-		install(bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv)})
+		install(bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv), Observe: drift.observe})
 	}
-	go runWorkspaceReconcile(d.ctx, d.clk(), d.reconcileInterval, push, d.config.TownRoot, d.logger.Printf)
+	go runWorkspaceReconcile(d.ctx, d.clk(), d.reconcileInterval, push, d.config.TownRoot, d.logger.Printf, drift)
 	return true
 }
 
@@ -59,20 +62,116 @@ func (d *Daemon) reconcileInterval() time.Duration {
 	return interval
 }
 
+// workspaceDriftGap is the least time after a push before a drift answer pushes
+// again. A drift answer inside the gap waits for the gap to end.
+const workspaceDriftGap = 10 * time.Second
+
+// workspaceDrifted reports whether an answer says the gateway no longer serves the
+// tree the last good push stored: a refusal that the workspace is not present, or
+// a hash header other than lastGood. An answer with no header says nothing.
+func workspaceDrifted(a bdgateway.WorkspaceAnswer, lastGood string) bool {
+	if a.Absent {
+		return true
+	}
+	return a.Hash != "" && a.Hash != lastGood
+}
+
+// workspaceDriftCheck carries the drift check from the gateway's answers to the
+// reconcile loop. observe runs on whichever goroutine sends a push (the loop's own
+// and a writer's), so it never waits on the loop. A drift answer sets signal, which
+// holds one pending drift: a drift that finds one already pending adds nothing,
+// because the pending push covers it, and no drift is lost.
+type workspaceDriftCheck struct {
+	mu       sync.Mutex
+	lastGood string
+	signal   chan struct{}
+}
+
+func newWorkspaceDriftCheck() *workspaceDriftCheck {
+	return &workspaceDriftCheck{signal: make(chan struct{}, 1)}
+}
+
+// observe checks one gateway answer against the last good push and signals the
+// loop when the answer shows drift.
+func (c *workspaceDriftCheck) observe(a bdgateway.WorkspaceAnswer) {
+	c.mu.Lock()
+	drifted := workspaceDrifted(a, c.lastGood)
+	c.mu.Unlock()
+	if !drifted {
+		return
+	}
+	select {
+	case c.signal <- struct{}{}:
+	default:
+	}
+}
+
+// stored records the hash of a push that stored: the tree answers are checked
+// against from now on.
+func (c *workspaceDriftCheck) stored(hash string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastGood = hash
+}
+
 // runWorkspaceReconcile pushes the town at once, then once per interval, until
 // ctx ends. A push that fails is logged and the next tick tries again; one failed
 // answer does not end the loop.
-func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval func() time.Duration, push func(context.Context, string) (string, error), townRoot string, logf func(string, ...any)) {
-	for {
-		if _, err := push(ctx, townRoot); err != nil {
+//
+// A drift signal pushes before the next tick: at once when the last push is at
+// least workspaceDriftGap old, else at the end of that gap. Signals inside one gap
+// share one push. Every push resets the tick and drops the deferred push, so the
+// interval runs from the last push whatever sent it.
+func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval func() time.Duration, push func(context.Context, string) (string, error), townRoot string, logf func(string, ...any), drift *workspaceDriftCheck) {
+	var (
+		pushedAt  time.Time
+		tick      clockwork.Timer
+		deferred  clockwork.Timer
+		deferredC <-chan time.Time
+	)
+	pushNow := func() {
+		hash, err := push(ctx, townRoot)
+		if err != nil {
 			logf("Workspace reconcile: the bd gateway's workspace was not updated; retrying at the next tick: %v", err)
+		} else {
+			drift.stored(hash)
 		}
-		timer := clk.NewTimer(interval())
+		pushedAt = clk.Now()
+		if deferred != nil {
+			deferred.Stop()
+		}
+		deferred, deferredC = nil, nil
+		if tick != nil {
+			tick.Stop()
+		}
+		tick = clk.NewTimer(interval())
+	}
+	pushNow()
+	defer func() {
+		tick.Stop()
+		if deferred != nil {
+			deferred.Stop()
+		}
+	}()
+	for {
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return
-		case <-timer.Chan():
+		case <-tick.Chan():
+			pushNow()
+		case <-deferredC:
+			pushNow()
+		case <-drift.signal:
+			if deferred != nil {
+				continue
+			}
+			wait := pushedAt.Add(workspaceDriftGap).Sub(clk.Now())
+			if wait <= 0 {
+				pushNow()
+				continue
+			}
+			deferred = clk.NewTimer(wait)
+			deferredC = deferred.Chan()
 		}
 	}
 }
