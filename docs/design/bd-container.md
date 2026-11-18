@@ -16,15 +16,18 @@ the shim describes that deferred state.
 ## Goal
 
 The `bd` binary leaves the daemon image and the polecat image. One dedicated bd
-image, built by CI, runs the gateway. After the cutover the gateway is the
-`bd-gateway` workload in the cluster, rolled with the daemon (see
-[The in-cluster gateway](#the-in-cluster-gateway)). Until the cutover it is the
-`gt-bd` container in the Mac's local Docker beside Dolt, in one compose unit
-started at system startup. Every caller that runs bd today calls the gateway
-instead, over a small authenticated protocol. The bd shim (tracker routing)
-belongs to the tracker program (the note above, gt-p85pw), so the image runs the
-real bd. Seats keep their own bd until
-approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
+image, built by CI, runs the gateway. The cutover is the one attended window in
+which the pods' `BD_GATEWAY_URL` moves from the host container to the in-cluster
+Service, with a one-hour parallel run and a rollback that is the old URL (the
+overseer's step, gt-wwo7ew). The host container is retired after it (gt-en7uos).
+After the cutover the gateway is the `bd-gateway` workload in the cluster,
+rolled with the daemon (see [The in-cluster gateway](#the-in-cluster-gateway)).
+Until the cutover it is the `gt-bd` container in the Mac's local Docker beside
+Dolt, in one compose unit started at system startup. Every caller that runs bd
+today calls the gateway instead, over a small authenticated protocol. The bd
+shim (tracker routing) belongs to the tracker program (the note above,
+gt-p85pw), so the image runs the real bd. Seats keep their own bd until approach
+A (TASK.md in, outbox out, gt-4fgpu5) is built.
 
 ## Facts this design rests on
 
@@ -104,9 +107,9 @@ gateway in the cluster, as described in
 
 | Caller | Today | After |
 |---|---|---|
-| Mac shell, scripts, hooks | gt-wrap kubernetes target: `kubectl exec` into the daemon pod, 304 ms | gt-wrap docker target, configured for the bd container: `docker exec gt-bd bdgw exec -- <args>` |
-| Daemon patrols, spec dispatcher, landing worker, sling, done | `bd` on PATH in the pod, exec per call | `bd` on PATH is gt-wrap with the `bdgateway` target: HTTP to `http://host.docker.internal:7440`, class `daemon` |
-| Dashboard Deployment | `internal/beads` in its own pod | same forwarder, class `read` |
+| Mac shell, scripts, hooks | gt-wrap kubernetes target: `kubectl exec` into the daemon pod, 304 ms | gt-wrap `bdgateway` target at `127.0.0.1:7440`, the port-forward to the `bd-gateway` Service that `gt town forward bd-gateway` prints; until the cutover, the docker target: `docker exec gt-bd bdgw exec -- <args>` |
+| Daemon patrols, spec dispatcher, landing worker, sling, done | `bd` on PATH in the pod, exec per call | `bd` on PATH is gt-wrap with the `bdgateway` target: HTTP to the `bd-gateway` Service in the cluster ([The in-cluster gateway](#the-in-cluster-gateway)), class `daemon`; until the cutover, `http://host.docker.internal:7440` |
+| Dashboard Deployment | `internal/beads` in its own pod | same forwarder, class `read`, to the same Service |
 | Plugins (town-metrics, app-promote), hm-sync | inherit the daemon pod's `bd` | same forwarder; hm-sync's bd use is not verified |
 | gt commands run by sessions through gt-wrap in the pod | bd inside the pod | the forwarder, class `daemon`; the actor is logged from `BD_ACTOR` |
 | Polecat seats (sandboxes) | their own bd, Dolt via policy endpoint | unchanged until approach A; a gateway endpoint would need a new policy entry in deploy/polecat/policy.yaml and deploy/k8s/policy/kind.yaml |
@@ -128,12 +131,17 @@ render builds from the host gateway IP.
 
 The update order is gateway first. The gateway's Deployment is patched and its
 rollout is waited on (three minutes at most, so its pod is Ready) before the
-daemon's Deployment is patched, and the dashboard's comes last. A Deployment that
-does not exist is skipped, and the gateway moves only when the pair names its
-image.
+daemon's Deployment is patched, and the dashboard's comes last. A Deployment
+that does not exist is skipped, and the gateway moves only when the pair names
+its image.
 
-Every gateway change stays compatible with the previous daemon for one roll,
-because the gateway moves first.
+The compatibility rule binds every change to the gateway wire (verbs, exit
+codes, frame kinds, headers) and to what the daemon and dashboard send. A new
+gateway must work with the previous daemon and dashboard for one roll, because
+the gateway moves first and runs beside them until their rollouts complete. A
+new daemon or dashboard must work with the previous gateway for one roll,
+because a rollback restores the old gateway before them, so they run against it
+until they roll back.
 
 Rollback puts the recorded previous pair back over all three images through the
 same swap. A failure in the gateway step is reported as the gateway's check, and
