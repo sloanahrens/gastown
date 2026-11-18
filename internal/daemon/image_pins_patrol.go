@@ -391,23 +391,24 @@ func imagePinsCompareFor(apiBase, tokenPath string) (ImagePinCompare, error) {
 }
 
 // imagePinsBeads opens a client for the gt source rig's database directory: the
-// refresh bead names files in that rig, so its bd calls run there. They carry
-// the town's mutation routing environment, which names the town's .beads as
-// BEADS_DIR — the workspace the bd gateway forwarder places the call in — and
-// strips any inherited database pin, so prefix routing chooses the database and
-// the town's named Dolt endpoint the server (gt-ff9cxi, gt-dl9ug0). A refresh
-// bead created with no ID prefix therefore files into the town's database, not
-// the gt source rig's; the client needs a pinned env instead (reported on
-// gt-dl9ug0). The wrapper is NewPlain because the bd deadline and the process
-// group are asked on the plain wrapper, which panics when handed any other
-// (gt-fu9c8a).
+// refresh bead names files in that rig, so its bd calls run there. They carry the
+// town's mutation routing environment over that rig's .beads, so BEADS_DIR names
+// the rig's .beads — the store the call reads, which the bd gateway forwarder
+// places the call in — and a refresh bead created with no ID prefix files into
+// the rig's database, not the town's (gt-dl9ug0). An inherited database pin is
+// stripped, so prefix routing chooses the database and the town's named Dolt
+// endpoint the server (gt-ff9cxi). The wrapper is NewPlain because the bd
+// deadline and the process group are asked on the plain wrapper, which panics
+// when handed any other (gt-fu9c8a).
 func (d *Daemon) imagePinsBeads() beads.Client {
 	opts := []beads.Option{beads.WithBin(d.bdPathOrDefault())}
 	if d.imagePinsBeadRunner != nil {
 		opts = append(opts, beads.WithEnvRunner(d.imagePinsBeadRunner))
 	}
-	return beads.NewPlain(filepath.Join(d.config.TownRoot, rebuildGTSourceRig, ".beads"),
-		bdMutationRoutingEnv(d.config.TownRoot), opts...).WithTimeout(imagePinsBdTimeout).WithProcessGroup()
+	rigBeadsDir := filepath.Join(d.config.TownRoot, rebuildGTSourceRig, ".beads")
+	return beads.NewPlain(rigBeadsDir,
+		bdMutationRoutingEnvOver(os.Environ(), d.config.TownRoot, rigBeadsDir), opts...).
+		WithTimeout(imagePinsBdTimeout).WithProcessGroup()
 }
 
 // imagePinsTickSeams are one tick's readings, decisions and filer, injected so

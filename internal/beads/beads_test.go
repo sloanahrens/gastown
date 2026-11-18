@@ -607,6 +607,7 @@ func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	writePortFileFixture(t, beadsDir, "4407")
+	wantBeadsDir := canonicalBeadsDir(beadsDir)
 
 	base := []string{
 		"PATH=/usr/bin",
@@ -624,12 +625,12 @@ func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
 		wantDB         string
 		wantConnection bool
 	}{
-		{name: "pinned", env: BuildPinnedBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantDB: "rigdb", wantConnection: true},
-		{name: "routing", env: BuildRoutingBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantConnection: true},
-		{name: "read only pinned", env: BuildReadOnlyPinnedBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantDB: "rigdb", wantConnection: true},
-		{name: "read only routing", env: BuildReadOnlyRoutingBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantConnection: true},
-		{name: "mutation pinned", env: BuildMutationPinnedBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantDB: "rigdb", wantConnection: true},
-		{name: "mutation routing", env: BuildMutationRoutingBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantConnection: true},
+		{name: "pinned", env: BuildPinnedBDEnv(base, beadsDir), wantBeadsDir: wantBeadsDir, wantDB: "rigdb", wantConnection: true},
+		{name: "routing", env: BuildRoutingBDEnv(base, beadsDir), wantBeadsDir: wantBeadsDir, wantConnection: true},
+		{name: "read only pinned", env: BuildReadOnlyPinnedBDEnv(base, beadsDir), wantBeadsDir: wantBeadsDir, wantDB: "rigdb", wantConnection: true},
+		{name: "read only routing", env: BuildReadOnlyRoutingBDEnv(base, beadsDir), wantBeadsDir: wantBeadsDir, wantConnection: true},
+		{name: "mutation pinned", env: BuildMutationPinnedBDEnv(base, beadsDir), wantBeadsDir: wantBeadsDir, wantDB: "rigdb", wantConnection: true},
+		{name: "mutation routing", env: BuildMutationRoutingBDEnv(base, beadsDir), wantBeadsDir: wantBeadsDir, wantConnection: true},
 		{name: "mutation neutral", env: BuildMutationNeutralBDEnv(base)},
 	}
 
@@ -804,8 +805,8 @@ func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T)
 		"BEADS_DOLT_SERVER_DATABASE=hq",
 	}, beadsDir)
 	got := envMap(env)
-	if got["BEADS_DIR"] != beadsDir {
-		t.Fatalf("BEADS_DIR = %q, want the fallback %q", got["BEADS_DIR"], beadsDir)
+	if want := canonicalBeadsDir(beadsDir); got["BEADS_DIR"] != want {
+		t.Fatalf("BEADS_DIR = %q, want the canonical fallback %q", got["BEADS_DIR"], want)
 	}
 	if value, ok := got["BEADS_DOLT_SERVER_DATABASE"]; ok {
 		t.Fatalf("BEADS_DOLT_SERVER_DATABASE should be absent for routed env, got %q", value)
@@ -5672,7 +5673,7 @@ func TestBuildRoutingEnv(t *testing.T) {
 		{
 			name:           "default strips the inherited BEADS_DIR and names the workDir's own",
 			envVars:        map[string]string{"BEADS_DIR": "/stale/beads", "PATH": "/usr/bin"},
-			mustContain:    []string{"PATH=", "BEADS_DIR=" + filepath.Join(workDir, ".beads")},
+			mustContain:    []string{"PATH=", "BEADS_DIR=" + canonicalBeadsDir(workDir)},
 			mustNotContain: []string{"BEADS_DIR=/stale/beads", "BD_JSON_ENVELOPE="},
 		},
 		{
@@ -5723,7 +5724,7 @@ func TestBuildRoutingEnv(t *testing.T) {
 // fallback (gt-dl9ug0); isolated mode never names one.
 func TestBuildRoutingEnvNamesTheTownBeadsDir(t *testing.T) {
 	townRoot, rigWorktree := townWithRoutes(t)
-	wantBeadsDir := filepath.Join(townRoot, ".beads")
+	wantBeadsDir := canonicalBeadsDir(townRoot)
 	noTownWorkDir := t.TempDir()
 
 	tests := []struct {
@@ -5734,7 +5735,7 @@ func TestBuildRoutingEnvNamesTheTownBeadsDir(t *testing.T) {
 	}{
 		{name: "town root", workDir: townRoot, want: wantBeadsDir},
 		{name: "polecat worktree", workDir: rigWorktree, want: wantBeadsDir},
-		{name: "no town above the workDir names its own", workDir: noTownWorkDir, want: filepath.Join(noTownWorkDir, ".beads")},
+		{name: "no town above the workDir names its own", workDir: noTownWorkDir, want: canonicalBeadsDir(noTownWorkDir)},
 		{name: "isolated names none", workDir: townRoot, isolated: true},
 	}
 	for _, tc := range tests {
@@ -5751,6 +5752,33 @@ func TestBuildRoutingEnvNamesTheTownBeadsDir(t *testing.T) {
 				t.Fatalf("BEADS_DIR = %q (set %v), want %q", got, ok, tc.want)
 			}
 		})
+	}
+}
+
+// TestBuildRoutingEnvNamesTheRigBeadsDirForARigScopedCall pins the gt-dl9ug0
+// rule for a rig-scoped call: a routed bd call names the .beads of the store it
+// reads, which is the rig's resolved .beads for a Beads scoped to a rig
+// worktree. The bd gateway forwarder reads the first BEADS_DIR entry (gtwrap's
+// envValue), so that is the entry it places the call by; a first entry naming
+// the town's .beads would move the rig's beads into the town database.
+func TestBuildRoutingEnvNamesTheRigBeadsDirForARigScopedCall(t *testing.T) {
+	townRoot, rigWorktree := townWithRoutes(t)
+	townBeadsDir := canonicalBeadsDir(townRoot)
+	rigBeadsDir := ResolveBeadsDir(rigWorktree)
+	if rigBeadsDir == townBeadsDir {
+		t.Fatalf("the fixture's rig worktree resolves to the town's .beads %q", townBeadsDir)
+	}
+
+	env := (&Beads{workDir: rigWorktree}).buildRoutingEnv()
+	got, ok := firstEnvValue(env, "BEADS_DIR")
+	if !ok {
+		t.Fatalf("the rig-scoped routing env names no BEADS_DIR, so the bd gateway forwarder refuses the call")
+	}
+	if got == townBeadsDir {
+		t.Fatalf("the rig-scoped routing env's first BEADS_DIR names the town's .beads %q, want the rig's %q", townBeadsDir, rigBeadsDir)
+	}
+	if got != rigBeadsDir {
+		t.Fatalf("BEADS_DIR = %q, want the rig's resolved .beads %q", got, rigBeadsDir)
 	}
 }
 

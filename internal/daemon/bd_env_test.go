@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestBdReadOnlyEnv verifies that the read-only env holds exactly one
@@ -93,7 +95,7 @@ func TestBdReadOnlyRoutingEnvCarriesTownBeadsDirButNotDatabase(t *testing.T) {
 	}
 
 	env := bdReadOnlyRoutingEnvFrom(base, townRoot)
-	assertSingleEnvValue(t, env, "BEADS_DIR", beadsDir)
+	assertSingleEnvValue(t, env, "BEADS_DIR", beads.ResolveBeadsDir(beadsDir))
 	assertEnvAbsent(t, env, "BEADS_DOLT_SERVER_DATABASE")
 	assertSingleEnvValue(t, env, "BEADS_DOLT_SERVER_PORT", "4407")
 	assertSingleEnvValue(t, env, "BD_DOLT_AUTO_COMMIT", "off")
@@ -141,7 +143,7 @@ func TestWorkBeadStateRoutesWithTheTownsBeadsDir(t *testing.T) {
 	if _, err := d.workBeadState("gt-abc"); err != nil {
 		t.Fatalf("workBeadState: %v", err)
 	}
-	assertSingleEnvValue(t, got, "BEADS_DIR", filepath.Join(townRoot, ".beads"))
+	assertSingleEnvValue(t, got, "BEADS_DIR", beads.ResolveBeadsDir(townRoot))
 	assertSingleEnvValue(t, got, "BD_READONLY", "true")
 	assertSingleEnvValue(t, got, "BD_DOLT_AUTO_COMMIT", "off")
 	assertEnvAbsent(t, got, "BEADS_DOLT_SERVER_DATABASE")
