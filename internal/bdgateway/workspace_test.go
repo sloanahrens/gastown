@@ -1074,6 +1074,28 @@ func TestWorkspacePresent(t *testing.T) {
 			},
 		},
 		{
+			// The same names away from the place bd writes them are still
+			// directories, never runtime files: the walk refuses the directory
+			// by its name instead of descending and admitting the files its
+			// nested .beads makes legal.
+			name: "a directory named .beads.gate.lock with no .beads directory beside it",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/.beads.gate.lock/.beads/redirect", "x")
+			},
+		},
+		{
+			name: "a directory named last-touched outside a .beads directory",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/rig/last-touched/.beads/redirect", "x")
+			},
+		},
+		{
+			name: "a directory named .local_version outside a .beads directory",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/rig/.local_version/.beads/redirect", "x")
+			},
+		},
+		{
 			name: "a .beads.gate.lock with no .beads directory beside it",
 			build: func(t *testing.T, root string) {
 				writeFileIn(t, root, "gt/mayor/.beads.gate.lock", "")
