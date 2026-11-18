@@ -184,11 +184,40 @@ func TestDefaultAllowEnvStillDropsOtherVariables(t *testing.T) {
 		"BEADS_DOLT_SERVER_HOST":  "host.docker.internal",
 		"BEADS_DOLT_SERVER_PORT":  "3307",
 		"BEADS_DOLT_PASSWORD":     "parent-only",
+		"BD_GATEWAY_TOKEN":        "parent-only",
 		"TOWN_METRICS_TEST_TOKEN": "parent-only",
 	}))
 	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want only the endpoint %d (a credential the allowlist omits must not reach a child)", len(got), len(want))
+		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want only the endpoint %d (a credential the allowlist omits, such as the gateway token's value beside its file's name, must not reach a child)", len(got), len(want))
+	}
+}
+
+// TestDefaultAllowEnvPassesTheGateway pins what a forwarder-mode bd needs: with
+// the parent naming a gateway, the child holds the URL and the token file's
+// path, so gt-wrap forwards the call instead of refusing it.
+func TestDefaultAllowEnvPassesTheGateway(t *testing.T) {
+	t.Parallel()
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{
+		"BD_GATEWAY_URL":        "http://host.docker.internal:7440",
+		"BD_GATEWAY_TOKEN_FILE": "/run/gt/bd-gateway/token",
+	}))
+	want := []string{"BD_GATEWAY_URL=http://host.docker.internal:7440", "BD_GATEWAY_TOKEN_FILE=/run/gt/bd-gateway/token"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want %d (a child bd behind the forwarder needs the gateway URL and token file)", len(got), len(want))
+	}
+}
+
+// TestDefaultAllowEnvUnsetGatewayStaysAbsent pins the other half: an allowlisted
+// name the parent does not set is left out, never invented empty, so a bd with
+// no gateway configured fails with gt-wrap's own message rather than an empty
+// URL the caller never set.
+func TestDefaultAllowEnvUnsetGatewayStaysAbsent(t *testing.T) {
+	t.Parallel()
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{"PATH": "/usr/bin"}))
+	want := []string{"PATH=/usr/bin"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want %d (an unset gateway variable must stay absent)", len(got), len(want))
 	}
 }
 
