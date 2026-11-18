@@ -123,6 +123,19 @@ type workspaceRoute struct {
 // would route prefixes to a workspace holding no database for them, and the
 // refusal names the rig or file at fault.
 func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
+	return buildWorkspaceDocument(townRoot, os.Open)
+}
+
+// formulaOpener opens one formula file for reading. It is a parameter rather
+// than a package variable so the refusal is driven through the build without a
+// file-mode trick: a process running as root, as the container gate does, reads
+// a mode-0 file. Production passes os.Open.
+type formulaOpener func(path string) (*os.File, error)
+
+// buildWorkspaceDocument is BuildWorkspaceDocument with the opener the formula
+// reads use, so a caller can make a formula's read fail without depending on
+// the file mode.
+func buildWorkspaceDocument(townRoot string, openFormula formulaOpener) (WorkspaceDocument, error) {
 	if townRoot == "" || !filepath.IsAbs(townRoot) {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: the town root %q must be an absolute path", townRoot)
 	}
@@ -159,7 +172,7 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 	// sling through the gateway fails with "issue not found" without them. They
 	// are carried once under the town's own beads directory and, below, under
 	// each registered rig's, so a rig-scoped cook finds them too.
-	formulas, err := readTownFormulas(root, townBeads)
+	formulas, err := readTownFormulas(root, townBeads, openFormula)
 	if err != nil {
 		return WorkspaceDocument{}, err
 	}
@@ -392,8 +405,9 @@ func addBeadsFiles(files map[string]string, townRoot, beadsDir, prefix string) e
 // subdirectory or a device is refused rather than followed or descended, and a
 // file over the per-file cap is refused as the fixed files are. A town with no
 // formulas directory yields none; a formulas directory that is a link out of the
-// town, or names nothing, is refused rather than read as absent.
-func readTownFormulas(townRoot, beadsDir string) (map[string]string, error) {
+// town, or names nothing, is refused rather than read as absent. Each formula's
+// read opens through openFormula, which production sets to os.Open.
+func readTownFormulas(townRoot, beadsDir string, openFormula formulaOpener) (map[string]string, error) {
 	dir := filepath.Join(beadsDir, formulaDirName)
 	// Resolve before reading: a formulas directory that is a link out of the
 	// town would carry files from outside it into the pushed tree.
@@ -435,7 +449,7 @@ func readTownFormulas(townRoot, beadsDir string) (map[string]string, error) {
 		// would be held whole by a plain read, so the bytes are read through
 		// readAtMost, which stops one byte past the cap and refuses what it
 		// finds there.
-		data, err := readFormulaFile(formulaPath)
+		data, err := readFormulaFile(openFormula, formulaPath)
 		if err != nil {
 			return nil, err
 		}
@@ -444,11 +458,11 @@ func readTownFormulas(townRoot, beadsDir string) (map[string]string, error) {
 	return formulas, nil
 }
 
-// readFormulaFile opens the regular file at p and returns its content, read
-// through readAtMost. Its over-cap refusal names the formula path, which
-// readAtMost does not know.
-func readFormulaFile(p string) ([]byte, error) {
-	f, err := os.Open(p) //nolint:gosec // G304: p is the regular file the caller stat'd inside the town
+// readFormulaFile opens the regular file at p with open and returns its
+// content, read through readAtMost. Its over-cap refusal names the formula
+// path, which readAtMost does not know.
+func readFormulaFile(open formulaOpener, p string) ([]byte, error) {
+	f, err := open(p)
 	if err != nil {
 		return nil, fmt.Errorf("bdgateway: reading %s: %w", p, err)
 	}

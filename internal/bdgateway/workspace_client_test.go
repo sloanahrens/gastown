@@ -1053,26 +1053,19 @@ func TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig(t *testing.T)
 
 // TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder
 // cannot read refuses the push rather than pushing a workspace without it, which
-// would fail only when a sling cooks that formula.
+// would fail only when a sling cooks that formula. The opener makes the read
+// fail: a mode-0 file does not fail a process running as root, as the container
+// gate does, so the refusal has to be driven through the build rather than
+// through the file's permissions (gt-0713x5).
 func TestBuildWorkspaceDocumentRefusesAnUnreadableFormula(t *testing.T) {
 	t.Parallel()
 	root := clientTown(t)
-	formula := filepath.Join(root, ".beads", "formulas", "alpha.formula.toml")
 	writePath(t, root, ".beads/formulas/alpha.formula.toml", "formula = \"alpha\"\n")
-	if err := os.Chmod(formula, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(formula, 0o600) })
-	// A process that can open a mode-0 file (root, as a container gate runs)
-	// cannot be made to fail the read, and the document would build.
-	if f, err := os.Open(formula); err == nil {
-		_ = f.Close()
-		//testpolicy:allow no-skip — a process that reads a mode-0 file (root, as a container gate runs) cannot be made to fail this read, so the case is unbuildable there, not failing
-		t.Skip("the process reads a mode-0 file (it runs as root), so the formula read cannot be made to fail")
-	}
-	_, err := BuildWorkspaceDocument(root)
+	_, err := buildWorkspaceDocument(root, func(string) (*os.File, error) {
+		return nil, os.ErrPermission
+	})
 	if err == nil || !strings.Contains(err.Error(), "alpha.formula.toml") {
-		t.Fatalf("BuildWorkspaceDocument error = %v, want a refusal naming the formula", err)
+		t.Fatalf("buildWorkspaceDocument error = %v, want a refusal naming the formula", err)
 	}
 }
 
@@ -1083,7 +1076,7 @@ func TestBuildWorkspaceDocumentRefusesAnUnreadableFormula(t *testing.T) {
 func TestReadFormulaFileRefusesAFileItCannotRead(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	_, err := readFormulaFile(dir)
+	_, err := readFormulaFile(os.Open, dir)
 	if err == nil {
 		t.Fatalf("readFormulaFile(%s) returned no error for a directory", dir)
 	}
