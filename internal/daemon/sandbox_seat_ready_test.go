@@ -4,13 +4,17 @@ import (
 	"errors"
 	"io"
 	"log"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/outbox"
 )
 
 // seatOutboxSubmission is result.json carrying the branch a file-mode gt done
@@ -18,8 +22,85 @@ import (
 func seatOutboxSubmission() string {
 	return `{"bead_id":"` + endBead + `","status":"done",` +
 		`"submission":{"branch":"` + endBranch + `",` +
-		`"head":"0123456789abcdef0123456789abcdef01234567",` +
+		`"head":"` + endSubmittedHead + `",` +
 		`"target":"main","submitted_at":"2026-11-16T18:40:48Z"}}`
+}
+
+// TestNoBeadAccessSeatEndReadyBlockNeedsTheOriginTip: the block is written only
+// when origin's tip of the branch, read from the rig's bare repo, is the reported
+// head. Origin's own answer is reported and never asked again; a failed read
+// keeps the seat and is retried (gt-e1sd0v).
+func TestNoBeadAccessSeatEndReadyBlockNeedsTheOriginTip(t *testing.T) {
+	t.Parallel()
+	const otherHead = "fedcba9876543210fedcba9876543210fedcba98"
+	tests := []struct {
+		name        string
+		refs        []git.RemoteRef
+		err         error
+		wantKept    bool // the first pass keeps the seat
+		wantRetried bool // the second, with origin holding the head, writes the block
+		wantLog     string
+	}{
+		{"a tip at another commit", []git.RemoteRef{{Name: "refs/heads/" + endBranch, Hash: otherHead}}, nil, false, false, "is at " + otherHead + ", not the reported head " + endSubmittedHead},
+		{"a branch origin does not hold", []git.RemoteRef{{Name: "refs/heads/main", Hash: otherHead}}, nil, false, false, `origin holds no branch "` + endBranch + `"`},
+		{"a branch origin names with no commit", []git.RemoteRef{{Name: "refs/heads/" + endBranch}}, nil, false, false, `origin names no commit for branch "` + endBranch + `"`},
+		{"a read that failed", nil, errors.New("could not resolve host: origin"), true, true, "cannot be read"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			seedSeatBead(t, f, "")
+			writeSeatOutbox(t, f.town, seatOutboxSubmission(), "")
+			readDir := ""
+			f.host.d.openGitFn = func(dir string) daemonGit { readDir = dir; return f.origin }
+			f.origin.originRefs, f.origin.originErr = tt.refs, tt.err
+			var logs strings.Builder
+			f.host.d.logger = log.New(&logs, "", 0)
+
+			reason := f.host.applySeatOutbox(endRig, endPolecat, endBead)
+			if tt.wantKept != strings.HasPrefix(reason, outboxReadyReason) {
+				t.Fatalf("reason = %q, want kept = %v", reason, tt.wantKept)
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log %q does not report %q", logs.String(), tt.wantLog)
+			}
+			issue, err := f.agentDB.Show(endBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(issue.Notes, land.ReadyNoteMarker) || beads.HasLabel(issue, land.LabelReadyToLand) {
+				t.Fatalf("the first pass got a block or label origin did not confirm: %q %v", issue.Notes, issue.Labels)
+			}
+			f.origin.originRefs, f.origin.originErr = []git.RemoteRef{{Name: "refs/heads/" + endBranch, Hash: endSubmittedHead}}, nil
+			if reason := f.host.applySeatOutbox(endRig, endPolecat, endBead); reason != "" {
+				t.Errorf("second pass reason = %q, want none", reason)
+			}
+			if issue, err = f.agentDB.Show(endBead); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(issue.Notes, land.ReadyNoteMarker); got != tt.wantRetried {
+				t.Errorf("second pass wrote a block = %v, want %v: %q", got, tt.wantRetried, issue.Notes)
+			}
+			if want := constants.RigBareRepoPath(filepath.Join(f.town, endRig)); readDir != want {
+				t.Errorf("origin read in %q, want the rig's bare repo %q", readDir, want)
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessSeatEndAsksNoGitAboutABadBranch: a branch git would refuse
+// never reaches the origin read (gt-e1sd0v).
+func TestNoBeadAccessSeatEndAsksNoGitAboutABadBranch(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	asked := false
+	f.host.d.openGitFn = func(string) daemonGit { asked = true; return f.origin }
+	got := f.host.submissionOrigin(endRig, outbox.Result{Status: outbox.StatusDone, Submission: &outbox.Submission{
+		Branch: "-c core.pager=cat", Head: "0123456789abcdef", Target: "main"}})
+	if asked || got != (outbox.OriginTip{}) {
+		t.Errorf("origin = %+v asked = %v, want no read for a branch git refuses", got, asked)
+	}
 }
 
 // A seat's outbox says what it pushed, and the host the seat could not reach

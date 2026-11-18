@@ -21,7 +21,8 @@
 // to report for. title and acceptance are the edits a file-mode `gt bead
 // update` makes: the new title, and the whole replacement criteria block, as
 // bd's --acceptance means it. submission is the branch a file-mode `gt done`
-// pushed for landing, which the host writes as the READY TO LAND block.
+// pushed for landing, which the host writes as the READY TO LAND block once it
+// has read origin and found the branch tip is that head (OriginTip).
 //
 // The package does no I/O: the host reads the two files and hands their contents
 // to Validate.
@@ -225,7 +226,7 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 			Head:   strings.TrimSpace(wire.Submission.Head),
 			Target: strings.TrimSpace(wire.Submission.Target),
 		}
-		if err := submissionProblem(submission, wire.Status); err != nil {
+		if err := SubmissionProblem(submission, wire.Status); err != nil {
 			return Result{}, fmt.Errorf("outbox: result.json %w", err)
 		}
 		if wire.Submission.SubmittedAt != "" {
@@ -248,13 +249,15 @@ func Validate(raw []byte, notes []byte, beadID string) (Result, error) {
 	}, nil
 }
 
-// submissionProblem returns why s is not a landing the host can write, or nil
+// SubmissionProblem returns why s is not a landing the host can write, or nil
 // when it is one. Validate refuses through it what a seat wrote, and Apply
 // through it what a hand-built Result carries, so neither path marks a bead
 // ready to land for a branch or target git would refuse or a head that is not a
 // commit sha: the block's values reach git as a ref to fetch and a commit to
-// merge, and a seat is not the authority on what git accepts.
-func submissionProblem(s *Submission, status Status) error {
+// merge, and a seat is not the authority on what git accepts. A host calls it
+// before it reads origin, so a branch a result.json wrote never reaches git
+// (gt-e1sd0v).
+func SubmissionProblem(s *Submission, status Status) error {
 	if s == nil {
 		return nil
 	}

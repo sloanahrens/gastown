@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+// originHoldsTheSubmission is the tip these tests hand Apply: origin holds the
+// branch at the head the submission reports.
+var originHoldsTheSubmission = OriginTip{Head: "0123456789abcdef0123456789abcdef01234567", Held: true}
+
 // TestNoBeadAccessApplyWritesTheReadyBlockFromASubmittedOutbox: a result.json
 // that says what it submitted has the READY TO LAND block written for the bead,
 // so the landing worker finds it: branch, head and target from the outbox, the
@@ -49,7 +53,7 @@ func TestNoBeadAccessApplyWritesTheReadyBlockFromASubmittedOutbox(t *testing.T) 
 				t.Fatalf("Validate() error = %v, want nil", err)
 			}
 			store := &fakeStore{}
-			if err := Apply(store, testBead, testSeat, acceptance, r); err != nil {
+			if err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission); err != nil {
 				t.Fatalf("Apply() error = %v, want nil", err)
 			}
 			want := []storeCall{{op: "MarkReadyToLand", beadID: testBead, text: tt.wantNote}}
@@ -61,16 +65,28 @@ func TestNoBeadAccessApplyWritesTheReadyBlockFromASubmittedOutbox(t *testing.T) 
 }
 
 // TestNoBeadAccessApplyRefusesABadSubmission: a submission the decoder refused,
-// or a hand-built one, marks no bead ready to land, and the writes around it are
-// still made (gt-qk3ppr).
+// a hand-built one, or one origin does not confirm marks no bead ready to land,
+// and the writes around it are still made. Only a failed read is retried
+// (gt-qk3ppr, gt-e1sd0v).
 func TestNoBeadAccessApplyRefusesABadSubmission(t *testing.T) {
 	t.Parallel()
+	submitted := &Submission{Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main"}
 	tests := []struct {
 		name      string
 		result    Result
+		origin    OriginTip
 		wantErr   string
+		wantRetry bool
 		wantCalls []storeCall
 	}{
+		{name: "a submission origin does not hold", result: Result{Status: StatusDone, Submission: submitted}, origin: OriginTip{},
+			wantErr: `outbox: mark gt-swfo9e ready to land: origin holds no branch "polecat/capable/gt-swfo9e"`},
+		{name: "a submission at another commit on origin", result: Result{Status: StatusDone, Submission: submitted},
+			origin: OriginTip{Head: "fedcba9876543210", Held: true}, wantErr: "not the reported head 0123456789abcdef"},
+		{name: "a submission origin names with no commit", result: Result{Status: StatusDone, Submission: submitted},
+			origin: OriginTip{Held: true}, wantErr: `origin names no commit for branch "polecat/capable/gt-swfo9e"`},
+		{name: "a submission origin cannot be read", result: Result{Status: StatusDone, Submission: submitted},
+			origin: OriginTip{Err: errors.New("could not resolve host: origin")}, wantErr: "cannot be read", wantRetry: true},
 		{
 			name: "a deferred result that still carries a submission",
 			result: Result{Status: StatusDeferred, Submission: &Submission{
@@ -136,12 +152,16 @@ func TestNoBeadAccessApplyRefusesABadSubmission(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			err := Apply(store, testBead, testSeat, acceptance, tt.result)
+			err := Apply(store, testBead, testSeat, acceptance, tt.result, tt.origin)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("Apply() error = %q, want it to name %q", err, tt.wantErr)
+			}
+			var readFailure *OriginReadError
+			if got := errors.As(err, &readFailure); got != tt.wantRetry {
+				t.Errorf("errors.As(*OriginReadError) = %v, want %v", got, tt.wantRetry)
 			}
 			if !reflect.DeepEqual(store.calls, tt.wantCalls) {
 				t.Errorf("Apply() calls = %#v, want %#v", store.calls, tt.wantCalls)
@@ -165,7 +185,7 @@ func TestNoBeadAccessApplyFailedReadyWriteIsReported(t *testing.T) {
 	r := Result{Status: StatusDone, Notes: "a note", Submission: &Submission{
 		Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main",
 	}}
-	err := Apply(store, testBead, testSeat, acceptance, r)
+	err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission)
 	if err == nil || !strings.Contains(err.Error(), "mark gt-swfo9e ready to land") || !strings.Contains(err.Error(), readyErr.Error()) {
 		t.Fatalf("Apply() error = %v, want it to name the ready write and its failure", err)
 	}
@@ -278,7 +298,7 @@ func TestNoBeadAccessApplyRefusesASubmissionTheStoreCannotWrite(t *testing.T) {
 	r := Result{Status: StatusDone, Submission: &Submission{
 		Branch: "polecat/capable/gt-swfo9e", Head: "0123456789abcdef", Target: "main",
 	}}
-	err := Apply(store, testBead, testSeat, acceptance, r)
+	err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission)
 	if err == nil || !strings.Contains(err.Error(), "cannot write a READY TO LAND block") {
 		t.Fatalf("Apply() error = %v, want the store's refusal to write the block", err)
 	}

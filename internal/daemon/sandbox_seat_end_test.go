@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
@@ -32,6 +33,8 @@ const (
 	endBranch    = "polecat/agate/gt-n4xq8+x1"
 	endSandboxIn = "deepseek-flash-sandbox"
 	endHostAgent = "deepseek-flash"
+	// endSubmittedHead is the head seatOutboxSubmission reports; origin holds it.
+	endSubmittedHead = "0123456789abcdef0123456789abcdef01234567"
 )
 
 // endSettings is a town with one tmux seat and one openshell seat, the two
@@ -64,6 +67,8 @@ type seatEndFake struct {
 	// cursorAt with no err is a town that has not written a cursor yet.
 	cursorAt  time.Time
 	cursorErr error
+	// origin is the git seam's answer about the seat's branch.
+	origin *pushStubGit
 }
 
 func newSeatEndFake(t *testing.T) *seatEndFake {
@@ -81,6 +86,9 @@ func newSeatEndFake(t *testing.T) *seatEndFake {
 	}
 	f.agentBead = beads.AgentBeadIDFor(constants.RolePolecat, endRig, endPolecat, town)
 	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: newFakeTmux(newFixedClock())}
+	// The origin a seat's ready write reads; a test about origin's answer replaces it.
+	f.origin = &pushStubGit{originRefs: []git.RemoteRef{{Name: "refs/heads/" + endBranch, Hash: endSubmittedHead}}}
+	d.openGitFn = func(string) daemonGit { return f.origin }
 	d.rulesCursorAt = func(string) (time.Time, bool, error) {
 		if f.cursorErr != nil {
 			return time.Time{}, false, f.cursorErr
