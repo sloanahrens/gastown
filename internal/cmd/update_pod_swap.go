@@ -43,10 +43,11 @@ func isDNSLabel(name string) bool {
 // install records before it swaps: the update Job's init container rewrites the
 // values file with the new pair first. Apply refuses a pair whose daemon, polecat
 // or bd gateway is not a digest reference, and a swap missing its context,
-// namespace or rollout timeout, before any command runs. A failed step is named
-// by the step and its exit, never by the command's output, which can hold a
-// secret; a gateway step's failure is returned as update.GatewayStepError, so the
-// install names the gateway rather than the daemon rollout that never started.
+// namespace, rollout timeout or gateway rollout timeout, before any command
+// runs. A failed step is named by the step and its exit, never by the command's
+// output, which can hold a secret; a gateway step's failure is returned as
+// update.GatewayStepError, so the install names the gateway rather than the
+// daemon rollout that never started.
 type podDaemonSwap struct {
 	// Context is the kubectl context the Deployment runs in. Required unless
 	// InCluster, and refused with it.
@@ -64,8 +65,8 @@ type podDaemonSwap struct {
 	Run update.RunFunc
 	// RolloutTimeout bounds the wait for the rollout. Required; zero is refused.
 	RolloutTimeout time.Duration
-	// GatewayRolloutTimeout bounds the bd gateway's rollout wait; a non-positive
-	// value means gatewayRolloutTimeout, the bound a digest install runs with.
+	// GatewayRolloutTimeout bounds the bd gateway's rollout wait. Required; zero
+	// is refused, so no swap waits on a bound nobody chose.
 	GatewayRolloutTimeout time.Duration
 	// Out receives the one line Apply prints when the cluster has no dashboard
 	// Deployment and the dashboard is not moved. Nil discards it.
@@ -82,11 +83,13 @@ var _ update.ImageRunningPair = podDaemonSwap{}
 // Deployment, so the operator can see the dashboard was not moved.
 const dashboardAbsentLine = "dashboard Deployment not found; not moved"
 
-// gatewayRolloutTimeout bounds the wait for the bd gateway's rollout before the
-// daemon is patched. The gateway must be new and Ready before the daemon that
-// needs it moves, so a gateway that never comes Ready fails the roll and restores
-// the previous images while the daemon is still on its old pair; the bound is its
-// own constant rather than the daemon's restart bound for that reason.
+// gatewayRolloutTimeout is the bound a digest install wires for the bd gateway's
+// rollout, the wait between the gateway's patch and the daemon's. The gateway
+// must be new and Ready before the daemon that needs it moves, so a gateway that
+// never comes Ready fails the roll and restores the previous images while the
+// daemon is still on its old pair; the bound is its own constant rather than the
+// daemon's restart bound for that reason. daemonImageSwap wires it, as it wires
+// the daemon's restart bound, so the live install takes both through one seam.
 const gatewayRolloutTimeout = 3 * time.Minute
 
 // runningPairJSONPath reads the pair the daemon's Deployment runs: the daemon
@@ -204,7 +207,7 @@ func (s podDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) error {
 		if err := s.kubectl(ctx, "the bd gateway's patch", "patch", "deployment/"+k8sdaemon.BdGatewayName, "--type=strategic", "-p", gatewayPatch); err != nil {
 			return update.GatewayStepError{Err: err}
 		}
-		timeout := "--timeout=" + s.gatewayTimeout().String()
+		timeout := "--timeout=" + s.GatewayRolloutTimeout.String()
 		if err := s.kubectl(ctx, "the bd gateway's rollout status", "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, timeout); err != nil {
 			return update.GatewayStepError{Err: err}
 		}
@@ -272,15 +275,6 @@ func (s podDaemonSwap) gatewayPresent(ctx context.Context) (bool, error) {
 	default:
 		return false, fmt.Errorf("%s printed a name other than the bd gateway's", step)
 	}
-}
-
-// gatewayTimeout is the bound the gateway's rollout wait carries: the field when
-// it is positive, else the bound a digest install runs with.
-func (s podDaemonSwap) gatewayTimeout() time.Duration {
-	if s.GatewayRolloutTimeout > 0 {
-		return s.GatewayRolloutTimeout
-	}
-	return gatewayRolloutTimeout
 }
 
 // out is the writer Apply's line goes to: Out when set, else nowhere.
@@ -358,6 +352,9 @@ func (s podDaemonSwap) validate(pair update.ImagePair) error {
 	}
 	if s.RolloutTimeout <= 0 {
 		return errors.New("the pod daemon swap has no rollout timeout")
+	}
+	if s.GatewayRolloutTimeout <= 0 {
+		return errors.New("the pod daemon swap has no bd gateway rollout timeout")
 	}
 	if err := checkPodDigest("daemon", pair.Daemon); err != nil {
 		return err

@@ -159,13 +159,19 @@ var podSwapPolecatRef = "registry.internal:5000/town/gastown-polecat@sha256:" + 
 // podSwapPair is a complete pair, both halves digests.
 var podSwapPair = update.ImagePair{Daemon: podSwapDigestRef, Polecat: podSwapPolecatRef}
 
+// podSwapGatewayWait is the gateway bound podSwapFor wires. It differs from the
+// bound a digest install wires, so a test that reads the gateway's --timeout
+// proves the swap reads its own field rather than the constant.
+const podSwapGatewayWait = 4 * time.Minute
+
 // podSwapFor is a swap wired to fake, with every required field set.
 func podSwapFor(fake *podSwapFake) podDaemonSwap {
 	return podDaemonSwap{
-		Context:        podSwapContext,
-		Namespace:      podSwapNamespace,
-		Run:            fake.run,
-		RolloutTimeout: 5 * time.Minute,
+		Context:               podSwapContext,
+		Namespace:             podSwapNamespace,
+		Run:                   fake.run,
+		RolloutTimeout:        5 * time.Minute,
+		GatewayRolloutTimeout: podSwapGatewayWait,
 	}
 }
 
@@ -370,12 +376,14 @@ func TestDigestInstallerGatewayMovesTheGatewayFirst(t *testing.T) {
 		}
 	})
 
-	t.Run("a gateway wait with no bound set uses the install's bound", func(t *testing.T) {
+	t.Run("the gateway wait carries the install's bound", func(t *testing.T) {
 		t.Parallel()
 		prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
 		fake := &podSwapFake{gateway: "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)}
+		swap := podSwapFor(fake)
+		swap.GatewayRolloutTimeout = gatewayRolloutTimeout
 
-		if err := podSwapFor(fake).Apply(context.Background(), podSwapBdPair()); err != nil {
+		if err := swap.Apply(context.Background(), podSwapBdPair()); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
 		if len(fake.calls) < 4 {
@@ -943,6 +951,18 @@ func TestPodDaemonSwapRefusesAnUnusableTargetOrPair(t *testing.T) {
 			pair:    podSwapPair,
 			mutate:  func(s *podDaemonSwap) { s.RolloutTimeout = -time.Second },
 			wantErr: "has no rollout timeout",
+		},
+		{
+			name:    "a zero bd gateway rollout timeout is refused, never read as the install's bound",
+			pair:    podSwapPair,
+			mutate:  func(s *podDaemonSwap) { s.GatewayRolloutTimeout = 0 },
+			wantErr: "has no bd gateway rollout timeout",
+		},
+		{
+			name:    "a negative bd gateway rollout timeout is refused",
+			pair:    podSwapPair,
+			mutate:  func(s *podDaemonSwap) { s.GatewayRolloutTimeout = -time.Second },
+			wantErr: "has no bd gateway rollout timeout",
 		},
 		{
 			name:    "a swap with no runner is refused",

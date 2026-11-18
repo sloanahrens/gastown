@@ -700,6 +700,9 @@ func TestUpdatePodFlagsSelectThePodSeams(t *testing.T) {
 		if swap.RolloutTimeout != updateRestartWait {
 			t.Errorf("rollout timeout = %v, want the restart bound %v", swap.RolloutTimeout, updateRestartWait)
 		}
+		if swap.GatewayRolloutTimeout != gatewayRolloutTimeout {
+			t.Errorf("bd gateway rollout timeout = %v, want the install's gateway bound %v", swap.GatewayRolloutTimeout, gatewayRolloutTimeout)
+		}
 		if reading, ok := inst.Images.Running.(podDaemonSwap); !ok {
 			t.Errorf("running pair read = %T, want the pod swap: only the Deployment can say which pair ran before", inst.Images.Running)
 		} else if reading.Namespace != podSwapNamespace {
