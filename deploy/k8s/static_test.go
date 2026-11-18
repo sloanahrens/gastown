@@ -274,8 +274,8 @@ func TestStaticObjectsRefusals(t *testing.T) {
 			want: "more than one YAML document",
 		},
 		{
-			name: "a malformed second document reports its parse error",
-			body: "apiVersion: v1\nkind: Role\nmetadata: {name: a, namespace: gt}\n--- # second\na: b: c\n",
+			name:    "a malformed second document reports its parse error",
+			body:    "apiVersion: v1\nkind: Role\nmetadata: {name: a, namespace: gt}\n--- # second\na: b: c\n",
 			want:    "second document",
 			notWant: "more than one YAML document",
 		},
