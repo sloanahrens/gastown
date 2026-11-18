@@ -187,6 +187,12 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("cross-rig guard %s %s", id, agent)
 			return nil
 		},
+		// The estimate is the lint's seam in production. A harness sling that is
+		// not about sizing gets a bead sized at once, with no estimator run and no
+		// call logged, so its call log is what it was before the estimate.
+		estimateFirst: func(context.Context, string, string) (specEstimateOutcome, error) {
+			return specEstimateOutcome{Action: "estimated", Points: 3, Rung: "all", Minutes: 6}, nil
+		},
 
 		resolveSelf:   func() (string, string, string, error) { return "", "", "", errors.New("not in an agent session") },
 		resolveTarget: h.resolveTarget,
