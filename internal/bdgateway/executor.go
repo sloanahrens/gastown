@@ -579,9 +579,9 @@ func (e *Executor) timeout(ms int) (time.Duration, error) {
 // link below its root is never its own, and each existing element below the
 // root is refused if it is one.
 //
-// The workspace tree holds only the five files the design pushes, so the
-// caller's directory is created on first use: bd starts in the directory the
-// caller named, not in the root. A read-only workspace volume therefore
+// The workspace tree holds only files the gateway wrote, so the caller's
+// directory is created on first use: bd starts in the directory the caller
+// named, not in the root. A read-only workspace volume therefore
 // refuses every call from a directory it does not already hold.
 func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) {
 	root := e.workspaceRoot

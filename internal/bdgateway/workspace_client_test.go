@@ -25,7 +25,7 @@ func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) 
 // beads, a rig whose .beads is a redirect into mayor/rig, and a rig that holds
 // its files in its own .beads. Each directory keeps a file the workspace does
 // not serve, so a test catches a document that copies the directory rather than
-// the five files.
+// the files the workspace takes.
 func clientTown(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -126,6 +126,49 @@ func TestBuildWorkspaceDocument(t *testing.T) {
 			t.Errorf("document holds %s, which the workspace does not serve: %q", name, content)
 		}
 	}
+	if got, want := doc.ManifestSHA, WorkspaceManifest(want); got != want {
+		t.Errorf("manifest = %s, want the hash of the expected files %s", got, want)
+	}
+	if _, err := validatedManifest(doc); err != nil {
+		t.Errorf("the gateway would refuse the document the builder returned: %v", err)
+	}
+}
+
+// TestBuildWorkspaceDocumentCarriesTownFormulas: the document holds each
+// regular .formula.toml of the town's formulas directory under
+// .beads/formulas, and nothing else that directory holds — not the installed
+// record, not a README, not a file nested in a subdirectory.
+func TestBuildWorkspaceDocumentCarriesTownFormulas(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	writePath(t, root, ".beads/formulas/alpha.formula.toml", "formula = \"alpha\"\n")
+	writePath(t, root, ".beads/formulas/mol-beta.formula.toml", "formula = \"mol-beta\"\ntype = \"workflow\"\n")
+	writePath(t, root, ".beads/formulas/.installed.json", `{"formulas":{}}`)
+	writePath(t, root, ".beads/formulas/README.md", "hand-written notes\n")
+	writePath(t, root, ".beads/formulas/archive/gamma.formula.toml", "formula = \"gamma\"\n")
+
+	doc, err := BuildWorkspaceDocument(root)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	want := clientTownDocument(t, root)
+	want[".beads/formulas/alpha.formula.toml"] = "formula = \"alpha\"\n"
+	want[".beads/formulas/mol-beta.formula.toml"] = "formula = \"mol-beta\"\ntype = \"workflow\"\n"
+	for name, content := range want {
+		if got, ok := doc.Files[name]; !ok {
+			t.Errorf("document holds no %s", name)
+		} else if got != content {
+			t.Errorf("%s = %q, want %q", name, got, content)
+		}
+	}
+	for name, content := range doc.Files {
+		if _, ok := want[name]; ok {
+			continue
+		}
+		t.Errorf("document holds %s, which the workspace does not take: %q", name, content)
+	}
+	// The manifest the pusher sends must cover the formulas, or the gateway's
+	// hash of the same files would differ and refuse the push.
 	if got, want := doc.ManifestSHA, WorkspaceManifest(want); got != want {
 		t.Errorf("manifest = %s, want the hash of the expected files %s", got, want)
 	}
@@ -475,6 +518,87 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			wantErr: ErrLinkOutsideTown,
 			want:    "mayor/rigs.json",
 		},
+		{
+			// A formula link is refused even when its target is in the town: the
+			// workspace carries formulas as regular files only.
+			name: "a formula that is a symlink to a file in the town",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, "shared/alpha.formula.toml", "formula = \"alpha\"\n")
+				writePath(t, root, ".beads/formulas/alpha.formula.toml", "placeholder\n")
+				linkFile(t, root, ".beads/formulas/alpha.formula.toml", filepath.Join(root, "shared", "alpha.formula.toml"))
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a formula that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				outside := filepath.Join(t.TempDir(), "alpha.formula.toml")
+				if err := os.WriteFile(outside, []byte("formula = \"alpha\"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writePath(t, root, ".beads/formulas/alpha.formula.toml", "placeholder\n")
+				linkFile(t, root, ".beads/formulas/alpha.formula.toml", outside)
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a subdirectory named like a formula",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/formulas/alpha.formula.toml/keep", "x")
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a formulas directory that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				outside := t.TempDir()
+				if err := os.WriteFile(filepath.Join(outside, "alpha.formula.toml"), []byte("formula = \"alpha\"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, ".beads", "formulas")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "resolves outside the town",
+		},
+		{
+			name: "a formulas directory that is a dangling link is refused, not read as absent",
+			spoil: func(t *testing.T, root string) {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(root, ".beads", "formulas")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "names nothing",
+		},
+		{
+			name: "a formulas path that is a regular file",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/formulas", "not a directory\n")
+			},
+			want: "the town's formulas directory",
+		},
+		{
+			name: "a formula over the per-file cap",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/formulas/alpha.formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes+1))
+			},
+			wantErr: ErrWorkspaceFileTooLarge,
+		},
+		{
+			// Five formulas at the per-file cap are over the total while each is
+			// under its own: the set is refused, never truncated.
+			name: "town formulas over the total cap",
+			spoil: func(t *testing.T, root string) {
+				for _, name := range []string{"a", "b", "c", "d", "e"} {
+					writePath(t, root, ".beads/formulas/"+name+".formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes))
+				}
+			},
+			wantErr: ErrWorkspaceTooLarge,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -495,6 +619,24 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 				t.Errorf("error = %v, want it to name %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder
+// cannot read refuses the push rather than pushing a workspace without it, which
+// would fail only when a sling cooks that formula.
+func TestBuildWorkspaceDocumentRefusesAnUnreadableFormula(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	formula := filepath.Join(root, ".beads", "formulas", "alpha.formula.toml")
+	writePath(t, root, ".beads/formulas/alpha.formula.toml", "formula = \"alpha\"\n")
+	if err := os.Chmod(formula, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(formula, 0o600) })
+	_, err := BuildWorkspaceDocument(root)
+	if err == nil || !strings.Contains(err.Error(), "alpha.formula.toml") {
+		t.Fatalf("BuildWorkspaceDocument error = %v, want a refusal naming the formula", err)
 	}
 }
 

@@ -237,6 +237,43 @@ func TestWorkspaceValidation(t *testing.T) {
 			want: ErrWorkspaceFileName,
 		},
 		{
+			name: "a town formula with another extension",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/formulas/x.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a town formula one level too deep",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/formulas/a/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a town formula with no name",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/formulas/.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			// A rig's formulas directory is not part of the workspace.
+			name: "a formula under a rig's beads directory",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/.beads/formulas/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
 			name: "a file over the per-file cap",
 			files: func() map[string]string {
 				files := maps.Clone(base)
@@ -347,6 +384,43 @@ func TestWorkspaceLocalVersionPush(t *testing.T) {
 	}
 	if got := readWorkspace(t, root); !maps.Equal(got, files) {
 		t.Errorf("the pushed tree = %v, want %v", got, files)
+	}
+}
+
+// TestWorkspaceAcceptsTownFormulas: the gateway stores a town formula pushed at
+// `.beads/formulas/<name>.formula.toml`, serves it from the live tree, and reads
+// it back on Open, so a bd cooking through the gateway finds it.
+func TestWorkspaceAcceptsTownFormulas(t *testing.T) {
+	t.Parallel()
+	s, root := openTestStore(t)
+	files := testWorkspaceFiles("one")
+	files[".beads/formulas/mol-sample.formula.toml"] = "formula = \"mol-sample\"\ntype = \"workflow\"\n"
+	manifest := WorkspaceManifest(files)
+	encoded, err := json.Marshal(files)
+	if err != nil {
+		t.Fatalf("encoding the files: %v", err)
+	}
+	body := fmt.Sprintf(`{"manifest_sha":%q,"files":%s}`, manifest, encoded)
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/workspace", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a push carrying a formula answered %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get(WorkspaceHashHeader); got != manifest {
+		t.Errorf("header = %q, want the pushed hash %q", got, manifest)
+	}
+	if got := readWorkspace(t, root); !maps.Equal(files, got) {
+		t.Errorf("the live tree = %v, want the pushed files %v", got, files)
+	}
+	// A restart reads the tree back through the same path rules, so a path the
+	// store accepted must also be one it can serve after Open.
+	reopened, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("reopening the store: %v", err)
+	}
+	if got := reopened.Manifest(); got != manifest {
+		t.Errorf("the reopened store's manifest = %s, want %s", got, manifest)
 	}
 }
 
