@@ -375,8 +375,7 @@ func TestRigDockedFileReadsParkStateEveryCheck(t *testing.T) {
 		t.Errorf("the parked check read the identity bead %d time(s), want 0: park is the registry's", n)
 	}
 
-	journal := func(string) (bool, error) { return false, nil }
-	if err := unparkRigs(&out, town, []string{"testrig"}, journal); err != nil {
+	if err := unparkRigs(&out, town, []string{"testrig"}); err != nil {
 		t.Fatalf("unparkRigs = %v\n%s", err, out.String())
 	}
 	if blocked, reason := memo.parkedOrDocked(town, "testrig"); blocked || reason != "" {
@@ -417,8 +416,7 @@ func TestRigDockedFileDoesNotStoreAParkVerdict(t *testing.T) {
 		t.Fatalf("parking inside the race = %v\n%s", parkErr, out.String())
 	}
 
-	journal := func(string) (bool, error) { return false, nil }
-	if err := unparkRigs(&out, town, []string{"testrig"}, journal); err != nil {
+	if err := unparkRigs(&out, town, []string{"testrig"}); err != nil {
 		t.Fatalf("unparkRigs = %v\n%s", err, out.String())
 	}
 
