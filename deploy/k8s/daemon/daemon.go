@@ -844,12 +844,21 @@ type Values struct {
 	// Empty renders no gateway. It is for the live pod only, since a rehearsal
 	// mounts no token. The dashboard's Values.BdGatewayURL is separate.
 	DaemonBdGatewayURL string
+	// BdGatewayImage is the bd gateway's image, by digest (repo@sha256:<64 lowercase
+	// hex>), as deploy/values/images.yaml writes it. Set, Build renders the gateway
+	// Deployment, its Service and its workspace claim; a tag is refused. Empty renders
+	// none of them, and the manifests are the ones they were before the gateway.
+	BdGatewayImage string
+	// BdGatewayTokenSecret names the Secret that holds the gateway's tokens. Its
+	// entries are mounted read-only in the gateway's token directory. Required with
+	// BdGatewayImage. The Secret is named, never created: the operator creates it.
+	BdGatewayTokenSecret string
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard,
-// tracker and tracker-backup objects are zero unless Values.Dashboard,
-// Values.Tracker or Values.TrackerBackup is set. The dolt-backup claim is nil when
-// Values.DoltBackupHostPath replaces it.
+// tracker, tracker-backup and bd gateway objects are zero unless Values.Dashboard,
+// Values.Tracker, Values.TrackerBackup or Values.BdGatewayImage is set. The
+// dolt-backup claim is nil when Values.DoltBackupHostPath replaces it.
 type Manifests struct {
 	Namespace            Namespace
 	ServiceAccount       ServiceAccount
@@ -857,13 +866,16 @@ type Manifests struct {
 	LandingWorkClaim     PersistentVolumeClaim
 	DoltBackupClaim      *PersistentVolumeClaim
 	TrackerBackupClaim   PersistentVolumeClaim
+	BdGatewayClaim       PersistentVolumeClaim
 	ForgejoService       Service
 	DashboardService     Service
 	TrackerService       Service
+	BdGatewayService     Service
 	Secrets              []Secret
 	Deployment           Deployment
 	DashboardDeployment  Deployment
 	TrackerDeployment    Deployment
+	BdGatewayDeployment  Deployment
 	TrackerBackupCronJob CronJob
 	SweepRoleBinding     RoleBinding
 	CacheTrimRoleBinding RoleBinding
@@ -938,6 +950,13 @@ func Build(v Values) (Manifests, error) {
 	if v.TrackerBackup {
 		m.TrackerBackupClaim = claim(TrackerBackupClaim, namespace, v.TrackerBackupStorage, v.StorageClass)
 		m.TrackerBackupCronJob = trackerBackupCronJob(v, namespace)
+	}
+	// The gateway is rendered only when its image is set; validateBdGatewayWorkload
+	// has already refused an image that is not a digest, or a missing token Secret.
+	if v.BdGatewayImage != "" {
+		m.BdGatewayClaim = claim(BdGatewayWorkspaceClaim, namespace, BdGatewayWorkspaceSize, v.StorageClass)
+		m.BdGatewayService = bdGatewayService(namespace)
+		m.BdGatewayDeployment = bdGatewayDeployment(v, namespace)
 	}
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
 	// the pod mounts the directory the backups are written to (gt-cbsx3k).
@@ -2209,6 +2228,9 @@ func (v Values) validate() error {
 	if err := v.validateDaemonBdGateway(); err != nil {
 		return err
 	}
+	if err := v.validateBdGatewayWorkload(); err != nil {
+		return err
+	}
 	if err := v.validateTracker(); err != nil {
 		return err
 	}
@@ -2717,6 +2739,10 @@ func Render(w io.Writer, m Manifests) error {
 	if m.TrackerBackupClaim.Kind != "" {
 		docs = append(docs, m.TrackerBackupClaim)
 	}
+	// Build leaves the bd gateway claim zero unless Values.BdGatewayImage is set.
+	if m.BdGatewayClaim.Kind != "" {
+		docs = append(docs, m.BdGatewayClaim)
+	}
 	docs = append(docs, m.ForgejoService)
 	// Build leaves the dashboard objects zero unless Values.Dashboard is set, so a
 	// zero object is one that was not rendered and is not written.
@@ -2726,6 +2752,10 @@ func Render(w io.Writer, m Manifests) error {
 	// Build leaves the tracker Service zero unless Values.Tracker is set.
 	if m.TrackerService.Kind != "" {
 		docs = append(docs, m.TrackerService)
+	}
+	// Build leaves the bd gateway Service zero unless Values.BdGatewayImage is set.
+	if m.BdGatewayService.Kind != "" {
+		docs = append(docs, m.BdGatewayService)
 	}
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
@@ -2737,6 +2767,10 @@ func Render(w io.Writer, m Manifests) error {
 	// Build leaves the tracker Deployment zero unless Values.Tracker is set.
 	if m.TrackerDeployment.Kind != "" {
 		docs = append(docs, m.TrackerDeployment)
+	}
+	// Build leaves the bd gateway Deployment zero unless Values.BdGatewayImage is set.
+	if m.BdGatewayDeployment.Kind != "" {
+		docs = append(docs, m.BdGatewayDeployment)
 	}
 	// Build leaves the tracker-backup CronJob zero unless Values.TrackerBackup is set.
 	if m.TrackerBackupCronJob.Kind != "" {
@@ -3045,6 +3079,15 @@ type Container struct {
 	// RestartPolicy is Always on a native sidecar (an init container), and empty on
 	// every other container.
 	RestartPolicy string `yaml:"restartPolicy,omitempty"`
+	// SecurityContext is the container's privilege setting. Nil, the container
+	// carries none, as every container did before the bd gateway.
+	SecurityContext *ContainerSecurityContext `yaml:"securityContext,omitempty"`
+}
+
+// ContainerSecurityContext is the container's privilege setting. The field is a
+// pointer, so an explicit false is written rather than dropped as the zero value.
+type ContainerSecurityContext struct {
+	AllowPrivilegeEscalation *bool `yaml:"allowPrivilegeEscalation,omitempty"`
 }
 
 // EnvVar is one environment entry: a literal value, or the key of a Secret. A
