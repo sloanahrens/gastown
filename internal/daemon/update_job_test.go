@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1354,4 +1357,168 @@ func TestUpdateJobGatewayURLUnsetOrIP(t *testing.T) {
 			assert.Equal(t, tt.wantGateway, got, "the IP host was not passed through unchanged")
 		})
 	}
+}
+
+// TestUpdateJobGatewayServicePassesThrough: a BD_GATEWAY_URL whose host is the
+// gateway's in-cluster Service name reaches the Job exactly as the daemon was given
+// it, and no resolver is read: the Job reaches the name through cluster DNS. The
+// fixed address the admission policy also admits is passed through the same way. Every
+// URL here is one the Job policy admits (deploy/k8s/update-admission.yaml).
+func TestUpdateJobGatewayServicePassesThrough(t *testing.T) {
+	t.Parallel()
+	serviceURL := "http://" + bdGatewayServiceHost + ":" + strconv.Itoa(k8sdaemon.BdGatewayPort)
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "the Service name with its port", raw: serviceURL},
+		{name: "the fixed address the policy admits", raw: "http://192.168.5.2:7440"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.d.getenv = gatewayURLEnv(tt.raw)
+			lookups := 0
+			r.d.lookupHost = func(string) ([]string, error) {
+				lookups++
+				return nil, errors.New("the host is not resolved")
+			}
+			sha := r.commits[2]
+
+			require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, sha))
+
+			assert.Zero(t, lookups, "the host was resolved")
+			job := decodeUpdateJob(t, r.cluster.made["gt-update-"+sha[:12]])
+			pod := job.Spec.Template.Spec
+			require.Len(t, pod.InitContainers, 1)
+			require.Len(t, pod.Containers, 1)
+			for _, c := range []updatejob.Container{pod.InitContainers[0], pod.Containers[0]} {
+				got, ok := jobEnvValue(c, k8sdaemon.BdGatewayURLEnv)
+				require.True(t, ok, "container %s carries no %s", c.Name, k8sdaemon.BdGatewayURLEnv)
+				assert.Equal(t, tt.raw, got, "container %s does not carry the gateway URL unchanged", c.Name)
+			}
+		})
+	}
+}
+
+// TestUpdateJobGatewayServiceOtherNamesResolve: only the gateway's own Service name
+// in the Job's namespace is passed on. Any other name, including one that only ends
+// in that suffix, is resolved to the address the daemon's resolver answers.
+func TestUpdateJobGatewayServiceOtherNamesResolve(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "the gateway name in another namespace", raw: "http://bd-gateway.other.svc:7440"},
+		{name: "a name that only ends in the Service suffix", raw: "http://evil-bd-gateway.gt.svc:7440"},
+		{name: "a plain host name", raw: "http://gateway-host.example:7440"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.d.getenv = gatewayURLEnv(tt.raw)
+			var asked []string
+			r.d.lookupHost = func(host string) ([]string, error) {
+				asked = append(asked, host)
+				return []string{"192.168.5.2"}, nil
+			}
+			sha := r.commits[2]
+
+			require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, sha))
+
+			u, err := url.Parse(tt.raw)
+			require.NoError(t, err)
+			assert.Equal(t, []string{u.Hostname()}, asked, "the host name was not resolved once")
+			job := decodeUpdateJob(t, r.cluster.made["gt-update-"+sha[:12]])
+			got, ok := jobEnvValue(job.Spec.Template.Spec.Containers[0], k8sdaemon.BdGatewayURLEnv)
+			require.True(t, ok, "the Job carries no %s", k8sdaemon.BdGatewayURLEnv)
+			assert.Equal(t, "http://192.168.5.2:7440", got, "the name was not replaced by its address")
+		})
+	}
+}
+
+// TestUpdateJobGatewayServicePolicyPinsBothURLs reads the admission policy the cluster
+// enforces on the update Job and holds the BD_GATEWAY_URL pin of each container
+// validation to exactly two URLs: the address the daemon resolves a name to, and the
+// in-cluster Service URL the daemon passes on. The Service URL is accepted, and any
+// other host, port or address is refused, since the pin is an exact set.
+func TestUpdateJobGatewayServicePolicyPinsBothURLs(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "k8s", "update-admission.yaml"))
+	require.NoError(t, err)
+	var expressions []string
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	for {
+		var doc updateAdmissionDoc
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		require.NoError(t, err, "the admission manifest holds a document that does not parse")
+		if doc.Kind != "ValidatingAdmissionPolicy" {
+			continue
+		}
+		for _, v := range doc.Spec.Validations {
+			expressions = append(expressions, v.Expression)
+		}
+	}
+	require.NotEmpty(t, expressions, "the admission manifest holds no ValidatingAdmissionPolicy")
+
+	clause := regexp.MustCompile(`e\.name == '` + regexp.QuoteMeta(k8sdaemon.BdGatewayURLEnv) + `' && has\(e\.value\) && \(([^()]*)\)`)
+	quoted := regexp.MustCompile(`'([^']*)'`)
+	var pinned [][]string
+	for _, expr := range expressions {
+		if !strings.Contains(expr, k8sdaemon.BdGatewayURLEnv) {
+			continue
+		}
+		clauses := clause.FindAllStringSubmatch(expr, -1)
+		require.Len(t, clauses, 1, "a validation pins %s in %d clauses, want 1", k8sdaemon.BdGatewayURLEnv, len(clauses))
+		var urls []string
+		for _, q := range quoted.FindAllStringSubmatch(clauses[0][1], -1) {
+			urls = append(urls, q[1])
+		}
+		slices.Sort(urls)
+		pinned = append(pinned, urls)
+	}
+	require.Len(t, pinned, 2, "the policy pins %s in %d validations, want the two container validations", k8sdaemon.BdGatewayURLEnv, len(pinned))
+
+	want := []string{"http://192.168.5.2:7440", "http://" + bdGatewayServiceHost + ":" + strconv.Itoa(k8sdaemon.BdGatewayPort)}
+	slices.Sort(want)
+	for i, urls := range pinned {
+		assert.Equal(t, want, urls, "container validation %d admits other gateway URLs than the daemon hands the Job", i+1)
+	}
+}
+
+// TestUpdateJobGatewayServiceHostIsJobNamespace holds the Service host the daemon hands
+// the Job to the namespace the Job it creates lands in, so the name the Job resolves is
+// the gateway Service in the Job's own namespace.
+func TestUpdateJobGatewayServiceHostIsJobNamespace(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.d.getenv = gatewayURLEnv("http://bd-gateway.gt.svc:7440")
+	sha := r.commits[2]
+
+	require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, sha))
+
+	job := decodeUpdateJob(t, r.cluster.made["gt-update-"+sha[:12]])
+	got, ok := jobEnvValue(job.Spec.Template.Spec.Containers[0], k8sdaemon.BdGatewayURLEnv)
+	require.True(t, ok, "the Job carries no %s", k8sdaemon.BdGatewayURLEnv)
+	u, err := url.Parse(got)
+	require.NoError(t, err)
+	assert.Equal(t, k8sdaemon.BdGatewayName+"."+job.Metadata.Namespace+".svc", u.Hostname(),
+		"the host handed to the Job is not the gateway Service in the Job's namespace %q", job.Metadata.Namespace)
+}
+
+// updateAdmissionDoc is the part of one document of deploy/k8s/update-admission.yaml
+// the gateway policy test reads: its kind and the expressions of a policy.
+type updateAdmissionDoc struct {
+	Kind string `yaml:"kind"`
+	Spec struct {
+		Validations []struct {
+			Expression string `yaml:"expression"`
+		} `yaml:"validations"`
+	} `yaml:"spec"`
 }

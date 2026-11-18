@@ -230,7 +230,8 @@ Turn `patrols.update.enabled` on in a pod only after one roll has run by hand
 through the Job, with the overseer watching:
 
 1. Apply the update manifests: `deploy/k8s/update-rbac.yaml`,
-   `deploy/k8s/update-admission.yaml`, and the Job and the suspended CronJob
+   `deploy/k8s/update-admission.yaml`, `deploy/k8s/bd-gateway-service-admission.yaml`
+   (the guard on the gateway Service the Job's `BD_GATEWAY_URL` names), and the Job and the suspended CronJob
    `gt-update` rendered from `deploy/k8s/update-job`. Before you apply the
    policy, read the cluster-version requirement in the header of
    `deploy/k8s/update-admission.yaml`; that header carries the check command.

@@ -254,14 +254,23 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 	return d.updateJob.CreateJob(ctx, name, buf.Bytes(), d.updateJobRequestTimeout())
 }
 
+// bdGatewayServiceHost is the host name of the bd gateway's in-cluster Service in the
+// namespace the Job lands in: bd-gateway.gt.svc. updatejob.Build gives the Job that
+// namespace by default, and the daemon's kubectl calls name the same one, so the host
+// is spelled from that constant. The Job resolves it through cluster DNS, so the
+// daemon hands it on unchanged. The admission policy pins the same URL
+// (deploy/k8s/update-admission.yaml), and a test holds the two equal.
+const bdGatewayServiceHost = k8sdaemon.BdGatewayName + "." + updatejob.DefaultNamespace + ".svc"
+
 // gatewayURLForJob is the gateway URL the update Job is given: the daemon's own
 // BD_GATEWAY_URL with its host name, when it is a name, replaced by the address the
 // daemon resolves. The daemon pod reaches the gateway through a hostAlias, which
 // the admission policy forbids on the Job (gt-j571bu), so the Job is handed the
-// address instead of the name the daemon's own environment carries. An unset
-// variable stays empty and the Job renders without a gateway; a host that is
-// already an IP is passed through. The raw value is never echoed in an error, since
-// a credential may sit in it.
+// address instead of the name the daemon's own environment carries. A host that is
+// the gateway's in-cluster Service name is handed on as it is, since the Job reaches
+// that name through cluster DNS. An unset variable stays empty and the Job renders
+// without a gateway; a host that is already an IP is passed through. The raw value
+// is never echoed in an error, since a credential may sit in it.
 func (d *Daemon) gatewayURLForJob() (string, error) {
 	raw := d.env(k8sdaemon.BdGatewayURLEnv)
 	if raw == "" {
@@ -272,7 +281,7 @@ func (d *Daemon) gatewayURLForJob() (string, error) {
 		return "", fmt.Errorf("%s is not a URL with a host", k8sdaemon.BdGatewayURLEnv)
 	}
 	host := u.Hostname()
-	if net.ParseIP(host) != nil {
+	if net.ParseIP(host) != nil || host == bdGatewayServiceHost {
 		return raw, nil
 	}
 	lookup := d.lookupHost
