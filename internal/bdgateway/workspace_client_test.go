@@ -136,8 +136,9 @@ func TestBuildWorkspaceDocument(t *testing.T) {
 
 // TestBuildWorkspaceDocumentCarriesTownFormulas: the document holds each
 // regular .formula.toml of the town's formulas directory under
-// .beads/formulas, and nothing else that directory holds — not the installed
-// record, not a README, not a file nested in a subdirectory.
+// .beads/formulas, and a copy under each registered rig's beads directory at
+// <rig>/.beads/formulas, and nothing else that directory holds — not the
+// installed record, not a README, not a file nested in a subdirectory.
 func TestBuildWorkspaceDocumentCarriesTownFormulas(t *testing.T) {
 	t.Parallel()
 	root := clientTown(t)
@@ -154,6 +155,12 @@ func TestBuildWorkspaceDocumentCarriesTownFormulas(t *testing.T) {
 	want := clientTownDocument(t, root)
 	want[".beads/formulas/alpha.formula.toml"] = "formula = \"alpha\"\n"
 	want[".beads/formulas/mol-beta.formula.toml"] = "formula = \"mol-beta\"\ntype = \"workflow\"\n"
+	// A rig-scoped bd cook reads the rig's own .beads/formulas, so the same two
+	// files are carried under each registered rig as well.
+	for _, rig := range []string{"gastown", "toolbox"} {
+		want[rig+"/.beads/formulas/alpha.formula.toml"] = "formula = \"alpha\"\n"
+		want[rig+"/.beads/formulas/mol-beta.formula.toml"] = "formula = \"mol-beta\"\ntype = \"workflow\"\n"
+	}
 	for name, content := range want {
 		if got, ok := doc.Files[name]; !ok {
 			t.Errorf("document holds no %s", name)
@@ -869,6 +876,49 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap: the same formula
+// bytes are carried under the town's beads directory and under each registered
+// rig's, so a set that fits as the town's copies alone is over the total once
+// the rig copies are added, and the document is refused whole rather than
+// truncated. A town with no registered rigs carries the town copies alone and
+// pushes the same set.
+func TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap(t *testing.T) {
+	t.Parallel()
+	// Three formulas at the per-file cap: the town's copies fit the total cap,
+	// and each rig's copy of them pushes the set over it.
+	spoil := func(t *testing.T, root string) {
+		t.Helper()
+		for _, name := range []string{"a", "b", "c"} {
+			writePath(t, root, ".beads/formulas/"+name+".formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes))
+		}
+	}
+
+	t.Run("with the registered rigs the set is refused", func(t *testing.T) {
+		t.Parallel()
+		root := clientTown(t)
+		spoil(t, root)
+		if _, err := BuildWorkspaceDocument(root); !errors.Is(err, ErrWorkspaceTooLarge) {
+			t.Fatalf("BuildWorkspaceDocument error = %v, want %v", err, ErrWorkspaceTooLarge)
+		}
+	})
+
+	t.Run("as the town's copies alone the same set is pushed", func(t *testing.T) {
+		t.Parallel()
+		root := clientTown(t)
+		spoil(t, root)
+		writePath(t, root, "mayor/rigs.json", `{"version":1,"rigs":{}}`)
+		doc, err := BuildWorkspaceDocument(root)
+		if err != nil {
+			t.Fatalf("BuildWorkspaceDocument: %v", err)
+		}
+		for _, name := range []string{"a", "b", "c"} {
+			if _, ok := doc.Files[".beads/formulas/"+name+".formula.toml"]; !ok {
+				t.Errorf("document holds no town formula %q", name)
+			}
+		}
+	})
 }
 
 // TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder
