@@ -24,8 +24,6 @@ var (
 // landSizeStatsDefaultWeeks is the window a run reports without --weeks.
 const landSizeStatsDefaultWeeks = 4
 
-// landSizeStatsCmd prints the added-lines buckets of the landing record, and
-// writes no file.
 var landSizeStatsCmd = &cobra.Command{
 	Use:   "size-stats",
 	Short: "Report landings by added lines, with their time and attempt shares",
@@ -41,11 +39,9 @@ a short sample as a complete one. The count left out is printed under the
 table, along with the landings outside the window and the record lines that
 would not read, so a reader can tell a thin table from a complete one.
 
-Reads the rig landing ledgers (.runtime/landings/<rig>.jsonl), the files the
-other gt land commands read, keeping the landings in the last --weeks weeks
-ending with the current one.
-
-The command reads only: it writes no file. --json prints the same numbers.
+Reads the rig landing ledgers the other gt land commands read, keeping the
+landings in the last --weeks weeks ending with the current one, and writes no
+file. --json prints the same numbers.
 
 Examples:
   gt land size-stats
