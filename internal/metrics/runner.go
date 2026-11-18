@@ -18,9 +18,11 @@ import (
 const killGrace = 2 * time.Second
 
 // DefaultAllowEnv is the environment a source's child commands inherit: enough
-// to find binaries and the user's config, and the Dolt endpoint a child bd
-// needs to reach the server, and nothing else.
-var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"}
+// to find binaries and the user's config, reach the Dolt server, and reach the
+// bd gateway, and nothing else. The bd ahead of the real one in a container is
+// the gt-wrap forwarder, which refuses every call without BD_GATEWAY_URL; the
+// token crosses by the path in BD_GATEWAY_TOKEN_FILE, never by value.
+var DefaultAllowEnv = []string{"PATH", "HOME", "TMPDIR", "LANG", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BD_GATEWAY_URL", "BD_GATEWAY_TOKEN_FILE"}
 
 // OSRunner returns a Runner that runs argv as a child process with no
 // environment beyond the allowlist.
