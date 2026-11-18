@@ -321,24 +321,49 @@ func readsNoDatabase(words []string) bool {
 }
 
 // bdReadsStdin reports whether a bd call reads the caller's stdin, so its bytes
-// may follow the head line. bd takes stdin as a "-" value, either as a token of
-// its own ("bd update gt-x --body-file -", "bd comments add gt-x -f -", or a
-// positional "-") or attached to its flag ("--body-file=-", "-f=-", "-f-"), and
-// through its --stdin flag. A file the wrapper carries reaches bd as one of those
-// "-" forms, since filearg.go rewrites the flag's value. words is the call's argv
-// after "bd", and nothing after "--" is a flag. Any other call sends no stdin, so
-// a caller whose stdin is a pipe that never closes does not stall it (gt-vojyy8).
+// may follow the head line. bd takes stdin as a "-" value of a file flag: the
+// four flags in bdStdinFlags under any command, and -f/--file under a command
+// whose -f reads stdin (bdFileCommands), either as the next token ("bd update
+// gt-x --body-file -", "bd comments add gt-x -f -") or attached ("--body-file=-",
+// "-f=-", "-f-"), and through its --stdin flag. A file the wrapper carries
+// reaches bd as one of those "-" forms, since filearg.go rewrites the flag's
+// value. words is the call's argv after "bd", and nothing after "--" is a flag.
+//
+// A "-" value of any other flag, and a positional "-", read no stdin: sending
+// one would hold the call to the gateway's read deadline for a caller whose
+// stdin is a pipe that never closes (gt-vojyy8).
 func bdReadsStdin(words []string) bool {
-	for _, word := range words {
+	command, sub := commandWords(words)
+	// readsStdin reports whether flag's "-" value makes bd read stdin.
+	readsStdin := func(flag string) bool {
+		return classifyBd(command, sub, flag, "-") == argStdin
+	}
+	for i, word := range words {
 		switch {
 		case word == "--":
 			return false
-		case word == "-" || word == "--stdin":
+		case word == "--stdin":
 			return true
-		case strings.HasSuffix(word, "=-"):
-			return true
-		case len(word) > 2 && word[0] == '-' && word[1] != '-' && word[len(word)-1] == '-' && shorthandGroup(word):
-			return true
+		case strings.HasPrefix(word, "--"):
+			flag, value, attached := strings.Cut(word, "=")
+			if attached && value == "-" && readsStdin(flag) {
+				return true
+			}
+		case len(word) > 2 && shorthandGroup(word):
+			// An attached shorthand value: -f- or -f=-. A group such as -xf-
+			// is refused by ScanFileArgs, so only the flag's own letter is read.
+			flag, value := word[:2], word[2:]
+			if rest, ok := strings.CutPrefix(value, "="); ok {
+				value = rest
+			}
+			if value == "-" && readsStdin(flag) {
+				return true
+			}
+		case word == "-":
+			// The separate value form: the token before it is the flag.
+			if i > 0 && readsStdin(words[i-1]) {
+				return true
+			}
 		}
 	}
 	return false

@@ -171,21 +171,22 @@ func TestBdGatewayTarget(t *testing.T) {
 	}
 }
 
-// blockingStdin is a caller's stdin a call must not read: a read reports itself
-// on read and then blocks until a test receives it, so a call that reads it
-// cannot finish unnoticed.
-type blockingStdin struct{ read chan struct{} }
+// recordingStdin is a caller's stdin a call must not read: a read is recorded
+// and ends the stream at once, so a call that reads it still returns and the
+// test reports the read, while a call that reads none never touches it (a pipe
+// that never closes would hold a reading call to the gateway's read deadline).
+type recordingStdin struct{ read bool }
 
-func (r blockingStdin) Read([]byte) (int, error) {
-	r.read <- struct{}{}
+func (r *recordingStdin) Read([]byte) (int, error) {
+	r.read = true
 	return 0, io.EOF
 }
 
-// TestBdGatewaySendsNoStdinWhenTheCallReadsNone: a call that names no "-" value
-// sends the head line alone, and the caller's stdin is never read even when it
-// is a pipe that never closes, so the call is not held to the gateway's read
-// deadline (gt-vojyy8). Nothing after "--" is a flag, so a "-" value there reads
-// no stdin either.
+// TestBdGatewaySendsNoStdinWhenTheCallReadsNone: a call whose argv names no "-"
+// value of a file flag sends the head line alone and never reads the caller's
+// stdin, so it is not held to the gateway's read deadline (gt-vojyy8). That
+// includes a "-" value of any other flag, a positional "-", and anything after
+// "--".
 func TestBdGatewaySendsNoStdinWhenTheCallReadsNone(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -195,11 +196,14 @@ func TestBdGatewaySendsNoStdinWhenTheCallReadsNone(t *testing.T) {
 	}{
 		{name: "no argument reads stdin", argv: []string{"bd", "show", "gt-x", "--json"}},
 		{name: "a dash value after --", argv: []string{"bd", "show", "gt-x", "--", "--body-file", "-"}},
+		{name: "a non-file flag's separate dash value", argv: []string{"bd", "list", "--assignee", "-"}},
+		{name: "a non-file flag's attached dash value", argv: []string{"bd", "list", "--assignee=-"}},
+		{name: "a positional dash", argv: []string{"bd", "show", "gt-x", "-"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			stdin := blockingStdin{read: make(chan struct{})}
+			stdin := &recordingStdin{}
 			var body []byte
 			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(req *http.Request) (*http.Response, error) {
 				var err error
@@ -215,18 +219,11 @@ func TestBdGatewaySendsNoStdinWhenTheCallReadsNone(t *testing.T) {
 				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
 				Dir:  town,
 			}
-			done := make(chan error, 1)
-			go func() {
-				_, err := g.Launch(call)
-				done <- err
-			}()
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatalf("Launch: %v", err)
-				}
-			case <-stdin.read:
-				t.Fatal("the call read the caller's stdin")
+			if _, err := g.Launch(call); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if stdin.read {
+				t.Error("the call read the caller's stdin")
 			}
 			_, rest, ok := bytes.Cut(body, []byte("\n"))
 			if !ok {
