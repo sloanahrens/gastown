@@ -75,8 +75,10 @@ const (
 // validateBdGatewayWorkload refuses the gateway workload values the cluster cannot
 // run. The image is a digest, as the daemon's is, so a tag cannot roll a build the
 // values file does not name. The token Secret is required with the image: without
-// it the gateway starts with no tokens and refuses every client. With no image the
-// workload is not rendered, and the token Secret name is not read.
+// it the gateway starts with no tokens and refuses every client. The gateway also
+// needs Values.HostGatewayIP, since its Dolt host resolves only through that
+// address's hostAliases entry. With no image the workload is not rendered, and
+// the gateway's token Secret name is not read.
 func (v Values) validateBdGatewayWorkload() error {
 	if v.BdGatewayImage == "" {
 		return nil
@@ -89,6 +91,15 @@ func (v Values) validateBdGatewayWorkload() error {
 	}
 	if !validDNS1123Subdomain(v.BdGatewayTokenSecret) {
 		return fmt.Errorf("Values.BdGatewayTokenSecret %q: want a Secret name, a DNS-1123 subdomain", v.BdGatewayTokenSecret)
+	}
+	// The gateway dials DoltHostName, which resolves only through the hostAliases
+	// entry hostAliases builds from Values.HostGatewayIP. A rehearsal builds no
+	// entry, so a gateway there would dial a name it cannot resolve.
+	if v.HostGatewayIP == "" {
+		return fmt.Errorf("Values.HostGatewayIP is empty while Values.BdGatewayImage is set: the gateway dials %s, which resolves only through the hostAliases entry that address builds", DoltHostName)
+	}
+	if v.Rehearsal {
+		return fmt.Errorf("Values.BdGatewayImage is set with Values.Rehearsal: a rehearsal builds no hostAliases entry, so the gateway's dial to %s would not resolve", DoltHostName)
 	}
 	return nil
 }

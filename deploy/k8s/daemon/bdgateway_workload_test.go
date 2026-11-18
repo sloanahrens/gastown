@@ -97,6 +97,23 @@ func TestBdGatewayWorkloadRunsAsItsIdentity(t *testing.T) {
 	}
 }
 
+// TestBdGatewayWorkloadHostAlias holds the gateway's hostAliases to the daemon's:
+// the gateway resolves its Dolt host, host.docker.internal, through the same
+// address the live daemon's pod does, so a gateway with no entry cannot reach Dolt.
+func TestBdGatewayWorkloadHostAlias(t *testing.T) {
+	t.Parallel()
+	v := bdGatewayWorkloadValues(t)
+	m := mustBuild(t, v)
+	got := m.BdGatewayDeployment.Spec.Template.Spec.HostAliases
+	want := m.Deployment.Spec.Template.Spec.HostAliases
+	if len(got) != 1 || got[0].IP != v.HostGatewayIP || len(got[0].Hostnames) != 1 || got[0].Hostnames[0] != DoltHostName {
+		t.Fatalf("the gateway hostAliases = %+v, want one entry for %s at %s", got, DoltHostName, v.HostGatewayIP)
+	}
+	if len(want) != 1 || want[0].IP != got[0].IP || want[0].Hostnames[0] != got[0].Hostnames[0] {
+		t.Errorf("the gateway hostAliases %+v differ from the daemon's %+v", got, want)
+	}
+}
+
 // TestBdGatewayWorkloadRefusals drives each refusal of the gateway workload values.
 // Each refusal names the field it is about, and a refused Build returns no gateway.
 func TestBdGatewayWorkloadRefusals(t *testing.T) {
@@ -110,6 +127,13 @@ func TestBdGatewayWorkloadRefusals(t *testing.T) {
 		{"a digest that is not 64 hex", func(v *Values) { v.BdGatewayImage = "registry.example.com/gt/bdgw@sha256:abc" }, "Values.BdGatewayImage"},
 		{"an empty token Secret name with an image", func(v *Values) { v.BdGatewayTokenSecret = "" }, "Values.BdGatewayTokenSecret"},
 		{"a token Secret name that is not a DNS-1123 subdomain", func(v *Values) { v.BdGatewayTokenSecret = "Bd_Gateway_Tokens" }, "Values.BdGatewayTokenSecret"},
+		{"an empty host gateway address with an image", func(v *Values) { v.HostGatewayIP = ""; v.ProxyImage = "" }, "Values.HostGatewayIP"},
+		{"a rehearsal with an image", func(v *Values) {
+			v.Rehearsal = true
+			v.Namespace = "gt-rehearsal"
+			v.ConfirmContainerStopped = false
+			v.OMToken = false
+		}, "Values.Rehearsal"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
