@@ -17,6 +17,9 @@ const (
 	defaultWorkspaceRoot = "/ws"
 	defaultBinary        = "/usr/local/bin/bd"
 	defaultAddr          = ":7440"
+	// defaultPushAddr is the push-only listener's port, a second Service the
+	// cluster publishes while the pod is unready.
+	defaultPushAddr = ":7441"
 )
 
 // config is the gateway's fixed settings, shared by all three modes. The names
