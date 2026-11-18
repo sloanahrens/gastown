@@ -94,8 +94,17 @@ type forwardPlistView struct {
 	LogErr string
 }
 
+// bdGatewayService, bdGatewayNamespace and bdGatewayPort name the bd gateway
+// Service the manifest renders (deploy/k8s/daemon, BdGatewayName and BdGatewayPort).
+const (
+	bdGatewayService   = "bd-gateway"
+	bdGatewayNamespace = "gt"
+	bdGatewayPort      = 7440
+)
+
 func init() {
 	townForwardCmd.AddCommand(newForwardPlistCmd(os.UserHomeDir, exec.LookPath))
+	townForwardCmd.AddCommand(newForwardBdGatewayCmd(os.UserHomeDir, exec.LookPath))
 	townCmd.AddCommand(townForwardCmd)
 }
 
@@ -118,27 +127,7 @@ The command only prints. The plist and the dashboard URL go to stdout and stderr
 nothing is loaded into launchd and no cluster is contacted.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := f.validate(); err != nil {
-				return err
-			}
-			dir, err := home()
-			if err != nil {
-				return fmt.Errorf("HOME cannot be found, so the job's log paths cannot be set: %w", err)
-			}
-			kubectl, err := lookPath(forwardKubectl)
-			if err != nil {
-				return fmt.Errorf("%s cannot be found, so its absolute path is unknown and the plist cannot be written without it: %w", forwardKubectl, err)
-			}
-			if !filepath.IsAbs(kubectl) {
-				return fmt.Errorf("%s resolved to %q, which is not an absolute path, so launchd cannot run the job", forwardKubectl, kubectl)
-			}
-			if err = writeForwardPlist(cmd.OutOrStdout(), dir, kubectl, f); err != nil {
-				return err
-			}
-			if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "dashboard URL: http://%s:%d/\n", f.bind, f.port); err != nil {
-				return fmt.Errorf("writing the URL: %w", err)
-			}
-			return nil
+			return printForwardPlist(cmd, home, lookPath, f, "dashboard")
 		},
 	}
 	c.Flags().StringVar(&f.service, "service", "",
@@ -152,6 +141,62 @@ nothing is loaded into launchd and no cluster is contacted.`,
 	c.Flags().IntVar(&f.port, "port", 0,
 		"the local and the Service port, 1 to 65535 (required)")
 	return c
+}
+
+// newForwardBdGatewayCmd builds `bd-gateway`, which prints the launchd job that
+// forwards the bd gateway Service to 127.0.0.1:7440. The Service, port and bind are
+// fixed; --context and --namespace are the only inputs, as in `plist`.
+func newForwardBdGatewayCmd(home func() (string, error), lookPath func(string) (string, error)) *cobra.Command {
+	var f forwardPlistFlags
+	c := &cobra.Command{
+		Use:   "bd-gateway",
+		Short: "Print the launchd job that forwards the bd gateway to 127.0.0.1:7440",
+		Long: `Print a launchd property list for a job that runs kubectl port-forward of
+svc/bd-gateway to 127.0.0.1:7440, restarting it if it exits. The job logs under
+~/gt/daemon as forward-bd-gateway.log and forward-bd-gateway.err.log.
+
+The command only prints. The plist and the gateway URL go to stdout and stderr;
+nothing is loaded into launchd and no cluster is contacted.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			f.service = bdGatewayService
+			f.port = bdGatewayPort
+			f.bind = forwardLoopbackBind
+			return printForwardPlist(cmd, home, lookPath, f, "bd gateway")
+		},
+	}
+	c.Flags().StringVar(&f.context, "context", "",
+		"the kube context the forward runs against (required; a shell default is not trusted)")
+	c.Flags().StringVar(&f.namespace, "namespace", bdGatewayNamespace,
+		"the namespace the bd-gateway Service lives in, a DNS label")
+	return c
+}
+
+// printForwardPlist validates f, resolves the job's paths and writes the plist to
+// the command's stdout and the URL to its stderr, under urlName. Nothing is written
+// when a check fails.
+func printForwardPlist(cmd *cobra.Command, home func() (string, error), lookPath func(string) (string, error), f forwardPlistFlags, urlName string) error {
+	if err := f.validate(); err != nil {
+		return err
+	}
+	dir, err := home()
+	if err != nil {
+		return fmt.Errorf("HOME cannot be found, so the job's log paths cannot be set: %w", err)
+	}
+	kubectl, err := lookPath(forwardKubectl)
+	if err != nil {
+		return fmt.Errorf("%s cannot be found, so its absolute path is unknown and the plist cannot be written without it: %w", forwardKubectl, err)
+	}
+	if !filepath.IsAbs(kubectl) {
+		return fmt.Errorf("%s resolved to %q, which is not an absolute path, so launchd cannot run the job", forwardKubectl, kubectl)
+	}
+	if err = writeForwardPlist(cmd.OutOrStdout(), dir, kubectl, f); err != nil {
+		return err
+	}
+	if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "%s URL: http://%s:%d/\n", urlName, f.bind, f.port); err != nil {
+		return fmt.Errorf("writing the URL: %w", err)
+	}
+	return nil
 }
 
 // validate refuses a flag the job cannot run with, before anything is printed.
