@@ -863,7 +863,7 @@ func (g GatewayPusher) endpoint(path string) (string, error) {
 		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(g.URL)))
 	}
 	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
-		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https or a loopback address", shown(redactedURL(g.URL)))
+		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or an in-cluster Service name (<service>.<namespace>.svc)", shown(redactedURL(g.URL)))
 	}
 	return strings.TrimSuffix(g.URL, "/") + path, nil
 }
@@ -879,14 +879,55 @@ var localGatewayHosts = map[string]bool{
 	"gateway.docker.internal":  true,
 }
 
-// localGatewayHost reports whether host is this machine: a loopback address or
-// one of the Docker host aliases.
+// localGatewayHost reports whether host is this machine or the cluster the
+// caller runs in: a loopback address, one of the Docker host aliases, or an
+// in-cluster Service name. Plain http to such a host never leaves a network the
+// caller already trusts.
 func localGatewayHost(host string) bool {
 	if localGatewayHosts[strings.ToLower(host)] {
 		return true
 	}
+	if inClusterServiceHost(host) {
+		return true
+	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// inClusterServiceHost reports whether host is the cluster DNS name of a
+// Service: <service>.<namespace>.svc, or the same with .cluster.local after it
+// (the in-cluster bd gateway is http://bd-gateway.gt.svc:7440). Exactly those
+// two shapes, every label a plain DNS label, so a bare "svc", a name that only
+// contains svc (a.svc.evil.com, bd-gateway.svcx.example) and a name with an
+// empty label are not Service names.
+func inClusterServiceHost(host string) bool {
+	labels := strings.Split(strings.ToLower(host), ".")
+	switch {
+	case len(labels) == 3 && labels[2] == "svc":
+	case len(labels) == 5 && labels[2] == "svc" && labels[3] == "cluster" && labels[4] == "local":
+	default:
+		return false
+	}
+	for _, l := range labels {
+		if !dnsLabel(l) {
+			return false
+		}
+	}
+	return true
+}
+
+// dnsLabel reports whether s is a non-empty DNS label: lowercase letters,
+// digits and hyphens, not starting or ending with a hyphen.
+func dnsLabel(s string) bool {
+	if s == "" || s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // redactedURL is raw without the credentials a URL may carry, for an error
