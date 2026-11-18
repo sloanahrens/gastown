@@ -67,10 +67,12 @@ func importsOf(t *testing.T, path string) []string {
 }
 
 // manifestPackages is the package holding the manifests this builder renders
-// from: the daemon's secrets and the town root's ownership split. It imports
-// the standard library and the YAML module only, so the walk continues through
-// it and covers every package the renderer reaches.
+// from: the daemon's secrets, the town root's ownership split and the static
+// control-cluster set. It imports the standard library and the YAML module
+// only, so the walk continues through it and covers every package the renderer
+// reaches.
 var manifestPackages = []string{
+	"github.com/steveyegge/gastown/deploy/k8s",
 	"github.com/steveyegge/gastown/internal/manifestdata",
 }
 

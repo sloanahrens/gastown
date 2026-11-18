@@ -167,6 +167,8 @@ With `--daemon-bd-gateway-url` the daemon's bd forwarder points at the bd gatewa
 
 The daemon container also carries `STORYPOINTS_EMBED_URL`, the host's Ollama at the name the pod reaches the host by (`StorypointsEmbedURL` in `deploy/k8s/daemon/daemon.go`), which the weekly story-points retrain embeds through: without it the retrain reads its own default, the process loopback, which in the pod is the pod itself, so the run fails. The dashboard carries none, as it runs no retrain, and a pod with no hostAlias carries none, since that name resolves in the pod only through the alias.
 
+The render writes the six static control-cluster manifests `deploy/k8s` embeds when `Values.IncludeStatic` is set (`deploy/k8s/daemon/daemon.go`): right after the ServiceAccount, the cluster-scoped objects first, so the admission policies exist before the Services they judge. A namespaced document outside the render's own namespace, the sweep's or Forgejo's is refused, and every decision reads the document's bytes rather than the metadata struct beside them, because those bytes are what an apply sends (gt-o8per2).
+
 The daemon is granted the right to start the pod update's Job, so the roll outlives the pod it replaces. Through that Job it reaches the update ServiceAccount's grants and every Secret in `gt`, and it can run any image the nodes pull. The reason it is accepted is in the header of `deploy/k8s/update-rbac.yaml`, and what bounds it is in the header of `deploy/k8s/update-admission.yaml`.
 
 ### The town-state claim
