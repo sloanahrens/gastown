@@ -12,6 +12,8 @@ import (
 	"text/template"
 
 	"github.com/spf13/cobra"
+
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 )
 
 // forwardLoopbackBind is the only address the forward listens on. The dashboard
@@ -94,14 +96,6 @@ type forwardPlistView struct {
 	LogErr string
 }
 
-// bdGatewayService, bdGatewayNamespace and bdGatewayPort name the bd gateway
-// Service the manifest renders (deploy/k8s/daemon, BdGatewayName and BdGatewayPort).
-const (
-	bdGatewayService   = "bd-gateway"
-	bdGatewayNamespace = "gt"
-	bdGatewayPort      = 7440
-)
-
 func init() {
 	townForwardCmd.AddCommand(newForwardPlistCmd(os.UserHomeDir, exec.LookPath))
 	townForwardCmd.AddCommand(newForwardBdGatewayCmd(os.UserHomeDir, exec.LookPath))
@@ -159,15 +153,15 @@ The command only prints. The plist and the gateway URL go to stdout and stderr;
 nothing is loaded into launchd and no cluster is contacted.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			f.service = bdGatewayService
-			f.port = bdGatewayPort
+			f.service = k8sdaemon.BdGatewayName
+			f.port = k8sdaemon.BdGatewayPort
 			f.bind = forwardLoopbackBind
 			return printForwardPlist(cmd, home, lookPath, f, "bd gateway")
 		},
 	}
 	c.Flags().StringVar(&f.context, "context", "",
 		"the kube context the forward runs against (required; a shell default is not trusted)")
-	c.Flags().StringVar(&f.namespace, "namespace", bdGatewayNamespace,
+	c.Flags().StringVar(&f.namespace, "namespace", k8sdaemon.DefaultNamespace,
 		"the namespace the bd-gateway Service lives in, a DNS label")
 	return c
 }
