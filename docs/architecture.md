@@ -208,7 +208,7 @@ The *Forgejo runner* executes workflows. It runs beside a docker-in-docker conta
 |---|---|---|
 | `ci` (`gate.yml`) | a push to `land/**` | Runs `make gate` on the merge candidate. Its result is the required status `ci / gate (push)`. |
 | `post-land` | a push to `main` | Runs the post-land check on the landed commit. The landing worker reads its result as the rig's verdict on `main`. |
-| `images` | a push to `green/**` | Builds the daemon image and the polecat image at the same commit and labels both. |
+| `images` | a push to `green/**` | Builds the daemon, polecat and bd gateway images at the same commit and labels each. |
 
 The workflow files in Forgejo are protected: only a human account may change them (see [The security model](#the-security-model)). The reviewed text of the `images` workflow lives in `deploy/ci/` and a person copies it into place.
 
@@ -373,7 +373,7 @@ sequenceDiagram
     T->>T: hourly tiers (shell, integration, race)
     T-->>L: summary lines, all tiers green
     L->>F: publish green/sha12
-    F->>R: images workflow builds daemon and polecat image at that commit
+    F->>R: images workflow builds daemon, polecat and bd gateway images at that commit
     L->>G: fast-forward GitHub main to the green commit
 ```
 
@@ -401,7 +401,7 @@ sequenceDiagram
 
 **11. The tier sweep and the green ref.** The hourly sweep runs the slow tiers. When one cycle shows every tier green for a commit, the daemon publishes `green/<sha12>` on Forgejo.
 
-**12. Images and promotion.** The `images` workflow runs on `green/**` and builds the daemon image and the polecat image at the same commit, then checks that both carry that commit's label, because a daemon and a polecat image from different commits cannot run together. Promotion is a fast-forward push of the green commit to the rig's `main` on GitHub. It is exactly `<commit>:refs/heads/main`: never a force, never another branch or a tag. A failed promotion is recorded and retried at the next green verdict; it never blocks the landing.
+**12. Images and promotion.** The `images` workflow runs on `green/**` and builds the daemon, polecat and bd gateway images at the same commit, then checks that each carries that commit's label, because a daemon and a polecat image from different commits cannot run together. Promotion is a fast-forward push of the green commit to the rig's `main` on GitHub. It is exactly `<commit>:refs/heads/main`: never a force, never another branch or a tag. A failed promotion is recorded and retried at the next green verdict; it never blocks the landing.
 
 **13. The roll.** A new daemon image reaches the cluster by a Job. When the image pair of a green commit is published and newer than the running commit, a *deploy-pair-ready* item appears in the attention queue; when the update patrol is on, it starts the roll as the Kubernetes Job `gt-update-<sha12>` inside its window and minimum interval (see [The daemon](#the-daemon)). The Job's init container records the pair's digests in `.runtime/update/images.yaml`. Its `update` container plans the run, moves the daemon's Deployment and the dashboard's to the pair's daemon digest in one step (the polecat digest rides on the daemon's pod template as an annotation), waits on both rollouts and restores both if either fails, then verifies the installed build and the town's health. After an ok run on a pod it writes the pair, with its commit line, into the town's own `<town>/gastown/deploy/values/images.yaml`, the running values file the pair-ready check reads. The values file holds digests, never tags, so the pod runs exactly the commit the file names; when the bd gateway image was built for the same commit, `gt update images --bd` also records its digest under a `bd:` key, which nothing reads yet. The daemon publishes the polecat image to the sandbox cluster's registry as `localhost:5001/gastown-polecat:dev` when it starts.
 
