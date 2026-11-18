@@ -2505,7 +2505,7 @@ func (b *Beads) buildRunEnv() []string {
 // own .beads, whose routes.jsonl routes each prefix to its rig's database. The
 // bd gateway forwarder refuses a call that sets no BEADS_DIR, since it cannot
 // tell which rig it runs in (gt-judxkm); a Beads with no town above its workDir
-// still names nothing, and the forwarder refuses that call rather than guessing.
+// names its own resolved .beads through BuildRoutingBDEnv's fallback (gt-dl9ug0).
 // In isolated mode: strips BEADS_DIR with the rest (BD_ACTOR, BEADS_*, GT_ROOT,
 // HOME), because a test must never be handed a workspace to write.
 func (b *Beads) buildRoutingEnv() []string {

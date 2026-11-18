@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestBdReadOnlyEnv verifies that the read-only env holds exactly one
@@ -66,7 +69,11 @@ func TestBdReadOnlyPinnedEnvUsesSelectedBeadsDir(t *testing.T) {
 	assertEnvAbsent(t, env, "GT_DOLT_DATA")
 }
 
-func TestBdReadOnlyRoutingEnvDoesNotPinDatabase(t *testing.T) {
+// TestBdReadOnlyRoutingEnvCarriesTownBeadsDirButNotDatabase pins gt-dl9ug0:
+// the daemon's routed read names the town's .beads, the workspace the bd
+// gateway forwarder places the call in, and still pins no database, so prefix
+// routing chooses it.
+func TestBdReadOnlyRoutingEnvCarriesTownBeadsDirButNotDatabase(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	beadsDir := filepath.Join(townRoot, ".beads")
@@ -86,7 +93,7 @@ func TestBdReadOnlyRoutingEnvDoesNotPinDatabase(t *testing.T) {
 	}
 
 	env := bdReadOnlyRoutingEnvFrom(base, townRoot)
-	assertEnvAbsent(t, env, "BEADS_DIR")
+	assertSingleEnvValue(t, env, "BEADS_DIR", beadsDir)
 	assertEnvAbsent(t, env, "BEADS_DOLT_SERVER_DATABASE")
 	assertSingleEnvValue(t, env, "BEADS_DOLT_SERVER_PORT", "4407")
 	assertSingleEnvValue(t, env, "BD_DOLT_AUTO_COMMIT", "off")
@@ -116,6 +123,30 @@ func TestBdEnvWrappersStartFromTheProcessEnvironment(t *testing.T) {
 	}
 }
 
+// TestWorkBeadStateRoutesWithTheTownsBeadsDir pins the call site gt-dl9ug0 was
+// filed for: the overrun guard's bead read is a routed call, so the environment
+// it hands bd must name the town's .beads and stay read-only. Without a
+// BEADS_DIR the bd gateway forwarder refuses the read and the guard cannot
+// judge the bead.
+func TestWorkBeadStateRoutesWithTheTownsBeadsDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(io.Discard, "", 0)}
+	var got []string
+	d.openWorkBeads = func(env []string, _ time.Duration) workBeadReader {
+		got = env
+		return workBeadStore{"gt-abc": {ID: "gt-abc", Status: "open"}}
+	}
+
+	if _, err := d.workBeadState("gt-abc"); err != nil {
+		t.Fatalf("workBeadState: %v", err)
+	}
+	assertSingleEnvValue(t, got, "BEADS_DIR", filepath.Join(townRoot, ".beads"))
+	assertSingleEnvValue(t, got, "BD_READONLY", "true")
+	assertSingleEnvValue(t, got, "BD_DOLT_AUTO_COMMIT", "off")
+	assertEnvAbsent(t, got, "BEADS_DOLT_SERVER_DATABASE")
+}
+
 func assertSingleEnvValue(t *testing.T, env []string, key, want string) {
 	t.Helper()
 	var count int
@@ -127,7 +158,7 @@ func assertSingleEnvValue(t *testing.T, env []string, key, want string) {
 		}
 	}
 	if count != 1 || value != want {
-		t.Fatalf("%s count/value = %d/%q, want 1/%q in %v", key, count, value, want, env)
+		t.Fatalf("%s count/value = %d/%q, want 1/%q", key, count, value, want)
 	}
 }
 
@@ -135,7 +166,7 @@ func assertEnvAbsent(t *testing.T, env []string, key string) {
 	t.Helper()
 	for _, e := range env {
 		if strings.HasPrefix(e, key+"=") {
-			t.Fatalf("%s should be absent, got %q in %v", key, e, env)
+			t.Fatalf("%s should be absent, got %q", key, e)
 		}
 	}
 }

@@ -420,27 +420,27 @@ func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
 	got := envMap(env)
 
 	if got["BEADS_DIR"] != beadsDir {
-		t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], beadsDir, env)
+		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], beadsDir)
 	}
 	if got["BEADS_DOLT_SERVER_DATABASE"] != "rigdb" {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want rigdb in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want rigdb", got["BEADS_DOLT_SERVER_DATABASE"])
 	}
 	if count := countEnvPrefix(env, "BEADS_DOLT_SERVER_DATABASE="); count != 1 {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE count = %d, want 1 in %v", count, env)
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE count = %d, want 1", count)
 	}
 	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.1 in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want 127.0.0.1", got["BEADS_DOLT_SERVER_HOST"])
 	}
 	if got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
-		t.Fatalf("ports = server:%q legacy:%q, want 4407 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+		t.Fatalf("ports = server:%q legacy:%q, want 4407", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"])
 	}
 	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_DATABASE", "BEADS_DOLT_DATA_DIR", "BEADS_DOLT_FUTURE_SELECTOR"} {
 		if value, ok := got[key]; ok {
-			t.Fatalf("%s should be stripped, got %q in %v", key, value, env)
+			t.Fatalf("%s should be stripped, got %q", key, value)
 		}
 	}
 	if got["BEADS_DOLT_AUTO_START"] != "0" {
-		t.Fatalf("BEADS_DOLT_AUTO_START should be forced off, got %q in %v", got["BEADS_DOLT_AUTO_START"], env)
+		t.Fatalf("BEADS_DOLT_AUTO_START should be forced off, got %q", got["BEADS_DOLT_AUTO_START"])
 	}
 }
 
@@ -505,16 +505,16 @@ func TestBuildPinnedBDEnvFollowsRedirectBeforeMetadata(t *testing.T) {
 	got := envMap(env)
 
 	if got["BEADS_DIR"] != canonicalBeadsDir {
-		t.Fatalf("BEADS_DIR = %q, want canonical %q in %v", got["BEADS_DIR"], canonicalBeadsDir, env)
+		t.Fatalf("BEADS_DIR = %q, want canonical %q", got["BEADS_DIR"], canonicalBeadsDir)
 	}
 	if got["BEADS_DOLT_SERVER_DATABASE"] != "gastown" {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want gastown in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want gastown", got["BEADS_DOLT_SERVER_DATABASE"])
 	}
 	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" || got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
-		t.Fatalf("connection env used stale redirect metadata: %v", env)
+		t.Fatalf("connection env used stale redirect metadata")
 	}
 	if _, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
-		t.Fatalf("BEADS_DOLT_DATA_DIR should be stripped in %v", env)
+		t.Fatalf("BEADS_DOLT_DATA_DIR should be stripped")
 	}
 
 	routingEnv := BuildRoutingBDEnv([]string{
@@ -523,14 +523,14 @@ func TestBuildPinnedBDEnvFollowsRedirectBeforeMetadata(t *testing.T) {
 		"BEADS_DOLT_SERVER_DATABASE=hq",
 	}, rigBeadsDir)
 	routingGot := envMap(routingEnv)
-	if _, ok := routingGot["BEADS_DIR"]; ok {
-		t.Fatalf("routing env should not set BEADS_DIR: %v", routingEnv)
+	if routingGot["BEADS_DIR"] != canonicalBeadsDir {
+		t.Fatalf("BEADS_DIR = %q, want the canonical fallback %q", routingGot["BEADS_DIR"], canonicalBeadsDir)
 	}
 	if _, ok := routingGot["BEADS_DOLT_SERVER_DATABASE"]; ok {
-		t.Fatalf("routing env should not set BEADS_DOLT_SERVER_DATABASE: %v", routingEnv)
+		t.Fatalf("routing env should not set BEADS_DOLT_SERVER_DATABASE")
 	}
 	if routingGot["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" || routingGot["BEADS_DOLT_SERVER_PORT"] != "4407" || routingGot["BEADS_DOLT_PORT"] != "4407" {
-		t.Fatalf("routing env should use canonical connection metadata: %v", routingEnv)
+		t.Fatalf("routing env should use canonical connection metadata")
 	}
 }
 
@@ -572,25 +572,25 @@ func TestBuildBDEnvConnectionOverridesAndDoesNotRestoreDataDir(t *testing.T) {
 			// Outside a town the inherited endpoint beats metadata.json;
 			// GT_DOLT_* is never read (gt-y3pgh.3).
 			if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
-				t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want the inherited host in %v", got["BEADS_DOLT_SERVER_HOST"], tc.env)
+				t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want the inherited host", got["BEADS_DOLT_SERVER_HOST"])
 			}
 			if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-				t.Fatalf("Beads port aliases = server:%q legacy:%q, want 5507 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], tc.env)
+				t.Fatalf("Beads port aliases = server:%q legacy:%q, want 5507", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"])
 			}
 			if _, ok := got["BEADS_DOLT_DATA_DIR"]; ok {
-				t.Fatalf("BEADS_DOLT_DATA_DIR should be stripped in %v", tc.env)
+				t.Fatalf("BEADS_DOLT_DATA_DIR should be stripped")
 			}
 			if _, ok := got["GT_DOLT_DATA"]; ok {
-				t.Fatalf("GT_DOLT_DATA should be stripped in %v", tc.env)
+				t.Fatalf("GT_DOLT_DATA should be stripped")
 			}
 			if tc.wantDBGone {
 				if _, ok := got["BEADS_DOLT_SERVER_DATABASE"]; ok {
-					t.Fatalf("routing env must not pin database: %v", tc.env)
+					t.Fatalf("routing env must not pin database")
 				}
 				return
 			}
 			if got["BEADS_DOLT_SERVER_DATABASE"] != tc.wantDB {
-				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want %q in %v", got["BEADS_DOLT_SERVER_DATABASE"], tc.wantDB, tc.env)
+				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want %q", got["BEADS_DOLT_SERVER_DATABASE"], tc.wantDB)
 			}
 		})
 	}
@@ -625,11 +625,11 @@ func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
 		wantConnection bool
 	}{
 		{name: "pinned", env: BuildPinnedBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantDB: "rigdb", wantConnection: true},
-		{name: "routing", env: BuildRoutingBDEnv(base, beadsDir), wantConnection: true},
+		{name: "routing", env: BuildRoutingBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantConnection: true},
 		{name: "read only pinned", env: BuildReadOnlyPinnedBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantDB: "rigdb", wantConnection: true},
-		{name: "read only routing", env: BuildReadOnlyRoutingBDEnv(base, beadsDir), wantConnection: true},
+		{name: "read only routing", env: BuildReadOnlyRoutingBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantConnection: true},
 		{name: "mutation pinned", env: BuildMutationPinnedBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantDB: "rigdb", wantConnection: true},
-		{name: "mutation routing", env: BuildMutationRoutingBDEnv(base, beadsDir), wantConnection: true},
+		{name: "mutation routing", env: BuildMutationRoutingBDEnv(base, beadsDir), wantBeadsDir: beadsDir, wantConnection: true},
 		{name: "mutation neutral", env: BuildMutationNeutralBDEnv(base)},
 	}
 
@@ -638,33 +638,33 @@ func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
 			got := envMap(tc.env)
 			for _, key := range []string{"BEADS_DOLT_DATA_DIR", "GT_DOLT_DATA"} {
 				if value, ok := got[key]; ok {
-					t.Fatalf("%s should be stripped, got %q in %v", key, value, tc.env)
+					t.Fatalf("%s should be stripped, got %q", key, value)
 				}
 			}
 			if got["BEADS_DOLT_AUTO_START"] != "0" {
-				t.Fatalf("BEADS_DOLT_AUTO_START should be preserved, got %q in %v", got["BEADS_DOLT_AUTO_START"], tc.env)
+				t.Fatalf("BEADS_DOLT_AUTO_START = %q, want 0", got["BEADS_DOLT_AUTO_START"])
 			}
 			if got["BEADS_DIR"] != tc.wantBeadsDir {
-				t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], tc.wantBeadsDir, tc.env)
+				t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], tc.wantBeadsDir)
 			}
 			if tc.wantDB == "" {
 				if value, ok := got["BEADS_DOLT_SERVER_DATABASE"]; ok {
-					t.Fatalf("BEADS_DOLT_SERVER_DATABASE should be stripped, got %q in %v", value, tc.env)
+					t.Fatalf("BEADS_DOLT_SERVER_DATABASE should be stripped, got %q", value)
 				}
 			} else if got["BEADS_DOLT_SERVER_DATABASE"] != tc.wantDB {
-				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want %q in %v", got["BEADS_DOLT_SERVER_DATABASE"], tc.wantDB, tc.env)
+				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want %q", got["BEADS_DOLT_SERVER_DATABASE"], tc.wantDB)
 			}
 			if tc.wantConnection {
 				if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
-					t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want metadata host in %v", got["BEADS_DOLT_SERVER_HOST"], tc.env)
+					t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want metadata host", got["BEADS_DOLT_SERVER_HOST"])
 				}
 				if got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
-					t.Fatalf("ports = server:%q legacy:%q, want metadata 4407 (GT_DOLT_PORT is never read) in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], tc.env)
+					t.Fatalf("ports = server:%q legacy:%q, want metadata 4407 (GT_DOLT_PORT is never read)", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"])
 				}
 			} else {
 				for _, key := range []string{"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
 					if value, ok := got[key]; ok {
-						t.Fatalf("neutral env should not add %s, got %q in %v", key, value, tc.env)
+						t.Fatalf("neutral env should not add %s, got %q", key, value)
 					}
 				}
 			}
@@ -804,13 +804,62 @@ func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T)
 		"BEADS_DOLT_SERVER_DATABASE=hq",
 	}, beadsDir)
 	got := envMap(env)
-	for _, key := range []string{"BEADS_DIR", "BEADS_DOLT_SERVER_DATABASE"} {
-		if value, ok := got[key]; ok {
-			t.Fatalf("%s should be absent for routed env, got %q in %v", key, value, env)
-		}
+	if got["BEADS_DIR"] != beadsDir {
+		t.Fatalf("BEADS_DIR = %q, want the fallback %q", got["BEADS_DIR"], beadsDir)
+	}
+	if value, ok := got["BEADS_DOLT_SERVER_DATABASE"]; ok {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE should be absent for routed env, got %q", value)
 	}
 	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" || got["BEADS_DOLT_SERVER_PORT"] != "4407" || got["BEADS_DOLT_PORT"] != "4407" {
-		t.Fatalf("routing env did not use selected connection, got %v", env)
+		t.Fatalf("routing env did not use the selected connection")
+	}
+}
+
+// TestBuildRoutingBDEnvSetsCanonicalFallbackBeadsDir pins gt-dl9ug0: a routed bd
+// call names its fallback workspace as BEADS_DIR, because the bd gateway
+// forwarder refuses a call that names no workspace. The name is canonical — the
+// fallback's redirect is followed, as the pinned builders do — and a call with
+// no fallback names none.
+func TestBuildRoutingBDEnvSetsCanonicalFallbackBeadsDir(t *testing.T) {
+	t.Parallel()
+	rigRoot := t.TempDir()
+	redirected := filepath.Join(rigRoot, ".beads")
+	canonical := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+	for _, dir := range []string{redirected, canonical} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(redirected, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name     string
+		fallback string
+		want     string
+	}{
+		{name: "a fallback names its canonical .beads", fallback: redirected, want: canonical},
+		{name: "no fallback names none", fallback: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := BuildRoutingBDEnv([]string{"PATH=/usr/bin", "BEADS_DIR=/wrong"}, tc.fallback)
+			got, ok := lastEnvValue(env, "BEADS_DIR")
+			if tc.want == "" {
+				if ok {
+					t.Fatalf("BEADS_DIR = %q, want no BEADS_DIR entry", got)
+				}
+				return
+			}
+			if !ok || got != tc.want {
+				t.Fatalf("BEADS_DIR = %q (set %v), want %q", got, ok, tc.want)
+			}
+			if count := countEnvPrefix(env, "BEADS_DIR="); count != 1 {
+				t.Fatalf("BEADS_DIR entries = %d, want 1", count)
+			}
+		})
 	}
 }
 
@@ -5609,9 +5658,10 @@ func TestBuildRunEnv(t *testing.T) {
 }
 
 // TestBuildRoutingEnv verifies buildRoutingEnv() returns the correct environment
-// for each mode: default (strip the inherited BEADS_DIR; /tmp has no town above
-// it, so none is named) and isolated (strip all beads vars).
+// for each mode: default (strip the inherited BEADS_DIR and name the workDir's
+// own .beads, since no town is above it) and isolated (strip all beads vars).
 func TestBuildRoutingEnv(t *testing.T) {
+	workDir := t.TempDir()
 	tests := []struct {
 		name           string
 		isolated       bool
@@ -5620,15 +5670,15 @@ func TestBuildRoutingEnv(t *testing.T) {
 		mustNotContain []string
 	}{
 		{
-			name:           "default strips the inherited BEADS_DIR when no town is above the workDir",
-			envVars:        map[string]string{"BEADS_DIR": "/tmp/beads", "PATH": "/usr/bin"},
-			mustContain:    []string{"PATH="},
-			mustNotContain: []string{"BEADS_DIR=", "BD_JSON_ENVELOPE="},
+			name:           "default strips the inherited BEADS_DIR and names the workDir's own",
+			envVars:        map[string]string{"BEADS_DIR": "/stale/beads", "PATH": "/usr/bin"},
+			mustContain:    []string{"PATH=", "BEADS_DIR=" + filepath.Join(workDir, ".beads")},
+			mustNotContain: []string{"BEADS_DIR=/stale/beads", "BD_JSON_ENVELOPE="},
 		},
 		{
 			name:           "isolated strips all beads vars",
 			isolated:       true,
-			envVars:        map[string]string{"BD_ACTOR": "test-actor", "BEADS_DIR": "/tmp/beads"},
+			envVars:        map[string]string{"BD_ACTOR": "test-actor", "BEADS_DIR": "/stale/beads"},
 			mustNotContain: []string{"BD_ACTOR=", "BEADS_DIR=", "BD_JSON_ENVELOPE="},
 		},
 	}
@@ -5638,7 +5688,7 @@ func TestBuildRoutingEnv(t *testing.T) {
 			for k, v := range tt.envVars {
 				t.Setenv(k, v)
 			}
-			b := &Beads{workDir: "/tmp", isolated: tt.isolated}
+			b := &Beads{workDir: workDir, isolated: tt.isolated}
 			env := b.buildRoutingEnv()
 
 			for _, prefix := range tt.mustContain {
@@ -5669,11 +5719,12 @@ func TestBuildRoutingEnv(t *testing.T) {
 // tell which rig the call runs in. A routed call therefore names the town's own
 // .beads — the workspace a bd run from the town root reads, whose routes.jsonl
 // sends each prefix to its rig's database. A wrapper with no town above its
-// workDir still names nothing, so the forwarder refuses that call rather than
-// the wrapper guessing a workspace; isolated mode never names one either.
+// workDir names its own resolved .beads instead, through BuildRoutingBDEnv's
+// fallback (gt-dl9ug0); isolated mode never names one.
 func TestBuildRoutingEnvNamesTheTownBeadsDir(t *testing.T) {
 	townRoot, rigWorktree := townWithRoutes(t)
 	wantBeadsDir := filepath.Join(townRoot, ".beads")
+	noTownWorkDir := t.TempDir()
 
 	tests := []struct {
 		name     string
@@ -5683,7 +5734,7 @@ func TestBuildRoutingEnvNamesTheTownBeadsDir(t *testing.T) {
 	}{
 		{name: "town root", workDir: townRoot, want: wantBeadsDir},
 		{name: "polecat worktree", workDir: rigWorktree, want: wantBeadsDir},
-		{name: "no town above the workDir names none", workDir: t.TempDir()},
+		{name: "no town above the workDir names its own", workDir: noTownWorkDir, want: filepath.Join(noTownWorkDir, ".beads")},
 		{name: "isolated names none", workDir: townRoot, isolated: true},
 	}
 	for _, tc := range tests {

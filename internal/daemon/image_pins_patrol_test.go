@@ -1108,9 +1108,9 @@ type bdCallRecord struct {
 // (gt-fu9c8a): the patrol panicked the daemon on its first tick because
 // imagePinsBeads called WithTimeout on a NewPinned wrapper, so this test calls
 // the constructor itself and drives one bd call through the client it returns.
-// That call must run in the gt source rig's .beads directory, where the refresh
-// bead is filed and looked up, and a client whose copies dropped its bd seam
-// would not answer at all.
+// That call must run in the gt source rig's .beads directory, and a client whose
+// copies dropped its bd seam would not answer at all. The env that call carries
+// is TestImagePinsBeadsRoutesWithTheTownsMutationEnv's subject.
 func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -1137,8 +1137,9 @@ func TestImagePinsBeadsOpensTheGTSourceRigDatabase(t *testing.T) {
 
 // TestImagePinsBeadsRoutesWithTheTownsMutationEnv: the client's bd calls start
 // from the town's mutation routing environment, not the process one
-// (gt-ff9cxi). No BEADS_DIR and no database pin reach bd, so the working
-// directory chooses the database the refresh bead is filed into, and the
+// (gt-ff9cxi). BEADS_DIR names the town's .beads, the workspace the gateway
+// forwarder places the call in (gt-dl9ug0), and no database pin reaches bd, so
+// prefix routing chooses the database the refresh bead is filed into, and the
 // endpoint the town names is the server the call dials.
 func TestImagePinsBeadsRoutesWithTheTownsMutationEnv(t *testing.T) {
 	t.Parallel()
@@ -1158,9 +1159,12 @@ func TestImagePinsBeadsRoutesWithTheTownsMutationEnv(t *testing.T) {
 		t.Fatalf("bd calls = %d, want the one List", len(calls))
 	}
 
-	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE"} {
+	if got, ok := lookupEnvIn(calls[0].env, "BEADS_DIR"); !ok || got != filepath.Join(townRoot, ".beads") {
+		t.Errorf("the bd call's BEADS_DIR = %q (set %v), want the town's .beads %q", got, ok, filepath.Join(townRoot, ".beads"))
+	}
+	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_SERVER_DATABASE"} {
 		if value, ok := lookupEnvIn(calls[0].env, key); ok {
-			t.Errorf("the bd call carries %s=%s, so the env, not the working directory, chooses the database", key, value)
+			t.Errorf("the bd call carries %s=%s, so the env, not the route table, pins the database", key, value)
 		}
 	}
 	for key, want := range map[string]string{

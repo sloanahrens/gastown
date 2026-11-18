@@ -93,11 +93,17 @@ func BuildPinnedBDEnv(base []string, beadsDir string) []string {
 }
 
 // BuildRoutingBDEnv returns env for a bd subprocess that intentionally relies on
-// bd prefix routing. It strips stale target/database selectors, then re-adds only
-// connection host/port from fallbackBeadsDir so routing can choose the database.
+// bd prefix routing. It strips stale target/database selectors, then names
+// fallbackBeadsDir as BEADS_DIR — the workspace routing starts from, which the
+// bd gateway forwarder needs to place the call (gt-dl9ug0) — and re-adds that
+// workspace's connection host/port so routing can choose the database. An empty
+// fallback names no workspace.
 func BuildRoutingBDEnv(base []string, fallbackBeadsDir string) []string {
 	env := SuppressBDSideEffects(StripBDTargetEnv(base))
 	fallbackBeadsDir = canonicalBeadsDir(fallbackBeadsDir)
+	if fallbackBeadsDir != "" {
+		env = append(env, "BEADS_DIR="+fallbackBeadsDir)
+	}
 	env = append(env, doltTargetEnvFromBeadsDir(fallbackBeadsDir)...)
 	return addResolvedDoltConnectionEnv(env, base, fallbackBeadsDir)
 }

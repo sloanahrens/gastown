@@ -390,14 +390,17 @@ func imagePinsCompareFor(apiBase, tokenPath string) (ImagePinCompare, error) {
 	return client, nil
 }
 
-// imagePinsBeads opens the gt source rig's database: the refresh bead names
-// files in that rig, so it is filed and looked up there and nowhere else. Its
-// bd calls run in that rig's .beads directory with the town's mutation routing
-// environment, which strips any inherited BEADS_DIR and database pin, so the
-// working directory chooses the database and the town's named Dolt endpoint the
-// server (gt-ff9cxi). The wrapper is NewPlain because the bd deadline and the
-// process group are asked on the plain wrapper, which panics when handed any
-// other (gt-fu9c8a).
+// imagePinsBeads opens a client for the gt source rig's database directory: the
+// refresh bead names files in that rig, so its bd calls run there. They carry
+// the town's mutation routing environment, which names the town's .beads as
+// BEADS_DIR — the workspace the bd gateway forwarder places the call in — and
+// strips any inherited database pin, so prefix routing chooses the database and
+// the town's named Dolt endpoint the server (gt-ff9cxi, gt-dl9ug0). A refresh
+// bead created with no ID prefix therefore files into the town's database, not
+// the gt source rig's; the client needs a pinned env instead (reported on
+// gt-dl9ug0). The wrapper is NewPlain because the bd deadline and the process
+// group are asked on the plain wrapper, which panics when handed any other
+// (gt-fu9c8a).
 func (d *Daemon) imagePinsBeads() beads.Client {
 	opts := []beads.Option{beads.WithBin(d.bdPathOrDefault())}
 	if d.imagePinsBeadRunner != nil {
