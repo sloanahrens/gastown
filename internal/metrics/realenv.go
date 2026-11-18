@@ -9,10 +9,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -122,8 +123,8 @@ type RealEnvOptions struct {
 	// DocsDir is where the digest and regime-events.json live; empty is
 	// TOWN_METRICS_DOCS, else Home/.claude/docs/metrics.
 	DocsDir string
-	// Home is the directory the defaults and the home-level bead listing join
-	// to; empty is HomeDir's.
+	// Home is the directory the town and docs defaults join to when their own
+	// options and settings name none; empty is HomeDir's.
 	Home string
 	// HomeDir finds the home directory Home leaves to it; nil is the process's
 	// own home.
@@ -160,14 +161,7 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
-	// The claude workspace resolves first, through the home lookup it falls
-	// back to, so a home directory that cannot be found is refused with the
-	// workspace named (config.ClaudeConfigDirFrom, gt-1z0dia).
 	findHome := func() (string, error) { return homeDir(opts.Home, opts.HomeDir) }
-	claudeDir, err := config.ClaudeConfigDirFrom(getenv, findHome)
-	if err != nil {
-		return real, fmt.Errorf("real env: claude workspace: %w", err)
-	}
 	home, err := findHome()
 	if err != nil {
 		return real, fmt.Errorf("real env: %w", err)
@@ -249,18 +243,31 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 		beadDirs = append(beadDirs, filepath.Join(town, rig))
 	}
 	beadDirs = append(beadDirs, town)
-	// The claude workspace is the config dir the town's agents use,
-	// CLAUDE_CONFIG_DIR else home/.claude. It is listed only where it is one: the
-	// pod's own config dir holds no beads database, so handing it to bd would
-	// make the daily run report the whole source as a gap (gt-1z0dia).
-	listed, err := claudeBeadWorkspace(files, claudeDir)
+	// The claude beads live in the workspace the town's route table names: the
+	// claudeRoutePrefix entry is the source bd reads the claude- prefix through
+	// (gt-7et6ab). The routed directory is listed only where it holds a .beads
+	// database; otherwise the footer names the routed path, so the entry points
+	// at the dir the town routes to. A route table that names no claude
+	// workspace is named there too, by the table the wiring could not read it
+	// from: a source it never resolved was not read, and reading it as no
+	// source would report a missing route exactly like a healthy town.
+	routesPath := filepath.Join(town, ".beads", beads.RoutesFileName)
+	claudeDir, found, err := claudeBeadDir(files, routesPath, town)
 	if err != nil {
-		return real, fmt.Errorf("real env: claude workspace: %w", err)
+		return real, fmt.Errorf("real env: claude route: %w", err)
 	}
-	if listed {
-		beadDirs = append(beadDirs, claudeDir)
+	if !found {
+		unreadable = append(unreadable, claudeSourceName+":"+routesPath)
 	} else {
-		unreadable = append(unreadable, claudeSourceName+":"+claudeDir)
+		listed, err := claudeBeadWorkspace(files, claudeDir)
+		if err != nil {
+			return real, fmt.Errorf("real env: claude workspace: %w", err)
+		}
+		if !listed {
+			unreadable = append(unreadable, claudeSourceName+":"+claudeDir)
+		} else if !slices.Contains(beadDirs, claudeDir) {
+			beadDirs = append(beadDirs, claudeDir)
+		}
 	}
 
 	real.Extract = ExtractEnv{
@@ -285,9 +292,53 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	return real, nil
 }
 
-// claudeSourceName names the home-level claude workspace in the footer's
+// claudeSourceName names the claude beads workspace in the footer's
 // sources_unreadable, the list a source the wiring could not read is named in.
 const claudeSourceName = "claude"
+
+// claudeRoutePrefix is the route prefix the claude beads workspace is registered
+// under in the town's routes.jsonl.
+const claudeRoutePrefix = "claude-"
+
+// claudeBeadDir is the claude beads workspace the town's route table at
+// routesPath names: the path of its claudeRoutePrefix entry, joined to the town
+// root as bd resolves it. found is false when the table names no such entry, so
+// the caller names the table as the source the wiring could not read from. A
+// route path that leaves the town is refused, because it is data from the table
+// and a listing outside the town would read a database the town does not own. A
+// table that cannot be read, or a line that does not parse, is an error for the
+// same reason: a route that could not be read is never a town without the
+// route.
+func claudeBeadDir(files RealFiles, routesPath, town string) (string, bool, error) {
+	data, err := files.ReadFile(routesPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("%s: %w", routesPath, err)
+	}
+	var malformed error
+	routes := beads.ParseRoutes(data, func(line int, err error) {
+		if malformed == nil {
+			malformed = fmt.Errorf("%s:%d: %w", routesPath, line, err)
+		}
+	})
+	if malformed != nil {
+		return "", false, malformed
+	}
+	for _, route := range routes {
+		if route.Prefix != claudeRoutePrefix {
+			continue
+		}
+		dir := filepath.Join(town, route.Path)
+		rel, err := filepath.Rel(town, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return "", false, fmt.Errorf("%s: route path %q is outside the town root", routesPath, route.Path)
+		}
+		return dir, true, nil
+	}
+	return "", false, nil
+}
 
 // claudeBeadWorkspace reports whether dir holds a beads workspace, the .beads
 // directory bd reads beside the beads it lists. A dir holding none is not a

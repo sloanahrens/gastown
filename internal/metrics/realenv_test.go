@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -140,86 +141,254 @@ func footerSource(pairs [][]string, source string) bool {
 	return slices.ContainsFunc(pairs, func(pair []string) bool { return len(pair) > 0 && pair[0] == source })
 }
 
-// TestRealEnvClaudeWorkspace: the home-level claude workspace reaches the bd
-// listing only when it holds a beads database. A pod's own config dir holds
-// none, so the daily footer names it as dropped rather than reporting the failed
-// listing as a gap (gt-1z0dia).
-func TestRealEnvClaudeWorkspace(t *testing.T) {
+// claudeRouteTable is the pod's route entry for the claude beads workspace: the
+// path relative to the town root and the prefix, as routes.jsonl holds it.
+const claudeRouteTable = `{"path":"claude-beads","prefix":"claude-"}` + "\n"
+
+// routeFiles answers the town's routes.jsonl and the routed workspace's
+// directory listing from the case, so a claude-source test names the route and
+// the workspace without writing either to disk. Every other path reads the
+// fixture town.
+func routeFiles(routesPath, routes, dir string, entries []DirEntry) RealFiles {
+	return RealFiles{
+		ReadFile: func(path string) ([]byte, error) {
+			if path == routesPath {
+				return []byte(routes), nil
+			}
+			return os.ReadFile(path)
+		},
+		ReadDir: func(path string) ([]DirEntry, error) {
+			if path == dir {
+				return entries, nil
+			}
+			return hostDir(path)
+		},
+	}
+}
+
+// namesClaude reports whether entries names the claude source at dir: the
+// wiring's claude entry, or a bd listing of that directory.
+func namesClaude(entries []string, dir string) bool {
+	return slices.Contains(entries, claudeSourceName+":"+dir) || slices.Contains(entries, "bd:"+dir)
+}
+
+// bdListsBeads reports whether argv is the bd list the wiring runs: bd, then
+// list, under nice. Matching the whole shape keeps a command that merely
+// mentions bd or list from answering for the claude workspace's listing.
+func bdListsBeads(argv []string) bool {
+	return len(argv) > 4 && argv[0] == "nice" && argv[1] == "-n" && argv[2] == "15" &&
+		argv[3] == "bd" && argv[4] == "list"
+}
+
+// TestRealEnvClaudeRoute: the claude beads workspace is the one the town's route
+// table names, read through bd like any other beads directory. The pod's home
+// holds no beads database, so the footer names the routed path, never the home
+// directory (gt-7et6ab).
+func TestRealEnvClaudeRoute(t *testing.T) {
 	t.Parallel()
-	t.Run("with a beads database it is listed and no gap names it", func(t *testing.T) {
+	t.Run("the routed workspace answers and nothing names claude", func(t *testing.T) {
 		t.Parallel()
 		town, home := realFixture(t)
-		claudeDir := filepath.Join(home, ".claude")
-		if err := os.MkdirAll(filepath.Join(claudeDir, ".beads"), 0o755); err != nil {
-			t.Fatalf("make the claude beads database: %v", err)
-		}
+		claudeDir := filepath.Join(town, "claude-beads")
+		files := routeFiles(filepath.Join(town, ".beads", "routes.jsonl"), claudeRouteTable, claudeDir,
+			[]DirEntry{{Name: ".beads", IsDir: true}})
 		// The workspace lists one bead no rig holds, so the footer shows the
 		// source was read rather than that bd happened to succeed.
 		bd := realGit(town)
 		runner := &realRunner{answer: func(dir string, argv []string) ([]byte, error) {
-			if dir == claudeDir && len(argv) > 3 && argv[3] == "bd" {
+			if dir == claudeDir && bdListsBeads(argv) {
 				return []byte(`[{"id":"claude-a","created_at":"2026-10-12T00:00:00Z","issue_type":"task"}]`), nil
 			}
 			return bd(dir, argv)
 		}}
 		real, err := RealEnv(context.Background(), RealEnvOptions{
-			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Run: runner.run,
+			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
 		})
 		if err != nil {
 			t.Fatalf("RealEnv: %v", err)
 		}
 		if !slices.Contains(real.Extract.BeadDirs, claudeDir) {
-			t.Errorf("BeadDirs = %q, want the claude workspace %q", real.Extract.BeadDirs, claudeDir)
+			t.Errorf("BeadDirs = %q, want the routed workspace %q", real.Extract.BeadDirs, claudeDir)
 		}
-		if slices.Contains(real.Extract.Unreadable, claudeSourceName+":"+claudeDir) {
-			t.Errorf("Unreadable = %q, want the workspace not named as dropped", real.Extract.Unreadable)
+		if namesClaude(real.Extract.Unreadable, claudeDir) {
+			t.Errorf("Unreadable = %q, want no claude entry: the routed workspace answered", real.Extract.Unreadable)
 		}
 		footer := claudeExtract(t, real)
-		if footerSource(footer.Gaps, "bd:"+claudeDir) {
-			t.Errorf("gaps = %v, want none for the claude workspace", footer.Gaps)
-		}
-		if slices.Contains(footer.SourcesUnreadable, claudeSourceName+":"+claudeDir) {
-			t.Errorf("sources_unreadable = %q, want the workspace not named there", footer.SourcesUnreadable)
+		if namesClaude(footer.SourcesUnreadable, claudeDir) {
+			t.Errorf("sources_unreadable = %q, want no claude entry: the routed workspace answered", footer.SourcesUnreadable)
 		}
 		if got := footer.RowsRead["beads"]; got != 1 {
 			t.Errorf("rows_read[beads] = %d, want the workspace's own bead", got)
 		}
 		listed := slices.ContainsFunc(runner.calls, func(c realCall) bool {
-			return c.dir == claudeDir && slices.Contains(c.argv, "list")
+			return c.dir == claudeDir && bdListsBeads(c.argv)
 		})
 		if !listed {
-			t.Errorf("no bd list ran in the claude workspace: %q", runner.calls)
+			t.Errorf("no bd list ran in the routed workspace: %q", runner.calls)
 		}
 	})
-	t.Run("without one it is dropped and named in the footer", func(t *testing.T) {
+	t.Run("a routed workspace holding no beads database is named by its path", func(t *testing.T) {
 		t.Parallel()
-		real, _, home, runner := realWired(t, "smoke")
-		claudeDir := filepath.Join(home, ".claude")
+		town, home := realFixture(t)
+		claudeDir := filepath.Join(town, "claude-beads")
+		files := routeFiles(filepath.Join(town, ".beads", "routes.jsonl"), claudeRouteTable, claudeDir,
+			[]DirEntry{{Name: "README", IsDir: false}})
+		runner := &realRunner{answer: realGit(town)}
+		real, err := RealEnv(context.Background(), RealEnvOptions{
+			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+		})
+		if err != nil {
+			t.Fatalf("RealEnv: %v", err)
+		}
 		if slices.Contains(real.Extract.BeadDirs, claudeDir) {
-			t.Errorf("BeadDirs = %q, want no claude workspace: the dir holds no beads database", real.Extract.BeadDirs)
+			t.Errorf("BeadDirs = %q, want no routed workspace: the dir holds no beads database", real.Extract.BeadDirs)
 		}
 		if !slices.Contains(real.Extract.Unreadable, claudeSourceName+":"+claudeDir) {
-			t.Errorf("Unreadable = %q, want the dropped claude workspace named", real.Extract.Unreadable)
+			t.Errorf("Unreadable = %q, want the routed workspace named by its path", real.Extract.Unreadable)
+		}
+		if homeClaude := claudeSourceName + ":" + filepath.Join(home, ".claude"); slices.Contains(real.Extract.Unreadable, homeClaude) {
+			t.Errorf("Unreadable = %q, want the home directory's .claude not named", real.Extract.Unreadable)
 		}
 		footer := claudeExtract(t, real)
-		if footerSource(footer.Gaps, "bd:"+claudeDir) {
-			t.Errorf("gaps = %v, want none for the claude workspace", footer.Gaps)
-		}
 		if !slices.Contains(footer.SourcesUnreadable, claudeSourceName+":"+claudeDir) {
-			t.Errorf("sources_unreadable = %q, want the dropped claude workspace named", footer.SourcesUnreadable)
+			t.Errorf("sources_unreadable = %q, want the routed workspace named by its path", footer.SourcesUnreadable)
+		}
+		if homeClaude := claudeSourceName + ":" + filepath.Join(home, ".claude"); slices.Contains(footer.SourcesUnreadable, homeClaude) {
+			t.Errorf("sources_unreadable = %q, want the home directory's .claude not named", footer.SourcesUnreadable)
 		}
 		ran := slices.ContainsFunc(runner.calls, func(c realCall) bool { return c.dir == claudeDir })
 		if ran {
-			t.Errorf("a bd command ran in the dropped claude workspace: %q", runner.calls)
+			t.Errorf("a bd command ran in a workspace holding no beads database: %q", runner.calls)
+		}
+	})
+	t.Run("a bd listing that fails names the routed path, not the home", func(t *testing.T) {
+		t.Parallel()
+		town, home := realFixture(t)
+		claudeDir := filepath.Join(town, "claude-beads")
+		files := routeFiles(filepath.Join(town, ".beads", "routes.jsonl"), claudeRouteTable, claudeDir,
+			[]DirEntry{{Name: ".beads", IsDir: true}})
+		bd := realGit(town)
+		runner := &realRunner{answer: func(dir string, argv []string) ([]byte, error) {
+			if dir == claudeDir && bdListsBeads(argv) {
+				return nil, errors.New("no such database")
+			}
+			return bd(dir, argv)
+		}}
+		real, err := RealEnv(context.Background(), RealEnvOptions{
+			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+		})
+		if err != nil {
+			t.Fatalf("RealEnv: %v", err)
+		}
+		footer := claudeExtract(t, real)
+		if !slices.Contains(footer.SourcesUnreadable, "bd:"+claudeDir) {
+			t.Errorf("sources_unreadable = %q, want the failed listing named by the routed path", footer.SourcesUnreadable)
+		}
+		if !footerSource(footer.Gaps, "bd:"+claudeDir) {
+			t.Errorf("gaps = %v, want the failed listing's gap for the routed path", footer.Gaps)
+		}
+		if homeClaude := claudeSourceName + ":" + filepath.Join(home, ".claude"); slices.Contains(footer.SourcesUnreadable, homeClaude) {
+			t.Errorf("sources_unreadable = %q, want the home directory's .claude not named", footer.SourcesUnreadable)
+		}
+	})
+	t.Run("a route table naming no claude workspace names the table", func(t *testing.T) {
+		t.Parallel()
+		for _, tc := range []struct {
+			name  string
+			files func(town string) RealFiles
+		}{
+			{"no route table", func(string) RealFiles { return RealFiles{} }},
+			{"a route table without a claude entry", func(town string) RealFiles {
+				return routeFiles(filepath.Join(town, ".beads", "routes.jsonl"),
+					`{"path":"gastown/mayor/rig","prefix":"gt-"}`+"\n", "", nil)
+			}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				town, home := realFixture(t)
+				routesPath := filepath.Join(town, ".beads", beads.RoutesFileName)
+				runner := &realRunner{answer: realGit(town)}
+				real, err := RealEnv(context.Background(), RealEnvOptions{
+					Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv,
+					Files: tc.files(town), Run: runner.run,
+				})
+				if err != nil {
+					t.Fatalf("RealEnv: %v", err)
+				}
+				// A table that names no claude workspace is a source the wiring
+				// never read, so the footer names the table rather than leaving
+				// the footer looking like a town with nothing to read.
+				if !slices.Contains(real.Extract.Unreadable, claudeSourceName+":"+routesPath) {
+					t.Errorf("Unreadable = %q, want the route table named", real.Extract.Unreadable)
+				}
+				footer := claudeExtract(t, real)
+				if !slices.Contains(footer.SourcesUnreadable, claudeSourceName+":"+routesPath) {
+					t.Errorf("sources_unreadable = %q, want the route table named", footer.SourcesUnreadable)
+				}
+				if homeClaude := claudeSourceName + ":" + filepath.Join(home, ".claude"); slices.Contains(footer.SourcesUnreadable, homeClaude) {
+					t.Errorf("sources_unreadable = %q, want the home directory's .claude not named", footer.SourcesUnreadable)
+				}
+			})
+		}
+	})
+	t.Run("a route path outside the town refuses the wiring", func(t *testing.T) {
+		t.Parallel()
+		town, home := realFixture(t)
+		files := routeFiles(filepath.Join(town, ".beads", "routes.jsonl"),
+			`{"path":"../outside","prefix":"claude-"}`+"\n", "", nil)
+		runner := &realRunner{answer: realGit(town)}
+		_, err := RealEnv(context.Background(), RealEnvOptions{
+			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "claude route") || !strings.Contains(err.Error(), "outside the town root") {
+			t.Errorf("RealEnv error = %v, want the escaping route path refused", err)
+		}
+	})
+	t.Run("a route table it cannot read refuses the wiring", func(t *testing.T) {
+		t.Parallel()
+		town, home := realFixture(t)
+		routesPath := filepath.Join(town, ".beads", "routes.jsonl")
+		files := RealFiles{
+			ReadFile: func(path string) ([]byte, error) {
+				if path == routesPath {
+					return nil, errors.New("permission denied")
+				}
+				return os.ReadFile(path)
+			},
+			ReadDir: func(dir string) ([]DirEntry, error) { return hostDir(dir) },
+		}
+		runner := &realRunner{answer: realGit(town)}
+		_, err := RealEnv(context.Background(), RealEnvOptions{
+			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "claude route") || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("RealEnv error = %v, want the unreadable route table refused", err)
+		}
+	})
+	t.Run("a malformed route line refuses the wiring", func(t *testing.T) {
+		t.Parallel()
+		town, home := realFixture(t)
+		files := routeFiles(filepath.Join(town, ".beads", "routes.jsonl"), `{"path":"claude-beads"`, filepath.Join(town, "claude-beads"), nil)
+		runner := &realRunner{answer: realGit(town)}
+		_, err := RealEnv(context.Background(), RealEnvOptions{
+			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
+		})
+		if err == nil || !strings.Contains(err.Error(), "claude route") {
+			t.Errorf("RealEnv error = %v, want the malformed route refused", err)
 		}
 	})
 	t.Run("a workspace it cannot list refuses the wiring", func(t *testing.T) {
 		t.Parallel()
 		town, home := realFixture(t)
-		claudeDir := filepath.Join(home, ".claude")
-		runner := &realRunner{answer: realGit(town)}
+		routesPath := filepath.Join(town, ".beads", "routes.jsonl")
+		claudeDir := filepath.Join(town, "claude-beads")
 		files := RealFiles{
-			ReadFile: os.ReadFile,
+			ReadFile: func(path string) ([]byte, error) {
+				if path == routesPath {
+					return []byte(claudeRouteTable), nil
+				}
+				return os.ReadFile(path)
+			},
 			ReadDir: func(dir string) ([]DirEntry, error) {
 				if dir == claudeDir {
 					return nil, errors.New("permission denied")
@@ -227,122 +396,14 @@ func TestRealEnvClaudeWorkspace(t *testing.T) {
 				return hostDir(dir)
 			},
 		}
+		runner := &realRunner{answer: realGit(town)}
 		_, err := RealEnv(context.Background(), RealEnvOptions{
 			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: noEnv, Files: files, Run: runner.run,
 		})
 		if err == nil || !strings.Contains(err.Error(), "claude workspace") || !strings.Contains(err.Error(), "permission denied") {
-			t.Errorf("RealEnv error = %v, want the unreadable claude workspace refused", err)
+			t.Errorf("RealEnv error = %v, want the unreadable workspace refused", err)
 		}
 	})
-}
-
-// TestRealEnvClaudeConfigDir: CLAUDE_CONFIG_DIR names the claude workspace in
-// place of home/.claude, and the same rule holds for it: listed only when it
-// holds a beads database, otherwise named in the footer by its own path, never
-// the home directory's (gt-1z0dia).
-func TestRealEnvClaudeConfigDir(t *testing.T) {
-	t.Parallel()
-	t.Run("a dir with a beads database is listed and no gap names it", func(t *testing.T) {
-		t.Parallel()
-		town, home := realFixture(t)
-		cfg := t.TempDir()
-		if err := os.Mkdir(filepath.Join(cfg, ".beads"), 0o755); err != nil {
-			t.Fatalf("make the config dir's beads database: %v", err)
-		}
-		bd := realGit(town)
-		runner := &realRunner{answer: func(dir string, argv []string) ([]byte, error) {
-			if dir == cfg && len(argv) > 3 && argv[3] == "bd" {
-				return []byte(`[{"id":"claude-a","created_at":"2026-10-12T00:00:00Z","issue_type":"task"}]`), nil
-			}
-			return bd(dir, argv)
-		}}
-		real, err := RealEnv(context.Background(), RealEnvOptions{
-			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: configDirEnv(cfg), Run: runner.run,
-		})
-		if err != nil {
-			t.Fatalf("RealEnv: %v", err)
-		}
-		if !slices.Contains(real.Extract.BeadDirs, cfg) {
-			t.Errorf("BeadDirs = %q, want the config dir %q", real.Extract.BeadDirs, cfg)
-		}
-		if slices.Contains(real.Extract.Unreadable, claudeSourceName+":"+cfg) {
-			t.Errorf("Unreadable = %q, want the config dir not named as dropped", real.Extract.Unreadable)
-		}
-		footer := claudeExtract(t, real)
-		if footerSource(footer.Gaps, "bd:"+cfg) {
-			t.Errorf("gaps = %v, want none for the config dir", footer.Gaps)
-		}
-		if got := footer.RowsRead["beads"]; got != 1 {
-			t.Errorf("rows_read[beads] = %d, want the config dir's own bead", got)
-		}
-		listed := slices.ContainsFunc(runner.calls, func(c realCall) bool {
-			return c.dir == cfg && slices.Contains(c.argv, "list")
-		})
-		if !listed {
-			t.Errorf("no bd list ran in the config dir: %q", runner.calls)
-		}
-	})
-	t.Run("a dir without one is dropped and named by its own path", func(t *testing.T) {
-		t.Parallel()
-		town, home := realFixture(t)
-		cfg := t.TempDir()
-		runner := &realRunner{answer: realGit(town)}
-		real, err := RealEnv(context.Background(), RealEnvOptions{
-			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: configDirEnv(cfg), Run: runner.run,
-		})
-		if err != nil {
-			t.Fatalf("RealEnv: %v", err)
-		}
-		if slices.Contains(real.Extract.BeadDirs, cfg) {
-			t.Errorf("BeadDirs = %q, want no config dir: it holds no beads database", real.Extract.BeadDirs)
-		}
-		if !slices.Contains(real.Extract.Unreadable, claudeSourceName+":"+cfg) {
-			t.Errorf("Unreadable = %q, want the dropped config dir named", real.Extract.Unreadable)
-		}
-		if homeClaude := claudeSourceName + ":" + filepath.Join(home, ".claude"); slices.Contains(real.Extract.Unreadable, homeClaude) {
-			t.Errorf("Unreadable = %q, want the home directory's .claude not named: the config dir replaces it", real.Extract.Unreadable)
-		}
-		footer := claudeExtract(t, real)
-		if footerSource(footer.Gaps, "bd:"+cfg) {
-			t.Errorf("gaps = %v, want none for the config dir", footer.Gaps)
-		}
-		if !slices.Contains(footer.SourcesUnreadable, claudeSourceName+":"+cfg) {
-			t.Errorf("sources_unreadable = %q, want the dropped config dir named", footer.SourcesUnreadable)
-		}
-		ran := slices.ContainsFunc(runner.calls, func(c realCall) bool { return c.dir == cfg })
-		if ran {
-			t.Errorf("a bd command ran in the dropped config dir: %q", runner.calls)
-		}
-	})
-	t.Run("unset, the claude workspace is the home directory's .claude", func(t *testing.T) {
-		t.Parallel()
-		town, home := realFixture(t)
-		claudeDir := filepath.Join(home, ".claude")
-		if err := os.MkdirAll(filepath.Join(claudeDir, ".beads"), 0o755); err != nil {
-			t.Fatalf("make the claude beads database: %v", err)
-		}
-		runner := &realRunner{answer: realGit(town)}
-		real, err := RealEnv(context.Background(), RealEnvOptions{
-			Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Getenv: configDirEnv(""), Run: runner.run,
-		})
-		if err != nil {
-			t.Fatalf("RealEnv: %v", err)
-		}
-		if !slices.Contains(real.Extract.BeadDirs, claudeDir) {
-			t.Errorf("BeadDirs = %q, want the home directory's .claude %q", real.Extract.BeadDirs, claudeDir)
-		}
-	})
-}
-
-// configDirEnv answers CLAUDE_CONFIG_DIR with dir and no other variable. An empty
-// dir is the variable unset, which is how os.Getenv answers it.
-func configDirEnv(dir string) func(string) string {
-	return func(name string) string {
-		if name == "CLAUDE_CONFIG_DIR" {
-			return dir
-		}
-		return ""
-	}
 }
 
 func TestRealEnvReadsTheTown(t *testing.T) {
@@ -372,9 +433,9 @@ func TestRealEnvReadsTheTown(t *testing.T) {
 			wantUnreadable = append(wantUnreadable, "ledger:"+rig)
 		}
 	}
-	// The fixture home's .claude holds no beads database, so the claude workspace
-	// is named as a source the wiring dropped.
-	wantUnreadable = append(wantUnreadable, claudeSourceName+":"+filepath.Join(home, ".claude"))
+	// The fixture town routes no claude beads, so the footer names the route
+	// table the claude workspace could not be read from.
+	wantUnreadable = append(wantUnreadable, claudeSourceName+":"+filepath.Join(town, ".beads", beads.RoutesFileName))
 	if !reflect.DeepEqual(real.Extract.Unreadable, wantUnreadable) {
 		t.Errorf("Unreadable = %v, want %v", real.Extract.Unreadable, wantUnreadable)
 	}
@@ -446,10 +507,10 @@ func TestRealEnvLivesWithNoSourceFiles(t *testing.T) {
 		t.Errorf("a town with no sources read %d ledgers, %d usage files and %d overrun states",
 			len(real.Extract.LedgerLines), len(real.Extract.UsageFiles), len(real.Extract.OverrunStates))
 	}
-	// The missing ledgers, reviews, and the claude workspace the fixture home
-	// holds no beads database in.
+	// The missing ledgers, reviews, and the route table a town with no claude
+	// route leaves the claude workspace unread from.
 	if want := len(Rigs) + 2; len(real.Extract.Unreadable) != want {
-		t.Errorf("Unreadable = %v, want each of the %d missing ledgers, reviews and claude workspace", real.Extract.Unreadable, want)
+		t.Errorf("Unreadable = %v, want each of the %d missing ledgers, reviews and claude route", real.Extract.Unreadable, want)
 	}
 }
 
@@ -528,29 +589,16 @@ func TestRealEnvNeedsARunner(t *testing.T) {
 
 func TestRealEnvStopsWhenTheHomeCannotBeFound(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name   string
-		getenv func(string) string
-		want   string
-	}{
-		// Without CLAUDE_CONFIG_DIR the home is the claude workspace's own path,
-		// so the refusal names the workspace it could not resolve.
-		{"unset, the refusal names the claude workspace", noEnv, "real env: claude workspace: no home directory"},
-		// With CLAUDE_CONFIG_DIR set the workspace needs no home; the town's own
-		// defaults still do.
-		{"set, the refusal is the home lookup's", configDirEnv("/cfg"), "real env: no home directory"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
-			_, err := RealEnv(context.Background(), RealEnvOptions{
-				Today: "smoke", Town: t.TempDir(), DocsDir: t.TempDir(), Getenv: tc.getenv, Run: runner.run,
-				HomeDir: func() (string, error) { return "", errors.New("no home directory") },
-			})
-			if err == nil || err.Error() != tc.want {
-				t.Errorf("RealEnv error = %v, want %q", err, tc.want)
-			}
-		})
+	// The claude workspace is read from the town's route table, not the home
+	// directory, so a home that cannot be found is the town defaults' refusal
+	// alone and is not named as a claude workspace (gt-7et6ab).
+	runner := &realRunner{answer: func(string, []string) ([]byte, error) { return nil, nil }}
+	_, err := RealEnv(context.Background(), RealEnvOptions{
+		Today: "smoke", Town: t.TempDir(), DocsDir: t.TempDir(), Getenv: noEnv, Run: runner.run,
+		HomeDir: func() (string, error) { return "", errors.New("no home directory") },
+	})
+	if err == nil || err.Error() != "real env: no home directory" {
+		t.Errorf("RealEnv error = %v, want %q", err, "real env: no home directory")
 	}
 }
 
@@ -937,11 +985,7 @@ func TestRealEnvDefaultsFromTheEnvironment(t *testing.T) {
 	t.Parallel()
 	town, home := realFixture(t)
 	docs := filepath.Join(home, "docs-env")
-	cfg := t.TempDir()
-	if err := os.Mkdir(filepath.Join(cfg, ".beads"), 0o755); err != nil {
-		t.Fatalf("make the config dir's beads database: %v", err)
-	}
-	fromEnv := map[string]string{envTown: town, envDocs: docs, "CLAUDE_CONFIG_DIR": cfg}
+	fromEnv := map[string]string{envTown: town, envDocs: docs}
 	runner := &realRunner{answer: realGit(town)}
 	real, err := RealEnv(context.Background(), RealEnvOptions{Today: "smoke", Home: home, Run: runner.run,
 		Getenv: func(name string) string { return fromEnv[name] }})
@@ -956,12 +1000,6 @@ func TestRealEnvDefaultsFromTheEnvironment(t *testing.T) {
 	}
 	if !slices.Contains(real.Extract.BeadDirs, town) {
 		t.Errorf("BeadDirs = %q, want the town %q listed", real.Extract.BeadDirs, town)
-	}
-	if len(real.Extract.BeadDirs) == 0 {
-		t.Fatal("BeadDirs is empty, want the config dir last")
-	}
-	if want := cfg; real.Extract.BeadDirs[len(real.Extract.BeadDirs)-1] != want {
-		t.Errorf("last bead dir = %q, want the %s dir %q: it holds a beads database and replaces the home's .claude", real.Extract.BeadDirs[len(real.Extract.BeadDirs)-1], "CLAUDE_CONFIG_DIR", want)
 	}
 }
 

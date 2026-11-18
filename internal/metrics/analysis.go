@@ -98,8 +98,8 @@ func NeedRebuild(built, head string) bool {
 // AnalysisOptions is what the daily analysis reaches outside its Env: the
 // extract, the mango repository, and where its binary goes.
 type AnalysisOptions struct {
-	// Home is the home directory the in-process extract joins its defaults and
-	// its home-level bead listing to; empty is the process's own.
+	// Home is the home directory the in-process extract joins its town and docs
+	// defaults to; empty is the process's own.
 	Home string
 	// Extract runs the extract over town, writing its docs into docsDir, and
 	// returns the day directory it wrote. Nil is the in-process extract, whose
@@ -380,8 +380,7 @@ func readStamp(env Env, path string) (time.Time, error) {
 // the local day, and the caches saved so the next run reads each bead and
 // commit once. It returns the day directory the extract wrote. run is the
 // runner every git and bd command goes through; home is the directory the
-// extract's defaults and its home-level bead listing join to, empty for the
-// process's own.
+// extract's town and docs defaults join to, empty for the process's own.
 func inProcessExtract(now time.Time, home string, run RunnerDir) func(ctx context.Context, town, docsDir string) (string, error) {
 	return func(ctx context.Context, town, docsDir string) (string, error) {
 		real, err := RealEnv(ctx, RealEnvOptions{
