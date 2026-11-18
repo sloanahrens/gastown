@@ -1571,3 +1571,84 @@ func TestReadTownFileChecksTheFileBeforeReadingIt(t *testing.T) {
 		t.Errorf("a file over the cap: got %v, want ErrWorkspaceFileTooLarge", err)
 	}
 }
+
+// TestGatewayPusherReportedHash drives the reported-hash read: one GET to /readyz
+// with the bearer token, the hash taken from WorkspaceHashHeader, and a refusal for
+// each way the read can fail. A missing header is never an empty hash.
+func TestGatewayPusherReportedHash(t *testing.T) {
+	t.Parallel()
+	const url = "http://127.0.0.1:7440"
+	withHeader := func(hash string) func(*http.Request) (*http.Response, error) {
+		return func(*http.Request) (*http.Response, error) {
+			resp := jsonResponse(http.StatusOK, "ok\n")
+			if hash != "" {
+				resp.Header.Set(WorkspaceHashHeader, hash)
+			}
+			return resp, nil
+		}
+	}
+	tests := []struct {
+		name     string
+		url      string
+		noToken  bool
+		answer   func(*http.Request) (*http.Response, error)
+		want     string
+		wantErr  error
+		wantText string
+	}{
+		{name: "the header carries the reported hash", url: url, answer: withHeader("manifest-1"), want: "manifest-1"},
+		{name: "no gateway URL is refused", answer: withHeader("manifest-1"), wantErr: ErrNoGatewayURL},
+		{name: "no token file is refused", url: url, noToken: true, answer: withHeader("manifest-1"), wantErr: ErrNoTokenFile},
+		{name: "a missing header is ErrNoReportedHash", url: url, answer: withHeader(""), wantErr: ErrNoReportedHash},
+		{
+			name:     "an unreachable gateway is an error",
+			url:      url,
+			answer:   func(*http.Request) (*http.Response, error) { return nil, errors.New("connection refused") },
+			wantText: "did not answer",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got *http.Request
+			pusher := GatewayPusher{
+				URL: tt.url,
+				HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+					got = req
+					return tt.answer(req)
+				}),
+			}
+			if !tt.noToken {
+				pusher.TokenFile = clientToken(t, "  s3cret \n")
+			}
+			hash, err := pusher.ReportedHash(context.Background())
+			if tt.want == "" {
+				if err == nil {
+					t.Fatalf("ReportedHash = %q, nil error; want a refusal", hash)
+				}
+				if hash != "" {
+					t.Errorf("hash = %q with an error, want empty", hash)
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Errorf("error = %v, want %v", err, tt.wantErr)
+				}
+				if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+					t.Errorf("error = %q, want it to contain %q", err, tt.wantText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReportedHash: %v", err)
+			}
+			if hash != tt.want {
+				t.Errorf("hash = %q, want %q", hash, tt.want)
+			}
+			if got.Method != http.MethodGet || got.URL.String() != url+"/readyz" {
+				t.Errorf("request = %s %s, want GET %s/readyz", got.Method, got.URL, url)
+			}
+			if auth := got.Header.Get("Authorization"); auth != "Bearer s3cret" {
+				t.Errorf("Authorization = %q, want the bearer token from the token file", auth)
+			}
+		})
+	}
+}
