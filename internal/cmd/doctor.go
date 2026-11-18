@@ -152,8 +152,10 @@ token, and every token file in the town's gateway token directory
 project and file as gt dolt start, and the check never starts or repairs
 anything. When the cluster has a bd-gateway Deployment, the check reads the
 in-cluster gateway instead: the Deployment Available, its Service with an
-endpoint, and the workspace hash it reports equal to the town copy's. Without
-the flag it reports SKIPPED and never fails.`,
+endpoint, and the workspace hash in the X-Bd-Workspace header of a GET to the
+gateway's /readyz (sent with BD_GATEWAY_URL and the BD_GATEWAY_TOKEN_FILE token)
+equal to the manifest hash of the town copy. Without the flag it reports SKIPPED
+and never fails.`,
 	RunE: runDoctor,
 }
 
@@ -206,7 +208,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// default run never registers it.
 		d.Register(doctor.NewMacCrewHooksCheck())
 	}
-	registerDataUnitCheck(d, names, doltComposeRealDeps(), realBdGatewayClusterDeps())
+	registerDataUnitCheck(d, names, doltComposeRealDeps(), realBdGatewayClusterDeps(bdGatewayPusherFromEnv()))
 	if err := selectDoctorChecks(d, names); err != nil {
 		return err
 	}

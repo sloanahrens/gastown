@@ -3,9 +3,14 @@ package cmd
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/doctor"
 )
 
@@ -303,19 +308,128 @@ func TestDoctorBdGatewayTownHashRefusesANonTown(t *testing.T) {
 	}
 }
 
-// TestDoctorBdGatewayReportedHashRefuses: the reported hash has no kubectl read path,
-// so it refuses by name instead of reporting a hash it did not read.
-func TestDoctorBdGatewayReportedHashRefuses(t *testing.T) {
+// bdGatewayTestToken is the bearer token the gateway read presents in these tests.
+const bdGatewayTestToken = "daemon-test-token"
+
+// bdGatewayDoer is a bdgateway.HTTPDoer a test scripts: the request runs against the
+// answer the func returns, so the gateway read opens no socket (docs/testing.md,
+// no-network).
+type bdGatewayDoer func(*http.Request) (*http.Response, error)
+
+// Do answers req with the scripted answer.
+func (f bdGatewayDoer) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+// bdGatewayAnswer is the gateway's /readyz answer carrying hash on the workspace
+// header. An empty hash is an answer with no header. The status is not read, only the
+// header the gateway sets on every response.
+func bdGatewayAnswer(hash string) func(*http.Request) (*http.Response, error) {
+	return func(*http.Request) (*http.Response, error) {
+		h := http.Header{}
+		if hash != "" {
+			h.Set(bdgateway.WorkspaceHashHeader, hash)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}
+}
+
+// bdGatewayUnreachable is a gateway that does not answer at all.
+func bdGatewayUnreachable(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
+}
+
+// bdGatewayProductionCluster is the host's cluster deps, built by
+// realBdGatewayClusterDeps with a pusher whose requests run against answer. Only
+// kubectl and the town copy's hash come from the fake; the reported hash is the
+// production read. noURL and noToken leave the pusher without its URL or token file.
+func bdGatewayProductionCluster(t *testing.T, f *bdGatewayFake, answer func(*http.Request) (*http.Response, error), noURL, noToken bool) bdGatewayClusterDeps {
+	t.Helper()
+	pusher := bdgateway.GatewayPusher{URL: "https://bd-gateway:7440", HTTP: bdGatewayDoer(answer)}
+	if noURL {
+		pusher.URL = ""
+	}
+	if !noToken {
+		tokenFile := filepath.Join(t.TempDir(), "token")
+		if err := os.WriteFile(tokenFile, []byte(bdGatewayTestToken+"\n"), 0o600); err != nil {
+			t.Fatalf("writing the token file: %v", err)
+		}
+		pusher.TokenFile = tokenFile
+	}
+	cluster := realBdGatewayClusterDeps(pusher)
+	fake := f.deps()
+	cluster.kube = fake.kube
+	cluster.townHash = fake.townHash
+	return cluster
+}
+
+// TestDoctorBdGatewayReadsTheReportedHeader: the production reported-hash read takes
+// the hash from the gateway's workspace header. Equal passes all three checks; each
+// other answer fails with its own message.
+func TestDoctorBdGatewayReadsTheReportedHeader(t *testing.T) {
 	t.Parallel()
-	hash, err := bdGatewayReportedHash(context.Background())
-	if err == nil {
-		t.Fatalf("bdGatewayReportedHash = %q, nil error; want a refusal naming the header", hash)
+	const town = "hash-of-town"
+	tests := []struct {
+		name     string
+		answer   func(*http.Request) (*http.Response, error)
+		noURL    bool
+		noToken  bool
+		wantOK   bool
+		wantText []string
+	}{
+		{name: "a header equal to the town copy passes all three", answer: bdGatewayAnswer(town), wantOK: true},
+		{name: "a header that differs fails with both hashes", answer: bdGatewayAnswer("hash-of-other"), wantText: []string{"hash-of-other", town}},
+		{name: "a missing header fails by name", answer: bdGatewayAnswer(""), wantText: []string{"carries no X-Bd-Workspace header"}},
+		{name: "an unreachable gateway fails by name", answer: bdGatewayUnreachable, wantText: []string{"did not answer"}},
+		{name: "no gateway URL fails by name", answer: bdGatewayAnswer(town), noURL: true, wantText: []string{"set --gateway-url or BD_GATEWAY_URL"}},
+		{name: "no token file fails by name", answer: bdGatewayAnswer(town), noToken: true, wantText: []string{"set --token-file or BD_GATEWAY_TOKEN_FILE"}},
 	}
-	if hash != "" {
-		t.Errorf("hash = %q with an error, want empty", hash)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cluster := bdGatewayProductionCluster(t, healthyBdGatewayFake(), tt.answer, tt.noURL, tt.noToken)
+			res, _ := runBdGatewayCheck(t, []string{doctor.DataUnitCheckName}, cluster)
+			if tt.wantOK {
+				if res.Status != doctor.StatusOK {
+					t.Fatalf("status = %v, want OK; message %q", res.Status, res.Message)
+				}
+				if len(res.Details) != 3 {
+					t.Errorf("passed rungs = %d, want all three named in details: %v", len(res.Details), res.Details)
+				}
+				return
+			}
+			if res.Status != doctor.StatusError {
+				t.Fatalf("status = %v, want error; message %q", res.Status, res.Message)
+			}
+			for _, want := range tt.wantText {
+				if !strings.Contains(res.Message, want) {
+					t.Errorf("message = %q, want it to contain %q", res.Message, want)
+				}
+			}
+		})
 	}
-	if !strings.Contains(err.Error(), "X-Bd-Workspace") {
-		t.Errorf("error = %q, want it to name the response header the hash rides on", err)
+}
+
+// TestDoctorBdGatewayReadsReadyzWithTheToken: the reported hash is read with one GET
+// to the gateway's /readyz, carrying the daemon's bearer token.
+func TestDoctorBdGatewayReadsReadyzWithTheToken(t *testing.T) {
+	t.Parallel()
+	var got *http.Request
+	answer := func(req *http.Request) (*http.Response, error) {
+		got = req
+		return bdGatewayAnswer("hash-of-town")(req)
+	}
+	cluster := bdGatewayProductionCluster(t, healthyBdGatewayFake(), answer, false, false)
+	runBdGatewayCheck(t, []string{doctor.DataUnitCheckName}, cluster)
+	if got == nil {
+		t.Fatal("the gateway was not read")
+	}
+	if got.Method != http.MethodGet {
+		t.Errorf("method = %s, want GET", got.Method)
+	}
+	if want := "https://bd-gateway:7440/readyz"; got.URL.String() != want {
+		t.Errorf("url = %s, want %s", got.URL, want)
+	}
+	if auth := got.Header.Get("Authorization"); auth != "Bearer "+bdGatewayTestToken {
+		t.Errorf("Authorization header is not the bearer token from the token file")
 	}
 }
 

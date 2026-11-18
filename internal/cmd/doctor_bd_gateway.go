@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -34,13 +35,23 @@ type bdGatewayClusterDeps struct {
 }
 
 // realBdGatewayClusterDeps is the host's: kubectl, the daemon's namespace, the
-// town copy's hash from the same document a push sends, and the reported hash.
-func realBdGatewayClusterDeps() bdGatewayClusterDeps {
+// town copy's hash from the same document a push sends, and the reported hash read
+// through gateway, the pusher the daemon sends its workspace with.
+func realBdGatewayClusterDeps(gateway bdgateway.GatewayPusher) bdGatewayClusterDeps {
 	return bdGatewayClusterDeps{
 		kube:         realRunFunc(),
 		namespace:    k8sdaemon.DefaultNamespace,
 		townHash:     townWorkspaceHash,
-		reportedHash: bdGatewayReportedHash,
+		reportedHash: gateway.ReportedHash,
+	}
+}
+
+// bdGatewayPusherFromEnv is the pusher the doctor reads the gateway with: the URL and
+// token file gt-wrap's bdgateway target reads, the same pair the daemon pushes with.
+func bdGatewayPusherFromEnv() bdgateway.GatewayPusher {
+	return bdgateway.GatewayPusher{
+		URL:       os.Getenv(bdgateway.WorkspaceURLEnv),
+		TokenFile: os.Getenv(bdgateway.WorkspaceTokenEnv),
 	}
 }
 
@@ -52,14 +63,6 @@ func townWorkspaceHash(townRoot string) (string, error) {
 		return "", err
 	}
 	return doc.ManifestSHA, nil
-}
-
-// bdGatewayReportedHash is the reported hash's read path. The gateway puts its
-// hash on the X-Bd-Workspace header of each response, and kubectl does not return
-// response headers, so no kubectl read carries it. It refuses by name rather than
-// report a hash it did not read: an unread hash is not a match.
-func bdGatewayReportedHash(context.Context) (string, error) {
-	return "", errors.New("the bd gateway's workspace hash has no kubectl read path: it rides on the X-Bd-Workspace response header, which kubectl does not return")
 }
 
 // bdGatewayDataUnitCheck is the data unit check with the in-cluster bd gateway in
