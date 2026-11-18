@@ -36,59 +36,61 @@ func renderFlagsPathIn(townRoot string) string {
 // same name and type; TestRenderFlagsRecordCoversTheFlagStruct fails until a
 // newly added flag is recorded or named as deliberately not recorded.
 type renderFlagsRecord struct {
-	Dir                string `json:"dir"`
-	Out                string `json:"out"`
-	Namespace          string `json:"namespace"`
-	Rehearsal          bool   `json:"rehearsal"`
-	CPU                string `json:"cpu"`
-	Memory             string `json:"memory"`
-	HostGateway        string `json:"host_gateway"`
-	ConfirmStopped     bool   `json:"confirm_container_stopped"`
-	WithHelper         bool   `json:"with_helper"`
-	ProxyImage         string `json:"proxy_image"`
-	PolecatImage       string `json:"polecat_image"`
-	ConfigDir          string `json:"config_dir"`
-	OpenShellConfigDir string `json:"openshell_config_dir"`
-	ForgeHost          string `json:"forge_host"`
-	DoltBackupHostPath string `json:"dolt_backup_host_path"`
-	Dashboard          bool   `json:"dashboard"`
-	DashboardClaudeDir string `json:"dashboard_claude_dir"`
-	BdGatewayURL       string `json:"bd_gateway_url"`
-	DaemonClaudeDir    string `json:"daemon_claude_dir"`
-	Tracker            bool   `json:"tracker"`
-	TrackerDSNSecret   string `json:"tracker_dsn_secret"`
-	TrackerBackup      bool   `json:"tracker_backup"`
-	TrackerBackupImage string `json:"tracker_backup_image"`
-	DaemonBdGatewayURL string `json:"daemon_bd_gateway_url"`
+	Dir                  string `json:"dir"`
+	Out                  string `json:"out"`
+	Namespace            string `json:"namespace"`
+	Rehearsal            bool   `json:"rehearsal"`
+	CPU                  string `json:"cpu"`
+	Memory               string `json:"memory"`
+	HostGateway          string `json:"host_gateway"`
+	ConfirmStopped       bool   `json:"confirm_container_stopped"`
+	WithHelper           bool   `json:"with_helper"`
+	ProxyImage           string `json:"proxy_image"`
+	PolecatImage         string `json:"polecat_image"`
+	ConfigDir            string `json:"config_dir"`
+	OpenShellConfigDir   string `json:"openshell_config_dir"`
+	ForgeHost            string `json:"forge_host"`
+	DoltBackupHostPath   string `json:"dolt_backup_host_path"`
+	Dashboard            bool   `json:"dashboard"`
+	DashboardClaudeDir   string `json:"dashboard_claude_dir"`
+	BdGatewayURL         string `json:"bd_gateway_url"`
+	BdGatewayTokenSecret string `json:"bd_gateway_token_secret"`
+	DaemonClaudeDir      string `json:"daemon_claude_dir"`
+	Tracker              bool   `json:"tracker"`
+	TrackerDSNSecret     string `json:"tracker_dsn_secret"`
+	TrackerBackup        bool   `json:"tracker_backup"`
+	TrackerBackupImage   string `json:"tracker_backup_image"`
+	DaemonBdGatewayURL   string `json:"daemon_bd_gateway_url"`
 }
 
 // record is f as the file holds it.
 func (f clusterRenderFlags) record() renderFlagsRecord {
 	return renderFlagsRecord{
-		Dir:                f.dir,
-		Out:                f.out,
-		Namespace:          f.namespace,
-		Rehearsal:          f.rehearsal,
-		CPU:                f.cpu,
-		Memory:             f.memory,
-		HostGateway:        f.hostGateway,
-		ConfirmStopped:     f.confirmStopped,
-		WithHelper:         f.withHelper,
-		ProxyImage:         f.proxyImage,
-		PolecatImage:       f.polecatImage,
-		ConfigDir:          f.configDir,
-		OpenShellConfigDir: f.openShellConfigDir,
-		ForgeHost:          f.forgeHost,
-		DoltBackupHostPath: f.doltBackupHostPath,
-		Dashboard:          f.dashboard,
-		DashboardClaudeDir: f.dashboardClaudeDir,
-		BdGatewayURL:       f.bdGatewayURL,
-		DaemonClaudeDir:    f.daemonClaudeDir,
-		Tracker:            f.tracker,
-		TrackerDSNSecret:   f.trackerDSNSecret,
-		TrackerBackup:      f.trackerBackup,
-		TrackerBackupImage: f.trackerBackupImage,
-		DaemonBdGatewayURL: f.daemonBdGatewayURL,
+		Dir:                  f.dir,
+		Out:                  f.out,
+		Namespace:            f.namespace,
+		Rehearsal:            f.rehearsal,
+		CPU:                  f.cpu,
+		Memory:               f.memory,
+		HostGateway:          f.hostGateway,
+		ConfirmStopped:       f.confirmStopped,
+		WithHelper:           f.withHelper,
+		ProxyImage:           f.proxyImage,
+		PolecatImage:         f.polecatImage,
+		ConfigDir:            f.configDir,
+		OpenShellConfigDir:   f.openShellConfigDir,
+		ForgeHost:            f.forgeHost,
+		DoltBackupHostPath:   f.doltBackupHostPath,
+		Dashboard:            f.dashboard,
+		DashboardClaudeDir:   f.dashboardClaudeDir,
+		BdGatewayURL:         f.bdGatewayURL,
+		BdGatewayTokenSecret: f.bdGatewayTokenSecret,
+		DaemonClaudeDir:      f.daemonClaudeDir,
+		Tracker:              f.tracker,
+		TrackerDSNSecret:     f.trackerDSNSecret,
+		TrackerBackup:        f.trackerBackup,
+		TrackerBackupImage:   f.trackerBackupImage,
+		DaemonBdGatewayURL:   f.daemonBdGatewayURL,
 	}
 }
 
@@ -115,6 +117,7 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		dashboard:             r.Dashboard,
 		dashboardClaudeDir:    r.DashboardClaudeDir,
 		bdGatewayURL:          r.BdGatewayURL,
+		bdGatewayTokenSecret:  r.BdGatewayTokenSecret,
 		daemonClaudeDir:       r.DaemonClaudeDir,
 		tracker:               r.Tracker,
 		trackerDSNSecret:      r.TrackerDSNSecret,
