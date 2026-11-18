@@ -288,7 +288,8 @@ hour, which is the evidence for revisiting the 1 CPU and 1 GiB limit (decision 7
 
 bd reads four files per rig and one per town: `<rig>/.beads/redirect`,
 `metadata.json`, `config.yaml`, `dolt-server.port`, and `routes.jsonl` at the
-town's `.beads/` (seagull's facts, internal/sandbox/skeleton.go). They are
+town's `.beads/` (seagull's facts, internal/sandbox/skeleton.go). `bd cook` also
+reads the town's formulas, `.beads/formulas/<name>.formula.toml`. They are
 written by gt (`EnsureMetadata`, `EnsureMetadataForBeadsDir`, `WriteRoutes`, rig
 setup) and by `bd init` and `bd config set`. A route flip is an edit to
 `routes.jsonl`; the bd container must see it at once.
@@ -301,7 +302,8 @@ Two ways to give the container those files:
   copy and the pod's claim are already two copies that can drift.
 - B. The gateway owns a small workspace tree, `/var/lib/bdgw/ws/<rig>/.beads/
   {metadata.json, config.yaml, redirect, dolt-server.port}` and
-  `/var/lib/bdgw/ws/.beads/routes.jsonl`, and gt pushes it. The image links
+  `/var/lib/bdgw/ws/.beads/routes.jsonl` and the town's formulas under
+  `/var/lib/bdgw/ws/.beads/formulas/`, and gt pushes it. The image links
   `/ws` to `/var/lib/bdgw/ws`, so the `/ws/<rel>` paths gt writes into redirects
   resolve. The root is not a mount point and sits under `/var/lib/bdgw`, which
   the gateway user owns: the store renames its temp tree in the root's parent,
@@ -312,10 +314,19 @@ Under B:
 - gt-side, `gt bd workspace push` reads the files from the town copy it runs in
   (the pod's claim) and sends them with `PUT /v1/workspace` as one JSON document
   `{"manifest_sha":"...","files":{"<rel path>":"<content>"}}`. The gateway
-  validates every path (relative, no `..`, only the five file names above),
-  writes into a temp tree, renames it into place atomically, and answers with
-  its own manifest hash. Paths inside `metadata.json` and `redirect` are rewritten
-  to `/ws` relative form on the gt side.
+  validates every path (relative, no `..`, only the five file names above or a
+  town formula name), writes into a temp tree, renames it into place atomically,
+  and answers with its own manifest hash. Paths inside `metadata.json` and
+  `redirect` are rewritten to `/ws` relative form on the gt side.
+- The town's formulas are pushed as they are: each regular file
+  `<town>/.beads/formulas/<name>.formula.toml` goes to the same relative path,
+  because `bd cook` reads a sling's formula from there, and a sling through the
+  gateway fails with "issue not found" without it. A rig's formulas directory is
+  not pushed. Other files in the town's formulas directory (a README, the
+  installed record) and subdirectories are skipped. A formula entry that is a
+  link or not a regular file, a formula over the per-file cap, and a formulas
+  directory that is a link (out of the town, or naming nothing) each refuse the
+  whole push. A town with no formulas directory pushes none.
 - It is called, always, after the function that changes the files returns:
   `EnsureMetadata*` and `WriteRoutes` call it through a small `workspacePusher`
   interface (nil when no gateway is configured, so every existing test and the
