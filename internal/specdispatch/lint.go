@@ -312,6 +312,13 @@ type LintOptions struct {
 	// budget line at all. Off (false) is the default: a bead that declares no
 	// budget is not judged on one (gt-j0xfx5).
 	BudgetRequired bool
+	// RequireEstimate refuses a work bead that carries no sp-minutes label, so
+	// a bead filed before any estimate ran its gate is refused rather than
+	// passing in silence (gt-1cx0o0). Off (false) is the default: a library
+	// caller that is not the filer's lint reads no estimate requirement. A bead
+	// whose sp-rung is none carries the estimate's own answer that no estimate
+	// could be made, so it passes.
+	RequireEstimate bool
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
@@ -337,9 +344,9 @@ const (
 )
 
 // Refusal is one shape failure: the field that failed ("## Gate",
-// "acceptance", "size", "not a work bead") and the phrase the one-line report
-// uses. gt spec lint --json prints the whole list so a shell caller can act on
-// every failure at once.
+// "acceptance", "size", "estimate", "not a work bead") and the phrase the
+// one-line report uses. gt spec lint --json prints the whole list so a shell
+// caller can act on every failure at once.
 type Refusal struct {
 	Field  string `json:"field"`
 	Reason string `json:"reason"`
@@ -349,8 +356,8 @@ type Refusal struct {
 type LintVerdict struct {
 	Route Route
 	// Field names the first refusal's field ("## Gate", "acceptance", "size",
-	// "not a work bead"), or "size" when the route is planning. Empty when
-	// clean.
+	// "estimate", "not a work bead"), or "size" when the route is planning.
+	// Empty when clean.
 	Field string
 	// Reason is a short human phrase for Field.
 	Reason string
@@ -775,7 +782,11 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //     rule named; a label that does not read, or two that disagree, leaves the
 //     gate unrun and says so in Warnings, and a bead labeled size-ok or whose
 //     rung is none passes (gt-mtzx6s)
-//  9. size: needs-planning label, a Size that says planning, or more than
+//  9. a bead carrying no sp-minutes label at all is refused when
+//     LintOptions.RequireEstimate asks for one, naming the two commands that
+//     write it; a bead whose rung is none, or whose label does not read,
+//     passes (gt-1cx0o0)
+//  10. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused. A bead labeled overseer-only or operator-only may
 //     say one session of its owner instead (gt-hgt9j.13)
@@ -890,6 +901,12 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	if r, refused := storyPointsSizeRefusal(s, opts.LintOverMinutes); refused {
 		failures = append(failures, r)
 	}
+	// A bead carrying no sp-minutes label at all is refused when the caller
+	// asks for an estimate, so a filer who never estimated hears it now rather
+	// than after the bead is dispatched (gt-1cx0o0).
+	if r, refused := storyPointsEstimateRefusal(s, opts.RequireEstimate); refused {
+		failures = append(failures, r)
+	}
 	// A bead that declares a change budget over the operator's maximum is
 	// refused here, where the size gate refuses, rather than at the landing gate
 	// once the work is already done (gt-j0xfx5).
@@ -954,6 +971,28 @@ func storyPointsSizeRefusal(s Spec, overMinutes float64) (Refusal, bool) {
 	return Refusal{Field: "size", Reason: fmt.Sprintf(
 		"%s is at or over lint_over_minutes %s: split the bead into beads of about twenty minutes each, one deliverable each, or remove the label with the reason if the estimate is wrong (a bead the overseer marks %s with a comment passes)",
 		label, minutesString(overMinutes), sizeOkLabel)}, true
+}
+
+// storyPointsEstimateRefusal is the estimate requirement's verdict on a spec:
+// the refusal when the bead carries no sp-minutes label, false otherwise. Off
+// (required false) reads no label. A bead whose sp-rung is none passes: the
+// estimate answered that none could be made, which is an estimate's answer and
+// not a missing one. A label that does not parse is still a label the filer
+// wrote — the size gate owns that reading when it is on — so it is not a
+// missing estimate either.
+func storyPointsEstimateRefusal(s Spec, required bool) (Refusal, bool) {
+	if !required || s.HasLabel(noneRungLabel) {
+		return Refusal{}, false
+	}
+	if _, _, found, err := storyPointsMinutes(s.Labels); found || err != nil {
+		return Refusal{}, false
+	}
+	id := s.ID
+	if id == "" {
+		id = "<bead-id>"
+	}
+	return Refusal{Field: "estimate", Reason: fmt.Sprintf(
+		"no story-point estimate (no sp-minutes label): run gt spec lint --estimate %s, or gt spec estimate %s", id, id)}, true
 }
 
 // changeBudgetRefusal is the lint's verdict on a bead's declared change budget

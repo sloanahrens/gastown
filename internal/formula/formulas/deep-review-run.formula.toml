@@ -129,7 +129,7 @@ needs none, keeping its docs-only gate.
 ```bash
 gt bead create "<one line>" --type bug -p <1|2|3> -l review-deep -q \\
   -d "$(cat $D/body.md)"
-gt spec lint <new id>          # must exit 0; fix the body until it does
+gt spec lint --allow-unestimated <new id>   # new bead, no estimate yet; must exit 0
 ```
 With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued`.
 
