@@ -25,7 +25,7 @@ const (
 type Owner struct {
 	// Profile is gt-sbx when the listener is the sandbox VM's Lima forward,
 	// gt-control when it is the control VM's, and "" when nothing listens or
-	// the command names neither. Nothing listening and an unrecognised
+	// the command names neither. Nothing listening and an unrecognized
 	// listener read alike; a caller treats "" as "no known VM forward owns the
 	// port", never as proof that one of the two is absent.
 	Profile string
