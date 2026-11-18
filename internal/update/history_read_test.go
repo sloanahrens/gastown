@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -53,6 +52,7 @@ func TestUpdateHistoryReadNewestFirstAndLimit(t *testing.T) {
 		{name: "every run when n exceeds the count", n: 10, want: []State{third, second, first}},
 		{name: "exactly the count", n: 3, want: []State{third, second, first}},
 		{name: "zero asks for no runs", n: 0, want: nil},
+		{name: "a negative count reads as no runs", n: -1, want: nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestUpdateHistoryReadMissingFileIsEmpty(t *testing.T) {
 	}
 }
 
-func TestUpdateHistoryReadSkipsCorruptAndPartialLines(t *testing.T) {
+func TestUpdateHistoryReadSkipsCorruptLines(t *testing.T) {
 	t.Parallel()
 	store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
 	older := appendRun(t, store, "20261103T100000Z-furiosa")
@@ -108,14 +108,35 @@ func TestUpdateHistoryReadSkipsCorruptAndPartialLines(t *testing.T) {
 	newer := appendRun(t, store, "20261103T110000Z-furiosa")
 	// A truncated line that does not parse.
 	appendRawHistory(t, store.Dir, `{"v":1,"run_id":"20261103T115000Z-cut`+"\n")
+
+	got, err := ReadHistory(store.Dir, 10)
+	if err != nil {
+		t.Fatalf("ReadHistory: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ReadHistory returned %d runs, want 2 (the corrupt and other-version lines skipped)", len(got))
+	}
+	assertSameState(t, got[0].State, newer)
+	assertSameState(t, got[1].State, older)
+}
+
+func TestUpdateHistoryReadSkipsPartialLastLine(t *testing.T) {
+	t.Parallel()
+	store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
+	finished := appendRun(t, store, "20261103T100000Z-furiosa")
 	// The last line is a whole run whose newline has not been written yet: the
 	// append is still in progress, so it is not a finished run.
 	inFlight := fullState()
-	inFlight.RunID = "20261103T120000Z-inflight"
+	inFlight.RunID = "20261103T110000Z-inflight"
 	inFlight.Outcome = OutcomeOK
 	data, err := json.Marshal(HistoryLine{State: inFlight})
 	if err != nil {
 		t.Fatalf("encode in-flight run: %v", err)
+	}
+	// The bytes are a complete run that parses on their own, so the missing
+	// newline is the only reason the line can be skipped.
+	if _, ok := parseHistoryLine(data); !ok {
+		t.Fatalf("in-flight bytes do not parse; the test would not isolate the newline check")
 	}
 	appendRawHistory(t, store.Dir, string(data))
 
@@ -123,25 +144,10 @@ func TestUpdateHistoryReadSkipsCorruptAndPartialLines(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHistory: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("ReadHistory returned %d runs, want 2 (the corrupt, other-version and partial lines skipped)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("ReadHistory returned %d runs, want 1 (the partial last line skipped)", len(got))
 	}
-	assertSameState(t, got[0].State, newer)
-	assertSameState(t, got[1].State, older)
-}
-
-func TestUpdateHistoryReadRefusesNegativeCount(t *testing.T) {
-	t.Parallel()
-	store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
-	appendRun(t, store, "20261103T100000Z-furiosa")
-
-	got, err := ReadHistory(store.Dir, -1)
-	if err == nil {
-		t.Fatalf("ReadHistory(n=-1) = %d runs, want an error", len(got))
-	}
-	if !strings.Contains(err.Error(), "negative") {
-		t.Errorf("error %q does not name the negative count", err)
-	}
+	assertSameState(t, got[0].State, finished)
 }
 
 func TestUpdateHistoryReadReportsAnUnreadableFile(t *testing.T) {

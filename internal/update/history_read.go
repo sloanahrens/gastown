@@ -13,14 +13,12 @@ import (
 )
 
 // ReadHistory returns the newest n finished runs in dir's history.jsonl, newest
-// first. dir is the update state directory, as Dir returns it. A missing file
-// is an empty list. A line that does not parse, that carries another schema
-// version, or that is a partial last line of an append still in progress is
-// skipped. The read takes no lock and writes nothing.
+// first. dir is the update state directory, as Dir returns it. A count of zero
+// or less returns no runs. A missing file is an empty list. A line that does not
+// parse, that carries another schema version, or that is a partial last line of
+// an append still in progress is skipped. The read takes no lock and writes
+// nothing.
 func ReadHistory(dir string, n int) ([]HistoryLine, error) {
-	if n < 0 {
-		return nil, fmt.Errorf("read update history: count %d is negative", n)
-	}
 	path := filepath.Join(dir, historyFileName)
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
