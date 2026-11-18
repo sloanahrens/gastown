@@ -855,6 +855,14 @@ func TestBdGatewaySettlesDirectory(t *testing.T) {
 			wantRig: "gastown", wantCwd: "gastown",
 		},
 		{
+			name: "a relative -C with no working directory resolves against the town root",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway), []string) {
+				mkdirBeads(t, filepath.Join(town, "gastown"))
+				return Call{Argv: []string{"bd", "-C", "gastown", "list", "--json"}}, nil, []string{"list", "--json"}
+			},
+			wantRig: "gastown", wantCwd: "gastown",
+		},
+		{
 			name: "a relative -C that leaves the town is refused",
 			setup: func(t *testing.T, town string) (Call, func(*BdGateway), []string) {
 				return Call{
@@ -873,6 +881,75 @@ func TestBdGatewaySettlesDirectory(t *testing.T) {
 				}, nil, nil
 			},
 			wantErr: "outside the town",
+		},
+		{
+			name: "a -C symlink inside the town that points outside it is refused",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway), []string) {
+				outside := t.TempDir()
+				mkdirBeads(t, outside)
+				if err := os.MkdirAll(filepath.Join(town, "gastown"), 0o755); err != nil {
+					t.Fatalf("make the rig directory: %v", err)
+				}
+				link := filepath.Join(town, "gastown", "escape")
+				if err := os.Symlink(outside, link); err != nil {
+					t.Fatalf("link %s to %s: %v", link, outside, err)
+				}
+				return Call{
+					Argv: []string{"bd", "-C", link, "list"},
+					Dir:  town,
+				}, nil, nil
+			},
+			wantErr: "outside the town",
+		},
+		{
+			name: "a -C symlink inside the town that points inside it is accepted",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway), []string) {
+				mkdirBeads(t, filepath.Join(town, "gastown"))
+				link := filepath.Join(town, "gastown", "alias")
+				if err := os.Symlink(filepath.Join(town, "gastown"), link); err != nil {
+					t.Fatalf("link %s to the rig directory: %v", link, err)
+				}
+				return Call{
+					Argv: []string{"bd", "-C", link, "list"},
+					Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+					Dir:  town,
+				}, nil, []string{"list"}
+			},
+			wantRig: "gastown", wantCwd: "gastown/alias",
+		},
+		{
+			name: "a -C directory the stat reports but the filesystem cannot resolve is refused",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway), []string) {
+				info, err := os.Stat(town)
+				if err != nil {
+					t.Fatalf("stat the town: %v", err)
+				}
+				return Call{
+					Argv: []string{"bd", "-C", filepath.Join(town, "gastown", "gone"), "list"},
+					Dir:  town,
+				}, func(g *BdGateway) {
+					g.Stat = func(string) (fs.FileInfo, error) { return info, nil }
+				}, nil
+			},
+			wantErr: "resolve the bd call's -C directory",
+		},
+		{
+			name: "a town root the filesystem cannot resolve is refused",
+			setup: func(t *testing.T, town string) (Call, func(*BdGateway), []string) {
+				info, err := os.Stat(town)
+				if err != nil {
+					t.Fatalf("stat the town: %v", err)
+				}
+				missing := filepath.Join(town, "missing-town")
+				return Call{
+					Argv: []string{"bd", "-C", filepath.Join(missing, "gastown"), "list"},
+					Dir:  missing,
+				}, func(g *BdGateway) {
+					g.Town = missing
+					g.Stat = func(string) (fs.FileInfo, error) { return info, nil }
+				}, nil
+			},
+			wantErr: "resolve the town",
 		},
 		{
 			name: "a -C in a call whose working directory is relative is refused",

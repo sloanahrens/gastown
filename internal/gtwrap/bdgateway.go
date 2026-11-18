@@ -286,15 +286,15 @@ func (g BdGateway) validate() error {
 }
 
 // settleDirectory turns a call that begins with bd's root flag "-C <dir>" into
-// the call run in that directory: -C names the directory bd would run in, and
-// the gateway takes the directory from the call instead, so the flag becomes
-// call.Dir (gt-dnaau7). The directory is resolved against the call's own working
-// directory when it is relative, and must be an existing directory inside the
-// town. An empty value, a path outside the town, and one that is missing, is
-// not a directory or cannot be read each refuse the call before it is sent; the
-// refusal names the path, or says the flag named none. An explicit BEADS_DIR
-// still decides the rig, since settleBeadsDir runs after and leaves the
-// variable alone.
+// the call run in that directory. The gateway takes the working directory from
+// the call, not from bd's flag, so the flag becomes call.Dir. A relative
+// directory resolves against the call's working directory, or against the town
+// root when the call has none. The directory must exist and lie inside the town
+// once symbolic links are resolved, so a link cannot send the call outside it.
+// An empty name, a path outside the town, a missing directory, one that is not
+// a directory, and one that cannot be read are each refused before the call is
+// sent; the refusal names the path, or says the flag named none. An explicit
+// BEADS_DIR still decides the rig.
 //
 // Only the leading pair is read. A "-C" anywhere else, and the attached forms
 // "-C<dir>" and "-C=<dir>", are left for the gateway's flag refusal.
@@ -308,7 +308,11 @@ func (g BdGateway) settleDirectory(call *Call) error {
 	}
 	dir := named
 	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(call.Dir, dir)
+		base := call.Dir
+		if base == "" {
+			base = g.Town
+		}
+		dir = filepath.Join(base, dir)
 	}
 	dir = filepath.Clean(dir)
 	described := named
@@ -330,6 +334,22 @@ func (g BdGateway) settleDirectory(call *Call) error {
 		return fmt.Errorf("gtwrap: read the bd call's -C directory %s: %w", described, err)
 	case info == nil || !info.IsDir():
 		return fmt.Errorf("gtwrap: the bd call's -C directory %s is not a directory, so it cannot be the call's working directory", described)
+	}
+	// The lexical check above cannot see a symbolic link: a link inside the town
+	// may point outside it, and the gateway would run the call there. The
+	// containment is checked again on the resolved paths. A failed resolution
+	// refuses too, since an unresolved path cannot be shown to be inside.
+	realTown, err := filepath.EvalSymlinks(g.Town)
+	if err != nil {
+		return fmt.Errorf("gtwrap: resolve the town %s, so the bd call's -C directory %s cannot be checked against it: %w", g.Town, described, err)
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return fmt.Errorf("gtwrap: resolve the bd call's -C directory %s: %w", described, err)
+	}
+	realRel, err := filepath.Rel(realTown, realDir)
+	if err != nil || realRel == ".." || strings.HasPrefix(realRel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("gtwrap: the bd call's -C directory %s is outside the town %s, so it cannot be the call's working directory", described, g.Town)
 	}
 	call.Argv = append([]string{call.Argv[0]}, call.Argv[3:]...)
 	call.Dir = dir
