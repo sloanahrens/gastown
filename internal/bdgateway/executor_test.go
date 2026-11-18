@@ -869,13 +869,32 @@ func TestExecutorEnv(t *testing.T) {
 	}
 }
 
+// TestExecutorEnvWithoutWorkspaceRoot: an executor with no workspace root omits
+// GT_TOWN_ROOT instead of setting it to the empty string. New refuses such an
+// executor, so the test builds one directly to exercise buildEnv's guard.
+func TestExecutorEnvWithoutWorkspaceRoot(t *testing.T) {
+	t.Parallel()
+	e := &Executor{
+		home:         "/home/bdgw",
+		searchPath:   "/usr/local/bin:/usr/bin:/bin",
+		doltHost:     "gt-dolt",
+		doltPort:     "3307",
+		trackerURL:   "http://127.0.0.1:7433",
+		trackerToken: "/run/secrets/tracker.token",
+	}
+	env, err := e.buildEnv(filepath.Join("gastown", ".beads"), nil)
+	if err != nil {
+		t.Fatalf("buildEnv: %v", err)
+	}
+	if got, ok := envMap(env)["GT_TOWN_ROOT"]; ok {
+		t.Errorf("GT_TOWN_ROOT = %q with no workspace root, want the key absent", got)
+	}
+}
+
 // TestExecutorCookFindsTheTownFormulas: a sling's cook carries the route
-// target's .beads as BEADS_DIR — for a gt- bead, gastown/mayor/rig/.beads — and
-// bd reads formulas from its own beads directory's formulas/ unless
-// $GT_TOWN_ROOT/.beads/formulas holds them (bd formula --help, search paths
-// 1-4). The push carries the town's formulas only under the town's .beads, so
-// without the town root in the call's environment the cook finds no formula and
-// bd exits 20 (gt-x49njj).
+// target's own .beads as BEADS_DIR — for a gt- bead, gastown/mayor/rig/.beads —
+// which holds no formulas, so bd finds the town's only through the workspace
+// root the environment names (gt-x49njj).
 func TestExecutorCookFindsTheTownFormulas(t *testing.T) {
 	t.Parallel()
 	town := clientTown(t)
@@ -921,18 +940,22 @@ func TestExecutorCookFindsTheTownFormulas(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wantBeads, formulaDirName)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("the call's BEADS_DIR holds a formulas directory (%v), so the test no longer reproduces the failing shape", err)
 	}
-	// bd's last search path is $GT_TOWN_ROOT/.beads/formulas, so the town root
-	// the environment names must be the workspace, and the town's formula must
-	// be there for the cook to find it.
+	// The town root the call's environment names must be the workspace and must
+	// hold the pushed formula, or the cook finds nothing.
 	townRoot, ok := env["GT_TOWN_ROOT"]
 	if !ok {
-		t.Fatalf("the cook's environment names no GT_TOWN_ROOT, so bd searches only its own BEADS_DIR and finds no formula")
+		t.Fatalf("the cook's environment names no GT_TOWN_ROOT")
 	}
 	if townRoot != root {
 		t.Fatalf("GT_TOWN_ROOT = %q, want the workspace root %q", townRoot, root)
 	}
-	if _, err := os.Stat(filepath.Join(townRoot, ".beads", formulaDirName, name)); err != nil {
-		t.Errorf("the town root the cook is given holds no %s: %v", name, err)
+	formula := filepath.Join(townRoot, ".beads", formulaDirName, name)
+	fi, err := os.Stat(formula)
+	if err != nil {
+		t.Fatalf("the town root the cook is given holds no %s: %v", name, err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Errorf("%s is not a regular file: %v", formula, fi.Mode())
 	}
 }
 
