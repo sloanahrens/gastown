@@ -136,6 +136,29 @@ func TestEligibleFollowsTheSharedHoldRule(t *testing.T) {
 	}
 }
 
+// TestDispatchHoldLabelPrefixEligible pins the dispatcher's half of the hold:
+// prefix rule (gt-la0djc): a bead the birds filed for the overseer to vet —
+// hold:decision, hold:vet, hold:order — is not a candidate, and the refusal
+// names the label. The server-side ready query cannot filter a prefix, so the
+// eligibility arm is what catches it.
+func TestDispatchHoldLabelPrefixEligible(t *testing.T) {
+	t.Parallel()
+	for _, label := range []string{"hold:decision", "hold:vet", "hold:order"} {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			s := goodSpec()
+			s.Labels = append(s.Labels, label)
+			ok, why := Eligible(s, 2)
+			if ok {
+				t.Fatalf("Eligible with %q = true, want a hold", label)
+			}
+			if want := "hold: label " + label; why != want {
+				t.Errorf("Eligible with %q refused %q, want %q", label, why, want)
+			}
+		})
+	}
+}
+
 // The ready query filters the excluded labels the tick does not have to
 // report, and carries the rest: a board-carried label's bead reaches the tick
 // so its skip line names the label, and every other excluded label is filtered

@@ -68,6 +68,13 @@ var (
 	dispatchHoldLabels = append(append([]string(nil), routingHoldLabels...), HumanHoldLabels()...)
 )
 
+// holdPrefix begins the labels the birds write on a bead they file for the
+// overseer to vet: hold:decision, hold:vet, hold:order. The part after the
+// colon names the ruling, so no list can carry every name; the rule matches
+// the prefix itself. The match is the exact lower-case prefix, so holdover,
+// on-hold and hold are ordinary work.
+const holdPrefix = "hold:"
+
 // HumanHoldLabels returns the labels in humanHoldLabels, the holds no polecat
 // can settle. A reader that must know the vocabulary before it sees a bead's
 // fields — the dashboard's page script, whose copy of the list the page tests
@@ -117,6 +124,18 @@ func holdFieldReason(labels []string, assignee, design, notes string, op *config
 			if strings.EqualFold(label, held) {
 				return "label " + label
 			}
+		}
+	}
+	// The hold: labels carry their ruling after the prefix, so the vocabulary
+	// above cannot list them all and the rule matches the prefix instead.
+	// This runs after the operator reservation and the label lists, so a bead
+	// that already has a reason keeps it. It sits in the rule both reads
+	// share, so the dispatcher's draw and the sling guard refuse the bead
+	// alike. The server-side ready query cannot filter a prefix, so this arm
+	// is what keeps such a bead out of an automatic dispatch.
+	for _, label := range labels {
+		if strings.HasPrefix(label, holdPrefix) {
+			return "label " + label
 		}
 	}
 	if decision := holdDecisionIn(design); decision != "" {

@@ -276,3 +276,68 @@ func TestOverseerFirstLabelsHold(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatchHoldLabelPrefixVerdicts pins the hold: labels the birds write on
+// a bead they file for the overseer to vet (gt-la0djc): a label starting with
+// the exact lower-case hold: prefix holds the bead, with the reason naming the
+// label as typed, and a label that merely carries "hold" does not. Both reads
+// of the shared rule refuse it — the dispatcher's draw through
+// DispatchHoldFields and the sling guard's through SlingHoldFields — since a
+// server-side ready query cannot filter a prefix.
+func TestDispatchHoldLabelPrefixVerdicts(t *testing.T) {
+	t.Parallel()
+	t.Run("holds", func(t *testing.T) {
+		t.Parallel()
+		for _, label := range []string{"hold:decision", "hold:vet", "hold:order"} {
+			t.Run(label, func(t *testing.T) {
+				t.Parallel()
+				want := "label " + label
+				if got := DispatchHoldFields("open", []string{label}, "", "", "", nil); got != want {
+					t.Errorf("DispatchHoldFields with %q = %q, want %q", label, got, want)
+				}
+				if got := SlingHoldFields([]string{label}, "", "", "", nil); got != want {
+					t.Errorf("SlingHoldFields with %q = %q, want %q", label, got, want)
+				}
+			})
+		}
+	})
+	t.Run("does not hold", func(t *testing.T) {
+		t.Parallel()
+		for _, label := range []string{"holdover", "on-hold", "hold", "Hold:vet"} {
+			t.Run(label, func(t *testing.T) {
+				t.Parallel()
+				if got := DispatchHoldFields("open", []string{label}, "", "", "", nil); got != "" {
+					t.Errorf("DispatchHoldFields with %q = %q, want no hold", label, got)
+				}
+				if got := SlingHoldFields([]string{label}, "", "", "", nil); got != "" {
+					t.Errorf("SlingHoldFields with %q = %q, want no hold", label, got)
+				}
+			})
+		}
+	})
+	// A bead that already has a reason keeps it, whichever order the labels
+	// are written in: the prefix arm runs after the operator reservation and
+	// the label lists.
+	t.Run("keeps the existing reason", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name     string
+			labels   []string
+			assignee string
+			want     string
+		}{
+			{"overseer-only before the hold: label", []string{OverseerOnlyLabel, "hold:vet"}, "", "label " + OverseerOnlyLabel},
+			{"overseer-only after the hold: label", []string{"hold:vet", OverseerOnlyLabel}, "", "label " + OverseerOnlyLabel},
+			{"the operator reservation", []string{"hold:vet", OperatorLabel}, "", "label " + OperatorLabel},
+			{"a human assignee", []string{"hold:vet"}, "ada", "assignee ada is not an agent address"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := DispatchHoldFields("open", tc.labels, tc.assignee, "", "", nil); got != tc.want {
+					t.Errorf("DispatchHoldFields(%q, %q) = %q, want %q", tc.labels, tc.assignee, got, tc.want)
+				}
+			})
+		}
+	})
+}
