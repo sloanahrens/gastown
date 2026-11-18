@@ -53,8 +53,17 @@ for a copy-out, is written last and is not applied with the rest.
 Secret documents are not written. The command prints, for each Secret the
 Deployment mounts, one kubectl line that creates it from the operator's existing
 file, so no agent reads a secret. No file is opened to print those lines. The
-one exception is the daemon's bd gateway token Secret, which --daemon-bd-gateway-url
-mounts: the operator creates it, and the command prints a note in place of a line.
+one exception is the bd gateway token Secrets: the daemon's, which --daemon-bd-gateway-url
+mounts, and the gateway's own, which --bd-gateway-token-secret names. The operator
+creates them, and the command prints a note in place of a line.
+
+When the values file names a bd image (the bd key gt update images --bd writes),
+the render also writes the bd gateway: its Deployment, Service and workspace claim.
+It points the daemon and, with --dashboard, the dashboard at the gateway's
+in-cluster Service, http://bd-gateway.<namespace>.svc:7440, unless
+--daemon-bd-gateway-url or --bd-gateway-url names another URL. A rehearsal renders
+no gateway, and takes no default URL. The update Job takes its gateway URL from the
+daemon's BD_GATEWAY_URL.
 
 The image values file is read from under --dir, where imagevalues places it;
 a missing file is refused, since a render needs a digest. A live render also
@@ -97,18 +106,25 @@ type clusterRenderFlags struct {
 	dashboard          bool
 	dashboardClaudeDir string
 	bdGatewayURL       string
-	daemonClaudeDir    string
-	tracker            bool
-	trackerDSNSecret   string
-	trackerBackup      bool
-	trackerBackupImage string
-	daemonBdGatewayURL string
+	// bdGatewayTokenSecret names the Secret the bd gateway's tokens are read from;
+	// empty means defaultBdGatewayTokenSecret.
+	bdGatewayTokenSecret string
+	daemonClaudeDir      string
+	tracker              bool
+	trackerDSNSecret     string
+	trackerBackup        bool
+	trackerBackupImage   string
+	daemonBdGatewayURL   string
 	// daemonBdGatewayURLSet is whether the flag was named at all, so an empty value
 	// is refused rather than read as absent.
 	daemonBdGatewayURLSet bool
 }
 
 var clusterRender clusterRenderFlags
+
+// defaultBdGatewayTokenSecret is the Secret the bd gateway reads its tokens from
+// when --bd-gateway-token-secret is not given.
+const defaultBdGatewayTokenSecret = "bd-gateway-tokens" //nolint:gosec // a Secret name, not a credential
 
 // clusterRenderRecordOptions are the two flags that tie a run to the recorded-flags
 // file. They are not fields of clusterRenderFlags because that struct's every
@@ -223,7 +239,9 @@ func init() {
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerBackupImage, "tracker-backup-image", "",
 		"the postgres image the nightly dump runs in, by digest; its pg_dump must match the server's major version; it needs --tracker-backup")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonBdGatewayURL, "daemon-bd-gateway-url", "",
-		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only")
+		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only; without it, a values file with a bd image points the daemon at the in-cluster gateway")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayTokenSecret, "bd-gateway-token-secret", "",
+		"the Secret the bd gateway reads its tokens from, mounted whole in the gateway (default "+defaultBdGatewayTokenSecret+"); the render names it and never creates it; it is read only when the values file names a bd image")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
 		"write the flags this run used to the town's recorded-flags file, so a later render replays them with --use-recorded; a live render only")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.use, "use-recorded", false,
@@ -350,6 +368,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"dolt-backup-host-path", &f.doltBackupHostPath, r.doltBackupHostPath},
 		{"dashboard-claude-dir", &f.dashboardClaudeDir, r.dashboardClaudeDir},
 		{"bd-gateway-url", &f.bdGatewayURL, r.bdGatewayURL},
+		{"bd-gateway-token-secret", &f.bdGatewayTokenSecret, r.bdGatewayTokenSecret},
 		{"daemon-claude-dir", &f.daemonClaudeDir, r.daemonClaudeDir},
 		{"tracker-dsn-secret", &f.trackerDSNSecret, r.trackerDSNSecret},
 		{"tracker-backup-image", &f.trackerBackupImage, r.trackerBackupImage},
@@ -467,6 +486,9 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		}
 		f.openShellConfigDir = dir
 	}
+	if f.bdGatewayTokenSecret == "" {
+		f.bdGatewayTokenSecret = defaultBdGatewayTokenSecret
+	}
 	if err := f.validate(); err != nil {
 		return err
 	}
@@ -569,9 +591,14 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		fmt.Fprintf(d.out, "  %s\n", trackerBackupReaderLine())
 	}
 	// The daemon's gateway Secret is operator-created and skipped by secretCreateLines,
-	// so this note names it in its place. The render never reads the token.
-	if f.daemonBdGatewayURL != "" {
+	// so this note names it in its place. The render never reads the token. The
+	// in-cluster default sets the URL without the flag, so the note reads the Values.
+	if v.DaemonBdGatewayURL != "" {
 		fmt.Fprintf(d.out, "  %s\n", daemonBdGatewayTokenLine())
+	}
+	// The gateway's own tokens are the same kind of Secret: named here, never created.
+	if v.BdGatewayImage != "" {
+		fmt.Fprintf(d.out, "  %s\n", bdGatewayTokensLine(v.BdGatewayTokenSecret))
 	}
 	if !f.rehearsal {
 		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
@@ -681,6 +708,25 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.OMToken = true
 		v.ForgeHost = strings.TrimSpace(f.forgeHost)
 		v.DoltBackupHostPath = f.doltBackupHostPath
+	}
+	// A values file that names a bd image renders the gateway, and points its clients
+	// at the gateway's Service. A flag that names a URL wins. A rehearsal renders no
+	// gateway: it mounts no token and builds no hostAliases entry, which the gateway
+	// needs, so no default URL is set there.
+	if pair.Bd != "" && !f.rehearsal {
+		namespace := f.namespace
+		if namespace == "" {
+			namespace = k8sdaemon.DefaultNamespace
+		}
+		inCluster := inClusterBdGatewayURL(namespace)
+		v.BdGatewayImage = pair.Bd
+		v.BdGatewayTokenSecret = strings.TrimSpace(f.bdGatewayTokenSecret)
+		if v.DaemonBdGatewayURL == "" {
+			v.DaemonBdGatewayURL = inCluster
+		}
+		if f.dashboard && v.BdGatewayURL == "" {
+			v.BdGatewayURL = inCluster
+		}
 	}
 	return v, pair, townRoot, nil
 }
@@ -907,6 +953,19 @@ func trackerBackupLine(image, secret string) string {
 // token.
 func daemonBdGatewayTokenLine() string {
 	return fmt.Sprintf("the daemon reads its bd gateway token from Secret %s under key %s, mounted at %s: create it yourself before the apply; this render does not create it or read the token", k8sdaemon.BdGatewayDaemonSecretName, k8sdaemon.BdGatewayTokenKey, k8sdaemon.BdGatewayTokenDir)
+}
+
+// bdGatewayTokensLine names the Secret the gateway reads its tokens from. It is a
+// note like daemonBdGatewayTokenLine: the operator creates the Secret before the
+// apply, and the render neither creates it nor reads a token.
+func bdGatewayTokensLine(secret string) string {
+	return fmt.Sprintf("the bd gateway reads its tokens from Secret %s: create it yourself before the apply; this render does not create it or read a token", secret)
+}
+
+// inClusterBdGatewayURL is the gateway's Service URL in namespace. The daemon and,
+// with --dashboard, the dashboard are pointed at it when no URL flag names another.
+func inClusterBdGatewayURL(namespace string) string {
+	return fmt.Sprintf("http://%s.%s.svc:%d", k8sdaemon.BdGatewayName, namespace, k8sdaemon.BdGatewayPort)
 }
 
 // trackerBackupReaderLine names the reader Pod and says it is not applied with the
