@@ -39,14 +39,19 @@ const (
 	// per rig.
 	MaxWorkspaceFileBytes = 256 << 10
 
-	// MaxWorkspaceTotalBytes bounds the whole tree. A document over it would mean
-	// a caller that is not pushing bd's files and the town's formulas.
-	MaxWorkspaceTotalBytes = 1 << 20
+	// MaxWorkspaceTotalBytes bounds the whole tree. The tree carries the town's
+	// formulas under the town's beads directory and under each registered rig's,
+	// one copy per rig: the town's 21 formulas are about 160 KiB, so a town with
+	// ten rigs carries eleven copies, about 1.74 MiB, and this cap leaves room
+	// for more formulas and rigs. A document over it would mean a caller that is
+	// not pushing bd's files and the town's formulas.
+	MaxWorkspaceTotalBytes = 4 << 20
 
 	// MaxWorkspaceDocumentBytes bounds the JSON body of a push. JSON escaping can
 	// expand one byte to six ("\u00XX"), so a tree at the total cap can arrive as
-	// a body several times the cap; this leaves room for that and the manifest.
-	MaxWorkspaceDocumentBytes = 8 << 20
+	// a body six times the cap (24 MiB); this leaves room for that and the
+	// manifest.
+	MaxWorkspaceDocumentBytes = 28 << 20
 )
 
 // The workspace store's named refusals. Put and OpenWorkspaceStore wrap one of

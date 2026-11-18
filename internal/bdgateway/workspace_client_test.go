@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -72,6 +73,44 @@ func clientTown(t *testing.T) string {
 func quoteJSON(s string) string {
 	data, _ := json.Marshal(s)
 	return string(data)
+}
+
+// formulaTown writes the smallest town that carries a formula set: the town's
+// own beads metadata and routes, the given number of registered rigs, each with
+// its beads metadata, and the given number of formulas of size bytes. The
+// builder then carries every formula once under the town and once under each
+// rig.
+func formulaTown(t *testing.T, rigs, formulas, size int) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("creating %s: %v", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", p, err)
+		}
+	}
+	write("mayor/town.json", `{"type":"town","version":1,"name":"fx"}`)
+	entries := make([]string, rigs)
+	names := make([]string, rigs)
+	for i := range names {
+		names[i] = fmt.Sprintf("rig%02d", i)
+		entries[i] = quoteJSON(names[i]) + ":{}"
+	}
+	write("mayor/rigs.json", `{"version":1,"rigs":{`+strings.Join(entries, ",")+`}}`)
+	write(".beads/metadata.json", `{"dolt_database":"hq"}`+"\n")
+	write(".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+	formula := strings.Repeat("f", size)
+	for i := 0; i < formulas; i++ {
+		write(fmt.Sprintf(".beads/formulas/mol-%02d%s", i, formulaSuffix), formula)
+	}
+	for _, name := range names {
+		write(name+"/.beads/metadata.json", `{"dolt_database":`+quoteJSON(name)+`}`+"\n")
+	}
+	return root
 }
 
 // clientTownDocument is the document writeClientTown's town builds, keyed by
@@ -806,12 +845,13 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			wantErr: ErrWorkspaceFileTooLarge,
 		},
 		{
-			// Five formulas at the per-file cap are over the total while each is
-			// under its own: the set is refused, never truncated.
+			// One more formula at the per-file cap than the total holds: the set
+			// is over the total while each file is under its own, so it is
+			// refused, never truncated.
 			name: "town formulas over the total cap",
 			spoil: func(t *testing.T, root string) {
-				for _, name := range []string{"a", "b", "c", "d", "e"} {
-					writePath(t, root, ".beads/formulas/"+name+".formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes))
+				for i := 0; i < MaxWorkspaceTotalBytes/MaxWorkspaceFileBytes+1; i++ {
+					writePath(t, root, fmt.Sprintf(".beads/formulas/bulk-%02d.formula.toml", i), strings.Repeat("f", MaxWorkspaceFileBytes))
 				}
 			},
 			wantErr: ErrWorkspaceTooLarge,
@@ -886,11 +926,17 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 // pushes the same set.
 func TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap(t *testing.T) {
 	t.Parallel()
-	// Three formulas at the per-file cap: the town's copies fit the total cap,
-	// and each rig's copy of them pushes the set over it.
+	// clientTown registers two rigs, so each formula is carried three times: at
+	// the per-file cap, one more formula than the total holds with the rig
+	// copies, while the town's copies alone fit under it.
+	const copies = 3
+	names := make([]string, MaxWorkspaceTotalBytes/(copies*MaxWorkspaceFileBytes)+1)
+	for i := range names {
+		names[i] = fmt.Sprintf("bulk-%02d", i)
+	}
 	spoil := func(t *testing.T, root string) {
 		t.Helper()
-		for _, name := range []string{"a", "b", "c"} {
+		for _, name := range names {
 			writePath(t, root, ".beads/formulas/"+name+".formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes))
 		}
 	}
@@ -913,12 +959,61 @@ func TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap(t *testing.T) {
 		if err != nil {
 			t.Fatalf("BuildWorkspaceDocument: %v", err)
 		}
-		for _, name := range []string{"a", "b", "c"} {
+		for _, name := range names {
 			if _, ok := doc.Files[".beads/formulas/"+name+".formula.toml"]; !ok {
 				t.Errorf("document holds no town formula %q", name)
 			}
 		}
 	})
+}
+
+// TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig: the town's
+// formula set is carried under the town's beads directory and under each
+// registered rig's, so a town with ten rigs pushes eleven copies, about 1.74 MiB
+// for the town's 21 formulas, and the gateway accepts the document whole. The
+// per-file cap still bounds each file; the total cap admits the copies the
+// workspace now carries.
+func TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig(t *testing.T) {
+	t.Parallel()
+	const (
+		formulaCount = 21
+		formulaSize  = 7555 // 21 of these are the 158,644 bytes the town's formulas take, to within 11
+		rigCount     = 10
+	)
+	root := formulaTown(t, rigCount, formulaCount, formulaSize)
+	doc, err := BuildWorkspaceDocument(root)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	if _, err := validatedManifest(doc); err != nil {
+		t.Fatalf("the gateway refuses the document: %v", err)
+	}
+	var formulaBytes int
+	for name, content := range doc.Files {
+		if strings.HasSuffix(name, formulaSuffix) {
+			formulaBytes += len(content)
+		}
+	}
+	wantCopies := rigCount + 1
+	if want := wantCopies * formulaCount * formulaSize; formulaBytes != want {
+		t.Errorf("the document carries %d formula bytes, want %d (%d copies of %d)", formulaBytes, want, wantCopies, formulaCount)
+	}
+	if formulaBytes <= 1<<20 {
+		t.Fatalf("the fixture carries %d formula bytes, not over the 1 MiB the total cap used to be", formulaBytes)
+	}
+	// The store is what a push lands in, so the document must push whole and
+	// read back to the same tree.
+	s, landing := openTestStore(t)
+	if _, err := s.Put(doc); err != nil {
+		t.Fatalf("the gateway refused the town's formulas under every rig: %v", err)
+	}
+	reopened, err := OpenWorkspaceStore(landing)
+	if err != nil {
+		t.Fatalf("reopening the store: %v", err)
+	}
+	if got := reopened.Manifest(); got != doc.ManifestSHA {
+		t.Errorf("the tree the gateway stored hashes to %s, want the document's %s", got, doc.ManifestSHA)
+	}
 }
 
 // TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder

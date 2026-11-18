@@ -1,6 +1,7 @@
 package bdgateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,18 @@ func testWorkspaceFiles(season string) map[string]string {
 		"gt/mayor/rig/.beads/config.yaml":      fmt.Sprintf("issue-prefix: \"gt-\"\nseason: %s\n", season),
 		"gt/mayor/rig/.beads/dolt-server.port": "3307",
 	}
+}
+
+// overTotalCapFiles is a valid document's files whose total is over
+// MaxWorkspaceTotalBytes while every file is under its own cap: a town formula
+// at the per-file cap for each file, one more file than the total holds.
+func overTotalCapFiles(season string) map[string]string {
+	files := testWorkspaceFiles(season)
+	n := MaxWorkspaceTotalBytes/MaxWorkspaceFileBytes + 1
+	for i := 0; i < n; i++ {
+		files[fmt.Sprintf(".beads/formulas/bulk-%02d.formula.toml", i)] = strings.Repeat("x", MaxWorkspaceFileBytes)
+	}
+	return files
 }
 
 // openTestStore opens a store whose root is a fresh directory under the test's
@@ -314,19 +327,7 @@ func TestWorkspaceValidation(t *testing.T) {
 		{
 			name: "a document over the total cap",
 			files: func() map[string]string {
-				files := maps.Clone(base)
-				for _, name := range []string{
-					"gt/.beads/redirect",
-					"gt/mayor/rig/.beads/metadata.json",
-					"gt/mayor/rig/.beads/config.yaml",
-					"gt/mayor/rig/.beads/dolt-server.port",
-				} {
-					files[name] = strings.Repeat("x", MaxWorkspaceFileBytes)
-				}
-				// Four files at the per-file cap plus one byte of routes is
-				// over the total cap while every file stays under its own.
-				files[".beads/routes.jsonl"] = "y"
-				return files
+				return overTotalCapFiles("one")
 			},
 			want: ErrWorkspaceTooLarge,
 		},
@@ -485,6 +486,74 @@ func TestWorkspaceAcceptsRigFormulas(t *testing.T) {
 	}
 	if got := reopened.Manifest(); got != manifest {
 		t.Errorf("the reopened store's manifest = %s, want %s", got, manifest)
+	}
+}
+
+// TestWorkspaceRefusesATreeOverTheTotalCapWhole: a document over the total cap
+// is refused with the named refusal before the store writes anything, so the
+// gateway keeps serving the tree it had rather than a truncated one.
+func TestWorkspaceRefusesATreeOverTheTotalCapWhole(t *testing.T) {
+	t.Parallel()
+	s, root := openTestStore(t)
+	before := pushWorkspace(t, s, testWorkspaceFiles("one"))
+	beforeTree := readWorkspace(t, root)
+
+	files := overTotalCapFiles("two")
+	if _, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(files), Files: files}); !errors.Is(err, ErrWorkspaceTooLarge) {
+		t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceTooLarge)
+	}
+	if after := readWorkspace(t, root); !maps.Equal(beforeTree, after) {
+		t.Errorf("a refused push changed the live tree:\nbefore: %v\nafter:  %v", beforeTree, after)
+	}
+	if after := s.Manifest(); after != before {
+		t.Errorf("manifest after a refused push = %s, want %s", after, before)
+	}
+	if siblings := siblingNames(t, root); len(siblings) != 0 {
+		t.Errorf("a refused push left %v beside the live tree", siblings)
+	}
+}
+
+// TestWorkspaceDocumentAtTheTotalCapFitsTheDocumentCap: a document whose files
+// total exactly the total cap, with every content byte the worst case for JSON
+// escaping (0x01 encodes as six bytes, "\u0001"), still fits the document cap
+// and the gateway accepts it, so a tree at the cap arrives whole rather than as
+// a 413.
+func TestWorkspaceDocumentAtTheTotalCapFitsTheDocumentCap(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{}
+	n := MaxWorkspaceTotalBytes / MaxWorkspaceFileBytes
+	for i := 0; i < n; i++ {
+		files[fmt.Sprintf(".beads/formulas/bulk-%02d.formula.toml", i)] = strings.Repeat("\x01", MaxWorkspaceFileBytes)
+	}
+	total := n * MaxWorkspaceFileBytes
+	if total != MaxWorkspaceTotalBytes {
+		t.Fatalf("the fixture totals %d bytes, want exactly the cap %d, so the caps are not multiples of the per-file cap", total, MaxWorkspaceTotalBytes)
+	}
+	doc := WorkspaceDocument{ManifestSHA: WorkspaceManifest(files), Files: files}
+	if _, err := validatedManifest(doc); err != nil {
+		t.Fatalf("the gateway refuses a document at the total cap: %v", err)
+	}
+	// The pusher's encoding (GatewayPusher.Push), so the body is the one the
+	// gateway's MaxBytesReader reads.
+	body, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("encoding the document: %v", err)
+	}
+	if len(body) < 6*total {
+		t.Fatalf("the body is %d bytes, not the worst case of six per byte (%d)", len(body), 6*total)
+	}
+	if len(body) > MaxWorkspaceDocumentBytes {
+		t.Fatalf("a document at the total cap encodes to %d bytes, over the document cap %d", len(body), MaxWorkspaceDocumentBytes)
+	}
+
+	s, root := openTestStore(t)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/workspace", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a push at the total cap answered %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := len(readWorkspace(t, root)); got != n {
+		t.Errorf("the live tree holds %d files, want the %d the push carried", got, n)
 	}
 }
 
@@ -1363,15 +1432,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		{
 			name: "a tree over the total cap",
 			build: func(t *testing.T, root string) {
-				for _, path := range []string{
-					".beads/routes.jsonl",
-					"gt/.beads/redirect",
-					"gt/mayor/rig/.beads/metadata.json",
-					"gt/mayor/rig/.beads/config.yaml",
-					"gt/mayor/rig/.beads/dolt-server.port",
-				} {
-					writeFileIn(t, root, path, strings.Repeat("x", MaxWorkspaceFileBytes))
-				}
+				writeOverTotalCapTree(t, root, "")
 			},
 		},
 		{
@@ -1433,15 +1494,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		{
 			name: "a tree over the total cap at an overlong path",
 			build: func(t *testing.T, root string) {
-				writeFileIn(t, root, ".beads/routes.jsonl", "x")
-				for _, path := range []string{
-					".beads/redirect",
-					".beads/metadata.json",
-					"mayor/rig/.beads/config.yaml",
-					"mayor/rig/.beads/dolt-server.port",
-				} {
-					writeFileIn(t, root, longDir+"/"+path, fill(MaxWorkspaceFileBytes))
-				}
+				writeOverTotalCapTree(t, root, longDir)
 			},
 		},
 	}
@@ -1591,6 +1644,20 @@ func writeFileIn(t *testing.T, root, path, content string) {
 	}
 	if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
 		t.Fatalf("writing %s: %v", target, err)
+	}
+}
+
+// writeOverTotalCapTree writes a live tree whose files are over the total cap
+// while each is under its own: town formulas at the per-file cap, one more than
+// the total holds, under dir ("" is the tree's root, else dir is a rig).
+func writeOverTotalCapTree(t *testing.T, root, dir string) {
+	t.Helper()
+	for i := 0; i < MaxWorkspaceTotalBytes/MaxWorkspaceFileBytes+1; i++ {
+		rel := fmt.Sprintf(".beads/formulas/bulk-%02d.formula.toml", i)
+		if dir != "" {
+			rel = dir + "/" + rel
+		}
+		writeFileIn(t, root, rel, strings.Repeat("x", MaxWorkspaceFileBytes))
 	}
 }
 
