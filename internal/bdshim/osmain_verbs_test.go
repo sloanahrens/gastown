@@ -20,11 +20,11 @@ import (
 func TestEveryHandlerIsAllowlisted(t *testing.T) {
 	t.Parallel()
 	paths := allowedPaths(t)
-	tree, _, err := cmdtree.LoadBdTree()
+	tree, snap, err := cmdtree.LoadBdTree()
 	if err != nil {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
-	for _, msg := range pathWordErrors(paths, tree) {
+	for _, msg := range pathWordErrors(paths, tree, gapsFor(snap.Commit)) {
 		t.Error(msg)
 	}
 	verbs := make([]string, 0, len(handlers))
@@ -44,29 +44,53 @@ func TestPathWordErrorsNamesAMissingWord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
-	got := pathWordErrors([]string{"show", "not-a-bd-verb"}, tree)
+	got := pathWordErrors([]string{"show", "not-a-bd-verb"}, tree, nil)
 	if len(got) != 1 || !strings.Contains(got[0], "not-a-bd-verb") {
 		t.Fatalf("pathWordErrors = %v, want one message naming not-a-bd-verb", got)
 	}
 }
 
-// TestPathWordErrorsExcusesOnlyAKnownTreeGap: a path listed in bdTreeGaps is
-// excused while the snapshot lacks it and reported as stale once the tree runs
-// it, and the list excuses no other path.
+// TestPathWordErrorsReportsAGapWhenNoneIsExcused: with no excuse list, a verb
+// the tree lacks is a word error, so the excuse can only come from the list.
+func TestPathWordErrorsReportsAGapWhenNoneIsExcused(t *testing.T) {
+	t.Parallel()
+	tree := cmdtree.NewTree()
+	tree.Add([]string{"show"}, nil, false)
+	got := pathWordErrors([]string{"sample add"}, tree, nil)
+	if len(got) == 0 || !strings.Contains(got[0], `"sample add"`) {
+		t.Fatalf("pathWordErrors(sample add, no excuses) = %v, want word errors for sample add", got)
+	}
+}
+
+// TestGapsForExcusesOnlyTheSnapshotItWasWrittenAgainst: the excuses hold while
+// the embedded snapshot is the commit bdTreeGaps was written against, and a
+// refreshed snapshot at any other commit excuses nothing.
+func TestGapsForExcusesOnlyTheSnapshotItWasWrittenAgainst(t *testing.T) {
+	t.Parallel()
+	if got := gapsFor(bdTreeGapsSnapshot); len(got) != len(bdTreeGaps) {
+		t.Errorf("gapsFor(recorded snapshot) has %d rows, want %d", len(got), len(bdTreeGaps))
+	}
+	if got := gapsFor("0000000000000000000000000000000000000000"); len(got) != 0 {
+		t.Errorf("gapsFor(other snapshot) = %v, want no excuses", got)
+	}
+}
+
+// TestPathWordErrorsExcusesOnlyAKnownTreeGap: a path listed in the excuse list
+// is excused while the tree lacks it and reported as stale once the tree runs
+// it, and the list excuses no other path. The tree is built here, so the test
+// does not depend on what the embedded snapshot holds.
 func TestPathWordErrorsExcusesOnlyAKnownTreeGap(t *testing.T) {
 	t.Parallel()
-	snapshot, _, err := cmdtree.LoadBdTree()
-	if err != nil {
-		t.Fatalf("LoadBdTree: %v", err)
-	}
-	if got := pathWordErrors([]string{"sample add"}, snapshot); len(got) != 0 {
+	absent := cmdtree.NewTree()
+	absent.Add([]string{"show"}, nil, false)
+	if got := pathWordErrors([]string{"sample add"}, absent, bdTreeGaps); len(got) != 0 {
 		t.Errorf("pathWordErrors(sample add) = %v, want the listed gap excused", got)
 	}
 
 	refreshed := cmdtree.NewTree()
 	refreshed.Add([]string{"sample", "add"}, nil, false)
 	refreshed.Add([]string{"sample", "list"}, nil, false)
-	got := pathWordErrors([]string{"sample add", "sample purge"}, refreshed)
+	got := pathWordErrors([]string{"sample add", "sample purge"}, refreshed, bdTreeGaps)
 	if len(got) != 2 || !strings.Contains(got[0], "sample add") || !strings.Contains(got[1], "sample purge") {
 		t.Errorf("pathWordErrors on a tree holding the gap = %v, want a stale row for sample add and a word error for sample purge", got)
 	}
@@ -117,14 +141,28 @@ var bdTreeGaps = map[string]string{
 	"sample list": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
 }
 
+// bdTreeGapsSnapshot is the command tree snapshot commit bdTreeGaps is written
+// against. The excuses apply only while the embedded snapshot is this commit,
+// so a refreshed snapshot re-checks every verb.
+const bdTreeGapsSnapshot = "b9f68260ed2a494972fe8aa922b6408a91905f0c"
+
+// gapsFor returns the excuses that apply to a tree snapshot at commit: bdTreeGaps
+// for the snapshot it was written against, none for any other.
+func gapsFor(commit string) map[string]string {
+	if commit == bdTreeGapsSnapshot {
+		return bdTreeGaps
+	}
+	return nil
+}
+
 // pathWordErrors returns one message per path word bd's tree does not resolve
 // in order. A prefix may stop on a help-only parent, which Resolve reports as
-// HelpOnly rather than Unknown. A path in bdTreeGaps is excused while the tree
-// lacks it, and reported once the tree resolves it.
-func pathWordErrors(paths []string, tree *cmdtree.Tree) []string {
+// HelpOnly rather than Unknown. A path in gaps is excused while the tree lacks
+// it, and reported once the tree resolves it.
+func pathWordErrors(paths []string, tree *cmdtree.Tree, gaps map[string]string) []string {
 	var errs []string
 	for _, path := range paths {
-		if _, known := bdTreeGaps[path]; known {
+		if _, known := gaps[path]; known {
 			if tree.Resolve(strings.Fields(path)).OK {
 				errs = append(errs, fmt.Sprintf("bdTreeGaps lists %q, but bd's tree now runs it: refresh the snapshot and delete the row", path))
 			}
