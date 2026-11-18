@@ -695,6 +695,17 @@ func (l brokenListener) Accept() (net.Conn, error) { return nil, l.err }
 func (l brokenListener) Close() error              { return nil }
 func (l brokenListener) Addr() net.Addr            { return pipeAddr{} }
 
+// closeErrListener closes the pipe listener it wraps and reports err with the
+// result, standing in for a socket whose Close fails.
+type closeErrListener struct {
+	*pipeListener
+	err error
+}
+
+func (l closeErrListener) Close() error {
+	return errors.Join(l.pipeListener.Close(), l.err)
+}
+
 // TestServePushListenerRoutes: with the default flags the push listener serves
 // PUT /v1/workspace and answers /v1/exec 404, while the main listener still runs
 // a call. The gateway is the production one; only the listener is in memory.
@@ -860,6 +871,62 @@ func TestServePushListenerDrain(t *testing.T) {
 	}
 }
 
+// TestServePushListenerDrainTimesOut: a call still running when the grace
+// expires makes the drain fail, and serve returns that error rather than
+// reading the shutdown as clean.
+func TestServePushListenerDrainTimesOut(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := newServeTestConfig(t)
+	sc.shutdownGrace = time.Millisecond
+	runner := newBlockingRunner()
+	sc.newGateway = func(opts bdgateway.GatewayOptions) (*bdgateway.Gateway, error) {
+		opts.Runner = runner
+		return bdgateway.NewGateway(opts)
+	}
+	mainPl, pushPl := newPipeListener(), newPipeListener()
+	sc.listen = listenByAddr(sc.addr, mainPl, sc.pushAddr, pushPl)
+	mainClient := dialClient(t, mainPl)
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	waitFor(t, bound, "both listeners accept", func() bool {
+		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+	})
+
+	inFlight := make(chan httpReply, 1)
+	go func() {
+		inFlight <- send(bound, mainClient, http.MethodPost, "/v1/exec", testReadToken, strings.NewReader(execHead(t)))
+	}()
+	select {
+	case <-runner.started:
+	case <-bound.Done():
+		t.Fatal("the call did not reach the executor within the test's bound")
+	}
+
+	stop()
+	select {
+	case err := <-served:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("serve with a grace the call outlasts = %v, want %v", err, context.DeadlineExceeded)
+		}
+	case <-bound.Done():
+		t.Fatal("serve did not return when the grace expired")
+	}
+	// Release the call so the handler and its connection finish before the
+	// test ends.
+	close(runner.release)
+	select {
+	case <-inFlight:
+	case <-bound.Done():
+		t.Fatal("the in-flight call did not finish within the test's bound")
+	}
+}
+
 // TestServePushListenerFailure: a listener that cannot bind or fails while
 // serving ends serve with that error, and the other listener does not keep
 // accepting.
@@ -885,6 +952,19 @@ func TestServePushListenerFailure(t *testing.T) {
 			},
 			probe: func(mainPl, _ *pipeListener) *pipeListener { return mainPl },
 			want:  "the push address is taken",
+		},
+		{
+			name: "push cannot bind and the main listener does not close",
+			listen: func(sc *serveConfig, mainPl, _ *pipeListener) func(string) (net.Listener, error) {
+				return func(addr string) (net.Listener, error) {
+					if addr == sc.pushAddr {
+						return nil, errors.New("the push address is taken")
+					}
+					return closeErrListener{pipeListener: mainPl, err: errors.New("the main listener did not close")}, nil
+				}
+			},
+			probe: func(mainPl, _ *pipeListener) *pipeListener { return mainPl },
+			want:  "the main listener did not close",
 		},
 		{
 			name: "push fails while serving",
