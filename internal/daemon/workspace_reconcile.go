@@ -34,18 +34,22 @@ func (d *Daemon) startWorkspaceReconcile() bool {
 	drift := newWorkspaceDriftCheck()
 	d.workspaceDrift = drift
 	push := bdgateway.PushWorkspace
+	var probe func(context.Context) error
 	if d.workspacePusher != nil {
 		push = d.workspacePusher.Push
 	} else {
 		// The installed pusher is what every writer of the town copy pushes
-		// through, so the reconcile and the writers share one push order.
+		// through, so the reconcile and the writers share one push order. The probe
+		// is the same pusher's GET, so it reaches the gateway the same way.
+		gateway := bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv), HTTP: d.workspaceHTTP, Observe: drift.observe}
 		install := d.installWorkspacePusher
 		if install == nil {
 			install = bdgateway.SetWorkspacePusher
 		}
-		install(bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv), Observe: drift.observe})
+		install(gateway)
+		probe = gateway.Probe
 	}
-	go runWorkspaceReconcile(d.ctx, d.clk(), d.reconcileInterval, push, d.config.TownRoot, d.logger.Printf, drift)
+	go runWorkspaceReconcile(d.ctx, d.clk(), d.reconcileInterval, push, probe, d.config.TownRoot, d.logger.Printf, drift)
 	return true
 }
 
@@ -71,20 +75,29 @@ const workspaceDriftGap = 10 * time.Second
 // one per drift gap.
 const workspaceAbsentFloor = 30 * time.Second
 
+// workspaceProbeInterval is the wait between the loop's probes of the gateway. A
+// probe is one GET that reads the gateway's hash header, so a gateway restarted
+// with an empty workspace is seen within this interval, not at the next push tick.
+const workspaceProbeInterval = 10 * time.Second
+
 // workspaceDrifted reports whether an answer says the gateway no longer serves the
 // tree the last good push stored: a refusal that the workspace is not present, or
-// a hash header other than lastGood. An answer with no header says nothing.
+// a hash header other than lastGood.
 func workspaceDrifted(a bdgateway.WorkspaceAnswer, lastGood string) bool {
 	if a.Absent {
 		return true
 	}
-	return a.Hash != "" && a.Hash != lastGood
+	// An answer with no header says nothing about the tree, so it is not drift.
+	if a.Hash == "" {
+		return false
+	}
+	return a.Hash != lastGood
 }
 
 // workspaceDriftCheck carries the drift check from the gateway's answers to the
 // reconcile loop. observe runs on whichever goroutine sends a push (the loop's own
-// and a writer's), so it never waits on the loop. An answer to the loop's own push
-// is never drift: that push wrote the tree the answer echoes, and it arrives before
+// and a writer's) or a probe, so it never waits on the loop. An answer to the loop's
+// own push is never drift: that push wrote the tree the answer echoes, and it arrives before
 // stored records the new hash. A drift answer is recorded as pending and wakes the
 // loop through signal; take reads everything pending in one step, so drifts that
 // arrive before the loop reads share one push and none is lost.
@@ -139,13 +152,19 @@ func (c *workspaceDriftCheck) stored(hash string) {
 // ctx ends. A push that fails is logged and the next tick tries again; one failed
 // answer does not end the loop.
 //
+// When probe is not nil, the loop also probes the gateway every
+// workspaceProbeInterval. The probe's answer goes through the same drift check as
+// a push's answer, so a gateway that lost its workspace is seen within one probe
+// interval, whatever sent the daemon's last push. A probe that gets no answer is
+// logged when it starts failing and when it answers again, and triggers no push.
+//
 // A drift signal pushes before the next tick: at once when the last push is at
 // least workspaceDriftGap old, else at the end of that gap. A drift that an absent
 // refusal caused also waits until workspaceAbsentFloor has passed since the last
 // push an absent refusal caused. Signals inside one wait share one push. Every push
 // resets the tick and drops the deferred push, so the interval runs from the last
 // push whatever sent it.
-func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval func() time.Duration, push func(context.Context, string) (string, error), townRoot string, logf func(string, ...any), drift *workspaceDriftCheck) {
+func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval func() time.Duration, push func(context.Context, string) (string, error), probe func(context.Context) error, townRoot string, logf func(string, ...any), drift *workspaceDriftCheck) {
 	var (
 		pushedAt       time.Time
 		absentAt       time.Time
@@ -154,7 +173,28 @@ func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval fu
 		deferredC      <-chan time.Time
 		deferredDue    time.Time
 		deferredAbsent bool
+		probeTimer     clockwork.Timer
+		probeC         <-chan time.Time
+		probeDown      bool
 	)
+	// A nil probe leaves probeC nil, so the select never takes that case.
+	if probe != nil {
+		probeTimer = clk.NewTimer(workspaceProbeInterval)
+		probeC = probeTimer.Chan()
+	}
+	// probeOnce asks the gateway for its answer and logs only a change of state:
+	// the first failure after an answer, and the first answer after failures.
+	probeOnce := func() {
+		err := probe(ctx)
+		switch {
+		case err != nil && !probeDown:
+			probeDown = true
+			logf("Workspace reconcile: the bd gateway did not answer the workspace probe; probing again every %s: %v", workspaceProbeInterval, err)
+		case err == nil && probeDown:
+			probeDown = false
+			logf("Workspace reconcile: the bd gateway answers the workspace probe again")
+		}
+	}
 	// pushNow pushes the town as the loop's own push. absent says the push answers
 	// an absent refusal, so it starts the absent floor.
 	pushNow := func(absent bool) {
@@ -183,6 +223,9 @@ func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval fu
 		if deferred != nil {
 			deferred.Stop()
 		}
+		if probeTimer != nil {
+			probeTimer.Stop()
+		}
 	}()
 	for {
 		select {
@@ -190,6 +233,12 @@ func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval fu
 			return
 		case <-tick.Chan():
 			pushNow(false)
+		case <-probeC:
+			// The probe runs before its timer is re-armed, so a clock wait that sees the
+			// timer again knows the probe's answer is already observed.
+			probeOnce()
+			probeTimer = clk.NewTimer(workspaceProbeInterval)
+			probeC = probeTimer.Chan()
 		case <-deferredC:
 			pushNow(deferredAbsent)
 		case <-drift.signal:

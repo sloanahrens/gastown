@@ -753,6 +753,50 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	return result.ManifestSHA, nil
 }
 
+// Probe asks the gateway for its counters with GET /v1/stats, using the same URL,
+// token and client as a push, and observes the answer. Every gateway response
+// carries the live tree's hash, so a probe finds a gateway whose workspace drifted
+// (an empty one, say) without sending a document. A probe that gets no answer
+// returns an error and observes nothing.
+func (g GatewayPusher) Probe(ctx context.Context) error {
+	endpoint, err := g.endpoint(statsPath)
+	if err != nil {
+		return err
+	}
+	token, err := readTokenFile(g.TokenFile)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	// endpoint checked the URL and the method is fixed, so building the request
+	// cannot fail, as in Push.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.doer().Do(req)
+	if err != nil {
+		return fmt.Errorf("bdgateway: the gateway at %s did not answer the probe: %w", shown(redactedURL(g.URL)), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
+	if err != nil {
+		return fmt.Errorf("bdgateway: reading the gateway's probe answer: %w", err)
+	}
+	if g.Observe != nil {
+		g.Observe(WorkspaceAnswer{
+			Hash:   resp.Header.Get(WorkspaceHashHeader),
+			Absent: workspaceAbsent(resp.StatusCode, data),
+		})
+	}
+	if resp.StatusCode != http.StatusOK {
+		return g.refusal(resp.StatusCode, data)
+	}
+	return nil
+}
+
 // ReportedHash is the manifest hash the gateway reports it serves. It sends GET
 // /v1/stats with the pusher's bearer token and reads WorkspaceHashHeader from a 200
 // answer. The route is authenticated, so an answer that is not from the gateway

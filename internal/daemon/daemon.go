@@ -423,9 +423,13 @@ type Daemon struct {
 	installWorkspacePusher func(bdgateway.WorkspacePusher)
 
 	// workspaceDrift checks each gateway answer for drift and signals the reconcile
-	// loop. startWorkspaceReconcile creates it; the installed pusher feeds it, and a
-	// test calls observe on it to stand in for a gateway answer.
+	// loop. startWorkspaceReconcile creates it; the installed pusher and the loop's
+	// probe feed it, and a test calls observe on it to stand in for a gateway answer.
 	workspaceDrift *workspaceDriftCheck
+
+	// workspaceHTTP sends the gateway pusher's push and probe requests. Nil in
+	// production (the pusher's own client); a test sets it to stand in for the gateway.
+	workspaceHTTP bdgateway.HTTPDoer
 
 	// maint replaces scheduled maintenance's side effects in tests (see
 	// maintenanceSeams); the zero value is production.
