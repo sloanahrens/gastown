@@ -19,6 +19,12 @@ const repairLogTail = "2000"
 // directory RepairRegistry takes rather than reads, so a test needs no file.
 var controlLimaDir = filepath.Join(".colima", "_lima", "colima-"+profileControl)
 
+// registryRestartArgv restarts the sandbox VM's registry container, which reads
+// the port at startup. It is a package-level list, as the DNS repair's restarts
+// are, because the caller's Runner runs it: this package starts no process
+// itself (gt-6imyon).
+var registryRestartArgv = []string{"docker", "--context", "colima-" + profileSandbox, "restart", "gt-registry"}
+
 // RepairRegistry cancels the gt-control VM's ssh forward of the Mac's registry
 // port and restarts gt-registry, returning the commands that ran; a healthy
 // gt-sbx forward already owns the port, so nothing runs (gt-6imyon).
@@ -52,7 +58,7 @@ func RepairRegistry(ctx context.Context, run Runner, home string) ([]Step, error
 		{"ssh", "-S", filepath.Join(home, controlLimaDir, "ssh.sock"), "-O", "cancel",
 			"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", registryPort, registryPort),
 			"-p", port, "127.0.0.1"},
-		{"docker", "--context", "colima-" + profileSandbox, "restart", "gt-registry"},
+		registryRestartArgv,
 	}
 	var steps []Step
 	for _, argv := range repair {
