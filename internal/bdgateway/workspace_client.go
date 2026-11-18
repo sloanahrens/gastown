@@ -655,6 +655,24 @@ type WorkspaceAnswer struct {
 	Hash string
 	// Absent reports a refusal that says the workspace is not present.
 	Absent bool
+	// Own reports that the answer is to the reconcile loop's own push. That push
+	// writes the tree the answer echoes, so the answer says nothing new.
+	Own bool
+}
+
+// ownPushKey marks the context of a push the reconcile loop sends itself.
+type ownPushKey struct{}
+
+// AsOwnPush marks ctx as the reconcile loop's own push, so the answer to it is
+// observed as Own.
+func AsOwnPush(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ownPushKey{}, true)
+}
+
+// IsOwnPush reports whether ctx was marked by AsOwnPush.
+func IsOwnPush(ctx context.Context) bool {
+	own, _ := ctx.Value(ownPushKey{}).(bool)
+	return own
 }
 
 // GatewayPusher is the WorkspacePusher that sends the document to a running bd
@@ -668,7 +686,8 @@ type GatewayPusher struct {
 	// HTTP sends the request; nil uses an http.Client bounded by pushTimeout.
 	HTTP HTTPDoer
 	// Observe receives what each answer says about the workspace, whether the push
-	// stored or was refused. Nil observes nothing.
+	// stored or was refused, and whether the push was the reconcile loop's own (see
+	// AsOwnPush). Nil observes nothing.
 	Observe func(WorkspaceAnswer)
 }
 
@@ -715,6 +734,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 		g.Observe(WorkspaceAnswer{
 			Hash:   resp.Header.Get(WorkspaceHashHeader),
 			Absent: workspaceAbsent(resp.StatusCode, data),
+			Own:    IsOwnPush(ctx),
 		})
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -859,14 +879,16 @@ func (g GatewayPusher) refusal(status int, data []byte) error {
 }
 
 // workspaceAbsent reports whether an answer refuses because the workspace is not
-// present. The gateway sends ErrNoWorkspace as a bad_request whose message names
-// it, so the message is what the answer carries.
+// present. The gateway sends ErrNoWorkspace as a bad_request, the same code as its
+// other bad requests, so the answer tells it apart only by the message the
+// sentinel formats. The match uses that sentinel's text, so a rename there
+// cannot leave this check matching a stale literal.
 func workspaceAbsent(status int, data []byte) bool {
 	var payload ErrorPayload
 	return status == http.StatusBadRequest &&
 		json.Unmarshal(data, &payload) == nil &&
 		payload.Code == codeBadRequest &&
-		strings.Contains(payload.Message, "the workspace is not present")
+		strings.Contains(payload.Message, ErrNoWorkspace.Error())
 }
 
 // readTokenFile reads the bearer token from path: the file's content without

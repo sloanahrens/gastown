@@ -155,20 +155,82 @@ func TestWorkspaceDriftCoalesces(t *testing.T) {
 }
 
 // TestWorkspaceDriftMatchingHashIsQuiet: a hash that matches the last good push
-// signals nothing. The check runs without a loop, because a running loop takes a
-// signal as soon as it is sent and the signal could not be read back. The second
-// observation is a control: a differing hash must signal, or the first proves
-// nothing.
+// records no drift. The check runs without a loop, because a running loop takes a
+// drift as soon as it is recorded and the record could not be read back. The
+// second observation is a control: a differing hash must record one, or the first
+// proves nothing.
 func TestWorkspaceDriftMatchingHashIsQuiet(t *testing.T) {
 	t.Parallel()
 	c := newWorkspaceDriftCheck()
 	c.stored("sha")
 	c.observe(bdgateway.WorkspaceAnswer{Hash: "sha"})
-	if n := len(c.signal); n != 0 {
-		t.Fatalf("a matching hash left %d drift signal(s) pending, want none", n)
+	if pending, _ := c.take(); pending {
+		t.Fatal("a matching hash recorded a drift, want none")
 	}
 	c.observe(bdgateway.WorkspaceAnswer{Hash: "other"})
-	if n := len(c.signal); n != 1 {
-		t.Fatalf("a differing hash left %d drift signal(s) pending, want 1", n)
+	if pending, _ := c.take(); !pending {
+		t.Fatal("a differing hash recorded no drift, want one")
+	}
+}
+
+// TestWorkspaceDriftOwnAnswerIsQuiet: an answer to the loop's own push is never
+// drift, whatever its hash, because that push wrote the tree the answer echoes. The
+// foreign answer after it is the control: it must record a drift.
+func TestWorkspaceDriftOwnAnswerIsQuiet(t *testing.T) {
+	t.Parallel()
+	c := newWorkspaceDriftCheck()
+	c.stored("old")
+	c.observe(bdgateway.WorkspaceAnswer{Hash: "new", Own: true})
+	c.observe(bdgateway.WorkspaceAnswer{Absent: true, Own: true})
+	if pending, _ := c.take(); pending {
+		t.Fatal("an answer to the loop's own push recorded a drift, want none")
+	}
+	c.observe(bdgateway.WorkspaceAnswer{Hash: "new"})
+	if pending, _ := c.take(); !pending {
+		t.Fatal("a foreign differing hash recorded no drift, want one")
+	}
+}
+
+// TestWorkspaceDriftPushIsMarkedOwn: every push the loop sends carries the
+// own-push mark, so the gateway's answer to it is observed as the loop's own and
+// is not drift. Checked on the start push and a tick push.
+func TestWorkspaceDriftPushIsMarkedOwn(t *testing.T) {
+	t.Parallel()
+	r := startDriftRun(t)
+	r.clk.Advance(config.DefaultWorkspaceReconcileInterval)
+	if got := awaitPush(t, r.pusher.calls); got != 2 {
+		t.Fatalf("push = call %d, want the tick push 2", got)
+	}
+	for i, own := range r.pusher.own {
+		if !own {
+			t.Errorf("push %d carried no own-push mark, so its answer would read as drift", i+1)
+		}
+	}
+}
+
+// TestWorkspaceDriftAbsentFloor: absent refusals push at most once per
+// workspaceAbsentFloor. An absent refusal a minute after the last push pushes at
+// once. A second one straight after waits for the floor, though the drift gap ended
+// long before, and then pushes once.
+func TestWorkspaceDriftAbsentFloor(t *testing.T) {
+	t.Parallel()
+	r := startDriftRun(t)
+	r.clk.Advance(time.Minute)
+	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Absent: true})
+	if got := awaitPush(t, r.pusher.calls); got != 2 {
+		t.Fatalf("push = call %d, want the absent push 2", got)
+	}
+	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Absent: true})
+	awaitWaits(t, r.clk, 2)
+	r.clk.Advance(workspaceDriftGap)
+	// The drift gap has ended but the floor has not: the reconcile still holds its
+	// deferred wait, so it has not pushed.
+	awaitWaits(t, r.clk, 2)
+	r.clk.Advance(workspaceAbsentFloor - workspaceDriftGap)
+	if got := awaitPush(t, r.pusher.calls); got != 3 {
+		t.Fatalf("push = call %d, want the floored absent push 3", got)
+	}
+	if got := r.at[2].Sub(r.at[1]); got != workspaceAbsentFloor {
+		t.Errorf("second absent push at %s after the first, want %s", got, workspaceAbsentFloor)
 	}
 }

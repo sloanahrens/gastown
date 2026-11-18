@@ -66,6 +66,11 @@ func (d *Daemon) reconcileInterval() time.Duration {
 // again. A drift answer inside the gap waits for the gap to end.
 const workspaceDriftGap = 10 * time.Second
 
+// workspaceAbsentFloor is the least time between two pushes that an absent refusal
+// triggered. A gateway that keeps refusing as absent gets one push per floor, not
+// one per drift gap.
+const workspaceAbsentFloor = 30 * time.Second
+
 // workspaceDrifted reports whether an answer says the gateway no longer serves the
 // tree the last good push stored: a refusal that the workspace is not present, or
 // a hash header other than lastGood. An answer with no header says nothing.
@@ -78,32 +83,48 @@ func workspaceDrifted(a bdgateway.WorkspaceAnswer, lastGood string) bool {
 
 // workspaceDriftCheck carries the drift check from the gateway's answers to the
 // reconcile loop. observe runs on whichever goroutine sends a push (the loop's own
-// and a writer's), so it never waits on the loop. A drift answer sets signal, which
-// holds one pending drift: a drift that finds one already pending adds nothing,
-// because the pending push covers it, and no drift is lost.
+// and a writer's), so it never waits on the loop. An answer to the loop's own push
+// is never drift: that push wrote the tree the answer echoes, and it arrives before
+// stored records the new hash. A drift answer is recorded as pending and wakes the
+// loop through signal; take reads everything pending in one step, so drifts that
+// arrive before the loop reads share one push and none is lost.
 type workspaceDriftCheck struct {
-	mu       sync.Mutex
-	lastGood string
-	signal   chan struct{}
+	mu            sync.Mutex
+	lastGood      string
+	pending       bool
+	pendingAbsent bool
+	signal        chan struct{}
 }
 
 func newWorkspaceDriftCheck() *workspaceDriftCheck {
 	return &workspaceDriftCheck{signal: make(chan struct{}, 1)}
 }
 
-// observe checks one gateway answer against the last good push and signals the
-// loop when the answer shows drift.
+// observe checks one gateway answer against the last good push and records a
+// drift when the answer shows one that is not the loop's own.
 func (c *workspaceDriftCheck) observe(a bdgateway.WorkspaceAnswer) {
 	c.mu.Lock()
-	drifted := workspaceDrifted(a, c.lastGood)
-	c.mu.Unlock()
-	if !drifted {
+	if a.Own || !workspaceDrifted(a, c.lastGood) {
+		c.mu.Unlock()
 		return
 	}
+	c.pending = true
+	c.pendingAbsent = c.pendingAbsent || a.Absent
+	c.mu.Unlock()
 	select {
 	case c.signal <- struct{}{}:
 	default:
 	}
+}
+
+// take clears the drifts pending since the last take. It reports whether any were
+// pending, and whether one of them is an absent refusal.
+func (c *workspaceDriftCheck) take() (pending, absent bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pending, absent = c.pending, c.pendingAbsent
+	c.pending, c.pendingAbsent = false, false
+	return pending, absent
 }
 
 // stored records the hash of a push that stored: the tree answers are checked
@@ -119,34 +140,44 @@ func (c *workspaceDriftCheck) stored(hash string) {
 // answer does not end the loop.
 //
 // A drift signal pushes before the next tick: at once when the last push is at
-// least workspaceDriftGap old, else at the end of that gap. Signals inside one gap
-// share one push. Every push resets the tick and drops the deferred push, so the
-// interval runs from the last push whatever sent it.
+// least workspaceDriftGap old, else at the end of that gap. A drift that an absent
+// refusal caused also waits until workspaceAbsentFloor has passed since the last
+// push an absent refusal caused. Signals inside one wait share one push. Every push
+// resets the tick and drops the deferred push, so the interval runs from the last
+// push whatever sent it.
 func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval func() time.Duration, push func(context.Context, string) (string, error), townRoot string, logf func(string, ...any), drift *workspaceDriftCheck) {
 	var (
-		pushedAt  time.Time
-		tick      clockwork.Timer
-		deferred  clockwork.Timer
-		deferredC <-chan time.Time
+		pushedAt       time.Time
+		absentAt       time.Time
+		tick           clockwork.Timer
+		deferred       clockwork.Timer
+		deferredC      <-chan time.Time
+		deferredDue    time.Time
+		deferredAbsent bool
 	)
-	pushNow := func() {
-		hash, err := push(ctx, townRoot)
+	// pushNow pushes the town as the loop's own push. absent says the push answers
+	// an absent refusal, so it starts the absent floor.
+	pushNow := func(absent bool) {
+		hash, err := push(bdgateway.AsOwnPush(ctx), townRoot)
 		if err != nil {
 			logf("Workspace reconcile: the bd gateway's workspace was not updated; retrying at the next tick: %v", err)
 		} else {
 			drift.stored(hash)
 		}
 		pushedAt = clk.Now()
+		if absent {
+			absentAt = pushedAt
+		}
 		if deferred != nil {
 			deferred.Stop()
 		}
-		deferred, deferredC = nil, nil
+		deferred, deferredC, deferredAbsent = nil, nil, false
 		if tick != nil {
 			tick.Stop()
 		}
 		tick = clk.NewTimer(interval())
 	}
-	pushNow()
+	pushNow(false)
 	defer func() {
 		tick.Stop()
 		if deferred != nil {
@@ -158,20 +189,36 @@ func runWorkspaceReconcile(ctx context.Context, clk clockwork.Clock, interval fu
 		case <-ctx.Done():
 			return
 		case <-tick.Chan():
-			pushNow()
+			pushNow(false)
 		case <-deferredC:
-			pushNow()
+			pushNow(deferredAbsent)
 		case <-drift.signal:
+			pending, absent := drift.take()
+			if !pending {
+				continue
+			}
+			absent = absent || deferredAbsent
+			due := pushedAt.Add(workspaceDriftGap)
+			if absent && absentAt.Add(workspaceAbsentFloor).After(due) {
+				due = absentAt.Add(workspaceAbsentFloor)
+			}
+			if deferred != nil && !due.After(deferredDue) {
+				// The deferred push is due no later than this drift needs, so it covers it.
+				deferredAbsent = absent
+				continue
+			}
+			now := clk.Now()
+			if !due.After(now) {
+				pushNow(absent)
+				continue
+			}
 			if deferred != nil {
-				continue
+				deferred.Stop()
 			}
-			wait := pushedAt.Add(workspaceDriftGap).Sub(clk.Now())
-			if wait <= 0 {
-				pushNow()
-				continue
-			}
-			deferred = clk.NewTimer(wait)
+			deferred = clk.NewTimer(due.Sub(now))
 			deferredC = deferred.Chan()
+			deferredDue = due
+			deferredAbsent = absent
 		}
 	}
 }
