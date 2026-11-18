@@ -131,7 +131,7 @@ func omLessonsTownSources(townRoot string) (omLessonsSources, error) {
 			return omLessonsTownRecords(townRoot, since)
 		},
 		Rules: func() (map[string]bool, error) {
-			return omLessonsDirectiveRules(filepath.Join(townRoot, "directives"))
+			return omLessonsDirectiveRules(agentconfig.CentralDirectiveDir(townRoot))
 		},
 	}, nil
 }
