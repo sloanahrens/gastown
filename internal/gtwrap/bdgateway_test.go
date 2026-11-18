@@ -560,11 +560,12 @@ func TestBdGatewaySettlesBeadsDir(t *testing.T) {
 			wantErr: "read the .beads entry", wantErrIs: fs.ErrPermission,
 		},
 		{
-			name: "a working directory that cannot be compared refuses",
+			name: "a working directory that cannot be compared keeps the no-BEADS_DIR refusal",
 			setup: func(t *testing.T, town string) (Call, func(*BdGateway)) {
+				mkdirBeads(t, filepath.Join(town, "gastown"))
 				return Call{Argv: []string{"bd", "list"}, Dir: "relative/dir"}, nil
 			},
-			wantErr: "compare the working directory",
+			wantErr: "sets no BEADS_DIR",
 		},
 	}
 	for _, tt := range tests {
