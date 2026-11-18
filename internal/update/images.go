@@ -36,25 +36,28 @@ var ErrNothingRecorded = errors.New("no daemon image is recorded to roll back to
 // daemon already runs.
 var ErrAlreadyRunning = errors.New("the recorded previous image is the one the daemon runs")
 
-// ImagePair is the daemon and polecat image pair one digest install put in
-// force, with the commit both images were built from.
+// ImagePair is the daemon, polecat and bd gateway image triple one digest
+// install put in force, with the commit the three images were built from. Bd is
+// empty for a town with no bd gateway Deployment, and for a record written
+// before the gateway existed.
 type ImagePair struct {
 	Daemon  string `json:"daemon"`
 	Polecat string `json:"polecat"`
+	Bd      string `json:"bd,omitempty"`
 	Commit  string `json:"commit"`
 }
 
-// imagePairOf reads a values file's pair.
+// imagePairOf reads a values file's triple.
 func imagePairOf(v imagevalues.Values) ImagePair {
-	return ImagePair{Daemon: v.Daemon, Polecat: v.Polecat, Commit: v.Commit}
+	return ImagePair{Daemon: v.Daemon, Polecat: v.Polecat, Bd: v.Bd, Commit: v.Commit}
 }
 
 // ImageRecord is the digest install's ledger. Current is the pair the daemon
 // runs, or the pair it is being moved to; Previous is the pair a rollback puts
 // back. Both are written before the service changes, so a swap that stops
 // partway leaves the pair to restore on record. For a daemon that runs as a
-// pod, Previous is the pair its Deployment ran, read from the cluster, and names
-// no commit: a Deployment carries the two images and no build. Refused is the
+// pod, Previous is the pair its Deployments ran, read from the cluster, and
+// names no commit: a Deployment carries the images and no build. Refused is the
 // pair a pre-swap check refused and RefusedReason the failure it named; a later
 // install that succeeds clears both.
 type ImageRecord struct {
@@ -340,9 +343,11 @@ type DigestInstaller struct {
 }
 
 // validRecordedPair checks a pair the ledger holds. The zero pair is nothing
-// recorded and passes; any other pair must name both images by digest, and its
-// commit, when given, must be a full commit. A pair read from a Deployment names
-// no commit, and is recorded that way.
+// recorded and passes; any other pair must name its daemon and polecat images by
+// digest, and its commit, when given, must be a full commit. A pair read from a
+// Deployment names no commit, and is recorded that way. A pair with no bd
+// gateway image is a town with no gateway Deployment, and passes: a record
+// written before the gateway existed names none.
 func validRecordedPair(p ImagePair) error {
 	if p == (ImagePair{}) {
 		return nil
@@ -354,6 +359,9 @@ func validRecordedPair(p ImagePair) error {
 		if !imagevalues.ValidRef(field.value) {
 			return fmt.Errorf("the %s image %q is not repo@sha256:<64 lowercase hex>", field.name, field.value)
 		}
+	}
+	if p.Bd != "" && !imagevalues.ValidRef(p.Bd) {
+		return fmt.Errorf("the bd gateway image %q is not repo@sha256:<64 lowercase hex>", p.Bd)
 	}
 	if p.Commit != "" && !imagevalues.ValidCommit(p.Commit) {
 		return fmt.Errorf("the commit %q is not a full 40-character lowercase commit", p.Commit)
@@ -367,10 +375,17 @@ func sameImages(a, b ImagePair) bool {
 	return a.Daemon == b.Daemon && a.Polecat == b.Polecat
 }
 
-// pairHolds reports whether the pair check, when one is wired, holds pair. An
-// unwired check holds nothing back.
-func (d *DigestInstaller) pairHolds(ctx context.Context, pair ImagePair) bool {
-	return d.PairCheck == nil || d.PairCheck(ctx, pair) == nil
+// pairHolds reports whether the pair the daemon runs holds pair: the pair check,
+// when one is wired, holds it, and the bd gateway image the cluster runs is the
+// pair's, compared as sameImages compares the other two. A cluster with no
+// bd-gateway Deployment yet (its pair names no gateway image) holds the pair on
+// its other two images, so a roll before the cutover still works. An unwired
+// check holds nothing back.
+func (d *DigestInstaller) pairHolds(ctx context.Context, pair, running ImagePair) bool {
+	if d.PairCheck != nil && d.PairCheck(ctx, pair) != nil {
+		return false
+	}
+	return running.Bd == "" || running.Bd == pair.Bd
 }
 
 // Install validates the values file and its commit, reads the pair the daemon
@@ -439,7 +454,7 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 		// that stopped between the record and the swap left the service behind,
 		// and the swap runs again with the previous pair that record kept.
 		previous = rec.Previous
-		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) && d.pairHolds(ctx, target) {
+		if daemon, err := d.Images.Verify.DaemonVersion(ctx); err == nil && sameCommit(daemon, sha) && d.pairHolds(ctx, target, running) {
 			// The install succeeded, so a refusal the record still names is
 			// cleared with the record write the swap path makes below: a pair
 			// the daemon runs must not stay recorded as refused.
