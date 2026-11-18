@@ -170,6 +170,38 @@ func splitGoldenCounts(line string, current, prior *ClassCounts) error {
 	return nil
 }
 
+// TestReworkProgramProposalDraft: a draft names the coverage, the two windows'
+// counts, the example beads and the directive edit, and nothing about which
+// caller prints it. The daemon files this text and the command prints it, so
+// this is the one place the draft is written down (gt-f5oavm).
+func TestReworkProgramProposalDraft(t *testing.T) {
+	t.Parallel()
+	p := Proposal{
+		ID:       "fail-open",
+		Name:     "an error reads as success",
+		Coverage: "violated-anyway: rule #1 covers it and it still appears",
+		Current:  ClassCounts{Findings: 6, Beads: 4, Rounds: 2},
+		Prior:    ClassCounts{Findings: 1, Beads: 1},
+		Examples: []string{"gt-a", "gt-b", "gt-c"},
+	}
+	want := `Coverage: violated-anyway: rule #1 covers it and it still appears
+Counts: 6 finding(s) on 4 bead(s), 2 round(s) burned; prior window 1 finding(s) on 1 bead(s), 0 round(s)
+Examples: gt-a, gt-b, gt-c
+
+Goal: a directive edit that stops om raising this class.
+Constraints: the edit goes to the directive files in /town/directives; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.
+Out of scope: om's bar or threshold; turning anything on.
+Gate: go test ./internal/cmd -run TestLandOmLessons -count=1
+Size: one directive edit, one landing.
+Acceptance:
+- [ ] the rule for this class says what the case is and what to do instead
+- [ ] the next weekly pass counts fewer findings of this class than this window
+`
+	if got := ProposalDraft(p, "/town/directives"); got != want {
+		t.Errorf("ProposalDraft() =\n%q\nwant\n%q", got, want)
+	}
+}
+
 // TestReworkProgramProposalCoverage: a class with enough findings names its
 // coverage against the rules the directive carries. Each row is one way a class
 // can be covered or a gap.

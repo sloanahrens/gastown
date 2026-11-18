@@ -639,6 +639,11 @@ type Daemon struct {
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
 
+	// omLessonsFeedFn records a failed om_lessons filing in the town feed, so
+	// the failure reaches a reader who never reads the daemon log. Nil writes
+	// the real feed; tests capture the event instead.
+	omLessonsFeedFn func(eventType string, payload map[string]interface{}) error
+
 	// rebuildGTStaleFn reads binary staleness for the rebuild_gt job (see
 	// rebuild_gt.go); nil is version.CheckStaleBinaryFresh, which shells out
 	// to git. rebuildGTGateFn reads the container-gate picture; nil is the
@@ -1441,6 +1446,11 @@ type Daemon struct {
 	// and Run's return joins one it left (om_lessons_patrol.go).
 	omLessonsRunning atomic.Bool
 	omLessonsCycles  sync.WaitGroup
+	// omLessonsFilingFailures counts the checks in a row whose filing failed, so
+	// a beads store that keeps refusing create is retried a bounded number of
+	// times before the week is spent (om_lessons_patrol.go, gt-f5oavm). It is
+	// per process: a restart retries the bound again.
+	omLessonsFilingFailures atomic.Int32
 	// omLessonsJoinGrace overrides omLessonsJoinWait in tests.
 	omLessonsJoinGrace time.Duration
 	// omLessonsRun is the patrol's run seam: nil is omLessonsRunSkeleton,

@@ -112,6 +112,7 @@ const (
 	TypeEscalationDropped = "escalation_dropped" // gt escalate call itself failed — the alert never reached a bead
 	TypePatrolComplete    = "patrol_complete"
 	TypeDogCycleOutcome   = "dog_cycle_outcome" // A daemon dog job cycle with a failed step, recorded so a failure reaches readers of the feed (gt-i3rpw)
+	TypePatrolFailed      = "patrol_failed"     // A daemon patrol pass that failed and will be retried, recorded so the failure reaches readers of the feed (gt-f5oavm)
 
 	// Merge queue events (emitted by refinery)
 	TypeMergeStarted = "merge_started"
