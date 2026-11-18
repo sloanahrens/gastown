@@ -35,6 +35,7 @@ import (
 	"unicode"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -138,6 +139,72 @@ func ciEngineUntil(age time.Duration) string {
 		return strconv.FormatInt(int64(age/time.Hour), 10) + "h"
 	}
 	return strconv.FormatInt(int64(age/time.Minute), 10) + "m"
+}
+
+// ciEngineSizeReportFormat is the template the build cache's size is read with: one
+// line per kind of storage, its size and what a prune could reclaim. It is the
+// template the polecat image prune reads its sizes with.
+const ciEngineSizeReportFormat = "{{.Type}} {{.Size}} {{.Reclaimable}}"
+
+// errCIEngineTotal is the refusal for a builder prune whose output names no
+// reclaimed size. The caller logs the output's last line itself, bounded.
+var errCIEngineTotal = errors.New("docker builder prune printed no Total line with a size")
+
+// errCIEngineReclaimable is the refusal for a size report whose Build Cache line
+// names no reclaimable size.
+var errCIEngineReclaimable = errors.New("docker system df printed no reclaimable size for the build cache")
+
+// ciEngineBuildCacheTotal reads the bytes docker builder prune reports it reclaimed.
+// The figure is on the Total line it prints: "Total: 68.8GB" from buildx, "Total
+// reclaimed space: 68.8GB" from the classic builder. The last Total line is the one
+// read; output with no Total line that carries a size is an error.
+func ciEngineBuildCacheTotal(out []byte) (int64, error) {
+	lines := strings.Split(string(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "Total") {
+			continue
+		}
+		colon := strings.LastIndex(line, ":")
+		if colon < 0 {
+			return 0, errCIEngineTotal
+		}
+		n, err := dockerimg.ParseSize(strings.TrimSpace(line[colon+1:]))
+		if err != nil {
+			return 0, errCIEngineTotal
+		}
+		return n, nil
+	}
+	return 0, errCIEngineTotal
+}
+
+// ciEngineBuildCacheReport reads a build cache prune that ran without error. It
+// returns the reclaimed figure the verdict line names, and the WARN line when the
+// prune reclaimed nothing although docker reported reclaimable cache before it ran.
+// known is false when that size read failed, which skips the WARN and nothing else.
+// A total that cannot be read is named by docker's last line, bounded, and fails
+// nothing.
+func ciEngineBuildCacheReport(out []byte, reclaimable int64, known bool) (reclaimed, warn string) {
+	n, err := ciEngineBuildCacheTotal(out)
+	if err != nil {
+		return fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
+	}
+	if n == 0 && known && reclaimable > 0 {
+		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s, and cache younger than the filter is not removed",
+			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(ciEngineUnusedAge))
+	}
+	return "build cache reclaimed " + polecatimage.Human(n), warn
+}
+
+// ciEngineLastLine is the last line of out that is not blank, or "".
+func ciEngineLastLine(out []byte) string {
+	lines := strings.Split(string(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			return lines[i]
+		}
+	}
+	return ""
 }
 
 // ciEngineRemoved reads what docker reported removed. docker rm and docker volume
@@ -678,10 +745,24 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 			failed = true
 		}
 	}
-	if _, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); err != nil {
+	// The build cache is sized once, before its prune, through the same exec: the
+	// prune's total is read against what docker said was reclaimable. A failed size
+	// read skips that check and nothing else.
+	reclaimable, reclaimErr := d.ciEngineBuildCacheReclaimable(ctx, kubeconfig, kubeContext, pod)
+	if reclaimErr != nil {
+		d.ciEnginePruneLogf("reclaimable unreadable", "disk_maintenance: ci engine prune: the build cache's reclaimable size could not be read before its prune: %v; the zero-reclaim check is skipped", reclaimErr)
+	}
+	cache := "build cache prune failed"
+	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineFailure(err, stderr))
 		failed = true
+	} else {
+		var warn string
+		cache, warn = ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil)
+		if warn != "" {
+			d.logger.Printf("%s", warn)
+		}
 	}
 	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
 	if err != nil {
@@ -689,11 +770,11 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		return false
 	}
 	if failed {
-		d.logger.Printf("disk_maintenance: ci engine prune: a removal failed; the engine is %s, from %s; the run is retried", polecatimage.Human(afterKiB*1024), before)
+		d.logger.Printf("disk_maintenance: ci engine prune: a removal failed; the engine is %s, from %s; %s; the run is retried", polecatimage.Human(afterKiB*1024), before, cache)
 		return false
 	}
-	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s",
-		counts, before, polecatimage.Human(afterKiB*1024))
+	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s; %s",
+		counts, before, polecatimage.Human(afterKiB*1024), cache)
 	return true
 }
 
@@ -788,21 +869,27 @@ func ciEngineStderrLine(err error, stderr []byte) string {
 		if ciEngineKubectlLine(err, raw) {
 			continue
 		}
-		line := strings.TrimSpace(strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-				return ' '
-			}
-			return r
-		}, raw))
-		if line == "" {
-			continue
+		if line := ciEngineBounded(raw); line != "" {
+			return line
 		}
-		if runes := []rune(line); len(runes) > ciEngineStderrMax {
-			return string(runes[:ciEngineStderrMax])
-		}
-		return line
 	}
 	return ""
+}
+
+// ciEngineBounded makes one line of an engine program's output safe for the log:
+// control and format characters, bidi overrides and isolates among them, become
+// spaces; the line is trimmed and cut at ciEngineStderrMax characters.
+func ciEngineBounded(raw string) string {
+	line := strings.TrimSpace(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, raw))
+	if runes := []rune(line); len(runes) > ciEngineStderrMax {
+		return string(runes[:ciEngineStderrMax])
+	}
+	return line
 }
 
 // ciEngineKubectlLine reports whether a stderr line is one kubectl printed itself. The
@@ -868,6 +955,31 @@ func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContex
 		return 0, fmt.Errorf("du printed %q, not a KiB figure", fields[0])
 	}
 	return kib, nil
+}
+
+// ciEngineBuildCacheReclaimable reads the build cache's reclaimable size from one
+// docker system df, made before the prune runs. On the template's Build Cache line
+// the size is the first field after the kind and the reclaimable size the second,
+// which docker may follow with a percentage. An error names the exit status and the
+// bounded first stderr line, never stdout.
+func (d *Daemon) ciEngineBuildCacheReclaimable(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
+	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "docker", "system", "df", "--format", ciEngineSizeReportFormat)
+	if err != nil {
+		return 0, fmt.Errorf("docker system df failed (%s)", ciEngineFailure(err, stderr))
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Build Cache ")
+		if !ok {
+			continue
+		}
+		if fields := strings.Fields(rest); len(fields) >= 2 {
+			if n, parseErr := dockerimg.ParseSize(fields[1]); parseErr == nil {
+				return n, nil
+			}
+		}
+		return 0, errCIEngineReclaimable
+	}
+	return 0, errCIEngineReclaimable
 }
 
 // ciEngineDuVanished reports whether du's stderr is only the report of files that

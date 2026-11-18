@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
 // The engine prune's fixtures are hand-built listings: each container, image and
@@ -400,6 +401,8 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engine
 			return cliReply{stdout: "10485760\t" + ciEngineRoot + "\n"}
 		case strings.Contains(verb, "-- docker builder prune"):
 			return cliReply{stdout: "Total:\t0B\n"}
+		case strings.Contains(verb, "-- docker system df"):
+			return cliReply{stdout: "Build Cache 0B 0B\n"}
 		case strings.Contains(verb, " inspect "):
 			if remove.noInspect {
 				return cliReply{startErr: errors.New("kubectl: could not run")}
@@ -1039,6 +1042,197 @@ func TestCIEngineBuildCachePruneArgvUsesADuration(t *testing.T) {
 		if wantArgv := []string{"docker", "builder", "prune", "-af", "--filter", "until=" + want}; !slices.Equal(got, wantArgv) {
 			t.Errorf("build cache prune argv for %v = %q, want %q", age, got, wantArgv)
 		}
+	}
+}
+
+// engineBuildCacheListing is one stopped container, its image and an anonymous volume,
+// each old enough to go: a run that removes one of each, so its verdict line and its
+// build cache line are both there to read.
+func engineBuildCacheListing(t *testing.T) []byte {
+	t.Helper()
+	return engListing(t,
+		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
+		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
+		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
+	)
+}
+
+// TestCIEnginePruneBuildCacheTotalReadsDockersTotalLine: the reclaimed figure is the
+// size on the Total line docker builder prune prints, in either builder's wording;
+// output that names no size on a Total line is refused.
+func TestCIEnginePruneBuildCacheTotalReadsDockersTotalLine(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		out     string
+		want    int64
+		refused bool
+	}{
+		"buildx total":        {out: "Deleted build cache objects:\nabc\n\nTotal:\t68.8GB\n", want: 68_800_000_000},
+		"classic total":       {out: "Deleted build cache objects:\nabc\nTotal reclaimed space: 1.2GB\n", want: 1_200_000_000},
+		"nothing reclaimed":   {out: "Total:\t0B\n", want: 0},
+		"no total line":       {out: "Deleted build cache objects:\nabc\n", refused: true},
+		"total with no size":  {out: "Total:\tlots\n", refused: true},
+		"total with no colon": {out: "Total 5GB\n", refused: true},
+		"empty output":        {out: "", refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ciEngineBuildCacheTotal([]byte(tc.out))
+			if tc.refused {
+				if err == nil {
+					t.Fatalf("the total of %q = %d, want a refusal", tc.out, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the total of %q: %v", tc.out, err)
+			}
+			if got != tc.want {
+				t.Errorf("the total of %q = %d, want %d", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneBuildCacheLogsReclaimedBytes: the verdict line names the bytes the
+// build cache prune reclaimed, read from the Total line docker printed.
+func TestCIEnginePruneBuildCacheLogsReclaimedBytes(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Deleted build cache objects:\nabc\nTotal:\t2GB\n"})
+	f.tick()
+	f.drain()
+
+	line := engineLogLine(f.logs.String(), "removed 1 containers, 1 images, 1 volumes")
+	if want := "; build cache reclaimed " + polecatimage.Human(2_000_000_000); !strings.Contains(line, want) {
+		t.Errorf("the verdict line does not name the reclaimed build cache %q:\n%s", want, f.logs.String())
+	}
+}
+
+// TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed: a build cache prune that
+// reclaims 0 bytes logs one WARN naming the reclaimable figure docker reported before
+// the prune, the filter, and that cache younger than the filter is not removed, when
+// that figure is above zero. Every other reading of the two logs no WARN, and the run
+// still reaches its verdict.
+func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
+	t.Parallel()
+	const reclaimable = 68_800_000_000
+	for name, tc := range map[string]struct {
+		df, prune cliReply
+		warn      bool
+	}{
+		"none of the reclaimable cache is reclaimed": {
+			df: cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"}, prune: cliReply{stdout: "Total:\t0B\n"}, warn: true,
+		},
+		"nothing was reclaimable before the prune": {
+			df: cliReply{stdout: "Build Cache 0B 0B (0%)\n"}, prune: cliReply{stdout: "Total:\t0B\n"},
+		},
+		"the prune reclaims some of the reclaimable cache": {
+			df: cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"}, prune: cliReply{stdout: "Total:\t1GB\n"},
+		},
+		"the size report names no build cache": {
+			df: cliReply{stdout: "Images 3 1GB 0B\n"}, prune: cliReply{stdout: "Total:\t0B\n"},
+		},
+		"the Build Cache line names no reclaimable size": {
+			df: cliReply{stdout: "Build Cache 88GB\n"}, prune: cliReply{stdout: "Total:\t0B\n"},
+		},
+		"the size read before the prune failed": {
+			df: cliReply{code: 1, stderr: "Cannot connect to the Docker daemon"}, prune: cliReply{stdout: "Total:\t0B\n"},
+		},
+		"the prune's total is unreadable": {
+			df: cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"}, prune: cliReply{stdout: "Total: lots\n"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+			replaceEngineReply(f, "-- docker system df", tc.df)
+			replaceEngineReply(f, "-- docker builder prune", tc.prune)
+			f.tick()
+			f.drain()
+
+			logs := f.logs.String()
+			var warns []string
+			for _, line := range strings.Split(logs, "\n") {
+				if strings.Contains(line, "WARN") {
+					warns = append(warns, line)
+				}
+			}
+			if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+				t.Errorf("the run did not reach its verdict:\n%s", logs)
+			}
+			if !tc.warn {
+				if len(warns) != 0 {
+					t.Errorf("a run that is not a zero reclaim logged a WARN:\n%s", logs)
+				}
+				return
+			}
+			if len(warns) != 1 {
+				t.Fatalf("logged %d WARN line(s), want one:\n%s", len(warns), logs)
+			}
+			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=24h", "cache younger than the filter is not removed"} {
+				if !strings.Contains(warns[0], want) {
+					t.Errorf("the WARN line lacks %q:\n%s", want, warns[0])
+				}
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneBuildCacheSizeReadFailureSkipsOnlyTheWarn: a size read before the
+// prune that fails is logged once and skips only the zero-reclaim check. The build
+// cache prune, the removals and the verdict all still run.
+func TestCIEnginePruneBuildCacheSizeReadFailureSkipsOnlyTheWarn(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker system df", cliReply{code: 1, stderr: "Cannot connect to the Docker daemon"})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t0B\n"})
+	f.tick()
+	f.drain()
+
+	logs := f.logs.String()
+	if n := len(engineDockerExecs(f, "builder prune")); n != 1 {
+		t.Errorf("the build cache prune ran %d time(s), want once", n)
+	}
+	if n := len(engineDockerExecs(f, "rm")); n != 1 {
+		t.Errorf("the container removal ran %d time(s), want once", n)
+	}
+	if line := engineLogLine(logs, "removed 1 containers, 1 images, 1 volumes"); !strings.HasSuffix(line, "; build cache reclaimed 0.0B") {
+		t.Errorf("the verdict line does not name the build cache reclaimed:\n%s", logs)
+	}
+	if line := engineLogLine(logs, "zero-reclaim check is skipped"); !strings.Contains(line, "exit status 1") {
+		t.Errorf("no line names the failed size read and the skipped check:\n%s", logs)
+	}
+	if strings.Contains(logs, "WARN") {
+		t.Errorf("a failed size read logged a WARN:\n%s", logs)
+	}
+	if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+		t.Errorf("a failed size read left the engine prune without a verdict")
+	}
+}
+
+// TestCIEnginePruneBuildCacheUnparseableTotalDoesNotFailTheRun: a Total line that does
+// not read as a size is logged as docker's last line, and the run still reaches its
+// verdict with every removal done and no failure line.
+func TestCIEnginePruneBuildCacheUnparseableTotalDoesNotFailTheRun(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total: lots\n"})
+	f.tick()
+	f.drain()
+
+	logs := f.logs.String()
+	if want := `build cache reclaimed unknown (docker's last line was "Total: lots")`; !strings.Contains(logs, want) {
+		t.Errorf("the verdict line does not log docker's last line %q:\n%s", want, logs)
+	}
+	if !strings.Contains(logs, "removed 1 containers, 1 images, 1 volumes") {
+		t.Errorf("the verdict line is missing:\n%s", logs)
+	}
+	if strings.Contains(logs, "failed") || strings.Contains(logs, "retried") {
+		t.Errorf("an unreadable total failed the run:\n%s", logs)
+	}
+	if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+		t.Errorf("an unreadable total left the engine prune without a verdict")
 	}
 }
 
