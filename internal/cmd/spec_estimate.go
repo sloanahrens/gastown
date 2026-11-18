@@ -18,6 +18,8 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hmhints"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/sling"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 	"github.com/steveyegge/gastown/internal/storypoints/estlog"
@@ -666,6 +668,118 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 		}
 	}
 	return lines
+}
+
+// specEstimateAheadUnderHold is the estimate-ahead pass a tick held by the
+// operator hold file runs in place of its decisions (gt-r6lb5v). The tick
+// decides nothing and slings nothing: it reads the board, finds the shaped
+// candidates the tick would have found, and estimates up to the pass's limit of
+// them. It returns the lines the tick logs, the first one saying the tick ran
+// under the hold. With the setting off or a dry run it reads nothing.
+func specEstimateAheadUnderHold(env specDispatchEnv, hold string) []string {
+	if !env.StoryPointShadow || env.DryRun {
+		return nil
+	}
+	lines := []string{fmt.Sprintf("spec dispatch held (%s): nothing slung; the estimate-ahead pass ran under the hold", hold)}
+	shaped, readLines, finished := specHeldShapedRead(env)
+	lines = append(lines, readLines...)
+	if !finished {
+		// The walk did not finish inside the bound, so the pass ends here, as
+		// it does when its own reads run past it.
+		return lines
+	}
+	return append(lines, specEstimateAheadPass(env, shaped, nil)...)
+}
+
+// specHeldShapedRead reads the board a held tick holds and returns the ids of
+// the candidates the tick would have found shaped, in board order, with the
+// lines for what it could not read. The read and the walk run on their own
+// goroutine under specStoryPointTimeout, as the pass's reads do, so a held tick
+// holds a bd lock no longer than the pass does today. A walk that does not
+// finish returns finished false and one line, and nothing is estimated.
+func specHeldShapedRead(env specDispatchEnv) (ids []string, lines []string, finished bool) {
+	type walked struct {
+		ids   []string
+		lines []string
+	}
+	board := env.HoldCandidates
+	if board == nil {
+		board = env.Candidates
+	}
+	done := make(chan walked, 1)
+	go func() {
+		read := board()
+		var w walked
+		for _, e := range read.Errors {
+			w.lines = append(w.lines, "story points estimate ahead: board read: "+e)
+		}
+		var walkLines []string
+		w.ids, walkLines = specHeldShapedWalk(env, read)
+		w.lines = append(w.lines, walkLines...)
+		done <- w
+	}()
+	after := env.EstimateAheadAfter
+	if after == nil {
+		after = time.After
+	}
+	select {
+	case w := <-done:
+		return w.ids, w.lines, true
+	case <-after(specStoryPointTimeout):
+		return nil, []string{fmt.Sprintf("story points estimate ahead: the held board read did not finish within %s; nothing estimated this tick", specStoryPointTimeout)}, false
+	}
+}
+
+// specHeldShapedWalk takes each board candidate through the refusals the
+// candidate loop makes before its lint, then the lint, and returns the ids the
+// lint clears. The board read has already applied Eligible, so it is not made
+// again. It writes nothing. The live-seat refusal is not made, because it
+// needs the roster and a held tick does not read the roster; a candidate that a
+// live seat holds can therefore be estimated, and its estimate writes only its
+// own labels and note. A blocker read that fails is one line, and the candidate
+// is left out.
+func specHeldShapedWalk(env specDispatchEnv, read specBoardRead) (ids []string, lines []string) {
+	inFlight := map[string]bool{}
+	for _, f := range env.InFlight {
+		inFlight[f.Bead] = true
+	}
+	rigHold := env.HeldRigHold
+	if rigHold == nil {
+		rigHold = env.RigHold
+	}
+	for _, c := range read.Candidates {
+		id := c.Spec.ID
+		if inFlight[id] || rigHold(c.Rig) != "" {
+			continue
+		}
+		if specBlocked(sling.Admit(c.Blockers)) != "" {
+			continue
+		}
+		full := c.Spec
+		run, err := specdispatch.FormulaRunOf(full)
+		if err != nil {
+			continue
+		}
+		if run.Declared() && env.FormulaExists(c.Rig, run.Formula) != nil {
+			continue
+		}
+		rv, _ := specdispatch.ResolveRevert(env.RevertInFlight(c.Rig), env.Now())
+		if specdispatch.RedMainHold(full, rv) != "" {
+			continue
+		}
+		full.Target = env.target(c.Rig)
+		full.Rig = c.Rig
+		full.TownRigs = env.TownRigs
+		walked, err := env.withBlockerCreates(full)
+		if err != nil {
+			lines = append(lines, fmt.Sprintf("%s: story points estimate ahead: cannot read its blockers: %s", id, firstErrLine(err)))
+			continue
+		}
+		if specdispatch.LintWith(walked, env.Template, env.lintOptions()).Clean() {
+			ids = append(ids, id)
+		}
+	}
+	return ids, lines
 }
 
 // specEstimateAheadReadCandidates reads ids under specStoryPointTimeout and
