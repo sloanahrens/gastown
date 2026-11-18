@@ -60,13 +60,23 @@ func admissionValues() Values {
 	return v
 }
 
-// PinnedBdGatewayURL is the only gateway address the policy admits: the address the
-// daemon hands the Job, not the name it configures its own forwarder with.
-// gatewayURLForJob (internal/daemon/update_job.go) resolves the daemon's gateway name
-// to an address before the Job is created, and the policy refuses hostAliases, so
-// every Job the daemon makes carries an address. The policy repeats this literal, and
-// TestAdmissionGatewayPinMatchesRenderer holds the two equal.
+// PinnedBdGatewayURL is one of the two gateway addresses the policy admits: the
+// address the daemon hands the Job for a gateway name it resolves. gatewayURLForJob
+// (internal/daemon/update_job.go) resolves the daemon's gateway name to an address
+// before the Job is created, and the policy refuses hostAliases. The policy repeats
+// this literal, and TestAdmissionGatewayPinMatchesRenderer holds the two equal.
 const PinnedBdGatewayURL = "http://192.168.5.2:7440"
+
+// PinnedBdGatewayServiceURL is the other gateway address the policy admits: the
+// in-cluster Service name, which gatewayURLForJob hands on unchanged. The Job reaches
+// it through cluster DNS, not a hostAlias. The policy repeats this literal, and
+// TestAdmissionGatewayPinMatchesRenderer holds the two equal.
+const PinnedBdGatewayServiceURL = "http://bd-gateway.gt.svc:7440"
+
+// admissionGatewayURLAdmitted reports whether the policy admits s as the gateway URL.
+func admissionGatewayURLAdmitted(s string) bool {
+	return s == PinnedBdGatewayURL || s == PinnedBdGatewayServiceURL
+}
 
 // admissionGatewayValues is admissionValues with the bd gateway set: the Job the
 // daemon renders when bd answers its pre-swap handshake through the gateway
@@ -125,10 +135,21 @@ func admissionEnvExpr(t *testing.T, v Values) string {
 	env := containerEnv(v)
 	parts := []string{"has(c.env)", fmt.Sprintf("size(c.env) == %d", len(env))}
 	for _, e := range env {
-		parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && e.value == %s)",
-			celString(t, e.Name), celString(t, e.Value)))
+		parts = append(parts, fmt.Sprintf("c.env.exists(e, e.name == %s && has(e.value) && %s)",
+			celString(t, e.Name), admissionEnvValueExpr(t, e)))
 	}
 	return strings.Join(parts, " && ")
+}
+
+// admissionEnvValueExpr is the value clause of one pinned variable: its one value,
+// or for BD_GATEWAY_URL either admitted gateway URL, whichever the renderer set.
+func admissionEnvValueExpr(t *testing.T, e EnvVar) string {
+	t.Helper()
+	if e.Name == k8sdaemon.BdGatewayURLEnv {
+		return fmt.Sprintf("(e.value == %s || e.value == %s)",
+			celString(t, PinnedBdGatewayURL), celString(t, PinnedBdGatewayServiceURL))
+	}
+	return fmt.Sprintf("e.value == %s", celString(t, e.Value))
 }
 
 // admissionNoElevationExpr refuses a privileged container and added Linux
@@ -633,9 +654,13 @@ func admissionJobEnvProblems(got, want Container) []string {
 		problems = append(problems, fmt.Sprintf("container %q names %d distinct environment variables, want %d", got.Name, len(byName), len(want.Env)))
 	}
 	for _, w := range want.Env {
-		if v, ok := byName[w.Name]; !ok {
+		v, ok := byName[w.Name]
+		switch {
+		case !ok:
 			problems = append(problems, fmt.Sprintf("container %q sets no %s", got.Name, w.Name))
-		} else if v != w.Value {
+		case w.Name == k8sdaemon.BdGatewayURLEnv && !admissionGatewayURLAdmitted(v):
+			problems = append(problems, fmt.Sprintf("container %q sets %s to %q, which the policy does not admit", got.Name, w.Name, v))
+		case w.Name != k8sdaemon.BdGatewayURLEnv && v != w.Value:
 			problems = append(problems, fmt.Sprintf("container %q sets %s to %q, want %q", got.Name, w.Name, v, w.Value))
 		}
 	}
@@ -942,10 +967,14 @@ func TestUpdateAdmissionVolumeExprNamesEveryVolume(t *testing.T) {
 // expression states, and the deployed expressions are read to show the pin itself.
 func TestUpdateAdmissionPolicyPinsGatewayURL(t *testing.T) {
 	t.Parallel()
-	admitted := mustBuild(t, admissionGatewayValues()).Job
-	admitted.Metadata.Name = JobNamePrefix + "0123456789ab"
-	if problems := updateAdmissionJobProblems(admitted, admissionGatewayValues()); len(problems) > 0 {
-		t.Errorf("the Job whose BD_GATEWAY_URL is the pinned URL is refused: %s", strings.Join(problems, "; "))
+	for _, url := range []string{PinnedBdGatewayURL, PinnedBdGatewayServiceURL} {
+		values := admissionGatewayValues()
+		values.BdGatewayURL = url
+		admitted := mustBuild(t, values).Job
+		admitted.Metadata.Name = JobNamePrefix + "0123456789ab"
+		if problems := updateAdmissionJobProblems(admitted, admissionGatewayValues()); len(problems) > 0 {
+			t.Errorf("the Job whose BD_GATEWAY_URL is %q is refused: %s", url, strings.Join(problems, "; "))
+		}
 	}
 	for _, r := range []struct {
 		url string
@@ -955,6 +984,8 @@ func TestUpdateAdmissionPolicyPinsGatewayURL(t *testing.T) {
 		{"http://host.docker.internal:7440", "a host name"},
 		{"http://192.168.5.2:7441", "another port"},
 		{"https://192.168.5.2:7440", "an https URL"},
+		{"http://bd-gateway.gt.svc:7441", "the Service name on another port"},
+		{"http://bd-gateway.other.svc:7440", "the Service name in another namespace"},
 	} {
 		t.Run(r.why, func(t *testing.T) {
 			t.Parallel()
@@ -973,9 +1004,10 @@ func TestUpdateAdmissionPolicyPinsGatewayURL(t *testing.T) {
 	// pin stands between the daemon-class token and another destination.
 	for _, i := range []int{3, 4} {
 		expr := admissionPolicyValidationText(t, i)
-		pin := "e.name == " + celString(t, k8sdaemon.BdGatewayURLEnv) + " && has(e.value) && e.value == " + celString(t, PinnedBdGatewayURL)
+		pin := "e.name == " + celString(t, k8sdaemon.BdGatewayURLEnv) + " && has(e.value) && (e.value == " +
+			celString(t, PinnedBdGatewayURL) + " || e.value == " + celString(t, PinnedBdGatewayServiceURL) + ")"
 		if !strings.Contains(expr, pin) {
-			t.Errorf("the deployed validation %d does not pin %s to %q: %q", i+1, k8sdaemon.BdGatewayURLEnv, PinnedBdGatewayURL, expr)
+			t.Errorf("the deployed validation %d does not pin %s to %q or %q: %q", i+1, k8sdaemon.BdGatewayURLEnv, PinnedBdGatewayURL, PinnedBdGatewayServiceURL, expr)
 		}
 	}
 }
@@ -985,7 +1017,7 @@ func TestUpdateAdmissionPolicyPinsGatewayURL(t *testing.T) {
 // cannot drift. It fails when the literal in the manifest is another URL.
 func TestAdmissionGatewayPinMatchesRenderer(t *testing.T) {
 	t.Parallel()
-	pin := regexp.MustCompile(`e\.name == '` + k8sdaemon.BdGatewayURLEnv + `' && has\(e\.value\) && e\.value == '([^']*)'`)
+	pin := regexp.MustCompile(`e\.name == '` + k8sdaemon.BdGatewayURLEnv + `' && has\(e\.value\) && \(e\.value == '([^']*)' \|\| e\.value == '([^']*)'\)`)
 	for _, i := range []int{3, 4} {
 		expr := admissionPolicyValidationText(t, i)
 		matches := pin.FindAllStringSubmatch(expr, -1)
@@ -993,8 +1025,9 @@ func TestAdmissionGatewayPinMatchesRenderer(t *testing.T) {
 			t.Errorf("the deployed validation %d pins %s in %d clauses, want 1: %q", i+1, k8sdaemon.BdGatewayURLEnv, len(matches), expr)
 			continue
 		}
-		if got := matches[0][1]; got != PinnedBdGatewayURL {
-			t.Errorf("the deployed validation %d pins %s to %q, want the renderer's %q", i+1, k8sdaemon.BdGatewayURLEnv, got, PinnedBdGatewayURL)
+		want := []string{PinnedBdGatewayURL, PinnedBdGatewayServiceURL}
+		if got := matches[0][1:]; !slices.Equal(got, want) {
+			t.Errorf("the deployed validation %d pins %s to %q, want the renderer's %q", i+1, k8sdaemon.BdGatewayURLEnv, got, want)
 		}
 	}
 }
@@ -1257,7 +1290,7 @@ var updateAdmissionRefusals = []updateAdmissionRefusal{
 	{
 		name: "a gateway URL matched by any value",
 		edit: func(t *testing.T, docs []admissionDoc) []admissionDoc {
-			pin := "e.value == " + celString(t, PinnedBdGatewayURL)
+			pin := "(e.value == " + celString(t, PinnedBdGatewayURL) + " || e.value == " + celString(t, PinnedBdGatewayServiceURL) + ")"
 			expr := docs[0].Spec.Validations[3].Expression
 			if !strings.Contains(expr, pin) {
 				t.Fatalf("the container validation does not carry the gateway URL pin %q", pin)
