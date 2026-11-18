@@ -51,6 +51,7 @@ func (w *escalationCloseTown) daemon() *Daemon {
 		config:        &Config{TownRoot: w.root},
 		logger:        log.New(io.Discard, "", 0),
 		tmux:          w.tmux,
+		clock:         w.tmux.clock,
 		notifier:      w.notify,
 		openWorkBeads: w.bd.open,
 	}
@@ -89,6 +90,15 @@ func (w *escalationCloseTown) session(name string, live, idle bool) {
 // close marks escalation id closed with reason.
 func (w *escalationCloseTown) close(id, bead, raiser, reason string) {
 	w.escalate(id, raiser, bead, "closed", reason)
+}
+
+// closeAt files escalation id as closed with reason at closedAt (RFC 3339), so
+// the pass reads a close time, as bd records it.
+func (w *escalationCloseTown) closeAt(id, bead, raiser, reason, closedAt string) {
+	w.bd.db.Seed(beads.Issue{ID: id, Status: "closed", Title: bead + ": a decision",
+		Labels: []string{"gt:escalation"}, CloseReason: reason, ClosedAt: closedAt,
+		Description: beads.FormatEscalationDescription(bead+": a decision", &beads.EscalationFields{
+			Severity: "high", EscalatedBy: raiser, RelatedBead: bead})})
 }
 
 // delivered is the nudges that went out, not the ones the notifier refused.
@@ -729,6 +739,43 @@ func TestEscalationCloseNudgeReadFailureKeepsState(t *testing.T) {
 	}
 }
 
+// An escalation that opened and closed between two ticks is never seen open,
+// yet its seat is nudged once: the close time bd records is after the tick that
+// recorded the pass's start (gt-nanhzn).
+func TestEscalationCloseNudgesCloseNeverListedOpen(t *testing.T) {
+	t.Parallel()
+	w := newEscalationCloseTown(t)
+	w.hold(closeTestBead, closeTestSeat)
+	w.session("capable", true, true)
+	w.tick()
+	w.closeAt(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason, "2026-11-13T06:00:00Z")
+
+	w.tick()
+	if got := len(w.delivered()); got != 1 {
+		t.Fatalf("close after the last pass: %d nudges, want 1", got)
+	}
+	w.tick()
+	if got := len(w.delivered()); got != 1 {
+		t.Errorf("next pass: %d nudges, want still 1", got)
+	}
+}
+
+// A close bd records before the last pass started was judged by that pass or
+// is not owed, so a close the pass never saw open is not nudged.
+func TestEscalationCloseSkipsCloseBeforeLastPass(t *testing.T) {
+	t.Parallel()
+	w := newEscalationCloseTown(t)
+	w.hold(closeTestBead, closeTestSeat)
+	w.session("capable", true, true)
+	w.tick()
+	w.closeAt(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason, "2026-11-12T06:00:00Z")
+
+	w.tick()
+	if got := len(w.delivered()); got != 0 {
+		t.Errorf("close before the last pass: %d nudges, want none", got)
+	}
+}
+
 // escalationCloseFixture is a two-rig town for one pass: each rig's escalations
 // and read error, the notifier's sends, and the state file the passes save to.
 // Every seam appends to events, so a test reads the order the pass did things in.
@@ -737,9 +784,13 @@ type escalationCloseFixture struct {
 	escs    map[string][]patrolscan.Escalation
 	readErr map[string]error
 	saveErr error
-	sent    []string
-	events  []string
-	log     recordingLogger
+	// at is the fake clock's time: the pass's start and the send budget read it.
+	at time.Time
+	// busy, when set, makes the seat's pane busy, so a close is owed, not sent.
+	busy   bool
+	sent   []string
+	events []string
+	log    recordingLogger
 }
 
 func newEscalationCloseFixture(t *testing.T) *escalationCloseFixture {
@@ -748,6 +799,7 @@ func newEscalationCloseFixture(t *testing.T) *escalationCloseFixture {
 		path:    filepath.Join(t.TempDir(), "daemon", escalationCloseNudgeFile),
 		escs:    map[string][]patrolscan.Escalation{},
 		readErr: map[string]error{},
+		at:      time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC),
 	}
 }
 
@@ -761,13 +813,15 @@ func (f *escalationCloseFixture) seams() escalationCloseSeams {
 			return f.escs[rig], nil
 		},
 		holding: func(string, string) (string, error) { return closeTestBead, nil },
-		seat:    func(string, string) (escalationSeat, error) { return escalationSeat{Live: true, Idle: true}, nil },
+		seat: func(string, string) (escalationSeat, error) {
+			return escalationSeat{Live: true, Idle: !f.busy}, nil
+		},
 		nudge: func(target, msg string, _ time.Duration) error {
 			f.events = append(f.events, "send")
 			f.sent = append(f.sent, target)
 			return nil
 		},
-		now: time.Now,
+		now: func() time.Time { return f.at },
 		save: func(st escalationCloseState) error {
 			f.events = append(f.events, "save")
 			if f.saveErr != nil {
@@ -1271,6 +1325,182 @@ func TestEscalationCloseFailedReadsAndWritesAreReturned(t *testing.T) {
 }
 
 // escalationCloseEsc is a closed escalation carrying reason, for the message.
+// closeTestEscalation is the escalation the pass reads for a close that
+// landed at closedAt, with no open record of it.
+func closeTestEscalation(closedAt time.Time) patrolscan.Escalation {
+	return patrolscan.Escalation{ID: closeTestEscID, EscalatedBy: closeTestSeat,
+		RelatedBead: closeTestBead, CloseReason: closeTestReason, ClosedAt: closedAt}
+}
+
+// A closed escalation the pass never saw open is judged only when it closed
+// after the last complete pass began. With no recorded pass nothing unwatched is
+// judged, and every pass records its start.
+func TestEscalationCloseJudgesCloseSinceLastPass(t *testing.T) {
+	t.Parallel()
+	pass := time.Date(2026, time.November, 18, 12, 0, 0, 0, time.UTC)
+	checked := pass.Add(-time.Hour)
+	tests := []struct {
+		name      string
+		checkedAt time.Time
+		closedAt  time.Time
+		wantSent  int
+	}{
+		{"closed after the last pass is nudged", checked, checked.Add(time.Minute), 1},
+		{"closed before the last pass is not", checked, checked.Add(-time.Minute), 0},
+		{"no recorded pass judges nothing", time.Time{}, pass.Add(-time.Minute), 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newEscalationCloseFixture(t)
+			f.at = pass
+			f.escs["gastown"] = []patrolscan.Escalation{closeTestEscalation(tt.closedAt)}
+			if !tt.checkedAt.IsZero() {
+				if err := saveEscalationCloseState(f.path, escalationCloseState{CheckedAt: tt.checkedAt}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.tick("gastown")
+			if len(f.sent) != tt.wantSent {
+				t.Errorf("sent %v, want %d nudges", f.sent, tt.wantSent)
+			}
+			st, err := loadEscalationCloseState(f.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !st.CheckedAt.Equal(pass) {
+				t.Errorf("CheckedAt = %v, want the pass's start %v", st.CheckedAt, pass)
+			}
+		})
+	}
+}
+
+// A close the pass never saw open is nudged once, and the next pass, which
+// still finds it closed after the previous pass's start, does not nudge again.
+func TestEscalationCloseNudgesCloseNeverSeenOpenOnce(t *testing.T) {
+	t.Parallel()
+	f := newEscalationCloseFixture(t)
+	start := f.at
+	f.tick("gastown")
+	f.escs["gastown"] = []patrolscan.Escalation{closeTestEscalation(start.Add(time.Minute))}
+	f.at = start.Add(2 * time.Minute)
+	f.tick("gastown")
+	if len(f.sent) != 1 {
+		t.Fatalf("after the close: sent %v, want 1 nudge", f.sent)
+	}
+	f.at = start.Add(3 * time.Minute)
+	f.tick("gastown")
+	if len(f.sent) != 1 {
+		t.Errorf("next pass: sent %v, want still 1 nudge", f.sent)
+	}
+}
+
+// A pass that cannot read a rig does not record its start: CheckedAt stays where
+// the last complete pass left it, so the close the pass missed is judged by the
+// next complete pass.
+func TestEscalationCloseFailedReadKeepsCheckedAt(t *testing.T) {
+	t.Parallel()
+	f := newEscalationCloseFixture(t)
+	checked := f.at
+	if err := saveEscalationCloseState(f.path, escalationCloseState{CheckedAt: checked}); err != nil {
+		t.Fatal(err)
+	}
+	f.escs["gastown"] = []patrolscan.Escalation{closeTestEscalation(checked.Add(time.Minute))}
+	f.readErr["gastown"] = errors.New("bd list: store unavailable")
+	f.at = checked.Add(time.Hour)
+	f.tick("gastown", "other")
+	if len(f.sent) != 0 {
+		t.Fatalf("unreadable rig: sent %v, want none", f.sent)
+	}
+	st, err := loadEscalationCloseState(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.CheckedAt.Equal(checked) {
+		t.Errorf("CheckedAt after a failed read = %v, want unchanged %v", st.CheckedAt, checked)
+	}
+
+	delete(f.readErr, "gastown")
+	f.at = checked.Add(2 * time.Hour)
+	f.tick("gastown", "other")
+	if len(f.sent) != 1 {
+		t.Errorf("after the read recovers: sent %v, want 1 nudge", f.sent)
+	}
+	st, err = loadEscalationCloseState(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.CheckedAt.Equal(checked.Add(2 * time.Hour)) {
+		t.Errorf("CheckedAt after a complete pass = %v, want %v", st.CheckedAt, checked.Add(2*time.Hour))
+	}
+}
+
+// A close the pass never saw open, with its seat busy, is owed: it stays
+// watched, and the next tick nudges it once the seat is idle.
+func TestEscalationCloseBusySeatOwesCloseNeverSeenOpen(t *testing.T) {
+	t.Parallel()
+	f := newEscalationCloseFixture(t)
+	start := f.at
+	f.tick("gastown")
+	f.escs["gastown"] = []patrolscan.Escalation{closeTestEscalation(start.Add(time.Minute))}
+	f.busy = true
+	f.at = start.Add(2 * time.Minute)
+	f.tick("gastown")
+	if len(f.sent) != 0 {
+		t.Fatalf("busy seat: sent %v, want none", f.sent)
+	}
+	st, err := loadEscalationCloseState(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Watch[closeTestEscID] {
+		t.Fatalf("busy seat: %s is not owed (watch %v)", closeTestEscID, st.Watch)
+	}
+
+	f.busy = false
+	f.at = start.Add(3 * time.Minute)
+	f.tick("gastown")
+	if len(f.sent) != 1 {
+		t.Errorf("idle seat: sent %v, want 1 nudge", f.sent)
+	}
+}
+
+// A close that lands while the rigs are read is after the pass's start, so the
+// next pass judges it. CheckedAt records the start, not the end: recording the
+// end would skip a close made between the two.
+func TestEscalationCloseLandingMidPassIsJudgedNextPass(t *testing.T) {
+	t.Parallel()
+	f := newEscalationCloseFixture(t)
+	start := f.at
+	if err := saveEscalationCloseState(f.path, escalationCloseState{CheckedAt: start.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	s := f.seams()
+	read := s.escalations
+	s.escalations = func(rig string) ([]patrolscan.Escalation, error) {
+		escs, err := read(rig)
+		// The close lands after this read, a minute into the pass, so this
+		// pass did not list it.
+		f.at = start.Add(time.Minute)
+		f.escs[rig] = []patrolscan.Escalation{closeTestEscalation(start.Add(30 * time.Second))}
+		return escs, err
+	}
+	st, err := loadEscalationCloseState(f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runEscalationCloseNudges(s, st, []string{"gastown"})
+	if len(f.sent) != 0 {
+		t.Fatalf("the close landed after the read: sent %v, want none this pass", f.sent)
+	}
+
+	f.at = start.Add(2 * time.Minute)
+	f.tick("gastown")
+	if len(f.sent) != 1 {
+		t.Errorf("next pass: sent %v, want 1 nudge for the mid-pass close", f.sent)
+	}
+}
+
 func escalationCloseEsc(reason string) patrolscan.Escalation {
 	return patrolscan.Escalation{ID: closeTestEscID, CloseReason: reason}
 }
