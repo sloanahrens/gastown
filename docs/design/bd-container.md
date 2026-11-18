@@ -345,33 +345,32 @@ and p99 against the same calls through the in-pod bd.
 
 ## Images and CI
 
-Two layers (decision 6): the beads repo builds the base image with the real bd,
-and gastown's CI adds `bdgw` on top, because `cmd/bdgw` is gastown's and the
-beads repo cannot build it.
+One image (decision 6): `gt-bd` carries both the real bd and the gateway, and
+gastown's image CI builds it, because `cmd/bdgw` is gastown's; the beads repo
+builds no image.
 
-1. **Base image `bd`, built by the beads rig.** A `Dockerfile` in the beads repo:
-   Debian slim, `tini`, a non-root user, the town-style bd (linux/arm64,
-   `CGO_ENABLED=0`, no tags, stamped with the commit and build id) at
-   `/usr/local/bin/bd.real`, label `org.gastown.bd-commit`. The beads repo has
-   `.forgejo/workflows/gate.yml` (push to `land/**`) and `post-land.yml` (push to
-   main) and nothing that builds an image; `.github/workflows` is upstream CI,
-   inert here. A new `.forgejo/workflows/bd-image.yml` builds and pushes
-   `forgejo:3000/bot-registry/beads-bd` on a push to main and tags it with the
-   commit.
-2. **Gateway image `gt-bd`, built by gastown's image CI.** `Dockerfile.bd` in
-   deploy/bd: `FROM forgejo:3000/bot-registry/beads-bd@<digest>` (the digest from
-   a pins file, never a tag), adds `bdgw`, links `bd` to the real bd at
-   `bd.real`, sets the entrypoint. `images.yml` already builds the
-   daemon and polecat images on a push to `green/**` and `imagepublish check`
-   reads `org.gastown.gt-commit` back; it gains a third image.
+1. **`deploy/bd/Dockerfile.bd`.** One stage, `FROM ubuntu:24.04`, installing
+   only `ca-certificates`, `git` and `tini`. It builds nothing and copies what
+   it runs from the build context: `bd.real`, the real bd built from the beads
+   source at the commit `deploy/daemon/image-pins` names; `bdgw`,
+   cross-compiled for linux/arm64 from gastown at the green commit; and
+   `verbs.json`, the gateway's policy at that same commit. It links
+   `/usr/local/bin/bd` to `bd.real`, runs as the numeric user 65532, and puts
+   `tini` in front of `bdgw serve` as PID 1.
+2. **CI.** `.forgejo/workflows/images.yml` builds and pushes
+   `forgejo:3000/bot-registry/gastown-bd` on a push to `green/**`, in the same
+   job as the daemon and polecat images and at the same commit. Its "stage the
+   gt-bd image's build context" step runs `gt daemon image --apply
+   --context-only --gateway`, which stages the three files; the image carries
+   `org.gastown.gt-commit=<green sha>`, and `imagepublish check` reads that label
+   back with the other two images'. A beads change reaches the image only through
+   the bd pin.
 
-The pin: `deploy/values/images.yaml` (written by `gt update images`, read by
-`internal/imagevalues`) gains a `bd:` key holding the gateway image's digest;
-the base image's digest sits in `deploy/bd/base-pin`. The bump step: after the
-beads CI pushes a new base, `gt update bd-base` resolves the `beads-bd:<commit>`
-tag to a digest, writes the pin, and the next gastown image build picks it up;
-`gt update images` then writes the new `bd:` digest. The compose unit reads the
-digest from the values file; nothing runs `:latest`.
+The pin: `deploy/values/images.yaml` (written by `gt update images --bd`, read by
+`internal/imagevalues`) holds a `bd:` key beside `daemon:` and `polecat:`.
+`gt update images --bd --sha <commit>` resolves the `gastown-bd:<sha12>` tag to
+a digest and writes it; the compose unit reads the digest from the values file,
+and nothing runs `:latest`.
 
 Docker Desktop must be able to pull from the Forgejo registry. The cluster
 pulls from `forgejo:3000/bot-registry`; whether Docker Desktop's daemon can
@@ -384,13 +383,13 @@ The Forgejo hook `20-gt-protect-workflows` admits only the operator's account to
 `.forgejo/workflows/`, so each workflow change is a reviewed text the operator
 copies:
 
-1. beads repo: new `.forgejo/workflows/bd-image.yml` (reviewed text kept in the
-   repo, as post-land.yml does).
-2. gastown: `.forgejo/workflows/images.yml` gains the bd-layer build, push and
-   check steps (a test already holds the live copy equal to the reviewed text).
-3. beads repo secrets `REGISTRY_TOKEN` (and `SOURCES_TOKEN` if the build fetches
-   another repo), set in the Forgejo UI; the registry user is `bot-registry`.
-4. the three gateway tokens and the tracker add-as token: created on the host,
+1. `.forgejo/workflows/images.yml` is the operator's byte-for-byte copy of
+   `deploy/ci/images.workflow.yml`; the gt-bd staging, build, push and check
+   steps are in that text, and a test holds the live copy equal to it.
+2. the CI secrets `REGISTRY_TOKEN` (the registry user `bot-registry`) and
+   `SOURCES_TOKEN` (the source reader `bot-viewer`), set in the Forgejo UI; the
+   bd build fetches the beads source with the second.
+3. the three gateway tokens and the tracker add-as token: created on the host,
    never printed, put in the secrets directory the compose unit mounts and in a
    Secret for the daemon and dashboard pods.
 
