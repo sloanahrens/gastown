@@ -1361,17 +1361,18 @@ func TestUpdateJobGatewayURLUnsetOrIP(t *testing.T) {
 
 // TestUpdateJobGatewayServicePassesThrough: a BD_GATEWAY_URL whose host is the
 // gateway's in-cluster Service name reaches the Job exactly as the daemon was given
-// it, and no resolver is read: the Job reaches the name through cluster DNS. An IP
-// host is passed through the same way.
+// it, and no resolver is read: the Job reaches the name through cluster DNS. The
+// fixed address the admission policy also admits is passed through the same way. Every
+// URL here is one the Job policy admits (deploy/k8s/update-admission.yaml).
 func TestUpdateJobGatewayServicePassesThrough(t *testing.T) {
 	t.Parallel()
+	serviceURL := "http://" + bdGatewayServiceHost + ":" + strconv.Itoa(k8sdaemon.BdGatewayPort)
 	tests := []struct {
 		name string
 		raw  string
 	}{
-		{name: "the Service name with its port", raw: "http://bd-gateway.gt.svc:7440"},
-		{name: "the Service name with a path", raw: "http://bd-gateway.gt.svc:7440/bd"},
-		{name: "an IPv4 host", raw: "http://192.168.5.2:7440"},
+		{name: "the Service name with its port", raw: serviceURL},
+		{name: "the fixed address the policy admits", raw: "http://192.168.5.2:7440"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
