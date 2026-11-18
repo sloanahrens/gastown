@@ -241,7 +241,7 @@ func TestMigrateSecretsMovesDoltPassword(t *testing.T) {
 	}
 	env, err := LoadDaemonEnv(town)
 	if err != nil || env["DOLT_PASSWORD"] != fakeTokenA {
-		t.Errorf("daemon.env = %v, %v; want DOLT_PASSWORD in it", env, err)
+		t.Errorf("daemon.env = %d entries, %v; want DOLT_PASSWORD in it", len(env), err)
 	}
 	back, err := LoadOrCreateTownSettings(TownSettingsPath(town))
 	if err != nil {

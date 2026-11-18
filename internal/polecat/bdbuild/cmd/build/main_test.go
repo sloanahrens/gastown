@@ -198,7 +198,7 @@ func TestInstalledBDReadsWhereItRunsWithTheTargetVariablesStripped(t *testing.T)
 	}
 	for _, kept := range []string{"PATH=/usr/bin", "HOME=/home/polecat"} {
 		if !slices.Contains(gotEnv, kept) {
-			t.Errorf("env %q lacks %q, want the host environment kept", gotEnv, kept)
+			t.Errorf("env lacks %q, want the host environment kept", kept)
 		}
 	}
 	for _, dropped := range []string{"BEADS_DIR=/town/other/.beads", "BEADS_DOLT_SERVER_DATABASE=other", "BD_DB=other"} {

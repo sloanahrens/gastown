@@ -849,7 +849,7 @@ func TestSupervisorData_LeavesDaemonEnvTokensOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	if data.Env["SDKROOT"] != "/fake/sdk" {
-		t.Errorf("SDKROOT dropped: %v", data.Env)
+		t.Errorf("SDKROOT dropped")
 	}
 	if _, ok := data.Env["DS_TOKEN"]; ok {
 		t.Error("supervisor env carries the daemon.env token")

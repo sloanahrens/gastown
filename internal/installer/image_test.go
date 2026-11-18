@@ -157,7 +157,7 @@ func TestImageStepBuildsBeforeTheSwap(t *testing.T) {
 		imageFailClosedEnv + "=1",
 	}
 	if strings.Join(build.Env, "\n") != strings.Join(wantEnv, "\n") {
-		t.Errorf("env = %q, want %q", build.Env, wantEnv)
+		t.Errorf("env = %d entries, want %d", len(build.Env), len(wantEnv))
 	}
 	if ir.has("RESULT") {
 		t.Errorf("output names a result line: %q", ir.output())
@@ -626,13 +626,13 @@ func TestImageStepDaemonEnv(t *testing.T) {
 			env := ir.builds[0].Env
 			for _, want := range tc.wantEnv {
 				if !containsLine(env, want) {
-					t.Errorf("env = %q, want %q", env, want)
+					t.Errorf("env = %d entries, want %d", len(env), len(want))
 				}
 			}
 			for _, not := range tc.notEnv {
 				for _, have := range env {
 					if strings.HasPrefix(have, not) {
-						t.Errorf("env = %q, want no %s", env, not)
+						t.Errorf("env carries %s, want it left out", not)
 					}
 				}
 			}
@@ -667,7 +667,7 @@ func TestImageStepAmbientRegistryIsNotLocalOnly(t *testing.T) {
 	}
 	for _, have := range ir.builds[0].Env {
 		if strings.HasPrefix(have, "POLECAT_IMAGE_REGISTRY=") {
-			t.Errorf("env = %q, want the inherited registry left alone", ir.builds[0].Env)
+			t.Errorf("env changed: want the inherited registry left alone")
 		}
 	}
 }
@@ -700,7 +700,7 @@ func TestImageStepTownDefaults(t *testing.T) {
 		"POLECAT_IMAGE_LOCK=" + filepath.Join(town, ".runtime", "polecat-image.lock"),
 	} {
 		if !containsLine(build.Env, want) {
-			t.Errorf("env = %q, want %q", build.Env, want)
+			t.Errorf("env = %d entries, want %d", len(build.Env), len(want))
 		}
 	}
 }
@@ -730,7 +730,7 @@ func TestImageStepSettingsOverrides(t *testing.T) {
 		t.Errorf("build = %+v, want the named program, log and lock", build)
 	}
 	if !containsLine(build.Env, "POLECAT_IMAGE_GT="+output) {
-		t.Errorf("env = %q, want the named build output", build.Env)
+		t.Errorf("env does not carry the named build output")
 	}
 	if info, err := os.Stat(filepath.Join(root, "logs")); err != nil || !info.IsDir() {
 		t.Errorf("the log directory was not created: %v", err)
@@ -759,7 +759,7 @@ func TestImageAfterStartsADetachedBuild(t *testing.T) {
 	}
 	for _, have := range build.Env {
 		if strings.HasPrefix(have, imageFailClosedEnv+"=") {
-			t.Errorf("env = %q, want no %s: the install already stands", build.Env, imageFailClosedEnv)
+			t.Errorf("env carries %s, want it left out: the install already stands", imageFailClosedEnv)
 		}
 	}
 	if want := "polecat image: rebuild for c2222222 started in the background (log /dev/null)"; !ir.has(want) {
@@ -875,7 +875,7 @@ func TestImageAfterWithAnUnreadableRegistryLogsAndCarriesOn(t *testing.T) {
 		t.Errorf("escalation = %q, want none for an install that already stands", ir.escalation())
 	}
 	if containsLine(ir.builds[0].Env, imageFailClosedEnv+"=1") {
-		t.Errorf("env = %q, want a detached build not told to fail closed", ir.builds[0].Env)
+		t.Errorf("env told a detached build to fail closed")
 	}
 }
 
@@ -987,7 +987,7 @@ func TestRunImageBuildRunsUnderTheSupervisor(t *testing.T) {
 		t.Errorf("escalation = %q/%q, want none for a build whose caller is still there", got.GT, got.Fingerprint)
 	}
 	if !containsLine(got.Env, "POLECAT_IMAGE_GT=/rig/gt") {
-		t.Errorf("env = %q, want the build settings", got.Env)
+		t.Errorf("env does not carry the build settings")
 	}
 	body, readErr := os.ReadFile(log)
 	if readErr != nil {
@@ -1089,7 +1089,7 @@ func TestStartImageWorker(t *testing.T) {
 				t.Error("the worker was not started in a session of its own")
 			}
 			if !containsLine(started.Env, "POLECAT_IMAGE_TOWN_ROOT=/town") {
-				t.Errorf("env = %q, want the build settings", started.Env)
+				t.Errorf("env does not carry the build settings")
 			}
 		})
 	}

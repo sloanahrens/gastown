@@ -17,7 +17,7 @@ func TestLoadDaemonEnv_MissingFileReturnsEmptyMap(t *testing.T) {
 		t.Fatalf("LoadDaemonEnv() error = %v", err)
 	}
 	if len(env) != 0 {
-		t.Fatalf("LoadDaemonEnv() = %v, want empty map", env)
+		t.Fatalf("LoadDaemonEnv() = %d entries, want empty", len(env))
 	}
 }
 
@@ -49,7 +49,7 @@ func TestLoadDaemonEnv_ParsesKeyValuePairs(t *testing.T) {
 		"DEVELOPER_DIR":              "/Library/Developer/CommandLineTools",
 	}
 	if len(env) != len(want) {
-		t.Fatalf("LoadDaemonEnv() = %v, want %v", env, want)
+		t.Fatalf("LoadDaemonEnv() = %d entries, want %d", len(env), len(want))
 	}
 	for k, v := range want {
 		if env[k] != v {

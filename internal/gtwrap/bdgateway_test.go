@@ -140,7 +140,7 @@ func TestBdGatewayTarget(t *testing.T) {
 	}
 	wantEnv := map[string]string{"BD_ACTOR": "town/crew/dipper", "BD_READONLY": "1"}
 	if len(head.Env) != len(wantEnv) || head.Env["BD_ACTOR"] != wantEnv["BD_ACTOR"] || head.Env["BD_READONLY"] != wantEnv["BD_READONLY"] {
-		t.Errorf("head env = %v, want only the allowlisted %v", head.Env, wantEnv)
+		t.Errorf("head env = %d entries, want only the allowlisted %d", len(head.Env), len(wantEnv))
 	}
 	if head.Rig != "gastown" {
 		t.Errorf("head rig = %q, want %q", head.Rig, "gastown")

@@ -11,9 +11,9 @@ func TestSocketName(t *testing.T) {
 	t.Parallel()
 	townRoot := filepath.Join("/towns", "My Town")
 	derived := townSocketName(townRoot)
-	for _, env := range []string{"", "default", "auto"} {
-		if got := socketName(townRoot, env); got != derived {
-			t.Errorf("socketName(%q, %q) = %q, want the derived %q", townRoot, env, got, derived)
+	for _, socketEnv := range []string{"", "default", "auto"} {
+		if got := socketName(townRoot, socketEnv); got != derived {
+			t.Errorf("socketName(%q, %q) = %q, want the derived %q", townRoot, socketEnv, got, derived)
 		}
 	}
 	if got := socketName(townRoot, "mysocket"); got != "mysocket" {

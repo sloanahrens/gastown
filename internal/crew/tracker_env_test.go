@@ -109,7 +109,7 @@ func TestTrackerEnvByRouteBackend(t *testing.T) {
 			}
 			if !tc.wantTracker {
 				if len(env) != 0 {
-					t.Errorf("environment = %v, want no tracker variables", env)
+					t.Errorf("environment = %d entries, want no tracker variables", len(env))
 				}
 				return
 			}
@@ -149,10 +149,10 @@ func TestTrackerEnvRefusesUnsafeCrewName(t *testing.T) {
 			issuer := &fakeSeatIssuer{token: "trk_seat-token-0003"}
 			env, err := crewManagerFor(issuer).trackerEnv(root, name)
 			if err == nil {
-				t.Fatalf("trackerEnv(%q) = %v, want a refusal", name, env)
+				t.Fatalf("trackerEnv(%q) = %d entries, want a refusal", name, len(env))
 			}
 			if env != nil {
-				t.Errorf("environment = %v after a refused name, want none", env)
+				t.Errorf("environment = %d entries after a refused name, want none", len(env))
 			}
 			if len(issuer.actors) != 0 {
 				t.Errorf("tokens minted = %d, want none", len(issuer.actors))
@@ -198,10 +198,10 @@ func TestTrackerEnvIssuerFailureHoldsNoToken(t *testing.T) {
 
 	env, err := crewManagerFor(issuer).trackerEnv(root, "dave")
 	if err == nil {
-		t.Fatalf("trackerEnv = %v, want the issuer failure", env)
+		t.Fatalf("trackerEnv = %d entries, want the issuer failure", len(env))
 	}
 	if env != nil {
-		t.Errorf("environment = %v after a failed issue, want none", env)
+		t.Errorf("environment = %d entries after a failed issue, want none", len(env))
 	}
 	if strings.Contains(err.Error(), leaked) {
 		t.Errorf("error %q carries the token", err)
@@ -263,7 +263,7 @@ func TestTrackerEnvWithoutAdminCredentialRefuses(t *testing.T) {
 		t.Fatalf("trackerEnv error = %v, want the host issuer to be refused", err)
 	}
 	if env != nil {
-		t.Errorf("environment = %v after a refused issuer, want none", env)
+		t.Errorf("environment = %d entries after a refused issuer, want none", len(env))
 	}
 	tokens, err := filepath.Glob(filepath.Join(root, ".runtime", "seats", "gastown", "*.token"))
 	if err != nil {

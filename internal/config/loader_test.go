@@ -3286,10 +3286,10 @@ func TestFillRuntimeDefaults(t *testing.T) {
 			t.Errorf("Args: got %v, want %v", result.Args, input.Args)
 		}
 		if result.Env["OPENCODE_PERMISSION"] != input.Env["OPENCODE_PERMISSION"] {
-			t.Errorf("Env: got %v, want %v", result.Env, input.Env)
+			t.Errorf("Env: got %d entries, want %d", len(result.Env), len(input.Env))
 		}
 		if result.Env["OPENCODE_CONFIG_CONTENT"] != input.Env["OPENCODE_CONFIG_CONTENT"] {
-			t.Errorf("OPENCODE_CONFIG_CONTENT was not preserved: got %v, want %v", result.Env, input.Env)
+			t.Errorf("OPENCODE_CONFIG_CONTENT was not preserved: got %d entries, want %d", len(result.Env), len(input.Env))
 		}
 		if result.InitialPrompt != input.InitialPrompt {
 			t.Errorf("InitialPrompt: got %q, want %q", result.InitialPrompt, input.InitialPrompt)

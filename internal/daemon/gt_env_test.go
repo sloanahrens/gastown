@@ -84,7 +84,7 @@ func TestWithPolecatImageTrimContext(t *testing.T) {
 				t.Errorf("%s = %q, want %q", polecatImageTrimContextEnv, got, tc.want)
 			}
 			if tc.want == "" && len(env) != 1 {
-				t.Errorf("env = %q, want the input alone", env)
+				t.Errorf("env = %d entries, want the input alone", len(env))
 			}
 		})
 	}
@@ -127,7 +127,7 @@ func TestWithPolecatImageTrimContextRefusesADisabledSweep(t *testing.T) {
 		logger:          log.New(io.Discard, "", 0),
 	}
 	if env := d.withPolecatImageTrimContext([]string{"PATH=/usr/bin"}); len(env) != 1 {
-		t.Errorf("env = %q, want the input alone for a disabled sweep", env)
+		t.Errorf("env = %d entries, want the input alone for a disabled sweep", len(env))
 	}
 }
 
@@ -187,7 +187,7 @@ func TestPolecatImageTrimEnvActiveReturnsOneEntry(t *testing.T) {
 	}
 	want := []string{polecatImageTrimContextEnv + "=colima-gt-control"}
 	if !slices.Equal(env, want) {
-		t.Errorf("PolecatImageTrimEnv() = %q, want %q", env, want)
+		t.Errorf("PolecatImageTrimEnv() = %d entries, want %d", len(env), len(want))
 	}
 }
 
@@ -215,7 +215,7 @@ func TestPolecatImageTrimEnvNoEntryWhenInactiveOrEmpty(t *testing.T) {
 				t.Errorf("PolecatImageTrimEnv() error = %v, want nil", err)
 			}
 			if env != nil {
-				t.Errorf("PolecatImageTrimEnv() = %q, want nil", env)
+				t.Errorf("PolecatImageTrimEnv() = %d entries, want nil", len(env))
 			}
 		})
 	}
@@ -231,7 +231,7 @@ func TestPolecatImageTrimEnvRejectsAnInvalidContext(t *testing.T) {
 		t.Fatal("PolecatImageTrimEnv() error = nil, want a refusal")
 	}
 	if env != nil {
-		t.Errorf("PolecatImageTrimEnv() = %q, want nil", env)
+		t.Errorf("PolecatImageTrimEnv() = %d entries, want nil", len(env))
 	}
 	if !strings.Contains(err.Error(), `"-rf"`) {
 		t.Errorf("error = %q, want it to name the refused context", err)

@@ -227,7 +227,7 @@ func TestRunnerKeepsForwardedValuesOutOfArgv(t *testing.T) {
 					t.Fatalf("%s line %q does not forward %s by name", rung.name, argv, name)
 				}
 				if !slices.Contains(env, entry) {
-					t.Fatalf("%s docker env %q does not carry %q", rung.name, env, entry)
+					t.Fatalf("%s docker env does not carry %q", rung.name, entry)
 				}
 			}
 		})

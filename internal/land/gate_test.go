@@ -164,7 +164,7 @@ func TestGoGateUnitOnlyTurnsContainersOff(t *testing.T) {
 			has = has || e == "GT_TEST_DOCKER=0"
 		}
 		if has != unit {
-			t.Errorf("GoGate(%v) test env = %v", unit, test.Env)
+			t.Errorf("GoGate(%v) test env = %d entries", unit, len(test.Env))
 		}
 	}
 }
@@ -708,7 +708,7 @@ func TestRigGatePresubmitPrecedence(t *testing.T) {
 		t.Fatalf("explicit presubmit_command = %+v, %v", g.Steps, err)
 	}
 	if !reflect.DeepEqual(g.Steps[0].Env, []string{"GT_TEST_DOCKER=0"}) {
-		t.Errorf("explicit presubmit_command env = %v, want containers forced off", g.Steps[0].Env)
+		t.Errorf("explicit presubmit_command env = %d entries, want containers forced off", len(g.Steps[0].Env))
 	}
 
 	g, err = RigGate(both, &config.MergeQueueConfig{TestCommand: "make test"}, true)

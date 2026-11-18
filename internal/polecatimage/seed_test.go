@@ -379,7 +379,7 @@ func TestRunSeedChildPutsTheTokenEnvInTheChild(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Errorf("the child's environment = %v, want the token header", child.Env)
+		t.Errorf("the child's environment = %d entries, want the token header", len(child.Env))
 	}
 }
 
@@ -413,7 +413,7 @@ func TestSeedCloneSendsTokenThroughEnvNotArgv(t *testing.T) {
 		t.Fatalf("the first child = %q, want git --version before any clone", got)
 	}
 	if len(cmds[0].Env) != 0 {
-		t.Errorf("the version probe carried env %v, want none", cmds[0].Env)
+		t.Errorf("the version probe carried %d env entries, want none", len(cmds[0].Env))
 	}
 	for _, c := range cmds[1:] {
 		if strings.Contains(strings.Join(c.Argv, " "), token) {
@@ -453,7 +453,7 @@ func TestCloneSeedWithoutATokenSetsNoHeader(t *testing.T) {
 	}
 	for _, c := range cmds {
 		if len(c.Env) != 0 {
-			t.Errorf("an anonymous clone ran with env %v, want none", c.Env)
+			t.Errorf("an anonymous clone ran with %d env entries, want none", len(c.Env))
 		}
 	}
 }

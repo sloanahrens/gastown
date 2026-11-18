@@ -139,7 +139,7 @@ func TestContainerEnvPinsTheIdentity(t *testing.T) {
 		t.Errorf("GIT_AUTHOR_NAME = %q, want the recorder's identity, not the operator's", got)
 	}
 	if _, ok := envValue(env, "BEADS_DOLT_SERVER_PORT"); !ok {
-		t.Errorf("the endpoint name is missing from %v", env)
+		t.Errorf("the endpoint name is missing from the environment")
 	}
 }
 

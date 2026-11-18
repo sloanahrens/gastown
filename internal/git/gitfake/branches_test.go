@@ -24,7 +24,7 @@ func TestListRemoteRefsWithHashesEnvRecordsEnv(t *testing.T) {
 		t.Fatalf("ListRemoteRefsWithHashesEnv: %v", err)
 	}
 	if got := f.ListRemoteEnv(); !reflect.DeepEqual(got, env) {
-		t.Errorf("recorded env = %v, want %v", got, env)
+		t.Errorf("recorded env = %d entries, want %d", len(got), len(env))
 	}
 }
 

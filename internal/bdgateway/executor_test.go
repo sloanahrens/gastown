@@ -860,7 +860,7 @@ func TestExecutorEnv(t *testing.T) {
 				}
 			}
 			if got, want := len(env), 7+len(tc.env); got != want {
-				t.Errorf("environment holds %d entries, want %d: %v", got, want, env)
+				t.Errorf("environment holds %d entries, want %d", got, want)
 			}
 		})
 	}

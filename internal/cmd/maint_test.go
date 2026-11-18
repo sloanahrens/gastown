@@ -563,7 +563,7 @@ func TestMaintColimaTargetPrunesThroughTheSandboxSocket(t *testing.T) {
 	}
 	want := "DOCKER_HOST=unix://" + filepath.Join(home, ".colima", "gt-sbx", "docker.sock")
 	if !slices.Contains(env, want) {
-		t.Fatalf("docker env = %v, want %q: the colima target reads the sandbox's socket", env, want)
+		t.Fatalf("docker env = %d entries, want %q: the colima target reads the sandbox's socket", len(env), want)
 	}
 }
 

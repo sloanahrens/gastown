@@ -91,7 +91,7 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 		env[e.Name] = e.Value
 	}
 	if env["GOCACHE"] != "/cache/gocache" || env["GOMODCACHE"] != "/cache/gomodcache" {
-		t.Errorf("env = %v, want the two caches under /cache", env)
+		t.Errorf("env = %d entries, want the two caches under /cache", len(env))
 	}
 	if env["GOFLAGS"] != "-p=4 -modcacherw" {
 		t.Errorf("GOFLAGS = %q, want the Dockerfile seed RUN's flags so cache keys match", env["GOFLAGS"])
@@ -104,8 +104,8 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	if clone.Command[0] != HelperPath || clone.Command[1] != "seed-clone" {
 		t.Errorf("clone command = %v, want the image's seed-clone helper", clone.Command)
 	}
-	if env := envValue(clone.Env, "GIT_TERMINAL_PROMPT"); env != "0" {
-		t.Errorf("clone GIT_TERMINAL_PROMPT = %q, want 0: a prompt would hang the Job", env)
+	if prompt := envValue(clone.Env, "GIT_TERMINAL_PROMPT"); prompt != "0" {
+		t.Errorf("clone GIT_TERMINAL_PROMPT = %q, want 0: a prompt would hang the Job", prompt)
 	}
 }
 

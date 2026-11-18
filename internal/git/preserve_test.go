@@ -392,10 +392,10 @@ func TestCallEnvRemovesUnsetKeysAndAppendsExtras(t *testing.T) {
 	t.Parallel()
 	env := callEnv([]string{"GT_TEST_EXTRA=1"}, []string{"PATH"})
 	if envHas(env, "PATH") {
-		t.Fatalf("callEnv kept PATH after unsetting it: %v", env)
+		t.Fatalf("callEnv kept PATH after unsetting it")
 	}
 	if !envHas(env, "GT_TEST_EXTRA") {
-		t.Fatalf("callEnv dropped the extra variable: %v", env)
+		t.Fatalf("callEnv dropped the extra variable")
 	}
 	if !envHas(callEnv(nil, nil), "PATH") {
 		t.Fatal("callEnv dropped PATH with nothing to unset: the process environment must pass through")

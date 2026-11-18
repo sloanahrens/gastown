@@ -290,7 +290,7 @@ func TestCLIExecRunDropsHookVariables(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 	if want := []string{"PATH=/usr/bin"}; !slices.Equal(got.Env, want) {
-		t.Errorf("command environment = %q, want %q", got.Env, want)
+		t.Errorf("command environment = %d entries, want %d", len(got.Env), len(want))
 	}
 }
 

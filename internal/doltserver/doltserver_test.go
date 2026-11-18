@@ -5137,10 +5137,10 @@ func TestHostWithEnvOverlaysServerEnv(t *testing.T) {
 	}
 	env := f.started[0].Env
 	if !slices.Contains(env, "GT_DOLT_PASSWORD=overlay-pass") {
-		t.Errorf("sql-server env = %v, want the overlay over the host's environment", env)
+		t.Errorf("sql-server env = %d entries, want the overlay over the host's environment", len(env))
 	}
 	if i, j := slices.Index(env, "GT_DOLT_PASSWORD=base-pass"), slices.Index(env, "GT_DOLT_PASSWORD=overlay-pass"); i > j {
-		t.Errorf("sql-server env = %v, want the overlay after (winning over) the host's value", env)
+		t.Errorf("sql-server env = %d entries, want the overlay after (winning over) the host's value", len(env))
 	}
 }
 

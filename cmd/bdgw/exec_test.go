@@ -98,7 +98,7 @@ func TestBdgwExec(t *testing.T) {
 		t.Errorf("timeout_ms = %d, want the read cap 30000", got)
 	}
 	if got, ok := runner.req.Env["BD_ACTOR"]; !ok || got != "town/crew/dipper" {
-		t.Errorf("env = %v, want BD_ACTOR kept", runner.req.Env)
+		t.Errorf("env does not keep BD_ACTOR")
 	}
 	for _, name := range []string{"HOME", "SECRET"} {
 		if _, ok := runner.req.Env[name]; ok {

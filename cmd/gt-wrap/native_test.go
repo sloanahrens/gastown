@@ -110,7 +110,7 @@ func TestRunOmReviewUsesNativePath(t *testing.T) {
 		t.Fatalf("native ran in %q, want the caller's directory %q", fp.dir, caller)
 	}
 	if !slices.Equal(fp.env, env) {
-		t.Fatalf("native env = %q, want the caller's whole environment %q", fp.env, env)
+		t.Fatalf("native env = %d entries, want the caller's whole environment's %d", len(fp.env), len(env))
 	}
 	if h.fake.launched || h.targetSet {
 		t.Fatal("a native om review reached the target")
@@ -399,7 +399,7 @@ func TestRunBdHooksUseNativePath(t *testing.T) {
 		t.Fatalf("native ran in %q, want the caller's directory %q", fp.dir, caller)
 	}
 	if !slices.Equal(fp.env, env) {
-		t.Fatalf("native env = %q, want the caller's whole environment %q", fp.env, env)
+		t.Fatalf("native env = %d entries, want the caller's whole environment's %d", len(fp.env), len(env))
 	}
 	if h.fake.launched || h.targetSet {
 		t.Fatal("bd hooks run reached the target")
@@ -474,7 +474,7 @@ func TestRunGtHostCommandsUseNativePath(t *testing.T) {
 			t.Fatalf("native ran in %q, want the caller's directory %q", fp.dir, caller)
 		}
 		if !slices.Equal(fp.env, env) {
-			t.Fatalf("native env = %q, want the caller's whole environment %q", fp.env, env)
+			t.Fatalf("native env = %d entries, want the caller's whole environment's %d", len(fp.env), len(env))
 		}
 		if h.fake.launched {
 			t.Fatalf("%q reached the target", argv)

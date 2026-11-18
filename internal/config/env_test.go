@@ -1622,6 +1622,6 @@ func TestSeatLocalEmail(t *testing.T) {
 		t.Errorf("SeatLocalEmail(\"\") = %q, want empty", got)
 	}
 	if env := GitIdentityEnv(""); len(env) != 1 || env["GIT_AUTHOR_NAME"] != "" {
-		t.Errorf("GitIdentityEnv(\"\") = %v, want only an empty GIT_AUTHOR_NAME", env)
+		t.Errorf("GitIdentityEnv(\"\") = %d entries, want only an empty GIT_AUTHOR_NAME", len(env))
 	}
 }

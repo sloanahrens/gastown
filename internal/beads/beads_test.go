@@ -927,6 +927,7 @@ func TestResolvedDoltEndpointEnvTownConfig(t *testing.T) {
 				t.Errorf("ok = %v, want %v", ok, tc.wantEnv != nil)
 			}
 			if !reflect.DeepEqual(env, tc.wantEnv) {
+				// testpolicy:env-print-ok ResolvedDoltEndpointEnv resolves only a Dolt host and port
 				t.Errorf("env = %v, want %v", env, tc.wantEnv)
 			}
 		})

@@ -304,7 +304,7 @@ func TestCPUClassRunsNicedWithPFlag(t *testing.T) {
 				t.Errorf("GOFLAGS in the child env = %v, want exactly [%q]", flags, tc.wantFlags)
 			}
 			if !containsEntry(got.Env, "GT_TEST_DOCKER=0") {
-				t.Errorf("child env = %v, want the leading assignment applied", got.Env)
+				t.Errorf("child env = %d entries, want the leading assignment applied", len(got.Env))
 			}
 			if _, statErr := os.Stat(CPUOwnerPath(town, 0)); !os.IsNotExist(statErr) {
 				t.Errorf("slot 0 owner file after RunCPU: stat err=%v, want the slot released", statErr)

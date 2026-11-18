@@ -97,7 +97,7 @@ func TestScratchEnvPointsAtThePortAndOptsInToNewDatabases(t *testing.T) {
 		"BD_ALLOW_NEW_DATABASE=1",
 	} {
 		if !slices.Contains(env, want) {
-			t.Errorf("scratchEnv(4455) = %v, missing %q", env, want)
+			t.Errorf("scratchEnv(4455) = %d entries, missing %q", len(env), want)
 		}
 	}
 }

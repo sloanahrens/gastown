@@ -133,15 +133,15 @@ func TestMachineExemptIsBdSQLAndHelp(t *testing.T) {
 	}
 	env := machineEnvForCall("", []string{"A=1"}, []string{"sql", "SELECT 1"})
 	if _, ok := lastEnvValue(env, "BD_MACHINE"); ok {
-		t.Errorf("bd sql env %v must not carry BD_MACHINE", env)
+		t.Errorf("bd sql env must not carry BD_MACHINE")
 	}
 	env = machineEnvForCall("", []string{"A=1"}, []string{"backup", "--help"})
 	if _, ok := lastEnvValue(env, "BD_MACHINE"); ok {
-		t.Errorf("bd backup --help env %v must not carry BD_MACHINE", env)
+		t.Errorf("bd backup --help env must not carry BD_MACHINE")
 	}
 	env = machineEnvForCall("", []string{"A=1"}, []string{"show", "gt-1"})
 	if v, _ := lastEnvValue(env, "BD_MACHINE"); v != "1" {
-		t.Errorf("bd show env %v must carry BD_MACHINE=1", env)
+		t.Errorf("bd show env must carry BD_MACHINE=1")
 	}
 }
 
