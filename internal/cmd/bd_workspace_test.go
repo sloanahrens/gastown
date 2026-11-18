@@ -162,7 +162,7 @@ func TestWorkspacePushSends(t *testing.T) {
 		}
 		return ""
 	}
-	if err := runWorkspacePush(context.Background(), deps, root, "", ""); err != nil {
+	if err := runWorkspacePush(context.Background(), deps, root, "", "", ""); err != nil {
 		t.Fatalf("runWorkspacePush: %v", err)
 	}
 	if got == nil {
@@ -277,7 +277,7 @@ func TestWorkspacePushNeedsItsSettings(t *testing.T) {
 			t.Parallel()
 			root := writePushTown(t)
 			deps, townRoot, url, token := tc.deps(t, root)
-			err := runWorkspacePush(context.Background(), deps, townRoot, url, token)
+			err := runWorkspacePush(context.Background(), deps, townRoot, url, "", token)
 			if err == nil {
 				t.Fatal("the push ran")
 			}
@@ -287,6 +287,132 @@ func TestWorkspacePushNeedsItsSettings(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.wantText) {
 				t.Errorf("error = %v, want it to name %q", err, tc.wantText)
 			}
+		})
+	}
+}
+
+// capturingPushDeps is a push's seams with a scripted environment: every key the
+// push reads is answered from env, and the request's URL is recorded in sentTo.
+// The doer answers with the manifest the document carried, so the push lands.
+func capturingPushDeps(t *testing.T, root string, env map[string]string, sentTo *string) workspacePushDeps {
+	t.Helper()
+	return workspacePushDeps{
+		findTown: func() (string, error) { return root, nil },
+		getenv:   func(key string) string { return env[key] },
+		doer: pushDoerFunc(func(req *http.Request) (*http.Response, error) {
+			*sentTo = req.URL.String()
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("reading the request body: %v", err)
+			}
+			var doc bdgateway.WorkspaceDocument
+			if err := json.Unmarshal(body, &doc); err != nil {
+				t.Fatalf("the request body is not a workspace document: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"manifest_sha":"` + doc.ManifestSHA + `"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+		out: &bytes.Buffer{},
+	}
+}
+
+// runPushURLCase drives one case through the command and asserts the request
+// went to wantOrigin's workspace endpoint.
+func runPushURLCase(t *testing.T, env map[string]string, args []string, wantOrigin string) {
+	t.Helper()
+	root := writePushTown(t)
+	withToken := make(map[string]string, len(env)+1)
+	for key, value := range env {
+		withToken[key] = value
+	}
+	withToken[bdgateway.WorkspaceTokenEnv] = writePushToken(t, "tok")
+	var sentTo string
+	cmd := newWorkspacePushCmd(capturingPushDeps(t, root, withToken, &sentTo))
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetArgs(append([]string{"--town-root", root}, args...))
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gt bd workspace push: %v", err)
+	}
+	if want := wantOrigin + bdgateway.WorkspacePath; sentTo != want {
+		t.Errorf("the push went to %s, want %s", sentTo, want)
+	}
+}
+
+// TestBdWorkspacePushURLEnvAndFlag: the push URL reaches the pusher — from
+// BD_GATEWAY_PUSH_URL when no flag names one, and from --push-url when it does,
+// over the environment and whether or not a gateway URL is set.
+func TestBdWorkspacePushURLEnvAndFlag(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+		// wantOrigin is the base URL the request must reach.
+		wantOrigin string
+	}{
+		{
+			name: "env push url",
+			env: map[string]string{
+				bdgateway.WorkspaceURLEnv:     "http://127.0.0.1:7440",
+				bdgateway.WorkspacePushURLEnv: "http://127.0.0.1:7441",
+			},
+			wantOrigin: "http://127.0.0.1:7441",
+		},
+		{
+			name: "flag wins over env",
+			env: map[string]string{
+				bdgateway.WorkspaceURLEnv:     "http://127.0.0.1:7440",
+				bdgateway.WorkspacePushURLEnv: "http://127.0.0.1:7441",
+			},
+			args:       []string{"--push-url", "http://127.0.0.1:7442"},
+			wantOrigin: "http://127.0.0.1:7442",
+		},
+		{
+			name:       "flag alone needs no gateway url",
+			env:        map[string]string{},
+			args:       []string{"--push-url", "http://127.0.0.1:7442"},
+			wantOrigin: "http://127.0.0.1:7442",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runPushURLCase(t, tc.env, tc.args, tc.wantOrigin)
+		})
+	}
+}
+
+// TestBdWorkspacePushURLNone: with no push URL flag or environment the pusher
+// keeps its PushURL empty, and the push goes to --gateway-url or BD_GATEWAY_URL
+// exactly as before.
+func TestBdWorkspacePushURLNone(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+		// wantOrigin is the base URL the request must reach.
+		wantOrigin string
+	}{
+		{
+			name:       "gateway url flag",
+			env:        map[string]string{},
+			args:       []string{"--gateway-url", "http://127.0.0.1:7440"},
+			wantOrigin: "http://127.0.0.1:7440",
+		},
+		{
+			name:       "gateway url env",
+			env:        map[string]string{bdgateway.WorkspaceURLEnv: "https://gw.test"},
+			wantOrigin: "https://gw.test",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runPushURLCase(t, tc.env, tc.args, tc.wantOrigin)
 		})
 	}
 }

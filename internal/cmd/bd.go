@@ -63,7 +63,7 @@ func processWorkspacePushDeps() workspacePushDeps {
 var bdWorkspacePushCmd = newWorkspacePushCmd(processWorkspacePushDeps())
 
 func newWorkspacePushCmd(deps workspacePushDeps) *cobra.Command {
-	var townRoot, gatewayURL, tokenFile string
+	var townRoot, gatewayURL, pushURL, tokenFile string
 	cmd := &cobra.Command{
 		Use:   "push",
 		Short: "Push the town's workspace to the bd gateway",
@@ -77,19 +77,22 @@ the gateway would otherwise serve a tree that routes prefixes it cannot open.
       --token-file ~/.local/state/gt/bd/daemon.token`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runWorkspacePush(cmd.Context(), deps, townRoot, gatewayURL, tokenFile)
+			return runWorkspacePush(cmd.Context(), deps, townRoot, gatewayURL, pushURL, tokenFile)
 		},
 	}
 	cmd.Flags().StringVar(&townRoot, "town-root", "", "Town root to read (default: the town containing the working directory)")
 	cmd.Flags().StringVar(&gatewayURL, "gateway-url", "", "Gateway base URL (default: $"+bdgateway.WorkspaceURLEnv+")")
+	cmd.Flags().StringVar(&pushURL, "push-url", "", "Gateway push URL, used instead of the gateway URL (default: $"+bdgateway.WorkspacePushURLEnv+")")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "File holding the bearer token (default: $"+bdgateway.WorkspaceTokenEnv+")")
 	return cmd
 }
 
 // runWorkspacePush builds the document from the town and sends it, printing the
 // manifest hash the gateway stored. Each setting falls back to its flag, then to
-// the environment gt-wrap's bdgateway target reads.
-func runWorkspacePush(ctx context.Context, deps workspacePushDeps, townRoot, gatewayURL, tokenFile string) error {
+// the environment gt-wrap's bdgateway target reads. The push URL serves the
+// corrective push an operator runs by hand, which must reach a gateway the
+// gateway URL does not point at.
+func runWorkspacePush(ctx context.Context, deps workspacePushDeps, townRoot, gatewayURL, pushURL, tokenFile string) error {
 	if deps.out == nil {
 		return errors.New("gt bd workspace push: no output writer is wired, so the manifest hash would be lost")
 	}
@@ -103,16 +106,19 @@ func runWorkspacePush(ctx context.Context, deps workspacePushDeps, townRoot, gat
 		}
 		townRoot = found
 	}
-	url, token := gatewayURL, tokenFile
+	url, push, token := gatewayURL, pushURL, tokenFile
 	if deps.getenv != nil {
 		if url == "" {
 			url = deps.getenv(bdgateway.WorkspaceURLEnv)
+		}
+		if push == "" {
+			push = deps.getenv(bdgateway.WorkspacePushURLEnv)
 		}
 		if token == "" {
 			token = deps.getenv(bdgateway.WorkspaceTokenEnv)
 		}
 	}
-	pusher := bdgateway.GatewayPusher{URL: url, TokenFile: token, HTTP: deps.doer}
+	pusher := bdgateway.GatewayPusher{URL: url, PushURL: push, TokenFile: token, HTTP: deps.doer}
 	manifest, err := pusher.Push(ctx, townRoot)
 	if err != nil {
 		return fmt.Errorf("gt bd workspace push: %w", err)
