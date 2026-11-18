@@ -255,6 +255,10 @@ type attentionSources struct {
 	// the setting that asked for them (gt-01lcq2).
 	imagePins func() ([]attention.Item, error)
 
+	// imagePinLayers is the image_pin_layers run's dead-layer record
+	// (image_pin_layers.go): nil while the patrol is off, so its items clear.
+	imagePinLayers func() ([]attention.Item, error)
+
 	// refusals is gt done's refusal ledger; refusalBead reads one refused
 	// bead in its own rig.
 	refusals    func() ([]attention.Refusal, error)
@@ -767,6 +771,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindImagePinsStale, collect: s.collectImagePins(attention.KindImagePinsStale)},
 		{kind: attention.KindImagePinsUnreadable, collect: s.collectImagePins(attention.KindImagePinsUnreadable)},
 		{kind: attention.KindImagePinsRefreshStuck, collect: s.collectImagePins(attention.KindImagePinsRefreshStuck)},
+		// A dead layer of a digest-pinned image, read from the
+		// image_pin_layers run's record (gt-2v6scj).
+		{kind: attention.KindImagePinsDeadLayer, collect: s.collectImagePinLayersDeadLayer},
 	}, s.questionCollectors()...)
 }
 
@@ -810,6 +817,10 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	// collector carries no read and the queue clears its items.
 	if d.isPatrolActive("image_pins") {
 		s.imagePins = d.imagePinsAttention.observed
+	}
+	if d.isPatrolActive(imagePinLayersPatrol) {
+		record := imagePinLayersFindingsPath(d.config.TownRoot)
+		s.imagePinLayers = func() ([]attention.Item, error) { return imagePinLayersObserved(record) }
 	}
 	// A polecat-health pass that is off raises nothing, so its items clear
 	// rather than outliving the patrol that asked for them (gt-q6hafz).
