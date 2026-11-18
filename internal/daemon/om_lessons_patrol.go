@@ -418,10 +418,11 @@ func saveOmLessonsFiled(townRoot, week string, filed map[string]bool) error {
 //
 // A class the week already filed is skipped and named in the log, so a second
 // pass in the week — a restart, a shorter configured interval, a rerun — files
-// nothing twice. A class whose create fails is logged and left out of the
-// record, so the proposals after it still file and the next pass of the week
-// tries it again; every failure is returned together, so a pass that lost a
-// bead never reads as clean.
+// nothing twice. The record is written as each class is filed, so a pass that
+// ends between two creates leaves the classes it already filed recorded. A
+// class whose create fails is left out of the record, so the proposals after
+// it still file and the next pass of the week tries it again; every failure is
+// returned together, so a pass that lost a bead never reads as clean.
 func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omlessons.Proposal) error {
 	var drafts []omlessons.Proposal
 	for _, p := range proposals {
@@ -452,7 +453,6 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 	}
 	writer := d.noticeBeads()
 	var failures []error
-	filedNow := false
 	for _, p := range drafts {
 		if filed[p.ID] {
 			d.logger.Printf("om_lessons: %s was already filed in %s, skipping", p.ID, week)
@@ -466,15 +466,14 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 			Actor:       daemonActor,
 		})
 		if err != nil {
-			failure := fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err)
-			d.logger.Printf("%v", failure)
-			failures = append(failures, failure)
+			failures = append(failures, fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err))
 			continue
 		}
 		filed[p.ID] = true
-		filedNow = true
-	}
-	if filedNow {
+		// Record the class with its bead, not once after the loop: a pass
+		// that dies before the loop ends leaves the classes it already filed
+		// recorded, and a write that fails here is retried by the next class's
+		// write, which carries the accumulated set.
 		if err := saveOmLessonsFiled(townRoot, week, filed); err != nil {
 			failures = append(failures, fmt.Errorf("om_lessons: recording the classes filed in %s: %w", week, err))
 		}

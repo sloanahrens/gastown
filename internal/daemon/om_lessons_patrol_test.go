@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -522,6 +523,30 @@ func (w omLessonsSelectiveWriter) Create(opts beads.CreateOptions) (*beads.Issue
 	return w.inner.Create(opts)
 }
 
+// omLessonsWatchingWriter is a beads client that notes, at the start of each
+// create, the classes the town's filed record names, so a test can see which
+// filings the pass had recorded by the time it filed the next bead.
+type omLessonsWatchingWriter struct {
+	inner notifyBeadWriter
+	town  string
+	week  string
+	seen  [][]string
+}
+
+func (w *omLessonsWatchingWriter) Create(opts beads.CreateOptions) (*beads.Issue, error) {
+	filed, err := loadOmLessonsFiled(w.town, w.week)
+	if err != nil {
+		return nil, fmt.Errorf("reading the filed record before a create: %w", err)
+	}
+	ids := make([]string, 0, len(filed))
+	for id := range filed {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	w.seen = append(w.seen, ids)
+	return w.inner.Create(opts)
+}
+
 // omLessonsTwoDraftWeek is a week with two classes past the proposal floor:
 // fail-open first in the table's order, then missing-refusal-test.
 func omLessonsTwoDraftWeek(at time.Time) []land.ReviewRecord {
@@ -534,8 +559,8 @@ func omLessonsTwoDraftWeek(at time.Time) []land.ReviewRecord {
 }
 
 // TestReworkProgramOmLessonsRefusedFilingIsReturned: a create the beads client
-// refuses is logged and returned wrapped, naming the class it was filing, so
-// the pass never reads as filed.
+// refuses is returned wrapped, naming the class it was filing, so the pass
+// never reads as filed.
 func TestReworkProgramOmLessonsRefusedFilingIsReturned(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
@@ -670,16 +695,14 @@ func TestReworkProgramOmLessonsFilingDedupesByClassAndISOWeek(t *testing.T) {
 }
 
 // TestReworkProgramOmLessonsOneFailedFilingDoesNotStopTheOthers: a create the
-// beads client refuses is logged and returned, and the proposals after it are
-// still filed.
+// beads client refuses is returned, and the proposals after it are still filed.
 func TestReworkProgramOmLessonsOneFailedFilingDoesNotStopTheOthers(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 	refused := errors.New("the beads client refused the create")
 	bd := beadsfake.New()
-	var logged bytes.Buffer
 
-	d := omLessonsTestDaemon(t, &logged)
+	d := omLessonsTestDaemon(t, io.Discard)
 	d.openNoticeBeads = func() notifyBeadWriter {
 		return omLessonsSelectiveWriter{inner: bd, refuse: "fail-open", err: refused}
 	}
@@ -688,9 +711,6 @@ func TestReworkProgramOmLessonsOneFailedFilingDoesNotStopTheOthers(t *testing.T)
 	_, err := d.runOmLessonsTick(context.Background(), at)
 	if !errors.Is(err, refused) {
 		t.Fatalf("a refused create returned %v, want the client's error", err)
-	}
-	if !strings.Contains(logged.String(), "filing the proposal for fail-open") {
-		t.Errorf("a refused create logged %q, want the class it was filing named", logged.String())
 	}
 
 	filed, err := bd.List(beads.ListOptions{Status: "all"})
@@ -702,6 +722,60 @@ func TestReworkProgramOmLessonsOneFailedFilingDoesNotStopTheOthers(t *testing.T)
 	}
 	if want := "Class: a refusal branch has no test (missing-refusal-test)"; !strings.Contains(filed[0].Description, want) {
 		t.Errorf("the pass filed a bead other than missing-refusal-test; text:\n%s", filed[0].Description)
+	}
+}
+
+// TestReworkProgramOmLessonsAFiledClassIsRecordedBeforeTheNextCreate: the filed
+// record is written as each class's bead is created, not once after the loop, so
+// a pass that ends before its last class leaves the classes it already filed
+// recorded and the next pass of the week files nothing twice.
+func TestReworkProgramOmLessonsAFiledClassIsRecordedBeforeTheNextCreate(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC) // 2026-W47
+	town := t.TempDir()
+	week := omLessonsISOWeek(at)
+	w := &omLessonsWatchingWriter{inner: beadsfake.New(), town: town, week: week}
+
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.config.TownRoot = town
+	d.openNoticeBeads = func() notifyBeadWriter { return w }
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsTwoDraftWeek(at), map[string]bool{"1": true, "3": true}))
+
+	if _, err := d.runOmLessonsTick(context.Background(), at); err != nil {
+		t.Fatalf("the pass over two draft classes: %v", err)
+	}
+	if len(w.seen) != 2 {
+		t.Fatalf("the pass made %d create(s), want the two draft classes", len(w.seen))
+	}
+	if len(w.seen[0]) != 0 {
+		t.Errorf("the first create saw %v already recorded, want nothing filed before it", w.seen[0])
+	}
+	if want := []string{"fail-open"}; !slices.Equal(w.seen[1], want) {
+		t.Errorf("the second create saw %v recorded, want the class created before it (%v) recorded by then", w.seen[1], want)
+	}
+}
+
+// TestReworkProgramOmLessonsOneFailedFilingIsLoggedOnce: a create the beads
+// client refuses reaches the log once, through the pass's returned error, not
+// also straight from the filing loop.
+func TestReworkProgramOmLessonsOneFailedFilingIsLoggedOnce(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	refused := errors.New("the beads client refused the create")
+	var logged bytes.Buffer
+
+	d := omLessonsTestDaemon(t, &logged)
+	d.clock = clockwork.NewFakeClockAt(at)
+	d.config.TownRoot = t.TempDir()
+	d.openNoticeBeads = func() notifyBeadWriter {
+		return omLessonsSelectiveWriter{inner: beadsfake.New(), refuse: "fail-open", err: refused}
+	}
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsTwoDraftWeek(at), map[string]bool{"1": true, "3": true}))
+
+	d.triggerOmLessons()
+
+	if got := strings.Count(logged.String(), "filing the proposal for fail-open"); got != 1 {
+		t.Errorf("one refused create was logged %d time(s), want once; log:\n%s", got, logged.String())
 	}
 }
 
