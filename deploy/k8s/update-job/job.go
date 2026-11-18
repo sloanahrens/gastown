@@ -218,14 +218,16 @@ func volumes(v Values) []Volume {
 	return vols
 }
 
-// imagesContainer records the images of the green commit into the values file. It
-// is an init container, so the roll does not start when the record is refused.
+// imagesContainer records the images of the green commit into the values file, the
+// bd gateway image included, since the town's copy of that file is what the compose
+// unit reads its bd image from. It is an init container, so the roll does not start
+// when the record is refused.
 func imagesContainer(v Values) Container {
 	return Container{
 		Name:    InitContainerName,
 		Image:   v.Image,
 		Command: []string{"gt"},
-		Args:    []string{"update", "images", "--sha", v.GreenCommit, "--out", ValuesPath},
+		Args:    []string{"update", "images", "--sha", v.GreenCommit, "--out", ValuesPath, "--bd"},
 		// `gt update images` finds the town from its working directory.
 		WorkingDir:   k8sdaemon.TownRootPath,
 		Env:          containerEnv(v),

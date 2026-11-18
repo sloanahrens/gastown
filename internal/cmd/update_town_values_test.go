@@ -18,7 +18,7 @@ import (
 
 // townValuesPair is the pair the fixture's --images file holds.
 func townValuesPair() imagevalues.Values {
-	return imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Commit: rollbackNewCommit}
+	return imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}
 }
 
 // townValuesRecord is the writer a town-values test injects: it records each

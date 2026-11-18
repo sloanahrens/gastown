@@ -23,6 +23,9 @@ import (
 var (
 	podSwapOldDaemonRef  = "registry.internal:5000/town/gastown-daemon@sha256:" + strings.Repeat("1", 64)
 	podSwapOldPolecatRef = "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("2", 64)
+	// podSwapBdRef is the bd gateway digest a values file records under bd. A pod
+	// target refuses a file with no bd key, so the pod fixtures name one.
+	podSwapBdRef = "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("3", 64)
 )
 
 // podDaemonKubectl stands in for kubectl against a daemon that runs as a pod. A
@@ -171,7 +174,7 @@ func captureWiredInstall(t *testing.T, extra ...string) wiredInstall {
 	values := filepath.Join(townRoot, "images.yaml")
 	// The polecat digest is the one the fake registry serves at the dev tag, so the
 	// pod's pair check passes for a healthy pod.
-	if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Commit: rollbackNewCommit}); err != nil {
+	if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}); err != nil {
 		t.Fatalf("write the values file: %v", err)
 	}
 	clock := &rollbackTestClock{now: time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)}
@@ -392,7 +395,7 @@ func runCountedPodCommand(t *testing.T, withImages bool, args ...string) (podRun
 	}
 	if withImages {
 		values := filepath.Join(townRoot, "images.yaml")
-		if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Commit: rollbackNewCommit}); err != nil {
+		if err := imagevalues.Write(values, imagevalues.Values{Daemon: podSwapDigestRef, Polecat: podPairPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}); err != nil {
 			t.Fatalf("write the values file: %v", err)
 		}
 		args = append([]string{"--images", values}, args...)

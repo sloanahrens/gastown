@@ -192,13 +192,14 @@ spec:
         c.name == 'images' &&
         c.image.matches('^forgejo:3000/bot-registry/gastown-daemon@sha256:[0-9a-f]{64}$') &&
         c.command == ['gt'] &&
-        size(c.args) == 6 &&
+        size(c.args) == 7 &&
         c.args[0] == 'update' &&
         c.args[1] == 'images' &&
         c.args[2] == '--sha' &&
         c.args[3].matches('^[0-9a-f]{40}$') &&
         c.args[4] == '--out' &&
         c.args[5] == '/Users/sloan/gt/.runtime/update/images.yaml' &&
+        c.args[6] == '--bd' &&
         !has(c.envFrom) &&
         !has(c.ports) &&
         (!has(c.securityContext) ||

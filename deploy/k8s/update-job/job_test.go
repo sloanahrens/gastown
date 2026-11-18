@@ -280,7 +280,7 @@ func TestInitRecordsTheImagesAndTheContainerRollsThem(t *testing.T) {
 			t.Errorf("%s workingDir = %q, want the town root %q", c.Name, c.WorkingDir, k8sdaemon.TownRootPath)
 		}
 	}
-	wantImages := []string{"update", "images", "--sha", v.GreenCommit, "--out", ValuesPath}
+	wantImages := []string{"update", "images", "--sha", v.GreenCommit, "--out", ValuesPath, "--bd"}
 	if !slices.Equal(images.Args, wantImages) {
 		t.Errorf("images args = %v, want %v", images.Args, wantImages)
 	}
@@ -290,6 +290,32 @@ func TestInitRecordsTheImagesAndTheContainerRollsThem(t *testing.T) {
 	}
 	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != "images" {
 		t.Errorf("init containers = %+v, want the one images container, so the roll waits for the record", pod.InitContainers)
+	}
+}
+
+// TestUpdateJobBdInitArgsEndWithBd holds the images init container to record the bd
+// gateway image: its args end with --bd with the gateway off and on, and the CronJob's
+// template carries the same args, so a Job the daemon creates from it records bd too.
+func TestUpdateJobBdInitArgsEndWithBd(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		v    Values
+	}{
+		{name: "gateway off", v: goldenValues()},
+		{name: "gateway on", v: bdGatewayValues()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := mustBuild(t, tt.v)
+			for _, pod := range []PodSpec{podOf(m), m.CronJob.Spec.JobTemplate.Spec.Template.Spec} {
+				images := containerNamed(t, pod, InitContainerName)
+				if n := len(images.Args); n == 0 || images.Args[n-1] != "--bd" {
+					t.Errorf("init container args = %v, want them to end with --bd", images.Args)
+				}
+			}
+		})
 	}
 }
 
