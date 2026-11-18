@@ -16,11 +16,14 @@ the shim describes that deferred state.
 ## Goal
 
 The `bd` binary leaves the daemon image and the polecat image. One dedicated bd
-image, built by CI, runs as a long-lived container in the Mac's local Docker
-beside Dolt, in one compose unit started at system startup. Every caller that
-runs bd today calls that container instead, through a small authenticated
-gateway. The bd shim (tracker routing) belongs to the tracker program (the note
-above, gt-p85pw), so the image runs the real bd. Seats keep their own bd until
+image, built by CI, runs the gateway. After the cutover the gateway is the
+`bd-gateway` workload in the cluster, rolled with the daemon (see
+[The in-cluster gateway](#the-in-cluster-gateway)). Until the cutover it is the
+`gt-bd` container in the Mac's local Docker beside Dolt, in one compose unit
+started at system startup. Every caller that runs bd today calls the gateway
+instead, over a small authenticated protocol. The bd shim (tracker routing)
+belongs to the tracker program (the note above, gt-p85pw), so the image runs the
+real bd. Seats keep their own bd until
 approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
 
 ## Facts this design rests on
@@ -62,6 +65,10 @@ approach A (TASK.md in, outbox out, gt-4fgpu5) is built.
   :275). It cannot run embedded Dolt and does not need to.
 
 ## Architecture
+
+The diagram shows the state until the cutover. After it, the pods reach the
+gateway in the cluster, as described in
+[The in-cluster gateway](#the-in-cluster-gateway).
 
 ```
  Mac callers                        Docker Desktop (Mac)                    Colima VMs
@@ -108,6 +115,33 @@ A forwarder per call cannot keep an HTTP connection alive. The first phase
 accepts that (one extra TCP connect, about 3 to 5 ms). A later, optional step
 gives the daemon an in-process client behind `bdRunFunc` with keepalive; it needs
 no protocol change.
+
+## The in-cluster gateway
+
+After the cutover the gateway is a workload in the cluster, rolled with the
+daemon. Its Deployment, container and Service are all named `bd-gateway`, and
+the Service publishes port 7440 as `http://bd-gateway.<namespace>.svc:7440`.
+The render creates it only when the values file names a gateway image, and that
+image is a digest from the values file's `bd` key. Its workspace lives on the
+`bd-gateway-workspace` claim (1Gi). It reaches Dolt through the host alias the
+render builds from the host gateway IP.
+
+The update order is gateway first. The gateway's Deployment is patched and its
+rollout is waited on (three minutes at most, so its pod is Ready) before the
+daemon's Deployment is patched, and the dashboard's comes last. A Deployment that
+does not exist is skipped, and the gateway moves only when the pair names its
+image.
+
+Every gateway change stays compatible with the previous daemon for one roll,
+because the gateway moves first.
+
+Rollback puts the recorded previous pair back over all three images through the
+same swap. A failure in the gateway step is reported as the gateway's check, and
+the daemon is not rolled onto the pair. A previous pair that names no gateway
+image leaves the gateway Deployment on its current image.
+
+Until the cutover the gateway is the `gt-bd` container in
+[The compose unit](#the-compose-unit).
 
 ## The gateway protocol
 
@@ -171,7 +205,8 @@ Head (JSON):
 
 Accepted from the caller: `BD_ACTOR`, `BEADS_ACTOR`, `BD_MACHINE`,
 `BD_JSON_ENVELOPE`, `BD_READONLY`, `BD_DOLT_AUTO_COMMIT`. Computed by the gateway
-and never accepted: `BEADS_DIR` (from `rig`), `BEADS_DOLT_SERVER_HOST` and
+and never accepted: `BEADS_DIR` (from `rig`), `GT_TOWN_ROOT` (the executor's
+workspace root, set when there is one), `BEADS_DOLT_SERVER_HOST` and
 `BEADS_DOLT_SERVER_PORT` (the compose service name and port), `TRACKER_URL`,
 `TRACKER_TOKEN_FILE`, `HOME`, `PATH`. `BD_ALLOW_NEW_DATABASE` is refused with
 every class: `init` is not served. The class forces `BD_READONLY=true` for
