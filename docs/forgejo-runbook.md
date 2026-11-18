@@ -401,17 +401,20 @@ cluster volume.
 
 The nightly host job runs the dump inside the forgejo pod and writes
 `forgejo-dump-<ts>.tar.gz`. The archive holds `app.ini`, the repositories, the
-data directory and `forgejo-db.sql`, and it holds the application secrets:
-treat it as sensitive as the live data.
+data directory and `forgejo-db.sql`: treat it as sensitive as the live data.
+`app.ini` in a standard Forgejo configuration holds the application secrets; the
+rehearsal did not read those values.
 
 Find the SQL entry from the archive's listing rather than by extracting the
-rest. In the rehearsed archive `forgejo-db.sql` sat at entry 781, so a
-`grep -m1` on the tar listing finds it without extracting the rest of the
-archive:
+rest. The listing ran:
 
 ```bash
-tar tzf forgejo-dump-<ts>.tar.gz | grep -m1 'forgejo-db.sql$'
+tar tzf forgejo-dump-<ts>.tar.gz | grep -a -m1 -n -E 'forgejo-db|gitea-db|\.sql'
 ```
+
+It found `781:forgejo-db.sql` in 19 s. The grep stops at the first match, but tar
+still decompresses everything before that entry; the whole archive was never
+listed.
 
 Restore into a scratch PostgreSQL 17 and a scratch Forgejo 16.0.5, never into
 the live pair. Put the scratch pair on a network with no route out, and run
@@ -419,15 +422,20 @@ Forgejo with mirrors, cron, Actions, mail and SSH off.
 
 ### The database
 
-A plain `psql < forgejo-db.sql` does not restore this dump: 63 CREATE TABLE
-statements fail on foreign keys to `repository`, which the file creates later,
-and 39 INSERTs fail for the same reason. Load it in two passes. Put every line
-that starts with CREATE in one file and run that file twice: the first pass
-creates what it can and reports the foreign-key errors, and the second creates
-the tables those errors left out. Put every line that starts with INSERT INTO or
-SELECT in another file and run it once, as a superuser role, with
-`SET session_replication_role = replica;` as its first statement so the INSERTs
-load without the foreign-key checks:
+A plain `psql < forgejo-db.sql` does not restore the dump because the file
+creates tables and inserts rows in alphabetical order, so a table with a foreign
+key to one created later (`repository`, `user` and others) cannot be created.
+Rehearsed, with `ON_ERROR_STOP=1` the load stopped after 2 s at its first error
+`relation "public.repository" does not exist`; without it one pass over the whole
+file reported 63 errors all of the kind `relation ... does not exist`; and with
+the CREATE lines already run twice, the INSERT lines run without
+`session_replication_role = replica` reported 39 errors. Load it in two passes.
+Put every line that starts with CREATE in one file and run that file twice: the
+first pass creates what it can and reports the `does not exist` errors, and the
+second creates the tables those errors left out. Put every line that starts with
+INSERT INTO or SELECT in another file and run it once, as a superuser role (the
+rehearsal role was a superuser), with `SET session_replication_role = replica;`
+as its first statement so the INSERTs load without the foreign-key checks:
 
 ```bash
 grep '^CREATE' forgejo-db.sql > create.sql
@@ -435,13 +443,20 @@ grep -E '^(INSERT INTO|SELECT)' forgejo-db.sql > data.sql
 psql -d <scratch-db> -U <superuser> -f create.sql
 psql -d <scratch-db> -U <superuser> -f create.sql
 { echo 'SET session_replication_role = replica;'; cat data.sql; } |
-  psql -d <scratch-db> -U <superuser> -v ON_ERROR_STOP=1
+  psql -d <scratch-db> -U <superuser>
 ```
 
-Neither create pass sets `ON_ERROR_STOP`: with it, the first pass stops at its
-first foreign-key error and the second stops at its first `already exists`.
-The restore is complete when the first pass reports only foreign-key errors and
-the second only `already exists`. The data pass reported 0 errors.
+Neither create pass sets `ON_ERROR_STOP`; a whole-file load with it stopped at
+the first error (above); on the create file alone the first pass is expected to
+stop at its first `does not exist` error and the second at its first
+`already exists`, which was not run. A good first create pass reports only
+`relation "..." does not exist` errors (19 here), a good second pass reports only
+`relation "..." already exists` errors (388 here) and NOTICEs, the table count
+then equals the number of CREATE TABLE lines in the create file (128 here), and
+the data pass, run without ON_ERROR_STOP, reported 0 errors and one setval result
+per SELECT line (116 here). The rehearsal did not record the data pass's exit
+status; adding `-v ON_ERROR_STOP=1` to stop at the first data error is
+recommended and not rehearsed.
 
 Do not run the whole file twice instead: a table with no primary key then loads
 its rows twice (`forgejo_sem_ver` showed 2).
@@ -460,7 +475,7 @@ ref counts equal the live ones, except in what moved since the dump.
 |------|------|
 | SQL entry found in the archive listing | 19 s |
 | Extract | 35 s |
-| Database load | 94 s |
+| Database load (CREATE lines twice, then data once, no ON_ERROR_STOP) | 94 s |
 | Forgejo ready | about 9 s |
 | 14 repositories cloned over HTTP | 37 s |
 
@@ -470,6 +485,17 @@ ref counts equal the live ones, except in what moved since the dump.
 - Actions run history and logs.
 - Restoring the Forgejo data volume itself: the rehearsal restored the dump, not
   the volume. SSH went untested too.
+- Loading into a host PostgreSQL server: the rehearsal used a container with
+  PostgreSQL 17.11.
+- A non-superuser load role: that the setting needs a superuser is expected, not
+  tested.
+- Other Forgejo versions: the split assumes one statement per line.
+- Restore time from a cold cache.
+- The whole-archive listing.
+- `ON_ERROR_STOP` on the data pass.
+- The commands as written: the code block uses `-f` and `grep '^CREATE'` where
+  the rehearsal used stdin, `-q` and `grep -E '^CREATE '`, equivalent on this
+  dump and not run as written.
 
 ## Tests
 
