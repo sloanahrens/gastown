@@ -491,6 +491,115 @@ func TestBdgwReadyReasons(t *testing.T) {
 	}
 }
 
+// loadedGatewayWithProbe builds a gateway whose pieces are all loaded, with the
+// given Dolt probe wired, so Ready answers nil and only the probe can refuse.
+func loadedGatewayWithProbe(t *testing.T, probe func(context.Context) error) *Gateway {
+	t.Helper()
+	store := mustStore(t)
+	pushWorkspace(t, store, map[string]string{"gastown/.beads/metadata.json": "{}"})
+	g, err := NewGateway(GatewayOptions{
+		Auth:       testAuthenticator(t),
+		Policy:     mustPolicy(t),
+		Workspaces: store,
+		Log:        newTestCallLog(t),
+		Runner:     &stubRunner{exit: 0},
+		DoltProbe:  probe,
+	})
+	if err != nil {
+		t.Fatalf("NewGateway: %v", err)
+	}
+	return g
+}
+
+// getReady drives GET /readyz with a read token and returns the recorder.
+func getReady(t *testing.T, g *Gateway) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, readyPath, nil)
+	req.Header.Set("Authorization", "Bearer "+testReadToken)
+	g.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestGatewayReadyDoltServe: /readyz is 200 when the Dolt probe answers and 503
+// naming Dolt when it fails. A call and Ready itself never touch the probe, so
+// only readiness reports the Dolt reason.
+func TestGatewayReadyDoltServe(t *testing.T) {
+	t.Parallel()
+	probeErr := errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+	cases := []struct {
+		name    string
+		probe   func(context.Context) error
+		want    int
+		message string
+	}{
+		{name: "dolt answers", probe: func(context.Context) error { return nil }, want: http.StatusOK},
+		{name: "dolt unreachable", probe: func(context.Context) error { return probeErr }, want: http.StatusServiceUnavailable,
+			message: "bdgateway: dolt is not reachable: dial tcp 127.0.0.1:3307: connect: connection refused"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := getReady(t, loadedGatewayWithProbe(t, tc.probe))
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body %s", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.message == "" {
+				return
+			}
+			var payload ErrorPayload
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("body %q is not an error payload: %v", rec.Body.String(), err)
+			}
+			if payload.Message != tc.message {
+				t.Errorf("message = %q, want %q", payload.Message, tc.message)
+			}
+		})
+	}
+
+	// The Dolt reason belongs to /readyz alone: a call and the Ready check must
+	// not run the probe, or a slow dial would land in every push path.
+	t.Run("only readiness probes", func(t *testing.T) {
+		t.Parallel()
+		var calls int
+		g := loadedGatewayWithProbe(t, func(context.Context) error {
+			calls++
+			return probeErr
+		})
+		if err := g.Ready(); err != nil {
+			t.Fatalf("Ready = %v, want nil with every piece loaded", err)
+		}
+		if code := postExec(t, g, testReadToken, Request{Argv: []string{"show"}}); code != http.StatusOK {
+			t.Fatalf("call status = %d, want 200", code)
+		}
+		if calls != 0 {
+			t.Errorf("the probe ran %d times outside /readyz, want 0", calls)
+		}
+	})
+}
+
+// TestGatewayReadyDoltNil: with no probe wired, readiness is exactly what it was
+// before the probe existed: 200 when the pieces are loaded, and the workspace
+// reason still first when they are not.
+func TestGatewayReadyDoltNil(t *testing.T) {
+	t.Parallel()
+	if rec := getReady(t, loadedGatewayWithProbe(t, nil)); rec.Code != http.StatusOK {
+		t.Fatalf("loaded gateway status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	g := newTestGateway(t, mustStore(t), newTestCallLog(t), &stubRunner{exit: 0})
+	rec := getReady(t, g)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unloaded workspace status = %d, want 503; body %s", rec.Code, rec.Body.String())
+	}
+	var payload ErrorPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("body %q is not an error payload: %v", rec.Body.String(), err)
+	}
+	if !strings.Contains(payload.Message, "no workspace is loaded") {
+		t.Errorf("message = %q, want the workspace reason", payload.Message)
+	}
+}
+
 // TestBdgwStatsAndWorkspace: the counters need a token, and the workspace takes
 // a push only from a class that may write.
 func TestBdgwStatsAndWorkspace(t *testing.T) {
