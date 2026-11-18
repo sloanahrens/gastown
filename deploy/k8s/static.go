@@ -36,7 +36,7 @@ type StaticObject struct {
 	APIVersion string
 	Kind       string
 	Name       string
-	// Namespace is empty for a cluster-scoped object (Cluster is true).
+	// Namespace is empty only for a cluster-scoped object (Cluster is true).
 	Namespace string
 	Cluster   bool
 	// SecretNoData is true for a Secret the cluster fills in; Static refuses a
@@ -114,6 +114,14 @@ func staticExcludedFiles(rows []struct{ File, Owner, Reason string }) ([]string,
 		if !ok {
 			return nil, fmt.Errorf("StaticExcluded lists %q, which is not under %s/", row.File, staticDir)
 		}
+		// A row with no owner or reason records no decision, which is what the
+		// list exists to hold.
+		switch {
+		case row.Owner == "":
+			return nil, fmt.Errorf("StaticExcluded row for %q names no owner", row.File)
+		case row.Reason == "":
+			return nil, fmt.Errorf("StaticExcluded row for %q gives no reason", row.File)
+		}
 		files = append(files, rel)
 	}
 	return files, nil
@@ -160,10 +168,15 @@ func parseStaticObject(doc []byte) (StaticObject, error) {
 	if err := dec.Decode(&parsed); err != nil {
 		return StaticObject{}, fmt.Errorf("not a YAML object: %w", err)
 	}
-	// The splitter cuts on separator lines alone; a second document here means a
-	// separator it did not recognize, and Decode would keep only the first.
+	// The splitter cuts on separator lines alone, so a second document here means
+	// a separator it did not recognize. Decode would keep only the first, and a
+	// trailing document it cannot parse would otherwise read as a second one.
 	var extra yaml.Node
-	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+	switch err := dec.Decode(&extra); {
+	case errors.Is(err, io.EOF):
+	case err != nil:
+		return StaticObject{}, fmt.Errorf("second document: %w", err)
+	default:
 		return StaticObject{}, errors.New("more than one YAML document between separators")
 	}
 	switch {
@@ -177,6 +190,11 @@ func parseStaticObject(doc []byte) (StaticObject, error) {
 	cluster, known := staticKinds[parsed.Kind]
 	if !known {
 		return StaticObject{}, fmt.Errorf("kind %s is not in the static set's kinds", parsed.Kind)
+	}
+	// A namespaced object with no namespace renders into whatever namespace the
+	// applier's context holds, which is not the namespace this file reviewed.
+	if !cluster && parsed.Metadata.Namespace == "" {
+		return StaticObject{}, fmt.Errorf("namespaced kind %s has no metadata.namespace", parsed.Kind)
 	}
 	obj := StaticObject{
 		APIVersion: parsed.APIVersion,

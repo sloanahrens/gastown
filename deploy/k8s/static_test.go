@@ -196,14 +196,37 @@ func TestStaticObjectsEveryFileAccountedFor(t *testing.T) {
 			t.Fatalf("staticExcludedFiles(%q) = %v, want an error naming it", rows, err)
 		}
 	})
+
+	t.Run("a row with no owner is refused", func(t *testing.T) {
+		t.Parallel()
+		rows := []struct{ File, Owner, Reason string }{
+			{"deploy/k8s/hand-applied.yaml", "", "a hand-applied object"},
+		}
+		_, err := staticExcludedFiles(rows)
+		if err == nil || !strings.Contains(err.Error(), "hand-applied.yaml") || !strings.Contains(err.Error(), "owner") {
+			t.Fatalf("staticExcludedFiles(%q) = %v, want an error naming the file and its missing owner", rows, err)
+		}
+	})
+
+	t.Run("a row with no reason is refused", func(t *testing.T) {
+		t.Parallel()
+		rows := []struct{ File, Owner, Reason string }{
+			{"deploy/k8s/hand-applied.yaml", "overseer", ""},
+		}
+		_, err := staticExcludedFiles(rows)
+		if err == nil || !strings.Contains(err.Error(), "hand-applied.yaml") || !strings.Contains(err.Error(), "reason") {
+			t.Fatalf("staticExcludedFiles(%q) = %v, want an error naming the file and its missing reason", rows, err)
+		}
+	})
 }
 
 func TestStaticObjectsRefusals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		body string
-		want string
+		name    string
+		body    string
+		want    string
+		notWant string
 	}{
 		{
 			name: "no apiVersion",
@@ -241,9 +264,20 @@ func TestStaticObjectsRefusals(t *testing.T) {
 			want: "Deployment is not in the static set",
 		},
 		{
+			name: "a namespaced kind with no namespace",
+			body: "apiVersion: v1\nkind: Role\nmetadata:\n  name: r\n",
+			want: "no metadata.namespace",
+		},
+		{
 			name: "a separator the splitter does not recognize hides a second document",
-			body: "apiVersion: v1\nkind: Role\nmetadata: {name: a}\n--- # second\napiVersion: v1\nkind: Role\nmetadata: {name: b}\n",
+			body: "apiVersion: v1\nkind: Role\nmetadata: {name: a, namespace: gt}\n--- # second\napiVersion: v1\nkind: Role\nmetadata: {name: b, namespace: gt}\n",
 			want: "more than one YAML document",
+		},
+		{
+			name:    "a malformed second document reports its parse error",
+			body:    "apiVersion: v1\nkind: Role\nmetadata: {name: a, namespace: gt}\n--- # second\na: b: c\n",
+			want:    "second document",
+			notWant: "more than one YAML document",
 		},
 		{
 			name: "a document that is not a mapping",
@@ -265,6 +299,9 @@ func TestStaticObjectsRefusals(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error %q does not say %q", err, tt.want)
+			}
+			if tt.notWant != "" && strings.Contains(err.Error(), tt.notWant) {
+				t.Errorf("error %q reads as %q", err, tt.notWant)
 			}
 		})
 	}
