@@ -355,3 +355,121 @@ func TestWorkspaceReconcileInstallsGatewayPusher(t *testing.T) {
 		t.Errorf("installed pusher = {URL %q, TokenFile %q}, want {URL %q, TokenFile %q}", gp.URL, gp.TokenFile, url, tokenFile)
 	}
 }
+
+// TestWorkspaceReconcilePushURLSet: with BD_GATEWAY_URL and BD_GATEWAY_PUSH_URL
+// both set, the daemon installs a GatewayPusher that carries both, and its start
+// log names the push URL it pushes to. A push URL that carries credentials has
+// them stripped from the log, since the log never holds a credential.
+func TestWorkspaceReconcilePushURLSet(t *testing.T) {
+	t.Parallel()
+	const (
+		url     = "http://127.0.0.1:7440"
+		pushURL = "http://127.0.0.1:7441"
+	)
+	tests := []struct {
+		name string
+		// pushURL is the push service the environment names.
+		pushURL string
+		// wantLog is the URL the log line must name.
+		wantLog string
+		// wantSecret is text the log must not hold. Empty checks nothing.
+		wantSecret string
+	}{
+		{name: "the push URL is carried and named in the log", pushURL: pushURL, wantLog: pushURL},
+		{
+			name:       "credentials in the push URL are stripped from the log",
+			pushURL:    "http://pusher:hunter2@127.0.0.1:7441",
+			wantLog:    pushURL,
+			wantSecret: "hunter2",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := map[string]string{
+				bdgateway.WorkspaceURLEnv:     url,
+				bdgateway.WorkspacePushURLEnv: tt.pushURL,
+			}
+			logs := &lockedBuffer{}
+			var installed []bdgateway.WorkspacePusher
+			d := newWorkspaceDaemon(t, env, newFixedClock(), nil, logs, nil)
+			d.installWorkspacePusher = func(p bdgateway.WorkspacePusher) { installed = append(installed, p) }
+
+			if !d.startWorkspaceReconcile() {
+				t.Fatal("startWorkspaceReconcile() = false with a gateway and a push URL named, want true")
+			}
+			if len(installed) != 1 {
+				t.Fatalf("installs = %d, want 1", len(installed))
+			}
+			gp, ok := installed[0].(bdgateway.GatewayPusher)
+			if !ok {
+				t.Fatalf("installed pusher = %T, want bdgateway.GatewayPusher", installed[0])
+			}
+			if gp.URL != url || gp.PushURL != tt.pushURL {
+				t.Errorf("installed pusher = {URL %q, PushURL %q}, want {URL %q, PushURL %q}", gp.URL, gp.PushURL, url, tt.pushURL)
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log does not name the push URL %q: %q", tt.wantLog, logs.String())
+			}
+			if tt.wantSecret != "" && strings.Contains(logs.String(), tt.wantSecret) {
+				t.Errorf("log holds the push URL's credential: %q", logs.String())
+			}
+		})
+	}
+}
+
+// TestWorkspaceReconcilePushURLUnset: with only BD_GATEWAY_URL set, the pusher
+// carries no push URL, the reconcile starts as before and its log names the
+// gateway's own URL. A push URL alone names no gateway, so the reconcile starts
+// nothing.
+func TestWorkspaceReconcilePushURLUnset(t *testing.T) {
+	t.Parallel()
+	const (
+		url     = "http://127.0.0.1:7440"
+		pushURL = "http://127.0.0.1:7441"
+	)
+	t.Run("the gateway URL alone leaves the push URL empty", func(t *testing.T) {
+		t.Parallel()
+		logs := &lockedBuffer{}
+		var installed []bdgateway.WorkspacePusher
+		d := newWorkspaceDaemon(t, map[string]string{bdgateway.WorkspaceURLEnv: url}, newFixedClock(), nil, logs, nil)
+		d.installWorkspacePusher = func(p bdgateway.WorkspacePusher) { installed = append(installed, p) }
+
+		if !d.startWorkspaceReconcile() {
+			t.Fatal("startWorkspaceReconcile() = false with a gateway named and no push URL, want true")
+		}
+		if len(installed) != 1 {
+			t.Fatalf("installs = %d, want 1", len(installed))
+		}
+		gp, ok := installed[0].(bdgateway.GatewayPusher)
+		if !ok {
+			t.Fatalf("installed pusher = %T, want bdgateway.GatewayPusher", installed[0])
+		}
+		if gp.URL != url {
+			t.Errorf("installed pusher URL = %q, want %q", gp.URL, url)
+		}
+		if gp.PushURL != "" {
+			t.Errorf("installed pusher PushURL = %q with only %s set, want empty", gp.PushURL, bdgateway.WorkspaceURLEnv)
+		}
+		if !strings.Contains(logs.String(), url) {
+			t.Errorf("log does not name the gateway URL %q: %q", url, logs.String())
+		}
+	})
+	t.Run("a push URL alone starts nothing", func(t *testing.T) {
+		t.Parallel()
+		logs := &lockedBuffer{}
+		installs := 0
+		d := newWorkspaceDaemon(t, map[string]string{bdgateway.WorkspacePushURLEnv: pushURL}, newFixedClock(), nil, logs, nil)
+		d.installWorkspacePusher = func(bdgateway.WorkspacePusher) { installs++ }
+
+		if d.startWorkspaceReconcile() {
+			t.Fatalf("startWorkspaceReconcile() = true with only %s set, want false", bdgateway.WorkspacePushURLEnv)
+		}
+		if installs != 0 {
+			t.Errorf("pusher installs with no gateway = %d, want 0", installs)
+		}
+		if logs.String() != "" {
+			t.Errorf("log with no gateway = %q, want none", logs.String())
+		}
+	})
+}
