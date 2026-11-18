@@ -395,8 +395,11 @@ func TestIntegrationWorkspaceProofBdResult(t *testing.T) {
 }
 
 // TestIntegrationWorkspaceProofLayout checks the tree the proof runs against:
-// the five files G7 will push, with the redirect and metadata pointing into the
-// tree rather than the host. It needs no bd and no endpoint.
+// the five-file layout a workspace push is built from (the town's routes.jsonl,
+// the rig's redirect, metadata.json, config.yaml and dolt-server.port), with
+// the redirect and metadata pointing into the tree rather than the host. A push
+// also carries the town's formulas when there are any, which a bd show does not
+// read. It needs no bd and no endpoint.
 func TestIntegrationWorkspaceProofLayout(t *testing.T) {
 	setup := proofSetup{
 		beadID: "gt-probe-1",
