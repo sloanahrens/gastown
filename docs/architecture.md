@@ -178,6 +178,8 @@ The daemon image's `bd` is the `gt-wrap` forwarder, and the real bd sits beside 
 
 The list of which paths belong to the daemon, which to other owners and which are never copied is a manifest in the repository (`deploy/daemon/town-state.yaml`). Tests hold the render of the cluster objects to that manifest, so the volume and the code cannot disagree about what is in it.
 
+The same manifest tags the rows a backup export carries (`backup: true`, beside the `rollback: true` rows): the small, named set a restore needs, in place of the whole daemon-owned set. A row may carry the tag whatever its owner, because the shared `settings`, `<rig>/settings` and `<rig>/directives` rows are part of a restore. Before changing a tag, read `Entry.Backup` and `Manifest.Backup()` in `internal/manifestdata/manifest.go`, which hold the set's one definition; an export takes it from there rather than restating it.
+
 The claim carries each rig's bare repository (`<rig>/.repo.git`), not a canonical clone: `<rig>/mayor/rig` is retired, so the manifest has no row for it, the seed and export carry none, and `gt town state verify` reports a clone a tree still holds as information until the operator removes it (`gt rig retire-mayor`).
 
 ### Secrets
