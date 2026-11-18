@@ -312,3 +312,189 @@ func TestTownForwardPlistRefusals(t *testing.T) {
 		}
 	})
 }
+
+// execForwardBdGateway runs the production bd-gateway command with args, writing
+// stdout to out and stderr to errOut.
+func execForwardBdGateway(home func() (string, error), lookPath func(string) (string, error), out, errOut io.Writer, args []string) error {
+	c := newForwardBdGatewayCmd(home, lookPath)
+	c.SetOut(out)
+	c.SetErr(errOut)
+	c.SetArgs(args)
+	c.SilenceUsage = true
+	return c.Execute()
+}
+
+// runForwardBdGateway runs bd-gateway with the fixed home and client lookup and
+// returns what it wrote to stderr and its error.
+func runForwardBdGateway(out io.Writer, args []string) (string, error) {
+	var errBuf bytes.Buffer
+	err := execForwardBdGateway(fixedForwardPlistHome, fixedForwardPlistLookup, out, &errBuf, args)
+	return errBuf.String(), err
+}
+
+// TestTownForwardBdGatewayIsRegisteredUnderForward checks that `gt town forward
+// bd-gateway` resolves to a command, so the subcommand is wired into the tree.
+func TestTownForwardBdGatewayIsRegisteredUnderForward(t *testing.T) {
+	t.Parallel()
+	c, _, err := townForwardCmd.Find([]string{"bd-gateway"})
+	if err != nil {
+		t.Fatalf("finding bd-gateway under forward: %v", err)
+	}
+	if c.Name() != "bd-gateway" {
+		t.Errorf("forward resolves bd-gateway to %q, so the subcommand is not registered", c.Name())
+	}
+}
+
+// TestTownForwardBdGatewayPlistNamesTheService checks that the job forwards
+// svc/bd-gateway on 7440, that its program is the absolute kubectl path, and that
+// its stderr names the bd gateway URL. The namespace is not passed, so the default
+// is checked too.
+func TestTownForwardBdGatewayPlistNamesTheService(t *testing.T) {
+	t.Parallel()
+	const kubectl = "/opt/homebrew/opt/kubernetes-cli/bin/kubectl"
+	lookup := func(string) (string, error) { return kubectl, nil }
+	var out, errOut bytes.Buffer
+	if err := execForwardBdGateway(fixedForwardPlistHome, lookup, &out, &errOut, []string{"--context", "colima-gt-control"}); err != nil {
+		t.Fatalf("bd-gateway with a context: %v", err)
+	}
+	const wantStderr = "bd gateway URL: http://127.0.0.1:7440/\n"
+	if errOut.String() != wantStderr {
+		t.Errorf("stderr = %q, want %q", errOut.String(), wantStderr)
+	}
+	wantArgs := []string{
+		kubectl,
+		"--context=colima-gt-control",
+		"--namespace=gt",
+		"port-forward",
+		"--address=127.0.0.1",
+		"service/bd-gateway",
+		"7440:7440",
+	}
+	if got := plistProgramArguments(t, out.String()); !slices.Equal(got, wantArgs) {
+		t.Errorf("program arguments = %q, want %q", got, wantArgs)
+	}
+}
+
+// TestTownForwardBdGatewayLabelAndLogs checks that the job's label and log paths
+// are the bd-gateway ones and carry none of the dashboard's.
+func TestTownForwardBdGatewayLabelAndLogs(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	if _, err := runForwardBdGateway(&out, []string{"--context", "colima-gt-control"}); err != nil {
+		t.Fatalf("bd-gateway with a context: %v", err)
+	}
+	doc := out.String()
+	for _, want := range []string{
+		"<string>com.gastown.forward-bd-gateway</string>",
+		"<string>/Users/operator/gt/daemon/forward-bd-gateway.log</string>",
+		"<string>/Users/operator/gt/daemon/forward-bd-gateway.err.log</string>",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Errorf("plist lacks %s:\n%s", want, doc)
+		}
+	}
+	if strings.Contains(doc, "dashboard") {
+		t.Errorf("bd-gateway plist names the dashboard:\n%s", doc)
+	}
+}
+
+// TestTownForwardBdGatewayLeavesDashboardPlistUnchanged checks that the dashboard
+// plist still prints byte-for-byte the golden after bd-gateway is registered.
+func TestTownForwardBdGatewayLeavesDashboardPlistUnchanged(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	if _, err := runForwardPlist(fixedForwardPlistHome, &out, forwardPlistArgs()); err != nil {
+		t.Fatalf("dashboard plist with valid flags: %v", err)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", forwardPlistGoldenPath))
+	if err != nil {
+		t.Fatalf("reading the golden: %v", err)
+	}
+	if out.String() != string(want) {
+		t.Errorf("dashboard plist differs from %s:\n%s", forwardPlistGoldenPath, out.String())
+	}
+}
+
+// TestTownForwardBdGatewayRefusals checks that each refused run exits non-zero
+// naming the flag and prints no plist, and that a failed write exits non-zero.
+func TestTownForwardBdGatewayRefusals(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{"missing context", []string{"--namespace", "gt"}, "--context"},
+		{"blank context", []string{"--context", "  "}, "--context"},
+		{"context that reads as a flag", []string{"--context", "--namespace=gt"}, "--context"},
+		{"namespace that is not a label", []string{"--context", "colima-gt-control", "--namespace", "gt/x"}, "--namespace"},
+		{"port flag, which the command does not take", []string{"--context", "colima-gt-control", "--port", "9999"}, "--port"},
+		{"bind flag, which the command does not take", []string{"--context", "colima-gt-control", "--bind", "0.0.0.0"}, "--bind"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			_, err := runForwardBdGateway(&out, tc.args)
+			if err == nil {
+				t.Fatalf("run with %s succeeded", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.flag) {
+				t.Errorf("error %q does not name %s", err, tc.flag)
+			}
+			if out.Len() != 0 {
+				t.Errorf("a refused run wrote %d bytes of plist", out.Len())
+			}
+		})
+	}
+
+	t.Run("failed write of the output", func(t *testing.T) {
+		t.Parallel()
+		err := execForwardBdGateway(fixedForwardPlistHome, fixedForwardPlistLookup, forwardPlistFailingWriter{}, io.Discard, []string{"--context", "colima-gt-control"})
+		if err == nil {
+			t.Fatal("a failed write of the bd-gateway plist exited zero")
+		}
+	})
+
+	t.Run("kubectl cannot be found", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		noKubectl := func(string) (string, error) { return "", errors.New("executable file not found in $PATH") }
+		err := execForwardBdGateway(fixedForwardPlistHome, noKubectl, &out, io.Discard, []string{"--context", "colima-gt-control"})
+		if err == nil {
+			t.Fatal("a bd-gateway run without kubectl exited zero")
+		}
+		if !strings.Contains(err.Error(), "kubectl") || !strings.Contains(err.Error(), "executable file not found") {
+			t.Errorf("error %q does not name kubectl and keep the lookup's cause", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("a run without kubectl wrote %d bytes of plist", out.Len())
+		}
+	})
+
+	t.Run("kubectl resolved to a relative path", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		relative := func(string) (string, error) { return "bin/kubectl", nil }
+		err := execForwardBdGateway(fixedForwardPlistHome, relative, &out, io.Discard, []string{"--context", "colima-gt-control"})
+		if err == nil || !strings.Contains(err.Error(), "kubectl") {
+			t.Fatalf("bd-gateway with a relative kubectl: err = %v, want one naming kubectl", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("a run with a relative kubectl wrote %d bytes of plist", out.Len())
+		}
+	})
+
+	t.Run("home cannot be found", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		noHome := func() (string, error) { return "", errors.New("no HOME") }
+		err := execForwardBdGateway(noHome, fixedForwardPlistLookup, &out, io.Discard, []string{"--context", "colima-gt-control"})
+		if err == nil || !strings.Contains(err.Error(), "HOME") {
+			t.Fatalf("bd-gateway without a home directory: err = %v, want one naming HOME", err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("a run without a home directory wrote %d bytes", out.Len())
+		}
+	})
+}
