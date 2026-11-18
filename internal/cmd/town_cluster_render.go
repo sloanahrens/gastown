@@ -109,12 +109,16 @@ type clusterRenderFlags struct {
 	// bdGatewayTokenSecret names the Secret the bd gateway's tokens are read from;
 	// empty means defaultBdGatewayTokenSecret.
 	bdGatewayTokenSecret string
-	daemonClaudeDir      string
-	tracker              bool
-	trackerDSNSecret     string
-	trackerBackup        bool
-	trackerBackupImage   string
-	daemonBdGatewayURL   string
+	// bdGatewayMaxConcurrent is the bd gateway's concurrency cap, written as
+	// --max-concurrent with a values file's bd image; zero leaves the gateway's own
+	// default.
+	bdGatewayMaxConcurrent int
+	daemonClaudeDir        string
+	tracker                bool
+	trackerDSNSecret       string
+	trackerBackup          bool
+	trackerBackupImage     string
+	daemonBdGatewayURL     string
 	// daemonBdGatewayURLSet is whether the flag was named at all, so an empty value
 	// is refused rather than read as absent.
 	daemonBdGatewayURLSet bool
@@ -125,6 +129,11 @@ var clusterRender clusterRenderFlags
 // defaultBdGatewayTokenSecret is the Secret the bd gateway reads its tokens from
 // when --bd-gateway-token-secret is not given.
 const defaultBdGatewayTokenSecret = "bd-gateway-tokens" //nolint:gosec // a Secret name, not a credential
+
+// defaultBdGatewayMaxConcurrent is the bd gateway's concurrency cap when
+// --bd-gateway-max-concurrent is not given. It is above the gateway's own default
+// of 16, which the operator found too low.
+const defaultBdGatewayMaxConcurrent = 32
 
 // clusterRenderRecordOptions are the two flags that tie a run to the recorded-flags
 // file. They are not fields of clusterRenderFlags because that struct's every
@@ -242,6 +251,8 @@ func init() {
 		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only; without it, a values file with a bd image points the daemon at the in-cluster gateway")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayTokenSecret, "bd-gateway-token-secret", "",
 		"the Secret the bd gateway reads its tokens from, mounted whole in the gateway (default "+defaultBdGatewayTokenSecret+"); the render names it and never creates it; it is read only when the values file names a bd image")
+	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayMaxConcurrent, "bd-gateway-max-concurrent", defaultBdGatewayMaxConcurrent,
+		"the most bd processes the bd gateway runs at once, a positive cap, or zero for the gateway's own default; the cap is written only when the values file names a bd image, so a rehearsal writes no gateway and ignores it; a negative cap is refused")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
 		"write the flags this run used to the town's recorded-flags file, so a later render replays them with --use-recorded; a live render only")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.use, "use-recorded", false,
@@ -312,6 +323,8 @@ func (f clusterRenderFlags) validate() error {
 		// Checked here, before any write; the URL's shape is checked by the
 		// Build call, which names Values.DaemonBdGatewayURL and never echoes it.
 		return errors.New("--daemon-bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
+	case f.bdGatewayMaxConcurrent < 0:
+		return fmt.Errorf("--bd-gateway-max-concurrent %d is negative: name a positive cap, or zero for the gateway's own default", f.bdGatewayMaxConcurrent)
 	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
 		return fmt.Errorf("--daemon-claude-dir %q must be an absolute path: the pod names the host directory", f.daemonClaudeDir)
 	case f.rehearsal && f.tracker:
@@ -378,6 +391,9 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		if !named(p.flag) {
 			*p.dst = p.src
 		}
+	}
+	if !named("bd-gateway-max-concurrent") {
+		f.bdGatewayMaxConcurrent = r.bdGatewayMaxConcurrent
 	}
 	switches := []struct {
 		flag string
@@ -721,6 +737,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		inCluster := inClusterBdGatewayURL(namespace)
 		v.BdGatewayImage = pair.Bd
 		v.BdGatewayTokenSecret = strings.TrimSpace(f.bdGatewayTokenSecret)
+		v.BdGatewayMaxConcurrent = f.bdGatewayMaxConcurrent
 		if v.DaemonBdGatewayURL == "" {
 			v.DaemonBdGatewayURL = inCluster
 		}
