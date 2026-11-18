@@ -7,7 +7,8 @@ package daemon
 //
 // The seam reads the review records of the window ending at the pass's clock,
 // and the numbered rules of the town's directives, and returns one proposal per
-// rejection class. Filing the proposals as beads is gt-pawdfa.
+// rejection class. Each proposal with enough findings is then filed as one
+// overseer-only bead through the town's beads client (gt-pawdfa).
 //
 // The ticker is a check cadence, not a run cadence: an in-process ticker resets
 // its countdown on every daemon start, so a ticker set to the 168h interval
@@ -27,7 +28,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
 )
@@ -309,8 +312,9 @@ func (d *Daemon) triggerOmLessons() {
 	d.logger.Printf("om_lessons: the pass built %d proposal(s)", len(proposals))
 }
 
-// runOmLessonsTick runs one pass: it calls the run seam once. A daemon built
-// without one runs the pass over the town's own review records and directives.
+// runOmLessonsTick runs one pass: it calls the run seam once, then files the
+// proposals it built. A daemon built without a run seam runs the pass over the
+// town's own review records and directives.
 func (d *Daemon) runOmLessonsTick(ctx context.Context, at time.Time) ([]omlessons.Proposal, error) {
 	run := d.omLessonsRun
 	if run == nil {
@@ -323,7 +327,88 @@ func (d *Daemon) runOmLessonsTick(ctx context.Context, at time.Time) ([]omlesson
 		}
 		run = omLessonsPass(sources)
 	}
-	return run(ctx, at)
+	proposals, err := run(ctx, at)
+	if err != nil {
+		return proposals, err
+	}
+	return proposals, d.fileOmLessonsProposals(at, omlessons.DefaultDays, proposals)
+}
+
+// omLessonsDayLayout formats the window's first and last days, as the
+// `gt land om-lessons` report does.
+const omLessonsDayLayout = "2006-01-02"
+
+// fileOmLessonsProposals files one overseer-only bead for each proposal with
+// enough findings to draft an edit. A too-few class has no draft and files
+// nothing. The counts named in each bead are read over a window of days ending
+// on at's day, the window the pass read. Dedupe by class and ISO week is not
+// here yet (gt-ygtazd), so a pass that runs twice in one week files its
+// proposals twice.
+func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omlessons.Proposal) error {
+	var drafts []omlessons.Proposal
+	for _, p := range proposals {
+		if !p.TooFew {
+			drafts = append(drafts, p)
+		}
+	}
+	if len(drafts) == 0 {
+		return nil
+	}
+	if d.config == nil {
+		return errors.New("om_lessons: the daemon names no town, so the proposals have no directory to name")
+	}
+	span, err := omlessons.Windows(at, time.Time{}, days)
+	if err != nil {
+		return fmt.Errorf("om_lessons: %w", err)
+	}
+	window := omLessonsWindowLine(span)
+	directives := agentconfig.CentralDirectiveDir(d.config.TownRoot)
+	writer := d.noticeBeads()
+	for _, p := range drafts {
+		_, err := writer.Create(beads.CreateOptions{
+			Title:       fmt.Sprintf("om lessons: %s (%s)", p.Name, p.ID),
+			Labels:      []string{dispatch.OverseerOnlyLabel},
+			Priority:    2,
+			Description: omLessonsProposalBody(p, window, directives),
+			Actor:       daemonActor,
+		})
+		if err != nil {
+			return fmt.Errorf("om_lessons: filing the proposal for %s: %w", p.ID, err)
+		}
+	}
+	return nil
+}
+
+// omLessonsWindowLine names the two windows a proposal's counts are read over.
+func omLessonsWindowLine(span omlessons.Span) string {
+	first := func(b omlessons.Bounds) string { return b.Start.Format(omLessonsDayLayout) }
+	last := func(b omlessons.Bounds) string { return b.End.AddDate(0, 0, -1).Format(omLessonsDayLayout) }
+	return fmt.Sprintf("om lessons: %s to %s (%d days), against %s to %s",
+		first(span.Current), last(span.Current), span.Days, first(span.Prior), last(span.Prior))
+}
+
+// omLessonsProposalBody is the text of the bead a proposal files: the class, its
+// counts, its three example beads and the directive edit the overseer writes.
+// It reads as writeLandOmLessonsProposals in internal/cmd does, so the bead and
+// the `gt land om-lessons --propose` draft say the same thing.
+func omLessonsProposalBody(p omlessons.Proposal, window, directives string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n\n", window)
+	fmt.Fprintf(&b, "Class: %s (%s)\n", p.Name, p.ID)
+	fmt.Fprintf(&b, "Coverage: %s\n", p.Coverage)
+	fmt.Fprintf(&b, "Counts: %d finding(s) on %d bead(s), %d round(s) burned; prior window %d finding(s) on %d bead(s), %d round(s)\n",
+		p.Current.Findings, p.Current.Beads, p.Current.Rounds,
+		p.Prior.Findings, p.Prior.Beads, p.Prior.Rounds)
+	fmt.Fprintf(&b, "Examples: %s\n", strings.Join(p.Examples, ", "))
+	fmt.Fprintln(&b, "\nGoal: a directive edit that stops om raising this class.")
+	fmt.Fprintf(&b, "Constraints: the edit goes to the directive files in %s; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.\n", directives)
+	fmt.Fprintln(&b, "Out of scope: om's bar or threshold; turning anything on.")
+	fmt.Fprintln(&b, "Gate: go test ./internal/cmd -run TestLandOmLessons -count=1")
+	fmt.Fprintln(&b, "Size: one directive edit, one landing.")
+	fmt.Fprintln(&b, "Acceptance:")
+	fmt.Fprintln(&b, "- [ ] the rule for this class says what the case is and what to do instead")
+	fmt.Fprintln(&b, "- [ ] the next weekly pass counts fewer findings of this class than this window")
+	return b.String()
 }
 
 // stopOmLessonsPatrol stops the patrol's ticker and joins the pass it may have
