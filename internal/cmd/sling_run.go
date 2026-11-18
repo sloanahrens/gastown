@@ -137,6 +137,10 @@ type slingDeps struct {
 	checkDuplicates    func(townRoot, beadID string, info *beadInfo) (*duplicateCandidate, []duplicateMatch, error)
 	noteDispatched     func(townRoot string, candidate *duplicateCandidate)
 	crossRigGuard      func(beadID, targetAgent, townRoot string) error
+	// estimateFirst is the story-point estimate a hand sling makes before it
+	// hooks a bead with no sp-minutes label: the run gt spec estimate makes,
+	// through the lint's seam (slingEstimateFirst, gt-t9kwfu).
+	estimateFirst func(ctx context.Context, townRoot, beadID string) (specEstimateOutcome, error)
 
 	// The target and its polecat.
 	resolveSelf    func() (agentID, pane, hookRoot string, err error)
@@ -277,6 +281,9 @@ func realSlingDepsFor(stores slingStores) *slingDeps {
 		},
 		noteDispatched: noteSlingCandidateDispatched,
 		crossRigGuard:  checkCrossRigGuard,
+		estimateFirst: func(ctx context.Context, townRoot, beadID string) (specEstimateOutcome, error) {
+			return specLintEstimateRun(townRoot, os.Stderr)(ctx, beadID)
+		},
 
 		resolveSelf: resolveSelfTarget,
 		spawnPolecat: func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {

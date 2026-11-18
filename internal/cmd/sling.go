@@ -821,6 +821,11 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 
+	// The bead is sized before anything below spawns or hooks it (gt-t9kwfu).
+	if err := r.slingEstimateFirst(townRoot, beadID, info.Labels); err != nil {
+		return err
+	}
+
 	// What is left is a non-rig target: crew, witness, refinery, a named
 	// polecat, or the caller itself (gt-hk555 moved the rig targets to the
 	// engine above). These the engine does not cover, so the dispatch is
@@ -1284,6 +1289,15 @@ func (r *slingRun) runRigTarget(rigName, beadID, formulaName, townRoot string) e
 		if err := r.crossRigGuard(beadID, rigName+"/polecats/_", townRoot); err != nil {
 			return err
 		}
+	}
+	// The bead is sized before the engine hooks it, so no hand sling starts work
+	// that has no estimate (gt-t9kwfu). A refusal here spends no seat.
+	info, err := r.beadInfo(beadID)
+	if err != nil {
+		return fmt.Errorf("checking bead status: %w", err)
+	}
+	if err := r.slingEstimateFirst(townRoot, beadID, info.Labels); err != nil {
+		return err
 	}
 	if formulaName == "" {
 		// A bare bead keeps the rig's default formula, which the engine takes
