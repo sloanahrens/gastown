@@ -419,29 +419,32 @@ Forgejo with mirrors, cron, Actions, mail and SSH off.
 
 ### The database
 
-A plain `psql < forgejo-db.sql` does not restore this dump: the CREATE TABLE
-statements are alphabetical, so 63 of them fail on foreign keys to
-`repository`, which is created later, and 39 INSERTs fail for the same reason.
-Load it in two passes. Put every line that starts with CREATE in one file and
-run that file twice: the first pass reports the foreign-key errors and carries
-on, and the second creates the tables those errors left out. Put every line
-that starts with INSERT INTO or SELECT in another file and run it once, as a
-superuser role, with `SET session_replication_role = replica;` as its first
-statement so the INSERTs load without the foreign-key checks:
+A plain `psql < forgejo-db.sql` does not restore this dump: 63 CREATE TABLE
+statements fail on foreign keys to `repository`, which the file creates later,
+and 39 INSERTs fail for the same reason. Load it in two passes. Put every line
+that starts with CREATE in one file and run that file twice: the first pass
+creates what it can and reports the foreign-key errors, and the second creates
+the tables those errors left out. Put every line that starts with INSERT INTO or
+SELECT in another file and run it once, as a superuser role, with
+`SET session_replication_role = replica;` as its first statement so the INSERTs
+load without the foreign-key checks:
 
 ```bash
 grep '^CREATE' forgejo-db.sql > create.sql
 grep -E '^(INSERT INTO|SELECT)' forgejo-db.sql > data.sql
 psql -d <scratch-db> -U <superuser> -f create.sql
-psql -d <scratch-db> -U <superuser> -v ON_ERROR_STOP=1 -f create.sql
+psql -d <scratch-db> -U <superuser> -f create.sql
 { echo 'SET session_replication_role = replica;'; cat data.sql; } |
   psql -d <scratch-db> -U <superuser> -v ON_ERROR_STOP=1
 ```
 
-The first create pass sets no `ON_ERROR_STOP` on purpose: it stops at the first
-error if it does. The second create pass and the data pass reported 0 errors. Do
-not run the whole file twice instead: a table with no primary key then loads its
-rows twice (`forgejo_sem_ver` showed 2).
+Neither create pass sets `ON_ERROR_STOP`: with it, the first pass stops at its
+first foreign-key error and the second stops at its first `already exists`.
+The restore is complete when the first pass reports only foreign-key errors and
+the second only `already exists`. The data pass reported 0 errors.
+
+Do not run the whole file twice instead: a table with no primary key then loads
+its rows twice (`forgejo_sem_ver` showed 2).
 
 The dump omits the `forgejo_version` and `forgejo_migration` tables. Forgejo
 16.0.5 recreated both at start, with 1 and 39 rows, equal to live.
