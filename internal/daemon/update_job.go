@@ -44,6 +44,11 @@ const (
 	// updateJobBackoffBase is the wait after the first failed launch. Each further
 	// consecutive failure doubles it, up to updateLaunchSuppression.
 	updateJobBackoffBase = time.Minute
+
+	// updateJobLookupTimeout bounds the gateway host lookup in gatewayURLForJob.
+	// The launch runs on the heartbeat, so a stalled resolver must not hold it for
+	// the system resolver's own retry budget; it is well under updateJobCreateTimeout.
+	updateJobLookupTimeout = 5 * time.Second
 )
 
 // errUpdateJobExists is what a cluster client returns when the Job it was asked
@@ -269,8 +274,11 @@ const bdGatewayServiceHost = k8sdaemon.BdGatewayName + "." + updatejob.DefaultNa
 // address instead of the name the daemon's own environment carries. A host that is
 // the gateway's in-cluster Service name is handed on as it is, since the Job reaches
 // that name through cluster DNS. An unset variable stays empty and the Job renders
-// without a gateway; a host that is already an IP is passed through. The raw value
-// is never echoed in an error, since a credential may sit in it.
+// without a gateway; a host that is already an IP is passed through. An https host
+// that is a name is refused: the address would stand in for the name in the TLS
+// server name, and verification fails unless the certificate carries that address.
+// The lookup is bounded by updateJobLookupTimeout. The raw value is never echoed in
+// an error, since a credential may sit in it.
 func (d *Daemon) gatewayURLForJob() (string, error) {
 	raw := d.env(k8sdaemon.BdGatewayURLEnv)
 	if raw == "" {
@@ -284,11 +292,14 @@ func (d *Daemon) gatewayURLForJob() (string, error) {
 	if net.ParseIP(host) != nil || host == bdGatewayServiceHost {
 		return raw, nil
 	}
+	if u.Scheme == "https" {
+		return "", fmt.Errorf("%s is an https URL on the name %s: the update Job cannot be given an address for it without breaking TLS verification", k8sdaemon.BdGatewayURLEnv, host)
+	}
 	lookup := d.lookupHost
 	if lookup == nil {
-		lookup = net.LookupHost
+		lookup = net.DefaultResolver.LookupHost
 	}
-	addrs, err := lookup(host)
+	addrs, err := boundedLookupHost(updateJobLookupTimeout, lookup, host)
 	if err != nil {
 		return "", fmt.Errorf("resolve the gateway host %s for the update Job: %w", host, err)
 	}

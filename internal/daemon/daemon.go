@@ -224,9 +224,9 @@ type Daemon struct {
 	getenv func(string) string
 
 	// lookupHost resolves the gateway host name a pod roll's Job is given (see
-	// gatewayURLForJob); nil is net.LookupHost. Tests set it so no test reaches a
-	// resolver.
-	lookupHost func(string) ([]string, error)
+	// gatewayURLForJob); nil is net.DefaultResolver. The lookup is bounded by
+	// updateJobLookupTimeout. Tests set it so no test reaches a resolver.
+	lookupHost lookupHostName
 
 	// hostname names the host a manual owner's id carries (see
 	// hostnameOrOS); nil reads os.Hostname. Tests set it to drive the failed
