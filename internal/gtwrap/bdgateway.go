@@ -90,9 +90,11 @@ type BdGateway struct {
 	// town and runs in the town root instead. Nil refuses the call, so a mapped
 	// directory is never silent.
 	Note io.Writer
-	// Stat checks for a .beads directory when a bd call sets no BEADS_DIR. Nil
-	// uses os.Stat. A .beads entry that cannot be read refuses the call, so an
-	// unreadable candidate is never read as absent and routed to another rig.
+	// Stat checks the directory a call's leading -C names, and the .beads entries
+	// a call without BEADS_DIR walks. Nil uses os.Stat. A .beads entry that cannot
+	// be read refuses the call, so an unreadable candidate is never read as absent
+	// and routed to another rig; a -C directory that cannot be read is refused
+	// too.
 	Stat func(string) (fs.FileInfo, error)
 }
 
@@ -109,6 +111,9 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	}
 	if call.Argv[0] != "bd" {
 		return exitDown, fmt.Errorf("gtwrap: the bdgateway target runs bd, but the call names %q", call.Argv[0])
+	}
+	if err := g.settleDirectory(&call); err != nil {
+		return exitDown, err
 	}
 	if err := g.settleBeadsDir(&call); err != nil {
 		return exitDown, err
@@ -277,6 +282,57 @@ func (g BdGateway) validate() error {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("gtwrap: the bdgateway target's url %q carries a query or fragment, which the gateway endpoint does not take", g.URL)
 	}
+	return nil
+}
+
+// settleDirectory turns a call that begins with bd's root flag "-C <dir>" into
+// the call run in that directory: -C names the directory bd would run in, and
+// the gateway takes the directory from the call instead, so the flag becomes
+// call.Dir (gt-dnaau7). The directory is resolved against the call's own working
+// directory when it is relative, and must be an existing directory inside the
+// town. An empty value, a path outside the town, and one that is missing, is
+// not a directory or cannot be read each refuse the call before it is sent; the
+// refusal names the path, or says the flag named none. An explicit BEADS_DIR
+// still decides the rig, since settleBeadsDir runs after and leaves the
+// variable alone.
+//
+// Only the leading pair is read. A "-C" anywhere else, and the attached forms
+// "-C<dir>" and "-C=<dir>", are left for the gateway's flag refusal.
+func (g BdGateway) settleDirectory(call *Call) error {
+	if len(call.Argv) < 3 || call.Argv[1] != "-C" {
+		return nil
+	}
+	named := call.Argv[2]
+	if named == "" {
+		return errors.New("gtwrap: the bd call's leading -C names no directory, so the call is refused")
+	}
+	dir := named
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(call.Dir, dir)
+	}
+	dir = filepath.Clean(dir)
+	described := named
+	if described != dir {
+		described = fmt.Sprintf("%s (resolved to %s)", named, dir)
+	}
+	rel, err := filepath.Rel(g.Town, dir)
+	if err != nil {
+		return fmt.Errorf("gtwrap: compare the bd call's -C directory %s with the town %s, so the call cannot be told which rig it runs in: %w", described, g.Town, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("gtwrap: the bd call's -C directory %s is outside the town %s, so it cannot be the call's working directory", described, g.Town)
+	}
+	info, err := statDir(g.Stat)(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("gtwrap: the bd call's -C directory %s does not exist, so it cannot be the call's working directory", described)
+	case err != nil:
+		return fmt.Errorf("gtwrap: read the bd call's -C directory %s: %w", described, err)
+	case info == nil || !info.IsDir():
+		return fmt.Errorf("gtwrap: the bd call's -C directory %s is not a directory, so it cannot be the call's working directory", described)
+	}
+	call.Argv = append([]string{call.Argv[0]}, call.Argv[3:]...)
+	call.Dir = dir
 	return nil
 }
 
