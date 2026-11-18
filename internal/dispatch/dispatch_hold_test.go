@@ -276,3 +276,106 @@ func TestOverseerFirstLabelsHold(t *testing.T) {
 		})
 	}
 }
+
+// TestDispatchHoldLabelPrefixVerdicts pins the hold: labels the birds write on
+// a bead they file for the overseer to vet (gt-la0djc): a label starting with
+// the exact lower-case hold: prefix holds the bead, with the reason naming the
+// label as typed, and a label that merely carries "hold" does not. Both reads
+// of the shared rule refuse it — the dispatcher's draw through
+// DispatchHoldFields and the sling guard's through SlingHoldFields — since a
+// server-side ready query cannot filter a prefix.
+func TestDispatchHoldLabelPrefixVerdicts(t *testing.T) {
+	t.Parallel()
+	t.Run("holds", func(t *testing.T) {
+		t.Parallel()
+		for _, label := range []string{"hold:decision", "hold:vet", "hold:order"} {
+			t.Run(label, func(t *testing.T) {
+				t.Parallel()
+				want := "label " + label
+				if got := DispatchHoldFields("open", []string{label}, "", "", "", nil); got != want {
+					t.Errorf("DispatchHoldFields with %q = %q, want %q", label, got, want)
+				}
+				if got := SlingHoldFields([]string{label}, "", "", "", nil); got != want {
+					t.Errorf("SlingHoldFields with %q = %q, want %q", label, got, want)
+				}
+			})
+		}
+	})
+	t.Run("does not hold", func(t *testing.T) {
+		t.Parallel()
+		for _, label := range []string{"holdover", "on-hold", "hold", "Hold:vet"} {
+			t.Run(label, func(t *testing.T) {
+				t.Parallel()
+				if got := DispatchHoldFields("open", []string{label}, "", "", "", nil); got != "" {
+					t.Errorf("DispatchHoldFields with %q = %q, want no hold", label, got)
+				}
+				if got := SlingHoldFields([]string{label}, "", "", "", nil); got != "" {
+					t.Errorf("SlingHoldFields with %q = %q, want no hold", label, got)
+				}
+			})
+		}
+	})
+	// A bead that already has a reason keeps it, whichever order the labels
+	// are written in: the prefix arm runs after the operator reservation and
+	// the label lists.
+	t.Run("keeps the existing reason", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name     string
+			labels   []string
+			assignee string
+			want     string
+		}{
+			{"overseer-only before the hold: label", []string{OverseerOnlyLabel, "hold:vet"}, "", "label " + OverseerOnlyLabel},
+			{"overseer-only after the hold: label", []string{"hold:vet", OverseerOnlyLabel}, "", "label " + OverseerOnlyLabel},
+			{"the operator reservation", []string{"hold:vet", OperatorLabel}, "", "label " + OperatorLabel},
+			{"a human assignee", []string{"hold:vet"}, "ada", "assignee ada is not an agent address"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				if got := DispatchHoldFields("open", tc.labels, tc.assignee, "", "", nil); got != tc.want {
+					t.Errorf("DispatchHoldFields(%q, %q) = %q, want %q", tc.labels, tc.assignee, got, tc.want)
+				}
+			})
+		}
+	})
+}
+
+// TestDispatchHoldLabelPrefixLeavesWorkingBeadsAlone pins the blast-radius
+// limit on the hold: arm (gt-la0djc): DispatchHoldFields is also the patrol
+// scan's restart read of a seat's hooked bead (internal/daemon/patrol_scan.go,
+// gt-n38c6), so a bead already worked must not be held by its hold: label. The
+// arm applies only to an open, unassigned bead; a hooked or in_progress bead,
+// or an assigned one, returns no hold from the patrol scan's verdict. A sling
+// re-read under --force keeps the same rule for an assigned bead.
+func TestDispatchHoldLabelPrefixLeavesWorkingBeadsAlone(t *testing.T) {
+	t.Parallel()
+	const seat = "gastown/polecats/ace"
+	cases := []struct {
+		name     string
+		status   string
+		assignee string
+	}{
+		{"hooked and assigned", "hooked", seat},
+		{"in_progress and assigned", "in_progress", seat},
+		{"in_progress and unassigned", "in_progress", ""},
+		{"open and assigned", "open", seat},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for _, label := range []string{"hold:decision", "hold:vet", "hold:order"} {
+				if got := DispatchHoldFields(tc.status, []string{label}, tc.assignee, "", "", nil); got != "" {
+					t.Errorf("patrol scan DispatchHoldFields(%q, assignee %q) with %q = %q, want no hold", tc.status, tc.assignee, label, got)
+				}
+			}
+		})
+	}
+	t.Run("sling re-read of an assigned bead", func(t *testing.T) {
+		t.Parallel()
+		if got := SlingHoldFields([]string{"hold:vet"}, seat, "", "", nil); got != "" {
+			t.Errorf("SlingHoldFields with hold:vet on assigned bead = %q, want no hold", got)
+		}
+	})
+}

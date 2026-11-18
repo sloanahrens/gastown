@@ -68,6 +68,13 @@ var (
 	dispatchHoldLabels = append(append([]string(nil), routingHoldLabels...), HumanHoldLabels()...)
 )
 
+// holdPrefix begins the labels the birds write on a bead they file for the
+// overseer to vet: hold:decision, hold:vet, hold:order. The part after the
+// colon names the ruling, so no list can carry every name; the rule matches
+// the prefix itself. The match is the exact lower-case prefix, so holdover,
+// on-hold and hold are ordinary work.
+const holdPrefix = "hold:"
+
 // HumanHoldLabels returns the labels in humanHoldLabels, the holds no polecat
 // can settle. A reader that must know the vocabulary before it sees a bead's
 // fields — the dashboard's page script, whose copy of the list the page tests
@@ -103,18 +110,39 @@ func DispatchHoldFields(status string, labels []string, assignee, design, notes 
 	// The operator reservation is checked before the routing labels: a bead the
 	// operator owns is not the town's to route anywhere, and its reason is the
 	// one an operator reading the log needs named (gt-21pl0).
-	return holdFieldReason(labels, assignee, design, notes, op)
+	// Only an open, unassigned bead is dispatchable, so only it takes a hold:
+	// label. A hooked or in_progress bead keeps its restart read (gt-n38c6).
+	return holdFieldReason(labels, assignee, design, notes, op, dispatchable(status, assignee))
+}
+
+// dispatchable reports whether a bead is open and unassigned, the state an
+// automatic dispatch would take it in.
+func dispatchable(status, assignee string) bool {
+	return strings.EqualFold(strings.TrimSpace(status), "open") && strings.TrimSpace(assignee) == ""
 }
 
 // holdFieldReason is DispatchHoldFields' body past its status arm: the hold a
-// bead's labels, assignee and prose assert, whatever its status.
-func holdFieldReason(labels []string, assignee, design, notes string, op *config.OperatorConfig) string {
+// bead's labels, assignee and prose assert, whatever its status. prefixHolds
+// says whether a hold: label holds the bead, which only a dispatchable bead
+// takes.
+func holdFieldReason(labels []string, assignee, design, notes string, op *config.OperatorConfig, prefixHolds bool) string {
 	if reason := OperatorReservation(labels, assignee, op); reason != "" {
 		return reason
 	}
 	for _, label := range labels {
 		for _, held := range dispatchHoldLabels {
 			if strings.EqualFold(label, held) {
+				return "label " + label
+			}
+		}
+	}
+	// The hold: labels carry their ruling after the prefix, so the label lists
+	// cannot name them all. This arm runs after them, so a bead that already has
+	// a reason keeps it. The server-side ready query cannot filter a prefix, so
+	// this arm is what keeps such a bead out of an automatic dispatch.
+	if prefixHolds {
+		for _, label := range labels {
+			if strings.HasPrefix(label, holdPrefix) {
 				return "label " + label
 			}
 		}
@@ -144,7 +172,11 @@ func holdFieldReason(labels []string, assignee, design, notes string, op *config
 // mid-dispatch from being overwritten by the dispatch's own hook write
 // (gt-0k7kb).
 func SlingHoldFields(labels []string, assignee, design, notes string, op *config.OperatorConfig) string {
-	return holdFieldReason(withoutLabels(labels, routingHoldLabels), assignee, design, notes, op)
+	// The status is not read here, so the hold: arm asks only that the bead is
+	// unassigned: a hooked bead being re-slung under --force keeps its hold-free
+	// read.
+	unassigned := strings.TrimSpace(assignee) == ""
+	return holdFieldReason(withoutLabels(labels, routingHoldLabels), assignee, design, notes, op, unassigned)
 }
 
 // HasLabel reports whether labels carries want, matching as the hold rule does
