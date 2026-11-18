@@ -2,10 +2,16 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -359,7 +365,8 @@ func TestWorkspaceReconcileInstallsGatewayPusher(t *testing.T) {
 // TestWorkspaceReconcilePushURLSet: with BD_GATEWAY_URL and BD_GATEWAY_PUSH_URL
 // both set, the daemon installs a GatewayPusher that carries both, and its start
 // log names the push URL it pushes to. A push URL that carries credentials has
-// them stripped from the log, since the log never holds a credential.
+// them stripped from the log, with or without a scheme, since the log never
+// holds a credential.
 func TestWorkspaceReconcilePushURLSet(t *testing.T) {
 	t.Parallel()
 	const (
@@ -380,6 +387,12 @@ func TestWorkspaceReconcilePushURLSet(t *testing.T) {
 			name:       "credentials in the push URL are stripped from the log",
 			pushURL:    "http://pusher:hunter2@127.0.0.1:7441",
 			wantLog:    pushURL,
+			wantSecret: "hunter2",
+		},
+		{
+			name:       "credentials in a schemeless push URL are stripped from the log",
+			pushURL:    "pusher:hunter2@127.0.0.1:7441",
+			wantLog:    "127.0.0.1:7441",
 			wantSecret: "hunter2",
 		},
 	}
@@ -472,4 +485,101 @@ func TestWorkspaceReconcilePushURLUnset(t *testing.T) {
 			t.Errorf("log with no gateway = %q, want none", logs.String())
 		}
 	})
+}
+
+// routingGateway records each request the pusher sends and answers as the
+// gateway does: a PUT stores and echoes the document's manifest, and a GET
+// reports the live tree's hash.
+type routingGateway struct {
+	mu   sync.Mutex
+	reqs []recordedRequest
+}
+
+type recordedRequest struct {
+	method string
+	url    string
+}
+
+func (g *routingGateway) Do(req *http.Request) (*http.Response, error) {
+	g.mu.Lock()
+	g.reqs = append(g.reqs, recordedRequest{method: req.Method, url: req.URL.String()})
+	g.mu.Unlock()
+	if req.Method == http.MethodPut {
+		var doc struct {
+			ManifestSHA string `json:"manifest_sha"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&doc); err != nil {
+			return nil, errors.New("the document is not readable")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader(`{"manifest_sha":"` + doc.ManifestSHA + `"}`)),
+		}, nil
+	}
+	h := http.Header{}
+	h.Set(bdgateway.WorkspaceHashHeader, "sha")
+	return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+}
+
+func (g *routingGateway) requests() []recordedRequest {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]recordedRequest(nil), g.reqs...)
+}
+
+// TestWorkspaceReconcilePushURLRoutesPushAndProbe: the pusher the daemon installs
+// sends both its push and its probe to the push URL, never to the gateway URL.
+// The two URLs differ by port, so a request that reached the wrong one fails.
+func TestWorkspaceReconcilePushURLRoutesPushAndProbe(t *testing.T) {
+	t.Parallel()
+	const (
+		url     = "http://127.0.0.1:7440"
+		pushURL = "http://127.0.0.1:7441"
+	)
+	token := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(token, []byte("s3cret\n"), 0o600); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+	gw := &routingGateway{}
+	d := newWorkspaceDaemon(t, map[string]string{
+		bdgateway.WorkspaceURLEnv:     url,
+		bdgateway.WorkspacePushURLEnv: pushURL,
+		bdgateway.WorkspaceTokenEnv:   token,
+	}, newFixedClock(), nil, &lockedBuffer{}, nil)
+	d.workspaceHTTP = gw
+	var installed []bdgateway.WorkspacePusher
+	d.installWorkspacePusher = func(p bdgateway.WorkspacePusher) { installed = append(installed, p) }
+
+	if !d.startWorkspaceReconcile() {
+		t.Fatal("startWorkspaceReconcile() = false with a gateway and a push URL named, want true")
+	}
+	if len(installed) != 1 {
+		t.Fatalf("installs = %d, want 1", len(installed))
+	}
+	gp, ok := installed[0].(bdgateway.GatewayPusher)
+	if !ok {
+		t.Fatalf("installed pusher = %T, want bdgateway.GatewayPusher", installed[0])
+	}
+	if _, err := gp.Push(context.Background(), writeProbeTown(t)); err != nil {
+		t.Fatalf("Push() through the installed pusher: %v", err)
+	}
+	if err := gp.Probe(context.Background()); err != nil {
+		t.Fatalf("Probe() through the installed pusher: %v", err)
+	}
+	reqs := gw.requests()
+	if len(reqs) != 2 {
+		t.Fatalf("requests = %v, want the push and the probe", reqs)
+	}
+	if reqs[0].method != http.MethodPut {
+		t.Errorf("first request = %s %s, want the push PUT", reqs[0].method, reqs[0].url)
+	}
+	if reqs[1].method != http.MethodGet {
+		t.Errorf("second request = %s %s, want the probe GET", reqs[1].method, reqs[1].url)
+	}
+	for _, req := range reqs {
+		if !strings.HasPrefix(req.url, pushURL+"/") {
+			t.Errorf("%s %s did not go to the push service %s", req.method, req.url, pushURL)
+		}
+	}
 }

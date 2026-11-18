@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,10 +59,23 @@ func (d *Daemon) startWorkspaceReconcile() bool {
 		if pushURL != "" {
 			target = pushURL
 		}
-		d.logger.Printf("Workspace reconcile: pushing the workspace to the bd gateway at %s", util.RedactURL(target))
+		d.logger.Printf("Workspace reconcile: pushing the workspace to the bd gateway at %s", workspaceLogTarget(target))
 	}
 	go runWorkspaceReconcile(d.ctx, d.clk(), d.reconcileInterval, push, probe, d.config.TownRoot, d.logger.Printf, drift)
 	return true
+}
+
+// workspaceLogTarget is the push target as the start log names it: any userinfo
+// is removed first. util.RedactURL covers a URL with a scheme; a target without
+// one is refused by the pusher on the first push, but the log is written at
+// start, so its userinfo is masked here rather than passed through.
+func workspaceLogTarget(raw string) string {
+	if !strings.Contains(raw, "://") {
+		if at := strings.LastIndex(raw, "@"); at >= 0 {
+			return "<redacted>@" + raw[at+1:]
+		}
+	}
+	return util.RedactURL(raw)
 }
 
 // reconcileInterval returns the wait before the next push. It is read at each
