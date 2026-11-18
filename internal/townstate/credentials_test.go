@@ -33,6 +33,7 @@ func TestFindCredentials(t *testing.T) {
 		{"plural tokens count or flag is exempt", `{"CLAUDE_CODE_MAX_OUTPUT_TOKENS":"8192","CLAUDE_CODE_TOTAL_TOKENS_REMINDER":"off"}`, nil},
 		{"plural tokens holding a real value reports", `{"auth_tokens":"abcDEF123"}`, []string{"json:auth_tokens"}},
 		{"singular names are never exempt by shape", `{"token":"12345","password":"off","api_key":"true"}`, []string{"json:token", "json:password", "json:api_key"}},
+		{"content after a valid document is still scanned", `{"api_key":"abc"} trailing`, []string{"json:api_key"}},
 		{"truncated JSON is still scanned", `{"api_key":"abc"`, []string{"json:api_key"}},
 		{"not JSON, no credentials", "hello\nworld\n", nil},
 	}

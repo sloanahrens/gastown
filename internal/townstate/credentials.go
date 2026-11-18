@@ -139,7 +139,7 @@ func stringStart(data []byte, end int) int {
 // Valid JSON is walked; anything else is scanned for NAME=value and "key": "value".
 func FindCredentials(data []byte) []string {
 	var found []string
-	if hits, err := jsonHits(data); json.Valid(data) && err == nil {
+	if hits, err := jsonHits(data); err == nil {
 		for _, h := range hits {
 			found = append(found, h.rule)
 		}
