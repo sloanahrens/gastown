@@ -33,25 +33,35 @@ func (g *Git) AddedLinesSince(base string) (int, error) {
 // sumNumstatAdded adds the added column of numstat output. A line whose added
 // field is "-" is a binary file, which git reports no line count for.
 func sumNumstatAdded(out string) (int, error) {
-	total := 0
+	added, _, err := NumstatSize(out)
+	return added, err
+}
+
+// NumstatSize reads `git diff --numstat --no-renames` output: added is the
+// added column summed, files is one count per line. A binary file's "-" adds
+// no lines and still counts as a file, and a path git quotes (a name with a
+// space or a non-ASCII character) stays one tab-separated field, so it counts
+// once. A line that is not three tab-separated fields, or whose added count is
+// neither "-" nor an integer, is an error and no size, never a partial sum.
+func NumstatSize(out string) (added, files int, err error) {
 	for i, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
 		fields := strings.Split(line, "\t")
 		if len(fields) != 3 {
-			return 0, fmt.Errorf("parsing git diff --numstat line %d: %d tab-separated fields, want 3", i+1, len(fields))
+			return 0, 0, fmt.Errorf("parsing git diff --numstat line %d: %d tab-separated fields, want 3", i+1, len(fields))
 		}
-		if fields[0] == "-" {
-			continue
+		if fields[0] != "-" {
+			n, err := strconv.Atoi(fields[0])
+			if err != nil {
+				return 0, 0, fmt.Errorf("parsing added count of git diff --numstat line %d: %w", i+1, err)
+			}
+			added += n
 		}
-		n, err := strconv.Atoi(fields[0])
-		if err != nil {
-			return 0, fmt.Errorf("parsing added count of git diff --numstat line %d: %w", i+1, err)
-		}
-		total += n
+		files++
 	}
-	return total, nil
+	return added, files, nil
 }
 
 // addedLinesInUntrackedFiles counts the lines of the files git reports as
