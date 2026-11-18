@@ -590,6 +590,7 @@ func TestIntegrationSQLRefusalRunsRealBd(t *testing.T) {
 		Workspaces: mustStore(t),
 		Log:        log,
 		Runner:     executor,
+		Caps:       executor,
 	})
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)

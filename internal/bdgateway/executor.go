@@ -127,7 +127,12 @@ type Executor struct {
 	defaultTimeout time.Duration
 	killGrace      time.Duration
 	slots          chan struct{}
-	runner         processRunner
+	// capRefusals and peakInFlight are atomics rather than a lock: the stats
+	// route reads them while calls run, and the refusal path must not take a
+	// lock per call the cap turns away.
+	capRefusals  atomic.Uint64
+	peakInFlight atomic.Uint64
+	runner       processRunner
 }
 
 // New builds an executor. A field bd cannot run without is refused by name
@@ -192,6 +197,43 @@ func New(opts Options) (*Executor, error) {
 	}, nil
 }
 
+// CapSnapshot is the executor's concurrency-cap counters, which GET /v1/stats
+// serves beside the call log's.
+type CapSnapshot struct {
+	// TooManyCalls is how many calls were refused because every slot was taken.
+	TooManyCalls uint64 `json:"too_many_calls"`
+	// InFlight is how many calls hold a slot now.
+	InFlight uint64 `json:"in_flight"`
+	// PeakInFlight is the most calls that held a slot at once since start.
+	PeakInFlight uint64 `json:"peak_in_flight"`
+}
+
+// CapStats returns a snapshot of the concurrency-cap counters. A zero-value
+// executor answers zeros, since it holds no slots to read.
+func (e *Executor) CapStats() CapSnapshot {
+	if e == nil || e.slots == nil {
+		return CapSnapshot{}
+	}
+	return CapSnapshot{
+		TooManyCalls: e.capRefusals.Load(),
+		InFlight:     uint64(len(e.slots)),
+		PeakInFlight: e.peakInFlight.Load(),
+	}
+}
+
+// recordInFlight raises the peak to the number of calls holding a slot now. It
+// runs at admission, when len(slots) counts the call just admitted, so the peak
+// is the highest number in flight at once rather than the number admitted.
+func (e *Executor) recordInFlight() {
+	n := uint64(len(e.slots))
+	for {
+		peak := e.peakInFlight.Load()
+		if n <= peak || e.peakInFlight.CompareAndSwap(peak, n) {
+			return
+		}
+	}
+}
+
 // Exec runs one bd call: it maps the head to the workspace, builds bd's
 // environment, streams stdin up to the cap, frames bd's output and exit status
 // on frames, and kills the whole process group when the call times out or the
@@ -232,7 +274,9 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	select {
 	case e.slots <- struct{}{}:
 		defer func() { <-e.slots }()
+		e.recordInFlight()
 	default:
+		e.capRefusals.Add(1)
 		return ErrTooManyCalls
 	}
 

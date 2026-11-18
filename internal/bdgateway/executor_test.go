@@ -738,6 +738,9 @@ func TestExecutorCap(t *testing.T) {
 	if second.Len() != 0 {
 		t.Errorf("the refused call wrote frames: %q", second.Bytes())
 	}
+	if got := e.CapStats().TooManyCalls; got != 1 {
+		t.Errorf("too_many_calls after one refusal = %d, want 1", got)
+	}
 
 	proc.finish(0)
 	select {
@@ -747,6 +750,100 @@ func TestExecutorCap(t *testing.T) {
 		}
 	case <-waitCtx(t).Done():
 		t.Fatal("the call holding the slot did not return within the test's bound")
+	}
+}
+
+// TestExecutorCapStatsNoSlots: an executor with no slots answers zeros rather
+// than panicking, since a typed nil can still reach the stats route.
+func TestExecutorCapStatsNoSlots(t *testing.T) {
+	t.Parallel()
+	var typedNil *Executor
+	for name, e := range map[string]*Executor{"typed nil": typedNil, "zero value": {}} {
+		if got := e.CapStats(); got != (CapSnapshot{}) {
+			t.Errorf("%s: CapStats = %+v, want zeros", name, got)
+		}
+	}
+}
+
+// TestExecutorPeakInFlight: the peak is the highest number of calls in flight
+// at once, and the count in flight returns to zero once they end.
+func TestExecutorPeakInFlight(t *testing.T) {
+	t.Parallel()
+	const calls = 3
+	runner := &capRunner{bound: waitCtx(t), started: make(chan struct{}, calls)}
+	e, err := New(Options{
+		Binary:        "/opt/bd/bd",
+		WorkspaceRoot: testWorkspace(t),
+		Home:          "/home/bdgw",
+		Path:          "/usr/bin:/bin",
+		DoltHost:      "gt-dolt",
+		DoltPort:      "3307",
+		MaxConcurrent: calls,
+		runner:        runner,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	done := make(chan error, calls)
+	for i := 0; i < calls; i++ {
+		go func() {
+			done <- e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, io.Discard)
+		}()
+		select {
+		case <-runner.started:
+		case <-waitCtx(t).Done():
+			t.Fatal("a call was not started within the test's bound")
+		}
+	}
+	if got := e.CapStats(); got.InFlight != calls || got.PeakInFlight != calls {
+		t.Errorf("with %d calls running, in flight = %d and peak = %d, want %d and %d",
+			calls, got.InFlight, got.PeakInFlight, calls, calls)
+	}
+
+	runner.finishAll(0)
+	for i := 0; i < calls; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("call %d: %v", i, err)
+			}
+		case <-waitCtx(t).Done():
+			t.Fatal("a call did not return within the test's bound")
+		}
+	}
+	if got := e.CapStats(); got.InFlight != 0 || got.PeakInFlight != calls {
+		t.Errorf("after the calls ended, in flight = %d and peak = %d, want 0 and %d",
+			got.InFlight, got.PeakInFlight, calls)
+	}
+}
+
+// capRunner starts every call on a process that ends only when the test
+// finishes it, and signals each start, so a test can hold several calls in
+// flight at once.
+type capRunner struct {
+	mu      sync.Mutex
+	procs   []*fakeProcess
+	bound   context.Context
+	started chan struct{}
+}
+
+func (r *capRunner) Start(string, []string, []string, string) (Process, error) {
+	p := newBlockingFake("")
+	p.bound = r.bound
+	r.mu.Lock()
+	r.procs = append(r.procs, p)
+	r.mu.Unlock()
+	r.started <- struct{}{}
+	return p, nil
+}
+
+func (r *capRunner) finishAll(status int) {
+	r.mu.Lock()
+	procs := slices.Clone(r.procs)
+	r.mu.Unlock()
+	for _, p := range procs {
+		p.finish(status)
 	}
 }
 

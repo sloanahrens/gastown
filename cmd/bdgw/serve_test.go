@@ -92,6 +92,7 @@ func newFixture(t *testing.T, runner bdgateway.CallRunner) *fixture {
 		Workspaces: store,
 		Log:        log,
 		Runner:     runner,
+		Caps:       fixedCaps{},
 	})
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
@@ -130,6 +131,12 @@ func pushBody(t *testing.T) string {
 	}
 	return string(body)
 }
+
+// fixedCaps serves a cap snapshot a test sets; the fixture runs calls only for
+// their HTTP answers.
+type fixedCaps struct{ snap bdgateway.CapSnapshot }
+
+func (f fixedCaps) CapStats() bdgateway.CapSnapshot { return f.snap }
 
 // exitRunner answers every call with one exit frame, so a request that reaches
 // the executor finishes without a process.

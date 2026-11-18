@@ -649,6 +649,7 @@ func TestSQLRefusesWrites(t *testing.T) {
 				Workspaces: mustStore(t),
 				Log:        newTestCallLog(t),
 				Runner:     stub,
+				Caps:       fixedCaps{},
 			})
 			if err != nil {
 				t.Fatalf("NewGateway: %v", err)
