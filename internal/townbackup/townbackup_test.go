@@ -234,6 +234,129 @@ func TestRotateKeepsABackupWithAnUnreadableManifest(t *testing.T) {
 	}
 }
 
+// A manifest that cannot be written stops Commit before the rename: a night is
+// never published without it.
+func TestCommitRefusesWhenTheManifestCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	partial := PartialDir(root, night)
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, ArchiveName), []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory in the manifest's place, so the atomic rename onto it fails.
+	manifest := filepath.Join(partial, ManifestName)
+	if err := os.MkdirAll(manifest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifest, "blocker"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Commit(root, Manifest{Taken: night}); err == nil {
+		t.Fatal("Commit published a night whose manifest it could not write")
+	}
+	if _, err := os.Stat(Dir(root, night)); !os.IsNotExist(err) {
+		t.Errorf("Commit renamed a night with no manifest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(partial, ArchiveName)); err != nil {
+		t.Errorf("the partial night lost its archive: %v", err)
+	}
+}
+
+// A night the filesystem will not rename stays partial, so no date names an
+// unpublished backup.
+func TestCommitKeepsTheNightPartialWhenTheRenameFails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	partial := PartialDir(root, night)
+	if err := os.MkdirAll(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(partial, ArchiveName), []byte("archive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The root denies writes, so the manifest can be written inside the partial
+	// directory but the night cannot be renamed out of it.
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Errorf("restore root permissions: %v", err)
+		}
+	})
+
+	if _, err := Commit(root, Manifest{Taken: night}); err == nil {
+		t.Fatal("Commit renamed a night on a root it cannot write")
+	}
+	if _, err := os.Stat(Dir(root, night)); !os.IsNotExist(err) {
+		t.Errorf("a final directory names a night that was never renamed: %v", err)
+	}
+	if _, err := os.Stat(partial); err != nil {
+		t.Errorf("the partial night is gone: %v", err)
+	}
+}
+
+// A night rotation cannot remove is reported and left in place: a failed
+// removal is never counted as a removed night.
+func TestRotateReportsANightItCannotRemove(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	commitNight(t, root, 1)
+	removable := commitNight(t, root, 0)
+	doomed := commitNight(t, root, 2)
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0o755); err != nil {
+			t.Errorf("restore root permissions: %v", err)
+		}
+	})
+
+	removed, err := Rotate(root, 2)
+	if err == nil {
+		t.Fatal("Rotate reported success for a night it could not remove")
+	}
+	if len(removed) != 0 {
+		t.Errorf("removed = %v, want none", removed)
+	}
+	for _, path := range []string{doomed, removable} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("rotation lost %s: %v", path, statErr)
+		}
+	}
+}
+
+// A root that is not a directory is a read error, not an empty backup set.
+func TestListRefusesARootThatIsNotADirectory(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "town-state")
+	if err := os.WriteFile(root, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := List(root); err == nil {
+		t.Error("List read a root that is not a directory as an empty backup set")
+	}
+}
+
+// Rotation refuses a root it cannot read rather than reporting nothing to remove.
+func TestRotateRefusesARootThatIsNotADirectory(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "town-state")
+	if err := os.WriteFile(root, []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Rotate(root, Keep); err == nil {
+		t.Error("Rotate reported an unreadable root as nothing to remove")
+	}
+}
+
 func TestNewestAgeAndStale(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
