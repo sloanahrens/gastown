@@ -897,7 +897,7 @@ func (g GatewayPusher) endpoint(path string) (string, error) {
 		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(g.URL)))
 	}
 	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
-		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or an in-cluster Service name (<service>.<namespace>.svc)", shown(redactedURL(g.URL)))
+		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or the bd gateway's in-cluster Service name (bd-gateway.gt.svc)", shown(redactedURL(g.URL)))
 	}
 	return strings.TrimSuffix(g.URL, "/") + path, nil
 }
@@ -913,33 +913,57 @@ var localGatewayHosts = map[string]bool{
 	"gateway.docker.internal":  true,
 }
 
-// localGatewayHost reports whether host is this machine or the cluster the
-// caller runs in: a loopback address, one of the Docker host aliases, or an
-// in-cluster Service name. Plain http to such a host never leaves a network the
-// caller already trusts.
+// gatewayServiceName and gatewayServiceNamespace are the name and namespace the
+// cluster gives the bd gateway's Deployment, container and Service
+// (docs/design/bd-container.md, "The in-cluster gateway"), so bd-gateway.gt.svc
+// is the only in-cluster Service a plain-http gateway URL may name. The name
+// alone is not enough: the Service admission guard
+// (deploy/k8s/bd-gateway-service-admission.yaml) binds namespace gt only, and
+// deploy/k8s/update-admission.yaml pins the daemon's URL to
+// http://bd-gateway.gt.svc:7440, so a Service called bd-gateway in another
+// namespace is not this gateway and would receive the bearer token over plain
+// http. They are spelled here rather than imported so the gateway client carries
+// no dependency on the render packages; a render that renames the gateway or
+// moves the town out of gt makes every in-cluster push refuse, naming this host,
+// rather than trust a different Service.
+const (
+	gatewayServiceName      = "bd-gateway"
+	gatewayServiceNamespace = "gt"
+)
+
+// localGatewayHost reports whether host is this machine, or the gateway itself
+// in the cluster the caller runs in: a loopback address, one of the Docker host
+// aliases, or the gateway's in-cluster Service name in the namespace its Service
+// guard binds. Another Service's name, or the gateway's name in another
+// namespace, is not this gateway, and plain http to it would send the bearer
+// token in the clear to something that is not the gateway.
 func localGatewayHost(host string) bool {
 	if localGatewayHosts[strings.ToLower(host)] {
 		return true
 	}
-	if inClusterServiceHost(host) {
+	if gatewayServiceHost(host) {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
-// inClusterServiceHost reports whether host is the cluster DNS name of a
-// Service: <service>.<namespace>.svc, or the same with .cluster.local after it
-// (the in-cluster bd gateway is http://bd-gateway.gt.svc:7440). Exactly those
+// gatewayServiceHost reports whether host is the cluster DNS name of the
+// gateway's Service: bd-gateway.gt.svc, or the same with .cluster.local after it
+// (the cluster render's default is http://bd-gateway.gt.svc:7440). Exactly those
 // two shapes, every label a plain DNS label, so a bare "svc", a name that only
-// contains svc (a.svc.evil.com, bd-gateway.svcx.example) and a name with an
-// empty label are not Service names.
-func inClusterServiceHost(host string) bool {
+// contains svc (a.svc.evil.com, bd-gateway.svcx.example), a name with an empty
+// label, another Service's name (dolt.gt.svc) and the gateway's name in another
+// namespace (bd-gateway.openshell.svc) are not the gateway.
+func gatewayServiceHost(host string) bool {
 	labels := strings.Split(strings.ToLower(host), ".")
 	switch {
 	case len(labels) == 3 && labels[2] == "svc":
 	case len(labels) == 5 && labels[2] == "svc" && labels[3] == "cluster" && labels[4] == "local":
 	default:
+		return false
+	}
+	if labels[0] != gatewayServiceName || labels[1] != gatewayServiceNamespace {
 		return false
 	}
 	for _, l := range labels {
