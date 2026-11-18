@@ -167,6 +167,74 @@ func TestStaticObjectsRefusesAFailedSource(t *testing.T) {
 	}
 }
 
+// TestBuildRefusesAFailedStaticSource drives the Build call site: a source that
+// cannot be read fails the build rather than yielding a Manifests whose Static
+// is empty. k8s.Static cannot fail, so the test injects the failing source.
+func TestBuildRefusesAFailedStaticSource(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.IncludeStatic = true
+	v.staticSource = func() ([]k8s.StaticObject, error) {
+		return nil, errors.New("the embed is unreadable")
+	}
+	m, err := Build(v)
+	if err == nil {
+		t.Fatal("Build accepted a static source that failed")
+	}
+	if !strings.Contains(err.Error(), "the embed is unreadable") {
+		t.Errorf("the refusal %q does not carry the source's error", err)
+	}
+	if len(m.Static) != 0 {
+		t.Errorf("a refused build returned %d static objects", len(m.Static))
+	}
+}
+
+// errorWriter is a writer whose every write fails.
+type errorWriter struct{ err error }
+
+func (w errorWriter) Write([]byte) (int, error) { return 0, w.err }
+
+// TestRenderRefusesAFailedWrite drives the render's write refusal on a stream
+// carrying the static set: a writer that fails returns the error rather than
+// reporting the stream written.
+func TestRenderRefusesAFailedWrite(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues(t))
+	m.Static = []k8s.StaticObject{{
+		Kind:      "Role",
+		Name:      "stray-role",
+		Namespace: DefaultNamespace,
+		Doc:       []byte("kind: Role\n"),
+	}}
+	err := Render(errorWriter{errors.New("disk full")}, m)
+	if err == nil {
+		t.Fatal("Render reported a stream written to a writer that failed")
+	}
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("the refusal %q does not carry the writer's error", err)
+	}
+}
+
+// TestEncodeStreamRefusesADocumentItCannotEncode drives the encoder's failure
+// branch: a document the YAML encoder cannot marshal fails the stream. Render
+// cannot be driven into it, since every document it writes comes from a
+// Manifests field the encoder accepts, so the test calls the seam with a node
+// of an unknown kind, which the encoder refuses.
+func TestEncodeStreamRefusesADocumentItCannotEncode(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	err := encodeStream(&buf, &yaml.Node{Kind: 99})
+	if err == nil {
+		t.Fatal("encodeStream wrote a document the YAML encoder cannot marshal")
+	}
+	if !strings.Contains(err.Error(), "encoding the manifest") {
+		t.Errorf("the refusal %q does not say the encoder failed", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("the refused stream wrote %d bytes, want none", buf.Len())
+	}
+}
+
 // TestOrderedStaticPutsClusterScopedFirst holds the render order: the
 // cluster-scoped objects first, then the namespaced ones, each group in the
 // order it arrived.

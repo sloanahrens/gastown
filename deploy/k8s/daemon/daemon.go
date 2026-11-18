@@ -887,6 +887,10 @@ type Values struct {
 	// namespaced object outside this render's namespace, the sweep's or Forgejo's
 	// is refused.
 	IncludeStatic bool
+	// staticSource replaces k8s.Static when Build reads the static set. Only a
+	// test sets it, to drive the refusal of a source that cannot be read; k8s.Static
+	// cannot fail, so no caller's render reaches that branch.
+	staticSource func() ([]k8s.StaticObject, error)
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard,
@@ -981,7 +985,11 @@ func Build(v Values) (Manifests, error) {
 	// order here and refuses a namespaced object outside the namespaces this
 	// render may touch before any of them reach the stream.
 	if v.IncludeStatic {
-		static, err := staticObjects(k8s.Static, namespace)
+		source := v.staticSource
+		if source == nil {
+			source = k8s.Static
+		}
+		static, err := staticObjects(source, namespace)
 		if err != nil {
 			return Manifests{}, err
 		}
