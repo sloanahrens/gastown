@@ -440,6 +440,35 @@ func TestSpecLintEstimateRequiredRefusesMissingLabel(t *testing.T) {
 	}
 }
 
+// TestSpecLintEstimateRequiredRefusesUnreadableLabel: gt spec lint refuses a
+// work bead whose sp-minutes label does not read by default, since with the
+// size gate off nothing else reads it and the requirement must not pass an
+// estimate it could not check (gt-uffeik).
+func TestSpecLintEstimateRequiredRefusesUnreadableLabel(t *testing.T) {
+	t.Parallel()
+	opts, err := specLintOptsFor(nil, t.TempDir(), false, false, io.Discard)
+	if err != nil {
+		t.Fatalf("specLintOptsFor: %v", err)
+	}
+	spec := cleanSpec("gt-bad", 2, "2026-01-01")
+	spec.Labels = []string{"sp-minutes:soon"}
+	var out, errOut bytes.Buffer
+	err = runSpecLintAtWith(&out, &errOut, "", spec.ID, spec, nil, "", nil, false, time.Now(), opts)
+	if code, _ := IsSilentExit(err); code != specLintExitRefused {
+		t.Fatalf("exit code = %d, want %d (err %v, out %q)", code, specLintExitRefused, err, out.String())
+	}
+	for _, want := range []string{
+		"gt-bad",
+		"estimate",
+		`"sp-minutes:soon" is unreadable as sp-minutes`,
+		"gt spec estimate gt-bad",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("verdict %q does not name %q", out.String(), want)
+		}
+	}
+}
+
 // TestSpecLintEstimateRequiredEstimateFlag: --estimate writes the label the
 // requirement reads and the lint then passes; a bead that already carries the
 // label passes with no estimator attached (gt-1cx0o0).
@@ -487,9 +516,9 @@ func TestSpecLintEstimateRequiredEstimateFlag(t *testing.T) {
 }
 
 // TestSpecLintEstimateRequiredAllowUnestimated: --allow-unestimated turns the
-// refusal off for a bead that cannot have an estimate yet, and a bead whose
-// rung is none or whose label does not read is not refused for a missing
-// estimate (gt-1cx0o0).
+// refusal off for a bead that cannot have an estimate yet — for a missing
+// label, and for one that does not read — and a bead whose rung is none is not
+// refused for a missing estimate (gt-1cx0o0, gt-uffeik).
 func TestSpecLintEstimateRequiredAllowUnestimated(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -499,7 +528,7 @@ func TestSpecLintEstimateRequiredAllowUnestimated(t *testing.T) {
 	}{
 		{name: "no label, --allow-unestimated", allow: true},
 		{name: "the rung is none", labels: []string{"sp-rung:none"}},
-		{name: "the label does not read", labels: []string{"sp-minutes:soon"}},
+		{name: "the label does not read, --allow-unestimated", labels: []string{"sp-minutes:soon"}, allow: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
