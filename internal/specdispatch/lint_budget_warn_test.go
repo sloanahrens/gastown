@@ -25,6 +25,20 @@ func budgetWarnSpec(line string, boxes int) Spec {
 	return s
 }
 
+// budgetWarn40x4 is the WARN line a bead declaring 40 lines over 4 boxes gets:
+// the text changeBudgetWarnText formats for those numbers. Both tests that pin
+// it read this one literal (gt-ed0hjd).
+const budgetWarn40x4 = "declared 40 lines for 4 boxes: beads that landed on their first attempt added a median 34 lines per box"
+
+// budgetWarnings keeps the change budget's WARN line from warnings, whatever its
+// numbers, so a silence test fails on that line and not on any other advisory
+// warning a bead carries.
+func budgetWarnings(warnings []string) []string {
+	return slices.DeleteFunc(slices.Clone(warnings), func(w string) bool {
+		return !strings.HasPrefix(w, "declared ")
+	})
+}
+
 // A bead that declares 40 added lines for four acceptance boxes declares under
 // twenty lines per box, so the lint warns with the declared lines, the box
 // count and the measured median. It is a warning: the bead still dispatches
@@ -37,9 +51,8 @@ func TestRunawayBeadBudgetWarningNamesBothNumbers(t *testing.T) {
 	if !v.Clean() {
 		t.Fatalf("bead refused: %s", v.Line(s.ID))
 	}
-	want := "declared 40 lines for 4 boxes: beads that landed on their first attempt added a median 34 lines per box"
-	if !slices.Contains(v.Warnings, want) {
-		t.Fatalf("Warnings = %q, want %q", v.Warnings, want)
+	if !slices.Contains(v.Warnings, budgetWarn40x4) {
+		t.Fatalf("Warnings = %q, want %q", v.Warnings, budgetWarn40x4)
 	}
 }
 
@@ -70,8 +83,9 @@ func TestRunawayBeadBudgetWarningStaysSilent(t *testing.T) {
 			if tc.epic {
 				s.Type = "epic"
 			}
-			if v := LintWith(s, defaultTemplate(), LintOptions{}); len(v.Warnings) != 0 {
-				t.Errorf("Warnings = %q, want none", v.Warnings)
+			v := LintWith(s, defaultTemplate(), LintOptions{})
+			if got := budgetWarnings(v.Warnings); len(got) != 0 {
+				t.Errorf("budget warning = %q, want none", got)
 			}
 		})
 	}
@@ -101,8 +115,7 @@ func TestRunawayBeadBudgetWarningLeavesTheRoute(t *testing.T) {
 	if rv.Route != RouteRefuse {
 		t.Fatalf("bead missing its Gate got route %q, want %q", rv.Route, RouteRefuse)
 	}
-	want := "declared 40 lines for 4 boxes: beads that landed on their first attempt added a median 34 lines per box"
-	if !slices.Contains(rv.Warnings, want) {
+	if !slices.Contains(rv.Warnings, budgetWarn40x4) {
 		t.Errorf("Warnings = %q, want the budget warning beside the refusal", rv.Warnings)
 	}
 }
