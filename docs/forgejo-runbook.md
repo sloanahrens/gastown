@@ -393,6 +393,76 @@ the revoked value until it restarts.
 | A bot's push is refused | It is not a collaborator with write access, or the protection rule does not list it. Check both. |
 | `token file ... is mode ...; it must be 600`, from the client | The file lost its mode. The command restores 600 on the next run. |
 
+## Restoring a Forgejo dump
+
+The restore below was rehearsed on 2026-11-18 against that night's archive, into
+a scratch pair. It restores the dump; it does not rehearse the cluster volume.
+
+The nightly host job runs the dump inside the forgejo pod and writes
+`forgejo-dump-<ts>.tar.gz`. The archive holds `app.ini`, the repositories, the
+data directory and `forgejo-db.sql`, and it holds the application secrets:
+treat it as sensitive as the live data.
+
+Find the SQL entry from the archive's listing rather than by extracting the
+rest. In the rehearsed archive `forgejo-db.sql` sat at entry 781, so a
+`grep -m1` on the tar listing finds it without reading the whole file:
+
+```bash
+tar tzf forgejo-dump-<ts>.tar.gz | grep -m1 'forgejo-db.sql$'
+```
+
+Restore into a scratch PostgreSQL 17 and a scratch Forgejo 16.0.5, never into
+the live pair. Put the scratch pair on a network with no route out, and run
+Forgejo with mirrors, cron, Actions, mail and SSH off.
+
+### The database
+
+A plain `psql < forgejo-db.sql` does not restore this dump: the CREATE TABLE
+statements are alphabetical, so 63 of them fail on foreign keys to
+`repository`, which is created later, and 39 INSERTs fail for the same reason.
+Load it in two passes. Put every line that starts with CREATE in one file and
+run it twice; put every line that starts with INSERT INTO or SELECT in another
+and run it once, as a superuser role, with
+`SET session_replication_role = replica;` as its first statement so the
+INSERTs load without the foreign-key checks:
+
+```bash
+grep '^CREATE' forgejo-db.sql > create.sql
+grep -E '^(INSERT INTO|SELECT)' forgejo-db.sql > data.sql
+psql -v ON_ERROR_STOP=1 -f create.sql
+psql -v ON_ERROR_STOP=1 -f create.sql
+{ echo 'SET session_replication_role = replica;'; cat data.sql; } |
+  psql -U <superuser> -v ON_ERROR_STOP=1
+```
+
+The run gave 0 errors. Do not run the whole file twice instead: a table with no
+primary key then loads its rows twice (`forgejo_sem_ver` showed 2).
+
+The dump omits the `forgejo_version` and `forgejo_migration` tables. Forgejo
+16.0.5 recreated both at start, with 1 and 39 rows, equal to live.
+
+### What a good restore shows
+
+`healthz` passes, every repository clones over HTTP with `--mirror`, and the
+ref counts equal the live ones, except in what moved since the dump.
+
+### Timings, 2026-11-18
+
+| Step | Time |
+|------|------|
+| SQL entry found in the archive listing | 19 s |
+| Extract | 35 s |
+| Database load | 94 s |
+| Forgejo ready | about 9 s |
+| 14 repositories cloned over HTTP | 37 s |
+
+### Not verified
+
+- Pulling a container image from the restored registry.
+- Actions run history and logs.
+- Restoring the Forgejo data volume itself: the rehearsal restored the dump, not
+  the volume. SSH went untested too.
+
 ## Tests
 
 The Go packages `internal/forgejoprov`, `internal/forgejoresync` and
