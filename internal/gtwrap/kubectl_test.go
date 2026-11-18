@@ -1048,15 +1048,19 @@ func beadsDirsIn(argv []string) []string {
 // TestKubectlSettlesBeadsDir: a bd call that sets no BEADS_DIR is given the
 // .beads directory nearest at or above its working directory, inside the town,
 // so the pod's bd forwarder names the rig the caller meant (gt-iy4cpy). The
-// nearest directory wins, the town's own .beads answers a walk that finds none,
-// a caller's BEADS_DIR is kept, and a directory outside the town gets none.
+// nearest directory wins, a worktree's redirect is followed to the rig's beads
+// directory (gt-8y5mcn), the town's own .beads answers a walk that finds none, a
+// caller's BEADS_DIR is kept, and a directory outside the town gets none.
 func TestKubectlSettlesBeadsDir(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	mkdirTownDir(t, filepath.Join(town, ".beads"))
 	mkdirTownDir(t, filepath.Join(town, "gastown", ".beads"))
 	mkdirTownDir(t, filepath.Join(town, "gastown", "crew", "nux"))
+	mkdirTownDir(t, filepath.Join(town, "gastown", "mayor", "rig", ".beads"))
 	mkdirTownDir(t, filepath.Join(town, "crew"))
+	worktree := filepath.Join(town, "gastown", "polecats", "nux", "gastown")
+	writeRedirect(t, worktree, "../../../mayor/rig/.beads\n")
 	outside := t.TempDir()
 	setDir := filepath.Join(town, "crew", ".beads")
 
@@ -1068,6 +1072,7 @@ func TestKubectlSettlesBeadsDir(t *testing.T) {
 	}{
 		{"nearest rig", filepath.Join(town, "gastown"), nil, filepath.Join(town, "gastown", ".beads")},
 		{"nearest above", filepath.Join(town, "gastown", "crew", "nux"), nil, filepath.Join(town, "gastown", ".beads")},
+		{"worktree redirect", worktree, nil, filepath.Join(town, "gastown", "mayor", "rig", ".beads")},
 		{"town root", filepath.Join(town, "crew"), nil, filepath.Join(town, ".beads")},
 		{"set", filepath.Join(town, "gastown"), []string{"BEADS_DIR=" + setDir}, setDir},
 		{"outside", outside, nil, ""},
