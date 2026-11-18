@@ -252,6 +252,9 @@ func TestRenderStaticAllowlist(t *testing.T) {
 		{"a document holding two objects", []k8s.StaticObject{
 			{Doc: []byte("kind: Role\nmetadata: {name: a, namespace: gt}\n---\nkind: Role\n")},
 		}, "gt", "holds more than one YAML document"},
+		{"a second document that does not parse", []k8s.StaticObject{
+			{Doc: []byte("kind: Role\nmetadata: {name: a, namespace: gt}\n---\nkind: [\n")},
+		}, "gt", "second document"},
 		{"a document with no kind", []k8s.StaticObject{{Doc: []byte("metadata: {name: a}\n")}}, "gt", "names no kind"},
 		{"a document with no name", []k8s.StaticObject{{Doc: []byte("kind: Role\nmetadata: {namespace: gt}\n")}}, "gt", "names no metadata.name"},
 	}
