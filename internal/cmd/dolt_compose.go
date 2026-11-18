@@ -216,6 +216,13 @@ func doltComposePsFor(deps doltComposeDeps) func(townRoot string) ([]byte, error
 // registerDataUnitCheck registers the data unit check on d, reading the unit with
 // deps. It is opt-in by name, like mac-crew-hooks: named in names, it reads the
 // compose unit through docker; otherwise it reports SKIPPED and calls nothing.
-func registerDataUnitCheck(d *doctor.Doctor, names []string, deps doltComposeDeps) {
-	d.Register(doctor.NewDataUnitCheck(slices.Contains(names, doctor.DataUnitCheckName), doltComposePsFor(deps)))
+// Named, it first asks the cluster for the bd-gateway Deployment (cluster): with one
+// present the in-cluster gateway is checked, and with none the compose unit is.
+func registerDataUnitCheck(d *doctor.Doctor, names []string, deps doltComposeDeps, cluster bdGatewayClusterDeps) {
+	named := slices.Contains(names, doctor.DataUnitCheckName)
+	d.Register(bdGatewayDataUnitCheck{
+		Check:   doctor.NewDataUnitCheck(named, doltComposePsFor(deps)),
+		named:   named,
+		cluster: cluster,
+	})
 }
