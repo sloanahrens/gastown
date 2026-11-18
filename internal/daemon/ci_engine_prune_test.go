@@ -1111,8 +1111,9 @@ func TestCIEnginePruneBuildCacheLogsReclaimedBytes(t *testing.T) {
 
 // TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed: a build cache prune that
 // reclaims 0 bytes logs one WARN naming the reclaimable figure docker reported before
-// the prune and the filter, when that figure is above zero. Every other reading of the
-// two logs no WARN, and the run still reaches its verdict.
+// the prune, the filter, and that cache younger than the filter is not removed, when
+// that figure is above zero. Every other reading of the two logs no WARN, and the run
+// still reaches its verdict.
 func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
 	t.Parallel()
 	const reclaimable = 68_800_000_000
@@ -1169,7 +1170,7 @@ func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
 			if len(warns) != 1 {
 				t.Fatalf("logged %d WARN line(s), want one:\n%s", len(warns), logs)
 			}
-			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=24h"} {
+			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=24h", "cache younger than the filter is not removed"} {
 				if !strings.Contains(warns[0], want) {
 					t.Errorf("the WARN line lacks %q:\n%s", want, warns[0])
 				}

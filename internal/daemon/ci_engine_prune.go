@@ -190,7 +190,7 @@ func ciEngineBuildCacheReport(out []byte, reclaimable int64, known bool) (reclai
 		return fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
 	}
 	if n == 0 && known && reclaimable > 0 {
-		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s",
+		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s, and cache younger than the filter is not removed",
 			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(ciEngineUnusedAge))
 	}
 	return "build cache reclaimed " + polecatimage.Human(n), warn
