@@ -152,7 +152,7 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	// Nothing in this rig reads the host's environment or a resolver: the gateway
 	// URL is empty unless a test sets one, and a lookup is a test's fake.
 	d.getenv = func(string) string { return "" }
-	d.lookupHost = func(host string) ([]string, error) {
+	d.lookupHost = func(_ context.Context, host string) ([]string, error) {
 		return nil, errors.New("no resolver in this rig: " + host)
 	}
 	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
@@ -780,7 +780,7 @@ func TestUpdateJobRefusalsLogTheirReason(t *testing.T) {
 			name: "gateway host unresolvable",
 			setup: func(_ *testing.T, r *updateJobRig) {
 				r.d.getenv = gatewayURLEnv("http://gateway-host.example:7440")
-				r.d.lookupHost = func(string) ([]string, error) { return nil, errors.New("no such host") }
+				r.d.lookupHost = func(context.Context, string) ([]string, error) { return nil, errors.New("no such host") }
 			},
 			wantReason: "launch of the update Job failed: resolve the gateway host gateway-host.example",
 		},
@@ -1203,12 +1203,6 @@ func TestUpdateJobGatewayURLResolvesName(t *testing.T) {
 			want:  "http://192.168.5.2:7440/bd",
 		},
 		{
-			name:  "an https name with no port",
-			raw:   "https://gateway-host.example",
-			addrs: []string{"192.168.5.2"},
-			want:  "https://192.168.5.2",
-		},
-		{
 			name:  "the first IPv4 answer, past an IPv6 one",
 			raw:   "http://gateway-host.example:7440",
 			addrs: []string{"fd00::1", "192.168.5.2", "192.168.5.3"},
@@ -1221,7 +1215,7 @@ func TestUpdateJobGatewayURLResolvesName(t *testing.T) {
 			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 			r.d.getenv = gatewayURLEnv(tt.raw)
 			var asked []string
-			r.d.lookupHost = func(host string) ([]string, error) {
+			r.d.lookupHost = func(_ context.Context, host string) ([]string, error) {
 				asked = append(asked, host)
 				return tt.addrs, nil
 			}
@@ -1255,34 +1249,46 @@ func TestUpdateJobGatewayURLResolvesName(t *testing.T) {
 	}
 }
 
-// TestUpdateJobGatewayURLLookupFails: a host the daemon cannot resolve, a lookup
-// that answers no IPv4 address, and a value that is not a URL with a host each
-// refuse the launch, and no Job is created. A lookup failure names the host and a
-// malformed value names the variable, never the value.
+// TestUpdateJobGatewayURLLookupFails: a host the daemon cannot resolve in time, a
+// lookup that answers no IPv4 address, a value that is not a URL with a host, and an
+// https URL on a name each refuse the launch, and no Job is created. A lookup
+// failure names the host and a malformed value names the variable, never the value.
 func TestUpdateJobGatewayURLLookupFails(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		raw     string
-		lookup  func(string) ([]string, error)
+		lookup  lookupHostName
 		wantMsg string
 	}{
 		{
 			name:    "the resolver fails",
 			raw:     "http://gateway-host.example:7440",
-			lookup:  func(string) ([]string, error) { return nil, errors.New("no such host") },
+			lookup:  func(context.Context, string) ([]string, error) { return nil, errors.New("no such host") },
 			wantMsg: "resolve the gateway host gateway-host.example for the update Job: no such host",
+		},
+		{
+			name:    "the resolver runs past its bound",
+			raw:     "http://gateway-host.example:7440",
+			lookup:  func(context.Context, string) ([]string, error) { return nil, context.DeadlineExceeded },
+			wantMsg: "resolve the gateway host gateway-host.example for the update Job: context deadline exceeded",
 		},
 		{
 			name:    "the resolver answers no IPv4 address",
 			raw:     "http://gateway-host.example:7440",
-			lookup:  func(string) ([]string, error) { return []string{"fd00::1"}, nil },
+			lookup:  func(context.Context, string) ([]string, error) { return []string{"fd00::1"}, nil },
 			wantMsg: "resolve the gateway host gateway-host.example for the update Job: the lookup answered no IPv4 address",
+		},
+		{
+			name:    "an https URL on a name",
+			raw:     "https://gateway-host.example",
+			lookup:  func(context.Context, string) ([]string, error) { return []string{"192.168.5.2"}, nil },
+			wantMsg: k8sdaemon.BdGatewayURLEnv + " is an https URL on the name gateway-host.example",
 		},
 		{
 			name:    "the value is not a URL with a host",
 			raw:     "gateway-host.example:7440",
-			lookup:  func(string) ([]string, error) { return []string{"192.168.5.2"}, nil },
+			lookup:  func(context.Context, string) ([]string, error) { return []string{"192.168.5.2"}, nil },
 			wantMsg: k8sdaemon.BdGatewayURLEnv + " is not a URL with a host",
 		},
 	}
@@ -1300,6 +1306,30 @@ func TestUpdateJobGatewayURLLookupFails(t *testing.T) {
 			assert.Empty(t, r.cluster.calls, "a refused launch reached the cluster")
 		})
 	}
+}
+
+// TestUpdateJobGatewayLookupHasADeadline: the gateway host lookup is given a context
+// whose deadline is no more than updateJobLookupTimeout after the launch starts, so
+// a stalled resolver cannot hold the heartbeat. The deadline is read from the
+// context the lookup receives; nothing waits on it.
+func TestUpdateJobGatewayLookupHasADeadline(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	r.d.getenv = gatewayURLEnv("http://gateway-host.example:7440")
+	var deadline time.Time
+	var hasDeadline bool
+	r.d.lookupHost = func(ctx context.Context, host string) ([]string, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return []string{"192.168.5.2"}, nil
+	}
+	before := time.Now()
+
+	require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, r.commits[2]))
+
+	after := time.Now()
+	require.True(t, hasDeadline, "the gateway host lookup has no deadline")
+	assert.True(t, deadline.After(before), "the lookup deadline precedes the launch")
+	assert.False(t, deadline.After(after.Add(updateJobLookupTimeout)), "the lookup deadline is past its bound")
 }
 
 // TestUpdateJobGatewayURLUnsetOrIP: an unset BD_GATEWAY_URL renders the Job exactly
@@ -1323,7 +1353,7 @@ func TestUpdateJobGatewayURLUnsetOrIP(t *testing.T) {
 			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 			r.d.getenv = gatewayURLEnv(tt.raw)
 			lookups := 0
-			r.d.lookupHost = func(string) ([]string, error) {
+			r.d.lookupHost = func(context.Context, string) ([]string, error) {
 				lookups++
 				return nil, errors.New("the host is not a name")
 			}
@@ -1380,7 +1410,7 @@ func TestUpdateJobGatewayServicePassesThrough(t *testing.T) {
 			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 			r.d.getenv = gatewayURLEnv(tt.raw)
 			lookups := 0
-			r.d.lookupHost = func(string) ([]string, error) {
+			r.d.lookupHost = func(context.Context, string) ([]string, error) {
 				lookups++
 				return nil, errors.New("the host is not resolved")
 			}
@@ -1421,7 +1451,7 @@ func TestUpdateJobGatewayServiceOtherNamesResolve(t *testing.T) {
 			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 			r.d.getenv = gatewayURLEnv(tt.raw)
 			var asked []string
-			r.d.lookupHost = func(host string) ([]string, error) {
+			r.d.lookupHost = func(_ context.Context, host string) ([]string, error) {
 				asked = append(asked, host)
 				return []string{"192.168.5.2"}, nil
 			}
