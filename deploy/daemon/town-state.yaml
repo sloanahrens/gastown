@@ -8,6 +8,7 @@ entries:
   - path: daemon
     owner: daemon
     rollback: true
+    backup: true
     why: the daemon's own state, settings and patrol records; rollback replays it
   - path: logs
     owner: daemon
@@ -15,20 +16,25 @@ entries:
   - path: events
     owner: daemon
     rollback: true
+    backup: true
     why: the town event store the daemon appends; rollback replays it
   - path: .events.jsonl
     owner: daemon
     rollback: true
+    backup: true
     why: the town event feed the daemon appends; rollback replays it
   - path: .feed.jsonl
     owner: daemon
     rollback: true
+    backup: true
     why: the feed the daemon appends; rollback replays it
   - path: mayor
     owner: daemon
+    backup: true
     why: town config and the pool and roster records it writes
   - path: .beads
     owner: daemon
+    backup: true
     why: workspace metadata the daemon reads and writes
   - path: plugins
     owner: daemon
@@ -38,15 +44,19 @@ entries:
     why: the daemon's liveness probe reads session transcripts under it (internal/liveness)
   - path: settings
     owner: shared
+    backup: true
     why: edited by gt config daemon, read by the daemon (gt-yjzepk.4)
   - path: seat-refill.hold
     owner: shared
+    backup: true
     why: the overseer's dispatch hold, placed in the pod's town root; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it
   - path: ESTOP
     owner: shared
+    backup: true
     why: the town-wide ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it
   - path: ESTOP.<rig>
     owner: shared
+    backup: true
     why: the per-rig ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it
   - path: .events.jsonl.lock
     owner: daemon
@@ -56,24 +66,29 @@ entries:
     why: the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into
   - path: .beads-wisp
     owner: daemon
+    backup: true
     why: the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads
   - path: <rig>/config.json
     owner: daemon
+    backup: true
     why: the rig's registry record the daemon and landing worker read
   - path: <rig>/.repo.git
     owner: daemon
     why: the rig's bare repository the landing worker fetches and merges into; the name is constants.DirRepoGit, which internal/rig and the daemon build the path from
   - path: <rig>/.beads
     owner: daemon
+    backup: true
     why: the rig's beads workspace internal/rig/manager.go InitBeads creates and bd writes, as the town-level .beads row
   - path: <rig>/plugins
     owner: daemon
     why: the plugins the daemon's scanner loads from each rig (internal/plugin/scanner.go DiscoverAll); internal/cmd/daemon_rehearse_plugins.go reads it
   - path: <rig>/settings
     owner: shared
+    backup: true
     why: the rig's behavioral settings gt config writes (internal/config/loader.go SaveRigSettings) and the daemon's landing worker reads (internal/daemon/landing_worker.go rigPostLandCommand), as the town-level settings row
   - path: <rig>/directives
     owner: shared
+    backup: true
     why: directives a person writes and internal/config/directives.go reads as the rig's layer (two rigs of this town have it)
   - path: <rig>/scripts
     owner: shared
@@ -83,6 +98,7 @@ entries:
     why: the deploy-managed file list the om repo's deploy.sh (contrib/gastown) writes and internal/doctor/harness_drift_check.go reads; the refinery it deployed to is retired
   - path: <rig>/.runtime/namepool-state.json
     owner: daemon
+    backup: true
     why: the name pool's state internal/polecat/namepool.go writes when a polecat is named
   - path: <rig>/.runtime/locks
     owner: daemon
@@ -116,13 +132,16 @@ entries:
     why: polecat span records the daemon writes
   - path: .runtime/agents
     owner: daemon
+    backup: true
     why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands). Owner daemon because after the wrapper cutover every gt command runs in the container, so the volume holds the only copy of what a gt command writes; until then a gt command on the Mac also writes the host's tree, a cutover prerequisite (gt-yjzepk.10). The gt-command rows below say their owner is as this row says"
   - path: .runtime/landings
     owner: daemon
     rollback: true
+    backup: true
     why: landing ledgers the daemon writes; rollback replays the landing records
   - path: .runtime/usage
     owner: daemon
+    backup: true
     why: usage records the daemon writes
   - path: .runtime/sweep-runs
     owner: daemon
@@ -139,6 +158,7 @@ entries:
   - path: .runtime/spec_dispatch
     owner: daemon
     rollback: true
+    backup: true
     why: spec dispatcher state the daemon writes; rollback replays it
   - path: .runtime/heartbeats
     owner: daemon
@@ -155,6 +175,7 @@ entries:
   - path: .runtime/red-main
     owner: daemon
     rollback: true
+    backup: true
     why: red-main status the landing worker writes; rollback replays the statuses
   - path: .runtime/locks
     owner: daemon
