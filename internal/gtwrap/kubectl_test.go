@@ -1130,6 +1130,35 @@ func TestKubectlSettlesBeadsDirMapsOntoThePodRoot(t *testing.T) {
 	}
 }
 
+// TestKubectlSettlesBeadsDirReadsTheInjectedFilesystem: the wrapper reads a
+// worktree's redirect through the injected read, not the host's filesystem, so a
+// redirect that only the injected read holds is followed to the rig's beads
+// (gt-x43caq).
+func TestKubectlSettlesBeadsDirReadsTheInjectedFilesystem(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	mkdirTownDir(t, filepath.Join(town, "gastown", "mayor", "rig", ".beads"))
+	worktree := filepath.Join(town, "gastown", "polecats", "nux", "gastown")
+	mkdirTownDir(t, filepath.Join(worktree, ".beads"))
+	f := healthyKube()
+	var note bytes.Buffer
+	k := beadsTownKube(t, f, &note, town)
+	k.ReadFile = func(name string) ([]byte, error) {
+		if name == filepath.Join(worktree, beadsDirName, beadsRedirectName) {
+			return []byte("../../../mayor/rig/.beads\n"), nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	exit, err := k.Launch(kubeBdCall(t, worktree, nil))
+	if exit != 0 || err != nil {
+		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+	}
+	want := []string{"BEADS_DIR=" + filepath.Join(town, "gastown", "mayor", "rig", ".beads")}
+	if got := beadsDirsIn(f.attached[0]); !slices.Equal(got, want) {
+		t.Fatalf("argv carries BEADS_DIR entries %q; want %q", got, want)
+	}
+}
+
 // TestKubectlSettlesBeadsDirRefusesUncomparableDir: a working directory the town
 // cannot be compared with refuses the call, rather than the failed comparison
 // being read as a directory outside the town.
