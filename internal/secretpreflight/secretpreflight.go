@@ -40,11 +40,15 @@ func Missing(ctx context.Context, run Runner, kubeContext, namespace string, nam
 	if namespace == "" {
 		return nil, errors.New("secret preflight: no namespace, so the check cannot name the namespace it reads")
 	}
-	var missing []string
+	// Every name is judged before the first get, so a refusal leaves the
+	// cluster untouched.
 	for _, name := range names {
 		if name == "" || strings.HasPrefix(name, "-") {
 			return nil, fmt.Errorf("secret preflight: %q is not a Secret name: an empty name or one starting with '-' is not passed to kubectl", name)
 		}
+	}
+	var missing []string
+	for _, name := range names {
 		argv := []string{"--context", kubeContext, "-n", namespace, "get", "secret", name}
 		out, err := run(ctx, Command, argv...)
 		if err != nil {
@@ -55,7 +59,7 @@ func Missing(ctx context.Context, run Runner, kubeContext, namespace string, nam
 			return nil, fmt.Errorf("check Secret %s in namespace %s: %w", name, namespace, err)
 		}
 		if !tableNames(out, name) {
-			return nil, fmt.Errorf("the get of Secret %s in namespace %s printed a table whose first column does not name it", name, namespace)
+			return nil, fmt.Errorf("the get of Secret %s in namespace %s printed a table whose data row does not name it", name, namespace)
 		}
 	}
 	slices.Sort(missing)
@@ -73,14 +77,23 @@ func isNotFound(out []byte, err error) bool {
 	return strings.Contains(err.Error(), "NotFound") || bytes.Contains(out, []byte("NotFound"))
 }
 
-// tableNames reports whether the table's first column names the Secret. The
-// header and any warning line carry no cell equal to the name, so scanning for
-// the name reads only that column and nothing the other columns hold.
+// tableNames reports whether the table's data row names the Secret. The header
+// row is the one whose first cell is NAME, and the get names one Secret, so the
+// first non-blank line under that header is the answer. Only that cell is
+// compared, so neither a later column nor a line outside the data row can pass
+// as the name.
 func tableNames(out []byte, name string) bool {
-	for _, line := range bytes.Split(out, []byte("\n")) {
-		if fields := bytes.Fields(line); len(fields) > 0 && string(fields[0]) == name {
-			return true
+	lines := bytes.Split(out, []byte("\n"))
+	for i, line := range lines {
+		if fields := bytes.Fields(line); len(fields) == 0 || string(fields[0]) != "NAME" {
+			continue
 		}
+		for _, row := range lines[i+1:] {
+			if fields := bytes.Fields(row); len(fields) > 0 {
+				return string(fields[0]) == name
+			}
+		}
+		return false
 	}
 	return false
 }
