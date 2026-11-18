@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -1436,15 +1437,6 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			},
 		},
 		{
-			name: "a tree with an empty directory",
-			build: func(t *testing.T, root string) {
-				writeFileIn(t, root, "gt/.beads/redirect", "x")
-				if err := os.MkdirAll(filepath.Join(root, "gt", "empty"), 0o700); err != nil {
-					t.Fatalf("creating the empty directory: %v", err)
-				}
-			},
-		},
-		{
 			name: "a tree with a symlink",
 			build: func(t *testing.T, root string) {
 				writeFileIn(t, root, "gt/.beads/target", "x")
@@ -1633,6 +1625,156 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			t.Errorf("a refused recovery moved the tree to the root: %v", err)
 		}
 	})
+}
+
+// TestWorkspaceLiveTreeEmptyDir holds the live tree to the rule that a nested
+// directory with no entries is one bd or the executor made: the tree opens and
+// is served as if the directory were not there, and the refusals around it stay.
+func TestWorkspaceLiveTreeEmptyDir(t *testing.T) {
+	t.Parallel()
+	files := map[string]string{
+		".beads/routes.jsonl":               `{"path":".","prefix":"hq-"}` + "\n",
+		"gt/.beads/redirect":                "/ws/gt/mayor/rig/.beads\n",
+		"gt/mayor/rig/.beads/metadata.json": `{"dolt_database":"gt"}` + "\n",
+	}
+	writeTree := func(t *testing.T, root string) {
+		t.Helper()
+		for p, c := range files {
+			writeFileIn(t, root, p, c)
+		}
+	}
+	shapes := []struct {
+		name string
+		dirs []string
+	}{
+		{name: "one level deep", dirs: []string{"gt/empty"}},
+		{name: "two levels deep", dirs: []string{"gt/mayor/rig/empty/deeper"}},
+		{name: "a directory holding only empty directories", dirs: []string{"toolbox/mayor/rig"}},
+	}
+	for _, sh := range shapes {
+		t.Run("an empty directory "+sh.name+" opens as the tree without it", func(t *testing.T) {
+			withDir := filepath.Join(t.TempDir(), "ws")
+			writeTree(t, withDir)
+			for _, dir := range sh.dirs {
+				if err := os.MkdirAll(filepath.Join(withDir, filepath.FromSlash(dir)), 0o700); err != nil {
+					t.Fatalf("creating %s: %v", dir, err)
+				}
+			}
+			plain := filepath.Join(t.TempDir(), "ws")
+			writeTree(t, plain)
+			got, err := OpenWorkspaceStore(withDir)
+			if err != nil {
+				t.Fatalf("opening a tree with an empty directory: %v", err)
+			}
+			want, err := OpenWorkspaceStore(plain)
+			if err != nil {
+				t.Fatalf("opening the tree without it: %v", err)
+			}
+			if got.Manifest() != want.Manifest() {
+				t.Errorf("Manifest() = %s, want the tree without the directory's %s", got.Manifest(), want.Manifest())
+			}
+			gotFiles, err := got.readTree()
+			if err != nil {
+				t.Fatalf("reading the tree with an empty directory: %v", err)
+			}
+			wantFiles, err := want.readTree()
+			if err != nil {
+				t.Fatalf("reading the tree without it: %v", err)
+			}
+			if !reflect.DeepEqual(gotFiles, wantFiles) {
+				t.Errorf("file map = %v, want %v", gotFiles, wantFiles)
+			}
+		})
+	}
+
+	// The daemon's drift probe compares the hash the gateway serves with the
+	// hash of its own copy. An empty directory appearing or going must not move
+	// the hash, so the probe does not push for it.
+	t.Run("the drift hash does not move when an empty directory appears or goes", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeTree(t, root)
+		s, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("opening the tree: %v", err)
+		}
+		before := s.Manifest()
+		empty := filepath.Join(root, "toolbox", "mayor", "rig")
+		if err := os.MkdirAll(empty, 0o700); err != nil {
+			t.Fatalf("creating the empty directory: %v", err)
+		}
+		if present, err := WorkspacePresent(root); err != nil || !present {
+			t.Fatalf("WorkspacePresent with an empty directory = %v, %v; want true, nil", present, err)
+		}
+		appeared, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("reopening the tree with an empty directory: %v", err)
+		}
+		if got := appeared.Manifest(); got != before {
+			t.Errorf("Manifest() with the directory = %s, want the drift-free %s", got, before)
+		}
+		if err := os.RemoveAll(filepath.Join(root, "toolbox")); err != nil {
+			t.Fatalf("removing the empty directory: %v", err)
+		}
+		gone, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("reopening the tree without the directory: %v", err)
+		}
+		if got := gone.Manifest(); got != before {
+			t.Errorf("Manifest() after the directory goes = %s, want %s", got, before)
+		}
+	})
+
+	// The empty directory is accepted only as an empty directory: beside it a
+	// symlink, an oversized file or a non-regular file is still refused. Each
+	// file sits at a name the live tree admits, so the refusal is the one named.
+	// readTreeAt flattens the cause into the root's error, so the cause is
+	// matched by its message.
+	refused := []struct {
+		name  string
+		build func(t *testing.T, root string)
+		cause error
+	}{
+		{
+			name: "a symlink",
+			build: func(t *testing.T, root string) {
+				target := filepath.Join(root, "gt/mayor/rig/.beads/metadata.json")
+				if err := os.Symlink(target, filepath.Join(root, "gt/mayor/rig/.beads/last-touched")); err != nil {
+					t.Fatalf("creating the symlink: %v", err)
+				}
+			},
+			cause: ErrWorkspacePath,
+		},
+		{
+			name: "an oversized file",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/.beads/redirect", strings.Repeat("x", MaxWorkspaceFileBytes+1))
+			},
+			cause: ErrWorkspaceFileTooLarge,
+		},
+		{
+			name: "a non-regular file",
+			build: func(t *testing.T, root string) {
+				if err := syscall.Mkfifo(filepath.Join(root, "gt/mayor/rig/.beads.gate.lock"), 0o600); err != nil {
+					t.Fatalf("creating the fifo: %v", err)
+				}
+			},
+			cause: ErrWorkspacePath,
+		},
+	}
+	for _, tc := range refused {
+		t.Run("a tree with an empty directory and "+tc.name+" is refused", func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "ws")
+			writeTree(t, root)
+			if err := os.MkdirAll(filepath.Join(root, "gt", "empty"), 0o700); err != nil {
+				t.Fatalf("creating the empty directory: %v", err)
+			}
+			tc.build(t, root)
+			_, err := OpenWorkspaceStore(root)
+			if !errors.Is(err, ErrWorkspaceRoot) || !strings.Contains(fmt.Sprint(err), tc.cause.Error()) {
+				t.Fatalf("OpenWorkspaceStore(%q) error = %v, want a refusal of %q", root, err, tc.cause)
+			}
+		})
+	}
 }
 
 // writeFileIn creates path under root and writes content to it.

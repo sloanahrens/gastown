@@ -494,12 +494,9 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 	if err != nil {
 		return err
 	}
-	// The store writes a directory only as the parent of a file, so a nested
-	// directory with no entries is an entry it did not write; the root itself
-	// may be empty, which is the empty workspace.
-	if prefix != "" && len(entries) == 0 {
-		return fmt.Errorf("%w: %q is an empty directory", ErrWorkspacePath, shown(prefix))
-	}
+	// A nested directory with no entries is a directory bd or the executor made.
+	// It holds no file, so the walk below adds nothing for it and it is ignored:
+	// the files, the manifest and the drift hash are the same with or without it.
 	// bd writes its lock file beside a .beads directory, so the lock is admitted
 	// only in a directory that holds one.
 	besideBeads := false
