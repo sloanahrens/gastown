@@ -418,7 +418,7 @@ func TestDigestInstallEscalatesWhenTheSwapCannotBePutBack(t *testing.T) {
 		Polecat: "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("f", 64),
 		Commit:  rollbackOldCommit,
 	}
-	newPair := update.ImagePair{Daemon: swapDaemonRef, Polecat: swapPolecatRef, Commit: rollbackNewCommit}
+	newPair := update.ImagePair{Daemon: swapDaemonRef, Polecat: swapPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}
 	ledger := update.FileImageLedger{Dir: update.Dir(townRoot)}
 	if err := ledger.Write(update.ImageRecord{Current: oldPair}); err != nil {
 		t.Fatalf("record the running pair: %v", err)
@@ -529,7 +529,7 @@ func TestUpdateImagesFlagInstallsThePairThroughRunUpdate(t *testing.T) {
 		Polecat: "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("f", 64),
 		Commit:  rollbackOldCommit,
 	}
-	newPair := update.ImagePair{Daemon: swapDaemonRef, Polecat: swapPolecatRef, Commit: rollbackNewCommit}
+	newPair := update.ImagePair{Daemon: swapDaemonRef, Polecat: swapPolecatRef, Bd: podSwapBdRef, Commit: rollbackNewCommit}
 	ledger := update.FileImageLedger{Dir: update.Dir(townRoot)}
 	if err := ledger.Write(update.ImageRecord{Current: oldPair}); err != nil {
 		t.Fatalf("record the running pair: %v", err)

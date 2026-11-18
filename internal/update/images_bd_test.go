@@ -56,33 +56,46 @@ func TestImagePairBdRecordsAllThree(t *testing.T) {
 // TestImagePairBdHoldsOnTheGatewayImage: pairHolds compares the bd gateway image
 // against the pair the cluster runs, the way it compares the other two. A cluster
 // with no bd-gateway Deployment yet names no gateway image and holds the pair on
-// its other two, so a roll before the cutover still works.
+// its other two, and a pair that names no gateway image changes nothing about the
+// gateway, so each holds whatever the other side runs.
 func TestImagePairBdHoldsOnTheGatewayImage(t *testing.T) {
 	t.Parallel()
+	noBd := ImagePair{Daemon: bdPair.Daemon, Polecat: bdPair.Polecat, Commit: bdPair.Commit}
 	tests := []struct {
 		name    string
+		target  ImagePair
 		running ImagePair
 		swap    bool
 	}{
 		{
 			name:    "all three match, so the pair holds",
+			target:  bdPair,
 			running: ImagePair{Daemon: bdPair.Daemon, Polecat: bdPair.Polecat, Bd: bdPair.Bd},
 		},
 		{
 			name:    "only the gateway image differs, so the pair does not hold",
+			target:  bdPair,
 			running: ImagePair{Daemon: bdPair.Daemon, Polecat: bdPair.Polecat, Bd: imgRef("bd-gateway", "9")},
 			swap:    true,
 		},
 		{
 			name:    "a cluster with no bd-gateway Deployment holds on the other two",
+			target:  bdPair,
 			running: ImagePair{Daemon: bdPair.Daemon, Polecat: bdPair.Polecat},
+		},
+		{
+			name:    "a target with no gateway image holds beside a cluster gateway",
+			target:  noBd,
+			running: ImagePair{Daemon: bdPair.Daemon, Polecat: bdPair.Polecat, Bd: imgRef("bd-gateway", "9")},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newImageFixture(t, ImageRecord{Current: bdPair, Previous: oldPair})
-			writeBdValues(t, f)
+			if err := imagevalues.Write(f.path, imagevalues.Values{Daemon: tt.target.Daemon, Polecat: tt.target.Polecat, Bd: tt.target.Bd, Commit: tt.target.Commit}); err != nil {
+				t.Fatalf("write the values file: %v", err)
+			}
 			f.inst.Images.Running = &fakeRunningPair{pair: tt.running}
 
 			res, err := f.inst.Install(context.Background(), bdPair.Commit)
@@ -104,8 +117,8 @@ func TestImagePairBdHoldsOnTheGatewayImage(t *testing.T) {
 			if got := f.swap.applied; len(got) != 1 || got[0] != bdPair {
 				t.Errorf("applied = %+v, want one swap to the pair %+v", got, bdPair)
 			}
-			if want := (ImageRecord{Current: bdPair, Previous: oldPair}); f.swap.seenAtApply[0] != want {
-				t.Errorf("the record at the swap = %+v, want %+v", f.swap.seenAtApply[0], want)
+			if want := (ImageRecord{Current: bdPair, Previous: tt.running}); f.swap.seenAtApply[0] != want {
+				t.Errorf("the record at the swap = %+v, want %+v: the previous pair is the one the cluster ran", f.swap.seenAtApply[0], want)
 			}
 		})
 	}

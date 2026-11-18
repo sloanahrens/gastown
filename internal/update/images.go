@@ -369,23 +369,31 @@ func validRecordedPair(p ImagePair) error {
 	return nil
 }
 
-// sameImages reports whether two pairs name the same daemon and polecat images.
-// The commit is not compared: a pair read from a Deployment names none.
+// sameImages reports whether two pairs name the same images: the daemon and
+// polecat always, and the bd gateway when both pairs name one, so a pair whose
+// gateway digest changed is not taken as already running. A pair that names no
+// gateway image leaves the gateway as it is, and a cluster with no bd-gateway
+// Deployment has none to compare, so either side naming none matches. The
+// commit is not compared: a pair read from a Deployment names none.
 func sameImages(a, b ImagePair) bool {
-	return a.Daemon == b.Daemon && a.Polecat == b.Polecat
+	if a.Daemon != b.Daemon || a.Polecat != b.Polecat {
+		return false
+	}
+	return a.Bd == "" || b.Bd == "" || a.Bd == b.Bd
 }
 
 // pairHolds reports whether the pair the daemon runs holds pair: the pair check,
 // when one is wired, holds it, and the bd gateway image the cluster runs is the
-// pair's, compared as sameImages compares the other two. A cluster with no
-// bd-gateway Deployment yet (its pair names no gateway image) holds the pair on
-// its other two images, so a roll before the cutover still works. An unwired
-// check holds nothing back.
+// pair's, compared as sameImages compares the other two. A pair that names no
+// gateway image changes nothing about the gateway, and a cluster with no
+// bd-gateway Deployment yet names none either, so each holds on the images it
+// names: a roll that does not move the gateway still works. An unwired check
+// holds nothing back.
 func (d *DigestInstaller) pairHolds(ctx context.Context, pair, running ImagePair) bool {
 	if d.PairCheck != nil && d.PairCheck(ctx, pair) != nil {
 		return false
 	}
-	return running.Bd == "" || running.Bd == pair.Bd
+	return pair.Bd == "" || running.Bd == "" || running.Bd == pair.Bd
 }
 
 // Install validates the values file and its commit, reads the pair the daemon
