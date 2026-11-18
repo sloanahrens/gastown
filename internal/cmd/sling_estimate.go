@@ -15,11 +15,11 @@ import (
 // never starts work that has no estimate. A bead that already carries one, and
 // a dry run, pay nothing. An estimate that makes none refuses the sling, naming
 // its cause, and the bead is not hooked.
-func (r *slingRun) slingEstimateFirst(townRoot, beadID string, labels []string) error {
+func (r *slingRun) slingEstimateFirst(ctx context.Context, townRoot, beadID string, labels []string) error {
 	if r.opts.dryRun || hasSPMinutesLabel(labels) {
 		return nil
 	}
-	outcome, err := r.estimateFirst(context.Background(), townRoot, beadID)
+	outcome, err := r.estimateFirst(ctx, townRoot, beadID)
 	if err != nil {
 		return fmt.Errorf("refusing to sling %s: the story-point estimate failed: %w", beadID, err)
 	}
