@@ -47,6 +47,11 @@ type Entry struct {
 	// daemon row can carry it, because only the daemon-owned set travels to
 	// the volume.
 	Rollback bool `yaml:"rollback,omitempty" json:"rollback,omitempty"`
+	// Backup marks the rows a nightly backup export carries: the small, named
+	// set a restore needs, in place of the whole daemon-owned set. A row may
+	// carry it whatever its owner; the shared settings and directives rows are
+	// tagged because a restore without settings is not a restore.
+	Backup bool `yaml:"backup,omitempty" json:"backup,omitempty"`
 	// Private marks a daemon-owned row whose files carry modes that must
 	// survive a round trip (a kubeconfig, a config an agent may hold): import
 	// keeps the archive's mode instead of masking it to 0755/0644.
@@ -91,33 +96,33 @@ type DirNames struct {
 func Default(dirs DirNames) *Manifest {
 	return &Manifest{Entries: []Entry{
 		// Town-level state the daemon writes.
-		{Path: "daemon", Owner: OwnerDaemon, Rollback: true, Why: "the daemon's own state, settings and patrol records; rollback replays it"},
+		{Path: "daemon", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "the daemon's own state, settings and patrol records; rollback replays it"},
 		{Path: "logs", Owner: OwnerDaemon, Why: "daemon and session logs the daemon rotates"},
-		{Path: "events", Owner: OwnerDaemon, Rollback: true, Why: "the town event store the daemon appends; rollback replays it"},
-		{Path: ".events.jsonl", Owner: OwnerDaemon, Rollback: true, Why: "the town event feed the daemon appends; rollback replays it"},
-		{Path: ".feed.jsonl", Owner: OwnerDaemon, Rollback: true, Why: "the feed the daemon appends; rollback replays it"},
-		{Path: "mayor", Owner: OwnerDaemon, Why: "town config and the pool and roster records it writes"},
-		{Path: ".beads", Owner: OwnerDaemon, Why: "workspace metadata the daemon reads and writes"},
+		{Path: "events", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "the town event store the daemon appends; rollback replays it"},
+		{Path: ".events.jsonl", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "the town event feed the daemon appends; rollback replays it"},
+		{Path: ".feed.jsonl", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "the feed the daemon appends; rollback replays it"},
+		{Path: "mayor", Owner: OwnerDaemon, Backup: true, Why: "town config and the pool and roster records it writes"},
+		{Path: ".beads", Owner: OwnerDaemon, Backup: true, Why: "workspace metadata the daemon reads and writes"},
 		{Path: "plugins", Owner: OwnerDaemon, Why: "installed plugins the daemon loads"},
 		{Path: ".claude-town", Owner: OwnerDaemon, Why: "the daemon's liveness probe reads session transcripts under it (internal/liveness)"},
-		{Path: "settings", Owner: OwnerShared, Why: "edited by gt config daemon, read by the daemon (gt-yjzepk.4)"},
-		{Path: "seat-refill.hold", Owner: OwnerShared, Why: "the overseer's dispatch hold, placed in the pod's town root; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it"},
-		{Path: "ESTOP", Owner: OwnerShared, Why: "the town-wide ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it"},
-		{Path: "ESTOP.<rig>", Owner: OwnerShared, Why: "the per-rig ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it"},
+		{Path: "settings", Owner: OwnerShared, Backup: true, Why: "edited by gt config daemon, read by the daemon (gt-yjzepk.4)"},
+		{Path: "seat-refill.hold", Owner: OwnerShared, Backup: true, Why: "the overseer's dispatch hold, placed in the pod's town root; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it"},
+		{Path: "ESTOP", Owner: OwnerShared, Backup: true, Why: "the town-wide ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it"},
+		{Path: "ESTOP.<rig>", Owner: OwnerShared, Backup: true, Why: "the per-rig ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it"},
 		{Path: ".events.jsonl.lock", Owner: OwnerDaemon, Why: "the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave"},
 		{Path: ".dolt-archive", Owner: OwnerDaemon, Why: "the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into"},
-		{Path: ".beads-wisp", Owner: OwnerDaemon, Why: "the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads"},
+		{Path: ".beads-wisp", Owner: OwnerDaemon, Backup: true, Why: "the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads"},
 
 		// Rig repositories the landing worker and promoter run git in.
-		{Path: "<rig>/config.json", Owner: OwnerDaemon, Why: "the rig's registry record the daemon and landing worker read"},
+		{Path: "<rig>/config.json", Owner: OwnerDaemon, Backup: true, Why: "the rig's registry record the daemon and landing worker read"},
 		{Path: "<rig>/" + dirs.RepoGit, Owner: OwnerDaemon, Why: "the rig's bare repository the landing worker fetches and merges into; the name is constants.DirRepoGit, which internal/rig and the daemon build the path from"},
-		{Path: "<rig>/.beads", Owner: OwnerDaemon, Why: "the rig's beads workspace internal/rig/manager.go InitBeads creates and bd writes, as the town-level .beads row"},
+		{Path: "<rig>/.beads", Owner: OwnerDaemon, Backup: true, Why: "the rig's beads workspace internal/rig/manager.go InitBeads creates and bd writes, as the town-level .beads row"},
 		{Path: "<rig>/plugins", Owner: OwnerDaemon, Why: "the plugins the daemon's scanner loads from each rig (internal/plugin/scanner.go DiscoverAll); internal/cmd/daemon_rehearse_plugins.go reads it"},
-		{Path: "<rig>/settings", Owner: OwnerShared, Why: "the rig's behavioral settings gt config writes (internal/config/loader.go SaveRigSettings) and the daemon's landing worker reads (internal/daemon/landing_worker.go rigPostLandCommand), as the town-level settings row"},
-		{Path: "<rig>/directives", Owner: OwnerShared, Why: "directives a person writes and internal/config/directives.go reads as the rig's layer (two rigs of this town have it)"},
+		{Path: "<rig>/settings", Owner: OwnerShared, Backup: true, Why: "the rig's behavioral settings gt config writes (internal/config/loader.go SaveRigSettings) and the daemon's landing worker reads (internal/daemon/landing_worker.go rigPostLandCommand), as the town-level settings row"},
+		{Path: "<rig>/directives", Owner: OwnerShared, Backup: true, Why: "directives a person writes and internal/config/directives.go reads as the rig's layer (two rigs of this town have it)"},
 		{Path: "<rig>/scripts", Owner: OwnerShared, Why: "harness scripts a person writes by running the om repo's deploy.sh (contrib/gastown), which internal/doctor/harness_drift_check.go hashes; the refinery it deployed to is retired"},
 		{Path: "<rig>/.gastown-harness-manifest.json", Owner: OwnerShared, Why: "the deploy-managed file list the om repo's deploy.sh (contrib/gastown) writes and internal/doctor/harness_drift_check.go reads; the refinery it deployed to is retired"},
-		{Path: "<rig>/.runtime/namepool-state.json", Owner: OwnerDaemon, Why: "the name pool's state internal/polecat/namepool.go writes when a polecat is named"},
+		{Path: "<rig>/.runtime/namepool-state.json", Owner: OwnerDaemon, Backup: true, Why: "the name pool's state internal/polecat/namepool.go writes when a polecat is named"},
 		{Path: "<rig>/.runtime/locks", Owner: OwnerDaemon, Why: "rig lock files a polecat session takes (internal/polecat/manager.go) as the town-level .runtime/locks row; export skips the files themselves and keeps the directory"},
 		{Path: "<rig>/.runtime/session_id", Owner: OwnerSession, Why: "the session ID gt prime writes in the cwd of a session started at the rig root (internal/cmd/prime_session.go persistSessionID)"},
 		{Path: "<rig>/.runtime/session_start_emitted", Owner: OwnerSession, Why: "the ID whose session_start gt prime has emitted, written in that session's cwd (internal/cmd/prime_session.go recordSessionStartEmitted)"},
@@ -131,19 +136,19 @@ func Default(dirs DirNames) *Manifest {
 		// for the gt-command rows, which name that row.
 		{Path: ".runtime/jev", Owner: OwnerDaemon, Why: "jev's dataset the daemon writes"},
 		{Path: ".runtime/polecat-spans", Owner: OwnerDaemon, Why: "polecat span records the daemon writes"},
-		{Path: ".runtime/agents", Owner: OwnerDaemon, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands). Owner daemon because after the wrapper cutover every gt command runs in the container, so the volume holds the only copy of what a gt command writes; until then a gt command on the Mac also writes the host's tree, a cutover prerequisite (gt-yjzepk.10). The gt-command rows below say their owner is as this row says"},
-		{Path: ".runtime/landings", Owner: OwnerDaemon, Rollback: true, Why: "landing ledgers the daemon writes; rollback replays the landing records"},
-		{Path: ".runtime/usage", Owner: OwnerDaemon, Why: "usage records the daemon writes"},
+		{Path: ".runtime/agents", Owner: OwnerDaemon, Backup: true, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands). Owner daemon because after the wrapper cutover every gt command runs in the container, so the volume holds the only copy of what a gt command writes; until then a gt command on the Mac also writes the host's tree, a cutover prerequisite (gt-yjzepk.10). The gt-command rows below say their owner is as this row says"},
+		{Path: ".runtime/landings", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "landing ledgers the daemon writes; rollback replays the landing records"},
+		{Path: ".runtime/usage", Owner: OwnerDaemon, Backup: true, Why: "usage records the daemon writes"},
 		{Path: ".runtime/sweep-runs", Owner: OwnerDaemon, Why: "tier sweep output the daemon writes"},
 		{Path: ".runtime/overrun-guard", Owner: OwnerDaemon, Why: "overrun guard state the daemon writes"},
 		{Path: ".runtime/metrics", Owner: OwnerDaemon, Why: "resource samples the daemon writes"},
 		{Path: ".runtime/landing-om", Owner: OwnerDaemon, Why: "landing om evidence the daemon writes"},
-		{Path: ".runtime/spec_dispatch", Owner: OwnerDaemon, Rollback: true, Why: "spec dispatcher state the daemon writes; rollback replays it"},
+		{Path: ".runtime/spec_dispatch", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "spec dispatcher state the daemon writes; rollback replays it"},
 		{Path: ".runtime/heartbeats", Owner: OwnerDaemon, Why: "daemon heartbeats"},
 		{Path: ".runtime/sandboxes", Owner: OwnerDaemon, Why: "sandbox records the daemon writes"},
 		{Path: ".runtime/landing-logs", Owner: OwnerDaemon, Why: "landing stage logs the daemon writes"},
 		{Path: ".runtime/attention", Owner: OwnerDaemon, Why: "the attention queue the daemon writes"},
-		{Path: ".runtime/red-main", Owner: OwnerDaemon, Rollback: true, Why: "red-main status the landing worker writes; rollback replays the statuses"},
+		{Path: ".runtime/red-main", Owner: OwnerDaemon, Rollback: true, Backup: true, Why: "red-main status the landing worker writes; rollback replays the statuses"},
 		{Path: ".runtime/locks", Owner: OwnerDaemon, Why: "town lock files the daemon takes; export skips the files themselves and keeps the directory"},
 		{Path: ".runtime/container", Owner: OwnerDaemon, Private: true, Why: "the container's kubeconfig and state the daemon writes; the kubeconfig and the 0600 configs beside it must keep their modes through a copy"},
 		{Path: ".runtime/daemon-image", Owner: OwnerDaemon, Why: "the daemon image build record"},
@@ -317,6 +322,19 @@ func (m *Manifest) Rollback() []Entry {
 	var out []Entry
 	for _, e := range m.Entries {
 		if e.Rollback {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// Backup returns the rows tagged backup: true, in manifest order. The tag on
+// each row is the one place the set is defined, so a backup export takes it
+// from here rather than restating it.
+func (m *Manifest) Backup() []Entry {
+	var out []Entry
+	for _, e := range m.Entries {
+		if e.Backup {
 			out = append(out, e)
 		}
 	}
