@@ -683,11 +683,18 @@ func noSymlinkBelow(root, path string) error {
 // another token. A key outside the list is refused rather than dropped, so the
 // caller learns it sent something the gateway does not take; BD_ALLOW_NEW_DATABASE
 // is refused by the same rule, since init is not served.
+//
+// GT_TOWN_ROOT is the workspace root, bd's last formula search path
+// (bd formula --help): the push carries the town's formulas only there, and a
+// sling's cook names a route target's .beads — <rig>/mayor/rig/.beads for a
+// gt- bead — which the workspace holds no formulas under, so the cook finds
+// none without it (gt-x49njj).
 func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]string, error) {
 	env := []string{
 		"HOME=" + e.home,
 		"PATH=" + e.searchPath,
 		"BEADS_DIR=" + beadsDir,
+		"GT_TOWN_ROOT=" + e.workspaceRoot,
 		"BEADS_DOLT_SERVER_HOST=" + e.doltHost,
 		"BEADS_DOLT_SERVER_PORT=" + e.doltPort,
 		"TRACKER_URL=" + e.trackerURL,

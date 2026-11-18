@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -816,6 +817,7 @@ func TestExecutorEnv(t *testing.T) {
 			},
 		},
 		{name: "an unknown key", env: map[string]string{"GT_ROOT": "/Users/user/gt"}, wantErr: ErrEnvNotAllowed},
+		{name: "GT_TOWN_ROOT", env: map[string]string{"GT_TOWN_ROOT": "/Users/user/gt"}, wantErr: ErrEnvNotAllowed},
 		{name: "BEADS_DIR", env: map[string]string{"BEADS_DIR": "/etc"}, wantErr: ErrEnvNotAllowed},
 		{name: "HOME", env: map[string]string{"HOME": "/root"}, wantErr: ErrEnvNotAllowed},
 		{name: "PATH", env: map[string]string{"PATH": "/bin"}, wantErr: ErrEnvNotAllowed},
@@ -850,6 +852,7 @@ func TestExecutorEnv(t *testing.T) {
 				"HOME":                   "/home/bdgw",
 				"PATH":                   "/usr/local/bin:/usr/bin:/bin",
 				"BEADS_DIR":              filepath.Join(root, "gastown", ".beads"),
+				"GT_TOWN_ROOT":           root,
 				"BEADS_DOLT_SERVER_HOST": "gt-dolt",
 				"BEADS_DOLT_SERVER_PORT": "3307",
 				"TRACKER_URL":            "http://127.0.0.1:7433",
@@ -859,10 +862,77 @@ func TestExecutorEnv(t *testing.T) {
 					t.Errorf("%s = %q, want %q", k, got, want)
 				}
 			}
-			if got, want := len(env), 7+len(tc.env); got != want {
+			if got, want := len(env), 8+len(tc.env); got != want {
 				t.Errorf("environment holds %d entries, want %d", got, want)
 			}
 		})
+	}
+}
+
+// TestExecutorCookFindsTheTownFormulas: a sling's cook carries the route
+// target's .beads as BEADS_DIR — for a gt- bead, gastown/mayor/rig/.beads — and
+// bd reads formulas from its own beads directory's formulas/ unless
+// $GT_TOWN_ROOT/.beads/formulas holds them (bd formula --help, search paths
+// 1-4). The push carries the town's formulas only under the town's .beads, so
+// without the town root in the call's environment the cook finds no formula and
+// bd exits 20 (gt-x49njj).
+func TestExecutorCookFindsTheTownFormulas(t *testing.T) {
+	t.Parallel()
+	town := clientTown(t)
+	name := "mol-polecat-work" + formulaSuffix
+	formulaPath := filepath.Join(town, ".beads", formulaDirName, name)
+	if err := os.MkdirAll(filepath.Dir(formulaPath), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(formulaPath), err)
+	}
+	if err := os.WriteFile(formulaPath, []byte("description = \"a polecat's work\"\n"), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", formulaPath, err)
+	}
+	doc, err := BuildWorkspaceDocument(town)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	root := t.TempDir()
+	store, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceStore: %v", err)
+	}
+	if _, err := store.Put(doc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	runner := &fakeRunner{}
+	e := newTestExecutor(t, root, runner)
+	var out bytes.Buffer
+	if err := e.Exec(context.Background(), Request{
+		Argv: []string{"cook", "mol-polecat-work"},
+		Rig:  "gastown/mayor/rig",
+		Cwd:  "gastown/mayor/rig",
+	}, nil, &out); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	rec := runner.only(t)
+	env := envMap(rec.env)
+	// The shape the sling's call names: the route target's own .beads, which the
+	// pushed workspace holds no formulas under, so bd's first search path misses.
+	wantBeads := filepath.Join(root, "gastown", "mayor", "rig", ".beads")
+	if got := env["BEADS_DIR"]; got != wantBeads {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, wantBeads)
+	}
+	if _, err := os.Stat(filepath.Join(wantBeads, formulaDirName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the call's BEADS_DIR holds a formulas directory (%v), so the test no longer reproduces the failing shape", err)
+	}
+	// bd's last search path is $GT_TOWN_ROOT/.beads/formulas, so the town root
+	// the environment names must be the workspace, and the town's formula must
+	// be there for the cook to find it.
+	townRoot, ok := env["GT_TOWN_ROOT"]
+	if !ok {
+		t.Fatalf("the cook's environment names no GT_TOWN_ROOT, so bd searches only its own BEADS_DIR and finds no formula")
+	}
+	if townRoot != root {
+		t.Fatalf("GT_TOWN_ROOT = %q, want the workspace root %q", townRoot, root)
+	}
+	if _, err := os.Stat(filepath.Join(townRoot, ".beads", formulaDirName, name)); err != nil {
+		t.Errorf("the town root the cook is given holds no %s: %v", name, err)
 	}
 }
 
