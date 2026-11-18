@@ -92,11 +92,12 @@ func (w *escalationCloseTown) close(id, bead, raiser, reason string) {
 	w.escalate(id, raiser, bead, "closed", reason)
 }
 
-// closeAt files escalation id as closed with reason at closedAt (RFC 3339), so
-// the pass reads a close time, as bd records it.
-func (w *escalationCloseTown) closeAt(id, bead, raiser, reason, closedAt string) {
+// closeAt files escalation id as closed with reason at closedAt, so the pass
+// reads a close time, as bd records it.
+func (w *escalationCloseTown) closeAt(id, bead, raiser, reason string, closedAt time.Time) {
 	w.bd.db.Seed(beads.Issue{ID: id, Status: "closed", Title: bead + ": a decision",
-		Labels: []string{"gt:escalation"}, CloseReason: reason, ClosedAt: closedAt,
+		Labels: []string{"gt:escalation"}, CloseReason: reason,
+		ClosedAt: closedAt.Format(time.RFC3339),
 		Description: beads.FormatEscalationDescription(bead+": a decision", &beads.EscalationFields{
 			Severity: "high", EscalatedBy: raiser, RelatedBead: bead})})
 }
@@ -748,7 +749,8 @@ func TestEscalationCloseNudgesCloseNeverListedOpen(t *testing.T) {
 	w.hold(closeTestBead, closeTestSeat)
 	w.session("capable", true, true)
 	w.tick()
-	w.closeAt(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason, "2026-11-13T06:00:00Z")
+	// After the start of the pass the tick recorded.
+	w.closeAt(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason, w.tmux.clock.Now().Add(time.Hour))
 
 	w.tick()
 	if got := len(w.delivered()); got != 1 {
@@ -768,7 +770,8 @@ func TestEscalationCloseSkipsCloseBeforeLastPass(t *testing.T) {
 	w.hold(closeTestBead, closeTestSeat)
 	w.session("capable", true, true)
 	w.tick()
-	w.closeAt(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason, "2026-11-12T06:00:00Z")
+	// Before the start of the pass the tick recorded.
+	w.closeAt(closeTestEscID, closeTestBead, closeTestSeat, closeTestReason, w.tmux.clock.Now().Add(-time.Hour))
 
 	w.tick()
 	if got := len(w.delivered()); got != 0 {
@@ -1324,7 +1327,6 @@ func TestEscalationCloseFailedReadsAndWritesAreReturned(t *testing.T) {
 	})
 }
 
-// escalationCloseEsc is a closed escalation carrying reason, for the message.
 // closeTestEscalation is the escalation the pass reads for a close that
 // landed at closedAt, with no open record of it.
 func closeTestEscalation(closedAt time.Time) patrolscan.Escalation {
@@ -1501,6 +1503,7 @@ func TestEscalationCloseLandingMidPassIsJudgedNextPass(t *testing.T) {
 	}
 }
 
+// escalationCloseEsc is a closed escalation carrying reason, for the message.
 func escalationCloseEsc(reason string) patrolscan.Escalation {
 	return patrolscan.Escalation{ID: closeTestEscID, CloseReason: reason}
 }
