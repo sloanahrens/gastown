@@ -96,14 +96,20 @@ func Commit(root string, m Manifest) (string, error) {
 	return final, nil
 }
 
-// Taken reports whether the night containing t already has a complete backup.
+// Taken reports whether the night containing t already has a published backup.
+// A night's final directory exists only after its archive is in and its
+// manifest is written, so its presence is what Commit refuses on; a manifest
+// too corrupt to read does not make the night free again.
 func Taken(root string, t time.Time) bool {
-	_, err := readManifest(Dir(root, t))
+	_, err := os.Stat(Dir(root, t))
 	return err == nil
 }
 
 // List returns the complete backups under root, oldest first. A missing root
-// has none. A dated directory without a readable manifest is not a backup.
+// has none. A dated directory with no manifest never finished and is not a
+// backup. A manifest that is there but cannot be read is an error: it must not
+// read as an absent backup, or a root whose only night is corrupt would look
+// like an empty one.
 func List(root string) ([]Backup, error) {
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -119,8 +125,11 @@ func List(root string) ([]Backup, error) {
 		}
 		path := filepath.Join(root, e.Name())
 		m, err := readManifest(path)
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("backup %s: %w", path, err)
 		}
 		out = append(out, Backup{Path: path, Manifest: m})
 	}

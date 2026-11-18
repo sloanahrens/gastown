@@ -11,6 +11,17 @@ import (
 
 var night = time.Date(2026, 10, 1, 3, 5, 0, 0, time.UTC)
 
+// requireDeniedWrites fails a test whose fixture relies on a mode bit denying
+// a write, on a host where the write is not denied — root bypasses the mode
+// check. Without it the test would pass over the branch it means to drive.
+func requireDeniedWrites(t *testing.T, dir string) {
+	t.Helper()
+	probe := filepath.Join(dir, "write-probe")
+	if err := os.WriteFile(probe, []byte("x"), 0o644); err == nil {
+		t.Fatalf("%s is writable despite its mode (running as root?); the denied write this test needs did not happen", dir)
+	}
+}
+
 // commitNight writes a complete backup for the night daysAgo before night.
 func commitNight(t *testing.T, root string, daysAgo int) string {
 	t.Helper()
@@ -146,6 +157,65 @@ func TestListSkipsPartialsAndUnfinishedNights(t *testing.T) {
 	missing, err := List(filepath.Join(root, "nope"))
 	if err != nil || len(missing) != 0 {
 		t.Errorf("List of a missing root = %v, %v; want none", missing, err)
+	}
+}
+
+// A manifest that is there but cannot be read is an error, not a night that
+// never finished: a corrupt backup must not read as no backup at all.
+func TestListRefusesACorruptManifest(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	commitNight(t, root, 1)
+	corrupt := commitNight(t, root, 0)
+	if err := os.WriteFile(filepath.Join(corrupt, ManifestName), []byte(`{"taken":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if all, err := List(root); err == nil {
+		t.Fatalf("List = %v, no error; want an error for %s", all, corrupt)
+	}
+}
+
+// A root whose only night is corrupt must not read like an empty root: the
+// staleness alarm would report a fresh install while the sole backup is broken.
+func TestNewestDistinguishesACorruptRootFromAnEmptyOne(t *testing.T) {
+	t.Parallel()
+	if _, ok, err := Newest(t.TempDir()); err != nil || ok {
+		t.Fatalf("Newest of an empty root = %v, %v; want none", ok, err)
+	}
+	root := t.TempDir()
+	corrupt := commitNight(t, root, 0)
+	if err := os.WriteFile(filepath.Join(corrupt, ManifestName), []byte(`{"taken":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := Newest(root); err == nil {
+		t.Fatalf("Newest of a corrupt-only root = %v, no error; want an error", ok)
+	}
+}
+
+// Taken and Commit agree about a night whose manifest is unreadable: its final
+// directory is published, so a caller is not told the night is free and then
+// refused by Commit.
+func TestTakenAgreesWithCommitOnACorruptManifest(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := commitNight(t, root, 0)
+	if err := os.WriteFile(filepath.Join(path, ManifestName), []byte(`{"taken":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !Taken(root, night) {
+		t.Error("Taken = false for a published night with an unreadable manifest")
+	}
+	if err := os.MkdirAll(PartialDir(root, night), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(PartialDir(root, night), ArchiveName), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Commit(root, Manifest{Taken: night}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Errorf("Commit = %v, want it to refuse the night Taken reports as taken", err)
 	}
 }
 
@@ -290,6 +360,7 @@ func TestCommitKeepsTheNightPartialWhenTheRenameFails(t *testing.T) {
 			t.Errorf("restore root permissions: %v", err)
 		}
 	})
+	requireDeniedWrites(t, root)
 
 	if _, err := Commit(root, Manifest{Taken: night}); err == nil {
 		t.Fatal("Commit renamed a night on a root it cannot write")
@@ -307,9 +378,9 @@ func TestCommitKeepsTheNightPartialWhenTheRenameFails(t *testing.T) {
 func TestRotateReportsANightItCannotRemove(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	commitNight(t, root, 1)
-	removable := commitNight(t, root, 0)
-	doomed := commitNight(t, root, 2)
+	middle := commitNight(t, root, 1)
+	newest := commitNight(t, root, 0)
+	oldest := commitNight(t, root, 2)
 	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
 	if err := os.Chmod(root, 0o555); err != nil {
 		t.Fatal(err)
@@ -320,7 +391,10 @@ func TestRotateReportsANightItCannotRemove(t *testing.T) {
 			t.Errorf("restore root permissions: %v", err)
 		}
 	})
+	requireDeniedWrites(t, root)
 
+	// keep=2 makes the oldest night the only one to remove, and the read-only
+	// root denies the removal.
 	removed, err := Rotate(root, 2)
 	if err == nil {
 		t.Fatal("Rotate reported success for a night it could not remove")
@@ -328,7 +402,7 @@ func TestRotateReportsANightItCannotRemove(t *testing.T) {
 	if len(removed) != 0 {
 		t.Errorf("removed = %v, want none", removed)
 	}
-	for _, path := range []string{doomed, removable} {
+	for _, path := range []string{oldest, middle, newest} {
 		if _, statErr := os.Stat(path); statErr != nil {
 			t.Errorf("rotation lost %s: %v", path, statErr)
 		}
