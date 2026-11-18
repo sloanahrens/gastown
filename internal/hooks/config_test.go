@@ -1576,8 +1576,8 @@ func gtInvokedWith(command string) string {
 
 // TestNoBeadAccessFileModeDropsCommand pins the predicate a file-mode seat's
 // settings render uses (gt-1m0kb F6): only the mail check, the mail inbox and
-// the bead-reading stop hook are named; every guard, prime and the nudge drain
-// are not.
+// the bead-reading stop hook are named after any leading NAME=value
+// assignments are skipped; every guard, prime and the nudge drain are not.
 func TestNoBeadAccessFileModeDropsCommand(t *testing.T) {
 	t.Parallel()
 	for command, want := range map[string]bool{
@@ -1587,6 +1587,14 @@ func TestNoBeadAccessFileModeDropsCommand(t *testing.T) {
 		"/Users/x/.local/bin/gt mail inbox":        true,
 		"gt tap polecat-stop-check":                true,
 		"/usr/local/bin/gt tap polecat-stop-check": true,
+		"FOO=1 gt mail inbox":                      true,
+		"FOO=1 BAR=2 gt mail check --inject":       true,
+		"FOO=1 gt prime --hook":                    false,
+		"FOO=1 gt tap guard pr-workflow":           false,
+		"FOO=1 chmod 600 x":                        false,
+		"--x=1 gt mail inbox":                      false,
+		"a-b=2 gt mail inbox":                      false,
+		"=x gt mail inbox":                         false,
 		"gt mail read gt-abc":                      false,
 		"gt mail":                                  false,
 		"gt tap guard pr-workflow":                 false,
