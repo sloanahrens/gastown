@@ -77,9 +77,14 @@ const (
 // values file does not name. The token Secret is required with the image: without
 // it the gateway starts with no tokens and refuses every client. The gateway also
 // needs Values.HostGatewayIP, since its Dolt host resolves only through that
-// address's hostAliases entry. With no image the workload is not rendered, and
-// the gateway's token Secret name is not read.
+// address's hostAliases entry. The token-copy init container runs Values.ProxyImage,
+// so the gateway needs that too. A negative concurrency cap is refused even with no
+// image. With no image the workload is not rendered, and the gateway's token Secret
+// name is not read.
 func (v Values) validateBdGatewayWorkload() error {
+	if v.BdGatewayMaxConcurrent < 0 {
+		return fmt.Errorf("Values.BdGatewayMaxConcurrent %d: want zero, which leaves --max-concurrent off so the gateway's own default applies, or a positive cap", v.BdGatewayMaxConcurrent)
+	}
 	if v.BdGatewayImage == "" {
 		return nil
 	}
@@ -100,6 +105,9 @@ func (v Values) validateBdGatewayWorkload() error {
 	}
 	if v.Rehearsal {
 		return fmt.Errorf("Values.BdGatewayImage is set with Values.Rehearsal: a rehearsal builds no hostAliases entry, so the gateway's dial to %s would not resolve", DoltHostName)
+	}
+	if v.ProxyImage == "" {
+		return errors.New("Values.ProxyImage is empty while Values.BdGatewayImage is set: the gateway's tokens-0600 init container copies its tokens with the proxy image, and an empty one has nothing to run")
 	}
 	return nil
 }

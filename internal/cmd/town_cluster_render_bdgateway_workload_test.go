@@ -31,6 +31,9 @@ func withBdImage(t *testing.T, f clusterRenderFlags) clusterRenderFlags {
 		t.Fatalf("writing the values file with a bd image: %v", err)
 	}
 	f.hostGateway = "192.168.64.1"
+	// The gateway's tokens-0600 init container runs the proxy image, and a render
+	// with a bd image and no proxy image is refused.
+	f.proxyImage = clusterRenderDaemonDigest
 	return f
 }
 

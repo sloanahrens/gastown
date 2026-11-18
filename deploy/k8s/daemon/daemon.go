@@ -853,6 +853,11 @@ type Values struct {
 	// entries are mounted read-only in the gateway's token directory. Required with
 	// BdGatewayImage. The Secret is named, never created: the operator creates it.
 	BdGatewayTokenSecret string
+	// BdGatewayMaxConcurrent is the gateway's concurrency cap, passed as
+	// --max-concurrent to bdgw serve. Zero leaves the flag off, so the gateway's own
+	// default applies; a negative value is refused. It is read only with
+	// BdGatewayImage.
+	BdGatewayMaxConcurrent int
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard,

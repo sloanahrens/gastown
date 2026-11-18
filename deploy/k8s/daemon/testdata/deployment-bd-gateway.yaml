@@ -28,6 +28,21 @@ spec:
         - ip: 192.168.5.2
           hostnames:
             - host.docker.internal
+      initContainers:
+        - name: tokens-0600
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          command:
+            - sh
+            - -c
+            - cp /secrets/* /tokens/ && chmod 0600 /tokens/*
+          volumeMounts:
+            - name: bd-gateway-token-secret
+              mountPath: /secrets
+              readOnly: true
+            - name: bd-gateway-tokens
+              mountPath: /tokens
+          securityContext:
+            allowPrivilegeEscalation: false
       containers:
         - name: bd-gateway
           image: registry.example.com/gt/bdgw@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
@@ -59,6 +74,10 @@ spec:
               command:
                 - bdgw
                 - ready
+                - --tokens-dir
+                - /run/bdgw/tokens
+                - --verbs
+                - /etc/bdgw/verbs.json
                 - --workspace
                 - /var/lib/bdgw/ws
             initialDelaySeconds: 10
@@ -68,10 +87,12 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
       volumes:
-        - name: bd-gateway-tokens
+        - name: bd-gateway-token-secret
           secret:
             secretName: bd-gateway-tokens
             defaultMode: 288
+        - name: bd-gateway-tokens
+          emptyDir: {}
         - name: bd-gateway-log
           emptyDir: {}
         - name: bd-gateway-workspace
