@@ -280,10 +280,12 @@ func TestCommitKeepsTheNightPartialWhenTheRenameFails(t *testing.T) {
 	}
 	// The root denies writes, so the manifest can be written inside the partial
 	// directory but the night cannot be renamed out of it.
+	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
 	if err := os.Chmod(root, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
 		if err := os.Chmod(root, 0o755); err != nil {
 			t.Errorf("restore root permissions: %v", err)
 		}
@@ -308,10 +310,12 @@ func TestRotateReportsANightItCannotRemove(t *testing.T) {
 	commitNight(t, root, 1)
 	removable := commitNight(t, root, 0)
 	doomed := commitNight(t, root, 2)
+	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
 	if err := os.Chmod(root, 0o555); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
 		if err := os.Chmod(root, 0o755); err != nil {
 			t.Errorf("restore root permissions: %v", err)
 		}
