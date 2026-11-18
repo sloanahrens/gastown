@@ -434,8 +434,9 @@ Put every line that starts with CREATE in one file and run that file twice: the
 first pass creates what it can and reports the `does not exist` errors, and the
 second creates the tables those errors left out. Put every line that starts with
 INSERT INTO or SELECT in another file and run it once, as a superuser role (the
-rehearsal role was a superuser), with `SET session_replication_role = replica;`
-as its first statement so the INSERTs load without the foreign-key checks:
+rehearsal role was a superuser, and that the setting needs a superuser is
+expected, not tested), with `SET session_replication_role = replica;` as its
+first statement so the INSERTs load without the foreign-key checks:
 
 ```bash
 grep '^CREATE' forgejo-db.sql > create.sql
@@ -487,8 +488,7 @@ ref counts equal the live ones, except in what moved since the dump.
   the volume. SSH went untested too.
 - Loading into a host PostgreSQL server: the rehearsal used a container with
   PostgreSQL 17.11.
-- A non-superuser load role: that the setting needs a superuser is expected, not
-  tested.
+- A non-superuser load role.
 - Other Forgejo versions: the split assumes one statement per line.
 - Restore time from a cold cache.
 - The whole-archive listing.
