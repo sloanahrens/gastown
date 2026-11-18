@@ -3,10 +3,12 @@
 // The Phase 0 proof of docs/design/bd-container.md: a real bd reads a bead
 // through a workspace tree laid out the way the gateway's PUT /v1/workspace
 // will push one, with the redirect and the Dolt endpoint rewritten into that
-// tree. It skips unless BD_PROOF_BEAD names a bead and the Dolt endpoint is
-// set, so a sandbox starts no bd and reaches no network; the env and bd-result
-// tests start child copies of this test binary and run it against commands
-// standing in for bd.
+// tree, and cooks the town's formula through the same tree, since a push
+// carries the formulas a sling needs (gt-c2cghr). The reading is the proof
+// test below; the cooking is the proof's cook test. The proof skips unless
+// BD_PROOF_BEAD names a bead and the Dolt endpoint is set, so a sandbox starts
+// no bd and reaches no network; the env and bd-result tests start child copies
+// of this test binary and run it against commands standing in for bd.
 //
 // Running it. The proof needs a real bd and a Dolt endpoint that holds a bead;
 // elsewhere it skips, unless BD_PROOF_REQUIRE says a missing prerequisite must
@@ -90,6 +92,22 @@ type proofTree struct {
 	beadsDir string // the rig's redirect directory, the BEADS_DIR of the run
 }
 
+// The formula every proof tree carries. A push carries the town's formulas so a
+// sling's cook finds them (gt-c2cghr); the proof lays one out where a push puts
+// it and cooks it, so the layout the gateway writes is exercised, not only the
+// five files a bd show reads.
+const (
+	proofFormulaName = "proof-probe"
+	proofFormulaBody = `formula = "proof-probe"
+version = 1
+
+[[steps]]
+id = "probe"
+title = "Probe step"
+description = "A formula the workspace proof cooks."
+`
+)
+
 // proofRequired reads BD_PROOF_REQUIRE. An unrecognized value is an error, not
 // off: a guard that cannot read its switch must not pass as clean.
 func proofRequired(raw string) (bool, error) {
@@ -157,8 +175,9 @@ func proofPrereqs(getenv func(string) string, lookPath func(string) (string, err
 }
 
 // writeProofWorkspace lays out the tree the gateway's PUT /v1/workspace will
-// push: the town's routes.jsonl, the rig's redirect, and the rig's workspace
-// files, with every absolute path pointing into root rather than the host.
+// push: the town's routes.jsonl and formula, the rig's redirect, the rig's
+// workspace files, and the formula copy the builder puts beside the rig, with
+// every absolute path pointing into root rather than the host.
 func writeProofWorkspace(t *testing.T, root string, s proofSetup) proofTree {
 	t.Helper()
 	rigDir := filepath.Join(root, s.rig)
@@ -218,6 +237,18 @@ func writeProofWorkspace(t *testing.T, root string, s proofSetup) proofTree {
 	write(filepath.Join(workspace, "metadata.json"), string(metadata)+"\n")
 	write(filepath.Join(workspace, "config.yaml"), fmt.Sprintf("issue-prefix: %q\n", s.prefix))
 	write(filepath.Join(workspace, "dolt-server.port"), s.port)
+	// The formula a push carries: under the town's beads, where a cook finds it
+	// through the workspace root, and the copy the builder writes beside the
+	// rig's redirect.
+	for _, dir := range []string{
+		filepath.Join(townBeads, formulaDirName),
+		filepath.Join(beadsDir, formulaDirName),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("creating %s: %v", dir, err)
+		}
+		write(filepath.Join(dir, proofFormulaName+formulaSuffix), proofFormulaBody)
+	}
 	return proofTree{root: root, beadsDir: beadsDir}
 }
 
@@ -253,6 +284,46 @@ func TestIntegrationWorkspaceProof(t *testing.T) {
 	}
 	if !strings.Contains(string(out), setup.beadID) {
 		t.Fatalf("bd show %s did not name the bead in its output:\n%s", setup.beadID, out)
+	}
+}
+
+// TestIntegrationWorkspaceProofCook is the new layout's own proof: a real bd
+// cooks the town's formula through the tree a push lays out. A sling's cook
+// carries the route target's own .beads as BEADS_DIR, which a push holds no
+// formulas under, and names the workspace root as GT_TOWN_ROOT, where it does
+// (gt-c2cghr, gt-x49njj). It skips with the proof's prerequisites, and the
+// overseer's host run exercises it when BD_PROOF_BEAD and the Dolt endpoint are
+// set.
+func TestIntegrationWorkspaceProofCook(t *testing.T) {
+	setup, skip, err := proofPrereqs(os.Getenv, exec.LookPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if skip != "" {
+		t.Skip(skip)
+	}
+	tree := writeProofWorkspace(t, t.TempDir(), setup)
+	workdir := filepath.Join(tree.root, setup.rig, "mayor", "rig")
+
+	ctx, cancel := context.WithTimeout(t.Context(), proofTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, setup.bdPath, "cook", proofFormulaName)
+	cmd.Dir = workdir
+	cmd.Env = append(os.Environ(),
+		"BEADS_DIR="+filepath.Join(workdir, ".beads"),
+		"GT_TOWN_ROOT="+tree.root,
+		proofDoltHostEnv+"="+setup.host,
+		proofDoltPortEnv+"="+setup.port,
+	)
+	out, runErr := cmd.CombinedOutput()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("bd cook %s did not finish within %s", proofFormulaName, proofTimeout)
+	}
+	if runErr != nil {
+		t.Fatalf("bd cook %s against the gateway workspace failed: %v\nbd output:\n%s", proofFormulaName, runErr, out)
+	}
+	if !strings.Contains(string(out), proofFormulaName) {
+		t.Fatalf("bd cook %s did not name the formula in its output:\n%s", proofFormulaName, out)
 	}
 }
 
@@ -395,11 +466,11 @@ func TestIntegrationWorkspaceProofBdResult(t *testing.T) {
 }
 
 // TestIntegrationWorkspaceProofLayout checks the tree the proof runs against:
-// the five-file layout a workspace push is built from (the town's routes.jsonl,
-// the rig's redirect, metadata.json, config.yaml and dolt-server.port), with
-// the redirect and metadata pointing into the tree rather than the host. A push
-// also carries the town's formulas when there are any, which a bd show does not
-// read. It needs no bd and no endpoint.
+// the layout a workspace push is built from (the town's routes.jsonl, the rig's
+// redirect, metadata.json, config.yaml and dolt-server.port), with the redirect
+// and metadata pointing into the tree rather than the host, and the town's
+// formula where a push puts it (under the town's beads, and beside the rig's
+// redirect). It needs no bd and no endpoint.
 func TestIntegrationWorkspaceProofLayout(t *testing.T) {
 	setup := proofSetup{
 		beadID: "gt-probe-1",
@@ -469,6 +540,19 @@ func TestIntegrationWorkspaceProofLayout(t *testing.T) {
 	for _, want := range []string{`{"path":".","prefix":"hq-"}`, `{"path":"gt/mayor/rig","prefix":"gt-"}`} {
 		if !strings.Contains(string(routes), want) {
 			t.Errorf("routes.jsonl does not contain %s:\n%s", want, routes)
+		}
+	}
+
+	for _, dir := range []string{
+		filepath.Join(tree.root, ".beads", formulaDirName),
+		filepath.Join(tree.beadsDir, formulaDirName),
+	} {
+		got, err := os.ReadFile(filepath.Join(dir, proofFormulaName+formulaSuffix))
+		if err != nil {
+			t.Fatalf("reading the formula a push carries in %s: %v", dir, err)
+		}
+		if string(got) != proofFormulaBody {
+			t.Errorf("%s carries %q, want the probe formula", dir, got)
 		}
 	}
 }

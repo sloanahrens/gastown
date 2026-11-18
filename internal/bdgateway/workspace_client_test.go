@@ -838,11 +838,16 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			want: "the town's formulas directory",
 		},
 		{
+			// The formula read is what refuses it, before the document exists:
+			// an unbounded read would carry the file and leave the refusal to
+			// the gateway's validation, whose message names the document key in
+			// quotes rather than the path the read found too much in.
 			name: "a formula over the per-file cap",
 			spoil: func(t *testing.T, root string) {
 				writePath(t, root, ".beads/formulas/alpha.formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes+1))
 			},
 			wantErr: ErrWorkspaceFileTooLarge,
+			want:    fmt.Sprintf("is over the %d-byte cap", MaxWorkspaceFileBytes),
 		},
 		{
 			// One more formula at the per-file cap than the total holds: the set
@@ -1048,19 +1053,72 @@ func TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig(t *testing.T)
 
 // TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder
 // cannot read refuses the push rather than pushing a workspace without it, which
-// would fail only when a sling cooks that formula.
+// would fail only when a sling cooks that formula. The opener fails the read
+// because a mode-0 file does not fail a root process, as the container gate is
+// (gt-0713x5).
 func TestBuildWorkspaceDocumentRefusesAnUnreadableFormula(t *testing.T) {
 	t.Parallel()
 	root := clientTown(t)
-	formula := filepath.Join(root, ".beads", "formulas", "alpha.formula.toml")
 	writePath(t, root, ".beads/formulas/alpha.formula.toml", "formula = \"alpha\"\n")
-	if err := os.Chmod(formula, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(formula, 0o600) })
-	_, err := BuildWorkspaceDocument(root)
+	_, err := buildWorkspaceDocument(root, func(string) (*os.File, error) {
+		return nil, os.ErrPermission
+	})
 	if err == nil || !strings.Contains(err.Error(), "alpha.formula.toml") {
-		t.Fatalf("BuildWorkspaceDocument error = %v, want a refusal naming the formula", err)
+		t.Fatalf("buildWorkspaceDocument error = %v, want a refusal naming the formula", err)
+	}
+}
+
+// TestReadFormulaFileRefusesAFileItCannotRead: a formula that opens but cannot
+// be read is refused with its path, never read as an empty formula. A directory
+// opens for reading on every platform the rig runs on and fails the read, so
+// the failure path needs no permission trick and passes as root too.
+func TestReadFormulaFileRefusesAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	_, err := readFormulaFile(os.Open, dir)
+	if err == nil {
+		t.Fatalf("readFormulaFile(%s) returned no error for a directory", dir)
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("the refusal %q does not name the path %s", err, dir)
+	}
+}
+
+// TestReadAtMostRefusesAStreamOverTheCap: a formula read is bounded by the bytes
+// the stream yields, not by a size a stat reported, so a file that grew after
+// the stat is refused rather than held whole (gt-0713x5). The build's own row
+// "a formula over the per-file cap" drives the same bound through
+// BuildWorkspaceDocument.
+func TestReadAtMostRefusesAStreamOverTheCap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "under the cap", size: MaxWorkspaceFileBytes - 1},
+		{name: "at the cap", size: MaxWorkspaceFileBytes},
+		{name: "one byte over the cap", size: MaxWorkspaceFileBytes + 1, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := readAtMost(strings.NewReader(strings.Repeat("f", tc.size)))
+			if tc.wantErr {
+				if !errors.Is(err, ErrWorkspaceFileTooLarge) {
+					t.Fatalf("readAtMost(%d bytes) error = %v, want ErrWorkspaceFileTooLarge", tc.size, err)
+				}
+				if data != nil {
+					t.Errorf("readAtMost(%d bytes) returned %d bytes, want none", tc.size, len(data))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readAtMost(%d bytes): %v", tc.size, err)
+			}
+			if len(data) != tc.size {
+				t.Errorf("readAtMost(%d bytes) returned %d, want all of them", tc.size, len(data))
+			}
+		})
 	}
 }
 
