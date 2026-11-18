@@ -431,16 +431,51 @@ func readTownFormulas(townRoot, beadsDir string) (map[string]string, error) {
 		if statErr != nil || !info.Mode().IsRegular() {
 			return nil, fmt.Errorf("%w: %s is not a regular file", ErrWorkspaceFileName, shown(formulaPath))
 		}
-		if info.Size() > MaxWorkspaceFileBytes {
-			return nil, fmt.Errorf("%w: %s is %d bytes, cap %d", ErrWorkspaceFileTooLarge, shown(formulaPath), info.Size(), MaxWorkspaceFileBytes)
-		}
-		data, err := os.ReadFile(formulaPath) //nolint:gosec // G304: a regular file in the town's formulas directory
+		// The stat is not the cap. A formula that grows between it and the read
+		// would be held whole by a plain read, so the bytes are read through
+		// readAtMost, which stops one byte past the cap and refuses what it
+		// finds there.
+		data, err := readFormulaFile(formulaPath)
 		if err != nil {
-			return nil, fmt.Errorf("bdgateway: reading %s: %w", formulaPath, err)
+			return nil, err
 		}
 		formulas[name] = string(data)
 	}
 	return formulas, nil
+}
+
+// readFormulaFile opens the regular file at p and returns its content, read
+// through readAtMost. Its over-cap refusal names the formula path, which
+// readAtMost does not know.
+func readFormulaFile(p string) ([]byte, error) {
+	f, err := os.Open(p) //nolint:gosec // G304: p is the regular file the caller stat'd inside the town
+	if err != nil {
+		return nil, fmt.Errorf("bdgateway: reading %s: %w", p, err)
+	}
+	defer func() { _ = f.Close() }()
+	data, err := readAtMost(f)
+	switch {
+	case errors.Is(err, ErrWorkspaceFileTooLarge):
+		return nil, fmt.Errorf("%w: %s is over the %d-byte cap", ErrWorkspaceFileTooLarge, shown(p), MaxWorkspaceFileBytes)
+	case err != nil:
+		return nil, fmt.Errorf("bdgateway: reading %s: %w", p, err)
+	}
+	return data, nil
+}
+
+// readAtMost reads r to its end, up to MaxWorkspaceFileBytes, and returns
+// ErrWorkspaceFileTooLarge rather than the bytes when r carries more. The cap is
+// what the stream yields, not a size a caller stated: a file that grows after it
+// was stat'd is refused by the read, never held whole.
+func readAtMost(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxWorkspaceFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxWorkspaceFileBytes {
+		return nil, ErrWorkspaceFileTooLarge
+	}
+	return data, nil
 }
 
 // checkFormulaCopiesFit refuses a formula set whose copies fill more than the
