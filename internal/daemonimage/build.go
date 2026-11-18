@@ -1,6 +1,6 @@
 // Package daemonimage builds the gastown daemon's container artifacts on the
-// host: the linux/arm64 gt, bd, om, trackerd and trackerbackup binaries the
-// image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned
+// host: the linux/arm64 gt, bd, om, gt-wrap, trackerd and trackerbackup binaries
+// the image runs (gt-qpeei.9), the image's cgo-built mango (gt-wznahy), the pinned
 // claude CLI om's reviewer runs (gt-qpeei.35), and the image built from them
 // (gt-qpeei.16).
 // Every command it runs and every download it makes is one injected call, so the
@@ -42,13 +42,15 @@ const DockerContext = "desktop-linux"
 // pinned to the polecat image flow's own sources: a test keeps GTPackage equal
 // to the package polecat-image builds, and BDPackage to bdbuild.Package.
 // TrackerdPackage and TrackerbackupPackage are main packages in the tracker
-// module, built in TrackerdModuleDir rather than at the checkout root.
+// module, built in TrackerdModuleDir rather than at the checkout root. GtWrap
+// is the forwarder the image installs as bd (gt-p4xncz).
 const (
 	GTPackage            = "./cmd/gt"
 	BDPackage            = "./cmd/bd"
 	OMPackage            = "./cmd/om"
 	TrackerdPackage      = "./cmd/trackerd"
 	TrackerbackupPackage = "./cmd/trackerbackup"
+	GtWrapPackage        = "./cmd/gt-wrap"
 )
 
 // TrackerdModuleDir is the gt checkout's directory that trackerd and
@@ -162,26 +164,29 @@ type Builder struct {
 	Fetch Fetcher
 
 	// The fields below are test seams for the filesystem calls the plugin,
-	// mango and gateway moves and their rollbacks make; nil means the os
-	// function of the same shape.
-	rename func(oldpath, newpath string) error
-	remove func(path string) error
-	lstat  func(path string) (os.FileInfo, error)
+	// mango and gateway moves and their rollbacks make, and the write the
+	// gateway's policy file is staged with; nil means the os function of the
+	// same shape.
+	rename    func(oldpath, newpath string) error
+	remove    func(path string) error
+	lstat     func(path string) (os.FileInfo, error)
+	writeFile func(name string, data []byte, perm os.FileMode) error
 }
 
 // fileOps is the filesystem the plugin, mango and gateway moves publish and
-// roll back with: the os functions of the same shape, or the test seams
-// standing in for them.
+// roll back with, and the gateway's policy file is staged in: the os functions
+// of the same shape, or the test seams standing in for them.
 type fileOps struct {
-	rename func(oldpath, newpath string) error
-	remove func(path string) error
-	lstat  func(path string) (os.FileInfo, error)
+	rename    func(oldpath, newpath string) error
+	remove    func(path string) error
+	lstat     func(path string) (os.FileInfo, error)
+	writeFile func(name string, data []byte, perm os.FileMode) error
 }
 
 // fileOps returns b's filesystem, with the os functions filling any seam b
 // leaves nil.
 func (b Builder) fileOps() fileOps {
-	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat}
+	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat, writeFile: os.WriteFile}
 	if b.rename != nil {
 		ops.rename = b.rename
 	}
@@ -190,6 +195,9 @@ func (b Builder) fileOps() fileOps {
 	}
 	if b.lstat != nil {
 		ops.lstat = b.lstat
+	}
+	if b.writeFile != nil {
+		ops.writeFile = b.writeFile
 	}
 	return ops
 }
@@ -212,6 +220,15 @@ type binary struct {
 	stampsBuildID bool
 }
 
+// bdBinary is the image's bd, built from src at commit and staged under name:
+// BuildBinaries stages it as bd and StageGatewayContext as bd.real, both with
+// the stamps the two images' bd report one build id under (gt-glsx8):
+// main.Build from git's abbreviation of the commit in the worktree, then
+// main.Commit with the full sha.
+func bdBinary(src, commit, name string) binary {
+	return binary{name: name, src: src, commit: commit, pkg: BDPackage, ldflags: bdCommitFlag + commit, stampsBuildID: true}
+}
+
 // plugin is one plugin the image carries: its directory name in the town's
 // plugins/ and the package under the gt checkout it is built from.
 type plugin struct{ name, pkg string }
@@ -226,8 +243,8 @@ var imagePlugins = []plugin{
 	{name: "town-metrics", pkg: "./plugins/town-metrics"},
 }
 
-// BuildBinaries writes gt, bd, om, trackerd and trackerbackup to b.Out and
-// returns their paths in that order. Every refusal comes before the first build
+// BuildBinaries writes gt, bd, om, gt-wrap, trackerd and trackerbackup to b.Out
+// and returns their paths in that order. Every refusal comes before the first build
 // runs, so a refused call writes nothing. Each binary is built in a clean
 // worktree of its commit and is staged under b.Out until every binary has built,
 // so a build that fails returns its error and no paths, and leaves nothing in
@@ -272,8 +289,12 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	}
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
-		{name: "bd", src: bdSrc, commit: bdCommit, pkg: BDPackage, ldflags: bdCommitFlag + bdCommit, stampsBuildID: true},
+		bdBinary(bdSrc, bdCommit, "bd"),
 		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
+		// gt-wrap is the forwarder the image installs as bd, with the real bd
+		// beside it as bd.real (gt-p4xncz): an in-cluster bd call must reach
+		// this binary, or BD_GATEWAY_URL changes nothing.
+		{name: "gt-wrap", src: b.GTSrc, commit: gtCommit, pkg: GtWrapPackage},
 		{name: "trackerd", src: b.GTSrc, commit: gtCommit, pkg: TrackerdPackage, moduleDir: TrackerdModuleDir},
 		{name: "trackerbackup", src: b.GTSrc, commit: gtCommit, pkg: TrackerbackupPackage, moduleDir: TrackerdModuleDir},
 	}
@@ -772,6 +793,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
 	lines = append(lines, om.fetch...)
 	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
+	lines = append(lines, fmt.Sprintf("build gt-wrap: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt-wrap"), GtWrapPackage, ""), " "), b.GTSrc, rev))
 	lines = append(lines, fmt.Sprintf("build trackerd: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	lines = append(lines, fmt.Sprintf("build trackerbackup: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerbackup"), TrackerbackupPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	for _, p := range imagePlugins {
@@ -1093,17 +1115,17 @@ func (b Builder) stageKnownHosts() error {
 }
 
 // checkImageBinaries refuses a set of binaries the Dockerfile's COPY lines could
-// not read: each of the image's binaries (gt, bd, om, trackerd, trackerbackup,
-// claude, the toolNames and ClientToolNames), each of imagePlugins and each of
-// mangoNames once, at the path under b.Out its COPY reads. Docker would report a
-// missing or misplaced one only after the package install ran, so it is caught
-// here first, against what the caller passed.
+// not read: each of the image's binaries (gt, bd, om, gt-wrap, trackerd,
+// trackerbackup, claude, the toolNames and ClientToolNames), each of imagePlugins
+// and each of mangoNames once, at the path under b.Out its COPY reads. Docker would
+// report a missing or misplaced one only after the package install ran, so it is
+// caught here first, against what the caller passed.
 func (b Builder) checkImageBinaries(bins []string) error {
 	// rels is each binary's COPY source relative to the build context; want holds
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append(append([]string{"gt", "bd", "om", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
+	for _, name := range append(append([]string{"gt", "bd", "om", "gt-wrap", "trackerd", "trackerbackup", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
 		rels[name] = name
 		want = append(want, name)
 	}

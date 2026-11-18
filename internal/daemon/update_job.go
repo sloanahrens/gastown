@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
@@ -225,10 +228,15 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 	if !ok {
 		return errors.New("no values file names the running daemon image")
 	}
+	gatewayURL, err := d.gatewayURLForJob()
+	if err != nil {
+		return err
+	}
 	m, err := updatejob.Build(updatejob.Values{
-		Image:       running.Daemon,
-		GreenCommit: sha,
-		MaxRuntime:  settings.MaxRuntime,
+		Image:        running.Daemon,
+		GreenCommit:  sha,
+		MaxRuntime:   settings.MaxRuntime,
+		BdGatewayURL: gatewayURL,
 	})
 	if err != nil {
 		return fmt.Errorf("render the update Job: %w", err)
@@ -244,6 +252,50 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 		return fmt.Errorf("encode the update Job: %w", err)
 	}
 	return d.updateJob.CreateJob(ctx, name, buf.Bytes(), d.updateJobRequestTimeout())
+}
+
+// gatewayURLForJob is the gateway URL the update Job is given: the daemon's own
+// BD_GATEWAY_URL with its host name, when it is a name, replaced by the address the
+// daemon resolves. The daemon pod reaches the gateway through a hostAlias, which
+// the admission policy forbids on the Job (gt-j571bu), so the Job is handed the
+// address instead of the name the daemon's own environment carries. An unset
+// variable stays empty and the Job renders without a gateway; a host that is
+// already an IP is passed through. The raw value is never echoed in an error, since
+// a credential may sit in it.
+func (d *Daemon) gatewayURLForJob() (string, error) {
+	raw := d.env(k8sdaemon.BdGatewayURLEnv)
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("%s is not a URL with a host", k8sdaemon.BdGatewayURLEnv)
+	}
+	host := u.Hostname()
+	if net.ParseIP(host) != nil {
+		return raw, nil
+	}
+	lookup := d.lookupHost
+	if lookup == nil {
+		lookup = net.LookupHost
+	}
+	addrs, err := lookup(host)
+	if err != nil {
+		return "", fmt.Errorf("resolve the gateway host %s for the update Job: %w", host, err)
+	}
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		if port := u.Port(); port != "" {
+			u.Host = net.JoinHostPort(ip.To4().String(), port)
+		} else {
+			u.Host = ip.To4().String()
+		}
+		return u.String(), nil
+	}
+	return "", fmt.Errorf("resolve the gateway host %s for the update Job: the lookup answered no IPv4 address", host)
 }
 
 // updateJobBound is the deadline on one create: updateJobCreateTimeout, unless a

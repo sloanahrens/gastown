@@ -299,10 +299,10 @@ func TestOMReviewerStripsClaudeConfigDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Contains(env, "CLAUDE_CONFIG_DIR") {
-		t.Fatalf("env %v does not unset CLAUDE_CONFIG_DIR", env)
+		t.Fatalf("env does not unset CLAUDE_CONFIG_DIR")
 	}
 	got := mergeEnv([]string{"A=1", "CLAUDE_CONFIG_DIR=/x", "B=2"}, env)
 	if slices.ContainsFunc(got, func(kv string) bool { return strings.HasPrefix(kv, "CLAUDE_CONFIG_DIR") }) || len(got) != 2 {
-		t.Fatalf("mergeEnv kept CLAUDE_CONFIG_DIR: %v", got)
+		t.Fatalf("mergeEnv kept CLAUDE_CONFIG_DIR in %d entries", len(got))
 	}
 }

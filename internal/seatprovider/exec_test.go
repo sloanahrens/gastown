@@ -36,7 +36,7 @@ func TestExecRunnerPassesTheArgvAndAddsTheEnvironment(t *testing.T) {
 		t.Errorf("command = %q %q, want openshell %q", gotName, gotArgs, argv)
 	}
 	if !slices.Contains(cmd.Env, "TRACKER_TOKEN=secret-value") {
-		t.Errorf("child environment lacks the added variable: %q", cmd.Env)
+		t.Errorf("child environment lacks the added variable")
 	}
 	if len(cmd.Env) != len(os.Environ())+1 {
 		t.Errorf("child environment has %d entries, want this process's %d plus the one added", len(cmd.Env), len(os.Environ()))

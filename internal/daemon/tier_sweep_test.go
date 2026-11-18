@@ -686,14 +686,14 @@ func TestTierSweepStagePassesTimingsAndResumePaths(t *testing.T) {
 			for _, st := range tierSweepStages("gastown") {
 				st.tested = "abc123"
 				if got := d.tierSweepGate(st).Steps[0].Env; !slices.Equal(got, want) {
-					t.Errorf("stage %v env = %q, want %q", st.tiers, got, want)
+					t.Errorf("stage %v env = %d entries, want %d", st.tiers, len(got), len(want))
 				}
 			}
 
 			script := tierSweepStages("gastown")[0]
 			script.script = true
 			if got := d.tierSweepGate(script).Steps[0].Env; got != nil {
-				t.Errorf("script stage env = %q, want none", got)
+				t.Errorf("script stage env = %d entries, want none", len(got))
 			}
 			if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 				t.Errorf("rig directory %s: err = %v, want a directory", dir, err)
@@ -719,7 +719,7 @@ func TestTierSweepStageEnvRunsWithoutPathsWhenDirCannotBeMade(t *testing.T) {
 			st := tierSweepStages("gastown")[1]
 			st.tested = "abc123"
 			if got := d.tierSweepGate(st).Steps[0].Env; got != nil {
-				t.Errorf("env = %q, want none when the directory cannot be made", got)
+				t.Errorf("env = %d entries, want none when the directory cannot be made", len(got))
 			}
 			if want := []string{dir}; !slices.Equal(made, want) {
 				t.Errorf("makeDir called with %q, want %q", made, want)
@@ -742,7 +742,7 @@ func TestTierSweepRigPathSegmentIsValidated(t *testing.T) {
 			st.rig = rig
 
 			if got := d.tierSweepGate(st).Steps[0].Env; got != nil {
-				t.Errorf("env = %q, want no timings or resume paths", got)
+				t.Errorf("env = %d entries, want no timings or resume paths", len(got))
 			}
 			if !strings.Contains(logs.String(), "refusing") {
 				t.Errorf("log = %q, want a logged refusal", logs.String())

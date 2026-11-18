@@ -295,8 +295,9 @@ func TestMergeReadyGateComposesWithStatusBasedGates(t *testing.T) {
 
 // --- One sling-context read per dispatch cycle (gt-pjcpb) ----------------
 
-// townWithRigDirs builds a town root whose search dirs are the root plus one
-// per named rig, so a scan of it has one store per rig to read.
+// townWithRigDirs builds a town whose .beads holds the root plus one per named
+// rig, and registers those rigs: the scan reads the town's registry, not the
+// folders, so a scan of it has one store per rig (gt-qczeve).
 func townWithRigDirs(t *testing.T, rigs ...string) string {
 	t.Helper()
 	townRoot := t.TempDir()
@@ -309,6 +310,19 @@ func townWithRigDirs(t *testing.T, rigs ...string) string {
 			t.Fatalf("mkdir beads dir for %s: %v", dir, err)
 		}
 	}
+	writeJSONFile(t, filepath.Join(townRoot, "mayor", "town.json"), config.TownConfig{
+		Type:    "town",
+		Name:    "test",
+		Version: config.CurrentTownVersion,
+	})
+	entries := make(map[string]config.RigEntry, len(rigs))
+	for _, rig := range rigs {
+		entries[rig] = config.RigEntry{}
+	}
+	writeJSONFile(t, filepath.Join(townRoot, "mayor", "rigs.json"), config.RigsConfig{
+		Version: config.CurrentRigsVersion,
+		Rigs:    entries,
+	})
 	return townRoot
 }
 
@@ -602,6 +616,26 @@ func TestListScheduledReportsTheScansOwnFailure(t *testing.T) {
 	})
 	if err != nil || got != nil {
 		t.Fatalf("ListScheduled with nothing scheduled = (%+v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// The production listing reads the town's registry, so a town without one is
+// reported as an error, not searched as the folders on disk: a schedulerrun
+// fixture that reaches the scan registers its rigs through townWithRigDirs
+// (gt-qczeve).
+func TestListScheduledReportsATownWithoutARegistry(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "stray", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ListScheduled(townRoot)
+	if err == nil {
+		t.Fatalf("ListScheduled on a town with no registry = %+v, want the load's error", got)
+	}
+	if got != nil {
+		t.Errorf("ListScheduled = %+v beside its error, want nothing listed", got)
 	}
 }
 

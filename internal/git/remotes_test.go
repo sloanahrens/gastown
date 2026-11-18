@@ -169,7 +169,7 @@ func TestPushWithEnvPassesEnvironment(t *testing.T) {
 	}
 	c, found := s.sentCall("push origin feature --force")
 	if !found || !reflect.DeepEqual(c.env, env) || c.timeout != pushTimeout {
-		t.Fatalf("push call = %+v (found %v), want env %v and timeout %v", c, found, env, pushTimeout)
+		t.Fatalf("push call (found %v) env = %d entries, want %d and timeout %v", found, len(c.env), len(env), pushTimeout)
 	}
 }
 
@@ -188,7 +188,7 @@ func TestListRemoteRefsWithHashesEnvPassesEnvironment(t *testing.T) {
 	}
 	c, found := s.sentCall("ls-remote --refs origin refs/heads/*")
 	if !found || !reflect.DeepEqual(c.env, env) || c.timeout != remoteQueryTimeout {
-		t.Fatalf("ls-remote call = %+v (found %v), want env %v and timeout %v", c, found, env, remoteQueryTimeout)
+		t.Fatalf("ls-remote call (found %v) env = %d entries, want %d and timeout %v", found, len(c.env), len(env), remoteQueryTimeout)
 	}
 }
 

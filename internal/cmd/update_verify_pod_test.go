@@ -576,10 +576,11 @@ func TestPodRunVerifyListsThePairChecks(t *testing.T) {
 	// on the pair the values file names, the state a verify after the install reads.
 	got.kube.polecat = podPairPolecatRef
 
-	probes, ok := got.deps.Verify.(podImageLabelProbes)
+	crash, ok := got.deps.Verify.(podCrashProbes)
 	if !ok {
 		t.Fatalf("verify probe = %T, want the pod runs' probes", got.deps.Verify)
 	}
+	probes := crash.podImageLabelProbes
 	want := testDigestOf(podPairManifest)
 	if digest := probes.WantPolecat(); digest != want {
 		t.Errorf("WantPolecat = %q, want the --images file's polecat digest %q", digest, want)

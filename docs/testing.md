@@ -148,6 +148,18 @@ An exemption is a comment on the offending line or the line above it:
 
 `TestPolicy` logs every exemption it honors. Exemptions are for a real exception; a converted package normally has none, and `internal/tmux` has none. When a test needs real processes, move it to the integration tier instead of exempting it.
 
+### The env-print rule
+
+`TestEnvPrintGuardOnTree` in `internal/testpolicy` walks every `*_test.go` under `internal` and `cmd` and reports a `Fatal`, `Fatalf`, `Error`, `Errorf`, `Log`, `Logf`, `Skip` or `Skipf` call whose arguments print an environment (gt-b5s9bg). A failure message reaches an agent's conversation, and a credential placeholder there ends the seat, so the message names the key or a count instead: `t.Errorf("env has %d entries, want %d", len(env), len(want))`. The scan follows a value into an index, a slice and a formatting call such as `fmt.Sprintf` or `strings.Join`, and treats `os.Environ()`, a field ending in `.Env`, a name such as `env`, `cmdEnv` or `dockerEnv`, and a `[]string` function named for an environment (`childEnv`) as environments. `len` and `cap`, a single value, and a slice built only from literals in the test pass: none can carry a host value.
+
+A call that must print an environment carries the marker trailing it on the call's line, or alone on the line directly above it. The marker exempts that one call and no other: a second call on a later line is judged on its own. The reason names the value printed in its place:
+
+```go
+t.Errorf("endpoint = %v", env) // testpolicy:env-print-ok a host and a port
+```
+
+The marker is separate from `//testpolicy:allow`: `TestPolicy` does not read it, and `TestEnvPrintGuardOnTree` does not read `allow`.
+
 ## Seams
 
 A type that runs programs or reads the clock gets two unexported fields, with nil meaning "use the real one". A struct literal such as `&Tmux{}` then keeps working, and tests set both fields.

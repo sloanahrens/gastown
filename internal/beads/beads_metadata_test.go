@@ -272,7 +272,7 @@ func TestWithDatabaseTargetReplacesInheritedSelector(t *testing.T) {
 		}
 	}
 	if count != 1 {
-		t.Errorf("BEADS_DOLT_SERVER_DATABASE appears %d times, want 1 (env=%v)", count, env)
+		t.Errorf("BEADS_DOLT_SERVER_DATABASE appears %d times, want 1", count)
 	}
 }
 

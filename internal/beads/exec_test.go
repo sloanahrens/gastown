@@ -21,7 +21,7 @@ func TestCommandWithEnvPreservesCallerEnv(t *testing.T) {
 		t.Fatalf("Env len = %d, want %d (the caller's env plus BD_MACHINE=1)", len(cmd.Env), len(env)+1)
 	}
 	if !hasEnvEntry(cmd.Env, "BD_MACHINE=1") {
-		t.Fatalf("Env = %v, want BD_MACHINE=1", cmd.Env)
+		t.Fatalf("Env = %d entries, want BD_MACHINE=1", len(cmd.Env))
 	}
 	found := false
 	for _, e := range cmd.Env {
@@ -45,7 +45,7 @@ func TestCommandContextWithEnvPreservesCallerEnv(t *testing.T) {
 		t.Fatalf("Dir = %q, want /work", cmd.Dir)
 	}
 	if len(cmd.Env) != len(env)+1 || !hasEnvEntry(cmd.Env, "BD_MACHINE=1") {
-		t.Fatalf("Env = %v, want %v plus BD_MACHINE=1", cmd.Env, env)
+		t.Fatalf("Env = %d entries, want %d plus BD_MACHINE=1", len(cmd.Env), len(env))
 	}
 	if cmd.SysProcAttr != nil {
 		t.Fatal("CommandContextWithEnv must not impose a process-group policy; callers set their own")
@@ -63,7 +63,7 @@ func TestCommandWithPathUsesGivenArgv0(t *testing.T) {
 		t.Fatalf("Dir = %q, want /work", cmd.Dir)
 	}
 	if len(cmd.Env) != len(env)+1 || !hasEnvEntry(cmd.Env, "BD_MACHINE=1") {
-		t.Fatalf("Env = %v, want %v plus BD_MACHINE=1", cmd.Env, env)
+		t.Fatalf("Env = %d entries, want %d plus BD_MACHINE=1", len(cmd.Env), len(env))
 	}
 }
 

@@ -1320,7 +1320,7 @@ func TestProcessSweepHandsTheSweepItsOverrides(t *testing.T) {
 		want := append(append([]string{}, base...),
 			envJobs+"=4", tiersweep.EnvLogDir+"=/out/logs", tiersweep.EnvTested+"="+testSHA)
 		if !equal(gotEnv, want) {
-			t.Errorf("child environment = %q, want %q", gotEnv, want)
+			t.Errorf("child environment = %d entries, want %d", len(gotEnv), len(want))
 		}
 	})
 

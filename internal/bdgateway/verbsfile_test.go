@@ -68,27 +68,59 @@ func sortedVerbNames(p *Policy) []string {
 	return names
 }
 
+// bdTreeGapsSnapshot is the command tree snapshot bdTreeGaps is written
+// against: beads b9f68260ed2a494972fe8aa922b6408a91905f0c, which predates the
+// sample verb. The exceptions apply only while the embedded snapshot is this
+// commit, so a refreshed snapshot re-checks every verb and a bd that renamed
+// the verb cannot stay excused.
+const bdTreeGapsSnapshot = "b9f68260ed2a494972fe8aa922b6408a91905f0c"
+
+// bdTreeGaps names the verbs deploy/bd/verbs.json allows that the snapshot
+// above does not run, with the bd commit that offers them. The town runs bd
+// b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f. An entry excuses only that exact
+// verb; once a refreshed snapshot runs it, staleGapFailures reports the row so
+// it is deleted.
+var bdTreeGaps = map[string]string{
+	"sample add":  "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+	"sample list": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+}
+
 // TestVerbsFileMatchesCommandTree: every verb deploy/bd/verbs.json allows runs
-// in the bd the repository's command tree records. A bd upgrade that renames a
-// verb therefore fails this gate instead of failing a call behind the gateway.
-// internal/bdshim tests the other half, that every verb the shim answers is in
-// the file, beside the handler registry it can read.
+// in the bd the repository's command tree records, except a verb in
+// bdTreeGaps, which names the bd commit that runs it while the snapshot is
+// bdTreeGapsSnapshot. A bd upgrade that renames a verb therefore fails this
+// gate instead of failing a call behind the gateway. internal/bdshim tests the
+// other half, that every verb the shim answers is in the file, beside the
+// handler registry it can read.
 func TestVerbsFileMatchesCommandTree(t *testing.T) {
 	t.Parallel()
 	p := loadDeployPolicy(t)
-	tree, _, err := cmdtree.LoadBdTree()
+	tree, snap, err := cmdtree.LoadBdTree()
 	if err != nil {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
-	for _, msg := range verbsAbsentFromTree(p, tree) {
+	var exceptions map[string]string
+	if snap.Commit == bdTreeGapsSnapshot {
+		exceptions = bdTreeGaps
+	}
+	for _, msg := range treeGapFailures(verbsAbsentFromTree(p, tree), exceptions) {
+		t.Error(msg)
+	}
+	for _, msg := range staleGapFailures(bdTreeGaps, tree) {
 		t.Error(msg)
 	}
 }
 
-// verbsAbsentFromTree returns one message per allowed verb the tree does not
-// run.
-func verbsAbsentFromTree(p *Policy, tree *cmdtree.Tree) []string {
-	var missing []string
+// verbGap is one allowed verb the command tree does not run, with the message
+// the gate reports for it.
+type verbGap struct {
+	name    string
+	message string
+}
+
+// verbsAbsentFromTree returns one gap per allowed verb the tree does not run.
+func verbsAbsentFromTree(p *Policy, tree *cmdtree.Tree) []verbGap {
+	var missing []verbGap
 	for _, name := range sortedVerbNames(p) {
 		res := tree.Resolve(p.verbs[name].Path)
 		if res.OK {
@@ -98,9 +130,37 @@ func verbsAbsentFromTree(p *Policy, tree *cmdtree.Tree) []string {
 		if res.HelpOnly {
 			detail = "stops on a help-only parent"
 		}
-		missing = append(missing, fmt.Sprintf("deploy/bd/verbs.json allows %q, which bd's command tree does not run: %s", name, detail))
+		missing = append(missing, verbGap{
+			name:    name,
+			message: fmt.Sprintf("deploy/bd/verbs.json allows %q, which bd's command tree does not run: %s", name, detail),
+		})
 	}
 	return missing
+}
+
+// treeGapFailures returns one message per gap the exception list does not
+// name, so an exception excuses only the verbs it lists.
+func treeGapFailures(gaps []verbGap, exceptions map[string]string) []string {
+	var failures []string
+	for _, gap := range gaps {
+		if _, ok := exceptions[gap.name]; ok {
+			continue
+		}
+		failures = append(failures, gap.message)
+	}
+	return failures
+}
+
+// staleGapFailures returns one message per exception row the command tree now
+// runs, so the list cannot outlive the snapshot it works around.
+func staleGapFailures(exceptions map[string]string, tree *cmdtree.Tree) []string {
+	var failures []string
+	for name, commit := range exceptions {
+		if tree.Resolve(strings.Fields(name)).OK {
+			failures = append(failures, fmt.Sprintf("bdTreeGaps lists %q (bd %s), but the command tree runs it: refresh the snapshot and delete the row", name, commit))
+		}
+	}
+	return failures
 }
 
 // TestVerbsAbsentFromTreeFindsAMissingVerb drives the failing branch of the
@@ -120,8 +180,123 @@ func TestVerbsAbsentFromTreeFindsAMissingVerb(t *testing.T) {
 		t.Fatalf("LoadBdTree: %v", err)
 	}
 	missing := verbsAbsentFromTree(p, tree)
-	if len(missing) != 1 || !strings.Contains(missing[0], "not-a-bd-verb") {
-		t.Fatalf("verbsAbsentFromTree = %v, want one message naming not-a-bd-verb", missing)
+	if len(missing) != 1 || missing[0].name != "not-a-bd-verb" || !strings.Contains(missing[0].message, "not-a-bd-verb") {
+		t.Fatalf("verbsAbsentFromTree = %v, want one gap naming not-a-bd-verb", missing)
+	}
+}
+
+// TestTreeGapFailures: a gap the exception list does not name is reported and
+// a listed gap is excused, so the list cannot widen the gate.
+func TestTreeGapFailures(t *testing.T) {
+	t.Parallel()
+	exceptions := map[string]string{"sample add": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f"}
+	gaps := []verbGap{
+		{name: "sample add", message: "sample add is missing"},
+		{name: "sample list", message: "sample list is missing"},
+	}
+	got := treeGapFailures(gaps, exceptions)
+	if len(got) != 1 || !strings.Contains(got[0], "sample list is missing") {
+		t.Errorf("treeGapFailures = %v, want only the unlisted gap reported", got)
+	}
+}
+
+// TestStaleGapFailures: an exception row the command tree now runs is
+// reported, and one the tree still lacks is not, so the row is deleted when a
+// refreshed snapshot stops needing it.
+func TestStaleGapFailures(t *testing.T) {
+	t.Parallel()
+	tree := cmdtree.NewTree()
+	tree.Add([]string{"sample", "add"}, nil, false)
+	exceptions := map[string]string{
+		"sample add":  "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+		"sample list": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+	}
+	got := staleGapFailures(exceptions, tree)
+	if len(got) != 1 || !strings.Contains(got[0], "sample add") {
+		t.Errorf("staleGapFailures = %v, want only sample add reported as stale", got)
+	}
+}
+
+// TestAuthorizeSample: the file the gateway image ships allows bd sample add
+// for the daemon and operator classes only, bd sample list for every class,
+// and still refuses a verb the file does not name.
+func TestAuthorizeSample(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+	cases := []struct {
+		name      string
+		class     TokenClass
+		argv      []string
+		wantErr   error
+		wantVerb  string
+		wantClass VerbClass
+	}{
+		{"daemon token writes a sample row", TokenDaemon, []string{"sample", "add", "--kind", "claude_plan", "--at", "2026-11-17T20:00:00Z", "--json", "-"}, nil, "sample add", ClassWrite},
+		{"operator token writes a sample row", TokenOperator, []string{"sample", "add", "--kind", "claude_plan"}, nil, "sample add", ClassWrite},
+		{"read token cannot write a sample row", TokenRead, []string{"sample", "add", "--kind", "claude_plan"}, ErrClassDenied, "", ""},
+		{"read token lists samples", TokenRead, []string{"sample", "list", "--kind", "claude_plan", "--json"}, nil, "sample list", ClassRead},
+		{"daemon token lists samples", TokenDaemon, []string{"sample", "list"}, nil, "sample list", ClassRead},
+		{"operator token lists samples", TokenOperator, []string{"sample", "list", "--limit", "10"}, nil, "sample list", ClassRead},
+		{"a verb the file does not name is refused", TokenOperator, []string{"dolt", "push"}, ErrVerbNotAllowed, "", ""},
+		{"an unnamed sample subcommand is refused", TokenDaemon, []string{"sample", "purge"}, ErrVerbNotAllowed, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := p.Authorize(tc.class, tc.argv)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Authorize(%q, %q) = %v, want %v", tc.class, tc.argv, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Authorize(%q, %q) = %v, want it allowed", tc.class, tc.argv, err)
+			}
+			if v.Name() != tc.wantVerb || v.Class != tc.wantClass {
+				t.Errorf("Authorize(%q, %q) matched %q (%s), want %q (%s)", tc.class, tc.argv, v.Name(), v.Class, tc.wantVerb, tc.wantClass)
+			}
+		})
+	}
+}
+
+// TestAuthorizeGateCheck: the file the gateway image ships allows bd gate
+// check, the call the daemon's patrol scan runs for every rig on every tick
+// ("gate check --type=timer"), for the daemon and operator classes only. It
+// evaluates timer gates and closes resolved ones, so the read class is
+// refused with the class error.
+func TestAuthorizeGateCheck(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+	cases := []struct {
+		name      string
+		class     TokenClass
+		argv      []string
+		wantErr   error
+		wantVerb  string
+		wantClass VerbClass
+	}{
+		{"daemon token checks timer gates", TokenDaemon, []string{"gate", "check", "--type=timer"}, nil, "gate check", ClassWrite},
+		{"operator token checks timer gates", TokenOperator, []string{"gate", "check"}, nil, "gate check", ClassWrite},
+		{"read token cannot check gates", TokenRead, []string{"gate", "check", "--type=timer"}, ErrClassDenied, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v, err := p.Authorize(tc.class, tc.argv)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("Authorize(%q, %q) = %v, want %v", tc.class, tc.argv, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Authorize(%q, %q) = %v, want it allowed", tc.class, tc.argv, err)
+			}
+			if v.Name() != tc.wantVerb || v.Class != tc.wantClass {
+				t.Errorf("Authorize(%q, %q) matched %q (%s), want %q (%s)", tc.class, tc.argv, v.Name(), v.Class, tc.wantVerb, tc.wantClass)
+			}
+		})
 	}
 }
 

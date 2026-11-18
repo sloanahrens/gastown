@@ -139,6 +139,20 @@ type overrunSeams struct {
 	// the seat because the bead's last submission is read with it (the seat's
 	// bead read), so the clock and the run end it started after are one read.
 	slungAt func(seat overrunSeat) (time.Time, bool)
+	// addedLines counts the lines the seat's handle adds over origin/main, so
+	// the guard can weigh how much work a seat has done. It opens the same
+	// handle overrunSeatGit picks for the stop's save, dirty check, push and
+	// reset, so the count reads the worktree those act on. An error comes with
+	// no count: a zero reads as a seat that added nothing. nil means the
+	// reading is off.
+	addedLines func(seat overrunSeat) (int, error)
+	// countFailed is told when addedLines fails, so a count that could not be
+	// read is not left to the daemon log alone: production raises an alert for
+	// the seat. It changes no decision — the mark stands and the seat runs on to
+	// the stop threshold. Its error is the alert's delivery outcome, which the
+	// guard logs rather than swallows. The dry run never calls it, as it writes
+	// nothing. nil means no alert (gt-eb7bzu).
+	countFailed func(seat overrunSeat, err error) error
 	// nudged is told each seat the guard marks at the nudge threshold, and when,
 	// so the progress battery can ask about the seat (jev_progress.go). nil
 	// means nothing is asked.
@@ -396,8 +410,12 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	nudgeAfter, stopAfter := overrunGuardThresholds(pc)
 	scheduledStopAfter := overrunScheduledStopAfter(pc)
 	dry := false
+	// split_added_lines, the runaway-bead tripwire: at the mark, a seat over
+	// this many added lines is stopped early for a split (gt-1eg5u3). 0 is off.
+	splitAddedLines := 0
 	if cfg := overrunGuardConfig(pc); cfg != nil {
 		dry = cfg.DryRun
+		splitAddedLines = cfg.SplitAddedLinesOrOff()
 	}
 	// An unset gate seam is no exemption: every seat's time counts.
 	gateRunning := s.gateRunning
@@ -561,6 +579,9 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		case overrunNudge:
 			if dry {
 				d.logger.Printf("overrun_guard: dry run: would mark %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
+				if reason := d.overrunTripwireReason(s, seat, elapsed, splitAddedLines, true); reason != "" {
+					d.logger.Printf("overrun_guard: dry run: would stop %s on %s for the tripwire: %s", who, seat.Bead, reason)
+				}
 				continue
 			}
 			// The threshold marks the seat and nothing else: a message to the
@@ -576,6 +597,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				continue
 			}
 			d.logger.Printf("overrun_guard: marked %s on %s after %s; no message sent", who, seat.Bead, elapsed.Round(time.Second))
+			// The mark is the tripwire's moment: a seat that has already added
+			// the limit's worth of lines is stopped here and its bead handed
+			// back for a split, rather than run on to the 20 minute stop.
+			if reason := d.overrunTripwireReason(s, seat, elapsed, splitAddedLines, false); reason != "" {
+				seat.StopReason = reason
+				// The stop's rework decision needs the sling it is stopping, as
+				// in the stop case.
+				seat.SlingAt = slung
+				d.overrunStop(s, seat, state, elapsed)
+			}
 		case overrunStop:
 			// The stop ran for this run of the bead already and the bead is
 			// back in the pool, labeled for a split or as rework. The stop
@@ -607,17 +638,78 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	}
 }
 
+// overrunTripwireReason returns the reason the guard stops a seat it has just
+// marked whose worktree adds at least limit lines, and "" when the tripwire
+// leaves the seat alone: the seat is handed back for a split instead of run on
+// to the 20 minute stop (gt-uj5a1i). A zero limit or an unset seam is off, and
+// so is a count under the limit. A count that fails is no reason either: the
+// mark stands, and the seat runs on to the stop threshold. It is not left to
+// the log alone, though: outside a dry run the countFailed seam alerts on it,
+// because the tripwire cannot weigh the seat while its worktree cannot be read;
+// an alert that could not be delivered is logged too, so the guard's blindness
+// is never silent (gt-eb7bzu). dry says no mark was written, so the log makes
+// no claim to one.
+func (d *Daemon) overrunTripwireReason(s overrunSeams, seat overrunSeat, elapsed time.Duration, limit int, dry bool) string {
+	if limit <= 0 || s.addedLines == nil {
+		return ""
+	}
+	n, err := s.addedLines(seat)
+	if err != nil {
+		who := seat.Rig + "/" + seat.Polecat
+		if dry {
+			d.logger.Printf("overrun_guard: dry run: %s: cannot count the lines added on %s, so no tripwire stop: %v", who, seat.Bead, err)
+			return ""
+		}
+		d.logger.Printf("overrun_guard: %s: cannot count the lines added on %s, so no tripwire stop; the mark stands and the seat runs on to the stop threshold: %v", who, seat.Bead, err)
+		if s.countFailed != nil {
+			if alertErr := s.countFailed(seat, err); alertErr != nil {
+				d.logger.Printf("overrun_guard: %s: the count-failure alert on %s was not delivered: %v", who, seat.Bead, alertErr)
+			}
+		}
+		return ""
+	}
+	if n < limit {
+		return ""
+	}
+	return fmt.Sprintf("tripwire: %d added lines at %s, at or over split_added_lines %d; split the bead",
+		n, elapsed.Round(time.Second), limit)
+}
+
 // overrunProdSeams returns the production seams: the daemon's rigs, event
-// log and notifier, the gate reader, and the stop's pause, session, checkpoint
-// and hand-back.
+// log and notifier, the gate reader, the seat's added-lines reading, and the
+// stop's pause, session, checkpoint and hand-back.
 func (d *Daemon) overrunProdSeams() overrunSeams {
 	sl := &overrunSlungReader{d: d}
 	gate := newOverrunGateReader(d)
 	escalation := newOverrunEscalationReader(d)
+	// addedLines opens the seat's handle through the one seam that picks it for
+	// the stop too, so the count reads the worktree the save, dirty check, push
+	// and reset act on. A handle the seam refuses comes back as its error with
+	// no count.
+	addedLines := func(seat overrunSeat) (int, error) {
+		g, err := d.overrunSeatGit(seat)
+		if err != nil {
+			return 0, err
+		}
+		return overrunSeatAddedLines(g, "origin/main")
+	}
 	return d.overrunStopSeams(overrunSeams{
-		now:                  time.Now,
-		workingSeats:         d.overrunWorkingSeats,
-		slungAt:              sl.slungAt,
+		now:          time.Now,
+		workingSeats: d.overrunWorkingSeats,
+		slungAt:      sl.slungAt,
+		addedLines:   addedLines,
+		// A count that fails leaves the tripwire blind on this seat, so it is
+		// raised rather than left in the log alone (gt-eb7bzu). The key names
+		// the bead as well as the seat: `gt escalate` records a repeat on the
+		// open bead, and a bead handed to a new seat is a new condition. The
+		// delivery outcome is returned so the guard does not report a blind
+		// tripwire as alerted when the alert never landed.
+		countFailed: func(seat overrunSeat, err error) error {
+			who := seat.Rig + "/" + seat.Polecat
+			return d.escalateAlertErr("overrun-count-failed:"+who+":"+seat.Bead, overrunActor, fmt.Sprintf(
+				"the overrun guard could not count the lines %s added on %s, so the split_added_lines tripwire cannot weigh the seat; the mark stands and the seat runs on to the stop threshold: %v",
+				who, seat.Bead, err))
+		},
 		gateRunning:          gate.running,
 		escalationWaiting:    escalation.waiting,
 		escalationAnsweredAt: escalation.answeredAt,

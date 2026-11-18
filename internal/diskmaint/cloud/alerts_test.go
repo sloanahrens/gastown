@@ -207,7 +207,7 @@ func TestReadingAsksTheDaemonsContainersAndTakesTheWorst(t *testing.T) {
 	}
 	for i, env := range f.envs {
 		if !slices.Equal(env, []string{"DOCKER_HOST=" + dockerHost}) {
-			t.Fatalf("call %v env = %v, want the cloud socket alone", f.calls[i], env)
+			t.Fatalf("call %v env = %d entries, want the cloud socket alone", f.calls[i], len(env))
 		}
 	}
 	// The Mac volume holds the VM's disk image; df runs inside the VM, so no

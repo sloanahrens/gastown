@@ -20,15 +20,19 @@ import (
 // are bd's, not a table gastown creates).
 const SampleKindUsageRecord = "usage_record"
 
-// UsageRecordRow is one usage record row: the run's record, the transcript
-// sessions it counted, and when the row was built. Record's own JSON is the
-// row's payload, so a reader of the scan's record files reads a row too.
+// UsageRecordRow is one usage record row: the bead's record as of the write, the
+// transcript sessions it counts, and when the row was built. A bead that ran more
+// than once files its whole merged record on each write (gt-27kuyd), so the
+// newest row of a bead and kind holds every run of it, and the rows are read
+// newest first. Record's own JSON is the row's payload, so a reader of the scan's
+// record files reads a row too.
 type UsageRecordRow struct {
 	// BuiltAt is when the row was built. It is bd's sample at, stored in UTC at
 	// second precision.
 	BuiltAt time.Time
-	// Record is the run's usage record (usagerecord.Record, the type the
-	// dashboard names dashboard.UsageRecord); Start and End are stored in UTC.
+	// Record is the bead's usage record as of the write (usagerecord.Record, the
+	// type the dashboard names dashboard.UsageRecord); Start and End are stored
+	// in UTC.
 	Record usagerecord.Record
 	// Sessions are the transcript sessions the record's totals count.
 	Sessions []string

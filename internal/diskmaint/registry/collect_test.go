@@ -66,7 +66,7 @@ func TestRegistryCollectOnlyRunsWithoutDeletes(t *testing.T) {
 		t.Fatalf("commands = %v, want the one collect %v", run.calls, argv)
 	}
 	if !slices.Equal(run.envs[0], env) {
-		t.Fatalf("collect env = %v, want %v", run.envs[0], env)
+		t.Fatalf("collect env = %d entries, want %d", len(run.envs[0]), len(env))
 	}
 	entry := readLedger(t, path)[0]
 	if entry.Target != collectTarget || entry.Done != 0 || len(entry.Errors) != 0 {

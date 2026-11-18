@@ -61,7 +61,7 @@ func expectedUnit() map[string]any {
 					"--tokens-dir", "/run/bdgw/tokens",
 					"--verbs", "/etc/bdgw/verbs.json",
 					"--log-dir", "/var/log/bdgw",
-					"--workspace", "/ws",
+					"--workspace", "/var/lib/bdgw/ws",
 				},
 				"environment": map[string]any{
 					"HOME":               "/home/bdgw",
@@ -73,13 +73,12 @@ func expectedUnit() map[string]any {
 				"volumes": []any{
 					"${GT_BD_TOKEN_DIR:?set GT_BD_TOKEN_DIR to the gateway token directory}:/run/bdgw/tokens:ro",
 					"bd-logs:/var/log/bdgw",
-					"bd-ws:/ws",
 				},
 				"mem_limit": "1g",
 				"cpus":      1,
 				"healthcheck": map[string]any{
 					"test": []any{"CMD", "/usr/local/bin/bdgw", "ready", "--tokens-dir", "/run/bdgw/tokens",
-						"--verbs", "/etc/bdgw/verbs.json", "--workspace", "/ws"},
+						"--verbs", "/etc/bdgw/verbs.json", "--workspace", "/var/lib/bdgw/ws"},
 					"interval": "10s",
 					"timeout":  "5s",
 					"retries":  5,
@@ -89,7 +88,6 @@ func expectedUnit() map[string]any {
 		"volumes": map[string]any{
 			"dolt-var": nil,
 			"bd-logs":  nil,
-			"bd-ws":    nil,
 		},
 	}
 }
@@ -291,6 +289,294 @@ func TestComposeDependsOn(t *testing.T) {
 	err := checkSections(readCompose(t), "services.bd.depends_on")
 	if err != nil {
 		t.Errorf("%s depends_on:\n%v", composeFile, err)
+	}
+}
+
+// bdWorkspaceRoot is the store root the bd service starts the gateway on. The
+// workspace store swaps the root directory by renaming a tree into place, so
+// the root must sit under a parent the gateway user owns, not at a mount point.
+const bdWorkspaceRoot = "/var/lib/bdgw/ws"
+
+// stringList returns a decoded YAML string sequence as strings, refusing a
+// value of another shape.
+func stringList(v any) ([]string, error) {
+	list, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("want a sequence of strings, got %T", v)
+	}
+	out := make([]string, len(list))
+	for i, item := range list {
+		s, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("element %d is %T, want a string: %v", i, item, item)
+		}
+		out[i] = s
+	}
+	return out, nil
+}
+
+// workspaceFlag returns the value of argv's single --workspace flag.
+func workspaceFlag(argv []string) (string, error) {
+	var values []string
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == "--workspace" {
+			values = append(values, argv[i+1])
+		}
+	}
+	switch len(values) {
+	case 0:
+		return "", errors.New("no --workspace flag")
+	case 1:
+		return values[0], nil
+	default:
+		return "", fmt.Errorf("%d --workspace flags: %v", len(values), values)
+	}
+}
+
+// bdWorkspacePaths returns the workspace path the bd service's command and its
+// health check name.
+func bdWorkspacePaths(doc map[string]any) (command, health string, err error) {
+	bd := service(doc, "bd")
+	cmd, err := stringList(bd["command"])
+	if err != nil {
+		return "", "", fmt.Errorf("the bd command: %w", err)
+	}
+	hc, ok := bd["healthcheck"].(map[string]any)
+	if !ok {
+		return "", "", fmt.Errorf("the bd health check is not a mapping: %v", bd["healthcheck"])
+	}
+	test, err := stringList(hc["test"])
+	if err != nil {
+		return "", "", fmt.Errorf("the bd health check command: %w", err)
+	}
+	if command, err = workspaceFlag(cmd); err != nil {
+		return "", "", fmt.Errorf("the bd command: %w", err)
+	}
+	if health, err = workspaceFlag(test); err != nil {
+		return "", "", fmt.Errorf("the bd health check: %w", err)
+	}
+	return command, health, nil
+}
+
+// workspaceAgreement returns an error unless the bd service's command and its
+// health check name the same workspace path, so readiness is judged against the
+// tree the running gateway serves.
+func workspaceAgreement(doc map[string]any) error {
+	command, health, err := bdWorkspacePaths(doc)
+	if err != nil {
+		return err
+	}
+	if command != health {
+		return fmt.Errorf("the bd command names --workspace %q, the health check names %q", command, health)
+	}
+	return nil
+}
+
+// volumeTarget returns the container path a compose volume entry mounts at. A
+// ${...} source may hold colons in its default text, so the source ends at the
+// first closing brace; a container path holds no colon, so any colon left on
+// the target ends it and begins a mount mode.
+func volumeTarget(spec string) string {
+	rest := spec
+	switch {
+	case strings.HasPrefix(rest, "${"):
+		if end := strings.Index(rest, "}"); end >= 0 {
+			rest = strings.TrimPrefix(rest[end+1:], ":")
+		}
+	case strings.Contains(rest, ":"):
+		rest = rest[strings.Index(rest, ":")+1:]
+	}
+	if i := strings.Index(rest, ":"); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
+}
+
+// bdMountTargets returns the container paths the bd service mounts volumes at.
+func bdMountTargets(doc map[string]any) ([]string, error) {
+	specs, err := stringList(service(doc, "bd")["volumes"])
+	if err != nil {
+		return nil, fmt.Errorf("the bd volumes: %w", err)
+	}
+	targets := make([]string, len(specs))
+	for i, spec := range specs {
+		targets[i] = volumeTarget(spec)
+	}
+	return targets, nil
+}
+
+// atOrUnder reports whether target is root itself or a path beneath it.
+func atOrUnder(target, root string) bool {
+	return target == root || strings.HasPrefix(target, root+"/")
+}
+
+// TestComposeWorkspaceLayout: the gateway runs on a store root its user owns and
+// that no volume covers, so its swap can rename a tree into place.
+func TestComposeWorkspaceLayout(t *testing.T) {
+	t.Parallel()
+	doc, err := decodeUnit(readCompose(t))
+	if err != nil {
+		t.Fatalf("%s: %v", composeFile, err)
+	}
+	command, health, err := bdWorkspacePaths(doc)
+	if err != nil {
+		t.Fatalf("%s: %v", composeFile, err)
+	}
+	if command != bdWorkspaceRoot {
+		t.Errorf("the bd command's --workspace = %q, want %q", command, bdWorkspaceRoot)
+	}
+	if health != bdWorkspaceRoot {
+		t.Errorf("the bd health check's --workspace = %q, want %q", health, bdWorkspaceRoot)
+	}
+	targets, err := bdMountTargets(doc)
+	if err != nil {
+		t.Fatalf("%s: %v", composeFile, err)
+	}
+	for _, target := range targets {
+		if atOrUnder(target, "/ws") || atOrUnder(target, "/var/lib/bdgw") {
+			t.Errorf("the bd service mounts a volume at %q; the store renames its root, so no volume may sit at or above it", target)
+		}
+	}
+}
+
+// TestComposeWorkspaceLayoutFlagsAgree: the command and the health check start
+// the gateway on the same store root, and the comparison reports two paths that
+// differ.
+func TestComposeWorkspaceLayoutFlagsAgree(t *testing.T) {
+	t.Parallel()
+	raw := readCompose(t)
+	doc, err := decodeUnit(raw)
+	if err != nil {
+		t.Fatalf("%s: %v", composeFile, err)
+	}
+	if err := workspaceAgreement(doc); err != nil {
+		t.Errorf("%s: %v", composeFile, err)
+	}
+	for _, tc := range []struct {
+		name string
+		set  func(t *testing.T, bd map[string]any)
+	}{
+		{
+			name: "the health check names another path",
+			set: func(t *testing.T, bd map[string]any) {
+				hc, ok := bd["healthcheck"].(map[string]any)
+				if !ok {
+					t.Fatalf("the bd health check is not a mapping: %v", bd["healthcheck"])
+				}
+				swapWorkspaceFlag(t, hc["test"], "/var/lib/bdgw/other")
+			},
+		},
+		{
+			name: "the command names another path",
+			set: func(t *testing.T, bd map[string]any) {
+				swapWorkspaceFlag(t, bd["command"], "/ws")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := decodeUnit(raw)
+			if err != nil {
+				t.Fatalf("%s: %v", composeFile, err)
+			}
+			tc.set(t, service(doc, "bd"))
+			if err := workspaceAgreement(doc); err == nil {
+				t.Error("agreement accepted a command and a health check naming different workspace paths")
+			}
+		})
+	}
+}
+
+// swapWorkspaceFlag replaces the value after each --workspace flag in a decoded
+// YAML sequence.
+func swapWorkspaceFlag(t *testing.T, seq any, value string) {
+	t.Helper()
+	list, ok := seq.([]any)
+	if !ok {
+		t.Fatalf("want a command sequence, got %T", seq)
+	}
+	swapped := false
+	for i := 0; i+1 < len(list); i++ {
+		if list[i] == "--workspace" {
+			list[i+1] = value
+			swapped = true
+		}
+	}
+	if !swapped {
+		t.Fatal("the sequence has no --workspace flag")
+	}
+}
+
+// TestWorkspaceFlag: one --workspace flag supplies the path; no flag, a flag
+// with no value after it, or two flags are refused.
+func TestWorkspaceFlag(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		argv    []string
+		want    string
+		wantErr bool
+	}{
+		{"one flag", []string{"--workspace", "/ws"}, "/ws", false},
+		{"no flag", []string{"--tokens-dir", "/t"}, "", true},
+		{"two flags", []string{"--workspace", "/a", "--workspace", "/b"}, "", true},
+		{"a trailing flag with no value", []string{"--workspace"}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := workspaceFlag(tc.argv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("workspaceFlag(%q) error = %v, wantErr %v", tc.argv, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("workspaceFlag(%q) = %q, want %q", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestStringList: a sequence of strings is returned; a value of another shape,
+// or an element that is not a string, is refused.
+func TestStringList(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		in      any
+		want    []string
+		wantErr bool
+	}{
+		{"strings", []any{"a", "b"}, []string{"a", "b"}, false},
+		{"not a sequence", "a", nil, true},
+		{"a non-string element", []any{"a", 2}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := stringList(tc.in)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("stringList(%v) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("stringList(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVolumeTarget: the target is the container path, after a named or variable
+// source and before a mount mode.
+func TestVolumeTarget(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, spec, want string }{
+		{"a named volume", "bd-logs:/var/log/bdgw", "/var/log/bdgw"},
+		{"a read-only variable source", "${GT_BD_TOKEN_DIR:?set GT_BD_TOKEN_DIR to the gateway token directory}:/run/bdgw/tokens:ro", "/run/bdgw/tokens"},
+		{"a variable target", "${GT_DOLT_DATA:?set GT_DOLT_DATA to the .dolt-data directory}:${GT_DOLT_DATA}", "${GT_DOLT_DATA}"},
+		{"an anonymous volume", "/data", "/data"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := volumeTarget(tc.spec); got != tc.want {
+				t.Errorf("volumeTarget(%q) = %q, want %q", tc.spec, got, tc.want)
+			}
+		})
 	}
 }
 

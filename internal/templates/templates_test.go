@@ -355,7 +355,7 @@ func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
 	for key, value := range data.Env {
 		want := `Environment="` + key + "=" + value + `"`
 		if !strings.Contains(output, want) {
-			t.Errorf("unit missing %q:\n%s", want, output)
+			t.Errorf("unit missing the environment directive for %s", key)
 		}
 	}
 }
@@ -849,7 +849,7 @@ func TestSupervisorData_LeavesDaemonEnvTokensOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	if data.Env["SDKROOT"] != "/fake/sdk" {
-		t.Errorf("SDKROOT dropped: %v", data.Env)
+		t.Errorf("SDKROOT dropped")
 	}
 	if _, ok := data.Env["DS_TOKEN"]; ok {
 		t.Error("supervisor env carries the daemon.env token")

@@ -217,10 +217,87 @@ func TestWorkspaceValidation(t *testing.T) {
 			want: ErrWorkspaceFileName,
 		},
 		{
+			// bd's runtime files are admitted by the live-tree walk only: an
+			// unknown name directly beside the town's .beads files is refused
+			// from a push like any other.
+			name: "an unknown name beside the town's .beads files",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/other.txt"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
 			name: "a workspace file outside a .beads directory",
 			files: func() map[string]string {
 				files := maps.Clone(base)
 				files["gt/metadata.json"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a town formula with another extension",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/formulas/x.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a town formula one level too deep",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/formulas/a/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a town formula with no name",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files[".beads/formulas/.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a rig formula with another extension",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/.beads/formulas/x.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a rig formula one level too deep",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/.beads/formulas/a/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			name: "a formula under a rig's own formulas directory, not its beads directory",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/formulas/x.formula.toml"] = "x"
+				return files
+			},
+			want: ErrWorkspaceFileName,
+		},
+		{
+			// A rig's own beads tree lives deeper down the redirect path; the copy
+			// is only at `<rig>/.beads/formulas`, so the deeper shape is no formula.
+			name: "a formula under a rig's redirected beads directory",
+			files: func() map[string]string {
+				files := maps.Clone(base)
+				files["gt/mayor/rig/.beads/formulas/x.formula.toml"] = "x"
 				return files
 			},
 			want: ErrWorkspaceFileName,
@@ -320,6 +397,95 @@ func TestWorkspaceValidation(t *testing.T) {
 			t.Errorf("the refusal echoed %d bytes of the caller's name", len(err.Error()))
 		}
 	})
+}
+
+// TestWorkspaceRuntimeFilePushRefused: a document that names a file bd writes
+// into a live workspace is refused, whatever its place. The runtime names are
+// for the live-tree walk only; the pushed tree holds the files the town builder
+// reads.
+func TestWorkspaceRuntimeFilePushRefused(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{
+		"gt/mayor/rig/.beads.gate.lock",
+		"gt/mayor/rig/.beads/.local_version",
+		"gt/mayor/rig/.beads/last-touched",
+	} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			files := testWorkspaceFiles("runtime")
+			files[path] = "x"
+			s, _ := openTestStore(t)
+			_, err := s.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(files), Files: files})
+			if !errors.Is(err, ErrWorkspaceFileName) {
+				t.Fatalf("Put with %q error = %v, want %v", path, err, ErrWorkspaceFileName)
+			}
+		})
+	}
+}
+
+// TestWorkspaceAcceptsTownFormulas: the gateway stores a town formula pushed at
+// `.beads/formulas/<name>.formula.toml`, serves it from the live tree, and reads
+// it back on Open, so a bd cooking through the gateway finds it.
+func TestWorkspaceAcceptsTownFormulas(t *testing.T) {
+	t.Parallel()
+	s, root := openTestStore(t)
+	files := testWorkspaceFiles("one")
+	files[".beads/formulas/mol-sample.formula.toml"] = "formula = \"mol-sample\"\ntype = \"workflow\"\n"
+	manifest := WorkspaceManifest(files)
+	encoded, err := json.Marshal(files)
+	if err != nil {
+		t.Fatalf("encoding the files: %v", err)
+	}
+	body := fmt.Sprintf(`{"manifest_sha":%q,"files":%s}`, manifest, encoded)
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v1/workspace", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a push carrying a formula answered %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get(WorkspaceHashHeader); got != manifest {
+		t.Errorf("header = %q, want the pushed hash %q", got, manifest)
+	}
+	if got := readWorkspace(t, root); !maps.Equal(files, got) {
+		t.Errorf("the live tree = %v, want the pushed files %v", got, files)
+	}
+	// A restart reads the tree back through the same path rules, so a path the
+	// store accepted must also be one it can serve after Open.
+	reopened, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("reopening the store: %v", err)
+	}
+	if got := reopened.Manifest(); got != manifest {
+		t.Errorf("the reopened store's manifest = %s, want %s", got, manifest)
+	}
+}
+
+// TestWorkspaceAcceptsRigFormulas: the gateway stores a town formula's copy under
+// a registered rig at `<rig>/.beads/formulas/<name>.formula.toml`, serves it from
+// the live tree, and reads it back on Open, so a rig-scoped bd cooking through
+// the gateway finds it.
+func TestWorkspaceAcceptsRigFormulas(t *testing.T) {
+	t.Parallel()
+	s, root := openTestStore(t)
+	files := testWorkspaceFiles("one")
+	files["gt/.beads/formulas/mol-sample.formula.toml"] = "formula = \"mol-sample\"\ntype = \"workflow\"\n"
+	manifest := WorkspaceManifest(files)
+
+	if _, err := s.Put(WorkspaceDocument{ManifestSHA: manifest, Files: files}); err != nil {
+		t.Fatalf("a push carrying a rig formula was refused: %v", err)
+	}
+	if got := readWorkspace(t, root); !maps.Equal(files, got) {
+		t.Errorf("the live tree = %v, want the pushed files %v", got, files)
+	}
+	// A restart reads the tree back through the same path rules, so a path the
+	// store accepted must also be one it can serve after Open.
+	reopened, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("reopening the store: %v", err)
+	}
+	if got := reopened.Manifest(); got != manifest {
+		t.Errorf("the reopened store's manifest = %s, want %s", got, manifest)
+	}
 }
 
 // TestWorkspaceAtomicSwap checks that a push replaces the whole tree and that a
@@ -780,6 +946,84 @@ func TestWorkspacePresent(t *testing.T) {
 			t.Fatalf("WorkspacePresent = %v, %v, want true, nil", present, err)
 		}
 	})
+	// A live workspace bd has run in holds the lock and state files bd writes
+	// itself. The readiness check must read it as ready, or the container
+	// reports unhealthy while bd serves calls.
+	t.Run("a tree holding bd's runtime files", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, ".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/.local_version", "6")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/last-touched", "2026-11-17T19:30:00Z")
+		writeFileIn(t, root, "gt/mayor/rig/.beads.gate.lock", "")
+		present, err := WorkspacePresent(root)
+		if err != nil || !present {
+			t.Fatalf("WorkspacePresent = %v, %v, want true, nil", present, err)
+		}
+	})
+	// The runtime names are admitted only where bd writes them, and only as
+	// regular files: every other shape stays refused, so the wider walk does
+	// not admit a foreign tree.
+	liveTree := func(t *testing.T) string {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, ".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
+		return root
+	}
+	for _, tc := range []struct {
+		name  string
+		build func(t *testing.T, root string)
+	}{
+		{
+			name: "an unknown file name",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/rig/.beads/README", "x")
+			},
+		},
+		{
+			name: "a symbolic link named .beads.gate.lock",
+			build: func(t *testing.T, root string) {
+				link := filepath.Join(root, "gt", "mayor", "rig", ".beads.gate.lock")
+				if err := os.Symlink(filepath.Join(root, "gt", "mayor", "rig", ".beads", "metadata.json"), link); err != nil {
+					t.Fatalf("creating the symlink: %v", err)
+				}
+			},
+		},
+		{
+			// The files under the directory would pass the push rules, so only
+			// the directory's own name is what makes the tree refused.
+			name: "a directory named .beads.gate.lock",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/rig/.beads.gate.lock/.beads/redirect", "x")
+			},
+		},
+		{
+			name: "a directory named last-touched",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/rig/.beads/last-touched/.beads/redirect", "x")
+			},
+		},
+		{
+			name: "a .beads.gate.lock with no .beads directory beside it",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/.beads.gate.lock", "")
+			},
+		},
+		{
+			name: "a last-touched outside a .beads directory",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, "gt/mayor/rig/last-touched", "")
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := liveTree(t)
+			tc.build(t, root)
+			if present, err := WorkspacePresent(root); !errors.Is(err, ErrWorkspaceRoot) {
+				t.Fatalf("WorkspacePresent = %v, %v, want an error wrapping %v", present, err, ErrWorkspaceRoot)
+			}
+		})
+	}
 	t.Run("a root that cannot be read", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "file")
 		if err := os.WriteFile(root, []byte("x"), 0o600); err != nil {
@@ -1039,6 +1283,44 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		}
 	})
 
+	// bd writes .local_version into a rig's .beads directory while the gateway
+	// serves calls, so a tree the readiness check reads holds it. Opening that
+	// tree must succeed, and the marker is served like any other workspace file.
+	t.Run("a tree holding bd's version marker in a rig directory", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, ".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+		writeFileIn(t, root, "gt/.beads/redirect", "/ws/gt/mayor/rig/.beads\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/.local_version", "6")
+		s, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("opening a tree with .local_version: %v", err)
+		}
+		want := WorkspaceManifest(readWorkspace(t, root))
+		if got := s.Manifest(); got != want {
+			t.Errorf("Manifest() = %s, want the tree's %s", got, want)
+		}
+	})
+
+	// bd also writes its lock beside a .beads directory and a last-touched
+	// stamp inside one. A gateway restarting over that live tree must open it,
+	// not refuse the workspace it just served.
+	t.Run("a tree holding bd's lock and state files", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "ws")
+		writeFileIn(t, root, ".beads/routes.jsonl", `{"path":".","prefix":"hq-"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
+		writeFileIn(t, root, "gt/mayor/rig/.beads/last-touched", "2026-11-17T19:30:00Z")
+		writeFileIn(t, root, "gt/mayor/rig/.beads.gate.lock", "")
+		s, err := OpenWorkspaceStore(root)
+		if err != nil {
+			t.Fatalf("opening a tree with bd's lock and state files: %v", err)
+		}
+		want := WorkspaceManifest(readWorkspace(t, root))
+		if got := s.Manifest(); got != want {
+			t.Errorf("Manifest() = %s, want the tree's %s", got, want)
+		}
+	})
+
 	t.Run("an empty root path", func(t *testing.T) {
 		if _, err := OpenWorkspaceStore(""); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf(`OpenWorkspaceStore("") error = %v, want %v`, err, ErrWorkspaceRoot)
@@ -1061,6 +1343,15 @@ func TestOpenWorkspaceStore(t *testing.T) {
 			name: "a tree with a file the store does not serve",
 			build: func(t *testing.T, root string) {
 				writeFileIn(t, root, "gt/.beads/README", "x")
+			},
+		},
+		{
+			// Admitting bd's runtime files widens the live-tree name rule by
+			// that closed set only: any other file under a .beads directory is
+			// still refused.
+			name: "a tree with an unknown file name under the town's .beads",
+			build: func(t *testing.T, root string) {
+				writeFileIn(t, root, ".beads/other.txt", "x")
 			},
 		},
 		{

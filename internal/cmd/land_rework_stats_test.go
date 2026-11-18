@@ -191,10 +191,16 @@ func checkLandReworkStatsGolden(t *testing.T, name string, out []byte) {
 	}
 }
 
-// TestLandReworkStats pins the weekly table: the share of beads with two or
-// more om rounds, with two or more seats, and the mean polecat minutes, with
-// the untimed landings counted separately and the thin week saying so.
-func TestLandReworkStats(t *testing.T) {
+// TestReworkProgramStatsTable pins the weekly table: the share of beads with
+// two or more om rounds, with two or more seats, and the mean polecat minutes,
+// with the untimed landings counted separately and the thin week saying so.
+//
+// The ReworkProgram prefix is deliberate (gt-rmq3yv): the rework-stats gate
+// line selects the tests it covers with -run 'ReworkProgram' over
+// ./internal/cmd, and its siblings in this file are named TestLandReworkStats*,
+// which that filter does not match. A rename back into that family hides this
+// test from the gate.
+func TestReworkProgramStatsTable(t *testing.T) {
 	t.Parallel()
 	town, _ := landReworkStatsFixture(t)
 	var out bytes.Buffer
@@ -453,6 +459,22 @@ func TestLandReworkStatsRefusals(t *testing.T) {
 				t.Errorf("error = %v, want it to name %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestLandReworkStatsWeeksRefusedBeforeTheTown: a window below one week is
+// refused before the command resolves the town or reads a ledger, so a bad
+// --weeks fails on the flag, not on the town.
+func TestLandReworkStatsWeeksRefusedBeforeTheTown(t *testing.T) {
+	t.Parallel()
+	resolve := func() (string, error) {
+		t.Error("--weeks 0 resolved the town")
+		return "", errors.New("not in a town")
+	}
+	var out bytes.Buffer
+	err := landReworkStatsReportFrom(resolve, &out, landReworkStatsNow, 0, false)
+	if err == nil || !strings.Contains(err.Error(), "want at least 1") {
+		t.Fatalf("error = %v, want the --weeks refusal", err)
 	}
 }
 

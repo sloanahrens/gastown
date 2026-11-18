@@ -35,6 +35,6 @@ func TestGitChildEnvDropsTheScrubbedVars(t *testing.T) {
 		"GIT_TERMINAL_PROMPT=0",
 	}
 	if got := GitChildEnv(environ); !reflect.DeepEqual(got, want) {
-		t.Fatalf("GitChildEnv = %q, want %q", got, want)
+		t.Fatalf("GitChildEnv = %d entries, want %d", len(got), len(want))
 	}
 }

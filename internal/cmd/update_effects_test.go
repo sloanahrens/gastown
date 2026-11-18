@@ -381,7 +381,7 @@ func TestRealRunFuncExitCodes(t *testing.T) {
 			t.Errorf("cmd.Dir = %q, want %q", got.Dir, dir)
 		}
 		if !slices.Contains(got.Env, envEntry) {
-			t.Errorf("cmd.Env = %q, want it to hold %q", got.Env, envEntry)
+			t.Errorf("cmd.Env does not hold %q", envEntry)
 		}
 		if len(got.Env) != wantEnvLen {
 			t.Errorf("len(cmd.Env) = %d, want %d: the caller's env is appended to the process environment, not given instead of it", len(got.Env), wantEnvLen)

@@ -83,7 +83,7 @@ type surface struct {
 	// newBdDocker builds the bddocker target for a town.
 	newBdDocker func(town string, cfg bdDockerConfig) target
 	// newForwarder builds the forwarder target for a town, with the gateway config
-	// gtwrap.DecideForwarder chose; an empty URL is the local route.
+	// gtwrap.DecideForwarder chose.
 	newForwarder func(town string, cfg bdGatewayConfig) target
 	// executable is the wrapper binary install copies into each tool's place.
 	executable func() (string, error)
@@ -174,8 +174,6 @@ func osSurface() surface {
 					Stderr:    os.Stderr,
 					Note:      os.Stderr,
 				},
-				Run:     gtwrap.OSProcess{},
-				Environ: os.Environ(),
 			}
 		},
 		executable: os.Executable,
@@ -266,8 +264,8 @@ type targetConfig struct {
 }
 
 // bdGatewayConfig is the bdgateway target's fields in the config file. The forwarder
-// fills the URL and token file from the environment instead; gtwrap.DecideForwarder
-// holds that decision and its rollback.
+// fills the URL and token file from the environment instead, and refuses when the URL
+// is unset; gtwrap.DecideForwarder holds that decision.
 type bdGatewayConfig struct {
 	URL       string `json:"url"`
 	TokenFile string `json:"token_file"`
@@ -401,14 +399,11 @@ func absentConfigTarget(s surface, tool string) (targetConfig, error) {
 
 // needsFileArgs reports whether the target cannot read the caller's files, so a
 // file a flag names travels as stdin instead. The forwarder's gateway workspace
-// mirrors the town but not the caller's filesystem; the local bd it falls back to
-// reads the file itself.
+// mirrors the town but not the caller's filesystem.
 func (c targetConfig) needsFileArgs() bool {
 	switch c.Target {
-	case kubernetesTarget, bdGatewayTarget, bdDockerTarget:
+	case kubernetesTarget, bdGatewayTarget, bdDockerTarget, forwarderTarget:
 		return true
-	case forwarderTarget:
-		return c.BdGateway.URL != ""
 	}
 	return false
 }
@@ -465,10 +460,13 @@ func openTarget(cfg targetConfig, town, tool string, s surface) (target, error) 
 // the town's compose file, so it finds the town. The kubernetes target only maps
 // the working directory onto the pod, and the path it maps under is $HOME/gt. That
 // needs no town marker, and a directory outside it is mapped with a note, not
-// refused, so the target runs from any directory. The forwarder's local bd needs
-// no town either; its gateway does, since the translation is relative to it.
+// refused, so the target runs from any directory. The forwarder's gateway needs the
+// town too, since the translation is relative to it.
+// A forwarder with no gateway refuses before it could use a town, so it needs none.
 func townFor(cfg targetConfig, s surface) (string, error) {
 	if cfg.Target == forwarderTarget && cfg.BdGateway.URL == "" {
+		// The refusal is bd's 125 status, and a town lookup that failed first would
+		// replace it with the wrapper's own failure status (f8cefae660a9).
 		return "", nil
 	}
 	if cfg.Target != kubernetesTarget {
@@ -608,8 +606,13 @@ func report(stdout io.Writer, diag gtwrap.Diagnosis, targetName string) int {
 	return 0
 }
 
-// fail reports a refusal and returns the wrapper's failure status.
+// fail reports a refusal and returns the wrapper's failure status, or bd's refusal
+// status when the forwarder has no gateway, so a caller never reads that refusal as
+// a crash.
 func fail(stderr io.Writer, err error) int {
 	fmt.Fprintln(stderr, err)
+	if errors.Is(err, gtwrap.ErrNoGateway) {
+		return gtwrap.ExitRefused
+	}
 	return exitFailure
 }

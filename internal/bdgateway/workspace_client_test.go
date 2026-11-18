@@ -25,7 +25,7 @@ func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) 
 // beads, a rig whose .beads is a redirect into mayor/rig, and a rig that holds
 // its files in its own .beads. Each directory keeps a file the workspace does
 // not serve, so a test catches a document that copies the directory rather than
-// the five files.
+// the files the workspace takes.
 func clientTown(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -131,6 +131,266 @@ func TestBuildWorkspaceDocument(t *testing.T) {
 	}
 	if _, err := validatedManifest(doc); err != nil {
 		t.Errorf("the gateway would refuse the document the builder returned: %v", err)
+	}
+}
+
+// TestBuildWorkspaceDocumentCarriesTownFormulas: the document holds each
+// regular .formula.toml of the town's formulas directory under
+// .beads/formulas, and a copy under each registered rig's beads directory at
+// <rig>/.beads/formulas, and nothing else that directory holds — not the
+// installed record, not a README, not a file nested in a subdirectory.
+func TestBuildWorkspaceDocumentCarriesTownFormulas(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	writePath(t, root, ".beads/formulas/alpha.formula.toml", "formula = \"alpha\"\n")
+	writePath(t, root, ".beads/formulas/mol-beta.formula.toml", "formula = \"mol-beta\"\ntype = \"workflow\"\n")
+	writePath(t, root, ".beads/formulas/.installed.json", `{"formulas":{}}`)
+	writePath(t, root, ".beads/formulas/README.md", "hand-written notes\n")
+	writePath(t, root, ".beads/formulas/archive/gamma.formula.toml", "formula = \"gamma\"\n")
+
+	doc, err := BuildWorkspaceDocument(root)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	want := clientTownDocument(t, root)
+	want[".beads/formulas/alpha.formula.toml"] = "formula = \"alpha\"\n"
+	want[".beads/formulas/mol-beta.formula.toml"] = "formula = \"mol-beta\"\ntype = \"workflow\"\n"
+	// A rig-scoped bd cook reads the rig's own .beads/formulas, so the same two
+	// files are carried under each registered rig as well.
+	for _, rig := range []string{"gastown", "toolbox"} {
+		want[rig+"/.beads/formulas/alpha.formula.toml"] = "formula = \"alpha\"\n"
+		want[rig+"/.beads/formulas/mol-beta.formula.toml"] = "formula = \"mol-beta\"\ntype = \"workflow\"\n"
+	}
+	for name, content := range want {
+		if got, ok := doc.Files[name]; !ok {
+			t.Errorf("document holds no %s", name)
+		} else if got != content {
+			t.Errorf("%s = %q, want %q", name, got, content)
+		}
+	}
+	for name, content := range doc.Files {
+		if _, ok := want[name]; ok {
+			continue
+		}
+		t.Errorf("document holds %s, which the workspace does not take: %q", name, content)
+	}
+	// The manifest the pusher sends must cover the formulas, or the gateway's
+	// hash of the same files would differ and refuse the push.
+	if got, want := doc.ManifestSHA, WorkspaceManifest(want); got != want {
+		t.Errorf("manifest = %s, want the hash of the expected files %s", got, want)
+	}
+	if _, err := validatedManifest(doc); err != nil {
+		t.Errorf("the gateway would refuse the document the builder returned: %v", err)
+	}
+}
+
+// appendRoute adds one route line to the fixture town's routes.jsonl.
+func appendRoute(t *testing.T, root, line string) {
+	t.Helper()
+	path := filepath.Join(root, ".beads", "routes.jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writePath(t, root, ".beads/routes.jsonl", string(data)+line+"\n")
+}
+
+// TestBuildWorkspaceDocumentCarriesRouteTargets: a route to a folder that is
+// not a registered rig is in the document's routes, and that folder's .beads
+// files are pushed with it. bd resolves a route's path to the .beads directory
+// inside the folder, so a workspace holding the route but not the database
+// answers "no dolt_database" for every bead the prefix names.
+func TestBuildWorkspaceDocumentCarriesRouteTargets(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	appendRoute(t, root, `{"path":"claude-beads","prefix":"claude-"}`)
+	writePath(t, root, "claude-beads/.beads/metadata.json", `{"dolt_database":"claude"}`+"\n")
+	writePath(t, root, "claude-beads/.beads/config.yaml", "issue-prefix: claude\n")
+	writePath(t, root, "claude-beads/.beads/dolt-server.port", "3307")
+	writePath(t, root, "claude-beads/.beads/.gt-types-configured", "x")
+	writePath(t, root, "claude-beads/notes.md", "not a beads file\n")
+
+	doc, err := BuildWorkspaceDocument(root)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	want := clientTownDocument(t, root)
+	want[".beads/routes.jsonl"] = clientTownRoutes + `{"prefix":"claude-","path":"claude-beads"}` + "\n"
+	want["claude-beads/.beads/metadata.json"] = `{"dolt_database":"claude"}` + "\n"
+	want["claude-beads/.beads/config.yaml"] = "issue-prefix: claude\n"
+	want["claude-beads/.beads/dolt-server.port"] = "3307"
+	for name, content := range want {
+		if got, ok := doc.Files[name]; !ok {
+			t.Errorf("document holds no %s", name)
+		} else if got != content {
+			t.Errorf("%s = %q, want %q", name, got, content)
+		}
+	}
+	for name, content := range doc.Files {
+		if _, ok := want[name]; !ok {
+			t.Errorf("document holds %s, which the workspace does not serve: %q", name, content)
+		}
+	}
+	if got, wantHash := doc.ManifestSHA, WorkspaceManifest(want); got != wantHash {
+		t.Errorf("manifest = %s, want the hash of the expected files %s", got, wantHash)
+	}
+	if _, err := validatedManifest(doc); err != nil {
+		t.Errorf("the gateway would refuse the document the builder returned: %v", err)
+	}
+}
+
+// TestBuildWorkspaceDocumentSkipsRouteTargetsWithoutADatabase: a route whose
+// target the town does not hold — no folder, no beads metadata, or something
+// that is not a folder — is kept in routes.jsonl and pushes no file. bd on the
+// host reports the same missing database for that prefix, and a route written
+// before its folder exists must not fail every other prefix's push.
+func TestBuildWorkspaceDocumentSkipsRouteTargetsWithoutADatabase(t *testing.T) {
+	t.Parallel()
+	const route = `{"path":"claude-beads","prefix":"claude-"}`
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root string)
+	}{
+		{
+			name:  "the target is missing on disk",
+			setup: func(*testing.T, string) {},
+		},
+		{
+			name: "the target holds no beads metadata",
+			setup: func(t *testing.T, root string) {
+				writePath(t, root, "claude-beads/.beads/config.yaml", "issue-prefix: claude\n")
+			},
+		},
+		{
+			name: "the target is a regular file",
+			setup: func(t *testing.T, root string) {
+				writePath(t, root, "claude-beads", "not a folder\n")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := clientTown(t)
+			appendRoute(t, root, route)
+			tc.setup(t, root)
+			doc, err := BuildWorkspaceDocument(root)
+			if err != nil {
+				t.Fatalf("BuildWorkspaceDocument: %v", err)
+			}
+			if got, want := doc.Files[".beads/routes.jsonl"], clientTownRoutes+`{"prefix":"claude-","path":"claude-beads"}`+"\n"; got != want {
+				t.Errorf("routes.jsonl = %q, want the route kept as %q", got, want)
+			}
+			for name := range doc.Files {
+				if strings.HasPrefix(name, "claude-beads/") {
+					t.Errorf("document holds %s, want no file for a target with no database", name)
+				}
+			}
+		})
+	}
+}
+
+// TestBuildWorkspaceDocumentRefusesAnEscapingRouteTarget: a route whose target
+// leaves the town — the folder itself, the .beads directory inside it, or the
+// metadata file — is refused rather than read into the pushed tree.
+func TestBuildWorkspaceDocumentRefusesAnEscapingRouteTarget(t *testing.T) {
+	t.Parallel()
+	const route = `{"path":"claude-beads","prefix":"claude-"}`
+	cases := []struct {
+		name    string
+		setup   func(t *testing.T, root string)
+		wantErr error
+		want    string
+	}{
+		{
+			// The route path itself resolves out, so rewrittenRoutes refuses it
+			// before any target file is read.
+			name: "the target folder is a symlink out of the town",
+			setup: func(t *testing.T, root string) {
+				if err := os.Symlink(writeOutsideBeads(t), filepath.Join(root, "claude-beads")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "outside the town",
+		},
+		{
+			// A link that names nothing is refused, never read as a folder the
+			// town has not made yet.
+			name: "the target folder is a dangling symlink",
+			setup: func(t *testing.T, root string) {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(root, "claude-beads")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "names nothing",
+		},
+		{
+			name: "the target's .beads is a symlink out of the town",
+			setup: func(t *testing.T, root string) {
+				if err := os.MkdirAll(filepath.Join(root, "claude-beads"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(writeOutsideBeads(t), filepath.Join(root, "claude-beads", ".beads")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
+		{
+			name: "the target's metadata.json is a symlink out of the town",
+			setup: func(t *testing.T, root string) {
+				writePath(t, root, "claude-beads/.beads/metadata.json", "placeholder\n")
+				linkFile(t, root, "claude-beads/.beads/metadata.json", filepath.Join(writeOutsideBeads(t), "metadata.json"))
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "resolves outside the town",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := clientTown(t)
+			appendRoute(t, root, route)
+			tc.setup(t, root)
+			_, err := BuildWorkspaceDocument(root)
+			if err == nil {
+				t.Fatal("BuildWorkspaceDocument accepted a route target that leaves the town")
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("error = %v, want it to wrap %v", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildWorkspaceDocumentPushesARigRouteTargetOnce: the fixture's routes name
+// both rigs — toolbox directly, and gastown through its redirect's target — so
+// each is also a route target. The document is exactly the rig-only set: the
+// route loop adds no second copy, and the manifest is the gateway's hash of the
+// files it carries.
+func TestBuildWorkspaceDocumentPushesARigRouteTargetOnce(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	doc, err := BuildWorkspaceDocument(root)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	want := clientTownDocument(t, root)
+	if len(doc.Files) != len(want) {
+		t.Fatalf("document holds %d files, want the %d rig-only files: %v", len(doc.Files), len(want), mapKeys(doc.Files))
+	}
+	for name := range doc.Files {
+		if _, ok := want[name]; !ok {
+			t.Errorf("document holds %s, which the rig and town files do not", name)
+		}
+	}
+	if got, wantHash := doc.ManifestSHA, WorkspaceManifest(want); got != wantHash {
+		t.Errorf("manifest = %s, want the hash of the rig-only files %s", got, wantHash)
 	}
 }
 
@@ -475,6 +735,126 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 			wantErr: ErrLinkOutsideTown,
 			want:    "mayor/rigs.json",
 		},
+		{
+			// A formula link is refused even when its target is in the town: the
+			// workspace carries formulas as regular files only.
+			name: "a formula that is a symlink to a file in the town",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, "shared/alpha.formula.toml", "formula = \"alpha\"\n")
+				writePath(t, root, ".beads/formulas/alpha.formula.toml", "placeholder\n")
+				linkFile(t, root, ".beads/formulas/alpha.formula.toml", filepath.Join(root, "shared", "alpha.formula.toml"))
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a formula that is a symlink to a file outside the town",
+			spoil: func(t *testing.T, root string) {
+				outside := filepath.Join(t.TempDir(), "alpha.formula.toml")
+				if err := os.WriteFile(outside, []byte("formula = \"alpha\"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writePath(t, root, ".beads/formulas/alpha.formula.toml", "placeholder\n")
+				linkFile(t, root, ".beads/formulas/alpha.formula.toml", outside)
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a subdirectory named like a formula",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/formulas/alpha.formula.toml/keep", "x")
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a formulas directory that is a symlink out of the town",
+			spoil: func(t *testing.T, root string) {
+				outside := t.TempDir()
+				if err := os.WriteFile(filepath.Join(outside, "alpha.formula.toml"), []byte("formula = \"alpha\"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, ".beads", "formulas")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "resolves outside the town",
+		},
+		{
+			name: "a formulas directory that is a dangling link is refused, not read as absent",
+			spoil: func(t *testing.T, root string) {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "gone"), filepath.Join(root, ".beads", "formulas")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrLinkOutsideTown,
+			want:    "names nothing",
+		},
+		{
+			name: "a formulas path that is a regular file",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/formulas", "not a directory\n")
+			},
+			want: "the town's formulas directory",
+		},
+		{
+			name: "a formula over the per-file cap",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/formulas/alpha.formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes+1))
+			},
+			wantErr: ErrWorkspaceFileTooLarge,
+		},
+		{
+			// Five formulas at the per-file cap are over the total while each is
+			// under its own: the set is refused, never truncated.
+			name: "town formulas over the total cap",
+			spoil: func(t *testing.T, root string) {
+				for _, name := range []string{"a", "b", "c", "d", "e"} {
+					writePath(t, root, ".beads/formulas/"+name+".formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes))
+				}
+			},
+			wantErr: ErrWorkspaceTooLarge,
+		},
+		{
+			name: "a route target whose metadata.json is a directory",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/routes.jsonl", `{"path":"claude-beads","prefix":"claude-"}`+"\n")
+				if err := os.MkdirAll(filepath.Join(root, "claude-beads", ".beads", "metadata.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrWorkspaceFileName,
+			want:    "is not a regular file",
+		},
+		{
+			name: "a route target's metadata.json over the file cap",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/routes.jsonl", `{"path":"claude-beads","prefix":"claude-"}`+"\n")
+				writePath(t, root, "claude-beads/.beads/metadata.json", strings.Repeat("m", MaxWorkspaceFileBytes+1))
+			},
+			wantErr: ErrWorkspaceFileTooLarge,
+		},
+		{
+			// The metadata can be neither read nor shown absent: the route target
+			// is refused rather than skipped as one holding no database.
+			name: "a route target whose .beads is a regular file",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/routes.jsonl", `{"path":"claude-beads","prefix":"claude-"}`+"\n")
+				writePath(t, root, "claude-beads/.beads", "not a directory\n")
+			},
+			want: "reading route target",
+		},
+		{
+			// A route path whose parent is a regular file cannot be stat'd, so
+			// the target is refused rather than read as absent.
+			name: "a route target under a regular file",
+			spoil: func(t *testing.T, root string) {
+				writePath(t, root, ".beads/routes.jsonl", `{"path":"claude-beads/sub","prefix":"claude-"}`+"\n")
+				writePath(t, root, "claude-beads", "not a directory\n")
+			},
+			want: "reading route target",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -495,6 +875,67 @@ func TestBuildWorkspaceDocumentRefusals(t *testing.T) {
 				t.Errorf("error = %v, want it to name %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap: the same formula
+// bytes are carried under the town's beads directory and under each registered
+// rig's, so a set that fits as the town's copies alone is over the total once
+// the rig copies are added, and the document is refused whole rather than
+// truncated. A town with no registered rigs carries the town copies alone and
+// pushes the same set.
+func TestBuildWorkspaceDocumentRigFormulasCountTowardTheTotalCap(t *testing.T) {
+	t.Parallel()
+	// Three formulas at the per-file cap: the town's copies fit the total cap,
+	// and each rig's copy of them pushes the set over it.
+	spoil := func(t *testing.T, root string) {
+		t.Helper()
+		for _, name := range []string{"a", "b", "c"} {
+			writePath(t, root, ".beads/formulas/"+name+".formula.toml", strings.Repeat("f", MaxWorkspaceFileBytes))
+		}
+	}
+
+	t.Run("with the registered rigs the set is refused", func(t *testing.T) {
+		t.Parallel()
+		root := clientTown(t)
+		spoil(t, root)
+		if _, err := BuildWorkspaceDocument(root); !errors.Is(err, ErrWorkspaceTooLarge) {
+			t.Fatalf("BuildWorkspaceDocument error = %v, want %v", err, ErrWorkspaceTooLarge)
+		}
+	})
+
+	t.Run("as the town's copies alone the same set is pushed", func(t *testing.T) {
+		t.Parallel()
+		root := clientTown(t)
+		spoil(t, root)
+		writePath(t, root, "mayor/rigs.json", `{"version":1,"rigs":{}}`)
+		doc, err := BuildWorkspaceDocument(root)
+		if err != nil {
+			t.Fatalf("BuildWorkspaceDocument: %v", err)
+		}
+		for _, name := range []string{"a", "b", "c"} {
+			if _, ok := doc.Files[".beads/formulas/"+name+".formula.toml"]; !ok {
+				t.Errorf("document holds no town formula %q", name)
+			}
+		}
+	})
+}
+
+// TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder
+// cannot read refuses the push rather than pushing a workspace without it, which
+// would fail only when a sling cooks that formula.
+func TestBuildWorkspaceDocumentRefusesAnUnreadableFormula(t *testing.T) {
+	t.Parallel()
+	root := clientTown(t)
+	formula := filepath.Join(root, ".beads", "formulas", "alpha.formula.toml")
+	writePath(t, root, ".beads/formulas/alpha.formula.toml", "formula = \"alpha\"\n")
+	if err := os.Chmod(formula, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(formula, 0o600) })
+	_, err := BuildWorkspaceDocument(root)
+	if err == nil || !strings.Contains(err.Error(), "alpha.formula.toml") {
+		t.Fatalf("BuildWorkspaceDocument error = %v, want a refusal naming the formula", err)
 	}
 }
 

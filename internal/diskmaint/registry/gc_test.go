@@ -111,7 +111,7 @@ func TestGarbageCollectUsesTheConfiguredDockerHost(t *testing.T) {
 		t.Fatalf("collect argv = %v, want %v", run.calls[0], argv)
 	}
 	if !slices.Equal(run.envs[0], env) {
-		t.Fatalf("collect env = %v, want %v", run.envs[0], env)
+		t.Fatalf("collect env = %d entries, want %d", len(run.envs[0]), len(env))
 	}
 }
 

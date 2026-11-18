@@ -57,7 +57,7 @@ func TestDaemonEnvShadowedKeyIsKeptAndNamed(t *testing.T) {
 		t.Errorf("HM_CONFIG = %q, want the pod's value %q kept", got, testPodValue)
 	}
 	if !slices.Equal(shadowed, []string{"HM_CONFIG"}) {
-		t.Errorf("shadowed keys = %v, want [HM_CONFIG]", shadowed)
+		t.Errorf("shadowed keys = %d, want [HM_CONFIG]", len(shadowed))
 	}
 	report := logs.joined()
 	if !strings.Contains(report, "HM_CONFIG") || !strings.Contains(report, testSettingsSource) {
@@ -89,7 +89,7 @@ func TestDaemonEnvUnsetAndEqualKeysAreApplied(t *testing.T) {
 		t.Errorf("SAME_KEY = %q, want it applied", got)
 	}
 	if len(shadowed) != 0 {
-		t.Errorf("shadowed keys = %v, want none", shadowed)
+		t.Errorf("shadowed keys = %d, want none", len(shadowed))
 	}
 	if strings.Contains(logs.joined(), "already sets") {
 		t.Errorf("an unset or equal key must not be reported as shadowed, got:\n%s", logs.joined())
@@ -109,7 +109,7 @@ func TestDaemonEnvOutsideContainerAppliesEveryKey(t *testing.T) {
 		t.Errorf("HM_CONFIG = %q, want the settings value applied outside container mode", got)
 	}
 	if len(shadowed) != 0 {
-		t.Errorf("shadowed keys = %v, want none outside container mode", shadowed)
+		t.Errorf("shadowed keys = %d, want none outside container mode", len(shadowed))
 	}
 }
 

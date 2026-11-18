@@ -79,8 +79,9 @@ func gatewayTarget(t *testing.T, town, tokenFile string, doer HTTPDoer) (BdGatew
 
 // TestBdGatewayTarget drives one whole call through the target: the head names
 // the bd arguments after bd, the screened env, the rig and the town-relative
-// directory; the token travels as the bearer header; the frames reach the
-// caller's streams; and the exit frame's status is returned unchanged.
+// directory; the token travels as the bearer header; the caller's stdin, which
+// the call reads, follows the head; the frames reach the caller's streams; and
+// the exit frame's status is returned unchanged.
 func TestBdGatewayTarget(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -116,7 +117,7 @@ func TestBdGatewayTarget(t *testing.T) {
 	})
 	g, stdout, stderr, _ := gatewayTarget(t, town, tokenFile, doer)
 	call := Call{
-		Argv: []string{"bd", "--allow-stale", "show", "gt-abc", "--json"},
+		Argv: []string{"bd", "--allow-stale", "comments", "add", "gt-abc", "-f", "-"},
 		Env: []string{
 			"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads"),
 			"BD_ACTOR=town/crew/dipper",
@@ -134,12 +135,12 @@ func TestBdGatewayTarget(t *testing.T) {
 	if exit != 7 {
 		t.Fatalf("exit = %d, want the exit frame's 7", exit)
 	}
-	if got, want := head.Argv, []string{"--allow-stale", "show", "gt-abc", "--json"}; !slices.Equal(got, want) {
+	if got, want := head.Argv, []string{"--allow-stale", "comments", "add", "gt-abc", "-f", "-"}; !slices.Equal(got, want) {
 		t.Errorf("head argv = %q, want %q (bd itself is never sent)", got, want)
 	}
 	wantEnv := map[string]string{"BD_ACTOR": "town/crew/dipper", "BD_READONLY": "1"}
 	if len(head.Env) != len(wantEnv) || head.Env["BD_ACTOR"] != wantEnv["BD_ACTOR"] || head.Env["BD_READONLY"] != wantEnv["BD_READONLY"] {
-		t.Errorf("head env = %v, want only the allowlisted %v", head.Env, wantEnv)
+		t.Errorf("head env = %d entries, want only the allowlisted %d", len(head.Env), len(wantEnv))
 	}
 	if head.Rig != "gastown" {
 		t.Errorf("head rig = %q, want %q", head.Rig, "gastown")
@@ -170,10 +171,156 @@ func TestBdGatewayTarget(t *testing.T) {
 	}
 }
 
+// recordingStdin is a caller's stdin a call must not read: a read is recorded
+// and ends the stream at once, so a call that reads it still returns and the
+// test reports the read, while a call that reads none never touches it (a pipe
+// that never closes would hold a reading call to the gateway's read deadline).
+type recordingStdin struct{ read bool }
+
+func (r *recordingStdin) Read([]byte) (int, error) {
+	r.read = true
+	return 0, io.EOF
+}
+
+// TestBdGatewaySendsNoStdinWhenTheCallReadsNone: a call whose argv names no "-"
+// value of a file flag sends the head line alone and never reads the caller's
+// stdin, so it is not held to the gateway's read deadline (gt-vojyy8). That
+// includes a "-" value of any other flag, a positional "-", and anything after
+// "--".
+func TestBdGatewaySendsNoStdinWhenTheCallReadsNone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name string
+		argv []string
+	}{
+		{name: "no argument reads stdin", argv: []string{"bd", "show", "gt-x", "--json"}},
+		{name: "a dash value after --", argv: []string{"bd", "show", "gt-x", "--", "--body-file", "-"}},
+		{name: "a non-file flag's separate dash value", argv: []string{"bd", "list", "--assignee", "-"}},
+		{name: "a non-file flag's attached dash value", argv: []string{"bd", "list", "--assignee=-"}},
+		{name: "a positional dash", argv: []string{"bd", "show", "gt-x", "-"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stdin := &recordingStdin{}
+			var body []byte
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(req *http.Request) (*http.Response, error) {
+				var err error
+				body, err = io.ReadAll(req.Body)
+				if err != nil {
+					t.Errorf("read the request body: %v", err)
+				}
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			}))
+			g.Stdin = stdin
+			call := Call{
+				Argv: tt.argv,
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  town,
+			}
+			if _, err := g.Launch(call); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if stdin.read {
+				t.Error("the call read the caller's stdin")
+			}
+			_, rest, ok := bytes.Cut(body, []byte("\n"))
+			if !ok {
+				t.Fatalf("request body %q has no head line", body)
+			}
+			if len(rest) != 0 {
+				t.Errorf("body after the head = %q, want none", rest)
+			}
+		})
+	}
+}
+
+// TestBdGatewaySendsStdinWhenTheCallReadsIt: every form bd takes its stdin in
+// carries the caller's stdin bytes after the head line, and a stdin the call
+// itself carries is sent whatever the arguments say.
+func TestBdGatewaySendsStdinWhenTheCallReadsIt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tests := []struct {
+		name string
+		argv []string
+		// callStdin is the stdin the call struct carries; empty uses the target's.
+		callStdin string
+		want      string
+	}{
+		{
+			name: "--body-file -",
+			argv: []string{"bd", "update", "gt-x", "--body-file", "-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "-f - under comments add",
+			argv: []string{"bd", "comments", "add", "gt-x", "-f", "-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "-f- attached to the shorthand",
+			argv: []string{"bd", "comments", "add", "gt-x", "-f-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "--description-file=-",
+			argv: []string{"bd", "update", "gt-x", "--description-file=-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "--stdin",
+			argv: []string{"bd", "create", "--stdin", "--title", "t"},
+			want: "the caller's stdin",
+		},
+		{
+			name:      "the call's own stdin",
+			argv:      []string{"bd", "update", "gt-x"},
+			callStdin: "the call's stdin",
+			want:      "the call's stdin",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(req *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read the request body: %v", err)
+				}
+				_, rest, ok := bytes.Cut(body, []byte("\n"))
+				if !ok {
+					t.Fatalf("request body %q has no head line", body)
+				}
+				got = string(rest)
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			}))
+			g.Stdin = strings.NewReader("the caller's stdin")
+			call := Call{
+				Argv: tt.argv,
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  town,
+			}
+			if tt.callStdin != "" {
+				call.Stdin = strings.NewReader(tt.callStdin)
+			}
+			if _, err := g.Launch(call); err != nil {
+				t.Fatalf("Launch: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("stdin after the head = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBdGatewayTranslation: BEADS_DIR names the rig and the working directory is
 // sent relative to the town; a directory outside the town runs in the town root
 // with a note; a BEADS_DIR the workspace cannot hold is refused before any
-// request.
+// request; a call that sets none runs in the town workspace only for bd version
+// and the root help probe, and is refused otherwise.
 func TestBdGatewayTranslation(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -181,6 +328,7 @@ func TestBdGatewayTranslation(t *testing.T) {
 	outside := t.TempDir()
 	tests := []struct {
 		name     string
+		argv     []string // nil means "bd show gt-x"
 		env      []string
 		dir      string
 		wantRig  string
@@ -206,6 +354,40 @@ func TestBdGatewayTranslation(t *testing.T) {
 		{
 			name: "no BEADS_DIR",
 			env:  nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "version without BEADS_DIR",
+			argv: []string{"bd", "version"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "version with --json without BEADS_DIR",
+			argv: []string{"bd", "version", "--json"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "--help without BEADS_DIR",
+			argv: []string{"bd", "--help"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "help without BEADS_DIR",
+			argv: []string{"bd", "help"}, env: nil, dir: inside, wantRig: "", wantCwd: "gastown/crew/dipper",
+		},
+		{
+			name: "list without BEADS_DIR",
+			argv: []string{"bd", "list", "--json"}, env: nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "version with another flag without BEADS_DIR",
+			argv: []string{"bd", "version", "--verbose"}, env: nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "--help with another word without BEADS_DIR",
+			argv: []string{"bd", "--help", "show"}, env: nil, dir: inside, wantErr: "sets no BEADS_DIR",
+		},
+		{
+			name: "version with a BEADS_DIR outside the town",
+			argv: []string{"bd", "version"},
+			env:  []string{"BEADS_DIR=" + filepath.Join(outside, "gastown", ".beads")},
+			dir:  inside, wantErr: "outside the town",
 		},
 		{
 			name: "relative BEADS_DIR",
@@ -240,7 +422,11 @@ func TestBdGatewayTranslation(t *testing.T) {
 				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
 			})
 			g, _, _, note := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
-			exit, err := g.Launch(Call{Argv: []string{"bd", "show", "gt-x"}, Env: tt.env, Dir: tt.dir})
+			argv := tt.argv
+			if argv == nil {
+				argv = []string{"bd", "show", "gt-x"}
+			}
+			exit, err := g.Launch(Call{Argv: argv, Env: tt.env, Dir: tt.dir})
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("Launch error = %v, want it to name %q", err, tt.wantErr)

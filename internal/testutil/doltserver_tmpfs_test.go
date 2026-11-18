@@ -34,7 +34,7 @@ func TestDoltContainerOpts_TmpfsByDefault(t *testing.T) {
 		t.Fatalf("Tmpfs[%s] = %q, want %q", doltDataDir, got, "rw,size=2g")
 	}
 	if req.Env["DOLT_ROOT_HOST"] != "%" {
-		t.Fatalf("DOLT_ROOT_HOST = %q, want %%", req.Env["DOLT_ROOT_HOST"])
+		t.Fatalf("DOLT_ROOT_HOST is not the expected value, want %%")
 	}
 }
 

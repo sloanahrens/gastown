@@ -100,7 +100,7 @@ func envValue(t *testing.T, env []string, key string) string {
 		}
 	}
 	if len(values) != 1 {
-		t.Fatalf("env defines %s %d times, want once: %q", key, len(values), env)
+		t.Fatalf("env defines %s %d times, want once", key, len(values))
 	}
 	return values[0]
 }
@@ -482,7 +482,7 @@ func TestPlanReplacesAnInheritedGitIdentity(t *testing.T) {
 	launch := launched(t, d)
 	checkIdentity(t, launch, "wren")
 	if !slices.Contains(launch.Env, "PATH=/bin") {
-		t.Errorf("env %q lost PATH", launch.Env)
+		t.Errorf("env lost PATH")
 	}
 }
 
@@ -498,6 +498,6 @@ func TestPlanLeavesTheCallersInputsAlone(t *testing.T) {
 		t.Errorf("args = %q, want them unchanged: %q", args, wantArgs)
 	}
 	if !slices.Equal(env, wantEnv) {
-		t.Errorf("env = %q, want it unchanged: %q", env, wantEnv)
+		t.Errorf("env changed, want it unchanged: %q", wantEnv)
 	}
 }

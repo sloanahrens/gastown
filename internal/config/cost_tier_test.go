@@ -195,17 +195,17 @@ func TestCostTierAgents(t *testing.T) {
 			t.Fatal("groq-compound Env is nil, want Groq API env vars")
 		}
 		if groq.Env["ANTHROPIC_BASE_URL"] != "https://api.groq.com/openai/v1" {
-			t.Errorf("groq-compound ANTHROPIC_BASE_URL = %q, want Groq API URL", groq.Env["ANTHROPIC_BASE_URL"])
+			t.Errorf("groq-compound ANTHROPIC_BASE_URL is set to an unexpected value, want the Groq API URL")
 		}
 		if groq.Env["ANTHROPIC_MODEL"] != "compound-beta" {
-			t.Errorf("groq-compound ANTHROPIC_MODEL = %q, want compound-beta", groq.Env["ANTHROPIC_MODEL"])
+			t.Errorf("groq-compound ANTHROPIC_MODEL is set to an unexpected value, want compound-beta")
 		}
 		// The tier persists the ${GROQ_API_KEY} reference, not the key's value:
 		// ApplyCostTier writes this RuntimeConfig into settings/config.json, and
 		// a live key there would put the secret on disk. The reference resolves
 		// at spawn instead (gt-yih1).
 		if got := groq.Env["ANTHROPIC_API_KEY"]; got != "${GROQ_API_KEY}" {
-			t.Errorf("groq-compound ANTHROPIC_API_KEY = %q, want the %q reference (never the key)", got, "${GROQ_API_KEY}")
+			t.Errorf("groq-compound ANTHROPIC_API_KEY is not the %q reference", "${GROQ_API_KEY}")
 		}
 	})
 }

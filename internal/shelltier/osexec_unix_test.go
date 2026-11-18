@@ -28,7 +28,7 @@ func TestNewCommandIsBoundedAndGrouped(t *testing.T) {
 	}
 	for _, kv := range c.Env {
 		if !slices.Contains(cmd.Env, kv) {
-			t.Fatalf("env %q is missing from the command's environment", kv)
+			t.Fatalf("an environment entry is missing from the command's environment")
 		}
 	}
 }

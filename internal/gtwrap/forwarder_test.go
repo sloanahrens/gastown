@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 
@@ -15,22 +14,6 @@ import (
 
 // gatewayURL is the gateway the forwarder rows configure.
 const gatewayURL = "http://gw:7440"
-
-// processRecorder is a Process that records the call and answers from its fields,
-// so a test drives the local bd without starting one.
-type processRecorder struct {
-	ran  bool
-	argv []string
-	env  []string
-	dir  string
-	exit int
-	err  error
-}
-
-func (p *processRecorder) Run(argv, env []string, dir string) (int, error) {
-	p.ran, p.argv, p.env, p.dir = true, argv, env, dir
-	return p.exit, p.err
-}
 
 // wrapperAt names a wrapper and the real bd beside it, in a temp dir.
 func wrapperAt(t *testing.T) (self, real string) {
@@ -52,21 +35,25 @@ func inputs(self string, stat func(string) (fs.FileInfo, error), url, tokenFile 
 	}
 }
 
-// beside answers a stat that reports the wrapper and the real bd as executable
-// regular files, so the decision's checks run without a test writing an executable.
+// beside answers a stat that reports the wrapper and the real bd as present, so the
+// decision's checks run without a test writing a file.
 func beside(self, real string) func(string) (fs.FileInfo, error) {
 	return statFiles(map[string]os.FileMode{self: 0o755, real: 0o755})
 }
 
-// forwarderLocal is a Forwarder in forwarder mode with the real bd beside it, no
-// gateway configured, and the runner given.
-func forwarderLocal(t *testing.T, run Process) Forwarder {
+// gatewayForwarder is a Forwarder in forwarder mode with a readable token and a
+// gateway whose every request answers with an empty success.
+func gatewayForwarder(t *testing.T) Forwarder {
 	t.Helper()
+	town := t.TempDir()
 	self, real := wrapperAt(t)
+	token := writeGatewayToken(t, "sekrit\n")
+	gateway, _, _, _ := gatewayTarget(t, town, token, doerFunc(func(*http.Request) (*http.Response, error) {
+		return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+	}))
 	return Forwarder{
-		In:      inputs(self, beside(self, real), "", ""),
-		Run:     run,
-		Environ: []string{"PATH=/usr/bin", "BEADS_DIR=/town/.beads"},
+		In:      inputs(self, beside(self, real), gatewayURL, token),
+		Gateway: gateway,
 	}
 }
 
@@ -78,7 +65,7 @@ func TestDecideForwarder(t *testing.T) {
 		name  string
 		in    func(t *testing.T) ForwarderInputs
 		route ForwarderRoute
-		// want is the refusal's text, or the route's real bd name or gateway URL.
+		// want is the refusal's text, or the route's gateway URL.
 		want   string
 		refuse bool
 	}{
@@ -148,15 +135,6 @@ func TestDecideForwarder(t *testing.T) {
 			want:   "no way to find the wrapper or read",
 		},
 		{
-			name: "no gateway routes the call to the real bd beside the wrapper",
-			in: func(t *testing.T) ForwarderInputs {
-				self, real := wrapperAt(t)
-				return inputs(self, beside(self, real), "", "")
-			},
-			route: RouteLocal,
-			want:  realBdName,
-		},
-		{
 			name: "a configured gateway carries the call when its token can be read",
 			in: func(t *testing.T) ForwarderInputs {
 				self, real := wrapperAt(t)
@@ -166,7 +144,7 @@ func TestDecideForwarder(t *testing.T) {
 			want:  gatewayURL,
 		},
 		{
-			name: "a gateway carries the call even when the real bd is not executable",
+			name: "a gateway carries the call whatever bd.real's mode, since it never runs it",
 			in: func(t *testing.T) ForwarderInputs {
 				self, real := wrapperAt(t)
 				stat := statFiles(map[string]os.FileMode{self: 0o755, real: 0o644})
@@ -204,51 +182,6 @@ func TestDecideForwarder(t *testing.T) {
 			refuse: true,
 			want:   "no way to read the gateway token file",
 		},
-		{
-			name: "the local route refuses a real bd that is not executable",
-			in: func(t *testing.T) ForwarderInputs {
-				self, real := wrapperAt(t)
-				return inputs(self, statFiles(map[string]os.FileMode{self: 0o755, real: 0o644}), "", "")
-			},
-			refuse: true,
-			want:   "not an executable file",
-		},
-		{
-			name: "the local route refuses a real bd that is the wrapper itself",
-			in: func(t *testing.T) ForwarderInputs {
-				// The wrapper is the test binary, a real executable, and bd.real beside
-				// it is a link to the same file; neither is written by the test.
-				exe, err := os.Executable()
-				if err != nil {
-					t.Fatalf("find the test binary: %v", err)
-				}
-				dir := t.TempDir()
-				self, real := filepath.Join(dir, "bd"), filepath.Join(dir, realBdName)
-				for _, path := range []string{self, real} {
-					if err := os.Symlink(exe, path); err != nil {
-						t.Fatalf("symlink the test binary: %v", err)
-					}
-				}
-				return inputs(self, os.Stat, "", "")
-			},
-			refuse: true,
-			want:   "would run it again",
-		},
-		{
-			name: "the local route refuses a wrapper whose metadata cannot be read",
-			in: func(t *testing.T) ForwarderInputs {
-				self, real := wrapperAt(t)
-				stat := beside(self, real)
-				return inputs(self, func(path string) (fs.FileInfo, error) {
-					if path == self {
-						return nil, errors.New("the wrapper's own metadata is unreadable")
-					}
-					return stat(path)
-				}, "", "")
-			},
-			refuse: true,
-			want:   "read the wrapper",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -269,42 +202,95 @@ func TestDecideForwarder(t *testing.T) {
 			if plan.Route != tt.route {
 				t.Fatalf("route = %d, want %d (reason: %s)", plan.Route, tt.route, plan.Reason)
 			}
-			switch tt.route {
-			case RouteLocal:
-				if filepath.Base(plan.RealBd) != realBdName {
-					t.Fatalf("real bd = %q, want the bd.real beside the wrapper", plan.RealBd)
-				}
-			case RouteGateway:
-				if plan.URL != tt.want {
-					t.Fatalf("gateway URL = %q, want %q", plan.URL, tt.want)
-				}
+			if tt.route == RouteGateway && plan.URL != tt.want {
+				t.Fatalf("gateway URL = %q, want %q", plan.URL, tt.want)
 			}
 		})
 	}
 }
 
-// TestForwarderAsBd drives the two routes Launch takes: a configured gateway
-// carries the call, and with none configured the real bd beside the wrapper runs
-// with bd's own arguments.
-func TestForwarderAsBd(t *testing.T) {
+// TestForwarderNoGateway: in forwarder mode with BD_GATEWAY_URL unset or empty, the
+// plan is a refusal naming BD_GATEWAY_URL and nothing runs, whether or not a token
+// file is configured (gt-q1beru).
+func TestForwarderNoGateway(t *testing.T) {
 	t.Parallel()
-	t.Run("a configured gateway carries the call", func(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		tokenFile func(t *testing.T) string
+	}{
+		{name: "with no token file either", tokenFile: func(*testing.T) string { return "" }},
+		{name: "with a token file a configured gateway would use", tokenFile: func(t *testing.T) string {
+			return writeGatewayToken(t, "sekrit\n")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			self, real := wrapperAt(t)
+			token := tt.tokenFile(t)
+			in := inputs(self, beside(self, real), "", token)
+
+			plan, err := DecideForwarder(in)
+			if err == nil {
+				t.Fatalf("DecideForwarder = %+v, nil; want a refusal", plan)
+			}
+			if !errors.Is(err, ErrNoGateway) {
+				t.Fatalf("DecideForwarder error %q does not wrap ErrNoGateway", err)
+			}
+			if !strings.Contains(err.Error(), "BD_GATEWAY_URL") {
+				t.Fatalf("error %q does not name BD_GATEWAY_URL", err)
+			}
+
+			calls := 0
+			gateway, _, _, _ := gatewayTarget(t, town, token, doerFunc(func(*http.Request) (*http.Response, error) {
+				calls++
+				return gatewayResponse(t, bdgateway.ExitFrame(0)), nil
+			}))
+			f := Forwarder{In: in, Gateway: gateway}
+			exit, err := f.Launch(Call{Argv: []string{"bd", "show", "gt-x"}, Dir: town})
+			if err == nil {
+				t.Fatalf("Launch = %d, nil; want a refusal", exit)
+			}
+			if exit != ExitRefused {
+				t.Fatalf("Launch = %d, want bd's refusal status %d", exit, ExitRefused)
+			}
+			if calls != 0 {
+				t.Fatalf("the gateway was called %d times with no BD_GATEWAY_URL", calls)
+			}
+		})
+	}
+}
+
+// TestForwarderGatewayRoutes: with the URL and a readable token file the call routes
+// to the gateway target, and a URL without a token file still errors as before.
+func TestForwarderGatewayRoutes(t *testing.T) {
+	t.Parallel()
+	t.Run("a URL and a readable token route the call to the gateway", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
-		tokenFile := writeGatewayToken(t, "sekrit\n")
-		gateway, stdout, _, _ := gatewayTarget(t, town, "", doerFunc(func(*http.Request) (*http.Response, error) {
+		token := writeGatewayToken(t, "sekrit\n")
+		self, real := wrapperAt(t)
+		in := inputs(self, beside(self, real), gatewayURL, token)
+
+		plan, err := DecideForwarder(in)
+		if err != nil {
+			t.Fatalf("DecideForwarder = %v; want the gateway route", err)
+		}
+		if plan.Route != RouteGateway || plan.URL != gatewayURL || plan.TokenFile != token {
+			t.Fatalf("plan = %+v, want the gateway %s with the token %s", plan, gatewayURL, token)
+		}
+
+		calls := 0
+		gateway, stdout, _, _ := gatewayTarget(t, town, token, doerFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			if got, want := req.URL.String(), gatewayURL+"/v1/exec"; got != want {
+				t.Errorf("request URL = %q, want %q", got, want)
+			}
 			return gatewayResponse(t,
 				bdgateway.Frame{Kind: bdgateway.FrameStdout, Payload: []byte("gt-x\n")},
 				bdgateway.ExitFrame(0)), nil
 		}))
-		self, real := wrapperAt(t)
-		local := &processRecorder{exit: 9}
-		f := Forwarder{
-			In:      inputs(self, beside(self, real), gateway.URL, tokenFile),
-			Gateway: gateway,
-			Run:     local,
-		}
-
+		f := Forwarder{In: in, Gateway: gateway}
 		exit, err := f.Launch(Call{
 			Argv: []string{"bd", "show", "gt-x"},
 			Env:  []string{"BEADS_DIR=" + filepath.Join(town, ".beads")},
@@ -313,46 +299,35 @@ func TestForwarderAsBd(t *testing.T) {
 		if err != nil || exit != 0 {
 			t.Fatalf("Launch = %d, %v; want the gateway's 0, nil", exit, err)
 		}
-		if local.ran {
-			t.Fatalf("the local bd ran %q beside a configured gateway", local.argv)
+		if calls != 1 {
+			t.Fatalf("the gateway was called %d times, want 1", calls)
 		}
 		if got := stdout.String(); got != "gt-x\n" {
 			t.Fatalf("stdout = %q, want the gateway's frame", got)
 		}
 	})
 
-	t.Run("no gateway runs the local real bd", func(t *testing.T) {
+	t.Run("a URL without a token file still refuses", func(t *testing.T) {
 		t.Parallel()
-		run := &processRecorder{exit: 3}
-		f := forwarderLocal(t, run)
-		self, err := f.In.Executable()
-		if err != nil {
-			t.Fatalf("wrapper path: %v", err)
+		self, real := wrapperAt(t)
+		in := inputs(self, beside(self, real), gatewayURL, "")
+		plan, err := DecideForwarder(in)
+		if err == nil {
+			t.Fatalf("DecideForwarder = %+v, nil; want a refusal", plan)
 		}
-
-		exit, err := f.Launch(Call{Argv: []string{"bd", "create", "--title", "t"}, Dir: t.TempDir()})
-		if err != nil {
-			t.Fatalf("Launch = %v", err)
+		if !strings.Contains(err.Error(), "BD_GATEWAY_TOKEN_FILE") {
+			t.Fatalf("error %q does not name BD_GATEWAY_TOKEN_FILE", err)
 		}
-		if exit != 3 {
-			t.Fatalf("Launch = %d, want the real bd's 3", exit)
-		}
-		if !run.ran {
-			t.Fatal("the local bd did not run with no gateway configured")
-		}
-		want := []string{filepath.Join(filepath.Dir(self), realBdName), "create", "--title", "t"}
-		if !slices.Equal(run.argv, want) {
-			t.Fatalf("ran %q, want %q", run.argv, want)
-		}
-		if !slices.Equal(run.env, f.Environ) {
-			t.Fatalf("env = %q, want the caller's whole environment %q", run.env, f.Environ)
+		f := Forwarder{In: in}
+		if exit, err := f.Launch(Call{Argv: []string{"bd", "show", "gt-x"}}); err == nil || exit != exitDown {
+			t.Fatalf("Launch = %d, %v; want the refusal %d", exit, err, exitDown)
 		}
 	})
 }
 
 // TestForwarderNoSilentFallback: a gateway that is configured but cannot answer is
-// an error naming its URL, and the local bd never runs in its place, so a caller
-// never reads a local bd's result as the gateway's.
+// an error naming its URL, so a caller never reads some other result as the
+// gateway's.
 func TestForwarderNoSilentFallback(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -361,11 +336,9 @@ func TestForwarderNoSilentFallback(t *testing.T) {
 		return nil, errors.New("connection refused")
 	}))
 	self, real := wrapperAt(t)
-	local := &processRecorder{exit: 0}
 	f := Forwarder{
 		In:      inputs(self, beside(self, real), gateway.URL, tokenFile),
 		Gateway: gateway,
-		Run:     local,
 	}
 
 	exit, err := f.Launch(Call{
@@ -382,9 +355,6 @@ func TestForwarderNoSilentFallback(t *testing.T) {
 	if !strings.Contains(err.Error(), gateway.URL) {
 		t.Fatalf("error %q does not name the gateway URL %s", err, gateway.URL)
 	}
-	if local.ran {
-		t.Fatalf("the local bd ran %q in place of a down gateway", local.argv)
-	}
 }
 
 // TestForwarderRefusesACallItCannotRun: each way a bd call cannot reach a route is a
@@ -398,34 +368,22 @@ func TestForwarderRefusesACallItCannotRun(t *testing.T) {
 		reason string
 	}{
 		{
-			name: "a call not named bd",
-			f: func(t *testing.T) Forwarder {
-				return forwarderLocal(t, &processRecorder{})
-			},
+			name:   "a call not named bd",
+			f:      gatewayForwarder,
 			argv:   []string{"gt", "status"},
 			reason: `names "gt"`,
 		},
 		{
-			name: "a call with no arguments",
-			f: func(t *testing.T) Forwarder {
-				return forwarderLocal(t, &processRecorder{})
-			},
+			name:   "a call with no arguments",
+			f:      gatewayForwarder,
 			argv:   nil,
 			reason: "no arguments",
-		},
-		{
-			name: "no runner wired for the local route",
-			f: func(t *testing.T) Forwarder {
-				return forwarderLocal(t, nil)
-			},
-			argv:   []string{"bd", "show", "gt-x"},
-			reason: "no runner is wired",
 		},
 		{
 			name: "no bd.real, so the wrapper is not in forwarder mode",
 			f: func(t *testing.T) Forwarder {
 				self, _ := wrapperAt(t)
-				return Forwarder{In: inputs(self, statFiles(map[string]os.FileMode{self: 0o755}), "", ""), Run: &processRecorder{}}
+				return Forwarder{In: inputs(self, statFiles(map[string]os.FileMode{self: 0o755}), "", "")}
 			},
 			argv:   []string{"bd", "show", "gt-x"},
 			reason: "not in forwarder mode",
@@ -435,7 +393,7 @@ func TestForwarderRefusesACallItCannotRun(t *testing.T) {
 			f: func(t *testing.T) Forwarder {
 				in := ForwarderInputs{Tool: nativeBdTool, Stat: os.Stat}
 				in.Executable = func() (string, error) { return "", errors.New("no own path") }
-				return Forwarder{In: in, Run: &processRecorder{}}
+				return Forwarder{In: in}
 			},
 			argv:   []string{"bd", "show", "gt-x"},
 			reason: "find the wrapper",
@@ -466,24 +424,13 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 	tests := []struct {
 		name string
 		in   func(t *testing.T) ForwarderInputs
-		// nilRun leaves the local route's runner unwired.
-		nilRun bool
-		rung   Rung
+		rung Rung
 		// reason is text the doctor's reason must contain.
 		reason string
-		// local is whether the launch runs the real bd.
-		local bool
+		// exit is the launch's status: 0 when the call runs, the refusal status
+		// otherwise.
+		exit int
 	}{
-		{
-			name: "no gateway: the real bd runs",
-			in: func(t *testing.T) ForwarderInputs {
-				self, real := wrapperAt(t)
-				return inputs(self, beside(self, real), "", "")
-			},
-			rung:   RungLocal,
-			reason: realBdName,
-			local:  true,
-		},
 		{
 			name: "a gateway with its token: the gateway carries the call",
 			in: func(t *testing.T) ForwarderInputs {
@@ -492,6 +439,7 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 			},
 			rung:   RungExec,
 			reason: gatewayURL,
+			exit:   0,
 		},
 		{
 			name: "a gateway with no token file: refused",
@@ -501,6 +449,7 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 			},
 			rung:   RungDown,
 			reason: "BD_GATEWAY_TOKEN_FILE",
+			exit:   exitDown,
 		},
 		{
 			name: "a gateway with an unreadable token: refused",
@@ -510,6 +459,17 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 			},
 			rung:   RungDown,
 			reason: "read the gateway token file",
+			exit:   exitDown,
+		},
+		{
+			name: "no gateway configured: refused",
+			in: func(t *testing.T) ForwarderInputs {
+				self, real := wrapperAt(t)
+				return inputs(self, beside(self, real), "", "")
+			},
+			rung:   RungDown,
+			reason: "BD_GATEWAY_URL",
+			exit:   ExitRefused,
 		},
 		{
 			name: "no real bd beside the wrapper: not in forwarder mode",
@@ -519,44 +479,7 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 			},
 			rung:   RungDown,
 			reason: "not in forwarder mode",
-		},
-		{
-			name: "the real bd is not executable: refused",
-			in: func(t *testing.T) ForwarderInputs {
-				self, real := wrapperAt(t)
-				return inputs(self, statFiles(map[string]os.FileMode{self: 0o755, real: 0o644}), "", "")
-			},
-			rung:   RungDown,
-			reason: "not an executable file",
-		},
-		{
-			name: "the real bd is the wrapper: refused",
-			in: func(t *testing.T) ForwarderInputs {
-				exe, err := os.Executable()
-				if err != nil {
-					t.Fatalf("find the test binary: %v", err)
-				}
-				dir := t.TempDir()
-				self, real := filepath.Join(dir, "bd"), filepath.Join(dir, realBdName)
-				for _, path := range []string{self, real} {
-					if err := os.Symlink(exe, path); err != nil {
-						t.Fatalf("symlink the test binary: %v", err)
-					}
-				}
-				return inputs(self, os.Stat, "", "")
-			},
-			rung:   RungDown,
-			reason: "would run it again",
-		},
-		{
-			name: "no runner wired for the local route: the doctor reports down, as the launch refuses",
-			in: func(t *testing.T) ForwarderInputs {
-				self, real := wrapperAt(t)
-				return inputs(self, beside(self, real), "", "")
-			},
-			nilRun: true,
-			rung:   RungDown,
-			reason: "no runner is wired",
+			exit:   exitDown,
 		},
 	}
 	for _, tt := range tests {
@@ -571,12 +494,7 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 					bdgateway.Frame{Kind: bdgateway.FrameStdout, Payload: []byte("gt-x\n")},
 					bdgateway.ExitFrame(0)), nil
 			}))
-			var run Process
-			local := &processRecorder{exit: 0}
-			if !tt.nilRun {
-				run = local
-			}
-			f := Forwarder{In: tt.in(t), Gateway: gateway, Run: run, Environ: []string{"PATH=/usr/bin"}}
+			f := Forwarder{In: tt.in(t), Gateway: gateway}
 
 			diag, err := f.Doctor()
 			if err != nil {
@@ -597,33 +515,9 @@ func TestForwarderLaunchAndDoctorAgree(t *testing.T) {
 			if (diag.Rung == RungDown) != (lerr != nil) {
 				t.Fatalf("doctor says %s but Launch = %d, %v; they must agree", diag.Rung, exit, lerr)
 			}
-			if lerr != nil {
-				if exit != exitDown {
-					t.Fatalf("refused Launch = %d, want %d", exit, exitDown)
-				}
-			} else if exit != 0 {
-				t.Fatalf("Launch = %d, want 0", exit)
-			}
-			if local.ran != tt.local {
-				t.Fatalf("the local bd ran = %v, want %v", local.ran, tt.local)
+			if exit != tt.exit {
+				t.Fatalf("Launch = %d, want %d", exit, tt.exit)
 			}
 		})
-	}
-}
-
-// TestRungLocalHasItsOwnName keeps the word the doctor prints distinct from the
-// other rungs.
-func TestRungLocalHasItsOwnName(t *testing.T) {
-	t.Parallel()
-	seen := map[string]Rung{}
-	for _, rung := range []Rung{RungExec, RungRun, RungDown, RungLocal} {
-		name := rung.String()
-		if other, ok := seen[name]; ok {
-			t.Fatalf("rungs %s and %s both print %q", other, rung, name)
-		}
-		seen[name] = rung
-	}
-	if got := RungLocal.String(); got != "local" {
-		t.Fatalf("RungLocal prints %q, want %q", got, "local")
 	}
 }

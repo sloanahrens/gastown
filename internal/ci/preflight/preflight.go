@@ -1,9 +1,9 @@
 // Package preflight is the images workflow's first step (gt-gg9hv.62): the
 // runner carries the tools the job runs, jq is the version the base image
-// ships, the mango pin names a source on the Forgejo host, and the green
-// commit is a full sha. The workflow text in deploy/ci/images.workflow.yml
-// only calls it, so every refusal here is driven by a unit test through the
-// injected seams.
+// ships, every digest-pinned image still has every layer its registry serves,
+// the mango pin names a source on the Forgejo host, and the green commit is a
+// full sha. The workflow text in deploy/ci/images.workflow.yml only calls it,
+// so every refusal here is driven by a unit test through the injected seams.
 package preflight
 
 import (
@@ -41,6 +41,12 @@ type Options struct {
 	LookPath func(string) (string, error)
 	// Version runs "jq --version" and answers what it printed.
 	Version func() (string, error)
+	// PinCheck refuses a digest-pinned image whose layer the registry no
+	// longer serves. It is the one check that leaves the runner, so it runs
+	// after the tool checks: a runner that cannot build is refused before a
+	// registry is asked anything. A nil PinCheck is refused, because an
+	// unchecked pin would build from a layer the registry dropped.
+	PinCheck func() error
 	// SHA is GITHUB_SHA, the green commit. MangoURL and MangoCommit are the
 	// repository variables naming the mango source the daemon image carries.
 	// Host is the Forgejo host:port the pins and the images name.
@@ -65,6 +71,9 @@ func Check(o Options) (Green, error) {
 	if o.Version == nil {
 		return Green{}, errors.New("preflight: no jq version read is wired")
 	}
+	if o.PinCheck == nil {
+		return Green{}, errors.New("preflight: no image pin check is wired")
+	}
 	if o.EnvOut == nil {
 		return Green{}, errors.New("preflight: no environment output is wired")
 	}
@@ -85,6 +94,9 @@ func Check(o Options) (Green, error) {
 	}
 	if got := strings.TrimSpace(printed); got != JQVersion {
 		return Green{}, fmt.Errorf("preflight: jq --version printed %q, but this workflow needs %s (deploy/ci-base/Dockerfile); the base image's jq is another version", got, JQVersion)
+	}
+	if err := o.PinCheck(); err != nil {
+		return Green{}, fmt.Errorf("preflight: %w", err)
 	}
 	if !fullSHA.MatchString(o.SHA) {
 		return Green{}, fmt.Errorf("preflight: the green commit %q is not a full lowercase 40-character sha", o.SHA)

@@ -148,10 +148,10 @@ func TestMergeRuntimeLivenessEnv_SetsResolvedAgentAndProcessNames(t *testing.T) 
 	got := MergeRuntimeLivenessEnv(env, rc)
 
 	if got["GT_AGENT"] != "claude" {
-		t.Fatalf("GT_AGENT = %q, want %q", got["GT_AGENT"], "claude")
+		t.Fatalf("GT_AGENT = an unexpected value, want %q", "claude")
 	}
 	if got["GT_PROCESS_NAMES"] != "node,claude" {
-		t.Fatalf("GT_PROCESS_NAMES = %q, want %q", got["GT_PROCESS_NAMES"], "node,claude")
+		t.Fatalf("GT_PROCESS_NAMES = an unexpected value, want %q", "node,claude")
 	}
 }
 
@@ -169,10 +169,10 @@ func TestMergeRuntimeLivenessEnv_RespectsExistingValues(t *testing.T) {
 	got := MergeRuntimeLivenessEnv(env, rc)
 
 	if got["GT_AGENT"] != "explicit-agent" {
-		t.Fatalf("GT_AGENT = %q, want %q", got["GT_AGENT"], "explicit-agent")
+		t.Fatalf("GT_AGENT = an unexpected value, want %q", "explicit-agent")
 	}
 	if got["GT_PROCESS_NAMES"] != "custom-bin,custom-agent" {
-		t.Fatalf("GT_PROCESS_NAMES = %q, want %q", got["GT_PROCESS_NAMES"], "custom-bin,custom-agent")
+		t.Fatalf("GT_PROCESS_NAMES = an unexpected value, want %q", "custom-bin,custom-agent")
 	}
 }
 

@@ -740,7 +740,7 @@ func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 		"ANTHROPIC_AUTH_TOKEN":   "",
 	} {
 		if got := prep.Env[k]; got != want {
-			t.Errorf("Env[%s] = %q, want %q", k, got, want)
+			t.Errorf("Env[%s] = an unexpected value, want %q", k, want)
 		}
 	}
 	if b.Tmux() == nil {
@@ -796,7 +796,7 @@ func TestOpenShellPrepareKeepsDoltAtTheControlPlaneHost(t *testing.T) {
 		t.Errorf("skeleton ControlPlaneHost = %q, want the control-plane host dolt.internal", skeleton.ControlPlaneHost)
 	}
 	if got := prep.Env["BEADS_DOLT_SERVER_HOST"]; got != "dolt.internal" {
-		t.Errorf("Env[BEADS_DOLT_SERVER_HOST] = %q, want the control-plane host dolt.internal", got)
+		t.Errorf("Env[BEADS_DOLT_SERVER_HOST] is not the control-plane host dolt.internal")
 	}
 }
 
@@ -1938,7 +1938,7 @@ func TestContractGoCacheSetWhenClaimNamed(t *testing.T) {
 		"GOMODCACHE": "/tmp/gt-cache/gomodcache",
 	} {
 		if got := cs.Env[k]; got != want {
-			t.Errorf("Env[%s] = %q, want %q", k, got, want)
+			t.Errorf("Env[%s] = an unexpected value, want %q", k, want)
 		}
 	}
 }
@@ -2026,7 +2026,7 @@ func TestContractGoCacheUsesSeedDirConstants(t *testing.T) {
 	} {
 		rel, ok := strings.CutPrefix(cs.Env[k], sandboxCacheDir+"/")
 		if !ok || rel != dir {
-			t.Errorf("Env[%s] = %q, want %s/%s (the cache mount, then the seed's %q)", k, cs.Env[k], sandboxCacheDir, dir, dir)
+			t.Errorf("Env[%s] is not under %s and the seed's %q", k, sandboxCacheDir, dir)
 		}
 	}
 }
@@ -2213,12 +2213,12 @@ func TestOpenShellPrepareDropsHostOnlyEnv(t *testing.T) {
 	}
 	for _, k := range sandboxDroppedEnv {
 		if v, ok := prep.Env[k]; !ok || v != "" {
-			t.Errorf("Env[%s] = %q (present %v), want present and empty so the host value is dropped", k, v, ok)
+			t.Errorf("Env[%s] present=%v, want present and empty so the host value is dropped", k, ok)
 		}
 	}
 	for k, v := range prep.Env {
 		if strings.Contains(v, "HOST-ONLY-VALUE") || strings.Contains(v, "/host/only/config") {
-			t.Errorf("Env[%s] carries a host-only value %q", k, v)
+			t.Errorf("Env[%s] carries a host-only value", k)
 		}
 	}
 }

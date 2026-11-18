@@ -105,6 +105,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"build gt: ", "go build -trimpath -ldflags " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
+		{"build gt-wrap: ", "go build -trimpath -o " + filepath.Join(b.Out, "gt-wrap") + " " + GtWrapPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build trackerd: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
 		{"build trackerbackup: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerbackup") + " " + TrackerbackupPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
@@ -331,6 +332,6 @@ func TestDockerEnvDropsTheShellsEngineChoice(t *testing.T) {
 	t.Parallel()
 	got := DockerEnv([]string{"PATH=/usr/bin", "DOCKER_CONTEXT=other", "DOCKER_HOST=tcp://x:2375", "HOME=/h", "GOFLAGS=-mod=mod"})
 	if strings.Join(got, " ") != "PATH=/usr/bin HOME=/h" {
-		t.Errorf("DockerEnv = %v, want PATH and HOME only", got)
+		t.Errorf("DockerEnv = %d entries, want PATH and HOME only", len(got))
 	}
 }

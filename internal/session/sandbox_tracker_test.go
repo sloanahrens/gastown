@@ -150,7 +150,7 @@ func TestOpenShellContractCarriesTheTrackerForATrackerRoutedRig(t *testing.T) {
 				t.Fatalf("createSpec: %v", err)
 			}
 			if !reflect.DeepEqual(cs.Env, c.want) {
-				t.Fatalf("contract:\n got %q\nwant %q", cs.Env, c.want)
+				t.Fatalf("contract:\n got %d entries\nwant %d", len(cs.Env), len(c.want))
 			}
 		})
 	}
@@ -371,7 +371,7 @@ func TestOpenShellPrepareStagesTheSeatTokenAsOneFile(t *testing.T) {
 		}
 	}
 	if prepared.Env["TRACKER_TOKEN_FILE"] != SandboxTrackerTokenFile || prepared.Env["TRACKER_URL"] == "" {
-		t.Errorf("Prepared.Env tracker values = %q, want the token file %s and the URL", prepared.Env, SandboxTrackerTokenFile)
+		t.Errorf("Prepared.Env tracker values = %d entries, want the token file %s and the URL", len(prepared.Env), SandboxTrackerTokenFile)
 	}
 	for _, row := range fake.Envs() {
 		for _, kv := range row {
@@ -514,7 +514,7 @@ func TestTrackerPlaceholderArchiveHoldsNoRealToken(t *testing.T) {
 		}
 	}
 	if cs.Env["TRACKER_TOKEN_FILE"] != SandboxTrackerTokenFile {
-		t.Errorf("TRACKER_TOKEN_FILE = %q, want %s", cs.Env["TRACKER_TOKEN_FILE"], SandboxTrackerTokenFile)
+		t.Errorf("TRACKER_TOKEN_FILE = an unexpected value, want %s", SandboxTrackerTokenFile)
 	}
 }
 

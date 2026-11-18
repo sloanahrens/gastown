@@ -20,9 +20,14 @@ const changeBudgetGrammar = "Change: at most N added lines in M files."
 const changeBudgetPrefix = "change:"
 
 // changeBudgetRe is changeBudgetGrammar as a regular expression over one
-// trimmed line. [1-9][0-9]* spells "positive integer", so a stated zero is a
-// line that does not match rather than a budget of no lines.
+// trimmed line without its markdown decoration (budgetLineText).
+// [1-9][0-9]* spells "positive integer", so a stated zero is a line that does
+// not match rather than a budget of no lines.
 var changeBudgetRe = regexp.MustCompile(`(?i)^change:\s+at\s+most\s+([1-9][0-9]*)\s+added\s+lines(?:\s+in\s+([1-9][0-9]*)\s+files)?\.?$`)
+
+// budgetEmphasis removes the characters that mark emphasized text, so
+// **bold**, __bold__ and *italic* read as the words they decorate.
+var budgetEmphasis = strings.NewReplacer("*", "", "_", "")
 
 // ChangeBudget is the change budget a bead's Size section states: at most
 // Lines added lines across at most Files files. Files is 0 when the line
@@ -35,17 +40,21 @@ type ChangeBudget struct {
 // ParseChangeBudget reads a bead's Size section body, the "size" key of
 // Sections(description), for its change budget line (changeBudgetGrammar):
 // found is false when the section carries none, and a line that starts
-// "Change:" without matching the grammar is an error quoting it. The first
-// matching line answers; every "Change:" line must match.
+// "Change:" without matching the grammar is an error quoting it. A line is read
+// through the markdown a bead's prose carries — the leading bullet and the
+// emphasis budgetLineText strips — so a bulleted or bolded budget is found
+// rather than skipped as though the author had stated none. The first matching
+// line answers; every "Change:" line must match.
 func ParseChangeBudget(size string) (ChangeBudget, bool, error) {
 	var budget ChangeBudget
 	found := false
 	for _, raw := range strings.Split(size, "\n") {
 		line := strings.TrimSpace(raw)
-		if !strings.HasPrefix(strings.ToLower(line), changeBudgetPrefix) {
+		text := budgetLineText(line)
+		if !strings.HasPrefix(strings.ToLower(text), changeBudgetPrefix) {
 			continue
 		}
-		m := changeBudgetRe.FindStringSubmatch(line)
+		m := changeBudgetRe.FindStringSubmatch(text)
 		if m == nil {
 			return ChangeBudget{}, false, changeBudgetError(line)
 		}
@@ -67,6 +76,22 @@ func ParseChangeBudget(size string) (ChangeBudget, bool, error) {
 		found = true
 	}
 	return budget, found, nil
+}
+
+// budgetLineText returns a Size body line without the markdown that decorates
+// it: the leading "- ", "* " or "+ " of a list bullet, and the * and _
+// characters that mark emphasized text. A bullet marker counts only when a
+// space follows it, as markdown writes one. The words, the numbers and the
+// punctuation the grammar reads are left as written, so
+// "- **Change:** at most 80 added lines." reads as the grammar's line. A
+// decorated line that still does not match is reported by quoting the original
+// line, never skipped as though the author had stated no budget.
+func budgetLineText(line string) string {
+	s := strings.TrimSpace(line)
+	if len(s) >= 2 && (s[0] == '-' || s[0] == '*' || s[0] == '+') && (s[1] == ' ' || s[1] == '\t') {
+		s = strings.TrimSpace(s[1:])
+	}
+	return budgetEmphasis.Replace(s)
 }
 
 // changeBudgetError refuses a stated budget the grammar cannot read. The

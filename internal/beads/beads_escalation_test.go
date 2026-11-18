@@ -536,16 +536,19 @@ func sameBdListArgv(got, want []string) bool {
 //  1. bd v0.59+ ignores --json on `list` without --flat and emits tree text, so
 //     json.Unmarshal fails. The stub models that, meaning a regression that
 //     drops the injection fails here the way it would against a real bd.
-//  2. Cross-rig routing only engages when BEADS_DIR is left unset. The stub
-//     records the variable, and the test requires it absent — otherwise the
-//     query is silently pinned to one database again, which is the original
-//     gt-wbxb "No escalations found" symptom.
+//  2. A routed call names the town's .beads, whose routes.jsonl sends each
+//     prefix to the rig database that holds it (gt-judxkm). With no BEADS_DIR
+//     the bd gateway forwarder refuses the call, and pinned to one rig's .beads
+//     the query silently hides every other rig's escalations — the original
+//     gt-wbxb "No escalations found" symptom. The stub records the variable,
+//     and the test requires it to name the town's directory.
 //
 // Regression test for the review of MR gt-wisp-nysy, where runWithRouting had
 // neither the --flat injection nor the retry that run/runWithStdin perform.
 func TestListEscalationsAcrossRigsInjectsFlatAndRoutes(t *testing.T) {
 	logPath := escalationBDStub(t, false)
-	b := New(t.TempDir())
+	townRoot, _ := townWithRoutes(t)
+	b := New(townRoot)
 
 	escalations, err := ListEscalationsAcrossRigs(b)
 	if err != nil {
@@ -559,8 +562,8 @@ func TestListEscalationsAcrossRigsInjectsFlatAndRoutes(t *testing.T) {
 	if !strings.Contains(log, "arg --flat") {
 		t.Errorf("routed list query did not pass --flat, so bd would emit tree text:\n%s", log)
 	}
-	if !strings.Contains(log, "env BEADS_DIR=<unset>") {
-		t.Errorf("routed list query pinned BEADS_DIR, so it cannot see other rigs' escalations:\n%s", log)
+	if !strings.Contains(log, "env BEADS_DIR="+filepath.Join(townRoot, ".beads")) {
+		t.Errorf("routed list query did not name the town's .beads, so it cannot see other rigs' escalations:\n%s", log)
 	}
 }
 
@@ -664,6 +667,41 @@ func TestListEscalationsAcrossRigsUncapsBdPage(t *testing.T) {
 	}
 }
 
+// TestListEscalationsAcrossRigsNamesTheTownBeadsDir holds gt-judxkm through the
+// caller: the routed bd list call carries BEADS_DIR naming the town's .beads, so
+// the bd gateway forwarder can place the call instead of refusing it for naming
+// no rig (gt-judxkm).
+func TestListEscalationsAcrossRigsNamesTheTownBeadsDir(t *testing.T) {
+	townRoot, _ := townWithRoutes(t)
+	r := newRecorder(func(args []string) reply {
+		if len(args) > 0 && args[0] == "list" {
+			return reply{stdout: "[]"}
+		}
+		return reply{}
+	})
+	b := newBeads(beadsFields{workDir: townRoot, exec: r.exec})
+
+	if _, err := ListEscalationsAcrossRigs(b); err != nil {
+		t.Fatalf("ListEscalationsAcrossRigs: %v", err)
+	}
+
+	var listCall *recordedCall
+	for _, call := range r.calls() {
+		if len(call.args) > 0 && call.args[0] == "list" {
+			c := call
+			listCall = &c
+			break
+		}
+	}
+	if listCall == nil {
+		t.Fatalf("no routed bd list call among %q", r.argvs())
+	}
+	got, set := lastEnvValue(listCall.env, "BEADS_DIR")
+	if want := filepath.Join(townRoot, ".beads"); !set || got != want {
+		t.Fatalf("routed bd list BEADS_DIR = %q (set %v), want %q", got, set, want)
+	}
+}
+
 // TestListEscalationsStaysPinnedToCurrentDatabase pins the scope decision made
 // for gt-wbxb: only the display path routes across rigs. ListEscalations feeds
 // ListStaleEscalations (which reescalates and sends mail) and shares its query
@@ -689,7 +727,8 @@ func TestListEscalationsStaysPinnedToCurrentDatabase(t *testing.T) {
 // filtering, which would silently change `gt escalate list --all` output.
 func TestListAllEscalationsAcrossRigsKeepsMessages(t *testing.T) {
 	logPath := escalationBDStub(t, false)
-	b := New(t.TempDir())
+	townRoot, _ := townWithRoutes(t)
+	b := New(townRoot)
 
 	escalations, err := ListAllEscalationsAcrossRigs(b)
 	if err != nil {
@@ -704,8 +743,8 @@ func TestListAllEscalationsAcrossRigsKeepsMessages(t *testing.T) {
 	if !strings.Contains(log, "arg --status=all") {
 		t.Errorf("--all view did not query --status=all:\n%s", log)
 	}
-	if !strings.Contains(log, "env BEADS_DIR=<unset>") {
-		t.Errorf("--all view pinned BEADS_DIR, so it cannot see other rigs' escalations:\n%s", log)
+	if !strings.Contains(log, "env BEADS_DIR="+filepath.Join(townRoot, ".beads")) {
+		t.Errorf("--all view did not name the town's .beads, so it cannot see other rigs' escalations:\n%s", log)
 	}
 }
 

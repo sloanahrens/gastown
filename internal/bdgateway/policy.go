@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // The policy answers one question: may this caller run this bd call. It is the
@@ -22,7 +24,9 @@ import (
 // refused by name, and a token class or verb class the code does not know is
 // refused too, so a typo in the file narrows the surface rather than widening
 // it. The verb comes from argv read the way bd's own root parse reads it
-// (scanArgs), so the class check applies to the verb bd will run.
+// (scanArgs), so the class check applies to the verb bd will run. The one verb
+// no file row can name is bd's root help probe, whose argv holds no verb word;
+// the policy carries that row itself (rootHelpVerb).
 
 // VerbClass is what running a bd verb may do to the store.
 type VerbClass string
@@ -73,7 +77,17 @@ var (
 	// reads a value (or the reverse) would class-check one verb while bd runs
 	// another.
 	ErrAmbiguousVerb = errors.New("bdgateway: cannot tell which verb these arguments run")
+	// ErrSQLNotReadOnly is a sql call whose statement is not one read-only
+	// statement: bd's sql verb runs whatever text it is handed, so the policy
+	// refuses a write, DDL, a multi-statement string or an empty statement
+	// before bd starts (beadsql.ReadOnly is the rule).
+	ErrSQLNotReadOnly = errors.New("bdgateway: sql serves one read-only statement")
 )
+
+// sqlVerb is bd's raw-SQL verb, the one verb whose operand is a statement. The
+// file gives it its class; the rule on the statement itself is the code's,
+// like the root help row.
+const sqlVerb = "sql"
 
 // maxPathWords bounds a verb path. bd's deepest verb gt calls is three words
 // ("mol wisp list"), and the resolver tries at most this many words.
@@ -139,6 +153,36 @@ type Verb struct {
 
 // Name returns the verb path as one string, for logs and error messages.
 func (v Verb) Name() string { return strings.Join(v.Path, " ") }
+
+// rootHelpVerb is the policy's row for bd's root help probe. beads.sampleOffersVerb
+// runs the probe before every sample write to learn whether the bd behind the
+// gateway offers the verb (gt-qe1cb5), and no verbs file row can match it: a row
+// names command words, and the probe names none. It is a read, so every token
+// class may run it, and the gateway forwards the probe unchanged, so bd's own
+// help is the only thing it runs.
+var rootHelpVerb = Verb{Path: []string{"help"}, Class: ClassRead}
+
+// rootHelpRequest reports whether argv asks bd for its root help: its first
+// non-empty argument is "--help" or the help command. probe is true when that
+// argument is the whole of argv. A help request carrying any other word or flag
+// asks for more than the root help the gateway serves, so it is not the probe.
+func rootHelpRequest(argv []string) (isHelp, probe bool) {
+	seen := 0
+	first := ""
+	for _, arg := range argv {
+		if arg == "" {
+			continue
+		}
+		if seen == 0 {
+			first = arg
+		}
+		seen++
+	}
+	if first != "--help" && first != "help" {
+		return false, false
+	}
+	return true, seen == 1
+}
 
 // Policy is a loaded verbs file: the allowlist, its classes and the refused
 // flags. It is read-only after loading.
@@ -305,12 +349,26 @@ func parseVerbClass(s string) (VerbClass, error) {
 
 // Authorize checks one call: argv names a listed verb, class may run that
 // verb's class, and no flag on argv is refused for the verb or for every verb.
-// It returns the matched verb so the caller can log its path and class.
+// It returns the matched verb so the caller can log its path and class. The
+// root help probe is the one argv authorized without a file row (rootHelpVerb).
 //
 // argv is bd's arguments, never "bd" and never a shell string. One scan
 // (scanArgs) reads both the verb words and the flags, so the class check and
 // the flag check cannot disagree about which tokens are flags.
 func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
+	if isHelp, probe := rootHelpRequest(argv); isHelp {
+		if !probe {
+			// It names no verb the policy lists, so it is refused the way any
+			// unknown verb is, not by the scan's ambiguity refusal.
+			return Verb{}, fmt.Errorf("%w: %q", ErrVerbNotAllowed, rootHelpVerb.Name())
+		}
+		// The probe is a read, which every class the gateway knows may run; an
+		// unknown token class still fails the check rather than passing it.
+		if !Allowed(class, rootHelpVerb.Class) {
+			return Verb{}, fmt.Errorf("%w: %s token may not run %s (%s)", ErrClassDenied, class, rootHelpVerb.Name(), rootHelpVerb.Class)
+		}
+		return rootHelpVerb, nil
+	}
 	scan, err := p.scanArgs(argv)
 	if err != nil {
 		return Verb{}, err
@@ -326,7 +384,38 @@ func (p *Policy) Authorize(class TokenClass, argv []string) (Verb, error) {
 	if flag, ok := p.refusedFlag(v, scan.flags); ok {
 		return Verb{}, fmt.Errorf("%w: %s on %s", ErrFlagRefused, flag.spelling, v.Name())
 	}
+	if name == sqlVerb {
+		if err := checkSQLStatement(scan.operands); err != nil {
+			return Verb{}, err
+		}
+	}
 	return v, nil
+}
+
+// checkSQLStatement applies the read-only rule to a sql call before bd starts.
+// The statement is the one operand after bd's flags, which scanArgs read: bd's
+// sql verb takes one <query> and runs its text as written. sql's only own flag
+// is the boolean --csv (`bd sql --help`, bd 1.2.2), so a settled unknown
+// command flag consumes nothing in scanArgs — one followed by "--" is refused
+// before this check — and the statement is the one operand. Every flag that takes a value is a root flag
+// bdRootFlags places, so its value is consumed and never read as the query. A
+// call naming no operand — the empty statement, or a query that was really a
+// value-taking flag's argument — is refused, and one naming more than one
+// operand is refused rather than letting the gateway check an argument bd may
+// not run. beadsql.ReadOnly carries the rule itself, so a write, DDL, a
+// multi-statement string or a dolt_* procedure is refused with the reason.
+func checkSQLStatement(operands []string) error {
+	switch len(operands) {
+	case 0:
+		return fmt.Errorf("%w: no statement", ErrSQLNotReadOnly)
+	case 1:
+	default:
+		return fmt.Errorf("%w: %d statements, want one", ErrSQLNotReadOnly, len(operands))
+	}
+	if err := beadsql.ReadOnly(operands[0]); err != nil {
+		return fmt.Errorf("%w: %v", ErrSQLNotReadOnly, err)
+	}
+	return nil
 }
 
 // scanResult is what one scanArgs pass read from argv. words are the command
@@ -356,8 +445,18 @@ type scanResult struct {
 // counts for the refusal.
 //
 // A flag outside bdRootFlags is a command flag whose arity the tree does not
-// record. Before the verb is settled, or with a following token that starts
-// with "-", its value cannot be told from a flag, so the call is refused.
+// record. While a listed verb path still extends the words read, its value
+// cannot be told from a verb word, so the call is refused. Once the verb is
+// settled, it is read as a boolean: it consumes nothing, and the next token is
+// scanned on its own. That cannot change the verb, since no later word is a
+// command word once no listed path extends. It also cannot hide a flag behind
+// a later dash token, which is scanned as a flag in its own right, with two
+// exceptions that swallowsNextFlag names: if the flag takes a value, "--" is
+// that value rather than the end of the options, and a value-taking root flag
+// without an attached value ("--db", "-C", "--format") is that value rather
+// than a flag taking the token after it. bd then reads the following tokens as
+// flags, while the boolean reading calls them operands or a root flag's value.
+// A settled unknown flag followed by either is therefore refused too.
 func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 	var res scanResult
 	res.words = make([]string, 0, maxPathWords)
@@ -388,13 +487,36 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 			i++ // the value is the next argument, whatever it looks like
 		case known:
 			// A boolean root flag: the next argument is not its value.
-		case i+1 < len(argv) && strings.HasPrefix(argv[i+1], "-"):
-			return scanResult{}, ambiguousFlag(arg)
 		case p.extends(res.words):
+			// A listed verb path can still claim the next word, so an unknown
+			// flag here could be taking that word as its value.
+			return scanResult{}, ambiguousFlag(arg)
+		case i+1 < len(argv) && swallowsNextFlag(argv[i+1]):
+			// If the unknown flag takes a value, bd takes this next token as
+			// that value and still reads the tokens after it as flags. Read as
+			// boolean, the scan would let the token end the options ("--") or
+			// take the following token as its own value (a root flag without an
+			// attached value), and miss a refused flag behind it.
 			return scanResult{}, ambiguousFlag(arg)
 		}
 	}
 	return res, nil
+}
+
+// swallowsNextFlag reports whether next, read as the value of an unknown
+// command flag, would change how the tokens after it are read. "--" ends the
+// options in the scan, and a value-taking root flag without an attached value
+// ("--db", "-C", "--format") takes the next token as its own value, so either
+// would hide a refused flag that bd, reading next as the unknown flag's value,
+// still parses as a flag. Every other next token is read as a flag or an
+// operand on its own, so a boolean reading of the unknown flag only counts more
+// flags, never fewer.
+func swallowsNextFlag(next string) bool {
+	if next == "--" {
+		return true
+	}
+	kind, known, attached := rootFlag(next)
+	return known && kind == flagValue && !attached
 }
 
 // ambiguousFlag is the refusal for a flag the scan cannot place.

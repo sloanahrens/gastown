@@ -840,25 +840,25 @@ func TestBdSubprocessEnvUsesHardenedBDEnv(t *testing.T) {
 	env := bdSubprocessEnv(base, beadsDir, "explicit_db")
 	got := rigEnvMap(env)
 	if got["BEADS_DIR"] != beadsDir {
-		t.Fatalf("BEADS_DIR = %q, want %q in %v", got["BEADS_DIR"], beadsDir, env)
+		t.Fatalf("BEADS_DIR = %q, want %q", got["BEADS_DIR"], beadsDir)
 	}
 	if got["BEADS_DOLT_SERVER_DATABASE"] != "explicit_db" {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db", got["BEADS_DOLT_SERVER_DATABASE"])
 	}
 	// Outside a town there is no endpoint: bd gets the endpoint it
 	// inherited, and GT_DOLT_* is never translated (gt-y3pgh.3).
 	if got["BEADS_DOLT_SERVER_HOST"] != "inherited-host" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want the inherited host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want the inherited host", got["BEADS_DOLT_SERVER_HOST"])
 	}
 	if got["BEADS_DOLT_SERVER_PORT"] != "4401" || got["BEADS_DOLT_PORT"] != "4401" {
-		t.Fatalf("ports = server:%q legacy:%q, want the inherited 4401 in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+		t.Fatalf("ports = server:%q legacy:%q, want the inherited 4401", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"])
 	}
 	if got["BEADS_DOLT_AUTO_START"] != "0" || got["BD_DOLT_AUTO_COMMIT"] != "on" {
-		t.Fatalf("bd mutation guardrails missing in %v", env)
+		t.Fatalf("bd mutation guardrails missing")
 	}
 	for _, key := range []string{"BEADS_DB", "BD_DB", "BEADS_DOLT_DATA_DIR", "GT_DOLT_DATA"} {
 		if value, ok := got[key]; ok {
-			t.Fatalf("%s leaked as %q in %v", key, value, env)
+			t.Fatalf("%s leaked as %q", key, value)
 		}
 	}
 }
@@ -895,13 +895,13 @@ func TestBdSubprocessEnvUsesTownConfigBeforeMetadataExists(t *testing.T) {
 	env := bdSubprocessEnv(base, beadsDir, "explicit_db")
 	got := rigEnvMap(env)
 	if got["BEADS_DOLT_SERVER_DATABASE"] != "explicit_db" {
-		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db in %v", got["BEADS_DOLT_SERVER_DATABASE"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want explicit_db", got["BEADS_DOLT_SERVER_DATABASE"])
 	}
 	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.2" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want config host in %v", got["BEADS_DOLT_SERVER_HOST"], env)
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want config host", got["BEADS_DOLT_SERVER_HOST"])
 	}
 	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-		t.Fatalf("ports = server:%q legacy:%q, want config port in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+		t.Fatalf("ports = server:%q legacy:%q, want config port", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"])
 	}
 }
 
@@ -931,10 +931,10 @@ func TestBdSubprocessEnvClearsStaleHostWhenConfigHasNoHost(t *testing.T) {
 	env := bdSubprocessEnv(base, beadsDir, "explicit_db")
 	got := rigEnvMap(env)
 	if _, ok := got["BEADS_DOLT_SERVER_HOST"]; ok {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST leaked from config without host: %v", env)
+		t.Fatalf("BEADS_DOLT_SERVER_HOST leaked from config without host")
 	}
 	if got["BEADS_DOLT_SERVER_PORT"] != "5507" || got["BEADS_DOLT_PORT"] != "5507" {
-		t.Fatalf("ports = server:%q legacy:%q, want config port in %v", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"], env)
+		t.Fatalf("ports = server:%q legacy:%q, want config port", got["BEADS_DOLT_SERVER_PORT"], got["BEADS_DOLT_PORT"])
 	}
 }
 

@@ -98,7 +98,7 @@ func TestBdgwExec(t *testing.T) {
 		t.Errorf("timeout_ms = %d, want the read cap 30000", got)
 	}
 	if got, ok := runner.req.Env["BD_ACTOR"]; !ok || got != "town/crew/dipper" {
-		t.Errorf("env = %v, want BD_ACTOR kept", runner.req.Env)
+		t.Errorf("env does not keep BD_ACTOR")
 	}
 	for _, name := range []string{"HOME", "SECRET"} {
 		if _, ok := runner.req.Env[name]; ok {
@@ -336,11 +336,11 @@ func TestBdgwExecEnv(t *testing.T) {
 	got := callerEnv([]string{"BD_ACTOR=a", "PATH=/bin", "no-value", "=nameless"})
 	want := map[string]string{"BD_ACTOR": "a", "PATH": "/bin"}
 	if len(got) != len(want) {
-		t.Fatalf("env = %v, want %v", got, want)
+		t.Fatalf("env = %d entries, want %d", len(got), len(want))
 	}
 	for k, v := range want {
 		if got[k] != v {
-			t.Errorf("env[%q] = %q, want %q", k, got[k], v)
+			t.Errorf("env[%q] = an unexpected value, want %q", k, v)
 		}
 	}
 }

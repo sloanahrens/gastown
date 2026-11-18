@@ -57,16 +57,13 @@ func newDashboardClaudePlanReader(path string, usage *dashUsageReader, planUSDMo
 		WithUsageAbsent(usage.absent)
 }
 
-// resolveClaudePlanFile is the series file the plan meter falls back to: the
-// status line's copy under the home directory when it exists, else the town's
-// own. The dashboard pod mounts the Mac's ~/.claude read-only at its home
-// (/root/.claude) and the status line writes the live series there, while the
-// pod's own <town>/.runtime copy stopped moving when the pod took over, so
-// reading the town's copy first shows a meter whose newest sample is days old
-// (gt-q6qd1j; lost when the rows source replaced it, gt-hutsr6). A home lookup
-// that fails, or a stat that fails for a reason other than absence, answers
-// with the town's copy and the reason goes to whyLog. Callers resolve it on
-// every poll, so a file that appears after the hub started is read at the next
+// resolveClaudePlanFile names the series file the plan meter reads when no
+// claude_plan row answers: the status line's copy under the home directory
+// when it exists, else the town's own, so the meter reads the live series
+// rather than a stale town copy (gt-q6qd1j). A home lookup that fails, or a
+// stat that fails for a reason other than absence, answers with the town's
+// copy and the reason goes to whyLog. Callers resolve it on every poll, so a
+// home series that appears after the hub started is picked up at the next
 // poll. The home lookup and the stat are injected so a test drives each case.
 func resolveClaudePlanFile(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog) string {
 	town := dashboardClaudePlanPath(townRoot)

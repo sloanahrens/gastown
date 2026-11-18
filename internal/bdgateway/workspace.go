@@ -17,12 +17,16 @@ import (
 )
 
 // The workspace is the small tree of bd's own files the gateway owns and gt
-// pushes: the town's .beads/routes.jsonl, each rig's .beads/redirect, and each
-// rig's .beads/{metadata.json,config.yaml,dolt-server.port}. The design is
-// docs/design/bd-container.md ("The workspace"); the tree layout it pushes is
-// the one the Phase 0 proof (workspace_proof_integration_test.go) showed a real
-// bd reading. G6 mounts the volume and routes PUT /v1/workspace to the store
-// below; G8 builds the document from the town copy.
+// pushes: the town's .beads/routes.jsonl, the town's
+// .beads/formulas/<name>.formula.toml, a copy of those formulas at
+// <rig>/.beads/formulas/<name>.formula.toml for each registered rig, each rig's
+// .beads/redirect, and every .beads/{metadata.json,config.yaml,dolt-server.port}
+// set the document carries — one per rig, and one per folder a route names that
+// is not a rig. The design is docs/design/bd-container.md ("The workspace");
+// the tree layout it pushes is the one the Phase 0 proof
+// (workspace_proof_integration_test.go) showed a real bd reading. G6 mounts the
+// volume and routes PUT /v1/workspace to the store below; G8 builds the document
+// from the town copy.
 
 const (
 	// WorkspaceHashHeader carries the live tree's manifest hash on every gateway
@@ -31,11 +35,12 @@ const (
 	WorkspaceHashHeader = "X-Bd-Workspace"
 
 	// MaxWorkspaceFileBytes bounds one workspace file. Every file here is bd
-	// configuration: a few lines, or for routes.jsonl one short line per rig.
+	// configuration or a formula: a few lines, or for routes.jsonl one short line
+	// per rig.
 	MaxWorkspaceFileBytes = 256 << 10
 
 	// MaxWorkspaceTotalBytes bounds the whole tree. A document over it would mean
-	// a caller that is not pushing bd's five files.
+	// a caller that is not pushing bd's files and the town's formulas.
 	MaxWorkspaceTotalBytes = 1 << 20
 
 	// MaxWorkspaceDocumentBytes bounds the JSON body of a push. JSON escaping can
@@ -53,8 +58,9 @@ var (
 	// the workspace: absolute, a backslash, an empty, "." or ".." component, or
 	// a spelling path.Clean would change.
 	ErrWorkspacePath = errors.New("bdgateway: workspace path refused")
-	// ErrWorkspaceFileName is a file name outside the five names the gateway
-	// serves, or one not directly under a .beads directory.
+	// ErrWorkspaceFileName is a file name outside the names the gateway serves:
+	// the fixed names below, each directly under a .beads directory, or a town
+	// formula. It is also a formula entry that is not a regular file.
 	ErrWorkspaceFileName = errors.New("bdgateway: workspace file name refused")
 	// ErrWorkspaceFileTooLarge is one file over MaxWorkspaceFileBytes.
 	ErrWorkspaceFileTooLarge = errors.New("bdgateway: workspace file over the size cap")
@@ -83,15 +89,92 @@ var (
 	ErrWorkspaceLiveTreeLost = errors.New("bdgateway: workspace live tree lost")
 )
 
-// workspaceFileNames is every file the workspace holds, by base name. bd reads
-// no other file from it, so a document naming another name is refused rather
-// than written where nothing reads it.
+// workspaceFileNames is every fixed file a pushed document may hold, by base
+// name. The town builder reads no other file into the workspace, so a document
+// naming another name is refused rather than written where nothing reads it.
+// The files bd itself writes into a live workspace are not here: they are
+// bdRuntimeFileNames, admitted by the readiness walk only, never by a push. The
+// town's formulas are the one set of names that varies; townFormulaPath admits
+// them.
 var workspaceFileNames = map[string]bool{
 	"metadata.json":    true,
 	"config.yaml":      true,
 	"redirect":         true,
 	"dolt-server.port": true,
 	"routes.jsonl":     true,
+}
+
+// bdRuntimeFileNames is the closed set of files bd writes into a live
+// workspace while it runs: ".local_version" and "last-touched" inside a
+// .beads directory, and ".beads.gate.lock" beside one. They are not part of a
+// pushed document, so a push naming any of them is refused; the live tree's
+// walk (readTreeDir) admits them so the readiness check and a restart read a
+// workspace bd has been running in.
+var bdRuntimeFileNames = map[string]bool{
+	".beads.gate.lock": true,
+	".local_version":   true,
+	"last-touched":     true,
+}
+
+// isBDRuntimeFile reports whether name is one of bdRuntimeFileNames at a place
+// bd writes it: directly inside a .beads directory, or, for ".beads.gate.lock",
+// directly beside one. besideBeads says whether the directory holding name
+// also holds a .beads directory. The base name alone is not enough: the same
+// name anywhere else is not a file bd writes.
+func isBDRuntimeFile(name string, besideBeads bool) bool {
+	parts := strings.Split(name, "/")
+	base := parts[len(parts)-1]
+	if !bdRuntimeFileNames[base] {
+		return false
+	}
+	if base == ".beads.gate.lock" {
+		return besideBeads
+	}
+	return len(parts) >= 2 && parts[len(parts)-2] == ".beads"
+}
+
+// validateLiveTreePath checks one path of a live tree on disk: the push rules,
+// or a file bd writes into the workspace while it runs. Only the live-tree walk
+// uses it; a pushed document is held to validateWorkspacePath, so no runtime
+// file name can reach the tree through a push.
+func validateLiveTreePath(name string, besideBeads bool) error {
+	if isBDRuntimeFile(name, besideBeads) {
+		return nil
+	}
+	return validateWorkspacePath(name)
+}
+
+// formulaDirName and formulaSuffix name a formula's place in a beads
+// directory: bd cooks `<beads>/formulas/<name>.formula.toml`. internal/formula
+// keeps the same suffix unexported, so it is repeated here for both sides of the
+// workspace to share.
+const (
+	formulaDirName = "formulas"
+	formulaSuffix  = ".formula.toml"
+)
+
+// isFormulaFileName reports whether name is a formula's file name: a formula
+// name followed by .formula.toml. The bare suffix names no formula.
+func isFormulaFileName(name string) bool {
+	return len(name) > len(formulaSuffix) && strings.HasSuffix(name, formulaSuffix)
+}
+
+// townFormulaPath reports whether a path's parts are the one shape a town
+// formula takes: `.beads/formulas/<name>.formula.toml`, exactly one directory
+// under the town's own beads directory, where bd looks for the formula a sling
+// cooks.
+func townFormulaPath(parts []string) bool {
+	return len(parts) == 3 && parts[0] == ".beads" && parts[1] == formulaDirName && isFormulaFileName(parts[2])
+}
+
+// rigFormulaPath reports whether a path's parts are the one shape a town
+// formula's copy under a rig takes: `<rig>/.beads/formulas/<name>.formula.toml`,
+// the rig one path element, exactly one directory under the rig's beads
+// directory. That is where a bd whose BEADS_DIR names the rig reads formulas, so
+// the builder pushes a copy there. A deeper path and any other name are refused
+// by validateWorkspacePath.
+func rigFormulaPath(parts []string) bool {
+	return len(parts) == 4 && parts[1] == ".beads" && parts[2] == formulaDirName && isFormulaFileName(parts[3])
 }
 
 // WorkspaceDocument is the body of PUT /v1/workspace: every file of the tree,
@@ -160,9 +243,13 @@ func validatedManifest(doc WorkspaceDocument) (string, error) {
 }
 
 // validateWorkspacePath checks one relative path. The rules are the design's
-// ("relative, no .., only the five file names above") plus the `.beads` parent
-// every one of the five files sits under, which keeps a path from landing in a
-// directory bd does not read or beside the tree's root.
+// ("relative, no .., only the workspace file names above") plus the `.beads`
+// parent every one of those files sits under, which keeps a path from landing in
+// a directory bd does not read or beside the tree's root. The town's formulas
+// are the one other kind of name, in the two shapes a cook reads them from:
+// `.beads/formulas/<name>.formula.toml` for the town's own beads directory and
+// `<rig>/.beads/formulas/<name>.formula.toml` for a registered rig's, each
+// exactly one level under formulas. Every other depth and name is refused.
 func validateWorkspacePath(name string) error {
 	if name == "" {
 		return fmt.Errorf("%w: empty path", ErrWorkspacePath)
@@ -185,8 +272,11 @@ func validateWorkspacePath(name string) error {
 			return fmt.Errorf("%w: %q has a %q component", ErrWorkspacePath, shown(name), part)
 		}
 	}
+	if townFormulaPath(parts) || rigFormulaPath(parts) {
+		return nil
+	}
 	if len(parts) < 2 || parts[len(parts)-2] != ".beads" {
-		return fmt.Errorf("%w: %q is not directly under a .beads directory", ErrWorkspaceFileName, shown(name))
+		return fmt.Errorf("%w: %q is not directly in a .beads directory and is not a town formula", ErrWorkspaceFileName, shown(name))
 	}
 	if base := parts[len(parts)-1]; !workspaceFileNames[base] {
 		return fmt.Errorf("%w: %q is not one of the workspace's files", ErrWorkspaceFileName, shown(base))
@@ -389,9 +479,11 @@ func (s *WorkspaceStore) readTreeAt(root string) (map[string]string, error) {
 }
 
 // readTreeDir adds every file under dir to files, keyed by its path from the
-// root, and checks it against the push rules. prefix is that path so far, in
-// slash form. Directories are walked through the filesystem seam rather than
-// filepath.WalkDir, so every read failure is one a test can drive.
+// root, and checks it against the live-tree rules: the push rules plus the
+// files bd writes into the workspace while it runs (validateLiveTreePath).
+// prefix is that path so far, in slash form. Directories are walked through the
+// filesystem seam rather than filepath.WalkDir, so every read failure is one a
+// test can drive.
 func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string, total *int) error {
 	entries, err := s.fs.readDir(dir)
 	if err != nil {
@@ -403,15 +495,29 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 	if prefix != "" && len(entries) == 0 {
 		return fmt.Errorf("%w: %q is an empty directory", ErrWorkspacePath, shown(prefix))
 	}
+	// bd writes its lock file beside a .beads directory, so the lock is admitted
+	// only in a directory that holds one.
+	besideBeads := false
+	for _, entry := range entries {
+		if entry.Name() == ".beads" && entry.IsDir() {
+			besideBeads = true
+			break
+		}
+	}
 	for _, entry := range entries {
 		name := path.Join(prefix, entry.Name())
 		if entry.IsDir() {
+			// A directory named like a file bd writes is not one of them, and
+			// descending into it would admit its files under a runtime name.
+			if isBDRuntimeFile(name, besideBeads) {
+				return fmt.Errorf("%w: %q is a directory, not a file bd writes", ErrWorkspacePath, shown(name))
+			}
 			if err := s.readTreeDir(filepath.Join(dir, entry.Name()), name, files, total); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := validateWorkspacePath(name); err != nil {
+		if err := validateLiveTreePath(name, besideBeads); err != nil {
 			return err
 		}
 		if !entry.Type().IsRegular() {

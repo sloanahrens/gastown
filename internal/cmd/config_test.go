@@ -313,7 +313,7 @@ func TestConfigAgentSet(t *testing.T) {
 		if len(agent.Env) != 2 ||
 			agent.Env["ANTHROPIC_BASE_URL"] != "https://backend.example" ||
 			agent.Env["ANTHROPIC_AUTH_TOKEN"] != "$DEEPSEEK_KEY" {
-			t.Errorf("Env block changed: %v", agent.Env)
+			t.Errorf("Env block changed")
 		}
 		if agent.InitialPrompt != "hello" {
 			t.Errorf("InitialPrompt = %q, want 'hello'", agent.InitialPrompt)
@@ -363,7 +363,7 @@ func TestConfigAgentSet(t *testing.T) {
 			t.Errorf("Provider = %q, want 'codex'", agent.Provider)
 		}
 		if agent.Env["K"] != "v" {
-			t.Errorf("Env = %v, want K=v kept", agent.Env)
+			t.Errorf("Env does not keep K=v")
 		}
 	})
 }

@@ -150,30 +150,32 @@ func TestAgentBeadRetireSeatCapDecisionIgnoresIntent(t *testing.T) {
 	cases := []struct {
 		name string
 		// record is what the restarting seat's intent record holds.
-		record  func(s *seatShadowTown)
-		wantLog bool
+		record func(s *seatShadowTown)
+		// wantLine is the line the seat's read logs, matched as a prefix, and
+		// "" when the pair agrees and nothing is logged.
+		wantLine string
 	}{
 		{
 			// A seat with no record at all is one the intent record cannot
 			// vouch for: the bead alone names the hook, which is itself the
 			// drift the window measures.
-			name:    "no record",
-			record:  func(*seatShadowTown) {},
-			wantLog: true,
+			name:     "no record",
+			record:   func(*seatShadowTown) {},
+			wantLine: "agentbead_shadow: gastown/ruby hook intent= bead=gt-bead",
 		},
 		{
 			name:   "the record agrees",
 			record: func(s *seatShadowTown) { s.slung("gastown", "ruby", "gt-bead") },
 		},
 		{
-			name:    "the record disagrees",
-			record:  func(s *seatShadowTown) { s.slung("gastown", "ruby", "gt-intent") },
-			wantLog: true,
+			name:     "the record disagrees",
+			record:   func(s *seatShadowTown) { s.slung("gastown", "ruby", "gt-intent") },
+			wantLine: "agentbead_shadow: gastown/ruby hook intent=gt-intent bead=gt-bead",
 		},
 		{
-			name:    "the record cannot be read",
-			record:  func(s *seatShadowTown) { s.unreadableIntent("gastown", "ruby") },
-			wantLog: true,
+			name:     "the record cannot be read",
+			record:   func(s *seatShadowTown) { s.unreadableIntent("gastown", "ruby") },
+			wantLine: "agentbead_shadow: gastown/ruby hook unreadable intent record: ",
 		},
 	}
 	for _, tc := range cases {
@@ -188,10 +190,37 @@ func TestAgentBeadRetireSeatCapDecisionIgnoresIntent(t *testing.T) {
 			if got := s.seatCap("gastown", "ruby"); got != want {
 				t.Fatalf("seatCap = %+v, want %+v whichever way the intent record reads", got, want)
 			}
-			if gotLog := s.logs.Len() > 0; gotLog != tc.wantLog {
-				t.Fatalf("logged %q, want a line: %v", s.logs.String(), tc.wantLog)
+			got := s.logs.String()
+			switch {
+			case tc.wantLine == "":
+				if got != "" {
+					t.Fatalf("logged %q, want no line: the record agrees with the bead", got)
+				}
+			case !strings.HasPrefix(got, tc.wantLine) || strings.Count(got, "\n") != 1:
+				t.Fatalf("logged %q, want the line %q", got, tc.wantLine)
 			}
 		})
+	}
+}
+
+// A seat whose pair agrees again ends the latched state, so the same
+// disagreement logs when it recurs. A latch that kept the old line would
+// report the first drift and swallow every recurrence after it.
+func TestAgentBeadRetireSeatCapShadowLogsRecurrence(t *testing.T) {
+	t.Parallel()
+	s := newSeatShadowTown(t, seatShadowSettings, nil)
+	s.agentBead("gastown", "ruby", "deepseek-flash", "gt-bead")
+	want := "agentbead_shadow: gastown/ruby hook intent=gt-intent bead=gt-bead"
+
+	s.slung("gastown", "ruby", "gt-intent")
+	s.seatCap("gastown", "ruby")
+	s.slung("gastown", "ruby", "gt-bead") // the record agrees with the bead again
+	s.seatCap("gastown", "ruby")
+	s.slung("gastown", "ruby", "gt-intent")
+	s.seatCap("gastown", "ruby")
+
+	if got := strings.Count(s.logs.String(), want); got != 2 {
+		t.Fatalf("logged the recurring disagreement %d time(s), want twice: once at first sight, then again after the seat agreed:\n%s", got, s.logs.String())
 	}
 }
 

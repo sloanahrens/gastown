@@ -1052,7 +1052,7 @@ func TestExportTableToJsonlUsesTheTownEndpoint(t *testing.T) {
 		}
 	}
 	if !slices.Contains(got.Env, "DOLT_CLI_PASSWORD=") {
-		t.Errorf("export environment carries no DOLT_CLI_PASSWORD: %v", got.Env)
+		t.Errorf("export environment carries no DOLT_CLI_PASSWORD")
 	}
 }
 

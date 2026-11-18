@@ -142,7 +142,7 @@ func TestGlobalAuthorEmailEnvironment(t *testing.T) {
 		t.Fatal("globalAuthorEmailWith built no command")
 	}
 	if want := []string{"HOME=/home/host", "PATH=/usr/bin:/bin"}; !reflect.DeepEqual(cmd.Env, want) {
-		t.Errorf("env = %v, want %v: repository and GIT_* settings must not reach git", cmd.Env, want)
+		t.Errorf("env = %d entries, want %d: repository and GIT_* settings must not reach git", len(cmd.Env), len(want))
 	}
 }
 

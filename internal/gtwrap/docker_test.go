@@ -221,13 +221,13 @@ func TestRunnerKeepsForwardedValuesOutOfArgv(t *testing.T) {
 			for _, entry := range call.Env {
 				name, _, _ := strings.Cut(entry, "=")
 				if slices.Contains(argv, entry) {
-					t.Fatalf("%s line %q carries the value %q in argv", rung.name, argv, entry)
+					t.Fatalf("%s line %q carries the value of %s in argv", rung.name, argv, name)
 				}
 				if !slices.Contains(argv, name) {
 					t.Fatalf("%s line %q does not forward %s by name", rung.name, argv, name)
 				}
 				if !slices.Contains(env, entry) {
-					t.Fatalf("%s docker env %q does not carry %q", rung.name, env, entry)
+					t.Fatalf("%s docker env does not carry %s", rung.name, name)
 				}
 			}
 		})

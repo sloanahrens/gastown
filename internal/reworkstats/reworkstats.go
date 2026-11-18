@@ -87,7 +87,7 @@ func Compute(recs []landings.Record, reviews []land.ReviewRecord, now time.Time,
 	if err != nil {
 		return Report{}, fmt.Errorf("the week of the window's first day: %w", err)
 	}
-	weekNames, err := weekNames(firstWeek, weeks)
+	names, err := weekNames(firstWeek, weeks)
 	if err != nil {
 		return Report{}, err
 	}
@@ -154,8 +154,8 @@ func Compute(recs []landings.Record, reviews []land.ReviewRecord, now time.Time,
 		}
 	}
 
-	report.Weeks = make([]Week, 0, len(weekNames))
-	for _, week := range weekNames {
+	report.Weeks = make([]Week, 0, len(names))
+	for _, week := range names {
 		row := Week{Week: week}
 		if t := byWeek[week]; t != nil {
 			row.Beads, row.TwoRounds, row.TwoSeats = t.beads, t.twoRounds, t.twoSeats

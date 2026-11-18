@@ -15,7 +15,9 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
@@ -144,6 +146,12 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	}
 	d.openGitFn = func(dir string) daemonGit { return world.Open(dir).(daemonGit) }
 	d.podMode = true
+	// Nothing in this rig reads the host's environment or a resolver: the gateway
+	// URL is empty unless a test sets one, and a lookup is a test's fake.
+	d.getenv = func(string) string { return "" }
+	d.lookupHost = func(host string) ([]string, error) {
+		return nil, errors.New("no resolver in this rig: " + host)
+	}
 	cluster := &fakeUpdateJob{made: map[string][]byte{}, entered: make(chan struct{}, 8), release: make(chan struct{})}
 	t.Cleanup(func() { close(cluster.release) })
 	d.updateJob = cluster
@@ -765,6 +773,14 @@ func TestUpdateJobRefusalsLogTheirReason(t *testing.T) {
 			},
 			wantReason: "running commit unreadable: ",
 		},
+		{
+			name: "gateway host unresolvable",
+			setup: func(_ *testing.T, r *updateJobRig) {
+				r.d.getenv = gatewayURLEnv("http://gateway-host.example:7440")
+				r.d.lookupHost = func(string) ([]string, error) { return nil, errors.New("no such host") }
+			},
+			wantReason: "launch of the update Job failed: resolve the gateway host gateway-host.example",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1115,5 +1131,227 @@ func TestLaunchUpdateJobBoundedNeverFindsItsOwnFinishedCreateOutstanding(t *test
 		if errors.Is(err, errUpdateJobOutstanding) {
 			t.Fatalf("attempt %d found the earlier, finished create outstanding", i)
 		}
+	}
+}
+
+// gatewayURLEnv answers BD_GATEWAY_URL with raw and every other name with "".
+func gatewayURLEnv(raw string) func(string) string {
+	return func(key string) string {
+		if key == k8sdaemon.BdGatewayURLEnv {
+			return raw
+		}
+		return ""
+	}
+}
+
+// decodeUpdateJob reads the manifest the daemon created as the Job it rendered.
+func decodeUpdateJob(t *testing.T, manifest []byte) updatejob.Job {
+	t.Helper()
+	require.NotEmpty(t, manifest, "the daemon created no Job")
+	var job updatejob.Job
+	require.NoError(t, yaml.Unmarshal(manifest, &job), "the created manifest is not a Job")
+	return job
+}
+
+// jobEnvValue is the value of the environment entry named name in c, and whether
+// c carries it.
+func jobEnvValue(c updatejob.Container, name string) (string, bool) {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return e.Value, true
+		}
+	}
+	return "", false
+}
+
+// jobGatewayTokenVolume is the pod volume that carries the daemon-class gateway
+// token Secret, or nil when the Job mounts none.
+func jobGatewayTokenVolume(job updatejob.Job) *updatejob.Volume {
+	for i, v := range job.Spec.Template.Spec.Volumes {
+		if v.Secret != nil && v.Secret.SecretName == k8sdaemon.BdGatewayDaemonSecretName {
+			return &job.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	return nil
+}
+
+// TestUpdateJobGatewayURLResolvesName: a BD_GATEWAY_URL whose host is a name
+// reaches the Job with the address the daemon resolves in the host, keeping the
+// scheme, the port and the path, and the Job mounts the daemon-class token Secret
+// both containers read. The first IPv4 answer is the one used.
+func TestUpdateJobGatewayURLResolvesName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		raw   string
+		addrs []string
+		want  string
+	}{
+		{
+			name:  "a name with a port",
+			raw:   "http://gateway-host.example:7440",
+			addrs: []string{"192.168.5.2"},
+			want:  "http://192.168.5.2:7440",
+		},
+		{
+			name:  "a name with a port and a path",
+			raw:   "http://gateway-host.example:7440/bd",
+			addrs: []string{"192.168.5.2"},
+			want:  "http://192.168.5.2:7440/bd",
+		},
+		{
+			name:  "an https name with no port",
+			raw:   "https://gateway-host.example",
+			addrs: []string{"192.168.5.2"},
+			want:  "https://192.168.5.2",
+		},
+		{
+			name:  "the first IPv4 answer, past an IPv6 one",
+			raw:   "http://gateway-host.example:7440",
+			addrs: []string{"fd00::1", "192.168.5.2", "192.168.5.3"},
+			want:  "http://192.168.5.2:7440",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.d.getenv = gatewayURLEnv(tt.raw)
+			var asked []string
+			r.d.lookupHost = func(host string) ([]string, error) {
+				asked = append(asked, host)
+				return tt.addrs, nil
+			}
+			sha := r.commits[2]
+
+			require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, sha))
+
+			assert.Equal(t, []string{"gateway-host.example"}, asked, "the host name was not resolved once")
+			job := decodeUpdateJob(t, r.cluster.made["gt-update-"+sha[:12]])
+			tokenVolume := jobGatewayTokenVolume(job)
+			require.NotNil(t, tokenVolume, "the Job mounts no daemon-class gateway token Secret")
+			pod := job.Spec.Template.Spec
+			require.Len(t, pod.InitContainers, 1)
+			require.Len(t, pod.Containers, 1)
+			for _, c := range []updatejob.Container{pod.InitContainers[0], pod.Containers[0]} {
+				got, ok := jobEnvValue(c, k8sdaemon.BdGatewayURLEnv)
+				require.True(t, ok, "container %s carries no %s", c.Name, k8sdaemon.BdGatewayURLEnv)
+				assert.Equal(t, tt.want, got, "container %s carries the wrong gateway URL", c.Name)
+				tokenFile, ok := jobEnvValue(c, k8sdaemon.BdGatewayTokenFileEnv)
+				require.True(t, ok, "container %s carries no %s", c.Name, k8sdaemon.BdGatewayTokenFileEnv)
+				assert.Equal(t, k8sdaemon.BdGatewayTokenPath, tokenFile)
+				mounted := false
+				for _, m := range c.VolumeMounts {
+					if m.Name == tokenVolume.Name && m.MountPath == k8sdaemon.BdGatewayTokenDir && m.ReadOnly {
+						mounted = true
+					}
+				}
+				assert.True(t, mounted, "container %s mounts no read-only gateway token", c.Name)
+			}
+		})
+	}
+}
+
+// TestUpdateJobGatewayURLLookupFails: a host the daemon cannot resolve, a lookup
+// that answers no IPv4 address, and a value that is not a URL with a host each
+// refuse the launch, and no Job is created. A lookup failure names the host and a
+// malformed value names the variable, never the value.
+func TestUpdateJobGatewayURLLookupFails(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		raw     string
+		lookup  func(string) ([]string, error)
+		wantMsg string
+	}{
+		{
+			name:    "the resolver fails",
+			raw:     "http://gateway-host.example:7440",
+			lookup:  func(string) ([]string, error) { return nil, errors.New("no such host") },
+			wantMsg: "resolve the gateway host gateway-host.example for the update Job: no such host",
+		},
+		{
+			name:    "the resolver answers no IPv4 address",
+			raw:     "http://gateway-host.example:7440",
+			lookup:  func(string) ([]string, error) { return []string{"fd00::1"}, nil },
+			wantMsg: "resolve the gateway host gateway-host.example for the update Job: the lookup answered no IPv4 address",
+		},
+		{
+			name:    "the value is not a URL with a host",
+			raw:     "gateway-host.example:7440",
+			lookup:  func(string) ([]string, error) { return []string{"192.168.5.2"}, nil },
+			wantMsg: k8sdaemon.BdGatewayURLEnv + " is not a URL with a host",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.d.getenv = gatewayURLEnv(tt.raw)
+			r.d.lookupHost = tt.lookup
+
+			err := r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, r.commits[2])
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMsg)
+			assert.Empty(t, r.cluster.calls, "a refused launch reached the cluster")
+		})
+	}
+}
+
+// TestUpdateJobGatewayURLUnsetOrIP: an unset BD_GATEWAY_URL renders the Job exactly
+// as a render with no gateway value does, and a host that is already an IP is
+// passed through unchanged. Neither reads a resolver.
+func TestUpdateJobGatewayURLUnsetOrIP(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		raw  string
+		// wantGateway is the gateway URL the Job carries; empty means the render
+		// must equal a render with no gateway value.
+		wantGateway string
+	}{
+		{name: "unset"},
+		{name: "an IPv4 host", raw: "http://10.9.8.7:7440/bd", wantGateway: "http://10.9.8.7:7440/bd"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			r.d.getenv = gatewayURLEnv(tt.raw)
+			lookups := 0
+			r.d.lookupHost = func(string) ([]string, error) {
+				lookups++
+				return nil, errors.New("the host is not a name")
+			}
+			sha := r.commits[2]
+			settings := config.UpdateSettings{MaxRuntime: time.Hour}
+			name := "gt-update-" + sha[:12]
+
+			require.NoError(t, r.d.launchUpdateJob(context.Background(), settings, sha))
+
+			assert.Zero(t, lookups, "the host was resolved")
+			manifest, ok := r.cluster.made[name]
+			require.True(t, ok, "the Job was not created")
+			if tt.wantGateway == "" {
+				running, ok, err := imagevalues.LoadIn(filepath.Join(r.town, "gastown"))
+				require.NoError(t, err)
+				require.True(t, ok)
+				want, err := updatejob.Build(updatejob.Values{
+					Image: running.Daemon, GreenCommit: sha, MaxRuntime: settings.MaxRuntime,
+				})
+				require.NoError(t, err)
+				want.Job.Metadata.Name = name
+				var buf bytes.Buffer
+				require.NoError(t, updatejob.YAML(&buf, want.Job))
+				assert.Equal(t, buf.String(), string(manifest), "the empty gateway changed the rendered Job")
+				return
+			}
+			job := decodeUpdateJob(t, manifest)
+			update := job.Spec.Template.Spec.Containers[0]
+			got, ok := jobEnvValue(update, k8sdaemon.BdGatewayURLEnv)
+			require.True(t, ok, "the Job carries no %s", k8sdaemon.BdGatewayURLEnv)
+			assert.Equal(t, tt.wantGateway, got, "the IP host was not passed through unchanged")
+		})
 	}
 }

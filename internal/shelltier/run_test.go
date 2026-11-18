@@ -339,7 +339,7 @@ func TestRunGivesEachScriptItsOwnEnvAndLog(t *testing.T) {
 		}
 		wantTmp := "TMPDIR=" + filepath.Join(logDir, "tmp", tc.wantTmp)
 		if want := []string{"GT_TEST_DOCKER=0", wantTmp}; !slices.Equal(c.Env, want) {
-			t.Errorf("%s: env = %v, want %v", tc.path, c.Env, want)
+			t.Errorf("%s: env = %d entries, want %d", tc.path, len(c.Env), len(want))
 		}
 		if want := filepath.Join(logDir, tc.wantLog); c.Log != want {
 			t.Errorf("%s: log = %q, want %q", tc.path, c.Log, want)

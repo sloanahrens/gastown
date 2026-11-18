@@ -52,11 +52,11 @@ func TestCommitAuthorEnvIsTheSeatAddress(t *testing.T) {
 		"GIT_COMMITTER_NAME=coma", "GIT_COMMITTER_EMAIL=coma@gastown.local",
 	}
 	if !slices.Equal(got, want) {
-		t.Errorf("withAuthorEnv = %v, want %v", got, want)
+		t.Errorf("withAuthorEnv = %d entries, want %d", len(got), len(want))
 	}
 	for _, kv := range got {
 		if strings.Contains(kv, "host@example.com") || strings.Contains(kv, "Host Human") {
-			t.Errorf("the host identity survived: %q", kv)
+			t.Errorf("the host identity survived in %d entries", len(got))
 		}
 	}
 	args := commitGitArgs([]string{"-m", "msg"}, seat)
@@ -244,6 +244,6 @@ func TestWithAuthorEnvReplacesInheritedAuthor(t *testing.T) {
 		"GIT_COMMITTER_EMAIL=" + seatEmail,
 	}
 	if !slices.Equal(got, want) {
-		t.Errorf("withAuthorEnv = %v, want %v", got, want)
+		t.Errorf("withAuthorEnv = %d entries, want %d", len(got), len(want))
 	}
 }

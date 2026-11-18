@@ -20,18 +20,41 @@ type preflightCall struct {
 	townConfig, handshake int
 }
 
-// fakePreflightChecks are the pre-roll checks as fakes: each records its call
-// and answers with its error, so a test runs neither a town config load nor bd.
-func fakePreflightChecks(calls *preflightCall, ctxErr, handshakeErr error) preflightChecks {
+// fakeTownConfigCheck is the town config check as a fake: it records its call
+// and answers with err, so a test runs no town config load.
+func fakeTownConfigCheck(calls *preflightCall, err error) func(string) error {
+	return func(string) error {
+		calls.townConfig++
+		return err
+	}
+}
+
+// fakeBDHandshake is the bd handshake as a fake: it records its call and
+// answers with err, so a test runs no bd.
+func fakeBDHandshake(calls *preflightCall, err error) func(context.Context, string) error {
+	return func(context.Context, string) error {
+		calls.handshake++
+		return err
+	}
+}
+
+// fakePreflightChecks are both checks as fakes.
+func fakePreflightChecks(calls *preflightCall, townConfigErr, handshakeErr error) preflightChecks {
 	return preflightChecks{
-		townConfig: func(string) error {
-			calls.townConfig++
-			return ctxErr
-		},
-		bdHandshake: func(context.Context, string) error {
-			calls.handshake++
-			return handshakeErr
-		},
+		townConfig:  fakeTownConfigCheck(calls, townConfigErr),
+		bdHandshake: fakeBDHandshake(calls, handshakeErr),
+	}
+}
+
+// writeUnparseableTownConfig writes a mayor/town.json under townRoot that does
+// not parse, so a test runs the real town config check against a broken town.
+func writeUnparseableTownConfig(t *testing.T, townRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -101,14 +124,9 @@ func TestPreRollGuardResults(t *testing.T) {
 func TestPreRollGuardBrokenTownConfigStillRunsHandshake(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeUnparseableTownConfig(t, townRoot)
 	var calls preflightCall
-	checks := preflightChecks{townConfig: daemon.CheckTownConfig, bdHandshake: fakePreflightChecks(&calls, nil, nil).bdHandshake}
+	checks := preflightChecks{townConfig: daemon.CheckTownConfig, bdHandshake: fakeBDHandshake(&calls, nil)}
 
 	results := runPreflightChecksWith(context.Background(), townRoot, checks)
 
@@ -149,18 +167,24 @@ func TestPreRollGuardUnwiredCheckFailsClosed(t *testing.T) {
 	}
 }
 
-// TestPreRollGuardProductionChecksAreWired pins that runPreflightChecks runs
-// the real town config check and the real bd handshake, so a check dropped
-// from the production struct cannot silently leave the report.
+// TestPreRollGuardProductionChecksAreWired pins that the production struct
+// wires both checks, so neither is reported as unwired, and that its
+// town-config check runs the real town config check: against a town whose
+// mayor/town.json does not parse it must fail naming the file.
 func TestPreRollGuardProductionChecksAreWired(t *testing.T) {
 	t.Parallel()
-	if townPreflightChecks.townConfig == nil ||
-		reflect.ValueOf(townPreflightChecks.townConfig).Pointer() != reflect.ValueOf(daemon.CheckTownConfig).Pointer() {
-		t.Error("the preflight's town-config check is not daemon.CheckTownConfig")
+	if townPreflightChecks.townConfig == nil {
+		t.Fatal("the preflight wires no town-config check, so it reports the check as unwired and fails")
 	}
-	if townPreflightChecks.bdHandshake == nil ||
-		reflect.ValueOf(townPreflightChecks.bdHandshake).Pointer() != reflect.ValueOf(bdTownHandshake).Pointer() {
-		t.Error("the preflight's bd-handshake check is not bdTownHandshake")
+	if townPreflightChecks.bdHandshake == nil {
+		t.Fatal("the preflight wires no bd-handshake check, so it reports the check as unwired and fails")
+	}
+
+	townRoot := t.TempDir()
+	writeUnparseableTownConfig(t, townRoot)
+
+	if err := townPreflightChecks.townConfig(townRoot); err == nil || !strings.Contains(err.Error(), "mayor/town.json") {
+		t.Errorf("the production town-config check = %v, want the real check's failure naming mayor/town.json", err)
 	}
 }
 

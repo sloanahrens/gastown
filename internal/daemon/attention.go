@@ -283,6 +283,13 @@ type attentionSources struct {
 	// is no exemption; an error means the gate state could not be read, and
 	// the item is raised.
 	gateRunning func(rig, name string) (bool, error)
+	// gateExemptFor is how long a seat inside its gate is exempt from the
+	// stall item: the gate time one sling may bank (overrunGateAllowance), the
+	// same ceiling the overrun guard applies. A gate that has not returned
+	// past it is a stuck seat, so the exemption ends there and the quiet is an
+	// item again; a gate_allowance of "0" banks no gate time, so it exempts
+	// nothing (gt-mcvyw0).
+	gateExemptFor time.Duration
 	// remoteTip reads the rig's landing target from origin with git ls-remote.
 	// It never fetches: the rig repo is the landing worker's and
 	// <town>/gastown/mayor/rig is install-gt's, so a fetch here would race them.
@@ -689,6 +696,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindTierSweepStuck, collect: s.collectTierSweepStuck},
 		{kind: attention.KindTierSweepGuardUnreadable, collect: s.collectTierSweepGuardUnreadable},
+		// The retries the sweep spent on a green commit whose images build kept
+		// failing, read from the same tier-sweep record the RED and starved
+		// items above use (gt-yhvp5m).
+		{kind: attention.KindTierSweepImagesRetryExhausted, collect: s.collectTierSweepImagesRetryExhausted},
 		{kind: attention.KindGreenRef, collect: s.collectGreenRef},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
@@ -720,6 +731,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The unknown build status is a fourth kind from the same read, with a
 		// collector of its own for the same reason (gt-3vafwr).
 		{kind: attention.KindImagesUnknown, collect: s.collectImagesUnknown},
+		// The pair the update ledger records as refused is a fifth kind from
+		// the same read, with a collector of its own (gt-t8vf15).
+		{kind: attention.KindDeployPairRefused, collect: s.collectPairRefused},
 		{kind: attention.KindConfigEnvShadowed, collect: s.collectConfigEnvShadowed},
 		// The patrol config that does not load is raised beside the env item
 		// (gt-6frjqf).
@@ -768,6 +782,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		host:          d.hostProbes,
 		envShadowed:   d.envShadowed,
 		patrolFailure: d.currentPatrolFailure(),
+		gateExemptFor: d.attentionGateExemptFor(),
 	}
 	if s.host == nil {
 		forgejoBaseURL := d.forgejoBaseURL
@@ -1020,6 +1035,17 @@ func (d *Daemon) attentionLandingLimits() townhealth.Limits {
 		th = townhealth.DefaultThresholds()
 	}
 	return th.Landing
+}
+
+// attentionGateExemptFor is the ceiling on the polecat-stall item's gate
+// exemption: the gate time one sling may bank, the ceiling the overrun guard
+// applies (overrunGateAllowance). The two read the same configured bound, so a
+// gate the guard counts as stuck is one this item reports too; a gate that
+// does not return is a stuck seat, not an infinite silence (gt-mcvyw0).
+func (d *Daemon) attentionGateExemptFor() time.Duration {
+	pc := d.patrol()
+	_, stopAfter := overrunGuardThresholds(pc)
+	return overrunGateAllowance(pc, stopAfter)
 }
 
 // attentionLandingStuckBudget is how long the in-flight landing's stage may
@@ -1718,16 +1744,19 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 		}
 		// A gate runs go test plus make lint for several minutes, longer with
 		// four seats compiling at once, so a seat that is quiet inside its own
-		// gate is doing what its bead told it to do (gt-nh2dgf). A gate state
-		// that cannot be read is not an exemption: the item is raised, the
-		// direction the overrun guard takes.
+		// gate is doing what its bead told it to do (gt-nh2dgf). The exemption
+		// is bounded by the gate time one sling may bank, the overrun guard's
+		// ceiling: past it a gate that has not returned is a stuck seat, and
+		// the quiet is an item again (gt-mcvyw0). A gate state that cannot be
+		// read is not an exemption: the item is raised, the direction the
+		// overrun guard takes.
 		if s.gateRunning != nil {
 			inGate, err := s.gateRunning(seat.Rig, name)
 			if err != nil {
 				s.d.logger.Printf("attention: cannot read the gate state for %s/%s, raising its stall: %v", seat.Rig, name, err)
 				inGate = false
 			}
-			if inGate {
+			if inGate && quiet <= s.gateExemptFor {
 				continue
 			}
 		}
@@ -2048,6 +2077,57 @@ func (s *attentionSources) collectTierSweepGuardUnreadable(ctx context.Context) 
 			Rig:      rig,
 			Summary: fmt.Sprintf("tier sweep %s: %s failed (exit %d): %s; the cycle is deferred, and the cluster access it needs is recorded in deploy/k8s/sweep-rbac.yaml",
 				rig, u.Argv0Verb, u.ExitCode, u.FirstLine),
+		})
+	}
+	return out, nil
+}
+
+// collectTierSweepImagesRetryExhausted raises one item per rig whose record has
+// spent tierSweepImagesRetryMax early re-runs on its green commit and whose
+// images are not known to have published (gt-yhvp5m). Nothing retries the build
+// until the hourly cycle then, and the commit has no daemon or polecat images
+// to roll onto. The item names the rig, the green commit, the retries spent and
+// the answer it read.
+//
+// Only a published answer clears it: a failed run raises it, and so does an
+// answer the pair check does not hold, because a read that has not reached the
+// commit is no proof of a success and must not clear a raised item (gt-opkfch).
+// A cycle whose images run succeeded clears the count (tierSweepImagesRetryRecorded
+// reads the published pair), and a new green sha moves the count with it.
+func (s *attentionSources) collectTierSweepImagesRetryExhausted(ctx context.Context) ([]attention.Item, error) {
+	if s.d == nil {
+		return nil, nil
+	}
+	var out []attention.Item
+	for _, rig := range s.tierSweepRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		st, err := s.tierSweep(rig)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		if st.LastGreenSHA == "" || st.ImagesRetrySHA != st.LastGreenSHA ||
+			st.ImagesRetries < tierSweepImagesRetryMax {
+			continue
+		}
+		answer := s.d.tierSweepImagesAnswerFor(rig, st.LastGreenSHA)
+		if answer == tierSweepImagesPublished {
+			continue
+		}
+		why := "the build still failed"
+		if answer == tierSweepImagesUnanswered {
+			why = "the pair check holds no answer for the run"
+		}
+		sha12 := greenRefShortSHA(st.LastGreenSHA)
+		out = append(out, attention.Item{
+			Key:      "tier-sweep-images-retry-exhausted:" + rig + ":" + sha12,
+			Kind:     attention.KindTierSweepImagesRetryExhausted,
+			Severity: attention.SeverityHigh,
+			Rig:      rig,
+			SHA:      st.LastGreenSHA,
+			Summary: fmt.Sprintf("images retries exhausted on %s for green %s: %d early re-runs ran and %s, so the commit waits for the hourly cycle",
+				rig, sha12, st.ImagesRetries, why),
 		})
 	}
 	return out, nil

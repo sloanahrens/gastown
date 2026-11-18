@@ -44,11 +44,19 @@ type daemonImageFlags struct {
 	townRoot    string // the town whose forge.owner names the owner when forgeOwner is empty
 	apply       bool
 	contextOnly bool // stop after the staged build context, before any engine step
+	gateway     bool // with apply and contextOnly, stage the gt-bd image's context instead
 }
 
-// imageBuilder is the build's steps, in the order they run. A
+// gatewayBDCommitLabel is the label a gateway listing prints the bd commit
+// under. It is the key internal/ci/ctxlabels reads a bd commit from, so the
+// line has the shape that reader parses.
+const gatewayBDCommitLabel = "org.gastown.bd-commit"
+
+// imageBuilder is the build's steps: the daemon build's, in the order they run,
+// and the gt-bd context stage a --gateway run takes instead. A
 // daemonimage.Builder is one; a test stands in a recording fake.
 type imageBuilder interface {
+	StageGatewayContext(ctx context.Context, rev string) ([]string, string, error)
 	BuildBinaries(ctx context.Context, rev string) ([]string, error)
 	BuildPlugins(ctx context.Context, rev string) ([]string, error)
 	BuildTools(ctx context.Context) ([]string, error)
@@ -163,7 +171,14 @@ With --apply and --context-only it stages the image's build context, the same
 binary, plugin, claude CLI and client tool steps, and stops there: neither the
 mango build nor the image build runs, so no container-engine command is issued.
 Its last line is "context: <absolute dir>", the directory to build the image
-from. Without --apply, --context-only prints that build's plan and runs nothing.`,
+from. Without --apply, --context-only prints that build's plan and runs nothing.
+
+With --gateway as well it stages the gt-bd image's build context instead of the
+daemon's: bd.real built from the bd source at the bd pin, and bdgw with its
+policy file verbs.json built from --gt-src at --rev. It prints the context
+directory, each staged file with its path, and the full bd commit as a label
+line; none of the daemon build's steps run. --gateway without --apply and
+--context-only is refused, and the error names the flags it lacks.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return run(cmd.Context(), cmd.OutOrStdout(), f)
@@ -184,6 +199,7 @@ from. Without --apply, --context-only prints that build's plan and runs nothing.
 	fl.StringVar(&f.townRoot, "town-root", "", "town whose forge.owner names the owner when --forge-owner is empty; empty reads no town")
 	fl.BoolVar(&f.apply, "apply", false, "run the build; without it only print the plan")
 	fl.BoolVar(&f.contextOnly, "context-only", false, "with --apply, stage the build context and stop before any container-engine step, printing its directory")
+	fl.BoolVar(&f.gateway, "gateway", false, "with --apply and --context-only, stage the gt-bd image's build context instead of the daemon's")
 	return cmd
 }
 
@@ -200,8 +216,13 @@ func init() {
 // plugins, the tools, mango, the claude CLI, the client tools, the image, in
 // that order, stopping at the first failure. With --context-only the build stops
 // after the client tools, before mango and the image: it stages the build context
-// and prints its directory, and no container-engine command is issued.
+// and prints its directory, and no container-engine command is issued. With
+// --gateway, which requires both, it stages the gt-bd image's build context and
+// prints that listing instead; it prints no plan and runs none of these steps.
 func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) error {
+	if err := validateGatewayFlags(f); err != nil {
+		return err
+	}
 	if err := validateDaemonImageFlags(f, d.evalSymlinks); err != nil {
 		return err
 	}
@@ -238,17 +259,21 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 			fmt.Fprintln(d.out, note)
 		}
 	}
-	var plan []string
-	if f.contextOnly {
-		plan, err = b.PlanContext(f.rev)
-	} else {
-		plan, err = b.Plan(f.rev)
-	}
-	if err != nil {
-		return err
-	}
-	for _, line := range plan {
-		fmt.Fprintln(d.out, line)
+	// The gateway stage takes none of the steps a daemon plan lists, so it
+	// prints its own listing once the files are in place.
+	if !f.gateway {
+		var plan []string
+		if f.contextOnly {
+			plan, err = b.PlanContext(f.rev)
+		} else {
+			plan, err = b.Plan(f.rev)
+		}
+		if err != nil {
+			return err
+		}
+		for _, line := range plan {
+			fmt.Fprintln(d.out, line)
+		}
 	}
 	if !f.apply {
 		fmt.Fprintln(d.out, "dry run: nothing was run. Pass --apply to build.")
@@ -257,6 +282,9 @@ func runDaemonImage(ctx context.Context, f daemonImageFlags, d daemonImageDeps) 
 	var build imageBuilder = b
 	if d.builder != nil {
 		build = d.builder(b)
+	}
+	if f.gateway {
+		return runGatewayContext(ctx, build, f.rev, f.out, d.out)
 	}
 	if f.contextOnly {
 		return runContextOnly(ctx, build, f.rev, f.out, d.out)
@@ -318,6 +346,49 @@ func runContextOnly(ctx context.Context, build imageBuilder, rev, ctxDir string,
 		return err
 	}
 	fmt.Fprintln(out, daemonimage.ContextLine(ctxDir))
+	return nil
+}
+
+// validateGatewayFlags refuses --gateway unless --apply and --context-only are
+// set too: the stage writes a build context and builds no image, so a run
+// without the other two would mean something else. The error names each flag
+// the run lacks, so the fix is in the message.
+func validateGatewayFlags(f daemonImageFlags) error {
+	if !f.gateway {
+		return nil
+	}
+	var missing []string
+	if !f.apply {
+		missing = append(missing, "--apply")
+	}
+	if !f.contextOnly {
+		missing = append(missing, "--context-only")
+	}
+	if len(missing) != 0 {
+		return fmt.Errorf("--gateway is valid only with %s: it stages the gt-bd image's build context and stops before the image build", strings.Join(missing, " and "))
+	}
+	return nil
+}
+
+// runGatewayContext stages the gt-bd image's build context through build and
+// prints its listing: the context directory, each staged file with its path,
+// and the full bd commit as a label line, the shape internal/ci/ctxlabels reads
+// a bd commit from.
+func runGatewayContext(ctx context.Context, build imageBuilder, rev, ctxDir string, out io.Writer) error {
+	paths, bdCommit, err := build.StageGatewayContext(ctx, rev)
+	if err != nil {
+		return err
+	}
+	lines := []string{daemonimage.ContextLine(ctxDir)}
+	for _, p := range paths {
+		lines = append(lines, "staged "+filepath.Base(p)+": "+p)
+	}
+	lines = append(lines, "label: "+gatewayBDCommitLabel+"="+bdCommit)
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return fmt.Errorf("printing the gt-bd build context listing: %w", err)
+		}
+	}
 	return nil
 }
 

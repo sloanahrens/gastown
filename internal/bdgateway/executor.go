@@ -568,8 +568,10 @@ func (e *Executor) timeout(ms int) (time.Duration, error) {
 
 // workspace maps rig and cwd to the directory bd runs in and the BEADS_DIR it
 // reads. An empty rig is the town's own workspace (.beads at the root); an
-// empty cwd is the root. Anything that is not a local relative path is refused
-// before it reaches a filesystem call.
+// empty cwd is the root. A rig is a local relative path of one or more
+// non-empty elements: the daemon sends "om/mayor/rig" for the om rig's
+// redirect target. Anything that is not such a path is refused before it
+// reaches a filesystem call.
 //
 // The lexical checks are not enough on their own: a symbolic link inside the
 // tree would carry bd, or the metadata it reads, out of the workspace even
@@ -577,18 +579,34 @@ func (e *Executor) timeout(ms int) (time.Duration, error) {
 // link below its root is never its own, and each existing element below the
 // root is refused if it is one.
 //
-// The workspace tree holds only the five files the design pushes, so the
-// caller's directory is created on first use: bd starts in the directory the
-// caller named, not in the root. A read-only workspace volume therefore
+// The workspace tree holds only files the gateway wrote, so the caller's
+// directory is created on first use: bd starts in the directory the caller
+// named, not in the root. A read-only workspace volume therefore
 // refuses every call from a directory it does not already hold.
 func (e *Executor) workspace(rig, cwd string) (dir, beadsDir string, err error) {
 	root := e.workspaceRoot
 	beadsDir = filepath.Join(root, ".beads")
 	if rig != "" {
-		if rig == "." || !filepath.IsLocal(rig) || strings.ContainsRune(rig, filepath.Separator) {
-			return "", "", fmt.Errorf("%w: %q is not one path element", ErrBadRig, rig)
+		elements := strings.Split(rig, string(filepath.Separator))
+		if rig == "." || !filepath.IsLocal(rig) {
+			return "", "", fmt.Errorf("%w: %q is not a local relative path", ErrBadRig, rig)
+		}
+		for _, element := range elements {
+			if element == "" {
+				return "", "", fmt.Errorf("%w: %q has an empty path element", ErrBadRig, rig)
+			}
 		}
 		beadsDir = filepath.Join(root, rig, ".beads")
+		if len(elements) > 1 {
+			// A multi-element rig's own directories are checked here, so a link
+			// among them is named as a bad rig. Any other failure of this walk
+			// is the beads walk below's to report: it checks the same elements
+			// and calls them a workspace that is not present, which is what a
+			// single-element rig has always answered.
+			if err := noSymlinkBelow(root, filepath.Join(root, rig)); errors.Is(err, errSymlinkElement) {
+				return "", "", fmt.Errorf("%w: %v", ErrBadRig, err)
+			}
+		}
 	}
 	dir = root
 	if cwd != "" {

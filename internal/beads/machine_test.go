@@ -52,7 +52,7 @@ func TestWithMachineEnvSetsItExactlyOnce(t *testing.T) {
 	t.Parallel()
 	got := WithMachineEnv([]string{"A=1", "BD_MACHINE=0", "B=2", "BD_MACHINE=", "BD_MACHINE=1"})
 	if want := []string{"A=1", "B=2", "BD_MACHINE=1"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("WithMachineEnv = %v, want %v", got, want)
+		t.Errorf("WithMachineEnv = %d entries, want %d", len(got), len(want))
 	}
 }
 
@@ -133,15 +133,15 @@ func TestMachineExemptIsBdSQLAndHelp(t *testing.T) {
 	}
 	env := machineEnvForCall("", []string{"A=1"}, []string{"sql", "SELECT 1"})
 	if _, ok := lastEnvValue(env, "BD_MACHINE"); ok {
-		t.Errorf("bd sql env %v must not carry BD_MACHINE", env)
+		t.Errorf("bd sql env must not carry BD_MACHINE")
 	}
 	env = machineEnvForCall("", []string{"A=1"}, []string{"backup", "--help"})
 	if _, ok := lastEnvValue(env, "BD_MACHINE"); ok {
-		t.Errorf("bd backup --help env %v must not carry BD_MACHINE", env)
+		t.Errorf("bd backup --help env must not carry BD_MACHINE")
 	}
 	env = machineEnvForCall("", []string{"A=1"}, []string{"show", "gt-1"})
 	if v, _ := lastEnvValue(env, "BD_MACHINE"); v != "1" {
-		t.Errorf("bd show env %v must carry BD_MACHINE=1", env)
+		t.Errorf("bd show env must carry BD_MACHINE=1")
 	}
 }
 

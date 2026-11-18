@@ -78,7 +78,8 @@ type BdGateway struct {
 	// HTTP sends the requests. Nil uses an http.Client bounded by the call's
 	// timeout, or by the probe bound for a doctor.
 	HTTP HTTPDoer
-	// Stdin is the caller's stdin, streamed after the head line. Nil sends none.
+	// Stdin is the caller's stdin, streamed after the head line only when the
+	// call reads stdin, and never otherwise. Nil sends none.
 	Stdin io.Reader
 	// Stdout and Stderr receive bd's own streams. Nil refuses the call, so the
 	// tool's output is never dropped.
@@ -104,7 +105,7 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	if call.Argv[0] != "bd" {
 		return exitDown, fmt.Errorf("gtwrap: the bdgateway target runs bd, but the call names %q", call.Argv[0])
 	}
-	rig, err := beadRig(g.Town, call.Env)
+	rig, err := beadRig(g.Town, call.Env, call.Argv)
 	if err != nil {
 		return exitDown, err
 	}
@@ -125,11 +126,18 @@ func (g BdGateway) Launch(call Call) (int, error) {
 		Cwd:       dirRelative(g.Town, call.Dir, g.Note),
 		TimeoutMS: g.timeoutMS(),
 	})
-	stdin := g.Stdin
-	if call.Stdin != nil {
+	// The body after the head is the caller's stdin only when the call reads it: a
+	// caller whose stdin is a pipe that never closes would otherwise hold the
+	// request open until the gateway's read deadline (gt-vojyy8). A stdin the call
+	// itself carries is always sent, since the caller that supplied it means bd to
+	// read it.
+	var stdin io.Reader
+	switch {
+	case call.Stdin != nil:
 		stdin = call.Stdin
-	}
-	if stdin == nil {
+	case g.Stdin != nil && bdReadsStdin(call.Argv[1:]):
+		stdin = g.Stdin
+	default:
 		stdin = strings.NewReader("")
 	}
 	body := io.MultiReader(bytes.NewReader(append(head, '\n')), stdin)
@@ -269,11 +277,18 @@ func (g BdGateway) validate() error {
 // removed, which is "" for the town's own beads. The absolute path never crosses;
 // the gateway joins the rig onto its own workspace. A BEADS_DIR the workspace
 // cannot hold is refused rather than sent, so the gateway never runs in the wrong
-// database. The bdgateway and bddocker targets share it, so the two cannot
+// database. A call that sets no BEADS_DIR gets the town workspace ("") when it
+// reads no database (bd's version command or its root help probe); every other
+// call without BEADS_DIR is refused, since the gateway cannot otherwise be told
+// which rig it runs in. argv is the call's argv, whose first word the caller has
+// checked is "bd". The bdgateway and bddocker targets share it, so the two cannot
 // translate a call differently.
-func beadRig(town string, env []string) (string, error) {
+func beadRig(town string, env, argv []string) (string, error) {
 	beadsDir, ok := envValue(env, "BEADS_DIR")
 	if !ok || beadsDir == "" {
+		if readsNoDatabase(argv[1:]) {
+			return "", nil
+		}
 		return "", errors.New("gtwrap: the call sets no BEADS_DIR, so the bd gateway cannot be told which rig it runs in; set BEADS_DIR to the town's or a rig's .beads directory")
 	}
 	if !filepath.IsAbs(beadsDir) {
@@ -291,6 +306,67 @@ func beadRig(town string, env []string) (string, error) {
 		return "", nil
 	}
 	return filepath.ToSlash(rig), nil
+}
+
+// readsNoDatabase reports whether a bd call reads no database, so it may run in
+// the town workspace when the caller sets no BEADS_DIR: bd's version command and
+// its root help probe. words is the call's argv after "bd". The match is exact, so
+// a version or help request carrying any other word, which may reach a database,
+// is not one of these calls.
+func readsNoDatabase(words []string) bool {
+	if slices.Equal(words, []string{"version"}) || slices.Equal(words, []string{"version", "--json"}) {
+		return true
+	}
+	return len(words) == 1 && (words[0] == "--help" || words[0] == "help")
+}
+
+// bdReadsStdin reports whether a bd call reads the caller's stdin, so its bytes
+// may follow the head line. bd takes stdin as a "-" value of a file flag: the
+// four flags in bdStdinFlags under any command, and -f/--file under a command
+// whose -f reads stdin (bdFileCommands), either as the next token ("bd update
+// gt-x --body-file -", "bd comments add gt-x -f -") or attached ("--body-file=-",
+// "-f=-", "-f-"), and through its --stdin flag. A file the wrapper carries
+// reaches bd as one of those "-" forms, since filearg.go rewrites the flag's
+// value. words is the call's argv after "bd", and nothing after "--" is a flag.
+//
+// A "-" value of any other flag, and a positional "-", read no stdin: sending
+// one would hold the call to the gateway's read deadline for a caller whose
+// stdin is a pipe that never closes (gt-vojyy8).
+func bdReadsStdin(words []string) bool {
+	command, sub := commandWords(words)
+	// readsStdin reports whether flag's "-" value makes bd read stdin.
+	readsStdin := func(flag string) bool {
+		return classifyBd(command, sub, flag, "-") == argStdin
+	}
+	for i, word := range words {
+		switch {
+		case word == "--":
+			return false
+		case word == "--stdin":
+			return true
+		case strings.HasPrefix(word, "--"):
+			flag, value, attached := strings.Cut(word, "=")
+			if attached && value == "-" && readsStdin(flag) {
+				return true
+			}
+		case len(word) > 2 && shorthandGroup(word):
+			// An attached shorthand value: -f- or -f=-. A group such as -xf-
+			// is refused by ScanFileArgs, so only the flag's own letter is read.
+			flag, value := word[:2], word[2:]
+			if rest, ok := strings.CutPrefix(value, "="); ok {
+				value = rest
+			}
+			if value == "-" && readsStdin(flag) {
+				return true
+			}
+		case word == "-":
+			// The separate value form: the token before it is the flag.
+			if i > 0 && readsStdin(words[i-1]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dirRelative maps the caller's working directory onto the bd gateway's

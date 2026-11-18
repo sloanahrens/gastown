@@ -1105,10 +1105,15 @@ func runSpecLintOnWith(cmd *cobra.Command, args []string, townRoot string, graph
 	if path == "" {
 		path = specTemplatePath(sd)
 	}
+	// The settings are read before the bead: a config the accessor refuses is
+	// the answer the lint has, and no bead read changes it (gt-p2zuge).
+	opts, err := specLintOptsFor(sd, townRoot, withEstimate, cmd.ErrOrStderr())
+	if err != nil {
+		return err
+	}
 	read := specBlockerRead(nil, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
-	spec, err := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, read, openRigTree)
-	opts := specLintOptsFor(sd, townRoot, withEstimate, cmd.ErrOrStderr())
-	return runSpecLintAtWith(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, err, path, hmHintSource(nil), specLintJSON, time.Now(), opts)
+	spec, specErr := specForLint(townRoot, args[0], func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) }, read, openRigTree)
+	return runSpecLintAtWith(cmd.OutOrStdout(), cmd.ErrOrStderr(), townRoot, args[0], spec, specErr, path, hmHintSource(nil), specLintJSON, time.Now(), opts)
 }
 
 // specForLint reads beadID for gt spec lint with the target inventory the
@@ -1440,6 +1445,14 @@ type specLintOpts struct {
 	// which the lint refuses a bead by its own sp-minutes label. Zero is off,
 	// and the lint then reads no story-point label (gt-mtzx6s).
 	LintOverMinutes float64
+	// BudgetMaxLines is story_points.lint_budget_max_lines: the change budget
+	// in added lines a bead's Size section may declare, past which the lint
+	// refuses it. Zero or below is off (gt-muzkwi).
+	BudgetMaxLines int
+	// BudgetRequired is story_points.lint_budget_required: the lint refuses a
+	// bead whose Size section declares no change budget at all. False is off
+	// (gt-muzkwi).
+	BudgetRequired bool
 	// Estimate is --estimate's run of one bead's estimate, nil when the flag
 	// is off. It writes the labels and the note before the check, and the lint
 	// reads the size that run wrote (gt-5ynb86).
@@ -1456,27 +1469,44 @@ type specLintOpts struct {
 const specLintEstimateWait = specStoryPointTimeout
 
 // specLintOptsFrom is the settings gt spec lint runs with, read from the town's
-// spec_dispatch block: the story-point size gate (gt-mtzx6s). A nil block is
-// every setting off.
-func specLintOptsFrom(sd *config.SpecDispatchConfig) specLintOpts {
-	return specLintOpts{LintOverMinutes: sd.StoryPointsLintOver()}
+// spec_dispatch block: the story-point size gate (gt-mtzx6s) and the change
+// budget gate (gt-muzkwi). A nil block is every setting off. A change budget
+// the accessor refuses stops the lint rather than running the gate off
+// (gt-p2zuge).
+func specLintOptsFrom(sd *config.SpecDispatchConfig) (specLintOpts, error) {
+	budget, err := sd.StoryPointsLintBudgetMaxLines()
+	if err != nil {
+		return specLintOpts{}, err
+	}
+	return specLintOpts{
+		LintOverMinutes: sd.StoryPointsLintOver(),
+		BudgetMaxLines:  budget,
+		BudgetRequired:  sd.StoryPointsLintBudgetRequired(),
+	}, nil
 }
 
 // specLintOptsFor is the settings and flags one gt spec lint run reads: the
 // size gate from the town's spec_dispatch block, and --estimate's run when the
 // flag is set (gt-5ynb86). The estimate is attached only when asked for: the
 // lint never makes one by default.
-func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimate bool, errw io.Writer) specLintOpts {
-	opts := specLintOptsFrom(sd)
+func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimate bool, errw io.Writer) (specLintOpts, error) {
+	opts, err := specLintOptsFrom(sd)
+	if err != nil {
+		return specLintOpts{}, err
+	}
 	if withEstimate {
 		opts.Estimate = specLintEstimateRun(townRoot, errw)
 	}
-	return opts
+	return opts, nil
 }
 
 // lintOptions is the lint's own view of the settings.
 func (o specLintOpts) lintOptions() specdispatch.LintOptions {
-	return specdispatch.LintOptions{LintOverMinutes: o.LintOverMinutes}
+	return specdispatch.LintOptions{
+		LintOverMinutes: o.LintOverMinutes,
+		BudgetMaxLines:  o.BudgetMaxLines,
+		BudgetRequired:  o.BudgetRequired,
+	}
 }
 
 // gt spec lint --estimate (gt-5ynb86): the lint never estimates by itself, so
@@ -2069,6 +2099,13 @@ type specDispatchEnv struct {
 	// lint refuses a candidate whose own sp-minutes label is at or over it, so
 	// the bead is split before a seat finds out at the overrun stop.
 	StoryPointLintOver float64
+	// StoryPointLintBudgetMaxLines is the change budget ceiling in added lines
+	// (story_points.lint_budget_max_lines, gt-muzkwi). Zero is off.
+	StoryPointLintBudgetMaxLines int
+	// StoryPointLintBudgetRequired refuses a candidate whose Size section
+	// declares no change budget (story_points.lint_budget_required,
+	// gt-muzkwi). False is off.
+	StoryPointLintBudgetRequired bool
 	// StoryPointEstimate is the estimate the tick runs for a bead, under a
 	// context the tick cancels on timeout. Production is specStoryPointEstimate.
 	// The outcome carries the numbers the split route reads.
@@ -2165,6 +2202,17 @@ func specLockTimeoutRecorded(storeFor func(beadID string) beads.Client) func(bea
 			texts = append(texts, c.Text)
 		}
 		return specdispatch.LockTimeoutRecorded(texts), nil
+	}
+}
+
+// lintOptions is the settings the tick lints a candidate with: the same
+// settings gt spec lint reads, so a candidate the seat's lint would refuse is
+// held here instead of slung (gt-muzkwi).
+func (e specDispatchEnv) lintOptions() specdispatch.LintOptions {
+	return specdispatch.LintOptions{
+		LintOverMinutes: e.StoryPointLintOver,
+		BudgetMaxLines:  e.StoryPointLintBudgetMaxLines,
+		BudgetRequired:  e.StoryPointLintBudgetRequired,
 	}
 }
 
@@ -2487,7 +2535,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 				continue
 			}
 			full = walked
-			verdict = specdispatch.LintWith(full, env.Template, specdispatch.LintOptions{LintOverMinutes: env.StoryPointLintOver})
+			verdict = specdispatch.LintWith(full, env.Template, env.lintOptions())
 			env.Verdicts.record(c, specCandidateVerdict{Eligible: true, Shaped: true, Shape: verdict})
 		}
 		// A clean verdict is the only shape the estimate-ahead pass reads: the
@@ -3765,17 +3813,26 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 // specWireStoryPoints fills the tick's story-point fields from the town's
 // dispatch config in one call, so the settings' read has a test of its own: the
 // operator hold stops a tick before the candidate loop that uses the fields, so
-// a whole-tick test cannot reach them (gt-cgsivu).
-func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, townRoot string) {
+// a whole-tick test cannot reach them (gt-cgsivu). A change budget the accessor
+// refuses stops the tick rather than running the gate off (gt-p2zuge).
+func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, townRoot string) error {
+	budget, err := sd.StoryPointsLintBudgetMaxLines()
+	if err != nil {
+		return err
+	}
 	// The story-point settings read from the same block as the other
 	// spec_dispatch knobs, and have no environment variable (gt-5d9k2f.14,
 	// gt-5d9k2f.18).
 	env.StoryPointShadow = sd.StoryPointsShadow()
 	env.StoryPointSplitOver = sd.StoryPointsSplitOver()
 	// The size gate that refuses an over-estimate bead at lint time lives in
-	// the same block (gt-mtzx6s).
+	// the same block (gt-mtzx6s), and so does the change budget gate
+	// (gt-muzkwi).
 	env.StoryPointLintOver = sd.StoryPointsLintOver()
+	env.StoryPointLintBudgetMaxLines = budget
+	env.StoryPointLintBudgetRequired = sd.StoryPointsLintBudgetRequired()
 	env.StoryPointEstimate = specStoryPointEstimate(townRoot)
+	return nil
 }
 
 // runSpecDispatchAtWith is runSpecDispatchAt with the daemon that started the
@@ -3998,7 +4055,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 				return beads.New(resolveBeadDirFromTownRoot(townRoot, id)).Comments(id)
 			}),
 	}
-	specWireStoryPoints(&env, sd, townRoot)
+	if err := specWireStoryPoints(&env, sd, townRoot); err != nil {
+		return specDispatchReport{}, err
+	}
 	report := runSpecDispatchCycle(env)
 	report.Notices = append(report.Notices, slingTraces.notices()...)
 	annotations.save()
