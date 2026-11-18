@@ -190,6 +190,57 @@ func TestEstimateAheadUnderHoldNoHoldIsUnchanged(t *testing.T) {
 	}
 }
 
+// TestEstimateAheadUnderHoldOperatorFileEstimatesThroughTheTick runs a held tick
+// on the real hold files of a town directory, with the production rig-hold
+// wiring: the operator hold file is the only town-wide hold, and the walk leaves
+// that file out. Both shaped beads in gastown are estimated and nothing is slung;
+// the bead in a rig under its own ESTOP is still skipped.
+func TestEstimateAheadUnderHoldOperatorFileEstimatesThroughTheTick(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.WriteFile(dispatch.HoldFilePath(town), []byte("hold\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(estop.RigFilePath(town, "otherrig"), estop.Render(estop.TriggerManual, "estimate under hold test", specTestNow), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	specs := aheadHoldSpecs(3)
+	f := newFakeSpecTown(specs...)
+	f.rigOf = map[string]string{"gt-02": "otherrig"}
+	f.hold = dispatch.OperatorHold(town)
+	if f.hold == "" {
+		t.Fatal("the operator hold file reads as no hold in the test town")
+	}
+	env := f.env()
+	env.HoldFileOnly = func() bool { return specOperatorHoldOnly(town) }
+	env.RigHold = func(rig string) string { return dispatch.RigHold(town, rig) }
+	env.HeldRigHold = specHeldRigHold(town)
+	db := specAheadSeed(t, specs...)
+	var reads []string
+	aheadHoldEstimates(&env, db, &reads)
+
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v under the operator hold file, want none", f.slung)
+	}
+	if want := []string{"gt-00", "gt-01"}; !slices.Equal(reads, want) {
+		t.Fatalf("read %v for the pass, want the gastown beads %v; the parked-rig bead gt-02 must stay out", reads, want)
+	}
+	var estimated []string
+	for _, s := range specs {
+		if slices.Contains(specAheadLabelsOn(t, db, s.ID), "sp:5") {
+			estimated = append(estimated, s.ID)
+		}
+	}
+	if want := []string{"gt-00", "gt-01"}; !slices.Equal(estimated, want) {
+		t.Fatalf("estimated %v under the operator hold file, want %v", estimated, want)
+	}
+	if n := strings.Join(r.Notices, "\n"); !strings.Contains(n, "the estimate-ahead pass ran under the hold") {
+		t.Fatalf("notices %q carry no line that the pass ran under the hold", r.Notices)
+	}
+}
+
 // TestEstimateAheadUnderHoldBoardTimeoutEstimatesNothing: a held board read
 // that has not returned when the read phase's timeout passes ends the pass in
 // one line, and nothing is estimated.

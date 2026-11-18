@@ -1995,6 +1995,11 @@ type specDispatchEnv struct {
 	// queries.
 	Children func(beadID string) ([]specdispatch.Child, error)
 	RigHold  func(rig string) string
+	// HeldRigHold is the rig holds a held tick's estimate-ahead walk checks:
+	// RigHold with the operator hold file left out, since that file is the hold
+	// the walk runs under (gt-r6lb5v). Nil reads RigHold, which holds more, so
+	// the walk skips more beads, never fewer.
+	HeldRigHold func(rig string) string
 	// RevertInFlight is the revert the rig's red-main owner has building or
 	// queued, from the state the landing worker writes; nil is none. It holds
 	// that rig's red-main beads, never any other bead (gt-zkdwt).
@@ -3868,10 +3873,6 @@ func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, to
 	return nil
 }
 
-// specOperatorHoldName is the name dispatch.HoldView gives the operator hold
-// file among the town's hold sources.
-const specOperatorHoldName = "operator hold file"
-
 // specOperatorHoldOnly reports whether the operator hold file is the only hold
 // on the town: the file is present, and no other source holds (town ESTOP, the
 // boot hold, the Ring, or a missing town root). An unreadable hold file is not
@@ -3881,11 +3882,21 @@ func specOperatorHoldOnly(townRoot string) bool {
 		return false
 	}
 	for _, s := range dispatch.HoldView(townRoot).Sources {
-		if s.Name != specOperatorHoldName && s.Reason != "" {
+		if s.Name != dispatch.OperatorHoldSource && s.Reason != "" {
 			return false
 		}
 	}
 	return true
+}
+
+// specHeldRigHold is the rig-hold read of a held tick's estimate-ahead walk: the
+// holds on one rig, with the operator hold file left out, since that file is the
+// hold the walk runs under (gt-r6lb5v). Town ESTOP and the boot hold still hold
+// here, as they stop the tick before the walk.
+func specHeldRigHold(townRoot string) func(rig string) string {
+	return func(rig string) string {
+		return dispatch.RigHoldIgnoring(townRoot, rig, dispatch.OperatorHoldSource)
+	}
 }
 
 // runSpecDispatchAtWith is runSpecDispatchAt with the daemon that started the
@@ -4034,7 +4045,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		Claims: func(beadID string) ([]specdispatch.Claimant, error) {
 			return specTargetClaims(townRoot, beadID)
 		},
-		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		RigHold:     func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		HeldRigHold: specHeldRigHold(townRoot),
 		RevertInFlight: specRevertInFlight(townRoot, reads, reverts, func(name string) beads.Client {
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, name)))
 		}),

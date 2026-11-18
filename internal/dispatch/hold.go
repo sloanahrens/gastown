@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ import (
 // replaced the plugin (the spec dispatcher and gt sling), and every other
 // automatic sling path with it.
 const HoldFileName = "seat-refill.hold"
+
+// OperatorHoldSource is the name HoldView gives the operator hold file among the
+// town-wide hold sources. RigHoldIgnoring takes it to leave that file out.
+const OperatorHoldSource = "operator hold file"
 
 // HoldFilePath returns the operator hold file for a town.
 func HoldFilePath(townRoot string) string {
@@ -197,7 +202,7 @@ func holdView(townRoot string, key ring.KeyFunc, now time.Time, rigs rigLister) 
 		return state
 	}
 	state.Sources = []HoldSource{
-		{Name: "operator hold file", Reason: operatorHoldFileReason(townRoot)},
+		{Name: OperatorHoldSource, Reason: operatorHoldFileReason(townRoot)},
 		{Name: "town ESTOP", Reason: estopHold(townRoot, "")},
 		{Name: "boot hold", Reason: BootHold(townRoot)},
 		{Name: "Ring", Reason: ring.Hold(townRoot, key, now)},
@@ -265,8 +270,19 @@ func estopHold(townRoot, rig string) string {
 // (townconfig.DispatchHeldReason). An empty rig answers for the town, and the
 // town-wide holds win because they are checked first.
 func RigHold(townRoot, rig string) string {
-	if reason := OperatorHold(townRoot); reason != "" {
-		return reason
+	return RigHoldIgnoring(townRoot, rig)
+}
+
+// RigHoldIgnoring is RigHold with the town-wide hold sources named in ignore
+// left out, by the names HoldView gives them. A tick whose only town-wide hold
+// is the operator hold file passes OperatorHoldSource, and still stops at the
+// rig's own holds: its ESTOP and its dispatch hold (gt-r6lb5v). A town-wide
+// source that is not named still holds first, and so does a missing town root.
+func RigHoldIgnoring(townRoot, rig string, ignore ...string) string {
+	for _, source := range holdView(townRoot, ring.TownKey(os.Getenv), time.Now(), noRigs).Sources {
+		if source.Reason != "" && !slices.Contains(ignore, source.Name) {
+			return source.Reason
+		}
 	}
 	if townRoot == "" || rig == "" {
 		return ""

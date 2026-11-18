@@ -743,9 +743,13 @@ func specHeldShapedWalk(env specDispatchEnv, read specBoardRead) (ids []string, 
 	for _, f := range env.InFlight {
 		inFlight[f.Bead] = true
 	}
+	rigHold := env.HeldRigHold
+	if rigHold == nil {
+		rigHold = env.RigHold
+	}
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
-		if inFlight[id] || env.RigHold(c.Rig) != "" {
+		if inFlight[id] || rigHold(c.Rig) != "" {
 			continue
 		}
 		if specBlocked(sling.Admit(c.Blockers)) != "" {
