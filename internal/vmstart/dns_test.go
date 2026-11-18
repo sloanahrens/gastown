@@ -9,12 +9,22 @@ import (
 
 const testResolvConf = "# managed by lima\nnameserver 192.168.5.3\nsearch lima.local\n"
 
+// readCommand is the shell text CheckDNS runs in the VM, written out here rather
+// than read from dnsCommand so a change to the read fails a test.
+// dns_repair_test.go shares readArgv, so the two fixtures cannot drift
+// (gt-8bs4dv).
+const readCommand = "cat /etc/resolv.conf || echo gt:resolv.conf:unreadable; timeout 5 getent hosts github.com"
+
+// readArgv is the command CheckDNS runs in the named VM.
+func readArgv(profile string) []string {
+	return []string{"colima", "ssh", "-p", profile, "--", "sh", "-c", readCommand}
+}
+
 // TestVMStartDNSCheck: a failed lookup returns the parsed nameserver with
 // Answers false, and a lookup that exited 0 returns Answers true.
 func TestVMStartDNSCheck(t *testing.T) {
 	t.Parallel()
-	wantArgv := []string{"colima", "ssh", "-p", "gt-control", "--", "sh", "-c",
-		"cat /etc/resolv.conf; timeout 5 getent hosts github.com"}
+	wantArgv := readArgv("gt-control")
 	cases := map[string]struct {
 		out    string
 		runErr error
@@ -68,6 +78,45 @@ func TestVMStartDNSReadError(t *testing.T) {
 	}
 	if _, err := CheckDNS(context.Background(), run, "gt-sbx"); err == nil {
 		t.Fatal("CheckDNS accepted a read that printed nothing")
+	}
+}
+
+// TestVMStartDNSUnreadableConf: a resolv.conf the read could not open is an
+// unknown state even when the lookup answered, so a clean DNSState is never
+// reported over a file nobody read (gt-8bs4dv).
+func TestVMStartDNSUnreadableConf(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		out    string
+		runErr error
+	}{
+		{
+			name: "a passing lookup",
+			out:  unreadableMarker + "\n140.82.113.4  github.com\n",
+		},
+		{
+			name:   "a failing lookup",
+			out:    unreadableMarker + "\n",
+			runErr: errors.New("exit status 1"),
+		},
+		{
+			name:   "file content read before the failure",
+			out:    testResolvConf + unreadableMarker + "\n",
+			runErr: errors.New("exit status 1"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			run := func(context.Context, string, ...string) ([]byte, error) {
+				return []byte(tc.out), tc.runErr
+			}
+			got, err := CheckDNS(context.Background(), run, "gt-control")
+			if err == nil {
+				t.Fatalf("CheckDNS reported %+v over an unreadable resolv.conf", got)
+			}
+		})
 	}
 }
 
