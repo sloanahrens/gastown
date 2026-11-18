@@ -420,7 +420,7 @@ func TestGitEnvTurnsEveryPromptOff(t *testing.T) {
 	got := gitEnv(base)
 	for _, want := range []string{"GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=true", "GIT_SSH_COMMAND=ssh -o BatchMode=yes"} {
 		if !slices.Contains(got, want) {
-			t.Errorf("env lacks %q: %v", want, got)
+			t.Errorf("env lacks %q: %d entries", want, len(got))
 		}
 	}
 	if !slices.Equal(base, []string{"HOME=/h", "GIT_TERMINAL_PROMPT=1"}) {
@@ -428,7 +428,7 @@ func TestGitEnvTurnsEveryPromptOff(t *testing.T) {
 	}
 	own := gitEnv([]string{"GIT_SSH_COMMAND=ssh -i key"})
 	if slices.Contains(own, "GIT_SSH_COMMAND=ssh -o BatchMode=yes") || !slices.Contains(own, "GIT_SSH_COMMAND=ssh -i key") {
-		t.Errorf("env replaced the caller's ssh command: %v", own)
+		t.Errorf("env replaced the caller's ssh command: %d entries", len(own))
 	}
 }
 

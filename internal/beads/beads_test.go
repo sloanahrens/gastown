@@ -927,8 +927,7 @@ func TestResolvedDoltEndpointEnvTownConfig(t *testing.T) {
 				t.Errorf("ok = %v, want %v", ok, tc.wantEnv != nil)
 			}
 			if !reflect.DeepEqual(env, tc.wantEnv) {
-				// testpolicy:env-print-ok ResolvedDoltEndpointEnv resolves only a Dolt host and port
-				t.Errorf("env = %v, want %v", env, tc.wantEnv)
+				t.Errorf("env = %d entries, want %d", len(env), len(tc.wantEnv))
 			}
 		})
 	}
@@ -4937,12 +4936,12 @@ func TestFilterBeadsEnv_PreservesDoltPortVars(t *testing.T) {
 		"PATH=/usr/bin",
 	}
 	if len(got) != len(want) {
-		t.Fatalf("filterBeadsEnv returned %d items, want %d\n  got:  %v\n  want: %v",
-			len(got), len(want), got, want)
+		t.Fatalf("filterBeadsEnv returned %d items, want %d",
+			len(got), len(want))
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			t.Errorf("[%d] = an entry that differs from the expected one", i)
 		}
 	}
 }
@@ -4969,11 +4968,11 @@ func TestFilterBeadsEnv_StripsCaseVariantBeadsEnv(t *testing.T) {
 		"PATH=/usr/bin",
 	}
 	if len(got) != len(want) {
-		t.Fatalf("filterBeadsEnv returned %d items, want %d\n  got:  %v\n  want: %v", len(got), len(want), got, want)
+		t.Fatalf("filterBeadsEnv returned %d items, want %d", len(got), len(want))
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			t.Errorf("[%d] = an entry that differs from the expected one", i)
 		}
 	}
 }
@@ -5273,7 +5272,7 @@ func TestStripEnvPrefixes_PreservesOrder(t *testing.T) {
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			t.Errorf("[%d] = an entry that differs from the expected one", i)
 		}
 	}
 }
@@ -5285,11 +5284,11 @@ func TestStripEnvPrefixes_CaseInsensitiveKeys(t *testing.T) {
 	got := stripEnvPrefixes(environ, "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_")
 	want := []string{"PATH=/usr/bin"}
 	if len(got) != len(want) {
-		t.Fatalf("stripEnvPrefixes() returned %d items, want %d\n  got:  %v\n  want: %v", len(got), len(want), got, want)
+		t.Fatalf("stripEnvPrefixes() returned %d items, want %d", len(got), len(want))
 	}
 	for i := range got {
 		if got[i] != want[i] {
-			t.Errorf("[%d] = %q, want %q", i, got[i], want[i])
+			t.Errorf("[%d] = an entry that differs from the expected one", i)
 		}
 	}
 }
@@ -5567,7 +5566,7 @@ func TestFilterBeadsEnv_Integration(t *testing.T) {
 	for _, e := range env {
 		for _, prefix := range forbidden {
 			if strings.HasPrefix(e, prefix) {
-				t.Errorf("filterBeadsEnv did not strip %s (found: %s)", prefix, e)
+				t.Errorf("filterBeadsEnv did not strip %s (found %d entries)", prefix, len(env))
 			}
 		}
 	}
@@ -5591,7 +5590,7 @@ func TestBdBranch_SystemScenario_FilterBeadsEnvIsolation(t *testing.T) {
 	for _, entry := range filtered {
 		for _, prefix := range forbidden {
 			if strings.HasPrefix(entry, prefix) {
-				t.Errorf("filterBeadsEnv result still contains %s", entry)
+				t.Errorf("filterBeadsEnv result still contains an entry with the stripped prefix %s", prefix)
 			}
 		}
 	}

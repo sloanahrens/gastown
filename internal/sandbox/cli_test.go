@@ -293,7 +293,7 @@ func TestInheritedEnvDropsEnvFromEntries(t *testing.T) {
 	environ := []string{"PATH=/bin", "GT_SANDBOX_ENV_STALE=old", "HOME=/h", "GT_SANDBOX_ENV_=x"}
 	want := []string{"PATH=/bin", "HOME=/h"}
 	if got := inheritedEnv(environ); !reflect.DeepEqual(got, want) {
-		t.Errorf("inheritedEnv = %q, want %q; a parent's GT_SANDBOX_ENV_ entry must not reach openshell", got, want)
+		t.Errorf("inheritedEnv = %d entries, want %d; a parent's GT_SANDBOX_ENV_ entry must not reach openshell", len(got), len(want))
 	}
 }
 

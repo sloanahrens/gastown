@@ -50,6 +50,6 @@ func TestEventsJournalProbeEnv(t *testing.T) {
 	got := EventsJournalProbeEnv([]string{"A=1", "BD_EVENTS_JOURNAL=1", "BEADS_DIR=/other"}, "/rig/.beads")
 	want := []string{"A=1", "BEADS_DIR=/rig/.beads"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("EventsJournalProbeEnv = %v, want %v", got, want)
+		t.Errorf("EventsJournalProbeEnv = %d entries, want %d", len(got), len(want))
 	}
 }

@@ -154,7 +154,7 @@ func TestEndpointEnvDropsTheStoreSelector(t *testing.T) {
 	})
 	want := []string{"BEADS_DOLT_SERVER_PORT=" + testScratchPort}
 	if !slices.Equal(got, want) {
-		t.Errorf("endpointEnv = %v, want the selector dropped, %v", got, want)
+		t.Errorf("endpointEnv = %d entries, want the selector dropped, %d", len(got), len(want))
 	}
 }
 
@@ -204,7 +204,7 @@ func TestContainerEnvMapsTheHostAndKeepsTheOtherNames(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := containerEnv(endpointEnv(tc.env), testDoltHost); !slices.Equal(got, tc.want) {
-				t.Errorf("containerEnv(%v) = %v, want %v", tc.env, got, tc.want)
+				t.Errorf("containerEnv(%d entries) = %d entries, want %d", len(tc.env), len(got), len(tc.want))
 			}
 		})
 	}
@@ -322,7 +322,7 @@ func TestEndpointEnvKeepsOnlyTheDoltNames(t *testing.T) {
 	})
 	want := []string{"BEADS_DOLT_SERVER_PORT=13307"}
 	if !slices.Equal(got, want) {
-		t.Errorf("endpointEnv = %v, want %v", got, want)
+		t.Errorf("endpointEnv = %d entries, want %d", len(got), len(want))
 	}
 }
 

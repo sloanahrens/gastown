@@ -242,7 +242,7 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 		t.Errorf("polecat override config lacks the per-agent flag: %v", rc.Args)
 	}
 	if rc.Env[EnvSystemPromptFile] != polecatPath {
-		t.Errorf("env %s = %q, want %q", EnvSystemPromptFile, rc.Env[EnvSystemPromptFile], polecatPath)
+		t.Errorf("env %s is not %q", EnvSystemPromptFile, polecatPath)
 	}
 
 	// Missing file: unchanged config, no error.
@@ -414,7 +414,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 		t.Fatalf("first spawn must carry the flag once the file is rendered; args = %v", got.Args)
 	}
 	if got.Env[EnvSystemPromptFile] != want {
-		t.Fatalf("env %s = %q, want %q", EnvSystemPromptFile, got.Env[EnvSystemPromptFile], want)
+		t.Fatalf("env %s is not %q", EnvSystemPromptFile, want)
 	}
 
 	// The file now exists: a second spawn still renders, so a stale file is

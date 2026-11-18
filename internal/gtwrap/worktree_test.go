@@ -165,6 +165,6 @@ func TestGitEnvDropsOverridesAndForcesEnglish(t *testing.T) {
 	})
 	want := []string{"PATH=/bin", "HOME=/h", "LC_ALL=C"}
 	if !slices.Equal(got, want) {
-		t.Fatalf("gitEnv = %q, want %q", got, want)
+		t.Fatalf("gitEnv = %d entries, want %d", len(got), len(want))
 	}
 }

@@ -5405,8 +5405,8 @@ func TestBuildStartupCommand_CostTierGroqCompoundResolvesKeyReference(t *testing
 		t.Fatal("tier did not persist a groq-compound agent")
 	}
 	if got := persisted.Env["ANTHROPIC_API_KEY"]; got != "${GROQ_API_KEY}" {
-		t.Errorf("persisted ANTHROPIC_API_KEY = %q, want the %q reference (never the key)",
-			got, "${GROQ_API_KEY}")
+		t.Errorf("persisted ANTHROPIC_API_KEY is not the %q reference",
+			"${GROQ_API_KEY}")
 	}
 
 	// The tier sets the crew's agent; the polecat's agents are the seats.

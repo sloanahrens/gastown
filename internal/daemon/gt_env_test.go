@@ -267,7 +267,7 @@ func TestDaemonGTEnvReplacesTheIdentity(t *testing.T) {
 	got := daemonGTEnv(pollutedEnv())
 	assertDaemonIdentity(t, "daemonGTEnv", got)
 	if !slices.Contains(got, "PATH=/usr/bin") {
-		t.Errorf("daemonGTEnv dropped a non-identity variable: %q", got)
+		t.Errorf("daemonGTEnv dropped a non-identity variable: %d entries", len(got))
 	}
 	assertDaemonIdentity(t, "daemonGTEnv(nil)", daemonGTEnv(nil))
 }
@@ -468,7 +468,7 @@ func TestPluginEnvDoltEndpointExisting(t *testing.T) {
 			"GT_ROLE=daemon/plugin",
 		)
 		if got := calls[0].env; !slices.Equal(got, want) {
-			t.Errorf("child env = %q, want %q", got, want)
+			t.Errorf("child env = %d entries, want %d", len(got), len(want))
 		}
 	})
 }

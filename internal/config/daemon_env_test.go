@@ -53,7 +53,7 @@ func TestLoadDaemonEnv_ParsesKeyValuePairs(t *testing.T) {
 	}
 	for k, v := range want {
 		if env[k] != v {
-			t.Errorf("LoadDaemonEnv()[%q] = %q, want %q", k, env[k], v)
+			t.Errorf("LoadDaemonEnv()[%q] = an unexpected value, want %q", k, v)
 		}
 	}
 }

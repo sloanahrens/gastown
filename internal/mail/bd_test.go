@@ -125,13 +125,13 @@ func TestBdSubprocessEnv_SuppressesAutoImport(t *testing.T) {
 	got := bdSubprocessEnv([]string{"PATH=/usr/bin"}, "/tmp/.beads", true)
 
 	if !envContains(got, "BEADS_NO_AUTO_IMPORT=1") {
-		t.Fatalf("expected BEADS_NO_AUTO_IMPORT=1 in env, got %v", got)
+		t.Fatalf("expected BEADS_NO_AUTO_IMPORT=1 in env, got %d entries", len(got))
 	}
 	if !envContains(got, "BEADS_DIR=/tmp/.beads") {
-		t.Fatalf("expected BEADS_DIR to be passed through, got %v", got)
+		t.Fatalf("expected BEADS_DIR to be passed through, got %d entries", len(got))
 	}
 	if !envContains(got, "PATH=/usr/bin") {
-		t.Fatalf("expected base env to be preserved, got %v", got)
+		t.Fatalf("expected base env to be preserved, got %d entries", len(got))
 	}
 }
 
@@ -141,10 +141,10 @@ func TestBdSubprocessEnv_BaseEnvCannotOverrideCanonicalPolicy(t *testing.T) {
 
 	value, ok := envLastValue(got, "BEADS_NO_AUTO_IMPORT")
 	if !ok {
-		t.Fatalf("expected BEADS_NO_AUTO_IMPORT in env, got %v", got)
+		t.Fatalf("expected BEADS_NO_AUTO_IMPORT in env, got %d entries", len(got))
 	}
 	if value != "1" {
-		t.Fatalf("expected canonical env to win, got BEADS_NO_AUTO_IMPORT=%s in %v", value, got)
+		t.Fatalf("expected canonical env to win, got BEADS_NO_AUTO_IMPORT=%s in %d entries", value, len(got))
 	}
 }
 
@@ -184,17 +184,17 @@ func TestBdSubprocessEnv_FiltersStaleBdTargetEnv(t *testing.T) {
 	}, beadsDir, true)
 
 	if envContains(got, "BEADS_DIR=/wrong") || envContains(got, "BEADS_DB=/wrong.db") || envContains(got, "BEADS_DOLT_SERVER_DATABASE=wrong") {
-		t.Fatalf("stale bd target env was not filtered: %v", got)
+		t.Fatalf("stale bd target env was not filtered: %d entries", len(got))
 	}
 	if !envContains(got, "BEADS_DIR="+beadsDir) {
-		t.Fatalf("expected current BEADS_DIR in env, got %v", got)
+		t.Fatalf("expected current BEADS_DIR in env, got %d entries", len(got))
 	}
 	if value, ok := envLastValue(got, "BEADS_DOLT_SERVER_DATABASE"); !ok || value != "rigdb" {
-		t.Fatalf("database selector = %q present=%v, want rigdb in %v", value, ok, got)
+		t.Fatalf("database selector = %q present=%v, want rigdb in %d entries", value, ok, len(got))
 	}
 	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BD_EXPORT_AUTO=false", "BD_BACKUP_ENABLED=false", "BD_DOLT_AUTO_PUSH=false", "BD_NO_PUSH=true", "BD_EXPORT_GIT_ADD=false", "BD_NO_GIT_OPS=true"} {
 		if !envContains(got, want) {
-			t.Fatalf("expected %s in env, got %v", want, got)
+			t.Fatalf("expected %s in env, got %d entries", want, len(got))
 		}
 	}
 }
@@ -203,11 +203,11 @@ func TestBdSubprocessEnv_WriteCommandsAreNotReadonly(t *testing.T) {
 	t.Parallel()
 	got := bdSubprocessEnv([]string{"PATH=/usr/bin", "BD_READONLY=true"}, "/tmp/.beads", false)
 	if value, ok := envLastValue(got, "BD_READONLY"); ok {
-		t.Fatalf("write command env should not inherit or set BD_READONLY, got %q in %v", value, got)
+		t.Fatalf("write command env should not inherit or set BD_READONLY, got %q in %d entries", value, len(got))
 	}
 	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BD_EXPORT_AUTO=false", "BD_BACKUP_ENABLED=false", "BD_DOLT_AUTO_PUSH=false", "BD_NO_PUSH=true", "BD_EXPORT_GIT_ADD=false", "BD_NO_GIT_OPS=true"} {
 		if !envContains(got, want) {
-			t.Fatalf("expected %s in env, got %v", want, got)
+			t.Fatalf("expected %s in env, got %d entries", want, len(got))
 		}
 	}
 }
@@ -216,7 +216,7 @@ func TestBdSubprocessEnv_ReadonlyCannotBeOverridden(t *testing.T) {
 	t.Parallel()
 	got := bdSubprocessEnv([]string{"PATH=/usr/bin", "BD_READONLY=false"}, "/tmp/.beads", true)
 	if value, ok := envLastValue(got, "BD_READONLY"); !ok || value != "true" {
-		t.Fatalf("read command env should force BD_READONLY=true, got %q present=%v in %v", value, ok, got)
+		t.Fatalf("read command env should force BD_READONLY=true, got %q present=%v in %d entries", value, ok, len(got))
 	}
 }
 
@@ -317,16 +317,16 @@ func TestBdSubprocessEnv_AllowsRoutingWhenBeadsDirEmpty(t *testing.T) {
 
 	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BEADS_DOLT_SERVER_DATABASE"} {
 		if value, ok := envLastValue(got, key); ok {
-			t.Fatalf("expected %s to be absent for routed command, got %q in %v", key, value, got)
+			t.Fatalf("expected %s to be absent for routed command, got %q in %d entries", key, value, len(got))
 		}
 	}
 	if !envContains(got, "BEADS_NO_AUTO_IMPORT=1") {
-		t.Fatalf("expected BEADS_NO_AUTO_IMPORT=1 in env, got %v", got)
+		t.Fatalf("expected BEADS_NO_AUTO_IMPORT=1 in env, got %d entries", len(got))
 	}
 	// Outside a town the inherited bd endpoint passes through; GT_DOLT_* is
 	// never translated (gt-y3pgh.3).
 	if !envContains(got, "BEADS_DOLT_SERVER_HOST=wrong-host") || !envContains(got, "BEADS_DOLT_SERVER_PORT=9999") || envContains(got, "BEADS_DOLT_SERVER_PORT=5507") {
-		t.Fatalf("expected the inherited bd endpoint for routed command, got %v", got)
+		t.Fatalf("expected the inherited bd endpoint for routed command, got %d entries", len(got))
 	}
 }
 
@@ -347,14 +347,14 @@ func TestBdSubprocessEnvPinnedReadAndWritePolicy(t *testing.T) {
 	readEnv := bdSubprocessEnv([]string{"BD_READONLY=false", "BD_DOLT_AUTO_COMMIT=on"}, beadsDir, true)
 	for _, want := range []string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !envContains(readEnv, want) {
-			t.Fatalf("read env missing %q:\n%v", want, readEnv)
+			t.Fatalf("read env missing %q:\n%d entries", want, len(readEnv))
 		}
 	}
 
 	writeEnv := bdSubprocessEnv([]string{"BD_READONLY=true", "BD_DOLT_AUTO_COMMIT=off"}, beadsDir, false)
 	for _, want := range []string{"BD_DOLT_AUTO_COMMIT=on", "BEADS_NO_AUTO_IMPORT=1", "BEADS_DIR=" + beadsDir, "BEADS_DOLT_SERVER_DATABASE=maildb"} {
 		if !envContains(writeEnv, want) {
-			t.Fatalf("write env missing %q:\n%v", want, writeEnv)
+			t.Fatalf("write env missing %q:\n%d entries", want, len(writeEnv))
 		}
 	}
 	if value, ok := envLastValue(writeEnv, "BD_READONLY"); ok && value != "" {

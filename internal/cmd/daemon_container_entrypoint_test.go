@@ -1510,10 +1510,10 @@ func TestMergeEnv(t *testing.T) {
 	)
 	want := []string{"A=1", "B=2", "CLAUDE_CODE_OAUTH_TOKEN=new", "C=3"}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("mergeEnv = %v, want %v", got, want)
+		t.Errorf("mergeEnv = %d entries, want %d", len(got), len(want))
 	}
 	if got := mergeEnv([]string{"A=1"}, nil); !reflect.DeepEqual(got, []string{"A=1"}) {
-		t.Errorf("mergeEnv with no additions = %v, want the base", got)
+		t.Errorf("mergeEnv with no additions = %d entries, want the base", len(got))
 	}
 }
 

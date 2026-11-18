@@ -104,8 +104,8 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	if clone.Command[0] != HelperPath || clone.Command[1] != "seed-clone" {
 		t.Errorf("clone command = %v, want the image's seed-clone helper", clone.Command)
 	}
-	if prompt := envValue(clone.Env, "GIT_TERMINAL_PROMPT"); prompt != "0" {
-		t.Errorf("clone GIT_TERMINAL_PROMPT = %q, want 0: a prompt would hang the Job", prompt)
+	if env := envValue(clone.Env, "GIT_TERMINAL_PROMPT"); env != "0" {
+		t.Errorf("clone GIT_TERMINAL_PROMPT = %q, want 0: a prompt would hang the Job", env)
 	}
 }
 

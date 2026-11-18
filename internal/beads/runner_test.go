@@ -302,7 +302,7 @@ func TestPlainListSendsAssigneeStatusAndDefaultPage(t *testing.T) {
 		t.Errorf("call = %+v, want a plain call in %s", calls[0], dir)
 	}
 	if wantEnv := WithMachineEnvIn(dir, nil); !reflect.DeepEqual(calls[0].env, wantEnv) {
-		t.Errorf("env = %q, want %q", calls[0].env, wantEnv)
+		t.Errorf("env = %d entries, want %d", len(calls[0].env), len(wantEnv))
 	}
 }
 

@@ -269,6 +269,6 @@ func TestPlanScreensBeforeAnyEnvFlagIsBuilt(t *testing.T) {
 		t.Fatalf("Plan forwarded %d entries, want %q: the screen must run in Plan, before any flag is built", len(call.Env), want)
 	}
 	if !slices.Equal(dockerEnv, want) {
-		t.Fatalf("docker environment is %q, want %q", dockerEnv, want)
+		t.Fatalf("docker environment is %d entries, want %d", len(dockerEnv), len(want))
 	}
 }

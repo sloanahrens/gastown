@@ -336,11 +336,11 @@ func TestBdgwExecEnv(t *testing.T) {
 	got := callerEnv([]string{"BD_ACTOR=a", "PATH=/bin", "no-value", "=nameless"})
 	want := map[string]string{"BD_ACTOR": "a", "PATH": "/bin"}
 	if len(got) != len(want) {
-		t.Fatalf("env = %v, want %v", got, want)
+		t.Fatalf("env = %d entries, want %d", len(got), len(want))
 	}
 	for k, v := range want {
 		if got[k] != v {
-			t.Errorf("env[%q] = %q, want %q", k, got[k], v)
+			t.Errorf("env[%q] = an unexpected value, want %q", k, v)
 		}
 	}
 }

@@ -387,7 +387,7 @@ func TestExecEnvReplacesAStaleListenerFD(t *testing.T) {
 	got := execEnv(in, 9)
 	want := []string{"A=1", "B=2", dashboardListenFDEnv + "=9"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
-		t.Fatalf("execEnv = %v, want %v", got, want)
+		t.Fatalf("execEnv = %d entries, want %d", len(got), len(want))
 	}
 	if len(in) != 3 || in[1] != dashboardListenFDEnv+"=7" {
 		t.Fatalf("execEnv modified its input: %v", in)

@@ -267,7 +267,7 @@ func TestGuardEnvironDropsHookVariables(t *testing.T) {
 	}
 	want := []string{"PATH=/usr/bin", "HOME=/home/slit", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_DIRECTORY=/keep"}
 	if got := GuardEnviron(environ); !slices.Equal(got, want) {
-		t.Errorf("GuardEnviron() = %q, want %q", got, want)
+		t.Errorf("GuardEnviron() = %d entries, want %d", len(got), len(want))
 	}
 }
 

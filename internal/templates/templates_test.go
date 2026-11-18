@@ -355,7 +355,7 @@ func TestRenderSystemdUnit_EnvironmentVariables(t *testing.T) {
 	for key, value := range data.Env {
 		want := `Environment="` + key + "=" + value + `"`
 		if !strings.Contains(output, want) {
-			t.Errorf("unit missing %q:\n%s", want, output)
+			t.Errorf("unit missing the environment directive for %s", key)
 		}
 	}
 }

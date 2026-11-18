@@ -52,7 +52,7 @@ func TestRunnerChildEnvPassesOnlyAllowlisted(t *testing.T) {
 			t.Parallel()
 			got := childEnv(tc.allow, tc.extra, lookup)
 			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("childEnv(%v, %v) = %v, want %v (secrets in the host environment must not reach a child)", tc.allow, tc.extra, got, tc.want)
+				t.Fatalf("childEnv(%v, %v) = %d entries, want %d (secrets in the host environment must not reach a child)", tc.allow, tc.extra, len(got), len(tc.want))
 			}
 		})
 	}
@@ -174,7 +174,7 @@ func TestDefaultAllowEnvPassesTheDoltEndpoint(t *testing.T) {
 	}))
 	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want %v (the Dolt endpoint must reach a child bd)", got, want)
+		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want %d (the Dolt endpoint must reach a child bd)", len(got), len(want))
 	}
 }
 
@@ -188,7 +188,7 @@ func TestDefaultAllowEnvStillDropsOtherVariables(t *testing.T) {
 	}))
 	want := []string{"BEADS_DOLT_SERVER_HOST=host.docker.internal", "BEADS_DOLT_SERVER_PORT=3307"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want only the endpoint %v (a credential the allowlist omits must not reach a child)", got, want)
+		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want only the endpoint %d (a credential the allowlist omits must not reach a child)", len(got), len(want))
 	}
 }
 
@@ -197,7 +197,7 @@ func TestDefaultAllowEnvUnsetEndpointStaysAbsent(t *testing.T) {
 	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{"PATH": "/usr/bin"}))
 	want := []string{"PATH=/usr/bin"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("childEnv(DefaultAllowEnv) = %v, want %v (an unset endpoint variable must stay absent)", got, want)
+		t.Fatalf("childEnv(DefaultAllowEnv) = %d entries, want %d (an unset endpoint variable must stay absent)", len(got), len(want))
 	}
 }
 

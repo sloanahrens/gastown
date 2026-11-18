@@ -332,6 +332,6 @@ func TestDockerEnvDropsTheShellsEngineChoice(t *testing.T) {
 	t.Parallel()
 	got := DockerEnv([]string{"PATH=/usr/bin", "DOCKER_CONTEXT=other", "DOCKER_HOST=tcp://x:2375", "HOME=/h", "GOFLAGS=-mod=mod"})
 	if strings.Join(got, " ") != "PATH=/usr/bin HOME=/h" {
-		t.Errorf("DockerEnv = %v, want PATH and HOME only", got)
+		t.Errorf("DockerEnv = %d entries, want PATH and HOME only", len(got))
 	}
 }

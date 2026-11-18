@@ -744,7 +744,7 @@ func assertEnv(t *testing.T, env map[string]string, key, expected string) {
 func assertNotSet(t *testing.T, env map[string]string, key string) {
 	t.Helper()
 	if _, ok := env[key]; ok {
-		t.Errorf("env[%q] should not be set, but is %q", key, env[key])
+		t.Errorf("env[%q] should not be set", key)
 	}
 }
 
@@ -1277,7 +1277,7 @@ func TestNormalizeConfiguredDoltEnv_NoEndpointLeavesBase(t *testing.T) {
 	t.Parallel()
 	base := []string{"GT_DOLT_PORT=1", "BEADS_DOLT_PORT=1", "KEEP=1"}
 	if got := NormalizeConfiguredDoltEnv(base, t.TempDir()); !reflect.DeepEqual(got, base) {
-		t.Fatalf("NormalizeConfiguredDoltEnv = %v, want base unchanged", got)
+		t.Fatalf("NormalizeConfiguredDoltEnv = %d entries, want base unchanged", len(got))
 	}
 }
 
@@ -1286,10 +1286,10 @@ func TestConfiguredDoltEnv(t *testing.T) {
 	got := ConfiguredDoltEnv(writeDoltTown(t, "", "listener:\n  port: 5507\n"))
 	want := map[string]string{"BEADS_DOLT_SERVER_PORT": "5507", "BEADS_DOLT_PORT": "5507"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("ConfiguredDoltEnv = %v, want %v", got, want)
+		t.Fatalf("ConfiguredDoltEnv = %d entries, want %d", len(got), len(want))
 	}
 	if got := ConfiguredDoltEnv(t.TempDir()); len(got) != 0 {
-		t.Fatalf("ConfiguredDoltEnv(no endpoint) = %v, want empty", got)
+		t.Fatalf("ConfiguredDoltEnv(no endpoint) = %d entries, want empty", len(got))
 	}
 }
 
@@ -1407,7 +1407,7 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 			TownRoot: "/tmp/nonexistent-town",
 		})
 		if got := env["CLAUDE_CODE_EFFORT_LEVEL"]; got != "high" {
-			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q", got, "high")
+			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL is set to an unexpected value, want %q", "high")
 		}
 	})
 
@@ -1420,7 +1420,7 @@ func TestAgentEnv_EffortLevel(t *testing.T) {
 			TownRoot: "/tmp/nonexistent-town",
 		})
 		if got := env["CLAUDE_CODE_EFFORT_LEVEL"]; got != "high" {
-			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL = %q, want %q (env var should be ignored)", got, "high")
+			t.Errorf("CLAUDE_CODE_EFFORT_LEVEL is set to an unexpected value, want %q (env var should be ignored)", "high")
 		}
 	})
 

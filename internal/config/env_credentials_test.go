@@ -63,7 +63,7 @@ func TestSpawnCommandsCarryNoParentCredentials(t *testing.T) {
 				}
 			}
 			if env["ANTHROPIC_MODEL"] != "fake-model" {
-				t.Errorf("AgentEnv[ANTHROPIC_MODEL] = %q, want the parent's setting forwarded", env["ANTHROPIC_MODEL"])
+				t.Errorf("AgentEnv[ANTHROPIC_MODEL] does not carry the parent's setting")
 			}
 
 			rp := rigPath

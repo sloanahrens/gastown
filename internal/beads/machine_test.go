@@ -52,7 +52,7 @@ func TestWithMachineEnvSetsItExactlyOnce(t *testing.T) {
 	t.Parallel()
 	got := WithMachineEnv([]string{"A=1", "BD_MACHINE=0", "B=2", "BD_MACHINE=", "BD_MACHINE=1"})
 	if want := []string{"A=1", "B=2", "BD_MACHINE=1"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("WithMachineEnv = %v, want %v", got, want)
+		t.Errorf("WithMachineEnv = %d entries, want %d", len(got), len(want))
 	}
 }
 

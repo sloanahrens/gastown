@@ -131,7 +131,7 @@ func TestJevSubmissionGitEnvDropsRepositoryVariables(t *testing.T) {
 	})
 	want := []string{"PATH=/usr/bin", "GIT_SSH_COMMAND=ssh -i key", "HOME=/home/x"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("gitEnv = %v, want %v", got, want)
+		t.Errorf("gitEnv = %d entries, want %d", len(got), len(want))
 	}
 }
 

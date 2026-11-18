@@ -514,7 +514,7 @@ func TestTrackerPlaceholderArchiveHoldsNoRealToken(t *testing.T) {
 		}
 	}
 	if cs.Env["TRACKER_TOKEN_FILE"] != SandboxTrackerTokenFile {
-		t.Errorf("TRACKER_TOKEN_FILE = %q, want %s", cs.Env["TRACKER_TOKEN_FILE"], SandboxTrackerTokenFile)
+		t.Errorf("TRACKER_TOKEN_FILE = an unexpected value, want %s", SandboxTrackerTokenFile)
 	}
 }
 

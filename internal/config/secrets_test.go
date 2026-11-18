@@ -133,7 +133,7 @@ func TestMigrateSecretsMovesTokensToDaemonEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := s.Agents["ds-pro"].Env["ANTHROPIC_AUTH_TOKEN"]; got != "${DS_FLASH_ANTHROPIC_AUTH_TOKEN}" {
-		t.Errorf("ds-pro token = %q, want the reference", got)
+		t.Errorf("ds-pro token does not carry the reference")
 	}
 	if s.Agents["local"].Env["ANTHROPIC_AUTH_TOKEN"] != "ollama" || s.Agents["ds-flash"].Env["ANTHROPIC_MODEL"] != "deepseek-v4-flash" {
 		t.Error("migrate changed a value that is not a token")

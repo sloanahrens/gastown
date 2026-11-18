@@ -524,7 +524,7 @@ func TestEnvVarsCheck_FixAppliesMissingVars(t *testing.T) {
 		if !found {
 			t.Errorf("Fix() did not call SetEnvironment for key %s", key)
 		} else if gotVal != wantVal {
-			t.Errorf("Fix() SetEnvironment(%s) = %q, want %q", key, gotVal, wantVal)
+			t.Errorf("Fix() SetEnvironment(%s) = an unexpected value", key)
 		}
 	}
 }

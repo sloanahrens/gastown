@@ -10,9 +10,10 @@ import (
 	"testing"
 )
 
-// TestEnvPrintGuardDetectsAndExempts drives every shape the guard judges: each
-// env slice in a failure message is reported, a count is not, and the
-// env-print-ok comment skips the call it marks.
+// TestEnvPrintGuardDetectsAndExempts drives every shape the guard judges: an
+// environment in a failure message is reported however it is reached (direct,
+// indexed, nested in a formatting call, or a name-based fallback), while a
+// count, a test-authored literal and the env-print-ok comment pass.
 func TestEnvPrintGuardDetectsAndExempts(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -24,12 +25,10 @@ func TestEnvPrintGuardDetectsAndExempts(t *testing.T) {
 			name: "identifier env",
 			src: `package p
 import "testing"
-func TestX(t *testing.T) {
-	if env := []string{"A=1"}; len(env) != 2 {
-		t.Fatalf("env = %v", env)
-	}
+func helper(t *testing.T, env []string) {
+	t.Fatalf("env = %v", env)
 }`,
-			want: []string{"5:env-print"},
+			want: []string{"4:env-print"},
 		},
 		{
 			name: "every env identifier name",
@@ -69,18 +68,89 @@ func TestX(t *testing.T) {
 			name: "a count is not the slice",
 			src: `package p
 import "testing"
-func TestX(t *testing.T) {
-	env := []string{"A=1"}
+func helper(t *testing.T, env []string) {
 	t.Fatalf("env has %d entries", len(env))
 }`,
 			want: nil,
 		},
 		{
-			name: "a selector that only ends in the letters Env is not the field",
+			name: "an identifier whose name ends in Env",
 			src: `package p
 import "testing"
 func TestX(t *testing.T) {
 	t.Fatalf("want = %v", wantEnv)
+}`,
+			want: []string{"4:env-print"},
+		},
+		{
+			name: "an environment nested in a formatting call",
+			src: `package p
+import (
+	"fmt"
+	"testing"
+)
+func helper(t *testing.T, env []string) {
+	t.Errorf("nested %v", fmt.Sprintf("%v", env))
+}`,
+			want: []string{"7:env-print"},
+		},
+		{
+			name: "an indexed entry",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	t.Errorf("first %q", env[0])
+}`,
+			want: []string{"4:env-print"},
+		},
+		{
+			name: "the non-format method",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	t.Error(env)
+}`,
+			want: []string{"4:env-print"},
+		},
+		{
+			name: "a scalar named env is not the environment",
+			src: `package p
+import "testing"
+func TestX(t *testing.T) {
+	for _, env := range []string{"kind", "cloud"} {
+		t.Errorf("env %q", env)
+	}
+}`,
+			want: nil,
+		},
+		{
+			name: "a slice of test literals cannot carry a host value",
+			src: `package p
+import "testing"
+func TestX(t *testing.T) {
+	expected := []string{"A=1"}
+	t.Errorf("expected %v", expected)
+}`,
+			want: nil,
+		},
+		{
+			name: "a function that builds a []string for an environment",
+			src: `package p
+import "testing"
+func childEnv() []string { return nil }
+func TestX(t *testing.T) {
+	got := childEnv()
+	t.Errorf("child %v", got)
+}`,
+			want: []string{"6:env-print"},
+		},
+		{
+			name: "a comparison prints a bool, not the field",
+			src: `package p
+import "testing"
+func TestX(t *testing.T) {
+	var cmd struct{ Env []string }
+	t.Errorf("nil = %v", cmd.Env == nil)
 }`,
 			want: nil,
 		},
@@ -88,8 +158,7 @@ func TestX(t *testing.T) {
 			name: "exemption comment on the call line",
 			src: `package p
 import "testing"
-func TestX(t *testing.T) {
-	env := []string{"BEADS_DOLT_SERVER_HOST=127.0.0.1", "BEADS_DOLT_PORT=4407"}
+func helper(t *testing.T, env []string) {
 	t.Fatalf("endpoint = %v", env) // testpolicy:env-print-ok a host and a port
 }`,
 			want: nil,
@@ -98,18 +167,26 @@ func TestX(t *testing.T) {
 			name: "exemption comment on the line above",
 			src: `package p
 import "testing"
-func TestX(t *testing.T) {
-	env := []string{"BEADS_DOLT_SERVER_HOST=127.0.0.1", "BEADS_DOLT_PORT=4407"}
+func helper(t *testing.T, env []string) {
 	// testpolicy:env-print-ok a host and a port
 	t.Fatalf("endpoint = %v", env)
 }`,
 			want: nil,
 		},
 		{
+			name: "an exemption without a reason is reported",
+			src: `package p
+import "testing"
+func helper(t *testing.T, env []string) {
+	t.Fatalf("env = %v", env) // testpolicy:env-print-ok
+}`,
+			want: []string{"4:env-print"},
+		},
+		{
 			name: "a comment on an unrelated line does not exempt",
 			src: `package p
 import "testing"
-func TestX(t *testing.T) {
+func helper(t *testing.T, env []string) {
 	// testpolicy:env-print-ok says nothing about this call
 	_ = 0
 	t.Fatalf("env = %v", env)
@@ -147,6 +224,18 @@ func TestEnvPrintGuardRefusesAnUnparsableFile(t *testing.T) {
 	writeTemp(t, dir, "broken_test.go", "package p\nfunc TestX( {\n")
 	if _, err := CheckEnvPrints(dir); err == nil {
 		t.Fatal("CheckEnvPrints returned no error for an unparsable file")
+	}
+}
+
+// TestEnvPrintGuardRefusesAnUnparsableSibling pins that a package file the scan
+// cannot read is an error, not a package with fewer names to judge.
+func TestEnvPrintGuardRefusesAnUnparsableSibling(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeTemp(t, dir, "x_test.go", "package p\n")
+	writeTemp(t, dir, "broken.go", "package p\nfunc Broken( {\n")
+	if _, err := CheckEnvPrints(dir); err == nil {
+		t.Fatal("CheckEnvPrints returned no error for an unparsable package file")
 	}
 }
 

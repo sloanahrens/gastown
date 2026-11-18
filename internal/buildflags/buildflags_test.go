@@ -48,11 +48,11 @@ func TestDarwinCgoEnv(t *testing.T) {
 			t.Parallel()
 			got := darwinCgoEnv(tc.base, tc.prefix)
 			if len(got) != len(tc.want) {
-				t.Fatalf("darwinCgoEnv = %v, want %v", got, tc.want)
+				t.Fatalf("darwinCgoEnv = %d entries, want %d", len(got), len(tc.want))
 			}
 			for i := range got {
 				if got[i] != tc.want[i] {
-					t.Errorf("darwinCgoEnv = %v, want %v", got, tc.want)
+					t.Errorf("darwinCgoEnv = %d entries, want %d", len(got), len(tc.want))
 				}
 			}
 		})

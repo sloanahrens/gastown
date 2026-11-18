@@ -265,7 +265,7 @@ func TestRigGateStepsCarryNoGOFLAGSEnv(t *testing.T) {
 	for _, s := range g.Steps {
 		for _, e := range s.Env {
 			if e == "GOFLAGS" || strings.HasPrefix(e, "GOFLAGS=") {
-				t.Fatalf("gate step %q carries %q; the seat cap must not reach the gate", s.Name, e)
+				t.Fatalf("gate step %q carries a seat-cap entry in its environment", s.Name)
 			}
 		}
 	}
@@ -275,7 +275,7 @@ func TestMergeEnvReplacesInheritedKeys(t *testing.T) {
 	t.Parallel()
 	got := mergeEnv([]string{"A=1", "GT_TEST_DOCKER=1", "B=2"}, []string{"GT_TEST_DOCKER=0"})
 	if strings.Join(got, " ") != "A=1 B=2 GT_TEST_DOCKER=0" {
-		t.Fatalf("mergeEnv = %q, want the inherited GT_TEST_DOCKER dropped", got)
+		t.Fatalf("mergeEnv = %d entries, want the inherited GT_TEST_DOCKER dropped", len(got))
 	}
 }
 

@@ -36,6 +36,6 @@ func TestDoltContainerOpts_LabelsOwnerProcess(t *testing.T) {
 		}
 	}
 	if req.Env["DOLT_ROOT_HOST"] != "%" {
-		t.Errorf("labels displaced the env: DOLT_ROOT_HOST = %q", req.Env["DOLT_ROOT_HOST"])
+		t.Errorf("labels displaced the env: DOLT_ROOT_HOST is not the expected value")
 	}
 }
