@@ -186,7 +186,7 @@ func TestResolveRoleAgentConfig_FirstPolecatSpawnCarriesSystemPromptFlag(t *test
 		t.Fatalf("first spawn resolved without the system prompt flag: %v", rc.Args)
 	}
 	if rc.Env[config.EnvSystemPromptFile] != path {
-		t.Fatalf("env %s = %q, want %q", config.EnvSystemPromptFile, rc.Env[config.EnvSystemPromptFile], path)
+		t.Fatalf("env %s is not %q", config.EnvSystemPromptFile, path)
 	}
 	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
 		t.Fatalf("file must have been rendered at resolve time: %v", err)

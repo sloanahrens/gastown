@@ -325,7 +325,7 @@ func TestTestContainerEnv(t *testing.T) {
 	t.Parallel()
 	got := testContainerEnv()
 	if len(got) != 1 || got[0] != "BD_ALLOW_REMOTE_MIGRATE=1" {
-		t.Fatalf("testContainerEnv() = %q, want [BD_ALLOW_REMOTE_MIGRATE=1]", got)
+		t.Fatalf("testContainerEnv() = %d entries, want [BD_ALLOW_REMOTE_MIGRATE=1]", len(got))
 	}
 }
 

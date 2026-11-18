@@ -29,10 +29,10 @@ func TestCookForRender_CooksInRigDirWithTownOverlay(t *testing.T) {
 	}
 	env := envSlice(formulaEnv(c.site.townRoot))
 	if env["GT_ROOT"] != town {
-		t.Errorf("GT_ROOT = %q, want %q", env["GT_ROOT"], town)
+		t.Errorf("GT_ROOT = an unexpected value, want %q", town)
 	}
 	if want := filepath.Join(town, "formula-overlays"); env["BD_FORMULA_OVERLAY_DIR"] != want {
-		t.Errorf("BD_FORMULA_OVERLAY_DIR = %q, want %q", env["BD_FORMULA_OVERLAY_DIR"], want)
+		t.Errorf("BD_FORMULA_OVERLAY_DIR = an unexpected value, want %q", want)
 	}
 }
 

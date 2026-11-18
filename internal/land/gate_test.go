@@ -164,7 +164,7 @@ func TestGoGateUnitOnlyTurnsContainersOff(t *testing.T) {
 			has = has || e == "GT_TEST_DOCKER=0"
 		}
 		if has != unit {
-			t.Errorf("GoGate(%v) test env = %v", unit, test.Env)
+			t.Errorf("GoGate(%v) test env = %d entries", unit, len(test.Env))
 		}
 	}
 }
@@ -265,7 +265,7 @@ func TestRigGateStepsCarryNoGOFLAGSEnv(t *testing.T) {
 	for _, s := range g.Steps {
 		for _, e := range s.Env {
 			if e == "GOFLAGS" || strings.HasPrefix(e, "GOFLAGS=") {
-				t.Fatalf("gate step %q carries %q; the seat cap must not reach the gate", s.Name, e)
+				t.Fatalf("gate step %q carries a seat-cap entry in its environment", s.Name)
 			}
 		}
 	}
@@ -275,7 +275,7 @@ func TestMergeEnvReplacesInheritedKeys(t *testing.T) {
 	t.Parallel()
 	got := mergeEnv([]string{"A=1", "GT_TEST_DOCKER=1", "B=2"}, []string{"GT_TEST_DOCKER=0"})
 	if strings.Join(got, " ") != "A=1 B=2 GT_TEST_DOCKER=0" {
-		t.Fatalf("mergeEnv = %q, want the inherited GT_TEST_DOCKER dropped", got)
+		t.Fatalf("mergeEnv = %d entries, want the inherited GT_TEST_DOCKER dropped", len(got))
 	}
 }
 
@@ -708,7 +708,7 @@ func TestRigGatePresubmitPrecedence(t *testing.T) {
 		t.Fatalf("explicit presubmit_command = %+v, %v", g.Steps, err)
 	}
 	if !reflect.DeepEqual(g.Steps[0].Env, []string{"GT_TEST_DOCKER=0"}) {
-		t.Errorf("explicit presubmit_command env = %v, want containers forced off", g.Steps[0].Env)
+		t.Errorf("explicit presubmit_command env = %d entries, want containers forced off", len(g.Steps[0].Env))
 	}
 
 	g, err = RigGate(both, &config.MergeQueueConfig{TestCommand: "make test"}, true)

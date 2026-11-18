@@ -112,7 +112,7 @@ func TestImageValuesHoldsNoForkLocalNames(t *testing.T) {
 				}
 			}
 			if !reported {
-				t.Errorf("the source holding %s %q was not reported; hits = %q", key, name, hits)
+				t.Errorf("the source holding %s was not reported; hits = %q", key, hits)
 			}
 		}
 	})

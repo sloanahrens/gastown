@@ -79,7 +79,7 @@ func TestRealCommandInheritsTheProcess(t *testing.T) {
 		t.Errorf("Args = %q, want bd.real with bd's argv unchanged", got)
 	}
 	if cmd.Env != nil {
-		t.Errorf("Env = %v, want nil so the environment is inherited", cmd.Env)
+		t.Errorf("Env = %d entries, want nil so the environment is inherited", len(cmd.Env))
 	}
 	if cmd.Stdin != os.Stdin || cmd.Stdout != os.Stdout || cmd.Stderr != os.Stderr {
 		t.Errorf("streams = %v/%v/%v, want the inherited os.Stdin/Stdout/Stderr", cmd.Stdin, cmd.Stdout, cmd.Stderr)

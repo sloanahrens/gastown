@@ -154,7 +154,7 @@ func TestRevertEnv(t *testing.T) {
 		"GIT_AUTHOR_EMAIL=gt-landing@gastown.local",
 	}
 	if got := RevertEnv(); !slices.Equal(got, want) {
-		t.Fatalf("RevertEnv() = %q, want %q", got, want)
+		t.Fatalf("RevertEnv() = %d entries, want %d", len(got), len(want))
 	}
 }
 

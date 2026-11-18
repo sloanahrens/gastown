@@ -468,7 +468,7 @@ func TestGitEnvDropsCallerRepoVariables(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if got := gitEnv(tc.environ); !slices.Equal(got, tc.want) {
-				t.Fatalf("gitEnv = %v, want %v", got, tc.want)
+				t.Fatalf("gitEnv = %d entries, want %d", len(got), len(tc.want))
 			}
 		})
 	}

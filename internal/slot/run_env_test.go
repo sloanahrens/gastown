@@ -44,7 +44,7 @@ func TestSplitEnvPrefix(t *testing.T) {
 	for _, c := range cases {
 		gotEnv, gotCmd := SplitEnvPrefix(c.in)
 		if strings.Join(gotEnv, " ") != strings.Join(c.wantEnv, " ") || strings.Join(gotCmd, " ") != strings.Join(c.wantCmd, " ") {
-			t.Errorf("SplitEnvPrefix(%v) = (%v, %v), want (%v, %v)", c.in, gotEnv, gotCmd, c.wantEnv, c.wantCmd)
+			t.Errorf("SplitEnvPrefix(%v) = (%d entries, %v), want (%v, %v)", c.in, len(gotEnv), gotCmd, c.wantEnv, c.wantCmd)
 		}
 	}
 }

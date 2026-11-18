@@ -88,7 +88,7 @@ func TestAppPowerReadsOnAndTheThreeOffEnvironments(t *testing.T) {
 	} {
 		r := appRow(t, p, tc.app)
 		if r.State != tc.state || r.Env != tc.env || r.Reason != tc.reason {
-			t.Errorf("%s: state %q env %q reason %q, want %q %q %q", tc.app, r.State, r.Env, r.Reason, tc.state, tc.env, tc.reason)
+			t.Errorf("%s: state %q reason %q, want state %q reason %q", tc.app, r.State, r.Reason, tc.state, tc.reason)
 		}
 		if tc.state == AppOff {
 			if !r.Since.Equal(time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)) || r.By != "operator" {
@@ -161,7 +161,7 @@ func TestAppPowerUnparsableMarkerIsOffNeverOn(t *testing.T) {
 	for _, app := range []string{"empty", "garbage", "badsince", "badenv"} {
 		r := appRow(t, p, app)
 		if r.State != AppOff || r.Note != appMarkerUnreadable || r.Env != "" {
-			t.Errorf("%s: state %q note %q env %q, want off (unreadable marker)", app, r.State, r.Note, r.Env)
+			t.Errorf("%s: state %q note %q, want off (unreadable marker)", app, r.State, r.Note)
 		}
 	}
 }

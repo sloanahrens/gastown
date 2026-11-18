@@ -119,7 +119,7 @@ func TestRuntimeConfigFromPresetReturnsNilEnvForPresetsWithoutEnv(t *testing.T) 
 
 	// Claude preset doesn't have Env, so it should be nil
 	if rc.Env != nil && len(rc.Env) > 0 {
-		t.Errorf("Expected nil/empty Env for Claude preset, got %v", rc.Env)
+		t.Errorf("Expected nil/empty Env for Claude preset, got %d entries", len(rc.Env))
 	}
 }
 

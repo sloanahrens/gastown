@@ -211,10 +211,10 @@ func TestMainExecRunnerBuildsEachChildInProcess(t *testing.T) {
 	}
 	for i, cmd := range start.cmds {
 		if slices.Contains(cmd.Env, "GT_AUTH_FORGEJO_TOKEN="+brokerLeak) || slices.Contains(cmd.Env, "FORGEJO_ADMIN_TOKEN="+standInLeak) {
-			t.Errorf("child %d inherited a token variable: %q", i, cmd.Env)
+			t.Errorf("child %d inherited a token variable", i)
 		}
 		if !slices.Contains(cmd.Env, "UNRELATED=kept") {
-			t.Errorf("child %d lost an unrelated variable: %q", i, cmd.Env)
+			t.Errorf("child %d lost an unrelated variable", i)
 		}
 	}
 	if start.cmds[0].Stdout != nil || start.cmds[0].Stderr != nil {

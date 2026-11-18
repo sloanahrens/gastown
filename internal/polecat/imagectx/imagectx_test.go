@@ -480,7 +480,7 @@ func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
 		env := envOfCall(t, w, pkg)
 		for _, want := range []string{"GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0"} {
 			if !contains(env, want) {
-				t.Errorf("%s is built without %s in its environment: %v", pkg, want, env)
+				t.Errorf("%s is built without %s in its environment", pkg, want)
 			}
 		}
 	}

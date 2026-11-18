@@ -49,7 +49,7 @@ func TestCommandActorDaemonRun(t *testing.T) {
 	t.Parallel()
 	for _, env := range []map[string]string{nil, {"GT_ROLE": "gastown/crew/operator"}} {
 		if got := commandActor(daemonRunCmd, envOf(env), false); got != "daemon" {
-			t.Errorf("commandActor(gt daemon run, %v) = %q, want daemon", env, got)
+			t.Errorf("commandActor(gt daemon run) = %q, want daemon", got)
 		}
 	}
 	if got := commandActor(daemonStartCmd, envOf(nil), false); got != "unknown" {

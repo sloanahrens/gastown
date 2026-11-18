@@ -42,7 +42,7 @@ func TestCleanGTEnv_KeepsHarnessMarkers(t *testing.T) {
 	keep := []string{"GT_DOLT_HOST=h", "GT_TEST_EXTERNAL_DOLT=1", "GT_TEST_HERMETIC=1", "GT_TEST_FORBIDDEN_TOWN_ROOT=/live"}
 	env := cleanGTEnv(append([]string{"GT_ROLE=x", "BD_ACTOR=y"}, keep...))
 	if !slices.Equal(env, keep) {
-		t.Errorf("CleanGTEnv = %q, want %q", env, keep)
+		t.Errorf("CleanGTEnv = %d entries, want %q", len(env), keep)
 	}
 }
 
@@ -50,7 +50,7 @@ func TestCleanGTEnv_ExtraEnv(t *testing.T) {
 	t.Parallel()
 	env := cleanGTEnv(nil, "HOME=/tmp/test", "FOO=bar")
 	if !slices.Equal(env, []string{"HOME=/tmp/test", "FOO=bar"}) {
-		t.Errorf("CleanGTEnv extras = %q, want them appended", env)
+		t.Errorf("CleanGTEnv extras = %d entries, want them appended", len(env))
 	}
 }
 
@@ -59,7 +59,7 @@ func TestNewIsolatedGTCommand_SetEnv(t *testing.T) {
 	t.Parallel()
 	cmd := NewIsolatedGTCommand("version")
 	if want := CleanGTEnv(); !slices.Equal(cmd.Env, want) {
-		t.Errorf("Env = %q, want %q", cmd.Env, want)
+		t.Errorf("Env = %d entries, want %d", len(cmd.Env), len(want))
 	}
 	if !slices.Equal(cmd.Args, []string{"gt", "version"}) {
 		t.Errorf("Args = %q", cmd.Args)

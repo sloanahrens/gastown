@@ -1006,7 +1006,7 @@ func TestK8sRunnerDisablesTheTestcontainersReaper(t *testing.T) {
 		t.Fatalf("the Job renders no %q container", runnerContainerName)
 	}
 	if !slices.Contains(runner.Env, EnvVar{Name: "TESTCONTAINERS_RYUK_DISABLED", Value: "true"}) {
-		t.Errorf("runner env %v does not disable the reaper", runner.Env)
+		t.Errorf("runner env does not disable the reaper")
 	}
 }
 
@@ -1109,7 +1109,7 @@ func TestK8sRunnerMountsTheCacheAndSetsTheGoCacheEnv(t *testing.T) {
 		{Name: "GOMODCACHE", Value: cacheMount + "/gomodcache"},
 	} {
 		if !slices.Contains(runner.Env, want) {
-			t.Errorf("runner env %v does not set %s=%s", runner.Env, want.Name, want.Value)
+			t.Errorf("runner env does not set %s=%s", want.Name, want.Value)
 		}
 	}
 }

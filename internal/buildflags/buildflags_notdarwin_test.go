@@ -9,6 +9,6 @@ import "testing"
 func TestICUCgoEnvAddsNothingOffDarwin(t *testing.T) {
 	t.Parallel()
 	if got := ICUCgoEnv([]string{"PATH=/bin"}); got != nil {
-		t.Errorf("ICUCgoEnv on this host = %v, want nil", got)
+		t.Errorf("ICUCgoEnv on this host = %d entries, want nil", len(got))
 	}
 }

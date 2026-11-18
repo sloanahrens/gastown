@@ -278,7 +278,7 @@ func TestAddTrackerSeatEnvRefusals(t *testing.T) {
 				t.Errorf("error carries the token: %v", err)
 			}
 			if len(env) != 0 {
-				t.Errorf("a refused seat was handed environment %v", env)
+				t.Errorf("a refused seat was handed %d environment entries", len(env))
 			}
 		})
 	}
@@ -331,7 +331,7 @@ func TestAddTrackerSeatEnvRefusesAnUnsafeSeatName(t *testing.T) {
 				t.Fatalf("addTrackerSeatEnv(%q) succeeded", name)
 			}
 			if len(issuer.actors) != 0 || len(env) != 0 {
-				t.Errorf("a refused seat name reached the issuer (%v) or the environment (%v)", issuer.actors, env)
+				t.Errorf("a refused seat name reached the issuer (%v) or the environment (%d entries)", issuer.actors, len(env))
 			}
 			if _, statErr := os.Stat(filepath.Join(town, ".runtime")); !errors.Is(statErr, os.ErrNotExist) {
 				t.Errorf("a refused seat name wrote under the town's runtime directory (stat: %v)", statErr)
@@ -363,7 +363,7 @@ func TestAddTrackerSeatEnvBoundsTheIssue(t *testing.T) {
 		t.Errorf("error = %v, want it to name the seat gastown/polecats/box", err)
 	}
 	if len(env) != 0 {
-		t.Errorf("a seat whose token issue timed out was handed environment %v", env)
+		t.Errorf("a seat whose token issue timed out was handed %d environment entries", len(env))
 	}
 }
 

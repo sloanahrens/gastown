@@ -3286,10 +3286,10 @@ func TestFillRuntimeDefaults(t *testing.T) {
 			t.Errorf("Args: got %v, want %v", result.Args, input.Args)
 		}
 		if result.Env["OPENCODE_PERMISSION"] != input.Env["OPENCODE_PERMISSION"] {
-			t.Errorf("Env: got %v, want %v", result.Env, input.Env)
+			t.Errorf("Env: got %d entries, want %d", len(result.Env), len(input.Env))
 		}
 		if result.Env["OPENCODE_CONFIG_CONTENT"] != input.Env["OPENCODE_CONFIG_CONTENT"] {
-			t.Errorf("OPENCODE_CONFIG_CONTENT was not preserved: got %v, want %v", result.Env, input.Env)
+			t.Errorf("OPENCODE_CONFIG_CONTENT was not preserved: got %d entries, want %d", len(result.Env), len(input.Env))
 		}
 		if result.InitialPrompt != input.InitialPrompt {
 			t.Errorf("InitialPrompt: got %q, want %q", result.InitialPrompt, input.InitialPrompt)
@@ -5405,8 +5405,8 @@ func TestBuildStartupCommand_CostTierGroqCompoundResolvesKeyReference(t *testing
 		t.Fatal("tier did not persist a groq-compound agent")
 	}
 	if got := persisted.Env["ANTHROPIC_API_KEY"]; got != "${GROQ_API_KEY}" {
-		t.Errorf("persisted ANTHROPIC_API_KEY = %q, want the %q reference (never the key)",
-			got, "${GROQ_API_KEY}")
+		t.Errorf("persisted ANTHROPIC_API_KEY is not the %q reference",
+			"${GROQ_API_KEY}")
 	}
 
 	// The tier sets the crew's agent; the polecat's agents are the seats.

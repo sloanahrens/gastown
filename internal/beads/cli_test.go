@@ -88,7 +88,7 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 		}
 		wantEnv = applyNewDatabaseOptIn(wantEnv, c.args)
 		if !c.plain || !reflect.DeepEqual(c.env, wantEnv) {
-			t.Errorf("call %v not plain with the given env: plain=%v env=%v, want %v", c.args, c.plain, c.env, wantEnv)
+			t.Errorf("call %v not plain with the given env: plain=%v, env has %d entries, want %d", c.args, c.plain, len(c.env), len(wantEnv))
 		}
 	}
 }

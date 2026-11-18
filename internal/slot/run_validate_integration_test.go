@@ -146,7 +146,7 @@ func TestIntegrationCommandResolution(t *testing.T) {
 			pathEnv := entry + string(os.PathListSeparator) + t.TempDir()
 			got, err := lookPathForSlot("probe-gt-f4xe", pathEnv)
 			if !errors.Is(err, exec.ErrDot) {
-				t.Errorf("lookPathForSlot(\"probe-gt-f4xe\", PATH=%q) = %q, %v; the working directory holds it, so want an error satisfying errors.Is(err, exec.ErrDot), not the ambient PATH's %q", pathEnv, got, err, decoy)
+				t.Errorf("lookPathForSlot(\"probe-gt-f4xe\") = %q, %v; the working directory holds it, so want an error satisfying errors.Is(err, exec.ErrDot), not the ambient PATH's %q", got, err, decoy)
 			}
 		}
 

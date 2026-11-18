@@ -1532,7 +1532,7 @@ func TestUpdateImagesWorkflowNamesTheTownsRegistry(t *testing.T) {
 		{"REGISTRY_OWNER", registry.Owner},
 	} {
 		if got := doc.Env[want.key]; got != want.value {
-			t.Errorf("the workflow's %s is %q, but gt update images reads %q from the town's rig settings", want.key, got, want.value)
+			t.Errorf("the workflow's %s does not carry the town's rig settings", want.key)
 		}
 	}
 }

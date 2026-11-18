@@ -86,7 +86,7 @@ func TestPlanForwardsOnlyTheWrapperEnvironment(t *testing.T) {
 		t.Fatalf("Plan returned an error: %v", err)
 	}
 	if !slices.Equal(call.Env, want) {
-		t.Fatalf("Plan forwarded %q, want %q", call.Env, want)
+		t.Fatalf("Plan forwarded %d entries, want %q", len(call.Env), want)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestPlanNeverForwardsACredentialName(t *testing.T) {
 	}
 	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
 	if !slices.Equal(call.Env, want) {
-		t.Fatalf("Plan forwarded %q, want only the ordinary CLAUDE_ name %q", call.Env, want)
+		t.Fatalf("Plan forwarded %d entries, want only the ordinary CLAUDE_ name %q", len(call.Env), want)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestPlanRefusesTheOAuthTokenInTheClaudeFamily(t *testing.T) {
 	}
 	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
 	if !slices.Equal(call.Env, want) {
-		t.Fatalf("Plan forwarded %q, want only the ordinary CLAUDE_ name %q", call.Env, want)
+		t.Fatalf("Plan forwarded %d entries, want only the ordinary CLAUDE_ name %q", len(call.Env), want)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestPlanForwardsTheDoltPasswordButNoBrokerOrRingKey(t *testing.T) {
 				want = []string{entry}
 			}
 			if !slices.Equal(call.Env, want) {
-				t.Fatalf("Plan forwarded %q, want %q", call.Env, want)
+				t.Fatalf("Plan forwarded %d entries, want %q", len(call.Env), want)
 			}
 		})
 	}
@@ -179,7 +179,7 @@ func TestPlanForwardsGTBeadsAndBDNamesThatCarryACredentialWord(t *testing.T) {
 				t.Fatalf("Plan returned an error: %v", err)
 			}
 			if !slices.Equal(call.Env, []string{entry}) {
-				t.Fatalf("Plan forwarded %q, want %q to cross", call.Env, entry)
+				t.Fatalf("Plan forwarded %d entries, want %q to cross", len(call.Env), entry)
 			}
 		})
 	}
@@ -224,7 +224,7 @@ func TestPlanDropsAClaudeNameThatContainsACredentialWord(t *testing.T) {
 				t.Fatalf("Plan returned an error: %v", err)
 			}
 			if len(call.Env) != 0 {
-				t.Fatalf("Plan forwarded %q, want %s dropped", call.Env, tt.name)
+				t.Fatalf("Plan forwarded %d entries, want %s dropped", len(call.Env), tt.name)
 			}
 		})
 	}
@@ -241,7 +241,7 @@ func TestPlanKeepsAClaudeNameWithNoCredentialWord(t *testing.T) {
 				t.Fatalf("Plan returned an error: %v", err)
 			}
 			if !slices.Equal(call.Env, []string{entry}) {
-				t.Fatalf("Plan forwarded %q, want %q", call.Env, entry)
+				t.Fatalf("Plan forwarded %d entries, want %q", len(call.Env), entry)
 			}
 		})
 	}
@@ -266,9 +266,9 @@ func TestPlanScreensBeforeAnyEnvFlagIsBuilt(t *testing.T) {
 	}
 	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
 	if !slices.Equal(call.Env, want) {
-		t.Fatalf("Plan forwarded %q, want %q: the screen must run in Plan, before any flag is built", call.Env, want)
+		t.Fatalf("Plan forwarded %d entries, want %q: the screen must run in Plan, before any flag is built", len(call.Env), want)
 	}
 	if !slices.Equal(dockerEnv, want) {
-		t.Fatalf("docker environment is %q, want %q", dockerEnv, want)
+		t.Fatalf("docker environment is %d entries, want %d", len(dockerEnv), len(want))
 	}
 }

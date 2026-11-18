@@ -47,7 +47,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 		}
 	}
 	if _, ok := got.Env[EnvSystemPromptFile]; ok {
-		t.Fatalf("env must not be set while the file does not exist: %v", got.Env)
+		t.Fatalf("env must not be set while the file does not exist")
 	}
 
 	path := SystemPromptFilePath("polecat", town, rig, "nux")
@@ -72,7 +72,7 @@ func TestWithRoleSystemPromptFlag_OnlyWhenFileExists(t *testing.T) {
 		t.Fatalf("expected --append-system-prompt-file in %v", got.Args)
 	}
 	if got.Env[EnvSystemPromptFile] != path {
-		t.Fatalf("env %s must name the file, env = %v", EnvSystemPromptFile, got.Env)
+		t.Fatalf("env %s must name the file", EnvSystemPromptFile)
 	}
 
 	// Idempotent: a second call must not add the flag twice.
@@ -120,7 +120,7 @@ func TestResolveRoleAgentConfig_AddsSystemPromptFlagWhenFileExists(t *testing.T)
 		t.Fatalf("ResolveRoleAgentConfig must carry the system-prompt flag, args=%v", rc.Args)
 	}
 	if rc.Env[EnvSystemPromptFile] != path {
-		t.Fatalf("env not set: %v", rc.Env)
+		t.Fatalf("env not set")
 	}
 }
 
@@ -242,7 +242,7 @@ func TestResolveRoleAgentConfigWithOverrideAppliesRoleFlags(t *testing.T) {
 		t.Errorf("polecat override config lacks the per-agent flag: %v", rc.Args)
 	}
 	if rc.Env[EnvSystemPromptFile] != polecatPath {
-		t.Errorf("env %s = %q, want %q", EnvSystemPromptFile, rc.Env[EnvSystemPromptFile], polecatPath)
+		t.Errorf("env %s is not %q", EnvSystemPromptFile, polecatPath)
 	}
 
 	// Missing file: unchanged config, no error.
@@ -414,7 +414,7 @@ func TestWithRoleSystemPromptFlag_RendersMissingFileFirst(t *testing.T) {
 		t.Fatalf("first spawn must carry the flag once the file is rendered; args = %v", got.Args)
 	}
 	if got.Env[EnvSystemPromptFile] != want {
-		t.Fatalf("env %s = %q, want %q", EnvSystemPromptFile, got.Env[EnvSystemPromptFile], want)
+		t.Fatalf("env %s is not %q", EnvSystemPromptFile, want)
 	}
 
 	// The file now exists: a second spawn still renders, so a stale file is
@@ -440,7 +440,7 @@ func TestWithRoleSystemPromptFlag_RendererFailureLeavesConfigUnchanged(t *testin
 			t.Fatalf("a failing renderer must not add the flag: %v", got.Args)
 		}
 		if _, ok := got.Env[EnvSystemPromptFile]; ok {
-			t.Fatalf("a failing renderer must not set the env: %v", got.Env)
+			t.Fatalf("a failing renderer must not set the env")
 		}
 	})
 	t.Run("wrote nothing", func(t *testing.T) {

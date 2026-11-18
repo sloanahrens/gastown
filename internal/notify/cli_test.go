@@ -162,7 +162,7 @@ func TestCLIPassesEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := r.only(t).Env; !reflect.DeepEqual(got, []string{"BD_ACTOR=daemon"}) {
-		t.Fatalf("env = %q", got)
+		t.Fatalf("env = %d entries", len(got))
 	}
 }
 

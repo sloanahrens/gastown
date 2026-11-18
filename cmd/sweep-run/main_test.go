@@ -30,6 +30,6 @@ func TestDepsAreWired(t *testing.T) {
 		t.Errorf("the cache trim is not the shared claim's: %+v, want root %s and cap %d", d.Trim, sweepCacheRoot, sweepCacheCapBytes)
 	}
 	if !slices.Equal(d.Environ, env) {
-		t.Errorf("environment = %q, want the %q it was given", d.Environ, env)
+		t.Errorf("environment = %d entries, want the %d it was given", len(d.Environ), len(env))
 	}
 }

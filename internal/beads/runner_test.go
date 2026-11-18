@@ -45,7 +45,7 @@ func TestDefaultRunnerIsRealBD(t *testing.T) {
 		t.Errorf("newBDCmd args/dir = %v %q", cmd.Args, cmd.Dir)
 	}
 	if len(cmd.Env) == 0 || cmd.Env[0] != "A=1" || cmd.Stdin == nil || cmd.Stdout != &stdout || cmd.Stderr != &stderr {
-		t.Errorf("newBDCmd env/stdio not wired: env=%v", cmd.Env)
+		t.Errorf("newBDCmd env/stdio not wired: env has %d entries", len(cmd.Env))
 	}
 }
 
@@ -302,7 +302,7 @@ func TestPlainListSendsAssigneeStatusAndDefaultPage(t *testing.T) {
 		t.Errorf("call = %+v, want a plain call in %s", calls[0], dir)
 	}
 	if wantEnv := WithMachineEnvIn(dir, nil); !reflect.DeepEqual(calls[0].env, wantEnv) {
-		t.Errorf("env = %q, want %q", calls[0].env, wantEnv)
+		t.Errorf("env = %d entries, want %d", len(calls[0].env), len(wantEnv))
 	}
 }
 
@@ -413,7 +413,7 @@ func TestNewPlainBDCmdWiring(t *testing.T) {
 		t.Errorf("Dir = %q, want /rig", cmd.Dir)
 	}
 	if !reflect.DeepEqual(cmd.Env, env) {
-		t.Errorf("Env = %q, want exactly %q", cmd.Env, env)
+		t.Errorf("Env = %d entries, want exactly %d", len(cmd.Env), len(env))
 	}
 	if cmd.Stdin == nil || cmd.Stdout != &stdout || cmd.Stderr != &stderr {
 		t.Error("stdio not wired")
@@ -424,7 +424,7 @@ func TestNewPlainBDCmdWiring(t *testing.T) {
 
 	inherit := newPlainBDCmd(context.Background(), bdCall{dir: "/rig", args: []string{"stats"}, plain: true}, &stdout, &stderr)
 	if inherit.Env != nil {
-		t.Errorf("nil env became %q; it must stay nil so bd inherits", inherit.Env)
+		t.Errorf("nil env became %d entries; it must stay nil so bd inherits", len(inherit.Env))
 	}
 	if inherit.Stdin != nil {
 		t.Error("no stdin was given, but one is wired")
@@ -443,7 +443,7 @@ func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 
 	plain := newBDProcess(context.Background(), bdCall{dir: "/rig", env: env, args: []string{"stats"}, plain: true}, &stdout, &stderr)
 	if !reflect.DeepEqual(plain.Env, env) || plain.SysProcAttr != nil {
-		t.Errorf("plain call: Env = %q, SysProcAttr = %+v; want exactly %q in the caller's process group", plain.Env, plain.SysProcAttr, env)
+		t.Errorf("plain call: Env = %d entries, SysProcAttr = %+v; want exactly %d in the caller's process group", len(plain.Env), plain.SysProcAttr, len(env))
 	}
 
 	routed := newBDProcess(context.Background(), bdCall{dir: "/rig", env: env, args: []string{"stats"}}, &stdout, &stderr)
@@ -451,7 +451,7 @@ func TestBDProcessChoosesPlainOnlyForPlainCalls(t *testing.T) {
 		t.Error("routed call: not in a detached process group, so it was built as a plain call")
 	}
 	if routed.Dir != "/rig" || !reflect.DeepEqual(routed.Env, env) {
-		t.Errorf("routed call: Dir = %q, Env = %q; want /rig and exactly the call's env", routed.Dir, routed.Env)
+		t.Errorf("routed call: Dir = %q, Env = %d entries; want /rig and exactly the call's env", routed.Dir, len(routed.Env))
 	}
 }
 

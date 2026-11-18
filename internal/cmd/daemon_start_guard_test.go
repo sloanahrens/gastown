@@ -598,7 +598,7 @@ func TestRealEnvSeamCommandAndError(t *testing.T) {
 		t.Errorf("command = %q, want docker compose up", got)
 	}
 	if n := len(cmd.Env); n == 0 || cmd.Env[n-1] != "GT_DAEMON_TAKEOVER=1" {
-		t.Errorf("environment ends %v, want GT_DAEMON_TAKEOVER=1 added last", cmd.Env)
+		t.Errorf("environment does not end with GT_DAEMON_TAKEOVER=1 added last")
 	}
 	if err := commandError([]byte("ok\n"), nil); err != nil {
 		t.Errorf("commandError for a success = %v, want nil", err)
@@ -645,10 +645,10 @@ func TestStartDaemonCarriesTheTakeoverVariable(t *testing.T) {
 				carries := len(env) == 1 && env[0] == "GT_DAEMON_TAKEOVER=1"
 				starts := strings.HasSuffix(strings.Join(calls.argv[i], " "), " up -d daemon") || strings.HasSuffix(strings.Join(calls.argv[i], " "), " up -d")
 				if starts && carries != tc.wantEnv {
-					t.Errorf("start %v ran with environment %v, want the takeover variable: %v", calls.argv[i], env, tc.wantEnv)
+					t.Errorf("start %v ran with %d environment entries, want the takeover variable: %v", calls.argv[i], len(env), tc.wantEnv)
 				}
 				if !starts && len(env) != 0 {
-					t.Errorf("non-start command %v carried environment %v", calls.argv[i], env)
+					t.Errorf("non-start command %v carried %d environment entries", calls.argv[i], len(env))
 				}
 			}
 		})

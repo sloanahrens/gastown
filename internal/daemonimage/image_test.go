@@ -344,12 +344,12 @@ func TestBuildImageRunsWithTheDockerEnvironment(t *testing.T) {
 	env := run.calls[0].env
 	for _, want := range []string{"PATH=/usr/bin:/bin", "HOME=/home/builder", "DOCKER_CONFIG=/home/builder/.docker"} {
 		if !contains(env, want) {
-			t.Errorf("build env = %q, want %s carried through", env, want)
+			t.Errorf("build env does not carry %s through", want)
 		}
 	}
 	for _, key := range []string{"GOFLAGS", "GOWORK", "GOCACHE", "DOCKER_HOST"} {
 		if hasKey(env, key) {
-			t.Errorf("build env = %q, want %s left out", env, key)
+			t.Errorf("build env does not leave %s out", key)
 		}
 	}
 }

@@ -75,10 +75,10 @@ func TestIntegrationGitEnvDropsTheLiveEnvironment(t *testing.T) {
 	}
 	env := gitEnv(live)
 	if !slices.Contains(env, "PATH=/usr/bin:/bin") {
-		t.Fatalf("env %q does not keep PATH", env)
+		t.Fatalf("env does not keep PATH")
 	}
 	if !slices.Contains(env, "GIT_CONFIG_GLOBAL=/dev/null") {
-		t.Fatalf("env %q does not pin the global config to /dev/null", env)
+		t.Fatalf("env does not pin the global config to /dev/null")
 	}
 	for _, dropped := range []string{
 		"GIT_DIR=/elsewhere/.git",
@@ -87,7 +87,7 @@ func TestIntegrationGitEnvDropsTheLiveEnvironment(t *testing.T) {
 		"HOME=/home/op",
 	} {
 		if slices.Contains(env, dropped) {
-			t.Fatalf("env %q carries the live %q", env, dropped)
+			t.Fatalf("env carries the live %q", dropped)
 		}
 	}
 }

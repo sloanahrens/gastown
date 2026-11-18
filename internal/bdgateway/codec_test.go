@@ -43,7 +43,7 @@ func TestReadRequest(t *testing.T) {
 		t.Errorf("head = %+v, want %+v", got, req)
 	}
 	if len(got.Env) != len(req.Env) || got.Env["BD_ACTOR"] != req.Env["BD_ACTOR"] || got.Env["BD_JSON_ENVELOPE"] != req.Env["BD_JSON_ENVELOPE"] {
-		t.Errorf("env = %v, want %v", got.Env, req.Env)
+		t.Errorf("env = %d entries, want %d", len(got.Env), len(req.Env))
 	}
 	gotStdin, err := io.ReadAll(rest)
 	if err != nil {

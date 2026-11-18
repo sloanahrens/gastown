@@ -86,7 +86,7 @@ func TestContainerEnvFromDaemonEnvDropsHostOnlyKeys(t *testing.T) {
 	}
 	got := containerEnv(in, nil)
 	if len(got) != 1 || got["BEADS_DOLT_POOL_READ_TIMEOUT"] != "30s" {
-		t.Errorf("container env = %v, want only BEADS_DOLT_POOL_READ_TIMEOUT", got)
+		t.Errorf("container env = %d entries, want only BEADS_DOLT_POOL_READ_TIMEOUT", len(got))
 	}
 }
 
@@ -113,14 +113,14 @@ func TestContainerEnvNeverEmitsASecretReference(t *testing.T) {
 			}
 			got := containerEnv(in, tc.files)
 			if _, ok := got["REF_A"]; ok || got["PLAIN"] != "v" {
-				t.Errorf("container env = %v, want PLAIN and not the referenced REF_A", got)
+				t.Errorf("container env = %d entries, want PLAIN and not the referenced REF_A", len(got))
 			}
 		})
 	}
 	// A secret-named entry is dropped even when nothing references it.
 	got := containerEnv(map[string]string{"DEEPSEEK_API_KEY": "k", "GITHUB_TOKEN": "t", "X_PASSWORD": "p", "OK": "v"}, nil)
 	if len(got) != 1 || got["OK"] != "v" {
-		t.Errorf("container env = %v, want OK only", got)
+		t.Errorf("container env = %d entries, want OK only", len(got))
 	}
 }
 

@@ -528,7 +528,7 @@ func TestPolecatHandoffDoneCmd(t *testing.T) {
 	}
 	env := strings.Join(cmd.Env, "\n")
 	if !strings.Contains(env, envDoneFromHandoff+"=1") || !strings.Contains(env, "GT_ROLE=gastown/polecats/Toast") {
-		t.Fatalf("env = %v, want the caller's environment plus %s=1", cmd.Env, envDoneFromHandoff)
+		t.Fatalf("env = %d entries, want the caller's environment plus %s=1", len(cmd.Env), envDoneFromHandoff)
 	}
 }
 
