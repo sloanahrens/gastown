@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,14 +17,18 @@ import (
 
 	"github.com/jonboulle/clockwork"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
 )
 
 // omLessonsTestDaemon builds a daemon whose om_lessons patrol is enabled. Its
 // in-memory last-run entry is dropped when the test ends, so no later daemon
-// can inherit a completion through a recycled address.
+// can inherit a completion through a recycled address. Its proposals are filed
+// to a fresh beadsfake, so no pass reaches the town's bd.
 func omLessonsTestDaemon(t *testing.T, logged io.Writer) *Daemon {
 	t.Helper()
 	d := &Daemon{
@@ -32,6 +37,7 @@ func omLessonsTestDaemon(t *testing.T, logged io.Writer) *Daemon {
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 			OmLessons: &agentconfig.OmLessonsConfig{Enabled: true},
 		}},
+		openNoticeBeads: func() notifyBeadWriter { return beadsfake.New() },
 	}
 	t.Cleanup(d.forgetOmLessonsLastRun)
 	return d
@@ -476,6 +482,132 @@ func omLessonsFakeSources(records []land.ReviewRecord, rules map[string]bool) om
 // it belongs to and the findings it carries at at.
 func omLessonsReviewRecord(bead string, at time.Time, attempt int, findings ...land.ReviewFindingText) land.ReviewRecord {
 	return land.ReviewRecord{BeadID: bead, Rig: "gastown", At: at, Attempt: attempt, Verdict: land.VerdictApprove, FindingText: findings}
+}
+
+// omLessonsFailOpenWeek is the week of one class past the proposal floor: six
+// fail-open findings on six beads, one of them on a third attempt, so the class
+// burned two rounds. Every other class is too few to say.
+func omLessonsFailOpenWeek(at time.Time) []land.ReviewRecord {
+	recent := at.AddDate(0, 0, -3)
+	var records []land.ReviewRecord
+	for _, bead := range []string{"gt-a", "gt-b", "gt-c", "gt-d", "gt-e", "gt-f"} {
+		attempt := 1
+		if bead == "gt-b" {
+			attempt = 3
+		}
+		records = append(records, omLessonsReviewRecord(bead, recent, attempt, omLessonsFinding("major", "fail-open: a failed read reads as clean")))
+	}
+	return records
+}
+
+// omLessonsRefusingWriter is a beads client that refuses every create.
+type omLessonsRefusingWriter struct{ err error }
+
+func (w omLessonsRefusingWriter) Create(beads.CreateOptions) (*beads.Issue, error) {
+	return nil, w.err
+}
+
+// TestReworkProgramOmLessonsRefusedFilingIsReturned: a create the beads client
+// refuses ends the pass with that error, wrapped and naming the class it was
+// filing, so the pass never reads as filed.
+func TestReworkProgramOmLessonsRefusedFilingIsReturned(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+	refused := errors.New("the beads client refused the create")
+
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.openNoticeBeads = func() notifyBeadWriter { return omLessonsRefusingWriter{err: refused} }
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsFailOpenWeek(at), map[string]bool{"1": true}))
+
+	_, err := d.runOmLessonsTick(context.Background(), at)
+	if !errors.Is(err, refused) {
+		t.Fatalf("a refused create returned %v, want the client's error", err)
+	}
+	if !strings.Contains(err.Error(), "fail-open") {
+		t.Errorf("the refused create's error %q does not name the class it was filing", err)
+	}
+}
+
+// TestReworkProgramOmLessonsFilingRefusesAnEmptyWindow: a window of no days
+// names no counts, so filing refuses it and writes no bead.
+func TestReworkProgramOmLessonsFilingRefusesAnEmptyWindow(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	proposals, err := omLessonsRunFrom(context.Background(), at, omLessonsFakeSources(omLessonsFailOpenWeek(at), map[string]bool{"1": true}))
+	if err != nil {
+		t.Fatalf("the pass over a fake record source: %v", err)
+	}
+	bd := beadsfake.New()
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.openNoticeBeads = func() notifyBeadWriter { return bd }
+
+	if err := d.fileOmLessonsProposals(at, 0, proposals); err == nil {
+		t.Fatal("a window of no days filed proposals")
+	}
+	filed, err := bd.List(beads.ListOptions{Status: "all"})
+	if err != nil {
+		t.Fatalf("listing the beads the refused filing left: %v", err)
+	}
+	if len(filed) != 0 {
+		t.Errorf("a refused window left %d bead(s), want none", len(filed))
+	}
+}
+
+// TestReworkProgramOmLessonsFilingNeedsATown: a daemon that names no town has no
+// directive directory to name in a proposal bead, so a pass with drafts to file
+// refuses to file them rather than writing a bead with no directory in it.
+func TestReworkProgramOmLessonsFilingNeedsATown(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsFailOpenWeek(at), map[string]bool{"1": true}))
+
+	if _, err := d.runOmLessonsTick(context.Background(), at); err == nil {
+		t.Fatal("a pass with drafts to file filed them in a daemon that names no town")
+	}
+}
+
+// TestReworkProgramOmLessonsOneProposalFilesOneOverseerBead: a pass over a week
+// with one class past the proposal floor files one bead through the beads
+// client. The bead wears overseer-only alone, and its text carries the class,
+// the counts, the first three example beads and the directive edit. The classes
+// with too few findings to say file nothing.
+func TestReworkProgramOmLessonsOneProposalFilesOneOverseerBead(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	bd := beadsfake.New()
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.openNoticeBeads = func() notifyBeadWriter { return bd }
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsFailOpenWeek(at), map[string]bool{"1": true}))
+
+	if _, err := d.runOmLessonsTick(context.Background(), at); err != nil {
+		t.Fatalf("the pass over a fake record source: %v", err)
+	}
+	filed, err := bd.List(beads.ListOptions{Status: "all"})
+	if err != nil {
+		t.Fatalf("listing the beads the pass filed: %v", err)
+	}
+	if len(filed) != 1 {
+		t.Fatalf("the pass filed %d bead(s), want one: fail-open is the only class with enough findings", len(filed))
+	}
+	issue := filed[0]
+	if want := []string{dispatch.OverseerOnlyLabel}; !slices.Equal(issue.Labels, want) {
+		t.Errorf("the proposal bead wears labels %v, want only %v so no seat slings it", issue.Labels, want)
+	}
+	for _, want := range []string{
+		"Class: an error reads as success (fail-open)",
+		"Coverage: violated-anyway: rule #1 covers it and it still appears",
+		"Counts: 6 finding(s) on 6 bead(s), 2 round(s) burned; prior window 0 finding(s) on 0 bead(s), 0 round(s)",
+		"Examples: gt-a, gt-b, gt-c\n",
+		"Goal: a directive edit that stops om raising this class.",
+	} {
+		if !strings.Contains(issue.Description, want) {
+			t.Errorf("the proposal bead's text lacks %q; text:\n%s", want, issue.Description)
+		}
+	}
 }
 
 // TestReworkProgramOmLessonsRunBuildsOneProposalPerRejectionClass: one pass over
