@@ -44,11 +44,6 @@ func (r *replyRunner) run(_ context.Context, name string, args ...string) ([]byt
 
 func cmdKey(argv []string) string { return strings.Join(argv, " ") }
 
-func readArgv(profile string) []string {
-	return []string{"colima", "ssh", "-p", profile, "--", "sh", "-c",
-		"cat /etc/resolv.conf; timeout 5 getent hosts github.com"}
-}
-
 func backupArgv(profile string) []string {
 	return []string{"colima", "ssh", "-p", profile, "--",
 		"sudo -n cp -p /etc/resolv.conf /etc/resolv.conf.bak-" + repairStamp}
@@ -175,6 +170,27 @@ func TestVMStartDNSRepairStops(t *testing.T) {
 				t.Fatalf("calls = %q, want %q and no restart", r.calls, tc.wantCalls)
 			}
 		})
+	}
+}
+
+// TestVMStartDNSRepairUnreadable: a resolv.conf the read could not open is an
+// unknown state, so the repair stops after the read rather than rewriting a
+// resolver it could not inspect (gt-8bs4dv).
+func TestVMStartDNSRepairUnreadable(t *testing.T) {
+	t.Parallel()
+	read := readArgv("gt-control")
+	r := &replyRunner{table: map[string]reply{
+		cmdKey(read): {out: unreadableMarker + "\n", err: errors.New("exit status 1")},
+	}}
+	steps, err := RepairDNS(context.Background(), r.run, "gt-control", repairClock)
+	if err == nil {
+		t.Fatal("RepairDNS repaired a VM whose resolv.conf it could not read")
+	}
+	if steps != nil {
+		t.Fatalf("steps = %v, want none", steps)
+	}
+	if !reflect.DeepEqual(r.calls, [][]string{read}) {
+		t.Fatalf("calls = %q, want only the read %q", r.calls, read)
 	}
 }
 

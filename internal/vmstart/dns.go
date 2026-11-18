@@ -35,20 +35,28 @@ type DNSState struct {
 	Answers bool
 }
 
+// unreadableMarker is what the shell prints when cat could not read
+// /etc/resolv.conf; the lookup still runs and its status is the command's, so
+// without the marker a failed read on a VM whose lookup passes would pass as a
+// clean state (gt-8bs4dv).
+const unreadableMarker = "gt:resolv.conf:unreadable"
+
 // dnsCommand is the reboot sheet's read: cat the file, then a bounded lookup.
 // The shell exits with the lookup's status, so a non-zero exit is a failed
 // answer rather than a failed read.
-const dnsCommand = "cat /etc/resolv.conf; timeout 5 getent hosts github.com"
+const dnsCommand = "cat /etc/resolv.conf || echo " + unreadableMarker +
+	"; timeout 5 getent hosts github.com"
 
 // vmProfiles are the two VMs the town runs; any other profile is refused before
 // a call is made.
 var vmProfiles = map[string]bool{"gt-control": true, "gt-sbx": true}
 
 // CheckDNS reads the resolv.conf and DNS answer of the named VM. Answers is
-// false both for a lookup that failed and for a command that failed after
-// printing the file; when the command printed nothing the state is unknown and
-// CheckDNS returns an error instead. A profile that is not gt-control or gt-sbx
-// is refused before any call.
+// false for a lookup that failed, whether or not the command also failed after
+// printing the file. The state is unknown — an error, never a state — when the
+// command printed nothing, and when the read of /etc/resolv.conf failed, which
+// the shell marks even if the lookup answered (gt-8bs4dv). A profile that is not
+// gt-control or gt-sbx is refused before any call.
 func CheckDNS(ctx context.Context, run Runner, profile string) (DNSState, error) {
 	if !vmProfiles[profile] {
 		return DNSState{}, fmt.Errorf("unknown Colima profile %q: want gt-control or gt-sbx", profile)
@@ -57,9 +65,25 @@ func CheckDNS(ctx context.Context, run Runner, profile string) (DNSState, error)
 	if err != nil && len(out) == 0 {
 		return DNSState{}, fmt.Errorf("read DNS in %s: %w", profile, err)
 	}
+	if resolvConfUnreadable(string(out)) {
+		return DNSState{}, fmt.Errorf("read /etc/resolv.conf in %s: file is unreadable", profile)
+	}
 	state := DNSState{ResolvConf: string(out), Answers: err == nil}
 	state.Nameservers = parseNameservers(state.ResolvConf)
 	return state, nil
+}
+
+// resolvConfUnreadable reports whether the read printed unreadableMarker, the
+// only sign the shell's cat failed: an unread file is an unknown state, never a
+// clean one. The check is per line because the lookup's answer follows the
+// marker, and a resolv.conf that itself holds that line is refused with it.
+func resolvConfUnreadable(out string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if line == unreadableMarker {
+			return true
+		}
+	}
+	return false
 }
 
 // parseNameservers returns the address on every nameserver line, ignoring
