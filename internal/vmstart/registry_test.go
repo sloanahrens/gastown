@@ -160,6 +160,10 @@ func TestVMStartRegistryOwnerReadError(t *testing.T) {
 			curlErr:   errors.New("exec: \"curl\": executable file not found in $PATH"),
 			wantCalls: 3,
 		},
+		"curl failed after printing 200": {
+			curlOut: "200", curlErr: errors.New("curl: error writing body"),
+			wantCalls: 3,
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

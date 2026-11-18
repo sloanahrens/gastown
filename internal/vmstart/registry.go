@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // registryPort is the Mac loopback port the gt-sbx VM's Lima forward publishes
@@ -23,7 +25,9 @@ const (
 type Owner struct {
 	// Profile is gt-sbx when the listener is the sandbox VM's Lima forward,
 	// gt-control when it is the control VM's, and "" when nothing listens or
-	// the command names neither.
+	// the command names neither. Nothing listening and an unrecognised
+	// listener read alike; a caller treats "" as "no known VM forward owns the
+	// port", never as proof that one of the two is absent.
 	Profile string
 	// Healthy is true when the registry answered 200 on /v2/.
 	Healthy bool
@@ -50,11 +54,16 @@ func RegistryOwner(ctx context.Context, run Runner) (Owner, error) {
 		}
 		owner.Profile = profileOf(string(command))
 	}
-	code, err := run(ctx, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", fmt.Sprintf("http://127.0.0.1:%d/v2/", registryPort))
-	if err != nil && len(code) == 0 {
+	// The registry URL is built through config.ImageRegistryBase, as every
+	// consumer of an image registry is, so the two cannot disagree on the
+	// scheme (gt-vv9ir0).
+	base := config.ImageRegistryBase(fmt.Sprintf("127.0.0.1:%d", registryPort))
+	code, err := run(ctx, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", base+"/v2/")
+	answer := strings.TrimSpace(string(code))
+	if err != nil && (answer == "" || answer == "200") {
 		return Owner{}, fmt.Errorf("read the registry's answer on port %d: %w", registryPort, err)
 	}
-	owner.Healthy = strings.TrimSpace(string(code)) == "200"
+	owner.Healthy = answer == "200"
 	return owner, nil
 }
 
