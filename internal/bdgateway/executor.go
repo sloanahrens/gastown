@@ -683,6 +683,9 @@ func noSymlinkBelow(root, path string) error {
 // another token. A key outside the list is refused rather than dropped, so the
 // caller learns it sent something the gateway does not take; BD_ALLOW_NEW_DATABASE
 // is refused by the same rule, since init is not served.
+//
+// GT_TOWN_ROOT names the workspace root, where the push carries the town's
+// formulas a cook needs (gt-x49njj).
 func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]string, error) {
 	env := []string{
 		"HOME=" + e.home,
@@ -692,6 +695,9 @@ func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]st
 		"BEADS_DOLT_SERVER_PORT=" + e.doltPort,
 		"TRACKER_URL=" + e.trackerURL,
 		"TRACKER_TOKEN_FILE=" + e.trackerToken,
+	}
+	if e.workspaceRoot != "" {
+		env = append(env, "GT_TOWN_ROOT="+e.workspaceRoot)
 	}
 	keys := make([]string, 0, len(fromCaller))
 	for k := range fromCaller {

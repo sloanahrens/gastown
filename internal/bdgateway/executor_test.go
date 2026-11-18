@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -816,6 +817,7 @@ func TestExecutorEnv(t *testing.T) {
 			},
 		},
 		{name: "an unknown key", env: map[string]string{"GT_ROOT": "/Users/user/gt"}, wantErr: ErrEnvNotAllowed},
+		{name: "GT_TOWN_ROOT", env: map[string]string{"GT_TOWN_ROOT": "/Users/user/gt"}, wantErr: ErrEnvNotAllowed},
 		{name: "BEADS_DIR", env: map[string]string{"BEADS_DIR": "/etc"}, wantErr: ErrEnvNotAllowed},
 		{name: "HOME", env: map[string]string{"HOME": "/root"}, wantErr: ErrEnvNotAllowed},
 		{name: "PATH", env: map[string]string{"PATH": "/bin"}, wantErr: ErrEnvNotAllowed},
@@ -850,6 +852,7 @@ func TestExecutorEnv(t *testing.T) {
 				"HOME":                   "/home/bdgw",
 				"PATH":                   "/usr/local/bin:/usr/bin:/bin",
 				"BEADS_DIR":              filepath.Join(root, "gastown", ".beads"),
+				"GT_TOWN_ROOT":           root,
 				"BEADS_DOLT_SERVER_HOST": "gt-dolt",
 				"BEADS_DOLT_SERVER_PORT": "3307",
 				"TRACKER_URL":            "http://127.0.0.1:7433",
@@ -859,10 +862,100 @@ func TestExecutorEnv(t *testing.T) {
 					t.Errorf("%s = %q, want %q", k, got, want)
 				}
 			}
-			if got, want := len(env), 7+len(tc.env); got != want {
+			if got, want := len(env), 8+len(tc.env); got != want {
 				t.Errorf("environment holds %d entries, want %d", got, want)
 			}
 		})
+	}
+}
+
+// TestExecutorEnvWithoutWorkspaceRoot: an executor with no workspace root omits
+// GT_TOWN_ROOT instead of setting it to the empty string. New refuses such an
+// executor, so the test builds one directly to exercise buildEnv's guard.
+func TestExecutorEnvWithoutWorkspaceRoot(t *testing.T) {
+	t.Parallel()
+	e := &Executor{
+		home:         "/home/bdgw",
+		searchPath:   "/usr/local/bin:/usr/bin:/bin",
+		doltHost:     "gt-dolt",
+		doltPort:     "3307",
+		trackerURL:   "http://127.0.0.1:7433",
+		trackerToken: "/run/secrets/tracker.token",
+	}
+	env, err := e.buildEnv(filepath.Join("gastown", ".beads"), nil)
+	if err != nil {
+		t.Fatalf("buildEnv: %v", err)
+	}
+	if got, ok := envMap(env)["GT_TOWN_ROOT"]; ok {
+		t.Errorf("GT_TOWN_ROOT = %q with no workspace root, want the key absent", got)
+	}
+}
+
+// TestExecutorCookFindsTheTownFormulas: a sling's cook carries the route
+// target's own .beads as BEADS_DIR — for a gt- bead, gastown/mayor/rig/.beads —
+// which holds no formulas, so bd finds the town's only through the workspace
+// root the environment names (gt-x49njj).
+func TestExecutorCookFindsTheTownFormulas(t *testing.T) {
+	t.Parallel()
+	town := clientTown(t)
+	name := "mol-polecat-work" + formulaSuffix
+	formulaPath := filepath.Join(town, ".beads", formulaDirName, name)
+	if err := os.MkdirAll(filepath.Dir(formulaPath), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(formulaPath), err)
+	}
+	if err := os.WriteFile(formulaPath, []byte("description = \"a polecat's work\"\n"), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", formulaPath, err)
+	}
+	doc, err := BuildWorkspaceDocument(town)
+	if err != nil {
+		t.Fatalf("BuildWorkspaceDocument: %v", err)
+	}
+	root := t.TempDir()
+	store, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceStore: %v", err)
+	}
+	if _, err := store.Put(doc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	runner := &fakeRunner{}
+	e := newTestExecutor(t, root, runner)
+	var out bytes.Buffer
+	if err := e.Exec(context.Background(), Request{
+		Argv: []string{"cook", "mol-polecat-work"},
+		Rig:  "gastown/mayor/rig",
+		Cwd:  "gastown/mayor/rig",
+	}, nil, &out); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	rec := runner.only(t)
+	env := envMap(rec.env)
+	// The shape the sling's call names: the route target's own .beads, which the
+	// pushed workspace holds no formulas under, so bd's first search path misses.
+	wantBeads := filepath.Join(root, "gastown", "mayor", "rig", ".beads")
+	if got := env["BEADS_DIR"]; got != wantBeads {
+		t.Fatalf("BEADS_DIR = %q, want %q", got, wantBeads)
+	}
+	if _, err := os.Stat(filepath.Join(wantBeads, formulaDirName)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the call's BEADS_DIR holds a formulas directory (%v), so the test no longer reproduces the failing shape", err)
+	}
+	// The town root the call's environment names must be the workspace and must
+	// hold the pushed formula, or the cook finds nothing.
+	townRoot, ok := env["GT_TOWN_ROOT"]
+	if !ok {
+		t.Fatalf("the cook's environment names no GT_TOWN_ROOT")
+	}
+	if townRoot != root {
+		t.Fatalf("GT_TOWN_ROOT = %q, want the workspace root %q", townRoot, root)
+	}
+	formula := filepath.Join(townRoot, ".beads", formulaDirName, name)
+	fi, err := os.Stat(formula)
+	if err != nil {
+		t.Fatalf("the town root the cook is given holds no %s: %v", name, err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Errorf("%s is not a regular file: %v", formula, fi.Mode())
 	}
 }
 
