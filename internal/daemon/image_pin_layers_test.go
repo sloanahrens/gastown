@@ -3,19 +3,25 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // imagePinDurabilityNoon is noon UTC on day, so a record's day is that date in
@@ -497,4 +503,188 @@ func TestImagePinDurabilityImagePinLayersStopJoinsTheRun(t *testing.T) {
 		unblock()
 		d.imagePinLayersCycles.Wait()
 	})
+}
+
+// imagePinDurabilityDigest is the sha256 digest the fake registry names for seed.
+func imagePinDurabilityDigest(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+// imagePinDurabilityRegistry is the fake registry: an image manifest with one
+// served layer for every reference, the dead layer its dead map names for the
+// reference's digest, and no answer when fail is set.
+type imagePinDurabilityRegistry struct {
+	asked []string
+	dead  map[string]string
+	fail  error
+}
+
+func (r *imagePinDurabilityRegistry) Manifest(_ context.Context, _, ref string) ([]byte, string, error) {
+	r.asked = append(r.asked, ref)
+	if r.fail != nil {
+		return nil, "", r.fail
+	}
+	layer := imagePinDurabilityDigest("served")
+	if dead, ok := r.dead[ref]; ok {
+		layer = dead
+	}
+	const mediaType = "application/vnd.oci.image.manifest.v1+json"
+	body, err := json.Marshal(map[string]any{
+		"mediaType": mediaType,
+		"config":    map[string]string{"digest": imagePinDurabilityDigest("config")},
+		"layers":    []map[string]string{{"digest": layer}},
+	})
+	return body, mediaType, err
+}
+
+func (r *imagePinDurabilityRegistry) BlobExists(_ context.Context, _, digest string) (bool, error) {
+	served := true
+	for _, dead := range r.dead {
+		served = served && dead != digest
+	}
+	return served, nil
+}
+
+// TestImagePinDurabilityARunRaisesAndAWholeRunClearsTheDeadLayerItem is the
+// bead's first acceptance: a registry missing one layer makes a run raise
+// KindImagePinsDeadLayer naming the image and the layer, and a whole run clears it.
+func TestImagePinDurabilityARunRaisesAndAWholeRunClearsTheDeadLayerItem(t *testing.T) {
+	t.Parallel()
+	pins := templates.DigestPinnedImages()
+	if len(pins) < 2 {
+		t.Fatalf("the town pins %d digest images, want a whole pin beside a dead one", len(pins))
+	}
+	digests := make([]string, len(pins))
+	for i, pinned := range pins {
+		_, digests[i], _ = strings.Cut(pinned, "@")
+	}
+	town := t.TempDir()
+	record := imagePinLayersFindingsPath(town)
+	dead := imagePinDurabilityDigest("dead layer")
+	broken := &imagePinDurabilityRegistry{dead: map[string]string{digests[0]: dead}}
+	var logged bytes.Buffer
+	d := imagePinDurabilityTestDaemon(t, town, &logged)
+	d.imagePinLayersRun = func(ctx context.Context, _ time.Time) error {
+		return runImagePinLayers(ctx, record, broken)
+	}
+
+	d.startImagePinLayersTick()
+	d.imagePinLayersCycles.Wait()
+
+	if !slices.Equal(broken.asked, digests) {
+		t.Errorf("the run read %q, want every pin %q", broken.asked, digests)
+	}
+	items, err := imagePinLayersObserved(record)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("the run raised %d items (%v), want one for the pin with the dead layer", len(items), err)
+	}
+	item := items[0]
+	if item.Kind != attention.KindImagePinsDeadLayer || !strings.Contains(item.Key, pins[0]) {
+		t.Errorf("the item = %+v, want kind %q keyed by the dead pin %s", item, attention.KindImagePinsDeadLayer, pins[0])
+	}
+	if !strings.Contains(item.Summary, pins[0]) || !strings.Contains(item.Summary, dead) {
+		t.Errorf("the item's summary = %q, want the image %s and the dead digest %s named", item.Summary, pins[0], dead)
+	}
+	if !strings.Contains(logged.String(), item.Key) || !strings.Contains(logged.String(), dead) {
+		t.Errorf("the tick logged %q, want the raised item %q named", logged.String(), item.Key)
+	}
+
+	whole := &imagePinDurabilityRegistry{}
+	d.imagePinLayersRun = func(ctx context.Context, _ time.Time) error {
+		return runImagePinLayers(ctx, record, whole)
+	}
+	if ran, _, err := d.runImagePinLayersTick(time.Now().AddDate(0, 0, 1)); err != nil || !ran {
+		t.Fatalf("the next day's run = %v, %v; want a completed run", ran, err)
+	}
+	items, err = imagePinLayersObserved(record)
+	if err != nil {
+		t.Fatalf("reading the record after the whole run: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("a run over a whole registry left %d items standing, want the item cleared", len(items))
+	}
+}
+
+// TestImagePinDurabilityARecordThatWillNotOpenOrWriteIsAnError: an unreadable
+// record is an error, never an empty registry, and an unwritable one fails the run.
+func TestImagePinDurabilityARecordThatWillNotOpenOrWriteIsAnError(t *testing.T) {
+	t.Parallel()
+	corrupt := filepath.Join(t.TempDir(), imagePinLayersFindingsFile)
+	if err := os.WriteFile(corrupt, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write a corrupt record: %v", err)
+	}
+	if _, err := imagePinLayersObserved(corrupt); err == nil || !strings.Contains(err.Error(), "parsing the dead-layer record") {
+		t.Fatalf("reading a corrupt record = %v, want the parse error", err)
+	}
+	held := filepath.Join(t.TempDir(), imagePinLayersFindingsFile)
+	if err := os.MkdirAll(held, 0o755); err != nil {
+		t.Fatalf("hold the record's path with a directory: %v", err)
+	}
+	if _, err := imagePinLayersObserved(held); err == nil || !strings.Contains(err.Error(), "reading the dead-layer record") {
+		t.Fatalf("reading a record held by a directory = %v, want the read error", err)
+	}
+	if err := runImagePinLayers(context.Background(), held, &imagePinDurabilityRegistry{}); err == nil || !strings.Contains(err.Error(), "recording the image pin layers findings") {
+		t.Fatalf("a run over an unwritable record = %v, want the record named", err)
+	}
+}
+
+// TestImagePinDurabilityAHostlessRepositoryIsReadAtDockerHub: a pin naming no
+// registry host is read at Docker Hub's library, so it is addressable.
+func TestImagePinDurabilityAHostlessRepositoryIsReadAtDockerHub(t *testing.T) {
+	t.Parallel()
+	digest := imagePinDurabilityDigest("pin")
+	if got, want := imagePinLayersRegistryRef("alpine:3@"+digest), imagePinLayersHubHost+"/library/alpine@"+digest; got != want {
+		t.Errorf("a hostless repository was read at %q, want %q", got, want)
+	}
+}
+
+// TestImagePinDurabilityAnUnreachableRegistryRaisesNothingAndIsLogged is the
+// bead's second acceptance: an unreachable registry raises no item and is logged.
+func TestImagePinDurabilityAnUnreachableRegistryRaisesNothingAndIsLogged(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	record := imagePinLayersFindingsPath(town)
+	refused := &imagePinDurabilityRegistry{fail: errors.New("dial tcp: the registry is unreachable")}
+	var logged bytes.Buffer
+	d := imagePinDurabilityTestDaemon(t, town, &logged)
+	d.imagePinLayersRun = func(ctx context.Context, _ time.Time) error {
+		return runImagePinLayers(ctx, record, refused)
+	}
+
+	d.startImagePinLayersTick()
+	d.imagePinLayersCycles.Wait()
+
+	if !strings.Contains(logged.String(), "the registry is unreachable") {
+		t.Errorf("the tick logged %q, want the failed check named", logged.String())
+	}
+	if strings.Contains(logged.String(), imagePinLayersDeadLayerKey) {
+		t.Errorf("an unreachable registry logged %q, want no dead-layer item", logged.String())
+	}
+	if items, err := imagePinLayersObserved(record); err != nil || len(items) != 0 {
+		t.Errorf("an unreachable registry left %d items (%v), want none raised", len(items), err)
+	}
+	if _, err := os.Stat(imagePinLayersLastRunPath(town)); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("an unreachable registry's tick wrote a last-run record (%v), want the day left due", err)
+	}
+}
+
+// TestImagePinDurabilityTheStartedTickerInstallsTheProductionRun: a started
+// ticker gives a town with no seam the production check; a patrol off installs none.
+func TestImagePinDurabilityTheStartedTickerInstallsTheProductionRun(t *testing.T) {
+	t.Parallel()
+	newTicker := func(time.Duration) (<-chan time.Time, func()) { return make(chan time.Time), func() {} }
+	on := imagePinDurabilityTestDaemon(t, t.TempDir(), io.Discard)
+	on.newImagePinLayersTicker = newTicker
+	if _, stop := on.startImagePinLayersTicker(); stop == nil {
+		t.Fatal("the enabled patrol started no ticker")
+	}
+	if on.imagePinLayersRun == nil {
+		t.Error("the started ticker left no run seam, so a tick would run nothing")
+	}
+	off := imagePinDurabilityTestDaemon(t, t.TempDir(), io.Discard)
+	off.newImagePinLayersTicker, off.patrolConfig = newTicker, &DaemonPatrolConfig{}
+	if _, stop := off.startImagePinLayersTicker(); stop != nil || off.imagePinLayersRun != nil {
+		t.Error("a patrol the town turned off started a ticker or installed a run")
+	}
 }

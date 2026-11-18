@@ -3,10 +3,9 @@ package daemon
 // The image_pin_layers patrol (gt-rhrbyd): once a day it checks every
 // digest-pinned image against its registry, so a layer the registry no longer
 // serves is found before the next images build. This file is the patrol's
-// skeleton: its config key and off-by-default ticker, its last-run record under
-// .runtime, and the run seam a later bead fills with the check (gt-hpmk5n). No
-// seam is installed in this build yet, so a tick runs nothing and records no
-// day: only a completed check marks the day run.
+// config key and off-by-default ticker, its last-run record under .runtime, the
+// day's check, and the dead-layer record a run leaves behind: only a completed
+// check marks the day run.
 //
 // The ticker is a check cadence, not a run cadence: an in-process ticker resets
 // its countdown on every daemon start, so a ticker set to a day would never fire
@@ -21,10 +20,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/pincheck"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 const (
@@ -40,6 +43,18 @@ const (
 	// directory: the clock reading of the run that last completed, so a tick in
 	// the same day runs nothing.
 	imagePinLayersLastRunFile = "last-run.json"
+
+	// imagePinLayersFindingsFile is the dead-layer record beside it.
+	imagePinLayersFindingsFile = "dead-layers.json"
+
+	// imagePinLayersPlatform is the platform every pin is checked at.
+	imagePinLayersPlatform = "linux/arm64"
+
+	// imagePinLayersDeadLayerKey prefixes each pin's dead-layer item.
+	imagePinLayersDeadLayerKey = "image-pins-dead-layer"
+
+	// imagePinLayersHubHost is where a pin with no registry host is read.
+	imagePinLayersHubHost = "registry-1.docker.io"
 
 	// imagePinLayersCheckTick is how often the patrol asks whether today's run
 	// has happened. It is a check, not the run cadence: the record decides
@@ -104,6 +119,77 @@ func writeImagePinLayersLastRun(path string, at time.Time) error {
 	return atomicfile.EnsureDirAndWriteJSON(path, imagePinLayersLastRun{LastRun: at})
 }
 
+// imagePinLayersFindingsPath returns the dead-layer record's path.
+func imagePinLayersFindingsPath(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), imagePinLayersDir, imagePinLayersFindingsFile)
+}
+
+// imagePinLayersFindings is the dead-layer record: the digests a pin's last
+// check found unserved, by pin; an empty record is every pin whole.
+type imagePinLayersFindings map[string][]string
+
+// imagePinLayersObserved is the dead-layer items the record names, keyed by pin.
+func imagePinLayersObserved(path string) ([]attention.Item, error) {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the dead-layer record %s: %w", path, err)
+	}
+	var f imagePinLayersFindings
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("parsing the dead-layer record %s: %w", path, err)
+	}
+	items := make([]attention.Item, 0, len(f))
+	for ref, dead := range f {
+		items = append(items, attention.Item{
+			Key:      imagePinLayersDeadLayerKey + ":" + ref,
+			Kind:     attention.KindImagePinsDeadLayer,
+			Severity: attention.SeverityMedium,
+			Summary:  fmt.Sprintf("%s: the registry no longer serves %s", ref, strings.Join(dead, "; ")),
+		})
+	}
+	return items, nil
+}
+
+// imagePinLayersRegistryRef is the reference pincheck reads for a pinned image:
+// its reader tag dropped and a hostless repository qualified with Docker Hub's.
+func imagePinLayersRegistryRef(pinned string) string {
+	repo, digest, _ := strings.Cut(pinned, "@")
+	if colon := strings.LastIndexByte(repo, ':'); colon > strings.LastIndexByte(repo, '/') {
+		repo = repo[:colon]
+	}
+	host, _, hasRepo := strings.Cut(repo, "/")
+	if !hasRepo {
+		return imagePinLayersHubHost + "/library/" + repo + "@" + digest
+	}
+	if host != "localhost" && !strings.ContainsAny(host, ".:") {
+		return imagePinLayersHubHost + "/" + repo + "@" + digest
+	}
+	return repo + "@" + digest
+}
+
+// runImagePinLayers is one day's check: every digest-pinned image is asked of
+// its registry at linux/arm64 and the dead digests replace the record, so a pin
+// found whole clears. A check that cannot decide writes nothing and fails.
+func runImagePinLayers(ctx context.Context, recordPath string, reg pincheck.Registry) error {
+	findings := imagePinLayersFindings{}
+	for _, pinned := range templates.DigestPinnedImages() {
+		res, err := pincheck.Check(ctx, reg, imagePinLayersRegistryRef(pinned), []string{imagePinLayersPlatform})
+		if err != nil {
+			return fmt.Errorf("checking the layers of %s: %w", pinned, err)
+		}
+		if len(res.Dead) > 0 {
+			findings[pinned] = res.Dead
+		}
+	}
+	if err := atomicfile.EnsureDirAndWriteJSON(recordPath, findings); err != nil {
+		return fmt.Errorf("recording the image pin layers findings: %w", err)
+	}
+	return nil
+}
+
 // imagePinLayersDueDecision is whether this tick is today's run, with the line
 // the caller logs either way.
 type imagePinLayersDueDecision struct {
@@ -159,6 +245,13 @@ func (d *Daemon) startImagePinLayersTicker() (<-chan time.Time, func()) {
 		}
 	}
 	ticks, stop := newTicker(imagePinLayersCheckTick)
+	// A town that installed no run seam gets the production check.
+	if d.imagePinLayersRun == nil {
+		townRoot := d.config.TownRoot
+		d.imagePinLayersRun = func(ctx context.Context, _ time.Time) error {
+			return runImagePinLayers(ctx, imagePinLayersFindingsPath(townRoot), pincheck.HTTP{})
+		}
+	}
 	d.logger.Printf("Image pin layers ticker started (check interval %v)", imagePinLayersCheckTick)
 	return ticks, stop
 }
@@ -200,6 +293,14 @@ func (d *Daemon) triggerImagePinLayers() {
 	}
 	if ran {
 		d.logger.Printf("image_pin_layers: today's run completed")
+		// The items the record names reach the log, an unreadable record too.
+		items, err := imagePinLayersObserved(imagePinLayersFindingsPath(d.config.TownRoot))
+		if err != nil {
+			d.logger.Printf("image_pin_layers: %v", err)
+		}
+		for _, it := range items {
+			d.logger.Printf("image_pin_layers: %s: %s", it.Key, it.Summary)
+		}
 	}
 }
 
