@@ -28,19 +28,25 @@ func isDNSLabel(name string) bool {
 }
 
 // podDaemonSwap puts a digest install's pair in force on a daemon that runs as a
-// pod. Apply moves two Deployments to the pair: the daemon's, whose container
-// takes the daemon image and whose pod template takes the polecat image
-// annotation, and the dashboard's, whose container takes the daemon image. The
-// dashboard is optional, so Apply asks the cluster whether its Deployment exists
-// and moves it only when it does. It patches what it moves, then waits for each
-// rollout, so the pair moves as one step and the caller's wait, restore and
-// escalation work as they do for the container daemon. RunningPair reads the
-// pair the Deployment runs now, which an install records before it swaps: the
-// update Job's init container rewrites the values file with the new pair first.
-// Apply refuses a pair whose daemon or polecat is not a digest reference, and a
-// swap missing its context, namespace or rollout timeout, before any command
-// runs. A failed step is named by the step and its exit, never by the command's
-// output, which can hold a secret.
+// pod. Apply moves up to three Deployments to the pair: the bd gateway's, whose
+// container takes the gateway image, then the daemon's, whose container takes the
+// daemon image and whose pod template takes the polecat image annotation, and the
+// dashboard's, whose container takes the daemon image. The gateway moves first
+// and the daemon does not move until the gateway's rollout is complete and its
+// pod Ready (its readiness probe is bdgw ready), since the compatibility rule
+// lets a gateway change run with the previous daemon for one roll. The gateway
+// and the dashboard are optional, so Apply asks the cluster whether each
+// Deployment exists and moves it only when it does and the pair names its image.
+// It patches what it moves, then waits for each rollout, so the pair moves as one
+// step and the caller's wait, restore and escalation work as they do for the
+// container daemon. RunningPair reads the pair the Deployment runs now, which an
+// install records before it swaps: the update Job's init container rewrites the
+// values file with the new pair first. Apply refuses a pair whose daemon, polecat
+// or bd gateway is not a digest reference, and a swap missing its context,
+// namespace or rollout timeout, before any command runs. A failed step is named
+// by the step and its exit, never by the command's output, which can hold a
+// secret; a gateway step's failure is returned as update.GatewayStepError, so the
+// install names the gateway rather than the daemon rollout that never started.
 type podDaemonSwap struct {
 	// Context is the kubectl context the Deployment runs in. Required unless
 	// InCluster, and refused with it.
@@ -72,6 +78,13 @@ var _ update.ImageRunningPair = podDaemonSwap{}
 // dashboardAbsentLine is what Apply prints when the cluster has no dashboard
 // Deployment, so the operator can see the dashboard was not moved.
 const dashboardAbsentLine = "dashboard Deployment not found; not moved"
+
+// gatewayRolloutTimeout bounds the wait for the bd gateway's rollout before the
+// daemon is patched. The gateway must be new and Ready before the daemon that
+// needs it moves, so a gateway that never comes Ready fails the roll and restores
+// the previous images while the daemon is still on its old pair; the bound is its
+// own constant rather than the daemon's restart bound for that reason.
+const gatewayRolloutTimeout = 3 * time.Minute
 
 // runningPairJSONPath reads the pair the daemon's Deployment runs: the daemon
 // container's image, then the pod template's polecat image annotation, on two
@@ -148,10 +161,12 @@ func (s podDaemonSwap) gatewayImage(ctx context.Context) (string, error) {
 	return image, nil
 }
 
-// Apply patches the daemon's Deployment, then the dashboard's when the cluster has
-// one, with the pair, and then waits for each rollout. Both bodies are encoded
-// before any command runs, and a failed step stops the swap at that step. The
-// caller restores the previous pair through this same Apply, which asks the same
+// Apply patches the bd gateway's Deployment when the cluster has one and the pair
+// names its image, waits for that rollout, then patches the daemon's Deployment
+// and the dashboard's when the cluster has one, and waits for each of those. All
+// the bodies are encoded, and the cluster is asked which Deployments exist, before
+// any patch runs, and a failed step stops the swap at that step. The caller
+// restores the previous pair through this same Apply, which asks the same
 // question and moves whichever Deployments exist.
 func (s podDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) error {
 	if err := s.validate(pair); err != nil {
@@ -165,9 +180,31 @@ func (s podDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) error {
 	if err != nil {
 		return fmt.Errorf("encoding the dashboard's pod patch: %w", err)
 	}
+	gatewayPatch := ""
+	if pair.Bd != "" {
+		if gatewayPatch, err = s.gatewayPatch(pair); err != nil {
+			return fmt.Errorf("encoding the bd gateway's pod patch: %w", err)
+		}
+	}
 	present, err := s.dashboardPresent(ctx)
 	if err != nil {
 		return err
+	}
+	gatewayPresent, err := s.gatewayPresent(ctx)
+	if err != nil {
+		return err
+	}
+	movesGateway := gatewayPresent && pair.Bd != ""
+	if movesGateway {
+		// The gateway is new before the daemon that needs it: the daemon's patch
+		// waits on this rollout, whose completion requires the bdgw ready probe.
+		if err := s.kubectl(ctx, "the bd gateway's patch", "patch", "deployment/"+k8sdaemon.BdGatewayName, "--type=strategic", "-p", gatewayPatch); err != nil {
+			return update.GatewayStepError{Err: err}
+		}
+		timeout := "--timeout=" + gatewayRolloutTimeout.String()
+		if err := s.kubectl(ctx, "the bd gateway's rollout status", "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, timeout); err != nil {
+			return update.GatewayStepError{Err: err}
+		}
 	}
 	daemon, dashboard := s.deployment(), k8sdaemon.DashboardName
 	timeout := "--timeout=" + s.RolloutTimeout.String()
@@ -213,6 +250,27 @@ func (s podDaemonSwap) dashboardPresent(ctx context.Context) (bool, error) {
 	}
 }
 
+// gatewayPresent asks the cluster whether the bd gateway's Deployment exists: the
+// town before the cutover has none, and the renderer creates it only for a town
+// with a gateway. An empty answer is absent, the gateway's own name is present,
+// and any other answer, a nonzero exit or a runner error is an error, so an
+// unreadable cluster never reads as a gateway that is not there.
+func (s podDaemonSwap) gatewayPresent(ctx context.Context) (bool, error) {
+	const step = "the bd gateway's existence read"
+	out, err := s.kubectlOutput(ctx, step, "get", "deployment/"+k8sdaemon.BdGatewayName, "-o", "name", "--ignore-not-found")
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(out) {
+	case "":
+		return false, nil
+	case "deployment.apps/" + k8sdaemon.BdGatewayName, "deployment/" + k8sdaemon.BdGatewayName:
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s printed a name other than the bd gateway's", step)
+	}
+}
+
 // out is the writer Apply's line goes to: Out when set, else nowhere.
 func (s podDaemonSwap) out() io.Writer {
 	if s.Out == nil {
@@ -233,6 +291,13 @@ func (s podDaemonSwap) daemonPatch(pair update.ImagePair) (string, error) {
 // annotations, such as a hand restart's, are kept.
 func (s podDaemonSwap) dashboardPatch(pair update.ImagePair) (string, error) {
 	return s.encode(podTemplatePatch(nil, k8sdaemon.DashboardName, pair.Daemon))
+}
+
+// gatewayPatch is the strategic-merge patch that puts the bd gateway image of pair
+// on the gateway's container. It sets no annotation, as the dashboard's does not:
+// a gateway roll keeps the annotations the pod template already carries.
+func (s podDaemonSwap) gatewayPatch(pair update.ImagePair) (string, error) {
+	return s.encode(podTemplatePatch(nil, k8sdaemon.BdGatewayName, pair.Bd))
 }
 
 // podTemplatePatch is the body that sets container's image, by name, in a
@@ -285,7 +350,13 @@ func (s podDaemonSwap) validate(pair update.ImagePair) error {
 	if err := checkPodDigest("daemon", pair.Daemon); err != nil {
 		return err
 	}
-	return checkPodDigest("polecat", pair.Polecat)
+	if err := checkPodDigest("polecat", pair.Polecat); err != nil {
+		return err
+	}
+	if pair.Bd == "" {
+		return nil
+	}
+	return checkPodDigest("bd gateway", pair.Bd)
 }
 
 // validateTarget refuses a runner or a Deployment the swap cannot name in a

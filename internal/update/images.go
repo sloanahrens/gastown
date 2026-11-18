@@ -71,8 +71,10 @@ type ImageRecord struct {
 // The checks a digest install names in a failure. CheckPreflight runs before
 // anything is installed or swapped, so it is never in a RollbackRecord: a pair
 // it refuses is never installed, swapped or restored. The rest run after the
-// swap: CheckRollout and CheckVersion are the rollout wait, the last two the
-// pair check's digest and tag reads.
+// swap: CheckGateway is the gateway step that comes before the daemon moves,
+// CheckRollout and CheckVersion are the daemon's rollout wait, and
+// CheckRunningDigests and CheckRegistryTag are the pair check's digest and tag
+// reads.
 const (
 	CheckPreflight      = "preflight"
 	CheckRollout        = "rollout"
@@ -82,6 +84,10 @@ const (
 	// CheckPair is a pair check failure that names no check of its own, such as
 	// the values file no longer holding the pair. It is never read as a rollout.
 	CheckPair = "pair"
+	// CheckGateway is the bd gateway step, which runs before the daemon moves: the
+	// gateway image did not reach its rollout, so the daemon was never rolled onto
+	// the pair and the operator reads which image the roll stopped on.
+	CheckGateway = "gateway"
 )
 
 // RollbackRecord is what a digest install that put the previous pair back on a
@@ -111,6 +117,26 @@ func pairCheckName(err error) string {
 		return pc.Check
 	}
 	return CheckPair
+}
+
+// GatewayStepError is a swap's failure in the bd gateway step, which runs before
+// the daemon moves: the failure is reported as the gateway state, not the daemon
+// rollout that never started. Its message is the step's, and it unwraps to the
+// failure underneath.
+type GatewayStepError struct{ Err error }
+
+func (e GatewayStepError) Error() string { return e.Err.Error() }
+
+func (e GatewayStepError) Unwrap() error { return e.Err }
+
+// swapFailure is the check a failed swap names and the failure's message: the
+// gateway step when the swap reached it, else the daemon's rollout.
+func swapFailure(err error) (check, reason string) {
+	var gw GatewayStepError
+	if errors.As(err, &gw) {
+		return CheckGateway, "the bd gateway step failed: " + err.Error()
+	}
+	return CheckRollout, "the daemon image swap failed: " + err.Error()
 }
 
 // ImageLedger reads and writes the digest install's record.
@@ -178,7 +204,9 @@ func (l FileImageLedger) Write(rec ImageRecord) error {
 // ImageSwap puts a pair in force: the daemon service runs the pair's daemon
 // image, and the polecat image the pair names is the one sandboxes run on. It
 // returns once the daemon has been recreated on the pair; the caller waits for
-// the daemon to report the build.
+// the daemon to report the build. A swap that also moves a bd gateway image moves
+// it before the daemon, since a gateway change stays compatible with the previous
+// daemon for one roll.
 type ImageSwap interface {
 	Apply(ctx context.Context, pair ImagePair) error
 }
@@ -398,7 +426,9 @@ func (d *DigestInstaller) pairHolds(ctx context.Context, pair, running ImagePair
 
 // Install validates the values file and its commit, reads the pair the daemon
 // runs now, runs the pre-swap check, runs the host install, and moves the daemon
-// to the pair.
+// to the pair. A pair that names a bd gateway image moves the gateway first, and
+// a step that fails, the gateway's included, puts the recorded previous pair back
+// over all three images.
 func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResult, error) {
 	if err := d.Images.wired(); err != nil {
 		return InstallResult{}, err
@@ -487,7 +517,7 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 	reason := fmt.Sprintf("the daemon did not report %s within the restart bound", shortSHA(sha))
 	switch {
 	case err != nil:
-		check, reason = CheckRollout, "the daemon image swap failed: "+err.Error()
+		check, reason = swapFailure(err)
 	case healthy:
 		if d.PairCheck == nil {
 			return res, nil
