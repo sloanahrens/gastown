@@ -1518,13 +1518,17 @@ func originBranchSHA(g daemonGit, branch string) string {
 	return sha
 }
 
+// errOriginNoCommit is originBranchRead's error for a listing that names the ref
+// with no hash: origin's answer, not a failed read (gt-e1sd0v).
+var errOriginNoCommit = errors.New("the listing names the branch with no commit hash")
+
 // originBranchRead is origin's answer for branch. held reports whether origin
 // listed the branch, and is decided by the listing naming the ref, never by its
 // hash's text: a listing that names the ref with no hash is an answer too
-// malformed to read as held or absent, so it is the error (gt-p0jiud). Origin
-// may answer that it has no such branch (held false, no error), and a read that
-// fails is the error. The stop reads the error where an unknown answer must not
-// pass for an absent branch (gt-lahjz4).
+// malformed to read as held or absent, so it is the error, which wraps
+// errOriginNoCommit (gt-p0jiud). Origin may answer that it has no such branch
+// (held false, no error), and a read that fails is the error. The stop reads the
+// error where an unknown answer must not pass for an absent branch (gt-lahjz4).
 func originBranchRead(g daemonGit, branch string) (sha string, held bool, err error) {
 	ref := "refs/heads/" + branch
 	refs, err := g.ListRemoteRefsWithHashes("origin", ref)
@@ -1536,7 +1540,7 @@ func originBranchRead(g daemonGit, branch string) (sha string, held bool, err er
 			continue
 		}
 		if r.Hash == "" {
-			return "", false, fmt.Errorf("read origin's %s: the listing names the branch with no commit hash", ref)
+			return "", false, fmt.Errorf("read origin's %s: %w", ref, errOriginNoCommit)
 		}
 		return r.Hash, true, nil
 	}

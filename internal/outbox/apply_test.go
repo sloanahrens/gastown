@@ -280,7 +280,7 @@ func TestApply(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			if err := Apply(store, testBead, testSeat, tt.acceptance, tt.result); err != nil {
+			if err := Apply(store, testBead, testSeat, tt.acceptance, tt.result, originHoldsTheSubmission); err != nil {
 				t.Fatalf("Apply() error = %v, want nil", err)
 			}
 			if !reflect.DeepEqual(store.calls, tt.want) {
@@ -328,7 +328,7 @@ func TestApplyRefusedTick(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
 			r := Result{Status: StatusDone, Notes: "a note", Ticked: tt.ticked, Findings: []string{"a finding"}}
-			err := Apply(store, testBead, testSeat, tt.acceptance, r)
+			err := Apply(store, testBead, testSeat, tt.acceptance, r, originHoldsTheSubmission)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
 			}
@@ -373,7 +373,7 @@ func TestApplyFailedWriteDoesNotStopTheRest(t *testing.T) {
 		Ticked:   []int{0},
 		Findings: []string{"the first finding", "the second finding"},
 	}
-	err := Apply(store, testBead, testSeat, acceptance, r)
+	err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission)
 	if err == nil {
 		t.Fatal("Apply() = nil with four failed writes, want every failure")
 	}
@@ -419,7 +419,7 @@ func TestApplyFailedEscalationIsJoinedWithEarlierErrors(t *testing.T) {
 		Notes:      "a note that fails",
 		Escalation: &Escalation{Text: "HELP: the third criterion needs a decision"},
 	}
-	err := Apply(store, testBead, testSeat, acceptance, r)
+	err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission)
 	if err == nil {
 		t.Fatal("Apply() = nil with the note and the escalation failed, want both failures")
 	}
@@ -452,7 +452,7 @@ func TestNoBeadAccessApplyCreatesTheEscalationFromAValidatedOutbox(t *testing.T)
 		t.Fatalf("Validate() error = %v, want nil", err)
 	}
 	store := &fakeStore{}
-	if err := Apply(store, testBead, testSeat, acceptance, r); err != nil {
+	if err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission); err != nil {
 		t.Fatalf("Apply() error = %v, want nil", err)
 	}
 	want := []storeCall{
@@ -514,7 +514,7 @@ func TestNoBeadAccessApplyEscalationOnlyWhenTheRequestHasText(t *testing.T) {
 			// A host stops at the outbox it could not validate and applies
 			// nothing.
 			if err == nil {
-				err = Apply(store, testBead, testSeat, acceptance, r)
+				err = Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission)
 			}
 			if tt.wantErr == "" {
 				if err != nil {
@@ -568,7 +568,7 @@ func TestNoBeadAccessApplyWritesTheTitleAndAcceptanceOfAValidatedOutbox(t *testi
 				t.Fatalf("Validate() error = %v, want nil", err)
 			}
 			store := &fakeStore{}
-			if err := Apply(store, testBead, testSeat, acceptance, r); err != nil {
+			if err := Apply(store, testBead, testSeat, acceptance, r, originHoldsTheSubmission); err != nil {
 				t.Fatalf("Apply() error = %v, want nil", err)
 			}
 			if !reflect.DeepEqual(store.calls, tt.want) {
@@ -620,7 +620,7 @@ func TestApplyRefusedStatus(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			err := Apply(store, testBead, testSeat, acceptance, tt.result)
+			err := Apply(store, testBead, testSeat, acceptance, tt.result, originHoldsTheSubmission)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %s", tt.wantErr)
 			}
@@ -676,7 +676,7 @@ func TestNoBeadAccessApplyRefusesAnEmptyTitleOrAcceptance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			store := &fakeStore{}
-			err := Apply(store, testBead, testSeat, acceptance, tt.result)
+			err := Apply(store, testBead, testSeat, acceptance, tt.result, originHoldsTheSubmission)
 			if err == nil {
 				t.Fatalf("Apply() = nil, want an error naming %q", tt.wantErr)
 			}

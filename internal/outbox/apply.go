@@ -48,6 +48,45 @@ type Seat struct {
 	Worker string
 }
 
+// OriginTip is origin's answer for a submission's branch: the commit at
+// refs/heads/<branch>, Held false when origin holds no branch of that name, and
+// Err the read's own failure. The zero value holds no branch and writes no block.
+type OriginTip struct {
+	Head string
+	Held bool
+	Err  error
+}
+
+// ReadyRefusal is origin's final answer that the submission is not landable: no
+// branch of that name, no commit for it, or a tip at another commit.
+type ReadyRefusal struct{ reason error }
+
+func (e *ReadyRefusal) Error() string { return e.reason.Error() }
+
+// OriginReadError is a failed read of origin: no answer at all, so a host keeps
+// the seat and reads again.
+type OriginReadError struct{ reason error }
+
+func (e *OriginReadError) Error() string { return e.reason.Error() }
+
+// submissionOnOrigin returns why origin's tip does not show s's branch at the
+// head it reported, or nil; a failed read is an OriginReadError, every other
+// answer a ReadyRefusal.
+func submissionOnOrigin(s *Submission, origin OriginTip) error {
+	head := strings.TrimSpace(origin.Head)
+	switch {
+	case origin.Err != nil:
+		return &OriginReadError{reason: fmt.Errorf("origin's tip of branch %q cannot be read: %w", s.Branch, origin.Err)}
+	case !origin.Held:
+		return &ReadyRefusal{reason: fmt.Errorf("origin holds no branch %q", s.Branch)}
+	case head == "":
+		return &ReadyRefusal{reason: fmt.Errorf("origin names no commit for branch %q", s.Branch)}
+	case !strings.HasPrefix(head, s.Head):
+		return &ReadyRefusal{reason: fmt.Errorf("origin's branch %q is at %s, not the reported head %s", s.Branch, head, s.Head)}
+	}
+	return nil
+}
+
 // Apply writes the parts of r that change the bead through store: the seat's
 // title, its notes, its acceptance (the block it replaced or the boxes it
 // ticked), its findings, a deferred status, its escalation request and its
@@ -63,7 +102,8 @@ type Seat struct {
 // and target from the submission, Worker from seat and Submitted from the
 // seat's own stamp, using the builder gt done writes its block with
 // (gt-kepije). That block and the ready label in the one store write are what
-// the landing worker finds the bead by.
+// the landing worker finds the bead by, only when origin's tip of the branch is
+// the reported head (gt-e1sd0v).
 //
 // The writes run in that order, and every one is attempted even after an
 // earlier one failed, so one failed write neither hides the writes after it nor
@@ -86,7 +126,7 @@ type Seat struct {
 // acceptance text is written for it. The acceptance is written only when the
 // replacement or the ticks change the block the host read, and a note only when
 // r.Notes is not empty.
-func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) error {
+func Apply(store Store, beadID string, seat Seat, acceptance string, r Result, origin OriginTip) error {
 	var errs []error
 	if r.Title != nil {
 		if strings.TrimSpace(*r.Title) == "" {
@@ -138,7 +178,7 @@ func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) e
 		}
 	}
 	if r.Submission != nil {
-		if err := MarkReady(store, beadID, seat, r); err != nil {
+		if err := MarkReady(store, beadID, seat, r, origin); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -148,15 +188,21 @@ func Apply(store Store, beadID string, seat Seat, acceptance string, r Result) e
 // MarkReady marks beadID ready to land for r's submission. It refuses, with the
 // block unwritten, what Validate refuses and what a hand-built Result can still
 // carry: a status other than StatusDone, an empty branch, head or target, and a
-// branch or head git would not accept. The Worker line is seat.Worker, never a
-// value from the outbox. The block is written through the store's ReadyStore: a
-// store that cannot write it refuses the submission rather than dropping it.
+// branch or head git would not accept. It refuses one whose tip on origin is not
+// the reported head with a ReadyRefusal, and one whose tip could not be read
+// with an OriginReadError: only the first is final (gt-e1sd0v). The Worker line
+// is seat.Worker, never a value from the outbox. The block is written through
+// the store's ReadyStore: a store that cannot write it refuses the submission
+// rather than dropping it.
 //
 // Apply calls it for its last write. A host that recorded an earlier pass as
 // having left the write undone calls it to make just that one, with the same
 // refusals and the same block (gt-qk3ppr).
-func MarkReady(store Store, beadID string, seat Seat, r Result) error {
-	if err := submissionProblem(r.Submission, r.Status); err != nil {
+func MarkReady(store Store, beadID string, seat Seat, r Result, origin OriginTip) error {
+	if err := SubmissionProblem(r.Submission, r.Status); err != nil {
+		return fmt.Errorf("outbox: mark %s ready to land: %w", beadID, err)
+	}
+	if err := submissionOnOrigin(r.Submission, origin); err != nil {
 		return fmt.Errorf("outbox: mark %s ready to land: %w", beadID, err)
 	}
 	ready, ok := store.(ReadyStore)

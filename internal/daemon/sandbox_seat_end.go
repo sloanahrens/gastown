@@ -669,10 +669,10 @@ const seatEscalationSource = "sandbox-seat-end"
 // appliedSeatOutbox records what a pass applied from a seat's outbox, so a seat
 // end that runs again for the same seat writes nothing twice: the notes, the
 // ticks and the findings a pass wrote are not written again, and neither is an
-// escalation a pass filed. Ready says the submission was marked ready to land
-// (it is true for an outbox that submitted nothing). A record of another bead,
-// or of other bytes, is another run of the same polecat name and is applied
-// (gt-s4gfph, gt-qk3ppr).
+// escalation a pass filed. Ready says the ready step is settled: the block was
+// written, origin refused it, or the outbox submitted nothing (gt-e1sd0v). A
+// record of another bead, or of other bytes, is another run of the same polecat
+// name and is applied (gt-s4gfph, gt-qk3ppr).
 type appliedSeatOutbox struct {
 	Bead      string `json:"bead"`
 	Digest    string `json:"digest"`
@@ -801,25 +801,32 @@ func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
 		return outboxNotReadReason + ": cannot read its bead: " + err.Error()
 	}
 	store := &seatOutboxStore{bd: bd, escalate: h.fileSeatEscalation}
-	applyErr := outbox.Apply(store, beadID, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, beads.AcceptanceText(issue), decoded)
+	applyErr := outbox.Apply(store, beadID, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, beads.AcceptanceText(issue), decoded, h.submissionOrigin(rig, decoded))
 	if applyErr != nil {
 		// Never swallowed: the copy on the host is where an operator finds what
 		// the bead did not get. Every write the store refused keeps the seat, and
 		// the record below names each one a later pass makes again.
 		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not applied in full: %v; the copy it was read from stays at %s", rig, name, applyErr, dir)
 	}
+	// A refusal never reaches the store: origin's final answer settles the ready
+	// step without a block, while a failed read keeps the seat (gt-e1sd0v).
+	readyErr := store.readyErr
+	var readErr *outbox.OriginReadError
+	if readyErr == nil && errors.As(applyErr, &readErr) {
+		readyErr = readErr
+	}
 	h.recordAppliedSeatOutbox(rig, name, appliedSeatOutbox{
 		Bead:      beadID,
 		Digest:    digest,
 		Escalated: store.escalationErr == nil,
-		Ready:     store.readyErr == nil,
+		Ready:     readyErr == nil,
 		Pending:   store.pending,
 	})
 	if store.escalationErr != nil {
 		return outboxEscalationReason + ": " + store.escalationErr.Error()
 	}
-	if store.readyErr != nil {
-		return outboxReadyReason + ": " + store.readyErr.Error()
+	if readyErr != nil {
+		return outboxReadyReason + ": " + readyErr.Error()
 	}
 	// A failure that left no write pending is the outbox's own values being
 	// refused, not a write the store lost: a later pass would refuse them the
@@ -837,6 +844,9 @@ func (h *patrolScanHost) applySeatOutbox(rig, name, beadID string) string {
 // pending write is written. The notes, ticks, findings and status the earlier
 // pass wrote are not written again: the retry applies the outbox through a store
 // that skips every write outside Pending (gt-s4gfph, gt-kj60e4).
+//
+// The ready retry reads origin again: origin's refusal settles the step and is
+// never asked twice, while a failed read or write keeps the seat (gt-e1sd0v).
 func (h *patrolScanHost) finishSeatOutbox(rig, name, beadID string, seat supervisor.Seat, decoded outbox.Result, rec appliedSeatOutbox) string {
 	if !rec.Escalated {
 		if err := h.fileSeatEscalation(beadID, seat.Address(), decoded.Escalation.Text); err != nil {
@@ -847,7 +857,14 @@ func (h *patrolScanHost) finishSeatOutbox(rig, name, beadID string, seat supervi
 	if !rec.Ready {
 		store := &seatOutboxStore{bd: h.recoveryBeads(), escalate: h.fileSeatEscalation}
 		who := outbox.Seat{Actor: seat.Address(), Worker: seat.Name}
-		if err := outbox.MarkReady(store, beadID, who, decoded); err != nil {
+		err := outbox.MarkReady(store, beadID, who, decoded, h.submissionOrigin(rig, decoded))
+		var refusal *outbox.ReadyRefusal
+		switch {
+		case errors.As(err, &refusal):
+			// Origin's answer is final: the block is never written, and the
+			// record settles the step rather than asking again (gt-e1sd0v).
+			h.d.logger.Printf("sandbox seat end %s/%s: its submission gets no %s block: %v", rig, name, land.ReadyNoteMarker, err)
+		case err != nil:
 			// The record keeps the ready write pending, so the next pass
 			// retries it; the escalation this pass filed stays recorded.
 			h.recordAppliedSeatOutbox(rig, name, rec)
@@ -863,7 +880,9 @@ func (h *patrolScanHost) finishSeatOutbox(rig, name, beadID string, seat supervi
 		}
 		store := &seatOutboxStore{bd: bd, escalate: h.fileSeatEscalation, only: seatOutboxWriteSet(rec.Pending)}
 		who := outbox.Seat{Actor: seat.Address(), Worker: seat.Name}
-		if err := outbox.Apply(store, beadID, who, beads.AcceptanceText(issue), decoded); err != nil {
+		rest := decoded
+		rest.Submission = nil // the ready write is made above or settled, never pending
+		if err := outbox.Apply(store, beadID, who, beads.AcceptanceText(issue), rest, outbox.OriginTip{}); err != nil {
 			// The record keeps the writes this pass could not make pending, so
 			// the next pass makes those alone; those it made stay recorded.
 			rec.Pending = store.pending
@@ -874,6 +893,26 @@ func (h *patrolScanHost) finishSeatOutbox(rig, name, beadID string, seat supervi
 	}
 	h.recordAppliedSeatOutbox(rig, name, rec)
 	return ""
+}
+
+// submissionOrigin is origin's answer for the branch a seat's outbox submitted,
+// read from the rig's shared bare repository: the one repository of the rig no
+// polecat writes, and a submission Apply refuses from its own fields never
+// reaches it. A branch origin names with no commit is an answer, not a failed
+// read, so it is refused like an absent branch (gt-e1sd0v).
+func (h *patrolScanHost) submissionOrigin(rig string, r outbox.Result) outbox.OriginTip {
+	if r.Submission == nil || outbox.SubmissionProblem(r.Submission, r.Status) != nil {
+		return outbox.OriginTip{}
+	}
+	g := h.d.gitAt(constants.RigBareRepoPath(filepath.Join(h.town(), rig)))
+	sha, held, err := originBranchRead(g, r.Submission.Branch)
+	switch {
+	case errors.Is(err, errOriginNoCommit):
+		return outbox.OriginTip{Held: true}
+	case err != nil:
+		return outbox.OriginTip{Err: err}
+	}
+	return outbox.OriginTip{Head: sha, Held: held}
 }
 
 // seatOutboxWriteSet is the lookup a retry store skips every write outside of.
