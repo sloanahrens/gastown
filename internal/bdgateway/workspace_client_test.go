@@ -1571,3 +1571,119 @@ func TestReadTownFileChecksTheFileBeforeReadingIt(t *testing.T) {
 		t.Errorf("a file over the cap: got %v, want ErrWorkspaceFileTooLarge", err)
 	}
 }
+
+// reportedHashGateway is a fake gateway for the reported-hash read, answering by
+// route as the real one does. /readyz needs no token and carries readyzHash on its
+// answer. /v1/stats needs the bearer token: without it, or with a token the gateway
+// does not hold, the answer is 401. Every /v1/stats answer carries statsHash on the
+// workspace header, which the real gateway sets on every response. statsStatus, when
+// set, replaces the status /v1/stats answers with.
+type reportedHashGateway struct {
+	token       string
+	readyzHash  string
+	statsHash   string
+	statsStatus int
+}
+
+// Do answers req as the gateway's route does. A request to any other path is 404.
+func (g reportedHashGateway) Do(req *http.Request) (*http.Response, error) {
+	h := http.Header{}
+	status := http.StatusOK
+	switch req.URL.Path {
+	case readyPath:
+		if g.readyzHash != "" {
+			h.Set(WorkspaceHashHeader, g.readyzHash)
+		}
+	case statsPath:
+		if g.statsHash != "" {
+			h.Set(WorkspaceHashHeader, g.statsHash)
+		}
+		if req.Header.Get("Authorization") != "Bearer "+g.token {
+			status = http.StatusUnauthorized
+		}
+		if g.statsStatus != 0 {
+			status = g.statsStatus
+		}
+	default:
+		status = http.StatusNotFound
+	}
+	return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+}
+
+// TestGatewayPusherReportedHash drives the reported-hash read: one GET to /v1/stats
+// with the bearer token from the token file, the hash taken from WorkspaceHashHeader
+// of a 200 answer, and a refusal for each way the read can fail. A header on the
+// unauthenticated /readyz route is never the reported hash.
+func TestGatewayPusherReportedHash(t *testing.T) {
+	t.Parallel()
+	const url = "http://127.0.0.1:7440"
+	const token = "s3cret"
+	tests := []struct {
+		name     string
+		url      string
+		noToken  bool
+		down     bool
+		gateway  reportedHashGateway
+		want     string
+		wantErr  error
+		wantText string
+	}{
+		{name: "the stats header carries the reported hash", url: url, gateway: reportedHashGateway{token: token, statsHash: "manifest-1"}, want: "manifest-1"},
+		{name: "no gateway URL is refused", gateway: reportedHashGateway{token: token, statsHash: "manifest-1"}, wantErr: ErrNoGatewayURL},
+		{name: "no token file is refused", url: url, noToken: true, gateway: reportedHashGateway{token: token, statsHash: "manifest-1"}, wantErr: ErrNoTokenFile},
+		{name: "a 200 with no header is ErrNoReportedHash", url: url, gateway: reportedHashGateway{token: token}, wantErr: ErrNoReportedHash},
+		{name: "a header on /readyz alone does not count", url: url, gateway: reportedHashGateway{token: token, readyzHash: "manifest-1"}, wantErr: ErrNoReportedHash},
+		{name: "a 401 carrying the header is refused", url: url, gateway: reportedHashGateway{token: "other", statsHash: "manifest-1"}, wantErr: ErrReportedHashRefused, wantText: "refused the doctor's token"},
+		{name: "a 403 carrying the header is refused", url: url, gateway: reportedHashGateway{token: token, statsHash: "manifest-1", statsStatus: http.StatusForbidden}, wantErr: ErrReportedHashRefused, wantText: "refused the doctor's token"},
+		{name: "a 401 with the header only on /readyz is refused", url: url, gateway: reportedHashGateway{token: "other", readyzHash: "manifest-1"}, wantErr: ErrReportedHashRefused},
+		{name: "a 503 is an error that names the status", url: url, gateway: reportedHashGateway{token: token, statsHash: "manifest-1", statsStatus: http.StatusServiceUnavailable}, wantText: "answered 503"},
+		{name: "an unreachable gateway is an error", url: url, down: true, gateway: reportedHashGateway{token: token, statsHash: "manifest-1"}, wantText: "did not answer"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got *http.Request
+			pusher := GatewayPusher{
+				URL: tt.url,
+				HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+					got = req
+					if tt.down {
+						return nil, errors.New("connection refused")
+					}
+					return tt.gateway.Do(req)
+				}),
+			}
+			if !tt.noToken {
+				pusher.TokenFile = clientToken(t, "  "+token+" \n")
+			}
+			hash, err := pusher.ReportedHash(context.Background())
+			if tt.want == "" {
+				if err == nil {
+					t.Fatalf("ReportedHash = %q, nil error; want a refusal", hash)
+				}
+				if hash != "" {
+					t.Errorf("hash = %q with an error, want empty", hash)
+				}
+				if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+					t.Errorf("error = %v, want %v", err, tt.wantErr)
+				}
+				if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+					t.Errorf("error = %q, want it to contain %q", err, tt.wantText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReportedHash: %v", err)
+			}
+			if hash != tt.want {
+				t.Errorf("hash = %q, want %q", hash, tt.want)
+			}
+			if got.Method != http.MethodGet || got.URL.String() != url+"/v1/stats" {
+				t.Errorf("request = %s %s, want GET %s/v1/stats", got.Method, got.URL, url)
+			}
+			if auth := got.Header.Get("Authorization"); auth != "Bearer "+token {
+				t.Errorf("Authorization = %q, want the bearer token from the token file", auth)
+			}
+		})
+	}
+}

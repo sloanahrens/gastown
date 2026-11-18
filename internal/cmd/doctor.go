@@ -150,7 +150,13 @@ services healthy in docker compose ps, the gateway's /readyz with the daemon
 token, and every token file in the town's gateway token directory
 (.runtime/bd-gateway/tokens) at mode 0600. The unit is read through the same
 project and file as gt dolt start, and the check never starts or repairs
-anything. Without the flag it reports SKIPPED and never fails.`,
+anything. When the cluster has a bd-gateway Deployment, the check reads the
+in-cluster gateway instead: the Deployment Available, its Service with an
+endpoint, and the workspace hash in the X-Bd-Workspace header of a 200 answer to
+a GET of the gateway's /v1/stats, sent with BD_GATEWAY_URL and the token in
+BD_GATEWAY_TOKEN_FILE, equal to the manifest hash of the town copy. A 401 or 403
+answer means the gateway refused the token. Without the flag it reports SKIPPED
+and never fails.`,
 	RunE: runDoctor,
 }
 
@@ -203,7 +209,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// default run never registers it.
 		d.Register(doctor.NewMacCrewHooksCheck())
 	}
-	registerDataUnitCheck(d, names, doltComposeRealDeps())
+	registerDataUnitCheck(d, names, doltComposeRealDeps(), realBdGatewayClusterDeps(bdGatewayPusherFromEnv(os.Getenv)))
 	if err := selectDoctorChecks(d, names); err != nil {
 		return err
 	}

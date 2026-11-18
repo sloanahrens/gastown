@@ -31,7 +31,7 @@ func TestDataUnitDoctorRegistration(t *testing.T) {
 			townRoot := composeTown(t, composeRef("gastown-bd"))
 			var calls []composeCall
 			d := doctor.NewDoctor()
-			registerDataUnitCheck(d, tt.names, fakeComposeDeps(townRoot, &calls, nil, nil))
+			registerDataUnitCheck(d, tt.names, fakeComposeDeps(townRoot, &calls, nil, nil), absentBdGatewayCluster())
 			checks := d.Checks()
 			if len(checks) != 1 || checks[0].Name() != doctor.DataUnitCheckName {
 				t.Fatalf("registered checks = %d, want the data unit check alone", len(checks))

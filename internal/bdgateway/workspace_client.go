@@ -76,6 +76,12 @@ var (
 	// ErrGatewayRefused is a push the gateway answered with a status other than
 	// 200. The error names the gateway's code and message.
 	ErrGatewayRefused = errors.New("bdgateway: the gateway refused the workspace")
+	// ErrNoReportedHash is a gateway answer with no WorkspaceHashHeader, so the
+	// caller cannot tell which tree the gateway serves.
+	ErrNoReportedHash = errors.New("bdgateway: the gateway's answer carries no workspace hash")
+	// ErrReportedHashRefused is the gateway's 401 or 403 to the reported-hash read:
+	// the token the caller presented is not one the gateway accepts for a read.
+	ErrReportedHashRefused = errors.New("bdgateway: the gateway refused the doctor's token")
 	// ErrNoManifest is a 200 answer that does not name the manifest hash it
 	// stored, so the caller cannot tell which tree the gateway serves.
 	ErrNoManifest = errors.New("bdgateway: the gateway's answer names no manifest")
@@ -662,7 +668,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	if err != nil {
 		return "", err
 	}
-	endpoint, err := g.endpoint()
+	endpoint, err := g.endpoint(WorkspacePath)
 	if err != nil {
 		return "", err
 	}
@@ -708,10 +714,53 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	return result.ManifestSHA, nil
 }
 
-// endpoint is the URL the push goes to, refusing a URL that is not http(s) with
-// a host, that carries credentials or a query or fragment the endpoint does not
-// take, or that would send the bearer token in the clear to another machine.
-func (g GatewayPusher) endpoint() (string, error) {
+// ReportedHash is the manifest hash the gateway reports it serves. It sends GET
+// /v1/stats with the pusher's bearer token and reads WorkspaceHashHeader from a 200
+// answer. The route is authenticated, so an answer that is not from the gateway
+// with this token cannot pass: a 401 or 403 is ErrReportedHashRefused, any other
+// status that is not 200 is an error, and a 200 with no header is
+// ErrNoReportedHash. A caller compares the hash with the manifest of the tree it
+// believes current.
+func (g GatewayPusher) ReportedHash(ctx context.Context) (string, error) {
+	endpoint, err := g.endpoint(statsPath)
+	if err != nil {
+		return "", err
+	}
+	token, err := readTokenFile(g.TokenFile)
+	if err != nil {
+		return "", err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	// endpoint checked the URL and the method is fixed, so building the request
+	// cannot fail, as in Push.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.doer().Do(req)
+	if err != nil {
+		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so its workspace hash was not read: %w", shown(redactedURL(g.URL)), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		return "", fmt.Errorf("%w: %s answered %d", ErrReportedHashRefused, shown(redactedURL(g.URL)), resp.StatusCode)
+	case resp.StatusCode != http.StatusOK:
+		return "", fmt.Errorf("bdgateway: the gateway at %s answered %d to the workspace hash read, so its hash was not read", shown(redactedURL(g.URL)), resp.StatusCode)
+	}
+	hash := resp.Header.Get(WorkspaceHashHeader)
+	if hash == "" {
+		return "", fmt.Errorf("%w: the answer from %s carries no %s header", ErrNoReportedHash, shown(redactedURL(g.URL)), WorkspaceHashHeader)
+	}
+	return hash, nil
+}
+
+// endpoint is the URL a request to path goes to, refusing a URL that is not http(s)
+// with a host, that carries credentials or a query or fragment the endpoint does
+// not take, or that would send the bearer token in the clear to another machine.
+func (g GatewayPusher) endpoint(path string) (string, error) {
 	if g.URL == "" {
 		return "", fmt.Errorf("%w: set --gateway-url or %s", ErrNoGatewayURL, WorkspaceURLEnv)
 	}
@@ -733,7 +782,7 @@ func (g GatewayPusher) endpoint() (string, error) {
 	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
 		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https or a loopback address", shown(redactedURL(g.URL)))
 	}
-	return strings.TrimSuffix(g.URL, "/") + WorkspacePath, nil
+	return strings.TrimSuffix(g.URL, "/") + path, nil
 }
 
 // localGatewayHosts are the names a container uses for the machine its Docker
