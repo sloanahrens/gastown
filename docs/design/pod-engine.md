@@ -201,6 +201,7 @@ These files hold the literal `docker` without running the CLI as a program of a 
 - `internal/templates/daemon_compose.go` — the scratch render's dind alias.
 - `internal/templates/images.go` — the pinned docker client the daemon image carries, which is not an engine.
 - `internal/testutil/unittier/tools.go` — the host tools a unit-tier run may exec.
+- `internal/vmstart/dns_repair.go` — the restarts a DNS repair returns as argv for the caller's runner: the gt-sbx kind node restart names `docker`, and the gt-control one names `kubectl`; this package runs neither (gt-x5a7bz).
 
 ## Needs an engine
 
