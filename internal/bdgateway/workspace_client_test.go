@@ -1285,6 +1285,14 @@ func TestGatewayPusherRefusals(t *testing.T) {
 			want:    WorkspaceURLEnv,
 		},
 		{
+			// A pusher with neither URL nor PushURL names the push env too, so
+			// the operator can set either.
+			name:    "no url names the push env",
+			pusher:  func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = ""; return g },
+			wantErr: ErrNoGatewayURL,
+			want:    WorkspacePushURLEnv,
+		},
+		{
 			name:   "a url that does not parse",
 			pusher: func(_ *testing.T, g GatewayPusher) GatewayPusher { g.URL = "http://127.0.0.1:7440/%zz"; return g },
 			want:   "invalid gateway URL",
