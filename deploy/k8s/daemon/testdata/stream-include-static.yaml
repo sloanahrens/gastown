@@ -1,0 +1,1413 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: daemon
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+---
+# The ValidatingAdmissionPolicy that makes the bd gateway's Service name safe to hand to
+# the update Job (gt-dsyh4t). deploy/k8s/update-admission.yaml admits the Job's
+# BD_GATEWAY_URL as http://bd-gateway.gt.svc:7440, and the daemon-class gateway token
+# the Job mounts goes to whatever Service bd-gateway in gt is, and so to the pods that
+# Service selects. This policy bounds both.
+#
+# A Service named bd-gateway in gt must be ClusterIP, with no externalIPs and no
+# externalName, and must select exactly app.kubernetes.io/name=bd-gateway, the one
+# selector the renderer gives the gateway's Service (bdGatewaySelectorLabels in
+# deploy/k8s/daemon). No other Service in gt may select the gateway's pods: a selector
+# whose every pair is one the gateway's pods carry (app.kubernetes.io/name=bd-gateway
+# or app.kubernetes.io/managed-by=gt) is refused. An empty selector selects nothing, so
+# it is allowed.
+#
+# The policy is bound to Service creates and updates in gt for every requester, since
+# it bounds what the Services are and not who writes them. A request that does not
+# touch the bd-gateway name or a gateway selector is not refused. Every field the
+# expressions read is checked with has() first, so a Service without the field is
+# judged on what it does have, not refused by an evaluation error.
+#
+# What this does not bound: a pod in gt that carries app.kubernetes.io/name=bd-gateway
+# is selected by the bd-gateway Service whatever the policy says, so creating such a pod
+# is still a way to reach the token's destination; and the Endpoints and EndpointSlice
+# objects for a Service name are not checked here.
+#
+# The operator applies this file with update-admission.yaml. Before relying on it, check
+# it on the cluster as the operator checks that file (its header carries the commands):
+#
+#   kubectl apply --dry-run=server -f deploy/k8s/bd-gateway-service-admission.yaml
+#   kubectl -n gt create --dry-run=server -f <a bd-gateway Service rendered by gt>   # must be admitted
+#   kubectl -n gt create --dry-run=server -f <the same Service with type NodePort>   # must be refused
+#   kubectl -n gt create --dry-run=server -f <another Service selecting app.kubernetes.io/name=bd-gateway> # must be refused
+#
+# TestBdGatewayServiceAdmissionBindsGt (deploy/k8s/manifests_test.go) reads this file
+# for its shape and binding, and the daemon package's policy test holds its literals to
+# the renderer's Service and labels.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gt-bd-gateway-service
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["services"]
+        operations: ["CREATE", "UPDATE"]
+  validations:
+    # The Service named bd-gateway is the one the update Job's BD_GATEWAY_URL names. It
+    # must be ClusterIP, so nothing outside the cluster can answer for the name; it must
+    # carry no external address, so no other IP answers for it; and it must select only
+    # the gateway's own label, which the gateway's pods carry and no other pod does.
+    - expression: >-
+        object.metadata.name != 'bd-gateway' ||
+        (has(object.spec.type) && object.spec.type == 'ClusterIP' &&
+        (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0) &&
+        !has(object.spec.externalName) &&
+        has(object.spec.selector) && size(object.spec.selector) == 1 &&
+        object.spec.selector.exists(k, k == 'app.kubernetes.io/name' &&
+        object.spec.selector[k] == 'bd-gateway'))
+      message: >-
+        the Service bd-gateway in gt must be ClusterIP, with no externalIPs and no
+        externalName, and select exactly app.kubernetes.io/name=bd-gateway
+    # No other Service may select the gateway's pods. A selector whose pairs are all
+    # the gateway's labels selects them; one that names any other pair does not. An
+    # empty selector selects nothing and is allowed.
+    - expression: >-
+        object.metadata.name == 'bd-gateway' ||
+        !has(object.spec.selector) ||
+        size(object.spec.selector) == 0 ||
+        !object.spec.selector.all(k,
+        (k == 'app.kubernetes.io/name' && object.spec.selector[k] == 'bd-gateway') ||
+        (k == 'app.kubernetes.io/managed-by' && object.spec.selector[k] == 'gt'))
+      message: >-
+        only the Service bd-gateway in gt may select the bd gateway's pods; this
+        Service's selector selects only labels those pods carry
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gt-bd-gateway-service
+spec:
+  policyName: gt-bd-gateway-service
+  validationActions: [Deny]
+  matchResources:
+    # The namespace the daemon's Role lives in, named by the label every namespace
+    # carries (kubernetes.io/metadata.name).
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: gt
+---
+# The ValidatingAdmissionPolicy that bounds what a Job the daemon starts may be
+# (gt-j571bu). deploy/k8s/update-rbac.yaml grants the daemon ServiceAccount create,
+# get, list, watch and delete on Jobs in gt; a Job's pod spec is chosen by whoever
+# creates it, so that grant alone reaches any Secret in gt and the gt-update
+# ServiceAccount's own Role.
+#
+# It bounds exactly these fields, and no others: the Job's name starts gt-update-;
+# the pod runs as the gt-update ServiceAccount and carries its token; the host
+# network, PID and IPC namespaces are off; nodeName, nodeSelector, tolerations,
+# runtimeClassName, hostAliases, dnsConfig, shareProcessNamespace and hostUsers
+# are unset; the pod securityContext sets no run-as identity,
+# group, sysctl or security profile; the priority class is gt-control-plane and the
+# restart policy Never; the pod has exactly one update container and one images init
+# container, with the image, command, arguments, environment and mounts the renderer
+# sets, and no ports, envFrom, lifecycle hook, probe, privileged flag or added Linux
+# capability; and it has either the renderer's two volumes, the town-state claim and
+# the viewer-token Secret, or those two and the daemon-class gateway token Secret,
+# each of that exact kind, every one of the render's present by name, with no
+# hostPath.
+#
+# The gateway pair BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE in the environment, the
+# one extra mount of their token directory, and the one Secret it mounts, the
+# daemon-class gateway token Secret bd-gateway-daemon, are the whole of what this
+# policy admits beyond the gateway-off Job: every other Secret, environment variable,
+# mount and volume stays refused. They are here because bd runs only in the container
+# (the operator's order of 2026-11-17), so the Job's bd answers the pre-swap handshake
+# through the gateway, and the renderer carries the pair and that Secret for it
+# (gt-15dkai). The token file is pinned to its one path, and BD_GATEWAY_URL to one of
+# two URLs: http://192.168.5.2:7440, the address the daemon resolves the gateway name
+# to before it creates the Job (gatewayURLForJob in internal/daemon), and
+# http://bd-gateway.gt.svc:7440, the gateway's Service name in gt, which the daemon
+# hands on unchanged. The policy refuses hostAliases, which could point a name at any
+# address. The Service name reaches whatever Service bd-gateway in gt is, so the
+# daemon-class token the Job mounts goes to the pods that Service selects. The Service
+# guard in deploy/k8s/bd-gateway-service-admission.yaml is what makes that name safe: it
+# holds the bd-gateway Service to ClusterIP with no external address, selecting only the
+# gateway's own pods, and refuses any other Service in gt that selects them. Any other
+# host, address, port or scheme is refused, and so are user information, a query and a
+# fragment.
+#
+# The command and the environment are bounded for the same reason as the volumes:
+# the daemon image carries kubectl and git, and the renderer sets GIT_CONFIG_VALUE_0
+# to a shell command, so a Job free to choose its own command, run a hook or probe,
+# add a container or set one more environment variable could run kubectl as
+# gt-update and exec into the daemon pod, which mounts every Secret in gt. The mounts
+# are pinned because a mount of the claim over a directory the command reads would
+# run a file from the town instead of the image.
+#
+# The policy's matchConditions name the daemon's ServiceAccount, and matchConditions
+# are how a policy skips a request rather than refusing it: the operator's own apply
+# and a hand-run Job the overseer creates are unaffected, and a request from any
+# other account never reaches these validations. matchConstraints names Job creation
+# only: the daemon's Role has no update verb on Jobs, and a Job's pod template is
+# immutable after creation, so an update could not widen what this admits anyway.
+#
+# This file is not applied by the daemon. The operator applies it with the Job's
+# manifests. The cluster must serve admissionregistration.k8s.io/v1
+# ValidatingAdmissionPolicy, which Kubernetes serves from 1.30 (v1beta1 from 1.28).
+# Before relying on the policy, the operator checks it on the cluster, impersonating
+# the daemon because the matchConditions otherwise leave the request unvalidated:
+#
+#   kubectl version
+#   kubectl api-resources --api-group=admissionregistration.k8s.io
+#   kubectl apply --dry-run=server -f deploy/k8s/update-admission.yaml
+#   kubectl apply -f deploy/k8s/update-admission.yaml
+#   kubectl -n gt create job --from=cronjob/gt-update gt-update-probe \
+#     --dry-run=client -o yaml > scratch/real.yaml
+#   kubectl -n gt create --dry-run=server \
+#     --as=system:serviceaccount:gt:daemon -f scratch/real.yaml      # must be admitted
+#
+# Run the last command again on each mutated Job (an extra Secret volume, a hostPath,
+# another ServiceAccount, a name outside gt-update-, another Secret, a hostAlias, a
+# stray environment variable, an extra mount); each must be refused, and the same
+# command on the gateway Job must be admitted. If the
+# API server refuses this file at apply, or refuses the real Job, stop and report
+# the message: failurePolicy Fail then denies every Job the daemon creates.
+#
+# TestUpdateAdmissionPolicy holds these expressions to the renderer's own output
+# (its containers, environment and constants) and the rendered Job to the same
+# bounds, without needing a CEL library.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gt-update-jobs
+spec:
+  failurePolicy: Fail
+  # A request that does not match a condition is not validated, so the operator and
+  # the overseer's hand run pass through and only the daemon's Jobs are held to the
+  # validations below.
+  matchConditions:
+    - name: daemon-service-account
+      expression: >-
+        request.userInfo.username == 'system:serviceaccount:gt:daemon'
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        resources: ["jobs"]
+        operations: ["CREATE"]
+  validations:
+    # The daemon names each Job it creates gt-update-<green short sha>
+    # (updatejob.JobNamePrefix and internal/daemon's updateJobName).
+    - expression: >-
+        object.metadata.name.startsWith('gt-update-')
+      message: >-
+        the Job's name must start gt-update-, the name the daemon gives the update
+        Job it creates
+    # The deprecated serviceAccount alias is refused unless it names the same
+    # account, so a request cannot name one account in each field.
+    - expression: >-
+        object.spec.template.spec.serviceAccountName == 'gt-update' &&
+        (!has(object.spec.template.spec.serviceAccount) ||
+        object.spec.template.spec.serviceAccount == 'gt-update')
+      message: >-
+        the Job's pod must run as the gt-update ServiceAccount, which is the account
+        the update-rbac Role grants
+    - expression: >-
+        (!has(object.spec.template.spec.hostNetwork) || !object.spec.template.spec.hostNetwork) &&
+        (!has(object.spec.template.spec.hostPID) || !object.spec.template.spec.hostPID) &&
+        (!has(object.spec.template.spec.hostIPC) || !object.spec.template.spec.hostIPC)
+      message: >-
+        the Job's pod must not join the node's network, PID or IPC namespace
+    # The one container jobSpec renders (updatejob.updateContainer): its name,
+    # image, command, arguments, environment and mounts, with no hook, probe or
+    # elevation. The image regex is what holds the image to
+    # forgejo:3000/bot-registry/gastown-daemon, since the renderer accepts any
+    # repo@sha256 reference. The environment and mounts are pinned to what
+    # containerEnv and mounts set: the gateway-off render's four variables and two
+    # mounts, or the gateway-on render's six and three, with the gateway URL pinned
+    # to the address the daemon resolves or the Service name it passes on, and the
+    # token file to its one path.
+    # envFrom is refused, so no Secret can enter through the environment.
+    - expression: >-
+        size(object.spec.template.spec.containers) == 1 &&
+        object.spec.template.spec.containers.all(c,
+        c.name == 'update' &&
+        c.image.matches('^forgejo:3000/bot-registry/gastown-daemon@sha256:[0-9a-f]{64}$') &&
+        c.command == ['gt'] &&
+        size(c.args) == 6 &&
+        c.args[0] == 'update' &&
+        c.args[1] == '--images' &&
+        c.args[2] == '/Users/sloan/gt/.runtime/update/images.yaml' &&
+        c.args[3] == '--pod-in-cluster' &&
+        c.args[4] == '--pod-namespace' &&
+        c.args[5] == 'gt' &&
+        !has(c.envFrom) &&
+        !has(c.ports) &&
+        (!has(c.securityContext) ||
+        ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0))) &&
+        !has(c.lifecycle) &&
+        !has(c.livenessProbe) &&
+        !has(c.readinessProbe) &&
+        !has(c.startupProbe) &&
+        ((has(c.env) &&
+        size(c.env) == 4 &&
+        c.env.exists(e, e.name == 'XDG_CONFIG_HOME' && has(e.value) && e.value == '/run/gt/xdg') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
+        size(c.volumeMounts) == 2 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly)) ||
+        (has(c.env) &&
+        size(c.env) == 6 &&
+        c.env.exists(e, e.name == 'XDG_CONFIG_HOME' && has(e.value) && e.value == '/run/gt/xdg') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
+        c.env.exists(e, e.name == 'BD_GATEWAY_URL' && has(e.value) && (e.value == 'http://192.168.5.2:7440' || e.value == 'http://bd-gateway.gt.svc:7440')) &&
+        c.env.exists(e, e.name == 'BD_GATEWAY_TOKEN_FILE' && has(e.value) && e.value == '/run/gt/bd-gateway/token') &&
+        size(c.volumeMounts) == 3 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly) &&
+        c.volumeMounts.exists(m, m.name == 'bd-gateway-token' &&
+        m.mountPath == '/run/gt/bd-gateway' && !has(m.subPathExpr) && !has(m.subPath) &&
+        has(m.readOnly) && m.readOnly))))
+      message: >-
+        the Job may run only the update container the renderer sets, with its image,
+        command, arguments, no hook or probe, no added capability, and either the
+        gateway-off environment and mounts or the gateway pair with its token mount
+    # The one init container jobSpec renders (updatejob.imagesContainer). Its one
+    # caller-chosen argument is the green commit, which must be a full lowercase sha.
+    - expression: >-
+        has(object.spec.template.spec.initContainers) &&
+        size(object.spec.template.spec.initContainers) == 1 &&
+        object.spec.template.spec.initContainers.all(c,
+        c.name == 'images' &&
+        c.image.matches('^forgejo:3000/bot-registry/gastown-daemon@sha256:[0-9a-f]{64}$') &&
+        c.command == ['gt'] &&
+        size(c.args) == 7 &&
+        c.args[0] == 'update' &&
+        c.args[1] == 'images' &&
+        c.args[2] == '--sha' &&
+        c.args[3].matches('^[0-9a-f]{40}$') &&
+        c.args[4] == '--out' &&
+        c.args[5] == '/Users/sloan/gt/.runtime/update/images.yaml' &&
+        c.args[6] == '--bd' &&
+        !has(c.envFrom) &&
+        !has(c.ports) &&
+        (!has(c.securityContext) ||
+        ((!has(c.securityContext.privileged) || !c.securityContext.privileged) &&
+        (!has(c.securityContext.capabilities) || !has(c.securityContext.capabilities.add) ||
+        size(c.securityContext.capabilities.add) == 0))) &&
+        !has(c.lifecycle) &&
+        !has(c.livenessProbe) &&
+        !has(c.readinessProbe) &&
+        !has(c.startupProbe) &&
+        ((has(c.env) &&
+        size(c.env) == 4 &&
+        c.env.exists(e, e.name == 'XDG_CONFIG_HOME' && has(e.value) && e.value == '/run/gt/xdg') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
+        size(c.volumeMounts) == 2 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly)) ||
+        (has(c.env) &&
+        size(c.env) == 6 &&
+        c.env.exists(e, e.name == 'XDG_CONFIG_HOME' && has(e.value) && e.value == '/run/gt/xdg') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_COUNT' && has(e.value) && e.value == '1') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_KEY_0' && has(e.value) && e.value == 'credential.http://forgejo:3000.helper') &&
+        c.env.exists(e, e.name == 'GIT_CONFIG_VALUE_0' && has(e.value) && e.value == '!gt git-credential-forgejo --host forgejo:3000 --token-file /run/gt/xdg/gt/forgejo-viewer.env') &&
+        c.env.exists(e, e.name == 'BD_GATEWAY_URL' && has(e.value) && (e.value == 'http://192.168.5.2:7440' || e.value == 'http://bd-gateway.gt.svc:7440')) &&
+        c.env.exists(e, e.name == 'BD_GATEWAY_TOKEN_FILE' && has(e.value) && e.value == '/run/gt/bd-gateway/token') &&
+        size(c.volumeMounts) == 3 &&
+        c.volumeMounts.exists(m, m.name == 'town-state' &&
+        m.mountPath == '/Users/sloan/gt' && !has(m.subPathExpr) && !has(m.subPath) &&
+        (!has(m.readOnly) || !m.readOnly)) &&
+        c.volumeMounts.exists(m, m.name == 'viewer-token' &&
+        m.mountPath == '/run/gt/xdg/gt/forgejo-viewer.env' &&
+        !has(m.subPathExpr) && m.subPath == 'forgejo-viewer.env' &&
+        has(m.readOnly) && m.readOnly) &&
+        c.volumeMounts.exists(m, m.name == 'bd-gateway-token' &&
+        m.mountPath == '/run/gt/bd-gateway' && !has(m.subPathExpr) && !has(m.subPath) &&
+        has(m.readOnly) && m.readOnly))))
+      message: >-
+        the Job may run only the images init container the renderer sets, with its
+        image, command, arguments (the green commit a full lowercase sha), no hook or
+        probe, no added capability, and either the gateway-off environment and mounts
+        or the gateway pair with its token mount
+    # The volumes the renderer names, in the two shapes it renders: the town-state
+    # claim and the viewer-token Secret, and with the gateway set those two plus the
+    # daemon-class gateway token Secret, whose name pins which Secret is mounted. Each
+    # branch's size plus one clause per volume leaves no room for another volume, for
+    # a hostPath, or for another volume source, and an exists per name refuses a
+    # branch that reached the count with one of the render's volumes missing and a
+    # second of another kind in its place.
+    - expression: >-
+        has(object.spec.template.spec.volumes) &&
+        ((size(object.spec.template.spec.volumes) == 2 &&
+        object.spec.template.spec.volumes.all(v,
+        (v.name == 'town-state' && has(v.persistentVolumeClaim) &&
+        v.persistentVolumeClaim.claimName == 'town-state' && !has(v.hostPath)) ||
+        (v.name == 'viewer-token' && has(v.secret) &&
+        v.secret.secretName == 'daemon-forgejo-viewer.env' && !has(v.hostPath))) &&
+        object.spec.template.spec.volumes.exists(v, v.name == 'town-state' &&
+        has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == 'town-state' &&
+        !has(v.hostPath)) &&
+        object.spec.template.spec.volumes.exists(v, v.name == 'viewer-token' &&
+        has(v.secret) && v.secret.secretName == 'daemon-forgejo-viewer.env' && !has(v.hostPath))) ||
+        (size(object.spec.template.spec.volumes) == 3 &&
+        object.spec.template.spec.volumes.all(v,
+        (v.name == 'town-state' && has(v.persistentVolumeClaim) &&
+        v.persistentVolumeClaim.claimName == 'town-state' && !has(v.hostPath)) ||
+        (v.name == 'viewer-token' && has(v.secret) &&
+        v.secret.secretName == 'daemon-forgejo-viewer.env' && !has(v.hostPath)) ||
+        (v.name == 'bd-gateway-token' && has(v.secret) &&
+        v.secret.secretName == 'bd-gateway-daemon' && !has(v.hostPath))) &&
+        object.spec.template.spec.volumes.exists(v, v.name == 'town-state' &&
+        has(v.persistentVolumeClaim) && v.persistentVolumeClaim.claimName == 'town-state' &&
+        !has(v.hostPath)) &&
+        object.spec.template.spec.volumes.exists(v, v.name == 'viewer-token' &&
+        has(v.secret) && v.secret.secretName == 'daemon-forgejo-viewer.env' && !has(v.hostPath)) &&
+        object.spec.template.spec.volumes.exists(v, v.name == 'bd-gateway-token' &&
+        has(v.secret) && v.secret.secretName == 'bd-gateway-daemon' && !has(v.hostPath))))
+      message: >-
+        the Job may mount only the town-state claim and the viewer-token Secret, or
+        with the gateway set those and the daemon-class gateway token Secret, and no
+        hostPath
+    # The pod fields the renderer leaves unset or sets to one value. nodeName,
+    # nodeSelector, tolerations and runtimeClassName would place the pod on a chosen
+    # node or runtime; hostAliases and dnsConfig would redirect the names the pod
+    # resolves (the Forgejo and daemon hosts among them); shareProcessNamespace and
+    # hostUsers would change what the pod's processes can see and which user they
+    # map to; the pod securityContext would change the user, groups, sysctls
+    # or security profile the pinned command runs under; and the daemon image runs as
+    # its own user, so the renderer sets no run-as identity. The API server may
+    # default the pod securityContext to an empty object, so this checks its fields,
+    # not its presence.
+    - expression: >-
+        !has(object.spec.template.spec.nodeName) &&
+        !has(object.spec.template.spec.nodeSelector) &&
+        !has(object.spec.template.spec.tolerations) &&
+        !has(object.spec.template.spec.runtimeClassName) &&
+        !has(object.spec.template.spec.hostAliases) &&
+        !has(object.spec.template.spec.dnsConfig) &&
+        !has(object.spec.template.spec.shareProcessNamespace) &&
+        !has(object.spec.template.spec.hostUsers) &&
+        (!has(object.spec.template.spec.securityContext) ||
+        (!has(object.spec.template.spec.securityContext.runAsNonRoot) &&
+        !has(object.spec.template.spec.securityContext.runAsUser) &&
+        !has(object.spec.template.spec.securityContext.runAsGroup) &&
+        !has(object.spec.template.spec.securityContext.fsGroup) &&
+        !has(object.spec.template.spec.securityContext.supplementalGroups) &&
+        !has(object.spec.template.spec.securityContext.sysctls) &&
+        !has(object.spec.template.spec.securityContext.seccompProfile) &&
+        !has(object.spec.template.spec.securityContext.selinuxOptions))) &&
+        has(object.spec.template.spec.automountServiceAccountToken) &&
+        object.spec.template.spec.automountServiceAccountToken == true &&
+        object.spec.template.spec.priorityClassName == 'gt-control-plane' &&
+        object.spec.template.spec.restartPolicy == 'Never'
+      message: >-
+        the Job's pod may set only the ServiceAccount token, priority class and
+        restart policy the renderer sets, with no node placement, runtime class,
+        host alias, DNS config, shared process namespace, user namespace setting,
+        run-as identity, group, sysctl or security profile
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gt-update-jobs
+spec:
+  policyName: gt-update-jobs
+  validationActions: [Deny]
+  matchResources:
+    # The namespace the daemon's Role lives in, named by the label every namespace
+    # carries (kubernetes.io/metadata.name).
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: gt
+---
+# The cluster access the tier sweep runs with (gt-gg9hv.55): the gt-sweeps
+# namespace, the sweep-runner service account the Kubernetes backend's Job runs
+# as, its namespaced Role and binding, the token Secret, the gt-sweep-reader
+# ClusterRole the capacity, priority and control-disk guards read through, and
+# the gt-ci-cache-trim Role and binding in the forgejo namespace the CI cache
+# trim execs through. Two of the grants reach wider than the one call that needs
+# each, because a rule cannot name the path or the container that would bound
+# them; each rule says how far.
+#
+# This file is not applied by the daemon. The operator's apply step is in
+# docs/reference.md, Tier sweep runner. TestSweepRBACManifestParses,
+# TestSweepRBACCoversEveryRead and TestSweepRBACClusterGrantIsReadOnly hold it to
+# the reads in internal/sweeprunner/testdata/rbac-reads.golden.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt-sweeps
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-sweep-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  # get on nodes/proxy is path-unbounded: RBAC cannot name a proxy path, so this
+  # rule reaches every kubelet endpoint a GET reaches on every node, the stats
+  # summary, logs and the rest (gt-11e5gm). It also reaches exec: the kubelet
+  # authorizes a websocket connection to its exec endpoint on the initial GET, so
+  # this grant can exec in pods on a reachable node through the kubelet websocket
+  # (H3-2026-0002). Kubernetes calls that working as intended. The control-disk
+  # read needs stats only. nodes/stats replaces nodes/proxy once the control
+  # cluster is on Kubernetes 1.36 or later. It runs v1.35.0 (k3s), so this rule
+  # stays until then.
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-sweep-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-sweep-reader
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps
+---
+# Eviction and preemption order for the town cluster (decided 2026-10-24):
+# under pressure Kubernetes sheds a tier sweep first, then a landing gate,
+# then the sandboxes, and never the control plane (Dolt, Forgejo, the
+# gateway). Values sit far below the system-critical classes (2,000,000,000).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: gt-control-plane}
+value: 1000000
+globalDefault: false
+description: "Control-plane workloads (gateway, Dolt, Forgejo, hm): never preempted by sandboxes or CI."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+# OpenShell admits an external PriorityClass named by a sandbox create only when
+# it carries its approval label (resourceAdmission).
+metadata: {name: gt-sandbox, labels: {openshell.ai/sandbox-attachable: "true"}}
+value: 1000
+globalDefault: false
+description: "Sandbox polecats: preempted by the control plane, preempt CI."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: gt-ci-gate}
+value: 200
+globalDefault: false
+description: "Landing gates: preempt a tier sweep, and are themselves preempted by the control plane and by the sandboxes."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: gt-ci}
+value: 100
+globalDefault: false
+description: "CI runners and their jobs: the first workload shed under pressure."
+---
+# The cluster access the pod-update Job runs as (gt-360i18): the gt-update
+# ServiceAccount in the gt namespace, its namespaced Role and the RoleBinding that
+# grants it. A daemon that runs as a pod is moved by four kinds of kubectl call: a
+# read of whether the dashboard's and the bd gateway's Deployments exist and of the
+# gateway image the cluster runs, a strategic patch of the gateway's, the daemon's
+# and the dashboard's Deployment, the rollout waits on all three, and an exec into
+# the daemon's pod to read the build. The Deployment rule names the three Deployments
+# it moves, bd-gateway, daemon and dashboard, so its get, list, watch and patch reach
+# no other Deployment in gt. kubectl rollout status sends a metadata.name field
+# selector on its list and watch, which the API server authorizes by the name, so
+# the rollout waits are bound too. The pods rules reach every pod in gt, because the
+# exec resolves its pod from the Deployment's selector, so the pod's name is not known
+# when the grant is written.
+#
+# The gt-update-launch Role lets the daemon's ServiceAccount create, get, list, watch
+# and delete Jobs in gt, so the daemon can start the roll as a Job that outlives the
+# pod it replaces. WHAT THIS REACHES: through a Job the daemon can (1) run a pod as
+# the gt-update ServiceAccount and use its grants above (patch and get on the
+# Deployments daemon, dashboard and bd-gateway, get and list pods, create pods/exec in
+# gt); (2) mount any Secret in gt, because the kubelet mounts what the pod's own spec
+# names, which includes gt-cloud-check-gcp, the cloud check's key, which the daemon
+# pod mounts only when the operator's key file is set; (3) run any image the nodes
+# can pull. WHY ACCEPTED: the daemon is the town's own control process, it already
+# mounts most of the Secrets in gt, and the roll must outlive the pod it replaces, so
+# it needs a creator other than that pod. WHAT BOUNDS IT: namespace gt only, the verbs
+# on jobs only, and the ValidatingAdmissionPolicy in deploy/k8s/update-admission.yaml,
+# which admits from the daemon's ServiceAccount only the Job deploy/k8s/update-job
+# renders. That file's header holds the bounds; the operator applies it with these
+# manifests.
+#
+# This file is not applied by the daemon. The operator's apply step applies it with
+# the Job's manifests. TestPodUpdateRBACManifestParses, TestPodUpdateRBACCoversEveryRead
+# and TestPodUpdateRBACGrantsNothingElse hold the gt-update Role to the reads in
+# internal/update/testdata/pod-update-reads.golden, TestPodUpdateRBACGatewayReadsAreInCoveredSet
+# and TestPodUpdateRBACGatewayRefusals hold its Deployment rule to the gateway step's
+# reads, and TestPodUpdateLaunchRBAC holds the launch Role to its grants.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gt-update
+  namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-update
+  namespace: gt
+rules:
+  # The strategic patches, the rollout waits, the dashboard's and the bd gateway's
+  # existence reads, the running pair's gateway image read and the exec's Deployment
+  # read, each bound to the three Deployments the roll moves.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["daemon", "dashboard", "bd-gateway"]
+    verbs: ["get", "list", "watch", "patch"]
+  # The exec's pod read, and the list of the pods its Deployment's selector matches.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # The exec itself.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-update
+  namespace: gt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-update
+subjects:
+  - kind: ServiceAccount
+    name: gt-update
+    namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-update-launch
+  namespace: gt
+rules:
+  # The daemon creates the update's Job from the CronJob's template, and reads,
+  # watches and deletes the Jobs it made.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-update-launch
+  namespace: gt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-update-launch
+subjects:
+  - kind: ServiceAccount
+    name: daemon
+    namespace: gt
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sweep-runner
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps
+---
+# The token Secret is declared here for its annotations only: the control
+# cluster fills in the token, and the file carries no data.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sweep-runner-token
+  namespace: gt-sweeps
+  annotations:
+    kubernetes.io/service-account.name: sweep-runner
+    kubernetes.io/service-account.uid: ad62749c-5263-484e-a42c-3602cf0dfb6e
+type: kubernetes.io/service-account-token
+---
+# The CI cache trim (gt-gg9hv.57) runs as the sweep-runner service account and
+# execs into the forgejo-runner's dind container in the forgejo namespace. Its
+# grant lives in that namespace, not in gt-sweeps. pods/exec create is not
+# bounded to that container: RBAC can name only a fixed pod and has no field for
+# a container, while the forgejo-runner Deployment names each pod when its
+# ReplicaSet creates it, so the rule reaches every pod in forgejo, Forgejo itself
+# included (gt-11e5gm). The trim selects the runner pod by label and execs into
+# its dind container (internal/daemon/ci_cache_trim.go); RBAC does not enforce
+# that selection.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-ci-cache-trim
+  namespace: forgejo
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-ci-cache-trim
+  namespace: forgejo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-ci-cache-trim
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps
+---
+# The grant the Mac's gt-mac-watch publishes probes.json through (gt-a2uug4.22):
+# get and list on pods in gt, create on pods/exec, for one ServiceAccount,
+# Role and RoleBinding. A rule cannot name the daemon pod because its Deployment
+# generates the name; before changing a grant, read docs/design/pod-host-probes.md.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mac-watch
+  namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mac-watch
+  namespace: gt
+rules:
+  # The exec's read of the daemon pod and the list of the pods its Deployment's
+  # selector matches.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # The exec itself, which writes probes.json through the daemon container.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mac-watch
+  namespace: gt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mac-watch
+subjects:
+  - kind: ServiceAccount
+    name: mac-watch
+    namespace: gt
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: town-state
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/size-enforced: "false"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: landing-work
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/size-enforced: "false"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dolt-backup
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/size-enforced: "false"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forgejo
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+spec:
+  type: ExternalName
+  externalName: forgejo.forgejo.svc.cluster.local
+  ports:
+    - name: http
+      port: 3000
+      protocol: TCP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-forgejo-landing.env
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: forgejo-landing.env
+type: Opaque
+stringData:
+  forgejo-landing.env: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-forgejo-viewer.env
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: forgejo-viewer.env
+type: Opaque
+stringData:
+  forgejo-viewer.env: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-promote-gastown.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: promote-gastown.key
+type: Opaque
+stringData:
+  promote-gastown.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-promote-om.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: promote-om.key
+type: Opaque
+stringData:
+  promote-om.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-promote-hm.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: promote-hm.key
+type: Opaque
+stringData:
+  promote-hm.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-promote-beads.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: promote-beads.key
+type: Opaque
+stringData:
+  promote-beads.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-promote-mango.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: promote-mango.key
+type: Opaque
+stringData:
+  promote-mango.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-promote-fractals.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: promote-fractals.key
+type: Opaque
+stringData:
+  promote-fractals.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-om-daemon-token
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: om-daemon-token
+type: Opaque
+stringData:
+  om-daemon-token: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-om-daemon-token.meta
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: om-daemon-token.meta
+type: Opaque
+stringData:
+  om-daemon-token.meta: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-jev.env
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: jev.env
+type: Opaque
+stringData:
+  jev.env: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-ledger-reader.dsn
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: ledger-reader.dsn
+type: Opaque
+stringData:
+  ledger-reader.dsn: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-dolt-archive.key
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: dolt-archive.key
+type: Opaque
+stringData:
+  dolt-archive.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gt-cloud-check-gcp
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: gt-cloud-check-gcp
+type: Opaque
+stringData:
+  key.json: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: daemon-openshell
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/source-file: openshell
+type: Opaque
+stringData:
+  active_gateway: ""
+  gateway.toml: ""
+  gateways__k8s__last_sandbox: ""
+  gateways__k8s__metadata.json: ""
+  gateways__k8s__mtls__ca.crt: ""
+  gateways__k8s__mtls__tls.crt: ""
+  gateways__k8s__mtls__tls.key: ""
+  gateways__openshell__metadata.json: ""
+  gateways__openshell__mtls__ca.crt: ""
+  gateways__openshell__mtls__tls.crt: ""
+  gateways__openshell__mtls__tls.key: ""
+---
+# no /Users/sloan/.claude/.beads mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daemon
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/town-owner: pod
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+    spec:
+      serviceAccountName: daemon
+      hostAliases:
+        - ip: 192.168.5.2
+          hostnames:
+            - host.docker.internal
+      terminationGracePeriodSeconds: 185
+      initContainers:
+        - name: registry-proxy
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1
+            - TCP:192.168.5.2:5001
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+          restartPolicy: Always
+        - name: gateway-proxy
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:28443,fork,reuseaddr,bind=127.0.0.1
+            - TCP:192.168.5.2:28443
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+          restartPolicy: Always
+      containers:
+        - name: daemon
+          image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          args:
+            - --om-token-file
+            - /run/secrets/om-token
+            - --forge-host
+            - forgejo:3000
+            - --forge-token-file
+            - /run/secrets/forge-token
+          workingDir: /Users/sloan/gt
+          env:
+            - name: GT_TOWN_ROOT
+              value: /Users/sloan/gt
+            - name: XDG_CONFIG_HOME
+              value: /run/gt/xdg
+            - name: GT_DAEMON_CONTAINER_NAME
+              value: daemon
+            - name: GT_DAEMON_SUPERVISOR
+              value: container
+            - name: TZ
+              value: America/Chicago
+            - name: FORGEJO_API_URL
+              value: http://forgejo:3000/api/v1
+            - name: AWS_REGION
+              value: us-east-1
+            - name: GT_DOLT_BACKUP_ROOT
+              value: /Users/sloan/gt-backups/dolt
+            - name: STORYPOINTS_EMBED_URL
+              value: http://host.docker.internal:11434
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: town-state
+              mountPath: /Users/sloan/gt
+            - name: landing-work
+              mountPath: /Users/sloan/gt-landing.noindex
+            - name: dolt-backup
+              mountPath: /Users/sloan/gt-backups/dolt
+            - name: gotmp
+              mountPath: /Users/Shared/gt-gotmp.noindex
+            - name: daemon-forgejo-landing-env
+              mountPath: /run/gt/xdg/gt/forgejo-landing.env
+              subPath: forgejo-landing.env
+              readOnly: true
+            - name: daemon-forgejo-viewer-env
+              mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+              subPath: forgejo-viewer.env
+              readOnly: true
+            - name: daemon-promote-gastown-key
+              mountPath: /run/gt/xdg/gt/promote-gastown.key
+              subPath: promote-gastown.key
+              readOnly: true
+            - name: daemon-promote-om-key
+              mountPath: /run/gt/xdg/gt/promote-om.key
+              subPath: promote-om.key
+              readOnly: true
+            - name: daemon-promote-hm-key
+              mountPath: /run/gt/xdg/gt/promote-hm.key
+              subPath: promote-hm.key
+              readOnly: true
+            - name: daemon-promote-beads-key
+              mountPath: /run/gt/xdg/gt/promote-beads.key
+              subPath: promote-beads.key
+              readOnly: true
+            - name: daemon-promote-mango-key
+              mountPath: /run/gt/xdg/gt/promote-mango.key
+              subPath: promote-mango.key
+              readOnly: true
+            - name: daemon-promote-fractals-key
+              mountPath: /run/gt/xdg/gt/promote-fractals.key
+              subPath: promote-fractals.key
+              readOnly: true
+            - name: daemon-om-daemon-token
+              mountPath: /run/gt/xdg/gt/om-daemon-token
+              subPath: om-daemon-token
+              readOnly: true
+            - name: daemon-om-daemon-token-meta
+              mountPath: /run/gt/xdg/gt/om-daemon-token.meta
+              subPath: om-daemon-token.meta
+              readOnly: true
+            - name: daemon-jev-env
+              mountPath: /run/gt/xdg/gt/jev.env
+              subPath: jev.env
+              readOnly: true
+            - name: daemon-ledger-reader-dsn
+              mountPath: /run/gt/xdg/gt/ledger-reader.dsn
+              subPath: ledger-reader.dsn
+              readOnly: true
+            - name: daemon-dolt-archive-key
+              mountPath: /run/gt/xdg/gt/dolt-archive.key
+              subPath: dolt-archive.key
+              readOnly: true
+            - name: daemon-om-daemon-token
+              mountPath: /run/secrets/om-token
+              subPath: om-daemon-token
+              readOnly: true
+            - name: daemon-forgejo-landing-env
+              mountPath: /run/secrets/forge-token
+              subPath: forgejo-landing.env
+              readOnly: true
+            - name: daemon-openshell
+              mountPath: /run/gt/xdg/openshell
+              readOnly: true
+            - name: gt-cloud-check-gcp
+              mountPath: /var/run/secrets/gt-cloud-check/key.json
+              subPath: key.json
+              readOnly: true
+            - name: town-state
+              mountPath: /run/gt/xdg/om/config.json
+              subPath: .runtime/container/om-config.json
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - gt
+                - status
+                - --line
+                - --ready
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - gt
+                - daemon
+                - status
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 5
+      volumes:
+        - name: town-state
+          persistentVolumeClaim:
+            claimName: town-state
+        - name: landing-work
+          persistentVolumeClaim:
+            claimName: landing-work
+        - name: dolt-backup
+          persistentVolumeClaim:
+            claimName: dolt-backup
+        - name: gotmp
+          emptyDir: {}
+        - name: daemon-forgejo-landing-env
+          secret:
+            secretName: daemon-forgejo-landing.env
+            defaultMode: 384
+        - name: daemon-forgejo-viewer-env
+          secret:
+            secretName: daemon-forgejo-viewer.env
+            defaultMode: 384
+        - name: daemon-promote-gastown-key
+          secret:
+            secretName: daemon-promote-gastown.key
+            defaultMode: 384
+        - name: daemon-promote-om-key
+          secret:
+            secretName: daemon-promote-om.key
+            defaultMode: 384
+        - name: daemon-promote-hm-key
+          secret:
+            secretName: daemon-promote-hm.key
+            defaultMode: 384
+        - name: daemon-promote-beads-key
+          secret:
+            secretName: daemon-promote-beads.key
+            defaultMode: 384
+        - name: daemon-promote-mango-key
+          secret:
+            secretName: daemon-promote-mango.key
+            defaultMode: 384
+        - name: daemon-promote-fractals-key
+          secret:
+            secretName: daemon-promote-fractals.key
+            defaultMode: 384
+        - name: daemon-om-daemon-token
+          secret:
+            secretName: daemon-om-daemon-token
+            defaultMode: 384
+        - name: daemon-om-daemon-token-meta
+          secret:
+            secretName: daemon-om-daemon-token.meta
+            defaultMode: 384
+        - name: daemon-jev-env
+          secret:
+            secretName: daemon-jev.env
+            defaultMode: 384
+        - name: daemon-ledger-reader-dsn
+          secret:
+            secretName: daemon-ledger-reader.dsn
+            defaultMode: 384
+        - name: daemon-dolt-archive-key
+          secret:
+            secretName: daemon-dolt-archive.key
+            defaultMode: 384
+        - name: daemon-openshell
+          secret:
+            secretName: daemon-openshell
+            defaultMode: 256
+            items:
+              - key: gateway.toml
+                path: gateway.toml
+              - key: active_gateway
+                path: active_gateway
+              - key: gateways__k8s__metadata.json
+                path: gateways/k8s/metadata.json
+              - key: gateways__k8s__last_sandbox
+                path: gateways/k8s/last_sandbox
+              - key: gateways__k8s__mtls__ca.crt
+                path: gateways/k8s/mtls/ca.crt
+              - key: gateways__k8s__mtls__tls.crt
+                path: gateways/k8s/mtls/tls.crt
+              - key: gateways__k8s__mtls__tls.key
+                path: gateways/k8s/mtls/tls.key
+              - key: gateways__openshell__metadata.json
+                path: gateways/openshell/metadata.json
+              - key: gateways__openshell__mtls__ca.crt
+                path: gateways/openshell/mtls/ca.crt
+              - key: gateways__openshell__mtls__tls.crt
+                path: gateways/openshell/mtls/tls.crt
+              - key: gateways__openshell__mtls__tls.key
+                path: gateways/openshell/mtls/tls.key
+        - name: gt-cloud-check-gcp
+          secret:
+            secretName: gt-cloud-check-gcp
+            defaultMode: 256
+            items:
+              - key: key.json
+                path: key.json
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daemon-sweep-runner
+  namespace: gt-sweeps
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sweep-runner
+subjects:
+  - kind: ServiceAccount
+    name: daemon
+    namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: daemon-gt-ci-cache-trim
+  namespace: forgejo
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-ci-cache-trim
+subjects:
+  - kind: ServiceAccount
+    name: daemon
+    namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: daemon-gt-sweep-reader
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-sweep-reader
+subjects:
+  - kind: ServiceAccount
+    name: daemon
+    namespace: gt
