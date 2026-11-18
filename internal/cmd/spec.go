@@ -1957,6 +1957,15 @@ type specRoster struct {
 // in tests.
 type specDispatchEnv struct {
 	Hold func() string
+	// HoldFileOnly says the operator hold file is the only hold in force, so a
+	// held tick runs its estimate-ahead pass and nothing else (gt-r6lb5v). Nil,
+	// or a false answer, stops the held tick at the hold: ESTOP, the boot hold
+	// and the Ring stop the pass too.
+	HoldFileOnly func() bool
+	// HoldCandidates is the board read a held tick takes: the candidates
+	// Candidates reads, with no timed-out retry, no annotation and no verdict
+	// memo, so the read writes nothing. Nil reads Candidates.
+	HoldCandidates func() specBoardRead
 	// PendingInstall is the pending-install marker in force now, nil when no
 	// install is pending: a gt install is in flight and no new sling starts
 	// (installpending, gt-2rp64). It is read at the tick's clock, so a test's
@@ -2324,6 +2333,12 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// leaves the last real tick's reasons in place.
 	if hold := env.Hold(); hold != "" {
 		report.Hold = hold
+		// The operator hold file alone lets the estimate-ahead pass run: it
+		// writes only the estimate's own labels and note, and slings nothing
+		// (gt-r6lb5v). Any other hold stops the tick here, pass included.
+		if env.HoldFileOnly != nil && env.HoldFileOnly() {
+			report.Notices = append(report.Notices, specEstimateAheadUnderHold(env, hold)...)
+		}
 		return report
 	}
 	// A gt install in flight stops every new sling, this tick's slings
@@ -3853,6 +3868,26 @@ func specWireStoryPoints(env *specDispatchEnv, sd *config.SpecDispatchConfig, to
 	return nil
 }
 
+// specOperatorHoldName is the name dispatch.HoldView gives the operator hold
+// file among the town's hold sources.
+const specOperatorHoldName = "operator hold file"
+
+// specOperatorHoldOnly reports whether the operator hold file is the only hold
+// on the town: the file is present, and no other source holds (town ESTOP, the
+// boot hold, the Ring, or a missing town root). An unreadable hold file is not
+// present, so it stops the tick like every other hold (gt-r6lb5v).
+func specOperatorHoldOnly(townRoot string) bool {
+	if _, err := os.Stat(dispatch.HoldFilePath(townRoot)); err != nil {
+		return false
+	}
+	for _, s := range dispatch.HoldView(townRoot).Sources {
+		if s.Name != specOperatorHoldName && s.Reason != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // runSpecDispatchAtWith is runSpecDispatchAt with the daemon that started the
 // tick and the dry-run flag given, so a test drives the census wiring without
 // the process environment (gt-139dp).
@@ -3938,6 +3973,18 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, sd.StoryPointsLintOver(), targetOf, townRigs))
 	// The tick's children read, grouped per rig once the board is known.
 	var children func(beadID string) ([]specdispatch.Child, error)
+	// board is the candidate read both the tick and a held tick take: the ready
+	// rows and their details. retry is the timed-out sling retry, nil on a read
+	// that must write nothing; memo is the verdict memo, nil on the same read.
+	board := func(retry *specTimeoutRetry, memo *specCandidateVerdicts) specBoardRead {
+		read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
+			reads.call()
+			return specReadyBoard(rigPath)
+		}, docked.parkedOrDocked, retry)
+		return specBoardDetails(reads, func(rig string) beads.Client {
+			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
+		}, read, memo)
+	}
 	env := specDispatchEnv{
 		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
 		PendingInstall: func(now time.Time) (*installpending.Marker, error) { return pendingInstall.Pending(now) },
@@ -3958,18 +4005,16 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 					respawnGate: specRespawnGateIn(townRoot),
 				}
 			}
-			read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
-				reads.call()
-				return specReadyBoard(rigPath)
-			}, docked.parkedOrDocked, retry)
-			read = specBoardDetails(reads, func(rig string) beads.Client {
-				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
-			}, read, verdicts)
+			read := board(retry, verdicts)
 			annotations.observe(read)
 			children = specCandidateChildren(townRoot, reads, read.Candidates, verdicts, nil)
 			return read
 		},
-		Verdicts: verdicts,
+		// A held tick reads the same board with no retry to clear, no memo to
+		// fill and no annotation to observe, so the read writes nothing.
+		HoldCandidates: func() specBoardRead { return board(nil, nil) },
+		HoldFileOnly:   func() bool { return specOperatorHoldOnly(townRoot) },
+		Verdicts:       verdicts,
 		Show: func(id string) (specdispatch.Spec, error) {
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 		},
