@@ -127,14 +127,12 @@ func BuildWorkspaceDocument(townRoot string) (WorkspaceDocument, error) {
 }
 
 // formulaOpener opens one formula file for reading. It is a parameter rather
-// than a package variable so the refusal is driven through the build without a
-// file-mode trick: a process running as root, as the container gate does, reads
-// a mode-0 file. Production passes os.Open.
+// than a package variable so a caller can make a formula's read fail without a
+// file-mode trick, which proves nothing as root (gt-0713x5).
 type formulaOpener func(path string) (*os.File, error)
 
-// buildWorkspaceDocument is BuildWorkspaceDocument with the opener the formula
-// reads use, so a caller can make a formula's read fail without depending on
-// the file mode.
+// buildWorkspaceDocument is BuildWorkspaceDocument with the formula opener
+// given.
 func buildWorkspaceDocument(townRoot string, openFormula formulaOpener) (WorkspaceDocument, error) {
 	if townRoot == "" || !filepath.IsAbs(townRoot) {
 		return WorkspaceDocument{}, fmt.Errorf("bdgateway: the town root %q must be an absolute path", townRoot)
@@ -405,8 +403,7 @@ func addBeadsFiles(files map[string]string, townRoot, beadsDir, prefix string) e
 // subdirectory or a device is refused rather than followed or descended, and a
 // file over the per-file cap is refused as the fixed files are. A town with no
 // formulas directory yields none; a formulas directory that is a link out of the
-// town, or names nothing, is refused rather than read as absent. Each formula's
-// read opens through openFormula, which production sets to os.Open.
+// town, or names nothing, is refused rather than read as absent.
 func readTownFormulas(townRoot, beadsDir string, openFormula formulaOpener) (map[string]string, error) {
 	dir := filepath.Join(beadsDir, formulaDirName)
 	// Resolve before reading: a formulas directory that is a link out of the

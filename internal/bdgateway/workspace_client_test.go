@@ -1053,10 +1053,9 @@ func TestBuildWorkspaceDocumentCarriesTheTownFormulasUnderEveryRig(t *testing.T)
 
 // TestBuildWorkspaceDocumentRefusesAnUnreadableFormula: a formula the builder
 // cannot read refuses the push rather than pushing a workspace without it, which
-// would fail only when a sling cooks that formula. The opener makes the read
-// fail: a mode-0 file does not fail a process running as root, as the container
-// gate does, so the refusal has to be driven through the build rather than
-// through the file's permissions (gt-0713x5).
+// would fail only when a sling cooks that formula. The opener fails the read
+// because a mode-0 file does not fail a root process, as the container gate is
+// (gt-0713x5).
 func TestBuildWorkspaceDocumentRefusesAnUnreadableFormula(t *testing.T) {
 	t.Parallel()
 	root := clientTown(t)
