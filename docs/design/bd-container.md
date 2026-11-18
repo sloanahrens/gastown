@@ -299,9 +299,13 @@ Two ways to give the container those files:
   same thing. It fails the moment the Mac stops being a town (gt-qq5kv4), puts a
   read-write mount of the whole town in a network-facing container, and the Mac
   copy and the pod's claim are already two copies that can drift.
-- B. The gateway owns a small workspace tree in its own volume, `/ws/<rig>/.beads/
-  {metadata.json, config.yaml, redirect, dolt-server.port}` and `/ws/.beads/
-  routes.jsonl`, and gt pushes it. **Recommended.**
+- B. The gateway owns a small workspace tree, `/var/lib/bdgw/ws/<rig>/.beads/
+  {metadata.json, config.yaml, redirect, dolt-server.port}` and
+  `/var/lib/bdgw/ws/.beads/routes.jsonl`, and gt pushes it. The image links
+  `/ws` to `/var/lib/bdgw/ws`, so the `/ws/<rel>` paths gt writes into redirects
+  resolve. The root is not a mount point and sits under `/var/lib/bdgw`, which
+  the gateway user owns: the store renames its temp tree in the root's parent,
+  and a rename cannot replace a mount point or write under `/`. **Recommended.**
 
 Under B:
 
@@ -417,7 +421,7 @@ Mounts: an anonymous volume at `/var/lib/dolt`, `/Users/sloan/gt-backups/dolt`,
 | Service | Image | Limits | Ports | Mounts |
 |---|---|---|---|---|
 | `dolt` (container name `gt-dolt`, kept so the ExternalContainer setting and the slot reaper's `org.gastown.keep` label still match) | the same digest-pinned dolt image | 8 GiB, swap equal, as now (the cap is never raised) | `127.0.0.1:3307:3306` | the same three bind mounts; `/var/lib/dolt` becomes a named volume (see Migration) |
-| `bd` (container name `gt-bd`) | the `gt-bd` image by digest | 1 CPU, 1 GiB at the start (decision 7); revisit from `/v1/stats` | `127.0.0.1:7440:7440` | the token directory (ro), the log volume, the workspace volume, no town mount |
+| `bd` (container name `gt-bd`) | the `gt-bd` image by digest | 1 CPU, 1 GiB at the start (decision 7); revisit from `/v1/stats` | `127.0.0.1:7440:7440` | the token directory (ro), the log volume, no town mount; the workspace is under `/var/lib/bdgw` on the container, not a mount |
 
 - Start order: `bd` `depends_on` `dolt` with `condition: service_healthy`. The
   Dolt health check is `dolt --host 127.0.0.1 --port 3306 -u root sql -q 'select
