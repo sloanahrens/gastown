@@ -647,6 +647,34 @@ func PushWorkspace(ctx context.Context, townRoot string) (string, error) {
 	return installed.push(ctx, townRoot)
 }
 
+// WorkspaceAnswer is what one gateway answer says about the workspace the gateway
+// serves now. The daemon's drift check compares it with the push that last stored.
+type WorkspaceAnswer struct {
+	// Hash is the X-Bd-Workspace header: the manifest hash of the live tree. It is
+	// empty when the answer carries no header, and an empty hash says nothing.
+	Hash string
+	// Absent reports a refusal that says the workspace is not present.
+	Absent bool
+	// Own reports that the answer is to the reconcile loop's own push. That push
+	// writes the tree the answer echoes, so the answer says nothing new.
+	Own bool
+}
+
+// ownPushKey marks the context of a push the reconcile loop sends itself.
+type ownPushKey struct{}
+
+// AsOwnPush marks ctx as the reconcile loop's own push, so the answer to it is
+// observed as Own.
+func AsOwnPush(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ownPushKey{}, true)
+}
+
+// IsOwnPush reports whether ctx was marked by AsOwnPush.
+func IsOwnPush(ctx context.Context) bool {
+	own, _ := ctx.Value(ownPushKey{}).(bool)
+	return own
+}
+
 // GatewayPusher is the WorkspacePusher that sends the document to a running bd
 // gateway with its bearer token.
 type GatewayPusher struct {
@@ -657,6 +685,10 @@ type GatewayPusher struct {
 	TokenFile string
 	// HTTP sends the request; nil uses an http.Client bounded by pushTimeout.
 	HTTP HTTPDoer
+	// Observe receives what each answer says about the workspace, whether the push
+	// stored or was refused, and whether the push was the reconcile loop's own (see
+	// AsOwnPush). Nil observes nothing.
+	Observe func(WorkspaceAnswer)
 }
 
 // Push builds the town's document and sends it with PUT /v1/workspace. It
@@ -698,6 +730,13 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	if err != nil {
 		return "", fmt.Errorf("bdgateway: reading the gateway's answer: %w", err)
 	}
+	if g.Observe != nil {
+		g.Observe(WorkspaceAnswer{
+			Hash:   resp.Header.Get(WorkspaceHashHeader),
+			Absent: workspaceAbsent(resp.StatusCode, data),
+			Own:    IsOwnPush(ctx),
+		})
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", g.refusal(resp.StatusCode, data)
 	}
@@ -712,6 +751,50 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 		return "", fmt.Errorf("%w: sent %s, the gateway stored %s", ErrManifestDiffers, doc.ManifestSHA, shown(result.ManifestSHA))
 	}
 	return result.ManifestSHA, nil
+}
+
+// Probe asks the gateway for its counters with GET /v1/stats, using the same URL,
+// token and client as a push, and observes the answer. Every gateway response
+// carries the live tree's hash, so a probe finds a gateway whose workspace drifted
+// (an empty one, say) without sending a document. A probe that gets no answer
+// returns an error and observes nothing.
+func (g GatewayPusher) Probe(ctx context.Context) error {
+	endpoint, err := g.endpoint(statsPath)
+	if err != nil {
+		return err
+	}
+	token, err := readTokenFile(g.TokenFile)
+	if err != nil {
+		return err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	// endpoint checked the URL and the method is fixed, so building the request
+	// cannot fail, as in Push.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.doer().Do(req)
+	if err != nil {
+		return fmt.Errorf("bdgateway: the gateway at %s did not answer the probe: %w", shown(redactedURL(g.URL)), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
+	if err != nil {
+		return fmt.Errorf("bdgateway: reading the gateway's probe answer: %w", err)
+	}
+	if g.Observe != nil {
+		g.Observe(WorkspaceAnswer{
+			Hash:   resp.Header.Get(WorkspaceHashHeader),
+			Absent: workspaceAbsent(resp.StatusCode, data),
+		})
+	}
+	if resp.StatusCode != http.StatusOK {
+		return g.refusal(resp.StatusCode, data)
+	}
+	return nil
 }
 
 // ReportedHash is the manifest hash the gateway reports it serves. It sends GET
@@ -837,6 +920,19 @@ func (g GatewayPusher) refusal(status int, data []byte) error {
 		return fmt.Errorf("%w with HTTP %d: %s: %s", ErrGatewayRefused, status, payload.Code, payload.Message)
 	}
 	return fmt.Errorf("%w with HTTP %d, so the workspace was not stored", ErrGatewayRefused, status)
+}
+
+// workspaceAbsent reports whether an answer refuses because the workspace is not
+// present. The gateway sends ErrNoWorkspace as a bad_request, the same code as its
+// other bad requests, so the answer tells it apart only by the message the
+// sentinel formats. The match uses that sentinel's text, so a rename there
+// cannot leave this check matching a stale literal.
+func workspaceAbsent(status int, data []byte) bool {
+	var payload ErrorPayload
+	return status == http.StatusBadRequest &&
+		json.Unmarshal(data, &payload) == nil &&
+		payload.Code == codeBadRequest &&
+		strings.Contains(payload.Message, ErrNoWorkspace.Error())
 }
 
 // readTokenFile reads the bearer token from path: the file's content without

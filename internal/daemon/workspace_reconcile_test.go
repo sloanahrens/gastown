@@ -27,12 +27,14 @@ const workspaceHangGuard = 10 * time.Second
 type fakeWorkspacePusher struct {
 	calls  chan int
 	n      int
+	own    []bool // whether each push carried the reconcile loop's own-push mark
 	onCall func(call int)
 	fail   func(call int) error
 }
 
-func (f *fakeWorkspacePusher) Push(_ context.Context, _ string) (string, error) {
+func (f *fakeWorkspacePusher) Push(ctx context.Context, _ string) (string, error) {
 	f.n++
+	f.own = append(f.own, bdgateway.IsOwnPush(ctx))
 	if f.onCall != nil {
 		f.onCall(f.n)
 	}
