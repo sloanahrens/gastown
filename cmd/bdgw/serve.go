@@ -105,6 +105,7 @@ func serve(ctx context.Context, sc *serveConfig) error {
 		Workspaces: workspaces,
 		Log:        log,
 		Runner:     runner,
+		Caps:       runner,
 	})
 	if err != nil {
 		return err

@@ -33,10 +33,21 @@ const (
 	testOperatorToken = "operator-token-0123456789abcdef012345"
 )
 
+// fixedCaps is a CapCounters a test reads directly: a gateway test that does not
+// exercise the cap serves this snapshot.
+type fixedCaps struct{ snap CapSnapshot }
+
+func (f fixedCaps) CapStats() CapSnapshot { return f.snap }
+
 // newTestGateway builds a Gateway from real pieces: a token directory holding
 // one token per class, the gateway policy, the given store, a call log in its
-// own directory and runner.
+// own directory and runner, and cap counters at zero.
 func newTestGateway(t *testing.T, store *WorkspaceStore, log *CallLog, runner CallRunner) *Gateway {
+	t.Helper()
+	return newTestGatewayWithCaps(t, store, log, runner, fixedCaps{})
+}
+
+func newTestGatewayWithCaps(t *testing.T, store *WorkspaceStore, log *CallLog, runner CallRunner, caps CapCounters) *Gateway {
 	t.Helper()
 	g, err := NewGateway(GatewayOptions{
 		Auth:       testAuthenticator(t),
@@ -44,6 +55,7 @@ func newTestGateway(t *testing.T, store *WorkspaceStore, log *CallLog, runner Ca
 		Workspaces: store,
 		Log:        log,
 		Runner:     runner,
+		Caps:       caps,
 	})
 	if err != nil {
 		t.Fatalf("NewGateway: %v", err)
@@ -503,6 +515,7 @@ func loadedGatewayWithProbe(t *testing.T, probe func(context.Context) error) *Ga
 		Workspaces: store,
 		Log:        newTestCallLog(t),
 		Runner:     &stubRunner{exit: 0},
+		Caps:       fixedCaps{},
 		DoltProbe:  probe,
 	})
 	if err != nil {
@@ -699,6 +712,70 @@ func TestBdgwStatsAndWorkspace(t *testing.T) {
 	}
 }
 
+// exitByVerb answers each call with the exit status the test gave its verb.
+type exitByVerb map[string]int
+
+func (m exitByVerb) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
+	return WriteFrame(frames, ExitFrame(m[req.Argv[0]]))
+}
+
+// TestBdgwStatsCapFields: GET /v1/stats carries the call log's four counters with
+// their values, and the executor's three cap counters beside them.
+func TestBdgwStatsCapFields(t *testing.T) {
+	t.Parallel()
+	caps := fixedCaps{snap: CapSnapshot{TooManyCalls: 7, InFlight: 2, PeakInFlight: 9}}
+	g := newTestGatewayWithCaps(t, mustStore(t), newTestCallLog(t), exitByVerb{"show": 0, "list": 1}, caps)
+	for _, head := range []Request{{Argv: []string{"show"}}, {Argv: []string{"list"}}} {
+		if code := postExec(t, g, testReadToken, head); code != http.StatusOK {
+			t.Fatalf("a served call = %d, want 200", code)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, statsPath, nil)
+	req.Header.Set("Authorization", "Bearer "+testReadToken)
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stats = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	// The counters are pointers, so a field the body dropped is nil rather than
+	// the zero a reader could not tell from a real value.
+	var got struct {
+		Calls        *uint64           `json:"calls"`
+		Errors       *uint64           `json:"errors"`
+		Dropped      *uint64           `json:"dropped"`
+		Verbs        map[string]uint64 `json:"verbs"`
+		TooManyCalls *uint64           `json:"too_many_calls"`
+		InFlight     *uint64           `json:"in_flight"`
+		PeakInFlight *uint64           `json:"peak_in_flight"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode stats: %v", err)
+	}
+	for _, f := range []struct {
+		name string
+		got  *uint64
+		want uint64
+	}{
+		{"calls", got.Calls, 2},
+		{"errors", got.Errors, 1},
+		{"dropped", got.Dropped, 0},
+		{"too_many_calls", got.TooManyCalls, 7},
+		{"in_flight", got.InFlight, 2},
+		{"peak_in_flight", got.PeakInFlight, 9},
+	} {
+		switch {
+		case f.got == nil:
+			t.Errorf("stats carries no %s", f.name)
+		case *f.got != f.want:
+			t.Errorf("%s = %d, want %d", f.name, *f.got, f.want)
+		}
+	}
+	if got.Verbs["show"] != 1 || got.Verbs["list"] != 1 {
+		t.Errorf("verbs = %v, want show and list counted once each", got.Verbs)
+	}
+}
+
 // brokenResponse is a client that stops reading after the first frame.
 type brokenResponse struct {
 	header  http.Header
@@ -806,6 +883,7 @@ func TestBdgwNewGatewayRefusesUnwired(t *testing.T) {
 		{name: "no workspace", want: "workspace store"},
 		{name: "no log", want: "call log"},
 		{name: "no runner", want: "call runner"},
+		{name: "no cap counters", want: "cap counters"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -816,6 +894,7 @@ func TestBdgwNewGatewayRefusesUnwired(t *testing.T) {
 				Workspaces: mustStore(t),
 				Log:        newTestCallLog(t),
 				Runner:     &stubRunner{},
+				Caps:       fixedCaps{},
 			}
 			switch i {
 			case 0:
@@ -828,6 +907,8 @@ func TestBdgwNewGatewayRefusesUnwired(t *testing.T) {
 				opts.Log = nil
 			case 4:
 				opts.Runner = nil
+			case 5:
+				opts.Caps = nil
 			}
 			_, err := NewGateway(opts)
 			if !errors.Is(err, ErrUnconfigured) || !strings.Contains(err.Error(), tc.want) {

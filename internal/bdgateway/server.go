@@ -68,6 +68,13 @@ type CallRunner interface {
 	Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error
 }
 
+// CapCounters reports the executor's concurrency-cap counters, which GET
+// /v1/stats serves beside the call log's. *Executor is the production value; a
+// test injects a fixed snapshot.
+type CapCounters interface {
+	CapStats() CapSnapshot
+}
+
 // GatewayOptions is what a Gateway is built from. Every field is required: a
 // gateway missing one refuses to start rather than serving with the check it
 // stands for silently off.
@@ -82,6 +89,9 @@ type GatewayOptions struct {
 	Log *CallLog
 	// Runner runs the calls. The production value is New's *Executor.
 	Runner CallRunner
+	// Caps reports the concurrency-cap counters the calls run under. The
+	// production value is the same *Executor as Runner.
+	Caps CapCounters
 	// DoltProbe reports whether Dolt answers at the endpoint the calls run
 	// against. Ready does not cover it: every file can be loaded while Dolt is
 	// still starting after a reboot, and then each call fails. serveReady calls
@@ -99,6 +109,7 @@ type Gateway struct {
 	workspaces *WorkspaceStore
 	log        *CallLog
 	runner     CallRunner
+	caps       CapCounters
 	doltProbe  func(context.Context) error
 	closing    atomic.Bool
 }
@@ -116,6 +127,7 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 		{"workspace store", opts.Workspaces == nil},
 		{"call log", opts.Log == nil},
 		{"call runner", opts.Runner == nil},
+		{"cap counters", opts.Caps == nil},
 	} {
 		if f.empty {
 			return nil, fmt.Errorf("%w: no %s", ErrUnconfigured, f.name)
@@ -127,6 +139,7 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 		workspaces: opts.Workspaces,
 		log:        opts.Log,
 		runner:     opts.Runner,
+		caps:       opts.Caps,
 		doltProbe:  opts.DoltProbe,
 	}, nil
 }
@@ -336,7 +349,15 @@ func (g *Gateway) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 	g.workspaces.ServeHTTP(w, r)
 }
 
-// serveStats is GET /v1/stats: the counter snapshot the call log keeps.
+// statsBody is GET /v1/stats's answer. Both parts are embedded, so the log's
+// four counters keep their names and values and the executor's three are added
+// beside them.
+type statsBody struct {
+	Stats
+	CapSnapshot
+}
+
+// serveStats is GET /v1/stats: the counters the call log and the executor keep.
 func (g *Gateway) serveStats(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodGet) {
 		return
@@ -350,7 +371,7 @@ func (g *Gateway) serveStats(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusForbidden, codeForbidden, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, g.log.Stats())
+	writeJSON(w, http.StatusOK, statsBody{Stats: g.log.Stats(), CapSnapshot: g.caps.CapStats()})
 }
 
 // requireMethod answers 405 when the request's method is not want, and reports
