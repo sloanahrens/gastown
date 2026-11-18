@@ -73,10 +73,13 @@ func (k *podDaemonKubectl) run(_ context.Context, _ string, _ []string, _ string
 		}
 		return k.image + "\n" + k.polecat, 0, nil
 	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.BdGatewayName):
-		// The bd gateway image read: the Deployment's name and container image
-		// on the two lines the swap reads, or nothing when the cluster has none.
+		// The bd gateway reads: the Deployment's name for the existence read, and
+		// its name and container image on the two lines the pair read wants.
 		if k.bd == "" {
 			return "", 0, nil
+		}
+		if containsArg(args, "name") {
+			return "deployment.apps/" + k8sdaemon.BdGatewayName + "\n", 0, nil
 		}
 		return k8sdaemon.BdGatewayName + "\n" + k.bd, 0, nil
 	case containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.DashboardName):

@@ -64,7 +64,10 @@ func (l *fakeImageLedger) RunningPair(context.Context) (ImagePair, error) {
 
 // fakeImageSwap is the daemon's side of a swap and the probe that reads it. A
 // pair whose daemon ref is in stuck is applied, but the daemon comes up
-// reporting no build; a ref in fail refuses the swap outright.
+// reporting no build; a ref in fail refuses the swap outright. A ref in
+// gatewayFail fails the swap at the bd gateway step, before the daemon moves, as
+// the pod swap reports it. bd is the gateway image the fake's cluster runs, which
+// a pair that names one puts in force.
 type fakeImageSwap struct {
 	ledger  *fakeImageLedger
 	running string
@@ -73,11 +76,19 @@ type fakeImageSwap struct {
 	seenAtApply []ImageRecord
 	stuck       map[string]bool
 	fail        map[string]error
+	gatewayFail map[string]error
+	bd          string
 }
 
 func (s *fakeImageSwap) Apply(_ context.Context, pair ImagePair) error {
 	s.applied = append(s.applied, pair)
 	s.seenAtApply = append(s.seenAtApply, s.ledger.rec)
+	if pair.Bd != "" {
+		s.bd = pair.Bd
+	}
+	if err := s.gatewayFail[pair.Bd]; err != nil {
+		return GatewayStepError{Err: err}
+	}
 	if err := s.fail[pair.Daemon]; err != nil {
 		return err
 	}

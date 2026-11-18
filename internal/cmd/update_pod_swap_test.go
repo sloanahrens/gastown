@@ -36,27 +36,30 @@ type podSwapCall struct {
 // by default. pairOut, when set, is its whole answer, and pairExit and pairErr
 // fail it.
 //
-// The bd gateway image read (a get of the gateway Deployment) names no gateway by
-// default, as a cluster before the cutover: kubectl prints nothing for
-// --ignore-not-found. gateway, when set, is the image it prints, and gatewayOut,
-// gatewayExit and gatewayErr answer or fail the read instead.
+// The bd gateway reads (a get of the gateway Deployment, once for its name and
+// once for its image) name no gateway by default, as a cluster before the
+// cutover: kubectl prints nothing for --ignore-not-found. gateway, when set, is
+// the image the Deployment runs and the name the existence read prints;
+// gatewayOut is the image read's whole answer, gatewayNameOut the existence
+// read's, and gatewayExit and gatewayErr fail either.
 type podSwapFake struct {
-	calls       []podSwapCall
-	verb        string
-	deployment  string
-	exit        int
-	err         error
-	absent      bool
-	readExit    int
-	readErr     error
-	readOut     string
-	pairOut     string
-	pairExit    int
-	pairErr     error
-	gateway     string
-	gatewayOut  string
-	gatewayExit int
-	gatewayErr  error
+	calls          []podSwapCall
+	verb           string
+	deployment     string
+	exit           int
+	err            error
+	absent         bool
+	readExit       int
+	readErr        error
+	readOut        string
+	pairOut        string
+	pairExit       int
+	pairErr        error
+	gateway        string
+	gatewayOut     string
+	gatewayNameOut string
+	gatewayExit    int
+	gatewayErr     error
 }
 
 func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
@@ -70,6 +73,9 @@ func (f *podSwapFake) run(_ context.Context, _ string, _ []string, name string, 
 	if containsArg(args, "get") && containsArg(args, "deployment/"+k8sdaemon.BdGatewayName) {
 		if f.gatewayErr != nil || f.gatewayExit != 0 {
 			return podSwapOutput, f.gatewayExit, f.gatewayErr
+		}
+		if containsArg(args, "name") {
+			return f.gatewayNameAnswer(), 0, nil
 		}
 		return f.gatewayAnswer(), 0, nil
 	}
@@ -124,6 +130,20 @@ func (f *podSwapFake) gatewayAnswer() string {
 	}
 }
 
+// gatewayNameAnswer is what the bd gateway existence read prints: gatewayNameOut
+// when a test sets one, nothing when the cluster has no gateway Deployment, else
+// the Deployment's name, which kubectl prints for -o name.
+func (f *podSwapFake) gatewayNameAnswer() string {
+	switch {
+	case f.gatewayNameOut != "":
+		return f.gatewayNameOut
+	case f.gateway == "":
+		return ""
+	default:
+		return "deployment.apps/" + k8sdaemon.BdGatewayName + "\n"
+	}
+}
+
 const (
 	podSwapContext   = "control-cluster"
 	podSwapNamespace = "gt"
@@ -167,9 +187,10 @@ type podSwapPatchBody struct {
 	} `json:"spec"`
 }
 
-// TestUpdatePodSwapMovesBothDeploymentsInOrder holds the swap's five commands: the
-// dashboard's existence read, the daemon's patch, the dashboard's patch, then the
-// wait on each rollout. The daemon's patch carries the polecat annotation; the
+// TestUpdatePodSwapMovesBothDeploymentsInOrder holds the swap's six commands: the
+// dashboard's existence read, the bd gateway's read (this cluster has no gateway,
+// so the gateway is not moved), the daemon's patch, the dashboard's patch, then
+// the wait on each rollout. The daemon's patch carries the polecat annotation; the
 // dashboard's carries only the daemon image, and no annotation, so the annotations
 // it already has stay.
 func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
@@ -180,12 +201,15 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		t.Fatalf("Apply: %v", err)
 	}
 
-	if len(fake.calls) != 5 {
-		t.Fatalf("commands = %+v, want the dashboard's existence read, the daemon's patch, the dashboard's patch, then both rollout waits", fake.calls)
+	if len(fake.calls) != 6 {
+		t.Fatalf("commands = %+v, want both existence reads, the daemon's patch, the dashboard's patch, then both rollout waits", fake.calls)
 	}
 	prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
 	if want := append(slices.Clone(prefix), "get", "deployment/"+k8sdaemon.DashboardName, "-o", "name", "--ignore-not-found"); !slices.Equal(fake.calls[0].args, want) {
 		t.Errorf("first command = %q, want the existence read %q", fake.calls[0].args, want)
+	}
+	if want := gatewayPresentArgs(prefix); !slices.Equal(fake.calls[1].args, want) {
+		t.Errorf("second command = %q, want the bd gateway existence read %q", fake.calls[1].args, want)
 	}
 	patchArgs := func(deployment string) []string {
 		return append(slices.Clone(prefix), "patch", "deployment/"+deployment, "--type=strategic", "-p")
@@ -206,7 +230,7 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		return body
 	}
 
-	daemon := checkPatch(t, fake.calls[1].args, k8sdaemon.Name)
+	daemon := checkPatch(t, fake.calls[2].args, k8sdaemon.Name)
 	if got := daemon.Spec.Template.Metadata.Annotations[k8sdaemon.PolecatImageAnnotation]; got != podSwapPolecatRef {
 		t.Errorf("polecat annotation = %q, want the pair's polecat digest", got)
 	}
@@ -214,7 +238,7 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		t.Errorf("daemon containers = %+v, want %s on the pair's daemon digest alone", c, k8sdaemon.Name)
 	}
 
-	dashboard := checkPatch(t, fake.calls[2].args, k8sdaemon.DashboardName)
+	dashboard := checkPatch(t, fake.calls[3].args, k8sdaemon.DashboardName)
 	if c := dashboard.Spec.Template.Spec.Containers; len(c) != 1 || c[0].Name != k8sdaemon.DashboardName || c[0].Image != podSwapDigestRef {
 		t.Errorf("dashboard containers = %+v, want %s on the pair's daemon digest alone", c, k8sdaemon.DashboardName)
 	}
@@ -222,16 +246,25 @@ func TestUpdatePodSwapMovesBothDeploymentsInOrder(t *testing.T) {
 		t.Errorf("dashboard annotations = %v, want none, so the pod template's own annotations are kept", got)
 	}
 
-	if !slices.Equal(fake.calls[3].args, rolloutArgs(k8sdaemon.Name)) {
-		t.Errorf("fourth command = %q, want the daemon's rollout wait %q", fake.calls[3].args, rolloutArgs(k8sdaemon.Name))
+	if !slices.Equal(fake.calls[4].args, rolloutArgs(k8sdaemon.Name)) {
+		t.Errorf("fifth command = %q, want the daemon's rollout wait %q", fake.calls[4].args, rolloutArgs(k8sdaemon.Name))
 	}
-	if !slices.Equal(fake.calls[4].args, rolloutArgs(k8sdaemon.DashboardName)) {
-		t.Errorf("fifth command = %q, want the dashboard's rollout wait %q", fake.calls[4].args, rolloutArgs(k8sdaemon.DashboardName))
+	if !slices.Equal(fake.calls[5].args, rolloutArgs(k8sdaemon.DashboardName)) {
+		t.Errorf("sixth command = %q, want the dashboard's rollout wait %q", fake.calls[5].args, rolloutArgs(k8sdaemon.DashboardName))
 	}
 }
 
+// gatewayPresentArgs is the argv of the bd gateway existence read Apply makes: the
+// Deployment's name, or nothing when the cluster has no gateway.
+func gatewayPresentArgs(prefix []string) []string {
+	return append(slices.Clone(prefix),
+		"get", "deployment/"+k8sdaemon.BdGatewayName,
+		"-o", "name", "--ignore-not-found",
+	)
+}
+
 // TestPodDaemonSwapSkipsAnAbsentDashboard holds the town with no dashboard: after
-// the existence read, only the daemon's patch and rollout wait run, no command names
+// the two reads, only the daemon's patch and rollout wait run, no command names
 // the dashboard, and one line says the dashboard was not moved.
 func TestPodDaemonSwapSkipsAnAbsentDashboard(t *testing.T) {
 	t.Parallel()
@@ -243,14 +276,14 @@ func TestPodDaemonSwapSkipsAnAbsentDashboard(t *testing.T) {
 	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(fake.calls) != 3 {
-		t.Fatalf("commands = %+v, want the existence read, then the daemon's patch and rollout wait only", fake.calls)
+	if len(fake.calls) != 4 {
+		t.Fatalf("commands = %+v, want both existence reads, then the daemon's patch and rollout wait only", fake.calls)
 	}
-	if !containsArg(fake.calls[1].args, "patch") || !containsArg(fake.calls[1].args, "deployment/"+k8sdaemon.Name) {
-		t.Errorf("second command = %q, want the daemon's patch", fake.calls[1].args)
+	if !containsArg(fake.calls[2].args, "patch") || !containsArg(fake.calls[2].args, "deployment/"+k8sdaemon.Name) {
+		t.Errorf("third command = %q, want the daemon's patch", fake.calls[2].args)
 	}
-	if !slices.Equal(fake.calls[2].args, append(slices.Clone(fake.calls[1].args[:4]), "rollout", "status", "deployment/"+k8sdaemon.Name, "--timeout=5m0s")) {
-		t.Errorf("third command = %q, want the daemon's rollout wait", fake.calls[2].args)
+	if !slices.Equal(fake.calls[3].args, append(slices.Clone(fake.calls[2].args[:4]), "rollout", "status", "deployment/"+k8sdaemon.Name, "--timeout=5m0s")) {
+		t.Errorf("fourth command = %q, want the daemon's rollout wait", fake.calls[3].args)
 	}
 	for _, c := range fake.calls[1:] {
 		if containsArg(c.args, "deployment/"+k8sdaemon.DashboardName) {
@@ -276,6 +309,210 @@ func TestPodDaemonSwapPrintsNothingWhenTheDashboardIsMoved(t *testing.T) {
 	}
 	if got := out.String(); got != "" {
 		t.Errorf("output = %q, want none when the dashboard is moved", got)
+	}
+}
+
+// podSwapBdNext is a bd gateway digest a pair names, distinct from the image the
+// fake's cluster runs before the swap.
+var podSwapBdNext = "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("5", 64)
+
+// podSwapBdPair is podSwapPair with the gateway image a pod install's values file
+// names.
+func podSwapBdPair() update.ImagePair {
+	pair := podSwapPair
+	pair.Bd = podSwapBdNext
+	return pair
+}
+
+// TestPodDaemonSwapMovesTheGatewayFirst holds the gateway step: when the cluster
+// has a bd-gateway Deployment and the pair names its image, Apply patches the
+// gateway and waits for its rollout, with the gateway's own bound, before the
+// daemon's patch. A cluster with no gateway, or a pair that names no gateway
+// image, moves the daemon alone and leaves the gateway as it is.
+func TestPodDaemonSwapMovesTheGatewayFirst(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a cluster with a gateway moves it before the daemon", func(t *testing.T) {
+		t.Parallel()
+		prefix := []string{"--context", podSwapContext, "-n", podSwapNamespace}
+		fake := &podSwapFake{gateway: "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)}
+
+		if err := podSwapFor(fake).Apply(context.Background(), podSwapBdPair()); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		if len(fake.calls) != 8 {
+			t.Fatalf("commands = %+v, want both reads, the gateway's patch and wait, then the daemon's, the dashboard's and their waits", fake.calls)
+		}
+		want := append(slices.Clone(prefix), "patch", "deployment/"+k8sdaemon.BdGatewayName, "--type=strategic", "-p")
+		if got := fake.calls[2].args; len(got) != len(want)+1 || !slices.Equal(got[:len(want)], want) {
+			t.Fatalf("third command = %q, want the gateway's patch %q and one body", got, want)
+		}
+		var body podSwapPatchBody
+		if err := json.Unmarshal([]byte(fake.calls[2].args[len(want)]), &body); err != nil {
+			t.Fatalf("the gateway patch body is not JSON: %v", err)
+		}
+		if c := body.Spec.Template.Spec.Containers; len(c) != 1 || c[0].Name != k8sdaemon.BdGatewayName || c[0].Image != podSwapBdNext {
+			t.Errorf("gateway containers = %+v, want %s on the pair's gateway digest alone", c, k8sdaemon.BdGatewayName)
+		}
+		if got := body.Spec.Template.Metadata.Annotations; len(got) != 0 {
+			t.Errorf("gateway annotations = %v, want none, so the pod template's own annotations are kept", got)
+		}
+		want = append(slices.Clone(prefix), "rollout", "status", "deployment/"+k8sdaemon.BdGatewayName, "--timeout=3m0s")
+		if got := fake.calls[3].args; !slices.Equal(got, want) {
+			t.Errorf("fourth command = %q, want the gateway's rollout wait %q", got, want)
+		}
+		want = append(slices.Clone(prefix), "patch", "deployment/"+k8sdaemon.Name, "--type=strategic", "-p")
+		if got := fake.calls[4].args; len(got) != len(want)+1 || !slices.Equal(got[:len(want)], want) {
+			t.Errorf("fifth command = %q, want the daemon's patch %q, which waits for the gateway rollout", got, want)
+		}
+	})
+
+	t.Run("a pair that names no gateway image leaves the cluster's gateway alone", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{gateway: "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)}
+
+		if err := podSwapFor(fake).Apply(context.Background(), podSwapPair); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		assertDaemonMovedWithoutGateway(t, fake)
+	})
+
+	t.Run("a cluster with no gateway Deployment moves the daemon alone", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+
+		if err := podSwapFor(fake).Apply(context.Background(), podSwapBdPair()); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		assertDaemonMovedWithoutGateway(t, fake)
+	})
+}
+
+// assertDaemonMovedWithoutGateway holds a swap that leaves the gateway alone: the
+// daemon and the dashboard are patched and waited on, and no command patches the
+// gateway.
+func assertDaemonMovedWithoutGateway(t *testing.T, fake *podSwapFake) {
+	t.Helper()
+	if len(fake.calls) != 6 {
+		t.Fatalf("commands = %+v, want both reads, both patches and both rollout waits", fake.calls)
+	}
+	patched := 0
+	for _, c := range fake.calls {
+		if !containsArg(c.args, "patch") {
+			continue
+		}
+		patched++
+		if containsArg(c.args, "deployment/"+k8sdaemon.BdGatewayName) {
+			t.Errorf("command %q patches the gateway, want it left as it is", c.args)
+		}
+	}
+	if patched != 2 {
+		t.Errorf("patches = %d, want the daemon's and the dashboard's", patched)
+	}
+	for _, c := range fake.calls {
+		if containsArg(c.args, "rollout") && containsArg(c.args, "deployment/"+k8sdaemon.BdGatewayName) {
+			t.Errorf("command %q waits on the gateway, want no gateway step", c.args)
+		}
+	}
+}
+
+// TestPodDaemonSwapFailsTheGatewayStep holds a gateway step that fails: the
+// failure is an update.GatewayStepError naming the step, no daemon patch runs, and
+// the command's output is never carried. The daemon's image is therefore not set
+// until the gateway's rollout reports ready.
+func TestPodDaemonSwapFailsTheGatewayStep(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fake podSwapFake
+		want string
+	}{
+		{
+			name: "a gateway patch that exits nonzero stops before the daemon's patch",
+			fake: podSwapFake{verb: "patch", deployment: k8sdaemon.BdGatewayName, exit: 1},
+			want: "the bd gateway's patch exited 1",
+		},
+		{
+			name: "a gateway patch the runner cannot start stops before the daemon's patch",
+			fake: podSwapFake{verb: "patch", deployment: k8sdaemon.BdGatewayName, err: errors.New("kubectl not found")},
+			want: "running kubectl for the bd gateway's patch",
+		},
+		{
+			name: "a gateway rollout that never reports ready stops before the daemon's patch",
+			fake: podSwapFake{verb: "rollout", deployment: k8sdaemon.BdGatewayName, exit: 1},
+			want: "the bd gateway's rollout status exited 1",
+		},
+		{
+			name: "a gateway rollout the runner cannot start stops before the daemon's patch",
+			fake: podSwapFake{verb: "rollout", deployment: k8sdaemon.BdGatewayName, err: errors.New("kubectl not found")},
+			want: "running kubectl for the bd gateway's rollout status",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := tt.fake
+			fake.gateway = "registry.internal:5000/town/gastown-bd@sha256:" + strings.Repeat("4", 64)
+			err := podSwapFor(&fake).Apply(context.Background(), podSwapBdPair())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Apply error = %v, want one naming %q", err, tt.want)
+			}
+			var gw update.GatewayStepError
+			if !errors.As(err, &gw) {
+				t.Errorf("Apply error = %T, want update.GatewayStepError so the install names the gateway step", err)
+			}
+			if strings.Contains(err.Error(), podSwapOutput) {
+				t.Errorf("Apply error carries the command's output: %v", err)
+			}
+			for _, c := range fake.calls {
+				if containsArg(c.args, "patch") && containsArg(c.args, "deployment/"+k8sdaemon.Name) {
+					t.Errorf("command %q patches the daemon, want the daemon left on its old image until the gateway is Ready", c.args)
+				}
+			}
+		})
+	}
+}
+
+// TestPodDaemonSwapStopsOnAnUnreadableGatewayRead: a gateway read that fails stops
+// the swap before any patch, so an unreadable cluster never reads as a gateway
+// that is not there and nothing moves past it.
+func TestPodDaemonSwapStopsOnAnUnreadableGatewayRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		fake podSwapFake
+		want string
+	}{
+		{
+			name: "a read that exits nonzero fails the step",
+			fake: podSwapFake{gatewayExit: 1},
+			want: "the bd gateway's existence read exited 1",
+		},
+		{
+			name: "a read the runner cannot run fails the step",
+			fake: podSwapFake{gatewayErr: errors.New("kubectl not found")},
+			want: "running kubectl for the bd gateway's existence read",
+		},
+		{
+			name: "a read that answers with another Deployment fails the step",
+			fake: podSwapFake{gatewayNameOut: "deployment.apps/" + k8sdaemon.DashboardName + "\n"},
+			want: "printed a name other than the bd gateway's",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := tt.fake
+			err := podSwapFor(&fake).Apply(context.Background(), podSwapBdPair())
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Apply error = %v, want one containing %q", err, tt.want)
+			}
+			for _, c := range fake.calls {
+				if containsArg(c.args, "patch") {
+					t.Errorf("command %q patches a Deployment, want none before the gateway read holds", c.args)
+				}
+			}
+		})
 	}
 }
 
@@ -567,8 +804,8 @@ func TestPodDaemonSwapAcceptsANameAtTheDNSLabelLimit(t *testing.T) {
 	if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(fake.calls) != 5 {
-		t.Errorf("commands = %d, want 5 at the limit", len(fake.calls))
+	if len(fake.calls) != 6 {
+		t.Errorf("commands = %d, want 6 at the limit", len(fake.calls))
 	}
 }
 
@@ -583,12 +820,12 @@ func TestPodDaemonSwapUsesTheNamedDeployment(t *testing.T) {
 	}
 	// The daemon's patch and rollout wait name the configured Deployment; the
 	// dashboard's patch and wait name the dashboard's, whatever the daemon is.
-	for _, i := range []int{1, 3} {
+	for _, i := range []int{2, 4} {
 		if !containsArg(fake.calls[i].args, "deployment/daemon-canary") {
 			t.Errorf("command %v does not name the configured Deployment", fake.calls[i].args)
 		}
 	}
-	for _, i := range []int{2, 4} {
+	for _, i := range []int{3, 5} {
 		if !containsArg(fake.calls[i].args, "deployment/"+k8sdaemon.DashboardName) {
 			t.Errorf("command %v does not name the dashboard Deployment", fake.calls[i].args)
 		}
@@ -622,6 +859,16 @@ func TestPodDaemonSwapRefusesAnUnusableTargetOrPair(t *testing.T) {
 			name:    "an empty polecat is refused",
 			pair:    update.ImagePair{Daemon: podSwapDigestRef},
 			wantErr: "polecat image",
+		},
+		{
+			name:    "a bd gateway tag reference is refused, since the patch would name a tag",
+			pair:    update.ImagePair{Daemon: podSwapDigestRef, Polecat: podSwapPolecatRef, Bd: "registry.internal:5000/town/gastown-bd:latest"},
+			wantErr: `bd gateway image "registry.internal:5000/town/gastown-bd:latest"`,
+		},
+		{
+			name:    "a bd gateway digest with a short hash is refused",
+			pair:    update.ImagePair{Daemon: podSwapDigestRef, Polecat: podSwapPolecatRef, Bd: "registry.internal:5000/town/gastown-bd@sha256:abc"},
+			wantErr: "bd gateway image",
 		},
 		{
 			name:    "an empty context is refused",
@@ -743,6 +990,32 @@ func TestPodDaemonSwapStopsWhenTheDashboardPatchCannotEncode(t *testing.T) {
 	}
 }
 
+// TestPodDaemonSwapStopsWhenTheGatewayPatchCannotEncode holds the gateway body's
+// encoding: the daemon's and the dashboard's bodies encode, the gateway's does
+// not, and no command runs, so no Deployment moves before every body is known to
+// build.
+func TestPodDaemonSwapStopsWhenTheGatewayPatchCannotEncode(t *testing.T) {
+	t.Parallel()
+	fake := &podSwapFake{}
+	swap := podSwapFor(fake)
+	encodes := 0
+	swap.marshal = func(v any) ([]byte, error) {
+		encodes++
+		if encodes > 2 {
+			return nil, errors.New("encode refused")
+		}
+		return json.Marshal(v)
+	}
+
+	err := swap.Apply(context.Background(), podSwapBdPair())
+	if err == nil || !strings.Contains(err.Error(), "encoding the bd gateway's pod patch") {
+		t.Fatalf("Apply error = %v, want the gateway patch encoding named", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("commands = %+v, want none when the gateway patch cannot be built", fake.calls)
+	}
+}
+
 func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -755,43 +1028,43 @@ func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 			name:      "a failing daemon patch stops before the dashboard is patched",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.Name, exit: 1},
 			wantStep:  "the daemon's patch exited 1",
-			wantCalls: 2,
+			wantCalls: 3,
 		},
 		{
 			name:      "a failing dashboard patch stops before the rollout waits",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.DashboardName, exit: 1},
 			wantStep:  "the dashboard's patch exited 1",
-			wantCalls: 3,
+			wantCalls: 4,
 		},
 		{
 			name:      "a failing daemon rollout stops before the dashboard's wait",
 			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.Name, exit: 1},
 			wantStep:  "the daemon's rollout status exited 1",
-			wantCalls: 4,
+			wantCalls: 5,
 		},
 		{
 			name:      "a failing dashboard rollout is named as the dashboard's rollout",
 			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.DashboardName, exit: 1},
 			wantStep:  "the dashboard's rollout status exited 1",
-			wantCalls: 5,
+			wantCalls: 6,
 		},
 		{
 			name:      "a daemon patch command that cannot start is named as the daemon's patch",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.Name, err: errors.New("kubectl not found")},
 			wantStep:  "the daemon's patch",
-			wantCalls: 2,
+			wantCalls: 3,
 		},
 		{
 			name:      "a dashboard patch command that cannot start is named as the dashboard's patch",
 			fake:      podSwapFake{verb: "patch", deployment: k8sdaemon.DashboardName, err: errors.New("kubectl not found")},
 			wantStep:  "the dashboard's patch",
-			wantCalls: 3,
+			wantCalls: 4,
 		},
 		{
 			name:      "a rollout command that cannot start is named as the rollout",
 			fake:      podSwapFake{verb: "rollout", deployment: k8sdaemon.Name, err: errors.New("kubectl not found")},
 			wantStep:  "the daemon's rollout status",
-			wantCalls: 4,
+			wantCalls: 5,
 		},
 	}
 	for _, tt := range tests {
@@ -828,8 +1101,8 @@ func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
 		if err := swap.Apply(context.Background(), podSwapPair); err != nil {
 			t.Fatalf("Apply: %v", err)
 		}
-		if len(fake.calls) != 5 {
-			t.Fatalf("commands = %+v, want the existence read, both patches, then both rollout waits", fake.calls)
+		if len(fake.calls) != 6 {
+			t.Fatalf("commands = %+v, want both existence reads, both patches, then both rollout waits", fake.calls)
 		}
 		for _, c := range fake.calls {
 			if containsArg(c.args, "--context") {
@@ -839,11 +1112,11 @@ func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
 				t.Errorf("command %v does not start with the namespace", c.args)
 			}
 		}
-		if !containsArg(fake.calls[1].args, "patch") || !containsArg(fake.calls[2].args, "patch") {
-			t.Errorf("second and third commands %v are not the patches", fake.calls[1:3])
+		if !containsArg(fake.calls[2].args, "patch") || !containsArg(fake.calls[3].args, "patch") {
+			t.Errorf("third and fourth commands %v are not the patches", fake.calls[2:4])
 		}
-		if !containsArg(fake.calls[3].args, "rollout") || !containsArg(fake.calls[4].args, "rollout") {
-			t.Errorf("last two commands %v are not the rollout waits", fake.calls[3:])
+		if !containsArg(fake.calls[4].args, "rollout") || !containsArg(fake.calls[5].args, "rollout") {
+			t.Errorf("last two commands %v are not the rollout waits", fake.calls[4:])
 		}
 	})
 
