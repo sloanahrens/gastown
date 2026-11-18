@@ -319,16 +319,35 @@ type bdGatewayDoer func(*http.Request) (*http.Response, error)
 // Do answers req with the scripted answer.
 func (f bdGatewayDoer) Do(req *http.Request) (*http.Response, error) { return f(req) }
 
-// bdGatewayAnswer is the gateway's /readyz answer carrying hash on the workspace
-// header. An empty hash is an answer with no header. The status is not read, only the
-// header the gateway sets on every response.
-func bdGatewayAnswer(hash string) func(*http.Request) (*http.Response, error) {
+// bdGatewayStatusAnswer is the gateway's answer with status carrying hash on the
+// workspace header. An empty hash is an answer with no header.
+func bdGatewayStatusAnswer(status int, hash string) func(*http.Request) (*http.Response, error) {
 	return func(*http.Request) (*http.Response, error) {
 		h := http.Header{}
 		if hash != "" {
 			h.Set(bdgateway.WorkspaceHashHeader, hash)
 		}
-		return &http.Response{StatusCode: http.StatusOK, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+		return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(strings.NewReader(""))}, nil
+	}
+}
+
+// bdGatewayAnswer is the gateway's 200 answer to the stats read carrying hash on the
+// workspace header. An empty hash is an answer with no header.
+func bdGatewayAnswer(hash string) func(*http.Request) (*http.Response, error) {
+	return bdGatewayStatusAnswer(http.StatusOK, hash)
+}
+
+// bdGatewayReadyzOnly is a gateway that carries hash on /readyz alone: /readyz needs
+// no token, so the header there proves nothing, and the authenticated /v1/stats read
+// is refused.
+func bdGatewayReadyzOnly(hash string) func(*http.Request) (*http.Response, error) {
+	ready := bdGatewayAnswer(hash)
+	refused := bdGatewayStatusAnswer(http.StatusUnauthorized, "")
+	return func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path == "/readyz" {
+			return ready(req)
+		}
+		return refused(req)
 	}
 }
 
@@ -379,6 +398,9 @@ func TestDoctorBdGatewayReadsTheReportedHeader(t *testing.T) {
 		{name: "a header that differs fails with both hashes", answer: bdGatewayAnswer("hash-of-other"), wantText: []string{"hash-of-other", town}},
 		{name: "a missing header fails by name", answer: bdGatewayAnswer(""), wantText: []string{"carries no X-Bd-Workspace header"}},
 		{name: "an unreachable gateway fails by name", answer: bdGatewayUnreachable, wantText: []string{"did not answer"}},
+		{name: "a 401 refusal fails by name even with the header", answer: bdGatewayStatusAnswer(http.StatusUnauthorized, town), wantText: []string{"refused the doctor's token"}},
+		{name: "a 403 refusal fails by name even with the header", answer: bdGatewayStatusAnswer(http.StatusForbidden, town), wantText: []string{"refused the doctor's token"}},
+		{name: "a header on /readyz alone fails by name", answer: bdGatewayReadyzOnly(town), wantText: []string{"refused the doctor's token"}},
 		{name: "no gateway URL fails by name", answer: bdGatewayAnswer(town), noURL: true, wantText: []string{"set --gateway-url or BD_GATEWAY_URL"}},
 		{name: "no token file fails by name", answer: bdGatewayAnswer(town), noToken: true, wantText: []string{"set --token-file or BD_GATEWAY_TOKEN_FILE"}},
 	}
@@ -408,9 +430,9 @@ func TestDoctorBdGatewayReadsTheReportedHeader(t *testing.T) {
 	}
 }
 
-// TestDoctorBdGatewayReadsReadyzWithTheToken: the reported hash is read with one GET
-// to the gateway's /readyz, carrying the daemon's bearer token.
-func TestDoctorBdGatewayReadsReadyzWithTheToken(t *testing.T) {
+// TestDoctorBdGatewayReadsStatsWithTheToken: the reported hash is read with one GET
+// to the gateway's /v1/stats, carrying the daemon's bearer token.
+func TestDoctorBdGatewayReadsStatsWithTheToken(t *testing.T) {
 	t.Parallel()
 	var got *http.Request
 	answer := func(req *http.Request) (*http.Response, error) {
@@ -425,7 +447,7 @@ func TestDoctorBdGatewayReadsReadyzWithTheToken(t *testing.T) {
 	if got.Method != http.MethodGet {
 		t.Errorf("method = %s, want GET", got.Method)
 	}
-	if want := "https://bd-gateway:7440/readyz"; got.URL.String() != want {
+	if want := "https://bd-gateway:7440/v1/stats"; got.URL.String() != want {
 		t.Errorf("url = %s, want %s", got.URL, want)
 	}
 	if auth := got.Header.Get("Authorization"); auth != "Bearer "+bdGatewayTestToken {
@@ -444,5 +466,38 @@ func TestDoctorBdGatewayNotNamedReadsNothing(t *testing.T) {
 	}
 	if len(f.kubeCalls) != 0 || len(docker) != 0 {
 		t.Errorf("kubectl reads = %v, docker calls = %d, want none when unnamed", f.kubeCalls, len(docker))
+	}
+}
+
+// TestDoctorBdGatewayPusherFromEnvReadsTheGatewayPair: the doctor's pusher takes its
+// URL and token file from the same two variables the daemon pushes with, and from
+// nothing else. Unset variables stay empty, so the read refuses them by name.
+func TestDoctorBdGatewayPusherFromEnvReadsTheGatewayPair(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		env       map[string]string
+		wantURL   string
+		wantToken string
+	}{
+		{
+			name:      "both variables set",
+			env:       map[string]string{bdgateway.WorkspaceURLEnv: "https://bd-gateway:7440", bdgateway.WorkspaceTokenEnv: "/run/token"},
+			wantURL:   "https://bd-gateway:7440",
+			wantToken: "/run/token",
+		},
+		{name: "neither variable set", env: map[string]string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pusher := bdGatewayPusherFromEnv(func(key string) string { return tt.env[key] })
+			if pusher.URL != tt.wantURL {
+				t.Errorf("URL = %q, want %q", pusher.URL, tt.wantURL)
+			}
+			if pusher.TokenFile != tt.wantToken {
+				t.Errorf("TokenFile = %q, want %q", pusher.TokenFile, tt.wantToken)
+			}
+		})
 	}
 }

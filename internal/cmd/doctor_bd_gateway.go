@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -48,10 +47,11 @@ func realBdGatewayClusterDeps(gateway bdgateway.GatewayPusher) bdGatewayClusterD
 
 // bdGatewayPusherFromEnv is the pusher the doctor reads the gateway with: the URL and
 // token file gt-wrap's bdgateway target reads, the same pair the daemon pushes with.
-func bdGatewayPusherFromEnv() bdgateway.GatewayPusher {
+// getenv is os.Getenv in the doctor and a fake in a test.
+func bdGatewayPusherFromEnv(getenv func(string) string) bdgateway.GatewayPusher {
 	return bdgateway.GatewayPusher{
-		URL:       os.Getenv(bdgateway.WorkspaceURLEnv),
-		TokenFile: os.Getenv(bdgateway.WorkspaceTokenEnv),
+		URL:       getenv(bdgateway.WorkspaceURLEnv),
+		TokenFile: getenv(bdgateway.WorkspaceTokenEnv),
 	}
 }
 
