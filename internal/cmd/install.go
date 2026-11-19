@@ -1049,17 +1049,22 @@ func initTownBeads(townPath string) error {
 	return nil
 }
 
-// configureTownBeads turns on the two bd settings the town needs: explicit
-// routing (gt doctor requires it) and the events journal (gt tail reads it,
-// gt-7iwy0.7). Both are reported, not fatal: the database is already
-// initialized, and gt doctor names either one when it is off.
+// configureTownBeads turns on the one bd setting a new town needs: explicit
+// routing (gt doctor requires it). A failure is reported, not fatal: the
+// database is already initialized, and gt doctor names it when it is off.
+//
+// The events journal is left off: a store journals only when its own config
+// turns it on.
 func configureTownBeads(townPath string) {
 	townBd := beads.NewPlain(townPath, withBeadsDirEnv(filepath.Join(townPath, ".beads")))
-	if err := townBd.ConfigSet("routing.mode", "explicit"); err != nil {
-		fmt.Printf("   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
-	}
-	if err := townBd.ConfigSet(beads.EventsJournalKey, "true"); err != nil {
-		fmt.Printf("   %s Could not turn on the events journal: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
+	configureTownBeadsWith(townBd, os.Stdout)
+}
+
+// configureTownBeadsWith sets routing.mode to explicit, reporting a refusal to
+// w. It sets no other key.
+func configureTownBeadsWith(bd interface{ ConfigSet(key, value string) error }, w io.Writer) {
+	if err := bd.ConfigSet("routing.mode", "explicit"); err != nil {
+		fmt.Fprintf(w, "   %s Could not set routing.mode: %s\n", style.Dim.Render("⚠"), bdErrOutput(err))
 	}
 }
 
