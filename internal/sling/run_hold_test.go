@@ -23,8 +23,9 @@ import (
 // the spawn, with nothing but the hook write left — and no earlier guard can
 // stand in for it.
 const (
-	holdTestTownRoot = "/town"
-	holdTestBeadID   = "gt-hold"
+	holdTestTownRoot  = "/town"
+	holdTestBeadID    = "gt-hold"
+	holdTestClonePath = "/town/gastown/polecats/onyx"
 )
 
 // holdTestRead is one read of the bead: what a success returns, or the error
@@ -60,6 +61,11 @@ type fakeSlingDeps struct {
 	overrides         []string       // "<actor> over <blocker>, <blocker>"
 	overrideErr       error          // what writing the override comment fails with
 	admissionSequence []string
+
+	// The seat's worktree, for the hook-branch guard.
+	branch    string // the branch WorktreeBranch reports
+	branchErr error  // what WorktreeBranch fails with
+	branchDir string // the worktree WorktreeBranch was asked about
 }
 
 func (f *fakeSlingDeps) deps() *Deps {
@@ -83,9 +89,13 @@ func (f *fakeSlingDeps) deps() *Deps {
 			f.spawns++
 			f.spawnOptions = append(f.spawnOptions, opts)
 			f.admissionSequence = append(f.admissionSequence, "spawn")
-			return &Spawn{RigName: "gastown", PolecatName: "onyx"}, nil
+			return &Spawn{RigName: "gastown", PolecatName: "onyx", ClonePath: holdTestClonePath}, nil
 		},
-		LockAssignee:       func(string, string) (func(), error) { return func() {}, nil },
+		LockAssignee: func(string, string) (func(), error) { return func() {}, nil },
+		WorktreeBranch: func(dir string) (string, error) {
+			f.branchDir = dir
+			return f.branch, f.branchErr
+		},
 		AgentDead:          func(string) bool { return f.agentDead },
 		SurvivingWorkGuard: func(string, string, string) error { return nil },
 		ClearReassigned:    func(string, string) func() { return func() {} },

@@ -48,6 +48,12 @@ type Deps struct {
 	LockBead     func(townRoot, beadID string) (func(), error)
 	LockAssignee func(townRoot, targetAgent string) (func(), error)
 
+	// WorktreeBranch reports the branch checked out in the seat's worktree at
+	// dir. The hook step reads it under the assignee lock, so a sling never
+	// writes its hook onto a branch that already carries another bead's work
+	// (gt-u9fqky). An error means the branch could not be read.
+	WorktreeBranch func(dir string) (string, error)
+
 	// The polecat the dispatch runs on. StartSession takes the town root
 	// explicitly: the exec boundary used to supply it as the subprocess's
 	// working directory, and a mechanism that reads the cwd instead is a
