@@ -496,12 +496,12 @@ func TestGTBuildStampsVersionAndCommit(t *testing.T) {
 	}
 }
 
-// TestBDBuildStampsFollowTheStripFlags: the image's bd link line leads with the
+// TestBDBuildFlagsAreUnchanged: the image's bd link line leads with the
 // -s -w strip flags (gt-aermmg) and keeps the stamps it had before gt's Version
 // flag was added: main.Build from git's abbreviation of the commit, then
 // main.Commit with the full sha (gt-glsx8). It goes red if a change touches bd's
 // flags or drops the strip.
-func TestBDBuildStampsFollowTheStripFlags(t *testing.T) {
+func TestBDBuildFlagsAreUnchanged(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
@@ -596,11 +596,11 @@ func TestBuildBinariesStillChecksOutTheFullCommit(t *testing.T) {
 	}
 }
 
-// TestBuildBinariesBdAndOmLinkFlags: the image's bd carries the -s -w strip
+// TestBuildBinariesBdAndOmStampsUnchanged: the image's bd carries the -s -w strip
 // flags and both halves of the build id `bd version` prints, main.Build before
 // main.Commit, the way bdbuild stamps the polecat image's bd (gt-glsx8,
 // gt-aermmg), and om carries the strip flags and no stamp.
-func TestBuildBinariesBdAndOmLinkFlags(t *testing.T) {
+func TestBuildBinariesBdAndOmStampsUnchanged(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
