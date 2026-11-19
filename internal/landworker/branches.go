@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // polecatRefPrefix is the origin ref space of a polecat's work branches; a
@@ -31,6 +32,12 @@ type RemoteRef struct {
 // that landed. Best effort: a failed list or delete is logged, and the
 // landing's record is already written, so nothing here fails or re-delays it.
 //
+// A branch another open ready-to-land bead names in its READY TO LAND block
+// is kept, on origin and in the rig repository alike: that bead's work is on
+// it, and the landed bead's id in the name proves nothing about whose commits
+// it holds (gt-9c46mz). A ready list that cannot be read keeps every branch of
+// the reap, because an answer that was not read cannot clear a branch.
+//
 // It returns every branch it found for the bead, deleted or not, so the
 // landing path can also refresh the seat of each polecat that authored one
 // (gt-fn9e6.55).
@@ -43,14 +50,30 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 		w.logf("%s: listing the polecat branches to delete: %v", beadID, err)
 		return nil
 	}
+	var mine []RemoteRef
 	var found []string
-	deleted := 0
 	for _, ref := range refs {
 		if !branchForBead(ref.Name, beadID) {
 			continue
 		}
+		mine = append(mine, ref)
+		found = append(found, strings.TrimPrefix(ref.Name, "refs/heads/"))
+	}
+	if len(mine) == 0 {
+		return nil
+	}
+	holders, err := w.readyBranchHolders(beadID)
+	if err != nil {
+		w.logf("%s: kept its polecat branches %s: listing %s beads: %v", beadID, strings.Join(found, ", "), land.LabelReadyToLand, err)
+		return found
+	}
+	deleted := 0
+	for _, ref := range mine {
 		branch := strings.TrimPrefix(ref.Name, "refs/heads/")
-		found = append(found, branch)
+		if holder, held := holders[branch]; held {
+			w.logf("%s: kept %s: ready-to-land bead %s names it", beadID, branch, holder)
+			continue
+		}
 		if err := w.Remote.DeleteRemoteBranchIfAt(branch, ref.Hash); err != nil {
 			w.logf("%s: deleting %s on origin: %v", beadID, branch, err)
 		} else {
@@ -64,6 +87,27 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 		w.logf("%s: deleted %d stale polecat branch(es) on origin", beadID, deleted)
 	}
 	return found
+}
+
+// readyBranchHolders maps each polecat branch an open ready-to-land bead other
+// than beadID names in its last READY TO LAND block to that bead's id. The
+// list is the landing pass's own (the label, every status but closed), so a
+// deferred bead that still waits to land holds its branch too.
+func (w *Worker) readyBranchHolders(beadID string) (map[string]string, error) {
+	issues, err := w.Beads.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
+	if err != nil {
+		return nil, err
+	}
+	holders := map[string]string{}
+	for _, issue := range issues {
+		if issue == nil || issue.ID == beadID {
+			continue
+		}
+		if work, ok := land.ParseReadyNote(issue.Notes); ok {
+			holders[work.Branch] = issue.ID
+		}
+	}
+	return holders, nil
 }
 
 // deleteLocalBranch deletes the rig repository's copy of a polecat branch
