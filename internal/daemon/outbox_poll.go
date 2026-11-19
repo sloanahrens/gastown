@@ -163,6 +163,13 @@ func (h *patrolScanHost) fileOutboxPollRequest(_ context.Context, req outboxPoll
 	// escalation alone. StatusDone is the status on which Apply writes no
 	// status: the seat still runs, and its end sets it.
 	carried := outbox.Result{Status: outbox.StatusDone, Escalation: decoded.Escalation}
+	// A tick hands this request to the seat end's filing path every time it
+	// reads the seat's outbox, for as long as that seat's record lives: the
+	// seat end's fingerprint leaves an escalation that is still open alone, but
+	// the poll keeps no memory of what an earlier tick read. Deduping a request
+	// across ticks is gt-0ghqvp, and that ordering is by design. The poll is
+	// off by default, and it must not be enabled before gt-0ghqvp lands
+	// (gt-dq4ce6).
 	return outbox.Apply(store, req.Bead, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, "", carried, outbox.OriginTip{})
 }
 

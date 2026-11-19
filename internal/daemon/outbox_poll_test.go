@@ -217,8 +217,8 @@ func TestNoBeadAccessOutboxPollRefusesWhileATickRuns(t *testing.T) {
 }
 
 // TestNoBeadAccessOutboxPollTickWithoutASeamCompletes: a daemon with no tick
-// seam runs the live poll, which refuses while no filing seam is wired; the
-// refusal still ends the tick and frees the guard (gt-0hkj0c, gt-nvii5d).
+// seam runs the live poll, and a town with no running seat ends the tick
+// quietly and frees the guard (gt-0hkj0c, gt-nvii5d).
 func TestNoBeadAccessOutboxPollTickWithoutASeamCompletes(t *testing.T) {
 	t.Parallel()
 	d := outboxPollTestDaemon(t, true, io.Discard)
@@ -231,22 +231,72 @@ func TestNoBeadAccessOutboxPollTickWithoutASeamCompletes(t *testing.T) {
 	}
 }
 
-// TestNoBeadAccessOutboxPollLiveTickFilesThroughASeam: the poll the daemon runs
-// carries its filing seam, so a tick over a town with no running seat ends
-// quietly rather than with the "no filing seam" refusal (gt-dq4ce6).
+// TestNoBeadAccessOutboxPollLiveTickFilesThroughASeam: the tick the daemon
+// starts hands a running seat's request to its own filing seam,
+// d.outboxPollFiling, which files one escalation bead through the seat end's
+// validation and apply; the tick is not refused for a missing seam, and it
+// frees the single-flight guard (gt-dq4ce6).
 func TestNoBeadAccessOutboxPollLiveTickFilesThroughASeam(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	bd := beadsfake.New()
 	var logged bytes.Buffer
 	d := outboxPollTestDaemon(t, true, &logged)
+	d.config.TownRoot = town
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
+	d.prefixRegistryFn = rigPrefixes("gastown")
+	d.openRecoveryBeads = func([]string) beads.Client { return bd }
+	d.outboxPollTick = newOutboxPoll(town, exec, d.outboxPollFiling(), d.logger, time.Second).tick
 
 	d.startOutboxPollTick()
 	d.outboxPollCycles.Wait()
 
+	escalations, err := beads.ListEscalations(bd)
+	if err != nil {
+		t.Fatalf("listing the escalations: %v", err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("the live tick filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+	fields := beads.ParseEscalationFields(escalations[0].Description)
+	for _, c := range []struct{ what, got, want string }{
+		{"title", escalations[0].Title, "HELP: the seat is stuck"},
+		{"escalated_by", fields.EscalatedBy, "gastown/polecats/able"},
+		{"related_bead", fields.RelatedBead, "gt-able"},
+	} {
+		if c.got != c.want {
+			t.Errorf("the live tick's escalation %s = %q, want %q", c.what, c.got, c.want)
+		}
+	}
 	if strings.Contains(logged.String(), "no filing seam is wired") {
 		t.Errorf("the daemon's live poll has no filing seam: %q", logged.String())
 	}
 	if d.outboxPollRunning.Load() {
 		t.Error("the live tick left the single-flight guard held")
+	}
+}
+
+// TestNoBeadAccessOutboxPollNoFilingSeamAlarmsOnce: the nil-seam refusal now
+// reaches only a poll built without a filing seam, and the daemon logs it once
+// rather than on every tick that poll runs (gt-dq4ce6).
+func TestNoBeadAccessOutboxPollNoFilingSeamAlarmsOnce(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := outboxPollTestDaemon(t, true, &logged)
+	d.outboxPollTick = newOutboxPoll(t.TempDir(), &fakeOutboxPollExec{}, nil, d.logger, time.Second).tick
+
+	d.triggerOutboxPoll()
+	d.triggerOutboxPoll()
+
+	if got := strings.Count(logged.String(), errOutboxPollNoFilingSeam.Error()); got != 1 {
+		t.Errorf("the nil-seam refusal is logged %d times over two ticks, want once: %q", got, logged.String())
+	}
+	if !strings.Contains(logged.String(), "the patrol says this once") {
+		t.Errorf("the alarm's log is %q, want it named as the once-only alarm", logged.String())
 	}
 }
 
@@ -352,9 +402,11 @@ func outboxPollTestPoll(t *testing.T, town string, exec outboxPollExec, file out
 	return newOutboxPoll(town, exec, file, log.New(logged, "", 0), time.Second)
 }
 
-// outboxPollTestFiling returns the production filing seam over a fake town bead
-// store: the seat end's own validation and escalation path, with the bd calls
-// answered by fake rather than a live town.
+// outboxPollTestFiling returns the daemon's own filing seam, d.outboxPollFiling,
+// over a fake town bead store: the production wiring of the seat end's
+// validation and escalation path, with the bd calls answered by the fake rather
+// than a live town. A change to the daemon's wiring turns the tests that use it
+// red, which a hand-built patrolScanHost would not.
 func outboxPollTestFiling(t *testing.T, town string, bd *beadsfake.Fake, logged io.Writer) outboxPollFileFunc {
 	t.Helper()
 	d := &Daemon{
@@ -362,9 +414,11 @@ func outboxPollTestFiling(t *testing.T, town string, bd *beadsfake.Fake, logged 
 		logger:           log.New(logged, "", 0),
 		clock:            clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)),
 		prefixRegistryFn: rigPrefixes("gastown"),
+		openRecoveryBeads: func([]string) beads.Client {
+			return bd
+		},
 	}
-	h := &patrolScanHost{d: d, openRecoveryBeads: func([]string) beads.Client { return bd }}
-	return h.fileOutboxPollRequest
+	return d.outboxPollFiling()
 }
 
 // outboxPollSeatRecord writes the sandbox record of one running seat: rig
