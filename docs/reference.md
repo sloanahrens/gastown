@@ -613,12 +613,16 @@ detached, and reads the `result.json` it writes.
 
 `cpus` and `memory` are the pod's total share, not one container's: on the
 Kubernetes backend the Job's pod asks for exactly that total, and the dind
-sidecar's fixed share comes out of it before the runner container gets the
-rest. A total that cannot hold the sidecar and leave the runner a share is
-refused when the run is rendered; on the Kubernetes backend with dind the
-setting must be at least 3 CPUs and 6 GB, because the sidecar asks for 2 and 4
-of them. The Docker backend has no pod, so its runner container asks for the
-whole share.
+sidecar's share comes out of it before the runner container gets the rest.
+`dind_cpus` sets that sidecar's CPU share, default 2: it must be at least 1 and
+below `cpus`, and it is refused unless the backend is `kubernetes` and `dind` is
+on, where no sidecar would read it. Until the daemon passes the share into the
+sweep's Spec (gt-esfo9p), any value but the default is refused too: the sidecar
+would still render 2. With dind the totals must be at least
+`dind_cpus` plus 1 CPUs and 6 GB, because the sidecar's memory stays fixed at 4
+GB and the runner needs 2. A total that cannot hold the sidecar and leave the
+runner a share is refused when the run is rendered. The Docker backend has no
+pod, so its runner container asks for the whole share.
 
 Before a Kubernetes Job is created, the daemon reads every node and pod once
 (`kubectl get nodes,pods -A -o json`). A node is eligible when it is Ready, is

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
@@ -33,6 +34,11 @@ type Spec struct {
 	// MemoryGB is the run's memory share in GB, 2 to 48, in the same units:
 	// the Kubernetes backend's Job pod total, the Docker backend's runner limit.
 	MemoryGB int
+	// DindCPUs is the dind sidecar's CPU share on the Kubernetes backend: at
+	// least 1 and below CPUs, so the runner keeps at least one of the pod's.
+	// Zero means the default, config.SweepDindCPUs. A value set with Dind off is
+	// refused, because no sidecar would read it (gt-h7497c).
+	DindCPUs int
 	// Tiers are the tiers to run, in the order given. Empty runs the tiers a
 	// tier-sweep command line naming none runs (TiersOrDefault).
 	Tiers []string
@@ -110,6 +116,17 @@ func (s Spec) Validate() error {
 	if s.CPUs < 1 || s.CPUs > 16 {
 		return &FieldError{Field: "cpus", Rule: fmt.Sprintf("%d is outside 1-16", s.CPUs)}
 	}
+	if s.DindCPUs < 0 {
+		return &FieldError{Field: "dindCPUs", Rule: fmt.Sprintf("%d is below 0, and 0 means the default %d", s.DindCPUs, config.SweepDindCPUs)}
+	}
+	if s.DindCPUs > 0 {
+		if !s.Dind {
+			return &FieldError{Field: "dindCPUs", Rule: fmt.Sprintf("%d is set, but the run starts no dind sidecar", s.DindCPUs)}
+		}
+		if s.DindCPUs >= s.CPUs {
+			return &FieldError{Field: "dindCPUs", Rule: fmt.Sprintf("%d leaves the runner no share of the pod's %d CPUs", s.DindCPUs, s.CPUs)}
+		}
+	}
 	if s.MemoryGB < 2 || s.MemoryGB > 48 {
 		return &FieldError{Field: "memoryGB", Rule: fmt.Sprintf("%d is outside 2-48", s.MemoryGB)}
 	}
@@ -139,6 +156,15 @@ func (s Spec) Validate() error {
 		return &FieldError{Field: "runID", Rule: fmt.Sprintf("%q is not one name segment; every object the run makes is named after it", s.RunID)}
 	}
 	return nil
+}
+
+// dindCPUShare is the dind sidecar's CPU share: the Spec's DindCPUs, or the
+// config package's default when it names none.
+func (s Spec) dindCPUShare() int {
+	if s.DindCPUs > 0 {
+		return s.DindCPUs
+	}
+	return config.SweepDindCPUs
 }
 
 // defaultTiers are the tiers a run naming none tests: the same three, in the

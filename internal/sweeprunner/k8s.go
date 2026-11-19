@@ -609,9 +609,10 @@ func jobRequest(job *Job, syncPod, reader *Pod) (Amount, error) {
 // renderJob is the Job for a Spec that has passed Validate.
 //
 // Spec.CPUs and Spec.MemoryGB are the pod's total share, not one container's:
-// the dind sidecar's fixed share (dindCPU and dindMemory) comes out of that
-// total, and the runner container gets the rest. A Spec whose total cannot hold
-// the sidecar and leave the runner a share is refused (gt-gg9hv.38).
+// the dind sidecar's share (Spec.DindCPUs, defaulting to config.SweepDindCPUs,
+// and config.SweepDindMemoryGB) comes out of that total, and the runner
+// container gets the rest. A Spec whose total cannot hold the sidecar and leave
+// the runner a share is refused (gt-gg9hv.38).
 func renderJob(spec Spec) (*Job, error) {
 	runner, err := runnerContainer(spec)
 	if err != nil {
@@ -634,7 +635,7 @@ func renderJob(spec Spec) (*Job, error) {
 		// Job ends when the runner exits, and the kubelet then stops the sidecar
 		// too, so the run gives its share back instead of running to the
 		// deadline (gt-etbor).
-		initContainers = append(initContainers, dindContainer())
+		initContainers = append(initContainers, dindContainer(spec))
 		volumes = append(volumes, Volume{Name: dindVolume, EmptyDir: &EmptyDirVolumeSource{}})
 	}
 	return &Job{
@@ -709,11 +710,14 @@ func runnerContainer(spec Spec) (Container, error) {
 	}, nil
 }
 
-// dindRequest is the dind sidecar's fixed share, read from the quantities its
-// container renders, so the figure the runner's share subtracts cannot drift
-// from the figure the pod asks for. The constants are this package's own, so an
-// unreadable one is a build mistake: the tests render it and see it fail.
-var dindRequest = mustAmount(dindCPU, dindMemory)
+// dindRequest is the dind sidecar's share for a run, read from the quantities
+// its container renders, so the figure the runner's share subtracts cannot
+// drift from the figure the pod asks for. The CPU quantity comes from a Go int
+// and the memory from the config package's constant, so an unreadable one is a
+// build mistake: the tests render it and see it fail.
+func dindRequest(spec Spec) Amount {
+	return mustAmount(strconv.Itoa(spec.dindCPUShare()), dindMemory)
+}
 
 // mustAmount is amountOf for a quantity the package defines. An unreadable
 // constant leaves no run to refuse, so it panics where every test sees it
@@ -734,10 +738,11 @@ func runnerShare(spec Spec) (ResourceList, error) {
 	cpu := int64(spec.CPUs) * 1000
 	memory := int64(spec.MemoryGB) << 30
 	if spec.Dind {
-		cpu -= dindRequest.CPU
-		memory -= dindRequest.Memory
+		sidecar := dindRequest(spec)
+		cpu -= sidecar.CPU
+		memory -= sidecar.Memory
 		if cpu <= 0 {
-			return ResourceList{}, &FieldError{Field: "cpus", Rule: fmt.Sprintf("%d is the whole pod's CPUs, and the dind sidecar's %s share leaves the runner nothing", spec.CPUs, dindCPU)}
+			return ResourceList{}, &FieldError{Field: "cpus", Rule: fmt.Sprintf("%d is the whole pod's CPUs, and the dind sidecar's %d share leaves the runner nothing", spec.CPUs, spec.dindCPUShare())}
 		}
 		if memory <= 0 {
 			return ResourceList{}, &FieldError{Field: "memoryGB", Rule: fmt.Sprintf("%d is the whole pod's GB of memory, and the dind sidecar's %s share leaves the runner nothing", spec.MemoryGB, dindMemory)}
@@ -776,8 +781,8 @@ func memoryQuantity(bytes int64) string {
 // It is rendered as a native sidecar: restartPolicy Always on an init container
 // makes the kubelet start it before the runner and stop it when the runner
 // exits, so the Job completes and the pod releases its share (gt-etbor).
-func dindContainer() Container {
-	share := ResourceList{CPU: dindCPU, Memory: dindMemory}
+func dindContainer(spec Spec) Container {
+	share := ResourceList{CPU: strconv.Itoa(spec.dindCPUShare()), Memory: dindMemory}
 	return Container{
 		Name:  dindContainerName,
 		Image: templates.SweepDindImage,
@@ -1076,10 +1081,12 @@ func int64Ptr(v int64) *int64 { return &v }
 // omitted.
 func boolPtr(v bool) *bool { return &v }
 
-// dindCPU and dindMemory are the sidecar's share, requested and limited like
-// the runner's: an unbounded nested engine competes with the run it serves and
-// with the node's other pods. They come from the config package's constants,
-// which the settings validation reads too, so the figure has one source.
+// dindCPU is the sidecar's default CPU quantity, for a Spec whose DindCPUs
+// names none, and dindMemory is its fixed memory quantity. Both are requested
+// and limited like the runner's: an unbounded nested engine competes with the
+// run it serves and with the node's other pods. They come from the config
+// package's constants, which the settings validation reads too, so the figure
+// has one source.
 var (
 	dindCPU    = strconv.Itoa(config.SweepDindCPUs)
 	dindMemory = strconv.Itoa(config.SweepDindMemoryGB) + "Gi"

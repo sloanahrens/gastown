@@ -3544,9 +3544,19 @@ type TierSweepRunnerConfig struct {
 	Image string `json:"image"`
 
 	// CPUs is the run's CPU share, 1 to 16. On the Kubernetes backend it is the
-	// whole Job pod's total: the dind sidecar's fixed share comes out of it, so
-	// with dind the minimum is 3 (the sidecar's 2 CPUs and the runner's 1).
+	// whole Job pod's total: the dind sidecar's share (DindCPUs, the default 2
+	// when unset) comes out of it, so with dind the minimum is that share plus
+	// the runner's 1.
 	CPUs int `json:"cpus"`
+
+	// DindCPUs is the dind sidecar's CPU share on the Kubernetes backend: at
+	// least 1 and below CPUs, so the runner keeps at least one of the pod's.
+	// Zero means the default, SweepDindCPUs. A value set for a backend or a
+	// block that starts no sidecar is refused: it would read as effective and
+	// do nothing. Until the daemon passes the share into the sweep's Spec
+	// (gt-esfo9p), any value but the default is refused for the same reason:
+	// the sidecar would still render 2 (gt-h7497c).
+	DindCPUs int `json:"dind_cpus,omitempty"`
 
 	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
 	// backend the whole Job pod's total, as CPUs is. With dind the minimum is 6
@@ -3626,6 +3636,17 @@ func (c *TierSweepRunnerConfig) ProtectedNamespaceList() []string {
 	return append([]string(nil), DefaultSweepProtectedNamespaces...)
 }
 
+// DindCPUShare is the dind sidecar's CPU share on the Kubernetes backend: the
+// setting, or SweepDindCPUs when it names none. validate refuses a setting for
+// a block that would render no sidecar, and a non-default setting until the
+// daemon passes it into the sweep's Spec (gt-esfo9p).
+func (c *TierSweepRunnerConfig) DindCPUShare() int {
+	if c.DindCPUs > 0 {
+		return c.DindCPUs
+	}
+	return SweepDindCPUs
+}
+
 // The ranges TierSweepRunnerConfig accepts, matching sweeprunner.Spec.Validate.
 // The spec's own Validate is the authority: it runs on every rendered run, so a
 // config built in code rather than decoded cannot reach a backend with a value
@@ -3640,10 +3661,12 @@ const (
 	runnerJobsMax   = 16
 )
 
-// SweepDindCPUs and SweepDindMemoryGB are the dind sidecar's fixed share on the
-// Kubernetes backend. internal/sweeprunner renders the sidecar from these two
-// constants and this package refuses a pod total that cannot hold them, so the
-// figure has one source (gt-gg9hv.38).
+// SweepDindCPUs is the dind sidecar's default CPU share on the Kubernetes
+// backend, used when the runner block names no dind_cpus. SweepDindMemoryGB is
+// its fixed memory share: memory stays a constant while a run may raise the CPU
+// share (gt-h7497c). internal/sweeprunner renders the sidecar from these two,
+// and this package refuses a pod total that cannot hold them, so each figure
+// has one source (gt-gg9hv.38).
 const (
 	SweepDindCPUs     = 2
 	SweepDindMemoryGB = 4
@@ -3700,17 +3723,38 @@ func (c *TierSweepRunnerConfig) validate() error {
 	if c.Memory < runnerMemoryMin || c.Memory > runnerMemoryMax {
 		return fmt.Errorf("memory = %d: want %d-%d GB", c.Memory, runnerMemoryMin, runnerMemoryMax)
 	}
+	// dind_cpus is the sidecar's CPU share, so it is only meaningful where the
+	// Kubernetes backend starts one: 0 takes the default, a negative value is no
+	// share, and a setting for a block that renders no sidecar would read as
+	// effective and do nothing (gt-h7497c).
+	if c.DindCPUs < 0 {
+		return fmt.Errorf("dind_cpus = %d: want 0 for the default %d, or at least 1", c.DindCPUs, SweepDindCPUs)
+	}
+	if c.DindCPUs > 0 && (c.Backend != TierSweepRunnerKubernetes || !c.Dind) {
+		return fmt.Errorf("dind_cpus = %d: want it only with backend %s and dind on", c.DindCPUs, TierSweepRunnerKubernetes)
+	}
 	// With dind the Kubernetes setting is the whole pod's total, so it must hold
-	// the sidecar's fixed share and still leave the runner its own minimum. A
-	// total at or below the sidecar's share renders a runner with nothing
-	// (gt-gg9hv.38).
+	// the sidecar's share and still leave the runner its own minimum. A total at
+	// or below the sidecar's share renders a runner with nothing; when the share
+	// is the operator's own setting, the error names that key instead
+	// (gt-gg9hv.38, gt-h7497c).
 	if c.Backend == TierSweepRunnerKubernetes && c.Dind {
-		if min := runnerCPUsMin + SweepDindCPUs; c.CPUs < min {
-			return fmt.Errorf("cpus = %d: want at least %d with dind (the sidecar's %d CPUs plus the runner's %d)", c.CPUs, min, SweepDindCPUs, runnerCPUsMin)
+		if share := c.DindCPUShare(); c.CPUs < runnerCPUsMin+share {
+			if c.DindCPUs > 0 {
+				return fmt.Errorf("dind_cpus = %d: want below cpus = %d, so the runner keeps at least %d CPU", c.DindCPUs, c.CPUs, runnerCPUsMin)
+			}
+			return fmt.Errorf("cpus = %d: want at least %d with dind (the sidecar's %d CPUs plus the runner's %d)", c.CPUs, runnerCPUsMin+share, share, runnerCPUsMin)
 		}
 		if min := runnerMemoryMin + SweepDindMemoryGB; c.Memory < min {
 			return fmt.Errorf("memory = %d: want at least %d GB with dind (the sidecar's %d GB plus the runner's %d)", c.Memory, min, SweepDindMemoryGB, runnerMemoryMin)
 		}
+	}
+	// The daemon builds the sweep's Spec without this setting until gt-esfo9p
+	// passes it through, so the sidecar renders the default however a file names
+	// it. A non-default value is refused rather than loaded and ignored: it
+	// would read as effective and still render 2 (gt-h7497c).
+	if c.DindCPUs > 0 && c.DindCPUs != SweepDindCPUs {
+		return fmt.Errorf("dind_cpus = %d: want unset or the default %d until the daemon passes it into the sweep Spec (gt-esfo9p)", c.DindCPUs, SweepDindCPUs)
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {
 		return fmt.Errorf("jobs = %d: want %d-%d", c.Jobs, runnerJobsMin, runnerJobsMax)
