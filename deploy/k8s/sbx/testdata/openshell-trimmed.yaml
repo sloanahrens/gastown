@@ -1,0 +1,114 @@
+---
+# A trimmed copy of the OpenShell 0.1.4 chart's helm output for the tests in
+# this package: the certgen hook ServiceAccount, Role, RoleBinding and Job, the
+# credential-storage-key-encryption-key Secret, the gateway StatefulSet and its
+# Service. No helm binary renders it.
+# Source: openshell/templates/certgen-serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openshell-certgen
+  namespace: openshell
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+# Source: openshell/templates/certgen-role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openshell-certgen
+  namespace: openshell
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update"]
+---
+# Source: openshell/templates/certgen-rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openshell-certgen
+  namespace: openshell
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openshell-certgen
+subjects:
+  - kind: ServiceAccount
+    name: openshell-certgen
+    namespace: openshell
+---
+# Source: openshell/templates/certgen-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openshell-certgen
+  namespace: openshell
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+spec:
+  template:
+    spec:
+      serviceAccountName: openshell-certgen
+      restartPolicy: Never
+      containers:
+        - name: certgen
+          image: ghcr.io/nvidia/openshell-certgen:0.1.4
+          args:
+            - --server-secret-name=openshell-server-tls
+            - --client-secret-name=openshell-client-tls
+            - --jwt-secret-name=openshell-jwt-keys
+---
+# Source: openshell/templates/credential-encryption-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openshell-credential-storage-key-encryption-key
+  namespace: openshell
+type: Opaque
+data:
+  encryption-key: cmFuZG9tLWJ5dGVzLWZyb20tdGhlLXRlbXBsYXRl
+---
+# Source: openshell/templates/gateway-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openshell
+  namespace: openshell
+spec:
+  serviceName: openshell
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openshell
+  template:
+    metadata:
+      labels:
+        app: openshell
+    spec:
+      serviceAccountName: openshell
+      containers:
+        - name: openshell
+          image: ghcr.io/nvidia/openshell-gateway:0.1.4
+          ports:
+            - name: grpc
+              containerPort: 50051
+---
+# Source: openshell/templates/gateway-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell
+  namespace: openshell
+spec:
+  selector:
+    app: openshell
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
