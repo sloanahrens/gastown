@@ -51,7 +51,8 @@ func analysisOptions(town string) metrics.AnalysisOptions {
 }
 
 // runMetricsAnalyse runs the analysis in env and prints one receipt line: what
-// it published, or that the last run is still current.
+// it published, or that the last run is still current. It is the analyse
+// command's run, which has no use for the result the hour reads.
 //
 // Nothing here needs the gt source checkout: the extract runs in process inside
 // the town (gt-fsoh3), so a town whose gastown/ holds no cmd/gt/main.go still
@@ -59,13 +60,20 @@ func analysisOptions(town string) metrics.AnalysisOptions {
 // lived in this function, and the regression test drives it with a fake
 // (gt-w4brv).
 func runMetricsAnalyse(ctx context.Context, out io.Writer, env metrics.Env, opts metrics.AnalysisOptions) error {
+	_, err := runMetricsAnalyseResult(ctx, out, env, opts)
+	return err
+}
+
+// runMetricsAnalyseResult is runMetricsAnalyse also returning the result, whose
+// DayDir the hour reads the footer from after the receipt is written (gt-t9ll9c).
+func runMetricsAnalyseResult(ctx context.Context, out io.Writer, env metrics.Env, opts metrics.AnalysisOptions) (metrics.AnalysisResult, error) {
 	res, err := metrics.RunAnalysis(ctx, env, opts)
 	if err != nil {
-		return err
+		return res, err
 	}
 	if !res.Ran {
 		_, err := fmt.Fprintf(out, "analyse: not due, the last analysis is under %s old\n", metrics.DailyEvery)
-		return err
+		return res, err
 	}
 	_, err = fmt.Fprintf(out, "analyse %s: %d landings, %d targets -> %s\n",
 		res.Panel.GeneratedAt, res.Landings, len(res.Panel.Targets), filepath.Join(res.Dir, "panel.json"))
@@ -73,9 +81,9 @@ func runMetricsAnalyse(ctx context.Context, out io.Writer, env metrics.Env, opts
 		_, err = fmt.Fprintf(out, "analyse: %d snapshot(s) skipped, their ts does not parse\n", res.SnapshotsSkipped)
 	}
 	if err != nil || len(res.PeaksSkipped) == 0 {
-		return err
+		return res, err
 	}
 	_, err = fmt.Fprintf(out, "analyse: %d peak file(s) skipped, their rows are not joined: %s\n",
 		len(res.PeaksSkipped), strings.Join(res.PeaksSkipped, ", "))
-	return err
+	return res, err
 }

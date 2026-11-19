@@ -173,8 +173,13 @@ func AnalysisDir(town string) string {
 }
 
 // AnalysisResult is one run of the daily analysis: whether it was due, where it
-// published, how many landings it read, and the panel it published.
+// published, where it extracted, how many landings it read, and the panel it
+// published.
 type AnalysisResult struct {
+	// DayDir is the directory the extract wrote the day's tables into, so a
+	// caller can read the footer beside them. It is empty on a run that was not
+	// due, where no extract ran (gt-t9ll9c).
+	DayDir   string
 	Ran      bool
 	Dir      string
 	Landings int
@@ -252,6 +257,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err != nil {
 		return res, fmt.Errorf("extract: %w", err)
 	}
+	res.DayDir = dayDir
 	columns, rows, explainOnly, err := readExtract(env, dayDir)
 	if err != nil {
 		return res, err
