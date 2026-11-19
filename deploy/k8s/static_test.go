@@ -144,7 +144,10 @@ func TestStaticObjectsEveryFileAccountedFor(t *testing.T) {
 		if err != nil {
 			t.Fatalf("StaticExcluded: %v", err)
 		}
-		if problems := accountingProblems(walkStaticYAML(t, "."), staticFileNames, excluded); len(problems) > 0 {
+		// drift-exceptions.yaml is embedded beside the manifests but is not one:
+		// Static returns no object for it, so the accounting names it here.
+		embedded := append(slices.Clone(staticFileNames), driftExceptionsFile)
+		if problems := accountingProblems(walkStaticYAML(t, "."), embedded, excluded); len(problems) > 0 {
 			t.Fatalf("deploy/k8s files not accounted for:\n%s", strings.Join(problems, "\n"))
 		}
 	})

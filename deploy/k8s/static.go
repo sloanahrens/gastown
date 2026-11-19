@@ -32,6 +32,17 @@ var staticFileNames = []string{
 //go:embed bd-gateway-service-admission.yaml update-admission.yaml update-rbac.yaml sweep-rbac.yaml mac-watch-rbac.yaml priority-classes.yaml drift-rbac.yaml deployer-rbac.yaml
 var staticManifests embed.FS
 
+// driftExceptionsFile is the checked-in exceptions file: the live differences
+// the operator has explained. It is not a manifest, so Static returns no object
+// for it, and the accounting test names it as embedded rather than excluded.
+const driftExceptionsFile = "drift-exceptions.yaml"
+
+// DriftExceptions is drift-exceptions.yaml's text at the building commit, so a
+// run reads the exceptions of the build it runs.
+//
+//go:embed drift-exceptions.yaml
+var DriftExceptions []byte
+
 // StaticObject is one Kubernetes object from the static manifests, with its
 // document kept so a renderer applies the text that was reviewed.
 type StaticObject struct {
