@@ -3,6 +3,7 @@ package land
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -408,6 +409,159 @@ func TestFollowupFeedKeepsAnOverlongLineAndStillCompacts(t *testing.T) {
 	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
 		t.Errorf("queue = %+v, %v; want the drained line gone", queued, err)
 	}
+}
+
+// budgetWeek is a landings file with n records landed inside the seven-day
+// window the follow-up budget counts.
+func budgetWeek(t *testing.T, n int) *LandingsFile {
+	t.Helper()
+	f := &LandingsFile{Path: filepath.Join(t.TempDir(), "landings.jsonl")}
+	at := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < n; i++ {
+		if err := f.Append(LandingRecord{BeadID: fmt.Sprintf("gt-week-%d", i), LandedAt: at}); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+	return f
+}
+
+// filedThisWeek is n follow-up beads filed inside the window, the count the
+// budget measures its share against.
+func filedThisWeek(n int) []ExistingFollowup {
+	at := time.Now().UTC().Add(-time.Hour)
+	out := make([]ExistingFollowup, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, ExistingFollowup{ID: fmt.Sprintf("gt-filed-week-%d", i), Title: "an older finding", Status: "open", CreatedAt: at})
+	}
+	return out
+}
+
+// TestFollowupBudgetFeedHoldsAPlanAndQueuesIt: a plan that would carry the
+// week's follow-up beads past their share of its landings is not filed. Its
+// findings go to the same queue the backpressure bound uses, and the line says
+// "weekly budget" so the hold is not read as backpressure (gt-y5wvum).
+func TestFollowupBudgetFeedHoldsAPlanAndQueuesIt(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+	// Five beads filed for eight landings: a sixth bead is over 25 percent.
+	f.lander.Landings = budgetWeek(t, 8)
+	f.fake.existing = filedThisWeek(5)
+	log := f.run()
+	if len(f.fake.created) != 0 {
+		t.Fatalf("filed %d beads over the weekly budget:\n%s", len(f.fake.created), log)
+	}
+	if !strings.Contains(log, "weekly budget") {
+		t.Fatalf("log = %q, want the weekly budget named", log)
+	}
+	if strings.Contains(log, "backpressure bound") {
+		t.Errorf("log = %q, want the budget hold not read as backpressure", log)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || len(queued[0].Findings) != 1 || queued[0].Findings[0].Title != "name the error" {
+		t.Errorf("queue = %+v, want the held finding", queued)
+	}
+}
+
+// TestFollowupBudgetFeedDrainsWhenThereIsRoom: the queue waits for the week to
+// have room again, and the landing that finds it files the held findings
+// (gt-y5wvum).
+func TestFollowupBudgetFeedDrainsWhenThereIsRoom(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+	f.lander.Landings = budgetWeek(t, 8)
+	f.fake.existing = filedThisWeek(5)
+	if log := f.run(); len(f.fake.created) != 0 {
+		t.Fatalf("filed %d beads over the weekly budget:\n%s", len(f.fake.created), log)
+	}
+	// The later landing has nothing of its own to file; the week now has 24
+	// landings, so a sixth bead is at 25 percent rather than over it.
+	f.result.Verdict.Findings = nil
+	at := time.Now().UTC().Add(-time.Minute)
+	for i := 0; i < 16; i++ {
+		if err := f.lander.Landings.Append(LandingRecord{BeadID: fmt.Sprintf("gt-later-%d", i), LandedAt: at}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads with room in the week's budget, want the held one:\n%s", len(f.fake.created), log)
+	}
+	if body := f.fake.created[0].Body; !strings.Contains(body, "name the error") {
+		t.Errorf("bead body lacks the held finding:\n%s", body)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 0 {
+		t.Errorf("queue = %+v, want the drained line gone", queued)
+	}
+}
+
+// TestFollowupBudgetFeedCountsTheBeadsItFiledThisPass: a bead the queue drain
+// files counts in the week's filed total for the landing's own findings after
+// it, so one landing cannot reach the floor with a fresh count and file past
+// its share (gt-y5wvum).
+func TestFollowupBudgetFeedCountsTheBeadsItFiledThisPass(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{minorAt("internal/metrics/panel.go", 40, "count the row")})
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.bd.Seed(beads.Issue{ID: "gt-held", Title: "an earlier landing", Status: "closed", Type: "bug"})
+	// Four beads under the floor of five: the drain files the fifth, and the
+	// landing's own finding is the sixth, over 25 percent of eight landings.
+	f.lander.Landings = budgetWeek(t, 8)
+	f.fake.existing = filedThisWeek(4)
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads, want the held one from the queue and none over budget:\n%s", len(f.fake.created), log)
+	}
+	if !strings.Contains(log, "weekly budget") {
+		t.Errorf("log = %q, want the own finding held by the weekly budget", log)
+	}
+	queued, err := f.reviews.Queued()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || len(queued[0].Findings) != 1 || queued[0].Findings[0].Title != "count the row" {
+		t.Errorf("queue = %+v, want the own finding queued", queued)
+	}
+}
+
+// TestFollowupBudgetFeedNeedsLandings: a landings read that fails applies no
+// budget to the landing and logs the error, so the plan is filed anyway: a
+// broken log must not stop the feed (gt-y5wvum).
+func TestFollowupBudgetFeedNeedsLandings(t *testing.T) {
+	t.Parallel()
+	t.Run("no landings file", func(t *testing.T) {
+		t.Parallel()
+		f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+		f.fake.existing = filedThisWeek(5) // over any budget, if one were applied
+		log := f.run()
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads without a landings file, want the plan filed anyway:\n%s", len(f.fake.created), log)
+		}
+		if !strings.Contains(log, "filing without a weekly budget") {
+			t.Errorf("log = %q, want the missing budget named", log)
+		}
+	})
+	t.Run("a landings file that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+		f.lander.Landings = &LandingsFile{Path: t.TempDir()}
+		f.fake.existing = filedThisWeek(5)
+		log := f.run()
+		if len(f.fake.created) != 1 {
+			t.Fatalf("filed %d beads on an unreadable landings file, want the plan filed anyway:\n%s", len(f.fake.created), log)
+		}
+		if !strings.Contains(log, "could not read the week's landings") {
+			t.Errorf("log = %q, want the unreadable landings named", log)
+		}
+	})
 }
 
 // TestCompactKeepsAQueueMarkedLineItCannotDecode: a line that marks itself a
