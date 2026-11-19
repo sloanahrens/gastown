@@ -46,12 +46,9 @@ var sandboxListing = []string{"find", sandboxProjectsDir, "-type", "f", "-name",
 
 // SandboxTranscript is one transcript the sandbox listing names.
 type SandboxTranscript struct {
-	// Remote is the file's path inside the sandbox.
-	Remote string
-	// Rel is its path under the projects directory, slash-separated.
-	Rel string
-	// Size is the file's size in bytes.
-	Size int64
+	remote string // the file's path inside the sandbox
+	rel    string // its path under the projects directory, slash-separated
+	size   int64  // bytes
 	// MTime is the sandbox's modification time, which the copy keeps.
 	MTime time.Time
 }
@@ -188,14 +185,10 @@ func (b *openshellBackend) clock() time.Time {
 	return time.Now()
 }
 
-// ListSeatTranscripts lists the transcripts of rec's seat inside its sandbox:
-// only those under the seat's own project folder, so another folder's files can
-// neither use up the cap nor be counted as left out by it. A listing that fails,
-// or does not parse, is an error: a missing line would be a silently partial copy.
-//
-// It is exported so a caller outside the seat's lifecycle can read where a
-// seat's transcripts are, and how recently it wrote one, without a spawn: the
-// daemon's silent-seat collector is the first (gt-oq4ele).
+// ListSeatTranscripts lists the transcripts of rec's seat under its own project
+// folder inside its sandbox, so another folder's files can neither use up the
+// copy's cap nor be counted as left out by it; a listing that fails or does not
+// parse is an error, since a missing line would be a silently partial copy.
 func (b *openshellBackend) ListSeatTranscripts(ctx context.Context, rec SandboxRecord) ([]SandboxTranscript, error) {
 	out, _, err := b.cli.Exec(ctx, rec.Session, nil, sandboxListing, nil)
 	if err != nil {
@@ -208,9 +201,9 @@ func (b *openshellBackend) ListSeatTranscripts(ctx context.Context, rec SandboxR
 	return seatFolderTranscripts(all, SandboxTranscriptFolder(rec.Rig, rec.Polecat)), nil
 }
 
-// ListSeatTranscripts reads the listing rec's seat's transcripts make, from the
-// record alone, so a caller that has no Prepare to carry a backend over — the
-// daemon's silent-seat collector — asks the same read the seat end copies out.
+// ListSeatTranscripts lists rec's seat's transcripts, building its backend from
+// the record alone, so a caller with no seat lifecycle to Prepare it asks the
+// read the seat end copies out.
 func ListSeatTranscripts(ctx context.Context, townRoot string, rec SandboxRecord) ([]SandboxTranscript, error) {
 	return recordBackend(townRoot, rec).ListSeatTranscripts(ctx, rec)
 }
@@ -222,7 +215,7 @@ func seatFolderTranscripts(files []SandboxTranscript, folder string) []SandboxTr
 	prefix := folder + "/"
 	var own []SandboxTranscript
 	for _, f := range files {
-		if strings.HasPrefix(f.Rel, prefix) {
+		if strings.HasPrefix(f.rel, prefix) {
 			own = append(own, f)
 		}
 	}
@@ -237,11 +230,11 @@ func seatFolderTranscripts(files []SandboxTranscript, folder string) []SandboxTr
 func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec SandboxRecord, files []SandboxTranscript, dest string) (int, error) {
 	keep, skipped := selectSandboxTranscripts(files, rec.CreatedAt, b.capLimit())
 	for _, f := range keep {
-		local := filepath.Join(dest, filepath.FromSlash(f.Rel))
+		local := filepath.Join(dest, filepath.FromSlash(f.rel))
 		if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
 			return 0, err
 		}
-		if err := b.cli.Download(ctx, rec.Session, f.Remote, filepath.Dir(local)); err != nil {
+		if err := b.cli.Download(ctx, rec.Session, f.remote, filepath.Dir(local)); err != nil {
 			return 0, err
 		}
 		// A download that wrote no file where it was asked to fails here, not later
@@ -285,7 +278,7 @@ func parseSandboxListing(out string) ([]SandboxTranscript, error) {
 		if !ok || !plainTranscriptPath(rel) {
 			return nil, fmt.Errorf("sandbox transcript listing has a path that is not a transcript under %s", sandboxProjectsDir)
 		}
-		files = append(files, SandboxTranscript{Remote: fields[2], Rel: rel, Size: size, MTime: mtime})
+		files = append(files, SandboxTranscript{remote: fields[2], rel: rel, size: size, MTime: mtime})
 	}
 	return files, nil
 }
@@ -339,12 +332,12 @@ func selectSandboxTranscripts(files []SandboxTranscript, since time.Time, limit 
 	var kept []SandboxTranscript
 	var total int64
 	for i, f := range own {
-		// total never exceeds limit, so limit-total cannot overflow, while total+f.Size
+		// total never exceeds limit, so limit-total cannot overflow, while total+f.size
 		// would wrap for a size the sandbox reported near the top of int64.
-		if f.Size > limit-total {
+		if f.size > limit-total {
 			return kept, len(own) - i
 		}
-		total += f.Size
+		total += f.size
 		kept = append(kept, f)
 	}
 	return kept, 0

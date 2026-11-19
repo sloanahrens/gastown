@@ -926,11 +926,12 @@ type Daemon struct {
 	// sandboxSilentUnreadable holds the sandbox seats (session name and the
 	// record's creation time) whose transcript listing could not be read and
 	// whose failure has been logged, so one line is said per seat rather than
-	// per tick (gt-oq4ele). Only the attention tick touches it.
+	// per tick; a full pass drops the seats it no longer lists (gt-oq4ele).
+	// Only the attention tick touches it.
 	sandboxSilentUnreadable sync.Map
 
-	// sandboxTranscripts reads one sandbox seat's transcript listing, the read
-	// the silent-seat collector judges progress by; nil is
+	// sandboxTranscripts lists one sandbox seat's transcripts, the read the
+	// silent-seat collector judges progress by; nil reads through
 	// session.ListSeatTranscripts. Tests set it, so a tick execs into no
 	// sandbox (gt-oq4ele).
 	sandboxTranscripts func(ctx context.Context, townRoot string, rec session.SandboxRecord) ([]session.SandboxTranscript, error)

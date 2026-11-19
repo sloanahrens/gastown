@@ -92,19 +92,21 @@ func (f *silentSandboxFixture) seat(t *testing.T, sessionName, rig, polecat stri
 
 // transcript is one listed transcript of a seat, written old before the tick.
 func (f *silentSandboxFixture) transcript(sessionName string, old time.Duration) {
-	// The listing's own paths do not reach the collector: it reads the times.
-	f.listing[sessionName] = []session.SandboxTranscript{{
-		Remote: "/sandbox/x/y.jsonl",
-		Rel:    "x/y.jsonl",
-		Size:   7,
-		MTime:  silentSandboxNow.Add(-old),
-	}}
+	// The listing's own paths do not reach the collector: it reads the time.
+	f.listing[sessionName] = []session.SandboxTranscript{{MTime: silentSandboxNow.Add(-old)}}
 }
 
 // collect runs the production collector the registry serves for the kind.
 func (f *silentSandboxFixture) collect(t *testing.T) ([]attention.Item, error) {
 	t.Helper()
-	return collectorFor(t, f.src, attention.KindSandboxSilent).collect(context.Background())
+	return f.collectCtx(t, context.Background())
+}
+
+// collectCtx runs the production collector under ctx, so a test can show a tick
+// that has already ended.
+func (f *silentSandboxFixture) collectCtx(t *testing.T, ctx context.Context) ([]attention.Item, error) {
+	t.Helper()
+	return collectorFor(t, f.src, attention.KindSandboxSilent).collect(ctx)
 }
 
 // TestSandboxSilentAttention is the bead's first box. A seat whose newest
@@ -161,8 +163,10 @@ func TestSandboxSilentAttention(t *testing.T) {
 // TestSandboxSilentAttentionRefusals is the bead's second box, and the
 // collector's refusal branches. A listing that cannot be read raises no new
 // item and logs one line per seat, while the item the seat already had is
-// kept; a newer transcript clears an open item; and a registry or record read
-// that fails fails the collection rather than passing as a town with no seat.
+// kept; a newer transcript clears an open item; a registry, profile or record
+// read that fails fails the collection rather than passing as a town with no
+// seat; a seat naming a profile the settings dropped fails it too; and an
+// ended tick stops before the next seat's exec.
 func TestSandboxSilentAttentionRefusals(t *testing.T) {
 	t.Parallel()
 
@@ -302,6 +306,83 @@ func TestSandboxSilentAttentionRefusals(t *testing.T) {
 			t.Errorf("items = %+v, want none beside the error", items)
 		}
 	})
+
+	t.Run("a profile the settings no longer hold fails the collection", func(t *testing.T) {
+		t.Parallel()
+		f := newSilentSandboxFixture(t)
+		if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+			Session: "gt-gastown-gone", Rig: "gastown", Polecat: "gone",
+			Profile: "dropped-profile", CreatedAt: silentSandboxNow.Add(-2 * time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		items, err := f.collect(t)
+		if err == nil {
+			t.Fatalf("collect = %+v, nil; want a seat naming a profile the settings do not hold refused", items)
+		}
+		if items != nil {
+			t.Errorf("items = %+v, want none beside the error", items)
+		}
+		if f.reads != 0 {
+			t.Errorf("listings read = %d, want none for a seat whose profile is unknown", f.reads)
+		}
+	})
+
+	t.Run("a completed pass drops the marks of seats it no longer lists", func(t *testing.T) {
+		t.Parallel()
+		f := newSilentSandboxFixture(t)
+		gone := f.seat(t, "gt-gastown-gone", "gastown", "gone", 2*time.Hour)
+		f.listErr[gone.Session] = errors.New("openshell sandbox exec: gateway did not answer")
+		if _, err := f.collect(t); err != nil {
+			t.Fatal(err)
+		}
+		if n := f.unreadableMarks(); n != 1 {
+			t.Fatalf("marks = %d after one unreadable seat, want 1", n)
+		}
+		if err := os.Remove(filepath.Join(session.SandboxRegistryDir(f.town), gone.Session+".json")); err != nil {
+			t.Fatal(err)
+		}
+		still := f.seat(t, "gt-gastown-still", "gastown", "still", 2*time.Hour)
+		f.listErr[still.Session] = errors.New("openshell sandbox exec: gateway did not answer")
+		if _, err := f.collect(t); err != nil {
+			t.Fatal(err)
+		}
+		if n := f.unreadableMarks(); n != 1 {
+			t.Errorf("marks = %d after the seat ended, want 1 (the ended seat's mark is dropped)", n)
+		}
+		if _, logged := f.d.sandboxSilentUnreadable.Load(sandboxSilentUnreadableKey(gone)); logged {
+			t.Errorf("the ended seat %s keeps its unreadable mark", gone.Session)
+		}
+	})
+
+	t.Run("an expired tick stops before the next seat's read", func(t *testing.T) {
+		t.Parallel()
+		f := newSilentSandboxFixture(t)
+		f.seat(t, "gt-gastown-mango", "gastown", "mango", 2*time.Hour)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		items, err := f.collectCtx(t, ctx)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("collect = %+v, %v; want the ended tick refused", items, err)
+		}
+		if items != nil {
+			t.Errorf("items = %+v, want none beside the error", items)
+		}
+		if f.reads != 0 {
+			t.Errorf("listings read = %d, want none after the tick's deadline", f.reads)
+		}
+	})
+}
+
+// unreadableMarks counts the seats whose unreadable listing has been logged,
+// so a test can show a completed pass prunes the seats it no longer lists.
+func (f *silentSandboxFixture) unreadableMarks() int {
+	var n int
+	f.d.sandboxSilentUnreadable.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
 }
 
 // writeRawRecord files a record's bytes under the registry name, so a test can
