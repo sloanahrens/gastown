@@ -174,6 +174,10 @@ const (
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
 	KindHoldStale Kind = "hold-stale"
+	// KindMetricsExtract: the metrics extract a digest or analysis reads is
+	// stale, gapped, or could not be read at all, so the tables it publishes
+	// no longer describe the town (gt-mi4cem).
+	KindMetricsExtract Kind = "metrics-extract"
 	// KindSandboxPending: a sandbox pod has stayed Pending and unschedulable
 	// past the window, so no agent runs in it and the scheduler's own message
 	// names what the pod cannot get (gt-1gtq5g).
@@ -223,7 +227,7 @@ func Kinds() []Kind {
 		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
+		KindHoldStale, KindMetricsExtract, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer,

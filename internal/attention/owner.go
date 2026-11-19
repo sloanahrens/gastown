@@ -157,6 +157,10 @@ var ruleOwners = map[string]Owner{
 	// A stale hold is the overseer's to release: it reads the hold's reason and
 	// releases the label or closes the bead (gt-j669b4.19).
 	RuleHoldStale: OwnerOverseer,
+	// A stale, gapped or unreadable metrics extract is the town's own run to
+	// look at: the overseer reads why the extract stopped or what its read could
+	// not see before a person is woken (gt-mi4cem).
+	RuleMetricsExtract: OwnerOverseer,
 	// A sandbox pod the scheduler cannot place is the town's own pool to look
 	// at: the overseer gives the pod what its request needs, or lowers the
 	// request, before a person is woken (gt-1gtq5g).
