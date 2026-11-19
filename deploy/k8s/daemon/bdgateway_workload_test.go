@@ -536,3 +536,54 @@ func TestBdGatewayLogClaimGolden(t *testing.T) {
 	}
 	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "bd-gateway-claims.yaml", claims)
 }
+
+// TestBdGatewayLogVolumePinned holds the call log to the claim, so a pod
+// replacement keeps it: the pod's bd-gateway-log volume is a
+// PersistentVolumeClaim naming BdGatewayLogClaim, mounted at /var/log/bdgw, and no
+// volume of that name is an emptyDir.
+func TestBdGatewayLogVolumePinned(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, bdGatewayWorkloadValues(t)).BdGatewayDeployment.Spec.Template.Spec
+
+	for i := range pod.Volumes {
+		v := &pod.Volumes[i]
+		if v.Name == bdGatewayLogVolume && v.EmptyDir != nil {
+			t.Errorf("the %q volume is an emptyDir, want the %q claim", bdGatewayLogVolume, BdGatewayLogClaim)
+		}
+	}
+	vol := renderVolume(pod, bdGatewayLogVolume)
+	switch {
+	case vol == nil:
+		t.Fatalf("the gateway pod has no %q volume: %+v", bdGatewayLogVolume, pod.Volumes)
+	case vol.PersistentVolumeClaim == nil:
+		t.Fatalf("the %q volume is not a PersistentVolumeClaim: %+v", bdGatewayLogVolume, *vol)
+	case vol.PersistentVolumeClaim.ClaimName != BdGatewayLogClaim:
+		t.Errorf("the %q volume names claim %q, want %q", bdGatewayLogVolume, vol.PersistentVolumeClaim.ClaimName, BdGatewayLogClaim)
+	}
+
+	var mounted bool
+	for _, m := range pod.Containers[0].VolumeMounts {
+		if m.Name == bdGatewayLogVolume && m.MountPath == "/var/log/bdgw" {
+			mounted = true
+		}
+	}
+	if !mounted {
+		t.Errorf("the gateway container does not mount %q at /var/log/bdgw: %+v", bdGatewayLogVolume, pod.Containers[0].VolumeMounts)
+	}
+}
+
+// TestBdGatewayLogVolumeRest holds what the claim switch leaves alone: one replica
+// under Recreate, and the token copies still on an emptyDir.
+func TestBdGatewayLogVolumeRest(t *testing.T) {
+	t.Parallel()
+	d := mustBuild(t, bdGatewayWorkloadValues(t)).BdGatewayDeployment
+	if d.Spec.Replicas != 1 {
+		t.Errorf("the gateway has %d replicas, want 1", d.Spec.Replicas)
+	}
+	if d.Spec.Strategy.Type != "Recreate" {
+		t.Errorf("the gateway strategy is %q, want Recreate", d.Spec.Strategy.Type)
+	}
+	if vol := renderVolume(d.Spec.Template.Spec, bdGatewayTokensVolume); vol == nil || vol.EmptyDir == nil {
+		t.Errorf("the token copies are not on an emptyDir: %+v", d.Spec.Template.Spec.Volumes)
+	}
+}

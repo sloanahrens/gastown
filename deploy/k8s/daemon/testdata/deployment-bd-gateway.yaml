@@ -110,7 +110,8 @@ spec:
         - name: bd-gateway-tokens
           emptyDir: {}
         - name: bd-gateway-log
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: bd-gateway-log
         - name: bd-gateway-workspace
           persistentVolumeClaim:
             claimName: bd-gateway-workspace
