@@ -251,7 +251,7 @@ func (l *RoundsLedger) AppendLane(lane string, round int, head string, findings 
 		return l.save(doc)
 	}
 	doc.Rounds = append(doc.Rounds, next)
-	sort.SliceStable(doc.Rounds, func(i, j int) bool { return doc.Rounds[i].Round < doc.Rounds[j].Round })
+	sortRounds(doc.Rounds)
 	return l.save(doc)
 }
 
@@ -288,11 +288,10 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 	return l.save(doc)
 }
 
-// Render returns the ledger as the JSON array gt-3l5qy writes for om, newest
-// rounds first kept: trimming follows the round number, so an output over
-// maxBytes loses its lowest-numbered rounds whole and keeps the newest even
-// alone over the cap. Zero or negative maxBytes means DefaultRoundsCap. A ledger
-// that does not parse is ErrRoundsCorrupt, which the caller treats as no history.
+// Render returns the ledger as the JSON array gt-3l5qy writes for om, each
+// lane's rounds together and ascending: over maxBytes it drops the earliest
+// rounds whole and keeps the last even alone over it. Zero or negative maxBytes
+// means DefaultRoundsCap; a ledger that does not parse is ErrRoundsCorrupt.
 func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRoundsCap
@@ -464,8 +463,23 @@ func (l *RoundsLedger) load() (ledgerDoc, error) {
 	if err := doc.check(name, l.Bead); err != nil {
 		return ledgerDoc{}, err
 	}
-	sort.SliceStable(doc.Rounds, func(i, j int) bool { return doc.Rounds[i].Round < doc.Rounds[j].Round })
+	sortRounds(doc.Rounds)
 	return doc, nil
+}
+
+// sortRounds orders rounds by lane, lanes in first-appearance order and rounds
+// ascending inside one, so a lane's rounds read together (gt-sp439m).
+func sortRounds(rounds []ledgerRound) {
+	rank := map[string]int{}
+	for _, r := range rounds {
+		if _, ok := rank[r.Lane]; !ok {
+			rank[r.Lane] = len(rank)
+		}
+	}
+	sort.SliceStable(rounds, func(i, j int) bool {
+		a, b := rank[rounds[i].Lane], rank[rounds[j].Lane]
+		return a < b || a == b && rounds[i].Round < rounds[j].Round
+	})
 }
 
 // check reports a document that cannot be this landing's ledger: another bead's
