@@ -55,11 +55,9 @@ func storyPointsEvalSince(value string) (time.Time, error) {
 // with its held-out error. stats is nil when the part is under the minimum, so
 // no figure is printed from a part too small to read.
 func writeStoryPointsEval(w io.Writer, counts EvalCounts, testRows int, stats []PredictorStats) error {
-	if _, err := fmt.Fprintf(w, "story points evaluation: %d test rows of %d joined rows (%d landing records read)\n",
-		testRows, counts.Joined, counts.Records); err != nil {
-		return err
-	}
-	if _, err := fmt.Fprintf(w, "  dropped: no estimate %d, lower bound %d, upper bound %d, absent %d; malformed log lines %d\n",
+	if _, err := fmt.Fprintf(w, "story points evaluation: %d test rows of %d joined rows (%d landing records read)\n"+
+		"  dropped: no estimate %d, lower bound %d, upper bound %d, absent %d; malformed log lines %d\n",
+		testRows, counts.Joined, counts.Records,
 		counts.NoEstimate, counts.LowerBound, counts.UpperBound, counts.Absent, counts.MalformedLog); err != nil {
 		return err
 	}

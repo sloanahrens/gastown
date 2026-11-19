@@ -3,7 +3,9 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -88,13 +90,44 @@ func TestStoryPointsEvalShortPart(t *testing.T) {
 	}
 }
 
-// TestStoryPointsEvalReportsAFailedWrite: a table the step cannot write fails
-// the run, rather than reporting an evaluation nobody saw.
+// failAfterWrites accepts n writes and fails the next, so a case can fail the
+// line after the counts alone.
+type failAfterWrites struct {
+	writes, n int
+}
+
+func (w *failAfterWrites) Write(p []byte) (int, error) {
+	if w.writes >= w.n {
+		return 0, errors.New("closed pipe")
+	}
+	w.writes++
+	return len(p), nil
+}
+
+// TestStoryPointsEvalReportsAFailedWrite: each line the step writes fails the
+// run when it cannot be written, rather than reporting an evaluation nobody
+// saw.
 func TestStoryPointsEvalReportsAFailedWrite(t *testing.T) {
 	t.Parallel()
-	err := writeStoryPointsEval(&firstWriteFails{}, EvalCounts{}, 0, nil)
-	if err == nil || !strings.Contains(err.Error(), "closed pipe") {
-		t.Fatalf("err = %v, want the failed write's error", err)
+	stats := []PredictorStats{{Name: predictorBlended, N: storyPointsEvalMinTest}}
+	cases := []struct {
+		name     string
+		w        io.Writer
+		testRows int
+		stats    []PredictorStats
+	}{
+		{"the counts", &firstWriteFails{}, 0, nil},
+		{"the short-part line", &failAfterWrites{n: 1}, storyPointsEvalMinTest - 1, nil},
+		{"the table", &failAfterWrites{n: 1}, storyPointsEvalMinTest, stats},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := writeStoryPointsEval(tc.w, EvalCounts{}, tc.testRows, tc.stats)
+			if err == nil || !strings.Contains(err.Error(), "closed pipe") {
+				t.Fatalf("err = %v, want the failed write's error", err)
+			}
+		})
 	}
 }
 
