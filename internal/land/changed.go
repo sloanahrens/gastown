@@ -312,6 +312,16 @@ var treeWideGuards = []treeWideGuard{
 		judges:  func(rel string) bool { return rel == "deploy/polecat/policy.yaml" },
 		removal: true,
 	},
+	{
+		// TestSecretsManifestNamesAreSecretShaped reads the secrets manifest's
+		// names against townstate.SecretShape, so a branch that adds a secret
+		// with an odd name runs the guard that refuses it. The test reads the
+		// file, so deleting it fails the test too (gt-4kf6kk).
+		pkg:     "internal/townstate",
+		tests:   []string{"TestSecretsManifestNamesAreSecretShaped"},
+		judges:  func(rel string) bool { return rel == "deploy/daemon/secrets.yaml" },
+		removal: true,
+	},
 	// The always entries: guards that scan the whole tree, so no path
 	// predicate can name their input, and a new file is exactly the change
 	// that breaks them. Every non-empty diff runs them.

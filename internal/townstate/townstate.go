@@ -68,6 +68,11 @@ func (m *Manifest) Rollback() []Entry {
 	return (*manifestdata.Manifest)(m).Rollback()
 }
 
+// Backup returns the rows tagged backup: true, in manifest order.
+func (m *Manifest) Backup() []Entry {
+	return (*manifestdata.Manifest)(m).Backup()
+}
+
 // Expand replaces the rig and bird placeholders with the names a town has.
 func (m *Manifest) Expand(rigs, birds []string) []Entry {
 	return (*manifestdata.Manifest)(m).Expand(rigs, birds)
