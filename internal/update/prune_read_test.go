@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -31,27 +32,34 @@ func pruneItem(name, tag, digest string, pushed time.Time) string {
 }
 
 // pruneAnswer is one scripted packages page: its status, the X-Total-Count it
-// reports (none when empty), its body, and readErr when reading the body fails.
+// reports (none when empty), its body, the Server and Via headers it answers
+// with, and readErr when reading the body fails.
 type pruneAnswer struct {
 	status  int
 	total   string
 	body    string
 	readErr error
+	server  string
+	via     string
 }
 
 // pruneForgejoFake answers the packages listing from a script per image:
 // answers[image] holds the answer to each page in turn. A page past the script
 // answers an empty listing with the last page's total, as a listing that has
-// run out does. Every request's method is recorded, and doErr, when set, is the
+// run out does. Every request's method and URL are recorded, each answer names
+// the request it answers as a real client's does, and doErr, when set, is the
 // failure every request gets instead of an answer.
 type pruneForgejoFake struct {
 	answers map[string][]pruneAnswer
 	methods []string
+	urls    []*url.URL
 	doErr   error
 }
 
 func (f *pruneForgejoFake) Do(req *http.Request) (*http.Response, error) {
 	f.methods = append(f.methods, req.Method)
+	u := *req.URL
+	f.urls = append(f.urls, &u)
 	if f.doErr != nil {
 		return nil, f.doErr
 	}
@@ -61,14 +69,16 @@ func (f *pruneForgejoFake) Do(req *http.Request) (*http.Response, error) {
 		return nil, fmt.Errorf("fake: page %q is not a number", q.Get("page"))
 	}
 	script := f.answers[q.Get("q")]
-	if len(script) == 0 {
-		return pruneResponse(pruneAnswer{status: http.StatusOK, total: "0", body: "[]"}), nil
+	resp := pruneResponse(pruneAnswer{status: http.StatusOK, total: "0", body: "[]"})
+	if len(script) != 0 {
+		a := script[min(page, len(script))-1]
+		if page > len(script) {
+			a.body = "[]"
+		}
+		resp = pruneResponse(a)
 	}
-	a := script[min(page, len(script))-1]
-	if page > len(script) {
-		a.body = "[]"
-	}
-	return pruneResponse(a), nil
+	resp.Request = req
+	return resp, nil
 }
 
 // pruneResponse is the answer a scripted page makes.
@@ -76,6 +86,12 @@ func pruneResponse(a pruneAnswer) *http.Response {
 	h := http.Header{}
 	if a.total != "" {
 		h.Set("X-Total-Count", a.total)
+	}
+	if a.server != "" {
+		h.Set("Server", a.server)
+	}
+	if a.via != "" {
+		h.Set("Via", a.via)
 	}
 	var body io.Reader = strings.NewReader(a.body)
 	if a.readErr != nil {
@@ -207,8 +223,10 @@ func TestPruneReadRegistryRefusesAnUnreadableListing(t *testing.T) {
 		daemon []pruneAnswer
 		marked bool
 	}{
+		// A non-200 answer's body is now the answer's reason, redacted and
+		// shown (TestPruneReadReasonRedacted): the marker is not a credential.
 		{"non-200 answer with a listing that would read", []pruneAnswer{{status: http.StatusInternalServerError, total: "1", body: "[" +
-			pruneItem("gastown-daemon", pruneReadMarker, pruneDigest("a"), pruneBase) + "]"}}, true},
+			pruneItem("gastown-daemon", pruneReadMarker, pruneDigest("a"), pruneBase) + "]"}}, false},
 		{"body that is not a listing", []pruneAnswer{{status: http.StatusOK, total: "1", body: "<html>" + pruneReadMarker}}, true},
 		{"listing short of its total", []pruneAnswer{{status: http.StatusOK, total: "3", body: one}}, false},
 		{"total header missing", []pruneAnswer{{status: http.StatusOK, body: one}}, false},
@@ -261,6 +279,187 @@ func pruneEndless() []pruneAnswer {
 		pages = append(pages, pruneAnswer{status: http.StatusOK, total: "100000", body: `[{"name":"other-app","version":"x"}]`})
 	}
 	return pages
+}
+
+// TestPruneReadReasonShown holds that a refused packages answer carries
+// Forgejo's own reason after the status text: the JSON "message" when the body
+// is an object holding one, else the body's first line, and who answered.
+func TestPruneReadReasonShown(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		answer     pruneAnswer
+		want       []string
+		wantSuffix string
+		absent     []string
+	}{
+		{
+			name:       "JSON message",
+			answer:     pruneAnswer{status: http.StatusBadRequest, body: `{"message":"bad request: page size"}`},
+			want:       []string{"answered HTTP 400 for gastown-daemon", ": bad request: page size"},
+			wantSuffix: ": bad request: page size",
+			absent:     []string{`server "`, `via "`},
+		},
+		{
+			name: "plain-text body with the answering server",
+			answer: pruneAnswer{
+				status: http.StatusBadRequest, body: "Client sent an HTTP request to an HTTPS server.",
+				server: "gitea/1.22", via: "1.1 caddy",
+			},
+			want: []string{
+				"answered HTTP 400 for gastown-daemon",
+				`server "gitea/1.22"`,
+				`via "1.1 caddy"`,
+				"Client sent an HTTP request to an HTTPS server.",
+				"requested https://forgejo.example",
+			},
+			absent: []string{"/api/", "limit=50"},
+		},
+		{
+			name:   "answering-side header is capped",
+			answer: pruneAnswer{status: http.StatusBadGateway, server: strings.Repeat("s", pruneReasonSideMaxBytes+20)},
+			want:   []string{`server "` + strings.Repeat("s", pruneReasonSideMaxBytes) + `"`},
+			absent: []string{strings.Repeat("s", pruneReasonSideMaxBytes+1)},
+		},
+		{
+			name:   "object with no message field falls back to the body",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"errors":["nope"]}`},
+			want:   []string{`{"errors":["nope"]}`},
+		},
+		{
+			name:   "body that cannot be read",
+			answer: pruneAnswer{status: http.StatusBadRequest, readErr: errors.New("connection reset")},
+			want:   []string{"answered HTTP 400 for gastown-daemon", "the answer body could not be read"},
+			absent: []string{"connection reset"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": {tc.answer}}}
+			reg := PruneRegistryReader{
+				Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+				Credentials: func() (string, string, error) { return "viewer", "secret-token", nil },
+			}
+			_, err := reg.Images(context.Background())
+			if err == nil {
+				t.Fatal("Images() = nil error, want a refusal")
+			}
+			for _, s := range tc.want {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q does not contain %q", err, s)
+				}
+			}
+			if tc.wantSuffix != "" && !strings.HasSuffix(err.Error(), tc.wantSuffix) {
+				t.Errorf("error %q does not end with %q", err, tc.wantSuffix)
+			}
+			for _, s := range tc.absent {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("error %q contains %q, want it left out", err, s)
+				}
+			}
+		})
+	}
+}
+
+// TestPruneReadReasonRedacted holds that the reason a refused answer reports
+// never carries the viewer's user or token, which Forgejo 16.0.5 echoes in a
+// 401 message.
+func TestPruneReadReasonRedacted(t *testing.T) {
+	t.Parallel()
+	const (
+		user  = "nobody"
+		token = "badtoken"
+	)
+	cases := []struct {
+		name       string
+		body       string
+		want       []string
+		wantAbsent []string
+	}{
+		{
+			// The captured answer names the user and the token on its later
+			// lines; only the first line is kept.
+			name:       "captured 401, credentials past the first line",
+			body:       `{"message":"invalid credentials\nuser does not exist [uid: 0, name: nobody]\naccess token does not exist [sha: badtoken]"}`,
+			want:       []string{"invalid credentials"},
+			wantAbsent: []string{user, token, "uid: 0", "access token does not exist"},
+		},
+		{
+			name:       "credentials on the first line are redacted",
+			body:       `{"message":"basic auth failed for user nobody with token badtoken\nuser does not exist [uid: 0, name: nobody]\naccess token does not exist [sha: badtoken]"}`,
+			want:       []string{"***"},
+			wantAbsent: []string{user, token},
+		},
+		{
+			name:       "reason is capped at 200 bytes",
+			body:       `{"message":"` + strings.Repeat("x", 400) + `"}`,
+			want:       []string{strings.Repeat("x", 200)},
+			wantAbsent: []string{strings.Repeat("x", 201)},
+		},
+		{
+			name:       "control characters become spaces",
+			body:       `{"message":"line one\u0000with a null"}`,
+			want:       []string{"line one with a null"},
+			wantAbsent: []string{"\x00"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
+				"gastown-daemon": {{status: http.StatusUnauthorized, body: tc.body}},
+			}}
+			reg := PruneRegistryReader{
+				Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+				Credentials: func() (string, string, error) { return user, token, nil },
+			}
+			_, err := reg.Images(context.Background())
+			if err == nil {
+				t.Fatal("Images() = nil error, want a refusal")
+			}
+			for _, s := range tc.want {
+				if !strings.Contains(err.Error(), s) {
+					t.Errorf("error %q does not contain %q", err, s)
+				}
+			}
+			for _, s := range tc.wantAbsent {
+				if strings.Contains(err.Error(), s) {
+					t.Errorf("error %q contains %q, want it left out", err, s)
+				}
+			}
+		})
+	}
+}
+
+// TestPruneReadReasonQueryPinned holds the packages request Forgejo 16.0.5
+// accepts, captured with HTTP 200 and X-Total-Count: 390.
+func TestPruneReadReasonQueryPinned(t *testing.T) {
+	t.Parallel()
+	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
+		"gastown-daemon": {{status: http.StatusOK, total: "0", body: "[]"}},
+	}}
+	reg := PruneRegistryReader{
+		Base: "https://forgejo.example", Owner: "bot-registry", Doer: fake,
+		Credentials: func() (string, string, error) { return "viewer", "t", nil },
+	}
+	if _, err := reg.Images(context.Background()); err != nil {
+		t.Fatalf("Images() error = %v", err)
+	}
+	var got *url.URL
+	for _, u := range fake.urls {
+		if u.Query().Get("q") == "gastown-daemon" {
+			got = u
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("no packages request for gastown-daemon was sent")
+	}
+	if want := "/api/v1/packages/bot-registry"; got.Path != want {
+		t.Errorf("request path = %q, want %q", got.Path, want)
+	}
+	if want := "limit=50&page=1&q=gastown-daemon&type=container"; got.RawQuery != want {
+		t.Errorf("request query = %q, want %q", got.RawQuery, want)
+	}
 }
 
 // TestPruneReadRegistryRefusesBeforeSending holds that the listing reader sends
