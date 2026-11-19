@@ -23,30 +23,12 @@ type failNotes struct {
 
 func (f failNotes) AppendNotes(string, string) error { return f.err }
 
-// faultQueue is the record queue whose reads or removals fail on demand: the
-// queue-side refusals a pass logs and steps past (gt-qa5ge8).
-type faultQueue struct {
-	q         *land.RecordQueue
-	pendErr   error
-	removeErr error
-}
+// removeFails is a record queue whose removals are refused (gt-qa5ge8).
+type removeFails struct{ *land.RecordQueue }
 
-func (f faultQueue) Pending() ([]land.PendingRecord, error) {
-	if f.pendErr != nil {
-		return nil, f.pendErr
-	}
-	return f.q.Pending()
-}
+func (removeFails) Remove(land.PendingRecord) error { return errors.New("rewrite refused") }
 
-func (f faultQueue) Remove(rec land.PendingRecord) error {
-	if f.removeErr != nil {
-		return f.removeErr
-	}
-	return f.q.Remove(rec)
-}
-
-// drainNoteRecord is the queued note the drain tests write: a gate rejection
-// of noteHead.
+// drainNoteRecord is the queued note the drain tests write: a gate rejection of noteHead.
 func drainNoteRecord() land.PendingRecord {
 	note := land.RejectionNote{Attempt: 1, Kind: string(land.RejectGate), Reason: "gate failed",
 		Branch: branch, Target: "main", MR: "gt-abc", Head: noteHead}
@@ -130,20 +112,20 @@ func TestDrainRecordQueue(t *testing.T) {
 	}
 }
 
-// TestDrainRecordQueueFaults: a queue the pass cannot read is logged and the
-// pass goes on; a record whose removal fails stays queued after its note is
-// on the bead (gt-qa5ge8).
+// TestDrainRecordQueueFaults: a queue that cannot be read is logged and the
+// pass goes on; a record whose removal is refused stays queued, its note
+// already on the bead (gt-qa5ge8).
 func TestDrainRecordQueueFaults(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name      string
-		pendErr   error
-		removeErr error
-		wantNote  bool
-		wantLog   string
+		name       string
+		unreadable bool // the queue path is a directory, so its read fails
+		refuse     bool // removals fail
+		wantNote   bool
+		wantLog    string
 	}{
-		{"read fails, the pass goes on", errors.New("queue unreadable"), nil, false, "reading the landing record queue"},
-		{"removal fails, the entry stays", nil, errors.New("rewrite refused"), true, "removing a landing record its bead now carries"},
+		{"read fails, the pass goes on", true, false, false, "reading the landing record queue"},
+		{"removal fails, the entry stays", false, true, true, "removing a landing record its bead now carries"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -153,12 +135,18 @@ func TestDrainRecordQueueFaults(t *testing.T) {
 				Assignee: "gastown/polecats/opal"})
 			var logs []string
 			h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-			q := land.RecordQueue{Path: filepath.Join(t.TempDir(), "records.jsonl")}
 			rec := drainNoteRecord()
+			q := &land.RecordQueue{Path: filepath.Join(t.TempDir(), "records.jsonl")}
 			if err := q.Enqueue(rec); err != nil {
 				t.Fatal(err)
 			}
-			h.w.Records = faultQueue{q: &q, pendErr: tc.pendErr, removeErr: tc.removeErr}
+			h.w.Records = q
+			if tc.refuse {
+				h.w.Records = removeFails{q}
+			}
+			if tc.unreadable {
+				h.w.Records = &land.RecordQueue{Path: t.TempDir()}
+			}
 			h.w.Pass(context.Background())
 			recs, err := q.Pending()
 			if err != nil {
