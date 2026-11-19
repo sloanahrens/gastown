@@ -580,6 +580,44 @@ func TestNoBeadAccessOutboxPollUnreadableOutboxIsLoggedAndSkipped(t *testing.T) 
 	}
 }
 
+// TestNoBeadAccessOutboxPollUnreadableSeatsAreLoggedOnceEach: each seat whose
+// outbox cannot be read gets exactly one log line naming it, and neither stops
+// the tick: a readable seat after them is still read and filed, and the tick
+// returns nil (gt-2bdvj4).
+func TestNoBeadAccessOutboxPollUnreadableSeatsAreLoggedOnceEach(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	outboxPollSeatRecord(t, town, "sbx-baker", "gt-baker")
+	outboxPollSeatRecord(t, town, "sbx-cook", "gt-cook")
+	result := `{"bead_id":"gt-cook","status":"done"}`
+	exec := &fakeOutboxPollExec{
+		reads: map[string]string{"sbx-cook": outboxPollReadText(&result, nil)},
+		errs: map[string]error{
+			"sbx-able":  errors.New("openshell sandbox exec: i/o timeout"),
+			"sbx-baker": errors.New("openshell sandbox exec: the gateway refused the read"),
+		},
+	}
+	var logged bytes.Buffer
+	file := &fakeOutboxPollFile{}
+	poll := outboxPollTestPoll(t, town, exec, file.file, &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v, want the tick to survive each unreadable seat", err)
+	}
+	for _, seat := range []string{"sbx-able", "sbx-baker"} {
+		if got := strings.Count(logged.String(), "seat "+seat+": its outbox is not read"); got != 1 {
+			t.Errorf("the tick logged seat %s's unreadable outbox %d times, want once: %q", seat, got, logged.String())
+		}
+	}
+	if strings.Contains(logged.String(), "seat sbx-cook:") {
+		t.Errorf("the tick's log is %q, want no line about the readable seat", logged.String())
+	}
+	if len(file.requests) != 1 || file.requests[0].Seat != "sbx-cook" {
+		t.Errorf("the tick filed %+v, want the readable seat after the failures still filed", file.requests)
+	}
+}
+
 // TestNoBeadAccessOutboxPollSeatWithoutOutboxIsNotFiled: a running seat that
 // has written no result.json has no request to file, so the tick files
 // nothing and logs nothing; one that wrote notes first is logged, since the
