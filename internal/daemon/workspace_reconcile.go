@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // The workspace reconcile is the daemon's share of the bd gateway's workspace
@@ -16,7 +18,8 @@ import (
 // files when it starts and again on every tick, so a gateway that restarted or
 // missed a push converges within one interval. It runs only when the daemon's
 // environment names a gateway (BD_GATEWAY_URL): with none, the daemon starts and
-// patrols exactly as before.
+// patrols exactly as before. When BD_GATEWAY_PUSH_URL names the gateway's push
+// Service, the push and its probe go there instead of the gateway's own URL.
 
 // startWorkspaceReconcile starts the reconcile when the patrol is enabled and a
 // gateway is configured, and reports whether it did; Run ignores the answer, and
@@ -40,17 +43,39 @@ func (d *Daemon) startWorkspaceReconcile() bool {
 	} else {
 		// The installed pusher is what every writer of the town copy pushes
 		// through, so the reconcile and the writers share one push order. The probe
-		// is the same pusher's GET, so it reaches the gateway the same way.
-		gateway := bdgateway.GatewayPusher{URL: url, TokenFile: d.env(bdgateway.WorkspaceTokenEnv), HTTP: d.workspaceHTTP, Observe: drift.observe}
+		// is the same pusher's GET, so it reaches the gateway the same way. An
+		// empty push URL leaves the pusher on the gateway's own URL.
+		pushURL := d.env(bdgateway.WorkspacePushURLEnv)
+		gateway := bdgateway.GatewayPusher{URL: url, PushURL: pushURL, TokenFile: d.env(bdgateway.WorkspaceTokenEnv), HTTP: d.workspaceHTTP, Observe: drift.observe}
 		install := d.installWorkspacePusher
 		if install == nil {
 			install = bdgateway.SetWorkspacePusher
 		}
 		install(gateway)
 		probe = gateway.Probe
+		// The URL is redacted: a gateway URL may carry credentials, and the
+		// pusher's bearer token comes from its own file, never from here.
+		target := url
+		if pushURL != "" {
+			target = pushURL
+		}
+		d.logger.Printf("Workspace reconcile: pushing the workspace to the bd gateway at %s", workspaceLogTarget(target))
 	}
 	go runWorkspaceReconcile(d.ctx, d.clk(), d.reconcileInterval, push, probe, d.config.TownRoot, d.logger.Printf, drift)
 	return true
+}
+
+// workspaceLogTarget is the push target as the start log names it: any userinfo
+// is removed first. util.RedactURL covers a URL with a scheme; a target without
+// one is refused by the pusher on the first push, but the log is written at
+// start, so its userinfo is masked here rather than passed through.
+func workspaceLogTarget(raw string) string {
+	if !strings.Contains(raw, "://") {
+		if at := strings.LastIndex(raw, "@"); at >= 0 {
+			return "<redacted>@" + raw[at+1:]
+		}
+	}
+	return util.RedactURL(raw)
 }
 
 // reconcileInterval returns the wait before the next push. It is read at each
