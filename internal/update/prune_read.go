@@ -1,0 +1,297 @@
+package update
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/imagevalues"
+)
+
+const (
+	// prunePackagesLimit is the page size of one packages listing read.
+	prunePackagesLimit = 50
+	// prunePackagesMaxPages bounds how many pages one image's listing may take,
+	// so a listing that never ends is an error rather than a hang.
+	prunePackagesMaxPages = 200
+	// prunePackagesMaxBytes bounds one packages page answer.
+	prunePackagesMaxBytes = 4 << 20
+	// pruneBranchLimit is the page size of one branch listing read.
+	pruneBranchLimit = 100
+	// pruneBranchMaxPages bounds how many pages one branch listing may take.
+	pruneBranchMaxPages = 1000
+)
+
+var (
+	// pruneOwnerPattern is one account name, as the packages path takes it.
+	pruneOwnerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+	// greenBranchPattern is a green ref: green/<sha12>, the sha12 a lowercase
+	// hex prefix of the commit the image build was made from.
+	greenBranchPattern = regexp.MustCompile(`^green/([0-9a-f]{12})$`)
+)
+
+// PruneLedger is the digest install's record, which the planner's installed and
+// previous pairs are read from.
+type PruneLedger interface {
+	Read() (ImageRecord, error)
+}
+
+// ReadPrunePairs returns the installed pair and the previous pair the ledger
+// holds. Both must name their daemon and polecat digests, and an installed pair
+// with no previous recorded is an error, not an empty previous: the planner
+// must never run on a record it cannot read in full. A bd digest may be empty,
+// as ImagePair allows.
+func ReadPrunePairs(ledger PruneLedger) (installed, previous ImagePair, err error) {
+	if ledger == nil {
+		return ImagePair{}, ImagePair{}, errors.New("no daemon image record is wired for the prune plan")
+	}
+	rec, err := ledger.Read()
+	if err != nil {
+		return ImagePair{}, ImagePair{}, fmt.Errorf("reading the daemon image record for the prune plan: %w", err)
+	}
+	switch {
+	case rec.Current == (ImagePair{}):
+		return ImagePair{}, ImagePair{}, errors.New("the daemon image record names no installed pair, so the prune plan cannot read one")
+	case rec.Previous == (ImagePair{}):
+		return ImagePair{}, ImagePair{}, errors.New("the daemon image record names an installed pair with no previous pair, so the prune plan cannot keep the pair a rollback restores")
+	}
+	for _, p := range []ImagePair{rec.Current, rec.Previous} {
+		if err := validRecordedPair(p); err != nil {
+			return ImagePair{}, ImagePair{}, fmt.Errorf("the daemon image record names a damaged pair: %w", err)
+		}
+	}
+	return rec.Current, rec.Previous, nil
+}
+
+// PruneDoer sends one request and returns its answer. *http.Client satisfies it.
+type PruneDoer interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// PruneRegistryReader reads every tag of the three gastown images from the
+// Forgejo packages API, with the viewer's read credential.
+type PruneRegistryReader struct {
+	// Base is the town's Forgejo root, such as https://forgejo.example.
+	Base string
+	// Owner is the account that owns the images.
+	Owner string
+	// PlaintextHost is the one non-loopback host the credential may reach over
+	// http, as imagevalues.CheckCredentialTransport takes it; "" is https only.
+	PlaintextHost string
+	// Doer sends the requests. Its client must refuse a redirect that leaves the
+	// first endpoint, as imagevalues.SameEndpointRedirect does.
+	Doer PruneDoer
+	// Credentials returns the viewer's login and token. Neither reaches an error.
+	Credentials func() (user, token string, err error)
+}
+
+// packageVersion is the part of one package version in a listing that the
+// reader reads: its image name, its tag, its push time and the digest its
+// manifest carries.
+type packageVersion struct {
+	Name      string    `json:"name"`
+	Version   string    `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	Metadata  struct {
+		ManifestDigest string `json:"manifest_digest"`
+	} `json:"metadata"`
+}
+
+// tag is the version as a PruneTag. A version the planner could not rank, match
+// or name is an error here, which stops the listing read.
+func (v packageVersion) tag(image string) (PruneTag, error) {
+	switch {
+	case v.Version == "":
+		return PruneTag{}, fmt.Errorf("a %s package version has no tag", image)
+	case !imagevalues.ValidDigest(v.Metadata.ManifestDigest):
+		return PruneTag{}, fmt.Errorf("the %s tag %q names no manifest digest", image, v.Version)
+	case v.CreatedAt.IsZero():
+		return PruneTag{}, fmt.Errorf("the %s tag %q names no push time", image, v.Version)
+	}
+	return PruneTag{Name: v.Version, Digest: v.Metadata.ManifestDigest, PushedAt: v.CreatedAt}, nil
+}
+
+// Images reads the tags of each of the three gastown images, following every
+// page of each listing until it is complete. An image with no tags is an
+// answer, an empty listing whose total is zero; a listing that cannot be read
+// in full is an error, and no tags are returned with it.
+func (r PruneRegistryReader) Images(ctx context.Context) (map[string][]PruneTag, error) {
+	switch {
+	case r.Doer == nil:
+		return nil, errors.New("no HTTP client is wired for the prune listing")
+	case r.Credentials == nil:
+		return nil, errors.New("no credential reader is wired for the prune listing")
+	case !pruneOwnerPattern.MatchString(r.Owner):
+		return nil, errors.New("the prune listing's owner is not one lowercase account name")
+	}
+	user, token, err := r.Credentials()
+	if err != nil {
+		return nil, fmt.Errorf("reading the viewer credential for the prune listing: %w", err)
+	}
+	out := make(map[string][]PruneTag, len(pruneImages))
+	for _, image := range pruneImages {
+		tags, err := r.imageTags(ctx, user, token, image)
+		if err != nil {
+			return nil, err
+		}
+		out[image] = tags
+	}
+	return out, nil
+}
+
+// imageTags reads every page of image's listing. The total every page reports
+// must not change while the pages are read. The walk ends at an empty page or
+// once the total is read; a listing that ends short of its total is an error.
+func (r PruneRegistryReader) imageTags(ctx context.Context, user, token, image string) ([]PruneTag, error) {
+	var tags []PruneTag
+	total, seen := -1, 0
+	for page := 1; ; page++ {
+		if page > prunePackagesMaxPages {
+			return nil, fmt.Errorf("the Forgejo packages listing for %s runs past %d pages", image, prunePackagesMaxPages)
+		}
+		items, pageTotal, err := r.page(ctx, user, token, image, page)
+		if err != nil {
+			return nil, err
+		}
+		if total < 0 {
+			total = pageTotal
+		} else if pageTotal != total {
+			return nil, fmt.Errorf("the Forgejo packages listing for %s changed while it was read: its total went from %d to %d", image, total, pageTotal)
+		}
+		if len(items) == 0 {
+			break
+		}
+		seen += len(items)
+		for _, v := range items {
+			if v.Name == "" {
+				return nil, fmt.Errorf("the Forgejo packages listing for %s holds a package with no name", image)
+			}
+			if v.Name != image {
+				continue
+			}
+			t, err := v.tag(image)
+			if err != nil {
+				return nil, err
+			}
+			tags = append(tags, t)
+		}
+		if seen >= total {
+			break
+		}
+	}
+	switch {
+	case seen < total:
+		return nil, fmt.Errorf("the Forgejo packages listing for %s is truncated: %d of %d packages read", image, seen, total)
+	case seen > total:
+		return nil, fmt.Errorf("the Forgejo packages listing for %s changed while it was read: %d packages read against a total of %d", image, seen, total)
+	}
+	return tags, nil
+}
+
+// page reads one page of image's packages and the total the answer reports.
+// The answer's body is never put in an error.
+func (r PruneRegistryReader) page(ctx context.Context, user, token, image string, page int) ([]packageVersion, int, error) {
+	u, err := r.listingURL(image, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := imagevalues.CheckCredentialTransport(u, r.PlaintextHost); err != nil {
+		return nil, 0, err
+	}
+	req := (&http.Request{Method: http.MethodGet, URL: u, Header: http.Header{}}).WithContext(ctx)
+	req.SetBasicAuth(user, token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := r.Doer.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("asking the Forgejo packages API for %s: %w", image, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, 0, fmt.Errorf("the Forgejo packages API answered HTTP %d for %s", resp.StatusCode, image)
+	}
+	total, err := strconv.Atoi(resp.Header.Get("X-Total-Count"))
+	if err != nil || total < 0 {
+		return nil, 0, fmt.Errorf("the Forgejo packages answer for %s names no total, so its listing cannot be shown complete", image)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, prunePackagesMaxBytes+1))
+	if err != nil {
+		return nil, 0, fmt.Errorf("reading the Forgejo packages answer for %s: %w", image, err)
+	}
+	if len(body) > prunePackagesMaxBytes {
+		return nil, 0, fmt.Errorf("the Forgejo packages answer for %s is larger than %d bytes", image, prunePackagesMaxBytes)
+	}
+	var items []packageVersion
+	if err := json.Unmarshal(body, &items); err != nil {
+		return nil, 0, fmt.Errorf("the Forgejo packages answer for %s is not a package listing", image)
+	}
+	return items, total, nil
+}
+
+// listingURL is the packages listing of the owner's container packages named
+// image, at page. The image name and page reach the query only as encoded
+// values.
+func (r PruneRegistryReader) listingURL(image string, page int) (*url.URL, error) {
+	base, err := url.Parse(r.Base)
+	if err != nil || base.Host == "" {
+		return nil, errors.New("the Forgejo base URL for the prune listing is not an absolute URL")
+	}
+	u := base.JoinPath("api", "v1", "packages", r.Owner)
+	u.RawQuery = url.Values{
+		"type":  {"container"},
+		"q":     {image},
+		"page":  {strconv.Itoa(page)},
+		"limit": {strconv.Itoa(prunePackagesLimit)},
+	}.Encode()
+	return u, nil
+}
+
+// BranchLister lists one page of a repository's branches. *forgejo.Client
+// satisfies it.
+type BranchLister interface {
+	ListBranches(ctx context.Context, owner, repo string, page, limit int) ([]forgejo.Branch, error)
+}
+
+// ReadGreenRefs returns the sha12 of every green/<sha12> branch of owner/repo,
+// following the branch pages until one comes back empty. A page is not taken as
+// the last for coming back short: a server may answer fewer branches than the
+// page size asks for. A branch named any other way is not a green ref and is
+// not in the set. A listing that fails on any page is an error with no set
+// returned, since a set missing its refs would let the planner delete a green
+// image.
+func ReadGreenRefs(ctx context.Context, branches BranchLister, owner, repo string) (map[string]bool, error) {
+	if branches == nil {
+		return nil, errors.New("no branch listing is wired for the green refs")
+	}
+	green := map[string]bool{}
+	for page := 1; ; page++ {
+		if page > pruneBranchMaxPages {
+			return nil, fmt.Errorf("the branch listing of %s/%s runs past %d pages", owner, repo, pruneBranchMaxPages)
+		}
+		list, err := branches.ListBranches(ctx, owner, repo, page, pruneBranchLimit)
+		if err != nil {
+			// A Forgejo answer's text can carry the response body, so only its
+			// status is named.
+			var apiErr *forgejo.APIError
+			if errors.As(err, &apiErr) {
+				return nil, fmt.Errorf("the Forgejo branch listing for %s/%s answered HTTP %d", owner, repo, apiErr.StatusCode)
+			}
+			return nil, fmt.Errorf("the Forgejo branch listing for %s/%s failed", owner, repo)
+		}
+		for _, b := range list {
+			if m := greenBranchPattern.FindStringSubmatch(b.Name); m != nil {
+				green[m[1]] = true
+			}
+		}
+		if len(list) == 0 {
+			return green, nil
+		}
+	}
+}
