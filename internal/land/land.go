@@ -183,6 +183,12 @@ type Lander struct {
 	// lander holds no state between landings, so how often the loss reaches a
 	// human is the sink's own business (gt-4ty22). Nil reports nothing.
 	FollowupAlert func(message string)
+	// FollowupSkip, when set, is asked about every minor finding the feed is
+	// about to file; a non-empty reason drops it before the de-duplication
+	// decision, the queue and the bead body, and the feed logs the reasons
+	// once (gt-3v8jno). It runs in the feed path: keep it cheap and free of
+	// state. Nil skips nothing.
+	FollowupSkip func(w Work, c FollowupCandidate) string
 	// AcceptedRiskAlert, when set, raises the attention item the overseer sees
 	// for a review that was given an accepted risk (gt-tvhg8): key names the
 	// work bead and the head reviewed, so a repeat of the same review keeps
