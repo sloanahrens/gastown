@@ -37,31 +37,32 @@ func renderFlagsPathIn(townRoot string) string {
 // TestRenderFlagsRecordCoversTheFlagStruct fails until a newly added flag is
 // recorded or named there as deliberately not recorded.
 type renderFlagsRecord struct {
-	Dir                    string `json:"dir"`
-	Out                    string `json:"out"`
-	Namespace              string `json:"namespace"`
-	Rehearsal              bool   `json:"rehearsal"`
-	CPU                    string `json:"cpu"`
-	Memory                 string `json:"memory"`
-	HostGateway            string `json:"host_gateway"`
-	ConfirmStopped         bool   `json:"confirm_container_stopped"`
-	WithHelper             bool   `json:"with_helper"`
-	ProxyImage             string `json:"proxy_image"`
-	PolecatImage           string `json:"polecat_image"`
-	ConfigDir              string `json:"config_dir"`
-	OpenShellConfigDir     string `json:"openshell_config_dir"`
-	ForgeHost              string `json:"forge_host"`
-	DoltBackupHostPath     string `json:"dolt_backup_host_path"`
-	Dashboard              bool   `json:"dashboard"`
-	BdGatewayURL           string `json:"bd_gateway_url"`
-	BdGatewayTokenSecret   string `json:"bd_gateway_token_secret"`
-	BdGatewayMaxConcurrent int    `json:"bd_gateway_max_concurrent"`
-	BdGatewayReplicas      int    `json:"bd_gateway_replicas"`
-	Tracker                bool   `json:"tracker"`
-	TrackerDSNSecret       string `json:"tracker_dsn_secret"`
-	TrackerBackup          bool   `json:"tracker_backup"`
-	TrackerBackupImage     string `json:"tracker_backup_image"`
-	DaemonBdGatewayURL     string `json:"daemon_bd_gateway_url"`
+	Dir                           string `json:"dir"`
+	Out                           string `json:"out"`
+	Namespace                     string `json:"namespace"`
+	Rehearsal                     bool   `json:"rehearsal"`
+	CPU                           string `json:"cpu"`
+	Memory                        string `json:"memory"`
+	HostGateway                   string `json:"host_gateway"`
+	ConfirmStopped                bool   `json:"confirm_container_stopped"`
+	WithHelper                    bool   `json:"with_helper"`
+	ProxyImage                    string `json:"proxy_image"`
+	PolecatImage                  string `json:"polecat_image"`
+	ConfigDir                     string `json:"config_dir"`
+	OpenShellConfigDir            string `json:"openshell_config_dir"`
+	ForgeHost                     string `json:"forge_host"`
+	DoltBackupHostPath            string `json:"dolt_backup_host_path"`
+	Dashboard                     bool   `json:"dashboard"`
+	BdGatewayServicePolicyApplied bool   `json:"bd_gateway_service_policy_applied"`
+	BdGatewayURL                  string `json:"bd_gateway_url"`
+	BdGatewayTokenSecret          string `json:"bd_gateway_token_secret"`
+	BdGatewayMaxConcurrent        int    `json:"bd_gateway_max_concurrent"`
+	BdGatewayReplicas             int    `json:"bd_gateway_replicas"`
+	Tracker                       bool   `json:"tracker"`
+	TrackerDSNSecret              string `json:"tracker_dsn_secret"`
+	TrackerBackup                 bool   `json:"tracker_backup"`
+	TrackerBackupImage            string `json:"tracker_backup_image"`
+	DaemonBdGatewayURL            string `json:"daemon_bd_gateway_url"`
 }
 
 // renderFlagsFile is the record as the file's JSON decodes into it. Its cap and
@@ -82,31 +83,32 @@ type renderFlagsFile struct {
 // record is f as the file holds it.
 func (f clusterRenderFlags) record() renderFlagsRecord {
 	return renderFlagsRecord{
-		Dir:                    f.dir,
-		Out:                    f.out,
-		Namespace:              f.namespace,
-		Rehearsal:              f.rehearsal,
-		CPU:                    f.cpu,
-		Memory:                 f.memory,
-		HostGateway:            f.hostGateway,
-		ConfirmStopped:         f.confirmStopped,
-		WithHelper:             f.withHelper,
-		ProxyImage:             f.proxyImage,
-		PolecatImage:           f.polecatImage,
-		ConfigDir:              f.configDir,
-		OpenShellConfigDir:     f.openShellConfigDir,
-		ForgeHost:              f.forgeHost,
-		DoltBackupHostPath:     f.doltBackupHostPath,
-		Dashboard:              f.dashboard,
-		BdGatewayURL:           f.bdGatewayURL,
-		BdGatewayTokenSecret:   f.bdGatewayTokenSecret,
-		BdGatewayMaxConcurrent: f.bdGatewayMaxConcurrent,
-		BdGatewayReplicas:      f.bdGatewayReplicas,
-		Tracker:                f.tracker,
-		TrackerDSNSecret:       f.trackerDSNSecret,
-		TrackerBackup:          f.trackerBackup,
-		TrackerBackupImage:     f.trackerBackupImage,
-		DaemonBdGatewayURL:     f.daemonBdGatewayURL,
+		Dir:                           f.dir,
+		Out:                           f.out,
+		Namespace:                     f.namespace,
+		Rehearsal:                     f.rehearsal,
+		CPU:                           f.cpu,
+		Memory:                        f.memory,
+		HostGateway:                   f.hostGateway,
+		ConfirmStopped:                f.confirmStopped,
+		WithHelper:                    f.withHelper,
+		ProxyImage:                    f.proxyImage,
+		PolecatImage:                  f.polecatImage,
+		ConfigDir:                     f.configDir,
+		OpenShellConfigDir:            f.openShellConfigDir,
+		ForgeHost:                     f.forgeHost,
+		DoltBackupHostPath:            f.doltBackupHostPath,
+		Dashboard:                     f.dashboard,
+		BdGatewayServicePolicyApplied: f.bdGatewayServicePolicyApplied,
+		BdGatewayURL:                  f.bdGatewayURL,
+		BdGatewayTokenSecret:          f.bdGatewayTokenSecret,
+		BdGatewayMaxConcurrent:        f.bdGatewayMaxConcurrent,
+		BdGatewayReplicas:             f.bdGatewayReplicas,
+		Tracker:                       f.tracker,
+		TrackerDSNSecret:              f.trackerDSNSecret,
+		TrackerBackup:                 f.trackerBackup,
+		TrackerBackupImage:            f.trackerBackupImage,
+		DaemonBdGatewayURL:            f.daemonBdGatewayURL,
 	}
 }
 
@@ -115,32 +117,33 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 // already, so a non-empty URL answers true as it does on the command line.
 func (r renderFlagsRecord) flags() clusterRenderFlags {
 	return clusterRenderFlags{
-		dir:                    r.Dir,
-		out:                    r.Out,
-		namespace:              r.Namespace,
-		rehearsal:              r.Rehearsal,
-		cpu:                    r.CPU,
-		memory:                 r.Memory,
-		hostGateway:            r.HostGateway,
-		confirmStopped:         r.ConfirmStopped,
-		withHelper:             r.WithHelper,
-		proxyImage:             r.ProxyImage,
-		polecatImage:           r.PolecatImage,
-		configDir:              r.ConfigDir,
-		openShellConfigDir:     r.OpenShellConfigDir,
-		forgeHost:              r.ForgeHost,
-		doltBackupHostPath:     r.DoltBackupHostPath,
-		dashboard:              r.Dashboard,
-		bdGatewayURL:           r.BdGatewayURL,
-		bdGatewayTokenSecret:   r.BdGatewayTokenSecret,
-		bdGatewayMaxConcurrent: r.BdGatewayMaxConcurrent,
-		bdGatewayReplicas:      r.BdGatewayReplicas,
-		tracker:                r.Tracker,
-		trackerDSNSecret:       r.TrackerDSNSecret,
-		trackerBackup:          r.TrackerBackup,
-		trackerBackupImage:     r.TrackerBackupImage,
-		daemonBdGatewayURL:     r.DaemonBdGatewayURL,
-		daemonBdGatewayURLSet:  r.DaemonBdGatewayURL != "",
+		dir:                           r.Dir,
+		out:                           r.Out,
+		namespace:                     r.Namespace,
+		rehearsal:                     r.Rehearsal,
+		cpu:                           r.CPU,
+		memory:                        r.Memory,
+		hostGateway:                   r.HostGateway,
+		confirmStopped:                r.ConfirmStopped,
+		withHelper:                    r.WithHelper,
+		proxyImage:                    r.ProxyImage,
+		polecatImage:                  r.PolecatImage,
+		configDir:                     r.ConfigDir,
+		openShellConfigDir:            r.OpenShellConfigDir,
+		forgeHost:                     r.ForgeHost,
+		doltBackupHostPath:            r.DoltBackupHostPath,
+		dashboard:                     r.Dashboard,
+		bdGatewayServicePolicyApplied: r.BdGatewayServicePolicyApplied,
+		bdGatewayURL:                  r.BdGatewayURL,
+		bdGatewayTokenSecret:          r.BdGatewayTokenSecret,
+		bdGatewayMaxConcurrent:        r.BdGatewayMaxConcurrent,
+		bdGatewayReplicas:             r.BdGatewayReplicas,
+		tracker:                       r.Tracker,
+		trackerDSNSecret:              r.TrackerDSNSecret,
+		trackerBackup:                 r.TrackerBackup,
+		trackerBackupImage:            r.TrackerBackupImage,
+		daemonBdGatewayURL:            r.DaemonBdGatewayURL,
+		daemonBdGatewayURLSet:         r.DaemonBdGatewayURL != "",
 	}
 }
 

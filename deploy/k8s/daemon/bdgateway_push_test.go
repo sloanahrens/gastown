@@ -1,6 +1,11 @@
 package daemon
 
 import (
+	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -23,6 +28,9 @@ func bdGatewayPushValues(t *testing.T) Values {
 	v.BdGatewayPushURL = testBdGatewayPushURL
 	v.DaemonBdGatewayURL = "http://127.0.0.1:7440"
 	v.DaemonBdGatewayPushURL = testBdGatewayPushURL
+	// The push URL renders only with the policy rendered or attested; these
+	// fixtures exercise the push render, not the refusal.
+	v.BdGatewayServicePolicyApplied = true
 	return v
 }
 
@@ -175,4 +183,230 @@ func TestBdGatewayPushServiceEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPushPolicyAttestRefuses holds the push render's refusal: a dashboard push
+// URL and a daemon push URL are each refused when neither Values.IncludeStatic
+// nor Values.BdGatewayServicePolicyApplied is set, and the message names both
+// fields and the policy file, so the operator hears both ways out.
+func TestPushPolicyAttestRefuses(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Values)
+		field  string
+	}{
+		{
+			name:   "the dashboard's push URL",
+			mutate: func(v *Values) { v.DaemonBdGatewayPushURL = "" },
+			field:  "Values.BdGatewayPushURL",
+		},
+		{
+			name:   "the daemon's push URL",
+			mutate: func(v *Values) { v.BdGatewayPushURL = "" },
+			field:  "Values.DaemonBdGatewayPushURL",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayPushValues(t)
+			v.BdGatewayServicePolicyApplied = false
+			tc.mutate(&v)
+			m, err := Build(v)
+			if err == nil {
+				t.Fatalf("Build accepted %s with neither Values.IncludeStatic nor Values.BdGatewayServicePolicyApplied, want a refusal", tc.name)
+			}
+			for _, want := range []string{
+				tc.field,
+				"BdGatewayServicePolicyApplied",
+				"IncludeStatic",
+				"bd-gateway-service-admission.yaml",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal %q does not name %s", err, want)
+				}
+			}
+			if m.BdGatewayPushService.Kind != "" {
+				t.Errorf("a refused Build returned a push Service")
+			}
+		})
+	}
+}
+
+// TestPushPolicyAttestAdmits holds the two ways out: each push URL renders with
+// Values.IncludeStatic and with Values.BdGatewayServicePolicyApplied, and a values
+// file with no push URL renders in all four flag combinations, with the flag
+// alone changing nothing.
+func TestPushPolicyAttestAdmits(t *testing.T) {
+	t.Parallel()
+
+	// pushEnvIs asserts the named container carries exactly the fixture's push URL,
+	// so a render that dropped the URL cannot pass as an admit.
+	pushEnvIs := func(t *testing.T, name string, c Container) {
+		t.Helper()
+		if got := envValuesNamed(c, BdGatewayPushURLEnv); !slices.Equal(got, []string{testBdGatewayPushURL}) {
+			t.Errorf("%s names %s = %q, want exactly %q", name, BdGatewayPushURLEnv, got, testBdGatewayPushURL)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Values)
+		check  func(t *testing.T, m Manifests)
+	}{
+		{
+			name: "the dashboard's push URL with IncludeStatic",
+			mutate: func(v *Values) {
+				v.DaemonBdGatewayPushURL = ""
+				v.IncludeStatic = true
+				v.BdGatewayServicePolicyApplied = false
+			},
+			check: func(t *testing.T, m Manifests) {
+				pushEnvIs(t, "the dashboard", m.DashboardDeployment.Spec.Template.Spec.Containers[0])
+			},
+		},
+		{
+			name: "the dashboard's push URL attested",
+			mutate: func(v *Values) {
+				v.DaemonBdGatewayPushURL = ""
+				v.IncludeStatic = false
+				v.BdGatewayServicePolicyApplied = true
+			},
+			check: func(t *testing.T, m Manifests) {
+				pushEnvIs(t, "the dashboard", m.DashboardDeployment.Spec.Template.Spec.Containers[0])
+			},
+		},
+		{
+			name: "the daemon's push URL with IncludeStatic",
+			mutate: func(v *Values) {
+				v.BdGatewayPushURL = ""
+				v.IncludeStatic = true
+				v.BdGatewayServicePolicyApplied = false
+			},
+			check: func(t *testing.T, m Manifests) {
+				pushEnvIs(t, "the daemon", m.Deployment.Spec.Template.Spec.Containers[0])
+			},
+		},
+		{
+			name: "the daemon's push URL attested",
+			mutate: func(v *Values) {
+				v.BdGatewayPushURL = ""
+				v.IncludeStatic = false
+				v.BdGatewayServicePolicyApplied = true
+			},
+			check: func(t *testing.T, m Manifests) {
+				pushEnvIs(t, "the daemon", m.Deployment.Spec.Template.Spec.Containers[0])
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayPushValues(t)
+			tc.mutate(&v)
+			tc.check(t, mustBuild(t, v))
+		})
+	}
+
+	t.Run("a values file with no push URL renders in all four flag combinations", func(t *testing.T) {
+		t.Parallel()
+		base := bdGatewayPushValues(t)
+		base.BdGatewayPushURL = ""
+		base.DaemonBdGatewayPushURL = ""
+		var withoutStatic []byte
+		for _, tc := range []struct {
+			name    string
+			include bool
+			applied bool
+		}{
+			{"neither flag", false, false},
+			{"IncludeStatic", true, false},
+			{"BdGatewayServicePolicyApplied", false, true},
+			{"both flags", true, true},
+		} {
+			v := base
+			v.IncludeStatic = tc.include
+			v.BdGatewayServicePolicyApplied = tc.applied
+			m := mustBuild(t, v)
+			for _, container := range []struct {
+				name string
+				c    Container
+			}{
+				{"the daemon", m.Deployment.Spec.Template.Spec.Containers[0]},
+				{"the dashboard", m.DashboardDeployment.Spec.Template.Spec.Containers[0]},
+			} {
+				if got := envValuesNamed(container.c, BdGatewayPushURLEnv); len(got) != 0 {
+					t.Errorf("%s with %s names %s = %q, want none with no push URL set", tc.name, container.name, BdGatewayPushURLEnv, got)
+				}
+			}
+			if tc.include {
+				continue
+			}
+			var buf bytes.Buffer
+			if err := Render(&buf, m); err != nil {
+				t.Fatalf("rendering with %s: %v", tc.name, err)
+			}
+			if withoutStatic == nil {
+				withoutStatic = buf.Bytes()
+				continue
+			}
+			if !bytes.Equal(withoutStatic, buf.Bytes()) {
+				t.Errorf("the render with %s differs from the render with neither flag, though no push URL is set", tc.name)
+			}
+		}
+	})
+}
+
+// TestPushPolicyAttestDocumented holds the attestation's contract to its word: the
+// field's doc comment in daemon.go says it is an attestation, and the architecture
+// page carries the refusal beside the paragraph that names the push Service.
+func TestPushPolicyAttestDocumented(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the field doc says it is an attestation", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(packageDir(t), "daemon.go")
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		var doc string
+		ast.Inspect(file, func(n ast.Node) bool {
+			spec, ok := n.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != "Values" {
+				return true
+			}
+			structType, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				return false
+			}
+			for _, field := range structType.Fields.List {
+				for _, name := range field.Names {
+					if name.Name == "BdGatewayServicePolicyApplied" && field.Doc != nil {
+						doc = field.Doc.Text()
+					}
+				}
+			}
+			return false
+		})
+		if doc == "" {
+			t.Fatal("daemon.go has no doc comment on Values.BdGatewayServicePolicyApplied")
+		}
+		if !strings.Contains(strings.ToLower(doc), "attestation") {
+			t.Errorf("the Values.BdGatewayServicePolicyApplied doc %q does not say it is an attestation", doc)
+		}
+	})
+
+	t.Run("the architecture page carries the refusal", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(packageDir(t), "..", "..", "..", "docs", "architecture.md")
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		const want = "A push URL is refused at render unless the policy is in the same render or the values file attests it is applied"
+		if !strings.Contains(string(body), want) {
+			t.Errorf("docs/architecture.md does not carry the refusal sentence %q", want)
+		}
+	})
 }

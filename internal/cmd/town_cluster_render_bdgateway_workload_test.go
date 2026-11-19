@@ -37,6 +37,10 @@ func withBdImage(t *testing.T, f clusterRenderFlags) clusterRenderFlags {
 	// The gateway's tokens-0600 init container runs the proxy image, and a render
 	// with a bd image and no proxy image is refused.
 	f.proxyImage = clusterRenderDaemonDigest
+	// The push URL the bd image renders sends the bearer over plain http to a
+	// Service name the admission policy bounds; the operator's attestation is what
+	// a live render passes once the policy is applied.
+	f.bdGatewayServicePolicyApplied = true
 	return f
 }
 
@@ -138,6 +142,24 @@ func TestClusterRenderBdGatewayPushURL(t *testing.T) {
 			if got := deploymentEnv(t, f.out, tc.suffix)[k8sdaemon.BdGatewayPushURLEnv]; got != clusterRenderInClusterPushURL {
 				t.Errorf("%s names %s = %q, want the in-cluster %q", tc.name, k8sdaemon.BdGatewayPushURLEnv, got, clusterRenderInClusterPushURL)
 			}
+		}
+	})
+
+	t.Run("a bd image without the attestation is refused", func(t *testing.T) {
+		t.Parallel()
+		f := withBdImage(t, clusterRenderFixture(t))
+		f.dashboard = true
+		// Clearing the flag is what a live render without
+		// --bd-gateway-service-policy-applied carries: the push URL it would set
+		// is refused, so the command's wiring is what admits it.
+		f.bdGatewayServicePolicyApplied = false
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
+		if err == nil {
+			t.Fatal("the render accepted a bd image without the Service policy attestation, want a refusal")
+		}
+		if !strings.Contains(err.Error(), "Values.BdGatewayServicePolicyApplied") {
+			t.Errorf("the refusal %q does not name Values.BdGatewayServicePolicyApplied", err)
 		}
 	})
 

@@ -71,6 +71,9 @@ func TestBdGatewayPushServiceUpdateJobEnv(t *testing.T) {
 		DaemonBdGatewayPushURL:  pushURL,
 		BdGatewayImage:          pushTestGatewayImage,
 		BdGatewayTokenSecret:    tokenName,
+		// The push URL renders only with the policy rendered or attested; this
+		// fixture exercises the push render, not the refusal.
+		BdGatewayServicePolicyApplied: true,
 	})
 	if err != nil {
 		t.Fatalf("building the daemon manifests: %v", err)

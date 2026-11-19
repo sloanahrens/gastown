@@ -35,6 +35,11 @@ const (
 	BdGatewayDaemonSecretName    = "bd-gateway-daemon"    //nolint:gosec // a Secret name, not a credential
 	bdGatewayVolumeName          = "bd-gateway-token"     //nolint:gosec // a volume name, not a credential
 	bdGatewayTokenMode           = int32(0o400)
+	// BdGatewayServicePolicyFile is the Service admission policy that admits the
+	// push Service's name on its one port and refuses every other Service that
+	// selects the gateway pods. A push URL needs it applied, or the name the
+	// plain-http bearer travels to is bounded by nothing.
+	BdGatewayServicePolicyFile = "deploy/k8s/bd-gateway-service-admission.yaml"
 )
 
 // validateBdGateway refuses the dashboard's gateway values a pod cannot use. The
@@ -50,6 +55,11 @@ func (v Values) validateBdGateway() error {
 	}
 	if v.BdGatewayPushURL != "" && v.BdGatewayImage == "" {
 		return errors.New("Values.BdGatewayPushURL is set while Values.BdGatewayImage is empty: the push Service renders only with the gateway workload, so the URL would name no pod")
+	}
+	if v.BdGatewayPushURL != "" {
+		if err := v.pushPolicyRefusal("Values.BdGatewayPushURL"); err != nil {
+			return err
+		}
 	}
 	for _, field := range []struct{ name, value string }{
 		{"Values.BdGatewayURL", v.BdGatewayURL},
@@ -79,6 +89,11 @@ func (v Values) validateDaemonBdGateway() error {
 	if v.DaemonBdGatewayPushURL != "" && v.BdGatewayImage == "" {
 		return errors.New("Values.DaemonBdGatewayPushURL is set while Values.BdGatewayImage is empty: the push Service renders only with the gateway workload, so the URL would name no pod")
 	}
+	if v.DaemonBdGatewayPushURL != "" {
+		if err := v.pushPolicyRefusal("Values.DaemonBdGatewayPushURL"); err != nil {
+			return err
+		}
+	}
 	for _, field := range []struct{ name, value string }{
 		{"Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL},
 		{"Values.DaemonBdGatewayPushURL", v.DaemonBdGatewayPushURL},
@@ -91,6 +106,19 @@ func (v Values) validateDaemonBdGateway() error {
 		}
 	}
 	return nil
+}
+
+// pushPolicyRefusal refuses a push URL unless the Service admission policy that
+// bounds the push Service's name is in this render (Values.IncludeStatic) or the
+// operator attests it is applied (Values.BdGatewayServicePolicyApplied). The
+// render cannot verify the cluster, so the message names both ways out and the
+// policy file; a push URL with neither would carry the write-class bearer over
+// plain http to a Service name trusted by label alone.
+func (v Values) pushPolicyRefusal(field string) error {
+	if v.IncludeStatic || v.BdGatewayServicePolicyApplied {
+		return nil
+	}
+	return fmt.Errorf("%s is set without Values.IncludeStatic or Values.BdGatewayServicePolicyApplied: the push URL sends the gateway's bearer token over plain http to a Service name that %s guards, so the render refuses it unless that policy is in the same render (Values.IncludeStatic) or the operator attests it is applied (Values.BdGatewayServicePolicyApplied)", field, BdGatewayServicePolicyFile)
 }
 
 // The gateway's own workload, rendered when Values.BdGatewayImage is set

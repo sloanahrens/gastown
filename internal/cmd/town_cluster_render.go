@@ -126,6 +126,10 @@ type clusterRenderFlags struct {
 	// daemonBdGatewayURLSet is whether the flag was named at all, so an empty value
 	// is refused rather than read as absent.
 	daemonBdGatewayURLSet bool
+	// bdGatewayServicePolicyApplied is the operator's statement that
+	// deploy/k8s/bd-gateway-service-admission.yaml is applied. The render cannot
+	// verify the cluster, so a bd-image render refuses a push URL without it.
+	bdGatewayServicePolicyApplied bool
 	// bdGatewayReplicas is the gateway Deployment's replica count, written with a
 	// values file's bd image; zero reads as one, as Values.BdGatewayReplicas does.
 	bdGatewayReplicas int
@@ -260,6 +264,8 @@ func init() {
 		"the postgres image the nightly dump runs in, by digest; its pg_dump must match the server's major version; it needs --tracker-backup")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonBdGatewayURL, "daemon-bd-gateway-url", "",
 		"the bd gateway's base URL, http or https with a host, for the daemon's bd forwarder; the render names the "+k8sdaemon.BdGatewayDaemonSecretName+" Secret and never creates it; a live render only; without it, a values file with a bd image points the daemon at the in-cluster gateway")
+	townClusterRenderCmd.Flags().BoolVar(&clusterRender.bdGatewayServicePolicyApplied, "bd-gateway-service-policy-applied", false,
+		"the operator's statement that "+k8sdaemon.BdGatewayServicePolicyFile+" is applied to the cluster; a values file with a bd image points the daemon and the dashboard at the push Service, and the render refuses those push URLs until this is set, since the bearer token travels in plain http to a Service name that policy guards")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayTokenSecret, "bd-gateway-token-secret", "",
 		"the Secret the bd gateway reads its tokens from, mounted whole in the gateway (default "+defaultBdGatewayTokenSecret+"); the render names it and never creates it; it is read only when the values file names a bd image")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayMaxConcurrent, "bd-gateway-max-concurrent", defaultBdGatewayMaxConcurrent,
@@ -421,6 +427,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"confirm-container-stopped", &f.confirmStopped, r.confirmStopped},
 		{"with-helper", &f.withHelper, r.withHelper},
 		{"dashboard", &f.dashboard, r.dashboard},
+		{"bd-gateway-service-policy-applied", &f.bdGatewayServicePolicyApplied, r.bdGatewayServicePolicyApplied},
 		{"tracker", &f.tracker, r.tracker},
 		{"tracker-backup", &f.trackerBackup, r.trackerBackup},
 	}
@@ -754,6 +761,10 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.BdGatewayTokenSecret = strings.TrimSpace(f.bdGatewayTokenSecret)
 		v.BdGatewayMaxConcurrent = f.bdGatewayMaxConcurrent
 		v.BdGatewayReplicas = f.bdGatewayReplicas
+		// The render cannot see the cluster, so the push URLs below are refused
+		// unless the operator says the Service policy that bounds the name is
+		// applied.
+		v.BdGatewayServicePolicyApplied = f.bdGatewayServicePolicyApplied
 		if v.DaemonBdGatewayURL == "" {
 			v.DaemonBdGatewayURL = inCluster
 		}
