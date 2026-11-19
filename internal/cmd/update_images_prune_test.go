@@ -42,6 +42,10 @@ type pruneTestRegistry struct {
 	status  map[string]int
 	methods []string
 	paths   []string
+	// bytesRefused names image:tag whose manifest the bytes step cannot read: the
+	// digest read answers, and every later manifest read of the tag is a 500.
+	bytesRefused  map[string]bool
+	manifestsSeen map[string]int
 }
 
 // RoundTrip answers a packages listing request for the image its q names, and a
@@ -72,8 +76,16 @@ func (f *pruneTestRegistry) RoundTrip(req *http.Request) (*http.Response, error)
 // manifest answers a manifest read of image at tag with the tag's manifest bytes
 // and their digest, as a registry does. A tag the fake does not hold is a 404.
 func (f *pruneTestRegistry) manifest(req *http.Request, image, tag string) *http.Response {
+	if f.manifestsSeen == nil {
+		f.manifestsSeen = map[string]int{}
+	}
+	key := image + ":" + tag
+	f.manifestsSeen[key]++
 	for _, t := range f.tags[image] {
 		if t.name == tag {
+			if f.bytesRefused[key] && f.manifestsSeen[key] > 1 {
+				return pruneTestResponse(req, http.StatusInternalServerError, nil, 0)
+			}
 			body := pruneTestManifest(tag)
 			resp := pruneTestResponse(req, http.StatusOK, body, 0)
 			resp.Header.Set("Docker-Content-Digest", pruneTestDigestOf(body))
@@ -104,10 +116,17 @@ func (l pruneTestLedger) Read() (update.ImageRecord, error) { return l.rec, l.er
 // n-th tag a fixture makes.
 func pruneTestName(n int) string { return fmt.Sprintf("%012x", n) }
 
-// pruneTestManifest is the manifest a tag names, and pruneTestDigestOf its
-// digest: the hash of its bytes, the form the registry reports and the reader
-// checks.
-func pruneTestManifest(tag string) []byte { return []byte("manifest " + tag) }
+// pruneTestLayerSize is the compressed size of the one layer each fixture tag
+// holds, so a delete of one tag frees one gigabyte.
+const pruneTestLayerSize = 1000000000
+
+// pruneTestManifest is the manifest a tag names: one layer of its own, of
+// pruneTestLayerSize bytes. pruneTestDigestOf is its digest: the hash of its
+// bytes, the form the registry reports and the reader checks.
+func pruneTestManifest(tag string) []byte {
+	layer := pruneTestDigestOf([]byte("layer " + tag))
+	return []byte(fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":%q,"size":%d}]}`, layer, pruneTestLayerSize))
+}
 
 func pruneTestDigestOf(body []byte) string {
 	sum := sha256.Sum256(body)
@@ -266,15 +285,83 @@ func TestUpdateImagesPrunePrintsEachImagesKeepAndDeleteLines(t *testing.T) {
 	fmt.Fprintf(&want, "keep   %s:%s %s: green/%s ref\n", imagevalues.DaemonImage, pruneTestName(1), pruneTestDigest(1), pruneTestName(1))
 	fmt.Fprintf(&want, "delete %s:%s %s: pushed 2026-11-01T01:00:00Z, rank 21 of 22 by push time; not in the installed pair, the previous pair, or a green ref, and not covered by the newest-tags rule (keep newest 20)\n",
 		imagevalues.DaemonImage, pruneTestName(2), pruneTestDigest(2))
+	// The one delete candidate holds one layer of its own, so it frees one
+	// gigabyte; the images with no delete free nothing.
 	fmt.Fprintf(&want, "%s: keep 21, delete 1\n", imagevalues.DaemonImage)
+	fmt.Fprintf(&want, "%s: would free about 1.00 GB (layers held only by the deleted tags; Forgejo's own cleanup must run before disk returns)\n", imagevalues.DaemonImage)
 	fmt.Fprintf(&want, "%s: keep 0, delete 0\n", imagevalues.PolecatImage)
+	fmt.Fprintf(&want, "%s: would free about 0.00 GB (layers held only by the deleted tags; Forgejo's own cleanup must run before disk returns)\n", imagevalues.PolecatImage)
 	fmt.Fprintf(&want, "keep   %s:%s %s: one of the newest 20 tags\n", imagevalues.BdImage, pruneTestName(100), pruneTestDigest(100))
 	fmt.Fprintf(&want, "%s: keep 1, delete 0\n", imagevalues.BdImage)
+	fmt.Fprintf(&want, "%s: would free about 0.00 GB (layers held only by the deleted tags; Forgejo's own cleanup must run before disk returns)\n", imagevalues.BdImage)
 	fmt.Fprintf(&want, "total: keep 22, delete 1; nothing is deleted by this command\n")
 
 	if out != want.String() {
 		t.Fatalf("prune output:\n%s\nwant:\n%s", out, want.String())
 	}
+}
+
+// TestUpdateImagesPruneUnreadableManifestLeavesFigureOut: a tag whose manifest
+// cannot be read is named in a bytes unknown line in place of its image's
+// figure. The command still exits zero, and its keep and delete lines are those
+// of a run that reads every manifest.
+func TestUpdateImagesPruneUnreadableManifestLeavesFigureOut(t *testing.T) {
+	t.Parallel()
+	clean, err := runUpdateImagesPruneCmd(t, pruneTestSeams(pruneTestPopulated()))
+	if err != nil {
+		t.Fatalf("prune over readable inputs: %v", err)
+	}
+
+	reg := pruneTestPopulated()
+	reg.bytesRefused = map[string]bool{imagevalues.DaemonImage + ":" + pruneTestName(2): true}
+	out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg))
+	if err != nil {
+		t.Fatalf("prune with an unreadable manifest exited non-zero: %v", err)
+	}
+	unknown := "bytes unknown: " + imagevalues.DaemonImage + ":" + pruneTestName(2) + "\n"
+	if !strings.Contains(out, unknown) {
+		t.Fatalf("prune output has no %q line:\n%s", unknown, out)
+	}
+	if strings.Contains(out, imagevalues.DaemonImage+": would free") {
+		t.Fatalf("daemon's figure printed over an unreadable manifest:\n%s", out)
+	}
+	if got, want := pruneListLines(out), pruneListLines(clean); got != want {
+		t.Fatalf("tag lists changed by an unreadable manifest:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestUpdateImagesPruneBytesCredentialFailurePrintsNothing: a viewer credential
+// that reads for the listing but not for the bytes step stops the command with
+// an error and prints no line.
+func TestUpdateImagesPruneBytesCredentialFailurePrintsNothing(t *testing.T) {
+	t.Parallel()
+	seams := pruneTestSeams(pruneTestPopulated())
+	reads := 0
+	seams.Credentials = func() (string, string, error) {
+		reads++
+		if reads > 1 {
+			return "", "", errors.New("no token file")
+		}
+		return testUpdateImagesUser, testUpdateImagesToken, nil
+	}
+	out, err := runUpdateImagesPruneCmd(t, seams)
+	if err == nil {
+		t.Fatal("prune exited zero with the bytes step's credential unreadable")
+	}
+	if out != "" {
+		t.Fatalf("prune printed a plan after the bytes step failed:\n%s", out)
+	}
+}
+
+// pruneListLines is the keep and delete lines of out, one per tag, in order.
+func pruneListLines(out string) string {
+	var b strings.Builder
+	for _, line := range strings.SplitAfter(out, "\n") {
+		if strings.HasPrefix(line, "keep ") || strings.HasPrefix(line, "delete ") {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
 }
 
 // TestUpdateImagesPruneDigestWired holds that the plan reads each listed tag's
@@ -284,7 +371,7 @@ func TestUpdateImagesPrunePrintsEachImagesKeepAndDeleteLines(t *testing.T) {
 func TestUpdateImagesPruneDigestWired(t *testing.T) {
 	t.Parallel()
 	reg := pruneTestPopulated()
-	plan, err := planUpdateImagesPrune(context.Background(), pruneTestSeams(reg))
+	plan, _, err := planUpdateImagesPrune(context.Background(), pruneTestSeams(reg))
 	if err != nil {
 		t.Fatalf("planUpdateImagesPrune() error = %v", err)
 	}

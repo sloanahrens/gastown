@@ -251,6 +251,12 @@ A tag is kept when its digest is the installed or previous pair's, when its
 name is a green ref's, or when it is one of the newest 20 tags of its image by
 push time. A tag that shares a digest with a kept tag is kept too.
 
+For each image it then prints the bytes a delete would free: the layers held
+only by its deleted tags, each counted once. The figure is additional output;
+a tag whose manifest cannot be read leaves its image's figure out and is named
+in a "bytes unknown" line. Forgejo's own cleanup must run before the disk
+returns.
+
 The command fails closed: a read or plan that fails exits non-zero and prints
 no line, so nothing is listed for deletion. The command only reads; it has no
 apply path.`,
@@ -265,35 +271,40 @@ apply path.`,
 // runUpdateImagesPrune plans the retention and prints it. Nothing is printed
 // unless every read and the plan succeed.
 func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams) error {
-	plan, err := planUpdateImagesPrune(cmd.Context(), seams)
+	plan, reader, err := planUpdateImagesPrune(cmd.Context(), seams)
 	if err != nil {
 		return fmt.Errorf("gt update images prune: %w", err)
 	}
-	writeUpdateImagesPrunePlan(cmd.OutOrStdout(), plan)
+	figures, err := reader.PruneBytes(cmd.Context(), plan)
+	if err != nil {
+		return fmt.Errorf("gt update images prune: %w", err)
+	}
+	writeUpdateImagesPrunePlan(cmd.OutOrStdout(), plan, figures)
 	return nil
 }
 
 // planUpdateImagesPrune reads the three inputs the planner decides on and plans
 // retention over them. Every read is a GET to the registry or the forge. A read
-// or plan that fails returns its error and no plan.
-func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update.PrunePlan, error) {
+// or plan that fails returns its error and no plan. The reader comes back with
+// the plan, so the bytes step reads the manifests through the same wiring.
+func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update.PrunePlan, update.PruneRegistryReader, error) {
 	if err := validateUpdateImagesPruneSeams(seams); err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
 	townRoot, err := seams.FindTownRoot()
 	if err != nil {
-		return update.PrunePlan{}, fmt.Errorf("finding the town root: %w", err)
+		return update.PrunePlan{}, update.PruneRegistryReader{}, fmt.Errorf("finding the town root: %w", err)
 	}
 	installed, previous, err := update.ReadPrunePairs(seams.PruneLedger(townRoot))
 	if err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
 	registry, err := seams.Registry(townRoot)
 	if err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
 	if err := registry.Validate(); err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
 	// The redirect rule is the one the image reads hold: a redirect that leaves
 	// the first endpoint is refused, so the credential never follows it.
@@ -314,11 +325,11 @@ func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update
 	}
 	tags, err := reader.Images(ctx)
 	if err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
 	green, err := seams.PruneGreen(ctx, townRoot)
 	if err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
 	plan, err := seams.PlanPrune(update.PruneInput{
 		Images:     tags,
@@ -328,9 +339,9 @@ func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update
 		KeepNewest: updateImagesPruneKeepNewest,
 	})
 	if err != nil {
-		return update.PrunePlan{}, err
+		return update.PrunePlan{}, update.PruneRegistryReader{}, err
 	}
-	return plan, nil
+	return plan, reader, nil
 }
 
 // validateUpdateImagesPruneSeams refuses a prune that would report a plan over a
@@ -358,7 +369,7 @@ func validateUpdateImagesPruneSeams(s updateImagesSeams) error {
 // writeUpdateImagesPrunePlan prints the plan image by image, in the order the
 // gastown images are named: the keep lines, the delete lines with their reasons,
 // then the image's counts. The total follows the last image.
-func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan) {
+func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan, figures map[string]update.PruneFigure) {
 	var keep, del int
 	for _, image := range []string{imagevalues.DaemonImage, imagevalues.PolecatImage, imagevalues.BdImage} {
 		var k, d int
@@ -375,10 +386,27 @@ func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan) {
 			}
 		}
 		fmt.Fprintf(w, "%s: keep %d, delete %d\n", image, k, d)
+		writeUpdateImagesPruneFigure(w, image, figures[image])
 		keep += k
 		del += d
 	}
 	fmt.Fprintf(w, "total: keep %d, delete %d; nothing is deleted by this command\n", keep, del)
+}
+
+// writeUpdateImagesPruneFigure prints the bytes line of one image's delete: the
+// figure when every manifest it sums was read, else one bytes unknown line per
+// tag whose manifest could not be read, with the figure left out.
+func writeUpdateImagesPruneFigure(w io.Writer, image string, f update.PruneFigure) {
+	switch {
+	case f.Err != nil:
+		fmt.Fprintf(w, "%s: bytes unknown: %v\n", image, f.Err)
+	case !f.Known:
+		for _, ref := range f.Unknown {
+			fmt.Fprintf(w, "bytes unknown: %s\n", ref)
+		}
+	default:
+		fmt.Fprintf(w, "%s: would free about %.2f GB (layers held only by the deleted tags; Forgejo's own cleanup must run before disk returns)\n", image, float64(f.Bytes)/1e9)
+	}
 }
 
 // updateImagesRepoFile opens a rig's repository to read its repo-committed
