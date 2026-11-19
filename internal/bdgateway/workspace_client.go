@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,13 @@ const (
 	// pushResponseLimit bounds the gateway's answer read for its manifest hash
 	// or its refusal: one small JSON object either way.
 	pushResponseLimit = 64 << 10
+	// callsResponseLimit bounds the gateway's calls answer read. GET /v1/calls
+	// answers at most maxCallsLimit entries, and one entry is bounded by the log
+	// writer: class and caller maxFieldBytes (64) each, verb 32, up to
+	// maxLoggedItems flags and bead ids, and an error of maxErrorBytes (512), so
+	// about 8 KiB of JSON at the worst. 4 MiB is 500 such entries, and a page past
+	// it is an error rather than a truncated body handed to the decoder.
+	callsResponseLimit = 4 << 20
 	// tokenFileLimit bounds the token file read. A gateway token is one short
 	// line; a file past this is not one, and reading it whole would spool a
 	// mistaken path into memory.
@@ -881,6 +889,90 @@ func (g GatewayPusher) Probe(ctx context.Context) error {
 		return g.refusal(resp.StatusCode, data)
 	}
 	return nil
+}
+
+// CallsPage is a calls read's answer: the log's recent entries, oldest first,
+// and the number of lines the log writer dropped, so a caller can tell a quiet
+// window from a log that lost entries.
+type CallsPage struct {
+	Entries []CallEntry
+	Dropped uint64
+}
+
+// callsReadRefusal is a non-200 answer to a calls read that carries no refusal
+// payload. Its text names the read, not a stored workspace (the push path's
+// refusal), and it unwraps to ErrGatewayRefused so a caller matching the
+// gateway's refusals as a class still matches.
+type callsReadRefusal struct{ status int }
+
+func (e callsReadRefusal) Error() string {
+	return fmt.Sprintf("bdgateway: the gateway refused the calls read with HTTP %d", e.status)
+}
+
+func (e callsReadRefusal) Unwrap() error { return ErrGatewayRefused }
+
+// Calls reads the call log's recent entries with GET /v1/calls: the entries
+// stamped after since, oldest first, at most limit. It uses the same endpoint,
+// token file, client and timeout as a probe, and returns the answer's entries in
+// order and its dropped counter. A non-200 answer is a refusal carrying no
+// entries; an answer over callsResponseLimit, a body that is not the calls
+// answer, and an answer with no calls field are errors. A calls read observes
+// nothing: it says nothing about the workspace hash.
+func (g GatewayPusher) Calls(ctx context.Context, since time.Time, limit int) (CallsPage, error) {
+	endpoint, err := g.endpoint(callsPath)
+	if err != nil {
+		return CallsPage{}, err
+	}
+	token, err := readTokenFile(g.TokenFile)
+	if err != nil {
+		return CallsPage{}, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	query := url.Values{}
+	query.Set("since", since.Format(time.RFC3339))
+	query.Set("limit", strconv.Itoa(limit))
+	// endpoint checked the URL and the method is fixed, so building the request
+	// cannot fail, as in Probe.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.doer().Do(req)
+	if err != nil {
+		return CallsPage{}, fmt.Errorf("bdgateway: the gateway at %s did not answer the calls read: %w", shown(redactedURL(g.effectiveURL())), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	// The extra byte is how an answer at the limit is told from one past it: a
+	// truncated page must not reach the decoder as a short list.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, callsResponseLimit+1))
+	if err != nil {
+		return CallsPage{}, fmt.Errorf("bdgateway: reading the gateway's calls answer: %w", err)
+	}
+	if len(data) > callsResponseLimit {
+		return CallsPage{}, fmt.Errorf("bdgateway: the gateway's calls answer is over %d MiB", callsResponseLimit>>20)
+	}
+	if resp.StatusCode != http.StatusOK {
+		var payload ErrorPayload
+		if json.Unmarshal(data, &payload) == nil && payload.Code != "" {
+			return CallsPage{}, g.refusal(resp.StatusCode, data)
+		}
+		return CallsPage{}, callsReadRefusal{status: resp.StatusCode}
+	}
+	// The calls field is a pointer so an answer with no calls key (or a null one)
+	// is told from an empty log.
+	var body struct {
+		Calls   *[]CallEntry `json:"calls"`
+		Dropped uint64       `json:"dropped"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		return CallsPage{}, fmt.Errorf("bdgateway: the gateway's calls answer is not the call log: %w", err)
+	}
+	if body.Calls == nil {
+		return CallsPage{}, errors.New("bdgateway: the gateway's calls answer has no calls field")
+	}
+	return CallsPage{Entries: *body.Calls, Dropped: body.Dropped}, nil
 }
 
 // ReportedHash is the manifest hash the gateway reports it serves. It sends GET
