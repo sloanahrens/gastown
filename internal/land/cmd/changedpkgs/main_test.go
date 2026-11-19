@@ -72,20 +72,30 @@ func nameStatus(records ...string) string {
 }
 
 // fakeGit maps "ref:path" to a file's text for the content reader's git calls.
-// A spec it does not hold is missing from that ref's tree, and readFail makes
-// rev-parse find the path while show fails.
+// A spec it does not hold is missing from that ref's tree: ls-tree succeeds
+// with no output, the one positive answer. probeFail makes ls-tree fail (a bad
+// revision or a corrupt object) and readFail makes it find the path while show
+// fails.
 type fakeGit map[string]string
 
-const readFail = "\x00fail"
+const (
+	probeFail = "\x00probe"
+	readFail  = "\x00fail"
+)
 
 func (g fakeGit) run(argv []string) ([]byte, error) {
 	spec := argv[len(argv)-1]
+	if argv[1] == "ls-tree" {
+		spec = argv[4] + ":" + argv[6]
+	}
 	src, ok := g[spec]
 	switch {
 	case !ok:
-		return nil, errors.New("exit status 1")
-	case argv[1] == "rev-parse":
-		return []byte("obj\n"), nil
+		return nil, nil
+	case src == probeFail && argv[1] == "ls-tree":
+		return nil, errors.New("exit status 128")
+	case argv[1] == "ls-tree":
+		return []byte(argv[6] + "\x00"), nil
 	case src == readFail:
 		return nil, errors.New("exit status 128")
 	}
@@ -119,6 +129,8 @@ func TestRunGuardsContentJudgesANonCmdGoChangeByItsInvocations(t *testing.T) {
 		{"a deleted file that held one", nameStatus("D " + path), fakeGit{base + path: sling}, true},
 		{"a rename that changes one", nameStatus("R100 " + path + " " + moved), fakeGit{base + path: sling, "HEAD:" + moved: hook}, true},
 		{"a rename that keeps them", nameStatus("R100 " + path + " " + moved), fakeGit{base + path: sling, "HEAD:" + moved: sling}, false},
+		{"a failed probe on the base keeps the guard", nameStatus("M " + path), fakeGit{base + path: probeFail, "HEAD:" + path: none}, true},
+		{"a failed probe on HEAD keeps the guard", nameStatus("M " + path), fakeGit{base + path: none, "HEAD:" + path: probeFail}, true},
 		{"a failed show keeps the guard", nameStatus("M " + path), fakeGit{base + path: none, "HEAD:" + path: readFail}, true},
 		{"an internal/cmd Go change still fires on its path", nameStatus("M internal/cmd/root.go"), fakeGit{}, true},
 		{"a Makefile change still fires on its path", nameStatus("M Makefile"), fakeGit{}, true},

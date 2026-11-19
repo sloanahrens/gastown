@@ -104,8 +104,9 @@ func main() {
 // contentReader reads a changed file's bytes at base (head false) or at HEAD
 // through run, for the internal/cmd guard's content judge. A path missing from
 // the ref's tree is nil bytes and no error, the side an added or deleted file
-// leaves empty; a git show failure is returned, which fires the guard. The base
-// ref already resolved for the diff, so the probe fails only for an absent path.
+// leaves empty. That is the one positive answer: `git ls-tree` succeeding with
+// no output. Any other failure (a bad revision, a corrupt object, a permission
+// error, a timeout, a failed show) is returned, which fires the guard.
 func contentReader(run func(argv []string) ([]byte, error), base string) land.ContentReader {
 	return func(rel string, head bool) ([]byte, error) {
 		ref := base
@@ -115,11 +116,14 @@ func contentReader(run func(argv []string) ([]byte, error), base string) land.Co
 		if ref == "" {
 			return nil, errors.New("no base ref for the content judge")
 		}
-		spec := ref + ":" + rel
-		if _, err := run([]string{"git", "rev-parse", "--verify", "--quiet", spec}); err != nil {
+		listed, err := run([]string{"git", "ls-tree", "-z", "--name-only", ref, "--", rel})
+		if err != nil {
+			return nil, fmt.Errorf("git ls-tree %s -- %s: %w", ref, rel, err)
+		}
+		if len(listed) == 0 {
 			return nil, nil
 		}
-		return run([]string{"git", "show", spec})
+		return run([]string{"git", "show", ref + ":" + rel})
 	}
 }
 
