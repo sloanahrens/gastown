@@ -36,6 +36,7 @@ import (
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint/dockerimg"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -53,6 +54,16 @@ const (
 	// ciEngineRoot is the Docker data root the engine's size is read from: the
 	// claim the dind container mounts.
 	ciEngineRoot = ciCacheDindMount
+)
+
+// The outcomes an engine prune run records in the job ledger. A failed run is
+// "failed"; a run that reached its verdict is "ok", except that a build cache step
+// which reclaimed nothing while docker reported reclaimable cache before it records
+// the empty outcome: the run did what its filter allowed, and the WARN names what is
+// left (gt-np1hrk).
+const (
+	ciEngineOutcomeOK     = "ok"
+	ciEngineOutcomeFailed = "failed"
 )
 
 // ciEngineListScript is the list program. It prints one JSON object: the data
@@ -175,21 +186,23 @@ func ciEngineBuildCacheTotal(out []byte) (int64, error) {
 }
 
 // ciEngineBuildCacheReport reads a build cache prune that ran without error. It
-// returns the reclaimed figure the verdict line names, and the WARN line when the
-// prune reclaimed nothing although docker reported reclaimable cache before it ran;
-// unusedAge is the filter that WARN names. known is false when that size read
-// failed, which skips the WARN and nothing else. A total that cannot be read is
-// named by docker's last line, bounded, and fails nothing.
-func ciEngineBuildCacheReport(out []byte, reclaimable int64, known bool, unusedAge time.Duration) (reclaimed, warn string) {
+// returns the bytes the prune reclaimed and whether docker printed that figure in a
+// size at all (known is false when the Total line could not be read), the verdict
+// line naming them, and the WARN line when the prune reclaimed nothing although
+// docker reported reclaimable cache before it ran; unusedAge is the filter that WARN
+// names. reclaimableKnown is false when that size read failed, which skips the WARN
+// and nothing else. A total that cannot be read is named by docker's last line,
+// bounded, and fails nothing.
+func ciEngineBuildCacheReport(out []byte, reclaimable int64, reclaimableKnown bool, unusedAge time.Duration) (reclaimed int64, known bool, verdict, warn string) {
 	n, err := ciEngineBuildCacheTotal(out)
 	if err != nil {
-		return fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
+		return 0, false, fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
 	}
-	if n == 0 && known && reclaimable > 0 {
+	if n == 0 && reclaimableKnown && reclaimable > 0 {
 		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s, and cache younger than the filter is not removed",
 			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge))
 	}
-	return "build cache reclaimed " + polecatimage.Human(n), warn
+	return n, true, "build cache reclaimed " + polecatimage.Human(n), warn
 }
 
 // ciEngineLastLine is the last line of out that is not blank, or "".
@@ -696,15 +709,39 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 }
 
 // ciEnginePrune runs the engine prune once and reports whether it reached a
-// verdict. A run that cannot list the engine or plan from the listing removes
-// nothing and says why. Once it removes, every kind and the build cache prune run
-// whatever an earlier one did; a kind docker left in place, or that could not be
-// checked, fails the run after the rest have run, and the next run plans again
-// from what is left.
+// verdict. Every run, whatever path it takes, is appended to the job ledger: the
+// plan's counts, the bytes the build cache step reclaimed and how the run ended,
+// with the next due at one interval from its end. A run that cannot list the
+// engine or plan from the listing removes nothing and says why. Once it removes,
+// every kind and the build cache prune run whatever an earlier one did; a kind
+// docker left in place, or that could not be checked, fails the run after the rest
+// have run, and the next run plans again from what is left.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	_, imageAge, unusedAge, keepRepos, err := ciEnginePruneSettings(pc)
+	started := s.now()
+	every, imageAge, unusedAge, keepRepos, err := ciEnginePruneSettings(pc)
+	stats := map[string]int64{}
+	outcome := ciEngineOutcomeFailed
+	// The run is recorded on every return path below, the refusals included, so
+	// the ledger says when the job last ran and when it is next due.
+	defer func() {
+		ended := s.now()
+		run := jobledger.Run{
+			Job:       ciEnginePruneName,
+			StartedAt: started,
+			EndedAt:   ended,
+			Outcome:   outcome,
+			Stats:     stats,
+		}
+		// A refused setting leaves the interval unknown, so no next due is
+		// recorded rather than a guessed one.
+		if every > 0 {
+			next := ended.Add(every)
+			run.NextDue = &next
+		}
+		d.recordCIEnginePruneRun(run)
+	}()
 	if err != nil {
 		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false
@@ -751,6 +788,9 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 
 	before := polecatimage.Human(*listing.DataRootKiB * 1024)
 	counts := fmt.Sprintf("%d containers, %d images, %d volumes", len(plan.containers), len(plan.images), len(plan.volumes))
+	stats["containers"] = int64(len(plan.containers))
+	stats["images"] = int64(len(plan.images))
+	stats["volumes"] = int64(len(plan.volumes))
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		for _, c := range plan.containers {
 			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove container %s", c.ID[:12])
@@ -763,6 +803,8 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		}
 		d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove %s, of %s, and prune build cache (not sized in a dry run); nothing removed",
 			counts, before)
+		// The build cache step did not run, so no build_cache_bytes is recorded.
+		outcome = ciEngineOutcomeOK
 		return true
 	}
 
@@ -782,14 +824,19 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		d.ciEnginePruneLogf("reclaimable unreadable", "disk_maintenance: ci engine prune: the build cache's reclaimable size could not be read before its prune: %v; the zero-reclaim check is skipped", reclaimErr)
 	}
 	cache := "build cache prune failed"
+	zeroReclaim := false
 	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(unusedAge)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineFailure(err, stderr))
 		failed = true
 	} else {
-		var warn string
-		cache, warn = ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge)
+		reclaimed, known, verdict, warn := ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge)
+		cache = verdict
+		if known {
+			stats["build_cache_bytes"] = reclaimed
+		}
 		if warn != "" {
+			zeroReclaim = true
 			d.logger.Printf("%s", warn)
 		}
 	}
@@ -802,9 +849,29 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		d.logger.Printf("disk_maintenance: ci engine prune: a removal failed; the engine is %s, from %s; %s; the run is retried", polecatimage.Human(afterKiB*1024), before, cache)
 		return false
 	}
+	outcome = ciEngineOutcomeOK
+	if zeroReclaim {
+		// The empty outcome tells the job list this run succeeded but had nothing
+		// it was allowed to remove from a cache docker called reclaimable.
+		outcome = ""
+	}
 	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s; %s",
 		counts, before, polecatimage.Human(afterKiB*1024), cache)
 	return true
+}
+
+// recordCIEnginePruneRun appends one run to the town's job ledger. A ledger that
+// cannot be opened or appended is logged once and never changes the prune's own
+// result: the ledger is a record of what the job did, not part of doing it.
+func (d *Daemon) recordCIEnginePruneRun(run jobledger.Run) {
+	ledger, err := d.diskMaintenanceSeams().jobLedger()
+	if err != nil {
+		d.ciEnginePruneLogf("job ledger", "disk_maintenance: ci engine prune: the job ledger could not be opened (%v); the run is not recorded", err)
+		return
+	}
+	if err := ledger.Append(run); err != nil {
+		d.ciEnginePruneLogf("job ledger", "disk_maintenance: ci engine prune: the run could not be recorded (%v)", err)
+	}
 }
 
 // ciEngineRemoveKind runs one kind's removal and reports whether every planned id

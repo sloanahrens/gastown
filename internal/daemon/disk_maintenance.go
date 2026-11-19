@@ -42,6 +42,7 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -153,6 +154,16 @@ type diskMaintSeams struct {
 	// sweepRunsFS is the filesystem the sweep-runs prune lists and removes
 	// through; nil is the operating system's.
 	sweepRunsFS sweepRunsFileSystem
+	// jobLedger returns the ledger a maintenance job appends its run to; nil is
+	// the town's ledger under <town>/.runtime/jobs.
+	jobLedger func() (jobRunAppender, error)
+}
+
+// jobRunAppender appends one maintenance job run to the ledger. It is an
+// interface so a test can hand a pass one whose Append fails, which a town's
+// ledger does not.
+type jobRunAppender interface {
+	Append(jobledger.Run) error
 }
 
 // diskMaintenanceSeams returns d's patrol seams with every unset one filled in
@@ -205,6 +216,11 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.sweepRunsFS == nil {
 		s.sweepRunsFS = osSweepRunsFS{}
+	}
+	if s.jobLedger == nil {
+		s.jobLedger = func() (jobRunAppender, error) {
+			return jobledger.NewLedger(d.config.TownRoot)
+		}
 	}
 	return s
 }

@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -1700,5 +1703,196 @@ func TestCIEnginePresenceArgv(t *testing.T) {
 		if !slices.Equal(got, want) {
 			t.Errorf("%s presence argv = %q, want %q", kind, got, want)
 		}
+	}
+}
+
+// TestCIEnginePruneRecordsRun: every run of the engine prune appends exactly one
+// run to the town's job ledger, stamped with the daemon's clock, the plan's counts,
+// the bytes the build cache step reclaimed and the next due one interval on. A run
+// that reached its verdict is "ok"; a step that failed is "failed"; a build cache
+// step that reclaimed nothing while docker reported reclaimable cache records the
+// empty outcome; a dry run records its plan with no build cache figure; and a
+// listing the run could not read records "failed" with no counts.
+func TestCIEnginePruneRecordsRun(t *testing.T) {
+	t.Parallel()
+	// The default ci_engine_prune_interval the fixture's empty setting takes.
+	const every = time.Hour
+	counts := map[string]int64{"containers": 1, "images": 1, "volumes": 1}
+	for name, tc := range map[string]struct {
+		mode        string
+		setup       func(f *ciCacheFixture)
+		wantOutcome string
+		wantStats   map[string]int64
+	}{
+		"a run that reclaims build cache is ok with its bytes": {
+			mode: agentconfig.DiskMaintenanceModeApply,
+			setup: func(f *ciCacheFixture) {
+				replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"})
+				replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t2GB\n"})
+			},
+			wantOutcome: ciEngineOutcomeOK,
+			wantStats:   map[string]int64{"containers": 1, "images": 1, "volumes": 1, "build_cache_bytes": 2_000_000_000},
+		},
+		"a step that fails is failed": {
+			mode: agentconfig.DiskMaintenanceModeApply,
+			setup: func(f *ciCacheFixture) {
+				replaceEngineReply(f, "-- docker builder prune", cliReply{code: 1, stderr: "Cannot connect to the Docker daemon"})
+			},
+			wantOutcome: ciEngineOutcomeFailed,
+			wantStats:   counts,
+		},
+		"a build cache step that reclaims nothing over reclaimable cache is the empty outcome": {
+			mode: agentconfig.DiskMaintenanceModeApply,
+			setup: func(f *ciCacheFixture) {
+				replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"})
+				replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t0B\n"})
+			},
+			wantOutcome: "",
+			wantStats:   map[string]int64{"containers": 1, "images": 1, "volumes": 1, "build_cache_bytes": 0},
+		},
+		"a total the run could not read records no build cache figure": {
+			mode: agentconfig.DiskMaintenanceModeApply,
+			setup: func(f *ciCacheFixture) {
+				replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"})
+				replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total: lots\n"})
+			},
+			wantOutcome: ciEngineOutcomeOK,
+			wantStats:   counts,
+		},
+		"a dry run records its plan and no build cache figure": {
+			mode:        agentconfig.DiskMaintenanceModeDryRun,
+			setup:       func(*ciCacheFixture) {},
+			wantOutcome: ciEngineOutcomeOK,
+			wantStats:   counts,
+		},
+		"a listing the run could not read is failed with no counts": {
+			mode: agentconfig.DiskMaintenanceModeApply,
+			setup: func(f *ciCacheFixture) {
+				replaceEngineReply(f, "ci-engine-list", cliReply{stdout: "not the list program's JSON\n"})
+			},
+			wantOutcome: ciEngineOutcomeFailed,
+			wantStats:   nil,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, tc.mode, engineBuildCacheListing(t), engineRemoveAnswers{})
+			tc.setup(f)
+			f.tick()
+			f.drain()
+
+			ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+			if err != nil {
+				t.Fatalf("opening the job ledger: %v", err)
+			}
+			runs, err := ledger.Tail(ciEnginePruneName, 10)
+			if err != nil {
+				t.Fatalf("reading the job ledger: %v", err)
+			}
+			if len(runs) != 1 {
+				t.Fatalf("the run was recorded %d time(s), want once\n%s", len(runs), f.logs.String())
+			}
+			run := runs[0]
+			if run.Job != ciEnginePruneName {
+				t.Errorf("recorded run's job = %q, want %q", run.Job, ciEnginePruneName)
+			}
+			if !run.StartedAt.Equal(ciCacheTestStart) || !run.EndedAt.Equal(ciCacheTestStart) {
+				t.Errorf("recorded run's span = %v to %v, want the daemon's clock %v", run.StartedAt, run.EndedAt, ciCacheTestStart)
+			}
+			if run.Outcome != tc.wantOutcome {
+				t.Errorf("recorded outcome = %q, want %q", run.Outcome, tc.wantOutcome)
+			}
+			if !maps.Equal(run.Stats, tc.wantStats) {
+				t.Errorf("recorded stats = %v, want %v", run.Stats, tc.wantStats)
+			}
+			if want := ciCacheTestStart.Add(every); run.NextDue == nil || !run.NextDue.Equal(want) {
+				t.Errorf("recorded next due = %v, want %v", run.NextDue, want)
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneRecordsNoNextDueWhenSettingsRefused: a run whose settings cannot
+// be read records "failed" with no counts and no next due. The interval it would take
+// is the setting that failed, so the ledger records it as unknown rather than guessing.
+// The pass refuses such a setting before it calls the prune, so this calls the prune
+// with the bad setting in place, as a reload between the pass's read and the prune's
+// does.
+func TestCIEnginePruneRecordsNoNextDueWhenSettingsRefused(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineUnusedAge = "30m"
+	if f.d.ciEnginePrune(context.Background(), agentconfig.DiskMaintenanceModeApply) {
+		t.Fatalf("a run whose settings cannot be read reported a verdict:\n%s", f.logs.String())
+	}
+
+	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("opening the job ledger: %v", err)
+	}
+	run, ok, err := ledger.Last(ciEnginePruneName)
+	if err != nil {
+		t.Fatalf("reading the job ledger: %v", err)
+	}
+	if !ok {
+		t.Fatalf("a run whose settings could not be read was not recorded:\n%s", f.logs.String())
+	}
+	if run.Outcome != ciEngineOutcomeFailed || len(run.Stats) != 0 {
+		t.Errorf("recorded outcome and stats = %q, %v, want %q and none", run.Outcome, run.Stats, ciEngineOutcomeFailed)
+	}
+	if run.NextDue != nil {
+		t.Errorf("recorded next due = %v, want none when the interval could not be read", run.NextDue)
+	}
+}
+
+// failingJobLedger is a maintenance job ledger whose Append fails, as a full disk
+// or a read-only .runtime makes a town's.
+type failingJobLedger struct{}
+
+func (failingJobLedger) Append(jobledger.Run) error {
+	return errors.New("write .runtime/jobs/runs.jsonl: no space left on device")
+}
+
+// TestCIEnginePruneAppendFailure: a job ledger whose Append fails, or that cannot be
+// opened at all, is logged once and changes nothing about the prune: the removals
+// run, the verdict is reached and scheduled, and the verdict line is logged.
+func TestCIEnginePruneAppendFailure(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		ledger  func() (jobRunAppender, error)
+		wantLog string
+	}{
+		"Append fails": {
+			ledger:  func() (jobRunAppender, error) { return failingJobLedger{}, nil },
+			wantLog: "the run could not be recorded",
+		},
+		"the ledger cannot be opened": {
+			ledger:  func() (jobRunAppender, error) { return nil, errors.New("jobledger: town root is empty") },
+			wantLog: "the job ledger could not be opened",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+			replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"})
+			replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t2GB\n"})
+			f.d.diskMaint.jobLedger = tc.ledger
+			f.tick()
+			f.drain()
+
+			logs := f.logs.String()
+			if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+				t.Errorf("a failed ledger append left the run without a verdict:\n%s", logs)
+			}
+			if !strings.Contains(logs, "removed 1 containers, 1 images, 1 volumes") {
+				t.Errorf("a failed ledger append changed the verdict line:\n%s", logs)
+			}
+			if want := engineLogLine(logs, tc.wantLog); want == "" {
+				t.Errorf("no line names the failed ledger write (%q):\n%s", tc.wantLog, logs)
+			}
+			if strings.Contains(logs, "WARN") || strings.Contains(logs, "retried") {
+				t.Errorf("a failed ledger append turned into a warning or a retry:\n%s", logs)
+			}
+		})
 	}
 }
