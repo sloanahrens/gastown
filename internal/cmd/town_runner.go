@@ -20,10 +20,6 @@ import (
 // rollOwner is the owner the roll writes into the landing hold.
 const rollOwner = "roll"
 
-// rollHoldFile is the landing hold's file name at the town root. It matches
-// runnerroll's landingHoldName, which the roll only prints in a removal command.
-const rollHoldFile = "landing.hold"
-
 // releaseBound bounds the release of the hold. The release runs after a signal
 // has canceled the roll's context, so it gets a context of its own.
 const releaseBound = time.Minute
@@ -84,7 +80,8 @@ in order, and each one is printed:
   5. release the landing hold
 
 The hold is released on every exit path, including SIGINT and SIGTERM. A failed
-release prints the command that removes the file. A wait that times out exits
+release reads the hold again and prints what to do by whose hold it is now: a
+removal command only while the file is this roll's. A wait that times out exits
 non-zero, applies nothing, and releases the hold.
 
 The apply step is not wired yet, so a real roll refuses before it takes the
@@ -144,7 +141,7 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 // then the refusal comes first.
 func runnerRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait time.Duration, dryRun bool) runnerRollDeps {
 	return runnerRollDeps{
-		holdPath:    filepath.Join(townRoot, rollHoldFile),
+		holdPath:    filepath.Join(townRoot, runnerroll.LandingHoldName),
 		clock:       wallRollClock{},
 		now:         time.Now,
 		apply:       unwiredApplier{},
@@ -243,8 +240,8 @@ func runTownRunnerRoll(ctx context.Context, d runnerRollDeps) (err error) {
 }
 
 // releaseHold gives the hold back on a context the roll's cancellation does not
-// reach, with its own bound. A failed release prints the command that removes the
-// file, and returns the error.
+// reach, with its own bound. After a failed release it reads the hold again and
+// prints what to do by whose hold it is now.
 func (d runnerRollDeps) releaseHold(ctx context.Context, hold *runnerroll.Hold) error {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseBound)
 	defer cancel()
@@ -252,6 +249,30 @@ func (d runnerRollDeps) releaseHold(ctx context.Context, hold *runnerroll.Hold) 
 	if err == nil {
 		return nil
 	}
-	fmt.Fprintf(d.out, "the landing hold is still in place: %v\nremove it with: rm -f -- %s\n", err, d.holdPath)
+	d.printHoldAdvice(ctx, hold)
 	return fmt.Errorf("releasing the landing hold: %w", err)
+}
+
+// printHoldAdvice reads the landing hold again and prints what is there and what
+// to do about it. Only a hold this roll still owns gets a removal command: another
+// roll's hold, a file that is not a whole hold, a file already gone and an
+// unreadable file are each reported as they were found.
+func (d runnerRollDeps) printHoldAdvice(ctx context.Context, hold *runnerroll.Hold) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseBound)
+	defer cancel()
+	view, err := hold.Inspect(rctx)
+	switch {
+	case err != nil:
+		fmt.Fprintf(d.out, "the landing hold could not be read back: %v; it was left in place\n", err)
+	case view.State == runnerroll.HoldOwn:
+		fmt.Fprintf(d.out, "the landing hold is still this roll's; remove it with: rm -f -- %s\n", d.holdPath)
+	case view.State == runnerroll.HoldOther:
+		fmt.Fprintf(d.out, "the landing hold is held by owner %q with reason %q; do not remove it; ask that roll\n", view.Owner, view.Reason)
+	case view.State == runnerroll.HoldMalformed:
+		fmt.Fprintf(d.out, "the landing hold is not a whole hold (its first line is %q); it was left in place\n", view.Reason)
+	case view.State == runnerroll.HoldMissing:
+		fmt.Fprintln(d.out, "the landing hold file is already gone")
+	default:
+		fmt.Fprintln(d.out, "the landing hold's state is unknown; it was left in place")
+	}
 }

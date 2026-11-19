@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ type rollStore struct {
 	content   string
 	present   bool
 	createErr error
+	readErr   error
 	removeErr error
 }
 
@@ -48,6 +50,9 @@ func (s *rollStore) Create(ctx context.Context, content string) error {
 }
 
 func (s *rollStore) Read(context.Context) (string, bool, error) {
+	if s.readErr != nil {
+		return "", false, s.readErr
+	}
 	return s.content, s.present, nil
 }
 
@@ -108,7 +113,7 @@ func newRollFixture() *rollFixture {
 	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	f.deps = runnerRollDeps{
 		store:    f.store,
-		holdPath: "/town/landing.hold",
+		holdPath: filepath.Join("/town", runnerroll.LandingHoldName),
 		landing: func(context.Context) (string, int, bool, error) {
 			ev.add("landing")
 			return runnerroll.RollPause, 0, true, nil
@@ -330,18 +335,72 @@ func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
 	}
 }
 
-func TestTownRunnerRollPrintsRemovalCommandWhenReleaseFails(t *testing.T) {
+// TestTownRunnerRollHoldPathUsesTheExportedName: the roll's hold path is built from runnerroll's one exported name.
+func TestTownRunnerRollHoldPathUsesTheExportedName(t *testing.T) {
 	t.Parallel()
-	f := newRollFixture()
-	f.store.removeErr = errors.New("pod unreachable")
-
-	err := runTownRunnerRoll(context.Background(), f.deps)
-
-	if err == nil {
-		t.Fatal("roll with a failed release succeeded")
+	got := runnerRollDepsFor("/town", &bytes.Buffer{}, time.Minute, time.Minute, false).holdPath
+	if !strings.HasSuffix(got, runnerroll.LandingHoldName) {
+		t.Errorf("the roll's hold path %q does not end with %q", got, runnerroll.LandingHoldName)
 	}
-	if want := "rm -f -- /town/landing.hold"; !strings.Contains(f.out.String(), want) {
-		t.Errorf("output lacks the removal command %q; got:\n%s", want, f.out.String())
+}
+
+// changeHoldDuringRuns makes the runs read write the store, as another process
+// would between the take and the release.
+func changeHoldDuringRuns(f *rollFixture, content string, present bool) {
+	f.deps.runs = func(context.Context) ([]runnerroll.Run, error) {
+		f.events.add("runs")
+		f.store.content, f.store.present = content, present
+		return nil, nil
+	}
+}
+
+// TestTownRunnerRollReleaseFailureAdvice: a failed release prints what to do by
+// whose hold the file is now. Only this roll's own hold gets a removal command.
+func TestTownRunnerRollReleaseFailureAdvice(t *testing.T) {
+	t.Parallel()
+	const otherHold = "overseer pause\nowner=ops token=tok-2 at=2026-11-19T11:00:00Z"
+	cases := []struct {
+		name     string
+		mutate   func(*rollFixture)
+		want     []string
+		wantPath bool
+	}{
+		{name: "this roll's own hold", mutate: func(f *rollFixture) { f.store.removeErr = errors.New("pod unreachable") },
+			want: []string{"still this roll's", "remove it with: rm -f -- "}, wantPath: true},
+		{name: "another roll's hold", mutate: func(f *rollFixture) { changeHoldDuringRuns(f, otherHold, true) },
+			want: []string{`owner "ops"`, `reason "overseer pause"`, "do not remove it; ask that roll"}},
+		{name: "a file that is not a whole hold", mutate: func(f *rollFixture) { changeHoldDuringRuns(f, "overseer pause\nowner=ops", true) },
+			want: []string{`first line is "overseer pause"`, "left in place"}},
+		{name: "a file already gone", mutate: func(f *rollFixture) { changeHoldDuringRuns(f, "", false) },
+			want: []string{"already gone"}},
+		{name: "a file that cannot be read", mutate: func(f *rollFixture) { f.store.readErr = errors.New("pod unreachable") },
+			want: []string{"could not be read back", "pod unreachable"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRollFixture()
+			tc.mutate(f)
+			err := runTownRunnerRoll(context.Background(), f.deps)
+			if err == nil {
+				t.Fatal("roll with a failed release succeeded")
+			}
+			out := f.out.String()
+			for _, want := range tc.want {
+				if !strings.Contains(out, want) {
+					t.Errorf("output lacks %q; got:\n%s", want, out)
+				}
+			}
+			if tc.wantPath {
+				_, after, _ := strings.Cut(out, "rm -f -- ")
+				printed, _, _ := strings.Cut(after, "\n")
+				printed = strings.TrimSpace(printed)
+				if !strings.HasSuffix(printed, runnerroll.LandingHoldName) {
+					t.Errorf("printed hold path %q does not end with %q", printed, runnerroll.LandingHoldName)
+				}
+			} else if strings.Contains(out, "rm") {
+				t.Errorf("output holds a removal command; got:\n%s", out)
+			}
+		})
 	}
 }
 
