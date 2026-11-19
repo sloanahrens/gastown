@@ -226,6 +226,11 @@ const (
 	// all pole-bound: the overseer reads the pole package and the tier seconds
 	// (gt-l0t2tg).
 	RuleGateSlow = "gate.slow"
+
+	// RuleSeatFinishedLingering is a finished seat the town still wants
+	// running: its last turn ended and its bead is closed, and it has been left
+	// in recovery past the linger bound (gt-klpqb3).
+	RuleSeatFinishedLingering = "seat.finished_lingering"
 )
 
 var (
@@ -365,6 +370,10 @@ var ruleFlags = map[string]RuleFlags{
 	// nothing running on it: the overseer is woken to read the last error and
 	// release or restart the seat (gt-q6hafz).
 	RuleSeatUnreachable: flagsWake,
+	// A finished seat left in recovery costs a seat name, not the town: the
+	// queue row is what the overseer reads on its next look, and no run is
+	// blocked on the seat name while it goes unread (gt-klpqb3).
+	RuleSeatFinishedLingering: flagsAsk,
 	// A drift item and its unreadable twin are the estimator's own calibration
 	// to look at, not a page: the next retrain is the fix, and the queue is
 	// where the overseer reads it (gt-my0o23).
@@ -509,6 +518,7 @@ var kindRules = map[Kind]string{
 	KindSandboxSilent:                 RuleSandboxSilent,
 	KindSeatSandboxStale:              RuleSeatSandboxStale,
 	KindSeatUnreachable:               RuleSeatUnreachable,
+	KindSeatFinishedLingering:         RuleSeatFinishedLingering,
 	KindStoryPointsDrift:              RuleStoryPointsDrift,
 	KindImagePinsStale:                RuleImagePinsStale,
 	KindImagePinsUnreadable:           RuleImagePinsUnreadable,

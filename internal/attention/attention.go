@@ -218,6 +218,10 @@ const (
 	// KindGateSlow: the newest gate runs of a rig were all over their tier bar,
 	// or all pole-bound (gt-l0t2tg).
 	KindGateSlow Kind = "gate-slow"
+	// KindSeatFinishedLingering: a seat whose last turn ended and whose bead is
+	// closed is still in the walk past the linger bound, so the town wants it
+	// running and nothing is running it (gt-klpqb3).
+	KindSeatFinishedLingering Kind = "seat-finished-lingering"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -240,7 +244,7 @@ func Kinds() []Kind {
 		KindHoldStale, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
-		KindImagePinsDeadLayer, KindGateSlow,
+		KindImagePinsDeadLayer, KindGateSlow, KindSeatFinishedLingering,
 	}
 }
 

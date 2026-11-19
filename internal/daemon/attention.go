@@ -76,6 +76,11 @@ const (
 	// and short enough that the queue does not become a history file
 	// (gt-vsct7.4).
 	attentionRiskPathWindow = 7 * 24 * time.Hour
+	// attentionSeatFinishedLinger is how long a seat whose agent bead says done
+	// and whose last work bead reads closed may stand in the walk before it is
+	// an item. The landing hook ends a landed seat at once, so half an hour is
+	// past every normal end (gt-klpqb3).
+	attentionSeatFinishedLinger = 30 * time.Minute
 )
 
 // landingState is one rig's landing state as the collectors read it
@@ -693,6 +698,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindLandingStuck, collect: s.collectLandingStuck},
 		{kind: attention.KindQueueStuck, collect: s.collectQueueStuck},
 		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
+		// A seat whose turn ended and whose work landed but which is still in
+		// the walk: the stall rule above cannot see it, because a done seat
+		// holds no open work (gt-klpqb3).
+		{kind: attention.KindSeatFinishedLingering, collect: s.collectSeatFinishedLingering},
 		{kind: attention.KindDirectPush, collect: s.collectDirectPush},
 		{kind: attention.KindRiskPath, collect: s.collectRiskPaths},
 		// Reads the count collectRiskPaths just made, so it stays right after it.
@@ -1830,6 +1839,70 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 			Severity: attention.SeverityLow,
 			Rig:      seat.Rig,
 			Summary:  fmt.Sprintf("%s silent %s with work in hand", name, townhealth.Short(quiet)),
+		})
+	}
+	return out, nil
+}
+
+// collectSeatFinishedLingering raises one low item per seat whose agent bead
+// says done, whose last work bead reads closed, and which has stood that way
+// longer than attentionSeatFinishedLinger (gt-klpqb3): the turn ended and its
+// work landed, yet the walk still lists the seat. A seat whose bead is open is
+// rework with its branch preserved and never raises.
+//
+// Every read is the error, never a guess (keptSeatReSlung): the previous
+// tick's items are kept rather than read as finished or as rework. The age is
+// the agent bead's last write, which for a done seat is gt done's write
+// (polecat.AgentBeadUpdatedAt, patrolscan.AgentRecord.UpdatedAt).
+func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]attention.Item, error) {
+	seats, err := s.seats()
+	if err != nil {
+		return nil, err
+	}
+	h := &patrolScanHost{d: s.d}
+	var out []attention.Item
+	for _, seat := range seats {
+		role, name, named := strings.Cut(seat.Name, "/")
+		if !named || role != constants.RolePolecat || seat.Rig == "" {
+			continue
+		}
+		rec, err := h.AgentRecord(seat.Rig, name)
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s: %w", seat.Rig, name, err)
+		}
+		if beads.AgentState(strings.TrimSpace(rec.State)) != beads.AgentStateDone {
+			continue
+		}
+		if rec.LastSourceIssue == "" {
+			continue
+		}
+		issue, err := h.readBeads(seat.Rig).Show(rec.LastSourceIssue)
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s: %w", seat.Rig, name, err)
+		}
+		if issue == nil {
+			return nil, fmt.Errorf("%s/%s: bd show %s: no issue", seat.Rig, name, rec.LastSourceIssue)
+		}
+		if beads.IssueStatus(issue.Status) != beads.StatusClosed {
+			continue
+		}
+		// The age is the record's last write. A record that carries none cannot
+		// be judged, so it is an error rather than an age read as zero (which
+		// would raise every time).
+		if rec.UpdatedAt.IsZero() {
+			return nil, fmt.Errorf("%s/%s: the agent bead carries no update time", seat.Rig, name)
+		}
+		done := s.now.Sub(rec.UpdatedAt)
+		if done <= attentionSeatFinishedLinger {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "seat-finished:" + seat.Rig + "/" + name,
+			Kind:     attention.KindSeatFinishedLingering,
+			Severity: attention.SeverityLow,
+			Rig:      seat.Rig,
+			Bead:     rec.LastSourceIssue,
+			Summary:  fmt.Sprintf("%s/%s done %s on %s", seat.Rig, name, townhealth.Short(done), rec.LastSourceIssue),
 		})
 	}
 	return out, nil
