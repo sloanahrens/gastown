@@ -2034,6 +2034,13 @@ type specDispatchEnv struct {
 	// bead instead of deferring it again.
 	RecordLockTimeout func(beadID string, attempts int) error
 	ClearLockTimeout  func(beadID string) error
+	// RecordContention writes the contention schedule a bond lost to database
+	// contention leaves on its bead, and ClearContention drops it when a sling
+	// dispatches the bead (gt-kmkpao). A Record that fails or is unwired is
+	// reported and the bead is not labeled: the loss is the host's load, not
+	// the bead's defect.
+	RecordContention func(beadID string, rec specdispatch.ContentionState) error
+	ClearContention  func(beadID string) error
 	// LockTimeoutRecorded reports whether a bead's comments record an
 	// assignee-lock timeout run still in progress (specdispatch's
 	// LockTimeoutRecorded), asked when the planned count is missing: a run the
@@ -2197,6 +2204,44 @@ func specLockTimeoutCounter(townRoot string) (record func(beadID string, attempt
 	return record, clear
 }
 
+// specContentionStore is the pair of writes a bead's contention schedule lives
+// behind, in the bead's metadata, for both the tick and the background sling
+// processes that carry the schedule across ticks (gt-kmkpao).
+func specContentionStore(townRoot string) (record func(beadID string, rec specdispatch.ContentionState) error, clear func(beadID string) error) {
+	store := func(id string) beads.Client {
+		return beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id))
+	}
+	record = func(id string, rec specdispatch.ContentionState) error {
+		return store(id).Update(id, beads.UpdateOptions{
+			SetMetadata: []string{
+				fmt.Sprintf("%s=%s", specdispatch.ContentionFirstKey, rec.First.UTC().Format(time.RFC3339)),
+				fmt.Sprintf("%s=%d", specdispatch.ContentionAttemptsKey, rec.Attempts),
+				fmt.Sprintf("%s=%s", specdispatch.ContentionRetryAtKey, rec.RetryAt.UTC().Format(time.RFC3339)),
+			},
+		})
+	}
+	clear = func(id string) error {
+		return store(id).Update(id, beads.UpdateOptions{
+			UnsetMetadata: []string{
+				specdispatch.ContentionFirstKey,
+				specdispatch.ContentionAttemptsKey,
+				specdispatch.ContentionRetryAtKey,
+			},
+		})
+	}
+	return record, clear
+}
+
+// specContentionOf is the contention schedule a bead's metadata records, nil
+// when it records none.
+func specContentionOf(metadata []byte) *specdispatch.ContentionState {
+	rec, ok := specdispatch.ContentionRecord(metadata)
+	if !ok {
+		return nil
+	}
+	return &rec
+}
+
 // recordLockTimeout writes a bead's consecutive assignee-lock-timeout count
 // through the env's writer. An env with no writer cannot bound the deferrals,
 // and the caller labels the bead instead (gt-a4cdcd).
@@ -2214,6 +2259,25 @@ func (e specDispatchEnv) clearLockTimeout(beadID string) error {
 		return nil
 	}
 	return e.ClearLockTimeout(beadID)
+}
+
+// recordContention writes a bead's contention schedule through the env's
+// writer. An env with no writer is reported by the caller, which labels
+// nothing: the loss is the host's, not the bead's (gt-kmkpao).
+func (e specDispatchEnv) recordContention(beadID string, rec specdispatch.ContentionState) error {
+	if e.RecordContention == nil {
+		return errors.New("no contention store is wired")
+	}
+	return e.RecordContention(beadID, rec)
+}
+
+// clearContention drops a bead's contention schedule. An env with no writer
+// never recorded one, so there is nothing to clear.
+func (e specDispatchEnv) clearContention(beadID string) error {
+	if e.ClearContention == nil {
+		return nil
+	}
+	return e.ClearContention(beadID)
 }
 
 // lockTimeoutHistory answers whether a bead's comments record an
@@ -2846,7 +2910,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// reads, was the tick: 45-70 s each in series, 2026-10-21).
 		c.order = len(pending)
 		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, overrunNote: overrunNote,
-			lockTimeouts: specdispatch.LockTimeoutAttempts(latest.Metadata), entry: entry})
+			lockTimeouts: specdispatch.LockTimeoutAttempts(latest.Metadata), contention: specContentionOf(latest.Metadata), entry: entry})
 		slated[id] = true
 		budget.Bump(seat.Agent, budget.Now)
 	}
@@ -3041,7 +3105,11 @@ type specPendingSling struct {
 	// the job for a background sling): a timeout this sling hits is one more,
 	// and any other outcome clears it (gt-a4cdcd).
 	lockTimeouts int
-	entry        specDispatchEntry
+	// contention is the schedule the bead carried when this sling was planned,
+	// nil when it carried none: a loss this sling hits is one more attempt on
+	// that schedule (gt-kmkpao).
+	contention *specdispatch.ContentionState
+	entry      specDispatchEntry
 }
 
 // specSlingOutcome is what one sling produced, applied to the report in
@@ -3060,6 +3128,12 @@ type specSlingOutcome struct {
 	// clearLockTimeout drops the count a bead carries: the bead succeeded on
 	// this sling, or this failure or deferral broke the consecutive run.
 	clearLockTimeout bool
+	// recordContention is the contention schedule to write on the bead, nil
+	// when this outcome owes none (gt-kmkpao).
+	recordContention *specdispatch.ContentionState
+	// clearContention drops the schedule a bead carries: this sling dispatched
+	// it, so the contention cleared.
+	clearContention bool
 	// refused is set when the sling was refused before it spawned, or after it
 	// rolled its spawn back: its charged seat is handed back. Any other sling
 	// that did not succeed keeps the charge for the tick (gt-pto2f).
@@ -3172,6 +3246,20 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: clearing the lock timeout count: %v", o.entry.Bead, err))
 		}
 	}
+	if o.recordContention != nil {
+		// A schedule that cannot be written is reported and labels nothing:
+		// the bead was deferred anyway, so the loss costs only its record
+		// (gt-kmkpao).
+		if err := env.recordContention(o.entry.Bead, *o.recordContention); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: recording the contention retry: %v", o.entry.Bead, err))
+		}
+	} else if o.clearContention {
+		// A clear that fails leaves a stale schedule on the bead: the error is
+		// reported, and the sling's own outcome stands (gt-kmkpao).
+		if err := env.clearContention(o.entry.Bead); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: clearing the contention retry: %v", o.entry.Bead, err))
+		}
+	}
 	if o.label != "" {
 		if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
@@ -3255,6 +3343,11 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		if p.lockTimeouts > 0 && o.recordLockTimeout == 0 {
 			o.clearLockTimeout = true
 		}
+		// A sling that reached a session ended the contended run, so the
+		// schedule the plan read is cleared (gt-kmkpao).
+		if o.kind == specSlingDispatched && p.contention != nil {
+			o.clearContention = true
+		}
 		return o
 	}
 	// A refusal for the lagging image stands for HoldFor: the slings behind it
@@ -3309,7 +3402,21 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		// re-read refuses a bead with an assignee, so a sling that hooked the
 		// bead before its error is not slung twice (gt-9x16z). The attempt may
 		// have hooked it, so the seat stays charged for this tick (gt-pto2f).
+		// The loss is dated on the bead's schedule: the attempt and the time
+		// its retry is owed (gt-kmkpao).
 		if specdispatch.IsSerializationFailure(err) {
+			planned := specdispatch.ContentionState{}
+			if p.contention != nil {
+				planned = *p.contention
+			}
+			next, exhausted := specdispatch.ContentionNext(planned, env.Now())
+			if !exhausted {
+				entry.Line = fmt.Sprintf("%s: sling deferred, database contention, retry at %s (attempt %d)",
+					id, next.RetryAt.Format(time.RFC3339), next.Attempts)
+				return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, recordContention: &next})
+			}
+			// A spent schedule, or one that cannot be read, defers the bead as
+			// it did before the schedule existed (gt-kmkpao).
 			entry.Line = fmt.Sprintf("%s: sling deferred, %v after %d attempts: %s", id, specdispatch.ErrRetriesExhausted, attempts, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
@@ -3965,6 +4072,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	// The consecutive assignee-lock-timeout count, read on the bead's fresh
 	// read and written back when a timeout defers it (gt-a4cdcd).
 	recordLockTimeout, clearLockTimeout := specLockTimeoutCounter(townRoot)
+	// The contention schedule, written when a lost bond defers the bead and
+	// cleared when a sling dispatches it (gt-kmkpao).
+	recordContention, clearContention := specContentionStore(townRoot)
 	// The revert beads the tick read, kept for the tick alone so a rig with an
 	// open revert costs it one bd read (gt-kuax8).
 	reverts := newSpecRevertBeads()
@@ -4088,6 +4198,8 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		},
 		RecordLockTimeout: recordLockTimeout,
 		ClearLockTimeout:  clearLockTimeout,
+		RecordContention:  recordContention,
+		ClearContention:   clearContention,
 		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
 			reads.call()
 			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
