@@ -83,7 +83,7 @@ func bdGatewayDeployment(v Values, namespace string) Deployment {
 					},
 					HostAliases:    hostAliases(v),
 					InitContainers: []Container{bdGatewayTokenCopy(v)},
-					Containers:     []Container{bdGatewayContainer(v)},
+					Containers:     []Container{bdGatewayContainer(v, DoltHostName, bdGatewayDoltPort)},
 					Volumes:        bdGatewayVolumes(v),
 				},
 			},
@@ -112,13 +112,18 @@ func bdGatewayTokenCopy(v Values) Container {
 }
 
 // bdGatewayContainer runs bdgw serve with the command the gateway's image expects.
-// Its Dolt endpoint is DoltHostName, which the pod's hostAliases entry resolves when
-// the render has a host gateway address. Its readiness is bdgw ready on the tokens,
-// the verb table and the workspace, the three flags bdgw ready requires, so a gateway
-// whose workspace is not ready stays out of the Service.
-func bdGatewayContainer(v Values) Container {
+// Its Dolt endpoint is doltHost and doltPort, which bdGatewayDeployment passes as
+// DoltHostName and bdGatewayDoltPort; the serve command and the readiness probe both
+// take that one pair, so they cannot name different Dolt endpoints. The host resolves
+// through the pod's hostAliases entry when the render has a host gateway address.
+// Its readiness is bdgw ready on the tokens, the verb table and the workspace, the
+// three flags bdgw ready requires, plus the same Dolt endpoint, so a gateway whose
+// workspace is not ready, or whose Dolt does not answer at that endpoint, stays out
+// of the Service.
+func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 	allowEscalation := false
-	command := []string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir, "--dolt-host", DoltHostName, "--dolt-port", strconv.Itoa(bdGatewayDoltPort)}
+	dolt := []string{"--dolt-host", doltHost, "--dolt-port", strconv.Itoa(doltPort)}
+	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir}, dolt...)
 	if v.BdGatewayMaxConcurrent > 0 {
 		command = append(command, "--max-concurrent", strconv.Itoa(v.BdGatewayMaxConcurrent))
 	}
@@ -143,7 +148,7 @@ func bdGatewayContainer(v Values) Container {
 			FailureThreshold: 60,
 		},
 		ReadinessProbe: &Probe{
-			Exec:                &ExecAction{Command: []string{"bdgw", "ready", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--workspace", bdGatewayWorkspaceDir}},
+			Exec:                &ExecAction{Command: append([]string{"bdgw", "ready", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--workspace", bdGatewayWorkspaceDir}, dolt...)},
 			InitialDelaySeconds: 2,
 			PeriodSeconds:       3,
 			TimeoutSeconds:      5,
