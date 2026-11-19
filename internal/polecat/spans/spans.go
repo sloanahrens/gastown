@@ -76,7 +76,8 @@ func DefaultDir(townRoot string) string {
 // Start appends a start event for seat working bead.
 //
 // A start written while the same seat already has an open attempt is not
-// refused here: the appends are the record, and Summarize skips the duplicate.
+// refused here: the appends are the record, and Summarize closes the earlier
+// attempt with no time when it reads the second start.
 func (s *Store) Start(bead, seat string) error {
 	if err := validateBead(bead); err != nil {
 		return err
@@ -213,11 +214,11 @@ type Summary struct {
 	// Attempts is one entry per start event, in the order the starts were
 	// recorded. An open attempt is included with zero Secs.
 	Attempts []Attempt
-	// LowerBound is set when some attempt is open, or was closed by a dead
-	// seat, so Secs may understate the real time.
+	// LowerBound is set when some attempt is open, was closed by a dead seat,
+	// or was closed by a repeated start, so Secs may understate the real time.
 	LowerBound bool
-	// Skipped counts events that could not be paired: an end without a start,
-	// a duplicate start, or an end earlier than its start.
+	// Skipped counts events that could not be paired: an end without an open
+	// attempt, or an end earlier than its start.
 	Skipped int
 	// Corrupt counts lines that did not parse or did not describe this bead.
 	Corrupt int
@@ -233,7 +234,7 @@ type Attempt struct {
 	// it.
 	Open bool
 	// LowerBound marks an attempt whose duration is a floor: it is still open,
-	// or a dead seat closed it.
+	// a dead seat closed it, or a repeated start closed it with no time.
 	LowerBound bool
 }
 
@@ -336,9 +337,15 @@ func (sum *Summary) readLine(line, bead string, open map[string]openAttempt) {
 	}
 	switch ev.Event {
 	case EventStart:
-		if _, ok := open[ev.Seat]; ok {
-			sum.Skipped++
-			return
+		// A second start while the seat's attempt is open means the first one
+		// was never ended. Close it with no time: the record cannot say when the
+		// seat stopped, and a later end must not span the gap to this start.
+		if prev, ok := open[ev.Seat]; ok {
+			a := &sum.Attempts[prev.index]
+			a.Open = false
+			a.LowerBound = true
+			sum.LowerBound = true
+			delete(open, ev.Seat)
 		}
 		sum.Attempts = append(sum.Attempts, Attempt{Seat: ev.Seat, StartedAt: at, Open: true})
 		open[ev.Seat] = openAttempt{index: len(sum.Attempts) - 1, at: at}
