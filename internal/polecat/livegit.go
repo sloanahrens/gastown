@@ -87,24 +87,40 @@ func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
 	return probeLiveGitStateLocalExec(worktreePath, nil)
 }
 
+// liveProbeOpener is the opener ProbeLiveGitStateLocal probes through: the git
+// runner a unit test injects (nil is the real git on PATH) under the local
+// probe's deadline, and nothing else, so production keeps the plain handle the
+// file-read shortcuts need.
+func liveProbeOpener(exec git.ExecFunc) gitOpener {
+	return gitOpener{exec: exec, timeout: liveProbeTimeout}
+}
+
 // probeLiveGitStateLocalExec is ProbeLiveGitStateLocal with the git runner
 // passed in, so a unit test can answer and record the calls without git
 // (docs/testing.md, "Seams for external tools"). A nil exec is the real git on
 // PATH.
 //
-// Every call runs under liveProbeTimeout. The pool reads this probe once per
-// sessionless polecat dir, serially, on every roster read and every sling, so a
-// worktree whose filesystem stalls must fail the probe in bounded time rather
-// than hold up the read (and everything queued behind it) until the tick kills
-// the process. A killed call is a failed measurement, which probeLiveGitState
-// already reports as unknown — the pool counts unknown as occupied.
+// The deadline bounds every git process the probe starts: status, stash, the
+// unpushed count, and any rev-parse the file-read shortcuts leave to git. It
+// does not reach the shortcuts production takes, because with exec and open
+// nil the probe answers some questions from the files themselves: git's
+// IsWorktreeRootFast, currentBranchFast and refExists read .git, commondir,
+// HEAD, a loose ref and packed-refs with os.ReadFile and os.Stat and start no
+// process. A read blocked on a stalled filesystem cannot be canceled by a
+// timeout, so only the process calls are bounded. The probe reads once per
+// sessionless polecat dir, serially, on every roster read and every sling; the
+// bound is what keeps a stalled worktree's process calls from holding up the
+// read, and everything queued behind it, until the tick kills it. A killed
+// call is a failed measurement, which probeLiveGitState reports as unknown.
 func probeLiveGitStateLocalExec(worktreePath string, exec git.ExecFunc) LiveGitState {
-	return probeLiveGitState(gitOpener{exec: exec, timeout: liveProbeTimeout}, worktreePath, gitRepo.CheckUncommittedWorkLocal, localPreservation)
+	return probeLiveGitState(liveProbeOpener(exec), worktreePath, gitRepo.CheckUncommittedWorkLocal, localPreservation)
 }
 
-// liveProbeTimeout bounds every git call of the local probe. It is generous
-// next to a healthy call (a status on a local worktree) and short next to the
-// tick's own bound, which is what a hung probe used to spend in full.
+// liveProbeTimeout bounds every git process the local probe starts, not the
+// file-read shortcuts that answer without one (see probeLiveGitStateLocalExec).
+// It is generous next to a healthy call (a status on a local worktree) and
+// short next to the tick's own bound, which is what a hung probe used to spend
+// in full.
 const liveProbeTimeout = 10 * time.Second
 
 // livePreservation and localPreservation read a branch's preservation the way

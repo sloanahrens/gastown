@@ -128,12 +128,16 @@ func localProbeExecArgs(dir string, calls *[]git.ExecCall) git.ExecFunc {
 	}
 }
 
-// TestLiveProbeLocalBoundsEveryGitCall: the probe the pool runs per sessionless
-// dir must finish. Every git call it makes runs under liveProbeTimeout, so a
-// worktree whose filesystem stalls cannot hold the roster read (and every sling
-// behind it) open. The probe still answers from the same facts — the bound must
-// not come at the cost of the answer.
-func TestLiveProbeLocalBoundsEveryGitCall(t *testing.T) {
+// TestLiveProbeLocalBoundsEveryExecCall: the probe the pool runs per
+// sessionless dir must finish. Every git process it starts runs under
+// liveProbeTimeout, so a worktree whose filesystem stalls cannot hold the
+// roster read (and every sling behind it) open. The probe still answers from
+// the same facts — the bound must not come at the cost of the answer.
+//
+// It asserts the bound on every call the recording runner saw and nothing
+// about which calls those are: the probe's set of git subcommands is free to
+// change without breaking this test.
+func TestLiveProbeLocalBoundsEveryExecCall(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	var calls []git.ExecCall
@@ -153,21 +157,6 @@ func TestLiveProbeLocalBoundsEveryGitCall(t *testing.T) {
 		if c.Timeout() != liveProbeTimeout {
 			t.Errorf("git %s ran with timeout %v, want %v",
 				strings.Join(c.Args(), " "), c.Timeout(), liveProbeTimeout)
-		}
-	}
-	// The calls that can hang (status, stash, the unpushed ref reads) are the
-	// ones the bound exists for; assert they went through the runner rather
-	// than a file-system shortcut that answered without one.
-	for _, want := range []string{"status --porcelain -uall", "stash list", "rev-parse refs/remotes/origin/main"} {
-		found := false
-		for _, c := range calls {
-			if strings.Join(c.Args(), " ") == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("runner saw no %q call; recorded %d calls", want, len(calls))
 		}
 	}
 }
@@ -204,5 +193,46 @@ func TestLiveProbeLocalReadsAKilledCallAsUnknown(t *testing.T) {
 	}
 	if got.FailedReason == "" {
 		t.Fatal("FailedReason = empty for a killed status call")
+	}
+}
+
+// TestLiveProbeLocalProductionOpenerTakesTheShortcuts: the opener production
+// probes through carries no runner and no custom open, plus the deadline, so
+// the probe answers the worktree-root and branch questions from .git on disk
+// without starting a process. Those are the calls the deadline cannot bound,
+// and the reason it is documented as bounding only the process calls.
+//
+// The unit tier runs a refusing git on PATH, so a fallback to a subprocess
+// fails here rather than answering.
+func TestLiveProbeLocalProductionOpenerTakesTheShortcuts(t *testing.T) {
+	t.Parallel()
+	opener := liveProbeOpener(nil)
+	if opener.exec != nil || opener.open != nil {
+		t.Fatalf("liveProbeOpener(nil) = exec set %v, open set %v; want production's nil runner and nil open",
+			opener.exec != nil, opener.open != nil)
+	}
+	if opener.timeout != liveProbeTimeout {
+		t.Fatalf("liveProbeOpener(nil).timeout = %v, want %v", opener.timeout, liveProbeTimeout)
+	}
+
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "refs", "heads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "refs", "heads", "main"),
+		[]byte("1111111111111111111111111111111111111111\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	branch, err := opener.Open(dir).CurrentBranch()
+	if err != nil {
+		t.Fatalf("CurrentBranch on a hand-written .git = %v; the production opener fell back to a git process", err)
+	}
+	if branch != "main" {
+		t.Fatalf("CurrentBranch = %q, want %q read from HEAD", branch, "main")
 	}
 }
