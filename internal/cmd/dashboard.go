@@ -374,10 +374,10 @@ func closeCloudLedger(s cloudledger.Source) {
 }
 
 // dashboardTailOptions selects the feed's sources: the landings, the daemon log
-// and the watch feed, and the gateway's call log when gateway is set. journalFor
-// stays nil, so buildTailSources opens no store's bd events journal for the hub
-// (gt-ug7zed). deploys is passed through as the caller set it: with a tracker,
-// the daemon source is wrapped in that tracker.
+// and the watch feed, and the gateway's call log when gateway is set. The feed
+// reads no store's bd events journal (gt-ug7zed). deploys is passed through as
+// the caller set it: with a tracker, the daemon source is wrapped in that
+// tracker.
 func dashboardTailOptions(townRoot string, cutoff time.Time, loc *time.Location, rigNames func(townRoot string) ([]string, error), beads *tailBeads, deploys *tailDeploys, gateway tailGatewayReader) tailOptions {
 	kinds := map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true}
 	if gateway != nil {

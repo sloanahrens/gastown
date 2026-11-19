@@ -14,17 +14,14 @@ import (
 func dashboardTestRigs(string) ([]string, error) { return []string{"gastown"}, nil }
 
 // TestDashboardTailOptionsReadsNoEventsJournal: the hub's feed asks for the
-// landings, daemon and watch sources only, opens no store's bd events journal,
-// and builds no events source from those options.
+// landings, daemon and watch sources only and builds no events source from
+// those options.
 func TestDashboardTailOptionsReadsNoEventsJournal(t *testing.T) {
 	t.Parallel()
 	opts := dashboardTailOptions(t.TempDir(), tailNow, tailTestLoc, dashboardTestRigs, nil, nil, nil)
 	want := map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true}
 	if !reflect.DeepEqual(opts.kinds, want) {
 		t.Fatalf("kinds = %v, want %v", opts.kinds, want)
-	}
-	if opts.journalFor != nil {
-		t.Fatal("the hub's feed carries a journal opener; it must open no store's events journal")
 	}
 	sources, _, err := buildTailSources(opts)
 	if err != nil {

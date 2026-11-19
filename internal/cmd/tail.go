@@ -50,20 +50,22 @@ const tailMinInterval = 500 * time.Millisecond
 var tailCmd = &cobra.Command{
 	Use:     "tail",
 	GroupID: GroupDiag,
-	Short:   "Stream bd events, landings, daemon.log and the watch feed as one time-ordered log",
+	Short:   "Stream landings, daemon.log and the watch feed as one time-ordered log",
 	Long: `Print one time-ordered, plain-text stream of what the town is doing,
-merged from four read-only sources:
+merged from three read-only sources:
 
-  events    each store's bd events journal (hq and every registered rig)
   landings  each rig's landings file (.runtime/landings/<rig>.jsonl)
   daemon    daemon/daemon.log, plus its rotated backups for --since
   watch     the town's watch feed: .runtime/watch/alerts.jsonl and
             .runtime/attention/events.jsonl
 
+The bd events journal is retired as a source: the dashboard's Town activity
+pane reads the town's activity now.
+
 Every line is "<local time> <tag> <text>": one short source tag — the rig a
-daemon line belongs to ("town" for the daemon's own town-wide lines), the
-store's rig name, or the watch feed's "watch" — so a typical line fits a
-terminal without wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
+landings or daemon line belongs to ("town" for the daemon's own town-wide
+lines), or the watch feed's "watch" — so a typical line fits a terminal without
+wrapping. The time is HH:MM:SS in local time; --iso prints RFC3339 with the
 date and zone. --verbose keeps the "<rig> <kind>" columns, the form to cut or
 grep by position.
 
@@ -76,49 +78,16 @@ with no emoji. --color selects: auto (the default) draws color and emoji only
 on a terminal, and honors NO_COLOR and GT_NO_EMOJI; never draws either;
 always draws both.
 
-The default view hides what the town does every few seconds: wisp events
-(gt-wisp-*, hq-wisp-*) and their "close detected" lines, the daemon's
+The default view hides what the town does every few seconds: the daemon's
 heartbeat, plugin-handler skips, the patrols a config leaves off, the
 checkpoint, jsonl-backup, patrol-scan and doctor all-clear lines, clearAlerts
-lines, a polecat agent bead's own status writes, a townhealth line that
-repeats the last one shown but for the age and the exec-tax reading it
-carries, and a spec-dispatcher tick whose counts repeat the last tick shown. A
-tick that dispatched a bead, or whose counts moved, always shows. Landings,
-rejections, escalations, upgrade restarts, a tick that dispatched, and bead
-create/close/status changes always show, and a hidden line that reports a
-failure shows anyway. --all (or --verbose) shows everything; --iso prints
-today's stream, without the folds and the annotations described below.
-
-It also folds one bead's own churn. A bead's status is rewritten every few
-seconds as a polecat works, so the default view collapses the status updates
-for one bead written within a minute of one another into one line: the last
-status and the count of updates folded into it, as "update gt-1
-status=in_progress (×4)". An update that is not adjacent to the run, and a run
-of one, prints as it is.
-
-It also drops what repeats. An events line that says what the line before it
-said — the same bead, operation and status within two seconds — prints once:
-that is one bd write the journal recorded twice, or a retry that landed on the
-same row. And an events line drops its seq= cursor, and its
-actor= when that actor is your own git user.name; another writer's actor
-stays. --verbose keeps both fields, which is what to cut or grep by position.
-
-A bead line names the bead: create, close, dependency and status-change lines
-append the bead's title after a " · ", read once per bead per run and
-truncated so the line still fits the terminal (80 columns when stdout is not
-one). A title that cannot be read is simply absent — never an error line.
-
-Two more annotations are the default view's. A comment line prints the first 60
-characters of the comment, and a work bead's submission prints "submitted
-<bead> @ <sha7> for landing" beside the update that left it — the READY TO LAND
-block a polecat's gt done writes, shown once per head while the bead waits to
-land.
-
-The review loop's own words win over the comment text. A comment or a note
-that opens with OVERSEER REVIEW, OVERSEER RULING or MERGE REJECTION
-prints its first 100 characters after the line, green for a PASS, red for a
-FAIL, a REFUSED or a REJECTION, and yellow for a "(shadow)" verdict. Every
-other comment prints only its first 60 characters.
+lines, a townhealth line that repeats the last one shown but for the age and
+the exec-tax reading it carries, and a spec-dispatcher tick whose counts repeat
+the last tick shown. A tick that dispatched a bead, or whose counts moved,
+always shows. Landings, rejections, escalations, an upgrade restart and a tick
+that dispatched always show, and a hidden line that reports a failure shows
+anyway. --all (or --verbose) shows everything; --iso keeps today's stream with
+the repeated spec-tick fold off.
 
 The watch feed is what the operator's monitor scripts and the daemon's
 attention queue see: one JSON object per line, {ts, class, severity, text}.
@@ -171,13 +140,12 @@ backlog. What arrives after it prints as each later poll returns.
 
 gt tail only reads. It computes no verdict and exits 0 whatever it shows:
 the town's health is gt status. A source that cannot be read says so in one
-line and the stream continues. A store whose config leaves the events
-journal off says so once: nothing is journaled there.
+line and the stream continues.
 
 Examples:
   gt tail                           # the last 15 minutes, then exit
   gt tail -f                        # the last 15 minutes, then follow
-  gt tail --rig gastown --since 2h  # one rig (its daemon lines)
+  gt tail --rig gastown --since 2h  # one rig (its landings and daemon lines)
   gt tail --kind landings --since 1d
   gt tail -f --verbose --since 0 | grep ' landings '`,
 	Args: cobra.NoArgs,
@@ -185,12 +153,12 @@ Examples:
 }
 
 func init() {
-	tailCmd.Flags().StringVar(&tailRig, "rig", "", "Show one rig: its events and landings, and the daemon lines it names or belongs to (hq for the town store; the watch feed is town-wide)")
+	tailCmd.Flags().StringVar(&tailRig, "rig", "", "Show one rig: its landings, and the daemon lines it names or belongs to (the watch feed is town-wide)")
 	tailCmd.Flags().StringVar(&tailSince, "since", "15m", "Start at a duration back (15m, 2h, 1d; 0 = now) or a time (RFC3339, 2006-01-02T15:04:05, 2006-01-02 15:04, 2006-01-02)")
 	tailCmd.Flags().BoolVarP(&tailFollow, "follow", "f", false, "Keep polling every source and print new lines as they appear")
-	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: events, landings, daemon, watch")
+	tailCmd.Flags().StringVar(&tailKind, "kind", strings.Join(tailKinds, ","), "Comma-separated sources to show: "+strings.Join(tailKinds, ", "))
 	tailCmd.Flags().DurationVar(&tailInterval, "interval", 3*time.Second, "Poll interval with --follow")
-	tailCmd.Flags().BoolVar(&tailAll, "all", false, "Show routine lines too: wisp events, heartbeats, handler skips, dog and patrol-scan chatter")
+	tailCmd.Flags().BoolVar(&tailAll, "all", false, "Show routine lines too: heartbeats, handler skips, dog and patrol-scan chatter")
 	tailCmd.Flags().BoolVar(&tailVerbose, "verbose", false, "Same as --all, and keep the <rig> <kind> columns")
 	tailCmd.Flags().BoolVar(&tailISO, "iso", false, "Print each time as RFC3339 with the date and zone, not HH:MM:SS")
 	tailCmd.Flags().StringVar(&tailColor, "color", string(tailColorAuto), "How to color the lines: auto (only on a terminal), never, always")
@@ -231,7 +199,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, why), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
-		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
+		rigNames: knownRigNames, beads: beadReads, deploys: deploys,
 	})
 	if err != nil {
 		return err
@@ -453,8 +421,6 @@ type tailOptions struct {
 	now      func() time.Time
 	// rigNames reads the rig registry (knownRigNames in production).
 	rigNames func(townRoot string) ([]string, error)
-	// journalFor opens a store's journal (openTailJournal in production).
-	journalFor func(townRoot, rig string) (tailJournal, error)
 	// beads resolves the titles and verdicts an events line carries
 	// (openTailBeads in production, nil in a test that wants neither).
 	beads *tailBeads
@@ -492,9 +458,10 @@ func openTailJournal(townRoot, rig string) (tailJournal, error) {
 	return newTailJournalStore(bd, func() (tailJournalRead, error) { return openTailJournalSQL(townRoot, dir) }), nil
 }
 
-// buildTailSources returns the selected sources in tie order: hq, then each
-// rig by name (events before landings), then the daemon. preface holds lines
-// about the selection itself. Only an unknown --rig is an error.
+// buildTailSources returns the selected sources in tie order: each rig's
+// landings by name (hq names no landings file), then the daemon, then the watch
+// feed. preface holds lines about the selection itself. Only an unknown --rig
+// is an error.
 func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, err error) {
 	rigs, regErr := o.rigNames(o.townRoot)
 	if regErr != nil {
@@ -502,7 +469,7 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 			return nil, nil, fmt.Errorf("--rig %q: cannot read the rig registry: %w", o.rig, regErr)
 		}
 		preface = append(preface, tailLine{At: o.now(), Rig: "town", Kind: "tail",
-			Text: fmt.Sprintf("cannot read the rig registry (%v): showing hq, the daemon and the watch feed only", regErr)})
+			Text: fmt.Sprintf("cannot read the rig registry (%v): showing the daemon and the watch feed only", regErr)})
 		rigs = nil
 	}
 	stores := append([]string{"hq"}, rigs...)
@@ -519,10 +486,6 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 		stores = []string{o.rig}
 	}
 	for _, rig := range stores {
-		if o.kinds[tailKindEvents] {
-			j, openErr := o.journalFor(o.townRoot, rig)
-			sources = append(sources, &eventsSource{rig: rig, journal: j, openErr: openErr, cutoff: o.cutoff, now: o.now, beads: o.beads})
-		}
 		if o.kinds[tailKindLandings] && rig != "hq" {
 			path, pathErr := landings.Path(o.townRoot, rig)
 			if pathErr != nil {
@@ -829,9 +792,9 @@ type tailSource interface {
 	Poll() []tailLine
 }
 
-// closeTailSources releases what the sources hold open between polls — an
-// events source's journal connection (gt-jw9sr). A viewer that stops closes
-// them rather than leaving a Dolt session to the process's exit.
+// closeTailSources releases what the sources hold open between polls — a
+// source that reads over a connection of its own (gt-jw9sr). A viewer that
+// stops closes them rather than leaving a Dolt session to the process's exit.
 func closeTailSources(sources []tailSource) {
 	for _, s := range sources {
 		if c, ok := s.(interface{ Close() error }); ok {
@@ -842,6 +805,9 @@ func closeTailSources(sources []tailSource) {
 
 // The kinds gt tail merges, in the order ties print.
 const (
+	// tailKindEvents names a line from a store's bd events journal. The kind is
+	// retired as a selection: parseTailKinds refuses it and no source is built
+	// for it (gt-itjvy8). The journal source and its filters still name it.
 	tailKindEvents   = "events"
 	tailKindLandings = "landings"
 	tailKindDaemon   = "daemon"
@@ -850,7 +816,8 @@ const (
 	tailKindWatch = "watch"
 )
 
-var tailKinds = []string{tailKindEvents, tailKindLandings, tailKindDaemon, tailKindWatch}
+// tailKinds is what --kind offers and, by default, selects.
+var tailKinds = []string{tailKindLandings, tailKindDaemon, tailKindWatch}
 
 // mergeTail concatenates the batches and orders them by time. The sort is
 // stable, so lines with equal times keep batch order and, within a batch,
@@ -1038,13 +1005,18 @@ func parseTailSince(s string, now time.Time, loc *time.Location) (time.Time, err
 	return time.Time{}, fmt.Errorf("--since %q: want a duration (15m, 2h, 1d) or a time (RFC3339, 2006-01-02T15:04:05, 2006-01-02 15:04, 2006-01-02)", s)
 }
 
-// parseTailKinds reads --kind: a comma-separated subset of tailKinds.
+// parseTailKinds reads --kind: a comma-separated subset of tailKinds. The
+// retired events journal is refused by name, so a run that names it fails
+// before any source is built.
 func parseTailKinds(s string) (map[string]bool, error) {
 	kinds := map[string]bool{}
 	for _, k := range strings.Split(s, ",") {
 		k = strings.TrimSpace(k)
 		if k == "" {
 			continue
+		}
+		if k == tailKindEvents {
+			return nil, fmt.Errorf("--kind %q: the events journal is retired: use the dashboard's Town activity pane", k)
 		}
 		valid := false
 		for _, v := range tailKinds {

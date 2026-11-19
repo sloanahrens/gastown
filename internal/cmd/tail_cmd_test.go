@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -119,8 +118,8 @@ func TestRunTailStream_WriteFailureStops(t *testing.T) {
 }
 
 // fakeTailTown lays out a town with landings files and a daemon log, and
-// returns options reading it through a fake rig registry and journal opener.
-func fakeTailTown(t *testing.T, rigs []string, regErr error) (tailOptions, map[string]*fakeTailJournal) {
+// returns options reading it through a fake rig registry.
+func fakeTailTown(t *testing.T, rigs []string, regErr error) tailOptions {
 	t.Helper()
 	town := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(town, ".runtime", "landings"), 0o700); err != nil {
@@ -136,25 +135,25 @@ func fakeTailTown(t *testing.T, rigs []string, regErr error) (tailOptions, map[s
 	appendFile(t, filepath.Join(town, "daemon", "daemon.log"),
 		"2026/09/30 08:59:10 Convoy: close detected: gt-1 (from gastown)\n2026/09/30 08:59:20 hm witness restarted\n")
 
-	journals := map[string]*fakeTailJournal{}
-	o := tailOptions{
+	return tailOptions{
 		townRoot: town,
 		loc:      tailTestLoc,
 		now:      fixedNow,
 		rigNames: func(string) ([]string, error) { return rigs, regErr },
-		journalFor: func(_ string, rig string) (tailJournal, error) {
-			j := &fakeTailJournal{config: "true", records: []beads.EventRecord{{Seq: 1, TS: "2026-09-30T13:58:00Z", Op: "create", IssueID: rig + "-e", Actor: "a", Status: "open"}}}
-			journals[rig] = j
-			return j, nil
-		},
 	}
-	return o, journals
 }
 
-func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
+// TestBuildTailSources_DefaultKinds: the default --kind landings,daemon,watch
+// prints the landings and daemon lines it printed beside the journal, in time
+// order.
+func TestBuildTailSources_DefaultKinds(t *testing.T) {
 	t.Parallel()
-	o, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
-	o.kinds, o.cutoff = allTailKinds(), at("2026-09-30T13:00:00Z")
+	o := fakeTailTown(t, []string{"gastown", "hm"}, nil)
+	kinds, err := parseTailKinds("landings,daemon,watch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.kinds, o.cutoff = kinds, at("2026-09-30T13:00:00Z")
 	sources, preface, err := buildTailSources(o)
 	if err != nil || len(preface) != 0 {
 		t.Fatalf("build: %v %v", err, preface)
@@ -164,9 +163,6 @@ func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{
-		"2026-09-30T08:58:00-05:00 hq events create hq-e status=open actor=a seq=1",
-		"2026-09-30T08:58:00-05:00 gastown events create gastown-e status=open actor=a seq=1",
-		"2026-09-30T08:58:00-05:00 hm events create hm-e status=open actor=a seq=1",
 		"2026-09-30T08:59:00-05:00 gastown landings landed gastown-1 - -> - commit=- patch=- gate=- om=-/0.00 route=-",
 		"2026-09-30T08:59:00-05:00 hm landings landed hm-1 - -> - commit=- patch=- gate=- om=-/0.00 route=-",
 		"2026-09-30T08:59:10-05:00 town daemon Convoy: close detected: gt-1 (from gastown)",
@@ -175,13 +171,22 @@ func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
 	if got := strings.Split(strings.TrimSpace(buf.String()), "\n"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("stream:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	var opened []string
-	for rig := range journals {
-		opened = append(opened, rig)
+}
+
+// TestBuildTailSources_DefaultKindsBuildNoEventsSource: no source of the
+// default kinds reads a store's bd events journal.
+func TestBuildTailSources_DefaultKindsBuildNoEventsSource(t *testing.T) {
+	t.Parallel()
+	o := fakeTailTown(t, []string{"gastown", "hm"}, nil)
+	o.kinds, o.cutoff = allTailKinds(), at("2026-09-30T13:00:00Z")
+	sources, _, err := buildTailSources(o)
+	if err != nil {
+		t.Fatal(err)
 	}
-	sort.Strings(opened)
-	if !reflect.DeepEqual(opened, []string{"gastown", "hm", "hq"}) {
-		t.Fatalf("journals opened for %v", opened)
+	for _, s := range sources {
+		if _, ok := s.(*eventsSource); ok {
+			t.Fatalf("the default kinds built an events source: %T", s)
+		}
 	}
 }
 
@@ -190,7 +195,7 @@ func TestBuildTailSources_AllRigsAllKinds(t *testing.T) {
 // under the rig they belong to and the daemon's own lines stay "town".
 func TestBuildTailSources_DaemonLinesCarryTheirRig(t *testing.T) {
 	t.Parallel()
-	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o := fakeTailTown(t, []string{"gastown"}, nil)
 	writeTailRoutes(t, o.townRoot)
 	appendFile(t, filepath.Join(o.townRoot, "daemon", "daemon.log"),
 		"2026/09/30 08:59:30 landing_worker: [land] gt-1: landed 1111aaaa on origin/main\n"+
@@ -219,7 +224,7 @@ func TestBuildTailSources_DaemonLinesCarryTheirRig(t *testing.T) {
 
 func TestBuildTailSources_RigAndKindFilters(t *testing.T) {
 	t.Parallel()
-	o, journals := fakeTailTown(t, []string{"gastown", "hm"}, nil)
+	o := fakeTailTown(t, []string{"gastown", "hm"}, nil)
 	o.rig, o.kinds, o.cutoff = "hm", map[string]bool{tailKindLandings: true, tailKindDaemon: true}, at("2026-09-30T13:00:00Z")
 	sources, _, err := buildTailSources(o)
 	if err != nil {
@@ -234,33 +239,30 @@ func TestBuildTailSources_RigAndKindFilters(t *testing.T) {
 	if buf.String() != want {
 		t.Fatalf("filtered stream:\n%s", buf.String())
 	}
-	if len(journals) != 0 {
-		t.Fatalf("--kind without events still opened journals: %v", journals)
-	}
 }
 
 func TestBuildTailSources_UnknownRigIsRefused(t *testing.T) {
 	t.Parallel()
-	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o := fakeTailTown(t, []string{"gastown"}, nil)
 	o.rig, o.kinds = "nope", allTailKinds()
 	if _, _, err := buildTailSources(o); err == nil {
 		t.Fatal("--rig nope accepted")
 	}
 }
 
-func TestBuildTailSources_UnreadableRegistryKeepsHQAndDaemon(t *testing.T) {
+func TestBuildTailSources_UnreadableRegistryKeepsDaemonAndWatch(t *testing.T) {
 	t.Parallel()
-	o, journals := fakeTailTown(t, nil, errors.New("rigs.json: no such file"))
+	o := fakeTailTown(t, nil, errors.New("rigs.json: no such file"))
 	o.kinds, o.cutoff = allTailKinds(), at("2026-09-30T13:00:00Z")
 	sources, preface, err := buildTailSources(o)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(preface) != 1 || preface[0].Text != "cannot read the rig registry (rigs.json: no such file): showing hq, the daemon and the watch feed only" || preface[0].Rig != "town" {
+	if len(preface) != 1 || preface[0].Text != "cannot read the rig registry (rigs.json: no such file): showing the daemon and the watch feed only" || preface[0].Rig != "town" {
 		t.Fatalf("preface = %+v", preface)
 	}
-	if len(sources) != 3 || len(journals) != 1 || journals["hq"] == nil {
-		t.Fatalf("sources %d journals %v", len(sources), journals)
+	if len(sources) != 2 {
+		t.Fatalf("sources = %d; want the daemon and the watch feed", len(sources))
 	}
 }
 
@@ -269,7 +271,7 @@ func TestBuildTailSources_UnreadableRegistryKeepsHQAndDaemon(t *testing.T) {
 // still print.
 func TestBuildTailSources_DeploysWrapTheDaemonSource(t *testing.T) {
 	t.Parallel()
-	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o := fakeTailTown(t, []string{"gastown"}, nil)
 	o.rig, o.kinds, o.cutoff = "gastown", map[string]bool{tailKindDaemon: true}, at("2026-09-30T13:00:00Z")
 	o.deploys = newTailDeploys(fixedNow, fakeTailAncestry(), o.cutoff)
 	sources, _, err := buildTailSources(o)
@@ -300,7 +302,7 @@ func TestBuildTailSources_DeploysWrapTheDaemonSource(t *testing.T) {
 // --rig cannot narrow it and the source is built whatever rig is named.
 func TestBuildTailSources_WatchIsTownWide(t *testing.T) {
 	t.Parallel()
-	o, _ := fakeTailTown(t, []string{"gastown"}, nil)
+	o := fakeTailTown(t, []string{"gastown"}, nil)
 	o.rig, o.kinds, o.cutoff = "gastown", allTailKinds(), at("2026-09-30T13:00:00Z")
 	sources, _, err := buildTailSources(o)
 	if err != nil {
