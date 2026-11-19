@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +33,9 @@ type rollStore struct {
 	createErr error
 	readErr   error
 	removeErr error
+	// releaseCtxErr is the Remove call's context state: a release on the roll's
+	// cancelled context would see the cancel here.
+	releaseCtxErr error
 }
 
 func (s *rollStore) Create(ctx context.Context, content string) error {
@@ -60,6 +64,7 @@ func (s *rollStore) Read(context.Context) (string, bool, error) {
 // roll context fails here instead of passing.
 func (s *rollStore) Remove(ctx context.Context) error {
 	s.events.add("hold:remove")
+	s.releaseCtxErr = ctx.Err()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -70,46 +75,96 @@ func (s *rollStore) Remove(ctx context.Context) error {
 	return nil
 }
 
-// rollApply is the apply step as a fake: it records each call, and returns err.
+// stopWaitBound bounds a test's wait for the roll to stop listening, so a roll
+// that never stops fails the test instead of hanging it.
+const stopWaitBound = 10 * time.Second
+
+// rollApply is the apply step as a fake: it records each call, can cancel the
+// roll's context and wait for the roll to stop listening, then returns err.
 type rollApply struct {
-	events *rollEvents
-	err    error
+	events   *rollEvents
+	err      error
+	cancel   context.CancelFunc
+	waitStop <-chan struct{}
+	sawStop  bool
 }
 
 func (a *rollApply) Wired() error { return nil }
 
 func (a *rollApply) Apply(context.Context) error {
 	a.events.add("apply")
+	if a.cancel == nil {
+		return a.err
+	}
+	a.cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), stopWaitBound)
+	defer cancel()
+	select {
+	case <-a.waitStop:
+		a.sawStop = true
+	case <-ctx.Done():
+	}
 	return a.err
 }
 
 // rollClock is a clock that advances only when the wait sleeps, so no test sleeps.
 type rollClock struct {
-	now time.Time
+	now     time.Time
+	onSleep context.CancelFunc
 }
 
 func (c *rollClock) Now() time.Time { return c.now }
 
-func (c *rollClock) Sleep(_ context.Context, d time.Duration) { c.now = c.now.Add(d) }
+func (c *rollClock) Sleep(_ context.Context, d time.Duration) {
+	c.now = c.now.Add(d)
+	if c.onSleep != nil {
+		c.onSleep()
+	}
+}
+
+// fakeRollSignals is the roll's signal source in a test: the test cancels ctx,
+// and stop counts its calls and records whether the signal had cancelled ctx.
+type fakeRollSignals struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	stops  atomic.Int32
+	stopCh chan struct{}
+	// cancelledAtStop is written before stopCh closes.
+	cancelledAtStop bool
+}
+
+func (s *fakeRollSignals) source() (context.Context, context.CancelFunc) {
+	return s.ctx, func() {
+		if s.stops.Add(1) == 1 {
+			s.cancelledAtStop = s.ctx.Err() != nil
+			close(s.stopCh)
+		}
+	}
+}
 
 // rollFixture is a roll with every seam faked and every wait quiet and idle. A
 // test changes the field it exercises.
 type rollFixture struct {
-	events *rollEvents
-	store  *rollStore
-	apply  *rollApply
-	out    *bytes.Buffer
-	deps   runnerRollDeps
+	events  *rollEvents
+	store   *rollStore
+	apply   *rollApply
+	signals *fakeRollSignals
+	out     *bytes.Buffer
+	deps    runnerRollDeps
 }
 
 func newRollFixture() *rollFixture {
 	ev := &rollEvents{}
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := &fakeRollSignals{ctx: ctx, cancel: cancel, stopCh: make(chan struct{})}
 	f := &rollFixture{
-		events: ev,
-		store:  &rollStore{events: ev},
-		apply:  &rollApply{events: ev},
-		out:    &bytes.Buffer{},
+		events:  ev,
+		store:   &rollStore{events: ev},
+		apply:   &rollApply{events: ev},
+		signals: signals,
+		out:     &bytes.Buffer{},
 	}
+	f.apply.waitStop = signals.stopCh
 	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	f.deps = runnerRollDeps{
 		store:    f.store,
@@ -124,6 +179,7 @@ func newRollFixture() *rollFixture {
 		},
 		clock:       &rollClock{now: t0},
 		now:         func() time.Time { return t0 },
+		signals:     signals.source,
 		apply:       f.apply,
 		landingWait: 10 * time.Minute,
 		runsWait:    20 * time.Minute,
@@ -136,7 +192,7 @@ func TestTownRunnerRollRunsStepsInOrder(t *testing.T) {
 	t.Parallel()
 	f := newRollFixture()
 
-	if err := runTownRunnerRoll(context.Background(), f.deps); err != nil {
+	if err := runTownRunnerRoll(f.deps); err != nil {
 		t.Fatalf("roll: %v", err)
 	}
 
@@ -155,11 +211,12 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 		return "someone else", 2, true, nil
 	}
 	cases := []struct {
-		name       string
-		mutate     func(*runnerRollDeps, context.CancelFunc)
-		wantCalls  []string
-		wantErr    error
-		wantRunErr bool
+		name        string
+		mutate      func(*runnerRollDeps, context.CancelFunc)
+		wantCalls   []string
+		wantErr     error
+		wantRunErr  bool
+		wantNoApply bool // a cancel means nothing is applied after it
 	}{
 		{
 			name: "landing read fails",
@@ -221,21 +278,57 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 					return "someone else", 2, true, nil
 				}
 			},
-			wantCalls:  []string{"hold:create", "hold:remove"},
+			wantCalls:   []string{"hold:create", "hold:remove"},
+			wantErr:     context.Canceled,
+			wantRunErr:  true,
+			wantNoApply: true,
+		},
+		{
+			// A SIGINT while the runs wait sleeps: the gate run in flight is left
+			// alone, nothing is applied, and the release still reaches the store.
+			name: "context canceled during the runs wait",
+			mutate: func(d *runnerRollDeps, cancel context.CancelFunc) {
+				d.runs = func(context.Context) ([]runnerroll.Run, error) {
+					return []runnerroll.Run{{Repo: "town/gastown", Workflow: "gate.yml", ID: 7, Status: forgejo.RunStatusRunning, Created: d.now()}}, nil
+				}
+				d.runsWait = 10 * time.Second
+				d.clock.(*rollClock).onSleep = cancel
+			},
+			wantCalls:   []string{"hold:create", "landing", "hold:remove"},
+			wantErr:     context.Canceled,
+			wantRunErr:  true,
+			wantNoApply: true,
+		},
+		{
+			// A SIGINT during the apply step: the roll fails, and the release still
+			// reaches the store on a context the cancel does not reach.
+			name: "context canceled during the apply step",
+			mutate: func(d *runnerRollDeps, cancel context.CancelFunc) {
+				d.apply.(*rollApply).cancel = cancel
+				d.apply.(*rollApply).err = context.Canceled
+			},
+			wantCalls:  []string{"hold:create", "landing", "runs", "apply", "hold:remove"},
 			wantErr:    context.Canceled,
 			wantRunErr: true,
+		},
+		{
+			// A SIGINT during the apply step that still finishes: by the time the
+			// release runs the roll's context is cancelled, and the hold must still go.
+			name: "context canceled before the release runs",
+			mutate: func(d *runnerRollDeps, cancel context.CancelFunc) {
+				d.apply.(*rollApply).cancel = cancel
+			},
+			wantCalls: []string{"hold:create", "landing", "runs", "apply", "hold:remove"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRollFixture()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 			if tc.mutate != nil {
-				tc.mutate(&f.deps, cancel)
+				tc.mutate(&f.deps, f.signals.cancel)
 			}
 
-			err := runTownRunnerRoll(ctx, f.deps)
+			err := runTownRunnerRoll(f.deps)
 
 			if tc.wantRunErr && err == nil {
 				t.Fatal("roll succeeded, want an error")
@@ -249,6 +342,23 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			if f.store.present {
 				t.Error("the landing hold was not released")
 			}
+			if tc.wantNoApply && slices.Contains(f.events.calls, "apply") {
+				t.Errorf("calls = %v: something was applied after the cancel", f.events.calls)
+			}
+			if f.store.releaseCtxErr != nil {
+				t.Errorf("the release ran on a cancelled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
+			}
+			if f.apply.cancel != nil {
+				if !f.apply.sawStop {
+					t.Error("the roll did not stop listening while it still ran: a second Ctrl-C would be swallowed")
+				}
+				if got := f.signals.stops.Load(); got != 1 {
+					t.Errorf("stop was called %d times, want once after the signal", got)
+				}
+				if !f.signals.cancelledAtStop {
+					t.Error("stop was called before the context was cancelled")
+				}
+			}
 		})
 	}
 }
@@ -259,7 +369,7 @@ func TestTownRunnerRollHeldByOtherRefusesBeforeAnyWait(t *testing.T) {
 	const holder = "ops rebuilding the image\nowner=ops token=abc123 at=2026-11-19T10:00:00Z"
 	f.store.content, f.store.present = holder, true
 
-	err := runTownRunnerRoll(context.Background(), f.deps)
+	err := runTownRunnerRoll(f.deps)
 
 	if !errors.Is(err, runnerroll.ErrHeldByOther) {
 		t.Fatalf("error = %v, want ErrHeldByOther", err)
@@ -280,7 +390,7 @@ func TestTownRunnerRollDryRunTakesNoHoldAndPrintsSteps(t *testing.T) {
 	f := newRollFixture()
 	f.deps.dryRun = true
 
-	if err := runTownRunnerRoll(context.Background(), f.deps); err != nil {
+	if err := runTownRunnerRoll(f.deps); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
 
@@ -309,7 +419,7 @@ func TestTownRunnerRollDefaultApplierRefusesBeforeHold(t *testing.T) {
 	out := &bytes.Buffer{}
 	deps := runnerRollDepsFor("/town", out, 10*time.Minute, 20*time.Minute, false)
 
-	err := runTownRunnerRoll(context.Background(), deps)
+	err := runTownRunnerRoll(deps)
 
 	if !errors.Is(err, errApplyUnwired) {
 		t.Fatalf("error = %v, want the unwired-apply refusal", err)
@@ -327,7 +437,7 @@ func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
 	f := newRollFixture()
 	f.deps.landingWait = 0
 
-	if err := runTownRunnerRoll(context.Background(), f.deps); err == nil {
+	if err := runTownRunnerRoll(f.deps); err == nil {
 		t.Fatal("roll with a zero --landing-wait succeeded")
 	}
 	if len(f.events.calls) != 0 {
@@ -380,7 +490,7 @@ func TestTownRunnerRollReleaseFailureAdvice(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRollFixture()
 			tc.mutate(f)
-			err := runTownRunnerRoll(context.Background(), f.deps)
+			err := runTownRunnerRoll(f.deps)
 			if err == nil {
 				t.Fatal("roll with a failed release succeeded")
 			}
@@ -409,7 +519,7 @@ func TestTownRunnerRollRefusesWithoutAHoldStoreBeforeTheHold(t *testing.T) {
 	f := newRollFixture()
 	f.deps.store = nil
 
-	if err := runTownRunnerRoll(context.Background(), f.deps); err == nil {
+	if err := runTownRunnerRoll(f.deps); err == nil {
 		t.Fatal("roll with no landing hold store succeeded")
 	}
 	if len(f.events.calls) != 0 {
