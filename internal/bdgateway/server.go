@@ -531,8 +531,9 @@ func refuseAuth(w http.ResponseWriter, err error) {
 // refuseLogged answers a refusal the gateway makes before bd runs, and writes the
 // call's line first, with the refusal's code as its reason. rec holds only what
 // the gateway knows at that point: a request that never authenticated has no
-// class and no actor, and an argv it did not parse is absent. The line keeps no
-// error text, so the log never repeats the request.
+// class and no actor, and an argv the scan could not place carries no flags but
+// the one flag it refused. The line keeps no error text, so the log never
+// repeats the request.
 func (g *Gateway) refuseLogged(w http.ResponseWriter, rec CallRecord, start time.Time, status int, code, message string) {
 	rec.ExitCode = ExitRefused
 	rec.Duration = time.Since(start)

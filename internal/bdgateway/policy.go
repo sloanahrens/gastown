@@ -426,6 +426,10 @@ type scanResult struct {
 	words    []string
 	flags    []flagToken
 	operands []string
+	// refusedFlag is the flag the scan refused as unplaceable, as flagNames
+	// spells it and without its value, or empty when the token names no single
+	// flag. The call log reads it so a refused line names the flag (gt-bfqtip).
+	refusedFlag string
 }
 
 // scanArgs reads argv once the way bd's root parse does, returning the command
@@ -493,6 +497,7 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 		case p.extends(res.words):
 			// A listed verb path can still claim the next word, so an unknown
 			// flag here could be taking that word as its value.
+			res.refusedFlag = refusedFlagName(arg)
 			return res, ambiguousFlag(arg)
 		case i+1 < len(argv) && swallowsNextFlag(argv[i+1]):
 			// If the unknown flag takes a value, bd takes this next token as
@@ -500,6 +505,7 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 			// boolean, the scan would let the token end the options ("--") or
 			// take the following token as its own value (a root flag without an
 			// attached value), and miss a refused flag behind it.
+			res.refusedFlag = refusedFlagName(arg)
 			return res, ambiguousFlag(arg)
 		}
 	}
@@ -525,6 +531,19 @@ func swallowsNextFlag(next string) bool {
 // ambiguousFlag is the refusal for a flag the scan cannot place.
 func ambiguousFlag(arg string) error {
 	return fmt.Errorf("%w: %q is not a bd root flag the policy can place", ErrAmbiguousVerb, arg)
+}
+
+// refusedFlagName returns the name of the flag an unplaceable token was refused
+// for, as flagNames spells it: a long flag without its attached value, a lone
+// shorthand with its dash. A token naming more than one flag (a clustered
+// shorthand such as -Zsecret, whose later letters may be the first one's value)
+// names none, and neither does a name that is not a bare flag.
+func refusedFlagName(arg string) string {
+	tokens := flagNames(arg)
+	if len(tokens) != 1 || !bareFlag.MatchString(tokens[0].name) {
+		return ""
+	}
+	return boundText(tokens[0].spelling)
 }
 
 // extends reports whether a listed verb path has words as a strict prefix, so
