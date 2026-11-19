@@ -1882,6 +1882,15 @@ function renderTrend(s) {
   if (loadLine) figs.push(el("div", "k title", loadLine));
   else figs.push(el("div", "empty", "no load history yet (it fills while a page is open)"));
 
+  // The follow-up flow in one line: the open follow-up beads, those filed this
+  // week, and their share of the week's landings. The operator reads the
+  // all-time count as a backlog; this line shows what is open and moving (Q37,
+  // gt-eguody). A state with no flow draws no line, never a zero flow.
+  if (s.followups) {
+    const fl = s.followups;
+    figs.push(el("div", "k title", "follow-ups: " + fl.open + " open, " + fl.filed_week + " filed this week, " + fl.share_pct + "% of landings"));
+  }
+
   box.prepend(...figs);
   const tbl = landingTable(s, names, recent, waiting);
   if (tbl) box.append(tbl);
