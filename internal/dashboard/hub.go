@@ -195,6 +195,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Update != nil {
 		start(h.cfg.UpdateEvery, h.pollUpdate)
 	}
+	if h.cfg.SystemUpdates != nil {
+		start(h.cfg.SystemUpdatesEvery, h.pollSystemUpdates)
+	}
 	if h.cfg.Forgejo != nil {
 		start(h.cfg.ForgejoEvery, h.pollForgejo)
 	}

@@ -1013,6 +1013,10 @@ type State struct {
 	// run's heartbeat has gone stale, and for a run that ended more than a day
 	// ago.
 	Update *UpdateStatus `json:"update,omitempty"`
+	// SystemUpdates is the System updates section: the newest landed commits
+	// and the Now block naming the roll or sweep running at this moment. It is
+	// nil until its reader first reports.
+	SystemUpdates *SystemUpdates `json:"system_updates,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
@@ -1105,6 +1109,9 @@ type Config struct {
 	// Update reads the gt update job's run from the record it writes. Nil, or
 	// a nil return, leaves the feed without an update section.
 	Update func() *UpdateStatus
+	// SystemUpdates reads the System updates section's commit rows. Nil leaves
+	// the feed without the section.
+	SystemUpdates func() *SystemUpdates
 	// Forgejo reads the viewer's Forgejo recent-activity feed.
 	Forgejo func() *ForgejoFeed
 	// News reads the top Hacker News stories for the News pane.
@@ -1228,6 +1235,9 @@ type Config struct {
 
 	// ReworkNumbersEvery is the rework numbers document's own poll clock.
 	ReworkNumbersEvery time.Duration
+	// SystemUpdatesEvery is the System updates section's own poll clock, which
+	// follows the update record's rather than the tier sweep's minute.
+	SystemUpdatesEvery time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -1267,6 +1277,9 @@ func (c *Config) defaults() {
 	// changes is what the page's banner is for, so it is read on the page's
 	// own clock rather than a minute's.
 	def(&c.UpdateEvery, 10*time.Second)
+	// The Now block names the roll and sweep running now, so the section is read
+	// on the update record's clock rather than the tier sweep's minute.
+	def(&c.SystemUpdatesEvery, 10*time.Second)
 	def(&c.ForgejoEvery, 3*time.Minute)
 	// The front page turns over in hours and the reader holds what it read for
 	// five minutes, so the poll is a fraction of that: it only publishes a

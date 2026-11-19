@@ -548,6 +548,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
+		SystemUpdates:  func() *dashboard.SystemUpdates { return systemUpdates(townRoot, tierSweeps, time.Now()) },
 		Forgejo:        forgejoFeed,
 		News:           news,
 		Deploys:        forgejoDeploys,
