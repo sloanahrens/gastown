@@ -56,6 +56,17 @@ const (
 	maxLoggedItems = 32
 )
 
+// The per-actor counter map's bound, as the verb map's is: an actor is the
+// caller's own word, so a long run of distinct names cannot grow Stats.
+const (
+	// maxActorKeys is the most distinct named actors Stats keeps.
+	maxActorKeys = 32
+	// otherActor is the key every named actor past maxActorKeys is counted under.
+	otherActor = "(other)"
+	// noneActor is the key a call that named no actor is counted under.
+	noneActor = "(none)"
+)
+
 // CallLogOptions configures a CallLog.
 type CallLogOptions struct {
 	// Dir is the mounted log volume's directory; it is created if missing.
@@ -130,6 +141,19 @@ type Stats struct {
 	// ConflictVerbs counts those conflicts by verb, bounded like Verbs. It is
 	// omitted when no conflict has been counted.
 	ConflictVerbs map[string]uint64 `json:"conflict_verbs,omitempty"`
+	// Actors counts calls by the acting agent the caller named, bounded: a call
+	// with no actor counts under noneActor, and named actors past maxActorKeys
+	// count under otherActor.
+	Actors map[string]ActorStats `json:"actors"`
+}
+
+// ActorStats is one acting agent's share of the counted calls: its reads and
+// writes by the call's Write flag, and the calls whose bd stderr carried a Dolt
+// commit conflict. A conflicting call is counted as a read or a write as well.
+type ActorStats struct {
+	Reads     uint64 `json:"reads"`
+	Writes    uint64 `json:"writes"`
+	Conflicts uint64 `json:"conflicts"`
 }
 
 // entry is one JSONL line with CallEntry's fixed field set, so argv data cannot
@@ -154,6 +178,11 @@ type CallLog struct {
 
 	conflicts     uint64
 	conflictVerbs map[string]uint64
+
+	// actors holds the per-actor counters; namedActors counts the distinct
+	// non-empty actor names kept, which the maxActorKeys cap bounds.
+	actors      map[string]ActorStats
+	namedActors int
 
 	ch   chan []byte
 	done chan struct{}
@@ -216,6 +245,7 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 		policy:        opts.Policy,
 		verbs:         make(map[string]uint64),
 		conflictVerbs: make(map[string]uint64),
+		actors:        make(map[string]ActorStats),
 	}
 	go l.run(w)
 	return l, nil
@@ -298,6 +328,7 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 				countVerb(l.conflictVerbs, parsed.verb)
 			}
 		}
+		l.countActor(e.Actor, rec.Write, rec.Conflict)
 	}
 	if marshalErr != nil {
 		l.dropped++
@@ -334,6 +365,34 @@ func countVerb(counts map[string]uint64, verb string) {
 	counts[verb]++
 }
 
+// countActor counts one call under its actor: a read or a write by write, and a
+// conflict too when conflict is set. An empty actor counts under noneActor, and
+// a named actor that would be the maxActorKeys+1st counts under otherActor. The
+// caller holds l.mu.
+func (l *CallLog) countActor(actor string, write, conflict bool) {
+	key := actor
+	_, known := l.actors[key]
+	switch {
+	case key == "":
+		key = noneActor
+	case known:
+	case l.namedActors >= maxActorKeys:
+		key = otherActor
+	default:
+		l.namedActors++
+	}
+	s := l.actors[key]
+	if write {
+		s.Writes++
+	} else {
+		s.Reads++
+	}
+	if conflict {
+		s.Conflicts++
+	}
+	l.actors[key] = s
+}
+
 // Stats returns a copy of the counters.
 func (l *CallLog) Stats() Stats {
 	l.mu.Lock()
@@ -349,7 +408,18 @@ func (l *CallLog) Stats() Stats {
 		Verbs:         verbs,
 		Conflicts:     l.conflicts,
 		ConflictVerbs: copyConflictVerbs(l.conflictVerbs),
+		Actors:        copyActors(l.actors),
 	}
+}
+
+// copyActors returns a copy of counts, so a snapshot cannot change the log's
+// per-actor counters.
+func copyActors(counts map[string]ActorStats) map[string]ActorStats {
+	out := make(map[string]ActorStats, len(counts))
+	for actor, s := range counts {
+		out[actor] = s
+	}
+	return out
 }
 
 // copyConflictVerbs returns a copy of counts, or nil when it is empty, so a
