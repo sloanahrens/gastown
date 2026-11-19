@@ -836,6 +836,10 @@ func (s listLikeBD) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	return rows, err
 }
 
+func (s listLikeBD) ConfigGet(key string) (string, error) {
+	return s.Client.(customStatusReader).ConfigGet(key)
+}
+
 func (s listLikeBD) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
 	if s.showErr != nil {
 		return nil, s.showErr

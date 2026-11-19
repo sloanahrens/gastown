@@ -38,6 +38,10 @@ func newCountingStore(db beads.Client) *countingStore {
 	return &countingStore{Client: db, shows: map[string]int{}}
 }
 
+func (c *countingStore) ConfigGet(key string) (string, error) {
+	return c.Client.(customStatusReader).ConfigGet(key)
+}
+
 func (c *countingStore) Show(id string) (*beads.Issue, error) {
 	c.shows[id]++
 	return c.Client.Show(id)

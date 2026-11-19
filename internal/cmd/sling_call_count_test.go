@@ -304,12 +304,12 @@ func TestSlingCallsCountSeparatelyForConcurrentSlings(t *testing.T) {
 			t.Errorf("a sling counted %d bd call(s), its own calls were %d: %v", total, want, fake.recorded())
 		}
 	}
-	// The first sling made the pool's list reads and the second made none, so
-	// the difference is exactly those reads: each trace holds its own calls and
-	// nothing of the other's.
+	// The first sling made the pool's list reads and its status.custom config
+	// read, and the second made none, so the difference is exactly those reads:
+	// each trace holds its own calls and nothing of the other's.
 	poolReads := 0
 	for _, call := range first.recorded() {
-		if len(call) > 0 && call[0] == "list" {
+		if len(call) > 0 && (call[0] == "list" || call[0] == "config") {
 			poolReads++
 		}
 	}
