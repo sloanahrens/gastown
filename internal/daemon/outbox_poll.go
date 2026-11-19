@@ -8,7 +8,9 @@ package daemon
 //
 // One tick reads each running seat's outbox through the in-sandbox exec the
 // seat-end copy-out reads it through, and hands what it finds to the filing
-// seam, which the next bead fills (gt-nvii5d, gt-dq4ce6).
+// seam: the read outbox is validated as the seat end validates it, and the
+// escalation request it carries is filed as the seat (gt-nvii5d, gt-dq4ce6).
+// Deduping a request a tick reads again is gt-0ghqvp.
 
 import (
 	"bytes"
@@ -124,14 +126,49 @@ type outboxPollRequest struct {
 type outboxPollFileFunc func(ctx context.Context, req outboxPollRequest) error
 
 // outboxPollFiling returns the production filing seam a tick hands its reads
-// to, or nil until bead gt-dq4ce6 fills it. A nil seam refuses the whole tick:
-// a read nothing files would be dropped, and the seat keeps no second copy of
-// it. The daemon logs that refusal once, not once per tick.
-func outboxPollFiling() outboxPollFileFunc { return nil }
+// to: the same validation and the same escalation path the seat end runs, so a
+// read outbox is filed exactly as the seat-end copy-out would file it
+// (gt-dq4ce6). A nil seam refuses the whole tick: a read nothing files would be
+// dropped, and the seat keeps no second copy of it.
+func (d *Daemon) outboxPollFiling() outboxPollFileFunc {
+	h := &patrolScanHost{d: d, openRecoveryBeads: d.openRecoveryBeads}
+	return h.fileOutboxPollRequest
+}
+
+// fileOutboxPollRequest files one request a tick read. The read outbox is held
+// to outbox.Validate against the bead its record names, and the escalation
+// request it carries is filed through outbox.Apply as the seat: the same pair
+// the seat-end apply uses, so an outbox the seat end would refuse files nothing
+// here either (gt-5rmlks, gt-dq4ce6).
+//
+// Only the escalation is applied. The seat is still running, and its end is the
+// one place its notes, ticks, findings and status are written; a poll that
+// wrote them here would write them twice.
+//
+// A read the validator refuses, and an escalation the store refuses, are
+// returned for the tick to log with the seat named, and nothing is filed for
+// them. The next tick reads the seat again while its record lives (gt-0ghqvp
+// dedupes a request across ticks).
+func (h *patrolScanHost) fileOutboxPollRequest(_ context.Context, req outboxPollRequest) error {
+	decoded, err := outbox.Validate(req.Result, req.Notes, req.Bead)
+	if err != nil {
+		return err
+	}
+	if decoded.Escalation == nil {
+		return nil
+	}
+	seat := h.seat(req.Rig, req.Polecat)
+	store := &seatOutboxStore{bd: h.recoveryBeads(), escalate: h.fileSeatEscalation}
+	// Apply writes the parts of the result it carries, so this one carries the
+	// escalation alone. StatusDone is the status on which Apply writes no
+	// status: the seat still runs, and its end sets it.
+	carried := outbox.Result{Status: outbox.StatusDone, Escalation: decoded.Escalation}
+	return outbox.Apply(store, req.Bead, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, "", carried, outbox.OriginTip{})
+}
 
 // errOutboxPollNoFilingSeam is the tick's refusal when no filing seam is
-// wired. triggerOutboxPoll logs it once, so an enabled patrol that has no seam
-// yet says so without a line every interval.
+// wired. A poll the daemon runs always has one, so this is a poll built
+// without one; triggerOutboxPoll logs it once rather than once per interval.
 var errOutboxPollNoFilingSeam = errors.New("no filing seam is wired, so no seat is read")
 
 // outboxPoll is one tick's reader: the town whose sandbox records name the
@@ -156,9 +193,14 @@ func newOutboxPoll(townRoot string, exec outboxPollExec, file outboxPollFileFunc
 
 // liveOutboxPoll returns the poll a tick runs in production: every running
 // seat's outbox read through the gateway's openshell CLI, which is the exec the
-// seat-end copy-out reads through.
-func liveOutboxPoll(townRoot string, logger *log.Logger) *outboxPoll {
-	return newOutboxPoll(townRoot, &sandbox.CLI{}, outboxPollFiling(), logger, outboxPollSeatTimeout)
+// seat-end copy-out reads through, and each read filed through the seat end's
+// own validation and escalation path.
+func (d *Daemon) liveOutboxPoll() *outboxPoll {
+	var townRoot string
+	if d.config != nil {
+		townRoot = d.config.TownRoot
+	}
+	return newOutboxPoll(townRoot, &sandbox.CLI{}, d.outboxPollFiling(), d.logger, outboxPollSeatTimeout)
 }
 
 // tick reads every running seat's outbox once and hands each one it finds to
@@ -500,10 +542,9 @@ func (d *Daemon) startOutboxPollTick() {
 // otherwise. A town that turned the patrol off since the ticker started reads
 // nothing, and a tick that fails is logged rather than read as a quiet tick.
 //
-// A tick with no filing seam is the one failure logged once: until gt-dq4ce6
-// wires the seam, the live tick refuses every interval, and a line every
-// interval would say the same thing. Every other failure is logged as it
-// happens.
+// A tick with no filing seam is the one failure logged once: a poll built
+// without one refuses every interval, and a line every interval would say the
+// same thing. Every other failure is logged as it happens.
 func (d *Daemon) triggerOutboxPoll() {
 	if !d.isPatrolActive(outboxPollPatrol) {
 		return
@@ -516,11 +557,7 @@ func (d *Daemon) triggerOutboxPoll() {
 	defer cancel()
 	tick := d.outboxPollTick
 	if tick == nil {
-		var townRoot string
-		if d.config != nil {
-			townRoot = d.config.TownRoot
-		}
-		tick = liveOutboxPoll(townRoot, d.logger).tick
+		tick = d.liveOutboxPoll().tick
 	}
 	err := tick(ctx)
 	if err == nil {
