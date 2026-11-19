@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/promote"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -41,6 +42,31 @@ const (
 	landingLogRetention          = 7 * 24 * time.Hour
 	landingRemoteFetchTimeout    = 2 * time.Minute
 )
+
+// landingLaneKey is landingPersonKey with the lane after it, so each lane of a
+// bead has its own escalation; lane "" keeps the bead's key (gt-il3out).
+func landingLaneKey(reader beadReader, beadID, lane string) string {
+	if lane == "" {
+		return landingPersonKey(reader, beadID)
+	}
+	return landingPersonKey(reader, beadID) + "#" + lane
+}
+
+// landingEscalationOpen builds the check for whether a bead's lane has an open
+// escalation. A check that cannot read answers not open, so the worker raises
+// it again, and says so at every check: a duplicate alarm is tolerable,
+// silence is not (gt-il3out).
+func landingEscalationOpen(reader beadReader, town beads.Client, logf func(string, ...any)) func(beadID, lane string) (bool, error) {
+	return func(beadID, lane string) (bool, error) {
+		key := landingLaneKey(reader, beadID, lane)
+		open, err := notify.OpenByKey(town, key)
+		if err != nil {
+			logf("%s: reading escalation %q: %v; raising it again", beadID, key, err)
+			return false, nil
+		}
+		return open, nil
+	}
+}
 
 // beadReader reads one bead's record; landworker.RetryBeads is one.
 type beadReader interface {
@@ -553,7 +579,15 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if err != nil {
 		return nil, err
 	}
-	bd := landworker.RetryBeads{Inner: beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))}
+	rigBeads := d.landingBeads
+	if rigBeads == nil {
+		rigBeads = beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))
+	}
+	bd := landworker.RetryBeads{Inner: rigBeads}
+	town := d.landingEscalations
+	if town == nil {
+		town = beads.New(beads.ResolveBeadsDir(townRoot))
+	}
 	out := landingLogWriter{logf: d.logger.Printf}
 	cfg := landingWorkerConfig(pc)
 	if cfg == nil {
@@ -774,8 +808,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		MainState:         mainState,
 		LandTimeout:       landingRigLandTimeout(pc),
 		Logf:              d.logger.Printf,
-		Escalate: func(beadID, message string) {
-			d.escalateAlert(landingPersonKey(bd, beadID), "landing_worker", message)
+		EscalationOpen:    landingEscalationOpen(bd, town, d.logger.Printf),
+		Escalate: func(beadID, lane, message string) {
+			d.escalateAlert(landingLaneKey(bd, beadID, lane), "landing_worker", message)
 		},
 		// A landing failing at any stage is its own alert, keyed per rig and
 		// bead so the retries upsert onto one escalation instead of minting

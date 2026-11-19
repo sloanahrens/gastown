@@ -51,6 +51,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	jevthrash "github.com/steveyegge/gastown/internal/jev/thrash"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -376,6 +377,13 @@ type Daemon struct {
 	// its verdicts with (see newRigLandingWorker); nil reads the rig's own
 	// repository. Tests hand it a fake.
 	postLandIsAncestor func(ancestor, descendant string) (bool, error)
+
+	// landingBeads is the landing worker's rig bead store and
+	// landingEscalations the store its escalation check lists (see
+	// landingEscalationOpen); nil opens the rig's and the town's. Tests hand
+	// fakes.
+	landingBeads       landworker.RetryInner
+	landingEscalations beads.Client
 
 	// endSandboxSeat is the step that ends a finished sandbox seat (see
 	// sandboxSeatEnder); nil builds one over the daemon's own seams. Tests

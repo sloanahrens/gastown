@@ -453,7 +453,7 @@ func TestPassHumanRejectionCommentFailureIsLogged(t *testing.T) {
 		logs = append(logs, fmt.Sprintf(format, args...))
 	}
 	var escalations atomic.Int32
-	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.Escalate = func(string, string, string) { escalations.Add(1) }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false}
 	}
@@ -480,7 +480,7 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	got := make(chan string, 2)
-	h.w.Escalate = func(beadID, message string) { got <- beadID + ": " + message }
+	h.w.Escalate = func(beadID, _, message string) { got <- beadID + ": " + message }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om review returned no verdict", Rework: false}
 	}
@@ -503,7 +503,7 @@ func TestEscalationTextFromHumanRejection(t *testing.T) {
 	w := land.Work{Branch: "crew/overseer/gt-x", Head: noteHead, Target: "main", Worker: "opal"}
 	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal", Labels: []string{land.LabelReadyToLand}, UpdatedAt: seededRowAt, Notes: land.FormatReadyNote(w)})
 	got := make(chan string, 1)
-	h.w.Escalate = func(_, m string) { got <- m }
+	h.w.Escalate = func(_, _, m string) { got <- m }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om requested changes", Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
 	}
@@ -549,7 +549,7 @@ func TestPassHumanRejectionEscalatesOncePerLane(t *testing.T) {
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	var escalations atomic.Int32
-	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.Escalate = func(string, string, string) { escalations.Add(1) }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", NoEscalate: true}
 	}
@@ -567,7 +567,7 @@ func TestPassReworkRejectionDoesNotEscalate(t *testing.T) {
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	var escalations atomic.Int32
-	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.Escalate = func(string, string, string) { escalations.Add(1) }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectGate, Reason: "gate failed", Rework: true}
 	}
@@ -608,7 +608,7 @@ func TestPassSupersededRejection(t *testing.T) {
 			h := newHarness(t)
 			h.seedReady(t, "gt-abc")
 			var escalations atomic.Int32
-			h.w.Escalate = func(string, string) { escalations.Add(1) }
+			h.w.Escalate = func(string, string, string) { escalations.Add(1) }
 			hooks := &fakeRevertHooks{isRevert: true}
 			h.w.Reverts = hooks
 			h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, tc.rej }
@@ -638,7 +638,7 @@ func TestPassHumanRejectionWithRecordErrorEscalates(t *testing.T) {
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	var escalations atomic.Int32
-	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.Escalate = func(string, string, string) { escalations.Add(1) }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", Rework: false, RecordErr: errors.New("bd down")}
 	}
@@ -665,7 +665,7 @@ func TestPassEscalatePanicIsRecoveredAndLogged(t *testing.T) {
 		defer mu.Unlock()
 		logs = append(logs, fmt.Sprintf(format, args...))
 	}
-	h.w.Escalate = func(string, string) { panic("alert path broke") }
+	h.w.Escalate = func(string, string, string) { panic("alert path broke") }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
 		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false}
 	}
@@ -1249,7 +1249,7 @@ func TestPassRepeatedCISilencesEscalateOnce(t *testing.T) {
 	h.seedReady(t, "gt-abc")
 	var mu sync.Mutex
 	var got []string
-	h.w.Escalate = func(beadID, message string) {
+	h.w.Escalate = func(beadID, _, message string) {
 		mu.Lock()
 		defer mu.Unlock()
 		got = append(got, beadID+": "+message)
@@ -1286,7 +1286,7 @@ func TestPassCISilenceRunIsBrokenByAnotherOutcome(t *testing.T) {
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	var escalations atomic.Int32
-	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.w.Escalate = func(string, string, string) { escalations.Add(1) }
 	h.w.CISilenceEscalateAfter = 2
 	h.lander.fn = func(n int, _ land.Work) (land.Result, error) {
 		if n == 2 {
