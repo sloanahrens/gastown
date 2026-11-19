@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"math"
 	"strconv"
 	"strings"
 
@@ -62,6 +63,17 @@ type Deps struct {
 	// caller reads it from the bead's ID prefix (specBeadRig); empty is unknown,
 	// as it is for every bead estimated before a rig is known.
 	Rig string
+	// Prior returns the component minutes an earlier estimate of the bead
+	// recorded for the same SectionHash. A nil Prior, or ok false, estimates as
+	// usual, and so does a Prior with either minutes value not valid.
+	Prior func(beadID, hash string) (PriorMinutes, bool)
+}
+
+// PriorMinutes are the component minutes an earlier estimate of one bead text
+// recorded: the embedding ridge's minutes and the Jev minutes.
+type PriorMinutes struct {
+	Embed float64
+	Jev   float64
 }
 
 // Skip names an input the estimate could not use and why.
@@ -152,20 +164,30 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 
 	in := storypoints.Inputs{ShapeMinutes: &shapeMinutes, Weights: weights}
 	var skipped []Skip
+	var vector []float32
+	hash := SectionHash(issue)
 
-	embedMinutes, vector, skip := embedInput(ctx, deps, weights, issue)
-	if skip != nil {
-		skipped = append(skipped, *skip)
+	// An unchanged bead reuses the embed and Jev minutes its earlier estimate
+	// recorded, so the embedder and the Jev battery are not asked again.
+	if prior, ok := reusablePrior(deps, issue, hash); ok {
+		in.EmbedMinutes, in.JevMinutes = &prior.Embed, &prior.Jev
+		componentMinutes.Embed = &prior.Embed
 	} else {
-		in.EmbedMinutes = &embedMinutes
-		componentMinutes.Embed = &embedMinutes
-	}
+		embedMinutes, v, skip := embedInput(ctx, deps, weights, issue)
+		if skip != nil {
+			skipped = append(skipped, *skip)
+		} else {
+			vector = v
+			in.EmbedMinutes = &embedMinutes
+			componentMinutes.Embed = &embedMinutes
+		}
 
-	jevFits, skip := jevInput(ctx, deps, issue)
-	if skip != nil {
-		skipped = append(skipped, *skip)
-	} else {
-		in.JevFits = &jevFits
+		jevFits, skip := jevInput(ctx, deps, issue)
+		if skip != nil {
+			skipped = append(skipped, *skip)
+		} else {
+			in.JevFits = &jevFits
+		}
 	}
 
 	blended, err := blend(in)
@@ -210,7 +232,7 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		Rung:             blended.Rung,
 		Neighbors:        neighbors,
 		NeighborsSkipped: neighborsSkipped,
-		Hash:             SectionHash(issue),
+		Hash:             hash,
 		WeightsVersion:   weights.Version(),
 	}, nil
 }
@@ -290,6 +312,26 @@ func SectionHash(issue *beads.Issue) string {
 func writeHashField(h hash.Hash, name, value string) {
 	value = strings.TrimSpace(value)
 	fmt.Fprintf(h, "%d:%s%d:%s", len(name), name, len(value), value)
+}
+
+// reusablePrior returns the component minutes an earlier estimate recorded for
+// this bead text, when deps.Prior answers ok with both values valid minutes. A
+// nil Prior, a miss, or a single valid value estimates as usual.
+func reusablePrior(deps Deps, issue *beads.Issue, hash string) (PriorMinutes, bool) {
+	if deps.Prior == nil {
+		return PriorMinutes{}, false
+	}
+	prior, ok := deps.Prior(issue.ID, hash)
+	if !ok || !usableMinutes(prior.Embed) || !usableMinutes(prior.Jev) {
+		return PriorMinutes{}, false
+	}
+	return prior, true
+}
+
+// usableMinutes reports whether m is a finite, positive number of minutes, the
+// same test storypoints.Blend applies to each input.
+func usableMinutes(m float64) bool {
+	return m > 0 && !math.IsInf(m, 1)
 }
 
 // embedInput builds the embedding minutes and the vector the ridge read, or the
