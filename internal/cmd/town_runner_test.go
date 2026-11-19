@@ -515,6 +515,52 @@ func TestTownRunnerRollDryRunPrintsTheDriftDiff(t *testing.T) {
 	}
 }
 
+// TestTownRunnerRollDryRunRefusesAnUnreadableCompare: a dry run whose values or
+// live object cannot be read exits non-zero instead of reporting no difference.
+func TestTownRunnerRollDryRunRefusesAnUnreadableCompare(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*runnerApplier, *recordingKubectl)
+		want   string
+	}{
+		{name: "values unreadable", mutate: func(a *runnerApplier, _ *recordingKubectl) {
+			a.values = func() (forgejorunner.Values, error) {
+				return forgejorunner.Values{}, errors.New("file unreadable")
+			}
+		}, want: "reading the control cluster's runner values"},
+		{name: "the live object cannot be read", mutate: func(_ *runnerApplier, k *recordingKubectl) {
+			k.answer = func(recordedKubectlCall) (string, int, error) { return "", 1, nil }
+		}, want: "could not be read"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &recordingKubectl{answer: func(recordedKubectlCall) (string, int, error) { return "{}", 0, nil }}
+			a := testRunnerApplier(k)
+			tc.mutate(&a, k)
+			deps := runnerRollDeps{
+				apply:       a,
+				landingWait: 10 * time.Minute,
+				runsWait:    20 * time.Minute,
+				rolloutWait: 10 * time.Minute,
+				dryRun:      true,
+				out:         io.Discard,
+			}
+
+			err := runTownRunnerRoll(deps)
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+			for _, call := range k.calls {
+				if len(call.args) > 0 && call.args[0] == "apply" {
+					t.Errorf("dry run made an apply call: %v", call.args)
+				}
+			}
+		})
+	}
+}
+
 // TestTownRunnerRollRefusesWithoutAWiredApplier: a real roll and a dry run both
 // refuse an applier that cannot work, and neither touches the hold.
 func TestTownRunnerRollRefusesWithoutAWiredApplier(t *testing.T) {
