@@ -56,6 +56,15 @@ const (
 	maxLoggedItems = 32
 )
 
+// The per-reason refusal counter map's bound, as the verb map's is: a reason is
+// a gateway code, and the cap keeps a run of distinct codes from growing Stats.
+const (
+	// maxRefusalKeys is the most distinct refusal reasons Stats keeps.
+	maxRefusalKeys = 16
+	// otherRefusal is the key every refusal reason past maxRefusalKeys is counted under.
+	otherRefusal = "(other)"
+)
+
 // The per-actor counter map's bound, as the verb map's is: an actor is the
 // caller's own word, so a long run of distinct names cannot grow Stats.
 const (
@@ -119,6 +128,11 @@ type CallRecord struct {
 	// Conflict is whether bd's stderr carried a Dolt commit conflict during the
 	// call. The line carries it only when it is true.
 	Conflict bool
+	// Refusal is the reason code of a call the gateway refused before exec, such
+	// as forbidden or too_many_calls. The line carries it only when it is set,
+	// and Stats counts it per reason. The code is the gateway's own word, never
+	// text from the request.
+	Refusal string
 }
 
 // Stats is a snapshot of the log's counters, which GET /v1/stats serves.
@@ -141,6 +155,10 @@ type Stats struct {
 	// ConflictVerbs counts those conflicts by verb, bounded like Verbs. It is
 	// omitted when no conflict has been counted.
 	ConflictVerbs map[string]uint64 `json:"conflict_verbs,omitempty"`
+	// Refusals counts the refused calls by their reason code, bounded like Verbs:
+	// past maxRefusalKeys distinct reasons, calls fall under otherRefusal. It is
+	// omitted when no refusal has been counted.
+	Refusals map[string]uint64 `json:"refusals,omitempty"`
 	// Actors counts calls by the acting agent the caller named, bounded: a call
 	// with no actor counts under noneActor, and named actors past maxActorKeys
 	// count under otherActor.
@@ -178,6 +196,9 @@ type CallLog struct {
 
 	conflicts     uint64
 	conflictVerbs map[string]uint64
+
+	// refusals counts the refused calls by reason, bounded by maxRefusalKeys.
+	refusals map[string]uint64
 
 	// actors holds the per-actor counters; namedActors counts the distinct
 	// non-empty actor names kept, which the maxActorKeys cap bounds.
@@ -245,6 +266,7 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 		policy:        opts.Policy,
 		verbs:         make(map[string]uint64),
 		conflictVerbs: make(map[string]uint64),
+		refusals:      make(map[string]uint64),
 		actors:        make(map[string]ActorStats),
 	}
 	go l.run(w)
@@ -308,6 +330,7 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 		ExitCode:   rec.ExitCode,
 		DurationMS: rec.Duration.Milliseconds(),
 		Error:      boundTextTo(rec.Error, maxErrorBytes),
+		Refusal:    boundText(rec.Refusal),
 		Conflict:   rec.Conflict,
 	}
 	line, marshalErr := json.Marshal(e)
@@ -327,6 +350,9 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 			if parsed.verb != "" {
 				countVerb(l.conflictVerbs, parsed.verb)
 			}
+		}
+		if e.Refusal != "" {
+			countRefusal(l.refusals, e.Refusal)
 		}
 		l.countActor(e.Actor, rec.Write, rec.Conflict)
 	}
@@ -363,6 +389,15 @@ func countVerb(counts map[string]uint64, verb string) {
 		verb = otherVerb
 	}
 	counts[verb]++
+}
+
+// countRefusal counts one refused call under its reason in counts, keeping the
+// map bounded. The caller holds l.mu.
+func countRefusal(counts map[string]uint64, reason string) {
+	if _, ok := counts[reason]; !ok && len(counts) >= maxRefusalKeys {
+		reason = otherRefusal
+	}
+	counts[reason]++
 }
 
 // countActor counts one call under its actor: a read or a write by write, and a
@@ -408,8 +443,22 @@ func (l *CallLog) Stats() Stats {
 		Verbs:         verbs,
 		Conflicts:     l.conflicts,
 		ConflictVerbs: copyConflictVerbs(l.conflictVerbs),
+		Refusals:      copyRefusals(l.refusals),
 		Actors:        copyActors(l.actors),
 	}
+}
+
+// copyRefusals returns a copy of counts, or nil when it is empty, so a snapshot
+// with no refusals carries no refusals key.
+func copyRefusals(counts map[string]uint64) map[string]uint64 {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(counts))
+	for reason, n := range counts {
+		out[reason] = n
+	}
+	return out
 }
 
 // copyActors returns a copy of counts, so a snapshot cannot change the log's
