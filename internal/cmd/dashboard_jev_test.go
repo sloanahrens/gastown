@@ -7,10 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
@@ -340,6 +342,110 @@ func TestDashboardJevScorecardKeepsTheKeptBlockAndLeavesTheRest(t *testing.T) {
 	}
 	if want := (dashboard.JevTotals{Batteries: 1, Items: 5, Labeled: 4}); sc.Totals != want {
 		t.Errorf("Totals = %+v, want the kept line counted", sc.Totals)
+	}
+}
+
+// writeJevPatrolConfig writes the patrol config at the path the daemon reads,
+// so the payload's read and the daemon's read are the same file.
+func writeJevPatrolConfig(t *testing.T, town, body string) {
+	t.Helper()
+	path := daemon.PatrolConfigFile(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("making the patrol config directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing the patrol config: %v", err)
+	}
+}
+
+// A battery is off in the payload when its patrol key is not enabled: a config
+// that turns attention on leaves drift off, and the payload names drift only.
+func TestDashboardJevScorecardMarksDisabledPatrols(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	scored := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	writeJevCache(t, town, scorecard.CacheDoc{ScoredAt: scored, Since: "7d", Batteries: []scorecard.BatteryBlock{
+		{Name: "attention", ScoredAt: scored, Report: &scorecard.Report{Battery: "attention", Items: 1}},
+	}})
+	writeJevPatrolConfig(t, town, `{"patrols":{"jev_attention":{"enabled":true}}}`)
+
+	sc := dashboardJevScorecard(town)()
+	if sc == nil {
+		t.Fatal("the cache read as a failure")
+	}
+	if sc.ConfigUnreadable {
+		t.Error("a readable patrol config reads as unreadable")
+	}
+	if !slices.Contains(sc.Disabled, "drift") {
+		t.Errorf("Disabled = %q, want drift: its patrol is unset", sc.Disabled)
+	}
+	if slices.Contains(sc.Disabled, "attention") {
+		t.Errorf("Disabled = %q, want no attention: its patrol is enabled", sc.Disabled)
+	}
+}
+
+// A town with no patrol config has every battery off, as gt jev health reads it.
+// The read succeeded, so the list is known and not unreadable.
+func TestDashboardJevScorecardNoPatrolConfigIsAllOff(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	scored := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	writeJevCache(t, town, scorecard.CacheDoc{ScoredAt: scored, Since: "7d", Batteries: []scorecard.BatteryBlock{
+		{Name: "attention", ScoredAt: scored, Report: &scorecard.Report{Battery: "attention", Items: 1}},
+	}})
+
+	sc := dashboardJevScorecard(town)()
+	if sc == nil {
+		t.Fatal("the cache read as a failure")
+	}
+	if sc.ConfigUnreadable {
+		t.Error("a town with no patrol config reads as unreadable")
+	}
+	if !slices.Contains(sc.Disabled, "attention") || !slices.Contains(sc.Disabled, "drift") {
+		t.Errorf("Disabled = %q, want every battery off", sc.Disabled)
+	}
+}
+
+// A patrol config that cannot be read sets ConfigUnreadable and names no
+// batteries: an empty list would read as every battery on.
+func TestDashboardJevScorecardConfigUnreadable(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	scored := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	writeJevCache(t, town, scorecard.CacheDoc{ScoredAt: scored, Since: "7d", Batteries: []scorecard.BatteryBlock{
+		{Name: "attention", ScoredAt: scored, Report: &scorecard.Report{Battery: "attention", Items: 1}},
+	}})
+	writeJevPatrolConfig(t, town, "{")
+
+	sc := dashboardJevScorecard(town)()
+	if sc == nil {
+		t.Fatal("the cache read as a failure")
+	}
+	if !sc.ConfigUnreadable {
+		t.Error("an unreadable patrol config does not set ConfigUnreadable")
+	}
+	if len(sc.Disabled) != 0 {
+		t.Errorf("Disabled = %q, want none when the config is unreadable", sc.Disabled)
+	}
+}
+
+// The no-scorecard value carries the config read too, so the page can say the
+// off list is unknown before any refresh has run.
+func TestDashboardJevScorecardNoScorecardKeepsTheConfigRead(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	writeJevPatrolConfig(t, town, "{")
+
+	sc := dashboardJevScorecard(town)()
+	if sc == nil || !sc.NoScorecard {
+		t.Fatalf("an empty town read %+v, want the no-scorecard value", sc)
+	}
+	if !sc.ConfigUnreadable || len(sc.Disabled) != 0 {
+		t.Errorf("no-scorecard value = %+v, want an unreadable config with no names", *sc)
 	}
 }
 

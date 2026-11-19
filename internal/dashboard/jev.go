@@ -126,6 +126,13 @@ type JevScorecard struct {
 	// order, set by Tally. Each is either a placeholder with no line or a
 	// kept last good line.
 	Unavailable []string `json:"unavailable,omitempty"`
+	// Disabled names the batteries the town has turned off under patrols, read
+	// from the patrol config the way gt jev health reads it, in the order that
+	// command judges them. Empty when ConfigUnreadable is set.
+	Disabled []string `json:"disabled,omitempty"`
+	// ConfigUnreadable is set when the patrol config cannot be read, so Disabled
+	// is not known: an empty list here would read as every battery on.
+	ConfigUnreadable bool `json:"config_unreadable,omitempty"`
 }
 
 // JevTotals sums the batteries for the JEV panel's title line: how many
