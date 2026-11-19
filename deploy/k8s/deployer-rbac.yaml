@@ -1,19 +1,21 @@
-# The two deployer credentials (gt-57u2we): client certificates whose subject
-# names the role (operator decision 2026-11-18, map ticket claude-30uf).
-# deployer-apply writes the five namespaced workload kinds in gt;
-# deployer-policy writes RBAC, admission policies, priority classes and
-# namespaces, and is issued per use. Both certificates carry the organization
-# gt-deployers, so the group binding below gives both the read supplement: the
-# cluster-scoped kinds an all-objects drift compare reads that the
-# gt-drift-reader ClusterRole in drift-rbac.yaml does not name.
+# Read docs/architecture.md for the two deployer roles, what each writes, and the
+# read supplement: this file holds their grants and does not restate them
+# (gt-57u2we).
 #
 # This file is not applied by the daemon. The overseer applies it with the admin
-# credential (gt-77r621). TestDeployerRBAC* in deploy/k8s holds it to these
-# grants, and holds every rule here to a no-secrets refusal. That refusal is not
-# a real boundary for deployer-policy: it carries escalate and bind on roles and
-# clusterroles by the operator's decision of 2026-11-18 (map ticket claude-30uf),
-# so it could create a role that grants secrets and bind it to itself. The real
-# protection is that its certificate is issued per use.
+# credential (gt-77r621). TestDeployerRBAC* in deploy/k8s holds each grant to an
+# allowlist, the bindings to the subjects the certificates carry, and every rule
+# here to a no-secrets refusal.
+#
+# That refusal is not a boundary for deployer-policy. It holds escalate and bind
+# on roles and clusterroles and create on clusterrolebindings (operator decision
+# 2026-11-18, map ticket claude-30uf), so it can bind the built-in cluster-admin
+# ClusterRole to itself. Its real reach is cluster-admin, not only secrets. The
+# control is not this file: its certificate is issued per use through an
+# operator-approved CertificateSigningRequest in a root window with the
+# break-glass credential, a one-day lifetime against 30 days for deployer-apply
+# (gt-negjz0). escalate and bind stay in the role; narrowing them is the
+# operator's call, filed as the open decision bead gt-924m6x.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
