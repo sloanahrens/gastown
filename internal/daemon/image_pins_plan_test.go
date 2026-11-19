@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
 // TestPlanImagePins is the filing decision's table: which pins a refresh bead
@@ -35,16 +36,21 @@ func TestPlanImagePins(t *testing.T) {
 		},
 		{
 			name: "one commit short of the file threshold",
-			pins: []ImagePinState{state("bd", 19)},
+			pins: []ImagePinState{state("bd", 14)},
 		},
 		{
 			name:     "at the file threshold",
-			pins:     []ImagePinState{state("bd", 20)},
+			pins:     []ImagePinState{state("bd", 15)},
+			wantFile: []string{"bd"},
+		},
+		{
+			name:     "nineteen behind files",
+			pins:     []ImagePinState{state("bd", 19)},
 			wantFile: []string{"bd"},
 		},
 		{
 			name:      "exactly the pins at or over the threshold",
-			pins:      []ImagePinState{state("bd", 19), state("om", 20), state("hm", 34), state("devops", 3)},
+			pins:      []ImagePinState{state("bd", 14), state("om", 15), state("hm", 34), state("devops", 3)},
 			wantFile:  []string{"om", "hm"},
 			wantItems: []string{imagePinsStaleKey},
 		},
@@ -130,6 +136,53 @@ func TestPlanImagePins(t *testing.T) {
 				t.Errorf("item keys %v, want %v", keys, tt.wantItems)
 			}
 		})
+	}
+}
+
+// TestPlanImagePinsFilesAtTheFileThreshold: filing turns on imagePinsFileBehind,
+// so a pin one commit short of it files nothing, and a pin at it or over it
+// files.
+func TestPlanImagePinsFilesAtTheFileThreshold(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		behind int
+		want   bool
+	}{
+		{behind: imagePinsFileBehind - 1, want: false},
+		{behind: imagePinsFileBehind, want: true},
+		{behind: 19, want: true},
+	}
+	for _, tt := range tests {
+		got := PlanImagePins([]ImagePinState{{Name: "bd", Behind: tt.behind}}, nil, at)
+		if filed := len(got.File) == 1; filed != tt.want {
+			t.Errorf("a pin %d behind: filed = %v, want %v (File %+v)", tt.behind, filed, tt.want, got.File)
+		}
+	}
+}
+
+// TestPlanImagePinsThresholdOrdering holds the three bounds apart: the planner
+// files below the stale item, and both sit below the drift guard's bound, so a
+// pin the guard would refuse a roll for has been filed for first. An open
+// refresh bead still suppresses the file the threshold would make.
+func TestPlanImagePinsThresholdOrdering(t *testing.T) {
+	t.Parallel()
+	if imagePinsFileBehind >= imagePinsStaleBehind {
+		t.Errorf("file threshold %d is not below the stale bound %d", imagePinsFileBehind, imagePinsStaleBehind)
+	}
+	if imagePinsFileBehind >= daemonimage.PinRefreshBehind {
+		t.Errorf("file threshold %d is not below the pins command's %d", imagePinsFileBehind, daemonimage.PinRefreshBehind)
+	}
+	if imagePinsStaleBehind >= daemonimage.MaxPinBehind {
+		t.Errorf("stale bound %d is not below the drift guard's %d-commit bound", imagePinsStaleBehind, daemonimage.MaxPinBehind)
+	}
+
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	atThreshold := ImagePinState{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: imagePinsFileBehind}
+	open := &ImagePinRefreshBead{ID: "gt-refresh7", OpenedAt: at.Add(-time.Hour)}
+	if got := PlanImagePins([]ImagePinState{atThreshold}, open, at); len(got.File) != 0 {
+		t.Errorf("File = %+v under an open refresh bead, want none", got.File)
 	}
 }
 

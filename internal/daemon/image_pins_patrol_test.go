@@ -90,7 +90,7 @@ func TestImagePinsTick(t *testing.T) {
 		},
 		{
 			name: "a pin one commit short of the trigger files nothing",
-			pins: []ImagePinState{refreshPin("bd", pinBD, tipBD, 19)},
+			pins: []ImagePinState{refreshPin("bd", pinBD, tipBD, 14)},
 		},
 		{
 			name:      "a pin 20 behind files one bead",
