@@ -11,6 +11,9 @@
 // suite of the package that hosts one: internal/cmd and internal/polecat take
 // minutes each, and the guard test inside them takes a second.
 //
+// The internal/cmd guard judges a non-cmd Go change by the gt and bd
+// invocations the file holds at the base and at HEAD, read from git (gt-jvv5qb).
+//
 // The pod-engine inventory (gt-tk6l7k) pins file lines in
 // docs/design/pod-engine.md, and internal/podengine's tests fail when a pinned
 // line moves. A file is pinned when the doc's inventory File column names it,
@@ -49,16 +52,18 @@ import (
 type options struct {
 	guards   bool
 	recovery bool
+	base     string // ref the branch is compared against, read for a changed file
 }
 
 // seams are what a run reaches outside the process: the inventory document, the
-// inventory package's tests, and the check for Go in a directory. main wires
-// the real ones, and the tests inject fakes.
+// inventory package's tests, the check for Go in a directory, and the git and
+// go runner. main wires the real ones, and the tests inject fakes.
 type seams struct {
 	readDoc      func() ([]byte, error)
 	runInventory func() error
 	hasGo        func(dir string) bool
 	importers    func(dirs []string) (land.ImporterSelection, error)
+	run          func(argv []string) ([]byte, error)
 }
 
 func main() {
@@ -91,8 +96,31 @@ func main() {
 		importers: func(dirs []string) (land.ImporterSelection, error) {
 			return land.SelectImporters(runCommand, repoRoot, "HEAD", dirs)
 		},
+		run: runCommand,
 	}
-	os.Exit(run(options{guards: *guards, recovery: *recovery}, string(out), s, os.Stdout, os.Stderr))
+	os.Exit(run(options{guards: *guards, recovery: *recovery, base: *base}, string(out), s, os.Stdout, os.Stderr))
+}
+
+// contentReader reads a changed file's bytes at base (head false) or at HEAD
+// through run, for the internal/cmd guard's content judge. A path missing from
+// the ref's tree is nil bytes and no error, the side an added or deleted file
+// leaves empty; a git show failure is returned, which fires the guard. The base
+// ref already resolved for the diff, so the probe fails only for an absent path.
+func contentReader(run func(argv []string) ([]byte, error), base string) land.ContentReader {
+	return func(rel string, head bool) ([]byte, error) {
+		ref := base
+		if head {
+			ref = "HEAD"
+		}
+		if ref == "" {
+			return nil, errors.New("no base ref for the content judge")
+		}
+		spec := ref + ":" + rel
+		if _, err := run([]string{"git", "rev-parse", "--verify", "--quiet", spec}); err != nil {
+			return nil, nil
+		}
+		return run([]string{"git", "show", spec})
+	}
 }
 
 // run writes the selection for nameStatus to stdout, a refusal to stderr, and
@@ -103,7 +131,7 @@ func run(o options, nameStatus string, s seams, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if o.guards {
-		sel, err := land.GuardSelects(nameStatus, s.hasGo)
+		sel, err := land.GuardSelectsWithContent(nameStatus, s.hasGo, contentReader(s.run, o.base))
 		if err != nil {
 			return fail(err)
 		}
