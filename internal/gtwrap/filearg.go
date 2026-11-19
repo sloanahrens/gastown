@@ -85,6 +85,10 @@ func classifyBd(command, sub, flag, value string) argKind {
 	if bdStdinFlags[flag] {
 		return argStdin
 	}
+	// --json is the payload source of bd sample add: a file or "-".
+	if flag == "--json" && command == "sample" && sub == "add" {
+		return argStdin
+	}
 	switch {
 	case flag == "-f" || flag == "--file":
 		if bdFileCommands[command] || bdFileCommands[command+" "+sub] {
