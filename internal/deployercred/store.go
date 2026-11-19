@@ -1,6 +1,7 @@
 package deployercred
 
 import (
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
@@ -24,11 +25,8 @@ const (
 	// fileMode is the one mode a credential file may have.
 	fileMode fs.FileMode = 0o600
 	// adminContext is the town's admin kubectl context; a deployer context of
-	// that name would shadow the operator's own (Q13).
+	// that name would shadow the operator's own.
 	adminContext = "colima-gt-control"
-	// kubeconfigTarget is the file a credential is never written to: the
-	// deployer's kubeconfig lives in its own 0700 directory (Q13).
-	kubeconfigTarget = ".kube/config"
 )
 
 // Info is one path as Store checks it: its kind and permission bits, and the
@@ -44,9 +42,20 @@ type Info struct {
 type FS interface {
 	Lstat(name string) (Info, error)
 	MkdirAll(dir string, perm fs.FileMode) error
-	WriteFile(name string, data []byte, perm fs.FileMode) error
+	// CreateExclusive opens name for writing with perm, failing when name
+	// already exists. The caller relies on the atomicity of that check: a
+	// separate existence test would let another process put a file in the way.
+	CreateExclusive(name string, perm fs.FileMode) (File, error)
 	Chmod(name string, mode fs.FileMode) error
 	Rename(oldpath, newpath string) error
+	Remove(name string) error
+}
+
+// File is a file Store is writing the credential bytes into.
+type File interface {
+	Write(p []byte) (int, error)
+	Sync() error
+	Close() error
 }
 
 // Disk is FS on the host's filesystem.
@@ -64,9 +73,10 @@ func (Disk) Lstat(name string) (Info, error) {
 // MkdirAll is os.MkdirAll.
 func (Disk) MkdirAll(dir string, perm fs.FileMode) error { return os.MkdirAll(dir, perm) }
 
-// WriteFile is os.WriteFile.
-func (Disk) WriteFile(name string, data []byte, perm fs.FileMode) error {
-	return os.WriteFile(name, data, perm)
+// CreateExclusive is os.OpenFile with O_CREATE|O_EXCL: the file is created in
+// perm, and an existing path is an error rather than a file to write through.
+func (Disk) CreateExclusive(name string, perm fs.FileMode) (File, error) {
+	return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 }
 
 // Chmod is os.Chmod.
@@ -74,6 +84,9 @@ func (Disk) Chmod(name string, mode fs.FileMode) error { return os.Chmod(name, m
 
 // Rename is os.Rename.
 func (Disk) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
+
+// Remove is os.Remove.
+func (Disk) Remove(name string) error { return os.Remove(name) }
 
 // Disk is the FS the deployer command runs on the host; a drift from the
 // interface fails to compile here rather than at the command.
@@ -83,9 +96,14 @@ var _ FS = Disk{}
 // refuses anything it cannot verify: a symlink at dir or on the way to it, a
 // directory with another mode or owner, a name that is not one plain file, a
 // target that is or ends in .kube/config, and an existing file that is not 0600
-// and uid's. Each file is written 0600 under a temporary name and renamed into
-// place, so a reader opens either no credential or a whole one. The bytes are
-// never returned or printed; an error names the path, not the content.
+// and uid's. Each file is created exclusively under a temporary name in the
+// directory, written and synced, verified 0600 and uid's, and only then renamed
+// onto its target, so a reader of the target opens either no file or the whole
+// one; a failure at any step removes the temporary file, and a removal that also
+// fails is reported with the cause. The files are not written as one unit: a
+// failure after the first rename leaves the files already renamed in place,
+// which Check refuses. The bytes are never returned or printed; an error names
+// the path, not the content.
 func Store(fsys FS, uid int, dir string, files map[string][]byte) error {
 	if fsys == nil {
 		return errors.New("the store has no filesystem to write through")
@@ -145,6 +163,43 @@ func Store(fsys FS, uid int, dir string, files map[string][]byte) error {
 	return nil
 }
 
+// Check refuses a credential set Store cannot vouch for: it returns an error
+// unless dir still passes Store's directory checks and every named file exists,
+// is 0600 and owned by uid. It reads no file contents.
+func Check(fsys FS, uid int, dir string, names []string) error {
+	if fsys == nil {
+		return errors.New("the check has no filesystem to read through")
+	}
+	if uid < 0 {
+		return fmt.Errorf("the deployer uid is %d, and an owner is never read from a negative uid", uid)
+	}
+	if err := checkDirPath(dir); err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("there are no files to check in %s", dir)
+	}
+	info, exists, err := checkChain(fsys, dir)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("the deployer directory %s does not exist", dir)
+	}
+	if err := checkDir(dir, info, uid); err != nil {
+		return err
+	}
+	for _, name := range names {
+		if err := checkName(name); err != nil {
+			return err
+		}
+		if err := checkPresent(fsys, uid, filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // checkDirPath refuses a directory path Store cannot verify as one place: an
 // empty, relative or unclean path names a different directory than the one the
 // Lstat walk checks.
@@ -169,8 +224,8 @@ func checkName(name string) error {
 	return nil
 }
 
-// checkTarget refuses the admin kubeconfig's path: the deployer credential is
-// written into its own 0700 directory, never over ~/.kube/config (Q13).
+// checkTarget refuses the admin kubeconfig's path: writing the deployer
+// credential there would replace the operator's own kubectl credential.
 func checkTarget(dir, name string) error {
 	target := filepath.Join(dir, name)
 	sep := string(filepath.Separator)
@@ -238,48 +293,98 @@ func checkOwner(what string, info Info, uid int) error {
 // file that is not regular, or one that is not already 0600 and uid's.
 func checkExisting(fsys FS, uid int, target string) error {
 	info, err := fsys.Lstat(target)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	if errors.Is(err, fs.ErrNotExist) {
 		return nil
-	case err != nil:
+	}
+	if err != nil {
 		return fmt.Errorf("could not read the existing credential %s: %w", target, err)
 	}
+	return checkFileInfo(uid, target, info)
+}
+
+// checkPresent refuses a credential Check cannot vouch for: an absent file, a
+// symlink, a file that is not regular, or one that is not 0600 and uid's.
+func checkPresent(fsys FS, uid int, target string) error {
+	info, err := fsys.Lstat(target)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("the credential %s does not exist", target)
+	}
+	if err != nil {
+		return fmt.Errorf("could not read the credential %s: %w", target, err)
+	}
+	return checkFileInfo(uid, target, info)
+}
+
+// checkFileInfo refuses a path that is not one credential file: a symlink, a
+// directory, a wider mode, or another owner.
+func checkFileInfo(uid int, target string, info Info) error {
 	switch {
 	case info.Mode&fs.ModeSymlink != 0:
-		return fmt.Errorf("the credential %s is a symlink, and Store never writes through one", target)
+		return fmt.Errorf("the credential %s is a symlink, and a credential is never a link", target)
 	case !info.Mode.IsRegular():
 		return fmt.Errorf("the credential %s is not a regular file", target)
 	case info.Mode != fileMode:
-		return fmt.Errorf("the existing credential %s has mode %04o, not 0600", target, info.Mode.Perm())
+		return fmt.Errorf("the credential %s has mode %04o, not 0600", target, info.Mode.Perm())
 	}
 	return checkOwner("the credential "+target, info, uid)
 }
 
-// writeFile writes one credential under a temporary name in dir and renames it
-// into place, so a reader of the target opens either no file or the whole one.
-// WriteFile's mode is subject to umask, so Chmod repeats 0600 before the rename.
-// A temporary path that already exists is refused: Store writes only over a file
-// it created.
+// writeFile writes one credential through a temporary file in dir and renames it
+// onto the target only after its mode and owner are verified, so neither a
+// failed write nor a filesystem that dropped a permission bit leaves anything
+// usable at the target. A temporary path that already exists is refused by the
+// exclusive create, never written over.
 func writeFile(fsys FS, uid int, dir, name string, data []byte) error {
 	target := filepath.Join(dir, name)
 	temp := tempName(dir, name)
-	_, err := fsys.Lstat(temp)
-	switch {
-	case err == nil:
-		return fmt.Errorf("the temporary file %s already exists, and Store never writes over a file it did not create", temp)
-	case !errors.Is(err, fs.ErrNotExist):
-		return fmt.Errorf("could not read the temporary path %s: %w", temp, err)
+	f, err := fsys.CreateExclusive(temp, fileMode)
+	if err != nil {
+		return fmt.Errorf("could not create a temporary file for %s: %w", target, err)
 	}
-	if err := fsys.WriteFile(temp, data, fileMode); err != nil {
-		return fmt.Errorf("could not write the credential %s: %w", target, err)
-	}
+	// CreateExclusive's mode is subject to umask, so Chmod makes 0600 the mode
+	// the temporary file holds before its bytes reach the disk.
 	if err := fsys.Chmod(temp, fileMode); err != nil {
-		return fmt.Errorf("could not set the credential %s to 0600 before moving it into place: %w", target, err)
+		return finishTemp(fsys, f, temp, fmt.Errorf("could not set the credential %s to 0600: %w", target, err))
+	}
+	if err := writeAndSync(f, data); err != nil {
+		return finishTemp(fsys, f, temp, fmt.Errorf("could not write the credential %s: %w", target, err))
+	}
+	if err := f.Close(); err != nil {
+		return finishTemp(fsys, nil, temp, fmt.Errorf("could not close the credential %s: %w", target, err))
+	}
+	if err := verifyTemp(fsys, uid, temp, target); err != nil {
+		return finishTemp(fsys, nil, temp, err)
 	}
 	if err := fsys.Rename(temp, target); err != nil {
-		return fmt.Errorf("could not move the credential into %s: %w", target, err)
+		return finishTemp(fsys, nil, temp, fmt.Errorf("could not move the credential into %s: %w", target, err))
 	}
-	return verifyWritten(fsys, uid, target)
+	return nil
+}
+
+// writeAndSync writes the credential bytes and flushes them, so a power loss
+// after the rename leaves the whole file, not a prefix of it.
+func writeAndSync(f File, data []byte) error {
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+// finishTemp removes the temporary file after a failure before the rename, so no
+// key bytes stay in the directory, and returns the cause. A close or removal
+// that also fails is joined to the cause, never dropped: a temporary file that
+// outlives its removal still holds the credential.
+func finishTemp(fsys FS, f File, temp string, cause error) error {
+	errs := []error{cause}
+	if f != nil {
+		if err := f.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("the temporary file %s could not be closed: %w", temp, err))
+		}
+	}
+	if err := fsys.Remove(temp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("the temporary file %s could not be removed and may hold the credential: %w", temp, err))
+	}
+	return errors.Join(errs...)
 }
 
 // tempName is the name a credential is written under before its rename; the pid
@@ -289,17 +394,18 @@ func tempName(dir, name string) string {
 	return filepath.Join(dir, "."+name+"."+strconv.Itoa(os.Getpid())+".tmp")
 }
 
-// verifyWritten checks the mode and owner the finished file landed with, so a
-// filesystem that dropped a permission bit is a refusal, not a credential.
-func verifyWritten(fsys FS, uid int, target string) error {
-	info, err := fsys.Lstat(target)
+// verifyTemp checks the mode and owner the temporary file holds before the
+// rename, so a filesystem that dropped a permission bit refuses instead of
+// landing a world-readable credential.
+func verifyTemp(fsys FS, uid int, temp, target string) error {
+	info, err := fsys.Lstat(temp)
 	if err != nil {
-		return fmt.Errorf("could not read back the credential %s: %w", target, err)
+		return fmt.Errorf("could not read back the temporary file %s for %s: %w", temp, target, err)
 	}
 	if info.Mode != fileMode {
-		return fmt.Errorf("the credential %s has mode %04o after the write, not 0600", target, info.Mode.Perm())
+		return fmt.Errorf("the temporary file %s for %s holds mode %04o, not 0600, so it is never moved into place", temp, target, info.Mode.Perm())
 	}
-	return checkOwner("the credential "+target, info, uid)
+	return checkOwner("the temporary file "+temp+" for "+target, info, uid)
 }
 
 // kubeconfigObject is the kubeconfig as kubectl reads it; only the fields the
@@ -346,8 +452,8 @@ type kubeContextConfig struct {
 // Kubeconfig returns the deployer's kubeconfig: the cluster at server with caPEM
 // embedded, and a user that references the certificate and key by path, so the
 // private key is never copied into a second file. The server must be https on a
-// loopback address, the CA must hold a certificate, both paths must be
-// absolute, and contextName may not be the admin context (Q13).
+// loopback address, the CA must hold a certificate that parses, both paths must
+// be absolute, and contextName may not be the admin context.
 func Kubeconfig(server string, caPEM []byte, certPath, keyPath, contextName string) ([]byte, error) {
 	return kubeconfigDocument(server, caPEM, certPath, keyPath, contextName, yaml.Marshal)
 }
@@ -423,8 +529,9 @@ func checkServer(server string) error {
 	return fmt.Errorf("the cluster server %q is not a loopback address, and the deployer credential reaches only the cluster on this host", server)
 }
 
-// checkCA refuses a CA that is empty or holds no certificate: a kubeconfig that
-// could not verify the server must not be written as if it could.
+// checkCA refuses a CA that is empty, holds no CERTIFICATE block, or holds one
+// that does not parse: a kubeconfig that could not verify the server must not be
+// written as if it could.
 func checkCA(caPEM []byte) error {
 	if len(caPEM) == 0 {
 		return errors.New("the cluster CA is empty, so the kubeconfig could not verify the server")
@@ -436,9 +543,13 @@ func checkCA(caPEM []byte) error {
 		if block == nil {
 			return errors.New("the cluster CA holds no CERTIFICATE PEM block, so the kubeconfig could not verify the server")
 		}
-		if block.Type == "CERTIFICATE" {
-			return nil
+		if block.Type != "CERTIFICATE" {
+			continue
 		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return fmt.Errorf("the cluster CA's CERTIFICATE block does not parse as a certificate, so the kubeconfig could not verify the server: %w", err)
+		}
+		return nil
 	}
 }
 
