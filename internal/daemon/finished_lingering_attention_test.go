@@ -79,6 +79,31 @@ func TestSeatFinishedLingeringRaisesAfterTheWindow(t *testing.T) {
 	}
 }
 
+// A seat that raised the item and has left the walk raises nothing next tick:
+// the item is keyed by the seat, and a key the walk no longer shows is one the
+// queue clears. The previous tick's item is carried in prev, as the daemon
+// carries it across heartbeats.
+func TestSeatFinishedLingeringClearsWhenTheSeatLeavesTheWalk(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	finishedSeatTown(t, f,
+		finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+	)
+	c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+	first, err := c.collect(context.Background())
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first tick = %+v, %v; want the one item for the walking seat", first, err)
+	}
+
+	f.src.seats = func() ([]townhealth.Seat, error) { return nil, nil }
+	got := collectAttention(context.Background(), attention.State{Items: first},
+		[]attentionCollector{c}, func(string, ...any) {})
+	if len(got) != 0 {
+		t.Errorf("items after the seat left the walk = %+v, want none", got)
+	}
+}
+
 // A done seat whose bead is still open is rework with its branch preserved,
 // not a seat left behind, so it raises nothing however long it has lingered.
 func TestSeatFinishedLingeringIgnoresOpenWork(t *testing.T) {
@@ -144,6 +169,61 @@ func TestSeatFinishedLingeringSkipsSeatsItCannotJudge(t *testing.T) {
 			}
 			if len(items) != 0 {
 				t.Fatalf("items = %+v, want none for a seat the rule cannot judge", items)
+			}
+		})
+	}
+}
+
+// The agent bead is a read the rule cannot guess at: one that fails and one
+// that reads as no bead each fail the collection with no item, and the caller
+// keeps the previous tick's seat-finished items rather than clearing them.
+func TestSeatFinishedLingeringUnreadableAgentBeadKeepsPreviousItems(t *testing.T) {
+	t.Parallel()
+	readFails := errors.New("bedrock: bd unavailable")
+	seat := finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "done", age: 3 * time.Hour}
+	cases := []struct {
+		name string
+		read func(t *testing.T, f *attentionFixture)
+	}{
+		{
+			name: "the agent bead read fails",
+			read: func(t *testing.T, f *attentionFixture) {
+				r := finishedSeatTown(t, f, seat)
+				r.fail = map[string]error{keptSeatAgentID(f, seat.name): readFails}
+				f.d.openWorkBeads = r.open
+			},
+		},
+		{
+			name: "the agent bead reads as no bead",
+			read: func(t *testing.T, f *attentionFixture) {
+				r := finishedSeatTown(t, f, seat)
+				r.noBead = map[string]bool{keptSeatAgentID(f, seat.name): true}
+				f.d.openWorkBeads = r.open
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			tc.read(t, f)
+			c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+			prev := attention.State{Items: []attention.Item{
+				{Key: "seat-finished:gastown/capable", Kind: attention.KindSeatFinishedLingering, Severity: attention.SeverityLow, Rig: attentionRig, Bead: seat.bead},
+				{Key: "stall:gastown/opal", Kind: attention.KindPolecatStall, Severity: attention.SeverityHigh, Summary: "another collector's item"},
+			}}
+
+			items, err := c.collect(context.Background())
+			if err == nil {
+				t.Fatalf("collect = %+v, nil; want the read's error", items)
+			}
+			if len(items) != 0 {
+				t.Errorf("items = %+v, want none beside the error", items)
+			}
+
+			got := collectAttention(context.Background(), prev, []attentionCollector{c}, func(string, ...any) {})
+			if len(got) != 1 || got[0].Key != "seat-finished:gastown/capable" {
+				t.Errorf("collectAttention = %+v, want only the previous seat-finished item kept", got)
 			}
 		})
 	}
