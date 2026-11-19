@@ -949,6 +949,105 @@ func TestIntegrationCICacheTrimLRUApplyEmptySelection(t *testing.T) {
 	}
 }
 
+// TestIntegrationCICacheTrimLRUApplyDirs runs apply over the LRU tree with one
+// file added below the top level and one top-level shard left empty: with a cap
+// of zero every file past the floor is selected, so the removal empties the
+// depth-2 directory and both shard directories, while the root's own file and
+// the files inside the floor stay. The directory the removal emptied below the
+// top level goes; every top-level shard directory stays, empty or not, since Go
+// creates them once and does not recreate them (gt-qaqvf4); and after_kib is the
+// volume read once both steps are done.
+//
+// Dropping the empty-directory sweep leaves 00/deep present and turns this test
+// red; sweeping at -mindepth 1 instead of 2 removes 00 and 7f and turns it red;
+// reading after_kib before the sweep reports a figure 4 KiB larger than the
+// volume's and turns it red.
+func TestIntegrationCICacheTrimLRUApplyDirs(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Now()
+	ciCacheLRUTreeWrite(t, root, now)
+
+	// 00/deep holds one file past the age, so the removal empties it; 7f is a
+	// top-level shard Go created and never filled.
+	deep := filepath.Join(root, "00", "deep")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatalf("making %s: %v", deep, err)
+	}
+	deepFile := filepath.Join(deep, "deep-3h")
+	if err := os.WriteFile(deepFile, bytes.Repeat([]byte{'x'}, 64*1024), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", deepFile, err)
+	}
+	mtime := now.Add(-170 * time.Minute)
+	if err := os.Chtimes(deepFile, mtime, mtime); err != nil {
+		t.Fatalf("dating %s: %v", deepFile, err)
+	}
+	emptyShard := filepath.Join(root, "7f")
+	if err := os.Mkdir(emptyShard, 0o755); err != nil {
+		t.Fatalf("making %s: %v", emptyShard, err)
+	}
+
+	before := ciCacheLRUBefore(t, root)
+	floor := strconv.Itoa(ciCacheLRUFloorMinutes)
+
+	// A cap of zero leaves every file past the floor in the excess, so the
+	// selection is exactly what the floor does not protect: 00's two files, the
+	// deep file and ab's window files above the floor.
+	listed, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", "0", floor)
+	if status != 0 {
+		t.Fatalf("the LRU list exited %d: %s", status, stderr)
+	}
+	selected, _ := ciCacheLRURead(t, listed)
+	wantRemoved := ciCacheLRUPaths(root, "00/old-3h", "00/deep/deep-3h", "ab/lru-100m", "00/lru-96m", "ab/lru-90m")
+	if !slices.Equal(selected, wantRemoved) {
+		t.Fatalf("list selected %v, want every file past the floor, oldest first: %v", selected, wantRemoved)
+	}
+
+	stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "apply", root, "120", "0", floor)
+	if status != 0 {
+		t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+	}
+	reply, err := parseCICacheTrimReply([]byte(stdout))
+	if err != nil {
+		t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+	}
+	if want := int64(len(wantRemoved)); reply.removed != want {
+		t.Errorf("removed = %d, want the %d files list selected", reply.removed, want)
+	}
+	if reply.beforeKiB != before {
+		t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+	}
+
+	if _, err := os.Stat(deep); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the directory the removal emptied below the top level is still present (stat error %v)", err)
+	}
+	for _, shard := range []string{"00", "7f"} {
+		if _, err := os.Stat(filepath.Join(root, shard)); err != nil {
+			t.Errorf("the top-level shard directory %s was removed: %v", shard, err)
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(root, "00")); err != nil {
+		t.Errorf("reading the emptied shard directory 00: %v", err)
+	} else if len(entries) != 0 {
+		t.Errorf("00 holds %d entries after the apply, want it emptied by the removal", len(entries))
+	}
+
+	kept := []string{filepath.Join("ab", "mid-45m"), filepath.Join("ab", "fresh-10m"), "trim.txt"}
+	slices.Sort(kept)
+	if got := ciCacheScriptFiles(t, root); !slices.Equal(got, kept) {
+		t.Errorf("the volume holds %v after the apply, want %v: the floor's files and the root's own stay", got, kept)
+	}
+
+	// The figure is read after the directory sweep too: a read taken before it
+	// would still count the emptied directory's block.
+	if after := ciCacheLRUBefore(t, root); reply.afterKiB != after {
+		t.Errorf("after_kib = %d, want the volume read again after both steps, %d KiB", reply.afterKiB, after)
+	}
+	if reply.afterKiB >= reply.beforeKiB {
+		t.Errorf("after_kib = %d, want less than before_kib, %d: the apply removed files", reply.afterKiB, reply.beforeKiB)
+	}
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh

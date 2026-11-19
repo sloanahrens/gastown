@@ -238,10 +238,12 @@ fi
 // list removes nothing: it prints one line per selected file and then the three
 // lines the other programs print, with the size after equal to the size before.
 // apply removes exactly the files list selects, passing their names NUL-separated
-// to rm, and prints only those three lines, the size after read again once the
-// removal is done. It removes files only, never a directory: an emptied
-// directory, above all a top-level shard, is left where it is (gt-5y4cmu,
-// gt-qaqvf4). Go touches a cache file's mtime when it uses it, so the oldest
+// to rm, then removes the empty directories the removal left below the top level
+// (gt-5y4cmu), as the age rule does, and prints only those three lines, the size
+// after read again once both steps are done. The top level's 256 two-hex-digit
+// shard directories stay, empty or not: Go creates them once and does not
+// recreate them, so removing one loses every write that hashes into it
+// (gt-qaqvf4). Go touches a cache file's mtime when it uses it, so the oldest
 // mtime is the least recently used.
 //
 // It takes exactly those five arguments and refuses any other count with exit 2
@@ -301,6 +303,7 @@ cat "$tmp/selected"
 after=$before
 else
 if [ "$removed" -gt 0 ]; then tr '\n' '\000' < "$tmp/selected" | xargs -0 rm -f; fi
+find "$root" -mindepth 2 -type d -empty -delete
 after=$(du -sk "$root" | cut -f1)
 fi
 echo "before_kib=$before"
