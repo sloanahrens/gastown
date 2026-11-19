@@ -177,6 +177,10 @@ type Lander struct {
 	// FollowupBackpressure is the open om-followup count at which the feed
 	// stops filing. Zero means DefaultFollowupBackpressure (gt-4ty22).
 	FollowupBackpressure int
+	// FollowupBudgetPercent is the share of the week's landings the feed may
+	// file as new beads. Zero means DefaultFollowupBudgetPercent and a negative
+	// percent is no budget (gt-y5wvum).
+	FollowupBudgetPercent int
 	// FollowupAlert, when set, is told every time the backpressure bound keeps
 	// the feed from filing, so the findings lost to it are visible. It runs on
 	// the feed's own goroutine, which the feed's timeout can abandon; the

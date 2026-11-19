@@ -350,12 +350,31 @@ func (l *Lander) compactQueue(rig string, existing []ExistingFollowup, skips *fo
 // bead naming them. existing is the de-duplication read, so the backpressure
 // bound is applied to every bead the landing files rather than once to the
 // landing: a landing that splits into three beads stops at the bound instead of
-// carrying the queue past it (gt-4ty22). It returns the beads it filed, the
-// findings the bound held back, and the lines it wants logged.
+// carrying the queue past it (gt-4ty22). The week's budget is applied the same
+// way: a plan that would carry the feed past its share of the week's landings
+// is held back with the findings below it (gt-y5wvum). It returns the beads it
+// filed, the findings the bound held back, and the lines it wants logged.
 func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, existing []ExistingFollowup) (filed []ExistingFollowup, held []FollowupCandidate, lines []string) {
 	plans := FollowupPlans(w, res, fresh)
 	bound := l.followupBackpressure()
 	open := openFollowups(existing)
+	// The budget measures a week of the feed: the beads it has filed in the
+	// last seven days against the landings in the same days. A landings read
+	// that fails files the landing's plans anyway, so a broken log cannot stop
+	// the feed; the line says so (gt-y5wvum).
+	cutoff := l.now().Add(-FollowupBudgetWindow)
+	filedThisWeek := FiledSince(existing, cutoff)
+	landedThisWeek := 0
+	budget := l.FollowupBudgetPercent
+	if landed, err := LandedSince(l.Landings, cutoff); err != nil {
+		budget = -1
+		lines = append(lines, fmt.Sprintf("could not read the week's landings the follow-up budget counts against (%v); filing without a weekly budget for this landing", err))
+	} else {
+		landedThisWeek = landed
+	}
+	if budget == 0 {
+		budget = DefaultFollowupBudgetPercent
+	}
 	var ids []string
 	for i, p := range plans {
 		if open+len(ids) >= bound {
@@ -365,6 +384,14 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			lines = append(lines, l.holdBack(open+len(ids), bound, len(held)))
 			break
 		}
+		if !BudgetAllows(filedThisWeek+len(ids), landedThisWeek, budget) {
+			for _, rest := range plans[i:] {
+				held = append(held, rest.Findings...)
+			}
+			lines = append(lines, fmt.Sprintf("%d %s beads for %d landings in the last 7 days, at the %d-percent weekly budget; held back %s for this landing",
+				filedThisWeek+len(ids), FollowUpLabel, landedThisWeek, budget, findingsPhrase(len(held))))
+			break
+		}
 		spec := p.Spec
 		id, err := l.Followups.CreateFollowup(spec)
 		if err != nil {
@@ -372,7 +399,9 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			continue
 		}
 		ids = append(ids, id)
-		filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels})
+		// CreatedAt is the feed's clock, so a later call in this same feed
+		// counts this bead in the week's filed total (gt-y5wvum).
+		filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels, CreatedAt: l.now()})
 		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(p.Findings)), res.Verdict.Score))
 	}
 	if len(ids) == 0 {
