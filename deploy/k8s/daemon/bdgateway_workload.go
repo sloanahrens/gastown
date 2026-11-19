@@ -56,6 +56,30 @@ const (
 	bdGatewayPushPortName = "push"
 )
 
+// BdGatewayMaxReplicas is the most gateway pods a render runs: two, so one serves
+// while the other rolls or fails.
+const BdGatewayMaxReplicas = 2
+
+// validateBdGatewayReplicas refuses a replica count the gateway does not run: a
+// negative count, or more than BdGatewayMaxReplicas. It runs with or without the
+// gateway image, as the concurrency cap's refusal does, so a value is refused rather
+// than ignored.
+func (v Values) validateBdGatewayReplicas() error {
+	if v.BdGatewayReplicas < 0 || v.BdGatewayReplicas > BdGatewayMaxReplicas {
+		return fmt.Errorf("Values.BdGatewayReplicas %d: want zero or one for one gateway pod, or two, the most the gateway runs", v.BdGatewayReplicas)
+	}
+	return nil
+}
+
+// bdGatewayReplicas is the Deployment's replica count: Values.BdGatewayReplicas, with
+// zero read as one. validateBdGatewayReplicas has already bounded the value.
+func (v Values) bdGatewayReplicas() int32 {
+	if v.BdGatewayReplicas == 0 {
+		return 1
+	}
+	return int32(v.BdGatewayReplicas) //nolint:gosec // bounded to 0..2 by validateBdGatewayReplicas, which Build runs first
+}
+
 // bdGatewayDeployment is the gateway's pod: an init container that copies the tokens
 // to 0600, one container running bdgw serve, the emptyDir for tokens, the log claim
 // and the workspace claim. It takes no ServiceAccount token, as the dashboard's pod
@@ -64,7 +88,9 @@ const (
 // Its strategy is RollingUpdate with maxUnavailable 0 and maxSurge 1: the new gateway
 // starts, and passes its readiness, before the old one stops, so the gateway has no
 // gap in service. For the length of a roll two gateway processes share the workspace
-// claim and the log claim. Replicas stay at one.
+// claim and the log claim. Replicas is Values.BdGatewayReplicas, one by default and
+// two when an operator sets it; with two, the pods share the claims in steady state
+// as they do during a roll, and both match the Service's selector.
 //
 // That sharing is safe on the control cluster as verified on 2026-11-19 by the
 // overseer's commands: kubectl get nodes shows one node (colima-gt-control, k3s v1.35),
@@ -95,7 +121,7 @@ func bdGatewayDeployment(v Values, namespace string) Deployment {
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{Name: BdGatewayName, Namespace: namespace, Labels: bdGatewayLabels()},
 		Spec: DeploymentSpec{
-			Replicas: 1,
+			Replicas: v.bdGatewayReplicas(),
 			Strategy: DeploymentStrategy{
 				Type:          "RollingUpdate",
 				RollingUpdate: &RollingUpdateStrategy{MaxUnavailable: &maxUnavailable, MaxSurge: &maxSurge},

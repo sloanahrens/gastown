@@ -896,6 +896,12 @@ type Values struct {
 	// default applies; a negative value is refused. It is read only with
 	// BdGatewayImage.
 	BdGatewayMaxConcurrent int
+	// BdGatewayReplicas is the gateway Deployment's replica count. Zero means one, the
+	// default a render keeps until an operator sets two; a value above two or below
+	// zero is refused, with or without BdGatewayImage. The count is rendered only with
+	// BdGatewayImage. Two pods share the gateway's claims and serve from one Service
+	// (bdgateway_workload.go).
+	BdGatewayReplicas int
 	// IncludeStatic renders the six static control-cluster manifests
 	// (deploy/k8s/static.go) right after the ServiceAccount: the cluster-scoped
 	// objects first, then the namespaced ones, each as its reviewed bytes. Off by
@@ -2339,6 +2345,9 @@ func (v Values) validate() error {
 		return err
 	}
 	if err := v.validateBdGatewayWorkload(); err != nil {
+		return err
+	}
+	if err := v.validateBdGatewayReplicas(); err != nil {
 		return err
 	}
 	if err := v.validateTracker(); err != nil {

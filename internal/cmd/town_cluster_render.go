@@ -126,6 +126,9 @@ type clusterRenderFlags struct {
 	// daemonBdGatewayURLSet is whether the flag was named at all, so an empty value
 	// is refused rather than read as absent.
 	daemonBdGatewayURLSet bool
+	// bdGatewayReplicas is the gateway Deployment's replica count, written with a
+	// values file's bd image; zero reads as one, as Values.BdGatewayReplicas does.
+	bdGatewayReplicas int
 }
 
 var clusterRender clusterRenderFlags
@@ -138,6 +141,10 @@ const defaultBdGatewayTokenSecret = "bd-gateway-tokens" //nolint:gosec // a Secr
 // --bd-gateway-max-concurrent is not given. It is above the gateway's own default
 // of 16 (gt-jz9gn7).
 const defaultBdGatewayMaxConcurrent = 32
+
+// defaultBdGatewayReplicas is the bd gateway's replica count when --bd-gateway-replicas
+// is not given: one, the count a render keeps until an operator sets two.
+const defaultBdGatewayReplicas = 1
 
 // clusterRenderRecordOptions are the two flags that tie a run to the recorded-flags
 // file. They are not fields of clusterRenderFlags because that struct's every
@@ -257,6 +264,8 @@ func init() {
 		"the Secret the bd gateway reads its tokens from, mounted whole in the gateway (default "+defaultBdGatewayTokenSecret+"); the render names it and never creates it; it is read only when the values file names a bd image")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayMaxConcurrent, "bd-gateway-max-concurrent", defaultBdGatewayMaxConcurrent,
 		"the most bd processes the bd gateway runs at once, a positive cap, or zero for the gateway's own default; the cap is written only when the values file names a bd image, so a rehearsal writes no gateway and ignores it; a negative cap is refused")
+	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayReplicas, "bd-gateway-replicas", defaultBdGatewayReplicas,
+		"the bd gateway's pod count, one or two; two pods serve from one Service and share its claims, so one serves while the other rolls; the count is written only when the values file names a bd image, so a rehearsal writes no gateway and ignores it; a count below zero or above two is refused")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
 		"write the flags this run used to the town's recorded-flags file, so a later render replays them with --use-recorded; a live render only")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.use, "use-recorded", false,
@@ -332,6 +341,8 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--daemon-bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
 	case f.bdGatewayMaxConcurrent < 0:
 		return fmt.Errorf("--bd-gateway-max-concurrent %d is negative: name a positive cap, or zero for the gateway's own default", f.bdGatewayMaxConcurrent)
+	case f.bdGatewayReplicas < 0 || f.bdGatewayReplicas > k8sdaemon.BdGatewayMaxReplicas:
+		return fmt.Errorf("--bd-gateway-replicas %d: want one or two, the most pods the gateway runs; zero reads as one", f.bdGatewayReplicas)
 	case f.rehearsal && f.tracker:
 		return errors.New("--tracker is for a live render: a rehearsal never runs trackerd, so drop --rehearsal or --tracker")
 	case f.tracker && strings.TrimSpace(f.trackerDSNSecret) == "":
@@ -397,6 +408,9 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 	}
 	if !named("bd-gateway-max-concurrent") {
 		f.bdGatewayMaxConcurrent = r.bdGatewayMaxConcurrent
+	}
+	if !named("bd-gateway-replicas") {
+		f.bdGatewayReplicas = r.bdGatewayReplicas
 	}
 	switches := []struct {
 		flag string
@@ -739,6 +753,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.BdGatewayImage = pair.Bd
 		v.BdGatewayTokenSecret = strings.TrimSpace(f.bdGatewayTokenSecret)
 		v.BdGatewayMaxConcurrent = f.bdGatewayMaxConcurrent
+		v.BdGatewayReplicas = f.bdGatewayReplicas
 		if v.DaemonBdGatewayURL == "" {
 			v.DaemonBdGatewayURL = inCluster
 		}

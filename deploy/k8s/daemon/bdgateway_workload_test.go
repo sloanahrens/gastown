@@ -335,6 +335,72 @@ func TestBdGatewayRenderMaxConcurrentRefusal(t *testing.T) {
 	}
 }
 
+// TestBdGatewayReplicasRender holds Values.BdGatewayReplicas to the Deployment's
+// replica count: two renders two pods, and zero and one render one, so the count a
+// render keeps is one until an operator sets two.
+func TestBdGatewayReplicasRender(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		replicas int
+		want     int32
+	}{
+		{"zero renders one", 0, 1},
+		{"one renders one", 1, 1},
+		{"two renders two", 2, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayWorkloadValues(t)
+			v.BdGatewayReplicas = tc.replicas
+			m := mustBuild(t, v)
+			if got := m.BdGatewayDeployment.Spec.Replicas; got != tc.want {
+				t.Errorf("the gateway has %d replicas, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdGatewayReplicasRefusal holds a count below zero or above two to an error
+// naming the field, with or without the gateway image: the value is refused, not
+// rendered as one pod.
+func TestBdGatewayReplicasRefusal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		image    string
+		replicas int
+	}{
+		{"three with the gateway image", testBdGatewayImage, 3},
+		{"three with no gateway image", "", 3},
+		{"negative with the gateway image", testBdGatewayImage, -1},
+		{"negative with no gateway image", "", -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayWorkloadValues(t)
+			v.BdGatewayImage = tc.image
+			v.BdGatewayReplicas = tc.replicas
+			_, err := Build(v)
+			if err == nil || !strings.Contains(err.Error(), "Values.BdGatewayReplicas") {
+				t.Errorf("Build error = %v, want a refusal naming Values.BdGatewayReplicas", err)
+			}
+		})
+	}
+}
+
+// TestBdGatewayReplicasTwoGolden holds the Deployment of a two-replica render to its
+// golden, so the replica count and the rest of the gateway's pod are reviewed together.
+func TestBdGatewayReplicasTwoGolden(t *testing.T) {
+	t.Parallel()
+	v := bdGatewayWorkloadValues(t)
+	v.BdGatewayReplicas = 2
+	m := mustBuild(t, v)
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway-two-replicas.yaml", document(t, m.BdGatewayDeployment))
+}
+
 // bdgwReadyRequires is the flag set cmd/bdgw/ready.go's require call names: bdgw
 // ready exits 2 without any of them, so the probe must pass each one.
 var bdgwReadyRequires = []string{"--tokens-dir", "--verbs", "--workspace"}
