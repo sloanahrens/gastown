@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"io/fs"
 	"log"
 	"os"
@@ -180,6 +181,77 @@ func TestTownStateBackupRedactCleanFailureKeepsTheError(t *testing.T) {
 	}
 	if !strings.Contains(reason, "origin") {
 		t.Errorf("alert text = %q, want the push failure itself", reason)
+	}
+}
+
+// TestTownStateBackupRedactRefusedPathLeavesNoStoredCopy drives one path
+// through a clean tick that stores it and a credential-bearing tick that
+// refuses it: the backup repository keeps no copy in its tree or index, the
+// deletion rides in the refusing tick's commit, and the note names the path
+// without its value.
+func TestTownStateBackupRedactRefusedPathLeavesNoStoredCopy(t *testing.T) {
+	t.Parallel()
+	d, f, town := townStateDaemon(t)
+	const exported = "gastown/.beads/config.yaml"
+	tree := fstest.MapFS{
+		"mayor/town.json": {Data: []byte(`{"name":"town"}`)},
+		exported:          {Data: []byte("prefix: gt\n")},
+	}
+	d.townStateFS = func(string) fs.FS { return tree }
+	gitRepo := filepath.Join(town, ".dolt-archive", "git")
+	seedTownStateOrigin(t, f, town, gitRepo)
+	inRepo := townStateBackupDir + "/" + exported
+	stored := filepath.Join(gitRepo, townStateBackupDir, filepath.FromSlash(exported))
+
+	d.syncTownStateBackup()
+	head1 := townStateHead(t, f, gitRepo)
+	if got := f.Tree(head1)[inRepo]; got != "prefix: gt\n" {
+		t.Fatalf("after the clean tick, HEAD stores %s = %q; want the file", exported, got)
+	}
+	if _, err := os.Stat(stored); err != nil {
+		t.Fatalf("after the clean tick, %s is not on disk: %v", stored, err)
+	}
+
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+	tree[exported] = &fstest.MapFile{Data: []byte("DEEPSEEK_API_KEY=PLANTED-123\n")}
+	d.syncTownStateBackup()
+	head2 := townStateHead(t, f, gitRepo)
+
+	if head2 == head1 {
+		t.Fatalf("the refusing tick committed nothing; HEAD stayed %s", head1)
+	}
+	parents := f.Parents(head2)
+	if len(parents) != 1 || parents[0] != head1 {
+		t.Fatalf("tick 2's parents = %v, want [%s]", parents, head1)
+	}
+	if _, ok := f.Tree(head1)[inRepo]; !ok {
+		t.Errorf("the parent commit does not hold %s; the deletion is not tick 2's", exported)
+	}
+	if _, ok := f.Tree(head2)[inRepo]; ok {
+		t.Errorf("HEAD still holds a copy of %s after it was refused", exported)
+	}
+	if _, err := os.Stat(stored); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("%s is still on disk after the refusing tick (stat err = %v)", stored, err)
+	}
+	staged, err := d.backupGitAt(gitRepo, 0).StagedChanges()
+	if err != nil {
+		t.Fatalf("StagedChanges: %v", err)
+	}
+	if len(staged) != 0 {
+		t.Errorf("the index still differs from HEAD after the commit: %v", staged)
+	}
+
+	subjects := townStateSubjects(t, d, gitRepo)
+	if len(subjects) != 2 || !strings.Contains(subjects[0], exported) {
+		t.Errorf("subjects = %q; want the newest to name %s", subjects, exported)
+	}
+	const note = "refused 1 secret-bearing file(s): " + exported
+	if strings.Count(logs.String(), note) != 1 {
+		t.Errorf("log = %q, want the note to name %s once", logs.String(), exported)
+	}
+	if strings.Contains(logs.String(), "PLANTED-123") {
+		t.Errorf("the log holds the planted credential")
 	}
 }
 

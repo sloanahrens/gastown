@@ -394,9 +394,11 @@ func (d *Daemon) writeTownStateSnapshot(gitRepo string, snap townStateSnapshot) 
 	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		return err
 	}
-	// The snapshot is written beside the jsonl export, never over it. Files are
-	// only ever written: a file removed from the town stays in the backup, since
-	// a backup must not drop its only copy because the source went missing.
+	// The snapshot is written beside the jsonl export, never over it. A file
+	// the town no longer holds stays in the backup, since a backup must not
+	// drop its only copy because the source went missing. A file the town
+	// holds and refuses does not: an earlier tick's copy would keep publishing
+	// the credential the refusal exists to keep out (gt-qcmfhm).
 	for name, data := range snap.Files {
 		dst := filepath.Join(gitRepo, townStateBackupDir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -404,6 +406,16 @@ func (d *Daemon) writeTownStateSnapshot(gitRepo string, snap townStateSnapshot) 
 		}
 		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return fmt.Errorf("writing %s: %w", dst, err)
+		}
+	}
+	// The removal happens before the staging below, so the same `git add -A`
+	// stages the deletion and the same commit carries it. A missing copy is the
+	// ordinary case for a path refused on several ticks; any other failure
+	// leaves the copy in place and is not reported as a clean backup.
+	for _, name := range snap.Refused {
+		dst := filepath.Join(gitRepo, townStateBackupDir, filepath.FromSlash(name))
+		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing the copy of refused %s from the backup: %w", name, err)
 		}
 	}
 

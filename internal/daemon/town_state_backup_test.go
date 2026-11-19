@@ -539,6 +539,15 @@ func TestTownStateBackupFailuresEscalate(t *testing.T) {
 			want: "is a directory",
 		},
 		{
+			name: "refused copy cannot be removed",
+			setup: func(t *testing.T, d *Daemon, f *gitfake.Fake, town, gitRepo string) {
+				initTownStateRepo(t, d, gitRepo)
+				blocked := filepath.Join(gitRepo, townStateBackupDir, "settings", "themes", "ci.key")
+				writeTownStateFile(t, filepath.Join(blocked, "keep"), "x")
+			},
+			want: "removing the copy of refused settings/themes/ci.key",
+		},
+		{
 			name:  "git add fails",
 			setup: seededTownStateOrigin,
 			fault: "add",
