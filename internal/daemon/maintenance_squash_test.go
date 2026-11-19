@@ -738,6 +738,322 @@ func TestSquashRowsRefusesAClosedResultSet(t *testing.T) {
 	}
 }
 
+// scriptSquashRun replaces the engine for one due database's run, so a
+// completed, failed or conflicted run's record is reachable without a server.
+// calls counts the runs the check started.
+func scriptSquashRun(d *Daemon, calls *int, res doltsquash.RunResult, err error) {
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		*calls++
+		return res, err
+	}
+}
+
+// readSquashLedger is the ledger's lines, empty when no run has been recorded.
+func readSquashLedger(t *testing.T, townRoot string) []squashLedgerEntry {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(townRoot, "daemon", squashLedgerFile))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("reading the ledger: %v", err)
+	}
+	var entries []squashLedgerEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var e squashLedgerEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("the ledger line %q does not parse: %v", line, err)
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// TestSquashRecordCompletedRunWritesStateAndLedger is the bead's first box for
+// a completed run: its state record names the start and outcome, and its one
+// ledger line carries the commits, the three step durations and the retries.
+func TestSquashRecordCompletedRunWritesStateAndLedger(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{
+		CommitsBefore: 900,
+		CommitsAfter:  40,
+		AfterRead:     true,
+		Rebase:        2 * time.Second,
+		Catchup:       3 * time.Second,
+		Swap:          time.Second,
+		Tail:          7,
+		Retries:       2,
+	}}, nil)
+
+	d.runScheduledMaintenance()
+
+	if calls != 1 {
+		t.Fatalf("the check started %d runs, want 1", calls)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("the run's state record does not read: %v", err)
+	}
+	rec, ok := st.Squash["gt"]
+	if !ok {
+		t.Fatalf("the state file holds no record for gt: %+v", st.Squash)
+	}
+	if !rec.LastRun.Equal(squashTestNow) {
+		t.Errorf("the state record holds last run %v, want %v", rec.LastRun, squashTestNow)
+	}
+	if rec.Outcome != squashOutcomeCompleted {
+		t.Errorf("the state record holds outcome %q, want %q", rec.Outcome, squashOutcomeCompleted)
+	}
+	entries := readSquashLedger(t, d.config.TownRoot)
+	if len(entries) != 1 {
+		t.Fatalf("the ledger holds %d lines, want 1: %+v", len(entries), entries)
+	}
+	e := entries[0]
+	if e.DB != "gt" || e.Outcome != squashOutcomeCompleted {
+		t.Errorf("the ledger line names %q with outcome %q, want gt completed", e.DB, e.Outcome)
+	}
+	if !e.Started.Equal(squashTestNow) || !e.Finished.Equal(squashTestNow) {
+		t.Errorf("the ledger line runs %v to %v, want both %v", e.Started, e.Finished, squashTestNow)
+	}
+	if e.CommitsBefore != 900 {
+		t.Errorf("the ledger line holds %d commits before, want 900", e.CommitsBefore)
+	}
+	if e.CommitsAfter == nil || *e.CommitsAfter != 40 {
+		t.Errorf("the ledger line holds commits after %v, want 40", e.CommitsAfter)
+	}
+	if e.RebaseMs != 2000 || e.CatchupMs != 3000 || e.SwapMs != 1000 {
+		t.Errorf("the ledger line holds step durations %d/%d/%d ms, want 2000/3000/1000", e.RebaseMs, e.CatchupMs, e.SwapMs)
+	}
+	if e.Tail != 7 || e.Retries != 2 {
+		t.Errorf("the ledger line holds tail %d and %d retries, want 7 and 2", e.Tail, e.Retries)
+	}
+	if e.Error != "" || e.Conflict != "" {
+		t.Errorf("a completed run's line carries %q / %q", e.Error, e.Conflict)
+	}
+	if !strings.Contains(logs.String(), "squash: gt: the run finished") {
+		t.Errorf("the check did not log the run as finished: %q", logs.String())
+	}
+}
+
+// TestSquashRecordFailedRunWritesFailedStateAndLine is the bead's first box for
+// a failed run: both records say the run failed and carry why, and the after
+// count is absent because the run stopped before the swap.
+func TestSquashRecordFailedRunWritesFailedStateAndLine(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	cause := errors.New("doltsquash: the catch-up: read failed")
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900}}, cause)
+
+	d.runScheduledMaintenance()
+
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("the run's state record does not read: %v", err)
+	}
+	if rec := st.Squash["gt"]; rec.Outcome != squashOutcomeFailed {
+		t.Errorf("the state record holds outcome %q, want %q", rec.Outcome, squashOutcomeFailed)
+	}
+	entries := readSquashLedger(t, d.config.TownRoot)
+	if len(entries) != 1 {
+		t.Fatalf("the ledger holds %d lines, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Outcome != squashOutcomeFailed || entries[0].Error != cause.Error() {
+		t.Errorf("the ledger line holds outcome %q and error %q, want %q and %q",
+			entries[0].Outcome, entries[0].Error, squashOutcomeFailed, cause)
+	}
+	if entries[0].CommitsAfter != nil {
+		t.Errorf("a run that stopped before the swap recorded an after count: %d", *entries[0].CommitsAfter)
+	}
+}
+
+// TestSquashRecordConflictedRunNamesTheConflict: a swap that kept both branches
+// is not an error, so its record says "conflict" and names the commits, which
+// is what the item D9b-3 raises from it reads.
+func TestSquashRecordConflictedRunNamesTheConflict(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	conflict := doltsquash.SwapConflict{Commit: "abc123", Unpicked: []string{"abc123", "def456"}}
+	scriptSquashRun(d, &calls, doltsquash.RunResult{
+		Swap:    doltsquash.SwapResult{Conflict: &conflict},
+		Summary: doltsquash.RunSummary{CommitsBefore: 900, CommitsAfter: 40, AfterRead: true},
+	}, nil)
+
+	d.runScheduledMaintenance()
+
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("the run's state record does not read: %v", err)
+	}
+	if rec := st.Squash["gt"]; rec.Outcome != squashOutcomeConflict {
+		t.Errorf("the state record holds outcome %q, want %q", rec.Outcome, squashOutcomeConflict)
+	}
+	entries := readSquashLedger(t, d.config.TownRoot)
+	if len(entries) != 1 {
+		t.Fatalf("the ledger holds %d lines, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Outcome != squashOutcomeConflict || entries[0].Conflict != conflict.String() {
+		t.Errorf("the ledger line holds outcome %q and conflict %q, want %q and %q",
+			entries[0].Outcome, entries[0].Conflict, squashOutcomeConflict, conflict.String())
+	}
+	if entries[0].Error != "" {
+		t.Errorf("a conflicted run's line carries the error %q", entries[0].Error)
+	}
+}
+
+// TestSquashRecordRefusedRunWritesNothing is the bead's second box: a run the
+// marker refuses sent no statement, so it is not a run and writes neither a
+// state record nor a ledger line.
+func TestSquashRecordRefusedRunWritesNothing(t *testing.T) {
+	t.Parallel()
+	d, server, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	path := squashMarkerPath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	release, ok, err := lock.FlockTryAcquire(path)
+	if err != nil {
+		t.Fatalf("taking the other daemon's marker: %v", err)
+	}
+	if !ok {
+		t.Fatal("the other daemon's marker was not free to take")
+	}
+	defer release()
+
+	d.runScheduledMaintenance()
+
+	if !strings.Contains(logs.String(), "another daemon holds the run marker") {
+		t.Fatalf("the run was not refused by the marker: %q", logs.String())
+	}
+	if _, err := readMaintenanceGCState(d.config.TownRoot); !errors.Is(err, errMaintenanceGCStateAbsent) {
+		t.Errorf("a refused run wrote the state file: %v", err)
+	}
+	if entries := readSquashLedger(t, d.config.TownRoot); len(entries) != 0 {
+		t.Errorf("a refused run wrote %d ledger lines: %+v", len(entries), entries)
+	}
+	// The refusal is the check's, not a run's: only the readings were sent.
+	if len(server.queries) != squashP95Rounds+1 {
+		t.Errorf("a refused run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	}
+}
+
+// TestSquashRecordHoldsTheNextCheckAfterAFailure: a recorded run is the
+// 24-hour gate, so the check that runs an hour after a failed run does not
+// start a second one even though its readings trip.
+func TestSquashRecordHoldsTheNextCheckAfterAFailure(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{}, errors.New("doltsquash: the catch-up: read failed"))
+
+	// The first check starts the run, which fails and records its start.
+	d.runScheduledMaintenance()
+	if calls != 1 {
+		t.Fatalf("the first check started %d runs, want 1", calls)
+	}
+	// An hour on, the patrol is due again; the recorded run holds the day.
+	later := squashTestNow.Add(squashCheckRetryAfter + time.Minute)
+	d.maint.now = func() time.Time { return later }
+	d.runScheduledMaintenance()
+
+	if calls != 1 {
+		t.Errorf("a check inside the run's 24-hour gate started a second run: %d runs", calls)
+	}
+	if !strings.Contains(logs.String(), "the last run started 1h1m0s ago, inside the 24h gate") {
+		t.Errorf("the check did not name the gate holding it: %q", logs.String())
+	}
+}
+
+// TestSquashRecordWarnsWhenAWriteFails drives both writes at their call site: a
+// record that cannot be written is a WARNING naming the file, and the run is
+// still logged, so a full disk or a blocked path is never a silent loss.
+func TestSquashRecordWarnsWhenAWriteFails(t *testing.T) {
+	t.Parallel()
+	// failOne replaces one of the real ledger's operations with a failing one.
+	failOne := func(fail func(*squashLedger)) func(d *Daemon) {
+		return func(d *Daemon) {
+			d.maint.squashLedger = func(townRoot string) squashLedger {
+				l := newSquashLedger(townRoot)
+				fail(&l)
+				return l
+			}
+		}
+	}
+	cases := map[string]struct {
+		// block is a path made a directory, so the real operation on it fails.
+		block   func(townRoot string) string
+		setup   func(d *Daemon)
+		wantLog []string
+	}{
+		"the state file": {
+			block: maintenanceGCStatePath,
+			wantLog: []string{
+				"cannot record the run in " + maintenanceGCStateFileName,
+				// The unreadable state holds no run back: the check runs anyway.
+				"no last run is known, so the 24-hour gate holds nothing back",
+			},
+		},
+		"the ledger path is blocked": {
+			block:   func(townRoot string) string { return filepath.Join(townRoot, "daemon", squashLedgerFile) },
+			wantLog: []string{"cannot write the ledger line to " + squashLedgerFile},
+		},
+		"the ledger line does not marshal": {
+			setup: failOne(func(l *squashLedger) {
+				l.marshal = func(any) ([]byte, error) { return nil, errors.New("bad record") }
+			}),
+			wantLog: []string{"cannot write the ledger line to " + squashLedgerFile},
+		},
+		"the ledger directory cannot be made": {
+			setup: failOne(func(l *squashLedger) {
+				l.mkdir = func(string, os.FileMode) error { return errors.New("read-only") }
+			}),
+			wantLog: []string{"cannot write the ledger line to " + squashLedgerFile},
+		},
+		"the ledger write fails": {
+			setup: failOne(func(l *squashLedger) {
+				l.write = func(*os.File, []byte) (int, error) { return 0, errors.New("no space left") }
+			}),
+			wantLog: []string{"cannot write the ledger line to " + squashLedgerFile},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			calls := 0
+			scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+			if tc.setup != nil {
+				tc.setup(d)
+			}
+			if tc.block != nil {
+				if err := os.MkdirAll(tc.block(d.config.TownRoot), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			d.runScheduledMaintenance()
+
+			for _, want := range tc.wantLog {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("the failed write logged no WARNING holding %q: %q", want, logs.String())
+				}
+			}
+			if !strings.Contains(logs.String(), "squash: gt: the run finished") {
+				t.Errorf("the run was not logged after the failed write: %q", logs.String())
+			}
+		})
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).

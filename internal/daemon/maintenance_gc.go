@@ -185,6 +185,11 @@ type maintenanceGCState struct {
 	// (gt-7nxj4).
 	ArchiveEventsWatermarks map[string]EventsArchiveWatermark `json:"archive_events_watermarks,omitempty"`
 
+	// Squash is, per database, the rolling squash's last run: when it started
+	// and how it ended. The start is the 24-hour gate a run must pass, so it
+	// survives a daemon restart (maintenance_squash.go, gt-5v1fye).
+	Squash map[string]squashRunRecord `json:"squash,omitempty"`
+
 	// LastRequestAnswer is the outcome of the last request-driven cycle
 	// (maintenance_request.go). It lets a request whose result write failed be
 	// re-answered on the next tick instead of rerunning the cycle.
@@ -268,6 +273,7 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 		StaleGCAlerts:           map[string]bool{},
 		ArchiveWatermarks:       map[string]ArchiveWatermark{},
 		ArchiveEventsWatermarks: map[string]EventsArchiveWatermark{},
+		Squash:                  map[string]squashRunRecord{},
 	}
 	data, err := os.ReadFile(maintenanceGCStatePath(townRoot))
 	if err != nil {
@@ -304,6 +310,9 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	}
 	for k, v := range parsed.ArchiveEventsWatermarks {
 		st.ArchiveEventsWatermarks[k] = v
+	}
+	for k, v := range parsed.Squash {
+		st.Squash[k] = v
 	}
 	st.LastRequestAnswer = parsed.LastRequestAnswer
 	st.LastUpdateAlertRunID = parsed.LastUpdateAlertRunID

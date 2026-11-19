@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -28,8 +29,9 @@ import (
 // the reads bd issues, and main's commit count — and doltsquash.Decide turns
 // them into a decision the check logs. A database Decide finds due is run by
 // doltsquash.Run, which holds the town's run marker for its whole length so
-// two daemons cannot run it at once. The run's state record, ledger line and
-// attention item are D9b-2 and D9b-3 (gt-5v1fye, gt-0g4yoa).
+// two daemons cannot run it at once. Each run is recorded in
+// maintenance_state.json and in one daemon/squash_ledger.jsonl line (gt-5v1fye);
+// the attention item a failed run raises is D9b-3 (gt-0g4yoa).
 //
 // The check rides the scheduled_maintenance tick but not its window and not
 // its quiet-window guard: its readings are taken on every tick regardless, and
@@ -78,6 +80,10 @@ const (
 	// is refused before it sends a statement.
 	squashRunMarkerFile = "squash_run.lock"
 
+	// squashLedgerFile is the run ledger's name under <town>/daemon: one JSON
+	// line per run, the per-run record the design keeps beside the state file.
+	squashLedgerFile = "squash_ledger.jsonl"
+
 	// squashRunBackupFreshness is how recent the last nightly backup must be
 	// for a run to start: the 24 hours the design's step 1 allows, which is
 	// also the age the restore path can use.
@@ -88,6 +94,15 @@ const (
 func squashMarkerPath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", squashRunMarkerFile)
 }
+
+// How a run ended, in its state record and its ledger line. A conflict is not
+// an error — the swap kept both branches — so it is told apart from a failed
+// run rather than read as one.
+const (
+	squashOutcomeCompleted = "completed"
+	squashOutcomeFailed    = "failed"
+	squashOutcomeConflict  = "conflict"
+)
 
 // errSquashMarkerUnavailable reports that the run marker could not be taken for
 // a reason other than another holder: the flock could not be opened or locked,
@@ -229,9 +244,7 @@ func (d *Daemon) triggerSquashCheck() {
 //
 // A number that cannot be read is a WARNING naming it, and no verdict is
 // logged for that database: a quiet-day line over an unreadable input would
-// read a failed read as a clean day. The run's own last-run argument is the
-// zero time: the daily gate above is the only one until D9b-2 records runs in
-// maintenance_state.json.
+// read a failed read as a clean day.
 func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	undecided := false
 	defer func() {
@@ -243,6 +256,15 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 		}
 		d.recordPatrolRun(&d.squashCheckRun, squashCheckPatrol, at)
 	}()
+
+	// Each database's 24-hour gate is its last recorded run. A state file that
+	// cannot be read reads as no run at all, never as "not due": the run it
+	// would let start is held by its own marker, and a gate that silently
+	// stopped holding is the starvation this check exists to avoid.
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		d.logger.Printf("squash: WARNING: %v — no last run is known, so the 24-hour gate holds nothing back", err)
+	}
 
 	settings := doltsquash.Settings{
 		Thresholds: doltsquash.Thresholds{
@@ -263,7 +285,7 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 				db, strings.Join(names, ", "), readings.describe())
 			continue
 		}
-		dec, err := doltsquash.Decide(now, time.Time{}, readings.inputs, settings)
+		dec, err := doltsquash.Decide(now, st.Squash[db].LastRun, readings.inputs, settings)
 		if err != nil {
 			undecided = true
 			d.logger.Printf("squash: WARNING: %s: %v — the check did not decide", db, err)
@@ -304,14 +326,16 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	}
 }
 
-// runSquashDatabase runs the engine over one due database. It opens one
-// session, which MaxRuntime bounds both as the run's context and as the
-// connection's read timeout, and doltsquash.Run holds the town's run marker for
-// the run's whole length. A run refused by the marker has sent no statement:
-// its error matches doltsquash.ErrRunMarkerHeld, and a marker that could not be
-// taken matches errSquashMarkerUnavailable.
+// runSquashDatabase runs the engine over one due database and records it. It
+// opens one session, which MaxRuntime bounds both as the run's context and as
+// the connection's read timeout, and doltsquash.Run holds the town's run marker
+// for the run's whole length. A run refused by the marker has sent no
+// statement: its error matches doltsquash.ErrRunMarkerHeld, and a marker that
+// could not be taken matches errSquashMarkerUnavailable. Neither is a run, so
+// neither writes a record.
 func (d *Daemon) runSquashDatabase(ctx context.Context, db string, cut time.Time, settings *agentconfig.SquashSettings) (doltsquash.RunResult, error) {
-	conn, err := d.maintenance().squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
+	m := d.maintenance()
+	conn, err := m.squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
 	if err != nil {
 		return doltsquash.RunResult{}, fmt.Errorf("squash: opening the connection to %s: %w", db, err)
 	}
@@ -319,13 +343,152 @@ func (d *Daemon) runSquashDatabase(ctx context.Context, db string, cut time.Time
 	conn.SetMaxOpenConns(1)
 	runCtx, cancel := context.WithTimeout(ctx, settings.MaxRuntime)
 	defer cancel()
-	return doltsquash.Run(runCtx, doltsquash.RunInput{
+	started := m.now()
+	res, err := m.squashRun(runCtx, doltsquash.RunInput{
 		Exec:    squashDoltExec{conn: conn},
 		Marker:  &squashMarker{path: squashMarkerPath(d.config.TownRoot)},
 		Clock:   d.clk(),
 		Sleeper: d.clk(),
 		Cut:     cut,
 	})
+	finished := m.now()
+	// A swap left standing with both branches kept for the retention check ran
+	// no step, so it records no run: the next check says why in its log line
+	// and only the retention check moves it.
+	if res.Held || errors.Is(err, doltsquash.ErrRunMarkerHeld) || errors.Is(err, errSquashMarkerUnavailable) {
+		return res, err
+	}
+	entry := newSquashLedgerEntry(db, started, finished, res, err)
+	// The run is recorded whether or not it worked, so its day is not retried
+	// run after run. A record that cannot be written is a WARNING, not a lost
+	// run: the check's own patrol record still holds the next day.
+	if err := recordSquashRun(d.config.TownRoot, db, started, entry.Outcome); err != nil {
+		d.logger.Printf("squash: %s: WARNING: cannot record the run in %s: %v", db, maintenanceGCStateFileName, err)
+	}
+	if err := m.squashLedger(d.config.TownRoot).append(entry); err != nil {
+		d.logger.Printf("squash: %s: WARNING: cannot write the ledger line to %s: %v", db, squashLedgerFile, err)
+	}
+	return res, err
+}
+
+// squashRunRecord is, per database, the rolling squash's last run: the start
+// the 24-hour gate compares, and how the run ended.
+type squashRunRecord struct {
+	LastRun time.Time `json:"last_run"`
+	Outcome string    `json:"outcome"`
+}
+
+// recordSquashRun records one run's start and outcome in maintenance_state.json.
+func recordSquashRun(townRoot, db string, started time.Time, outcome string) error {
+	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
+		st.Squash[db] = squashRunRecord{LastRun: started, Outcome: outcome}
+	})
+	return err
+}
+
+// squashLedgerEntry is one run's line in daemon/squash_ledger.jsonl: commits
+// before and after, the three step durations, the tail and the retries, and how
+// the run ended.
+type squashLedgerEntry struct {
+	DB       string    `json:"db"`
+	Started  time.Time `json:"started"`
+	Finished time.Time `json:"finished"`
+	// Outcome is one of the squashOutcome constants.
+	Outcome string `json:"outcome"`
+	// CommitsBefore is main's commit count in the BEFORE record.
+	CommitsBefore int64 `json:"commits_before"`
+	// CommitsAfter is main's commit count after the swap. It is absent when the
+	// run stopped before the swap: that zero is a missing reading, not a count.
+	CommitsAfter *int64 `json:"commits_after,omitempty"`
+	RebaseMs     int64  `json:"rebase_ms"`
+	CatchupMs    int64  `json:"catchup_ms"`
+	SwapMs       int64  `json:"swap_ms"`
+	Tail         int    `json:"tail"`
+	Retries      int    `json:"retries"`
+	// Recovered is the recovery table's row when the run settled a dead run's
+	// branches before its own first step.
+	Recovered string `json:"recovered,omitempty"`
+	// Error is why a failed run stopped.
+	Error string `json:"error,omitempty"`
+	// Conflict is the swap conflict a conflicted run left, naming its commits.
+	Conflict string `json:"conflict,omitempty"`
+}
+
+// newSquashLedgerEntry is what one run's record holds. The run's error is kept
+// in the entry rather than re-derived from the result: a step that fails
+// returns the result it reached, and the error says which step stopped it.
+func newSquashLedgerEntry(db string, started, finished time.Time, res doltsquash.RunResult, runErr error) squashLedgerEntry {
+	e := squashLedgerEntry{
+		DB:            db,
+		Started:       started,
+		Finished:      finished,
+		CommitsBefore: res.Summary.CommitsBefore,
+		RebaseMs:      res.Summary.Rebase.Milliseconds(),
+		CatchupMs:     res.Summary.Catchup.Milliseconds(),
+		SwapMs:        res.Summary.Swap.Milliseconds(),
+		Tail:          res.Summary.Tail,
+		Retries:       res.Summary.Retries,
+	}
+	if res.Summary.AfterRead {
+		after := res.Summary.CommitsAfter
+		e.CommitsAfter = &after
+	}
+	if res.Recovered != nil {
+		e.Recovered = string(res.Recovered.State)
+	}
+	switch {
+	case runErr != nil:
+		e.Outcome, e.Error = squashOutcomeFailed, runErr.Error()
+	case res.Swap.Conflict != nil:
+		e.Outcome, e.Conflict = squashOutcomeConflict, res.Swap.Conflict.String()
+	default:
+		e.Outcome = squashOutcomeCompleted
+	}
+	return e
+}
+
+// squashLedger is the run ledger's file and the operations one line takes. The
+// operations are fields so a test can fail one: a record that does not
+// marshal, an unmakeable directory and a failed write cannot be arranged on the
+// town's own filesystem.
+type squashLedger struct {
+	path    string
+	marshal func(v any) ([]byte, error)
+	mkdir   func(path string, perm os.FileMode) error
+	open    func(path string, flag int, perm os.FileMode) (*os.File, error)
+	write   func(f *os.File, b []byte) (int, error)
+}
+
+// newSquashLedger is the ledger at its town path, reading and writing for real.
+func newSquashLedger(townRoot string) squashLedger {
+	return squashLedger{
+		path:    filepath.Join(townRoot, "daemon", squashLedgerFile),
+		marshal: json.Marshal,
+		mkdir:   os.MkdirAll,
+		open:    os.OpenFile,
+		write:   (*os.File).Write,
+	}
+}
+
+// append writes one run's line as a single append write, so a line never
+// interleaves a line another run wrote beside it.
+func (l squashLedger) append(e squashLedgerEntry) error {
+	line, err := l.marshal(e)
+	if err != nil {
+		return err
+	}
+	if err := l.mkdir(filepath.Dir(l.path), 0o755); err != nil {
+		return err
+	}
+	f, err := l.open(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := l.write(f, append(line, '\n')); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // squashReadings is what the daily check read for one database: the three
