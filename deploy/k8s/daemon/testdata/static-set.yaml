@@ -554,10 +554,11 @@ description: "CI runners and their jobs: the first workload shed under pressure.
 ---
 # The cluster reads the drift compare makes: the gt-drift-reader ClusterRole the
 # daemon's service account in gt reads the rendered control-cluster objects
-# through, and its binding. The compare reads a Deployment and the gate runner's
-# ConfigMap by name, so the grant is get and list on those two kinds and nothing
-# else: no Secret, no write verb, no wildcard. A kind the compare comes to read
-# joins this file and internal/cmd/testdata/drift-reads.golden together.
+# through, and its binding. The compare reads a Deployment, a Service, a claim,
+# the ServiceAccount, the tracker backup CronJob and the gate runner's ConfigMap
+# by name, so the grant is get and list on those kinds and nothing else: no
+# Secret, no write verb, no wildcard. A kind the compare comes to read joins this
+# file and internal/cmd/testdata/drift-reads.golden together.
 #
 # This file is not applied by the daemon: the overseer applies it with the admin
 # credential and turns the drift patrol on (gt-p2katm). TestDriftRBAC* in
@@ -570,8 +571,13 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list"]
+  # The gate runner's ConfigMap, the Services, the claims and the ServiceAccount
+  # are all core-group objects.
   - apiGroups: [""]
-    resources: ["configmaps"]
+    resources: ["configmaps", "services", "persistentvolumeclaims", "serviceaccounts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
     verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

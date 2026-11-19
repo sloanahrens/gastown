@@ -35,8 +35,12 @@ const (
 // this table as well as the manifest, and TestDriftRBACCoverageProblemsReportsEachFailingBranch
 // fails if the table, the golden and the manifest disagree in either direction.
 var driftGranted = map[string]string{
-	"deployments": "apps",
-	"configmaps":  "",
+	"deployments":            "apps",
+	"configmaps":             "",
+	"services":               "",
+	"persistentvolumeclaims": "",
+	"serviceaccounts":        "",
+	"cronjobs":               "batch",
 }
 
 // driftGrantedVerbs is every verb the ClusterRole may grant. The compare reads

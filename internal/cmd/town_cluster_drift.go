@@ -24,8 +24,10 @@ var townClusterDriftCmd = &cobra.Command{
 	Long: `Render the daemon's Deployment, and the dashboard's, trackerd's and the bd
 gateway's when the recorded flags name each, from the flags the last live render
 recorded and the image values file. Render the gate runner's Deployment and its
-ConfigMap from the checked-in control values. Read each live object through
-kubectl and print every field the render names and the live object carries
+ConfigMap from the checked-in control values. The Services, the claims, the
+ServiceAccount and the tracker backup CronJob are compared beside the
+Deployments, each one the flags render. Read each live object through kubectl
+and print every field the render names and the live object carries
 differently.
 
 An image roll is not a difference: the container images, the runner's included,
@@ -182,6 +184,10 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 		return fmt.Errorf("cannot render the gate runner to compare: %w", err)
 	}
 	targets = append(targets, runnerTargets...)
+	// The Services, the claims, the ServiceAccount and the backup CronJob follow
+	// the Deployments: a render that names them has more than its workloads to
+	// keep in step, and an unread one is not a cluster in step (gt-03u02a).
+	targets = append(targets, renderedNamespacedTargets(m)...)
 	differed := false
 	for _, target := range targets {
 		lines, err := target.differences(ctx, d)
