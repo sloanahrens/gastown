@@ -130,6 +130,30 @@ func TestSpecContentionRecordBackgroundSlingCarriesTheSchedule(t *testing.T) {
 	}
 }
 
+// A tick with no schedule writer cannot record the loss, so it says so:
+// dropping it would leave the next tick nothing to add to, and labeling the
+// bead would hold it for a person over the host's load (gt-kmkpao).
+func TestSpecContentionRecordAnUnwiredWriterIsReported(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.RecordContention = nil
+	for i := 0; i < specdispatch.RetryAttempts; i++ {
+		f.slingErrs["gt-a"] = append(f.slingErrs["gt-a"], contentionErr())
+	}
+	r := runSpecDispatchCycle(env)
+
+	if len(r.Deferred) != 1 || len(r.Failed) != 0 {
+		t.Fatalf("deferred %+v failed %+v, want one deferral", r.Deferred, r.Failed)
+	}
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "no contention store is wired") {
+		t.Errorf("errors = %v, want one naming the unwired store", r.Errors)
+	}
+	if got := f.labels["gt-a"]; len(got) != 0 {
+		t.Errorf("labels = %v, want none", got)
+	}
+}
+
 // contentionMetadata is a bead's metadata carrying the three contention keys.
 func contentionMetadata(first time.Time, attempts int, retryAt time.Time) []byte {
 	return []byte(`{"` + specdispatch.ContentionFirstKey + `":"` + first.UTC().Format(time.RFC3339) +
