@@ -193,13 +193,15 @@ The claim carries each rig's bare repository (`<rig>/.repo.git`), not a canonica
 
 Each credential is a Kubernetes Secret created from a file named in a manifest (`deploy/daemon/secrets.yaml`). The kinds of credential are:
 
-- the Forgejo bot tokens (landing and viewer);
+- the Forgejo bot tokens (landing, viewer and registry);
 - one deploy key per rig that publishes to GitHub;
 - the review (om) daemon token;
 - the OpenShell gateway material;
 - the jev environment, a ledger reader connection string and a Dolt archive key;
 - the read-only cloud auditor key used by the cloud check;
 - the DeepSeek balance key the `deepseek_balance` patrol reads.
+
+The registry bot's token mounts read-only at owner-read only, because that token can write the registry's packages where the viewer's cannot.
 
 The DeepSeek balance key is created from `deepseek.env` in the operator's config directory rather than from a `deploy/daemon/secrets.yaml` entry: `gt town cluster render` mounts it at the patrol's default key file, and prints its create line, only when that file is present, so a town without the key runs the patrol unconfigured.
 

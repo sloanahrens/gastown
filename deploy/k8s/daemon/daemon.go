@@ -314,6 +314,15 @@ const (
 	// ViewerTokenFile is the read-only Forgejo token the dashboard page reads from
 	// $XDG_CONFIG_HOME/gt, the same Secret entry a rehearsal mounts.
 	ViewerTokenFile = RehearsalForgeTokenFile
+	// RegistryTokenFile is the write-capable Forgejo token the registry tag prune
+	// needs from $XDG_CONFIG_HOME/gt. The daemon pod mounts it read-only, at
+	// registryTokenMode, only when Values.Secrets names it; a rehearsal never
+	// mounts it, as it never mounts the landing bot's token.
+	RegistryTokenFile = "forgejo-registry.env" //nolint:gosec // a file name, not a credential
+	// registryTokenMode is the permission the registry token's Secret volume
+	// carries: owner read only, narrower than the entry's 0600 manifest maximum
+	// because the token can write packages.
+	registryTokenMode = int32(0o400)
 	// dashboardViewerPath is where the dashboard container mounts the viewer token:
 	// the file the page reads, which the daemon container's Secrets loop also
 	// mounts at this path.
@@ -2115,11 +2124,17 @@ func townStateBackupVolume(v Values) Volume {
 }
 
 // secretVolume is the pod volume that carries file's Secret, at the entry's
-// manifest mode.
+// manifest mode. The registry bot's token is the exception: it renders
+// owner-read only, because it can write packages.
 func secretVolume(file manifestdata.SecretFile) (Volume, error) {
 	mode, err := secretFileMode(file)
 	if err != nil {
 		return Volume{}, err
+	}
+	// Narrow only, never widen: a manifest mode that grants no owner read is
+	// left as it is rather than given one.
+	if file.Name == RegistryTokenFile && mode&0o400 != 0 {
+		mode = registryTokenMode
 	}
 	return Volume{
 		Name:   secretVolumeName(file.Name),

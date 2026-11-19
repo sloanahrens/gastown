@@ -113,6 +113,10 @@ spec:
               mountPath: /run/gt/xdg/gt/forgejo-viewer.env
               subPath: forgejo-viewer.env
               readOnly: true
+            - name: daemon-forgejo-registry-env
+              mountPath: /run/gt/xdg/gt/forgejo-registry.env
+              subPath: forgejo-registry.env
+              readOnly: true
             - name: daemon-promote-gastown-key
               mountPath: /run/gt/xdg/gt/promote-gastown.key
               subPath: promote-gastown.key
@@ -220,6 +224,10 @@ spec:
           secret:
             secretName: daemon-forgejo-viewer.env
             defaultMode: 384
+        - name: daemon-forgejo-registry-env
+          secret:
+            secretName: daemon-forgejo-registry.env
+            defaultMode: 256
         - name: daemon-promote-gastown-key
           secret:
             secretName: daemon-promote-gastown.key
