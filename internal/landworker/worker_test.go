@@ -495,30 +495,30 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	}
 }
 
-// TestEscalationTextFromHumanRejection: the alarm names the lane and carries
-// the findings (gt-yo36hx).
+// TestEscalationTextFromHumanRejection: the human-rejection alarm names the lane (gt-yo36hx).
 func TestEscalationTextFromHumanRejection(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.remote.tips["crew/overseer/gt-x"] = tipHead
 	w := land.Work{Branch: "crew/overseer/gt-x", Head: noteHead, Target: "main", Worker: "opal"}
-	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal",
-		Labels: []string{land.LabelReadyToLand}, UpdatedAt: seededRowAt, Notes: land.FormatReadyNote(w)})
-	var msg string
-	h.w.Escalate = func(_, m string) { msg = m }
+	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal", Labels: []string{land.LabelReadyToLand}, UpdatedAt: seededRowAt, Notes: land.FormatReadyNote(w)})
+	got := make(chan string, 1)
+	h.w.Escalate = func(_, m string) { got <- m }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
-		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om requested changes", Rework: false,
-			Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om requested changes", Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
 	}
 	h.w.Pass(context.Background())
-	h.w.escWG.Wait()
-	if want := "lane crew/overseer; major a.go:9 error dropped; minor b.go naming"; !strings.Contains(msg, want) {
-		t.Fatalf("escalation %q lacks %q", msg, want)
+	select {
+	case msg := <-got:
+		if want := "lane crew/overseer; major a.go:9 error dropped; minor b.go naming"; !strings.Contains(msg, want) {
+			t.Fatalf("escalation %q lacks %q", msg, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no escalation within 5s")
 	}
 }
 
-// TestEscalationText: the alarm names the lane and each finding, prints at
-// most six, and says how many it left out (gt-yo36hx).
+// TestEscalationText: the alarm names the lane, at most six findings and the rest (gt-yo36hx).
 func TestEscalationText(t *testing.T) {
 	t.Parallel()
 	const pre = "Landing of gt-abc (crew/overseer/gt-x @ abc123) left for the overseer (review): "
