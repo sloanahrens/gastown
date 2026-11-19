@@ -31,7 +31,9 @@
 #                          GT_TEST_DOCKER=0 itself, so an inherited value cannot
 #                          turn containers on. Do not wrap it in `gt slot run`.
 #   make presubmit         gt done's pre-submit check (gt-ssyxd): lint, `go build
-#                          ./...`, then `go test` of only the packages the branch
+#                          ./...`, then the integration vet when the branch
+#                          changed a .go file (gt-w3aby, gt-edlvvt), then `go
+#                          test` of only the packages the branch
 #                          changed against origin/main and of the tree-wide guard
 #                          tests its changed paths trigger (gt-ydzwb), then the
 #                          error returns the branch adds with no unit test
@@ -594,8 +596,10 @@ tier-check:
 
 # presubmit is gt done's pre-submit check (gt-ssyxd): the landing worker gates
 # every branch on the merged tree with `make gate`, so a polecat running the
-# whole gate first only doubles the host load. This target lints, builds, and
-# tests the packages the branch changed and their direct importers
+# whole gate first only doubles the host load. This target lints, builds, runs
+# the integration vet when the branch changed a .go file (the same command the
+# gate runs, gt-w3aby), and tests the packages the branch changed and their
+# direct importers
 # (internal/land/cmd/changedpkgs, unit-tested in internal/land/changed_test.go
 # and internal/land/importers_test.go; the heavy importers are left out and
 # named, gt-cwkzxk). It skips the budget runner, the
@@ -629,6 +633,7 @@ presubmit: lint
 	@echo "presubmit: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
 	@$(CPU_CLASS) go build ./... || { echo "presubmit: FAILED at build" >&2; exit 1; }
 	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do $(CPU_CLASS) go -C "$$m" build -o "$$out/" ./... || { rm -rf "$$out"; echo "presubmit: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- '*.go'; then echo "presubmit: integration vet (go run ./internal/testpolicy/cmd/integrationvet)" >&2; go run ./internal/testpolicy/cmd/integrationvet || { echo "presubmit: FAILED at integration vet" >&2; exit 1; }; fi
 	@for m in $(TESTED_MODULES); do if ! git diff --quiet $(PRESUBMIT_BASE)...HEAD -- "$$m"; then echo "presubmit: vet and tests in $$m" >&2; ($(CPU_CLASS) go -C "$$m" vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go -C "$$m" test -timeout 10m ./...) || { echo "presubmit: FAILED at tests ($$m)" >&2; exit 1; }; fi; done
 	@pkgs=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE)) || { echo "presubmit: FAILED computing the changed packages against $(PRESUBMIT_BASE)" >&2; exit 1; }; \
 	guards=$$(go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -guards) || { echo "presubmit: FAILED computing the tree-wide guard tests against $(PRESUBMIT_BASE)" >&2; exit 1; }; \

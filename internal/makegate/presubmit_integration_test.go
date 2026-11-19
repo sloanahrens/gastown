@@ -21,8 +21,11 @@ import (
 // depth or the first commit of the clone the tests run in.
 //
 // Each test is named after its shell case and its comment names the mutation
-// that turns it red. The make calls are processes, so this file is integration
-// tier (docs/standards/test-engineering.md, rule 2).
+// that turns it red. The integration-vet cases (gt-edlvvt) have no shell case:
+// the scratch checkout's second commit changes a .go file, so they pin the
+// presubmit recipe line's place and its exit status against it. The make calls
+// are processes, so this file is integration tier
+// (docs/standards/test-engineering.md, rule 2).
 
 // gateStubGoInterrupt is the gate family's go stub with the interrupt path the
 // shell fixture's stub carries, built from gateStubGo's own pieces (its call
@@ -114,6 +117,63 @@ func TestIntegrationPresubmitUnchangedTrackerModuleNotTested(t *testing.T) {
 	}
 	if r.hasCall("go test in tracker") {
 		t.Fatalf("presubmit tested a tracker module the branch did not change\ncalls:\n%s", r.callLog())
+	}
+}
+
+// TestIntegrationPresubmitRunsTheIntegrationVet checks that presubmit runs the
+// integration vet after the build and before the tests, and only when the
+// branch changed a Go file.
+// Mutation: delete the presubmit recipe line that runs
+// ./internal/testpolicy/cmd/integrationvet, and both cases go red; move it
+// below the changed-package tests, and the order case fails; drop its
+// `git diff --quiet ... -- '*.go'` guard, and the unchanged case runs the vet.
+func TestIntegrationPresubmitRunsTheIntegrationVet(t *testing.T) {
+	t.Run("after the build and before the tests", func(t *testing.T) {
+		out := dryTarget(t, defaultsMake(t, repoRoot(t)), "presubmit")
+		build := lineOf(out, "go build ./... ||")
+		vet := lineOf(out, "go run ./internal/testpolicy/cmd/integrationvet")
+		tests := lineOf(out, "go test -timeout 10m -coverprofile=")
+		if build == 0 || vet == 0 || tests == 0 || build >= vet || vet >= tests {
+			t.Fatalf("presubmit's build is at line %d, its integration vet at %d and its tests at %d, want build < vet < tests\n%s", build, vet, tests, out)
+		}
+	})
+
+	t.Run("only when a Go file changed", func(t *testing.T) {
+		s := newGateScratch(t)
+		changed := s.runTarget("presubmit", []string{"-o", "lint"}, "PRESUBMIT_BASE="+s.first)
+		if changed.Code != 0 {
+			t.Fatalf("presubmit exited %d on a branch that changed a Go file, want 0\nstdout:\n%s\nstderr:\n%s\ncalls:\n%s", changed.Code, changed.Stdout, changed.Stderr, changed.callLog())
+		}
+		if !changed.hasCall("integrationvet") {
+			t.Fatalf("presubmit did not run the integration vet on a branch that changed a Go file\ncalls:\n%s", changed.callLog())
+		}
+		unchanged := s.runTarget("presubmit", []string{"-o", "lint"}, "PRESUBMIT_BASE=HEAD")
+		if unchanged.Code != 0 {
+			t.Fatalf("presubmit exited %d on a branch that changed no Go file, want 0\nstdout:\n%s\nstderr:\n%s\ncalls:\n%s", unchanged.Code, unchanged.Stdout, unchanged.Stderr, unchanged.callLog())
+		}
+		if unchanged.hasCall("integrationvet") {
+			t.Fatalf("presubmit ran the integration vet on a branch that changed no Go file\ncalls:\n%s", unchanged.callLog())
+		}
+	})
+}
+
+// TestIntegrationPresubmitRunsTheIntegrationVetFailsTheTarget checks that a
+// failing integration vet makes presubmit print its stage line and exit
+// non-zero.
+// Mutation: replace the vet line's `|| { echo "presubmit: FAILED at integration
+// vet"; exit 1; }` guard with `|| true`, and presubmit exits 0 on a failing vet.
+func TestIntegrationPresubmitRunsTheIntegrationVetFailsTheTarget(t *testing.T) {
+	s := newGateScratch(t)
+	r := s.runTarget("presubmit", []string{"-o", "lint"}, "PRESUBMIT_BASE="+s.first, "STUB_VET_FAIL=1")
+
+	if r.Code == 0 {
+		t.Fatalf("presubmit exited 0 with a failing integration vet\nstdout:\n%s\nstderr:\n%s\ncalls:\n%s", r.Stdout, r.Stderr, r.callLog())
+	}
+	if !strings.Contains(r.Stderr, "presubmit: FAILED at integration vet") {
+		t.Fatalf("presubmit did not name the failed integration vet\nstderr:\n%s", r.Stderr)
+	}
+	if !r.hasCall("integrationvet") {
+		t.Fatalf("the vet stub never ran, so this case asserts nothing\ncalls:\n%s", r.callLog())
 	}
 }
 
