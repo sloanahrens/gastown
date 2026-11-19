@@ -1,6 +1,7 @@
 package land
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -43,7 +44,7 @@ func TestRejectionEscalateFlag(t *testing.T) {
 			w := f.work
 			w.Branch, w.Head = tc.branch, head
 			rej := tc.rej
-			if err := f.lander().reject(f.bead(), w, &rej, nil); err != &rej || rej.RecordErr != nil {
+			if err := f.lander().reject(context.Background(), f.bead(), w, &rej, nil); err != &rej || rej.RecordErr != nil {
 				t.Fatalf("reject = %v, record error %v; want the refusal recorded", err, rej.RecordErr)
 			}
 			if rej.NoEscalate != tc.want {
@@ -77,7 +78,7 @@ func TestLaneAttemptRefusalIsNumberedByLane(t *testing.T) {
 			w := f.work
 			w.Branch = tc.branch
 			rej := &Rejection{Kind: tc.kind, Rework: true, Reason: "r"}
-			if err := f.lander().reject(f.bead(), w, rej, nil); err != rej || rej.RecordErr != nil {
+			if err := f.lander().reject(context.Background(), f.bead(), w, rej, nil); err != rej || rej.RecordErr != nil {
 				t.Fatalf("reject = %v, record error %v; want the refusal recorded", err, rej.RecordErr)
 			}
 			if got, ok := ParseRejectionNote(f.bead().Notes); !ok || got.Attempt != tc.attempt || rej.Rework != tc.rework {
@@ -107,7 +108,7 @@ func TestLaneAttemptRepeatNumbersInTheBlocksLane(t *testing.T) {
 	w := f.work
 	w.Branch = "crew/overseer/gt-x"
 	rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "r"}
-	if err := f.lander().reject(f.bead(), w, rej, nil); err != rej || rej.RecordErr != nil {
+	if err := f.lander().reject(context.Background(), f.bead(), w, rej, nil); err != rej || rej.RecordErr != nil {
 		t.Fatalf("reject = %v, record error %v; want the interrupted block completed", err, rej.RecordErr)
 	}
 	if b := f.bead(); rej.Rework || !beads.HasLabel(b, LabelNeedsOverseer) {

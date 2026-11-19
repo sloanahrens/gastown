@@ -211,6 +211,9 @@ type Lander struct {
 	// test can reach the timeout without waiting it out. Zero keeps
 	// commentTimeout.
 	auditTimeout time.Duration
+	// sleep, when set, is the wait between a refused bead write and its retry
+	// (gt-hounmt). Nil means a real wait; tests inject one that waits nothing.
+	sleep func(time.Duration)
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -1347,7 +1350,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %s has no %s label", ErrNotReady, w.BeadID, LabelReadyToLand)
 	}
 	if rej := policyRejection(issue); rej != nil {
-		return Result{}, l.reject(issue, w, rej, nil)
+		return Result{}, l.reject(ctx, issue, w, rej, nil)
 	}
 
 	if err := l.fetchTarget(g, w.Target); err != nil {
@@ -1359,7 +1362,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	if rej, err := l.checkHeadPushed(g, w); err != nil || rej != nil {
 		if rej != nil {
-			return Result{}, l.reject(issue, w, rej, nil)
+			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		}
 		return Result{}, err
 	}
@@ -1393,7 +1396,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// account for it: it reached the target by a route that left no
 		// landing record (an operator push), which is not the author's to
 		// rework (gt-mdet3).
-		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
+		return Result{}, l.reject(ctx, issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
 			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
 	}
 	for _, check := range l.RangeChecks {
@@ -1402,7 +1405,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			return Result{}, &InfraError{Stage: "range check", Err: err}
 		}
 		if rej != nil {
-			return Result{}, l.reject(issue, w, rej, nil)
+			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		}
 	}
 	// Risk paths are the label this landing carries, never a hold: a read
@@ -1432,7 +1435,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		if res, handled, err := l.finishedUnrecordedLanding(g, issue, w); handled {
 			return res, err
 		}
-		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(g, EmptyMerge{
+		return Result{}, l.reject(ctx, issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(g, EmptyMerge{
 			Target: w.Target, Base: base, Head: w.Head, Stage: "before merge",
 			Comparison: fmt.Sprintf("%s/%s and %s have identical trees", remote, w.Target, shortSHA(w.Head)),
 		})}, nil)
@@ -1472,7 +1475,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// that left no record, so there is nothing for the author to land
 		// and nothing for an operator to repair (gt-sq2oe).
 		if out.EmptySquash {
-			return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
+			return Result{}, l.reject(ctx, issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
 				Target: w.Target, Base: base, Head: w.Head, Stage: "after merge",
 				Comparison: fmt.Sprintf("merging %s changes nothing on %s/%s (its changes are already there, and no land merge of this lander's accounts for them)", shortSHA(w.Head), remote, w.Target),
 			})}, nil)
@@ -1490,12 +1493,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 				return res, err
 			}
 		}
-		return Result{}, l.reject(issue, w, rej, nil)
+		return Result{}, l.reject(ctx, issue, w, rej, nil)
 	}
 	if same, err := wt.TreesIdentical(base, "HEAD"); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
 	} else if same {
-		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
+		return Result{}, l.reject(ctx, issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
 			Target: w.Target, Base: base, Head: w.Head, Stage: "after merge",
 			Comparison: fmt.Sprintf("the merge result and %s/%s have identical trees", remote, w.Target),
 		})}, nil)
@@ -1535,7 +1538,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// the head against, so its head waits for the overseer before om runs
 		// (gt-93hf4). A waived head skipped this branch above.
 		if rej := l.omConfigRejection(g, base, merged, w.Head, w.BeadID); rej != nil {
-			return Result{}, l.reject(issue, w, rej, nil)
+			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		}
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
@@ -1584,7 +1587,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
 			rej := &Rejection{Kind: RejectReview, Rework: false,
 				Reason: l.reviewErrorRejectionReason(wt, base, merged, reviewErr)}
-			return Result{}, l.reject(issue, w, rej, nil)
+			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		}
 		verdict = Verdict{Verdict: VerdictErrorPrefix + reviewErrorReason(reviewErr), Version: verdict.Version}
 		res.Verdict = verdict
@@ -1602,7 +1605,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if verdict.Verdict == VerdictRequestChanges {
 		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
-		return Result{}, l.reject(issue, w, rej, &verdict)
+		return Result{}, l.reject(ctx, issue, w, rej, &verdict)
 	}
 	// An approving verdict is a score and a set of findings, and the findings
 	// refuse the landing too: a major inside the approving band would otherwise
@@ -1610,7 +1613,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// either refusal, so no gate run pays for it.
 	if rej := findingsRej; rej != nil {
 		l.logf("%s: %s", w.BeadID, stageTimesCISkipped(omRejectedStage, omTime, omRetried))
-		return Result{}, l.reject(issue, w, rej, &verdict)
+		return Result{}, l.reject(ctx, issue, w, rej, &verdict)
 	}
 	if err := ctx.Err(); err != nil {
 		return Result{}, &InfraError{Stage: "push", Err: err}
@@ -1665,7 +1668,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// that tree, so a later target tip is what lifts a resubmission.
 		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog,
 			Findings: verdict.Findings, Approved: verdict.Verdict == VerdictApprove, TargetTip: base}
-		return Result{}, l.reject(issue, w, rej, nil)
+		return Result{}, l.reject(ctx, issue, w, rej, nil)
 	}
 
 	// The rig lands through Forgejo: the om status is posted and the PR merged
@@ -1691,12 +1694,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			// lifts it: the bead goes to a human, and the worker escalates
 			// it (classification reads Rework=false as outRejectedHuman).
 			rej := &Rejection{Kind: RejectForgedStatus, Rework: false, Reason: forged.Reason}
-			return Result{}, l.reject(issue, w, rej, nil)
+			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		case errors.As(err, &refused):
 			rej := &Rejection{Kind: RejectMergeRefused, Rework: false,
 				Reason: fmt.Sprintf("Forgejo refused to merge %s into %s (405, not ready to be merged): %s. A required status is missing or red, so a retry cannot converge: check that branch protection's required contexts match the gate workflow's, and that the %s status was accepted. A human decides.",
 					w.Candidate(), w.Target, elideMiddle(NoteField(refused.Err.Error()), reviewErrorReasonMax), OMStatusContext)}
-			return Result{}, l.reject(issue, w, rej, nil)
+			return Result{}, l.reject(ctx, issue, w, rej, nil)
 		}
 		return Result{}, err
 	}
@@ -2370,7 +2373,7 @@ func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejec
 // recorded twice: appending a second identical block would burn a rework
 // attempt the author never saw, and at MaxReworkAttempts the bead is escalated
 // with no rework comment ever posted (gt-zqqcr).
-func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
+func (l *Lander) reject(ctx context.Context, issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
 	repeat, err := l.rejectionAlreadyRecorded(issue, w, rej)
 	if err != nil {
 		// Without repeat the lane check cannot run, so NoEscalate stays false (gt-dtx3ht).
@@ -2452,7 +2455,15 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	}
 	l.logf("%s", line)
 	if !repeat {
-		if err := l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note)); err != nil {
+		// A transient bd failure is retried before the note is reported as not
+		// written (gt-hounmt).
+		wait := l.sleep
+		if wait == nil {
+			wait = realWait
+		}
+		if err := retryWrite(ctx, wait, func() error {
+			return l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note))
+		}); err != nil {
 			rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
 			return rej
 		}
