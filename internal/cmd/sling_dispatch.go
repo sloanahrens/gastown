@@ -41,25 +41,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 func (d *slingDeps) executeSling(params SlingParams) (*SlingResult, error) {
 	result, err := sling.Run(context.Background(), d.engineDeps(), params)
 	if err != nil {
-		giveBackBondLockRespawn(result, err)
+		giveBackSlingRespawn(result, err)
 	}
 	return result, err
 }
 
-// giveBackBondLockRespawn gives back the respawn a spawn charged when the
-// engine's formula step failed on a bond that never got the town lock
-// (ErrBondLockTimeout). The lock never reached bd, so the failure is the town's
-// load rather than a death of the bead: the spec dispatcher defers the bead and
-// slings it again next tick, and a count per tick would spend the bead's
-// respawn budget on the queue in front of it (gt-8d38p). Every other failure
-// keeps its count. The engine returns the spawn beside the error, unless the
-// spawn itself failed: then there is no count to give back.
+// giveBackSlingRespawn gives back the respawn a spawn charged for any engine
+// failure the classifier names (slingGiveBackReason): a bond that never got
+// the town lock, a hook write that lost the assignee lock, a contended Dolt
+// store, a busy seat. Those are the town's load rather than a death of the
+// bead, and the dispatcher defers the bead and slings it again next tick, so a
+// count per tick would spend the bead's respawn budget on the queue in front
+// of it (gt-8d38p, gt-wsf3ht). Any other failure keeps its count. The engine
+// returns the spawn beside the error, unless the spawn itself failed: then
+// there is no count to give back.
 //
 // The engine cannot classify the error itself — internal/sling does not import
 // cmd — which is why this lives here rather than on the engine's Deps.
-func giveBackBondLockRespawn(result *SlingResult, err error) {
+func giveBackSlingRespawn(result *SlingResult, err error) {
 	if result == nil || result.SpawnInfo == nil {
 		return
 	}
-	cmdSpawn(result.SpawnInfo).giveBackBondLockRespawn(err)
+	cmdSpawn(result.SpawnInfo).giveBackClassifiedRespawn(err)
 }

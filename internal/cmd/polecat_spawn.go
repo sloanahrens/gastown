@@ -85,8 +85,9 @@ type SpawnedPolecatInfo struct {
 	seatClaim *poolSeatClaimStore
 
 	// respawnMark is the increment this spawn recorded for HookBead, zero when it
-	// recorded none. A session start refused for image drift hands it back:
-	// that refusal is the seat's, not a death of the bead (gt-cjmt5).
+	// recorded none. A failure the classifier names — an image-drift refusal, a
+	// lock that did not free — hands it back: that failure is the seat's, not a
+	// death of the bead (gt-cjmt5, gt-wsf3ht).
 	respawnMark polecat.RespawnMark
 
 	// trace times the sandbox phases of this spawn's session start, for the
@@ -1144,7 +1145,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions, store
 
 // freshSpawnInfo is the info a fresh allocation hands back: the polecat it
 // created, and the respawn increment recordRespawn recorded for the sling's bead.
-// A start refused for image drift hands that count back (giveBackDriftRespawn),
+// A start refused for image drift hands that count back (giveBackClassifiedRespawn),
 // so a spawn that stopped recording it would leave the deferral spending the
 // bead's budget (gt-cjmt5). Kept out of prepareSlingPolecat so the recording
 // is reachable from a test without a rig and a tmux.
@@ -1182,56 +1183,38 @@ func (s *SpawnedPolecatInfo) StartSession() (string, error) {
 }
 
 // finishStart is what the start outcome does to the bead: the failure record a
-// later sling reads, and the count an image-drift refusal did not spend.
+// later sling reads, and the count a classified refusal did not spend.
 func (s *SpawnedPolecatInfo) finishStart(pane string, startErr error) (string, error) {
 	s.noteStartOutcome(startErr)
-	s.giveBackDriftRespawn(startErr)
+	s.giveBackClassifiedRespawn(startErr)
 	return pane, startErr
 }
 
-// giveBackDriftRespawn hands back the count this spawn recorded when its
-// session start was refused because the sandbox image lags the installed gt.
-// That refusal is the seat's precondition, and the dispatcher defers the bead
-// and slings it again next tick: a count per tick reaches the respawn limit
-// during one image rebuild, and the sling after it is refused with the failure
-// label the deferral exists to avoid (gt-2qdzf, gt-cjmt5). Every other start
+// giveBackClassifiedRespawn hands back the count this spawn recorded when the
+// classifier names its failure as the seat's precondition rather than a death
+// of the bead (slingGiveBackReason). The dispatcher defers such a bead and
+// slings it again, so a count per attempt spends the bead's respawn budget on
+// the town's own load: an image rebuild, a busy bond lock, a hook lock, a
+// contended Dolt store (gt-2qdzf, gt-cjmt5, gt-8d38p, gt-wsf3ht). Any other
 // failure keeps its count.
-func (s *SpawnedPolecatInfo) giveBackDriftRespawn(startErr error) {
-	s.giveBackDriftRespawnWith(workspace.FindFromCwdOrError, os.Stderr, startErr)
+func (s *SpawnedPolecatInfo) giveBackClassifiedRespawn(slingErr error) {
+	s.giveBackClassifiedRespawnWith(workspace.FindFromCwdOrError, os.Stderr, slingErr)
 }
 
-// giveBackDriftRespawnWith is giveBackDriftRespawn with the town lookup and
-// the warning's writer given: workspace.FindFromCwdOrError and os.Stderr in
-// production, so the refusal an unrecorded town reaches is driven in a test
-// without a town on disk.
-func (s *SpawnedPolecatInfo) giveBackDriftRespawnWith(findTown func() (string, error), warn io.Writer, startErr error) {
-	if s == nil || s.HookBead == "" || !errors.Is(startErr, session.ErrImageDrift) {
+// giveBackClassifiedRespawnWith is giveBackClassifiedRespawn with the town
+// lookup and the warning's writer given: workspace.FindFromCwdOrError and
+// os.Stderr in production, so the refusal an unrecorded town reaches is driven
+// in a test without a town on disk.
+func (s *SpawnedPolecatInfo) giveBackClassifiedRespawnWith(findTown func() (string, error), warn io.Writer, slingErr error) {
+	if s == nil || s.HookBead == "" {
 		return
 	}
-	if townRoot, ok := s.townForGiveBack(findTown, warn, "an image-drift deferral"); ok {
-		s.giveBackRespawn(townRoot, "an image-drift deferral")
-	}
-}
-
-// giveBackBondLockRespawn hands back the count this spawn recorded when the
-// sling could not bond its molecule because the town bond lock did not free
-// (ErrBondLockTimeout). The lock never reached bd, so that failure is the
-// town's load rather than a death of the bead: the dispatcher defers the bead
-// and slings it again next tick, and a count per tick spends the bead's
-// respawn budget on the queue in front of it (gt-8d38p). Every other sling
-// failure keeps its count.
-func (s *SpawnedPolecatInfo) giveBackBondLockRespawn(slingErr error) {
-	s.giveBackBondLockRespawnWith(workspace.FindFromCwdOrError, os.Stderr, slingErr)
-}
-
-// giveBackBondLockRespawnWith is giveBackBondLockRespawn with the town lookup
-// and the warning's writer given, as giveBackDriftRespawnWith is.
-func (s *SpawnedPolecatInfo) giveBackBondLockRespawnWith(findTown func() (string, error), warn io.Writer, slingErr error) {
-	if s == nil || s.HookBead == "" || !errors.Is(slingErr, ErrBondLockTimeout) {
+	why, giveBack := slingGiveBackReason(slingErr)
+	if !giveBack {
 		return
 	}
-	if townRoot, ok := s.townForGiveBack(findTown, warn, "a bond-lock deferral"); ok {
-		s.giveBackRespawn(townRoot, "a bond-lock deferral")
+	if townRoot, ok := s.townForGiveBack(findTown, warn, why); ok {
+		s.giveBackRespawn(townRoot, why)
 	}
 }
 
