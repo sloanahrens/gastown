@@ -19,6 +19,8 @@ var (
 	doctorLiveFire bool
 	doctorCheck    []string
 	doctorPodTown  string
+	// doctorKubeconfig is the host kubeconfig --check admin-kubeconfig reads.
+	doctorKubeconfig string
 )
 
 var doctorCmd = &cobra.Command{
@@ -145,6 +147,12 @@ clone's .git/config without running git, needs no --pod-town, and never
 repairs. Run it on a native gt on the Mac: a pod town has no crew clones, so
 it warns there instead of passing.
 
+Use --check admin-kubeconfig to find a kubeconfig context that reaches the
+control cluster with an embedded credential. It reads the kubeconfig named by
+--kubeconfig, else $KUBECONFIG, else $HOME/.kube/config, and never writes it.
+Run it on a native gt on the Mac: a pod refuses, because the kubeconfig it
+checks is the host's. A kubeconfig it cannot read fails the run.
+
 Use --check data-unit to check the data compose unit (gt-data): the Dolt and bd
 services healthy in docker compose ps, the gateway's /readyz with the daemon
 token, and every token file in the town's gateway token directory
@@ -169,6 +177,7 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorLiveFire, "live-fire", false, "Include hooks-live-fire (spawns a real claude -p session; slow, token-cost-bearing)")
 	doctorCmd.Flags().StringArrayVar(&doctorCheck, "check", nil, "Run only the named check (repeatable)")
 	doctorCmd.Flags().StringVar(&doctorPodTown, "pod-town", "", "Pod claim listing that mac-town-state compares the Mac town with")
+	doctorCmd.Flags().StringVar(&doctorKubeconfig, "kubeconfig", "", "Host kubeconfig that --check admin-kubeconfig reads (default $KUBECONFIG else $HOME/.kube/config)")
 	doctorCmd.AddCommand(doctorFixCmd)
 	rootCmd.AddCommand(doctorCmd)
 }
@@ -208,6 +217,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// Opt-in by name: on a pod town it finds no crew clones and warns, so a
 		// default run never registers it.
 		d.Register(doctor.NewMacCrewHooksCheck())
+	}
+	if slices.Contains(names, doctor.AdminKubeconfigCheckName) {
+		// Opt-in by name: the kubeconfig it reads is the Mac's, not the pod's,
+		// so a default run never registers it.
+		if err := registerAdminKubeconfigCheck(d, doctorKubeconfig, os.Getenv); err != nil {
+			return err
+		}
 	}
 	registerDataUnitCheck(d, names, doltComposeRealDeps(), realBdGatewayClusterDeps(bdGatewayPusherFromEnv(os.Getenv)))
 	if err := selectDoctorChecks(d, names); err != nil {
@@ -256,6 +272,38 @@ func podTownRefusal(names []string, podTown string) error {
 		return fmt.Errorf("%s needs --pod-town <listing> naming the pod claim's listing file", doctor.MacTownStateCheckName)
 	}
 	return nil
+}
+
+// registerAdminKubeconfigCheck registers the admin-kubeconfig check over the
+// host kubeconfig, for a run that names the check. The kubeconfig is the
+// Mac's, so a pod refuses: inside one the check would read a path that is not
+// the operator's file.
+func registerAdminKubeconfigCheck(d *doctor.Doctor, kubeconfigFlag string, getenv func(string) string) error {
+	if getenv(podEnv) != "" {
+		return fmt.Errorf("%s runs on the Mac, where the kubeconfig is, so it refuses inside a pod, where %s is set", doctor.AdminKubeconfigCheckName, podEnv)
+	}
+	path, err := resolveAdminKubeconfigPath(kubeconfigFlag, getenv)
+	if err != nil {
+		return err
+	}
+	d.Register(adminKubeconfigRequiredCheck{doctor.NewAdminKubeconfigCheck(path)})
+	return nil
+}
+
+// adminKubeconfigRequiredCheck is doctor.AdminKubeconfigCheck with a kubeconfig
+// it could not read reported as an error. The check itself reads a missing file
+// as skipped, and a skipped check does not fail a doctor run, so without this
+// a missing kubeconfig would pass the run the check was named for.
+type adminKubeconfigRequiredCheck struct {
+	*doctor.AdminKubeconfigCheck
+}
+
+func (c adminKubeconfigRequiredCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	result := c.AdminKubeconfigCheck.Run(ctx)
+	if result.Status == doctor.StatusSkipped {
+		result.Status = doctor.StatusError
+	}
+	return result
 }
 
 // selectDoctorChecks narrows d to the named checks, from --check or from
