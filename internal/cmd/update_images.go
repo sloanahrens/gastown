@@ -369,7 +369,7 @@ func validateUpdateImagesPruneSeams(s updateImagesSeams) error {
 // writeUpdateImagesPrunePlan prints the plan image by image, in the order the
 // gastown images are named: the keep lines, the delete lines with their reasons,
 // then the image's counts. The total follows the last image.
-func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan, figures map[string]update.PruneFigure) {
+func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan, figures update.PruneFigures) {
 	var keep, del int
 	for _, image := range []string{imagevalues.DaemonImage, imagevalues.PolecatImage, imagevalues.BdImage} {
 		var k, d int
@@ -386,21 +386,28 @@ func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan, figures map[
 			}
 		}
 		fmt.Fprintf(w, "%s: keep %d, delete %d\n", image, k, d)
-		writeUpdateImagesPruneFigure(w, image, figures[image])
+		writeUpdateImagesPruneFigure(w, image, figures.Images[image])
 		keep += k
 		del += d
+	}
+	// A kept tag that cannot be read is named once, after the last image's
+	// counts, since it leaves every image's figure out.
+	for _, ref := range figures.KeptUnknown {
+		fmt.Fprintf(w, "bytes unknown: %s\n", ref)
 	}
 	fmt.Fprintf(w, "total: keep %d, delete %d; nothing is deleted by this command\n", keep, del)
 }
 
 // writeUpdateImagesPruneFigure prints the bytes line of one image's delete: the
-// figure when every manifest it sums was read, else one bytes unknown line per
-// tag whose manifest could not be read, with the figure left out.
+// figure when every manifest it sums was read; a figure that cannot be summed
+// prints its reason in place of the figure; otherwise the figure is left out,
+// with one bytes unknown line per deleted tag whose manifest could not be read.
 func writeUpdateImagesPruneFigure(w io.Writer, image string, f update.PruneFigure) {
 	switch {
 	case f.Err != nil:
 		fmt.Fprintf(w, "%s: bytes unknown: %v\n", image, f.Err)
 	case !f.Known:
+		fmt.Fprintf(w, "%s: figure left out\n", image)
 		for _, ref := range f.Unknown {
 			fmt.Fprintf(w, "bytes unknown: %s\n", ref)
 		}

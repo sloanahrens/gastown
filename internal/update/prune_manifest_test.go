@@ -158,7 +158,7 @@ func TestPruneReadBytesRefusesAnUnusableBaseOrTransport(t *testing.T) {
 			if err != nil {
 				t.Fatalf("PruneBytes() error = %v, want the tag named as unknown", err)
 			}
-			assertPruneUnknown(t, got["gastown-daemon"], "gastown-daemon:d-old")
+			assertPruneUnknown(t, got.Images["gastown-daemon"], "gastown-daemon:d-old")
 			if len(fake.methods) != 0 {
 				t.Errorf("requests = %v, want none for an unusable base or transport", fake.methods)
 			}
@@ -189,8 +189,8 @@ func TestPruneReadBytesRefusesAnUnwiredReader(t *testing.T) {
 			if err == nil {
 				t.Fatalf("PruneBytes() = %v, nil error; want a refusal", got)
 			}
-			if got != nil {
-				t.Errorf("PruneBytes() returned figures %v with its error", got)
+			if len(got.Images) != 0 || got.KeptUnknown != nil {
+				t.Errorf("PruneBytes() returned figures %+v with its error", got)
 			}
 		})
 	}
@@ -214,7 +214,7 @@ func pruneBytesFor(t *testing.T, fake PruneDoer, plan PrunePlan) map[string]Prun
 	if err != nil {
 		t.Fatalf("PruneBytes() error = %v", err)
 	}
-	return got
+	return got.Images
 }
 
 // TestPruneReadBytesCountsLayersHeldOnlyByTheDeletedTags: a layer a deleted tag
@@ -307,8 +307,17 @@ func TestPruneReadBytesLeavesFigureOutForAnUnreadableManifest(t *testing.T) {
 		{"body does not parse", func(f *pruneManifestFake) PruneEntry {
 			return pruneServe(f, "gastown-daemon", "d-old", []byte("not a manifest"))
 		}},
-		{"layer with no size", func(f *pruneManifestFake) PruneEntry {
-			return pruneServe(f, "gastown-daemon", "d-old", []byte(`{"layers":[{"digest":"`+pruneDigest("2")+`"}]}`))
+		{"manifest with no layers key", func(f *pruneManifestFake) PruneEntry {
+			return pruneServe(f, "gastown-daemon", "d-old", []byte(`{"schemaVersion":2}`))
+		}},
+		{"manifest with null layers", func(f *pruneManifestFake) PruneEntry {
+			return pruneServe(f, "gastown-daemon", "d-old", []byte(`{"schemaVersion":2,"layers":null}`))
+		}},
+		{"manifest with empty layers", func(f *pruneManifestFake) PruneEntry {
+			return pruneServe(f, "gastown-daemon", "d-old", []byte(`{"schemaVersion":2,"layers":[]}`))
+		}},
+		{"index with no platform manifests", func(f *pruneManifestFake) PruneEntry {
+			return pruneServe(f, "gastown-daemon", "d-old", pruneIndexBody())
 		}},
 		{"layer with a negative size", func(f *pruneManifestFake) PruneEntry {
 			return pruneServe(f, "gastown-daemon", "d-old", []byte(`{"layers":[{"digest":"`+pruneDigest("2")+`","size":-1}]}`))
@@ -336,8 +345,8 @@ func TestPruneReadBytesLeavesFigureOutForAnUnreadableManifest(t *testing.T) {
 		{"index whose platform does not parse", func(f *pruneManifestFake) PruneEntry {
 			return pruneIndexOf(f, []byte("not a manifest"))
 		}},
-		{"index whose platform has a layer with no size", func(f *pruneManifestFake) PruneEntry {
-			return pruneIndexOf(f, []byte(`{"layers":[{"digest":"`+pruneDigest("2")+`"}]}`))
+		{"index whose platform has no layers", func(f *pruneManifestFake) PruneEntry {
+			return pruneIndexOf(f, []byte(`{"schemaVersion":2,"layers":[]}`))
 		}},
 		{"index whose platform answers another digest", func(f *pruneManifestFake) PruneEntry {
 			// The platform is served at a digest its own bytes do not hash to: its
@@ -402,10 +411,10 @@ func TestPruneReadBytesRefusesAnIndexBeforeFetchingItsPlatforms(t *testing.T) {
 	}
 }
 
-// TestPruneReadBytesNamesAKeptTagInEveryFigure: a kept tag whose manifest cannot
-// be read could hold any layer of a delete, so it leaves every image's figure
-// out, and each image names it.
-func TestPruneReadBytesNamesAKeptTagInEveryFigure(t *testing.T) {
+// TestPruneReadBytesNamesAKeptTagOnce: a kept tag whose manifest cannot be read
+// could hold any layer of a delete, so it leaves every image's figure out. It is
+// named once in KeptUnknown, and no image's own Unknown repeats it.
+func TestPruneReadBytesNamesAKeptTagOnce(t *testing.T) {
 	t.Parallel()
 	fake := &pruneManifestFake{manifests: map[string][]byte{}}
 	plan := PrunePlan{
@@ -414,12 +423,18 @@ func TestPruneReadBytesNamesAKeptTagInEveryFigure(t *testing.T) {
 			pruneServe(fake, "gastown-daemon", "d-old", pruneImageBody(pruneSizedLayer{pruneDigest("2"), 1e9})),
 		},
 	}
-	got := pruneBytesFor(t, fake, plan)
-	for _, image := range pruneImages {
-		assertPruneUnknown(t, got[image], "gastown-polecat:p-new")
+	got, err := pruneBytesReader(fake).PruneBytes(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("PruneBytes() error = %v", err)
 	}
-	if u := got["gastown-daemon"].Unknown; len(u) != 1 || u[0] != "gastown-polecat:p-new" {
-		t.Errorf("daemon unknown = %v, want only the kept tag, since the deleted tag reads", u)
+	if len(got.KeptUnknown) != 1 || got.KeptUnknown[0] != "gastown-polecat:p-new" {
+		t.Fatalf("kept unknown = %v, want the kept tag named once", got.KeptUnknown)
+	}
+	for _, image := range pruneImages {
+		f := got.Images[image]
+		if f.Known || len(f.Unknown) != 0 || f.Err != nil {
+			t.Errorf("%s figure = %+v, want it left out with no unknown tag of its own", image, f)
+		}
 	}
 }
 
@@ -445,6 +460,39 @@ func TestPruneReadBytesRefusesALayerOfTwoSizes(t *testing.T) {
 	}
 }
 
+// TestPruneReadBytesRefusesALayerWithNoSize: a layer whose manifest names no size
+// is read, since its digest is known, but its sum cannot be made. The image's
+// figure carries the refusal and its reason, and no bytes or unknown tag.
+func TestPruneReadBytesRefusesALayerWithNoSize(t *testing.T) {
+	t.Parallel()
+	noSize := `{"layers":[{"digest":"` + pruneDigest("2") + `"}]}`
+	cases := []struct {
+		name  string
+		setup func(f *pruneManifestFake) PruneEntry
+	}{
+		{"layer with no size", func(f *pruneManifestFake) PruneEntry {
+			return pruneServe(f, "gastown-daemon", "d-old", []byte(noSize))
+		}},
+		{"index whose platform has a layer with no size", func(f *pruneManifestFake) PruneEntry {
+			return pruneIndexOf(f, []byte(noSize))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &pruneManifestFake{manifests: map[string][]byte{}}
+			entry := tc.setup(fake)
+			f := pruneBytesFor(t, fake, PrunePlan{Delete: []PruneEntry{entry}})["gastown-daemon"]
+			if !errors.Is(f.Err, ErrPruneRefused) || !strings.Contains(f.Err.Error(), "no known size") {
+				t.Fatalf("daemon figure error = %v, want ErrPruneRefused naming the layer with no known size", f.Err)
+			}
+			if f.Known || f.Bytes != 0 || len(f.Unknown) != 0 {
+				t.Errorf("daemon figure = %+v, want no figure and no unknown tag with the refusal", f)
+			}
+		})
+	}
+}
+
 // TestPruneReadBytesCredentialErrorIsAnError: a viewer credential that cannot be
 // read stops the bytes step with an error and no figures.
 func TestPruneReadBytesCredentialErrorIsAnError(t *testing.T) {
@@ -455,8 +503,8 @@ func TestPruneReadBytesCredentialErrorIsAnError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("PruneBytes() = %v, nil error; want the credential error", got)
 	}
-	if got != nil {
-		t.Errorf("PruneBytes() returned figures %v with its error", got)
+	if len(got.Images) != 0 || got.KeptUnknown != nil {
+		t.Errorf("PruneBytes() returned figures %+v with its error", got)
 	}
 }
 

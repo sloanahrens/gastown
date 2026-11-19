@@ -38,15 +38,24 @@ var pruneRefPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 
 // PruneFigure is the bytes one image's delete would free. Known is set when
 // every manifest the figure sums was read and summed; Bytes is then the figure.
-// Otherwise Unknown names, as image:tag, the tags whose manifests could not be
-// read, and the figure is left out. Err is set when the layers read cannot be
-// summed.
+// Otherwise the figure is left out: Unknown names, as image:tag, the image's
+// deleted tags whose manifests could not be read, and Err is set when the
+// layers read cannot be summed.
 type PruneFigure struct {
 	Image   string
 	Bytes   int64
 	Known   bool
 	Unknown []string
 	Err     error
+}
+
+// PruneFigures is the bytes step's answer for one plan: each image's figure, and
+// the kept tags whose manifests could not be read. A kept tag's layers could be
+// shared with any delete, so it leaves every image's figure out; it is named
+// once here rather than under each image.
+type PruneFigures struct {
+	Images      map[string]PruneFigure
+	KeptUnknown []string
 }
 
 // pruneManifestBody is the part of a manifest or index the bytes step reads:
@@ -75,21 +84,21 @@ func (m pruneManifestBody) isIndex() bool {
 // returns each image's figure for its delete. The registry's blobs may be shared
 // across images, so the layers of every kept tag, in any image, are never
 // counted as freed. A manifest that cannot be read leaves the figure of every
-// image it bears on out and names the tag in Unknown; it never changes the plan.
-// It returns an error only when the viewer credential cannot be read or the
-// reader is not wired.
-func (r PruneRegistryReader) PruneBytes(ctx context.Context, plan PrunePlan) (map[string]PruneFigure, error) {
+// image it bears on out and names the tag; it never changes the plan. It
+// returns an error only when the viewer credential cannot be read or the reader
+// is not wired.
+func (r PruneRegistryReader) PruneBytes(ctx context.Context, plan PrunePlan) (PruneFigures, error) {
 	switch {
 	case r.Doer == nil:
-		return nil, errors.New("no HTTP client is wired for the prune bytes")
+		return PruneFigures{}, errors.New("no HTTP client is wired for the prune bytes")
 	case r.Credentials == nil:
-		return nil, errors.New("no credential reader is wired for the prune bytes")
+		return PruneFigures{}, errors.New("no credential reader is wired for the prune bytes")
 	case !pruneOwnerPattern.MatchString(r.Owner):
-		return nil, errors.New("the prune bytes' owner is not one lowercase account name")
+		return PruneFigures{}, errors.New("the prune bytes' owner is not one lowercase account name")
 	}
 	user, token, err := r.Credentials()
 	if err != nil {
-		return nil, fmt.Errorf("reading the viewer credential for the prune bytes: %w", err)
+		return PruneFigures{}, fmt.Errorf("reading the viewer credential for the prune bytes: %w", err)
 	}
 	type read struct {
 		layers []prunedLayer
@@ -122,10 +131,11 @@ func (r PruneRegistryReader) PruneBytes(ctx context.Context, plan PrunePlan) (ma
 		}
 	}
 
-	out := make(map[string]PruneFigure, len(pruneImages))
+	sort.Strings(keptUnknown)
+	out := PruneFigures{Images: make(map[string]PruneFigure, len(pruneImages)), KeptUnknown: keptUnknown}
 	for _, image := range pruneImages {
 		f := PruneFigure{Image: image}
-		unknown := append([]string(nil), keptUnknown...)
+		var unknown []string
 		var deleted []prunedManifest
 		for _, e := range plan.Delete {
 			if e.Image != image {
@@ -138,20 +148,20 @@ func (r PruneRegistryReader) PruneBytes(ctx context.Context, plan PrunePlan) (ma
 				deleted = append(deleted, prunedManifest{Tag: ref, Layers: rd.layers})
 			}
 		}
-		if len(unknown) > 0 {
+		if len(unknown) > 0 || len(keptUnknown) > 0 {
 			sort.Strings(unknown)
 			f.Unknown = unknown
-			out[image] = f
+			out.Images[image] = f
 			continue
 		}
 		total, err := uniqueBytes(deleted, kept)
 		if err != nil {
 			f.Err = err
-			out[image] = f
+			out.Images[image] = f
 			continue
 		}
 		f.Bytes, f.Known = total, true
-		out[image] = f
+		out.Images[image] = f
 	}
 	return out, nil
 }
@@ -174,6 +184,9 @@ func (r PruneRegistryReader) tagLayers(ctx context.Context, user, token, image, 
 	}
 	if !m.isIndex() {
 		return manifestLayers(image, tag, m)
+	}
+	if len(m.Manifests) == 0 {
+		return nil, fmt.Errorf("the index of %s:%s names no platform manifests", image, tag)
 	}
 	if len(m.Manifests) > pruneManifestMaxChildren {
 		return nil, fmt.Errorf("the index of %s:%s names %d platform manifests, more than %d", image, tag, len(m.Manifests), pruneManifestMaxChildren)
@@ -206,20 +219,28 @@ func (r PruneRegistryReader) tagLayers(ctx context.Context, user, token, image, 
 	return layers, nil
 }
 
-// manifestLayers returns the layers an image manifest names. Each layer must
-// name a digest and a size no negative, since the figure sums sizes.
+// manifestLayers returns the layers an image manifest names. A manifest that
+// names no layers is unreadable, not a zero-byte figure: its layers cannot be
+// checked against the delete. Each layer must name a digest and a size no
+// negative. A layer with no size is carried with its size unknown, so the sum
+// refuses it with its reason.
 func manifestLayers(image, tag string, m pruneManifestBody) ([]prunedLayer, error) {
+	if len(m.Layers) == 0 {
+		return nil, fmt.Errorf("the manifest of %s:%s names no layers", image, tag)
+	}
 	layers := make([]prunedLayer, 0, len(m.Layers))
 	for _, l := range m.Layers {
-		switch {
-		case !imagevalues.ValidDigest(l.Digest):
+		if !imagevalues.ValidDigest(l.Digest) {
 			return nil, fmt.Errorf("the manifest of %s:%s names layer digest %q, not sha256:<64 lowercase hex>", image, tag, l.Digest)
-		case l.Size == nil:
-			return nil, fmt.Errorf("the manifest of %s:%s names layer %s with no size", image, tag, l.Digest)
-		case *l.Size < 0:
+		}
+		if l.Size != nil && *l.Size < 0 {
 			return nil, fmt.Errorf("the manifest of %s:%s names layer %s with a negative size", image, tag, l.Digest)
 		}
-		layers = append(layers, prunedLayer{Digest: l.Digest, Size: *l.Size, SizeKnown: true})
+		layer := prunedLayer{Digest: l.Digest}
+		if l.Size != nil {
+			layer.Size, layer.SizeKnown = *l.Size, true
+		}
+		layers = append(layers, layer)
 	}
 	return layers, nil
 }

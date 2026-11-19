@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -46,6 +47,8 @@ type pruneTestRegistry struct {
 	// digest read answers, and every later manifest read of the tag is a 500.
 	bytesRefused  map[string]bool
 	manifestsSeen map[string]int
+	// bodies overrides the manifest bytes a tag answers with, keyed by image:tag.
+	bodies map[string][]byte
 }
 
 // RoundTrip answers a packages listing request for the image its q names, and a
@@ -87,6 +90,9 @@ func (f *pruneTestRegistry) manifest(req *http.Request, image, tag string) *http
 				return pruneTestResponse(req, http.StatusInternalServerError, nil, 0)
 			}
 			body := pruneTestManifest(tag)
+			if b, ok := f.bodies[key]; ok {
+				body = b
+			}
 			resp := pruneTestResponse(req, http.StatusOK, body, 0)
 			resp.Header.Set("Docker-Content-Digest", pruneTestDigestOf(body))
 			return resp
@@ -330,6 +336,75 @@ func TestUpdateImagesPruneUnreadableManifestLeavesFigureOut(t *testing.T) {
 	}
 }
 
+// TestUpdateImagesPruneKeptUnreadableNamedOnce: an unreadable kept tag leaves
+// every image's figure out, and its bytes unknown line is printed once, after
+// the last image's counts, however many images the output names.
+func TestUpdateImagesPruneKeptUnreadableNamedOnce(t *testing.T) {
+	t.Parallel()
+	kept := imagevalues.DaemonImage + ":" + pruneTestName(22)
+	reg := pruneTestPopulated()
+	reg.bytesRefused = map[string]bool{kept: true}
+	out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg))
+	if err != nil {
+		t.Fatalf("prune with an unreadable kept tag exited non-zero: %v", err)
+	}
+	line := "bytes unknown: " + kept + "\n"
+	if n := strings.Count(out, line); n != 1 {
+		t.Fatalf("%q appears %d times, want once:\n%s", line, n, out)
+	}
+	for _, image := range []string{imagevalues.DaemonImage, imagevalues.PolecatImage, imagevalues.BdImage} {
+		if !strings.Contains(out, image+": figure left out\n") {
+			t.Fatalf("prune output has no figure-left-out line for %s:\n%s", image, out)
+		}
+	}
+	if strings.Contains(out, ": would free") {
+		t.Fatalf("a figure printed over an unreadable kept tag:\n%s", out)
+	}
+	if strings.Index(out, line) < strings.Index(out, imagevalues.BdImage+": keep ") {
+		t.Fatalf("kept unknown line printed before the last image's counts:\n%s", out)
+	}
+}
+
+// TestUpdateImagesPruneRefusedSumPrintsItsReason: a layer with no size cannot be
+// summed, so its image's figure prints the refusal's reason in place of the
+// figure. The command still exits zero and its tag lists are those of a clean run.
+func TestUpdateImagesPruneRefusedSumPrintsItsReason(t *testing.T) {
+	t.Parallel()
+	clean, err := runUpdateImagesPruneCmd(t, pruneTestSeams(pruneTestPopulated()))
+	if err != nil {
+		t.Fatalf("prune over readable inputs: %v", err)
+	}
+	cases := []struct {
+		name string
+		tag  string
+		body []byte
+	}{
+		{"layer with no size", pruneTestName(2), []byte(`{"layers":[{"digest":"` + pruneTestDigestOf([]byte("unsized")) + `"}]}`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := pruneTestPopulated()
+			reg.bodies = map[string][]byte{imagevalues.DaemonImage + ":" + tc.tag: tc.body}
+			out, err := runUpdateImagesPruneCmd(t, pruneTestSeams(reg))
+			if err != nil {
+				t.Fatalf("prune exited non-zero: %v", err)
+			}
+			if !strings.Contains(out, imagevalues.DaemonImage+": bytes unknown: ") || !strings.Contains(out, "no known size") {
+				t.Fatalf("prune output has no bytes unknown line with the reason:\n%s", out)
+			}
+			if strings.Contains(out, imagevalues.DaemonImage+": would free") {
+				t.Fatalf("daemon's figure printed over a refused sum:\n%s", out)
+			}
+			// The overridden tag serves another manifest, so its digest differs; the
+			// lists must still name the same tags for the same reasons.
+			if got, want := pruneDigestRe.ReplaceAllString(pruneListLines(out), ""), pruneDigestRe.ReplaceAllString(pruneListLines(clean), ""); got != want {
+				t.Fatalf("tag lists changed by a refused sum:\n%s\nwant:\n%s", got, want)
+			}
+		})
+	}
+}
+
 // TestUpdateImagesPruneBytesCredentialFailurePrintsNothing: a viewer credential
 // that reads for the listing but not for the bytes step stops the command with
 // an error and prints no line.
@@ -352,6 +427,9 @@ func TestUpdateImagesPruneBytesCredentialFailurePrintsNothing(t *testing.T) {
 		t.Fatalf("prune printed a plan after the bytes step failed:\n%s", out)
 	}
 }
+
+// pruneDigestRe matches one sha256 digest in a plan line.
+var pruneDigestRe = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
 
 // pruneListLines is the keep and delete lines of out, one per tag, in order.
 func pruneListLines(out string) string {
