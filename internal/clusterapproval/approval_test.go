@@ -50,6 +50,17 @@ func recordText(fields map[string]any) string {
 	return body.String()
 }
 
+// duplicatedKey is the good record with key written twice, which a Go map
+// cannot express.
+func duplicatedKey(key string) string {
+	fields := goodRecord()
+	value, err := json.Marshal(fields[key])
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("{%q:%s,%s", key, value, recordText(fields)[1:])
+}
+
 // goodRecord is the fields of a record ParseRecord accepts; each refusal row
 // changes or drops one.
 func goodRecord() map[string]any {
@@ -101,19 +112,32 @@ func TestClusterApprovalParse(t *testing.T) {
 	}{
 		{"good", recordText(goodRecord()), &accepted, ""},
 		{"good at the longest window", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-19T12:00:00Z"})), &longest, ""},
-		{"unknown key", recordText(with(goodRecord(), map[string]any{"extra": "1"})), nil, "unknown field"},
+		{"unknown key", recordText(with(goodRecord(), map[string]any{"extra": "1"})), nil, "unknown key"},
+		{"act key in the wrong case", recordText(with(goodRecord(), map[string]any{"Act": ActApplyPlan})), nil, "unknown key"},
+		{"sha key in the wrong case", recordText(with(goodRecord(), map[string]any{"PLAN_SHA256": goodSHA})), nil, "unknown key"},
+		{"duplicate act key", duplicatedKey("act"), nil, "twice"},
+		{"missing act", recordText(without(goodRecord(), "act")), nil, "has no act"},
+		{"empty act", recordText(with(goodRecord(), map[string]any{"act": ""})), nil, "has no act"},
+		{"null act", recordText(with(goodRecord(), map[string]any{"act": nil})), nil, "has no act"},
+		{"act is not a string", recordText(with(goodRecord(), map[string]any{"act": 5})), nil, "not a JSON string"},
+		{"empty sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": ""})), nil, "plan_sha256"},
 		{"short sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": goodSHA[:63]})), nil, "plan_sha256"},
 		{"upper-case sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": strings.ToUpper(goodSHA)})), nil, "plan_sha256"},
-		{"empty sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": ""})), nil, "plan_sha256"},
 		{"missing cluster", recordText(without(goodRecord(), "cluster")), nil, "cluster"},
+		{"null cluster", recordText(with(goodRecord(), map[string]any{"cluster": nil})), nil, "cluster"},
 		{"unknown cluster", recordText(with(goodRecord(), map[string]any{"cluster": "production"})), nil, "cluster"},
+		{"missing proposal_id", recordText(without(goodRecord(), "proposal_id")), nil, "has no proposal_id"},
+		{"empty proposal_id", recordText(with(goodRecord(), map[string]any{"proposal_id": ""})), nil, "has no proposal_id"},
+		{"null proposal_id", recordText(with(goodRecord(), map[string]any{"proposal_id": nil})), nil, "has no proposal_id"},
 		{"missing approved_at", recordText(without(goodRecord(), "approved_at")), nil, "no approved_at"},
 		{"null approved_at", recordText(with(goodRecord(), map[string]any{"approved_at": nil})), nil, "no approved_at"},
 		{"missing expires_at", recordText(without(goodRecord(), "expires_at")), nil, "no expires_at"},
 		{"non-UTC approved_at", recordText(with(goodRecord(), map[string]any{"approved_at": "2026-11-18T13:00:00+01:00"})), nil, "approved_at is not in UTC"},
 		{"non-UTC expires_at", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T11:00:00-07:00"})), nil, "expires_at is not in UTC"},
+		{"zero window", recordText(with(goodRecord(), map[string]any{"expires_at": approvedText})), nil, "not after approved_at"},
+		{"negative window", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T11:00:00Z"})), nil, "not after approved_at"},
 		{"window over the longest", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-19T12:00:01Z"})), nil, "more than"},
-		{"not an object", "[]", nil, "decode"},
+		{"not an object", "[]", nil, "not one JSON object"},
 		{"trailing data", recordText(goodRecord()) + "{}", nil, "trailing data"},
 	}
 	for _, tt := range tests {
@@ -157,10 +181,13 @@ func TestClusterApprovalProposal(t *testing.T) {
 			Versions: versions,
 		}
 	}
-	body, id := NewProposal(plan(map[string]string{
+	body, id, err := NewProposal(plan(map[string]string{
 		"apps/gt/deployer": "100",
 		"batch/gt/nightly": "200",
 	}))
+	if err != nil {
+		t.Fatalf("NewProposal: %v", err)
+	}
 
 	wantBody := `{"act":"apply-plan","cluster":"control","plan_sha256":"` + goodSHA + `","phases":["policy","workloads"],"versions":{"apps/gt/deployer":"100","batch/gt/nightly":"200"}}`
 	if string(body) != wantBody {
@@ -176,25 +203,76 @@ func TestClusterApprovalProposal(t *testing.T) {
 	reversed := map[string]string{}
 	reversed["batch/gt/nightly"] = "200"
 	reversed["apps/gt/deployer"] = "100"
-	reversedBody, reversedID := NewProposal(plan(reversed))
+	reversedBody, reversedID, err := NewProposal(plan(reversed))
+	if err != nil {
+		t.Fatalf("NewProposal: %v", err)
+	}
 	if !bytes.Equal(body, reversedBody) || id != reversedID {
 		t.Errorf("the same plan in another map order gave %s id %q, want %s id %q", reversedBody, reversedID, body, id)
 	}
 
 	// Moving one live version changes both the bytes and the id.
-	movedBody, movedID := NewProposal(plan(map[string]string{
+	movedBody, movedID, err := NewProposal(plan(map[string]string{
 		"apps/gt/deployer": "101",
 		"batch/gt/nightly": "200",
 	}))
+	if err != nil {
+		t.Fatalf("NewProposal: %v", err)
+	}
 	if bytes.Equal(body, movedBody) || id == movedID {
 		t.Errorf("a moved version gave %s id %q, want bytes and id that differ from %s id %q", movedBody, movedID, body, id)
 	}
 }
 
+func TestClusterApprovalProposalRefuses(t *testing.T) {
+	t.Parallel()
+	valid := Plan{
+		Cluster: ClusterControl,
+		SHA256:  goodSHA,
+		Phases:  []string{"policy", "workloads"},
+	}
+	tests := []struct {
+		name string
+		plan Plan
+	}{
+		{"empty cluster", withPlan(valid, func(p *Plan) { p.Cluster = "" })},
+		{"unknown cluster", withPlan(valid, func(p *Plan) { p.Cluster = "production" })},
+		{"empty sha", withPlan(valid, func(p *Plan) { p.SHA256 = "" })},
+		{"short sha", withPlan(valid, func(p *Plan) { p.SHA256 = goodSHA[:63] })},
+		{"upper-case sha", withPlan(valid, func(p *Plan) { p.SHA256 = strings.ToUpper(goodSHA) })},
+		{"nil phases", withPlan(valid, func(p *Plan) { p.Phases = nil })},
+		{"empty phases", withPlan(valid, func(p *Plan) { p.Phases = []string{} })},
+		{"unknown phase", withPlan(valid, func(p *Plan) { p.Phases = []string{"secrets"} })},
+		{"phases out of order", withPlan(valid, func(p *Plan) { p.Phases = []string{"workloads", "policy"} })},
+		{"duplicate phase", withPlan(valid, func(p *Plan) { p.Phases = []string{"policy", "policy"} })},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, id, err := NewProposal(tt.plan)
+			if err == nil {
+				t.Fatalf("NewProposal accepted an invalid plan and returned %s", body)
+			}
+			if body != nil || id != "" {
+				t.Errorf("NewProposal returned bytes %s and id %q with its error, want neither", body, id)
+			}
+		})
+	}
+}
+
+// withPlan copies p and applies change to the copy, so a row cannot leak its
+// edit into another.
+func withPlan(p Plan, change func(*Plan)) Plan {
+	change(&p)
+	return p
+}
+
 func TestClusterApprovalProposalEmpty(t *testing.T) {
 	t.Parallel()
-	body, _ := NewProposal(Plan{Cluster: ClusterGTSbx, SHA256: goodSHA})
-	wantBody := `{"act":"apply-plan","cluster":"gt-sbx","plan_sha256":"` + goodSHA + `","phases":[],"versions":{}}`
+	body, _, err := NewProposal(Plan{Cluster: ClusterGTSbx, SHA256: goodSHA, Phases: []string{"workloads"}})
+	if err != nil {
+		t.Fatalf("NewProposal: %v", err)
+	}
+	wantBody := `{"act":"apply-plan","cluster":"gt-sbx","plan_sha256":"` + goodSHA + `","phases":["workloads"],"versions":{}}`
 	if string(body) != wantBody {
 		t.Errorf("proposal = %s, want %s", body, wantBody)
 	}
