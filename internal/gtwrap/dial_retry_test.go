@@ -3,6 +3,7 @@ package gtwrap
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/url"
@@ -105,4 +106,66 @@ func TestDialRetrySchedule(t *testing.T) {
 			t.Fatalf("RetrySchedule(0) = %v, want no delays", got)
 		}
 	})
+}
+
+func TestRetryableReadTable(t *testing.T) {
+	t.Parallel()
+	gatewayURL := "http://127.0.0.1:1/exec"
+	transport := []struct {
+		name string
+		err  error
+	}{
+		{"timeout", &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}},
+		{"deadline in a url.Error", &url.Error{Op: "Post", URL: gatewayURL, Err: context.DeadlineExceeded}},
+		{"connection reset", &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}},
+		{"unexpected EOF", &url.Error{Op: "Post", URL: gatewayURL, Err: io.ErrUnexpectedEOF}},
+	}
+	shapes := []struct {
+		name       string
+		argv       []string
+		sendsStdin bool
+		wroteOut   bool
+		want       bool
+	}{
+		{"read verb, nothing sent or written", []string{"list"}, false, false, true},
+		{"write verb", []string{"close", "gt-abc"}, false, false, false},
+		{"unknown verb", []string{"frobnicate"}, false, false, false},
+		{"read verb with stdin", []string{"list"}, true, false, false},
+		{"read verb after output was written", []string{"list"}, false, true, false},
+	}
+	for _, tr := range transport {
+		for _, sh := range shapes {
+			t.Run(tr.name+", "+sh.name, func(t *testing.T) {
+				t.Parallel()
+				if got := RetryableRead(tr.err, sh.argv, sh.sendsStdin, sh.wroteOut); got != sh.want {
+					t.Errorf("RetryableRead(%v, %q, stdin=%v, output=%v) = %v, want %v",
+						tr.err, sh.argv, sh.sendsStdin, sh.wroteOut, got, sh.want)
+				}
+			})
+		}
+	}
+}
+
+func TestRetryableReadOther(t *testing.T) {
+	t.Parallel()
+	gatewayURL := "http://127.0.0.1:1/exec"
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"nil", nil},
+		{"refused dial", dialFailure(syscall.ECONNREFUSED)},
+		{"refused dial in a url.Error", &url.Error{Op: "Post", URL: gatewayURL, Err: dialFailure(syscall.ECONNREFUSED)}},
+		{"TLS handshake error", &url.Error{Op: "Post", URL: "https://127.0.0.1:1/exec", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}},
+		{"plain EOF", &url.Error{Op: "Post", URL: gatewayURL, Err: io.EOF}},
+		{"non-transport error", errors.New("bdgateway: verb not allowlisted")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if RetryableRead(tc.err, []string{"list"}, false, false) {
+				t.Errorf("RetryableRead(%v, list) = true, want false", tc.err)
+			}
+		})
+	}
 }
