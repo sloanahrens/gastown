@@ -102,13 +102,7 @@ type poolSession struct {
 // router, the dispatch-check patrol and the roster alike without any caller
 // opting in.
 func poolHeldCount(sessions []poolSession) int {
-	n := 0
-	for _, s := range sessions {
-		if !s.parkedStale {
-			n++
-		}
-	}
-	return n
+	return poolOccupancy(sessions).Total
 }
 
 // poolSeatCount counts the polecat sessions holding agent's seat, released
@@ -123,13 +117,7 @@ func poolSeatCount(agent string, sessions []poolSession) int {
 	if agent == "" {
 		return 0
 	}
-	n := 0
-	for _, s := range sessions {
-		if s.agent == agent && !s.parkedStale {
-			n++
-		}
-	}
-	return n
+	return poolOccupancy(sessions).ByAgent[agent].Total
 }
 
 // poolSeatOf returns agent's entry in the seat map.

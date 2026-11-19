@@ -3743,19 +3743,28 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 	if ts != nil {
 		unrecorded = ts.PolecatPool.UnrecordedAgent()
 	}
-	for _, s := range sessions {
-		agent := s.agent
-		if agent == "" {
-			agent = unrecorded
+	seats := make([]poolSession, len(sessions))
+	for i, s := range sessions {
+		if s.agent == "" {
+			s.agent = unrecorded
 		}
-		if agent == config.UnknownSeatAgent {
+		seats[i] = s
+	}
+	occupied := poolOccupancy(seats)
+	for agent, t := range occupied.ByAgent {
+		r.Live[agent] = t.Total
+		if t.DeadHooked > 0 {
+			r.DeadHooked[agent] = t.DeadHooked
+		}
+	}
+	for _, s := range seats {
+		if s.agent == config.UnknownSeatAgent {
 			r.Unrecorded = append(r.Unrecorded, s.name)
 		}
 		if s.parkedStale {
-			r.ParkedStale[agent]++
+			r.ParkedStale[s.agent]++
 			continue
 		}
-		r.Live[agent]++
 		// The bead a seat inside Live hooks is accounted for by that seat, so
 		// a running sling for it must not add another (gt-75fma5). A released
 		// parked seat is skipped above: it counts nothing, so it hooks nothing.
@@ -3764,9 +3773,6 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 				r.HookedBeads = map[string]bool{}
 			}
 			r.HookedBeads[s.hookedBead] = true
-		}
-		if s.deadHooked {
-			r.DeadHooked[agent]++
 		}
 		if s.created.After(r.Newest) {
 			r.Newest = s.created
