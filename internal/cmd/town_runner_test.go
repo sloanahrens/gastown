@@ -126,6 +126,7 @@ func newRollFixture() *rollFixture {
 }
 
 func TestTownRunnerRollRunsStepsInOrder(t *testing.T) {
+	t.Parallel()
 	f := newRollFixture()
 
 	if err := runTownRunnerRoll(context.Background(), f.deps); err != nil {
@@ -142,6 +143,7 @@ func TestTownRunnerRollRunsStepsInOrder(t *testing.T) {
 }
 
 func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
+	t.Parallel()
 	timeoutLanding := func(context.Context) (string, int, bool, error) {
 		return "someone else", 2, true, nil
 	}
@@ -245,6 +247,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 }
 
 func TestTownRunnerRollHeldByOtherRefusesBeforeAnyWait(t *testing.T) {
+	t.Parallel()
 	f := newRollFixture()
 	const holder = "ops rebuilding the image\nowner=ops token=abc123 at=2026-11-19T10:00:00Z"
 	f.store.content, f.store.present = holder, true
@@ -266,6 +269,7 @@ func TestTownRunnerRollHeldByOtherRefusesBeforeAnyWait(t *testing.T) {
 }
 
 func TestTownRunnerRollDryRunTakesNoHoldAndPrintsSteps(t *testing.T) {
+	t.Parallel()
 	f := newRollFixture()
 	f.deps.dryRun = true
 
@@ -294,6 +298,7 @@ func TestTownRunnerRollDryRunTakesNoHoldAndPrintsSteps(t *testing.T) {
 }
 
 func TestTownRunnerRollDefaultApplierRefusesBeforeHold(t *testing.T) {
+	t.Parallel()
 	out := &bytes.Buffer{}
 	deps := runnerRollDepsFor("/town", out, 10*time.Minute, 20*time.Minute, false)
 
@@ -311,6 +316,7 @@ func TestTownRunnerRollDefaultApplierRefusesBeforeHold(t *testing.T) {
 }
 
 func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
+	t.Parallel()
 	f := newRollFixture()
 	f.deps.landingWait = 0
 
@@ -323,6 +329,7 @@ func TestTownRunnerRollRefusesNonPositiveWaitBeforeHold(t *testing.T) {
 }
 
 func TestTownRunnerRollPrintsRemovalCommandWhenReleaseFails(t *testing.T) {
+	t.Parallel()
 	f := newRollFixture()
 	f.store.removeErr = errors.New("pod unreachable")
 
