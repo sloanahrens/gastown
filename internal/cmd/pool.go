@@ -185,7 +185,9 @@ func runPoolSeatMapShow(w io.Writer, townRoot string, ts *config.TownSettings, n
 
 // renderPoolSeatMap prints one line per agent: live over cap, then open or
 // closed with the next opening, and the town's total beneath them. A map with
-// no seat says so, since the dispatcher then spawns nothing.
+// no seat says so, since the dispatcher then spawns nothing. A seat or the
+// town's total above its cap lists the seats it holds on the line under it
+// (gt-f4wwm7).
 func renderPoolSeatMap(w io.Writer, townRoot string, v poolSeatMapView, live poolShowLive) {
 	width := len("total")
 	for _, s := range v.seats {
@@ -199,16 +201,46 @@ func renderPoolSeatMap(w io.Writer, townRoot string, v poolSeatMapView, live poo
 			state += ", pinned-only"
 		}
 		fmt.Fprintf(w, "%-*s  %s  %s\n", width, s.Agent, live.seatCount(s.Agent, s.Cap), state)
+		writeHeldSeats(w, live.live[s.Agent], s.Cap, live.heldFor(s.Agent))
 	}
 	if len(v.seats) == 0 {
 		fmt.Fprintln(w, "no seats: polecat_pool.seats is empty, so the dispatcher spawns nothing; gt pool set <agent>=<cap> adds one")
 	}
 	fmt.Fprintf(w, "%-*s  %s\n", width, "total", live.totalCount(v.maxTotal))
+	if v.maxTotal != nil {
+		writeHeldSeats(w, live.total, *v.maxTotal, live.held)
+	}
 	keys := "polecat_pool.seats, max_total"
 	if v.timezone != "" {
 		keys += ", timezone " + v.timezone
 	}
 	fmt.Fprintf(w, "read: %s (%s)\n", config.SourcePathRel(townRoot, config.TownSettingsPath(townRoot)), keys)
+}
+
+// writeHeldSeats prints the seats a count holds under its line when the count
+// is above cap, through the formatter the tick line names its held seats with,
+// so a reading of 9/8 says which nine seats it is (gt-f4wwm7). At or under the
+// cap it prints nothing, so a reading inside every cap keeps the page it had.
+func writeHeldSeats(w io.Writer, n, cap int, held []specdispatch.HeldSeat) {
+	if n <= cap {
+		return
+	}
+	if list := specdispatch.HeldSeatList(held); list != "" {
+		fmt.Fprintf(w, "  held: %s\n", list)
+	}
+}
+
+// heldFor is the seats the count took on agent: the page lists a seat above its
+// cap from the entries counted on its agent, so the list sums to the count
+// printed beside it (gt-f4wwm7).
+func (l poolShowLive) heldFor(agent string) []specdispatch.HeldSeat {
+	var out []specdispatch.HeldSeat
+	for _, s := range l.held {
+		if s.Agent == agent {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // seatCount is a seat's occupancy. A picture that could not be read is no
@@ -436,6 +468,9 @@ func printPoolSeatChanges(w io.Writer, before map[string]config.SeatConfig, chan
 type poolShowLive struct {
 	live map[string]int
 	dead map[string]int
+	// held is every seat the count took, from the same read: a seat or the town
+	// total above its cap lists its seats from it (gt-f4wwm7).
+	held []specdispatch.HeldSeat
 	// parked counts, per agent, the released parked seats, which are not in live.
 	parked map[string]int
 	// parkedTotal is the sum of parked: the released seats the total leaves out.
@@ -485,7 +520,7 @@ func poolLiveForWith(townRoot string, readSeats func(pool *config.PolecatPool) (
 		return poolShowLive{}
 	}
 	r := specRosterFrom(sessions, ts)
-	out := poolShowLive{live: r.Live, dead: r.DeadHooked, parked: r.ParkedStale, ok: true}
+	out := poolShowLive{live: r.Live, dead: r.DeadHooked, held: r.Held, parked: r.ParkedStale, ok: true}
 	for _, n := range r.Live {
 		out.total += n
 	}
