@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -14,9 +15,9 @@ import (
 // in tailKinds, so gt tail's --kind never offers it.
 const tailKindGateway = "gateway"
 
-// tailGatewayLimit is how many calls one poll asks for: the recent window a
-// feed needs, under the gateway's cap on a calls read.
-const tailGatewayLimit = 200
+// tailGatewayLimit is how many calls one poll asks for: the gateway's cap on a
+// calls read, so a poll at the log's peak rate fits in one answer.
+const tailGatewayLimit = 500
 
 // tailGatewayReader reads the gateway's recent calls. GatewayPusher is the
 // production reader; a test injects its own.
@@ -25,9 +26,10 @@ type tailGatewayReader interface {
 }
 
 // tailGatewaySource shows the gateway's call log: a line for each write and
-// each failed call, and one count of the calls a poll read. The cursor is the
-// newest stamp returned, and the calls already returned at that stamp are kept
-// so a call is never shown twice, even when a read serves its stamp again.
+// each failed call, and one count of the successful reads a poll skipped. The
+// cursor is the newest stamp returned, and the calls already returned at that
+// stamp are kept so a call is never shown twice, even when a read serves its
+// stamp again.
 type tailGatewaySource struct {
 	reader tailGatewayReader
 	cursor time.Time
@@ -35,6 +37,12 @@ type tailGatewaySource struct {
 	returned map[string]bool
 	now      func() time.Time
 	failed   tailOnce
+	// unstamped reports a poll's calls with no readable time, once per text.
+	unstamped tailOnce
+	// dropped is the answer's Dropped count at the last poll that read one; it
+	// is set only once droppedSeen is, so the first poll sets the baseline.
+	dropped     uint64
+	droppedSeen bool
 }
 
 // newTailGatewaySource starts the source at cutoff, so the first poll shows the
@@ -81,65 +89,77 @@ type fresh struct {
 	key  string
 }
 
+// Poll returns the lines for the calls stamped after the cursor and moves the
+// cursor past them.
 func (s *tailGatewaySource) Poll() []tailLine {
 	now := s.now()
 	page, err := s.reader.Calls(context.Background(), s.cursor, tailGatewayLimit)
 	if err != nil {
 		return s.readError(now, err)
 	}
-	// A call stamp the cursor cannot be placed against is a read failure: the
-	// feed must not skip it silently or show it twice.
-	stamps := make([]time.Time, len(page.Entries))
-	for i, e := range page.Entries {
-		at, err := time.Parse(time.RFC3339Nano, e.TS)
-		if err != nil {
-			return s.readError(now, fmt.Errorf("call %d has no readable time: %w", i, err))
-		}
-		stamps[i] = at
-	}
 	s.failed.clear()
 
+	var out []tailLine
+	if s.droppedSeen && page.Dropped > s.dropped {
+		out = append(out, s.line(now, "%d calls were not logged", page.Dropped-s.dropped))
+	}
+	s.dropped, s.droppedSeen = page.Dropped, true
+
+	// A call with no readable time cannot be placed against the cursor. It is
+	// skipped and counted, and the cursor moves past it, so it cannot pin the feed.
 	var batch []fresh
 	seen := map[string]bool{}
-	for i, e := range page.Entries {
+	unreadable := 0
+	anyStamp := false
+	var newestStamp time.Time
+	for _, e := range page.Entries {
+		at, err := time.Parse(time.RFC3339Nano, e.TS)
+		if err != nil {
+			unreadable++
+			continue
+		}
+		if !anyStamp || at.After(newestStamp) {
+			newestStamp = at
+		}
+		anyStamp = true
 		key := gatewayCallKey(e)
-		at := stamps[i]
 		if at.Before(s.cursor) || (at.Equal(s.cursor) && s.returned[key]) || seen[key] {
 			continue
 		}
 		seen[key] = true
 		batch = append(batch, fresh{call: e, at: at, key: key})
 	}
-	if len(batch) == 0 {
-		return nil
-	}
 	slices.SortStableFunc(batch, func(a, b fresh) int { return a.at.Compare(b.at) })
 
-	// The cursor moves to the newest stamp this poll shows. At an unmoved
-	// cursor the calls already shown there stay in the set; at a moved one the
-	// set is only the calls this poll showed at the new stamp.
-	newest := batch[len(batch)-1].at
+	// The cursor moves to the newest readable stamp in the page. When the page
+	// had calls and none had a readable time, it moves to this poll's clock. It
+	// never moves back. At an unmoved cursor the calls already shown there stay
+	// in the set; at a moved one the set is only the calls shown at the new stamp.
+	target := s.cursor
+	switch {
+	case anyStamp && newestStamp.After(s.cursor):
+		target = newestStamp
+	case !anyStamp && unreadable > 0 && now.After(s.cursor):
+		target = now
+	}
 	next := map[string]bool{}
-	if newest.Equal(s.cursor) {
-		for k := range s.returned {
-			next[k] = true
-		}
+	if target.Equal(s.cursor) {
+		maps.Copy(next, s.returned)
 	}
 	for _, f := range batch {
-		if f.at.Equal(newest) {
+		if f.at.Equal(target) {
 			next[f.key] = true
 		}
 	}
-	s.cursor = newest
+	s.cursor = target
 	s.returned = next
 
-	var out []tailLine
-	reads := false
+	// A successful read is counted, not shown. A failed call, read or write, is
+	// a line of its own, so it is never counted as a read.
+	reads := 0
 	for _, f := range batch {
-		if !f.call.Write {
-			reads = true
-		}
 		if !f.call.Write && f.call.ExitCode == 0 {
+			reads++
 			continue
 		}
 		class := tailClassPlain
@@ -148,8 +168,21 @@ func (s *tailGatewaySource) Poll() []tailLine {
 		}
 		out = append(out, tailLine{At: f.at, Rig: "town", Kind: tailKindGateway, Class: class, Text: gatewayCallText(f.call)})
 	}
-	if reads {
-		out = append(out, s.line(now, "%d gateway reads", len(batch)))
+	if reads > 0 {
+		out = append(out, s.line(now, "%d gateway reads", reads))
+	}
+	// ReadCalls keeps the oldest calls after the cursor, so a full page leaves the
+	// rest for the next poll: the cursor above is at the page's last call.
+	if len(page.Entries) >= tailGatewayLimit {
+		out = append(out, s.line(now, "more calls waiting"))
+	}
+	if unreadable > 0 {
+		text := fmt.Sprintf("%d calls had an unreadable time and were skipped", unreadable)
+		if s.unstamped.first(text) {
+			out = append(out, s.line(now, "%s", text))
+		}
+	} else {
+		s.unstamped.clear()
 	}
 	return out
 }
