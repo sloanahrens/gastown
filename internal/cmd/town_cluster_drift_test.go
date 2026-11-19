@@ -261,7 +261,10 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 		if live["metadata"].(map[string]any)["name"] != k8sdaemon.BdGatewayName {
 			return
 		}
-		driftObjectAt(live, "spec", "strategy")["type"] = "RollingUpdate"
+		// The cluster has not rolled yet: it still runs Recreate, with no rollingUpdate.
+		strategy := driftObjectAt(live, "spec", "strategy")
+		strategy["type"] = "Recreate"
+		delete(strategy, "rollingUpdate")
 	}), &reads)
 	err := runClusterDrift(context.Background(), d)
 	if got := driftExit(err); got != 1 {
@@ -276,7 +279,12 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
 	}
-	wantLines := []string{"deployment/" + k8sdaemon.BdGatewayName + ": " + driftWantDifference(t, "spec.strategy.type", "Recreate", "RollingUpdate")}
+	// The render rolls the gateway; the cluster still holds the Recreate it ran before.
+	gateway := "deployment/" + k8sdaemon.BdGatewayName + ": "
+	wantLines := []string{
+		gateway + driftWantAbsent(t, "spec.strategy.rollingUpdate", map[string]any{"maxUnavailable": 0, "maxSurge": 1}),
+		gateway + driftWantDifference(t, "spec.strategy.type", "RollingUpdate", "Recreate"),
+	}
 	if got := driftLines(out); !slices.Equal(got, wantLines) {
 		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 	}

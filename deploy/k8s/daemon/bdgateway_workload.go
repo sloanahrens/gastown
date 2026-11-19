@@ -61,19 +61,45 @@ const (
 // and the workspace claim. It takes no ServiceAccount token, as the dashboard's pod
 // does not.
 //
-// Its strategy is Recreate: the old gateway stops before the new one starts, so the
-// two never write the workspace together.
+// Its strategy is RollingUpdate with maxUnavailable 0 and maxSurge 1: the new gateway
+// starts, and passes its readiness, before the old one stops, so the gateway has no
+// gap in service. For the length of a roll two gateway processes share the workspace
+// claim and the log claim. Replicas stay at one.
+//
+// That sharing is safe on the control cluster as verified on 2026-11-19 by the
+// overseer's commands: kubectl get nodes shows one node (colima-gt-control, k3s v1.35),
+// and kubectl get storageclass shows local-path. The gateway's two claims,
+// bd-gateway-workspace and bd-gateway-log, are ReadWriteOnce, which is per node, and
+// local-path volumes are node-local hostPath, so the surge pod attaches while the old
+// pod still holds them and the roll does not stall. This stops
+// holding if the control cluster gets a second node: the claims must then become
+// ReadWriteMany, or the strategy goes back to Recreate.
+//
+// Both checks behind the sharing are DONE. The overseer's check (gt-yz0s8v, closed
+// 2026-11-18 after a run in a scratch namespace) found bd's runtime files safe under
+// two pods on one claim, and found the workspace push unsafe with two pushers. The
+// push's cross-process lock (gt-fo7rf0, landed) serializes it. The lock holds only
+// between pods that run that release, so the first roll from an image built before it
+// races once. That run did not verify the X-Bd-Workspace hash each pod reports after
+// the other pod swapped the tree, nor a real roll with pod startup. The live cluster
+// keeps Recreate until the next attended render and apply, so that attended roll is the
+// first real one. --log-per-pod gives each pod its own call log directory.
 func bdGatewayDeployment(v Values, namespace string) Deployment {
 	automount := false
 	user := bdGatewayIdentity
 	group := bdGatewayIdentity
 	fsGroup := bdGatewayIdentity
+	maxUnavailable := int32(0)
+	maxSurge := int32(1)
 	return Deployment{
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{Name: BdGatewayName, Namespace: namespace, Labels: bdGatewayLabels()},
 		Spec: DeploymentSpec{
 			Replicas: 1,
-			Strategy: DeploymentStrategy{Type: "Recreate"},
+			Strategy: DeploymentStrategy{
+				Type:          "RollingUpdate",
+				RollingUpdate: &RollingUpdateStrategy{MaxUnavailable: &maxUnavailable, MaxSurge: &maxSurge},
+			},
 			Selector: LabelSelector{MatchLabels: bdGatewaySelectorLabels()},
 			Template: PodTemplate{
 				Metadata: PodTemplateMeta{Labels: bdGatewayLabels()},
@@ -127,7 +153,7 @@ func bdGatewayTokenCopy(v Values) Container {
 func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 	allowEscalation := false
 	dolt := []string{"--dolt-host", doltHost, "--dolt-port", strconv.Itoa(doltPort)}
-	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir}, dolt...)
+	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--log-per-pod", "--workspace", bdGatewayWorkspaceDir}, dolt...)
 	command = append(command, "--push-addr", ":"+strconv.Itoa(BdGatewayPushPort))
 	if v.BdGatewayMaxConcurrent > 0 {
 		command = append(command, "--max-concurrent", strconv.Itoa(v.BdGatewayMaxConcurrent))
