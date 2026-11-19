@@ -96,13 +96,24 @@ fi
 if vmkind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   say "kind cluster $CLUSTER exists; leaving it"
 else
+  # The API server port must be its own free port: the gateway port is
+  # published on the same loopback address, and the registry's port belongs to
+  # its container. A clash is a settings error, so it is refused before either
+  # port is probed and named as GT_K8S_API_PORT to point at the fix.
+  [ "$API_PORT" != "$GATEWAY_PORT" ] ||
+    die "GT_K8S_API_PORT and GT_K8S_GATEWAY_PORT are both $API_PORT; set GT_K8S_API_PORT to a free port"
+  [ "$API_PORT" != "$REGISTRY_PORT" ] ||
+    die "GT_K8S_API_PORT and GT_K8S_REGISTRY_PORT are both $API_PORT; set GT_K8S_API_PORT to a free port"
   port_in_use "$GATEWAY_PORT" && die "127.0.0.1:$GATEWAY_PORT already has a listener (not ours to touch); set GT_K8S_GATEWAY_PORT to a free port"
-  # cluster.yaml is the checked-in kind config; the cluster name and the gateway
-  # port are the two values up.sh sets per run. The replacement is escaped so an
-  # operator's GT_K8S_* value cannot rewrite the expression or the config.
+  port_in_use "$API_PORT" && die "127.0.0.1:$API_PORT already has a listener (not ours to touch); set GT_K8S_API_PORT to a free port"
+  # cluster.yaml is the checked-in kind config; the cluster name, the gateway
+  # port and the API server port are the values up.sh sets per run. The
+  # replacement is escaped so an operator's GT_K8S_* value cannot rewrite the
+  # expression or the config.
   sed_replacement() { printf '%s' "$1" | sed 's/[&\\|]/\\&/g'; }
   sed -e "s|__CLUSTER__|$(sed_replacement "$CLUSTER")|g" \
     -e "s|__GATEWAY_PORT__|$(sed_replacement "$GATEWAY_PORT")|g" \
+    -e "s|__API_PORT__|$(sed_replacement "$API_PORT")|g" \
     "$HERE/cluster.yaml" >"$OUT/kind-config.yaml"
   say "creating kind cluster $CLUSTER"
   vmkind create cluster --config "$OUT/kind-config.yaml" --wait 180s

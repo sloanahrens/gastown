@@ -17,6 +17,7 @@ PROFILE="${GT_K8S_COLIMA_PROFILE:-gt-sbx}"
 CLUSTER="${GT_K8S_CLUSTER:-gt-sbx}"
 OUT="${GT_K8S_DIR:-$HOME/gt/.runtime/sbx-k8s}"
 GATEWAY_PORT="${GT_K8S_GATEWAY_PORT:-28443}"
+API_PORT="${GT_K8S_API_PORT:-28444}"
 REGISTRY_PORT="${GT_K8S_REGISTRY_PORT:-5001}"
 REGISTRY_NAME="gt-registry"
 # The town cluster is three nodes (control plane, core, sandbox), so the VM is

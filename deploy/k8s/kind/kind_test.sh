@@ -329,6 +329,8 @@ kind_cfg="$(cat "$S/state/kind-config.yaml")"
 check "the kind config maps the gateway nodePort to the Mac loopback port" contains "hostPort: 28443" "$kind_cfg"
 check "the kind config maps from nodePort 30443" contains "containerPort: 30443" "$kind_cfg"
 check "the kind config listens on 127.0.0.1 only" contains "listenAddress: 127.0.0.1" "$kind_cfg"
+check "the kind config pins the API server to the loopback address" contains 'apiServerAddress: "127.0.0.1"' "$kind_cfg"
+check "the kind config pins the API server port" contains "apiServerPort: 28444" "$kind_cfg"
 check "the kind config enables the containerd registry config_path" contains 'config_path = "/etc/containerd/certs.d"' "$kind_cfg"
 check "nodes get the registry mirror" contains 'server = "http://gt-registry:5000"' "$(cat "$S/state/hosts.toml")"
 check "the cluster exists before the chart is installed" before "kind create cluster" "helm upgrade --install"
@@ -439,6 +441,7 @@ check "rerun does not start colima" lacks "colima start" "$CALLS_LOG"
 check "rerun does not create a second cluster" lacks "kind create" "$CALLS_LOG"
 check "rerun does not start a second registry" lacks "docker run" "$CALLS_LOG"
 check "rerun does not register the gateway twice" lacks "gateway add" "$CALLS_LOG"
+check "rerun writes no kind config for the existing cluster" test ! -e "$S/state/kind-config.yaml"
 
 echo "a similar gateway name does not count as registered"
 scenario lookalike
@@ -604,15 +607,63 @@ touch "$S/state/colima-running"
 run "$UP" GT_K8S_GATEWAY_PORT=29001 --
 check "GT_K8S_GATEWAY_PORT moves the mapping to a free port" contains "hostPort: 29001" "$(cat "$S/state/kind-config.yaml")"
 
-echo "a cluster name with sed metacharacters is written literally"
+echo "the API server port is set per run"
+scenario api_port
+touch "$S/state/colima-running"
+run "$UP" GT_K8S_API_PORT=29002 --
+check "up exits 0 with a configured API port" test "$RC" -eq 0
+api_cfg="$(cat "$S/state/kind-config.yaml")"
+check "the rendered config carries the API port" contains "apiServerPort: 29002" "$api_cfg"
+check "no API placeholder survives the render" lacks "__API_PORT__" "$api_cfg"
+check "the gateway port keeps its own value" contains "hostPort: 28443" "$api_cfg"
+
+echo "someone else owns the API server port"
+scenario busy_api
+echo 28444 >"$S/state/busy-port"
+touch "$S/state/colima-running"
+run "$UP" --
+check "a busy API port stops the run" test "$RC" -ne 0
+check "the failure names GT_K8S_API_PORT" contains "GT_K8S_API_PORT" "$OUT_TEXT"
+check "no cluster is created on a busy API port" lacks "kind create" "$CALLS_LOG"
+check "no kind config is written for a busy API port" test ! -e "$S/state/kind-config.yaml"
+
+echo "the API port must differ from the gateway and registry ports"
+scenario api_equals_gateway
+touch "$S/state/colima-running"
+run "$UP" GT_K8S_API_PORT=28443 --
+check "an API port equal to the gateway port stops the run" test "$RC" -ne 0
+check "the failure names GT_K8S_API_PORT" contains "GT_K8S_API_PORT" "$OUT_TEXT"
+check "the failure names the gateway port setting" contains "GT_K8S_GATEWAY_PORT" "$OUT_TEXT"
+check "no cluster is created when the API port equals the gateway port" lacks "kind create" "$CALLS_LOG"
+check "no kind config is written when the API port equals the gateway port" test ! -e "$S/state/kind-config.yaml"
+scenario api_equals_registry
+touch "$S/state/colima-running"
+run "$UP" GT_K8S_API_PORT=5001 --
+check "an API port equal to the registry port stops the run" test "$RC" -ne 0
+check "the failure names GT_K8S_API_PORT" contains "GT_K8S_API_PORT" "$OUT_TEXT"
+check "no cluster is created when the API port equals the registry port" lacks "kind create" "$CALLS_LOG"
+check "no kind config is written when the API port equals the registry port" test ! -e "$S/state/kind-config.yaml"
+
+echo "an existing cluster keeps its API server config"
+scenario rerun_busy_api
+echo 28444 >"$S/state/busy-port"
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+run "$UP" --
+check "a busy API port does not stop a run against an existing cluster" test "$RC" -eq 0
+check "an existing cluster renders no kind config" test ! -e "$S/state/kind-config.yaml"
+check "an existing cluster is not recreated" lacks "kind create" "$CALLS_LOG"
+
+echo "a setting with sed metacharacters is written literally"
 scenario cluster_escape
 touch "$S/state/colima-running"
-run "$UP" 'GT_K8S_CLUSTER=gt&sbx|x\y' --
+run "$UP" 'GT_K8S_CLUSTER=gt&sbx|x\y' 'GT_K8S_API_PORT=29002&x' --
 check "up exits 0 with metacharacters in the cluster name" test "$RC" -eq 0
 escaped_cfg="$(cat "$S/state/kind-config.yaml" 2>/dev/null || true)"
 check "the cluster name reaches the kind config literally" contains 'name: gt&sbx|x\y' "$escaped_cfg"
+check "the API port reaches the kind config literally" contains 'apiServerPort: 29002&x' "$escaped_cfg"
 check "no cluster placeholder survives the render" lacks "__CLUSTER__" "$escaped_cfg"
 check "no gateway placeholder survives the render" lacks "__GATEWAY_PORT__" "$escaped_cfg"
+check "no API placeholder survives the render" lacks "__API_PORT__" "$escaped_cfg"
 
 echo "the port probe cannot run"
 scenario probe_error
