@@ -167,6 +167,10 @@ const (
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
+	// RuleMetricsExtract is a metrics extract that is stale, gapped or
+	// unreadable: the tables a digest or analysis reads no longer describe the
+	// town (gt-mi4cem).
+	RuleMetricsExtract = "metrics.extract"
 	// RuleSandboxPending is a sandbox pod Pending and unschedulable past the
 	// window: the scheduler's message says what the pod cannot get, and the
 	// seat's agent never starts until it is given (gt-1gtq5g).
@@ -320,6 +324,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
+	// A stale, gapped or unreadable extract is a record, not a page: nothing
+	// decides on the line itself, and the measure the extract feeds is judged
+	// by its own rule, storypoints.drift (gt-my0o23, gt-mi4cem).
+	RuleMetricsExtract: flagsInfo,
 	// A sandbox pod the scheduler cannot place never starts its agent: the
 	// overseer is woken to give it the resources or fix its request (gt-1gtq5g).
 	RuleSandboxPending: flagsWake,
@@ -465,6 +473,7 @@ var kindRules = map[Kind]string{
 	KindSandboxSeatKept:               RuleSandboxSeatKept,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
 	KindHoldStale:                     RuleHoldStale,
+	KindMetricsExtract:                RuleMetricsExtract,
 	KindSandboxPending:                RuleSandboxPending,
 	KindSeatSandboxStale:              RuleSeatSandboxStale,
 	KindSeatUnreachable:               RuleSeatUnreachable,
