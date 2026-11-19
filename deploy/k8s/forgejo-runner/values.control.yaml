@@ -1,0 +1,21 @@
+# The Values the control cluster's forgejo-runner is built from, read from the
+# cluster on 2026-11-18: the runner's ConfigMap labels, the address the forgejo
+# alias resolves to, the claim sizes the claims hold, and each container's
+# share. Decoded by ControlValues; a key Values does not have is refused, so a
+# knob added here must first exist in Values (gt-q2nigb). It holds labels, an
+# address and sizes, and no credential.
+namespace: forgejo
+capacity: 2
+labels:
+  - "docker-cli:docker://data.forgejo.org/oci/docker:28.5-cli"
+  - "node:docker://data.forgejo.org/oci/node:20.19"
+  - "ci-base:docker://data.forgejo.org/oci/gastown-runner:go1.27-node20"
+forgejoHostIP: "10.43.130.32"
+dindStorage: 40Gi
+runnerStorage: 1Gi
+runnerResources:
+  cpu: "1"
+  memory: 1Gi
+dindResources:
+  cpu: "8"
+  memory: 12Gi
