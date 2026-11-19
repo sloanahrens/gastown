@@ -109,6 +109,11 @@ const (
 	// BdGatewayWorkspaceSize is its request.
 	BdGatewayWorkspaceClaim = "bd-gateway-workspace"
 	BdGatewayWorkspaceSize  = "1Gi"
+	// BdGatewayLogClaim is the claim the gateway's call log lives on, and
+	// BdGatewayLogSize is its request. It is its own claim so a full log cannot
+	// make the workspace claim, and the gateway's readiness, fail.
+	BdGatewayLogClaim = "bd-gateway-log"
+	BdGatewayLogSize  = "512Mi"
 )
 
 // validateBdGatewayWorkload refuses the gateway workload values the cluster cannot

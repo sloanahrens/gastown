@@ -472,3 +472,67 @@ func TestBdGatewayWorkloadRendered(t *testing.T) {
 		}
 	}
 }
+
+// TestBdGatewayLogClaimRender holds the call-log claim to the render: a Values with
+// the gateway image writes bd-gateway-log, 512Mi, ReadWriteOnce, in the render's
+// namespace and storage class, and a Values with no image writes no claim and
+// names none.
+func TestBdGatewayLogClaimRender(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayWorkloadValues(t))
+	c := m.BdGatewayLogClaim
+	if c.Kind != "PersistentVolumeClaim" || c.Metadata.Name != BdGatewayLogClaim {
+		t.Fatalf("the gateway log claim is a %q named %q, want a PersistentVolumeClaim named %q", c.Kind, c.Metadata.Name, BdGatewayLogClaim)
+	}
+	if c.Metadata.Namespace != m.Namespace.Metadata.Name {
+		t.Errorf("the log claim's namespace = %q, want the render's %q", c.Metadata.Namespace, m.Namespace.Metadata.Name)
+	}
+	if got := c.Spec.Resources.Requests["storage"]; got != "512Mi" {
+		t.Errorf("the log claim requests %q, want 512Mi", got)
+	}
+	if len(c.Spec.AccessModes) != 1 || c.Spec.AccessModes[0] != "ReadWriteOnce" {
+		t.Errorf("the log claim's access modes = %q, want ReadWriteOnce", c.Spec.AccessModes)
+	}
+	if got := c.Spec.StorageClassName; got != m.TownStateClaim.Spec.StorageClassName {
+		t.Errorf("the log claim's class = %q, want the render's %q", got, m.TownStateClaim.Spec.StorageClassName)
+	}
+	var buf bytes.Buffer
+	if err := Render(&buf, m); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !bytes.Contains(buf.Bytes(), document(t, c)) {
+		t.Errorf("Render does not write the log claim as Build built it")
+	}
+
+	off := goldenValues(t)
+	mOff := mustBuild(t, off)
+	if mOff.BdGatewayLogClaim.Kind != "" {
+		t.Errorf("a Values with no gateway image rendered the log claim")
+	}
+	buf.Reset()
+	if err := Render(&buf, mOff); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if bytes.Contains(buf.Bytes(), []byte(BdGatewayLogClaim)) {
+		t.Errorf("the render with no gateway image names %q", BdGatewayLogClaim)
+	}
+}
+
+// TestBdGatewayLogClaimGolden holds the workspace claim and the log claim, as the
+// render writes them, to their golden stream: the log claim comes directly after
+// the workspace claim, with the stream's separator between them.
+func TestBdGatewayLogClaimGolden(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayWorkloadValues(t))
+	var buf bytes.Buffer
+	if err := Render(&buf, m); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	workspace := document(t, m.BdGatewayClaim)
+	logClaim := document(t, m.BdGatewayLogClaim)
+	claims := append(append(append([]byte{}, workspace...), "---\n"...), logClaim...)
+	if !bytes.Contains(buf.Bytes(), claims) {
+		t.Fatalf("the render does not write the log claim directly after the workspace claim:\n%s", buf.Bytes())
+	}
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "bd-gateway-claims.yaml", claims)
+}

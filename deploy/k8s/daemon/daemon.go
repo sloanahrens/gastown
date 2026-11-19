@@ -927,6 +927,7 @@ type Manifests struct {
 	DoltBackupClaim      *PersistentVolumeClaim
 	TrackerBackupClaim   PersistentVolumeClaim
 	BdGatewayClaim       PersistentVolumeClaim
+	BdGatewayLogClaim    PersistentVolumeClaim
 	ForgejoService       Service
 	DashboardService     Service
 	TrackerService       Service
@@ -1030,6 +1031,7 @@ func Build(v Values) (Manifests, error) {
 	// has already refused an image that is not a digest, or a missing token Secret.
 	if v.BdGatewayImage != "" {
 		m.BdGatewayClaim = claim(BdGatewayWorkspaceClaim, namespace, BdGatewayWorkspaceSize, v.StorageClass)
+		m.BdGatewayLogClaim = claim(BdGatewayLogClaim, namespace, BdGatewayLogSize, v.StorageClass)
 		m.BdGatewayService = bdGatewayService(namespace)
 		m.BdGatewayPushService = bdGatewayPushService(namespace)
 		m.BdGatewayDeployment = bdGatewayDeployment(v, namespace)
@@ -2881,6 +2883,10 @@ func Render(w io.Writer, m Manifests) error {
 	// Build leaves the bd gateway claim zero unless Values.BdGatewayImage is set.
 	if m.BdGatewayClaim.Kind != "" {
 		docs = append(docs, m.BdGatewayClaim)
+	}
+	// The log claim follows the workspace claim, and is zero under the same condition.
+	if m.BdGatewayLogClaim.Kind != "" {
+		docs = append(docs, m.BdGatewayLogClaim)
 	}
 	docs = append(docs, m.ForgejoService)
 	// Build leaves the dashboard objects zero unless Values.Dashboard is set, so a
