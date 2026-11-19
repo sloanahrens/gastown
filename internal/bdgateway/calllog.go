@@ -115,20 +115,9 @@ type Stats struct {
 	Verbs map[string]uint64 `json:"verbs"`
 }
 
-// entry is one JSONL line. The field set is fixed — ts, class, caller, verb,
-// flags, beads, exit code and duration, plus the error of a refused call — so
-// argv data cannot ride along unseen.
-type entry struct {
-	TS         string   `json:"ts"`
-	Class      string   `json:"class"`
-	Caller     string   `json:"caller"`
-	Verb       string   `json:"verb"`
-	Flags      []string `json:"flags"`
-	Beads      []string `json:"beads"`
-	ExitCode   int      `json:"exit_code"`
-	DurationMS int64    `json:"duration_ms"`
-	Error      string   `json:"error,omitempty"`
-}
+// entry is one JSONL line with CallEntry's fixed field set, so argv data cannot
+// ride along unseen and the writer and the reader cannot drift.
+type entry = CallEntry
 
 // CallLog writes one JSONL line per bd call behind a buffered channel, rotates
 // the file by size, and counts calls for GET /v1/stats.
