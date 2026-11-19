@@ -634,19 +634,25 @@ func CloseBlockReason(issue *beads.Issue) string {
 // rig's landings file as JSON and to the work bead as a LANDING RECORD notes
 // block (until be-u20 gives beads a typed landing verb).
 type LandingRecord struct {
-	BeadID       string    `json:"bead"`
-	Rig          string    `json:"rig"`
-	Branch       string    `json:"branch"`
-	Head         string    `json:"head"`
-	Target       string    `json:"target"`
-	Base         string    `json:"base"`
-	LandedCommit string    `json:"landed_commit"`
-	PatchID      string    `json:"patch_id"`
-	GateResult   string    `json:"gate_result"`
-	OMVerdict    string    `json:"om_verdict"`
-	OMScore      float64   `json:"om_score"`
-	Route        string    `json:"route"`
-	LandedAt     time.Time `json:"landed_at"`
+	BeadID       string  `json:"bead"`
+	Rig          string  `json:"rig"`
+	Branch       string  `json:"branch"`
+	Head         string  `json:"head"`
+	Target       string  `json:"target"`
+	Base         string  `json:"base"`
+	LandedCommit string  `json:"landed_commit"`
+	PatchID      string  `json:"patch_id"`
+	GateResult   string  `json:"gate_result"`
+	OMVerdict    string  `json:"om_verdict"`
+	OMScore      float64 `json:"om_score"`
+	// OMRounds is how many review rounds the landed bead took: the highest
+	// attempt the town's review ledger held for it when the record was written
+	// (gt-hx18i9). It goes to the landings file only, not the note block. A bead
+	// with no review rows, and a ledger that could not be read, leave it zero,
+	// and a zero is left out of the JSON.
+	OMRounds int       `json:"om_rounds,omitempty"`
+	Route    string    `json:"route"`
+	LandedAt time.Time `json:"landed_at"`
 	// RiskPaths are the changed paths this landing touched that matched
 	// internal/land/riskpaths.txt at the base commit. They are the record the
 	// attention queue's risk-path item reads, and the reason the work bead

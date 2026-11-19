@@ -34,6 +34,12 @@ type LandingsFile struct {
 	// is read from; the landing worker sets the town's store and no other
 	// caller writes. Nil means records carry no polecat time (gt-yxl22).
 	Spans SpanSummarizer
+	// Reviews, when set, is the town's om review ledger each appended record's
+	// OMRounds is read from: the highest attempt the landed bead's rows carry,
+	// read once per record (gt-hx18i9). RigLandingsFile points it at the town
+	// file beside the rig's, so the landing worker writes the count without
+	// holding a second reader. Nil means records carry no om round count.
+	Reviews *ReviewsFile
 	// FirstSeen, when set, answers when the host first saw a bead's submission
 	// at a head: the first-sight record the landing worker writes from its own
 	// clock before it lands anything. It is the end a landing trusts for a seat
@@ -63,6 +69,7 @@ func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
 	}
 	return &LandingsFile{
 		Path:      filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl"),
+		Reviews:   TownReviewsFile(townRoot),
 		FirstSeen: FirstSeenIn(SubmissionsSeenPath(townRoot)),
 		SlungAt:   SlungAtIn(townRoot),
 	}, nil
@@ -81,7 +88,8 @@ type SpanSummarizer interface {
 //
 // The polecat time is Append's to write: it fills rec's three polecat fields
 // from Spans when rec carries none, and a caller that set them itself keeps
-// what it set rather than having the values replaced under it.
+// what it set rather than having the values replaced under it. So is the om
+// round count: rec.OMRounds is filled from Reviews when rec carries none.
 //
 // A tail left torn (a crash or a short write stopped mid-record, so the file
 // does not end in a newline) is repaired first, and a short write of rec is
@@ -118,6 +126,9 @@ func (f *LandingsFile) AppendSubmitted(rec LandingRecord, seat string, submitted
 		if len(rec.PolecatAttempts) == 0 && !rec.PolecatLowerBound {
 			f.fillDispatchFloor(&rec, seat, end, ok)
 		}
+	}
+	if rec.OMRounds == 0 {
+		rec.OMRounds = f.reviewRounds(rec.BeadID)
 	}
 	line, err := json.Marshal(rec)
 	if err != nil {
@@ -240,6 +251,30 @@ func (f *LandingsFile) fillDispatchFloor(rec *LandingRecord, seat string, end ti
 	rec.PolecatAttempts = []PolecatAttempt{{Seat: seat, Secs: secs, UpperBound: true, From: PolecatFromSling}}
 	f.logf("landings file %s: %s wrote no span start for %s; its polecat time is the dispatch interval from the sling at %s, an upper bound",
 		f.Path, seat, rec.BeadID, start.UTC().Format(time.RFC3339))
+}
+
+// reviewRounds is the review rounds the landed bead took: the highest attempt
+// the town's review ledger holds for it when the record is written, and zero
+// when the bead has no rows. The count is read through the ledger's own reader,
+// and a ledger that cannot be read is logged and costs the count, not the
+// landing (gt-hx18i9). A file that does not exist yet is a bead with no rows,
+// not a failure: the reviews reader answers none.
+func (f *LandingsFile) reviewRounds(bead string) int {
+	if f.Reviews == nil {
+		return 0
+	}
+	rows, err := f.Reviews.Since(time.Time{})
+	if err != nil {
+		f.logf("landings file %s: no om rounds for %s: %v", f.Path, bead, err)
+		return 0
+	}
+	rounds := 0
+	for _, row := range rows {
+		if row.BeadID == bead && row.Attempt > rounds {
+			rounds = row.Attempt
+		}
+	}
+	return rounds
 }
 
 // sameSeat reports whether two spellings name the same seat: the event log
