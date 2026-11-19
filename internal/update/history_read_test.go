@@ -120,6 +120,26 @@ func TestUpdateHistoryReadSkipsCorruptLines(t *testing.T) {
 	assertSameState(t, got[1].State, older)
 }
 
+func TestUpdateHistoryReadReportsAFileNothingParses(t *testing.T) {
+	t.Parallel()
+	store := &Store{Dir: filepath.Join(t.TempDir(), "update")}
+	if err := os.MkdirAll(store.Dir, 0o700); err != nil {
+		t.Fatalf("create update state directory: %v", err)
+	}
+	appendRawHistory(t, store.Dir, "not json at all\n")
+	// A whole line at another schema version is no more readable by this build
+	// than junk, so a file of nothing else is corrupt too.
+	appendRawHistory(t, store.Dir, `{"v":2,"run_id":"20261103T105000Z-future"}`+"\n")
+
+	got, err := ReadHistory(store.Dir, 10)
+	if err == nil {
+		t.Fatalf("ReadHistory = %d runs, want an error for a file none of whose lines parses", len(got))
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Errorf("error %v reads as a missing file; a missing file must be an empty list", err)
+	}
+}
+
 func TestUpdateHistoryReadSkipsPartialLastLine(t *testing.T) {
 	t.Parallel()
 	store := &Store{Dir: filepath.Join(t.TempDir(), "update")}

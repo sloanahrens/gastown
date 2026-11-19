@@ -16,8 +16,9 @@ import (
 // first. dir is the update state directory, as Dir returns it. A count of zero
 // or less returns no runs. A missing file is an empty list. A line that does not
 // parse, that carries another schema version, or that is a partial last line of
-// an append still in progress is skipped. The read takes no lock and writes
-// nothing.
+// an append still in progress is skipped while another line parses; a file
+// whose every whole line fails to parse is an error, never an empty history,
+// because nothing in it can be read. The read takes no lock and writes nothing.
 func ReadHistory(dir string, n int) ([]HistoryLine, error) {
 	path := filepath.Join(dir, historyFileName)
 	f, err := os.Open(path)
@@ -30,8 +31,11 @@ func ReadHistory(dir string, n int) ([]HistoryLine, error) {
 	defer f.Close()
 
 	// newest holds the last n valid lines in file order, oldest first. The file
-	// grows by one line per run, so only n lines are kept in memory.
+	// grows by one line per run, so only n lines are kept in memory. whole counts
+	// the lines that ended with a newline, valid or not, so a file nothing in it
+	// parses is not read as an empty history.
 	var newest []HistoryLine
+	var whole, valid int
 	reader := bufio.NewReader(f)
 	for {
 		raw, readErr := reader.ReadBytes('\n')
@@ -41,7 +45,9 @@ func ReadHistory(dir string, n int) ([]HistoryLine, error) {
 		// AppendHistory ends every line with a newline, so a final line without
 		// one is a write still in progress and is skipped like a corrupt line.
 		if readErr == nil {
+			whole++
 			if line, ok := parseHistoryLine(raw); ok {
+				valid++
 				newest = append(newest, line)
 				if len(newest) > n {
 					newest = newest[1:]
@@ -51,6 +57,9 @@ func ReadHistory(dir string, n int) ([]HistoryLine, error) {
 		if readErr != nil {
 			break
 		}
+	}
+	if whole > 0 && valid == 0 {
+		return nil, fmt.Errorf("update history %s: none of its %d lines parses", path, whole)
 	}
 	slices.Reverse(newest)
 	if newest == nil {
