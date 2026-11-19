@@ -127,6 +127,10 @@ type fakeSpecTown struct {
 	// write for the bead it names, so a test drives the path where the count
 	// cannot be recorded and the bead has to be labeled instead (gt-a4cdcd).
 	lockTimeoutWriteErr map[string]error
+	// contentionWriteErr fails the contention schedule's write for the bead it
+	// names, so a test drives the path where the schedule cannot be recorded
+	// (gt-kmkpao).
+	contentionWriteErr map[string]error
 	// lockTimeoutHistoryErr fails the read of the bead's lock-timeout history,
 	// so a test drives the path where the dispatcher cannot tell a lost count
 	// from a fresh bead (gt-a4cdcd).
@@ -199,7 +203,8 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 		slingErrs: map[string][]error{}, originBranches: map[string]bool{}, notes: map[string][]string{}, labels: map[string][]string{},
 		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}, blockers: map[string][]beads.IssueDep{},
 		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{},
-		aheadComments: map[string][]beads.Comment{}, aheadErr: map[string]error{}}
+		aheadComments: map[string][]beads.Comment{}, aheadErr: map[string]error{},
+		lockTimeoutWriteErr: map[string]error{}, contentionWriteErr: map[string]error{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -379,6 +384,31 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return nil
 		},
 		ClearLockTimeout: func(id string) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			s := f.specs[id]
+			s.Metadata = nil
+			f.specs[id] = s
+			return nil
+		},
+		// The bead's metadata carries the contention schedule the same way:
+		// the next tick's fresh read parses back what a deferred sling wrote
+		// (gt-kmkpao).
+		RecordContention: func(id string, rec specdispatch.ContentionState) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if err := f.contentionWriteErr[id]; err != nil {
+				return err
+			}
+			s := f.specs[id]
+			s.Metadata = fmt.Appendf(nil, `{%q:%q,%q:%d,%q:%q}`,
+				specdispatch.ContentionFirstKey, rec.First.UTC().Format(time.RFC3339),
+				specdispatch.ContentionAttemptsKey, rec.Attempts,
+				specdispatch.ContentionRetryAtKey, rec.RetryAt.UTC().Format(time.RFC3339))
+			f.specs[id] = s
+			return nil
+		},
+		ClearContention: func(id string) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			s := f.specs[id]
@@ -1708,7 +1738,7 @@ func TestSpecDispatchContentionThatOutlastsItsRetriesIsADeferral(t *testing.T) {
 	if len(f.slung) != 0 || len(r.Failed) != 0 || len(r.Deferred) != 1 {
 		t.Fatalf("slung %v failed %+v deferred %+v, want one deferral and no failure", f.slung, r.Failed, r.Deferred)
 	}
-	if line := r.Deferred[0].Line; !strings.Contains(line, "Dolt contention") || !strings.Contains(line, "after 4 attempts") {
+	if line := r.Deferred[0].Line; !strings.Contains(line, "database contention") || !strings.Contains(line, "retry at 2026-09-30T12:00:05Z (attempt 1)") {
 		t.Errorf("deferral line = %q", line)
 	}
 	if n := len(f.notes["gt-a"]); n != 0 {

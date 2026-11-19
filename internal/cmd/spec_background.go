@@ -49,6 +49,10 @@ type specSlingJob struct {
 	// on the bead, so the sling that runs later adds to the same run rather
 	// than starting from a count it did not read (gt-a4cdcd).
 	LockTimeouts int `json:"lock_timeouts,omitempty"`
+	// Contention is the schedule the tick read on the bead, so the job that
+	// runs later adds to the same run rather than starting every loss at
+	// attempt one (gt-kmkpao).
+	Contention *specdispatch.ContentionState `json:"contention,omitempty"`
 }
 
 // specInFlight is a running sling as the daemon hands it to the tick: the
@@ -208,7 +212,7 @@ func specHandOffPendingSlings(env specDispatchEnv, pending []specPendingSling, r
 		report.Pending = append(report.Pending, specSlingJob{
 			Bead: p.id, Rig: p.c.Rig, Agent: p.seat.Agent, Reason: p.seat.Reason,
 			Resume: p.resume, Gone: p.gone, ShapeNote: p.shapeNote, OverrunNote: p.overrunNote,
-			LockTimeouts: p.lockTimeouts, Run: p.c.Run,
+			LockTimeouts: p.lockTimeouts, Contention: p.contention, Run: p.c.Run,
 		})
 	}
 }
@@ -225,6 +229,7 @@ func (j specSlingJob) pending() specPendingSling {
 		shapeNote:    j.ShapeNote,
 		overrunNote:  j.OverrunNote,
 		lockTimeouts: j.LockTimeouts,
+		contention:   j.Contention,
 		entry:        specDispatchEntry{Bead: j.Bead, Rig: j.Rig, Agent: j.Agent},
 	}
 }
@@ -344,6 +349,7 @@ func specSlingReport(townRoot string, job specSlingJob, envFor func(townRoot, ca
 func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDispatchEnv {
 	specDetailCache.Store(specSlingDetailCacheFor(townRoot, cacheOwner))
 	recordLockTimeout, clearLockTimeout := specLockTimeoutCounter(townRoot)
+	recordContention, clearContention := specContentionStore(townRoot)
 	// One gateway listing for this job's sling, as the tick reads one for its
 	// own slings (gt-zapy97).
 	staleSeats := newSpecStaleSeats(traces, time.Now, specTownRunsSandboxes(townRoot))
@@ -355,6 +361,8 @@ func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDisp
 
 		RecordLockTimeout: recordLockTimeout,
 		ClearLockTimeout:  clearLockTimeout,
+		RecordContention:  recordContention,
+		ClearContention:   clearContention,
 		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
 			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
 		}),
