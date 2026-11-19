@@ -721,7 +721,7 @@ func pinRenderedJobs(t *testing.T) []cachevol.SeedJob {
 
 	// The shard route: a few entries the cap removes whole.
 	shard, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
-		Image: image, ClaimName: claim, Listing: pinTrimListing(2, 32), CapBytes: 0,
+		Image: image, ClaimName: claim, Listing: pinTrimListing(2, 32), CapBytes: 0, Now: trimListNow(),
 	})
 	if err != nil {
 		t.Fatalf("rendering the shard trim: %v", err)
@@ -733,7 +733,7 @@ func pinRenderedJobs(t *testing.T) []cachevol.SeedJob {
 	// it and a separator in the encoded list, which is what a shard is measured on.
 	perShard := cachevol.TrimShardBytes/(pinPathChars+3) + 1
 	claimTrim, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
-		Image: image, ClaimName: claim, Listing: pinTrimListing(perShard*(cachevol.TrimMaxShards+1), pinPathChars), CapBytes: 0,
+		Image: image, ClaimName: claim, Listing: pinTrimListing(perShard*(cachevol.TrimMaxShards+1), pinPathChars), CapBytes: 0, Now: trimListNow(),
 	})
 	if err != nil {
 		t.Fatalf("rendering the claim trim: %v", err)

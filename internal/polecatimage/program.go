@@ -336,19 +336,21 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 }
 
 // trimListWriteMain runs the writer: it plans PlanTrim's removal list from the claim at --root, under
-// the cap and sandbox count its Job passes, and writes the list and its digest into the claim where
-// the Job's trim container reads them. It is the claim-carried trim Job's init container.
+// the cap, sandbox count and clock its Job passes, and writes the list and its digest into the claim
+// where the Job's trim container reads them. It is the claim-carried trim Job's init container.
 //
 // The list is planned here, in the pod that mounts the claim, because a list past one set of shards
 // has no other channel that reaches the claim whole and nothing outside the cluster mounts it. Exit 3
 // with a reason on stderr means nothing was written: the list is refused whole or written whole, so
-// the trim container never reads a list the writer did not vouch for.
+// the trim container never reads a list the writer did not vouch for. The clock is required for the
+// same reason: a plan at the pod's own time would judge ages by a time the Job's builder never saw.
 func trimListWriteMain(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("trim-list-write", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	root := flags.String("root", cachevol.SeedCacheRoot, "the shared cache claim the trim plans and writes its list in")
 	capText := flags.String("cap-bytes", "", "the size to bring the claim under, in bytes")
 	sandboxesText := flags.String("sandboxes", "", "the count of running sandboxes, whose module cache the plan leaves alone")
+	nowText := flags.String("now", "", "the clock the file ages are judged by, as an RFC 3339 time, which the Job renders")
 	if err := flags.Parse(args); err != nil {
 		return 3
 	}
@@ -362,7 +364,12 @@ func trimListWriteMain(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "trim-list-write: --sandboxes needs a whole number of running sandboxes, 0 when none runs")
 		return 3
 	}
-	paths, err := TrimListPaths(*root, cap, sandboxes > 0, filepath.Walk)
+	now, err := time.Parse(time.RFC3339Nano, *nowText)
+	if err != nil || now.IsZero() {
+		fmt.Fprintln(stderr, "trim-list-write: --now needs the clock the Job was built at, as an RFC 3339 time")
+		return 3
+	}
+	paths, err := TrimListPaths(*root, cap, sandboxes > 0, now, filepath.Walk)
 	var digest string
 	if err == nil {
 		digest, err = writeTrimListInto(*root, paths)

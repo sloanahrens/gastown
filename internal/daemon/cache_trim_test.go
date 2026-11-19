@@ -1840,6 +1840,54 @@ func TestCacheTrimOverTheCapPinnedByASandboxRetriesSoon(t *testing.T) {
 	}
 }
 
+// TestCacheTrimKeepsBuildFilesInsideTheMinimumAge pins the floor at the pass: a
+// claim over the cap whose build-cache files are all younger than the build
+// cache's minimum age plans no removal, so the pass applies no Job and
+// retries soon, as it does for a claim the rules can only pin.
+func TestCacheTrimKeepsBuildFilesInsideTheMinimumAge(t *testing.T) {
+	t.Parallel()
+	const young = `[{"path":"gocache/aa/a","cache":"build","size":1000,` +
+		`"atime":"2026-10-29T04:30:00Z","mtime":"2026-10-29T04:30:00Z"},` +
+		`{"path":"gocache/bb/b","cache":"build","size":1000,` +
+		`"atime":"2026-10-29T04:40:00Z","mtime":"2026-10-29T04:40:00Z"}]`
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: young},
+	})
+	now := diskMaintNow // 04:45: both files were used inside the last hour
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance()
+	if got := f.applyCalls(); len(got) != 0 {
+		t.Fatalf("the pass applied %d objects for a claim whose files are all inside the minimum age: %v", len(got), f.verbs())
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "would remove nothing") {
+		t.Errorf("the log does not say the trim had nothing it may remove: %s", logged)
+	}
+	// An hour later the same files are past the floor, and the retried pass trims them.
+	now = diskMaintNow.Add(time.Hour)
+	f.d.runDiskMaintenance()
+	if got := f.applyCalls(); len(got) == 0 {
+		t.Errorf("the pass applied nothing an hour later, when the files are past the minimum age: %v", f.verbs())
+	}
+}
+
+// TestCacheTrimRefusesAZeroClock pins the plan's clock refusal at the pass: a
+// clock seam that answers the zero time plans nothing and says so, rather than
+// applying a trim whose file ages were never judged.
+func TestCacheTrimRefusesAZeroClock(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.diskMaint.now = func() time.Time { return time.Time{} }
+
+	f.d.runDiskMaintenance()
+	if got := f.applyCalls(); len(got) != 0 {
+		t.Fatalf("the pass applied %d objects with no clock to judge ages by: %v", len(got), f.verbs())
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "the trim plan needs the time its file ages are judged by") {
+		t.Errorf("the log does not name the zero clock: %s", logged)
+	}
+}
+
 // TestCacheTrimLogsEverySuccessfulTrim pins that a success is not held back by
 // the once-an-hour hold on refusals: the same trim run twice in one hour says it
 // applied both times.
@@ -2458,6 +2506,7 @@ func cacheTrimManifestWithLargeShards(t *testing.T, shards int) *cachevol.TrimMa
 		Listing:          listing,
 		CapBytes:         1024,
 		SandboxesRunning: 1,
+		Now:              diskMaintNow,
 	})
 	if err != nil {
 		t.Fatalf("the large listing builds no trim: %v", err)
@@ -2648,7 +2697,10 @@ func cacheTrimRemovalListSize(listing string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("the listing does not parse: %w", err)
 	}
-	plan := cachevol.PlanTrim(entries, 1024, true)
+	plan, err := cachevol.PlanTrim(entries, 1024, true, diskMaintNow)
+	if err != nil {
+		return 0, fmt.Errorf("planning the listing: %w", err)
+	}
 	paths := make([]string, 0, len(plan.Removals))
 	for _, removal := range plan.Removals {
 		paths = append(paths, removal.Path)
@@ -2990,8 +3042,10 @@ func TestCacheTrimCrossesTheShardCeilingByTheClaimRoute(t *testing.T) {
 		}
 	}
 
-	// The Job plans and writes the list itself, under the cap and the sandbox
-	// count the pass computed.
+	// The Job plans and writes the list itself, under the cap, the sandbox count
+	// and the clock the pass computed: the pod plans again when it runs, and
+	// the pass's clock keeps its list from judging ages by a time the fit check
+	// never saw.
 	pod := f.appliedTrimJob(t).Spec.Template.Spec
 	if len(pod.InitContainers) != 1 {
 		t.Fatalf("the applied Job runs %d init containers, want the list writer", len(pod.InitContainers))
@@ -3000,8 +3054,8 @@ func TestCacheTrimCrossesTheShardCeilingByTheClaimRoute(t *testing.T) {
 	if want := []string{cachevol.HelperPath, "trim-list-write"}; !slices.Equal(writer.Command, want) {
 		t.Errorf("the init container runs %v, want the image's list writer %v", writer.Command, want)
 	}
-	if want := []string{"--root", cachevol.SeedCacheRoot, "--cap-bytes", "1024", "--sandboxes", "1"}; !slices.Equal(writer.Args, want) {
-		t.Errorf("the list writer's args = %v, want the pass's cap and sandbox count %v", writer.Args, want)
+	if want := []string{"--root", cachevol.SeedCacheRoot, "--cap-bytes", "1024", "--sandboxes", "1", "--now", diskMaintNow.Format(time.RFC3339Nano)}; !slices.Equal(writer.Args, want) {
+		t.Errorf("the list writer's args = %v, want the pass's cap, sandbox count and clock %v", writer.Args, want)
 	}
 }
 
@@ -3703,14 +3757,17 @@ func TestCacheTrimFitCheckAgreesWithTheWriter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsing the listing: %v", err)
 	}
-	plan := cachevol.PlanTrim(entries, 0, false)
+	plan, err := cachevol.PlanTrim(entries, 0, false, diskMaintNow)
+	if err != nil {
+		t.Fatalf("planning the listing: %v", err)
+	}
 	paths := make([]string, 0, len(plan.Removals))
 	for _, removal := range plan.Removals {
 		paths = append(paths, removal.Path)
 	}
 	for _, free := range []int64{room - 1024, room, room + 1024} {
 		_, writeErr := polecatimage.WriteTrimList(paths, cacheTrimWriterFiles{free: free})
-		fitErr := cacheTrimClaimFits(entries, 0, 0, free)
+		fitErr := cacheTrimClaimFits(plan, free)
 		if (writeErr == nil) != (fitErr == nil) {
 			t.Errorf("room %d: the writer says %v, the fit check says %v; they must agree", free, writeErr, fitErr)
 		}

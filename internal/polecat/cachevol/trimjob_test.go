@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // trimInput is an input that builds: one build-cache file over the cap, the tests vary one field.
@@ -19,6 +20,7 @@ func trimInput() TrimJobInput {
 		Listing:          []Entry{file("gocache/ab/cdef", BuildCache, 100, 8, 8)},
 		CapBytes:         50,
 		SandboxesRunning: 0,
+		Now:              trimNow,
 	}
 }
 
@@ -124,7 +126,7 @@ func TestBuildTrimManifestCarriesTheRemovalsInTheMountedShards(t *testing.T) {
 
 	// 400 bytes over a 250-byte cap, so the two least recently used build-cache files go and the
 	// module cache stays, since a sandbox is running.
-	want := removedPaths(PlanTrim(in.Listing, in.CapBytes, true))
+	want := removedPaths(planTrim(t, in.Listing, in.CapBytes, true, in.Now))
 	if got := manifestPaths(t, m); !reflect.DeepEqual(got, want) {
 		t.Errorf("the shards list %v, want PlanTrim's removals %v", got, want)
 	}
@@ -165,9 +167,11 @@ func TestBuildTrimManifestCarriesAListTooLongForOneArgv(t *testing.T) {
 	in := trimInput()
 	in.Listing = listing
 	in.CapBytes = 0
+	// A clock past every entry's hour, so the plan is the whole list and the test measures the route.
+	in.Now = at(count + 2)
 	m := buildTrim(t, in)
 
-	plan := PlanTrim(listing, 0, false)
+	plan := planTrim(t, listing, 0, false, in.Now)
 	if len(plan.Removals) != count {
 		t.Fatalf("the plan removes %d of %d files, want every one", len(plan.Removals), count)
 	}
@@ -259,8 +263,9 @@ func halfShardPaths(n int) []string {
 func shardPerPathListing(n int) []Entry {
 	paths := halfShardPaths(n)
 	out := make([]Entry, 0, n)
-	for i, p := range paths {
-		out = append(out, file(p, BuildCache, 1, 0, i))
+	for _, p := range paths {
+		// Every entry is old at trimInput's clock, so the plan is the whole list the route counts.
+		out = append(out, file(p, BuildCache, 1, 1, 1))
 	}
 	return out
 }
@@ -375,8 +380,10 @@ func TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim(t *testing.T
 		t.Errorf("pod securityContext = %+v, want the trim to run as the cache user %d", sc, SeedUserID)
 	}
 
-	// The init container is the writer: it plans PlanTrim's list from the claim under the caller's cap
-	// and sandbox count, and the main container cannot start until it has written the list.
+	// The init container is the writer: it plans PlanTrim's list from the claim under the caller's cap,
+	// sandbox count and clock, and the main container cannot start until it has written the list. The
+	// clock is the caller's, not the pod's, so the pod judges each file's age by the time the plan and
+	// the fit check already used.
 	if len(pod.InitContainers) != 1 {
 		t.Fatalf("init containers = %d, want the one that writes the list", len(pod.InitContainers))
 	}
@@ -384,8 +391,8 @@ func TestBuildTrimManifestCarriesAListPastTheShardCeilingInTheClaim(t *testing.T
 	if want := []string{HelperPath, "trim-list-write"}; !reflect.DeepEqual(plan.Command, want) {
 		t.Errorf("init command = %v, want the image's trim-list-write helper", plan.Command)
 	}
-	if want := []string{"--root", SeedCacheRoot, "--cap-bytes", "0", "--sandboxes", "2"}; !reflect.DeepEqual(plan.Args, want) {
-		t.Errorf("init args = %v, want the caller's cap and sandbox count", plan.Args)
+	if want := []string{"--root", SeedCacheRoot, "--cap-bytes", "0", "--sandboxes", "2", "--now", trimNow.Format(time.RFC3339Nano)}; !reflect.DeepEqual(plan.Args, want) {
+		t.Errorf("init args = %v, want the caller's cap, sandbox count and clock", plan.Args)
 	}
 	if len(plan.VolumeMounts) != 1 || plan.VolumeMounts[0].MountPath != SeedCacheRoot {
 		t.Errorf("init mounts = %+v, want the claim at %s", plan.VolumeMounts, SeedCacheRoot)
@@ -511,7 +518,7 @@ func TestBuildTrimManifestTakesTheSandboxCountFromItsCaller(t *testing.T) {
 			in.CapBytes = 50
 			in.SandboxesRunning = tc.running
 			m := buildTrim(t, in)
-			want := removedPaths(PlanTrim(in.Listing, in.CapBytes, tc.running > 0))
+			want := removedPaths(planTrim(t, in.Listing, in.CapBytes, tc.running > 0, in.Now))
 			if got := manifestPaths(t, m); !reflect.DeepEqual(got, want) {
 				t.Errorf("the shards list %v, want PlanTrim's removals %v", got, want)
 			}
@@ -565,8 +572,8 @@ func hasModulePath(paths []string) bool {
 }
 
 // TestBuildTrimManifestRefusesAnInputItCannotRender pins each refusal: a name, namespace, image or
-// claim Kubernetes would reject, a cap or count that is not a size, a listing with nothing to remove,
-// and a path that could name a file outside the claim.
+// claim Kubernetes would reject, a cap or count that is not a size, a clock the plan is refused
+// without, a listing with nothing to remove, and a path that could name a file outside the claim.
 func TestBuildTrimManifestRefusesAnInputItCannotRender(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -580,6 +587,7 @@ func TestBuildTrimManifestRefusesAnInputItCannotRender(t *testing.T) {
 		{"no claim", func(in *TrimJobInput) { in.ClaimName = "" }},
 		{"a negative cap", func(in *TrimJobInput) { in.CapBytes = -1 }},
 		{"a negative sandbox count", func(in *TrimJobInput) { in.SandboxesRunning = -1 }},
+		{"no clock", func(in *TrimJobInput) { in.Now = time.Time{} }},
 		{"nothing listed", func(in *TrimJobInput) { in.Listing = nil }},
 		{"a listing under the cap", func(in *TrimJobInput) { in.CapBytes = 1000 }},
 		{"an absolute path", func(in *TrimJobInput) {
@@ -861,7 +869,8 @@ func TestBuildTrimManifestTakesTheClaimForAListPastTheShardBytesCeiling(t *testi
 	listing := make([]Entry, 0, n)
 	for i := 0; i < n; i++ {
 		p := fmt.Sprintf("gocache/%02x/%0*d", i%256, pathLen-len("gocache/00/"), i)
-		listing = append(listing, file(p, BuildCache, 1, 0, i))
+		// Every entry is old enough to remove at trimInput's clock: this test is the list's size.
+		listing = append(listing, file(p, BuildCache, 1, 1, 1))
 	}
 	var raw int
 	for _, e := range listing {
