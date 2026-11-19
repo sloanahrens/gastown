@@ -17,7 +17,10 @@
 //     session that defers again (gt-otb5m3). A live seat whose branch is on
 //     origin with a head from this run, and whose progress evidence has stood
 //     still, finished its work and lost its turn: it is restarted onto that
-//     branch, at most once per bead per 30 minutes (gt-k6t2b3);
+//     branch, at most once per bead per 30 minutes (gt-k6t2b3). A live seat
+//     that stopped on an escalation of its own for its open bead, and went
+//     quiet after that escalation was closed, is restarted the same way
+//     whether or not it pushed, once the close is two minutes old (gt-r3c58b);
 //   - orphaned molecules: a polecat that is gone (no session and no
 //     directory) leaves its work bead's bonded mol-polecat-work wisp and step
 //     wisps open; they are closed so the base bead is not blocked by them;
@@ -139,6 +142,10 @@ const (
 	// revived, so a seat that genuinely cannot finish does not restart on
 	// every tick.
 	reviveCooldown = 30 * time.Minute
+	// escalationGrace is how old an answer must be before a live seat is
+	// restarted on it: the escalation close nudge reaches a host seat first
+	// (reviveAnswered, gt-r3c58b).
+	escalationGrace = 2 * time.Minute
 )
 
 // Actor is the supervisor actor and comment author of every tick action.
@@ -1035,14 +1042,23 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		if f, ok := s.revivePushed(rig, name, res); ok {
 			return f, true
 		}
+		// A live seat that stopped on an escalation of its own and went quiet
+		// after it was closed never read the answer (reviveAnswered).
+		if f, ok := s.reviveAnswered(rig, name, res); ok {
+			return f, true
+		}
 		return Finding{}, false
 	case liveness.Stalled:
 		if f, ok := s.releaseStalled(rig, name, res); ok {
 			return f, true
 		}
-		// A stall on a pushed branch is the same finished work, only
-		// quieter, so the revival is tried before the stall is reported.
+		// A stall on a pushed branch, or after an answered escalation, is the
+		// same finished or waiting work, only quieter, so the revival is tried
+		// before the stall is reported.
 		if f, ok := s.revivePushed(rig, name, res); ok {
+			return f, true
+		}
+		if f, ok := s.reviveAnswered(rig, name, res); ok {
 			return f, true
 		}
 		// Reported only: a stall on work that is not over is a long turn,
@@ -1510,35 +1526,17 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 		return Finding{}, false
 	}
 	now := s.o.Now()
-	if hb := s.env.Heartbeat(rig, name); hb != nil {
-		switch strings.ToLower(strings.TrimSpace(hb.State)) {
-		case "stuck":
-			f.Outcome, f.Detail = OutcomeSkipped, "heartbeat says stuck: held by the polecat"
-			return f, true
-		case "exiting":
-			if now.Sub(hb.At) < s.o.HeartbeatFresh {
-				f.Outcome, f.Detail = OutcomeSkipped, "heartbeat says exiting: inside gt done"
-				return f, true
-			}
-		}
+	if why, held := s.reviveHeldByHeartbeat(rig, name, now); held {
+		f.Outcome, f.Detail = OutcomeSkipped, why
+		return f, true
 	}
-	work, err := s.env.AssignedWork(rig, name)
+	work, err := s.reviveWork(rig, name)
 	if err != nil {
 		f.Outcome, f.Detail = OutcomeUnknown, "quiet seat's work unreadable: "+err.Error()
 		return f, true
 	}
-	if work == nil || work.IsSubmitted() {
+	if work == nil {
 		return Finding{}, false
-	}
-	switch strings.ToLower(strings.TrimSpace(work.Status)) {
-	case "hooked", "in_progress", "open":
-	default:
-		return Finding{}, false
-	}
-	if s.o.HoldReason != nil {
-		if why := s.o.HoldReason(*work); why != "" {
-			return Finding{}, false
-		}
 	}
 	head, err := s.env.PushedSinceSling(rig, name)
 	if err != nil {
@@ -1549,32 +1547,168 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 		return Finding{}, false
 	}
 	quiet := res.QuietFor.Round(time.Second)
+	return s.reviveRestart(rig, name, work, now, quiet, revivalReason(work.ID, head, quiet)), true
+}
+
+// reviveAnswered restarts a LIVE seat that stopped on an escalation of its own
+// for its open work bead and went quiet after the escalation was closed
+// (gt-r3c58b). A sandbox seat cannot be nudged, and the escalation close nudge
+// reaches only a seat that saw the escalation open, so an answer closed while
+// the seat waited on it is never read and nothing else wakes the seat.
+//
+// The close is read as the answer when it came after the seat's last output
+// (now minus its quiet time) and at least escalationGrace ago, which leaves the
+// close nudge time to reach a host seat first. The rule acts only on a bead the
+// seat holds open and has not submitted, and only when the seat's escalations
+// for that bead are all closed (SeatEscalationVerdict, the tie the stuck-seat
+// tick reads): an open one holds it, and so does a closed one with no close
+// time. It needs no pushed branch, so it applies whether or not the seat
+// pushed. The restart reason names the escalation and its close reason.
+//
+// It shares the revival rule's heartbeat guard, work checks and cooldown, so a
+// seat is revived for a bead at most once per reviveCooldown, whichever rule
+// revived it. A failed read is Unknown and nothing is acted on. It reports
+// ok=false when the rule does not apply.
+func (s *Scanner) reviveAnswered(rig, name string, res liveness.Result) (Finding, bool) {
+	f := Finding{Kind: "seat", Subject: name}
+	// A close at or before now-escalationGrace that is after now-QuietFor needs
+	// a quiet longer than the grace, so a shorter quiet cannot fire.
+	if res.QuietFor <= escalationGrace {
+		return Finding{}, false
+	}
+	now := s.o.Now()
+	if why, held := s.reviveHeldByHeartbeat(rig, name, now); held {
+		f.Outcome, f.Detail = OutcomeSkipped, why
+		return f, true
+	}
+	work, err := s.reviveWork(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "quiet seat's work unreadable: "+err.Error()
+		return f, true
+	}
+	if work == nil {
+		return Finding{}, false
+	}
+	raised, err := s.env.PolecatEscalations(rig)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "escalations unreadable: "+err.Error()
+		return f, true
+	}
+	if SeatEscalationVerdict(rig, name, work.ID, raised).Verdict != EscalationResolved {
+		return Finding{}, false
+	}
+	var answer Escalation
+	for _, e := range seatEscalationMatches(rig, name, work.ID, raised) {
+		if e.ClosedAt.IsZero() {
+			f.Outcome, f.Detail = OutcomeSkipped, e.ID+" for "+work.ID+" has no close time; nothing is acted on"
+			return f, true
+		}
+		if e.ClosedAt.After(answer.ClosedAt) {
+			answer = e
+		}
+	}
+	if lastOutput := now.Add(-res.QuietFor); !answer.ClosedAt.After(lastOutput) {
+		// Closed before the seat last wrote anything: it answered itself, or
+		// kept working after the answer. Nothing is waiting on it.
+		return Finding{}, false
+	}
+	if age := now.Sub(answer.ClosedAt); age < escalationGrace {
+		f.Outcome, f.Detail = OutcomeSkipped, fmt.Sprintf("%s was closed %s ago; waiting %s for the close nudge to reach the seat",
+			answer.ID, age.Round(time.Second), escalationGrace)
+		return f, true
+	}
+	quiet := res.QuietFor.Round(time.Second)
+	return s.reviveRestart(rig, name, work, now, quiet, answeredReason(work.ID, answer, quiet)), true
+}
+
+// reviveHeldByHeartbeat is the heartbeat guard both revival rules apply first:
+// a heartbeat that says stuck is held by its own polecat, and an exiting one
+// that is still fresh is inside gt done. It returns the reason the seat is held.
+func (s *Scanner) reviveHeldByHeartbeat(rig, name string, now time.Time) (string, bool) {
+	hb := s.env.Heartbeat(rig, name)
+	if hb == nil {
+		return "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(hb.State)) {
+	case "stuck":
+		return "heartbeat says stuck: held by the polecat", true
+	case "exiting":
+		if now.Sub(hb.At) < s.o.HeartbeatFresh {
+			return "heartbeat says exiting: inside gt done", true
+		}
+	}
+	return "", false
+}
+
+// reviveWork returns the work bead a quiet live seat may be revived for: an
+// assigned bead that is not submitted, in an assigned status, and not held from
+// dispatch. It returns nil when the rule does not apply, and an error when the
+// bead cannot be read.
+func (s *Scanner) reviveWork(rig, name string) (*Work, error) {
+	work, err := s.env.AssignedWork(rig, name)
+	if err != nil {
+		return nil, err
+	}
+	if work == nil || work.IsSubmitted() {
+		return nil, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(work.Status)) {
+	case "hooked", "in_progress", "open":
+	default:
+		return nil, nil
+	}
+	if s.o.HoldReason != nil {
+		if why := s.o.HoldReason(*work); why != "" {
+			return nil, nil
+		}
+	}
+	return work, nil
+}
+
+// reviveRestart is the end both revival rules share: a bead revived inside
+// reviveCooldown is skipped, the cooldown stamp is written before the restart so
+// a failed restart is not retried every tick, and the supervisor's refusal or
+// failure is the outcome. reason is the restart reason; quiet is the seat's
+// quiet time, named when the cooldown holds it.
+func (s *Scanner) reviveRestart(rig, name string, work *Work, now time.Time, quiet time.Duration, reason string) Finding {
+	f := Finding{Kind: "seat", Subject: name}
 	at, err := s.env.ReviveCooldown(rig, name, work.ID)
 	if err != nil {
 		f.Outcome, f.Detail = OutcomeUnknown, "revival cooldown unreadable: "+err.Error()
-		return f, true
+		return f
 	}
 	if !at.IsZero() && now.Sub(at) < reviveCooldown {
 		f.Outcome = OutcomeSkipped
 		f.Detail = fmt.Sprintf("%s was revived %s ago and is quiet again for %s; the %s cooldown holds it until %s",
 			work.ID, now.Sub(at).Round(time.Second), quiet, reviveCooldown, at.Add(reviveCooldown).Format(time.RFC3339))
-		return f, true
+		return f
 	}
 	if err := s.env.MarkRevived(rig, name, work.ID, now); err != nil {
 		f.Outcome, f.Detail = OutcomeUnknown, "recording the revival: "+err.Error()
-		return f, true
+		return f
 	}
-	reason := revivalReason(work.ID, head, quiet)
 	if err := s.env.Restart(rig, name, reason); err != nil {
 		if s.o.IsRefusal(err) {
 			f.Outcome, f.Detail = OutcomeRefused, err.Error()
-			return f, true
+			return f
 		}
 		f.Outcome, f.Detail = OutcomeFailed, err.Error()
-		return f, true
+		return f
 	}
 	f.Outcome, f.Detail = OutcomeRevived, reason
-	return f, true
+	return f
+}
+
+// answeredReason is the restart reason an answered-escalation revival writes: it
+// names the bead, the escalation the seat stopped on and its close reason, so the
+// log and the seat's record say what was answered.
+func answeredReason(bead string, e Escalation, quiet time.Duration) string {
+	answer := fmt.Sprintf("closed with the reason %q", e.CloseReason)
+	if e.CloseReason == "" {
+		answer = "closed with no close reason"
+	}
+	return fmt.Sprintf("patrol scan: revived %s after %s quiet: escalation %s was %s, after the seat's last output",
+		bead, quiet, e.ID, answer)
 }
 
 // finishedExitEvidence returns the evidence that the seat the last turn left
