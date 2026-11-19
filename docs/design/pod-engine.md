@@ -203,6 +203,7 @@ These files hold the literal `docker` without running the CLI as a program of a 
 - `internal/testutil/unittier/tools.go` — the host tools a unit-tier run may exec.
 - `internal/vmstart/dns_repair.go` — the restarts a DNS repair returns as argv for the caller's runner: the gt-sbx kind node restart names `docker`, and the gt-control one names `kubectl`; this package runs neither (gt-x5a7bz).
 - `internal/vmstart/registry_repair.go` — the `gt-registry` restart a registry repair returns as argv for the caller's runner; this package runs no process itself (gt-6imyon).
+- `internal/vmstart/start.go` — the container start Start returns as argv for the caller's runner; this package runs no process itself (gt-igzpx9).
 
 ## Needs an engine
 
