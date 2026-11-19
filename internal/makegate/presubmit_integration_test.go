@@ -3,6 +3,7 @@
 package makegate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -23,9 +24,34 @@ import (
 // Each test is named after its shell case and its comment names the mutation
 // that turns it red. The integration-vet cases (gt-edlvvt) have no shell case:
 // the scratch checkout's second commit changes a .go file, so they pin the
-// presubmit recipe line's place and its exit status against it. The make calls
-// are processes, so this file is integration tier
+// vet's guarded call and its exit status against it; the vet's place in the
+// recipe is pinned against the checkout's Makefile source instead (gt-digv4n).
+// The make calls are processes, so this file is integration tier
 // (docs/standards/test-engineering.md, rule 2).
+
+// presubmitRecipe returns the recipe of the Makefile's `presubmit: lint` rule:
+// the tab-indented lines after the rule line, up to the first line that is
+// neither tab-indented nor blank. The ordering case reads this source instead
+// of a dry run, because make runs a recipe line that holds $(MAKE) even under
+// -n and presubmit has one, so `make -n presubmit` builds and tests the
+// checkout (gt-digv4n, gt-qax2ta, sweep f213fda4, 398 s).
+func presubmitRecipe(makefile string) (string, error) {
+	lines := strings.Split(makefile, "\n")
+	for i, line := range lines {
+		if strings.TrimRight(line, " \t") != "presubmit: lint" {
+			continue
+		}
+		var recipe []string
+		for _, r := range lines[i+1:] {
+			if !strings.HasPrefix(r, "\t") && strings.TrimSpace(r) != "" {
+				break
+			}
+			recipe = append(recipe, r)
+		}
+		return strings.Join(recipe, "\n"), nil
+	}
+	return "", fmt.Errorf("the Makefile has no `presubmit: lint` rule: the ordering case has no recipe to read")
+}
 
 // gateStubGoInterrupt is the gate family's go stub with the interrupt path the
 // shell fixture's stub carries, built from gateStubGo's own pieces (its call
@@ -124,17 +150,30 @@ func TestIntegrationPresubmitUnchangedTrackerModuleNotTested(t *testing.T) {
 // integration vet after the build and before the tests, and only when the
 // branch changed a Go file.
 // Mutation: delete the presubmit recipe line that runs
-// ./internal/testpolicy/cmd/integrationvet, and both cases go red; move it
-// below the changed-package tests, and the order case fails; drop its
+// ./internal/testpolicy/cmd/integrationvet, and the order and vet cases go red;
+// move it below the changed-package tests, and the order case fails; drop its
 // `git diff --quiet ... -- '*.go'` guard, and the unchanged case runs the vet.
 func TestIntegrationPresubmitRunsTheIntegrationVet(t *testing.T) {
 	t.Run("after the build and before the tests", func(t *testing.T) {
-		out := dryTarget(t, defaultsMake(t, repoRoot(t)), "presubmit")
-		build := lineOf(out, "go build ./... ||")
-		vet := lineOf(out, "go run ./internal/testpolicy/cmd/integrationvet")
-		tests := lineOf(out, "go test -timeout 10m -coverprofile=")
+		recipe, err := presubmitRecipe(makefileText(t, repoRoot(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		build := lineOf(recipe, "go build ./... ||")
+		vet := lineOf(recipe, "go run ./internal/testpolicy/cmd/integrationvet")
+		tests := lineOf(recipe, "go test -timeout 10m -coverprofile=")
 		if build == 0 || vet == 0 || tests == 0 || build >= vet || vet >= tests {
-			t.Fatalf("presubmit's build is at line %d, its integration vet at %d and its tests at %d, want build < vet < tests\n%s", build, vet, tests, out)
+			t.Fatalf("presubmit's build is at line %d, its integration vet at %d and its tests at %d, want build < vet < tests\n%s", build, vet, tests, recipe)
+		}
+	})
+
+	t.Run("a Makefile with no presubmit: lint rule", func(t *testing.T) {
+		recipe, err := presubmitRecipe("presubmit:\n\techo hi\n")
+		if err == nil {
+			t.Fatalf("presubmitRecipe returned %q for a Makefile with no `presubmit: lint` rule, want an error naming the rule", recipe)
+		}
+		if !strings.Contains(err.Error(), "presubmit: lint") {
+			t.Fatalf("the error does not name the missing `presubmit: lint` rule: %v", err)
 		}
 	})
 
