@@ -42,9 +42,12 @@ operator-created. A render that holds a static document, a Secret, an admission
 policy or a Role among them, is refused by name before the hold is taken.
 
 Before the hold is taken the roll compares the rendered Deployments with the
-live ones and prints every difference. A cluster that already matches is never
-restarted: the roll says so and exits 0 without taking the hold. An input it
-cannot read stops it there too, since an unread object is not one in step.
+live ones and prints every difference. Only the Deployments are compared: a
+change to a Service, a claim, the ServiceAccount or the tracker backup CronJob
+alone is not a difference this command sees, and those kinds are applied only
+beside a Deployment that differs. A cluster whose Deployments already match is
+never restarted: the roll says so and exits 0 without taking the hold. An input
+it cannot read stops it there too, since an unread object is not one in step.
 --dry-run prints the steps, their bounds and the diff lines, and takes no hold
 and writes nothing.
 
@@ -128,9 +131,13 @@ type clusterRollDeps struct {
 // reads are not wired here, as the gate runner roll's are not, so a real roll
 // refuses before it takes the hold; --dry-run needs neither.
 func clusterRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait, rolloutWait time.Duration, dryRun bool) clusterRollDeps {
+	// The command found the town already; the render takes that root rather than
+	// searching for one again that the hold path and the render could disagree on.
+	render := realClusterRenderDeps(out)
+	render.findTown = func() (string, error) { return townRoot, nil }
 	return clusterRollDeps{
 		apply: &clusterRollApplier{
-			render:      realClusterRenderDeps(out),
+			render:      render,
 			kubectl:     realRunFunc(),
 			rolloutWait: rolloutWait,
 			out:         out,
@@ -220,9 +227,9 @@ func them(n int) string {
 
 // runTownClusterRoll runs the roll over the daemon namespace: runnerroll.Run
 // owns the steps, and this supplies the namespace's applier, its step names and
-// its target. The render is compared with the live cluster before the hold is
-// taken, so an empty diff never restarts a clean cluster and a refused render
-// never takes the hold.
+// its target. The render is built once, before the hold, and compared with the
+// live cluster, so an empty diff never restarts a clean cluster, a refused
+// render never takes the hold, and the applied set is the one that was compared.
 func runTownClusterRoll(d clusterRollDeps) error {
 	if d.out == nil {
 		return errors.New("the roll has nowhere to print, so an operator could not see the steps it took")
@@ -248,16 +255,26 @@ func runTownClusterRoll(d clusterRollDeps) error {
 	ctx, stop := d.rollContext()
 	defer stop()
 
+	// Render once, before the hold: the diff, the apply and the ready wait read
+	// this render, so a file that changes under the roll cannot make the decision
+	// and the applied set disagree. A document the roll does not apply refuses
+	// here, before the hold is taken.
+	m, err := d.apply.manifests()
+	if err != nil {
+		return err
+	}
+	target := clusterRollTarget{applier: d.apply, manifests: m}
+
 	if !d.dryRun {
-		lines, err := d.apply.Diff(ctx)
+		lines, err := target.Diff(ctx)
 		if err != nil {
 			return fmt.Errorf("comparing the %s with the live cluster: %w", d.apply.Name(), err)
 		}
 		if len(lines) == 0 {
-			fmt.Fprintf(d.out, "no differences: the live %s matches the rendered manifests; no hold was taken and nothing was applied\n", d.apply.Name())
+			fmt.Fprintf(d.out, "no differences: %s; no hold was taken and nothing was applied\n", target.DiffMatch())
 			return nil
 		}
-		fmt.Fprintf(d.out, "the live %s differs from the rendered manifests:\n", d.apply.Name())
+		fmt.Fprintln(d.out, target.DiffHeading())
 		for _, line := range lines {
 			fmt.Fprintln(d.out, line)
 		}
@@ -280,10 +297,52 @@ func runTownClusterRoll(d clusterRollDeps) error {
 		DryRun:      d.dryRun,
 		Step:        d.step,
 	}
-	return runnerroll.Run(ctx, deps, d.apply, opts)
+	return runnerroll.Run(ctx, deps, target, opts)
 }
 
-// clusterRollApplier is the daemon namespace as runnerroll.Run's target: it
+// clusterRollTarget is the daemon namespace as runnerroll.Run's target: the one
+// render the run built, so the diff, the apply and the ready wait cannot read
+// different renders.
+type clusterRollTarget struct {
+	applier   *clusterRollApplier
+	manifests k8sdaemon.Manifests
+}
+
+// Name names the target in the roll's messages.
+func (t clusterRollTarget) Name() string { return t.applier.Name() }
+
+// DiffMatch is the line the roll prints when the compare finds nothing. Only the
+// rendered Deployments are compared, so the line names the Deployments and never
+// the namespace or the manifests.
+func (t clusterRollTarget) DiffMatch() string {
+	return "the live Deployments match the rendered Deployments"
+}
+
+// DiffHeading introduces the lines where the Deployments differ.
+func (t clusterRollTarget) DiffHeading() string {
+	return "the live Deployments differ from the rendered Deployments:"
+}
+
+// Diff is the drift compare's lines for every rendered Deployment, each prefixed
+// with the resource it describes, or none when the live objects match the render.
+func (t clusterRollTarget) Diff(ctx context.Context) ([]string, error) {
+	return t.applier.diff(ctx, t.manifests)
+}
+
+// Apply writes the apply set through the cluster client, one object per call. An
+// apply that fails returns an error, so the roll stops and leaves the caller to
+// release the hold.
+func (t clusterRollTarget) Apply(ctx context.Context) error {
+	return t.applier.apply(ctx, t.manifests)
+}
+
+// WaitReady waits for each rendered Deployment's rollout within rolloutWait, then
+// reads its Available condition.
+func (t clusterRollTarget) WaitReady(ctx context.Context) error {
+	return t.applier.waitReady(ctx, t.manifests)
+}
+
+// clusterRollApplier is the daemon namespace as the roll applies it: it
 // renders from the recorded flags the way drift does, applies the workload
 // kinds, and waits for each rendered Deployment.
 type clusterRollApplier struct {
@@ -317,10 +376,11 @@ func (a clusterRollApplier) Wired() error {
 	return nil
 }
 
-// manifests is the render the diff, the apply and the ready wait all start
-// from: the flags the last live render recorded, the image values file and the
-// secrets manifest, built the way drift builds them. A document the roll does
-// not apply refuses the render here, before the hold is taken.
+// manifests is the one render the run applies: the flags the last live render
+// recorded, the image values file and the secrets manifest, built the way drift
+// builds them. runTownClusterRoll calls it once and passes the result to the
+// diff, the apply and the ready wait. A document the roll does not apply refuses
+// the render here, before the hold is taken.
 func (a clusterRollApplier) manifests() (k8sdaemon.Manifests, error) {
 	root, err := a.render.findTown()
 	if err != nil {
@@ -334,8 +394,8 @@ func (a clusterRollApplier) manifests() (k8sdaemon.Manifests, error) {
 	if !ok {
 		return k8sdaemon.Manifests{}, fmt.Errorf("no live render has recorded its flags at %s, so there is no render to apply; run a live render with --record-flags first", recordPath)
 	}
-	// The record is under the root the run already found, so the values assembly
-	// takes the same root rather than a second lookup that could disagree with it.
+	// The record is under the root this function just found, so the values
+	// assembly takes that same root rather than a second lookup.
 	findTown := func() (string, error) { return root, nil }
 	v, _, _, err := clusterRenderValues(a.render, flags, findTown)
 	if err != nil {
@@ -450,13 +510,9 @@ func claimIfSet(c k8sdaemon.PersistentVolumeClaim) *k8sdaemon.PersistentVolumeCl
 	return &c
 }
 
-// Diff is the drift compare's lines for every rendered Deployment, each prefixed
-// with the resource it describes, or none when the live objects match the render.
-func (a clusterRollApplier) Diff(ctx context.Context) ([]string, error) {
-	m, err := a.manifests()
-	if err != nil {
-		return nil, err
-	}
+// diff is the drift compare's lines for every Deployment in the render, each
+// prefixed with the resource it describes, or none when the live objects match.
+func (a clusterRollApplier) diff(ctx context.Context, m k8sdaemon.Manifests) ([]string, error) {
 	d := clusterDriftDeps{
 		render:  clusterRenderDeps{encode: a.render.encode},
 		kubectl: a.kubectl,
@@ -474,14 +530,10 @@ func (a clusterRollApplier) Diff(ctx context.Context) ([]string, error) {
 	return lines, nil
 }
 
-// Apply writes the apply set through the cluster client, one object per call. A
-// build or an apply that fails returns an error, so the roll stops and leaves
-// the caller to release the hold.
-func (a clusterRollApplier) Apply(ctx context.Context) error {
-	m, err := a.manifests()
-	if err != nil {
-		return err
-	}
+// apply writes the render's apply set through the cluster client, one object per
+// call. A call that fails returns an error, so the roll stops and leaves the
+// caller to release the hold.
+func (a clusterRollApplier) apply(ctx context.Context, m k8sdaemon.Manifests) error {
 	for _, object := range clusterRollObjects(m) {
 		if err := a.applyObject(ctx, object); err != nil {
 			return err
@@ -490,13 +542,9 @@ func (a clusterRollApplier) Apply(ctx context.Context) error {
 	return nil
 }
 
-// WaitReady waits for each rendered Deployment's rollout within rolloutWait, then
+// waitReady waits for each rendered Deployment's rollout within rolloutWait, then
 // reads its Available condition.
-func (a clusterRollApplier) WaitReady(ctx context.Context) error {
-	m, err := a.manifests()
-	if err != nil {
-		return err
-	}
+func (a clusterRollApplier) waitReady(ctx context.Context, m k8sdaemon.Manifests) error {
 	for _, target := range clusterRollDeploymentTargets(m) {
 		if err := waitDeploymentReady(ctx, a.kubectl, a.out, target.namespace, target.resource, a.rolloutWait); err != nil {
 			return err

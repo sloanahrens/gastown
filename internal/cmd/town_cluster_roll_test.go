@@ -134,6 +134,30 @@ func appliedObjects(out *bytes.Buffer) []string {
 	return applied
 }
 
+// noDifferencesLine is the line the roll prints when the compare finds nothing.
+// The compare covers the Deployments only, so the line must say that and nothing
+// wider.
+func noDifferencesLine(t *testing.T, out *bytes.Buffer) string {
+	t.Helper()
+	for _, line := range driftLines(out) {
+		if strings.HasPrefix(line, "no differences:") {
+			return line
+		}
+	}
+	t.Fatalf("the roll printed no no-differences line; printed:\n%s", out.String())
+	return ""
+}
+
+// driftServiceChanged makes a live Service differ from the render, the change
+// the roll's Deployment-only compare does not see.
+func driftServiceChanged(t *testing.T, live map[string]any) {
+	t.Helper()
+	if live["kind"] != "Service" {
+		return
+	}
+	driftObjectAt(live, "metadata", "annotations")["example.test/hand-patched"] = "true"
+}
+
 // appliedDeployment decodes the Deployment the roll handed kubectl under name.
 func appliedDeployment(t *testing.T, k *recordingKubectl, name string) k8sdaemon.Deployment {
 	t.Helper()
@@ -225,8 +249,10 @@ func TestTownClusterRollAppliesTheRenderedDeployment(t *testing.T) {
 	}
 }
 
-// TestTownClusterRollEmptyDiffTakesNoHold: a cluster that already matches the
-// render is never restarted, so no hold is taken and nothing is applied.
+// TestTownClusterRollEmptyDiffTakesNoHold: a cluster whose Deployments already
+// match the render is never restarted, so no hold is taken and nothing is
+// applied. The line says the Deployments match, never the namespace or the
+// manifests, since only the Deployments were compared.
 func TestTownClusterRollEmptyDiffTakesNoHold(t *testing.T) {
 	t.Parallel()
 	d, _, town := driftFourDeploymentSeams(t)
@@ -236,8 +262,14 @@ func TestTownClusterRollEmptyDiffTakesNoHold(t *testing.T) {
 	if err := runTownClusterRoll(f.deps); err != nil {
 		t.Fatalf("roll: %v\nprinted:\n%s", err, f.out.String())
 	}
-	if !strings.Contains(f.out.String(), "no differences") {
-		t.Errorf("the roll did not say the cluster matches; printed:\n%s", f.out.String())
+	line := noDifferencesLine(t, f.out)
+	if !strings.Contains(line, "the live Deployments match the rendered Deployments") {
+		t.Errorf("the empty-diff line = %q, want it to name the Deployments", line)
+	}
+	for _, banned := range []string{"namespace", "manifests"} {
+		if strings.Contains(line, banned) {
+			t.Errorf("the empty-diff line = %q, want no %q, since only the Deployments were compared", line, banned)
+		}
 	}
 	if len(f.events.calls) != 0 {
 		t.Errorf("calls = %v, want no hold taken and no wait", f.events.calls)
@@ -246,6 +278,30 @@ func TestTownClusterRollEmptyDiffTakesNoHold(t *testing.T) {
 		if len(call.args) > 0 && call.args[0] != "get" {
 			t.Errorf("ran kubectl %v, want only the diff's reads", call.args)
 		}
+	}
+	if got := appliedObjects(f.out); len(got) != 0 {
+		t.Errorf("applied = %v, want nothing", got)
+	}
+}
+
+// TestTownClusterRollIgnoresAServiceOnlyDifference: the compare covers only the
+// Deployments, so a live Service that differs from the render is not seen. The
+// roll reports the Deployments matching, takes no hold and applies nothing,
+// which pins the stated limit.
+func TestTownClusterRollIgnoresAServiceOnlyDifference(t *testing.T) {
+	t.Parallel()
+	d, _, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	f := newClusterRollFixture(t, d.render, clusterRollAnswering(t, driftAnswering(t, m, driftServiceChanged)))
+
+	if err := runTownClusterRoll(f.deps); err != nil {
+		t.Fatalf("roll: %v\nprinted:\n%s", err, f.out.String())
+	}
+	if line := noDifferencesLine(t, f.out); !strings.Contains(line, "the live Deployments match the rendered Deployments") {
+		t.Errorf("the empty-diff line = %q, want it to name the Deployments", line)
+	}
+	if len(f.events.calls) != 0 {
+		t.Errorf("calls = %v, want no hold taken", f.events.calls)
 	}
 	if got := appliedObjects(f.out); len(got) != 0 {
 		t.Errorf("applied = %v, want nothing", got)
@@ -328,6 +384,9 @@ func TestTownClusterRollDryRunPrintsTheDiffAndWritesNothing(t *testing.T) {
 	if !strings.Contains(f.out.String(), "deployment/bd-gateway: ") {
 		t.Errorf("the dry run did not print the gateway's diff line; printed:\n%s", f.out.String())
 	}
+	if !strings.Contains(f.out.String(), "the live Deployments differ from the rendered Deployments:") {
+		t.Errorf("the dry run did not name the Deployments it compared; printed:\n%s", f.out.String())
+	}
 	if len(f.events.calls) != 0 {
 		t.Errorf("calls = %v, want no hold taken", f.events.calls)
 	}
@@ -335,6 +394,33 @@ func TestTownClusterRollDryRunPrintsTheDiffAndWritesNothing(t *testing.T) {
 		if len(call.args) == 0 || call.args[0] != "get" {
 			t.Errorf("ran kubectl %v, want only the diff's reads", call.args)
 		}
+	}
+}
+
+// TestTownClusterRollDryRunSaysTheDeploymentsMatch: a dry run whose Deployments
+// match prints the Deployments-only line, never a whole-namespace match, and
+// takes no hold.
+func TestTownClusterRollDryRunSaysTheDeploymentsMatch(t *testing.T) {
+	t.Parallel()
+	d, _, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	f := newClusterRollFixture(t, d.render, clusterRollAnswering(t, driftAnswering(t, m, nil)))
+	f.deps.dryRun = true
+
+	if err := runTownClusterRoll(f.deps); err != nil {
+		t.Fatalf("dry run: %v\nprinted:\n%s", err, f.out.String())
+	}
+	line := noDifferencesLine(t, f.out)
+	if !strings.Contains(line, "the live Deployments match the rendered Deployments") {
+		t.Errorf("the dry run's empty-diff line = %q, want it to name the Deployments", line)
+	}
+	for _, banned := range []string{"namespace", "manifests"} {
+		if strings.Contains(line, banned) {
+			t.Errorf("the dry run's empty-diff line = %q, want no %q", line, banned)
+		}
+	}
+	if len(f.events.calls) != 0 {
+		t.Errorf("calls = %v, want no hold taken", f.events.calls)
 	}
 }
 
@@ -706,44 +792,36 @@ func TestTownClusterRollRefusesAnUnreadableRender(t *testing.T) {
 	}
 }
 
-// TestTownClusterRollRefusesAStepWhoseRenderFails: the render is read again for
-// the apply and for the ready wait, and a read that fails there releases the hold
-// rather than applying a partial or stale set.
-func TestTownClusterRollRefusesAStepWhoseRenderFails(t *testing.T) {
+// TestTownClusterRollRendersOnce: one real roll builds the render once and looks
+// the town up once, so the diff, the apply and the ready wait cannot read
+// different renders.
+func TestTownClusterRollRendersOnce(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		failAt  int
-		wantErr string
-	}{
-		{name: "the apply's render", failAt: 2, wantErr: "applying the daemon namespace"},
-		{name: "the ready wait's render", failAt: 3, wantErr: "waiting for the daemon namespace to be ready"},
+	d, _, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	render := d.render
+	build := render.build
+	builds := 0
+	render.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+		builds++
+		return build(v)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			d, _, town := driftFourDeploymentSeams(t)
-			m := driftTestRendered(t, d, driftTestFlags(t, town))
-			render := d.render
-			build := render.build
-			calls := 0
-			render.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
-				calls++
-				if calls == tc.failAt {
-					return k8sdaemon.Manifests{}, errors.New("a file changed under the roll")
-				}
-				return build(v)
-			}
-			f := newClusterRollFixture(t, render, clusterRollAnswering(t, driftAnswering(t, m, driftGatewayProbeMoved)))
+	findTown := render.findTown
+	lookups := 0
+	render.findTown = func() (string, error) {
+		lookups++
+		return findTown()
+	}
+	f := newClusterRollFixture(t, render, clusterRollAnswering(t, driftAnswering(t, m, driftGatewayProbeMoved)))
 
-			err := runTownClusterRoll(f.deps)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "a file changed under the roll") {
-				t.Fatalf("err = %v, want %q wrapping the failed render", err, tc.wantErr)
-			}
-			if f.store.present {
-				t.Error("the landing hold is still in place after a failed render")
-			}
-		})
+	if err := runTownClusterRoll(f.deps); err != nil {
+		t.Fatalf("roll: %v\nprinted:\n%s", err, f.out.String())
+	}
+	if builds != 1 {
+		t.Errorf("the render was built %d times, want once", builds)
+	}
+	if lookups != 1 {
+		t.Errorf("the town was looked up %d times, want once", lookups)
 	}
 }
 
@@ -795,7 +873,7 @@ func TestTownClusterRollApplyStartFailureReleasesTheHold(t *testing.T) {
 	}
 }
 
-// TestTownClusterRollRefusesARealRollWithoutItsSeams: the production build wires
+// TestTownClusterRollRealRollNeedsTheHoldAndWaits: the production build wires
 // neither the hold store nor the two wait reads, so a real roll refuses before
 // it reads the cluster, and --dry-run is the path that runs.
 func TestTownClusterRollRealRollNeedsTheHoldAndWaits(t *testing.T) {
@@ -815,5 +893,18 @@ func TestTownClusterRollRealRollNeedsTheHoldAndWaits(t *testing.T) {
 	err := runTownClusterRoll(d)
 	if err == nil || !strings.Contains(err.Error(), "landing hold store") {
 		t.Fatalf("err = %v, want a refusal naming the hold store", err)
+	}
+}
+
+// TestClusterRollDepsUseTheTownTheCommandFound: the production deps hand the
+// render the root the command looked up, so the roll does not search for the
+// town a second time.
+func TestClusterRollDepsUseTheTownTheCommandFound(t *testing.T) {
+	t.Parallel()
+	d := clusterRollDepsFor("/town", io.Discard, time.Minute, time.Minute, time.Minute, false)
+
+	got, err := d.apply.render.findTown()
+	if err != nil || got != "/town" {
+		t.Errorf("the render's town = %q, %v, want the /town the command found", got, err)
 	}
 }
