@@ -20,7 +20,7 @@ const (
 	// other is a commit the context must not be staged at.
 	other = "fedcba9876543210fedcba9876543210fedcba98"
 	// bdPin is the bd commit the polecat image is built from.
-	bdPin = "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f"
+	bdPin = "0f9f640fe0f1a4162f3aebdef7994135b1167a85"
 	// floor is the Go floor the image build takes.
 	floor = "1.10.0"
 )
@@ -296,6 +296,36 @@ func TestSeedPinMatchesBDPin(t *testing.T) {
 		t.Fatalf("reading %s: %v", seedPinsPath, err)
 	}
 	if err := seedPinMatchesBDPin(body, bdPin); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestPreRollGuardPinsNameTheSamplesBuild pins the three files that name the
+// bd commit to the beads build with bd sample and bd mol bond --root-only, so
+// the pre-roll guard (gt-tgje6t) cannot be undone by a pin bump back to the
+// schema-66 build (gt-fenu9p).
+func TestPreRollGuardPinsNameTheSamplesBuild(t *testing.T) {
+	t.Parallel()
+	const samplesBuild = "0f9f640fe0f1a4162f3aebdef7994135b1167a85"
+	if bdPin != samplesBuild {
+		t.Errorf("bdPin = %s, want %s", bdPin, samplesBuild)
+	}
+	image, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(daemonimage.PinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", daemonimage.PinsPath, err)
+	}
+	text, err := config.ExpandForgeOwner(string(image), config.DefaultForgeOwner)
+	if err != nil {
+		t.Fatalf("%s: %v", daemonimage.PinsPath, err)
+	}
+	if err := bdPinMatches([]byte(text), samplesBuild); err != nil {
+		t.Error(err)
+	}
+	seed, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(seedPinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", seedPinsPath, err)
+	}
+	if err := seedPinMatchesBDPin(seed, samplesBuild); err != nil {
 		t.Error(err)
 	}
 }

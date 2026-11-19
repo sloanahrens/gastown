@@ -3,11 +3,14 @@
 package doctor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beadsql"
 )
 
 // TestIntegrationBeadsBinaryCheck_DefaultWiring runs the check with no injected runner
@@ -23,7 +26,7 @@ func TestIntegrationBeadsBinaryCheck_DefaultWiring(t *testing.T) {
 		want    CheckStatus
 		inMsg   string
 	}{
-		{"matching levels", "66", StatusOK, "database at 66"},
+		{"matching levels", fmt.Sprint(beadsql.SchemaVersion), StatusOK, fmt.Sprintf("database at %d", beadsql.SchemaVersion)},
 		{"database behind", "65", StatusError, "database is at 65"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

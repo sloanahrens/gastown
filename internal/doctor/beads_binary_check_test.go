@@ -13,16 +13,17 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/tracker/api"
 )
 
-const forkVersionJSON = `{"build":"da4983e","build_id":"da4983e","commit":"da4983e","contract_version":1,"db_schema_version":66,"version":"1.2.2"}`
+var forkVersionJSON = fmt.Sprintf(`{"build":"da4983e","build_id":"da4983e","commit":"da4983e","contract_version":1,"db_schema_version":%d,"version":"1.2.2"}`, beadsql.SchemaVersion)
 
 // The reports the stub in the integration tier and these cases answer with,
 // parsed as the store hands them to the handshake.
 var (
-	forkReport  = beads.VersionInfo{Version: "1.2.2", Build: "da4983e", BuildID: "da4983e", Commit: "da4983e", ContractVersion: 1, DBSchemaVersion: 66}
+	forkReport  = beads.VersionInfo{Version: "1.2.2", Build: "da4983e", BuildID: "da4983e", Commit: "da4983e", ContractVersion: 1, DBSchemaVersion: beadsql.SchemaVersion}
 	preD1Report = beads.VersionInfo{Version: "1.2.2", Build: "537accb", Commit: "537accbea9ca"}
 )
 
@@ -67,11 +68,11 @@ func TestBeadsBinaryCheck_Metadata(t *testing.T) {
 
 func TestBeadsBinaryCheck_HandshakePasses(t *testing.T) {
 	t.Parallel()
-	result := handshakeCheck(forkReport, nil, 66).Run(&CheckContext{TownRoot: t.TempDir()})
+	result := handshakeCheck(forkReport, nil, beadsql.SchemaVersion).Run(&CheckContext{TownRoot: t.TempDir()})
 	if result.Status != StatusOK {
 		t.Fatalf("status = %v: %s %v", result.Status, result.Message, result.Details)
 	}
-	for _, want := range []string{"da4983e", "schema<=66", "contract 1", "database at 66"} {
+	for _, want := range []string{"da4983e", fmt.Sprintf("schema<=%d", beadsql.SchemaVersion), "contract 1", fmt.Sprintf("database at %d", beadsql.SchemaVersion)} {
 		if !strings.Contains(result.Message, want) {
 			t.Errorf("message %q lacks %q", result.Message, want)
 		}
@@ -220,7 +221,7 @@ func writeTownJSON(t *testing.T, town, body string) {
 // be decided by the tracker alone, so a pass from bd would hide a tracker that
 // is not ready.
 func trackerBinaryCheck(transport http.RoundTripper) *BeadsBinaryCheck {
-	c := handshakeCheck(forkReport, nil, 66)
+	c := handshakeCheck(forkReport, nil, beadsql.SchemaVersion)
 	c.trackerHTTP = &http.Client{Transport: transport}
 	return c
 }
