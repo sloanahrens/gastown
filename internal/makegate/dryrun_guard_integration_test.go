@@ -16,14 +16,11 @@ import (
 	"testing"
 )
 
-// dryRunTargets names the Makefile targets whose recipe holds a line that runs
-// $(MAKE) beside other commands. GNU make runs such a line for real even under
-// -n, so `make -n` of one is not a dry run: presubmit builds the checkout for
-// its machine-stdout check through $(MAKE), and ci-base-image reads its
-// golangci-lint pin through $(MAKE) on the same line as its empty-base guard,
-// which the Makefile comment beside that rule says is deliberate. A test that
-// dry-runs either against the real tree therefore runs the recipe for real
-// (gt-digv4n, sweep f213fda4).
+// dryRunTargets names the Makefile targets whose recipe line holds $(MAKE), so
+// GNU make runs it for real even under -n (gt-digv4n, sweep f213fda4).
+//
+// Before changing either name, read the Makefile comment above ci-base-image
+// and the presubmit recipe.
 var dryRunTargets = []string{"presubmit", "ci-base-image"}
 
 // dryRunFactory names the helpers that return a Make bound to a checkout. A
@@ -196,6 +193,17 @@ func makeVariables(file *ast.File) map[string]bool {
 	return makes
 }
 
+// dryRunAlarms returns one message per refused dry run, each naming the file,
+// line, caller and target. The package case in TestIntegrationDryRunCallers
+// reports exactly these.
+func dryRunAlarms(calls []dryRunTargetCall) []string {
+	alarms := make([]string, 0, len(calls))
+	for _, call := range calls {
+		alarms = append(alarms, call.String())
+	}
+	return alarms
+}
+
 // packageTestDir is the directory holding this file, read from the compiled
 // path so the guard checks the package it was built in rather than the working
 // directory.
@@ -221,8 +229,28 @@ func TestIntegrationDryRunCallers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v", err)
 		}
-		for _, call := range calls {
-			t.Error(call)
+		for _, alarm := range dryRunAlarms(calls) {
+			t.Error(alarm)
+		}
+	})
+
+	t.Run("a scratch file's dry run reaches the alarm", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "scratch_test.go")
+		src := "package makegate\n\nfunc TestX(t *testing.T) {\n\tdryTarget(t, defaultsMake(t, root), \"presubmit\")\n}\n"
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		calls, err := dryRunPackageCalls(dir)
+		if err != nil {
+			t.Fatalf("dryRunPackageCalls(%s): %v", dir, err)
+		}
+		alarms := dryRunAlarms(calls)
+		if len(alarms) != 1 {
+			t.Fatalf("dryRunAlarms = %q, want one alarm for %s", alarms, path)
+		}
+		if !strings.Contains(alarms[0], path+":4:") {
+			t.Fatalf("the alarm %q does not name %s:4: the call's line", alarms[0], path)
 		}
 	})
 
@@ -268,7 +296,10 @@ func TestIntegrationDryRunCallers(t *testing.T) {
 				want: nil,
 			},
 			{
-				name: "a target named through a variable is left alone",
+				// The guard reads string literals only, so a target held in a
+				// variable is not seen. Failing closed on a non-literal target
+				// is gt-xusszl.
+				name: "known limit: a target named through a variable is not seen",
 				src:  "func TestX(t *testing.T) {\n\ttarget := \"presubmit\"\n\tdryTarget(t, defaultsMake(t, root), target)\n}\n",
 				want: nil,
 			},
