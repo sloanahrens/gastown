@@ -60,6 +60,14 @@ const (
 	EnvTiers = "GT_SWEEP_TIERS"
 	// EnvJobs is how many packages the runner tests at once.
 	EnvJobs = "GT_SWEEP_JOBS"
+	// testDoltInitConcurrencyEnv is the test-Dolt init pool internal/beads opens
+	// in the runner, and testDoltInitConcurrency is the value both backends set.
+	// Package beads otherwise caps the pool at its default of 4. The value is the
+	// scheduler town slot count (internal/cmd's schedulerTownSlots) and matches
+	// the value the Makefile's test-integration targets pass, so the integration
+	// tier's pool matches the towns queued on it (gt-ik4a1.4.12).
+	testDoltInitConcurrencyEnv = "GT_TEST_DOLT_INIT_CONCURRENCY"
+	testDoltInitConcurrency    = "8"
 )
 
 const (
@@ -191,6 +199,7 @@ func runnerArgv(spec Spec) []string {
 		"--env", EnvSHA+"="+spec.SHA,
 		"--env", EnvTiers+"="+strings.Join(spec.TiersOrDefault(), ","),
 		"--env", EnvJobs+"="+strconv.Itoa(spec.Jobs),
+		"--env", testDoltInitConcurrencyEnv+"="+testDoltInitConcurrency,
 		"--env", ryukDisabledName+"="+ryukDisabledValue,
 		spec.Image,
 	), RunnerArgv()...)

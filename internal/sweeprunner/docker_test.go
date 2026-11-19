@@ -185,6 +185,27 @@ func TestDockerRenderPassesTheTiersItWasGiven(t *testing.T) {
 	}
 }
 
+// TestDockerRunnerSetsDoltInitConcurrency pins the Docker backend's runner
+// environment to the same test-Dolt init pool as the Kubernetes one:
+// GT_TEST_DOLT_INIT_CONCURRENCY=8, the scheduler town slot count the Makefile's
+// test-integration targets pass, set exactly once.
+func TestDockerRunnerSetsDoltInitConcurrency(t *testing.T) {
+	t.Parallel()
+	const (
+		envName = "GT_TEST_DOLT_INIT_CONCURRENCY"
+		want    = "8"
+	)
+	var values []string
+	for _, arg := range runnerArgv(goldenSpec()) {
+		if value, found := strings.CutPrefix(arg, envName+"="); found {
+			values = append(values, value)
+		}
+	}
+	if len(values) != 1 || values[0] != want {
+		t.Errorf("runner argv sets %s on %d entries, want exactly one entry with value %q", envName, len(values), want)
+	}
+}
+
 // TestDockerRenderNeverMountsTheSocketAndOnlyDindIsPrivileged holds the isolation
 // the design promises: the run reads the repo read-only, writes /out, publishes
 // nothing, and has no Docker of its own except the sidecar it starts.
