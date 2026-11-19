@@ -231,13 +231,23 @@ func listCacheTree(claim fs.FS, dir string, cache cachevol.Cache) ([]cachevol.En
 		// last-use figure for both times: a noatime or relatime mount leaves
 		// atime stale, and PlanTrim orders by the later of the two.
 		used := info.ModTime()
-		out = append(out, cachevol.Entry{
+		entry := cachevol.Entry{
 			Path:  p,
 			Cache: cache,
 			Size:  info.Size(),
 			Atime: used,
 			Mtime: used,
-		})
+		}
+		if cache == cachevol.BuildCache {
+			output, err := cachevol.BuildActionOutputFrom(p, func() (io.ReadCloser, error) {
+				return claim.Open(p)
+			})
+			if err != nil {
+				return fmt.Errorf("reading the build-cache header of %s: %w", p, err)
+			}
+			entry.Output = output
+		}
+		out = append(out, entry)
 		return nil
 	})
 	if err != nil {

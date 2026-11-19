@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,6 +27,31 @@ func trimListNowText() string { return trimListNow().Format(time.RFC3339Nano) }
 // trimListWriteArgs is the writer's argv for root: the cap, sandbox count and clock a Job renders.
 func trimListWriteArgs(root, capText, sandboxes string) []string {
 	return []string{"--root", root, "--cap-bytes", capText, "--sandboxes", sandboxes, "--now", trimListNowText()}
+}
+
+const (
+	trimListActionID = "1111111111111111111111111111111111111111111111111111111111111111"
+	trimListOutputID = "2222222222222222222222222222222222222222222222222222222222222222"
+	// trimListAction and trimListOutput are the claim-relative names Go gives one action's index and
+	// the output the index names.
+	trimListAction = cachevol.SeedBuildCacheDir + "/11/" + trimListActionID + "-a"
+	trimListOutput = cachevol.SeedBuildCacheDir + "/22/" + trimListOutputID + "-d"
+)
+
+// plantBuildAction writes the -a file Go writes for actionID naming outID: the version, both ids and
+// the size and time fields, as cmd/go/internal/cache putIndexEntry writes them.
+func plantBuildAction(t *testing.T, name, actionID, outID string, when time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	header := fmt.Sprintf("v1 %s %s %20d %20d\n", actionID, outID, 100, when.UnixNano())
+	if err := os.WriteFile(name, []byte(header), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(name, when, when); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // fakeListFS records the writer's calls and answers the failure a case names. Names are the ones the
@@ -352,6 +378,116 @@ func TestClaimListingRefusesACacheTreeItCannotRead(t *testing.T) {
 	}
 	if _, err := claimListing(root, filepath.Walk); err == nil {
 		t.Fatal("claimListing listed a cache tree that is a link out of the claim")
+	}
+}
+
+// TestTrimListingNamesTheOutputAnActionFileNames: the listing carries the -d file each -a file's
+// header names, so the plan can remove the pair together, and no output for the -d file itself
+// (gt-udrvfw).
+func TestTrimListingNamesTheOutputAnActionFileNames(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantBuildAction(t, filepath.Join(root, filepath.FromSlash(trimListAction)), trimListActionID, trimListOutputID, testTime)
+	plantCacheFile(t, filepath.Join(root, filepath.FromSlash(trimListOutput)), 90, testTime)
+
+	listing, err := trimListing(root, filepath.Walk)
+	if err != nil {
+		t.Fatalf("trimListing: %v", err)
+	}
+	got := make(map[string]string, len(listing))
+	for _, e := range listing {
+		got[e.Path] = e.Output
+	}
+	want := map[string]string{trimListAction: trimListOutput, trimListOutput: ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the listing's outputs are %v, want %v", got, want)
+	}
+}
+
+// TestTrimListingLeavesAHeaderGoWouldMissUnpaired: a header Go reads as a cache miss names no live
+// entry, so the listing still names the -a file but pairs it with nothing rather than refusing the
+// whole listing over a file no build can use.
+func TestTrimListingLeavesAHeaderGoWouldMissUnpaired(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{"an empty file", ""},
+		{"a file Go is still writing", "v1 " + trimListActionID},
+		{"another version", "v2 " + trimListActionID + " " + trimListOutputID + " "},
+		{"an action id that is not the file's", "v1 " + strings.Repeat("3", 64) + " " + trimListOutputID + " "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			name := filepath.Join(root, filepath.FromSlash(trimListAction))
+			plantCacheFile(t, name, 0, testTime)
+			if err := os.WriteFile(name, []byte(tc.header), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			listing, err := trimListing(root, filepath.Walk)
+			if err != nil {
+				t.Fatalf("trimListing: %v", err)
+			}
+			if len(listing) != 1 {
+				t.Fatalf("the listing is %+v, want the one -a file", listing)
+			}
+			if listing[0].Output != "" {
+				t.Errorf("the -a file names %q, want no output for a header Go reads as a miss", listing[0].Output)
+			}
+		})
+	}
+}
+
+// TestClaimListingRefusesAnActionFileItCannotRead: an -a file the listing cannot read leaves its -d
+// file's pairing unknown, so the listing is refused whole rather than letting the plan remove a -d
+// file whose index the lister never read (gt-udrvfw). The walk reports an action-file name whose path
+// is a symbolic link to itself, which is what opening it fails on.
+func TestClaimListingRefusesAnActionFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, cachevol.SeedBuildCacheDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loop := filepath.Join(root, filepath.FromSlash(trimListAction))
+	if err := os.MkdirAll(filepath.Dir(loop), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	walk := func(_ string, fn filepath.WalkFunc) error {
+		return fn(loop, &fakeFileInfo{name: filepath.Base(loop)}, nil)
+	}
+	_, err := claimListing(root, walk)
+	if err == nil {
+		t.Fatal("claimListing listed an action file it could not read")
+	}
+	if !strings.Contains(err.Error(), "reading the build-cache header") {
+		t.Errorf("error = %q, want it to name the header it could not read", err)
+	}
+}
+
+// TestTrimListPathsRemovesAnActionFileWithItsOutput drives the plan the init container writes: a cap
+// the -a file alone would reach still names the -d file it points at, because the pair goes whole
+// (gt-udrvfw).
+func TestTrimListPathsRemovesAnActionFileWithItsOutput(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantBuildAction(t, filepath.Join(root, filepath.FromSlash(trimListAction)), trimListActionID, trimListOutputID, testTime)
+	plantCacheFile(t, filepath.Join(root, filepath.FromSlash(trimListOutput)), 90, testTime)
+
+	// The -a file is 175 bytes, so a 100-byte cap is reached by removing it alone: a plan that did
+	// not pair would stop there and leave the -d file behind.
+	paths, err := TrimListPaths(root, 100, false, trimListNow(), filepath.Walk)
+	if err != nil {
+		t.Fatalf("TrimListPaths: %v", err)
+	}
+	want := []string{trimListAction, trimListOutput}
+	if !reflect.DeepEqual(paths, want) {
+		t.Errorf("the list is %v, want %v", paths, want)
 	}
 }
 

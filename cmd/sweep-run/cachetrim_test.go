@@ -631,6 +631,95 @@ func cacheClaim(t *testing.T) string {
 	return root
 }
 
+// trimClaimFS is a claim whose Open of one name fails with err, so a test
+// drives what the listing does with an action file it cannot read.
+type trimClaimFS struct {
+	fs.FS
+	failOn string
+	err    error
+}
+
+func (f trimClaimFS) Open(name string) (fs.File, error) {
+	if name == f.failOn {
+		return nil, f.err
+	}
+	return f.FS.Open(name)
+}
+
+// TestTrimSweepCacheRemovesAnActionFileWithItsOutput: the sweep's plan reads
+// the output id out of an -a file's header, so a trim that takes the index
+// takes the -d file it names in the same run (gt-udrvfw).
+func TestTrimSweepCacheRemovesAnActionFileWithItsOutput(t *testing.T) {
+	t.Parallel()
+	root := emptyClaimRoot(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	actionID, outputID := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	action := path.Join(cachevol.SeedBuildCacheDir, "11", actionID+"-a")
+	output := path.Join(cachevol.SeedBuildCacheDir, "22", outputID+"-d")
+	writeFile(t, filepath.Join(root, output), 90, base.Add(time.Hour))
+	header := fmt.Sprintf("v1 %s %s %20d %20d\n", actionID, outputID, 90, base.UnixNano())
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, action)), 0o755); err != nil {
+		t.Fatalf("making the directory of %s: %v", action, err)
+	}
+	if err := os.WriteFile(filepath.Join(root, action), []byte(header), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", action, err)
+	}
+	if err := os.Chtimes(filepath.Join(root, action), base, base); err != nil {
+		t.Fatalf("setting the times of %s: %v", action, err)
+	}
+
+	// The header file is 175 bytes, so the 100-byte cap is reached by removing
+	// it alone: a plan that did not pair would stop there and leave the -d file.
+	trim := &CacheTrim{Root: root, CapBytes: 100, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}
+	if err := trimSweepCache(trim); err != nil {
+		t.Fatalf("trimSweepCache: %v", err)
+	}
+	if got := filesUnder(t, root); len(got) != 0 {
+		t.Errorf("cache files = %q, want the -a file and the -d file it names both removed", got)
+	}
+}
+
+// TestTrimSweepCacheReadsAnActionFilesHeader: a header the listing cannot read
+// refuses the plan, since the -d file it names would be removed without it,
+// while a file another run removed is planned as the lone entry it is.
+func TestTrimSweepCacheReadsAnActionFilesHeader(t *testing.T) {
+	t.Parallel()
+	actionID, outputID := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	action := path.Join(cachevol.SeedBuildCacheDir, "11", actionID+"-a")
+	header := fmt.Sprintf("v1 %s %s %20d %20d\n", actionID, outputID, 1, 1)
+	claim := fstest.MapFS{
+		action: &fstest.MapFile{Data: []byte(header), ModTime: sweepTrimNow().Add(-48 * time.Hour)},
+		// Both trees have to be there: a tree the claim lacks makes the
+		// listing partial and is refused.
+		cachevol.SeedModuleCacheDir: &fstest.MapFile{Mode: fs.ModeDir},
+	}
+	tests := []struct {
+		name    string
+		err     error
+		wantErr string
+	}{
+		{"a header the listing cannot read", errors.New("open failed"), "reading the build-cache header"},
+		{"a file another run removed", fs.ErrNotExist, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			trim := &CacheTrim{
+				Root: t.TempDir(), CapBytes: 1, Now: sweepTrimNow,
+				Claim:  func(string) (fs.FS, error) { return trimClaimFS{FS: claim, failOn: action, err: tc.err}, nil },
+				Remove: func(string, string) error { return nil },
+			}
+			err := trimSweepCache(trim)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("trimSweepCache: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("trimSweepCache = %v, want a refusal naming %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // emptyClaimRoot is a claim mount under t.TempDir() with both cache trees
 // present and holding nothing.
 func emptyClaimRoot(t *testing.T) string {

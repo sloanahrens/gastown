@@ -1709,6 +1709,9 @@ type cacheTrimListingEntry struct {
 	Size  int64     `json:"size"`
 	Atime time.Time `json:"atime"`
 	Mtime time.Time `json:"mtime"`
+	// Output is the -d file an -a entry's header names, which the plan removes
+	// with it (gt-udrvfw).
+	Output string `json:"output"`
 }
 
 // cacheTrimParseListing turns the helper's JSON into PlanTrim's entries. The
@@ -1736,11 +1739,12 @@ func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 				entry.Cache, entry.Path, polecatimage.TrimListCacheBuild, polecatimage.TrimListCacheModule)
 		}
 		listing = append(listing, cachevol.Entry{
-			Path:  entry.Path,
-			Cache: cache,
-			Size:  entry.Size,
-			Atime: entry.Atime,
-			Mtime: entry.Mtime,
+			Path:   entry.Path,
+			Cache:  cache,
+			Size:   entry.Size,
+			Atime:  entry.Atime,
+			Mtime:  entry.Mtime,
+			Output: entry.Output,
 		})
 	}
 	return listing, nil

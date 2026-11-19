@@ -1,6 +1,11 @@
 package cachevol
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"reflect"
 	"strings"
@@ -86,6 +91,29 @@ func TestPlanSeedRefusesAPinItCannotRead(t *testing.T) {
 // file is a listing entry with a size and times in hours after base.
 func file(path string, c Cache, size int64, atimeH, mtimeH int) Entry {
 	return Entry{Path: path, Cache: c, Size: size, Atime: at(atimeH), Mtime: at(mtimeH)}
+}
+
+const (
+	actionOne     = "1111111111111111111111111111111111111111111111111111111111111111"
+	actionTwo     = "3333333333333333333333333333333333333333333333333333333333333333"
+	outputID      = "2222222222222222222222222222222222222222222222222222222222222222"
+	actionPath    = "gocache/11/" + actionOne + "-a"
+	actionTwoPath = "gocache/33/" + actionTwo + "-a"
+	outputPath    = "gocache/22/" + outputID + "-d"
+)
+
+// action is a build-cache -a entry whose header names output, with a size and times in hours after
+// base.
+func action(path, output string, size int64, atimeH, mtimeH int) Entry {
+	e := file(path, BuildCache, size, atimeH, mtimeH)
+	e.Output = output
+	return e
+}
+
+// actionHeader is the start of an -a file as Go writes it: version, action id, output id, size and
+// time, each field after the version followed by a space (cmd/go/internal/cache putIndexEntry).
+func actionHeader(actionID, outID string) []byte {
+	return []byte("v1 " + actionID + " " + outID + " " + fmt.Sprintf("%20d", 10) + " " + fmt.Sprintf("%20d", 1<<30) + "\n")
 }
 
 func removedPaths(p TrimPlan) []string {
@@ -341,5 +369,248 @@ func TestPlanTrimDoesNotTrimTheModuleCacheWhenTheAgeFloorStopsTheBuildPass(t *te
 				t.Errorf("overflow = %v over %d, want %v", plan.Overflow, plan.OverBytes, tc.wantOverflow)
 			}
 		})
+	}
+}
+
+// TestPlanTrimRemovesAnActionFileWithTheOutputItNames: a removal that takes the -a file takes the -d
+// file its header names in the same plan, so no removal leaves an index naming a file that is gone
+// (gt-udrvfw). Each case is a cap the -a file alone reaches: a planner that did not pair would stop
+// after the -a and leave the -d behind.
+func TestPlanTrimRemovesAnActionFileWithTheOutputItNames(t *testing.T) {
+	t.Parallel()
+	listing := []Entry{
+		action(actionPath, outputPath, 90, 1, 1),
+		file(outputPath, BuildCache, 10, 5, 5),
+	}
+	plan := planTrim(t, listing, 50, false, trimNow)
+	if got, want := removedPaths(plan), []string{actionPath, outputPath}; !reflect.DeepEqual(got, want) {
+		t.Errorf("removals = %v, want %v: the -a file's removal takes the -d file it names", got, want)
+	}
+	if plan.Overflow {
+		t.Errorf("overflow = %v over %d, want the pair's removal to bring the claim under the cap", plan.Overflow, plan.OverBytes)
+	}
+}
+
+// TestPlanTrimRemovesAnOutputWithEveryActionFileThatNamesIt: a removal that takes a -d file takes
+// every -a file whose header names it, in the same plan, since a build reads any of them (gt-udrvfw).
+// The cap here is reached by the -d file alone, so a planner that did not pair would leave both -a
+// files dangling.
+func TestPlanTrimRemovesAnOutputWithEveryActionFileThatNamesIt(t *testing.T) {
+	t.Parallel()
+	listing := []Entry{
+		file(outputPath, BuildCache, 90, 1, 1),
+		action(actionPath, outputPath, 10, 2, 2),
+		action(actionTwoPath, outputPath, 10, 3, 3),
+	}
+	plan := planTrim(t, listing, 50, false, trimNow)
+	if got, want := removedPaths(plan), []string{actionPath, outputPath, actionTwoPath}; !reflect.DeepEqual(got, want) {
+		t.Errorf("removals = %v, want %v: the -d file's removal takes every -a file that names it", got, want)
+	}
+}
+
+// TestPlanTrimCountsTheBytesOfAPairAndItsActionsOnce: a -d file that two -a files name leaves the
+// claim once, so after the unit goes the claim is still 20 bytes over a 90-byte cap and Overflow says
+// so; a planner that subtracted the -d file once per naming -a would report no overflow.
+func TestPlanTrimCountsTheBytesOfAPairAndItsActionsOnce(t *testing.T) {
+	t.Parallel()
+	listing := []Entry{
+		file(outputPath, BuildCache, 45, 1, 1),
+		action(actionPath, outputPath, 45, 1, 1),
+		file("gocache/young", BuildCache, 110, 24, 24),
+	}
+	plan := planTrim(t, listing, 90, false, trimNow)
+	if got, want := removedPaths(plan), []string{actionPath, outputPath}; !reflect.DeepEqual(got, want) {
+		t.Errorf("removals = %v, want %v", got, want)
+	}
+	if !plan.Overflow || plan.OverBytes != 20 {
+		t.Errorf("overflow = %v over %d, want true over 20 (200 bytes against a 90-byte cap, the 90-byte unit removed)",
+			plan.Overflow, plan.OverBytes)
+	}
+}
+
+// TestPlanTrimPlansALoneHalfAsBefore: an -a file whose -d file the listing does not hold, and a -d
+// file no listed -a file names, are each a unit of one, planned by their own age and bytes as they
+// were before the pairing existed.
+func TestPlanTrimPlansALoneHalfAsBefore(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		listing []Entry
+		want    []string
+	}{
+		{
+			name: "an -a file whose output is not in the listing",
+			listing: []Entry{
+				action(actionPath, "gocache/22/"+outputID+"-d", 90, 1, 1),
+				file("gocache/other", BuildCache, 10, 2, 2),
+			},
+			want: []string{actionPath},
+		},
+		{
+			name: "a -d file no listed -a file names",
+			listing: []Entry{
+				file(outputPath, BuildCache, 90, 1, 1),
+				file("gocache/other", BuildCache, 10, 2, 2),
+			},
+			want: []string{outputPath},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			plan := planTrim(t, tc.listing, 50, false, trimNow)
+			if got := removedPaths(plan); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("removals = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPlanTrimKeepsAUnitWhoseActionFileIsYoung: a unit goes whole or not at all, so a young -a file
+// keeps its old -d file in the claim even while the claim is over its cap; removing the -d alone
+// would leave the young index naming a file that is gone (gt-udrvfw).
+func TestPlanTrimKeepsAUnitWhoseActionFileIsYoung(t *testing.T) {
+	t.Parallel()
+	listing := []Entry{
+		action(actionPath, outputPath, 90, 24, 24),
+		file(outputPath, BuildCache, 90, 1, 1),
+	}
+	plan := planTrim(t, listing, 50, false, trimNow)
+	if got := removedPaths(plan); len(got) != 0 {
+		t.Errorf("removals = %v, want none: the unit's youngest file is inside the minimum age", got)
+	}
+	if !plan.Overflow || plan.OverBytes != 130 {
+		t.Errorf("overflow = %v over %d, want true over 130 (180 bytes against a 50-byte cap)", plan.Overflow, plan.OverBytes)
+	}
+}
+
+// TestIsBuildActionFile: only Go's action-file name is read for a header, so a file named *-a
+// anywhere else in the tree is left unpaired rather than parsed.
+func TestIsBuildActionFile(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{actionPath, true},
+		{outputPath, false},
+		{"gocache/11/" + actionOne, false},
+		{SeedBuildCacheDir + "/11/" + strings.Repeat("A", 64) + "-a", false},
+		{SeedModuleCacheDir + "/11/" + actionOne + "-a", false},
+		{SeedBuildCacheDir + "/1/" + actionOne + "-a", false},
+		{SeedBuildCacheDir + "/11/" + actionOne[:63] + "-a", false},
+		{SeedBuildCacheDir + "/11/" + actionOne + "-a/exe", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := isBuildActionFile(tc.path); got != tc.want {
+			t.Errorf("isBuildActionFile(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+// TestBuildActionOutput reads the output path out of an -a header the way Go does: the second id in
+// "v1 <action id> <output id> <size> <time>", at most as strict as Go's own check, so a header this
+// leaves unpaired is one Go reads as a cache miss and never a live entry.
+func TestBuildActionOutput(t *testing.T) {
+	t.Parallel()
+	upper := strings.ToUpper(outputID)
+	tests := []struct {
+		name   string
+		path   string
+		header []byte
+		want   string
+		ok     bool
+	}{
+		{"the header Go writes", actionPath, actionHeader(actionOne, outputID), outputPath, true},
+		{"an upper-case id Go decodes", actionPath, actionHeader(strings.ToUpper(actionOne), upper), outputPath, true},
+		{"another version", actionPath, []byte("v2 " + actionOne + " " + outputID + " "), "", false},
+		{"no version", actionPath, actionHeader(actionOne, outputID)[3:], "", false},
+		{"an action id that is not the file's", actionPath, actionHeader(actionTwo, outputID), "", false},
+		{"a short header", actionPath, []byte("v1 " + actionOne + " "), "", false},
+		{"an empty header", actionPath, nil, "", false},
+		{"a non-hex id", actionPath, actionHeader(actionOne, strings.Repeat("z", 64)), "", false},
+		{"a header cut before its size", actionPath, []byte("v1 " + actionOne + " " + outputID), "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := buildActionOutput(tc.path, tc.header)
+			if ok != tc.ok || got != tc.want {
+				t.Errorf("buildActionOutput = %q, %v; want %q, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// readerFor opens the bytes b, as a listing's open of a cache file would.
+func readerFor(b []byte) func() (io.ReadCloser, error) {
+	return func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
+}
+
+// TestBuildActionOutputFrom: the listing's read of an action file's header pairs the file with its
+// output; a file that is gone, is not an action file, or holds a header Go would miss is paired with
+// nothing; and a file that cannot be read is an error, since its -d file would be removed without it
+// (gt-udrvfw).
+func TestBuildActionOutputFrom(t *testing.T) {
+	t.Parallel()
+	header := actionHeader(actionOne, outputID)
+	tests := []struct {
+		name    string
+		path    string
+		open    func() (io.ReadCloser, error)
+		want    string
+		wantErr bool
+	}{
+		{"the header Go writes", actionPath, readerFor(header), outputPath, false},
+		{"a file that is not an action file", outputPath, readerFor(header), "", false},
+		{"a file this run removed", actionPath, func() (io.ReadCloser, error) { return nil, fs.ErrNotExist }, "", false},
+		{"a file that cannot be opened", actionPath, func() (io.ReadCloser, error) { return nil, errors.New("open failed") }, "", true},
+		{"a header that cannot be read", actionPath, func() (io.ReadCloser, error) { return io.NopCloser(failingReader{}), nil }, "", true},
+		{"a header Go would read as a miss", actionPath, readerFor(nil), "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := BuildActionOutputFrom(tc.path, tc.open)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("BuildActionOutputFrom error = %v, want an error of %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("BuildActionOutputFrom = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// failingReader is a reader whose every read fails, standing for a cache file the listing cannot
+// read.
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+
+// TestReadBuildActionHeader: a short file is what a file Go is still writing gives and Go reads as a
+// cache miss, so it is not an error; a read that fails is returned, since the listing then cannot say
+// what the entry names.
+func TestReadBuildActionHeader(t *testing.T) {
+	t.Parallel()
+	short := []byte("v1 ")
+	got, err := readBuildActionHeader(strings.NewReader(string(short)))
+	if err != nil {
+		t.Fatalf("readBuildActionHeader on a short file: %v", err)
+	}
+	if string(got) != string(short) {
+		t.Errorf("readBuildActionHeader = %q, want the %d bytes the file holds", got, len(short))
+	}
+	full := actionHeader(actionOne, outputID)
+	got, err = readBuildActionHeader(bytes.NewReader(full))
+	if err != nil {
+		t.Fatalf("readBuildActionHeader on a whole header: %v", err)
+	}
+	if !bytes.Equal(got, full[:buildActionHeaderLen]) {
+		t.Errorf("readBuildActionHeader = %q, want the header's first %d bytes", got, buildActionHeaderLen)
+	}
+	if _, err := readBuildActionHeader(failingReader{}); err == nil {
+		t.Error("readBuildActionHeader read through a failing reader")
 	}
 }
