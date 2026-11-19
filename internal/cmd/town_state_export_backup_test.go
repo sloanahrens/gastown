@@ -4,7 +4,24 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
+
+// TestTownStateExportBackupFlagReadIsRefused drives the read of --backup: a
+// command that does not define it is an error naming the flag, never a false
+// read as the default.
+func TestTownStateExportBackupFlagReadIsRefused(t *testing.T) {
+	t.Parallel()
+	cmd := &cobra.Command{}
+	cmd.Flags().String("town", "", "")
+	cmd.Flags().String("since", "", "")
+	cmd.Flags().Bool("rollback", false, "")
+	err := runTownStateExport(cmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "reading --backup") {
+		t.Fatalf("runTownStateExport = %v, want a refusal naming the --backup read", err)
+	}
+}
 
 // TestTownStateExportBackupWritesTheBackupSet drives --backup: the archive holds
 // the settings rows a restore needs and leaves out a secret-shaped file and a
