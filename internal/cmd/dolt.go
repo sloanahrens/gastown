@@ -293,6 +293,7 @@ func init() {
 	doltCmd.AddCommand(doltCleanupCmd)
 	doltCmd.AddCommand(doltLatencyCmd)
 	doltCmd.AddCommand(doltTopCmd)
+	doltCmd.AddCommand(doltUsersCmd)
 	doltCmd.AddCommand(newDoltCompareCmd(doltCompareRealDeps()))
 
 	doltKillImpostersCmd.Flags().BoolVar(&doltKillImpostersDry, "dry-run", false, "Preview without killing")
