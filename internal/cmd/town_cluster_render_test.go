@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
@@ -804,12 +805,10 @@ func TestTownClusterRenderValuesMatchWhatTheRenderBuilds(t *testing.T) {
 			name: "the dashboard and its bd gateway",
 			mutate: func(f *clusterRenderFlags) {
 				f.dashboard = true
-				f.dashboardClaudeDir = "/Users/user/.claude"
 				f.bdGatewayURL = " https://bd.example.test:8443 "
 			},
 			want: func(base k8sdaemon.Values) k8sdaemon.Values {
 				base.Dashboard = true
-				base.DashboardClaudeDir = "/Users/user/.claude"
 				base.BdGatewayURL = "https://bd.example.test:8443"
 				return base
 			},
@@ -1828,10 +1827,9 @@ func renderedHostPaths(t *testing.T, out, suffix string) []string {
 	return nil
 }
 
-// TestTownClusterRenderDashboardFlag holds --dashboard and --dashboard-claude-dir:
-// the pair is written in apply order, the flag off leaves the file names and the
-// Secret lines as they were, each refusal writes nothing, and the claude directory
-// is the dashboard's only host path.
+// TestTownClusterRenderDashboardFlag holds --dashboard: the pair is written in
+// apply order, the flag off leaves the file names and the Secret lines as they
+// were, each refusal writes nothing, and the dashboard mounts no Mac directory.
 func TestTownClusterRenderDashboardFlag(t *testing.T) {
 	t.Parallel()
 
@@ -1931,39 +1929,15 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		}
 	})
 
-	t.Run("a relative claude directory refuses before a write", func(t *testing.T) {
+	t.Run("the dashboard mounts no Mac directory", func(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.dashboard = true
-		f.dashboardClaudeDir = "Users/user/.claude"
-		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
-		requireErrorNames(t, err, "--dashboard-claude-dir", "absolute")
-		if got := outState(f.out); got != "absent" {
-			t.Errorf("the refused render left %s: %s", f.out, got)
-		}
-	})
-
-	t.Run("the claude directory without the dashboard refuses before a write", func(t *testing.T) {
-		f := clusterRenderFixture(t)
-		f.dashboardClaudeDir = "/Users/user/.claude"
-		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
-		requireErrorNames(t, err, "--dashboard-claude-dir", "--dashboard")
-		if got := outState(f.out); got != "absent" {
-			t.Errorf("the refused render left %s: %s", f.out, got)
-		}
-	})
-
-	t.Run("the claude directory is the dashboard's only host path", func(t *testing.T) {
-		f := clusterRenderFixture(t)
-		f.dashboard = true
-		f.dashboardClaudeDir = "/Users/user/.claude"
 		var out bytes.Buffer
 		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render: %v", err)
 		}
-		if got, want := renderedHostPaths(t, f.out, "-deployment-dashboard.yaml"), []string{"/Users/user/.claude Directory"}; !slices.Equal(got, want) {
-			t.Errorf("the dashboard's host paths = %q, want %q", got, want)
+		if got := renderedHostPaths(t, f.out, "-deployment-dashboard.yaml"); len(got) != 0 {
+			t.Errorf("the dashboard's host paths = %q, want none", got)
 		}
 		if got := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"); len(got) != 0 {
 			t.Errorf("the daemon's host paths = %q, want none", got)
@@ -1971,69 +1945,110 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 	})
 }
 
-// TestTownClusterRenderDaemonClaudeDirFlag holds --daemon-claude-dir: the flag sets
-// Values.DaemonClaudeDir, its absence leaves the file names and the daemon's host
-// paths as they were, and a relative path is refused naming the flag before a write.
-func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
+// TestTownClusterRenderClaudeDirRefused: the two Mac-directory mounts are
+// retired, so naming either flag fails the render before a write, and the
+// refusal names the cost_samples and usage_records rows that replaced it.
+func TestTownClusterRenderClaudeDirRefused(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		flag string
+		set  func(*clusterRenderFlags)
+	}{
+		{
+			flag: "--dashboard-claude-dir",
+			set: func(f *clusterRenderFlags) {
+				f.dashboard = true
+				f.dashboardClaudeDir = "/Users/user/.claude"
+			},
+		},
+		{
+			flag: "--daemon-claude-dir",
+			set:  func(f *clusterRenderFlags) { f.daemonClaudeDir = "/Users/user/.claude" },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.flag, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			tc.set(&f)
+			var out bytes.Buffer
+			err := runClusterRender(clusterRenderTestDeps(t, &out), f)
+			requireErrorNames(t, err, tc.flag, "retired", "cost_samples", "usage_records")
+			if got := outState(f.out); got != "absent" {
+				t.Errorf("the refused render left %s: %s", f.out, got)
+			}
+		})
+	}
+}
 
-	t.Run("the flag sets Values.DaemonClaudeDir", func(t *testing.T) {
-		f := clusterRenderFixture(t)
-		f.daemonClaudeDir = "/Users/user/.claude"
-		var out bytes.Buffer
-		deps := clusterRenderTestDeps(t, &out)
-		var seen k8sdaemon.Values
-		deps.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
-			seen = v
-			return k8sdaemon.Build(v)
-		}
-		if err := runClusterRender(deps, f); err != nil {
-			t.Fatalf("render: %v", err)
-		}
-		if seen.DaemonClaudeDir != f.daemonClaudeDir {
-			t.Errorf("Values.DaemonClaudeDir = %q, want %q", seen.DaemonClaudeDir, f.daemonClaudeDir)
-		}
-		if got, want := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"), []string{"/Users/user/.claude Directory"}; !slices.Equal(got, want) {
-			t.Errorf("the daemon's host paths = %q, want %q", got, want)
-		}
-	})
+// TestTownClusterRenderClaudeDirRecorded: a recorded flags file written before
+// the mounts were removed still carries the two retired keys. The replay reads
+// it without error, drops the values, and renders no Mac directory in either
+// pod.
+func TestTownClusterRenderClaudeDirRecorded(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.dashboard = true
+	town := clusterRenderTestTown(t)
 
-	t.Run("the flag off leaves the names and the daemon's host paths as they were", func(t *testing.T) {
-		f := clusterRenderFixture(t)
-		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
-			t.Fatalf("render without the flag: %v", err)
-		}
-		want := []string{
-			"01-namespace-gt.yaml",
-			"02-persistentvolumeclaim-town-state.yaml",
-			"03-persistentvolumeclaim-landing-work.yaml",
-			"04-persistentvolumeclaim-dolt-backup.yaml",
-			"05-serviceaccount-daemon.yaml",
-			"06-service-forgejo.yaml",
-			"07-rolebinding-daemon-sweep-runner.yaml",
-			"08-rolebinding-daemon-gt-ci-cache-trim.yaml",
-			"09-clusterrolebinding-daemon-gt-sweep-reader.yaml",
-			"10-deployment-daemon.yaml",
-		}
-		if got := dirNames(t, f.out); !slices.Equal(got, want) {
-			t.Fatalf("file names without the flag = %v, want %v", got, want)
-		}
-		if got := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"); len(got) != 0 {
-			t.Errorf("the daemon's host paths without the flag = %q, want none", got)
-		}
-	})
+	// The record an older render left: this build's flags plus the two retired
+	// keys, as the file held them.
+	fields := map[string]any{}
+	raw, err := json.Marshal(f.record())
+	if err != nil {
+		t.Fatalf("marshaling the record: %v", err)
+	}
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("unmarshaling the record: %v", err)
+	}
+	fields["dashboard_claude_dir"] = "/Users/user/.claude"
+	fields["daemon_claude_dir"] = "/Users/user/.claude"
+	old, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshaling the old record: %v", err)
+	}
+	recordPath := renderFlagsPathIn(town)
+	if err := os.MkdirAll(filepath.Dir(recordPath), 0o755); err != nil {
+		t.Fatalf("making the record's directory: %v", err)
+	}
+	if err := os.WriteFile(recordPath, old, 0o600); err != nil {
+		t.Fatalf("writing the old record: %v", err)
+	}
 
-	t.Run("a relative claude directory refuses before a write", func(t *testing.T) {
-		f := clusterRenderFixture(t)
-		f.daemonClaudeDir = "Users/user/.claude"
-		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
-		requireErrorNames(t, err, "--daemon-claude-dir", "absolute")
-		if got := outState(f.out); got != "absent" {
-			t.Errorf("the refused render left %s: %s", f.out, got)
+	rec, ok, err := loadRenderFlags(recordPath)
+	if err != nil {
+		t.Fatalf("the loader refused a record with the retired keys: %v", err)
+	}
+	if !ok {
+		t.Fatalf("the loader found no record at %s", recordPath)
+	}
+	if rec.dashboardClaudeDir != "" || rec.daemonClaudeDir != "" {
+		t.Errorf("the loader carried the retired flags: dashboard %q, daemon %q, want both empty", rec.dashboardClaudeDir, rec.daemonClaudeDir)
+	}
+
+	replay := clusterRenderFlags{out: filepath.Join(t.TempDir(), "replay")}
+	var out bytes.Buffer
+	d := clusterRenderDepsAt(t, town, &out)
+	var seen k8sdaemon.Values
+	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+		seen = v
+		return k8sdaemon.Build(v)
+	}
+	d.record = clusterRenderRecordOptions{
+		use:   true,
+		named: func(flag string) bool { return flag == "out" },
+	}
+	if err := runClusterRender(d, replay); err != nil {
+		t.Fatalf("the replay: %v", err)
+	}
+	if seen.DashboardClaudeDir != "" || seen.DaemonClaudeDir != "" {
+		t.Errorf("Values carries the retired directories: dashboard %q, daemon %q, want both empty", seen.DashboardClaudeDir, seen.DaemonClaudeDir)
+	}
+	for _, suffix := range []string{"-deployment-daemon.yaml", "-deployment-dashboard.yaml"} {
+		if got := renderedHostPaths(t, replay.out, suffix); len(got) != 0 {
+			t.Errorf("the replayed %s host paths = %q, want none", suffix, got)
 		}
-	})
+	}
 }
 
 // requireErrorNames fails the test unless err is non-nil and its text names each
@@ -2843,6 +2858,9 @@ func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 		case "daemonBdGatewayURLSet":
 			// The loader answers it true for a recorded URL (renderFlagsRecord.flags).
 			full.daemonBdGatewayURLSet = true
+		case "dashboardClaudeDir", "daemonClaudeDir":
+			// Retired: the flags are refused, so the record holds neither and a
+			// replay leaves both empty (gt-ja7otj).
 		default:
 			t.Fatalf("clusterRenderFlags.%s is zero after the record fill, so the record has no field for it and nothing here would see withRecorded drop it", name)
 		}

@@ -33,9 +33,7 @@ func renderFlagsFixture() clusterRenderFlags {
 		forgeHost:             "forge.internal.test:3000",
 		doltBackupHostPath:    "/host/dolt-backup",
 		dashboard:             true,
-		dashboardClaudeDir:    "/host/claude-dashboard",
 		bdGatewayURL:          "http://127.0.0.1:8080",
-		daemonClaudeDir:       "/host/claude-daemon",
 		tracker:               true,
 		trackerDSNSecret:      "tracker-dsn",
 		trackerBackup:         true,
@@ -438,11 +436,9 @@ var renderFlagRecordNames = map[string]string{
 	"forgeHost":              "ForgeHost",
 	"doltBackupHostPath":     "DoltBackupHostPath",
 	"dashboard":              "Dashboard",
-	"dashboardClaudeDir":     "DashboardClaudeDir",
 	"bdGatewayURL":           "BdGatewayURL",
 	"bdGatewayTokenSecret":   "BdGatewayTokenSecret",
 	"bdGatewayMaxConcurrent": "BdGatewayMaxConcurrent",
-	"daemonClaudeDir":        "DaemonClaudeDir",
 	"tracker":                "Tracker",
 	"trackerDSNSecret":       "TrackerDSNSecret",
 	"trackerBackup":          "TrackerBackup",
@@ -460,6 +456,8 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 	// with the reason it need not.
 	notRecorded := map[string]string{
 		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
+		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
 	recordType := reflect.TypeOf(renderFlagsRecord{})
