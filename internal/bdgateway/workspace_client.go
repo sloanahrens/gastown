@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -881,6 +882,52 @@ func (g GatewayPusher) Probe(ctx context.Context) error {
 		return g.refusal(resp.StatusCode, data)
 	}
 	return nil
+}
+
+// Calls reads the call log's recent entries with GET /v1/calls: the entries
+// stamped after since, oldest first, at most limit. It uses the same endpoint,
+// token file, client and timeout as a probe, and returns the answer's entries in
+// order. A non-200 answer is the refusal Probe returns, with no entries; a body
+// that is not the calls answer is an error. A calls read observes nothing: it
+// says nothing about the workspace hash.
+func (g GatewayPusher) Calls(ctx context.Context, since time.Time, limit int) ([]CallEntry, error) {
+	endpoint, err := g.endpoint(callsPath)
+	if err != nil {
+		return nil, err
+	}
+	token, err := readTokenFile(g.TokenFile)
+	if err != nil {
+		return nil, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	query := url.Values{}
+	query.Set("since", since.Format(time.RFC3339))
+	query.Set("limit", strconv.Itoa(limit))
+	// endpoint checked the URL and the method is fixed, so building the request
+	// cannot fail, as in Probe.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?"+query.Encode(), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.doer().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("bdgateway: the gateway at %s did not answer the calls read: %w", shown(redactedURL(g.effectiveURL())), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
+	if err != nil {
+		return nil, fmt.Errorf("bdgateway: reading the gateway's calls answer: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, g.refusal(resp.StatusCode, data)
+	}
+	var body callsBody
+	if err := json.Unmarshal(data, &body); err != nil {
+		return nil, fmt.Errorf("bdgateway: the gateway's calls answer is not the call log: %w", err)
+	}
+	return body.Calls, nil
 }
 
 // ReportedHash is the manifest hash the gateway reports it serves. It sends GET
