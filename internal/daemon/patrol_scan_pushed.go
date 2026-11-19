@@ -3,6 +3,9 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // PushedSinceSling implements patrolscan.Env (gt-hgb91h): origin's head for the
@@ -12,8 +15,8 @@ import (
 //
 // The branch comes from the handle the overrun guard's stop works through, so a
 // sandbox seat is read in its clone and a host seat in its worktree. The clock
-// is the guard's own (overrunSlungReader.slungAt) and the decision its
-// originHeadSince.
+// is the guard's own (overrunSlungReader.slungAt) and the decision is
+// pushedHeadSince, originHeadSince's steps with each failed read returned.
 func (h *patrolScanHost) PushedSinceSling(rig, name string) (string, error) {
 	bead, err := h.seatWorkBead(rig, name)
 	if err != nil {
@@ -36,14 +39,56 @@ func (h *patrolScanHost) PushedSinceSling(rig, name string) (string, error) {
 	if !ok || slung.IsZero() {
 		return "", fmt.Errorf("the sling clock of %s for %s/%s cannot be read", bead, rig, name)
 	}
-	// originHeadSince answers "" for an origin it cannot reach, which the stop
-	// reads as "not finished work". The Env contract needs that failed read as
-	// an error, so origin is asked here first; a branch origin does not hold
-	// falls through to the "" originHeadSince gives it.
-	if _, _, err := originBranchRead(g, branch); err != nil {
-		return "", fmt.Errorf("%s/%s: %w", rig, name, err)
+	return pushedHeadSince(g, branch, slung)
+}
+
+// pushedHeadSince is originHeadSince's decision with every failed read returned
+// as an error. originHeadSince answers "" for each failure, which the overrun
+// stop reads as "not finished work"; the Env contract reads "" as "not pushed",
+// so the same steps here keep the failure. A read that answers "not on origin",
+// "origin's head does not descend from the local tip" or "origin's head predates
+// the sling" returns "" with no error. The caller sets slingAt.
+func pushedHeadSince(g daemonGit, branch string, slingAt time.Time) (string, error) {
+	tip, err := g.Rev("refs/heads/" + branch)
+	if err != nil {
+		return "", fmt.Errorf("read the local head of %s: %w", branch, err)
 	}
-	return originHeadSince(g, branch, slung), nil
+	if tip == "" {
+		return "", fmt.Errorf("the local head of %s is empty", branch)
+	}
+	origin, held, err := originBranchRead(g, branch)
+	if err != nil {
+		return "", err
+	}
+	if !held {
+		return "", nil
+	}
+	if origin != tip {
+		fetched, err := g.HasObject(origin)
+		if err != nil {
+			return "", fmt.Errorf("check origin's head %s of %s is fetched: %w", origin, branch, err)
+		}
+		if !fetched {
+			if err := g.FetchRefspecWithTimeout("origin", "refs/heads/"+branch, git.RemoteQueryTimeout); err != nil {
+				return "", fmt.Errorf("fetch origin's %s: %w", branch, err)
+			}
+		}
+		ancestor, err := g.IsAncestor(tip, origin)
+		if err != nil {
+			return "", fmt.Errorf("check origin's head %s of %s descends from the local tip: %w", origin, branch, err)
+		}
+		if !ancestor {
+			return "", nil
+		}
+	}
+	at, err := g.CommitTime(origin)
+	if err != nil {
+		return "", fmt.Errorf("read the commit time of origin's head %s: %w", origin, err)
+	}
+	if !at.After(slingAt) {
+		return "", nil
+	}
+	return origin, nil
 }
 
 // seatWorkBead is the bead whose sling clock dates the seat's run: the one its

@@ -152,6 +152,25 @@ func TestPushedSinceSling_HeadBeforeTheSlingIsNoWork(t *testing.T) {
 	}
 }
 
+// An origin head that does not descend from the local tip is a history this
+// run did not produce: no answer, and not an error.
+func TestPushedSinceSling_DivergedOriginHeadIsNoWork(t *testing.T) {
+	t.Parallel()
+	p := newPushedTown(t)
+	slung := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	p.slingAt(t, slung)
+	p.git.commitTime = slung.Add(5 * time.Minute)
+	p.originHolds("def5678")
+
+	got, err := p.h.PushedSinceSling(pushedRig, pushedPolecat)
+	if err != nil {
+		t.Fatalf("PushedSinceSling: %v", err)
+	}
+	if got != "" {
+		t.Errorf("PushedSinceSling = %q, want \"\"", got)
+	}
+}
+
 // A branch origin does not hold is a seat that has not pushed it: no answer,
 // and not an error.
 func TestPushedSinceSling_BranchMissingOnOriginIsNoWork(t *testing.T) {
@@ -296,6 +315,118 @@ func TestPushedSinceSling_UnreadableInputsAreErrors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not name the %s", err, want)
+			}
+		})
+	}
+}
+
+// failingGit is the git handle with the named reads failing: the stand-in for
+// a read that fails after origin has already answered.
+type failingGit struct {
+	daemonGit
+	rev, hasObject, isAncestor error
+}
+
+func (g failingGit) Rev(ref string) (string, error) {
+	if g.rev != nil {
+		return "", g.rev
+	}
+	return g.daemonGit.Rev(ref)
+}
+
+func (g failingGit) HasObject(sha string) (bool, error) {
+	if g.hasObject != nil {
+		return false, g.hasObject
+	}
+	return g.daemonGit.HasObject(sha)
+}
+
+func (g failingGit) IsAncestor(ancestor, descendant string) (bool, error) {
+	if g.isAncestor != nil {
+		return false, g.isAncestor
+	}
+	return g.daemonGit.IsAncestor(ancestor, descendant)
+}
+
+// A read that fails after origin has answered is an error, never the "" that
+// reads as an unpushed branch. Origin's head differs from the local tip and
+// descends from it, so every read below is reached.
+func TestPushedSinceSling_FailedHeadReadsAreErrors(t *testing.T) {
+	t.Parallel()
+	slung := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	boom := errors.New("bd: git: transport failed")
+	for _, tc := range []struct {
+		name string
+		// broke breaks one read of the fixture and returns what the error must name.
+		broke func(p *pushedTown) string
+	}{
+		{
+			name: "local head read",
+			broke: func(p *pushedTown) string {
+				p.d.openGitFn = func(string) daemonGit { return failingGit{daemonGit: p.git, rev: boom} }
+				return "read the local head"
+			},
+		},
+		{
+			name: "local head empty",
+			broke: func(p *pushedTown) string {
+				p.git.sha = ""
+				return "local head"
+			},
+		},
+		{
+			name: "origin head fetched check",
+			broke: func(p *pushedTown) string {
+				p.d.openGitFn = func(string) daemonGit { return failingGit{daemonGit: p.git, hasObject: boom} }
+				return "is fetched"
+			},
+		},
+		{
+			name: "origin head fetch",
+			broke: func(p *pushedTown) string {
+				p.git.hasObject = nil
+				p.git.fetchErr = boom
+				return "fetch origin's"
+			},
+		},
+		{
+			name: "ancestry check",
+			broke: func(p *pushedTown) string {
+				p.d.openGitFn = func(string) daemonGit { return failingGit{daemonGit: p.git, isAncestor: boom} }
+				return "descends"
+			},
+		},
+		{
+			name: "commit time",
+			broke: func(p *pushedTown) string {
+				p.git.commitTime = time.Time{}
+				return "commit time"
+			},
+		},
+		{
+			name: "origin listing",
+			broke: func(p *pushedTown) string {
+				p.git.originErr = boom
+				return "read origin's"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newPushedTown(t)
+			p.slingAt(t, slung)
+			p.git.commitTime = slung.Add(5 * time.Minute)
+			p.originHolds("def5678")
+			p.git.ancestors = map[string]bool{"abc1234 def5678": true}
+			p.git.hasObject = map[string]bool{"def5678": true}
+			want := tc.broke(p)
+
+			got, err := p.h.PushedSinceSling(pushedRig, pushedPolecat)
+			if err == nil || got != "" {
+				t.Fatalf("PushedSinceSling = %q, %v; want \"\" and an error", got, err)
+			}
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
 			}
 		})
 	}
