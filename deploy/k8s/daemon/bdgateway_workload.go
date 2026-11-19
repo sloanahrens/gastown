@@ -64,10 +64,23 @@ const (
 // Its strategy is RollingUpdate with maxUnavailable 0 and maxSurge 1: the new gateway
 // starts, and passes its readiness, before the old one stops, so the gateway has no
 // gap in service. For the length of a roll two gateway processes share the workspace
-// claim and the log claim. That is safe because the workspace push takes a
-// cross-process lock (gt-fo7rf0), the overseer checked bd's runtime files under two
-// pods (gt-yz0s8v), and --log-per-pod gives each pod its own call log directory.
-// Replicas stay at one.
+// claim and the log claim. Replicas stay at one.
+//
+// That sharing is safe on the control cluster as verified on 2026-11-19 by the
+// overseer's commands: kubectl get nodes shows one node (colima-gt-control, k3s v1.35),
+// and kubectl get storageclass shows local-path. The gateway's two claims,
+// bd-gateway-workspace and bd-gateway-log, are ReadWriteOnce, which is per node, and
+// local-path volumes are node-local hostPath, so the surge pod attaches while the old
+// pod still holds them and the roll does not stall. This stops
+// holding if the control cluster gets a second node: the claims must then become
+// ReadWriteMany, or the strategy goes back to Recreate.
+//
+// Two checks back the sharing. The overseer's check (gt-yz0s8v, run 2026-11-18 in a
+// scratch namespace) found bd's runtime files safe under two pods on one claim. The
+// workspace push was unsafe until its cross-process lock (gt-fo7rf0) serialized it,
+// and the lock holds only between pods that run that release, so the first roll from
+// an image built before it races once. A real roll with pod startup was not part of
+// that run. --log-per-pod gives each pod its own call log directory.
 func bdGatewayDeployment(v Values, namespace string) Deployment {
 	automount := false
 	user := bdGatewayIdentity
