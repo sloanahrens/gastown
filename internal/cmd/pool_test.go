@@ -761,6 +761,130 @@ func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
 	}
 }
 
+// TestPoolShowNamesEveryHeldSeatAboveTheCap is gt-f4wwm7: a seat reading 9/8
+// lists the nine seats it holds under its line, in the states and the formatter
+// the tick line names them, so the reading can be attributed rather than guessed
+// at. The list is built from the same seat read as the count, so it has one
+// entry per seat counted.
+func TestPoolShowNamesEveryHeldSeatAboveTheCap(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"deepseek-flash":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"deepseek-flash":{"cap":8}}}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seat := func(name string) poolSession {
+		return poolSession{name: "gt-" + name, agent: "deepseek-flash", rig: "gastown", polecat: name}
+	}
+	sessions := []poolSession{
+		seat("alpha"), seat("bravo"), seat("charlie"),
+		seat("delta"), seat("echo"), seat("foxtrot"),
+		{name: "landing/gastown/golf", agent: "deepseek-flash", rig: "gastown", polecat: "golf", landing: true},
+		{name: "dead/gastown/hotel", agent: "deepseek-flash", rig: "gastown", polecat: "hotel", deadHooked: true},
+		{name: "pool-claim/c1", agent: "deepseek-flash", claim: true},
+	}
+	live := poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) {
+		return sessions, nil
+	})
+
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {
+		t.Fatal(err)
+	}
+	page := out.String()
+	if got, want := poolTestShowLine(page, "deepseek-flash"), "deepseek-flash 9/8 (8 live + 1 dead-hooked) open"; got != want {
+		t.Fatalf("seat line = %q, want %q:\n%s", got, want, page)
+	}
+	held := poolTestShowLine(page, "held:")
+	want := "held: gastown/alpha:session, gastown/bravo:session, gastown/charlie:session, " +
+		"gastown/delta:session, gastown/echo:session, gastown/foxtrot:session, " +
+		"gastown/golf:landing, gastown/hotel:dead-hooked, pool-claim/c1:claim"
+	if held != want {
+		t.Fatalf("held line = %q, want %q:\n%s", held, want, page)
+	}
+	entries := strings.Split(strings.TrimPrefix(held, "held: "), ", ")
+	if len(entries) != live.live["deepseek-flash"] || len(entries) != 9 {
+		t.Errorf("the list names %d seats, the seat counts %d:\n%s", len(entries), live.live["deepseek-flash"], page)
+	}
+}
+
+// TestPoolShowNamesEveryHeldSeatAboveTheTotalCap is gt-f4wwm7 for the town's
+// total: each seat inside its own cap and the town above max_total lists every
+// seat it holds under the total line, one entry per seat the total counts.
+func TestPoolShowNamesEveryHeldSeatAboveTheTotalCap(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"claude-sonnet":{"command":"claude"},"deepseek-flash":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"claude-sonnet":{"cap":5},"deepseek-flash":{"cap":5}},"max_total":3}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seat := func(agent, name string) poolSession {
+		return poolSession{name: "gt-" + name, agent: agent, rig: "gastown", polecat: name}
+	}
+	live := poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) {
+		return []poolSession{
+			seat("claude-sonnet", "a"), seat("claude-sonnet", "b"),
+			seat("deepseek-flash", "c"), seat("deepseek-flash", "d"),
+		}, nil
+	})
+
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {
+		t.Fatal(err)
+	}
+	page := out.String()
+	if got, want := poolTestShowLine(page, "total"), "total 4/3"; got != want {
+		t.Fatalf("total line = %q, want %q:\n%s", got, want, page)
+	}
+	held := poolTestShowLine(page, "held:")
+	want := "held: gastown/a:session, gastown/b:session, gastown/c:session, gastown/d:session"
+	if held != want {
+		t.Fatalf("held line = %q, want %q:\n%s", held, want, page)
+	}
+	if entries := strings.Split(strings.TrimPrefix(held, "held: "), ", "); len(entries) != live.total {
+		t.Errorf("the list names %d seats, the total counts %d:\n%s", len(entries), live.total, page)
+	}
+}
+
+// TestPoolShowUnderEveryCapKeepsItsLines is gt-f4wwm7's other half: a reading at
+// or under every cap prints exactly the page it printed before the held list
+// existed, so the list cannot change a healthy reading.
+func TestPoolShowUnderEveryCapKeepsItsLines(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"claude-sonnet":{"command":"claude"},"deepseek-flash":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"claude-sonnet":{"cap":2},"deepseek-flash":{"cap":3}},"max_total":5}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seat := func(agent, name string) poolSession {
+		return poolSession{name: "gt-" + name, agent: agent, rig: "gastown", polecat: name}
+	}
+	live := poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) {
+		return []poolSession{
+			seat("claude-sonnet", "a"), seat("claude-sonnet", "b"),
+			seat("deepseek-flash", "c"),
+		}, nil
+	})
+
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {
+		t.Fatal(err)
+	}
+	want := "claude-sonnet   2/2  open\n" +
+		"deepseek-flash  1/3  open\n" +
+		"total           3/5\n" +
+		"read: " + config.SourcePathRel(root, config.TownSettingsPath(root)) + " (polecat_pool.seats, max_total)\n"
+	if got := out.String(); got != want {
+		t.Errorf("a reading under every cap changed:\ngot:\n%s\nwant:\n%s", got, want)
+	}
+}
+
 // TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat is gt-2q283 through
 // both readers of one seat picture: `gt pool show`'s page and the spec
 // dispatcher's tick line are built from the same count (poolSeatSessions →
