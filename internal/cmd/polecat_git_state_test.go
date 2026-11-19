@@ -1,12 +1,17 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/polecat"
 )
 
 // fakeGitState is a worktree as gitStateOf reads it.
@@ -134,5 +139,208 @@ func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+// gitStateSeatFixtures is a polecat's agent bead and the reads the command
+// builds from it, before a test replaces the sandbox probe and the git reader.
+type gitStateSeatFixtures struct {
+	reads       polecatGitStateReads
+	agentBeadID string
+}
+
+// newGitStateSeatFixtures stores an agent bead recording agentName (none when
+// empty) and returns the production reads over it, so a test drives the real
+// agent-bead read and only the gateway and git seams are faked.
+func newGitStateSeatFixtures(t *testing.T, agentName string) gitStateSeatFixtures {
+	t.Helper()
+	bd := beadsfake.New()
+	beadID := "gt-gastown-polecat-nux"
+	description := ""
+	if agentName != "" {
+		description = "agent: " + agentName + "\n"
+	}
+	bd.Seed(beads.Issue{ID: beadID, Type: "agent", Description: description})
+	return gitStateSeatFixtures{reads: polecatGitStateReadsFor(bd, t.TempDir(), beadID), agentBeadID: beadID}
+}
+
+// TestPolecatGitStateSandboxSeatUnknown is gt-ue5ady: a sandbox seat edits and
+// commits inside its sandbox, so its pod-side worktree is a stale leftover
+// whose clean reading says nothing. The command must answer that the state
+// lives in the sandbox, name it, and never read the pod-side worktree.
+func TestPolecatGitStateSandboxSeatUnknown(t *testing.T) {
+	t.Parallel()
+	const (
+		agentName   = "codex"
+		sessionName = "gt-nux"
+	)
+	for _, tc := range []struct {
+		name   string
+		exists bool
+		want   string
+	}{
+		{
+			name:   "running sandbox",
+			exists: true,
+			want:   "unknown: git state lives in the running sandbox " + sessionName + "; the pod-side worktree is not the seat's work",
+		},
+		{
+			name:   "gone sandbox names no stale reading",
+			exists: false,
+			want:   "unknown: git state of sandbox " + sessionName + " is unknown; the pod-side worktree is not the seat's work",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newGitStateSeatFixtures(t, agentName)
+			gitCalled := false
+			f.reads.gitState = func(string) (*GitState, error) {
+				gitCalled = true
+				return &GitState{Clean: true, UncommittedFiles: []string{}}, nil
+			}
+			f.reads.probe = func(agent, session string) (polecat.LiveGitState, bool) {
+				if agent != agentName || session != sessionName {
+					t.Errorf("probe asked about agent %q session %q, want %q and %q", agent, session, agentName, sessionName)
+				}
+				return polecat.SandboxSeatGitState("", tc.exists, nil, session), true
+			}
+
+			var out bytes.Buffer
+			if err := reportPolecatGitState(&out, "gastown", "nux", "/stale/host/clone", sessionName, f.reads, false); err != nil {
+				t.Fatalf("reportPolecatGitState: %v", err)
+			}
+			if gitCalled {
+				t.Error("the pod-side git reader ran for a sandbox seat")
+			}
+			got := out.String()
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("output does not carry %q:\n%s", tc.want, got)
+			}
+			if strings.Contains(strings.ToLower(got), "clean") {
+				t.Errorf("output claims a clean verdict for a sandbox seat:\n%s", got)
+			}
+		})
+	}
+}
+
+// TestPolecatGitStateSandboxSeatJSON pins the --json answer for a sandbox seat:
+// a source of unknown and no clean field, because clean is not knowable from
+// the pod-side worktree.
+func TestPolecatGitStateSandboxSeatJSON(t *testing.T) {
+	t.Parallel()
+	const (
+		agentName   = "codex"
+		sessionName = "gt-nux"
+	)
+	f := newGitStateSeatFixtures(t, agentName)
+	f.reads.gitState = func(string) (*GitState, error) {
+		t.Error("the pod-side git reader ran for a sandbox seat")
+		return nil, errors.New("unreachable")
+	}
+	f.reads.probe = func(_, session string) (polecat.LiveGitState, bool) {
+		return polecat.SandboxSeatGitState("", true, nil, session), true
+	}
+
+	var out bytes.Buffer
+	if err := reportPolecatGitState(&out, "gastown", "nux", "/stale/host/clone", sessionName, f.reads, true); err != nil {
+		t.Fatalf("reportPolecatGitState: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out.String())
+	}
+	if got["source"] != polecat.GitStateSourceUnknown {
+		t.Errorf("source = %v, want %q", got["source"], polecat.GitStateSourceUnknown)
+	}
+	if _, ok := got["clean"]; ok {
+		t.Errorf("sandbox-seat JSON carries a clean field:\n%s", out.String())
+	}
+	reason, _ := got["reason"].(string)
+	if !strings.Contains(reason, sessionName) {
+		t.Errorf("reason %q does not name the sandbox %s", reason, sessionName)
+	}
+}
+
+// TestPolecatGitStateHostSeatUnchanged pins a host seat's output byte for byte
+// against what the command printed before the sandbox probe ran, so the probe
+// never changes a host seat's answer.
+func TestPolecatGitStateHostSeatUnchanged(t *testing.T) {
+	t.Parallel()
+	const (
+		agentName   = "codex"
+		sessionName = "gt-toast"
+		clonePath   = "/town/gastown/polecats/toast/gastown"
+	)
+	f := newGitStateSeatFixtures(t, agentName)
+	f.reads.probe = func(agent, session string) (polecat.LiveGitState, bool) {
+		if agent != agentName || session != sessionName {
+			t.Errorf("probe asked about agent %q session %q, want %q and %q", agent, session, agentName, sessionName)
+		}
+		return polecat.LiveGitState{}, false
+	}
+	f.reads.gitState = func(path string) (*GitState, error) {
+		if path != clonePath {
+			t.Errorf("git reader asked about %q, want %q", path, clonePath)
+		}
+		return gitStateOf(&fakeGitState{branch: "polecat/toast"}, nil)
+	}
+
+	var text bytes.Buffer
+	if err := reportPolecatGitState(&text, "gastown", "toast", clonePath, sessionName, f.reads, false); err != nil {
+		t.Fatalf("reportPolecatGitState: %v", err)
+	}
+	wantText := "Git State: gastown/toast\n\n" +
+		"  Working Tree:  clean\n" +
+		"  Unpushed:      0 commits\n" +
+		"  Branch Stashes: 0\n" +
+		"\n" +
+		"  Verdict:       CLEAN (safe to kill)\n"
+	if text.String() != wantText {
+		t.Errorf("host-seat text changed:\ngot:\n%q\nwant:\n%q", text.String(), wantText)
+	}
+
+	var encoded bytes.Buffer
+	if err := reportPolecatGitState(&encoded, "gastown", "toast", clonePath, sessionName, f.reads, true); err != nil {
+		t.Fatalf("reportPolecatGitState --json: %v", err)
+	}
+	wantJSON := "{\n" +
+		"  \"clean\": true,\n" +
+		"  \"uncommitted_files\": [],\n" +
+		"  \"unpushed_commits\": 0,\n" +
+		"  \"unpreserved_patch_count\": 0,\n" +
+		"  \"stash_count\": 0\n" +
+		"}\n"
+	if encoded.String() != wantJSON {
+		t.Errorf("host-seat JSON changed:\ngot:\n%q\nwant:\n%q", encoded.String(), wantJSON)
+	}
+}
+
+// TestPolecatGitStateUnreadableAgentBeadIsUnknown refuses a clean verdict when
+// the agent bead cannot be read: without the recorded agent the seat could be a
+// sandbox seat, so the pod-side worktree is not evidence either way.
+func TestPolecatGitStateUnreadableAgentBeadIsUnknown(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New()
+	bd.FailWith("show", errors.New("dolt unreachable"))
+	f := gitStateSeatFixtures{reads: polecatGitStateReadsFor(bd, t.TempDir(), "gt-gastown-polecat-nux")}
+	f.reads.gitState = func(string) (*GitState, error) {
+		t.Error("the pod-side git reader ran with no readable agent bead")
+		return nil, errors.New("unreachable")
+	}
+	f.reads.probe = func(string, string) (polecat.LiveGitState, bool) {
+		t.Error("the sandbox probe ran with no recorded agent name")
+		return polecat.LiveGitState{}, false
+	}
+
+	var out bytes.Buffer
+	if err := reportPolecatGitState(&out, "gastown", "nux", "/stale/host/clone", "gt-nux", f.reads, false); err != nil {
+		t.Fatalf("reportPolecatGitState: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "unknown: could not read the polecat's agent bead: dolt unreachable") {
+		t.Errorf("output does not report the unread bead as unknown:\n%s", got)
+	}
+	if strings.Contains(strings.ToLower(got), "clean") {
+		t.Errorf("output claims a clean verdict with no readable agent bead:\n%s", got)
 	}
 }
