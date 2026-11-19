@@ -397,6 +397,62 @@ func TestRunDryRunSaysWhenThereIsNoDiff(t *testing.T) {
 	}
 }
 
+// namingTarget is the fake target with a partial compare: it names the objects
+// its Diff read, as a target whose compare covers only some kinds must.
+type namingTarget struct {
+	*recordingTarget
+}
+
+func (namingTarget) DiffMatch() string {
+	return "the live Deployments match the rendered Deployments"
+}
+
+func (namingTarget) DiffHeading() string {
+	return "the live Deployments differ from the rendered Deployments:"
+}
+
+// TestRunDryRunUsesTheTargetsDiffNames: a target that names what its compare
+// covers has its wording printed, so the roll never reports a wider match than
+// the compare made.
+func TestRunDryRunUsesTheTargetsDiffNames(t *testing.T) {
+	t.Parallel()
+	t.Run("differences", func(t *testing.T) {
+		t.Parallel()
+		f := newRollFixture()
+		f.opts.DryRun = true
+		f.target.diff = []string{"deployment/daemon: probe"}
+
+		if err := Run(context.Background(), f.deps, namingTarget{f.target}, f.opts); err != nil {
+			t.Fatalf("dry run: %v", err)
+		}
+
+		out := f.out.String()
+		if !strings.Contains(out, "the live Deployments differ from the rendered Deployments:") {
+			t.Errorf("dry run output lacks the target's heading; got:\n%s", out)
+		}
+		if strings.Contains(out, "the live runner differs") {
+			t.Errorf("dry run used the roll's default heading; got:\n%s", out)
+		}
+	})
+	t.Run("no differences", func(t *testing.T) {
+		t.Parallel()
+		f := newRollFixture()
+		f.opts.DryRun = true
+
+		if err := Run(context.Background(), f.deps, namingTarget{f.target}, f.opts); err != nil {
+			t.Fatalf("dry run: %v", err)
+		}
+
+		out := f.out.String()
+		if !strings.Contains(out, "no differences: the live Deployments match the rendered Deployments") {
+			t.Errorf("dry run output lacks the target's match line; got:\n%s", out)
+		}
+		if strings.Contains(out, "matches the rendered manifests") {
+			t.Errorf("dry run used the roll's default match line; got:\n%s", out)
+		}
+	})
+}
+
 // TestRunDryRunRefusesAnUnreadableDiff: a dry run that cannot compare exits
 // non-zero instead of reporting no difference, and still takes nothing.
 func TestRunDryRunRefusesAnUnreadableDiff(t *testing.T) {

@@ -26,6 +26,18 @@ type Target interface {
 	WaitReady(ctx context.Context) error
 }
 
+// DiffNamer is an optional Target interface: a target whose Diff compares only
+// part of what it applies names what it compared, so the roll's summary lines
+// never report a wider match than the compare made. A target without it is
+// described as "the live <name>".
+type DiffNamer interface {
+	// DiffMatch says what matched, as a sentence: "the live Deployments match
+	// the rendered Deployments".
+	DiffMatch() string
+	// DiffHeading introduces the difference lines, ending with a colon.
+	DiffHeading() string
+}
+
 // RollDeps is what a roll runs with: the landing hold and its owner, the two
 // waits' reads, the clock they poll on, the reading the hold is stamped with,
 // and where the roll prints.
@@ -113,11 +125,18 @@ func dryRun(ctx context.Context, deps RollDeps, t Target, opts RollOptions) erro
 	if err != nil {
 		return fmt.Errorf("comparing the %s with the live cluster: %w", t.Name(), err)
 	}
+	match := fmt.Sprintf("the live %s matches the rendered manifests", t.Name())
+	heading := fmt.Sprintf("the live %s differs from the rendered manifests:", t.Name())
+	if named, ok := t.(DiffNamer); ok {
+		// A target that names what it compared wins over the roll's default, which
+		// would otherwise claim a whole-render match for a partial compare.
+		match, heading = named.DiffMatch(), named.DiffHeading()
+	}
 	if len(diffs) == 0 {
-		fmt.Fprintf(deps.Out, "no differences: the live %s matches the rendered manifests\n", t.Name())
+		fmt.Fprintf(deps.Out, "no differences: %s\n", match)
 		return nil
 	}
-	fmt.Fprintf(deps.Out, "the live %s differs from the rendered manifests:\n", t.Name())
+	fmt.Fprintln(deps.Out, heading)
 	for _, line := range diffs {
 		fmt.Fprintln(deps.Out, line)
 	}

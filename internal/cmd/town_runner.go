@@ -371,24 +371,10 @@ func (d runnerRollDeps) step(n int) string {
 	}
 }
 
-// rollContext is the context the roll runs under: its signal source's, with the
-// listening stopped after the first signal, so a second Ctrl-C takes the default
-// action. A dry run may have no source, since it takes no hold and only reads;
-// a real roll refuses that before it starts.
+// rollContext is the context the roll runs under: the shared signal rule's,
+// which a dry run may run without since it takes no hold and only reads.
 func (d runnerRollDeps) rollContext() (context.Context, context.CancelFunc) {
-	if d.signals == nil {
-		return context.Background(), func() {}
-	}
-	ctx, stop := d.signals()
-	// The first signal cancels the roll. Stop listening on that signal once it
-	// does, so a second Ctrl-C takes the default action and ends the process.
-	unregister := context.AfterFunc(ctx, stop)
-	return ctx, func() {
-		// True means the callback never ran, so this call is the one that stops.
-		if unregister() {
-			stop()
-		}
-	}
+	return rollContextFrom(d.signals)
 }
 
 // runTownRunnerRoll runs the roll over the runner: runnerroll.Run owns the
