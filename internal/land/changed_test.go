@@ -683,3 +683,55 @@ func TestGuardCommandTokens(t *testing.T) {
 		})
 	}
 }
+
+// TestGuardSelectsNilReaderMatchesContentless: with no reader GuardSelects and
+// GuardSelectsWithContent return the same selection for every status, and a
+// content judge never runs (gt-47cf12).
+func TestGuardSelectsNilReaderMatchesContentless(t *testing.T) {
+	t.Parallel()
+	diffs := []string{
+		"M\x00internal/daemon/patrol.go\x00",
+		"A\x00internal/daemon/patrol.go\x00",
+		"D\x00internal/daemon/patrol.go\x00",
+		"R100\x00internal/daemon/patrol.go\x00internal/daemon/moved.go\x00",
+		"R100\x00internal/daemon/patrol.go\x00docs/testing.md\x00",
+		"M\x00Makefile\x00",
+	}
+	hasGo := func(string) bool { return true }
+	for _, diff := range diffs {
+		t.Run(diff, func(t *testing.T) {
+			t.Parallel()
+			plain, err := GuardSelects(diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", diff, err)
+			}
+			contentless, err := GuardSelectsWithContent(diff, hasGo, nil)
+			if err != nil {
+				t.Fatalf("GuardSelectsWithContent(%q, nil): %v", diff, err)
+			}
+			if !reflect.DeepEqual(plain, contentless) {
+				t.Errorf("nil-reader selection %v differs from GuardSelects %v", contentless, plain)
+			}
+		})
+	}
+}
+
+// TestTreeWideGuardTripsWithoutReader: a content judge never runs without a
+// reader, so a guard that has one answers by path alone (gt-47cf12).
+func TestTreeWideGuardTripsWithoutReader(t *testing.T) {
+	t.Parallel()
+	g := treeWideGuard{
+		judges:       func(rel string) bool { return false },
+		contentPaths: commandTokenContent,
+		judgesContent: func(string, string, ContentReader) bool {
+			t.Error("judgesContent ran with no reader")
+			return true
+		},
+	}
+	if g.trips([]string{"internal/daemon/patrol.go"}, nil, nil) {
+		t.Error("trips selected a path its judges rule does not name")
+	}
+	if g.trips(nil, []string{"internal/daemon/patrol.go"}, nil) {
+		t.Error("trips selected a deletion its judges rule does not name")
+	}
+}
