@@ -793,6 +793,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			fmt.Sprintf("the town's overseer identity cannot be read, so the landing worker for rig %s is not running and nothing is landing: %v", rigName, err))
 		return nil, fmt.Errorf("reading the town's overseer identity: %w", err)
 	}
+	// The queue the Lander fills, which the pass drains once bd answers. A nil
+	// queue stays a nil interface, not a typed nil the drain would call (gt-qa5ge8).
+	var records landworker.RecordQueue
+	if lander.Records != nil {
+		records = lander.Records
+	}
 	return &landworker.Worker{
 		Rig:        rigName,
 		TownRoot:   townRoot,
@@ -800,6 +806,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Beads:      bd,
 		Remote:     gitRemote{g: git.NewGit(repo).WithConfigReadRetry(), remote: landingRemote},
 		Lander:     lander,
+		Records:    records,
 		Landings:   landings,
 		Backoff:    backoff,
 		Queue:      d.landingQueueView(),

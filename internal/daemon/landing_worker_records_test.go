@@ -24,4 +24,7 @@ func TestNewRigLandingWorkerKeepsRecordsInTheTownLandings(t *testing.T) {
 	if l == nil || l.Records == nil || l.Records.Path != want {
 		t.Fatalf("Lander.Records = %+v; want the record queue at %s", l, want)
 	}
+	if w.Records != l.Records {
+		t.Fatalf("Worker.Records = %+v; want the Lander's queue", w.Records)
+	}
 }

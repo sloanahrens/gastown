@@ -134,6 +134,13 @@ func verdictCommented(comments []beads.Comment, head, prefix string) bool {
 	return false
 }
 
+// VerdictCommentQueued reports whether comments already carry the verdict
+// comment a queued landing record holds, matched on the record's head marker
+// and the "om " every verdict comment opens with (gt-qa5ge8).
+func VerdictCommentQueued(comments []beads.Comment, rec PendingRecord) bool {
+	return verdictCommented(comments, rec.Key, "om ")
+}
+
 // commentReviewLogFailure writes on the work bead that its om verdict is not
 // in the reviews log, so the rework table's undercount traces to the verdict it
 // lacks rather than to a daemon log line alone. It is fail-soft and bounded
