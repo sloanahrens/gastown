@@ -45,23 +45,75 @@ func recordingSleep(slept *[]time.Duration) func(time.Duration) {
 	return func(d time.Duration) { *slept = append(*slept, d) }
 }
 
+// startListenerSandbox is the ps command line of a sandbox forward that owns
+// the Mac's registry port, the owner the repair leaves alone.
+const startListenerSandbox = "ssh -S /Users/me/.colima/_lima/colima-gt-sbx/ssh.sock -L 127.0.0.1:5001:127.0.0.1:5001"
+
+// answeredRead is what CheckDNS prints for a VM whose lookup answers.
+const answeredRead = testResolvConf + "140.82.113.4  github.com\n"
+
+// healthyRepairs queues the reads the repairs make when both VMs answer DNS and
+// a healthy sandbox forward owns the registry port, so no repair runs a
+// command.
+func healthyRepairs() map[string][]reply {
+	return map[string][]reply{
+		cmdKey(readArgv("gt-sbx")):     {{out: answeredRead}},
+		cmdKey(readArgv("gt-control")): {{out: answeredRead}},
+		cmdKey(registryLsofArgv):       {{out: "p4242\n"}},
+		cmdKey(repairPSArgv("4242")):   {{out: startListenerSandbox}},
+		cmdKey(registryCurlArgv):       {{out: "200"}},
+	}
+}
+
+// startQueues merges the named VM start and container replies into the healthy
+// repair reads of a run.
+func startQueues(starts map[string][]reply) map[string][]reply {
+	queues := healthyRepairs()
+	for key, replies := range starts {
+		queues[key] = replies
+	}
+	return queues
+}
+
+// repairReads are the calls Start makes after the container start when both VMs
+// answer DNS and the sandbox forward healthily owns the registry port.
+var repairReads = [][]string{
+	readArgv("gt-sbx"), readArgv("gt-control"),
+	registryLsofArgv, repairPSArgv("4242"), registryCurlArgv,
+}
+
+// startStarts queues the three VM and container starts of a run where all of
+// them pass.
+func startStarts() map[string][]reply {
+	return map[string][]reply{
+		cmdKey(startArgv("gt-sbx")):     {{}},
+		cmdKey(startArgv("gt-control")): {{}},
+		cmdKey(containersArgv):          {{}},
+	}
+}
+
+// reportCommands lists the report's command column in row order.
+func reportCommands(report Report) []string {
+	cmds := make([]string, 0, len(report))
+	for _, row := range report {
+		cmds = append(cmds, row.Command)
+	}
+	return cmds
+}
+
 // TestVMStartRunOrder: the sandbox VM starts first, then the control VM, then
 // the containers, and a run where every step passes sleeps nowhere.
 func TestVMStartRunOrder(t *testing.T) {
 	t.Parallel()
-	r := &queueRunner{queues: map[string][]reply{
-		cmdKey(startArgv("gt-sbx")):     {{}},
-		cmdKey(startArgv("gt-control")): {{}},
-		cmdKey(containersArgv):          {{}},
-	}}
+	r := &queueRunner{queues: startQueues(startStarts())}
 	var slept []time.Duration
 	report, err := Start(context.Background(), r.run, recordingSleep(&slept), time.Now, "/home/test")
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	want := [][]string{startArgv("gt-sbx"), startArgv("gt-control"), containersArgv}
-	if !reflect.DeepEqual(r.calls, want) {
-		t.Fatalf("calls = %q, want %q", r.calls, want)
+	if len(r.calls) < len(want) || !reflect.DeepEqual(r.calls[:len(want)], want) {
+		t.Fatalf("calls = %q, want them to begin %q", r.calls, want)
 	}
 	if len(slept) != 0 {
 		t.Fatalf("slept %v, want no sleep", slept)
@@ -95,11 +147,11 @@ func TestVMStartRunRetries(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			r := &queueRunner{queues: map[string][]reply{
+			r := &queueRunner{queues: startQueues(map[string][]reply{
 				cmdKey(startArgv("gt-sbx")):     tc.sbxReplies,
 				cmdKey(startArgv("gt-control")): {{}},
 				cmdKey(containersArgv):          {{}},
-			}}
+			})}
 			var slept []time.Duration
 			report, err := Start(context.Background(), r.run, recordingSleep(&slept), time.Now, "/home/test")
 			if !reflect.DeepEqual(slept, tc.wantSleeps) {
@@ -118,8 +170,8 @@ func TestVMStartRunRetries(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			want := [][]string{startArgv("gt-sbx"), startArgv("gt-sbx"), startArgv("gt-sbx"),
-				startArgv("gt-control"), containersArgv}
+			want := append([][]string{startArgv("gt-sbx"), startArgv("gt-sbx"), startArgv("gt-sbx"),
+				startArgv("gt-control"), containersArgv}, repairReads...)
 			if !reflect.DeepEqual(r.calls, want) {
 				t.Fatalf("calls = %q, want %q", r.calls, want)
 			}
@@ -138,15 +190,16 @@ func reportFailed(report Report, profile string) bool {
 }
 
 // TestVMStartRunError: a failed container start makes Start return an error
-// naming that command, after both VM starts ran.
+// naming that command, after both VM starts ran, and the repairs still read
+// their state.
 func TestVMStartRunError(t *testing.T) {
 	t.Parallel()
 	exit := errors.New("exit status 1")
-	r := &queueRunner{queues: map[string][]reply{
+	r := &queueRunner{queues: startQueues(map[string][]reply{
 		cmdKey(startArgv("gt-sbx")):     {{}},
 		cmdKey(startArgv("gt-control")): {{}},
 		cmdKey(containersArgv):          {{err: exit}},
-	}}
+	})}
 	report, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, "/home/test")
 	if err == nil {
 		t.Fatalf("Start returned nil over a failed container start: %s", report)
@@ -154,9 +207,113 @@ func TestVMStartRunError(t *testing.T) {
 	if !strings.Contains(err.Error(), strings.Join(containersArgv, " ")) {
 		t.Fatalf("error = %q, want it to name %q", err, strings.Join(containersArgv, " "))
 	}
-	if len(r.calls) != 3 {
-		t.Fatalf("calls = %q, want both starts and the container start", r.calls)
+	want := append([][]string{startArgv("gt-sbx"), startArgv("gt-control"), containersArgv}, repairReads...)
+	if !reflect.DeepEqual(r.calls, want) {
+		t.Fatalf("calls = %q, want %q", r.calls, want)
 	}
+}
+
+// TestVMStartRepairsOrder: after the container start the repairs read the
+// sandbox VM's DNS, then the control VM's, then the registry port's owner, in
+// that order.
+func TestVMStartRepairsOrder(t *testing.T) {
+	t.Parallel()
+	r := &queueRunner{queues: startQueues(startStarts())}
+	if _, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, "/home/test"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(r.calls) != 3+len(repairReads) {
+		t.Fatalf("calls = %q, want the three starts and then %q", r.calls, repairReads)
+	}
+	if got := r.calls[3:]; !reflect.DeepEqual(got, repairReads) {
+		t.Fatalf("calls after the container start = %q, want %q", got, repairReads)
+	}
+}
+
+// TestVMStartRepairsReport: a failing lookup in gt-control records the DNS
+// repair's steps under gt-control while the answering gt-sbx records none, and
+// a repair that fails is recorded and makes Start return an error without
+// stopping the registry repair.
+func TestVMStartRepairsReport(t *testing.T) {
+	t.Parallel()
+	exit := errors.New("exit status 1")
+	// dnsQueues queues the starts, a sandbox lookup that answers and a control
+	// lookup that does not, with the named reply to the repair's first command.
+	dnsQueues := func(backup reply) map[string][]reply {
+		queues := startQueues(map[string][]reply{
+			cmdKey(startArgv("gt-sbx")):     {{}},
+			cmdKey(startArgv("gt-control")): {{}},
+			cmdKey(containersArgv):          {{}},
+			cmdKey(readArgv("gt-sbx")):      {{out: answeredRead}},
+			cmdKey(readArgv("gt-control")):  {{out: testResolvConf, err: exit}},
+		})
+		queues[cmdKey(backupArgv("gt-control"))] = []reply{backup}
+		queues[cmdKey(writeArgv("gt-control"))] = []reply{{}}
+		queues[cmdKey(corednsRestartArgv)] = []reply{{}}
+		return queues
+	}
+
+	t.Run("failing lookup in gt-control", func(t *testing.T) {
+		t.Parallel()
+		r := &queueRunner{queues: dnsQueues(reply{})}
+		report, err := Start(context.Background(), r.run, func(time.Duration) {}, repairClock, repairHome)
+		if err != nil {
+			t.Fatalf("Start over a repair it ran cleanly: %v", err)
+		}
+		wantSteps := []string{cmdKey(backupArgv("gt-control")), cmdKey(writeArgv("gt-control")), cmdKey(corednsRestartArgv)}
+		got := reportCommands(report)
+		if len(got) != 3+len(wantSteps) {
+			t.Fatalf("report = %s, want the three starts and the gt-control repair steps", report)
+		}
+		if !reflect.DeepEqual(got[3:], wantSteps) {
+			t.Fatalf("repair steps = %q, want %q", got[3:], wantSteps)
+		}
+		for _, row := range report[3:] {
+			if row.Profile != profileControl {
+				t.Fatalf("step row = %+v, want it reported for %s", row, profileControl)
+			}
+		}
+		for _, command := range reportCommands(report) {
+			if command == cmdKey(backupArgv("gt-sbx")) {
+				t.Fatalf("report = %s, want no repair step for the answering gt-sbx", report)
+			}
+		}
+	})
+
+	t.Run("a failed DNS repair", func(t *testing.T) {
+		t.Parallel()
+		r := &queueRunner{queues: dnsQueues(reply{err: exit})}
+		report, err := Start(context.Background(), r.run, func(time.Duration) {}, repairClock, repairHome)
+		if err == nil {
+			t.Fatalf("Start returned nil over a failed DNS repair: %s", report)
+		}
+		if !strings.Contains(err.Error(), "repair DNS in "+profileControl) {
+			t.Fatalf("error = %q, want it to name the %s repair", err, profileControl)
+		}
+		if n := len(report); n == 0 || report[n-1].Command != dnsRepairRow || report[n-1].Err == nil {
+			t.Fatalf("report = %s, want the failed %s repair recorded", report, dnsRepairRow)
+		}
+		if got := r.calls[len(r.calls)-1]; !reflect.DeepEqual(got, registryCurlArgv) {
+			t.Fatalf("last call = %q, want the registry read %q after the failed DNS repair", got, registryCurlArgv)
+		}
+	})
+
+	t.Run("a failed registry repair", func(t *testing.T) {
+		t.Parallel()
+		queues := startQueues(startStarts())
+		queues[cmdKey(registryLsofArgv)] = []reply{{err: errors.New("exit status 2")}}
+		r := &queueRunner{queues: queues}
+		report, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, repairHome)
+		if err == nil {
+			t.Fatalf("Start returned nil over a failed registry repair: %s", report)
+		}
+		if !strings.Contains(err.Error(), registryRepairRow) {
+			t.Fatalf("error = %q, want it to name %q", err, registryRepairRow)
+		}
+		if n := len(report); n == 0 || report[n-1].Command != registryRepairRow || report[n-1].Err == nil {
+			t.Fatalf("report = %s, want the failed %s repair recorded", report, registryRepairRow)
+		}
+	})
 }
 
 // TestVMStartRunRefuses: a nil runner or a nil sleep is refused before any
