@@ -207,6 +207,75 @@ func TestBlendRefusesAverageWithNoPoint(t *testing.T) {
 	}
 }
 
+func TestBlendJevMinutes(t *testing.T) {
+	t.Parallel()
+	// A Jev input given as minutes must blend exactly as the probability that
+	// maps to those minutes: 0.4 is 25 minutes on the sloped table.
+	byProb, err := Blend(Inputs{ShapeMinutes: ptr(2), EmbedMinutes: ptr(18), JevFits: ptr(0.4), Weights: sloped})
+	if err != nil {
+		t.Fatalf("probability Blend error = %v, want nil", err)
+	}
+	byMin, err := Blend(Inputs{ShapeMinutes: ptr(2), EmbedMinutes: ptr(18), JevMinutes: ptr(25)})
+	if err != nil {
+		t.Fatalf("minutes Blend error = %v, want nil", err)
+	}
+	if math.Abs(byMin.Minutes-byProb.Minutes) > 1e-9 {
+		t.Errorf("Minutes = %v, want %v (the probability blend)", byMin.Minutes, byProb.Minutes)
+	}
+	if byMin.Points != byProb.Points {
+		t.Errorf("Points = %d, want %d (the probability blend)", byMin.Points, byProb.Points)
+	}
+	if byMin.Rung != "all" || byProb.Rung != "all" {
+		t.Errorf("Rung = %q / %q, want \"all\" for both", byMin.Rung, byProb.Rung)
+	}
+	if want := []string{"shape", "embed", "jev"}; !slices.Equal(byMin.Inputs, want) {
+		t.Errorf("Inputs = %q, want %q", byMin.Inputs, want)
+	}
+	if byMin.JevMinutes == nil || *byMin.JevMinutes != 25 {
+		t.Errorf("JevMinutes = %v, want 25", byMin.JevMinutes)
+	}
+}
+
+func TestBlendJevMinutesRefusals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		in      Inputs
+		wantErr error
+		// wantMin is the minutes the blend must return when it succeeds; a
+		// refusal leaves it zero.
+		wantMin float64
+	}{
+		{"NaN jev minutes", Inputs{ShapeMinutes: ptr(2), JevMinutes: ptr(math.NaN())}, ErrNoMinutes, 0},
+		{"zero jev minutes", Inputs{ShapeMinutes: ptr(2), JevMinutes: ptr(0)}, ErrNoMinutes, 0},
+		{"negative jev minutes", Inputs{ShapeMinutes: ptr(2), JevMinutes: ptr(-3)}, ErrNoMinutes, 0},
+		{"infinite jev minutes", Inputs{ShapeMinutes: ptr(2), JevMinutes: ptr(math.Inf(1))}, ErrNoMinutes, 0},
+		{"jev minutes without shape", Inputs{JevMinutes: ptr(25)}, ErrNoShape, 0},
+		{"probability wins over minutes", Inputs{ShapeMinutes: ptr(2), JevFits: ptr(0.4), JevMinutes: ptr(99), Weights: sloped}, nil, geoMean(2, 25)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Blend(tt.in)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Blend error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantErr != nil {
+				if got.Rung != "" || got.Minutes != 0 {
+					t.Errorf("Blend returned %+v with the error; want the zero value", got)
+				}
+				return
+			}
+			if math.Abs(got.Minutes-tt.wantMin) > 1e-9 {
+				t.Errorf("Minutes = %v, want %v", got.Minutes, tt.wantMin)
+			}
+			if got.JevMinutes == nil || math.Abs(*got.JevMinutes-25) > 1e-9 {
+				t.Errorf("JevMinutes = %v, want 25 from the probability", got.JevMinutes)
+			}
+		})
+	}
+}
+
 func TestJevMinutesRefusesBadProbability(t *testing.T) {
 	t.Parallel()
 	for _, p := range []float64{-0.5, 2, math.NaN()} {
