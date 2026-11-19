@@ -800,10 +800,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Beads:      bd,
 		Remote:     gitRemote{g: git.NewGit(repo).WithConfigReadRetry(), remote: landingRemote},
 		Lander:     lander,
-		Landings:   landings,
-		Backoff:    backoff,
-		Queue:      d.landingQueueView(),
-		PostLand:   postLand,
+		// The queue the Lander fills; the pass drains it once bd answers (gt-qa5ge8).
+		Records:  lander.Records,
+		Landings: landings,
+		Backoff:  backoff,
+		Queue:    d.landingQueueView(),
+		PostLand: postLand,
 		// The landing merges on the remote, which moves main there and leaves
 		// the author seat's remote-tracking ref for it stale (gt-fn9e6.55).
 		RefreshAuthorSeat: refreshAuthorSeat,

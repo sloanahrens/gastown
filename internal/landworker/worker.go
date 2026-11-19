@@ -138,6 +138,9 @@ type Worker struct {
 	Remote   Remote
 	Lander   Lander
 	Landings Landings
+	// Records, when set, is the queue of landing records an earlier pass could
+	// not write; each pass writes them once bd answers (gt-qa5ge8). nil skips it.
+	Records *land.RecordQueue
 	// noBatchSaid is set once the worker has said its beads client cannot batch
 	// reads, so the pass that repeats says so once, not on every pass.
 	noBatchSaid bool
@@ -419,6 +422,9 @@ func (w *Worker) outcomeRow(issue *beads.Issue, wrote bool) string {
 // push, then sweeps origin's leftover polecat branches, and returns what
 // happened. It stops early only when ctx is done.
 func (w *Worker) Pass(ctx context.Context) Report {
+	// First, so a bd that has answered since the record was queued takes it
+	// before this pass claims anything (gt-qa5ge8).
+	w.drainRecordQueue()
 	rep := w.landReady(ctx)
 	if !w.draining() {
 		w.watchTarget(ctx)
