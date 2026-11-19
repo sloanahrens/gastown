@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -225,6 +226,62 @@ func TestRenderDeploymentRecreates(t *testing.T) {
 	}
 	if got := golden.Spec.Strategy.Type; got != Recreate {
 		t.Errorf("%s sets strategy type %q, want %q", path, got, Recreate)
+	}
+}
+
+// TestRenderDeploymentTerminationGrace drives the grace period the kubelet gives
+// the pod before it sends SIGKILL. It reads the rendered object and the golden,
+// not a struct field, so a builder that drops the setting fails here.
+func TestRenderDeploymentTerminationGrace(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues())
+	var buf bytes.Buffer
+	if err := YAML(&buf, m.Deployment); err != nil {
+		t.Fatalf("YAML: %v", err)
+	}
+	var rendered map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &rendered); err != nil {
+		t.Fatalf("decoding the rendered Deployment: %v", err)
+	}
+	if got := renderedPodSpec(t, rendered)["terminationGracePeriodSeconds"]; got != 660 {
+		t.Errorf("rendered terminationGracePeriodSeconds = %v (%T), want 660", got, got)
+	}
+
+	path := filepath.Join("testdata", "deployment.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var golden map[string]any
+	if err := yaml.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("decoding %s: %v", path, err)
+	}
+	if got := renderedPodSpec(t, golden)["terminationGracePeriodSeconds"]; got != 660 {
+		t.Errorf("%s sets terminationGracePeriodSeconds = %v (%T), want 660", path, got, got)
+	}
+}
+
+// TestRenderConfigShutdownTimeout drives the runner's shutdown wait and the job
+// timeout. The shutdown wait must end before the kubelet's grace period does, so
+// the runner exits on its own; the job timeout stays 3h.
+func TestRenderConfigShutdownTimeout(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues())
+	doc := decodeConfig(t, m)
+	if doc.Runner.ShutdownTimeout != "10m" {
+		t.Errorf("shutdown_timeout = %q, want %q", doc.Runner.ShutdownTimeout, "10m")
+	}
+	if doc.Runner.Timeout != "3h" {
+		t.Errorf("timeout = %q, want %q: a job may run three hours", doc.Runner.Timeout, "3h")
+	}
+
+	shutdown, err := time.ParseDuration(ShutdownTimeout)
+	if err != nil {
+		t.Fatalf("ShutdownTimeout %q does not parse: %v", ShutdownTimeout, err)
+	}
+	grace := time.Duration(TerminationGrace) * time.Second
+	if shutdown >= grace {
+		t.Errorf("ShutdownTimeout %s is not shorter than TerminationGrace %s: the kubelet would SIGKILL before the runner's wait ends", shutdown, grace)
 	}
 }
 
