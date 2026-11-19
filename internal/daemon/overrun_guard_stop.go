@@ -1414,28 +1414,11 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	return nil
 }
 
-// overrunFinishedOnOrigin is the finishedOnOrigin seam: the commit the seat's
-// kept branch holds in its worktree when origin holds that same commit for the
-// branch and the seat committed it after the bead's dispatch clock began, ""
-// otherwise. That check is what keeps a rework bead, slung onto the branch the
-// landing worker rejected, from reading as finished work: the rejected landing
-// submitted the bead, so the rework dispatch is a new run's clock, and the head
-// the seat resumed predates it — the seat has done nothing since, and the stop
-// is an overrun (needs-split, with its attention item) rather than rework.
+// overrunFinishedOnOrigin is the finishedOnOrigin seam: the commit origin holds
+// for the seat's kept branch when that commit was made after the bead's
+// dispatch clock began, "" otherwise. originHeadSince decides it.
 //
-// The check reads the head's committer time, not its author time: the author
-// date can be set freely at commit time, while the committer date belongs to
-// the operation that wrote the commit. A seat that rebases or cherry-picks the
-// branch rewrites the head and stamps it with the moment of that rewrite, so
-// the new head counts as produced by the run — which it is. A head merely
-// resumed keeps the committer time it was pushed with.
-//
-// A seat with no worktree or branch, a branch origin lacks, an origin that
-// cannot be asked, a head whose committer time cannot be read, and a seat
-// whose sling time is unknown (a stop resumed from a record saved before the
-// sling was kept) all answer "": with nothing showing the head was produced
-// during the run, the stop takes the needs-split path, whose attention item
-// asks for the operator look.
+// A seat with no worktree or branch answers "": there is no branch to judge.
 func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
@@ -1454,24 +1437,69 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 	if branch == "" || branch == "HEAD" {
 		return ""
 	}
-	sha, err := g.Rev("refs/heads/" + branch)
-	if err != nil || sha == "" {
+	return originHeadSince(g, branch, seat.SlingAt)
+}
+
+// originHeadSince is the finishedOnOrigin read: the commit origin holds for
+// branch when it was committed after slingAt and the worktree's branch tip is
+// that commit or an ancestor of it, "" otherwise.
+//
+// The tip need not be origin's head. A sandbox seat pushes from its own clone
+// while this reads the host worktree, which can lag it, so origin holds commits
+// above the tip: that is the seat's finished work. A tip that is not an
+// ancestor of origin's head is not in origin's history, so the branch is no
+// finished branch (gt-x32qui).
+//
+// The head's object may be absent from the worktree, so the branch is fetched
+// into no destination ref — no branch or remote-tracking ref moves and the
+// working tree is untouched — before the ancestry test, which needs the object.
+// The refspec is built from a name origin has already listed as
+// refs/heads/<branch>, and git's ref rules admit no ':' there, so it cannot
+// carry a destination of its own.
+//
+// The committer time is read, not the author time: the author date can be set
+// freely while the committer date belongs to the operation that wrote the
+// commit. A seat that rebases or cherry-picks stamps a head produced by the
+// run, and a head merely resumed keeps the time it was pushed with.
+//
+// A branch origin lacks, an origin that cannot be asked, a fetch that fails, a
+// head whose committer time cannot be read, and an unknown sling time all
+// answer "": the stop then takes the needs-split path, whose attention item
+// asks for the operator look.
+func originHeadSince(g daemonGit, branch string, slingAt time.Time) string {
+	tip, err := g.Rev("refs/heads/" + branch)
+	if err != nil || tip == "" {
 		return ""
 	}
-	if originBranchSHA(g, branch) != sha {
+	origin := originBranchSHA(g, branch)
+	if origin == "" {
 		return ""
 	}
 	// A head committed before the sling is the branch the seat resumed, not
 	// work this run produced. An unknown sling time cannot tell the two apart,
 	// so it answers "" like an old head: needs-split is the safe hand-back.
-	if seat.SlingAt.IsZero() {
+	if slingAt.IsZero() {
 		return ""
 	}
-	at, err := g.CommitTime(sha)
-	if err != nil || !at.After(seat.SlingAt) {
+	if origin != tip {
+		held, err := g.HasObject(origin)
+		if err != nil {
+			return ""
+		}
+		if !held {
+			if err := g.FetchRefspecWithTimeout("origin", "refs/heads/"+branch, git.RemoteQueryTimeout); err != nil {
+				return ""
+			}
+		}
+		if ancestor, err := g.IsAncestor(tip, origin); err != nil || !ancestor {
+			return ""
+		}
+	}
+	at, err := g.CommitTime(origin)
+	if err != nil || !at.After(slingAt) {
 		return ""
 	}
-	return sha
+	return origin
 }
 
 // overrunPushDivergedError is a push origin rejected because it holds history

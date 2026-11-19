@@ -600,6 +600,19 @@ type pushStubGit struct {
 	ancestors map[string]bool
 	cherry    map[string]string
 	cherryErr error
+	// hasObject is HasObject's answer per sha; a sha it does not list is absent,
+	// as a commit the worktree never fetched is. fetches records the "remote
+	// refspec" of each fetch, and fetchErr fails every one.
+	hasObject map[string]bool
+	fetches   []string
+	fetchErr  error
+}
+
+func (g *pushStubGit) HasObject(sha string) (bool, error) { return g.hasObject[sha], nil }
+
+func (g *pushStubGit) FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error {
+	g.fetches = append(g.fetches, remote+" "+refspec)
+	return g.fetchErr
 }
 
 func (g *pushStubGit) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {

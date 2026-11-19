@@ -2464,6 +2464,95 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 	}
 }
 
+// Origin holding commits the worktree's branch does not — the host worktree
+// lags the seat's clone, and the seat pushed before it idled — is the seat's
+// finished work, so the hand-back is rework: the commit origin holds is
+// accepted when the worktree tip is its ancestor, and the object is fetched
+// (the branch alone, no ref) so its committer time can be read.
+func TestOverrunFinishedOnOrigin_OriginAheadOfTheWorktreeIsFinished(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable", "gastown")
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ref := "refs/heads/" + stopSeat.Branch
+	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	seated := stopSeat
+	seated.SlingAt = slung
+	newStub := func() *pushStubGit {
+		return &pushStubGit{
+			branch:    stopSeat.Branch,
+			sha:       "abc123",
+			ancestors: map[string]bool{"abc123 9f8e7d6": true},
+			originRefs: []git.RemoteRef{
+				{Hash: "9f8e7d6", Name: ref},
+			},
+			commitTime: slung.Add(time.Minute),
+		}
+	}
+
+	// The worktree lags origin: it holds abc123, origin holds 9f8e7d6 above it.
+	g := newStub()
+	d.openGitFn = func(string) daemonGit { return g }
+	if got := d.overrunFinishedOnOrigin(seated); got != "9f8e7d6" {
+		t.Errorf("origin ahead of the worktree: got %q, want 9f8e7d6", got)
+	}
+	if want := []string{"origin refs/heads/" + stopSeat.Branch}; !reflect.DeepEqual(g.fetches, want) {
+		t.Errorf("fetches = %q, want %q (the branch, into no ref)", g.fetches, want)
+	}
+
+	// A commit the worktree already holds needs no fetch.
+	g = newStub()
+	g.hasObject = map[string]bool{"9f8e7d6": true}
+	d.openGitFn = func(string) daemonGit { return g }
+	if got := d.overrunFinishedOnOrigin(seated); got != "9f8e7d6" {
+		t.Errorf("object already local: got %q, want 9f8e7d6", got)
+	}
+	if len(g.fetches) != 0 {
+		t.Errorf("fetches = %q, want none", g.fetches)
+	}
+
+	// A head origin committed before the sling is the branch the seat resumed.
+	g = newStub()
+	g.commitTime = slung.Add(-time.Hour)
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("head committed before the sling: got %q, want none", got)
+	}
+
+	// A tip origin's head does not contain is diverged work: pushing it was
+	// refused, and it is no finished branch.
+	g = newStub()
+	g.ancestors = nil
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("tip not an ancestor of origin's head: got %q, want none", got)
+	}
+
+	// A branch origin lacks, an origin that cannot be asked and a fetch that
+	// fails all leave nothing showing finished work.
+	g = newStub()
+	g.originRefs = []git.RemoteRef{{Hash: "9f8e7d6", Name: ref + "-other"}}
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("branch origin lacks: got %q, want none", got)
+	}
+	g = newStub()
+	g.originErr = errors.New("unreachable")
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("origin cannot be asked: got %q, want none", got)
+	}
+	g = newStub()
+	g.fetchErr = errors.New("fetch failed")
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("fetch failed: got %q, want none", got)
+	}
+
+	// An unknown sling time cannot show the head was produced by this run.
+	g = newStub()
+	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+		t.Errorf("sling time unknown: got %q, want none", got)
+	}
+}
+
 // A stop retried on later ticks records the run's end once, stamped with the
 // session stop's time: a hand-back that keeps failing runs step 5 every tick,
 // and a later end written each time would creep past the dispatch it ended,
