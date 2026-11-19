@@ -174,6 +174,9 @@ const (
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
 	KindHoldStale Kind = "hold-stale"
+	// KindJobOverdue: a maintenance job is past its cadence or its newest run
+	// failed, so the work it does has not happened (gt-toiff6).
+	KindJobOverdue Kind = "job-overdue"
 	// KindMetricsExtract: the metrics extract a digest or analysis reads is
 	// stale, gapped, or could not be read at all, so the tables it publishes
 	// no longer describe the town (gt-mi4cem).
@@ -234,7 +237,7 @@ func Kinds() []Kind {
 		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
+		KindHoldStale, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow,

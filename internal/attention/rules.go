@@ -2,6 +2,7 @@ package attention
 
 import (
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -167,6 +168,12 @@ const (
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
+	// RuleJobOverdue is a maintenance job past its cadence, or one whose newest
+	// run failed: a record the overseer reads on its next look (gt-toiff6).
+	RuleJobOverdue = "job.overdue"
+	// RuleJobOverdueWake is a job that missed two cadences, which the town
+	// cannot wait for: the overseer is woken (gt-toiff6, gt-obe5qp).
+	RuleJobOverdueWake = "job.overdue_wake"
 	// RuleMetricsExtract is a metrics extract that is stale, gapped or
 	// unreadable: the tables a digest or analysis reads no longer describe the
 	// town (gt-mi4cem).
@@ -334,6 +341,12 @@ var ruleFlags = map[string]RuleFlags{
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
+	// A job past its cadence is a record for the overseer's next look; the jobs
+	// the town cannot let slip raise job.overdue_wake instead (gt-toiff6).
+	RuleJobOverdue: flagsInfo,
+	// A job that missed two cadences has done no maintenance the town relies on:
+	// the overseer is woken to restart it or find what stopped it (gt-obe5qp).
+	RuleJobOverdueWake: flagsWake,
 	// A stale, gapped or unreadable extract is a record, not a page: nothing
 	// decides on the line itself, and the measure the extract feeds is judged
 	// by its own rule, storypoints.drift (gt-my0o23, gt-mi4cem).
@@ -490,6 +503,7 @@ var kindRules = map[Kind]string{
 	KindSandboxSeatKept:               RuleSandboxSeatKept,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
 	KindHoldStale:                     RuleHoldStale,
+	KindJobOverdue:                    RuleJobOverdue,
 	KindMetricsExtract:                RuleMetricsExtract,
 	KindSandboxPending:                RuleSandboxPending,
 	KindSandboxSilent:                 RuleSandboxSilent,
@@ -503,13 +517,21 @@ var kindRules = map[Kind]string{
 	KindGateSlow:                      RuleGateSlow,
 }
 
+// jobOverdueWakePrefix is the key a job that missed two cadences raises under
+// job.overdue_wake; every other job-overdue key is the info record (gt-obe5qp).
+const jobOverdueWakePrefix = "job-overdue:wake:"
+
 // RuleFor is the rule id of an item. A disk collector's key is its rule
 // (host.disk_warn or host.disk_crit, host.node_disk_warn or
-// host.node_disk_crit); every other kind has one rule. An item of a kind with
-// no rule yields "".
+// host.node_disk_crit), a job-overdue item whose key starts with
+// jobOverdueWakePrefix raises job.overdue_wake, and every other kind has one
+// rule. An item of a kind with no rule yields "".
 func RuleFor(it Item) string {
 	if it.Kind == KindHostDisk || it.Kind == KindHostNodeDisk {
 		return it.Key
+	}
+	if it.Kind == KindJobOverdue && strings.HasPrefix(it.Key, jobOverdueWakePrefix) {
+		return RuleJobOverdueWake
 	}
 	return kindRules[it.Kind]
 }
