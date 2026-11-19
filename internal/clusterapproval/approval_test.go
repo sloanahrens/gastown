@@ -120,6 +120,9 @@ func TestClusterApprovalParse(t *testing.T) {
 		{"empty act", recordText(with(goodRecord(), map[string]any{"act": ""})), nil, "has no act"},
 		{"null act", recordText(with(goodRecord(), map[string]any{"act": nil})), nil, "has no act"},
 		{"act is not a string", recordText(with(goodRecord(), map[string]any{"act": 5})), nil, "not a JSON string"},
+		{"cluster is not a string", recordText(with(goodRecord(), map[string]any{"cluster": 5})), nil, "cluster is not a JSON string"},
+		{"sha is not a string", recordText(with(goodRecord(), map[string]any{"plan_sha256": 5})), nil, "plan_sha256 is not a JSON string"},
+		{"proposal_id is not a string", recordText(with(goodRecord(), map[string]any{"proposal_id": 5})), nil, "proposal_id is not a JSON string"},
 		{"empty sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": ""})), nil, "plan_sha256"},
 		{"short sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": goodSHA[:63]})), nil, "plan_sha256"},
 		{"upper-case sha", recordText(with(goodRecord(), map[string]any{"plan_sha256": strings.ToUpper(goodSHA)})), nil, "plan_sha256"},
@@ -131,6 +134,8 @@ func TestClusterApprovalParse(t *testing.T) {
 		{"null proposal_id", recordText(with(goodRecord(), map[string]any{"proposal_id": nil})), nil, "has no proposal_id"},
 		{"missing approved_at", recordText(without(goodRecord(), "approved_at")), nil, "no approved_at"},
 		{"null approved_at", recordText(with(goodRecord(), map[string]any{"approved_at": nil})), nil, "no approved_at"},
+		{"approved_at is not a time", recordText(with(goodRecord(), map[string]any{"approved_at": "yesterday"})), nil, "not an RFC 3339 time"},
+		{"expires_at is not a time", recordText(with(goodRecord(), map[string]any{"expires_at": "yesterday"})), nil, "not an RFC 3339 time"},
 		{"missing expires_at", recordText(without(goodRecord(), "expires_at")), nil, "no expires_at"},
 		{"non-UTC approved_at", recordText(with(goodRecord(), map[string]any{"approved_at": "2026-11-18T13:00:00+01:00"})), nil, "approved_at is not in UTC"},
 		{"non-UTC expires_at", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T11:00:00-07:00"})), nil, "expires_at is not in UTC"},
@@ -138,7 +143,12 @@ func TestClusterApprovalParse(t *testing.T) {
 		{"negative window", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-18T11:00:00Z"})), nil, "not after approved_at"},
 		{"window over the longest", recordText(with(goodRecord(), map[string]any{"expires_at": "2026-11-19T12:00:01Z"})), nil, "more than"},
 		{"not an object", "[]", nil, "not one JSON object"},
+		{"empty body", "", nil, "not one JSON object"},
+		{"truncated key", `{"act`, nil, "read the approval record"},
+		{"truncated value", `{"act":`, nil, "read the value"},
+		{"no closing brace", `{"act":"apply-plan"`, nil, "read the approval record"},
 		{"trailing data", recordText(goodRecord()) + "{}", nil, "trailing data"},
+		{"trailing garbage", recordText(goodRecord()) + "xx", nil, "trailing data"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -87,15 +87,15 @@ func ParseRecord(data []byte) (Record, error) {
 	// last of duplicate keys, so the parser reads the object token by token
 	// and compares each key exactly (gt-esk22l).
 	values := make(map[string]json.RawMessage, len(recordKeys))
-	for dec.More() {
+	for {
 		tok, err := dec.Token()
 		if err != nil {
-			return Record{}, fmt.Errorf("clusterapproval: read a key of the approval record: %w", err)
+			return Record{}, fmt.Errorf("clusterapproval: read the approval record: %w", err)
 		}
-		key, ok := tok.(string)
-		if !ok {
-			return Record{}, fmt.Errorf("clusterapproval: the approval record has the non-string key %v", tok)
+		if tok == json.Delim('}') {
+			break
 		}
+		key := tok.(string) // at object depth the only token that is not the closing brace is a key
 		if !recordKeys[key] {
 			return Record{}, fmt.Errorf("clusterapproval: the record has the unknown key %q", key)
 		}
@@ -107,9 +107,6 @@ func ParseRecord(data []byte) (Record, error) {
 			return Record{}, fmt.Errorf("clusterapproval: read the value of %q: %w", key, err)
 		}
 		values[key] = value
-	}
-	if err := readDelim(dec, '}'); err != nil {
-		return Record{}, fmt.Errorf("clusterapproval: the approval record does not close: %w", err)
 	}
 	if tok, err := dec.Token(); !errors.Is(err, io.EOF) {
 		if err != nil {
@@ -248,16 +245,13 @@ func NewProposal(p Plan) ([]byte, string, error) {
 	if versions == nil {
 		versions = map[string]string{}
 	}
-	body, err := json.Marshal(proposalJSON{
+	body, _ := json.Marshal(proposalJSON{ //nolint:errcheck // proposalJSON holds only strings, a string slice and a string map, so its JSON cannot fail to encode
 		Act:        ActApplyPlan,
 		Cluster:    p.Cluster,
 		PlanSHA256: p.SHA256,
 		Phases:     p.Phases,
 		Versions:   versions,
 	})
-	if err != nil {
-		return nil, "", fmt.Errorf("clusterapproval: encode the proposal: %w", err)
-	}
 	sum := sha256.Sum256(body)
 	return body, hex.EncodeToString(sum[:])[:proposalIDChars], nil
 }
