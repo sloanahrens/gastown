@@ -260,10 +260,11 @@ func (d *Daemon) recordNodeDiskReads(reads []hostNodeRead) {
 			entries[r.Node] = nodeDiskEntry{Err: r.Err.Error(), ErrAt: now}
 			continue
 		}
+		usedBytes, capacityBytes := r.UsedBytes, r.CapacityBytes
 		entries[r.Node] = nodeDiskEntry{
 			UsedPercent:   int(math.Round(r.Disk.UsedPct)),
-			UsedBytes:     r.UsedBytes,
-			CapacityBytes: r.CapacityBytes,
+			UsedBytes:     &usedBytes,
+			CapacityBytes: &capacityBytes,
 			ReadAt:        now,
 		}
 	}
