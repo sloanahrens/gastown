@@ -36,6 +36,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/jev/health"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/jev/scrub"
 	"github.com/steveyegge/gastown/internal/land"
@@ -1159,15 +1160,19 @@ func dashboardJevScorecardWith(townRoot string, cache scorecard.Cache) func() *d
 		doc, err := cache.Read(scorecard.CachePath(townRoot))
 		if err != nil {
 			if errors.Is(err, scorecard.ErrNoScorecard) {
-				return &dashboard.JevScorecard{NoScorecard: true}
+				disabled, unreadable := jevDisabledBatteries(townRoot)
+				return &dashboard.JevScorecard{NoScorecard: true, Disabled: disabled, ConfigUnreadable: unreadable}
 			}
 			return nil
 		}
+		disabled, unreadable := jevDisabledBatteries(townRoot)
 		scored := doc.ScoredAt
 		sc := &dashboard.JevScorecard{
-			Batteries: make([]dashboard.JevBattery, 0, len(doc.Batteries)),
-			Window:    doc.Since,
-			ScoredAt:  &scored,
+			Batteries:        make([]dashboard.JevBattery, 0, len(doc.Batteries)),
+			Window:           doc.Since,
+			ScoredAt:         &scored,
+			Disabled:         disabled,
+			ConfigUnreadable: unreadable,
 		}
 		for _, block := range doc.Batteries {
 			sc.Batteries = append(sc.Batteries, jevBatteryFromCache(block))
@@ -1175,6 +1180,25 @@ func dashboardJevScorecardWith(townRoot string, cache scorecard.Cache) func() *d
 		sc.Tally()
 		return sc
 	}
+}
+
+// jevDisabledBatteries names the Jev batteries the town has turned off under
+// patrols, in health.Batteries order. It reads the patrol config the way gt jev
+// health does: a battery is off when its patrols key is not enabled, and a town
+// with no patrol config has every battery off. A config that cannot be read
+// reports unreadable with no names, since an empty list would read as every
+// battery on.
+func jevDisabledBatteries(townRoot string) (disabled []string, unreadable bool) {
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return nil, true
+	}
+	for _, b := range health.Batteries {
+		if !daemon.IsPatrolEnabled(cfg, b.ConfigKey) {
+			disabled = append(disabled, b.Name)
+		}
+	}
+	return disabled, false
 }
 
 // jevBatteryFromCache folds one cache block into the panel's line. A block a
