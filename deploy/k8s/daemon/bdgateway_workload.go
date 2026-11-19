@@ -61,19 +61,29 @@ const (
 // and the workspace claim. It takes no ServiceAccount token, as the dashboard's pod
 // does not.
 //
-// Its strategy is Recreate: the old gateway stops before the new one starts, so the
-// two never write the workspace together.
+// Its strategy is RollingUpdate with maxUnavailable 0 and maxSurge 1: the new gateway
+// starts, and passes its readiness, before the old one stops, so the gateway has no
+// gap in service. For the length of a roll two gateway processes share the workspace
+// claim and the log claim. That is safe because the workspace push takes a
+// cross-process lock (gt-fo7rf0), the overseer checked bd's runtime files under two
+// pods (gt-yz0s8v), and --log-per-pod gives each pod its own call log directory.
+// Replicas stay at one.
 func bdGatewayDeployment(v Values, namespace string) Deployment {
 	automount := false
 	user := bdGatewayIdentity
 	group := bdGatewayIdentity
 	fsGroup := bdGatewayIdentity
+	maxUnavailable := int32(0)
+	maxSurge := int32(1)
 	return Deployment{
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{Name: BdGatewayName, Namespace: namespace, Labels: bdGatewayLabels()},
 		Spec: DeploymentSpec{
 			Replicas: 1,
-			Strategy: DeploymentStrategy{Type: "Recreate"},
+			Strategy: DeploymentStrategy{
+				Type:          "RollingUpdate",
+				RollingUpdate: &RollingUpdateStrategy{MaxUnavailable: &maxUnavailable, MaxSurge: &maxSurge},
+			},
 			Selector: LabelSelector{MatchLabels: bdGatewaySelectorLabels()},
 			Template: PodTemplate{
 				Metadata: PodTemplateMeta{Labels: bdGatewayLabels()},
@@ -127,7 +137,7 @@ func bdGatewayTokenCopy(v Values) Container {
 func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 	allowEscalation := false
 	dolt := []string{"--dolt-host", doltHost, "--dolt-port", strconv.Itoa(doltPort)}
-	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir}, dolt...)
+	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--log-per-pod", "--workspace", bdGatewayWorkspaceDir}, dolt...)
 	command = append(command, "--push-addr", ":"+strconv.Itoa(BdGatewayPushPort))
 	if v.BdGatewayMaxConcurrent > 0 {
 		command = append(command, "--max-concurrent", strconv.Itoa(v.BdGatewayMaxConcurrent))

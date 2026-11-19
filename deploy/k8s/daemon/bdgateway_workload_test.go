@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -53,14 +54,14 @@ func TestBdGatewayWorkloadRunsAsItsIdentity(t *testing.T) {
 	if c.SecurityContext == nil || c.SecurityContext.AllowPrivilegeEscalation == nil || *c.SecurityContext.AllowPrivilegeEscalation {
 		t.Errorf("the gateway container does not set allowPrivilegeEscalation to false")
 	}
-	if d.Spec.Strategy.Type != "Recreate" {
-		t.Errorf("the gateway strategy is %q, want Recreate", d.Spec.Strategy.Type)
+	if d.Spec.Strategy.Type != "RollingUpdate" {
+		t.Errorf("the gateway strategy is %q, want RollingUpdate", d.Spec.Strategy.Type)
 	}
 	if c.Image != testBdGatewayImage {
 		t.Errorf("the gateway image is %q, want the digest %q", c.Image, testBdGatewayImage)
 	}
 
-	const wantCommand = "bdgw serve --tokens-dir /run/bdgw/tokens --verbs /etc/bdgw/verbs.json --log-dir /var/log/bdgw --workspace /var/lib/bdgw/ws --dolt-host host.docker.internal --dolt-port 3307 --push-addr :7441"
+	const wantCommand = "bdgw serve --tokens-dir /run/bdgw/tokens --verbs /etc/bdgw/verbs.json --log-dir /var/log/bdgw --log-per-pod --workspace /var/lib/bdgw/ws --dolt-host host.docker.internal --dolt-port 3307 --push-addr :7441"
 	if got := strings.Join(c.Command, " "); got != wantCommand {
 		t.Errorf("the gateway command is\n%s\nwant\n%s", got, wantCommand)
 	}
@@ -437,8 +438,8 @@ func TestBdGatewayProbeTimingGolden(t *testing.T) {
 	}
 }
 
-// TestBdGatewayProbeTimingStrategy holds the gateway to one replica under Recreate: a
-// second replica or a surge would put two gateways on the workspace claim at once.
+// TestBdGatewayProbeTimingStrategy holds the gateway to one replica under RollingUpdate:
+// a second replica would put two gateways on the workspace claim outside a roll.
 func TestBdGatewayProbeTimingStrategy(t *testing.T) {
 	t.Parallel()
 	m := mustBuild(t, bdGatewayWorkloadValues(t))
@@ -446,8 +447,46 @@ func TestBdGatewayProbeTimingStrategy(t *testing.T) {
 	if d.Spec.Replicas != 1 {
 		t.Errorf("the gateway has %d replicas, want 1", d.Spec.Replicas)
 	}
-	if d.Spec.Strategy.Type != "Recreate" {
-		t.Errorf("the gateway strategy is %q, want Recreate", d.Spec.Strategy.Type)
+	if d.Spec.Strategy.Type != "RollingUpdate" {
+		t.Errorf("the gateway strategy is %q, want RollingUpdate", d.Spec.Strategy.Type)
+	}
+}
+
+// TestBdGatewayRollingStrategy pins the gateway's rolling update against the golden:
+// one replica, maxUnavailable 0 and maxSurge 1, so the new gateway is up before the
+// old one stops, and the per-pod call log flag in the command. The fields are asserted
+// by name, so a golden regenerated with -update cannot move them unnoticed.
+func TestBdGatewayRollingStrategy(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayWorkloadValues(t))
+	d := m.BdGatewayDeployment
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway.yaml", document(t, d))
+
+	if d.Spec.Replicas != 1 {
+		t.Errorf("the gateway has %d replicas, want 1", d.Spec.Replicas)
+	}
+	ru := d.Spec.Strategy.RollingUpdate
+	if d.Spec.Strategy.Type != "RollingUpdate" || ru == nil || ru.MaxUnavailable == nil || ru.MaxSurge == nil {
+		t.Fatalf("the gateway strategy is %+v, want RollingUpdate with maxUnavailable and maxSurge set", d.Spec.Strategy)
+	}
+	if *ru.MaxUnavailable != 0 || *ru.MaxSurge != 1 {
+		t.Errorf("the gateway rolls with maxUnavailable %d and maxSurge %d, want 0 and 1", *ru.MaxUnavailable, *ru.MaxSurge)
+	}
+	if c := d.Spec.Template.Spec.Containers[0]; !slices.Contains(c.Command, "--log-per-pod") {
+		t.Errorf("the gateway command %v does not carry --log-per-pod", c.Command)
+	}
+}
+
+// TestBdGatewayRollingOthersRecreate holds the daemon and the dashboard to Recreate. The
+// rolling update is the gateway's rule alone: the daemon and the dashboard share the
+// town's volume, and a second daemon must never start beside the first.
+func TestBdGatewayRollingOthersRecreate(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayDashboardValues(t))
+	for name, d := range map[string]Deployment{"the daemon": m.Deployment, "the dashboard": m.DashboardDeployment} {
+		if d.Spec.Strategy.Type != "Recreate" || d.Spec.Strategy.RollingUpdate != nil {
+			t.Errorf("%s strategy is %+v, want Recreate with no rollingUpdate", name, d.Spec.Strategy)
+		}
 	}
 }
 
@@ -573,15 +612,15 @@ func TestBdGatewayLogVolumePinned(t *testing.T) {
 }
 
 // TestBdGatewayLogVolumeRest holds what the claim switch leaves alone: one replica
-// under Recreate, and the token copies still on an emptyDir.
+// under RollingUpdate, and the token copies still on an emptyDir.
 func TestBdGatewayLogVolumeRest(t *testing.T) {
 	t.Parallel()
 	d := mustBuild(t, bdGatewayWorkloadValues(t)).BdGatewayDeployment
 	if d.Spec.Replicas != 1 {
 		t.Errorf("the gateway has %d replicas, want 1", d.Spec.Replicas)
 	}
-	if d.Spec.Strategy.Type != "Recreate" {
-		t.Errorf("the gateway strategy is %q, want Recreate", d.Spec.Strategy.Type)
+	if d.Spec.Strategy.Type != "RollingUpdate" {
+		t.Errorf("the gateway strategy is %q, want RollingUpdate", d.Spec.Strategy.Type)
 	}
 	if vol := renderVolume(d.Spec.Template.Spec, bdGatewayTokensVolume); vol == nil || vol.EmptyDir == nil {
 		t.Errorf("the token copies are not on an emptyDir: %+v", d.Spec.Template.Spec.Volumes)

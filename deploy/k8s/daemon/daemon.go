@@ -3148,8 +3148,18 @@ type DeploymentSpec struct {
 
 // DeploymentStrategy is how a rollout replaces the pod; Recreate stops the old
 // pod before the new one starts, so two daemons never hold the town's volume.
+// RollingUpdate starts the new pod before the old one stops; its bounds say how far
+// the pod count may dip and rise, and a nil RollingUpdate is left out of the manifest.
 type DeploymentStrategy struct {
-	Type string `yaml:"type"`
+	Type          string                 `yaml:"type"`
+	RollingUpdate *RollingUpdateStrategy `yaml:"rollingUpdate,omitempty"`
+}
+
+// RollingUpdateStrategy is the bound a RollingUpdate keeps. Each field is a pointer
+// so a zero renders: maxUnavailable 0 is the setting that keeps every pod serving.
+type RollingUpdateStrategy struct {
+	MaxUnavailable *int32 `yaml:"maxUnavailable,omitempty"`
+	MaxSurge       *int32 `yaml:"maxSurge,omitempty"`
 }
 
 // LabelSelector is the subset of a selector the Deployment sets.
