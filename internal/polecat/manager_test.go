@@ -3012,6 +3012,154 @@ func TestLoadFromBeads_SpawnGraceEndToEnd(t *testing.T) {
 	}
 }
 
+// TestLoadFromBeads_SpawningClaim pins gt-lgcwd6: a sling claims a seat by
+// writing the agent bead (agent_state=spawning, hook_bead=<work bead>) and
+// hooks the work bead only at its later hook step, 10 to 40 s on. With no
+// hooked or assigned bead yet, the seat read idle and a second sling was
+// handed the seat the first had already claimed. The claim holds the seat
+// while the spawn grace runs; past it the claim expires and the seat is
+// reusable again.
+func TestLoadFromBeads_SpawningClaim(t *testing.T) {
+	t.Parallel()
+	const (
+		agentName   = "basalt"
+		rigName     = "testrig"
+		assigneeIDT = "testrig/polecats/basalt"
+		agentBeadID = "gt-testrig-polecat-basalt"
+		workID      = "gt-testrig-work"
+	)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	// 30 s is a 10x margin against the 5m window, as in the spawn-grace test:
+	// only a multi-minute pause between setup and the load can drift the fresh
+	// bead out of the window.
+	fresh := now.Add(-30 * time.Second).Format(time.RFC3339)
+	stale := now.Add(-10 * time.Minute).Format(time.RFC3339)
+
+	// claim builds a rig whose one polecat has the agent bead the sling wrote:
+	// spawning, hook_bead set, and a work bead in the given status, unassigned.
+	// liveSession raises a session with a fresh heartbeat, the state of a
+	// hooked seat whose polecat is already running.
+	claim := func(t *testing.T, updatedAt, hookBead, workStatus string, liveSession bool) *Manager {
+		t.Helper()
+		root := t.TempDir()
+		rigPath := filepath.Join(root, rigName)
+		for _, dir := range []string{
+			filepath.Join(rigPath, "polecats", agentName),
+			filepath.Join(rigPath, "mayor", "rig"),
+		} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", dir, err)
+			}
+		}
+		db := newPolecatDB()
+		// The claimed work bead is open and unassigned until the sling's hook
+		// step; a bead the sling has hooked or assigned belongs to the assignee.
+		work := beads.Issue{ID: workID, Title: "work", Status: workStatus, UpdatedAt: fresh}
+		if workStatus != string(beads.StatusOpen) {
+			work.Assignee = assigneeIDT
+		}
+		db.Seed(
+			beads.Issue{
+				ID: agentBeadID, Title: "agent", Labels: []string{"gt:agent"}, Status: "open", UpdatedAt: updatedAt,
+				Description: beads.FormatAgentDescription("agent", &beads.AgentFields{
+					RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: hookBead, CleanupStatus: "clean",
+				}),
+			},
+			work,
+		)
+		tm := newFakeProbe()
+		mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, nil, tm, db)
+		mgr.spawnGraceWindow = 5 * time.Minute
+		if liveSession {
+			sessionName := mgr.sessionName(agentName)
+			if err := tm.NewSessionWithCommandAndEnv(sessionName, rigPath, "sleep 300", nil); err != nil {
+				t.Fatalf("create session: %v", err)
+			}
+			TouchSessionHeartbeat(root, sessionName)
+		}
+		return mgr
+	}
+
+	t.Run("claimed but not yet hooked reads spawning", func(t *testing.T) {
+		t.Parallel()
+		mgr := claim(t, fresh, workID, "open", false)
+
+		p, err := mgr.loadFromBeads(agentName, nil)
+		if err != nil {
+			t.Fatalf("loadFromBeads: %v", err)
+		}
+		if p.State != StateSpawning {
+			t.Fatalf("state = %q, want %q: the sling's claim on the bead is not the seat's state", p.State, StateSpawning)
+		}
+		if p.Issue != workID {
+			t.Errorf("issue = %q, want %q (the claimed work bead)", p.Issue, workID)
+		}
+		seats, err := mgr.IdlePolecats()
+		if err != nil {
+			t.Fatalf("IdlePolecats: %v", err)
+		}
+		for s := range seats {
+			t.Errorf("IdlePolecats yielded %s (%s) while another sling holds its claim", s.Name, s.State)
+		}
+	})
+
+	t.Run("claim past the spawn grace reads idle", func(t *testing.T) {
+		t.Parallel()
+		mgr := claim(t, stale, workID, "open", false)
+
+		p, err := mgr.loadFromBeads(agentName, nil)
+		if err != nil {
+			t.Fatalf("loadFromBeads: %v", err)
+		}
+		if p.State != StateIdle {
+			t.Errorf("state = %q, want %q: a claim older than the grace is a dispatch that never hooked", p.State, StateIdle)
+		}
+	})
+
+	t.Run("a spawning bead with no hook_bead reads idle", func(t *testing.T) {
+		t.Parallel()
+		mgr := claim(t, fresh, "", "open", false)
+
+		p, err := mgr.loadFromBeads(agentName, nil)
+		if err != nil {
+			t.Fatalf("loadFromBeads: %v", err)
+		}
+		if p.State != StateIdle {
+			t.Errorf("state = %q, want %q: a spawning bead that claims no work is not a claim on the seat", p.State, StateIdle)
+		}
+	})
+
+	t.Run("an assigned issue outranks the claim", func(t *testing.T) {
+		t.Parallel()
+		mgr := claim(t, fresh, workID, "in_progress", true)
+
+		p, err := mgr.loadFromBeads(agentName, nil)
+		if err != nil {
+			t.Fatalf("loadFromBeads: %v", err)
+		}
+		if p.State != StateWorking {
+			t.Errorf("state = %q, want %q: assigned work outranks the agent bead's claim", p.State, StateWorking)
+		}
+	})
+
+	t.Run("a hooked work bead still reads working", func(t *testing.T) {
+		t.Parallel()
+		mgr := claim(t, fresh, workID, "hooked", true)
+
+		p, err := mgr.loadFromBeads(agentName, nil)
+		if err != nil {
+			t.Fatalf("loadFromBeads: %v", err)
+		}
+		if p.State != StateWorking {
+			t.Errorf("state = %q, want %q: hooked work outranks the agent bead's claim", p.State, StateWorking)
+		}
+		if p.Issue != workID {
+			t.Errorf("issue = %q, want %q", p.Issue, workID)
+		}
+	})
+}
+
 // A removed polecat must take its intent record with it: townhealth reads
 // every record under .runtime/agents, so one that outlives its seat reports
 // that seat dead forever (gt-u7voe).
