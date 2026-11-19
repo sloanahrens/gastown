@@ -267,22 +267,31 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 		}
 		t.Run(verb+"a Service selecting "+svc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := otherServiceGuardAdmits(svc.selector, gateway); got != svc.admitted {
+			if got := otherServiceGuardAdmits(serviceFixture{name: "dolt", selector: svc.selector}, gateway); got != svc.admitted {
 				t.Errorf("the other-Service guard admits a Service selecting %v as %v, want %v", svc.selector, got, svc.admitted)
 			}
 		})
 	}
 }
 
-// otherServiceGuardAdmits reports whether the other-Service validation admits a Service
-// with the selector: any selector that names a pair the gateway's pods do not carry is
-// admitted, and so is an empty one, which selects nothing. A selector made only of the
-// gateway's pairs is refused.
-func otherServiceGuardAdmits(selector, gateway map[string]string) bool {
-	if len(selector) == 0 {
+// otherServiceGuardAdmits restates the Service guard's validations on one Service: the
+// other-Service validation for every name, which exempts the two gateway names, and the
+// bd-gateway-push validation for the push name. A Service named bd-gateway is judged by
+// its own validation, which TestBdGatewayServicePolicyPinsRenderedService holds to the
+// renderer, so it is admitted here. Otherwise a selector that names a pair the gateway's
+// pods do not carry is admitted, and so is an empty one, which selects nothing; a
+// selector made only of the gateway's pairs is refused.
+func otherServiceGuardAdmits(s serviceFixture, gateway map[string]string) bool {
+	if s.name == BdGatewayPushName && !pushServiceShapeAdmits(s) {
+		return false
+	}
+	if s.name == "bd-gateway" || s.name == BdGatewayPushName {
 		return true
 	}
-	for k, v := range selector {
+	if len(s.selector) == 0 {
+		return true
+	}
+	for k, v := range s.selector {
 		if want, ok := gateway[k]; !ok || want != v {
 			return true
 		}
@@ -311,16 +320,9 @@ type serviceFixture struct {
 	ports        []int
 }
 
-// pushServiceGuardAdmits restates the Service guard on one Service. A Service named
-// bd-gateway-push is judged by the push validation alone; any other name is judged by
-// the other-Service validation, which otherServiceGuardAdmits restates. A Service named
-// bd-gateway is judged by the bd-gateway validation, which
-// TestBdGatewayServicePolicyPinsRenderedService holds to the renderer, so it is not a
-// fixture here.
-func pushServiceGuardAdmits(s serviceFixture, gateway map[string]string) bool {
-	if s.name != BdGatewayPushName {
-		return otherServiceGuardAdmits(s.selector, gateway)
-	}
+// pushServiceShapeAdmits restates the bd-gateway-push validation on one Service: the
+// bounds the bd-gateway validation gives, the one selector pair, and the one port.
+func pushServiceShapeAdmits(s serviceFixture) bool {
 	if s.typ != "ClusterIP" || len(s.externalIPs) != 0 || s.externalName != "" {
 		return false
 	}
@@ -392,7 +394,7 @@ func TestBdGatewayServiceAdmissionPushRefusals(t *testing.T) {
 	} {
 		t.Run(tc.why, func(t *testing.T) {
 			t.Parallel()
-			if got := pushServiceGuardAdmits(tc.svc, gateway); got != tc.admitted {
+			if got := otherServiceGuardAdmits(tc.svc, gateway); got != tc.admitted {
 				t.Errorf("%s (%+v) is admitted = %v, want %v", tc.why, tc.svc, got, tc.admitted)
 			}
 		})

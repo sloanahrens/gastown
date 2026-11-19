@@ -94,8 +94,9 @@ func TestLocalGatewayHostEndpoint(t *testing.T) {
 }
 
 // TestGatewayPushTrustAllowList: the push Service's name is trusted for plain http
-// only in namespace gt, beside the gateway's own name, and the Service guard file
-// names it, so the client never trusts a name the cluster does not admit.
+// only in namespace gt, and only through the push URL: pushGatewayHost admits it,
+// while localGatewayHost, which the gateway URL uses, refuses it. The Service guard
+// file names it, so the client never trusts a name the cluster does not admit.
 func TestGatewayPushTrustAllowList(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -106,6 +107,7 @@ func TestGatewayPushTrustAllowList(t *testing.T) {
 		{"BD-Gateway-Push.GT.SVC", true},
 		{"bd-gateway-push.gt.svc.cluster.local", true},
 		{"bd-gateway.gt.svc", true},
+		{"localhost", true},
 		{"bd-gateway-push.openshell.svc", false},
 		{"bd-gateway-push.gt-rehearsal.svc", false},
 		{"bd-gateway-push.openshell.svc.cluster.local", false},
@@ -120,10 +122,15 @@ func TestGatewayPushTrustAllowList(t *testing.T) {
 		tc := tc
 		t.Run(tc.host, func(t *testing.T) {
 			t.Parallel()
-			if got := localGatewayHost(tc.host); got != tc.want {
-				t.Errorf("localGatewayHost(%q) = %v, want %v", tc.host, got, tc.want)
+			if got := pushGatewayHost(tc.host); got != tc.want {
+				t.Errorf("pushGatewayHost(%q) = %v, want %v", tc.host, got, tc.want)
 			}
 		})
+	}
+	for _, host := range []string{"bd-gateway-push.gt.svc", "bd-gateway-push.gt.svc.cluster.local"} {
+		if localGatewayHost(host) {
+			t.Errorf("localGatewayHost(%q) = true, want false: the push name is trusted only through the push URL", host)
+		}
 	}
 
 	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "k8s", "bd-gateway-service-admission.yaml"))
@@ -132,5 +139,34 @@ func TestGatewayPushTrustAllowList(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), "bd-gateway-push") {
 		t.Errorf("the Service guard does not name bd-gateway-push, so the client trusts a Service the cluster does not admit")
+	}
+}
+
+// TestGatewayPushURLEndpoint: the push URL takes the push Service over plain http in
+// gt, and the gateway URL does not take it: BD_GATEWAY_URL naming bd-gateway-push is
+// refused, and a push URL naming another Service or host is refused too.
+func TestGatewayPushURLEndpoint(t *testing.T) {
+	t.Parallel()
+	const pushURL = "http://bd-gateway-push.gt.svc:7441"
+	got, err := GatewayPusher{PushURL: pushURL}.endpoint("/v1/workspace")
+	if err != nil {
+		t.Fatalf("endpoint(the push Service as the push URL) = %v, want nil", err)
+	}
+	if want := pushURL + "/v1/workspace"; got != want {
+		t.Errorf("endpoint = %q, want %q", got, want)
+	}
+	refused := []struct {
+		why    string
+		pusher GatewayPusher
+	}{
+		{"the push Service through the gateway URL", GatewayPusher{URL: pushURL}},
+		{"the push Service in another namespace as the push URL", GatewayPusher{PushURL: "http://bd-gateway-push.openshell.svc:7441"}},
+		{"another Service as the push URL", GatewayPusher{PushURL: "http://dolt.gt.svc:7441"}},
+		{"an external host as the push URL", GatewayPusher{PushURL: "http://bd-gateway-push.example.com:7441"}},
+	}
+	for _, tc := range refused {
+		if _, err := tc.pusher.endpoint("/v1/workspace"); err == nil {
+			t.Errorf("endpoint for %s over plain http = nil, want a refusal", tc.why)
+		}
 	}
 }

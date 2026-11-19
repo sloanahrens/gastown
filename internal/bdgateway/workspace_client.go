@@ -1051,7 +1051,13 @@ func (g GatewayPusher) endpoint(path string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(raw)))
 	}
-	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
+	// The push URL is the one a plain-http push may name the push Service through; a
+	// URL that is not the push URL is held to the gateway's own name alone.
+	plainHost := localGatewayHost
+	if g.PushURL != "" {
+		plainHost = pushGatewayHost
+	}
+	if u.Scheme == "http" && !plainHost(u.Hostname()) {
 		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or the bd gateway's in-cluster Service name (bd-gateway.gt.svc)", shown(redactedURL(raw)))
 	}
 	return strings.TrimSuffix(raw, "/") + path, nil
@@ -1078,12 +1084,13 @@ var localGatewayHosts = map[string]bool{
 // http://bd-gateway.gt.svc:7440, so a Service called bd-gateway in another
 // namespace is not this gateway and would receive the bearer token over plain
 // http. gatewayPushServiceName is the push Service the daemon pushes to
-// (BdGatewayPushName in deploy/k8s/daemon); it carries the same token, so it is
-// trusted in the same namespace, and only once the Service guard admits it. They
-// are spelled here rather than imported so the gateway client carries
-// no dependency on the render packages; a render that renames the gateway or
-// moves the town out of gt makes every in-cluster push refuse, naming this host,
-// rather than trust a different Service.
+// (BdGatewayPushName in deploy/k8s/daemon). It carries the same token, so it is
+// trusted in the same namespace, and only through the push URL (pushGatewayHost):
+// the cluster's Service guard admits it, and the render refuses a push URL unless
+// that guard is applied. They are spelled here rather than imported so the
+// gateway client carries no dependency on the render packages; a render that
+// renames the gateway or moves the town out of gt makes every in-cluster push
+// refuse, naming this host, rather than trust a different Service.
 const (
 	gatewayServiceName      = "bd-gateway"
 	gatewayPushServiceName  = "bd-gateway-push"
@@ -1092,10 +1099,11 @@ const (
 
 // localGatewayHost reports whether host is this machine, or the gateway itself
 // in the cluster the caller runs in: a loopback address, one of the Docker host
-// aliases, or one of the gateway's in-cluster Service names in the namespace its
-// Service guard binds. Another Service's name, or a gateway name in another
-// namespace, is not this gateway, and plain http to it would send the bearer
-// token in the clear to something that is not the gateway.
+// aliases, or the gateway's in-cluster Service name in the namespace its Service
+// guard binds. Another Service's name, or the gateway's name in another namespace,
+// is not this gateway, and plain http to it would send the bearer token in the
+// clear to something that is not the gateway. The push Service's name is not
+// admitted here: only the push URL takes it (pushGatewayHost).
 func localGatewayHost(host string) bool {
 	if localGatewayHosts[strings.ToLower(host)] {
 		return true
@@ -1107,15 +1115,27 @@ func localGatewayHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// gatewayServiceHost reports whether host is the cluster DNS name of one of the
-// gateway's Services: bd-gateway.gt.svc or bd-gateway-push.gt.svc, or either with
-// .cluster.local after it (the cluster render's default is
-// http://bd-gateway.gt.svc:7440). Exactly those shapes, every label a plain DNS
-// label, so a bare "svc", a name that only contains svc (a.svc.evil.com,
-// bd-gateway.svcx.example), a name with an empty label, another Service's name
-// (dolt.gt.svc) and a gateway name in another namespace (bd-gateway.openshell.svc,
-// bd-gateway-push.openshell.svc) are not the gateway.
+// pushGatewayHost reports whether host may take the push URL in plain http: the
+// push Service's name in gt, or any host localGatewayHost admits. The push URL is
+// the only place this is used, so BD_GATEWAY_URL naming bd-gateway-push is refused.
+func pushGatewayHost(host string) bool {
+	return inGatewayNamespace(host, gatewayPushServiceName) || localGatewayHost(host)
+}
+
+// gatewayServiceHost reports whether host is the cluster DNS name of the gateway's
+// Service: bd-gateway.gt.svc, or that with .cluster.local after it (the cluster
+// render's default is http://bd-gateway.gt.svc:7440). Exactly those shapes, every
+// label a plain DNS label, so a bare "svc", a name that only contains svc
+// (a.svc.evil.com, bd-gateway.svcx.example), a name with an empty label, another
+// Service's name (dolt.gt.svc) and a gateway name in another namespace
+// (bd-gateway.openshell.svc) are not the gateway.
 func gatewayServiceHost(host string) bool {
+	return inGatewayNamespace(host, gatewayServiceName)
+}
+
+// inGatewayNamespace reports whether host is the cluster DNS name of the Service
+// named service in gatewayServiceNamespace, in the shapes gatewayServiceHost takes.
+func inGatewayNamespace(host, service string) bool {
 	labels := strings.Split(strings.ToLower(host), ".")
 	switch {
 	case len(labels) == 3 && labels[2] == "svc":
@@ -1123,7 +1143,7 @@ func gatewayServiceHost(host string) bool {
 	default:
 		return false
 	}
-	if labels[0] != gatewayServiceName && labels[0] != gatewayPushServiceName {
+	if labels[0] != service {
 		return false
 	}
 	if labels[1] != gatewayServiceNamespace {
