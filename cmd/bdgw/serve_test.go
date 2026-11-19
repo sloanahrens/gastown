@@ -279,9 +279,11 @@ func TestReadyDoltExit(t *testing.T) {
 	cases := []struct {
 		name string
 		dial func(context.Context, string, string) (net.Conn, error)
-		// probeTimeout is short only for the row that waits for the deadline;
-		// the other two answer at once, so a short bound would race their
-		// answer against a loaded runner's scheduling.
+		// probeTimeout is the production bound for the rows that answer at
+		// once, because only the last row tests the deadline: a short bound
+		// on the others races their answer against a loaded runner's
+		// scheduling and measures the host, not the gateway. The last row
+		// overrides it so the test does not wait the production bound.
 		probeTimeout time.Duration
 		wantStatus   int
 		wantStderr   string
@@ -289,13 +291,13 @@ func TestReadyDoltExit(t *testing.T) {
 		{
 			name:         "all pass",
 			dial:         pipeConn,
-			probeTimeout: 5 * time.Second,
+			probeTimeout: doltProbeTimeout,
 			wantStatus:   exitOK,
 		},
 		{
 			name:         "dolt unreachable",
 			dial:         func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
-			probeTimeout: 5 * time.Second,
+			probeTimeout: doltProbeTimeout,
 			wantStatus:   exitFailed,
 			wantStderr:   "not ready: dolt: connection refused",
 		},
