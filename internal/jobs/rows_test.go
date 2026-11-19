@@ -224,13 +224,19 @@ func TestJobsDoltBackupRow(t *testing.T) {
 func TestJobsDoltBackupRowNewestByName(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "dolt")
-	// The older night finished later than the newer one, so only the date name
-	// can say which night is the newest: the daemon writes one directory per
-	// date and a night's finished time comes from its own manifest.
+	// The older night's manifest finished later than the newer one's, as a
+	// clock that ran ahead leaves it, so only the date name can say which night
+	// is the newest: the daemon writes one directory per date.
 	writeBackupManifest(t, root, "2026-11-18",
-		`{"started":"2026-11-18T03:00:00Z","finished":"2026-11-18T23:00:00Z","databases":["hq"],"method":"test"}`)
+		`{"started":"2026-11-18T23:00:00Z","finished":"2026-11-19T04:00:00Z","databases":["hq"],"method":"test"}`)
 	writeBackupManifest(t, root, "2026-11-19",
 		`{"started":"2026-11-19T03:00:00Z","finished":"2026-11-19T03:05:00Z","databases":["hq","gt"],"method":"test"}`)
+	// Neither a night still being written nor a directory that is not a date is
+	// a night, however new its manifest looks.
+	writeBackupManifest(t, root, "2026-11-20.partial",
+		`{"started":"2026-11-20T03:00:00Z","finished":"2026-11-20T03:00:00Z","databases":["hq"],"method":"test"}`)
+	writeBackupManifest(t, root, "nightly.tmp",
+		`{"started":"2026-11-21T03:00:00Z","finished":"2026-11-21T03:00:00Z","databases":["hq"],"method":"test"}`)
 
 	j := jobsRow(t, t.TempDir(), Options{BackupRoot: root}, nil, doltBackupJobName)
 	wantLastRun := time.Date(2026, 11, 19, 3, 5, 0, 0, time.UTC)

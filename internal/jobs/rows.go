@@ -73,9 +73,10 @@ func applyUpdateRun(j *Job, history []update.HistoryLine, historyErr error, now 
 	return stateOf(*j, historyErr != nil, false, now)
 }
 
-// backupDateLayout is the name layout doltbackup.Dir gives a night's
-// directory. The row picks the newest night by this name, as the daemon writes
-// one directory per date.
+// backupDateLayout is the name layout doltbackup.Dir gives a night's directory.
+// doltbackup does not export it, so the row repeats it to name a night the way
+// doltbackup does; the row picks the newest night by that name, as the daemon
+// writes one directory per date.
 const backupDateLayout = "2006-01-02"
 
 // isBackupNight reports whether name is a night's date: the test
@@ -134,8 +135,8 @@ func newestBackupNight(root string) (m doltbackup.Manifest, night bool, err erro
 
 // doltBackupRow is the nightly backup's row: when the newest night finished and
 // how many databases it holds. A night whose manifest cannot be read, an
-// unreadable root, and a resolved root with no night each make it unknown; only
-// a root that holds no night at all is never_run.
+// unreadable root, and a resolved root with no night each make it unknown; a
+// root with no night on disk is never_run.
 func doltBackupRow(m doltbackup.Manifest, night bool, readErr error, now time.Time) Job {
 	j := Job{Name: doltBackupJobName, Kind: config.DaemonStepPatrol, Cadence: nightlyCadence}
 	switch {
