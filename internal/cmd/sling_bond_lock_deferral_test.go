@@ -173,7 +173,7 @@ func TestBondLockGiveBackResolvesTheTown(t *testing.T) {
 			s := &SpawnedPolecatInfo{HookBead: bead, respawnMark: mark}
 			var warn bytes.Buffer
 
-			s.giveBackBondLockRespawnWith(findTown, &warn, fmt.Errorf("bonding: %w", ErrBondLockTimeout))
+			s.giveBackClassifiedRespawnWith(findTown, &warn, fmt.Errorf("bonding: %w", ErrBondLockTimeout))
 
 			if got := respawnCountOf(t, townRoot, bead); got != tc.want {
 				t.Errorf("respawn count after the give-back = %d, want %d", got, tc.want)
