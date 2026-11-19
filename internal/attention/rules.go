@@ -209,6 +209,11 @@ const (
 	// registry no longer serves: the pin names an image a fresh pull cannot
 	// fetch until someone re-pins it (gt-kyomsc).
 	RuleImagePinsDeadLayer = "image_pins.dead_layer"
+
+	// RuleGateSlow is a rig whose last gate runs were all over the tier bar or
+	// all pole-bound: the overseer reads the pole package and the tier seconds
+	// (gt-l0t2tg).
+	RuleGateSlow = "gate.slow"
 )
 
 var (
@@ -389,6 +394,9 @@ var ruleFlags = map[string]RuleFlags{
 	// that failed: the overseer re-pins the image on their next look, so it
 	// queues with the other image pin rows and wakes no one (gt-kyomsc).
 	RuleImagePinsDeadLayer: flagsAsk,
+	// The last runs of a rig were slow for the same reason: the overseer is
+	// woken to read the pole package (gt-l0t2tg).
+	RuleGateSlow: flagsWake,
 }
 
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
@@ -482,6 +490,7 @@ var kindRules = map[Kind]string{
 	KindImagePinsUnreadable:           RuleImagePinsUnreadable,
 	KindImagePinsRefreshStuck:         RuleImagePinsRefreshStuck,
 	KindImagePinsDeadLayer:            RuleImagePinsDeadLayer,
+	KindGateSlow:                      RuleGateSlow,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

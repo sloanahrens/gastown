@@ -208,6 +208,9 @@ const (
 	// served by its registry, so the pin names an image the registry can no
 	// longer hand out (gt-kyomsc).
 	KindImagePinsDeadLayer Kind = "image-pins-dead-layer"
+	// KindGateSlow: the newest gate runs of a rig were all over their tier bar,
+	// or all pole-bound (gt-l0t2tg).
+	KindGateSlow Kind = "gate-slow"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -230,7 +233,7 @@ func Kinds() []Kind {
 		KindHoldStale, KindMetricsExtract, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
-		KindImagePinsDeadLayer,
+		KindImagePinsDeadLayer, KindGateSlow,
 	}
 }
 

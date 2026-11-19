@@ -185,6 +185,9 @@ var ruleOwners = map[string]Owner{
 	// move: the overseer re-pins the image to one the registry still hands
 	// out (gt-kyomsc).
 	RuleImagePinsDeadLayer: OwnerOverseer,
+	// A slow gate is the town's own run to look at: the overseer reads the pole
+	// package and the tier seconds before a person is woken (gt-l0t2tg).
+	RuleGateSlow: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

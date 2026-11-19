@@ -778,7 +778,27 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A dead layer of a digest-pinned image, read from the
 		// image_pin_layers run's record (gt-2v6scj).
 		{kind: attention.KindImagePinsDeadLayer, collect: s.collectImagePinLayersDeadLayer},
+		// The slow gate the last runs of a rig show (gt-l0t2tg). The owns
+		// predicate keeps only its own items when the run log cannot be read.
+		{kind: attention.KindGateSlow, collect: s.collectGateSlowItems, owns: gateSlowOwned},
 	}, s.questionCollectors()...)
+}
+
+// collectGateSlowItems is collectGateSlow with the kind set on each item. The
+// gate-slow items it builds leave Kind empty, and an item with no kind has no
+// rule, so it would never reach the overseer (gt-l0t2tg).
+func (s *attentionSources) collectGateSlowItems(ctx context.Context) ([]attention.Item, error) {
+	items, err := s.collectGateSlow(ctx)
+	for i := range items {
+		items[i].Kind = attention.KindGateSlow
+	}
+	return items, err
+}
+
+// gateSlowOwned picks the gate-slow items out of the previous items a failed
+// read keeps: the kind and the key prefix both have to match (gt-l0t2tg).
+func gateSlowOwned(it attention.Item) bool {
+	return it.Kind == attention.KindGateSlow && strings.HasPrefix(it.Key, gateSlowPrefix)
 }
 
 // attentionSources builds the production reads. The bead lists go through the
