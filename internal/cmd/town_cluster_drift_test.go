@@ -36,7 +36,12 @@ func driftTestSeams(t *testing.T, adjust func(*clusterRenderFlags)) (clusterDrif
 		t.Fatalf("recording the render flags: %v", err)
 	}
 	out := &bytes.Buffer{}
-	return clusterDriftDeps{render: clusterRenderDepsAt(t, town, io.Discard), runner: realRunnerDriftTargets, out: out}, out, town
+	return clusterDriftDeps{
+		render:        clusterRenderDepsAt(t, town, io.Discard),
+		runner:        realRunnerDriftTargets,
+		policyTargets: policyDriftTargets,
+		out:           out,
+	}, out, town
 }
 
 // driftTestFlags is the flag set the run reads back from the town.
@@ -114,6 +119,16 @@ func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T,
 	}
 	if m.TrackerBackupCronJob.Kind != "" {
 		objects["cronjob/"+k8sdaemon.TrackerBackupName] = m.TrackerBackupCronJob
+	}
+	// The hand-applied admission and RBAC objects are answered from the embedded
+	// documents, as the run's own compare reads them, so a case starts from a
+	// cluster in step (gt-aar839).
+	policyTargets, err := policyDriftTargets()
+	if err != nil {
+		t.Fatalf("reading the embedded admission and RBAC documents: %v", err)
+	}
+	for _, target := range policyTargets {
+		objects[target.resource] = target.object
 	}
 
 	runnerTargets, err := realRunnerDriftTargets()
@@ -435,6 +450,7 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 		"persistentvolumeclaim/" + k8sdaemon.BdGatewayLogClaim,
 		"serviceaccount/" + k8sdaemon.ServiceAccountName,
 	}
+	wantReads = append(wantReads, driftPolicyReads(t)...)
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
 	}
@@ -490,7 +506,8 @@ func TestTownClusterDriftRefusesATrackerdOrGatewayTheClusterDoesNotHold(t *testi
 // TestTownClusterDriftReadsOnlyTheObjectsTheFlagsRender holds flags that render
 // no trackerd, no backup and no bd gateway to the objects a render of the daemon
 // and the dashboard builds: their Deployments and Services, the daemon's claims,
-// the ServiceAccount, and the runner the control values always render.
+// the ServiceAccount, the runner the control values always render, and the
+// hand-applied admission and RBAC objects the embedded documents name.
 func TestTownClusterDriftReadsOnlyTheObjectsTheFlagsRender(t *testing.T) {
 	t.Parallel()
 	d, out, town := driftTestSeams(t, func(f *clusterRenderFlags) { f.dashboard = true })
@@ -513,6 +530,7 @@ func TestTownClusterDriftReadsOnlyTheObjectsTheFlagsRender(t *testing.T) {
 		"persistentvolumeclaim/" + k8sdaemon.DoltBackupClaim,
 		"serviceaccount/" + k8sdaemon.ServiceAccountName,
 	}
+	wantReads = append(wantReads, driftPolicyReads(t)...)
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
 	}
@@ -1286,14 +1304,35 @@ func TestRunnerDriftTargetsRefusesAValueOrBuildItCannotRead(t *testing.T) {
 	}
 }
 
+// driftPolicyReads is every hand-applied object the compare reads after the
+// render's objects, in the order policyDriftTargets lists them. It is derived
+// from that one list, so a test never repeats the objects the compare covers
+// (gt-aar839).
+func driftPolicyReads(t *testing.T) []string {
+	t.Helper()
+	targets, err := policyDriftTargets()
+	if err != nil {
+		t.Fatalf("reading the embedded admission and RBAC documents: %v", err)
+	}
+	reads := make([]string, 0, len(targets))
+	for _, target := range targets {
+		reads = append(reads, target.resource)
+	}
+	return reads
+}
+
 // driftReadPlurals maps a drift read's kind, before the slash, to its granted resource.
 var driftReadPlurals = map[string]string{
-	"deployment":            "deployments",
-	"configmap":             "configmaps",
-	"service":               "services",
-	"persistentvolumeclaim": "persistentvolumeclaims",
-	"serviceaccount":        "serviceaccounts",
-	"cronjob":               "cronjobs",
+	"deployment":                       "deployments",
+	"configmap":                        "configmaps",
+	"service":                          "services",
+	"persistentvolumeclaim":            "persistentvolumeclaims",
+	"serviceaccount":                   "serviceaccounts",
+	"cronjob":                          "cronjobs",
+	"validatingadmissionpolicy":        "validatingadmissionpolicies",
+	"validatingadmissionpolicybinding": "validatingadmissionpolicybindings",
+	"role":                             "roles",
+	"rolebinding":                      "rolebindings",
 }
 
 // TestTownClusterDriftReadsMatchTheGolden derives the compare's reads from the
