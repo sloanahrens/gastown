@@ -63,7 +63,7 @@ func TestBuildReviewInput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			issue := &beads.Issue{ID: "gt-abc", Description: description, Notes: tc.notes}
-			got := BuildReviewInput(issue, comments, op, "accepted risk text", "rounds text", "base-sha", "head-sha", "/work", repo)
+			got := BuildReviewInput(issue, comments, op, "accepted risk text", "rounds text", "base-sha", "head-sha", "polecat/x/gt-abc", "/work", repo)
 			want := ReviewInput{
 				Dir: "/work", Base: "base-sha", Head: "head-sha", Repo: repo, BeadID: "gt-abc",
 				CriteriaText:      "- [ ] the count is one",
@@ -206,7 +206,7 @@ func TestReviewInputGuard(t *testing.T) {
 			},
 			{
 				"a call is no assembly",
-				"package land\n\nfunc assemble() ReviewInput {\n\treturn BuildReviewInput(nil, nil, nil, \"\", \"\", \"base\", \"head\", \"work\", nil)\n}\n",
+				"package land\n\nfunc assemble() ReviewInput {\n\treturn BuildReviewInput(nil, nil, nil, \"\", \"\", \"base\", \"head\", \"branch\", \"work\", nil)\n}\n",
 				nil,
 			},
 		} {

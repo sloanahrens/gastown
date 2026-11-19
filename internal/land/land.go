@@ -1078,7 +1078,7 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, comments []beads.Comment,
 		// to the tree that was judged (gt-6c9o7).
 		l.logf("%s: WARNING the judged head is empty; the reviews log line carries no head and cannot be joined to a tree", w.BeadID)
 	}
-	attempt := reviewAttempt(issue.Notes)
+	attempt := reviewAttempt(issue.Notes, w.Branch)
 	// A refused round's block stops counting at the ceiling (gt-ern0y), so the
 	// line names that same attempt: the rework pass matches a record to its
 	// block by number and skips a record with no block (gt-k10bq). An approval
@@ -1108,7 +1108,7 @@ func (l *Lander) logRounds(issue *beads.Issue, w Work, v Verdict) {
 		return
 	}
 	ledger := RoundsLedger{OutDir: l.RoundsDir, Bead: w.BeadID, Now: l.now}
-	if err := ledger.Append(reviewAttempt(issue.Notes), w.Head, v.Findings); err != nil {
+	if err := ledger.Append(reviewAttempt(issue.Notes, w.Branch), w.Head, v.Findings); err != nil {
 		if errors.Is(err, ErrRoundsCorrupt) && !l.firstRoundsWarning(w.BeadID) {
 			return
 		}
@@ -1542,7 +1542,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		op := l.operatorConfig(w.BeadID)
 		accepted, used := l.acceptedRisks(w.BeadID, op)
 		comments = l.beadComments(issue)
-		in := BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, dir, g)
+		in := BuildReviewInput(issue, comments, op, accepted, l.roundsText(w.BeadID), base, merged, w.Branch, dir, g)
 		// The usage window opens with the review it measures (gt-6qc3nw.13); it
 		// is read from the landing's clock, so a test can fix it.
 		usageStart := l.now()
