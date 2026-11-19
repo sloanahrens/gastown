@@ -1,9 +1,16 @@
-# The kind cluster that deploy/k8s/kind/up.sh creates. up.sh fills the two
-# placeholders from its own settings (GT_K8S_CLUSTER and GT_K8S_GATEWAY_PORT in
-# common.sh) and passes the rendered copy to `kind create cluster --config`.
+# The kind cluster that deploy/k8s/kind/up.sh creates. up.sh fills the three
+# placeholders from its own settings (GT_K8S_CLUSTER, GT_K8S_GATEWAY_PORT and
+# GT_K8S_API_PORT in common.sh) and passes the rendered copy to
+# `kind create cluster --config`.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: __CLUSTER__
+# A deployer kubeconfig written for this cluster keeps its endpoint when a
+# rebuild keeps these settings, so the API server is pinned to the VM's
+# loopback address at a fixed port (gt-1wwqqq).
+networking:
+  apiServerAddress: "127.0.0.1"
+  apiServerPort: __API_PORT__
 containerdConfigPatches:
 - |-
   [plugins."io.containerd.grpc.v1.cri".registry]

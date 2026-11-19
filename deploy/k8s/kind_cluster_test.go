@@ -63,6 +63,63 @@ func TestKindClusterConfigEnablesKubeletImageGC(t *testing.T) {
 	}
 }
 
+// The API server is pinned to the VM's loopback address at a port up.sh fills,
+// so a deployer kubeconfig for this cluster keeps its endpoint across a rebuild
+// (gt-1wwqqq). The new block must leave what up.sh already renders intact, so
+// the node layout, the gateway port mapping and the kubelet GC patch are
+// re-checked here.
+func TestKindClusterConfigFixesAPIServerAddress(t *testing.T) {
+	t.Parallel()
+	doc := clusterConfig(t)
+	networking, ok := doc["networking"].(map[string]any)
+	if !ok {
+		t.Fatalf("networking = %v, want a map with the API server's address and port", doc["networking"])
+	}
+	if got := networking["apiServerAddress"]; got != "127.0.0.1" {
+		t.Errorf("apiServerAddress = %v, want 127.0.0.1", got)
+	}
+	if got := networking["apiServerPort"]; got != "__API_PORT__" {
+		t.Errorf("apiServerPort = %v, want the __API_PORT__ placeholder up.sh fills", got)
+	}
+
+	// Still the config up.sh renders around the new block: three nodes, the
+	// gateway mapping on the control plane, and the kubelet GC patch.
+	nodes := kindNodes(t, doc)
+	var controlPlane *kindNode
+	for i := range nodes {
+		if nodes[i].role == "control-plane" {
+			controlPlane = &nodes[i]
+		}
+	}
+	if controlPlane == nil {
+		t.Fatal("no control-plane node")
+	}
+	mappings, ok := controlPlane.doc["extraPortMappings"].([]any)
+	if !ok || len(mappings) != 1 {
+		t.Fatalf("control-plane extraPortMappings = %v, want one", controlPlane.doc["extraPortMappings"])
+	}
+	mapping, ok := mappings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("port mapping = %v (%T), want a map", mappings[0], mappings[0])
+	}
+	if mapping["containerPort"] != 30443 || mapping["hostPort"] != "__GATEWAY_PORT__" {
+		t.Errorf("port mapping = %v, want containerPort 30443 and the __GATEWAY_PORT__ placeholder", mapping)
+	}
+	patches, ok := doc["kubeadmConfigPatches"].([]any)
+	if !ok {
+		t.Fatal("kind/cluster.yaml has no top-level kubeadmConfigPatches")
+	}
+	kubeletPatch := false
+	for _, raw := range patches {
+		if patchDoc(t, raw)["kind"] == "KubeletConfiguration" {
+			kubeletPatch = true
+		}
+	}
+	if !kubeletPatch {
+		t.Error("kubeadmConfigPatches has no KubeletConfiguration entry")
+	}
+}
+
 // kindNode is the part of one nodes[] entry the layout test judges.
 type kindNode struct {
 	role   string
