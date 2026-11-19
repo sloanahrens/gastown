@@ -131,14 +131,16 @@ func allowedPaths(t *testing.T) []string {
 // bdTreeGaps names the allowed verbs the command tree snapshot
 // (internal/cmdtree/bd-command-tree.json) predates, with the bd commit that
 // offers them. The snapshot records beads b9f68260ed2a494972fe8aa922b6408a91905f0c,
-// which predates the sample verb; the town runs bd
-// b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f. An entry excuses only that exact
-// path, and only while the tree lacks it: once the snapshot is refreshed with
-// `make bd-command-tree BEADS_SRC=<checkout>` the row fails the gate until it
-// is deleted.
+// which predates the sample verb. The town's pin is bd
+// 0f9f640fe0f1a4162f3aebdef7994135b1167a85, which it runs only after the
+// schema-67 migration window (gt-jgsmoj) rolls the pin pair; the predecessor
+// b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f predates the sample verb (be-1qqu).
+// An entry excuses only that exact path, and only while the tree lacks it: once
+// the snapshot is refreshed with `make bd-command-tree BEADS_SRC=<checkout>`
+// the row fails the gate until it is deleted.
 var bdTreeGaps = map[string]string{
-	"sample add":  "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
-	"sample list": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+	"sample add":  "0f9f640fe0f1a4162f3aebdef7994135b1167a85",
+	"sample list": "0f9f640fe0f1a4162f3aebdef7994135b1167a85",
 }
 
 // bdTreeGapsSnapshot is the command tree snapshot commit bdTreeGaps is written
