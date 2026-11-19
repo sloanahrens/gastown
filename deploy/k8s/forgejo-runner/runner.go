@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"regexp"
 	"strconv"
 	"strings"
@@ -221,6 +222,10 @@ func Build(v Values) (Manifests, error) {
 	if namespace == "" {
 		namespace = DefaultNamespace
 	}
+	config, err := configYAML(v)
+	if err != nil {
+		return Manifests{}, err
+	}
 
 	return Manifests{
 		DindClaim:   claim(Name+"-dind", namespace, v.DindStorage),
@@ -228,7 +233,7 @@ func Build(v Values) (Manifests, error) {
 		ConfigMap: ConfigMap{
 			TypeMeta: TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 			Metadata: objectMeta(Name+"-config", namespace),
-			Data:     map[string]string{configKey: configYAML(v)},
+			Data:     map[string]string{configKey: config},
 		},
 		Deployment: Deployment{
 			TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
@@ -465,7 +470,13 @@ func validIPv4(s string) bool {
 // configYAML returns config.yml for v. It is written as text rather than
 // encoded from a struct, so every value is quoted as a YAML scalar of its own
 // and a label's text cannot change the document's shape.
-func configYAML(v Values) string {
+func configYAML(v Values) (string, error) {
+	// The quota is the dind limit's whole cores: the same DindResources.CPU the
+	// engine container renders as its limit, so the two cannot drift (gt-j0i8ap).
+	quota, err := wholeCPUs(v.DindResources.CPU)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	b.WriteString("runner:\n")
 	fmt.Fprintf(&b, "  file: %s\n", yamlScalar(runnerFileName))
@@ -474,6 +485,8 @@ func configYAML(v Values) string {
 	for _, env := range jobEnvs {
 		fmt.Fprintf(&b, "    %s: %s\n", env.Name, yamlScalar(env.Value))
 	}
+	// The gate's cpuquota command reads the cores a job may use (gt-fvi3ny).
+	fmt.Fprintf(&b, "    CI_CPU_QUOTA: %s\n", yamlScalar(strconv.Itoa(quota)))
 	fmt.Fprintf(&b, "  timeout: %s\n", yamlScalar(RunnerTimeout))
 	fmt.Fprintf(&b, "  shutdown_timeout: %s\n", yamlScalar(ShutdownTimeout))
 	b.WriteString("  labels:\n")
@@ -488,7 +501,28 @@ func configYAML(v Values) string {
 		fmt.Fprintf(&b, "    - %s\n", yamlScalar(mount.volume))
 	}
 	fmt.Fprintf(&b, "    - %s\n", yamlScalar(certsClientDir))
-	return b.String()
+	return b.String(), nil
+}
+
+// wholeCPUs returns the whole number of cores cpu rounds up to: "6500m" is 7 and
+// "2.5" is 3. It refuses a quantity it cannot read, so no caller writes a zero
+// quota in its place.
+func wholeCPUs(cpu string) (int, error) {
+	cores, ok := new(big.Rat).SetString(strings.TrimSuffix(cpu, "m"))
+	if !ok {
+		return 0, fmt.Errorf("the CPU %q: want a core count such as 4 or 2.5, or millicores such as 6500m", cpu)
+	}
+	if strings.HasSuffix(cpu, "m") {
+		cores.Quo(cores, big.NewRat(1000, 1))
+	}
+	whole := new(big.Int).Quo(cores.Num(), cores.Denom())
+	if !cores.IsInt() {
+		whole.Add(whole, big.NewInt(1))
+	}
+	if !whole.IsInt64() {
+		return 0, fmt.Errorf("the CPU %q: the whole cores it rounds up to do not fit an int", cpu)
+	}
+	return int(whole.Int64()), nil
 }
 
 // containerOptions is what every job container is started with: the forgejo
