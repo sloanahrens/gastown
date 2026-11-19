@@ -16,8 +16,8 @@ import (
 
 // DefaultRoundsCap bounds Render's output in bytes when the caller names no
 // cap: the 16 KiB a landing's rounds file is designed to stay under, small
-// enough for om to read whole. Over the cap Render drops the oldest rounds
-// whole and keeps the newest even alone over it (gt-yphcl).
+// enough for om to read whole. Over the cap Render drops the earliest rounds
+// whole, keeping every lane's newest even over the cap (gt-yphcl, gt-sp439m).
 const DefaultRoundsCap = 16 << 10
 
 // ErrRoundsCorrupt reports a ledger file that does not parse: a caller treats
@@ -289,9 +289,11 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 }
 
 // Render returns the ledger as the JSON array gt-3l5qy writes for om, each
-// lane's rounds together and ascending: over maxBytes it drops the earliest
-// rounds whole and keeps the last even alone over it. Zero or negative maxBytes
-// means DefaultRoundsCap; a ledger that does not parse is ErrRoundsCorrupt.
+// lane's rounds together and ascending. Over maxBytes it drops the
+// lowest-numbered round among the lanes that still hold more than one (ties:
+// the lane that appeared first) until the output fits, so every lane keeps its
+// newest round, returned even over the cap; maxBytes <= 0 means DefaultRoundsCap
+// and an unparseable ledger is ErrRoundsCorrupt.
 func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRoundsCap
@@ -301,16 +303,41 @@ func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 		return nil, err
 	}
 	rounds := doc.Rounds
-	for n := len(rounds); n > 0; n-- {
-		data, err := json.Marshal(omRounds(renderRounds(rounds[len(rounds)-n:])))
+	for {
+		data, err := json.Marshal(omRounds(renderRounds(rounds)))
 		if err != nil {
 			return nil, fmt.Errorf("rounds ledger: rendering: %w", err)
 		}
-		if len(data) <= maxBytes || n == 1 {
+		if len(data) <= maxBytes {
 			return data, nil
 		}
+		trimmed, ok := dropEarliest(rounds)
+		if !ok {
+			return data, nil
+		}
+		rounds = trimmed
 	}
-	return []byte("[]"), nil
+}
+
+// dropEarliest drops the lowest-numbered round among the lanes that still hold
+// more than one, ties going to the lane that appeared first, and reports false
+// when every lane holds a single round (gt-sp439m). rounds is lane-grouped and
+// ascending, so the first match for a round number is the earliest lane's.
+func dropEarliest(rounds []ledgerRound) ([]ledgerRound, bool) {
+	holds := make(map[string]int, len(rounds))
+	for _, r := range rounds {
+		holds[r.Lane]++
+	}
+	drop := -1
+	for i, r := range rounds {
+		if holds[r.Lane] > 1 && (drop < 0 || r.Round < rounds[drop].Round) {
+			drop = i
+		}
+	}
+	if drop < 0 {
+		return nil, false
+	}
+	return append(rounds[:drop], rounds[drop+1:]...), true
 }
 
 // FindingOutcome is what became of key, the finding an earlier round raised:

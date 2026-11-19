@@ -372,17 +372,24 @@ func TestRoundsLedgerKeepsEachLanesRound(t *testing.T) {
 }
 
 // TestRoundsLedgerOrdersByLane: Render lists each lane's rounds together, lanes
-// in first-appearance order, keeping a pre-lane file's order (gt-sp439m).
+// in first-appearance order, keeping a pre-lane file's order, and over the byte
+// cap it drops each lane's earliest round so the newest of every lane survives
+// (gt-sp439m).
 func TestRoundsLedgerOrdersByLane(t *testing.T) {
 	t.Parallel()
+	// The four rounds below render as 153 bytes, three as 115, two as 77, one as 39: 50 fits at most two, 120 three.
+	grouped := []ledgerRound{{Round: 1, Head: "p1"}, {Round: 2, Head: "p2"}, {Round: 3, Head: "p3"}, {Round: 1, Lane: "crew/overseer", Head: "c1"}}
 	cases := []struct {
 		name, stored string        // the case, and the ledger file before any append
 		add          []ledgerRound // rounds appended through AppendLane after, in call order
+		capBytes     int           // Render's byte cap; 0 means the default
 		want         string        // heads in Render's order
 	}{
-		{"polecat rounds 1 to 3, then a crew round 1", `{"bead":"gt-abc","rounds":null}`, []ledgerRound{{Round: 1, Head: "p1"}, {Round: 2, Head: "p2"}, {Round: 3, Head: "p3"}, {Round: 1, Lane: "crew/overseer", Head: "c1"}}, "p1 p2 p3 c1"},
-		{"a file that stores one lane's rounds apart", `{"bead":"gt-abc","rounds":[{"round":1,"head":"p1"},{"round":1,"lane":"crew/overseer","head":"c1"},{"round":2,"head":"p2"},{"round":3,"head":"p3"}]}`, nil, "p1 p2 p3 c1"},
-		{"a file written before the lane field", `{"bead":"gt-abc","rounds":[{"round":1,"head":"old1"},{"round":2,"head":"old2"},{"round":3,"head":"old3"}]}`, nil, "old1 old2 old3"},
+		{"polecat rounds 1 to 3, then a crew round 1", `{"bead":"gt-abc","rounds":null}`, grouped, 0, "p1 p2 p3 c1"},
+		{"a file that stores one lane's rounds apart", `{"bead":"gt-abc","rounds":[{"round":1,"head":"p1"},{"round":1,"lane":"crew/overseer","head":"c1"},{"round":2,"head":"p2"},{"round":3,"head":"p3"}]}`, nil, 0, "p1 p2 p3 c1"},
+		{"a file written before the lane field", `{"bead":"gt-abc","rounds":[{"round":1,"head":"old1"},{"round":2,"head":"old2"},{"round":3,"head":"old3"}]}`, nil, 0, "old1 old2 old3"},
+		{"the grouped rounds at a cap that fits only the two lane-newest", `{"bead":"gt-abc","rounds":null}`, grouped, 50, "p3 c1"},
+		{"the grouped rounds at a cap that fits three", `{"bead":"gt-abc","rounds":null}`, grouped, 120, "p2 p3 c1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -391,8 +398,8 @@ func TestRoundsLedgerOrdersByLane(t *testing.T) {
 			for _, r := range tc.add {
 				must(t, l.AppendLane(r.Lane, r.Round, r.Head, nil))
 			}
-			first := renderedOf(t, l, 0)
-			reloaded := renderedOf(t, &RoundsLedger{OutDir: l.OutDir, Bead: l.Bead}, 0)
+			first := renderedOf(t, l, tc.capBytes)
+			reloaded := renderedOf(t, &RoundsLedger{OutDir: l.OutDir, Bead: l.Bead}, tc.capBytes)
 			want := strings.Fields(tc.want)
 			if len(first) != len(want) || len(reloaded) != len(want) {
 				t.Fatalf("Render listed %d rounds, then %d after a reload, want %d", len(first), len(reloaded), len(want))
