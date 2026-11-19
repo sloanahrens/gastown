@@ -580,6 +580,87 @@ func TestIntegrationCICacheTrimLRUNoOvershoot(t *testing.T) {
 	}
 }
 
+// TestIntegrationCICacheTrimLRUFloorAtListing proves the floor bounds the
+// listing, not the selection: a file younger than ciCacheLRUFloorMinutes is
+// never in the list, so no cap can select one, and a listing that loses the
+// floor condition selects the floor-edge files and turns this test red.
+//
+// The tree is the shared one plus two files dated just inside the floor, the
+// oldest files inside it: the first a floorless listing would reach once the
+// past-floor files are taken. It is over the cap by more than the four
+// past-floor files total, so the listing without the floor would keep selecting
+// past them. The selection still covers what the floor allows: the past-floor
+// files, which leave the volume over its cap.
+func TestIntegrationCICacheTrimLRUFloorAtListing(t *testing.T) {
+	t.Parallel()
+
+	// More than the four past-floor files' 1024 KiB, so the excess is not
+	// covered by them and a floorless listing selects the floor-edge files.
+	const excessKiB = 1200
+
+	for _, tt := range []struct {
+		name  string
+		capOf func(before int64) int64
+	}{
+		{name: "the excess is the whole volume", capOf: func(int64) int64 { return 0 }},
+		{name: "the excess is more than the past-floor files cover",
+			capOf: func(before int64) int64 { return before - excessKiB }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			now := time.Now()
+			ciCacheLRUTreeWrite(t, root, now)
+
+			for _, f := range []struct {
+				path   string
+				ageMin int
+			}{
+				{path: filepath.Join("ab", "floor-edge-59m"), ageMin: 59},
+				{path: filepath.Join("ab", "floor-edge-55m"), ageMin: 55},
+			} {
+				full := filepath.Join(root, f.path)
+				if err := os.WriteFile(full, bytes.Repeat([]byte{'x'}, 256*1024), 0o644); err != nil {
+					t.Fatalf("writing %s: %v", f.path, err)
+				}
+				mtime := now.Add(-time.Duration(f.ageMin) * time.Minute)
+				if err := os.Chtimes(full, mtime, mtime); err != nil {
+					t.Fatalf("dating %s: %v", f.path, err)
+				}
+			}
+			before := ciCacheScriptFiles(t, root)
+			capKiB := tt.capOf(ciCacheLRUBefore(t, root))
+
+			stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+			if status != 0 {
+				t.Fatalf("the LRU program exited %d: %s", status, stderr)
+			}
+			files, reply := ciCacheLRURead(t, stdout)
+			want := ciCacheLRUPaths(root, "00/old-3h", "ab/lru-100m", "00/lru-96m", "ab/lru-90m")
+			if !slices.Equal(files, want) {
+				t.Errorf("selected %v, want every past-floor file and no other: %v", files, want)
+			}
+			for _, kept := range ciCacheLRUPaths(root, "ab/floor-edge-59m", "ab/floor-edge-55m", "ab/mid-45m", "ab/fresh-10m") {
+				if slices.Contains(files, kept) {
+					t.Errorf("%s was selected: its mtime is inside the %d minute floor", kept, ciCacheLRUFloorMinutes)
+				}
+			}
+			if reply.beforeKiB <= capKiB {
+				t.Errorf("before_kib = %d, want the volume over its %d KiB cap", reply.beforeKiB, capKiB)
+			}
+			if reply.removed != int64(len(want)) {
+				t.Errorf("removed = %d, want %d", reply.removed, len(want))
+			}
+			if reply.afterKiB != reply.beforeKiB {
+				t.Errorf("list reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+			}
+			if after := ciCacheScriptFiles(t, root); !slices.Equal(after, before) {
+				t.Errorf("the list removed files: %v, before %v", after, before)
+			}
+		})
+	}
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh
