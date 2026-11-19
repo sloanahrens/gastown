@@ -628,6 +628,73 @@ func TestSummarize_DeadSeatCloseIsLowerBound(t *testing.T) {
 	}
 }
 
+// TestSummarizeRepeatedStart: a seat's second start while its first attempt is
+// open closes that attempt with no time, so a later end cannot span the idle
+// gap between the two starts (gt-8r17fp).
+func TestSummarizeRepeatedStart(t *testing.T) {
+	t.Parallel()
+	const bead = "gt-abc"
+	ev := func(kind string, secs int) event {
+		return event{Bead: bead, Seat: "a", Event: kind, At: formatTime(testEpoch.Add(time.Duration(secs) * time.Second))}
+	}
+	at := func(secs int) time.Time { return testEpoch.Add(time.Duration(secs) * time.Second) }
+	tests := []struct {
+		name     string
+		events   []event
+		want     []Attempt
+		wantSecs float64
+	}{
+		{
+			name:   "second start closes the first with no time and the end pairs with the second",
+			events: []event{ev(EventStart, 0), ev(EventStart, 100), ev(EventEnd, 160)},
+			want: []Attempt{
+				{Seat: "a", StartedAt: at(0), LowerBound: true},
+				{Seat: "a", StartedAt: at(100), Secs: 60},
+			},
+			wantSecs: 60,
+		},
+		{
+			name:   "each repeated start closes the attempt before it",
+			events: []event{ev(EventStart, 0), ev(EventStart, 100), ev(EventStart, 200), ev(EventEnd, 230)},
+			want: []Attempt{
+				{Seat: "a", StartedAt: at(0), LowerBound: true},
+				{Seat: "a", StartedAt: at(100), LowerBound: true},
+				{Seat: "a", StartedAt: at(200), Secs: 30},
+			},
+			wantSecs: 30,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeLog(t, dir, bead, logLines(t, tc.events...))
+
+			sum, err := New(dir, fixedClock{at: testEpoch}).Summarize(bead)
+			if err != nil {
+				t.Fatalf("Summarize: %v", err)
+			}
+			if sum.Skipped != 0 || sum.Corrupt != 0 {
+				t.Errorf("Skipped/Corrupt = %d/%d, want 0/0", sum.Skipped, sum.Corrupt)
+			}
+			if !sum.LowerBound {
+				t.Error("LowerBound = false, want true: a repeated start closed an attempt with no time")
+			}
+			if sum.Secs != tc.wantSecs {
+				t.Errorf("Secs = %v, want %v", sum.Secs, tc.wantSecs)
+			}
+			if len(sum.Attempts) != len(tc.want) {
+				t.Fatalf("Attempts = %+v, want %+v", sum.Attempts, tc.want)
+			}
+			for i := range tc.want {
+				if sum.Attempts[i] != tc.want[i] {
+					t.Errorf("Attempts[%d] = %+v, want %+v", i, sum.Attempts[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestSummarize_SkipsAndCountsUnpairedEvents(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -636,7 +703,8 @@ func TestSummarize_SkipsAndCountsUnpairedEvents(t *testing.T) {
 		// An end with no start at all.
 		event{Bead: bead, Seat: "ghost", Event: EventEnd, At: formatTime(testEpoch)},
 		event{Bead: bead, Seat: "a", Event: EventStart, At: formatTime(testEpoch)},
-		// A second start while a's attempt is still open.
+		// A second start while a's attempt is still open: the first attempt
+		// closes with no time, and the second one is the attempt that pairs.
 		event{Bead: bead, Seat: "a", Event: EventStart, At: formatTime(testEpoch.Add(5 * time.Second))},
 		event{Bead: bead, Seat: "a", Event: EventEnd, At: formatTime(testEpoch.Add(20 * time.Second))},
 		// The pair is already closed, so this end matches nothing.
@@ -650,17 +718,18 @@ func TestSummarize_SkipsAndCountsUnpairedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summarize: %v", err)
 	}
-	if sum.Skipped != 4 {
-		t.Errorf("Skipped = %d, want 4 (end-without-start, duplicate start, duplicate end, out-of-order end)", sum.Skipped)
+	if sum.Skipped != 3 {
+		t.Errorf("Skipped = %d, want 3 (end-without-start, duplicate end, out-of-order end)", sum.Skipped)
 	}
 	if sum.Corrupt != 0 {
 		t.Errorf("Corrupt = %d, want 0", sum.Corrupt)
 	}
-	if sum.Secs != 20 {
-		t.Errorf("Secs = %v, want a's 20s", sum.Secs)
+	if sum.Secs != 15 {
+		t.Errorf("Secs = %v, want a's second attempt, 15s", sum.Secs)
 	}
 	want := []Attempt{
-		{Seat: "a", StartedAt: testEpoch, Secs: 20},
+		{Seat: "a", StartedAt: testEpoch, LowerBound: true},
+		{Seat: "a", StartedAt: testEpoch.Add(5 * time.Second), Secs: 15},
 		{Seat: "b", StartedAt: testEpoch, Open: true, LowerBound: true},
 	}
 	if len(sum.Attempts) != len(want) {
