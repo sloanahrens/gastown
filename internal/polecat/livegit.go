@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
 )
@@ -83,8 +84,28 @@ func ProbeLiveGitState(worktreePath string) LiveGitState {
 // git.BranchPreservationStatusLocal for the boundary and for the callers that
 // need the live probe instead.
 func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
-	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWorkLocal, localPreservation)
+	return probeLiveGitStateLocalExec(worktreePath, nil)
 }
+
+// probeLiveGitStateLocalExec is ProbeLiveGitStateLocal with the git runner
+// passed in, so a unit test can answer and record the calls without git
+// (docs/testing.md, "Seams for external tools"). A nil exec is the real git on
+// PATH.
+//
+// Every call runs under liveProbeTimeout. The pool reads this probe once per
+// sessionless polecat dir, serially, on every roster read and every sling, so a
+// worktree whose filesystem stalls must fail the probe in bounded time rather
+// than hold up the read (and everything queued behind it) until the tick kills
+// the process. A killed call is a failed measurement, which probeLiveGitState
+// already reports as unknown — the pool counts unknown as occupied.
+func probeLiveGitStateLocalExec(worktreePath string, exec git.ExecFunc) LiveGitState {
+	return probeLiveGitState(gitOpener{exec: exec, timeout: liveProbeTimeout}, worktreePath, gitRepo.CheckUncommittedWorkLocal, localPreservation)
+}
+
+// liveProbeTimeout bounds every git call of the local probe. It is generous
+// next to a healthy call (a status on a local worktree) and short next to the
+// tick's own bound, which is what a hung probe used to spend in full.
+const liveProbeTimeout = 10 * time.Second
 
 // livePreservation and localPreservation read a branch's preservation the way
 // the reuse gate does (Manager.workstateInputForPolecat): against origin with

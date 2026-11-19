@@ -1,9 +1,13 @@
 package polecat
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // The local probe exists so a caller that measures every seat in the town pays
@@ -96,5 +100,109 @@ func TestProbeLiveGitStateLocalMeasuresTheSameFactsAsTheLiveOne(t *testing.T) {
 	}
 	if local.StashCount != live.StashCount {
 		t.Fatalf("StashCount = live %d / local %d, want agreement", live.StashCount, local.StashCount)
+	}
+}
+
+// localProbeExecArgs is the scripted answer for the git calls a clean local
+// probe makes: the directory is its own worktree root, the branch is main, the
+// status and stash are clean, and HEAD is the tip of the tracking ref the local
+// preservation read asks about. The returned func records every call it
+// answers.
+func localProbeExecArgs(dir string, calls *[]git.ExecCall) git.ExecFunc {
+	const sha = "1111111111111111111111111111111111111111"
+	return func(c git.ExecCall) (string, string, error) {
+		*calls = append(*calls, c)
+		switch strings.Join(c.Args(), " ") {
+		case "rev-parse --show-toplevel":
+			return dir + "\n", "", nil
+		case "rev-parse --abbrev-ref HEAD":
+			return "main\n", "", nil
+		case "status --porcelain -uall":
+			return "", "", nil
+		case "stash list":
+			return "", "", nil
+		case "rev-parse refs/remotes/origin/main", "rev-parse HEAD":
+			return sha + "\n", "", nil
+		}
+		return "", "", fmt.Errorf("unscripted git call: %s", strings.Join(c.Args(), " "))
+	}
+}
+
+// TestLiveProbeLocalBoundsEveryGitCall: the probe the pool runs per sessionless
+// dir must finish. Every git call it makes runs under liveProbeTimeout, so a
+// worktree whose filesystem stalls cannot hold the roster read (and every sling
+// behind it) open. The probe still answers from the same facts — the bound must
+// not come at the cost of the answer.
+func TestLiveProbeLocalBoundsEveryGitCall(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var calls []git.ExecCall
+
+	got := probeLiveGitStateLocalExec(dir, localProbeExecArgs(dir, &calls))
+
+	if got.Source != GitStateSourceLive {
+		t.Fatalf("Source = %q, want %q (reason %q)", got.Source, GitStateSourceLive, got.FailedReason)
+	}
+	if got.Branch != "main" || got.Dirty || got.UnpushedCommits != 0 {
+		t.Fatalf("probe = %+v, want branch main, clean, 0 unpushed", got)
+	}
+	if len(calls) == 0 {
+		t.Fatal("runner saw no git calls; the bound cannot be asserted")
+	}
+	for _, c := range calls {
+		if c.Timeout() != liveProbeTimeout {
+			t.Errorf("git %s ran with timeout %v, want %v",
+				strings.Join(c.Args(), " "), c.Timeout(), liveProbeTimeout)
+		}
+	}
+	// The calls that can hang (status, stash, the unpushed ref reads) are the
+	// ones the bound exists for; assert they went through the runner rather
+	// than a file-system shortcut that answered without one.
+	for _, want := range []string{"status --porcelain -uall", "stash list", "rev-parse refs/remotes/origin/main"} {
+		found := false
+		for _, c := range calls {
+			if strings.Join(c.Args(), " ") == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("runner saw no %q call; recorded %d calls", want, len(calls))
+		}
+	}
+}
+
+// TestLiveProbeLocalReadsAKilledCallAsUnknown: a call that runs out the
+// deadline is a failed measurement, not clean work. The state must be unknown
+// with a reason, which the pool counts as an occupied seat.
+func TestLiveProbeLocalReadsAKilledCallAsUnknown(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	var calls []git.ExecCall
+	answer := localProbeExecArgs(dir, &calls)
+	rec := func(c git.ExecCall) (string, string, error) {
+		if strings.Join(c.Args(), " ") == "status --porcelain -uall" {
+			calls = append(calls, c)
+			return "", "", git.ErrTimedOut
+		}
+		return answer(c)
+	}
+
+	got := probeLiveGitStateLocalExec(dir, rec)
+
+	sawStatus := false
+	for _, c := range calls {
+		if strings.Join(c.Args(), " ") == "status --porcelain -uall" {
+			sawStatus = true
+		}
+	}
+	if !sawStatus {
+		t.Fatal("runner saw no status call; the probe abandoned the read before it could be killed")
+	}
+	if got.Source != GitStateSourceUnknown {
+		t.Fatalf("Source = %q, want %q", got.Source, GitStateSourceUnknown)
+	}
+	if got.FailedReason == "" {
+		t.Fatal("FailedReason = empty for a killed status call")
 	}
 }
