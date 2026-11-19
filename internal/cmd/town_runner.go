@@ -42,9 +42,19 @@ type unwiredApplier struct{}
 func (unwiredApplier) Wired() error                { return errApplyUnwired }
 func (unwiredApplier) Apply(context.Context) error { return errApplyUnwired }
 
+// rollSignals is the roll's signal source: a context a signal cancels, and the
+// function that stops listening for another. It is a seam so a test delivers the
+// signal itself.
+type rollSignals func() (context.Context, context.CancelFunc)
+
+// liveRollSignals is the production source: SIGINT and SIGTERM cancel the roll.
+func liveRollSignals() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
 // runnerRollDeps is what a roll runs with: the hold store, the two waits' reads,
-// the clock they poll on, the applier, and the flags. The production command
-// builds it with runnerRollDepsFor.
+// the clock they poll on, the signal source, the applier, and the flags. The
+// production command builds it with runnerRollDepsFor.
 type runnerRollDeps struct {
 	store       runnerroll.HoldStore
 	holdPath    string
@@ -52,6 +62,7 @@ type runnerRollDeps struct {
 	runs        func(ctx context.Context) ([]runnerroll.Run, error)
 	clock       runnerroll.Clock
 	now         func() time.Time
+	signals     rollSignals
 	apply       rollApplier
 	landingWait time.Duration
 	runsWait    time.Duration
@@ -69,15 +80,9 @@ var townRunnerCmd = &cobra.Command{
 var townRunnerRollCmd = &cobra.Command{
 	Use:   "roll",
 	Short: "Roll the gate runner, holding landings and waiting for runs to finish",
-	Long: `Roll the gate runner without killing a gate that is running. The steps run
-in order, and each one is printed:
-
-  1. take the landing hold, owner "roll", reason "runner roll"; a hold someone
-     else holds refuses with that holder's line and nothing else is touched
-  2. wait for the landing pass in flight to end (--landing-wait)
-  3. wait for the gate and post-land runs to finish (--runs-wait)
-  4. apply
-  5. release the landing hold
+	Long: `Roll the gate runner without killing a gate that is running. --dry-run
+prints the steps, their bounds and their order, and takes no hold and writes
+nothing.
 
 The hold is released on every exit path, including SIGINT and SIGTERM. A failed
 release reads the hold again and prints what to do by whose hold it is now: a
@@ -85,8 +90,7 @@ removal command only while the file is this roll's. A wait that times out exits
 non-zero, applies nothing, and releases the hold.
 
 The apply step is not wired yet, so a real roll refuses before it takes the
-hold. --dry-run prints the steps and their bounds, and takes no hold and writes
-nothing.
+hold.
 
 Examples:
   gt town runner roll --dry-run
@@ -111,8 +115,7 @@ func runTownRunnerRollCmd(cmd *cobra.Command, _ []string) error {
 }
 
 // runTownRunnerRollIn reads the roll's flags from cmd and runs the roll in the
-// town findTown names. A SIGINT or SIGTERM cancels the roll's context, so each
-// wait returns and the hold is released.
+// town findTown names.
 func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) error {
 	landingWait, err := cmd.Flags().GetDuration("landing-wait")
 	if err != nil {
@@ -130,9 +133,7 @@ func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) er
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return runTownRunnerRoll(ctx, runnerRollDepsFor(townRoot, cmd.OutOrStdout(), landingWait, runsWait, dryRun))
+	return runTownRunnerRoll(runnerRollDepsFor(townRoot, cmd.OutOrStdout(), landingWait, runsWait, dryRun))
 }
 
 // runnerRollDepsFor is the production roll's deps. The apply step is the default
@@ -144,6 +145,7 @@ func runnerRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait tim
 		holdPath:    filepath.Join(townRoot, runnerroll.LandingHoldName),
 		clock:       wallRollClock{},
 		now:         time.Now,
+		signals:     liveRollSignals,
 		apply:       unwiredApplier{},
 		landingWait: landingWait,
 		runsWait:    runsWait,
@@ -184,10 +186,10 @@ func (d runnerRollDeps) step(n int) string {
 	}
 }
 
-// runTownRunnerRoll runs the roll's five steps. The landing hold is released by a
-// defer, so every exit after the take releases it. A release failure is returned
-// unless the roll already failed.
-func runTownRunnerRoll(ctx context.Context, d runnerRollDeps) (err error) {
+// runTownRunnerRoll runs the roll's five steps under a context its signal source
+// cancels. The landing hold is released by a defer, so every exit after the take
+// releases it. A release failure is returned unless the roll already failed.
+func runTownRunnerRoll(d runnerRollDeps) (err error) {
 	if d.landingWait <= 0 || d.runsWait <= 0 {
 		return fmt.Errorf("the waits must be longer than zero: --landing-wait %s, --runs-wait %s", d.landingWait, d.runsWait)
 	}
@@ -206,9 +208,19 @@ func runTownRunnerRoll(ctx context.Context, d runnerRollDeps) (err error) {
 		return werr
 	}
 	// Refuse before the hold here too: a roll missing any seam must not take it.
-	if d.store == nil || d.landing == nil || d.runs == nil || d.clock == nil || d.now == nil {
-		return errors.New("the roll has no landing hold store or wait reads wired, so it cannot take the hold")
+	if d.store == nil || d.landing == nil || d.runs == nil || d.clock == nil || d.now == nil || d.signals == nil {
+		return errors.New("the roll has no signal source, landing hold store or wait reads wired, so it cannot take the hold")
 	}
+	ctx, stop := d.signals()
+	// The first signal cancels the roll. Stop listening on that signal once it
+	// does, so a second Ctrl-C takes the default action and ends the process.
+	unregister := context.AfterFunc(ctx, stop)
+	defer func() {
+		// True means the callback never ran, so this call is the one that stops.
+		if unregister() {
+			stop()
+		}
+	}()
 
 	fmt.Fprintf(d.out, "step 1/5: %s\n", d.step(1))
 	hold, err := runnerroll.Take(ctx, d.store, rollOwner, runnerroll.RollPause, d.now())
