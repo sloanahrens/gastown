@@ -661,6 +661,108 @@ func TestIntegrationCICacheTrimLRUFloorAtListing(t *testing.T) {
 	}
 }
 
+// TestIntegrationCICacheTrimLRUUnderCapAndMode: the cut is the sum beyond the
+// age rule, never a whole trim. A volume at or under its cap still selects the
+// files past the age and nothing else; a volume one KiB over selects the oldest
+// file past the floor, whose size covers the excess; and the program has the one
+// mode list, so any other mode is refused with exit 2 before it looks at the
+// volume.
+//
+// The over-cap case runs with an age past every file's, so the age rule selects
+// nothing and the selection is the cut's alone: removing the cut's exit selects
+// every past-floor file and turns it red, and deleting the mode guard lets each
+// other mode run as a list and turns the mode case red.
+func TestIntegrationCICacheTrimLRUUnderCapAndMode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("at or under the cap selects only the files past the age", func(t *testing.T) {
+		t.Parallel()
+		for _, tt := range []struct {
+			name   string
+			capOf  func(before int64) int64
+			reason string
+		}{
+			{name: "at the cap", capOf: func(before int64) int64 { return before },
+				reason: "the excess is zero, so the cut adds nothing to the age rule"},
+			{name: "under the cap", capOf: func(before int64) int64 { return before + 4096 },
+				reason: "the excess is negative, so the cut adds nothing to the age rule"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				ciCacheLRUTreeWrite(t, root, time.Now())
+				before := ciCacheLRUBefore(t, root)
+				beforeFiles := ciCacheScriptFiles(t, root)
+
+				stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", strconv.FormatInt(tt.capOf(before), 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+				if status != 0 {
+					t.Fatalf("the LRU program exited %d: %s", status, stderr)
+				}
+				files, reply := ciCacheLRURead(t, stdout)
+				want := ciCacheLRUPaths(root, "00/old-3h")
+				if !slices.Equal(files, want) {
+					t.Errorf("selected %v, want only the file past the 120 minute age, %v: %s", files, want, tt.reason)
+				}
+				if reply.removed != int64(len(want)) {
+					t.Errorf("removed = %d, want %d", reply.removed, len(want))
+				}
+				if reply.afterKiB != reply.beforeKiB {
+					t.Errorf("list reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+				}
+				if after := ciCacheScriptFiles(t, root); !slices.Equal(after, beforeFiles) {
+					t.Errorf("the list removed files: %v, before %v", after, beforeFiles)
+				}
+			})
+		}
+	})
+
+	t.Run("one KiB over the cap selects the oldest file that covers it", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		before := ciCacheLRUBefore(t, root)
+		beforeFiles := ciCacheScriptFiles(t, root)
+
+		// An age past every file's: no file is past the age, so the age rule
+		// selects none and only the cut can select.
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "600", strconv.FormatInt(before-1, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		want := ciCacheLRUPaths(root, "00/old-3h")
+		if !slices.Equal(files, want) {
+			t.Errorf("selected %v, want only %v: the oldest file past the floor, whose 256 KiB covers the 1 KiB excess, stops the cut", files, want)
+		}
+		if reply.removed != int64(len(want)) {
+			t.Errorf("removed = %d, want %d", reply.removed, len(want))
+		}
+		if reply.afterKiB != reply.beforeKiB {
+			t.Errorf("list reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+		}
+		if after := ciCacheScriptFiles(t, root); !slices.Equal(after, beforeFiles) {
+			t.Errorf("the list removed files: %v, before %v", after, beforeFiles)
+		}
+	})
+
+	t.Run("any mode but list exits 2", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		beforeFiles := ciCacheScriptFiles(t, root)
+
+		for _, mode := range []string{"apply", "remove", "", "LIST", "List"} {
+			stdout, _, status := ciCacheLRURun(t, ciCacheLRUTrimScript, mode, root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+			if status != 2 || stdout != "" {
+				t.Errorf("mode %q: exit %d with output %q, want exit 2 and none", mode, status, stdout)
+			}
+			if after := ciCacheScriptFiles(t, root); !slices.Equal(after, beforeFiles) {
+				t.Errorf("mode %q changed the volume: %v, before %v", mode, after, beforeFiles)
+			}
+		}
+	})
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh
