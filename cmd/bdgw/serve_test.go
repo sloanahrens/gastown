@@ -268,6 +268,12 @@ func pipeConn(context.Context, string, string) (net.Conn, error) {
 	return client, nil
 }
 
+// successProbeBound is the readiness probe's deadline for the TestReadyDoltExit
+// rows that answer at once. It is a ceiling on a hang that is never reached,
+// far above the 20 ms the deadline row uses, so a loaded runner cannot fail a
+// row that does not test the deadline.
+const successProbeBound = 5 * time.Second
+
 // TestReadyDoltExit: bdgw ready exits 0 when the files load and the Dolt dial
 // passes, and exits 1 naming dolt when the dial fails or never answers.
 func TestReadyDoltExit(t *testing.T) {
@@ -279,11 +285,12 @@ func TestReadyDoltExit(t *testing.T) {
 	cases := []struct {
 		name string
 		dial func(context.Context, string, string) (net.Conn, error)
-		// probeTimeout is the production bound for the rows that answer at
-		// once, because only the last row tests the deadline: a short bound
-		// on the others races their answer against a loaded runner's
-		// scheduling and measures the host, not the gateway. The last row
-		// overrides it so the test does not wait the production bound.
+		// probeTimeout belongs to the row that tests the deadline: the last
+		// row, at 20 ms, is meant to time out. The other rows answer at once
+		// and do not test it, so a short bound there only measures the host's
+		// scheduling; they get successProbeBound, 5 s, a ceiling on a hang that
+		// is never reached, not a wait and not a raised timeout. No sleep is
+		// added.
 		probeTimeout time.Duration
 		wantStatus   int
 		wantStderr   string
@@ -291,13 +298,13 @@ func TestReadyDoltExit(t *testing.T) {
 		{
 			name:         "all pass",
 			dial:         pipeConn,
-			probeTimeout: doltProbeTimeout,
+			probeTimeout: successProbeBound,
 			wantStatus:   exitOK,
 		},
 		{
 			name:         "dolt unreachable",
 			dial:         func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
-			probeTimeout: doltProbeTimeout,
+			probeTimeout: successProbeBound,
 			wantStatus:   exitFailed,
 			wantStderr:   "not ready: dolt: connection refused",
 		},
