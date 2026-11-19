@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -125,6 +126,9 @@ type Work struct {
 	// a submission and does not move it (gt-t2jhf). Zero on a bead submitted
 	// before the note carried one.
 	Submitted time.Time
+	// Gate is what the seat's local presubmit gate cost, one bounded "Gate:"
+	// line so the gate's minutes can be read from the bead (gt-urrk8u).
+	Gate string
 	// CandidateBranch and CandidateHead name the merge candidate: the branch
 	// Land pushes it as and the merged commit on it. A READY TO LAND block
 	// carries neither — Candidate derives the branch from BeadID — and Land
@@ -182,14 +186,34 @@ func refusalSeat(w Work) string {
 	return w.Rig + "/" + polecat
 }
 
+// readyNoteGateMax bounds the Gate line FormatReadyNote writes, cutting a
+// runaway value at a rune boundary and marking it " …" the way alertField
+// does (gt-urrk8u); FormatReadyNote is a plain string and cannot refuse one.
+const readyNoteGateMax = 300
+
+func gateField(s string) string {
+	s = NoteField(s)
+	if len(s) <= readyNoteGateMax {
+		return s
+	}
+	cut := readyNoteGateMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + " …"
+}
+
 // FormatReadyNote renders the READY TO LAND block for w. Every value is
 // collapsed onto one line, so no field can inject a line the parser reads.
-// Submitted is left out while it is zero.
+// Submitted is left out while it is zero; so is Gate, which is written last.
 func FormatReadyNote(w Work) string {
 	note := fmt.Sprintf("%s\nBranch: %s\nHead: %s\nTarget: %s\nWorker: %s",
 		ReadyNoteMarker, NoteField(w.Branch), NoteField(w.Head), NoteField(w.Target), NoteField(w.Worker))
 	if !w.Submitted.IsZero() {
 		note += "\nSubmitted: " + w.Submitted.UTC().Format(time.RFC3339)
+	}
+	if gate := gateField(w.Gate); gate != "" {
+		note += "\nGate: " + gate
 	}
 	return note
 }
@@ -197,6 +221,10 @@ func FormatReadyNote(w Work) string {
 // ParseReadyNote reads the last READY TO LAND block in notes. A rework
 // resubmission appends a new block, so the last one is the live request.
 // BeadID and Rig are not part of the note and come back empty.
+//
+// A Gate line is read into Gate wherever it sits. When adding a key here, add
+// it to readySubmitted in internal/jev/scorecard/progress.go too, the second
+// reader that walks the fields; every other reader calls this one (gt-urrk8u).
 func ParseReadyNote(notes string) (Work, bool) {
 	idx := strings.LastIndex(notes, ReadyNoteMarker+"\n")
 	if idx < 0 {
@@ -224,6 +252,8 @@ func ParseReadyNote(notes string) (Work, bool) {
 			w.Target = value
 		case "worker":
 			w.Worker = polecatSeat(value)
+		case "gate":
+			w.Gate = value
 		case "submitted":
 			// A time this code cannot read orders as if the block carried
 			// none: a bad stamp is not a reason to refuse to land the work.

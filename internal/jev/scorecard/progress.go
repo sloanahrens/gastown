@@ -367,7 +367,9 @@ func isRejectionHeader(line string) bool {
 // readySubmitted reads a READY TO LAND block's Submitted stamp, with the field
 // rules land.ParseReadyNote reads: the fields run to the first line that is not
 // one, and a stamp no clock can read orders as none, rather than failing the
-// whole report over a bead whose work is fine.
+// whole report over a bead whose work is fine. The known keys are
+// land.ParseReadyNote's, "gate" included, so a Gate line the note writes last
+// never ends the block before the stamp (gt-urrk8u).
 func readySubmitted(fields []string) time.Time {
 	for _, line := range fields {
 		key, value, ok := strings.Cut(line, ":")
@@ -375,7 +377,7 @@ func readySubmitted(fields []string) time.Time {
 			return time.Time{}
 		}
 		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "branch", "head", "target", "worker":
+		case "branch", "head", "target", "worker", "gate":
 		case "submitted":
 			at, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
 			if err != nil {

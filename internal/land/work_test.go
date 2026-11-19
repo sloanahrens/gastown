@@ -167,6 +167,74 @@ func TestReadyNoteIgnoresAnUnreadableSubmissionTime(t *testing.T) {
 	}
 }
 
+// gateBeforeSubmitted moves a block's last line (the Gate line FormatReadyNote
+// writes last) ahead of its Submitted stamp, the shape a hand-written block
+// can take.
+func gateBeforeSubmitted(block string) string {
+	lines := strings.Split(block, "\n")
+	gate := lines[len(lines)-1]
+	head := strings.Join(lines[:len(lines)-1], "\n")
+	return strings.Replace(head, "\nSubmitted: ", "\n"+gate+"\nSubmitted: ", 1)
+}
+
+// A READY TO LAND block carries the seat's local gate cost as one bounded
+// Gate: line (gt-urrk8u). FormatReadyNote writes it last and only when it
+// holds text; ParseReadyNote reads it into Gate wherever the line sits,
+// leaving every other field as it was.
+func TestReadyNoteGate(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 1, 13, 45, 0, 0, time.UTC)
+	withGate := func(gate string) Work {
+		w := sampleWork()
+		w.Submitted, w.Gate = at, gate
+		return w
+	}
+	// The straddle's 300th byte falls inside the three-byte rune, so the cut
+	// belongs before that rune and the result stays valid UTF-8.
+	straddle := strings.Repeat("a", 299) + "…" + "tail"
+	bounded := strings.Repeat("b", 300) + " …"
+	tests := []struct {
+		name string
+		work Work
+		// edit rewrites the block before parsing, for the row that moves the Gate line.
+		edit               func(string) string
+		wantLine, wantGate string
+	}{
+		{name: "round-trips beside the other fields", work: withGate("PASS, 4m12s"), wantLine: "Gate: PASS, 4m12s", wantGate: "PASS, 4m12s"},
+		{name: "read ahead of the submission stamp", work: withGate("PASS, 4m12s"), edit: gateBeforeSubmitted, wantLine: "Gate: PASS, 4m12s", wantGate: "PASS, 4m12s"},
+		{name: "an empty gate writes no line", work: withGate("")},
+		{name: "a gate past 300 bytes is cut and marked", work: withGate(strings.Repeat("b", 301)), wantLine: "Gate: " + bounded, wantGate: bounded},
+		{name: "a cut landing inside a rune stops before it", work: withGate(straddle), wantLine: "Gate: " + strings.Repeat("a", 299) + " …", wantGate: strings.Repeat("a", 299) + " …"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			block := FormatReadyNote(tc.work)
+			if tc.wantLine == "" && strings.Contains(block, "\nGate:") {
+				t.Errorf("block = %q, want no Gate line", block)
+			} else if tc.wantLine != "" && !strings.HasSuffix(block, "\n"+tc.wantLine) {
+				t.Errorf("block = %q, want it to end with %q", block, tc.wantLine)
+			}
+			in := block
+			if tc.edit != nil {
+				in = tc.edit(block)
+			}
+			got, ok := ParseReadyNote(in)
+			if !ok {
+				t.Fatal("ParseReadyNote found no block")
+			}
+			want := tc.work
+			if got.Branch != want.Branch || got.Head != want.Head || got.Target != want.Target ||
+				got.Worker != want.Worker || !got.Submitted.Equal(want.Submitted) {
+				t.Errorf("round trip = %+v, want %+v", got, want)
+			}
+			if got.Gate != tc.wantGate {
+				t.Errorf("Gate = %q, want %q", got.Gate, tc.wantGate)
+			}
+		})
+	}
+}
+
 // A Worker line may hold the polecat's full actor, as a hand-written note does.
 // It reads as the bare seat name gt done writes; any other value is kept as
 // written, a crew actor included.
