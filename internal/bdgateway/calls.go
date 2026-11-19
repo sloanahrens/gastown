@@ -36,7 +36,10 @@ type CallEntry struct {
 	ExitCode   int      `json:"exit_code"`
 	DurationMS int64    `json:"duration_ms"`
 	Error      string   `json:"error,omitempty"`
-	Conflict   bool     `json:"conflict,omitempty"`
+	// Refusal is the reason code of a call the gateway refused before exec. A
+	// call that ran carries none.
+	Refusal  string `json:"refusal,omitempty"`
+	Conflict bool   `json:"conflict,omitempty"`
 }
 
 // stamped is one parsed call log line with its stamp, the key ReadCalls merges on.
