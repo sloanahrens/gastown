@@ -2,6 +2,7 @@ package gtwrap
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,9 +48,14 @@ const (
 	// "create the database" into a call it never made, so the call is refused.
 	gatewayPermitVar = "BD_ALLOW_NEW_DATABASE"
 	// gatewayRetryTotal is how long a call keeps waiting for the gateway after a
-	// refused dial, so a call made while the gateway rolls reaches it once it is
-	// back instead of failing on the first refusal.
+	// refused dial or a read call's mid-call transport failure, so a call made
+	// while the gateway rolls reaches it once it is back instead of failing on
+	// the first refusal.
 	gatewayRetryTotal = 45 * time.Second
+	// gatewayRetryMinimum is the least time a retried attempt may start with:
+	// with less than that left, the gateway cannot answer inside the budget, so
+	// the call ends instead of spending the attempt.
+	gatewayRetryMinimum = time.Second
 )
 
 // gatewayEnvNames are the only variables the gateway accepts in the head
@@ -81,7 +87,8 @@ type BdGateway struct {
 	// TimeoutMS is the head's requested limit. Zero means gatewayDefaultTimeoutMS.
 	TimeoutMS int
 	// HTTP sends the requests. Nil uses an http.Client bounded by the call's
-	// timeout, or by the probe bound for a doctor.
+	// timeout, or by the probe bound for a doctor. A call's request carries its
+	// attempt's limit on the context, so any doer is bounded the same way.
 	HTTP HTTPDoer
 	// Stdin is the caller's stdin, streamed after the head line only when the
 	// call reads stdin, and never otherwise. Nil sends none.
@@ -159,11 +166,12 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	// itself carries is always sent, since the caller that supplied it means bd to
 	// read it.
 	var stdin io.Reader
+	sendsStdin := false
 	switch {
 	case call.Stdin != nil:
-		stdin = call.Stdin
+		stdin, sendsStdin = call.Stdin, true
 	case g.Stdin != nil && bdReadsStdin(call.Argv[1:]):
-		stdin = g.Stdin
+		stdin, sendsStdin = g.Stdin, true
 	default:
 		stdin = strings.NewReader("")
 	}
@@ -171,11 +179,11 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	// fresh request is built for each: the request whose dial failed was closed by
 	// the client, so it cannot be sent again.
 	headLine := append(head, '\n')
-	newRequest := func() *http.Request {
+	newRequest := func(ctx context.Context) *http.Request {
 		body := io.MultiReader(bytes.NewReader(headLine), stdin)
 		// validate parsed the URL and the method is fixed, so building the request
 		// cannot fail.
-		req, _ := http.NewRequest(http.MethodPost, g.endpoint(gatewayExecPath), body)
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, g.endpoint(gatewayExecPath), body)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", gatewayContentType)
 		req.Header.Set("X-Gt-Caller", g.caller())
@@ -183,19 +191,57 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	}
 	// A gateway roll restarts the gateway, so a dial can be refused for a moment
 	// while a call is on its way. A refused dial never reached the gateway, so the
-	// call cannot have run: it is tried again on RetrySchedule's waits. A refused
-	// attempt never read the body, so the caller's stdin is still whole for the
-	// attempt that connects, and it is delivered once. A non-retryable error, a
-	// timeout and an answer, whatever its status, are each tried exactly once.
+	// call cannot have run: it is tried again on RetrySchedule's waits. A read
+	// call whose transport failed mid-call may have reached the gateway, so it is
+	// sent again on the same waits when RetryableRead allows it: it sent no stdin
+	// and wrote no output, so a second run repeats nothing. Both kinds draw on one
+	// budget, a wall-clock deadline taken when the call starts, so an attempt that
+	// burns its whole timeout counts against it. The budget governs retries only:
+	// the first attempt keeps the call's own timeout, a retry is bounded by the
+	// smaller of that timeout and the time the budget has left, and none starts
+	// with less than gatewayRetryMinimum left. A wait is taken only when the retry
+	// after it can still start, so the call does not spend its last seconds
+	// waiting for an attempt it will not make. A refused attempt never read the
+	// body, so the caller's stdin is still whole for the attempt that connects,
+	// and it is delivered once. A mid-call failure of a write call, or of a read
+	// call that sent stdin, is not retried; nor is a non-retryable error or an
+	// answer, whatever its status.
 	delays := RetrySchedule(gatewayRetryTotal)
-	doer := g.doer(g.clientTimeout())
 	started := g.now()
+	deadline := started.Add(gatewayRetryTotal)
 	attempts := 0
 	var resp *http.Response
+	// The last attempt's context is canceled on the way out, after any answer
+	// has been read, so its timer does not outlive the call.
+	var cancel context.CancelFunc
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
 	for {
+		left := deadline.Sub(g.now())
+		if attempts > 0 && left < gatewayRetryMinimum {
+			break
+		}
+		limit := g.clientTimeout()
+		if attempts > 0 {
+			limit = min(limit, left)
+		}
+		// The request carries the attempt's limit, so a doer that keeps no clock
+		// of its own is bounded the way the real client is.
+		if cancel != nil {
+			cancel()
+		}
 		attempts++
-		resp, err = doer.Do(newRequest())
-		if err == nil || !RetryableDial(err) || attempts > len(delays) {
+		resp, cancel, err = g.attempt(newRequest, limit)
+		// wroteOutput is false: the answer's frames are read only after Do returns,
+		// so a Do that failed has written nothing to the caller's streams.
+		if err == nil || attempts > len(delays) ||
+			!(RetryableDial(err) || RetryableRead(err, call.Argv[1:], sendsStdin, false)) {
+			break
+		}
+		if left = deadline.Sub(g.now()); left-delays[attempts-1] < gatewayRetryMinimum {
 			break
 		}
 		g.sleep(delays[attempts-1])
@@ -213,6 +259,15 @@ func (g BdGateway) Launch(call Call) (int, error) {
 		return exitDown, g.refusal(resp)
 	}
 	return g.readFrames(resp.Body)
+}
+
+// attempt sends one request bounded by limit and returns the response and the
+// cancel its caller runs once the body has been read, so an injected doer is
+// bounded the way the real client is.
+func (g BdGateway) attempt(newRequest func(context.Context) *http.Request, limit time.Duration) (*http.Response, context.CancelFunc, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	resp, err := g.doer(limit).Do(newRequest(ctx))
+	return resp, cancel, err
 }
 
 // readFrames copies the response's stdout and stderr frames to the caller's
