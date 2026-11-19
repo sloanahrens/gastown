@@ -1208,6 +1208,13 @@ func TestCallLogArgvParse(t *testing.T) {
 			beads: []string{},
 		},
 		{
+			name:  "flags read after the command word are named when the verb cannot be placed",
+			argv:  []string{"show", "--json", "--include-comments", "--", "gt-x"},
+			verb:  unparsedVerb,
+			flags: []string{"--json", "--include-comments"},
+			beads: []string{},
+		},
+		{
 			name:  "unknown prefix is not an id",
 			argv:  []string{"show", "refactor-sling"},
 			verb:  "show",

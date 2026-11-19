@@ -606,15 +606,18 @@ func TestIntegrationSQLRefusalRunsRealBd(t *testing.T) {
 	if code := postExec(t, g, testDaemonToken, Request{Argv: argv, Rig: setup.rig}); code != http.StatusOK {
 		t.Fatalf("schema-level read through the gateway = %d, want 200", code)
 	}
-	// Only the read reached the log, and bd's own exit status says the real
-	// schema level was read; a start failure writes an error frame the 200
-	// alone would not tell apart.
+	// The refused write leaves its refused line before the read's line, and bd's
+	// own exit status says the real schema level was read; a start failure
+	// writes an error frame the 200 alone would not tell apart.
 	entries := calls()
-	if len(entries) != 1 {
-		t.Fatalf("the call log holds %d calls, want only the read", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("the call log holds %d calls, want the refused write and the read", len(entries))
 	}
-	if e := entries[0]; e.Verb != "sql" || e.ExitCode != 0 {
-		t.Fatalf("schema-level read logged verb %q exit %d, want sql exit 0", e.Verb, e.ExitCode)
+	if e := entries[0]; e.Refusal != codeForbidden || e.ExitCode != ExitRefused {
+		t.Fatalf("refused write logged refusal %q exit %d, want forbidden exit %d", e.Refusal, e.ExitCode, ExitRefused)
+	}
+	if e := entries[1]; e.Verb != "sql" || e.ExitCode != 0 || e.Refusal != "" {
+		t.Fatalf("schema-level read logged verb %q exit %d refusal %q, want sql exit 0 with no refusal", e.Verb, e.ExitCode, e.Refusal)
 	}
 }
 

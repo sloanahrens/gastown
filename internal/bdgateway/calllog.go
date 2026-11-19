@@ -558,30 +558,27 @@ type logParts struct {
 // titles, descriptions, comment bodies — are never kept, and neither is an
 // id-shaped token after a flag, which may be that flag's value.
 //
-// An argv the scanner cannot place yields no flags and no ids and is counted
-// under unparsedVerb, so an unreadable call is visible rather than blank
-// (gt-itjuwu review).
+// An argv the scanner cannot place is counted under unparsedVerb, so an
+// unreadable call is visible rather than blank (gt-itjuwu review). It keeps no
+// ids. Its flag names are kept only once a command word was read: before the
+// first word, an unknown flag may take that word as its value, so the scan
+// refuses with no word read and no flag is named. After a word, the flags the
+// scan placed up to the token it could not are named, so a refused call's
+// flags reach its line.
 func (l *CallLog) parseArgv(argv []string) logParts {
 	parts := logParts{flags: []string{}, beads: []string{}}
 	scan, err := l.policy.scanArgs(argv)
 	if err != nil {
 		parts.verb = unparsedVerb
+		if len(scan.words) > 0 {
+			parts.flags = loggedFlags(scan.flags)
+		}
 		return parts
 	}
 	if len(scan.words) > 0 && isVerb(scan.words[0]) {
 		parts.verb = scan.words[0]
 	}
-	for _, flag := range scan.flags {
-		// A clustered shorthand may be part of the first one's value, so only
-		// the first in a token is a name for certain.
-		if flag.clustered || !bareFlag.MatchString(flag.name) {
-			continue
-		}
-		if len(parts.flags) >= maxLoggedItems {
-			break
-		}
-		parts.flags = append(parts.flags, flag.spelling)
-	}
+	parts.flags = loggedFlags(scan.flags)
 	// Only an operand that precedes every flag is positional for certain: after
 	// a command flag it may be that flag's value, and a value is never logged.
 	positional := argv
@@ -604,6 +601,23 @@ func (l *CallLog) parseArgv(argv []string) logParts {
 		}
 	}
 	return parts
+}
+
+// loggedFlags is the spelling of each flag name a line may keep, up to
+// maxLoggedItems. Only the first name in a token is kept, since a clustered
+// shorthand's later letters may be part of the first one's value.
+func loggedFlags(flags []flagToken) []string {
+	out := []string{}
+	for _, flag := range flags {
+		if flag.clustered || !bareFlag.MatchString(flag.name) {
+			continue
+		}
+		if len(out) >= maxLoggedItems {
+			break
+		}
+		out = append(out, flag.spelling)
+	}
+	return out
 }
 
 // isVerb reports whether token may be stored and counted as a verb: a bd
