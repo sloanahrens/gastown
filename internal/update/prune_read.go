@@ -33,9 +33,14 @@ const (
 	// for its reason, so a huge body is never loaded to report a status.
 	pruneReasonReadBytes = 512
 	// pruneReasonMaxBytes caps the reason one refused answer reports.
-	pruneReasonMaxBytes = 200
+	pruneReasonMaxBytes = 120
 	// pruneReasonSideMaxBytes caps one answering-side header value.
 	pruneReasonSideMaxBytes = 60
+	// pruneTokenPrefixMin is the shortest prefix of the token a reason may not
+	// end with, since a cut that leaves it may have dropped the rest.
+	pruneTokenPrefixMin = 6
+	// pruneNotShown is the reason shown in place of a cut through the token.
+	pruneNotShown = "body not shown (credential-shaped)"
 )
 
 var (
@@ -224,7 +229,7 @@ func (r PruneRegistryReader) page(ctx context.Context, user, token, image string
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, 0, pruneRefusal(resp, user, token, image)
+		return nil, 0, pruneRefusal(resp, u, user, token, image)
 	}
 	total, err := strconv.Atoi(resp.Header.Get("X-Total-Count"))
 	if err != nil || total < 0 {
@@ -245,88 +250,107 @@ func (r PruneRegistryReader) page(ctx context.Context, user, token, image string
 }
 
 // pruneRefusal is the error for a non-200 packages answer: it names the status
-// and image, then who answered and Forgejo's own reason for the refusal.
-func pruneRefusal(resp *http.Response, user, token, image string) error {
+// and image, then Forgejo's own reason, then the request and who answered, in a
+// bracket after the reason.
+func pruneRefusal(resp *http.Response, u *url.URL, user, token, image string) error {
 	msg := fmt.Sprintf("the Forgejo packages API answered HTTP %d for %s", resp.StatusCode, image)
-	if side := pruneAnswerSide(resp, user, token); side != "" {
-		msg += " (" + side + ")"
-	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, pruneReasonReadBytes))
-	if err != nil {
-		return errors.New(msg + ": the answer body could not be read")
+	reason := "the answer body could not be read"
+	if err == nil {
+		reason = pruneAnswerReason(body, user, token)
 	}
-	if reason := pruneAnswerReason(body, user, token); reason != "" {
+	if reason != "" {
 		msg += ": " + reason
 	}
-	return errors.New(msg)
+	return errors.New(msg + " [" + pruneRequestSide(resp, u, user, token) + "]")
 }
 
-// pruneAnswerSide names who answered a refused request, so an answer from a
-// hop between the town and Forgejo is visible: the Server and Via headers,
-// each capped at pruneReasonSideMaxBytes, and the scheme and host the request
-// went to, with no path or userinfo. Empty parts are left out.
-func pruneAnswerSide(resp *http.Response, user, token string) string {
-	var parts []string
+// pruneRequestSide names the request a refused answer answered and who answered
+// it: the path and query as sent, which carry no credential, then the Server and
+// Via header values. Each header value is capped at pruneReasonSideMaxBytes, and
+// an absent one is left out.
+func pruneRequestSide(resp *http.Response, u *url.URL, user, token string) string {
+	parts := []string{"GET " + u.EscapedPath() + "?" + u.RawQuery}
 	for _, h := range []struct{ header, label string }{
 		{"Server", "server"},
 		{"Via", "via"},
 	} {
-		v := strings.TrimSpace(pruneRedacted(resp.Header.Get(h.header), user, token))
-		if v == "" {
-			continue
-		}
-		if len(v) > pruneReasonSideMaxBytes {
-			v = v[:pruneReasonSideMaxBytes]
-		}
-		parts = append(parts, fmt.Sprintf("%s %q", h.label, v))
-	}
-	if resp.Request != nil && resp.Request.URL != nil {
-		if u := resp.Request.URL; u.Scheme != "" && u.Host != "" {
-			parts = append(parts, "requested "+u.Scheme+"://"+u.Host)
+		if v := pruneCredentialSafe(resp.Header.Get(h.header), pruneReasonSideMaxBytes, user, token); v != "" {
+			parts = append(parts, h.label+"="+v)
 		}
 	}
-	return strings.Join(parts, ", ")
+	return strings.Join(parts, "; ")
 }
 
-// pruneAnswerReason is a refused answer's own reason: the JSON "message" field
-// when the body is a JSON object carrying one, else the body's text. Only the
-// first line is kept, control characters become spaces, every occurrence of
-// the viewer's user and token becomes "***", and the result is capped at
-// pruneReasonMaxBytes.
+// pruneAnswerReason is a refused answer's own reason, or "" when the answer
+// gives none. The text is cut and redacted by pruneCredentialSafe.
 func pruneAnswerReason(body []byte, user, token string) string {
-	text := string(body)
-	var answer struct {
-		Message *string `json:"message"`
+	text, ok := pruneReasonText(body)
+	if !ok {
+		return ""
 	}
-	if err := json.Unmarshal(body, &answer); err == nil && answer.Message != nil {
-		text = *answer.Message
+	return pruneCredentialSafe(text, pruneReasonMaxBytes, user, token)
+}
+
+// pruneReasonText is the text a reason is taken from. A body that is not JSON
+// is its own text, which includes a JSON body cut at the read bound. A JSON body
+// gives text only when it is an object whose "message" is a string; any other
+// JSON gives none.
+func pruneReasonText(body []byte) (string, bool) {
+	if !json.Valid(body) {
+		return string(body), true
 	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return "", false
+	}
+	var msg string
+	if err := json.Unmarshal(obj["message"], &msg); err != nil {
+		return "", false
+	}
+	return msg, true
+}
+
+// pruneCredentialSafe is text as a refused answer shows it: its first line,
+// printable ASCII only (every other byte becomes a space), cut to limit bytes,
+// then the viewer's user and token replaced with "***". The cut comes first, so
+// a token the cut splits is not replaced; a text that then ends with a prefix of
+// the token is not shown at all.
+func pruneCredentialSafe(text string, limit int, user, token string) string {
 	if i := strings.IndexByte(text, '\n'); i >= 0 {
 		text = text[:i]
 	}
-	text = strings.TrimSpace(pruneRedacted(text, user, token))
-	if len(text) > pruneReasonMaxBytes {
-		text = text[:pruneReasonMaxBytes]
-	}
-	return text
-}
-
-// pruneRedacted replaces every occurrence of a non-empty credential in text
-// with "***" and every control character with a space, so neither a credential
-// nor a line break reaches an error message.
-func pruneRedacted(text, user, token string) string {
-	text = strings.Map(func(r rune) rune {
-		if r < ' ' || r == 0x7f {
-			return ' '
+	b := []byte(text)
+	for i, c := range b {
+		if c < ' ' || c > '~' {
+			b[i] = ' '
 		}
-		return r
-	}, text)
+	}
+	if len(b) > limit {
+		b = b[:limit]
+	}
+	text = string(b)
 	for _, secret := range []string{user, token} {
 		if secret != "" {
 			text = strings.ReplaceAll(text, secret, "***")
 		}
 	}
+	text = strings.TrimSpace(text)
+	if pruneEndsInToken(text, token) {
+		return pruneNotShown
+	}
 	return text
+}
+
+// pruneEndsInToken reports whether text ends with a prefix of token of
+// pruneTokenPrefixMin or more characters, short of the whole token.
+func pruneEndsInToken(text, token string) bool {
+	for n := len(token) - 1; n >= pruneTokenPrefixMin; n-- {
+		if strings.HasSuffix(text, token[:n]) {
+			return true
+		}
+	}
+	return false
 }
 
 // listingURL is the packages listing of the owner's container packages named

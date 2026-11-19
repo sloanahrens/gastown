@@ -223,10 +223,8 @@ func TestPruneReadRegistryRefusesAnUnreadableListing(t *testing.T) {
 		daemon []pruneAnswer
 		marked bool
 	}{
-		// A non-200 answer's body is now the answer's reason, redacted and
-		// shown (TestPruneReadReasonRedacted): the marker is not a credential.
 		{"non-200 answer with a listing that would read", []pruneAnswer{{status: http.StatusInternalServerError, total: "1", body: "[" +
-			pruneItem("gastown-daemon", pruneReadMarker, pruneDigest("a"), pruneBase) + "]"}}, false},
+			pruneItem("gastown-daemon", pruneReadMarker, pruneDigest("a"), pruneBase) + "]"}}, true},
 		{"body that is not a listing", []pruneAnswer{{status: http.StatusOK, total: "1", body: "<html>" + pruneReadMarker}}, true},
 		{"listing short of its total", []pruneAnswer{{status: http.StatusOK, total: "3", body: one}}, false},
 		{"total header missing", []pruneAnswer{{status: http.StatusOK, body: one}}, false},
@@ -281,157 +279,197 @@ func pruneEndless() []pruneAnswer {
 	return pages
 }
 
-// TestPruneReadReasonShown holds that a refused packages answer carries
-// Forgejo's own reason after the status text: the JSON "message" when the body
-// is an object holding one, else the body's first line, and who answered.
+// pruneReasonLine is the request line a refused answer names for the first
+// page of gastown-daemon's listing, as the reader sends it.
+const pruneReasonLine = "GET /api/v1/packages/bot-registry?limit=50&page=1&q=gastown-daemon&type=container"
+
+// pruneRefusalText returns the error text one scripted page answer refuses with.
+func pruneRefusalText(t *testing.T, a pruneAnswer, user, token string) string {
+	t.Helper()
+	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": {a}}}
+	reg := PruneRegistryReader{
+		Base: "https://forgejo.example", Owner: "bot-registry", Doer: fake,
+		Credentials: func() (string, string, error) { return user, token, nil },
+	}
+	_, err := reg.Images(context.Background())
+	if err == nil {
+		t.Fatal("Images() = nil error, want a refusal")
+	}
+	return err.Error()
+}
+
+// TestPruneReadReasonShown holds that a refused packages answer's error names
+// the status and image, then Forgejo's reason, then the request and the
+// answering server in a bracket. A JSON body with no message gives no reason.
 func TestPruneReadReasonShown(t *testing.T) {
 	t.Parallel()
+	const head = "the Forgejo packages API answered HTTP 400 for gastown-daemon"
 	cases := []struct {
-		name       string
-		answer     pruneAnswer
-		want       []string
-		wantSuffix string
-		absent     []string
+		name   string
+		answer pruneAnswer
+		want   string
 	}{
 		{
-			name:       "JSON message",
-			answer:     pruneAnswer{status: http.StatusBadRequest, body: `{"message":"bad request: page size"}`},
-			want:       []string{"answered HTTP 400 for gastown-daemon", ": bad request: page size"},
-			wantSuffix: ": bad request: page size",
-			absent:     []string{`server "`, `via "`},
+			name:   "JSON message",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"message":"bad request: page size"}`},
+			want:   head + ": bad request: page size [" + pruneReasonLine + "]",
 		},
 		{
-			name: "plain-text body with the answering server",
-			answer: pruneAnswer{
-				status: http.StatusBadRequest, body: "Client sent an HTTP request to an HTTPS server.",
-				server: "gitea/1.22", via: "1.1 caddy",
-			},
-			want: []string{
-				"answered HTTP 400 for gastown-daemon",
-				`server "gitea/1.22"`,
-				`via "1.1 caddy"`,
-				"Client sent an HTTP request to an HTTPS server.",
-				"requested https://forgejo.example",
-			},
-			absent: []string{"/api/", "limit=50"},
-		},
-		{
-			name:   "answering-side header is capped",
-			answer: pruneAnswer{status: http.StatusBadGateway, server: strings.Repeat("s", pruneReasonSideMaxBytes+20)},
-			want:   []string{`server "` + strings.Repeat("s", pruneReasonSideMaxBytes) + `"`},
-			absent: []string{strings.Repeat("s", pruneReasonSideMaxBytes+1)},
-		},
-		{
-			name:   "object with no message field falls back to the body",
+			name:   "JSON body with no message gives no reason",
 			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"errors":["nope"]}`},
-			want:   []string{`{"errors":["nope"]}`},
+			want:   head + " [" + pruneReasonLine + "]",
 		},
 		{
-			name:   "body that cannot be read",
+			name:   "answering server and via follow the request",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"message":"bad request: page size"}`, server: "gitea/1.22", via: "1.1 caddy"},
+			want:   head + ": bad request: page size [" + pruneReasonLine + "; server=gitea/1.22; via=1.1 caddy]",
+		},
+		{
+			name:   "answering server header is capped at 60 bytes",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"message":"bad request: page size"}`, server: strings.Repeat("s", 70)},
+			want:   head + ": bad request: page size [" + pruneReasonLine + "; server=" + strings.Repeat("s", 60) + "]",
+		},
+		{
+			name:   "body that cannot be read names that, not the read error",
 			answer: pruneAnswer{status: http.StatusBadRequest, readErr: errors.New("connection reset")},
-			want:   []string{"answered HTTP 400 for gastown-daemon", "the answer body could not be read"},
-			absent: []string{"connection reset"},
+			want:   head + ": the answer body could not be read [" + pruneReasonLine + "]",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": {tc.answer}}}
-			reg := PruneRegistryReader{
-				Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
-				Credentials: func() (string, string, error) { return "viewer", "secret-token", nil },
-			}
-			_, err := reg.Images(context.Background())
-			if err == nil {
-				t.Fatal("Images() = nil error, want a refusal")
-			}
-			for _, s := range tc.want {
-				if !strings.Contains(err.Error(), s) {
-					t.Errorf("error %q does not contain %q", err, s)
-				}
-			}
-			if tc.wantSuffix != "" && !strings.HasSuffix(err.Error(), tc.wantSuffix) {
-				t.Errorf("error %q does not end with %q", err, tc.wantSuffix)
-			}
-			for _, s := range tc.absent {
-				if strings.Contains(err.Error(), s) {
-					t.Errorf("error %q contains %q, want it left out", err, s)
-				}
+			t.Parallel()
+			if got := pruneRefusalText(t, tc.answer, "viewer", "secret-token"); got != tc.want {
+				t.Errorf("error = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-// TestPruneReadReasonRedacted holds that the reason a refused answer reports
-// never carries the viewer's user or token, which Forgejo 16.0.5 echoes in a
-// 401 message.
+// TestPruneReadReasonPlainText holds that a body which is not JSON is its own
+// reason, its first line only, so a bare Go server's or a proxy's answer shows.
+func TestPruneReadReasonPlainText(t *testing.T) {
+	t.Parallel()
+	const head = "the Forgejo packages API answered HTTP 400 for gastown-daemon: "
+	cases := []struct {
+		name   string
+		answer pruneAnswer
+		want   string
+	}{
+		{
+			name:   "HTTPS-only server answer with its server header",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: "Client sent an HTTP request to an HTTPS server.", server: "Go-http-server/1.1"},
+			want:   head + "Client sent an HTTP request to an HTTPS server. [" + pruneReasonLine + "; server=Go-http-server/1.1]",
+		},
+		{
+			name:   "bare status text with no server header",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: "400 Bad Request\n"},
+			want:   head + "400 Bad Request [" + pruneReasonLine + "]",
+		},
+		{
+			name:   "only the first line of a multi-line body is shown",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: "<html>\n<body>a page</body>"},
+			want:   head + "<html> [" + pruneReasonLine + "]",
+		},
+		{
+			name:   "control characters and non-ASCII bytes become spaces",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: "bad\tthing\xc3\xa9 end"},
+			want:   head + "bad thing   end [" + pruneReasonLine + "]",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := pruneRefusalText(t, tc.answer, "viewer", "secret-token"); got != tc.want {
+				t.Errorf("error = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPruneReadReasonRedacted holds that no run of six or more characters of
+// the viewer's token reaches a refused answer's error, however the 120-byte cut
+// falls across it, and that a cut that leaves part of the token at its end is
+// not shown at all.
 func TestPruneReadReasonRedacted(t *testing.T) {
 	t.Parallel()
 	const (
-		user  = "nobody"
-		token = "badtoken"
+		head      = "the Forgejo packages API answered HTTP 401 for gastown-daemon: "
+		fakeLogin = "rivet-bot"
+		fakeToken = "Kx4wZ9rT"
 	)
-	cases := []struct {
-		name       string
-		body       string
-		want       []string
-		wantAbsent []string
-	}{
-		{
-			// The captured answer names the user and the token on its later
-			// lines; only the first line is kept.
-			name:       "captured 401, credentials past the first line",
-			body:       `{"message":"invalid credentials\nuser does not exist [uid: 0, name: nobody]\naccess token does not exist [sha: badtoken]"}`,
-			want:       []string{"invalid credentials"},
-			wantAbsent: []string{user, token, "uid: 0", "access token does not exist"},
-		},
-		{
-			name:       "credentials on the first line are redacted",
-			body:       `{"message":"basic auth failed for user nobody with token badtoken\nuser does not exist [uid: 0, name: nobody]\naccess token does not exist [sha: badtoken]"}`,
-			want:       []string{"***"},
-			wantAbsent: []string{user, token},
-		},
-		{
-			name:       "reason is capped at 200 bytes",
-			body:       `{"message":"` + strings.Repeat("x", 400) + `"}`,
-			want:       []string{strings.Repeat("x", 200)},
-			wantAbsent: []string{strings.Repeat("x", 201)},
-		},
-		{
-			name:       "control characters become spaces",
-			body:       `{"message":"line one\u0000with a null"}`,
-			want:       []string{"line one with a null"},
-			wantAbsent: []string{"\x00"},
-		},
+	// captured401 is the 401 body Forgejo 16.0.5 answered, as captured, with the
+	// login and token replaced by the fakes above.
+	captured401 := `{"message":"token is malformed: token contains an invalid number of segments\n` +
+		`user does not exist [uid: 0, name: ` + fakeLogin + `]\n` +
+		`access token does not exist [sha: ` + fakeToken + `]\n` +
+		`task with token \"` + fakeToken + `\": resource does not exist"}`
+	refuse := func(t *testing.T, body string) string {
+		t.Helper()
+		return pruneRefusalText(t, pruneAnswer{status: http.StatusUnauthorized, body: body}, fakeLogin, fakeToken)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
-				"gastown-daemon": {{status: http.StatusUnauthorized, body: tc.body}},
-			}}
-			reg := PruneRegistryReader{
-				Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
-				Credentials: func() (string, string, error) { return user, token, nil },
+	// noFragment fails when err holds a six-character run of the token. Every
+	// longer run of the token contains one of the runs checked here.
+	noFragment := func(t *testing.T, label, got string) {
+		t.Helper()
+		for i := 0; i+6 <= len(fakeToken); i++ {
+			if strings.Contains(got, fakeToken[i:i+6]) {
+				t.Fatalf("%s: error %q holds token fragment %q", label, got, fakeToken[i:i+6])
 			}
-			_, err := reg.Images(context.Background())
-			if err == nil {
-				t.Fatal("Images() = nil error, want a refusal")
-			}
-			for _, s := range tc.want {
-				if !strings.Contains(err.Error(), s) {
-					t.Errorf("error %q does not contain %q", err, s)
-				}
-			}
-			for _, s := range tc.wantAbsent {
-				if strings.Contains(err.Error(), s) {
-					t.Errorf("error %q contains %q, want it left out", err, s)
-				}
-			}
-		})
+		}
 	}
+	t.Run("captured 401 shows its first line only", func(t *testing.T) {
+		t.Parallel()
+		want := head + "token is malformed: token contains an invalid number of segments [" + pruneReasonLine + "]"
+		if got := refuse(t, captured401); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+		noFragment(t, "captured 401", refuse(t, captured401))
+	})
+	t.Run("token at every cut position from 0 to 200 bytes", func(t *testing.T) {
+		t.Parallel()
+		for pad := 0; pad <= 200; pad++ {
+			body := `{"message":"` + strings.Repeat("p", pad) + " access token does not exist [sha: " + fakeToken + `]"}`
+			noFragment(t, fmt.Sprintf("pad %d", pad), refuse(t, body))
+		}
+	})
+	t.Run("a cut through the token prints the not-shown text", func(t *testing.T) {
+		t.Parallel()
+		// 114 bytes precede the token, so the 120-byte cut keeps its first six.
+		body := `{"message":"` + strings.Repeat("p", 114) + fakeToken + ` tail"}`
+		want := head + "body not shown (credential-shaped) [" + pruneReasonLine + "]"
+		if got := refuse(t, body); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
+	t.Run("a token inside the cut is replaced", func(t *testing.T) {
+		t.Parallel()
+		body := `{"message":"` + strings.Repeat("p", 10) + fakeToken + ` tail"}`
+		want := head + strings.Repeat("p", 10) + "*** tail [" + pruneReasonLine + "]"
+		if got := refuse(t, body); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
+	t.Run("login and token on the first line are replaced", func(t *testing.T) {
+		t.Parallel()
+		body := `{"message":"basic auth failed for user rivet-bot with token Kx4wZ9rT"}`
+		want := head + "basic auth failed for user *** with token *** [" + pruneReasonLine + "]"
+		if got := refuse(t, body); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
+	t.Run("reason is capped at 120 bytes", func(t *testing.T) {
+		t.Parallel()
+		body := `{"message":"` + strings.Repeat("x", 400) + `"}`
+		want := head + strings.Repeat("x", 120) + " [" + pruneReasonLine + "]"
+		if got := refuse(t, body); got != want {
+			t.Errorf("error = %q, want %q", got, want)
+		}
+	})
 }
 
 // TestPruneReadReasonQueryPinned holds the packages request Forgejo 16.0.5
-// accepts, captured with HTTP 200 and X-Total-Count: 390.
+// accepts, captured with HTTP 200 and X-Total-Count: 390, and that a refused
+// page names its own page and no other.
 func TestPruneReadReasonQueryPinned(t *testing.T) {
 	t.Parallel()
 	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
@@ -459,6 +497,26 @@ func TestPruneReadReasonQueryPinned(t *testing.T) {
 	}
 	if want := "limit=50&page=1&q=gastown-daemon&type=container"; got.RawQuery != want {
 		t.Errorf("request query = %q, want %q", got.RawQuery, want)
+	}
+
+	// Pages 1 and 2 answer one package each against a total of 3; page 3 refuses.
+	page3 := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": {
+		{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), pruneBase) + "]"},
+		{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneDigest("b"), pruneBase) + "]"},
+		{status: http.StatusBadRequest, total: "3", body: `{"message":"bad request: page size"}`},
+	}}}
+	reg.Doer = page3
+	reg.Credentials = func() (string, string, error) { return "rivet-bot", "Kx4wZ9rT", nil }
+	_, err := reg.Images(context.Background())
+	if err == nil {
+		t.Fatal("Images() = nil error, want a refusal on page 3")
+	}
+	const line = "GET /api/v1/packages/bot-registry?limit=50&page=3&q=gastown-daemon&type=container"
+	if !strings.Contains(err.Error(), line) {
+		t.Errorf("error %q does not name %q", err, line)
+	}
+	if strings.Contains(err.Error(), "page=1&") {
+		t.Errorf("error %q names page 1, want only the refused page", err)
 	}
 }
 
