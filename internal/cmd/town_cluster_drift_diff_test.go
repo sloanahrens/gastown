@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
 	"regexp"
 	"slices"
@@ -690,6 +691,112 @@ func TestDeploymentDriftRefusesAValueItCannotFingerprint(t *testing.T) {
 			}
 			if want := "env[name=TZ].value"; !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not name the path %s", err, want)
+			}
+		})
+	}
+}
+
+// TestClusterDriftObjectKinds holds the compare to every kind it walks, not only
+// a Deployment: a Role's changed rule field and a ValidatingAdmissionPolicy's
+// changed validation are reported as their path and a fingerprint of each side,
+// never a value, and the refusal names the kind it could not read (gt-5gtb1x).
+func TestClusterDriftObjectKinds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		kind          string
+		objectName    string
+		namespace     string
+		rendered      map[string]any
+		mutate        func(t *testing.T, live map[string]any)
+		path          string
+		renderedValue any
+		liveValue     any
+	}{
+		{
+			name:       "a Role",
+			kind:       roleKind,
+			objectName: updateRoleName,
+			namespace:  updateRBACNamespace,
+			rendered: map[string]any{
+				"apiVersion": "rbac.authorization.k8s.io/v1",
+				"kind":       roleKind,
+				"metadata":   map[string]any{"name": updateRoleName, "namespace": updateRBACNamespace},
+				"rules": []any{map[string]any{
+					"apiGroups":     []any{""},
+					"resourceNames": []any{"bd-gateway"},
+					"resources":     []any{"pods"},
+					"verbs":         []any{"get", "list"},
+				}},
+			},
+			mutate: func(t *testing.T, live map[string]any) {
+				rule := live["rules"].([]any)[0].(map[string]any)
+				rule["verbs"].([]any)[1] = "watch"
+			},
+			path:          "rules[0].verbs[1]",
+			renderedValue: "list",
+			liveValue:     "watch",
+		},
+		{
+			name:       "a ValidatingAdmissionPolicy",
+			kind:       validatingPolicyKind,
+			objectName: updatePolicyName,
+			rendered: map[string]any{
+				"apiVersion": "admissionregistration.k8s.io/v1",
+				"kind":       validatingPolicyKind,
+				"metadata":   map[string]any{"name": updatePolicyName},
+				"spec": map[string]any{
+					"failurePolicy": "Fail",
+					"validations": []any{map[string]any{
+						"expression": "request.operation == 'UPDATE'",
+						"message":    "updates go through the Job",
+					}},
+				},
+			},
+			mutate: func(t *testing.T, live map[string]any) {
+				validation := live["spec"].(map[string]any)["validations"].([]any)[0].(map[string]any)
+				validation["expression"] = "request.operation == 'DELETE'"
+			},
+			path:          "spec.validations[0].expression",
+			renderedValue: "request.operation == 'UPDATE'",
+			liveValue:     "request.operation == 'DELETE'",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			live := driftJSONDecoded(tc.rendered).(map[string]any)
+			tc.mutate(t, live)
+			got, err := objectDrift(tc.kind, tc.rendered, live)
+			if err != nil {
+				t.Fatalf("objectDrift(%s): %v", tc.kind, err)
+			}
+			want := driftWantDifference(t, tc.path, tc.renderedValue, tc.liveValue)
+			if !slices.Equal(got, []string{want}) {
+				t.Fatalf("drift = %q, want %q", got, want)
+			}
+			for _, value := range []any{tc.renderedValue, tc.liveValue} {
+				if text := fmt.Sprint(value); strings.Contains(got[0], text) {
+					t.Errorf("drift line %q carries the value %q", got[0], text)
+				}
+			}
+			// The command prints a line under the "<kind>/<name>" its target
+			// names, so the report says which kind differed although the line
+			// itself holds only the path and the fingerprints.
+			var target driftTarget
+			if tc.namespace == "" {
+				target = clusterScopedDriftTarget(tc.kind, tc.objectName, tc.rendered)
+			} else {
+				target = namespacedDriftTarget(tc.kind, tc.objectName, tc.namespace, tc.rendered)
+			}
+			if prefix := strings.ToLower(tc.kind) + "/" + tc.objectName + ": " + tc.path + ": rendered "; !strings.HasPrefix(target.resource+": "+got[0], prefix) {
+				t.Errorf("report %q does not name the kind, name and path with %q", target.resource+": "+got[0], prefix)
+			}
+			// The refusal names the kind it could not read.
+			if _, err := objectDrift(tc.kind, nil, live); err == nil {
+				t.Errorf("objectDrift(%s, nil, live) = no error, want the unreadable render refused", tc.kind)
+			} else if prefix := strings.ToLower(tc.kind) + " drift:"; !strings.HasPrefix(err.Error(), prefix) {
+				t.Errorf("error %q does not open with %q", err.Error(), prefix)
 			}
 		})
 	}

@@ -1,0 +1,8 @@
+# drift-exceptions.yaml lists the live differences gt town cluster drift reports
+# as explained. Each entry names one object ("<Kind>/<namespace>/<name>", the
+# namespace empty for a cluster-scoped object) and one field path the compare
+# prints, the owner who decided the difference stands and why, and the last day
+# the entry holds. The reader refuses an entry with no object, owner, reason or
+# path, an object of another shape, and an expiry that is not a date or has
+# passed, so a difference is unexplained unless an entry holds for it.
+exceptions: []
