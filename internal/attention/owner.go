@@ -196,6 +196,9 @@ var ruleOwners = map[string]Owner{
 	// A slow gate is the town's own run to look at: the overseer reads the pole
 	// package and the tier seconds before a person is woken (gt-l0t2tg).
 	RuleGateSlow: OwnerOverseer,
+	// A finished seat left in the walk is the town's own seat to end: the
+	// overseer reads why the end did not happen and ends it (gt-klpqb3).
+	RuleSeatFinishedLingering: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
