@@ -269,9 +269,10 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 		w.sum.Skipped[SkipSecret]++
 		return nil
 	}
-	// A backup leaves out every secret-shaped entry whole, a directory
-	// included: a credential under secrets/ never reaches the archive.
-	if w.opts.Backup && secretPath(name) {
+	// A backup leaves out a secret-shaped file by its name and a secret-shaped
+	// directory below the top level whole: a credential under settings/secrets/
+	// never reaches the archive, and a rig named for a token is not dropped.
+	if w.opts.Backup && backupSecretEntry(name, info.IsDir()) {
 		w.sum.Skipped[SkipSecret]++
 		return nil
 	}

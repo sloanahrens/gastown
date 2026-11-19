@@ -26,12 +26,21 @@ func SecretShape(name string) bool {
 	return strings.Contains(base, "token") || strings.Contains(base, "secret")
 }
 
-// secretPath reports whether any segment of a town-root-relative path has the
-// shape of a secret. A directory such as secrets/ or token-store/ therefore
-// leaves out everything below it, so a credential file with an ordinary name
-// under a secret-shaped directory is not carried either.
-func secretPath(name string) bool {
-	for _, seg := range strings.Split(name, "/") {
+// backupSecretEntry reports whether a backup export leaves out the entry at a
+// town-root-relative name: the entry's own name has a secret shape, or a
+// directory above it does. The first segment of a path with more is a row root
+// (a rig), and a top-level directory is a row root too: neither is dropped by
+// its name, so a rig whose own name holds "token" or "secret" keeps its rows,
+// while settings/secrets/ and anything below it is left out (gt-4kf6kk).
+func backupSecretEntry(name string, isDir bool) bool {
+	segs := strings.Split(name, "/")
+	if len(segs) == 1 && isDir {
+		return false
+	}
+	for i, seg := range segs {
+		if i == 0 && len(segs) > 1 {
+			continue
+		}
 		if SecretShape(seg) {
 			return true
 		}

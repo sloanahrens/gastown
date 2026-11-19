@@ -124,13 +124,19 @@ func TestSecretsManifestNamesAreSecretShaped(t *testing.T) {
 	}
 }
 
+// rowSecretShaped reports whether a backup row's path would be dropped by name,
+// the row read as a file so a top-level row with a secret shape is flagged.
+func rowSecretShaped(rowPath string) bool {
+	return backupSecretEntry(rowPath, false)
+}
+
 // secretShapedRows names the rows whose own path the backup's exclusion rules
 // catch. The export drops such a row whole, counting one skip and naming
 // nothing, so a tagged row of that shape leaves the archive without a word.
 func secretShapedRows(rows []Entry) []string {
 	var out []string
 	for _, e := range rows {
-		if secretPath(e.Path) {
+		if rowSecretShaped(e.Path) {
 			out = append(out, e.Path)
 		}
 	}

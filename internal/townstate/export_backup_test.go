@@ -186,6 +186,39 @@ func TestExportBackupLeavesOutARowBelowASecretShapedSegment(t *testing.T) {
 	}
 }
 
+// TestExportBackupKeepsTheRowsOfARigNamedForAToken: the first segment of a row
+// is its root, a rig. A rig whose own name holds "token" or "secret" keeps its
+// ordinary rows; only a secret-shaped file name, or a secret-shaped directory
+// below the root, is left out (gt-4kf6kk, om round 3).
+func TestExportBackupKeepsTheRowsOfARigNamedForAToken(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeStateFile(t, town, "token-svc/settings/config.json", `{"ok":true}`, 0o600)
+	writeStateFile(t, town, "token-svc/settings/secrets/session.json", `{"password":"not a real one"}`, 0o600)
+	m := &Manifest{Entries: []Entry{
+		{Path: "token-svc/settings", Owner: OwnerDaemon, Backup: true, Why: "test: a rig named for a token"},
+	}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("the test manifest: %v", err)
+	}
+
+	var stream bytes.Buffer
+	sum, err := Export(&stream, town, m, ExportOptions{Backup: true, AllowNoRigs: true})
+	if err != nil {
+		t.Fatalf("Export with Backup: %v", err)
+	}
+	names := archiveNames(t, stream.Bytes())
+	if !slices.Contains(names, "token-svc/settings/config.json") {
+		t.Errorf("the rig named for a token lost its ordinary row: %v", names)
+	}
+	if slices.Contains(names, "token-svc/settings/secrets/session.json") {
+		t.Errorf("the archive carries a file below a secret-shaped directory: %v", names)
+	}
+	if got := sum.Skipped[SkipSecret]; got != 1 {
+		t.Errorf("summary SkipSecret = %d, want 1 (the secrets directory)", got)
+	}
+}
+
 // TestExportBackupRefusesATownWithNoRigs drives the backup path's refusal: a
 // backup row carrying the rig placeholder with no registered rig is refused
 // with ErrNoRigs, and AllowNoRigs counts the walked set's rig rows in the
