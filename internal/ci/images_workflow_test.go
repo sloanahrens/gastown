@@ -446,7 +446,7 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 				t.Errorf("the gt-bd image build does not pass %s", want)
 			}
 		}
-		for _, later := range []string{"push both images and publish their digests", "check both images carry the one commit"} {
+		for _, later := range []string{"push the images and publish their digests", "check the images carry the one commit"} {
 			if i := named(steps, later); i < build {
 				t.Errorf("%q is step %d, before the gt-bd build (step %d)", later, i, build)
 			}
@@ -455,9 +455,9 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 
 	t.Run("the label check follows both builds", func(t *testing.T) {
 		t.Parallel()
-		at := named(steps, "check both images carry the one commit")
+		at := named(steps, "check the images carry the one commit")
 		if at < 0 {
-			t.Fatal("no step is named: check both images carry the one commit")
+			t.Fatal("no step is named: check the images carry the one commit")
 		}
 		if daemon := named(steps, "build the daemon image"); daemon < 0 || at < daemon {
 			t.Errorf("the label check is step %d, before the daemon build (step %d)", at, daemon)
@@ -472,9 +472,9 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 		// The mismatch and unreadable-label refusals are driven against the
 		// check itself by TestCheckReportsEveryImageOffTheCommit and
 		// TestCheckStopsWhenALabelCannotBeRead in internal/ci/imagepublish.
-		at := named(steps, "check both images carry the one commit")
+		at := named(steps, "check the images carry the one commit")
 		if at < 0 {
-			t.Fatal("no step is named: check both images carry the one commit")
+			t.Fatal("no step is named: check the images carry the one commit")
 		}
 		run := steps[at].run
 		if !strings.Contains(run, "go run ./internal/ci/cmd/imagepublish check") {
@@ -728,9 +728,9 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 		// against the publish itself by TestPushPrintsTheRegistryDigestForEachImage,
 		// TestPushRefusesWhenTheRegistryListsNoSingleDigest and
 		// TestPushStopsAtTheFirstFailedCommand in internal/ci/imagepublish.
-		at := named(steps, "push both images and publish their digests")
+		at := named(steps, "push the images and publish their digests")
 		if at < 0 {
-			t.Fatal("no step is named: push both images and publish their digests")
+			t.Fatal("no step is named: push the images and publish their digests")
 		}
 		if daemon := named(steps, "build the daemon image"); daemon < 0 || at < daemon {
 			t.Errorf("the push is step %d, before the daemon build (step %d)", at, daemon)
