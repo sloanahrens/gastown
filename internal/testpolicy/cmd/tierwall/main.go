@@ -47,6 +47,9 @@
 // The last line of the report is the cpus line (cpuLine), which says what CPUs
 // the run had, so a gate log shows the limits it ran under (gt-50ujsx). It
 // prints on every run and fails nothing.
+//
+// A package over 40 percent of the tier wall gets a WARNING line after the tier
+// line (gt-3k1qoy). It changes no exit code.
 package main
 
 import (
@@ -432,8 +435,30 @@ func (r *report) print(bar time.Duration, cpus string) error {
 		verdict = "OVER"
 	}
 	r.write(fmt.Sprintf("tierwall: tier %s bar %s %s\n", secs(r.tier()), secs(bar), verdict))
+	r.poleWarnings(pkgs)
 	r.write(cpus)
 	return r.err
+}
+
+// poleWarnPercent is the share of the tier wall one package may take before
+// the report names it as the pole (gt-3k1qoy).
+const poleWarnPercent = 40
+
+// poleWarnings writes a WARNING line per package over poleWarnPercent of the
+// tier wall, slowest first. A zero tier or a single package names none.
+func (r *report) poleWarnings(pkgs []string) {
+	tier := r.tier()
+	if tier <= 0 || len(pkgs) < 2 {
+		return
+	}
+	for _, pkg := range pkgs {
+		wall := seconds(r.elapsed[pkg])
+		if int64(wall)*100 <= int64(tier)*poleWarnPercent {
+			continue
+		}
+		r.write(fmt.Sprintf("tierwall: WARNING package %s is %d percent of the tier wall (%s of %s)\n",
+			pkg, int64(wall)*100/int64(tier), secs(wall), secs(tier)))
+	}
 }
 
 // cgroup quota files: the v2 unified file, then the v1 CPU controller's quota

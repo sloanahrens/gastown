@@ -72,6 +72,7 @@ func TestReport_PrintsEveryPackageSlowestFirstThenTheTier(t *testing.T) {
 		"tierwall: github.com/steveyegge/gastown/internal/tmux 19s",
 		"tierwall: github.com/steveyegge/gastown/internal/slot 0.1s",
 		"tierwall: tier 245.6s bar 90s OVER",
+		"tierwall: WARNING package github.com/steveyegge/gastown/internal/cmd is 82 percent of the tier wall (203.4s of 245.6s)",
 		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
 		"",
 	}, "\n")
@@ -108,6 +109,8 @@ func TestReport_FailingStreamKeepsTheFailureAndExitsOne(t *testing.T) {
 		"tierwall: github.com/steveyegge/gastown/internal/notify 39.2s",
 		"tierwall: github.com/steveyegge/gastown/internal/broken 0s",
 		"tierwall: tier 40.6s bar 90s OK",
+		"tierwall: WARNING package github.com/steveyegge/gastown/internal/daemon is 98 percent of the tier wall (40s of 40.6s)",
+		"tierwall: WARNING package github.com/steveyegge/gastown/internal/notify is 96 percent of the tier wall (39.2s of 40.6s)",
 		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
 		"",
 	}, "\n")
@@ -1230,5 +1233,85 @@ func TestCPULineWhenTheQuotaIsUnreadable(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// poleStream is a go test -json stream whose tier wall, first event to last,
+// is tier seconds, with one pass event per package at its wall.
+func poleStream(tier float64, walls map[string]float64) string {
+	at := func(s float64) string {
+		return time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC).Add(time.Duration(s * float64(time.Second))).Format(time.RFC3339Nano)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `{"Time":%q,"Action":"start"}`+"\n", at(0))
+	for pkg, wall := range walls {
+		fmt.Fprintf(&b, `{"Time":%q,"Action":"pass","Package":%q,"Elapsed":%g}`+"\n", at(tier), pkg, wall)
+	}
+	return b.String()
+}
+
+// runPoleStream runs a stream through run on the fixed host and returns the
+// exit code and stdout, failing the test on anything written to stderr.
+func runPoleStream(t *testing.T, stream string, args ...string) (int, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := run(args, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", errOut.String())
+	}
+	return code, out.String()
+}
+
+const (
+	poleDaemon = "github.com/steveyegge/gastown/internal/daemon"
+	poleGit    = "github.com/steveyegge/gastown/internal/git"
+)
+
+// TestTierwallPoleWarning pins the WARNING line for an 82s package on a 115s
+// tier (71 percent), after the tier line. Mutation: drop the call and it goes.
+func TestTierwallPoleWarning(t *testing.T) {
+	t.Parallel()
+	code, stdout := runPoleStream(t, poleStream(115, map[string]float64{poleDaemon: 82, poleGit: 20}))
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0", code)
+	}
+	want := strings.Join([]string{
+		"tierwall: " + poleDaemon + " 82s",
+		"tierwall: " + poleGit + " 20s",
+		"tierwall: tier 115s bar 90s OVER",
+		"tierwall: WARNING package " + poleDaemon + " is 71 percent of the tier wall (82s of 115s)",
+		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
+		"",
+	}, "\n")
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestTierwallPoleWarningQuiet pins the rows that print no warning: no package
+// over 40 percent, one at exactly 40 percent (not over), a zero tier, and a run
+// of one package, which is the whole tier and so names no pole. Each exits 0.
+// Mutation: compare >= rather than > and the exactly-40 row prints a WARNING.
+func TestTierwallPoleWarningQuiet(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		stream string
+	}{
+		{name: "no package over 40 percent", stream: poleStream(115, map[string]float64{poleDaemon: 30, poleGit: 25})},
+		{name: "exactly 40 percent is not over", stream: poleStream(115, map[string]float64{poleDaemon: 46, poleGit: 20})},
+		{name: "a zero tier names nothing", stream: poleStream(0, map[string]float64{poleDaemon: 0.5, poleGit: 0.5})},
+		{name: "one package is the whole tier", stream: poleStream(100, map[string]float64{poleDaemon: 100})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, stdout := runPoleStream(t, tc.stream)
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0", code)
+			}
+			if strings.Contains(stdout, "WARNING") {
+				t.Errorf("stdout names a pole, want no WARNING:\n%s", stdout)
+			}
+		})
 	}
 }
