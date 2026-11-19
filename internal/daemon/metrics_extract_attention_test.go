@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 )
 
 // metricsExtractTick is the time the extract cases tick at.
@@ -26,13 +29,15 @@ func metricsExtractRig(t *testing.T, now time.Time) *attentionFixture {
 }
 
 // writeExtractDay writes day's directory under town's metrics root with footer
-// as its footer.json; an empty footer writes no footer file.
+// as its footer.json and a healthy landings.csv; an empty footer writes no
+// footer file.
 func writeExtractDay(t *testing.T, town, day, footer string) {
 	t.Helper()
 	dir := filepath.Join(town, ".runtime", "metrics", day)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	writeExtractLandings(t, town, day, healthyLandings)
 	if footer == "" {
 		return
 	}
@@ -41,8 +46,68 @@ func writeExtractDay(t *testing.T, town, day, footer string) {
 	}
 }
 
+// writeExtractLandings overwrites day's landings.csv with content.
+func writeExtractLandings(t *testing.T, town, day, content string) {
+	t.Helper()
+	path := filepath.Join(town, ".runtime", "metrics", day, metricsExtractLandingsName)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// paddedEstimateRecord is one estimate record padded with trailing spaces to
+// size bytes. JSON ignores the spaces, so the record decodes until it is padded
+// past the scan's ceiling, where the ceiling alone makes it unreadable.
+func paddedEstimateRecord(at time.Time, size int) string {
+	rec := fmt.Sprintf(`{"bead_id":"pad","time":%q}`, at.Format(time.RFC3339Nano))
+	return rec + strings.Repeat(" ", size-len(rec))
+}
+
+// estimateLogText is one estimate record line per time, as the estimator
+// appends them: a bead id and the time, which is all the count decodes.
+func estimateLogText(times []time.Time) string {
+	var log strings.Builder
+	for i, at := range times {
+		fmt.Fprintf(&log, `{"bead_id":"b%d","time":%q}`+"\n", i, at.Format(time.RFC3339Nano))
+	}
+	return log.String()
+}
+
+// writeEstimateLog writes one estimate record per time to town's estimate log.
+func writeEstimateLog(t *testing.T, town string, times []time.Time) {
+	t.Helper()
+	writeEstimateLogText(t, town, estimateLogText(times))
+}
+
+// writeEstimateLogText writes content verbatim to town's estimate log, so a
+// case can plant a torn line or one past the scan's ceiling.
+func writeEstimateLogText(t *testing.T, town, content string) {
+	t.Helper()
+	path := estlog.Path(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// atMinutes returns count times, each one minute after the first, starting at
+// start.
+func atMinutes(start time.Time, count int) []time.Time {
+	times := make([]time.Time, count)
+	for i := range times {
+		times[i] = start.Add(time.Duration(i) * time.Minute)
+	}
+	return times
+}
+
 // cleanFooter is a footer with no gaps, as the extract writes one.
 const cleanFooter = `{"gaps":[]}`
+
+// healthyLandings is a day's landings table with an estimate filled in, the
+// shape a working extract writes.
+const healthyLandings = "bead,rig,sp_minutes\nb1,gastown,8.0\n"
 
 // TestMetricsExtractAttentionStale: the newest day directory older than the
 // stale window raises one item naming that day, and a day within the window
@@ -258,5 +323,267 @@ func TestMetricsExtractAttentionIsWiredAndRegistered(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Key != metricsExtractUnreadableKey {
 		t.Fatalf("items = %+v, want the production sources to raise the unreadable item", items)
+	}
+}
+
+// extractNoEstimatesDay is the day the estimate cases write, inside the stale
+// window at metricsExtractTick so only the item under test is raised.
+const extractNoEstimatesDay = "2026-11-19"
+
+// emptyEstimateLandings is a landings table whose estimate cells are all empty.
+const emptyEstimateLandings = "bead,rig,sp_minutes\nb1,gastown,\nb2,gastown,\n"
+
+// TestMetricsExtractNoEstimatesRaises: a newest table with an empty estimate
+// column and twenty-five estimates made since that day raises one item naming
+// the day and both counts; the same estimates beside a filled cell raise none
+// (gt-4f1ocn).
+func TestMetricsExtractNoEstimatesRaises(t *testing.T) {
+	t.Parallel()
+	dayStart := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		landings string
+		want     bool
+	}{
+		{name: "an empty estimate column beside 25 estimates that day", landings: emptyEstimateLandings, want: true},
+		{name: "a filled estimate cell beside 25 estimates that day", landings: healthyLandings},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := metricsExtractRig(t, metricsExtractTick)
+			writeExtractDay(t, f.d.config.TownRoot, extractNoEstimatesDay, cleanFooter)
+			writeExtractLandings(t, f.d.config.TownRoot, extractNoEstimatesDay, tc.landings)
+			writeEstimateLog(t, f.d.config.TownRoot, atMinutes(dayStart.Add(9*time.Hour), 25))
+
+			items := f.collect(t, f.src.collectMetricsExtract)
+			if !tc.want {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none", items)
+				}
+				return
+			}
+			if len(items) != 1 || items[0].Key != metricsExtractNoEstimatesKey {
+				t.Fatalf("items = %+v, want the one no-estimates item", items)
+			}
+			if items[0].Kind != attention.KindMetricsExtract {
+				t.Errorf("kind = %q, want %q", items[0].Kind, attention.KindMetricsExtract)
+			}
+			for _, want := range []string{extractNoEstimatesDay, metricsExtractEstimateColumn, "2 rows", "25"} {
+				if !strings.Contains(items[0].Summary, want) {
+					t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
+				}
+			}
+		})
+	}
+}
+
+// TestMetricsExtractNoEstimatesEdges: fewer estimates than the floor, estimates
+// from before the day, a table with no estimate column, a missing log, a log
+// that cannot be read and a landings table that cannot be read each behave as
+// the rule states. A log whose lines in the day's window do not decode — every
+// line, a torn line beside twenty good ones, a torn line after the window's
+// start, or a line over the scan's ceiling — raises the same item with the
+// unreadable reason and the two line counts, never a quiet day; a torn line
+// before the window's start is an earlier day's and raises none. The scan goes
+// on past an overlong line, and a line at the ceiling decodes.
+func TestMetricsExtractNoEstimatesEdges(t *testing.T) {
+	t.Parallel()
+	dayStart := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	good25 := atMinutes(dayStart.Add(9*time.Hour), 25)
+	oldBefore := atMinutes(dayStart.Add(-2*time.Hour), 5)
+	tests := []struct {
+		name     string
+		landings string
+		// unreadable selects how the estimate log is broken: "scan" is a
+		// directory at the log path, whose open succeeds and read fails;
+		// "open" is a file where the log's directory should be, whose open
+		// fails with an error that is not ErrNotExist.
+		noLandings    bool
+		estimates     []time.Time
+		rawLog        string // written verbatim in place of estimates
+		unreadableLog string
+		// unreadableNames is the file the unreadable item must name; the log
+		// path when empty.
+		unreadableNames string
+		want            []string // item keys
+		summary         []string // substrings the one wanted item's summary carries
+	}{
+		{
+			name:      "nineteen estimates that day is under the floor",
+			landings:  emptyEstimateLandings,
+			estimates: atMinutes(dayStart.Add(9*time.Hour), 19),
+		},
+		{
+			name:      "twenty-five estimates from the day before",
+			landings:  emptyEstimateLandings,
+			estimates: atMinutes(dayStart.Add(-time.Hour), 25),
+		},
+		{
+			name:      "a table with no estimate column is the same state",
+			landings:  "bead,rig\nb1,gastown\n",
+			estimates: atMinutes(dayStart.Add(9*time.Hour), 25),
+			want:      []string{metricsExtractNoEstimatesKey},
+		},
+		{
+			name:     "a town with no estimate log yet",
+			landings: emptyEstimateLandings,
+		},
+		{
+			name:          "an estimate log whose read fails",
+			landings:      emptyEstimateLandings,
+			unreadableLog: "scan",
+			want:          []string{metricsExtractUnreadableKey},
+		},
+		{
+			name:          "an estimate log whose open fails",
+			landings:      emptyEstimateLandings,
+			unreadableLog: "open",
+			want:          []string{metricsExtractUnreadableKey},
+		},
+		{
+			name:       "a day whose landings table is missing",
+			noLandings: true,
+			want:       []string{metricsExtractUnreadableKey},
+
+			unreadableNames: metricsExtractLandingsName,
+		},
+		{
+			name:            "a landings table that does not parse",
+			landings:        "bead,rig,sp_minutes\nb1,gastown\n",
+			estimates:       atMinutes(dayStart.Add(9*time.Hour), 25),
+			want:            []string{metricsExtractUnreadableKey},
+			unreadableNames: metricsExtractLandingsName,
+		},
+		{
+			name:     "a log whose every line is torn raises, naming them all",
+			landings: emptyEstimateLandings,
+			rawLog:   "not json\n{also not json\n",
+			want:     []string{metricsExtractNoEstimatesKey},
+			summary:  []string{"estimate log unreadable (2 of 2 lines do not decode)"},
+		},
+		{
+			name:     "a torn line beside twenty good ones raises the unreadable reason",
+			landings: emptyEstimateLandings,
+			rawLog:   estimateLogText(atMinutes(dayStart.Add(9*time.Hour), 20)) + "torn\n",
+			want:     []string{metricsExtractNoEstimatesKey},
+			summary:  []string{"estimate log unreadable (1 of 21 lines do not decode)"},
+		},
+		{
+			name:     "a torn line before the window start and no estimates today is quiet",
+			landings: emptyEstimateLandings,
+			rawLog:   "torn\n" + estimateLogText(oldBefore),
+		},
+		{
+			name:     "a torn line after the window start raises, counting the window's one line",
+			landings: emptyEstimateLandings,
+			rawLog:   estimateLogText(oldBefore) + "torn\n",
+			want:     []string{metricsExtractNoEstimatesKey},
+			summary:  []string{"estimate log unreadable (1 of 1 lines do not decode)"},
+		},
+		{
+			name:     "a line over the ceiling is unreadable even when its head decodes, and the scan goes on",
+			landings: emptyEstimateLandings,
+			rawLog: paddedEstimateRecord(dayStart.Add(10*time.Hour), metricsExtractEstimateLineMax+1) +
+				"\n" + estimateLogText(good25),
+			want:    []string{metricsExtractNoEstimatesKey},
+			summary: []string{"estimate log unreadable (1 of 26 lines do not decode)"},
+		},
+		{
+			name:     "a record padded to exactly the ceiling still decodes",
+			landings: emptyEstimateLandings,
+			rawLog:   estimateLogText(good25) + paddedEstimateRecord(dayStart.Add(10*time.Hour), metricsExtractEstimateLineMax),
+			want:     []string{metricsExtractNoEstimatesKey},
+			summary:  []string{"26 estimates"},
+		},
+		{
+			name:     "a filled table beside a torn log raises none",
+			landings: healthyLandings,
+			rawLog:   "torn\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := metricsExtractRig(t, metricsExtractTick)
+			writeExtractDay(t, f.d.config.TownRoot, extractNoEstimatesDay, cleanFooter)
+			if tc.noLandings {
+				path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", extractNoEstimatesDay, metricsExtractLandingsName)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeExtractLandings(t, f.d.config.TownRoot, extractNoEstimatesDay, tc.landings)
+			}
+			switch tc.unreadableLog {
+			case "scan":
+				if err := os.MkdirAll(estlog.Path(f.d.config.TownRoot), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "open":
+				dir := filepath.Dir(estlog.Path(f.d.config.TownRoot))
+				if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(dir, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				switch {
+				case tc.rawLog != "":
+					writeEstimateLogText(t, f.d.config.TownRoot, tc.rawLog)
+				case len(tc.estimates) > 0:
+					writeEstimateLog(t, f.d.config.TownRoot, tc.estimates)
+				}
+			}
+
+			items := f.collect(t, f.src.collectMetricsExtract)
+			got := make([]string, 0, len(items))
+			for _, it := range items {
+				got = append(got, it.Key)
+			}
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("keys = %v, want %v", got, tc.want)
+			}
+			if len(tc.want) == 1 {
+				for _, want := range tc.summary {
+					if !strings.Contains(items[0].Summary, want) {
+						t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
+					}
+				}
+			}
+			if len(tc.want) != 1 || tc.want[0] != metricsExtractUnreadableKey {
+				return
+			}
+			want := tc.unreadableNames
+			if want == "" {
+				want = estlog.Path(f.d.config.TownRoot)
+			}
+			if !strings.Contains(items[0].Summary, want) {
+				t.Errorf("summary = %q, want it to name %s", items[0].Summary, want)
+			}
+		})
+	}
+}
+
+// TestMetricsExtractNoEstimatesNotRaisedOnAFailedRead: a read that failed
+// raises only the unreadable item, even when it carries counts from before the
+// failure: a failed read could not confirm them, so they are not evidence.
+func TestMetricsExtractNoEstimatesNotRaisedOnAFailedRead(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, metricsExtractTick)
+	f.src.metricsExtract = func(time.Time) (metricsExtractRead, error) {
+		return metricsExtractRead{
+			day:                 metricsExtractTick.Add(-24 * time.Hour),
+			gaps:                [][]string{{"ledger", "unreadable diff"}},
+			landingsRows:        3,
+			estimateColumnEmpty: true,
+			estimates:           25,
+		}, errors.New("landings.csv: is a directory")
+	}
+
+	items := f.collect(t, f.src.collectMetricsExtract)
+	if len(items) != 1 || items[0].Key != metricsExtractUnreadableKey {
+		t.Fatalf("items = %+v, want only the unreadable item", items)
 	}
 }

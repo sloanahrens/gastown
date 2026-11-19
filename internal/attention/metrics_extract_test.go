@@ -21,6 +21,7 @@ func TestMetricsExtractRules(t *testing.T) {
 		"metrics-extract:stale",
 		"metrics-extract:gaps",
 		"metrics-extract:unreadable",
+		"metrics-extract:no-estimates",
 	} {
 		t.Run(key, func(t *testing.T) {
 			it := Item{Kind: KindMetricsExtract, Key: key}
