@@ -484,6 +484,81 @@ func TestIntegrationCICacheTrimLRUSelects(t *testing.T) {
 	})
 }
 
+// TestIntegrationCICacheTrimSelection feeds the selection parser the real list
+// program's stdout, not a constant reply: the program and the parser agree on
+// the wire only if every file line it prints is a clean absolute path strictly
+// under the root, one per removed file, and the three figures it prints are the
+// three the parser reads. The unit tier proves the parser on constant replies;
+// this proves the pair on the program's own output, so a change to either side's
+// format is red here rather than in the daemon.
+func TestIntegrationCICacheTrimSelection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an over-cap selection parses with one file line per removed file", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+
+		// The same cap the selection cases use: over the volume by the age
+		// rule's file plus 400 KiB, so three files are selected and the reply
+		// has file lines to parse.
+		capKiB := ciCacheLRUBefore(t, root) - 256 - 400
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		if len(files) == 0 {
+			t.Fatalf("the program selected no file, so the parser would not read a file line:\n%s", stdout)
+		}
+
+		got, err := parseCICacheTrimSelection([]byte(stdout), root)
+		if err != nil {
+			t.Fatalf("the parser refused the list program's own stdout: %v:\n%s", err, stdout)
+		}
+		if got != reply {
+			t.Errorf("the parser read %+v, the program's reply is %+v", got, reply)
+		}
+		if int64(len(files)) != reply.removed {
+			t.Errorf("the reply has %d file line(s) but reports removed=%d", len(files), reply.removed)
+		}
+		if got.afterKiB != got.beforeKiB {
+			t.Errorf("list reports the volume changing, %d to %d KiB", got.beforeKiB, got.afterKiB)
+		}
+	})
+
+	t.Run("an under-cap reply with no file line parses", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+
+		// An age past every file's, so the age rule selects none, and a cap
+		// above the volume, so the cut's excess is negative and it stops at the
+		// first candidate: the program prints the three figures only, and the
+		// parser sees no file line.
+		capKiB := ciCacheLRUBefore(t, root) + 1024
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "600", strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		if len(files) != 0 {
+			t.Fatalf("the under-cap program printed %d file line(s), want none:\n%s", len(files), stdout)
+		}
+
+		got, err := parseCICacheTrimSelection([]byte(stdout), root)
+		if err != nil {
+			t.Fatalf("the parser refused the under-cap reply: %v:\n%s", err, stdout)
+		}
+		if got != reply {
+			t.Errorf("the parser read %+v, the program's reply is %+v", got, reply)
+		}
+		if got.removed != 0 {
+			t.Errorf("removed = %d, want 0 under the cap", got.removed)
+		}
+	})
+}
+
 // TestIntegrationCICacheTrimLRUStrictOrder proves the selection's order: the
 // files past the floor are printed strictly oldest first by mtime, not merely
 // as a set holding the right names. The cap is 0, so the excess is the volume's
