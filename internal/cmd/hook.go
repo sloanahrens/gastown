@@ -586,7 +586,7 @@ func hookBeadArgError(arg string) error {
 // Returns (isComplete, hasAttachment):
 // - isComplete=true if no molecule attached OR all molecule steps are closed
 // - hasAttachment=true if there's an attached molecule
-func checkPinnedBeadComplete(b *beads.Beads, issue *beads.Issue) (isComplete bool, hasAttachment bool) {
+func checkPinnedBeadComplete(b beads.Client, issue *beads.Issue) (isComplete bool, hasAttachment bool) {
 	// Check for attached molecule
 	attachment := beads.ParseAttachmentFields(issue)
 	if attachment == nil || attachment.AttachedMolecule == "" {

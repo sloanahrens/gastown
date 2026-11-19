@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"sort"
@@ -29,6 +30,7 @@ type DAGNode struct {
 type DAGInfo struct {
 	RootID       string              `json:"root_id"`
 	RootTitle    string              `json:"root_title"`
+	NoSteps      bool                `json:"no_steps,omitempty"` // the root poured no step beads (bonded root-only)
 	TotalNodes   int                 `json:"total_nodes"`
 	Tiers        int                 `json:"tiers"`
 	CriticalPath []string            `json:"critical_path,omitempty"`
@@ -69,24 +71,40 @@ func init() {
 }
 
 func runMoleculeDag(cmd *cobra.Command, args []string) error {
-	rootID := args[0]
-
 	workDir, err := findLocalBeadsDir()
 	if err != nil {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.New(workDir)
+	return moleculeDagRun{
+		out:      os.Stdout,
+		client:   beads.New(workDir),
+		rootID:   args[0],
+		asJSON:   moleculeJSON,
+		showTier: dagShowTiers,
+	}.run()
+}
 
+// moleculeDagRun is one gt mol dag call with its environment resolved, so a
+// test drives it without a beads workspace.
+type moleculeDagRun struct {
+	out      io.Writer
+	client   beads.Client
+	rootID   string
+	asJSON   bool
+	showTier bool
+}
+
+func (r moleculeDagRun) run() error {
 	// Get the root issue
-	root, err := b.Show(rootID)
+	root, err := r.client.Show(r.rootID)
 	if err != nil {
 		return fmt.Errorf("getting root issue: %w", err)
 	}
 
 	// Find all children of the root issue
-	children, err := b.List(beads.ListOptions{
-		Parent:   rootID,
+	children, err := r.client.List(beads.ListOptions{
+		Parent:   r.rootID,
 		Status:   "all",
 		Priority: -1,
 	})
@@ -95,31 +113,55 @@ func runMoleculeDag(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(children) == 0 {
-		return fmt.Errorf("no steps found for %s (not a molecule root?)", rootID)
+		if root.Type != moleculeIssueType {
+			return fmt.Errorf("no steps found for %s (not a molecule root?)", r.rootID)
+		}
+		// A molecule bonded root-only pours no step beads: there is no DAG to
+		// draw, and its checklist lives in the formula.
+		return r.writeNoSteps(root)
 	}
 
 	// Build the DAG
-	dag, err := buildDAG(b, root, children)
+	dag, err := buildDAG(r.client, root, children)
 	if err != nil {
 		return fmt.Errorf("building DAG: %w", err)
 	}
 
 	// JSON output
-	if moleculeJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if r.asJSON {
+		enc := json.NewEncoder(r.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(dag)
 	}
 
 	// Human-readable output
-	if dagShowTiers {
+	if r.showTier {
 		return outputDAGTiers(dag)
 	}
 	return outputDAGTree(dag)
 }
 
+// writeNoSteps reports a root-only molecule: JSON callers get a root-only DAG
+// marked no_steps, everyone else gets the one line. The formula holds the
+// checklist, so there is no DAG to draw.
+func (r moleculeDagRun) writeNoSteps(root *beads.Issue) error {
+	if r.asJSON {
+		enc := json.NewEncoder(r.out)
+		enc.SetIndent("", "  ")
+		return enc.Encode(&DAGInfo{
+			RootID:     root.ID,
+			RootTitle:  root.Title,
+			NoSteps:    true,
+			Nodes:      map[string]*DAGNode{},
+			TierGroups: [][]string{},
+		})
+	}
+	_, err := fmt.Fprintln(r.out, noStepsPouredLine)
+	return err
+}
+
 // buildDAG constructs the DAG from molecule children.
-func buildDAG(b *beads.Beads, root *beads.Issue, children []*beads.Issue) (*DAGInfo, error) {
+func buildDAG(b beads.Client, root *beads.Issue, children []*beads.Issue) (*DAGInfo, error) {
 	dag := &DAGInfo{
 		RootID:    root.ID,
 		RootTitle: root.Title,
