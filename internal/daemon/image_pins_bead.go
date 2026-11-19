@@ -48,9 +48,15 @@ const (
 	imagePinsRefreshAcceptance = "- [ ] deploy/daemon/image-pins and deploy/polecat/seed-pins name each source tip named in this bead's Goal, and git diff shows only those commit lines changed\n" +
 		"- [ ] go test ./internal/daemonimage -count=1 passes"
 
-	// imagePinsRefreshCommand is the command the polecat runs. Every flag is
+	// imagePinsRefreshOverseerHeading labels the apply command. It is the
+	// overseer's route, not the seat's: it needs the four source checkouts,
+	// which a sandbox seat does not have, so the goal names it an alternative
+	// rather than the instruction (gt-xuntgv).
+	imagePinsRefreshOverseerHeading = "Overseer alternative: needs the four source checkouts, which a seat does not have, and moves only pins 20 or more commits behind"
+
+	// imagePinsRefreshCommand is the overseer's command. Every flag is
 	// required by the command and every path must be absolute, so the block
-	// names all six and leaves the four checkouts for the polecat to fill in.
+	// names all six and leaves the four checkouts for the reader to fill in.
 	imagePinsRefreshCommand = "```\n" +
 		"gt daemon image pins --apply \\\n" +
 		"  --pins \"$PWD/deploy/daemon/image-pins\" \\\n" +
@@ -146,27 +152,44 @@ func imagePinsRefreshDescription(pins []ImagePinState, filedAt time.Time) string
 	}, "\n\n") + "\n"
 }
 
+// imagePinsSeedLines names the line in deploy/polecat/seed-pins that pins the
+// same repository a pin names: the seed calls bd "beads". om and hm are seeded
+// from no line.
+var imagePinsSeedLines = map[string]string{
+	"bd":     "beads",
+	"devops": "devops",
+}
+
 // imagePinsRefreshGoal names each pin's pinned commit and source tip, the
 // instant the tips were read in UTC (a source moves about twenty commits an
-// hour, gt-fcsoy8), and the command that moves them.
+// hour, gt-fcsoy8), and the commit columns a seat edits to move it by hand.
+// The apply command, which needs checkouts a seat does not have, follows under
+// its own heading and is never the instruction.
 func imagePinsRefreshGoal(pins []ImagePinState, filedAt time.Time) string {
 	var b strings.Builder
-	b.WriteString("These image pins trail their sources' origin/main, and the pin-drift guard refuses an image roll once a pin is more than 40 commits behind its tip (gt-wmoa0d). Move each pin named here to its source tip and land the two pins files the refresh writes.\n\n")
+	b.WriteString("These image pins trail their sources' origin/main, and the pin-drift guard refuses an image roll once a pin is more than 40 commits behind its tip (gt-wmoa0d). A seat has no source checkout, so set each pin named here by hand.\n\n")
 	fmt.Fprintf(&b, "These tips were read at %s from each source's origin/main. A source that has moved since is fine: pin the tip named here.\n\n", filedAt.UTC().Format(time.RFC3339))
 	for _, pin := range pins {
-		fmt.Fprintf(&b, "- %s: pinned at %s; its source's origin/main is %s, %d commits behind.\n", pin.Name, pin.Pin, pin.Tip, pin.Behind)
+		line := fmt.Sprintf("- %s: pinned at %s; its source's origin/main is %s, %d commits behind. Set the %s commit column in deploy/daemon/image-pins", pin.Name, pin.Pin, pin.Tip, pin.Behind, pin.Name)
+		if seed, ok := imagePinsSeedLines[pin.Name]; ok {
+			line += fmt.Sprintf(" and the %s commit column in deploy/polecat/seed-pins", seed)
+		}
+		b.WriteString(line + ".\n")
 	}
-	b.WriteString("\nRun this at the root of the gt checkout this bead lands on, naming the four source checkouts by absolute path:\n\n")
+	b.WriteString("\nSet each commit column named above to its tip, then run `go test ./internal/daemonimage -run TestCommittedPinsAgree -count=1` and the Gate's command.\n\n")
+	fmt.Fprintf(&b, "### %s\n\n", imagePinsRefreshOverseerHeading)
+	b.WriteString("A machine holding the four source checkouts can move every pin the command accepts, at once; it is not the instruction here.\n\n")
 	b.WriteString(imagePinsRefreshCommand)
 	b.WriteString("\n\nThe four checkouts are the town's checkouts of those sources; the command reads each one's origin/main and writes neither. Without --apply it only prints the move.")
 	return b.String()
 }
 
 // imagePinsRefreshConstraints are the lines a move must not cross: the two
-// files stay in step, and a pin the command refuses is not edited into place.
+// files stay in step, and a pin that is not an ancestor of its tip is not
+// edited into place.
 const imagePinsRefreshConstraints = "- The diff is the commit columns of deploy/daemon/image-pins and deploy/polecat/seed-pins; nothing else in either file changes.\n" +
 	"- A source the two files share must name the same commit in both, or TestCommittedPinsAgree fails.\n" +
-	"- A pin the command refuses (not an ancestor of its tip: ahead or diverged) is not a pin to edit: stop and escalate with the command's message, and leave the guard's 40-commit and 7-day bounds alone.\n" +
+	"- A pin that is not an ancestor of its tip (ahead or diverged) is not a pin to edit: stop and escalate, and leave the guard's 40-commit and 7-day bounds alone.\n" +
 	"- Pin a source's tip even when that source's own CI is red: the guard compares commits, not runs."
 
 // imagePinsRefreshOutOfScope keeps a polecat from widening a pins diff.

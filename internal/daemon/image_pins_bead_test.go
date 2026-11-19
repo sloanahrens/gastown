@@ -141,21 +141,80 @@ func TestImagePinsRefreshBeadPassesSpecLint(t *testing.T) {
 	}
 }
 
-// TestImagePinsRefreshBeadCarriesTheRefreshCommand: the description tells the
-// polecat the command, the two files it writes and the four checkouts it reads.
-func TestImagePinsRefreshBeadCarriesTheRefreshCommand(t *testing.T) {
+// TestImagePinsRefreshBeadNamesTheFilesAndLinesToSetByHand: the goal names, per
+// pin, the commit column a seat edits by hand: bd and devops in both pins
+// files, om and hm in deploy/daemon/image-pins alone, then TestCommittedPinsAgree.
+func TestImagePinsRefreshBeadNamesTheFilesAndLinesToSetByHand(t *testing.T) {
+	t.Parallel()
+	draft, err := imagePinsRefreshBead([]ImagePinState{
+		refreshPin("bd", pinBD, tipBD, 22),
+		refreshPin("om", pinOM, tipOM, 21),
+		refreshPin("hm", pinHM, tipHM, 25),
+		refreshPin("devops", pinDevops, tipDevops, 47),
+	}, refreshFiledAt)
+	if err != nil {
+		t.Fatalf("imagePinsRefreshBead: %v", err)
+	}
+	pins := []struct {
+		name, pin, tip, columns string
+		behind                  int
+	}{
+		{"bd", pinBD, tipBD, "Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins.", 22},
+		{"om", pinOM, tipOM, "Set the om commit column in deploy/daemon/image-pins.", 21},
+		{"hm", pinHM, tipHM, "Set the hm commit column in deploy/daemon/image-pins.", 25},
+		{"devops", pinDevops, tipDevops, "Set the devops commit column in deploy/daemon/image-pins and the devops commit column in deploy/polecat/seed-pins.", 47},
+	}
+	for _, p := range pins {
+		want := fmt.Sprintf("- %s: pinned at %s; its source's origin/main is %s, %d commits behind. %s\n", p.name, p.pin, p.tip, p.behind, p.columns)
+		if !strings.Contains(draft.Description, want) {
+			t.Errorf("description does not carry %q:\n%s", want, draft.Description)
+		}
+	}
+	for _, want := range []string{
+		"set each pin named here by hand",
+		"Set each commit column named above to its tip",
+		"go test ./internal/daemonimage -run TestCommittedPinsAgree -count=1",
+	} {
+		if !strings.Contains(draft.Description, want) {
+			t.Errorf("description does not carry %q:\n%s", want, draft.Description)
+		}
+	}
+}
+
+// TestImagePinsRefreshBeadCarriesTheOverseerAlternative: the apply command sits
+// under the overseer-alternative heading, which says a seat lacks the checkouts,
+// and no text before it tells the seat to run it.
+func TestImagePinsRefreshBeadCarriesTheOverseerAlternative(t *testing.T) {
 	t.Parallel()
 	draft, err := imagePinsRefreshBead([]ImagePinState{refreshPin("devops", pinDevops, tipDevops, 47)}, refreshFiledAt)
 	if err != nil {
 		t.Fatalf("imagePinsRefreshBead: %v", err)
 	}
+	heading := "### Overseer alternative: needs the four source checkouts, which a seat does not have, and moves only pins 20 or more commits behind"
+	headingAt, blockAt := strings.Index(draft.Description, heading), strings.Index(draft.Description, imagePinsRefreshCommand)
+	if headingAt < 0 || blockAt < 0 {
+		t.Fatalf("description lacks the overseer heading (%d) or the apply command (%d):\n%s", headingAt, blockAt, draft.Description)
+	}
+	if n := strings.Count(draft.Description, imagePinsRefreshCommand); n != 1 {
+		t.Errorf("the apply command appears %d times, want once:\n%s", n, draft.Description)
+	}
+	if blockAt < headingAt {
+		t.Errorf("the apply command is at %d, before the heading at %d:\n%s", blockAt, headingAt, draft.Description)
+	}
+	if before := draft.Description[:headingAt]; strings.Contains(before, "gt daemon image pins") {
+		t.Errorf("the text before the overseer heading names the apply command:\n%s", before)
+	}
+	if between := draft.Description[headingAt+len(heading) : blockAt]; strings.Contains(strings.ToLower(between), "run ") {
+		t.Errorf("the overseer paragraph tells the reader to run the command: %q", between)
+	}
+	block := draft.Description[blockAt:]
 	for _, want := range []string{
-		"gt daemon image pins", "--apply", "--pins", "--seed-pins",
+		"--apply", "--pins", "--seed-pins",
 		"--bd-src", "--om-src", "--hm-src", "--devops-src",
 		"deploy/daemon/image-pins", "deploy/polecat/seed-pins",
 	} {
-		if !strings.Contains(draft.Description, want) {
-			t.Errorf("description does not carry %q:\n%s", want, draft.Description)
+		if !strings.Contains(block, want) {
+			t.Errorf("apply command does not carry %q:\n%s", want, block)
 		}
 	}
 }
