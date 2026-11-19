@@ -26,37 +26,43 @@ type nodeStats struct {
 // patrol must not mistake a disk it could not measure for an empty one
 // (gt-gg9hv.24.3).
 func ParseNodeStats(summary string) (float64, error) {
+	u, err := ParseNodeStatsUsage(summary)
+	return u.UsedPct, err
+}
+
+// ParseNodeStatsUsage is ParseNodeStats plus the byte counts the share is
+// computed from, so a caller that records a trend keeps the bytes the share
+// came from rather than a percent alone (gt-gj8zbw).
+func ParseNodeStatsUsage(summary string) (Usage, error) {
 	var stats nodeStats
 	if err := json.Unmarshal([]byte(summary), &stats); err != nil {
-		return 0, fmt.Errorf("node stats summary: %w", err)
+		return Usage{}, fmt.Errorf("node stats summary: %w", err)
 	}
 	if stats.Node.Fs == nil {
-		return 0, errors.New("node stats summary names no node.fs")
+		return Usage{}, errors.New("node stats summary names no node.fs")
 	}
 	capacity, err := statsBytes("capacityBytes", stats.Node.Fs.CapacityBytes)
 	if err != nil {
-		return 0, err
+		return Usage{}, err
 	}
 	used, err := statsBytes("usedBytes", stats.Node.Fs.UsedBytes)
 	if err != nil {
-		return 0, err
+		return Usage{}, err
 	}
 	if capacity <= 0 {
-		return 0, fmt.Errorf("node.fs capacityBytes = %d, want a positive capacity", capacity)
+		return Usage{}, fmt.Errorf("node.fs capacityBytes = %d, want a positive capacity", capacity)
 	}
 	if used < 0 {
-		return 0, fmt.Errorf("node.fs usedBytes = %d, want a byte count", used)
+		return Usage{}, fmt.Errorf("node.fs usedBytes = %d, want a byte count", used)
 	}
 	// Compare the counts as integers: above 2^53 bytes float64 rounds, so a
 	// disk one byte over capacity would divide to exactly 100 and read as full.
 	if used > capacity {
-		return 0, fmt.Errorf("node.fs usedBytes = %d is more than capacityBytes = %d, outside 0-100", used, capacity)
+		return Usage{}, fmt.Errorf("node.fs usedBytes = %d is more than capacityBytes = %d, outside 0-100", used, capacity)
 	}
+	// used <= capacity above, so the share cannot pass 100.
 	pct := float64(used) / float64(capacity) * 100
-	if pct > 100 {
-		return 0, fmt.Errorf("node.fs usedBytes = %d of capacityBytes = %d is %.1f%% used, outside 0-100", used, capacity, pct)
-	}
-	return pct, nil
+	return Usage{UsedPct: pct, UsedBytes: used, TotalBytes: capacity}, nil
 }
 
 // statsBytes requires a byte count the summary names, whole and not absent.

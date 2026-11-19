@@ -31,7 +31,12 @@ const tightenedKeep = 3
 type Reading struct {
 	Name    string // "mac", "colima", "docker-desktop", "control"
 	UsedPct float64
-	Err     error // non-nil: the disk could not be read
+	// UsedBytes and TotalBytes are the byte counts UsedPct comes from. Only a
+	// parser that reports them sets them (ParseNodeStatsUsage does; df does
+	// not), so zero means the reading kept the share alone.
+	UsedBytes  int64
+	TotalBytes int64
+	Err        error // non-nil: the disk could not be read
 	// Detail names the biggest consumers on the disk, as TopConsumers renders
 	// them. Evaluate appends it to a usage raise and to nothing else.
 	Detail string
@@ -55,6 +60,14 @@ type Alert struct {
 	// pace rather than raising it again.
 	Still  bool
 	Detail string
+}
+
+// Usage is a disk's used share and, when the output names them, the byte
+// counts the share was computed from.
+type Usage struct {
+	UsedPct    float64
+	UsedBytes  int64
+	TotalBytes int64
 }
 
 // ParseDF reads the used share from df -P output: the first field carrying a

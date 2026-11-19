@@ -463,6 +463,9 @@ type Daemon struct {
 	// diskMaintAlerts is the set of disk alert keys the patrol has open: it
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
+	// diskGrowth is when each kept disk's growth ring last took a sample, and
+	// the lock its writes run under (gt-gj8zbw).
+	diskGrowth diskGrowthState
 	// cacheTrimNoOp is the claims a completed cache trim left over twice the
 	// cap, which the attention queue raises until a later pass reads one under
 	// it or finds the claim gone (gt-gg9hv.46, gt-gg9hv.50).
