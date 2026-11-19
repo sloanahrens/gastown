@@ -117,7 +117,7 @@ func Start(ctx context.Context, run Runner, sleep func(time.Duration), now func(
 		}
 	}
 	// Every registry repair step is reported for the sandbox VM, whose registry
-	// the repair restarts; cancelling gt-control's forward of the port is part
+	// the repair restarts; canceling gt-control's forward of the port is part
 	// of that same repair (gt-4eig1r).
 	steps, err := RepairRegistry(ctx, run, home)
 	for _, step := range steps {
