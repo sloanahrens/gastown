@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -1302,15 +1303,27 @@ const sandboxSeatEndJoinBudget = 2 * time.Second
 // A daemon that is already stopping starts no end: the seat keeps its
 // directories, which is the safe answer.
 //
+// The step is named by the seat when the Worker is a polecat's own name on a
+// polecat branch, and by the bead when it is not: a takeover lands a crew
+// branch, whose Worker is the crew actor, so the bead names the seats the step
+// ends (gt-m1qf31). The subject is the whole phrase after "sandbox seat end ",
+// so a bead id is never printed where a seat name belongs.
+//
 // The stop check and the count are one step under sandboxSeatEndMu, the lock
 // stopSandboxSeatEnds takes before it waits: an end added after that wait
 // started would be one the shutdown never joins, and the two would race.
 func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
 	name := strings.TrimSpace(w.Worker)
-	if name == "" {
-		return // a crew landing has no seat
+	if name != "" && polecat.CheckSandboxSeatNames(rigName, name) == nil && !strings.HasPrefix(w.Branch, authorkind.CrewPrefix) {
+		d.startSandboxSeatEndStep(rigName+"/"+name, func() {
+			d.runSandboxSeatEnd(rigName, landings, w)
+		})
+		return
 	}
-	d.startSandboxSeatEndStep(rigName, name, func() {
+	if strings.TrimSpace(w.BeadID) == "" {
+		return // a landing with no bead names no seat to resolve
+	}
+	d.startSandboxSeatEndStep("bead "+w.BeadID, func() {
 		d.runSandboxSeatEnd(rigName, landings, w)
 	})
 }
@@ -1318,11 +1331,13 @@ func (d *Daemon) startSandboxSeatEnd(rigName string, landings *land.LandingsFile
 // startSandboxSeatEndStep runs one seat end off the caller's goroutine, with
 // the shutdown accounting every seat end shares: a daemon that is already
 // stopping starts none, and stopSandboxSeatEnds joins the ones in flight.
-func (d *Daemon) startSandboxSeatEndStep(rigName, name string, run func()) {
+// subject names the end: "<rig>/<seat>" for a seat, "bead <id>" for a landing
+// whose seats are read from its bead.
+func (d *Daemon) startSandboxSeatEndStep(subject string, run func()) {
 	d.sandboxSeatEndMu.Lock()
 	if d.sandboxSeatEndStopped || d.ctxOrBackground().Err() != nil {
 		d.sandboxSeatEndMu.Unlock()
-		d.logger.Printf("sandbox seat end %s/%s: kept: the daemon is stopping", rigName, name)
+		d.logger.Printf("sandbox seat end %s: kept: the daemon is stopping", subject)
 		return
 	}
 	d.sandboxSeatEndCycles.Add(1)
@@ -1331,7 +1346,7 @@ func (d *Daemon) startSandboxSeatEndStep(rigName, name string, run func()) {
 		defer d.sandboxSeatEndCycles.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				d.logger.Printf("landing_worker: %s: sandbox seat end panicked: %v", rigName, r)
+				d.logger.Printf("landing_worker: %s: sandbox seat end panicked: %v", subject, r)
 			}
 		}()
 		run()
@@ -1359,7 +1374,7 @@ func (d *Daemon) retryPendingSandboxSeatEnds() {
 		return
 	}
 	for _, rec := range records {
-		d.startSandboxSeatEndStep(rec.Rig, rec.Name, func() {
+		d.startSandboxSeatEndStep(rec.Rig+"/"+rec.Name, func() {
 			d.sandboxSeatEnder()(rec.Rig, rec.Name, rec.Landing)
 		})
 	}
@@ -1404,14 +1419,20 @@ func (d *Daemon) waitForSandboxSeatEnds() {
 // seat to the end step. A record that cannot be read is an unlanded answer: the
 // seat is kept, because the record is the only proof its work survived.
 //
+// A Worker that is a polecat's own name on its own branch ends that seat. A
+// crew branch, or a Worker that is no seat name (a takeover's crew actor, or
+// none), reaches no seat as a polecat: the bead names the seats instead (see
+// endSandboxSeatsOfBead).
+//
 // The read is safe beside the landing worker's appends: w's record was written
 // before the after-landing hook ran, and the file's reader skips a torn line
 // rather than failing on it, so a record another landing is writing at this
 // moment cannot hide w's (see the torn-line case in the test).
 func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, w land.Work) {
 	name := strings.TrimSpace(w.Worker)
-	if name == "" {
-		return // a crew landing has no seat
+	if name == "" || polecat.CheckSandboxSeatNames(rigName, name) != nil || strings.HasPrefix(w.Branch, authorkind.CrewPrefix) {
+		d.endSandboxSeatsOfBead(rigName, landings, w)
+		return
 	}
 	if landings == nil {
 		d.logger.Printf("sandbox seat end %s/%s: kept: no landing record to read", rigName, name)
@@ -1425,6 +1446,125 @@ func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, 
 	d.sandboxSeatEnder()(rigName, name, sandboxSeatLanding{
 		BeadID: w.BeadID, Branch: w.Branch, Submitted: w.Submitted, Landed: landed,
 	})
+}
+
+// endSandboxSeatsOfBead offers the end to each polecat seat the landed bead was
+// built on, with the landing's own facts, so every guard in keepReason still
+// decides. A seat the bead names no seat for is left alone; that is one log
+// line and no end. The bead is named as "bead <id>" in every line, never in
+// the seat-name slot of "sandbox seat end <rig>/<name>" (gt-m1qf31).
+func (d *Daemon) endSandboxSeatsOfBead(rigName string, landings *land.LandingsFile, w land.Work) {
+	if strings.TrimSpace(w.BeadID) == "" {
+		d.logger.Printf("sandbox seat end: kept: the landing names no bead, so no polecat seat is resolved")
+		return
+	}
+	seats, err := landingSeats(d.rigWorkBeads(rigName), rigName, w.BeadID)
+	if err != nil {
+		d.logger.Printf("sandbox seat end bead %s: kept: %v", w.BeadID, err)
+		return
+	}
+	if landings == nil {
+		d.logger.Printf("sandbox seat end bead %s: kept: no landing record to read", w.BeadID)
+		return
+	}
+	_, landed, err := landings.Find(w.BeadID, w.Head)
+	if err != nil {
+		d.logger.Printf("sandbox seat end bead %s: kept: cannot read the landing record: %v", w.BeadID, err)
+		return
+	}
+	for name, branch := range seats {
+		if branch == "" {
+			// Only the assignee names this seat: its own branch is the one its
+			// agent bead records, and only while that bead still hooks this
+			// bead. A seat re-slung to other work is not this bead's seat.
+			resolved, reason, err := d.assigneeSeatBranch(rigName, name, w.BeadID)
+			switch {
+			case err != nil:
+				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: cannot read its agent bead: %v", w.BeadID, name, err)
+				continue
+			case reason != "":
+				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: %s", w.BeadID, name, reason)
+				continue
+			}
+			branch = resolved
+		}
+		d.sandboxSeatEnder()(rigName, name, sandboxSeatLanding{
+			BeadID: w.BeadID, Branch: branch, Submitted: w.Submitted, Landed: landed,
+		})
+	}
+}
+
+// assigneeSeatBranch resolves the branch of a seat only the bead's assignee
+// names: the one its agent bead records, returned only while that agent bead
+// still hooks beadID, because a seat re-slung to other work is not this bead's
+// seat. A reason, not an error, says why a readable agent bead does not resolve
+// a branch; an unreadable one is returned as an error so its caller says which
+// read failed (gt-m1qf31).
+func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason string, err error) {
+	fields, err := d.sandboxSeatEndHost().seatAgentFields(rig, name)
+	if err != nil {
+		return "", "", fmt.Errorf("reading the agent bead: %w", err)
+	}
+	if fields == nil {
+		return "", "it has no agent bead", nil
+	}
+	if hook := strings.TrimSpace(fields.HookBead); hook != beadID {
+		return "", fmt.Sprintf("its agent bead hooks %q", hook), nil
+	}
+	if branch = strings.TrimSpace(fields.Branch); branch == "" {
+		return "", "its agent bead records no branch", nil
+	}
+	return branch, "", nil
+}
+
+// landingSeats maps each polecat seat a landed bead was built on to the branch
+// its own READY TO LAND block named, and to "" for a seat only the assignee
+// names: the caller resolves that one from its agent bead. Every block is read
+// (an earlier attempt of a rework is another seat), and the assignee counts
+// when it is <rig>/polecats/<name>. A name that is not one path segment is
+// skipped, and a bead left with no seat is an error: the caller ends nothing
+// rather than guess (gt-m1qf31).
+func landingSeats(reader beadReader, rig, beadID string) (map[string]string, error) {
+	if reader == nil {
+		return nil, errors.New("no bead reader is wired to resolve its seats")
+	}
+	issue, err := reader.Show(beadID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the bead: %w", err)
+	}
+	if issue == nil {
+		return nil, fmt.Errorf("bead %s is not found", beadID)
+	}
+	seats := map[string]string{}
+	add := func(branch string) {
+		rest, ok := strings.CutPrefix(branch, land.PolecatBranchPrefix)
+		name, tail, ok2 := strings.Cut(rest, "/")
+		if !ok || !ok2 || tail == "" || polecat.CheckSandboxSeatNames(rig, name) != nil {
+			return
+		}
+		if _, dup := seats[name]; !dup {
+			seats[name] = branch
+		}
+	}
+	for notes := issue.Notes; ; {
+		idx := strings.LastIndex(notes, land.ReadyNoteMarker+"\n")
+		if idx < 0 {
+			break
+		}
+		if work, ok := land.ParseReadyNote(notes[idx:]); ok {
+			add(work.Branch)
+		}
+		notes = notes[:idx]
+	}
+	if parts := strings.Split(issue.Assignee, "/"); len(parts) == 3 && parts[0] == rig && parts[1] == "polecats" {
+		if _, dup := seats[parts[2]]; !dup && polecat.CheckSandboxSeatNames(rig, parts[2]) == nil {
+			seats[parts[2]] = ""
+		}
+	}
+	if len(seats) == 0 {
+		return nil, fmt.Errorf("its assignee %q and its READY TO LAND blocks name no polecat seat", issue.Assignee)
+	}
+	return seats, nil
 }
 
 // sandboxSeatEnder is the step that ends one sandbox seat: patrolScanHost's

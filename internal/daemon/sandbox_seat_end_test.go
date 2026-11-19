@@ -786,7 +786,10 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 			wantCalled: true, wantLanded: true, wantLandedB: endBranch,
 		},
 		{
-			name: "a crew landing has no seat",
+			// No Worker is not a seat name, so the bead is asked for one. The
+			// bead exists and its assignee is the crew actor, which names no
+			// polecat seat: the landing ends nothing.
+			name: "a landing whose bead names no seat",
 			work: land.Work{BeadID: endBead, Head: head, Branch: endBranch},
 			landings: func(t *testing.T) *land.LandingsFile {
 				t.Helper()
@@ -814,9 +817,16 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 				landing   sandboxSeatLanding
 			}
 			var got []ended
+			var logs strings.Builder
 			d := &Daemon{
 				config: &Config{TownRoot: t.TempDir()},
-				logger: log.New(io.Discard, "", 0),
+				logger: log.New(&logs, "", 0),
+				// The seatless landing's bead exists: its assignee is the crew
+				// actor and its notes name no polecat branch, so it names no
+				// seat.
+				openWorkBeads: func([]string, time.Duration) workBeadReader {
+					return workBeadStore{endBead: &beads.Issue{ID: endBead, Assignee: "town/crew/overseer"}}
+				},
 				endSandboxSeat: func(rig, name string, landing sandboxSeatLanding) bool {
 					got = append(got, ended{rig, name, landing})
 					return true
@@ -830,6 +840,12 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 
 			if called := len(got) > 0; called != tt.wantCalled {
 				t.Fatalf("seat end called = %v, want %v (%v)", called, tt.wantCalled, got)
+			}
+			// A bead id or a crew actor is never printed in the seat-name slot.
+			for _, subject := range []string{endRig + "/" + endBead, endRig + "/town/crew/overseer"} {
+				if strings.Contains(logs.String(), "sandbox seat end "+subject) {
+					t.Errorf("log names %q as a seat: %q", subject, logs.String())
+				}
 			}
 			if !tt.wantCalled {
 				return
@@ -845,6 +861,310 @@ func TestRunSandboxSeatEndReadsTheLandingRecord(t *testing.T) {
 			}
 			if got[0].landing.BeadID != tt.work.BeadID {
 				t.Errorf("landing bead = %q, want %q", got[0].landing.BeadID, tt.work.BeadID)
+			}
+		})
+	}
+}
+
+// seatEndCall is one seat the end was offered.
+type seatEndCall struct {
+	rig, name string
+	landing   sandboxSeatLanding
+}
+
+// seatEndCalls returns a daemon that records every seat end it is offered and
+// serves bead to the seat-end read, plus the call log it fills and the agent
+// bead store an assignee-only seat is resolved from.
+func seatEndCalls(t *testing.T, bead *beads.Issue, logs io.Writer) (*Daemon, *[]seatEndCall, *beadsfake.Fake) {
+	t.Helper()
+	var got []seatEndCall
+	agents := beadsfake.New()
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(logs, "", 0),
+		openWorkBeads: func([]string, time.Duration) workBeadReader {
+			return workBeadStore{bead.ID: bead}
+		},
+		openRecoveryBeads: func([]string) beads.Client { return agents },
+		endSandboxSeat: func(rig, name string, landing sandboxSeatLanding) bool {
+			got = append(got, seatEndCall{rig, name, landing})
+			return true
+		},
+	}
+	return d, &got, agents
+}
+
+// seedSeatAgent writes the agent bead of the polecat seat name, so a landing
+// that names the seat only by the bead's assignee can resolve its branch.
+func seedSeatAgent(t *testing.T, d *Daemon, agents *beadsfake.Fake, name string, fields beads.AgentFields) {
+	t.Helper()
+	id := beads.AgentBeadIDFor(constants.RolePolecat, endRig, name, d.config.TownRoot)
+	if id == "" {
+		t.Fatalf("no agent bead id for %s/%s", endRig, name)
+	}
+	fields.RoleType = constants.RolePolecat
+	fields.Rig = endRig
+	if _, err := agents.Create(beads.CreateOptions{
+		ID: id, Title: id, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(id, &fields),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// landingRecord writes one landing record for endBead and returns the file.
+func landingRecord(t *testing.T, head, branch string) *land.LandingsFile {
+	t.Helper()
+	f := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
+	if err := f.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: branch}); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// A takeover lands crew/overseer/<bead>, so the landing's Worker is the crew
+// actor and not a seat. The bead the takeover built names the seat that must
+// be offered the end, and the crew actor is never named as one (gt-m1qf31).
+func TestTakeoverSeatEndEndsTheBeadsSeatNotTheCrewActor(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	bead := &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/ace",
+		Notes: land.FormatReadyNote(land.Work{Branch: branch, Head: head, Target: "main", Worker: "town/crew/overseer"})}
+	d, got, agents := seatEndCalls(t, bead, io.Discard)
+	// The bead names ace only by its assignee, so the seat's own branch comes
+	// from its agent bead: the crew branch would keep it forever.
+	const aceBranch = "polecat/ace/" + endBead + "+x1"
+	seedSeatAgent(t, d, agents, "ace", beads.AgentFields{HookBead: endBead, Branch: aceBranch})
+
+	d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+		land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+	if len(*got) != 1 {
+		t.Fatalf("seat ends offered = %+v, want only the bead's seat", *got)
+	}
+	if call := (*got)[0]; call.name != "ace" || call.rig != endRig {
+		t.Errorf("ended %s/%s, want %s/ace", call.rig, call.name, endRig)
+	}
+	if call := (*got)[0]; call.landing.Branch != aceBranch {
+		t.Errorf("ended ace on branch %q, want its own %q, never the crew branch", call.landing.Branch, aceBranch)
+	}
+	if call := (*got)[0]; call.landing.BeadID != endBead || !call.landing.Landed {
+		t.Errorf("landing facts = %+v, want the bead's landed record", call.landing)
+	}
+}
+
+// An assignee-only seat is resolved from its agent bead, and only while that
+// bead still hooks the landed bead: a seat re-slung to other work has a branch
+// that is not this bead's work, so it is not offered the end (gt-m1qf31).
+func TestTakeoverSeatEndDoesNotOfferASeatOnOtherWork(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	bead := &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/ace"}
+	d, got, agents := seatEndCalls(t, bead, io.Discard)
+	seedSeatAgent(t, d, agents, "ace", beads.AgentFields{HookBead: "gt-other1", Branch: "polecat/ace/gt-other1+x1"})
+
+	d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+		land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+	if len(*got) != 0 {
+		t.Errorf("a seat hooked to other work was offered the end: %+v", *got)
+	}
+}
+
+// A landing with no bead cannot name a seat: the resolution ends nothing and
+// says so once, instead of reading a bead it was never given (gt-m1qf31).
+func TestTakeoverSeatEndWithoutABeadOffersNothing(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	reads := 0
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logs, "", 0),
+		openWorkBeads: func([]string, time.Duration) workBeadReader {
+			reads++
+			return workBeadStore{}
+		},
+		endSandboxSeat: func(string, string, sandboxSeatLanding) bool {
+			t.Error("a landing with no bead offered a seat end")
+			return false
+		},
+	}
+	d.runSandboxSeatEnd(endRig, nil, land.Work{Head: "head", Branch: "crew/overseer/" + endBead, Worker: "town/crew/overseer"})
+
+	if reads != 0 {
+		t.Errorf("the bead was read %d times for a landing with no bead", reads)
+	}
+	if !strings.Contains(logs.String(), "the landing names no bead") {
+		t.Errorf("log = %q, want one line saying the landing names no bead", logs.String())
+	}
+}
+
+// An assignee-only seat whose agent bead cannot show its own branch is not
+// offered, and the line says which read or which fact refused it (gt-m1qf31).
+func TestTakeoverSeatEndDoesNotOfferWhatItsAgentBeadCannotShow(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	tests := []struct {
+		name    string
+		seed    func(t *testing.T, d *Daemon, agents *beadsfake.Fake)
+		wantLog string
+	}{
+		{"unreadable agent bead", func(t *testing.T, _ *Daemon, agents *beadsfake.Fake) {
+			agents.FailWith("show", errors.New("bd show: store unavailable"))
+		}, "cannot read its agent bead"},
+		{"no agent bead", func(*testing.T, *Daemon, *beadsfake.Fake) {}, "it has no agent bead"},
+		{"agent bead records no branch", func(t *testing.T, d *Daemon, agents *beadsfake.Fake) {
+			seedSeatAgent(t, d, agents, "ace", beads.AgentFields{HookBead: endBead})
+		}, "records no branch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			d, got, agents := seatEndCalls(t, &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/ace"}, &logs)
+			tt.seed(t, d, agents)
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+			if len(*got) != 0 {
+				t.Errorf("a seat its agent bead cannot show was offered the end: %+v", *got)
+			}
+			if !strings.Contains(logs.String(), "not offered: ") || !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log = %q, want one line saying the seat is not offered, naming %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
+// Every polecat branch a rework's READY TO LAND blocks name is a seat the
+// landing built on, and a name that is not one path segment is skipped. A bead
+// that names no seat ends nothing and says so once (gt-m1qf31).
+func TestTakeoverSeatEndOffersEveryNoteSeat(t *testing.T) {
+	t.Parallel()
+	const branch = "crew/overseer/" + endBead
+	ready := func(b, head string) string {
+		return land.FormatReadyNote(land.Work{Branch: b, Head: head, Target: "main", Worker: "town/crew/overseer"})
+	}
+	notes := strings.Join([]string{
+		ready("polecat/ace/"+endBead, "aaa"),
+		ready("polecat/dementus/"+endBead, "bbb"),
+		ready("polecat/../"+endBead, "ccc"),
+	}, "\n\n")
+	bead := &beads.Issue{ID: endBead, Assignee: "town/crew/overseer", Notes: notes}
+	d, got, _ := seatEndCalls(t, bead, io.Discard)
+
+	d.runSandboxSeatEnd(endRig, landingRecord(t, "head", branch),
+		land.Work{BeadID: endBead, Head: "head", Branch: branch, Worker: "town/crew/overseer"})
+
+	want := map[string]string{
+		"ace":      "polecat/ace/" + endBead,
+		"dementus": "polecat/dementus/" + endBead,
+	}
+	if len(*got) != len(want) {
+		t.Fatalf("seat ends offered = %+v, want %v", *got, want)
+	}
+	for _, call := range *got {
+		if call.landing.Branch != want[call.name] {
+			t.Errorf("%s ended with branch %q, want %q", call.name, call.landing.Branch, want[call.name])
+		}
+	}
+
+	var logs strings.Builder
+	d, got, _ = seatEndCalls(t, &beads.Issue{ID: endBead, Notes: ready(branch, "head")}, &logs)
+	d.runSandboxSeatEnd(endRig, landingRecord(t, "head", branch),
+		land.Work{BeadID: endBead, Head: "head", Branch: branch, Worker: "town/crew/overseer"})
+	if len(*got) != 0 {
+		t.Errorf("a bead naming no seat ended %+v", *got)
+	}
+	log := strings.TrimSpace(logs.String())
+	if lines := strings.Count(log, "\n") + 1; log == "" || !strings.Contains(log, "kept: ") || lines != 1 {
+		t.Errorf("log = %q, want one line saying the bead names no seat", logs.String())
+	}
+}
+
+// A polecat's own landing ends that seat as before, without reading the bead,
+// and no line names the crew actor as a polecat (gt-m1qf31).
+func TestTakeoverSeatEndLeavesAPolecatLandingUnchanged(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "polecat/agate/" + endBead
+	var logs strings.Builder
+	reads := 0
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logs, "", 0),
+		openWorkBeads: func([]string, time.Duration) workBeadReader {
+			reads++
+			return workBeadStore{}
+		},
+	}
+	var got []seatEndCall
+	d.endSandboxSeat = func(rig, name string, landing sandboxSeatLanding) bool {
+		got = append(got, seatEndCall{rig, name, landing})
+		return true
+	}
+	d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+		land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: endPolecat})
+
+	if reads != 0 {
+		t.Errorf("the bead was read %d times for a polecat landing, want none", reads)
+	}
+	if len(got) != 1 || got[0].name != endPolecat || got[0].landing.Branch != branch {
+		t.Errorf("seat ends offered = %+v, want only %s on %s", got, endPolecat, branch)
+	}
+	if strings.Contains(logs.String(), "town/crew/overseer") || strings.Contains(logs.String(), "not a single path segment") {
+		t.Errorf("log names a crew actor as a polecat: %q", logs.String())
+	}
+}
+
+// A takeover's seats are ended only on facts the end can read: a bead or
+// landing record it cannot read, and a bead that names no seat, end nothing and
+// say why in one line (gt-m1qf31).
+func TestTakeoverSeatEndEndsNothingItCannotProve(t *testing.T) {
+	t.Parallel()
+	const branch = "crew/overseer/" + endBead
+	seated := &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/ace"}
+	tests := []struct {
+		name     string
+		reader   workBeadReader
+		landings *land.LandingsFile
+		wantLog  string
+	}{
+		{"no bead reader", nil, nil, "no bead reader is wired"},
+		{"unreadable bead", unreadableBeads{}, nil, "reading the bead"},
+		{"bead not found", quietReader{}, nil, "is not found"},
+		{"no landing record", workBeadStore{endBead: seated}, nil, "no landing record to read"},
+		{"unreadable landing record", workBeadStore{endBead: seated},
+			&land.LandingsFile{Path: privateLandingsDir(t)}, "cannot read the landing record"},
+		{"bead names no seat", workBeadStore{}, landingRecord(t, "head", branch), "name no polecat seat"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			var got []seatEndCall
+			d := &Daemon{
+				config: &Config{TownRoot: t.TempDir()},
+				logger: log.New(&logs, "", 0),
+				openWorkBeads: func([]string, time.Duration) workBeadReader {
+					return tt.reader
+				},
+				endSandboxSeat: func(rig, name string, landing sandboxSeatLanding) bool {
+					got = append(got, seatEndCall{rig, name, landing})
+					return true
+				},
+			}
+			d.runSandboxSeatEnd(endRig, tt.landings,
+				land.Work{BeadID: endBead, Head: "head", Branch: branch, Worker: "town/crew/overseer"})
+			if len(got) != 0 {
+				t.Errorf("a refusal ended %+v", got)
+			}
+			if !strings.Contains(logs.String(), "kept: ") || !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log = %q, want one kept line naming %q", logs.String(), tt.wantLog)
 			}
 		})
 	}
