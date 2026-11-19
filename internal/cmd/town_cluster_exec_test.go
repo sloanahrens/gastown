@@ -194,8 +194,9 @@ func TestClusterExecViaPassesOnlyGetReads(t *testing.T) {
 }
 
 // TestClusterExecViaRefusesSecretSpellings drives execViaGuard with every
-// Secret spelling the bead lists and holds each to a refusal, and the one
-// Secret read, `get secret <name>`, to acceptance with no output flag.
+// Secret spelling the bead lists and holds each to a refusal before any exec,
+// and the one Secret read, `get secret <name>`, to acceptance with no output
+// flag, reaching the exec with its arguments unchanged.
 func TestClusterExecViaRefusesSecretSpellings(t *testing.T) {
 	t.Parallel()
 	refused := [][]string{
@@ -212,11 +213,20 @@ func TestClusterExecViaRefusesSecretSpellings(t *testing.T) {
 		{"-n", "openshell", "get", "secret", "creds", "-ojson"},
 		{"-n", "openshell", "get", "secret", "creds", "-o=json"},
 		{"-n", "openshell", "get", "secret", "creds", "--output", "json"},
+		{"-n", "openshell", "get", "secret", "creds", "--output=json"},
+		{"-n", "openshell", "get", "secret", "creds", "-o", "yaml"},
 		{"-n", "openshell", "get", "secret", "creds", "extra"},
 	}
 	for _, args := range refused {
 		if _, err := execViaGuard(args); err == nil {
 			t.Errorf("the read %q was accepted, want a refusal", args)
+		}
+		_, _, err, calls := clusterExecRead(t, "", "", args...)
+		if err == nil {
+			t.Errorf("the read %q was accepted by the runner, want a refusal", args)
+		}
+		if len(calls) != 0 {
+			t.Errorf("the refused read %q made exec calls %v, want none", args, calls)
 		}
 	}
 
@@ -228,6 +238,16 @@ func TestClusterExecViaRefusesSecretSpellings(t *testing.T) {
 	}
 	if !slices.Equal(got, args) {
 		t.Errorf("execViaGuard returned %q, want the arguments unchanged %q", got, args)
+	}
+	_, _, err, calls := clusterExecRead(t, "", "", args...)
+	if err != nil {
+		t.Fatalf("running the Secret read %q: %v", args, err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("the Secret read made %d exec calls, want 1: %v", len(calls), calls)
+	}
+	if !slices.Equal(calls[0].args, args) {
+		t.Errorf("the Secret read ran %q, want the arguments as given %q", calls[0].args, args)
 	}
 }
 
@@ -345,6 +365,17 @@ func TestClusterExecViaRefusesUnknownFlags(t *testing.T) {
 		{"get", "deployment/daemon", "--watch"},
 		{"get", "deployment/daemon", "--raw", "/api/v1/pods"},
 		{"get", "deployment/daemon", "--namespace", "openshell"},
+		{"get", "deployment/daemon", "--kubeconfig=/x"},
+		{"get", "deployment/daemon", "--context=other"},
+		{"get", "deployment/daemon", "--server=https://x"},
+		{"get", "deployment/daemon", "--token=t"},
+		{"get", "deployment/daemon", "--as=u"},
+		{"get", "deployment/daemon", "--user=u"},
+		{"get", "deployment/daemon", "--cluster=c"},
+		{"get", "deployment/daemon", "--as-group", "g"},
+		{"get", "deployment/daemon", "--certificate-authority", "/x"},
+		{"get", "deployment/daemon", "--client-certificate", "/x"},
+		{"get", "deployment/daemon", "--client-key", "/x"},
 		{"-n"},
 	}
 	for _, args := range refused {
@@ -424,16 +455,72 @@ func TestClusterExecViaHeaderNamesTheRebuild(t *testing.T) {
 	}
 }
 
-// TestClusterExecViaLeavesTheOutputFormToTheNextRule holds that a yaml read of
-// a table kind is not this guard's business: only the command's own output pair
-// rules refuse it.
+// TestClusterExecViaLeavesTheOutputFormToTheNextRule holds that this guard now
+// decides the output value: yaml is refused before any exec and json passes.
 func TestClusterExecViaLeavesTheOutputFormToTheNextRule(t *testing.T) {
 	t.Parallel()
 	_, _, err, calls := clusterExecRead(t, "", "", "-n", "openshell", "get", "deployment/daemon", "-o", "yaml")
+	if err == nil {
+		t.Error("a yaml read of a Deployment was accepted, want a refusal")
+	}
+	if len(calls) != 0 {
+		t.Errorf("a yaml read of a Deployment made exec calls %v, want none", calls)
+	}
+
+	_, _, err, calls = clusterExecRead(t, "", "", "-n", "openshell", "get", "deployment/daemon", "-o", "json")
 	if err != nil {
-		t.Errorf("a yaml read of a Deployment was refused: %v", err)
+		t.Errorf("a json read of a Deployment was refused: %v", err)
 	}
 	if len(calls) != 1 {
-		t.Errorf("a yaml read of a Deployment made %d exec calls, want 1", len(calls))
+		t.Errorf("a json read of a Deployment made %d exec calls, want 1", len(calls))
+	}
+}
+
+// TestClusterExecViaAcceptsOnlyJSONOutput drives execViaGuard with every
+// accepted json spelling and with each output value the drift compare does not
+// read, holding the former to acceptance unchanged and the latter to a refusal
+// before any exec.
+func TestClusterExecViaAcceptsOnlyJSONOutput(t *testing.T) {
+	t.Parallel()
+	accepted := [][]string{
+		{"get", "deployment/daemon", "-o", "json"},
+		{"get", "deployment/daemon", "-ojson"},
+		{"get", "deployment/daemon", "-o=json"},
+		{"get", "deployment/daemon", "--output", "json"},
+		{"get", "deployment/daemon", "--output=json"},
+	}
+	for _, args := range accepted {
+		got, err := execViaGuard(args)
+		if err != nil {
+			t.Errorf("the output %q was refused: %v", args, err)
+			continue
+		}
+		if !slices.Equal(got, args) {
+			t.Errorf("execViaGuard returned %q for %q, want the arguments unchanged", got, args)
+		}
+	}
+	refused := [][]string{
+		{"get", "deployment/daemon", "-o", "yaml"},
+		{"get", "deployment/daemon", "-oyaml"},
+		{"get", "deployment/daemon", "-o=yaml"},
+		{"get", "deployment/daemon", "--output", "yaml"},
+		{"get", "deployment/daemon", "--output=yaml"},
+		{"get", "deployment/daemon", "-o", "wide"},
+		{"get", "deployment/daemon", "-o", "name"},
+		{"get", "deployment/daemon", "-o", "jsonpath={.items[*]}"},
+		{"get", "deployment/daemon", "-o", "go-template={{.}}"},
+		{"get", "deployment/daemon", "-o", "custom-columns=X:.x"},
+	}
+	for _, args := range refused {
+		if _, err := execViaGuard(args); err == nil {
+			t.Errorf("the output %q was accepted, want a refusal", args)
+		}
+		_, _, err, calls := clusterExecRead(t, "", "", args...)
+		if err == nil {
+			t.Errorf("the output %q was accepted by the runner, want a refusal", args)
+		}
+		if len(calls) != 0 {
+			t.Errorf("the refused output %q made exec calls %v, want none", args, calls)
+		}
 	}
 }

@@ -122,7 +122,7 @@ var clusterTargetKinds = []struct{ singular, plural string }{
 
 // execViaGuard admits only a read the drift compare may make and returns args
 // unchanged: an optional -n <namespace>, the get verb, one target, and an
-// optional output pair. Every other argument is refused before an exec, so the
+// optional -o json pair. Every other argument is refused before an exec, so the
 // guard is an allowlist of these shapes and never a denylist of bad ones.
 func execViaGuard(args []string) ([]string, error) {
 	rest := args
@@ -244,8 +244,8 @@ func checkClusterNamespace(namespace string) error {
 	return nil
 }
 
-// checkClusterOutput holds the trailing arguments to one -o pair, leaving the
-// format value to the rules that force it.
+// checkClusterOutput holds the trailing arguments to one -o json pair: the
+// drift compare reads json only, so any other format is refused before an exec.
 func checkClusterOutput(args []string) error {
 	switch {
 	case len(args) == 2 && (args[0] == "-o" || args[0] == "--output") && clusterOutputValue(args[1]):
@@ -256,14 +256,15 @@ func checkClusterOutput(args []string) error {
 		clusterOutputValue(strings.TrimPrefix(strings.TrimPrefix(args[0], "-o"), "=")):
 		return nil
 	default:
-		return fmt.Errorf("the output arguments %q are not one -o pair, so nothing was run", args)
+		return fmt.Errorf("the output arguments %q are not one -o json pair, so nothing was run", args)
 	}
 }
 
-// clusterOutputValue reports whether value could be an output format, so a flag
-// read as a value is refused.
+// clusterOutputValue reports whether value is the one output format the drift
+// compare reads: json, so a flag read as a value, another format and a template
+// spelling are all refused.
 func clusterOutputValue(value string) bool {
-	return value != "" && !strings.HasPrefix(value, "-")
+	return value == "json"
 }
 
 // isClusterSecretRead reports whether the accepted target is the one Secret
