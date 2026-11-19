@@ -107,6 +107,16 @@ func (d *Daemon) landingPassEnded() {
 	}
 }
 
+// landingPassCount is the in-flight count the health report carries
+// (gt-u98suh). A health source built without a daemon has no passes to count,
+// as landingPausedReason has no pause to report.
+func (d *Daemon) landingPassCount() int {
+	if d == nil {
+		return 0
+	}
+	return int(d.landingPasses.Load())
+}
+
 // upgradeRestartDrains reports whether an upgrade restart holds the landing
 // passes off. It answers for the restart's own work only: a rebuild_om hold
 // parks no ticker and starts no sling wait (gt-0hsf6).
