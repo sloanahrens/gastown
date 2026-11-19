@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The workspace is the small tree of bd's own files the gateway owns and gt
@@ -92,6 +93,12 @@ var (
 	// the empty workspace, and a later Open or push recovers the tree the swap
 	// moved aside.
 	ErrWorkspaceLiveTreeLost = errors.New("bdgateway: workspace live tree lost")
+	// ErrWorkspaceLock is a workspace lock that cannot be taken or released: the lock
+	// file cannot be opened or locked, or its release fails.
+	ErrWorkspaceLock = errors.New("bdgateway: workspace lock failed")
+	// ErrWorkspaceLockTimeout is the workspace lock still held by another process
+	// at the deadline. It maps to 503 workspace_lock_timeout.
+	ErrWorkspaceLockTimeout = errors.New("bdgateway: workspace lock timeout")
 )
 
 // workspaceFileNames is every fixed file a pushed document may hold, by base
@@ -316,6 +323,9 @@ func fsMsg(err error) string {
 
 // workspaceFS is the store's filesystem seam. The real one is osWorkspaceFS;
 // tests replace one call to drive an error branch that a healthy disk cannot.
+// tryLock, now and pause are the workspace lock's seam: one non-blocking attempt
+// at the lock file, and the clock the wait reads, so a test drives the timeout
+// without a real second process or a real sleep.
 type workspaceFS struct {
 	lstat     func(path string) (os.FileInfo, error)
 	readFile  func(path string) ([]byte, error)
@@ -325,6 +335,9 @@ type workspaceFS struct {
 	removeAll func(path string) error
 	writeFile func(path string, data []byte, perm os.FileMode) error
 	rename    func(oldpath, newpath string) error
+	tryLock   func(path string) (release func() error, busy bool, err error)
+	now       func() time.Time
+	pause     func(d time.Duration)
 }
 
 // osWorkspaceFS is the seam's production value.
@@ -338,14 +351,17 @@ func osWorkspaceFS() workspaceFS {
 		removeAll: os.RemoveAll,
 		writeFile: os.WriteFile,
 		rename:    os.Rename,
+		tryLock:   osTryLock,
+		now:       time.Now,
+		pause:     time.Sleep,
 	}
 }
 
 // WorkspaceStore owns one workspace tree on disk and the manifest hash of the
 // tree it last published. It is safe for concurrent use: every push runs under
-// one mutex, so two pushes racing never interleave their temp trees. A second
-// gateway process on the same volume is out of scope, as the design gives the
-// volume to the one container.
+// one mutex, so two pushes racing never interleave their temp trees. Across
+// processes, a push and the open that recovers the tree take the workspace lock
+// (workspace_lock.go), so a second gateway on the same volume waits its turn.
 type WorkspaceStore struct {
 	root     string
 	mu       sync.Mutex
@@ -353,8 +369,9 @@ type WorkspaceStore struct {
 	fs       workspaceFS
 }
 
-// OpenWorkspaceStore takes ownership of the tree at root, creating nothing
-// until the first Put. A missing root is an empty workspace; an existing one
+// OpenWorkspaceStore takes ownership of the tree at root. It creates no tree: the
+// only file it makes is the workspace lock beside root, taken for the recovery
+// and read below. A missing root is an empty workspace; an existing one
 // must hold only entries the store itself would write, so a foreign tree is
 // refused rather than hashed and served. The store swaps
 // the root directory itself, so root's parent must exist and be on the writable
@@ -371,14 +388,22 @@ func openWorkspaceStore(root string, fsys workspaceFS) (*WorkspaceStore, error) 
 		return nil, fmt.Errorf("%w: empty path", ErrWorkspaceRoot)
 	}
 	s := &WorkspaceStore{root: root, fs: fsys}
-	files, restored, err := s.recoverSwapped()
+	// Recovery and the read run under the workspace lock, so an open that finds
+	// another process mid-swap waits for it to finish and never restores the tree
+	// that process moved aside.
+	release, err := s.acquireLock()
 	if err != nil {
 		return nil, err
 	}
-	if !restored {
-		if files, err = s.readTree(); err != nil {
-			return nil, err
-		}
+	files, restored, err := s.recoverSwapped()
+	if err == nil && !restored {
+		files, err = s.readTree()
+	}
+	if releaseErr := release(); releaseErr != nil {
+		err = errors.Join(err, fmt.Errorf("%w: releasing the lock: %s", ErrWorkspaceLock, fsMsg(releaseErr)))
+	}
+	if err != nil {
+		return nil, err
 	}
 	s.manifest = WorkspaceManifest(files)
 	return s, nil
@@ -549,11 +574,27 @@ func (s *WorkspaceStore) readTreeDir(dir, prefix string, files map[string]string
 // the root, builds the document's tree beside the live one, and publishes it,
 // returning the manifest hash now served. A document refusal happens before the
 // store writes anything; a failure while building or publishing leaves the
-// previous tree live (see swap).
+// previous tree live (see swap). The whole sequence runs under the workspace
+// lock, so another gateway process cannot publish over a swap in flight.
 func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	release, err := s.acquireLock()
+	if err != nil {
+		return "", err
+	}
+	manifest, err := s.putLocked(doc)
+	if releaseErr := release(); releaseErr != nil {
+		// The publish, if it ran, already happened; the caller learns the lock
+		// could not be released rather than being told a clean push.
+		return "", errors.Join(err, fmt.Errorf("%w: releasing the lock: %s", ErrWorkspaceLock, fsMsg(releaseErr)))
+	}
+	return manifest, err
+}
+
+// putLocked is Put's body, run with the workspace lock held.
+func (s *WorkspaceStore) putLocked(doc WorkspaceDocument) (string, error) {
 	// A swap whose restore failed left the previous tree beside the root and no
 	// tree live (ErrWorkspaceLiveTreeLost). Recovering it comes first, before the
 	// document is looked at and before anything is swept, so a push that is then
@@ -563,9 +604,16 @@ func (s *WorkspaceStore) Put(doc WorkspaceDocument) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if restored {
-		s.manifest = WorkspaceManifest(files)
+	if !restored {
+		// Another process may have published since this store last read the tree.
+		// The manifest is read from the tree under the lock, so it reports that
+		// process's push rather than this store's last one. A read failure is
+		// refused here as a swap failure, before anything is written.
+		if files, err = s.readTree(); err != nil {
+			return "", fmt.Errorf("%w: reading the live tree under the lock: %w", ErrWorkspaceSwap, err)
+		}
 	}
+	s.manifest = WorkspaceManifest(files)
 	manifest, err := validatedManifest(doc)
 	if err != nil {
 		return "", err
