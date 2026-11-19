@@ -76,13 +76,15 @@ func sortedVerbNames(p *Policy) []string {
 const bdTreeGapsSnapshot = "b9f68260ed2a494972fe8aa922b6408a91905f0c"
 
 // bdTreeGaps names the verbs deploy/bd/verbs.json allows that the snapshot
-// above does not run, with the bd commit that offers them. The town runs bd
-// b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f. An entry excuses only that exact
-// verb; once a refreshed snapshot runs it, staleGapFailures reports the row so
-// it is deleted.
+// above does not run, with the bd commit that offers them. The town's pin is
+// bd 0f9f640fe0f1a4162f3aebdef7994135b1167a85, which it runs only after the
+// schema-67 migration window (gt-jgsmoj) rolls the pin pair; the predecessor
+// b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f predates the sample verb (be-1qqu).
+// An entry excuses only that exact verb; once a refreshed snapshot runs it,
+// staleGapFailures reports the row so it is deleted.
 var bdTreeGaps = map[string]string{
-	"sample add":  "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
-	"sample list": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+	"sample add":  "0f9f640fe0f1a4162f3aebdef7994135b1167a85",
+	"sample list": "0f9f640fe0f1a4162f3aebdef7994135b1167a85",
 }
 
 // TestVerbsFileMatchesCommandTree: every verb deploy/bd/verbs.json allows runs
@@ -189,6 +191,7 @@ func TestVerbsAbsentFromTreeFindsAMissingVerb(t *testing.T) {
 // a listed gap is excused, so the list cannot widen the gate.
 func TestTreeGapFailures(t *testing.T) {
 	t.Parallel()
+	// The town still runs bd b7e5e9c until the schema-67 migration window (gt-jgsmoj) rolls the pin pair.
 	exceptions := map[string]string{"sample add": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f"}
 	gaps := []verbGap{
 		{name: "sample add", message: "sample add is missing"},
@@ -208,8 +211,8 @@ func TestStaleGapFailures(t *testing.T) {
 	tree := cmdtree.NewTree()
 	tree.Add([]string{"sample", "add"}, nil, false)
 	exceptions := map[string]string{
-		"sample add":  "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
-		"sample list": "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+		"sample add":  "0f9f640fe0f1a4162f3aebdef7994135b1167a85",
+		"sample list": "0f9f640fe0f1a4162f3aebdef7994135b1167a85",
 	}
 	got := staleGapFailures(exceptions, tree)
 	if len(got) != 1 || !strings.Contains(got[0], "sample add") {
