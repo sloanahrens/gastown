@@ -28,8 +28,8 @@ const (
 	runStatusSkipped   = "skipped"
 )
 
-// Run is one workflow run the runs wait is watching.
-type Run struct {
+// WorkflowRun is one workflow run the runs wait is watching.
+type WorkflowRun struct {
 	// Repo is owner/name of the repository the run belongs to.
 	Repo     string
 	Workflow string
@@ -46,7 +46,7 @@ type Run struct {
 // It never reports idle on a listing it cannot trust: a list error is returned,
 // and a run with an unknown status is an error. A wait still not idle when bound
 // passes returns an error wrapping ErrWaitTimeout that names the runs still going.
-func WaitRunsIdle(ctx context.Context, list func(ctx context.Context) ([]Run, error), clock Clock, bound time.Duration, out io.Writer) error {
+func WaitRunsIdle(ctx context.Context, list func(ctx context.Context) ([]WorkflowRun, error), clock Clock, bound time.Duration, out io.Writer) error {
 	deadline := clock.Now().Add(bound)
 	var printed bool
 	var lastKey string
@@ -95,9 +95,9 @@ type RepoRef struct {
 // ForgejoRuns returns the list argument of WaitRunsIdle: the in-flight runs of
 // each named workflow in each repository, read through client. A failed read, or
 // a run whose created time cannot be read, is an error, never an empty listing.
-func ForgejoRuns(client ForgejoRunLister, repos []RepoRef, workflows []string) func(context.Context) ([]Run, error) {
-	return func(ctx context.Context) ([]Run, error) {
-		var runs []Run
+func ForgejoRuns(client ForgejoRunLister, repos []RepoRef, workflows []string) func(context.Context) ([]WorkflowRun, error) {
+	return func(ctx context.Context) ([]WorkflowRun, error) {
+		var runs []WorkflowRun
 		for _, repo := range repos {
 			name := repo.Owner + "/" + repo.Name
 			for _, wf := range workflows {
@@ -114,7 +114,7 @@ func ForgejoRuns(client ForgejoRunLister, repos []RepoRef, workflows []string) f
 					if err != nil {
 						return nil, fmt.Errorf("run of %s %s has an unreadable created time", name, wf)
 					}
-					runs = append(runs, Run{Repo: name, Workflow: wf, ID: run.ID, Status: run.Status, Created: created})
+					runs = append(runs, WorkflowRun{Repo: name, Workflow: wf, ID: run.ID, Status: run.Status, Created: created})
 				}
 			}
 		}
@@ -125,8 +125,8 @@ func ForgejoRuns(client ForgejoRunLister, repos []RepoRef, workflows []string) f
 // inFlightRuns returns the runs still going, sorted so the printed set and its
 // key are the same from one read to the next. A status the wait does not know is
 // an error.
-func inFlightRuns(runs []Run) ([]Run, error) {
-	var out []Run
+func inFlightRuns(runs []WorkflowRun) ([]WorkflowRun, error) {
+	var out []WorkflowRun
 	for _, run := range runs {
 		live, err := runInFlight(run.Status)
 		if err != nil {
@@ -155,12 +155,12 @@ func runInFlight(status string) (bool, error) {
 
 // runKey identifies a run for the set-change check. The age is left out, because
 // it moves on every read.
-func runKey(r Run) string {
+func runKey(r WorkflowRun) string {
 	return fmt.Sprintf("%s %s %d", r.Repo, r.Workflow, r.ID)
 }
 
 // runsKey is the identity of an in-flight set, in the order inFlightRuns sorts it.
-func runsKey(runs []Run) string {
+func runsKey(runs []WorkflowRun) string {
 	keys := make([]string, 0, len(runs))
 	for _, run := range runs {
 		keys = append(keys, runKey(run))
@@ -169,7 +169,7 @@ func runsKey(runs []Run) string {
 }
 
 // printRuns writes the in-flight set with each run's repo, workflow and age.
-func printRuns(out io.Writer, runs []Run, now time.Time) {
+func printRuns(out io.Writer, runs []WorkflowRun, now time.Time) {
 	if len(runs) == 0 {
 		fmt.Fprintln(out, "runs: none in flight")
 		return
@@ -181,7 +181,7 @@ func printRuns(out io.Writer, runs []Run, now time.Time) {
 }
 
 // runsNames names each run by its repo and workflow for the timeout error.
-func runsNames(runs []Run) string {
+func runsNames(runs []WorkflowRun) string {
 	names := make([]string, 0, len(runs))
 	for _, run := range runs {
 		names = append(names, run.Repo+" "+run.Workflow)

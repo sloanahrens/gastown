@@ -13,14 +13,14 @@ import (
 
 // listing is one scripted run list read.
 type listing struct {
-	runs []Run
+	runs []WorkflowRun
 	err  error
 }
 
 // scriptedRuns returns the listings in order and repeats the last one after that.
-func scriptedRuns(ls ...listing) (func(context.Context) ([]Run, error), *int) {
+func scriptedRuns(ls ...listing) (func(context.Context) ([]WorkflowRun, error), *int) {
 	calls := 0
-	return func(context.Context) ([]Run, error) {
+	return func(context.Context) ([]WorkflowRun, error) {
 		i := min(calls, len(ls)-1)
 		calls++
 		return ls[i].runs, ls[i].err
@@ -28,8 +28,8 @@ func scriptedRuns(ls ...listing) (func(context.Context) ([]Run, error), *int) {
 }
 
 // runAt is one run of the gate workflow in the gastown repository.
-func runAt(id int64, workflow, status string, created time.Time) Run {
-	return Run{Repo: "gastownhall/gastown", Workflow: workflow, ID: id, Status: status, Created: created}
+func runAt(id int64, workflow, status string, created time.Time) WorkflowRun {
+	return WorkflowRun{Repo: "gastownhall/gastown", Workflow: workflow, ID: id, Status: status, Created: created}
 }
 
 var runsT0 = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
@@ -38,8 +38,8 @@ func TestWaitRunsHoldsUntilRunEndsAndPrintsOnce(t *testing.T) {
 	t.Parallel()
 	gate := runAt(7, "gate.yml", "running", runsT0)
 	list, _ := scriptedRuns(
-		listing{runs: []Run{gate}},
-		listing{runs: []Run{gate}},
+		listing{runs: []WorkflowRun{gate}},
+		listing{runs: []WorkflowRun{gate}},
 		listing{},
 	)
 	clock := &fakeClock{now: runsT0}
@@ -62,7 +62,7 @@ runs: none in flight
 func TestWaitRunsBoundReturnsTimeoutNamingRuns(t *testing.T) {
 	t.Parallel()
 	gate := runAt(7, "gate.yml", "running", runsT0)
-	list, _ := scriptedRuns(listing{runs: []Run{gate}})
+	list, _ := scriptedRuns(listing{runs: []WorkflowRun{gate}})
 	clock := &fakeClock{now: runsT0}
 	err := WaitRunsIdle(context.Background(), list, clock, 25*time.Second, &bytes.Buffer{})
 	if !errors.Is(err, ErrWaitTimeout) {
@@ -95,7 +95,7 @@ func TestWaitRunsListErrorIsNotIdle(t *testing.T) {
 func TestWaitRunsUnknownStatusIsNotIdle(t *testing.T) {
 	t.Parallel()
 	// A status the wait does not know must not read as finished.
-	list, _ := scriptedRuns(listing{runs: []Run{runAt(7, "gate.yml", "mystery", runsT0)}})
+	list, _ := scriptedRuns(listing{runs: []WorkflowRun{runAt(7, "gate.yml", "mystery", runsT0)}})
 	clock := &fakeClock{now: runsT0}
 	err := WaitRunsIdle(context.Background(), list, clock, time.Minute, &bytes.Buffer{})
 	if err == nil {
@@ -111,7 +111,7 @@ func TestWaitRunsEndedRunsDoNotHoldTheWait(t *testing.T) {
 	for _, status := range []string{"cancelled", "failure", "success", "skipped"} {
 		t.Run(status, func(t *testing.T) {
 			t.Parallel()
-			list, _ := scriptedRuns(listing{runs: []Run{runAt(7, "gate.yml", status, runsT0)}})
+			list, _ := scriptedRuns(listing{runs: []WorkflowRun{runAt(7, "gate.yml", status, runsT0)}})
 			clock := &fakeClock{now: runsT0}
 			var out bytes.Buffer
 			if err := WaitRunsIdle(context.Background(), list, clock, time.Minute, &out); err != nil {
@@ -132,7 +132,7 @@ func TestWaitRunsCancelDuringListIsNotIdle(t *testing.T) {
 	// The list is canceled after it returns an empty listing: that listing was
 	// read while the wait was being stopped, so it must not decide the wait.
 	ctx, cancel := context.WithCancel(context.Background())
-	list := func(context.Context) ([]Run, error) {
+	list := func(context.Context) ([]WorkflowRun, error) {
 		cancel()
 		return nil, nil
 	}

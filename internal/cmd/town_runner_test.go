@@ -88,6 +88,7 @@ const stopWaitBound = 10 * time.Second
 type rollApply struct {
 	events   *rollEvents
 	err      error
+	readyErr error
 	diff     []string
 	diffErr  error
 	cancel   context.CancelFunc
@@ -111,6 +112,11 @@ func (a *rollApply) Apply(context.Context) error {
 	case <-ctx.Done():
 	}
 	return a.err
+}
+
+func (a *rollApply) WaitReady(context.Context) error {
+	a.events.add("ready")
+	return a.readyErr
 }
 
 func (a *rollApply) Diff(context.Context) ([]string, error) {
@@ -217,7 +223,7 @@ func newRollFixture() *rollFixture {
 			ev.add("landing")
 			return runnerroll.RollPause, 0, true, nil
 		},
-		runs: func(context.Context) ([]runnerroll.Run, error) {
+		runs: func(context.Context) ([]runnerroll.WorkflowRun, error) {
 			ev.add("runs")
 			return nil, nil
 		},
@@ -241,7 +247,7 @@ func TestTownRunnerRollRunsStepsInOrder(t *testing.T) {
 		t.Fatalf("roll: %v", err)
 	}
 
-	want := []string{"hold:create", "landing", "runs", "apply", "hold:remove"}
+	want := []string{"hold:create", "landing", "runs", "apply", "ready", "hold:remove"}
 	if !slices.Equal(f.events.calls, want) {
 		t.Errorf("calls = %v, want %v", f.events.calls, want)
 	}
@@ -286,7 +292,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 		{
 			name: "runs list fails",
 			mutate: func(d *runnerRollDeps, _ context.CancelFunc) {
-				d.runs = func(context.Context) ([]runnerroll.Run, error) {
+				d.runs = func(context.Context) ([]runnerroll.WorkflowRun, error) {
 					return nil, errors.New("forgejo unreachable")
 				}
 			},
@@ -296,8 +302,8 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 		{
 			name: "runs wait times out",
 			mutate: func(d *runnerRollDeps, _ context.CancelFunc) {
-				d.runs = func(context.Context) ([]runnerroll.Run, error) {
-					return []runnerroll.Run{{Repo: "town/gastown", Workflow: "gate.yml", ID: 7, Status: forgejo.RunStatusRunning, Created: d.now()}}, nil
+				d.runs = func(context.Context) ([]runnerroll.WorkflowRun, error) {
+					return []runnerroll.WorkflowRun{{Repo: "town/gastown", Workflow: "gate.yml", ID: 7, Status: forgejo.RunStatusRunning, Created: d.now()}}, nil
 				}
 				d.runsWait = 10 * time.Second
 			},
@@ -311,6 +317,14 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 				d.apply.(*rollApply).err = errors.New("rollout refused")
 			},
 			wantCalls:  []string{"hold:create", "landing", "runs", "apply", "hold:remove"},
+			wantRunErr: true,
+		},
+		{
+			name: "the ready wait fails",
+			mutate: func(d *runnerRollDeps, _ context.CancelFunc) {
+				d.apply.(*rollApply).readyErr = errors.New("the Deployment did not become Available")
+			},
+			wantCalls:  []string{"hold:create", "landing", "runs", "apply", "ready", "hold:remove"},
 			wantRunErr: true,
 		},
 		{
@@ -333,8 +347,8 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			// alone, nothing is applied, and the release still reaches the store.
 			name: "context canceled during the runs wait",
 			mutate: func(d *runnerRollDeps, cancel context.CancelFunc) {
-				d.runs = func(context.Context) ([]runnerroll.Run, error) {
-					return []runnerroll.Run{{Repo: "town/gastown", Workflow: "gate.yml", ID: 7, Status: forgejo.RunStatusRunning, Created: d.now()}}, nil
+				d.runs = func(context.Context) ([]runnerroll.WorkflowRun, error) {
+					return []runnerroll.WorkflowRun{{Repo: "town/gastown", Workflow: "gate.yml", ID: 7, Status: forgejo.RunStatusRunning, Created: d.now()}}, nil
 				}
 				d.runsWait = 10 * time.Second
 				d.clock.(*rollClock).onSleep = cancel
@@ -363,7 +377,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			mutate: func(d *runnerRollDeps, cancel context.CancelFunc) {
 				d.apply.(*rollApply).cancel = cancel
 			},
-			wantCalls: []string{"hold:create", "landing", "runs", "apply", "hold:remove"},
+			wantCalls: []string{"hold:create", "landing", "runs", "apply", "ready", "hold:remove"},
 		},
 	}
 	for _, tc := range cases {
@@ -617,10 +631,10 @@ func TestTownRunnerApplierWiredRefusesAMissingSeam(t *testing.T) {
 	}
 }
 
-// TestTownRunnerRollApplyCallsInOrder: the ConfigMap, then the two claims, then
-// the Deployment, then the rollout wait and the readiness read, and nothing
-// else.
-func TestTownRunnerRollApplyCallsInOrder(t *testing.T) {
+// TestTownRunnerRollApplyAndReadyCallInOrder: the ConfigMap, then the two
+// claims, then the Deployment, then the rollout wait and the readiness read, and
+// nothing else.
+func TestTownRunnerRollApplyAndReadyCallInOrder(t *testing.T) {
 	t.Parallel()
 	k := &recordingKubectl{answer: func(call recordedKubectlCall) (string, int, error) {
 		if len(call.args) > 0 && call.args[0] == "get" {
@@ -629,8 +643,12 @@ func TestTownRunnerRollApplyCallsInOrder(t *testing.T) {
 		return "", 0, nil
 	}}
 
-	if err := testRunnerApplier(k).Apply(context.Background()); err != nil {
+	a := testRunnerApplier(k)
+	if err := a.Apply(context.Background()); err != nil {
 		t.Fatalf("apply: %v", err)
+	}
+	if err := a.WaitReady(context.Background()); err != nil {
+		t.Fatalf("ready: %v", err)
 	}
 
 	if len(k.calls) != 6 {
@@ -734,13 +752,56 @@ func TestTownRunnerRollApplyRefuses(t *testing.T) {
 			a := testRunnerApplier(k)
 			tc.mutate(&a, k)
 
+			// The apply and the ready wait are the roll's steps 4 and 5: a failing
+			// apply stops before the wait, as it does in the roll.
 			err := a.Apply(context.Background())
+			if err == nil {
+				err = a.WaitReady(context.Background())
+			}
 
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want it to name %q", err, tc.want)
 			}
 			if len(k.calls) != tc.wantCalls {
 				t.Errorf("made %d cluster calls, want %d: %v", len(k.calls), tc.wantCalls, k.calls)
+			}
+		})
+	}
+}
+
+// TestTownRunnerRollWaitReadyRefusesAManifestItCannotBuild: the ready wait finds
+// the Deployment by rendering the manifests again, so values or a render that
+// fail there are an error and no cluster call.
+func TestTownRunnerRollWaitReadyRefusesAManifestItCannotBuild(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*runnerApplier)
+		want   string
+	}{
+		{name: "values unreadable", mutate: func(a *runnerApplier) {
+			a.values = func() (forgejorunner.Values, error) { return forgejorunner.Values{}, errors.New("file unreadable") }
+		}, want: "reading the control cluster's runner values"},
+		{name: "render refuses", mutate: func(a *runnerApplier) {
+			a.build = func(forgejorunner.Values) (forgejorunner.Manifests, error) {
+				return forgejorunner.Manifests{}, errors.New("no labels")
+			}
+		}, want: "rendering the runner"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			k := &recordingKubectl{answer: func(recordedKubectlCall) (string, int, error) { return "", 0, nil }}
+			a := testRunnerApplier(k)
+			tc.mutate(&a)
+
+			err := a.WaitReady(context.Background())
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+			if len(k.calls) != 0 {
+				t.Errorf("made %d cluster calls, want none: %v", len(k.calls), k.calls)
 			}
 		})
 	}
@@ -814,7 +875,7 @@ func TestTownRunnerRollHoldPathUsesTheExportedName(t *testing.T) {
 // changeHoldDuringRuns makes the runs read write the store, as another process
 // would between the take and the release.
 func changeHoldDuringRuns(f *rollFixture, content string, present bool) {
-	f.deps.runs = func(context.Context) ([]runnerroll.Run, error) {
+	f.deps.runs = func(context.Context) ([]runnerroll.WorkflowRun, error) {
 		f.events.add("runs")
 		f.store.content, f.store.present = content, present
 		return nil, nil
@@ -878,6 +939,42 @@ func TestTownRunnerRollRefusesWithoutAHoldStoreBeforeTheHold(t *testing.T) {
 
 	if err := runTownRunnerRoll(f.deps); err == nil {
 		t.Fatal("roll with no landing hold store succeeded")
+	}
+	if len(f.events.calls) != 0 {
+		t.Errorf("calls = %v, want none", f.events.calls)
+	}
+}
+
+// TestTownRunnerRollRefusesWithoutAnApplier: a roll whose applier is not wired
+// at all refuses before it reads the town or takes the hold, instead of
+// panicking on the nil applier.
+func TestTownRunnerRollRefusesWithoutAnApplier(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	f.deps.apply = nil
+
+	err := runTownRunnerRoll(f.deps)
+
+	if err == nil || !strings.Contains(err.Error(), "no applier") {
+		t.Fatalf("error = %v, want the missing-applier refusal", err)
+	}
+	if len(f.events.calls) != 0 {
+		t.Errorf("calls = %v, want none", f.events.calls)
+	}
+}
+
+// TestTownRunnerRollRefusesWithoutASignalSourceBeforeTheHold: a real roll with
+// no signal source cannot release the hold on Ctrl-C, so it refuses before the
+// take.
+func TestTownRunnerRollRefusesWithoutASignalSourceBeforeTheHold(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	f.deps.signals = nil
+
+	err := runTownRunnerRoll(f.deps)
+
+	if err == nil || !strings.Contains(err.Error(), "no signal source") {
+		t.Fatalf("error = %v, want the missing-signal-source refusal", err)
 	}
 	if len(f.events.calls) != 0 {
 		t.Errorf("calls = %v, want none", f.events.calls)
