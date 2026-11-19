@@ -163,6 +163,22 @@ func TestJobsUpdateRowUnreadableHistory(t *testing.T) {
 	}
 }
 
+func TestJobsUpdateRowCorruptHistory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// Every complete line is unreadable: nothing says whether the file is a
+	// history of failed runs or junk, so the row is unknown, never never_run.
+	writeUpdateHistory(t, root, "not json at all\n"+`{"v":2,"run_id":"r1"}`+"\n")
+
+	j := jobsRow(t, root, Options{}, updateStep, updateJobName)
+	if j.State != StateUnknown {
+		t.Errorf("State = %q, want unknown for a history no line of which parses", j.State)
+	}
+	if j.LastRun != nil || j.Outcome != "" {
+		t.Errorf("LastRun = %v, Outcome = %q, want neither for a corrupt history", j.LastRun, j.Outcome)
+	}
+}
+
 func TestJobsUpdateRowWithoutEndTime(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -202,6 +218,48 @@ func TestJobsDoltBackupRow(t *testing.T) {
 	}
 	if j.Kind != config.DaemonStepPatrol || j.Cadence != nightlyCadence {
 		t.Errorf("Kind = %q, Cadence = %v, want %q and %v", j.Kind, j.Cadence, config.DaemonStepPatrol, nightlyCadence)
+	}
+}
+
+func TestJobsDoltBackupRowNewestByName(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "dolt")
+	// The older night finished later than the newer one, so only the date name
+	// can say which night is the newest: the daemon writes one directory per
+	// date and a night's finished time comes from its own manifest.
+	writeBackupManifest(t, root, "2026-11-18",
+		`{"started":"2026-11-18T03:00:00Z","finished":"2026-11-18T23:00:00Z","databases":["hq"],"method":"test"}`)
+	writeBackupManifest(t, root, "2026-11-19",
+		`{"started":"2026-11-19T03:00:00Z","finished":"2026-11-19T03:05:00Z","databases":["hq","gt"],"method":"test"}`)
+
+	j := jobsRow(t, t.TempDir(), Options{BackupRoot: root}, nil, doltBackupJobName)
+	wantLastRun := time.Date(2026, 11, 19, 3, 5, 0, 0, time.UTC)
+	if j.LastRun == nil || !j.LastRun.Equal(wantLastRun) {
+		t.Errorf("LastRun = %v, want the newest night by name %v", j.LastRun, wantLastRun)
+	}
+	if got := j.Stats["databases"]; got != 2 {
+		t.Errorf("Stats[databases] = %d, want the newest night's 2", got)
+	}
+}
+
+func TestJobsDoltBackupRowCorruptNewestNight(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "dolt")
+	// The older night is healthy, but the newest backup is the corrupt one:
+	// doltbackup.List would drop it and report the older night as the last run.
+	writeBackupManifest(t, root, "2026-11-18",
+		`{"started":"2026-11-18T03:00:00Z","finished":"2026-11-18T03:05:00Z","databases":["hq"],"method":"test"}`)
+	writeBackupManifest(t, root, "2026-11-19", `{"started":"2026-11-19T03:00:00Z",`)
+
+	j := jobsRow(t, t.TempDir(), Options{BackupRoot: root}, nil, doltBackupJobName)
+	if j.State != StateUnknown {
+		t.Errorf("State = %q, want unknown for a corrupt newest night beside a healthy older one", j.State)
+	}
+	if j.Outcome != OutcomeFailed {
+		t.Errorf("Outcome = %q, want failed for a corrupt newest night", j.Outcome)
+	}
+	if j.LastRun != nil || j.Stats != nil {
+		t.Errorf("LastRun = %v, Stats = %v, want neither for a corrupt newest night", j.LastRun, j.Stats)
 	}
 }
 

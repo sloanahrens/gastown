@@ -1,7 +1,12 @@
 package jobs
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -68,42 +73,88 @@ func applyUpdateRun(j *Job, history []update.HistoryLine, historyErr error, now 
 	return stateOf(*j, historyErr != nil, false, now)
 }
 
-// backupNights returns the nights doltbackup.List finds under root. An empty
-// root is an error, not a missing root: the caller did not resolve the backup
-// root, and reading that as "no backups" would show never_run for a root
-// nobody looked at.
-func backupNights(root string) ([]doltbackup.Backup, error) {
-	if root == "" {
-		return nil, errors.New("backup root is empty")
+// backupDateLayout is the name layout doltbackup.Dir gives a night's
+// directory. The row picks the newest night by this name, as the daemon writes
+// one directory per date.
+const backupDateLayout = "2006-01-02"
+
+// isBackupNight reports whether name is a night's date: the test
+// doltbackup.List makes before it reads a directory.
+func isBackupNight(name string) bool {
+	_, err := time.Parse(backupDateLayout, name)
+	return err == nil
+}
+
+// readBackupManifest reads the manifest doltbackup.Commit writes last into a
+// night's directory.
+func readBackupManifest(dir string) (doltbackup.Manifest, error) {
+	var m doltbackup.Manifest
+	path := filepath.Join(dir, doltbackup.ManifestName)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return m, err
 	}
-	return doltbackup.List(root)
+	if err := json.Unmarshal(data, &m); err != nil {
+		return m, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return m, nil
+}
+
+// newestBackupNight reads the manifest of the newest night under root, newest
+// by its date name. It does not use doltbackup.List, which drops a night whose
+// manifest does not parse: that would let the row report a healthy older night
+// while the newest backup is corrupt. night reports whether a date-named
+// directory exists; when it does and the manifest cannot be read, the error
+// says so. An empty root is an error, not a missing root: the caller did not
+// resolve the backup root, and reading that as "no backups" would show
+// never_run for a root nobody looked at.
+func newestBackupNight(root string) (m doltbackup.Manifest, night bool, err error) {
+	if root == "" {
+		return m, false, errors.New("backup root is empty")
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, fs.ErrNotExist) {
+		return m, false, nil
+	}
+	if err != nil {
+		return m, false, err
+	}
+	newest := ""
+	for _, e := range entries {
+		if e.IsDir() && isBackupNight(e.Name()) && e.Name() > newest {
+			newest = e.Name()
+		}
+	}
+	if newest == "" {
+		return m, false, nil
+	}
+	m, err = readBackupManifest(filepath.Join(root, newest))
+	return m, true, err
 }
 
 // doltBackupRow is the nightly backup's row: when the newest night finished and
-// how many databases it holds. An unreadable root, or nights with no finish
-// time, make it unknown; no night on disk is never_run.
-func doltBackupRow(backups []doltbackup.Backup, readErr error, now time.Time) Job {
+// how many databases it holds. A night whose manifest cannot be read, an
+// unreadable root, and a resolved root with no night each make it unknown; only
+// a root that holds no night at all is never_run.
+func doltBackupRow(m doltbackup.Manifest, night bool, readErr error, now time.Time) Job {
 	j := Job{Name: doltBackupJobName, Kind: config.DaemonStepPatrol, Cadence: nightlyCadence}
 	switch {
 	case readErr != nil:
 		j.State = StateUnknown
-	case len(backups) == 0:
+		if night {
+			// The newest night is on disk but its manifest cannot be read:
+			// that night's backup did not succeed, whatever older nights hold.
+			j.Outcome = OutcomeFailed
+		}
+	case !night:
 		j.State = StateNeverRun
+	case m.Finished.IsZero():
+		j.State = StateUnknown
 	default:
-		newest := backups[0]
-		for _, b := range backups[1:] {
-			if b.Manifest.Finished.After(newest.Manifest.Finished) {
-				newest = b
-			}
-		}
-		if newest.Manifest.Finished.IsZero() {
-			j.State = StateUnknown
-			break
-		}
-		at := newest.Manifest.Finished
+		at := m.Finished
 		j.LastRun = &at
 		j.Outcome = OutcomeOK
-		j.Stats = map[string]int64{"databases": int64(len(newest.Manifest.Databases))}
+		j.Stats = map[string]int64{"databases": int64(len(m.Databases))}
 		j.State = stateOf(j, false, false, now)
 	}
 	return j

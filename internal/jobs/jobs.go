@@ -104,7 +104,7 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 	}
 	runs, runErr := readLastRuns(townRoot)
 	history, historyErr := updateHistory(townRoot)
-	backups, backupErr := backupNights(opts.BackupRoot)
+	backup, backupNight, backupErr := newestBackupNight(opts.BackupRoot)
 
 	jobs := make([]Job, 0, len(steps)+2)
 	for _, s := range steps {
@@ -125,7 +125,7 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 		}
 		jobs = append(jobs, j)
 	}
-	jobs = append(jobs, doltBackupRow(backups, backupErr, now))
+	jobs = append(jobs, doltBackupRow(backup, backupNight, backupErr, now))
 	return append(jobs, doltGCRows(townRoot, now)...), nil
 }
 
