@@ -76,9 +76,9 @@ func TestMetricsHourRunsEveryStepAndReportsTheFirstFailure(t *testing.T) {
 					calls = append(calls, "regime")
 					return tc.regimeErr
 				},
-				analyse: func(context.Context, io.Writer, string, func(context.Context, string)) error {
+				analyse: func(context.Context, io.Writer, string, func(context.Context, string)) (metrics.AnalysisResult, error) {
 					calls = append(calls, "analyse")
-					return tc.analyseErr
+					return metrics.AnalysisResult{}, tc.analyseErr
 				},
 				weekly: func(context.Context, io.Writer, string) error {
 					calls = append(calls, "weekly")
@@ -216,12 +216,12 @@ func fakeHourSteps(calls *[]string, due bool, failures []error) metricsHourSteps
 			*calls = append(*calls, "dataset")
 			return 2, failures
 		},
-		analyse: func(ctx context.Context, _ io.Writer, _ string, beforeRun func(context.Context, string)) error {
+		analyse: func(ctx context.Context, _ io.Writer, _ string, beforeRun func(context.Context, string)) (metrics.AnalysisResult, error) {
 			if due {
 				beforeRun(ctx, "2026-11-12T00:00:00Z")
 			}
 			*calls = append(*calls, "analyse")
-			return nil
+			return metrics.AnalysisResult{}, nil
 		},
 		weekly: func(context.Context, io.Writer, string) error {
 			*calls = append(*calls, "weekly")
@@ -378,7 +378,7 @@ func TestMetricsHourRefreshesDatasetOnceADuePeriod(t *testing.T) {
 			exports++
 			return 1, nil
 		},
-		analyse: func(ctx context.Context, out io.Writer, _ string, beforeRun func(context.Context, string)) error {
+		analyse: func(ctx context.Context, out io.Writer, _ string, beforeRun func(context.Context, string)) (metrics.AnalysisResult, error) {
 			env := metrics.Env{
 				Town:     town,
 				Now:      func() time.Time { return now },
@@ -398,7 +398,7 @@ func TestMetricsHourRefreshesDatasetOnceADuePeriod(t *testing.T) {
 				return "", errors.New("the analysis must fail before the extract")
 			}
 			opts.BeforeRun = beforeRun
-			return runMetricsAnalyse(ctx, out, env, opts)
+			return runMetricsAnalyseResult(ctx, out, env, opts)
 		},
 	}
 	hours := []struct {
@@ -428,5 +428,121 @@ func TestMetricsHourRefreshesDatasetOnceADuePeriod(t *testing.T) {
 				t.Fatalf("dataset stamp %q does not name the due period %s", stamp, period)
 			}
 		}
+	}
+}
+
+// footerHourSteps is the hour's steps over a town whose analysis is due, with
+// its extract answered by the day's tables the test writes: the fake extract is
+// analysisPaths, and every step but the analysis is a stub, so the hour reaches
+// the gap check over the real footer reader.
+func footerHourSteps(t *testing.T, town string) metricsHourSteps {
+	t.Helper()
+	writeAnalyseStamp(t, town, analyseNow.Add(-25*time.Hour))
+	writeHourFile(t, town, ".runtime/metrics/2026-10-01/landings.csv", "bead,rig,landed_at\r\n")
+	return metricsHourSteps{
+		snapshot: func(context.Context, io.Writer, string) error { return nil },
+		regime:   func(io.Writer, string) error { return nil },
+		dataset:  func(context.Context, string) (int, []error) { return 0, nil },
+		weekly:   func(context.Context, io.Writer, string) error { return nil },
+		analyse: func(ctx context.Context, out io.Writer, town string, beforeRun func(context.Context, string)) (metrics.AnalysisResult, error) {
+			opts := analysisPaths(town)
+			opts.BeforeRun = beforeRun
+			return runMetricsAnalyseResult(ctx, out, fakeAnalyseEnv(t, town), opts)
+		},
+	}
+}
+
+// A day whose extract footer carries a gap fails the hour with the count and
+// the first gap named, so the plugin run is recorded as failed; the day's
+// tables are still on disk, because the analysis published them before the
+// check.
+func TestMetricsRunGapsFail(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		gaps string
+		want string
+	}{
+		{
+			name: "one gap",
+			gaps: `[["bd","bd show --json was refused (HTTP 403)"]]`,
+			want: "extract left 1 gaps, first: bd: bd show --json was refused (HTTP 403)",
+		},
+		{
+			name: "a gap row that is not a source and a reason",
+			gaps: `[["bd"]]`,
+			want: "extract left 1 gaps, and the first is not a source and a reason",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeHourFile(t, town, ".runtime/metrics/2026-10-01/weekly.csv",
+				"week,rig,thin,dominant_model\r\n")
+			writeHourFile(t, town, ".runtime/metrics/2026-10-01/footer.json",
+				`{"rows_read":{"ledger":0,"reviews":0,"beads":0,"usage":0},"rows_dropped":[],"gaps":`+tc.gaps+
+					`,"sources_unreadable":[],"model_unknown":0,"stage_stamp_missing_created_at":0,"stage_stamp_missing_dispatched_at":0,"stage_stamp_missing_submitted_at":0}`)
+
+			var out bytes.Buffer
+			err := runMetricsHourWith(context.Background(), &out, town, footerHourSteps(t, town))
+			if err == nil {
+				t.Fatalf("the hour returned no error for a footer with a gap; output %q", out.String())
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %q, want it to name the count and the first gap %q", err, tc.want)
+			}
+			for _, name := range []string{"landings.csv", "weekly.csv", "footer.json"} {
+				if _, statErr := os.Stat(filepath.Join(town, ".runtime", "metrics", "2026-10-01", name)); statErr != nil {
+					t.Errorf("%s is not on disk after the failed run: %v", name, statErr)
+				}
+			}
+		})
+	}
+}
+
+// A footer with no gaps leaves the hour running, and a footer it cannot read is
+// an error rather than a day read as gap-free.
+func TestMetricsRunGapsClean(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		footer  string
+		wantErr string
+	}{
+		{
+			name:   "no gaps",
+			footer: `{"rows_read":{"ledger":0,"reviews":0,"beads":0,"usage":0},"rows_dropped":[],"gaps":[],"sources_unreadable":[],"model_unknown":0,"stage_stamp_missing_created_at":0,"stage_stamp_missing_dispatched_at":0,"stage_stamp_missing_submitted_at":0}`,
+		},
+		{
+			name:    "an unreadable footer",
+			footer:  "not json",
+			wantErr: "extract footer:",
+		},
+		{
+			name:    "no footer at all",
+			footer:  "",
+			wantErr: "extract footer:",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeHourFile(t, town, ".runtime/metrics/2026-10-01/weekly.csv",
+				"week,rig,thin,dominant_model\r\n")
+			if tc.footer != "" {
+				writeHourFile(t, town, ".runtime/metrics/2026-10-01/footer.json", tc.footer)
+			}
+			err := runMetricsHourWith(context.Background(), io.Discard, town, footerHourSteps(t, town))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("the hour failed on a footer with no gaps: %v", err)
+			case tc.wantErr != "" && err == nil:
+				t.Fatalf("the hour passed over a footer it could not read")
+			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
+				t.Fatalf("err = %q, want it to name %q", err, tc.wantErr)
+			}
+		})
 	}
 }

@@ -31,9 +31,11 @@ passed since the last decision. A run that finds the lock held by another run
 prints a skipped line and exits 0, so the daemon records the hour as skipped
 rather than as a failure. Every step runs whichever one fails, and the command
 fails with the first failing step's error. A dataset failure is logged one line
-each and does not fail the command. The weekly retrain writes one line naming its
-outcome; a retrain or adoption that fails, a last-run stamp it cannot read, or
-a town it cannot wire, fails the command too.
+each and does not fail the command. An hour whose analysis extracted also fails
+when the extract left gaps in its footer, after the day's tables and the
+receipt are written. The weekly retrain writes one line naming its outcome; a
+retrain or adoption that fails, a last-run stamp it cannot read, or a town it
+cannot wire, fails the command too.
 
 This is the one entry point the daemon's town-metrics plugin calls.`,
 	Args: cobra.NoArgs,
@@ -63,8 +65,9 @@ type metricsHourSteps struct {
 	regime   func(io.Writer, string) error
 	// analyse runs the daily analysis. beforeRun is called once, before the
 	// analysis's first step, with the due period, on an hour the analysis runs
-	// and not otherwise.
-	analyse func(ctx context.Context, out io.Writer, town string, beforeRun func(context.Context, string)) error
+	// and not otherwise. Its result names the day's extract directory, empty on
+	// an hour that ran no extract, which the gap check reads the footer from.
+	analyse func(ctx context.Context, out io.Writer, town string, beforeRun func(context.Context, string)) (metrics.AnalysisResult, error)
 	// dataset refreshes every enabled battery's Jev dataset and returns how many
 	// it wrote and each failure.
 	dataset func(ctx context.Context, town string) (int, []error)
@@ -81,10 +84,10 @@ func hostMetricsHourSteps() metricsHourSteps {
 		regime: func(out io.Writer, town string) error {
 			return recordInstallRegimeEvents(out, metrics.OSEnv(town), townMetricsActor)
 		},
-		analyse: func(ctx context.Context, out io.Writer, town string, beforeRun func(context.Context, string)) error {
+		analyse: func(ctx context.Context, out io.Writer, town string, beforeRun func(context.Context, string)) (metrics.AnalysisResult, error) {
 			opts := analysisOptions(town)
 			opts.BeforeRun = beforeRun
-			return runMetricsAnalyse(ctx, out, metrics.OSEnv(town), opts)
+			return runMetricsAnalyseResult(ctx, out, metrics.OSEnv(town), opts)
 		},
 		dataset: jevDatasetHour,
 		weekly: func(ctx context.Context, out io.Writer, town string) error {
@@ -112,7 +115,9 @@ func runMetricsHour(ctx context.Context, out io.Writer, town string) error {
 // failing analysis retries. A dataset failure is logged one line each and never
 // stops the analysis or fails the hour. The weekly story-points job runs last, so
 // an hour that analyses has today's extract in place for it, and it runs whatever
-// the analysis decided.
+// the analysis decided. An hour whose analysis extracted is also refused when
+// its footer carries a gap, after the analysis wrote the day's tables and its
+// receipt (gt-t9ll9c).
 func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps metricsHourSteps) error {
 	if steps.weekly == nil {
 		return errors.New("metrics hour: the steps have no weekly job, so the story-point weights would never be retrained")
@@ -138,7 +143,11 @@ func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps m
 	}
 	snapshotErr := steps.snapshot(ctx, out, town)
 	regimeErr := steps.regime(out, town)
-	analyseErr := steps.analyse(ctx, out, town, refresh)
+	analysis, analyseErr := steps.analyse(ctx, out, town, refresh)
+	var gapsErr error
+	if analyseErr == nil {
+		gapsErr = extractGaps(town, analysis.DayDir)
+	}
 	weeklyErr := steps.weekly(ctx, out, town)
 	if snapshotErr != nil {
 		return snapshotErr
@@ -149,7 +158,34 @@ func runMetricsHourWith(ctx context.Context, out io.Writer, town string, steps m
 	if analyseErr != nil {
 		return analyseErr
 	}
+	if gapsErr != nil {
+		return gapsErr
+	}
 	return weeklyErr
+}
+
+// extractGaps refuses a day whose extract footer carries a gap, so an hour that
+// could not read its sources is recorded as failed rather than as a clean run
+// that published figures it did not have (gt-t9ll9c). dayDir is empty on an hour
+// whose analysis was not due: no extract ran, so there is no new footer to
+// judge. A footer the hour cannot read is an error too, never a day without
+// gaps.
+func extractGaps(town, dayDir string) error {
+	if dayDir == "" {
+		return nil
+	}
+	result, err := metrics.LoadResult(metrics.OSEnv(town), dayDir)
+	if err != nil {
+		return fmt.Errorf("extract footer: %w", err)
+	}
+	gaps := result.Footer.Gaps
+	if len(gaps) == 0 {
+		return nil
+	}
+	if len(gaps[0]) != 2 {
+		return fmt.Errorf("extract left %d gaps, and the first is not a source and a reason: %v", len(gaps), gaps[0])
+	}
+	return fmt.Errorf("extract left %d gaps, first: %s: %s", len(gaps), gaps[0][0], gaps[0][1])
 }
 
 // refreshDatasets refreshes the Jev datasets for period unless the stamp beside
