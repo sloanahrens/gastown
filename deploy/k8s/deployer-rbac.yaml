@@ -16,6 +16,13 @@
 # break-glass credential, a one-day lifetime against 30 days for deployer-apply
 # (gt-negjz0). escalate and bind stay in the role; narrowing them is the
 # operator's call, filed as the open decision bead gt-924m6x.
+#
+# The same refusal does not bound deployer-apply either. It may create and update
+# Deployments, CronJobs and ServiceAccounts in gt, so it can apply a Deployment
+# whose pod spec mounts any Secret in gt or runs as any ServiceAccount there,
+# including gt-update. This file holds neither fact down. What bounds the apply
+# credential is its use: it applies only the plan the operator approved by hash
+# (gt-igz5vn), and its certificate is the one that lasts 30 days.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
