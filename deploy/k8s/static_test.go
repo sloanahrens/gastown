@@ -181,17 +181,16 @@ func TestStaticObjectsEveryFileAccountedFor(t *testing.T) {
 		}
 	})
 
-	t.Run("the directories another package owns are not walked", func(t *testing.T) {
+	t.Run("the directories another package or the gt-sbx set owns are not walked", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		for _, dir := range []string{"kind", "values", "daemon", "dolt", "forgejo-runner", "update-job", "update-job/testdata", "testdata"} {
+		for _, dir := range []string{"kind", "values", "gt-cache", "daemon", "dolt", "forgejo-runner", "update-job", "update-job/testdata", "testdata"} {
 			writeFile(t, root, filepath.Join(dir, "owned.yaml"))
 		}
 		writeFile(t, root, "root.yaml")
 		writeFile(t, root, "policy/kind.yaml")
-		writeFile(t, root, "gt-cache/claim.yaml")
 		got := walkStaticYAML(t, root)
-		want := []string{"gt-cache/claim.yaml", "policy/kind.yaml", "root.yaml"}
+		want := []string{"policy/kind.yaml", "root.yaml"}
 		if !slices.Equal(got, want) {
 			t.Fatalf("walk found %q, want %q", got, want)
 		}
@@ -359,7 +358,8 @@ func TestStaticObjectsSplit(t *testing.T) {
 }
 
 // walkStaticYAML returns every YAML file under root, relative to root with
-// slash separators, skipping the directories whose files another package owns.
+// slash separators, skipping the directories whose files another package or the
+// gt-sbx set owns.
 func walkStaticYAML(t *testing.T, root string) []string {
 	t.Helper()
 	var files []string
@@ -390,11 +390,12 @@ func walkStaticYAML(t *testing.T, root string) []string {
 	return files
 }
 
-// staticOwnedDirs hold files another package reads and tests; none of them is a
-// control-cluster object the static set renders.
+// staticOwnedDirs hold files another package reads, or the gt-sbx set embeds;
+// none of them holds a control-cluster object the static set renders.
 var staticOwnedDirs = map[string]bool{
 	"kind":           true,
 	"values":         true,
+	"gt-cache":       true,
 	"daemon":         true,
 	"dolt":           true,
 	"forgejo-runner": true,
@@ -402,10 +403,15 @@ var staticOwnedDirs = map[string]bool{
 	"testdata":       true,
 }
 
-// accountingProblems returns one line per file the static set does not account
-// for, and per listed file that is not on disk: a new hand-applied manifest
-// cannot be added without a decision.
+// accountingProblems holds the control cluster's set to its accounting.
 func accountingProblems(files, embedded, excluded []string) []string {
+	return accountingProblemsFor(files, embedded, excluded, "StaticExcluded")
+}
+
+// accountingProblemsFor returns one line per file the set does not account for,
+// and per listed file that is not on disk: a new hand-applied file cannot be
+// added without a decision. listName is the exclusion list a problem names.
+func accountingProblemsFor(files, embedded, excluded []string, listName string) []string {
 	onDisk := map[string]bool{}
 	for _, f := range files {
 		onDisk[f] = true
@@ -424,7 +430,7 @@ func accountingProblems(files, embedded, excluded []string) []string {
 		case isEmbedded[f] && isExcluded[f]:
 			problems = append(problems, fmt.Sprintf("%s is both embedded and excluded", staticPath(f)))
 		case !isEmbedded[f] && !isExcluded[f]:
-			problems = append(problems, fmt.Sprintf("%s is neither embedded nor in StaticExcluded", staticPath(f)))
+			problems = append(problems, fmt.Sprintf("%s is neither embedded nor in %s", staticPath(f), listName))
 		}
 	}
 	for _, f := range append(slices.Clone(embedded), excluded...) {
@@ -438,11 +444,17 @@ func accountingProblems(files, embedded, excluded []string) []string {
 // writeFile plants a YAML file under root.
 func writeFile(t *testing.T, root, rel string) {
 	t.Helper()
+	writeFileText(t, root, rel, "apiVersion: v1\n")
+}
+
+// writeFileText plants a file under root holding content.
+func writeFileText(t *testing.T, root, rel, content string) {
+	t.Helper()
 	path := filepath.Join(root, filepath.FromSlash(rel))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("creating %s: %v", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, []byte("apiVersion: v1\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 }

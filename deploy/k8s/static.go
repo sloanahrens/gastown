@@ -64,18 +64,17 @@ func Static() ([]StaticObject, error) {
 	return staticObjects(staticManifests, staticFileNames)
 }
 
-// StaticExcluded lists every YAML file under deploy/k8s that Static does not
-// embed, with the owner who decides it and why it is not an applied object. A
-// new hand-applied file joins this list or the embedded set, or the accounting
-// test fails.
+// StaticExcluded lists every YAML file the accounting walk finds and Static
+// does not embed, with the owner who decides it and why it is not an applied
+// object. A new hand-applied file joins this list or the embedded set, or the
+// accounting test fails.
 var StaticExcluded = []struct{ File, Owner, Reason string }{
 	{"deploy/k8s/control-priorities.yaml", "overseer", "a record table of the priority class each live Forgejo Deployment runs at, not an applied object"},
 	{"deploy/k8s/policy/kind.yaml", "seagull", "the sandbox policy the gateway passes per sandbox create, not an object in the cluster"},
 	{"deploy/k8s/forgejo-tolerations.yaml", "overseer", "strategic-merge patch text for Deployments that live outside every repo"},
-	{"deploy/k8s/gt-cache/claim.yaml", "claude-60ny", "a PVC in namespace openshell, a gt-sbx object (the gt-sbx desired set)"},
 }
 
-// staticKinds maps every kind the static set may hold to whether it is
+// staticKinds maps every kind the static sets may hold to whether it is
 // cluster-scoped. A kind missing here is refused rather than read as namespaced:
 // a cluster-scoped kind with no namespace would otherwise render into the
 // caller's current namespace.
@@ -90,6 +89,8 @@ var staticKinds = map[string]bool{
 	"Role":                             false,
 	"RoleBinding":                      false,
 	"Secret":                           false,
+	"Service":                          false,
+	"PersistentVolumeClaim":            false,
 }
 
 // staticObjects reads files from fsys and returns every document they hold, in
@@ -117,23 +118,29 @@ func staticPath(file string) string {
 	return staticDir + "/" + file
 }
 
-// staticExcludedFiles returns rows' files relative to the package directory,
-// refusing a row that names a path outside deploy/k8s: a row the walk can never
-// find would hide its file as unaccounted rather than as a broken row.
+// staticExcludedFiles returns StaticExcluded's files for the accounting walk.
 func staticExcludedFiles(rows []struct{ File, Owner, Reason string }) ([]string, error) {
+	return excludedFiles("StaticExcluded", rows)
+}
+
+// excludedFiles returns rows' files relative to the package directory, refusing
+// a row that names a path outside deploy/k8s: a row the walk can never find
+// would hide its file as unaccounted rather than as a broken row. listName is
+// the list the row came from, so a refusal names it.
+func excludedFiles(listName string, rows []struct{ File, Owner, Reason string }) ([]string, error) {
 	files := make([]string, 0, len(rows))
 	for _, row := range rows {
 		rel, ok := strings.CutPrefix(row.File, staticDir+"/")
 		if !ok {
-			return nil, fmt.Errorf("StaticExcluded lists %q, which is not under %s/", row.File, staticDir)
+			return nil, fmt.Errorf("%s lists %q, which is not under %s/", listName, row.File, staticDir)
 		}
 		// A row with no owner or reason records no decision, which is what the
 		// list exists to hold.
 		switch {
 		case row.Owner == "":
-			return nil, fmt.Errorf("StaticExcluded row for %q names no owner", row.File)
+			return nil, fmt.Errorf("%s row for %q names no owner", listName, row.File)
 		case row.Reason == "":
-			return nil, fmt.Errorf("StaticExcluded row for %q gives no reason", row.File)
+			return nil, fmt.Errorf("%s row for %q gives no reason", listName, row.File)
 		}
 		files = append(files, rel)
 	}
