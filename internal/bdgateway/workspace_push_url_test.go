@@ -68,8 +68,9 @@ func gatewayDoer(t *testing.T, got **http.Request) HTTPDoer {
 	})
 }
 
-// TestGatewayPusherPushURLUsed: with PushURL set, Push, Probe and ReportedHash
-// send to the push URL and never to URL.
+// TestGatewayPusherPushURLUsed: with PushURL set, Push sends to the push URL and
+// Probe and ReportedHash send to URL: the push Service takes the write, and the
+// gateway takes every read.
 func TestGatewayPusherPushURLUsed(t *testing.T) {
 	t.Parallel()
 	const pushURL = "http://127.0.0.1:7441"
@@ -92,8 +93,12 @@ func TestGatewayPusherPushURLUsed(t *testing.T) {
 			if got == nil {
 				t.Fatal("the pusher sent no request")
 			}
-			if want := pushURL + route.path; got.URL.String() != want {
-				t.Errorf("the request went to %s, want the push URL %s", got.URL, want)
+			want := url + route.path
+			if route.name == "push" {
+				want = pushURL + route.path
+			}
+			if got.URL.String() != want {
+				t.Errorf("the request went to %s, want %s", got.URL, want)
 			}
 		})
 	}
@@ -129,10 +134,12 @@ func TestGatewayPusherPushURLFallback(t *testing.T) {
 }
 
 // TestGatewayPusherPushURLRefused: a PushURL that is plain http to a host that
-// is not this machine is refused by the same rule as URL, even when URL is a
-// good loopback address: the call names the push URL and sends nothing.
+// is not this machine and not the push Service is refused by Push, which names
+// it and sends nothing, even when URL is a good loopback address; the reads use
+// URL and reach it.
 func TestGatewayPusherPushURLRefused(t *testing.T) {
 	t.Parallel()
+	const url = "http://127.0.0.1:7440"
 	for _, tt := range []struct {
 		name    string
 		pushURL string
@@ -148,18 +155,31 @@ func TestGatewayPusherPushURLRefused(t *testing.T) {
 				t.Run(route.name, func(t *testing.T) {
 					t.Parallel()
 					root := clientTown(t)
+					var got *http.Request
 					pusher := GatewayPusher{
-						URL:       "http://127.0.0.1:7440",
+						URL:       url,
 						PushURL:   tt.pushURL,
 						TokenFile: clientToken(t, "tok"),
-						HTTP: doerFunc(func(*http.Request) (*http.Response, error) {
-							t.Fatal("the pusher sent a request with a refused push URL")
-							return nil, nil
-						}),
+						HTTP:      gatewayDoer(t, &got),
 					}
 					err := route.call(t, pusher, root)
+					if route.name != "push" {
+						if err != nil {
+							t.Fatalf("%s: %v", route.name, err)
+						}
+						if got == nil {
+							t.Fatalf("%s sent no request", route.name)
+						}
+						if want := url + route.path; got.URL.String() != want {
+							t.Errorf("%s went to %s, want %s", route.name, got.URL, want)
+						}
+						return
+					}
 					if err == nil {
-						t.Fatalf("%s accepted the push URL %s", route.name, tt.pushURL)
+						t.Fatalf("Push accepted the push URL %s", tt.pushURL)
+					}
+					if got != nil {
+						t.Fatal("Push sent a request with a refused push URL")
 					}
 					if !strings.Contains(err.Error(), "plain http") {
 						t.Errorf("error = %q, want the plain-http refusal", err)

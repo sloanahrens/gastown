@@ -528,10 +528,10 @@ func (g *routingGateway) requests() []recordedRequest {
 	return append([]recordedRequest(nil), g.reqs...)
 }
 
-// TestWorkspaceReconcilePushURLRoutesPushAndProbe: the pusher the daemon installs
-// sends both its push and its probe to the push URL, never to the gateway URL.
-// The two URLs differ by port, so a request that reached the wrong one fails.
-func TestWorkspaceReconcilePushURLRoutesPushAndProbe(t *testing.T) {
+// TestWorkspaceReconcilePushURLRoutesPush: the pusher the daemon installs sends
+// its push to the push URL and its probe to the gateway URL. The two URLs
+// differ by port, so a request that reached the wrong one fails.
+func TestWorkspaceReconcilePushURLRoutesPush(t *testing.T) {
 	t.Parallel()
 	const (
 		url     = "http://127.0.0.1:7440"
@@ -577,9 +577,10 @@ func TestWorkspaceReconcilePushURLRoutesPushAndProbe(t *testing.T) {
 	if reqs[1].method != http.MethodGet {
 		t.Errorf("second request = %s %s, want the probe GET", reqs[1].method, reqs[1].url)
 	}
-	for _, req := range reqs {
-		if !strings.HasPrefix(req.url, pushURL+"/") {
-			t.Errorf("%s %s did not go to the push service %s", req.method, req.url, pushURL)
-		}
+	if !strings.HasPrefix(reqs[0].url, pushURL+"/") {
+		t.Errorf("the push went to %s, want the push service %s", reqs[0].url, pushURL)
+	}
+	if !strings.HasPrefix(reqs[1].url, url+"/") {
+		t.Errorf("the probe went to %s, want the gateway %s", reqs[1].url, url)
 	}
 }
