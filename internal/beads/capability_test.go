@@ -78,6 +78,57 @@ func TestHelpOffersVerb(t *testing.T) {
 	}
 }
 
+// bdPodHelpNoSample holds the pod's bd --help "Sync & Data:" group, verbatim
+// (2026-11-18), under one ordinary "Working With Issues:" row; the pod's bd
+// predates the sample verb (gt-dtibiv).
+const bdPodHelpNoSample = `Working With Issues:
+  show             Show issue details
+
+Sync & Data:
+  backup           Back up your beads database
+  branch           List or create branches
+  export           Export issues to JSONL format
+  import           Import issues from a JSONL file or stdin into the database
+  vc               Version control operations
+`
+
+// TestHelpOffersVerbRealBdHelp: the probe finds a verb in the groups real bd
+// help prints and ignores the rows that are not commands. The fixture is the
+// captured --help of the bd build the town pins (gt-c2tetm); the pod case is
+// the older help with no sample verb (gt-dtibiv).
+func TestHelpOffersVerbRealBdHelp(t *testing.T) {
+	t.Parallel()
+	lines, err := readBdHelpFixture(bdHelpFixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := strings.Join(lines, "\n")
+	for _, tc := range []struct {
+		name string
+		help string
+		verb string
+		want bool
+	}{
+		{"sample under Sync & Data", fixture, "sample", true},
+		{"show under Working With Issues", fixture, "show", true},
+		{"cook under Additional Commands", fixture, "cook", true},
+		{"longer verb with the prefix", fixture, "sampl", false},
+		{"usage row is not a command", fixture, "bd", false},
+		{"flag row is not a command", "Flags:\n  sample           a flag\n", "sample", false},
+		{"global flag row is not a command", "Global Flags:\n  sample           a global flag\n", "sample", false},
+		{"alias row is not a command", "Aliases:\n  sample           Short alias for show\n", "sample", false},
+		{"pod help has no sample verb", bdPodHelpNoSample, "sample", false},
+		{"pod help offers backup", bdPodHelpNoSample, "backup", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := HelpOffersVerb([]byte(tc.help), tc.verb); got != tc.want {
+				t.Errorf("%s: HelpOffersVerb(%q) = %v, want %v", tc.name, tc.verb, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSampleVerbProbeAsksBdHelp: the typed probe runs bd --help and answers
 // from it, for a bd with the verb and one without; a bd that does not answer
 // is an error, not a false.

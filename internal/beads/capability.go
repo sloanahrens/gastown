@@ -31,24 +31,37 @@ func (b *Beads) sampleOffersVerb(ctx context.Context) (bool, error) {
 	return HelpOffersVerb(help, "sample"), nil
 }
 
+// nonCommandHeadings are the bd help sections whose indented rows are not
+// commands even though the heading ends in ":".
+var nonCommandHeadings = map[string]bool{
+	"Usage:":        true,
+	"Examples:":     true,
+	"Flags:":        true,
+	"Global Flags:": true,
+	"Aliases:":      true,
+}
+
 // HelpOffersVerb reports whether a bd --help text lists verb as a command in
-// its "Available Commands:" table. A verb named only in prose, an example line
-// under another section, and a longer verb that starts with the same letters
-// are not offered.
+// one of the groups real help prints, such as "Working With Issues:" or "Sync &
+// Data:". A verb named only in prose, an example, usage, flag or alias row, and
+// a longer verb that starts with the same letters are not offered (gastown
+// gt-dtibiv).
 func HelpOffersVerb(help []byte, verb string) bool {
-	inCommands := false
+	heading := ""
 	for _, line := range strings.Split(string(help), "\n") {
 		if strings.TrimSpace(line) == "" {
-			inCommands = false
 			continue
 		}
-		// A command row is indented under the table's heading; an unindented
-		// line is prose or the next section, which ends the table.
+		// Only an unindented heading that ends in ":" has command rows beneath
+		// it; any other unindented line is prose or ends the section.
 		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			inCommands = strings.HasPrefix(line, "Available Commands:")
+			heading = strings.TrimSpace(line)
+			if !strings.HasSuffix(heading, ":") {
+				heading = ""
+			}
 			continue
 		}
-		if !inCommands {
+		if heading == "" || nonCommandHeadings[heading] {
 			continue
 		}
 		fields := strings.Fields(line)
