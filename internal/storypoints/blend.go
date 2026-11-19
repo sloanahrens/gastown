@@ -20,11 +20,14 @@ var ErrBadProbability = errors.New("storypoints: probability must be between 0 a
 
 // Inputs are the estimates a blend may use. A nil pointer is an input that is
 // not available. Shape is required; embedding and Jev are optional. Weights
-// holds the knot table that maps the Jev probability to minutes.
+// holds the knot table that maps the Jev probability to minutes. JevMinutes is
+// a Jev estimate already in minutes, used only when JevFits is nil; when both
+// are set the probability wins and JevMinutes is not read.
 type Inputs struct {
 	ShapeMinutes *float64
 	EmbedMinutes *float64
 	JevFits      *float64
+	JevMinutes   *float64
 	Weights      Weights
 }
 
@@ -53,7 +56,8 @@ func Blend(in Inputs) (Blended, error) {
 // bottom of the float range, so the refusal for a time with no point is
 // exercised through this seam.
 func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) {
-	if in.ShapeMinutes == nil && in.EmbedMinutes == nil && in.JevFits == nil {
+	hasJev := in.JevFits != nil || in.JevMinutes != nil
+	if in.ShapeMinutes == nil && in.EmbedMinutes == nil && !hasJev {
 		return Blended{}, ErrNoInputs
 	}
 	if in.ShapeMinutes == nil {
@@ -69,11 +73,17 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 	if in.EmbedMinutes != nil {
 		terms = append(terms, term{"embed", *in.EmbedMinutes})
 	}
-	if in.JevFits != nil {
+	switch {
+	case in.JevFits != nil:
 		m, err := in.Weights.JevMinutes(*in.JevFits)
 		if err != nil {
 			return Blended{}, fmt.Errorf("storypoints: jev input: %w", err)
 		}
+		jevMinutes = &m
+		terms = append(terms, term{"jev", m})
+	case in.JevMinutes != nil:
+		// Validated with the other minutes inputs in the loop below.
+		m := *in.JevMinutes
 		jevMinutes = &m
 		terms = append(terms, term{"jev", m})
 	}
@@ -97,7 +107,7 @@ func blendWith(in Inputs, toPoints func(float64) (int, error)) (Blended, error) 
 		Minutes:    minutes,
 		Points:     points,
 		Inputs:     names,
-		Rung:       rungFor(in.EmbedMinutes != nil, in.JevFits != nil),
+		Rung:       rungFor(in.EmbedMinutes != nil, hasJev),
 		JevMinutes: jevMinutes,
 	}, nil
 }
