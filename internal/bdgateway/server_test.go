@@ -1,6 +1,7 @@
 package bdgateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -984,6 +985,198 @@ func TestBdgwMalformedFrame(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil || payload.Code != codeInternal {
 		t.Errorf("body = %q (%v), want code %q", rec.Body.String(), err, codeInternal)
 	}
+}
+
+// stderrFrame is one frame a test feeds httpFrames.Write.
+type stderrFrame struct {
+	kind    FrameKind
+	payload string
+}
+
+// frameBytes returns the wire bytes WriteFrame produces for one frame, which is
+// what httpFrames.Write reads in a single call.
+func frameBytes(t *testing.T, kind FrameKind, payload []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := WriteFrame(&buf, Frame{Kind: kind, Payload: payload}); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// oneByteStderrFrames splits s into one stderr frame per byte, the shortest
+// frames a phrase can be delivered in.
+func oneByteStderrFrames(s string) []stderrFrame {
+	frames := make([]stderrFrame, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		frames = append(frames, stderrFrame{FrameStderr, s[i : i+1]})
+	}
+	return frames
+}
+
+// TestCallConflictFrames: httpFrames reports a conflict for the two phrases bd
+// writes when Dolt rolled the transaction back, in any case, also when the
+// phrase is split across two or more stderr frames of any size, and only for
+// stderr.
+func TestCallConflictFrames(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		write []stderrFrame
+		want  bool
+	}{
+		{
+			name:  "Error 1213 in one stderr frame",
+			write: []stderrFrame{{FrameStderr, "bd: Error 1213 (40001): this transaction conflicts"}},
+			want:  true,
+		},
+		{
+			name:  "Error 1213 in upper case",
+			write: []stderrFrame{{FrameStderr, "BD: ERROR 1213 (40001): this transaction conflicts"}},
+			want:  true,
+		},
+		{
+			name:  "serialization failure in upper case",
+			write: []stderrFrame{{FrameStderr, "bd: SERIALIZATION FAILURE: this transaction conflicts"}},
+			want:  true,
+		},
+		{
+			name:  "serialization failure in mixed case",
+			write: []stderrFrame{{FrameStderr, "bd: Serialization Failure: this transaction conflicts"}},
+			want:  true,
+		},
+		{
+			name: "Error 1213 split across two stderr frames",
+			write: []stderrFrame{
+				{FrameStderr, "bd: Error 12"},
+				{FrameStderr, "13 (40001): this transaction conflicts"},
+			},
+			want: true,
+		},
+		{
+			name: "serialization failure split across two stderr frames",
+			write: []stderrFrame{
+				{FrameStderr, "bd: serializ"},
+				{FrameStderr, "ation failure: this transaction conflicts"},
+			},
+			want: true,
+		},
+		{
+			name: "Error 1213 split across three stderr frames",
+			write: []stderrFrame{
+				{FrameStderr, "bd: Error 1"},
+				{FrameStderr, "2"},
+				{FrameStderr, "13 (40001): this transaction conflicts"},
+			},
+			want: true,
+		},
+		{
+			name:  "serialization failure delivered one byte per stderr frame",
+			write: oneByteStderrFrames("bd: serialization failure: this transaction conflicts"),
+			want:  true,
+		},
+		{
+			name: "serialization failure split around a frame shorter than the carry",
+			write: []stderrFrame{
+				{FrameStderr, "bd: serialization f"},
+				{FrameStderr, "ail"},
+				{FrameStderr, "ure: this transaction conflicts"},
+			},
+			want: true,
+		},
+		{
+			name:  "other stderr",
+			write: []stderrFrame{{FrameStderr, "bd: no such issue: gt-nope"}},
+			want:  false,
+		},
+		{
+			name:  "stdout carrying the phrase",
+			write: []stderrFrame{{FrameStdout, "Error 1213 serialization failure"}},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &httpFrames{w: httptest.NewRecorder()}
+			for _, w := range tt.write {
+				if _, err := f.Write(frameBytes(t, w.kind, []byte(w.payload))); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if got := f.Conflict(); got != tt.want {
+				t.Errorf("Conflict() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// assertFramesForwarded checks the recorder body decodes to exactly the frames a
+// test wrote, unchanged, which is what the caller reads.
+func assertFramesForwarded(t *testing.T, rec *httptest.ResponseRecorder, sent [][]byte) {
+	t.Helper()
+	frames := readFrames(t, rec.Body.Bytes())
+	if len(frames) != len(sent) {
+		t.Fatalf("forwarded frames = %d, want %d", len(frames), len(sent))
+	}
+	for i, p := range sent {
+		if frames[i].Kind != FrameStderr || !bytes.Equal(frames[i].Payload, p) {
+			t.Errorf("forwarded frame %d = kind %d, %d bytes, want stderr and the %d bytes written", i, frames[i].Kind, len(frames[i].Payload), len(p))
+		}
+	}
+}
+
+// TestCallConflictFramesBound: the scan stops after the first 64 KiB of stderr,
+// and every frame still reaches the caller unchanged.
+func TestCallConflictFramesBound(t *testing.T) {
+	t.Parallel()
+
+	t.Run("marker starting at the bound is not scanned", func(t *testing.T) {
+		t.Parallel()
+		rec := httptest.NewRecorder()
+		f := &httpFrames{w: rec}
+		sent := [][]byte{
+			bytes.Repeat([]byte{'a'}, conflictScanLimit),
+			[]byte("bd: Error 1213 (40001): this transaction conflicts"),
+		}
+		for _, p := range sent {
+			if _, err := f.Write(frameBytes(t, FrameStderr, p)); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+		if f.Conflict() {
+			t.Error("Conflict() = true for a marker starting at the 64 KiB scan bound")
+		}
+		assertFramesForwarded(t, rec, sent)
+	})
+
+	t.Run("marker past the bound in the same frame is not scanned", func(t *testing.T) {
+		t.Parallel()
+		rec := httptest.NewRecorder()
+		f := &httpFrames{w: rec}
+		oneFrame := append(bytes.Repeat([]byte{'a'}, conflictScanLimit), "bd: Error 1213 (40001)"...)
+		if _, err := f.Write(frameBytes(t, FrameStderr, oneFrame)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if f.Conflict() {
+			t.Error("Conflict() = true for a marker past the 64 KiB scan bound")
+		}
+		assertFramesForwarded(t, rec, [][]byte{oneFrame})
+	})
+
+	t.Run("marker ending at the bound is found", func(t *testing.T) {
+		t.Parallel()
+		rec := httptest.NewRecorder()
+		f := &httpFrames{w: rec}
+		atEdge := append(bytes.Repeat([]byte{'a'}, conflictScanLimit-len("Error 1213")), "Error 1213"...)
+		if _, err := f.Write(frameBytes(t, FrameStderr, atEdge)); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		if !f.Conflict() {
+			t.Error("Conflict() = false for a marker ending at the 64 KiB scan bound")
+		}
+		assertFramesForwarded(t, rec, [][]byte{atEdge})
+	})
 }
 
 // TestBdgwNewGatewayRefusesUnwired refuses a gateway missing any piece by name.
