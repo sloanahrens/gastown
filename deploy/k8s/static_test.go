@@ -43,7 +43,7 @@ func docObject(t *testing.T, doc []byte) (apiVersion, kind, name, namespace stri
 	return parsed.APIVersion, parsed.Kind, parsed.Metadata.Name, parsed.Metadata.Namespace
 }
 
-// The control cluster's static set: every document of the six embedded files,
+// The control cluster's static set: every document of the seven embedded files,
 // in file order. sweep-rbac.yaml holds nine documents, not the eight the bead
 // first counted: its eight "---" separators sit between nine documents.
 func TestStaticObjectsDocuments(t *testing.T) {
@@ -86,6 +86,8 @@ func TestStaticObjectsDocuments(t *testing.T) {
 		{"priority-classes.yaml", sched, "PriorityClass", "gt-sandbox", "", true, false},
 		{"priority-classes.yaml", sched, "PriorityClass", "gt-ci-gate", "", true, false},
 		{"priority-classes.yaml", sched, "PriorityClass", "gt-ci", "", true, false},
+		{"drift-rbac.yaml", rbac, "ClusterRole", driftReaderRole, "", true, false},
+		{"drift-rbac.yaml", rbac, "ClusterRoleBinding", driftReaderRole, "", true, false},
 	}
 
 	objects, err := Static()
