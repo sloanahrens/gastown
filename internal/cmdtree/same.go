@@ -9,11 +9,17 @@ import (
 // bd invocations: the multiset of Bin, Words and Comment that ScanGo returns,
 // ignoring Line and File. A source ScanGo rejects returns its error.
 func SameRefs(file string, oldSrc, newSrc []byte) (bool, error) {
-	oldRefs, err := ScanGo(file, oldSrc)
+	return SameRefsAt(file, oldSrc, file, newSrc)
+}
+
+// SameRefsAt is SameRefs for a move: oldSrc is scanned under oldFile and newSrc
+// under newFile, since the path decides what ScanGo reads. A rejection errors.
+func SameRefsAt(oldFile string, oldSrc []byte, newFile string, newSrc []byte) (bool, error) {
+	oldRefs, err := ScanGo(oldFile, oldSrc)
 	if err != nil {
 		return false, err
 	}
-	newRefs, err := ScanGo(file, newSrc)
+	newRefs, err := ScanGo(newFile, newSrc)
 	if err != nil {
 		return false, err
 	}
