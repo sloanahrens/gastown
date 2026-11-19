@@ -289,3 +289,139 @@ func otherServiceGuardAdmits(selector, gateway map[string]string) bool {
 	}
 	return false
 }
+
+// bdGatewayPushExpression and bdGatewayOtherServiceExpression are the two validations of
+// the Service guard this change adds or edits, with the whitespace the YAML's folded
+// scalars leave collapsed. An edit of either in the policy file fails
+// TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions until the constant is
+// updated with it.
+const (
+	bdGatewayPushExpression         = "object.metadata.name != 'bd-gateway-push' || (has(object.spec.type) && object.spec.type == 'ClusterIP' && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0) && !has(object.spec.externalName) && has(object.spec.selector) && size(object.spec.selector) == 1 && object.spec.selector.exists(k, k == 'app.kubernetes.io/name' && object.spec.selector[k] == 'bd-gateway') && has(object.spec.ports) && size(object.spec.ports) == 1 && object.spec.ports.all(p, p.port == 7441))"
+	bdGatewayOtherServiceExpression = "object.metadata.name == 'bd-gateway' || object.metadata.name == 'bd-gateway-push' || !has(object.spec.selector) || size(object.spec.selector) == 0 || !object.spec.selector.all(k, (k == 'app.kubernetes.io/name' && object.spec.selector[k] == 'bd-gateway') || (k == 'app.kubernetes.io/managed-by' && object.spec.selector[k] == 'gt'))"
+)
+
+// serviceFixture is the part of a Service the Service guard reads: its name, type,
+// external addresses, selector and ports.
+type serviceFixture struct {
+	name         string
+	typ          string
+	externalName string
+	externalIPs  []string
+	selector     map[string]string
+	ports        []int
+}
+
+// pushServiceGuardAdmits restates the Service guard on one Service. A Service named
+// bd-gateway-push is judged by the push validation alone; any other name is judged by
+// the other-Service validation, which otherServiceGuardAdmits restates. A Service named
+// bd-gateway is judged by the bd-gateway validation, which
+// TestBdGatewayServicePolicyPinsRenderedService holds to the renderer, so it is not a
+// fixture here.
+func pushServiceGuardAdmits(s serviceFixture, gateway map[string]string) bool {
+	if s.name != BdGatewayPushName {
+		return otherServiceGuardAdmits(s.selector, gateway)
+	}
+	if s.typ != "ClusterIP" || len(s.externalIPs) != 0 || s.externalName != "" {
+		return false
+	}
+	if len(s.selector) != 1 || s.selector["app.kubernetes.io/name"] != "bd-gateway" {
+		return false
+	}
+	return len(s.ports) == 1 && s.ports[0] == BdGatewayPushPort
+}
+
+// TestBdGatewayServiceAdmissionPushRefusals runs the push Service and the other-Service
+// fixtures through the guard's model. The rendered push Service is admitted; a NodePort,
+// an extra port, a second selector pair, and any other Service name that selects the
+// gateway's pods are refused. The repo carries no CEL evaluator, so the refusals are the
+// Go restatement, and the cluster dry-run refusals are proven at cutover (gt-wwo7ew).
+func TestBdGatewayServiceAdmissionPushRefusals(t *testing.T) {
+	t.Parallel()
+	gateway := bdGatewayLabels()
+	rendered := serviceFixture{
+		name:     BdGatewayPushName,
+		typ:      "ClusterIP",
+		selector: map[string]string{"app.kubernetes.io/name": "bd-gateway"},
+		ports:    []int{BdGatewayPushPort},
+	}
+	with := func(edit func(*serviceFixture)) serviceFixture {
+		s := rendered
+		s.selector = map[string]string{"app.kubernetes.io/name": "bd-gateway"}
+		s.ports = []int{BdGatewayPushPort}
+		edit(&s)
+		return s
+	}
+	for _, tc := range []struct {
+		why      string
+		svc      serviceFixture
+		admitted bool
+	}{
+		{"the rendered push Service", rendered, true},
+		{"a NodePort push Service", with(func(s *serviceFixture) { s.typ = "NodePort" }), false},
+		{"a LoadBalancer push Service", with(func(s *serviceFixture) { s.typ = "LoadBalancer" }), false},
+		{"an ExternalName push Service", with(func(s *serviceFixture) {
+			s.typ, s.externalName = "ExternalName", "dolt.example.com"
+		}), false},
+		{"a push Service with an external IP", with(func(s *serviceFixture) { s.externalIPs = []string{"192.168.5.2"} }), false},
+		{"a push Service with a second port", with(func(s *serviceFixture) { s.ports = []int{BdGatewayPushPort, 8080} }), false},
+		{"a push Service on another port", with(func(s *serviceFixture) { s.ports = []int{7440} }), false},
+		{"a push Service with no port", with(func(s *serviceFixture) { s.ports = nil }), false},
+		{"a push Service with a second selector pair", with(func(s *serviceFixture) {
+			s.selector["app.kubernetes.io/managed-by"] = "gt"
+		}), false},
+		{"a push Service with an empty selector", with(func(s *serviceFixture) { s.selector = map[string]string{} }), false},
+		{"a push Service selecting only managed-by", with(func(s *serviceFixture) {
+			s.selector = map[string]string{"app.kubernetes.io/managed-by": "gt"}
+		}), false},
+		{"another Service selecting the gateway's pods", serviceFixture{
+			name:     "dolt-proxy",
+			typ:      "ClusterIP",
+			selector: map[string]string{"app.kubernetes.io/name": "bd-gateway"},
+			ports:    []int{BdGatewayPushPort},
+		}, false},
+		{"another Service selecting the gateway's labels and managed-by", serviceFixture{
+			name:     "dolt",
+			typ:      "ClusterIP",
+			selector: map[string]string{"app.kubernetes.io/name": "bd-gateway", "app.kubernetes.io/managed-by": "gt"},
+		}, false},
+		{"another Service selecting its own pods", serviceFixture{
+			name:     "dolt",
+			typ:      "ClusterIP",
+			selector: map[string]string{"app.kubernetes.io/name": "dolt"},
+		}, true},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			t.Parallel()
+			if got := pushServiceGuardAdmits(tc.svc, gateway); got != tc.admitted {
+				t.Errorf("%s (%+v) is admitted = %v, want %v", tc.why, tc.svc, got, tc.admitted)
+			}
+		})
+	}
+}
+
+// TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions compares the push validation
+// and the other-Service validation in the policy file with the pinned constants, with
+// whitespace collapsed on both sides. The refusal model above restates these rules, so
+// a change to the policy text that is not made to the model and the constants fails here.
+func TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions(t *testing.T) {
+	t.Parallel()
+	exprs := bdGatewayServicePolicyExpressions(t, filepath.Join(packageDir(t), "..", "bd-gateway-service-admission.yaml"))
+	if len(exprs) != 3 {
+		t.Fatalf("the Service guard holds %d validations, want 3", len(exprs))
+	}
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"the bd-gateway-push validation", exprs[1], bdGatewayPushExpression},
+		{"the other-Service validation", exprs[2], bdGatewayOtherServiceExpression},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := strings.Join(strings.Fields(tc.got), " "); got != tc.want {
+				t.Errorf("%s in the policy file is\n%q\nwant the pinned text\n%q", tc.name, got, tc.want)
+			}
+		})
+	}
+}
