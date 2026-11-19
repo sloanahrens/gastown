@@ -108,6 +108,12 @@ func (b *pushedBeads) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return nil, nil
 }
 
+// branchReadFails is a git handle whose branch read fails, the stand-in for a
+// checkout git cannot name a branch in.
+type branchReadFails struct{ daemonGit }
+
+func (branchReadFails) CurrentBranch() (string, error) { return "", errors.New("not a worktree") }
+
 // A branch origin holds whose head was committed after the sling is this run's
 // work: the seat pushed and the head is the answer.
 func TestPushedSinceSling_HeadFromThisRunIsTheAnswer(t *testing.T) {
@@ -233,6 +239,19 @@ func TestPushedSinceSling_UnreadableInputsAreErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "assigned work",
+			broke: func(t *testing.T, p *pushedTown) string {
+				if _, err := intent.Update(p.h.town(), pushedSeat(), func(r *intent.Record) error {
+					r.WorkBead = ""
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				p.work.err = errors.New("bd: timed out")
+				return "work assigned to"
+			},
+		},
+		{
 			name: "work bead",
 			broke: func(t *testing.T, p *pushedTown) string {
 				p.work.err = errors.New("bd: timed out")
@@ -246,6 +265,13 @@ func TestPushedSinceSling_UnreadableInputsAreErrors(t *testing.T) {
 					return nil, errors.New("no sandbox runner")
 				}
 				return "worktree"
+			},
+		},
+		{
+			name: "branch read",
+			broke: func(t *testing.T, p *pushedTown) string {
+				p.d.openGitFn = func(string) daemonGit { return branchReadFails{p.git} }
+				return "read the seat's branch"
 			},
 		},
 		{
