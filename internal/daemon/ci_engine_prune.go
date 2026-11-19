@@ -289,6 +289,10 @@ type ciEngineContainer struct {
 	Created string `json:"Created"`
 	State   struct {
 		Status string `json:"Status"`
+		// FinishedAt is when the container last stopped. docker prints the zero
+		// time for one that is not stopped, a container in "created" state that
+		// never ran included.
+		FinishedAt string `json:"FinishedAt"`
 	} `json:"State"`
 	Mounts []struct {
 		Type string `json:"Type"`
@@ -330,11 +334,11 @@ func (p ciEnginePlan) count() int {
 
 // planCIEnginePrune decides what the engine prune removes from a listing taken at
 // now, under the keep rule in docs/guides/disk-maintenance.md. imageAge is how old
-// an unused image must be, and unusedAge how old a stopped container, an unused
-// anonymous volume and an unused build cache record must be. It refuses a listing
-// it cannot read in full: an id or name that is not in docker's shape, a time it
-// cannot parse, or a missing data root figure. A refusal is a failed run, never an
-// empty plan.
+// an unused image must be, and unusedAge how long a stopped container has been
+// stopped, and how old an unused anonymous volume and an unused build cache record
+// must be. A listing it cannot read in full is refused: an id or name that is not
+// in docker's shape, a time it cannot parse, or a missing data root figure. A
+// refusal is a failed run, never an empty plan.
 func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge time.Duration, keepRepos []string) (ciEnginePlan, error) {
 	var plan ciEnginePlan
 	if l.DataRootKiB == nil {
@@ -351,9 +355,15 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge tim
 		if err != nil {
 			return plan, fmt.Errorf("container %s: %w", c.ID[:12], err)
 		}
-		if ciEngineStopped(c.State.Status) && now.Sub(created) > unusedAge {
-			plan.containers = append(plan.containers, c)
-			continue
+		if ciEngineStopped(c.State.Status) {
+			stoppedAt, err := ciEngineStoppedAt(c, created)
+			if err != nil {
+				return plan, fmt.Errorf("container %s: %w", c.ID[:12], err)
+			}
+			if now.Sub(stoppedAt) > unusedAge {
+				plan.containers = append(plan.containers, c)
+				continue
+			}
 		}
 		usedImage[c.Image] = true
 		for _, m := range c.Mounts {
@@ -540,6 +550,27 @@ func ciEngineStopped(status string) bool {
 		return true
 	}
 	return false
+}
+
+// ciEngineStoppedAt is the instant a stopped container stopped, which is what the
+// unused age is measured from: a job that ran longer than the age and stopped a
+// minute ago is not unused. docker's State.FinishedAt names that instant. A
+// container in "created" state never ran, so docker gives it the zero time there
+// and its creation is the instant it became idle. An unreadable finish time, or
+// one before the creation, is refused rather than read as creation: it could age a
+// container a job still holds.
+func ciEngineStoppedAt(c ciEngineContainer, created time.Time) (time.Time, error) {
+	finished, err := time.Parse(time.RFC3339Nano, c.State.FinishedAt)
+	if err != nil {
+		return time.Time{}, errors.New("a container's finish time is not RFC 3339")
+	}
+	if finished.IsZero() {
+		return created, nil
+	}
+	if finished.Before(created) {
+		return time.Time{}, errors.New("a container's finish time precedes its creation")
+	}
+	return finished, nil
 }
 
 // parseCIEngineTime reads a time docker prints, RFC 3339 with its fraction. A

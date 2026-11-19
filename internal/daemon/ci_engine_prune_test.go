@@ -29,17 +29,30 @@ func engAgo(d time.Duration) string {
 	return ciCacheTestStart.Add(-d).Format(time.RFC3339Nano)
 }
 
-// engCtr is a container inspect with its status, image and volume mounts.
+// engCtr is a container inspect with its status, image and volume mounts, stopped
+// for as long as it has existed: a job that ran and stopped at once.
 func engCtr(id byte, image byte, status string, created time.Duration, volumes ...string) map[string]any {
+	return engCtrStopped(id, image, status, created, created, volumes...)
+}
+
+// engCtrStopped is engCtr with the instant it stopped named, so created-stopped is
+// how long it ran. docker prints the zero finish time for a container that never
+// ran, which is status "created"; every other status here is one that ran and
+// stopped.
+func engCtrStopped(id byte, image byte, status string, created, stopped time.Duration, volumes ...string) map[string]any {
 	mounts := make([]map[string]any, 0, len(volumes))
 	for _, v := range volumes {
 		mounts = append(mounts, map[string]any{"Type": "volume", "Name": v})
+	}
+	finished := "0001-01-01T00:00:00Z"
+	if status == "exited" || status == "dead" {
+		finished = engAgo(stopped)
 	}
 	return map[string]any{
 		"Id":      engHex64(id),
 		"Image":   engImageID(image),
 		"Created": engAgo(created),
-		"State":   map[string]any{"Status": status},
+		"State":   map[string]any{"Status": status, "FinishedAt": finished},
 		"Mounts":  mounts,
 	}
 }
@@ -329,6 +342,16 @@ func TestCIEnginePruneRefusesAListingItCannotRead(t *testing.T) {
 		},
 		"container time unreadable": func(l *ciEngineListing) {
 			l.Containers = []ciEngineContainer{{ID: engHex64('1'), Image: engImageID('a'), Created: "yesterday"}}
+		},
+		"stopped container finish time unreadable": func(l *ciEngineListing) {
+			l.Containers = []ciEngineContainer{{ID: engHex64('1'), Image: engImageID('a'), Created: engAgo(time.Hour)}}
+			l.Containers[0].State.Status = "exited"
+			l.Containers[0].State.FinishedAt = "yesterday"
+		},
+		"stopped container finish time before its creation": func(l *ciEngineListing) {
+			l.Containers = []ciEngineContainer{{ID: engHex64('1'), Image: engImageID('a'), Created: engAgo(time.Hour)}}
+			l.Containers[0].State.Status = "exited"
+			l.Containers[0].State.FinishedAt = engAgo(2 * time.Hour)
 		},
 		"image id not docker's": func(l *ciEngineListing) {
 			l.Images = append(l.Images, ciEngineImage{ID: "sha256:short", Created: engAgo(time.Hour)})
@@ -1145,6 +1168,44 @@ func TestCIEnginePrunePlansByTheUnusedAgeItIsGiven(t *testing.T) {
 		if got := len(plan.volumes) == 1; got != want {
 			t.Errorf("anonymous volume 7h old at unused age %v: planned = %v, want %v", unusedAge, got, want)
 		}
+	}
+}
+
+// TestCIEnginePruneMeasuresAStoppedContainersAgeFromItsStop: a stopped container's
+// unused age runs from when it stopped, not from when it was created, so a job that
+// ran longer than the age and stopped a moment ago stays. A container in "created"
+// state never ran, so its creation is the instant it became idle.
+func TestCIEnginePruneMeasuresAStoppedContainersAgeFromItsStop(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		status  string
+		created time.Duration
+		stopped time.Duration
+		want    bool
+	}{
+		"a long job that just stopped stays":          {status: "exited", created: 10 * time.Hour, stopped: time.Minute, want: false},
+		"a long job stopped past the age goes":        {status: "exited", created: 10 * time.Hour, stopped: 7 * time.Hour, want: true},
+		"a created container past the age goes":       {status: "created", created: 7 * time.Hour, want: true},
+		"a created container inside the age stays":    {status: "created", created: 5 * time.Hour, want: false},
+		"a dead container long stopped past goes":     {status: "dead", created: 30 * time.Hour, stopped: 9 * time.Hour, want: true},
+		"an ancient container stopped just now stays": {status: "exited", created: 200 * time.Hour, stopped: 2 * time.Minute, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			listing := engDecode(t, engListing(t,
+				[]map[string]any{engCtrStopped('4', 'e', tc.status, tc.created, tc.stopped)},
+				[]map[string]any{engImg('e', 2*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
+				nil,
+			))
+			plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 6*time.Hour, []string{"ci-base"})
+			if err != nil {
+				t.Fatalf("planning: %v", err)
+			}
+			if got := len(plan.containers) == 1; got != tc.want {
+				t.Errorf("stopped container %s created %v ago and stopped %v ago is planned = %v, want %v",
+					tc.status, tc.created, tc.stopped, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -277,8 +277,8 @@ the `dind` container and the same `dry_run` default as the cache trim above.
   kind's ids, then the build cache prune, with no shell between the plan and
   docker.
 - What goes:
-  - stopped containers (`created`, `exited`, `dead`) created more than 24 hours
-    ago;
+  - stopped containers (`created`, `exited`, `dead`) stopped for longer than
+    `ci_engine_unused_age`; a container that never ran counts from its creation;
   - images no container uses that were created more than `ci_engine_prune_age`
     ago and carry no tag in a `ci_engine_keep_repos` repository other than
     `ci-base`;
@@ -292,9 +292,11 @@ the `dind` container and the same `dry_run` default as the cache trim above.
     former `:latest` that carried no other tag has no `ci-base` tag once the tag
     moves, and falls out of the rule and goes after the age;
   - anonymous volumes, whose names are the 64 hex digits docker gives one, with no
-    container that stays mounting them, and created more than 24 hours ago. A
-    volume's own name and mounts decide it; no companion volume is consulted;
-  - build cache unused for 24 hours, pruned by docker itself in an apply.
+    container that stays mounting them, and created more than
+    `ci_engine_unused_age` ago. A volume's own name and mounts decide it; no
+    companion volume is consulted;
+  - build cache unused for `ci_engine_unused_age`, pruned by docker itself in an
+    apply.
 - What stays: any image a container that stays uses; any image that is a parent
   of an image that stays, which docker would refuse to remove; named volumes, so
   `ci-gocache`, `ci-gomod` and `ci-npm` are never candidates.
