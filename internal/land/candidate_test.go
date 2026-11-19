@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1387,4 +1388,174 @@ func TestLandCandidateSilenceIsInfrastructure(t *testing.T) {
 		t.Fatalf("discarded %v; want the branch the silent gate pushed", cand.discarded)
 	}
 	f.assertUntouched(t)
+}
+
+// recordLogPass and recordLogRed are gate job logs with the stage markers
+// ParseGateRunLog reads: setup 3s, lint 2s, build 4s, unit wall 139s.
+const recordLogPass = "2026-11-19T10:00:00Z task received\n" +
+	"2026-11-19T10:00:03Z lint: golangci-lint run\n" +
+	"2026-11-19T10:00:05Z gate: build (go build ./...)\n" +
+	"2026-11-19T10:00:09Z gate: unit tier (every package)\n" +
+	"2026-11-19T10:02:28Z gate: PASSED in 139s wall\n"
+
+const recordLogRed = "2026-11-19T10:00:00Z task received\n" +
+	"⭐ Run Main actions/checkout@v4\n" +
+	"2026-11-19T10:00:03Z lint: golangci-lint run\n" +
+	"2026-11-19T10:00:05Z gate: build (go build ./...)\n" +
+	"2026-11-19T10:00:09Z gate: unit tier (every package)\n" +
+	"--- FAIL: TestThing\n" +
+	"2026-11-19T10:02:28Z gate: FAILED at unit tier (Go suite, exit 1) after 139s wall\n"
+
+// recordRun is the run that tested sha: queued 10s, run for 140s.
+func recordRun(sha, status string) forgejo.ActionRun {
+	return forgejo.ActionRun{ID: 7, CommitSHA: sha, Status: status,
+		Created: "2026-11-19T10:00:00Z", Started: "2026-11-19T10:00:10Z", Stopped: "2026-11-19T10:02:30Z"}
+}
+
+// TestCandidateGateRecordsAPass: a passing gate hands one row to Recorder,
+// carrying the job log's stage times and verdict and the run's queue and run
+// seconds, and the verdict is passed.
+func TestCandidateGateRecordsAPass(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{recordRun(sha, "success")},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "success"}},
+		log:      recordLogPass,
+	}
+	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
+	var recs []GateRun
+	gate := fastGate(client)
+	gate.Now = func() time.Time { return at }
+	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil || res.State != CandidatePassed {
+		t.Fatalf("Run = state %v err %v; want passed with no error", res.State, res.Err)
+	}
+	want := GateRun{TS: at, Rig: "gastown", Bead: "gt-abc", SHA: sha, RunID: "7",
+		QueueS: 10, RunS: 140, SetupS: 3, LintS: 2, BuildS: 4, UnitWallS: 139, Passed: true}
+	if len(recs) != 1 || !reflect.DeepEqual(recs[0], want) {
+		t.Fatalf("recorded %+v; want exactly one row %+v", recs, want)
+	}
+}
+
+// TestCandidateGateRecordsAPassWithFailedLogRead: a passing gate whose job log
+// cannot be read still records Passed: the verdict is the gate's (gt-r0fnmo).
+func TestCandidateGateRecordsAPassWithFailedLogRead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{recordRun(sha, "success")},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "success"}},
+		logErr:   errors.New("log unreadable"),
+	}
+	at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
+	var recs []GateRun
+	gate := fastGate(client)
+	gate.Now = func() time.Time { return at }
+	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil || res.State != CandidatePassed {
+		t.Fatalf("Run = state %v err %v; want passed with no error", res.State, res.Err)
+	}
+	want := GateRun{TS: at, Rig: "gastown", Bead: "gt-abc", SHA: sha, RunID: "7",
+		QueueS: 10, RunS: 140, Passed: true}
+	if len(recs) != 1 || !reflect.DeepEqual(recs[0], want) {
+		t.Fatalf("recorded %+v; want exactly one row %+v", recs, want)
+	}
+}
+
+// TestCandidateGateRecordsARed: a red gate records its row whichever read
+// fails, and the verdict stays failed with no error. A run that cannot be read
+// leaves the row with its identity only (gt-r0fnmo).
+func TestCandidateGateRecordsARed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		client     func(sha string) *fakeForgejo
+		want       GateRun
+		wantLogged string
+	}{
+		{
+			name: "readable log",
+			client: func(sha string) *fakeForgejo {
+				return &fakeForgejo{runs: []forgejo.ActionRun{recordRun(sha, "failure")},
+					jobs: []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}}, log: recordLogRed}
+			},
+			want: GateRun{RunID: "7", QueueS: 10, RunS: 140, SetupS: 3, LintS: 2, BuildS: 4, UnitWallS: 139},
+		},
+		{
+			name: "failed log read",
+			client: func(sha string) *fakeForgejo {
+				return &fakeForgejo{runs: []forgejo.ActionRun{recordRun(sha, "failure")},
+					jobs: []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "failure"}}, logErr: errors.New("log unreadable")}
+			},
+			want:       GateRun{RunID: "7", QueueS: 10, RunS: 140},
+			wantLogged: "for its gate record: log unreadable",
+		},
+		{
+			name: "failed run read",
+			client: func(string) *fakeForgejo {
+				return &fakeForgejo{runsErr: errors.New("runs unreadable")}
+			},
+			want:       GateRun{},
+			wantLogged: "for its gate record: runs unreadable",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLandFixture(t)
+			sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+			client := tc.client(sha)
+			client.statuses = []forgejo.CommitStatus{status(forgejo.StateFailure, "ci / gate (push)")}
+			at := time.Date(2026, 11, 19, 10, 3, 0, 0, time.UTC)
+			var recs []GateRun
+			var out strings.Builder
+			gate := fastGate(client)
+			gate.Now = func() time.Time { return at }
+			gate.Out = &out
+			gate.Recorder = func(r GateRun) { recs = append(recs, r) }
+
+			res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+			if res.Err != nil || res.State != CandidateFailed {
+				t.Fatalf("Run = state %v err %v; want failed with no error: the verdict is the work's", res.State, res.Err)
+			}
+			want := tc.want
+			want.TS, want.Rig, want.Bead, want.SHA = at, "gastown", "gt-abc", sha
+			if len(recs) != 1 || !reflect.DeepEqual(recs[0], want) {
+				t.Fatalf("recorded %+v; want exactly one row %+v", recs, want)
+			}
+			if tc.wantLogged == "" && strings.Contains(out.String(), "for its gate record") {
+				t.Fatalf("output %q; want no read failure logged", out.String())
+			}
+			if tc.wantLogged != "" && !strings.Contains(out.String(), tc.wantLogged) {
+				t.Fatalf("output %q; want the failed read logged: %q", out.String(), tc.wantLogged)
+			}
+		})
+	}
+}
+
+// TestCandidateGateRecordsNoSilence: a wait that ends with no verdict is
+// infrastructure, not a finished gate run, so Recorder is not called.
+func TestCandidateGateRecordsNoSilence(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	var calls int
+	gate := fastGate(&fakeForgejo{})
+	gate.Recorder = func(GateRun) { calls++ }
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if !errors.Is(res.Err, ErrCISilence) {
+		t.Fatalf("Run error = %v; want ErrCISilence", res.Err)
+	}
+	if calls != 0 {
+		t.Fatalf("Recorder called %d time(s) for a silent gate, want none", calls)
+	}
 }
