@@ -56,6 +56,7 @@ type renderFlagsRecord struct {
 	BdGatewayURL           string `json:"bd_gateway_url"`
 	BdGatewayTokenSecret   string `json:"bd_gateway_token_secret"`
 	BdGatewayMaxConcurrent int    `json:"bd_gateway_max_concurrent"`
+	BdGatewayReplicas      int    `json:"bd_gateway_replicas"`
 	Tracker                bool   `json:"tracker"`
 	TrackerDSNSecret       string `json:"tracker_dsn_secret"`
 	TrackerBackup          bool   `json:"tracker_backup"`
@@ -63,12 +64,13 @@ type renderFlagsRecord struct {
 	DaemonBdGatewayURL     string `json:"daemon_bd_gateway_url"`
 }
 
-// renderFlagsFile is the record as the file's JSON decodes into it. Its cap field
-// shadows the record's own field of the same key, so an absent key is nil rather
-// than the zero the record's int would read it as (loadRenderFlags).
+// renderFlagsFile is the record as the file's JSON decodes into it. Its cap and
+// replica fields shadow the record's own fields of the same keys, so an absent key is
+// nil rather than the zero the record's int would read it as (loadRenderFlags).
 type renderFlagsFile struct {
 	renderFlagsRecord
 	BdGatewayMaxConcurrent *int `json:"bd_gateway_max_concurrent"`
+	BdGatewayReplicas      *int `json:"bd_gateway_replicas"`
 	// The two retired Mac-directory flags (gt-ja7otj). A file written before the
 	// mounts were removed still carries their keys; they are decoded here only so
 	// DisallowUnknownFields reads the record instead of refusing it, and their
@@ -99,6 +101,7 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		BdGatewayURL:           f.bdGatewayURL,
 		BdGatewayTokenSecret:   f.bdGatewayTokenSecret,
 		BdGatewayMaxConcurrent: f.bdGatewayMaxConcurrent,
+		BdGatewayReplicas:      f.bdGatewayReplicas,
 		Tracker:                f.tracker,
 		TrackerDSNSecret:       f.trackerDSNSecret,
 		TrackerBackup:          f.trackerBackup,
@@ -131,6 +134,7 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		bdGatewayURL:           r.BdGatewayURL,
 		bdGatewayTokenSecret:   r.BdGatewayTokenSecret,
 		bdGatewayMaxConcurrent: r.BdGatewayMaxConcurrent,
+		bdGatewayReplicas:      r.BdGatewayReplicas,
 		tracker:                r.Tracker,
 		trackerDSNSecret:       r.TrackerDSNSecret,
 		trackerBackup:          r.TrackerBackup,
@@ -188,6 +192,12 @@ func loadRenderFlags(path string) (clusterRenderFlags, bool, error) {
 	r.BdGatewayMaxConcurrent = defaultBdGatewayMaxConcurrent
 	if f.BdGatewayMaxConcurrent != nil {
 		r.BdGatewayMaxConcurrent = *f.BdGatewayMaxConcurrent
+	}
+	// A record written before the replica count was recorded has no key for it, and
+	// such a record meant the flag's default of one, not zero.
+	r.BdGatewayReplicas = defaultBdGatewayReplicas
+	if f.BdGatewayReplicas != nil {
+		r.BdGatewayReplicas = *f.BdGatewayReplicas
 	}
 	return r.flags(), true, nil
 }

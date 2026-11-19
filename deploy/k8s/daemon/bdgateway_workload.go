@@ -56,6 +56,30 @@ const (
 	bdGatewayPushPortName = "push"
 )
 
+// BdGatewayMaxReplicas is the most gateway pods a render runs: two, so one serves
+// while the other rolls or fails.
+const BdGatewayMaxReplicas = 2
+
+// validateBdGatewayReplicas refuses a replica count the gateway does not run: a
+// negative count, or more than BdGatewayMaxReplicas. It runs with or without the
+// gateway image, as the concurrency cap's refusal does, so a value is refused rather
+// than ignored.
+func (v Values) validateBdGatewayReplicas() error {
+	if v.BdGatewayReplicas < 0 || v.BdGatewayReplicas > BdGatewayMaxReplicas {
+		return fmt.Errorf("Values.BdGatewayReplicas %d: want zero or one for one gateway pod, or two, the most the gateway runs", v.BdGatewayReplicas)
+	}
+	return nil
+}
+
+// bdGatewayReplicas is the Deployment's replica count: Values.BdGatewayReplicas, with
+// zero read as one. validateBdGatewayReplicas has already bounded the value.
+func (v Values) bdGatewayReplicas() int32 {
+	if v.BdGatewayReplicas == 0 {
+		return 1
+	}
+	return int32(v.BdGatewayReplicas) //nolint:gosec // bounded to 0..2 by validateBdGatewayReplicas, which Build runs first
+}
+
 // bdGatewayDeployment is the gateway's pod: an init container that copies the tokens
 // to 0600, one container running bdgw serve, the emptyDir for tokens, the log claim
 // and the workspace claim. It takes no ServiceAccount token, as the dashboard's pod
@@ -64,7 +88,9 @@ const (
 // Its strategy is RollingUpdate with maxUnavailable 0 and maxSurge 1: the new gateway
 // starts, and passes its readiness, before the old one stops, so the gateway has no
 // gap in service. For the length of a roll two gateway processes share the workspace
-// claim and the log claim. Replicas stay at one.
+// claim and the log claim. Replicas is Values.BdGatewayReplicas, one by default and
+// two when an operator sets it; with two, the pods share the claims in steady state
+// as they do during a roll, and both match the Service's selector.
 //
 // That sharing is safe on the control cluster as verified on 2026-11-19 by the
 // overseer's commands: kubectl get nodes shows one node (colima-gt-control, k3s v1.35),
@@ -75,15 +101,15 @@ const (
 // holding if the control cluster gets a second node: the claims must then become
 // ReadWriteMany, or the strategy goes back to Recreate.
 //
-// Both checks behind the sharing are DONE. The overseer's check (gt-yz0s8v, closed
-// 2026-11-18 after a run in a scratch namespace) found bd's runtime files safe under
-// two pods on one claim, and found the workspace push unsafe with two pushers. The
-// push's cross-process lock (gt-fo7rf0, landed) serializes it. The lock holds only
-// between pods that run that release, so the first roll from an image built before it
-// races once. That run did not verify the X-Bd-Workspace hash each pod reports after
-// the other pod swapped the tree, nor a real roll with pod startup. The live cluster
-// keeps Recreate until the next attended render and apply, so that attended roll is the
-// first real one. --log-per-pod gives each pod its own call log directory.
+// The steady-state sharing was checked by gt-yz0s8v (seagull, 2026-11-19): two pods on
+// one claim for 10 minutes served 4000 calls, and 636 of 636 acknowledged writes were
+// present. One pusher at a time is safe with the workspace push's cross-process lock
+// (gt-fo7rf0, landed), which serializes two pushers; the lock holds only between pods
+// that run that release, so a roll from an image built before it races once. The check
+// did not verify the X-Bd-Workspace hash each pod reports after the other pod swapped
+// the tree, nor a real roll with pod startup. The live cluster keeps Recreate until the
+// next attended render and apply, so that attended roll is the first real one.
+// --log-per-pod gives each pod its own call log directory.
 func bdGatewayDeployment(v Values, namespace string) Deployment {
 	automount := false
 	user := bdGatewayIdentity
@@ -95,7 +121,7 @@ func bdGatewayDeployment(v Values, namespace string) Deployment {
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{Name: BdGatewayName, Namespace: namespace, Labels: bdGatewayLabels()},
 		Spec: DeploymentSpec{
-			Replicas: 1,
+			Replicas: v.bdGatewayReplicas(),
 			Strategy: DeploymentStrategy{
 				Type:          "RollingUpdate",
 				RollingUpdate: &RollingUpdateStrategy{MaxUnavailable: &maxUnavailable, MaxSurge: &maxSurge},
@@ -140,6 +166,33 @@ func bdGatewayTokenCopy(v Values) Container {
 	}
 }
 
+// bdGatewayMaxConcurrentDefault is bdgw serve's own cap when --max-concurrent is
+// absent: internal/bdgateway.DefaultMaxConcurrent. The renderer imports no command
+// package (imports_test.go), so the value is repeated here and a test ties it to the
+// gateway's constant.
+const bdGatewayMaxConcurrentDefault = 16
+
+// bdGatewayMaxConcurrentPerPod is the --max-concurrent one pod runs and whether the
+// command carries it. Values.BdGatewayMaxConcurrent is the total across the replicas,
+// so each pod takes the total divided by the replica count, rounded up; a zero total
+// is the gateway's own default of 16 in total, so two pods take 8 each. The flag is
+// left off only when it would repeat that default, one pod with no total set, so an
+// unset cap renders what the gateway applied before replicas were configurable. A
+// replica count below one reads as one so the division cannot fail; bdGatewayReplicas
+// never returns zero.
+func bdGatewayMaxConcurrentPerPod(total int, replicas int32) (perPod int, render bool) {
+	if replicas < 1 {
+		replicas = 1
+	}
+	if total <= 0 {
+		if replicas == 1 {
+			return 0, false
+		}
+		total = bdGatewayMaxConcurrentDefault
+	}
+	return (total + int(replicas) - 1) / int(replicas), true
+}
+
 // bdGatewayContainer runs bdgw serve with the command the gateway's image expects.
 // Its Dolt endpoint is doltHost and doltPort, which bdGatewayDeployment passes as
 // DoltHostName and bdGatewayDoltPort; the serve command and the readiness probe both
@@ -155,8 +208,8 @@ func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 	dolt := []string{"--dolt-host", doltHost, "--dolt-port", strconv.Itoa(doltPort)}
 	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--log-per-pod", "--workspace", bdGatewayWorkspaceDir}, dolt...)
 	command = append(command, "--push-addr", ":"+strconv.Itoa(BdGatewayPushPort))
-	if v.BdGatewayMaxConcurrent > 0 {
-		command = append(command, "--max-concurrent", strconv.Itoa(v.BdGatewayMaxConcurrent))
+	if perPod, render := bdGatewayMaxConcurrentPerPod(v.BdGatewayMaxConcurrent, v.bdGatewayReplicas()); render {
+		command = append(command, "--max-concurrent", strconv.Itoa(perPod))
 	}
 	return Container{
 		Name:    BdGatewayName,

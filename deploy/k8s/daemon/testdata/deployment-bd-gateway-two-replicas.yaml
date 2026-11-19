@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bd-gateway
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: bd-gateway
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bd-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: bd-gateway
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      hostAliases:
+        - ip: 192.168.5.2
+          hostnames:
+            - host.docker.internal
+      initContainers:
+        - name: tokens-0600
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          command:
+            - sh
+            - -c
+            - cp /secrets/* /tokens/ && chmod 0600 /tokens/*
+          volumeMounts:
+            - name: bd-gateway-token-secret
+              mountPath: /secrets
+              readOnly: true
+            - name: bd-gateway-tokens
+              mountPath: /tokens
+          securityContext:
+            allowPrivilegeEscalation: false
+      containers:
+        - name: bd-gateway
+          image: registry.example.com/gt/bdgw@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+          command:
+            - bdgw
+            - serve
+            - --tokens-dir
+            - /run/bdgw/tokens
+            - --verbs
+            - /etc/bdgw/verbs.json
+            - --log-dir
+            - /var/log/bdgw
+            - --log-per-pod
+            - --workspace
+            - /var/lib/bdgw/ws
+            - --dolt-host
+            - host.docker.internal
+            - --dolt-port
+            - "3307"
+            - --push-addr
+            - :7441
+            - --max-concurrent
+            - "8"
+          ports:
+            - name: push
+              containerPort: 7441
+              protocol: TCP
+          volumeMounts:
+            - name: bd-gateway-tokens
+              mountPath: /run/bdgw/tokens
+              readOnly: true
+            - name: bd-gateway-log
+              mountPath: /var/log/bdgw
+            - name: bd-gateway-workspace
+              mountPath: /var/lib/bdgw
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 7440
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command:
+                - bdgw
+                - ready
+                - --tokens-dir
+                - /run/bdgw/tokens
+                - --verbs
+                - /etc/bdgw/verbs.json
+                - --workspace
+                - /var/lib/bdgw/ws
+                - --dolt-host
+                - host.docker.internal
+                - --dolt-port
+                - "3307"
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+      volumes:
+        - name: bd-gateway-token-secret
+          secret:
+            secretName: bd-gateway-tokens
+            defaultMode: 288
+        - name: bd-gateway-tokens
+          emptyDir: {}
+        - name: bd-gateway-log
+          persistentVolumeClaim:
+            claimName: bd-gateway-log
+        - name: bd-gateway-workspace
+          persistentVolumeClaim:
+            claimName: bd-gateway-workspace
