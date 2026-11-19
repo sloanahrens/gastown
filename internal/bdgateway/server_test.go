@@ -1244,3 +1244,163 @@ func TestBdgwHealthAlwaysOK(t *testing.T) {
 		}
 	}
 }
+
+// TestCallActorLineName: a call's line names the acting agent from BEADS_ACTOR,
+// falls back to BD_ACTOR when that is empty, names none when neither is set, and
+// truncates a value past the line's bound. Both log sites are covered: a call
+// that ran, and one refused before bd started.
+func TestCallActorLineName(t *testing.T) {
+	t.Parallel()
+	longActor := strings.Repeat("a", maxFieldBytes+32)
+	cases := []struct {
+		name    string
+		env     map[string]string
+		runner  CallRunner
+		status  int
+		want    string
+		wantKey bool
+	}{
+		{
+			name:    "BEADS_ACTOR",
+			env:     map[string]string{"BEADS_ACTOR": "gastown/polecats/nux"},
+			runner:  &stubRunner{},
+			status:  http.StatusOK,
+			want:    "gastown/polecats/nux",
+			wantKey: true,
+		},
+		{
+			name:    "BD_ACTOR fallback",
+			env:     map[string]string{"BD_ACTOR": "town/crew/dipper"},
+			runner:  &stubRunner{},
+			status:  http.StatusOK,
+			want:    "town/crew/dipper",
+			wantKey: true,
+		},
+		{
+			name:    "BEADS_ACTOR wins over BD_ACTOR",
+			env:     map[string]string{"BEADS_ACTOR": "gastown/polecats/nux", "BD_ACTOR": "town/crew/dipper"},
+			runner:  &stubRunner{},
+			status:  http.StatusOK,
+			want:    "gastown/polecats/nux",
+			wantKey: true,
+		},
+		{
+			name:   "neither set names no actor",
+			env:    map[string]string{"BD_MACHINE": "mini"},
+			runner: &stubRunner{},
+			status: http.StatusOK,
+		},
+		{
+			name:    "refused call names the actor",
+			env:     map[string]string{"BEADS_ACTOR": "gastown/polecats/nux"},
+			runner:  &stubRunner{err: errors.New("bd did not start")},
+			status:  http.StatusInternalServerError,
+			want:    "gastown/polecats/nux",
+			wantKey: true,
+		},
+		{
+			name:    "an over-long actor is truncated",
+			env:     map[string]string{"BEADS_ACTOR": longActor},
+			runner:  &stubRunner{},
+			status:  http.StatusOK,
+			want:    longActor[:maxFieldBytes],
+			wantKey: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			log, lines := newRawCallLog(t)
+			g := newTestGateway(t, mustStore(t), log, tc.runner)
+			rec := httptest.NewRecorder()
+			g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show", "gt-abc"}, Env: tc.env}, ""))
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d; body %s", rec.Code, tc.status, rec.Body.String())
+			}
+			got := lines()
+			if len(got) != 1 {
+				t.Fatalf("call log lines = %d, want 1: %q", len(got), got)
+			}
+			entry := decodeLine(t, got[0])
+			actor, ok := entry["actor"]
+			if ok != tc.wantKey {
+				t.Fatalf("actor key present = %v, want %v (line %q)", ok, tc.wantKey, got[0])
+			}
+			if ok && actor != tc.want {
+				t.Errorf("actor = %v, want %q", actor, tc.want)
+			}
+		})
+	}
+}
+
+// TestCallActorLineWrite: a call's line marks a read verb's call read and a
+// write verb's call write, on a call that ran and on one refused before bd
+// started. An admin verb is a write too, since only a read leaves the mark off.
+func TestCallActorLineWrite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		token  string
+		argv   []string
+		runner CallRunner
+		status int
+		want   bool
+	}{
+		{
+			name:   "read verb",
+			token:  testReadToken,
+			argv:   []string{"show", "gt-abc"},
+			runner: &stubRunner{},
+			status: http.StatusOK,
+			want:   false,
+		},
+		{
+			name:   "write verb",
+			token:  testDaemonToken,
+			argv:   []string{"create", "--title=x"},
+			runner: &stubRunner{},
+			status: http.StatusOK,
+			want:   true,
+		},
+		{
+			name:   "admin verb",
+			token:  testOperatorToken,
+			argv:   []string{"config", "set", "k", "v"},
+			runner: &stubRunner{},
+			status: http.StatusOK,
+			want:   true,
+		},
+		{
+			name:   "refused write verb",
+			token:  testDaemonToken,
+			argv:   []string{"create", "--title=x"},
+			runner: &stubRunner{err: errors.New("bd did not start")},
+			status: http.StatusInternalServerError,
+			want:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			log, lines := newRawCallLog(t)
+			g := newTestGateway(t, mustStore(t), log, tc.runner)
+			rec := httptest.NewRecorder()
+			g.ServeHTTP(rec, execRequest(t, tc.token, Request{Argv: tc.argv}, ""))
+			if rec.Code != tc.status {
+				t.Fatalf("status = %d, want %d; body %s", rec.Code, tc.status, rec.Body.String())
+			}
+			got := lines()
+			if len(got) != 1 {
+				t.Fatalf("call log lines = %d, want 1: %q", len(got), got)
+			}
+			entry := decodeLine(t, got[0])
+			mark, ok := entry["write"]
+			if !ok {
+				t.Fatalf("line %q has no write field", got[0])
+			}
+			if mark != tc.want {
+				t.Errorf("write = %v, want %v (line %q)", mark, tc.want, got[0])
+			}
+		})
+	}
+}

@@ -87,9 +87,15 @@ type CallRecord struct {
 	Class string
 	// Caller is the X-Gt-Caller name.
 	Caller string
+	// Actor is the acting agent the caller named, BEADS_ACTOR or BD_ACTOR, or
+	// empty when it named none.
+	Actor string
 	// Argv is bd's arguments. Its verb, flag names and bead ids are logged; a
 	// flag's value and every other operand are data and stay out.
 	Argv []string
+	// Write reports whether the authorized verb may change beads; a read verb
+	// leaves it false.
+	Write bool
 	// ExitCode is bd's exit status; non-zero counts the call as an error.
 	ExitCode int
 	// Duration is how long the call took.
@@ -251,7 +257,9 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 		TS:         l.now().UTC().Format(time.RFC3339Nano),
 		Class:      boundText(rec.Class),
 		Caller:     boundText(rec.Caller),
+		Actor:      boundText(rec.Actor),
 		Verb:       parsed.verb,
+		Write:      rec.Write,
 		Flags:      parsed.flags,
 		Beads:      parsed.beads,
 		ExitCode:   rec.ExitCode,
