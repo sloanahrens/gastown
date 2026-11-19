@@ -29,6 +29,9 @@ func refreshPin(name, pin, tip string, behind int) ImagePinState {
 	return ImagePinState{Name: name, Pin: pin, Tip: tip, Behind: behind}
 }
 
+// refreshFiledAt is the instant the builder tests say the tips were read.
+var refreshFiledAt = time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
 // TestImagePinsRefreshBeadNamesEachPin: the bead names every pin the planner
 // named with the commit it is pinned at and its source tip, in one bullet per
 // pin, and carries the label the open-bead lookup reads.
@@ -53,7 +56,7 @@ func TestImagePinsRefreshBeadNamesEachPin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			draft, err := imagePinsRefreshBead(tt.pins)
+			draft, err := imagePinsRefreshBead(tt.pins, refreshFiledAt)
 			if err != nil {
 				t.Fatalf("imagePinsRefreshBead: %v", err)
 			}
@@ -73,6 +76,35 @@ func TestImagePinsRefreshBeadNamesEachPin(t *testing.T) {
 	}
 }
 
+// TestImagePinsRefreshBeadNamesWhenTheTipsWereRead: the description says the
+// instant the tips were read, in RFC 3339 UTC whatever zone the patrol's clock
+// is in (gt-fcsoy8).
+func TestImagePinsRefreshBeadNamesWhenTheTipsWereRead(t *testing.T) {
+	t.Parallel()
+	read := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		filedAt time.Time
+	}{
+		{"a UTC clock", read},
+		{"a clock ahead of UTC", read.In(time.FixedZone("UTC+5:30", 5*3600+30*60))},
+		{"a clock behind UTC", read.In(time.FixedZone("UTC-8", -8*3600))},
+	}
+	want := "These tips were read at 2026-11-15T12:00:00Z from each source's origin/main. A source that has moved since is fine: pin the tip named here."
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			draft, err := imagePinsRefreshBead([]ImagePinState{refreshPin("bd", pinBD, tipBD, 22)}, tt.filedAt)
+			if err != nil {
+				t.Fatalf("imagePinsRefreshBead: %v", err)
+			}
+			if !strings.Contains(draft.Description, want) {
+				t.Errorf("description does not carry %q:\n%s", want, draft.Description)
+			}
+		})
+	}
+}
+
 // TestImagePinsRefreshBeadPassesSpecLint: the built text is the shape the
 // dispatcher reads, with the same boxes in the field and in the description and
 // no refusal the dispatcher would hold the bead for.
@@ -81,7 +113,7 @@ func TestImagePinsRefreshBeadPassesSpecLint(t *testing.T) {
 	draft, err := imagePinsRefreshBead([]ImagePinState{
 		refreshPin("bd", pinBD, tipBD, 22),
 		refreshPin("devops", pinDevops, tipDevops, 47),
-	})
+	}, refreshFiledAt)
 	if err != nil {
 		t.Fatalf("imagePinsRefreshBead: %v", err)
 	}
@@ -113,7 +145,7 @@ func TestImagePinsRefreshBeadPassesSpecLint(t *testing.T) {
 // polecat the command, the two files it writes and the four checkouts it reads.
 func TestImagePinsRefreshBeadCarriesTheRefreshCommand(t *testing.T) {
 	t.Parallel()
-	draft, err := imagePinsRefreshBead([]ImagePinState{refreshPin("devops", pinDevops, tipDevops, 47)})
+	draft, err := imagePinsRefreshBead([]ImagePinState{refreshPin("devops", pinDevops, tipDevops, 47)}, refreshFiledAt)
 	if err != nil {
 		t.Fatalf("imagePinsRefreshBead: %v", err)
 	}
@@ -147,7 +179,7 @@ func TestImagePinsRefreshBeadRefusesAPinItCannotName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			draft, err := imagePinsRefreshBead(tt.pins)
+			draft, err := imagePinsRefreshBead(tt.pins, refreshFiledAt)
 			if err == nil {
 				t.Fatalf("imagePinsRefreshBead(%v) = %q, want an error", tt.pins, draft.Title)
 			}
@@ -183,7 +215,7 @@ func TestImagePinsRefreshBeadRefusesAHostilePinField(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			draft, err := imagePinsRefreshBead([]ImagePinState{tt.pin})
+			draft, err := imagePinsRefreshBead([]ImagePinState{tt.pin}, refreshFiledAt)
 			if err == nil {
 				t.Fatalf("imagePinsRefreshBead accepted %+v, want an error", tt.pin)
 			}
@@ -376,8 +408,8 @@ func TestImagePinsOpenRefreshBeadRefusesWhatItCannotRead(t *testing.T) {
 }
 
 // TestImagePinsFileRefreshBeadRecordsNothingOnFailure: a create that fails
-// returns its error and no id, and records no bead. A refused set of pins never
-// reaches create at all.
+// returns its error and no id, and records no bead. A refused set of pins, or a
+// zero filing time, never reaches create at all.
 func TestImagePinsFileRefreshBeadRecordsNothingOnFailure(t *testing.T) {
 	t.Parallel()
 	errCreate := errors.New("bd create: database locked")
@@ -386,6 +418,7 @@ func TestImagePinsFileRefreshBeadRecordsNothingOnFailure(t *testing.T) {
 		name     string
 		store    *refreshStore
 		pins     []ImagePinState
+		filedAt  time.Time
 		wantErr  error
 		wantText string
 	}{
@@ -393,6 +426,7 @@ func TestImagePinsFileRefreshBeadRecordsNothingOnFailure(t *testing.T) {
 			name:     "the create fails",
 			store:    &refreshStore{createErr: errCreate},
 			pins:     good,
+			filedAt:  refreshFiledAt,
 			wantErr:  errCreate,
 			wantText: "filing",
 		},
@@ -400,19 +434,27 @@ func TestImagePinsFileRefreshBeadRecordsNothingOnFailure(t *testing.T) {
 			name:     "the create returns no bead",
 			store:    &refreshStore{nilIssue: true},
 			pins:     good,
+			filedAt:  refreshFiledAt,
 			wantText: "returned no bead id",
 		},
 		{
 			name:     "a pin it cannot name is refused before create",
 			store:    &refreshStore{},
 			pins:     []ImagePinState{{Name: "bd", Pin: pinBD, Behind: 22}},
+			filedAt:  refreshFiledAt,
 			wantText: "has no source tip",
+		},
+		{
+			name:     "a zero filing time is refused before create",
+			store:    &refreshStore{},
+			pins:     good,
+			wantText: "filing time is zero",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			id, err := imagePinsFileRefreshBead(tt.store.Create, tt.pins)
+			id, err := imagePinsFileRefreshBead(tt.store.Create, tt.pins, tt.filedAt)
 			if err == nil {
 				t.Fatalf("imagePinsFileRefreshBead = %q, want an error", id)
 			}
@@ -440,7 +482,7 @@ func TestImagePinsFileRefreshBeadFilesTheDraft(t *testing.T) {
 	t.Parallel()
 	store := &refreshStore{}
 	pins := []ImagePinState{refreshPin("devops", pinDevops, tipDevops, 47)}
-	id, err := imagePinsFileRefreshBead(store.Create, pins)
+	id, err := imagePinsFileRefreshBead(store.Create, pins, refreshFiledAt)
 	if err != nil {
 		t.Fatalf("imagePinsFileRefreshBead: %v", err)
 	}
@@ -456,6 +498,9 @@ func TestImagePinsFileRefreshBeadFilesTheDraft(t *testing.T) {
 	}
 	if !strings.Contains(got.Description, "- devops: pinned at "+pinDevops) {
 		t.Errorf("description does not name the devops pin:\n%s", got.Description)
+	}
+	if want := "These tips were read at " + refreshFiledAt.Format(time.RFC3339); !strings.Contains(got.Description, want) {
+		t.Errorf("filed description does not name the filing time %q:\n%s", want, got.Description)
 	}
 	if got.Acceptance != imagePinsRefreshAcceptance {
 		t.Errorf("acceptance = %q, want the draft's acceptance", got.Acceptance)

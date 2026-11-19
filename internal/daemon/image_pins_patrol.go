@@ -289,8 +289,8 @@ func (d *Daemon) imagePinsSeams(ctx context.Context) imagePinsTickSeams {
 		openBead: func() (*ImagePinRefreshBead, error) {
 			return imagePinsOpenRefreshBead(d.imagePinsBeads().List)
 		},
-		file: func(pins []ImagePinState) (string, error) {
-			return imagePinsFileRefreshBead(d.imagePinsBeads().Create, pins)
+		file: func(pins []ImagePinState, filedAt time.Time) (string, error) {
+			return imagePinsFileRefreshBead(d.imagePinsBeads().Create, pins, filedAt)
 		},
 	}
 }
@@ -428,9 +428,9 @@ type imagePinsTickSeams struct {
 	// plan decides whether a refresh bead is due. Nil means PlanImagePins; a
 	// test replaces it to see what the tick asked.
 	plan func(pins []ImagePinState, open *ImagePinRefreshBead, now time.Time) ImagePinPlan
-	// file files the refresh bead for the pins the planner named and returns
-	// its id.
-	file func(pins []ImagePinState) (string, error)
+	// file files the refresh bead for the pins the planner named, read at
+	// filedAt, and returns its id.
+	file func(pins []ImagePinState, filedAt time.Time) (string, error)
 }
 
 // check returns the error naming every required seam the tick was not given, so
@@ -492,11 +492,14 @@ func runImagePinsTick(ctx context.Context, s imagePinsTickSeams) (string, []Imag
 	if err != nil {
 		return "", nil, err
 	}
-	plan := s.planner()(pins, open, s.now())
+	// One clock read, so the open bead's age and the filed bead's filing time
+	// are measured against the same instant.
+	now := s.now()
+	plan := s.planner()(pins, open, now)
 	if len(plan.File) == 0 {
 		return "", plan.Items, nil
 	}
-	id, err := s.file(plan.File)
+	id, err := s.file(plan.File, now)
 	if err != nil {
 		return "", plan.Items, fmt.Errorf("image pins patrol: filing the refresh bead: %w", err)
 	}

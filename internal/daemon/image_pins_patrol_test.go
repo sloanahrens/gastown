@@ -50,9 +50,9 @@ func tickSeams(counts *tickCounts, now time.Time, pins []ImagePinState, open *Im
 			counts.open++
 			return open, nil
 		},
-		file: func(pins []ImagePinState) (string, error) {
+		file: func(pins []ImagePinState, filedAt time.Time) (string, error) {
 			counts.file++
-			return imagePinsFileRefreshBead(store.Create, pins)
+			return imagePinsFileRefreshBead(store.Create, pins, filedAt)
 		},
 	}
 }
@@ -151,6 +151,11 @@ func TestImagePinsTick(t *testing.T) {
 				if labels := store.created[0].Labels; !slices.Contains(labels, imagePinsRefreshLabel) {
 					t.Errorf("filed labels = %v, want %s among them", labels, imagePinsRefreshLabel)
 				}
+				// The filed bead says when its tips were read: the tick hands the
+				// filer the same clock read it gave the planner.
+				if want := "These tips were read at " + now.UTC().Format(time.RFC3339); !strings.Contains(store.created[0].Description, want) {
+					t.Errorf("filed description does not name the patrol's clock %q:\n%s", want, store.created[0].Description)
+				}
 			}
 			if got := tickItemNames(items); !slices.Equal(got, tt.wantItems) {
 				t.Errorf("items = %v, want %v", got, tt.wantItems)
@@ -187,7 +192,7 @@ func TestImagePinsTickAsksThePlanner(t *testing.T) {
 			gotPins, gotOpen, gotNow = p, o, n
 			return ImagePinPlan{}
 		},
-		file: func([]ImagePinState) (string, error) {
+		file: func([]ImagePinState, time.Time) (string, error) {
 			t.Error("the filer ran for a plan that named no pin")
 			return "", nil
 		},
@@ -340,7 +345,7 @@ func TestImagePinsTickStopsAtTheFailedRead(t *testing.T) {
 					}
 					return nil, nil
 				},
-				file: func([]ImagePinState) (string, error) {
+				file: func([]ImagePinState, time.Time) (string, error) {
 					counts.file++
 					if tt.fileErr != nil {
 						return "", tt.fileErr
