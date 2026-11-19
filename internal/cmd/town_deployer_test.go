@@ -2,14 +2,22 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"io"
 	"io/fs"
+	"math/big"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -399,5 +407,343 @@ func TestTownDeployerCSRFlagsRegistered(t *testing.T) {
 	found, _, err := townCmd.Find([]string{"deployer"})
 	if err != nil || found != townDeployerCmd {
 		t.Errorf("gt town Find(deployer) = %v, %v; want the deployer command", found, err)
+	}
+}
+
+const (
+	kubeconfigTestCAPath   = "/home/example/ca.crt"
+	kubeconfigTestCertPath = "/home/example/gt-deployer-apply.crt"
+	kubeconfigTestServer   = "https://127.0.0.1:64459"
+)
+
+// deployerTestCertificate builds a self-signed certificate PEM for the test,
+// so a CA or a signed certificate the command reads is a real one.
+func deployerTestCertificate(t *testing.T, commonName string) []byte {
+	t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("could not generate the test certificate key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             time.Unix(0, 0),
+		NotAfter:              time.Unix(1<<31-1, 0),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatalf("could not create the test certificate: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+// paths returns the fake filesystem's paths in a stable order, so a test can
+// show a refusal wrote nothing.
+func (f *fakeDeployerFS) paths() string {
+	names := make([]string, 0, len(f.entries))
+	for name := range f.entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, "\n")
+}
+
+// newKubeconfigEnv is the kubeconfig command a test runs: the fixed deployer
+// user outside a pod, on the fake filesystem, reading the files it is given.
+func newKubeconfigEnv(fsys *fakeDeployerFS, files map[string][]byte) townDeployerKubeconfigEnv {
+	return townDeployerKubeconfigEnv{
+		deployerEnv: deployerEnv{
+			command: "kubeconfig",
+			asUser:  "deployer",
+			getenv:  func(string) string { return "" },
+			current: deployerUser("deployer", "1000"),
+			fs:      fsys,
+			readFile: func(path string) ([]byte, error) {
+				data, ok := files[path]
+				if !ok {
+					return nil, fs.ErrNotExist
+				}
+				return data, nil
+			},
+			write: func(string, []byte, fs.FileMode) error {
+				return errors.New("kubeconfig wrote a file outside the store")
+			},
+			out: io.Discard,
+		},
+		name:   "gt-deployer-apply",
+		dir:    deployerTestDir,
+		server: kubeconfigTestServer,
+		ca:     kubeconfigTestCAPath,
+		cert:   kubeconfigTestCertPath,
+	}
+}
+
+// newKubeconfigFiles is the --ca and --cert input a test's environment reads.
+func newKubeconfigFiles(t *testing.T) map[string][]byte {
+	t.Helper()
+	return map[string][]byte{
+		kubeconfigTestCAPath:   deployerTestCertificate(t, "gt deployer test CA"),
+		kubeconfigTestCertPath: deployerTestCertificate(t, "gt-deployer-apply"),
+	}
+}
+
+// kubeconfigDoc is the stored kubeconfig as kubectl's schema reads it, decoded
+// independently of the package's own struct.
+type kubeconfigDoc struct {
+	APIVersion string `yaml:"apiVersion"`
+	Kind       string `yaml:"kind"`
+	Clusters   []struct {
+		Name    string `yaml:"name"`
+		Cluster struct {
+			Server                   string `yaml:"server"`
+			CertificateAuthorityData string `yaml:"certificate-authority-data"`
+		} `yaml:"cluster"`
+	} `yaml:"clusters"`
+	Users []struct {
+		Name string `yaml:"name"`
+		User struct {
+			ClientCertificate     string `yaml:"client-certificate"`
+			ClientKey             string `yaml:"client-key"`
+			ClientCertificateData string `yaml:"client-certificate-data"`
+			ClientKeyData         string `yaml:"client-key-data"`
+		} `yaml:"user"`
+	} `yaml:"users"`
+	Contexts []struct {
+		Name    string `yaml:"name"`
+		Context struct {
+			Cluster string `yaml:"cluster"`
+			User    string `yaml:"user"`
+		} `yaml:"context"`
+	} `yaml:"contexts"`
+	CurrentContext string `yaml:"current-context"`
+}
+
+func TestTownDeployerKubeconfigWrites(t *testing.T) {
+	t.Parallel()
+
+	t.Run("stores the certificate and names the key by path", func(t *testing.T) {
+		t.Parallel()
+		fsys := newFakeDeployerFS(1000)
+		fsys.entries[deployerTestDir] = deployerEntry{mode: fs.ModeDir | 0o700, owner: 1000}
+		keyPath := filepath.Join(deployerTestDir, "gt-deployer-apply.key")
+		fsys.entries[keyPath] = deployerEntry{mode: 0o600, owner: 1000, data: []byte("the key bytes")}
+		files := newKubeconfigFiles(t)
+
+		if err := runTownDeployerKubeconfigIn(newKubeconfigEnv(fsys, files)); err != nil {
+			t.Fatalf("runTownDeployerKubeconfigIn = %v", err)
+		}
+
+		certPath := filepath.Join(deployerTestDir, "gt-deployer-apply.crt")
+		stored, ok := fsys.entries[certPath]
+		if !ok {
+			t.Fatalf("the certificate was not stored at %s", certPath)
+		}
+		if stored.mode != 0o600 || stored.owner != 1000 {
+			t.Errorf("the certificate holds mode %04o owned by uid %d, want 0600 owned by 1000", stored.mode, stored.owner)
+		}
+		if !bytes.Equal(stored.data, files[kubeconfigTestCertPath]) {
+			t.Error("the stored certificate is not the bytes --cert named")
+		}
+
+		kubeconfigPath := filepath.Join(deployerTestDir, "gt-deployer-apply.kubeconfig")
+		kube, ok := fsys.entries[kubeconfigPath]
+		if !ok {
+			t.Fatalf("the kubeconfig was not stored at %s", kubeconfigPath)
+		}
+		if kube.mode != 0o600 || kube.owner != 1000 {
+			t.Errorf("the kubeconfig holds mode %04o owned by uid %d, want 0600 owned by 1000", kube.mode, kube.owner)
+		}
+
+		var doc kubeconfigDoc
+		if err := yaml.Unmarshal(kube.data, &doc); err != nil {
+			t.Fatalf("the stored kubeconfig does not parse: %v", err)
+		}
+		if doc.APIVersion != "v1" || doc.Kind != "Config" {
+			t.Fatalf("the kubeconfig is %s %s, want v1 Config", doc.APIVersion, doc.Kind)
+		}
+		if len(doc.Users) != 1 {
+			t.Fatalf("the kubeconfig holds %d users, want one", len(doc.Users))
+		}
+		user := doc.Users[0].User
+		if user.ClientKey != keyPath {
+			t.Errorf("the user references the key at %q, want %s", user.ClientKey, keyPath)
+		}
+		if user.ClientCertificate != certPath {
+			t.Errorf("the user references the certificate at %q, want %s", user.ClientCertificate, certPath)
+		}
+		if user.ClientKeyData != "" || user.ClientCertificateData != "" {
+			t.Error("the kubeconfig embeds the key or the certificate instead of naming its path")
+		}
+		if doc.CurrentContext != "gt-deployer-apply" {
+			t.Errorf("the current context is %q, want gt-deployer-apply", doc.CurrentContext)
+		}
+		if len(doc.Clusters) != 1 || doc.Clusters[0].Cluster.Server != kubeconfigTestServer {
+			t.Fatalf("the cluster is %+v, want %s", doc.Clusters, kubeconfigTestServer)
+		}
+		ca, err := base64.StdEncoding.DecodeString(doc.Clusters[0].Cluster.CertificateAuthorityData)
+		if err != nil || !bytes.Equal(ca, files[kubeconfigTestCAPath]) {
+			t.Errorf("the embedded CA is not the --ca certificate: %v", err)
+		}
+	})
+
+	t.Run("refuses the admin context name and writes nothing", func(t *testing.T) {
+		t.Parallel()
+		fsys := newFakeDeployerFS(1000)
+		fsys.entries[deployerTestDir] = deployerEntry{mode: fs.ModeDir | 0o700, owner: 1000}
+		env := newKubeconfigEnv(fsys, newKubeconfigFiles(t))
+		env.name = "colima-gt-control"
+		before := fsys.paths()
+
+		err := runTownDeployerKubeconfigIn(env)
+		if err == nil || !strings.Contains(err.Error(), "admin context") {
+			t.Fatalf("runTownDeployerKubeconfigIn = %v, want a refusal naming the admin context", err)
+		}
+		if after := fsys.paths(); after != before {
+			t.Errorf("the refused run wrote files: %s", after)
+		}
+	})
+}
+
+func TestTownDeployerKubeconfigRefuses(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name string
+		// edit adjusts the environment, the files --ca and --cert are read
+		// from, or the filesystem before the command runs.
+		edit func(env *townDeployerKubeconfigEnv, files map[string][]byte, fsys *fakeDeployerFS)
+		want string
+	}
+	cases := []testCase{
+		{
+			name: "inside a pod",
+			edit: func(env *townDeployerKubeconfigEnv, _ map[string][]byte, _ *fakeDeployerFS) {
+				env.getenv = func(string) string { return "10.0.0.1" }
+			},
+			want: "deployer user only",
+		},
+		{
+			name: "another running user",
+			edit: func(env *townDeployerKubeconfigEnv, _ map[string][]byte, _ *fakeDeployerFS) {
+				env.current = deployerUser("alice", "1001")
+			},
+			want: "not --as-user",
+		},
+		{
+			name: "no --as-user",
+			edit: func(env *townDeployerKubeconfigEnv, _ map[string][]byte, _ *fakeDeployerFS) {
+				env.asUser = ""
+			},
+			want: "needs --as-user",
+		},
+		{
+			name: "--ca cannot be read",
+			edit: func(_ *townDeployerKubeconfigEnv, files map[string][]byte, _ *fakeDeployerFS) {
+				delete(files, kubeconfigTestCAPath)
+			},
+			want: "reading --ca " + kubeconfigTestCAPath,
+		},
+		{
+			name: "--cert cannot be read",
+			edit: func(_ *townDeployerKubeconfigEnv, files map[string][]byte, _ *fakeDeployerFS) {
+				delete(files, kubeconfigTestCertPath)
+			},
+			want: "reading --cert " + kubeconfigTestCertPath,
+		},
+		{
+			name: "--cert holds no certificate",
+			edit: func(_ *townDeployerKubeconfigEnv, files map[string][]byte, _ *fakeDeployerFS) {
+				files[kubeconfigTestCertPath] = []byte("not a certificate")
+			},
+			want: "holds no CERTIFICATE PEM block",
+		},
+		{
+			name: "--cert holds a block that does not parse",
+			edit: func(_ *townDeployerKubeconfigEnv, files map[string][]byte, _ *fakeDeployerFS) {
+				files[kubeconfigTestCertPath] = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
+			},
+			want: "CERTIFICATE block that does not parse",
+		},
+		{
+			name: "the CA does not parse",
+			edit: func(_ *townDeployerKubeconfigEnv, files map[string][]byte, _ *fakeDeployerFS) {
+				files[kubeconfigTestCAPath] = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
+			},
+			want: "building the gt-deployer-apply kubeconfig",
+		},
+		{
+			name: "a server that is not loopback",
+			edit: func(env *townDeployerKubeconfigEnv, _ map[string][]byte, _ *fakeDeployerFS) {
+				env.server = "https://10.0.0.1:6443"
+			},
+			want: "not a loopback address",
+		},
+		{
+			name: "the directory fails the store's check",
+			edit: func(_ *townDeployerKubeconfigEnv, _ map[string][]byte, fsys *fakeDeployerFS) {
+				fsys.entries[deployerTestDir] = deployerEntry{mode: fs.ModeDir | 0o755, owner: 1000}
+			},
+			want: "writing the gt-deployer-apply certificate and kubeconfig",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newFakeDeployerFS(1000)
+			fsys.entries[deployerTestDir] = deployerEntry{mode: fs.ModeDir | 0o700, owner: 1000}
+			files := newKubeconfigFiles(t)
+			env := newKubeconfigEnv(fsys, files)
+			tc.edit(&env, files, fsys)
+			before := fsys.paths()
+
+			err := runTownDeployerKubeconfigIn(env)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("runTownDeployerKubeconfigIn = %v, want a refusal naming %q", err, tc.want)
+			}
+			if after := fsys.paths(); after != before {
+				t.Errorf("the refused run wrote files: %s", after)
+			}
+		})
+	}
+}
+
+// TestTownDeployerKubeconfigFlagReadsRefuseAnUndefinedFlag keeps every flag
+// read in runTownDeployerKubeconfig covered, so a flag that stops being
+// registered fails here.
+func TestTownDeployerKubeconfigFlagReadsRefuseAnUndefinedFlag(t *testing.T) {
+	t.Parallel()
+	flags := []string{"as-user", "name", "dir", "server", "ca", "cert"}
+	for i := range flags {
+		defined := flags[:i]
+		want := "reading --" + flags[i]
+		t.Run(want, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{}
+			for _, f := range defined {
+				cmd.Flags().String(f, "", "")
+			}
+			err := runTownDeployerKubeconfig(cmd, nil)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("runTownDeployerKubeconfig = %v, want a refusal naming %q", err, want)
+			}
+		})
+	}
+}
+
+// TestTownDeployerKubeconfigFlagsRegistered proves the command the binary runs
+// holds every flag the run function reads.
+func TestTownDeployerKubeconfigFlagsRegistered(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"as-user", "name", "dir", "server", "ca", "cert"} {
+		if townDeployerKubeconfigCmd.Flags().Lookup(name) == nil {
+			t.Errorf("gt town deployer kubeconfig has no --%s flag", name)
+		}
+	}
+	found, _, err := townCmd.Find([]string{"deployer", "kubeconfig"})
+	if err != nil || found != townDeployerKubeconfigCmd {
+		t.Errorf("gt town Find(deployer kubeconfig) = %v, %v; want the kubeconfig command", found, err)
 	}
 }

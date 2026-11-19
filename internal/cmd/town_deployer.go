@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -50,6 +53,31 @@ Examples:
 	RunE: runTownDeployerCSR,
 }
 
+var townDeployerKubeconfigCmd = &cobra.Command{
+	Use:   "kubeconfig",
+	Short: "Store the signed certificate and write the deployer's kubeconfig",
+	Long: `Store the signed certificate from --cert beside the key csr wrote, and
+write the deployer's kubeconfig into --dir.
+
+The kubeconfig names <dir>/<name>.crt and <dir>/<name>.key by path, so the
+private key is never copied out of the directory csr wrote it into, and embeds
+the CA at --ca so the deployer reaches only the cluster on this host. --name is
+also the context name, and the town's admin context name is refused so the
+deployer's kubeconfig never shadows the operator's own.
+
+The command writes only into the directory deployercred verifies as 0700 and
+owned by --as-user, at 0600. A --ca or --cert file that cannot be read, or
+holds no certificate that parses, is an error naming the file.
+
+The command runs only as the deployer user named by --as-user, and never inside
+a pod.
+
+Examples:
+  gt town deployer kubeconfig --as-user deployer --name gt-deployer-apply --dir ~deployer/.gt/deployer --server https://127.0.0.1:64459 --ca ca.crt --cert gt-deployer-apply.crt`,
+	Args: cobra.NoArgs,
+	RunE: runTownDeployerKubeconfig,
+}
+
 func init() {
 	townCmd.AddCommand(townDeployerCmd)
 	townDeployerCmd.AddCommand(townDeployerCSRCmd)
@@ -62,6 +90,20 @@ func init() {
 	_ = townDeployerCSRCmd.MarkFlagRequired("name")
 	_ = townDeployerCSRCmd.MarkFlagRequired("days")
 	_ = townDeployerCSRCmd.MarkFlagRequired("dir")
+
+	townDeployerCmd.AddCommand(townDeployerKubeconfigCmd)
+	townDeployerKubeconfigCmd.Flags().String("as-user", "", "the deployer user the command must run as (required)")
+	townDeployerKubeconfigCmd.Flags().String("name", "", "the deployer identity, and the kubeconfig's context name (required)")
+	townDeployerKubeconfigCmd.Flags().String("dir", "", "the deployer credential directory the key is in, verified 0700 and owned by --as-user (required)")
+	townDeployerKubeconfigCmd.Flags().String("server", "", "the control cluster's address as https on loopback, e.g. https://127.0.0.1:64459 (required)")
+	townDeployerKubeconfigCmd.Flags().String("ca", "", "the cluster CA certificate file, embedded in the kubeconfig (required)")
+	townDeployerKubeconfigCmd.Flags().String("cert", "", "the signed client certificate file for --name (required)")
+	_ = townDeployerKubeconfigCmd.MarkFlagRequired("as-user")
+	_ = townDeployerKubeconfigCmd.MarkFlagRequired("name")
+	_ = townDeployerKubeconfigCmd.MarkFlagRequired("dir")
+	_ = townDeployerKubeconfigCmd.MarkFlagRequired("server")
+	_ = townDeployerKubeconfigCmd.MarkFlagRequired("ca")
+	_ = townDeployerKubeconfigCmd.MarkFlagRequired("cert")
 }
 
 // deployerEnv is what a deployer command reads from the host: the running user,
@@ -75,8 +117,12 @@ type deployerEnv struct {
 	getenv  func(string) string
 	current func() (*user.User, error)
 	fs      deployercred.FS
-	// write is os.WriteFile for the non-secret outputs, the CSR and later the
-	// kubeconfig; the key goes through deployercred.Store alone.
+	// readFile is os.ReadFile for the files the operator hands the command,
+	// the CA and the signed certificate; they are inputs, so they do not go
+	// through deployercred.Store.
+	readFile func(string) ([]byte, error)
+	// write is os.WriteFile for the CSR; every file that lands in the
+	// credential directory goes through deployercred.Store alone.
 	write func(string, []byte, fs.FileMode) error
 	out   io.Writer
 }
@@ -137,13 +183,14 @@ func runTownDeployerCSR(cmd *cobra.Command, _ []string) error {
 	}
 	return runTownDeployerCSRIn(townDeployerCSREnv{
 		deployerEnv: deployerEnv{
-			command: "csr",
-			asUser:  asUser,
-			getenv:  os.Getenv,
-			current: user.Current,
-			fs:      deployercred.Disk{},
-			write:   os.WriteFile,
-			out:     cmd.OutOrStdout(),
+			command:  "csr",
+			asUser:   asUser,
+			getenv:   os.Getenv,
+			current:  user.Current,
+			fs:       deployercred.Disk{},
+			readFile: os.ReadFile,
+			write:    os.WriteFile,
+			out:      cmd.OutOrStdout(),
 		},
 		name:   name,
 		days:   days,
@@ -190,4 +237,113 @@ func runTownDeployerCSRIn(env townDeployerCSREnv) error {
 // kubeconfig command references the same path.
 func deployerNamedKey(id deployercred.Identity) string {
 	return string(id) + ".key"
+}
+
+// deployerNamedCert is the file name the signed certificate is stored under;
+// the kubeconfig references the same path.
+func deployerNamedCert(id deployercred.Identity) string {
+	return string(id) + ".crt"
+}
+
+// deployerNamedKubeconfig is the file name the identity's kubeconfig is
+// written under.
+func deployerNamedKubeconfig(id deployercred.Identity) string {
+	return string(id) + ".kubeconfig"
+}
+
+// townDeployerKubeconfigEnv is what `gt town deployer kubeconfig` reads from its
+// session.
+type townDeployerKubeconfigEnv struct {
+	deployerEnv
+	name   string
+	dir    string
+	server string
+	ca     string
+	cert   string
+}
+
+func runTownDeployerKubeconfig(cmd *cobra.Command, _ []string) error {
+	flags := make(map[string]string, 6)
+	for _, name := range []string{"as-user", "name", "dir", "server", "ca", "cert"} {
+		v, err := cmd.Flags().GetString(name)
+		if err != nil {
+			return fmt.Errorf("reading --%s: %w", name, err)
+		}
+		flags[name] = v
+	}
+	return runTownDeployerKubeconfigIn(townDeployerKubeconfigEnv{
+		deployerEnv: deployerEnv{
+			command:  "kubeconfig",
+			asUser:   flags["as-user"],
+			getenv:   os.Getenv,
+			current:  user.Current,
+			fs:       deployercred.Disk{},
+			readFile: os.ReadFile,
+			write:    os.WriteFile,
+			out:      cmd.OutOrStdout(),
+		},
+		name:   flags["name"],
+		dir:    flags["dir"],
+		server: flags["server"],
+		ca:     flags["ca"],
+		cert:   flags["cert"],
+	})
+}
+
+// runTownDeployerKubeconfigIn is what `gt town deployer kubeconfig` runs.
+func runTownDeployerKubeconfigIn(env townDeployerKubeconfigEnv) error {
+	uid, err := deployerUserUID(env.deployerEnv)
+	if err != nil {
+		return err
+	}
+	caPEM, err := env.readFile(env.ca)
+	if err != nil {
+		return fmt.Errorf("reading --ca %s: %w", env.ca, err)
+	}
+	certPEM, err := env.readFile(env.cert)
+	if err != nil {
+		return fmt.Errorf("reading --cert %s: %w", env.cert, err)
+	}
+	if err := checkDeployerCertificate(env.cert, certPEM); err != nil {
+		return err
+	}
+
+	id := deployercred.Identity(env.name)
+	kubeconfig, err := deployercred.Kubeconfig(env.server, caPEM, filepath.Join(env.dir, deployerNamedCert(id)), filepath.Join(env.dir, deployerNamedKey(id)), env.name)
+	if err != nil {
+		return fmt.Errorf("building the %s kubeconfig: %w", env.name, err)
+	}
+
+	// The certificate is stored beside the key it was issued for, so the two
+	// paths the kubeconfig names are both in the verified directory.
+	files := map[string][]byte{
+		deployerNamedCert(id):       certPEM,
+		deployerNamedKubeconfig(id): kubeconfig,
+	}
+	if err := deployercred.Store(env.fs, uid, env.dir, files); err != nil {
+		return fmt.Errorf("writing the %s certificate and kubeconfig: %w", env.name, err)
+	}
+	return nil
+}
+
+// checkDeployerCertificate refuses a --cert file with no CERTIFICATE PEM block
+// that parses. The bytes are stored as the credential kubectl presents to the
+// cluster, so a file the cluster cannot read must not be written as one; the
+// error names the file, never its content.
+func checkDeployerCertificate(path string, certPEM []byte) error {
+	rest := certPEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return fmt.Errorf("--cert %s holds no CERTIFICATE PEM block, so the kubeconfig would name a credential the cluster cannot read", path)
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return fmt.Errorf("--cert %s holds a CERTIFICATE block that does not parse, so the kubeconfig would name a credential the cluster cannot read: %w", path, err)
+		}
+		return nil
+	}
 }
