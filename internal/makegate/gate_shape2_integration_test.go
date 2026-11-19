@@ -29,7 +29,7 @@ var containerOptInOn = regexp.MustCompile(`GT_TEST_DOCKER=([^0]|$)`)
 // exported opt-in reaches the tier a landing runs.
 func TestIntegrationGateWritesTheContainerOptInOff(t *testing.T) {
 	out := dryGate(t, RealMake(repoRoot(t)))
-	if !strings.Contains(out, "GT_TEST_DOCKER=0 go test -timeout 20m ./...") {
+	if !strings.Contains(out, "GT_TEST_DOCKER=0 go test -p $q -timeout 20m ./...") {
 		t.Fatalf("gate does not write the container opt-in off on the unit tier's go test\n%s", out)
 	}
 }
@@ -104,7 +104,7 @@ func TestIntegrationGateCarriesOneTimeout(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("gate carries %d -timeout flags, want exactly one, on the unit tier's go test\n%s", count, out)
 	}
-	if !strings.Contains(out, "go test -timeout 20m ./...") {
+	if !strings.Contains(out, "go test -p $q -timeout 20m ./...") {
 		t.Fatalf("gate's one -timeout is not on the unit tier's go test\n%s", out)
 	}
 }

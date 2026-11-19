@@ -6,14 +6,16 @@
 #
 #   make gate              the landing gate: the exec-tax preflight (a warning
 #                          at worst, gt-2ycne.1), then lint, then `go build
-#                          ./...`, then the unit tier: plain `go test -timeout
-#                          20m ./...` over every package, through go test's
-#                          result cache (there is no slow tier: internal/cmd
-#                          and internal/beads run here since gt-ik4a1.9;
-#                          gt-s1vff). The gate runs no budget runner and
-#                          measures no wall, CPU or idle time, so a landing is
-#                          never refused for contention (gt-z7qtk). Prints its
-#                          wall time at the end. It runs the integration vet
+#                          ./...`, then the unit tier: `go test -timeout 20m
+#                          ./...` over every package, with -p and GOMAXPROCS
+#                          both taken from the CPU quota (gt-g9fnsa), through
+#                          go test's result cache (there is no slow tier:
+#                          internal/cmd and internal/beads run here since
+#                          gt-ik4a1.9; gt-s1vff). The gate runs no budget
+#                          runner and measures no wall, CPU or idle time, so a
+#                          landing is never refused for contention (gt-z7qtk).
+#                          Prints its wall time at the end. It runs the
+#                          integration vet
 #                          (`go run ./internal/testpolicy/cmd/integrationvet`,
 #                          which type-checks what the tag adds, gt-w3aby)
 #                          beside the unit tier.
@@ -556,10 +558,14 @@ gate-test:
 	@# package list, where the go tool still parses it, so the unit tier's line
 	@# keeps the shape the gate-shape tests pin. The last line is gateverdict's:
 	@# it names a red stage, exits 1, and keeps the PASSED wording (gt-w3aby).
+	@# -p and each test binary's GOMAXPROCS are the CPU quota, read once here
+	@# (gt-g9fnsa): a job sees NumCPU under a narrower cgroup quota and goes
+	@# throttled, so its wall must track the quota. A failed run stops the gate.
 	@umask 022; trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \
+	q=$$(go run ./internal/testpolicy/cmd/cpuquota) || { echo "gate: FAILED at cpuquota" >&2; exit 1; }; \
 	stream=$$(mktemp); \
 	go run ./internal/testpolicy/cmd/integrationvet & vet=$$!; \
-	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... -json >"$$stream" & gt=$$!; \
+	$(CPU_CLASS) GOMAXPROCS=$$q GT_TEST_DOCKER=0 go test -p $$q -timeout 20m ./... -json >"$$stream" & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	go run ./internal/testpolicy/cmd/tierwall -slow-tests $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
 	rm -f "$$stream"; \

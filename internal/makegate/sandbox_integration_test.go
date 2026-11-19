@@ -238,7 +238,14 @@ exit 0
 	exit 0
 fi
 `
-	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubGoPlusLintpin + gateStubGoPlusVetAndVerdict + gateStubTail
+	// gateStubGoPlusCPUQuota answers the quota command the unit tier runs with a
+	// number, so its GOMAXPROCS and -p carry a value rather than an empty one.
+	gateStubGoPlusCPUQuota = `if [ "$1" = run ] && [ "$2" = ./internal/testpolicy/cmd/cpuquota ]; then
+	echo 2
+	exit 0
+fi
+`
+	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubGoPlusLintpin + gateStubGoPlusCPUQuota + gateStubGoPlusVetAndVerdict + gateStubTail
 
 	// gateStubGoPlusVetAndVerdict makes the vet stage real: the vet exits with
 	// STUB_VET_FAIL, and the verdict runs the real gateverdict (gt-0h1w5j).
