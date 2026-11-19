@@ -263,6 +263,13 @@ func TestCICacheTrimConstantsMatchTheRunnerManifest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the runner manifest: %v", err)
 	}
+	type manifestContainer struct {
+		Name         string `yaml:"name"`
+		VolumeMounts []struct {
+			Name      string `yaml:"name"`
+			MountPath string `yaml:"mountPath"`
+		} `yaml:"volumeMounts"`
+	}
 	var m struct {
 		Metadata struct {
 			Name      string `yaml:"name"`
@@ -274,13 +281,9 @@ func TestCICacheTrimConstantsMatchTheRunnerManifest(t *testing.T) {
 					Labels map[string]string `yaml:"labels"`
 				} `yaml:"metadata"`
 				Spec struct {
-					Containers []struct {
-						Name         string `yaml:"name"`
-						VolumeMounts []struct {
-							Name      string `yaml:"name"`
-							MountPath string `yaml:"mountPath"`
-						} `yaml:"volumeMounts"`
-					} `yaml:"containers"`
+					// The engine is a native sidecar, so it is an init container.
+					InitContainers []manifestContainer `yaml:"initContainers"`
+					Containers     []manifestContainer `yaml:"containers"`
 				} `yaml:"spec"`
 			} `yaml:"template"`
 		} `yaml:"spec"`
@@ -298,7 +301,7 @@ func TestCICacheTrimConstantsMatchTheRunnerManifest(t *testing.T) {
 		t.Errorf("pod label = %q, the trim selects %q", got, ciCachePodLabel)
 	}
 	var mounted bool
-	for _, c := range m.Spec.Template.Spec.Containers {
+	for _, c := range append(m.Spec.Template.Spec.InitContainers, m.Spec.Template.Spec.Containers...) {
 		if c.Name != ciCacheContainer {
 			continue
 		}

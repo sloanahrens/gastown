@@ -260,7 +260,8 @@ func Build(v Values) (Manifests, error) {
 							IP:        v.ForgejoHostIP,
 							Hostnames: []string{ForgejoHostname},
 						}},
-						Containers: []Container{runnerContainer(v), dindContainer(v)},
+						InitContainers: []Container{dindContainer(v)},
+						Containers:     []Container{runnerContainer(v)},
 						Volumes: []Volume{
 							{Name: configVolume, ConfigMap: &ConfigMapVolumeSource{Name: Name + "-config"}},
 							// The engine writes its TLS material here and the runner
@@ -316,7 +317,9 @@ func runnerContainer(v Values) Container {
 }
 
 // dindContainer is the pod's only privileged container: the engine that runs the
-// gate's job containers.
+// gate's job containers. It is a native sidecar, an init container with
+// restartPolicy Always, so the kubelet stops it only after the runner has exited
+// and the engine stays up while the runner drains its jobs.
 func dindContainer(v Values) Container {
 	return Container{
 		Name:  dindContainerName,
@@ -333,6 +336,20 @@ func dindContainer(v Values) Container {
 			{Name: certsVolume, MountPath: certsDir},
 			{Name: dindDataVolume, MountPath: dindDataDir},
 		},
+		// The kubelet starts the runner only once this probe passes, so the runner
+		// never starts before the engine has issued its client certificate.
+		StartupProbe:  dindStartupProbe(),
+		RestartPolicy: "Always",
+	}
+}
+
+// dindStartupProbe passes once the engine has written its client certificate:
+// 60 checks, 2 seconds apart, so the engine has two minutes to come up.
+func dindStartupProbe() *Probe {
+	return &Probe{
+		Exec:             &ExecAction{Command: []string{"test", "-f", certsClientDir + "/cert.pem"}},
+		PeriodSeconds:    2,
+		FailureThreshold: 60,
 	}
 }
 
@@ -639,8 +656,11 @@ type PodSpec struct {
 	PriorityClassName             string      `yaml:"priorityClassName,omitempty"`
 	TerminationGracePeriodSeconds int         `yaml:"terminationGracePeriodSeconds,omitempty"`
 	HostAliases                   []HostAlias `yaml:"hostAliases,omitempty"`
-	Containers                    []Container `yaml:"containers"`
-	Volumes                       []Volume    `yaml:"volumes"`
+	// InitContainers carries the native sidecars: a container with restartPolicy
+	// Always, which the kubelet stops only after every regular container has exited.
+	InitContainers []Container `yaml:"initContainers,omitempty"`
+	Containers     []Container `yaml:"containers"`
+	Volumes        []Volume    `yaml:"volumes"`
 }
 
 // HostAlias is one /etc/hosts entry the pod's containers share: every hostname
@@ -661,6 +681,23 @@ type Container struct {
 	Resources       ContainerResources `yaml:"resources"`
 	SecurityContext *SecurityContext   `yaml:"securityContext,omitempty"`
 	VolumeMounts    []VolumeMount      `yaml:"volumeMounts,omitempty"`
+	StartupProbe    *Probe             `yaml:"startupProbe,omitempty"`
+	// RestartPolicy is Always on a native sidecar (an init container), and empty on
+	// every other container.
+	RestartPolicy string `yaml:"restartPolicy,omitempty"`
+}
+
+// Probe is the check the kubelet runs against a container: a command, how often it
+// runs, and how many failures end it.
+type Probe struct {
+	Exec             *ExecAction `yaml:"exec,omitempty"`
+	PeriodSeconds    int32       `yaml:"periodSeconds,omitempty"`
+	FailureThreshold int32       `yaml:"failureThreshold,omitempty"`
+}
+
+// ExecAction is a probe command, run inside the container.
+type ExecAction struct {
+	Command []string `yaml:"command"`
 }
 
 // EnvVar is one environment variable.

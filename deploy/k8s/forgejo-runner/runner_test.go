@@ -88,9 +88,15 @@ func goldenMismatch(path string, got, want []byte) string {
 	return fmt.Sprintf("%s does not match the renderer; re-run with -update if the change is intended\n--- %s\n%s--- renderer\n%s", path, path, want, got)
 }
 
+// allContainers is the pod's native sidecars followed by its regular containers,
+// so a check over every container reaches the engine as well as the runner.
+func allContainers(pod PodSpec) []Container {
+	return append(slices.Clone(pod.InitContainers), pod.Containers...)
+}
+
 func containerNamed(t *testing.T, pod PodSpec, name string) Container {
 	t.Helper()
-	for _, c := range pod.Containers {
+	for _, c := range allContainers(pod) {
 		if c.Name == name {
 			return c
 		}
@@ -182,8 +188,8 @@ func TestRenderDeploymentGolden(t *testing.T) {
 	if alias.IP != v.ForgejoHostIP || !slices.Equal(alias.Hostnames, []string{ForgejoHostname}) {
 		t.Errorf("hostAlias = %+v, want %s -> %v", alias, v.ForgejoHostIP, []string{ForgejoHostname})
 	}
-	if len(pod.Containers) != 2 {
-		t.Fatalf("the pod has %d containers, want the runner and the engine", len(pod.Containers))
+	if len(pod.Containers) != 1 || len(pod.InitContainers) != 1 {
+		t.Fatalf("the pod has %d containers and %d init containers, want the runner and the engine as a native sidecar", len(pod.Containers), len(pod.InitContainers))
 	}
 	runner := containerNamed(t, pod, runnerContainerName)
 	dind := containerNamed(t, pod, dindContainerName)
@@ -201,6 +207,99 @@ func TestRenderDeploymentGolden(t *testing.T) {
 	}
 	if runner.SecurityContext != nil && runner.SecurityContext.Privileged {
 		t.Error("the runner container is privileged; the engine is the pod's only privileged container")
+	}
+}
+
+// TestDindIsANativeSidecar drives the engine's place in the pod. As a native
+// sidecar (an init container with restartPolicy Always) the kubelet stops it only
+// after the runner has exited, and its startup probe holds the runner back until
+// the engine has issued its client certificate. The runner is the only regular
+// container.
+func TestDindIsANativeSidecar(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
+
+	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != dindContainerName {
+		t.Fatalf("init containers = %+v, want the engine alone", pod.InitContainers)
+	}
+	dind := pod.InitContainers[0]
+	if dind.RestartPolicy != "Always" {
+		t.Errorf("engine restartPolicy = %q, want Always: the kubelet stops a native sidecar only after the regular containers exit", dind.RestartPolicy)
+	}
+	probe := dind.StartupProbe
+	if probe == nil || probe.Exec == nil {
+		t.Fatalf("engine startupProbe = %+v, want an exec probe", probe)
+	}
+	if want := []string{"test", "-f", "/certs/client/cert.pem"}; !slices.Equal(probe.Exec.Command, want) {
+		t.Errorf("engine startupProbe command = %q, want %q", probe.Exec.Command, want)
+	}
+	if probe.PeriodSeconds != 2 || probe.FailureThreshold != 60 {
+		t.Errorf("engine startupProbe period %ds and %d failures, want 2s and 60", probe.PeriodSeconds, probe.FailureThreshold)
+	}
+
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != runnerContainerName {
+		t.Fatalf("containers = %+v, want the runner alone", pod.Containers)
+	}
+	if rp := pod.Containers[0].RestartPolicy; rp != "" {
+		t.Errorf("runner restartPolicy = %q, want none: only a native sidecar carries one", rp)
+	}
+}
+
+// TestDindKeepsItsRenderedContainer drives the engine's own settings, which the move
+// to a native sidecar must leave alone: the image, arguments, environment, shares,
+// privilege and mounts are the ones the previous golden recorded.
+func TestDindKeepsItsRenderedContainer(t *testing.T) {
+	t.Parallel()
+	dind := containerNamed(t, mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec, dindContainerName)
+
+	if want := "data.forgejo.org/oci/docker:dind"; dind.Image != want {
+		t.Errorf("engine image = %q, want %q", dind.Image, want)
+	}
+	if want := []string{"--insecure-registry=forgejo:3000"}; !slices.Equal(dind.Args, want) {
+		t.Errorf("engine args = %q, want %q", dind.Args, want)
+	}
+	if want := []EnvVar{{Name: "DOCKER_TLS_CERTDIR", Value: "/certs"}}; !slices.Equal(dind.Env, want) {
+		t.Errorf("engine env = %+v, want %+v", dind.Env, want)
+	}
+	share := ResourceList{CPU: "8", Memory: "12Gi"}
+	if want := (ContainerResources{Requests: share, Limits: share}); dind.Resources != want {
+		t.Errorf("engine resources = %+v, want %+v", dind.Resources, want)
+	}
+	if dind.SecurityContext == nil || !dind.SecurityContext.Privileged {
+		t.Errorf("engine securityContext = %+v, want it privileged", dind.SecurityContext)
+	}
+	want := []VolumeMount{
+		{Name: "docker-certs", MountPath: "/certs"},
+		{Name: "dind-data", MountPath: "/var/lib/docker"},
+	}
+	if !slices.Equal(dind.VolumeMounts, want) {
+		t.Errorf("engine mounts = %+v, want %+v", dind.VolumeMounts, want)
+	}
+}
+
+// TestGoldenDeploymentIsASidecarPod reads the golden the operator applies and checks
+// it carries the native sidecar, so a hand-edit that drops the restartPolicy or the
+// probe fails here as well as in the byte comparison of TestRenderDeploymentGolden.
+func TestGoldenDeploymentIsASidecarPod(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join("testdata", "deployment.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var golden Deployment
+	if err := yaml.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("decoding %s: %v", path, err)
+	}
+	pod := golden.Spec.Template.Spec
+	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != dindContainerName {
+		t.Fatalf("%s has init containers %+v, want the engine alone", path, pod.InitContainers)
+	}
+	if got := pod.InitContainers[0]; got.RestartPolicy != "Always" || got.StartupProbe == nil {
+		t.Errorf("%s engine = restartPolicy %q, startupProbe %+v; want Always and a startup probe", path, got.RestartPolicy, got.StartupProbe)
+	}
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != runnerContainerName {
+		t.Errorf("%s has containers %+v, want the runner alone", path, pod.Containers)
 	}
 }
 
@@ -690,7 +789,7 @@ func TestRenderClaimsAndLimits(t *testing.T) {
 	t.Run("requests equal limits", func(t *testing.T) {
 		t.Parallel()
 		pod := m.Deployment.Spec.Template.Spec
-		for _, c := range pod.Containers {
+		for _, c := range allContainers(pod) {
 			if c.Resources.Requests != c.Resources.Limits {
 				t.Errorf("container %q requests %+v but limits %+v", c.Name, c.Resources.Requests, c.Resources.Limits)
 			}
@@ -849,7 +948,7 @@ func TestNoSecretInRender(t *testing.T) {
 	// cannot arrive through an env var by default: a new one is a deliberate
 	// edit here as well as in the renderer.
 	allowedEnv := []string{"DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_TLS_CERTDIR"}
-	for _, c := range m.Deployment.Spec.Template.Spec.Containers {
+	for _, c := range allContainers(m.Deployment.Spec.Template.Spec) {
 		for _, env := range c.Env {
 			if !slices.Contains(allowedEnv, env.Name) {
 				t.Errorf("container %q sets the unvetted environment variable %q", c.Name, env.Name)
