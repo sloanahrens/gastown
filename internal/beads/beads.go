@@ -1036,6 +1036,9 @@ type Beads struct {
 	// that drives a deadline kill through the runner seam waits
 	// milliseconds, not the env-var minimum of 1s.
 	budget time.Duration
+	// bondRootOnly makes Bond pass --root-only to bd mol bond
+	// (WithBondRootOnly).
+	bondRootOnly bool
 
 	// plainTimeout bounds each bd call of a plain wrapper; zero means none.
 	plainTimeout time.Duration
@@ -1135,6 +1138,8 @@ type beadsFields struct {
 	observe func()
 	// budget replaces every call's subprocess deadline; tests only.
 	budget time.Duration
+	// bondRootOnly asks bd's mol bond for --root-only (WithBondRootOnly).
+	bondRootOnly bool
 }
 
 // Option configures a Beads at construction.
@@ -1245,19 +1250,20 @@ func (b *Beads) ActingAs(actor string) *Beads {
 		return b
 	}
 	c := newBeads(beadsFields{
-		workDir:    b.workDir,
-		beadsDir:   b.beadsDir,
-		isolated:   b.isolated,
-		serverPort: b.serverPort,
-		townRoot:   b.getTownRoot(),
-		noRoute:    b.noRoute,
-		agentScope: b.agentScope,
-		exec:       b.exec,
-		bin:        b.bin,
-		baseEnv:    b.baseEnv,
-		actor:      actor,
-		observe:    b.observe,
-		budget:     b.budget,
+		workDir:      b.workDir,
+		beadsDir:     b.beadsDir,
+		isolated:     b.isolated,
+		serverPort:   b.serverPort,
+		townRoot:     b.getTownRoot(),
+		noRoute:      b.noRoute,
+		agentScope:   b.agentScope,
+		exec:         b.exec,
+		bin:          b.bin,
+		baseEnv:      b.baseEnv,
+		actor:        actor,
+		observe:      b.observe,
+		budget:       b.budget,
+		bondRootOnly: b.bondRootOnly,
 	})
 	c.plain, c.plainEnv, c.plainTimeout, c.plainGroup = b.plain, b.plainEnv, b.plainTimeout, b.plainGroup
 	c.accessMode = b.accessMode
@@ -1287,20 +1293,21 @@ func newBeads(f beadsFields) *Beads {
 	refuseLiveTownPath("beads client workDir", f.workDir)
 	refuseLiveTownPath("beads client beadsDir", f.beadsDir)
 	return &Beads{
-		workDir:    f.workDir,
-		beadsDir:   f.beadsDir,
-		isolated:   f.isolated,
-		serverPort: f.serverPort,
-		townRoot:   f.townRoot,
-		noRoute:    f.noRoute,
-		agentScope: f.agentScope,
-		exec:       f.exec,
-		bin:        f.bin,
-		baseEnv:    f.baseEnv,
-		actor:      f.actor,
-		callCtx:    f.callCtx,
-		observe:    f.observe,
-		budget:     f.budget,
+		workDir:      f.workDir,
+		beadsDir:     f.beadsDir,
+		isolated:     f.isolated,
+		serverPort:   f.serverPort,
+		townRoot:     f.townRoot,
+		noRoute:      f.noRoute,
+		agentScope:   f.agentScope,
+		exec:         f.exec,
+		bin:          f.bin,
+		baseEnv:      f.baseEnv,
+		actor:        f.actor,
+		callCtx:      f.callCtx,
+		observe:      f.observe,
+		budget:       f.budget,
+		bondRootOnly: f.bondRootOnly,
 	}
 }
 
@@ -1374,17 +1381,18 @@ func (b *Beads) ForAgentBead() *Beads {
 		return b
 	}
 	return newBeads(beadsFields{
-		workDir:    b.workDir,
-		beadsDir:   b.beadsDir,
-		isolated:   b.isolated,
-		serverPort: b.serverPort,
-		townRoot:   b.getTownRoot(),
-		agentScope: true,
-		exec:       b.exec,
-		bin:        b.bin,
-		baseEnv:    b.baseEnv,
-		actor:      b.actor,
-		observe:    b.observe,
+		workDir:      b.workDir,
+		beadsDir:     b.beadsDir,
+		isolated:     b.isolated,
+		serverPort:   b.serverPort,
+		townRoot:     b.getTownRoot(),
+		agentScope:   true,
+		exec:         b.exec,
+		bin:          b.bin,
+		baseEnv:      b.baseEnv,
+		actor:        b.actor,
+		observe:      b.observe,
+		bondRootOnly: b.bondRootOnly,
 	})
 }
 
