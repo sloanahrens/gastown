@@ -532,9 +532,11 @@ func TestFollowupBudgetFeedCountsTheBeadsItFiledThisPass(t *testing.T) {
 	}
 }
 
-// TestFollowupBudgetFeedNeedsLandings: a landings read that fails applies no
-// budget to the landing and logs the error, so the plan is filed anyway: a
-// broken log must not stop the feed (gt-y5wvum).
+// TestFollowupBudgetFeedNeedsLandings: a Lander with no landings file wired
+// files with no weekly budget; a landings file that exists and cannot be read
+// says nothing about room, so the configured budget stands with the week's
+// landings at none and only the floor is filed — the rest is held and queued
+// (gt-y5wvum, gt-5hyv80).
 func TestFollowupBudgetFeedNeedsLandings(t *testing.T) {
 	t.Parallel()
 	t.Run("no landings file", func(t *testing.T) {
@@ -553,10 +555,33 @@ func TestFollowupBudgetFeedNeedsLandings(t *testing.T) {
 		t.Parallel()
 		f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
 		f.lander.Landings = &LandingsFile{Path: t.TempDir()}
-		f.fake.existing = filedThisWeek(5)
+		f.fake.existing = filedThisWeek(5) // five already this week is the floor
+		log := f.run()
+		if len(f.fake.created) != 0 {
+			t.Fatalf("filed %d beads on an unreadable landings file past the floor, want the plan held:\n%s", len(f.fake.created), log)
+		}
+		if !strings.Contains(log, "could not read the week's landings") {
+			t.Errorf("log = %q, want the unreadable landings named", log)
+		}
+		if !strings.Contains(log, "holding past the first 5 beads") {
+			t.Errorf("log = %q, want the hold named", log)
+		}
+		queued, err := f.reviews.Queued()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(queued) != 1 || len(queued[0].Findings) != 1 || queued[0].Findings[0].Title != "name the error" {
+			t.Errorf("queue = %+v, want the held finding", queued)
+		}
+	})
+	t.Run("a landings file that cannot be read under the floor", func(t *testing.T) {
+		t.Parallel()
+		f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+		f.lander.Landings = &LandingsFile{Path: t.TempDir()}
+		f.fake.existing = filedThisWeek(3) // under the floor, so a broken log does not starve a quiet week
 		log := f.run()
 		if len(f.fake.created) != 1 {
-			t.Fatalf("filed %d beads on an unreadable landings file, want the plan filed anyway:\n%s", len(f.fake.created), log)
+			t.Fatalf("filed %d beads on an unreadable landings file under the floor, want the plan filed:\n%s", len(f.fake.created), log)
 		}
 		if !strings.Contains(log, "could not read the week's landings") {
 			t.Errorf("log = %q, want the unreadable landings named", log)
