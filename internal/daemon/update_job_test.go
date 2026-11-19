@@ -164,6 +164,9 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	d.updateRemoteRun = remote.run
 	main := &fakeMainState{st: landworker.MainState{LastRun: commits[2], LastGreen: commits[2]}}
 	d.postLandRunners.set("gastown", &landworker.PostLandRunner{Rig: "gastown", State: main})
+	// The town has no beads repository, so the skew guard's reads are wired to
+	// agree: these tests are about the roll, not the guard.
+	d.pairReady.skew = pairAgreeingSkewReads(pairSchemaLevel)
 	writeRunningImages(t, town, commits[1])
 	return &updateJobRig{
 		d: d, logs: logs, cluster: cluster, launches: launches, town: town,
@@ -206,7 +209,10 @@ func (r *updateJobRig) pairForAt(t *testing.T, green string, now time.Time, daem
 	api := &fakePairAPI{branches: []forgejo.Branch{pairBranch(green)}, compares: map[string]int{}}
 	reg := &fakePairRegistry{digests: digests}
 	rigs := func() ([]pairReadyRig, error) {
-		return []pairReadyRig{{Rig: "gastown", Owner: pairOwner, Repo: pairRepo, API: api, Registry: reg, Git: r.git}}, nil
+		return []pairReadyRig{{
+			Rig: "gastown", Owner: pairOwner, Repo: pairRepo, API: api, Registry: reg, Git: r.git,
+			Pins: func(string) (string, error) { return pairImagePins(pairBdPin), nil },
+		}}, nil
 	}
 	r.d.pairReady.run(context.Background(), r.town, now, rigs, func(string, ...any) {})
 }

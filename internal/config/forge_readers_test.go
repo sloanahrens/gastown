@@ -30,6 +30,7 @@ var knownOwnerDataFileNamers = map[string]string{
 	"internal/cmd/daemon_image.go":                "reader: readImagePins expands image-pins",
 	"internal/cmd/daemon_image_pins.go":           "reader: readImagePinsFile expands image-pins, and the refresh writes back the unexpanded text",
 	"internal/daemon/image_pins_read.go":          "reader: parseImagePins expands image-pins through config.ExpandForgeOwner",
+	"internal/daemon/pair_ready.go":               "reader: the skew guard parses the green commit's image-pins through parseImagePins, which expands",
 	"internal/daemonimage/build.go":               "comment: the pins file Plan names",
 	"internal/daemonimage/pins.go":                "reader: ParsePins, and PinsPath",
 	"internal/daemon/image_pins_bead.go":          "the refresh bead's label and command name the pins files; it reads no data file",

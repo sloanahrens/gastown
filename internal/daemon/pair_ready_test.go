@@ -187,7 +187,11 @@ type pairFixture struct {
 	reg         pairReadyRegistry
 	// git is the rig's bare clone. The default holds no commits, so every commit
 	// is missing and the check falls back to the API's comparisons.
-	git     pairReadyGit
+	git pairReadyGit
+	// pins reads the green commit's image-pins file for the skew guard. The
+	// default names a bd pin whose level the fixture's default skew reads agree
+	// with, so a test that is not about the guard rolls as before.
+	pins    pairReadyPinsRead
 	rigErr  error
 	rigsErr error
 	check   pairReadyCheck
@@ -220,6 +224,8 @@ func newPairFixture(t *testing.T) *pairFixture {
 		imagevalues.DaemonImage + "@" + pairGreen12:  fx.daemon,
 		imagevalues.PolecatImage + "@" + pairGreen12: fx.polecat,
 	}}
+	fx.pins = func(string) (string, error) { return pairImagePins(pairBdPin), nil }
+	fx.check.skew = pairAgreeingSkewReads(pairSchemaLevel)
 	fx.writeRunning(t, pairRunning)
 	return fx
 }
@@ -260,7 +266,7 @@ func (fx *pairFixture) run(now time.Time) {
 		}
 		return []pairReadyRig{{
 			Rig: "gastown", Owner: pairOwner, Repo: pairRepo,
-			API: api, Registry: fx.reg, Git: fx.git, Err: fx.rigErr,
+			API: api, Registry: fx.reg, Git: fx.git, Pins: fx.pins, Err: fx.rigErr,
 		}}, nil
 	}
 	logf := func(format string, args ...any) { fx.logs = append(fx.logs, fmt.Sprintf(format, args...)) }

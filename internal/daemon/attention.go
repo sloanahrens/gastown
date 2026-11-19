@@ -746,6 +746,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The pair the update ledger records as refused is a fifth kind from
 		// the same read, with a collector of its own (gt-t8vf15).
 		{kind: attention.KindDeployPairRefused, collect: s.collectPairRefused},
+		// A published pair whose bd pin carries another schema level than the
+		// live database is a sixth kind from the same read, with a collector of
+		// its own (gt-5f0kue).
+		{kind: attention.KindDeployPairSkew, collect: s.collectPairSkew},
 		{kind: attention.KindConfigEnvShadowed, collect: s.collectConfigEnvShadowed},
 		// The patrol config that does not load is raised beside the env item
 		// (gt-6frjqf).
