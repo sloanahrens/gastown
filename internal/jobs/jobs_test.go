@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -207,3 +208,92 @@ func TestJobsUnreadablePatrolConfigIsError(t *testing.T) {
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+// findJob returns the row named name.
+func findJob(jobs []Job, name string) (Job, bool) {
+	for _, j := range jobs {
+		if j.Name == name {
+			return j, true
+		}
+	}
+	return Job{}, false
+}
+
+func TestJobsDoltGC(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		state         string // maintenance_state.json body; empty means no file
+		wantRow       bool
+		wantLastRun   *time.Time
+		wantReclaimed int64
+		wantOutcome   Outcome
+		wantState     State
+	}{
+		{
+			name: "newest gc is the last run and the reclaimed bytes are the sum",
+			state: `{"last_gc":{"hq":"2026-11-19T10:00:00Z","gt":"2026-11-19T11:00:00Z"},` +
+				`"reclaimed_bytes":{"hq":1024,"gt":2048}}`,
+			wantRow:       true,
+			wantLastRun:   ptrTime(time.Date(2026, 11, 19, 11, 0, 0, 0, time.UTC)),
+			wantReclaimed: 3072,
+			wantOutcome:   OutcomeOK,
+			wantState:     StateOK,
+		},
+		{
+			name:        "state file that does not parse is failed and unknown",
+			state:       `{"last_gc":`,
+			wantRow:     true,
+			wantOutcome: OutcomeFailed,
+			wantState:   StateUnknown,
+		},
+		{
+			name: "no state file is no row",
+		},
+		{
+			name:        "state file with no gc recorded has no last run",
+			state:       `{"consecutive_deferred_windows":0}`,
+			wantRow:     true,
+			wantOutcome: "",
+			wantState:   StateNeverRun,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			if c.state != "" {
+				writeFile(t, filepath.Join(root, "daemon", "maintenance_state.json"), c.state)
+			}
+
+			jobs, err := List(root, testNow)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			row, ok := findJob(jobs, doltGCName)
+			if ok != c.wantRow {
+				t.Fatalf("dolt_gc row present = %v, want %v", ok, c.wantRow)
+			}
+			if !c.wantRow {
+				return
+			}
+			switch {
+			case c.wantLastRun == nil && row.LastRun != nil:
+				t.Errorf("LastRun = %v, want none", *row.LastRun)
+			case c.wantLastRun != nil && (row.LastRun == nil || !row.LastRun.Equal(*c.wantLastRun)):
+				t.Errorf("LastRun = %v, want %v", row.LastRun, *c.wantLastRun)
+			}
+			if got := row.Stats["reclaimed_bytes"]; got != c.wantReclaimed {
+				t.Errorf("Stats[reclaimed_bytes] = %d, want %d", got, c.wantReclaimed)
+			}
+			if row.Outcome != c.wantOutcome {
+				t.Errorf("Outcome = %q, want %q", row.Outcome, c.wantOutcome)
+			}
+			if row.State != c.wantState {
+				t.Errorf("State = %q, want %q", row.State, c.wantState)
+			}
+			if row.Cadence != daemon.MaintenanceGCCadence {
+				t.Errorf("Cadence = %v, want the gc's weekly cadence %v", row.Cadence, daemon.MaintenanceGCCadence)
+			}
+		})
+	}
+}

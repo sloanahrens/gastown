@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -152,6 +153,75 @@ func TestMaintenanceGCStateRoundTrip(t *testing.T) {
 			names = append(names, e.Name())
 		}
 		t.Errorf("daemon dir holds %v, want only %s", names, maintenanceGCStateFileName)
+	}
+}
+
+func TestReadMaintenanceGC(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		state         string // written to the state path; empty means no file
+		wantLast      time.Time
+		wantReclaimed int64
+		wantMissing   bool
+		wantErr       bool
+	}{
+		{
+			name: "newest gc and the sum of reclaimed bytes",
+			state: `{"last_gc":{"hq":"2026-10-01T02:00:00Z","gt":"2026-10-01T03:00:00Z"},` +
+				`"reclaimed_bytes":{"hq":10,"gt":32}}`,
+			wantLast:      time.Date(2026, 10, 1, 3, 0, 0, 0, time.UTC),
+			wantReclaimed: 42,
+		},
+		{
+			name:  "state file with no gc recorded",
+			state: `{}`,
+		},
+		{
+			name:        "no state file is missing",
+			wantMissing: true,
+		},
+		{
+			name:    "state file that does not parse is an error",
+			state:   `{"last_gc":`,
+			wantErr: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			town := t.TempDir()
+			if c.state != "" {
+				path := maintenanceGCStatePath(town)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(c.state), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			last, reclaimed, err := ReadMaintenanceGC(town)
+			switch {
+			case c.wantMissing:
+				if !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("err = %v, want fs.ErrNotExist", err)
+				}
+				return
+			case c.wantErr:
+				if err == nil || errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("err = %v, want a read error other than fs.ErrNotExist", err)
+				}
+				return
+			case err != nil:
+				t.Fatalf("ReadMaintenanceGC: %v", err)
+			}
+			if !last.Equal(c.wantLast) {
+				t.Errorf("last gc = %v, want %v", last, c.wantLast)
+			}
+			if reclaimed != c.wantReclaimed {
+				t.Errorf("reclaimed bytes = %d, want %d", reclaimed, c.wantReclaimed)
+			}
+		})
 	}
 }
 
