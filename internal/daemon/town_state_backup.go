@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	gtgit "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/townstate"
 )
 
 // The town_state_backup patrol copies the town's configuration into the JSONL
@@ -68,9 +69,15 @@ var (
 // townStateSnapshot is what one tick reads from the town.
 type townStateSnapshot struct {
 	// Files maps each exported file, relative to the town root with forward
-	// slashes, to its content.
+	// slashes, to its content. A JSON file's content is already redacted.
 	Files map[string][]byte
-	// Refused lists the secret-looking files the walk found, by the same paths.
+	// Redacted lists the JSON files whose credential values were replaced, by
+	// the same paths.
+	Redacted []string
+	// Redactions counts the credential values replaced across every file.
+	Redactions int
+	// Refused lists the secret-bearing files the walk left out, by the same
+	// paths.
 	Refused []string
 }
 
@@ -98,6 +105,12 @@ func townStateSecret(base string) bool {
 		}
 	}
 	return false
+}
+
+// townStateIsJSON reports whether a path names a JSON document, in any case: a
+// JSON file is redacted, and one the redactor cannot parse is refused.
+func townStateIsJSON(name string) bool {
+	return strings.HasSuffix(strings.ToLower(path.Base(name)), ".json")
 }
 
 // townStateExported reports whether a town-relative file path is a row of the
@@ -174,9 +187,11 @@ func townStateNoSymlink(fsys fs.FS, name string) error {
 
 // collectTownState reads the town through fsys: every file the export table
 // names, and every secret-looking file in the directories the table reads. A
-// directory that does not exist holds nothing; any other read error fails the
-// whole snapshot, so a tick never reports a clean backup of a town it did not
-// fully read.
+// JSON file's credential values are redacted before its bytes are stored; a
+// JSON file the redactor cannot parse, and any other file found to carry a
+// credential, is refused. A directory that does not exist holds nothing; any
+// other read error fails the whole snapshot, so a tick never reports a clean
+// backup of a town it did not fully read.
 func collectTownState(fsys fs.FS, rigs []string) (townStateSnapshot, error) {
 	snap := townStateSnapshot{Files: map[string][]byte{}}
 	for _, dir := range townStateScanDirs(rigs) {
@@ -212,14 +227,46 @@ func collectTownState(fsys fs.FS, rigs []string) (townStateSnapshot, error) {
 			if err != nil {
 				return townStateSnapshot{}, fmt.Errorf("reading %s: %w", name, err)
 			}
+			if townStateIsJSON(name) {
+				redacted, n, err := townstate.RedactJSON(data)
+				if err != nil {
+					snap.Refused = append(snap.Refused, name)
+					continue
+				}
+				if n > 0 {
+					snap.Redacted = append(snap.Redacted, name)
+					snap.Redactions += n
+				}
+				data = redacted
+			} else if len(townstate.FindCredentials(data)) > 0 {
+				snap.Refused = append(snap.Refused, name)
+				continue
+			}
 			snap.Files[name] = data
 		}
 	}
 	if _, ok := snap.Files[townStateIdentityFile]; !ok {
 		return townStateSnapshot{}, fmt.Errorf("%s is not on the town root; refusing to back up a partial town", townStateIdentityFile)
 	}
+	sort.Strings(snap.Redacted)
 	sort.Strings(snap.Refused)
 	return snap, nil
+}
+
+// townStateCredentialNote reports what a snapshot redacted and refused: how many
+// files, by path, and never a value. An empty note means the town's
+// configuration carried no credential.
+func townStateCredentialNote(snap townStateSnapshot) string {
+	var parts []string
+	if snap.Redactions > 0 {
+		parts = append(parts, fmt.Sprintf("redacted %d credential value(s) in %d JSON file(s): %s",
+			snap.Redactions, len(snap.Redacted), strings.Join(snap.Redacted, ", ")))
+	}
+	if len(snap.Refused) > 0 {
+		parts = append(parts, fmt.Sprintf("refused %d secret-bearing file(s): %s",
+			len(snap.Refused), strings.Join(snap.Refused, ", ")))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // townStateFileSystem is the town's files: the test seam when one is set, else
@@ -325,16 +372,33 @@ func (d *Daemon) runTownStateBackup(gitRepo string) error {
 	if err != nil {
 		return err
 	}
-	if len(snap.Refused) > 0 {
-		d.logger.Printf("town_state_backup: refused %d secret-looking file(s) by pattern: %s", len(snap.Refused), strings.Join(snap.Refused, ", "))
+	note := townStateCredentialNote(snap)
+	if note != "" {
+		d.logger.Printf("town_state_backup: %s", note)
 	}
 
+	if err := d.writeTownStateSnapshot(gitRepo, snap); err != nil {
+		// A failing tick's alert names the redacted and refused files too:
+		// their paths, never their values.
+		if note != "" {
+			return fmt.Errorf("%w; %s", err, note)
+		}
+		return err
+	}
+	return nil
+}
+
+// writeTownStateSnapshot writes one collected snapshot under town-state/,
+// commits what changed, and pushes.
+func (d *Daemon) writeTownStateSnapshot(gitRepo string, snap townStateSnapshot) error {
 	if err := d.ensureGitRepoInitialized(gitRepo); err != nil {
 		return err
 	}
-	// The snapshot is written beside the jsonl export, never over it. Files are
-	// only ever written: a file removed from the town stays in the backup, since
-	// a backup must not drop its only copy because the source went missing.
+	// The snapshot is written beside the jsonl export, never over it. A file
+	// the town no longer holds stays in the backup, since a backup must not
+	// drop its only copy because the source went missing. A file the town
+	// holds and refuses does not: an earlier tick's copy would keep publishing
+	// the credential the refusal exists to keep out (gt-qcmfhm).
 	for name, data := range snap.Files {
 		dst := filepath.Join(gitRepo, townStateBackupDir, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
@@ -342,6 +406,16 @@ func (d *Daemon) runTownStateBackup(gitRepo string) error {
 		}
 		if err := os.WriteFile(dst, data, 0o600); err != nil {
 			return fmt.Errorf("writing %s: %w", dst, err)
+		}
+	}
+	// The removal happens before the staging below, so the same `git add -A`
+	// stages the deletion and the same commit carries it. A missing copy is the
+	// ordinary case for a path refused on several ticks; any other failure
+	// leaves the copy in place and is not reported as a clean backup.
+	for _, name := range snap.Refused {
+		dst := filepath.Join(gitRepo, townStateBackupDir, filepath.FromSlash(name))
+		if err := os.Remove(dst); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("removing the copy of refused %s from the backup: %w", name, err)
 		}
 	}
 
