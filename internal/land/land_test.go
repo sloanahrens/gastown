@@ -2792,6 +2792,45 @@ func TestLandRejectionLeavesABeadThatChangedHands(t *testing.T) {
 	}
 }
 
+// TestRejectSupersededBead: a refusal whose bead was closed, or changed hands,
+// while the gate ran comes back Superseded; an open bead left alone does not.
+func TestRejectSupersededBead(t *testing.T) {
+	t.Parallel()
+	closed, mayor := string(beads.StatusClosed), "mayor"
+	for _, tc := range []struct {
+		name string
+		upd  *beads.UpdateOptions
+		want bool
+	}{
+		{"closed", &beads.UpdateOptions{Status: &closed, Force: true}, true},
+		{"reassigned", &beads.UpdateOptions{Assignee: &mayor, Force: true}, true},
+		{"open", nil, false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			f.gate.fn = func(string) GateResult {
+				if tc.upd != nil {
+					if err := f.bd.Update("gt-abc", *tc.upd); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return GateResult{Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+			}
+			_, err := f.lander().Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectGate {
+				t.Fatalf("Land error = %v, want a gate rejection", err)
+			}
+			if rej.Superseded != tc.want || (rej.RecordErr != nil) != tc.want {
+				t.Errorf("Superseded = %v, RecordErr = %v; want Superseded=%v with RecordErr set only then",
+					rej.Superseded, rej.RecordErr, tc.want)
+			}
+		})
+	}
+}
+
 // TestLandRepeatRejectionUnreadableCommentsIsNotGuessed: telling an interrupted
 // block from a requeued one reads the bead's comments, and a read that fails is
 // reported on RecordErr rather than read as either answer — the block the bead
