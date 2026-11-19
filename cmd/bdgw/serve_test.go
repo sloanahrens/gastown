@@ -206,30 +206,216 @@ func TestBdgwReadyz(t *testing.T) {
 }
 
 // TestBdgwReadyCheck covers the questions bdgw ready asks: the token directory
-// loads, the verbs file loads and a workspace tree is present.
+// loads, the verbs file loads, a workspace tree is present and Dolt answers.
 func TestBdgwReadyCheck(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t, exitRunner{})
-	if err := checkReady(f.tokensDir, f.verbsPath, f.workspaceRoot); err == nil || !strings.Contains(err.Error(), "workspace") {
+	passes := func(context.Context) error { return nil }
+	fails := func(context.Context) error { return errors.New("connection refused") }
+	if err := checkReady(f.tokensDir, f.verbsPath, f.workspaceRoot, passes); err == nil || !strings.Contains(err.Error(), "workspace") {
 		t.Fatalf("checkReady with no workspace = %v, want a workspace refusal", err)
 	}
 	if err := os.MkdirAll(filepath.Join(f.workspaceRoot, "gastown", ".beads"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(f.workspaceRoot, "gastown", ".beads", "metadata.json"), "{}", 0o644)
-	if err := checkReady(f.tokensDir, f.verbsPath, f.workspaceRoot); err != nil {
+	if err := checkReady(f.tokensDir, f.verbsPath, f.workspaceRoot, passes); err != nil {
 		t.Fatalf("checkReady = %v, want ready", err)
 	}
-	if err := checkReady(filepath.Join(f.tokensDir, "missing"), f.verbsPath, f.workspaceRoot); err == nil || !strings.Contains(err.Error(), "tokens") {
+	if err := checkReady(f.tokensDir, f.verbsPath, f.workspaceRoot, fails); err == nil || !strings.Contains(err.Error(), "dolt: connection refused") {
+		t.Errorf("checkReady with a failing Dolt probe = %v, want a dolt refusal", err)
+	}
+	if err := checkReady(f.tokensDir, f.verbsPath, f.workspaceRoot, nil); err == nil || !strings.Contains(err.Error(), "dolt: no probe is wired") {
+		t.Errorf("checkReady with no Dolt probe = %v, want a refusal naming the missing probe", err)
+	}
+	if err := checkReady(filepath.Join(f.tokensDir, "missing"), f.verbsPath, f.workspaceRoot, passes); err == nil || !strings.Contains(err.Error(), "tokens") {
 		t.Errorf("checkReady with no token directory = %v, want a tokens refusal", err)
 	}
-	if err := checkReady(f.tokensDir, filepath.Join(f.verbsPath, "missing"), f.workspaceRoot); err == nil || !strings.Contains(err.Error(), "verbs") {
+	if err := checkReady(f.tokensDir, filepath.Join(f.verbsPath, "missing"), f.workspaceRoot, passes); err == nil || !strings.Contains(err.Error(), "verbs") {
 		t.Errorf("checkReady with no verbs file = %v, want a verbs refusal", err)
 	}
 	notATree := filepath.Join(t.TempDir(), "file")
 	writeFile(t, notATree, "x", 0o644)
-	if err := checkReady(f.tokensDir, f.verbsPath, notATree); err == nil || !strings.Contains(err.Error(), "workspace") {
+	if err := checkReady(f.tokensDir, f.verbsPath, notATree, passes); err == nil || !strings.Contains(err.Error(), "workspace") {
 		t.Errorf("checkReady with a workspace root that cannot be read = %v, want a workspace refusal", err)
+	}
+}
+
+// newReadyTestConfig is a readyConfig whose files load and whose workspace holds
+// one file, so only the Dolt answer decides the check.
+func newReadyTestConfig(t *testing.T) *readyConfig {
+	t.Helper()
+	rc := newReadyConfig()
+	rc.tokensDir = t.TempDir()
+	writeFile(t, filepath.Join(rc.tokensDir, "read.dash.token"), testReadToken, 0o600)
+	rc.verbsPath = filepath.Join(t.TempDir(), "verbs.json")
+	writeFile(t, rc.verbsPath, cmdPolicy, 0o644)
+	rc.workspaceRoot = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rc.workspaceRoot, "gastown", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(rc.workspaceRoot, "gastown", ".beads", "metadata.json"), "{}", 0o644)
+	return rc
+}
+
+// pipeConn answers a dial with an in-memory connection, so the success case
+// needs no socket.
+func pipeConn(context.Context, string, string) (net.Conn, error) {
+	client, server := net.Pipe()
+	if err := server.Close(); err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
+// TestReadyDoltExit: bdgw ready exits 0 when the files load and the Dolt dial
+// passes, and exits 1 naming dolt when the dial fails or never answers.
+func TestReadyDoltExit(t *testing.T) {
+	t.Parallel()
+	// blocked holds a dial that ignores its context open until the test ends, so
+	// the deadline, not the dial, is what makes ready answer.
+	blocked := make(chan struct{})
+	t.Cleanup(func() { close(blocked) })
+	cases := []struct {
+		name       string
+		dial       func(context.Context, string, string) (net.Conn, error)
+		wantStatus int
+		wantStderr string
+	}{
+		{
+			name:       "all pass",
+			dial:       pipeConn,
+			wantStatus: exitOK,
+		},
+		{
+			name:       "dolt unreachable",
+			dial:       func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
+			wantStatus: exitFailed,
+			wantStderr: "not ready: dolt: connection refused",
+		},
+		{
+			name: "dial never answers",
+			dial: func(context.Context, string, string) (net.Conn, error) {
+				<-blocked
+				return nil, errors.New("released")
+			},
+			wantStatus: exitFailed,
+			wantStderr: "not ready: dolt: context deadline exceeded",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rc := newReadyTestConfig(t)
+			rc.probeTimeout = 20 * time.Millisecond
+			var mu sync.Mutex
+			var dialed []string
+			rc.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				mu.Lock()
+				dialed = append(dialed, addr)
+				mu.Unlock()
+				return tc.dial(ctx, network, addr)
+			}
+			var stderr bytes.Buffer
+			got := runReadyWith(nil, &stderr, rc)
+			if got != tc.wantStatus {
+				t.Fatalf("bdgw ready = %d, want %d; stderr %s", got, tc.wantStatus, stderr.String())
+			}
+			if got != exitOK {
+				if !strings.Contains(stderr.String(), tc.wantStderr) {
+					t.Errorf("stderr = %q, want it to carry %q", stderr.String(), tc.wantStderr)
+				}
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			want := net.JoinHostPort(rc.doltHost, rc.doltPort)
+			if len(dialed) != 1 || dialed[0] != want {
+				t.Errorf("the Dolt probe dialed %v, want [%s]", dialed, want)
+			}
+		})
+	}
+}
+
+// TestReadyDoltServe: the serving gateway answers /readyz 503 with the Dolt
+// message when the injected dial fails, and 200 when it passes, having asked
+// the endpoint the flags name.
+func TestReadyDoltServe(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		dial func(context.Context, string, string) (net.Conn, error)
+		want int
+	}{
+		{
+			name: "dial fails",
+			dial: func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
+			want: http.StatusServiceUnavailable,
+		},
+		{name: "dial passes", dial: pipeConn, want: http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			sc := newServeTestConfig(t)
+			var mu sync.Mutex
+			var dialed []string
+			sc.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				mu.Lock()
+				dialed = append(dialed, addr)
+				mu.Unlock()
+				return tc.dial(ctx, network, addr)
+			}
+			mainPl, pushPl := newPipeListener(), newPipeListener()
+			sc.listen = listenByAddr(sc.addr, mainPl, sc.pushAddr, pushPl)
+			mainClient, pushClient := dialClient(t, mainPl), dialClient(t, pushPl)
+
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			served := make(chan error, 1)
+			go func() { served <- serve(ctx, sc) }()
+			waitFor(t, bound, "both listeners accept", func() bool {
+				return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+			})
+			pushed := send(bound, pushClient, http.MethodPut, "/v1/workspace", testDaemonToken, strings.NewReader(pushBody(t)))
+			if pushed.err != nil || pushed.status != http.StatusOK {
+				t.Fatalf("push = %d (%v), want 200; body %s", pushed.status, pushed.err, pushed.body)
+			}
+
+			ready := send(bound, mainClient, http.MethodGet, "/readyz", testReadToken, nil)
+			if ready.err != nil {
+				t.Fatalf("/readyz: %v", ready.err)
+			}
+			if ready.status != tc.want {
+				t.Fatalf("/readyz = %d, want %d; body %s", ready.status, tc.want, ready.body)
+			}
+			if tc.want != http.StatusOK && !strings.Contains(string(ready.body), "dolt is not reachable") {
+				t.Errorf("/readyz body = %s, want the Dolt message", ready.body)
+			}
+			if tc.want == http.StatusOK && !strings.Contains(string(ready.body), `"ready"`) {
+				t.Errorf("/readyz body = %s, want the ready status", ready.body)
+			}
+			mu.Lock()
+			gotDialed := append([]string(nil), dialed...)
+			mu.Unlock()
+			wantAddr := net.JoinHostPort(sc.doltHost, sc.doltPort)
+			if len(gotDialed) != 1 || gotDialed[0] != wantAddr {
+				t.Errorf("the Dolt probe dialed %v, want [%s]", gotDialed, wantAddr)
+			}
+
+			stop()
+			select {
+			case err := <-served:
+				if err != nil {
+					t.Errorf("serve after the drain = %v, want nil", err)
+				}
+			case <-bound.Done():
+				t.Fatal("serve did not return after the drain")
+			}
+		})
 	}
 }
 

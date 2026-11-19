@@ -32,6 +32,10 @@ type serveConfig struct {
 	// listen opens the sockets serve accepts on. A test replaces it with
 	// in-memory listeners, so a unit test runs the real drain without a socket.
 	listen func(addr string) (net.Listener, error)
+	// dial opens the Dolt probe's connection. Its own timeout bounds the check,
+	// so readiness does not inherit its limit from the caller's context; a test
+	// replaces it to drive each answer without a socket.
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 func newServeConfig() *serveConfig {
@@ -46,6 +50,7 @@ func newServeConfig() *serveConfig {
 		listen: func(addr string) (net.Listener, error) {
 			return net.Listen("tcp", addr)
 		},
+		dial: (&net.Dialer{Timeout: doltProbeTimeout}).DialContext,
 	}
 }
 
@@ -118,6 +123,7 @@ func serve(ctx context.Context, sc *serveConfig) error {
 		Log:        log,
 		Runner:     runner,
 		Caps:       runner,
+		DoltProbe:  newDoltProbe(sc.doltHost, sc.doltPort, doltProbeTimeout, sc.dial),
 	})
 	if err != nil {
 		return err
