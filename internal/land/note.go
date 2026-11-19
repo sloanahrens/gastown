@@ -218,6 +218,31 @@ func countKind(kinds []string, kind string) int {
 	return n
 }
 
+// laneOf is the lane a branch's refusals count in: polecat/ branches and blocks
+// naming no branch share one, crew/<owner>/ branches get one per owner, and
+// others are their own. A polecat's branch name changes on each dispatch (gt-mo4uj3).
+func laneOf(branch string) string {
+	if branch == "" || strings.HasPrefix(branch, "polecat/") {
+		return "polecat"
+	}
+	owner, _, found := strings.Cut(strings.TrimPrefix(branch, "crew/"), "/")
+	if strings.HasPrefix(branch, "crew/") && found && owner != "" {
+		return "crew/" + owner
+	}
+	return branch
+}
+
+// laneAttempt counts the refusals of kind in notes within branch's lane (gt-mo4uj3).
+func laneAttempt(notes, branch, kind string) int {
+	n := 0
+	for _, rej := range RejectionsOfKind(notes, kind) {
+		if laneOf(rej.Branch) == laneOf(branch) {
+			n++
+		}
+	}
+	return n
+}
+
 // rejectionBlockRE finds a rejection block's header. The marker must open a
 // line: findings, reasons and gate tails are agent-supplied text, and a
 // marker quoted inside one of them is content, not a block (gt-9bioi.1).
