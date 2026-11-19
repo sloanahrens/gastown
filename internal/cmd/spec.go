@@ -3911,12 +3911,21 @@ func specRecountSeatFor(townRoot string, pool *config.PolecatPool, lister func()
 		if err != nil {
 			return specSeatRecount{Cap: seat.Cap, MaxTotal: maxTotal}, err
 		}
-		r := specSeatRecount{Total: poolHeldCount(sessions), MaxTotal: maxTotal}
-		if hasSeat {
-			r.Seat, r.Cap = poolSeatCount(agent, sessions), seat.Cap
-		}
-		return r, nil
+		return specRecountOf(pool, agent, sessions), nil
 	}
+}
+
+// specRecountOf counts the room agent's sling would take over sessions: the
+// agent's seat and the town's total, through the same counts choosePoolAgent
+// refuses on. One set of sessions gives one count on the recount and the pool
+// check alike (gt-12boj6).
+func specRecountOf(pool *config.PolecatPool, agent string, sessions []poolSession) specSeatRecount {
+	seat, hasSeat := poolSeatOf(pool, agent)
+	r := specSeatRecount{Total: poolHeldCount(sessions), MaxTotal: pool.GetMaxTotal()}
+	if hasSeat {
+		r.Seat, r.Cap = poolSeatCount(agent, sessions), seat.Cap
+	}
+	return r
 }
 
 // specDrainingSessions is the sling-side occupancy beyond the roster: each held
