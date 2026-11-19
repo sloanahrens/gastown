@@ -103,6 +103,14 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if err := b.checkReleaseReporterVersion(stage, env); err != nil {
 		return nil, err
 	}
+	// Every tool is built from a pin, so each takes the fixed time while it is
+	// still in the staging directory; a refused stamp leaves b.Out as it was.
+	ops := b.fileOps()
+	for _, build := range builds {
+		if err := setPinnedInputMtime(ops, filepath.Join(stage, build.name)); err != nil {
+			return nil, err
+		}
+	}
 	// The app list is data, not a build: it is read from the pinned commit so
 	// it moves with the binary, and it lands beside the binary because that is
 	// where cmd/cloudcheck looks for it.

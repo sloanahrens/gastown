@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/buildstamp"
@@ -164,29 +165,32 @@ type Builder struct {
 	Fetch Fetcher
 
 	// The fields below are test seams for the filesystem calls the plugin,
-	// mango and gateway moves and their rollbacks make, and the write the
-	// gateway's policy file is staged with; nil means the os function of the
-	// same shape.
+	// mango and gateway moves and their rollbacks make, the write the gateway's
+	// policy file is staged with, and the fixed modification time a pinned
+	// input is given; nil means the os function of the same shape.
 	rename    func(oldpath, newpath string) error
 	remove    func(path string) error
 	lstat     func(path string) (os.FileInfo, error)
 	writeFile func(name string, data []byte, perm os.FileMode) error
+	chtimes   func(name string, atime, mtime time.Time) error
 }
 
 // fileOps is the filesystem the plugin, mango and gateway moves publish and
-// roll back with, and the gateway's policy file is staged in: the os functions
-// of the same shape, or the test seams standing in for them.
+// roll back with, the gateway's policy file is staged in, and a pinned input is
+// given its fixed modification time through: the os functions of the same
+// shape, or the test seams standing in for them.
 type fileOps struct {
 	rename    func(oldpath, newpath string) error
 	remove    func(path string) error
 	lstat     func(path string) (os.FileInfo, error)
 	writeFile func(name string, data []byte, perm os.FileMode) error
+	chtimes   func(name string, atime, mtime time.Time) error
 }
 
 // fileOps returns b's filesystem, with the os functions filling any seam b
 // leaves nil.
 func (b Builder) fileOps() fileOps {
-	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat, writeFile: os.WriteFile}
+	ops := fileOps{rename: os.Rename, remove: os.Remove, lstat: os.Lstat, writeFile: os.WriteFile, chtimes: os.Chtimes}
 	if b.rename != nil {
 		ops.rename = b.rename
 	}
@@ -199,7 +203,45 @@ func (b Builder) fileOps() fileOps {
 	if b.writeFile != nil {
 		ops.writeFile = b.writeFile
 	}
+	if b.chtimes != nil {
+		ops.chtimes = b.chtimes
+	}
 	return ops
+}
+
+// PinnedInputMtimeUnix is the modification time, as a Unix second, that every
+// input fetched or built from a pin is staged with: 2020-01-01T00:00:00Z. A
+// COPY layer's tar carries its files' modification times, so a pinned input
+// staged at the time the build ran gets a new layer digest after a builder
+// cache prune even when its bytes are the same as the previous tag's. One fixed
+// second makes that layer's digest depend on the input's bytes alone.
+//
+// It is a constant, not the time the build staged the file: a build time would
+// change with every run and defeat the cache. It is not a secret and not a
+// build time: it names no capability and no release.
+//
+// It covers the inputs this package stages: the claude CLI, the client tools,
+// ssh_known_hosts, and the binaries built from pins (bd, om, hm,
+// devops-reporter, release-reporter, cloudcheck). The binaries built from a
+// gastown commit (gt, gt-wrap, trackerd, trackerbackup), the plugins and the
+// mango files keep the time the build gave them. The image CI pushes is built
+// by the images workflow, whose "build mango for the daemon image" step stages
+// mango too; that workflow needs its own fixed modification time for the files
+// it writes.
+const PinnedInputMtimeUnix int64 = 1577836800
+
+// pinnedInputMtime is PinnedInputMtimeUnix as a UTC instant.
+func pinnedInputMtime() time.Time { return time.Unix(PinnedInputMtimeUnix, 0).UTC() }
+
+// setPinnedInputMtime gives path the fixed modification time every pinned input
+// is staged with. Its failure is returned, never dropped: a file left at the
+// build time is the defect this pins, so a caller must stage nothing instead.
+func setPinnedInputMtime(ops fileOps, path string) error {
+	at := pinnedInputMtime()
+	if err := ops.chtimes(path, at, at); err != nil {
+		return fmt.Errorf("daemonimage: cannot give %s the fixed modification time %s: %w", path, at.Format(time.RFC3339), err)
+	}
+	return nil
 }
 
 // ImageTag is the tag the daemon image for rev is built with: gt-daemon:<rev>.
@@ -218,6 +260,10 @@ type binary struct {
 	// with git's abbreviation of the commit in its worktree, which only exists
 	// once the build has made it.
 	stampsBuildID bool
+	// pinned marks a binary built from a pinned source, which is staged with
+	// PinnedInputMtimeUnix. A binary built from the gastown commit is not marked
+	// and keeps its build time.
+	pinned bool
 }
 
 // bdBinary is the image's bd, built from src at commit and staged under name:
@@ -226,7 +272,7 @@ type binary struct {
 // main.Build from git's abbreviation of the commit in the worktree, then
 // main.Commit with the full sha.
 func bdBinary(src, commit, name string) binary {
-	return binary{name: name, src: src, commit: commit, pkg: BDPackage, ldflags: bdCommitFlag + commit, stampsBuildID: true}
+	return binary{name: name, src: src, commit: commit, pkg: BDPackage, ldflags: bdCommitFlag + commit, stampsBuildID: true, pinned: true}
 }
 
 // plugin is one plugin the image carries: its directory name in the town's
@@ -290,7 +336,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		bdBinary(bdSrc, bdCommit, "bd"),
-		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage},
+		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage, pinned: true},
 		// gt-wrap is the forwarder the image installs as bd, with the real bd
 		// beside it as bd.real (gt-p4xncz): an in-cluster bd call must reach
 		// this binary, or BD_GATEWAY_URL changes nothing.
@@ -306,6 +352,17 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	env := bdbuild.Env(b.Environ)
 	for _, build := range builds {
 		if err := b.build(ctx, build, stage, env); err != nil {
+			return nil, err
+		}
+	}
+	// A binary built from a pin is stamped with the fixed time while it is
+	// still in the staging directory, so a refused stamp leaves b.Out as it was.
+	ops := b.fileOps()
+	for _, build := range builds {
+		if !build.pinned {
+			continue
+		}
+		if err := setPinnedInputMtime(ops, filepath.Join(stage, build.name)); err != nil {
 			return nil, err
 		}
 	}
@@ -995,6 +1052,7 @@ func (b Builder) fetchPinned(ctx context.Context, p pinnedFile, create func(dir,
 	if err := verifySum(p.what, p.url, hex.EncodeToString(sum.Sum(nil)), p.sha256, b.Out); err != nil {
 		return "", err
 	}
+	ops := b.fileOps()
 	path := filepath.Join(b.Out, p.name)
 	if p.member != "" {
 		data, err := extractMember(archive.Bytes(), p.member, p.max)
@@ -1004,7 +1062,20 @@ func (b Builder) fetchPinned(ctx context.Context, p pinnedFile, create func(dir,
 		if err := atomicfile.WriteFile(path, data, 0o755); err != nil {
 			return "", fmt.Errorf("daemonimage: cannot write %s: %w", path, err)
 		}
+		// The extracted member took its path whole; a refused stamp takes it
+		// back out so a failed fetch leaves nothing in the context.
+		if err := setPinnedInputMtime(ops, path); err != nil {
+			if removeErr := ops.remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+				return "", fmt.Errorf("%w; cannot take %s back out of %s: %w", err, p.name, b.Out, removeErr)
+			}
+			return "", err
+		}
 		return path, nil
+	}
+	// The stamped time goes on the temporary file, so a refusal leaves the
+	// deferred removal to clean it up and nothing reaches the context.
+	if err := setPinnedInputMtime(ops, tmp.Name()); err != nil {
+		return "", err
 	}
 	// The Dockerfile's COPY sets the binary's mode, so the file keeps the
 	// temporary file's.
@@ -1108,8 +1179,16 @@ func (b Builder) stageKnownHosts() error {
 	if err != nil {
 		return fmt.Errorf("daemonimage: %s is not readable; the image's COPY of it reads only the build context: %w", src, err)
 	}
-	if err := os.WriteFile(filepath.Join(b.Out, KnownHostsName), body, 0o644); err != nil {
+	path := filepath.Join(b.Out, KnownHostsName)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
 		return fmt.Errorf("daemonimage: staging %s in the build context %s: %w", KnownHostsName, b.Out, err)
+	}
+	ops := b.fileOps()
+	if err := setPinnedInputMtime(ops, path); err != nil {
+		if removeErr := ops.remove(path); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
+			return fmt.Errorf("%w; cannot take %s back out of %s: %w", err, KnownHostsName, b.Out, removeErr)
+		}
+		return err
 	}
 	return nil
 }
