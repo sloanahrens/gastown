@@ -1543,7 +1543,9 @@ func TestBdGatewayDoctor(t *testing.T) {
 
 // fakeDialClock is the injected clock of a retried call: Now reads it, and
 // Sleep moves it on, so the call spends no real time and the test sees the
-// waits it made.
+// waits it made. A test whose attempt has a latency of its own moves now on
+// inside its fake doer, so an attempt that runs to its timeout spends the
+// budget the way a real client does.
 type fakeDialClock struct {
 	now    time.Time
 	sleeps []time.Duration
@@ -1648,17 +1650,18 @@ func TestBdGatewayRetryRecovers(t *testing.T) {
 
 // TestBdGatewayRetryBounds: a gateway that is away keeps the call waiting only
 // as long as RetrySchedule allows, and the error names the attempts made and
-// the time spent; a write call's timeout or reset after the connection was made,
-// and an answer, whatever its status, are each tried exactly once.
+// the time spent. A read call's timeout or reset after the connection was made
+// is retried on the same schedule, and an answer, whatever its status, is
+// tried exactly once.
 func TestBdGatewayRetryBounds(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	base := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
 	wantDelays := RetrySchedule(gatewayRetryTotal)
-	// The timeout and reset rows run a write verb: a read with the same failure is
-	// retried (TestBdGatewayReadRetryRuns), so these rows assert the write rule.
+	// The timeout and reset rows run a read verb, since a read is retried on
+	// both; a write with the same failure is tried once, which
+	// TestBdGatewayReadRetryRuns asserts.
 	show := []string{"bd", "show", "gt-x"}
-	update := []string{"bd", "update", "gt-x", "--title", "t"}
 	tests := []struct {
 		name         string
 		argv         []string
@@ -1676,21 +1679,21 @@ func TestBdGatewayRetryBounds(t *testing.T) {
 			wantErr:      "did not answer",
 		},
 		{
-			name: "timeout on a write",
-			argv: update,
+			name: "timeout on a read",
+			argv: show,
 			answer: func(*http.Request) (*http.Response, error) {
 				return nil, &url.Error{Op: "Post", URL: "http://gw:7440/v1/exec", Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}}
 			},
-			wantAttempts: 1,
+			wantAttempts: len(wantDelays) + 1,
 			wantErr:      "did not answer",
 		},
 		{
-			name: "reset after send on a write",
-			argv: update,
+			name: "reset after send on a read",
+			argv: show,
 			answer: func(*http.Request) (*http.Response, error) {
 				return nil, &url.Error{Op: "Post", URL: "http://gw:7440/v1/exec", Err: &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}}
 			},
-			wantAttempts: 1,
+			wantAttempts: len(wantDelays) + 1,
 			wantErr:      "did not answer",
 		},
 		{
@@ -1886,47 +1889,108 @@ func TestBdGatewayReadRetryRuns(t *testing.T) {
 }
 
 // TestBdGatewayReadRetryBudget: refused dials and read timeouts draw on one
-// budget. A call whose gateway keeps failing in both ways waits exactly as long
-// as RetrySchedule allows, makes as many attempts as a call whose dials are all
-// refused, and its error names the attempts and the time spent.
+// wall-clock budget. The fake clock moves on while an attempt runs as well as
+// during a wait, so an attempt that runs to its timeout spends the budget the
+// way a real client's does. A call whose gateway never answers stops before an
+// attempt with less than the minimum left, ends within the budget plus the one
+// attempt that was in flight, and its error names the attempts and the time
+// spent.
 func TestBdGatewayReadRetryBudget(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	base := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
-	wantDelays := RetrySchedule(gatewayRetryTotal)
-	// The first attempts fail in both ways, then every later attempt times out.
-	script := []error{refusedDial(syscall.ECONNREFUSED), refusedDial(syscall.ECONNREFUSED), readTimeout()}
-	clock := &fakeDialClock{now: base}
-	attempts := 0
-	doer := doerFunc(func(*http.Request) (*http.Response, error) {
-		attempts++
-		if attempts <= len(script) {
-			return nil, script[attempts-1]
-		}
-		return nil, readTimeout()
-	})
-	g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
-	g.Sleep, g.Now = clock.Sleep, clock.Now
-	call := Call{
-		Argv: []string{"bd", "show", "gt-x"},
-		Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
-		Dir:  filepath.Join(town, "gastown"),
+	refused := refusedDial(syscall.ECONNREFUSED)
+	tests := []struct {
+		name string
+		// attemptCost is how long one attempt takes to fail: a gateway that
+		// accepts the connection and never answers.
+		attemptCost time.Duration
+		// refusals is how many of the first attempts are refused dials, which
+		// are quick; every later attempt times out.
+		refusals     int
+		wantSleeps   []time.Duration
+		wantAttempts int
+	}{
+		{
+			// Two refused dials are quick, then each read times out after ten
+			// seconds. The waits of 0.5, 1, 2, 3 and 5 seconds fit beside the
+			// attempt time, and the 3.5 seconds left after the fifth wait is
+			// spent by the sixth attempt.
+			name:         "refused dials and timeouts share the budget",
+			attemptCost:  10 * time.Second,
+			refusals:     2,
+			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second},
+			wantAttempts: 6,
+		},
+		{
+			// Every attempt times out: four attempts of ten seconds and the
+			// waits of 0.5, 1, 2 and 1.5 seconds are the whole budget, so no
+			// fifth attempt starts.
+			name:         "every attempt times out",
+			attemptCost:  10 * time.Second,
+			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 1500 * time.Millisecond},
+			wantAttempts: 4,
+		},
+		{
+			// Every attempt times out after 6.6 seconds: five attempts and the
+			// waits of 0.5, 1, 2, 3 and 5 seconds leave half a second, less than
+			// the minimum an attempt may start with, so the fifth attempt is the
+			// last.
+			name:         "no attempt starts with less than the minimum left",
+			attemptCost:  6600 * time.Millisecond,
+			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second},
+			wantAttempts: 5,
+		},
 	}
-	exit, err := g.Launch(call)
-	if err == nil || exit != exitDown {
-		t.Fatalf("Launch = (%d, %v), want the down status and an error", exit, err)
-	}
-	if attempts != len(wantDelays)+1 {
-		t.Errorf("the gateway was asked %d times, want %d: the same as a call whose dials are all refused", attempts, len(wantDelays)+1)
-	}
-	if !slices.Equal(clock.sleeps, wantDelays) {
-		t.Errorf("the waits = %v, want RetrySchedule's %v", clock.sleeps, wantDelays)
-	}
-	spent := clock.now.Sub(base)
-	if spent > gatewayRetryTotal || spent+5*time.Second <= gatewayRetryTotal {
-		t.Errorf("the call waited %v, want the most of the %v budget RetrySchedule allows", spent, gatewayRetryTotal)
-	}
-	if want := fmt.Sprintf("after %d attempts in %v", attempts, spent); !strings.Contains(err.Error(), want) {
-		t.Errorf("error %q does not name %q", err, want)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			base := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+			deadline := base.Add(gatewayRetryTotal)
+			clock := &fakeDialClock{now: base}
+			attempts := 0
+			doer := doerFunc(func(*http.Request) (*http.Response, error) {
+				attempts++
+				if attempts <= tt.refusals {
+					return nil, refused
+				}
+				// The attempt runs to the client's limit, the smaller of the
+				// call's timeout and the budget left, and then times out. Even
+				// an attempt with no budget left takes a moment to close, so the
+				// clock always moves on.
+				clock.now = clock.now.Add(max(min(tt.attemptCost, deadline.Sub(clock.now)), time.Millisecond))
+				return nil, readTimeout()
+			})
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			g.Sleep, g.Now = clock.Sleep, clock.Now
+			call := Call{
+				Argv: []string{"bd", "show", "gt-x"},
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  filepath.Join(town, "gastown"),
+			}
+			exit, err := g.Launch(call)
+			if err == nil || exit != exitDown {
+				t.Fatalf("Launch = (%d, %v), want the down status and an error", exit, err)
+			}
+			if attempts != tt.wantAttempts {
+				t.Errorf("the gateway was asked %d times, want %d", attempts, tt.wantAttempts)
+			}
+			if !slices.Equal(clock.sleeps, tt.wantSleeps) {
+				t.Errorf("the waits = %v, want %v", clock.sleeps, tt.wantSleeps)
+			}
+			spent := clock.now.Sub(base)
+			// The budget plus the one attempt that may have been in flight when
+			// it ran out is the most the call may spend waiting.
+			if spent > gatewayRetryTotal+tt.attemptCost {
+				t.Errorf("the call spent %v, past the %v budget plus one %v attempt", spent, gatewayRetryTotal, tt.attemptCost)
+			}
+			// An attempt's own time is part of the budget: the call must not
+			// make as many attempts as one whose attempts cost nothing.
+			if attempts >= len(RetrySchedule(gatewayRetryTotal))+1 {
+				t.Errorf("the gateway was asked %d times, as many as a call whose attempts cost no time; the attempt time did not count against the budget", attempts)
+			}
+			if want := fmt.Sprintf("after %d attempts in %v", attempts, spent); !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		})
 	}
 }

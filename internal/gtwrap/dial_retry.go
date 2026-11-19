@@ -58,10 +58,14 @@ func transportFailure(err error) bool {
 }
 
 // RetrySchedule returns the waits before each retry of a call that failed with
-// a retryable dial error, given the total time it may spend waiting: half a
-// second, then one, two and three seconds, then five seconds each. A wait that
-// would take the sum past total is left out, so a zero total gives none and the
-// waits always fit. The result is pure: no clock and no sleep.
+// a retryable error, a refused dial or a read call's mid-call transport
+// failure, given the total time it may spend waiting: half a second, then one,
+// two and three seconds, then five seconds each. A wait that would take the sum
+// past total is left out, so a zero total gives none and the waits always fit.
+// The waits are what a call spends waiting, not the whole budget: time an
+// attempt spends failing counts against the same total, so the caller stops
+// when what is left is too little to try with. The result is pure: no clock and
+// no sleep.
 func RetrySchedule(total time.Duration) []time.Duration {
 	ladder := [...]time.Duration{
 		500 * time.Millisecond,

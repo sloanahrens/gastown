@@ -47,9 +47,14 @@ const (
 	// "create the database" into a call it never made, so the call is refused.
 	gatewayPermitVar = "BD_ALLOW_NEW_DATABASE"
 	// gatewayRetryTotal is how long a call keeps waiting for the gateway after a
-	// refused dial, so a call made while the gateway rolls reaches it once it is
-	// back instead of failing on the first refusal.
+	// refused dial or a read call's mid-call transport failure, so a call made
+	// while the gateway rolls reaches it once it is back instead of failing on
+	// the first refusal.
 	gatewayRetryTotal = 45 * time.Second
+	// gatewayRetryMinimum is the least time a retried attempt may start with:
+	// with less than that left, the gateway cannot answer inside the budget, so
+	// the call ends instead of spending the attempt.
+	gatewayRetryMinimum = time.Second
 )
 
 // gatewayEnvNames are the only variables the gateway accepts in the head
@@ -188,25 +193,38 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	// call whose transport failed mid-call may have reached the gateway, so it is
 	// sent again on the same waits when RetryableRead allows it: it sent no stdin
 	// and wrote no output, so a second run repeats nothing. Both kinds draw on one
-	// budget. A refused attempt never read the body, so the caller's stdin is still
-	// whole for the attempt that connects, and it is delivered once. A mid-call
-	// failure of a write call, or of a read call that sent stdin, is not retried;
-	// nor is a non-retryable error or an answer, whatever its status.
+	// budget, a wall-clock deadline taken when the call starts, so an attempt that
+	// burns its whole timeout counts against it. Each attempt is bounded by the
+	// smaller of the call's own timeout and the time the budget has left, and none
+	// starts with less than gatewayRetryMinimum left. A refused attempt never read
+	// the body, so the caller's stdin is still whole for the attempt that
+	// connects, and it is delivered once. A mid-call failure of a write call, or
+	// of a read call that sent stdin, is not retried; nor is a non-retryable error
+	// or an answer, whatever its status.
 	delays := RetrySchedule(gatewayRetryTotal)
-	doer := g.doer(g.clientTimeout())
 	started := g.now()
+	deadline := started.Add(gatewayRetryTotal)
 	attempts := 0
 	var resp *http.Response
 	for {
+		left := deadline.Sub(g.now())
+		if attempts > 0 && left < gatewayRetryMinimum {
+			break
+		}
 		attempts++
-		resp, err = doer.Do(newRequest())
+		resp, err = g.doer(min(g.clientTimeout(), left)).Do(newRequest())
 		// wroteOutput is false: the answer's frames are read only after Do returns,
 		// so a Do that failed has written nothing to the caller's streams.
 		if err == nil || attempts > len(delays) ||
 			!(RetryableDial(err) || RetryableRead(err, call.Argv[1:], sendsStdin, false)) {
 			break
 		}
-		g.sleep(delays[attempts-1])
+		// A wait never runs past the deadline: a wait that would is spent only
+		// up to the time left, and one with no time left at all is skipped, so
+		// the minimum check above ends the call.
+		if wait := min(delays[attempts-1], deadline.Sub(g.now())); wait > 0 {
+			g.sleep(wait)
+		}
 	}
 	if err != nil {
 		if attempts > 1 {
