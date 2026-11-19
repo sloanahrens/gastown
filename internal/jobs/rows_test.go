@@ -269,6 +269,29 @@ func TestJobsDoltBackupRowCorruptNewestNight(t *testing.T) {
 	}
 }
 
+func TestJobsDoltBackupRowUnreadableNewestManifest(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "dolt")
+	writeBackupManifest(t, root, "2026-11-18",
+		`{"started":"2026-11-18T03:00:00Z","finished":"2026-11-18T03:05:00Z","databases":["hq"],"method":"test"}`)
+	// A directory where the newest night's manifest belongs opens but cannot be
+	// read as a file.
+	if err := os.MkdirAll(filepath.Join(root, "2026-11-19", "backup.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	j := jobsRow(t, t.TempDir(), Options{BackupRoot: root}, nil, doltBackupJobName)
+	if j.State != StateUnknown {
+		t.Errorf("State = %q, want unknown for an unreadable newest manifest", j.State)
+	}
+	if j.Outcome != OutcomeFailed {
+		t.Errorf("Outcome = %q, want failed for an unreadable newest manifest", j.Outcome)
+	}
+	if j.LastRun != nil || j.Stats != nil {
+		t.Errorf("LastRun = %v, Stats = %v, want neither for an unreadable newest manifest", j.LastRun, j.Stats)
+	}
+}
+
 func TestJobsDoltBackupRowUnreadableRoot(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "dolt")
