@@ -88,6 +88,12 @@ type poolSession struct {
 	// (poolSeatLedger.claimSessions). It holds the seat like a session does, and
 	// a refusal names it as a source of its count (gt-cx16fq).
 	claim bool
+	// hookedBead is the id of the live work the seat's hook reference (or the
+	// bead its claim or landing record names) holds, "" when it names none or
+	// cannot be read as live work. The spec dispatcher matches it against the
+	// slings still running, so a running sling and the seat it already fills
+	// count once (gt-75fma5).
+	hookedBead string
 }
 
 // poolHeldCount counts the sessions that hold a pool seat: every session but a
@@ -595,6 +601,11 @@ func (r poolSeatReads) openClient(dir string) beads.Client {
 type poolSeatState struct {
 	Disposition polecat.WorkstateDisposition
 	HookHeld    bool
+	// HookedBead is the id of the live work the seat's hook reference names,
+	// "" when the reference is absent, cannot be read, or names no live work.
+	// A running sling and the seat hooking its bead are one seat, so the pool
+	// roster matches this against the slings still running (gt-75fma5).
+	HookedBead string
 }
 
 // poolDispositionFor is the polecat-state read a caller in townRoot wants, or
@@ -672,18 +683,24 @@ func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, dispo
 			created = now
 		}
 		rigName, polecatName, ok := parsePolecatRole(role)
-		if ok && !polecatSeatOccupied(disposition, rigName, polecatName) {
-			continue
-		}
 		// A role that names no seat names no record to read either.
 		agent := ""
+		var hookedBead string
 		if ok {
+			state, occupied := poolSeatReadState(disposition, rigName, polecatName)
+			if !occupied {
+				continue
+			}
+			// The same read that decides the seat holds the bead its hook
+			// names, so the roster can count a running sling and this seat
+			// once without a second read (gt-75fma5).
+			hookedBead = state.HookedBead
 			agent, err = poolSeatAgent(seatAgent, rigName, polecatName)
 			if err != nil {
 				agent = config.UnknownSeatAgent
 			}
 		}
-		out = append(out, poolSession{name: n, agent: agent, created: created, rig: rigName, polecat: polecatName})
+		out = append(out, poolSession{name: n, agent: agent, created: created, rig: rigName, polecat: polecatName, hookedBead: hookedBead})
 	}
 	return out, nil
 }
@@ -781,11 +798,23 @@ func parsePolecatRole(role string) (rig, name string, ok bool) {
 // listPolecatSessions): a pool that cannot read a polecat's state is not a pool
 // that knows the seat is free, and undercounting risks the overrun the pool
 // exists to prevent (gt-md4z) rather than the seat refusal this fix targets.
+// It is the occupied answer of poolSeatReadState, which the roster reads the
+// hooked bead from too.
 func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatName string) bool {
+	_, occupied := poolSeatReadState(disposition, rigName, polecatName)
+	return occupied
+}
+
+// poolSeatReadState is one seat's own state read, with the fail-open answer a
+// nil read gives: a caller with no town to read counts the seat and names no
+// hook. It is the read listPolecatSessionsWith makes per live session, so the
+// seat's hooked bead costs no second read.
+func poolSeatReadState(disposition polecatDispositionFunc, rigName, polecatName string) (poolSeatState, bool) {
 	if disposition == nil {
-		return true
+		return poolSeatState{}, true
 	}
-	return poolSeatStateOccupied(disposition(rigName, polecatName))
+	state, err := disposition(rigName, polecatName)
+	return state, poolSeatStateOccupied(state, err)
 }
 
 // poolSeatStateOccupied is polecatSeatOccupied over a state already read: the
@@ -859,6 +888,9 @@ type poolSeatBeadRead struct {
 	hookBead string
 	hd       polecat.HookBeadDisposition
 	held     bool
+	// hookedBead is hookBead when the reference resolved to live work, "" when
+	// it is absent, unreadable, or names work that is not live (gt-75fma5).
+	hookedBead string
 }
 
 // poolReadSeatBeads reads and folds the beads one seat read decides from — the
@@ -924,13 +956,22 @@ func poolReadSeatBeads(townRoot, rigName, polecatName string, reads poolSeatRead
 	}
 	hd := polecat.ClassifyHookBead(hookBead, hookIssue, hookErr)
 	held := poolSeatWorkFacts(&facts, hd, assigned)
+	// The bead a running sling and this seat can both be counted for is the
+	// one the hook names as live work. A reference that cannot be read, or
+	// that names submitted or terminal work, carries none: the sling then
+	// counts as it did before (gt-75fma5).
+	hookedBead := ""
+	if hookErr == nil && hookIssue != nil && !polecat.IsSubmittedWork(hookIssue) && polecat.IsHookActiveStatus(hookIssue.Status) {
+		hookedBead = hookBead
+	}
 	return poolSeatBeadRead{
-		fields:   fields,
-		facts:    facts,
-		hint:     hint,
-		hookBead: hookBead,
-		hd:       hd,
-		held:     held,
+		fields:     fields,
+		facts:      facts,
+		hint:       hint,
+		hookBead:   hookBead,
+		hd:         hd,
+		held:       held,
+		hookedBead: hookedBead,
 	}, bd, nil
 }
 
@@ -1029,7 +1070,7 @@ func poolPolecatSeatStateFromBeadRead(townRoot, rigName, polecatName string, rea
 		}
 	}
 	d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
-	return poolSeatState{Disposition: d, HookHeld: seat.held}, nil
+	return poolSeatState{Disposition: d, HookHeld: seat.held, HookedBead: seat.hookedBead}, nil
 }
 
 // poolAssignedWorkEvidence reads the work bead assigned to one polecat and
@@ -1385,6 +1426,9 @@ func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
 // dispatcher roster read without pruning, so they skip them here rather than
 // count a seat nobody holds. Nothing is deleted on this path.
 //
+// The claim carries the bead its sling is for, so the roster can count the
+// running sling and this seat once (gt-75fma5).
+//
 // An error is the claim set failing to read, which the caller must answer for
 // rather than treating as no claims (gt-t8q5).
 func (l *poolSeatLedger) claimSessions(ownID string) ([]poolSession, error) {
@@ -1401,7 +1445,7 @@ func (l *poolSeatLedger) claimSessions(ownID string) ([]poolSession, error) {
 		if c.ID == ownID || c.Agent == "" || l.stale(c, now) {
 			continue
 		}
-		out = append(out, poolSession{name: "pool-claim/" + c.ID, agent: c.Agent, created: c.CreatedAt, claim: true})
+		out = append(out, poolSession{name: "pool-claim/" + c.ID, agent: c.Agent, created: c.CreatedAt, claim: true, hookedBead: c.Bead})
 	}
 	return out, nil
 }

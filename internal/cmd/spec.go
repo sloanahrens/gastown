@@ -1953,6 +1953,10 @@ type specRoster struct {
 	// its bead, so a bead a record's Branch still names is held off a second
 	// seat (gt-712i5k).
 	SandboxRecords []session.SandboxRecord
+	// HookedBeads names the beads the seats inside Live hook: a sling still
+	// running for one of them is that seat, not a second one, so it adds no
+	// seat to the count the dispatcher decides with (gt-75fma5).
+	HookedBeads map[string]bool
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -2370,11 +2374,14 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	}
 	budget := env.Budget
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
-	budget.SetLive(specLiveWithInFlight(roster.Live, env.InFlight))
+	budget.SetLive(specLiveWithInFlight(roster.Live, roster.HookedBeads, env.InFlight))
 	// The in-flight term is named apart from the roster in the picture, so a
 	// count above a cap reads as a double count rather than an admission past
-	// it (gt-la4r78). SetLive has set Live, which the term is part of.
-	budget.SetInFlight(specInFlightByAgent(env.InFlight))
+	// it (gt-la4r78). SetLive has set Live, which the term is part of. It names
+	// only the slings SetLive added: a sling whose bead a roster seat hooks is
+	// that seat, already among the live sessions, not a second seat in flight
+	// (gt-75fma5).
+	budget.SetInFlight(specInFlightByAgent(specInFlightAdded(env.InFlight, roster.HookedBeads)))
 	budget.SetDeadHooked(roster.DeadHooked)
 	budget.SetDraining(roster.Draining)
 	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)
@@ -3546,7 +3553,9 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 // A dead-hooked seat also counts in DeadHooked, so the picture can say why a
 // full seat shows fewer live sessions than its number (gt-tldj4); it has no
 // spawn time, so it never arms the stagger. A parkedStale seat is not counted
-// in Live; it is counted in ParkedStale (gt-t7k92).
+// in Live; it is counted in ParkedStale (gt-t7k92). Each seat counted in Live
+// contributes the bead its hook names to HookedBeads, so a running sling for
+// that bead can be seen as the same seat (gt-75fma5).
 //
 // A polecat that records no agent is counted on the seat map's only seat, and
 // under config.UnknownSeatAgent when the map has several: the tick lists it
@@ -3570,6 +3579,15 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 			continue
 		}
 		r.Live[agent]++
+		// The bead a seat inside Live hooks is accounted for by that seat, so
+		// a running sling for it must not add another (gt-75fma5). A released
+		// parked seat is skipped above: it counts nothing, so it hooks nothing.
+		if s.hookedBead != "" {
+			if r.HookedBeads == nil {
+				r.HookedBeads = map[string]bool{}
+			}
+			r.HookedBeads[s.hookedBead] = true
+		}
 		if s.deadHooked {
 			r.DeadHooked[agent]++
 		}

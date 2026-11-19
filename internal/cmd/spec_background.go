@@ -130,12 +130,34 @@ func specInFlightByAgent(inFlight []specInFlight) map[string]int {
 	return out
 }
 
-// specLiveWithInFlight is the roster's live count with each running sling added
-// to its agent: the sling is filling a seat the roster may not show yet, and a
-// seat it already shows is counted twice until the sling returns. That errs
-// toward fewer slings, never more, and the sling is the slow part either way.
-func specLiveWithInFlight(live map[string]int, inFlight []specInFlight) map[string]int {
-	extra := specInFlightByAgent(inFlight)
+// specInFlightAdded is the running slings that add a seat: those whose bead no
+// roster seat hooks. A sling whose bead a seat inside the roster hooks is that
+// seat, which the roster already counts, so adding it would count one polecat
+// twice (gt-75fma5). A sling whose bead no seat hooks is still added: it is
+// filling a seat the roster cannot show yet. A seat whose hook could not be
+// read carries no bead in hooked, so a sling for that bead is added as before.
+func specInFlightAdded(inFlight []specInFlight, hooked map[string]bool) []specInFlight {
+	if len(inFlight) == 0 {
+		return nil
+	}
+	out := make([]specInFlight, 0, len(inFlight))
+	for _, f := range inFlight {
+		if hooked[f.Bead] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// specLiveWithInFlight is the roster's live count with each running sling that
+// adds a seat (specInFlightAdded) added to its agent: the sling is filling a
+// seat the roster may not show yet. A seat the roster shows without naming the
+// sling's bead — its hook not recorded yet — is still counted twice until the
+// sling returns; that errs toward fewer slings, never more, and the sling is
+// the slow part either way.
+func specLiveWithInFlight(live map[string]int, hooked map[string]bool, inFlight []specInFlight) map[string]int {
+	extra := specInFlightByAgent(specInFlightAdded(inFlight, hooked))
 	if extra == nil {
 		return live
 	}

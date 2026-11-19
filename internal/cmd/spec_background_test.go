@@ -544,14 +544,14 @@ func TestSpecSlingHoldStopsAPlannedSlingIntoaHeldRig(t *testing.T) {
 func TestSpecLiveWithInFlight(t *testing.T) {
 	t.Parallel()
 	live := map[string]int{"claude-sonnet": 1}
-	got := specLiveWithInFlight(live, []specInFlight{{Bead: "gt-a", Agent: "claude-sonnet"}, {Bead: "gt-b", Agent: "deepseek-flash"}})
+	got := specLiveWithInFlight(live, nil, []specInFlight{{Bead: "gt-a", Agent: "claude-sonnet"}, {Bead: "gt-b", Agent: "deepseek-flash"}})
 	if got["claude-sonnet"] != 2 || got["deepseek-flash"] != 1 {
 		t.Errorf("live = %v, want claude-sonnet 2 and deepseek-flash 1", got)
 	}
 	if live["claude-sonnet"] != 1 || len(live) != 1 {
 		t.Errorf("the roster's own map = %v, want it left alone", live)
 	}
-	if got := specLiveWithInFlight(nil, nil); got != nil {
+	if got := specLiveWithInFlight(nil, nil, nil); got != nil {
 		t.Errorf("nothing in flight = %v, want the roster's map as it is", got)
 	}
 }
