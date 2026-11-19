@@ -211,7 +211,7 @@ func Rate(samples []Sample, now time.Time, window time.Duration) (float64, bool)
 	if span := newest.Sub(oldest); span <= 0 || span < window/2 {
 		return 0, false
 	}
-	// x is days from the oldest sample and y is used bytes, both centred on
+	// x is days from the oldest sample and y is used bytes, both centered on
 	// their means so each product is trend-sized rather than reading-sized and
 	// the sums keep float64's precision. span > 0 above means two x differ, so
 	// den is positive.
