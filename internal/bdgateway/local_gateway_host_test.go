@@ -1,6 +1,8 @@
 package bdgateway
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -88,5 +90,47 @@ func TestLocalGatewayHostEndpoint(t *testing.T) {
 		if !strings.Contains(err.Error(), "bd-gateway.gt.svc") {
 			t.Errorf("refusal for %s = %q, want it to name the gateway's Service form", url, err)
 		}
+	}
+}
+
+// TestGatewayPushTrustAllowList: the push Service's name is trusted for plain http
+// only in namespace gt, beside the gateway's own name, and the Service guard file
+// names it, so the client never trusts a name the cluster does not admit.
+func TestGatewayPushTrustAllowList(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"bd-gateway-push.gt.svc", true},
+		{"BD-Gateway-Push.GT.SVC", true},
+		{"bd-gateway-push.gt.svc.cluster.local", true},
+		{"bd-gateway.gt.svc", true},
+		{"bd-gateway-push.openshell.svc", false},
+		{"bd-gateway-push.gt-rehearsal.svc", false},
+		{"bd-gateway-push.openshell.svc.cluster.local", false},
+		{"bd-gateway-push.svc", false},
+		{"bd-gateway-push", false},
+		{"bd-gateway-pushx.gt.svc", false},
+		{"bd-gateway-push.gt.svc.evil.com", false},
+		{"bd-gateway-push.gt.cluster.local", false},
+		{"dolt.gt.svc", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.host, func(t *testing.T) {
+			t.Parallel()
+			if got := localGatewayHost(tc.host); got != tc.want {
+				t.Errorf("localGatewayHost(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "deploy", "k8s", "bd-gateway-service-admission.yaml"))
+	if err != nil {
+		t.Fatalf("reading the Service guard: %v", err)
+	}
+	if !strings.Contains(string(raw), "bd-gateway-push") {
+		t.Errorf("the Service guard does not name bd-gateway-push, so the client trusts a Service the cluster does not admit")
 	}
 }

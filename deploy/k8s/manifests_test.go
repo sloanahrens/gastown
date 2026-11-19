@@ -230,6 +230,129 @@ func TestBdGatewayServiceAdmissionBindsGt(t *testing.T) {
 	if got := rule["operations"]; !sameStrings(got, "CREATE", "UPDATE") {
 		t.Errorf("the policy's operations are %v, want CREATE and UPDATE", got)
 	}
+
+	// The push Service's validation names bd-gateway-push and its one port, 7441. This
+	// package cannot import the renderer (deploy/k8s/daemon imports it), so the daemon
+	// package's test holds these literals to BdGatewayPushName and BdGatewayPushPort.
+	validations, ok := at(t, policy, "spec", "validations").([]any)
+	if !ok || len(validations) != 3 {
+		t.Fatalf("the policy holds %d validations, want 3", len(validations))
+	}
+	push, _ := validations[1].(map[string]any)
+	pushExpr, _ := at(t, push, "expression").(string)
+	for _, want := range []string{"object.metadata.name != 'bd-gateway-push'", "object.spec.ports.all(p, p.port == 7441)"} {
+		if !strings.Contains(pushExpr, want) {
+			t.Errorf("the bd-gateway-push validation does not carry %q", want)
+		}
+	}
+	others, _ := validations[2].(map[string]any)
+	if expr, _ := at(t, others, "expression").(string); !strings.Contains(expr, "object.metadata.name == 'bd-gateway-push' ||") {
+		t.Errorf("the other-Service validation does not exempt the Service named bd-gateway-push")
+	}
+}
+
+// TestBdGatewayServiceAdmissionPushRefusals evaluates the push Service's admission on
+// fixtures: the rendered push Service is admitted, and each variant the policy must
+// still refuse is refused. The repo carries no CEL evaluator, so the rules are restated
+// in Go, the way the daemon package's otherServiceGuardAdmits restates the other-Service
+// rule; the policy's text is held to these rules by TestBdGatewayServiceAdmissionBindsGt
+// and the daemon package's policy tests, and the refusals are proven on the cluster at
+// cutover.
+func TestBdGatewayServiceAdmissionPushRefusals(t *testing.T) {
+	t.Parallel()
+	const pushPort = 7441
+	rendered := pushFixture{
+		name:     "bd-gateway-push",
+		typ:      "ClusterIP",
+		selector: map[string]string{"app.kubernetes.io/name": "bd-gateway"},
+		ports:    []int{pushPort},
+	}
+	with := func(edit func(*pushFixture)) pushFixture {
+		s := rendered
+		s.selector = map[string]string{"app.kubernetes.io/name": "bd-gateway"}
+		s.ports = []int{pushPort}
+		edit(&s)
+		return s
+	}
+	for _, tc := range []struct {
+		why      string
+		svc      pushFixture
+		admitted bool
+	}{
+		{"the rendered push Service", rendered, true},
+		{"a NodePort push Service", with(func(s *pushFixture) { s.typ = "NodePort" }), false},
+		{"a LoadBalancer push Service", with(func(s *pushFixture) { s.typ = "LoadBalancer" }), false},
+		{"an ExternalName push Service", with(func(s *pushFixture) { s.typ, s.externalName = "ExternalName", "dolt.example.com" }), false},
+		{"a push Service with an external IP", with(func(s *pushFixture) { s.externalIPs = []string{"192.168.5.2"} }), false},
+		{"a push Service with a second port", with(func(s *pushFixture) { s.ports = []int{pushPort, 8080} }), false},
+		{"a push Service on another port", with(func(s *pushFixture) { s.ports = []int{7440} }), false},
+		{"a push Service with no port", with(func(s *pushFixture) { s.ports = nil }), false},
+		{"a push Service with a second selector pair", with(func(s *pushFixture) {
+			s.selector["app.kubernetes.io/managed-by"] = "gt"
+		}), false},
+		{"a push Service with an empty selector", with(func(s *pushFixture) { s.selector = map[string]string{} }), false},
+		{"a push Service selecting only managed-by", with(func(s *pushFixture) {
+			s.selector = map[string]string{"app.kubernetes.io/managed-by": "gt"}
+		}), false},
+		{"another Service selecting the gateway's pods", pushFixture{
+			name:     "bd-gateway-other",
+			typ:      "ClusterIP",
+			selector: map[string]string{"app.kubernetes.io/name": "bd-gateway"},
+			ports:    []int{pushPort},
+		}, false},
+		{"a Service selecting the gateway's labels and managed-by", pushFixture{
+			name:     "dolt",
+			typ:      "ClusterIP",
+			selector: map[string]string{"app.kubernetes.io/name": "bd-gateway", "app.kubernetes.io/managed-by": "gt"},
+		}, false},
+		{"a Service selecting its own pods", pushFixture{
+			name:     "dolt",
+			typ:      "ClusterIP",
+			selector: map[string]string{"app.kubernetes.io/name": "dolt"},
+		}, true},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			t.Parallel()
+			if got := pushServiceAdmitted(tc.svc); got != tc.admitted {
+				t.Errorf("%s (%+v) is admitted = %v, want %v", tc.why, tc.svc, got, tc.admitted)
+			}
+		})
+	}
+}
+
+// pushFixture is the part of a Service the push validations read.
+type pushFixture struct {
+	name         string
+	typ          string
+	externalName string
+	externalIPs  []string
+	selector     map[string]string
+	ports        []int
+}
+
+// pushServiceAdmitted restates the Service guard on one Service: the bd-gateway-push
+// shape for the push name, and the other-Service refusal for every other name. A
+// Service named bd-gateway is judged by the bd-gateway shape and is not a fixture here.
+func pushServiceAdmitted(s pushFixture) bool {
+	if s.name == "bd-gateway-push" {
+		if s.typ != "ClusterIP" || len(s.externalIPs) != 0 || s.externalName != "" {
+			return false
+		}
+		if len(s.selector) != 1 || s.selector["app.kubernetes.io/name"] != "bd-gateway" {
+			return false
+		}
+		return len(s.ports) == 1 && s.ports[0] == 7441
+	}
+	if len(s.selector) == 0 {
+		return true
+	}
+	for k, v := range s.selector {
+		gatewayPair := (k == "app.kubernetes.io/name" && v == "bd-gateway") || (k == "app.kubernetes.io/managed-by" && v == "gt")
+		if !gatewayPair {
+			return true
+		}
+	}
+	return false
 }
 
 // sameStrings reports whether v is a list of strings holding exactly want, in any order.

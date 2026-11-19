@@ -24,10 +24,10 @@ func TestBdGatewayServicePolicyPinsRenderedService(t *testing.T) {
 	t.Parallel()
 	svc := mustBuild(t, bdGatewayWorkloadValues(t)).BdGatewayService
 	exprs := bdGatewayServicePolicyExpressions(t, filepath.Join(packageDir(t), "..", "bd-gateway-service-admission.yaml"))
-	if len(exprs) != 2 {
-		t.Fatalf("the Service guard holds %d validations, want 2: the bd-gateway shape and the other-Service refusal", len(exprs))
+	if len(exprs) != 3 {
+		t.Fatalf("the Service guard holds %d validations, want 3: the bd-gateway shape, the bd-gateway-push shape and the other-Service refusal", len(exprs))
 	}
-	shape, others := exprs[0], exprs[1]
+	shape, others := exprs[0], exprs[2]
 
 	if want := "object.spec.type == '" + svc.Spec.Type + "'"; !strings.Contains(shape, want) {
 		t.Errorf("the bd-gateway validation does not require %q, the type the renderer sets: %q", want, shape)
@@ -57,6 +57,46 @@ func TestBdGatewayServicePolicyPinsRenderedService(t *testing.T) {
 		if !strings.Contains(others, want) {
 			t.Errorf("the other-Service validation does not treat the gateway's label pair %q as selecting the gateway's pods", want)
 		}
+	}
+}
+
+// TestBdGatewayServiceAdmissionPushLiterals holds the push Service's validation to the
+// renderer's push Service: its name, type, the one selector pair, and the one port the
+// guard admits, all of them the renderer's constants and the rendered object. The other-
+// Service validation must exempt the push name, or the push Service is refused at apply.
+func TestBdGatewayServiceAdmissionPushLiterals(t *testing.T) {
+	t.Parallel()
+	svc := mustBuild(t, bdGatewayWorkloadValues(t)).BdGatewayPushService
+	if svc.Metadata.Name != BdGatewayPushName || len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != BdGatewayPushPort {
+		t.Fatalf("the renderer's push Service is %q with ports %+v, want %q on %d", svc.Metadata.Name, svc.Spec.Ports, BdGatewayPushName, BdGatewayPushPort)
+	}
+	exprs := bdGatewayServicePolicyExpressions(t, filepath.Join(packageDir(t), "..", "bd-gateway-service-admission.yaml"))
+	if len(exprs) != 3 {
+		t.Fatalf("the Service guard holds %d validations, want 3", len(exprs))
+	}
+	push, others := exprs[1], exprs[2]
+
+	for _, want := range []string{
+		"object.metadata.name != '" + BdGatewayPushName + "' ||",
+		"object.spec.type == '" + svc.Spec.Type + "'",
+		"size(object.spec.selector) == " + strconv.Itoa(len(svc.Spec.Selector)),
+		"size(object.spec.ports) == " + strconv.Itoa(len(svc.Spec.Ports)),
+		"object.spec.ports.all(p, p.port == " + strconv.Itoa(BdGatewayPushPort) + ")",
+		"(!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0)",
+		"!has(object.spec.externalName)",
+	} {
+		if !strings.Contains(push, want) {
+			t.Errorf("the bd-gateway-push validation does not carry %q: %q", want, push)
+		}
+	}
+	for _, k := range sortedKeys(svc.Spec.Selector) {
+		want := "k == '" + k + "' && object.spec.selector[k] == '" + svc.Spec.Selector[k] + "'"
+		if !strings.Contains(push, want) {
+			t.Errorf("the bd-gateway-push validation does not admit the renderer's selector pair %q", want)
+		}
+	}
+	if want := "object.metadata.name == '" + BdGatewayPushName + "' ||"; !strings.Contains(others, want) {
+		t.Errorf("the other-Service validation does not exempt %q, so the push Service is refused: %q", BdGatewayPushName, others)
 	}
 }
 
@@ -188,8 +228,8 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 	})
 	t.Run("each validation has an expression and a message", func(t *testing.T) {
 		t.Parallel()
-		if n := len(policy.Spec.Validations); n != 2 {
-			t.Fatalf("the policy holds %d validations, want 2", n)
+		if n := len(policy.Spec.Validations); n != 3 {
+			t.Fatalf("the policy holds %d validations, want 3", n)
 		}
 		for i, v := range policy.Spec.Validations {
 			if strings.TrimSpace(v.Expression) == "" || strings.TrimSpace(v.Message) == "" {
@@ -197,11 +237,14 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 			}
 		}
 	})
-	t.Run("the other-Service validation exempts the bd-gateway name", func(t *testing.T) {
+	t.Run("the other-Service validation exempts the two gateway Service names", func(t *testing.T) {
 		t.Parallel()
-		others := policy.Spec.Validations[1].Expression
+		others := policy.Spec.Validations[2].Expression
 		if !strings.Contains(others, "object.metadata.name == 'bd-gateway' ||") {
 			t.Errorf("the other-Service validation does not exempt the Service named bd-gateway: %q", others)
+		}
+		if !strings.Contains(others, "object.metadata.name == 'bd-gateway-push' ||") {
+			t.Errorf("the other-Service validation does not exempt the Service named bd-gateway-push: %q", others)
 		}
 	})
 
