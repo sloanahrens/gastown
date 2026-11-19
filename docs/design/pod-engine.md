@@ -190,6 +190,7 @@ These files hold the literal `docker` without running the CLI as a program of a 
 
 - `internal/ci/imagepublish/imagepublish.go` — the publisher's default program name.
 - `internal/ci/preflight/preflight.go` — the host tools a preflight looks for.
+- `internal/cmd/town_cluster_exec.go` — the interim docker-exec read path builds `docker --context … exec …` and hands it to an injected runner; this file runs no process of its own (gt-smwhb8).
 - `internal/config/daemon_config.go` — `TierSweepRunnerDocker`, one of the two backend names.
 - `internal/config/daemon_steps.go` — the audit's Needs column, which names programs a step execs.
 - `internal/config/types.go` — `SandboxDriverDocker`, one of the two sandbox driver names.
