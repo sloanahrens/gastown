@@ -49,7 +49,7 @@ func (s *rollStore) Read(context.Context) (string, bool, error) {
 	return s.content, s.present, nil
 }
 
-// Remove honours ctx as the pod exec does, so a release that runs on a cancelled
+// Remove honours ctx as the pod exec does, so a release that runs on a canceled
 // roll context fails here instead of passing.
 func (s *rollStore) Remove(ctx context.Context) error {
 	s.events.add("hold:remove")
@@ -205,7 +205,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 		{
 			// A SIGINT cancels the roll's context while the landing wait runs. The
 			// release must still reach the store, so the hold does not outlive the roll.
-			name: "context cancelled during the landing wait",
+			name: "context canceled during the landing wait",
 			mutate: func(d *runnerRollDeps, cancel context.CancelFunc) {
 				d.landing = func(context.Context) (string, int, bool, error) {
 					cancel()

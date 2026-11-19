@@ -25,7 +25,7 @@ const rollOwner = "roll"
 const rollHoldFile = "landing.hold"
 
 // releaseBound bounds the release of the hold. The release runs after a signal
-// has cancelled the roll's context, so it gets a context of its own.
+// has canceled the roll's context, so it gets a context of its own.
 const releaseBound = time.Minute
 
 // errApplyUnwired is what the default applier returns. It is refused before the
