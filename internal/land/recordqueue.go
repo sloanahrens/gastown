@@ -114,19 +114,21 @@ func (q RecordQueue) Pending() ([]PendingRecord, error) {
 }
 
 // Remove rewrites the queue without rec through a temp file and rename; a
-// missing queue or entry is a no-op and a torn line is kept as read.
+// missing queue or entry is a no-op. A torn (unparsable) line is dropped by the
+// rewrite, so a queue with a torn tail can always drain and Pending reads clean
+// afterwards; a torn line alone is enough to trigger the rewrite.
 func (q RecordQueue) Remove(rec PendingRecord) error {
 	return q.walk(func(entries []queueEntry) error {
 		var kept strings.Builder
-		removed := false
+		changed := false
 		for _, e := range entries {
-			if e.ok && e.rec.sameEntry(rec) {
-				removed = true
+			if !e.ok || e.rec.sameEntry(rec) {
+				changed = true
 				continue
 			}
 			kept.WriteString(e.raw + "\n")
 		}
-		if !removed {
+		if !changed {
 			return nil
 		}
 		if err := atomicfile.WriteFile(q.Path, []byte(kept.String()), 0o600); err != nil {

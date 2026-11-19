@@ -59,8 +59,25 @@ func TestRecordQueueTornLastLine(t *testing.T) {
 	if err := q.Remove(got[0]); err != nil {
 		t.Fatalf("Remove with a torn line present: %v", err)
 	}
-	if got, err = q.Pending(); err == nil || len(got) != 1 || got[0].Key != "k2" {
-		t.Errorf("after Remove Pending = %+v, %v; want only k2 with the torn line still reported", got, err)
+	if got, err = q.Pending(); err != nil || len(got) != 1 || got[0].Key != "k2" {
+		t.Errorf("after Remove Pending = %+v, %v; want only k2 and the torn tail repaired, no error", got, err)
+	}
+}
+
+func TestRecordQueueRemoveRepairsTornTailWithNothingToRemove(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "q.jsonl")
+	body := `{"bead":"gt-a","kind":"notes","key":"k1","text":"one"}` + "\n" + `{"bead":"gt-c","kind":"no`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	q := RecordQueue{Path: path}
+	if err := q.Remove(PendingRecord{Bead: "gt-zzz", Kind: RecordKindNotes, Key: "absent"}); err != nil {
+		t.Fatalf("Remove of an absent record with a torn tail: %v", err)
+	}
+	got, err := q.Pending()
+	if err != nil || len(got) != 1 || got[0].Key != "k1" {
+		t.Errorf("Pending = %+v, %v; want only k1 and a clean read after the repair", got, err)
 	}
 }
 
@@ -80,7 +97,15 @@ func TestRecordQueueFailures(t *testing.T) {
 	// Remove's rewrite names its temp file base+".tmp.<digits>", so a 250-byte
 	// base is a valid queue name whose temp name is over NAME_MAX: the rewrite is
 	// refused whatever account runs the test.
-	tempTooLong := filepath.Join(t.TempDir(), strings.Repeat("y", 250))
+	privateDir := t.TempDir()
+	// t.TempDir makes this subdirectory with 0777 minus the umask, and the CI
+	// runner's umask is open, so a queue that must accept its directory chmods
+	// it private first (the queue refuses a group- or world-writable directory).
+	//testpolicy:allow no-exec-files — a directory, not a file: its owner search bit lets the queue reach its file
+	if err := os.Chmod(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tempTooLong := filepath.Join(privateDir, strings.Repeat("y", 250))
 	if err := (RecordQueue{Path: tempTooLong}).Enqueue(ok); err != nil {
 		t.Fatal(err)
 	}
