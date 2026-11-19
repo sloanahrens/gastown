@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -408,36 +409,66 @@ func parseCICacheTrimReply(out []byte) (ciCacheTrimReply, error) {
 	return ciCacheTrimReply{beforeKiB: values[0], removed: values[1], afterKiB: values[2]}, nil
 }
 
+// The rules a selection reply's line can break. The refusals are typed so the
+// caller reads the rule from a field, not from the text, which names no path.
+const (
+	ciCacheSelectionRuleEmpty       = "empty"
+	ciCacheSelectionRuleNotAbsolute = "absolute"
+	ciCacheSelectionRuleNotClean    = "clean"
+	ciCacheSelectionRuleOutsideRoot = "inside the root"
+	ciCacheSelectionRuleCount       = "file count"
+	ciCacheSelectionRuleShape       = "reply shape"
+)
+
+// ciCacheSelectionError refuses a line of the list program's reply. Line is the
+// 1-based line in the reply and Rule is one of the ciCacheSelectionRule
+// constants. For a count refusal Line is the first figure line, where the file
+// lines should have ended. The text never carries the line's content.
+type ciCacheSelectionError struct {
+	Line int
+	Rule string
+}
+
+func (e *ciCacheSelectionError) Error() string {
+	return fmt.Sprintf("the selection reply fails its %s check at line %d", e.Rule, e.Line)
+}
+
 // parseCICacheTrimSelection reads the list program's reply: one line per selected
-// file, then the three figures parseCICacheTrimReply reads. Every file line must
-// be under root and there must be one for each removed file, so a line outside
-// the root or a count that differs from removed is refused rather than read as a
-// smaller selection. A refusal names the rule and, for a bad line, its number; it
-// never carries the file name, which is not logged.
+// file, then the three figures parseCICacheTrimReply reads. A file line must be a
+// clean absolute path strictly inside root, never root itself or a sibling whose
+// name merely begins with root's, and there must be one per removed file. An
+// unclean path is refused rather than cleaned, because the remover applies the
+// raw line. No file name reaches the error: a refusal names its rule and line,
+// which is what the caller reports without logging a path.
 func parseCICacheTrimSelection(out []byte, root string) (ciCacheTrimReply, error) {
 	if root == "" {
 		return ciCacheTrimReply{}, errors.New("the selection needs a volume root: every file line is checked against it")
 	}
 	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
 	if len(lines) < 3 {
-		return ciCacheTrimReply{}, fmt.Errorf("the reply has %d line(s), want a file line per removal and then before_kib, removed and after_kib", len(lines))
+		return ciCacheTrimReply{}, &ciCacheSelectionError{Line: len(lines) + 1, Rule: ciCacheSelectionRuleShape}
 	}
 	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-3:], "\n")))
 	if err != nil {
-		return ciCacheTrimReply{}, err
+		shape := &ciCacheSelectionError{Line: len(lines) - 2, Rule: ciCacheSelectionRuleShape}
+		return ciCacheTrimReply{}, fmt.Errorf("%w: %v", shape, err)
 	}
+	cleanRoot := filepath.Clean(root)
 	files := lines[:len(lines)-3]
-	under := root + "/"
 	for i, line := range files {
-		if line == "" {
-			return ciCacheTrimReply{}, fmt.Errorf("the reply's line %d is empty: every line before the three figures is a selected file", i+1)
-		}
-		if !strings.HasPrefix(line, under) {
-			return ciCacheTrimReply{}, fmt.Errorf("the reply's line %d is not a file under %s", i+1, root)
+		switch {
+		case line == "":
+			return ciCacheTrimReply{}, &ciCacheSelectionError{Line: i + 1, Rule: ciCacheSelectionRuleEmpty}
+		case !filepath.IsAbs(line):
+			return ciCacheTrimReply{}, &ciCacheSelectionError{Line: i + 1, Rule: ciCacheSelectionRuleNotAbsolute}
+		case filepath.Clean(line) != line:
+			return ciCacheTrimReply{}, &ciCacheSelectionError{Line: i + 1, Rule: ciCacheSelectionRuleNotClean}
+		case !strings.HasPrefix(line, cleanRoot+"/"):
+			return ciCacheTrimReply{}, &ciCacheSelectionError{Line: i + 1, Rule: ciCacheSelectionRuleOutsideRoot}
 		}
 	}
 	if int64(len(files)) != reply.removed {
-		return ciCacheTrimReply{}, fmt.Errorf("the reply has %d file line(s) but removed=%d", len(files), reply.removed)
+		return ciCacheTrimReply{}, &ciCacheSelectionError{Line: len(files) + 1, Rule: ciCacheSelectionRuleCount}
 	}
 	return reply, nil
 }
