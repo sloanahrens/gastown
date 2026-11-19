@@ -234,11 +234,15 @@ fi
 // past the age, then, while the selection still leaves the volume over its cap,
 // the files after them in mtime order, oldest first, until their sizes cover the
 // excess over the cap. Its arguments are argv data: the mode, the volume root,
-// the age in minutes, the cap in KiB and the floor in minutes. Its only mode is
-// list: it removes nothing, prints one line per selected file and then the three
+// the age in minutes, the cap in KiB and the floor in minutes. It has two modes.
+// list removes nothing: it prints one line per selected file and then the three
 // lines the other programs print, with the size after equal to the size before.
-// Go touches a cache file's mtime when it uses it, so the oldest mtime is the
-// least recently used.
+// apply removes exactly the files list selects, passing their names NUL-separated
+// to rm, and prints only those three lines, the size after read again once the
+// removal is done. It removes files only, never a directory: an emptied
+// directory, above all a top-level shard, is left where it is (gt-5y4cmu,
+// gt-qaqvf4). Go touches a cache file's mtime when it uses it, so the oldest
+// mtime is the least recently used.
 //
 // It takes exactly those five arguments and refuses any other count with exit 2
 // before it reads one: an unset $5 would otherwise end the shell with a status
@@ -268,7 +272,7 @@ fi
 const ciCacheLRUTrimScript = `set -eu
 [ "$#" -eq 5 ] || { echo "the program takes five arguments" >&2; exit 2; }
 mode=$1; root=$2; age=$3; cap=$4; floor=$5
-[ "$mode" = list ] || { echo "the mode $mode is not this program's: only list" >&2; exit 2; }
+case "$mode" in list|apply) ;; *) echo "the mode $mode is not this program's: only list and apply" >&2; exit 2;; esac
 [ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
 for n in "$age" "$cap" "$floor"; do
 case "$n" in ''|*[!0-9]*) echo "the age, the cap and the floor are whole numbers, not $n" >&2; exit 2;; esac
@@ -291,10 +295,17 @@ p = $0; sub(/^[0-9]+ [0-9]+ /, "", p)
 print p
 taken += int(($2 + 4095) / 4096) * 4
 }' "$tmp/sorted" > "$tmp/selected"
+removed=$(wc -l < "$tmp/selected" | tr -d ' ')
+if [ "$mode" = list ]; then
 cat "$tmp/selected"
+after=$before
+else
+if [ "$removed" -gt 0 ]; then tr '\n' '\000' < "$tmp/selected" | xargs -0 rm -f; fi
+after=$(du -sk "$root" | cut -f1)
+fi
 echo "before_kib=$before"
-echo "removed=$(wc -l < "$tmp/selected" | tr -d ' ')"
-echo "after_kib=$before"
+echo "removed=$removed"
+echo "after_kib=$after"
 `
 
 // ciCacheLRUArgv is the argv the LRU program runs with: sh -c, the script and
