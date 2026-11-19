@@ -57,6 +57,8 @@ func TestScanFileArgsRewritesToStdin(t *testing.T) {
 			[]string{"comments", "add", "gt-x", "--file", "-"}, FileArg{"--file", "n.txt"}},
 		{"create --design-file=", "bd", []string{"create", "--design-file=d.md"},
 			[]string{"create", "--design-file=-"}, FileArg{"--design-file", "d.md"}},
+		{"sample add --json file", "bd", []string{"sample", "add", "--kind", "usage_record", "--at", "2026-11-19T19:12:43Z", "--json", "/mac/usage.json"},
+			[]string{"sample", "add", "--kind", "usage_record", "--at", "2026-11-19T19:12:43Z", "--json", "-"}, FileArg{"--json", "/mac/usage.json"}},
 		// A file flag's value is not a command word.
 		{"value is not the subcommand", "bd", []string{"comments", "--file", "n.txt", "add", "gt-x"},
 			[]string{"comments", "--file", "-", "add", "gt-x"}, FileArg{"--file", "n.txt"}},
@@ -164,6 +166,7 @@ func TestScanFileArgsLeavesOtherCallsAlone(t *testing.T) {
 		{"no flags", "bd", []string{"show", "gt-x"}},
 		{"stdin already named", "bd", []string{"create", "--stdin", "--title", "t"}},
 		{"- value", "bd", []string{"create", "--body-file", "-"}},
+		{"sample add --json -", "bd", []string{"sample", "add", "--kind", "usage_record", "--at", "2026-11-19T19:12:43Z", "--json", "-"}},
 		{"-f under another command", "bd", []string{"list", "-f", "x"}},
 		{"inline metadata", "bd", []string{"update", "x", "--metadata", `{"a":1}`}},
 		{"gt escalate stdin", "gt", []string{"escalate", "--stdin", "msg"}},

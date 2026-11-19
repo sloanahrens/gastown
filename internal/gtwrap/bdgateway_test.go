@@ -201,6 +201,8 @@ func TestBdGatewaySendsNoStdinWhenTheCallReadsNone(t *testing.T) {
 		argv []string
 	}{
 		{name: "no argument reads stdin", argv: []string{"bd", "show", "gt-x", "--json"}},
+		{name: "show --json -", argv: []string{"bd", "show", "gt-x", "--json", "-"}},
+		{name: "sample list --json -", argv: []string{"bd", "sample", "list", "--kind", "usage_record", "--json", "-"}},
 		{name: "a dash value after --", argv: []string{"bd", "show", "gt-x", "--", "--body-file", "-"}},
 		{name: "a non-file flag's separate dash value", argv: []string{"bd", "list", "--assignee", "-"}},
 		{name: "a non-file flag's attached dash value", argv: []string{"bd", "list", "--assignee=-"}},
@@ -278,6 +280,16 @@ func TestBdGatewaySendsStdinWhenTheCallReadsIt(t *testing.T) {
 		{
 			name: "--stdin",
 			argv: []string{"bd", "create", "--stdin", "--title", "t"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "--json - under sample add",
+			argv: []string{"bd", "sample", "add", "--kind", "usage_record", "--at", "2026-11-19T19:12:43Z", "--json", "-"},
+			want: "the caller's stdin",
+		},
+		{
+			name: "--json=- under sample add",
+			argv: []string{"bd", "sample", "add", "--kind", "usage_record", "--at", "2026-11-19T19:12:43Z", "--json=-"},
 			want: "the caller's stdin",
 		},
 		{
