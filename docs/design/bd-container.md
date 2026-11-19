@@ -128,19 +128,37 @@ The render creates it only when the values file names a gateway image, and that
 image is a digest from the values file's `bd` key. Its workspace lives on the
 `bd-gateway-workspace` claim (1Gi), beside the `bd-gateway-log` claim (512Mi)
 that holds its call log and survives a pod replacement. It reaches Dolt through
-the host alias the render builds from the host gateway IP.
+the host alias the render builds from the host gateway IP. `Values.BdGatewayReplicas`
+sets its replica count at one or two, one by default; a second pod serves while
+the first rolls or fails, and both pods match the Service's selector, so the
+Service sends a call to either (gt-o9u1yn).
+
+Its strategy is RollingUpdate with `maxUnavailable: 0` and `maxSurge: 1`: the
+new pod starts and passes its readiness before the old one stops, so a roll
+leaves a ready gateway throughout (gt-t9pihj). For the length of a roll two
+gateway processes share the `bd-gateway-workspace` and `bd-gateway-log` claims,
+and with two replicas they share them in steady state too. ReadWriteOnce bounds
+a claim to one node, not to one pod, and the control cluster is one node whose
+`local-path` volumes are node-local, so the second pod attaches the claims the
+first holds and the roll does not stall. A ten-minute, 4000-call check under two
+pods found bd's runtime files on the shared workspace safe (gt-yz0s8v), and the
+workspace push serializes its pushers on a file lock (gt-fo7rf0). On several
+nodes that stops holding: the workspace needs a design with no claim shared
+across pods, or claims that are ReadWriteMany.
 
 The token Secret is mounted only by an init container, `tokens-0600`, which runs
 the proxy image as the pod's user and copies each token file into an emptyDir at
 mode 0600. The gateway mounts that emptyDir read-only at `/run/bdgw/tokens`. The
 Secret volume is 0440, which the pod's fsGroup needs for the copy to read it, but
 the gateway's token loader refuses any mode other than 0600. `Values.BdGatewayMaxConcurrent`
-passes `--max-concurrent` to `bdgw serve`; zero leaves the gateway's own default.
+is the cap across the gateway's pods, and each pod runs that total divided by
+the replica count, rounded up; zero means the gateway's own default of 16 in
+total, so eight per pod at two replicas.
 The readiness probe is `bdgw ready` with the same `--tokens-dir`, `--verbs` and
 `--workspace` paths the serve command uses, the three flags `bdgw ready` requires.
 
 The update order is gateway first. The gateway's Deployment is patched and its
-rollout is waited on (three minutes at most, so its pod is Ready) before the
+rollout is waited on (three minutes at most, so its pods are Ready) before the
 daemon's Deployment is patched, and the dashboard's comes last. A Deployment
 that does not exist is skipped, and the gateway moves only when the pair names
 its image.
@@ -284,15 +302,30 @@ seven files kept: time, token class, `X-Gt-Caller`, `BD_ACTOR`, rig, the verb
 path, the flag names (not values) and bead ids found in argv, stdin byte count,
 stdout and stderr byte counts, exit status and duration. Free-text values
 (titles, descriptions, comment bodies) are never logged. `GET /v1/stats` (class
-`read`) returns counts and latency percentiles per verb and caller for the last
-hour, which is the evidence for revisiting the 1 CPU and 1 GiB limit (decision 7).
+`read`) returns the counters since the process started, per verb and per actor,
+which is the evidence for revisiting the 1 CPU and 1 GiB limit (decision 7).
 
 In the cluster the log is not on the pod's disk. It lives on its own claim,
 `bd-gateway-log` (512Mi, ReadWriteOnce), mounted at `/var/log/bdgw`, so it
-survives a pod replacement. The rotation above keeps 350 MiB of that claim (50
-MB times seven files), and a roll appends to the same `call.log`. The claim is
-separate from `bd-gateway-workspace` (1Gi), so a full log cannot make the
-gateway unready. The render writes both claims; see gt-fn4lrl and gt-2kqwzv.
+survives a pod replacement. `bdgw serve` runs with `--log-per-pod`, which puts
+each pod's log under `/var/log/bdgw/<pod>/`, the directory named for the pod's
+hostname, so the old and new pods of a roll keep separate `call.log` files
+instead of appending to one (gt-sbzzro). Each directory keeps its own 350 MiB of
+rotation (50 MB times seven files), so two pods want 700 MiB of the claim;
+`local-path` does not enforce the 512Mi request, so the volume grows to fit, and
+a log write the volume refuses drops its line and counts it in `dropped`.
+The claim is separate from `bd-gateway-workspace` (1Gi), so a full log cannot
+make the gateway unready. The render writes both claims; see gt-fn4lrl and
+gt-2kqwzv.
+
+`GET /v1/calls` (class `read`) reads the live `call.log` in the log directory
+and in every pod directory, merges their entries by time stamp, and applies the
+caller's `since` and `limit` to the merged list, so a read through the Service
+shows both pods' calls; a pod log it cannot read fails the request rather than
+answering with a partial window (gt-njdluo). The `GET /v1/stats` counters stay
+per process: each pod counts only the calls it served, so a read through the
+Service reports the pod the load balancer chose. The merged `GET /v1/calls`
+list carries the totals.
 
 ## The workspace
 
