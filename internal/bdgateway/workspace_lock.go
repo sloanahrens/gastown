@@ -26,17 +26,23 @@ const (
 	workspaceLockPoll = 10 * time.Millisecond
 )
 
-// osTryLock makes one non-blocking attempt at the exclusive flock on path,
+// osTryLock is the production lock attempt: flockTryLock with the kernel's flock.
+func osTryLock(path string) (release func() error, busy bool, err error) {
+	return flockTryLock(path, syscall.Flock)
+}
+
+// flockTryLock makes one non-blocking attempt at the exclusive flock on path,
 // creating the lock file 0600 if it is absent. It returns busy when another
 // holder has the lock; release drops it and closes the file. A failed attempt
-// closes its file, so nothing is held on a refusal.
-func osTryLock(path string) (release func() error, busy bool, err error) {
+// closes its file, so nothing is held on a refusal. flock is the kernel call,
+// injected so a test can drive a failure the disk does not produce.
+func flockTryLock(path string, flock func(fd int, how int) error) (release func() error, busy bool, err error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, false, err
 	}
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
 			break
 		}
@@ -50,7 +56,7 @@ func osTryLock(path string) (release func() error, busy bool, err error) {
 		return nil, false, err
 	}
 	return func() error {
-		unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		unlockErr := flock(int(f.Fd()), syscall.LOCK_UN)
 		closeErr := f.Close()
 		return errors.Join(unlockErr, closeErr)
 	}, false, nil

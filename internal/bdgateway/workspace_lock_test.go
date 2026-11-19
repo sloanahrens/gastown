@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -423,6 +424,58 @@ func TestWorkspaceLockFailures(t *testing.T) {
 			t.Fatalf("Put error = %v, want %v", err, ErrWorkspaceLock)
 		}
 	})
+}
+
+// TestWorkspaceFlockAttempt drives each branch of one lock attempt with a fake
+// flock: an interrupted call is retried, a held lock is reported busy, and any
+// other failure is returned.
+func TestWorkspaceFlockAttempt(t *testing.T) {
+	t.Parallel()
+	ioErr := errors.New("input/output error")
+	cases := []struct {
+		name     string
+		answers  []error
+		wantErr  error
+		wantBusy bool
+		wantCall int
+	}{
+		{name: "an interrupted call is retried until it answers", answers: []error{syscall.EINTR, nil}, wantCall: 2},
+		{name: "a held lock is reported busy", answers: []error{syscall.EWOULDBLOCK}, wantBusy: true, wantCall: 1},
+		{name: "any other failure is returned and holds nothing", answers: []error{ioErr}, wantErr: ioErr, wantCall: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			flock := func(int, int) error {
+				calls++
+				if calls <= len(tc.answers) {
+					return tc.answers[calls-1]
+				}
+				return nil // the unlock after a held lock
+			}
+			path := filepath.Join(t.TempDir(), ".ws.lock")
+			release, busy, err := flockTryLock(path, flock)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("error = %v, want %v", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("error = %v, want none", err)
+			}
+			if busy != tc.wantBusy {
+				t.Fatalf("busy = %v, want %v", busy, tc.wantBusy)
+			}
+			if calls != tc.wantCall {
+				t.Fatalf("flock called %d times, want %d", calls, tc.wantCall)
+			}
+			if release != nil {
+				if err := release(); err != nil {
+					t.Fatalf("releasing: %v", err)
+				}
+			}
+		})
+	}
 }
 
 // TestWorkspaceFlockExcludes is the production lock: a real flock on a file under
