@@ -150,6 +150,39 @@ func TestTownStateBackupRedactLogsOnACleanTick(t *testing.T) {
 	}
 }
 
+// TestTownStateBackupRedactCleanFailureKeepsTheError: a failing tick whose
+// snapshot carried no credential returns the tick's own error, with no note
+// appended to the alert text.
+func TestTownStateBackupRedactCleanFailureKeepsTheError(t *testing.T) {
+	t.Parallel()
+	d, _, town := townStateDaemon(t)
+	rec := notifyfake.New()
+	d.notifier = rec
+	tree := townStateRedactTree()
+	tree["settings/config.json"] = &fstest.MapFile{Data: []byte(`{"model":"m"}`)}
+	delete(tree, "settings/themes/notes.txt")
+	d.townStateFS = func(string) fs.FS { return tree }
+	gitRepo := filepath.Join(town, ".dolt-archive", "git")
+	if err := os.MkdirAll(gitRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initEmptyGitRepo(t, d, gitRepo)
+
+	d.syncTownStateBackup()
+
+	escalations := rec.Escalations()
+	if len(escalations) != 1 {
+		t.Fatalf("escalations = %d, want one (the push failure)", len(escalations))
+	}
+	reason := escalations[0].Escalation.Reason
+	if strings.Contains(reason, "redacted") || strings.Contains(reason, "refused") {
+		t.Errorf("alert text = %q, want no credential note on a clean snapshot", reason)
+	}
+	if !strings.Contains(reason, "origin") {
+		t.Errorf("alert text = %q, want the push failure itself", reason)
+	}
+}
+
 // TestTownStateBackupRedactLogAndAlertHoldNoValue drives a whole tick that
 // redacts one file and refuses another and then fails at the push, so the log
 // and the alert text both exist. Neither, and no stored byte, holds the value;
