@@ -23,8 +23,8 @@ import (
 	"unicode/utf8"
 )
 
-// landingHoldName is the file at the town root the daemon reads.
-const landingHoldName = "landing.hold"
+// LandingHoldName is the file at the town root the daemon reads.
+const LandingHoldName = "landing.hold"
 
 // reasonMax is the most characters a reason may carry. The daemon cuts the
 // reason at the same bound, so a longer one would be shown shortened.
@@ -74,6 +74,36 @@ type Hold struct {
 
 	store    HoldStore
 	released bool
+}
+
+// HoldState is what the landing.hold file is now: absent, this hold's, another's,
+// or malformed. The zero value is no state, so an error's zero HoldView is not HoldMissing.
+type HoldState int
+
+const HoldMissing, HoldOwn, HoldOther, HoldMalformed HoldState = 1, 2, 3, 4
+
+// HoldView is whose hold the file is now, with another holder's owner and reason.
+type HoldView struct {
+	State         HoldState
+	Owner, Reason string
+}
+
+// Inspect reports whose hold the landing.hold file is now, from one read of the store.
+func (h *Hold) Inspect(ctx context.Context) (HoldView, error) {
+	content, present, err := h.store.Read(ctx)
+	if err != nil {
+		return HoldView{}, fmt.Errorf("runnerroll: reading the landing hold: %w", err)
+	}
+	first, second := splitHold(content)
+	switch {
+	case !present:
+		return HoldView{State: HoldMissing}, nil
+	case carriesToken(content, h.Token):
+		return HoldView{State: HoldOwn}, nil
+	case !wellFormed(content):
+		return HoldView{State: HoldMalformed, Reason: first}, nil
+	}
+	return HoldView{State: HoldOther, Owner: ownerOf(second), Reason: first}, nil
 }
 
 // Take holds the landing for owner, with reason as the first line, at now. When
@@ -288,7 +318,7 @@ func NewPodStore(townRoot string, run Runner) (HoldStore, error) {
 	if run == nil {
 		return nil, errors.New("runnerroll: no runner to reach the pod with")
 	}
-	return &podStore{run: run, path: path.Join(townRoot, landingHoldName)}, nil
+	return &podStore{run: run, path: path.Join(townRoot, LandingHoldName)}, nil
 }
 
 // createScript writes stdin to a temp file beside $1, then publishes it with ln,

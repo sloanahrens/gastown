@@ -13,10 +13,13 @@ var fixedNow = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 
 // fakeStore is an in-memory HoldStore. Create is exclusive, as the real one is.
 // writes counts the Creates that wrote, so a test can see a refused take wrote nothing.
+// reads counts the Reads; later is what each Read after the first returns.
 type fakeStore struct {
 	content   string
+	later     string
 	present   bool
 	creates   int
+	reads     int
 	writes    int
 	removes   int
 	createErr error
@@ -38,8 +41,12 @@ func (s *fakeStore) Create(_ context.Context, content string) error {
 }
 
 func (s *fakeStore) Read(_ context.Context) (string, bool, error) {
+	s.reads++
 	if s.readErr != nil {
 		return "", false, s.readErr
+	}
+	if s.reads > 1 && s.later != "" {
+		return s.later, true, nil
 	}
 	return s.content, s.present, nil
 }
@@ -563,6 +570,59 @@ func TestHoldPodStoreRemoveReturnsRunnerErrors(t *testing.T) {
 	r := &fakeRunner{err: errors.New("kubectl: exit 1")}
 	if err := newPodStore(t, r).Remove(context.Background()); err == nil {
 		t.Fatal("Remove with a failing runner returned nil, want the error")
+	}
+}
+
+// TestHoldInspectClassifiesTheFile: Inspect reports each state, another holder's
+// owner and reason, a zero view with its read error, and writes nothing.
+func TestHoldInspectClassifiesTheFile(t *testing.T) {
+	t.Parallel()
+	const own = "roll 1/5\nowner=roll-a token=tok-1 at=2026-11-19T12:00:00Z"
+	const other = "overseer pause\nowner=ops token=tok-2 at=2026-11-19T13:00:00Z"
+	cases := map[string]struct {
+		content string
+		present bool
+		readErr error
+		want    HoldView
+	}{
+		"missing":             {"", false, nil, HoldView{State: HoldMissing}},
+		"own":                 {own, true, nil, HoldView{State: HoldOwn}},
+		"another's":           {other, true, nil, HoldView{State: HoldOther, Owner: "ops", Reason: "overseer pause"}},
+		"malformed":           {"overseer pause\nowner=ops at=x", true, nil, HoldView{State: HoldMalformed, Reason: "overseer pause"}},
+		"token on third line": {other + "\ntoken=tok-1", true, nil, HoldView{State: HoldOther, Owner: "ops", Reason: "overseer pause"}},
+		"read error":          {"", false, errors.New("io"), HoldView{}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			store := &fakeStore{content: tc.content, present: tc.present, readErr: tc.readErr}
+			got, err := (&Hold{Token: "tok-1", store: store}).Inspect(context.Background())
+			if got != tc.want || (err != nil) != (tc.readErr != nil) || store.writes != 0 || store.removes != 0 {
+				t.Fatalf("Inspect = (%+v, %v), want %+v with read error %v; writes %d, removes %d", got, err, tc.want, tc.readErr != nil, store.writes, store.removes)
+			}
+		})
+	}
+}
+
+// TestHoldInspectReadsOnce: a writer that replaces the file between two reads cannot
+// make Inspect's answer disagree with itself, because it reads once.
+func TestHoldInspectReadsOnce(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{content: "roll 1/5\nowner=roll-a token=tok-1 at=x", present: true, later: "overseer pause\nowner=ops token=tok-2 at=x"}
+	got, err := (&Hold{Token: "tok-1", store: store}).Inspect(context.Background())
+	if err != nil || got.State != HoldOwn {
+		t.Fatalf("Inspect = (%+v, %v), want HoldOwn", got, err)
+	}
+	if store.reads != 1 {
+		t.Fatalf("store reads = %d, want exactly one", store.reads)
+	}
+}
+
+// TestHoldLandingHoldName: the hold file has one exported name, and the pod store's path ends with it.
+func TestHoldLandingHoldName(t *testing.T) {
+	t.Parallel()
+	if path := newPodStore(t, &fakeRunner{}).(*podStore).path; LandingHoldName != "landing.hold" || !strings.HasSuffix(path, LandingHoldName) {
+		t.Fatalf("LandingHoldName = %q, pod store path %q; want landing.hold as its suffix", LandingHoldName, path)
 	}
 }
 

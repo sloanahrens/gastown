@@ -41,8 +41,8 @@ func integrationStore(t *testing.T) (HoldStore, string) {
 func assertOnlyHold(t *testing.T, dir string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != landingHoldName {
-		t.Fatalf("town root = %v (%v), want only %s", entries, err, landingHoldName)
+	if err != nil || len(entries) != 1 || entries[0].Name() != LandingHoldName {
+		t.Fatalf("town root = %v (%v), want only %s", entries, err, LandingHoldName)
 	}
 }
 
