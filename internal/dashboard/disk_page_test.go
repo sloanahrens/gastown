@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -51,7 +52,7 @@ func TestDiskBlockDrawsEveryStateItCanRead(t *testing.T) {
 		`box.append(el("div", "empty", "reading the disk samples…"))`,
 		`if (r.err) { box.append(el("div", "empty", r.name + " disk: could not read its samples")); continue; }`,
 		`if (r.no_samples) { box.append(el("div", "empty", r.name + " disk: no samples yet")); continue; }`,
-		`r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB)"`,
+		`r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB), " + diskGrowthText(r)`,
 	} {
 		if !strings.Contains(draw, want) {
 			t.Errorf("renderDisk has no %q", want)
@@ -74,7 +75,9 @@ func TestDiskBlockDrawsTheShareLine(t *testing.T) {
 	}})
 
 	line := dom.descend(t, "disk", 0)
-	if want := "control disk 82% used (410.0 of 500.0 GiB)"; line.Text != want {
+	// The payload carries no growth flags, so the line words the growth as the
+	// fit it has not got rather than inventing one beside the share.
+	if want := "control disk 82% used (410.0 of 500.0 GiB), growth: not enough samples yet"; line.Text != want {
 		t.Errorf("the row draws %q, want %q", line.Text, want)
 	}
 	if line.Class != "" {
@@ -184,5 +187,186 @@ func TestDiskBlockIsDrawnWhereverDeploysIs(t *testing.T) {
 	tick := page[strings.Index(page, "setInterval("):]
 	if !strings.Contains(tick, "renderDisk(state)") {
 		t.Error("the 15 s tick does not redraw the Disk block")
+	}
+}
+
+// diskRow builds the row the server would send for name, with the growth the
+// reader fitted beside the share.
+func diskRow(name string, used, total int64, pct int, growth map[string]any) map[string]any {
+	row := map[string]any{"name": name, "used_bytes": used, "total_bytes": total, "used_pct": pct}
+	for k, v := range growth {
+		row[k] = v
+	}
+	return row
+}
+
+// The line a reader makes of a steady ring is golden end to end: the ring grows
+// a GiB an hour all week, which is 24 GiB a day in both windows, and 268 of 500
+// GiB used at 24 a day leaves 9. The row reaches the page through the payload's
+// JSON, the way the hub hands it over.
+func TestDiskGrowthLineOfASteadyRing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	diskHourlyRing(t, dir, "control", func(k int) int64 { return (int64(100) + int64(k)) << 30 })
+	raw, err := json.Marshal(ReadDisk(dir, diskNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var disk map[string]any
+	if err := json.Unmarshal(raw, &disk); err != nil {
+		t.Fatal(err)
+	}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderDisk", map[string]any{"disk": disk})
+	want := "control disk 54% used (268.0 of 500.0 GiB), +24.0 GiB/day (24h), +24.0 GiB/day (7d), about 9 days left"
+	if got := dom.descend(t, "disk", 0).Text; got != want {
+		t.Errorf("the row draws %q, want %q", got, want)
+	}
+}
+
+// The growth the reader fitted is the line's tail, goldened over every state
+// the reader can send: a steady ring shows both rates and the days left, a ring
+// with too few samples says so, a missing ring has no share to grow, a flat
+// disk says it has no growth, a disk more than 90 days away stops counting, and
+// a window that lost space is drawn with its own sign.
+func TestDiskGrowthLineDrawsEveryState(t *testing.T) {
+	t.Parallel()
+
+	const gib = int64(1) << 30
+	cases := []struct {
+		name string
+		row  map[string]any
+		want string
+	}{
+		{
+			name: "steady growth",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": 3.0, "gib_per_day_7d": 2.9, "days_left": 31.03,
+				"growth_ok": true, "days_left_ok": true,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), +3.0 GiB/day (24h), +2.9 GiB/day (7d), about 31 days left",
+		},
+		{
+			name: "too few samples",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"growth_ok": false, "days_left_ok": false,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), growth: not enough samples yet",
+		},
+		{
+			name: "missing ring",
+			row:  map[string]any{"name": "control", "used_pct": 0, "no_samples": true},
+			want: "control disk: no samples yet",
+		},
+		{
+			name: "flat disk",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": 0.0, "gib_per_day_7d": 0.0, "days_left": 0.0,
+				"growth_ok": true, "days_left_ok": false,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), no growth",
+		},
+		{
+			name: "over ninety days",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": 1.2, "gib_per_day_7d": 1.0, "days_left": 120.5,
+				"growth_ok": true, "days_left_ok": true,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), +1.2 GiB/day (24h), +1.0 GiB/day (7d), about 90+ days left",
+		},
+		{
+			name: "exactly ninety days",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": 1.2, "gib_per_day_7d": 1.0, "days_left": 90.0,
+				"growth_ok": true, "days_left_ok": true,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), +1.2 GiB/day (24h), +1.0 GiB/day (7d), about 90 days left",
+		},
+		{
+			name: "a day short of ten",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": 1.2, "gib_per_day_7d": 1.0, "days_left": 9.8,
+				"growth_ok": true, "days_left_ok": true,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), +1.2 GiB/day (24h), +1.0 GiB/day (7d), about 9 days left",
+		},
+		{
+			name: "the day lost space",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": -0.4, "gib_per_day_7d": 1.5, "days_left": 40.0,
+				"growth_ok": true, "days_left_ok": true,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), -0.4 GiB/day (24h), +1.5 GiB/day (7d), about 40 days left",
+		},
+		{
+			name: "a day that rounds to zero",
+			row: diskRow("control", 410*gib, 500*gib, 82, map[string]any{
+				"gib_per_day_24h": -0.04, "gib_per_day_7d": 1.5, "days_left": 40.0,
+				"growth_ok": true, "days_left_ok": true,
+			}),
+			want: "control disk 82% used (410.0 of 500.0 GiB), +0.0 GiB/day (24h), +1.5 GiB/day (7d), about 40 days left",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderDisk", map[string]any{"disk": map[string]any{"rows": []any{tc.row}}})
+			if got := dom.descend(t, "disk", 0).Text; got != tc.want {
+				t.Errorf("the row draws %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A disk with under a week left is warned on its days left even below the hot
+// share, and one with a week or more is not; a row with no projection has no
+// days left to warn on, so its zero value must stay plain rather than read as
+// "0 days left".
+func TestDiskGrowthWarnsUnderSevenDaysLeft(t *testing.T) {
+	t.Parallel()
+
+	const gib = int64(1) << 30
+	cases := []struct {
+		name    string
+		growth  map[string]any
+		wantCls string
+	}{
+		{
+			name:    "under seven days",
+			growth:  map[string]any{"gib_per_day_24h": 3.0, "gib_per_day_7d": 2.9, "days_left": 6.9, "growth_ok": true, "days_left_ok": true},
+			wantCls: "warnc",
+		},
+		{
+			name:    "exactly seven days",
+			growth:  map[string]any{"gib_per_day_24h": 3.0, "gib_per_day_7d": 2.9, "days_left": 7.0, "growth_ok": true, "days_left_ok": true},
+			wantCls: "",
+		},
+		{
+			name:    "longer than seven days",
+			growth:  map[string]any{"gib_per_day_24h": 3.0, "gib_per_day_7d": 2.9, "days_left": 40.0, "growth_ok": true, "days_left_ok": true},
+			wantCls: "",
+		},
+		{
+			name:    "no projection",
+			growth:  map[string]any{"gib_per_day_24h": 0.0, "gib_per_day_7d": 0.0, "days_left": 0.0, "growth_ok": true, "days_left_ok": false},
+			wantCls: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderDisk", map[string]any{"disk": map[string]any{"rows": []any{
+				diskRow("control", 410*gib, 500*gib, 82, tc.growth),
+			}}})
+			if got := dom.descend(t, "disk", 0).Class; got != tc.wantCls {
+				t.Errorf("the row wears %q, want %q", got, tc.wantCls)
+			}
+		})
 	}
 }
