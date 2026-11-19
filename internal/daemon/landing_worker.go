@@ -687,6 +687,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if rigFollowupsEnabled(rigPath) {
 		lander.Followups = followupBeads{client: bd}
 		lander.FollowupBackpressure = rigFollowupBackpressure(rigPath)
+		applyFollowupPolicy(lander)
 		// The backpressure holds findings back silently otherwise, so the day
 		// it does, the loss reaches a human as a low attention item (gt-4ty22).
 		lander.FollowupAlert = d.followupBackpressureAlert(rigName)
