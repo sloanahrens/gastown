@@ -1114,8 +1114,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		// NoEscalate is set when an earlier block of the refusal's lane already
 		// escalated the loop, so the operator is not alerted again (gt-dtx3ht).
 		if w.shouldEscalate(work, rej) {
-			w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for the overseer (%s): %s",
-				work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
+			w.escalate(work.BeadID, escalationText(work, rej))
 		}
 		if rej.RecordErr != nil {
 			w.closeFailureRun(work.BeadID)
@@ -1359,6 +1358,27 @@ func reworkMessage(rej *land.Rejection) string {
 func humanMessage(rej *land.Rejection) string {
 	return rejectionComment(rej, fmt.Sprintf("Landing rejected (%s) and escalated to a human, not reworked again: %s.",
 		rej.Kind, land.NoteField(rej.Reason)))
+}
+
+// maxEscalationFindings caps the findings an escalation carries (gt-yo36hx).
+const maxEscalationFindings = 6
+
+// escalationText is the alarm for a rejection left for a human: the lane and
+// its findings, so the overseer need not open the branch (gt-yo36hx).
+func escalationText(work land.Work, rej *land.Rejection) string {
+	text := fmt.Sprintf("Landing of %s (%s @ %s) left for the overseer (%s): %s; lane %s",
+		work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason), land.NoteField(land.LaneOf(work.Branch)))
+	for i, f := range rej.Findings {
+		if i == maxEscalationFindings {
+			return text + fmt.Sprintf("; %d finding(s) left out", len(rej.Findings)-i)
+		}
+		loc := f.Path
+		if f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", f.Path, f.Line)
+		}
+		text += fmt.Sprintf("; %s %s %s", land.NoteField(f.Severity), land.NoteField(loc), land.NoteField(f.Title))
+	}
+	return text
 }
 
 // rejectionComment appends an om rejection's verdict word, score, summary and
