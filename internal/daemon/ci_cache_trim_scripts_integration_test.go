@@ -521,6 +521,65 @@ func TestIntegrationCICacheTrimLRUStrictOrder(t *testing.T) {
 	}
 }
 
+// TestIntegrationCICacheTrimLRUNoOvershoot: the cut stops at the file that
+// covers the excess. The window is 540 minutes wide, the floor to the age, and
+// its two oldest candidates are 2 minutes apart and both inside the age: the
+// older covers the excess of 256 KiB on its own, so it is the only file
+// selected. A program that takes the file after the one that covers the excess
+// selects the second of the pair too, and this test goes red.
+func TestIntegrationCICacheTrimLRUNoOvershoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	now := time.Now()
+	ciCacheLRUTreeWrite(t, root, now)
+
+	// The shared tree's candidates span 90 minutes, so this case adds the pair it
+	// needs: 2 minutes apart, with the older file covering the excess, and 410
+	// minutes above the tree's newest candidate, so the candidates span more than
+	// 240 minutes.
+	for _, f := range []struct {
+		path   string
+		ageMin int
+	}{
+		{path: filepath.Join("ab", "lru-500m"), ageMin: 500},
+		{path: filepath.Join("ab", "lru-498m"), ageMin: 498},
+	} {
+		full := filepath.Join(root, f.path)
+		if err := os.WriteFile(full, bytes.Repeat([]byte{'x'}, 256*1024), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", f.path, err)
+		}
+		mtime := now.Add(-time.Duration(f.ageMin) * time.Minute)
+		if err := os.Chtimes(full, mtime, mtime); err != nil {
+			t.Fatalf("dating %s: %v", f.path, err)
+		}
+	}
+	before := ciCacheScriptFiles(t, root)
+
+	// The excess is one file's size, measured the way the program measures the
+	// volume, so the older of the pair covers it exactly.
+	const excessKiB = 256
+	capKiB := ciCacheLRUBefore(t, root) - excessKiB
+
+	stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "600", strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+	if status != 0 {
+		t.Fatalf("the LRU program exited %d: %s", status, stderr)
+	}
+	files, reply := ciCacheLRURead(t, stdout)
+	want := ciCacheLRUPaths(root, "ab/lru-500m")
+	if !slices.Equal(files, want) {
+		t.Errorf("selected %v, want only %v: the excess of %d KiB is the file's, so the file after it is not selected", files, want, excessKiB)
+	}
+	if reply.removed != 1 {
+		t.Errorf("removed = %d, want 1", reply.removed)
+	}
+	if reply.afterKiB != reply.beforeKiB {
+		t.Errorf("list reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+	}
+	if after := ciCacheScriptFiles(t, root); !slices.Equal(after, before) {
+		t.Errorf("the list removed files: %v, before %v", after, before)
+	}
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh
