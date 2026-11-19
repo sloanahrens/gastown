@@ -25,8 +25,8 @@ const (
 	nodeDiskRecordFile = "node_disk.json"
 
 	// nodeDiskSandboxKey is the record's entry for the sandbox cluster's data
-	// disk. It names no node: the reading is the busiest node's share, not one
-	// node's own (gt-cya9c0).
+	// disk (gt-cya9c0); what the entry holds is said at the call in
+	// diskMaintenancePass.
 	nodeDiskSandboxKey = "sandbox"
 )
 
@@ -112,15 +112,15 @@ func recordNodeDisk(townRoot string, entries map[string]nodeDiskEntry) error {
 }
 
 // recordSandboxDiskReading writes one pass's sandbox cluster disk reading into
-// the town's node disk record under nodeDiskSandboxKey (gt-cya9c0). The reading
-// is the busiest node's share, so a cluster with several nodes hides the others:
-// the entry names no node and keeps no byte counts, only the whole-percent share
-// and when it was read. A reading that carries Err keeps the entry the file
-// already holds and adds the error and its time.
+// the town's node disk record under nodeDiskSandboxKey (gt-cya9c0): the share
+// rounded to a whole number and when it was read, and no byte counts, or, for a
+// reading that carries Err, the error and its time against the entry the file
+// already holds. What the share represents is said at its call in
+// diskMaintenancePass.
 //
 // A write that fails is logged once and changes no alert, keep or plan: the pass
 // decides on the readings it took, not on the record.
-func (d *Daemon) recordSandboxDiskReading(readings []disks.Reading, now time.Time) {
+func (s diskMaintSeams) recordSandboxDiskReading(townRoot string, readings []disks.Reading, now time.Time, logf func(format string, args ...any)) {
 	for _, r := range readings {
 		if r.Name != diskMaintDiskColima {
 			continue
@@ -129,8 +129,8 @@ func (d *Daemon) recordSandboxDiskReading(readings []disks.Reading, now time.Tim
 		if r.Err != nil {
 			entry = nodeDiskEntry{Err: r.Err.Error(), ErrAt: now}
 		}
-		if err := recordNodeDisk(d.config.TownRoot, map[string]nodeDiskEntry{nodeDiskSandboxKey: entry}); err != nil {
-			d.logger.Printf("sandbox disk: the reading was not recorded (%v)", err)
+		if err := s.recordNodeDisk(townRoot, map[string]nodeDiskEntry{nodeDiskSandboxKey: entry}); err != nil {
+			logf("sandbox disk: the reading was not recorded (%v)", err)
 		}
 		return
 	}

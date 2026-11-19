@@ -260,8 +260,7 @@ func (d *Daemon) diskMaintDF(name string, args ...string) DFReader {
 // diskMaintenanceReadings reads every watched disk once, through the injected
 // reader a disk has in tests and its own command otherwise. A probe-backed disk
 // is read from the host agent's file. A failed read or output the disk's parser
-// refuses becomes that disk's reading error. The sandbox disk's reading is then
-// recorded beside the control node's (gt-cya9c0).
+// refuses becomes that disk's reading error.
 func (d *Daemon) diskMaintenanceReadings(ctx context.Context, now time.Time, injected map[string]DFReader, kubeconfig string) []disks.Reading {
 	watched := d.diskMaintDisks(kubeconfig)
 	host, hostErr := d.diskMaintHostReadings(watched, injected, now)
@@ -285,10 +284,6 @@ func (d *Daemon) diskMaintenanceReadings(ctx context.Context, now time.Time, inj
 		}
 		readings = append(readings, readDF(ctx, disk, disk.df))
 	}
-	// The sandbox reading is the highest-used node's share (diskMaintSandboxDisk
-	// returns the busiest node's summary), so a cluster with several nodes hides
-	// the others' figures in the record this pass leaves (gt-cya9c0).
-	d.recordSandboxDiskReading(readings, now)
 	return readings
 }
 

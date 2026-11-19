@@ -157,6 +157,9 @@ type diskMaintSeams struct {
 	// jobLedger returns the ledger a maintenance job appends its run to; nil is
 	// the town's ledger under <town>/.runtime/jobs.
 	jobLedger func() (jobRunAppender, error)
+	// recordNodeDisk writes a pass's node disk entries into the town's record;
+	// nil is recordNodeDisk against the town root.
+	recordNodeDisk func(townRoot string, entries map[string]nodeDiskEntry) error
 }
 
 // jobRunAppender appends one maintenance job run to the ledger. It is an
@@ -221,6 +224,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 		s.jobLedger = func() (jobRunAppender, error) {
 			return jobledger.NewLedger(d.config.TownRoot)
 		}
+	}
+	if s.recordNodeDisk == nil {
+		s.recordNodeDisk = recordNodeDisk
 	}
 	return s
 }
@@ -878,6 +884,12 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	if !ok {
 		return // the pass ended before its turn; the targets stay due
 	}
+	// The sandbox entry is the busiest node's share: diskMaintSandboxDisk takes
+	// the highest-used node of the cluster, so a cluster with several nodes hides
+	// the others, and the record names no node (gt-cya9c0). It is written here,
+	// once after the pass has taken its readings, not in the read seam the early
+	// cache-trim tick shares.
+	s.recordSandboxDiskReading(d.config.TownRoot, readings, now, d.logger.Printf)
 
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run

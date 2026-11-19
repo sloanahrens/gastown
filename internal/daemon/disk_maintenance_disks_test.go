@@ -936,18 +936,17 @@ func TestDiskMaintRecordsSandboxDiskWriteFailure(t *testing.T) {
 			"docker-desktop": healthy,
 		}
 		if unwritable {
-			// Only the record's directory is unwritable: the growth rings live in
-			// their own directory and still record, so the one line is the record's.
-			jobs := filepath.Join(d.config.TownRoot, ".runtime", "jobs")
-			if err := os.MkdirAll(jobs, 0o755); err != nil {
+			// A regular file where the record's directory belongs: the record's
+			// path cannot be created for any user, root or not. The growth rings
+			// live in their own directory and still record, so the one line is
+			// the record's.
+			runtime := filepath.Join(d.config.TownRoot, ".runtime")
+			if err := os.MkdirAll(runtime, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
-			if err := os.Chmod(jobs, 0o555); err != nil {
+			if err := os.WriteFile(filepath.Join(runtime, "jobs"), nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			//testpolicy:allow no-exec-files — the target is the fixture directory: restores its write bit for t.TempDir cleanup
-			t.Cleanup(func() { _ = os.Chmod(jobs, 0o755) })
 		}
 		d.runDiskMaintenance()
 		return f, logs.String()
@@ -986,6 +985,57 @@ func TestDiskMaintRecordsSandboxDiskWriteFailure(t *testing.T) {
 	if !slices.Equal(kept, logLines(writableLogs)) {
 		t.Errorf("log with an unwritable record = %q, want the writable town's lines plus the record's: %q",
 			brokenLogs, writableLogs)
+	}
+}
+
+// TestDiskMaintRecordsSandboxDiskOncePerPass: one patrol pass writes the sandbox
+// entry once, and a later early cache-trim tick, whose read goes through the same
+// read seam the pass uses, writes it no more.
+func TestDiskMaintRecordsSandboxDiskOncePerPass(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	writes := 0
+	d.diskMaint.recordNodeDisk = func(string, map[string]nodeDiskEntry) error {
+		writes++
+		return nil
+	}
+	trims := countCacheTrims(d)
+	d.diskMaint.readDisks = nil // the production read, with these df readings
+	reads := 0
+	healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
+	d.diskMaint.dfReaders = map[string]DFReader{
+		"mac": healthy,
+		"colima": func(context.Context) ([]byte, error) {
+			reads++
+			return []byte(diskMaintNodeStats(129000)), nil
+		},
+		"docker-desktop": healthy,
+	}
+	// 12:45, outside the window: the cache trim has never run, so the first tick
+	// dispatches a patrol pass. The sandbox disk at 81 percent is over the early
+	// check's default 75, so the second tick's early check reads it.
+	now := diskMaintNow.Add(8 * time.Hour)
+	d.diskMaint.now = func() time.Time { return now }
+
+	d.runDiskMaintenance()
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times on the first tick, want 1: a trim that never ran is due", *trims)
+	}
+	if writes != 1 {
+		t.Fatalf("sandbox record written %d times by one patrol pass, want 1", writes)
+	}
+
+	now = now.Add(20 * time.Minute) // 13:05: over the gap, so the early check reads
+	before := reads
+	d.runDiskMaintenance()
+	if reads == before {
+		t.Fatalf("disk read %d times by the early tick, want more than none: the fixture must exercise the shared read", reads-before)
+	}
+	if *trims != 2 {
+		t.Fatalf("trimmed %d times at the early tick, want 2: the early check runs the trim", *trims)
+	}
+	if writes != 1 {
+		t.Errorf("sandbox record written %d times after the early tick's read, want still 1", writes)
 	}
 }
 
