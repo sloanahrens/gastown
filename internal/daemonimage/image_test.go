@@ -667,6 +667,169 @@ func TestDaemonDockerfileCopiesTheClaudeCLIAndNothingFetchesIt(t *testing.T) {
 	}
 }
 
+// imageSlimPinnedCopies are the Dockerfile's COPY sources a version pin fixes,
+// so their bytes are the same in every build (gt-5u0nps): a file the deployer
+// fetches and verifies by sha256, the Dolt client from the dolt stage, or a
+// binary built from a pinned commit rather than the gastown commit. The image
+// copies them before the files built from the commit, so a build whose commit
+// moved keeps their layers.
+var imageSlimPinnedCopies = append(append([]string{
+	KnownHostsName,
+	"/usr/local/bin/dolt",
+	claudeCLIName,
+	mangoDir + "/mango",
+	mangoDir + "/mango.sha",
+	"bd",
+	"om",
+	CloudCheckAppsName,
+}, toolNames...), ClientToolNames()...)
+
+// imageSlimBuiltCopies are the Dockerfile's COPY sources built from the gastown
+// commit itself, so their bytes move with every commit.
+var imageSlimBuiltCopies = func() []string {
+	srcs := []string{"gt", "gt-wrap", "trackerd", "trackerbackup"}
+	for _, p := range pluginCopies() {
+		srcs = append(srcs, p.src)
+	}
+	return srcs
+}()
+
+// TestDaemonImageSlimDaemonOrder: every COPY of an artifact a pin fixes comes
+// before the first COPY of a file built from the gastown commit, so a commit
+// that moves invalidates only the layers below it (gt-5u0nps). A pinned COPY
+// moved below gt fails here, because its layer would be rebuilt and re-pushed
+// on every build.
+func TestDaemonImageSlimDaemonOrder(t *testing.T) {
+	t.Parallel()
+	pinned := map[string]bool{}
+	for _, src := range imageSlimPinnedCopies {
+		pinned[src] = true
+	}
+	built := map[string]bool{}
+	for _, src := range imageSlimBuiltCopies {
+		built[src] = true
+	}
+	ins := dockerfileInstructions(t, readDockerfile(t))
+	copyAt := map[string]int{}
+	for i, in := range ins {
+		if in.cmd != "COPY" {
+			continue
+		}
+		_, src, _ := copyOperands(in.args)
+		if _, seen := copyAt[src]; !seen {
+			copyAt[src] = i
+		}
+		switch {
+		case pinned[src] && built[src]:
+			t.Errorf("%s holds %s in both imageSlimPinnedCopies and imageSlimBuiltCopies", DockerfilePath, src)
+		case pinned[src], built[src]:
+		default:
+			t.Errorf("%s COPY %q reads %q, which neither imageSlimPinnedCopies nor imageSlimBuiltCopies names; classify it by what a build changes", DockerfilePath, in.args, src)
+		}
+	}
+	firstBuilt, firstBuiltSrc := len(ins), ""
+	for _, src := range imageSlimBuiltCopies {
+		i, ok := copyAt[src]
+		if !ok {
+			t.Errorf("%s COPYs no file named %s, one of the files built from the commit", DockerfilePath, src)
+			continue
+		}
+		if i < firstBuilt {
+			firstBuilt, firstBuiltSrc = i, src
+		}
+	}
+	for _, src := range imageSlimPinnedCopies {
+		i, ok := copyAt[src]
+		if !ok {
+			t.Errorf("%s COPYs no file named %s, one of the pinned artifacts", DockerfilePath, src)
+			continue
+		}
+		if i > firstBuilt {
+			t.Errorf("%s COPYs the pinned %s at instruction %d, below %s at %d; every layer below %s is rebuilt and re-pushed whenever the commit moves", DockerfilePath, src, i, firstBuiltSrc, firstBuilt, firstBuiltSrc)
+		}
+	}
+}
+
+// copyTriple is one COPY of the Dockerfile from its build context: the mode its
+// --chmod flag writes ("" where it writes none), the source it reads and the
+// destination it writes in the image.
+type copyTriple struct{ mode, src, dst string }
+
+func (tr copyTriple) String() string {
+	mode := tr.mode
+	if mode == "" {
+		mode = "(none)"
+	}
+	return mode + " " + tr.src + " " + tr.dst
+}
+
+// TestDaemonDockerfileCopyTriples: the COPYs from the build context are exactly
+// the files the daemon image is specified by (gt-5u0nps), each at the same
+// --chmod mode and destination, in any order. A reorder that drops a file or
+// changes its mode or destination fails here.
+func TestDaemonDockerfileCopyTriples(t *testing.T) {
+	t.Parallel()
+	want := []copyTriple{
+		{"", KnownHostsName, "/etc/ssh/ssh_known_hosts"},
+		{"0755", claudeCLIName, "/usr/local/bin/claude"},
+		{"0755", "openshell", "/usr/local/bin/openshell"},
+		{"0755", "docker", "/usr/local/bin/docker"},
+		{"0755", "kubectl", "/usr/local/bin/kubectl"},
+		{"0755", mangoDir + "/mango", "/usr/local/lib/gt/mango/mango"},
+		{"0755", mangoDir + "/mango.sha", "/usr/local/lib/gt/mango/mango.sha"},
+		{"0755", "bd", "/usr/local/bin/bd.real"},
+		{"0755", "om", "/usr/local/bin/om"},
+		{"0755", "hm", "/usr/local/bin/hm"},
+		{"0755", "devops-reporter", "/usr/local/bin/devops-reporter"},
+		{"0755", "release-reporter", "/usr/local/bin/release-reporter"},
+		{"0755", "cloudcheck", "/usr/local/bin/cloudcheck"},
+		{"0644", CloudCheckAppsName, "/usr/local/bin/cloud-check.apps"},
+		{"0755", "gt", "/usr/local/bin/gt"},
+		{"0755", "gt-wrap", "/usr/local/bin/bd"},
+		{"0755", "trackerd", "/usr/local/bin/trackerd"},
+		{"0755", "trackerbackup", "/usr/local/bin/trackerbackup"},
+		{"0755", "plugins/app-promote/app-promote", "/usr/local/lib/gt/plugins/app-promote/app-promote"},
+		{"0755", "plugins/town-metrics/town-metrics", "/usr/local/lib/gt/plugins/town-metrics/town-metrics"},
+	}
+	var got []copyTriple
+	for _, in := range dockerfileInstructions(t, readDockerfile(t)) {
+		if in.cmd != "COPY" {
+			continue
+		}
+		from, src, dst := copyOperands(in.args)
+		if from != "" {
+			continue
+		}
+		if src == "" || dst == "" {
+			t.Errorf("%s has COPY %q, which is not one source and one destination", DockerfilePath, strings.Join(in.args, " "))
+			continue
+		}
+		got = append(got, copyTriple{mode: copyChmod(in.args), src: src, dst: dst})
+	}
+	render := func(triples []copyTriple) []string {
+		out := make([]string, 0, len(triples))
+		for _, tr := range triples {
+			out = append(out, tr.String())
+		}
+		slices.Sort(out)
+		return out
+	}
+	if got, want := render(got), render(want); !slices.Equal(got, want) {
+		t.Errorf("%s COPYs these files from its build context:\n%s\nwant:\n%s", DockerfilePath, strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// copyChmod returns the mode a COPY's --chmod flag writes, and "" for a COPY
+// that writes none.
+func copyChmod(args []string) string {
+	for _, arg := range args {
+		if mode, ok := strings.CutPrefix(arg, "--chmod="); ok {
+			return mode
+		}
+	}
+	return ""
+}
+
 // TestDaemonDockerfileHasNoRepeatedCommentLine: a comment block pasted twice is
 // left dangling above the next instruction, so no comment line may appear twice.
 // A bare "#" separator is exempt.

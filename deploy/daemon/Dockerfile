@@ -36,6 +36,12 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl git lsof openssh-client tmux tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# The COPYs below are in layer order, and that order follows what a build
+# changes (gt-5u0nps): every artifact a pin fixes first, the files built from the
+# gastown commit last, so a commit that moves reuses each pinned layer instead of
+# re-pushing it. TestDaemonImageSlimDaemonOrder holds the two groups apart in this
+# order, and TestDaemonDockerfileCopyTriples holds the set of files copied.
+
 # GitHub's host key, pinned in the system known_hosts that openssh-client reads.
 # The file is staged in the build context by BuildImage, the same way the
 # binaries are, because a COPY reads the context and nothing else. Host checking
@@ -47,18 +53,14 @@ COPY ssh_known_hosts /etc/ssh/ssh_known_hosts
 # directory is ever in this image.
 COPY --from=dolt /usr/local/bin/dolt /usr/local/bin/dolt
 
-# The town's binaries, cross-compiled at the rev the image is tagged with. The
-# COPY sources are entries of the build context, which BuildImage sets to the
-# output directory BuildBinaries wrote them to.
-COPY --chmod=0755 gt /usr/local/bin/gt
-# The bd a caller in the pod runs: before changing either path, read
-# docs/architecture.md, which owns the layout, and internal/gtwrap/forwarder.go,
-# which resolves bd.real beside the wrapper (gt-p4xncz).
-COPY --chmod=0755 gt-wrap /usr/local/bin/bd
+# bd and om, built from their own pins rather than from this image's commit
+# (BuildBinaries resolves BDSrc and OMSrc), so their layers survive a commit
+# moving. bd is the binary a caller in the pod runs: before changing either path,
+# read docs/architecture.md, which owns the layout, and
+# internal/gtwrap/forwarder.go, which resolves bd.real beside the wrapper the
+# image installs as bd (gt-p4xncz).
 COPY --chmod=0755 bd /usr/local/bin/bd.real
 COPY --chmod=0755 om /usr/local/bin/om
-COPY --chmod=0755 trackerd /usr/local/bin/trackerd
-COPY --chmod=0755 trackerbackup /usr/local/bin/trackerbackup
 
 # hm, the two devops reporters and the devops cloud check, cross-compiled for
 # linux/arm64 by BuildTools from the commits the deployer pins. They sit in
@@ -70,13 +72,6 @@ COPY --chmod=0755 devops-reporter /usr/local/bin/devops-reporter
 COPY --chmod=0755 release-reporter /usr/local/bin/release-reporter
 COPY --chmod=0755 cloudcheck /usr/local/bin/cloudcheck
 COPY --chmod=0644 cloud-check.apps /usr/local/bin/cloud-check.apps
-
-# The plugins the container daemon runs itself, cross-compiled for linux/arm64
-# from the same rev as the binaries above: the town's plugin directories hold
-# macOS builds the container cannot exec. polecat-image and hm-sync run only on
-# the host, so they are not shipped here.
-COPY --chmod=0755 plugins/app-promote/app-promote /usr/local/lib/gt/plugins/app-promote/app-promote
-COPY --chmod=0755 plugins/town-metrics/town-metrics /usr/local/lib/gt/plugins/town-metrics/town-metrics
 
 # mango and the commit it was built from. mango's go-api links DuckDB through
 # cgo, so BuildMango compiles it for linux/arm64 in a golang:1.27-bookworm
@@ -98,6 +93,24 @@ COPY --chmod=0755 claude /usr/local/bin/claude
 COPY --chmod=0755 openshell /usr/local/bin/openshell
 COPY --chmod=0755 docker /usr/local/bin/docker
 COPY --chmod=0755 kubectl /usr/local/bin/kubectl
+
+# The files built from the gastown commit itself, cross-compiled at the rev the
+# image is tagged with and so the last COPYs in this file. The COPY sources are
+# entries of the build context, which BuildImage sets to the output directory
+# BuildBinaries wrote them to.
+COPY --chmod=0755 gt /usr/local/bin/gt
+# The forwarder the pod's bd calls reach, installed as bd: the layout note above
+# bd.real owns the pair (gt-p4xncz).
+COPY --chmod=0755 gt-wrap /usr/local/bin/bd
+COPY --chmod=0755 trackerd /usr/local/bin/trackerd
+COPY --chmod=0755 trackerbackup /usr/local/bin/trackerbackup
+
+# The plugins the container daemon runs itself, cross-compiled for linux/arm64
+# from the same rev as the binaries above: the town's plugin directories hold
+# macOS builds the container cannot exec. polecat-image and hm-sync run only on
+# the host, so they are not shipped here.
+COPY --chmod=0755 plugins/app-promote/app-promote /usr/local/lib/gt/plugins/app-promote/app-promote
+COPY --chmod=0755 plugins/town-metrics/town-metrics /usr/local/lib/gt/plugins/town-metrics/town-metrics
 
 # The scratch town's first start runs a dolt preflight that copies git's global
 # user.name and user.email into dolt's config, and fails the install without them
