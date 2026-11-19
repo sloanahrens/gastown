@@ -1,6 +1,7 @@
 package tiersweep
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,6 +14,38 @@ import (
 
 	"github.com/steveyegge/gastown/internal/buildflags"
 )
+
+// binFromBuild is the -o path of a recorded go build call.
+func binFromBuild(t *testing.T, c tierCall) string {
+	t.Helper()
+	for i, a := range c.argv {
+		if a == "-o" && i+1 < len(c.argv) {
+			return c.argv[i+1]
+		}
+	}
+	t.Fatalf("go build argv = %v, want one naming an -o path", c.argv)
+	return ""
+}
+
+// buildGTLines is the stderr lines that report the gt build.
+func buildGTLines(stderr string) []string {
+	var lines []string
+	for _, l := range strings.Split(stderr, "\n") {
+		if strings.Contains(l, "build gt") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// underDir reports whether path is dir or under it.
+func underDir(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
 
 // gtTestEnvs is the environment of each go test command the integration tier
 // ran, in order. A go test runs through gt slot run, so its argv starts with gt.
@@ -66,19 +99,19 @@ func taggedRootRepo() *fakeRepo {
 }
 
 // TestSweepBuildsGTOnceAndExportsIt: a run builds ./cmd/gt once with the
-// integration helper's ldflags and the sweep's own environment, into the log
-// directory, and every go test environment names that binary.
+// integration helper's ldflags and the sweep's own environment, outside the
+// kept log directory, and every go test environment names that binary.
 func TestSweepBuildsGTOnceAndExportsIt(t *testing.T) {
 	t.Parallel()
 	fake := &fakeTier{head: "abc123"}
 	s, _ := newIntegration(t, taggedRootRepo(), fake, "", "")
 	s.Integration()
 
-	bin := filepath.Join(s.Opts.LogDir, gtBinName)
 	got := builds(fake)
 	if len(got) != 1 {
 		t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
 	}
+	bin := binFromBuild(t, got[0])
 	wantArgv := []string{"go", "build", "-ldflags", buildflags.LDFlags, "-o", bin, "./cmd/gt"}
 	if !reflect.DeepEqual(got[0].argv, wantArgv) {
 		t.Errorf("go build argv = %v, want %v", got[0].argv, wantArgv)
@@ -97,6 +130,224 @@ func TestSweepBuildsGTOnceAndExportsIt(t *testing.T) {
 		if !hasEnv(env, EnvGTBin+"="+bin) {
 			t.Errorf("go test %d environment does not name %s=%s", i, EnvGTBin, bin)
 		}
+	}
+}
+
+// TestBuildGTIsNotInTheLogDirectoryAndIsRemoved: the binary handed to the tests
+// is outside the kept log directory — under a temporary directory a host sweep
+// removes, or under the work tree a runner gave — the build log is inside it,
+// and the directory holding the binary is gone when the tier returns.
+func TestBuildGTIsNotInTheLogDirectoryAndIsRemoved(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// runner gives the sweep a work tree, as the container runner does.
+		runner bool
+	}{
+		{name: "a host sweep builds under a temporary directory"},
+		{name: "a runner's work tree holds the binary", runner: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeTier{head: "abc123"}
+			s, _ := newIntegration(t, taggedRootRepo(), fake, "", "")
+			var work string
+			if tc.runner {
+				work = t.TempDir()
+				s.Opts.WorkDir = work
+			}
+			s.Integration()
+
+			got := builds(fake)
+			if len(got) != 1 {
+				t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
+			}
+			bin := binFromBuild(t, got[0])
+			if underDir(bin, s.Opts.LogDir) {
+				t.Errorf("binary %s is under the kept log directory %s", bin, s.Opts.LogDir)
+			}
+			if tc.runner && !underDir(bin, work) {
+				t.Errorf("binary %s is not under the work tree %s the runner gave", bin, work)
+			}
+			if _, err := os.Stat(filepath.Dir(bin)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("build directory %s is still there after the sweep: %v", filepath.Dir(bin), err)
+			}
+			logPath := filepath.Join(s.Opts.LogDir, buildLogName)
+			if _, err := os.Stat(logPath); err != nil {
+				t.Errorf("build log %s is not in the log directory: %v", logPath, err)
+			}
+		})
+	}
+}
+
+// TestBuildGTRefusesAWorkTreeItCannotMake: a work tree whose gt-bin directory
+// cannot be made runs no build, leaves TIER_SWEEP_GT_BIN unset, and the tier
+// still runs GREEN as it does after a failed build. A regular file where the
+// work tree should be makes the mkdir fail.
+func TestBuildGTRefusesAWorkTreeItCannotMake(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, taggedRootRepo(), fake, "", "")
+	file := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.Opts.WorkDir = file
+	line, red := s.Integration()
+
+	if got := builds(fake); len(got) != 0 {
+		t.Errorf("go build calls = %v, want none where the directory cannot be made", got)
+	}
+	if lines := buildGTLines(stderr.String()); len(lines) != 1 {
+		t.Errorf("build gt stderr lines = %d, want 1: %q", len(lines), stderr.String())
+	}
+	for i, env := range gtTestEnvs(fake) {
+		if anyEnvNamed(env, EnvGTBin) {
+			t.Errorf("go test %d environment names %s with no build", i, EnvGTBin)
+		}
+	}
+	if red || !strings.Contains(line, "integration GREEN passed=1 failed=0 skipped=0") {
+		t.Errorf("line = %q red = %v, want the tier GREEN with its package passed", line, red)
+	}
+}
+
+// TestBuildGTTemporaryDirectoryFailure: a host sweep that cannot make its
+// temporary directory runs no build, reports it once, leaves TIER_SWEEP_GT_BIN
+// unset, and the tier still runs GREEN.
+func TestBuildGTTemporaryDirectoryFailure(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, taggedRootRepo(), fake, "", "")
+	s.MkdirTemp = func(string, string) (string, error) { return "", errors.New("no temporary directory") }
+	line, red := s.Integration()
+
+	if got := builds(fake); len(got) != 0 {
+		t.Errorf("go build calls = %v, want none with no directory to build in", got)
+	}
+	lines := buildGTLines(stderr.String())
+	if len(lines) != 1 || !strings.Contains(lines[0], "no temporary directory") {
+		t.Errorf("build gt stderr lines = %q, want one naming the failure", lines)
+	}
+	for i, env := range gtTestEnvs(fake) {
+		if anyEnvNamed(env, EnvGTBin) {
+			t.Errorf("go test %d environment names %s with no build", i, EnvGTBin)
+		}
+	}
+	if red || !strings.Contains(line, "integration GREEN passed=1 failed=0 skipped=0") {
+		t.Errorf("line = %q red = %v, want the tier GREEN with its package passed", line, red)
+	}
+}
+
+// TestBuildGTRemovalFailure: a build directory that cannot be removed is one
+// stderr line and changes no verdict, as a log directory that cannot be
+// removed is.
+func TestBuildGTRemovalFailure(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	s, stderr := newIntegration(t, taggedRootRepo(), fake, "", "")
+	s.Opts.WorkDir = t.TempDir()
+	var removed []string
+	s.RemoveAll = func(path string) error {
+		removed = append(removed, path)
+		return errors.New("busy")
+	}
+	line, red := s.Integration()
+
+	got := builds(fake)
+	if len(got) != 1 {
+		t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
+	}
+	dir := filepath.Dir(binFromBuild(t, got[0]))
+	if len(removed) != 1 || removed[0] != dir {
+		t.Errorf("removals = %v, want just the build directory %s", removed, dir)
+	}
+	if !strings.Contains(stderr.String(), "remove "+dir+": busy") {
+		t.Errorf("stderr = %q, want one line naming the failed removal of %s", stderr.String(), dir)
+	}
+	if red || !strings.Contains(line, "integration GREEN passed=1 failed=0 skipped=0") {
+		t.Errorf("line = %q red = %v, want the tier GREEN with its package passed", line, red)
+	}
+}
+
+// TestRunBuildsGTUnderTheRootItWasGiven: a run started with --root, as the
+// container runner starts it, builds gt under that work tree.
+func TestRunBuildsGTUnderTheRootItWasGiven(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	work := t.TempDir()
+	logDir := t.TempDir()
+	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
+	code := Run([]string{"--root", work, TierIntegration}, io.Discard, io.Discard, Deps{
+		CgoEnv: testCgoEnv,
+		Host: Host{
+			Env: func(name string) string {
+				if name == EnvLogDir {
+					return logDir
+				}
+				return ""
+			},
+			MkdirAll: func(string, fs.FileMode) error { return nil },
+		},
+		Exec:    fake.exec,
+		Src:     taggedRootRepo(),
+		Environ: []string{"PATH=/fake/bin"},
+		Now:     func() time.Time { return at },
+	})
+	if code != 0 {
+		t.Fatalf("Run exited %d, want a GREEN run", code)
+	}
+	got := builds(fake)
+	if len(got) != 1 {
+		t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
+	}
+	bin := binFromBuild(t, got[0])
+	if !underDir(bin, work) {
+		t.Errorf("go build -o %s, want the binary under --root %s", bin, work)
+	}
+	if underDir(bin, logDir) {
+		t.Errorf("go build -o %s, want it outside the log directory %s", bin, logDir)
+	}
+}
+
+// TestRunLeavesARelativeRootOutOfTheBinaryPath: a relative --root does not name
+// the binary's directory. TIER_SWEEP_GT_BIN reaches each go test, which would
+// resolve a relative path from its own package directory, so the run builds
+// under a temporary directory instead.
+func TestRunLeavesARelativeRootOutOfTheBinaryPath(t *testing.T) {
+	t.Parallel()
+	fake := &fakeTier{head: "abc123"}
+	logDir := t.TempDir()
+	at := time.Date(2026, time.October, 30, 0, 0, 0, 0, time.UTC)
+	code := Run([]string{"--root", "worktree", TierIntegration}, io.Discard, io.Discard, Deps{
+		CgoEnv: testCgoEnv,
+		Host: Host{
+			Env: func(name string) string {
+				if name == EnvLogDir {
+					return logDir
+				}
+				return ""
+			},
+			MkdirAll: func(string, fs.FileMode) error { return nil },
+		},
+		Exec:    fake.exec,
+		Src:     taggedRootRepo(),
+		Environ: []string{"PATH=/fake/bin"},
+		Now:     func() time.Time { return at },
+	})
+	if code != 0 {
+		t.Fatalf("Run exited %d, want a GREEN run", code)
+	}
+	got := builds(fake)
+	if len(got) != 1 {
+		t.Fatalf("go build calls = %d, want 1: %v", len(got), got)
+	}
+	bin := binFromBuild(t, got[0])
+	if !filepath.IsAbs(bin) {
+		t.Errorf("go build -o %s, want an absolute path a go test can use", bin)
+	}
+	if strings.HasPrefix(bin, "worktree"+string(filepath.Separator)) {
+		t.Errorf("go build -o %s, want the binary outside the relative --root", bin)
 	}
 }
 

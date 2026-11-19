@@ -114,6 +114,14 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		fmt.Fprintln(stderr, err)
 		return UsageExit
 	}
+	// A runner that gave the sweep an absolute work tree gets its gt binary
+	// built there, so the runner's own deletion of the tree takes the binary with
+	// it. The path reaches each go test as TIER_SWEEP_GT_BIN, which a relative
+	// one would resolve from that package's own directory, so a relative --root
+	// takes the temporary directory a host sweep uses instead (gt-pnzx3m).
+	if root != DefaultRoot && filepath.IsAbs(root) {
+		opts.WorkDir = root
+	}
 	if opts.OwnsLogDir && !cleanup {
 		fmt.Fprintf(stderr, "%s: log directory cleanup skipped: host has no ReadDir, Lstat and RemoveAll (%s)\n", Name, sweepGoesOn)
 	}

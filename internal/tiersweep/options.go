@@ -107,6 +107,11 @@ type Options struct {
 	// wrapper. The runner container sets it, since it has no town for the wrapper
 	// to find and holds its own reservation. Unset or 0 leaves the wrapper on.
 	NoSlot bool
+	// WorkDir is the absolute work tree a runner gave the sweep with --root: the
+	// gt binary is built under it, so the runner's deletion of the tree takes
+	// the binary with it (gt-pnzx3m). Empty on a host sweep, and for a relative
+	// --root, which builds under a temporary directory instead.
+	WorkDir string
 }
 
 // UnknownTierError is a command line naming a tier the sweep does not offer.
