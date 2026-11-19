@@ -647,6 +647,10 @@ func TestGuardCommandTokens(t *testing.T) {
 		sling    = "package daemon\n\nvar _ = exec.Command(\"gt\", \"sling\")\n"
 		hook     = "package daemon\n\nvar _ = exec.Command(\"gt\", \"hook\")\n"
 		unparsed = "package daemon {\n"
+		// seamPath holds a bd seam call, which the scan reads only under
+		// internal/beads/; seamSrc is the same source wherever it moves.
+		seamPath = "internal/beads/x.go"
+		seamSrc  = "package beads\n\nfunc f(b *Beads) { b.run(\"show\", \"x\") }\n"
 	)
 	tests := []struct {
 		name string
@@ -662,6 +666,9 @@ func TestGuardCommandTokens(t *testing.T) {
 		{"deleted file without one", "D\x00" + path + "\x00", contentReader(map[string]string{path: none}, nil), false},
 		{"rename that changes one", "R100\x00" + path + "\x00" + moved + "\x00", contentReader(map[string]string{path: sling}, map[string]string{moved: hook}), true},
 		{"rename that keeps them", "R100\x00" + path + "\x00" + moved + "\x00", contentReader(map[string]string{path: sling}, map[string]string{moved: sling}), false},
+		{"rename out of internal/beads keeps a seam call's base", "R100\x00" + seamPath + "\x00" + moved + "\x00", contentReader(map[string]string{seamPath: seamSrc}, map[string]string{moved: seamSrc}), true},
+		{"rename out to a path the judge does not read", "R100\x00" + seamPath + "\x00docs/x.go\x00", contentReader(map[string]string{seamPath: seamSrc}, nil), true},
+		{"rename whose base reads back absent", "R100\x00" + path + "\x00" + moved + "\x00", contentReader(nil, map[string]string{moved: none}), true},
 		{"scan error", "M\x00" + path + "\x00", contentReader(map[string]string{path: none}, map[string]string{path: unparsed}), true},
 		{"unreadable file", "M\x00" + path + "\x00", func(string, bool) ([]byte, error) { return nil, errors.New("unreadable") }, true},
 		{"no reader", "M\x00" + path + "\x00", nil, true},

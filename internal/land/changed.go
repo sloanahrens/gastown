@@ -77,17 +77,19 @@ type ContentReader func(rel string, head bool) ([]byte, error)
 // GuardSelects returns the tree-wide guard tests whose inputs nameStatus
 // changed and the guards every non-empty diff runs, sorted by package. An
 // empty diff returns nil, and a guard whose package holds no Go is left out.
-// It supplies no ContentReader, so a content-judged guard fires as it always
-// has; GuardSelectsWithContent judges the file instead.
+// It supplies no ContentReader, so every guard answers by path alone and a
+// guard without a removal rule is selected only by a path that exists after the
+// change: a deletion or a rename out selects nothing. Production calls it until
+// gt-jvv5qb supplies a reader to GuardSelectsWithContent.
 func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect, error) {
 	return GuardSelectsWithContent(nameStatus, hasGo, nil)
 }
 
 // GuardSelectsWithContent is GuardSelects with a reader for each changed
-// file's two versions. With one, a non-cmd Go file that exists after the
-// change selects the tokens guard only when its gt and bd invocations changed
-// (gt-47cf12). With none every guard answers by path alone, so the selection is
-// GuardSelects's. Every other path rule is unchanged.
+// file's two versions. With one, a non-cmd Go record of any status selects the
+// tokens guard only when its gt and bd invocations changed (gt-47cf12), so a
+// deletion or a rename out counts, judged from the base version. With none the
+// result is GuardSelects's. Every other path rule is unchanged.
 func GuardSelectsWithContent(nameStatus string, hasGo func(dir string) bool, read ContentReader) ([]GuardSelect, error) {
 	triggered := map[string]bool{}
 	err := eachChange(nameStatus, func(_, now, gone []string) {
@@ -388,11 +390,11 @@ var treeWideGuards = []treeWideGuard{
 	},
 	{
 		// TestCommandTokensResolve scans the same tree through ScanRepo and
-		// TestMakefileHandsTheContainerOptInToTheSuite reads the Makefile. Go
-		// under internal/cmd is left to the package suite that holds the test.
-		// With a reader, a non-cmd Go file is judged by its gt and bd
-		// invocations, so an edit that changes none of them no longer pays the
-		// test's build (gt-47cf12).
+		// TestMakefileHandsTheContainerOptInToTheSuite reads the Makefile.
+		// judges is the whole path rule. With a reader, non-cmd Go under
+		// internal/ or cmd/ (contentPaths) is judged by its gt and bd
+		// invocations instead, so an edit that changes none of them skips the
+		// test's build (gt-47cf12). Go under internal/cmd keeps its path rule.
 		pkg:           "internal/cmd",
 		tests:         []string{"TestCommandTokensResolve", "TestMakefileHandsTheContainerOptInToTheSuite"},
 		judges:        func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
@@ -612,12 +614,10 @@ var treeWideGuards = []treeWideGuard{
 // non-empty diff runs, whatever paths changed; an always entry sets no
 // predicate, since none could change its selection.
 //
-// judgesContent, when set, judges one diff record by content: baseRel and
-// headRel are its path at the base and at HEAD (a rename's old and new), and
-// read returns either version. contentPaths names the paths it judges: with a
-// reader those paths leave judges and are judged by judgesContent instead. With
-// no reader judges answers for every path, as it did before a content judge
-// existed.
+// judges is the whole path rule, and all a nil reader runs. With a reader, the
+// paths contentPaths names leave judges and judgesContent answers for them: it
+// gets the record's path at the base and at HEAD (a rename's old and new) and
+// the reader for either version.
 type treeWideGuard struct {
 	pkg           string
 	tests         []string
@@ -729,8 +729,10 @@ func commandTokenContent(rel string) bool {
 // whether the invocations ScanRepo would find in a content-judged Go file
 // differ between the base and HEAD. A side absent or outside the scanned tree
 // counts as no invocations, so an added, deleted or moved file fires exactly
-// when it carried one. Any read or scan failure fires. read is never nil:
-// trips calls a content judge only when it has a reader.
+// when it carried one. Each side is read and scanned under its own path, since
+// the scan reads the bd seam's calls only under internal/beads/. Any read or
+// scan failure fires, and so does a rename whose judged base reads back absent.
+// read is never nil: trips calls a content judge only when it has a reader.
 func commandTokensChanged(baseRel, headRel string, read ContentReader) bool {
 	baseJudged, headJudged := commandTokenContent(baseRel), commandTokenContent(headRel)
 	if !baseJudged && !headJudged {
@@ -751,17 +753,20 @@ func commandTokensChanged(baseRel, headRel string, read ContentReader) bool {
 		}
 		newSrc = src
 	}
+	if baseRel != headRel && baseJudged && oldSrc == nil {
+		return true // a rename has a base blob; one that reads absent fails closed
+	}
 	if oldSrc == nil || newSrc == nil {
 		// A side with no file: the side that exists fires the guard when it
 		// carries any invocation.
-		src := oldSrc
+		src, rel := oldSrc, baseRel
 		if src == nil {
-			src = newSrc
+			src, rel = newSrc, headRel
 		}
-		refs, err := cmdtree.ScanGo(headRel, src)
+		refs, err := cmdtree.ScanGo(rel, src)
 		return err != nil || len(refs) > 0
 	}
-	same, err := cmdtree.SameRefs(headRel, oldSrc, newSrc)
+	same, err := cmdtree.SameRefsAt(baseRel, oldSrc, headRel, newSrc)
 	return err != nil || !same
 }
 
