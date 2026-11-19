@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -39,6 +40,10 @@ type CacheTrim struct {
 	// Claim is the claim at Root as a read-only filesystem holding the two cache
 	// trees, or nil when the claim is not mounted.
 	Claim func(root string) (fs.FS, error)
+	// Now is the clock the plan judges file ages by, refused when nil as the
+	// other seams are: every removal is decided by a file's age. A test sets a
+	// fixed clock, so its plan does not depend on the host's.
+	Now func() time.Time
 	// Remove deletes name, a Root-relative path the plan chose, and refuses one
 	// that leaves the two cache trees.
 	Remove func(root, name string) error
@@ -47,7 +52,7 @@ type CacheTrim struct {
 // diskCacheTrim is the trim of the claim the run mounts, with the process
 // filesystem behind its seams.
 func diskCacheTrim(root string) *CacheTrim {
-	return &CacheTrim{Root: root, CapBytes: sweepCacheCapBytes, Claim: diskClaim, Remove: removeSweepCacheFile}
+	return &CacheTrim{Root: root, CapBytes: sweepCacheCapBytes, Claim: diskClaim, Remove: removeSweepCacheFile, Now: time.Now}
 }
 
 // recordTrim trims the cache claim and writes a failure to the run's log
@@ -64,7 +69,7 @@ func recordTrim(trim *CacheTrim, logDir string, stderr io.Writer) {
 // at the end of every Job that writes its result, so a Job that fails before the
 // result is written does not trim, and a claim already under the cap lists its
 // files and removes nothing. It lists the two cache trees, plans the removals with
-// cachevol.PlanTrim and removes what the plan names.
+// cachevol.PlanTrim under its Now clock, and removes what the plan names.
 //
 // A listing that is partial removes nothing: a cache tree the claim lacks, or a
 // directory the walk cannot list, makes the cap unverifiable, so the error names
@@ -85,6 +90,8 @@ func trimSweepCache(trim *CacheTrim) error {
 		return errors.New("the cache trim has no claim")
 	case trim.Remove == nil:
 		return errors.New("the cache trim has no removal")
+	case trim.Now == nil:
+		return errors.New("the cache trim has no clock")
 	}
 	claim, err := trim.Claim(trim.Root)
 	if err != nil {
@@ -100,7 +107,10 @@ func trimSweepCache(trim *CacheTrim) error {
 	}
 	// Another Job on the node may be building against the module cache while
 	// this run ends, so PlanTrim's cautious case leaves that cache alone.
-	plan := cachevol.PlanTrim(listing, trim.CapBytes, true)
+	plan, err := cachevol.PlanTrim(listing, trim.CapBytes, true, trim.Now())
+	if err != nil {
+		return fmt.Errorf("the cache claim %s is not planned, so nothing was removed: %w", trim.Root, err)
+	}
 	var errs []error
 	for _, removal := range plan.Removals {
 		// One failed removal does not stop the rest: the claim is still over

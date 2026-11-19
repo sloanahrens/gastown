@@ -705,13 +705,23 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		return true
 	}
 	trimmed[namespace] = claim.ClaimName
+	// One reading of the clock decides this claim's trim: the early verdict, the
+	// Job's plan and the fit check below all judge file ages by it, so a pass that
+	// crosses the trim's minimum age between them cannot plan one list and check
+	// another.
+	now := d.diskMaintenanceSeams().now()
 	// A listing at or under the cap has nothing to remove whatever the sandboxes
 	// do, so that is this claim's verdict for this listing. A listing over the
 	// cap with nothing removable, because a running sandbox pins the module
 	// cache, is not: it clears when the sandbox stops, so it falls through to
 	// the trim's refusal and is retried soon.
-	if plan := cachevol.PlanTrim(listing, capBytes, sandboxes > 0); plan.Total <= capBytes {
-		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the listing is %d bytes, at or under the cap of %d; nothing trimmed", claim.ClaimName, namespace, plan.Total, capBytes)
+	planned, err := cachevol.PlanTrim(listing, capBytes, sandboxes > 0, now)
+	if err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
+		return false
+	}
+	if planned.Total <= capBytes {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the listing is %d bytes, at or under the cap of %d; nothing trimmed", claim.ClaimName, namespace, planned.Total, capBytes)
 		return true
 	}
 	m, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
@@ -722,6 +732,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		Listing:          listing,
 		CapBytes:         capBytes,
 		SandboxesRunning: sandboxes,
+		Now:              now,
 		NodeSelector:     claim.NodeSelector,
 		Tolerations:      claim.Tolerations,
 	})
@@ -755,7 +766,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		if err != nil {
 			d.cacheTrimLogKeyed("cache_trim_free_unknown:"+namespace+"/"+claim.ClaimName,
 				"disk_maintenance: cache trim %s in %s: free space unknown: %v; trimming the claim route without the fit check", claim.ClaimName, namespace, err)
-		} else if err := cacheTrimClaimFits(listing, capBytes, sandboxes, reading.Available); err != nil {
+		} else if err := cacheTrimClaimFits(planned, reading.Available); err != nil {
 			d.cacheTrimLogKeyed("cache_trim_no_fit:"+namespace+"/"+claim.ClaimName,
 				"disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
 			return false
@@ -916,13 +927,13 @@ func (s *attentionSources) collectCacheTrimNoOp(context.Context) ([]attention.It
 //
 // The list's size is PlanTrim's removals encoded as the writer encodes them --
 // json.Marshal of the path slice, internal/polecatimage/trimlist.go WriteTrimList
-// -- measured from the listing this pass already has; the writer plans the same
-// list again when the Job runs, so a claim that changed in between can still end
-// under its cap. The writer's rule has no further margin: the filesystem's block
-// rounding is the writer's own measurement to make, and it refuses again if the
-// room shrank.
-func cacheTrimClaimFits(listing []cachevol.Entry, capBytes int64, sandboxes int, free int64) error {
-	plan := cachevol.PlanTrim(listing, capBytes, sandboxes > 0)
+// -- measured from the plan the pass already made from its listing, so the check
+// and the Job decide by one plan and one clock; the writer plans the same list
+// again when the Job runs, judged by the same now the Job carries, so a claim
+// that changed in between can still end under its cap. The writer's rule has no
+// further margin: the filesystem's block rounding is the writer's own
+// measurement to make, and it refuses again if the room shrank.
+func cacheTrimClaimFits(plan cachevol.TrimPlan, free int64) error {
 	paths := make([]string, 0, len(plan.Removals))
 	for _, removal := range plan.Removals {
 		paths = append(paths, removal.Path)

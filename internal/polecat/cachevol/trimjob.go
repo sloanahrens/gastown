@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -72,6 +73,12 @@ type TrimJobInput struct {
 	// SandboxesRunning is the caller's count of running sandboxes: PlanTrim leaves the module cache
 	// alone while any runs, and nothing here asks the cluster how many there are.
 	SandboxesRunning int
+	// Now is the clock PlanTrim judges file ages by, read once by the caller. The plan built here,
+	// the claim route's init container (which plans again in the pod, from the --now this field
+	// renders) and the caller's own fit check all decide by this one reading, so a file's age is
+	// judged the same on each. A zero Now is refused by the plan it feeds, so no file is removed
+	// without its age judged.
+	Now time.Time
 	// NodeSelector and Tolerations place the pod on the pool that mounts the claim, from the
 	// sandbox profile that owns it; empty leaves the placement to the cluster (gt-5paez).
 	NodeSelector map[string]string
@@ -176,12 +183,14 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 	if in.SandboxesRunning < 0 {
 		return nil, fmt.Errorf("the trim Job sandbox count %d: want the caller's count of running sandboxes, 0 when none runs", in.SandboxesRunning)
 	}
-
 	if err := checkListing(in.Listing); err != nil {
 		return nil, err
 	}
 
-	plan := PlanTrim(in.Listing, in.CapBytes, in.SandboxesRunning > 0)
+	plan, err := PlanTrim(in.Listing, in.CapBytes, in.SandboxesRunning > 0, in.Now)
+	if err != nil {
+		return nil, err
+	}
 	if len(plan.Removals) == 0 {
 		return nil, fmt.Errorf("the trim Job on %s would remove nothing: the listing is %d bytes, and the cap is %d", in.ClaimName, plan.Total, in.CapBytes)
 	}
@@ -262,7 +271,7 @@ func claimTrimJob(in TrimJobInput, name string, annotations map[string]string) *
 	}
 	mounts := []VolumeMount{{Name: trimCacheVolume, MountPath: SeedCacheRoot}}
 	return trimJobDocument(in, name, annotations, claimRemoveContainer(in.Image, mounts), volumes,
-		claimWriteContainer(in.Image, mounts, in.CapBytes, in.SandboxesRunning))
+		claimWriteContainer(in.Image, mounts, in.CapBytes, in.SandboxesRunning, in.Now))
 }
 
 // trimJobDocument is the Job both routes apply: the cache user's trim container, with the volumes and
@@ -400,9 +409,11 @@ func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 
 // claimWriteContainer plans the removal list from the claim and writes it into the claim, with the
 // image's trim-list-write helper. The plan rules and their inputs are the caller's: the cap the trim
-// brings the claim under and the caller's count of running sandboxes, so the list is PlanTrim's own
-// rather than a second set of rules the Job invents.
-func claimWriteContainer(image string, mounts []VolumeMount, capBytes int64, sandboxes int) Container {
+// brings the claim under, the caller's count of running sandboxes and the caller's clock, so the list
+// is PlanTrim's own rather than a second set of rules the Job invents. The clock travels in the argv
+// because the pod plans when it runs, and planning at the pod's own clock would judge each file's age
+// by a time the caller's plan and fit check never saw.
+func claimWriteContainer(image string, mounts []VolumeMount, capBytes int64, sandboxes int, now time.Time) Container {
 	return Container{
 		Name:            "plan",
 		Image:           image,
@@ -412,6 +423,7 @@ func claimWriteContainer(image string, mounts []VolumeMount, capBytes int64, san
 			"--root", SeedCacheRoot,
 			"--cap-bytes", strconv.FormatInt(capBytes, 10),
 			"--sandboxes", strconv.Itoa(sandboxes),
+			"--now", now.UTC().Format(time.RFC3339Nano),
 		},
 		VolumeMounts: mounts,
 	}

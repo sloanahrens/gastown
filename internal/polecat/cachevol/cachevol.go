@@ -113,28 +113,52 @@ type TrimPlan struct {
 	OverBytes int64
 }
 
-// PlanTrim returns the removals that bring the listing under capBytes. Build-cache files go first,
-// least recently used first (by the later of atime and mtime, ties by path). Module-cache files are
-// removed only when no sandbox is running, and only while the claim is still over the cap, so a trim
-// never touches the module cache under a running build (the overseer's default decision on the
+// buildCacheMinAge is the youngest a build-cache file may be and still be planned for removal: a
+// file whose later of atime and mtime is inside this age is left in the claim. Go sets both times
+// when it uses a cache entry, but at most once an hour (cmd/go/internal/cache mtimeInterval), so a
+// file a seat read within the hour can still carry times older than an hour. A file under the floor
+// stays even when that leaves the claim over its cap; Overflow reports it.
+const buildCacheMinAge = time.Hour
+
+// PlanTrim returns the removals that bring the listing under capBytes, judged as of now. Build-cache
+// files go first, least recently used first (by the later of atime and mtime, ties by path), and never
+// while younger than buildCacheMinAge. Module-cache files are removed only when no sandbox is running,
+// only while the claim is still over the cap, and only when the build pass reached the end of the
+// build cache: a build pass the age floor stopped is not the build cache saying it cannot reach the
+// cap, so the floor never moves a trim on to the module cache (the overseer's default decision on the
 // design's open question). If the claim cannot reach the cap, Overflow reports how far over it is.
-func PlanTrim(listing []Entry, capBytes int64, sandboxesRunning bool) TrimPlan {
+//
+// The age is the same later-of-atime-and-mtime figure the order uses: a stale atime can only make a
+// file look older than its mtime says, and the later of the two never takes it, so a file Go touched
+// is young whatever the mount does to its access time. A file whose times are both unset has no age
+// to judge, so it is kept and ends the build pass, as a file under the floor does. A zero now is
+// refused: it is a caller's mistake, and by it no file reads as old enough to remove.
+func PlanTrim(listing []Entry, capBytes int64, sandboxesRunning bool, now time.Time) (TrimPlan, error) {
+	if now.IsZero() {
+		return TrimPlan{}, fmt.Errorf("the trim plan needs the time its file ages are judged by: the zero time leaves every file younger than the minimum age, so the plan could remove nothing")
+	}
 	var plan TrimPlan
 	for _, e := range listing {
 		plan.Total += e.Size
 	}
 	remaining := plan.Total
 
-	build := sortedLRU(listing, BuildCache)
-	for _, e := range build {
+	// buildPassStopped is set when the age floor, rather than the end of the build cache, ended the
+	// pass: its remaining files are too young to remove, so the module cache is not the next resort.
+	buildPassStopped := false
+	for _, e := range sortedLRU(listing, BuildCache) {
 		if remaining <= capBytes {
+			break
+		}
+		if e.withinMinAge(now) {
+			buildPassStopped = true
 			break
 		}
 		plan.Removals = append(plan.Removals, Removal{Path: e.Path, Size: e.Size})
 		remaining -= e.Size
 	}
 
-	if remaining > capBytes && !sandboxesRunning {
+	if remaining > capBytes && !sandboxesRunning && !buildPassStopped {
 		for _, e := range sortedLRU(listing, ModuleCache) {
 			if remaining <= capBytes {
 				break
@@ -148,7 +172,17 @@ func PlanTrim(listing []Entry, capBytes int64, sandboxesRunning bool) TrimPlan {
 		plan.Overflow = true
 		plan.OverBytes = remaining - capBytes
 	}
-	return plan
+	return plan, nil
+}
+
+// withinMinAge reports whether e is too young to remove: its last use is inside buildCacheMinAge of
+// now, in the future (a clock that disagrees with the filesystem), or unset.
+func (e Entry) withinMinAge(now time.Time) bool {
+	used := e.lastUsed()
+	if used.IsZero() {
+		return true
+	}
+	return now.Sub(used) < buildCacheMinAge
 }
 
 // sortedLRU is the entries of one cache, least recently used first, ties broken by path.

@@ -156,16 +156,20 @@ func writeTrimListInto(root string, paths []string) (digest string, err error) {
 // TrimListPaths is PlanTrim's removal list for the claim at root, the list a claim-carried trim's init
 // container writes into the claim before the Job's trim container reads it.
 //
-// The plan's inputs are the caller's: the cap the trim brings the claim under and whether a sandbox is
-// running. The listing is of the claim as it is when the Job runs, so a claim that came under its cap,
-// or lost the module cache to a running sandbox, after the caller built the Job is refused here rather
-// than trimmed with nothing to do.
-func TrimListPaths(root string, capBytes int64, sandboxesRunning bool, walk fileWalk) ([]string, error) {
+// The plan's inputs are the caller's: the cap the trim brings the claim under, whether a sandbox is
+// running and the clock its file ages are judged by (the Job's --now, so the list is the one the
+// caller's plan and fit check decided by). The listing is of the claim as it is when the Job runs, so a
+// claim that came under its cap, or lost the module cache to a running sandbox, after the caller built
+// the Job is refused here rather than trimmed with nothing to do.
+func TrimListPaths(root string, capBytes int64, sandboxesRunning bool, now time.Time, walk fileWalk) ([]string, error) {
 	listing, err := claimListing(root, walk)
 	if err != nil {
 		return nil, err
 	}
-	plan := cachevol.PlanTrim(listing, capBytes, sandboxesRunning)
+	plan, err := cachevol.PlanTrim(listing, capBytes, sandboxesRunning, now)
+	if err != nil {
+		return nil, err
+	}
 	if len(plan.Removals) == 0 {
 		if plan.Overflow {
 			return nil, fmt.Errorf("the claim at %s is %d bytes over its %d-byte cap and no removal the rules allow closes it", root, plan.OverBytes, capBytes)

@@ -16,6 +16,18 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
+// trimListNow is the clock the trim-list tests judge file ages by: two hours after the time they plant
+// their files at, so every planted file is past the build-cache floor.
+func trimListNow() time.Time { return testTime.Add(2 * time.Hour) }
+
+// trimListNowText is trimListNow as the Job renders it into the writer's --now.
+func trimListNowText() string { return trimListNow().Format(time.RFC3339Nano) }
+
+// trimListWriteArgs is the writer's argv for root: the cap, sandbox count and clock a Job renders.
+func trimListWriteArgs(root, capText, sandboxes string) []string {
+	return []string{"--root", root, "--cap-bytes", capText, "--sandboxes", sandboxes, "--now", trimListNowText()}
+}
+
 // fakeListFS records the writer's calls and answers the failure a case names. Names are the ones the
 // writer makes, relative to the claim root.
 type fakeListFS struct {
@@ -367,7 +379,7 @@ func TestTrimListPathsPlansTheRemovals(t *testing.T) {
 			plantCacheFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "b"), 100, testTime)
 			plantCacheFile(t, filepath.Join(root, cachevol.SeedModuleCacheDir, "m"), 100, testTime)
 
-			paths, err := TrimListPaths(root, 50, tc.sandboxes > 0, filepath.Walk)
+			paths, err := TrimListPaths(root, 50, tc.sandboxes > 0, trimListNow(), filepath.Walk)
 			if err != nil {
 				t.Fatalf("TrimListPaths: %v", err)
 			}
@@ -397,7 +409,7 @@ func TestTrimListPathsRefusesAClaimWithNothingToTrim(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			plantCacheFile(t, filepath.Join(root, cachevol.SeedModuleCacheDir, "m"), 100, testTime)
-			_, err := TrimListPaths(root, tc.cap, tc.sandboxes > 0, filepath.Walk)
+			_, err := TrimListPaths(root, tc.cap, tc.sandboxes > 0, trimListNow(), filepath.Walk)
 			if err == nil {
 				t.Fatal("TrimListPaths planned a trim with nothing to remove")
 			}
@@ -405,6 +417,18 @@ func TestTrimListPathsRefusesAClaimWithNothingToTrim(t *testing.T) {
 				t.Errorf("error = %q, want it to name %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestTrimListPathsRefusesAZeroClock: the plan needs the clock its file ages are judged by, so a
+// caller that passes the zero time is refused rather than handed a list that removes nothing.
+func TestTrimListPathsRefusesAZeroClock(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	plantCacheFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "a"), 100, testTime)
+	_, err := TrimListPaths(root, 50, false, time.Time{}, filepath.Walk)
+	if err == nil || !strings.Contains(err.Error(), "the time its file ages are judged by") {
+		t.Fatalf("TrimListPaths with the zero time = %v, want the plan's clock refusal", err)
 	}
 }
 
@@ -418,7 +442,7 @@ func TestTrimListWriteHelperWritesThePlannedListIntoTheClaim(t *testing.T) {
 	plantCacheFile(t, filepath.Join(root, cachevol.SeedModuleCacheDir, "mod", "x"), 100, testTime)
 
 	var out, errOut bytes.Buffer
-	code := trimListWriteMain([]string{"--root", root, "--cap-bytes", "0", "--sandboxes", "0"}, &out, &errOut)
+	code := trimListWriteMain(trimListWriteArgs(root, "0", "0"), &out, &errOut)
 	if code != 0 {
 		t.Fatalf("trim-list-write = %d, want 0 (%s)", code, errOut.String())
 	}
@@ -459,10 +483,18 @@ func TestTrimListWriteHelperRefusesWhatItCannotPlan(t *testing.T) {
 		args    func(root string) []string
 		wantErr string
 	}{
-		{"no cap", func(root string) []string { return []string{"--root", root, "--sandboxes", "0"} }, "--cap-bytes needs a whole number of bytes"},
-		{"no sandbox count", func(root string) []string { return []string{"--root", root, "--cap-bytes", "0"} }, "--sandboxes needs a whole number of running sandboxes"},
+		{"no cap", func(root string) []string {
+			return []string{"--root", root, "--sandboxes", "0", "--now", trimListNowText()}
+		}, "--cap-bytes needs a whole number of bytes"},
+		{"no sandbox count", func(root string) []string {
+			return []string{"--root", root, "--cap-bytes", "0", "--now", trimListNowText()}
+		}, "--sandboxes needs a whole number of running sandboxes"},
+		{"no clock", func(root string) []string { return []string{"--root", root, "--cap-bytes", "0", "--sandboxes", "0"} }, "--now needs the clock the Job was built at"},
+		{"a clock that is not a time", func(root string) []string {
+			return []string{"--root", root, "--cap-bytes", "0", "--sandboxes", "0", "--now", "yesterday"}
+		}, "--now needs the clock the Job was built at"},
 		{"a claim under its cap", func(root string) []string {
-			return []string{"--root", root, "--cap-bytes", "1000", "--sandboxes", "0"}
+			return trimListWriteArgs(root, "1000", "0")
 		}, "nothing to trim"},
 	}
 	for _, tc := range tests {
@@ -513,7 +545,7 @@ func TestTrimListWriteRefusesAClaimItCannotOpen(t *testing.T) {
 	t.Parallel()
 	missing := filepath.Join(t.TempDir(), "no-claim")
 	var out, errOut bytes.Buffer
-	code := trimListWriteMain([]string{"--root", missing, "--cap-bytes", "0", "--sandboxes", "0"}, &out, &errOut)
+	code := trimListWriteMain(trimListWriteArgs(missing, "0", "0"), &out, &errOut)
 	if code != 3 {
 		t.Fatalf("trim-list-write exit = %d, want 3 for a claim it cannot open", code)
 	}
@@ -541,7 +573,7 @@ func TestTrimListWriteRefusesAClaimWhoseDirectoryLeavesIt(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := trimListWriteMain([]string{"--root", claim, "--cap-bytes", "0", "--sandboxes", "0"}, &stdout, &stderr)
+	code := trimListWriteMain(trimListWriteArgs(claim, "0", "0"), &stdout, &stderr)
 	if code != 3 {
 		t.Fatalf("trim-list-write exit = %d, want 3 for a claim whose list directory leaves it (stderr %q)", code, stderr.String())
 	}
@@ -576,7 +608,7 @@ func TestTrimListWriteDoesNotWriteThroughAStaleTemporary(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := trimListWriteMain([]string{"--root", claim, "--cap-bytes", "0", "--sandboxes", "0"}, &stdout, &stderr)
+	code := trimListWriteMain(trimListWriteArgs(claim, "0", "0"), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("trim-list-write exit = %d, want 0 (stderr %q)", code, stderr.String())
 	}

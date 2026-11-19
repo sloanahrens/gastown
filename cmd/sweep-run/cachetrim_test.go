@@ -19,6 +19,11 @@ import (
 	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
+// sweepTrimNow is the clock the trim tests judge file ages by: two days after
+// the cache files cacheClaim plants, so every planted file is past the
+// build-cache floor and no test reads the host's clock.
+func sweepTrimNow() time.Time { return time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC) }
+
 // TestTrimSweepCacheKeepsTheCap: a claim over the cap loses its least recently
 // used build-cache files until it is at or under the cap and keeps its module
 // cache, a claim under the cap loses nothing, and a cap of zero or less is
@@ -65,7 +70,7 @@ func TestTrimSweepCacheKeepsTheCap(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := cacheClaim(t)
-			trim := &CacheTrim{Root: root, CapBytes: tc.cap, Claim: diskClaim, Remove: removeSweepCacheFile}
+			trim := &CacheTrim{Root: root, CapBytes: tc.cap, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}
 			err := trimSweepCache(trim)
 			if tc.wantErr == "" && err != nil {
 				t.Fatalf("trimSweepCache: %v", err)
@@ -92,11 +97,12 @@ func TestTrimSweepCacheRefusesAnUnwiredTrim(t *testing.T) {
 		want string
 	}{
 		{"no trim", nil, "not wired"},
-		{"no root", &CacheTrim{CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}, "no claim root"},
-		{"a relative root", &CacheTrim{Root: "cache", CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}, "absolute path"},
-		{"a negative cap", &CacheTrim{Root: root, CapBytes: -1, Claim: diskClaim, Remove: removeSweepCacheFile}, "CapBytes is -1"},
-		{"no claim", &CacheTrim{Root: root, CapBytes: 1, Remove: removeSweepCacheFile}, "has no claim"},
-		{"no removal", &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim}, "no removal"},
+		{"no root", &CacheTrim{CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}, "no claim root"},
+		{"a relative root", &CacheTrim{Root: "cache", CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}, "absolute path"},
+		{"a negative cap", &CacheTrim{Root: root, CapBytes: -1, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}, "CapBytes is -1"},
+		{"no claim", &CacheTrim{Root: root, CapBytes: 1, Remove: removeSweepCacheFile, Now: sweepTrimNow}, "has no claim"},
+		{"no removal", &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Now: sweepTrimNow}, "no removal"},
+		{"no clock", &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}, "has no clock"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,9 +121,28 @@ func TestTrimSweepCacheRefusesAnUnwiredTrim(t *testing.T) {
 func TestTrimSweepCacheDoesNothingWithoutAMountedClaim(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "not-mounted")
-	trim := &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}
+	trim := &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}
 	if err := trimSweepCache(trim); err != nil {
 		t.Fatalf("trimSweepCache without a claim root: %v", err)
+	}
+}
+
+// TestTrimSweepCacheRefusesAZeroClock: a clock seam that answers the zero time
+// plans no removal, so the trim is reported rather than read as a claim with
+// nothing to remove.
+func TestTrimSweepCacheRefusesAZeroClock(t *testing.T) {
+	t.Parallel()
+	root := cacheClaim(t)
+	trim := &CacheTrim{
+		Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile,
+		Now: func() time.Time { return time.Time{} },
+	}
+	err := trimSweepCache(trim)
+	if err == nil || !strings.Contains(err.Error(), "is not planned") {
+		t.Fatalf("trimSweepCache with the zero time = %v, want a refusal naming the plan", err)
+	}
+	if got, want := filesUnder(t, root), 5; len(got) != want {
+		t.Errorf("the claim holds %d files after the refusal, want the %d it started with: %q", len(got), want, got)
 	}
 }
 
@@ -155,7 +180,7 @@ func TestTrimSweepCacheRefusesAClaimItCannotRead(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			trim := &CacheTrim{Root: tc.root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}
+			trim := &CacheTrim{Root: tc.root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}
 			err := trimSweepCache(trim)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("trimSweepCache = %v, want a refusal naming %q", err, tc.want)
@@ -173,6 +198,7 @@ func TestTrimSweepCacheAcceptsAFileAnotherRunRemoved(t *testing.T) {
 		Root: t.TempDir(), CapBytes: 1,
 		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/gone": fakeFile(1000, base)})),
 		Remove: removeSweepCacheFile,
+		Now:    sweepTrimNow,
 	}
 	if err := trimSweepCache(trim); err != nil {
 		t.Fatalf("trimSweepCache of a file another run removed: %v", err)
@@ -203,6 +229,7 @@ func TestTrimSweepCacheSkipsAFileThatVanishedMidWalk(t *testing.T) {
 		Root: t.TempDir(), CapBytes: 220,
 		Claim:  fakeClaimOf(claim),
 		Remove: recordRemovals(&removed),
+		Now:    sweepTrimNow,
 	}
 	if err := trimSweepCache(trim); err != nil {
 		t.Fatalf("trimSweepCache with a file that vanished mid-walk: %v", err)
@@ -271,6 +298,7 @@ func TestTrimSweepCacheFailsClosedOnAPartialWalk(t *testing.T) {
 				Root: t.TempDir(), CapBytes: 1,
 				Claim:  fakeClaimOf(tc.claim),
 				Remove: recordRemovals(&removed),
+				Now:    sweepTrimNow,
 			}
 			err := trimSweepCache(trim)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -301,7 +329,7 @@ func TestTrimSweepCacheRefusesPathsOutsideTheCaches(t *testing.T) {
 		if err := os.Symlink(outside, link); err != nil {
 			t.Fatalf("planting the link: %v", err)
 		}
-		trim := &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile}
+		trim := &CacheTrim{Root: root, CapBytes: 1, Claim: diskClaim, Remove: removeSweepCacheFile, Now: sweepTrimNow}
 		err := trimSweepCache(trim)
 		if err == nil || !strings.Contains(err.Error(), "is a symbolic link, not a cache file") {
 			t.Fatalf("trimSweepCache = %v, want a refusal naming the symbolic link", err)
@@ -398,10 +426,10 @@ func TestTrimSweepCacheErrorDoesNotChangeTheVerdict(t *testing.T) {
 			name: "a failing walk",
 			trim: func(root string) *CacheTrim {
 				claim := faultyClaim{
-					MapFS: fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, time.Now())}),
+					MapFS: fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, sweepTrimNow().Add(-time.Hour))}),
 					dirs:  map[string]error{cachevol.SeedBuildCacheDir: fs.ErrPermission},
 				}
-				return &CacheTrim{Root: root, CapBytes: 1, Claim: fakeClaimOf(claim), Remove: removeSweepCacheFile}
+				return &CacheTrim{Root: root, CapBytes: 1, Claim: fakeClaimOf(claim), Remove: removeSweepCacheFile, Now: sweepTrimNow}
 			},
 			logged: "listing " + cachevol.SeedBuildCacheDir + ":",
 		},
@@ -495,11 +523,12 @@ func failingTrimHarness(t *testing.T, trim func(root string) *CacheTrim) *harnes
 // failingRemoveTrim is a trim with one planned removal, which fails with err.
 func failingRemoveTrim(err error) func(root string) *CacheTrim {
 	return func(root string) *CacheTrim {
-		claim := fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, time.Now())})
+		claim := fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, sweepTrimNow().Add(-time.Hour))})
 		return &CacheTrim{
 			Root: root, CapBytes: 1,
 			Claim:  fakeClaimOf(claim),
 			Remove: func(string, string) error { return err },
+			Now:    sweepTrimNow,
 		}
 	}
 }
@@ -511,8 +540,9 @@ func TestTrimSweepCacheRefusesAClaimItCannotOpen(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "gone")
 	trim := &CacheTrim{
 		Root: root, CapBytes: 1,
-		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(1000, time.Now())})),
+		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(1000, sweepTrimNow().Add(-time.Hour))})),
 		Remove: removeSweepCacheFile,
+		Now:    sweepTrimNow,
 	}
 	err := trimSweepCache(trim)
 	if !errors.Is(err, fs.ErrNotExist) {
