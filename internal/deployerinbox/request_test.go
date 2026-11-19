@@ -82,6 +82,18 @@ func TestDeployerInboxParse(t *testing.T) {
 			data: `{"id":"` + goodID + `","kind":"plan","plan":"p","cluster":"control"}`,
 		},
 		{
+			name: "a duplicate kind key",
+			file: goodFile,
+			data: `{"id":"` + goodID + `","kind":"plan","kind":"apply","plan":"p"}`,
+			want: "twice",
+		},
+		{
+			name: "a duplicate id key with the same value",
+			file: goodFile,
+			data: `{"id":"` + goodID + `","id":"` + goodID + `","kind":"plan","plan":"p"}`,
+			want: "twice",
+		},
+		{
 			name: "a parent-directory plan",
 			file: goodFile,
 			data: `{"id":"` + goodID + `","kind":"plan","plan":"../control"}`,
@@ -168,6 +180,26 @@ func TestDeployerInboxParse(t *testing.T) {
 			name: "malformed JSON",
 			file: goodFile,
 			data: `{"id":`,
+		},
+		{
+			name: "an object that never closes",
+			file: goodFile,
+			data: `{"id":"` + goodID + `"`,
+		},
+		{
+			name: "an object that closes with a bracket",
+			file: goodFile,
+			data: `{"id":"` + goodID + `","kind":"plan","plan":"p"]`,
+		},
+		{
+			name: "a key that is not a string",
+			file: goodFile,
+			data: `{1:2}`,
+		},
+		{
+			name: "garbage after the object",
+			file: goodFile,
+			data: `{"id":"` + goodID + `","kind":"plan","plan":"p"}x`,
 		},
 		{
 			name: "a top-level array",

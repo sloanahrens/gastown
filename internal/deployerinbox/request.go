@@ -5,7 +5,9 @@ package deployerinbox
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"regexp"
 )
 
@@ -56,25 +58,19 @@ func ParseRequest(name string, data []byte) (Request, error) {
 		return Request{}, fmt.Errorf("the request file %s is %d bytes, over the %d-byte limit", name, len(data), MaxRequestBytes)
 	}
 
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return Request{}, fmt.Errorf("parse the request file %s: %w", name, err)
-	}
-	for key := range fields {
-		if !requestKeys[key] {
-			return Request{}, fmt.Errorf("the request file %s has the key %q, and a request carries only id, kind and plan", name, key)
-		}
-	}
-
-	id, err := stringField(fields, "id")
+	fields, err := decodeRequestObject(data)
 	if err != nil {
 		return Request{}, fmt.Errorf("the request file %s %w", name, err)
 	}
-	kind, err := stringField(fields, "kind")
+	id, err := textField(fields, "id")
 	if err != nil {
 		return Request{}, fmt.Errorf("the request file %s %w", name, err)
 	}
-	plan, err := stringField(fields, "plan")
+	kind, err := textField(fields, "kind")
+	if err != nil {
+		return Request{}, fmt.Errorf("the request file %s %w", name, err)
+	}
+	plan, err := textField(fields, "plan")
 	if err != nil {
 		return Request{}, fmt.Errorf("the request file %s %w", name, err)
 	}
@@ -97,18 +93,60 @@ func ParseRequest(name string, data []byte) (Request, error) {
 	return req, nil
 }
 
-// stringField returns the JSON string at key, refusing a missing key and a
-// value that is not a JSON string, null included.
-func stringField(fields map[string]json.RawMessage, key string) (string, error) {
-	raw, ok := fields[key]
+// decodeRequestObject decodes data as exactly one JSON object whose values are
+// all strings. A map decode keeps the last value of a repeated key silently, so
+// the object is read token by token and a key seen twice is refused.
+func decodeRequestObject(data []byte) (map[string]string, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("does not parse as JSON: %w", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("is not a JSON object")
+	}
+
+	fields := make(map[string]string)
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("does not parse as JSON: %w", err)
+		}
+		// Decoder.Token returns a string for every object key.
+		key := keyTok.(string)
+		if _, dup := fields[key]; dup {
+			return nil, fmt.Errorf("has the key %q twice, and a request carries each key once", key)
+		}
+		if !requestKeys[key] {
+			return nil, fmt.Errorf("has the key %q, and a request carries only id, kind and plan", key)
+		}
+		valueTok, err := dec.Token()
+		if err != nil {
+			return nil, fmt.Errorf("does not parse as JSON: %w", err)
+		}
+		value, ok := valueTok.(string)
+		if !ok {
+			return nil, fmt.Errorf("has a %q value that is not a JSON string", key)
+		}
+		fields[key] = value
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, fmt.Errorf("does not parse as JSON: %w", err)
+	}
+	if tok, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, fmt.Errorf("does not parse as JSON: %w", err)
+		}
+		return nil, fmt.Errorf("has data after the request object (%v)", tok)
+	}
+	return fields, nil
+}
+
+// textField returns the string at key, refusing a missing key.
+func textField(fields map[string]string, key string) (string, error) {
+	value, ok := fields[key]
 	if !ok {
 		return "", fmt.Errorf("has no %q field", key)
 	}
-	// A pointer stays nil for JSON null, which decoding into a string alone
-	// would silently turn into the empty string.
-	var value *string
-	if err := json.Unmarshal(bytes.TrimSpace(raw), &value); err != nil || value == nil {
-		return "", fmt.Errorf("has a %q value that is not a JSON string", key)
-	}
-	return *value, nil
+	return value, nil
 }
