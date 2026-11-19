@@ -769,6 +769,44 @@ func TestTownRunnerRollApplyRefuses(t *testing.T) {
 	}
 }
 
+// TestTownRunnerRollWaitReadyRefusesAManifestItCannotBuild: the ready wait finds
+// the Deployment by rendering the manifests again, so values or a render that
+// fail there are an error and no cluster call.
+func TestTownRunnerRollWaitReadyRefusesAManifestItCannotBuild(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*runnerApplier)
+		want   string
+	}{
+		{name: "values unreadable", mutate: func(a *runnerApplier) {
+			a.values = func() (forgejorunner.Values, error) { return forgejorunner.Values{}, errors.New("file unreadable") }
+		}, want: "reading the control cluster's runner values"},
+		{name: "render refuses", mutate: func(a *runnerApplier) {
+			a.build = func(forgejorunner.Values) (forgejorunner.Manifests, error) {
+				return forgejorunner.Manifests{}, errors.New("no labels")
+			}
+		}, want: "rendering the runner"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			k := &recordingKubectl{answer: func(recordedKubectlCall) (string, int, error) { return "", 0, nil }}
+			a := testRunnerApplier(k)
+			tc.mutate(&a)
+
+			err := a.WaitReady(context.Background())
+
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+			if len(k.calls) != 0 {
+				t.Errorf("made %d cluster calls, want none: %v", len(k.calls), k.calls)
+			}
+		})
+	}
+}
+
 // TestTownRunnerRollReleasesTheHoldWhenTheRolloutIsNotReady: a rollout that does
 // not become ready fails the roll after the hold is taken, and the hold is still
 // released.
