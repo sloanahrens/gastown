@@ -16,11 +16,12 @@ import (
 // frameRunner answers a call with the frames it was given, as the executor
 // would after bd ran.
 type frameRunner struct {
-	req     bdgateway.Request
-	frames  []bdgateway.Frame
-	err     error
-	tailErr error
-	calls   int
+	req        bdgateway.Request
+	frames     []bdgateway.Frame
+	err        error
+	tailErr    error
+	calls      int
+	stderrHead string
 }
 
 func (r *frameRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.Reader, frames io.Writer) error {
@@ -28,6 +29,11 @@ func (r *frameRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.
 	r.req = req
 	if r.err != nil {
 		return r.err
+	}
+	if r.stderrHead != "" {
+		if sink, ok := frames.(bdgateway.StderrHeadSink); ok {
+			sink.SetStderrHead(r.stderrHead)
+		}
 	}
 	for _, f := range r.frames {
 		if err := bdgateway.WriteFrame(frames, f); err != nil {
@@ -122,6 +128,37 @@ func TestBdgwExec(t *testing.T) {
 	// marked read.
 	if !strings.Contains(line, `"actor":"town/crew/dipper"`) || !strings.Contains(line, `"write":false`) {
 		t.Errorf("call log line = %s, want actor town/crew/dipper and write false", line)
+	}
+}
+
+// TestBdgwExecStderrHeadIsLogged: bdgw exec's line carries bd's first stderr
+// line for a call bd failed, as the HTTP handler's line does (gt-hbhi39).
+func TestBdgwExecStderrHeadIsLogged(t *testing.T) {
+	t.Parallel()
+	policy, log, ec := newExecFixture(t)
+	const bdError = "Error resolving gt-x: no issue found"
+	runner := &frameRunner{
+		stderrHead: bdError + "\n",
+		frames: []bdgateway.Frame{
+			{Kind: bdgateway.FrameStderr, Payload: []byte(bdError + "\n")},
+			{Kind: bdgateway.FrameExit, Payload: []byte("1")},
+		},
+	}
+	status := execCall(context.Background(), policy, log, runner, ec, []string{"show", "gt-x"},
+		map[string]string{}, nil, io.Discard, io.Discard)
+	if status != 1 {
+		t.Errorf("status = %d, want bd's 1", status)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("log.Close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(ec.logDir, bdgateway.DefaultCallLogName))
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.Contains(line, `"exit_code":1`) || !strings.Contains(line, `"error":"`+bdError+`"`) {
+		t.Errorf("call log line = %s, want exit 1 and error naming bd's first stderr line", line)
 	}
 }
 

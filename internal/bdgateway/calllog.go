@@ -122,10 +122,12 @@ type CallRecord struct {
 	ExitCode int
 	// Duration is how long the call took.
 	Duration time.Duration
-	// Error is the cause the gateway recorded for a refused call. For a failure
-	// inside the gateway the caller reads a fixed message and the text stays in
-	// the log; a call refused at the concurrency cap is logged with the text the
-	// caller was given.
+	// Error is the cause the gateway recorded for a refused call, or bd's own
+	// first stderr line for a call bd failed. For a failure inside the gateway
+	// the caller reads a fixed message and the text stays in the log; a call
+	// refused at the concurrency cap is logged with the text the caller was
+	// given. SetStderrError fills it from bd's stderr when the gateway set no
+	// text of its own.
 	Error string
 	// Conflict is whether bd's stderr carried a Dolt commit conflict during the
 	// call. The line carries it only when it is true.
@@ -135,6 +137,27 @@ type CallRecord struct {
 	// and Stats counts it per reason. The code is the gateway's own word, never
 	// text from the request.
 	Refusal string
+}
+
+// SetStderrError fills Error from the start of bd's stderr for a call bd itself
+// failed: a non-zero exit with no error text the gateway set. A zero exit, an
+// empty stderr and a call that already carries the gateway's own text keep the
+// value they had. The line keeps bd's first stderr line; Log bounds it and
+// strips control characters.
+func (rec *CallRecord) SetStderrError(stderrHead string) {
+	if rec.Error != "" || rec.ExitCode == 0 || stderrHead == "" {
+		return
+	}
+	rec.Error = firstLine(stderrHead)
+}
+
+// firstLine returns text up to its first line break, so a failed call's log
+// line keeps bd's first stderr line rather than every line bd wrote.
+func firstLine(text string) string {
+	if i := strings.IndexAny(text, "\r\n"); i >= 0 {
+		return text[:i]
+	}
+	return text
 }
 
 // Stats is a snapshot of the log's counters, which GET /v1/stats serves.

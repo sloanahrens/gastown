@@ -124,7 +124,7 @@ func execCall(ctx context.Context, policy *bdgateway.Policy, log *bdgateway.Call
 		fmt.Fprintln(stderr, "bdgw exec: the call ended without an exit frame")
 		status = exitRefused
 	}
-	log.Log(bdgateway.CallRecord{
+	rec := bdgateway.CallRecord{
 		Class:    string(bdgateway.TokenOperator),
 		Caller:   ec.caller,
 		Actor:    bdgateway.CallActor(filtered),
@@ -132,7 +132,9 @@ func execCall(ctx context.Context, policy *bdgateway.Policy, log *bdgateway.Call
 		Write:    verb.Class != bdgateway.ClassRead,
 		ExitCode: status,
 		Duration: time.Since(start),
-	})
+	}
+	rec.SetStderrError(sink.StderrHead())
+	log.Log(rec)
 	return status
 }
 
@@ -163,7 +165,17 @@ type streamSink struct {
 	started bool
 	status  int
 	exited  bool
+	// stderrHead is the start of bd's stderr the executor kept for the log
+	// line; only the executor's goroutine writes it, before execCall reads it.
+	stderrHead string
 }
+
+// SetStderrHead takes the start of bd's stderr the executor kept. It
+// implements StderrHeadSink.
+func (s *streamSink) SetStderrHead(head string) { s.stderrHead = head }
+
+// StderrHead returns the start of bd's stderr the executor kept.
+func (s *streamSink) StderrHead() string { return s.stderrHead }
 
 func (s *streamSink) Write(p []byte) (int, error) {
 	frame, err := bdgateway.ReadFrame(bytes.NewReader(p))

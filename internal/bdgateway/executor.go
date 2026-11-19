@@ -40,6 +40,11 @@ const (
 	// ErrKillFailed and reaped by a goroutine, so a bd that ignores the kill
 	// cannot hold Exec and its concurrency slot past the deadline.
 	DefaultKillGrace = 2 * time.Second
+
+	// stderrHeadBytes bounds how much of bd's stderr a call keeps for its log
+	// line. The first line is what names bd's failure; the cap lets a line that
+	// is one long run of bytes stay bounded.
+	stderrHeadBytes = 256
 )
 
 // The executor's named refusals. A caller matches these rather than message
@@ -295,6 +300,13 @@ func (e *Executor) Exec(ctx context.Context, req Request, stdin io.Reader, frame
 	if err != nil {
 		writeEnding(fw, CodeStartFailed, ExitRefused, messageStartFailed)
 		return fmt.Errorf("bdgateway: starting bd: %w", err)
+	}
+	// A sink that keeps the start of bd's stderr gets it on every ending,
+	// including one the gateway caused, so a failed call's log line can name
+	// bd's own error. The defer reads the head under its lock, which a pump the
+	// drain gave up on may still be writing.
+	if sink, ok := frames.(StderrHeadSink); ok {
+		defer func() { sink.SetStderrHead(fw.stderr.text()) }()
 	}
 
 	// out is the one record of how this call ends. The watcher writes the
@@ -769,10 +781,52 @@ var errFrameWrite = errors.New("bdgateway: writing a frame")
 // errRead marks a pump that could not read bd's output.
 var errRead = errors.New("bdgateway: reading bd's output")
 
+// StderrHeadSink is a frames writer that keeps the start of bd's stderr for
+// the call's log line. Both transports' sinks implement it; a runner that is
+// not an Executor never calls SetStderrHead, and its call logs no stderr text.
+type StderrHeadSink interface {
+	// SetStderrHead takes the first stderrHeadBytes of bd's stderr, or fewer
+	// when bd wrote less, and may be called once when the call ends.
+	SetStderrHead(head string)
+}
+
+// stderrHead is the start of bd's stderr one call keeps. Its mutex makes the
+// head readable while a pump the drain abandoned still writes to it.
+type stderrHead struct {
+	mu   sync.Mutex
+	buf  []byte
+	full bool
+}
+
+// note appends p to the head until stderrHeadBytes are kept.
+func (h *stderrHead) note(p []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.full {
+		return
+	}
+	room := stderrHeadBytes - len(h.buf)
+	if len(p) >= room {
+		h.buf = append(h.buf, p[:room]...)
+		h.full = true
+		return
+	}
+	h.buf = append(h.buf, p...)
+}
+
+// text returns the bytes kept so far.
+func (h *stderrHead) text() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return string(h.buf)
+}
+
 // frameWriter serializes the stdout and stderr pumps onto one frame stream.
 type frameWriter struct {
 	mu sync.Mutex
 	w  io.Writer
+	// stderr is the stderr pump's head, kept for the call's log line.
+	stderr stderrHead
 	// writing counts the writes in progress or waiting for the lock. A pump that
 	// is only slow to be scheduled is not in a write; one blocked on a client that
 	// stopped reading is, and that is what the drain after a call's end tells
@@ -824,6 +878,9 @@ func (f *frameWriter) copy(r io.Reader, kind FrameKind) error {
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
+			if kind == FrameStderr {
+				f.stderr.note(buf[:n])
+			}
 			if werr := f.write(kind, buf[:n]); werr != nil {
 				return fmt.Errorf("%w: %v", errFrameWrite, werr)
 			}
