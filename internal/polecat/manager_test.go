@@ -3160,6 +3160,120 @@ func TestLoadFromBeads_SpawningClaim(t *testing.T) {
 	})
 }
 
+// TestSpawningClaimEntryPoints pins gt-8agczc: gt-lgcwd6 taught the derivation
+// that a sling's agent-bead claim (spawning, hook_bead set, work bead not yet
+// hooked) holds the seat, but a sling asks about a seat through entry points
+// that reach the derivation by different paths. Get reads one seat directly,
+// List through the rig-wide batch, IdlePolecats and FindIdlePolecat filter its
+// results, and PeekNamedReuse normalizes a sessionless seat with no Issue to
+// idle before it decides. Each must read the claim as a taken seat.
+func TestSpawningClaimEntryPoints(t *testing.T) {
+	t.Parallel()
+	const (
+		claimed = "alpha"
+		other   = "beta"
+		workID  = "gt-rig-claimed-work"
+	)
+
+	// claimedRig is a two-seat rig in which a sling has just claimed claimed:
+	// its agent bead is spawning with hook_bead=workID, updated 30 s ago, and
+	// workID is open and unassigned (the sling hooks it later). other is the
+	// rig's settled idle seat.
+	claimedRig := func(t *testing.T) *Manager {
+		t.Helper()
+		mgr, _, bd, _, _ := canonicalWithPolecats(t, false, claimed, other)
+		mgr.spawnGraceWindow = 5 * time.Minute
+		// 30 s against the 5m window: only a multi-minute pause between setup
+		// and the read drifts the claim out of the window.
+		fresh := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339)
+		bd.Seed(
+			beads.Issue{ID: workID, Title: "claimed work", Status: string(beads.StatusOpen), UpdatedAt: fresh},
+			beads.Issue{
+				ID: mgr.agentBeadID(claimed), Title: "agent", Labels: []string{"gt:agent"}, Status: "open", UpdatedAt: fresh,
+				Description: beads.FormatAgentDescription("agent", &beads.AgentFields{
+					RoleType: "polecat", Rig: mgr.rig.Name, AgentState: "spawning", HookBead: workID, CleanupStatus: "clean",
+				}),
+			},
+		)
+		return mgr
+	}
+
+	t.Run("Get reports the claimed seat spawning with its issue", func(t *testing.T) {
+		t.Parallel()
+		p, err := claimedRig(t).Get(claimed)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", claimed, err)
+		}
+		if p.State != StateSpawning {
+			t.Errorf("state = %q, want %q: Get reads the sling's claim as a free seat", p.State, StateSpawning)
+		}
+		if p.Issue != workID {
+			t.Errorf("issue = %q, want %q (the claimed work bead)", p.Issue, workID)
+		}
+	})
+
+	t.Run("List reports it spawning and the other seat idle", func(t *testing.T) {
+		t.Parallel()
+		list, err := claimedRig(t).List()
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		byName := make(map[string]*Polecat, len(list))
+		for _, p := range list {
+			byName[p.Name] = p
+		}
+		got, ok := byName[claimed]
+		if !ok {
+			t.Fatalf("List omitted %s, which has a seat in the rig", claimed)
+		}
+		if got.State != StateSpawning {
+			t.Errorf("state = %q, want %q: the batched List reads the sling's claim as a free seat", got.State, StateSpawning)
+		}
+		if got.Issue != workID {
+			t.Errorf("issue = %q, want %q (the claimed work bead)", got.Issue, workID)
+		}
+		if otherSeat, ok := byName[other]; !ok || otherSeat.State != StateIdle {
+			t.Errorf("seat %s = %+v, want StateIdle: the untouched seat must still read idle", other, otherSeat)
+		}
+	})
+
+	t.Run("IdlePolecats yields only the unclaimed seat", func(t *testing.T) {
+		t.Parallel()
+		seats := idleSeatNames(t, claimedRig(t))
+		if slices.Contains(seats, claimed) {
+			t.Errorf("IdlePolecats yielded %s (%v) while another sling holds its claim", claimed, seats)
+		}
+		if !slices.Contains(seats, other) {
+			t.Errorf("IdlePolecats yielded %v, want the idle seat %s: the claim must not hide the rest of the pool", seats, other)
+		}
+	})
+
+	t.Run("PeekNamedReuse refuses the claimed seat and names its held issue", func(t *testing.T) {
+		t.Parallel()
+		held, err := claimedRig(t).PeekNamedReuse(claimed)
+		if !errors.Is(err, ErrPolecatNeedsRecovery) {
+			t.Fatalf("PeekNamedReuse(%s) err = %v, want ErrPolecatNeedsRecovery: the preview must stop where the reuse gate would", claimed, err)
+		}
+		if held != workID {
+			t.Errorf("held issue = %q, want %q (the claimed work bead)", held, workID)
+		}
+	})
+
+	t.Run("FindIdlePolecat skips it", func(t *testing.T) {
+		t.Parallel()
+		p, err := claimedRig(t).FindIdlePolecat()
+		if err != nil {
+			t.Fatalf("FindIdlePolecat: %v", err)
+		}
+		if p == nil {
+			t.Fatalf("FindIdlePolecat found no seat, want the idle seat %s", other)
+		}
+		if p.Name != other {
+			t.Errorf("FindIdlePolecat chose %s, want %s: the claimed seat is not the allocator's", p.Name, other)
+		}
+	})
+}
+
 // A removed polecat must take its intent record with it: townhealth reads
 // every record under .runtime/agents, so one that outlives its seat reports
 // that seat dead forever (gt-u7voe).
