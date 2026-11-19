@@ -136,6 +136,9 @@ type RealEnvOptions struct {
 	Files RealFiles
 	// Run runs every git and bd command; nil is an error.
 	Run RunnerDir
+	// BdGateway refuses the extract when the bd it would run is not wired to a
+	// gateway; nil runs with no check, as the extract did before the check.
+	BdGateway BdGatewayCheck
 }
 
 // RealTown is what real_env builds: the extract's sources, the town they were
@@ -160,6 +163,11 @@ func RealEnv(ctx context.Context, opts RealEnvOptions) (RealTown, error) {
 	getenv := opts.Getenv
 	if getenv == nil {
 		getenv = os.Getenv
+	}
+	if opts.BdGateway != nil {
+		if err := opts.BdGateway(getenv); err != nil {
+			return real, fmt.Errorf("real env: the metrics extract refuses to run: %w", err)
+		}
 	}
 	findHome := func() (string, error) { return homeDir(opts.Home, opts.HomeDir) }
 	home, err := findHome()
@@ -371,6 +379,14 @@ func realBd(ctx context.Context, r RunnerDir) BdRun {
 		return run(ctx, r, dir, append([]string{"bd"}, args...), runTimeout)
 	}
 }
+
+// BdGatewayCheck decides whether the extract's bd can reach its gateway. It is
+// injected by the caller that owns the host's bd (internal/cmd), so this package
+// does not depend on the forwarder: it returns the refusal the check gives and
+// nothing else. getenv reads the environment the extract runs in. A refusal
+// stops the extract before it runs a command, so no empty estimates are written
+// (gt-g8oimf).
+type BdGatewayCheck func(getenv func(string) string) error
 
 // rigRepo is the path of a rig's bare repository.
 func rigRepo(town, rig string) string {

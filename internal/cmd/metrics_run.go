@@ -89,9 +89,10 @@ func hostMetricsHourSteps() metricsHourSteps {
 		dataset: jevDatasetHour,
 		weekly: func(ctx context.Context, out io.Writer, town string) error {
 			return metrics.Commands{
-				Today: time.Now().Format(time.DateOnly),
-				Town:  town,
-				Out:   out,
+				Today:     time.Now().Format(time.DateOnly),
+				Town:      town,
+				Out:       out,
+				BdGateway: hostBdGateway(),
 			}.RunStoryPointsWeekly(ctx)
 		},
 	}

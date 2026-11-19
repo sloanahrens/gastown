@@ -58,6 +58,7 @@ func newTownMetricsCmd(name, short string, run func(context.Context, string, met
 				Today:             time.Now().Format(time.DateOnly),
 				Out:               cmd.OutOrStdout(),
 				StoryPointsRevert: name == metrics.CommandStoryPointsAdopt && revert,
+				BdGateway:         hostBdGateway(),
 			})
 		},
 	}

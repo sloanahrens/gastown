@@ -46,6 +46,7 @@ func analysisOptions(town string) metrics.AnalysisOptions {
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    metrics.PlatformMangoBin(town),
 		ArchiveDir:  func() (string, error) { return metrics.MetricsArchiveDir(town) },
+		BdGateway:   hostBdGateway(),
 	}
 }
 

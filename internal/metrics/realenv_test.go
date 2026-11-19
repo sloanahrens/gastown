@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/events"
@@ -584,6 +585,115 @@ func TestRealEnvNeedsARunner(t *testing.T) {
 	t.Parallel()
 	if _, err := RealEnv(context.Background(), RealEnvOptions{Town: t.TempDir(), Getenv: noEnv}); err == nil {
 		t.Fatal("RealEnv wired a town with no runner")
+	}
+}
+
+// gatewayCheck is an injected gateway check that refuses when BD_GATEWAY_URL is
+// unset, the way the forwarder refuses a bd in forwarder mode with no gateway. It
+// reads only the getenv it is given.
+func gatewayCheck(getenv func(string) string) error {
+	if getenv("BD_GATEWAY_URL") == "" {
+		return refusedGateway(getenv)
+	}
+	return nil
+}
+
+// refusedGateway is the refusal a forwarder's check gives: it names BD_GATEWAY_URL.
+// A test that must not read the host's environment injects it directly.
+func refusedGateway(func(string) string) error {
+	return errors.New("gtwrap: BD_GATEWAY_URL is unset, and bd is in forwarder mode")
+}
+
+// TestRealEnvGatewayRefuses pins the extract's gateway guard: an injected check
+// that refuses makes RealEnv refuse before any command runs, a check that passes
+// builds the bd runner, and no check builds it as before (gt-g8oimf).
+func TestRealEnvGatewayRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		check   BdGatewayCheck
+		env     map[string]string
+		wantErr string // empty means RealEnv builds the bd runner
+	}{
+		{name: "a refusing check stops the extract before any command", check: gatewayCheck,
+			env: map[string]string{}, wantErr: "BD_GATEWAY_URL"},
+		{name: "a passing check builds the bd runner", check: gatewayCheck,
+			env: map[string]string{"BD_GATEWAY_URL": "http://gateway:7440"}},
+		{name: "no check builds the bd runner as before", env: map[string]string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, home := realFixture(t)
+			runner := &realRunner{answer: realGit(town)}
+			real, err := RealEnv(context.Background(), RealEnvOptions{
+				Today: "smoke", Town: town, DocsDir: t.TempDir(), Home: home, Run: runner.run,
+				Getenv:    func(name string) string { return tc.env[name] },
+				BdGateway: tc.check,
+			})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("RealEnv refused a bd that needs no gateway: %v", err)
+				}
+				if real.Extract.RunBd == nil {
+					t.Fatal("RealEnv built no bd runner")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("RealEnv wired the extract with no gateway, want a refusal naming %s", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("RealEnv error = %q, want it to name %s", err, tc.wantErr)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("RealEnv ran %d commands before refusing, want none", len(runner.calls))
+			}
+		})
+	}
+}
+
+// TestInProcessExtractRefusesWithTheGatewayCheck pins that the analysis's
+// in-process extract hands its gateway check to RealEnv: a refusal stops the run
+// before any command, and the refusal names BD_GATEWAY_URL (gt-g8oimf).
+func TestInProcessExtractRefusesWithTheGatewayCheck(t *testing.T) {
+	t.Parallel()
+	town, home := realFixture(t)
+	runner := &realRunner{answer: realGit(town)}
+	extract := inProcessExtract(time.Now(), home, runner.run, refusedGateway)
+	_, err := extract(context.Background(), town, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "BD_GATEWAY_URL") {
+		t.Fatalf("inProcessExtract error = %v, want a refusal naming BD_GATEWAY_URL", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("inProcessExtract ran %d commands before refusing, want none", len(runner.calls))
+	}
+}
+
+// TestCommandsWireRefusesWithTheGatewayCheck pins that the extract command's
+// default wiring hands Commands.BdGateway to RealEnv: the refusal comes back from
+// Wire before the town is read (gt-g8oimf).
+func TestCommandsWireRefusesWithTheGatewayCheck(t *testing.T) {
+	t.Parallel()
+	c := Commands{Today: "smoke", Town: t.TempDir(), BdGateway: refusedGateway}.withDefaults()
+	_, err := c.Wire(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "BD_GATEWAY_URL") {
+		t.Fatalf("Wire error = %v, want a refusal naming BD_GATEWAY_URL", err)
+	}
+}
+
+// TestRealEnvGatewayChildEnv pins that the extract's bd child keeps the gateway
+// pair the forwarder needs, and drops a secret the allowlist does not name.
+func TestRealEnvGatewayChildEnv(t *testing.T) {
+	t.Parallel()
+	got := childEnv(DefaultAllowEnv, nil, fakeParentEnv(map[string]string{
+		"BD_GATEWAY_URL":        "http://host.docker.internal:7440",
+		"BD_GATEWAY_TOKEN_FILE": "/run/gt/bd-gateway/token",
+		"BD_GATEWAY_TOKEN":      "parent-only",
+	}))
+	want := []string{"BD_GATEWAY_URL=http://host.docker.internal:7440", "BD_GATEWAY_TOKEN_FILE=/run/gt/bd-gateway/token"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("childEnv(DefaultAllowEnv) = %q, want %q", got, want)
 	}
 }
 
