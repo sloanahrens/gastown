@@ -58,6 +58,10 @@ func landingLaneKey(reader beadReader, beadID, lane string) string {
 // silence is not (gt-il3out).
 func landingEscalationOpen(reader beadReader, town beads.Client, logf func(string, ...any)) func(beadID, lane string) (bool, error) {
 	return func(beadID, lane string) (bool, error) {
+		if _, err := reader.Show(beadID); err != nil {
+			logf("%s: reading the bead for its escalation key: %v; raising it again", beadID, err)
+			return false, nil
+		}
 		key := landingLaneKey(reader, beadID, lane)
 		open, err := notify.OpenByKey(town, key)
 		if err != nil {

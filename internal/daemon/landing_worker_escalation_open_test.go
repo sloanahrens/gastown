@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
@@ -20,6 +21,11 @@ type failedList struct{ beads.Client }
 func (failedList) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return nil, errors.New("store down")
 }
+
+// failedShow is a bead store whose reads fail, so the escalation key cannot be built.
+type failedShow struct{ landworker.RetryInner }
+
+func (failedShow) Show(string) (*beads.Issue, error) { return nil, errors.New("bead gone") }
 
 // TestLandingEscalationOpen: the escalation check the daemon builds asks
 // under the bead's key with the lane appended, so only that lane's open
@@ -77,6 +83,16 @@ func TestLandingEscalationOpen(t *testing.T) {
 	if n := strings.Count(logs.String(), "store down"); n != 2 {
 		t.Errorf("the failed read was logged %d times; want 2", n)
 	}
+	d.landingBeads, logs = failedShow{rig}, strings.Builder{}
+	d.logger = log.New(&logs, "", 0)
+	if w, err = d.newRigLandingWorker("gastown"); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := w.EscalationOpen("gt-1", "polecat"); open || !strings.Contains(logs.String(), "bead gone") {
+		t.Errorf("a failed bead read: open=%v, log %q; want not open and logged", open, logs.String())
+	}
+	d.landingBeads = rig
+	w, _ = d.newRigLandingWorker("gastown")
 	w.Escalate("gt-1", "polecat", "rejected")
 	got := d.notifier.(*notifyfake.Recorder).Escalations()
 	if len(got) != 1 || got[0].Escalation.Fingerprint != laneKey {
