@@ -18,15 +18,60 @@ green. The list below is a summary.
 
 ## Restoring the town configuration
 
-The `town_state_backup` patrol copies the town's configuration into the JSONL
-backup repository, under `town-state/`, and pushes that commit to the backup
-repository's origin. The files it copies are the rows of the `townStateExports`
-table in `internal/daemon/town_state_backup.go`. It never holds
-`settings/daemon.env` or any `*.env`, `*.key` or `*token*` file: those are the
-Secrets. To seed a claim whose configuration is gone, clone the backup
-repository, copy its `town-state/` tree over the claim's town root, then copy
-the Secrets in from the operator's own copy. The restore is done when
-`gt config validate` passes against the claim.
+The restore path is the nightly town-state backup and `gt town state seed`. The
+`town_state_backup` patrol (`internal/daemon/town_state_backup.go`) is not it.
+That patrol copies the town's configuration rows into the JSONL backup
+repository under `town-state/` and pushes the commit to the backup
+repository's origin; it is off by default, and it is not enabled on the live
+town, so a claim is not restored from it.
+
+The scheduled-maintenance step (`internal/daemon/town_state_nightly.go`), when
+`patrols.scheduled_maintenance.town_state_backup_root` names a directory, writes
+one verified night per day under it. On the Mac it is
+`~/gt-backups/town-state`; the pod sees it at its mount,
+`/Users/Shared/gt-backups/town-state`. A night is the dated directory
+`~/gt-backups/town-state/<date>/`, holding `state.tar.gz` (the exported town
+state) and `backup.json` (the manifest, written last, so a directory without
+one never finished). Rotation keeps the newest 14 nights (`townbackup.Keep`).
+
+To restore a night:
+
+1. Check the archive. `verify` refuses one it cannot read in full, one with no
+   `mayor/town.json`, and one carrying a secret-shaped name or a credential,
+   and exits non-zero:
+
+   ```bash
+   gt town state backup verify ~/gt-backups/town-state/<date>/state.tar.gz
+   ```
+
+2. Extract `state.tar.gz` into a scratch town root, a fresh directory at the
+   absolute path the seed helper Pod mounts the empty claim at.
+3. Seed the claim from the restored root. The seed streams the root through
+   `gt town state export` and `gt town state import`, then compares both sides
+   by sha256 and link target:
+
+   ```bash
+   gt town state seed --town <scratch-root> --namespace <namespace> \
+     --pod <seed-helper-pod> --context <kubectl-context> \
+     --secrets-manifest deploy/daemon/secrets.yaml
+   ```
+
+The archive holds no Secrets: the backup export leaves out every entry whose
+path has a secret shape, a name ending in `.env`, `.key`, `.pem` or `.dsn` or
+holding `token` or `secret`, and `--secrets-manifest` keeps the manifest's
+files out of the seed's stream and of its listing. The Secrets come from the
+operator's own copy of the config directory, `~/.config/gt`: `gt daemon compose
+write --config-dir ~/.config/gt --secrets-manifest deploy/daemon/secrets.yaml`
+mounts the manifest's files read-only for a container, and `gt town cluster
+render` turns the same list into the pod's Secrets. A restored claim takes them
+from that copy, not from the archive.
+
+`TestTownStateBackupRestoreIsAcceptedBySeed`
+(`internal/cmd/town_state_backup_restore_test.go`, from bead gt-9x9bou) proves
+the restore: a night's archive passes `backup verify`, extracts into a fresh
+town root unchanged, and the seed accepts that root into an empty claim. The
+test extracts into a temporary directory and runs a fake pod engine, so it does
+not prove the live host mount the daemon writes is writable.
 
 ## Mac crew and bird clones
 
