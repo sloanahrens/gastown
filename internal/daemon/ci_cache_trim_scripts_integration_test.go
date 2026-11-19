@@ -1048,6 +1048,145 @@ func TestIntegrationCICacheTrimLRUApplyDirs(t *testing.T) {
 	}
 }
 
+// TestIntegrationCICacheTrimLRUApplyFloorHolds proves the floor on apply: a
+// volume far over its cap loses nothing when every file in it is younger than
+// the floor. The floor passed is above the tree's oldest file, so find's floor
+// bound lists none of them, while the 1 KiB cap leaves the cut wanting nearly
+// the whole volume. apply reports removed 0, reads the same size before and
+// after, and the volume is still over its cap.
+//
+// Dropping the floor from the program — find's -mmin +0 in both stat branches
+// and the age clamp that never lets the age fall below the floor — lists the
+// tree and turns this test red: the cut then selects and removes the files,
+// starting with the past-age ones, so removed is 6 here, not 0.
+func TestIntegrationCICacheTrimLRUApplyFloorHolds(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	ciCacheLRUTreeWrite(t, root, time.Now())
+	before := ciCacheLRUBefore(t, root)
+	beforeFiles := ciCacheScriptFiles(t, root)
+
+	// Above ciCacheLRUTree's oldest row (180 minutes), so every file is under
+	// the floor; the cap is 1 KiB, far under the volume, so the cut would want
+	// nearly all of it.
+	const (
+		floorMinutes = 240
+		capKiB       = 1
+	)
+	for _, f := range ciCacheLRUTree {
+		if f.ageMin >= floorMinutes {
+			t.Fatalf("the tree's %s is dated %d minutes, not under the %d minute floor", f.path, f.ageMin, floorMinutes)
+		}
+	}
+
+	stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "apply", root, "120", strconv.Itoa(capKiB), strconv.Itoa(floorMinutes))
+	if status != 0 {
+		t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+	}
+	reply, err := parseCICacheTrimReply([]byte(stdout))
+	if err != nil {
+		t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+	}
+	if reply.removed != 0 {
+		t.Errorf("removed = %d, want 0: every file is under the %d minute floor", reply.removed, floorMinutes)
+	}
+	if reply.beforeKiB != before {
+		t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+	}
+	if reply.afterKiB != reply.beforeKiB {
+		t.Errorf("after_kib = %d, want before_kib, %d: a file under the floor is never removed", reply.afterKiB, reply.beforeKiB)
+	}
+	if reply.afterKiB <= capKiB {
+		t.Errorf("after_kib = %d, want the volume still over its %d KiB cap: the floor holds, so the excess stays", reply.afterKiB, capKiB)
+	}
+	if got := ciCacheScriptFiles(t, root); !slices.Equal(got, beforeFiles) {
+		t.Errorf("the apply removed files under the floor: %v, before %v", got, beforeFiles)
+	}
+}
+
+// TestIntegrationCICacheTrimLRUApplyFloorUnderCap proves the at-or-under-cap
+// case on apply: with the volume no bigger than its cap the cut selects
+// nothing, so apply removes only the files past the age and keeps every file
+// on the other side of it. The age is 120 minutes and the floor is the
+// configured 60, so only 00/old-3h is past the age; ab/lru-100m, 00/lru-96m
+// and ab/lru-90m sit between the floor and the age and are the files the cut
+// would take if it ignored the cap. apply removes files only, so both top-level
+// shard directories stay: 00 still holding lru-96m, ab its four files.
+//
+// Dropping the cap from the excess (excess=$before) makes the cut select those
+// three between-floor-and-age files as well, so removed becomes 4 and the kept
+// set assertion turns this test red.
+func TestIntegrationCICacheTrimLRUApplyFloorUnderCap(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		capOf func(before int64) int64
+	}{
+		{name: "at the cap", capOf: func(before int64) int64 { return before }},
+		{name: "under the cap", capOf: func(before int64) int64 { return before + 4096 }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			ciCacheLRUTreeWrite(t, root, time.Now())
+			before := ciCacheLRUBefore(t, root)
+			capKiB := tt.capOf(before)
+
+			stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "apply", root, "120",
+				strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+			if status != 0 {
+				t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+			}
+			reply, err := parseCICacheTrimReply([]byte(stdout))
+			if err != nil {
+				t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+			}
+
+			gone := ciCacheLRUPaths(root, "00/old-3h")
+			if want := int64(len(gone)); reply.removed != want {
+				t.Errorf("removed = %d, want the %d file past the age", reply.removed, want)
+			}
+			if reply.beforeKiB != before {
+				t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+			}
+			for _, path := range gone {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("the file past the age is still present after the apply: %s (stat error %v)", path, err)
+				}
+			}
+			kept := []string{
+				"trim.txt",
+				filepath.Join("ab", "lru-100m"), filepath.Join("00", "lru-96m"), filepath.Join("ab", "lru-90m"),
+				filepath.Join("ab", "mid-45m"), filepath.Join("ab", "fresh-10m"),
+			}
+			slices.Sort(kept)
+			if got := ciCacheScriptFiles(t, root); !slices.Equal(got, kept) {
+				t.Errorf("the volume holds %v after the apply, want only the files not past the age: %v", got, kept)
+			}
+			if after := ciCacheLRUBefore(t, root); reply.afterKiB != after {
+				t.Errorf("after_kib = %d, want the volume read again after the removal, %d KiB", reply.afterKiB, after)
+			}
+			if reply.afterKiB > capKiB {
+				t.Errorf("after_kib = %d, want at or under the %d KiB cap", reply.afterKiB, capKiB)
+			}
+
+			// Files only: 00 survives the removal holding lru-96m, and ab
+			// survives holding its four files.
+			for _, shard := range []string{"00", "ab"} {
+				info, err := os.Stat(filepath.Join(root, shard))
+				if err != nil {
+					t.Errorf("the top-level shard %s is gone after the apply: %v", shard, err)
+					continue
+				}
+				if !info.IsDir() {
+					t.Errorf("the top-level %s is no longer a directory after the apply", shard)
+				}
+			}
+		})
+	}
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh
