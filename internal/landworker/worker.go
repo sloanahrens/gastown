@@ -140,7 +140,7 @@ type Worker struct {
 	Landings Landings
 	// Records, when set, is the queue of landing records an earlier pass could
 	// not write; each pass writes them once bd answers (gt-qa5ge8). nil skips it.
-	Records *land.RecordQueue
+	Records RecordQueue
 	// noBatchSaid is set once the worker has said its beads client cannot batch
 	// reads, so the pass that repeats says so once, not on every pass.
 	noBatchSaid bool

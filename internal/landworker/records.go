@@ -5,6 +5,13 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
+// RecordQueue is the queue of landing records a pass drains: land.RecordQueue
+// in production, a fake in a test.
+type RecordQueue interface {
+	Pending() ([]land.PendingRecord, error)
+	Remove(land.PendingRecord) error
+}
+
 // drainRecordQueue writes the landing records an earlier pass queued because bd
 // would not take them, and drops each one its bead already carries. A record
 // that still cannot be written waits for a later pass, and one line says how
@@ -38,13 +45,8 @@ func (w *Worker) writeQueuedRecord(rec land.PendingRecord) bool {
 	switch rec.Kind {
 	case land.RecordKindNotes:
 		var issue *beads.Issue
-		if issue, err = w.Beads.Show(rec.Bead); err == nil {
-			// reject keys the record "<head> <kind>", so a block already holding
-			// both means the note is on the bead.
-			last, ok := land.ParseRejectionNote(issue.Notes)
-			if !ok || last.Head+" "+last.Kind != rec.Key {
-				err = w.Beads.AppendNotes(rec.Bead, rec.Text)
-			}
+		if issue, err = w.Beads.Show(rec.Bead); err == nil && !hasRejectionBlock(issue.Notes, rec.Key) {
+			err = w.Beads.AppendNotes(rec.Bead, rec.Text)
 		}
 	case land.RecordKindComment:
 		var comments []beads.Comment
@@ -59,4 +61,17 @@ func (w *Worker) writeQueuedRecord(rec land.PendingRecord) bool {
 		return false
 	}
 	return true
+}
+
+// hasRejectionBlock reports whether any rejection block in notes is keyed key,
+// "<head> <kind>": reject writes that key, so a block holding it means the note
+// is on the bead. Every block is read, not only the last, so a note followed by
+// a newer block is not written twice.
+func hasRejectionBlock(notes, key string) bool {
+	for _, rej := range land.Rejections(notes) {
+		if rej.Head+" "+rej.Kind == key {
+			return true
+		}
+	}
+	return false
 }
