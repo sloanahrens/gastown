@@ -145,18 +145,22 @@ func TestJobsRowPerStep(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	steps := config.DaemonSteps()
-	// A root with no maintenance state has no Dolt gc row, so the steps and the
-	// nightly backup make the whole list.
-	if len(jobs) != len(steps)+1 {
-		t.Fatalf("got %d rows, want %d daemon step rows plus the dolt_backup row", len(jobs), len(steps)+1)
+	// A root with no maintenance state has no Dolt gc row, and its missing node
+	// disk record is one unknown row, so the steps, the nightly backup and that
+	// row make the whole list.
+	if len(jobs) != len(steps)+2 {
+		t.Fatalf("got %d rows, want %d daemon step rows plus the dolt_backup and node_disk rows", len(jobs), len(steps)+2)
 	}
 	for i, s := range steps {
 		if jobs[i].Name != s.Name || jobs[i].Kind != s.Kind {
 			t.Errorf("row %d = %s (%s), want %s (%s)", i, jobs[i].Name, jobs[i].Kind, s.Name, s.Kind)
 		}
 	}
-	if last := jobs[len(jobs)-1]; last.Name != doltBackupJobName {
-		t.Errorf("last row = %q, want %q", last.Name, doltBackupJobName)
+	if _, ok := findJob(jobs, doltBackupJobName); !ok {
+		t.Errorf("no %q row in %d rows", doltBackupJobName, len(jobs))
+	}
+	if _, ok := findJob(jobs, nodeDiskJobName); !ok {
+		t.Errorf("no %q row in %d rows", nodeDiskJobName, len(jobs))
 	}
 	if _, ok := findJob(jobs, doltGCName); ok {
 		t.Errorf("dolt_gc row present, want none without maintenance state")

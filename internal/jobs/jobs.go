@@ -1,8 +1,9 @@
 // Package jobs lists the town's maintenance jobs: every daemon step, the jobs
-// the daemon runs inside one (the Dolt gc) and the nightly Dolt backup, with the
-// last completion, the cadence and whether it is overdue. The list is read-only.
-// It reads the daemon's patrol config, last-run record, maintenance state, update
-// history and backup root, and writes nothing, calls no daemon and runs no bd.
+// the daemon runs inside one (the Dolt gc), the nightly Dolt backup and each
+// node's disk reading, with the last completion, the cadence and whether it is
+// overdue. The list is read-only. It reads the daemon's patrol config, last-run
+// record, maintenance state, update history, backup root and node disk record,
+// and writes nothing, calls no daemon and runs no bd.
 package jobs
 
 import (
@@ -88,10 +89,11 @@ type Options struct {
 }
 
 // List returns one Job per daemon step in config.DaemonSteps, one for the
-// nightly Dolt backup and, when the daemon has recorded one, the Dolt gc row,
-// judged at now. An unreadable patrol config is an error, because no cadence can
-// be trusted. An unreadable last-run record, update history, backup root or
-// maintenance state is not: its rows come back as StateUnknown.
+// nightly Dolt backup, the Dolt gc row when the daemon has recorded one, and one
+// per node in the node disk record, judged at now. An unreadable patrol config
+// is an error, because no cadence can be trusted. An unreadable last-run record,
+// update history, backup root, maintenance state or node disk record is not: its
+// rows come back as StateUnknown.
 func List(townRoot string, opts Options, now time.Time) ([]Job, error) {
 	return list(townRoot, opts, config.DaemonSteps(), now)
 }
@@ -126,7 +128,8 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 		jobs = append(jobs, j)
 	}
 	jobs = append(jobs, doltBackupRow(backup, backupNight, backupErr, now))
-	return append(jobs, doltGCRows(townRoot, now)...), nil
+	jobs = append(jobs, doltGCRows(townRoot, now)...)
+	return append(jobs, nodeDiskRows(townRoot, now)...), nil
 }
 
 // doltGCName is the job list's row for the Dolt gc, which runs inside the
