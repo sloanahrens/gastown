@@ -76,11 +76,19 @@ var _ gitRepo = (*git.Git)(nil)
 // resolution reads (repoFile). Its zero value opens *git.Git; tests set the
 // funcs to a gitfake world's openers. observe, when set, is the run observer
 // each *git.Git it opens carries (git.Git.WithRunObserver).
+//
+// exec, when set, is the runner every handle Open returns sends its git calls
+// through (git.ExecFunc); nil runs the real git on PATH, as the zero opener
+// does. timeout, when positive, is the deadline those calls run under
+// (git.Git.WithTimeout). An opener that carries exec is not the plain handle
+// git's file-read shortcuts need, so isWorktreeRoot asks git instead.
 type gitOpener struct {
 	open     func(workDir string) gitRepo
 	openDir  func(gitDir, workDir string) gitRepo
 	observe  func()
 	repoFile func(repoPath string) rig.RepoFileReader
+	exec     git.ExecFunc
+	timeout  time.Duration
 }
 
 // withObserver returns a copy of the opener whose *git.Git handles call
@@ -92,10 +100,17 @@ func (o gitOpener) withObserver(observe func()) gitOpener {
 	return c
 }
 
-// Open is git.NewGit(workDir), or the test's opener.
+// Open is a *git.Git on workDir (the real git on PATH unless the opener
+// carries a runner), or the test's opener. It carries the runner and deadline
+// the opener holds, so a caller that bounds one handle's git runs every call
+// under that bound.
 func (o gitOpener) Open(workDir string) gitRepo {
 	if o.open == nil {
-		return git.NewGit(workDir).WithRunObserver(o.observe)
+		g := git.NewGitWithExec(workDir, o.exec).WithRunObserver(o.observe)
+		if o.timeout > 0 {
+			g = g.WithTimeout(o.timeout)
+		}
+		return g
 	}
 	return o.open(workDir)
 }

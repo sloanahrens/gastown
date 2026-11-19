@@ -166,8 +166,10 @@ func isWorktreeRoot(gits gitOpener, path string) bool {
 	if path == "" {
 		return false
 	}
-	// The real opener may read .git directly; a test's opener answers for itself.
-	if gits.open == nil {
+	// Only the plain opener may read .git directly: a test's opener answers for
+	// itself, and one that carries a runner is not the real git on PATH that
+	// git.IsWorktreeRootFast reads its file system for.
+	if gits.open == nil && gits.exec == nil {
 		if isRoot, known := git.IsWorktreeRootFast(path); known {
 			return isRoot
 		}
