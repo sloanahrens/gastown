@@ -30,6 +30,7 @@ type CallEntry struct {
 	ExitCode   int      `json:"exit_code"`
 	DurationMS int64    `json:"duration_ms"`
 	Error      string   `json:"error,omitempty"`
+	Conflict   bool     `json:"conflict,omitempty"`
 }
 
 // ReadCalls returns the live call log's entries stamped after since, oldest
