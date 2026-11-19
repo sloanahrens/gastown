@@ -664,9 +664,9 @@ func TestIntegrationCICacheTrimLRUFloorAtListing(t *testing.T) {
 // TestIntegrationCICacheTrimLRUUnderCapAndMode: the cut is the sum beyond the
 // age rule, never a whole trim. A volume at or under its cap still selects the
 // files past the age and nothing else; a volume one KiB over selects the oldest
-// file past the floor, whose size covers the excess; and the program has the one
-// mode list, so any other mode is refused with exit 2 before it looks at the
-// volume.
+// file past the floor, whose size covers the excess; and the program has the two
+// modes list and apply, so any other mode is refused with exit 2 before it looks
+// at the volume.
 //
 // The over-cap case runs with an age past every file's, so the age rule selects
 // nothing and the selection is the cut's alone: removing the cut's exit selects
@@ -745,13 +745,13 @@ func TestIntegrationCICacheTrimLRUUnderCapAndMode(t *testing.T) {
 		}
 	})
 
-	t.Run("any mode but list exits 2", func(t *testing.T) {
+	t.Run("any mode but list and apply exits 2", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		ciCacheLRUTreeWrite(t, root, time.Now())
 		beforeFiles := ciCacheScriptFiles(t, root)
 
-		for _, mode := range []string{"apply", "remove", "", "LIST", "List"} {
+		for _, mode := range []string{"remove", "", "LIST", "List"} {
 			stdout, _, status := ciCacheLRURun(t, ciCacheLRUTrimScript, mode, root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
 			if status != 2 || stdout != "" {
 				t.Errorf("mode %q: exit %d with output %q, want exit 2 and none", mode, status, stdout)
@@ -761,6 +761,117 @@ func TestIntegrationCICacheTrimLRUUnderCapAndMode(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestIntegrationCICacheTrimLRUApplyRemovesOldestFirst runs apply over the tree
+// the list cases use, at the same cap: it removes exactly the files list prints —
+// the age rule's file, then the window's oldest until the excess is covered,
+// oldest first — and keeps the newest. Its reply is the three lines
+// parseCICacheTrimReply reads and no file line, and its after_kib is the volume
+// read again after the removal, at or under the cap.
+//
+// Removing the mode's removal branch leaves every file in place and turns this
+// test red; printing the selection as list does makes the reply more than three
+// lines and turns it red; keeping the list's after_kib equal to before_kib turns
+// the re-read assertion red.
+func TestIntegrationCICacheTrimLRUApplyRemovesOldestFirst(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	ciCacheLRUTreeWrite(t, root, time.Now())
+	before := ciCacheLRUBefore(t, root)
+
+	// The excess is the age rule's file and 400 KiB beyond it, more than one
+	// 256 KiB window file covers and less than two.
+	const (
+		ageFileKiB      = 256
+		windowExcessKiB = 400
+	)
+	capKiB := before - ageFileKiB - windowExcessKiB
+	capArg := strconv.FormatInt(capKiB, 10)
+	floor := strconv.Itoa(ciCacheLRUFloorMinutes)
+
+	// The selection list prints on this tree is the set apply must remove.
+	listed, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", capArg, floor)
+	if status != 0 {
+		t.Fatalf("the LRU list exited %d: %s", status, stderr)
+	}
+	selected, _ := ciCacheLRURead(t, listed)
+	wantRemoved := ciCacheLRUPaths(root, "00/old-3h", "ab/lru-100m", "00/lru-96m")
+	if !slices.Equal(selected, wantRemoved) {
+		t.Fatalf("list selected %v, want the age rule's file and the window's oldest until the excess is covered: %v", selected, wantRemoved)
+	}
+
+	stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "apply", root, "120", capArg, floor)
+	if status != 0 {
+		t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+	}
+	// apply prints the reply only: a file line would make it unreadable to the
+	// daemon's parser.
+	reply, err := parseCICacheTrimReply([]byte(stdout))
+	if err != nil {
+		t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+	}
+	if want := int64(len(selected)); reply.removed != want {
+		t.Errorf("removed = %d, want the %d files list selected", reply.removed, want)
+	}
+	if reply.beforeKiB != before {
+		t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+	}
+
+	// The files list did not select stay: the window file after the cut and the
+	// two files inside the floor.
+	kept := []string{filepath.Join("ab", "lru-90m"), filepath.Join("ab", "mid-45m"), filepath.Join("ab", "fresh-10m"), "trim.txt"}
+	slices.Sort(kept)
+	if got := ciCacheScriptFiles(t, root); !slices.Equal(got, kept) {
+		t.Errorf("the volume holds %v after the apply, want %v: the selected files are the ones removed", got, kept)
+	}
+	for _, gone := range wantRemoved {
+		if _, err := os.Stat(gone); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a selected file is still present after the apply: %s (stat error %v)", gone, err)
+		}
+	}
+
+	if after := ciCacheLRUBefore(t, root); reply.afterKiB != after {
+		t.Errorf("after_kib = %d, want the volume read again after the removal, %d KiB", reply.afterKiB, after)
+	}
+	if reply.afterKiB >= reply.beforeKiB {
+		t.Errorf("after_kib = %d, want less than before_kib, %d: the apply removed files", reply.afterKiB, reply.beforeKiB)
+	}
+	if reply.afterKiB > capKiB {
+		t.Errorf("after_kib = %d, want at or under the %d KiB cap", reply.afterKiB, capKiB)
+	}
+}
+
+// TestIntegrationCICacheTrimLRUApplyEmptySelection removes nothing when the
+// selection is empty: with an age past every file's and a cap the volume is
+// under, no file is selected, so nothing is removed, the volume is unchanged and
+// the reply reads removed=0 with after_kib equal to before_kib. The removal's
+// `removed -gt 0` guard keeps rm from being started with no operand, which a
+// shell that refuses it would end non-zero.
+func TestIntegrationCICacheTrimLRUApplyEmptySelection(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	ciCacheLRUTreeWrite(t, root, time.Now())
+	before := ciCacheLRUBefore(t, root)
+	beforeFiles := ciCacheScriptFiles(t, root)
+
+	stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "apply", root, "600", strconv.FormatInt(before+4096, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+	if status != 0 {
+		t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+	}
+	reply, err := parseCICacheTrimReply([]byte(stdout))
+	if err != nil {
+		t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+	}
+	if reply.removed != 0 {
+		t.Errorf("removed = %d, want 0: no file is past the age or over the cap", reply.removed)
+	}
+	if reply.afterKiB != reply.beforeKiB {
+		t.Errorf("after_kib = %d, want before_kib, %d: an empty selection removes nothing", reply.afterKiB, reply.beforeKiB)
+	}
+	if got := ciCacheScriptFiles(t, root); !slices.Equal(got, beforeFiles) {
+		t.Errorf("the apply removed files from an empty selection: %v, before %v", got, beforeFiles)
+	}
 }
 
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
