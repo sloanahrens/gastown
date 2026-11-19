@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -26,6 +27,24 @@ type slingRollback struct {
 	newReleaser      func(townRoot, hookWorkDir string) polecatWorkReleaser
 	survivingWork    func(townRoot, beadID string) (string, error)
 	openSandbox      func(townRoot, rigName string) (spawnedPolecatSandbox, error)
+
+	// log collects the rollback's decision lines. Nil writes them to the
+	// console; unit tests collect them instead of swapping process stdio.
+	log func(format string, args ...any)
+}
+
+// say writes one line of the rollback's output.
+func (s slingRollback) say(format string, args ...any) {
+	if s.log != nil {
+		s.log(format, args...)
+		return
+	}
+	fmt.Printf(format, args...)
+}
+
+// warnf writes one warning line.
+func (s slingRollback) warnf(format string, args ...any) {
+	s.say("  %s "+format+"\n", append([]any{style.Dim.Render("Warning:")}, args...)...)
 }
 
 // realSlingRollbackIn is the rollback of the running gt: the caller's town
@@ -120,20 +139,53 @@ func (s slingRollback) rollback(spawnInfo *SpawnedPolecatInfo, beadID, hookWorkD
 
 // cleanupSpawned is cleanupSpawnedPolecatWork on this context.
 func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, beadID, hookWorkDir string) {
-	// The spawn's seat claim goes with the spawn: no session will ever exist
-	// for this polecat, so the seat it reserved must not stay reserved. This is
-	// the one path every caller-side failure after a spawn comes through —
-	// returning before the cleanup below, which is best-effort and gives up
-	// early when the workspace or rig cannot be read (gt-t8q5).
-	s.releaseSeat(spawnInfo)
-
 	if spawnInfo == nil {
 		return
 	}
-	townRoot := s.townRoot
-	if s.townErr != nil {
+
+	// Everything below is written for a seat only this sling holds. The spawn
+	// wrote this sling's bead into the seat's agent bead (hook_bead, state
+	// spawning); a sling that claimed the seat since overwrote it with its own,
+	// and releasing the claim, resetting the slot or removing the sandbox and
+	// branch under it would destroy that sling's work (gt-7izlwj). So read the
+	// agent bead before touching anything.
+	//
+	// The read and the release below are two steps, not one atomic step: a
+	// sling can claim the seat in between. No lock spans the two — the window
+	// is only the time between two calls of one rollback, and it is accepted.
+	spawnedFor := spawnInfo.HookBead
+	if spawnedFor == "" {
+		spawnedFor = beadID
+	}
+	heldBead, found, err := s.seatHeldBead(rigName, spawnInfo.PolecatName)
+	switch {
+	case err != nil:
+		// An unreadable agent bead does not say who holds the seat, so its
+		// slot and branch are not this sling's to undo. The seat claim still
+		// goes back: no session will ever exist for this spawn, and a leaked
+		// claim shadows a free seat until its TTL (gt-t8q5). releaseSeatClaim
+		// drops only this spawn's own claim file and needs no town root.
+		s.releaseSeat(spawnInfo)
+		s.warnf("Could not read %s's agent bead to see who holds its seat: %v; leaving its slot and branch alone",
+			spawnInfo.AgentID(), err)
+		return
+	case found && heldBead != "" && heldBead != spawnedFor:
+		not := spawnedFor
+		if not == "" {
+			not = "the bead this sling spawned for"
+		}
+		s.say("  %s Leaving %s's seat to the sling that holds it: its hook names %s, not %s\n",
+			style.Dim.Render("○"), spawnInfo.PolecatName, heldBead, not)
 		return
 	}
+
+	// The spawn's seat claim goes with the spawn: no session will ever exist
+	// for this polecat, so the seat it reserved must not stay reserved. This is
+	// the one path every caller-side failure after a spawn comes through —
+	// returning before the cleanup below, which is best-effort (gt-t8q5).
+	s.releaseSeat(spawnInfo)
+
+	townRoot := s.townRoot
 
 	// Give the work back first: the sandbox removal below resets a fresh
 	// polecat's agent bead, and a kept sandbox needs its slot reset here.
@@ -176,4 +228,23 @@ func (s slingRollback) cleanupSpawned(spawnInfo *SpawnedPolecatInfo, rigName, be
 		fmt.Printf("  %s Kept branch %s (not created by this sling)\n",
 			style.Dim.Render("○"), spawnInfo.Branch)
 	}
+}
+
+// seatHeldBead is the bead the agent bead of seat rigName/polecatName says its
+// hook holds. found is false when the seat has no agent bead: it names no
+// other claimant, so the rollback has nothing to leave alone. An agent bead
+// that cannot be read is an error, never "no claimant".
+func (s slingRollback) seatHeldBead(rigName, polecatName string) (hookBead string, found bool, err error) {
+	if s.townErr != nil {
+		return "", false, s.townErr
+	}
+	agentBeadID := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(s.townRoot, rigName), rigName, polecatName)
+	_, fields, err := beads.GetAgentBead(s.stores.pinnedAt(resolveBeadDirFromTownRoot(s.townRoot, agentBeadID)), agentBeadID)
+	if err != nil {
+		return "", false, err
+	}
+	if fields == nil {
+		return "", false, nil
+	}
+	return strings.TrimSpace(fields.HookBead), true, nil
 }
