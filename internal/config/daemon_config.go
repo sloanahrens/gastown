@@ -3553,9 +3553,7 @@ type TierSweepRunnerConfig struct {
 	// least 1 and below CPUs, so the runner keeps at least one of the pod's.
 	// Zero means the default, SweepDindCPUs. A value set for a backend or a
 	// block that starts no sidecar is refused: it would read as effective and
-	// do nothing. Until the daemon passes the share into the sweep's Spec
-	// (gt-esfo9p), any value but the default is refused for the same reason:
-	// the sidecar would still render 2 (gt-h7497c).
+	// do nothing (gt-h7497c).
 	DindCPUs int `json:"dind_cpus,omitempty"`
 
 	// Memory is the run's memory limit in GB, 2 to 48, and on the Kubernetes
@@ -3638,8 +3636,7 @@ func (c *TierSweepRunnerConfig) ProtectedNamespaceList() []string {
 
 // DindCPUShare is the dind sidecar's CPU share on the Kubernetes backend: the
 // setting, or SweepDindCPUs when it names none. validate refuses a setting for
-// a block that would render no sidecar, and a non-default setting until the
-// daemon passes it into the sweep's Spec (gt-esfo9p).
+// a block that would render no sidecar.
 func (c *TierSweepRunnerConfig) DindCPUShare() int {
 	if c.DindCPUs > 0 {
 		return c.DindCPUs
@@ -3748,13 +3745,6 @@ func (c *TierSweepRunnerConfig) validate() error {
 		if min := runnerMemoryMin + SweepDindMemoryGB; c.Memory < min {
 			return fmt.Errorf("memory = %d: want at least %d GB with dind (the sidecar's %d GB plus the runner's %d)", c.Memory, min, SweepDindMemoryGB, runnerMemoryMin)
 		}
-	}
-	// The daemon builds the sweep's Spec without this setting until gt-esfo9p
-	// passes it through, so the sidecar renders the default however a file names
-	// it. A non-default value is refused rather than loaded and ignored: it
-	// would read as effective and still render 2 (gt-h7497c).
-	if c.DindCPUs > 0 && c.DindCPUs != SweepDindCPUs {
-		return fmt.Errorf("dind_cpus = %d: want unset or the default %d until the daemon passes it into the sweep Spec (gt-esfo9p)", c.DindCPUs, SweepDindCPUs)
 	}
 	if c.Jobs < runnerJobsMin || c.Jobs > runnerJobsMax {
 		return fmt.Errorf("jobs = %d: want %d-%d", c.Jobs, runnerJobsMin, runnerJobsMax)
