@@ -159,7 +159,7 @@ func TestPassCISilenceDoesNotAlsoEscalateGenerally(t *testing.T) {
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
 	rec := &escalateRecorder{}
-	h.w.Escalate = func(_ string, message string) {
+	h.w.Escalate = func(_ string, _ string, message string) {
 		rec.mu.Lock()
 		defer rec.mu.Unlock()
 		rec.escalate = append(rec.escalate, message)

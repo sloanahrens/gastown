@@ -279,6 +279,21 @@ func Clear(townRoot string, keys []string, closedBy, reason string) ([]string, e
 	return closed, nil
 }
 
+// OpenByKey reports whether c holds an open escalation filed under key, by the
+// lookup Raise uses for a repeat firing. A blank key names no escalation, so
+// it is an error, not a clean answer (gt-il3out).
+func OpenByKey(c beads.Client, key string) (bool, error) {
+	label := FingerprintLabel(key)
+	if label == "" {
+		return false, fmt.Errorf("a blank escalation key names no escalation")
+	}
+	matches, err := beads.ListEscalationsByFingerprint(c, label)
+	if err != nil {
+		return false, fmt.Errorf("checking escalation fingerprint: %w", err)
+	}
+	return len(matches) > 0, nil
+}
+
 // FingerprintLabel is the bead label an alert key is stored under, or "" for
 // a blank key.
 func FingerprintLabel(raw string) string {

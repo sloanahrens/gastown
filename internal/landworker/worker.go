@@ -210,14 +210,15 @@ type Worker struct {
 	// to the operator, so it is not waiting unseen on a label: an om review
 	// that returned no verdict, a stage timeout, a policy refusal (gt-is0ep).
 	// It also raises a bead whose candidate gate reported nothing
-	// CISilenceEscalateAfter times in a row. It runs in its own goroutine,
-	// which recovers and logs a panic; the pass does not wait.
-	Escalate func(beadID, message string)
+	// CISilenceEscalateAfter times in a row. lane keys the escalation per lane;
+	// "" names none (gt-il3out). It runs in its own goroutine, which recovers
+	// and logs a panic; the pass does not wait.
+	Escalate func(beadID, lane, message string)
 	// EscalationOpen, when set, answers whether beadID's lane already has an
 	// open escalation, so a lane whose capped-loop escalation was closed
 	// raises one on a new rejection and none while it is open (gt-fjzstx). A
-	// nil seam or an error counts as open: a doubt never raises a second one
-	// (the doubt is logged once).
+	// check that errors, or no seam at all, raises it again and says so at
+	// every check: a silenced alarm is the defect (gt-il3out).
 	EscalationOpen func(beadID, lane string) (bool, error)
 	// CISilenceEscalateAfter is how many consecutive candidate-gate silences
 	// on one bead raise a single escalation; 0 means
@@ -254,9 +255,6 @@ type Worker struct {
 	memo *outcomeMemos
 	// escWG lets a test wait for Escalate goroutines.
 	escWG sync.WaitGroup
-	// escalationOpenSaid is set once the worker has said why it cannot tell
-	// whether a lane's escalation is open; the doubt line is not repeated.
-	escalationOpenSaid bool
 	// pendingRepair holds landings whose record was left incomplete; the
 	// next pass finishes them before landing anything new.
 	pendingRepair map[string]land.Work
@@ -1114,7 +1112,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		// NoEscalate is set when an earlier block of the refusal's lane already
 		// escalated the loop, so the operator is not alerted again (gt-dtx3ht).
 		if w.shouldEscalate(work, rej) {
-			w.escalate(work.BeadID, escalationText(work, rej))
+			w.escalate(work.BeadID, land.LaneOf(work.Branch), escalationText(work, rej))
 		}
 		if rej.RecordErr != nil {
 			w.closeFailureRun(work.BeadID)
@@ -1176,9 +1174,10 @@ func (w *Worker) supersededRejection(work land.Work, rej *land.Rejection) {
 
 // shouldEscalate reports whether a human refusal raises the operator's
 // escalation. A lane that never escalated raises as it always has. A lane
-// that escalated raises again once that escalation is closed, and stays
-// silent while the seam shows it open or cannot say: a doubt raises no second
-// escalation and is logged once (gt-dtx3ht, gt-fjzstx).
+// that escalated raises again once its escalation is closed, and stays silent
+// only while the check reads it open; a check that errors or is missing
+// raises again and says so every time, since a silenced alarm is the defect
+// (gt-dtx3ht, gt-fjzstx, gt-il3out).
 func (w *Worker) shouldEscalate(work land.Work, rej *land.Rejection) bool {
 	if !rej.NoEscalate {
 		return true
@@ -1187,34 +1186,24 @@ func (w *Worker) shouldEscalate(work land.Work, rej *land.Rejection) bool {
 		return false
 	}
 	if w.EscalationOpen == nil {
-		w.sayEscalationDoubt("%s: no seam reads the lane's escalations; not raising its closed one again", work.BeadID)
-		return false
+		w.logf("%s: no check reads the lane's escalations; raising it again", work.BeadID)
+		return true
 	}
 	open, err := w.EscalationOpen(work.BeadID, land.LaneOf(work.Branch))
 	if err != nil {
-		w.sayEscalationDoubt("%s: reading the lane's open escalation: %v; not raising it again", work.BeadID, err)
-		return false
+		w.logf("%s: reading the lane's open escalation: %v; raising it again", work.BeadID, err)
+		return true
 	}
 	return !open
 }
 
-// sayEscalationDoubt logs the one line a worker says when it cannot tell
-// whether a lane's escalation is open, however many beads meet the doubt.
-func (w *Worker) sayEscalationDoubt(format string, args ...any) {
-	if w.escalationOpenSaid {
-		return
-	}
-	w.escalationOpenSaid = true
-	w.logf(format, args...)
-}
-
 // escalate calls Escalate in its own goroutine. A panic in it is logged, not
 // fatal: the daemon outlives a broken alert path.
-func (w *Worker) escalate(beadID, message string) {
+func (w *Worker) escalate(beadID, lane, message string) {
 	if w.Escalate == nil {
 		return
 	}
-	w.alertAsync(beadID, func() { w.Escalate(beadID, message) })
+	w.alertAsync(beadID, func() { w.Escalate(beadID, lane, message) })
 }
 
 // alertAsync runs one alert call — a raise or a clear — off the pass's
@@ -1283,7 +1272,8 @@ func (w *Worker) countCISilence(work land.Work, err error) {
 		return
 	}
 	st.escalated = true
-	w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) has waited on the candidate gate %d times in a row with no verdict (%v). The worker keeps retrying with backoff and no rework is needed; look for a down, busy or hung Forgejo runner.",
+	// The CI-silence alert names no lane: its key stays per bead (gt-il3out).
+	w.escalate(work.BeadID, "", fmt.Sprintf("Landing of %s (%s @ %s) has waited on the candidate gate %d times in a row with no verdict (%v). The worker keeps retrying with backoff and no rework is needed; look for a down, busy or hung Forgejo runner.",
 		work.BeadID, work.Branch, work.Head, st.ciSilences, err))
 }
 
