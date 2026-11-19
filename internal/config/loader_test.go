@@ -470,6 +470,54 @@ func TestRigSettingsValidation(t *testing.T) {
 	}
 }
 
+// TestLoadMergeQueueFollowupBudgetPercent pins merge_queue.followup_budget_percent:
+// the landing worker's feed reads it from the rig's own settings/config.json to
+// size its weekly budget, so 25 loads, a negative value loads (the budget is
+// off) and a share above 100 — more than every landing of the week — is
+// refused when the config loads (gt-wwpfo7).
+func TestLoadMergeQueueFollowupBudgetPercent(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	for _, tc := range []struct {
+		name    string
+		body    string
+		want    int
+		wantErr bool
+	}{
+		{name: "the default share", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_budget_percent":25}}`, want: 25},
+		{name: "a negative turns the budget off", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_budget_percent":-1}}`, want: -1},
+		{name: "all of the week", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_budget_percent":100}}`, want: 100},
+		{name: "above every landing", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_budget_percent":101}}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadRigSettings(path)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("LoadRigSettings accepted a followup_budget_percent above 100")
+				}
+				if !strings.Contains(err.Error(), "followup_budget_percent") {
+					t.Errorf("error = %v, want it to name followup_budget_percent", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadRigSettings: %v", err)
+			}
+			if loaded.MergeQueue == nil {
+				t.Fatal("MergeQueue is nil")
+			}
+			if loaded.MergeQueue.FollowupBudgetPercent != tc.want {
+				t.Errorf("merge_queue.followup_budget_percent = %d, want %d",
+					loaded.MergeQueue.FollowupBudgetPercent, tc.want)
+			}
+		})
+	}
+}
+
 // TestValidateMergeQueueConfigRejectsNegativeFollowupBackpressure: zero is the
 // documented "use the default" value and a negative is read as that default
 // too, so a typo'd -1 must be refused rather than silently become 40.

@@ -687,6 +687,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if rigFollowupsEnabled(rigPath) {
 		lander.Followups = followupBeads{client: bd}
 		lander.FollowupBackpressure = rigFollowupBackpressure(rigPath)
+		lander.FollowupBudgetPercent = rigFollowupBudgetPercent(rigPath)
 		applyFollowupPolicy(lander)
 		// The backpressure holds findings back silently otherwise, so the day
 		// it does, the loss reaches a human as a low attention item (gt-4ty22).
@@ -1372,6 +1373,19 @@ func rigFollowupBackpressure(rigPath string) int {
 		return 0
 	}
 	return settings.MergeQueue.FollowupBackpressure
+}
+
+// rigFollowupBudgetPercent is merge_queue.followup_budget_percent from the
+// rig's own settings/config.json, and 0 when it names none — the share the
+// feed reads as its own default of 25. It is read from there for the reason
+// rigFollowupsEnabled reads its file: it is the weekly budget for beads
+// nobody is waiting on (gt-wwpfo7).
+func rigFollowupBudgetPercent(rigPath string) int {
+	settings, err := config.LoadRigSettings(config.RigSettingsPath(rigPath))
+	if err != nil || settings == nil || settings.MergeQueue == nil {
+		return 0
+	}
+	return settings.MergeQueue.FollowupBudgetPercent
 }
 
 // followupBackpressureAlertEvery is how often the feed's backpressure item may

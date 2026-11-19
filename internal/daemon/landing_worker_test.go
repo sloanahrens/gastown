@@ -513,6 +513,44 @@ func TestRigFollowupBackpressureReadsRigSettingsOnly(t *testing.T) {
 	}
 }
 
+// TestRigFollowupBudgetPercentReadsRigSettingsOnly: the weekly budget decides
+// how many beads the feed files, so it comes from the rig's own
+// settings/config.json and an unset one is the feed's default rather than a
+// value from merged repo content (gt-wwpfo7).
+func TestRigFollowupBudgetPercentReadsRigSettingsOnly(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, rigPath, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "no settings file", want: 0},
+		{name: "settings without a merge queue block", body: `{"type":"rig-settings","version":1,"landing":{"followups":true}}`, want: 0},
+		{name: "an empty merge queue block", body: `{"type":"rig-settings","version":1,"merge_queue":{}}`, want: 0},
+		{name: "a share", body: `{"type":"rig-settings","version":1,"merge_queue":{"followup_budget_percent":12}}`, want: 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			if tc.body != "" {
+				write(t, rigPath, tc.body)
+			}
+			if got := rigFollowupBudgetPercent(rigPath); got != tc.want {
+				t.Errorf("rigFollowupBudgetPercent() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestFollowupBackpressureAlertOnceADay: the feed's backpressure item reaches
 // the operator once a day per rig — the bound holds findings back on every
 // landing until the open count falls, and a landing rate is not a news rate
