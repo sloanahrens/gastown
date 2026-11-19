@@ -692,6 +692,70 @@ func TestSandboxGitExecRefusesAVerbOrAnOptionBeforeSending(t *testing.T) {
 	}
 }
 
+// The checkpoint revert guard runs its plumbing reads in a sandbox seat's
+// clone through this same runner (gt-fzuvn5), so the verbs it issues must be
+// ones the refusal lets through: a refused `write-tree` fails the guard closed
+// and no checkpoint of the seat's work is ever created. internal/daemon's
+// TestCheckpointRevertGuardSandboxRunsOnlyAllowedVerbs records what the guard
+// really issues; these rows pin the rule at the call site that applies it, and
+// keep a verb outside every caller's needs, such as gc, refused. The guard
+// reads the base ref's URL with `remote get-url` (CleanDefaultBranchBaseRef),
+// so that shape reaches the sandbox while a remote subcommand that writes the
+// clone's configuration is refused naming the subcommand (gt-fzuvn5).
+func TestSandboxGitRefusalAcceptsTheCheckpointRevertGuardVerbs(t *testing.T) {
+	t.Parallel()
+	const target = "0f9c2a3b4d5e6f708192a3b4c5d6e7f8091a2b3c"
+	tests := []struct {
+		name     string
+		args     []string
+		wantSent bool
+		refers   string // the refusal must name this
+	}{
+		{name: "write-tree", args: []string{"write-tree"}, wantSent: true},
+		{name: "ls-tree of a tree object", args: []string{"ls-tree", "-r", "-z", "--full-tree", target}, wantSent: true},
+		{name: "the base ref's remote url", args: []string{"remote", "get-url", "origin"}, wantSent: true},
+		{name: "a remote read with an option", args: []string{"remote", "get-url", "--push", "origin"}, refers: "get-url"},
+		{name: "remote set-url rewrites the clone", args: []string{"remote", "set-url", "origin", "x"}, refers: "set-url"},
+		{name: "remote add configures the clone", args: []string{"remote", "add", "x", "y"}, refers: "add"},
+		{name: "remote remove deletes a remote", args: []string{"remote", "remove", "origin"}, refers: "remove"},
+		{name: "a bare remote", args: []string{"remote"}, refers: "no subcommand"},
+		{name: "a verb outside the allowlist", args: []string{"gc"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{Reply: map[string]string{"exec": "ok"}}
+			b, _ := opsBackend(t, fake, newSandboxProbe(t, false))
+			rec := pushRec("polecat/cheedo/gt-hwpfq+abc")
+
+			out, err := b.sandboxGitExec(rec)(rec.WorkDir, tt.args...)
+			if !tt.wantSent {
+				if err == nil {
+					t.Fatalf("sandbox git %v = %q, want a refusal", tt.args, out)
+				}
+				if tt.refers != "" && !strings.Contains(err.Error(), tt.refers) {
+					t.Fatalf("refusal %q does not name %q", err, tt.refers)
+				}
+				if calls := fake.Calls(); len(calls) != 0 {
+					t.Fatalf("openshell calls = %v, want none for %v", calls, tt.args)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sandbox git %v: %v, want it sent to the sandbox", tt.args, err)
+			}
+			calls := fake.Calls()
+			if len(calls) != 1 {
+				t.Fatalf("openshell calls = %v, want one exec for %v", calls, tt.args)
+			}
+			want := append([]string{"--", "git", "-C", rec.WorkDir}, tt.args...)
+			if got := calls[0][len(calls[0])-len(want):]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("exec argv ends %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestOpenShellOpsRecordBackendCarriesTheRecord(t *testing.T) {
 	t.Parallel()
 	rec := SandboxRecord{Session: openshellTestSession, Gateway: "gw", Profile: "p", Image: "img"}

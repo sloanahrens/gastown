@@ -189,7 +189,7 @@ func (b *openshellBackend) cloneGit(ctx context.Context, rec SandboxRecord, dir 
 // sent to the sandbox.
 func (b *openshellBackend) sandboxGitExec(rec SandboxRecord) func(dir string, args ...string) ([]byte, error) {
 	return func(dir string, args ...string) ([]byte, error) {
-		if err := sandboxGitRefusal(rec, dir, args); err != nil {
+		if err := SandboxGitRefusal(rec, dir, args); err != nil {
 			return nil, err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), sandboxPushTimeout)
@@ -203,7 +203,8 @@ func (b *openshellBackend) sandboxGitExec(rec SandboxRecord) func(dir string, ar
 // holds ".." or a newline, a first argument outside sandboxGitVerbs, and an
 // argument that is an option able to change what git runs or that holds a
 // newline or NUL. A refusal names the sandbox and, when one is known, the git
-// verb.
+// verb and subcommand. SandboxGitRefusal reports the same rule to a caller that
+// must know which calls a sandbox seat's handle may issue (gt-fzuvn5).
 func sandboxGitRefusal(rec SandboxRecord, dir string, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("sandbox %s: refusing a git call with no verb", rec.Session)
@@ -222,6 +223,12 @@ func sandboxGitRefusal(rec SandboxRecord, dir string, args []string) error {
 	case strings.Contains(dir, "\n"):
 		return fmt.Errorf("sandbox %s: refusing git %s: clone directory %q holds a newline", rec.Session, verb, dir)
 	}
+	if verb == "remote" && !sandboxGitRemoteRead(args) {
+		if len(args) == 1 {
+			return fmt.Errorf("sandbox %s: refusing git remote with no subcommand: only `remote get-url <name>` runs in a sandbox clone", rec.Session)
+		}
+		return fmt.Errorf("sandbox %s: refusing git remote subcommand %q: only `remote get-url <name>` runs in a sandbox clone", rec.Session, args[1])
+	}
 	for _, arg := range args[1:] {
 		switch {
 		case strings.ContainsAny(arg, "\n\x00"):
@@ -233,14 +240,35 @@ func sandboxGitRefusal(rec SandboxRecord, dir string, args []string) error {
 	return nil
 }
 
-// sandboxGitVerbs are the git verbs the overrun save runs in a sandbox clone.
-// Anything else is refused: with no way to tell a branch from another command,
-// only the verbs the save uses reach git.
+// sandboxGitRemoteRead reports whether args is the one `remote` shape a
+// caller runs in a sandbox clone: `remote get-url <name>`, the base-ref probe
+// CleanDefaultBranchBaseRef makes. Every other subcommand writes the clone's
+// configuration (add, set-url, remove, rename, set-head), and no caller here
+// reads another shape, so only this one reaches the sandbox.
+func sandboxGitRemoteRead(args []string) bool {
+	return len(args) == 3 && args[1] == "get-url" && args[2] != "" && !strings.HasPrefix(args[2], "-")
+}
+
+// sandboxGitVerbs are the git verbs the overrun save and the checkpoint
+// revert guard run in a sandbox clone. Anything else is refused: with no way
+// to tell a branch from another command, only the verbs those callers use
+// reach git.
+//
+// The guard runs through the same runner (its handle is built over it), so a
+// verb it issues that is missing here refuses every checkpoint of a sandbox
+// seat whose target resolves, and the seat's uncommitted work is lost when
+// the sandbox stops (gt-fzuvn5). internal/daemon's
+// TestCheckpointRevertGuardSandboxRunsOnlyAllowedVerbs records the verbs the
+// guard really issues and fails on one this map lacks.
 var sandboxGitVerbs = map[string]bool{
 	"status": true, "add": true, "commit": true, "push": true, "fetch": true,
 	"rev-parse": true, "symbolic-ref": true, "log": true, "diff": true,
 	"reset": true, "ls-remote": true, "cherry": true, "merge-base": true,
 	"cat-file": true,
+	// The guard's plumbing reads, and the base-ref probe that decides whether
+	// the fork's upstream is the clean target. `remote` reaches git only as
+	// `remote get-url <name>` (sandboxGitRemoteRead).
+	"write-tree": true, "ls-tree": true, "remote": true,
 }
 
 // sandboxGitDeniedLong are the long options that change what git runs. git
@@ -308,6 +336,18 @@ var cloneBranch = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
 // in-sandbox runner, and the rule must not exist twice (gt-r1s10f).
 func ValidCloneBranch(name string) bool {
 	return cloneBranch.MatchString(name) && !strings.Contains(name, "..")
+}
+
+// SandboxGitRefusal reports why a git call may not run in rec's sandbox clone,
+// or nil when it may: the rule the in-sandbox runner applies before it sends
+// anything.
+//
+// It is exported because the checkpoint revert guard runs its plumbing reads
+// through the same in-sandbox runner, and the rule must not exist twice: a
+// caller that must know which calls a sandbox seat's handle may issue asks
+// here instead of keeping a second copy of the allowlist (gt-fzuvn5).
+func SandboxGitRefusal(rec SandboxRecord, dir string, args []string) error {
+	return sandboxGitRefusal(rec, dir, args)
 }
 
 // sampleSandboxRecord is SandboxLiveness: the record's seat assessed where its
