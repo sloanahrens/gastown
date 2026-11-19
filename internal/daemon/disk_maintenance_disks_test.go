@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -857,6 +858,135 @@ func diskMaintEscalationsFor(rec *notifyfake.Recorder, key string) int {
 		}
 	}
 	return n
+}
+
+// TestDiskMaintRecordsSandboxDisk: a pass records the sandbox cluster's disk
+// reading beside the control node's, as the busiest node's whole-percent share
+// and the pass's time and no byte counts; a later pass whose read fails keeps
+// that entry and adds the error and its time.
+func TestDiskMaintRecordsSandboxDisk(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	d.diskMaint.readDisks = nil // the production read, with these df readings
+	healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
+	// 129000 of 160000 bytes is 80.625%: rounded to a whole number it is 81, so a
+	// truncated share fails here.
+	d.diskMaint.dfReaders = map[string]DFReader{
+		"mac":            healthy,
+		"colima":         func(context.Context) ([]byte, error) { return []byte(diskMaintNodeStats(129000)), nil },
+		"docker-desktop": healthy,
+	}
+
+	d.runDiskMaintenance()
+
+	entry, ok := readNodeDiskState(t, d.config.TownRoot).Nodes[nodeDiskSandboxKey]
+	if !ok {
+		t.Fatalf("record holds no %s entry after a pass", nodeDiskSandboxKey)
+	}
+	if entry.UsedPercent == nil || *entry.UsedPercent != 81 {
+		t.Errorf("sandbox used_percent = %v, want 81 (80.625 rounded)", entry.UsedPercent)
+	}
+	if entry.ReadAt == nil || !entry.ReadAt.Equal(diskMaintNow) {
+		t.Errorf("sandbox read_at = %v, want the pass's clock %v", entry.ReadAt, diskMaintNow)
+	}
+	if entry.UsedBytes != nil || entry.CapacityBytes != nil {
+		t.Errorf("sandbox entry holds bytes %v/%v, want none: the reading is a share", entry.UsedBytes, entry.CapacityBytes)
+	}
+	if entry.Error != "" || entry.ErrorAt != nil {
+		t.Errorf("sandbox entry holds error %q at %v, want none", entry.Error, entry.ErrorAt)
+	}
+
+	// The next pass cannot read the sandbox disk: the entry keeps the figures it
+	// had and gains the error and the pass's time.
+	later := diskMaintNow.Add(24 * time.Hour)
+	diskMaintNextDay(d, 1)
+	d.diskMaint.dfReaders["colima"] = func(context.Context) ([]byte, error) {
+		return nil, errors.New("the connection to the server was refused")
+	}
+	d.runDiskMaintenance()
+
+	entry, ok = readNodeDiskState(t, d.config.TownRoot).Nodes[nodeDiskSandboxKey]
+	if !ok {
+		t.Fatalf("record holds no %s entry after the failed read", nodeDiskSandboxKey)
+	}
+	if entry.UsedPercent == nil || *entry.UsedPercent != 81 || entry.ReadAt == nil || !entry.ReadAt.Equal(diskMaintNow) {
+		t.Errorf("sandbox entry after the failed read = %+v, want the previous 81%% read at %v kept", entry, diskMaintNow)
+	}
+	if entry.Error == "" {
+		t.Error("sandbox entry holds no error after the failed read")
+	}
+	if entry.ErrorAt == nil || !entry.ErrorAt.Equal(later) {
+		t.Errorf("sandbox error_at = %v, want %v", entry.ErrorAt, later)
+	}
+}
+
+// TestDiskMaintRecordsSandboxDiskWriteFailure: a sandbox record that cannot be
+// written logs one line and leaves the patrol's alerts and plan exactly as a
+// writable record's.
+func TestDiskMaintRecordsSandboxDiskWriteFailure(t *testing.T) {
+	t.Parallel()
+	collect := func(t *testing.T, unwritable bool) (*diskMaintFakes, string) {
+		t.Helper()
+		d, logs, f := diskMaintTestDaemon(t)
+		d.diskMaint.readDisks = nil // the production read, with these df readings
+		healthy := func(context.Context) ([]byte, error) { return []byte(diskMaintHealthyDF), nil }
+		d.diskMaint.dfReaders = map[string]DFReader{
+			"mac":            healthy,
+			"colima":         func(context.Context) ([]byte, error) { return []byte(diskMaintNodeStats(129000)), nil },
+			"docker-desktop": healthy,
+		}
+		if unwritable {
+			// Only the record's directory is unwritable: the growth rings live in
+			// their own directory and still record, so the one line is the record's.
+			jobs := filepath.Join(d.config.TownRoot, ".runtime", "jobs")
+			if err := os.MkdirAll(jobs, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
+			if err := os.Chmod(jobs, 0o555); err != nil {
+				t.Fatal(err)
+			}
+			//testpolicy:allow no-exec-files — the target is the fixture directory: restores its write bit for t.TempDir cleanup
+			t.Cleanup(func() { _ = os.Chmod(jobs, 0o755) })
+		}
+		d.runDiskMaintenance()
+		return f, logs.String()
+	}
+
+	logLines := func(s string) []string {
+		if strings.TrimSpace(s) == "" {
+			return nil
+		}
+		return strings.Split(strings.TrimSpace(s), "\n")
+	}
+	writable, writableLogs := collect(t, false)
+	broken, brokenLogs := collect(t, true)
+	if !reflect.DeepEqual(broken.notify.Escalations(), writable.notify.Escalations()) {
+		t.Errorf("escalations with an unwritable record = %+v, want the writable town's %+v",
+			broken.notify.Escalations(), writable.notify.Escalations())
+	}
+	if !reflect.DeepEqual(broken.target.policies, writable.target.policies) {
+		t.Errorf("policies with an unwritable record = %+v, want the writable town's %+v",
+			broken.target.policies, writable.target.policies)
+	}
+	// The broken town's log is the writable town's plus the one record line, so
+	// the failure neither adds another line nor silences one.
+	var kept []string
+	failed := 0
+	for _, line := range logLines(brokenLogs) {
+		if strings.Contains(line, "sandbox disk: the reading was not recorded") {
+			failed++
+			continue
+		}
+		kept = append(kept, line)
+	}
+	if failed != 1 {
+		t.Errorf("log = %q, want exactly one line saying the sandbox reading was not recorded", brokenLogs)
+	}
+	if !slices.Equal(kept, logLines(writableLogs)) {
+		t.Errorf("log with an unwritable record = %q, want the writable town's lines plus the record's: %q",
+			brokenLogs, writableLogs)
+	}
 }
 
 // TestDiskMaintUnreadableIsRaisedOncePerOutage: a disk that stays unreadable

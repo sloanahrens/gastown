@@ -11,15 +11,24 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 )
 
-const nodeDiskRecordFile = "node_disk.json"
+const (
+	nodeDiskRecordFile = "node_disk.json"
+
+	// nodeDiskSandboxKey is the record's entry for the sandbox cluster's data
+	// disk. It names no node: the reading is the busiest node's share, not one
+	// node's own (gt-cya9c0).
+	nodeDiskSandboxKey = "sandbox"
+)
 
 // nodeDiskWriteMu guards the read-modify-write of the shared file, so a second
 // writer recording its own node cannot drop the entries this one read.
@@ -31,13 +40,14 @@ func nodeDiskRecordPath(townRoot string) string {
 }
 
 // nodeDiskEntry is one node's result from one pass. A reading carries the
-// figures the attention rule uses and when they were taken. A failed read
-// carries Err and ErrAt and no figures: recordNodeDisk keeps the node's
-// previous figures beside the error.
+// figures the attention rule uses and when they were taken; UsedBytes and
+// CapacityBytes stay nil when the reading kept the share alone, so the record
+// holds no invented zero. A failed read carries Err and ErrAt and no figures:
+// recordNodeDisk keeps the node's previous figures beside the error.
 type nodeDiskEntry struct {
 	UsedPercent   int
-	UsedBytes     int64
-	CapacityBytes int64
+	UsedBytes     *int64
+	CapacityBytes *int64
 	ReadAt        time.Time
 	Err           string
 	ErrAt         time.Time
@@ -101,9 +111,35 @@ func recordNodeDisk(townRoot string, entries map[string]nodeDiskEntry) error {
 	return atomicfile.WriteJSON(path, state)
 }
 
+// recordSandboxDiskReading writes one pass's sandbox cluster disk reading into
+// the town's node disk record under nodeDiskSandboxKey (gt-cya9c0). The reading
+// is the busiest node's share, so a cluster with several nodes hides the others:
+// the entry names no node and keeps no byte counts, only the whole-percent share
+// and when it was read. A reading that carries Err keeps the entry the file
+// already holds and adds the error and its time.
+//
+// A write that fails is logged once and changes no alert, keep or plan: the pass
+// decides on the readings it took, not on the record.
+func (d *Daemon) recordSandboxDiskReading(readings []disks.Reading, now time.Time) {
+	for _, r := range readings {
+		if r.Name != diskMaintDiskColima {
+			continue
+		}
+		entry := nodeDiskEntry{UsedPercent: int(math.Round(r.UsedPct)), ReadAt: now}
+		if r.Err != nil {
+			entry = nodeDiskEntry{Err: r.Err.Error(), ErrAt: now}
+		}
+		if err := recordNodeDisk(d.config.TownRoot, map[string]nodeDiskEntry{nodeDiskSandboxKey: entry}); err != nil {
+			d.logger.Printf("sandbox disk: the reading was not recorded (%v)", err)
+		}
+		return
+	}
+}
+
 // mergedNodeDiskRecord folds one pass's entry for a node into the record the
 // file holds: a failed read keeps the stored figures and records the error, a
-// successful one replaces the figures and clears the error.
+// successful one replaces the figures and clears the error. An entry that kept
+// no byte counts leaves the record without them.
 func mergedNodeDiskRecord(stored nodeDiskRecord, entry nodeDiskEntry) nodeDiskRecord {
 	if entry.Err != "" {
 		at := entry.ErrAt
@@ -111,11 +147,11 @@ func mergedNodeDiskRecord(stored nodeDiskRecord, entry nodeDiskEntry) nodeDiskRe
 		return stored
 	}
 	readAt := entry.ReadAt
-	usedPercent, usedBytes, capacity := entry.UsedPercent, entry.UsedBytes, entry.CapacityBytes
+	usedPercent := entry.UsedPercent
 	return nodeDiskRecord{
 		UsedPercent:   &usedPercent,
-		UsedBytes:     &usedBytes,
-		CapacityBytes: &capacity,
+		UsedBytes:     entry.UsedBytes,
+		CapacityBytes: entry.CapacityBytes,
 		ReadAt:        &readAt,
 	}
 }

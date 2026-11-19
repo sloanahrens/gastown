@@ -31,6 +31,9 @@ func readNodeDiskState(t *testing.T, townRoot string) nodeDiskState {
 	return state
 }
 
+// byteCount is the address of a byte count, for a nodeDiskEntry that keeps one.
+func byteCount(v int64) *int64 { return &v }
+
 // wantNodeDiskReading asserts a stored entry holds the given figures and read
 // time, and no error.
 func wantNodeDiskReading(t *testing.T, state nodeDiskState, node string, percent int, used, capacity int64, readAt time.Time) {
@@ -169,14 +172,14 @@ func TestRecordNodeDiskMerge(t *testing.T) {
 	town := t.TempDir()
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	if err := recordNodeDisk(town, map[string]nodeDiskEntry{
-		"colima-gt-control": {UsedPercent: 20, UsedBytes: 20, CapacityBytes: 100, ReadAt: now},
-		"colima":            {UsedPercent: 84, UsedBytes: 840, CapacityBytes: 1000, ReadAt: now},
+		"colima-gt-control": {UsedPercent: 20, UsedBytes: byteCount(20), CapacityBytes: byteCount(100), ReadAt: now},
+		"colima":            {UsedPercent: 84, UsedBytes: byteCount(840), CapacityBytes: byteCount(1000), ReadAt: now},
 	}); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	later := now.Add(time.Minute)
 	if err := recordNodeDisk(town, map[string]nodeDiskEntry{
-		"colima-gt-control": {UsedPercent: 67, UsedBytes: 67, CapacityBytes: 100, ReadAt: later},
+		"colima-gt-control": {UsedPercent: 67, UsedBytes: byteCount(67), CapacityBytes: byteCount(100), ReadAt: later},
 	}); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
@@ -196,7 +199,7 @@ func TestRecordNodeDiskMerge(t *testing.T) {
 			go func(node string) {
 				defer wg.Done()
 				if err := recordNodeDisk(town, map[string]nodeDiskEntry{
-					node: {UsedPercent: 50, UsedBytes: 500, CapacityBytes: 1000, ReadAt: later},
+					node: {UsedPercent: 50, UsedBytes: byteCount(500), CapacityBytes: byteCount(1000), ReadAt: later},
 				}); err != nil {
 					t.Errorf("concurrent write of %s: %v", node, err)
 				}
@@ -221,7 +224,7 @@ func TestRecordNodeDiskRefusesAnUnreadableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := recordNodeDisk(town, map[string]nodeDiskEntry{
-		"colima-gt-control": {UsedPercent: 20, UsedBytes: 20, CapacityBytes: 100, ReadAt: time.Now()},
+		"colima-gt-control": {UsedPercent: 20, UsedBytes: byteCount(20), CapacityBytes: byteCount(100), ReadAt: time.Now()},
 	})
 	if err == nil || !strings.Contains(err.Error(), "read "+nodeDiskRecordFile) {
 		t.Fatalf("recordNodeDisk = %v, want the read failure", err)
@@ -253,7 +256,7 @@ func TestRecordNodeDiskReplacesACorruptFile(t *testing.T) {
 	}
 	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	if err := recordNodeDisk(town, map[string]nodeDiskEntry{
-		"colima-gt-control": {UsedPercent: 20, UsedBytes: 20, CapacityBytes: 100, ReadAt: now},
+		"colima-gt-control": {UsedPercent: 20, UsedBytes: byteCount(20), CapacityBytes: byteCount(100), ReadAt: now},
 	}); err != nil {
 		t.Fatalf("recordNodeDisk: %v", err)
 	}
