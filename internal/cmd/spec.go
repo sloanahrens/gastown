@@ -1957,6 +1957,10 @@ type specRoster struct {
 	// running for one of them is that seat, not a second one, so it adds no
 	// seat to the count the dispatcher decides with (gt-75fma5).
 	HookedBeads map[string]bool
+	// Held names every seat counted in Live, with its state, from the same
+	// seat read the count used. A picture above its cap prints them, so the
+	// reading can be attributed to seats (gt-5y87fp).
+	Held []specdispatch.HeldSeat
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -2475,6 +2479,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.SetInFlight(specInFlightByAgent(specInFlightAdded(env.InFlight, roster.HookedBeads)))
 	budget.SetDeadHooked(roster.DeadHooked)
 	budget.SetDraining(roster.Draining)
+	// The seats the picture names: the roster's, the draining ones SetDraining
+	// added and the running slings SetLive added, so a count above its cap has
+	// one list entry per seat counted (gt-5y87fp).
+	budget.SetHeld(specHeldSeats(roster, env.InFlight))
 	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)
 	// The picture reads each seat's window at the tick's clock; the budget was
 	// built a moment before, and its construction time is no longer the one the
@@ -3765,6 +3773,7 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 			r.ParkedStale[s.agent]++
 			continue
 		}
+		r.Held = append(r.Held, specdispatch.HeldSeat{Agent: s.agent, Name: poolHeldSeatName(s), State: poolHeldSeatState(s)})
 		// The bead a seat inside Live hooks is accounted for by that seat, so
 		// a running sling for it must not add another (gt-75fma5). A released
 		// parked seat is skipped above: it counts nothing, so it hooks nothing.
@@ -3794,7 +3803,11 @@ func specRosterOf(seats poolSeatSnapshot, ts *config.TownSettings, occupied func
 	if err != nil {
 		return specRoster{}, fmt.Errorf("counting the seats a sling will see: %w", err)
 	}
-	roster.Draining = specRosterFrom(specDrainingSessions(seats.sessions, held), ts).Live
+	draining := specRosterFrom(specDrainingSessions(seats.sessions, held), ts)
+	roster.Draining = draining.Live
+	// The draining seats count in the tick's total, so the picture names them
+	// too: a list one entry short of the count would explain nothing (gt-5y87fp).
+	roster.Held = append(roster.Held, draining.Held...)
 	return roster, nil
 }
 

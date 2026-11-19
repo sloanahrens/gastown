@@ -587,6 +587,78 @@ func TestBudgetPictureNamesTheInFlightPartApart(t *testing.T) {
 	}
 }
 
+// TestBudgetPictureNamesHeldSeatsAboveTheCap is the reading gt-5y87fp explains:
+// a count above its cap names every seat inside it, one entry per seat
+// counted, so the nine cannot be attributed to a guess.
+func TestBudgetPictureNamesHeldSeatsAboveTheCap(t *testing.T) {
+	t.Parallel()
+	b := baseBudget()
+	b.Seats = []Seat{{Agent: "deepseek-flash", Cap: 8}}
+	b.SetLive(map[string]int{"deepseek-flash": 9})
+	held := func(agent string) []HeldSeat {
+		return []HeldSeat{
+			{Agent: agent, Name: "gastown/a", State: SeatStateSession},
+			{Agent: agent, Name: "gastown/b", State: SeatStateSession},
+			{Agent: agent, Name: "gastown/c", State: SeatStateSession},
+			{Agent: agent, Name: "gastown/d", State: SeatStateSession},
+			{Agent: agent, Name: "gastown/e", State: SeatStateSession},
+			{Agent: agent, Name: "gastown/f", State: SeatStateSession},
+			{Agent: agent, Name: "gastown/g", State: SeatStateLanding},
+			{Agent: agent, Name: "gastown/h", State: SeatStateDeadHooked},
+			{Agent: agent, Name: "gastown/i", State: SeatStateClaim},
+		}
+	}
+	b.SetHeld(held("deepseek-flash"))
+	want := "deepseek-flash 9/8 (held: gastown/a:session, gastown/b:session, gastown/c:session, gastown/d:session, gastown/e:session, gastown/f:session, gastown/g:landing, gastown/h:dead-hooked, gastown/i:claim)"
+	if got := b.Picture(); got != want {
+		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+	if got := len(strings.Split(HeldSeatList(b.Held), ", ")); got != b.Seats[0].Live {
+		t.Errorf("the list names %d seats, the count is %d", got, b.Seats[0].Live)
+	}
+
+	// Each seat names the seats counted on its agent, so a second seat above
+	// its cap names its own and the lists stay the counts printed beside them.
+	b.Seats = append(b.Seats, Seat{Agent: "claude-sonnet", Cap: 1, Live: 2})
+	b.SetHeld(append(held("deepseek-flash"), HeldSeat{Agent: "claude-sonnet", Name: "gastown/j", State: SeatStateSession}, HeldSeat{Agent: "claude-sonnet", Name: "gastown/k", State: SeatStateSession}))
+	if got, want := b.Picture(), "deepseek-flash 9/8 (held: gastown/a:session, gastown/b:session, gastown/c:session, gastown/d:session, gastown/e:session, gastown/f:session, gastown/g:landing, gastown/h:dead-hooked, gastown/i:claim), claude-sonnet 2/1 (held: gastown/j:session, gastown/k:session)"; got != want {
+		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+
+	// A running sling names the work it holds the seat for, in its state and
+	// its name, so an operator knows which bead is in flight.
+	b.Seats = b.Seats[:1]
+	b.Seats[0].Live = 10
+	b.SetHeld(append(held("deepseek-flash"), HeldSeat{Agent: "deepseek-flash", Name: "gastown/gt-x", State: SeatStateInFlight("gt-x")}))
+	if got := b.Picture(); !strings.Contains(got, "gastown/gt-x:in-flight:gt-x") {
+		t.Errorf("Picture() = %q, want the in-flight sling named with its bead", got)
+	}
+}
+
+// TestBudgetPictureKeepsItsWordingAtOrUnderEveryCap holds the old lines byte
+// for byte: a held-seat list is printed only for a count above its cap, so a
+// seat that is merely full still reads as it always has (gt-5y87fp).
+func TestBudgetPictureKeepsItsWordingAtOrUnderEveryCap(t *testing.T) {
+	t.Parallel()
+	b := baseBudget()
+	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
+	b.SetHeld([]HeldSeat{
+		{Agent: "deepseek-flash", Name: "gastown/a", State: SeatStateSession},
+		{Agent: "deepseek-flash", Name: "gastown/b", State: SeatStateSession},
+		{Agent: "claude-sonnet", Name: "gastown/c", State: SeatStateSession},
+	})
+	if got, want := b.Picture(), "deepseek-flash 2/2, claude-sonnet 1/2"; got != want {
+		t.Fatalf("a full seat printed a list: Picture() = %q, want %q", got, want)
+	}
+
+	// The town total above its cap prints the list too, on the total's own
+	// segment, so a town over its cap is explained when no seat is.
+	b.MaxTotal = 2
+	if got, want := b.Picture(), "deepseek-flash 2/2, claude-sonnet 1/2, total 3/2 (held: gastown/a:session, gastown/b:session, gastown/c:session)"; got != want {
+		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+}
+
 // TestSplitLiveDeadNamesTheDeadHookedPartApart is the one formatter every seat
 // count reads through: the tick line, `gt pool show` and the sling refusal. A
 // seat with neither a dead-hooked occupant nor a sling in flight prints nothing

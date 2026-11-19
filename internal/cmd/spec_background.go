@@ -175,6 +175,23 @@ func specLiveWithInFlight(live map[string]int, hooked map[string]bool, inFlight 
 	return out
 }
 
+// specHeldSeats names every seat the tick's count holds: the roster's seats
+// (with the draining ones already beside them) and each running sling
+// specLiveWithInFlight added to Live. A sling whose bead a roster seat hooks
+// added no seat, so it names none here either, and the list has one entry per
+// seat the count took (gt-5y87fp).
+func specHeldSeats(roster specRoster, inFlight []specInFlight) []specdispatch.HeldSeat {
+	held := append([]specdispatch.HeldSeat(nil), roster.Held...)
+	for _, f := range specInFlightAdded(inFlight, roster.HookedBeads) {
+		name := f.Bead
+		if f.Rig != "" {
+			name = f.Rig + "/" + f.Bead
+		}
+		held = append(held, specdispatch.HeldSeat{Agent: f.Agent, Name: name, State: specdispatch.SeatStateInFlight(f.Bead)})
+	}
+	return held
+}
+
 // specNewestSpawn is the spawn the min_spawn_gap stagger measures from: the
 // newer of the newest polecat the roster shows and the newest running sling's
 // start. The roster lacks a sling that has not spawned yet, so without the start

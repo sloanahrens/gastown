@@ -111,7 +111,9 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"the town's total counts a dead-hooked seat, so a restart cannot push past it", totaled, "", totaledCrashed, "deepseek-flash", "pool: total full (3/3 across every seat: 2 sessions, 1 dead-hooked) -> no seat for deepseek-flash", true, "polecat_pool.max_total"},
 		{"the town's total answers a request for another agent", totaled, "claude-sonnet", underTotal, "claude-sonnet", "pool: total full (3/3 across every seat) -> no seat for claude-sonnet", true, "polecat_pool.max_total"},
 		{"under the total the per-agent cap decides", totaled, "", oneTaken, "deepseek-flash", "pool: seat 2/3 -> deepseek-flash", false, ""},
-		{"the town's total holds a pool with no seats", &config.PolecatPool{MaxTotal: intPtr(1)}, "", full, "the default agent", "pool: total full (2/1 across every seat) -> no seat for the default agent", true, "polecat_pool.max_total"},
+		// A total above its cap names every seat it holds (gt-5y87fp); the
+		// fixture's sessions name no seat, so each is named by its session.
+		{"the town's total above its cap names every held seat", &config.PolecatPool{MaxTotal: intPtr(1)}, "", full, "the default agent", "pool: total full (2/1 across every seat; held: gt-x:session, gt-x:session) -> no seat for the default agent", true, "polecat_pool.max_total"},
 		{"max_total 0 is no total cap", &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3}}, MaxTotal: intPtr(0)}, "", oneTaken, "deepseek-flash", "pool: seat 2/3 -> deepseek-flash", false, ""},
 	}
 	for _, c := range cases {
@@ -130,6 +132,40 @@ func TestChoosePoolAgent(t *testing.T) {
 				t.Errorf("raise = %q, want %q", raise, c.wantRaise)
 			}
 		})
+	}
+}
+
+// TestChoosePoolAgentNamesEveryHeldSeatAboveTheCap is gt-5y87fp's refusal half:
+// a town total above its cap lists every seat inside it with its state, from the
+// same read the count used, so the list has one entry per seat counted and reads
+// as the tick line's does.
+func TestChoosePoolAgentNamesEveryHeldSeatAboveTheCap(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{MaxTotal: intPtr(8)}
+	session := func(name string) poolSession {
+		return poolSession{name: "gt-" + name, agent: "deepseek-flash", rig: "gastown", polecat: name}
+	}
+	sessions := []poolSession{
+		session("alpha"), session("bravo"), session("charlie"),
+		session("delta"), session("echo"), session("foxtrot"),
+		{name: "landing/gastown/golf", agent: "deepseek-flash", rig: "gastown", polecat: "golf", landing: true},
+		{name: "dead/gastown/hotel", agent: "deepseek-flash", rig: "gastown", polecat: "hotel", deadHooked: true},
+		{name: "pool-claim/c1", agent: "deepseek-flash", claim: true},
+	}
+	_, reason, refused, _ := choosePoolAgent(pool, "", sessions, poolTestNow)
+	if !refused {
+		t.Fatalf("a town of nine against a cap of eight was admitted: %q", reason)
+	}
+	want := "pool: total full (9/8 across every seat: 6 sessions, 1 dead-hooked, 1 mid-landing, 1 claim; held: " +
+		"gastown/alpha:session, gastown/bravo:session, " +
+		"gastown/charlie:session, gastown/delta:session, gastown/echo:session, gastown/foxtrot:session, " +
+		"gastown/golf:landing, gastown/hotel:dead-hooked, pool-claim/c1:claim) -> no seat for the default agent"
+	if reason != want {
+		t.Fatalf("reason = %q, want %q", reason, want)
+	}
+	held := reason[strings.Index(reason, "held: ")+len("held: ") : strings.Index(reason, ") ->")]
+	if got := len(strings.Split(held, ", ")); got != 9 {
+		t.Errorf("the refusal names %d seats, its count is 9: %q", got, held)
 	}
 }
 

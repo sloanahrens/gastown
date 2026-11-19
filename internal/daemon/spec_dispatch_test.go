@@ -358,7 +358,11 @@ func TestDispatchRosterSeats(t *testing.T) {
 		// A last segment shaped like the total but malformed is unreadable.
 		{"claude-sonnet 2/2, total", nil, true},
 		{"claude-sonnet 2/2, total x/10", nil, true},
-		{"claude-sonnet 2/2, total 2/10 (extra)", nil, true},
+		// A total above its cap carries the held seats Picture appends, as a
+		// seat carries its breakdown; the note is not the count, and its commas
+		// sit inside its parentheses (gt-5y87fp).
+		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session, gastown/b:claim)", []townhealth.DispatchSeat{{Live: 9, Cap: 8}}, false},
+		{"claude-sonnet 2/2, total 2/10 (extra)", []townhealth.DispatchSeat{{Live: 2, Cap: 2}}, false},
 		// A roster the daemon cannot read in full must not read as a full
 		// town, so each unreadable shape is reported rather than dropped
 		// (gt-xiw7o).

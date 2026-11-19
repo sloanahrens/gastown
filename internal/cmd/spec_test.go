@@ -2585,6 +2585,38 @@ func TestSpecDispatchHoldsAtTheTownTotal(t *testing.T) {
 	}
 }
 
+// TestSpecDispatchNamesEveryHeldSeatAboveTheCap is gt-5y87fp: a roster of nine
+// seats against a cap of eight names every seat inside the count, from the same
+// seat read the count used, so the list has one entry per seat counted and the
+// reading can be attributed rather than guessed at.
+func TestSpecDispatchNamesEveryHeldSeatAboveTheCap(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	f.seats = []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 8}}
+	session := func(name string) poolSession {
+		return poolSession{name: "gt-" + name, agent: "deepseek-flash", rig: "gastown", polecat: name}
+	}
+	f.roster = specRosterFrom([]poolSession{
+		session("alpha"), session("bravo"), session("charlie"),
+		session("delta"), session("echo"), session("foxtrot"),
+		{name: "landing/gastown/golf", agent: "deepseek-flash", rig: "gastown", polecat: "golf", landing: true},
+		{name: "dead/gastown/hotel", agent: "deepseek-flash", rig: "gastown", polecat: "hotel", deadHooked: true},
+		{name: "pool-claim/c1", agent: "deepseek-flash", claim: true},
+	}, nil)
+
+	r := runSpecDispatchCycle(f.env())
+	want := "deepseek-flash 9/8 (8 live + 1 dead-hooked) (held: gastown/alpha:session, gastown/bravo:session, " +
+		"gastown/charlie:session, gastown/delta:session, gastown/echo:session, gastown/foxtrot:session, " +
+		"gastown/golf:landing, gastown/hotel:dead-hooked, pool-claim/c1:claim)"
+	if r.Roster != want {
+		t.Fatalf("roster = %q, want %q", r.Roster, want)
+	}
+	held := r.Roster[strings.Index(r.Roster, "held: ")+len("held: "):]
+	if got := len(strings.Split(strings.TrimSuffix(held, ")"), ", ")); got != 9 {
+		t.Errorf("the tick line names %d seats, its count is 9", got)
+	}
+}
+
 // specSeatTown is town settings whose pool holds seats. Each seat's agent is
 // defined in agents, so the loader's known-agent check (the one a tick reads
 // through) passes without a settings file on disk.

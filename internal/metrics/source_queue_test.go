@@ -265,6 +265,16 @@ func TestSourceQueueParsesDaemonLogColumns(t *testing.T) {
 			absent: []string{"seat_live_total", "seat_cap_total"},
 		},
 		{
+			name: "a total above its cap keeps its seats and is still not a seat",
+			log:  "2026/10/24 12:40:00 spec_dispatch: tick: 2 candidate(s), roster deepseek-flash 9/8 (8 live + 1 dead-hooked) (held: gastown/a:session, gastown/b:claim), claude-sonnet 1/2, total 10/8 (held: gastown/a:session, gastown/b:claim, gastown/c:session), 0 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n",
+			want: map[string]any{
+				"dispatch_ticks_1h": 1, "dispatched_1h": 0,
+				"seat_live_deepseek-flash": 9, "seat_cap_deepseek-flash": 8,
+				"seat_live_claude-sonnet": 1, "seat_cap_claude-sonnet": 2,
+			},
+			absent: []string{"seat_live_total", "seat_cap_total", "seat_live_gastown/a", "seat_cap_gastown/a"},
+		},
+		{
 			name: "no seats reports no seat columns",
 			log:  "2026/10/24 12:40:00 spec_dispatch: tick: 0 candidate(s), roster no seats, 0 dispatched, 0 refused, 0 planning, 0 skipped, 0 failed, 0 held by the failed label\n",
 			want: map[string]any{
