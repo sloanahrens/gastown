@@ -78,6 +78,24 @@ func TestRetryWrite(t *testing.T) {
 	}
 }
 
+// pastDeadline is a context whose deadline has passed, though its Err has not.
+type pastDeadline struct{ context.Context }
+
+func (pastDeadline) Deadline() (time.Time, bool) { return time.Unix(0, 0), true }
+
+// TestRetryWriteStopsAtTheDeadline: a wait past the deadline is not taken (gt-y82k93).
+func TestRetryWriteStopsAtTheDeadline(t *testing.T) {
+	t.Parallel()
+	calls, paused := 0, false
+	err := retryWrite(pastDeadline{context.Background()}, func(time.Duration) { paused = true }, func() error {
+		calls++
+		return errors.New("dolt: connection refused")
+	})
+	if err == nil || calls != 1 || paused {
+		t.Errorf("retryWrite = %v after %d tries (paused %v); want the error after 1 try", err, calls, paused)
+	}
+}
+
 // TestRejectRetriesTheNote: a note that fails twice is recorded with no
 // RecordErr; one that fails three times is reported on it (gt-hounmt).
 func TestRejectRetriesTheNote(t *testing.T) {

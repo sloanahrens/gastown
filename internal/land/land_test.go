@@ -123,7 +123,7 @@ func (f *landFixture) lander() *Lander {
 	}
 	l := &Lander{Repo: f.repo, WorkRoot: f.workRoot, Candidate: &gateCandidate{f: f}, Merger: f.merger,
 		Reviewer: f.review, Beads: f.bd, Landings: lf,
-		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }}
+		Now: func() time.Time { return time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC) }, sleep: func(time.Duration) {}}
 	if f.git != nil {
 		l.openRepo = func(dir string) Repo { return f.git.Open(dir) }
 		// gitfake records no commit authors, so the fake landing's head reads as
