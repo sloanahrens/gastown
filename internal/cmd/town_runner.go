@@ -219,10 +219,9 @@ type runnerRollDeps struct {
 }
 
 var townRunnerCmd = &cobra.Command{
-	Use:     "runner",
-	GroupID: GroupDiag,
-	Short:   "Change the gate runner's configuration",
-	RunE:    requireSubcommand,
+	Use:   "runner",
+	Short: "Change the gate runner's configuration",
+	RunE:  requireSubcommand,
 }
 
 var townRunnerRollCmd = &cobra.Command{
