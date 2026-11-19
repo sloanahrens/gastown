@@ -91,6 +91,10 @@ type GatewayOptions struct {
 	Workspaces *WorkspaceStore
 	// Log records one line per bd call that ran.
 	Log *CallLog
+	// CallsDir is the directory GET /v1/calls merges: the shared log root that
+	// holds every pod's directory under --log-per-pod. Empty means the log's own
+	// directory, which is the whole log when the gateway is not per pod.
+	CallsDir string
 	// Runner runs the calls. The production value is New's *Executor.
 	Runner CallRunner
 	// Caps reports the concurrency-cap counters the calls run under. The
@@ -112,6 +116,7 @@ type Gateway struct {
 	policy     *Policy
 	workspaces *WorkspaceStore
 	log        *CallLog
+	callsDir   string
 	runner     CallRunner
 	caps       CapCounters
 	doltProbe  func(context.Context) error
@@ -137,11 +142,16 @@ func NewGateway(opts GatewayOptions) (*Gateway, error) {
 			return nil, fmt.Errorf("%w: no %s", ErrUnconfigured, f.name)
 		}
 	}
+	callsDir := opts.CallsDir
+	if callsDir == "" {
+		callsDir = opts.Log.Dir()
+	}
 	return &Gateway{
 		auth:       opts.Auth,
 		policy:     opts.Policy,
 		workspaces: opts.Workspaces,
 		log:        opts.Log,
+		callsDir:   callsDir,
 		runner:     opts.Runner,
 		caps:       opts.Caps,
 		doltProbe:  opts.DoltProbe,
@@ -454,7 +464,7 @@ func (g *Gateway) serveCalls(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
-	calls, err := ReadCalls(g.log.Dir(), since, limit)
+	calls, err := ReadCalls(g.callsDir, since, limit)
 	if err != nil {
 		refuse(w, http.StatusInternalServerError, codeInternal, callsLogUnreadableMessage)
 		return
