@@ -38,8 +38,12 @@ type CallEntry struct {
 	Error      string   `json:"error,omitempty"`
 	// Refusal is the reason code of a call the gateway refused before exec. A
 	// call that ran carries none.
-	Refusal  string `json:"refusal,omitempty"`
-	Conflict bool   `json:"conflict,omitempty"`
+	Refusal string `json:"refusal,omitempty"`
+	// RefusedFlag is the flag an unplaceable argv was refused for, as the scan
+	// spells it (--version, -x) and never its value. Only an ambiguous-flag
+	// refusal carries one, and the line omits it when empty.
+	RefusedFlag string `json:"refused_flag,omitempty"`
+	Conflict    bool   `json:"conflict,omitempty"`
 }
 
 // stamped is one parsed call log line with its stamp, the key ReadCalls merges on.

@@ -344,19 +344,20 @@ func (l *CallLog) LogUncounted(rec CallRecord) {
 func (l *CallLog) log(rec CallRecord, counted bool) {
 	parsed := l.parseArgv(rec.Argv)
 	e := entry{
-		TS:         l.now().UTC().Format(time.RFC3339Nano),
-		Class:      boundText(rec.Class),
-		Caller:     boundText(rec.Caller),
-		Actor:      boundText(rec.Actor),
-		Verb:       parsed.verb,
-		Write:      rec.Write,
-		Flags:      parsed.flags,
-		Beads:      parsed.beads,
-		ExitCode:   rec.ExitCode,
-		DurationMS: rec.Duration.Milliseconds(),
-		Error:      boundTextTo(rec.Error, maxErrorBytes),
-		Refusal:    boundText(rec.Refusal),
-		Conflict:   rec.Conflict,
+		TS:          l.now().UTC().Format(time.RFC3339Nano),
+		Class:       boundText(rec.Class),
+		Caller:      boundText(rec.Caller),
+		Actor:       boundText(rec.Actor),
+		Verb:        parsed.verb,
+		Write:       rec.Write,
+		Flags:       parsed.flags,
+		Beads:       parsed.beads,
+		ExitCode:    rec.ExitCode,
+		DurationMS:  rec.Duration.Milliseconds(),
+		Error:       boundTextTo(rec.Error, maxErrorBytes),
+		Refusal:     boundText(rec.Refusal),
+		RefusedFlag: parsed.refusedFlag,
+		Conflict:    rec.Conflict,
 	}
 	line, marshalErr := json.Marshal(e)
 
@@ -571,9 +572,10 @@ func (l *CallLog) drop() {
 
 // logParts is the part of argv a line keeps.
 type logParts struct {
-	verb  string
-	flags []string
-	beads []string
+	verb        string
+	flags       []string
+	beads       []string
+	refusedFlag string
 }
 
 // parseArgv reads argv with the policy's own scanner: the scan decides the
@@ -594,14 +596,16 @@ type logParts struct {
 // unreadable call is visible rather than blank (gt-itjuwu review). It keeps no
 // ids. Its flag names are kept only once a command word was read: before the
 // first word, an unknown flag may take that word as its value, so the scan
-// refuses with no word read and no flag is named. After a word, the flags the
-// scan placed up to the token it could not are named, so a refused call's
-// flags reach its line.
+// refuses with no word read and its flags list stays empty. The one flag the
+// scan refused still reaches the line, in refusedFlag, named without its value
+// (gt-bfqtip). After a word, the flags the scan placed up to the token it could
+// not are named too, so a refused call's flags reach its line.
 func (l *CallLog) parseArgv(argv []string) logParts {
 	parts := logParts{flags: []string{}, beads: []string{}}
 	scan, err := l.policy.scanArgs(argv)
 	if err != nil {
 		parts.verb = unparsedVerb
+		parts.refusedFlag = scan.refusedFlag
 		if len(scan.words) > 0 {
 			parts.flags = loggedFlags(scan.flags)
 		}
