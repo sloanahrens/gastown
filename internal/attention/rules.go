@@ -176,6 +176,11 @@ const (
 	// seat's agent never starts until it is given (gt-1gtq5g).
 	RuleSandboxPending = "sandbox.pending"
 
+	// RuleSandboxSilent is a running sandbox seat whose newest transcript is
+	// past the window: the seat holds its pool slot and its bead while nothing
+	// says whether its agent is working (gt-oq4ele).
+	RuleSandboxSilent = "sandbox.silent"
+
 	// RuleSeatSandboxStale is a seat's gateway sandbox left in a terminal
 	// failure phase: every sling to the seat name it names fails until the
 	// sandbox is deleted (gt-zapy97).
@@ -336,6 +341,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A sandbox pod the scheduler cannot place never starts its agent: the
 	// overseer is woken to give it the resources or fix its request (gt-1gtq5g).
 	RuleSandboxPending: flagsWake,
+	// A running sandbox seat whose transcripts have stopped may have an agent
+	// stuck at a prompt, holding its bead: the overseer is woken to read the
+	// seat before the overrun bound stops it (gt-oq4ele).
+	RuleSandboxSilent: flagsWake,
 	// A stale seat sandbox blocks its seat name for every sling: the overseer
 	// is woken to delete the sandbox and free the name (gt-zapy97).
 	RuleSeatSandboxStale: flagsWake,
@@ -483,6 +492,7 @@ var kindRules = map[Kind]string{
 	KindHoldStale:                     RuleHoldStale,
 	KindMetricsExtract:                RuleMetricsExtract,
 	KindSandboxPending:                RuleSandboxPending,
+	KindSandboxSilent:                 RuleSandboxSilent,
 	KindSeatSandboxStale:              RuleSeatSandboxStale,
 	KindSeatUnreachable:               RuleSeatUnreachable,
 	KindStoryPointsDrift:              RuleStoryPointsDrift,

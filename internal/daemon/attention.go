@@ -767,6 +767,10 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A sandbox pod the scheduler cannot place (gt-1gtq5g). The owns
 		// predicate keeps only its own items when the cluster read fails.
 		{kind: attention.KindSandboxPending, collect: s.collectPendingSandboxPods, owns: pendingSandboxItem},
+		// A running sandbox seat whose newest transcript is past the window
+		// (gt-oq4ele). The owns predicate keeps only its own items when a
+		// registry, profile or record read fails.
+		{kind: attention.KindSandboxSilent, collect: s.collectSilentSandboxSeats, owns: silentSandboxSeatItem},
 		// A seat's gateway sandbox left in a failure phase, which blocks the
 		// seat name every sling draws (gt-zapy97).
 		{kind: attention.KindSeatSandboxStale, collect: s.collectStaleSeatSandboxes, owns: seatSandboxStaleItem},

@@ -165,6 +165,10 @@ var ruleOwners = map[string]Owner{
 	// at: the overseer gives the pod what its request needs, or lowers the
 	// request, before a person is woken (gt-1gtq5g).
 	RuleSandboxPending: OwnerOverseer,
+	// A silent sandbox seat is the town's own seat to look at: the overseer
+	// reads whether its agent is working or stuck before a person is woken
+	// (gt-oq4ele).
+	RuleSandboxSilent: OwnerOverseer,
 	// A stale seat sandbox is the town's own gateway object to delete before a
 	// person is woken: the overseer frees the seat name it blocks (gt-zapy97).
 	RuleSeatSandboxStale: OwnerOverseer,
