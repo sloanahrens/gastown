@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -145,6 +146,97 @@ func TestLandingSurvivesAFailedBranchDelete(t *testing.T) {
 	}
 	if !logged(logs, "no lease") {
 		t.Fatalf("logs %q; want one naming the failed delete", logs)
+	}
+}
+
+// seedReadyNamingBranch seeds a ready-to-land bead whose READY TO LAND block
+// names branch, the note a seat's gt done leaves for the landing worker.
+func (h *harness) seedReadyNamingBranch(t *testing.T, id, branch string) {
+	t.Helper()
+	w := land.Work{Branch: branch, Head: noteHead, Target: "main", Worker: "coma"}
+	h.bd.Seed(beads.Issue{ID: id, Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/coma",
+		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w), UpdatedAt: seededRowAt})
+}
+
+// failingListStore is the fake whose List fails; every other method reaches
+// the embedded fake.
+type failingListStore struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (s failingListStore) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, s.err }
+
+// TestReapKeepsABranchAnotherReadyBeadNames is the incident of gt-wlrgk8: the
+// branch gt-ug7zed was landed from holds a commit past the landed head, and
+// the ready-to-land bead that commit belongs to names the branch.
+func TestReapBeadBranchesKeepsABranchAnotherReadyBeadNames(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const held = "polecat/coma/gt-ug7zed+mwmuimru"
+	h.seedReadyNamingBranch(t, "gt-wlrgk8", held)
+	h.remote.remoteRefs = map[string]string{"refs/heads/" + held: noteHead}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	h.w.reapBeadBranches("gt-ug7zed")
+
+	if len(h.remote.deleted) != 0 {
+		t.Fatalf("deleted %v; want the branch kept", h.remote.deleted)
+	}
+	if _, ok := h.remote.remoteRefs["refs/heads/"+held]; !ok {
+		t.Fatal("the branch gt-wlrgk8 names was deleted; want it kept")
+	}
+	if !logged(logs, held) || !logged(logs, "gt-wlrgk8") {
+		t.Fatalf("logs %q; want one naming the kept branch and gt-wlrgk8", logs)
+	}
+}
+
+// TestReapDeletesOnlyTheBranchNoReadyBeadNames: a ready bead protects the one
+// branch it names, not the landed bead's other attempts.
+func TestReapBeadBranchesDeletesOnlyTheBranchNoReadyBeadNames(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyNamingBranch(t, "gt-wlrgk8", "polecat/coma/gt-ug7zed+mwmuimru")
+	h.remote.remoteRefs = map[string]string{
+		"refs/heads/polecat/opal/gt-ug7zed+x1":       tipHead,
+		"refs/heads/polecat/coma/gt-ug7zed+mwmuimru": noteHead,
+	}
+
+	h.w.reapBeadBranches("gt-ug7zed")
+
+	want := []string{"polecat/opal/gt-ug7zed+x1"}
+	if strings.Join(h.remote.deleted, ",") != strings.Join(want, ",") {
+		t.Fatalf("deleted %v; want %v", h.remote.deleted, want)
+	}
+	if _, ok := h.remote.remoteRefs["refs/heads/polecat/coma/gt-ug7zed+mwmuimru"]; !ok {
+		t.Fatal("the branch a ready bead names was deleted; want it kept")
+	}
+}
+
+// TestReapDeletesNothingWhenTheReadyListFails: an unread ready list cannot
+// show which branch a bead holds, so the reap keeps every branch it found.
+func TestReapBeadBranchesDeletesNothingWhenTheReadyListFails(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.remote.remoteRefs = map[string]string{
+		"refs/heads/polecat/opal/gt-abc+x1":  tipHead,
+		"refs/heads/polecat/agate/gt-abc+x0": noteHead,
+	}
+	h.w.Beads = failingListStore{Fake: h.bd, err: errors.New("bd list failed")}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	h.w.reapBeadBranches("gt-abc")
+
+	if len(h.remote.deleted) != 0 {
+		t.Fatalf("deleted %v; want none", h.remote.deleted)
+	}
+	if len(h.remote.remoteRefs) != 2 {
+		t.Fatalf("remote refs %v; want both branches kept", h.remote.remoteRefs)
+	}
+	if !logged(logs, "bd list failed") {
+		t.Fatalf("logs %q; want one naming the failed ready-to-land listing", logs)
 	}
 }
 
