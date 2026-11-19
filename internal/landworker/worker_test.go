@@ -455,7 +455,7 @@ func TestPassHumanRejectionCommentFailureIsLogged(t *testing.T) {
 	var escalations atomic.Int32
 	h.w.Escalate = func(string, string) { escalations.Add(1) }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
-		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false}
+		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false, Escalate: true}
 	}
 	h.w.Pass(context.Background())
 	h.w.escWG.Wait()
@@ -482,7 +482,7 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	got := make(chan string, 2)
 	h.w.Escalate = func(beadID, message string) { got <- beadID + ": " + message }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
-		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om review returned no verdict", Rework: false}
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om review returned no verdict", Rework: false, Escalate: true}
 	}
 	h.w.Pass(context.Background())
 	// Bounded by the test binary's timeout: a missing escalation hangs here.
@@ -492,6 +492,39 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	}
 	if !strings.Contains(msg, "left for the overseer") {
 		t.Fatalf("escalation %q; want it to say the landing is left for the overseer, as the log line does", msg)
+	}
+}
+
+// TestPassHumanRejectionEscalatesOncePerLane: the worker raises a human
+// refusal's escalation only when the landing marked it as the lane's first
+// (Escalate). A lane already escalated by a capped block in the notes gets a
+// refusal with Escalate false, and the worker raises none (gt-dtx3ht). The
+// decision is made from the notes in land's reject (TestRejectionEscalateFlag).
+func TestPassHumanRejectionEscalatesOncePerLane(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name            string
+		escalate        bool
+		wantEscalations int32
+	}{
+		{"first human refusal of the lane escalates", true, 1},
+		{"human refusal after the lane escalated does not", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedReady(t, "gt-abc")
+			var escalations atomic.Int32
+			h.w.Escalate = func(string, string) { escalations.Add(1) }
+			h.lander.fn = func(int, land.Work) (land.Result, error) {
+				return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", Rework: false, Escalate: tc.escalate}
+			}
+			h.w.Pass(context.Background())
+			h.w.escWG.Wait()
+			if n := escalations.Load(); n != tc.wantEscalations {
+				t.Fatalf("escalated %d times; want %d", n, tc.wantEscalations)
+			}
+		})
 	}
 }
 
@@ -535,7 +568,7 @@ func TestPassSupersededRejection(t *testing.T) {
 	}{
 		{"superseded human", superseded(false), 0, false},
 		{"superseded revert", superseded(true), 0, false},
-		{"open human", &land.Rejection{Kind: land.RejectReview, Reason: "no verdict"}, 1, true},
+		{"open human", &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", Escalate: true}, 1, true},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -575,7 +608,7 @@ func TestPassHumanRejectionWithRecordErrorEscalates(t *testing.T) {
 	var escalations atomic.Int32
 	h.w.Escalate = func(string, string) { escalations.Add(1) }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
-		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", Rework: false, RecordErr: errors.New("bd down")}
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", Rework: false, Escalate: true, RecordErr: errors.New("bd down")}
 	}
 	h.w.Pass(context.Background())
 	h.w.escWG.Wait()
@@ -602,7 +635,7 @@ func TestPassEscalatePanicIsRecoveredAndLogged(t *testing.T) {
 	}
 	h.w.Escalate = func(string, string) { panic("alert path broke") }
 	h.lander.fn = func(int, land.Work) (land.Result, error) {
-		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false}
+		return land.Result{}, &land.Rejection{Kind: land.RejectPolicy, Reason: "no_merge work never lands", Rework: false, Escalate: true}
 	}
 	h.w.Pass(context.Background())
 	h.w.escWG.Wait()
