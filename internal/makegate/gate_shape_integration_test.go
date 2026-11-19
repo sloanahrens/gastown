@@ -64,6 +64,19 @@ func TestIntegrationGateRunsLintThenBuildThenUnitTier(t *testing.T) {
 	}
 }
 
+// TestIntegrationGateSetsTheUmaskFirst checks "gate-test sets umask 022, and
+// prints the one it replaced, before its first go command". Mutation: drop the
+// umask and a CI job container's open umask reaches the unit tier (gt-nmd2xg).
+func TestIntegrationGateSetsTheUmaskFirst(t *testing.T) {
+	out := dryGate(t, RealMake(repoRoot(t)))
+	if umask, build := lineOf(out, "umask 022"), lineOf(out, "go build ./... ||"); umask == 0 || umask >= build {
+		t.Fatalf("gate-test's umask is at line %d and its first go command at %d, want the umask first\n%s", umask, build, out)
+	}
+	if !strings.Contains(out, "gate: umask was") || !strings.Contains(out, "running under 0022") {
+		t.Fatalf("gate-test does not print the umask it replaced\n%s", out)
+	}
+}
+
 // TestIntegrationGateLeavesShellTestsToTestSlow checks "gate leaves the shell
 // tests (the shelltier runner) to test-slow".
 // Mutation: add the shelltier runner to gate's recipe, and every landing runs

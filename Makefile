@@ -519,13 +519,17 @@ GATE_WALLS = -jsonl .runtime/metrics/gate-walls.jsonl -run gate-$$(date +%s)-$$$
 
 # gate-test is build plus the unit tier and the integration vet. Its printed
 # wall is its own: lint reports separately (a value here wins over gate's).
+# It runs under umask 022 whatever the caller's is (gt-nmd2xg), so a CI job
+# container that starts open cannot fail a test a seat passed. Each recipe line
+# is its own shell, so each line that writes files sets the umask itself.
 gate-test: GATE_START := $(shell date +%s)
 gate-test:
+	@old=$$(umask); umask 022; echo "gate: umask was $$old, running under 0022" >&2
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
-	@$(CPU_CLASS) go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
+	@umask 022; $(CPU_CLASS) go build ./... || { echo "gate: FAILED at build" >&2; exit 1; }
 	@# -o into a temp dir: `go build ./...` over a module with one main
 	@# package writes that binary into the module's directory.
-	@out=$$(mktemp -d); for m in $(NESTED_MODULES); do $(CPU_CLASS) go -C "$$m" build -o "$$out/" ./... || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
+	@umask 022; out=$$(mktemp -d); for m in $(NESTED_MODULES); do $(CPU_CLASS) go -C "$$m" build -o "$$out/" ./... || { rm -rf "$$out"; echo "gate: FAILED at build ($$m)" >&2; exit 1; }; done; rm -rf "$$out"
 	@# The unit tier: every package, through go test's result cache, so a
 	@# landing reruns only the packages its change can affect (gt-s1vff).
 	@# The budget runner's CPU-measuring exec wrapper bypassed the cache and
@@ -552,7 +556,7 @@ gate-test:
 	@# package list, where the go tool still parses it, so the unit tier's line
 	@# keeps the shape the gate-shape tests pin. The last line is gateverdict's:
 	@# it names a red stage, exits 1, and keeps the PASSED wording (gt-w3aby).
-	@trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \
+	@umask 022; trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \
 	stream=$$(mktemp); \
 	go run ./internal/testpolicy/cmd/integrationvet & vet=$$!; \
 	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... -json >"$$stream" & gt=$$!; \
