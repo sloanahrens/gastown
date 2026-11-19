@@ -83,7 +83,12 @@ func TestRecordQueueFailures(t *testing.T) {
 	if err := os.Chmod(ro, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(ro, 0o700) })
+	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: t.TempDir needs its search bit back to remove it
+		if err := os.Chmod(ro, 0o700); err != nil {
+			t.Errorf("restore fixture directory permissions: %v", err)
+		}
+	})
 	cases := []op{
 		{"pending reads an unopenable queue", func() error { _, err := (RecordQueue{Path: long}).Pending(); return err }},
 		{"enqueue reads an unopenable queue", func() error { return (RecordQueue{Path: long}).Enqueue(ok) }},
