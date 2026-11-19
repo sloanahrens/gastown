@@ -222,6 +222,8 @@ var polecatGitStateCmd = &cobra.Command{
 
 Used by the Witness for pre-kill verification to ensure no work is lost.
 Returns whether the worktree is clean (safe to kill) or dirty (needs cleanup).
+A sandbox seat commits inside its sandbox, so it answers unknown rather than a
+verdict read from the pod-side worktree.
 
 Checks:
   - Working tree: uncommitted changes
@@ -1356,59 +1358,135 @@ func runPolecatGitState(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("polecat '%s' not found in rig '%s'", polecatName, rigName)
 	}
 
-	// Get git state from the polecat's worktree
-	state, err := getGitState(p.ClonePath)
+	reads := polecatGitStateReadsFor(beads.New(r.Path), filepath.Dir(r.Path), polecatBeadIDForRig(r, rigName, polecatName))
+	return reportPolecatGitState(os.Stdout, r.Name, polecatName, p.ClonePath, polecatSessionNameIn(rigName, polecatName), reads, polecatGitStateJSON)
+}
+
+// polecatGitStateReads is what the git-state command asks about one seat: the
+// agent name its agent bead recorded (an unreadable bead is an error), the
+// sandbox probe (ok false is a host seat), and the reader for a host seat's
+// pod-side worktree.
+type polecatGitStateReads struct {
+	agent    func() (string, error)
+	probe    func(agent, sessionName string) (polecat.LiveGitState, bool)
+	gitState func(worktreePath string) (*GitState, error)
+}
+
+// polecatGitStateReadsFor builds the real reads for one polecat. Agent names
+// come from its agent bead because the sandbox probe finds a seat by agent
+// name; a seat whose bead records none is a host seat, the manager's own rule.
+func polecatGitStateReadsFor(bd beads.Client, townRoot, agentBeadID string) polecatGitStateReads {
+	return polecatGitStateReads{
+		agent: func() (string, error) {
+			_, fields, err := beads.GetAgentBead(bd, agentBeadID)
+			if err != nil {
+				return "", err
+			}
+			if fields == nil {
+				return "", nil
+			}
+			return strings.TrimSpace(fields.Agent), nil
+		},
+		probe:    sandboxSeatProbeFor(townRoot, nil),
+		gitState: getGitState,
+	}
+}
+
+// polecatGitStateUnknown is the --json answer for a seat whose state cannot be
+// read from the host. It carries no clean field: whether such a seat's work is
+// clean is not knowable from the pod-side worktree.
+type polecatGitStateUnknown struct {
+	Source string `json:"source"`
+	Reason string `json:"reason"`
+}
+
+// reportPolecatGitState prints one seat's git state. A sandbox seat is answered
+// by the probe and its pod-side worktree — a stale leftover it never writes —
+// is not read, so the command can never print a clean verdict for it. A host
+// seat is measured from clonePath and rendered exactly as before.
+func reportPolecatGitState(w io.Writer, rigName, polecatName, clonePath, sessionName string, reads polecatGitStateReads, jsonOut bool) error {
+	if reads.probe != nil {
+		agent, err := reads.agent()
+		if err != nil {
+			return reportPolecatGitStateUnknown(w, rigName, polecatName, fmt.Sprintf("could not read the polecat's agent bead: %v", err), jsonOut)
+		}
+		if live, sandboxed := reads.probe(agent, sessionName); sandboxed {
+			reason := strings.TrimSpace(live.FailedReason)
+			if reason == "" {
+				reason = fmt.Sprintf("git state of sandbox %s is unknown", sessionName)
+			}
+			return reportPolecatGitStateUnknown(w, rigName, polecatName, reason+"; the pod-side worktree is not the seat's work", jsonOut)
+		}
+	}
+	state, err := reads.gitState(clonePath)
 	if err != nil {
 		return fmt.Errorf("getting git state: %w", err)
 	}
+	return reportHostSeatGitState(w, rigName, polecatName, state, jsonOut)
+}
 
+// reportPolecatGitStateUnknown prints the answer for a seat whose git state the
+// host cannot measure, and never a clean verdict.
+func reportPolecatGitStateUnknown(w io.Writer, rigName, polecatName, reason string, jsonOut bool) error {
+	if jsonOut {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		return enc.Encode(polecatGitStateUnknown{Source: polecat.GitStateSourceUnknown, Reason: reason})
+	}
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render(fmt.Sprintf("Git State: %s/%s", rigName, polecatName)))
+	fmt.Fprintf(w, "  Verdict:       %s\n", style.Warning.Render("unknown: "+reason))
+	return nil
+}
+
+// reportHostSeatGitState prints a host seat's measured git state.
+func reportHostSeatGitState(w io.Writer, rigName, polecatName string, state *GitState, jsonOut bool) error {
 	// JSON output
-	if polecatGitStateJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if jsonOut {
+		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(state)
 	}
 
 	// Human-readable output
-	fmt.Printf("%s\n\n", style.Bold.Render(fmt.Sprintf("Git State: %s/%s", r.Name, polecatName)))
+	fmt.Fprintf(w, "%s\n\n", style.Bold.Render(fmt.Sprintf("Git State: %s/%s", rigName, polecatName)))
 
 	// Working tree status
 	if len(state.UncommittedFiles) == 0 {
-		fmt.Printf("  Working Tree:  %s\n", style.Success.Render("clean"))
+		fmt.Fprintf(w, "  Working Tree:  %s\n", style.Success.Render("clean"))
 	} else {
-		fmt.Printf("  Working Tree:  %s\n", style.Warning.Render("dirty"))
-		fmt.Printf("  Uncommitted:   %s\n", style.Warning.Render(fmt.Sprintf("%d files", len(state.UncommittedFiles))))
+		fmt.Fprintf(w, "  Working Tree:  %s\n", style.Warning.Render("dirty"))
+		fmt.Fprintf(w, "  Uncommitted:   %s\n", style.Warning.Render(fmt.Sprintf("%d files", len(state.UncommittedFiles))))
 		for _, f := range state.UncommittedFiles {
-			fmt.Printf("                 %s\n", style.Dim.Render(f))
+			fmt.Fprintf(w, "                 %s\n", style.Dim.Render(f))
 		}
 	}
 
 	// Unpushed commits
 	if state.ComparisonBase != "" {
-		fmt.Printf("  Comparison:   %s (%d unpreserved patch(es))\n", style.Dim.Render(state.ComparisonBase), state.UnpreservedPatchCount)
+		fmt.Fprintf(w, "  Comparison:   %s (%d unpreserved patch(es))\n", style.Dim.Render(state.ComparisonBase), state.UnpreservedPatchCount)
 	}
 	if state.UnpushedCommits == 0 {
-		fmt.Printf("  Unpushed:      %s\n", style.Success.Render("0 commits"))
+		fmt.Fprintf(w, "  Unpushed:      %s\n", style.Success.Render("0 commits"))
 	} else {
-		fmt.Printf("  Unpushed:      %s\n", style.Warning.Render(fmt.Sprintf("%d commits ahead", state.UnpushedCommits)))
+		fmt.Fprintf(w, "  Unpushed:      %s\n", style.Warning.Render(fmt.Sprintf("%d commits ahead", state.UnpushedCommits)))
 	}
 
 	// Stashes
 	if state.StashCount == 0 {
-		fmt.Printf("  Branch Stashes: %s\n", style.Dim.Render("0"))
+		fmt.Fprintf(w, "  Branch Stashes: %s\n", style.Dim.Render("0"))
 	} else {
-		fmt.Printf("  Branch Stashes: %s\n", style.Warning.Render(fmt.Sprintf("%d", state.StashCount)))
+		fmt.Fprintf(w, "  Branch Stashes: %s\n", style.Warning.Render(fmt.Sprintf("%d", state.StashCount)))
 	}
 	if state.SharedStashCount > 0 {
-		fmt.Printf("  Shared Stashes: %s\n", style.Dim.Render(fmt.Sprintf("%d (repo-wide, not this branch)", state.SharedStashCount)))
+		fmt.Fprintf(w, "  Shared Stashes: %s\n", style.Dim.Render(fmt.Sprintf("%d (repo-wide, not this branch)", state.SharedStashCount)))
 	}
 
 	// Verdict
-	fmt.Println()
+	fmt.Fprintln(w)
 	if state.Clean {
-		fmt.Printf("  Verdict:       %s\n", style.Success.Render("CLEAN (safe to kill)"))
+		fmt.Fprintf(w, "  Verdict:       %s\n", style.Success.Render("CLEAN (safe to kill)"))
 	} else {
-		fmt.Printf("  Verdict:       %s\n", style.Error.Render("DIRTY (needs cleanup)"))
+		fmt.Fprintf(w, "  Verdict:       %s\n", style.Error.Render("DIRTY (needs cleanup)"))
 	}
 
 	return nil
