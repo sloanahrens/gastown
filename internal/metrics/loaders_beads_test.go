@@ -34,8 +34,9 @@ type bdCall struct {
 	args []string
 }
 
-// routedBd answers a bd list with list, and a bd show of a bead with shows[bead];
-// a bead with no entry in shows fails its show. It records the calls.
+// routedBd answers a bd list with list, and a bd read (show or comments) of a
+// bead with shows[bead]; a bead with no entry in shows fails its read. It
+// records the calls.
 func routedBd(list string, shows map[string]string, calls *[]bdCall) BdRun {
 	return func(dir string, args []string) ([]byte, error) {
 		*calls = append(*calls, bdCall{dir, args})
@@ -390,78 +391,106 @@ func TestHandoffBytesCacheSkipsCalls(t *testing.T) {
 	}
 }
 
-// estimateListFixture lists one estimated bead and one bead with no story-point
-// label, so only the first is shown for its comments.
+// estimateListFixture lists two estimated beads, one with an estimate comment
+// and one without, and one bead with no story-point label, so only the two
+// estimated beads are read for their comments.
 const estimateListFixture = `[
  {"id": "gt-1", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["sp:8", "sp-rung:all"]},
- {"id": "gt-2", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["bird-filed"]}
+ {"id": "gt-2", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["bird-filed"]},
+ {"id": "gt-3", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["sp:5"]}
 ]`
 
-// TestLoadBeadsReadsTheLatestEstimateTime: a bead with an sp: label has the
-// created time of its latest SP ESTIMATE v1 comment, not a later comment of
-// another kind and not an earlier estimate. A bead with no sp: label is not shown.
-func TestLoadBeadsReadsTheLatestEstimateTime(t *testing.T) {
+// TestEstimatedAtComments: an sp:-labelled bead's estimate time is the created
+// time of its newest SP ESTIMATE v1 comment, read with bd comments, the bead id
+// and --json; a later comment of another kind and an earlier estimate do not
+// win. A bead with no SP ESTIMATE comment has no time and no gap, and a bead
+// with no sp: label is not read at all.
+func TestEstimatedAtComments(t *testing.T) {
 	t.Parallel()
-	show := `{"schema_version": 1, "data": [{"id": "gt-1", "comments": [
-		{"text": "SP ESTIMATE v1 sp:8 rung:all hash:a", "created_at": "2026-10-21T10:00:00Z"},
-		{"text": "SP ESTIMATE v1 sp:5 rung:all hash:b", "created_at": "2026-10-19T10:00:00Z"},
-		{"text": "OVERSEER: a note after the estimate", "created_at": "2026-10-30T10:00:00Z"}
-	]}]}`
+	comments := `{"schema_version": 1, "data": [
+		{"author": "eagle", "created_at": "2026-10-21T10:00:00Z", "id": "c-2", "issue_id": "gt-1", "text": "SP ESTIMATE v1 sp:8 rung:all hash:a"},
+		{"author": "eagle", "created_at": "2026-10-19T10:00:00Z", "id": "c-1", "issue_id": "gt-1", "text": "SP ESTIMATE v1 sp:5 rung:all hash:b"},
+		{"author": "eagle", "created_at": "2026-10-30T10:00:00Z", "id": "c-3", "issue_id": "gt-1", "text": "OVERSEER: a note after the estimate"}
+	]}`
 	var calls []bdCall
 	var d Dropped
-	rows := LoadBeads(routedBd(estimateListFixture, map[string]string{"gt-1": show}, &calls), []string{"/g"}, &d)
+	reads := map[string]string{"gt-1": comments, "gt-3": `[]`}
+	rows := LoadBeads(routedBd(estimateListFixture, reads, &calls), []string{"/g"}, &d)
 	if got := rows[0].EstimatedAt; got != "2026-10-21T10:00:00Z" {
-		t.Errorf("gt-1 EstimatedAt = %q, want the latest estimate's time", got)
+		t.Errorf("gt-1 EstimatedAt = %q, want the newest estimate's time", got)
 	}
 	if got := rows[1].EstimatedAt; got != "" {
 		t.Errorf("gt-2 EstimatedAt = %q, want none for a bead with no sp: label", got)
 	}
+	if got := rows[2].EstimatedAt; got != "" {
+		t.Errorf("gt-3 EstimatedAt = %q, want none for a bead with no estimate comment", got)
+	}
+	var commentReads []bdCall
 	for _, c := range calls {
-		if c.args[0] == "show" && c.args[len(c.args)-1] != "gt-1" {
-			t.Errorf("bd show of %v, want only gt-1 shown", c.args)
+		if c.args[0] == "comments" {
+			commentReads = append(commentReads, c)
 		}
+	}
+	if want := []string{"comments", "--json", "--", "gt-1"}; len(commentReads) != 2 || !reflect.DeepEqual(commentReads[0].args, want) {
+		t.Errorf("bd comments calls = %v, want two, the first with args %v", commentReads, want)
 	}
 	if d.Count() != 0 {
 		t.Errorf("dropped = %+v, want none", d.Items)
 	}
 }
 
-// TestLoadBeadsLeavesTheEstimateTimeEmptyWhenItIsUnknown: a show that fails, one
-// that holds no bead, and an estimate comment whose time does not parse each
-// leave the time empty and are named in dropped. An unreadable time does not fall
-// back to an earlier estimate's time, so the report never reads a late estimate as
-// an early one.
-func TestLoadBeadsLeavesTheEstimateTimeEmptyWhenItIsUnknown(t *testing.T) {
+// TestEstimatedAtGaps: a bd comments call that fails leaves the time empty and
+// records a gap naming the bead and the first stderr line, and an estimate
+// comment whose time does not parse leaves it empty under the labels gap. An
+// unreadable time does not fall back to an earlier estimate's time, so the
+// report never reads a late estimate as an early one.
+func TestEstimatedAtGaps(t *testing.T) {
 	t.Parallel()
+	const oneEstimatedBead = `[
+	 {"id": "gt-1", "created_at": "2026-10-19T09:00:00Z", "issue_type": "task", "labels": ["sp:8"]}
+	]`
 	tests := []struct {
-		name    string
-		show    string
-		failed  bool
-		dropped string
+		name   string
+		run    BdRun
+		source string
+		reason string
 	}{
-		{name: "show fails", failed: true, dropped: "bd:gt-1"},
-		{name: "show holds no bead", show: `[]`, dropped: "bd:gt-1"},
 		{
-			name:    "estimate comment with no time",
-			show:    `[{"comments": [{"text": "SP ESTIMATE v1 sp:8", "created_at": ""}, {"text": "SP ESTIMATE v1 sp:5", "created_at": "2026-10-19T10:00:00Z"}]}]`,
-			dropped: "labels:gt-1",
+			name: "comments call fails",
+			run: func(_ string, args []string) ([]byte, error) {
+				if args[0] == "list" {
+					return []byte(oneEstimatedBead), nil
+				}
+				return nil, &exitError{
+					msg:    "bd comments: exit status 1",
+					stderr: "\n  the gateway refused the read\nlater detail\n",
+					err:    errors.New("exit status 1"),
+				}
+			},
+			source: "bd:gt-1",
+			reason: "bd comments failed: the gateway refused the read: estimate time not read",
+		},
+		{
+			name: "estimate comment with no time",
+			run: routedBd(oneEstimatedBead, map[string]string{"gt-1": `[
+				{"text": "SP ESTIMATE v1 sp:8", "created_at": ""},
+				{"text": "SP ESTIMATE v1 sp:5", "created_at": "2026-10-19T10:00:00Z"}
+			]`}, &[]bdCall{}),
+			source: "labels:gt-1",
+			reason: "SP ESTIMATE comment with no readable time",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calls []bdCall
 			var d Dropped
-			shows := map[string]string{"gt-1": tc.show}
-			if tc.failed {
-				shows = map[string]string{}
-			}
-			rows := LoadBeads(routedBd(estimateListFixture, shows, &calls), []string{"/g"}, &d)
+			rows := LoadBeads(tc.run, []string{"/g"}, &d)
 			if got := rows[0].EstimatedAt; got != "" {
 				t.Errorf("EstimatedAt = %q, want empty for an unknown time", got)
 			}
-			if len(d.Items) != 1 || d.Items[0].Source != tc.dropped {
-				t.Errorf("dropped = %+v, want one item from %s", d.Items, tc.dropped)
+			want := []DroppedItem{{Source: tc.source, Reason: tc.reason}}
+			if !reflect.DeepEqual(d.Items, want) {
+				t.Errorf("dropped = %+v, want %+v", d.Items, want)
 			}
 		})
 	}
