@@ -75,12 +75,15 @@ const (
 // holding if the control cluster gets a second node: the claims must then become
 // ReadWriteMany, or the strategy goes back to Recreate.
 //
-// Two checks back the sharing. The overseer's check (gt-yz0s8v, run 2026-11-18 in a
-// scratch namespace) found bd's runtime files safe under two pods on one claim. The
-// workspace push was unsafe until its cross-process lock (gt-fo7rf0) serialized it,
-// and the lock holds only between pods that run that release, so the first roll from
-// an image built before it races once. A real roll with pod startup was not part of
-// that run. --log-per-pod gives each pod its own call log directory.
+// Both checks behind the sharing are DONE. The overseer's check (gt-yz0s8v, closed
+// 2026-11-18 after a run in a scratch namespace) found bd's runtime files safe under
+// two pods on one claim, and found the workspace push unsafe with two pushers. The
+// push's cross-process lock (gt-fo7rf0, landed) serializes it. The lock holds only
+// between pods that run that release, so the first roll from an image built before it
+// races once. That run did not verify the X-Bd-Workspace hash each pod reports after
+// the other pod swapped the tree, nor a real roll with pod startup. The live cluster
+// keeps Recreate until the next attended render and apply, so that attended roll is the
+// first real one. --log-per-pod gives each pod its own call log directory.
 func bdGatewayDeployment(v Values, namespace string) Deployment {
 	automount := false
 	user := bdGatewayIdentity

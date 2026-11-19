@@ -472,7 +472,11 @@ func TestBdGatewayRollingStrategy(t *testing.T) {
 	if *ru.MaxUnavailable != 0 || *ru.MaxSurge != 1 {
 		t.Errorf("the gateway rolls with maxUnavailable %d and maxSurge %d, want 0 and 1", *ru.MaxUnavailable, *ru.MaxSurge)
 	}
-	if c := d.Spec.Template.Spec.Containers[0]; !slices.Contains(c.Command, "--log-per-pod") {
+	containers := d.Spec.Template.Spec.Containers
+	if len(containers) != 1 {
+		t.Fatalf("the gateway has %d containers, want 1", len(containers))
+	}
+	if c := containers[0]; !slices.Contains(c.Command, "--log-per-pod") {
 		t.Errorf("the gateway command %v does not carry --log-per-pod", c.Command)
 	}
 }
