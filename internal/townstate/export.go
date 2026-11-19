@@ -39,8 +39,9 @@ const (
 	SkipSymlinkOut SkipClass = "symlinks leaving the town root"
 	// SkipOlderThan is a regular file older than the --since time.
 	SkipOlderThan SkipClass = "files older than --since"
-	// SkipSecret is a file ExportOptions.Exclude names: a secret the copy must
-	// not carry. The summary counts it and never names it.
+	// SkipSecret is an entry a secret rule leaves out: one ExportOptions.Exclude
+	// names, or, for a backup, one whose path has a secret shape. The summary
+	// counts it and never names it.
 	SkipSecret SkipClass = "secret files (the secrets list)"
 	// SkipUnchanged is a regular file ExportOptions.Only refuses: a delta copy
 	// leaves out what the volume already holds with the same bytes.
@@ -63,8 +64,8 @@ var skipClassOrder = []SkipClass{
 
 // ExportSummary counts what an export put in the archive and what it left out.
 type ExportSummary struct {
-	// Entries are the daemon-owned manifest rows the export walked, in
-	// manifest order. They are top-level entry names, never the files below.
+	// Entries are the manifest rows the export walked, in manifest order.
+	// They are top-level entry names, never the files below.
 	Entries  []string
 	Files    int
 	Dirs     int
@@ -74,12 +75,12 @@ type ExportSummary struct {
 	// Skipped counts the entries left out, by class.
 	Skipped map[SkipClass]int
 	// LinkRefusals is one line for each link left out because the import would
-	// refuse it: the daemon-owned row that holds it and the reason, never the
-	// link's own name.
+	// refuse it: the row that holds it and the reason, never the link's own
+	// name.
 	LinkRefusals []string
-	// RigRowsDropped counts the rig-scoped daemon rows the archive lacks
-	// because the town's registry names no rig. It is zero for a town with
-	// rigs; non-zero only under ExportOptions.AllowNoRigs.
+	// RigRowsDropped counts the rig-scoped rows of the walked set that the
+	// archive lacks because the town's registry names no rig. It is zero for a
+	// town with rigs; non-zero only under ExportOptions.AllowNoRigs.
 	RigRowsDropped int
 }
 
@@ -95,7 +96,7 @@ func (s ExportSummary) String() string {
 		fmt.Fprintf(&b, "\nskipped link %s", line)
 	}
 	if s.RigRowsDropped > 0 {
-		fmt.Fprintf(&b, "\nWARNING: the town registers no rigs, so %d rig-scoped daemon rows are NOT in this archive", s.RigRowsDropped)
+		fmt.Fprintf(&b, "\nWARNING: the town registers no rigs, so %d rig-scoped rows are NOT in this archive", s.RigRowsDropped)
 	}
 	b.WriteString("\nskipped:")
 	printed := false
@@ -131,6 +132,13 @@ type ExportOptions struct {
 	// volume lacks or holds differently. Directories are always written, and an
 	// entry it refuses is counted under SkipUnchanged.
 	Only func(name string) bool
+	// Backup walks the manifest's backup rows expanded for the town's rigs
+	// (Manifest.Backup) instead of the daemon-owned rows, whatever their owner,
+	// so a restore carries the shared settings, directives and sentinel rows
+	// beside the daemon's own. An entry whose path has a secret shape
+	// (SecretShape) is left out beside Exclude, counted under SkipSecret and
+	// never named.
+	Backup bool
 	// RollbackSettings adds the town's settings/config.json and each registered
 	// rig's <rig>/settings/config.json after the rows, so a replay carries the
 	// settings the pod edited after the cut-over. It also leaves the cut-over
@@ -141,9 +149,11 @@ type ExportOptions struct {
 	ops townOps
 }
 
-// Export writes the daemon-owned set of the town at root to w as a tar stream
-// named relative to root, and returns what it wrote. Only manifest rows owned
-// by the daemon are walked; a session-owned path never enters the archive.
+// Export writes the town at root's manifest rows to w as a tar stream named
+// relative to root, and returns what it wrote. By default only rows owned by
+// the daemon are walked; a session-owned path never enters the archive. A backup
+// export walks the manifest's backup rows instead, whatever their owner
+// (ExportOptions.Backup).
 //
 // The walk never follows a symlink: a link whose relative target stays inside
 // the town root is archived as a link, and a link whose target is absolute or
@@ -157,7 +167,7 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 		return s, err
 	}
 	opts.ops = opts.ops.withDefaults()
-	townRoot, rigs, rows, dropped, err := townRowsAndRigs(opts.ops, root, m, opts.AllowNoRigs)
+	townRoot, rigs, rows, dropped, err := townRowsAndRigs(opts.ops, root, m, opts.AllowNoRigs, opts.Backup)
 	s.RigRowsDropped = dropped
 	if err != nil {
 		return s, err
@@ -204,7 +214,7 @@ type exportWalk struct {
 	links   map[string]string
 }
 
-// exportEntry walks one daemon-owned row. Every ancestor below the town root is
+// exportEntry walks one row. Every ancestor below the town root is
 // checked first, so a symlinked ancestor such as .runtime -> /outside is
 // refused before anything under it is read. An absent row is not a failed read:
 // a young town has not created every daemon path yet.
@@ -256,6 +266,12 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 		return nil
 	}
 	if !info.IsDir() && w.opts.Exclude != nil && w.opts.Exclude(name) {
+		w.sum.Skipped[SkipSecret]++
+		return nil
+	}
+	// A backup leaves out every secret-shaped entry whole, a directory
+	// included: a credential under secrets/ never reaches the archive.
+	if w.opts.Backup && secretPath(name) {
 		w.sum.Skipped[SkipSecret]++
 		return nil
 	}
@@ -460,21 +476,31 @@ func resolveTownRoot(ops townOps, root string) (string, error) {
 }
 
 // ErrNoRigs is the refusal for an export of a town whose registry names no rig
-// while the manifest has rig-scoped daemon rows: both mayor/town.json (its
+// while the walked rows carry the rig placeholder: both mayor/town.json (its
 // "registry" section) and mayor/rigs.json are absent or empty. Pass
 // ExportOptions.AllowNoRigs (--allow-no-rigs) for a town that really has none.
 var ErrNoRigs = errors.New("the town registers no rigs (no registry in mayor/town.json and no mayor/rigs.json), so every rig-scoped row would be missing from the archive; pass --allow-no-rigs if the town has no rigs")
 
-// rigScopedDaemonRows counts the manifest's daemon-owned rows that carry the
-// rig placeholder.
-func rigScopedDaemonRows(m *Manifest) int {
+// rigScopedRows counts the rows that carry the rig placeholder.
+func rigScopedRows(rows []Entry) int {
 	n := 0
-	for _, e := range m.Entries {
-		if e.Owner == OwnerDaemon && strings.Contains(e.Path, RigPlaceholder) {
+	for _, e := range rows {
+		if strings.Contains(e.Path, RigPlaceholder) {
 			n++
 		}
 	}
 	return n
+}
+
+// daemonRows returns the manifest's daemon-owned rows, before expansion.
+func daemonRows(m *Manifest) []Entry {
+	var out []Entry
+	for _, e := range m.Entries {
+		if e.Owner == OwnerDaemon {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // townRows resolves the town root and the daemon-owned rows it names, for an
@@ -482,13 +508,14 @@ func rigScopedDaemonRows(m *Manifest) int {
 // rig is refused with ErrNoRigs unless allowNoRigs; dropped counts the rig-scoped
 // rows the rows then lack.
 func townRows(ops townOps, root string, m *Manifest, allowNoRigs bool) (townRoot string, rows []Entry, dropped int, err error) {
-	townRoot, _, rows, dropped, err = townRowsAndRigs(ops, root, m, allowNoRigs)
+	townRoot, _, rows, dropped, err = townRowsAndRigs(ops, root, m, allowNoRigs, false)
 	return townRoot, rows, dropped, err
 }
 
 // townRowsAndRigs is townRows that also names the rigs the rows expand to, so an
-// export can add each rig's settings file for the same rigs.
-func townRowsAndRigs(ops townOps, root string, m *Manifest, allowNoRigs bool) (townRoot string, rigs []string, rows []Entry, dropped int, err error) {
+// export can add each rig's settings file for the same rigs. backup selects the
+// manifest's backup rows, whatever their owner, instead of the daemon-owned set.
+func townRowsAndRigs(ops townOps, root string, m *Manifest, allowNoRigs, backup bool) (townRoot string, rigs []string, rows []Entry, dropped int, err error) {
 	townRoot, err = resolveTownRoot(ops, root)
 	if err != nil {
 		return "", nil, nil, 0, err
@@ -497,11 +524,25 @@ func townRowsAndRigs(ops townOps, root string, m *Manifest, allowNoRigs bool) (t
 	if err != nil {
 		return "", nil, nil, 0, fmt.Errorf("reading the town's rigs: %w", err)
 	}
+	selected := daemonRows(m)
+	if backup {
+		selected = m.Backup()
+		// A backup names no bird: expanding a bird row to nothing would leave it
+		// out of the archive with no count and no warning.
+		for _, e := range selected {
+			if strings.Contains(e.Path, BirdPlaceholder) {
+				return "", nil, nil, 0, fmt.Errorf("townstate: the backup row %q names a bird; a backup names no bird, so expanding it would drop the row from the archive silently", e.Path)
+			}
+		}
+	}
 	if len(rigs) == 0 {
-		dropped = rigScopedDaemonRows(m)
+		dropped = rigScopedRows(selected)
 		if dropped > 0 && !allowNoRigs {
 			return "", nil, nil, dropped, ErrNoRigs
 		}
+	}
+	if backup {
+		return townRoot, rigs, backupEntries(m, rigs), dropped, nil
 	}
 	return townRoot, rigs, daemonEntries(m, rigs), dropped, nil
 }
@@ -513,6 +554,19 @@ func daemonEntries(m *Manifest, rigs []string) []Entry {
 	out := make([]Entry, 0, len(m.Entries))
 	for _, e := range m.Expand(rigs, nil) {
 		if e.Owner == OwnerDaemon {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// backupEntries returns the manifest's backup rows expanded for rigs, in
+// manifest order. The backup set is not filtered by owner: a restore needs the
+// shared settings, directives and sentinel rows as much as the daemon's own.
+func backupEntries(m *Manifest, rigs []string) []Entry {
+	out := make([]Entry, 0, len(m.Entries))
+	for _, e := range m.Expand(rigs, nil) {
+		if e.Backup {
 			out = append(out, e)
 		}
 	}
