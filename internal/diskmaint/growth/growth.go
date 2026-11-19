@@ -74,15 +74,15 @@ func Append(path string, s Sample, keep int) error {
 	if err != nil {
 		return fmt.Errorf("growth: encoding sample: %w", err)
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("growth: creating directory for %s: %w", path, err)
+	}
 	lines, _, err := readLines(path)
 	if err != nil {
 		return err
 	}
 	if len(lines) >= keep {
 		lines = lines[len(lines)-keep+1:]
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("growth: creating directory for %s: %w", path, err)
 	}
 	buf := make([]byte, 0, len(line)+1)
 	for _, l := range lines {
@@ -91,10 +91,7 @@ func Append(path string, s Sample, keep int) error {
 	}
 	buf = append(buf, line...)
 	buf = append(buf, '\n')
-	if err := atomicfile.WriteFile(path, buf, 0o644); err != nil {
-		return fmt.Errorf("growth: writing %s: %w", path, err)
-	}
-	return nil
+	return atomicfile.WriteFile(path, buf, 0o644)
 }
 
 // Read returns the samples stored at path, in line order. A line that does not

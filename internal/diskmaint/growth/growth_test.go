@@ -139,6 +139,19 @@ func TestReadMissingFileIsNoSamples(t *testing.T) {
 	}
 }
 
+// TestUnopenableRingRefuses keeps a ring the process cannot open from reading
+// as a ring with no samples yet: only a missing file is that.
+func TestUnopenableRingRefuses(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), strings.Repeat("x", 300)) // past NAME_MAX
+	if _, _, err := ReadCount(path); err == nil {
+		t.Fatal("ReadCount of an unopenable path = nil, want an error")
+	}
+	if err := Append(path, at(1), 0); err == nil {
+		t.Fatal("Append to an unopenable path = nil, want an error")
+	}
+}
+
 func TestReadSkipsOverlongLine(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "growth.jsonl")
