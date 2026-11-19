@@ -1,6 +1,7 @@
 package sbx
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -30,6 +31,12 @@ const (
 	// hookAnnotation marks a document helm runs during install or upgrade
 	// rather than applies as an object.
 	hookAnnotation = "helm.sh/hook"
+	// gatewayStatefulSet is the gateway StatefulSet's name in the chart.
+	gatewayStatefulSet = "openshell"
+	// gatewayCPU and gatewayMemory are the request and limit the gateway's
+	// containers run with, as up.sh's guaranteed_pod gives them (gt-cjm8fu).
+	gatewayCPU    = "250m"
+	gatewayMemory = "768Mi"
 )
 
 // openshellObjectScopes maps the kinds this render accepts to whether each is
@@ -71,7 +78,8 @@ type Runner func(ctx context.Context, name string, args ...string) ([]byte, erro
 // of the Secrets that must never be applied, and the hook objects it dropped.
 type Chart struct {
 	// Objects are the chart's documents in helm output order, without hook
-	// documents or Secrets.
+	// documents or Secrets, with the gateway StatefulSet's document re-encoded
+	// to carry its Guaranteed resources.
 	Objects []k8s.StaticObject
 	// Secrets names every Secret left out of Objects in helm output order,
 	// followed by the three certificate Secrets the certgen Job creates:
@@ -98,6 +106,11 @@ type Chart struct {
 // render runs no verb but `helm template` and never `helm upgrade`: an upgrade
 // regenerates the CA and every certificate. The first install stays a helm
 // install inside the rebuild sitting; this render is for plain apply after it.
+//
+// The gateway StatefulSet is sized Guaranteed on the decoded object: every
+// container and init container gets requests equal to limits of gatewayCPU and
+// gatewayMemory. A chart output without that StatefulSet is refused rather than
+// returned unsized.
 func OpenShell(ctx context.Context, run Runner, chartDir, valuesPath string) (Chart, error) {
 	if run == nil {
 		return Chart{}, errors.New("render the OpenShell chart: no runner, so helm cannot be run")
@@ -120,6 +133,9 @@ func OpenShell(ctx context.Context, run Runner, chartDir, valuesPath string) (Ch
 	}
 	chart, err := parseChart(out)
 	if err != nil {
+		return Chart{}, fmt.Errorf("OpenShell %s chart: %w", ChartVersion, err)
+	}
+	if err := chart.applyGuaranteed(yaml.Marshal); err != nil {
 		return Chart{}, fmt.Errorf("OpenShell %s chart: %w", ChartVersion, err)
 	}
 	return chart, nil
@@ -185,6 +201,96 @@ func parseChart(out []byte) (Chart, error) {
 		}
 	}
 	return chart, nil
+}
+
+// applyGuaranteed sizes the gateway StatefulSet Guaranteed and re-encodes its
+// document. A chart output without exactly one such StatefulSet is refused: an
+// empty patch would otherwise report success with the gateway free to run
+// Burstable or BestEffort.
+func (c *Chart) applyGuaranteed(marshal func(any) ([]byte, error)) error {
+	indexes := make([]int, 0, 1)
+	for i, object := range c.Objects {
+		if object.Kind == "StatefulSet" && object.Name == gatewayStatefulSet {
+			indexes = append(indexes, i)
+		}
+	}
+	switch len(indexes) {
+	case 0:
+		return fmt.Errorf("holds no StatefulSet named %s to size Guaranteed", gatewayStatefulSet)
+	case 1:
+	default:
+		return fmt.Errorf("holds %d StatefulSets named %s, want one", len(indexes), gatewayStatefulSet)
+	}
+	index := indexes[0]
+	node, err := documentNode(c.Objects[index].Doc)
+	if err != nil {
+		return fmt.Errorf("StatefulSet %s: %w", gatewayStatefulSet, err)
+	}
+	if err := patchGateway(node); err != nil {
+		return fmt.Errorf("StatefulSet %s: %w", gatewayStatefulSet, err)
+	}
+	patched, err := marshal(node)
+	if err != nil {
+		return fmt.Errorf("re-encoding StatefulSet %s: %w", gatewayStatefulSet, err)
+	}
+	c.Objects[index].Doc = bytes.TrimSpace(patched)
+	return nil
+}
+
+// patchGateway sizes every container and init container of the gateway's pod
+// Guaranteed. A pod with no init containers is sized like any other.
+func patchGateway(node *yaml.Node) error {
+	podSpec, err := mappingPath(node.Content[0], "spec", "template", "spec")
+	if err != nil {
+		return err
+	}
+	if err := sizeGuaranteed(podSpec, "containers", true); err != nil {
+		return err
+	}
+	return sizeGuaranteed(podSpec, "initContainers", false)
+}
+
+// sizeGuaranteed replaces the resources of every container in the pod spec's
+// sequence under key. An empty container list is refused when required,
+// because sizing nothing would otherwise report success.
+func sizeGuaranteed(podSpec *yaml.Node, key string, required bool) error {
+	containers := mappingValue(podSpec, key)
+	if containers == nil {
+		if required {
+			return fmt.Errorf("spec.template.spec.%s is missing, so the pod would not run Guaranteed", key)
+		}
+		return nil
+	}
+	if containers.Kind != yaml.SequenceNode {
+		return fmt.Errorf("spec.template.spec.%s is not a sequence", key)
+	}
+	if required && len(containers.Content) == 0 {
+		return fmt.Errorf("spec.template.spec.%s is empty, so the pod would not run Guaranteed", key)
+	}
+	for _, container := range containers.Content {
+		if container.Kind != yaml.MappingNode {
+			return fmt.Errorf("spec.template.spec.%s holds an item that is not a mapping", key)
+		}
+		setGatewayResources(container)
+	}
+	return nil
+}
+
+// setGatewayResources replaces container's resources with requests equal to
+// limits of the gateway's pair. The whole field is replaced, as up.sh's JSON
+// patch "add" does: a container keeping an extra request would fall out of the
+// Guaranteed class (gt-cjm8fu).
+func setGatewayResources(container *yaml.Node) {
+	resources := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	for _, field := range []string{"requests", "limits"} {
+		resources.Content = append(resources.Content,
+			scalarNode(field),
+			&yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+				scalarNode("cpu"), scalarNode(gatewayCPU),
+				scalarNode("memory"), scalarNode(gatewayMemory),
+			}})
+	}
+	setMappingNode(container, "resources", resources)
 }
 
 // readChartObject reads one document's object and checks the fields the render

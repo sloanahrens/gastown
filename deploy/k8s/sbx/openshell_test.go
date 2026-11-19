@@ -267,7 +267,7 @@ func TestOpenShellChartReadsCertgenSecretFlags(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 			var calls []runnerCall
-			raw := chartOf(certgenJobDoc(row.podSpec), openshellServiceDoc)
+			raw := chartOf(certgenJobDoc(row.podSpec), gatewayStatefulSetDoc(gatewayPod), openshellServiceDoc)
 			chart, err := OpenShell(context.Background(), outputRunner(&calls, raw, nil), "chart", "values.yaml")
 			if err != nil {
 				t.Fatalf("OpenShell(): %v", err)
