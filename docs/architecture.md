@@ -223,7 +223,7 @@ The workflow files in Forgejo are protected: only a human account may change the
 
 ### Tier sweep Jobs
 
-`make gate` is the fast gate every landing runs. Some tests are too slow or too heavy for it: the shell tests, the integration tests and the race detector. The *tier sweep* runs them hourly as Kubernetes Jobs in the `gt-sweeps` namespace. Each Job reports one summary line that the daemon parses. A package runs in a tier sweep when the change touched one of its trigger paths or when the daily run is due. When one sweep cycle covers every tier green, the daemon publishes that commit as a `green/<sha12>` branch, which starts the `images` workflow and enables promotion to GitHub.
+`make gate` is the fast gate every landing runs: lint, the build, the unit tier, and the integration vet that type-checks the packages the integration tag adds files to. The integration tests themselves, the shell tests and the race detector are too slow or too heavy for it. The *tier sweep* runs them hourly as Kubernetes Jobs in the `gt-sweeps` namespace. Each Job reports one summary line that the daemon parses. A package runs in a tier sweep when the change touched one of its trigger paths or when the daily run is due. When one sweep cycle covers every tier green, the daemon publishes that commit as a `green/<sha12>` branch, which starts the `images` workflow and enables promotion to GitHub.
 
 ### The dashboard
 
@@ -365,7 +365,7 @@ sequenceDiagram
     L->>L: merge the branch into a throwaway worktree of main
     L->>F: push the merge candidate as land/bead
     F->>R: ci workflow on land/**
-    R->>R: make gate (lint, then tests)
+    R->>R: make gate (lint, tests, integration vet)
     R-->>F: status ci / gate (push)
     L->>O: review the same range
     O-->>L: verdict (score, findings)
@@ -398,7 +398,7 @@ sequenceDiagram
 
 **5. Landing.** The landing worker picks the oldest ready bead of a rig and builds a *merge candidate*: it merges the branch into a throwaway worktree of `main`. The result is pushed as `land/<bead>`. This is what the gate runs on, so the gate sees exactly what would become `main`, not the polecat's pre-rebase view. The landing is a squash: one commit on `main` per bead.
 
-**6. The gate.** The `ci` workflow runs on `land/**` on a clean runner and runs `make gate` (lint, then the fast tests). The required status `ci / gate (push)` must be green. A red gate is a rejection. Nothing lands on a red candidate.
+**6. The gate.** The `ci` workflow runs on `land/**` on a clean runner and runs `make gate` (lint, then the fast tests and the integration vet). The required status `ci / gate (push)` must be green. A red gate is a rejection. Nothing lands on a red candidate.
 
 **7. Review.** om reads the same range and returns a verdict. The landing worker posts the verdict, and the merge goes through only for an approval. A change to a path on the risk list carries a risk-path label. It is never a hold: the landing proceeds, and the item stays in the attention queue until a human has reviewed it. When the overseer has reviewed the exact head in place of om, a note on the bead names that head, om is skipped for it and the landing records `om skipped (overseer-reviewed)`.
 
@@ -534,7 +534,7 @@ Facts that change are read, not written down.
 - **Bird.** A long-lived named Claude session with a handoff bead.
 - **Landing.** The daemon's merge of finished work onto `main`.
 - **Merge candidate.** The merged tree pushed as `land/<bead>` for the gate to judge.
-- **Gate.** The fast test and lint run (`make gate`) that every candidate must pass.
+- **Gate.** The fast test, integration-vet and lint run (`make gate`) that every candidate must pass.
 - **Tier sweep.** The hourly run of the slow test tiers.
 - **Green ref.** The `green/<sha12>` branch published when a whole sweep cycle is green.
 - **Promotion.** The fast-forward push of a green commit to GitHub.

@@ -113,13 +113,27 @@ func TestIntegrationGateOnlyWarnsOnWallTime(t *testing.T) {
 	}
 }
 
-// TestIntegrationGatePrintsItsWallTime checks "gate prints its wall time".
-// Mutation: delete gate's final PASSED echo, and the landing log no longer says
-// how long the gate took.
+// TestIntegrationGatePrintsItsWallTime checks "gate prints its wall time": its
+// last line is gateverdict's over both stage statuses and the wall.
+// Mutation: delete that line or one of its -unit, -vet or -wall arguments, and
+// the landing log loses the wall or the vet's verdict (gt-w3aby).
 func TestIntegrationGatePrintsItsWallTime(t *testing.T) {
 	out := dryGate(t, RealMake(repoRoot(t)))
-	if !strings.Contains(out, "gate: PASSED in ${wall}s wall") {
-		t.Fatalf("gate does not print its wall time\n%s", out)
+	if !strings.Contains(out, "gateverdict -unit $go_rc -vet $vet_rc -wall $wall") {
+		t.Fatalf("gate's final line is not the gateverdict verdict over both stage statuses and the wall\n%s", out)
+	}
+}
+
+// TestIntegrationGateRunsTheIntegrationVet checks "gate runs the integration
+// vet, then prints its verdict".
+// Mutation: delete the integrationvet line, and an integration-tagged file that
+// stops compiling reaches the tier sweep (gt-w3aby, gt-0h1w5j).
+func TestIntegrationGateRunsTheIntegrationVet(t *testing.T) {
+	out := dryGate(t, RealMake(repoRoot(t)))
+	vet := lineOf(out, "go run ./internal/testpolicy/cmd/integrationvet")
+	verdict := lineOf(out, "go run ./internal/testpolicy/cmd/gateverdict")
+	if vet == 0 || vet >= verdict {
+		t.Fatalf("gate's integration vet is at line %d and its verdict at line %d, want the vet first\n%s", vet, verdict, out)
 	}
 }
 

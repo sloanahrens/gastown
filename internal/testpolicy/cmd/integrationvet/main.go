@@ -4,7 +4,7 @@
 //	go run ./internal/testpolicy/cmd/integrationvet
 //
 // Vet type-checks each selected package and its tests, runs its analyzers, and builds no test
-// binary. It is not wired into make gate yet; the wiring is tracked on gt-tpg0p.
+// binary. `make gate` runs it beside the unit tier.
 package main
 
 import (
