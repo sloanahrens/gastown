@@ -1922,21 +1922,22 @@ func TestBdGatewayReadRetryBudget(t *testing.T) {
 		},
 		{
 			// Every attempt times out: four attempts of ten seconds and the
-			// waits of 0.5, 1, 2 and 1.5 seconds are the whole budget, so no
-			// fifth attempt starts.
+			// waits of 0.5, 1 and 2 seconds leave 1.5 seconds, and the 3 second
+			// wait would leave less than the minimum an attempt may start with,
+			// so the call ends without spending it.
 			name:         "every attempt times out",
 			attemptCost:  10 * time.Second,
-			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 1500 * time.Millisecond},
+			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second},
 			wantAttempts: 4,
 		},
 		{
 			// Every attempt times out after 6.6 seconds: five attempts and the
-			// waits of 0.5, 1, 2, 3 and 5 seconds leave half a second, less than
-			// the minimum an attempt may start with, so the fifth attempt is the
-			// last.
+			// waits of 0.5, 1, 2 and 3 seconds leave 5.5 seconds, not enough for
+			// the next 5 second wait and the minimum an attempt may start with,
+			// so the fifth attempt is the last.
 			name:         "no attempt starts with less than the minimum left",
 			attemptCost:  6600 * time.Millisecond,
-			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second},
+			wantSleeps:   []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 3 * time.Second},
 			wantAttempts: 5,
 		},
 	}
@@ -1953,11 +1954,15 @@ func TestBdGatewayReadRetryBudget(t *testing.T) {
 				if attempts <= tt.refusals {
 					return nil, refused
 				}
-				// The attempt runs to the client's limit, the smaller of the
-				// call's timeout and the budget left, and then times out. Even
-				// an attempt with no budget left takes a moment to close, so the
-				// clock always moves on.
-				clock.now = clock.now.Add(max(min(tt.attemptCost, deadline.Sub(clock.now)), time.Millisecond))
+				// The attempt runs to its client limit and then times out: the
+				// call's own timeout on the first attempt, the smaller of that
+				// and the budget left on a retry. Even an attempt with no budget
+				// left takes a moment to close, so the clock always moves on.
+				cost := tt.attemptCost
+				if attempts > 1 {
+					cost = min(cost, deadline.Sub(clock.now))
+				}
+				clock.now = clock.now.Add(max(cost, time.Millisecond))
 				return nil, readTimeout()
 			})
 			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
@@ -1990,6 +1995,81 @@ func TestBdGatewayReadRetryBudget(t *testing.T) {
 			}
 			if want := fmt.Sprintf("after %d attempts in %v", attempts, spent); !strings.Contains(err.Error(), want) {
 				t.Errorf("error %q does not name %q", err, want)
+			}
+		})
+	}
+}
+
+// TestBdGatewayReadRetryBudgetFirstAttempt: the retry budget pays for the extra
+// attempts a gateway roll costs, not the first one. A write, which is never
+// retried, and a read whose first attempt hangs each send their first request
+// with the call's full client timeout; a read's retry carries only what the
+// budget has left.
+func TestBdGatewayReadRetryBudgetFirstAttempt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	base := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		argv    []string
+		retried bool
+	}{
+		{
+			name: "write times out, tried once",
+			argv: []string{"bd", "update", "gt-x", "--title", "t"},
+		},
+		{
+			name:    "read times out, its retry draws on the budget",
+			argv:    []string{"bd", "show", "gt-x"},
+			retried: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := &fakeDialClock{now: base}
+			var limits []time.Duration
+			doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+				deadline, ok := req.Context().Deadline()
+				if !ok {
+					t.Fatalf("attempt %d carries no deadline on its request", len(limits)+1)
+				}
+				limits = append(limits, time.Until(deadline))
+				return nil, readTimeout()
+			})
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			g.Sleep, g.Now = clock.Sleep, clock.Now
+			call := Call{
+				Argv: tt.argv,
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  filepath.Join(town, "gastown"),
+			}
+			exit, err := g.Launch(call)
+			if err == nil || exit != exitDown {
+				t.Fatalf("Launch = (%d, %v), want the down status and an error", exit, err)
+			}
+			if len(limits) == 0 {
+				t.Fatal("the call sent no request")
+			}
+			// gatewayTarget asks for 90 seconds, and the probe bound adds 10.
+			wantFirst := 90*time.Second + probeTimeout
+			if got := limits[0]; got > wantFirst || got < wantFirst-time.Second {
+				t.Errorf("the first attempt's timeout = %v, want the call's full %v", got, wantFirst)
+			}
+			if !tt.retried {
+				if len(limits) != 1 {
+					t.Errorf("the write was sent %d times, want once", len(limits))
+				}
+				return
+			}
+			if len(limits) < 2 {
+				t.Fatalf("the read was sent %d times, want a retry after the first timeout", len(limits))
+			}
+			// The first wait has been taken, so the retry has the budget less
+			// that wait; the fake attempts cost no time of their own.
+			wantRetry := gatewayRetryTotal - RetrySchedule(gatewayRetryTotal)[0]
+			if got := limits[1]; got > wantRetry || got < wantRetry-time.Second {
+				t.Errorf("the retry's timeout = %v, want the budget's left %v", got, wantRetry)
 			}
 		})
 	}
