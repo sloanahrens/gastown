@@ -495,6 +495,53 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	}
 }
 
+// TestEscalationTextFromHumanRejection: the alarm names the lane and carries
+// the findings (gt-yo36hx).
+func TestEscalationTextFromHumanRejection(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.remote.tips["crew/overseer/gt-x"] = tipHead
+	w := land.Work{Branch: "crew/overseer/gt-x", Head: noteHead, Target: "main", Worker: "opal"}
+	h.bd.Seed(beads.Issue{ID: "gt-abc", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/polecats/opal",
+		Labels: []string{land.LabelReadyToLand}, UpdatedAt: seededRowAt, Notes: land.FormatReadyNote(w)})
+	var msg string
+	h.w.Escalate = func(_, m string) { msg = m }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "om requested changes", Rework: false,
+			Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}
+	}
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	if want := "lane crew/overseer; major a.go:9 error dropped; minor b.go naming"; !strings.Contains(msg, want) {
+		t.Fatalf("escalation %q lacks %q", msg, want)
+	}
+}
+
+// TestEscalationText: the alarm names the lane and each finding, prints at
+// most six, and says how many it left out (gt-yo36hx).
+func TestEscalationText(t *testing.T) {
+	t.Parallel()
+	const pre = "Landing of gt-abc (crew/overseer/gt-x @ abc123) left for the overseer (review): "
+	work := land.Work{BeadID: "gt-abc", Branch: "crew/overseer/gt-x", Head: "abc123"}
+	eight := make([]land.Finding, 8)
+	for i := range eight {
+		eight[i] = land.Finding{Severity: "minor", Path: "a.go", Line: i + 1, Title: fmt.Sprintf("title %d", i+1)}
+	}
+	for _, tc := range []struct {
+		name string
+		rej  *land.Rejection
+		want string
+	}{
+		{"lane and findings", &land.Rejection{Kind: land.RejectReview, Reason: "om requested changes", Findings: []land.Finding{{Severity: "major", Path: "a.go", Line: 9, Title: "error dropped"}, {Severity: "minor", Path: "b.go", Title: "naming"}}}, pre + "om requested changes; lane crew/overseer; major a.go:9 error dropped; minor b.go naming"},
+		{"eight findings", &land.Rejection{Kind: land.RejectReview, Reason: "om requested changes", Findings: eight}, pre + "om requested changes; lane crew/overseer; minor a.go:1 title 1; minor a.go:2 title 2; minor a.go:3 title 3; minor a.go:4 title 4; minor a.go:5 title 5; minor a.go:6 title 6; 2 finding(s) left out"},
+		{"no findings", &land.Rejection{Kind: land.RejectReview, Reason: "no verdict"}, pre + "no verdict; lane crew/overseer"},
+	} {
+		if got := escalationText(work, tc.rej); got != tc.want {
+			t.Errorf("%s: escalation\n%q\nwant\n%q", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestPassHumanRejectionEscalatesOncePerLane: a refusal whose lane already
 // escalated (NoEscalate) raises no escalation (gt-dtx3ht).
 func TestPassHumanRejectionEscalatesOncePerLane(t *testing.T) {
