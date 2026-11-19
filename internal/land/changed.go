@@ -86,10 +86,12 @@ func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect
 }
 
 // GuardSelectsWithContent is GuardSelects with a reader for each changed
-// file's two versions. With one, a non-cmd Go record of any status selects the
-// tokens guard only when its gt and bd invocations changed (gt-47cf12), so a
-// deletion or a rename out counts, judged from the base version. With none the
-// result is GuardSelects's. Every other path rule is unchanged.
+// file's two versions. A reader only narrows the one set of paths a guard names
+// in contentPaths: a record there selects the tokens guard when its gt and bd
+// invocations changed (gt-47cf12), judged from the base version for a deletion
+// or a rename out. Every other path rule is unchanged, so a record a path
+// selects without a reader still selects with one, including a rename out of a
+// path-judged file. With a nil reader the result is GuardSelects's.
 func GuardSelectsWithContent(nameStatus string, hasGo func(dir string) bool, read ContentReader) ([]GuardSelect, error) {
 	triggered := map[string]bool{}
 	err := eachChange(nameStatus, func(_, now, gone []string) {
@@ -391,10 +393,10 @@ var treeWideGuards = []treeWideGuard{
 	{
 		// TestCommandTokensResolve scans the same tree through ScanRepo and
 		// TestMakefileHandsTheContainerOptInToTheSuite reads the Makefile.
-		// judges is the whole path rule. With a reader, non-cmd Go under
-		// internal/ or cmd/ (contentPaths) is judged by its gt and bd
-		// invocations instead, so an edit that changes none of them skips the
-		// test's build (gt-47cf12). Go under internal/cmd keeps its path rule.
+		// Non-cmd Go under internal/ or cmd/ (contentPaths) is left to its
+		// gt and bd invocations when a reader is supplied, so an edit that
+		// changes none of them skips the test's build (gt-47cf12); Go under
+		// internal/cmd and every other path keep their path rule.
 		pkg:           "internal/cmd",
 		tests:         []string{"TestCommandTokensResolve", "TestMakefileHandsTheContainerOptInToTheSuite"},
 		judges:        func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
@@ -614,10 +616,9 @@ var treeWideGuards = []treeWideGuard{
 // non-empty diff runs, whatever paths changed; an always entry sets no
 // predicate, since none could change its selection.
 //
-// judges is the whole path rule, and all a nil reader runs. With a reader, the
-// paths contentPaths names leave judges and judgesContent answers for them: it
-// gets the record's path at the base and at HEAD (a rename's old and new) and
-// the reader for either version.
+// judges is the whole path rule. contentPaths names the paths a reader hands to
+// judgesContent instead, with the record's path at the base and at HEAD (a
+// rename's old and new). GuardSelectsWithContent states the reader's contract.
 type treeWideGuard struct {
 	pkg           string
 	tests         []string
@@ -729,12 +730,15 @@ func commandTokenContent(rel string) bool {
 // whether the invocations ScanRepo would find in a content-judged Go file
 // differ between the base and HEAD. A side absent or outside the scanned tree
 // counts as no invocations, so an added, deleted or moved file fires exactly
-// when it carried one. Each side is read and scanned under its own path, since
-// the scan reads the bd seam's calls only under internal/beads/. Any read or
-// scan failure fires, and so does a rename whose judged base reads back absent.
-// read is never nil: trips calls a content judge only when it has a reader.
+// when it carried one. Each side is scanned under its own path, since the scan
+// reads the bd seam's calls only under internal/beads/. A rename out of a path
+// the guard judges by path fires, a read or scan failure fires, and so does a
+// rename whose judged base reads back absent. read is never nil.
 func commandTokensChanged(baseRel, headRel string, read ContentReader) bool {
 	baseJudged, headJudged := commandTokenContent(baseRel), commandTokenContent(headRel)
+	if baseRel != headRel && !baseJudged && (baseRel == "Makefile" || commandTreeInputs(baseRel)) {
+		return true // a rename out of a path-judged input stays selected
+	}
 	if !baseJudged && !headJudged {
 		return false
 	}
