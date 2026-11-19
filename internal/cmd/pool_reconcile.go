@@ -223,7 +223,13 @@ func poolSandboxSeatFor(townRoot string) func(sandbox string) (rig, polecat stri
 // word's source. A caller with no town to read answers none, and each seat
 // prints "unknown".
 func poolReconcileDispositionFor(townRoot string) func(rig, name string) (polecat.WorkstateDisposition, error) {
-	read := poolDispositionFor(townRoot)
+	return poolReconcileDispositionWith(poolDispositionFor(townRoot))
+}
+
+// poolReconcileDispositionWith is poolReconcileDispositionFor over the seat-state
+// read passed in, so a test drives its error path with a fake. A read error is
+// returned, and the note prints the seat as unknown rather than dropping it.
+func poolReconcileDispositionWith(read polecatDispositionFunc) func(rig, name string) (polecat.WorkstateDisposition, error) {
 	if read == nil {
 		return nil
 	}

@@ -162,6 +162,31 @@ func TestPoolReconcileReadsNotesFailsClosedOnTheListing(t *testing.T) {
 	}
 }
 
+// TestPoolReconcileDispositionWithAnswersTheSeatsStateAndItsError is the
+// disposition read the notes name seats with: it returns the seat's own state,
+// and a failed read is returned rather than read as an empty disposition (which
+// the note would print as unknown only by accident).
+func TestPoolReconcileDispositionWithAnswersTheSeatsStateAndItsError(t *testing.T) {
+	t.Parallel()
+	want := polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictWorking}
+	read := func(string, string) (poolSeatState, error) {
+		return poolSeatState{Disposition: want}, nil
+	}
+	got, err := poolReconcileDispositionWith(read)("gastown", "ember")
+	if err != nil || got.Verdict != want.Verdict {
+		t.Fatalf("disposition = %+v, %v, want verdict %q and no error", got, err, want.Verdict)
+	}
+	failing := func(string, string) (poolSeatState, error) {
+		return poolSeatState{}, errors.New("beads down")
+	}
+	if _, err := poolReconcileDispositionWith(failing)("gastown", "ember"); err == nil {
+		t.Fatal("a failed seat-state read returned no error")
+	}
+	if poolReconcileDispositionWith(nil) != nil {
+		t.Fatal("no seat-state read answered a disposition")
+	}
+}
+
 // TestPoolSandboxSeatForSplitsAtTheRigPrefix resolves a sandbox name the way
 // session.PolecatSessionName built it, and refuses a name no rig's prefix
 // matches rather than inventing a seat.
