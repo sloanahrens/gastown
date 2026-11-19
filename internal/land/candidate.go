@@ -272,9 +272,8 @@ type CandidateGate struct {
 	// Out, when set, receives one line per poll, so a long wait is visible
 	// beside the rest of the landing's output.
 	Out io.Writer
-	// Recorder, when set, receives one GateRun for every gate run that reached
-	// a verdict, pass or red. It never changes the verdict, and a silent gate
-	// (no verdict) records nothing (gt-r0fnmo).
+	// Recorder, when set, receives one GateRun per gate run with a verdict, pass
+	// or red. It never changes the verdict (gt-r0fnmo).
 	Recorder func(GateRun)
 }
 
@@ -321,11 +320,11 @@ func (g *CandidateGate) Run(ctx context.Context, wt Repo, dir string, w Work, he
 }
 
 // record hands the finished gate run to Recorder (gt-r0fnmo). The run is the
-// one that tested res.SHA; its job log gives the stage times and verdict, and
-// its timestamps give the queue and run seconds. A run or log that cannot be
-// read is logged and the row is still recorded with what was read, so a
-// failed read never drops a finished gate. The verdict is already decided and
-// is not touched here.
+// one that tested res.SHA; its job log gives the stage times, and its timestamps
+// give the queue and run seconds. Passed is res.State, never the log's. A run or
+// log that cannot be read is logged and the row is still recorded with what was
+// read, so a failed read never drops a finished gate. The verdict is already
+// decided and is not touched here.
 func (g *CandidateGate) record(parent context.Context, wf GateWorkflow, w Work, res CandidateResult) {
 	if g.Recorder == nil || res.Err != nil || res.State == CandidateSilent {
 		return
@@ -345,6 +344,8 @@ func (g *CandidateGate) record(parent context.Context, wf GateWorkflow, w Work, 
 		row.RunS = secondsBetween(run.Started, run.Stopped)
 	}
 	row.TS, row.Rig, row.Bead, row.SHA = g.now(), g.RepoName, w.BeadID, res.SHA
+	// Passed is the verdict's: a failed log read must not record a pass as red.
+	row.Passed = res.State == CandidatePassed
 	g.Recorder(row)
 }
 
