@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -604,5 +605,81 @@ func writeFile(t *testing.T, root, rel, content string) {
 	}
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// contentReader serves the named base and HEAD file contents and reports every
+// other path absent, as a reader must for the side a change leaves without a
+// file.
+func contentReader(base, head map[string]string) ContentReader {
+	return func(rel string, atHead bool) ([]byte, error) {
+		files := base
+		if atHead {
+			files = head
+		}
+		if src, ok := files[rel]; ok {
+			return []byte(src), nil
+		}
+		return nil, nil
+	}
+}
+
+// commandTokensSelected reports whether sel runs internal/cmd's tests, which
+// hold TestCommandTokensResolve.
+func commandTokensSelected(sel []GuardSelect) bool {
+	for _, s := range sel {
+		if s.Package == "internal/cmd" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestGuardCommandTokens: with a reader, the tokens guard runs for a non-cmd Go
+// change exactly when the file's gt and bd invocations changed, and any read or
+// scan failure fires it. With no reader it fires as it always has (gt-47cf12).
+func TestGuardCommandTokens(t *testing.T) {
+	t.Parallel()
+	const (
+		path     = "internal/daemon/patrol.go"
+		moved    = "internal/daemon/moved.go"
+		none     = "package daemon\n"
+		sling    = "package daemon\n\nvar _ = exec.Command(\"gt\", \"sling\")\n"
+		hook     = "package daemon\n\nvar _ = exec.Command(\"gt\", \"hook\")\n"
+		unparsed = "package daemon {\n"
+	)
+	tests := []struct {
+		name string
+		diff string
+		read ContentReader
+		want bool
+	}{
+		{"unchanged invocations", "M\x00" + path + "\x00", contentReader(map[string]string{path: sling}, map[string]string{path: sling}), false},
+		{"changed invocation", "M\x00" + path + "\x00", contentReader(map[string]string{path: sling}, map[string]string{path: hook}), true},
+		{"added file with an invocation", "A\x00" + path + "\x00", contentReader(nil, map[string]string{path: sling}), true},
+		{"added file without one", "A\x00" + path + "\x00", contentReader(nil, map[string]string{path: none}), false},
+		{"deleted file that had one", "D\x00" + path + "\x00", contentReader(map[string]string{path: sling}, nil), true},
+		{"deleted file without one", "D\x00" + path + "\x00", contentReader(map[string]string{path: none}, nil), false},
+		{"rename that changes one", "R100\x00" + path + "\x00" + moved + "\x00", contentReader(map[string]string{path: sling}, map[string]string{moved: hook}), true},
+		{"rename that keeps them", "R100\x00" + path + "\x00" + moved + "\x00", contentReader(map[string]string{path: sling}, map[string]string{moved: sling}), false},
+		{"scan error", "M\x00" + path + "\x00", contentReader(map[string]string{path: none}, map[string]string{path: unparsed}), true},
+		{"unreadable file", "M\x00" + path + "\x00", func(string, bool) ([]byte, error) { return nil, errors.New("unreadable") }, true},
+		{"no reader", "M\x00" + path + "\x00", nil, true},
+		{"Makefile still fires on its path", "M\x00Makefile\x00", contentReader(map[string]string{"Makefile": none}, map[string]string{"Makefile": none}), true},
+		{"internal/cmd Go still fires on its path", "M\x00internal/cmd/root.go\x00", contentReader(map[string]string{"internal/cmd/root.go": none}, map[string]string{"internal/cmd/root.go": none}), true},
+		{"a path the judge does not read", "M\x00docs/testing.md\x00", contentReader(nil, nil), false},
+	}
+	hasGo := func(string) bool { return true }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelectsWithContent(tt.diff, hasGo, tt.read)
+			if err != nil {
+				t.Fatalf("GuardSelectsWithContent(%q): %v", tt.diff, err)
+			}
+			if got := commandTokensSelected(sel); got != tt.want {
+				t.Errorf("tokens guard selected = %t, want %t (selection %v)", got, tt.want, sel)
+			}
+		})
 	}
 }

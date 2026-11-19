@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
 // NameStatusArgs is the `git diff` argument list every name-status reader
@@ -67,17 +69,32 @@ type GuardSelect struct {
 	Tests   []string
 }
 
+// ContentReader returns one version of a repo-relative changed file: head
+// selects HEAD's, false the base's. An absent file is nil bytes and no error; a
+// file that cannot be read is an error, which fires the guard.
+type ContentReader func(rel string, head bool) ([]byte, error)
+
 // GuardSelects returns the tree-wide guard tests whose inputs nameStatus
 // changed and the guards every non-empty diff runs, sorted by package. An
 // empty diff returns nil, and a guard whose package holds no Go is left out.
+// It supplies no ContentReader, so a content-judged guard fires as it always
+// has; GuardSelectsWithContent judges the file instead.
 func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect, error) {
+	return GuardSelectsWithContent(nameStatus, hasGo, nil)
+}
+
+// GuardSelectsWithContent is GuardSelects with a reader for each changed
+// file's two versions. With one, the tokens guard runs for a non-cmd Go change
+// only when the file's gt and bd invocations changed (gt-47cf12); with none it
+// runs for every such change. Every other path rule is unchanged.
+func GuardSelectsWithContent(nameStatus string, hasGo func(dir string) bool, read ContentReader) ([]GuardSelect, error) {
 	triggered := map[string]bool{}
 	err := eachChange(nameStatus, func(_, now, gone []string) {
 		for _, g := range treeWideGuards {
 			if triggered[g.pkg] || !hasGo(g.pkg) {
 				continue
 			}
-			if g.always || anyJudged(g, now) || (g.removal && anyJudged(g, gone)) {
+			if g.trips(now, gone, read) {
 				triggered[g.pkg] = true
 			}
 		}
@@ -370,10 +387,17 @@ var treeWideGuards = []treeWideGuard{
 	},
 	{
 		// TestCommandTokensResolve scans the same tree through ScanRepo and
-		// TestMakefileHandsTheContainerOptInToTheSuite reads the Makefile.
-		pkg:    "internal/cmd",
-		tests:  []string{"TestCommandTokensResolve", "TestMakefileHandsTheContainerOptInToTheSuite"},
-		judges: func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
+		// TestMakefileHandsTheContainerOptInToTheSuite reads the Makefile. Go
+		// under internal/cmd is left to the package suite that holds the test;
+		// a non-cmd Go file is judged by its invocations when a reader is
+		// supplied, so an unrelated edit no longer pays the test's build
+		// (gt-47cf12).
+		pkg:   "internal/cmd",
+		tests: []string{"TestCommandTokensResolve", "TestMakefileHandsTheContainerOptInToTheSuite"},
+		judges: func(rel string) bool {
+			return rel == "Makefile" || (commandTreeInputs(rel) && !commandTokenContent(rel))
+		},
+		judgesContent: commandTokensChanged,
 	},
 	{
 		// TestGTPinMatchesTheSharedBuildArgv pins the daemon image's gt build
@@ -585,14 +609,42 @@ var treeWideGuards = []treeWideGuard{
 
 // treeWideGuard is one guard package's inputs: the test functions to run and
 // a predicate over a repo-relative changed path. always marks a guard every
-// non-empty diff runs, whatever paths changed; an always entry sets no
+// non-empty diff runs, whatever paths changed; an always entry sets neither
 // predicate, since none could change its selection.
+//
+// judgesContent, when set, judges one diff record by content: baseRel and
+// headRel are its path at the base and at HEAD (a rename's old and new), and
+// read returns either version. A nil read means no reader: the entry answers
+// for its paths as judges always did.
 type treeWideGuard struct {
-	pkg     string
-	tests   []string
-	judges  func(rel string) bool
-	removal bool
-	always  bool
+	pkg           string
+	tests         []string
+	judges        func(rel string) bool
+	judgesContent func(baseRel, headRel string, read ContentReader) bool
+	removal       bool
+	always        bool
+}
+
+// trips reports whether one diff record selects g. A content-judged record
+// names its path at the base and at HEAD: a rename's old and new, and the same
+// path otherwise (a copy is an addition at its destination).
+func (g treeWideGuard) trips(now, gone []string, read ContentReader) bool {
+	if g.always || anyJudged(g, now) || (g.removal && anyJudged(g, gone)) {
+		return true
+	}
+	if g.judgesContent == nil {
+		return false
+	}
+	var baseRel, headRel string
+	switch {
+	case len(now) > 0 && len(gone) > 0:
+		baseRel, headRel = gone[0], now[0]
+	case len(now) > 0:
+		baseRel, headRel = now[0], now[0]
+	default:
+		baseRel, headRel = gone[0], gone[0]
+	}
+	return g.judgesContent(baseRel, headRel, read)
 }
 
 // sessionStartFiles are the session-start functions TestEverySessionStartCallsTheGate
@@ -640,6 +692,55 @@ func commandTreeInputs(rel string) bool {
 		return nonTestGo(rel)
 	}
 	return false
+}
+
+// commandTokenContent reports whether rel is a file whose gt and bd
+// invocations, not its path alone, decide TestCommandTokensResolve: non-test Go
+// under internal/ or cmd/ outside internal/cmd, which ScanRepo reads.
+func commandTokenContent(rel string) bool {
+	return underInternalOrCmd(rel) && !strings.HasPrefix(rel, "internal/cmd/")
+}
+
+// commandTokensChanged is the internal/cmd entry's judgesContent: it reports
+// whether the invocations ScanRepo would find in a content-judged Go file
+// differ between the base and HEAD. A side absent or outside the scanned tree
+// counts as no invocations, so an added, deleted or moved file fires exactly
+// when it carried one. Any read or scan failure fires.
+func commandTokensChanged(baseRel, headRel string, read ContentReader) bool {
+	baseJudged, headJudged := commandTokenContent(baseRel), commandTokenContent(headRel)
+	if !baseJudged && !headJudged {
+		return false
+	}
+	if read == nil {
+		return true
+	}
+	var oldSrc, newSrc []byte
+	if baseJudged {
+		src, err := read(baseRel, false)
+		if err != nil {
+			return true
+		}
+		oldSrc = src
+	}
+	if headJudged {
+		src, err := read(headRel, true)
+		if err != nil {
+			return true
+		}
+		newSrc = src
+	}
+	if oldSrc == nil || newSrc == nil {
+		// A side with no file: the side that exists fires the guard when it
+		// carries any invocation.
+		src := oldSrc
+		if src == nil {
+			src = newSrc
+		}
+		refs, err := cmdtree.ScanGo(headRel, src)
+		return err != nil || len(refs) > 0
+	}
+	same, err := cmdtree.SameRefs(headRel, oldSrc, newSrc)
+	return err != nil || !same
 }
 
 func goFile(rel string) bool    { return strings.HasSuffix(rel, ".go") }
