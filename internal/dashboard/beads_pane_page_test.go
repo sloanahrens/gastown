@@ -40,7 +40,7 @@ func pageColumnKeys(t *testing.T) (left, right []string) {
 // (gt-70ortp). It is the one place this file pins where a pane sits: the Beads
 // tests take the pane above Beads from it instead of restating that pair.
 func beadsPageColumns() (left, right []string) {
-	return []string{"birds", "attention", "events", "cost", "rigs", "tiersweep", "beads"},
+	return []string{"birds", "attention", "events", "activity", "cost", "rigs", "tiersweep", "beads"},
 		[]string{"news", "machine", "cloud", "forgejo", "om", "jev", "mango"}
 }
 
