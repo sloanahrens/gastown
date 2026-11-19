@@ -32,6 +32,8 @@ func TestLocalGatewayHostInClusterService(t *testing.T) {
 		{"tracker.openshell.svc", false},
 		{"dolt.gt.svc.cluster.local", false},
 		{"bd-gateway-svc.gt.svc", false},
+		{"bd-gateway-push.gt.svc", false},
+		{"bd-gateway-push.gt.svc.cluster.local", false},
 		{"evil-bd-gateway.gt.svc", false},
 		{"svc", false},
 		{"gt.svc", false},
@@ -68,7 +70,7 @@ func TestLocalGatewayHostInClusterService(t *testing.T) {
 // gateway's Service form in the refusal.
 func TestLocalGatewayHostEndpoint(t *testing.T) {
 	t.Parallel()
-	got, err := GatewayPusher{URL: "http://bd-gateway.gt.svc:7440"}.endpoint("/v1/workspace")
+	got, err := GatewayPusher{URL: "http://bd-gateway.gt.svc:7440"}.endpoint("/v1/workspace", purposeRead)
 	if err != nil {
 		t.Fatalf("endpoint(the gateway's in-cluster Service) = %v, want nil", err)
 	}
@@ -80,7 +82,7 @@ func TestLocalGatewayHostEndpoint(t *testing.T) {
 		"http://dolt.gt.svc:7440",
 		"http://bd-gateway.openshell.svc:7440",
 	} {
-		_, err = GatewayPusher{URL: url}.endpoint("/v1/workspace")
+		_, err = GatewayPusher{URL: url}.endpoint("/v1/workspace", purposeRead)
 		if err == nil {
 			t.Errorf("endpoint(%s over plain http) = nil, want a refusal", url)
 			continue

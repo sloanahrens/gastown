@@ -771,8 +771,9 @@ func IsOwnPush(ctx context.Context) bool {
 type GatewayPusher struct {
 	// URL is the gateway's base URL, such as http://host.docker.internal:7440.
 	URL string
-	// PushURL is the base URL Push, Probe and ReportedHash go to when it is
-	// non-empty. Empty uses URL.
+	// PushURL is the base URL Push goes to when it is non-empty. Probe,
+	// ReportedHash and the calls read go to URL, so an empty PushURL leaves Push
+	// on URL and an empty URL leaves the reads on PushURL.
 	PushURL string
 	// TokenFile is the file holding the pusher's bearer token. It is read on
 	// every push, so a rotated token needs no restart.
@@ -794,7 +795,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	if err != nil {
 		return "", err
 	}
-	endpoint, err := g.endpoint(WorkspacePath)
+	endpoint, err := g.endpoint(WorkspacePath, purposePush)
 	if err != nil {
 		return "", err
 	}
@@ -817,7 +818,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so the workspace was not pushed: %w", shown(redactedURL(g.effectiveURL())), err)
+		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so the workspace was not pushed: %w", shown(redactedURL(g.effectiveURL(purposePush))), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
@@ -853,7 +854,7 @@ func (g GatewayPusher) Push(ctx context.Context, townRoot string) (string, error
 // workspace drifted (an empty one, say) without sending a document. A probe that
 // gets no answer returns an error and observes nothing.
 func (g GatewayPusher) Probe(ctx context.Context) error {
-	endpoint, err := g.endpoint(statsPath)
+	endpoint, err := g.endpoint(statsPath, purposeRead)
 	if err != nil {
 		return err
 	}
@@ -872,7 +873,7 @@ func (g GatewayPusher) Probe(ctx context.Context) error {
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return fmt.Errorf("bdgateway: the gateway at %s did not answer the probe: %w", shown(redactedURL(g.effectiveURL())), err)
+		return fmt.Errorf("bdgateway: the gateway at %s did not answer the probe: %w", shown(redactedURL(g.effectiveURL(purposeRead))), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
@@ -919,7 +920,7 @@ func (e callsReadRefusal) Unwrap() error { return ErrGatewayRefused }
 // answer, and an answer with no calls field are errors. A calls read observes
 // nothing: it says nothing about the workspace hash.
 func (g GatewayPusher) Calls(ctx context.Context, since time.Time, limit int) (CallsPage, error) {
-	endpoint, err := g.endpoint(callsPath)
+	endpoint, err := g.endpoint(callsPath, purposeRead)
 	if err != nil {
 		return CallsPage{}, err
 	}
@@ -941,7 +942,7 @@ func (g GatewayPusher) Calls(ctx context.Context, since time.Time, limit int) (C
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return CallsPage{}, fmt.Errorf("bdgateway: the gateway at %s did not answer the calls read: %w", shown(redactedURL(g.effectiveURL())), err)
+		return CallsPage{}, fmt.Errorf("bdgateway: the gateway at %s did not answer the calls read: %w", shown(redactedURL(g.effectiveURL(purposeRead))), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	// The extra byte is how an answer at the limit is told from one past it: a
@@ -983,7 +984,7 @@ func (g GatewayPusher) Calls(ctx context.Context, since time.Time, limit int) (C
 // ErrNoReportedHash. A caller compares the hash with the manifest of the tree it
 // believes current.
 func (g GatewayPusher) ReportedHash(ctx context.Context) (string, error) {
-	endpoint, err := g.endpoint(statsPath)
+	endpoint, err := g.endpoint(statsPath, purposeRead)
 	if err != nil {
 		return "", err
 	}
@@ -1002,39 +1003,63 @@ func (g GatewayPusher) ReportedHash(ctx context.Context) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := g.doer().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so its workspace hash was not read: %w", shown(redactedURL(g.effectiveURL())), err)
+		return "", fmt.Errorf("bdgateway: the gateway at %s did not answer, so its workspace hash was not read: %w", shown(redactedURL(g.effectiveURL(purposeRead))), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return "", fmt.Errorf("%w: %s answered %d", ErrReportedHashRefused, shown(redactedURL(g.effectiveURL())), resp.StatusCode)
+		return "", fmt.Errorf("%w: %s answered %d", ErrReportedHashRefused, shown(redactedURL(g.effectiveURL(purposeRead))), resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
-		return "", fmt.Errorf("bdgateway: the gateway at %s answered %d to the workspace hash read, so its hash was not read", shown(redactedURL(g.effectiveURL())), resp.StatusCode)
+		return "", fmt.Errorf("bdgateway: the gateway at %s answered %d to the workspace hash read, so its hash was not read", shown(redactedURL(g.effectiveURL(purposeRead))), resp.StatusCode)
 	}
 	hash := resp.Header.Get(WorkspaceHashHeader)
 	if hash == "" {
-		return "", fmt.Errorf("%w: the answer from %s carries no %s header", ErrNoReportedHash, shown(redactedURL(g.effectiveURL())), WorkspaceHashHeader)
+		return "", fmt.Errorf("%w: the answer from %s carries no %s header", ErrNoReportedHash, shown(redactedURL(g.effectiveURL(purposeRead))), WorkspaceHashHeader)
 	}
 	return hash, nil
 }
 
-// effectiveURL is the base URL a request goes to: PushURL when the pusher has
-// one, URL otherwise. A PushURL that is set is never skipped for a good URL, so
-// the URL a caller named for the push is the one validated and the one used.
-func (g GatewayPusher) effectiveURL() string {
-	if g.PushURL != "" {
-		return g.PushURL
+// requestPurpose says what a request is for, which decides both the URL it goes
+// to and the plain-http hosts it may name: Push writes the workspace, and every
+// read goes to the gateway.
+type requestPurpose int
+
+const (
+	// purposePush is Push: it may use PushURL and the push Service.
+	purposePush requestPurpose = iota
+	// purposeRead is Probe, ReportedHash and the calls read: they never use the
+	// push Service over plain http, whichever field named it.
+	purposeRead
+)
+
+// effectiveURL is the base URL a request for purpose goes to. Push goes to
+// PushURL when set, else URL: the push Service exists for the write. Probe,
+// ReportedHash and the calls read go to URL when set, else PushURL, so a pusher
+// configured with only a PushURL still reads.
+func (g GatewayPusher) effectiveURL(purpose requestPurpose) string {
+	if purpose == purposePush {
+		if g.PushURL != "" {
+			return g.PushURL
+		}
+		return g.URL
 	}
-	return g.URL
+	if g.URL != "" {
+		return g.URL
+	}
+	return g.PushURL
 }
 
 // endpoint is the URL a request to path goes to, refusing a URL that is not http(s)
 // with a host, that carries credentials or a query or fragment the endpoint does
 // not take, or that would send the bearer token in the clear to another machine.
-func (g GatewayPusher) endpoint(path string) (string, error) {
-	raw := g.effectiveURL()
+// A plain-http URL may name the push Service only when purpose is purposePush.
+func (g GatewayPusher) endpoint(path string, purpose requestPurpose) (string, error) {
+	raw := g.effectiveURL(purpose)
 	if raw == "" {
-		return "", fmt.Errorf("%w: set --gateway-url or %s, or %s for the push service", ErrNoGatewayURL, WorkspaceURLEnv, WorkspacePushURLEnv)
+		if purpose == purposePush {
+			return "", fmt.Errorf("%w: set --gateway-url or %s, or %s for the push service", ErrNoGatewayURL, WorkspaceURLEnv, WorkspacePushURLEnv)
+		}
+		return "", fmt.Errorf("%w: set --gateway-url or %s", ErrNoGatewayURL, WorkspaceURLEnv)
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -1051,7 +1076,11 @@ func (g GatewayPusher) endpoint(path string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("bdgateway: the gateway url %s carries a query or fragment, which the workspace endpoint does not take", shown(redactedURL(raw)))
 	}
-	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) {
+	if u.Scheme == "http" && !localGatewayHost(u.Hostname()) &&
+		!(purpose == purposePush && pushGatewayHost(u.Hostname())) {
+		if purpose == purposePush {
+			return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address, the bd gateway's in-cluster Service name (bd-gateway.gt.svc) or the push Service's (bd-gateway-push.gt.svc)", shown(redactedURL(raw)))
+		}
 		return "", fmt.Errorf("bdgateway: the gateway url %s is plain http to a host that is not this machine, so the bearer token would travel in the clear; use https, a loopback address or the bd gateway's in-cluster Service name (bd-gateway.gt.svc)", shown(redactedURL(raw)))
 	}
 	return strings.TrimSuffix(raw, "/") + path, nil
@@ -1119,6 +1148,35 @@ func gatewayServiceHost(host string) bool {
 		return false
 	}
 	if labels[0] != gatewayServiceName || labels[1] != gatewayServiceNamespace {
+		return false
+	}
+	for _, l := range labels {
+		if !dnsLabel(l) {
+			return false
+		}
+	}
+	return true
+}
+
+// pushGatewayServiceName is the Service the cluster render gives the daemon's
+// push listener. The admission guard binds both gateway names in namespace gt,
+// so the client pins the namespace rather than trusting the name alone.
+const pushGatewayServiceName = "bd-gateway-push"
+
+// pushGatewayHost reports whether host is the cluster DNS name of the push
+// Service: bd-gateway-push.gt.svc, or the same with .cluster.local after it,
+// case-insensitive and with every label a plain DNS label. It is the same
+// strictness as gatewayServiceHost, so another namespace, a bare svc name,
+// another Service and a suffix after cluster.local are not the push Service.
+func pushGatewayHost(host string) bool {
+	labels := strings.Split(strings.ToLower(host), ".")
+	switch {
+	case len(labels) == 3 && labels[2] == "svc":
+	case len(labels) == 5 && labels[2] == "svc" && labels[3] == "cluster" && labels[4] == "local":
+	default:
+		return false
+	}
+	if labels[0] != pushGatewayServiceName || labels[1] != gatewayServiceNamespace {
 		return false
 	}
 	for _, l := range labels {
