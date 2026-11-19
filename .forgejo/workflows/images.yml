@@ -8,10 +8,10 @@
 # .forgejo/workflows/. TestImagesWorkflowLiveCopyMatchesReviewedText in
 # internal/ci holds the two equal.
 #
-# One commit for both images: the preflight reads GITHUB_SHA once and writes
+# One commit for every image: the preflight reads GITHUB_SHA once and writes
 # the tag, each image is built at it and labelled with the full sha, and after
-# both builds a step reads the commit label back from each pushed image and
-# fails when either is not GITHUB_SHA. A daemon image and a polecat image at
+# the builds a step reads the commit label back from each pushed image and
+# fails when any is not GITHUB_SHA. A daemon image and a polecat image at
 # different commits are a pair the town cannot run (gt-gg9hv.63).
 #
 # No concurrency block on purpose: a cancelled run would leave a failure on a
@@ -201,6 +201,8 @@ jobs:
             --label org.gastown.bd-commit="$BD_COMMIT" \
             --build-arg GO_FLOOR="$GO_FLOOR" \
             "$POLECAT_CONTEXT"
+      # A failure in the gt-bd stage or build stops the push of every image by
+      # design: one commit, every image.
       - name: stage the gt-bd image's build context
         env:
           SOURCES_TOKEN: ${{ secrets.SOURCES_TOKEN }}
@@ -227,7 +229,7 @@ jobs:
             -t "$FORGEJO_HOST/$REGISTRY_OWNER/$BD_IMAGE:$TAG" \
             --label org.gastown.gt-commit="$SHA" \
             "$BD_CONTEXT"
-      - name: push both images and publish their digests
+      - name: push the images and publish their digests
         run: |
           set -euo pipefail
           # The push, the registry digest read and the IMAGE line are
@@ -243,7 +245,7 @@ jobs:
             -bd "$BD_IMAGE" \
             -tag "$TAG" \
             -sha "$SHA"
-      - name: check both images carry the one commit
+      - name: check the images carry the one commit
         run: |
           set -euo pipefail
           # The label read and the comparison are internal/ci/cmd/imagepublish
