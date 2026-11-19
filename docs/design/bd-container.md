@@ -126,8 +126,9 @@ daemon. Its Deployment, container and Service are all named `bd-gateway`, and
 the Service publishes port 7440 as `http://bd-gateway.<namespace>.svc:7440`.
 The render creates it only when the values file names a gateway image, and that
 image is a digest from the values file's `bd` key. Its workspace lives on the
-`bd-gateway-workspace` claim (1Gi). It reaches Dolt through the host alias the
-render builds from the host gateway IP.
+`bd-gateway-workspace` claim (1Gi), beside the `bd-gateway-log` claim (512Mi)
+that holds its call log and survives a pod replacement. It reaches Dolt through
+the host alias the render builds from the host gateway IP.
 
 The token Secret is mounted only by an init container, `tokens-0600`, which runs
 the proxy image as the pod's user and copies each token file into an emptyDir at
@@ -285,6 +286,13 @@ stdout and stderr byte counts, exit status and duration. Free-text values
 (titles, descriptions, comment bodies) are never logged. `GET /v1/stats` (class
 `read`) returns counts and latency percentiles per verb and caller for the last
 hour, which is the evidence for revisiting the 1 CPU and 1 GiB limit (decision 7).
+
+In the cluster the log is not on the pod's disk. It lives on its own claim,
+`bd-gateway-log` (512Mi, ReadWriteOnce), mounted at `/var/log/bdgw`, so it
+survives a pod replacement. The rotation above keeps 350 MiB of that claim (50
+MB times seven files), and a roll appends to the same `call.log`. The claim is
+separate from `bd-gateway-workspace` (1Gi), so a full log cannot make the
+gateway unready. The render writes both claims; see gt-fn4lrl and gt-2kqwzv.
 
 ## The workspace
 
