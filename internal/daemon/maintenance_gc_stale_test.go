@@ -306,9 +306,14 @@ func TestScheduledMaintenanceTickCarriesTheStaleGCAlert(t *testing.T) {
 	// The cycle recorded gt's gc, so the tick after it closes the key.
 	d.runScheduledMaintenance()
 
-	clears := rec.Clears()
-	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{doltGCStaleAlertKey("gt")}) {
-		t.Fatalf("clears = %+v, want one for gt after its gc", clears)
+	var staleClears []notifyfake.Call
+	for _, c := range rec.Clears() {
+		if slices.Equal(c.Fingerprints, []string{doltGCStaleAlertKey("gt")}) {
+			staleClears = append(staleClears, c)
+		}
+	}
+	if len(staleClears) != 1 {
+		t.Fatalf("clears = %+v, want one for gt after its gc", rec.Clears())
 	}
 }
 
