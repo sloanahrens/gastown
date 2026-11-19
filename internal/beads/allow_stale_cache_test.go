@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// gatewayRefusedAllowStale is what the probe's stderr holds when gt runs
+// through the bd gateway: gtwrap's one-line refusal (internal/gtwrap) quoting
+// the gateway policy's message (internal/bdgateway).
+const gatewayRefusedAllowStale = `gtwrap: the bd gateway at http://127.0.0.1:7777 refused the call with HTTP 403: forbidden: bdgateway: cannot tell which verb these arguments run: "--allow-stale" is not a bd root flag the policy can place`
+
 // TestAllowStaleCacheKeepsOnlyDefinitiveAnswers is gt-22hdp.27: a probe that
 // timed out under load was cached as "unsupported" for the life of the
 // process, so a long-running daemon dropped --allow-stale from every later
@@ -38,6 +43,20 @@ func TestAllowStaleCacheKeepsOnlyDefinitiveAnswers(t *testing.T) {
 	if !d.supported("/other/bd", ok) {
 		t.Error("a different bd path reused the cached answer")
 	}
+
+	// gt-d3v0iu: the bd gateway refuses --allow-stale with HTTP 403 because it
+	// is an import flag, not a root flag. That answer is definitive, so the
+	// process probes once instead of on every bd call.
+	var g allowStaleCache
+	gatewayProbes := 0
+	gatewayRefusal := func() (bool, bool) {
+		gatewayProbes++
+		return allowStaleAnswer(context.Background(), exitError{1}, gatewayRefusedAllowStale)
+	}
+	g.supported("/bin/bd", gatewayRefusal)
+	if g.supported("/bin/bd", gatewayRefusal) || gatewayProbes != 1 {
+		t.Errorf("a gateway refusal of --allow-stale was not cached: %d probes", gatewayProbes)
+	}
 }
 
 func TestAllowStaleAnswer(t *testing.T) {
@@ -61,6 +80,14 @@ func TestAllowStaleAnswer(t *testing.T) {
 		// call for the life of the process (gt-22hdp.27).
 		{"nonzero exit, other error", live, exitError{1}, "Error: failed to open database: lock held", false, false},
 		{"nonzero exit, no output", live, exitError{2}, "", false, false},
+		// The bd gateway refuses --allow-stale with HTTP 403 because it is an
+		// import flag, not a root flag (gt-d3v0iu). That is a definitive
+		// "unsupported": the probe must not run again on every bd call.
+		{"gateway refused --allow-stale", live, exitError{1}, gatewayRefusedAllowStale, false, true},
+		// A refusal of another flag says nothing about --allow-stale.
+		{"gateway refused another flag", live, exitError{1}, `gtwrap: the bd gateway at http://127.0.0.1:7777 refused the call with HTTP 403: forbidden: bdgateway: cannot tell which verb these arguments run: "--flat" is not a bd root flag the policy can place`, false, false},
+		// A refusal at another status is not the policy's answer about the flag.
+		{"gateway refused --allow-stale with HTTP 503", live, exitError{1}, `gtwrap: the bd gateway at http://127.0.0.1:7777 refused the call with HTTP 503: unavailable: "--allow-stale" is not a bd root flag the policy can place`, false, false},
 		{"exit 0, no output", live, nil, "", false, true},
 		{"timed out", expired, errors.New("signal: killed"), "", false, false},
 		{"did not start", live, errors.New("fork/exec: resource temporarily unavailable"), "", false, false},
