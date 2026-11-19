@@ -53,10 +53,6 @@ const (
 	// ciEngineRoot is the Docker data root the engine's size is read from: the
 	// claim the dind container mounts.
 	ciEngineRoot = ciCacheDindMount
-
-	// ciEngineUnusedAge is the age the keep rule gives a stopped container, an unused
-	// anonymous volume and an unused build cache record. See the guide.
-	ciEngineUnusedAge = 24 * time.Hour
 )
 
 // ciEngineListScript is the list program. It prints one JSON object: the data
@@ -180,18 +176,18 @@ func ciEngineBuildCacheTotal(out []byte) (int64, error) {
 
 // ciEngineBuildCacheReport reads a build cache prune that ran without error. It
 // returns the reclaimed figure the verdict line names, and the WARN line when the
-// prune reclaimed nothing although docker reported reclaimable cache before it ran.
-// known is false when that size read failed, which skips the WARN and nothing else.
-// A total that cannot be read is named by docker's last line, bounded, and fails
-// nothing.
-func ciEngineBuildCacheReport(out []byte, reclaimable int64, known bool) (reclaimed, warn string) {
+// prune reclaimed nothing although docker reported reclaimable cache before it ran;
+// unusedAge is the filter that WARN names. known is false when that size read
+// failed, which skips the WARN and nothing else. A total that cannot be read is
+// named by docker's last line, bounded, and fails nothing.
+func ciEngineBuildCacheReport(out []byte, reclaimable int64, known bool, unusedAge time.Duration) (reclaimed, warn string) {
 	n, err := ciEngineBuildCacheTotal(out)
 	if err != nil {
 		return fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
 	}
 	if n == 0 && known && reclaimable > 0 {
 		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s, and cache younger than the filter is not removed",
-			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(ciEngineUnusedAge))
+			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge))
 	}
 	return "build cache reclaimed " + polecatimage.Human(n), warn
 }
@@ -293,6 +289,10 @@ type ciEngineContainer struct {
 	Created string `json:"Created"`
 	State   struct {
 		Status string `json:"Status"`
+		// FinishedAt is when the container last stopped. docker prints the zero
+		// time for one that is not stopped, a container in "created" state that
+		// never ran included.
+		FinishedAt string `json:"FinishedAt"`
 	} `json:"State"`
 	Mounts []struct {
 		Type string `json:"Type"`
@@ -333,11 +333,13 @@ func (p ciEnginePlan) count() int {
 }
 
 // planCIEnginePrune decides what the engine prune removes from a listing taken at
-// now, under the keep rule in docs/guides/disk-maintenance.md. It refuses a listing
-// it cannot read in full: an id or name that is not in docker's shape, a time it
-// cannot parse, or a missing data root figure. A refusal is a failed run, never an
-// empty plan.
-func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keepRepos []string) (ciEnginePlan, error) {
+// now, under the keep rule in docs/guides/disk-maintenance.md. imageAge is how old
+// an unused image must be, and unusedAge how long a stopped container has been
+// stopped, and how old an unused anonymous volume and an unused build cache record
+// must be. A listing it cannot read in full is refused: an id or name that is not
+// in docker's shape, a time it cannot parse, or a missing data root figure. A
+// refusal is a failed run, never an empty plan.
+func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge time.Duration, keepRepos []string) (ciEnginePlan, error) {
 	var plan ciEnginePlan
 	if l.DataRootKiB == nil {
 		return plan, errors.New("the engine listing names no data root size")
@@ -353,9 +355,15 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 		if err != nil {
 			return plan, fmt.Errorf("container %s: %w", c.ID[:12], err)
 		}
-		if ciEngineStopped(c.State.Status) && now.Sub(created) > ciEngineUnusedAge {
-			plan.containers = append(plan.containers, c)
-			continue
+		if ciEngineStopped(c.State.Status) {
+			stoppedAt, err := ciEngineStoppedAt(c, created)
+			if err != nil {
+				return plan, fmt.Errorf("container %s: %w", c.ID[:12], err)
+			}
+			if now.Sub(stoppedAt) > unusedAge {
+				plan.containers = append(plan.containers, c)
+				continue
+			}
 		}
 		usedImage[c.Image] = true
 		for _, m := range c.Mounts {
@@ -400,12 +408,12 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 			// A base the rollback rule does not keep still waits out the age, like
 			// any other image: a build just made and not yet tagged latest is not
 			// swept away under the runner (gt-i02983, review round 3).
-			if !baseKeep[id] && now.Sub(created[id]) > age {
+			if !baseKeep[id] && now.Sub(created[id]) > imageAge {
 				removable[id] = true
 			}
 			continue
 		}
-		if now.Sub(created[id]) > age {
+		if now.Sub(created[id]) > imageAge {
 			removable[id] = true
 		}
 	}
@@ -453,7 +461,7 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 		if !ciEngineAnonymousVolumeRE.MatchString(v.Name) || usedVolume[v.Name] {
 			continue
 		}
-		if now.Sub(t) > ciEngineUnusedAge {
+		if now.Sub(t) > unusedAge {
 			plan.volumes = append(plan.volumes, v)
 		}
 	}
@@ -544,6 +552,27 @@ func ciEngineStopped(status string) bool {
 	return false
 }
 
+// ciEngineStoppedAt is the instant a stopped container stopped, which is what the
+// unused age is measured from: a job that ran longer than the age and stopped a
+// minute ago is not unused. docker's State.FinishedAt names that instant. A
+// container in "created" state never ran, so docker gives it the zero time there
+// and its creation is the instant it became idle. An unreadable finish time, or
+// one before the creation, is refused rather than read as creation: it could age a
+// container a job still holds.
+func ciEngineStoppedAt(c ciEngineContainer, created time.Time) (time.Time, error) {
+	finished, err := time.Parse(time.RFC3339Nano, c.State.FinishedAt)
+	if err != nil {
+		return time.Time{}, errors.New("a container's finish time is not RFC 3339")
+	}
+	if finished.IsZero() {
+		return created, nil
+	}
+	if finished.Before(created) {
+		return time.Time{}, errors.New("a container's finish time precedes its creation")
+	}
+	return finished, nil
+}
+
 // parseCIEngineTime reads a time docker prints, RFC 3339 with its fraction. A
 // zero time is refused: it would read as created long ago, and every age check
 // would then remove the item.
@@ -580,27 +609,27 @@ func ciEngineExitStatus(err error) string {
 	return "no exit status"
 }
 
-// ciEnginePruneSettings reads the engine prune's three settings from the patrol's
+// ciEnginePruneSettings reads the engine prune's four settings from the patrol's
 // block, returning the default for each that is empty. A value the patrol cannot
 // act on is an error naming its key.
-func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duration, []string, error) {
+func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, repoList []string, err error) {
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
 	}
-	every, err := settings.CIEnginePruneEvery()
-	if err != nil {
-		return 0, 0, nil, err
+	if every, err = settings.CIEnginePruneEvery(); err != nil {
+		return 0, 0, 0, nil, err
 	}
-	age, err := settings.CIEnginePruneAgeDuration()
-	if err != nil {
-		return 0, 0, nil, err
+	if imageAge, err = settings.CIEnginePruneAgeDuration(); err != nil {
+		return 0, 0, 0, nil, err
 	}
-	repos, err := settings.CIEngineKeepRepoList()
-	if err != nil {
-		return 0, 0, nil, err
+	if unusedAge, err = settings.CIEngineUnusedAgeDuration(); err != nil {
+		return 0, 0, 0, nil, err
 	}
-	return every, age, repos, nil
+	if repoList, err = settings.CIEngineKeepRepoList(); err != nil {
+		return 0, 0, 0, nil, err
+	}
+	return every, imageAge, unusedAge, repoList, nil
 }
 
 // runCIEnginePruneTick is the engine prune's own tick. It runs before the quiet
@@ -619,7 +648,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	every, _, _, err := ciEnginePruneSettings(pc)
+	every, _, _, _, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -647,7 +676,7 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
-	every, _, _, err := ciEnginePruneSettings(d.patrol())
+	every, _, _, _, err := ciEnginePruneSettings(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -675,7 +704,7 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	_, maxAge, keepRepos, err := ciEnginePruneSettings(pc)
+	_, imageAge, unusedAge, keepRepos, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false
@@ -714,7 +743,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		return false
 	}
 	now := s.now()
-	plan, err := planCIEnginePrune(listing, now, maxAge, keepRepos)
+	plan, err := planCIEnginePrune(listing, now, imageAge, unusedAge, keepRepos)
 	if err != nil {
 		d.ciEnginePruneLogf("plan refused", "disk_maintenance: ci engine prune: the listing could not be planned: %v; nothing pruned", err)
 		return false
@@ -753,13 +782,13 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		d.ciEnginePruneLogf("reclaimable unreadable", "disk_maintenance: ci engine prune: the build cache's reclaimable size could not be read before its prune: %v; the zero-reclaim check is skipped", reclaimErr)
 	}
 	cache := "build cache prune failed"
-	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); err != nil {
+	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(unusedAge)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineFailure(err, stderr))
 		failed = true
 	} else {
 		var warn string
-		cache, warn = ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil)
+		cache, warn = ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge)
 		if warn != "" {
 			d.logger.Printf("%s", warn)
 		}

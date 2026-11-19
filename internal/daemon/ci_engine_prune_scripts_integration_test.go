@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeDockerEnv is the fake docker a case runs against: a directory holding the
@@ -156,7 +157,7 @@ func TestIntegrationCIEngineRemovalsReachDockerAsGiven(t *testing.T) {
 			t.Errorf("the %s removal left %q unreported by docker", r.kind, missing)
 		}
 	}
-	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); !ok {
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(24*time.Hour)...); !ok {
 		t.Fatalf("the build cache prune failed on a clean engine")
 	}
 	want := []string{
@@ -175,7 +176,7 @@ func TestIntegrationCIEngineRemovalsReachDockerAsGiven(t *testing.T) {
 // with exit 1, so a run that sends one cannot pass.
 func TestIntegrationCIEngineBuildCachePruneRejectsATimestamp(t *testing.T) {
 	f := newFakeDocker(t)
-	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); !ok {
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(24*time.Hour)...); !ok {
 		t.Fatalf("the build cache prune the daemon builds was refused")
 	}
 	timestamp := []string{"docker", "builder", "prune", "-af", "--filter", "until=2026-11-09T20:03:27-06:00"}
