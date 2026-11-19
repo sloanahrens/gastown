@@ -49,7 +49,7 @@ func overTotalCapFiles(season string) map[string]string {
 func openTestStore(t *testing.T) (*WorkspaceStore, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "ws")
-	s, err := OpenWorkspaceStore(root)
+	s, err := openWorkspaceStore(root, testLockedFS())
 	if err != nil {
 		t.Fatalf("opening the store: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestWorkspaceAcceptsTownFormulas(t *testing.T) {
 	}
 	// A restart reads the tree back through the same path rules, so a path the
 	// store accepted must also be one it can serve after Open.
-	reopened, err := OpenWorkspaceStore(root)
+	reopened, err := openWorkspaceStore(root, testLockedFS())
 	if err != nil {
 		t.Fatalf("reopening the store: %v", err)
 	}
@@ -481,7 +481,7 @@ func TestWorkspaceAcceptsRigFormulas(t *testing.T) {
 	}
 	// A restart reads the tree back through the same path rules, so a path the
 	// store accepted must also be one it can serve after Open.
-	reopened, err := OpenWorkspaceStore(root)
+	reopened, err := openWorkspaceStore(root, testLockedFS())
 	if err != nil {
 		t.Fatalf("reopening the store: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 	// shortened rather than echoed whole.
 	t.Run("an overlong leftover name is shortened in the error", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), strings.Repeat("r", 200))
-		s, err := OpenWorkspaceStore(root)
+		s, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("opening the store: %v", err)
 		}
@@ -838,7 +838,7 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 
 		// The tree the swap moved aside is the last published one, so a restart
 		// serves it rather than the empty workspace.
-		reopened, err := OpenWorkspaceStore(root)
+		reopened, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("reopening after a failed restore: %v", err)
 		}
@@ -865,7 +865,7 @@ func TestWorkspaceAtomicSwap(t *testing.T) {
 			t.Fatalf("creating the leftover temp tree: %v", err)
 		}
 
-		reopened, err := OpenWorkspaceStore(root)
+		reopened, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("opening after a crashed swap: %v", err)
 		}
@@ -1161,7 +1161,7 @@ func TestWorkspaceManifestHeader(t *testing.T) {
 	}
 
 	// A restart recomputes the live tree's hash from the tree itself.
-	reopened, err := OpenWorkspaceStore(root)
+	reopened, err := openWorkspaceStore(root, testLockedFS())
 	if err != nil {
 		t.Fatalf("reopening the store: %v", err)
 	}
@@ -1363,7 +1363,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	t.Parallel()
 	t.Run("a missing root is an empty workspace", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
-		s, err := OpenWorkspaceStore(root)
+		s, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("opening a missing root: %v", err)
 		}
@@ -1384,7 +1384,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		writeFileIn(t, root, "gt/.beads/redirect", "/ws/gt/mayor/rig/.beads\n")
 		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
 		writeFileIn(t, root, "gt/mayor/rig/.beads/.local_version", "6")
-		s, err := OpenWorkspaceStore(root)
+		s, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("opening a tree with .local_version: %v", err)
 		}
@@ -1403,7 +1403,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		writeFileIn(t, root, "gt/mayor/rig/.beads/metadata.json", `{"dolt_database":"gt"}`+"\n")
 		writeFileIn(t, root, "gt/mayor/rig/.beads/last-touched", "2026-11-17T19:30:00Z")
 		writeFileIn(t, root, "gt/mayor/rig/.beads.gate.lock", "")
-		s, err := OpenWorkspaceStore(root)
+		s, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("opening a tree with bd's lock and state files: %v", err)
 		}
@@ -1414,7 +1414,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	})
 
 	t.Run("an empty root path", func(t *testing.T) {
-		if _, err := OpenWorkspaceStore(""); !errors.Is(err, ErrWorkspaceRoot) {
+		if _, err := openWorkspaceStore("", testLockedFS()); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf(`OpenWorkspaceStore("") error = %v, want %v`, err, ErrWorkspaceRoot)
 		}
 	})
@@ -1472,7 +1472,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "ws")
 			tc.build(t, root)
-			if _, err := OpenWorkspaceStore(root); !errors.Is(err, ErrWorkspaceRoot) {
+			if _, err := openWorkspaceStore(root, testLockedFS()); !errors.Is(err, ErrWorkspaceRoot) {
 				t.Fatalf("OpenWorkspaceStore(%q) error = %v, want %v", root, err, ErrWorkspaceRoot)
 			}
 		})
@@ -1516,7 +1516,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "ws")
 			tc.build(t, root)
-			_, err := OpenWorkspaceStore(root)
+			_, err := openWorkspaceStore(root, testLockedFS())
 			if !errors.Is(err, ErrWorkspaceRoot) {
 				t.Fatalf("OpenWorkspaceStore error = %v, want %v", err, ErrWorkspaceRoot)
 			}
@@ -1527,7 +1527,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	}
 
 	t.Run("a root that cannot be read", func(t *testing.T) {
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		fsys.lstat = func(string) (os.FileInfo, error) { return nil, errors.New("permission denied") }
 		if _, err := openWorkspaceStore(filepath.Join(t.TempDir(), "ws"), fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
@@ -1539,7 +1539,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	t.Run("a root that becomes unreadable after the recovery check", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
 		writeFileIn(t, root, "gt/.beads/redirect", "x")
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		lstat := fsys.lstat
 		calls := 0
 		fsys.lstat = func(p string) (os.FileInfo, error) {
@@ -1557,7 +1557,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	t.Run("a tree file that cannot be read", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
 		writeFileIn(t, root, "gt/.beads/redirect", "x")
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
 		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
@@ -1567,7 +1567,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	t.Run("a tree directory that cannot be read", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
 		writeFileIn(t, root, "gt/.beads/redirect", "x")
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		fsys.readDir = func(string) ([]os.DirEntry, error) { return nil, errors.New("permission denied") }
 		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
@@ -1577,7 +1577,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 	t.Run("a nested tree directory that cannot be read", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
 		writeFileIn(t, root, "gt/.beads/redirect", "x")
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		readDir := fsys.readDir
 		fsys.readDir = func(dir string) ([]os.DirEntry, error) {
 			if dir != root {
@@ -1592,7 +1592,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 
 	t.Run("a tree a swap moved aside that cannot be inspected", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		fsys.lstat = func(p string) (os.FileInfo, error) {
 			if p == root {
 				return nil, fs.ErrNotExist
@@ -1609,7 +1609,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		if err := os.WriteFile(root+".old", []byte("x"), 0o600); err != nil {
 			t.Fatalf("writing the moved-aside file: %v", err)
 		}
-		if _, err := OpenWorkspaceStore(root); !errors.Is(err, ErrWorkspaceRoot) {
+		if _, err := openWorkspaceStore(root, testLockedFS()); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
 		}
 		if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
@@ -1623,7 +1623,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		if err := os.Rename(root, root+".old"); err != nil {
 			t.Fatalf("moving the live tree aside: %v", err)
 		}
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		fsys.rename = func(string, string) error { return errors.New("rename refused") }
 		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
@@ -1636,7 +1636,7 @@ func TestOpenWorkspaceStore(t *testing.T) {
 		if err := os.Rename(root, root+".old"); err != nil {
 			t.Fatalf("moving the live tree aside: %v", err)
 		}
-		fsys := osWorkspaceFS()
+		fsys := testLockedFS()
 		fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("permission denied") }
 		if _, err := openWorkspaceStore(root, fsys); !errors.Is(err, ErrWorkspaceRoot) {
 			t.Fatalf("error = %v, want %v", err, ErrWorkspaceRoot)
@@ -1684,11 +1684,11 @@ func TestWorkspaceLiveTreeEmptyDir(t *testing.T) {
 			}
 			plain := filepath.Join(t.TempDir(), "ws")
 			writeTree(t, plain)
-			got, err := OpenWorkspaceStore(withDir)
+			got, err := openWorkspaceStore(withDir, testLockedFS())
 			if err != nil {
 				t.Fatalf("opening a tree with an empty directory: %v", err)
 			}
-			want, err := OpenWorkspaceStore(plain)
+			want, err := openWorkspaceStore(plain, testLockedFS())
 			if err != nil {
 				t.Fatalf("opening the tree without it: %v", err)
 			}
@@ -1715,7 +1715,7 @@ func TestWorkspaceLiveTreeEmptyDir(t *testing.T) {
 	t.Run("the drift hash does not move when an empty directory appears or goes", func(t *testing.T) {
 		root := filepath.Join(t.TempDir(), "ws")
 		writeTree(t, root)
-		s, err := OpenWorkspaceStore(root)
+		s, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("opening the tree: %v", err)
 		}
@@ -1727,7 +1727,7 @@ func TestWorkspaceLiveTreeEmptyDir(t *testing.T) {
 		if present, err := WorkspacePresent(root); err != nil || !present {
 			t.Fatalf("WorkspacePresent with an empty directory = %v, %v; want true, nil", present, err)
 		}
-		appeared, err := OpenWorkspaceStore(root)
+		appeared, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("reopening the tree with an empty directory: %v", err)
 		}
@@ -1737,7 +1737,7 @@ func TestWorkspaceLiveTreeEmptyDir(t *testing.T) {
 		if err := os.RemoveAll(filepath.Join(root, "toolbox")); err != nil {
 			t.Fatalf("removing the empty directory: %v", err)
 		}
-		gone, err := OpenWorkspaceStore(root)
+		gone, err := openWorkspaceStore(root, testLockedFS())
 		if err != nil {
 			t.Fatalf("reopening the tree without the directory: %v", err)
 		}
@@ -1791,7 +1791,7 @@ func TestWorkspaceLiveTreeEmptyDir(t *testing.T) {
 				t.Fatalf("creating the empty directory: %v", err)
 			}
 			tc.build(t, root)
-			_, err := OpenWorkspaceStore(root)
+			_, err := openWorkspaceStore(root, testLockedFS())
 			if !errors.Is(err, ErrWorkspaceRoot) || !strings.Contains(fmt.Sprint(err), tc.cause.Error()) {
 				t.Fatalf("OpenWorkspaceStore(%q) error = %v, want a refusal of %q", root, err, tc.cause)
 			}

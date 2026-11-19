@@ -89,6 +89,8 @@ func workspaceRefusal(err error) (int, string) {
 		return http.StatusBadRequest, "workspace_manifest_mismatch"
 	case errors.Is(err, ErrWorkspaceLiveTreeLost):
 		return http.StatusInternalServerError, "workspace_live_tree_lost"
+	case errors.Is(err, ErrWorkspaceLockTimeout):
+		return http.StatusServiceUnavailable, "workspace_lock_timeout"
 	default:
 		return http.StatusInternalServerError, "workspace_store_failed"
 	}
