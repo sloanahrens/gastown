@@ -960,10 +960,30 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 		Remote:     remote,
 		Out:        out,
 		GateLogDir: gateLogDir,
+		Recorder:   NewGateRunRecorder(d.controlClusterExec(), d.config.TownRoot, d.logger.Printf),
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
 	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, BotLogin: botLogin, Out: out}
 	return gate, merger, nil
+}
+
+// controlClusterExec is the kubectl seam the gate run recorder reads the forgejo
+// runner's cpu.stat through: the control cluster the cache trim uses. A town
+// with no kubernetes runner has none, so the read is refused, not run with an
+// empty context (gt-57qwa5).
+func (d *Daemon) controlClusterExec() func(context.Context, ...string) (string, error) {
+	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, d.diskMaintenanceSeams().getenv)
+	return func(ctx context.Context, args ...string) (string, error) {
+		kubeContext, ok, err := ciCacheTrimContext(d.patrolConfig)
+		if err != nil || !ok {
+			return "", errors.Join(err, errors.New("no kubernetes runner names a control cluster"))
+		}
+		stdout, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, args...)
+		if err != nil {
+			return "", fmt.Errorf("kubectl on the control cluster: %w", err)
+		}
+		return string(stdout), nil
+	}
 }
 
 // verifyForgejoGate checks the required context the workflow file derives
