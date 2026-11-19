@@ -1,0 +1,68 @@
+# Excerpts of bd --help and bd sample add --help of the fork build 0f9f640fe0f1, built in scratch by goose from beads origin/main (CGO, gms_pure_go), captured 2026-11-19, stdout only. Every line is verbatim; groups and sections not needed by the tests are left out. NOT the town's pod image.
+# bd version 1.2.2 (dev: main@0f9f640fe0f1) schema<=67
+
+################ bd --help
+Usage:
+  bd [flags]
+  bd [command]
+
+Working With Issues:
+  children         List child beads of a parent
+  close            Close one or more issues
+  comments         View or manage comments on an issue
+  create           Create a new issue (or batch from markdown/graph JSON)
+  create-form      Create a new issue using an interactive form
+  delete           Delete one or more issues and clean up references
+  gate             Manage async coordination gates
+  heartbeat        Refresh the lease on an issue you hold in_progress
+  label            Manage issue labels
+  land-record      Record a landing or a landing rejection on a work bead
+  list             List issues
+  merge-slot       Manage merge-slot gates for serialized conflict resolution
+  note             Append a note to an issue
+  priority         Set the priority of an issue
+  q                Quick capture: create issue and output only ID
+  query            Query issues using a simple query language
+  reclaim          Revert stale-lease in_progress issues back to ready (dead-worker recovery)
+  reopen           Reopen one or more closed issues
+  search           Search issues by text query
+  set-state        Set operational state (creates event + updates label)
+  show             Show issue details
+  state            Query the current value of a state dimension
+  todo             Manage TODO items (convenience wrapper for task issues)
+  unclaim          Release a claimed issue
+  update           Update one or more issues
+
+Sync & Data:
+  backup           Back up your beads database
+  branch           List or create branches
+  export           Export issues to JSONL format
+  import           Import issues from a JSONL file or stdin into the database
+  sample           Store and read generic timestamped samples
+  vc               Version control operations
+
+Additional Commands:
+  blocked          Show blocked issues
+  completion       Generate the autocompletion script for the specified shell
+  cook             Compile a formula into a proto (ephemeral by default)
+  defer            Defer one or more issues for later
+  formula          Manage workflow formulas
+  help             Help about any command
+  init-safety      Explain bd init flag semantics and the destroy-token format
+  mail             Delegate to mail provider (e.g., gt mail)
+  mol              Molecule commands (work templates)
+  ready            Show ready work (open, no active blockers)
+  rename           Rename an issue ID
+  schema           Print the JSON Schema for bd's --json / export output
+  undefer          Undefer one or more issues (restore to open)
+  version          Print version information
+
+################ bd sample add --help
+Usage:
+  bd sample add --kind <kind> --at <rfc3339> --json <file|->
+
+Flags:
+      --at string     Event time as an RFC3339 timestamp (required; stored in UTC)
+  -h, --help          help for add
+      --json string   Payload source: a file holding a JSON object, or - for standard input (required)
+      --kind string   Sample kind (required)
