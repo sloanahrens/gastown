@@ -695,6 +695,52 @@ func TestSummarizeRepeatedStart(t *testing.T) {
 	}
 }
 
+// TestSummarizeRepeatedStartFixture runs the rule over the five lines furiosa's
+// seat wrote on gt-8r17fp: its first start was never ended, so the second start
+// closes it with no time, and the end at 22:49:43 cannot span the four idle
+// days back to the start on 11-11 (a 372229-second attempt) (gt-04rwtv).
+func TestSummarizeRepeatedStartFixture(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	const bead = "gt-8r17fp"
+	// gt-8r17fp's log in the writer's field order: two starts with no end
+	// between them, then the end that pairs with the second.
+	body := `{"bead":"gt-8r17fp","seat":"gastown/furiosa","event":"start","at":"2026-11-11T15:25:54Z","lower_bound":false}
+{"bead":"gt-8r17fp","seat":"gastown/furiosa","event":"start","at":"2026-11-15T22:35:53Z","lower_bound":false}
+{"bead":"gt-8r17fp","seat":"gastown/furiosa","event":"end","at":"2026-11-15T22:49:43Z","reason":"done","lower_bound":false}
+{"bead":"gt-8r17fp","seat":"gastown/furiosa","event":"start","at":"2026-11-15T22:52:52Z","lower_bound":false}
+{"bead":"gt-8r17fp","seat":"gastown/furiosa","event":"end","at":"2026-11-15T23:04:22Z","reason":"done","lower_bound":false}
+`
+	writeLog(t, dir, bead, body)
+
+	sum, err := New(dir, fixedClock{at: testEpoch}).Summarize(bead)
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if sum.Skipped != 0 || sum.Corrupt != 0 {
+		t.Errorf("Skipped/Corrupt = %d/%d, want 0/0", sum.Skipped, sum.Corrupt)
+	}
+	want := []Attempt{
+		{Seat: "gastown/furiosa", StartedAt: time.Date(2026, 11, 11, 15, 25, 54, 0, time.UTC), LowerBound: true},
+		{Seat: "gastown/furiosa", StartedAt: time.Date(2026, 11, 15, 22, 35, 53, 0, time.UTC), Secs: 830},
+		{Seat: "gastown/furiosa", StartedAt: time.Date(2026, 11, 15, 22, 52, 52, 0, time.UTC), Secs: 690},
+	}
+	if len(sum.Attempts) != len(want) {
+		t.Fatalf("Attempts = %+v, want three (a repeated start must not be skipped)", sum.Attempts)
+	}
+	for i := range want {
+		if sum.Attempts[i] != want[i] {
+			t.Errorf("Attempts[%d] = %+v, want %+v", i, sum.Attempts[i], want[i])
+		}
+	}
+	if !sum.LowerBound {
+		t.Error("LowerBound = false, want true: the first attempt was closed by a repeated start with no time")
+	}
+	if sum.Secs != 1520 {
+		t.Errorf("Secs = %v, want 1520 (830 + 690)", sum.Secs)
+	}
+}
+
 func TestSummarize_SkipsAndCountsUnpairedEvents(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
