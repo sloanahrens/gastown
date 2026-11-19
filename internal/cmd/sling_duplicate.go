@@ -593,13 +593,18 @@ func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err e
 	// lookup is a refinement of the cached blocker read, so a failure is
 	// reported and the pool is built without it, as a failed enrichment is; it
 	// stays its own list because folding it into the active one would let a bd
-	// that rejects a custom status fail that list too. With no custom status
-	// registered there is nothing to ask: an empty status filter is not "none".
+	// that rejects a custom status fail that list too. Only the custom statuses
+	// the store registered are asked for: bd rejects any other on every fetch
+	// (gt-f6gv4k). With none registered there is nothing to ask: an empty status
+	// filter is not "none".
 	var customRows []*beads.Issue
-	if custom := constants.BeadsCustomStatusesList(); len(custom) > 0 {
-		var customErr error
-		if customRows, customErr = listDuplicateRows(store, custom, time.Time{}); customErr != nil {
-			warn(beadsDir, customErr)
+	custom, customErr := registeredCustomStatuses(store, beadsDir, details)
+	if customErr != nil {
+		warn(beadsDir, customErr)
+	} else if len(custom) > 0 {
+		var listErr error
+		if customRows, listErr = listDuplicateRows(store, custom, time.Time{}); listErr != nil {
+			warn(beadsDir, listErr)
 		}
 	}
 	known := append(append(append([]*beads.Issue(nil), activeRows...), closedRows...), customRows...)
@@ -649,6 +654,74 @@ func listDuplicateRows(store beads.Client, statuses []string, closedAfter time.T
 		return nil, fmt.Errorf("listing %s beads: %w", strings.Join(statuses, ","), err)
 	}
 	return rows, nil
+}
+
+// customStatusReader is the bd config read that names the custom statuses a
+// store registered. The bd and tracker stores answer it; a store that does not
+// is an error to the pool, never a store with none registered.
+type customStatusReader interface {
+	ConfigGet(key string) (string, error)
+}
+
+// customStatusEntry is one store's registered custom statuses, or the failed
+// read that could not name them.
+type customStatusEntry struct {
+	fetchedAt time.Time
+	statuses  []string
+	err       error
+}
+
+// registeredCustomStatuses returns the custom statuses the store at beadsDir
+// registers that the pool knows, in the order constants.BeadsCustomStatusesList
+// lists them. A nil details reads the store on every call; otherwise the read
+// is held in details for duplicatePoolTTL (gt-f6gv4k).
+func registeredCustomStatuses(store beads.Client, beadsDir string, details *duplicateDetailCache) ([]string, error) {
+	if details == nil {
+		return readRegisteredCustomStatuses(store)
+	}
+	return details.customStatuses(beadsDir, func() ([]string, error) { return readRegisteredCustomStatuses(store) })
+}
+
+// customStatuses returns the registered custom statuses for beadsDir, read by
+// read when no read inside duplicatePoolTTL is held. A failed read is held too,
+// so a fetch inside the TTL reports it without asking bd again.
+func (c *duplicateDetailCache) customStatuses(beadsDir string, read func() ([]string, error)) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.registered[beadsDir]; ok && time.Since(entry.fetchedAt) < duplicatePoolTTL {
+		return entry.statuses, entry.err
+	}
+	statuses, err := read()
+	if c.registered == nil {
+		c.registered = map[string]customStatusEntry{}
+	}
+	c.registered[beadsDir] = customStatusEntry{fetchedAt: time.Now(), statuses: statuses, err: err}
+	return statuses, err
+}
+
+// readRegisteredCustomStatuses reads status.custom from store and keeps the
+// constants' custom statuses it names. A store with no config read is reported
+// as an error, not read as registering none.
+func readRegisteredCustomStatuses(store beads.Client) ([]string, error) {
+	reader, ok := store.(customStatusReader)
+	if !ok {
+		return nil, errors.New("store cannot read status.custom, so custom-status beads are not listed")
+	}
+	raw, err := reader.ConfigGet("status.custom")
+	if err != nil {
+		return nil, fmt.Errorf("reading status.custom: %w", err)
+	}
+	named := map[string]bool{}
+	for _, status := range strings.Split(raw, ",") {
+		named[strings.TrimSpace(status)] = true
+	}
+	var registered []string
+	for _, status := range constants.BeadsCustomStatusesList() {
+		if named[status] {
+			registered = append(registered, status)
+		}
+	}
+	return registered, nil
 }
 
 // duplicateCandidatesOf reduces listed rows to their comparison fields, with

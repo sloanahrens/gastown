@@ -810,6 +810,7 @@ func TestOpenBlockersInKeepsACustomStatusBlockerUnresolved(t *testing.T) {
 func TestDuplicateDetailCacheKeepsACustomStatusBlockerOpen(t *testing.T) {
 	t.Parallel()
 	db := duplicateGuardFixture(t)
+	registerCustomStatuses(t, db)
 	db.Seed(
 		beads.Issue{ID: "gt-s1", Type: "task", Title: "staged blocker", Status: "staged_ready", Priority: 3,
 			Description: "Nothing shared.", CreatedAt: "2026-10-15T09:09:00Z", UpdatedAt: "2026-10-18T09:09:00Z"},
@@ -848,12 +849,17 @@ func (s customListFailsStore) List(opts beads.ListOptions) ([]*beads.Issue, erro
 	return s.Client.List(opts)
 }
 
+func (s customListFailsStore) ConfigGet(key string) (string, error) {
+	return s.Client.(customStatusReader).ConfigGet(key)
+}
+
 // The custom-status lookup only refines the cached blocker read: when it fails
 // the pool still comes back from the lists that matter, and the failure is
 // reported (gt-1w1ig).
 func TestFetchDuplicatePoolSurvivesACustomStatusListFailure(t *testing.T) {
 	t.Parallel()
 	db := duplicateGuardFixture(t)
+	registerCustomStatuses(t, db)
 	want := tickOver(t, newCountingStore(listLikeBD{Client: db}), filepath.Join(t.TempDir(), "cache.json"), "daemon-1", 40)
 	got := tickOver(t, customListFailsStore{listLikeBD{Client: db}}, filepath.Join(t.TempDir(), "cache.json"), "daemon-1", 40)
 	if len(got.pool) == 0 || len(got.pool) != len(want.pool) {
@@ -1011,6 +1017,10 @@ func bdJSONStore(t *testing.T, ids []string) *beads.Beads {
 		switch args[0] {
 		case "version":
 			return []byte("bd version 1.2.2\n"), nil, nil
+		case "config":
+			// No custom status is registered in this store, so the pool asks
+			// for none (gt-f6gv4k).
+			return []byte("status.custom (not set)\n"), nil, nil
 		case "list":
 			// The pool's live list carries the beads; the closed list and the
 			// custom-status refinement are empty in this pool.

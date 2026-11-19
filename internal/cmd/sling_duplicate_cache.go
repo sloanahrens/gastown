@@ -111,6 +111,9 @@ type duplicateDetailCache struct {
 	// rig's pool fetch prunes only its own beads.
 	rigs  map[string]map[string]cachedDetail
 	dirty bool
+	// registered holds each rig's registered custom statuses, keyed by the
+	// rig's beads directory, for the pool's TTL (gt-f6gv4k).
+	registered map[string]customStatusEntry
 	// The beads this tick showed, and the ones it answered from the cache.
 	fetched map[string]bool
 	cached  map[string]bool
