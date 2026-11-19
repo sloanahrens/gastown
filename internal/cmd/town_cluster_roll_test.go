@@ -80,11 +80,24 @@ func newClusterRollFixture(t *testing.T, render clusterRenderDeps, answer update
 	return f
 }
 
+// isRevisionRead reports whether a call reads a Deployment's recorded revision,
+// the read the rollback lines make before the first apply.
+func isRevisionRead(args []string) bool {
+	return strings.Contains(strings.Join(args, " "), "deployment\\.kubernetes\\.io/revision")
+}
+
 // clusterRollAnswering answers the cluster calls a roll makes beyond the diff's
-// reads: an apply succeeds, a rollout status succeeds and a ready read answers
-// True. The Deployment drift reads go to drift, which the drift tests' own
-// answering supplies.
+// reads: an apply succeeds, a rollout status succeeds, a ready read answers True
+// and a changed Deployment records revision 7. The Deployment drift reads go to
+// drift, which the drift tests' own answering supplies.
 func clusterRollAnswering(t *testing.T, drift update.RunFunc) update.RunFunc {
+	t.Helper()
+	return clusterRollAnsweringRevisions(t, drift, func(string) (string, int, error) { return "7", 0, nil })
+}
+
+// clusterRollAnsweringRevisions is clusterRollAnswering with the answer a
+// Deployment's revision read gives, so a test drives a revision it cannot read.
+func clusterRollAnsweringRevisions(t *testing.T, drift update.RunFunc, revision func(name string) (string, int, error)) update.RunFunc {
 	t.Helper()
 	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
 		if name != "kubectl" {
@@ -96,6 +109,9 @@ func clusterRollAnswering(t *testing.T, drift update.RunFunc) update.RunFunc {
 		case len(args) > 1 && args[0] == "rollout" && args[1] == "status":
 			return "", 0, nil
 		case len(args) > 1 && args[0] == "get" && args[1] == "deployment":
+			if isRevisionRead(args) {
+				return revision(args[2])
+			}
 			return "True", 0, nil
 		}
 		return drift(ctx, dir, env, name, args...)
@@ -178,7 +194,7 @@ func appliedDeployment(t *testing.T, k *recordingKubectl, name string) k8sdaemon
 }
 
 // TestTownClusterRollAppliesTheDiffAndWaits: a gateway probe that differs from
-// the render applies the workload kinds in the render's order and waits for each
+// the render applies the workload kinds in the roll's order and waits for each
 // Deployment's rollout and Available condition, all under the landing hold.
 func TestTownClusterRollAppliesTheDiffAndWaits(t *testing.T) {
 	t.Parallel()
@@ -200,10 +216,10 @@ func TestTownClusterRollAppliesTheDiffAndWaits(t *testing.T) {
 		"service/trackerd",
 		"service/bd-gateway",
 		"service/bd-gateway-push",
+		"deployment/bd-gateway",
 		"deployment/daemon",
 		"deployment/dashboard",
 		"deployment/trackerd",
-		"deployment/bd-gateway",
 	}
 	if got := appliedObjects(f.out); !slices.Equal(got, wantApplied) {
 		t.Errorf("applied = %v, want %v", got, wantApplied)
@@ -515,6 +531,10 @@ func TestTownClusterRollWaitFailureReleasesTheHold(t *testing.T) {
 				switch {
 				case len(args) > 0 && args[0] == "apply":
 					return "", 0, nil
+				case len(args) > 1 && args[0] == "get" && args[1] == "deployment" && isRevisionRead(args):
+					// The rollback lines read this before the first apply, so the
+					// case below drives the wait, not the revision.
+					return "7", 0, nil
 				case len(args) > 1 && args[0] == "rollout":
 					return tc.answer(recordedKubectlCall{name: name, args: args})
 				case len(args) > 1 && args[0] == "get" && args[1] == "deployment":
@@ -529,6 +549,231 @@ func TestTownClusterRollWaitFailureReleasesTheHold(t *testing.T) {
 			}
 			if f.store.present {
 				t.Error("the landing hold is still in place after a failed wait")
+			}
+			if !slices.Contains(f.events.calls, "hold:remove") {
+				t.Errorf("calls = %v, want the hold released", f.events.calls)
+			}
+		})
+	}
+}
+
+// driftGatewayAndDashboardChanged moves the live bd gateway's readiness probe and
+// the live dashboard's TZ value away from the render, so two Deployments differ
+// and the roll prints two undo lines.
+func driftGatewayAndDashboardChanged(t *testing.T, live map[string]any) {
+	t.Helper()
+	driftGatewayProbeMoved(t, live)
+	if live["kind"] != "Deployment" || live["metadata"].(map[string]any)["name"] != k8sdaemon.DashboardName {
+		return
+	}
+	driftEnvOf(t, driftContainer(t, live, k8sdaemon.DashboardName), "TZ")["value"] = "UTC"
+}
+
+// clusterRollTwoChangedDeployments is the four-Deployment fixture whose live
+// gateway and dashboard both differ from the render, with the gateway's rollout
+// finishing but its Available condition False.
+func clusterRollTwoChangedDeployments(t *testing.T) *clusterRollFixture {
+	t.Helper()
+	d, _, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	revisions := map[string]string{k8sdaemon.BdGatewayName: "7", k8sdaemon.DashboardName: "4"}
+	answer := clusterRollAnsweringRevisions(t, driftAnswering(t, m, driftGatewayAndDashboardChanged), func(name string) (string, int, error) {
+		return revisions[name], 0, nil
+	})
+	return newClusterRollFixture(t, d.render, func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if len(args) > 2 && args[0] == "get" && args[1] == "deployment" && !isRevisionRead(args) && args[2] == k8sdaemon.BdGatewayName {
+			return "False", 0, nil
+		}
+		return answer(ctx, dir, env, name, args...)
+	})
+}
+
+// kubectlRollSequence is the cluster calls a roll made from its first revision
+// read on, which is after the compare: each apply named by the object it wrote
+// on stdin, and each wait and revision read by what it read.
+func kubectlRollSequence(t *testing.T, k *recordingKubectl) []string {
+	t.Helper()
+	var sequence []string
+	started := false
+	for _, call := range k.calls {
+		switch {
+		case call.args[0] == "get" && isRevisionRead(call.args):
+			started = true
+			sequence = append(sequence, "revision "+call.args[2])
+		case !started:
+		case call.args[0] == "apply":
+			var object struct {
+				Kind     string
+				Metadata struct{ Name string }
+			}
+			if err := yaml.Unmarshal([]byte(call.stdin), &object); err != nil {
+				t.Fatalf("decoding the applied object: %v", err)
+			}
+			sequence = append(sequence, "apply "+strings.ToLower(object.Kind)+"/"+object.Metadata.Name)
+		case call.args[0] == "rollout":
+			sequence = append(sequence, "rollout "+call.args[2])
+		case call.args[0] == "get":
+			sequence = append(sequence, "ready deployment/"+call.args[2])
+		default:
+			t.Fatalf("unexpected kubectl call %v", call.args)
+		}
+	}
+	return sequence
+}
+
+// TestTownClusterRollWaitsForEachDeploymentBeforeTheNextApply: the bd gateway is
+// applied first of the Deployments and its rollout and Available condition are
+// waited for before the daemon is applied, then the same for each Deployment in
+// turn, so a gateway that does not come back is never followed by the daemon it
+// fronts being replaced.
+func TestTownClusterRollWaitsForEachDeploymentBeforeTheNextApply(t *testing.T) {
+	t.Parallel()
+	f := clusterRollFourDeployments(t)
+
+	if err := runTownClusterRoll(f.deps); err != nil {
+		t.Fatalf("roll: %v\nprinted:\n%s", err, f.out.String())
+	}
+
+	want := []string{
+		"revision bd-gateway",
+		"apply persistentvolumeclaim/town-state",
+		"apply persistentvolumeclaim/landing-work",
+		"apply persistentvolumeclaim/dolt-backup",
+		"apply persistentvolumeclaim/bd-gateway-workspace",
+		"apply persistentvolumeclaim/bd-gateway-log",
+		"apply serviceaccount/daemon",
+		"apply service/forgejo",
+		"apply service/dashboard",
+		"apply service/trackerd",
+		"apply service/bd-gateway",
+		"apply service/bd-gateway-push",
+		"apply deployment/bd-gateway",
+		"rollout deployment/bd-gateway",
+		"ready deployment/bd-gateway",
+		"apply deployment/daemon",
+		"rollout deployment/daemon",
+		"ready deployment/daemon",
+		"apply deployment/dashboard",
+		"rollout deployment/dashboard",
+		"ready deployment/dashboard",
+		"apply deployment/trackerd",
+		"rollout deployment/trackerd",
+		"ready deployment/trackerd",
+	}
+	if got := kubectlRollSequence(t, f.kubectl); !slices.Equal(got, want) {
+		t.Errorf("cluster calls = %v, want %v", got, want)
+	}
+}
+
+// TestTownClusterRollGatewayNotReadyStopsAndPrintsTheRollbackLines: a gateway
+// whose rollout finishes but that never becomes Available stops the roll with the
+// daemon, the dashboard and trackerd unapplied, gives the landing hold back,
+// exits non-zero and leaves the undo line of each changing Deployment, with the
+// revision the cluster recorded.
+func TestTownClusterRollGatewayNotReadyStopsAndPrintsTheRollbackLines(t *testing.T) {
+	t.Parallel()
+	f := clusterRollTwoChangedDeployments(t)
+
+	err := runTownClusterRoll(f.deps)
+	if err == nil || !strings.Contains(err.Error(), "deployment/bd-gateway is not ready") {
+		t.Fatalf("err = %v, want the gateway's missing readiness", err)
+	}
+	wantApplied := []string{
+		"persistentvolumeclaim/town-state",
+		"persistentvolumeclaim/landing-work",
+		"persistentvolumeclaim/dolt-backup",
+		"persistentvolumeclaim/bd-gateway-workspace",
+		"persistentvolumeclaim/bd-gateway-log",
+		"serviceaccount/daemon",
+		"service/forgejo",
+		"service/dashboard",
+		"service/trackerd",
+		"service/bd-gateway",
+		"service/bd-gateway-push",
+		"deployment/bd-gateway",
+	}
+	if got := appliedObjects(f.out); !slices.Equal(got, wantApplied) {
+		t.Errorf("applied = %v, want the gateway and nothing after it", got)
+	}
+	for _, call := range f.kubectl.calls {
+		if call.args[0] == "rollout" && call.args[2] != "deployment/bd-gateway" {
+			t.Errorf("waited for %s after the gateway did not come back", call.args[2])
+		}
+		if slices.Contains(call.args, "undo") {
+			t.Errorf("the roll ran %v; it prints the undo command rather than rolling back", call.args)
+		}
+	}
+	if f.store.present {
+		t.Error("the landing hold is still in place after the gateway did not come back")
+	}
+	if !slices.Contains(f.events.calls, "hold:remove") {
+		t.Errorf("calls = %v, want the hold released", f.events.calls)
+	}
+	lines := driftLines(f.out)
+	wantLines := []string{
+		"kubectl rollout undo deployment/bd-gateway -n gt --to-revision=7",
+		"kubectl rollout undo deployment/dashboard -n gt --to-revision=4",
+	}
+	for _, line := range wantLines {
+		if !slices.Contains(lines, line) {
+			t.Errorf("the roll never printed %q; printed:\n%s", line, f.out.String())
+		}
+	}
+}
+
+// TestTownClusterRollStopsBeforeAnyApplyWhenARevisionIsUnreadable: every way a
+// changed Deployment's recorded revision can be missing stops the roll before the
+// first apply, so a printed undo command always names a revision that exists, and
+// the landing hold is given back.
+func TestTownClusterRollStopsBeforeAnyApplyWhenARevisionIsUnreadable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		revision func(string) (string, int, error)
+		wantErr  string
+	}{
+		{
+			name:     "a changed Deployment records no revision",
+			revision: func(string) (string, int, error) { return "", 0, nil },
+			wantErr:  "deployment/bd-gateway records no revision",
+		},
+		{
+			name:     "the revision read cannot start",
+			revision: func(string) (string, int, error) { return "", 0, errors.New("exec: kubectl not found") },
+			wantErr:  "exec: kubectl not found",
+		},
+		{
+			name:     "the revision read exits non-zero",
+			revision: func(string) (string, int, error) { return "", 1, nil },
+			wantErr:  "kubectl exited 1",
+		},
+		{
+			name:     "the revision is not a number",
+			revision: func(string) (string, int, error) { return "seven", 0, nil },
+			wantErr:  "not a positive number",
+		},
+		{
+			name:     "the revision is zero",
+			revision: func(string) (string, int, error) { return "0", 0, nil },
+			wantErr:  "not a positive number",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, town := driftFourDeploymentSeams(t)
+			m := driftTestRendered(t, d, driftTestFlags(t, town))
+			f := newClusterRollFixture(t, d.render, clusterRollAnsweringRevisions(t, driftAnswering(t, m, driftGatewayAndDashboardChanged), tc.revision))
+
+			err := runTownClusterRoll(f.deps)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one naming %q", err, tc.wantErr)
+			}
+			if got := appliedObjects(f.out); len(got) != 0 {
+				t.Errorf("applied = %v, want nothing before a revision that could be read", got)
+			}
+			if f.store.present {
+				t.Error("the landing hold is still in place after a revision could not be read")
 			}
 			if !slices.Contains(f.events.calls, "hold:remove") {
 				t.Errorf("calls = %v, want the hold released", f.events.calls)
