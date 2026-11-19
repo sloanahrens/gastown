@@ -129,15 +129,9 @@ func TestJobsState(t *testing.T) {
 				writeLastRun(t, root, map[string]time.Time{"job": *c.lastRun})
 			}
 
-			jobs, err := list(root, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, testNow)
-			if err != nil {
-				t.Fatalf("list: %v", err)
-			}
-			if len(jobs) != 1 {
-				t.Fatalf("got %d rows, want 1", len(jobs))
-			}
-			if jobs[0].State != c.want {
-				t.Errorf("State = %q, want %q", jobs[0].State, c.want)
+			job := jobsRow(t, root, Options{}, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, "job")
+			if job.State != c.want {
+				t.Errorf("State = %q, want %q", job.State, c.want)
 			}
 		})
 	}
@@ -146,18 +140,26 @@ func TestJobsState(t *testing.T) {
 func TestJobsRowPerStep(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	jobs, err := List(root, testNow)
+	jobs, err := List(root, Options{}, testNow)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
 	steps := config.DaemonSteps()
-	if len(jobs) != len(steps) {
-		t.Fatalf("got %d rows, want %d (one per daemon step)", len(jobs), len(steps))
+	// A root with no maintenance state has no Dolt gc row, so the steps and the
+	// nightly backup make the whole list.
+	if len(jobs) != len(steps)+1 {
+		t.Fatalf("got %d rows, want %d daemon step rows plus the dolt_backup row", len(jobs), len(steps)+1)
 	}
 	for i, s := range steps {
 		if jobs[i].Name != s.Name || jobs[i].Kind != s.Kind {
 			t.Errorf("row %d = %s (%s), want %s (%s)", i, jobs[i].Name, jobs[i].Kind, s.Name, s.Kind)
 		}
+	}
+	if last := jobs[len(jobs)-1]; last.Name != doltBackupJobName {
+		t.Errorf("last row = %q, want %q", last.Name, doltBackupJobName)
+	}
+	if _, ok := findJob(jobs, doltGCName); ok {
+		t.Errorf("dolt_gc row present, want none without maintenance state")
 	}
 }
 
@@ -171,7 +173,7 @@ func TestJobsCadenceFromSectionOverFile(t *testing.T) {
 		`{"daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"job":{"interval":"2h"}}}}`)
 	writeLastRun(t, root, map[string]time.Time{"job": testNow.Add(-90 * time.Minute)})
 
-	jobs, err := list(root, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, testNow)
+	jobs, err := list(root, Options{}, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, testNow)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -200,7 +202,7 @@ func TestJobsUnreadablePatrolConfigIsError(t *testing.T) {
 			root := t.TempDir()
 			writeFile(t, filepath.Join(root, "mayor", "daemon.json"), c.body)
 
-			if _, err := List(root, testNow); err == nil {
+			if _, err := List(root, Options{}, testNow); err == nil {
 				t.Fatal("List returned no error for an unreadable patrol config")
 			}
 		})
@@ -265,7 +267,7 @@ func TestJobsDoltGC(t *testing.T) {
 				writeFile(t, filepath.Join(root, "daemon", "maintenance_state.json"), c.state)
 			}
 
-			jobs, err := List(root, testNow)
+			jobs, err := List(root, Options{}, testNow)
 			if err != nil {
 				t.Fatalf("List: %v", err)
 			}

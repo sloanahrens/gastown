@@ -1,8 +1,8 @@
-// Package jobs lists the town's maintenance jobs: every daemon step, and the
-// jobs the daemon runs inside one (the Dolt gc), with the last completion, the
-// cadence and whether it is overdue. The list is read-only. It reads the daemon's
-// patrol config, last-run record and maintenance state and writes nothing, calls
-// no daemon and runs no bd.
+// Package jobs lists the town's maintenance jobs: every daemon step, the jobs
+// the daemon runs inside one (the Dolt gc) and the nightly Dolt backup, with the
+// last completion, the cadence and whether it is overdue. The list is read-only.
+// It reads the daemon's patrol config, last-run record, maintenance state, update
+// history and backup root, and writes nothing, calls no daemon and runs no bd.
 package jobs
 
 import (
@@ -60,47 +60,72 @@ type Job struct {
 	// patrol, like the Dolt gc, carries that patrol's kind.
 	Kind config.DaemonStepKind
 	// LastRun is the job's last completion, nil when none is recorded or the
-	// last-run record cannot be read.
+	// job's own reader cannot read it.
 	LastRun *time.Time
 	// Cadence is the interval from the daemon's patrol config, zero when the
 	// job has none.
 	Cadence time.Duration
 	State   State
-	// Outcome is how the job's last run ended; empty when none is recorded.
+	// Outcome is how the last run ended, empty when no run is recorded or the
+	// row's reader has no outcome for it.
 	Outcome Outcome
-	// Stats are the job's headline numbers, by short name.
+	// Stats are the row's headline numbers, keyed by the name the dashboard
+	// reads (duration_ms, databases, reclaimed_bytes). Nil when the reader has
+	// none.
 	Stats map[string]int64
-	// Source names the config the cadence was read from, empty when the town
-	// has no patrol config.
+	// Source names the config the cadence was read from, empty when the
+	// cadence is not read from a config file.
 	Source string
 }
 
-// List returns one Job per daemon step in config.DaemonSteps, judged at now.
-// An unreadable patrol config is an error, because no cadence can be trusted.
-// An unreadable last-run record is not: its rows come back as StateUnknown.
-func List(townRoot string, now time.Time) ([]Job, error) {
-	return list(townRoot, config.DaemonSteps(), now)
+// Options are the list's inputs that do not come from the town root.
+type Options struct {
+	// BackupRoot is the nightly Dolt backup root: the value
+	// doltbackup.DefaultRoot returns, which is the path the daemon's
+	// scheduled_maintenance passes to doltbackup.Commit. Empty means the
+	// caller did not resolve it, and the dolt_backup row is unknown.
+	BackupRoot string
+}
+
+// List returns one Job per daemon step in config.DaemonSteps, one for the
+// nightly Dolt backup and, when the daemon has recorded one, the Dolt gc row,
+// judged at now. An unreadable patrol config is an error, because no cadence can
+// be trusted. An unreadable last-run record, update history, backup root or
+// maintenance state is not: its rows come back as StateUnknown.
+func List(townRoot string, opts Options, now time.Time) ([]Job, error) {
+	return list(townRoot, opts, config.DaemonSteps(), now)
 }
 
 // list is List over the given steps, so a test can name its own.
-func list(townRoot string, steps []config.DaemonStep, now time.Time) ([]Job, error) {
+func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Time) ([]Job, error) {
 	cadences, source, err := readCadences(townRoot)
 	if err != nil {
 		return nil, err
 	}
 	runs, runErr := readLastRuns(townRoot)
+	history, historyErr := updateHistory(townRoot)
+	backups, backupErr := backupNights(opts.BackupRoot)
 
-	jobs := make([]Job, 0, len(steps))
+	jobs := make([]Job, 0, len(steps)+2)
 	for _, s := range steps {
 		j := Job{Name: s.Name, Kind: s.Kind, Source: source}
-		if at, ok := runs[s.Name]; runErr == nil && ok && !at.IsZero() {
-			j.LastRun = &at
-		}
 		cadence, cadErr := cadenceOf(cadences, s.Name)
 		j.Cadence = cadence
-		j.State = stateOf(j, runErr != nil, cadErr, now)
+		if s.Name == updateJobName {
+			// The update patrol records its runs in history.jsonl, so that
+			// file, not the daemon's last-run record, says when it last ran.
+			j.Cadence = nightlyCadence
+			j.Source = ""
+			j.State = applyUpdateRun(&j, history, historyErr, now)
+		} else {
+			if at, ok := runs[s.Name]; runErr == nil && ok && !at.IsZero() {
+				j.LastRun = &at
+			}
+			j.State = stateOf(j, runErr != nil, cadErr, now)
+		}
 		jobs = append(jobs, j)
 	}
+	jobs = append(jobs, doltBackupRow(backups, backupErr, now))
 	return append(jobs, doltGCRows(townRoot, now)...), nil
 }
 
