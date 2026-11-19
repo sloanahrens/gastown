@@ -300,6 +300,130 @@ func TestEstimateComponentJevIsTheBlendMapping(t *testing.T) {
 	}
 }
 
+// embedCounter is an embedder that answers vec and counts its calls.
+type embedCounter struct {
+	vec   []float32
+	calls int
+}
+
+func (e *embedCounter) Embed(context.Context, string) ([]float32, error) {
+	e.calls++
+	return e.vec, nil
+}
+
+// jevCounter is a Jev asker that answers with the probability fits gives for
+// its call number (from 1) and counts the asks.
+type jevCounter struct {
+	fits  func(call int) float64
+	calls int
+}
+
+func (j *jevCounter) ask(context.Context, *beads.Issue) (dispatch.Answers, error) {
+	j.calls++
+	return dispatch.Answers{FitsTwentyMinutes: j.fits(j.calls)}, nil
+}
+
+// TestEstimateReusesPriorMinutes: a bead whose text an earlier estimate priced
+// re-estimates to the same minutes, and neither the embedder nor the Jev asker
+// is called again. The Jev asker answers differently on each call, so a call
+// would move the minutes.
+func TestEstimateReusesPriorMinutes(t *testing.T) {
+	t.Parallel()
+	issue := sampleBead()
+	emb := &embedCounter{vec: make([]float32, storypoints.Default().EmbeddingDimension())}
+	jev := &jevCounter{fits: func(call int) float64 { return 0.1 * float64(call) }}
+	deps := workingDeps()
+	deps.Embedder = emb
+	deps.JevAsk = jev.ask
+	deps.Prior = func(id, hash string) (PriorMinutes, bool) {
+		if id != issue.ID || hash != SectionHash(issue) {
+			return PriorMinutes{}, false
+		}
+		return PriorMinutes{Embed: 12, Jev: 8}, true
+	}
+	first, err := Estimate(context.Background(), deps, issue)
+	if err != nil {
+		t.Fatalf("first Estimate: %v", err)
+	}
+	second, err := Estimate(context.Background(), deps, issue)
+	if err != nil {
+		t.Fatalf("second Estimate: %v", err)
+	}
+	if first.Minutes != second.Minutes {
+		t.Fatalf("minutes = %v then %v, want the same for unchanged text", first.Minutes, second.Minutes)
+	}
+	if emb.calls != 0 || jev.calls != 0 {
+		t.Fatalf("embedder calls = %d, Jev calls = %d, want none for reused minutes", emb.calls, jev.calls)
+	}
+	if second.Embedding != nil {
+		t.Fatalf("reused Embedding = %v, want nil", second.Embedding)
+	}
+	if second.ComponentMinutes.Embed == nil || *second.ComponentMinutes.Embed != 12 {
+		t.Fatalf("component embed minutes = %v, want the prior 12", second.ComponentMinutes.Embed)
+	}
+	if second.ComponentMinutes.Jev == nil || *second.ComponentMinutes.Jev != 8 {
+		t.Fatalf("component jev minutes = %v, want the prior 8", second.ComponentMinutes.Jev)
+	}
+	if second.Rung != "all" || !slices.Equal(second.Inputs, []string{"shape", "embed", "jev"}) {
+		t.Fatalf("rung = %q inputs = %v, want all with shape, embed, jev", second.Rung, second.Inputs)
+	}
+}
+
+// TestEstimateIgnoresAbsentPrior: without prior minutes to reuse, the estimate
+// builds both inputs as before, and the prior values it was not given are not
+// read. A Prior with only one valid minutes value is absent too.
+func TestEstimateIgnoresAbsentPrior(t *testing.T) {
+	t.Parallel()
+	base := estimateCounted(t, nil)
+	cases := []struct {
+		name  string
+		prior func(string, string) (PriorMinutes, bool)
+	}{
+		{"nil prior", nil},
+		{"not ok", func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 1e6, Jev: 1e6}, false }},
+		{"embed only", func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 1e6}, true }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := estimateCounted(t, tc.prior)
+			if got.res.Minutes != base.res.Minutes {
+				t.Fatalf("minutes = %v, want %v as with no prior", got.res.Minutes, base.res.Minutes)
+			}
+			if got.embedCalls != 1 || got.jevCalls != 1 {
+				t.Fatalf("embedder calls = %d, Jev calls = %d, want one each", got.embedCalls, got.jevCalls)
+			}
+			if got.res.Embedding == nil {
+				t.Fatal("Embedding is nil; the estimate built its embed input")
+			}
+		})
+	}
+}
+
+// countedRun is one estimate of sampleBead with the embedder and the Jev asker
+// counted.
+type countedRun struct {
+	res        Result
+	embedCalls int
+	jevCalls   int
+}
+
+// estimateCounted estimates sampleBead with prior as its Prior, a Jev asker that
+// answers 0.5 and a counting embedder.
+func estimateCounted(t *testing.T, prior func(string, string) (PriorMinutes, bool)) countedRun {
+	t.Helper()
+	emb := &embedCounter{vec: make([]float32, storypoints.Default().EmbeddingDimension())}
+	jev := &jevCounter{fits: func(int) float64 { return 0.5 }}
+	deps := workingDeps()
+	deps.Embedder = emb
+	deps.JevAsk = jev.ask
+	deps.Prior = prior
+	res, err := Estimate(context.Background(), deps, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	return countedRun{res: res, embedCalls: emb.calls, jevCalls: jev.calls}
+}
+
 // TestEstimateSkippedInputs drives each way an optional input can fail: the rung
 // falls, and the note names the input and the reason.
 func TestEstimateSkippedInputs(t *testing.T) {
