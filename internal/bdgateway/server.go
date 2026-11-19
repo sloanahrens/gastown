@@ -265,6 +265,19 @@ func doltProbeWithin(ctx context.Context, probe func(context.Context) error) err
 	}
 }
 
+// CallActor is the acting agent a call log line names: BEADS_ACTOR, or BD_ACTOR
+// when that is empty, or nothing when the caller named neither. Both are the
+// head's env, which gt-wrap fills from the caller's own environment, so the
+// log records what the caller says it is; the line bounds the value. Both call
+// log sites — the HTTP handler and bdgw exec — read it here, so they cannot
+// disagree about which name wins.
+func CallActor(env map[string]string) string {
+	if actor := env["BEADS_ACTOR"]; actor != "" {
+		return actor
+	}
+	return env["BD_ACTOR"]
+}
+
 // serveExec is POST /v1/exec: authenticate, apply the policy, run the call and
 // stream its frames. The HTTP status is decided before anything is written: a
 // refusal the executor makes before it starts bd is still an HTTP status, and
@@ -295,13 +308,18 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 	}
 	req.TimeoutMS = CapTimeout(req.TimeoutMS, verb)
 
+	actor := CallActor(req.Env)
+	write := verb.Class != ClassRead
+
 	frames := &httpFrames{w: w}
 	if err := g.runner.Exec(r.Context(), req, stdin, frames); !frames.Started() {
 		status, code, message := execRefusal(err)
 		rec := CallRecord{
 			Class:    string(ident.Class),
 			Caller:   r.Header.Get("X-Gt-Caller"),
+			Actor:    actor,
 			Argv:     req.Argv,
+			Write:    write,
 			ExitCode: ExitRefused,
 			Duration: time.Since(start),
 			Error:    internalDetail(err),
@@ -336,7 +354,9 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 	g.log.Log(CallRecord{
 		Class:    string(ident.Class),
 		Caller:   r.Header.Get("X-Gt-Caller"),
+		Actor:    actor,
 		Argv:     req.Argv,
+		Write:    write,
 		ExitCode: status,
 		Duration: time.Since(start),
 	})

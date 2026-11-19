@@ -118,6 +118,36 @@ func TestBdgwExec(t *testing.T) {
 		!strings.Contains(line, `"exit_code":4`) || !strings.Contains(line, `"verb":"show"`) {
 		t.Errorf("call log line = %s, want class operator, caller mac.sloan-shell, verb show, exit 4", line)
 	}
+	// The acting agent is the caller's BD_ACTOR, and a read verb's call is
+	// marked read.
+	if !strings.Contains(line, `"actor":"town/crew/dipper"`) || !strings.Contains(line, `"write":false`) {
+		t.Errorf("call log line = %s, want actor town/crew/dipper and write false", line)
+	}
+}
+
+// TestBdgwExecWriteMark: a write verb's call is marked write on bdgw exec's
+// line, as the HTTP handler's line marks it.
+func TestBdgwExecWriteMark(t *testing.T) {
+	t.Parallel()
+	policy, log, ec := newExecFixture(t)
+	runner := &frameRunner{frames: []bdgateway.Frame{{Kind: bdgateway.FrameExit, Payload: []byte("0")}}}
+	var stdout, stderr bytes.Buffer
+	status := execCall(context.Background(), policy, log, runner, ec, []string{"create", "--title=x"}, map[string]string{},
+		strings.NewReader(""), &stdout, &stderr)
+	if status != 0 {
+		t.Fatalf("status = %d, want bd's 0; stderr %s", status, stderr.String())
+	}
+	if err := log.Close(); err != nil {
+		t.Fatalf("log.Close: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(ec.logDir, bdgateway.DefaultCallLogName))
+	if err != nil {
+		t.Fatalf("read call log: %v", err)
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.Contains(line, `"verb":"create"`) || !strings.Contains(line, `"write":true`) {
+		t.Errorf("call log line = %s, want verb create and write true", line)
+	}
 }
 
 // TestBdgwExecRefusals: a verb the policy refuses, and a call the executor

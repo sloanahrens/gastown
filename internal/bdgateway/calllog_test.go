@@ -120,7 +120,9 @@ func TestCallLogRedaction(t *testing.T) {
 	}
 
 	got := decodeLine(t, lines[0])
-	wantKeys := []string{"beads", "caller", "class", "duration_ms", "exit_code", "flags", "ts", "verb"}
+	// An empty actor is omitted, so a call naming none adds no key; write is
+	// always present so a line says whether the call wrote.
+	wantKeys := []string{"beads", "caller", "class", "duration_ms", "exit_code", "flags", "ts", "verb", "write"}
 	if !reflect.DeepEqual(keys(got), wantKeys) {
 		t.Errorf("fields = %v, want %v", keys(got), wantKeys)
 	}

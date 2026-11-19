@@ -127,7 +127,9 @@ func execCall(ctx context.Context, policy *bdgateway.Policy, log *bdgateway.Call
 	log.Log(bdgateway.CallRecord{
 		Class:    string(bdgateway.TokenOperator),
 		Caller:   ec.caller,
+		Actor:    bdgateway.CallActor(filtered),
 		Argv:     argv,
+		Write:    verb.Class != bdgateway.ClassRead,
 		ExitCode: status,
 		Duration: time.Since(start),
 	})

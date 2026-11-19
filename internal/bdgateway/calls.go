@@ -21,10 +21,16 @@ const maxCallReadBytes int64 = 8 << 20
 // flag's value, a title or a comment body cannot appear in an entry the
 // dashboard serves.
 type CallEntry struct {
-	TS         string   `json:"ts"`
-	Class      string   `json:"class"`
-	Caller     string   `json:"caller"`
-	Verb       string   `json:"verb"`
+	TS     string `json:"ts"`
+	Class  string `json:"class"`
+	Caller string `json:"caller"`
+	// Actor is the acting agent the caller named in BEADS_ACTOR, or BD_ACTOR
+	// when that is empty. A call naming neither logs no actor.
+	Actor string `json:"actor,omitempty"`
+	Verb  string `json:"verb"`
+	// Write reports whether the verb is one that may change beads, so a line
+	// says whether the call wrote without the reader knowing the policy.
+	Write      bool     `json:"write"`
 	Flags      []string `json:"flags"`
 	Beads      []string `json:"beads"`
 	ExitCode   int      `json:"exit_code"`
