@@ -34,7 +34,7 @@ func TestTimeoutRetrySkipsABeadAtItsRespawnLimit(t *testing.T) {
 	townRoot := specTown(t)
 	var cleared []string
 	retry := &specTimeoutRetry{
-		due: func(string) (map[string]bool, error) { return map[string]bool{"gt-retry": true}, nil },
+		due: func(string) (specRetryDue, error) { return specRetryDue{Due: map[string]bool{"gt-retry": true}}, nil },
 		clear: func(_, beadID string) error {
 			cleared = append(cleared, beadID)
 			return nil
@@ -67,7 +67,7 @@ func TestTimeoutRetryStillRetriesBelowTheLimit(t *testing.T) {
 	townRoot := specTown(t)
 	var cleared []string
 	retry := &specTimeoutRetry{
-		due: func(string) (map[string]bool, error) { return map[string]bool{"gt-retry": true}, nil },
+		due: func(string) (specRetryDue, error) { return specRetryDue{Due: map[string]bool{"gt-retry": true}}, nil },
 		clear: func(_, beadID string) error {
 			cleared = append(cleared, beadID)
 			return nil
@@ -98,7 +98,7 @@ func TestThreeRefusalsProduceNoFourthSling(t *testing.T) {
 	townRoot := specTown(t)
 	cleared := 0
 	retry := &specTimeoutRetry{
-		due:         func(string) (map[string]bool, error) { return map[string]bool{"gt-retry": true}, nil },
+		due:         func(string) (specRetryDue, error) { return specRetryDue{Due: map[string]bool{"gt-retry": true}}, nil },
 		clear:       func(string, string) error { cleared++; return nil },
 		respawnGate: specRespawnGateFrom(fakeSlingStores(beadsfake.New()), townRoot),
 	}
@@ -177,7 +177,7 @@ func respawnLimitedRetryTown(t *testing.T, submitted time.Time) (string, slingSt
 
 func respawnLimitedRetry(townRoot string, stores slingStores, cleared *[]string) *specTimeoutRetry {
 	return &specTimeoutRetry{
-		due: func(string) (map[string]bool, error) { return map[string]bool{"gt-retry": true}, nil },
+		due: func(string) (specRetryDue, error) { return specRetryDue{Due: map[string]bool{"gt-retry": true}}, nil },
 		clear: func(_, beadID string) error {
 			*cleared = append(*cleared, beadID)
 			return nil
