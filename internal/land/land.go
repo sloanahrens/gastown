@@ -354,7 +354,12 @@ type Rejection struct {
 	// it too, so gt done can tell whether the target moved since a gate
 	// rejection (gt-xzu8hp).
 	TargetTip string
-	RecordErr error
+	// Superseded is set when the re-read after the gate finds the bead closed,
+	// taken or no longer ready: the refusal is noted, but the worker writes no
+	// comment and raises no escalation for it (gt-favqpo). RecordErr carries
+	// the re-read's account.
+	Superseded bool
+	RecordErr  error
 }
 
 func (r *Rejection) Error() string {
@@ -2446,6 +2451,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		return rej
 	}
 	if !beads.HasLabel(now, LabelReadyToLand) || beads.IssueStatus(strings.TrimSpace(now.Status)).IsTerminal() || now.Assignee != issue.Assignee {
+		rej.Superseded = true
 		rej.RecordErr = fmt.Errorf("%s changed during the landing (status %s, assignee %q, ready=%v); the rejection is noted and the bead left as it is",
 			w.BeadID, now.Status, now.Assignee, beads.HasLabel(now, LabelReadyToLand))
 		return rej

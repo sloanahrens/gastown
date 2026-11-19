@@ -1071,6 +1071,13 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		var rej *land.Rejection
 		errors.As(err, &rej)
 		rep.Rejected++
+		if rej.Superseded {
+			// The bead is another holder's now, so RevertRejected's close and
+			// label strip are not this worker's to make.
+			w.supersededRejection(work, rej)
+			w.clearIntent(work)
+			return
+		}
 		w.logf("%s: %v", work.BeadID, err)
 		if rej.RecordErr != nil {
 			// The label may still be on the bead: space the next attempt.
@@ -1089,6 +1096,11 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		var rej *land.Rejection
 		errors.As(err, &rej)
 		rep.Rejected++
+		if rej.Superseded {
+			w.supersededRejection(work, rej)
+			w.clearIntent(work)
+			return
+		}
 		w.logf("%s: %v (left for the overseer: %s)", work.BeadID, err, land.LabelNeedsOverseer)
 		w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for the overseer (%s): %s",
 			work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
@@ -1138,6 +1150,16 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.countCISilence(work, err)
 		w.countFailingLanding(work, err)
 	}
+}
+
+// supersededRejection ends a landing whose bead was closed or changed hands
+// while the gate ran (land.Rejection.Superseded): nobody waits on the refusal,
+// so the pass logs one line, ends the failure run, writes no comment or
+// escalation, and gives the bead the human wait (gt-favqpo).
+func (w *Worker) supersededRejection(work land.Work, rej *land.Rejection) {
+	w.logf("%s: %v; the bead changed during the landing, so no comment and no escalation", work.BeadID, rej.RecordErr)
+	w.endFailureRun(work.BeadID)
+	w.bead(work.BeadID).until = w.now().Add(humanWaitBackoff)
 }
 
 // escalate calls Escalate in its own goroutine. A panic in it is logged, not

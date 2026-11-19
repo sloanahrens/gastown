@@ -515,6 +515,55 @@ func TestPassReworkRejectionDoesNotEscalate(t *testing.T) {
 	}
 }
 
+// TestPassSupersededRejection: a refusal whose bead was closed or taken while
+// the landing ran raises no escalation and writes no comment, for a human
+// refusal and for a rework refusal of a revert; the intent is still cleared
+// and the bead waits the human wait. The revert hook closes the bead it is
+// given, so a superseded revert must not reach it: the bead is another
+// holder's now. A refusal of an open bead still escalates (gt-favqpo).
+func TestPassSupersededRejection(t *testing.T) {
+	t.Parallel()
+	superseded := func(rework bool) *land.Rejection {
+		return &land.Rejection{Kind: land.RejectGate, Reason: "gate failed", Rework: rework,
+			Superseded: true, RecordErr: errors.New("gt-abc changed during the landing (status closed)")}
+	}
+	for _, tc := range []struct {
+		name            string
+		rej             *land.Rejection
+		wantEscalations int32
+		wantComment     bool
+	}{
+		{"superseded human", superseded(false), 0, false},
+		{"superseded revert", superseded(true), 0, false},
+		{"open human", &land.Rejection{Kind: land.RejectReview, Reason: "no verdict"}, 1, true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedReady(t, "gt-abc")
+			var escalations atomic.Int32
+			h.w.Escalate = func(string, string) { escalations.Add(1) }
+			hooks := &fakeRevertHooks{isRevert: true}
+			h.w.Reverts = hooks
+			h.lander.fn = func(int, land.Work) (land.Result, error) { return land.Result{}, tc.rej }
+			if rep := h.w.Pass(context.Background()); rep.Rejected != 1 {
+				t.Fatalf("report %v; want one rejection", rep)
+			}
+			h.w.escWG.Wait()
+			if n, cs := escalations.Load(), h.comments(t, "gt-abc"); n != tc.wantEscalations || (len(cs) > 0) != tc.wantComment {
+				t.Errorf("escalations %d, comments %q; want escalations %d, comment=%v", n, cs, tc.wantEscalations, tc.wantComment)
+			}
+			if len(h.cleared) != 1 || len(hooks.rejected) != 0 {
+				t.Errorf("intent cleared %v, revert hook calls %v; want once and none", h.cleared, hooks.rejected)
+			}
+			if got, want := h.w.bead("gt-abc").until, h.now.Add(humanWaitBackoff); !got.Equal(want) {
+				t.Errorf("next pass at %v; want the human wait %v", got, want)
+			}
+		})
+	}
+}
+
 // TestPassHumanRejectionWithRecordErrorEscalates: a rejection left for a
 // human is escalated even when writing it to the bead failed; the operator
 // hears at once, and the retry after rejectRecordBackoff re-raises it under
