@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -14,23 +16,27 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltsquash"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
-// The rolling Dolt squash's daemon step (D9a of
-// docs/plans/2026-11-15-dolt-squash-plan.md; the design's "Trigger").
+// The rolling Dolt squash's daemon step (D9a and D9b-1 of
+// docs/plans/2026-11-15-dolt-squash-plan.md; the design's "Trigger" and "The
+// run").
 //
 // Once a day the check reads four numbers per database the squash block
 // enables — the last nightly backup's size and duration, the round-trip p95 of
 // the reads bd issues, and main's commit count — and doltsquash.Decide turns
-// them into a decision the check logs. Nothing is squashed here: the run, its
-// marker, maintenance_state.json, the ledger line and the attention items are
-// D9b (gt-0g4yoa).
+// them into a decision the check logs. A database Decide finds due is run by
+// doltsquash.Run, which holds the town's run marker for its whole length so
+// two daemons cannot run it at once. The run's state record, ledger line and
+// attention item are D9b-2 and D9b-3 (gt-5v1fye, gt-0g4yoa).
 //
 // The check rides the scheduled_maintenance tick but not its window and not
-// its quiet-window guard: it only reads, and a reading taken only in a quiet
-// instant would almost never be taken (gt-y6ovz). It runs off the tick's
-// goroutine because its Dolt reads can each wait out a bound and the loop
-// carries the heartbeat (gt-uvxy, gt-23zbmi).
+// its quiet-window guard: its readings are taken on every tick regardless, and
+// a reading taken only in a quiet instant would almost never be taken
+// (gt-y6ovz). It runs off the tick's goroutine because its Dolt reads and a
+// run's steps can each wait out a bound and the loop carries the heartbeat
+// (gt-uvxy, gt-23zbmi).
 
 const (
 	// squashCheckPatrol is the daily check's key in daemon/patrol_last_run.json.
@@ -66,7 +72,73 @@ const (
 	// carries it, so the lookup returns no row and still makes the full round
 	// trip bd makes for an id it does not find.
 	squashLatencyProbeID = "gt-squash-latency-probe"
+
+	// squashRunMarkerFile is the run marker's name under <town>/daemon. One
+	// run holds the flock on it for its whole length, so a second daemon's run
+	// is refused before it sends a statement.
+	squashRunMarkerFile = "squash_run.lock"
+
+	// squashRunBackupFreshness is how recent the last nightly backup must be
+	// for a run to start: the 24 hours the design's step 1 allows, which is
+	// also the age the restore path can use.
+	squashRunBackupFreshness = 24 * time.Hour
 )
+
+// squashMarkerPath is the run marker's file: <town>/daemon/squash_run.lock.
+func squashMarkerPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", squashRunMarkerFile)
+}
+
+// errSquashMarkerUnavailable reports that the run marker could not be taken for
+// a reason other than another holder: the flock could not be opened or locked,
+// so the daemon cannot tell whether a run holds it. It is kept apart from
+// doltsquash.ErrRunMarkerHeld because a lock failure is not evidence another
+// run is in progress, and must not be read as one.
+var errSquashMarkerUnavailable = errors.New("squash: the run marker cannot be taken")
+
+// squashMarker is doltsquash.Marker over one flock file: Hold creates the file
+// and takes the exclusive lock without waiting, so a run that finds it held is
+// refused rather than queued, and Release gives it back. doltsquash.Run calls
+// both, so the marker is held for the run's whole length and released on every
+// way out.
+type squashMarker struct {
+	path    string
+	release func()
+}
+
+// Hold takes the marker, or returns doltsquash.ErrRunMarkerHeld while another
+// run holds it. A marker that could not be locked at all returns
+// errSquashMarkerUnavailable, because that is not the same answer.
+func (m *squashMarker) Hold() error {
+	if m.release != nil {
+		return fmt.Errorf("%w: this marker already holds it", errSquashMarkerUnavailable)
+	}
+	// The lock call creates the file but not its directory, and a fresh town
+	// may not hold <town>/daemon yet.
+	if err := os.MkdirAll(filepath.Dir(m.path), 0o755); err != nil {
+		return fmt.Errorf("%w: %v", errSquashMarkerUnavailable, err)
+	}
+	release, ok, err := lock.FlockTryAcquire(m.path)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errSquashMarkerUnavailable, err)
+	}
+	if !ok {
+		return doltsquash.ErrRunMarkerHeld
+	}
+	m.release = release
+	return nil
+}
+
+// Release gives the marker back. A marker that never held it releases nothing,
+// so the deferred Release that follows a refused Hold is harmless.
+func (m *squashMarker) Release() error {
+	if m.release == nil {
+		return nil
+	}
+	m.release()
+	m.release = nil
+	return nil
+}
 
 // squashLatencyMix is the read mix the check times: the three reads bd issues,
 // as `gt dolt latency` runs them (internal/cmd/dolt_latency.go). Each statement
@@ -146,18 +218,20 @@ func (d *Daemon) triggerSquashCheck() {
 	})
 }
 
-// runSquashCheck reads the four numbers for each enabled database and logs
-// doltsquash.Decide's answer with the cut. A check that decided for every database
-// records its completion, so it is not due again for a day. A check that could
-// not decide for some database is NOT recorded as completed: it is due again
-// after squashCheckRetryAfter, so a day of unreadable inputs does not set the
-// daily gate (overseer decision, gt-g4iwk0).
+// runSquashCheck reads the four numbers for each enabled database, logs
+// doltsquash.Decide's answer with the cut, and runs a due database through
+// doltsquash.Run. A check that finished every database records its completion,
+// so it is not due again for a day. A check that could not decide, could not
+// run, or found the run marker held is NOT recorded as completed: it is due
+// again after squashCheckRetryAfter, so a day of unreadable inputs or a run a
+// second daemon holds does not set the daily gate (overseer decision,
+// gt-g4iwk0).
 //
 // A number that cannot be read is a WARNING naming it, and no verdict is
 // logged for that database: a quiet-day line over an unreadable input would
 // read a failed read as a clean day. The run's own last-run argument is the
-// zero time: nothing has run yet, and the record of a run belongs to D9b, which
-// also owns the marker and the backend the run executes against.
+// zero time: the daily gate above is the only one until D9b-2 records runs in
+// maintenance_state.json.
 func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	undecided := false
 	defer func() {
@@ -196,17 +270,68 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			continue
 		}
 		reason := dec.Reason
-		if dec.Due {
-			reason += ", cut " + dec.Cut.Format(time.RFC3339)
+		if !dec.Due {
+			d.logger.Printf("squash: %s: %s (%s)", db, reason, readings.describe())
+			continue
 		}
+		reason += ", cut " + dec.Cut.Format(time.RFC3339)
 		d.logger.Printf("squash: %s: %s (%s)", db, reason, readings.describe())
+		// A run starts only on a backup the restore path can use (design step
+		// 1): an older one holds the run rather than squashing history the
+		// backup does not cover.
+		if readings.backupAge > squashRunBackupFreshness {
+			undecided = true
+			d.logger.Printf("squash: %s: holding: the last backup finished %v ago, and a run needs one within %v",
+				db, readings.backupAge.Round(time.Minute), squashRunBackupFreshness)
+			continue
+		}
+		res, err := d.runSquashDatabase(ctx, db, dec.Cut, step.settings)
+		switch {
+		case errors.Is(err, doltsquash.ErrRunMarkerHeld):
+			undecided = true
+			d.logger.Printf("squash: %s: another daemon holds the run marker — skipping this check", db)
+		case errors.Is(err, errSquashMarkerUnavailable):
+			undecided = true
+			d.logger.Printf("squash: WARNING: %s: %v — the run did not start", db, err)
+		case err != nil:
+			undecided = true
+			d.logger.Printf("squash: WARNING: %s: the run failed: %v", db, err)
+		case res.Held:
+			d.logger.Printf("squash: %s: the run held: %s", db, res.Recovered.Reason)
+		default:
+			d.logger.Printf("squash: %s: the run finished", db)
+		}
 	}
+}
+
+// runSquashDatabase runs the engine over one due database. It opens one
+// session, which MaxRuntime bounds both as the run's context and as the
+// connection's read timeout, and doltsquash.Run holds the town's run marker for
+// the run's whole length. A run refused by the marker has sent no statement:
+// its error matches doltsquash.ErrRunMarkerHeld, and a marker that could not be
+// taken matches errSquashMarkerUnavailable.
+func (d *Daemon) runSquashDatabase(ctx context.Context, db string, cut time.Time, settings *agentconfig.SquashSettings) (doltsquash.RunResult, error) {
+	conn, err := d.maintenance().squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
+	if err != nil {
+		return doltsquash.RunResult{}, fmt.Errorf("squash: opening the connection to %s: %w", db, err)
+	}
+	defer conn.Close()
+	conn.SetMaxOpenConns(1)
+	runCtx, cancel := context.WithTimeout(ctx, settings.MaxRuntime)
+	defer cancel()
+	return doltsquash.Run(runCtx, doltsquash.RunInput{
+		Exec:    squashDoltExec{conn: conn},
+		Marker:  &squashMarker{path: squashMarkerPath(d.config.TownRoot)},
+		Clock:   d.clk(),
+		Sleeper: d.clk(),
+		Cut:     cut,
+	})
 }
 
 // squashReadings is what the daily check read for one database: the three
 // trigger inputs, the commit count the design logs as the size trigger's proxy,
-// and the last backup's age, which the run's first step requires and the check
-// only reports (D9b enforces it).
+// and the last backup's age, which the run's first step requires before it
+// starts.
 type squashReadings struct {
 	inputs       doltsquash.Inputs
 	commits      int64

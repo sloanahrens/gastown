@@ -15,8 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltbackup"
+	"github.com/steveyegge/gastown/internal/doltsquash"
+	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -52,6 +55,7 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 		},
 	}
 	backupRoot := t.TempDir()
+	d.clock = clockwork.NewFakeClockAt(squashTestNow)
 	d.maint.now = func() time.Time { return squashTestNow }
 	d.maint.dispatch = func(fn func()) { fn() }
 	d.maint.escalate = func(_ *Daemon, source, message string) {
@@ -320,9 +324,13 @@ func TestSquashP95IsNearestRank(t *testing.T) {
 	}
 }
 
-// TestSquashCheckTrippedLogsDueAndRunsNothing: a reading over its threshold
-// logs the trigger and the cut, and still sends no statement but a read.
-func TestSquashCheckTrippedLogsDueAndRunsNothing(t *testing.T) {
+// TestSquashCheckTrippedRunsTheDatabase: a reading over its threshold logs the
+// trigger and the cut, then hands the database to the engine. The fake answers
+// the run's first branch read with the one column it gives every read, which is
+// not the two a recovery reads, so the run stops there and releases the marker.
+// The check is due again after the retry delay rather than setting the daily
+// gate.
+func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
 	t.Parallel()
 	bigger := int64(100)
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
@@ -337,10 +345,215 @@ func TestSquashCheckTrippedLogsDueAndRunsNothing(t *testing.T) {
 	if !strings.Contains(got, "squash: gt: due: backup bytes over the limit, cut 2026-11-09T12:00:00Z") {
 		t.Errorf("the tripped reason or its cut is missing: %q", got)
 	}
-	for _, q := range server.queries {
-		if !strings.HasPrefix(q, "SELECT") {
-			t.Errorf("a due check sent a statement that is not a read: %q", q)
+	if !strings.Contains(got, "reading the branches a dead run may have left") {
+		t.Errorf("the due database was not run: %q", got)
+	}
+	// The readings, then the run's one branch read.
+	if len(server.queries) != squashP95Rounds+2 {
+		t.Errorf("the check sent %d statements, want %d", len(server.queries), squashP95Rounds+2)
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter-time.Minute), squashCheckInterval); due.due {
+		t.Error("a failed run was due again before the retry delay")
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a failed run was not due again after the retry delay: it set the daily gate")
+	}
+}
+
+// squashDueDaemon is a daemon the next tick finds due: the backup-bytes trigger
+// sits below the 1 MiB backup the caller writes.
+func squashDueDaemon(t *testing.T) (*Daemon, *squashFakeServer, *bytes.Buffer) {
+	t.Helper()
+	small := int64(100)
+	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
+		Enabled: true, Databases: []string{"gt"}, TriggerBackupBytes: &small,
+	})
+	return d, server, logs
+}
+
+// TestSquashMarkerRefusesASecondDaemon is the bead's first box: another
+// daemon's run holds the town's marker, so this daemon's due run is refused
+// with doltsquash.ErrRunMarkerHeld, sends no statement of its own, and is due
+// again after the retry delay rather than for a day.
+func TestSquashMarkerRefusesASecondDaemon(t *testing.T) {
+	t.Parallel()
+	d, server, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	path := squashMarkerPath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The other daemon's flock is a second open of the same file, which
+	// conflicts with this process's own the way a second process's does.
+	release, ok, err := lock.FlockTryAcquire(path)
+	if err != nil {
+		t.Fatalf("taking the other daemon's marker: %v", err)
+	}
+	if !ok {
+		t.Fatal("the other daemon's marker was not free to take")
+	}
+	defer release()
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: another daemon holds the run marker — skipping this check") {
+		t.Errorf("the second daemon did not skip: %q", got)
+	}
+	if strings.Contains(got, "the run failed") || strings.Contains(got, "reading the branches") {
+		t.Errorf("a refused run sent statements of its own: %q", got)
+	}
+	if len(server.queries) != squashP95Rounds+1 {
+		t.Errorf("a refused run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a run refused by the marker set the daily gate: the check is not due again after the retry delay")
+	}
+}
+
+// TestSquashMarkerUnavailableIsNotARun is the bead's second box: a marker that
+// cannot be taken is its own error, not doltsquash.ErrRunMarkerHeld and not a
+// run. The lock path here is a directory, which cannot be opened for locking,
+// so the daemon cannot tell whether a run holds it.
+func TestSquashMarkerUnavailableIsNotARun(t *testing.T) {
+	t.Parallel()
+	d, server, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	if err := os.MkdirAll(squashMarkerPath(d.config.TownRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: WARNING: gt: doltsquash: the run marker: squash: the run marker cannot be taken:") {
+		t.Errorf("a lock failure was not reported as its own error: %q", got)
+	}
+	if !strings.Contains(got, "the run did not start") {
+		t.Errorf("the step did not say the run was not a run: %q", got)
+	}
+	if strings.Contains(got, "another daemon holds the run marker") {
+		t.Errorf("a lock failure was read as another holder: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("an untakeable marker still ran the engine: %q", got)
+	}
+	if len(server.queries) != squashP95Rounds+1 {
+		t.Errorf("an untakeable marker sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a run that could not take its marker set the daily gate")
+	}
+}
+
+// TestSquashMarkerReleasedWhenTheRunEnds is the bead's third box: the run that
+// took the marker gives it back when it ends, so the next check can take it.
+// The fake stops the run at its first branch read; doltsquash.Run releases the
+// marker on that way out too.
+func TestSquashMarkerReleasedWhenTheRunEnds(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+
+	d.runScheduledMaintenance()
+
+	if !strings.Contains(logs.String(), "reading the branches a dead run may have left") {
+		t.Fatalf("the run did not start, so there is no run end to test: %q", logs.String())
+	}
+	release, ok, err := lock.FlockTryAcquire(squashMarkerPath(d.config.TownRoot))
+	if err != nil {
+		t.Fatalf("taking the marker after the run: %v", err)
+	}
+	if !ok {
+		t.Fatal("the run ended without releasing the marker")
+	}
+	release()
+}
+
+// TestSquashMarkerRefusesASecondHold: one marker value holds one flock, so a
+// second Hold is the unavailable error rather than a second hold of the same
+// lock.
+func TestSquashMarkerRefusesASecondHold(t *testing.T) {
+	t.Parallel()
+	m := &squashMarker{path: filepath.Join(t.TempDir(), "daemon", squashRunMarkerFile)}
+	if err := m.Hold(); err != nil {
+		t.Fatalf("first Hold: %v", err)
+	}
+	defer m.Release()
+
+	err := m.Hold()
+	if !errors.Is(err, errSquashMarkerUnavailable) {
+		t.Errorf("second Hold = %v, want errSquashMarkerUnavailable", err)
+	}
+	if errors.Is(err, doltsquash.ErrRunMarkerHeld) {
+		t.Errorf("second Hold = %v, want an error that is not ErrRunMarkerHeld", err)
+	}
+}
+
+// TestSquashMarkerRefusesAnUncreatableDirectory: the marker's directory cannot
+// be created (its parent is a file), so Hold has no file to lock and reports
+// the unavailable error rather than a run.
+func TestSquashMarkerRefusesAnUncreatableDirectory(t *testing.T) {
+	t.Parallel()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &squashMarker{path: filepath.Join(blocker, "daemon", squashRunMarkerFile)}
+
+	err := m.Hold()
+	if !errors.Is(err, errSquashMarkerUnavailable) {
+		t.Errorf("Hold = %v, want errSquashMarkerUnavailable", err)
+	}
+}
+
+// TestSquashMarkerRefusesAnUnopenedRunConnection: the run's own connection
+// cannot be opened, which is the run failing before it sends a statement, not
+// a marker refusal.
+func TestSquashMarkerRefusesAnUnopenedRunConnection(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	open := d.maint.squashOpenDB
+	opens := 0
+	d.maint.squashOpenDB = func(dsn string) (*sql.DB, error) {
+		opens++
+		if opens > 1 {
+			return nil, errors.New("bad dsn")
 		}
+		return open(dsn)
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: WARNING: gt: the run failed: squash: opening the connection to gt: bad dsn") {
+		t.Errorf("an unopened run connection was not reported as a run failure: %q", got)
+	}
+	if strings.Contains(got, "another daemon holds the run marker") || strings.Contains(got, "the run marker cannot be taken") {
+		t.Errorf("an unopened connection was reported as a marker problem: %q", got)
+	}
+}
+
+// TestSquashMarkerHoldsWithoutAFreshBackup: the design's first step runs only
+// on a backup finished within 24 hours, so an older one holds the run and says
+// why rather than squashing history the backup does not cover.
+func TestSquashMarkerHoldsWithoutAFreshBackup(t *testing.T) {
+	t.Parallel()
+	d, server, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-30*time.Hour), squashTestNow.Add(-30*time.Hour+7*time.Second), 1<<20)
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: holding: the last backup finished 30h0m0s ago, and a run needs one within 24h0m0s") {
+		t.Errorf("a stale backup did not hold the run: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started on a stale backup: %q", got)
+	}
+	if len(server.queries) != squashP95Rounds+1 {
+		t.Errorf("a held run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
 	}
 }
 
