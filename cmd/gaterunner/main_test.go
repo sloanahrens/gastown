@@ -271,6 +271,10 @@ func TestRunAppliesTheOptionalFlags(t *testing.T) {
 	}
 
 	containers := map[string]forgejorunner.Container{}
+	// The engine is a native sidecar, so it is an init container.
+	for _, c := range deployment.Spec.Template.Spec.InitContainers {
+		containers[c.Name] = c
+	}
 	for _, c := range deployment.Spec.Template.Spec.Containers {
 		containers[c.Name] = c
 	}
