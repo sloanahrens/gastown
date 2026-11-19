@@ -188,8 +188,11 @@ RUN groupadd -g 10001 polecat \
 # Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
 # The mode is set in the COPY itself: a RUN chmod on these files would rewrite
 # each one into a second layer (TestPolecatImageSetsBinaryModesWithCopyChmod).
-COPY --chmod=0755 bin/gt /usr/local/bin/gt
+# The pinned bd comes before gt: a layer rebuilds when an earlier layer or its
+# own content changes, and gt changes with every commit where the pinned bd does
+# not, so bd first keeps the bd layer cached and out of the push (gt-kgm97c).
 COPY --chmod=0755 bin/bd /usr/local/bin/bd
+COPY --chmod=0755 bin/gt /usr/local/bin/gt
 # The trim helper a cache-volume container runs; plugin.md, "Per-rig cache
 # volumes", says why the trim has to run in the image.
 COPY --chmod=0755 bin/polecat-image /usr/local/bin/polecat-image
