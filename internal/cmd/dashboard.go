@@ -373,6 +373,19 @@ func closeCloudLedger(s cloudledger.Source) {
 	}
 }
 
+// dashboardTailOptions selects the feed's sources: the landings, the daemon log
+// and the watch feed. journalFor stays nil, so buildTailSources opens no store's
+// bd events journal for the hub (gt-ug7zed). deploys is passed through as the
+// caller set it: with a tracker, the daemon source is wrapped in that tracker.
+func dashboardTailOptions(townRoot string, cutoff time.Time, loc *time.Location, rigNames func(townRoot string) ([]string, error), beads *tailBeads, deploys *tailDeploys) tailOptions {
+	return tailOptions{
+		townRoot: townRoot,
+		kinds:    map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true},
+		cutoff:   cutoff, loc: loc, now: time.Now,
+		rigNames: rigNames, beads: beads, deploys: deploys,
+	}
+}
+
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
@@ -406,10 +419,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// before the tracker.
 	dispatches := events.NewDispatchReader(townRoot)
 	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog, dispatches)
-	sources, preface, err := buildTailSources(tailOptions{
-		townRoot: townRoot, kinds: allTailKinds(), cutoff: cutoff, loc: loc, now: time.Now,
-		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
-	})
+	sources, preface, err := buildTailSources(dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys))
 	if err != nil {
 		return nil, nil, err
 	}
