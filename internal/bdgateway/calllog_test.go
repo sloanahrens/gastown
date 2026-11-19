@@ -250,6 +250,251 @@ func TestCallLogRotate(t *testing.T) {
 	}
 }
 
+// writeCalls opens a log over opts and records one call per caller name, then
+// closes it so the lines reach the file.
+func writeCalls(t *testing.T, opts CallLogOptions, callers ...string) {
+	t.Helper()
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	for _, caller := range callers {
+		l.Log(CallRecord{Class: "daemon", Caller: caller, Argv: []string{"show", "gt-itjuwu"}})
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestCallLogReopenAppends is acceptance box 1: a log opened over an existing
+// directory appends after the old lines, and a first write that would cross
+// MaxBytes rotates using the existing file's size.
+func TestCallLogReopenAppends(t *testing.T) {
+	t.Parallel()
+
+	t.Run("appends after the existing lines", func(t *testing.T) {
+		t.Parallel()
+		opts := testOptions(t)
+		opts.MaxBytes = 1 << 20
+		opts.Buffer = 8
+		live := filepath.Join(opts.Dir, DefaultCallLogName)
+		writeCalls(t, opts, "before-0", "before-1")
+		before, err := os.ReadFile(live)
+		if err != nil {
+			t.Fatalf("read %s: %v", live, err)
+		}
+		backups := make(map[string][]byte, DefaultCallLogFiles-1)
+		for i := 1; i < DefaultCallLogFiles; i++ {
+			path := backupPath(live, i)
+			content := []byte(fmt.Sprintf("backup-%d\n", i))
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				t.Fatalf("write %s: %v", path, err)
+			}
+			backups[path] = content
+		}
+
+		writeCalls(t, opts, "after-0")
+
+		got, err := os.ReadFile(live)
+		if err != nil {
+			t.Fatalf("read %s: %v", live, err)
+		}
+		if !strings.HasPrefix(string(got), string(before)) {
+			t.Errorf("reopened log does not start with the old bytes:\ngot  %q\nwant prefix %q", got, before)
+		}
+		lines := readLines(t, live)
+		if len(lines) != 3 {
+			t.Fatalf("live log has %d lines, want 3", len(lines))
+		}
+		if caller := decodeLine(t, lines[0])["caller"]; caller != "before-0" {
+			t.Errorf("first line caller = %v, want before-0", caller)
+		}
+		if caller := decodeLine(t, lines[2])["caller"]; caller != "after-0" {
+			t.Errorf("last line caller = %v, want after-0", caller)
+		}
+		for path, want := range backups {
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			if string(got) != string(want) {
+				t.Errorf("%s = %q, want it untouched at %q", path, got, want)
+			}
+		}
+	})
+
+	t.Run("first write crossing MaxBytes rotates by the existing size", func(t *testing.T) {
+		t.Parallel()
+		opts := testOptions(t)
+		opts.MaxBytes = 1 << 20
+		opts.Buffer = 8
+		live := filepath.Join(opts.Dir, DefaultCallLogName)
+		writeCalls(t, opts, "before-0")
+		before, err := os.ReadFile(live)
+		if err != nil {
+			t.Fatalf("read %s: %v", live, err)
+		}
+		// Room for one more byte only: the next line crosses because the
+		// existing file already has content.
+		opts.MaxBytes = int64(len(before)) + 1
+
+		writeCalls(t, opts, "after-rotate")
+
+		rotated, err := os.ReadFile(backupPath(live, 1))
+		if err != nil {
+			t.Fatalf("read rotated file: %v", err)
+		}
+		if string(rotated) != string(before) {
+			t.Errorf("call.log.1 = %q, want the old live file %q", rotated, before)
+		}
+		lines := readLines(t, live)
+		if len(lines) != 1 {
+			t.Fatalf("live log has %d lines, want the one new line", len(lines))
+		}
+		if caller := decodeLine(t, lines[0])["caller"]; caller != "after-rotate" {
+			t.Errorf("live line caller = %v, want after-rotate", caller)
+		}
+		if _, err := os.Stat(backupPath(live, 2)); !os.IsNotExist(err) {
+			t.Errorf("call.log.2 exists after one rotation (err = %v)", err)
+		}
+	})
+}
+
+// TestCallLogReopenKeeps is acceptance box 2: a directory already holding
+// MaxFiles files stays at MaxFiles through more rotations, and an existing log
+// that cannot be opened or sized is an error rather than a silent fresh log.
+func TestCallLogReopenKeeps(t *testing.T) {
+	t.Parallel()
+
+	t.Run("keeps exactly MaxFiles after more rotations", func(t *testing.T) {
+		t.Parallel()
+		opts := testOptions(t)
+		// Smaller than any JSON line, so each write rotates once the live file
+		// has content; the writer stores an oversized line whole, not split.
+		opts.MaxBytes = 40
+		opts.MaxFiles = DefaultCallLogFiles
+		opts.Buffer = 8
+		live := filepath.Join(opts.Dir, DefaultCallLogName)
+		if err := os.WriteFile(live, []byte("pre-live\n"), 0o644); err != nil {
+			t.Fatalf("write live: %v", err)
+		}
+		for i := 1; i < opts.MaxFiles; i++ {
+			path := backupPath(live, i)
+			if err := os.WriteFile(path, []byte(fmt.Sprintf("pre-%d\n", i)), 0o644); err != nil {
+				t.Fatalf("write %s: %v", path, err)
+			}
+		}
+
+		writeCalls(t, opts, "caller-0", "caller-1", "caller-2", "caller-3")
+
+		entries, err := os.ReadDir(opts.Dir)
+		if err != nil {
+			t.Fatalf("read dir: %v", err)
+		}
+		if len(entries) != opts.MaxFiles {
+			names := make([]string, len(entries))
+			for i, e := range entries {
+				names[i] = e.Name()
+			}
+			t.Fatalf("kept %d files (%v), want %d", len(entries), names, opts.MaxFiles)
+		}
+		want := map[string]bool{DefaultCallLogName: true}
+		for i := 1; i < opts.MaxFiles; i++ {
+			want[fmt.Sprintf("%s.%d", DefaultCallLogName, i)] = true
+		}
+		for _, e := range entries {
+			if !want[e.Name()] {
+				t.Errorf("unexpected kept file %s", e.Name())
+			}
+		}
+		lines := readLines(t, live)
+		if caller := decodeLine(t, lines[len(lines)-1])["caller"]; caller != "caller-3" {
+			t.Errorf("live log's last caller = %v, want caller-3", caller)
+		}
+		lines = readLines(t, backupPath(live, 1))
+		if caller := decodeLine(t, lines[len(lines)-1])["caller"]; caller != "caller-2" {
+			t.Errorf("call.log.1's last caller = %v, want caller-2", caller)
+		}
+		for _, e := range entries {
+			data, err := os.ReadFile(filepath.Join(opts.Dir, e.Name()))
+			if err != nil {
+				t.Fatalf("read %s: %v", e.Name(), err)
+			}
+			if string(data) == "pre-6\n" {
+				t.Errorf("%s still holds the oldest pre-existing file", e.Name())
+			}
+		}
+	})
+
+	t.Run("existing log whose size cannot be read", func(t *testing.T) {
+		t.Parallel()
+		w := newLogWriter(filepath.Join(t.TempDir(), DefaultCallLogName), 100, DefaultCallLogFiles)
+		w.openFile = func(string) (logFile, error) { return &fakeFile{statErr: errors.New("stat boom")}, nil }
+		if err := w.open(); err == nil {
+			t.Fatal("open succeeded without the existing file's size, want an error")
+		}
+	})
+
+	t.Run("existing log path that cannot be opened", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name    string
+			arrange func(t *testing.T, live string)
+			verify  func(t *testing.T, live string)
+		}{
+			{
+				name: "directory in the log's place",
+				arrange: func(t *testing.T, live string) {
+					t.Helper()
+					if err := os.Mkdir(live, 0o755); err != nil {
+						t.Fatalf("mkdir %s: %v", live, err)
+					}
+					if err := os.WriteFile(filepath.Join(live, "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+						t.Fatalf("write keep.txt: %v", err)
+					}
+				},
+				verify: func(t *testing.T, live string) {
+					t.Helper()
+					data, err := os.ReadFile(filepath.Join(live, "keep.txt"))
+					if err != nil {
+						t.Fatalf("read keep.txt: %v", err)
+					}
+					if string(data) != "keep\n" {
+						t.Errorf("keep.txt = %q, want it untouched", data)
+					}
+				},
+			},
+			{
+				name: "symlink loop",
+				arrange: func(t *testing.T, live string) {
+					t.Helper()
+					if err := os.Symlink(live, live); err != nil {
+						t.Fatalf("symlink %s: %v", live, err)
+					}
+				},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				opts := testOptions(t)
+				live := filepath.Join(opts.Dir, DefaultCallLogName)
+				tt.arrange(t, live)
+				if l, err := NewCallLog(opts); err == nil {
+					l.Close()
+					t.Fatal("NewCallLog succeeded over an existing log path it cannot open, want an error")
+				}
+				if _, err := os.Lstat(live); err != nil {
+					t.Errorf("the existing log path was removed: %v", err)
+				}
+				if tt.verify != nil {
+					tt.verify(t, live)
+				}
+			})
+		}
+	})
+}
+
 // TestCallLogStats is acceptance box 3: calls, errors, dropped and per-verb
 // counts come out of Stats.
 func TestCallLogStats(t *testing.T) {
