@@ -399,6 +399,10 @@ type attentionSources struct {
 	// storyPointsDrift reads the story point estimator's drift measure over the
 	// newest extract at a tick's time (attention_story_points_drift.go).
 	storyPointsDrift func(now time.Time) (metrics.StoryPointsDriftRead, error)
+	// metricsExtract reads the town's daily metrics extract at a tick's time:
+	// the newest day directory and its footer's gaps
+	// (metrics_extract_attention.go).
+	metricsExtract func(now time.Time) (metricsExtractRead, error)
 	// seatUnreachable is what the polecat-health pass's tracker raised, which
 	// the seat-unreachable collector queues (seat_unreachable_patrol.go,
 	// gt-q6hafz).
@@ -755,6 +759,11 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A held bead nobody has released (gt-j669b4.19). The owns predicate
 		// keeps only its own items when a list or show fails.
 		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},
+		// The daily metrics extract: a newest day past the stale bound, a footer
+		// with gaps, and a directory that cannot be read (gt-9zu4p4). The
+		// collector raises the unreadable item itself and returns no error, so
+		// the keep-previous path never runs for this kind.
+		{kind: attention.KindMetricsExtract, collect: s.collectMetricsExtract},
 		// A sandbox pod the scheduler cannot place (gt-1gtq5g). The owns
 		// predicate keeps only its own items when the cluster read fails.
 		{kind: attention.KindSandboxPending, collect: s.collectPendingSandboxPods, owns: pendingSandboxItem},
@@ -957,6 +966,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	// file the metrics step writes, through the metrics package's file seams.
 	s.storyPointsDrift = func(now time.Time) (metrics.StoryPointsDriftRead, error) {
 		return metrics.ReadStoryPointsDrift(metrics.OSEnv(d.config.TownRoot), now)
+	}
+	// The extract read walks the town's .runtime/metrics, where the daily run
+	// writes one directory per day (internal/metrics/extract.go).
+	s.metricsExtract = func(now time.Time) (metricsExtractRead, error) {
+		return readMetricsExtract(d.config.TownRoot, now)
 	}
 	d.productionRiskAudit(s)
 	return s
