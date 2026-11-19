@@ -548,7 +548,7 @@ a.hrow:hover{background:#19212b}
   </div>
   <div class="col">
     <section id="newssec" data-fold="news" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
-    <section data-fold="machine"><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div></section>
+    <section data-fold="machine"><h2>Machine <span class="r" id="machnote"></span></h2><div class="body" id="machine"></div><h3 class="sub">Disk <span class="r" id="disknote"></span></h3><div class="body" id="disk"></div></section>
     <section data-fold="cloud"><h2>Cloud <span class="r" id="cloudnote"></span></h2><div class="body" id="cloud"></div><h3 class="sub">Deploys <span class="r" id="deploysnote"></span></h3><div class="body" id="deploys"></div></section>
     <section data-fold="forgejo"><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
     <section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
@@ -2693,6 +2693,37 @@ function renderDeploys(s) {
   // line up with (gt-t9w60).
   if (health.length) box.append(healthHead());
   for (const h of health) box.append(healthRow(h));
+}
+
+// The Disk block draws each kept disk's last reading, one line per disk: the
+// name, the whole percent used the reader rounded, and the bytes it came from
+// as GiB. A row the reader could not read, or has no sample for, says so rather
+// than drawing a zero share, and a snapshot that carries no disk reading at all
+// is not a clear disk. The reader keeps those states apart in the row's flags
+// (gt-a4bhxc); this block only words them (gt-wa1bgd).
+function renderDisk(s) {
+  if (pushSkip("disk", s)) return;
+  const box = $("disk");
+  box.replaceChildren();
+  const d = s.disk;
+  // A push with no disk reading yet says so, instead of holding a blank that
+  // reads as a clear disk.
+  if (!d) { box.append(el("div", "empty", "reading the disk samples…")); return; }
+  for (const r of d.rows || []) {
+    if (r.err) { box.append(el("div", "empty", r.name + " disk: could not read its samples")); continue; }
+    if (r.no_samples) { box.append(el("div", "empty", r.name + " disk: no samples yet")); continue; }
+    // A share at or past 90 is the hot share the patrol raises on, so the line
+    // takes the page's warning colour; below it the line is plain.
+    box.append(el("div", r.used_pct >= 90 ? "warnc" : "", r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB)"));
+  }
+}
+
+// diskGiB is a byte count as GiB to one decimal: the page has no other size
+// helper, and one decimal is what tells 410 GiB from 411. The reader omits a
+// zero used count, so a row drawn here with none is an empty disk, not an
+// unread one — the unread rows are the err and no_samples lines above.
+function diskGiB(bytes) {
+  return (bytes / 1073741824).toFixed(1);
 }
 
 // healthHead is the scheduled rows' column names. Every header cell carries its
@@ -5793,6 +5824,9 @@ const PANES = {
   machine: {sec: "machine", body: ["machine"], read: s => [s.machine, s.loads, readInput(s, "machine")], draw: s => renderMachine(s)},
   cloud: {sec: "cloud", body: ["cloud"], read: s => s.cloud, draw: s => renderCloud(s)},
   deploys: {sec: "cloud", body: ["deploys"], read: s => s.deploys, draw: s => renderDeploys(s)},
+  // The Disk block sits under the Machine body, so its pane is the Machine
+  // section's: opening that section draws it, and a closed one leaves it be.
+  disk: {sec: "machine", body: ["disk"], read: s => s.disk, draw: s => renderDisk(s)},
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
   tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
@@ -5862,7 +5896,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -6240,7 +6274,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
