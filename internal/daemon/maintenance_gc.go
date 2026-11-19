@@ -925,6 +925,11 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time, req
 		// Backup next (maintenance_backup.go); the gc only runs once the
 		// night's backup is on disk.
 		res := d.maintenanceBackup(databases)
+		// The town-state night is a second, independent copy
+		// (scheduled_maintenance.go): it runs whether or not the Dolt backup
+		// above succeeded, since that failure leaves the town's configuration
+		// with no other off-pod copy (gt-5dgbcy).
+		d.runTownStateBackupStep(d.maintenance().now())
 		if res.outcome == gcOutcomeCompleted {
 			res = d.maintenanceGCCycle(d.gcDatabasesAfterArchive(databases, unarchived), dataDir, localDataDir)
 		}

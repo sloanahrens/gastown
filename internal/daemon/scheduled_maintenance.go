@@ -3,10 +3,12 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -377,4 +379,87 @@ func (d *Daemon) runScheduledMaintenance() {
 	if finished := d.maintenanceGCFinishedAt.Swap(0); finished != 0 {
 		d.lastMaintenanceRun = time.Unix(0, finished)
 	}
+}
+
+// The nightly town-state backup (gt-5dgbcy): the cycle takes one verified night
+// (town_state_nightly.go) after the Dolt backup step, so the town's
+// configuration is copied off the pod even on a night the Dolt copy failed. The
+// two copies are independent: the Dolt one may be deferred, interrupted or
+// failed without costing the town-state one its night.
+
+const alertKeyTownStateNightly = "town_state_backup:nightly"
+
+// errTownStateNightlyOff reports a setting that is present and empty: the step
+// is off by the operator's choice, which is logged once a day, not alerted.
+var errTownStateNightlyOff = errors.New("town_state_backup_root is empty")
+
+// townStateNightlyOutcome is what one maintenance cycle's town-state step took.
+type townStateNightlyOutcome int
+
+const (
+	// townStateNightlyOff: the setting is present and empty; nothing was due.
+	townStateNightlyOff townStateNightlyOutcome = iota
+	// townStateNightlyDone: the night was written, or one already existed.
+	townStateNightlyDone
+	// townStateNightlyFailed: the root could not be read or the night failed,
+	// and the alert was raised.
+	townStateNightlyFailed
+)
+
+// townStateNightlyRoot returns the directory the nightly town-state backup
+// writes into. A config with no scheduled_maintenance section is an error
+// rather than the off state: a town whose section is missing would otherwise
+// keep no backup and say nothing, while an operator who means to turn the step
+// off has the key to leave empty (gt-5dgbcy). A relative root is refused for
+// the reason ParseArchiveDir refuses one: resolved against the daemon's working
+// directory it writes a backup nobody can find.
+func (d *Daemon) townStateNightlyRoot() (string, error) {
+	pc := d.patrol()
+	if pc == nil || pc.Patrols == nil || pc.Patrols.ScheduledMaintenance == nil {
+		return "", fmt.Errorf("the scheduled_maintenance patrol config is absent, so %s has no value",
+			config.MaintenanceTownStateBackupRootKey)
+	}
+	root := strings.TrimSpace(pc.Patrols.ScheduledMaintenance.TownStateBackupRoot)
+	if root == "" {
+		return "", errTownStateNightlyOff
+	}
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("%s = %q: want an absolute path", config.MaintenanceTownStateBackupRootKey, root)
+	}
+	return filepath.Clean(root), nil
+}
+
+// runTownStateBackupStep takes the night's town-state backup at now and reports
+// what it took. A failure is alerted here rather than returned: the maintenance
+// cycle has no caller that could retry it, and the alert under
+// town_state_backup:nightly is what the overseer acts on. A repeat firing the
+// same night counts an occurrence on the open alert instead of filing another.
+func (d *Daemon) runTownStateBackupStep(now time.Time) townStateNightlyOutcome {
+	root, err := d.townStateNightlyRoot()
+	switch {
+	case errors.Is(err, errTownStateNightlyOff):
+		// Keyed by date: a town whose cycle runs twice in one day says it once,
+		// and the next day says it again.
+		d.townStateNightlyLog.logAs(d.logger.Printf, "off", now.Format(time.DateOnly),
+			fmt.Sprintf("scheduled_maintenance: town-state backup is off: %s is empty",
+				config.MaintenanceTownStateBackupRootKey))
+		return townStateNightlyOff
+	case err != nil:
+		d.townStateNightlyAlert(err)
+		return townStateNightlyFailed
+	}
+	if err := d.maintenanceTownStateBackup(root, now); err != nil {
+		d.townStateNightlyAlert(err)
+		return townStateNightlyFailed
+	}
+	d.clearAlerts("the nightly town-state backup ran clean", alertKeyTownStateNightly)
+	return townStateNightlyDone
+}
+
+// townStateNightlyAlert logs err and raises the step's alert, naming the setting
+// to fix as the other maintenance alerts name theirs.
+func (d *Daemon) townStateNightlyAlert(err error) {
+	d.logger.Printf("scheduled_maintenance: WARNING: town-state nightly backup: %v", err)
+	d.escalateAlert(alertKeyTownStateNightly, "scheduled_maintenance",
+		fmt.Sprintf("the nightly town-state backup did not run: %v", err))
 }

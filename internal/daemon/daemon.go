@@ -99,6 +99,11 @@ type Daemon struct {
 	// verdict and tier-sweep call that builds its promoter (gt-mxa3op).
 	promoteViaLog logLatch
 
+	// townStateNightlyLog logs the nightly town-state backup's off reason once
+	// per day, so a cycle that runs twice in one day (a request and the
+	// window) does not repeat it (gt-5dgbcy).
+	townStateNightlyLog logLatch
+
 	// sandboxRecordCursor is the name the last sandbox record pass ended on.
 	// The next pass starts after it, so the walk rotates over the records and
 	// survives records coming and going between ticks.

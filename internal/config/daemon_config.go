@@ -1164,6 +1164,13 @@ type ScheduledMaintenanceConfig struct {
 	// ParseArchiveDir, which refuses a relative path.
 	ArchiveDir string `json:"archive_dir,omitempty"`
 
+	// TownStateBackupRoot is where the nightly town-state backup writes its
+	// dated nights (internal/daemon/town_state_nightly.go, gt-5dgbcy). Empty
+	// turns the step off. The daemon refuses a relative path, as ParseArchiveDir
+	// refuses one, since a root resolved against the daemon's working directory
+	// is a backup nobody can find.
+	TownStateBackupRoot string `json:"town_state_backup_root,omitempty"`
+
 	// ArchiveCommitLimit bounds one maintenance run's dolt_log read per
 	// database, so a first export against a whole history writes a bounded
 	// batch and the next run reads the rest (gt-s6srv). Nil or zero means
@@ -1221,6 +1228,11 @@ const (
 // appears in daemon.json, the path the daemon's logs and escalations tell an
 // operator to fix (gt-o4sk8.1).
 const MaintenanceArchiveBudgetKey = "patrols.scheduled_maintenance.archive_budget"
+
+// MaintenanceTownStateBackupRootKey is the nightly town-state backup's root as
+// it appears in daemon.json, the setting the daemon's log and alert name when
+// the step cannot run (gt-5dgbcy).
+const MaintenanceTownStateBackupRootKey = "patrols.scheduled_maintenance.town_state_backup_root"
 
 // DefaultArchiveBudget is how long one archive step keeps taking batches when
 // archive_budget is unset: long enough for a database a few batches behind to
