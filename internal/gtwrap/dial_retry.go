@@ -1,10 +1,14 @@
 package gtwrap
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"syscall"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/bdgateway"
 )
 
 // RetryableDial reports whether err is a dial that never reached the gateway,
@@ -20,6 +24,37 @@ func RetryableDial(err error) bool {
 	return errors.Is(err, syscall.ECONNREFUSED) ||
 		errors.Is(err, syscall.EHOSTUNREACH) ||
 		errors.Is(err, syscall.ENETUNREACH)
+}
+
+// RetryableRead reports whether a bd call that failed with err may be sent
+// again after the transport failed mid-call. It answers true only when all of
+// these hold: err is a timeout, a deadline, a reset or an unexpected EOF; argv
+// runs a read verb (bdgateway.IsReadCall); and the call neither sent stdin
+// nor wrote output, so a second run repeats nothing the first run delivered.
+// A refused dial is RetryableDial's case, and nil, a TLS or HTTP error and a
+// write or unknown verb all answer false.
+func RetryableRead(err error, argv []string, sendsStdin, wroteOutput bool) bool {
+	if sendsStdin || wroteOutput {
+		return false
+	}
+	if !transportFailure(err) {
+		return false
+	}
+	return bdgateway.IsReadCall(argv)
+}
+
+// transportFailure reports whether err is one of the mid-call failures a read
+// may be repeated after: a timeout, a deadline, a connection reset or an
+// unexpected EOF. A plain io.EOF is left out: the retry set names only the
+// unexpected form.
+func transportFailure(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // RetrySchedule returns the waits before each retry of a call that failed with
