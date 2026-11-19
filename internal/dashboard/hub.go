@@ -168,6 +168,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Mango != nil {
 		start(h.cfg.MangoEvery, h.pollMango)
 	}
+	if h.cfg.Disk != nil {
+		start(h.cfg.DiskEvery, h.pollDisk)
+	}
 	if h.cfg.Spend != nil || h.cfg.SpendHours != nil {
 		start(h.cfg.SpendEvery, h.pollSpend)
 	}
@@ -802,6 +805,21 @@ func (h *Hub) pollMango() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Mango = m
+	h.publishLocked()
+}
+
+// pollDisk holds the disk rows the reader read. A reader that hands back
+// nothing changes nothing, as pollCloud does for a nil: the rows ReadDisk
+// returns always name a state, a missing ring included, so only a reader that
+// is not wired can hand back nothing.
+func (h *Hub) pollDisk() {
+	d := h.cfg.Disk()
+	if d == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Disk = d
 	h.publishLocked()
 }
 

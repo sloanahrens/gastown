@@ -534,6 +534,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Machine:        dashboard.SampleMachine,
 		Cloud:          func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Mango:          func() *dashboard.Mango { return dashboard.ReadMango(mango, time.Now()) },
+		Disk:           func() *dashboard.Disk { return dashboard.ReadDisk(dashboardRuntimeDir(townRoot)) },
 		Spend:          spend,
 		SpendReason:    spendReason,
 		WatchDir:       dashboardWatchDir(townRoot),
