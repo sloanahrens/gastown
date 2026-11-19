@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -73,10 +74,17 @@ tree, which with --since is the bounded replay. --rollback also writes the
 town's settings/config.json and each registered rig's <rig>/settings/config.json,
 since the pod owns those after the cut-over; --since bounds them too.
 
+With --backup the archive is the backup set: the rows tagged backup: true,
+whatever their owner, so a restore carries the shared settings, directives and
+sentinel rows beside the daemon's own. An entry whose path has a secret shape is
+left out and counted in the summary, never named. --backup and --rollback are
+exclusive.
+
 Examples:
   gt town state export --town ~/gt > town-state.tar
   gt town state export --town ~/gt --since 2026-11-06T14:30:00Z > delta.tar
-  gt town state export --town /volume --rollback --since 2026-11-06T14:30:00Z > rollback.tar`,
+  gt town state export --town /volume --rollback --since 2026-11-06T14:30:00Z > rollback.tar
+  gt town state export --town /volume --backup > backup.tar`,
 	Args: cobra.NoArgs,
 	RunE: runTownStateExport,
 }
@@ -115,6 +123,7 @@ func init() {
 	townStateExportCmd.Flags().String("since", "", "keep only regular files modified after this RFC 3339 time (optional)")
 	townStateExportCmd.Flags().Bool("allow-no-rigs", false, "export a town whose registry names no rig (the rig-scoped rows are then missing; the summary says so)")
 	townStateExportCmd.Flags().Bool("rollback", false, "write only the rows tagged rollback: true (the one-way state a rollback replays), plus the settings/config.json files")
+	townStateExportCmd.Flags().Bool("backup", false, "write the backup set: the rows tagged backup: true (the shared settings, directives and sentinel rows beside the daemon's own), leaving out secret-shaped files")
 	_ = townStateExportCmd.MarkFlagRequired("town")
 	townStateImportCmd.Flags().String("town", "", "the town root to import into (required)")
 	townStateImportCmd.Flags().Bool("merge-newer", false, "write a regular file only when the archive's copy is newer (the rollback's replay)")
@@ -172,6 +181,7 @@ type townStateExportEnv struct {
 	town        string
 	since       string
 	rollback    bool
+	backup      bool
 	allowNoRigs bool
 	out         io.Writer
 	summary     io.Writer
@@ -190,6 +200,10 @@ func runTownStateExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("reading --rollback: %w", err)
 	}
+	backup, err := cmd.Flags().GetBool("backup")
+	if err != nil {
+		return fmt.Errorf("reading --backup: %w", err)
+	}
 	allowNoRigs, err := cmd.Flags().GetBool("allow-no-rigs")
 	if err != nil {
 		return fmt.Errorf("reading --allow-no-rigs: %w", err)
@@ -198,6 +212,7 @@ func runTownStateExport(cmd *cobra.Command, _ []string) error {
 		town:        town,
 		since:       since,
 		rollback:    rollback,
+		backup:      backup,
 		allowNoRigs: allowNoRigs,
 		out:         cmd.OutOrStdout(),
 		summary:     cmd.ErrOrStderr(),
@@ -208,6 +223,9 @@ func runTownStateExport(cmd *cobra.Command, _ []string) error {
 // out, the summary to summary. The summary is written even when the export
 // fails, because its counts say what reached the stream before the failure.
 func runTownStateExportIn(env townStateExportEnv) error {
+	if env.backup && env.rollback {
+		return errors.New("--backup and --rollback cannot be combined: --backup writes the backup set and --rollback writes the one-way rollback state; pass one")
+	}
 	var since time.Time
 	if env.since != "" {
 		parsed, err := time.Parse(time.RFC3339, env.since)
@@ -220,7 +238,10 @@ func runTownStateExportIn(env townStateExportEnv) error {
 	if env.rollback {
 		m = &townstate.Manifest{Entries: m.Rollback()}
 	}
-	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since, AllowNoRigs: env.allowNoRigs, RollbackSettings: env.rollback})
+	if env.backup {
+		m = &townstate.Manifest{Entries: m.Backup()}
+	}
+	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since, AllowNoRigs: env.allowNoRigs, Backup: env.backup, RollbackSettings: env.rollback})
 	fmt.Fprintln(env.summary, s.String())
 	if err != nil {
 		return fmt.Errorf("exporting the town state: %w", err)
