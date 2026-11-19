@@ -25,6 +25,37 @@ spec:
         - ip: 192.168.5.2
           hostnames:
             - forgejo
+      initContainers:
+        - name: dind
+          image: data.forgejo.org/oci/docker:dind
+          args:
+            - --insecure-registry=forgejo:3000
+          env:
+            - name: DOCKER_TLS_CERTDIR
+              value: /certs
+          resources:
+            requests:
+              cpu: "8"
+              memory: 12Gi
+            limits:
+              cpu: "8"
+              memory: 12Gi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: docker-certs
+              mountPath: /certs
+            - name: dind-data
+              mountPath: /var/lib/docker
+          startupProbe:
+            exec:
+              command:
+                - test
+                - -f
+                - /certs/client/cert.pem
+            periodSeconds: 2
+            failureThreshold: 60
+          restartPolicy: Always
       containers:
         - name: runner
           image: data.forgejo.org/forgejo/runner:13.2.0
@@ -57,27 +88,6 @@ spec:
             - name: config
               mountPath: /config
               readOnly: true
-        - name: dind
-          image: data.forgejo.org/oci/docker:dind
-          args:
-            - --insecure-registry=forgejo:3000
-          env:
-            - name: DOCKER_TLS_CERTDIR
-              value: /certs
-          resources:
-            requests:
-              cpu: "8"
-              memory: 12Gi
-            limits:
-              cpu: "8"
-              memory: 12Gi
-          securityContext:
-            privileged: true
-          volumeMounts:
-            - name: docker-certs
-              mountPath: /certs
-            - name: dind-data
-              mountPath: /var/lib/docker
       volumes:
         - name: config
           configMap:
