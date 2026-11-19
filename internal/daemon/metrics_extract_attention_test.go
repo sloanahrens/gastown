@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -369,7 +370,7 @@ func TestMetricsExtractNoEstimatesRaises(t *testing.T) {
 			if items[0].Kind != attention.KindMetricsExtract {
 				t.Errorf("kind = %q, want %q", items[0].Kind, attention.KindMetricsExtract)
 			}
-			for _, want := range []string{extractNoEstimatesDay, metricsExtractEstimateColumn, "2 rows", "25"} {
+			for _, want := range []string{"extract columns empty although 25 estimates were logged today", extractNoEstimatesDay, metricsExtractEstimateColumn, "2 rows"} {
 				if !strings.Contains(items[0].Summary, want) {
 					t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
 				}
@@ -563,6 +564,27 @@ func TestMetricsExtractNoEstimatesEdges(t *testing.T) {
 				t.Errorf("summary = %q, want it to name %s", items[0].Summary, want)
 			}
 		})
+	}
+}
+
+// TestMetricsExtractBrokenLandingsKeepsTheGapsItem: a landings table that
+// cannot be read raises the unreadable item beside the footer's gaps item, not
+// instead of it.
+func TestMetricsExtractBrokenLandingsKeepsTheGapsItem(t *testing.T) {
+	t.Parallel()
+	f := metricsExtractRig(t, metricsExtractTick)
+	writeExtractDay(t, f.d.config.TownRoot, extractNoEstimatesDay, `{"gaps":[["ledger","no rows"]]}`)
+	writeExtractLandings(t, f.d.config.TownRoot, extractNoEstimatesDay, "bead,rig,sp_minutes\nb1,gastown\n")
+
+	items := f.collect(t, f.src.collectMetricsExtract)
+	got := make([]string, 0, len(items))
+	for _, it := range items {
+		got = append(got, it.Key)
+	}
+	sort.Strings(got)
+	want := []string{metricsExtractGapsKey, metricsExtractUnreadableKey}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("keys = %v, want %v", got, want)
 	}
 }
 

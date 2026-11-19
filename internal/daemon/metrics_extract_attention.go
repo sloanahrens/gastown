@@ -84,6 +84,9 @@ type metricsExtractRead struct {
 	// record before the day's start.
 	estimateLogLines       int
 	estimateLogUndecodable int
+	// estimateCheckErr is why the landings table or estimate log could not be
+	// read, when the footer itself did read.
+	estimateCheckErr error
 }
 
 // collectMetricsExtract raises the metrics extract items: the newest day, its
@@ -145,7 +148,15 @@ func (s *attentionSources) collectMetricsExtract(context.Context) ([]attention.I
 	// it raises the same item, naming the unreadable lines instead of counting
 	// them as zero. That branch wins over the floor, so twenty good records
 	// beside one torn line is unreadable, not twenty.
-	if err == nil && read.estimateColumnEmpty {
+	if err == nil && read.estimateCheckErr != nil {
+		items = append(items, attention.Item{
+			Key:      metricsExtractUnreadableKey,
+			Kind:     attention.KindMetricsExtract,
+			Severity: attention.SeverityMedium,
+			Summary:  "metrics extract cannot be read: " + read.estimateCheckErr.Error(),
+		})
+	}
+	if err == nil && read.estimateCheckErr == nil && read.estimateColumnEmpty {
 		day := read.day.Format(time.DateOnly)
 		emptyColumn := fmt.Sprintf("the %s landings table carries no %s in any of its %d rows",
 			day, metricsExtractEstimateColumn, read.landingsRows)
@@ -163,8 +174,8 @@ func (s *attentionSources) collectMetricsExtract(context.Context) ([]attention.I
 				Key:      metricsExtractNoEstimatesKey,
 				Kind:     attention.KindMetricsExtract,
 				Severity: attention.SeverityMedium,
-				Summary: fmt.Sprintf("%s although %d estimates were logged since that day",
-					emptyColumn, read.estimates),
+				Summary: fmt.Sprintf("extract columns empty although %d estimates were logged today (%s)",
+					read.estimates, emptyColumn),
 			})
 		}
 	}
@@ -208,15 +219,19 @@ func readMetricsExtract(townRoot string, now time.Time) (metricsExtractRead, err
 		return read, fmt.Errorf("%s: %w", path, err)
 	}
 	read.gaps = footer.Gaps
+	// A landings table or estimate log that cannot be read is raised as the
+	// unreadable item, beside the footer's gaps item and not instead of it.
 	landings, err := readExtractLandings(filepath.Join(dayDir, metricsExtractLandingsName))
 	if err != nil {
-		return read, err
+		read.estimateCheckErr = err
+		return read, nil
 	}
 	read.landingsRows = landings.rows
 	read.estimateColumnEmpty = landings.estimateColumnEmpty
 	counted, err := countExtractEstimates(townRoot, day)
 	if err != nil {
-		return read, err
+		read.estimateCheckErr = err
+		return read, nil
 	}
 	read.estimates = counted.estimates
 	read.estimateLogLines = counted.lines
@@ -325,13 +340,13 @@ func countExtractEstimates(townRoot string, day time.Time) (extractEstimateCount
 	return count, nil
 }
 
-// readEstimateLogLine reads one line from r, keeping at most max bytes of it. A
+// readEstimateLogLine reads one line from r, keeping at most limit bytes of it. A
 // longer line reports overlong and its remaining fragments are discarded, so
-// the scan goes on to the line after it and no buffer grows past max.
-func readEstimateLogLine(r *bufio.Reader, max int) (line []byte, overlong bool, err error) {
+// the scan goes on to the line after it and no buffer grows past limit.
+func readEstimateLogLine(r *bufio.Reader, limit int) (line []byte, overlong bool, err error) {
 	for {
 		frag, isPrefix, readErr := r.ReadLine()
-		if room := max - len(line); room > 0 {
+		if room := limit - len(line); room > 0 {
 			if len(frag) > room {
 				line = append(line, frag[:room]...)
 				overlong = true
