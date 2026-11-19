@@ -461,6 +461,9 @@ type tailOptions struct {
 	// deploys tracks each bead's dispatch-to-deploy time off the daemon log
 	// (nil in a test that wants the raw daemon source).
 	deploys *tailDeploys
+	// gateway reads the gateway's call log for the gateway kind (nil when the
+	// gateway is not configured, and in gt tail, which never selects the kind).
+	gateway tailGatewayReader
 }
 
 func allTailKinds() map[string]bool {
@@ -549,6 +552,10 @@ func buildTailSources(o tailOptions) (sources []tailSource, preface []tailLine, 
 		// The feed is the town's, not a store's; it carries no rig for --rig to
 		// select on, so it is read the same whatever --rig says.
 		sources = append(sources, newTailWatchSource(o.townRoot, o.cutoff, o.now))
+	}
+	if o.kinds[tailKindGateway] && o.gateway != nil {
+		// The gateway's log is the town's too, so --rig does not select it.
+		sources = append(sources, newTailGatewaySource(o.gateway, o.cutoff, o.now))
 	}
 	return sources, preface, nil
 }
