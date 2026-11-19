@@ -359,16 +359,23 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	bound := l.followupBackpressure()
 	open := openFollowups(existing)
 	// The budget measures a week of the feed: the beads it has filed in the
-	// last seven days against the landings in the same days. A landings read
-	// that fails files the landing's plans anyway, so a broken log cannot stop
-	// the feed; the line says so (gt-y5wvum).
+	// last seven days against the landings in the same days. A rig with no
+	// landings file wired has no weekly budget, and the line says so
+	// (gt-y5wvum). A file that exists and cannot be read is a read the code
+	// could not make: it says nothing about room, so it is not read as room.
+	// The configured budget stands with the week's landings at none, which
+	// allows only the week's first followupBudgetFloor beads; a broken log
+	// therefore holds the feed rather than filing every plan through it
+	// (gt-5hyv80).
 	cutoff := l.now().Add(-FollowupBudgetWindow)
 	filedThisWeek := FiledSince(existing, cutoff)
 	landedThisWeek := 0
 	budget := l.FollowupBudgetPercent
-	if landed, err := LandedSince(l.Landings, cutoff); err != nil {
+	if l.Landings == nil {
 		budget = -1
-		lines = append(lines, fmt.Sprintf("could not read the week's landings the follow-up budget counts against (%v); filing without a weekly budget for this landing", err))
+		lines = append(lines, "no landings file is wired, so filing without a weekly budget for this landing")
+	} else if landed, err := LandedSince(l.Landings, cutoff); err != nil {
+		lines = append(lines, fmt.Sprintf("could not read the week's landings the follow-up budget counts against (%v); holding past the first %d beads", err, followupBudgetFloor))
 	} else {
 		landedThisWeek = landed
 	}
