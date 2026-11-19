@@ -7,7 +7,8 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// RecordQueue is what a pass drains: land.RecordQueue, or a fake in a test.
+// RecordQueue holds the landing records a pass has yet to write: Pending lists
+// them, and Remove drops one once it is written or its bead already carries it.
 type RecordQueue interface {
 	Pending() ([]land.PendingRecord, error)
 	Remove(land.PendingRecord) error
