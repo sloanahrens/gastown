@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -50,12 +51,19 @@ too, the nightly dump's claim and CronJob follow them, and the render names the
 image the dump runs in. The dump's reader Pod, which mounts the claim read-only
 for a copy-out, is written last and is not applied with the rest.
 
-Secret documents are not written. The command prints, for each Secret the
-Deployment mounts, one kubectl line that creates it from the operator's existing
-file, so no agent reads a secret. No file is opened to print those lines. The
-one exception is the bd gateway token Secrets: the daemon's, which --daemon-bd-gateway-url
-mounts, and the gateway's own, which --bd-gateway-token-secret names. The operator
-creates them, and the command prints a note in place of a line.
+With --include-static the render writes the static control-cluster set too:
+the admission policies, the priority classes and the Roles and bindings beside
+them, right after the ServiceAccount, the cluster-scoped documents first. Each
+static document is written as the bytes deploy/k8s reviewed, a static Secret
+among them included: it holds no data and the cluster fills it in.
+
+The render's own Secret documents are not written. The command prints, for each
+Secret the Deployment mounts, one kubectl line that creates it from the
+operator's existing file, so no agent reads a secret. No file is opened to print
+those lines. The one exception is the bd gateway token Secrets: the daemon's,
+which --daemon-bd-gateway-url mounts, and the gateway's own, which
+--bd-gateway-token-secret names. The operator creates them, and the command
+prints a note in place of a line.
 
 When the values file names a bd image (the bd key gt update images --bd writes),
 the render also writes the bd gateway: its Deployment, Service and workspace claim.
@@ -133,6 +141,10 @@ type clusterRenderFlags struct {
 	// bdGatewayReplicas is the gateway Deployment's replica count, written with a
 	// values file's bd image; zero reads as one, as Values.BdGatewayReplicas does.
 	bdGatewayReplicas int
+	// includeStatic renders the static control-cluster set with the daemon's
+	// desired set. The recorded-flags file has no field for it until gt-76p406,
+	// so a run that tried to record it is refused rather than dropping it.
+	includeStatic bool
 }
 
 var clusterRender clusterRenderFlags
@@ -272,6 +284,8 @@ func init() {
 		"the most bd processes all the gateway's pods run at once, a positive total, or zero for the gateway's own default of 16 in total; each pod runs the total divided by --bd-gateway-replicas, rounded up; a rehearsal renders no gateway, so the cap reaches only a live render; a negative cap is refused")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayReplicas, "bd-gateway-replicas", defaultBdGatewayReplicas,
 		"the bd gateway's pod count, one or two; two pods serve from one Service and share its claims, one serving while the other rolls (gt-yz0s8v); a rehearsal renders no gateway, so the count reaches only a live render; a count below zero or above two is refused")
+	townClusterRenderCmd.Flags().BoolVar(&clusterRender.includeStatic, "include-static", false,
+		"also write the static control-cluster manifests deploy/k8s embeds, after the ServiceAccount, so one command writes one desired set; a static Secret is written as its reviewed document and gets no create line")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
 		"write the flags this run used to the town's recorded-flags file, so a later render replays them with --use-recorded; a live render only")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.use, "use-recorded", false,
@@ -470,6 +484,13 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if d.record.record && f.rehearsal {
 		return errors.New("--record-flags is for a live render: the recorded flags describe the pair that is running, so drop --rehearsal, or drop --record-flags")
 	}
+	// The record file has no field for --include-static until gt-76p406, so a
+	// recording run would drop it and a later replay would render a desired set
+	// without the static objects: refused rather than recorded as something the
+	// file cannot hold.
+	if d.record.record && f.includeStatic {
+		return errors.New("--record-flags cannot record --include-static until the recorded flags carry it (gt-76p406): a replay would render the desired set without the static objects, so drop one of the two flags")
+	}
 	// A run with either record flag needs the town before its flags resolve: the
 	// record is under the town root, and --use-recorded fills --dir, --out and the
 	// rest from it. Every other run reaches the town below, after the flags and the
@@ -551,7 +572,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if err := d.render(&stream, m); err != nil {
 		return fmt.Errorf("cannot encode the manifests, and no file was written: %w", err)
 	}
-	objects, err := applyObjects(stream.Bytes(), yaml.Marshal)
+	objects, err := applyObjects(stream.Bytes(), yaml.Marshal, m.Static)
 	if err != nil {
 		return err
 	}
@@ -720,6 +741,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 	v := k8sdaemon.Values{
 		Namespace:               f.namespace,
 		Rehearsal:               f.rehearsal,
+		IncludeStatic:           f.includeStatic,
 		Secrets:                 secrets.Files,
 		CloudCheckKey:           cloudCheckKey,
 		DeepSeekBalanceKey:      deepSeekBalanceKey,
@@ -889,11 +911,31 @@ func hmConfigConfigured(path string, lstat func(string) (fs.FileInfo, error)) (b
 	return true, nil
 }
 
-// applyObjects splits a rendered stream into its documents, dropping the Secrets:
-// an applied placeholder would make the operator's `kubectl create secret` fail
-// with AlreadyExists, so the Secrets are created from the operator's files.
-// marshal re-encodes each document's node; the render passes yaml.Marshal.
-func applyObjects(stream []byte, marshal func(any) ([]byte, error)) ([]applyObject, error) {
+// applyKey identifies one document of the stream: its kind, name and namespace.
+// A cluster-scoped document names no namespace.
+type applyKey struct{ kind, name, namespace string }
+
+// staticApplyRank is the rank the static documents apply at. Build already
+// ordered the set (cluster-scoped first) and Render writes it right after the
+// ServiceAccount, so the set keeps that order and lands between the
+// ServiceAccount and the Services whose admission policies it holds.
+var staticApplyRank = applyRank["ServiceAccount"]
+
+// applyObjects splits a rendered stream into its documents. The render's own
+// Secrets are dropped: an applied placeholder would make the operator's
+// `kubectl create secret` fail with AlreadyExists, so they are created from the
+// operator's files. A static document is kept — the static Secret among them,
+// which carries no data and the cluster fills in — as the bytes it was reviewed
+// in, since an apply sends the document, not a placeholder. marshal re-encodes
+// each of the render's own documents' nodes; the render passes yaml.Marshal.
+func applyObjects(stream []byte, marshal func(any) ([]byte, error), static []k8s.StaticObject) ([]applyObject, error) {
+	// The static set is the authority on which document is static: a key here
+	// is a reviewed document, so it is applied rather than read as a Secret to
+	// create from a file.
+	staticDocs := make(map[applyKey]k8s.StaticObject, len(static))
+	for _, object := range static {
+		staticDocs[applyKey{kind: object.Kind, name: object.Name, namespace: object.Namespace}] = object
+	}
 	var out []applyObject
 	dec := yaml.NewDecoder(bytes.NewReader(stream))
 	for {
@@ -908,16 +950,21 @@ func applyObjects(stream []byte, marshal func(any) ([]byte, error)) ([]applyObje
 		var head struct {
 			Kind     string `yaml:"kind"`
 			Metadata struct {
-				Name string `yaml:"name"`
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
 			} `yaml:"metadata"`
 		}
 		if err := doc.Decode(&head); err != nil {
 			return nil, fmt.Errorf("reading a rendered document's kind: %w", err)
 		}
-		if head.Kind == "Secret" {
+		staticObject, isStatic := staticDocs[applyKey{kind: head.Kind, name: head.Metadata.Name, namespace: head.Metadata.Namespace}]
+		if head.Kind == "Secret" && !isStatic {
 			continue
 		}
 		rank, ok := applyRank[head.Kind]
+		if isStatic {
+			rank, ok = staticApplyRank, true
+		}
 		if !ok {
 			return nil, fmt.Errorf("the rendered manifests hold a %s, which has no place in the apply order", head.Kind)
 		}
@@ -926,8 +973,10 @@ func applyObjects(stream []byte, marshal func(any) ([]byte, error)) ([]applyObje
 		if head.Kind == "PersistentVolumeClaim" && head.Metadata.Name == k8sdaemon.TrackerBackupClaim {
 			rank = applyRank["CronJob"]
 		}
-		body, err := marshal(&doc)
-		if err != nil {
+		var body []byte
+		if isStatic {
+			body = staticObject.Doc
+		} else if body, err = marshal(&doc); err != nil {
 			return nil, fmt.Errorf("encoding a rendered %s: %w", head.Kind, err)
 		}
 		out = append(out, applyObject{rank: rank, kind: head.Kind, name: head.Metadata.Name, body: body})

@@ -462,6 +462,7 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
 		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
 		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
+		"includeStatic":         "refused: a recording run refuses the flag until the record file carries it, so a replay never drops it (gt-76p406)",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
 	recordType := reflect.TypeOf(renderFlagsRecord{})
