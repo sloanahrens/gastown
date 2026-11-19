@@ -1,7 +1,6 @@
 package polecat
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,53 +102,32 @@ func TestProbeLiveGitStateLocalMeasuresTheSameFactsAsTheLiveOne(t *testing.T) {
 	}
 }
 
-// localProbeExecArgs is the scripted answer for the git calls a clean local
-// probe makes: the directory is its own worktree root, the branch is main, the
-// status and stash are clean, and HEAD is the tip of the tracking ref the local
-// preservation read asks about. The returned func records every call it
-// answers.
-func localProbeExecArgs(dir string, calls *[]git.ExecCall) git.ExecFunc {
-	const sha = "1111111111111111111111111111111111111111"
+// recordingExec answers every git call with answer and records the call. It
+// matches no argument, so the probe's set of git subcommands is free to change
+// without breaking a test that uses it.
+func recordingExec(calls *[]git.ExecCall, answer func() (string, string, error)) git.ExecFunc {
 	return func(c git.ExecCall) (string, string, error) {
 		*calls = append(*calls, c)
-		switch strings.Join(c.Args(), " ") {
-		case "rev-parse --show-toplevel":
-			return dir + "\n", "", nil
-		case "rev-parse --abbrev-ref HEAD":
-			return "main\n", "", nil
-		case "status --porcelain -uall":
-			return "", "", nil
-		case "stash list":
-			return "", "", nil
-		case "rev-parse refs/remotes/origin/main", "rev-parse HEAD":
-			return sha + "\n", "", nil
-		}
-		return "", "", fmt.Errorf("unscripted git call: %s", strings.Join(c.Args(), " "))
+		return answer()
 	}
 }
 
 // TestLiveProbeLocalBoundsEveryExecCall: the probe the pool runs per
 // sessionless dir must finish. Every git process it starts runs under
 // liveProbeTimeout, so a worktree whose filesystem stalls cannot hold the
-// roster read (and every sling behind it) open. The probe still answers from
-// the same facts — the bound must not come at the cost of the answer.
+// roster read (and every sling behind it) open.
 //
 // It asserts the bound on every call the recording runner saw and nothing
-// about which calls those are: the probe's set of git subcommands is free to
-// change without breaking this test.
+// about which calls those are or what they answer: the facts the probe reads
+// are pinned by the real-repository tests above.
 func TestLiveProbeLocalBoundsEveryExecCall(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	var calls []git.ExecCall
 
-	got := probeLiveGitStateLocalExec(dir, localProbeExecArgs(dir, &calls))
+	probeLiveGitStateLocalExec(t.TempDir(), recordingExec(&calls, func() (string, string, error) {
+		return "", "", nil
+	}))
 
-	if got.Source != GitStateSourceLive {
-		t.Fatalf("Source = %q, want %q (reason %q)", got.Source, GitStateSourceLive, got.FailedReason)
-	}
-	if got.Branch != "main" || got.Dirty || got.UnpushedCommits != 0 {
-		t.Fatalf("probe = %+v, want branch main, clean, 0 unpushed", got)
-	}
 	if len(calls) == 0 {
 		t.Fatal("runner saw no git calls; the bound cannot be asserted")
 	}
@@ -163,36 +141,24 @@ func TestLiveProbeLocalBoundsEveryExecCall(t *testing.T) {
 
 // TestLiveProbeLocalReadsAKilledCallAsUnknown: a call that runs out the
 // deadline is a failed measurement, not clean work. The state must be unknown
-// with a reason, which the pool counts as an occupied seat.
+// with a reason, which the pool counts as an occupied seat. Every call is
+// killed, so the test names no subcommand.
 func TestLiveProbeLocalReadsAKilledCallAsUnknown(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 	var calls []git.ExecCall
-	answer := localProbeExecArgs(dir, &calls)
-	rec := func(c git.ExecCall) (string, string, error) {
-		if strings.Join(c.Args(), " ") == "status --porcelain -uall" {
-			calls = append(calls, c)
-			return "", "", git.ErrTimedOut
-		}
-		return answer(c)
-	}
 
-	got := probeLiveGitStateLocalExec(dir, rec)
+	got := probeLiveGitStateLocalExec(t.TempDir(), recordingExec(&calls, func() (string, string, error) {
+		return "", "", git.ErrTimedOut
+	}))
 
-	sawStatus := false
-	for _, c := range calls {
-		if strings.Join(c.Args(), " ") == "status --porcelain -uall" {
-			sawStatus = true
-		}
-	}
-	if !sawStatus {
-		t.Fatal("runner saw no status call; the probe abandoned the read before it could be killed")
+	if len(calls) == 0 {
+		t.Fatal("runner saw no git calls; the probe abandoned the read before it could be killed")
 	}
 	if got.Source != GitStateSourceUnknown {
 		t.Fatalf("Source = %q, want %q", got.Source, GitStateSourceUnknown)
 	}
 	if got.FailedReason == "" {
-		t.Fatal("FailedReason = empty for a killed status call")
+		t.Fatal("FailedReason = empty for a killed git call")
 	}
 }
 
