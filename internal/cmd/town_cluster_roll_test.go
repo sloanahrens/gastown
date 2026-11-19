@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -12,10 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	k8s "github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/runnerroll"
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -267,6 +270,11 @@ func TestTownClusterRollRefusesStaticDocuments(t *testing.T) {
 			name:    "a static admission policy",
 			object:  k8s.StaticObject{Kind: "ValidatingAdmissionPolicy", Name: "bd-gateway-service"},
 			wantErr: `ValidatingAdmissionPolicy "bd-gateway-service"`,
+		},
+		{
+			name:    "a static document that names nothing",
+			object:  k8s.StaticObject{},
+			wantErr: "names no kind and no name",
 		},
 	}
 	for _, tc := range tests {
@@ -524,6 +532,266 @@ func TestTownClusterRollWithoutRecordedFlagsRefuses(t *testing.T) {
 	}
 	if len(f.events.calls) != 0 {
 		t.Errorf("calls = %v, want no hold taken", f.events.calls)
+	}
+}
+
+// clusterRollFlagsCmd is the cluster roll command with every flag defined except
+// missing, so a flag the roll cannot read is reachable without a bad command.
+func clusterRollFlagsCmd(missing string) *cobra.Command {
+	cmd := &cobra.Command{}
+	if missing != "landing-wait" {
+		cmd.Flags().Duration("landing-wait", 10*time.Minute, "")
+	}
+	if missing != "runs-wait" {
+		cmd.Flags().Duration("runs-wait", 20*time.Minute, "")
+	}
+	if missing != "rollout-wait" {
+		cmd.Flags().Duration("rollout-wait", 10*time.Minute, "")
+	}
+	if missing != "dry-run" {
+		cmd.Flags().Bool("dry-run", false, "")
+	}
+	return cmd
+}
+
+// TestTownClusterRollRefusesAFlagItCannotRead: a flag the command does not carry
+// stops the roll before the town is looked up.
+func TestTownClusterRollRefusesAFlagItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"landing-wait", "runs-wait", "rollout-wait", "dry-run"} {
+		findTown := func() (string, error) {
+			t.Errorf("the town was looked up although --%s could not be read", name)
+			return "", nil
+		}
+
+		err := runTownClusterRollIn(clusterRollFlagsCmd(name), findTown)
+
+		if err == nil || !strings.Contains(err.Error(), "reading --"+name) {
+			t.Errorf("--%s missing: err = %v, want it to name reading --%s", name, err, name)
+		}
+	}
+}
+
+// TestTownClusterRollRefusesWhenTheTownIsNotFound: the roll names the lookup it
+// could not make rather than running outside a town.
+func TestTownClusterRollRefusesWhenTheTownIsNotFound(t *testing.T) {
+	t.Parallel()
+	out := &bytes.Buffer{}
+	cmd := clusterRollFlagsCmd("")
+	cmd.SetOut(out)
+	findTown := func() (string, error) { return "", errors.New("no town above the working directory") }
+
+	err := runTownClusterRollIn(cmd, findTown)
+
+	if err == nil || !strings.Contains(err.Error(), "finding the town root") {
+		t.Fatalf("err = %v, want it to name finding the town root", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the roll printed %q before refusing", out.String())
+	}
+}
+
+// TestTownClusterRollRefusesWithoutItsTwoSeams: a roll with nowhere to print and
+// a real roll with no signal source each refuse before the hold.
+func TestTownClusterRollRefusesWithoutItsTwoSeams(t *testing.T) {
+	t.Parallel()
+	t.Run("nowhere to print", func(t *testing.T) {
+		t.Parallel()
+		err := runTownClusterRoll(clusterRollDeps{})
+		if err == nil || !strings.Contains(err.Error(), "nowhere to print") {
+			t.Fatalf("err = %v, want a refusal with nowhere to print", err)
+		}
+	})
+	t.Run("no signal source", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRollFourDeployments(t)
+		f.deps.signals = nil
+
+		err := runTownClusterRoll(f.deps)
+		if err == nil || !strings.Contains(err.Error(), "no signal source") {
+			t.Fatalf("err = %v, want a refusal naming the signal source", err)
+		}
+		if len(f.events.calls) != 0 {
+			t.Errorf("calls = %v, want no hold taken", f.events.calls)
+		}
+	})
+}
+
+// TestTownClusterRollRefusesAnUnreadableRender: each input the render needs, and
+// its build, refuses the roll before the hold and before any cluster read.
+func TestTownClusterRollRefusesAnUnreadableRender(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		render  func(t *testing.T) clusterRenderDeps
+		wantErr string
+	}{
+		{
+			name: "not in a town",
+			render: func(t *testing.T) clusterRenderDeps {
+				render := clusterRenderDepsAt(t, t.TempDir(), io.Discard)
+				render.findTown = func() (string, error) { return "", errors.New("no town above the working directory") }
+				return render
+			},
+			wantErr: "not in a Gas Town workspace",
+		},
+		{
+			name: "the recorded flags are refused",
+			render: func(t *testing.T) clusterRenderDeps {
+				town := t.TempDir()
+				path := renderFlagsPathIn(town)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("making the flags directory: %v", err)
+				}
+				if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+					t.Fatalf("writing the broken flags file: %v", err)
+				}
+				return clusterRenderDepsAt(t, town, io.Discard)
+			},
+			wantErr: "are refused",
+		},
+		{
+			name: "no image pair",
+			render: func(t *testing.T) clusterRenderDeps {
+				d, _, town := driftTestSeams(t, nil)
+				dir := driftTestFlags(t, town).dir
+				if err := os.Remove(imagevalues.PathIn(dir)); err != nil {
+					t.Fatalf("removing the values file: %v", err)
+				}
+				return d.render
+			},
+			wantErr: "holds no image pair",
+		},
+		{
+			name: "no secrets manifest",
+			render: func(t *testing.T) clusterRenderDeps {
+				d, _, town := driftTestSeams(t, nil)
+				dir := driftTestFlags(t, town).dir
+				if err := os.Remove(filepath.Join(dir, secretsManifestRelPath)); err != nil {
+					t.Fatalf("removing the secrets manifest: %v", err)
+				}
+				return d.render
+			},
+			wantErr: "reading the secrets manifest",
+		},
+		{
+			name: "the build refuses",
+			render: func(t *testing.T) clusterRenderDeps {
+				d, _, _ := driftTestSeams(t, nil)
+				render := d.render
+				render.build = func(k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+					return k8sdaemon.Manifests{}, errors.New("the values cannot be rendered")
+				}
+				return render
+			},
+			wantErr: "cannot render the daemon namespace's manifests",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newClusterRollFixture(t, tc.render(t), func(context.Context, string, []string, string, ...string) (string, int, error) {
+				t.Error("read the cluster before refusing an unreadable render")
+				return "", 0, nil
+			})
+
+			err := runTownClusterRoll(f.deps)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want one naming %q", err, tc.wantErr)
+			}
+			if len(f.events.calls) != 0 {
+				t.Errorf("calls = %v, want no hold taken", f.events.calls)
+			}
+		})
+	}
+}
+
+// TestTownClusterRollRefusesAStepWhoseRenderFails: the render is read again for
+// the apply and for the ready wait, and a read that fails there releases the hold
+// rather than applying a partial or stale set.
+func TestTownClusterRollRefusesAStepWhoseRenderFails(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		failAt  int
+		wantErr string
+	}{
+		{name: "the apply's render", failAt: 2, wantErr: "applying the daemon namespace"},
+		{name: "the ready wait's render", failAt: 3, wantErr: "waiting for the daemon namespace to be ready"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, town := driftFourDeploymentSeams(t)
+			m := driftTestRendered(t, d, driftTestFlags(t, town))
+			render := d.render
+			build := render.build
+			calls := 0
+			render.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+				calls++
+				if calls == tc.failAt {
+					return k8sdaemon.Manifests{}, errors.New("a file changed under the roll")
+				}
+				return build(v)
+			}
+			f := newClusterRollFixture(t, render, clusterRollAnswering(t, driftAnswering(t, m, driftGatewayProbeMoved)))
+
+			err := runTownClusterRoll(f.deps)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "a file changed under the roll") {
+				t.Fatalf("err = %v, want %q wrapping the failed render", err, tc.wantErr)
+			}
+			if f.store.present {
+				t.Error("the landing hold is still in place after a failed render")
+			}
+		})
+	}
+}
+
+// TestTownClusterRollApplyRefusesAnObjectItCannotEncode: a manifest the encoder
+// cannot write stops the apply, and the hold is released.
+func TestTownClusterRollApplyRefusesAnObjectItCannotEncode(t *testing.T) {
+	t.Parallel()
+	d, _, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	render := d.render
+	encode := render.encode
+	render.encode = func(w io.Writer, object any) error {
+		if _, ok := object.(k8sdaemon.Deployment); ok {
+			return encode(w, object)
+		}
+		return errors.New("the object cannot be encoded")
+	}
+	f := newClusterRollFixture(t, render, clusterRollAnswering(t, driftAnswering(t, m, driftGatewayProbeMoved)))
+
+	err := runTownClusterRoll(f.deps)
+	if err == nil || !strings.Contains(err.Error(), "building the persistentvolumeclaim town-state") {
+		t.Fatalf("err = %v, want the unencodable claim", err)
+	}
+	if f.store.present {
+		t.Error("the landing hold is still in place after an apply that could not encode")
+	}
+}
+
+// TestTownClusterRollApplyStartFailureReleasesTheHold: an apply kubectl cannot
+// start ends the roll and gives the hold back, as a refused apply does.
+func TestTownClusterRollApplyStartFailureReleasesTheHold(t *testing.T) {
+	t.Parallel()
+	d, _, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	answer := clusterRollAnswering(t, driftAnswering(t, m, driftGatewayProbeMoved))
+	f := newClusterRollFixture(t, d.render, func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if len(args) > 0 && args[0] == "apply" {
+			return "", 0, errors.New("exec: kubectl not found")
+		}
+		return answer(ctx, dir, env, name, args...)
+	})
+
+	err := runTownClusterRoll(f.deps)
+	if err == nil || !strings.Contains(err.Error(), "applying the persistentvolumeclaim town-state") {
+		t.Fatalf("err = %v, want the apply kubectl could not start", err)
+	}
+	if f.store.present {
+		t.Error("the landing hold is still in place after an apply kubectl could not start")
 	}
 }
 
