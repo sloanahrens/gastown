@@ -1,7 +1,8 @@
-// Package jobs lists the town's maintenance jobs: every daemon step with its
-// last completion, its cadence and whether it is overdue. The list is read-only.
-// It reads the daemon's patrol config and last-run record and writes nothing,
-// calls no daemon and runs no bd.
+// Package jobs lists the town's maintenance jobs: every daemon step, and the
+// jobs the daemon runs inside one (the Dolt gc), with the last completion, the
+// cadence and whether it is overdue. The list is read-only. It reads the daemon's
+// patrol config, last-run record and maintenance state and writes nothing, calls
+// no daemon and runs no bd.
 package jobs
 
 import (
@@ -34,12 +35,29 @@ const (
 	StateUnknown State = "unknown"
 )
 
+// Outcome is how a job's last run ended. The empty outcome means no run is
+// recorded, so nothing says how it ended.
+type Outcome string
+
+const (
+	// OutcomeOK: the run finished its work.
+	OutcomeOK Outcome = "ok"
+	// OutcomeFailed: the run stopped with an error, or its source cannot be read.
+	OutcomeFailed Outcome = "failed"
+	// OutcomeRefused: the run declined to act, as its guard requires.
+	OutcomeRefused Outcome = "refused"
+	// OutcomeDeferred: the run found its window busy and left the work for later.
+	OutcomeDeferred Outcome = "deferred"
+)
+
 // minGrace is the least slack an overdue check allows past the cadence.
 const minGrace = 10 * time.Minute
 
 // Job is one maintenance job as the list shows it.
 type Job struct {
 	Name string
+	// Kind is the daemon step kind the job belongs to: a job that runs inside a
+	// patrol, like the Dolt gc, carries that patrol's kind.
 	Kind config.DaemonStepKind
 	// LastRun is the job's last completion, nil when none is recorded or the
 	// last-run record cannot be read.
@@ -48,6 +66,10 @@ type Job struct {
 	// job has none.
 	Cadence time.Duration
 	State   State
+	// Outcome is how the job's last run ended; empty when none is recorded.
+	Outcome Outcome
+	// Stats are the job's headline numbers, by short name.
+	Stats map[string]int64
 	// Source names the config the cadence was read from, empty when the town
 	// has no patrol config.
 	Source string
@@ -79,7 +101,39 @@ func list(townRoot string, steps []config.DaemonStep, now time.Time) ([]Job, err
 		j.State = stateOf(j, runErr != nil, cadErr, now)
 		jobs = append(jobs, j)
 	}
-	return jobs, nil
+	return append(jobs, doltGCRows(townRoot, now)...), nil
+}
+
+// doltGCName is the job list's row for the Dolt gc, which runs inside the
+// scheduled_maintenance patrol (internal/daemon/maintenance_gc.go).
+const doltGCName = "dolt_gc"
+
+// doltGCRows returns the dolt_gc row, or none when the daemon has written no
+// maintenance state: with no state file no gc is recorded. A state file that
+// exists but cannot be read is a failed row, never a clean one. The row's last
+// run is the newest gc across databases and its stat the total reclaimed.
+func doltGCRows(townRoot string, now time.Time) []Job {
+	lastGC, reclaimed, err := daemon.ReadMaintenanceGC(townRoot)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	j := Job{
+		Name:    doltGCName,
+		Kind:    config.DaemonStepPatrol,
+		Cadence: daemon.MaintenanceGCCadence,
+	}
+	if err != nil {
+		j.Outcome = OutcomeFailed
+		j.State = StateUnknown
+		return []Job{j}
+	}
+	if !lastGC.IsZero() {
+		j.LastRun = &lastGC
+		j.Outcome = OutcomeOK
+	}
+	j.Stats = map[string]int64{"reclaimed_bytes": reclaimed}
+	j.State = stateOf(j, false, false, now)
+	return []Job{j}
 }
 
 // stateOf judges one job. An unreadable last-run record or an unreadable

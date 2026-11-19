@@ -50,6 +50,11 @@ const (
 	// a day later each week.
 	maintenanceGCWeekly = 7*24*time.Hour - 4*time.Hour
 
+	// MaintenanceGCCadence is the routine interval between gc's of one
+	// database, which the job list judges its dolt_gc row against
+	// (maintenanceGCWeekly). Old-gen growth can gc a database sooner.
+	MaintenanceGCCadence = maintenanceGCWeekly
+
 	// maintenanceOldGenGrowth is the old-gen growth since the last gc that
 	// triggers an early gc: more than 20%.
 	maintenanceOldGenGrowth = 1.20
@@ -213,10 +218,48 @@ func maintenanceGCStatePath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", maintenanceGCStateFileName)
 }
 
+// errMaintenanceGCStateAbsent reports a town whose daemon has never written
+// maintenance state.
+var errMaintenanceGCStateAbsent = errors.New("no maintenance state file")
+
 // loadMaintenanceGCState reads the baselines. A missing file is empty state; a
 // corrupt one is an error the caller logs before treating it as empty (gc is
 // non-destructive, so "no baseline" is a safe reading).
 func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
+	st, err := readMaintenanceGCState(townRoot)
+	if errors.Is(err, errMaintenanceGCStateAbsent) {
+		return st, nil
+	}
+	return st, err
+}
+
+// ReadMaintenanceGC returns the newest LastGC across databases and the total
+// ReclaimedBytes from the daemon's maintenance state file; a missing file
+// returns fs.ErrNotExist and a file that exists but cannot be read its error.
+func ReadMaintenanceGC(townRoot string) (lastGC time.Time, reclaimedBytes int64, err error) {
+	st, err := readMaintenanceGCState(townRoot)
+	switch {
+	case errors.Is(err, errMaintenanceGCStateAbsent):
+		return time.Time{}, 0, fs.ErrNotExist
+	case err != nil:
+		return time.Time{}, 0, err
+	}
+	for _, at := range st.LastGC {
+		if at.After(lastGC) {
+			lastGC = at
+		}
+	}
+	for _, n := range st.ReclaimedBytes {
+		reclaimedBytes += n
+	}
+	return lastGC, reclaimedBytes, nil
+}
+
+// readMaintenanceGCState reads the state file. A missing file reports
+// errMaintenanceGCStateAbsent, so a caller can tell no state from an unreadable
+// one; a file that exists but cannot be read or parsed is its error, never
+// empty state.
+func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	st := maintenanceGCState{
 		PostGCBytes:             map[string]int64{},
 		PostGCOldGenBytes:       map[string]int64{},
@@ -229,7 +272,7 @@ func loadMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	data, err := os.ReadFile(maintenanceGCStatePath(townRoot))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return st, nil
+			return st, errMaintenanceGCStateAbsent
 		}
 		return st, err
 	}
