@@ -257,6 +257,9 @@ func driftFourDeploymentSeams(t *testing.T) (clusterDriftDeps, *bytes.Buffer, st
 		f.proxyImage = clusterRenderDaemonDigest
 		f.hostGateway = "192.168.64.1"
 		f.bdGatewayTokenSecret = "bd-gateway-tokens"
+		// The bd image renders the push URL, which needs the operator's
+		// attestation that the Service admission policy is applied.
+		f.bdGatewayServicePolicyApplied = true
 	})
 	driftNameBdImage(t, town)
 	return d, out, town

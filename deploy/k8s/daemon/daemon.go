@@ -851,6 +851,13 @@ type Values struct {
 	// gateway workload, which renders the push Service, and a URL of the gateway
 	// URL's form.
 	BdGatewayPushURL string
+	// BdGatewayServicePolicyApplied is the operator's attestation that the Service
+	// admission policy in deploy/k8s/bd-gateway-service-admission.yaml is applied
+	// to the cluster. The render cannot verify the cluster, so a push URL is
+	// refused unless this is set or Values.IncludeStatic puts that policy in the
+	// same render: the push URL sends the gateway's bearer token over plain http to
+	// a Service name the policy guards. Default false.
+	BdGatewayServicePolicyApplied bool
 	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container reads
 	// read-only, as a hostPath of type Directory so a missing directory fails the
 	// pod rather than creating one. Empty mounts nothing. Set, it must be absolute.
