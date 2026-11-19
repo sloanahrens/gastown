@@ -284,33 +284,10 @@ const (
 // loopback port-forward (gt-wl06ex). Its pod carries its own labels, so the
 // daemon's selector never matches it.
 const (
-	DashboardName         = "dashboard"
-	DashboardPort         = 8787
-	DashboardTmpVolume    = "dashboard-tmp"
-	DashboardTmpPath      = "/tmp"
-	DashboardClaudeVolume = "dashboard-claude"
-	// DaemonHomePath is the container's HOME: the image runs as root, so the
-	// daemon's own Claude config dir is ClaudeHomePath.
-	DaemonHomePath = "/root"
-	// ClaudeHomePath is where the Mac's ~/.claude sits in the image: its HOME is
-	// /root, so the transcripts and the spend ledger sit there. The dashboard mounts
-	// the whole directory here; the daemon mounts the host's projects directory
-	// beside it, at DaemonHostClaudeProjectsPath.
-	ClaudeHomePath = DaemonHomePath + "/.claude"
-	// DaemonClaudeVolume carries the Mac's ~/.claude into the daemon container, for
-	// the usage scan that reads the host's transcripts.
-	DaemonClaudeVolume = "daemon-claude"
-	// DaemonHostClaudeProjectsPath is where the daemon container sees the Mac's
-	// projects directory: the scan reads only the projects subtree, so the mount
-	// is narrowed to it with a subPath (gt-w9eca2). It is a sibling of
-	// ClaudeHomePath, never $HOME/.claude/projects: that is the config dir the
-	// container's own claude children (the om reviews) write, and mounting the
-	// Mac's directory there read-only made every review write no transcript
-	// (gt-xxhzf6). agentlog.HostClaudeProjectsDir names the same path from the
-	// home the scan resolves, and TestDaemonHostClaudePathMatchesAgentlog holds
-	// the two equal.
-	DaemonHostClaudeProjectsPath = DaemonHomePath + "/.claude-host/projects"
-	DaemonClaudeProjectsSub      = "projects"
+	DashboardName      = "dashboard"
+	DashboardPort      = 8787
+	DashboardTmpVolume = "dashboard-tmp"
+	DashboardTmpPath   = "/tmp"
 	// ViewerTokenFile is the read-only Forgejo token the dashboard page reads from
 	// $XDG_CONFIG_HOME/gt, the same Secret entry a rehearsal mounts.
 	ViewerTokenFile = RehearsalForgeTokenFile
@@ -831,12 +808,6 @@ type Values struct {
 	// forgejo-viewer.env entry. A rehearsal refuses it: the dashboard is a
 	// live-pod piece.
 	Dashboard bool
-	// DashboardClaudeDir is the Mac's ~/.claude directory the dashboard container
-	// mounts read-only at ClaudeHomePath, as a hostPath of type Directory so a
-	// missing directory fails the pod rather than creating one. Empty mounts
-	// nothing. Set, it must be absolute and Dashboard must be set. The mount is the
-	// whole directory, wider than the panes read; a narrower list is a later bead.
-	DashboardClaudeDir string
 	// BdGatewayURL points the dashboard's bd forwarder at the bd gateway: the
 	// dashboard carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE, and mounts its
 	// own read-class token Secret (BdGatewayDashboardSecretName) read-only. The
@@ -858,15 +829,6 @@ type Values struct {
 	// same render: the push URL sends the gateway's bearer token over plain http to
 	// a Service name the policy guards. Default false.
 	BdGatewayServicePolicyApplied bool
-	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container reads
-	// read-only, as a hostPath of type Directory so a missing directory fails the
-	// pod rather than creating one. Empty mounts nothing. Set, it must be absolute.
-	// The volume is the whole directory, but the container mounts only its
-	// projects subtree at DaemonHostClaudeProjectsPath, the one the usage scan
-	// reads, so the rest of ~/.claude is not visible in the pod (gt-w9eca2). The
-	// mount is a sibling of ClaudeHomePath, so the container's own Claude config
-	// dir stays writable for its om reviews (gt-xxhzf6).
-	DaemonClaudeDir string
 	// Tracker renders the trackerd Deployment beside the daemon and the
 	// dashboard: trackerd on loopback from Values.Image, and a socat relay from
 	// Values.ProxyImage that publishes it on TrackerPort. It needs
@@ -1671,8 +1633,7 @@ func trackerService(namespace string) Service {
 
 // dashboardDeployment is the dashboard's pod: one container running `gt dashboard`,
 // the town-state claim read-only, and the viewer token. The pod takes no
-// ServiceAccount token, and its only writable volume is an emptyDir at /tmp; the
-// claude directory is the only host path, and it is read-only.
+// ServiceAccount token, and its only writable volume is an emptyDir at /tmp.
 func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 	vols, err := dashboardVolumes(v)
 	if err != nil {
@@ -1756,17 +1717,13 @@ func dashboardProbe(initialDelay, period, timeout, failures int32) *Probe {
 }
 
 // dashboardMounts are the dashboard's paths: the town state read-only, the viewer
-// token as one read-only file where the page reads it, the /tmp emptyDir, the
-// claude directory read-only when one is set, and the gateway token directory
-// read-only when Values.BdGatewayURL is set.
+// token as one read-only file where the page reads it, the /tmp emptyDir, and the
+// gateway token directory read-only when Values.BdGatewayURL is set.
 func dashboardMounts(v Values) []VolumeMount {
 	m := []VolumeMount{
 		{Name: TownStateClaim, MountPath: TownRootPath, ReadOnly: true},
 		{Name: secretVolumeName(ViewerTokenFile), MountPath: dashboardViewerPath, SubPath: ViewerTokenFile, ReadOnly: true},
 		{Name: DashboardTmpVolume, MountPath: DashboardTmpPath},
-	}
-	if v.DashboardClaudeDir != "" {
-		m = append(m, VolumeMount{Name: DashboardClaudeVolume, MountPath: ClaudeHomePath, ReadOnly: true})
 	}
 	if v.BdGatewayURL != "" {
 		m = append(m, BdGatewayMount())
@@ -1775,9 +1732,8 @@ func dashboardMounts(v Values) []VolumeMount {
 }
 
 // dashboardVolumes are the dashboard's volumes: the town-state claim, the /tmp
-// emptyDir, the viewer Secret at the entry's manifest mode, the claude directory
-// as a hostPath of type Directory when one is set, and the gateway's read-class
-// token Secret when Values.BdGatewayURL is set.
+// emptyDir, the viewer Secret at the entry's manifest mode, and the gateway's
+// read-class token Secret when Values.BdGatewayURL is set.
 func dashboardVolumes(v Values) ([]Volume, error) {
 	viewer, ok := v.viewerEntry()
 	if !ok {
@@ -1792,20 +1748,10 @@ func dashboardVolumes(v Values) ([]Volume, error) {
 		{Name: DashboardTmpVolume, EmptyDir: &EmptyDirVolumeSource{}},
 		token,
 	}
-	if v.DashboardClaudeDir != "" {
-		vols = append(vols, claudeDirVolume(DashboardClaudeVolume, v.DashboardClaudeDir))
-	}
 	if v.BdGatewayURL != "" {
 		vols = append(vols, BdGatewayVolume(BdGatewayDashboardSecretName))
 	}
 	return vols, nil
-}
-
-// claudeDirVolume is the hostPath volume that carries a Mac ~/.claude directory
-// under name. The type is Directory, so a missing directory fails the pod rather
-// than creating one on the Mac.
-func claudeDirVolume(name, dir string) Volume {
-	return Volume{Name: name, HostPath: &HostPathVolumeSource{Path: dir, Type: hostPathDirectory}}
 }
 
 // dashboardSelectorLabels are what the dashboard's Deployment and Service select
@@ -2065,9 +2011,6 @@ func volumes(v Values) ([]Volume, error) {
 	if v.PolecatImage != "" {
 		vols = append(vols, polecatImageVolume())
 	}
-	if v.DaemonClaudeDir != "" {
-		vols = append(vols, claudeDirVolume(DaemonClaudeVolume, v.DaemonClaudeDir))
-	}
 	if !v.Rehearsal {
 		vols = append(vols, openShellVolume())
 	}
@@ -2230,14 +2173,6 @@ func mounts(v Values) []VolumeMount {
 			Name:      PolecatImageVolume,
 			MountPath: PolecatImagePath,
 			SubPath:   PolecatImageFile,
-			ReadOnly:  true,
-		})
-	}
-	if v.DaemonClaudeDir != "" {
-		m = append(m, VolumeMount{
-			Name:      DaemonClaudeVolume,
-			MountPath: DaemonHostClaudeProjectsPath,
-			SubPath:   DaemonClaudeProjectsSub,
 			ReadOnly:  true,
 		})
 	}
@@ -2430,33 +2365,14 @@ func (v Values) validate() error {
 	if err := v.validateTrackerBackup(); err != nil {
 		return err
 	}
-	if err := v.validateDaemonClaudeDir(); err != nil {
-		return err
-	}
 	return v.validateDaemon()
-}
-
-// validateDaemonClaudeDir refuses a claude directory the pod cannot name: the
-// pod's hostPath takes a host path, so a relative one is no directory at all.
-func (v Values) validateDaemonClaudeDir() error {
-	if v.DaemonClaudeDir != "" && !filepath.IsAbs(v.DaemonClaudeDir) {
-		return fmt.Errorf("Values.DaemonClaudeDir %q: want an absolute path, since the pod names the host directory", v.DaemonClaudeDir)
-	}
-	return nil
 }
 
 // validateDashboard refuses the dashboard values the pair cannot render. The
 // viewer token is the dashboard's only credential, so its Secret entry must be
 // in Secrets: a pod that mounts a Secret that does not exist stays in
-// ContainerCreating. The claude directory mount belongs to the dashboard, so it
-// needs Dashboard, and it must be a path the pod can name.
+// ContainerCreating.
 func (v Values) validateDashboard() error {
-	if v.DashboardClaudeDir != "" && !v.Dashboard {
-		return fmt.Errorf("Values.DashboardClaudeDir %q is set but Values.Dashboard is not: the mount belongs to the dashboard container", v.DashboardClaudeDir)
-	}
-	if v.DashboardClaudeDir != "" && !filepath.IsAbs(v.DashboardClaudeDir) {
-		return fmt.Errorf("Values.DashboardClaudeDir %q: want an absolute path, since the pod names the host directory", v.DashboardClaudeDir)
-	}
 	if !v.Dashboard {
 		return nil
 	}
