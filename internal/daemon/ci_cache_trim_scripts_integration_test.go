@@ -1174,3 +1174,104 @@ func TestIntegrationCICacheTrimLRUArguments(t *testing.T) {
 		}
 	})
 }
+
+// TestIntegrationCICacheTrimLRUContract pins the list program's contract by
+// running it, not by reading its text: a volume root that is not there is
+// refused with exit 3 and a message on stderr; an argument count other than the
+// five the daemon passes is refused with exit 2 before the program reads an
+// argument, so the status does not depend on the shell's unset-variable
+// behavior; and a successful run ends with the three reply lines in the order
+// the parser reads them: before_kib, removed, after_kib.
+func TestIntegrationCICacheTrimLRUContract(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a missing volume root exits 3 with a message", func(t *testing.T) {
+		t.Parallel()
+		missing := filepath.Join(t.TempDir(), "absent")
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", missing, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 3 {
+			t.Errorf("exit %d, want 3 for a volume root that is not there", status)
+		}
+		if stderr == "" {
+			t.Error("stderr is empty, want a message that the volume path was not found")
+		}
+		if stdout != "" {
+			t.Errorf("stdout is %q, want none", stdout)
+		}
+	})
+
+	t.Run("an argument count other than five exits 2", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		five := []string{"list", root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes)}
+		for _, tt := range []struct {
+			name string
+			args []string
+		}{
+			{name: "no argument", args: nil},
+			{name: "four arguments, without the floor", args: five[:4]},
+			{name: "six arguments, one past the floor", args: append(slices.Clone(five), "extra")},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				// ciCacheLRURun always passes the program's five arguments, so run
+				// the script through sh directly with the wrong count.
+				argv := append([]string{"-c", ciCacheLRUTrimScript, "ci-cache-trim"}, tt.args...)
+				cmd := exec.Command("/bin/sh", argv...)
+				cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout = &stdout
+				cmd.Stderr = &stderr
+				err := cmd.Run()
+				status := 0
+				if err != nil {
+					var exitErr *exec.ExitError
+					if !errors.As(err, &exitErr) {
+						t.Fatalf("running the LRU program: %v", err)
+					}
+					status = exitErr.ExitCode()
+				}
+				if status != 2 {
+					t.Errorf("exit %d with %d argument(s), want 2", status, len(tt.args))
+				}
+				if stdout.Len() != 0 {
+					t.Errorf("stdout is %q, want none", stdout.String())
+				}
+			})
+		}
+	})
+
+	t.Run("a successful reply ends with the three figures in order", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		before := ciCacheLRUBefore(t, root)
+
+		// An age past every file's, so the age rule selects nothing and only the
+		// cut selects a known set; cap 0 makes the excess the whole volume.
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "600", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+		if len(lines) < 3 {
+			t.Fatalf("the LRU program printed %d line(s), want a reply at least:\n%s", len(lines), stdout)
+		}
+		for i, key := range []string{"before_kib", "removed", "after_kib"} {
+			if line := lines[len(lines)-3+i]; !strings.HasPrefix(line, key+"=") {
+				t.Errorf("the reply's line %d is %q, want %s=N", i+1, line, key)
+			}
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		if reply.beforeKiB != before {
+			t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+		}
+		if reply.removed != int64(len(files)) {
+			t.Errorf("removed = %d, want one per file line, %d", reply.removed, len(files))
+		}
+		if reply.afterKiB != reply.beforeKiB {
+			t.Errorf("after_kib = %d, want before_kib, %d: the list removes nothing", reply.afterKiB, reply.beforeKiB)
+		}
+	})
+}

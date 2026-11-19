@@ -240,6 +240,10 @@ fi
 // Go touches a cache file's mtime when it uses it, so the oldest mtime is the
 // least recently used.
 //
+// It takes exactly those five arguments and refuses any other count with exit 2
+// before it reads one: an unset $5 would otherwise end the shell with a status
+// that differs by shell, 2 in dash and 1 in bash and busybox ash.
+//
 // The program lists once and sorts once. The floor is the one bound of the
 // listing (find -mmin +floor), so a file younger than the floor is not in the
 // list and nothing after it can select one, whatever the cap or the age. The
@@ -262,6 +266,7 @@ fi
 // sh, stat and find (ci_cache_trim_scripts_integration_test.go), and the Go that
 // builds its arguments is a unit test.
 const ciCacheLRUTrimScript = `set -eu
+[ "$#" -eq 5 ] || { echo "the program takes five arguments" >&2; exit 2; }
 mode=$1; root=$2; age=$3; cap=$4; floor=$5
 [ "$mode" = list ] || { echo "the mode $mode is not this program's: only list" >&2; exit 2; }
 [ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
