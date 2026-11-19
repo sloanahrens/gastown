@@ -10,19 +10,29 @@ package daemon
 // seat-end copy-out reads it through, and hands what it finds to the filing
 // seam: the read outbox is validated as the seat end validates it, and the
 // escalation request it carries is filed as the seat (gt-nvii5d, gt-dq4ce6).
-// Deduping a request a tick reads again is gt-0ghqvp.
+// A request an earlier tick already filed is skipped by its content hash, which
+// the poll also keeps in a small file under the town's .runtime so a restarted
+// daemon does not file it again (gt-0ghqvp).
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -147,8 +157,8 @@ func (d *Daemon) outboxPollFiling() outboxPollFileFunc {
 //
 // A read the validator refuses, and an escalation the store refuses, are
 // returned for the tick to log with the seat named, and nothing is filed for
-// them. The next tick reads the seat again while its record lives (gt-0ghqvp
-// dedupes a request across ticks).
+// them. They are not recorded as filed either, so the next tick reads the seat
+// again and tries again while its record lives (gt-0ghqvp).
 func (h *patrolScanHost) fileOutboxPollRequest(_ context.Context, req outboxPollRequest) error {
 	decoded, err := outbox.Validate(req.Result, req.Notes, req.Bead)
 	if err != nil {
@@ -163,13 +173,9 @@ func (h *patrolScanHost) fileOutboxPollRequest(_ context.Context, req outboxPoll
 	// escalation alone. StatusDone is the status on which Apply writes no
 	// status: the seat still runs, and its end sets it.
 	carried := outbox.Result{Status: outbox.StatusDone, Escalation: decoded.Escalation}
-	// A tick hands this request to the seat end's filing path every time it
-	// reads the seat's outbox, for as long as that seat's record lives: the
-	// seat end's fingerprint leaves an escalation that is still open alone, but
-	// the poll keeps no memory of what an earlier tick read. Deduping a request
-	// across ticks is gt-0ghqvp, and that ordering is by design. The poll is
-	// off by default, and it must not be enabled before gt-0ghqvp lands
-	// (gt-dq4ce6).
+	// The poll calls this once per request content: readAndFile skips a request
+	// an earlier tick filed (gt-0ghqvp), so this runs again only for a request
+	// whose content changed, or for one an earlier filing refused.
 	return outbox.Apply(store, req.Bead, outbox.Seat{Actor: seat.Address(), Worker: seat.Name}, "", carried, outbox.OriginTip{})
 }
 
@@ -180,22 +186,29 @@ var errOutboxPollNoFilingSeam = errors.New("no filing seam is wired, so no seat 
 
 // outboxPoll is one tick's reader: the town whose sandbox records name the
 // running seats, the exec that reads each outbox, and the filing seam the
-// reads are handed to.
+// reads are handed to. filed is the poll's record of the requests it has
+// already filed, by content hash (gt-0ghqvp).
 type outboxPoll struct {
 	townRoot string
 	exec     outboxPollExec
 	file     outboxPollFileFunc
+	filed    *outboxPollFiled
 	logger   *log.Logger
 	timeout  time.Duration
 }
 
 // newOutboxPoll returns the poll a tick runs. A zero timeout is
-// outboxPollSeatTimeout.
+// outboxPollSeatTimeout. A poll with a town root keeps the requests it files
+// in that town's .runtime, and a poll without one reads no seat at all.
 func newOutboxPoll(townRoot string, exec outboxPollExec, file outboxPollFileFunc, logger *log.Logger, timeout time.Duration) *outboxPoll {
 	if timeout <= 0 {
 		timeout = outboxPollSeatTimeout
 	}
-	return &outboxPoll{townRoot: townRoot, exec: exec, file: file, logger: logger, timeout: timeout}
+	poll := &outboxPoll{townRoot: townRoot, exec: exec, file: file, logger: logger, timeout: timeout}
+	if townRoot != "" {
+		poll.filed = newOutboxPollFiled(outboxPollFiledPath(townRoot))
+	}
+	return poll
 }
 
 // liveOutboxPoll returns the poll a tick runs in production: every running
@@ -212,9 +225,10 @@ func (d *Daemon) liveOutboxPoll() *outboxPoll {
 
 // tick reads every running seat's outbox once and hands each one it finds to
 // the filing seam. A failure of the whole read — no town root, no exec seam, no
-// filing seam, a registry that cannot be listed — is the tick's error and no
-// seat is read. One seat's failure is logged and skipped: one wedged sandbox
-// says nothing about the rest.
+// filing seam, no record of what it has filed that it can read, a registry that
+// cannot be listed — is the tick's error and no seat is read. One seat's
+// failure is logged and skipped: one wedged sandbox says nothing about the
+// rest.
 func (p *outboxPoll) tick(ctx context.Context) error {
 	if p.townRoot == "" {
 		return errors.New("no town root, so no seat is read")
@@ -224,6 +238,16 @@ func (p *outboxPoll) tick(ctx context.Context) error {
 	}
 	if p.file == nil {
 		return errOutboxPollNoFilingSeam
+	}
+	if p.filed == nil {
+		return errors.New("no record of the requests the poll filed, so no seat is read")
+	}
+	// A poll that cannot read what it filed cannot tell a new request from one
+	// it already filed, so it reads no seat: filing everything again is the
+	// duplicate the poll exists to avoid, and the seat end still files the
+	// outbox when the seat ends.
+	if err := p.filed.load(); err != nil {
+		return err
 	}
 	logf := func(format string, args ...any) {
 		if p.logger != nil {
@@ -247,10 +271,11 @@ func (p *outboxPoll) tick(ctx context.Context) error {
 	return nil
 }
 
-// readAndFile reads one seat's outbox and hands it to the filing seam. A read
-// that fails or does not parse, and a filing the seam refuses, are logged with
-// the seat named and change nothing else: the next tick reads the seat again
-// while its record lives.
+// readAndFile reads one seat's outbox and hands it to the filing seam, unless
+// a tick already filed this exact request. A read that fails or does not parse,
+// and a filing the seam refuses, are logged with the seat named and change
+// nothing else: the next tick reads the seat again while its record lives. A
+// refused request is not recorded as filed, so that next tick tries it again.
 func (p *outboxPoll) readAndFile(ctx context.Context, rec session.SandboxRecord, logf func(string, ...any)) {
 	text, err := p.readOutbox(ctx, rec.Session)
 	if err != nil {
@@ -279,8 +304,26 @@ func (p *outboxPoll) readAndFile(ctx context.Context, rec session.SandboxRecord,
 		Result:  read.result,
 		Notes:   read.notes,
 	}
+	hash := outboxPollRequestHash(req)
+	filed, err := p.filed.has(hash)
+	if err != nil {
+		logf("outbox_poll: seat %s: its outbox is not filed: %v", rec.Session, err)
+		return
+	}
+	if filed {
+		return
+	}
 	if err := p.file(ctx, req); err != nil {
 		logf("outbox_poll: seat %s: its outbox is not filed: %v", rec.Session, err)
+		return
+	}
+	// The request is filed; recording it is what keeps the next tick, and a
+	// restarted daemon, from filing it again. A record that cannot be written is
+	// logged and the request counts as filed for this process: the file is
+	// rewritten whole on the next record, and until then the seat end's
+	// fingerprint leaves the open escalation alone.
+	if err := p.filed.record(hash); err != nil {
+		logf("outbox_poll: seat %s: its request is filed, but the poll could not record it, so a restarted poll files it again: %v", rec.Session, err)
 	}
 }
 
@@ -604,4 +647,143 @@ func (d *Daemon) stopOutboxPollPatrol(stop func()) {
 	case <-timer.C:
 		d.logger.Printf("outbox_poll: a tick is still running %s after the ticker stopped; Run leaves without it", bound)
 	}
+}
+
+// outboxPollFiledPath is the file a poll records the requests it has filed in:
+// <town>/.runtime/outbox-poll/filed.json. It sits in the town's runtime rather
+// than in its bead store because it is the daemon's own memory of what it
+// already did, not a record about the town (gt-0ghqvp).
+func outboxPollFiledPath(townRoot string) string {
+	return filepath.Join(constants.TownRuntimePath(townRoot), "outbox-poll", "filed.json")
+}
+
+// outboxPollRequestHash is the content hash one request is deduped by: the seat
+// and the identity the request is filed under, and the bytes of the two outbox
+// files the seat wrote. Each field is length-prefixed, so no two different
+// requests can spell the same hash by moving a byte from one field into the
+// next. A seat that changes either file has written a different request, and a
+// seat that writes the same bytes again has not.
+func outboxPollRequestHash(req outboxPollRequest) string {
+	h := sha256.New()
+	fields := [][]byte{[]byte(req.Seat), []byte(req.Rig), []byte(req.Polecat), []byte(req.Bead), req.Result, req.Notes}
+	for _, field := range fields {
+		h.Write([]byte(strconv.Itoa(len(field)) + ":"))
+		h.Write(field)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// outboxPollFiledFile is the file's shape: every request hash the poll has
+// filed, as lowercase hex, in sorted order.
+type outboxPollFiledFile struct {
+	Filed []string `json:"filed"`
+}
+
+// outboxPollFiled is the poll's record of the requests it has filed, by content
+// hash: the set in memory, and the file under the town's .runtime that carries
+// it to a poll built later, which is how a restarted daemon skips what an
+// earlier one filed (gt-0ghqvp).
+//
+// The poll is built for each tick it runs, so the memory serves the seats of
+// one tick; the file is what an earlier tick, and a restarted daemon, reads.
+// A town runs one daemon, which is the file's only writer. The file holds one
+// 64-character hash per distinct request content the poll filed and is never
+// pruned: a seat's outbox usually changes a few times while it runs, and each
+// change is a request of its own.
+type outboxPollFiled struct {
+	path string
+
+	mu     sync.Mutex
+	loaded bool
+	err    error
+	hashes map[string]struct{}
+}
+
+// newOutboxPollFiled returns the record of one poll's filed requests, reading
+// path when it is first asked.
+func newOutboxPollFiled(path string) *outboxPollFiled {
+	return &outboxPollFiled{path: path}
+}
+
+// load reads the file into memory, once. A file that is not there is a poll
+// that has filed nothing yet; a file that cannot be read or does not parse is
+// an error, never an empty set: a poll that forgot what it filed would file
+// every request again. The failure is remembered for the poll's life, so a
+// tick's read costs at most one attempt.
+func (f *outboxPollFiled) load() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.loadLocked()
+}
+
+func (f *outboxPollFiled) loadLocked() error {
+	if f.loaded {
+		return f.err
+	}
+	f.loaded = true
+	body, err := os.ReadFile(f.path)
+	if errors.Is(err, os.ErrNotExist) {
+		f.hashes = make(map[string]struct{})
+		return nil
+	}
+	if err != nil {
+		f.err = fmt.Errorf("reading the requests the poll has filed, %s: %w", f.path, err)
+		return f.err
+	}
+	var file outboxPollFiledFile
+	if err := json.Unmarshal(body, &file); err != nil {
+		f.err = fmt.Errorf("the poll's filed requests in %s do not parse: %w", f.path, err)
+		return f.err
+	}
+	f.hashes = make(map[string]struct{}, len(file.Filed))
+	for _, hash := range file.Filed {
+		f.hashes[hash] = struct{}{}
+	}
+	return nil
+}
+
+// has reports whether hash is a request the poll already filed.
+func (f *outboxPollFiled) has(hash string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.loadLocked(); err != nil {
+		return false, err
+	}
+	_, ok := f.hashes[hash]
+	return ok, nil
+}
+
+// record remembers hash and writes the whole set back to the file. The hash is
+// remembered even when the write fails, so this process does not file the
+// request again and the next record's write carries it: a failed write is
+// returned for the tick to log, never dropped, and never read as an unrecorded
+// request.
+func (f *outboxPollFiled) record(hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.loadLocked(); err != nil {
+		return err
+	}
+	f.hashes[hash] = struct{}{}
+	return f.writeLocked()
+}
+
+// writeLocked replaces the file with the set: a reader sees either the previous
+// set or this one, never a half-written file. The directory is the poll's own
+// and private, and the file is replaced through atomicfile, which writes a temp
+// file beside it and renames it over.
+func (f *outboxPollFiled) writeLocked() error {
+	hashes := make([]string, 0, len(f.hashes))
+	for hash := range f.hashes {
+		hashes = append(hashes, hash)
+	}
+	sort.Strings(hashes)
+	dir := filepath.Dir(f.path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating %s: %w", dir, err)
+	}
+	if err := atomicfile.WriteJSONWithPerm(f.path, outboxPollFiledFile{Filed: hashes}, 0o600); err != nil {
+		return fmt.Errorf("writing the poll's filed requests to %s: %w", f.path, err)
+	}
+	return nil
 }
