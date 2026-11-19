@@ -138,6 +138,7 @@ type CallLog struct {
 	ch   chan []byte
 	done chan struct{}
 
+	dir      string
 	now      func() time.Time
 	prefixes map[string]bool
 	policy   *Policy
@@ -189,6 +190,7 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 	l := &CallLog{
 		ch:       make(chan []byte, opts.Buffer),
 		done:     make(chan struct{}),
+		dir:      opts.Dir,
 		now:      now,
 		prefixes: prefixes,
 		policy:   opts.Policy,
@@ -296,6 +298,10 @@ func (l *CallLog) Stats() Stats {
 	}
 	return Stats{Calls: l.calls, Errors: l.errors, Dropped: l.dropped, Verbs: verbs}
 }
+
+// Dir is the directory the live log is written in; GET /v1/calls reads the
+// recent entries from the same one, so the reader cannot be pointed at another.
+func (l *CallLog) Dir() string { return l.dir }
 
 // Close stops the writer after the lines already queued, and returns the first
 // write error seen.

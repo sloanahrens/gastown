@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,15 +17,17 @@ import (
 
 // The gateway's HTTP surface, the one the design's "The gateway protocol"
 // section names: POST /v1/exec runs one bd call, /healthz and /readyz answer
-// health, PUT /v1/workspace takes the workspace tree and GET /v1/stats the
-// counters. The command in cmd/bdgw builds a Gateway from the pieces and serves
-// it; exec mode reuses the same policy, executor and call log without HTTP.
+// health, PUT /v1/workspace takes the workspace tree, GET /v1/stats the
+// counters and GET /v1/calls the call log's recent entries. The command in
+// cmd/bdgw builds a Gateway from the pieces and serves it; exec mode reuses the
+// same policy, executor and call log without HTTP.
 const (
 	execPath      = "/v1/exec"
 	healthPath    = "/healthz"
 	readyPath     = "/readyz"
 	workspacePath = "/v1/workspace"
 	statsPath     = "/v1/stats"
+	callsPath     = "/v1/calls"
 )
 
 // The refusal codes a JSON refusal carries. The forwarder shows them to the
@@ -188,6 +192,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveWorkspace(w, r)
 	case statsPath:
 		g.serveStats(w, r)
+	case callsPath:
+		g.serveCalls(w, r)
 	default:
 		refuse(w, http.StatusNotFound, codeNotFound, "no such endpoint")
 	}
@@ -372,6 +378,80 @@ func (g *Gateway) serveStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, statsBody{Stats: g.log.Stats(), CapSnapshot: g.caps.CapStats()})
+}
+
+// The bounds GET /v1/calls applies to its limit. A caller's window is refused
+// rather than clamped when it is out of bounds, so a dashboard never shows
+// fewer entries than it asked for and believes it saw them all.
+const (
+	// defaultCallsLimit is how many entries one request returns when it names
+	// no limit.
+	defaultCallsLimit = 200
+	// maxCallsLimit is the most entries one request may ask for.
+	maxCallsLimit = 500
+	// callsLogUnreadableMessage is what GET /v1/calls answers when the log
+	// exists but cannot be read. It is fixed: the read error names the log's
+	// host path, which the caller does not carry.
+	callsLogUnreadableMessage = "the gateway could not read its call log"
+)
+
+// callsBody is GET /v1/calls's answer: the entries ReadCalls returned and the
+// log's dropped counter, so a dashboard can tell a quiet window from a log that
+// lost lines.
+type callsBody struct {
+	Calls   []CallEntry `json:"calls"`
+	Dropped uint64      `json:"dropped"`
+}
+
+// serveCalls is GET /v1/calls: the recent entries the call log holds, which
+// the dashboard's activity pane follows.
+func (g *Gateway) serveCalls(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	ident, err := g.auth.Authenticate(r.Header.Get("Authorization"))
+	if err != nil {
+		refuseAuth(w, err)
+		return
+	}
+	if err := ident.Require(ClassRead); err != nil {
+		refuse(w, http.StatusForbidden, codeForbidden, err.Error())
+		return
+	}
+	since, limit, err := callsQuery(r.URL.Query())
+	if err != nil {
+		refuse(w, http.StatusBadRequest, codeBadRequest, err.Error())
+		return
+	}
+	calls, err := ReadCalls(g.log.Dir(), since, limit)
+	if err != nil {
+		refuse(w, http.StatusInternalServerError, codeInternal, callsLogUnreadableMessage)
+		return
+	}
+	writeJSON(w, http.StatusOK, callsBody{Calls: calls, Dropped: g.log.Stats().Dropped})
+}
+
+// callsQuery reads GET /v1/calls's since and limit. An absent since is the zero
+// time, which every stamped entry follows; an absent limit is
+// defaultCallsLimit.
+func callsQuery(q url.Values) (time.Time, int, error) {
+	var since time.Time
+	if s := q.Get("since"); s != "" {
+		parsed, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return time.Time{}, 0, errors.New("since is not an RFC3339 time")
+		}
+		since = parsed
+	}
+	limit := defaultCallsLimit
+	if s := q.Get("limit"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 1 || n > maxCallsLimit {
+			return time.Time{}, 0, fmt.Errorf("limit is not a whole number from 1 to %d", maxCallsLimit)
+		}
+		limit = n
+	}
+	return since, limit, nil
 }
 
 // requireMethod answers 405 when the request's method is not want, and reports
