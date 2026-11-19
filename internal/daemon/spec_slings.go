@@ -642,11 +642,17 @@ func (d *Daemon) failSpecSling(f specSlingFlight, reason string, killedAtBound b
 	note := "spec-dispatch: " + reason + "; excluded from the queue until label " + constants.LabelSpecDispatchFailed + " is cleared"
 	// The pair the timeout retry reads goes with this failure: a bead killed at
 	// its bound and then failing for a reason of its own is that reason's bead,
-	// and the retry must not sling it again.
+	// and the retry must not sling it again. A spent contention goes the same
+	// way, or its label and schedule would hold the bead past a pause for a
+	// reason that is no longer its own (gt-nnq9a2).
 	d.beadWrite(f, "bead", "update", f.Bead,
 		"--add-label", constants.LabelSpecDispatchFailed,
 		"--remove-label", specdispatch.TimeoutLabel,
-		"--unset-metadata", specdispatch.TimeoutAttemptsKey)
+		"--unset-metadata", specdispatch.TimeoutAttemptsKey,
+		"--remove-label", specdispatch.ContentionLabel,
+		"--unset-metadata", specdispatch.ContentionFirstKey,
+		"--unset-metadata", specdispatch.ContentionAttemptsKey,
+		"--unset-metadata", specdispatch.ContentionRetryAtKey)
 	d.beadWrite(f, "bead", "note", f.Bead, note)
 }
 

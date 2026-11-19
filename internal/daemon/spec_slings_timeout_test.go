@@ -103,7 +103,11 @@ func TestAFailureOfItsOwnDropsTheTimeoutRetry(t *testing.T) {
 	want := []string{"bead", "update", "gt-z",
 		"--add-label", "spec-dispatch-failed",
 		"--remove-label", specdispatch.TimeoutLabel,
-		"--unset-metadata", specdispatch.TimeoutAttemptsKey}
+		"--unset-metadata", specdispatch.TimeoutAttemptsKey,
+		"--remove-label", specdispatch.ContentionLabel,
+		"--unset-metadata", specdispatch.ContentionFirstKey,
+		"--unset-metadata", specdispatch.ContentionAttemptsKey,
+		"--unset-metadata", specdispatch.ContentionRetryAtKey}
 	if got := fake.argvs("bead", "update"); len(got) != 1 || !slices.Equal(got[0], want) {
 		t.Errorf("bead updates = %v, want %v", got, want)
 	}

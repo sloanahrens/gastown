@@ -211,6 +211,40 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	return f
 }
 
+// dropContention takes the contention label and the schedule off a bead, as
+// production's specDropContentionFrom does (gt-nnq9a2). It removes the
+// label and the three contention keys and nothing else, so a test can assert
+// that the bead's other labels and metadata survive. A test wires it as the
+// env's writer: the fake's own env drops nothing by default, so a test that
+// asserts the drop is the one that asked for it.
+func (f *fakeSpecTown) dropContention(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.specs[id]
+	fields := map[string]any{}
+	if len(s.Metadata) > 0 {
+		if err := json.Unmarshal(s.Metadata, &fields); err != nil {
+			return err
+		}
+	}
+	delete(fields, specdispatch.ContentionFirstKey)
+	delete(fields, specdispatch.ContentionAttemptsKey)
+	delete(fields, specdispatch.ContentionRetryAtKey)
+	if len(fields) == 0 {
+		s.Metadata = nil
+	} else {
+		meta, err := json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		s.Metadata = meta
+	}
+	s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.ContentionLabel })
+	f.specs[id] = s
+	f.labels[id] = slices.DeleteFunc(f.labels[id], func(l string) bool { return l == specdispatch.ContentionLabel })
+	return nil
+}
+
 // productionCandidates is the tick's candidate read run through the production
 // board read: specCandidatesWith over specReadyBoardFrom, with the fake's split
 // beads on the split list and its other beads on the ready list. The split
@@ -3482,9 +3516,9 @@ func TestAFailedSlingDropsTheTimeoutRetry(t *testing.T) {
 
 	var report specDispatchReport
 	specApplyOutcome(env, &report, specSlingOutcome{
-		kind:  specSlingFailed,
-		entry: specDispatchEntry{Bead: "gt-a"},
-		label: specdispatch.DispatchFailedLabel,
+		kind:   specSlingFailed,
+		entry:  specDispatchEntry{Bead: "gt-a"},
+		labels: []string{specdispatch.DispatchFailedLabel},
 	})
 
 	if !slices.Equal(dropped, []string{"gt-a"}) {
@@ -3506,9 +3540,9 @@ func TestAFailedSlingReportsAFailedTimeoutDrop(t *testing.T) {
 
 	var report specDispatchReport
 	specApplyOutcome(env, &report, specSlingOutcome{
-		kind:  specSlingFailed,
-		entry: specDispatchEntry{Bead: "gt-a"},
-		label: specdispatch.DispatchFailedLabel,
+		kind:   specSlingFailed,
+		entry:  specDispatchEntry{Bead: "gt-a"},
+		labels: []string{specdispatch.DispatchFailedLabel},
 	})
 
 	if len(report.Errors) != 1 || !strings.Contains(report.Errors[0], "dolt: connection refused") {

@@ -363,6 +363,7 @@ func specSlingEnv(townRoot, cacheOwner string, traces *specSlingTraces) specDisp
 		ClearLockTimeout:  clearLockTimeout,
 		RecordContention:  recordContention,
 		ClearContention:   clearContention,
+		DropContention:    specDropContention(townRoot),
 		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
 			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
 		}),

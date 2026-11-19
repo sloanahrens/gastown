@@ -2027,6 +2027,11 @@ type specDispatchEnv struct {
 	// so the dispatcher does not sling that bead again on a kill's retries
 	// (gt-vaivp). Nil drops nothing.
 	DropTimeoutRetry func(beadID string) error
+	// DropContention removes the contention label and the schedule a spent
+	// contention left on a bead. A failure of any other kind calls it, so the
+	// bead's last reason is the failure a person clears (gt-nnq9a2). Nil drops
+	// nothing.
+	DropContention func(beadID string) error
 	// RecordLockTimeout writes the consecutive assignee-lock-timeout count a
 	// deferred sling leaves on its bead, and ClearLockTimeout drops it when the
 	// bead's next outcome is not another timeout (gt-a4cdcd). A Record that
@@ -2230,6 +2235,28 @@ func specContentionStore(townRoot string) (record func(beadID string, rec specdi
 		})
 	}
 	return record, clear
+}
+
+// specDropContention clears the contention label and the schedule a bead's
+// spent contention left on it, so a failure of another kind is the only reason
+// it carries (gt-nnq9a2).
+func specDropContention(townRoot string) func(beadID string) error {
+	return func(id string) error {
+		return specDropContentionFrom(beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id)), id)
+	}
+}
+
+// specDropContentionFrom is specDropContention over a store the caller
+// supplies, so a test runs the drop against a fake instead of a live bd.
+func specDropContentionFrom(b beads.Client, beadID string) error {
+	return b.Update(beadID, beads.UpdateOptions{
+		RemoveLabels: []string{specdispatch.ContentionLabel},
+		UnsetMetadata: []string{
+			specdispatch.ContentionFirstKey,
+			specdispatch.ContentionAttemptsKey,
+			specdispatch.ContentionRetryAtKey,
+		},
+	})
 }
 
 // specContentionOf is the contention schedule a bead's metadata records, nil
@@ -3123,14 +3150,16 @@ type specPendingSling struct {
 
 // specSlingOutcome is what one sling produced, applied to the report in
 // candidate order after every sling of the tick has returned. The writes a
-// sling owes the bead (the failed label, the notes) are collected here and
+// sling owes the bead (its labels and notes) are collected here and
 // made on the tick's goroutine, so the report and the bead writes keep the
 // candidate order and the env's writers are never called concurrently.
 type specSlingOutcome struct {
 	kind  specSlingKind
 	entry specDispatchEntry
-	label string      // a label to add to the bead, when set
-	notes [][2]string // Annotate key, text pairs
+	// labels are added to the bead, in order. A spent contention carries two:
+	// the failed label and the contention one (gt-nnq9a2).
+	labels []string
+	notes  [][2]string // Annotate key, text pairs
 	// recordLockTimeout is the consecutive assignee-lock-timeout count to
 	// write on the bead, 0 when this outcome owes none (gt-a4cdcd).
 	recordLockTimeout int
@@ -3221,7 +3250,8 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 }
 
 // specApplyOutcome adds one sling's outcome to the report and makes the writes
-// the sling owes its bead: the failed label and the notes (specSlingOutcome).
+// the sling owes its bead: its labels, the contention and timeout drops, and
+// the notes (specSlingOutcome).
 // A failed background sling goes through it too, so it labels its bead as a
 // foreground failure does (gt-5h70s).
 func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSlingOutcome) {
@@ -3243,8 +3273,8 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 		// a person instead of deferred on a retry nothing remembers (gt-a4cdcd).
 		if err := env.recordLockTimeout(o.entry.Bead, o.recordLockTimeout); err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: recording the lock timeout count: %v", o.entry.Bead, err))
-			if o.label == "" {
-				o.label = specdispatch.DispatchFailedLabel
+			if len(o.labels) == 0 {
+				o.labels = []string{specdispatch.DispatchFailedLabel}
 			}
 		}
 	} else if o.clearLockTimeout {
@@ -3269,16 +3299,26 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: clearing the contention retry: %v", o.entry.Bead, err))
 		}
 	}
-	if o.label != "" {
-		if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
+	for _, label := range o.labels {
+		if err := env.AddLabel(o.entry.Bead, label); err != nil {
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
 		}
+	}
+	if slices.Contains(o.labels, specdispatch.DispatchFailedLabel) {
 		// A failure that is not a kill at the bound spends the retries an
 		// earlier kill left on the bead: its label stays for a person, as any
 		// other failure's does (gt-vaivp).
-		if o.label == specdispatch.DispatchFailedLabel && env.DropTimeoutRetry != nil {
+		if env.DropTimeoutRetry != nil {
 			if err := env.DropTimeoutRetry(o.entry.Bead); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: dropping the timeout retry: %v", o.entry.Bead, err))
+			}
+		}
+		// A failure of another kind also ends a contended run: the schedule
+		// would otherwise hold the bead past the pause under a reason that is
+		// no longer its own (gt-nnq9a2).
+		if !slices.Contains(o.labels, specdispatch.ContentionLabel) && env.DropContention != nil {
+			if err := env.DropContention(o.entry.Bead); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: dropping the contention retry: %v", o.entry.Bead, err))
 			}
 		}
 	}
@@ -3405,14 +3445,15 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true})
 		}
-		// Contention that outlasted every retry is a deferral, not a failure:
-		// the label this path would add excludes the bead until an operator
-		// clears it, and contention clears by itself. The next tick's fresh
-		// re-read refuses a bead with an assignee, so a sling that hooked the
-		// bead before its error is not slung twice (gt-9x16z). The attempt may
-		// have hooked it, so the seat stays charged for this tick (gt-pto2f).
-		// The loss is dated on the bead's schedule: the attempt and the time
-		// its retry is owed (gt-kmkpao).
+		// Contention that outlasted this sling's retries while the schedule's
+		// window still holds is a deferral, not a failure: the label this path
+		// would add excludes the bead until an operator clears it, and
+		// contention clears by itself. The next tick's fresh re-read refuses a
+		// bead with an assignee, so a sling that hooked the bead before its
+		// error is not slung twice (gt-9x16z). The attempt may have hooked it,
+		// so the seat stays charged for this tick (gt-pto2f). The loss is dated
+		// on the bead's schedule: the attempt and the time its retry is owed
+		// (gt-kmkpao).
 		if specdispatch.IsSerializationFailure(err) {
 			planned := specdispatch.ContentionState{}
 			if p.contention != nil {
@@ -3424,10 +3465,30 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 					id, next.RetryAt.Format(time.RFC3339), next.Attempts)
 				return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, recordContention: &next})
 			}
-			// A spent schedule, or one that cannot be read, defers the bead as
-			// it did before the schedule existed (gt-kmkpao).
-			entry.Line = fmt.Sprintf("%s: sling deferred, %v after %d attempts: %s", id, specdispatch.ErrRetriesExhausted, attempts, firstErrLine(err))
-			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+			// A spent schedule is the host's contention outlasting every retry
+			// the bead is owed: it is held for a person under its own label,
+			// beside the failed one, and the time a retry is owed is dated on it
+			// (gt-nnq9a2). The note promises nothing past that: the reader that
+			// re-admits the bead once retry_at has passed is gt-5udj56's work.
+			// A schedule that cannot be read is held the same way, so a run
+			// nothing can trust is never retried blind. A retry_at that cannot
+			// be written leaves the bead labeled and held, which is the
+			// fail-safe side (the apply reports it).
+			next.RetryAt = env.Now().Add(specdispatch.ContentionPause)
+			retryAt := next.RetryAt.Format(time.RFC3339)
+			why := fmt.Sprintf("database contention outlasted the %s schedule; held under %s, retry_at %s",
+				specdispatch.ContentionWindow, specdispatch.ContentionLabel, retryAt)
+			excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
+			failLine := fmt.Sprintf("%s: dispatch failed, %s: %s; %s", id, why, firstErrLine(err), excluded)
+			entry.Line = failLine
+			note := specDispatchNotePrefix + failLine
+			return done(specSlingOutcome{
+				kind:             specSlingFailed,
+				entry:            entry,
+				labels:           []string{specdispatch.DispatchFailedLabel, specdispatch.ContentionLabel},
+				recordContention: &next,
+				notes:            [][2]string{{note, note}},
+			})
 		}
 		// A bond that could not take the town bond lock within its wait never
 		// reached bd, so this is not Dolt contention and no retry of it can
@@ -3483,7 +3544,7 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			note := specDispatchNotePrefix + failLine
 			// recordLockTimeout stays 0, so done() clears the count: a person
 			// who clears this label gives the bead a fresh set of retries.
-			return done(specSlingOutcome{kind: specSlingFailed, entry: entry, label: specdispatch.DispatchFailedLabel, notes: [][2]string{{note, note}}})
+			return done(specSlingOutcome{kind: specSlingFailed, entry: entry, labels: []string{specdispatch.DispatchFailedLabel}, notes: [][2]string{{note, note}}})
 		}
 		// A failed sling is not known to have spawned nothing: a hook or a
 		// session start can fail after it took effect, and the rollback is
@@ -3492,7 +3553,7 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, firstErrLine(err), excluded)
 		entry.Line = failLine
 		note := specDispatchNotePrefix + failLine
-		return done(specSlingOutcome{kind: specSlingFailed, entry: entry, label: specdispatch.DispatchFailedLabel, notes: [][2]string{{note, note}}})
+		return done(specSlingOutcome{kind: specSlingFailed, entry: entry, labels: []string{specdispatch.DispatchFailedLabel}, notes: [][2]string{{note, note}}})
 	}
 	entry.Polecat = polecat
 	entry.Line = fmt.Sprintf("%s: slung to %s/%s on %s (%s)", id, c.Rig, polecat, seat.Agent, seat.Reason)
@@ -4209,6 +4270,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		ClearLockTimeout:  clearLockTimeout,
 		RecordContention:  recordContention,
 		ClearContention:   clearContention,
+		DropContention:    specDropContention(townRoot),
 		LockTimeoutRecorded: specLockTimeoutRecorded(func(id string) beads.Client {
 			reads.call()
 			return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
