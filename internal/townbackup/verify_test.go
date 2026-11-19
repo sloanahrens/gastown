@@ -15,6 +15,7 @@ type arcEntry struct {
 	name string
 	typ  byte
 	data string
+	link string
 }
 
 // gzipTar builds a gzip-compressed tar archive from entries.
@@ -30,25 +31,7 @@ func gzipTarTrailing(t *testing.T, trailing int, entries ...arcEntry) []byte {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(zw)
-	for _, e := range entries {
-		hdr := &tar.Header{Name: e.name, Mode: 0o644, Typeflag: e.typ}
-		if hdr.Typeflag == tar.TypeDir {
-			hdr.Mode = 0o755
-		} else {
-			if hdr.Typeflag == 0 {
-				hdr.Typeflag = tar.TypeReg
-			}
-			hdr.Size = int64(len(e.data))
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			t.Fatalf("writing header %s: %v", e.name, err)
-		}
-		if hdr.Typeflag == tar.TypeReg {
-			if _, err := tw.Write([]byte(e.data)); err != nil {
-				t.Fatalf("writing %s: %v", e.name, err)
-			}
-		}
-	}
+	writeEntries(t, tw, entries...)
 	if err := tw.Close(); err != nil {
 		t.Fatalf("closing the tar stream: %v", err)
 	}
@@ -61,6 +44,62 @@ func gzipTarTrailing(t *testing.T, trailing int, entries ...arcEntry) []byte {
 		t.Fatalf("closing the gzip stream: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// gzipTarFlushed builds a gzip stream whose tar stream stops after the last
+// entry, without the two zero end blocks: a write cut at a block boundary
+// leaves the archive looking like this.
+func gzipTarFlushed(t *testing.T, entries ...arcEntry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	writeEntries(t, tw, entries...)
+	if err := tw.Flush(); err != nil {
+		t.Fatalf("flushing the tar stream: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing the gzip stream: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// writeEntries writes each entry in the shape its type calls for.
+func writeEntries(t *testing.T, tw *tar.Writer, entries ...arcEntry) {
+	t.Helper()
+	for _, e := range entries {
+		hdr := &tar.Header{Name: e.name, Typeflag: e.typ}
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			hdr.Mode = 0o755
+		case tar.TypeSymlink, tar.TypeLink:
+			hdr.Linkname = e.link
+		case tar.TypeChar, tar.TypeBlock:
+			hdr.Mode = 0o600
+			hdr.Devmajor, hdr.Devminor = 1, 1
+		case tar.TypeFifo:
+			hdr.Mode = 0o600
+		case tar.TypeXGlobalHeader:
+			// A global header carries only PAX records; the writer names it
+			// itself when Name is empty.
+			hdr.Format = tar.FormatPAX
+			hdr.PAXRecords = map[string]string{"comment": "verify"}
+		default:
+			if hdr.Typeflag == 0 {
+				hdr.Typeflag = tar.TypeReg
+			}
+			hdr.Mode = 0o644
+			hdr.Size = int64(len(e.data))
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("writing header %s: %v", e.name, err)
+		}
+		if hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeCont {
+			if _, err := tw.Write([]byte(e.data)); err != nil {
+				t.Fatalf("writing %s: %v", e.name, err)
+			}
+		}
+	}
 }
 
 // gzipped compresses data without a tar stream behind it.
@@ -97,10 +136,11 @@ func TestVerifyAcceptsATownArchive(t *testing.T) {
 		identity,
 		{name: "settings/config.json", data: `{"theme":"dark"}`},
 		{name: "rigs/gastown/config.json", data: `{"name":"gastown"}`},
+		{name: "settings/link.json", typ: tar.TypeSymlink, link: "config.json"},
 	}
 	var want Result
 	for _, e := range files {
-		if e.typ != tar.TypeDir {
+		if e.typ == 0 || e.typ == tar.TypeReg {
 			want.Files++
 			want.Bytes += int64(len(e.data))
 		}
@@ -135,8 +175,8 @@ func TestVerifyRefuses(t *testing.T) {
 		},
 		{
 			name:    "truncated gzip in the middle",
-			data:    truncate(gzipTar(t, identity, arcEntry{name: "settings/config.json", data: strings.Repeat("x", 4096)})),
-			wantErr: "",
+			data:    cutInHalf(gzipTar(t, identity)),
+			wantErr: "reading the archive",
 		},
 		{
 			name:    "file body cut short",
@@ -146,7 +186,12 @@ func TestVerifyRefuses(t *testing.T) {
 		{
 			name:    "truncated gzip trailer",
 			data:    dropTrailer(gzipTar(t, identity)),
-			wantErr: "",
+			wantErr: "reading the gzip stream to its end",
+		},
+		{
+			name:    "missing end blocks",
+			data:    gzipTarFlushed(t, identity),
+			wantErr: "ends without its end blocks",
 		},
 		{
 			name:    "data after the tar end blocks beyond the bound",
@@ -164,6 +209,21 @@ func TestVerifyRefuses(t *testing.T) {
 			wantErr: "has no " + identityFile,
 		},
 		{
+			name:    "absolute entry name",
+			data:    gzipTar(t, arcEntry{name: "/" + identityFile, data: "{}"}),
+			wantErr: "is absolute",
+		},
+		{
+			name:    "entry name with ..",
+			data:    gzipTar(t, arcEntry{name: "mayor/../town.json", data: "{}"}),
+			wantErr: "contains ..",
+		},
+		{
+			name:    "entry name with an empty segment",
+			data:    gzipTar(t, arcEntry{name: "settings//x.json", data: "{}"}),
+			wantErr: "empty or",
+		},
+		{
 			name:    "secret-shaped file",
 			data:    gzipTar(t, identity, arcEntry{name: "settings/daemon.env", data: "HOST=x\n"}),
 			wantErr: "settings/daemon.env has the shape of a secret",
@@ -172,6 +232,16 @@ func TestVerifyRefuses(t *testing.T) {
 			name:    "secret-shaped directory",
 			data:    gzipTar(t, identity, arcEntry{name: "settings/secrets/", typ: tar.TypeDir}),
 			wantErr: "settings/secrets has the shape of a secret",
+		},
+		{
+			name:    "secret-shaped symlink name",
+			data:    gzipTar(t, identity, arcEntry{name: "settings/daemon.key", typ: tar.TypeSymlink, link: "config.json"}),
+			wantErr: "settings/daemon.key has the shape of a secret",
+		},
+		{
+			name:    "symlink to a secret-shaped target",
+			data:    gzipTar(t, identity, arcEntry{name: "settings/link.json", typ: tar.TypeSymlink, link: "secrets/daemon.env"}),
+			wantErr: "settings/link.json links to secrets/daemon.env, which has the shape of a secret",
 		},
 		{
 			name:    "credential in a JSON body",
@@ -202,14 +272,44 @@ func TestVerifyRefuses(t *testing.T) {
 			if got != (Result{}) {
 				t.Errorf("Result = %+v on refusal, want the zero Result", got)
 			}
-			if c.wantErr == "" {
-				return
-			}
 			if !strings.Contains(err.Error(), c.wantErr) {
 				t.Errorf("error %q does not name %q", err, c.wantErr)
 			}
 			if c.notIn != "" && strings.Contains(err.Error(), c.notIn) {
 				t.Errorf("error %q prints the credential value %q", err, c.notIn)
+			}
+		})
+	}
+}
+
+// TestVerifyRefusesEntryTypes pins that a type an import would refuse is
+// refused here, named with its type, before its content can go unscanned.
+func TestVerifyRefusesEntryTypes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		desc  string
+		entry arcEntry
+		// name is the entry name as the tar reader reports it.
+		name string
+		typ  string
+	}{
+		{"hard link", arcEntry{name: "settings/link.json", typ: tar.TypeLink, link: identity.name}, "settings/link.json", "a hard link"},
+		{"contiguous file", arcEntry{name: "settings/blob", typ: tar.TypeCont, data: "x"}, "settings/blob", "a contiguous file"},
+		{"character device", arcEntry{name: "settings/dev", typ: tar.TypeChar}, "settings/dev", "a character device"},
+		{"block device", arcEntry{name: "settings/dev", typ: tar.TypeBlock}, "settings/dev", "a block device"},
+		{"fifo", arcEntry{name: "settings/pipe", typ: tar.TypeFifo}, "settings/pipe", "a fifo"},
+		{"pax global header", arcEntry{typ: tar.TypeXGlobalHeader}, "GlobalHead.0.0", "a pax global header"},
+	}
+	for _, c := range cases {
+		t.Run(c.desc, func(t *testing.T) {
+			t.Parallel()
+			_, err := Verify(writeArchive(t, gzipTar(t, identity, c.entry)))
+			if err == nil {
+				t.Fatal("Verify accepted an entry of a type an import refuses")
+			}
+			want := "entry " + c.name + " has type " + c.typ
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
 			}
 		})
 	}
@@ -274,8 +374,8 @@ func paddedCredential(size int) string {
 	return head + strings.Repeat(" ", size-len(head))
 }
 
-// truncate cuts data in half, as a transfer that stopped midway would.
-func truncate(data []byte) []byte {
+// cutInHalf cuts data in half, as a transfer that stopped midway would.
+func cutInHalf(data []byte) []byte {
 	return data[:len(data)/2]
 }
 
