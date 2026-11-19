@@ -10,7 +10,12 @@ import (
 	"os/exec"
 	"sync"
 	"testing"
+	"time"
 )
+
+// integrationBound is the longest a test of the real scripts may run; the context it
+// bounds kills a hung sh.
+const integrationBound = 30 * time.Second
 
 // execRunner runs argv for real, with stdin, as the pod exec does, so the store's
 // scripts run through /bin/sh here.
@@ -44,7 +49,8 @@ func assertOnlyHold(t *testing.T, dir string) {
 // TestIntegrationHoldCreateIsExclusive: two creates started together give one nil and
 // one ErrExists, the file holds the winner's content, and no temp file is left.
 func TestIntegrationHoldCreateIsExclusive(t *testing.T) {
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), integrationBound)
+	defer cancel()
 	store, dir := integrationStore(t)
 	contents := []string{"roll a\nowner=a token=t-a at=x", "roll b\nowner=b token=t-b at=x"}
 	gate, ready := make(chan struct{}), make(chan struct{}, 2)
@@ -59,10 +65,15 @@ func TestIntegrationHoldCreateIsExclusive(t *testing.T) {
 			errs[i] = store.Create(ctx, contents[i])
 		}()
 	}
-	<-ready
-	<-ready
+	for range 2 {
+		select {
+		case <-ready:
+		case <-ctx.Done():
+			t.Fatal("a create goroutine never started within the bound")
+		}
+	}
 	close(gate)
-	wg.Wait()
+	wg.Wait() // a hung sh is killed by ctx, so Create returns and this ends
 
 	winner := -1
 	for i, err := range errs {
@@ -83,7 +94,8 @@ func TestIntegrationHoldCreateIsExclusive(t *testing.T) {
 
 // TestIntegrationHoldReadClassifies: Read tells a missing, an own and another's file apart.
 func TestIntegrationHoldReadClassifies(t *testing.T) {
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), integrationBound)
+	defer cancel()
 	store, dir := integrationStore(t)
 	if _, present, err := store.Read(ctx); err != nil || present {
 		t.Fatalf("Read of a missing file = present %v, err %v; want absent", present, err)
