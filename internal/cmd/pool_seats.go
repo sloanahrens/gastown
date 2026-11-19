@@ -1233,6 +1233,7 @@ func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead string, n
 	return poolSession{
 		name:        "dead/" + rigName + "/" + name,
 		agent:       slungAgent(rec, fallbackAgent),
+		sandbox:     session.PolecatSessionName(beads.GetPrefixForRig(townRoot, rigName), name),
 		rig:         rigName,
 		polecat:     name,
 		deadHooked:  !stale,

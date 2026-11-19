@@ -1527,6 +1527,7 @@ func poolDeadHookedSessionsBeforeTheSplit(townRoot string, pool *config.PolecatP
 			out = append(out, poolSession{
 				name:        "dead/" + rigName + "/" + name,
 				agent:       slungAgent(rec, fallback(rigName)),
+				sandbox:     session.PolecatSessionName(beads.GetPrefixForRig(townRoot, rigName), name),
 				rig:         rigName,
 				polecat:     name,
 				deadHooked:  !stale,

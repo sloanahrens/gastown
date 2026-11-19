@@ -363,6 +363,12 @@ func TestDispatchRosterSeats(t *testing.T) {
 		// sit inside its parentheses (gt-5y87fp).
 		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session, gastown/b:claim)", []townhealth.DispatchSeat{{Live: 9, Cap: 8}}, false},
 		{"claude-sonnet 2/2, total 2/10 (extra)", []townhealth.DispatchSeat{{Live: 2, Cap: 2}}, false},
+		// The tick appends the pool reconciliation's notes after "; ". The notes
+		// are not seats, and their commas sit outside any parentheses, so they
+		// are cut before the seats are split (gt-nsbeg9).
+		{"claude-sonnet 1/2; uncounted sandboxes: gt-a:WORKING, gt-b:idle-clean", []townhealth.DispatchSeat{{Live: 1, Cap: 2}}, false},
+		{"claude-sonnet 1/2, total 1/3; counted without a sandbox: gt-a:NEEDS_RECOVERY", []townhealth.DispatchSeat{{Live: 1, Cap: 2}}, false},
+		{"no seats; sandbox listing unavailable", nil, false},
 		// A roster the daemon cannot read in full must not read as a full
 		// town, so each unreadable shape is reported rather than dropped
 		// (gt-xiw7o).

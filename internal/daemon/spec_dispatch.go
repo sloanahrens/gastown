@@ -458,6 +458,12 @@ func (d *Daemon) dispatchTickRecords() []townhealth.DispatchTick {
 // (gt-xiw7o).
 func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 	roster = strings.TrimSpace(roster)
+	// The tick appends the pool reconciliation's notes after "; " (gt-nsbeg9):
+	// the notes are not seats, and their commas sit outside any parentheses, so
+	// left in they would make a readable picture read as unreadable.
+	if i := strings.Index(roster, "; "); i >= 0 {
+		roster = strings.TrimSpace(roster[:i])
+	}
 	if roster == "" {
 		return nil, true
 	}
