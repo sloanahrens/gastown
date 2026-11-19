@@ -40,8 +40,8 @@ var (
 	ErrBadReason = errors.New("landing hold reason is not one line of at most 120 characters")
 	// ErrBadOwner refuses an owner that cannot sit in the owner= field.
 	ErrBadOwner = errors.New("landing hold owner is blank or has a space or control character")
-	// ErrRewritten means Release found the file without this hold's token. The
-	// file is left in place.
+	// ErrRewritten means Release found the file without this hold's token, or
+	// malformed. The file is left in place.
 	ErrRewritten = errors.New("landing hold was rewritten by someone else; left in place")
 	// ErrGone means the file is absent and this hold did not remove it.
 	ErrGone = errors.New("landing hold is already gone; this hold did not remove it")
@@ -113,13 +113,26 @@ func takeWith(ctx context.Context, store HoldStore, owner, reason string, now ti
 // Release gives the hold back. It removes the file only while the file still
 // carries this hold's token. A second call after a successful release does
 // nothing and returns nil. A file that is gone without this hold removing it is
-// ErrGone, and a file with another token is ErrRewritten. Both leave the file
-// alone and are never success.
+// ErrGone, and a file with another token, or malformed, is ErrRewritten. Both
+// leave the file alone and are never success.
 //
 // Read and Remove are two calls, and the store cannot make the removal depend on
 // the token. A rewrite between the read and the removal is removed with the
 // file. The window is the length of one round trip to the store.
 func (h *Hold) Release(ctx context.Context) error {
+	return h.release(ctx, false)
+}
+
+// ReleaseForce is Release for an operator who has decided the hold goes. It also
+// removes a malformed file: one whose second line lacks an owner=, token= or at=
+// field, so no later Release could ever match it. A well-formed file with another
+// token is still left in place and reported as ErrRewritten.
+func (h *Hold) ReleaseForce(ctx context.Context) error {
+	return h.release(ctx, true)
+}
+
+// release is Release, and ReleaseForce when force is set.
+func (h *Hold) release(ctx context.Context, force bool) error {
 	if h.released {
 		return nil
 	}
@@ -130,8 +143,8 @@ func (h *Hold) Release(ctx context.Context) error {
 	if !present {
 		return ErrGone
 	}
-	if !carriesToken(content, h.Token) {
-		_, first := splitHold(content)
+	if !carriesToken(content, h.Token) && (!force || wellFormed(content)) {
+		first, _ := splitHold(content)
 		return fmt.Errorf("%w (its first line is %q)", ErrRewritten, first)
 	}
 	if err := h.store.Remove(ctx); err != nil {
@@ -157,20 +170,22 @@ func heldBy(ctx context.Context, store HoldStore) error {
 	if !present {
 		return errors.New("runnerroll: the landing hold changed while it was being taken; retry")
 	}
-	rest, first := splitHold(content)
-	return fmt.Errorf("%w: %q (owner %s)", ErrHeldByOther, first, ownerOf(rest))
+	first, second := splitHold(content)
+	return fmt.Errorf("%w: %q (owner %s)", ErrHeldByOther, first, ownerOf(second))
 }
 
-// splitHold splits the file into its second line and its first line.
-func splitHold(content string) (rest, first string) {
-	first, rest, _ = strings.Cut(content, "\n")
-	return rest, first
+// splitHold returns the file's first line and its second line. A later line is
+// not part of the hold, so it is cut off.
+func splitHold(content string) (first, second string) {
+	first, rest, _ := strings.Cut(content, "\n")
+	second, _, _ = strings.Cut(rest, "\n")
+	return first, second
 }
 
 // ownerOf is the owner= field of the second line, or "unknown" when the line has
 // none. The token is left out: an error message does not carry it.
-func ownerOf(rest string) string {
-	for _, f := range strings.Fields(rest) {
+func ownerOf(line string) string {
+	for _, f := range strings.Fields(line) {
 		if owner, ok := strings.CutPrefix(f, "owner="); ok && owner != "" {
 			return owner
 		}
@@ -184,8 +199,23 @@ func carriesToken(content, token string) bool {
 	if token == "" {
 		return false
 	}
-	rest, _ := splitHold(content)
-	return slices.Contains(strings.Fields(rest), "token="+token)
+	_, second := splitHold(content)
+	return slices.Contains(strings.Fields(second), "token="+token)
+}
+
+// wellFormed reports whether the second line has a non-empty owner=, token= and
+// at= field.
+func wellFormed(content string) bool {
+	_, second := splitHold(content)
+	fields := strings.Fields(second)
+	for _, key := range []string{"owner=", "token=", "at="} {
+		if !slices.ContainsFunc(fields, func(f string) bool {
+			return len(f) > len(key) && strings.HasPrefix(f, key)
+		}) {
+			return false
+		}
+	}
+	return true
 }
 
 // checkReason refuses a reason that is blank, has a newline or other control
@@ -250,14 +280,15 @@ func NewPodStore(townRoot string, run Runner) (HoldStore, error) {
 	return &podStore{run: run, path: path.Join(townRoot, landingHoldName)}, nil
 }
 
-// createScript writes stdin to $1 only if $1 does not exist: set -C makes the
-// redirection fail on an existing file. It prints "created", or "exists" when
-// the file is there, and fails otherwise.
-const createScript = `set -C
-if cat > "$1" 2>/dev/null; then echo created
-elif [ -e "$1" ]; then echo exists
-else echo failed; exit 1
-fi`
+// createScript writes stdin to a temp file beside $1, then publishes it with ln,
+// which fails when $1 exists. So $1 appears whole or not at all. The temp file is
+// removed on every path the script returns by. It prints "created", or "exists"
+// when the file is there, and fails otherwise.
+const createScript = `tmp=$(mktemp "$1.XXXXXX") || { echo failed; exit 1; }
+if ! cat > "$tmp"; then rm -f "$tmp"; echo failed; exit 1; fi
+if ln "$tmp" "$1" 2>/dev/null; then rm -f "$tmp"; echo created; exit 0; fi
+rm -f "$tmp"
+if [ -e "$1" ]; then echo exists; else echo failed; exit 1; fi`
 
 // Create runs createScript. The reply is classified by what the script printed.
 func (s *podStore) Create(ctx context.Context, content string) error {

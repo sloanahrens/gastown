@@ -305,6 +305,7 @@ func TestHoldReleaseLeavesRewrittenFile(t *testing.T) {
 		"prefix of token":      "overseer pause\nowner=ops token=tok-10 at=2026-11-19T13:00:00Z",
 		"token only in reason": "tok-1\nowner=ops token=tok-2 at=2026-11-19T13:00:00Z",
 		"no second line":       "overseer pause",
+		"token on third line":  "overseer pause\nowner=ops token=tok-2 at=x\ntoken=tok-1",
 	}
 	for name, rewritten := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -321,6 +322,30 @@ func TestHoldReleaseLeavesRewrittenFile(t *testing.T) {
 				t.Fatalf("file = %q with %d removes, want the rewritten file left alone", store.content, store.removes)
 			}
 		})
+	}
+}
+
+// TestHoldCarriesTokenReadsOnlySecondLine: a token on a later line is not the hold's.
+func TestHoldCarriesTokenReadsOnlySecondLine(t *testing.T) {
+	t.Parallel()
+	if carriesToken("roll\nowner=a at=x\ntoken=tok-2", "tok-2") {
+		t.Fatal("carriesToken matched a token on the third line")
+	}
+}
+
+// TestHoldReleaseForceRemovesOnlyMalformed: ReleaseForce removes a malformed file and
+// leaves a well-formed file with another token.
+func TestHoldReleaseForceRemovesOnlyMalformed(t *testing.T) {
+	t.Parallel()
+	store, other := &fakeStore{}, &fakeStore{}
+	h, h2 := takeFixed(t, store), takeFixed(t, other)
+	store.content = "overseer pause\nowner=ops at=x"
+	other.content = "overseer pause\nowner=ops token=tok-2 at=x"
+	if err := h.ReleaseForce(context.Background()); err != nil || store.present {
+		t.Fatalf("ReleaseForce of a malformed file = %v, present %v; want it removed", err, store.present)
+	}
+	if err := h2.ReleaseForce(context.Background()); !errors.Is(err, ErrRewritten) || !other.present || other.removes != 0 {
+		t.Fatalf("ReleaseForce of another's file = %v; want ErrRewritten with the file left", err)
 	}
 }
 
