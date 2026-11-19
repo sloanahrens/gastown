@@ -83,6 +83,7 @@ dindResources:
 		{"malformed yaml", "labels: [\n", "values.control.yaml"},
 		{"no labels", "forgejoHostIP: \"10.0.0.7\"\n", "Values.Labels"},
 		{"a second document", valid + "---\ncapacity: 3\n", "one YAML document"},
+		{"a second document that does not parse", valid + "---\nlabels: [\n", "values.control.yaml"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
