@@ -150,6 +150,9 @@ type diskMaintSeams struct {
 	// the Actions retention step; nil is the landing worker's configured directory
 	// or the default, which fails only when no home directory resolves.
 	actionsTokenDir func() (string, error)
+	// sweepRunsFS is the filesystem the sweep-runs prune lists and removes
+	// through; nil is the operating system's.
+	sweepRunsFS sweepRunsFileSystem
 }
 
 // diskMaintenanceSeams returns d's patrol seams with every unset one filled in
@@ -199,6 +202,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.actionsTokenDir == nil {
 		s.actionsTokenDir = func() (string, error) { return landingWorkerConfig(d.patrol()).ForgejoTokenDir() }
+	}
+	if s.sweepRunsFS == nil {
+		s.sweepRunsFS = osSweepRunsFS{}
 	}
 	return s
 }
@@ -529,6 +535,7 @@ func (d *Daemon) runDiskMaintenance() {
 	// it is ticked before the quiet guard that holds the targets back (gt-gg9hv.57).
 	d.runCICacheTrimTick()
 	d.runCIEnginePruneTick()
+	d.runSweepRunsPruneTick()
 
 	due, errs := d.diskMaintenanceDue(now)
 	for _, err := range errs {

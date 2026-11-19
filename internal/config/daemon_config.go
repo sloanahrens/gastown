@@ -1583,6 +1583,16 @@ type DiskMaintenanceConfig struct {
 	// DiskMaintenanceDefaultCIEngineKeepRepos; an explicit empty list is refused,
 	// because it would leave the base images unprotected.
 	CIEngineKeepRepos []string `json:"ci_engine_keep_repos,omitempty"`
+	// SweepRunsPruneInterval is how often the tier-sweep output directories
+	// under .runtime/sweep-runs/<rig> are planned for pruning, in any window.
+	// Empty means DiskMaintenanceDefaultSweepRunsPruneInterval.
+	SweepRunsPruneInterval string `json:"sweep_runs_prune_interval,omitempty"` // Go duration such as "6h"
+	// SweepRunsKeep is how many of a rig's newest sweep run directories are
+	// kept whatever their age. Nil means DiskMaintenanceDefaultSweepRunsKeep.
+	SweepRunsKeep *int `json:"sweep_runs_keep,omitempty"` // count such as 30
+	// SweepRunsMinAge is how old a sweep run directory must be before it may be
+	// removed. Empty means DiskMaintenanceDefaultSweepRunsMinAge.
+	SweepRunsMinAge string `json:"sweep_runs_min_age,omitempty"` // Go duration such as "72h"
 	// ActionsRetention is the Forgejo Actions run retention step. Nil means the
 	// step does not run at all; a block with enabled false is a dry run.
 	ActionsRetention *DiskMaintenanceActionsRetention `json:"actions_retention,omitempty"`
@@ -1739,6 +1749,49 @@ func (c DiskMaintenanceConfig) CIEnginePruneAgeDuration() (time.Duration, error)
 	age, err := parseDiskMaintenanceCadence(raw)
 	if err != nil {
 		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_prune_age: %w", err)
+	}
+	return age, nil
+}
+
+// SweepRunsPruneEvery returns the cadence the sweep-runs prune plans on: the
+// default when the setting is empty, and an error naming the setting for a value
+// the patrol cannot schedule. It never falls back to the default on an error.
+func (c DiskMaintenanceConfig) SweepRunsPruneEvery() (time.Duration, error) {
+	raw := c.SweepRunsPruneInterval
+	if raw == "" {
+		raw = DiskMaintenanceDefaultSweepRunsPruneInterval
+	}
+	every, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.sweep_runs_prune_interval: %w", err)
+	}
+	return every, nil
+}
+
+// SweepRunsKeepCount returns how many of a rig's newest sweep run directories are
+// kept: the default when unset, and an error naming the setting for a value below
+// one. It never falls back to the default on an error.
+func (c DiskMaintenanceConfig) SweepRunsKeepCount() (int, error) {
+	if c.SweepRunsKeep == nil {
+		return DiskMaintenanceDefaultSweepRunsKeep, nil
+	}
+	if *c.SweepRunsKeep < 1 {
+		return 0, fmt.Errorf("patrols.disk_maintenance.sweep_runs_keep = %d: want at least 1", *c.SweepRunsKeep)
+	}
+	return *c.SweepRunsKeep, nil
+}
+
+// SweepRunsMinAgeDuration returns how old a sweep run directory must be before it
+// may be removed: the default when the setting is empty, and an error naming the
+// setting for a value the patrol cannot use.
+func (c DiskMaintenanceConfig) SweepRunsMinAgeDuration() (time.Duration, error) {
+	raw := c.SweepRunsMinAge
+	if raw == "" {
+		raw = DiskMaintenanceDefaultSweepRunsMinAge
+	}
+	age, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.sweep_runs_min_age: %w", err)
 	}
 	return age, nil
 }
@@ -1906,6 +1959,16 @@ const (
 	// DiskMaintenanceDefaultCIEnginePruneAge is how long an unused image may sit
 	// before the engine prune removes it (gt-i02983).
 	DiskMaintenanceDefaultCIEnginePruneAge = "48h"
+	// DiskMaintenanceDefaultSweepRunsPruneInterval is the sweep-runs prune's
+	// cadence: the tier sweep writes a run directory per sweep, and a day of them
+	// is a few hours of disk.
+	DiskMaintenanceDefaultSweepRunsPruneInterval = "6h"
+	// DiskMaintenanceDefaultSweepRunsKeep is how many of a rig's newest sweep run
+	// directories the prune keeps whatever their age.
+	DiskMaintenanceDefaultSweepRunsKeep = 30
+	// DiskMaintenanceDefaultSweepRunsMinAge is how old a sweep run directory must
+	// be before the prune may remove it.
+	DiskMaintenanceDefaultSweepRunsMinAge = "72h"
 	// DiskMaintenanceDefaultActionsRetentionDays is how old a Forgejo Actions run
 	// must be before the retention step may delete it: the runs table grows
 	// without bound otherwise (gt-573420).
@@ -1996,6 +2059,15 @@ func (c *DiskMaintenanceConfig) validate() error {
 		return err
 	}
 	if _, err := c.CIEngineKeepRepoList(); err != nil {
+		return err
+	}
+	if _, err := c.SweepRunsPruneEvery(); err != nil {
+		return err
+	}
+	if _, err := c.SweepRunsKeepCount(); err != nil {
+		return err
+	}
+	if _, err := c.SweepRunsMinAgeDuration(); err != nil {
 		return err
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Targets)) {

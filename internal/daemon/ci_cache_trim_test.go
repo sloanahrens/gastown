@@ -137,6 +137,9 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	// the trim above is (gt-i02983).
 	patrol.Patrols.DiskMaintenance.CIEnginePruneInterval = "1000h"
 	d.diskMaintSchedule.record(ciEnginePruneName, ciCacheTestStart)
+	// The sweep-runs prune is held the same way (gt-hhxczt).
+	patrol.Patrols.DiskMaintenance.SweepRunsPruneInterval = "1000h"
+	d.diskMaintSchedule.record(sweepRunsPruneName, ciCacheTestStart)
 	d.diskMaint.dispatch = func(fn func()) { f.pending = append(f.pending, fn) }
 	f.d = d
 	return f
