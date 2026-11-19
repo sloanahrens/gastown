@@ -159,11 +159,12 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	// itself carries is always sent, since the caller that supplied it means bd to
 	// read it.
 	var stdin io.Reader
+	sendsStdin := false
 	switch {
 	case call.Stdin != nil:
-		stdin = call.Stdin
+		stdin, sendsStdin = call.Stdin, true
 	case g.Stdin != nil && bdReadsStdin(call.Argv[1:]):
-		stdin = g.Stdin
+		stdin, sendsStdin = g.Stdin, true
 	default:
 		stdin = strings.NewReader("")
 	}
@@ -183,10 +184,14 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	}
 	// A gateway roll restarts the gateway, so a dial can be refused for a moment
 	// while a call is on its way. A refused dial never reached the gateway, so the
-	// call cannot have run: it is tried again on RetrySchedule's waits. A refused
-	// attempt never read the body, so the caller's stdin is still whole for the
-	// attempt that connects, and it is delivered once. A non-retryable error, a
-	// timeout and an answer, whatever its status, are each tried exactly once.
+	// call cannot have run: it is tried again on RetrySchedule's waits. A read
+	// call whose transport failed mid-call may have reached the gateway, so it is
+	// sent again on the same waits when RetryableRead allows it: it sent no stdin
+	// and wrote no output, so a second run repeats nothing. Both kinds draw on one
+	// budget. A refused attempt never read the body, so the caller's stdin is still
+	// whole for the attempt that connects, and it is delivered once. A mid-call
+	// failure of a write call, or of a read call that sent stdin, is not retried;
+	// nor is a non-retryable error or an answer, whatever its status.
 	delays := RetrySchedule(gatewayRetryTotal)
 	doer := g.doer(g.clientTimeout())
 	started := g.now()
@@ -195,7 +200,10 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	for {
 		attempts++
 		resp, err = doer.Do(newRequest())
-		if err == nil || !RetryableDial(err) || attempts > len(delays) {
+		// wroteOutput is false: the answer's frames are read only after Do returns,
+		// so a Do that failed has written nothing to the caller's streams.
+		if err == nil || attempts > len(delays) ||
+			!(RetryableDial(err) || RetryableRead(err, call.Argv[1:], sendsStdin, false)) {
 			break
 		}
 		g.sleep(delays[attempts-1])
