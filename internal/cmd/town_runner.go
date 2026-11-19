@@ -24,21 +24,35 @@ import (
 // rollOwner is the owner the roll writes into the landing hold.
 const rollOwner = "roll"
 
-// releaseBound bounds the release of the hold. The release runs after a signal
-// has canceled the roll's context, so it gets a context of its own.
-const releaseBound = time.Minute
-
-// rollApplier is step 4 of the roll: it applies the runner's manifests, waits
-// for the rollout, and compares the render with the live cluster for --dry-run.
+// rollApplier is what the runner roll's target does: write the runner's
+// manifests, wait for the rollout, and compare the render with the live cluster
+// for --dry-run.
 type rollApplier interface {
 	// Wired returns an error when the applier has no seam it needs, so the roll
 	// refuses before it takes the hold.
 	Wired() error
+	// Apply writes the runner's manifests.
 	Apply(ctx context.Context) error
+	// WaitReady waits for the Deployment's rollout and its Available condition.
+	WaitReady(ctx context.Context) error
 	// Diff returns the runner drift compare's lines, each prefixed with the
 	// resource it describes. It reads the cluster and writes nothing.
 	Diff(ctx context.Context) ([]string, error)
 }
+
+// runnerTarget is the runner as runnerroll.Run's target.
+type runnerTarget struct {
+	applier rollApplier
+}
+
+// Name names the runner in the roll's messages.
+func (t runnerTarget) Name() string { return "runner" }
+
+func (t runnerTarget) Diff(ctx context.Context) ([]string, error) { return t.applier.Diff(ctx) }
+
+func (t runnerTarget) Apply(ctx context.Context) error { return t.applier.Apply(ctx) }
+
+func (t runnerTarget) WaitReady(ctx context.Context) error { return t.applier.WaitReady(ctx) }
 
 // readyConditionJSONPath reads the Deployment's Available condition: the one
 // the API server sets when the Deployment has its minimum availability.
@@ -91,10 +105,10 @@ func (a runnerApplier) manifests() (forgejorunner.Manifests, error) {
 	return m, nil
 }
 
-// Apply writes the ConfigMap, then the two claims, then the Deployment, and
-// waits for the rollout and the Deployment's readiness. A build, an apply or a
-// wait that fails returns an error, so the roll stops and leaves the caller to
-// release the hold. The Recreate strategy rolls the pod; this never deletes it.
+// Apply writes the ConfigMap, then the two claims, then the Deployment. A build
+// or an apply that fails returns an error, so the roll stops and leaves the
+// caller to release the hold. The Recreate strategy rolls the pod; this never
+// deletes it.
 func (a runnerApplier) Apply(ctx context.Context) error {
 	m, err := a.manifests()
 	if err != nil {
@@ -114,6 +128,18 @@ func (a runnerApplier) Apply(ctx context.Context) error {
 		if err := a.apply(ctx, object.kind, object.name, object.object); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// WaitReady waits for the Deployment's rollout within rolloutWait, then reads
+// its Available condition. It renders the manifests again to find the
+// Deployment, so it reads the values a second time and holds no state between
+// the two steps.
+func (a runnerApplier) WaitReady(ctx context.Context) error {
+	m, err := a.manifests()
+	if err != nil {
+		return err
 	}
 	return a.waitReady(ctx, m.Deployment.Metadata.Namespace, m.Deployment.Metadata.Name)
 }
@@ -206,7 +232,7 @@ type runnerRollDeps struct {
 	store       runnerroll.HoldStore
 	holdPath    string
 	landing     func(ctx context.Context) (pause string, passes int, known bool, err error)
-	runs        func(ctx context.Context) ([]runnerroll.Run, error)
+	runs        func(ctx context.Context) ([]runnerroll.WorkflowRun, error)
 	clock       runnerroll.Clock
 	now         func() time.Time
 	signals     rollSignals
@@ -365,113 +391,41 @@ func (d runnerRollDeps) rollContext() (context.Context, context.CancelFunc) {
 	}
 }
 
-// runTownRunnerRoll runs the roll's five steps under a context its signal source
-// cancels. The landing hold is released by a defer, so every exit after the take
-// releases it. A release failure is returned unless the roll already failed.
-func runTownRunnerRoll(d runnerRollDeps) (err error) {
-	if d.landingWait <= 0 || d.runsWait <= 0 {
-		return fmt.Errorf("the waits must be longer than zero: --landing-wait %s, --runs-wait %s", d.landingWait, d.runsWait)
+// runTownRunnerRoll runs the roll over the runner: runnerroll.Run owns the
+// steps, and this supplies the runner's seams, its step names and its target.
+func runTownRunnerRoll(d runnerRollDeps) error {
+	if d.apply == nil {
+		return errors.New("the roll has no applier, so it cannot apply the runner")
 	}
-	if d.dryRun {
-		fmt.Fprintln(d.out, "dry run: no hold is taken and nothing is applied; the runner is compared with the live cluster")
-		for n := 1; n <= 5; n++ {
-			fmt.Fprintf(d.out, "step %d/5: %s\n", n, d.step(n))
-		}
-		// A dry run that cannot compare must not exit 0: an applier missing a
-		// seam cannot report the runner in step.
-		if werr := d.apply.Wired(); werr != nil {
-			return werr
-		}
-		ctx, stop := d.rollContext()
-		defer stop()
-		diffs, err := d.apply.Diff(ctx)
-		if err != nil {
-			return fmt.Errorf("comparing the runner with the live cluster: %w", err)
-		}
-		if len(diffs) == 0 {
-			fmt.Fprintln(d.out, "no differences: the live runner matches the rendered manifests")
-			return nil
-		}
-		fmt.Fprintln(d.out, "the live runner differs from the rendered manifests:")
-		for _, line := range diffs {
-			fmt.Fprintln(d.out, line)
-		}
-		return nil
+	// Refuse before the hold: an applier missing a seam it needs would otherwise
+	// fail halfway through.
+	if err := d.apply.Wired(); err != nil {
+		return err
 	}
-	// Refuse before the hold: an unwired apply means the roll must not start.
-	if werr := d.apply.Wired(); werr != nil {
-		return werr
-	}
-	// Refuse before the hold here too: a roll missing any seam must not take it.
-	if d.store == nil || d.landing == nil || d.runs == nil || d.clock == nil || d.now == nil || d.signals == nil {
-		return errors.New("the roll has no signal source, landing hold store or wait reads wired, so it cannot take the hold")
+	// A roll with no signal source cannot stop on Ctrl-C, and the hold it took
+	// would outlive the process.
+	if !d.dryRun && d.signals == nil {
+		return errors.New("the roll has no signal source, so an interrupted roll could not stop listening")
 	}
 	ctx, stop := d.rollContext()
 	defer stop()
-
-	fmt.Fprintf(d.out, "step 1/5: %s\n", d.step(1))
-	hold, err := runnerroll.Take(ctx, d.store, rollOwner, runnerroll.RollPause, d.now())
-	if err != nil {
-		return fmt.Errorf("taking the landing hold: %w", err)
+	deps := runnerroll.RollDeps{
+		Store:    d.store,
+		HoldPath: d.holdPath,
+		Owner:    rollOwner,
+		Reason:   runnerroll.RollPause,
+		Landing:  d.landing,
+		Runs:     d.runs,
+		Clock:    d.clock,
+		Now:      d.now,
+		Out:      d.out,
 	}
-	defer func() {
-		fmt.Fprintf(d.out, "step 5/5: %s\n", d.step(5))
-		if rerr := d.releaseHold(ctx, hold); rerr != nil && err == nil {
-			err = rerr
-		}
-	}()
-
-	fmt.Fprintf(d.out, "step 2/5: %s\n", d.step(2))
-	if err := runnerroll.WaitLandingIdle(ctx, d.landing, d.clock, d.landingWait, d.out); err != nil {
-		return fmt.Errorf("waiting for the landing pass: %w", err)
+	opts := runnerroll.RollOptions{
+		LandingWait: d.landingWait,
+		RunsWait:    d.runsWait,
+		RolloutWait: d.rolloutWait,
+		DryRun:      d.dryRun,
+		Step:        d.step,
 	}
-
-	fmt.Fprintf(d.out, "step 3/5: %s\n", d.step(3))
-	if err := runnerroll.WaitRunsIdle(ctx, d.runs, d.clock, d.runsWait, d.out); err != nil {
-		return fmt.Errorf("waiting for the gate and post-land runs: %w", err)
-	}
-
-	fmt.Fprintf(d.out, "step 4/5: %s\n", d.step(4))
-	if err := d.apply.Apply(ctx); err != nil {
-		return fmt.Errorf("applying the runner: %w", err)
-	}
-	return nil
-}
-
-// releaseHold gives the hold back on a context the roll's cancellation does not
-// reach, with its own bound. After a failed release it reads the hold again and
-// prints what to do by whose hold it is now.
-func (d runnerRollDeps) releaseHold(ctx context.Context, hold *runnerroll.Hold) error {
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseBound)
-	defer cancel()
-	err := hold.Release(rctx)
-	if err == nil {
-		return nil
-	}
-	d.printHoldAdvice(ctx, hold)
-	return fmt.Errorf("releasing the landing hold: %w", err)
-}
-
-// printHoldAdvice reads the landing hold again and prints what is there and what
-// to do about it. Only a hold this roll still owns gets a removal command: another
-// roll's hold, a file that is not a whole hold, a file already gone and an
-// unreadable file are each reported as they were found.
-func (d runnerRollDeps) printHoldAdvice(ctx context.Context, hold *runnerroll.Hold) {
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseBound)
-	defer cancel()
-	view, err := hold.Inspect(rctx)
-	switch {
-	case err != nil:
-		fmt.Fprintf(d.out, "the landing hold could not be read back: %v; it was left in place\n", err)
-	case view.State == runnerroll.HoldOwn:
-		fmt.Fprintf(d.out, "the landing hold is still this roll's; remove it with: rm -f -- %s\n", d.holdPath)
-	case view.State == runnerroll.HoldOther:
-		fmt.Fprintf(d.out, "the landing hold is held by owner %q with reason %q; do not remove it; ask that roll\n", view.Owner, view.Reason)
-	case view.State == runnerroll.HoldMalformed:
-		fmt.Fprintf(d.out, "the landing hold is not a whole hold (its first line is %q); it was left in place\n", view.Reason)
-	case view.State == runnerroll.HoldMissing:
-		fmt.Fprintln(d.out, "the landing hold file is already gone")
-	default:
-		fmt.Fprintln(d.out, "the landing hold's state is unknown; it was left in place")
-	}
+	return runnerroll.Run(ctx, deps, runnerTarget{applier: d.apply}, opts)
 }
