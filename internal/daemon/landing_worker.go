@@ -1417,9 +1417,15 @@ func (b followupBeads) ListFollowups(label string) ([]land.ExistingFollowup, err
 	}
 	out := make([]land.ExistingFollowup, 0, len(issues))
 	for _, issue := range issues {
+		// A created_at that does not parse leaves the zero time, not an error:
+		// the feed still decides on the title, path and labels it has.
+		var createdAt time.Time
+		if at, err := time.Parse(time.RFC3339Nano, issue.CreatedAt); err == nil {
+			createdAt = at
+		}
 		out = append(out, land.ExistingFollowup{
 			ID: issue.ID, Title: issue.Title, Description: issue.Description,
-			Status: issue.Status, Labels: issue.Labels,
+			Status: issue.Status, Labels: issue.Labels, CreatedAt: createdAt,
 		})
 	}
 	return out, nil

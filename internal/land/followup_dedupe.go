@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"path"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -83,13 +84,16 @@ func TitleSimilarity(a, b string) float64 {
 
 // ExistingFollowup is the part of an open or closed Found: bead the decision
 // reads. The body is scanned for the candidate's path, and the labels for its
-// fingerprint; Status is carried but not consulted.
+// fingerprint; Status and CreatedAt are carried but not consulted. CreatedAt is
+// when the bead was filed, and the zero time when the store's timestamp does not
+// parse.
 type ExistingFollowup struct {
 	ID          string
 	Title       string
 	Description string
 	Status      string
 	Labels      []string
+	CreatedAt   time.Time
 }
 
 // FollowupCandidate is one finding awaiting a decision: an om finding, or a bead

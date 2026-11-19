@@ -682,6 +682,43 @@ func TestFollowupBeadsFilesAndListsOverTheClient(t *testing.T) {
 	}
 }
 
+// TestFollowupBeadsListsCreatedAt: the feed carries when each existing follow-up
+// bead was filed, parsed from its created_at; a created_at that does not parse
+// leaves the zero time and the bead is still listed.
+func TestFollowupBeadsListsCreatedAt(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
+	var feed land.FollowupBeads = followupBeads{client: bd}
+	const filed = "2026-11-17T09:30:00.123456789Z"
+	bd.Seed(
+		beads.Issue{ID: "gt-filed", Title: "Found: a dated finding", Status: "open", Type: "task",
+			CreatedAt: filed, Labels: []string{land.FollowUpLabel}},
+		beads.Issue{ID: "gt-undated", Title: "Found: a finding with a bad stamp", Status: "closed", Type: "task",
+			CreatedAt: "last tuesday", Labels: []string{land.FollowUpLabel}},
+	)
+	existing, err := feed.ListFollowups(land.FollowUpLabel)
+	if err != nil {
+		t.Fatalf("ListFollowups: %v", err)
+	}
+	if len(existing) != 2 {
+		t.Fatalf("ListFollowups returned %d beads, want 2", len(existing))
+	}
+	want, err := time.Parse(time.RFC3339Nano, filed)
+	if err != nil {
+		t.Fatalf("parse fixture %q: %v", filed, err)
+	}
+	created := make(map[string]time.Time)
+	for _, e := range existing {
+		created[e.ID] = e.CreatedAt
+	}
+	if got := created["gt-filed"]; !got.Equal(want) {
+		t.Errorf("gt-filed CreatedAt = %v, want %v", got, want)
+	}
+	if got := created["gt-undated"]; !got.IsZero() {
+		t.Errorf("gt-undated CreatedAt = %v, want the zero time for an unparseable created_at", got)
+	}
+}
+
 // TestFollowupBeadsFilesTheAcceptanceField: the filed bead's acceptance field is
 // the spec's Acceptance, the box lines gt done reads, so a follow-up filed
 // without it leaves the worker nothing to tick (gt-ejsl5v).
