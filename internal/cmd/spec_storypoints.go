@@ -31,6 +31,12 @@ const specStoryPointTimeout = 20 * time.Second
 // tick cannot write a second copy.
 const specStoryPointSplitNotePrefix = "SPLIT ROUTE v1"
 
+// specSplitHysteresis is the band a bead already labeled under the split trigger
+// must clear before the route holds it: an estimate of unchanged text moves
+// between runs, so a bead near the trigger would otherwise flip between
+// dispatchable and held (gt-7dbjk5).
+const specSplitHysteresis = 0.5
+
 // errNoStoryPointEstimator reports a tick that has the setting on and no
 // estimate wired.
 var errNoStoryPointEstimator = errors.New("no estimator is wired")
@@ -97,6 +103,10 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 		res.Hold = specSplitHeldLine(beadID, latest.Labels, splitOver)
 		return res
 	}
+	// The earlier estimate is read from the labels the board gave, before this
+	// run writes a new sp-minutes label over it.
+	var earlier specEstimateOutcome
+	specEstimateFromLabels(&earlier, latest.Labels)
 	answer := specStoryPointRun(env, beadID)
 	// The estimate appends its log line whatever the settings read next, so a
 	// failed append is reported even when the shadow setting is off.
@@ -117,7 +127,13 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 			beadID, specdispatch.SkipSplitOver, reason))
 		return res
 	}
-	if rung == "shape" || minutes < splitOver {
+	// A bead already under the trigger is held only past the band, so noise near
+	// the trigger does not flip it; one at or over the trigger is judged as before.
+	hold := splitOver
+	if earlier.Minutes > 0 && earlier.Minutes < splitOver {
+		hold += specSplitHysteresis
+	}
+	if rung == "shape" || minutes < hold {
 		// A shape-only estimate is the weakest rung and is never acted on; an
 		// estimate under the trigger is a bead the seat can take.
 		return res
