@@ -32,6 +32,7 @@ import (
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecatimage"
@@ -83,6 +84,10 @@ const (
 	// completed trim: du in the pod the listing came from, since df reports the
 	// whole node filesystem for a local-path claim (gt-eyjgal).
 	cacheTrimDuVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- du -sk " + cacheTrimMountPath
+
+	// cacheTrimWaitVerb is the wait for the trim Job this pass applied to
+	// complete, the call that ends a run.
+	cacheTrimWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s"
 
 	// cacheTrimCanListVerb is the permission check the pass makes before it reads
 	// a namespace's pods: whether the sandbox kubeconfig may list them there.
@@ -4354,5 +4359,206 @@ func TestCacheTrimNoOpSummaryAllowsForOpenSandboxPaths(t *testing.T) {
 		if !strings.Contains(items[0].Summary, want) {
 			t.Errorf("item summary %q does not name %q", items[0].Summary, want)
 		}
+	}
+}
+
+// jobRuns reads the cache trim's runs from the town's job ledger, the file the
+// trim writes through the production ledger the job list reads.
+func (f *cacheTrimFixture) jobRuns(t *testing.T) []jobledger.Run {
+	t.Helper()
+	ledger, err := jobledger.NewLedger(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("jobledger.NewLedger: %v", err)
+	}
+	runs, err := ledger.Tail(cacheTrimLedgerJob, 10)
+	if err != nil {
+		t.Fatalf("ledger.Tail(%q): %v", cacheTrimLedgerJob, err)
+	}
+	return runs
+}
+
+// TestCacheTrimRecordsRun is the bead's first box: an applied trim appends one
+// run that is ok with the bytes before and after, a failed trim appends failed,
+// a completed trim that leaves the claim over twice the cap appends the empty
+// outcome, and a dry run, which trims nothing, appends nothing.
+func TestCacheTrimRecordsRun(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// answerFrom makes every call whose verb starts with prefix answer
+		// reply, so one kind of call fails and the rest of the pass runs.
+		answerFrom string
+		reply      cliReply
+		// du replaces the size du reads after a finished Job.
+		du *int64
+		// mode is the trim's mode; empty is an apply.
+		mode string
+		// wantOutcome and wantStats are the run's record; wantRuns is 0 for a
+		// run that trims nothing.
+		wantOutcome string
+		wantStats   map[string]int64
+		wantRuns    int
+		// wantNoVerdict marks a case whose pass reports no verdict: an apply
+		// the cluster refused is retried soon.
+		wantNoVerdict bool
+	}{
+		{
+			name:        "applied under the cap",
+			wantOutcome: cacheTrimRunOK,
+			wantStats: map[string]int64{
+				cacheTrimStatBytesBefore:  3000,
+				cacheTrimStatBytesAfter:   1024,
+				cacheTrimStatTrimmedFiles: 2,
+			},
+			wantRuns: 1,
+		},
+		{
+			name:        "applied and still over twice the cap",
+			du:          ptrInt64(4 << 10),
+			wantOutcome: cacheTrimRunOverCap,
+			wantStats: map[string]int64{
+				cacheTrimStatBytesBefore:  3000,
+				cacheTrimStatBytesAfter:   4 << 10,
+				cacheTrimStatTrimmedFiles: 2,
+			},
+			wantRuns: 1,
+		},
+		{
+			name:          "the apply failed",
+			answerFrom:    "apply ",
+			reply:         cliReply{stderr: "the shard ConfigMap was refused", code: 1},
+			wantOutcome:   cacheTrimRunFailed,
+			wantStats:     map[string]int64{cacheTrimStatBytesBefore: 3000},
+			wantRuns:      1,
+			wantNoVerdict: true,
+		},
+		{
+			name:        "the trim Job did not finish",
+			answerFrom:  cacheTrimWaitVerb,
+			reply:       cliReply{stderr: "the Job timed out", code: 1},
+			wantOutcome: cacheTrimRunFailed,
+			wantStats:   map[string]int64{cacheTrimStatBytesBefore: 3000},
+			wantRuns:    1,
+		},
+		{
+			name:     "a dry run records nothing",
+			mode:     agentconfig.DiskMaintenanceModeDryRun,
+			wantRuns: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mode := agentconfig.DiskMaintenanceModeApply
+			if tc.mode != "" {
+				mode = tc.mode
+			}
+			f := newCacheTrimFixture(t, mode, nil)
+			if tc.answerFrom != "" {
+				f.answerFrom(tc.answerFrom, tc.reply)
+			}
+			if tc.du != nil {
+				f.setDuReply(cliReply{stdout: cacheTrimDuReply(t, *tc.du)})
+			}
+			if verdict := f.d.cacheTrim(context.Background(), mode); verdict == tc.wantNoVerdict {
+				t.Fatalf("cacheTrim(%s) = %v, want the verdict %v; log:\n%s", mode, verdict, !tc.wantNoVerdict, f.log.String())
+			}
+
+			runs := f.jobRuns(t)
+			if len(runs) != tc.wantRuns {
+				t.Fatalf("the ledger holds %d run(s), want %d: %+v\nlog: %s", len(runs), tc.wantRuns, runs, f.log.String())
+			}
+			if tc.wantRuns == 0 {
+				return
+			}
+			run := runs[0]
+			if run.Job != cacheTrimLedgerJob {
+				t.Errorf("run job = %q, want %q", run.Job, cacheTrimLedgerJob)
+			}
+			if run.Outcome != tc.wantOutcome {
+				t.Errorf("run outcome = %q, want %q", run.Outcome, tc.wantOutcome)
+			}
+			if !reflect.DeepEqual(run.Stats, tc.wantStats) {
+				t.Errorf("run stats = %v, want %v", run.Stats, tc.wantStats)
+			}
+			if !run.StartedAt.Equal(diskMaintNow) || !run.EndedAt.Equal(diskMaintNow) {
+				t.Errorf("run runs %v to %v, want both %v, the daemon's clock", run.StartedAt, run.EndedAt, diskMaintNow)
+			}
+			// The due time comes from the configured cache_trim_interval, the
+			// default here since the fixture's patrol block names none.
+			wantDue := diskMaintNow.Add(2 * time.Hour)
+			if run.NextDue == nil || !run.NextDue.Equal(wantDue) {
+				t.Errorf("run next due = %v, want %v", run.NextDue, wantDue)
+			}
+		})
+	}
+}
+
+// ptrInt64 returns a pointer to v, for a case's optional figure.
+func ptrInt64(v int64) *int64 { return &v }
+
+// TestCacheTrimRunWithoutATownRoot drives a run whose ledger cannot be built at
+// all: the trim still reaches its verdict and logs the one line saying the run
+// was not recorded.
+func TestCacheTrimRunWithoutATownRoot(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.config.TownRoot = ""
+
+	if verdict := f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !verdict {
+		t.Fatalf("cacheTrim = false, want a verdict; log:\n%s", f.log.String())
+	}
+	if got := strings.Count(f.log.String(), "the run was not recorded"); got != 1 {
+		t.Fatalf("the log holds %d run-not-recorded line(s), want one:\n%s", got, f.log.String())
+	}
+}
+
+// TestCacheTrimRunWithoutADueTime drives the run whose interval cannot be read:
+// the run is still recorded, and its due time is left unset rather than guessed.
+func TestCacheTrimRunWithoutADueTime(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.patrolConfig = diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
+	f.d.patrolConfig.Patrols.DiskMaintenance.CacheTrimInterval = "sometimes"
+
+	if verdict := f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !verdict {
+		t.Fatalf("cacheTrim = false, want a verdict; log:\n%s", f.log.String())
+	}
+	runs := f.jobRuns(t)
+	if len(runs) != 1 {
+		t.Fatalf("the ledger holds %d run(s), want one: %+v", len(runs), runs)
+	}
+	if runs[0].NextDue != nil {
+		t.Errorf("run next due = %v, want none for an interval that cannot be read", runs[0].NextDue)
+	}
+	if !strings.Contains(f.log.String(), "the next due time is unknown") {
+		t.Errorf("the log does not name the unreadable interval:\n%s", f.log.String())
+	}
+}
+
+// TestCacheTrimAppendFailure is the bead's second box: an Append that fails
+// logs one line and never changes the trim's result -- the documents are still
+// applied and the pass still reaches its verdict.
+func TestCacheTrimAppendFailure(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	// A file where the ledger's directory belongs makes every Append fail, the
+	// way a town mount that cannot be written to would.
+	jobs := filepath.Join(f.d.config.TownRoot, ".runtime", "jobs")
+	if err := os.MkdirAll(filepath.Dir(jobs), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(jobs), err)
+	}
+	if err := os.WriteFile(jobs, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", jobs, err)
+	}
+
+	if verdict := f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !verdict {
+		t.Fatalf("cacheTrim = false, want the trim's own verdict: a failed append must not change it; log:\n%s", f.log.String())
+	}
+	if applied := f.applied(t); len(applied) == 0 {
+		t.Fatalf("the pass applied no document; a failed append must not stop the trim; log:\n%s", f.log.String())
+	}
+	if got := strings.Count(f.log.String(), "the run was not recorded"); got != 1 {
+		t.Fatalf("the log holds %d run-not-recorded line(s), want one:\n%s", got, f.log.String())
 	}
 }
