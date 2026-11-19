@@ -45,6 +45,11 @@ type fakeEnv struct {
 	// pushedErr makes the read fail, which a caller reads as Unknown.
 	pushed    map[string]string
 	pushedErr map[string]error
+	// revived is the revival cooldown stamp per "seat=bead"; reviveReadErr and
+	// markRevivedErr make the read and the write fail.
+	revived        map[string]time.Time
+	reviveReadErr  map[string]error
+	markRevivedErr map[string]error
 	// clearSeatErr makes the agent-bead reset fail.
 	clearSeatErr map[string]error
 	// idleStopped names seats whose record already says stop, so MarkIdle
@@ -177,6 +182,7 @@ func newFake() *fakeEnv {
 		clearErr:  map[string]error{},
 		gitStates: map[string]GitState{}, gitErr: map[string]error{},
 		pushed: map[string]string{}, pushedErr: map[string]error{},
+		revived: map[string]time.Time{}, reviveReadErr: map[string]error{}, markRevivedErr: map[string]error{},
 		clearSeatErr: map[string]error{},
 		blockers:     map[string][]WorkRef{}, blockerErr: map[string]error{},
 		deferErr: map[string]error{}, deferStale: map[string]bool{},
@@ -291,6 +297,21 @@ func (f *fakeEnv) PushedSinceSling(_, p string) (string, error) {
 	}
 	return f.pushed[p], nil
 }
+func (f *fakeEnv) ReviveCooldown(_, p, bead string) (time.Time, error) {
+	key := p + "=" + bead
+	if err := f.reviveReadErr[key]; err != nil {
+		return time.Time{}, err
+	}
+	return f.revived[key], nil
+}
+func (f *fakeEnv) MarkRevived(_, p, bead string, at time.Time) error {
+	key := p + "=" + bead
+	if err := f.markRevivedErr[key]; err != nil {
+		return err
+	}
+	f.revived[key] = at
+	return nil
+}
 func (f *fakeEnv) ClearStuckExit(_, p, exit string) (bool, error) {
 	if err := f.clearSeatErr[p]; err != nil {
 		return false, err
@@ -306,11 +327,18 @@ func (f *fakeEnv) ClearStuckExit(_, p, exit string) (bool, error) {
 	f.agents[p] = rec
 	return true, nil
 }
-func (f *fakeEnv) Restart(_, p, _ string) error {
+func (f *fakeEnv) Restart(_, p, reason string) error {
 	if err := f.restartErr[p]; err != nil {
 		return err
 	}
 	f.restarts = append(f.restarts, p)
+	// The supervisor writes the restart's stamp and its LastAction line on the
+	// seat's record, and nothing else: the revival rule keeps its own cooldown
+	// field, so the fake must not answer for it.
+	rec := f.intents[p]
+	rec.Restarts = append(rec.Restarts, now)
+	rec.LastAction = &intent.Action{Verb: "restart", Reason: reason, Actor: Actor, Outcome: "started", At: now}
+	f.intents[p] = rec
 	return nil
 }
 func (f *fakeEnv) Kill(_, p, _ string) error {

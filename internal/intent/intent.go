@@ -165,6 +165,12 @@ type Record struct {
 	// clears it, so a new session on the seat never inherits it.
 	SandboxOwed bool `json:"sandbox_owed,omitempty"`
 
+	// Revived is when patrol scan last revived the seat for each work bead,
+	// keyed by bead id (RecordRevived, gt-k6t2b3). It is its own field because
+	// LastAction is one slot that every supervisor action overwrites, and the
+	// rule's 30-minute cooldown must outlive a later kill or restart.
+	Revived map[string]time.Time `json:"revived,omitempty"`
+
 	// The finished-turn facts MarkTurnEnded records (gt-chcarg). They describe
 	// the session that ended, so MarkSlung clears the first three when new work
 	// is slung and keeps LastWorkBead, which is history.
@@ -344,6 +350,48 @@ func MarkSlung(townRoot string, s Seat, agent, actor string, now time.Time) erro
 		// doing, and stays.
 		r.TurnState, r.ExitType, r.CleanupStatus = "", "", ""
 		r.Actor, r.UpdatedAt = actor, now.UTC()
+		return nil
+	})
+	return err
+}
+
+// The revival memory RecordRevived keeps: the patrol's cooldown needs a stamp
+// for 30 minutes and nothing older, and the cap bounds a seat that churns
+// through beads.
+const (
+	revivedRetention  = 24 * time.Hour
+	revivedMaxEntries = 8
+)
+
+// RecordRevived records that patrol scan revived the seat for bead at at. The
+// stamp is the rule's own memory, not the last action, so every other field —
+// LastAction, WorkBead, Restarts — is left as it is. Entries older than 24
+// hours are dropped and at most 8 beads are kept.
+func RecordRevived(townRoot string, s Seat, bead string, at time.Time) error {
+	bead = strings.TrimSpace(bead)
+	if bead == "" {
+		return errors.New("recording a revival: empty bead id")
+	}
+	_, err := Update(townRoot, s, func(r *Record) error {
+		if r.Revived == nil {
+			r.Revived = map[string]time.Time{}
+		}
+		for id, when := range r.Revived {
+			if at.Sub(when) > revivedRetention {
+				delete(r.Revived, id)
+			}
+		}
+		r.Revived[bead] = at.UTC()
+		r.UpdatedAt = at.UTC()
+		for len(r.Revived) > revivedMaxEntries {
+			oldest, oldestAt := "", time.Time{}
+			for id, when := range r.Revived {
+				if oldest == "" || when.Before(oldestAt) {
+					oldest, oldestAt = id, when
+				}
+			}
+			delete(r.Revived, oldest)
+		}
 		return nil
 	})
 	return err

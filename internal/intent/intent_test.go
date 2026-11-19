@@ -930,3 +930,129 @@ func TestAgentBeadRetireSetCleanupStatusChangesOnlyCleanupStatus(t *testing.T) {
 		t.Fatalf("cleanup_status in the file = %v, want has_unpushed", raw["cleanup_status"])
 	}
 }
+
+// RecordRevived keeps one stamp per bead for the patrol's cooldown, in its own
+// field: the last action is one slot every supervisor write overwrites, so the
+// stamp must not live there (gt-k6t2b3).
+func TestRecordRevivedStampsEachBeadAndKeepsTheRest(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.WorkBead = "gt-work"
+		r.LastAction = &Action{Verb: "restart", Reason: "crash", Outcome: "started", At: now.Add(-time.Hour)}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RecordRevived(town, polecat, "gt-work", now); err != nil {
+		t.Fatalf("RecordRevived: %v", err)
+	}
+	rec, err := Read(town, polecat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Revived["gt-work"]; !got.Equal(now) {
+		t.Fatalf("Revived[gt-work] = %v, want %v", got, now)
+	}
+	if rec.LastAction == nil || rec.LastAction.Verb != "restart" {
+		t.Fatalf("RecordRevived erased the last action: %+v", rec.LastAction)
+	}
+	if rec.WorkBead != "gt-work" {
+		t.Fatalf("WorkBead = %q, want gt-work", rec.WorkBead)
+	}
+
+	// A second bead gets its own stamp; the first is kept.
+	if err := RecordRevived(town, polecat, "gt-other", now.Add(time.Minute)); err != nil {
+		t.Fatalf("RecordRevived: %v", err)
+	}
+	if rec, _ = Read(town, polecat); !rec.Revived["gt-work"].Equal(now) || !rec.Revived["gt-other"].Equal(now.Add(time.Minute)) {
+		t.Fatalf("Revived = %v, want both beads stamped", rec.Revived)
+	}
+}
+
+// The revival memory is bounded: stamps older than a day are dropped, and at
+// most 8 beads are kept, oldest first.
+func TestRecordRevivedDropsOldEntriesAndCapsTheMap(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+
+	if err := RecordRevived(town, polecat, "gt-old", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordRevived(town, polecat, "gt-new", now.Add(25*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := Read(town, polecat)
+	if _, ok := rec.Revived["gt-old"]; ok {
+		t.Fatalf("Revived = %v, want the entry older than 24h dropped", rec.Revived)
+	}
+	if _, ok := rec.Revived["gt-new"]; !ok {
+		t.Fatalf("Revived = %v, want the recent entry kept", rec.Revived)
+	}
+
+	// Ten stamps inside the retention window keep the 8 newest.
+	for i := 0; i < 10; i++ {
+		bead := "gt-b" + string(rune('0'+i))
+		if err := RecordRevived(town, polecat, bead, now.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, _ = Read(town, polecat)
+	if len(rec.Revived) != revivedMaxEntries {
+		t.Fatalf("len(Revived) = %d, want the %d-entry cap", len(rec.Revived), revivedMaxEntries)
+	}
+	for _, gone := range []string{"gt-old", "gt-b0", "gt-b1", "gt-b2"} {
+		if _, ok := rec.Revived[gone]; ok {
+			t.Errorf("Revived kept %s, want the oldest dropped: %v", gone, rec.Revived)
+		}
+	}
+	for _, kept := range []string{"gt-b9", "gt-new"} {
+		if _, ok := rec.Revived[kept]; !ok {
+			t.Errorf("Revived dropped %s, want the newest stamps kept: %v", kept, rec.Revived)
+		}
+	}
+}
+
+// An empty bead id is refused rather than written as a key no real bead has.
+func TestRecordRevivedRefusesAnEmptyBead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := RecordRevived(town, polecat, "  ", time.Now()); err == nil {
+		t.Fatal("RecordRevived accepted an empty bead id")
+	}
+	if rec, _ := Read(town, polecat); len(rec.Revived) != 0 {
+		t.Fatalf("Revived = %v, want nothing written", rec.Revived)
+	}
+}
+
+// The record's other writers carry the revival stamps: a sling, and the
+// restart the supervisor writes (its stamps and last action), must not erase a
+// field they do not know about.
+func TestRevivalStampsSurviveASlingAndARestart(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 19, 3, 0, 0, 0, time.UTC)
+	stamp := now.Add(-10 * time.Minute)
+
+	if err := RecordRevived(town, polecat, "gt-work", stamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkSlung(town, polecat, "deepseek-flash", "gt sling", now); err != nil {
+		t.Fatal(err)
+	}
+	// The supervisor's restart write: the stamp in Restarts and the action.
+	if _, err := Update(town, polecat, func(r *Record) error {
+		r.Restarts = append(r.Restarts, now)
+		r.LastAction = &Action{Verb: "restart", Reason: "patrol scan: revived gt-work", Outcome: "started", At: now}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := Read(town, polecat)
+	if got := rec.Revived["gt-work"]; !got.Equal(stamp) {
+		t.Fatalf("Revived[gt-work] = %v, want %v after a sling and a restart", got, stamp)
+	}
+}
