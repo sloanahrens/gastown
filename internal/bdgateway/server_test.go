@@ -1179,6 +1179,49 @@ func TestCallConflictFramesBound(t *testing.T) {
 	})
 }
 
+// conflictRunner is the CallRunner seam for a call whose bd wrote stderr: it
+// writes stderr as one frame, then bd's exit.
+type conflictRunner struct{ stderr string }
+
+func (c conflictRunner) Exec(ctx context.Context, req Request, stdin io.Reader, frames io.Writer) error {
+	if err := WriteFrame(frames, Frame{Kind: FrameStderr, Payload: []byte(c.stderr)}); err != nil {
+		return err
+	}
+	return WriteFrame(frames, ExitFrame(0))
+}
+
+// TestBdgwConflictIsLogged: a served call's line carries conflict true when bd's
+// stderr held the Dolt commit conflict, and false when it did not, so the
+// executor's frames reach the call log through POST /v1/exec.
+func TestBdgwConflictIsLogged(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		stderr string
+		want   bool
+	}{
+		{name: "conflict", stderr: "bd: Error 1213 (40001): this transaction conflicts", want: true},
+		{name: "no conflict", stderr: "bd: something else went wrong", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			log, entries := newCapturingCallLog(t)
+			g := newTestGateway(t, mustStore(t), log, conflictRunner{stderr: tc.stderr})
+			if code := postExec(t, g, testReadToken, Request{Argv: []string{"show", "gt-a"}}); code != http.StatusOK {
+				t.Fatalf("a served call = %d, want 200", code)
+			}
+			got := entries()
+			if len(got) != 1 {
+				t.Fatalf("got %d lines, want 1", len(got))
+			}
+			if got[0].Conflict != tc.want {
+				t.Errorf("line conflict = %v, want %v", got[0].Conflict, tc.want)
+			}
+		})
+	}
+}
+
 // TestBdgwNewGatewayRefusesUnwired refuses a gateway missing any piece by name.
 func TestBdgwNewGatewayRefusesUnwired(t *testing.T) {
 	t.Parallel()

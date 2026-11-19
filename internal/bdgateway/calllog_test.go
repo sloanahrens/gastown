@@ -525,6 +525,86 @@ func TestCallLogStats(t *testing.T) {
 	}
 }
 
+// TestCallConflictLogLine: a line carries conflict true only for a call whose
+// bd stderr held a Dolt commit conflict, and omits the key for every other call.
+func TestCallConflictLogLine(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "daemon", Caller: "a", Argv: []string{"update", "gt-itjuwu"}, Conflict: true})
+	l.Log(CallRecord{Class: "daemon", Caller: "b", Argv: []string{"show", "gt-itjuwu"}})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	lines := readLines(t, filepath.Join(opts.Dir, DefaultCallLogName))
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+	if got := decodeLine(t, lines[0])["conflict"]; got != true {
+		t.Errorf("conflicting call's line conflict = %v, want true", got)
+	}
+	if _, ok := decodeLine(t, lines[1])["conflict"]; ok {
+		t.Errorf("call without a conflict carries the conflict key: %s", lines[1])
+	}
+}
+
+// TestCallConflictLogStats: Stats counts conflicts in total and per verb, and a
+// verb past the cap is counted under otherVerb. LogUncounted moves none of it.
+func TestCallConflictLogStats(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "daemon", Caller: "a", Argv: []string{"update", "gt-a"}, Conflict: true})
+	l.Log(CallRecord{Class: "daemon", Caller: "b", Argv: []string{"show", "gt-a"}})
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"update", "gt-b"}, ExitCode: 1, Conflict: true})
+	l.LogUncounted(CallRecord{Class: "daemon", Caller: "d", Argv: []string{"update", "gt-c"}, Conflict: true})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := l.Stats()
+	want := Stats{
+		Calls:         3,
+		Errors:        1,
+		Verbs:         map[string]uint64{"update": 2, "show": 1},
+		Conflicts:     2,
+		ConflictVerbs: map[string]uint64{"update": 2},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Stats = %+v, want %+v", got, want)
+	}
+
+	const verbs = maxVerbKeys + 5
+	capOpts := testOptions(t)
+	capOpts.Buffer = verbs
+	capped, err := newCallLog(capOpts, func([]byte) error { return nil })
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	for i := 0; i < verbs; i++ {
+		capped.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{fmt.Sprintf("v%d", i)}, Conflict: true})
+	}
+	if err := capped.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	cs := capped.Stats()
+	if cs.Conflicts != verbs {
+		t.Errorf("conflicts = %d, want %d", cs.Conflicts, verbs)
+	}
+	if len(cs.ConflictVerbs) != maxVerbKeys+1 {
+		t.Errorf("kept %d conflict verb keys, want %d", len(cs.ConflictVerbs), maxVerbKeys+1)
+	}
+	if want := uint64(verbs - maxVerbKeys); cs.ConflictVerbs[otherVerb] != want {
+		t.Errorf("conflict_verbs[%s] = %d, want %d", otherVerb, cs.ConflictVerbs[otherVerb], want)
+	}
+}
+
 // TestCallLogUnparsedCounted checks an argv the scanner refuses is counted, so
 // a call the log cannot read is visible in Stats rather than silently absent.
 func TestCallLogUnparsedCounted(t *testing.T) {

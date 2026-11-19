@@ -359,6 +359,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		Write:    write,
 		ExitCode: status,
 		Duration: time.Since(start),
+		Conflict: frames.Conflict(),
 	})
 }
 

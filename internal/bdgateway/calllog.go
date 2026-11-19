@@ -105,6 +105,9 @@ type CallRecord struct {
 	// the log; a call refused at the concurrency cap is logged with the text the
 	// caller was given.
 	Error string
+	// Conflict is whether bd's stderr carried a Dolt commit conflict during the
+	// call. The line carries it only when it is true.
+	Conflict bool
 }
 
 // Stats is a snapshot of the log's counters, which GET /v1/stats serves.
@@ -121,6 +124,12 @@ type Stats struct {
 	// the scanner cannot place is counted under unparsedVerb. The key set is
 	// bounded: past maxVerbKeys distinct verbs, calls fall under otherVerb.
 	Verbs map[string]uint64 `json:"verbs"`
+	// Conflicts is how many of the counted calls had a Dolt commit conflict in
+	// bd's stderr.
+	Conflicts uint64 `json:"conflicts"`
+	// ConflictVerbs counts those conflicts by verb, bounded like Verbs. It is
+	// omitted when no conflict has been counted.
+	ConflictVerbs map[string]uint64 `json:"conflict_verbs,omitempty"`
 }
 
 // entry is one JSONL line with CallEntry's fixed field set, so argv data cannot
@@ -142,6 +151,9 @@ type CallLog struct {
 	errors  uint64
 	dropped uint64
 	verbs   map[string]uint64
+
+	conflicts     uint64
+	conflictVerbs map[string]uint64
 
 	ch   chan []byte
 	done chan struct{}
@@ -196,13 +208,14 @@ func newCallLog(opts CallLogOptions, hook func([]byte) error) (*CallLog, error) 
 		w = &logWriter{hook: hook}
 	}
 	l := &CallLog{
-		ch:       make(chan []byte, opts.Buffer),
-		done:     make(chan struct{}),
-		dir:      opts.Dir,
-		now:      now,
-		prefixes: prefixes,
-		policy:   opts.Policy,
-		verbs:    make(map[string]uint64),
+		ch:            make(chan []byte, opts.Buffer),
+		done:          make(chan struct{}),
+		dir:           opts.Dir,
+		now:           now,
+		prefixes:      prefixes,
+		policy:        opts.Policy,
+		verbs:         make(map[string]uint64),
+		conflictVerbs: make(map[string]uint64),
 	}
 	go l.run(w)
 	return l, nil
@@ -265,6 +278,7 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 		ExitCode:   rec.ExitCode,
 		DurationMS: rec.Duration.Milliseconds(),
 		Error:      boundTextTo(rec.Error, maxErrorBytes),
+		Conflict:   rec.Conflict,
 	}
 	line, marshalErr := json.Marshal(e)
 
@@ -276,7 +290,13 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 			l.errors++
 		}
 		if parsed.verb != "" {
-			l.countVerb(parsed.verb)
+			countVerb(l.verbs, parsed.verb)
+		}
+		if rec.Conflict {
+			l.conflicts++
+			if parsed.verb != "" {
+				countVerb(l.conflictVerbs, parsed.verb)
+			}
 		}
 	}
 	if marshalErr != nil {
@@ -305,13 +325,13 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 	l.sendMu.RUnlock()
 }
 
-// countVerb counts one call under verb, keeping the map bounded. The caller
-// holds l.mu.
-func (l *CallLog) countVerb(verb string) {
-	if _, ok := l.verbs[verb]; !ok && len(l.verbs) >= maxVerbKeys {
+// countVerb counts one call under verb in counts, keeping the map bounded. The
+// caller holds l.mu.
+func countVerb(counts map[string]uint64, verb string) {
+	if _, ok := counts[verb]; !ok && len(counts) >= maxVerbKeys {
 		verb = otherVerb
 	}
-	l.verbs[verb]++
+	counts[verb]++
 }
 
 // Stats returns a copy of the counters.
@@ -322,7 +342,27 @@ func (l *CallLog) Stats() Stats {
 	for verb, n := range l.verbs {
 		verbs[verb] = n
 	}
-	return Stats{Calls: l.calls, Errors: l.errors, Dropped: l.dropped, Verbs: verbs}
+	return Stats{
+		Calls:         l.calls,
+		Errors:        l.errors,
+		Dropped:       l.dropped,
+		Verbs:         verbs,
+		Conflicts:     l.conflicts,
+		ConflictVerbs: copyConflictVerbs(l.conflictVerbs),
+	}
+}
+
+// copyConflictVerbs returns a copy of counts, or nil when it is empty, so a
+// snapshot with no conflicts carries no conflict_verbs key.
+func copyConflictVerbs(counts map[string]uint64) map[string]uint64 {
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(counts))
+	for verb, n := range counts {
+		out[verb] = n
+	}
+	return out
 }
 
 // Dir is the directory the live log is written in; GET /v1/calls reads the
