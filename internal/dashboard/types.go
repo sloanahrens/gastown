@@ -664,6 +664,17 @@ type LandingsPause struct {
 	Unknown bool   `json:"unknown,omitempty"`
 }
 
+// FollowupFlow is the follow-up flow the Landings pane draws in one line: open
+// follow-up beads, follow-ups filed and landings taken in the last seven days,
+// and the filed share of those landings in whole percent (Q37). A nil one is
+// left out of the state, never shown as a zero flow.
+type FollowupFlow struct {
+	Open       int `json:"open"`
+	FiledWeek  int `json:"filed_week"`
+	LandedWeek int `json:"landed_week"`
+	SharePct   int `json:"share_pct"`
+}
+
 // Velocity is the story-point velocity of the landings: points landed per hour,
 // their smoothed first and second differences, and the headline figures. Hours
 // is the whole town's series; Classes holds the same series per seat class,
@@ -971,6 +982,10 @@ type State struct {
 	Escalations *Escalations `json:"escalations,omitempty"`
 	Queue       *Queue       `json:"queue,omitempty"`
 	Trend       *Trend       `json:"trend,omitempty"`
+	// Followups is the follow-up flow the Landings pane draws, nil when a read
+	// finds none: the last flow is never kept, as stale beads would draw as
+	// current.
+	Followups *FollowupFlow `json:"followups,omitempty"`
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
 	// at alertsKept.
 	Alerts []Alert `json:"alerts,omitempty"`
@@ -1111,6 +1126,9 @@ type Config struct {
 	// Trend reads the last 24 hours of landings, rejections, stage times and
 	// host load.
 	Trend func() *Trend
+	// Followups reads the follow-up flow the Landings pane draws, nil when the
+	// read found none (FollowupFlow).
+	Followups func() *FollowupFlow
 	// LoadSample records one machine sample for the trend's load history. The
 	// hub calls it from its machine poll, which runs only while a page is open.
 	LoadSample func(at time.Time, load float64)
@@ -1147,6 +1165,7 @@ type Config struct {
 	HoldEvery         time.Duration
 	QueueEvery        time.Duration
 	TrendEvery        time.Duration
+	FollowupsEvery    time.Duration
 
 	// ReworkNumbersEvery is the rework numbers document's own poll clock.
 	ReworkNumbersEvery time.Duration
@@ -1238,6 +1257,8 @@ func (c *Config) defaults() {
 	def(&c.HoldEvery, 60*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
 	def(&c.TrendEvery, 60*time.Second)
+	// A week's aggregate needs no clock tighter than a minute.
+	def(&c.FollowupsEvery, 60*time.Second)
 	if c.RingSize <= 0 {
 		c.RingSize = 500
 	}

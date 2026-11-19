@@ -914,3 +914,108 @@ func TestAPIStateCountsOnlyAReadTakenSinceTheRequest(t *testing.T) {
 		assert.Equal(t, c.want, h.healthReadSince(start), c.name)
 	}
 }
+
+// runHub runs h until the test ends, failing the test if Run does not stop.
+func runHub(t *testing.T, h *Hub) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wantSignal(t, done, "Run did not stop")
+	})
+}
+
+// The follow-up flow the Landings pane draws comes from its reader, polled on
+// its own clock: the value a poll reads reaches the state the page is sent. The
+// page's frame is waited for rather than the reader's own signal, which the
+// poll sends before it writes the state.
+func TestHubPollsFollowups(t *testing.T) {
+	t.Parallel()
+
+	want := &FollowupFlow{Open: 37, FiledWeek: 351, LandedWeek: 1000, SharePct: 35}
+	h := NewHub(Config{
+		Followups:      func() *FollowupFlow { return want },
+		FollowupsEvery: time.Millisecond,
+	})
+	runHub(t, h)
+
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	f := wantSignal(t, page.C, "Run never published the follow-up flow")
+	require.True(t, strings.HasPrefix(string(f), "event: state"), "the poll published %q", f)
+	assert.Equal(t, want, h.State().Followups)
+}
+
+// A read that finds no flow clears the flow the state holds: the pane draws no
+// line rather than stale beads as current.
+func TestHubPollsFollowupsNilReadClearsTheFlow(t *testing.T) {
+	t.Parallel()
+
+	var next *FollowupFlow
+	h := NewHub(Config{
+		Now:       func() time.Time { return time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC) },
+		Followups: func() *FollowupFlow { return next },
+	})
+	next = &FollowupFlow{Open: 4, FiledWeek: 9, LandedWeek: 20, SharePct: 45}
+	h.pollFollowups()
+	require.NotNil(t, h.State().Followups, "a read with a flow drew none")
+
+	next = nil
+	h.pollFollowups()
+	assert.Nil(t, h.State().Followups, "a read that found no flow left the last one drawing")
+}
+
+// A hub with no follow-up reader starts no follow-up worker: the flow the state
+// holds survives the polls the connected page drives. Every publish reads
+// NeedsHuman under the hub's lock, so a publish that finds the flow clear can
+// only be a follow-up poll with no reader, failed there by name. Both tickers
+// start with Run, so a worker a mistake started ticks no later than the hold
+// worker's second poll, which is waited for.
+func TestHubPollsFollowupsNilReaderStartsNoPoll(t *testing.T) {
+	t.Parallel()
+
+	seeded := &FollowupFlow{Open: 4, FiledWeek: 9, LandedWeek: 20, SharePct: 45}
+	published := make(chan struct{}, 1)
+	var h *Hub
+	h = NewHub(Config{
+		Hold: func() *Hold { return &Hold{} },
+		NeedsHuman: func() (attention.Scores, error) {
+			if h.state.Followups == nil {
+				t.Error("Run started a follow-up poll with no reader wired")
+			}
+			select {
+			case published <- struct{}{}:
+			default:
+			}
+			return nil, nil
+		},
+		HoldEvery:      time.Millisecond,
+		FollowupsEvery: time.Millisecond,
+	})
+	h.state.Followups = seeded
+	runHub(t, h)
+
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	for range 2 {
+		wantSignal(t, published, "the hub did not publish twice")
+	}
+	assert.Equal(t, seeded, h.State().Followups, "Run started a follow-up poll with no reader wired")
+}
+
+// The follow-up poll defaults to a minute: Run hands it to time.NewTicker,
+// which panics on a non-positive interval.
+func TestFollowupsEveryDefaultsToAMinute(t *testing.T) {
+	t.Parallel()
+
+	var c Config
+	c.defaults()
+	assert.Equal(t, time.Minute, c.FollowupsEvery)
+}
