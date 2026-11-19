@@ -1178,6 +1178,22 @@ func (h *patrolScanHost) MarkSubmitted(rig, name, workBead string) error {
 	return intent.MarkSubmitted(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
 }
 
+// ReviveCooldown implements patrolscan.Env (gt-k6t2b3): when the patrol last
+// revived the seat for bead, the zero time when it never has.
+func (h *patrolScanHost) ReviveCooldown(rig, name, bead string) (time.Time, error) {
+	rec, err := intent.Read(h.town(), supervisor.IntentSeat(h.seat(rig, name)))
+	if err != nil {
+		return time.Time{}, err
+	}
+	return rec.Revived[bead], nil
+}
+
+// MarkRevived records the cooldown stamp of a revival. The scan writes it
+// before it restarts, so a restart is never taken without its stamp.
+func (h *patrolScanHost) MarkRevived(rig, name, bead string, at time.Time) error {
+	return intent.RecordRevived(h.town(), supervisor.IntentSeat(h.seat(rig, name)), bead, at)
+}
+
 // doneAge answers patrolscan.Options.DoneAge from the event log, through the
 // read the daemon's crash detector uses.
 func (h *patrolScanHost) doneAge(rig, name, workBead string, now time.Time) (time.Duration, bool) {

@@ -14,7 +14,10 @@
 //     ESCALATED seat is released instead when a blocking dependency of its
 //     bead is unresolved: the bead's assignment is cleared and the bead
 //     deferred with the blocker named, because a restart only spawns a
-//     session that defers again (gt-otb5m3);
+//     session that defers again (gt-otb5m3). A live seat whose branch is on
+//     origin with a head from this run, and whose progress evidence has stood
+//     still, finished its work and lost its turn: it is restarted onto that
+//     branch, at most once per bead per 30 minutes (gt-k6t2b3);
 //   - orphaned molecules: a polecat that is gone (no session and no
 //     directory) leaves its work bead's bonded mol-polecat-work wisp and step
 //     wisps open; they are closed so the base bead is not blocked by them;
@@ -128,6 +131,14 @@ const (
 	// DefaultHeartbeatFresh is how recent an "exiting" heartbeat must be for
 	// a dead-looking session to be taken as a polecat inside gt done.
 	DefaultHeartbeatFresh = 3 * time.Minute
+	// reviveQuiet is how long a live seat's progress evidence must stand
+	// still before a pushed branch is read as finished work whose turn never
+	// ended (revivePushed).
+	reviveQuiet = 5 * time.Minute
+	// reviveCooldown is how long one bead is left alone after its seat was
+	// revived, so a seat that genuinely cannot finish does not restart on
+	// every tick.
+	reviveCooldown = 30 * time.Minute
 )
 
 // Actor is the supervisor actor and comment author of every tick action.
@@ -648,6 +659,14 @@ type Env interface {
 	// time or origin. A caller reads the error as Unknown and acts on nothing
 	// (gt-hgb91h).
 	PushedSinceSling(rig, polecat string) (sha string, err error)
+	// ReviveCooldown returns when the patrol last revived the seat for bead,
+	// the zero time when it never has, and an error when the record cannot be
+	// read: the revival rule then acts on nothing.
+	ReviveCooldown(rig, polecat, bead string) (time.Time, error)
+	// MarkRevived records that the seat was revived for bead at at. The rule
+	// writes it before Restart, so a restart is never taken without its
+	// cooldown stamp; a failed write means the restart is not taken.
+	MarkRevived(rig, polecat, bead string, at time.Time) error
 	// Heartbeat returns the session heartbeat, nil when there is none.
 	Heartbeat(rig, polecat string) *Heartbeat
 	// Restart restarts the seat through the supervisor.
@@ -835,6 +854,7 @@ type Outcome string
 
 const (
 	OutcomeRestarted Outcome = "restarted"
+	OutcomeRevived   Outcome = "revived"    // a live seat restarted onto its pushed branch
 	OutcomeRefused   Outcome = "refused"    // the supervisor said no
 	OutcomeFailed    Outcome = "failed"     // an action ran and failed
 	OutcomeSkipped   Outcome = "skipped"    // a guard said leave it
@@ -890,8 +910,8 @@ func (r Report) Count(o Outcome) int {
 // Lines renders the report for the daemon log: one summary line, then one
 // line per finding that is not a quiet skip.
 func (r Report) Lines() []string {
-	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d released, %d molecule(s) closed, %d reopened, %d error(s), %d reaped, %d would-reap, %d blocked",
-		r.Rig, r.Checked, r.Count(OutcomeRestarted), r.Count(OutcomeRefused), r.Count(OutcomeUnknown), r.Count(OutcomeReleased),
+	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d revived, %d refused, %d unknown, %d released, %d molecule(s) closed, %d reopened, %d error(s), %d reaped, %d would-reap, %d blocked",
+		r.Rig, r.Checked, r.Count(OutcomeRestarted), r.Count(OutcomeRevived), r.Count(OutcomeRefused), r.Count(OutcomeUnknown), r.Count(OutcomeReleased),
 		r.Count(OutcomeClosed), r.Count(OutcomeReopened), len(r.Errors),
 		r.Count(OutcomeReaped), r.Count(OutcomeWouldReap), r.Count(OutcomeBlocked))}
 	for _, f := range r.Findings {
@@ -1010,9 +1030,19 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		}
 		return unknown("liveness", res.Err)
 	case liveness.Alive:
+		// A live seat that pushed its branch and then went quiet has
+		// finished its work and lost its turn (revivePushed).
+		if f, ok := s.revivePushed(rig, name, res); ok {
+			return f, true
+		}
 		return Finding{}, false
 	case liveness.Stalled:
 		if f, ok := s.releaseStalled(rig, name, res); ok {
+			return f, true
+		}
+		// A stall on a pushed branch is the same finished work, only
+		// quieter, so the revival is tried before the stall is reported.
+		if f, ok := s.revivePushed(rig, name, res); ok {
 			return f, true
 		}
 		// Reported only: a stall on work that is not over is a long turn,
@@ -1442,6 +1472,108 @@ func (s *Scanner) releaseStalled(rig, name string, res liveness.Result) (Finding
 		return f, true
 	}
 	f.Outcome, f.Detail = OutcomeReleased, what+"; session stopped after "+quiet.String()+" quiet"
+	return f, true
+}
+
+// revivalReason is the restart reason a revival writes: it names the bead, the
+// pushed head and the quiet time, so the log and the seat's record say what was
+// finished.
+func revivalReason(bead, head string, quiet time.Duration) string {
+	return fmt.Sprintf("patrol scan: revived %s after %s quiet with its branch pushed at %s; the preserved worktree resumes that branch",
+		bead, quiet.Round(time.Second), head)
+}
+
+// revivePushed restarts a LIVE seat that finished its work and lost its turn:
+// its work bead is open, hooked or in_progress and not submitted, its progress
+// evidence has stood still for reviveQuiet, and its branch is on origin with a
+// head from this run (Env.PushedSinceSling). That is a polecat that pushed and
+// then went quiet before gt done: after a dropped API connection the pane sits
+// at an empty prompt, and a nudge cannot reach a sandbox seat, so nothing else
+// wakes it. The restart starts a session in the preserved worktree, which
+// resumes the pushed branch with the work bead still hooked to the seat.
+//
+// The rule acts at most once per bead per reviveCooldown, from the stamp
+// Env.MarkRevived writes before the restart: a seat revived and quiet again
+// inside the cooldown is reported and never restarted again, so one that
+// genuinely cannot finish does not loop. The stamp is written even when the
+// restart is refused or fails, so neither is retried every tick.
+//
+// It reports ok=false when the rule does not apply. The dead path's heartbeat
+// guard applies first: a seat whose heartbeat says stuck is held by its own
+// polecat, and one inside gt done is skipped. A submitted bead, a bead held
+// from dispatch, and a bead whose status is not an assigned one are left alone;
+// a read that fails is Unknown and nothing is acted on; the supervisor's
+// refusal is OutcomeRefused, as for every other restart.
+func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, bool) {
+	f := Finding{Kind: "seat", Subject: name}
+	if res.QuietFor < reviveQuiet {
+		return Finding{}, false
+	}
+	now := s.o.Now()
+	if hb := s.env.Heartbeat(rig, name); hb != nil {
+		switch strings.ToLower(strings.TrimSpace(hb.State)) {
+		case "stuck":
+			f.Outcome, f.Detail = OutcomeSkipped, "heartbeat says stuck: held by the polecat"
+			return f, true
+		case "exiting":
+			if now.Sub(hb.At) < s.o.HeartbeatFresh {
+				f.Outcome, f.Detail = OutcomeSkipped, "heartbeat says exiting: inside gt done"
+				return f, true
+			}
+		}
+	}
+	work, err := s.env.AssignedWork(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "quiet seat's work unreadable: "+err.Error()
+		return f, true
+	}
+	if work == nil || work.IsSubmitted() {
+		return Finding{}, false
+	}
+	switch strings.ToLower(strings.TrimSpace(work.Status)) {
+	case "hooked", "in_progress", "open":
+	default:
+		return Finding{}, false
+	}
+	if s.o.HoldReason != nil {
+		if why := s.o.HoldReason(*work); why != "" {
+			return Finding{}, false
+		}
+	}
+	head, err := s.env.PushedSinceSling(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "pushed branch unreadable: "+err.Error()
+		return f, true
+	}
+	if head == "" {
+		return Finding{}, false
+	}
+	quiet := res.QuietFor.Round(time.Second)
+	at, err := s.env.ReviveCooldown(rig, name, work.ID)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "revival cooldown unreadable: "+err.Error()
+		return f, true
+	}
+	if !at.IsZero() && now.Sub(at) < reviveCooldown {
+		f.Outcome = OutcomeSkipped
+		f.Detail = fmt.Sprintf("%s was revived %s ago and is quiet again for %s; the %s cooldown holds it until %s",
+			work.ID, now.Sub(at).Round(time.Second), quiet, reviveCooldown, at.Add(reviveCooldown).Format(time.RFC3339))
+		return f, true
+	}
+	if err := s.env.MarkRevived(rig, name, work.ID, now); err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "recording the revival: "+err.Error()
+		return f, true
+	}
+	reason := revivalReason(work.ID, head, quiet)
+	if err := s.env.Restart(rig, name, reason); err != nil {
+		if s.o.IsRefusal(err) {
+			f.Outcome, f.Detail = OutcomeRefused, err.Error()
+			return f, true
+		}
+		f.Outcome, f.Detail = OutcomeFailed, err.Error()
+		return f, true
+	}
+	f.Outcome, f.Detail = OutcomeRevived, reason
 	return f, true
 }
 

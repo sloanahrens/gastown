@@ -857,7 +857,11 @@ func (e *passEnv) PolecatEscalations(string) ([]patrolscan.Escalation, error) { 
 func (e *passEnv) GitState(string, string) (patrolscan.GitState, error) {
 	return patrolscan.GitState{}, nil
 }
-func (e *passEnv) PushedSinceSling(string, string) (string, error)     { return "", nil }
+func (e *passEnv) PushedSinceSling(string, string) (string, error) { return "", nil }
+func (e *passEnv) ReviveCooldown(string, string, string) (time.Time, error) {
+	return time.Time{}, nil
+}
+func (e *passEnv) MarkRevived(string, string, string, time.Time) error { return nil }
 func (e *passEnv) Heartbeat(string, string) *patrolscan.Heartbeat      { return nil }
 func (e *passEnv) Restart(string, string, string) error                { return nil }
 func (e *passEnv) Kill(string, string, string) error                   { return nil }
