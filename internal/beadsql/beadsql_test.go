@@ -118,6 +118,30 @@ func TestNewAcceptsTheDeclaredLevel(t *testing.T) {
 	}
 }
 
+// TestPreRollGuardSchemaVersionRefusesADatabaseAt66 pins the schema level at
+// 67 ahead of the migration window and shows the refusal a database still at
+// 66 meets: the pre-roll pair carries bd at 67 before any database has
+// migrated (gt-tgje6t, gt-jgsmoj).
+func TestPreRollGuardSchemaVersionRefusesADatabaseAt66(t *testing.T) {
+	t.Parallel()
+	if SchemaVersion != 67 {
+		t.Fatalf("SchemaVersion = %d, want 67", SchemaVersion)
+	}
+	_, err := open(t, &fakeServer{level: int64(66)})
+	var mismatch *SchemaMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("New over a database at 66: err = %v, want *SchemaMismatchError", err)
+	}
+	if mismatch.Found != 66 {
+		t.Errorf("Found = %d, want 66", mismatch.Found)
+	}
+	for _, want := range []string{"at bd schema 66", "written for 67", "beadsql.SchemaVersion"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q: %v", want, err)
+		}
+	}
+}
+
 func TestNewRefusesAnyOtherLevel(t *testing.T) {
 	t.Parallel()
 	for _, level := range []any{int64(SchemaVersion + 1), int64(SchemaVersion - 1), nil} {

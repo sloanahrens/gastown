@@ -2,6 +2,7 @@ package deps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
@@ -26,6 +28,11 @@ var (
 	// Upstream steveyegge/beads: a semver and nothing else.
 	bdInfoUpstream = beads.VersionInfo{Version: "1.0.5", Build: "release"}
 )
+
+// bdInfoSamplesBuild is the build the pin now names (beads 0f9f640, migration
+// 0067_create_samples): the fork report above with its ceiling at the schema
+// level gastown's SQL reads declare (gt-tgje6t).
+var bdInfoSamplesBuild = withSchemaCeiling(bdInfoFork, beadsql.SchemaVersion)
 
 // fakeStore answers the handshake's two reads. A nil levelFn answers the level
 // the version report names, as a database bd has migrated.
@@ -108,14 +115,14 @@ var elapsed = func() <-chan time.Time {
 
 func TestCheckBDHandshake_AcceptsForkBuildAtDBLevel(t *testing.T) {
 	t.Parallel()
-	hs, err := CheckBDHandshake(context.Background(), "/bin/bd", &fakeStore{info: bdInfoFork})
+	hs, err := CheckBDHandshake(context.Background(), "/bin/bd", &fakeStore{info: bdInfoSamplesBuild})
 	if err != nil {
 		t.Fatalf("CheckBDHandshake: %v", err)
 	}
-	if hs.DBSchema != 66 || hs.Found.BuildID != "da4983e" || hs.Path != "/bin/bd" {
+	if hs.DBSchema != beadsql.SchemaVersion || hs.Found.BuildID != "da4983e" || hs.Path != "/bin/bd" {
 		t.Fatalf("handshake = %+v", hs)
 	}
-	if got := hs.String(); !strings.Contains(got, "bd 1.2.2") || !strings.Contains(got, "database at 66") {
+	if got := hs.String(); !strings.Contains(got, "bd 1.2.2") || !strings.Contains(got, fmt.Sprintf("database at %d", beadsql.SchemaVersion)) {
 		t.Errorf("String() = %q", got)
 	}
 }
@@ -124,9 +131,33 @@ func TestCheckBDHandshake_AcceptsForkBuildAtDBLevel(t *testing.T) {
 // number or as text; the store parses both, and the handshake only compares.
 func TestCheckBDHandshake_DBLevelAsString(t *testing.T) {
 	t.Parallel()
-	s := &fakeStore{info: bdInfoFork, levelFn: func(int) (int, error) { return 66, nil }}
+	s := &fakeStore{info: bdInfoSamplesBuild, levelFn: func(int) (int, error) { return beadsql.SchemaVersion, nil }}
 	if _, err := CheckBDHandshake(context.Background(), "/bin/bd", s); err != nil {
 		t.Fatalf("CheckBDHandshake: %v", err)
+	}
+}
+
+// TestPreRollGuardDatabaseAt66RefusedBySQLReadsAt67 shows the refusal the pair
+// this lands meets: bd and the database agree at the captured schema-66 level,
+// and the handshake refuses at gastown's own level, 67, which is ahead of the
+// databases until the attended migration window (gt-tgje6t, gt-jgsmoj).
+func TestPreRollGuardDatabaseAt66RefusedBySQLReadsAt67(t *testing.T) {
+	t.Parallel()
+	if beadsql.SchemaVersion != 67 {
+		t.Fatalf("beadsql.SchemaVersion = %d, want 67", beadsql.SchemaVersion)
+	}
+	_, err := CheckBDHandshake(context.Background(), "/usr/local/bin/bd",
+		&fakeStore{info: bdInfoFork, levelFn: func(int) (int, error) { return 66, nil }})
+	if err == nil {
+		t.Fatal("a database at 66 was accepted while gastown's SQL reads are written for 67")
+	}
+	if !errors.Is(err, ErrBDHandshake) {
+		t.Errorf("refusal does not wrap ErrBDHandshake: %v", err)
+	}
+	for _, want := range []string{"database is at schema 66", "written for 67", "beadsql.SchemaVersion"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal lacks %q:\n%s", want, err)
+		}
 	}
 }
 
@@ -154,13 +185,13 @@ func TestCheckBDHandshake_Refusals(t *testing.T) {
 		},
 		{
 			name:      "database behind bd",
-			store:     &fakeStore{info: bdInfoFork, levelFn: func(int) (int, error) { return 65, nil }},
-			wantParts: []string{"schema<=66", "database at 65"},
+			store:     &fakeStore{info: bdInfoSamplesBuild, levelFn: func(int) (int, error) { return 65, nil }},
+			wantParts: []string{fmt.Sprintf("schema<=%d", beadsql.SchemaVersion), "database at 65"},
 		},
 		{
 			name:      "bd and database past the level gastown's SQL reads declare",
-			store:     &fakeStore{info: withSchemaCeiling(bdInfoFork, 67), levelFn: func(int) (int, error) { return 67, nil }},
-			wantParts: []string{"database is at schema 67", "written for 66", "beadsql.SchemaVersion"},
+			store:     &fakeStore{info: withSchemaCeiling(bdInfoFork, beadsql.SchemaVersion+1), levelFn: func(int) (int, error) { return beadsql.SchemaVersion + 1, nil }},
+			wantParts: []string{fmt.Sprintf("database is at schema %d", beadsql.SchemaVersion+1), fmt.Sprintf("written for %d", beadsql.SchemaVersion), "beadsql.SchemaVersion"},
 		},
 		{
 			name:      "database ahead of bd",
@@ -240,17 +271,17 @@ func withSchemaCeiling(info beads.VersionInfo, ceiling int) beads.VersionInfo {
 // again, and passes once Dolt answers.
 func TestCheckBDHandshake_WaitsOutAColdStore(t *testing.T) {
 	t.Parallel()
-	s := &fakeStore{info: bdInfoFork, levelFn: func(reads int) (int, error) {
+	s := &fakeStore{info: bdInfoSamplesBuild, levelFn: func(reads int) (int, error) {
 		if reads <= 3 {
 			return 0, fmt.Errorf("%w: bd exit 25: store unavailable", beads.ErrStoreUnavailable)
 		}
-		return 66, nil
+		return beadsql.SchemaVersion, nil
 	}}
 	hs, err := checkBDHandshake(context.Background(), "/bin/bd", s, storeRetryNow)
 	if err != nil {
 		t.Fatalf("CheckBDHandshake: %v", err)
 	}
-	if hs.DBSchema != 66 || hs.Found.BuildID != "da4983e" {
+	if hs.DBSchema != beadsql.SchemaVersion || hs.Found.BuildID != "da4983e" {
 		t.Fatalf("handshake = %+v", hs)
 	}
 	if s.reads != 4 {
@@ -437,6 +468,10 @@ func TestNewHandshakeStoreReadsATownLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	var calls []string
+	report, err := json.Marshal(bdInfoSamplesBuild)
+	if err != nil {
+		t.Fatalf("marshaling the bd version report: %v", err)
+	}
 	answer := func(_ context.Context, args []string) ([]byte, []byte, error) {
 		// The seam probes --allow-stale before each read; the reads are what
 		// this case is about.
@@ -446,9 +481,9 @@ func TestNewHandshakeStoreReadsATownLayout(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		switch args[0] {
 		case "version":
-			return []byte(forkReportJSON), nil, nil
+			return report, nil, nil
 		case "sql":
-			return []byte(`[{"version": 66}]`), nil, nil
+			return []byte(fmt.Sprintf(`[{"version": %d}]`, beadsql.SchemaVersion)), nil, nil
 		}
 		return nil, []byte("boom"), exitStatus(2)
 	}
@@ -457,7 +492,7 @@ func TestNewHandshakeStoreReadsATownLayout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckBDHandshake over the handshake store: %v", err)
 	}
-	if hs.DBSchema != 66 {
+	if hs.DBSchema != beadsql.SchemaVersion {
 		t.Errorf("DBSchema = %d, want 66", hs.DBSchema)
 	}
 	if len(calls) != 2 || !strings.HasPrefix(calls[0], "version --json") || !strings.HasPrefix(calls[1], "sql --json") {

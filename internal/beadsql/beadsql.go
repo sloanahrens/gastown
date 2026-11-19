@@ -33,8 +33,9 @@ import (
 // SchemaVersion is the bd schema level (MAX(version) in schema_migrations,
 // bd's db_schema_version) that gastown's SQL reads were written against.
 // When bd migrates past it, gastown stops reading until someone checks
-// every query against the new schema and bumps this.
-const SchemaVersion = 66
+// every query against the new schema and bumps this. It is 67 ahead of the
+// databases, which the attended migration window moves (gt-tgje6t, gt-jgsmoj).
+const SchemaVersion = 67
 
 // SchemaLevelQuery reads a bd database's migration level.
 const SchemaLevelQuery = "SELECT MAX(version) AS version FROM schema_migrations"
