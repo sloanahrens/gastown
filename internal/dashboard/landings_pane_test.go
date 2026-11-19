@@ -2,7 +2,10 @@ package dashboard
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -550,5 +553,87 @@ func TestLandingsPaneKeepsItsScrollWhenOnlyTheQueueIsShown(t *testing.T) {
 	}
 	if got := v.ToInteger(); got != 40 {
 		t.Errorf("queue-only scroll position after a redraw = %d, want 40: the early return put the rows back at the top", got)
+	}
+}
+
+var updateFollowupFlowGolden = flag.Bool("update-followup-flow-golden", false, "rewrite testdata/landings_pane_followups.golden")
+
+// landingsPaneWithFollowups is the Landings reading the follow-up tests draw:
+// one landed hour, so the figures block draws, and the follow-up flow when the
+// caller hands one. The map goes through JSON as the server's state does.
+func landingsPaneWithFollowups(t *testing.T, flow map[string]any) map[string]any {
+	t.Helper()
+
+	hour := time.Date(2026, 11, 19, 14, 0, 0, 0, time.Local).Format(time.RFC3339)
+	st := map[string]any{"trend": map[string]any{
+		"hours": []map[string]any{{"hour": hour, "landed": 1}},
+	}}
+	if flow != nil {
+		st["followups"] = flow
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// drawnFollowupLine is the follow-up flow line the Landings pane drew, or ""
+// when it drew none.
+func drawnFollowupLine(t *testing.T, p *pageDOM) string {
+	t.Helper()
+
+	v, err := p.vm.RunString(`(function () {
+  var found = "";
+  __walk(document.getElementById("trend"), function (c) {
+    if (!found && __cls(c, "k") && __cls(c, "title") && c.textContent.indexOf("follow-ups: ") === 0) found = c.textContent;
+  });
+  return found;
+})()`)
+	if err != nil {
+		t.Fatalf("reading the follow-up line the pane drew: %v", err)
+	}
+	return v.String()
+}
+
+// The Landings pane draws the follow-up flow in one line under the figures: the
+// open follow-up beads, those filed this week and their share of the week's
+// landings (Q37, gt-eguody). The golden is the line a reader sees.
+func TestLandingsPaneShowsFollowupFlow(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", landingsPaneWithFollowups(t, map[string]any{
+		"open": 37, "filed_week": 351, "landed_week": 1000, "share_pct": 36,
+	}))
+	got := drawnFollowupLine(t, p)
+
+	golden := filepath.Join("testdata", "landings_pane_followups.golden")
+	if *updateFollowupFlowGolden {
+		if err := os.WriteFile(golden, []byte(got+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got+"\n" != string(want) {
+		t.Errorf("the follow-up line the pane drew:\n got %q\nwant %q (rewrite with -update-followup-flow-golden)", got, strings.TrimSuffix(string(want), "\n"))
+	}
+}
+
+// A reading with no follow-up flow draws no line, rather than a zero flow.
+func TestLandingsPaneOmitsFollowupFlowWhenNil(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", landingsPaneWithFollowups(t, nil))
+	if line := drawnFollowupLine(t, p); line != "" {
+		t.Errorf("the pane drew %q with no follow-up flow in the state", line)
 	}
 }
