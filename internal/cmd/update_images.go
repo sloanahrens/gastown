@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -47,6 +48,10 @@ const (
 	// to: the sandbox pods and the polecat image run linux/arm64.
 	updateImagesOS   = "linux"
 	updateImagesArch = "arm64"
+	// updateImagesPruneKeepNewest is how many of each image's newest tags the
+	// retention plan keeps, on top of the installed and previous pairs and the
+	// green refs.
+	updateImagesPruneKeepNewest = 20
 )
 
 // updateImagesSeams are the subcommand's dependencies: the town's registry,
@@ -61,10 +66,17 @@ type updateImagesSeams struct {
 	Credentials func() (user, token string, err error)
 	HTTPClient  *http.Client
 	WriteValues func(path string, v imagevalues.Values) error
+	// PruneLedger returns the digest install's record the prune plan's
+	// installed and previous pairs are read from.
+	PruneLedger func(townRoot string) update.PruneLedger
+	// PruneGreen reads the sha12 of every green ref of the image rig.
+	PruneGreen func(ctx context.Context, townRoot string) (map[string]bool, error)
+	// PlanPrune decides the retention plan; production is update.PlanPrune.
+	PlanPrune func(in update.PruneInput) (update.PrunePlan, error)
 }
 
 // productionUpdateImagesSeams wires the real town, registry, viewer credential
-// and values writer.
+// and values writer, and the readers the prune plan reads.
 func productionUpdateImagesSeams() updateImagesSeams {
 	return updateImagesSeams{
 		FindTownRoot: workspace.FindFromCwdOrError,
@@ -72,6 +84,11 @@ func productionUpdateImagesSeams() updateImagesSeams {
 		Credentials:  viewerCredentialReader(forgejo.TokenPath),
 		HTTPClient:   &http.Client{Timeout: updateImagesTimeout},
 		WriteValues:  imagevalues.Write,
+		PruneLedger: func(townRoot string) update.PruneLedger {
+			return update.FileImageLedger{Dir: update.Dir(townRoot)}
+		},
+		PruneGreen: productionPruneGreen,
+		PlanPrune:  update.PlanPrune,
 	}
 }
 
@@ -101,32 +118,9 @@ func TownImageRegistry(townRoot string) (imagevalues.Registry, error) {
 // (rig.ResolveForgejoConfig), so a fork's host and owner stay in its own config
 // and this package types neither.
 func townImageRegistry(townRoot string) (imagevalues.Registry, error) {
-	patrol, err := loadUpdatePatrolConfig(townRoot)
-	if err != nil {
-		return imagevalues.Registry{}, fmt.Errorf("reading the daemon settings: %w", err)
-	}
-	known, err := knownRigNames(townRoot)
+	rigName, fc, err := townImageRigForgejo(townRoot)
 	if err != nil {
 		return imagevalues.Registry{}, err
-	}
-	var sweep *config.TierSweepConfig
-	if patrol != nil && patrol.Patrols != nil {
-		sweep = patrol.Patrols.TierSweep
-	}
-	rigs, err := sweep.TierSweepImageRigs(known)
-	if err != nil {
-		return imagevalues.Registry{}, err
-	}
-	if len(rigs) == 0 {
-		return imagevalues.Registry{}, errors.New("the town names no rig to build images in: set patrols.tier_sweep.image_rigs to the rigs whose green sweep publishes a green ref for the image build")
-	}
-	rigName := rigs[0]
-	fc, err := rig.ResolveForgejoConfigWithError(updateImagesRepoFile, townRoot, rigName)
-	if err != nil {
-		return imagevalues.Registry{}, fmt.Errorf("reading rig %s's Forgejo settings: %w", rigName, err)
-	}
-	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
-		return imagevalues.Registry{}, fmt.Errorf("rig %s names no merge_queue.forgejo.remote_url, so the town has no Forgejo registry to read images from", rigName)
 	}
 	remote := strings.TrimSpace(fc.RemoteURL)
 	u, err := url.Parse(remote)
@@ -156,6 +150,229 @@ func townImageRegistry(townRoot string) (imagevalues.Registry, error) {
 		return imagevalues.Registry{}, err
 	}
 	return registry, nil
+}
+
+// townImageRigForgejo names the rig whose fully green sweep publishes the green
+// refs for the image build, the first rig patrols.tier_sweep.image_rigs names,
+// and returns that rig's Forgejo settings, which carry a remote URL.
+func townImageRigForgejo(townRoot string) (string, *config.ForgejoConfig, error) {
+	patrol, err := loadUpdatePatrolConfig(townRoot)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading the daemon settings: %w", err)
+	}
+	known, err := knownRigNames(townRoot)
+	if err != nil {
+		return "", nil, err
+	}
+	var sweep *config.TierSweepConfig
+	if patrol != nil && patrol.Patrols != nil {
+		sweep = patrol.Patrols.TierSweep
+	}
+	rigs, err := sweep.TierSweepImageRigs(known)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(rigs) == 0 {
+		return "", nil, errors.New("the town names no rig to build images in: set patrols.tier_sweep.image_rigs to the rigs whose green sweep publishes a green ref for the image build")
+	}
+	rigName := rigs[0]
+	fc, err := rig.ResolveForgejoConfigWithError(updateImagesRepoFile, townRoot, rigName)
+	if err != nil {
+		return "", nil, fmt.Errorf("reading rig %s's Forgejo settings: %w", rigName, err)
+	}
+	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
+		return "", nil, fmt.Errorf("rig %s names no merge_queue.forgejo.remote_url, so the town has no Forgejo registry to read images from", rigName)
+	}
+	return rigName, fc, nil
+}
+
+// productionPruneGreen reads the green refs of the image rig's repository, the
+// one its Forgejo remote names, with the viewer token.
+func productionPruneGreen(ctx context.Context, townRoot string) (map[string]bool, error) {
+	rigName, fc, err := townImageRigForgejo(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return pruneGreenRefs(ctx, rigName, strings.TrimSpace(fc.RemoteURL), "")
+}
+
+// pruneGreenRefs reads the green refs of the repository remote names, through
+// the Forgejo API root the remote implies. An empty tokenPath reads the viewer
+// role's own token file; a test names one under its temporary directory. The
+// refs are pushed to the remote's owner and repository, which the registry's
+// owner may not be. The remote URL can carry a credential in its user info, so
+// its text stays out of these errors (gt-atcddq).
+func pruneGreenRefs(ctx context.Context, rigName, remote, tokenPath string) (map[string]bool, error) {
+	ru, err := url.Parse(remote)
+	if err != nil {
+		return nil, fmt.Errorf("rig %s's merge_queue.forgejo.remote_url is not a URL, so its green refs cannot be read", rigName)
+	}
+	apiBase, err := land.APIBaseFromRemoteURL(remote)
+	if err != nil {
+		return nil, fmt.Errorf("rig %s's merge_queue.forgejo.remote_url has no scheme and host, so its green refs cannot be read", rigName)
+	}
+	owner, repo, err := land.RepoFromRemoteURL(remote)
+	if err != nil {
+		return nil, fmt.Errorf("rig %s's merge_queue.forgejo.remote_url names no owner and repository, so its green refs cannot be read", rigName)
+	}
+	plaintextHost := forgejo.PlaintextHostOf(ru.Scheme, ru.Host)
+	opts := []forgejo.Option{
+		forgejo.WithBaseURL(apiBase),
+		forgejo.WithHTTPClient(&http.Client{Timeout: updateImagesTimeout}),
+		forgejo.WithRequestGuard(func(u *url.URL) error {
+			return imagevalues.CheckCredentialTransport(u, plaintextHost)
+		}),
+	}
+	if tokenPath != "" {
+		opts = append(opts, forgejo.WithTokenFile(tokenPath))
+	}
+	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("reading the viewer's Forgejo token: %w", err)
+	}
+	return update.ReadGreenRefs(ctx, client, owner, repo)
+}
+
+// newUpdateImagesPruneCmd builds `gt update images prune`: the registry
+// retention plan, printed and not applied. It has no flag that deletes, and
+// its reads are the GET requests the readers make.
+func newUpdateImagesPruneCmd(seams updateImagesSeams) *cobra.Command {
+	return &cobra.Command{
+		Use:   "prune",
+		Short: "Print the registry retention plan for the gastown images; deletes nothing",
+		Long: `Print the registry retention plan for the gastown images; deletes nothing.
+
+The plan reads the digest install's record for the installed and previous
+pairs, the registry's tags of the daemon, polecat and bd images, and the green
+refs of the image rig. For each image it prints every tag the plan keeps and
+every tag it would delete, one line each with its reason, then the counts.
+
+A tag is kept when its digest is the installed or previous pair's, when its
+name is a green ref's, or when it is one of the newest 20 tags of its image by
+push time. A tag that shares a digest with a kept tag is kept too.
+
+The command fails closed: a read or plan that fails exits non-zero and prints
+no line, so nothing is listed for deletion. The command only reads; it has no
+apply path.`,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runUpdateImagesPrune(cmd, seams)
+		},
+	}
+}
+
+// runUpdateImagesPrune plans the retention and prints it. Nothing is printed
+// unless every read and the plan succeed.
+func runUpdateImagesPrune(cmd *cobra.Command, seams updateImagesSeams) error {
+	plan, err := planUpdateImagesPrune(cmd.Context(), seams)
+	if err != nil {
+		return fmt.Errorf("gt update images prune: %w", err)
+	}
+	writeUpdateImagesPrunePlan(cmd.OutOrStdout(), plan)
+	return nil
+}
+
+// planUpdateImagesPrune reads the three inputs the planner decides on and plans
+// retention over them. Every read is a GET to the registry or the forge. A read
+// or plan that fails returns its error and no plan.
+func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update.PrunePlan, error) {
+	if err := validateUpdateImagesPruneSeams(seams); err != nil {
+		return update.PrunePlan{}, err
+	}
+	townRoot, err := seams.FindTownRoot()
+	if err != nil {
+		return update.PrunePlan{}, fmt.Errorf("finding the town root: %w", err)
+	}
+	installed, previous, err := update.ReadPrunePairs(seams.PruneLedger(townRoot))
+	if err != nil {
+		return update.PrunePlan{}, err
+	}
+	registry, err := seams.Registry(townRoot)
+	if err != nil {
+		return update.PrunePlan{}, err
+	}
+	if err := registry.Validate(); err != nil {
+		return update.PrunePlan{}, err
+	}
+	// The redirect rule is the one the image reads hold: a redirect that leaves
+	// the first endpoint is refused, so the credential never follows it.
+	client := *seams.HTTPClient
+	client.CheckRedirect = imagevalues.SameEndpointRedirect
+	reader := update.PruneRegistryReader{
+		Base:          registry.BaseURL(),
+		Owner:         registry.Owner,
+		PlaintextHost: plaintextHostOf(registry),
+		Doer:          &client,
+		Credentials:   seams.Credentials,
+	}
+	tags, err := reader.Images(ctx)
+	if err != nil {
+		return update.PrunePlan{}, err
+	}
+	green, err := seams.PruneGreen(ctx, townRoot)
+	if err != nil {
+		return update.PrunePlan{}, err
+	}
+	plan, err := seams.PlanPrune(update.PruneInput{
+		Images:     tags,
+		Installed:  installed,
+		Previous:   previous,
+		Green:      green,
+		KeepNewest: updateImagesPruneKeepNewest,
+	})
+	if err != nil {
+		return update.PrunePlan{}, err
+	}
+	return plan, nil
+}
+
+// validateUpdateImagesPruneSeams refuses a prune that would report a plan over a
+// read it never made.
+func validateUpdateImagesPruneSeams(s updateImagesSeams) error {
+	switch {
+	case s.FindTownRoot == nil:
+		return errors.New("gt update images prune: no town lookup is wired")
+	case s.Registry == nil:
+		return errors.New("gt update images prune: no registry is wired")
+	case s.Credentials == nil:
+		return errors.New("gt update images prune: no credential reader is wired")
+	case s.HTTPClient == nil:
+		return errors.New("gt update images prune: no HTTP client is wired")
+	case s.PruneLedger == nil:
+		return errors.New("gt update images prune: no digest install record is wired")
+	case s.PruneGreen == nil:
+		return errors.New("gt update images prune: no green refs reader is wired")
+	case s.PlanPrune == nil:
+		return errors.New("gt update images prune: no retention planner is wired")
+	}
+	return nil
+}
+
+// writeUpdateImagesPrunePlan prints the plan image by image, in the order the
+// gastown images are named: the keep lines, the delete lines with their reasons,
+// then the image's counts. The total follows the last image.
+func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan) {
+	var keep, del int
+	for _, image := range []string{imagevalues.DaemonImage, imagevalues.PolecatImage, imagevalues.BdImage} {
+		var k, d int
+		for _, e := range plan.Keep {
+			if e.Image == image {
+				fmt.Fprintf(w, "%-6s %s:%s %s: %s\n", "keep", e.Image, e.Tag, e.Digest, e.Reason)
+				k++
+			}
+		}
+		for _, e := range plan.Delete {
+			if e.Image == image {
+				fmt.Fprintf(w, "%-6s %s:%s %s: %s\n", "delete", e.Image, e.Tag, e.Digest, e.Reason)
+				d++
+			}
+		}
+		fmt.Fprintf(w, "%s: keep %d, delete %d\n", image, k, d)
+		keep += k
+		del += d
+	}
+	fmt.Fprintf(w, "total: keep %d, delete %d; nothing is deleted by this command\n", keep, del)
 }
 
 // updateImagesRepoFile opens a rig's repository to read its repo-committed
@@ -211,6 +428,7 @@ where it names instead.`,
 	c.Flags().StringVar(&sha, "sha", "", "The full green commit both images carry")
 	c.Flags().StringVar(&out, "out", "", "The values file to write; default is the shared path under the town's gastown directory")
 	c.Flags().BoolVar(&withBd, "bd", false, "Also record the bd gateway image built for --sha under the bd key")
+	c.AddCommand(newUpdateImagesPruneCmd(seams))
 	return c
 }
 
