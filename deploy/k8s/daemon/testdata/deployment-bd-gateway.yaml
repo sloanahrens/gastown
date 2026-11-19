@@ -69,6 +69,12 @@ spec:
               mountPath: /var/log/bdgw
             - name: bd-gateway-workspace
               mountPath: /var/lib/bdgw
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 7440
+            periodSeconds: 2
+            failureThreshold: 60
           readinessProbe:
             exec:
               command:
@@ -80,9 +86,9 @@ spec:
                 - /etc/bdgw/verbs.json
                 - --workspace
                 - /var/lib/bdgw/ws
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 10
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            timeoutSeconds: 5
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false

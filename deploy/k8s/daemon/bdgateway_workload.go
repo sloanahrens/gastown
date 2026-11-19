@@ -49,6 +49,8 @@ const (
 	bdGatewayTokenSecretMode = int32(0o440)
 	// bdGatewayDoltPort is the Dolt port the gateway dials at DoltHostName.
 	bdGatewayDoltPort = 3307
+	// bdGatewayHealthPath is the gateway's /healthz path, which answers with no token.
+	bdGatewayHealthPath = "/healthz"
 )
 
 // bdGatewayDeployment is the gateway's pod: an init container that copies the tokens
@@ -132,11 +134,19 @@ func bdGatewayContainer(v Values) Container {
 			{Name: bdGatewayLogVolume, MountPath: bdGatewayLogDir},
 			{Name: BdGatewayWorkspaceClaim, MountPath: bdGatewayWorkspaceMount},
 		},
+		// The readiness probe does not run until the startup probe passes. /healthz needs
+		// no token, so the startup probe passes as soon as the server answers on its port.
+		// Its window is 60 checks 2 s apart: a start slower than that restarts the container.
+		StartupProbe: &Probe{
+			HTTPGet:          &HTTPGetAction{Path: bdGatewayHealthPath, Port: BdGatewayPort},
+			PeriodSeconds:    2,
+			FailureThreshold: 60,
+		},
 		ReadinessProbe: &Probe{
 			Exec:                &ExecAction{Command: []string{"bdgw", "ready", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--workspace", bdGatewayWorkspaceDir}},
-			InitialDelaySeconds: 10,
-			PeriodSeconds:       15,
-			TimeoutSeconds:      10,
+			InitialDelaySeconds: 2,
+			PeriodSeconds:       3,
+			TimeoutSeconds:      5,
 			FailureThreshold:    3,
 		},
 	}

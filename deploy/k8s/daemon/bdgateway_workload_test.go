@@ -363,6 +363,45 @@ func TestBdGatewayRenderReadiness(t *testing.T) {
 	}
 }
 
+// TestBdGatewayProbeTimingGolden holds the gateway container's probes to the timing a
+// roll needs: a readiness probe that starts at 2 s and polls every 3 s, and a startup
+// probe that GETs /healthz on the gateway port, which holds the readiness probe back
+// until the server answers. The fields are asserted by name, so a golden regenerated
+// with -update cannot move them unnoticed.
+func TestBdGatewayProbeTimingGolden(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayWorkloadValues(t))
+	dir := filepath.Join(packageDir(t), "testdata")
+	compareGolden(t, dir, "deployment-bd-gateway.yaml", document(t, m.BdGatewayDeployment))
+
+	c := m.BdGatewayDeployment.Spec.Template.Spec.Containers[0]
+	if r := c.ReadinessProbe; r == nil || r.InitialDelaySeconds != 2 || r.PeriodSeconds != 3 || r.TimeoutSeconds != 5 || r.FailureThreshold != 3 {
+		t.Errorf("the readiness probe is %+v, want initialDelaySeconds 2, periodSeconds 3, timeoutSeconds 5, failureThreshold 3", r)
+	}
+	s := c.StartupProbe
+	if s == nil || s.HTTPGet == nil {
+		t.Fatalf("the gateway has no startup HTTP GET probe")
+	}
+	if s.HTTPGet.Path != "/healthz" || s.HTTPGet.Port != BdGatewayPort || s.PeriodSeconds != 2 || s.FailureThreshold != 60 {
+		t.Errorf("the startup probe is GET %s on %d every %ds with failureThreshold %d, want GET /healthz on %d every 2s with failureThreshold 60",
+			s.HTTPGet.Path, s.HTTPGet.Port, s.PeriodSeconds, s.FailureThreshold, BdGatewayPort)
+	}
+}
+
+// TestBdGatewayProbeTimingStrategy holds the gateway to one replica under Recreate: a
+// second replica or a surge would put two gateways on the workspace claim at once.
+func TestBdGatewayProbeTimingStrategy(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, bdGatewayWorkloadValues(t))
+	d := m.BdGatewayDeployment
+	if d.Spec.Replicas != 1 {
+		t.Errorf("the gateway has %d replicas, want 1", d.Spec.Replicas)
+	}
+	if d.Spec.Strategy.Type != "Recreate" {
+		t.Errorf("the gateway strategy is %q, want Recreate", d.Spec.Strategy.Type)
+	}
+}
+
 // TestBdGatewayWorkloadRendered holds the stream to the gateway's objects: a
 // Values with the image renders the Deployment, Service and claim exactly as their
 // documents encode, so Render writes what Build built.
