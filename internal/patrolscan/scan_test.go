@@ -41,6 +41,10 @@ type fakeEnv struct {
 	// measures clean, the answer nothing-wrong. gitErr makes the probe fail.
 	gitStates map[string]GitState
 	gitErr    map[string]error
+	// pushed is origin's head from this run per seat, "" for an unset seat;
+	// pushedErr makes the read fail, which a caller reads as Unknown.
+	pushed    map[string]string
+	pushedErr map[string]error
 	// clearSeatErr makes the agent-bead reset fail.
 	clearSeatErr map[string]error
 	// idleStopped names seats whose record already says stop, so MarkIdle
@@ -172,6 +176,7 @@ func newFake() *fakeEnv {
 		workBeads: map[string]*Work{}, workBeadErr: map[string]error{},
 		clearErr:  map[string]error{},
 		gitStates: map[string]GitState{}, gitErr: map[string]error{},
+		pushed: map[string]string{}, pushedErr: map[string]error{},
 		clearSeatErr: map[string]error{},
 		blockers:     map[string][]WorkRef{}, blockerErr: map[string]error{},
 		deferErr: map[string]error{}, deferStale: map[string]bool{},
@@ -279,6 +284,12 @@ func (f *fakeEnv) GitState(_, p string) (GitState, error) {
 		return GitState{}, err
 	}
 	return f.gitStates[p], nil
+}
+func (f *fakeEnv) PushedSinceSling(_, p string) (string, error) {
+	if err := f.pushedErr[p]; err != nil {
+		return "", err
+	}
+	return f.pushed[p], nil
 }
 func (f *fakeEnv) ClearStuckExit(_, p, exit string) (bool, error) {
 	if err := f.clearSeatErr[p]; err != nil {
