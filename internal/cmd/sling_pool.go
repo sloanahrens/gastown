@@ -67,6 +67,12 @@ type poolSession struct {
 	name    string
 	agent   string // the agent the seat's record names; empty when it names none
 	created time.Time
+	// sandbox is the gateway's name for the seat's sandbox: a live session's
+	// own name, and the session name a dead-hooked seat no longer has (its name
+	// carries dead/ instead). Empty for a claim or a landing seat, which has no
+	// sandbox by kind. The pool reconciliation compares it with the gateway's
+	// listing (pool_reconcile.go).
+	sandbox string
 	// rig and polecat name the seat this session runs, parsed from the session's
 	// GT_ROLE. Empty for a claim or a landing seat, which name no live polecat.
 	rig     string
@@ -746,7 +752,7 @@ func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, dispo
 				agent = config.UnknownSeatAgent
 			}
 		}
-		out = append(out, poolSession{name: n, agent: agent, created: created, rig: rigName, polecat: polecatName, hookedBead: hookedBead})
+		out = append(out, poolSession{name: n, agent: agent, created: created, sandbox: n, rig: rigName, polecat: polecatName, hookedBead: hookedBead})
 	}
 	return out, nil
 }

@@ -217,7 +217,7 @@ func TestSpecTickRosterReadsSlingSideOnceAndCountsTheSpawn(t *testing.T) {
 				failAt: tc.failAt,
 			}
 			var snap atomic.Pointer[poolSeatSnapshot]
-			roster := specDispatchRoster(newSpecTickReads(), town, ts, func() sessionLister { return lister }, store, &snap)
+			roster := specDispatchRoster(newSpecTickReads(), town, ts, func() sessionLister { return lister }, store, &snap, poolReconcileReads{})
 			got, err := roster()
 
 			if tc.failAt == 0 && lister.reads != 2 {
@@ -357,7 +357,7 @@ func TestSpecTickFailsClosedOnItsOccupancyRead(t *testing.T) {
 	var snap atomic.Pointer[poolSeatSnapshot]
 	f := specGoldenTown()
 	env := f.env()
-	env.Roster = specDispatchRoster(newSpecTickReads(), town, ts, func() sessionLister { return lister }, func(string) beads.Client { return beadsfake.New() }, &snap)
+	env.Roster = specDispatchRoster(newSpecTickReads(), town, ts, func() sessionLister { return lister }, func(string) beads.Client { return beadsfake.New() }, &snap, poolReconcileReads{})
 	r := runSpecDispatchCycle(env)
 
 	if len(f.slingRecords) != 0 {

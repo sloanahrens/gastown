@@ -186,7 +186,7 @@ func TestSpecDispatchRosterReadsTheLiveSandboxRecords(t *testing.T) {
 			var snap atomic.Pointer[poolSeatSnapshot]
 			roster, err := specDispatchRoster(newSpecTickReads(), town, ts,
 				func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} },
-				func(string) beads.Client { return beadsfake.New() }, &snap)()
+				func(string) beads.Client { return beadsfake.New() }, &snap, poolReconcileReads{})()
 			if tc.wantNo {
 				if err == nil {
 					t.Fatal("roster read succeeded, want it to fail")

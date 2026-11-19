@@ -423,7 +423,10 @@ type HeldSeat struct {
 	// it names the work it holds the seat for, and a claim that names no bead
 	// keeps its own name.
 	Name string
-	// State is one of the SeatState constants, or SeatStateInFlight(bead).
+	// State is one of the SeatState constants, SeatStateInFlight(bead), or — on
+	// a seat a pool reconciliation names — that seat's disposition word (its
+	// reuse status or verdict, from the polecat's own state read). Either way it
+	// is one word, so a seat prints the same way in every list.
 	State string
 }
 

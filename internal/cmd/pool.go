@@ -210,6 +210,12 @@ func renderPoolSeatMap(w io.Writer, townRoot string, v poolSeatMapView, live poo
 	if v.maxTotal != nil {
 		writeHeldSeats(w, live.total, *v.maxTotal, live.held)
 	}
+	// The gateway's running sandboxes against the counted seats, in the same
+	// notes the tick line appends: one line each, and nothing for a clean
+	// reading (gt-nsbeg9).
+	for _, note := range live.reconcile.Lines() {
+		fmt.Fprintf(w, "  %s\n", note)
+	}
 	keys := "polecat_pool.seats, max_total"
 	if v.timezone != "" {
 		keys += ", timezone " + v.timezone
@@ -477,6 +483,10 @@ type poolShowLive struct {
 	parkedTotal int
 	total       int
 	ok          bool
+	// reconcile is the pool's comparison of the gateway's running sandboxes
+	// with the counted seats, read once for the page, and the notes it prints
+	// under them (gt-nsbeg9). The zero value prints nothing.
+	reconcile poolReconcileNotes
 }
 
 func poolLiveFor(townRoot string) poolShowLive {
@@ -494,15 +504,23 @@ func poolLiveForBatch(townRoot string, lister sessionLister, storeFor func(dir s
 	work := func(ids []string) (map[string]*beads.Issue, error) {
 		return storeFor(townRoot).ShowMultiple(ids)
 	}
-	return poolLiveForWith(townRoot, func(pool *config.PolecatPool) ([]poolSession, error) {
+	return poolLiveForWithReconcile(townRoot, func(pool *config.PolecatPool) ([]poolSession, error) {
 		return poolSeatSessionsWith(lister, townRoot, batch.disposition, batch.hookHeld, work, pool)
-	})
+	}, poolReconcileTownReads(townRoot))
 }
 
 // poolLiveForWith is poolLiveFor with the town's seat read passed in, the way
 // the rest of the pool's reads take their collaborators: a test builds the count
-// from canned sessions and canned beads reads.
+// from canned sessions and canned beads reads. It reads no gateway listing, so
+// a test's page has no reconciliation notes unless it builds them.
 func poolLiveForWith(townRoot string, readSeats func(pool *config.PolecatPool) ([]poolSession, error)) poolShowLive {
+	return poolLiveForWithReconcile(townRoot, readSeats, poolReconcileReads{})
+}
+
+// poolLiveForWithReconcile is poolLiveForWith with the reconciliation reads
+// passed in too, so the page names the running sandboxes the count does not hold
+// from one census read (gt-nsbeg9).
+func poolLiveForWithReconcile(townRoot string, readSeats func(pool *config.PolecatPool) ([]poolSession, error), reconcile poolReconcileReads) poolShowLive {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil {
 		return poolShowLive{}
@@ -520,7 +538,8 @@ func poolLiveForWith(townRoot string, readSeats func(pool *config.PolecatPool) (
 		return poolShowLive{}
 	}
 	r := specRosterFrom(sessions, ts)
-	out := poolShowLive{live: r.Live, dead: r.DeadHooked, held: r.Held, parked: r.ParkedStale, ok: true}
+	out := poolShowLive{live: r.Live, dead: r.DeadHooked, held: r.Held, parked: r.ParkedStale, ok: true,
+		reconcile: reconcile.notes(sessions)}
 	for _, n := range r.Live {
 		out.total += n
 	}

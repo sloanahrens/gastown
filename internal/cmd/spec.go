@@ -1961,6 +1961,17 @@ type specRoster struct {
 	// seat read the count used. A picture above its cap prints them, so the
 	// reading can be attributed to seats (gt-5y87fp).
 	Held []specdispatch.HeldSeat
+	// Counted is every seat counted in Live: the roster's own sessions and the
+	// draining ones the sling-side read added. The pool reconciliation compares
+	// the gateway's running sandboxes against it, so a draining seat's sandbox
+	// is not named uncounted (gt-nsbeg9).
+	Counted []poolSession
+	// Reconcile is the pool's comparison of the gateway's running sandboxes with
+	// Counted, read once per tick. The picture appends its notes, so a reading
+	// that disagrees with the sandboxes says which seats it disagrees about
+	// (gt-nsbeg9). The zero value is a tick that read no listing and prints
+	// nothing.
+	Reconcile poolReconcileNotes
 }
 
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
@@ -2488,7 +2499,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// built a moment before, and its construction time is no longer the one the
 	// report speaks for (gt-t8new).
 	budget.Now = env.Now()
-	report.Roster = budget.Picture()
+	report.Roster = specRosterPicture(budget.Picture(), roster.Reconcile)
 	report.ProbedWorktrees = &roster.ProbedWorktrees
 	if len(roster.Unrecorded) > 0 {
 		sort.Strings(roster.Unrecorded)
@@ -3803,11 +3814,16 @@ func specRosterOf(seats poolSeatSnapshot, ts *config.TownSettings, occupied func
 	if err != nil {
 		return specRoster{}, fmt.Errorf("counting the seats a sling will see: %w", err)
 	}
-	draining := specRosterFrom(specDrainingSessions(seats.sessions, held), ts)
+	drainingSeats := specDrainingSessions(seats.sessions, held)
+	draining := specRosterFrom(drainingSeats, ts)
 	roster.Draining = draining.Live
 	// The draining seats count in the tick's total, so the picture names them
 	// too: a list one entry short of the count would explain nothing (gt-5y87fp).
 	roster.Held = append(roster.Held, draining.Held...)
+	// The reconciliation compares the counted seats as the total counts them,
+	// so a draining seat's running sandbox is its own seat and not an uncounted
+	// one (gt-nsbeg9).
+	roster.Counted = append(append([]poolSession(nil), seats.sessions...), drainingSeats...)
 	return roster, nil
 }
 
@@ -3829,7 +3845,7 @@ func specRosterStep(read func() (poolSeatSnapshot, error), ts *config.TownSettin
 // specDispatchRoster is the tick's Roster step over one town. The seat snapshot
 // and the sling-side occupancy read the same lister, the occupancy once per tick
 // (specRosterStep), so a test can drive the wiring with fakes (gt-97ppg).
-func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSettings, lister func() sessionLister, storeFor func(dir string) beads.Client, snapshot *atomic.Pointer[poolSeatSnapshot]) func() (specRoster, error) {
+func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSettings, lister func() sessionLister, storeFor func(dir string) beads.Client, snapshot *atomic.Pointer[poolSeatSnapshot], reconcile poolReconcileReads) func() (specRoster, error) {
 	return func() (specRoster, error) {
 		roster, err := specRosterStep(
 			func() (poolSeatSnapshot, error) {
@@ -3856,6 +3872,11 @@ func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSe
 			return specRoster{}, fmt.Errorf("listing live sandbox records: %w", err)
 		}
 		roster.SandboxRecords = records
+		// The gateway's running sandboxes against the seats counted above, read
+		// once for the tick. A listing that cannot be read is the note that says
+		// so, never a failed roster: the tick dispatches as it would without it
+		// (gt-nsbeg9).
+		roster.Reconcile = reconcile.notes(roster.Counted)
 		return roster, nil
 	}
 }
@@ -4282,7 +4303,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// live sessions, in-flight claims, and seats mid-landing. Two
 		// pictures of one pool is how the dispatcher ends up slinging into
 		// a seat the nudge just called free (gt-thy6r).
-		Roster:      specDispatchRoster(reads, townRoot, ts, newPoolSessionLister, func(dir string) beads.Client { return beads.New(dir) }, &snapshot),
+		Roster:      specDispatchRoster(reads, townRoot, ts, newPoolSessionLister, func(dir string) beads.Client { return beads.New(dir) }, &snapshot, poolReconcileTownReads(townRoot)),
 		RecountSeat: specRecountSeatFor(townRoot, ts.PolecatPool, newPoolSessionLister, &snapshot, time.Now),
 		Annotate:    annotations.annotate,
 		AddLabel: func(id, label string) error {
