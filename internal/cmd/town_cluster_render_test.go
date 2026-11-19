@@ -15,6 +15,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/deploy/k8s"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -204,6 +205,42 @@ func renderedKinds(t *testing.T, out string) []string {
 	return kinds
 }
 
+// writtenFile is one file the render wrote: the key of the object it declares
+// (kind/namespace/name) and its bytes.
+type writtenFile struct {
+	key  string
+	body string
+}
+
+// writtenFiles is every file in out in file-name order, so a test can compare
+// what two renders wrote without the numbers a flag shifts.
+func writtenFiles(t *testing.T, out string) []writtenFile {
+	t.Helper()
+	var files []writtenFile
+	for _, name := range dirNames(t, out) {
+		path := filepath.Join(out, name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("reading %s: %v", path, err)
+		}
+		var head struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name      string `yaml:"name"`
+				Namespace string `yaml:"namespace"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal(data, &head); err != nil {
+			t.Fatalf("%s does not parse back: %v", path, err)
+		}
+		files = append(files, writtenFile{
+			key:  head.Kind + "/" + head.Metadata.Namespace + "/" + head.Metadata.Name,
+			body: string(data),
+		})
+	}
+	return files
+}
+
 // deploymentBody is the rendered daemon Deployment's text, for a test that reads
 // a mount path or a volume name the typed helpers do not expose.
 func deploymentBody(t *testing.T, out string) string {
@@ -323,6 +360,147 @@ func TestTownClusterRenderWritesTheObjectsInApplyOrder(t *testing.T) {
 	}
 	if got := renderedKinds(t, f.out); !slices.Equal(got, want) {
 		t.Fatalf("apply order = %v, want %v", got, want)
+	}
+}
+
+// staticFileKeys is the static set in the order Build writes it: the
+// cluster-scoped documents first, then the namespaced ones, each in
+// k8s.Static's order, keyed as writtenFiles keys a file.
+func staticFileKeys(t *testing.T) []string {
+	t.Helper()
+	objects, err := k8s.Static()
+	if err != nil {
+		t.Fatalf("reading the static set: %v", err)
+	}
+	if len(objects) == 0 {
+		t.Fatal("the static set is empty, so this test cannot see the flag add anything")
+	}
+	var keys []string
+	for _, cluster := range []bool{true, false} {
+		for _, object := range objects {
+			if object.Cluster == cluster {
+				keys = append(keys, object.Kind+"/"+object.Namespace+"/"+object.Name)
+			}
+		}
+	}
+	return keys
+}
+
+// TestTownClusterRenderStaticFlag holds --include-static to its one job: the
+// flag adds the static control-cluster set to the files written, as one block
+// right after the ServiceAccount, and leaves every object the default render
+// writes byte-for-byte as it was (gt-lz5nv1).
+func TestTownClusterRenderStaticFlag(t *testing.T) {
+	t.Parallel()
+	render := func(t *testing.T, include bool) []writtenFile {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		f.includeStatic = include
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render with include-static=%v: %v", include, err)
+		}
+		return writtenFiles(t, f.out)
+	}
+	without := render(t, false)
+	with := render(t, true)
+
+	staticKeys := staticFileKeys(t)
+	keys := func(files []writtenFile) []string {
+		out := make([]string, 0, len(files))
+		for _, file := range files {
+			out = append(out, file.key)
+		}
+		return out
+	}
+	withoutKeys, withKeys := keys(without), keys(with)
+
+	// The static block follows the daemon's ServiceAccount, the last object the
+	// set may depend on, and everything the default render wrote around it keeps
+	// its order. The flag shifts file numbers, not the apply order.
+	saKey := "ServiceAccount/" + k8sdaemon.DefaultNamespace + "/" + k8sdaemon.ServiceAccountName
+	saAt := slices.Index(withoutKeys, saKey)
+	if saAt < 0 {
+		t.Fatalf("the default render wrote no %s: %v", saKey, withoutKeys)
+	}
+	if got := len(withKeys); got != len(withoutKeys)+len(staticKeys) {
+		t.Fatalf("--include-static wrote %d files, want the default %d and the %d static ones", got, len(withoutKeys), len(staticKeys))
+	}
+	if got := withKeys[:saAt+1]; !slices.Equal(got, withoutKeys[:saAt+1]) {
+		t.Fatalf("the files before the ServiceAccount = %v, want %v", got, withoutKeys[:saAt+1])
+	}
+	if got := withKeys[saAt+1 : saAt+1+len(staticKeys)]; !slices.Equal(got, staticKeys) {
+		t.Fatalf("the static block = %v, want %v", got, staticKeys)
+	}
+	if got := withKeys[saAt+1+len(staticKeys):]; !slices.Equal(got, withoutKeys[saAt+1:]) {
+		t.Fatalf("the files after the static block = %v, want %v", got, withoutKeys[saAt+1:])
+	}
+
+	// The flag adds the static files and changes no other one.
+	withBodies := make(map[string]string, len(with))
+	for _, file := range with {
+		withBodies[file.key] = file.body
+	}
+	for _, file := range without {
+		got, ok := withBodies[file.key]
+		if !ok {
+			t.Errorf("--include-static dropped the rendered %s", file.key)
+			continue
+		}
+		if got != file.body {
+			t.Errorf("--include-static changed the bytes of the rendered %s", file.key)
+		}
+	}
+	for _, key := range staticKeys {
+		if _, ok := withBodies[key]; !ok {
+			t.Errorf("--include-static wrote no file for the static %s", key)
+		}
+		if slices.Contains(withoutKeys, key) {
+			t.Errorf("a render without --include-static wrote the static %s", key)
+		}
+	}
+}
+
+// TestTownClusterRenderStaticSecretLines holds the static Secret to the render's
+// two treatments: it is written as the document the operator applies, and no
+// create line names it, since the render has no operator file to create it from
+// (gt-lz5nv1).
+func TestTownClusterRenderStaticSecretLines(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.includeStatic = true
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	objects, err := k8s.Static()
+	if err != nil {
+		t.Fatalf("reading the static set: %v", err)
+	}
+	var staticSecrets []k8s.StaticObject
+	for _, object := range objects {
+		if object.Kind == "Secret" {
+			staticSecrets = append(staticSecrets, object)
+		}
+	}
+	if len(staticSecrets) == 0 {
+		t.Fatal("the static set holds no Secret, so this test cannot see one")
+	}
+	written := make(map[string]bool, len(staticSecrets))
+	for _, file := range writtenFiles(t, f.out) {
+		written[file.key] = true
+	}
+	lines := createLines(out.String())
+	for _, object := range staticSecrets {
+		key := object.Kind + "/" + object.Namespace + "/" + object.Name
+		if !written[key] {
+			t.Errorf("--include-static wrote no file for the static %s", key)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, object.Name) {
+				t.Errorf("a create line names the static Secret %s: %s", object.Name, line)
+			}
+		}
 	}
 }
 
@@ -1466,7 +1644,7 @@ func TestApplyObjectsRefusesWhatItCannotOrder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := applyObjects([]byte(tt.stream), tt.marshal)
+			_, err := applyObjects([]byte(tt.stream), tt.marshal, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.cause) {
 				t.Fatalf("applyObjects = %v, want a refusal naming %q", err, tt.cause)
 			}
@@ -1492,7 +1670,7 @@ func TestApplyObjectsRanksTheTrackerBackupClaimWithTheCronJob(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			stream := "kind: PersistentVolumeClaim\nmetadata:\n  name: " + tt.claim + "\n"
-			objects, err := applyObjects([]byte(stream), yaml.Marshal)
+			objects, err := applyObjects([]byte(stream), yaml.Marshal, nil)
 			if err != nil {
 				t.Fatalf("applyObjects: %v", err)
 			}
@@ -1503,6 +1681,37 @@ func TestApplyObjectsRanksTheTrackerBackupClaimWithTheCronJob(t *testing.T) {
 				t.Errorf("the %s claim's rank = %d, want the %s rank %d", tt.claim, got, tt.rank, want)
 			}
 		})
+	}
+}
+
+// TestApplyObjectsKeepsTheStaticSet holds the split's one distinction: the
+// render's own Secrets are dropped and created from the operator's files, and a
+// static Secret is kept as the reviewed document the operator applies (gt-lz5nv1).
+func TestApplyObjectsKeepsTheStaticSet(t *testing.T) {
+	t.Parallel()
+	reviewed := "kind: Secret\nmetadata:\n  name: sweep-runner-token\n  namespace: gt-sweeps\ntype: kubernetes.io/service-account-token\n"
+	stream := reviewed + "---\nkind: Secret\nmetadata:\n  name: daemon-openshell\n  namespace: gt\n"
+	static := []k8s.StaticObject{{
+		Kind:      "Secret",
+		Name:      "sweep-runner-token",
+		Namespace: "gt-sweeps",
+		Doc:       []byte(reviewed),
+	}}
+	objects, err := applyObjects([]byte(stream), yaml.Marshal, static)
+	if err != nil {
+		t.Fatalf("applyObjects: %v", err)
+	}
+	if len(objects) != 1 {
+		t.Fatalf("applyObjects kept %d objects, want the static Secret only", len(objects))
+	}
+	if got := objects[0]; got.kind != "Secret" || got.name != "sweep-runner-token" {
+		t.Fatalf("applyObjects kept %s %q, want the static Secret", got.kind, got.name)
+	}
+	if got := string(objects[0].body); got != reviewed {
+		t.Fatalf("the static Secret's bytes = %q, want the reviewed document %q", got, reviewed)
+	}
+	if got := objects[0].rank; got != staticApplyRank {
+		t.Errorf("the static Secret's rank = %d, want %d", got, staticApplyRank)
 	}
 }
 
@@ -2725,6 +2934,14 @@ func TestTownClusterRenderRefusesTheRecordedFlags(t *testing.T) {
 			cause: "--record-flags is for a live render",
 		},
 		{
+			name: "recording a render that includes the static set",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps, f *clusterRenderFlags) {
+				f.includeStatic = true
+				d.record = clusterRenderRecordOptions{record: true}
+			},
+			cause: "--record-flags cannot record --include-static",
+		},
+		{
 			name: "a recorded file that the loader refuses",
 			mutate: func(t *testing.T, town string, d *clusterRenderDeps, _ *clusterRenderFlags) {
 				path := renderFlagsPathIn(town)
@@ -2885,6 +3102,9 @@ func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 		case "dashboardClaudeDir", "daemonClaudeDir":
 			// Retired: the flags are refused, so the record holds neither and a
 			// replay leaves both empty (gt-ja7otj).
+		case "includeStatic":
+			// Not recorded until gt-76p406; a recording run refuses the flag, so a
+			// replay leaves it false.
 		default:
 			t.Fatalf("clusterRenderFlags.%s is zero after the record fill, so the record has no field for it and nothing here would see withRecorded drop it", name)
 		}
