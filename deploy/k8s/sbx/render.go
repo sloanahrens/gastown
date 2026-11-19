@@ -58,6 +58,14 @@ type Inputs struct {
 	ChartDir, ValuesPath string
 }
 
+// ObjectRef names one Kubernetes object by kind, namespace and name. Namespace
+// is empty for a cluster-scoped kind.
+type ObjectRef struct {
+	Kind      string
+	Namespace string
+	Name      string
+}
+
 // Set is the gt-sbx desired set: the objects to apply and the Secrets that must
 // exist but are never applied.
 type Set struct {
@@ -66,6 +74,64 @@ type Set struct {
 	// Secrets names the OpenShell chart's Secrets, which the render never
 	// applies.
 	Secrets []string
+	// Runtime names the objects the sandbox cluster creates itself that carry a
+	// fixed name, so the drift compare never reports them as extra. It is a copy
+	// of the package list; a test asserts it shares no object with Objects.
+	Runtime []ObjectRef
+}
+
+// sbxRuntime is every fixed-name object the sandbox cluster creates itself,
+// grouped by the class of object that creates it. It is the source Render fills
+// Set.Runtime from. The list is read from the kind cluster config and up.sh in
+// deploy/k8s/kind, the pinned metrics-server manifest up.sh applies, and kind's
+// default add-ons; no live cluster was read for it. A miss shows as an "extra"
+// in the drift compare, and the fix is one more row.
+var sbxRuntime = []ObjectRef{
+	// The OpenShell gateway and the daemon create these at runtime.
+	{Kind: "NetworkPolicy", Namespace: openshellName, Name: "openshell-sandbox-supervisors"},
+	{Kind: "NetworkPolicy", Namespace: openshellName, Name: "openshell-sandbox-workloads"},
+	// The daemon's cache trim Job, named cacheTrimJobName for the gt-cache claim.
+	{Kind: "Job", Namespace: openshellName, Name: "gt-cache-trim-gt-cache"},
+	// The chart's certgen hook leaves these behind.
+	{Kind: "ServiceAccount", Namespace: openshellName, Name: "openshell-certgen"},
+	{Kind: "Role", Namespace: openshellName, Name: "openshell-certgen"},
+	{Kind: "RoleBinding", Namespace: openshellName, Name: "openshell-certgen"},
+
+	// The Namespaces kind and kubeadm start with.
+	{Kind: "Namespace", Name: "default"},
+	{Kind: "Namespace", Name: "kube-system"},
+	{Kind: "Namespace", Name: "kube-public"},
+	{Kind: "Namespace", Name: "kube-node-lease"},
+	{Kind: "Namespace", Name: "local-path-storage"},
+
+	// kind's local-path storage add-on.
+	{Kind: "Deployment", Namespace: "local-path-storage", Name: "local-path-provisioner"},
+	{Kind: "ConfigMap", Namespace: "local-path-storage", Name: "local-path-config"},
+	{Kind: "ServiceAccount", Namespace: "local-path-storage", Name: "local-path-provisioner"},
+	{Kind: "Role", Namespace: "local-path-storage", Name: "local-path-provisioner-role"},
+	{Kind: "RoleBinding", Namespace: "local-path-storage", Name: "local-path-provisioner-bind"},
+	{Kind: "ClusterRole", Name: "local-path-provisioner-role"},
+	{Kind: "ClusterRoleBinding", Name: "local-path-provisioner-bind"},
+	{Kind: "StorageClass", Name: "standard"},
+
+	// Cluster-scoped objects with fixed names: the apiserver's bootstrap
+	// ClusterRoles and ClusterRoleBinding (no system: or kubeadm: prefix, so a
+	// prefix rule does not cover them), the PriorityClasses, kindnet, and the
+	// metrics-server manifest up.sh applies.
+	{Kind: "ClusterRole", Name: "admin"},
+	{Kind: "ClusterRole", Name: "cluster-admin"},
+	{Kind: "ClusterRole", Name: "edit"},
+	{Kind: "ClusterRole", Name: "view"},
+	{Kind: "ClusterRoleBinding", Name: "cluster-admin"},
+	{Kind: "PriorityClass", Name: "system-cluster-critical"},
+	{Kind: "PriorityClass", Name: "system-node-critical"},
+	{Kind: "ClusterRole", Name: "kindnet"},
+	{Kind: "ClusterRoleBinding", Name: "kindnet"},
+	{Kind: "ClusterRole", Name: "system:aggregated-metrics-reader"},
+	{Kind: "ClusterRole", Name: "system:metrics-server"},
+	{Kind: "ClusterRoleBinding", Name: "metrics-server:system:auth-delegator"},
+	{Kind: "ClusterRoleBinding", Name: "system:metrics-server"},
+	{Kind: "APIService", Name: "v1beta1.metrics.k8s.io"},
 }
 
 // Render composes the gt-sbx cluster's desired set in apply order from the
@@ -137,7 +203,7 @@ func renderSet(ctx context.Context, in Inputs, static func() ([]k8s.StaticObject
 	if err := checkDuplicates(objects); err != nil {
 		return Set{}, err
 	}
-	return Set{Objects: objects, Secrets: slices.Clone(chart.Secrets)}, nil
+	return Set{Objects: objects, Secrets: slices.Clone(chart.Secrets), Runtime: slices.Clone(sbxRuntime)}, nil
 }
 
 // checkDuplicates refuses two objects with the same kind, namespace and name,
