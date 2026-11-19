@@ -46,6 +46,10 @@ const (
 	// because init is not served. Screening it out silently would turn a caller's
 	// "create the database" into a call it never made, so the call is refused.
 	gatewayPermitVar = "BD_ALLOW_NEW_DATABASE"
+	// gatewayRetryTotal is how long a call keeps waiting for the gateway after a
+	// refused dial, so a call made while the gateway rolls reaches it once it is
+	// back instead of failing on the first refusal.
+	gatewayRetryTotal = 45 * time.Second
 )
 
 // gatewayEnvNames are the only variables the gateway accepts in the head
@@ -100,6 +104,12 @@ type BdGateway struct {
 	// uses os.ReadFile. A redirect that exists but cannot be read refuses the
 	// call, since read as absent it would name the worktree's own .beads.
 	ReadFile func(string) ([]byte, error)
+	// Sleep waits between attempts after a refused dial. Nil uses time.Sleep, so
+	// a unit test records the waits instead of spending them.
+	Sleep func(time.Duration)
+	// Now reads the clock the time spent retrying is measured with. Nil uses
+	// time.Now.
+	Now func() time.Time
 }
 
 // Launch runs call through the gateway and returns bd's exit status. An error
@@ -157,15 +167,43 @@ func (g BdGateway) Launch(call Call) (int, error) {
 	default:
 		stdin = strings.NewReader("")
 	}
-	body := io.MultiReader(bytes.NewReader(append(head, '\n')), stdin)
-	// validate parsed the URL and the method is fixed, so building the request
-	// cannot fail.
-	req, _ := http.NewRequest(http.MethodPost, g.endpoint(gatewayExecPath), body)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", gatewayContentType)
-	req.Header.Set("X-Gt-Caller", g.caller())
-	resp, err := g.doer(g.clientTimeout()).Do(req)
+	// The head is marshaled once, so every attempt sends the same bytes, and a
+	// fresh request is built for each: the request whose dial failed was closed by
+	// the client, so it cannot be sent again.
+	headLine := append(head, '\n')
+	newRequest := func() *http.Request {
+		body := io.MultiReader(bytes.NewReader(headLine), stdin)
+		// validate parsed the URL and the method is fixed, so building the request
+		// cannot fail.
+		req, _ := http.NewRequest(http.MethodPost, g.endpoint(gatewayExecPath), body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", gatewayContentType)
+		req.Header.Set("X-Gt-Caller", g.caller())
+		return req
+	}
+	// A gateway roll restarts the gateway, so a dial can be refused for a moment
+	// while a call is on its way. A refused dial never reached the gateway, so the
+	// call cannot have run: it is tried again on RetrySchedule's waits. A refused
+	// attempt never read the body, so the caller's stdin is still whole for the
+	// attempt that connects, and it is delivered once. A non-retryable error, a
+	// timeout and an answer, whatever its status, are each tried exactly once.
+	delays := RetrySchedule(gatewayRetryTotal)
+	doer := g.doer(g.clientTimeout())
+	started := g.now()
+	attempts := 0
+	var resp *http.Response
+	for {
+		attempts++
+		resp, err = doer.Do(newRequest())
+		if err == nil || !RetryableDial(err) || attempts > len(delays) {
+			break
+		}
+		g.sleep(delays[attempts-1])
+	}
 	if err != nil {
+		if attempts > 1 {
+			return exitDown, fmt.Errorf("gtwrap: the bd gateway at %s did not answer, so the call did not run: %w (after %d attempts in %v)", g.URL, err, attempts, g.now().Sub(started))
+		}
 		return exitDown, fmt.Errorf("gtwrap: the bd gateway at %s did not answer, so the call did not run: %w", g.URL, err)
 	}
 	// The response is fully read by refusal or by readFrames, so a close error
@@ -586,4 +624,21 @@ func (g BdGateway) doer(limit time.Duration) HTTPDoer {
 		return g.HTTP
 	}
 	return &http.Client{Timeout: limit}
+}
+
+// sleep waits d between attempts: the injected sleep, or the real one.
+func (g BdGateway) sleep(d time.Duration) {
+	if g.Sleep != nil {
+		g.Sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// now reads the clock: the injected one, or the real one.
+func (g BdGateway) now() time.Time {
+	if g.Now != nil {
+		return g.Now()
+	}
+	return time.Now()
 }

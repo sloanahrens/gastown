@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
 )
@@ -1533,5 +1538,236 @@ func TestBdGatewayDoctor(t *testing.T) {
 				t.Error("the exec diagnosis did not ask /readyz")
 			}
 		})
+	}
+}
+
+// fakeDialClock is the injected clock of a retried call: Now reads it, and
+// Sleep moves it on, so the call spends no real time and the test sees the
+// waits it made.
+type fakeDialClock struct {
+	now    time.Time
+	sleeps []time.Duration
+}
+
+func (c *fakeDialClock) Now() time.Time { return c.now }
+
+func (c *fakeDialClock) Sleep(d time.Duration) {
+	c.sleeps = append(c.sleeps, d)
+	c.now = c.now.Add(d)
+}
+
+// refusedDial is the error the gateway's client returns when a dial is refused,
+// wrapped as net/http wraps it.
+func refusedDial(errno syscall.Errno) error {
+	return &url.Error{Op: "Post", URL: "http://gw:7440/v1/exec", Err: dialFailure(errno)}
+}
+
+// TestBdGatewayRetryRecovers: a gateway whose dial is refused three times and
+// then answers carries the call once. Each attempt sends a request of its own
+// with the call's head; the caller's stdin is delivered once, on the attempt
+// that connected; nothing is written to Stderr; and the waits between attempts
+// are the ones RetrySchedule names.
+func TestBdGatewayRetryRecovers(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tokenFile := writeGatewayToken(t, "t")
+	clock := &fakeDialClock{now: time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)}
+	var requests []*http.Request
+	var heads []bdgateway.Request
+	var delivered []string
+	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+		requests = append(requests, req)
+		if len(requests) <= 3 {
+			return nil, refusedDial(syscall.ECONNREFUSED)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read request body: %v", err)
+		}
+		line, rest, ok := bytes.Cut(body, []byte("\n"))
+		if !ok {
+			t.Fatalf("request body %q has no head line", body)
+		}
+		var head bdgateway.Request
+		if err := json.Unmarshal(line, &head); err != nil {
+			t.Fatalf("head %q is not JSON: %v", line, err)
+		}
+		heads = append(heads, head)
+		delivered = append(delivered, string(rest))
+		return gatewayResponse(t,
+			bdgateway.Frame{Kind: bdgateway.FrameStdout, Payload: []byte("the bead\n")},
+			bdgateway.ExitFrame(0),
+		), nil
+	})
+	g, stdout, stderr, note := gatewayTarget(t, town, tokenFile, doer)
+	g.Sleep, g.Now = clock.Sleep, clock.Now
+	call := Call{
+		Argv: []string{"bd", "comments", "add", "gt-x", "-f", "-"},
+		Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+		Dir:  filepath.Join(town, "gastown"),
+	}
+	exit, err := g.Launch(call)
+	if err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if exit != 0 {
+		t.Fatalf("exit = %d, want the exit frame's 0", exit)
+	}
+	if len(requests) != 4 {
+		t.Fatalf("the gateway was asked %d times, want the three refused dials and the answer", len(requests))
+	}
+	// Each attempt builds its own request: a request whose dial failed is closed
+	// and cannot be sent again.
+	distinct := make(map[*http.Request]bool, len(requests))
+	for _, req := range requests {
+		distinct[req] = true
+	}
+	if len(distinct) != len(requests) {
+		t.Errorf("the %d attempts share %d requests, want one request per attempt", len(requests), len(distinct))
+	}
+	if got, want := heads[0].Argv, []string{"comments", "add", "gt-x", "-f", "-"}; !slices.Equal(got, want) {
+		t.Errorf("head argv = %q, want %q", got, want)
+	}
+	if len(delivered) != 1 || delivered[0] != "the stdin body" {
+		t.Errorf("the caller's stdin reached the gateway as %q, want it delivered once as %q", delivered, "the stdin body")
+	}
+	if got, want := stdout.String(), "the bead\n"; got != want {
+		t.Errorf("stdout = %q, want the answer's frames once: %q", got, want)
+	}
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr = %q, want a retried call to print nothing", got)
+	}
+	if got := note.String(); got != "" {
+		t.Errorf("note = %q, want nothing", got)
+	}
+	wantSleeps := RetrySchedule(gatewayRetryTotal)[:3]
+	if !slices.Equal(clock.sleeps, wantSleeps) {
+		t.Errorf("the waits between attempts = %v, want RetrySchedule's %v", clock.sleeps, wantSleeps)
+	}
+}
+
+// TestBdGatewayRetryBounds: a gateway that is away keeps the call waiting only
+// as long as RetrySchedule allows, and the error names the attempts made and
+// the time spent; a timeout, a reset after the connection was made and an
+// answer, whatever its status, are each tried exactly once.
+func TestBdGatewayRetryBounds(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	base := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	wantDelays := RetrySchedule(gatewayRetryTotal)
+	tests := []struct {
+		name         string
+		answer       func(*http.Request) (*http.Response, error)
+		wantAttempts int
+		wantErr      string
+	}{
+		{
+			name: "always refused",
+			answer: func(*http.Request) (*http.Response, error) {
+				return nil, refusedDial(syscall.ECONNREFUSED)
+			},
+			wantAttempts: len(wantDelays) + 1,
+			wantErr:      "did not answer",
+		},
+		{
+			name: "timeout",
+			answer: func(*http.Request) (*http.Response, error) {
+				return nil, &url.Error{Op: "Post", URL: "http://gw:7440/v1/exec", Err: &net.OpError{Op: "dial", Net: "tcp", Err: os.ErrDeadlineExceeded}}
+			},
+			wantAttempts: 1,
+			wantErr:      "did not answer",
+		},
+		{
+			name: "reset after send",
+			answer: func(*http.Request) (*http.Response, error) {
+				return nil, &url.Error{Op: "Post", URL: "http://gw:7440/v1/exec", Err: &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}}
+			},
+			wantAttempts: 1,
+			wantErr:      "did not answer",
+		},
+		{
+			name: "HTTP 500",
+			answer: func(*http.Request) (*http.Response, error) {
+				return statusResponse(http.StatusInternalServerError, "boom"), nil
+			},
+			wantAttempts: 1,
+			wantErr:      "HTTP 500",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := &fakeDialClock{now: base}
+			attempts := 0
+			doer := doerFunc(func(req *http.Request) (*http.Response, error) {
+				attempts++
+				return tt.answer(req)
+			})
+			g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+			g.Sleep, g.Now = clock.Sleep, clock.Now
+			call := Call{
+				Argv: []string{"bd", "show", "gt-x"},
+				Env:  []string{"BEADS_DIR=" + filepath.Join(town, "gastown", ".beads")},
+				Dir:  filepath.Join(town, "gastown"),
+			}
+			exit, err := g.Launch(call)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Launch error = %v, want it to name %q", err, tt.wantErr)
+			}
+			if exit != exitDown {
+				t.Errorf("exit = %d, want %d", exit, exitDown)
+			}
+			if attempts != tt.wantAttempts {
+				t.Errorf("the gateway was asked %d times, want %d", attempts, tt.wantAttempts)
+			}
+			if attempts == 1 {
+				if len(clock.sleeps) != 0 {
+					t.Errorf("a call tried once waited %v, want no wait", clock.sleeps)
+				}
+				return
+			}
+			if !slices.Equal(clock.sleeps, wantDelays) {
+				t.Errorf("the waits = %v, want RetrySchedule's %v", clock.sleeps, wantDelays)
+			}
+			spent := clock.now.Sub(base)
+			if spent > gatewayRetryTotal {
+				t.Errorf("the call waited %v in all, past the %v RetrySchedule allows", spent, gatewayRetryTotal)
+			}
+			if spent+5*time.Second <= gatewayRetryTotal {
+				t.Errorf("the call waited %v, but another 5s wait would still fit in %v", spent, gatewayRetryTotal)
+			}
+			if want := fmt.Sprintf("after %d attempts in %v", attempts, spent); !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		})
+	}
+}
+
+// TestBdGatewayRetryDoctorAsksOnce: the doctor reports a gateway whose dial is
+// refused without waiting on the retry schedule, since a doctor names the state
+// it finds rather than waiting for it to change.
+func TestBdGatewayRetryDoctorAsksOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	clock := &fakeDialClock{now: time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)}
+	asked := 0
+	doer := doerFunc(func(*http.Request) (*http.Response, error) {
+		asked++
+		return nil, refusedDial(syscall.ECONNREFUSED)
+	})
+	g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doer)
+	g.Sleep, g.Now = clock.Sleep, clock.Now
+	diag, err := g.Doctor()
+	if err != nil {
+		t.Fatalf("Doctor: %v", err)
+	}
+	if asked != 1 {
+		t.Errorf("the doctor asked the gateway %d times, want once", asked)
+	}
+	if len(clock.sleeps) != 0 {
+		t.Errorf("the doctor waited %v, want no retry", clock.sleeps)
+	}
+	if diag.Rung != RungDown || !strings.Contains(diag.Reason, "did not answer") {
+		t.Errorf("diagnosis = %+v, want the down rung naming that the gateway did not answer", diag)
 	}
 }
