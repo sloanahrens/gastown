@@ -293,11 +293,16 @@ func pruneAnswerReason(body []byte, user, token string) string {
 }
 
 // pruneReasonText is the text a reason is taken from. A body that is not JSON
-// is its own text, which includes a JSON body cut at the read bound. A JSON body
-// gives text only when it is an object whose "message" is a string; any other
-// JSON gives none.
+// is its own text. A body that looks like JSON (its first non-space byte is '{'
+// or '[') is JSON even when it is not valid, which it is not when the reason
+// read cut it at the read bound: it gives no text, never its raw bytes, since a
+// long error body can carry the credential. A valid JSON body gives text only
+// when it is an object whose "message" is a string; any other JSON gives none.
 func pruneReasonText(body []byte) (string, bool) {
 	if !json.Valid(body) {
+		if t := strings.TrimSpace(string(body)); strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+			return "", false
+		}
 		return string(body), true
 	}
 	var obj map[string]json.RawMessage

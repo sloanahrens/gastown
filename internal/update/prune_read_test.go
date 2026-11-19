@@ -320,6 +320,23 @@ func TestPruneReadReasonShown(t *testing.T) {
 			want:   head + " [" + pruneReasonLine + "]",
 		},
 		{
+			// The reason read is bounded, so a long JSON body arrives cut and is no
+			// longer valid JSON: it must give no reason, never its raw text.
+			name:   "JSON body cut at the read bound gives no reason",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"message":"` + strings.Repeat("a", pruneReasonReadBytes)},
+			want:   head + " [" + pruneReasonLine + "]",
+		},
+		{
+			name:   "JSON body cut at the read bound that carries the token gives no reason",
+			answer: pruneAnswer{status: http.StatusUnauthorized, body: `{"message":"user does not exist [sha: secret-token]","pad":"` + strings.Repeat("a", pruneReasonReadBytes)},
+			want:   "the Forgejo packages API answered HTTP 401 for gastown-daemon [" + pruneReasonLine + "]",
+		},
+		{
+			name:   "JSON array cut at the read bound gives no reason",
+			answer: pruneAnswer{status: http.StatusBadRequest, body: `["` + strings.Repeat("a", pruneReasonReadBytes)},
+			want:   head + " [" + pruneReasonLine + "]",
+		},
+		{
 			name:   "answering server and via follow the request",
 			answer: pruneAnswer{status: http.StatusBadRequest, body: `{"message":"bad request: page size"}`, server: "gitea/1.22", via: "1.1 caddy"},
 			want:   head + ": bad request: page size [" + pruneReasonLine + "; server=gitea/1.22; via=1.1 caddy]",
