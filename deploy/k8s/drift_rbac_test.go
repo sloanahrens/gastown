@@ -35,12 +35,16 @@ const (
 // this table as well as the manifest, and TestDriftRBACCoverageProblemsReportsEachFailingBranch
 // fails if the table, the golden and the manifest disagree in either direction.
 var driftGranted = map[string]string{
-	"deployments":            "apps",
-	"configmaps":             "",
-	"services":               "",
-	"persistentvolumeclaims": "",
-	"serviceaccounts":        "",
-	"cronjobs":               "batch",
+	"deployments":                       "apps",
+	"configmaps":                        "",
+	"services":                          "",
+	"persistentvolumeclaims":            "",
+	"serviceaccounts":                   "",
+	"cronjobs":                          "batch",
+	"validatingadmissionpolicies":       "admissionregistration.k8s.io",
+	"validatingadmissionpolicybindings": "admissionregistration.k8s.io",
+	"roles":                             "rbac.authorization.k8s.io",
+	"rolebindings":                      "rbac.authorization.k8s.io",
 }
 
 // driftGrantedVerbs is every verb the ClusterRole may grant. The compare reads
