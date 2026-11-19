@@ -109,6 +109,10 @@
               {
                 "name": "GOMODCACHE",
                 "value": "/var/cache/gt-sweep/gomodcache"
+              },
+              {
+                "name": "GT_TEST_DOLT_INIT_CONCURRENCY",
+                "value": "8"
               }
             ],
             "resources": {

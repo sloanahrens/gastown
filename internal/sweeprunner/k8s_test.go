@@ -1010,6 +1010,36 @@ func TestK8sRunnerDisablesTheTestcontainersReaper(t *testing.T) {
 	}
 }
 
+// TestK8sRunnerSetsDoltInitConcurrency pins the integration tier's test-Dolt
+// init pool: the runner sets GT_TEST_DOLT_INIT_CONCURRENCY to 8, the scheduler
+// town slot count the Makefile's test-integration targets also pass, so package
+// beads does not fall back to its default of 4. The variable is set exactly
+// once, so a later edit cannot hand the tier two values.
+func TestK8sRunnerSetsDoltInitConcurrency(t *testing.T) {
+	t.Parallel()
+	plan, err := Kubernetes{}.Render(goldenSpec())
+	if err != nil {
+		t.Fatalf("rendering: %v", err)
+	}
+	runner, ok := containerNamed(plan.Job, runnerContainerName)
+	if !ok {
+		t.Fatalf("the Job renders no %q container", runnerContainerName)
+	}
+	const (
+		envName = "GT_TEST_DOLT_INIT_CONCURRENCY"
+		want    = "8"
+	)
+	var values []string
+	for _, variable := range runner.Env {
+		if variable.Name == envName {
+			values = append(values, variable.Value)
+		}
+	}
+	if len(values) != 1 || values[0] != want {
+		t.Errorf("runner env sets %s on %d entries, want exactly one entry with value %q", envName, len(values), want)
+	}
+}
+
 // The Kubernetes sidecar has the pod's network and pulls the test images itself,
 // so the Job renders no seed volume, claim or init container; adding a seed to one
 // backend without the other is a decision this test makes visible.

@@ -97,6 +97,8 @@
       "--env",
       "GT_SWEEP_JOBS=4",
       "--env",
+      "GT_TEST_DOLT_INIT_CONCURRENCY=8",
+      "--env",
       "TESTCONTAINERS_RYUK_DISABLED=true",
       "gt-polecat:gt-74ix9",
       "setpriv",

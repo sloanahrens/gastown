@@ -665,7 +665,7 @@ func renderJob(spec Spec) (*Job, error) {
 
 // runnerContainer is the container the sweep runs in.
 func runnerContainer(spec Spec) (Container, error) {
-	env := make([]EnvVar, 0, 5)
+	env := make([]EnvVar, 0, 10)
 	if spec.Dind {
 		env = append(env, EnvVar{Name: "DOCKER_HOST", Value: "tcp://" + dindAddress + ":" + dindPort})
 	}
@@ -680,6 +680,8 @@ func runnerContainer(spec Spec) (Container, error) {
 		// The caches sit on the cache claim, not under HOME, so the next run reuses them.
 		EnvVar{Name: "GOCACHE", Value: cacheMount + "/gocache"},
 		EnvVar{Name: "GOMODCACHE", Value: cacheMount + "/gomodcache"},
+		// The integration tier's test-Dolt pool matches the towns queued on it.
+		EnvVar{Name: testDoltInitConcurrencyEnv, Value: testDoltInitConcurrency},
 	)
 	// Requests equal limits, so the scheduler promises the run its whole share
 	// instead of letting it burst into a neighbour's (design 2026-10-30).
