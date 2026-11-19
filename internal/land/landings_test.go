@@ -1285,3 +1285,76 @@ func TestLandingsFileAppendFloorsNothingWhenTheEventLogCannotBeRead(t *testing.T
 		t.Errorf("logged = %q, want one line saying the floor could not be read", logged)
 	}
 }
+
+// TestLandingRecordOMRounds: a record carries the review rounds its bead took —
+// the highest attempt the town's review ledger holds for it — and the field is
+// left out for a bead with no rows (gt-hx18i9).
+func TestLandingRecordOMRounds(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	at := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	for _, row := range []ReviewRecord{
+		{BeadID: "gt-a", Attempt: 1, Verdict: VerdictRequestChanges, At: at},
+		{BeadID: "gt-a", Attempt: 2, Verdict: VerdictApprove, At: at.Add(time.Hour)},
+		{BeadID: "gt-b", Attempt: 1, Verdict: VerdictApprove, At: at},
+	} {
+		if err := TownReviewsFile(town).Append(row); err != nil {
+			t.Fatalf("seeding the review ledger: %v", err)
+		}
+	}
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		bead string
+		want int
+	}{
+		{"gt-a", 2}, // the highest of its two rounds, not the first
+		{"gt-b", 1}, // its one row
+		{"gt-c", 0}, // no rows at all
+	} {
+		if err := f.Append(LandingRecord{BeadID: c.bead, LandedCommit: c.bead}); err != nil {
+			t.Fatal(err)
+		}
+		rec, keyed := lastLine(t, f)
+		if rec.OMRounds != c.want {
+			t.Errorf("%s: OMRounds = %d, want %d", c.bead, rec.OMRounds, c.want)
+		}
+		if _, present := keyed["om_rounds"]; present != (c.want > 0) {
+			t.Errorf("%s: om_rounds present = %v with OMRounds %d, want the field omitted when zero", c.bead, present, c.want)
+		}
+	}
+}
+
+// TestLandingRecordOMRoundsUnreadable: a review ledger that cannot be read
+// leaves the count zero, logs one line, and the landing record is still written
+// (gt-hx18i9).
+func TestLandingRecordOMRoundsUnreadable(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the review ledger belongs: opening it succeeds and
+	// reading it fails, the shape of a ledger that is there but unreadable.
+	if err := os.MkdirAll(TownReviewsFile(town).Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f, err := RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	f.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	if err := f.Append(LandingRecord{BeadID: "gt-a", LandedCommit: "aaa"}); err != nil {
+		t.Fatalf("Append with an unreadable review ledger: %v; the landing must still be written", err)
+	}
+	rec, keyed := lastLine(t, f)
+	if rec.LandedCommit != "aaa" || rec.OMRounds != 0 {
+		t.Errorf("record = %+v; want the landing written with no om rounds", rec)
+	}
+	if _, present := keyed["om_rounds"]; present {
+		t.Error("om_rounds written from an unreadable ledger; want the field omitted")
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "no om rounds") {
+		t.Errorf("logged = %q, want one line saying the om rounds could not be read", logged)
+	}
+}
