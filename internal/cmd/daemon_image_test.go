@@ -209,17 +209,17 @@ func TestDaemonImageDryRunPrintsThePlanAndRunsNothing(t *testing.T) {
 		"pin om: " + imageTestPinURL("organic-mechanic") + " at " + imageTestOMCommit,
 		"pin hm: " + imageTestPinURL("history-man") + " at " + imageTestHMCommit,
 		"pin devops: " + imageTestPinURL("devops") + " at " + imageTestDevCommit,
-		"build gt: go build -trimpath -ldflags",
+		"build gt: go build -trimpath -ldflags -s -w",
 		"-o " + filepath.Join(r.flags.out, "gt") + " ./cmd/gt",
-		"build bd: go build -trimpath",
+		"build bd: go build -trimpath -ldflags -s -w",
 		"./cmd/bd",
-		"build om: go build -trimpath -o " + filepath.Join(r.flags.out, "om") + " ./cmd/om",
-		"build trackerd: go build -trimpath -o " + filepath.Join(r.flags.out, "trackerd") + " ./cmd/trackerd   (in tracker/ of a clean worktree of " + r.flags.gtSrc + " at " + imageTestRev + ")",
-		"build trackerbackup: go build -trimpath -o " + filepath.Join(r.flags.out, "trackerbackup") + " ./cmd/trackerbackup   (in tracker/ of a clean worktree",
-		"build gt-wrap: go build -trimpath -o " + filepath.Join(r.flags.out, "gt-wrap") + " ./cmd/gt-wrap   (clean worktree of " + r.flags.gtSrc + " at " + imageTestRev + ")",
-		"build hm: go build -trimpath -o " + filepath.Join(r.flags.out, "hm") + " .",
-		"build devops-reporter: go build -trimpath -o " + filepath.Join(r.flags.out, "devops-reporter") + " ./cmd/reporter",
-		"build release-reporter: go build -trimpath -o " + filepath.Join(r.flags.out, "release-reporter") + " ./cmd/release-reporter",
+		"build om: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "om") + " ./cmd/om",
+		"build trackerd: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "trackerd") + " ./cmd/trackerd   (in tracker/ of a clean worktree of " + r.flags.gtSrc + " at " + imageTestRev + ")",
+		"build trackerbackup: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "trackerbackup") + " ./cmd/trackerbackup   (in tracker/ of a clean worktree",
+		"build gt-wrap: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "gt-wrap") + " ./cmd/gt-wrap   (clean worktree of " + r.flags.gtSrc + " at " + imageTestRev + ")",
+		"build hm: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "hm") + " .",
+		"build devops-reporter: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "devops-reporter") + " ./cmd/reporter",
+		"build release-reporter: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "release-reporter") + " ./cmd/release-reporter",
 		"check release-reporter: go version -m " + filepath.Join(r.flags.out, "release-reporter"),
 		"build mango: docker --context " + daemonimage.DockerContext + " run --rm --platform linux/arm64",
 		"CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false",
@@ -657,18 +657,18 @@ pin bd: http://forgejo:3000/owner/beads.git at fedcba9876543210fedcba9876543210f
 pin om: http://forgejo:3000/owner/organic-mechanic.git at 00112233445566778899aabbccddeeff00112233
 pin hm: http://forgejo:3000/owner/history-man.git at abcdef0123456789abcdef0123456789abcdef01
 pin devops: http://forgejo:3000/owner/devops.git at 1234567890abcdef1234567890abcdef12345678
-build gt: go build -trimpath -ldflags -X github.com/steveyegge/gastown/internal/cmd.Version=012345678 -X github.com/steveyegge/gastown/internal/cmd.Commit=012345678 -o <tmp>/out/gt ./cmd/gt   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build bd: go build -trimpath -ldflags -X main.Build=short_sha_read_in_worktree -X main.Commit=fedcba9876543210fedcba9876543210fedcba98 -o <tmp>/out/bd ./cmd/bd   (clean worktree of <tmp>/beads at fedcba9876543210fedcba9876543210fedcba98)
-build om: go build -trimpath -o <tmp>/out/om ./cmd/om   (clean worktree of <tmp>/om at 00112233445566778899aabbccddeeff00112233)
-build gt-wrap: go build -trimpath -o <tmp>/out/gt-wrap ./cmd/gt-wrap   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build trackerd: go build -trimpath -o <tmp>/out/trackerd ./cmd/trackerd   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build trackerbackup: go build -trimpath -o <tmp>/out/trackerbackup ./cmd/trackerbackup   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build app-promote: go build -trimpath -o <tmp>/out/plugins/app-promote/app-promote ./plugins/app-promote   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build town-metrics: go build -trimpath -o <tmp>/out/plugins/town-metrics/town-metrics ./plugins/town-metrics   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build hm: go build -trimpath -o <tmp>/out/hm ./cmd/hm   (clean worktree of <tmp>/hm at abcdef0123456789abcdef0123456789abcdef01)
-build devops-reporter: go build -trimpath -o <tmp>/out/devops-reporter ./cmd/reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
-build release-reporter: go build -trimpath -o <tmp>/out/release-reporter ./cmd/release-reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
-build cloudcheck: go build -trimpath -o <tmp>/out/cloudcheck ./cmd/cloudcheck   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
+build gt: go build -trimpath -ldflags -s -w -X github.com/steveyegge/gastown/internal/cmd.Version=012345678 -X github.com/steveyegge/gastown/internal/cmd.Commit=012345678 -o <tmp>/out/gt ./cmd/gt   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build bd: go build -trimpath -ldflags -s -w -X main.Build=short_sha_read_in_worktree -X main.Commit=fedcba9876543210fedcba9876543210fedcba98 -o <tmp>/out/bd ./cmd/bd   (clean worktree of <tmp>/beads at fedcba9876543210fedcba9876543210fedcba98)
+build om: go build -trimpath -ldflags -s -w -o <tmp>/out/om ./cmd/om   (clean worktree of <tmp>/om at 00112233445566778899aabbccddeeff00112233)
+build gt-wrap: go build -trimpath -ldflags -s -w -o <tmp>/out/gt-wrap ./cmd/gt-wrap   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build trackerd: go build -trimpath -ldflags -s -w -o <tmp>/out/trackerd ./cmd/trackerd   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build trackerbackup: go build -trimpath -ldflags -s -w -o <tmp>/out/trackerbackup ./cmd/trackerbackup   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build app-promote: go build -trimpath -ldflags -s -w -o <tmp>/out/plugins/app-promote/app-promote ./plugins/app-promote   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build town-metrics: go build -trimpath -ldflags -s -w -o <tmp>/out/plugins/town-metrics/town-metrics ./plugins/town-metrics   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
+build hm: go build -trimpath -ldflags -s -w -o <tmp>/out/hm ./cmd/hm   (clean worktree of <tmp>/hm at abcdef0123456789abcdef0123456789abcdef01)
+build devops-reporter: go build -trimpath -ldflags -s -w -o <tmp>/out/devops-reporter ./cmd/reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
+build release-reporter: go build -trimpath -ldflags -s -w -o <tmp>/out/release-reporter ./cmd/release-reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
+build cloudcheck: go build -trimpath -ldflags -s -w -o <tmp>/out/cloudcheck ./cmd/cloudcheck   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
 check release-reporter: go version -m <tmp>/out/release-reporter   (refused unless vMAJOR.MINOR.PATCH[-pre])
 stage cloud-check.apps: git show 1234567890abcdef1234567890abcdef12345678:ops/cloud-check.apps -> <tmp>/out/cloud-check.apps
 build mango: docker --context desktop-linux run --rm --platform linux/arm64 -v mango_worktree:/src -v mango_stage:/out -w /src/go-api golang:1.27-bookworm sh -c apt-get update && apt-get install -y --no-install-recommends gcc g++ && CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-w -s" -o /out/mango ./cmd/mango   (clean worktree of <tmp>/mango at 2233445566778899aabbccddeeff001122334455)

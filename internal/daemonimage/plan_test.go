@@ -102,18 +102,18 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"pin om: ", testPinURL("organic-mechanic") + " at " + testOMCommit},
 		{"pin hm: ", testPinURL("history-man") + " at " + testHMCommit},
 		{"pin devops: ", testPinURL("devops") + " at " + testDevopsCommit},
-		{"build gt: ", "go build -trimpath -ldflags " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
-		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
-		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
-		{"build gt-wrap: ", "go build -trimpath -o " + filepath.Join(b.Out, "gt-wrap") + " " + GtWrapPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
-		{"build trackerd: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
-		{"build trackerbackup: ", "go build -trimpath -o " + filepath.Join(b.Out, "trackerbackup") + " " + TrackerbackupPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
-		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
-		{"build town-metrics: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
-		{"build hm: ", "go build -trimpath -o " + filepath.Join(b.Out, "hm") + " " + HMPackage + "   (clean worktree of /src/hm at " + testHMCommit + ")"},
-		{"build devops-reporter: ", "go build -trimpath -o " + filepath.Join(b.Out, "devops-reporter") + " " + DevopsReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
-		{"build release-reporter: ", "go build -trimpath -o " + filepath.Join(b.Out, "release-reporter") + " " + ReleaseReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
-		{"build cloudcheck: ", "go build -trimpath -o " + filepath.Join(b.Out, "cloudcheck") + " " + DevopsCloudCheckPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
+		{"build gt: ", "go build -trimpath -ldflags -s -w " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build bd: ", "go build -trimpath -ldflags -s -w " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
+		{"build om: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
+		{"build gt-wrap: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "gt-wrap") + " " + GtWrapPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build trackerd: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
+		{"build trackerbackup: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "trackerbackup") + " " + TrackerbackupPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
+		{"build app-promote: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build town-metrics: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
+		{"build hm: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "hm") + " " + HMPackage + "   (clean worktree of /src/hm at " + testHMCommit + ")"},
+		{"build devops-reporter: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "devops-reporter") + " " + DevopsReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
+		{"build release-reporter: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "release-reporter") + " " + ReleaseReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
+		{"build cloudcheck: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "cloudcheck") + " " + DevopsCloudCheckPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
 		{"check release-reporter: ", "go version -m " + filepath.Join(b.Out, "release-reporter") + "   (refused unless vMAJOR.MINOR.PATCH[-pre])"},
 		{"stage cloud-check.apps: ", "git show " + testDevopsCommit + ":" + CloudCheckAppsPath + " -> " + filepath.Join(b.Out, CloudCheckAppsName)},
 		{"build mango: ", "docker --context " + DockerContext + " run --rm --platform linux/arm64 -v " + planMangoWorktree + ":/src -v " + planMangoStage + ":/out -w /src/go-api golang:1.27-bookworm sh -c apt-get update && apt-get install -y --no-install-recommends gcc g++ && CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false -ldflags=\"-w -s\" -o /out/mango ./cmd/mango   (clean worktree of /src/mango at " + testMangoCommit + ")"},
@@ -221,7 +221,7 @@ func TestPlanListsThePluginBuilds(t *testing.T) {
 		{name: "app-promote", pkg: "./plugins/app-promote"},
 		{name: "town-metrics", pkg: "./plugins/town-metrics"},
 	} {
-		want := "build " + p.name + ": go build -trimpath -o " + filepath.Join(b.Out, "plugins", p.name, p.name) + " " + p.pkg
+		want := "build " + p.name + ": go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "plugins", p.name, p.name) + " " + p.pkg
 		at := -1
 		for i, line := range lines {
 			if strings.HasPrefix(line, "build "+p.name+": ") {

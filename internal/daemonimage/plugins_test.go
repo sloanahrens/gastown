@@ -41,8 +41,8 @@ func TestBuildPluginsBuildsEachPluginForLinuxArm64(t *testing.T) {
 				t.Errorf("%s build env = %q, want %s among them", p.name, call.env, want)
 			}
 		}
-		wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", p.pkg}
-		if got := withOut(withoutLdflags(call.argv)); !reflect.DeepEqual(got, wantArgv) {
+		wantArgv := []string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", "OUT", p.pkg}
+		if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
 			t.Errorf("%s build argv = %q, want %q", p.name, call.argv, wantArgv)
 		}
 		if got := filepath.Base(outOf(call.argv)); got != p.name {

@@ -709,13 +709,21 @@ func (b Builder) build(ctx context.Context, build binary, stage string, env []st
 	return nil
 }
 
+// stripFlags are the linker flags every image binary is built with: -s drops the
+// symbol table and -w the DWARF data (gt-aermmg).
+const stripFlags = "-s -w"
+
 // goBuildArgv is the compile of one binary to out: the same argv a build runs and
-// Plan prints.
+// Plan prints. -trimpath stays, and the argv always carries -ldflags, whose value
+// is stripFlags ahead of the ldflags the binary is passed, so a binary's own flags
+// (the -X stamps) extend that value rather than replace it (gt-aermmg).
 func goBuildArgv(out, pkg, ldflags string) []string {
-	argv := []string{"go", "build", "-trimpath"}
 	if ldflags != "" {
-		argv = append(argv, "-ldflags", ldflags)
+		ldflags = stripFlags + " " + ldflags
+	} else {
+		ldflags = stripFlags
 	}
+	argv := []string{"go", "build", "-trimpath", "-ldflags", ldflags}
 	return append(argv, "-o", out, pkg)
 }
 

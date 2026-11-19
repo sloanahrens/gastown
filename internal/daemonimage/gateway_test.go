@@ -66,7 +66,7 @@ func TestBuildsBdgw(t *testing.T) {
 			t.Errorf("bdgw build env = %q, want %s among them", call.env, want)
 		}
 	}
-	wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", BDGWPackage}
+	wantArgv := []string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", "OUT", BDGWPackage}
 	if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
 		t.Errorf("bdgw build argv = %q, want %q", call.argv, wantArgv)
 	}
