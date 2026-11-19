@@ -875,6 +875,9 @@ type State struct {
 	// Cloud is the cloud patrol's latest report, read from the directory it
 	// writes. It is nil until the reader first reports.
 	Cloud *Cloud `json:"cloud,omitempty"`
+	// Disk is each kept disk's last reading, from the ring the disk maintenance
+	// patrol appends to. It is nil until the reader first reports.
+	Disk *Disk `json:"disk,omitempty"`
 	// Mango is the town-metrics panel read from the directory the metrics
 	// writer fills. It is nil until the reader first reports.
 	Mango *Mango `json:"mango,omitempty"`
@@ -1019,6 +1022,8 @@ type Config struct {
 	Cloud func() *Cloud
 	// Mango reads the town-metrics panel from its directory.
 	Mango func() *Mango
+	// Disk reads each kept disk's last ring sample for the Disk panel.
+	Disk func() *Disk
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
 	// WatchDir is the directory the town's watch files live in, where a spend
@@ -1141,6 +1146,7 @@ type Config struct {
 	MachineEvery      time.Duration
 	CloudEvery        time.Duration
 	MangoEvery        time.Duration
+	DiskEvery         time.Duration
 	SpendEvery        time.Duration
 	JevSpendEvery     time.Duration
 	JevScorecardEvery time.Duration
@@ -1190,6 +1196,9 @@ func (c *Config) defaults() {
 	// The panel is rebuilt daily, so a read every five minutes picks up a new
 	// one within minutes of the writer finishing it.
 	def(&c.MangoEvery, 5*time.Minute)
+	// The patrol appends at most one sample per disk every five minutes, so a
+	// faster read would reread the same sample.
+	def(&c.DiskEvery, 5*time.Minute)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.JevSpendEvery, 5*time.Minute)
 	// The scorecard is a file read of the cache a refresh writes, so the panel
