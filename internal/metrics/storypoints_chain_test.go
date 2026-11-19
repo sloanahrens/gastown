@@ -9,10 +9,10 @@ import (
 )
 
 // chainFixture is n landed beads as the extract reads them: bd lists each with
-// its story-point labels and bd shows each one's SP ESTIMATE v1 comment, the
-// ledger lines the landings come from, and each bead's first dispatch. withMinutes
-// adds each bead's sp-minutes label. Bead 0's estimate is written after its
-// dispatch; the others are written before.
+// its story-point labels and bd comments reads each one's SP ESTIMATE v1
+// comments, the ledger lines the landings come from, and each bead's first
+// dispatch. withMinutes adds each bead's sp-minutes label. Bead 0's estimate is
+// written after its dispatch; the others are written before.
 func chainFixture(n int, withMinutes bool) (list string, shows map[string]string, ledger []string, dispatched map[string]string) {
 	points := []int{1, 2, 3, 5, 8, 13, 21, 34}
 	beads := make([]string, 0, n)
@@ -31,8 +31,8 @@ func chainFixture(n int, withMinutes bool) (list string, shows map[string]string
 		if i == 0 {
 			estimatedAt = "2026-10-25T10:00:00Z"
 		}
-		shows[id] = fmt.Sprintf(`{"schema_version": 1, "data": [{"id": %q, "comments": [{"text": "SP ESTIMATE v1 sp:%d rung:all hash:x", "created_at": %q}]}]}`,
-			id, est, estimatedAt)
+		shows[id] = fmt.Sprintf(`{"schema_version": 1, "data": [{"created_at": %q, "issue_id": %q, "text": "SP ESTIMATE v1 sp:%d rung:all hash:x"}]}`,
+			estimatedAt, id, est)
 
 		actualMinutes := 2 + (i*7)%40
 		ledger = append(ledger, fmt.Sprintf(`{"bead": %q, "rig": "gt", "landed_commit": "c-%d", "landed_at": "2026-10-24T12:00:00Z", "route": "daemon", "om_verdict": "approve", "gate_result": "build", "polecat_secs": %d, "agent": "sbx-haiku"}`,

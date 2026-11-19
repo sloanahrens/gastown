@@ -156,27 +156,31 @@ const estimateCommentPrefix = "SP ESTIMATE v1"
 
 // estimatedAt is the created time of a bead's latest SP ESTIMATE v1 comment, the
 // time its story-point labels were written. It is "" when the bead has no such
-// comment. It is also "" when the show fails or a comment's time does not parse,
-// and both are named in dropped: a time that cannot be read is unknown, so the
-// report does not read the estimate as written before dispatch.
+// comment. It is also "" when the comments cannot be read or a comment's time
+// does not parse, and both are named in dropped: a time that cannot be read is
+// unknown, so the report does not read the estimate as written before dispatch.
 func estimatedAt(run BdRun, dir, bead string, dropped *Dropped) string {
-	var data []struct {
-		Comments []struct {
-			Text      string `json:"text"`
-			CreatedAt string `json:"created_at"`
-		} `json:"comments"`
+	var comments []struct {
+		Text      string `json:"text"`
+		CreatedAt string `json:"created_at"`
 	}
-	// The flags precede "--" so the bead id is read as an argument, never as a flag.
-	raw, err := bdJSON(run, dir, []string{"show", "--json", "--include-comments", "--", bead})
+	// bd's gateway refuses show --include-comments, so the estimate is read with
+	// the allowed comments verb. The flags precede "--" so the bead id is read as
+	// an argument, never as a flag.
+	raw, err := bdJSON(run, dir, []string{"comments", "--json", "--", bead})
 	if err == nil {
-		err = json.Unmarshal(raw, &data)
+		err = json.Unmarshal(raw, &comments)
 	}
-	if err != nil || len(data) == 0 {
-		dropped.Add("bd:"+bead, "bd show failed: estimate time not read")
+	if err != nil {
+		reason := "bd comments failed"
+		if cause := bdFailureCause(err); cause != "" {
+			reason += ": " + cause
+		}
+		dropped.Add("bd:"+bead, reason+": estimate time not read")
 		return ""
 	}
 	var latest time.Time
-	for _, c := range data[0].Comments {
+	for _, c := range comments {
 		if !strings.HasPrefix(c.Text, estimateCommentPrefix) {
 			continue
 		}
