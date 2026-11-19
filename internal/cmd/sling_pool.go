@@ -365,7 +365,7 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 	}
 	if total := pool.GetMaxTotal(); total > 0 && poolHeldCount(sessions) >= total {
 		agent = poolRefusalAgent(pool, requested)
-		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat%s) -> no seat for %s", poolHeldCount(sessions), total, poolCountSources("", sessions), agent), true, "polecat_pool.max_total"
+		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat%s) -> no seat for %s", poolHeldCount(sessions), total, poolCountSources("", sessions, poolHeldCount(sessions), total), agent), true, "polecat_pool.max_total"
 	}
 	switch {
 	case len(pool.Seats) == 0:
@@ -394,7 +394,7 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 		return agent, fmt.Sprintf("pool: closed (cap 0) -> no seat for %s", agent), true, poolSeatCapKey(agent)
 	}
 	if n >= seat.Cap {
-		return agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, seat.Cap, poolCountSources(agent, sessions), agent), true, poolSeatCapKey(agent)
+		return agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, seat.Cap, poolCountSources(agent, sessions, n, seat.Cap), agent), true, poolSeatCapKey(agent)
 	}
 	return agent, fmt.Sprintf("pool: seat %d/%d -> %s", n+1, seat.Cap, agent), false, ""
 }
@@ -423,7 +423,13 @@ func poolRefusalAgent(pool *config.PolecatPool, requested string) string {
 // (gt-cx16fq). The breakdown appears when a dead-hooked seat or a claim is
 // inside, so a count of live sessions alone keeps the short wording it has
 // always had. agent "" counts every agent's seats, for the town's total.
-func poolCountSources(agent string, sessions []poolSession) string {
+//
+// A count of n above a cap of cap names every seat it holds too,
+// "held: gastown/a:session, gastown/b:claim", read from the same sessions and
+// filtered by the same agent as the count, so the list has one entry per seat
+// counted (gt-5y87fp). A count at its cap keeps the wording above: it is full,
+// not above, and its sources already name what filled it.
+func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 	var live, dead, landing, claims int
 	for _, s := range sessions {
 		if s.parkedStale || (agent != "" && s.agent != agent) {
@@ -440,14 +446,20 @@ func poolCountSources(agent string, sessions []poolSession) string {
 			live++
 		}
 	}
-	if dead == 0 && claims == 0 {
-		return ""
+	held := ""
+	if n > cap {
+		if list := specdispatch.HeldSeatList(poolHeldSeats(agent, sessions)); list != "" {
+			held = "; held: " + list
+		}
 	}
-	count := func(n int, one, many string) string {
-		if n == 1 {
+	if dead == 0 && claims == 0 {
+		return held
+	}
+	count := func(c int, one, many string) string {
+		if c == 1 {
 			return "1 " + one
 		}
-		return fmt.Sprintf("%d %s", n, many)
+		return fmt.Sprintf("%d %s", c, many)
 	}
 	var parts []string
 	if live > 0 {
@@ -462,7 +474,53 @@ func poolCountSources(agent string, sessions []poolSession) string {
 	if claims > 0 {
 		parts = append(parts, count(claims, "claim", "claims"))
 	}
-	return ": " + strings.Join(parts, ", ")
+	return ": " + strings.Join(parts, ", ") + held
+}
+
+// poolHeldSeats names every seat a count holds, one per session a cap counts,
+// with the state poolCountSources counts it in: the seats a refusal above its
+// cap prints. agent "" names every agent's seats, for the town's total; a
+// parked-stale seat is released and named by neither.
+func poolHeldSeats(agent string, sessions []poolSession) []specdispatch.HeldSeat {
+	held := make([]specdispatch.HeldSeat, 0, len(sessions))
+	for _, s := range sessions {
+		if s.parkedStale || (agent != "" && s.agent != agent) {
+			continue
+		}
+		held = append(held, specdispatch.HeldSeat{Agent: s.agent, Name: poolHeldSeatName(s), State: poolHeldSeatState(s)})
+	}
+	return held
+}
+
+// poolHeldSeatState is the state a held seat prints, read in the precedence
+// poolCountSources counts it in: a claimed seat is a claim even when its bead
+// is also hooked, so the seat is one entry in the list as it is one seat in
+// the count.
+func poolHeldSeatState(s poolSession) string {
+	switch {
+	case s.claim:
+		return specdispatch.SeatStateClaim
+	case s.deadHooked:
+		return specdispatch.SeatStateDeadHooked
+	case s.landing:
+		return specdispatch.SeatStateLanding
+	default:
+		return specdispatch.SeatStateSession
+	}
+}
+
+// poolHeldSeatName names a held seat: its "<rig>/<polecat>" when the seat
+// names one, else the work it holds the seat for (a claim or a running sling
+// has spawned no polecat), else the read's own name for it, so the list has an
+// entry for every seat the count took.
+func poolHeldSeatName(s poolSession) string {
+	if key := s.seatKey(); key != "" {
+		return key
+	}
+	if s.hookedBead != "" {
+		return s.hookedBead
+	}
+	return s.name
 }
 
 // parkedStaleCount names the seats a count no longer holds because their

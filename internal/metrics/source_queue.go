@@ -722,17 +722,24 @@ func queueTickLine(text string) (dispatched int, roster string, ok bool) {
 }
 
 // queueSeatColumns turns a roster into seat_live_<agent> and seat_cap_<agent>
-// columns. The last "total L/C" segment is Budget.Picture's town total, not a
-// seat, so it is dropped; a segment the seat pattern does not open (a closed
-// seat's reason split at its comma, "no seats") contributes nothing.
+// columns. A "total L/C" segment is Budget.Picture's town total, not a seat, so
+// it is dropped; a segment the seat pattern does not open (a closed seat's
+// reason split at its comma, "no seats", a held seat's name split the same way)
+// contributes nothing. A total above its cap carries the held seats Picture
+// appends, and that note's fragments fall under the same rule (gt-5y87fp).
 func queueSeatColumns(roster string) map[string]any {
 	parts := strings.Split(strings.TrimSpace(roster), ", ")
-	if n := len(parts); n > 0 && strings.HasPrefix(strings.TrimSpace(parts[n-1]), "total ") {
-		parts = parts[:n-1]
-	}
 	out := make(map[string]any, len(parts)*2)
 	for _, part := range parts {
-		m := queueSeatRe.FindStringSubmatch(strings.TrimSpace(part))
+		part = strings.TrimSpace(part)
+		count := part
+		if i := strings.IndexByte(count, '('); i >= 0 {
+			count = strings.TrimSpace(count[:i])
+		}
+		if strings.HasPrefix(count, "total ") {
+			continue
+		}
+		m := queueSeatRe.FindStringSubmatch(part)
 		if m == nil {
 			continue
 		}

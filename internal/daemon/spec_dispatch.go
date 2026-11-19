@@ -475,6 +475,13 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 		// named total with live at or above the seats' sum looks the same by
 		// text and is read as the total.
 		if n > 0 && n == len(parts)-1 && strings.HasPrefix(part, "total ") {
+			// A total may carry the held-seat list Picture appends after it,
+			// as a seat carries its breakdown: the note is not the count, and
+			// the note's commas sit inside its parentheses. Left in, the list
+			// would make a picture above its cap unreadable (gt-5y87fp).
+			if i := strings.IndexByte(part, '('); i >= 0 {
+				part = strings.TrimSpace(part[:i])
+			}
 			total, ok := parseRosterCount(strings.TrimPrefix(part, "total "))
 			if !ok {
 				return nil, true

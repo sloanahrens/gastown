@@ -364,6 +364,11 @@ type Budget struct {
 	// adds to it and Release gives a bump back, so the total moves with the
 	// seats.
 	LiveTotal int
+	// Held names the seats the count holds, one entry per seat counted in Live
+	// and LiveTotal, filled from the same seat read. A count above its cap
+	// prints them, so an operator can attribute the reading to seats rather
+	// than guess which sessions, claims or slings made it (gt-5y87fp).
+	Held []HeldSeat
 	// NewestSpawn and MinSpawnGap are the stagger: no dispatch while the
 	// newest polecat is younger than the gap.
 	NewestSpawn time.Time
@@ -381,6 +386,62 @@ type Budget struct {
 	// per-agent rather than per-seat because Bump charges the total for an
 	// agent no seat names too (gt-b5847).
 	charges map[string]int
+}
+
+// The states a held seat is printed with. They are the words every reader of a
+// count above its cap uses — the tick line and the sling refusal — so one seat
+// state reads the same everywhere (gt-5y87fp).
+const (
+	// SeatStateSession is a seat a live polecat session holds.
+	SeatStateSession = "session"
+	// SeatStateLanding is a seat whose polecat ran gt done and whose bead
+	// waits for the landing worker.
+	SeatStateLanding = "landing"
+	// SeatStateDeadHooked is a seat whose session is gone while its bead is
+	// still hooked.
+	SeatStateDeadHooked = "dead-hooked"
+	// SeatStateClaim is a seat another sling reserved before its session
+	// existed.
+	SeatStateClaim = "claim"
+	// SeatStateInFlightPrefix starts the state of a seat a running sling holds:
+	// "in-flight:<bead>" names the work the sling is for.
+	SeatStateInFlightPrefix = "in-flight:"
+)
+
+// SeatStateInFlight is the state of a seat a running sling holds for bead.
+func SeatStateInFlight(bead string) string { return SeatStateInFlightPrefix + bead }
+
+// HeldSeat is one seat a count holds, named for the reading a count above its
+// cap prints.
+type HeldSeat struct {
+	// Agent is the seat's agent, the count it was tallied under: Picture lists
+	// a seat above its cap from the entries naming its agent, so each seat's
+	// list sums to the count printed beside it.
+	Agent string
+	// Name names the seat: "<rig>/<polecat>" for a session, a landing seat or a
+	// dead-hooked seat. A claim or a running sling has spawned no polecat, so
+	// it names the work it holds the seat for, and a claim that names no bead
+	// keeps its own name.
+	Name string
+	// State is one of the SeatState constants, or SeatStateInFlight(bead).
+	State string
+}
+
+// HeldSeatList renders the seats a count holds, "gastown/a:session,
+// gastown/b:claim", sorted so a reading is stable. It is empty for no seats,
+// and a seat that names nothing still prints its state rather than vanish: the
+// list has one entry per seat counted, so it sums to the count printed beside
+// it.
+func HeldSeatList(seats []HeldSeat) string {
+	if len(seats) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(seats))
+	for _, s := range seats {
+		names = append(names, s.Name+":"+s.State)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // DeadHookedCount names the seats inside a count that no tmux session holds:
@@ -430,6 +491,15 @@ func SplitLiveDead(total, inFlight, dead int) string {
 // with a total cap names it too, so the picture a full town is reported with
 // holds the cap that held it rather than only the seats under it.
 //
+// A seat's count, or the town total, above its cap carries
+// "(held: <rig>/<polecat>:<state>, ...)": the seats the count was read from,
+// named by Held, so the reading can be attributed rather than guessed at. A
+// seat above its cap names the entries counted on its agent, so that list sums
+// to the count beside it; a town above its total names every entry, summing to
+// the total. A reading at or under every cap prints no list and keeps its
+// wording (gt-5y87fp). A list sits inside one parenthetical after its count,
+// so a reader of the roster still splits the picture into seats.
+//
 // The live part can count a sling twice. The caller adds each sling still running
 // to its agent's count, and the roster shows the same polecat once it spawns, so
 // until that sling returns the seat counts it twice. The error is toward fewer
@@ -458,19 +528,50 @@ func (b Budget) Picture() string {
 	if len(parts) == 0 {
 		return "no seats"
 	}
+	for i, s := range b.Seats {
+		if s.Live > s.Cap {
+			if held := HeldSeatList(b.heldFor(s.Agent)); held != "" {
+				parts[i] += " (held: " + held + ")"
+			}
+		}
+	}
 	if b.MaxTotal > 0 {
-		parts = append(parts, fmt.Sprintf("total %d/%d", b.LiveTotal, b.MaxTotal))
+		total := fmt.Sprintf("total %d/%d", b.LiveTotal, b.MaxTotal)
+		if b.LiveTotal > b.MaxTotal {
+			if held := HeldSeatList(b.Held); held != "" {
+				total += " (held: " + held + ")"
+			}
+		}
+		parts = append(parts, total)
 	}
 	return strings.Join(parts, ", ")
 }
 
+// heldFor returns the entries counted on agent, the seats a seat's own count
+// above its cap names. A nil list (no seat on the agent) renders as nothing.
+func (b Budget) heldFor(agent string) []HeldSeat {
+	var out []HeldSeat
+	for _, s := range b.Held {
+		if s.Agent == agent {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// SetHeld names the seats the count holds, from the same seat read the live
+// counts came from, so a count above its cap prints one entry per seat counted
+// (gt-5y87fp).
+func (b *Budget) SetHeld(held []HeldSeat) { b.Held = held }
+
 // SetLive fills each seat's Live from a count per agent, and LiveTotal from the
 // whole count: a live polecat on an agent the seats do not name is still a live
-// polecat, so a total cap has to see it. It clears InFlight and DeadHooked, the
-// two breakdowns of Live, which are set afterwards by SetInFlight and
-// SetDeadHooked.
+// polecat, so a total cap has to see it. It clears InFlight, DeadHooked and
+// Held, the breakdowns of Live, which are set afterwards by SetInFlight,
+// SetDeadHooked and SetHeld.
 func (b *Budget) SetLive(live map[string]int) {
 	total := 0
+	b.Held = nil
 	for i := range b.Seats {
 		b.Seats[i].Live = live[b.Seats[i].Agent]
 		b.Seats[i].InFlight = 0
