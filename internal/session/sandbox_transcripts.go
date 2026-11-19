@@ -44,12 +44,13 @@ const sandboxTranscriptMarker = "skipped-by-cap"
 // a link in the sandbox is never copied.
 var sandboxListing = []string{"find", sandboxProjectsDir, "-type", "f", "-name", "*.jsonl", "-printf", `%T@ %s %p\n`}
 
-// sandboxTranscript is one transcript the sandbox listing names.
-type sandboxTranscript struct {
-	remote string    // the file's path inside the sandbox
-	rel    string    // its path under the projects directory, slash-separated
-	size   int64     // bytes
-	mtime  time.Time // the sandbox's modification time, which the copy keeps
+// SandboxTranscript is one transcript the sandbox listing names.
+type SandboxTranscript struct {
+	remote string // the file's path inside the sandbox
+	rel    string // its path under the projects directory, slash-separated
+	size   int64  // bytes
+	// MTime is the sandbox's modification time, which the copy keeps.
+	MTime time.Time
 }
 
 // SandboxTranscriptCopyDir is the directory a seat's copied projects directory
@@ -144,7 +145,7 @@ func (b *openshellBackend) saveSeatTranscripts(rec SandboxRecord) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxDownloadTimeout)
 	defer cancel()
-	listed, err := b.listSeatTranscripts(ctx, rec)
+	listed, err := b.ListSeatTranscripts(ctx, rec)
 	if isSandboxNotFound(err) {
 		// A sandbox that is already gone has no transcripts to copy.
 		return nil
@@ -184,11 +185,11 @@ func (b *openshellBackend) clock() time.Time {
 	return time.Now()
 }
 
-// listSeatTranscripts lists the transcripts of rec's seat inside its sandbox:
-// only those under the seat's own project folder, so another folder's files can
-// neither use up the cap nor be counted as left out by it. A listing that fails,
-// or does not parse, is an error: a missing line would be a silently partial copy.
-func (b *openshellBackend) listSeatTranscripts(ctx context.Context, rec SandboxRecord) ([]sandboxTranscript, error) {
+// ListSeatTranscripts lists the transcripts of rec's seat under its own project
+// folder inside its sandbox, so another folder's files can neither use up the
+// copy's cap nor be counted as left out by it; a listing that fails or does not
+// parse is an error, since a missing line would be a silently partial copy.
+func (b *openshellBackend) ListSeatTranscripts(ctx context.Context, rec SandboxRecord) ([]SandboxTranscript, error) {
 	out, _, err := b.cli.Exec(ctx, rec.Session, nil, sandboxListing, nil)
 	if err != nil {
 		return nil, fmt.Errorf("listing its transcripts: %w", err)
@@ -200,12 +201,19 @@ func (b *openshellBackend) listSeatTranscripts(ctx context.Context, rec SandboxR
 	return seatFolderTranscripts(all, SandboxTranscriptFolder(rec.Rig, rec.Polecat)), nil
 }
 
+// ListSeatTranscripts lists rec's seat's transcripts, building its backend from
+// the record alone, so a caller with no seat lifecycle to Prepare it asks the
+// read the seat end copies out.
+func ListSeatTranscripts(ctx context.Context, townRoot string, rec SandboxRecord) ([]SandboxTranscript, error) {
+	return recordBackend(townRoot, rec).ListSeatTranscripts(ctx, rec)
+}
+
 // seatFolderTranscripts keeps the listed transcripts under folder, the seat's
 // project folder under the projects directory, its subagents' subfolders
 // included.
-func seatFolderTranscripts(files []sandboxTranscript, folder string) []sandboxTranscript {
+func seatFolderTranscripts(files []SandboxTranscript, folder string) []SandboxTranscript {
 	prefix := folder + "/"
-	var own []sandboxTranscript
+	var own []SandboxTranscript
 	for _, f := range files {
 		if strings.HasPrefix(f.rel, prefix) {
 			own = append(own, f)
@@ -219,7 +227,7 @@ func seatFolderTranscripts(files []sandboxTranscript, folder string) []sandboxTr
 // keeps its sandbox modification time, which the seat end reads to tell the seat's
 // own transcripts from its predecessor's. It returns how many of the seat's
 // transcripts the cap left out, and records that count at the root of dest.
-func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec SandboxRecord, files []sandboxTranscript, dest string) (int, error) {
+func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec SandboxRecord, files []SandboxTranscript, dest string) (int, error) {
 	keep, skipped := selectSandboxTranscripts(files, rec.CreatedAt, b.capLimit())
 	for _, f := range keep {
 		local := filepath.Join(dest, filepath.FromSlash(f.rel))
@@ -231,7 +239,7 @@ func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec Sand
 		}
 		// A download that wrote no file where it was asked to fails here, not later
 		// as a seat that reads a partial copy.
-		if err := os.Chtimes(local, f.mtime, f.mtime); err != nil {
+		if err := os.Chtimes(local, f.MTime, f.MTime); err != nil {
 			return 0, fmt.Errorf("keeping the sandbox mtime of a copied transcript: %w", err)
 		}
 	}
@@ -247,8 +255,8 @@ func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec Sand
 // parseSandboxListing reads the sandbox listing: one "<mtime> <size> <path>" line
 // per transcript under the projects directory. Output that does not parse is an
 // error, not a shorter list, since a missing line would be a silently partial copy.
-func parseSandboxListing(out string) ([]sandboxTranscript, error) {
-	var files []sandboxTranscript
+func parseSandboxListing(out string) ([]SandboxTranscript, error) {
+	var files []SandboxTranscript
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
@@ -270,7 +278,7 @@ func parseSandboxListing(out string) ([]sandboxTranscript, error) {
 		if !ok || !plainTranscriptPath(rel) {
 			return nil, fmt.Errorf("sandbox transcript listing has a path that is not a transcript under %s", sandboxProjectsDir)
 		}
-		files = append(files, sandboxTranscript{remote: fields[2], rel: rel, size: size, mtime: mtime})
+		files = append(files, SandboxTranscript{remote: fields[2], rel: rel, size: size, MTime: mtime})
 	}
 	return files, nil
 }
@@ -313,15 +321,15 @@ func plainTranscriptPath(rel string) bool {
 // at or after since (all of them when since is zero), newest first, while they fit
 // under limit. It returns them with how many the limit left out. The cut is always
 // of the oldest, and a transcript larger than the limit alone is left out at once.
-func selectSandboxTranscripts(files []sandboxTranscript, since time.Time, limit int64) ([]sandboxTranscript, int) {
-	var own []sandboxTranscript
+func selectSandboxTranscripts(files []SandboxTranscript, since time.Time, limit int64) ([]SandboxTranscript, int) {
+	var own []SandboxTranscript
 	for _, f := range files {
-		if since.IsZero() || !f.mtime.Before(since) {
+		if since.IsZero() || !f.MTime.Before(since) {
 			own = append(own, f)
 		}
 	}
-	sort.SliceStable(own, func(i, j int) bool { return own[i].mtime.After(own[j].mtime) })
-	var kept []sandboxTranscript
+	sort.SliceStable(own, func(i, j int) bool { return own[i].MTime.After(own[j].MTime) })
+	var kept []SandboxTranscript
 	var total int64
 	for i, f := range own {
 		// total never exceeds limit, so limit-total cannot overflow, while total+f.size

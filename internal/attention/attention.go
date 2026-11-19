@@ -182,6 +182,10 @@ const (
 	// past the window, so no agent runs in it and the scheduler's own message
 	// names what the pod cannot get (gt-1gtq5g).
 	KindSandboxPending Kind = "sandbox-pending"
+	// KindSandboxSilent: a running sandbox seat has written no transcript for
+	// the window, so its agent may be stuck at a prompt with nothing in the
+	// queue saying so until the overrun bound (gt-oq4ele).
+	KindSandboxSilent Kind = "sandbox-silent"
 	// KindSeatSandboxStale: a seat's gateway sandbox sits in a terminal
 	// failure phase, so its seat name fails every sling drawn for it until the
 	// sandbox is deleted (gt-zapy97).
@@ -230,7 +234,7 @@ func Kinds() []Kind {
 		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindMetricsExtract, KindSandboxPending, KindSeatSandboxStale, KindSeatUnreachable,
+		KindHoldStale, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow,

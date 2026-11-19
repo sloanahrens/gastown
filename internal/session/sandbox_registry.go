@@ -331,6 +331,12 @@ func ListSandboxSessions(townRoot string) []string {
 	return out
 }
 
+// SandboxSessions returns the recorded session names, sorted, and an error when
+// the registry cannot be read; a missing registry lists none.
+func SandboxSessions(townRoot string) ([]string, error) {
+	return listSandboxSessions(townRoot)
+}
+
 // listSandboxSessions is ListSandboxSessions reporting a read error; a
 // missing directory is an empty list, not an error.
 func listSandboxSessions(townRoot string) ([]string, error) {

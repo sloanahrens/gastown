@@ -434,7 +434,7 @@ func TestParseSandboxListingKeepsTheFractionOfAnMtime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || !files[0].mtime.Equal(time.Unix(1731369600, 250000000)) || files[0].size != 7 {
+	if len(files) != 1 || !files[0].MTime.Equal(time.Unix(1731369600, 250000000)) || files[0].size != 7 {
 		t.Fatalf("parsed = %+v, want the stamp to the nanosecond and size 7", files)
 	}
 }
