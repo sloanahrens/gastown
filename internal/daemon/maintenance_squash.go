@@ -30,8 +30,9 @@ import (
 // them into a decision the check logs. A database Decide finds due is run by
 // doltsquash.Run, which holds the town's run marker for its whole length so
 // two daemons cannot run it at once. Each run is recorded in
-// maintenance_state.json and in one daemon/squash_ledger.jsonl line (gt-5v1fye);
-// the attention item a failed run raises is D9b-3 (gt-0g4yoa).
+// maintenance_state.json and in one daemon/squash_ledger.jsonl line (gt-5v1fye),
+// and a failed run or a swap that kept both branches raises one attention item
+// (gt-0g4yoa).
 //
 // The check rides the scheduled_maintenance tick but not its window and not
 // its quiet-window guard: its readings are taken on every tick regardless, and
@@ -94,6 +95,10 @@ const (
 	// records a repeat on the bead already open under the key, so a file that
 	// stays unreadable leaves exactly one escalation behind.
 	squashStateAlertKey = "squash:state"
+
+	// squashAlertSource labels every item a run raises, as the state check's
+	// alert does.
+	squashAlertSource = "squash"
 )
 
 // squashMarkerPath is the run marker's file: <town>/daemon/squash_run.lock.
@@ -386,6 +391,14 @@ func (d *Daemon) runSquashDatabase(ctx context.Context, db string, cut time.Time
 	if err := m.squashLedger(d.config.TownRoot).append(entry); err != nil {
 		d.logger.Printf("squash: %s: WARNING: cannot write the ledger line to %s: %v", db, squashLedgerFile, err)
 	}
+	// A failed run, or a swap that kept both branches, leaves main in a state
+	// only a person or the recovery table settles: raise one item naming what
+	// happened and where it leaves the database. A completed run, a run the
+	// marker refused and a held run raise nothing.
+	switch entry.Outcome {
+	case squashOutcomeFailed, squashOutcomeConflict:
+		m.escalate(d, squashAlertSource, squashRunItem(entry, res, squashLedgerPath(d.config.TownRoot)))
+	}
 	return res, err
 }
 
@@ -465,6 +478,49 @@ func newSquashLedgerEntry(db string, started, finished time.Time, res doltsquash
 	return e
 }
 
+// squashRunItem is the item a failed or escalated run raises. Its first line
+// names the database and what happened, because that line becomes the
+// escalation's title; the body carries what stopped the run (its error or its
+// swap conflict), the run's times, where its ledger line is, and the state the
+// recovery table leaves the database in.
+func squashRunItem(e squashLedgerEntry, res doltsquash.RunResult, ledgerPath string) string {
+	what := "the run failed: " + e.Error
+	if e.Outcome == squashOutcomeConflict {
+		what = "the run was escalated: " + e.Conflict
+	}
+	return fmt.Sprintf("squash: %s: %s\nThe run started %s and finished %s; one line per run is in %s.\n%s",
+		e.DB, what, e.Started.UTC().Format(time.RFC3339), e.Finished.UTC().Format(time.RFC3339),
+		ledgerPath, squashRunState(res))
+}
+
+// squashRunState renders, in the design's recovery-table terms ("Recovery by
+// state"), what the run left the database holding: the row a start's recovery
+// applied when it found a dead run, and where main and the work branches stand
+// after the run stopped. That is what decides the next check's step, so it is
+// what the item says.
+func squashRunState(res doltsquash.RunResult) string {
+	var parts []string
+	if res.Recovered != nil {
+		parts = append(parts, fmt.Sprintf("the start found the database in the row %q and recovered it: %s",
+			res.Recovered.State, res.Recovered.Reason))
+	}
+	switch {
+	case res.Swap.Conflict != nil && res.Swap.RenamedBack:
+		parts = append(parts, "the two branches were renamed back, so main holds the old history again and compact-work and compact-base are kept beside it; the next check recovers them by state")
+	case res.Swap.Conflict != nil:
+		parts = append(parts, "the swap stands, so main holds the new history and main-pre-squash and compact-base are kept beside it; the next check finds the row after the swap and leaves them for the retention check")
+	case res.Swap.SwappedTip != "":
+		parts = append(parts, "the run stopped in or after the swap, which renames main and moves the work branches; the next check recovers them by state")
+	case res.Before.Tip != "":
+		parts = append(parts, "the run stopped before the swap, so main was never renamed; the next check drops compact-work and compact-base by state")
+	case res.Recovered != nil:
+		parts = append(parts, "the run stopped after its start's recovery and ran no step of its own, so the database is in the state the recovery left it")
+	default:
+		parts = append(parts, "no recovery row was applied and no step ran, so the database is as the check found it")
+	}
+	return strings.Join(parts, "; ") + "."
+}
+
 // squashLedger is the run ledger's file and the operations one line takes. The
 // operations are fields so a test can fail one: a record that does not
 // marshal, an unmakeable directory and a failed write cannot be arranged on the
@@ -477,10 +533,15 @@ type squashLedger struct {
 	write   func(f *os.File, b []byte) (int, error)
 }
 
+// squashLedgerPath is the run ledger's file: <town>/daemon/squash_ledger.jsonl.
+func squashLedgerPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", squashLedgerFile)
+}
+
 // newSquashLedger is the ledger at its town path, reading and writing for real.
 func newSquashLedger(townRoot string) squashLedger {
 	return squashLedger{
-		path:    filepath.Join(townRoot, "daemon", squashLedgerFile),
+		path:    squashLedgerPath(townRoot),
 		marshal: json.Marshal,
 		mkdir:   os.MkdirAll,
 		open:    os.OpenFile,

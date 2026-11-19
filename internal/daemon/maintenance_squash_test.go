@@ -739,6 +739,27 @@ func TestSquashRowsRefusesAClosedResultSet(t *testing.T) {
 	}
 }
 
+// squashItemDaemon is a daemon the next tick finds due, with the backup its
+// trigger needs written and an escalate seam that records the items a run
+// raises.
+func squashItemDaemon(t *testing.T) (*Daemon, *squashFakeServer, *[]string) {
+	t.Helper()
+	d, server, _ := squashDueDaemon(t)
+	escalations := captureSquashEscalations(d)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	return d, server, escalations
+}
+
+// captureSquashEscalations replaces the escalate seam with a recorder and
+// returns it, so a test can assert which items a run raised.
+func captureSquashEscalations(d *Daemon) *[]string {
+	var items []string
+	d.maint.escalate = func(_ *Daemon, source, message string) {
+		items = append(items, source+"|"+message)
+	}
+	return &items
+}
+
 // scriptSquashRun replaces the engine for one due database's run, so a
 // completed, failed or conflicted run's record is reachable without a server.
 // calls counts the runs the check started.
@@ -1136,6 +1157,264 @@ func TestSquashRecordWarnsWhenAWriteFails(t *testing.T) {
 	}
 }
 
+// TestSquashItemFailedRunNamesTheFailureAndTheState is the bead's first box: a
+// failed run raises one item naming the database, the failure and the recovery
+// state, and the database is left where the recovery table says it is.
+func TestSquashItemFailedRunNamesTheFailureAndTheState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a state no recovery row names", func(t *testing.T) {
+		t.Parallel()
+		d, server, escalations := squashItemDaemon(t)
+		// An empty branch catalog is the state no row of the recovery table
+		// names, so the run refuses to touch the database.
+		server.script = func(statement string) ([][]driver.Value, bool) {
+			if strings.HasPrefix(statement, "SELECT name, hash FROM dolt_branches") {
+				return [][]driver.Value{}, true
+			}
+			return nil, false
+		}
+
+		d.runScheduledMaintenance()
+
+		if got := len(*escalations); got != 1 {
+			t.Fatalf("a failed run raised %d items, want one: %v", got, *escalations)
+		}
+		item := (*escalations)[0]
+		for _, want := range []string{
+			"squash|squash: gt: the run failed: doltsquash: the database lists no branch at all, which no row of the recovery table names",
+			"The run started 2026-11-16T12:00:00Z and finished 2026-11-16T12:00:00Z",
+			squashLedgerPath(d.config.TownRoot),
+			"no recovery row was applied and no step ran, so the database is as the check found it.",
+		} {
+			if !strings.Contains(item, want) {
+				t.Errorf("the item does not hold %q: %q", want, item)
+			}
+		}
+		// The recovery table refused the state before any step: the run sent
+		// reads and no write.
+		for _, q := range server.queries {
+			if !strings.HasPrefix(q, "SELECT") {
+				t.Errorf("a run that refused its state sent a statement that is not a read: %q", q)
+			}
+		}
+		entries := readSquashLedger(t, d.config.TownRoot)
+		if len(entries) != 1 || entries[0].Outcome != squashOutcomeFailed {
+			t.Fatalf("the ledger holds %+v, want one failed line", entries)
+		}
+		if !strings.Contains(entries[0].Error, "the database lists no branch at all") {
+			t.Errorf("the ledger line does not name the failure: %q", entries[0].Error)
+		}
+		rec, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("the run's state record does not read: %v", err)
+		}
+		if rec.Squash["gt"].Outcome != squashOutcomeFailed {
+			t.Errorf("the state record holds outcome %q, want %q", rec.Squash["gt"].Outcome, squashOutcomeFailed)
+		}
+	})
+
+	t.Run("the start recovered a dead run's row", func(t *testing.T) {
+		t.Parallel()
+		d, _, escalations := squashItemDaemon(t)
+		calls := 0
+		scriptSquashRun(d, &calls, doltsquash.RunResult{Recovered: &doltsquash.Recovery{
+			State:   doltsquash.RecoveryBeforeSwap,
+			Dropped: []string{"compact-work"},
+			Reason:  "recovered a run that died before the swap: main was never renamed, 1 work branches were dropped",
+		}}, errors.New("doltsquash: the catch-up: read failed"))
+
+		d.runScheduledMaintenance()
+
+		if calls != 1 {
+			t.Fatalf("the check started %d runs, want 1", calls)
+		}
+		if got := len(*escalations); got != 1 {
+			t.Fatalf("a failed run raised %d items, want one: %v", got, *escalations)
+		}
+		item := (*escalations)[0]
+		for _, want := range []string{
+			"the run failed: doltsquash: the catch-up: read failed",
+			`the start found the database in the row "before the swap" and recovered it`,
+			"main was never renamed, 1 work branches were dropped",
+			"the database is in the state the recovery left it",
+			squashLedgerPath(d.config.TownRoot),
+		} {
+			if !strings.Contains(item, want) {
+				t.Errorf("the item does not hold %q: %q", want, item)
+			}
+		}
+		if strings.Contains(item, "no recovery row was applied") {
+			t.Errorf("the item reads a recovery that ran as no recovery: %q", item)
+		}
+	})
+}
+
+// TestSquashItemFailedRunNamesWhereTheDatabaseStands: a failure before the swap
+// and one inside it leave different branches, so the item says which part of the
+// recovery table the next check applies.
+func TestSquashItemFailedRunNamesWhereTheDatabaseStands(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		res  doltsquash.RunResult
+		want string
+	}{
+		"the run stopped before the swap": {
+			res:  doltsquash.RunResult{Before: doltsquash.Before{Tip: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+			want: "main was never renamed",
+		},
+		"the run stopped in or after the swap": {
+			res:  doltsquash.RunResult{Swap: doltsquash.SwapResult{SwappedTip: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+			want: "the run stopped in or after the swap, which renames main and moves the work branches",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, escalations := squashItemDaemon(t)
+			calls := 0
+			scriptSquashRun(d, &calls, tc.res, errors.New("doltsquash: the rebase: read failed"))
+
+			d.runScheduledMaintenance()
+
+			if got := len(*escalations); got != 1 {
+				t.Fatalf("a failed run raised %d items, want one: %v", got, *escalations)
+			}
+			if item := (*escalations)[0]; !strings.Contains(item, tc.want) {
+				t.Errorf("the item does not hold %q: %q", tc.want, item)
+			}
+		})
+	}
+}
+
+// TestSquashItemASwapConflictNamesTheBranchesKept is the bead's second box: a
+// swap conflict raises one item naming the branches kept beside main.
+func TestSquashItemASwapConflictNamesTheBranchesKept(t *testing.T) {
+	t.Parallel()
+	conflict := &doltsquash.SwapConflict{
+		Commit:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Unpicked: []string{"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		Landed:   []string{"cccccccccccccccccccccccccccccccccccccccc"},
+	}
+	cases := map[string]struct {
+		renamedBack bool
+		wantKept    string
+	}{
+		"the swap stands": {
+			wantKept: "main-pre-squash and compact-base are kept",
+		},
+		"the two branches were renamed back": {
+			renamedBack: true,
+			wantKept:    "compact-work and compact-base are kept",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, escalations := squashItemDaemon(t)
+			calls := 0
+			scriptSquashRun(d, &calls, doltsquash.RunResult{
+				Swap: doltsquash.SwapResult{
+					SwappedTip:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+					RenamedBack: tc.renamedBack,
+					Conflict:    conflict,
+				},
+				Summary: doltsquash.RunSummary{CommitsBefore: 900, CommitsAfter: 40, AfterRead: true},
+			}, nil)
+
+			d.runScheduledMaintenance()
+
+			if calls != 1 {
+				t.Fatalf("the check started %d runs, want 1", calls)
+			}
+			if got := len(*escalations); got != 1 {
+				t.Fatalf("a conflict raised %d items, want one: %v", got, *escalations)
+			}
+			item := (*escalations)[0]
+			for _, want := range []string{
+				"the run was escalated: the pick of " + conflict.Commit + " left conflicts",
+				"cccccccccccccccccccccccccccccccccccccccc",
+				tc.wantKept,
+				squashLedgerPath(d.config.TownRoot),
+			} {
+				if !strings.Contains(item, want) {
+					t.Errorf("the item does not hold %q: %q", want, item)
+				}
+			}
+			entries := readSquashLedger(t, d.config.TownRoot)
+			if len(entries) != 1 || entries[0].Outcome != squashOutcomeConflict {
+				t.Errorf("the ledger holds %+v, want one conflict line", entries)
+			}
+		})
+	}
+}
+
+// TestSquashItemCompletedRefusedAndHeldRunsRaiseNothing is the bead's third
+// box: only a failed or escalated run raises an item.
+func TestSquashItemCompletedRefusedAndHeldRunsRaiseNothing(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a completed run", func(t *testing.T) {
+		t.Parallel()
+		d, _, escalations := squashItemDaemon(t)
+		calls := 0
+		scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{
+			CommitsBefore: 900, CommitsAfter: 40, AfterRead: true,
+		}}, nil)
+
+		d.runScheduledMaintenance()
+
+		if calls != 1 {
+			t.Fatalf("the check started %d runs, want 1", calls)
+		}
+		if len(*escalations) != 0 {
+			t.Errorf("a completed run raised an item: %v", *escalations)
+		}
+	})
+
+	t.Run("a run the marker refused", func(t *testing.T) {
+		t.Parallel()
+		d, _, escalations := squashItemDaemon(t)
+		path := squashMarkerPath(d.config.TownRoot)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		release, ok, err := lock.FlockTryAcquire(path)
+		if err != nil {
+			t.Fatalf("taking the other daemon's marker: %v", err)
+		}
+		if !ok {
+			t.Fatal("the other daemon's marker was not free to take")
+		}
+		defer release()
+
+		d.runScheduledMaintenance()
+
+		if len(*escalations) != 0 {
+			t.Errorf("a run refused by the marker raised an item: %v", *escalations)
+		}
+	})
+
+	t.Run("a held run", func(t *testing.T) {
+		t.Parallel()
+		d, _, escalations := squashItemDaemon(t)
+		calls := 0
+		scriptSquashRun(d, &calls, doltsquash.RunResult{
+			Held:      true,
+			Recovered: &doltsquash.Recovery{State: doltsquash.RecoverySwappedKept, Kept: []string{"main-pre-squash"}, Reason: "kept the new main: the swap stands"},
+		}, nil)
+
+		d.runScheduledMaintenance()
+
+		if calls != 1 {
+			t.Fatalf("the check started %d runs, want 1", calls)
+		}
+		if len(*escalations) != 0 {
+			t.Errorf("a held run raised an item: %v", *escalations)
+		}
+	})
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
@@ -1146,10 +1425,18 @@ type squashFakeServer struct {
 	countRecords int
 	rowValue     driver.Value
 	nextErr      error
+	// script answers a statement a case names; no match falls back to rowsFor,
+	// so a case can send a branch catalog the built answer never holds.
+	script func(statement string) ([][]driver.Value, bool)
 }
 
 // rowsFor is the result of one statement.
 func (s *squashFakeServer) rowsFor(statement string) [][]driver.Value {
+	if s.script != nil {
+		if rows, ok := s.script(statement); ok {
+			return rows
+		}
+	}
 	if statement != squashMainCommitsSQL {
 		value := s.rowValue
 		if value == nil {
