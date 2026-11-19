@@ -27,6 +27,9 @@ import (
 // beadsName is the bead listing the extract writes beside its tables.
 const beadsName = "beads.csv"
 
+// gateRunsName is the gate-run table the extract writes beside landings.csv.
+const gateRunsName = "gate_runs.csv"
+
 // beadColumns is the header beads.csv carries, in the order the extract writes
 // it.
 var beadColumns = []string{
@@ -102,6 +105,8 @@ type ExtractEnv struct {
 	// BdShowCap bounds how many beads the handoff reader fetches; zero is the
 	// ported default of 150.
 	BdShowCap int
+	// TownRoot is the town whose gate-runs log the extract reads; it must be set.
+	TownRoot string
 	// JevLog is the Jev dispatch log the landings' jev columns read, by path.
 	// A missing file leaves those columns empty and is named in the footer; it
 	// must be set, so an unwired log is never read as an absent one.
@@ -137,8 +142,9 @@ type ExtractResult struct {
 // read as an empty one.
 //
 // The files go out in the ported extract's order: landings.csv, its sidecar,
-// weekly.csv, beads.csv (left out when no bd list worked, so an empty listing is
-// never published as a real answer) and footer.json last, describing the rest.
+// gate_runs.csv, weekly.csv, beads.csv (left out when no bd list worked, so an
+// empty listing is never published as a real answer) and footer.json last,
+// describing the rest.
 func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	var res ExtractResult
 	switch {
@@ -152,6 +158,10 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		// An empty path would read as a missing log, so an unwired one is
 		// refused here rather than passed as a log with no answers.
 		return res, errors.New("extract: ExtractEnv.JevLog is unset")
+	case env.TownRoot == "":
+		// An empty root would read as a town with no gate runs, so an unwired
+		// one is refused here rather than passed as a town that never ran a gate.
+		return res, errors.New("extract: ExtractEnv.TownRoot is unset")
 	}
 	if err := env.makeOutDir(); err != nil {
 		return res, fmt.Errorf("extract: %w", err)
@@ -339,13 +349,27 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	if err != nil {
 		return res, err
 	}
+	// The gate runs are read before the first write too, so an unreadable log
+	// refuses the extract rather than leaving part of a set behind.
+	gateRuns, gateSkipped, err := land.ReadGateRuns(env.TownRoot)
+	if err != nil {
+		return res, fmt.Errorf("extract: %w", err)
+	}
+	gateColumns, gateRows := GateRunRows(gateRuns)
 
 	if err := env.writeOutput(landingsName, func(w io.Writer) error {
 		return WriteCSV(w, landings, landingColumns)
 	}); err != nil {
 		return res, err
 	}
-	if err := env.writeOutput(sidecarName, WriteLandingSidecar); err != nil {
+	if err := env.writeOutput(sidecarName, func(w io.Writer) error {
+		return WriteLandingSidecar(w, gateSkipped)
+	}); err != nil {
+		return res, err
+	}
+	if err := env.writeOutput(gateRunsName, func(w io.Writer) error {
+		return writeGateRuns(w, gateColumns, gateRows)
+	}); err != nil {
 		return res, err
 	}
 	if err := env.writeOutput(weeklyName, func(w io.Writer) error {
@@ -394,6 +418,20 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 		return res, err
 	}
 	return ExtractResult{Landings: landings, Weekly: weekly, Footer: footer}, nil
+}
+
+// writeGateRuns writes gate_runs.csv in landings.csv's format: the header, then
+// one record per gate run. A town with no runs writes the header alone.
+func writeGateRuns(w io.Writer, columns []string, rows [][]string) error {
+	if err := writeRecord(w, columns); err != nil {
+		return fmt.Errorf("gate_runs.csv header: %w", err)
+	}
+	for i, cells := range rows {
+		if err := writeRecord(w, cells); err != nil {
+			return fmt.Errorf("gate_runs.csv row %d: %w", i+2, err)
+		}
+	}
+	return nil
 }
 
 // makeOutDir makes the output directory before the first write.

@@ -264,7 +264,7 @@ func TestExplainOnlyColumnsExtendThePinnedSet(t *testing.T) {
 func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := WriteLandingSidecar(&buf); err != nil {
+	if err := WriteLandingSidecar(&buf, 0); err != nil {
 		t.Fatalf("WriteLandingSidecar: %v", err)
 	}
 	var sidecar struct {
@@ -283,7 +283,7 @@ func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 // landingSidecarBytes is landings.sidecar.json's exact text: the mango stage
 // reads the file, so the bytes are the contract, not the decoded list. It is
 // tables.py's json.dump({"explain_only": sorted(EXPLAIN_ONLY)}, f, indent=1)
-// byte for byte, with no trailing newline.
+// byte for byte, with gate_runs_skipped after it and no trailing newline.
 const landingSidecarBytes = `{
  "explain_only": [
   "agent",
@@ -309,7 +309,8 @@ const landingSidecarBytes = `{
   "submitted_at",
   "time_to_land_s",
   "unreadable"
- ]
+ ],
+ "gate_runs_skipped": 0
 }`
 
 // TestWriteLandingSidecarExactBytes pins the sidecar's bytes, which the mango
@@ -317,7 +318,7 @@ const landingSidecarBytes = `{
 func TestWriteLandingSidecarExactBytes(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := WriteLandingSidecar(&buf); err != nil {
+	if err := WriteLandingSidecar(&buf, 0); err != nil {
 		t.Fatalf("WriteLandingSidecar: %v", err)
 	}
 	if got := buf.String(); got != landingSidecarBytes {
@@ -337,7 +338,7 @@ func (w causeWriter) Write([]byte) (int, error) { return 0, w.cause }
 func TestWriteLandingSidecarWriteErrorIsNamed(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
-	err := WriteLandingSidecar(causeWriter{cause: boom})
+	err := WriteLandingSidecar(causeWriter{cause: boom}, 0)
 	if err == nil {
 		t.Fatal("WriteLandingSidecar to a failing writer returned no error")
 	}
