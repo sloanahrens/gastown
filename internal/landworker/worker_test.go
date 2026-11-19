@@ -513,7 +513,7 @@ func TestEscalationTextFromHumanRejection(t *testing.T) {
 		if want := "lane crew/overseer; major a.go:9 error dropped; minor b.go naming"; !strings.Contains(msg, want) {
 			t.Fatalf("escalation %q lacks %q", msg, want)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(5 * time.Second): //testpolicy:allow no-sleep — a hang guard: only a broken run reaches it, and a correct run passes by the alarm, not by this bound
 		t.Fatal("no escalation within 5s")
 	}
 }
