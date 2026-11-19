@@ -490,6 +490,51 @@ func TestSquashMarkerRefusesASecondHold(t *testing.T) {
 	}
 }
 
+// TestSquashMarkerRefusesAnUncreatableDirectory: the marker's directory cannot
+// be created (its parent is a file), so Hold has no file to lock and reports
+// the unavailable error rather than a run.
+func TestSquashMarkerRefusesAnUncreatableDirectory(t *testing.T) {
+	t.Parallel()
+	blocker := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &squashMarker{path: filepath.Join(blocker, "daemon", squashRunMarkerFile)}
+
+	err := m.Hold()
+	if !errors.Is(err, errSquashMarkerUnavailable) {
+		t.Errorf("Hold = %v, want errSquashMarkerUnavailable", err)
+	}
+}
+
+// TestSquashMarkerRefusesAnUnopenedRunConnection: the run's own connection
+// cannot be opened, which is the run failing before it sends a statement, not
+// a marker refusal.
+func TestSquashMarkerRefusesAnUnopenedRunConnection(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	open := d.maint.squashOpenDB
+	opens := 0
+	d.maint.squashOpenDB = func(dsn string) (*sql.DB, error) {
+		opens++
+		if opens > 1 {
+			return nil, errors.New("bad dsn")
+		}
+		return open(dsn)
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: WARNING: gt: the run failed: squash: opening the connection to gt: bad dsn") {
+		t.Errorf("an unopened run connection was not reported as a run failure: %q", got)
+	}
+	if strings.Contains(got, "another daemon holds the run marker") || strings.Contains(got, "the run marker cannot be taken") {
+		t.Errorf("an unopened connection was reported as a marker problem: %q", got)
+	}
+}
+
 // TestSquashMarkerHoldsWithoutAFreshBackup: the design's first step runs only
 // on a backup finished within 24 hours, so an older one holds the run and says
 // why rather than squashing history the backup does not cover.
