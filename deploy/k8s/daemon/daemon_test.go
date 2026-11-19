@@ -169,6 +169,8 @@ func TestRenderGolden(t *testing.T) {
 		{"rolebinding-sweep-runner.yaml", m.SweepRoleBinding},
 		{"rolebinding-ci-cache-trim.yaml", m.CacheTrimRoleBinding},
 		{"clusterrolebinding-sweep-reader.yaml", m.SweepReaderBinding},
+		{"role-deployer-secret-names.yaml", m.SecretNamesRole},
+		{"rolebinding-deployer-secret-names.yaml", m.SecretNamesBinding},
 	} {
 		compareGolden(t, dir, doc.file, document(t, doc.value))
 	}
@@ -240,6 +242,10 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 			for _, file := range m.Secrets {
 				want = append(want, "Secret/"+file.Metadata.Name)
 			}
+			want = append(want,
+				"Role/"+m.SecretNamesRole.Metadata.Name,
+				"RoleBinding/"+m.SecretNamesBinding.Metadata.Name,
+			)
 			want = append(want, "Deployment/"+Name)
 			if tc.dashboard {
 				want = append(want, "Deployment/"+DashboardName)
