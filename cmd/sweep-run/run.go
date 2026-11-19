@@ -128,12 +128,21 @@ type Deps struct {
 	RunScript func(program string, args []string, dir string, env []string, stdout, stderr io.Writer) int
 	// WriteResult records a result as result.json in dir, as sweeprunner.Write.
 	WriteResult func(dir string, r sweeprunner.Result) error
-	// MkdirTemp creates the work directory the clone lands in.
+	// MkdirTemp creates the fallback work directory, used when the stable
+	// directory under the cache claim cannot be used.
 	MkdirTemp func(dir, pattern string) (string, error)
-	// MkdirAll creates the output directory and its parents.
+	// MkdirAll creates the output directory, the stable work directory and its
+	// parents.
 	MkdirAll func(path string, perm fs.FileMode) error
-	// RemoveAll deletes the work directory after the run.
+	// RemoveAll deletes the leftover clone before cloning and the work
+	// directory after the run, whether that directory is the stable one or the
+	// fallback.
 	RemoveAll func(path string) error
+	// Lstat reports the entry at path without following it. The stable work
+	// directory's parent and the directory itself are checked with it before
+	// anything is removed or created there, so a planted symlink cannot
+	// redirect the run outside the claim.
+	Lstat func(path string) (fs.FileInfo, error)
 	// Environ is the process environment: where a flag left out takes the
 	// container's value, what the sweep's children inherit, and the base of the
 	// environment the tier script runs with.
@@ -184,7 +193,7 @@ func Run(args []string, stdout, stderr io.Writer, d Deps) int {
 		fmt.Fprintf(stderr, "%s: prepare output directory %s: %v\n", name, opts.Out, err)
 		return FailureExit
 	}
-	work, err := d.MkdirTemp("", name+".")
+	work, err := workDirectory(d, opts, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: create the work directory: %v\n", name, err)
 		return FailureExit
@@ -664,6 +673,101 @@ func runnerRecord() sweeprunner.Runner {
 		// the share the run was given rather than the host's core count.
 		CPUs: runtime.GOMAXPROCS(0),
 	}
+}
+
+// workDirectory returns the directory the clone lands in. It prefers the stable
+// directory under the cache claim, so later sweeps of the same rig and tiers
+// hit the Go build cache, and falls back to a temporary directory, with one
+// stderr line, whenever that path cannot be used safely: a run never fails
+// because the saving was lost (gt-1cmla6).
+func workDirectory(d Deps, opts options, stderr io.Writer) (string, error) {
+	path, reason := stableWorkDir(d.Environ, opts.Rig, opts.Tiers)
+	if reason == "" {
+		if d.Lstat == nil || d.MkdirAll == nil || d.RemoveAll == nil {
+			reason = "the filesystem seams are not wired"
+		} else {
+			reason = claimDirRefusal(d.Lstat, path)
+		}
+	}
+	if reason == "" {
+		// The clone needs an empty directory, and a leftover clone from an
+		// earlier run must not leak into this one.
+		if err := d.RemoveAll(path); err != nil {
+			reason = fmt.Sprintf("remove the leftover clone at %s: %v", path, err)
+		} else if err := d.MkdirAll(path, 0o755); err != nil {
+			reason = fmt.Sprintf("create %s: %v", path, err)
+		} else {
+			return path, nil
+		}
+	}
+	fmt.Fprintf(stderr, "%s: using a temporary work directory: %s; the build-cache saving is lost for this run\n", name, reason)
+	if d.MkdirTemp == nil {
+		return "", errors.New("the filesystem seams are not wired")
+	}
+	return d.MkdirTemp("", name+".")
+}
+
+// stableWorkDir derives the work directory under the cache claim from GOCACHE
+// and states why it cannot be used, or "" when it can. The name holds the rig
+// and the tier set, so two runs of the same rig with different tiers never
+// share a directory; two runs of the same pair at once are not handled, since
+// the daemon's busy alert already keeps one sweep per rig running (gt-1cmla6).
+func stableWorkDir(env []string, rig string, tiers []string) (string, string) {
+	cache := envValue(env, "GOCACHE")
+	if cache == "" {
+		return "", "GOCACHE is empty"
+	}
+	if !filepath.IsAbs(cache) {
+		return "", fmt.Sprintf("GOCACHE %q is not absolute", cache)
+	}
+	if reason := elementRefusal("rig", rig); reason != "" {
+		return "", reason
+	}
+	for _, tier := range tiers {
+		if reason := elementRefusal("tier", tier); reason != "" {
+			return "", reason
+		}
+	}
+	return filepath.Join(filepath.Dir(cache), "work", rig+"-"+strings.Join(tiers, "+")), ""
+}
+
+// elementRefusal states why value cannot be one path element under the claim,
+// or "" when it can. It runs before the path is built, so a value that would
+// escape the claim (../x, a/b, an absolute path) never reaches a removal.
+func elementRefusal(field, value string) string {
+	ok := value != "" && value != "." && value != ".." &&
+		!strings.ContainsRune(value, filepath.Separator) &&
+		!strings.ContainsRune(value, 0) &&
+		value == filepath.Base(value)
+	if ok {
+		return ""
+	}
+	return fmt.Sprintf("%s %q is not a single path element", field, value)
+}
+
+// claimDirRefusal states why path cannot be the stable work directory, or ""
+// when it can. The work parent and the directory itself are Lstat'd before
+// anything is removed or created, because an existing symlink or non-directory
+// there could redirect the removal outside the claim. The window between this
+// check and the removal that follows is a known limit: a path swapped in it is
+// not caught (gt-1cmla6).
+func claimDirRefusal(lstat func(string) (fs.FileInfo, error), path string) string {
+	for _, p := range []string{filepath.Dir(path), path} {
+		info, err := lstat(p)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Sprintf("read %s: %v", p, err)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Sprintf("%s is a symlink", p)
+		}
+		if !info.IsDir() {
+			return fmt.Sprintf("%s is not a directory", p)
+		}
+	}
+	return ""
 }
 
 // removeWork deletes the clone the run worked in. The result and the logs are

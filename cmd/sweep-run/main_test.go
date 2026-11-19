@@ -22,9 +22,9 @@ func TestDepsAreWired(t *testing.T) {
 	if d.TreeHas == nil || d.RunScript == nil {
 		t.Errorf("a sweep-choice seam is nil: treeHas %v, runScript %v", d.TreeHas != nil, d.RunScript != nil)
 	}
-	if d.MkdirTemp == nil || d.MkdirAll == nil || d.RemoveAll == nil || d.Now == nil {
-		t.Errorf("a filesystem or clock seam is nil: mkdirTemp %v, mkdirAll %v, removeAll %v, now %v",
-			d.MkdirTemp != nil, d.MkdirAll != nil, d.RemoveAll != nil, d.Now != nil)
+	if d.MkdirTemp == nil || d.MkdirAll == nil || d.RemoveAll == nil || d.Lstat == nil || d.Now == nil {
+		t.Errorf("a filesystem or clock seam is nil: mkdirTemp %v, mkdirAll %v, removeAll %v, lstat %v, now %v",
+			d.MkdirTemp != nil, d.MkdirAll != nil, d.RemoveAll != nil, d.Lstat != nil, d.Now != nil)
 	}
 	if d.Trim == nil || d.Trim.Claim == nil || d.Trim.Remove == nil || d.Trim.Root != sweepCacheRoot || d.Trim.CapBytes != sweepCacheCapBytes {
 		t.Errorf("the cache trim is not the shared claim's: %+v, want root %s and cap %d", d.Trim, sweepCacheRoot, sweepCacheCapBytes)
