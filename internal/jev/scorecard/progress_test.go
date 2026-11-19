@@ -398,6 +398,18 @@ func refusedBlock(submitted time.Time, branch string, rej land.RejectionNote) st
 	return land.FormatReadyNote(work) + "\n" + land.FormatRejectionNote(rej)
 }
 
+// gateBeforeSubmittedNotes is refusedNotes for a hand-written block whose Gate
+// line sits before its Submitted stamp: the drift rule must place the refusal
+// by that stamp all the same (gt-urrk8u).
+func gateBeforeSubmittedNotes(submitted time.Time, reason string) string {
+	work := land.Work{Branch: "polecat/dag/gt-x", Head: "abc123", Target: "main", Worker: "dag", Gate: "PASS, 1m"}
+	rej := land.RejectionNote{Kind: "review", Reason: reason, Attempt: 1, Branch: work.Branch, Target: work.Target, MR: "gt-x", Head: work.Head}
+	return land.ReadyNoteMarker + "\nBranch: " + work.Branch + "\nHead: " + work.Head +
+		"\nTarget: " + work.Target + "\nWorker: " + work.Worker +
+		"\nGate: " + work.Gate + "\nSubmitted: " + submitted.UTC().Format(time.RFC3339) +
+		"\n" + land.FormatRejectionNote(rej)
+}
+
 // probeLabel runs one case's line through the adapter and returns the label
 // the test is about, and whether the adapter set it.
 func probeLabel(t *testing.T, town string, notes fakeProgressNotes, c progressCase, id QuestionID) (bool, bool) {
@@ -536,6 +548,10 @@ func TestProgressDriftedLabel(t *testing.T) {
 				extra: refusedBlock(at(5*time.Minute), "polecat/dag/gt-x", land.RejectionNote{
 					Kind: "gate", Reason: "the gate failed", GateTail: "FAIL\tinternal/scope/x_test.go"})},
 			set: false, want: false,
+		},
+		{
+			c:   progressCase{name: "a Gate line before the submission stamp still places the refusal", bead: "gt-d12", nudge: progressBase, extra: gateBeforeSubmittedNotes(at(5*time.Minute), "unrelated files")},
+			set: true, want: true,
 		},
 	}
 
