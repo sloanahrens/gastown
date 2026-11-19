@@ -2,6 +2,7 @@ package landworker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -22,17 +23,19 @@ type redMainHarness struct {
 	reruns []string
 	// rerunExit is each package's rerun exit code; absent means 0.
 	rerunExit map[string]int
-	status    []string
+	// rerunErr makes a package's rerun fail to run at all.
+	rerunErr map[string]error
+	status   []string
 }
 
 func newRedMainHarness(t *testing.T) *redMainHarness {
 	t.Helper()
-	h := &redMainHarness{bd: beadsfake.New(beadsfake.WithPrefix("gt")), rerunExit: map[string]int{}}
+	h := &redMainHarness{bd: beadsfake.New(beadsfake.WithPrefix("gt")), rerunExit: map[string]int{}, rerunErr: map[string]error{}}
 	h.r = &RedMain{Rig: "gastown", Beads: h.bd, Logf: t.Logf,
 		Rerun: func(_ context.Context, cmd, pkg string, pl PostLand) PostLandResult {
 			h.reruns = append(h.reruns, cmd+" "+pkg+"@"+pl.Commit)
 			code := h.rerunExit[pkg]
-			return PostLandResult{ExitCode: code, Tail: "--- FAIL: TestX in " + pkg}
+			return PostLandResult{ExitCode: code, Err: h.rerunErr[pkg], Tail: "--- FAIL: TestX in " + pkg}
 		},
 		Status: func(line string) { h.status = append(h.status, line) },
 	}
@@ -201,5 +204,100 @@ func TestRedMainBeadsCiteTheFullLog(t *testing.T) {
 	if none == nil || !strings.Contains(none.Description, "exited 2") || !strings.Contains(none.Description, "Full log: /logs/post-2/test.log") ||
 		!strings.Contains(none.Description, "FAILED in 1004s wall") {
 		t.Fatalf("no-package bead %+v; want exit code, tail and full log path", none)
+	}
+}
+
+// gt-7t9zrm: Q36 says a rerun that could not run files nothing for its package.
+func TestRedMainRerunThatCouldNotRunFilesNothing(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		prior bool // an open bead for the package, from an earlier red run
+		want  int
+	}{{name: "no open bead"}, {name: "an open bead stays", prior: true, want: 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRedMainHarness(t)
+			ctx := context.Background()
+			if tc.prior {
+				h.rerunExit[pkgA] = 1
+				h.r.Red(ctx, "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1"}, PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+				delete(h.rerunExit, pkgA)
+			}
+			h.rerunErr[pkgA] = errors.New("slot wait timed out")
+			h.r.Red(ctx, "make test-slow", PostLand{BeadID: "gt-l2", Commit: "c2"}, PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+			open := h.open(t)
+			if len(open) != tc.want {
+				t.Fatalf("open red-main beads %v; want %d", open, tc.want)
+			}
+			if a := open[RedMainTitle("gastown", pkgA)]; a != nil {
+				cs, err := h.bd.Comments(a.ID)
+				if err != nil || len(cs) != 0 {
+					t.Fatalf("comments %+v (err %v); want the package's bead left as it is", cs, err)
+				}
+			}
+		})
+	}
+}
+
+// gt-7t9zrm: Q36 says no verdict is recorded when a failing package's rerun
+// could not run. A package that passed its rerun does not make the commit
+// green either: the one that could not run was never checked (om, attempt 1).
+func TestRedMainRerunThatCouldNotRunRecordsNoVerdict(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		flaky bool // pkgB fails the first run and passes its rerun
+	}{
+		{name: "every rerun errored"},
+		{name: "another package passed its rerun", flaky: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRedMainHarness(t)
+			store := &MemoryMainState{}
+			if err := store.Save(MainState{LastRun: "g0", LastGreen: "g0"}); err != nil {
+				t.Fatal(err)
+			}
+			h.r.State = store
+			h.rerunErr[pkgA] = errors.New("slot wait timed out")
+			if !tc.flaky {
+				h.rerunErr[pkgB] = errors.New("make: not found")
+			}
+			h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1c1c1c1"}, PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false, pkgB: false})})
+			st, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.LastRun != "g0" || st.LastGreen != "g0" {
+				t.Fatalf("state %+v; want the previous verdict untouched", st)
+			}
+			if s := h.lastStatus(); !strings.HasPrefix(s, "main UNKNOWN at c1c1c1c1 ") || !strings.Contains(s, "no verdict") {
+				t.Fatalf("status %q; want UNKNOWN and no verdict", s)
+			}
+		})
+	}
+}
+
+// gt-7t9zrm: a package that did rerun and failed still files its bead while
+// another package's rerun could not run, and the commit is red.
+func TestRedMainRerunThatCouldNotRunStillFilesTheOneThatFailed(t *testing.T) {
+	t.Parallel()
+	h := newRedMainHarness(t)
+	store := &MemoryMainState{}
+	h.r.State = store
+	h.rerunErr[pkgA] = errors.New("slot wait timed out")
+	h.rerunExit[pkgB] = 1
+	h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1c1c1c1"}, PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false, pkgB: false})})
+	open := h.open(t)
+	if len(open) != 1 || open[RedMainTitle("gastown", pkgB)] == nil {
+		t.Fatalf("open %v; want only %s's bead", open, pkgB)
+	}
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastRun != "c1c1c1c1" || st.LastGreen == "c1c1c1c1" {
+		t.Fatalf("state %+v; want the red verdict recorded", st)
 	}
 }
