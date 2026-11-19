@@ -891,16 +891,18 @@ type Values struct {
 	// entries are mounted read-only in the gateway's token directory. Required with
 	// BdGatewayImage. The Secret is named, never created: the operator creates it.
 	BdGatewayTokenSecret string
-	// BdGatewayMaxConcurrent is the gateway's concurrency cap, passed as
-	// --max-concurrent to bdgw serve. Zero leaves the flag off, so the gateway's own
-	// default applies; a negative value is refused. It is read only with
-	// BdGatewayImage.
+	// BdGatewayMaxConcurrent is the gateway's concurrency cap across all its pods. Each
+	// pod renders it as --max-concurrent, the total divided by the replica count and
+	// rounded up, so the total is what Dolt serves whatever the replica count. Zero
+	// means the gateway's own default of 16 in total: at one pod the flag stays off and
+	// the gateway applies 16, and at two pods each renders 8. A negative value is
+	// refused. It is read only with BdGatewayImage.
 	BdGatewayMaxConcurrent int
 	// BdGatewayReplicas is the gateway Deployment's replica count. Zero means one, the
 	// default a render keeps until an operator sets two; a value above two or below
 	// zero is refused, with or without BdGatewayImage. The count is rendered only with
-	// BdGatewayImage. Two pods share the gateway's claims and serve from one Service
-	// (bdgateway_workload.go).
+	// BdGatewayImage. Two pods share the gateway's claims and serve from one Service,
+	// as gt-yz0s8v checked and bdgateway_workload.go describes.
 	BdGatewayReplicas int
 	// IncludeStatic renders the six static control-cluster manifests
 	// (deploy/k8s/static.go) right after the ServiceAccount: the cluster-scoped

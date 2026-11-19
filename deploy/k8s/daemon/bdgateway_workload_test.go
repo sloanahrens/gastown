@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/bdgateway"
 )
 
 // testBdGatewayImage is the gateway image the workload goldens record, by digest
@@ -280,9 +282,9 @@ func TestBdGatewayRenderProxyImageRefusal(t *testing.T) {
 	}
 }
 
-// TestBdGatewayRenderMaxConcurrent holds --max-concurrent to the value: a positive cap
-// is passed to bdgw serve, and zero leaves the flag off so the gateway's default
-// applies.
+// TestBdGatewayRenderMaxConcurrent holds --max-concurrent to the value at the default
+// one pod, where a pod's share is the whole total: a positive cap is passed to bdgw
+// serve, and zero leaves the flag off so the gateway's default applies.
 func TestBdGatewayRenderMaxConcurrent(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -399,6 +401,90 @@ func TestBdGatewayReplicasTwoGolden(t *testing.T) {
 	v.BdGatewayReplicas = 2
 	m := mustBuild(t, v)
 	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway-two-replicas.yaml", document(t, m.BdGatewayDeployment))
+}
+
+// TestBdGatewayMaxConcurrentDefaultMatchesGateway ties the renderer's copy of the
+// gateway's default cap to the constant bdgw serve reads, so an unset total cannot
+// drift into a different per-pod share.
+func TestBdGatewayMaxConcurrentDefaultMatchesGateway(t *testing.T) {
+	t.Parallel()
+	if bdGatewayMaxConcurrentDefault != bdgateway.DefaultMaxConcurrent {
+		t.Errorf("the renderer's gateway default = %d, want internal/bdgateway.DefaultMaxConcurrent %d", bdGatewayMaxConcurrentDefault, bdgateway.DefaultMaxConcurrent)
+	}
+}
+
+// TestBdGatewayReplicasMaxConcurrent holds --max-concurrent to the total across pods:
+// each pod runs the total divided by the replica count, rounded up, so a two-replica
+// render at the gateway's own total of 16 runs 8 on each pod. A zero total is that 16,
+// and the flag is left off only when one pod would repeat the gateway's own default.
+// The three-replica rows exercise the division beyond the render's two-pod bound, and
+// the golden is the reviewed copy of the two-pod case.
+func TestBdGatewayReplicasMaxConcurrent(t *testing.T) {
+	t.Parallel()
+	perPod := []struct {
+		name     string
+		total    int
+		replicas int32
+		want     int
+		render   bool
+	}{
+		{"16 total over 1 pod", 16, 1, 16, true},
+		{"16 total over 2 pods", 16, 2, 8, true},
+		{"16 total over 3 pods", 16, 3, 6, true},
+		{"5 total over 1 pod", 5, 1, 5, true},
+		{"5 total over 2 pods", 5, 2, 3, true},
+		{"5 total over 3 pods", 5, 3, 2, true},
+		{"zero total over 1 pod leaves the flag off", 0, 1, 0, false},
+		{"zero total over 2 pods splits the gateway's 16", 0, 2, 8, true},
+		{"zero total over 3 pods splits the gateway's 16", 0, 3, 6, true},
+	}
+	for _, tc := range perPod {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, render := bdGatewayMaxConcurrentPerPod(tc.total, tc.replicas)
+			if got != tc.want || render != tc.render {
+				t.Errorf("bdGatewayMaxConcurrentPerPod(%d, %d) = (%d, %v), want (%d, %v)", tc.total, tc.replicas, got, render, tc.want, tc.render)
+			}
+		})
+	}
+
+	rendered := []struct {
+		name     string
+		total    int
+		replicas int
+		want     string
+	}{
+		{"a total of 16 at one replica renders 16", 16, 1, "16"},
+		{"a total of 16 at two replicas renders 8", 16, 2, "8"},
+		{"a total of 5 at two replicas renders 3", 5, 2, "3"},
+		{"a zero total at one replica leaves the flag off", 0, 1, ""},
+		{"a zero total at two replicas renders the gateway's 8", 0, 2, "8"},
+	}
+	for _, tc := range rendered {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayWorkloadValues(t)
+			v.BdGatewayMaxConcurrent = tc.total
+			v.BdGatewayReplicas = tc.replicas
+			m := mustBuild(t, v)
+			command := m.BdGatewayDeployment.Spec.Template.Spec.Containers[0].Command
+			if got := flagValue(command, "--max-concurrent"); got != tc.want {
+				t.Errorf("--max-concurrent is %q, want %q; command %v", got, tc.want, command)
+			}
+		})
+	}
+
+	t.Run("the two-replica golden carries 8 on each pod", func(t *testing.T) {
+		t.Parallel()
+		v := bdGatewayWorkloadValues(t)
+		v.BdGatewayReplicas = 2
+		m := mustBuild(t, v)
+		command := m.BdGatewayDeployment.Spec.Template.Spec.Containers[0].Command
+		if got := flagValue(command, "--max-concurrent"); got != "8" {
+			t.Errorf("--max-concurrent is %q, want 8; command %v", got, command)
+		}
+		compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway-two-replicas.yaml", document(t, m.BdGatewayDeployment))
+	})
 }
 
 // bdgwReadyRequires is the flag set cmd/bdgw/ready.go's require call names: bdgw

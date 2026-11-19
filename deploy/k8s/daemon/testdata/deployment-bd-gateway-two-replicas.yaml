@@ -67,6 +67,8 @@ spec:
             - "3307"
             - --push-addr
             - :7441
+            - --max-concurrent
+            - "8"
           ports:
             - name: push
               containerPort: 7441
