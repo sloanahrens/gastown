@@ -274,7 +274,7 @@ func (v deployerViolation) String() string {
 	case deployerUnlistedRole:
 		return fmt.Sprintf("%s holds a Role or ClusterRole %q, which the allowlist does not name", deployerRBACManifest, v.Role)
 	case deployerSecretsResource:
-		return fmt.Sprintf("%s rule %d grants resource %q, which no deployer credential reads or writes", v.Role, v.Rule, v.Resource)
+		return fmt.Sprintf("%s rule %d grants resource %q; this refusal covers the rules in this file, and deployer-policy's escalate and bind can still reach secrets through a role it creates", v.Role, v.Rule, v.Resource)
 	case deployerRemoveVerb:
 		return fmt.Sprintf("%s rule %d grants %q on %q, and a deployer removes nothing", v.Role, v.Rule, v.Verb, v.Resource)
 	case deployerPolicyWorkloadKind:
@@ -403,7 +403,11 @@ func deployerGrantProblems(docs []deployerRBACDoc) []string {
 // deployerRefusalViolations reports every grant the design forbids whatever role
 // it sits in: a Secret, a wildcard, a removing verb, a workload kind in the
 // policy role, an RBAC, admission or Secret kind in the apply role, and a kind
-// in the supplement the drift read grant already names.
+// in the supplement the drift read grant already names. It covers the apply
+// role and the plain rules of the policy role, not what that role's escalate and
+// bind can reach: deployer-policy can create a role this file does not name and
+// bind it to itself, so no rule here can bound its access to Secrets
+// (deployer-rbac.yaml's header says so).
 func deployerRefusalViolations(docs []deployerRBACDoc) []deployerViolation {
 	var refusals []deployerViolation
 	for _, d := range docs {
@@ -640,7 +644,10 @@ func TestDeployerRBACRoles(t *testing.T) {
 
 // TestDeployerRBACRefusals holds the file to the grants the design forbids
 // whatever role they sit in, then drives every refusal on a clone with one
-// planted grant. The unmutated manifest passes.
+// planted grant. The unmutated manifest passes. The refusal covers the apply
+// role and the plain rules of the policy role, not what escalate and bind can
+// reach: deployer-policy could create a role that grants secrets and bind it to
+// itself, so the header says the real protection is its per-use issuance.
 func TestDeployerRBACRefusals(t *testing.T) {
 	t.Parallel()
 	docs := loadDeployerRBAC(t)
@@ -739,7 +746,7 @@ func TestDeployerRBACRefusals(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if !slices.Contains(deployerRefusalViolations(tc.edit(cloneDeployerDocs(docs))), tc.want) {
-				t.Errorf("with %s the grant was not refused as %q; got %q",
+				t.Errorf("with %s the grant was not refused as %q; the refusal covers the apply role and the plain rules of the policy role, not what escalate and bind can reach; got %q",
 					tc.name, tc.want, deployerRefusalProblems(tc.edit(cloneDeployerDocs(docs))))
 			}
 		})
