@@ -64,6 +64,75 @@ func TestParseGateRunLogPartial(t *testing.T) {
 		},
 		{name: "failed verdict with no wall", log: "2026-11-19T10:00:00Z gate: FAILED at build\n", want: GateRun{}},
 		{name: "wall too large for a float", log: "2026-11-19T10:00:00Z gate: PASSED in " + strings.Repeat("9", 400) + "s wall\n", want: GateRun{Passed: true}},
+		{name: "tier line without a verdict", log: "2026-11-19T10:02:00Z tierwall: tier 12s bar 90s\n", want: GateRun{}},
+		{name: "tier line with a non-numeric wall", log: "2026-11-19T10:02:00Z tierwall: tier xs bar 90s OK\n", want: GateRun{}},
+		{name: "tier line with a non-numeric bar", log: "2026-11-19T10:02:00Z tierwall: tier 12s bar ys OK\n", want: GateRun{}},
+		{name: "tier wall too large for a float", log: "2026-11-19T10:02:00Z tierwall: tier " + strings.Repeat("9", 400) + "s bar 90s OK\n", want: GateRun{}},
+		{name: "cpus line missing its cgroup", log: "2026-11-19T10:02:00Z tierwall: cpus: NumCPU=16 GOMAXPROCS=12\n", want: GateRun{}},
+		{name: "cpus count too large for an int", log: "2026-11-19T10:02:00Z tierwall: cpus: NumCPU=" + strings.Repeat("9", 400) + " GOMAXPROCS=12 cgroup=max\n", want: GateRun{}},
+		{name: "procs count too large for an int", log: "2026-11-19T10:02:00Z tierwall: cpus: NumCPU=16 GOMAXPROCS=" + strings.Repeat("9", 400) + " cgroup=max\n", want: GateRun{}},
+		{name: "two fields whose seconds do not parse", log: "2026-11-19T10:02:00Z tierwall: example.test/a slows\n", want: GateRun{}},
+		{name: "slow test line outside the slow block", log: "2026-11-19T10:02:00Z tierwall: example.test/a TestEarly 6s\n", want: GateRun{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ParseGateRunLog(tc.log); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("ParseGateRunLog() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseGateRunLogTierwall reads the tierwall report a gate job log carries: one line per
+// package slowest first, the slow tests under their package, the tier line against its bar and
+// the cpus line. The phases and WARNING lines between them are neither packages nor slow tests,
+// and a slow-test-shaped line after the block closed is not one either.
+func TestParseGateRunLogTierwall(t *testing.T) {
+	t.Parallel()
+	log := "2026-11-19T10:02:00Z tierwall: example.test/a 12.5s\r\n" +
+		"2026-11-19T10:02:00Z tierwall: example.test/b 9.5s\r\n" +
+		"2026-11-19T10:02:00Z tierwall: example.test/c 0.1s\r\n" +
+		"2026-11-19T10:02:00Z tierwall: slow tests\r\n" +
+		"2026-11-19T10:02:00Z tierwall:   example.test/a TestAlso 6s\r\n" +
+		"2026-11-19T10:02:00Z tierwall:   example.test/b TestSlow 9.5s\r\n" +
+		"2026-11-19T10:02:00Z tierwall: phases example.test/a serial 6s parallel 6.5s\r\n" +
+		"2026-11-19T10:02:00Z tierwall:   example.test/c TestLate 1s\r\n" +
+		"2026-11-19T10:02:00Z tierwall: WARNING package example.test/a is 42 percent of the tier wall (12.5s of 29.3s)\r\n" +
+		"2026-11-19T10:02:00Z tierwall: tier 29.3s bar 90s OK\r\n" +
+		"2026-11-19T10:02:00Z tierwall: cpus: NumCPU=16 GOMAXPROCS=12 cgroup=max 100000\r\n"
+
+	want := GateRun{
+		TierS: 29.3, TierBarS: 90,
+		PolePkg: "example.test/a", PoleS: 12.5,
+		Packages: []GateRunPackage{
+			{Pkg: "example.test/a", S: 12.5},
+			{Pkg: "example.test/b", S: 9.5},
+			{Pkg: "example.test/c", S: 0.1},
+		},
+		SlowTests: []GateRunTest{
+			{Pkg: "example.test/a", Test: "TestAlso", S: 6},
+			{Pkg: "example.test/b", Test: "TestSlow", S: 9.5},
+		},
+		NumCPU: 16, GOMAXPROCS: 12, Cgroup: "max 100000",
+	}
+	if got := ParseGateRunLog(log); !reflect.DeepEqual(got, want) {
+		t.Errorf("ParseGateRunLog() = %+v, want %+v", got, want)
+	}
+}
+
+// TestParseGateRunLogOverAndCached reads an OVER tier line and counts the packages go test served
+// from its result cache: a timed ok line is not one.
+func TestParseGateRunLogOverAndCached(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, log string
+		want      GateRun
+	}{
+		{"tier over its bar", "2026-11-19T10:02:00Z tierwall: tier 115.1s bar 90s OVER\r\n", GateRun{TierS: 115.1, TierBarS: 90, Over: true}},
+		{"two cached packages", "2026-11-19T10:02:00Z ok  \texample.test/a\t(cached)\r\n" +
+			"2026-11-19T10:02:00Z ok  \texample.test/b\t(cached)\r\n" +
+			"2026-11-19T10:02:00Z ok  \texample.test/c\t0.412s\r\n", GateRun{CachedPkgs: 2}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

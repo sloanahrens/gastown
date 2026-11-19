@@ -56,15 +56,21 @@ var gateWallRE = regexp.MustCompile(`(?:after|PASSED in) (\d+)s wall`)
 
 // ParseGateRunLog reads a gate job log into a GateRun. Setup runs from the task line to the first
 // lint line, lint to the build line and build to the unit tier line; the verdict line gives the
-// unit wall and passed. A missing marker, or a stage that does not run forward, leaves its field
-// zero, and a line without a leading RFC3339 timestamp is skipped.
+// unit wall and passed. The tierwall report gives the tier, packages, slow tests, CPUs and pole;
+// a "(cached)" ok line counts one cached package. A missing marker, or a stage that does not run
+// forward, leaves its field zero, a tierwall line it cannot read is skipped rather than read as a
+// value, and a line without a leading RFC3339 timestamp is skipped.
 func ParseGateRunLog(log string) GateRun {
 	var run GateRun
 	var task, lint, build, unit time.Time
+	var tw gateTierwall
 	for _, line := range strings.Split(log, "\n") {
 		at, msg, ok := splitGateLine(line)
 		if !ok {
 			continue
+		}
+		if f := strings.Fields(msg); len(f) == 3 && f[0] == "ok" && f[2] == "(cached)" {
+			run.CachedPkgs++
 		}
 		switch {
 		case task.IsZero() && strings.HasPrefix(msg, "task received"):
@@ -83,12 +89,84 @@ func ParseGateRunLog(log string) GateRun {
 					run.UnitWallS = wall
 				}
 			}
+		case strings.HasPrefix(msg, "tierwall: "):
+			tw.parse(&run, strings.TrimSuffix(strings.TrimPrefix(msg, "tierwall: "), "\r"))
 		}
 	}
 	run.SetupS = stageSeconds(task, lint)
 	run.LintS = stageSeconds(lint, build)
 	run.BuildS = stageSeconds(build, unit)
+	run.PolePkg, run.PoleS = gatePole(run.Packages)
 	return run
+}
+
+// tierwall line shapes, as internal/testpolicy/cmd/tierwall writes them. Each is matched whole, so
+// a line that does not parse as one is not half-read as another.
+var (
+	tierwallTierRE = regexp.MustCompile(`^tier (\d+(?:\.\d+)?)s bar (\d+(?:\.\d+)?)s (OK|OVER)$`)
+	tierwallCPURe  = regexp.MustCompile(`^cpus: NumCPU=(\d+) GOMAXPROCS=(\d+) cgroup=(.+)$`)
+	tierwallPkgRE  = regexp.MustCompile(`^(\S+) (\d+(?:\.\d+)?)s$`)
+	tierwallSlowRE = regexp.MustCompile(`^  (\S+) (\S+) (\d+(?:\.\d+)?)s$`)
+)
+
+// gateTierwall is the state kept while reading the tierwall report: whether the slow-tests block
+// is open, so a test-shaped line outside it is not read as one.
+type gateTierwall struct{ slow bool }
+
+// parse reads one line of the tierwall report, msg being the text after "tierwall: ".
+func (w *gateTierwall) parse(run *GateRun, msg string) {
+	if msg == "slow tests" {
+		w.slow = true
+		return
+	}
+	if w.slow {
+		if m := tierwallSlowRE.FindStringSubmatch(msg); m != nil {
+			if s, ok := gateSecs(m[3]); ok {
+				run.SlowTests = append(run.SlowTests, GateRunTest{Pkg: m[1], Test: m[2], S: s})
+			}
+			return
+		}
+		w.slow = false
+	}
+	if m := tierwallTierRE.FindStringSubmatch(msg); m != nil {
+		s, sok := gateSecs(m[1])
+		bar, bok := gateSecs(m[2])
+		if sok && bok {
+			run.TierS, run.TierBarS, run.Over = s, bar, m[3] == "OVER"
+		}
+		return
+	}
+	if m := tierwallCPURe.FindStringSubmatch(msg); m != nil {
+		ncpu, err := strconv.Atoi(m[1])
+		procs, perr := strconv.Atoi(m[2])
+		if err == nil && perr == nil {
+			run.NumCPU, run.GOMAXPROCS, run.Cgroup = ncpu, procs, strings.TrimSpace(m[3])
+		}
+		return
+	}
+	if m := tierwallPkgRE.FindStringSubmatch(msg); m != nil {
+		if s, ok := gateSecs(m[2]); ok {
+			run.Packages = append(run.Packages, GateRunPackage{Pkg: m[1], S: s})
+		}
+	}
+}
+
+// gateSecs reads a tierwall seconds field such as "29.3s"; ok is false when it is too large for a
+// float64.
+func gateSecs(field string) (float64, bool) {
+	v, err := strconv.ParseFloat(strings.TrimSuffix(field, "s"), 64)
+	return v, err == nil
+}
+
+// gatePole is the longest package, the first of equals; empty when the report listed none.
+func gatePole(pkgs []GateRunPackage) (string, float64) {
+	name, s := "", 0.0
+	for i, p := range pkgs {
+		if i == 0 || p.S > s {
+			name, s = p.Pkg, p.S
+		}
+	}
+	return name, s
 }
 
 // splitGateLine splits a line into its RFC3339 timestamp and the text after it; ok is false when
