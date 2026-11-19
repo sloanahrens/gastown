@@ -43,6 +43,10 @@ const (
 	// weights they replaced as numbered versions. With StoryPointsRevert it
 	// restores the newest version instead of adopting a proposal.
 	CommandStoryPointsAdopt = "storypoints-adopt"
+	// CommandStoryPointsEval prints the held-out error of the story-points
+	// estimate over the town's landed beads. It writes nothing and is not part of
+	// CommandAll.
+	CommandStoryPointsEval = "storypoints-eval"
 )
 
 // usageText is Main's answer to an argv that names no command, kept verbatim so
@@ -88,6 +92,10 @@ type Commands struct {
 	// StoryPointsRevert asks storypoints-adopt to restore the newest runtime
 	// weights version instead of adopting the day's proposal.
 	StoryPointsRevert bool
+	// StoryPointsSince is storypoints-eval's --since DATE: a YYYY-MM-DD day, and
+	// the test part is the rows landed at or after it. Empty scores the newest
+	// three rows in ten.
+	StoryPointsSince string
 	// Now is the clock the weekly retrain reads its last run and stamps its own;
 	// nil is the wall clock.
 	Now func() time.Time
@@ -175,13 +183,18 @@ func Run(ctx context.Context, command string, c Commands) error {
 			return fmt.Errorf("storypoints-adopt: %w", err)
 		}
 	}
+	if command == CommandStoryPointsEval {
+		if err := c.runStoryPointsEval(real); err != nil {
+			return fmt.Errorf("storypoints-eval: %w", err)
+		}
+	}
 	return nil
 }
 
 // isCommand reports whether name is one of main's subcommands.
 func isCommand(name string) bool {
 	switch name {
-	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints, CommandStoryPointsTrain, CommandStoryPointsAdopt:
+	case CommandExtract, CommandMango, CommandBacktest, CommandReport, CommandAll, CommandStoryPoints, CommandStoryPointsTrain, CommandStoryPointsAdopt, CommandStoryPointsEval:
 		return true
 	}
 	return false
