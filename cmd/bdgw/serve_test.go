@@ -277,21 +277,27 @@ func TestReadyDoltExit(t *testing.T) {
 	blocked := make(chan struct{})
 	t.Cleanup(func() { close(blocked) })
 	cases := []struct {
-		name       string
-		dial       func(context.Context, string, string) (net.Conn, error)
-		wantStatus int
-		wantStderr string
+		name string
+		dial func(context.Context, string, string) (net.Conn, error)
+		// probeTimeout is short only for the row that waits for the deadline;
+		// the other two answer at once, so a short bound would race their
+		// answer against a loaded runner's scheduling.
+		probeTimeout time.Duration
+		wantStatus   int
+		wantStderr   string
 	}{
 		{
-			name:       "all pass",
-			dial:       pipeConn,
-			wantStatus: exitOK,
+			name:         "all pass",
+			dial:         pipeConn,
+			probeTimeout: 5 * time.Second,
+			wantStatus:   exitOK,
 		},
 		{
-			name:       "dolt unreachable",
-			dial:       func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
-			wantStatus: exitFailed,
-			wantStderr: "not ready: dolt: connection refused",
+			name:         "dolt unreachable",
+			dial:         func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
+			probeTimeout: 5 * time.Second,
+			wantStatus:   exitFailed,
+			wantStderr:   "not ready: dolt: connection refused",
 		},
 		{
 			name: "dial never answers",
@@ -299,15 +305,16 @@ func TestReadyDoltExit(t *testing.T) {
 				<-blocked
 				return nil, errors.New("released")
 			},
-			wantStatus: exitFailed,
-			wantStderr: "not ready: dolt: context deadline exceeded",
+			probeTimeout: 20 * time.Millisecond,
+			wantStatus:   exitFailed,
+			wantStderr:   "not ready: dolt: context deadline exceeded",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rc := newReadyTestConfig(t)
-			rc.probeTimeout = 20 * time.Millisecond
+			rc.probeTimeout = tc.probeTimeout
 			var mu sync.Mutex
 			var dialed []string
 			rc.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
