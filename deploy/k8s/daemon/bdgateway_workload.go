@@ -30,7 +30,7 @@ const (
 	bdGatewayTokenCopyDir   = "/tokens"
 	// bdGatewayTokenInit names the init container that copies the tokens at 0600.
 	bdGatewayTokenInit = "tokens-0600" //nolint:gosec // a container name, not a credential
-	// bdGatewayLogDir is an emptyDir for the gateway's logs.
+	// bdGatewayLogDir is where the gateway writes its call log, on the log claim.
 	bdGatewayLogDir = "/var/log/bdgw"
 	// bdGatewayWorkspaceMount is the claim's mount; the gateway's workspace is the
 	// ws directory under it.
@@ -40,7 +40,7 @@ const (
 	bdGatewayVerbs = "/etc/bdgw/verbs.json"
 	// bdGatewayTokenSecretVolume is the Secret the init container reads, and
 	// bdGatewayTokensVolume the emptyDir it fills and the gateway mounts; bdGatewayLogVolume
-	// is the log emptyDir, and the claim is named by BdGatewayWorkspaceClaim.
+	// is the log claim's volume, and the workspace claim is named by BdGatewayWorkspaceClaim.
 	bdGatewayTokenSecretVolume = "bd-gateway-token-secret" //nolint:gosec // a volume name, not a credential
 	bdGatewayTokensVolume      = "bd-gateway-tokens"       //nolint:gosec // a volume name, not a credential
 	bdGatewayLogVolume         = "bd-gateway-log"
@@ -57,9 +57,9 @@ const (
 )
 
 // bdGatewayDeployment is the gateway's pod: an init container that copies the tokens
-// to 0600, one container running bdgw serve, the emptyDir for tokens and logs, and
-// the workspace claim. It takes no ServiceAccount token, as the dashboard's pod does
-// not.
+// to 0600, one container running bdgw serve, the emptyDir for tokens, the log claim
+// and the workspace claim. It takes no ServiceAccount token, as the dashboard's pod
+// does not.
 //
 // Its strategy is Recreate: the old gateway stops before the new one starts, so the
 // two never write the workspace together.
@@ -166,7 +166,7 @@ func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 }
 
 // bdGatewayVolumes are the gateway's volumes: the token Secret at the group-readable
-// mode, the emptyDir the init container fills with the 0600 copies, the log emptyDir,
+// mode, the emptyDir the init container fills with the 0600 copies, the log claim,
 // and the workspace claim. The Secret is mounted whole, since the init container
 // copies a directory of tokens.
 func bdGatewayVolumes(v Values) []Volume {
@@ -174,7 +174,7 @@ func bdGatewayVolumes(v Values) []Volume {
 	return []Volume{
 		{Name: bdGatewayTokenSecretVolume, Secret: &SecretVolumeSource{SecretName: v.BdGatewayTokenSecret, DefaultMode: &mode}},
 		{Name: bdGatewayTokensVolume, EmptyDir: &EmptyDirVolumeSource{}},
-		{Name: bdGatewayLogVolume, EmptyDir: &EmptyDirVolumeSource{}},
+		{Name: bdGatewayLogVolume, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: BdGatewayLogClaim}},
 		{Name: BdGatewayWorkspaceClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: BdGatewayWorkspaceClaim}},
 	}
 }
