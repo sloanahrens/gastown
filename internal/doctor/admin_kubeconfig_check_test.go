@@ -374,8 +374,8 @@ func TestAdminKubeconfigCheckNoLeak(t *testing.T) {
 	cases := []struct {
 		name       string
 		kubeconfig string
-		// wantLine is the line yaml reports for the problem, the only number
-		// the result may carry.
+		// wantLine is the line yaml reports for the problem, the only line
+		// number the result may carry.
 		wantLine string
 	}{
 		{
