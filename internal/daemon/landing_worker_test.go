@@ -2121,6 +2121,26 @@ func TestLandingWorkerGateRecorderWithoutControlClusterLeavesCountersUnmeasured(
 	}
 }
 
+// TestLandingWorkerGateRecorderKubectlFailureLeavesCountersUnmeasured: a kubectl
+// that fails still appends the row, with the counters at -1, and its stderr
+// stays out of the recorded row.
+func TestLandingWorkerGateRecorderKubectlFailureLeavesCountersUnmeasured(t *testing.T) {
+	t.Parallel()
+	gate, townRoot := recorderLanding(t, &config.TierSweepRunnerConfig{
+		Backend: config.TierSweepRunnerKubernetes, Context: "control"},
+		func(*exec.Cmd) ([]byte, []byte, error) {
+			return nil, []byte("error: unable to connect"), errors.New("exit status 1")
+		})
+	gate.Recorder(land.GateRun{Rig: "testrig", Bead: "gt-a", SHA: "c0ffee", Passed: true})
+	runs := gateRunRecorderRows(t, townRoot)
+	if len(runs) != 1 {
+		t.Fatalf("the gate run log holds %d row(s), want 1", len(runs))
+	}
+	if p, th, us := runs[0].RunnerPeriods, runs[0].RunnerThrottled, runs[0].RunnerThrottledUsec; p != -1 || th != -1 || us != -1 {
+		t.Errorf("counters = (%d, %d, %d), want all -1 after a failed kubectl", p, th, us)
+	}
+}
+
 // TestLandingWorkerGateRecorderAbsent: a rig that builds no candidate gate is
 // refused before any gate exists, so no gate run row is written under its town.
 func TestLandingWorkerGateRecorderAbsent(t *testing.T) {
