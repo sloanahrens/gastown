@@ -224,7 +224,7 @@ func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 	if build.dir != add[4] {
 		t.Errorf("Compile built in %q, want the worktree %q", build.dir, add[4])
 	}
-	wantArgs := []string{"build", "-trimpath", "-ldflags", "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit, "-o", out, "./cmd/bd"}
+	wantArgs := []string{"build", "-trimpath", "-ldflags", "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit + " -s -w", "-o", out, "./cmd/bd"}
 	if strings.Join(build.args, " ") != strings.Join(wantArgs, " ") {
 		t.Errorf("Compile ran go %v, want %v", build.args, wantArgs)
 	}
@@ -240,7 +240,8 @@ func TestCompileBuildsTheCommitFromACleanWorktree(t *testing.T) {
 
 // The image's bd must report the same build id as the host's installed bd, or
 // the recorder refuses it, so the build stamps main.Build beside main.Commit
-// the way the beads Makefile does (gt-glsx8).
+// the way the beads Makefile does (gt-glsx8), and links with the -s -w every
+// image binary is stripped with (gt-rn1h6p).
 func TestBuildStampsTheBuildIDAndTheCommit(t *testing.T) {
 	t.Parallel()
 	git := &fakeGit{revParse: fullCommit, short: shortID}
@@ -260,7 +261,7 @@ func TestBuildStampsTheBuildIDAndTheCommit(t *testing.T) {
 	if short[0] != add[4] || short[3] != fullCommit {
 		t.Errorf("Compile read the build id with %v, want rev-parse --short %s in the worktree %s", short, fullCommit, add[4])
 	}
-	want := "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit
+	want := "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit + " -s -w"
 	i := indexOf(build.args, "-ldflags")
 	if i < 0 || i+1 >= len(build.args) {
 		t.Fatalf("Compile ran go %v with no -ldflags value", build.args)
@@ -286,7 +287,7 @@ func TestCompileStampsTheInstalledBDsBuildIDForTheSameCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	want := "-X main.Build=" + hostBuildID + " -X main.Commit=" + fullCommit
+	want := "-X main.Build=" + hostBuildID + " -X main.Commit=" + fullCommit + " -s -w"
 	i := indexOf(build.args, "-ldflags")
 	if i < 0 || i+1 >= len(build.args) {
 		t.Fatalf("Compile ran go %v with no -ldflags value", build.args)
@@ -327,7 +328,7 @@ func TestCompileKeepsGitsAbbreviationWhenTheInstalledBDDoesNotNameTheCommit(t *t
 			}, git.run, build.run); err != nil {
 				t.Fatalf("Compile: %v", err)
 			}
-			want := "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit
+			want := "-X main.Build=" + shortID + " -X main.Commit=" + fullCommit + " -s -w"
 			i := indexOf(build.args, "-ldflags")
 			if i < 0 || i+1 >= len(build.args) {
 				t.Fatalf("Compile ran go %v with no -ldflags value", build.args)
@@ -561,6 +562,23 @@ func TestCompilePutsTheWorktreeUnderTheBuildDir(t *testing.T) {
 	}
 	if _, err := os.Stat(add[4]); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Compile left %q behind: %v", add[4], err)
+	}
+}
+
+// TestGoBuildArgvStripsAndEndsWithTheOutput pins the argv the shared helper
+// returns: -trimpath and the -s -w strip flags, then the output and the package
+// last. Mutation: drop either flag, or move -o, and this fails.
+func TestGoBuildArgvStripsAndEndsWithTheOutput(t *testing.T) {
+	t.Parallel()
+	const out, pkg = "/out/gt", "./cmd/gt"
+	got := GoBuildArgv(out, pkg)
+	for _, flag := range []string{"-trimpath", "-ldflags=-s -w"} {
+		if !contains(got, flag) {
+			t.Errorf("GoBuildArgv(%q, %q) = %q, which lacks %s", out, pkg, got, flag)
+		}
+	}
+	if n := len(got); n < 3 || got[n-3] != "-o" || got[n-2] != out || got[n-1] != pkg {
+		t.Errorf("GoBuildArgv(%q, %q) = %q, want it to end with -o %s %s", out, pkg, got, out, pkg)
 	}
 }
 

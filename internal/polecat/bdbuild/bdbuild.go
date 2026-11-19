@@ -30,11 +30,13 @@ const (
 const Package = "./cmd/bd"
 
 // GoBuildArgv is the argv, after the go command, that compiles one image binary
-// to out from pkg: the flags every image binary is built with, then the output
-// and the package. The polecat context command and the daemon image both build
-// gt with it, so the two compile the same way (gt-gg9hv.33).
+// to out from pkg: the flags every image binary is built with, -trimpath and the
+// -s -w that strips the debug sections the image never reads, then the output
+// and the package. The polecat context command builds gt with it, and the daemon
+// image's argv is pinned against it, so the two compile the same way
+// (gt-gg9hv.33, gt-rn1h6p).
 func GoBuildArgv(out, pkg string) []string {
-	return []string{"build", "-trimpath", "-o", out, pkg}
+	return []string{"build", "-trimpath", "-ldflags=-s -w", "-o", out, pkg}
 }
 
 // hostEnv names the host variables the compile passes through: those that
@@ -260,8 +262,9 @@ func Compile(opt Options, git Git, goBuild Go) (string, error) {
 	// version` prints, the same variables the beads Makefile stamps. main.Build
 	// is the installed bd's own build id when it names this commit, so both
 	// print the same id whatever this checkout abbreviates it to (gt-glsx8,
-	// gt-7qinix).
-	ldflags := "-X main.Build=" + stamp + " -X main.Commit=" + commit
+	// gt-7qinix). -s -w strips the debug sections the image never reads
+	// (gt-rn1h6p).
+	ldflags := "-X main.Build=" + stamp + " -X main.Commit=" + commit + " -s -w"
 	if _, err := goBuild(dir, env, "build", "-trimpath", "-ldflags", ldflags, "-o", out, Package); err != nil {
 		return "", fmt.Errorf("cannot build bd at %s: %w", commit, err)
 	}
