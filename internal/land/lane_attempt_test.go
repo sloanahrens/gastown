@@ -164,3 +164,38 @@ func TestLaneAttemptCountsEachLaneApart(t *testing.T) {
 		})
 	}
 }
+
+// TestRejectionPriorEscalated: PriorEscalated carries whether the refusal's
+// lane already holds an escalated block, whatever the refusal's own kind or
+// rework, so the worker can raise again once that escalation is closed
+// (gt-fjzstx).
+func TestRejectionPriorEscalated(t *testing.T) {
+	t.Parallel()
+	escalated := func(branch string) string {
+		return FormatRejectionNote(RejectionNote{Attempt: MaxReworkAttempts, Kind: string(RejectReview), Reason: loopEscalatedNote, Branch: branch, Head: "old-head"}) + "\n"
+	}
+	for _, tc := range []struct {
+		name, notes, branch string
+		rej                 Rejection
+		want                bool
+	}{
+		{"never escalated", "", fixtureBranch, Rejection{Kind: RejectPolicy, Reason: "r"}, false},
+		{"the lane's marker", escalated(fixtureBranch), fixtureBranch, Rejection{Kind: RejectReview, Reason: "r"}, true},
+		{"a rework refusal still sees it", escalated(fixtureBranch), fixtureBranch, Rejection{Kind: RejectReview, Rework: true, Reason: "r"}, true},
+		{"another lane's marker", escalated(fixtureBranch), "crew/overseer/gt-x", Rejection{Kind: RejectReview, Reason: "r"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLandFixture(t)
+			f.reseed(f.work, func(is *beads.Issue) { is.Notes = tc.notes })
+			w := f.work
+			w.Branch, w.Head = tc.branch, "head-now"
+			rej := tc.rej
+			if err := f.lander().reject(context.Background(), f.bead(), w, &rej, nil); err != &rej || rej.RecordErr != nil {
+				t.Fatalf("reject = %v, record error %v; want the refusal recorded", err, rej.RecordErr)
+			}
+			if rej.PriorEscalated != tc.want {
+				t.Errorf("PriorEscalated = %v; want %v", rej.PriorEscalated, tc.want)
+			}
+		})
+	}
+}
