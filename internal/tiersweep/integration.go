@@ -39,6 +39,12 @@ type Sweep struct {
 	// CgoEnv returns the cgo entries the go build needs on top of the
 	// environment it is handed (buildGT). Nil takes buildflags.ICUCgoEnv.
 	CgoEnv func(base []string) []string
+	// MkdirTemp makes the temporary directory a host sweep builds its gt
+	// binary in (buildGT). Nil takes os.MkdirTemp.
+	MkdirTemp func(dir, pattern string) (string, error)
+	// RemoveAll deletes the directory the gt binary was built in, once the
+	// integration tier's packages have run (buildGT). Nil takes os.RemoveAll.
+	RemoveAll func(path string) error
 	// Src lists and reads the repository's files, relative to the directory
 	// it is asked from.
 	Src Source
@@ -128,7 +134,11 @@ func (s *Sweep) Integration() (line string, red bool) {
 	// plan without one is not worth a build.
 	env := s.exportEnv(tested, skipList)
 	if len(plan.root) > 0 {
-		if gtBin := s.buildGT(); gtBin != "" {
+		// The binary's directory goes once every package that uses it has run,
+		// so a runner's work tree never loses it mid-tier (gt-pnzx3m).
+		gtBin, cleanup := s.buildGT()
+		defer cleanup()
+		if gtBin != "" {
 			env = append(env, EnvGTBin+"="+gtBin)
 		}
 	}
