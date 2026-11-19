@@ -3207,6 +3207,7 @@ type Container struct {
 	Env            []EnvVar            `yaml:"env,omitempty"`
 	Resources      *ContainerResources `yaml:"resources,omitempty"`
 	VolumeMounts   []VolumeMount       `yaml:"volumeMounts,omitempty"`
+	StartupProbe   *Probe              `yaml:"startupProbe,omitempty"`
 	ReadinessProbe *Probe              `yaml:"readinessProbe,omitempty"`
 	LivenessProbe  *Probe              `yaml:"livenessProbe,omitempty"`
 	// RestartPolicy is Always on a native sidecar (an init container), and empty on
@@ -3333,16 +3334,24 @@ type KeyToPath struct {
 	Path string `yaml:"path"`
 }
 
-// Probe is a readiness or liveness check: a command whose zero exit passes.
+// Probe is a readiness, liveness or startup check: a command whose zero exit passes,
+// or an HTTP GET that answers 200 to 399.
 type Probe struct {
-	Exec                *ExecAction `yaml:"exec,omitempty"`
-	InitialDelaySeconds int32       `yaml:"initialDelaySeconds,omitempty"`
-	PeriodSeconds       int32       `yaml:"periodSeconds,omitempty"`
-	TimeoutSeconds      int32       `yaml:"timeoutSeconds,omitempty"`
-	FailureThreshold    int32       `yaml:"failureThreshold,omitempty"`
+	Exec                *ExecAction    `yaml:"exec,omitempty"`
+	HTTPGet             *HTTPGetAction `yaml:"httpGet,omitempty"`
+	InitialDelaySeconds int32          `yaml:"initialDelaySeconds,omitempty"`
+	PeriodSeconds       int32          `yaml:"periodSeconds,omitempty"`
+	TimeoutSeconds      int32          `yaml:"timeoutSeconds,omitempty"`
+	FailureThreshold    int32          `yaml:"failureThreshold,omitempty"`
 }
 
 // ExecAction is a probe command.
 type ExecAction struct {
 	Command []string `yaml:"command"`
+}
+
+// HTTPGetAction is a probe that GETs Path on Port of the container.
+type HTTPGetAction struct {
+	Path string `yaml:"path"`
+	Port int32  `yaml:"port"`
 }
