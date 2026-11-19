@@ -86,6 +86,10 @@ spec:
                 - /etc/bdgw/verbs.json
                 - --workspace
                 - /var/lib/bdgw/ws
+                - --dolt-host
+                - host.docker.internal
+                - --dolt-port
+                - "3307"
             initialDelaySeconds: 2
             periodSeconds: 3
             timeoutSeconds: 5

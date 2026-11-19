@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -337,9 +338,16 @@ func TestBdGatewayRenderMaxConcurrentRefusal(t *testing.T) {
 // ready exits 2 without any of them, so the probe must pass each one.
 var bdgwReadyRequires = []string{"--tokens-dir", "--verbs", "--workspace"}
 
+// bdgwProbeEndpointFlags are the Dolt endpoint flags the readiness probe must carry.
+// bdgw ready does not require them, but without them it probes dolt:3306 while the
+// serve command dials the endpoint named here, so a gateway that cannot reach Dolt
+// reads as ready.
+var bdgwProbeEndpointFlags = []string{"--dolt-host", "--dolt-port"}
+
 // TestBdGatewayRenderReadiness holds the readiness probe to what bdgw ready requires:
 // --tokens-dir, --verbs and --workspace, each carrying the path the serve command
-// names, so the probe checks the same tokens, verbs and workspace the gateway runs on.
+// names, and the Dolt endpoint flags, each carrying the serve command's value, so the
+// probe checks the same tokens, verbs, workspace and Dolt the gateway runs on.
 func TestBdGatewayRenderReadiness(t *testing.T) {
 	t.Parallel()
 	m := mustBuild(t, bdGatewayWorkloadValues(t))
@@ -349,7 +357,7 @@ func TestBdGatewayRenderReadiness(t *testing.T) {
 	}
 	probe := c.ReadinessProbe.Exec.Command
 
-	const wantProbe = "bdgw ready --tokens-dir /run/bdgw/tokens --verbs /etc/bdgw/verbs.json --workspace /var/lib/bdgw/ws"
+	const wantProbe = "bdgw ready --tokens-dir /run/bdgw/tokens --verbs /etc/bdgw/verbs.json --workspace /var/lib/bdgw/ws --dolt-host host.docker.internal --dolt-port 3307"
 	if got := strings.Join(probe, " "); got != wantProbe {
 		t.Errorf("the readiness probe is\n%s\nwant\n%s", got, wantProbe)
 	}
@@ -360,6 +368,47 @@ func TestBdGatewayRenderReadiness(t *testing.T) {
 		if got, want := flagValue(probe, flag), flagValue(c.Command, flag); got != want {
 			t.Errorf("the probe's %s is %q, the serve command's is %q", flag, got, want)
 		}
+	}
+	for _, flag := range bdgwProbeEndpointFlags {
+		if got := flagValue(probe, flag); got == "" {
+			t.Errorf("the readiness probe has no %s, so it checks the default Dolt endpoint", flag)
+		}
+		if got, want := flagValue(probe, flag), flagValue(c.Command, flag); got != want {
+			t.Errorf("the probe's %s is %q, the serve command's is %q", flag, got, want)
+		}
+	}
+}
+
+// TestBdGatewayDoltEndpointSharedByProbeAndServe holds the probe and the serve command
+// to one Dolt endpoint: the host and port bdGatewayContainer is given are the values
+// both the serve command and the readiness probe carry, so a change to either moves
+// both together. The values differ from the production endpoint, so a probe that
+// hard-codes its flags, or a serve command that ignores its parameters, fails.
+func TestBdGatewayDoltEndpointSharedByProbeAndServe(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		host string
+		port int
+	}{
+		{"the production endpoint", DoltHostName, bdGatewayDoltPort},
+		{"another host", "dolt.gateway.internal", bdGatewayDoltPort},
+		{"another port", DoltHostName, 4406},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := bdGatewayContainer(bdGatewayWorkloadValues(t), tc.host, tc.port)
+			probe := c.ReadinessProbe.Exec.Command
+			for _, cmd := range [][]string{c.Command, probe} {
+				if got := flagValue(cmd, "--dolt-host"); got != tc.host {
+					t.Errorf("--dolt-host is %q in %v, want %q", got, cmd, tc.host)
+				}
+				if got, want := flagValue(cmd, "--dolt-port"), strconv.Itoa(tc.port); got != want {
+					t.Errorf("--dolt-port is %q in %v, want %q", got, cmd, want)
+				}
+			}
+		})
 	}
 }
 
