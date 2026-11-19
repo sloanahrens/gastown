@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -434,6 +435,121 @@ func newCapturingCallLog(t *testing.T) (*CallLog, func() []entry) {
 			entries = append(entries, e)
 		}
 		return entries
+	}
+}
+
+// newRawCallLog is a call log that keeps each line as written, so a test can
+// check what reached the log's file rather than what an entry decodes to. The
+// returned func closes the log before it reads.
+func newRawCallLog(t *testing.T) (*CallLog, func() []string) {
+	t.Helper()
+	var lines []string
+	hook := func(line []byte) error {
+		lines = append(lines, strings.TrimSpace(string(line)))
+		return nil
+	}
+	l, err := newCallLog(testOptions(t), hook)
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	return l, func() []string {
+		if err := l.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		return lines
+	}
+}
+
+// TestBdgwCapRefusalIsLogged: a call the executor refuses at the concurrency cap
+// is answered 429 with code too_many_calls, and the call log keeps one refused
+// line for it with the class, caller and verb the 500 refusal's line carries.
+func TestBdgwCapRefusalIsLogged(t *testing.T) {
+	t.Parallel()
+	log, calls := newCapturingCallLog(t)
+	g := newTestGateway(t, mustStore(t), log, &stubRunner{err: ErrTooManyCalls})
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show"}}, ""))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body %s", rec.Code, rec.Body.String())
+	}
+	var payload ErrorPayload
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("body %q is not an error payload: %v", rec.Body.String(), err)
+	}
+	if payload.Code != codeTooManyCalls {
+		t.Errorf("code = %q, want %q", payload.Code, codeTooManyCalls)
+	}
+	entries := calls()
+	if len(entries) != 1 {
+		t.Fatalf("call log = %+v, want one line for the refusal", entries)
+	}
+	if e := entries[0]; e.ExitCode != ExitRefused || e.Class != "read" || e.Caller != "daemon.spec-tick" || e.Verb != "show" {
+		t.Errorf("call log line = %+v, want ExitRefused with the class, caller and verb", e)
+	}
+}
+
+// TestBdgwCapRefusalLeavesCallStats: the line a cap refusal writes moves none of
+// the counters GET /v1/stats serves, since the gateway served no call; the
+// executor's too_many_calls is where a refusal is counted.
+func TestBdgwCapRefusalLeavesCallStats(t *testing.T) {
+	t.Parallel()
+	log, calls := newCapturingCallLog(t)
+	g := newTestGateway(t, mustStore(t), log, &stubRunner{err: ErrTooManyCalls})
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show"}}, ""))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body %s", rec.Code, rec.Body.String())
+	}
+	if got := log.Stats(); got.Calls != 0 || got.Errors != 0 || got.Dropped != 0 || len(got.Verbs) != 0 {
+		t.Errorf("Stats = %+v, want every counter at zero", got)
+	}
+	if entries := calls(); len(entries) != 1 {
+		t.Errorf("call log = %+v, want the refused line still written", entries)
+	}
+}
+
+// TestBdgwCapRefusalLogsNoFlagValueOrStdin: the cap refusal's line keeps the
+// same fields as the 500 refusal's and carries neither a flag's value nor any
+// stdin, whatever the caller sent.
+func TestBdgwCapRefusalLogsNoFlagValueOrStdin(t *testing.T) {
+	t.Parallel()
+	const secretDir = "/secret/workspace-dir"
+	const secretStdin = "sk-live-abcdef123456"
+
+	capLog, capLines := newRawCallLog(t)
+	g := newTestGateway(t, mustStore(t), capLog, &stubRunner{err: ErrTooManyCalls})
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show", "-C", secretDir}}, secretStdin))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body %s", rec.Code, rec.Body.String())
+	}
+
+	failLog, failLines := newRawCallLog(t)
+	fail := newTestGateway(t, mustStore(t), failLog, &stubRunner{err: errors.New("disk on fire")})
+	fail.ServeHTTP(httptest.NewRecorder(), execRequest(t, testReadToken, Request{Argv: []string{"show"}}, ""))
+
+	capLine := capLines()
+	failLine := failLines()
+	if len(capLine) != 1 || len(failLine) != 1 {
+		t.Fatalf("call log = %d and %d lines, want one each", len(capLine), len(failLine))
+	}
+	for _, secret := range []string{secretDir, secretStdin} {
+		if strings.Contains(capLine[0], secret) {
+			t.Errorf("cap refusal line %q carries %q", capLine[0], secret)
+		}
+	}
+	// The flag's name is logged, its value is not.
+	var line entry
+	if err := json.Unmarshal([]byte(capLine[0]), &line); err != nil {
+		t.Fatalf("cap refusal line %q: %v", capLine[0], err)
+	}
+	if len(line.Flags) != 1 || line.Flags[0] != "-C" {
+		t.Errorf("flags = %v, want only -C", line.Flags)
+	}
+	// Same fields as the 500 refusal's line: nothing rides along unseen.
+	if got, want := keys(decodeLine(t, capLine[0])), keys(decodeLine(t, failLine[0])); !reflect.DeepEqual(got, want) {
+		t.Errorf("cap line fields = %v, want the 500 line's %v", got, want)
 	}
 }
 
