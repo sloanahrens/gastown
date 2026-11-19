@@ -550,3 +550,208 @@ func TestIntegrationCICacheTrimModuleScripts(t *testing.T) {
 		}
 	})
 }
+
+// ciCacheLRUTree is the volume the LRU cases run over, relative to its root:
+// each file with its age in minutes and its size in KiB. The ages sit either
+// side of the floor and the age a case passes, so one find bounds the list
+// below the floor and another above the age; trim.txt is at the root and old on
+// purpose, so only its depth keeps it out of both. Every size is a whole number
+// of KiB, so du's figures are the same on the host and in the runner.
+var ciCacheLRUTree = []struct {
+	path    string
+	ageMin  int
+	sizeKiB int
+}{
+	{path: filepath.Join("00", "old-3h"), ageMin: 180, sizeKiB: 256},
+	{path: filepath.Join("ab", "lru-100m"), ageMin: 100, sizeKiB: 256},
+	{path: filepath.Join("00", "lru-96m"), ageMin: 96, sizeKiB: 256},
+	{path: filepath.Join("ab", "lru-90m"), ageMin: 90, sizeKiB: 256},
+	{path: filepath.Join("ab", "mid-45m"), ageMin: 45, sizeKiB: 128},
+	{path: filepath.Join("ab", "fresh-10m"), ageMin: 10, sizeKiB: 64},
+	{path: "trim.txt", ageMin: 180, sizeKiB: 32},
+}
+
+// ciCacheLRUTreeWrite writes the table under root, each file dated its age
+// before now, so every case reads the same ages whenever it runs. root is
+// chmod 0700 first: the runner's umask 000 would leave it world-writable.
+func ciCacheLRUTreeWrite(t *testing.T, root string, now time.Time) {
+	t.Helper()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatalf("chmod %s: %v", root, err)
+	}
+	for _, f := range ciCacheLRUTree {
+		full := filepath.Join(root, f.path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("making the directory of %s: %v", f.path, err)
+		}
+		if err := os.WriteFile(full, bytes.Repeat([]byte{'x'}, f.sizeKiB*1024), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", f.path, err)
+		}
+		mtime := now.Add(-time.Duration(f.ageMin) * time.Minute)
+		if err := os.Chtimes(full, mtime, mtime); err != nil {
+			t.Fatalf("dating %s: %v", f.path, err)
+		}
+	}
+}
+
+// ciCacheLRURun runs an LRU program the way the daemon does — the script text
+// through sh, with the mode, the volume root, the age in minutes, the cap in
+// KiB and the floor in minutes as argv data — and returns its output and exit
+// status. The script is a parameter so the helpers do not depend on the program
+// existing. The environment is exactly PATH and TMPDIR, so neither a tool on
+// the caller's PATH nor the shell itself can be swapped for the system's.
+func ciCacheLRURun(t *testing.T, script, mode, root, age, capKiB, floor string) (string, string, int) {
+	t.Helper()
+	args := []string{"-c", script, "ci-cache-trim", mode, root, age, capKiB, floor}
+	cmd := exec.Command("/bin/sh", args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		return stdout.String(), stderr.String(), 0
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("running the LRU program: %v", err)
+	}
+	return stdout.String(), stderr.String(), exitErr.ExitCode()
+}
+
+// ciCacheLRURead splits an LRU program's output: the file lines it selected, in
+// the order it printed them, and the three-line reply that follows them. The
+// reply must be there: a run read as zero figures would read as a trim that
+// removed nothing.
+func ciCacheLRURead(t *testing.T, stdout string) ([]string, ciCacheTrimReply) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("the LRU program printed %d line(s), want three at least:\n%s", len(lines), stdout)
+	}
+	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-3:], "\n") + "\n"))
+	if err != nil {
+		t.Fatalf("the LRU program's reply does not parse: %v:\n%s", err, stdout)
+	}
+	return lines[:len(lines)-3], reply
+}
+
+// ciCacheLRUBefore returns the volume tree's size in KiB, measured with du -sk:
+// the figure an LRU program reports as before_kib.
+func ciCacheLRUBefore(t *testing.T, root string) int64 {
+	t.Helper()
+	cmd := exec.Command("du", "-sk", root)
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("du -sk over the volume tree failed: %v", err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		t.Fatalf("du -sk printed no size for the volume tree")
+	}
+	kiB, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		t.Fatalf("du -sk's size field is not a whole number (parse error %v)", err)
+	}
+	return kiB
+}
+
+// TestIntegrationCICacheTrimLRUHelpers pins the helpers the LRU cases share, so
+// a case that reads the wrong figure fails here rather than inside its own
+// assertions: the tree builder writes the table's files at the sizes and ages
+// it names, the runner hands the script text the program's arguments and
+// returns its output and status, the reader splits the selected files from the
+// reply, and the size helper measures the volume the program will measure.
+func TestIntegrationCICacheTrimLRUHelpers(t *testing.T) {
+	t.Parallel()
+
+	// A fixed instant: every file's mtime is this minus its row's age, never a
+	// clock read during the test, so the assertion needs no tolerance.
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+	t.Run("the tree builder writes the table's files at its sizes and times", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, now)
+
+		want := make([]string, 0, len(ciCacheLRUTree))
+		for _, f := range ciCacheLRUTree {
+			want = append(want, f.path)
+			info, err := os.Stat(filepath.Join(root, f.path))
+			if err != nil {
+				t.Fatalf("the builder did not write %s: %v", f.path, err)
+			}
+			if size := int64(f.sizeKiB) * 1024; info.Size() != size {
+				t.Errorf("%s holds %d bytes, want the row's %d", f.path, info.Size(), size)
+			}
+			if dated := now.Add(-time.Duration(f.ageMin) * time.Minute); !info.ModTime().Equal(dated) {
+				t.Errorf("%s is dated %s, want the row's %s", f.path, info.ModTime(), dated)
+			}
+		}
+		slices.Sort(want)
+		if got := ciCacheScriptFiles(t, root); !slices.Equal(got, want) {
+			t.Errorf("the tree holds %v, want the table's %v", got, want)
+		}
+	})
+
+	t.Run("the runner returns the script's output and status", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		script := `printf '%s\n' "$@"; printf 'refused\n' >&2; exit 7`
+		stdout, stderr, status := ciCacheLRURun(t, script, "list", root, "120", "10", "60")
+		if want := strings.Join([]string{"list", root, "120", "10", "60"}, "\n") + "\n"; stdout != want {
+			t.Errorf("the script read %q, want its five arguments %q", stdout, want)
+		}
+		if want := "refused\n"; stderr != want {
+			t.Errorf("the script's stderr is %q, want %q", stderr, want)
+		}
+		if status != 7 {
+			t.Errorf("the script exited %d, want its own 7", status)
+		}
+	})
+
+	t.Run("the reader splits the selected files from the reply", func(t *testing.T) {
+		t.Parallel()
+		selected := []string{
+			filepath.Join("/vol", "00", "old-3h"),
+			filepath.Join("/vol", "ab", "lru-100m"),
+		}
+		stdout := strings.Join(append(selected, "before_kib=768", "removed=2", "after_kib=512"), "\n") + "\n"
+		files, reply := ciCacheLRURead(t, stdout)
+		if !slices.Equal(files, selected) {
+			t.Errorf("the reader split %v, want the file lines %v", files, selected)
+		}
+		if want := (ciCacheTrimReply{beforeKiB: 768, removed: 2, afterKiB: 512}); reply != want {
+			t.Errorf("the reader read %+v, want the reply %+v", reply, want)
+		}
+	})
+
+	t.Run("the reader takes a reply with no file line as an empty selection", func(t *testing.T) {
+		t.Parallel()
+		files, reply := ciCacheLRURead(t, "before_kib=0\nremoved=0\nafter_kib=0\n")
+		if len(files) != 0 {
+			t.Errorf("the reader split %v from output with no file line", files)
+		}
+		if want := (ciCacheTrimReply{}); reply != want {
+			t.Errorf("the reader read %+v, want the zero reply", reply)
+		}
+	})
+
+	t.Run("the size helper measures the tree in KiB", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, now)
+		before := ciCacheLRUBefore(t, root)
+
+		// A file of a whole number of KiB grows the measured volume by exactly
+		// its size: du counts allocation, and every block size divides it.
+		const grownKiB = 1024
+		if err := os.WriteFile(filepath.Join(root, "grown"), bytes.Repeat([]byte{'y'}, grownKiB*1024), 0o644); err != nil {
+			t.Fatalf("writing the grown file: %v", err)
+		}
+		if got := ciCacheLRUBefore(t, root) - before; got != grownKiB {
+			t.Errorf("a %d KiB file grew the measured volume by %d KiB", grownKiB, got)
+		}
+	})
+}
