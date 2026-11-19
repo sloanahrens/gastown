@@ -727,9 +727,9 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.DoltBackupHostPath = f.doltBackupHostPath
 	}
 	// A values file that names a bd image renders the gateway, and points its clients
-	// at the gateway's Service. A flag that names a URL wins. A rehearsal renders no
-	// gateway: it mounts no token and builds no hostAliases entry, which the gateway
-	// needs, so no default URL is set there.
+	// at the gateway's Service and its push Service. A flag that names a URL wins. A
+	// rehearsal renders no gateway: it mounts no token and builds no hostAliases
+	// entry, which the gateway needs, so no default URL is set there.
 	if pair.Bd != "" && !f.rehearsal {
 		namespace := f.namespace
 		if namespace == "" {
@@ -744,6 +744,16 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		}
 		if f.dashboard && v.BdGatewayURL == "" {
 			v.BdGatewayURL = inCluster
+		}
+		// The push Service is its own address: it publishes an unready gateway, so
+		// the pusher reaches the push listener while the readiness probe is still
+		// false.
+		push := inClusterBdGatewayPushURL(namespace)
+		if v.DaemonBdGatewayPushURL == "" {
+			v.DaemonBdGatewayPushURL = push
+		}
+		if f.dashboard && v.BdGatewayPushURL == "" {
+			v.BdGatewayPushURL = push
 		}
 	}
 	return v, pair, townRoot, nil
@@ -984,6 +994,12 @@ func bdGatewayTokensLine(secret string) string {
 // with --dashboard, the dashboard are pointed at it when no URL flag names another.
 func inClusterBdGatewayURL(namespace string) string {
 	return fmt.Sprintf("http://%s.%s.svc:%d", k8sdaemon.BdGatewayName, namespace, k8sdaemon.BdGatewayPort)
+}
+
+// inClusterBdGatewayPushURL is the push Service's URL in namespace, which the
+// pusher in the daemon and, with --dashboard, in the dashboard is pointed at.
+func inClusterBdGatewayPushURL(namespace string) string {
+	return fmt.Sprintf("http://%s.%s.svc:%d", k8sdaemon.BdGatewayPushName, namespace, k8sdaemon.BdGatewayPushPort)
 }
 
 // trackerBackupReaderLine names the reader Pod and says it is not applied with the

@@ -60,7 +60,7 @@ func TestBdGatewayWorkloadRunsAsItsIdentity(t *testing.T) {
 		t.Errorf("the gateway image is %q, want the digest %q", c.Image, testBdGatewayImage)
 	}
 
-	const wantCommand = "bdgw serve --tokens-dir /run/bdgw/tokens --verbs /etc/bdgw/verbs.json --log-dir /var/log/bdgw --workspace /var/lib/bdgw/ws --dolt-host host.docker.internal --dolt-port 3307"
+	const wantCommand = "bdgw serve --tokens-dir /run/bdgw/tokens --verbs /etc/bdgw/verbs.json --log-dir /var/log/bdgw --workspace /var/lib/bdgw/ws --dolt-host host.docker.internal --dolt-port 3307 --push-addr :7441"
 	if got := strings.Join(c.Command, " "); got != wantCommand {
 		t.Errorf("the gateway command is\n%s\nwant\n%s", got, wantCommand)
 	}
@@ -147,7 +147,7 @@ func TestBdGatewayWorkloadOff(t *testing.T) {
 	v := goldenValues(t)
 	v.BdGatewayTokenSecret = testBdGatewayTokenSecret
 	m := mustBuild(t, v)
-	if m.BdGatewayDeployment.Kind != "" || m.BdGatewayService.Kind != "" || m.BdGatewayClaim.Kind != "" {
+	if m.BdGatewayDeployment.Kind != "" || m.BdGatewayService.Kind != "" || m.BdGatewayPushService.Kind != "" || m.BdGatewayClaim.Kind != "" {
 		t.Errorf("a Values with no gateway image rendered a gateway object")
 	}
 	var buf bytes.Buffer
@@ -462,9 +462,10 @@ func TestBdGatewayWorkloadRendered(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for name, doc := range map[string][]byte{
-		"the Deployment": document(t, m.BdGatewayDeployment),
-		"the Service":    document(t, m.BdGatewayService),
-		"the claim":      document(t, m.BdGatewayClaim),
+		"the Deployment":   document(t, m.BdGatewayDeployment),
+		"the Service":      document(t, m.BdGatewayService),
+		"the push Service": document(t, m.BdGatewayPushService),
+		"the claim":        document(t, m.BdGatewayClaim),
 	} {
 		if !bytes.Contains(buf.Bytes(), doc) {
 			t.Errorf("Render does not write %s as Build built it", name)

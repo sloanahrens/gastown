@@ -51,6 +51,9 @@ const (
 	bdGatewayDoltPort = 3307
 	// bdGatewayHealthPath is the gateway's /healthz path, which answers with no token.
 	bdGatewayHealthPath = "/healthz"
+	// bdGatewayPushPortName names the push listener's port on the container and its
+	// Service, which publishes the pod before it is ready.
+	bdGatewayPushPortName = "push"
 )
 
 // bdGatewayDeployment is the gateway's pod: an init container that copies the tokens
@@ -119,11 +122,13 @@ func bdGatewayTokenCopy(v Values) Container {
 // Its readiness is bdgw ready on the tokens, the verb table and the workspace, the
 // three flags bdgw ready requires, plus the same Dolt endpoint, so a gateway whose
 // workspace is not ready, or whose Dolt does not answer at that endpoint, stays out
-// of the Service.
+// of bdGatewayService. The push Service publishes it either way, since an unready
+// gateway can still answer a push.
 func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 	allowEscalation := false
 	dolt := []string{"--dolt-host", doltHost, "--dolt-port", strconv.Itoa(doltPort)}
 	command := append([]string{"bdgw", "serve", "--tokens-dir", bdGatewayTokensDir, "--verbs", bdGatewayVerbs, "--log-dir", bdGatewayLogDir, "--workspace", bdGatewayWorkspaceDir}, dolt...)
+	command = append(command, "--push-addr", ":"+strconv.Itoa(BdGatewayPushPort))
 	if v.BdGatewayMaxConcurrent > 0 {
 		command = append(command, "--max-concurrent", strconv.Itoa(v.BdGatewayMaxConcurrent))
 	}
@@ -131,6 +136,9 @@ func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 		Name:    BdGatewayName,
 		Image:   v.BdGatewayImage,
 		Command: command,
+		// The push listener is the one port the container declares, so the pod's
+		// spec names the port bdGatewayPushService forwards to.
+		Ports: []ContainerPort{{Name: bdGatewayPushPortName, ContainerPort: BdGatewayPushPort, Protocol: "TCP"}},
 		SecurityContext: &ContainerSecurityContext{
 			AllowPrivilegeEscalation: &allowEscalation,
 		},
@@ -181,6 +189,23 @@ func bdGatewayService(namespace string) Service {
 			Type:     "ClusterIP",
 			Selector: bdGatewaySelectorLabels(),
 			Ports:    []ServicePort{{Name: "http", Port: BdGatewayPort, Protocol: "TCP"}},
+		},
+	}
+}
+
+// bdGatewayPushService publishes the gateway's push listener. It selects the same
+// pods as bdGatewayService, and it publishes them before they are ready, because an
+// unready gateway can still answer a push; bdGatewayService keeps publishing ready
+// pods only, so a bd exec never reaches a gateway whose workspace is not ready.
+func bdGatewayPushService(namespace string) Service {
+	return Service{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Service"},
+		Metadata: ObjectMeta{Name: BdGatewayPushName, Namespace: namespace, Labels: bdGatewayLabels()},
+		Spec: ServiceSpec{
+			Type:                     "ClusterIP",
+			Selector:                 bdGatewaySelectorLabels(),
+			Ports:                    []ServicePort{{Name: bdGatewayPushPortName, Port: BdGatewayPushPort, Protocol: "TCP"}},
+			PublishNotReadyAddresses: true,
 		},
 	}
 }

@@ -10,14 +10,19 @@ import (
 // The bd gateway's client side in a pod. The forwarder installed as bd reads two
 // environment names: BD_GATEWAY_URL, the gateway's base URL, and
 // BD_GATEWAY_TOKEN_FILE, the file that holds its bearer token
-// (internal/gtwrap/forwarder.go). A pod names the file inside BdGatewayTokenDir,
-// a read-only mount of one Secret that holds the token under BdGatewayTokenKey and
-// nothing else. The render names each Secret and never creates it: the operator
-// creates the tokens and their Secrets before the apply (bd-container design, O2).
+// (internal/gtwrap/forwarder.go). The pusher reads a third, BD_GATEWAY_PUSH_URL,
+// the URL of the Service that publishes the gateway's push listener
+// (internal/daemon/workspace_reconcile.go). A pod names the file inside
+// BdGatewayTokenDir, a read-only mount of one Secret that holds the token under
+// BdGatewayTokenKey and nothing else. The render names each Secret and never
+// creates it: the operator creates the tokens and their Secrets before the apply
+// (bd-container design, O2).
 const (
-	// BdGatewayURLEnv and BdGatewayTokenFileEnv are the forwarder's two names.
+	// BdGatewayURLEnv and BdGatewayTokenFileEnv are the forwarder's two names, and
+	// BdGatewayPushURLEnv is the pusher's.
 	BdGatewayURLEnv       = "BD_GATEWAY_URL"
 	BdGatewayTokenFileEnv = "BD_GATEWAY_TOKEN_FILE" //nolint:gosec // an environment name, not a credential
+	BdGatewayPushURLEnv   = "BD_GATEWAY_PUSH_URL"
 	// BdGatewayTokenDir is where the token Secret is mounted, and
 	// BdGatewayTokenPath is the token file inside it.
 	BdGatewayTokenDir  = "/run/gt/bd-gateway" //nolint:gosec // a directory path, not a credential
@@ -32,30 +37,60 @@ const (
 	bdGatewayTokenMode           = int32(0o400)
 )
 
-// validateBdGateway refuses the gateway values a pod cannot use. The URL is only
-// read by the dashboard today, so it needs Dashboard; a daemon that reads it
-// later widens this check with its own.
+// validateBdGateway refuses the dashboard's gateway values a pod cannot use. The
+// dashboard reads both URLs, so they need Dashboard. A push URL also needs the
+// gateway workload: without it the render writes no push Service, so the address
+// names no pod.
 func (v Values) validateBdGateway() error {
-	if v.BdGatewayURL == "" {
+	if v.BdGatewayURL == "" && v.BdGatewayPushURL == "" {
 		return nil
 	}
 	if !v.Dashboard {
-		return errors.New("Values.BdGatewayURL is set but Values.Dashboard is not: nothing in the pod reads the gateway settings, so the URL would be dropped")
+		return errors.New("Values.BdGatewayURL or Values.BdGatewayPushURL is set but Values.Dashboard is not: nothing in the pod reads the gateway settings, so the URL would be dropped")
 	}
-	return ValidateBdGatewayURL("Values.BdGatewayURL", v.BdGatewayURL)
+	if v.BdGatewayPushURL != "" && v.BdGatewayImage == "" {
+		return errors.New("Values.BdGatewayPushURL is set while Values.BdGatewayImage is empty: the push Service renders only with the gateway workload, so the URL would name no pod")
+	}
+	for _, field := range []struct{ name, value string }{
+		{"Values.BdGatewayURL", v.BdGatewayURL},
+		{"Values.BdGatewayPushURL", v.BdGatewayPushURL},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := ValidateBdGatewayURL(field.name, field.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// validateDaemonBdGateway refuses the daemon's gateway value a pod cannot use. A
+// validateDaemonBdGateway refuses the daemon's gateway values a pod cannot use. A
 // rehearsal mounts no token, so it refuses the URL rather than render a gateway
-// the pod cannot read.
+// the pod cannot read. A push URL also needs the gateway workload, which renders
+// the push Service.
 func (v Values) validateDaemonBdGateway() error {
-	if v.DaemonBdGatewayURL == "" {
+	if v.DaemonBdGatewayURL == "" && v.DaemonBdGatewayPushURL == "" {
 		return nil
 	}
 	if v.Rehearsal {
-		return errors.New("Values.DaemonBdGatewayURL is set with Values.Rehearsal: the gateway token is a live-pod credential, and a rehearsal mounts none")
+		return errors.New("Values.DaemonBdGatewayURL or Values.DaemonBdGatewayPushURL is set with Values.Rehearsal: the gateway token is a live-pod credential, and a rehearsal mounts none")
 	}
-	return ValidateBdGatewayURL("Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL)
+	if v.DaemonBdGatewayPushURL != "" && v.BdGatewayImage == "" {
+		return errors.New("Values.DaemonBdGatewayPushURL is set while Values.BdGatewayImage is empty: the push Service renders only with the gateway workload, so the URL would name no pod")
+	}
+	for _, field := range []struct{ name, value string }{
+		{"Values.DaemonBdGatewayURL", v.DaemonBdGatewayURL},
+		{"Values.DaemonBdGatewayPushURL", v.DaemonBdGatewayPushURL},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if err := ValidateBdGatewayURL(field.name, field.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // The gateway's own workload, rendered when Values.BdGatewayImage is set
@@ -66,6 +101,10 @@ const (
 	BdGatewayName = "bd-gateway"
 	// BdGatewayPort is the port the gateway's Service publishes in the cluster.
 	BdGatewayPort = 7440
+	// BdGatewayPushName names the Service that publishes the gateway's push
+	// listener, and BdGatewayPushPort is its port.
+	BdGatewayPushName = "bd-gateway-push"
+	BdGatewayPushPort = 7441
 	// BdGatewayWorkspaceClaim is the claim the gateway's workspace lives on, and
 	// BdGatewayWorkspaceSize is its request.
 	BdGatewayWorkspaceClaim = "bd-gateway-workspace"
@@ -141,6 +180,12 @@ func BdGatewayEnv(url string) []EnvVar {
 		{Name: BdGatewayURLEnv, Value: url},
 		{Name: BdGatewayTokenFileEnv, Value: BdGatewayTokenPath},
 	}
+}
+
+// BdGatewayPushEnv is the pusher's environment entry for a pod whose push Service
+// URL is url. The value is a URL the render validated, never a credential.
+func BdGatewayPushEnv(url string) []EnvVar {
+	return []EnvVar{{Name: BdGatewayPushURLEnv, Value: url}}
 }
 
 // BdGatewayVolume is the Secret volume that carries one gateway token. Its items
