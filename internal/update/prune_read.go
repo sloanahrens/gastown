@@ -104,32 +104,33 @@ type PruneRegistryReader struct {
 	Doer PruneDoer
 	// Credentials returns the viewer's login and token. Neither reaches an error.
 	Credentials func() (user, token string, err error)
+	// Digest reads the digest the registry holds for image at tag, through the
+	// viewer's credential. The packages listing carries no digest, so each tag's
+	// digest comes from here. found is false when the registry holds no such
+	// tag. A nil Digest is an error.
+	Digest func(ctx context.Context, user, token, image, tag string) (digest string, found bool, err error)
 }
 
 // packageVersion is the part of one package version in a listing that the
-// reader reads: its image name, its tag, its push time and the digest its
-// manifest carries.
+// reader reads: its image name, its tag and its push time. The listing carries
+// no digest.
 type packageVersion struct {
 	Name      string    `json:"name"`
 	Version   string    `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
-	Metadata  struct {
-		ManifestDigest string `json:"manifest_digest"`
-	} `json:"metadata"`
 }
 
-// tag is the version as a PruneTag. A version the planner could not rank, match
-// or name is an error here, which stops the listing read.
+// tag is the version as a PruneTag, its digest still to be read. A version the
+// planner could not rank, match or name is an error here, which stops the
+// listing read.
 func (v packageVersion) tag(image string) (PruneTag, error) {
 	switch {
 	case v.Version == "":
 		return PruneTag{}, fmt.Errorf("a %s package version has no tag", image)
-	case !imagevalues.ValidDigest(v.Metadata.ManifestDigest):
-		return PruneTag{}, fmt.Errorf("the %s tag %q names no manifest digest", image, v.Version)
 	case v.CreatedAt.IsZero():
 		return PruneTag{}, fmt.Errorf("the %s tag %q names no push time", image, v.Version)
 	}
-	return PruneTag{Name: v.Version, Digest: v.Metadata.ManifestDigest, PushedAt: v.CreatedAt}, nil
+	return PruneTag{Name: v.Version, PushedAt: v.CreatedAt}, nil
 }
 
 // Images reads the tags of each of the three gastown images, following every
@@ -142,6 +143,8 @@ func (r PruneRegistryReader) Images(ctx context.Context) (map[string][]PruneTag,
 		return nil, errors.New("no HTTP client is wired for the prune listing")
 	case r.Credentials == nil:
 		return nil, errors.New("no credential reader is wired for the prune listing")
+	case r.Digest == nil:
+		return nil, errors.New("no digest reader is wired for the prune listing")
 	case !pruneOwnerPattern.MatchString(r.Owner):
 		return nil, errors.New("the prune listing's owner is not one lowercase account name")
 	}
@@ -163,6 +166,9 @@ func (r PruneRegistryReader) Images(ctx context.Context) (map[string][]PruneTag,
 // imageTags reads every page of image's listing. The total every page reports
 // must not change while the pages are read. The walk ends at an empty page or
 // once the total is read; a listing that ends short of its total is an error.
+// A version named by a digest is a platform manifest under an image index, not
+// a tag: it counts toward the total and is not returned. Each tag's digest is
+// then read from the registry; one that cannot be read fails the whole listing.
 func (r PruneRegistryReader) imageTags(ctx context.Context, user, token, image string) ([]PruneTag, error) {
 	var tags []PruneTag
 	total, seen := -1, 0
@@ -187,7 +193,7 @@ func (r PruneRegistryReader) imageTags(ctx context.Context, user, token, image s
 			if v.Name == "" {
 				return nil, fmt.Errorf("the Forgejo packages listing for %s holds a package with no name", image)
 			}
-			if v.Name != image {
+			if v.Name != image || strings.HasPrefix(v.Version, "sha256:") {
 				continue
 			}
 			t, err := v.tag(image)
@@ -205,6 +211,18 @@ func (r PruneRegistryReader) imageTags(ctx context.Context, user, token, image s
 		return nil, fmt.Errorf("the Forgejo packages listing for %s is truncated: %d of %d packages read", image, seen, total)
 	case seen > total:
 		return nil, fmt.Errorf("the Forgejo packages listing for %s changed while it was read: %d packages read against a total of %d", image, seen, total)
+	}
+	for i := range tags {
+		digest, found, err := r.Digest(ctx, user, token, image, tags[i].Name)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("reading the %s tag %q's digest from the registry: %w", image, tags[i].Name, err)
+		case !found:
+			return nil, fmt.Errorf("the registry holds no digest for the %s tag %q, so the plan cannot read every tag", image, tags[i].Name)
+		case !imagevalues.ValidDigest(digest):
+			return nil, fmt.Errorf("the registry's digest for the %s tag %q is not sha256:<64 lowercase hex>", image, tags[i].Name)
+		}
+		tags[i].Digest = digest
 	}
 	return tags, nil
 }

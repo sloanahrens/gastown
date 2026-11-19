@@ -25,10 +25,25 @@ const pruneReadMarker = "SECRET-BODY-MARKER"
 // pruneDigest is a manifest digest of byte c, the form a registry reports.
 func pruneDigest(c string) string { return "sha256:" + strings.Repeat(c, 64) }
 
-// pruneItem is one package version as the packages listing answers it.
-func pruneItem(name, tag, digest string, pushed time.Time) string {
-	return fmt.Sprintf(`{"name":%q,"version":%q,"created_at":%q,"metadata":{"manifest_digest":%q}}`,
-		name, tag, pushed.Format(time.RFC3339), digest)
+// pruneItem is one package version as the packages listing answers it. The
+// listing carries no manifest digest: the reader reads each tag's digest from
+// the registry through its Digest seam.
+func pruneItem(name, tag string, pushed time.Time) string {
+	return fmt.Sprintf(`{"name":%q,"version":%q,"created_at":%q}`,
+		name, tag, pushed.Format(time.RFC3339))
+}
+
+// pruneFixtureDigests is the digest the registry holds for each fixture tag.
+var pruneFixtureDigests = map[string]string{
+	"d1aaaaaaaaaa": pruneDigest("a"),
+	"d2bbbbbbbbbb": pruneDigest("b"),
+	"p1cccccccccc": pruneDigest("c"),
+}
+
+// pruneFixtureDigest is a Digest seam that answers from pruneFixtureDigests.
+func pruneFixtureDigest(_ context.Context, _, _, _, tag string) (string, bool, error) {
+	d, ok := pruneFixtureDigests[tag]
+	return d, ok, nil
 }
 
 // pruneAnswer is one scripted packages page: its status, the X-Total-Count it
@@ -182,18 +197,19 @@ func TestPruneReadRegistryFollowsPagination(t *testing.T) {
 	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
 		"gastown-daemon": {
 			{status: http.StatusOK, total: "3", body: "[" +
-				pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), base) + "," +
-				pruneItem("other-app", "x", pruneDigest("e"), base) + "]"},
+				pruneItem("gastown-daemon", "d1aaaaaaaaaa", base) + "," +
+				pruneItem("other-app", "x", base) + "]"},
 			{status: http.StatusOK, total: "3", body: "[" +
-				pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneDigest("b"), base.AddDate(0, 0, 1)) + "]"},
+				pruneItem("gastown-daemon", "d2bbbbbbbbbb", base.AddDate(0, 0, 1)) + "]"},
 		},
 		"gastown-polecat": {
 			{status: http.StatusOK, total: "1", body: "[" +
-				pruneItem("gastown-polecat", "p1cccccccccc", pruneDigest("c"), base.AddDate(0, 0, 2)) + "]"},
+				pruneItem("gastown-polecat", "p1cccccccccc", base.AddDate(0, 0, 2)) + "]"},
 		},
 	}}
 	reg := PruneRegistryReader{
-		Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+		Digest: pruneFixtureDigest,
+		Base:   "https://forgejo.example", Owner: "gastown", Doer: fake,
 		Credentials: func() (string, string, error) { return "viewer", "t", nil },
 	}
 	got, err := reg.Images(context.Background())
@@ -217,42 +233,41 @@ func TestPruneReadRegistryFollowsPagination(t *testing.T) {
 // non-200 answer or a body that is not a listing never reaches the error text.
 func TestPruneReadRegistryRefusesAnUnreadableListing(t *testing.T) {
 	t.Parallel()
-	one := "[" + pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), pruneBase) + "]"
+	one := "[" + pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneBase) + "]"
 	cases := []struct {
 		name   string
 		daemon []pruneAnswer
 		marked bool
 	}{
 		{"non-200 answer with a listing that would read", []pruneAnswer{{status: http.StatusInternalServerError, total: "1", body: "[" +
-			pruneItem("gastown-daemon", pruneReadMarker, pruneDigest("a"), pruneBase) + "]"}}, true},
+			pruneItem("gastown-daemon", pruneReadMarker, pruneBase) + "]"}}, true},
 		{"body that is not a listing", []pruneAnswer{{status: http.StatusOK, total: "1", body: "<html>" + pruneReadMarker}}, true},
 		{"listing short of its total", []pruneAnswer{{status: http.StatusOK, total: "3", body: one}}, false},
 		{"total header missing", []pruneAnswer{{status: http.StatusOK, body: one}}, false},
 		{"total header not a number", []pruneAnswer{{status: http.StatusOK, total: "many", body: one}}, false},
 		{"total changes between pages", []pruneAnswer{
 			{status: http.StatusOK, total: "2", body: one},
-			{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneDigest("b"), pruneBase) + "]"},
+			{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneBase) + "]"},
 		}, false},
 		{"more packages than the total", []pruneAnswer{{status: http.StatusOK, total: "1", body: "[" +
-			pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), pruneBase) + "," +
-			pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneDigest("b"), pruneBase) + "]"}}, false},
+			pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneBase) + "," +
+			pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneBase) + "]"}}, false},
 		{"package with no name", []pruneAnswer{{status: http.StatusOK, total: "1", body: "[" +
-			pruneItem("", "d1aaaaaaaaaa", pruneDigest("a"), pruneBase) + "]"}}, false},
+			pruneItem("", "d1aaaaaaaaaa", pruneBase) + "]"}}, false},
 		{"version with no tag", []pruneAnswer{{status: http.StatusOK, total: "1", body: "[" +
-			pruneItem("gastown-daemon", "", pruneDigest("a"), pruneBase) + "]"}}, false},
+			pruneItem("gastown-daemon", "", pruneBase) + "]"}}, false},
 		{"answer that cannot be read", []pruneAnswer{{status: http.StatusOK, total: "1", readErr: errors.New("connection reset")}}, false},
 		{"answer larger than the byte bound", []pruneAnswer{{status: http.StatusOK, total: "1", body: strings.Repeat(" ", prunePackagesMaxBytes+1)}}, false},
-		{"tag with no manifest digest", []pruneAnswer{{status: http.StatusOK, total: "1", body: "[" +
-			pruneItem("gastown-daemon", "d1aaaaaaaaaa", "", pruneBase) + "]"}}, false},
 		{"tag with no push time", []pruneAnswer{{status: http.StatusOK, total: "1", body: "[" +
-			pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), time.Time{}) + "]"}}, false},
+			pruneItem("gastown-daemon", "d1aaaaaaaaaa", time.Time{}) + "]"}}, false},
 		{"listing runs past the page bound", pruneEndless(), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": tc.daemon}}
 			reg := PruneRegistryReader{
-				Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+				Digest: pruneFixtureDigest,
+				Base:   "https://forgejo.example", Owner: "gastown", Doer: fake,
 				Credentials: func() (string, string, error) { return "viewer", "t", nil },
 			}
 			got, err := reg.Images(context.Background())
@@ -288,7 +303,8 @@ func pruneRefusalText(t *testing.T, a pruneAnswer, user, token string) string {
 	t.Helper()
 	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": {a}}}
 	reg := PruneRegistryReader{
-		Base: "https://forgejo.example", Owner: "bot-registry", Doer: fake,
+		Digest: pruneFixtureDigest,
+		Base:   "https://forgejo.example", Owner: "bot-registry", Doer: fake,
 		Credentials: func() (string, string, error) { return user, token, nil },
 	}
 	_, err := reg.Images(context.Background())
@@ -493,7 +509,8 @@ func TestPruneReadReasonQueryPinned(t *testing.T) {
 		"gastown-daemon": {{status: http.StatusOK, total: "0", body: "[]"}},
 	}}
 	reg := PruneRegistryReader{
-		Base: "https://forgejo.example", Owner: "bot-registry", Doer: fake,
+		Digest: pruneFixtureDigest,
+		Base:   "https://forgejo.example", Owner: "bot-registry", Doer: fake,
 		Credentials: func() (string, string, error) { return "viewer", "t", nil },
 	}
 	if _, err := reg.Images(context.Background()); err != nil {
@@ -518,8 +535,8 @@ func TestPruneReadReasonQueryPinned(t *testing.T) {
 
 	// Pages 1 and 2 answer one package each against a total of 3; page 3 refuses.
 	page3 := &pruneForgejoFake{answers: map[string][]pruneAnswer{"gastown-daemon": {
-		{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), pruneBase) + "]"},
-		{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneDigest("b"), pruneBase) + "]"},
+		{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneBase) + "]"},
+		{status: http.StatusOK, total: "3", body: "[" + pruneItem("gastown-daemon", "d2bbbbbbbbbb", pruneBase) + "]"},
 		{status: http.StatusBadRequest, total: "3", body: `{"message":"bad request: page size"}`},
 	}}}
 	reg.Doer = page3
@@ -547,12 +564,12 @@ func TestPruneReadRegistryRefusesBeforeSending(t *testing.T) {
 		name string
 		reg  PruneRegistryReader
 	}{
-		{"no HTTP client", PruneRegistryReader{Base: "https://forgejo.example", Owner: "gastown", Credentials: creds}},
-		{"no credential reader", PruneRegistryReader{Base: "https://forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}}},
-		{"owner that is not an account name", PruneRegistryReader{Base: "https://forgejo.example", Owner: "gastown/x", Doer: &pruneForgejoFake{}, Credentials: creds}},
-		{"credential that cannot be read", PruneRegistryReader{Base: "https://forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}, Credentials: func() (string, string, error) { return "", "", errors.New("no token file") }}},
-		{"http to a host that is not the town's", PruneRegistryReader{Base: "http://forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}, Credentials: creds}},
-		{"base URL with no host", PruneRegistryReader{Base: "forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}, Credentials: creds}},
+		{"no HTTP client", PruneRegistryReader{Digest: pruneFixtureDigest, Base: "https://forgejo.example", Owner: "gastown", Credentials: creds}},
+		{"no credential reader", PruneRegistryReader{Digest: pruneFixtureDigest, Base: "https://forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}}},
+		{"owner that is not an account name", PruneRegistryReader{Digest: pruneFixtureDigest, Base: "https://forgejo.example", Owner: "gastown/x", Doer: &pruneForgejoFake{}, Credentials: creds}},
+		{"credential that cannot be read", PruneRegistryReader{Digest: pruneFixtureDigest, Base: "https://forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}, Credentials: func() (string, string, error) { return "", "", errors.New("no token file") }}},
+		{"http to a host that is not the town's", PruneRegistryReader{Digest: pruneFixtureDigest, Base: "http://forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}, Credentials: creds}},
+		{"base URL with no host", PruneRegistryReader{Digest: pruneFixtureDigest, Base: "forgejo.example", Owner: "gastown", Doer: &pruneForgejoFake{}, Credentials: creds}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -658,7 +675,8 @@ func TestPruneReadRegistryRefusesARequestWithNoAnswer(t *testing.T) {
 	t.Parallel()
 	fake := &pruneForgejoFake{doErr: errors.New("no route to host")}
 	reg := PruneRegistryReader{
-		Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+		Digest: pruneFixtureDigest,
+		Base:   "https://forgejo.example", Owner: "gastown", Doer: fake,
 		Credentials: func() (string, string, error) { return "viewer", "t", nil },
 	}
 	got, err := reg.Images(context.Background())
@@ -769,10 +787,11 @@ func TestPruneReadRequestsAreGET(t *testing.T) {
 	t.Parallel()
 	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
 		"gastown-daemon": {{status: http.StatusOK, total: "1", body: "[" +
-			pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneDigest("a"), pruneBase) + "]"}},
+			pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneBase) + "]"}},
 	}}
 	reg := PruneRegistryReader{
-		Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+		Digest: pruneFixtureDigest,
+		Base:   "https://forgejo.example", Owner: "gastown", Doer: fake,
 		Credentials: func() (string, string, error) { return "viewer", "t", nil },
 	}
 	if _, err := reg.Images(context.Background()); err != nil {
@@ -798,4 +817,117 @@ func TestPruneReadRequestsAreGET(t *testing.T) {
 			t.Errorf("a reader sent a %s request, want only GET", m)
 		}
 	}
+}
+
+// pruneCapturedTag is the tag item the real Forgejo 16.0.5 packages listing
+// answered for gastown-daemon, as the bytes arrived. Its owner and creator are
+// trimmed to id and login, and it has no metadata key.
+const pruneCapturedTag = `{"id":957,"owner":{"id":8,"login":"bot-registry"},"type":"container","name":"gastown-daemon","version":"10d55f6b2594","html_url":"http://forgejo:3000/bot-registry/-/packages/container/gastown-daemon/10d55f6b2594","created_at":"2026-11-19T04:13:12Z"}`
+
+// pruneCapturedPlatform is the second captured item: a platform manifest under
+// an image index, named by its digest rather than a tag. Its html_url follows
+// the first item's pattern; the capture named only its version.
+const pruneCapturedPlatform = `{"id":956,"owner":{"id":8,"login":"bot-registry"},"type":"container","name":"gastown-daemon","version":"sha256:80148f4370b250af1899f330eea0c2eb2719a676a8b2ca4a687bfbf3b0e5366d","html_url":"http://forgejo:3000/bot-registry/-/packages/container/gastown-daemon/sha256:80148f4370b250af1899f330eea0c2eb2719a676a8b2ca4a687bfbf3b0e5366d","created_at":"2026-11-19T04:13:12Z"}`
+
+// pruneDigestCall is one call the Digest seam received.
+type pruneDigestCall struct{ user, token, image, tag string }
+
+// TestPruneReadDigestListing holds that the captured listing gives one tag, read
+// with the Digest seam's digest and the listing's created_at as its push time,
+// and that a digest-named version is counted toward the total but is not a tag.
+func TestPruneReadDigestListing(t *testing.T) {
+	t.Parallel()
+	created, err := time.Parse(time.RFC3339, "2026-11-19T04:13:12Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The real page's total is 390; this page holds two items, so its total is
+	// the two items it carries, or the reader would read on past this page.
+	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
+		"gastown-daemon": {{status: http.StatusOK, total: "2", body: "[" + pruneCapturedTag + "," + pruneCapturedPlatform + "]"}},
+	}}
+	var calls []pruneDigestCall
+	reg := PruneRegistryReader{
+		Base: "https://forgejo.example", Owner: "bot-registry", Doer: fake,
+		Credentials: func() (string, string, error) { return "viewer", "t", nil },
+		Digest: func(_ context.Context, user, token, image, tag string) (string, bool, error) {
+			calls = append(calls, pruneDigestCall{user, token, image, tag})
+			return pruneDigest("a"), true, nil
+		},
+	}
+	got, err := reg.Images(context.Background())
+	if err != nil {
+		t.Fatalf("Images() error = %v", err)
+	}
+	pruneTagsWant(t, "gastown-daemon", got["gastown-daemon"], []PruneTag{
+		{Name: "10d55f6b2594", Digest: pruneDigest("a"), PushedAt: created},
+	})
+	want := []pruneDigestCall{{"viewer", "t", "gastown-daemon", "10d55f6b2594"}}
+	if !slices.Equal(calls, want) {
+		t.Errorf("Digest calls = %+v, want %+v: the digest-named version is not a tag and is not read", calls, want)
+	}
+}
+
+// TestPruneReadDigestMissing holds that a tag whose digest cannot be read makes
+// the listing fail, naming the image and the tag, with no tags returned, and that
+// a missing Digest seam fails before any request is sent.
+func TestPruneReadDigestMissing(t *testing.T) {
+	t.Parallel()
+	one := "[" + pruneItem("gastown-daemon", "d1aaaaaaaaaa", pruneBase) + "]"
+	cases := []struct {
+		name   string
+		digest func(context.Context, string, string, string, string) (string, bool, error)
+	}{
+		{"registry does not hold the tag", func(context.Context, string, string, string, string) (string, bool, error) {
+			return "", false, nil
+		}},
+		{"digest read fails", func(context.Context, string, string, string, string) (string, bool, error) {
+			return "", false, errors.New("registry unreachable")
+		}},
+		{"digest the registry answers is not a digest", func(context.Context, string, string, string, string) (string, bool, error) {
+			return "not-a-digest", true, nil
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
+				"gastown-daemon": {{status: http.StatusOK, total: "1", body: one}},
+			}}
+			reg := PruneRegistryReader{
+				Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+				Credentials: func() (string, string, error) { return "viewer", "t", nil },
+				Digest:      tc.digest,
+			}
+			got, err := reg.Images(context.Background())
+			if err == nil {
+				t.Fatalf("Images() = %v, nil error; want a refusal", got)
+			}
+			if got != nil {
+				t.Errorf("Images() returned tags %v with its error", got)
+			}
+			for _, name := range []string{"gastown-daemon", "d1aaaaaaaaaa"} {
+				if !strings.Contains(err.Error(), name) {
+					t.Errorf("error %q does not name %q", err, name)
+				}
+			}
+		})
+	}
+
+	t.Run("no Digest seam sends nothing", func(t *testing.T) {
+		t.Parallel()
+		fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
+			"gastown-daemon": {{status: http.StatusOK, total: "1", body: one}},
+		}}
+		reg := PruneRegistryReader{
+			Base: "https://forgejo.example", Owner: "gastown", Doer: fake,
+			Credentials: func() (string, string, error) { return "viewer", "t", nil },
+		}
+		if _, err := reg.Images(context.Background()); err == nil {
+			t.Fatal("Images() = nil error, want a refusal with no Digest seam")
+		}
+		if len(fake.methods) != 0 {
+			t.Errorf("sent %d requests with no Digest seam, want none", len(fake.methods))
+		}
+	})
 }

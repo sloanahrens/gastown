@@ -299,12 +299,18 @@ func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update
 	// the first endpoint is refused, so the credential never follows it.
 	client := *seams.HTTPClient
 	client.CheckRedirect = imagevalues.SameEndpointRedirect
+	// The packages listing carries no digest, so each tag's digest is read from
+	// the registry the way gt update images reads the digest it records: the
+	// planner then compares like with like.
 	reader := update.PruneRegistryReader{
 		Base:          registry.BaseURL(),
 		Owner:         registry.Owner,
 		PlaintextHost: plaintextHostOf(registry),
 		Doer:          &client,
 		Credentials:   seams.Credentials,
+		Digest: func(ctx context.Context, user, token, image, tag string) (string, bool, error) {
+			return imagevalues.TagDigest(ctx, &client, registry, plaintextHostOf(registry), user, token, image, tag)
+		},
 	}
 	tags, err := reader.Images(ctx)
 	if err != nil {
