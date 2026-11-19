@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -2023,5 +2024,139 @@ func TestLandingWorkerLoopRefusedPassResumesAfterRelease(t *testing.T) {
 	settlePasses(t, done, 1)
 	if got := passes.Load(); got < 1 {
 		t.Fatalf("pass body ran %d time(s) after the release, want at least 1", got)
+	}
+}
+
+// recorderLanding builds a Forgejo rig's worker and returns its candidate gate
+// and town root. runner is the tier sweep runner, nil for a town with none; run
+// is the daemon's command seam.
+func recorderLanding(t *testing.T, runner *config.TierSweepRunnerConfig, run cmdRunFunc) (*land.CandidateGate, string) {
+	t.Helper()
+	townRoot := gateRunRecorderRoot(t)
+	forgejoRigConfig(t, townRoot, "testrig")
+	writeOverseerIdentity(t, townRoot, overseerTestName)
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(), execCmd: run,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			LandingWorker: &LandingWorkerConfig{Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}},
+			TierSweep:     &config.TierSweepConfig{Enabled: true, Runner: runner}}}}
+	forgejoLandingRemote(t, useGitfake(t, d), townRoot, "testrig")
+	w, err := d.newRigLandingWorker("testrig")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("Lander = %T, want *land.Lander", w.Lander)
+	}
+	gate, ok := lander.Candidate.(*land.CandidateGate)
+	if !ok || gate == nil {
+		t.Fatalf("Candidate = %T; want the rig's Forgejo gate", lander.Candidate)
+	}
+	return gate, townRoot
+}
+
+// throttleKubectl answers the runner's cpu.stat read as a control cluster's
+// kubectl would, and records each argv. Any other command is refused.
+func throttleKubectl(argvs *[][]string) cmdRunFunc {
+	return func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if len(cmd.Args) == 0 || cmd.Args[0] != "kubectl" {
+			return nil, nil, fmt.Errorf("unexpected command %q", cmd.Args)
+		}
+		*argvs = append(*argvs, cmd.Args)
+		return []byte("nr_periods 40\nnr_throttled 7\nthrottled_usec 3100\n"), nil, nil
+	}
+}
+
+// TestLandingWorkerGateRecorderIsSet: the candidate gate a Forgejo rig builds
+// records each finished run, and the row's throttle is read through the control
+// cluster's kubectl.
+func TestLandingWorkerGateRecorderIsSet(t *testing.T) {
+	t.Parallel()
+	var argvs [][]string
+	gate, townRoot := recorderLanding(t, &config.TierSweepRunnerConfig{
+		Backend: config.TierSweepRunnerKubernetes, Context: "control"}, throttleKubectl(&argvs))
+	if gate.Recorder == nil {
+		t.Fatal("gate.Recorder is nil; a Forgejo rig's finished gate runs would record no row")
+	}
+	gate.Recorder(land.GateRun{Rig: "testrig", Bead: "gt-a", SHA: "c0ffee", Passed: true})
+	runs := gateRunRecorderRows(t, townRoot)
+	if len(runs) != 1 {
+		t.Fatalf("the gate run log holds %d row(s), want 1", len(runs))
+	}
+	if p, th, us := runs[0].RunnerPeriods, runs[0].RunnerThrottled, runs[0].RunnerThrottledUsec; p != 40 || th != 7 || us != 3100 {
+		t.Errorf("counters = (%d, %d, %d), want (40, 7, 3100)", p, th, us)
+	}
+	if len(argvs) != 1 {
+		t.Fatalf("the recorder ran kubectl %d time(s), want 1", len(argvs))
+	}
+	if i := slices.Index(argvs[0], "--context"); i < 0 || i+1 >= len(argvs[0]) || argvs[0][i+1] != "control" {
+		t.Errorf("kubectl argv %q does not name the control cluster's context", argvs[0])
+	}
+	if !slices.Equal(argvs[0][len(argvs[0])-len(runnerThrottleArgs):], runnerThrottleArgs) {
+		t.Errorf("kubectl argv %q does not end with the runner's cpu.stat read", argvs[0])
+	}
+}
+
+// TestLandingWorkerGateRecorderWithoutControlClusterLeavesCountersUnmeasured: a
+// town with no kubernetes runner has no control cluster, so the recorder runs no
+// kubectl and the counters read -1, never a zero.
+func TestLandingWorkerGateRecorderWithoutControlClusterLeavesCountersUnmeasured(t *testing.T) {
+	t.Parallel()
+	var argvs [][]string
+	gate, townRoot := recorderLanding(t, nil, throttleKubectl(&argvs))
+	gate.Recorder(land.GateRun{Rig: "testrig", Bead: "gt-a", SHA: "c0ffee", Passed: true})
+	runs := gateRunRecorderRows(t, townRoot)
+	if len(runs) != 1 {
+		t.Fatalf("the gate run log holds %d row(s), want 1", len(runs))
+	}
+	if p, th, us := runs[0].RunnerPeriods, runs[0].RunnerThrottled, runs[0].RunnerThrottledUsec; p != -1 || th != -1 || us != -1 {
+		t.Errorf("counters = (%d, %d, %d), want all -1 with no control cluster", p, th, us)
+	}
+	if len(argvs) != 0 {
+		t.Errorf("the recorder ran kubectl %q with no control cluster, want no call", argvs)
+	}
+}
+
+// TestLandingWorkerGateRecorderKubectlFailureLeavesCountersUnmeasured: a kubectl
+// that fails still appends the row, with the counters at -1, and its stderr
+// stays out of the recorded row.
+func TestLandingWorkerGateRecorderKubectlFailureLeavesCountersUnmeasured(t *testing.T) {
+	t.Parallel()
+	gate, townRoot := recorderLanding(t, &config.TierSweepRunnerConfig{
+		Backend: config.TierSweepRunnerKubernetes, Context: "control"},
+		func(*exec.Cmd) ([]byte, []byte, error) {
+			return nil, []byte("error: unable to connect"), errors.New("exit status 1")
+		})
+	gate.Recorder(land.GateRun{Rig: "testrig", Bead: "gt-a", SHA: "c0ffee", Passed: true})
+	runs := gateRunRecorderRows(t, townRoot)
+	if len(runs) != 1 {
+		t.Fatalf("the gate run log holds %d row(s), want 1", len(runs))
+	}
+	if p, th, us := runs[0].RunnerPeriods, runs[0].RunnerThrottled, runs[0].RunnerThrottledUsec; p != -1 || th != -1 || us != -1 {
+		t.Errorf("counters = (%d, %d, %d), want all -1 after a failed kubectl", p, th, us)
+	}
+}
+
+// TestLandingWorkerGateRecorderAbsent: a rig that builds no candidate gate is
+// refused before any gate exists, so no gate run row is written under its town.
+func TestLandingWorkerGateRecorderAbsent(t *testing.T) {
+	t.Parallel()
+	townRoot := gateRunRecorderRoot(t)
+	rigPath := filepath.Join(townRoot, "testrig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0o755); err != nil {
+		t.Fatalf("mkdir .repo.git: %v", err)
+	}
+	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branch":"main"}`)
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New()}
+	useGitfake(t, d).InitBare(t, filepath.Join(rigPath, ".repo.git"))
+	if _, err := d.newRigLandingWorker("testrig"); err == nil {
+		t.Fatal("newRigLandingWorker built a worker for a rig with no merge_queue.forgejo block; want it refused")
+	}
+	if runs := gateRunRecorderRows(t, townRoot); len(runs) != 0 {
+		t.Errorf("the gate run log holds %d row(s) for a rig with no candidate gate, want none", len(runs))
 	}
 }
