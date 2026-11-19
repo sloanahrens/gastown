@@ -211,6 +211,21 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 	return f
 }
 
+// dropContention takes the contention label and the schedule off a bead, as
+// the drop a failure of another kind makes does (gt-nnq9a2). A test wires it
+// as the env's writer: the fake's own env drops nothing by default, so a test
+// that asserts the drop is the one that asked for it.
+func (f *fakeSpecTown) dropContention(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s := f.specs[id]
+	s.Metadata = nil
+	s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.ContentionLabel })
+	f.specs[id] = s
+	f.labels[id] = slices.DeleteFunc(f.labels[id], func(l string) bool { return l == specdispatch.ContentionLabel })
+	return nil
+}
+
 // productionCandidates is the tick's candidate read run through the production
 // board read: specCandidatesWith over specReadyBoardFrom, with the fake's split
 // beads on the split list and its other beads on the ready list. The split
@@ -3482,9 +3497,9 @@ func TestAFailedSlingDropsTheTimeoutRetry(t *testing.T) {
 
 	var report specDispatchReport
 	specApplyOutcome(env, &report, specSlingOutcome{
-		kind:  specSlingFailed,
-		entry: specDispatchEntry{Bead: "gt-a"},
-		label: specdispatch.DispatchFailedLabel,
+		kind:   specSlingFailed,
+		entry:  specDispatchEntry{Bead: "gt-a"},
+		labels: []string{specdispatch.DispatchFailedLabel},
 	})
 
 	if !slices.Equal(dropped, []string{"gt-a"}) {
@@ -3506,9 +3521,9 @@ func TestAFailedSlingReportsAFailedTimeoutDrop(t *testing.T) {
 
 	var report specDispatchReport
 	specApplyOutcome(env, &report, specSlingOutcome{
-		kind:  specSlingFailed,
-		entry: specDispatchEntry{Bead: "gt-a"},
-		label: specdispatch.DispatchFailedLabel,
+		kind:   specSlingFailed,
+		entry:  specDispatchEntry{Bead: "gt-a"},
+		labels: []string{specdispatch.DispatchFailedLabel},
 	})
 
 	if len(report.Errors) != 1 || !strings.Contains(report.Errors[0], "dolt: connection refused") {
