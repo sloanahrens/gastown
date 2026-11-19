@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1137,5 +1138,49 @@ func TestRunnerDriftTargetsRefusesAValueOrBuildItCannotRead(t *testing.T) {
 				t.Errorf("error %q does not hold %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// driftReadPlurals maps a drift read's kind, before the slash, to its granted resource.
+var driftReadPlurals = map[string]string{
+	"deployment": "deployments",
+	"configmap":  "configmaps",
+}
+
+// TestTownClusterDriftReadsMatchTheGolden derives the compare's reads from the
+// run itself and holds the set to the golden the ClusterRole is checked against.
+func TestTownClusterDriftReadsMatchTheGolden(t *testing.T) {
+	t.Parallel()
+	d, _, town := driftFourDeploymentSeams(t)
+	var calls []string
+	d.kubectl = driftRecordReads(driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil), &calls)
+	if err := compareClusterDrift(context.Background(), d); err != nil {
+		t.Fatalf("comparing the render with its live form: %v", err)
+	}
+	read := map[string]bool{}
+	for _, call := range calls {
+		plural, known := driftReadPlurals[strings.SplitN(call, "/", 2)[0]]
+		if !known {
+			t.Fatalf("the compare reads %q, which driftReadPlurals does not map; add the kind and a golden line", call)
+		}
+		read[plural] = true
+	}
+	raw, err := os.ReadFile(filepath.FromSlash("testdata/drift-reads.golden"))
+	if err != nil {
+		t.Fatalf("reading the golden: %v", err)
+	}
+	golden := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line = strings.TrimSpace(line); line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if fields := strings.Fields(line); len(fields) == 2 {
+			golden[fields[1]] = true
+		} else {
+			t.Fatalf("golden line %q is not `<verb> <resource>`", line)
+		}
+	}
+	if got, want := slices.Sorted(maps.Keys(read)), slices.Sorted(maps.Keys(golden)); !slices.Equal(got, want) {
+		t.Errorf("the compare reads %q, and the golden lists %q", got, want)
 	}
 }

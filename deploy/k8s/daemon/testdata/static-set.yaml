@@ -552,6 +552,41 @@ value: 100
 globalDefault: false
 description: "CI runners and their jobs: the first workload shed under pressure."
 ---
+# The cluster reads the drift compare makes: the gt-drift-reader ClusterRole the
+# daemon's service account in gt reads the rendered control-cluster objects
+# through, and its binding. The compare reads a Deployment and the gate runner's
+# ConfigMap by name, so the grant is get and list on those two kinds and nothing
+# else: no Secret, no write verb, no wildcard. A kind the compare comes to read
+# joins this file and internal/cmd/testdata/drift-reads.golden together.
+#
+# This file is not applied by the daemon: the overseer applies it with the admin
+# credential and turns the drift patrol on (gt-p2katm). TestDriftRBAC* in
+# deploy/k8s holds it to the reads the golden lists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-drift-reader
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-drift-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-drift-reader
+subjects:
+  - kind: ServiceAccount
+    name: daemon
+    namespace: gt
+---
 # The cluster access the pod-update Job runs as (gt-360i18): the gt-update
 # ServiceAccount in the gt namespace, its namespaced Role and the RoleBinding that
 # grants it. A daemon that runs as a pod is moved by four kinds of kubectl call: a
