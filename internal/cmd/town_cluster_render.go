@@ -797,6 +797,7 @@ var applyRank = map[string]int{
 	"PersistentVolumeClaim": 2,
 	"ServiceAccount":        3,
 	"Service":               4,
+	"Role":                  5,
 	"RoleBinding":           5,
 	"ClusterRoleBinding":    5,
 	"Pod":                   6,

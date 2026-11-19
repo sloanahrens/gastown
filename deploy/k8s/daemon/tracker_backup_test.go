@@ -292,6 +292,8 @@ func TestTrackerBackupRenderOrder(t *testing.T) {
 		want = append(want, "Secret/"+file.Metadata.Name)
 	}
 	want = append(want,
+		"Role/"+m.SecretNamesRole.Metadata.Name,
+		"RoleBinding/"+m.SecretNamesBinding.Metadata.Name,
 		"Deployment/"+Name,
 		"Deployment/"+TrackerName,
 		"CronJob/"+TrackerBackupName,

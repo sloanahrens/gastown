@@ -3,8 +3,9 @@
 // claims that carry the town root, the landing work root and the host's Dolt
 // backups, the Service that keeps the name forgejo, one Secret per file of the
 // daemon's secrets manifest, the Deployment itself, the seed helper Pod
-// BuildHelper returns, and the bindings that give the pod the sweep roles
-// deploy/k8s/sweep-rbac.yaml defines. It renders only, so no apply path and no
+// BuildHelper returns, the bindings that give the pod the sweep roles
+// deploy/k8s/sweep-rbac.yaml defines, and the Role that lets a deployer read the
+// render's own Secrets by name. It renders only, so no apply path and no
 // Kubernetes client lives here (gt-gg9hv.69, gt-gg9hv.70, gt-p194yr).
 //
 // The pod mounts each volume at the path the compose container mounts it at, so
@@ -179,6 +180,14 @@ const (
 	SweepReaderRole    = "gt-sweep-reader"
 	CacheTrimNamespace = "forgejo"
 	CacheTrimRole      = "gt-ci-cache-trim"
+	// SecretNamesRole is the Role in the render's namespace that lets a deployer
+	// read the render's own Secrets by name, and DeployerGroup is the group its
+	// binding grants it to. The rule names exactly the Secrets the render writes,
+	// because RBAC cannot grant existence without data: the deployer's Secret
+	// preflight gets each name, and list or watch would return the data itself
+	// (gt-uoju5c).
+	SecretNamesRole = "deployer-secret-names"
+	DeployerGroup   = "gt-deployers"
 	// terminationGraceMargin keeps the pod alive past the drain, so the kubelet's
 	// SIGKILL lands after the daemon has finished stopping.
 	terminationGraceMargin = 30 * time.Second
@@ -942,6 +951,10 @@ type Manifests struct {
 	BdGatewayService     Service
 	BdGatewayPushService Service
 	Secrets              []Secret
+	// SecretNamesRole grants DeployerGroup get on the names Secrets holds, and
+	// SecretNamesBinding binds it. Both are zero when Secrets is empty.
+	SecretNamesRole      Role
+	SecretNamesBinding   RoleBinding
 	Deployment           Deployment
 	DashboardDeployment  Deployment
 	TrackerDeployment    Deployment
@@ -1075,7 +1088,44 @@ func Build(v Values) (Manifests, error) {
 	if !v.Rehearsal {
 		m.Secrets = append(m.Secrets, openShellSecret(namespace))
 	}
+	// The deployer reads the render's Secrets by name, so the grant is built last,
+	// from every Secret Render writes; a render with none grants nothing.
+	if names := secretNames(m.Secrets); len(names) > 0 {
+		m.SecretNamesRole = Role{
+			TypeMeta: TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "Role"},
+			Metadata: objectMeta(SecretNamesRole, namespace),
+			Rules: []PolicyRule{{
+				APIGroups:     []string{""},
+				Resources:     []string{"secrets"},
+				Verbs:         []string{"get"},
+				ResourceNames: names,
+			}},
+		}
+		m.SecretNamesBinding = RoleBinding{
+			TypeMeta: TypeMeta{APIVersion: "rbac.authorization.k8s.io/v1", Kind: "RoleBinding"},
+			Metadata: objectMeta(SecretNamesRole, namespace),
+			RoleRef:  RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: SecretNamesRole},
+			Subjects: []Subject{{Kind: "Group", Name: DeployerGroup}},
+		}
+	}
 	return m, nil
+}
+
+// secretNames is the names of secrets, sorted and without duplicates: the
+// resourceNames the named-Secrets read Role grants.
+func secretNames(secrets []Secret) []string {
+	names := make([]string, 0, len(secrets))
+	seen := make(map[string]bool, len(secrets))
+	for _, s := range secrets {
+		name := s.Metadata.Name
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // rehearsalFiles is the part of files a rehearsal renders, in the manifest's
@@ -2920,6 +2970,14 @@ func Render(w io.Writer, m Manifests) error {
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
 	}
+	// Build leaves the deployer's named-Secrets grant zero when the render holds
+	// no Secrets, so a zero object is one that was not rendered and is not written.
+	if m.SecretNamesRole.Kind != "" {
+		docs = append(docs, m.SecretNamesRole)
+	}
+	if m.SecretNamesBinding.Kind != "" {
+		docs = append(docs, m.SecretNamesBinding)
+	}
 	docs = append(docs, m.Deployment)
 	if m.DashboardDeployment.Kind != "" {
 		docs = append(docs, m.DashboardDeployment)
@@ -3084,8 +3142,25 @@ type ServiceAccount struct {
 	Metadata ObjectMeta `yaml:"metadata"`
 }
 
+// Role is the subset of rbac.authorization.k8s.io/v1's Role the builder renders:
+// its rules, in order.
+type Role struct {
+	TypeMeta `yaml:",inline"`
+	Metadata ObjectMeta   `yaml:"metadata"`
+	Rules    []PolicyRule `yaml:"rules"`
+}
+
+// PolicyRule is one rule of a Role: the API groups, resources, verbs and, when
+// the grant is by name, the resource names it covers.
+type PolicyRule struct {
+	APIGroups     []string `yaml:"apiGroups"`
+	Resources     []string `yaml:"resources"`
+	Verbs         []string `yaml:"verbs"`
+	ResourceNames []string `yaml:"resourceNames,omitempty"`
+}
+
 // RoleBinding is the subset of rbac.authorization.k8s.io/v1's RoleBinding the
-// builder renders: one RoleRef and the daemon's service account.
+// builder renders: one RoleRef and its subjects.
 type RoleBinding struct {
 	TypeMeta `yaml:",inline"`
 	Metadata ObjectMeta `yaml:"metadata"`

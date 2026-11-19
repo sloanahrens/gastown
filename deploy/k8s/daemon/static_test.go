@@ -56,8 +56,8 @@ func TestStaticScopesMatchTheEmbeddedSet(t *testing.T) {
 }
 
 // streamParts names the goldens of one live render, in the order Render writes
-// them. Every file predates the static set, so a comparison against them does
-// not rest on a golden this change created.
+// them. Each is one document's own golden, so a stream comparison never rests on
+// a golden only the stream test reads.
 func streamParts(v Values) []string {
 	parts := []string{
 		"namespace.yaml",
@@ -73,6 +73,8 @@ func streamParts(v Values) []string {
 	return append(parts,
 		"secret-"+CloudCheckKeySecretName+".yaml",
 		"secret-openshell.yaml",
+		"role-deployer-secret-names.yaml",
+		"rolebinding-deployer-secret-names.yaml",
 		"deployment.yaml",
 		"rolebinding-sweep-runner.yaml",
 		"rolebinding-ci-cache-trim.yaml",

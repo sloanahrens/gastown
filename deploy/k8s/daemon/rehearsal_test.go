@@ -134,10 +134,11 @@ func TestRehearsalMountsNoPromoteKeyAndBindsNoSweepRole(t *testing.T) {
 		}
 		kinds = append(kinds, obj.Kind)
 	}
-	// No binding document of any kind, not even an empty one.
-	want := []string{"Namespace", "ServiceAccount", "PersistentVolumeClaim", "PersistentVolumeClaim", "PersistentVolumeClaim", "Service", "Secret", "Deployment"}
+	// The only grant is the deployer's read of the rehearsal's own Secret: no
+	// sweep or cache-trim RoleBinding, and no ClusterRoleBinding, even an empty one.
+	want := []string{"Namespace", "ServiceAccount", "PersistentVolumeClaim", "PersistentVolumeClaim", "PersistentVolumeClaim", "Service", "Secret", "Role", "RoleBinding", "Deployment"}
 	if !slices.Equal(kinds, want) {
-		t.Errorf("the rehearsal renders the kinds %q, want %q: no RoleBinding or ClusterRoleBinding", kinds, want)
+		t.Errorf("the rehearsal renders the kinds %q, want %q: the named-Secrets grant alone, no sweep RoleBinding or ClusterRoleBinding", kinds, want)
 	}
 }
 

@@ -317,7 +317,8 @@ func TestTownClusterRenderWritesTheObjectsInApplyOrder(t *testing.T) {
 		"PersistentVolumeClaim", "PersistentVolumeClaim", "PersistentVolumeClaim",
 		"ServiceAccount",
 		"Service",
-		"RoleBinding", "RoleBinding", "ClusterRoleBinding",
+		"Role",
+		"RoleBinding", "RoleBinding", "RoleBinding", "ClusterRoleBinding",
 		"Deployment",
 	}
 	if got := renderedKinds(t, f.out); !slices.Equal(got, want) {
@@ -1376,9 +1377,24 @@ func TestTownClusterRenderRehearsalOmitsPromoteAndSweep(t *testing.T) {
 	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	for _, kind := range renderedKinds(t, f.out) {
-		if kind == "RoleBinding" || kind == "ClusterRoleBinding" {
-			t.Fatalf("a rehearsal wrote a sweep binding of kind %s", kind)
+	for _, name := range dirNames(t, f.out) {
+		data, err := os.ReadFile(filepath.Join(f.out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		var head struct {
+			Kind     string `yaml:"kind"`
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+		}
+		if err := yaml.Unmarshal(data, &head); err != nil {
+			t.Fatalf("%s does not parse back: %v", name, err)
+		}
+		// The deployer's named-Secrets grant is the one binding a rehearsal keeps:
+		// it reads the rehearsal's own Secret and is not a sweep role.
+		if head.Kind == "ClusterRoleBinding" || head.Kind == "RoleBinding" && head.Metadata.Name != k8sdaemon.SecretNamesRole {
+			t.Fatalf("a rehearsal wrote the binding %s %q, want the named-Secrets grant alone", head.Kind, head.Metadata.Name)
 		}
 	}
 	mounted := deploymentSecretVolumes(t, f.out)
@@ -1848,11 +1864,13 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 			"05-serviceaccount-daemon.yaml",
 			"06-service-forgejo.yaml",
 			"07-service-dashboard.yaml",
-			"08-rolebinding-daemon-sweep-runner.yaml",
-			"09-rolebinding-daemon-gt-ci-cache-trim.yaml",
-			"10-clusterrolebinding-daemon-gt-sweep-reader.yaml",
-			"11-deployment-daemon.yaml",
-			"12-deployment-dashboard.yaml",
+			"08-role-deployer-secret-names.yaml",
+			"09-rolebinding-deployer-secret-names.yaml",
+			"10-rolebinding-daemon-sweep-runner.yaml",
+			"11-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"12-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"13-deployment-daemon.yaml",
+			"14-deployment-dashboard.yaml",
 		}
 		if got := dirNames(t, f.out); !slices.Equal(got, want) {
 			t.Fatalf("file names = %v, want %v", got, want)
@@ -1880,10 +1898,12 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 			"04-persistentvolumeclaim-dolt-backup.yaml",
 			"05-serviceaccount-daemon.yaml",
 			"06-service-forgejo.yaml",
-			"07-rolebinding-daemon-sweep-runner.yaml",
-			"08-rolebinding-daemon-gt-ci-cache-trim.yaml",
-			"09-clusterrolebinding-daemon-gt-sweep-reader.yaml",
-			"10-deployment-daemon.yaml",
+			"07-role-deployer-secret-names.yaml",
+			"08-rolebinding-deployer-secret-names.yaml",
+			"09-rolebinding-daemon-sweep-runner.yaml",
+			"10-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"11-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"12-deployment-daemon.yaml",
 		}
 		if got := dirNames(t, f.out); !slices.Equal(got, want) {
 			t.Fatalf("file names without the flag = %v, want %v", got, want)
@@ -2096,11 +2116,13 @@ func TestTownClusterRenderTrackerFlag(t *testing.T) {
 			"05-serviceaccount-daemon.yaml",
 			"06-service-forgejo.yaml",
 			"07-service-trackerd.yaml",
-			"08-rolebinding-daemon-sweep-runner.yaml",
-			"09-rolebinding-daemon-gt-ci-cache-trim.yaml",
-			"10-clusterrolebinding-daemon-gt-sweep-reader.yaml",
-			"11-deployment-daemon.yaml",
-			"12-deployment-trackerd.yaml",
+			"08-role-deployer-secret-names.yaml",
+			"09-rolebinding-deployer-secret-names.yaml",
+			"10-rolebinding-daemon-sweep-runner.yaml",
+			"11-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"12-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"13-deployment-daemon.yaml",
+			"14-deployment-trackerd.yaml",
 		}
 		if got := dirNames(t, f.out); !slices.Equal(got, want) {
 			t.Fatalf("file names = %v, want %v", got, want)
@@ -2245,19 +2267,21 @@ func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
 			"05-serviceaccount-daemon.yaml",
 			"06-service-forgejo.yaml",
 			"07-service-trackerd.yaml",
-			"08-rolebinding-daemon-sweep-runner.yaml",
-			"09-rolebinding-daemon-gt-ci-cache-trim.yaml",
-			"10-clusterrolebinding-daemon-gt-sweep-reader.yaml",
-			"11-deployment-daemon.yaml",
-			"12-deployment-trackerd.yaml",
-			"13-persistentvolumeclaim-tracker-backup.yaml",
-			"14-cronjob-tracker-backup.yaml",
-			"15-pod-tracker-backup-reader.yaml",
+			"08-role-deployer-secret-names.yaml",
+			"09-rolebinding-deployer-secret-names.yaml",
+			"10-rolebinding-daemon-sweep-runner.yaml",
+			"11-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"12-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"13-deployment-daemon.yaml",
+			"14-deployment-trackerd.yaml",
+			"15-persistentvolumeclaim-tracker-backup.yaml",
+			"16-cronjob-tracker-backup.yaml",
+			"17-pod-tracker-backup-reader.yaml",
 		}
 		if got := dirNames(t, f.out); !slices.Equal(got, want) {
 			t.Fatalf("file names = %v, want %v", got, want)
 		}
-		cron, err := os.ReadFile(filepath.Join(f.out, "14-cronjob-tracker-backup.yaml"))
+		cron, err := os.ReadFile(filepath.Join(f.out, "16-cronjob-tracker-backup.yaml"))
 		if err != nil {
 			t.Fatalf("reading the CronJob: %v", err)
 		}
@@ -2347,7 +2371,7 @@ func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
 		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render: %v", err)
 		}
-		data, err := os.ReadFile(filepath.Join(f.out, "15-pod-tracker-backup-reader.yaml"))
+		data, err := os.ReadFile(filepath.Join(f.out, "17-pod-tracker-backup-reader.yaml"))
 		if err != nil {
 			t.Fatalf("reading the reader: %v", err)
 		}
@@ -2366,7 +2390,7 @@ func TestTownClusterRenderTrackerBackupFlag(t *testing.T) {
 		if err := yaml.Unmarshal(data, &pod); err != nil {
 			t.Fatalf("the reader does not parse back: %v", err)
 		}
-		if kind := renderedKind(t, filepath.Join(f.out, "15-pod-tracker-backup-reader.yaml")); kind != "Pod" {
+		if kind := renderedKind(t, filepath.Join(f.out, "17-pod-tracker-backup-reader.yaml")); kind != "Pod" {
 			t.Errorf("the reader's kind = %q, want Pod", kind)
 		}
 		if pod.Spec.RestartPolicy != "Never" {
