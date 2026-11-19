@@ -281,6 +281,8 @@ const (
 	// candidateRunPage bounds the runs listed when a red verdict is looking
 	// for the job whose log it carries.
 	candidateRunPage = 20
+	// candidateRunningPage bounds the running runs a gate record counts.
+	candidateRunningPage = 50
 	// candidateJobFailure is the job status Forgejo reports for a job that ran
 	// and failed, the fallback when the named job is not in the run.
 	candidateJobFailure = "failure"
@@ -344,9 +346,26 @@ func (g *CandidateGate) record(parent context.Context, wf GateWorkflow, w Work, 
 		row.RunS = secondsBetween(run.Started, run.Stopped)
 	}
 	row.TS, row.Rig, row.Bead, row.SHA = g.now(), g.RepoName, w.BeadID, res.SHA
+	row.RunningRuns = g.runningRuns(parent, w.BeadID, res.SHA)
 	// Passed is the verdict's: a failed log read must not record a pass as red.
 	row.Passed = res.State == CandidatePassed
 	g.Recorder(row)
+}
+
+// runningRuns counts the repository's running runs for a gate record, at most
+// candidateRunningPage. A failed list is -1 and logged; the verdict, already
+// decided, does not change (gt-cwr9n9).
+func (g *CandidateGate) runningRuns(parent context.Context, bead, sha string) int {
+	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
+	defer cancel()
+	runs, err := g.Client.ListRuns(ctx, g.Owner, g.RepoName, forgejo.RunFilter{
+		Status: []string{"running"}, Limit: candidateRunningPage,
+	})
+	if err != nil {
+		g.logf("%s: the running runs on %s could not be counted for its gate record: %v", bead, shortSHA(sha), err)
+		return -1
+	}
+	return len(runs.Runs)
 }
 
 // secondsBetween is the seconds from one RFC3339 run timestamp to the next: zero

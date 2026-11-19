@@ -53,13 +53,15 @@ func writeGateWorkflow(t *testing.T, body string) string {
 // status, so a test says whether the run behind a red context ran, was
 // cancelled, or was never there.
 type fakeForgejo struct {
-	mu       sync.Mutex
-	statuses []forgejo.CommitStatus
-	polls    int
-	runs     []forgejo.ActionRun
-	runsErr  error
-	jobs     []forgejo.ActionRunJob
-	log      string
+	mu         sync.Mutex
+	statuses   []forgejo.CommitStatus
+	polls      int
+	runs       []forgejo.ActionRun
+	runsErr    error
+	running    []forgejo.ActionRun
+	runningErr error
+	jobs       []forgejo.ActionRunJob
+	log        string
 	// limits is the maxBytes of every log fetch, in order: what the gate asked
 	// the server for.
 	limits []int64
@@ -94,7 +96,13 @@ func (f *fakeForgejo) CombinedStatus(context.Context, string, string, string) (*
 	return combined, nil
 }
 
-func (f *fakeForgejo) ListRuns(context.Context, string, string, forgejo.RunFilter) (*forgejo.RunList, error) {
+func (f *fakeForgejo) ListRuns(_ context.Context, _, _ string, filter forgejo.RunFilter) (*forgejo.RunList, error) {
+	if slices.Contains(filter.Status, "running") {
+		if f.runningErr != nil {
+			return nil, f.runningErr
+		}
+		return &forgejo.RunList{Runs: f.running}, nil
+	}
 	if f.runsErr != nil {
 		return nil, f.runsErr
 	}
@@ -1538,6 +1546,64 @@ func TestCandidateGateRecordsARed(t *testing.T) {
 				t.Fatalf("output %q; want the failed read logged: %q", out.String(), tc.wantLogged)
 			}
 		})
+	}
+}
+
+// TestCandidateGateRecordsRunningRuns: the row carries how many of the
+// repository's runs were running when the gate run was recorded (gt-cwr9n9).
+func TestCandidateGateRecordsRunningRuns(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses: []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+		runs:     []forgejo.ActionRun{recordRun(sha, "success")},
+		running:  []forgejo.ActionRun{{ID: 11}, {ID: 12}, {ID: 13}},
+		jobs:     []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "success"}},
+		log:      recordLogPass,
+	}
+	var recs []GateRun
+	gate := fastGate(client)
+	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil || res.State != CandidatePassed {
+		t.Fatalf("Run = state %v err %v; want passed with no error", res.State, res.Err)
+	}
+	if len(recs) != 1 || recs[0].RunningRuns != 3 {
+		t.Fatalf("recorded %+v; want one row with running_runs 3", recs)
+	}
+}
+
+// TestCandidateGateRecordsRunningRunsFails: a running-runs list that fails
+// records running_runs -1 and logs the failure, and the verdict stands
+// (gt-cwr9n9).
+func TestCandidateGateRecordsRunningRunsFails(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	sha := f.git.Commit(t, f.repo, "main", "candidate", map[string]string{"c.txt": "x\n"})
+	client := &fakeForgejo{
+		statuses:   []forgejo.CommitStatus{status(forgejo.StateSuccess, "ci / gate (push)")},
+		runs:       []forgejo.ActionRun{recordRun(sha, "success")},
+		runningErr: errors.New("running runs unreadable"),
+		jobs:       []forgejo.ActionRunJob{{ID: 9, RunID: 7, Name: "gate", Status: "success"}},
+		log:        recordLogPass,
+	}
+	var recs []GateRun
+	var out strings.Builder
+	gate := fastGate(client)
+	gate.Out = &out
+	gate.Recorder = func(r GateRun) { recs = append(recs, r) }
+
+	res := gate.Run(context.Background(), f.git.Open(f.repo), writeGateWorkflow(t, gateWorkflowYAML), f.work, sha)
+	if res.Err != nil || res.State != CandidatePassed {
+		t.Fatalf("Run = state %v err %v; want passed with no error", res.State, res.Err)
+	}
+	if len(recs) != 1 || recs[0].RunningRuns != -1 {
+		t.Fatalf("recorded %+v; want one row with running_runs -1", recs)
+	}
+	if !strings.Contains(out.String(), "running runs unreadable") {
+		t.Fatalf("output %q; want the failed count logged", out.String())
 	}
 }
 
