@@ -448,7 +448,7 @@ func TestDeploymentDriftReportsEveryFieldTheRenderNames(t *testing.T) {
 			if tc.live != nil {
 				tc.live(t, live)
 			}
-			got, err := deploymentDrift(rendered, live)
+			got, err := objectDrift("Deployment", rendered, live)
 			if err != nil {
 				t.Fatalf("deploymentDrift: %v", err)
 			}
@@ -475,7 +475,7 @@ func TestDeploymentDriftNeverPrintsAValue(t *testing.T) {
 	container := driftContainer(t, live, "daemon")
 	driftEnvOf(t, container, "TZ")["value"] = token
 	container["args"].([]any)[1] = token
-	got, err := deploymentDrift(rendered, live)
+	got, err := objectDrift("Deployment", rendered, live)
 	if err != nil {
 		t.Fatalf("deploymentDrift: %v", err)
 	}
@@ -596,7 +596,7 @@ func TestDeploymentDriftIgnoresImageRolls(t *testing.T) {
 			if tc.live != nil {
 				tc.live(t, live)
 			}
-			got, err := deploymentDrift(rendered, live)
+			got, err := objectDrift("Deployment", rendered, live)
 			if err != nil {
 				t.Fatalf("deploymentDrift: %v", err)
 			}
@@ -625,7 +625,7 @@ func TestDeploymentDriftRefusesAnUnreadableSide(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := deploymentDrift(tc.rendered, tc.live)
+			got, err := objectDrift("Deployment", tc.rendered, tc.live)
 			if err == nil {
 				t.Fatalf("drift = %q with no error, want the unreadable side refused", got)
 			}
@@ -664,7 +664,7 @@ func TestDeploymentDriftRefusesAValueItCannotFingerprint(t *testing.T) {
 			rendered := driftRendered()
 			live := driftLive(rendered)
 			tc.rendered(rendered, live)
-			got, err := deploymentDrift(rendered, live)
+			got, err := objectDrift("Deployment", rendered, live)
 			if err == nil {
 				t.Fatalf("drift = %q with no error, want the value refused", got)
 			}

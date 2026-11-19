@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	forgejorunner "github.com/steveyegge/gastown/deploy/k8s/forgejo-runner"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -34,7 +35,7 @@ func driftTestSeams(t *testing.T, adjust func(*clusterRenderFlags)) (clusterDrif
 		t.Fatalf("recording the render flags: %v", err)
 	}
 	out := &bytes.Buffer{}
-	return clusterDriftDeps{render: clusterRenderDepsAt(t, town, io.Discard), out: out}, out, town
+	return clusterDriftDeps{render: clusterRenderDepsAt(t, town, io.Discard), runner: realRunnerDriftTargets, out: out}, out, town
 }
 
 // driftTestFlags is the flag set the run reads back from the town.
@@ -62,9 +63,31 @@ func driftTestRendered(t *testing.T, d clusterDriftDeps, flags clusterRenderFlag
 	return m
 }
 
-// driftAnswering answers each kubectl read with the live form of the Deployment
-// the run rendered, then applies mutate to it.
+// driftAnswering answers each kubectl read with the live form of the object the
+// run rendered, then applies mutate to the Deployments the flags render. The
+// runner's objects come from the control values, as the run's own render does,
+// and carry no mutation, since a case's mutation names a flag-rendered object.
 func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T, map[string]any)) update.RunFunc {
+	t.Helper()
+	objects := map[string]any{}
+	for resource, deployment := range map[string]k8sdaemon.Deployment{
+		"deployment/" + k8sdaemon.Name:          m.Deployment,
+		"deployment/" + k8sdaemon.DashboardName: m.DashboardDeployment,
+		"deployment/" + k8sdaemon.TrackerName:   m.TrackerDeployment,
+		"deployment/" + k8sdaemon.BdGatewayName: m.BdGatewayDeployment,
+	} {
+		if deployment.Kind != "" {
+			objects[resource] = deployment
+		}
+	}
+	runnerTargets, err := realRunnerDriftTargets()
+	if err != nil {
+		t.Fatalf("rendering the gate runner: %v", err)
+	}
+	runner := map[string]any{}
+	for _, target := range runnerTargets {
+		runner[target.resource] = target.object
+	}
 	return func(_ context.Context, _ string, _ []string, name string, args ...string) (string, int, error) {
 		if name != "kubectl" {
 			t.Fatalf("ran %q, want kubectl", name)
@@ -72,23 +95,14 @@ func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T,
 		if len(args) < 2 || args[0] != "get" || args[len(args)-1] != "json" {
 			t.Fatalf("ran kubectl %q, want a get with -o json", args)
 		}
-		var deployment k8sdaemon.Deployment
-		switch resource := args[1]; resource {
-		case "deployment/" + k8sdaemon.Name:
-			deployment = m.Deployment
-		case "deployment/" + k8sdaemon.DashboardName:
-			deployment = m.DashboardDeployment
-		case "deployment/" + k8sdaemon.TrackerName:
-			deployment = m.TrackerDeployment
-		case "deployment/" + k8sdaemon.BdGatewayName:
-			deployment = m.BdGatewayDeployment
-		default:
-			t.Fatalf("kubectl read %q, which the run did not render", resource)
+		if object, ok := runner[args[1]]; ok {
+			return driftLiveAnswer(t, object, nil), 0, nil
 		}
-		if deployment.Kind == "" {
-			t.Fatalf("kubectl read %q, which the render did not build", args[1])
+		object, ok := objects[args[1]]
+		if !ok {
+			t.Fatalf("kubectl read %q, which the run did not render", args[1])
 		}
-		return driftLiveAnswer(t, deployment, mutate), 0, nil
+		return driftLiveAnswer(t, object, mutate), 0, nil
 	}
 }
 
@@ -101,10 +115,10 @@ func driftNoRead(t *testing.T) update.RunFunc {
 	}
 }
 
-// driftLiveAnswer returns the rendered Deployment as kubectl reports the live
-// one: a JSON round trip, so its numbers are float64 as encoding/json makes them,
-// plus the fields and defaults the API server adds, then mutate.
-func driftLiveAnswer(t *testing.T, rendered k8sdaemon.Deployment, mutate func(*testing.T, map[string]any)) string {
+// driftLiveAnswer returns the rendered object as kubectl reports the live one: a
+// JSON round trip, so its numbers are float64 as encoding/json makes them, plus
+// the fields and defaults the API server adds, then mutate.
+func driftLiveAnswer(t *testing.T, rendered any, mutate func(*testing.T, map[string]any)) string {
 	t.Helper()
 	live := driftDecodedDeployment(t, rendered)
 	driftServerFields(live)
@@ -118,17 +132,17 @@ func driftLiveAnswer(t *testing.T, rendered k8sdaemon.Deployment, mutate func(*t
 	return string(encoded)
 }
 
-// driftDecodedDeployment decodes a rendered Deployment to the field tree
+// driftDecodedDeployment decodes a rendered object to the field tree
 // encoding/json makes of the same object.
-func driftDecodedDeployment(t *testing.T, rendered k8sdaemon.Deployment) map[string]any {
+func driftDecodedDeployment(t *testing.T, rendered any) map[string]any {
 	t.Helper()
 	var body bytes.Buffer
 	if err := k8sdaemon.YAML(&body, rendered); err != nil {
-		t.Fatalf("encoding the rendered Deployment: %v", err)
+		t.Fatalf("encoding the rendered object: %v", err)
 	}
 	var decoded map[string]any
 	if err := yaml.Unmarshal(body.Bytes(), &decoded); err != nil {
-		t.Fatalf("decoding the rendered Deployment: %v", err)
+		t.Fatalf("decoding the rendered object: %v", err)
 	}
 	encoded, err := json.Marshal(decoded)
 	if err != nil {
@@ -142,13 +156,17 @@ func driftDecodedDeployment(t *testing.T, rendered k8sdaemon.Deployment) map[str
 }
 
 // driftServerFields adds what the API server fills in after the render is
-// applied: the metadata it stamps, the defaults it sets, and a status.
+// applied: the metadata it stamps, the defaults it sets, and a status. A
+// ConfigMap gets only the metadata, since the server sets no pod fields on it.
 func driftServerFields(live map[string]any) {
 	metadata := driftObjectAt(live, "metadata")
-	metadata["generation"] = 4
 	metadata["resourceVersion"] = "12345"
 	metadata["uid"] = "5d0e6a2c-0000-4000-8000-000000000000"
 	metadata["creationTimestamp"] = "2026-11-15T10:00:00Z"
+	if live["kind"] != "Deployment" {
+		return
+	}
+	metadata["generation"] = 4
 	driftObjectAt(metadata, "annotations")["deployment.kubernetes.io/revision"] = "4"
 
 	templateMeta := driftTemplateMeta(live)
@@ -158,6 +176,11 @@ func driftServerFields(live map[string]any) {
 	podSpec := driftPodSpec(live)
 	podSpec["dnsPolicy"] = "ClusterFirst"
 	podSpec["restartPolicy"] = "Always"
+	// The server defaults the grace period only when the render names none, as
+	// it does for the runner and not for the daemon.
+	if _, named := podSpec["terminationGracePeriodSeconds"]; !named {
+		podSpec["terminationGracePeriodSeconds"] = 30
+	}
 
 	spec := driftObjectAt(live, "spec")
 	spec["progressDeadlineSeconds"] = 600
@@ -275,6 +298,8 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 		"deployment/" + k8sdaemon.DashboardName,
 		"deployment/" + k8sdaemon.TrackerName,
 		"deployment/" + k8sdaemon.BdGatewayName,
+		"deployment/" + forgejorunner.Name,
+		"configmap/" + forgejorunner.Name + "-config",
 	}
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
@@ -329,8 +354,9 @@ func TestTownClusterDriftRefusesATrackerdOrGatewayTheClusterDoesNotHold(t *testi
 }
 
 // TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender holds flags that render
-// no trackerd and no bd gateway to the two reads the run made before, the daemon
-// and the dashboard.
+// no trackerd and no bd gateway to the two flag-rendered reads the run made
+// before, the daemon and the dashboard, followed by the runner the control
+// values always render.
 func TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender(t *testing.T) {
 	t.Parallel()
 	d, out, town := driftTestSeams(t, func(f *clusterRenderFlags) { f.dashboard = true })
@@ -341,7 +367,12 @@ func TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender(t *testing.T) {
 	if got := driftExit(err); got != 0 {
 		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", got, err, out.String())
 	}
-	wantReads := []string{"deployment/" + k8sdaemon.Name, "deployment/" + k8sdaemon.DashboardName}
+	wantReads := []string{
+		"deployment/" + k8sdaemon.Name,
+		"deployment/" + k8sdaemon.DashboardName,
+		"deployment/" + forgejorunner.Name,
+		"configmap/" + forgejorunner.Name + "-config",
+	}
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
 	}
@@ -726,6 +757,360 @@ func TestTownClusterDriftExits2ForEachInputItCannotRead(t *testing.T) {
 			}
 			if got := driftLines(out); got != nil {
 				t.Errorf("printed %q beside the refusal, want nothing", got)
+			}
+		})
+	}
+}
+
+// The gate runner's live objects as recorded: the render with the fields the API
+// server fills in, the dind share at the cpu 8 of values.control.yaml, the pod
+// left to the server's 30-second grace period, and config.yml at the capacity 2
+// the control values name. The template has since named its own grace period and
+// shutdown wait, so a compare against this record reports them as drift.
+const (
+	driftRunnerDeploymentFixture = "forgejo_runner_deployment.live.json"
+	driftRunnerConfigFixture     = "forgejo_runner_config.live.json"
+)
+
+// driftRecordedObject reads a recorded live object, the JSON kubectl answered
+// with, from testdata.
+func driftRecordedObject(t *testing.T, name string) map[string]any {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("reading the recorded %s: %v", name, err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(data, &object); err != nil {
+		t.Fatalf("decoding the recorded %s: %v", name, err)
+	}
+	return object
+}
+
+// driftRecordedAnswer answers the named resources with a recorded live object
+// exactly as it was recorded, and every other read with answer.
+func driftRecordedAnswer(t *testing.T, answer update.RunFunc, recorded map[string]map[string]any) update.RunFunc {
+	t.Helper()
+	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if len(args) > 1 {
+			if object, ok := recorded[args[1]]; ok {
+				encoded, err := json.Marshal(object)
+				if err != nil {
+					t.Fatalf("encoding the recorded %s answer: %v", args[1], err)
+				}
+				return string(encoded), 0, nil
+			}
+		}
+		return answer(ctx, dir, env, name, args...)
+	}
+}
+
+// driftControlRunner is the control cluster's values, held to the share the case
+// names so a test renders a runner that differs from the record.
+func driftControlRunner(t *testing.T, dindCPU string) forgejorunner.Values {
+	t.Helper()
+	v, err := forgejorunner.ControlValues()
+	if err != nil {
+		t.Fatalf("reading the control cluster's values: %v", err)
+	}
+	if dindCPU != "" {
+		v.DindResources.CPU = dindCPU
+	}
+	return v
+}
+
+// driftRunnerRendering is the command's runner seam rendering v.
+func driftRunnerRendering(t *testing.T, v forgejorunner.Values) func() ([]driftTarget, error) {
+	t.Helper()
+	m, err := forgejorunner.Build(v)
+	if err != nil {
+		t.Fatalf("rendering the runner: %v", err)
+	}
+	targets := runnerDriftTargets(m)
+	return func() ([]driftTarget, error) { return targets, nil }
+}
+
+// TestTownClusterDriftReportsTheGateRunnersDindShare holds the recorded cluster's
+// dind share of 8 to a render of 6, which is one line for the cpu request and one
+// for the limit, and the control values' own 8 to a cluster in step.
+func TestTownClusterDriftReportsTheGateRunnersDindShare(t *testing.T) {
+	t.Parallel()
+	recorded := map[string]map[string]any{
+		"deployment/" + forgejorunner.Name:            driftRecordedObject(t, driftRunnerDeploymentFixture),
+		"configmap/" + forgejorunner.Name + "-config": driftRecordedObject(t, driftRunnerConfigFixture),
+	}
+	six := driftControlRunner(t, "6")
+	sixManifests, err := forgejorunner.Build(six)
+	if err != nil {
+		t.Fatalf("rendering the runner from a dind share of 6: %v", err)
+	}
+	recordedConfig := recorded["configmap/"+forgejorunner.Name+"-config"]["data"].(map[string]any)["config.yml"].(string)
+	deploymentLine := "deployment/" + forgejorunner.Name + ": "
+	cases := []struct {
+		name      string
+		render    func() ([]driftTarget, error)
+		recorded  bool
+		wantExit  int
+		wantLines []string
+	}{
+		{
+			name:     "the render matches the live objects",
+			render:   realRunnerDriftTargets,
+			wantExit: 0,
+		},
+		{
+			name:     "a render of 6 against the recorded 8",
+			render:   driftRunnerRendering(t, six),
+			recorded: true,
+			wantExit: 1,
+			wantLines: []string{
+				deploymentLine + driftWantDifference(t, "spec.template.spec.containers[name=dind].resources.limits.cpu", "6", "8"),
+				deploymentLine + driftWantDifference(t, "spec.template.spec.containers[name=dind].resources.requests.cpu", "6", "8"),
+				// The record predates the template's own grace period, so the
+				// compare names it too.
+				deploymentLine + driftWantDifference(t, "spec.template.spec.terminationGracePeriodSeconds", forgejorunner.TerminationGrace, 30),
+				"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", sixManifests.ConfigMap.Data["config.yml"], recordedConfig),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, out, town := driftTestSeams(t, nil)
+			m := driftTestRendered(t, d, driftTestFlags(t, town))
+			d.runner = tc.render
+			d.kubectl = driftAnswering(t, m, nil)
+			if tc.recorded {
+				d.kubectl = driftRecordedAnswer(t, d.kubectl, recorded)
+			}
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != tc.wantExit {
+				t.Fatalf("exit = %d, want %d (err: %v); printed:\n%s", got, tc.wantExit, err, out.String())
+			}
+			if got := driftLines(out); !slices.Equal(got, tc.wantLines) {
+				t.Errorf("printed\n%q\nwant\n%q", got, tc.wantLines)
+			}
+		})
+	}
+}
+
+// TestTownClusterDriftReportsEachRunnerDifference moves one field of the
+// recorded live Deployment in the render, so the compare must name the grace
+// period, the strategy and an argument by path.
+func TestTownClusterDriftReportsEachRunnerDifference(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		moved    func(t *testing.T, rendered map[string]any)
+		path     string
+		rendered any
+		observed any
+	}{
+		{
+			name: "a grace period",
+			moved: func(_ *testing.T, rendered map[string]any) {
+				driftPodSpec(rendered)["terminationGracePeriodSeconds"] = 60
+			},
+			path:     "spec.template.spec.terminationGracePeriodSeconds",
+			rendered: 60,
+			observed: 30,
+		},
+		{
+			name: "a strategy",
+			moved: func(_ *testing.T, rendered map[string]any) {
+				driftObjectAt(rendered, "spec", "strategy")["type"] = "RollingUpdate"
+			},
+			path:     "spec.strategy.type",
+			rendered: "RollingUpdate",
+			observed: forgejorunner.Recreate,
+		},
+		{
+			name: "an argument",
+			moved: func(t *testing.T, rendered map[string]any) {
+				driftContainer(t, rendered, "dind")["args"] = []any{"--insecure-registry=forgejo:3999"}
+			},
+			path:     "spec.template.spec.containers[name=dind].args[0]",
+			rendered: "--insecure-registry=forgejo:3999",
+			observed: "--insecure-registry=forgejo:3000",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, out, town := driftTestSeams(t, nil)
+			m := driftTestRendered(t, d, driftTestFlags(t, town))
+			live := driftRecordedObject(t, driftRunnerDeploymentFixture)
+			rendered := driftRecordedObject(t, driftRunnerDeploymentFixture)
+			tc.moved(t, rendered)
+			targets := runnerDriftTargets(mustBuildRunner(t, driftControlRunner(t, "")))
+			for i := range targets {
+				if targets[i].kind == "Deployment" {
+					targets[i].object = rendered
+				}
+			}
+			d.runner = func() ([]driftTarget, error) { return targets, nil }
+			d.kubectl = driftRecordedAnswer(t, driftAnswering(t, m, nil), map[string]map[string]any{
+				"deployment/" + forgejorunner.Name: live,
+			})
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != 1 {
+				t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
+			}
+			wantLines := []string{"deployment/" + forgejorunner.Name + ": " + driftWantDifference(t, tc.path, tc.rendered, tc.observed)}
+			if got := driftLines(out); !slices.Equal(got, wantLines) {
+				t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
+			}
+		})
+	}
+}
+
+// mustBuildRunner renders v's runner manifests, failing the test when they
+// cannot be built.
+func mustBuildRunner(t *testing.T, v forgejorunner.Values) forgejorunner.Manifests {
+	t.Helper()
+	m, err := forgejorunner.Build(v)
+	if err != nil {
+		t.Fatalf("rendering the runner: %v", err)
+	}
+	return m
+}
+
+// TestTownClusterDriftReportsTheRunnersConfig holds a recorded ConfigMap whose
+// config.yml differs to one line naming data.config.yml and a fingerprint of
+// each side, with the document's text nowhere in the output.
+func TestTownClusterDriftReportsTheRunnersConfig(t *testing.T) {
+	t.Parallel()
+	d, out, town := driftTestSeams(t, nil)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	renderedConfig := mustBuildRunner(t, driftControlRunner(t, "")).ConfigMap.Data["config.yml"]
+	live := driftRecordedObject(t, driftRunnerConfigFixture)
+	recordedConfig := live["data"].(map[string]any)["config.yml"].(string)
+	liveConfig := strings.Replace(recordedConfig, "capacity: 2", "capacity: 3", 1)
+	if liveConfig == recordedConfig {
+		t.Fatal("fixture: the recorded config.yml names no capacity of 2")
+	}
+	live["data"].(map[string]any)["config.yml"] = liveConfig
+	d.kubectl = driftRecordedAnswer(t, driftAnswering(t, m, nil), map[string]map[string]any{
+		"configmap/" + forgejorunner.Name + "-config": live,
+	})
+	err := runClusterDrift(context.Background(), d)
+	if got := driftExit(err); got != 1 {
+		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
+	}
+	wantLines := []string{"configmap/" + forgejorunner.Name + "-config: " + driftWantDifference(t, "data.config.yml", renderedConfig, liveConfig)}
+	if got := driftLines(out); !slices.Equal(got, wantLines) {
+		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
+	}
+	if strings.Contains(out.String(), "capacity") {
+		t.Errorf("printed the config.yml text, want paths and fingerprints only:\n%s", out.String())
+	}
+	for _, line := range driftLines(out) {
+		if !driftLineShape.MatchString(line) {
+			t.Errorf("line %q is not a path and two fingerprints", line)
+		}
+	}
+}
+
+// TestTownClusterDriftRefusesAnUnreadableGateRunner holds the runner Deployment
+// and ConfigMap the cluster does not hold to the unreadable exit status, never 0
+// or 1.
+func TestTownClusterDriftRefusesAnUnreadableGateRunner(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		resource string
+	}{
+		{name: "the runner is absent", resource: "deployment/" + forgejorunner.Name},
+		{name: "the runner's config is absent", resource: "configmap/" + forgejorunner.Name + "-config"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, out, town := driftTestSeams(t, nil)
+			answer := driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil)
+			d.kubectl = func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+				if len(args) > 1 && args[1] == tc.resource {
+					// kubectl's status for an object the cluster does not hold.
+					return "", 1, nil
+				}
+				return answer(ctx, dir, env, name, args...)
+			}
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != driftExitUnreadable {
+				t.Fatalf("exit = %d, want %d (err: %v); printed:\n%s", got, driftExitUnreadable, err, out.String())
+			}
+			if want := "the live " + tc.resource + " could not be read"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not hold %q", err, want)
+			}
+			if got := driftLines(out); got != nil {
+				t.Errorf("printed %q beside the refusal, want nothing", got)
+			}
+		})
+	}
+}
+
+// TestTownClusterDriftRefusesARunnerItCannotRender holds a runner render that
+// refuses to the unreadable exit status, before any cluster read.
+func TestTownClusterDriftRefusesARunnerItCannotRender(t *testing.T) {
+	t.Parallel()
+	d, out, _ := driftTestSeams(t, nil)
+	d.runner = func() ([]driftTarget, error) {
+		return nil, errors.New("values.control.yaml: capacity: want a job count of zero or more")
+	}
+	d.kubectl = driftNoRead(t)
+	err := runClusterDrift(context.Background(), d)
+	if got := driftExit(err); got != driftExitUnreadable {
+		t.Fatalf("exit = %d, want %d (err: %v); printed:\n%s", got, driftExitUnreadable, err, out.String())
+	}
+	if want := "cannot render the gate runner to compare"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not hold %q", err, want)
+	}
+	if got := driftLines(out); got != nil {
+		t.Errorf("printed %q beside the refusal, want nothing", got)
+	}
+}
+
+// TestRunnerDriftTargetsRefusesAValueOrBuildItCannotRead holds the runner's
+// targets to both refusals: values that cannot be decoded and a build that
+// refuses are errors, never a target list the compare reads as a cluster in
+// step.
+func TestRunnerDriftTargetsRefusesAValueOrBuildItCannotRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		values func() (forgejorunner.Values, error)
+		build  func(forgejorunner.Values) (forgejorunner.Manifests, error)
+		want   string
+	}{
+		{
+			name: "the values cannot be read",
+			values: func() (forgejorunner.Values, error) {
+				return forgejorunner.Values{}, errors.New("values.control.yaml: capacity: want a job count of zero or more")
+			},
+			build: forgejorunner.Build,
+			want:  "reading the control cluster's runner values",
+		},
+		{
+			name:   "the render refuses",
+			values: forgejorunner.ControlValues,
+			build: func(forgejorunner.Values) (forgejorunner.Manifests, error) {
+				return forgejorunner.Manifests{}, errors.New("the dind share is empty")
+			},
+			want: "rendering the runner",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			targets, err := runnerDriftTargetsFrom(tc.values, tc.build)
+			if err == nil {
+				t.Fatalf("targets = %d with no error, want the refusal", len(targets))
+			}
+			if targets != nil {
+				t.Errorf("targets = %v beside the error, want none", targets)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not hold %q", err, tc.want)
 			}
 		})
 	}

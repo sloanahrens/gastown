@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"math/big"
@@ -38,16 +37,18 @@ var serverSetRootKeys = map[string]bool{
 	"status": true,
 }
 
-// deploymentDrift lists every rendered Deployment field the live one lacks or
+// objectDrift lists every rendered field of a kind object the live one lacks or
 // carries differently, one sorted line per field naming its JSON path and a
 // fingerprint of each side, never either value, and refuses either side that
-// decoded to nothing (gt-jqfk62, gt-wi4885).
-func deploymentDrift(rendered, live map[string]any) ([]string, error) {
+// decoded to nothing (gt-jqfk62, gt-wi4885). It compares Deployments and,
+// since the gate runner has one, its ConfigMap, whose data.config.yml is
+// therefore reported by path and fingerprint and never printed (gt-pkz70c).
+func objectDrift(kind string, rendered, live map[string]any) ([]string, error) {
 	if len(rendered) == 0 {
-		return nil, errors.New("deployment drift: the rendered Deployment has no fields, so it was not read; an unreadable render is not a cluster in step")
+		return nil, fmt.Errorf("%s drift: the rendered %s has no fields, so it was not read; an unreadable render is not a cluster in step", strings.ToLower(kind), kind)
 	}
 	if len(live) == 0 {
-		return nil, errors.New("deployment drift: the live Deployment has no fields, so it was not read; an unreadable object is not a cluster in step")
+		return nil, fmt.Errorf("%s drift: the live %s has no fields, so it was not read; an unreadable object is not a cluster in step", strings.ToLower(kind), kind)
 	}
 	w := &driftWalk{}
 	w.object("", rendered, live)
