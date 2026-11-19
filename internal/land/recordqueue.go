@@ -3,6 +3,7 @@ package land
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -42,14 +43,19 @@ type queueEntry struct {
 var recordQueueMu sync.Mutex
 
 // walk runs fn over the queue's entries under the process mutex; a missing file
-// is an empty queue.
+// is an empty queue. The read refuses a symlink as the append does.
 func (q RecordQueue) walk(fn func([]queueEntry) error) error {
 	recordQueueMu.Lock()
 	defer recordQueueMu.Unlock()
-	body, err := os.ReadFile(q.Path)
+	fh, err := os.OpenFile(q.Path, os.O_RDONLY|oNoFollow, 0)
 	if os.IsNotExist(err) {
 		return fn(nil)
 	}
+	if err != nil {
+		return fmt.Errorf("reading landing record queue: %w", err)
+	}
+	defer func() { _ = fh.Close() }()
+	body, err := io.ReadAll(fh)
 	if err != nil {
 		return fmt.Errorf("reading landing record queue: %w", err)
 	}
@@ -68,6 +74,9 @@ func (q RecordQueue) walk(fn func([]queueEntry) error) error {
 func (q RecordQueue) Enqueue(rec PendingRecord) error {
 	if rec.Kind != RecordKindNotes && rec.Kind != RecordKindComment {
 		return fmt.Errorf("queueing landing record: unknown kind %q", rec.Kind)
+	}
+	if rec.Bead == "" || rec.Key == "" {
+		return fmt.Errorf("queueing landing record: a bead and a key are required")
 	}
 	return q.walk(func(entries []queueEntry) error {
 		for _, e := range entries {

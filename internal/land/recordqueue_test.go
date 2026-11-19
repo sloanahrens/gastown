@@ -72,31 +72,36 @@ func TestRecordQueueFailures(t *testing.T) {
 	}
 	ok := PendingRecord{Bead: "gt-a", Kind: RecordKindNotes, Key: "k", Text: "one", At: time.Unix(1, 0).UTC()}
 	long := filepath.Join(t.TempDir(), strings.Repeat("x", 300))
-	verdict, unencodable := ok, ok
+	verdict, unencodable, beadless, keyless := ok, ok, ok, ok
 	verdict.Kind = "verdict"
 	unencodable.At = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
-	ro := t.TempDir()
-	if err := (RecordQueue{Path: filepath.Join(ro, "rw.jsonl")}).Enqueue(ok); err != nil {
+	beadless.Bead = ""
+	keyless.Key = ""
+	// Remove's rewrite names its temp file base+".tmp.<digits>", so a 250-byte
+	// base is a valid queue name whose temp name is over NAME_MAX: the rewrite is
+	// refused whatever account runs the test.
+	tempTooLong := filepath.Join(t.TempDir(), strings.Repeat("y", 250))
+	if err := (RecordQueue{Path: tempTooLong}).Enqueue(ok); err != nil {
 		t.Fatal(err)
 	}
-	//testpolicy:allow no-exec-files — the fixture directory drops its write bit (0500 keeps the search bit) so the append's create and the rewrite's temp file are refused
-	if err := os.Chmod(ro, 0o500); err != nil {
+	// Group and other can write this directory, so the landings dir's private
+	// check refuses it for every account, root included.
+	open := t.TempDir()
+	//testpolicy:allow no-exec-files — a directory, not a file: its owner search bit lets the append reach the private-mode check
+	if err := os.Chmod(open, 0o766); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		//testpolicy:allow no-exec-files — the target is the fixture directory: t.TempDir needs its search bit back to remove it
-		if err := os.Chmod(ro, 0o700); err != nil {
-			t.Errorf("restore fixture directory permissions: %v", err)
-		}
-	})
 	cases := []op{
 		{"pending reads an unopenable queue", func() error { _, err := (RecordQueue{Path: long}).Pending(); return err }},
 		{"enqueue reads an unopenable queue", func() error { return (RecordQueue{Path: long}).Enqueue(ok) }},
 		{"remove reads an unopenable queue", func() error { return (RecordQueue{Path: long}).Remove(ok) }},
+		{"pending reads a directory as the queue", func() error { _, err := (RecordQueue{Path: t.TempDir()}).Pending(); return err }},
 		{"unknown kind", func() error { return (RecordQueue{Path: long}).Enqueue(verdict) }},
+		{"enqueue without a bead", func() error { return (RecordQueue{Path: filepath.Join(t.TempDir(), "a")}).Enqueue(beadless) }},
+		{"enqueue without a key", func() error { return (RecordQueue{Path: filepath.Join(t.TempDir(), "a")}).Enqueue(keyless) }},
 		{"unencodable record", func() error { return (RecordQueue{Path: filepath.Join(t.TempDir(), "a")}).Enqueue(unencodable) }},
-		{"append into a read-only directory", func() error { return (RecordQueue{Path: filepath.Join(ro, "new.jsonl")}).Enqueue(ok) }},
-		{"rewrite into a read-only directory", func() error { return (RecordQueue{Path: filepath.Join(ro, "rw.jsonl")}).Remove(ok) }},
+		{"append into a non-private directory", func() error { return (RecordQueue{Path: filepath.Join(open, "new.jsonl")}).Enqueue(ok) }},
+		{"rewrite whose temp name is too long", func() error { return (RecordQueue{Path: tempTooLong}).Remove(ok) }},
 	}
 	for _, c := range cases {
 		if err := c.run(); err == nil {
