@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -806,6 +807,142 @@ func TestCICacheTrimReplyMustBeExact(t *testing.T) {
 		if _, err := parseCICacheTrimReply([]byte(out)); err == nil {
 			t.Errorf("%s reply parsed without an error", name)
 		}
+	}
+}
+
+// TestCICacheTrimSelection: the list program's reply is one line per selected
+// file and then the three figures. Every file line must be a clean absolute path
+// strictly inside the volume root, and there is one for each removed file. A
+// reply that breaks a rule is refused as a *ciCacheSelectionError carrying the
+// rule and the line number, never the file name.
+func TestCICacheTrimSelection(t *testing.T) {
+	t.Parallel()
+	const root = "/vol/ci-gocache/_data"
+
+	t.Run("a reply of file lines and the three figures returns the figures", func(t *testing.T) {
+		t.Parallel()
+		got, err := parseCICacheTrimSelection([]byte(
+			root+"/aa/one\n"+root+"/bb/two\nbefore_kib=9\nremoved=2\nafter_kib=5\n"), root)
+		if err != nil {
+			t.Fatalf("a well-formed selection does not parse: %v", err)
+		}
+		if want := (ciCacheTrimReply{beforeKiB: 9, removed: 2, afterKiB: 5}); got != want {
+			t.Errorf("parsed %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("a reply with no file lines returns removed 0", func(t *testing.T) {
+		t.Parallel()
+		got, err := parseCICacheTrimSelection([]byte("before_kib=9\nremoved=0\nafter_kib=9\n"), root)
+		if err != nil || got.removed != 0 {
+			t.Errorf("a reply with no file lines = %+v, %v; want removed 0 and no error", got, err)
+		}
+	})
+
+	t.Run("an empty root is refused", func(t *testing.T) {
+		t.Parallel()
+		if _, err := parseCICacheTrimSelection([]byte("before_kib=9\nremoved=0\nafter_kib=9\n"), ""); err == nil {
+			t.Error("an empty root parsed without an error")
+		}
+	})
+
+	tests := []struct {
+		name string
+		out  string
+		rule string
+		line int
+	}{
+		{
+			name: "an empty line is refused",
+			out:  "\n" + root + "/aa/one\nbefore_kib=9\nremoved=2\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleEmpty,
+			line: 1,
+		},
+		{
+			name: "a file line outside the root is refused",
+			out:  root + "/aa/one\n/vol/ci-npm/_data/other\nbefore_kib=9\nremoved=2\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleOutsideRoot,
+			line: 2,
+		},
+		{
+			name: "a .. in the middle of a path is refused",
+			out:  root + "/aa/../etc/x\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleNotClean,
+			line: 1,
+		},
+		{
+			name: "a .. at the end of a path is refused",
+			out:  root + "/aa/..\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleNotClean,
+			line: 1,
+		},
+		{
+			name: "a sibling sharing the root as a string prefix is refused",
+			out:  "/vol/ci-gocache/_data2/other\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleOutsideRoot,
+			line: 1,
+		},
+		{
+			name: "a relative path is refused",
+			out:  "aa/one\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleNotAbsolute,
+			line: 1,
+		},
+		{
+			name: "a path with a trailing slash is refused",
+			out:  root + "/aa/one/\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleNotClean,
+			line: 1,
+		},
+		{
+			name: "the root itself is refused",
+			out:  root + "\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleOutsideRoot,
+			line: 1,
+		},
+		{
+			name: "fewer file lines than removed is refused",
+			out:  root + "/aa/one\nbefore_kib=9\nremoved=2\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleCount,
+			line: 2,
+		},
+		{
+			name: "more file lines than removed is refused",
+			out:  root + "/aa/one\n" + root + "/bb/two\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			rule: ciCacheSelectionRuleCount,
+			line: 3,
+		},
+		{
+			name: "a reply with fewer than three lines is refused",
+			out:  "before_kib=9\nremoved=1\n",
+			rule: ciCacheSelectionRuleShape,
+			line: 3,
+		},
+		{
+			name: "a reply whose last three lines are not the three figures is refused",
+			out:  root + "/aa/one\nbefore_kib=9\nremoved=1\nnoise\n",
+			rule: ciCacheSelectionRuleShape,
+			line: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseCICacheTrimSelection([]byte(tc.out), root)
+			if err == nil {
+				t.Fatalf("parsed %+v without an error, want a refusal", got)
+			}
+			var sel *ciCacheSelectionError
+			if !errors.As(err, &sel) {
+				t.Fatalf("refused with %T (%v), want *ciCacheSelectionError", err, err)
+			}
+			if sel.Rule != tc.rule || sel.Line != tc.line {
+				t.Errorf("refused with rule %q line %d, want rule %q line %d", sel.Rule, sel.Line, tc.rule, tc.line)
+			}
+			if strings.Contains(err.Error(), "/") {
+				t.Errorf("refusal %q holds a path", err)
+			}
+		})
 	}
 }
 
