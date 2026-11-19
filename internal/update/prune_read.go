@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
@@ -28,6 +29,18 @@ const (
 	pruneBranchLimit = 100
 	// pruneBranchMaxPages bounds how many pages one branch listing may take.
 	pruneBranchMaxPages = 1000
+	// pruneReasonReadBytes bounds how much of a refused answer's body is read
+	// for its reason, so a huge body is never loaded to report a status.
+	pruneReasonReadBytes = 512
+	// pruneReasonMaxBytes caps the reason one refused answer reports.
+	pruneReasonMaxBytes = 120
+	// pruneReasonSideMaxBytes caps one answering-side header value.
+	pruneReasonSideMaxBytes = 60
+	// pruneTokenPrefixMin is the shortest prefix of the token a reason may not
+	// end with, since a cut that leaves it may have dropped the rest.
+	pruneTokenPrefixMin = 6
+	// pruneNotShown is the reason shown in place of a cut through the token.
+	pruneNotShown = "body not shown (credential-shaped)"
 )
 
 var (
@@ -196,8 +209,9 @@ func (r PruneRegistryReader) imageTags(ctx context.Context, user, token, image s
 	return tags, nil
 }
 
-// page reads one page of image's packages and the total the answer reports.
-// The answer's body is never put in an error.
+// page reads one page of image's packages and the total the answer reports. A
+// refused answer's body reaches an error only as its reason, through
+// pruneRefusal, which redacts the viewer's credential and bounds the text.
 func (r PruneRegistryReader) page(ctx context.Context, user, token, image string, page int) ([]packageVersion, int, error) {
 	u, err := r.listingURL(image, page)
 	if err != nil {
@@ -215,7 +229,7 @@ func (r PruneRegistryReader) page(ctx context.Context, user, token, image string
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, 0, fmt.Errorf("the Forgejo packages API answered HTTP %d for %s", resp.StatusCode, image)
+		return nil, 0, pruneRefusal(resp, u, user, token, image)
 	}
 	total, err := strconv.Atoi(resp.Header.Get("X-Total-Count"))
 	if err != nil || total < 0 {
@@ -235,6 +249,115 @@ func (r PruneRegistryReader) page(ctx context.Context, user, token, image string
 	return items, total, nil
 }
 
+// pruneRefusal is the error for a non-200 packages answer: it names the status
+// and image, then Forgejo's own reason, then the request and who answered, in a
+// bracket after the reason.
+func pruneRefusal(resp *http.Response, u *url.URL, user, token, image string) error {
+	msg := fmt.Sprintf("the Forgejo packages API answered HTTP %d for %s", resp.StatusCode, image)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, pruneReasonReadBytes))
+	reason := "the answer body could not be read"
+	if err == nil {
+		reason = pruneAnswerReason(body, user, token)
+	}
+	if reason != "" {
+		msg += ": " + reason
+	}
+	return errors.New(msg + " [" + pruneRequestSide(resp, u, user, token) + "]")
+}
+
+// pruneRequestSide names the request a refused answer answered and who answered
+// it: the path and query as sent, which carry no credential, then the Server and
+// Via header values. Each header value is capped at pruneReasonSideMaxBytes, and
+// an absent one is left out.
+func pruneRequestSide(resp *http.Response, u *url.URL, user, token string) string {
+	parts := []string{"GET " + u.EscapedPath() + "?" + u.RawQuery}
+	for _, h := range []struct{ header, label string }{
+		{"Server", "server"},
+		{"Via", "via"},
+	} {
+		if v := pruneCredentialSafe(resp.Header.Get(h.header), pruneReasonSideMaxBytes, user, token); v != "" {
+			parts = append(parts, h.label+"="+v)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+// pruneAnswerReason is a refused answer's own reason, or "" when the answer
+// gives none. The text is cut and redacted by pruneCredentialSafe.
+func pruneAnswerReason(body []byte, user, token string) string {
+	text, ok := pruneReasonText(body)
+	if !ok {
+		return ""
+	}
+	return pruneCredentialSafe(text, pruneReasonMaxBytes, user, token)
+}
+
+// pruneReasonText is the text a reason is taken from. A body that is not JSON
+// is its own text. A body that looks like JSON (its first non-space byte is '{'
+// or '[') is JSON even when it is not valid, which it is not when the reason
+// read cut it at the read bound: it gives no text, never its raw bytes, since a
+// long error body can carry the credential. A valid JSON body gives text only
+// when it is an object whose "message" is a string; any other JSON gives none.
+func pruneReasonText(body []byte) (string, bool) {
+	if !json.Valid(body) {
+		if t := strings.TrimSpace(string(body)); strings.HasPrefix(t, "{") || strings.HasPrefix(t, "[") {
+			return "", false
+		}
+		return string(body), true
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return "", false
+	}
+	var msg string
+	if err := json.Unmarshal(obj["message"], &msg); err != nil {
+		return "", false
+	}
+	return msg, true
+}
+
+// pruneCredentialSafe is text as a refused answer shows it: its first line,
+// printable ASCII only (every other byte becomes a space), cut to limit bytes,
+// then the viewer's user and token replaced with "***". The cut comes first, so
+// a token the cut splits is not replaced; a text that then ends with a prefix of
+// the token is not shown at all.
+func pruneCredentialSafe(text string, limit int, user, token string) string {
+	if i := strings.IndexByte(text, '\n'); i >= 0 {
+		text = text[:i]
+	}
+	b := []byte(text)
+	for i, c := range b {
+		if c < ' ' || c > '~' {
+			b[i] = ' '
+		}
+	}
+	if len(b) > limit {
+		b = b[:limit]
+	}
+	text = string(b)
+	for _, secret := range []string{user, token} {
+		if secret != "" {
+			text = strings.ReplaceAll(text, secret, "***")
+		}
+	}
+	text = strings.TrimSpace(text)
+	if pruneEndsInToken(text, token) {
+		return pruneNotShown
+	}
+	return text
+}
+
+// pruneEndsInToken reports whether text ends with a prefix of token of
+// pruneTokenPrefixMin or more characters, short of the whole token.
+func pruneEndsInToken(text, token string) bool {
+	for n := len(token) - 1; n >= pruneTokenPrefixMin; n-- {
+		if strings.HasSuffix(text, token[:n]) {
+			return true
+		}
+	}
+	return false
+}
+
 // listingURL is the packages listing of the owner's container packages named
 // image, at page. The image name and page reach the query only as encoded
 // values.
@@ -244,6 +367,12 @@ func (r PruneRegistryReader) listingURL(image string, page int) (*url.URL, error
 		return nil, errors.New("the Forgejo base URL for the prune listing is not an absolute URL")
 	}
 	u := base.JoinPath("api", "v1", "packages", r.Owner)
+	// JoinPath drops the leading slash when the base has no path, and a Go
+	// server answers such a request line 400 before its router sees it
+	// (gt-4nxkck).
+	if !strings.HasPrefix(u.Path, "/") {
+		u.Path = "/" + u.Path
+	}
 	u.RawQuery = url.Values{
 		"type":  {"container"},
 		"q":     {image},
