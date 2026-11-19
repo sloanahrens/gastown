@@ -875,8 +875,9 @@ type State struct {
 	// Cloud is the cloud patrol's latest report, read from the directory it
 	// writes. It is nil until the reader first reports.
 	Cloud *Cloud `json:"cloud,omitempty"`
-	// Disk is each kept disk's last reading, from the ring the disk maintenance
-	// patrol appends to. It is nil until the reader first reports.
+	// Disk is each kept disk's last reading and the growth its ring fits, from
+	// the ring the disk maintenance patrol appends to. It is nil until the
+	// reader first reports.
 	Disk *Disk `json:"disk,omitempty"`
 	// Mango is the town-metrics panel read from the directory the metrics
 	// writer fills. It is nil until the reader first reports.
@@ -1022,7 +1023,8 @@ type Config struct {
 	Cloud func() *Cloud
 	// Mango reads the town-metrics panel from its directory.
 	Mango func() *Mango
-	// Disk reads each kept disk's last ring sample for the Disk panel.
+	// Disk reads each kept disk's last ring sample and the growth fitted from
+	// its ring, for the Disk panel.
 	Disk func() *Disk
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage

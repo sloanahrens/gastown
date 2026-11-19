@@ -2696,11 +2696,13 @@ function renderDeploys(s) {
 }
 
 // The Disk block draws each kept disk's last reading, one line per disk: the
-// name, the whole percent used the reader rounded, and the bytes it came from
-// as GiB. A row the reader could not read, or has no sample for, says so rather
-// than drawing a zero share, and a snapshot that carries no disk reading at all
-// is not a clear disk. The reader keeps those states apart in the row's flags
-// (gt-a4bhxc); this block only words them (gt-wa1bgd).
+// name, the whole percent used the reader rounded, the bytes it came from as
+// GiB, and the growth the reader fitted from the ring behind them — both
+// windows' rates and the days they leave at the week's pace. A row the reader
+// could not read, or has no sample for, says so rather than drawing a zero
+// share, and a snapshot that carries no disk reading at all is not a clear
+// disk. The reader keeps those states apart in the row's flags (gt-a4bhxc,
+// gt-u3ccue); this block only words them (gt-wa1bgd).
 function renderDisk(s) {
   if (pushSkip("disk", s)) return;
   const box = $("disk");
@@ -2712,10 +2714,35 @@ function renderDisk(s) {
   for (const r of d.rows || []) {
     if (r.err) { box.append(el("div", "empty", r.name + " disk: could not read its samples")); continue; }
     if (r.no_samples) { box.append(el("div", "empty", r.name + " disk: no samples yet")); continue; }
-    // A share at or past 90 is the hot share the patrol raises on, so the line
-    // takes the page's warning colour; below it the line is plain.
-    box.append(el("div", r.used_pct >= 90 ? "warnc" : "", r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB)"));
+    // A share at or past 90 is the hot share the patrol raises on, and a disk
+    // with under a week left is warned on its days left, so either takes the
+    // page's warning colour; any other line is plain.
+    const warn = r.used_pct >= 90 || (r.days_left_ok && r.days_left < 7);
+    box.append(el("div", warn ? "warnc" : "", r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB), " + diskGrowthText(r)));
   }
+}
+
+// diskGrowthText is one disk's growth as its line words it: the rates the
+// reader fitted over the last 24 hours and the last week, then the days the
+// week's pace leaves. A rate the reader could not fit is said so rather than
+// drawn as zero growth, and a flat or falling disk has no projection to give.
+function diskGrowthText(r) {
+  if (!r.growth_ok) return "growth: not enough samples yet";
+  if (!r.days_left_ok) return "no growth";
+  // The day count is floored so the number printed never claims a day the
+  // projection does not give; past 90 days the line stops counting.
+  const days = r.days_left > 90 ? "90+" : String(Math.floor(r.days_left));
+  return diskRate(r.gib_per_day_24h) + " GiB/day (24h), " + diskRate(r.gib_per_day_7d) + " GiB/day (7d), about " + days + " days left";
+}
+
+// diskRate is a fitted GiB-per-day figure with its sign and one decimal: a
+// window that lost space fits a negative rate, and the line must not hide it
+// behind the "+" growth usually carries. A negative figure that rounds to zero
+// is drawn as the zero it prints, not as "-0.0".
+function diskRate(v) {
+  const s = v.toFixed(1);
+  if (s === "-0.0") return "+0.0";
+  return (s.charAt(0) === "-" ? "" : "+") + s;
 }
 
 // diskGiB is a byte count as GiB to one decimal: the page has no other size
