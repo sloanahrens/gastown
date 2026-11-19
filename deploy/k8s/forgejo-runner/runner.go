@@ -55,9 +55,15 @@ const (
 	ForgejoHostname = "forgejo"
 	// RunnerTimeout is the longest a job may run.
 	RunnerTimeout = "3h"
-	// ShutdownTimeout is how long the runner lets a running job finish before it
-	// exits: as long as the job timeout, so a shutdown never cuts a gate off.
-	ShutdownTimeout = "3h"
+	// ShutdownTimeout is how long the runner lets a running job finish after a
+	// shutdown starts, before it cancels the job. It ends before TerminationGrace,
+	// so the runner exits on its own before the kubelet sends SIGKILL.
+	ShutdownTimeout = "10m"
+	// TerminationGrace is the seconds the kubelet waits after SIGTERM before it
+	// sends SIGKILL to the pod. It is longer than ShutdownTimeout, so the runner's
+	// wait ends first. The engine sidecar still gets SIGTERM with the runner, so
+	// this alone does not keep a running job alive.
+	TerminationGrace = 660
 	// Recreate is the Deployment's update strategy: a rollout stops the old pod
 	// before it starts the new one, so two engines never mount one dind data
 	// claim and two runners never open one registration file.
@@ -248,7 +254,8 @@ func Build(v Values) (Manifests, error) {
 				Template: PodTemplate{
 					Metadata: TemplateMeta{Labels: labels()},
 					Spec: PodSpec{
-						PriorityClassName: PriorityClassName,
+						PriorityClassName:             PriorityClassName,
+						TerminationGracePeriodSeconds: TerminationGrace,
 						HostAliases: []HostAlias{{
 							IP:        v.ForgejoHostIP,
 							Hostnames: []string{ForgejoHostname},
@@ -629,10 +636,11 @@ type PodTemplate struct {
 
 // PodSpec is the subset of a pod's spec the builder sets.
 type PodSpec struct {
-	PriorityClassName string      `yaml:"priorityClassName,omitempty"`
-	HostAliases       []HostAlias `yaml:"hostAliases,omitempty"`
-	Containers        []Container `yaml:"containers"`
-	Volumes           []Volume    `yaml:"volumes"`
+	PriorityClassName             string      `yaml:"priorityClassName,omitempty"`
+	TerminationGracePeriodSeconds int         `yaml:"terminationGracePeriodSeconds,omitempty"`
+	HostAliases                   []HostAlias `yaml:"hostAliases,omitempty"`
+	Containers                    []Container `yaml:"containers"`
+	Volumes                       []Volume    `yaml:"volumes"`
 }
 
 // HostAlias is one /etc/hosts entry the pod's containers share: every hostname
