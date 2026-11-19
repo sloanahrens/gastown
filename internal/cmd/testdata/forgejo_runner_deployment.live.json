@@ -1,0 +1,192 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "annotations": {
+      "deployment.kubernetes.io/revision": "4"
+    },
+    "creationTimestamp": "2026-11-15T10:00:00Z",
+    "generation": 4,
+    "labels": {
+      "app.kubernetes.io/managed-by": "gt",
+      "app.kubernetes.io/name": "forgejo-runner"
+    },
+    "name": "forgejo-runner",
+    "namespace": "forgejo",
+    "resourceVersion": "12345",
+    "uid": "5d0e6a2c-0000-4000-8000-000000000000"
+  },
+  "spec": {
+    "progressDeadlineSeconds": 600,
+    "replicas": 1,
+    "revisionHistoryLimit": 10,
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "forgejo-runner"
+      }
+    },
+    "strategy": {
+      "type": "Recreate"
+    },
+    "template": {
+      "metadata": {
+        "annotations": {
+          "kubectl.kubernetes.io/restartedAt": "2026-11-15T10:30:00Z"
+        },
+        "creationTimestamp": null,
+        "labels": {
+          "app.kubernetes.io/managed-by": "gt",
+          "app.kubernetes.io/name": "forgejo-runner"
+        }
+      },
+      "spec": {
+        "containers": [
+          {
+            "command": [
+              "forgejo-runner",
+              "--config",
+              "/config/config.yml",
+              "daemon"
+            ],
+            "env": [
+              {
+                "name": "DOCKER_HOST",
+                "value": "tcp://127.0.0.1:2376"
+              },
+              {
+                "name": "DOCKER_TLS_VERIFY",
+                "value": "1"
+              },
+              {
+                "name": "DOCKER_CERT_PATH",
+                "value": "/certs/client"
+              }
+            ],
+            "image": "data.forgejo.org/forgejo/runner:13.2.0",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "runner",
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "1",
+                "memory": "1Gi"
+              }
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "volumeMounts": [
+              {
+                "mountPath": "/data",
+                "name": "data"
+              },
+              {
+                "mountPath": "/certs",
+                "name": "docker-certs",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/config",
+                "name": "config",
+                "readOnly": true
+              }
+            ],
+            "workingDir": "/data"
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "hostAliases": [
+          {
+            "hostnames": [
+              "forgejo"
+            ],
+            "ip": "10.43.130.32"
+          }
+        ],
+        "initContainers": [
+          {
+            "args": [
+              "--insecure-registry=forgejo:3000"
+            ],
+            "env": [
+              {
+                "name": "DOCKER_TLS_CERTDIR",
+                "value": "/certs"
+              }
+            ],
+            "image": "data.forgejo.org/oci/docker:dind",
+            "imagePullPolicy": "IfNotPresent",
+            "name": "dind",
+            "resources": {
+              "limits": {
+                "cpu": "8",
+                "memory": "12Gi"
+              },
+              "requests": {
+                "cpu": "8",
+                "memory": "12Gi"
+              }
+            },
+            "restartPolicy": "Always",
+            "securityContext": {
+              "privileged": true
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "test",
+                  "-f",
+                  "/certs/client/cert.pem"
+                ]
+              },
+              "failureThreshold": 60,
+              "periodSeconds": 2
+            },
+            "terminationMessagePath": "/dev/termination-log",
+            "volumeMounts": [
+              {
+                "mountPath": "/certs",
+                "name": "docker-certs"
+              },
+              {
+                "mountPath": "/var/lib/docker",
+                "name": "dind-data"
+              }
+            ]
+          }
+        ],
+        "priorityClassName": "gt-ci-gate",
+        "restartPolicy": "Always",
+        "terminationGracePeriodSeconds": 660,
+        "volumes": [
+          {
+            "configMap": {
+              "name": "forgejo-runner-config"
+            },
+            "name": "config"
+          },
+          {
+            "emptyDir": {},
+            "name": "docker-certs"
+          },
+          {
+            "name": "data",
+            "persistentVolumeClaim": {
+              "claimName": "forgejo-runner-data"
+            }
+          },
+          {
+            "name": "dind-data",
+            "persistentVolumeClaim": {
+              "claimName": "forgejo-runner-dind"
+            }
+          }
+        ]
+      }
+    }
+  },
+  "status": {
+    "readyReplicas": 1
+  }
+}

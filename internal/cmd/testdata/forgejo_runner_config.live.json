@@ -1,0 +1,18 @@
+{
+  "apiVersion": "v1",
+  "data": {
+    "config.yml": "runner:\n  file: '.runner'\n  capacity: 2\n  envs:\n    DOCKER_HOST: 'tcp://localhost:2376'\n    DOCKER_TLS_VERIFY: '1'\n    DOCKER_CERT_PATH: '/certs/client'\n    CI_CPU_QUOTA: '8'\n  timeout: '3h'\n  shutdown_timeout: '10m'\n  labels:\n    - 'docker-cli:docker://data.forgejo.org/oci/docker:28.5-cli'\n    - 'node:docker://data.forgejo.org/oci/node:20.19'\n    - 'ci-base:docker://data.forgejo.org/oci/gastown-runner:go1.27-node20'\ncontainer:\n  network: 'host'\n  options: '--add-host=forgejo:10.43.130.32 --init -v ci-gomod:/home/ci/go -v ci-gocache:/home/ci/.cache/go-build -v ci-npm:/home/ci/.npm -v /certs/client:/certs/client'\n  valid_volumes:\n    - 'ci-gomod'\n    - 'ci-gocache'\n    - 'ci-npm'\n    - '/certs/client'\n"
+  },
+  "kind": "ConfigMap",
+  "metadata": {
+    "creationTimestamp": "2026-11-15T10:00:00Z",
+    "labels": {
+      "app.kubernetes.io/managed-by": "gt",
+      "app.kubernetes.io/name": "forgejo-runner"
+    },
+    "name": "forgejo-runner-config",
+    "namespace": "forgejo",
+    "resourceVersion": "12345",
+    "uid": "5d0e6a2c-0000-4000-8000-000000000000"
+  }
+}
