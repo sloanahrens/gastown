@@ -504,6 +504,26 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		return result, fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
 	}
 	defer assigneeUnlock()
+	// A seat the pool hands out again keeps the worktree, and with it the
+	// branch an earlier sling made for a different bead: hooking here would put
+	// this bead's hook on that work, whose branch the other bead's landing then
+	// deletes (gt-u9fqky). Read the branch at the claim, as the last look at the
+	// seat before the hook write, and give the spawn back when it names another
+	// bead — unless the sling is deliberately resuming it. The error carries
+	// dispatch.SlingRefusalMarker, so an automatic dispatcher defers the bead
+	// and asks again next tick.
+	if branch, branchErr := d.WorktreeBranch(hookWorkDir); branchErr != nil {
+		// A branch the dispatch cannot judge keeps the behavior it had before
+		// this guard: warn, so an operator sees it, and hook as before
+		// (gt-u9fqky).
+		fmt.Fprintf(d.out(), "  %s Could not read the worktree branch of %s: %v; hooking the bead anyway\n",
+			style.Warning.Render("⚠"), targetAgent, branchErr)
+	} else if other := branchBead(branch); other != "" && other != opts.BeadID && branch != opts.ResumeBranch {
+		rollbackSpawnedPolecat(beadToHook, "Seat worktree holds another bead's branch")
+		result.ErrMsg = fmt.Sprintf("seat %s has %s checked out, named for %s", targetAgent, branch, other)
+		return result, fmt.Errorf("%s %s: the seat %s already has %s checked out, which carries %s's work, so the hook would be written onto another bead's branch\nResume that branch with --branch to take the work deliberately, or clear the seat's worktree first",
+			dispatch.SlingRefusalMarker, opts.BeadID, targetAgent, branch, other)
+	}
 	// The fields ride on the hook write, one bd update and one Dolt commit,
 	// unless raw metadata was stored ahead of it (then they are already there).
 	hookFields := &fieldUpdates
@@ -662,6 +682,33 @@ func canceled(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// branchBead is the bead a polecat branch names: the <bead> of
+// polecat/<seat>/<bead>+<mutation>, and "" for a branch of any other shape. It
+// reads the same shape landworker's beadForBranch parses, so the hook guard
+// and the landing worker agree on which branch carries which bead's work
+// (gt-u9fqky).
+func branchBead(branch string) string {
+	rest, ok := strings.CutPrefix(branch, "polecat/")
+	if !ok {
+		return ""
+	}
+	seat, rest, ok := strings.Cut(rest, "/")
+	if !ok || seat == "" {
+		return ""
+	}
+	bead, mutation, ok := strings.Cut(rest, "+")
+	if !ok || bead == "" || mutation == "" || !branchBeadStarts(bead[0]) {
+		return ""
+	}
+	return bead
+}
+
+// branchBeadStarts keeps branchBead's shape identical to landworker's
+// startsBeadID: a bead id opens with an alphanumeric.
+func branchBeadStarts(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // buildFormulaVars assembles the ordered var list for formula instantiation:

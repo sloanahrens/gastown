@@ -88,6 +88,7 @@ func (f *timingDeps) deps() *Deps {
 			return &FormulaResult{BeadToHook: timingBeadID, WispRootID: "wisp-1"}, nil
 		},
 		LockAssignee:    func(string, string) (func(), error) { return func() {}, nil },
+		WorktreeBranch:  func(string) (string, error) { return "main", nil },
 		ClearReassigned: func(string, string) func() { return func() {} },
 		HookDir:         func(string, string, string) string { return "/town/hook" },
 		Hook: func(string, string, string, string, *FieldUpdates) error {
