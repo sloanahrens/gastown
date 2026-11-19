@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/outbox"
 	"github.com/steveyegge/gastown/internal/session"
@@ -214,8 +217,8 @@ func TestNoBeadAccessOutboxPollRefusesWhileATickRuns(t *testing.T) {
 }
 
 // TestNoBeadAccessOutboxPollTickWithoutASeamCompletes: a daemon with no tick
-// seam runs the live poll, which refuses while no filing seam is wired; the
-// refusal still ends the tick and frees the guard (gt-0hkj0c, gt-nvii5d).
+// seam runs the live poll, and a town with no running seat ends the tick
+// quietly and frees the guard (gt-0hkj0c, gt-nvii5d).
 func TestNoBeadAccessOutboxPollTickWithoutASeamCompletes(t *testing.T) {
 	t.Parallel()
 	d := outboxPollTestDaemon(t, true, io.Discard)
@@ -228,21 +231,72 @@ func TestNoBeadAccessOutboxPollTickWithoutASeamCompletes(t *testing.T) {
 	}
 }
 
-// TestNoBeadAccessOutboxPollUnwiredFilingSeamLogsOnce: until the filing seam
-// is wired, every tick of the live poll refuses; the daemon says so once
-// rather than once per interval (gt-nvii5d).
-func TestNoBeadAccessOutboxPollUnwiredFilingSeamLogsOnce(t *testing.T) {
+// TestNoBeadAccessOutboxPollLiveTickFilesThroughASeam: the tick the daemon
+// starts hands a running seat's request to its own filing seam,
+// d.outboxPollFiling, which files one escalation bead through the seat end's
+// validation and apply; the tick is not refused for a missing seam, and it
+// frees the single-flight guard (gt-dq4ce6).
+func TestNoBeadAccessOutboxPollLiveTickFilesThroughASeam(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+	d := outboxPollTestDaemon(t, true, &logged)
+	d.config.TownRoot = town
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
+	d.prefixRegistryFn = rigPrefixes("gastown")
+	d.openRecoveryBeads = func([]string) beads.Client { return bd }
+	d.outboxPollTick = newOutboxPoll(town, exec, d.outboxPollFiling(), d.logger, time.Second).tick
+
+	d.startOutboxPollTick()
+	d.outboxPollCycles.Wait()
+
+	escalations, err := beads.ListEscalations(bd)
+	if err != nil {
+		t.Fatalf("listing the escalations: %v", err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("the live tick filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+	fields := beads.ParseEscalationFields(escalations[0].Description)
+	for _, c := range []struct{ what, got, want string }{
+		{"title", escalations[0].Title, "HELP: the seat is stuck"},
+		{"escalated_by", fields.EscalatedBy, "gastown/polecats/able"},
+		{"related_bead", fields.RelatedBead, "gt-able"},
+	} {
+		if c.got != c.want {
+			t.Errorf("the live tick's escalation %s = %q, want %q", c.what, c.got, c.want)
+		}
+	}
+	if strings.Contains(logged.String(), "no filing seam is wired") {
+		t.Errorf("the daemon's live poll has no filing seam: %q", logged.String())
+	}
+	if d.outboxPollRunning.Load() {
+		t.Error("the live tick left the single-flight guard held")
+	}
+}
+
+// TestNoBeadAccessOutboxPollNoFilingSeamAlarmsOnce: the nil-seam refusal now
+// reaches only a poll built without a filing seam, and the daemon logs it once
+// rather than on every tick that poll runs (gt-dq4ce6).
+func TestNoBeadAccessOutboxPollNoFilingSeamAlarmsOnce(t *testing.T) {
 	t.Parallel()
 	var logged bytes.Buffer
 	d := outboxPollTestDaemon(t, true, &logged)
+	d.outboxPollTick = newOutboxPoll(t.TempDir(), &fakeOutboxPollExec{}, nil, d.logger, time.Second).tick
 
-	for range 2 {
-		d.startOutboxPollTick()
-		d.outboxPollCycles.Wait()
+	d.triggerOutboxPoll()
+	d.triggerOutboxPoll()
+
+	if got := strings.Count(logged.String(), errOutboxPollNoFilingSeam.Error()); got != 1 {
+		t.Errorf("the nil-seam refusal is logged %d times over two ticks, want once: %q", got, logged.String())
 	}
-
-	if got := strings.Count(logged.String(), "no filing seam is wired"); got != 1 {
-		t.Errorf("the unwired seam was logged %d times over two ticks, want once: %q", got, logged.String())
+	if !strings.Contains(logged.String(), "the patrol says this once") {
+		t.Errorf("the alarm's log is %q, want it named as the once-only alarm", logged.String())
 	}
 }
 
@@ -346,6 +400,25 @@ func (f *fakeOutboxPollFile) file(_ context.Context, req outboxPollRequest) erro
 func outboxPollTestPoll(t *testing.T, town string, exec outboxPollExec, file outboxPollFileFunc, logged io.Writer) *outboxPoll {
 	t.Helper()
 	return newOutboxPoll(town, exec, file, log.New(logged, "", 0), time.Second)
+}
+
+// outboxPollTestFiling returns the daemon's own filing seam, d.outboxPollFiling,
+// over a fake town bead store: the production wiring of the seat end's
+// validation and escalation path, with the bd calls answered by the fake rather
+// than a live town. A change to the daemon's wiring turns the tests that use it
+// red, which a hand-built patrolScanHost would not.
+func outboxPollTestFiling(t *testing.T, town string, bd *beadsfake.Fake, logged io.Writer) outboxPollFileFunc {
+	t.Helper()
+	d := &Daemon{
+		config:           &Config{TownRoot: town},
+		logger:           log.New(logged, "", 0),
+		clock:            clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC)),
+		prefixRegistryFn: rigPrefixes("gastown"),
+		openRecoveryBeads: func([]string) beads.Client {
+			return bd
+		},
+	}
+	return d.outboxPollFiling()
 }
 
 // outboxPollSeatRecord writes the sandbox record of one running seat: rig
@@ -718,6 +791,116 @@ func TestNoBeadAccessOutboxPollFilingFailureIsLoggedAndOtherSeatsStillFile(t *te
 	}
 	if !strings.Contains(logged.String(), "seat sbx-able: its outbox is not filed: the store refused the escalation") {
 		t.Errorf("the tick's log is %q, want the refused filing named", logged.String())
+	}
+}
+
+// TestNoBeadAccessOutboxPollFilesTheEscalationItReads: a request in one running
+// seat's outbox creates one escalation bead on one tick, raised as the seat and
+// about its bead, through the same validation and apply the seat end uses
+// (gt-dq4ce6).
+func TestNoBeadAccessOutboxPollFilesTheEscalationItReads(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the acceptance list names a missing file\n\nSeverity: high"}}`
+	notes := "I stopped at the second criterion.\n"
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, &notes)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+	poll := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	escalations, err := beads.ListEscalations(bd)
+	if err != nil {
+		t.Fatalf("listing the escalations: %v", err)
+	}
+	if len(escalations) != 1 {
+		t.Fatalf("the tick filed %d escalation beads, want one: %+v", len(escalations), escalations)
+	}
+	got := escalations[0]
+	if got.Title != "HELP: the acceptance list names a missing file" {
+		t.Errorf("escalation title = %q, want the request's first line", got.Title)
+	}
+	fields := beads.ParseEscalationFields(got.Description)
+	for _, c := range []struct{ what, got, want string }{
+		{"severity", fields.Severity, "high"},
+		{"escalated_by", fields.EscalatedBy, "gastown/polecats/able"},
+		{"related_bead", fields.RelatedBead, "gt-able"},
+		{"source", fields.Source, seatEscalationSource},
+		{"escalated_at", fields.EscalatedAt, "2026-11-19T09:00:00Z"},
+	} {
+		if c.got != c.want {
+			t.Errorf("escalation %s = %q, want %q", c.what, c.got, c.want)
+		}
+	}
+	if !strings.Contains(fields.Reason, "HELP: the acceptance list names a missing file") {
+		t.Errorf("escalation reason = %q, want the seat's request as its detail", fields.Reason)
+	}
+	if logged.Len() != 0 {
+		t.Errorf("the tick logged %q, want the escalation filed with nothing wrong", logged.String())
+	}
+	// The seat still runs: its notes and ticks are the seat end's to write, so
+	// the poll writing them here would write them twice.
+	if issue, err := bd.Show("gt-able"); err == nil {
+		t.Errorf("the poll wrote the seat's bead mid-run: %#v", issue)
+	}
+}
+
+// TestNoBeadAccessOutboxPollRefusesAnInvalidRequest: a request whose outbox the
+// validator, or Apply's own guards, refuse creates no escalation and is logged
+// with the seat named (gt-dq4ce6).
+func TestNoBeadAccessOutboxPollRefusesAnInvalidRequest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		result string
+		want   string
+	}{
+		{
+			name:   "an outbox for another bead",
+			result: `{"bead_id":"gt-other","status":"deferred","escalation":{"text":"HELP: x"}}`,
+			want:   "bead_id is not the bead the seat was given",
+		},
+		{
+			name:   "an outbox with a field the decoder does not know",
+			result: `{"bead_id":"gt-able","status":"deferred","urgency":"high"}`,
+			want:   "unknown field",
+		},
+		{
+			name:   "an escalation of only whitespace",
+			result: `{"bead_id":"gt-able","status":"deferred","escalation":{"text":" \n\t"}}`,
+			want:   "escalation text is empty",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+			exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&tc.result, nil)}}
+			bd := beadsfake.New()
+			var logged bytes.Buffer
+			poll := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+
+			if err := poll.tick(context.Background()); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			escalations, err := beads.ListEscalations(bd)
+			if err != nil {
+				t.Fatalf("listing the escalations: %v", err)
+			}
+			if len(escalations) != 0 {
+				t.Errorf("an invalid request filed %d escalation beads, want none: %+v", len(escalations), escalations)
+			}
+			for _, want := range []string{"seat sbx-able: its outbox is not filed", tc.want} {
+				if !strings.Contains(logged.String(), want) {
+					t.Errorf("the tick's log is %q, want it to name %q", logged.String(), want)
+				}
+			}
+		})
 	}
 }
 
