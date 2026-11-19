@@ -4112,9 +4112,11 @@ func (m *Manager) lookupAssignedIssue(assignee string, batch *beadsBatch) (*bead
 //  2. Legacy agent hook_bead that still points to a currently hooked bead for this assignee
 //     → working (compatibility fallback during migration)
 //  3. Issue assigned via beads assignee (open/in_progress/hooked) → working
-//  4. Live session without active issue + clean cleanup → idle
-//  5. Live session without active issue + non-clean/unknown cleanup → review-needed
-//  6. Beads query failure + live/dead session → review-needed/stalled fallback
+//  4. Agent bead spawning with a hook_bead not yet hooked, no assigned issue
+//     → spawning (the sling's claim, gt-lgcwd6)
+//  5. Live session without active issue + clean cleanup → idle
+//  6. Live session without active issue + non-clean/unknown cleanup → review-needed
+//  7. Beads query failure + live/dead session → review-needed/stalled fallback
 //
 // Every "work assigned but no live session" outcome is spawning inside the
 // spawn grace and stalled after it (see sessionDownState) — the agent bead is
@@ -4231,6 +4233,21 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 		case beads.AgentStateDone:
 			agentState = StateDone
 		}
+	}
+
+	// The agent bead's claim is evidence of a taken seat: a sling writes
+	// spawning + hook_bead before it hooks the work bead, and in that gap the
+	// seat read idle, so a second sling took the seat the first had been given
+	// (gt-lgcwd6). Past the spawn grace the claim is stale and proves nothing.
+	if issueID == "" && spawning && fields != nil && fields.HookBead != "" {
+		return &Polecat{
+			Name:      name,
+			Rig:       m.rig.Name,
+			State:     StateSpawning,
+			ClonePath: clonePath,
+			Branch:    branchName,
+			Issue:     fields.HookBead,
+		}, nil
 	}
 
 	state := agentState
