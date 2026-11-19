@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/daemonimage"
@@ -66,14 +67,16 @@ type imagePinsRefreshDraft struct {
 	Labels     []string
 }
 
-// imagePinsRefreshBead builds the refresh bead for the pins the planner named.
-// The description names each pin, the commit it is pinned at and its source's
-// tip, and carries the refresh command with its four checkouts; a pin with no
-// name, commit or tip is refused, because a blank cell is a read that did not
-// happen rather than a pin to print.
-func imagePinsRefreshBead(pins []ImagePinState) (imagePinsRefreshDraft, error) {
+// imagePinsRefreshBead builds the refresh bead for the pins the planner named,
+// read at filedAt, the patrol's clock. A pin with no name, commit or tip, or a
+// zero filing time, is refused, because a blank cell is a read that did not
+// happen rather than a value to print.
+func imagePinsRefreshBead(pins []ImagePinState, filedAt time.Time) (imagePinsRefreshDraft, error) {
 	if len(pins) == 0 {
 		return imagePinsRefreshDraft{}, errors.New("image pins refresh bead: the planner named no pin: there is nothing for a polecat to move")
+	}
+	if filedAt.IsZero() {
+		return imagePinsRefreshDraft{}, errors.New("image pins refresh bead: the filing time is zero: the bead says when the tips were read, and a zero time would print as 0001-01-01")
 	}
 	for _, pin := range pins {
 		if err := checkImagePinState(pin); err != nil {
@@ -82,7 +85,7 @@ func imagePinsRefreshBead(pins []ImagePinState) (imagePinsRefreshDraft, error) {
 	}
 	return imagePinsRefreshDraft{
 		Title:       imagePinsRefreshTitle(pins),
-		Description: imagePinsRefreshDescription(pins),
+		Description: imagePinsRefreshDescription(pins, filedAt),
 		Acceptance:  imagePinsRefreshAcceptance,
 		Labels:      []string{imagePinsRefreshLabel},
 	}, nil
@@ -126,9 +129,9 @@ func imagePinsRefreshTitle(pins []ImagePinState) string {
 
 // imagePinsRefreshDescription is the six sections the shape lint reads, in
 // template order, plus the command the polecat runs.
-func imagePinsRefreshDescription(pins []ImagePinState) string {
+func imagePinsRefreshDescription(pins []ImagePinState, filedAt time.Time) string {
 	return strings.Join([]string{
-		"## Goal\n\n" + imagePinsRefreshGoal(pins),
+		"## Goal\n\n" + imagePinsRefreshGoal(pins, filedAt),
 		"## Constraints\n\n" + imagePinsRefreshConstraints,
 		"## Out of scope\n\n" + imagePinsRefreshOutOfScope,
 		"## Gate\n\n" + imagePinsRefreshGate,
@@ -137,11 +140,13 @@ func imagePinsRefreshDescription(pins []ImagePinState) string {
 	}, "\n\n") + "\n"
 }
 
-// imagePinsRefreshGoal names each pin's pinned commit and source tip, then the
-// command that moves them.
-func imagePinsRefreshGoal(pins []ImagePinState) string {
+// imagePinsRefreshGoal names each pin's pinned commit and source tip, the
+// instant the tips were read in UTC (a source moves about twenty commits an
+// hour, gt-fcsoy8), and the command that moves them.
+func imagePinsRefreshGoal(pins []ImagePinState, filedAt time.Time) string {
 	var b strings.Builder
 	b.WriteString("These image pins trail their sources' origin/main, and the pin-drift guard refuses an image roll once a pin is more than 40 commits behind its tip (gt-wmoa0d). Move each pin named here to its source tip and land the two pins files the refresh writes.\n\n")
+	fmt.Fprintf(&b, "These tips were read at %s from each source's origin/main. A source that has moved since is fine: pin the tip named here.\n\n", filedAt.UTC().Format(time.RFC3339))
 	for _, pin := range pins {
 		fmt.Fprintf(&b, "- %s: pinned at %s; its source's origin/main is %s, %d commits behind.\n", pin.Name, pin.Pin, pin.Tip, pin.Behind)
 	}
@@ -209,12 +214,12 @@ func imagePinsOpenRefreshBead(list imagePinsBeadList) (*ImagePinRefreshBead, err
 	return open, nil
 }
 
-// imagePinsFileRefreshBead builds the refresh bead for pins and files it through
-// create, returning the new bead's id. A refused set of pins never reaches
-// create. A failed create returns its error and no id, so nothing is recorded
-// for a bead that was not made.
-func imagePinsFileRefreshBead(create imagePinsBeadCreate, pins []ImagePinState) (string, error) {
-	draft, err := imagePinsRefreshBead(pins)
+// imagePinsFileRefreshBead builds the refresh bead for pins read at filedAt and
+// files it through create, returning the new bead's id. A refused set of pins,
+// and a zero filing time, never reach create. A failed create returns its error
+// and no id, so nothing is recorded for a bead that was not made.
+func imagePinsFileRefreshBead(create imagePinsBeadCreate, pins []ImagePinState, filedAt time.Time) (string, error) {
+	draft, err := imagePinsRefreshBead(pins, filedAt)
 	if err != nil {
 		return "", err
 	}
