@@ -641,6 +641,13 @@ type Env interface {
 	// answer returns an error, never a zero state: the tick reads a failed
 	// measurement as Unknown and clears nothing on it.
 	GitState(rig, polecat string) (GitState, error)
+	// PushedSinceSling returns origin's head for the seat's work branch when
+	// that head was committed after the bead's sling clock began, "" when the
+	// branch is not on origin or its head predates the sling, and an error when
+	// the question cannot be answered — an unreadable branch, work bead, sling
+	// time or origin. A caller reads the error as Unknown and acts on nothing
+	// (gt-hgb91h).
+	PushedSinceSling(rig, polecat string) (sha string, err error)
 	// Heartbeat returns the session heartbeat, nil when there is none.
 	Heartbeat(rig, polecat string) *Heartbeat
 	// Restart restarts the seat through the supervisor.
