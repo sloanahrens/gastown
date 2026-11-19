@@ -296,24 +296,31 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 	if !requireMethod(w, r, http.MethodPost) {
 		return
 	}
+	start := time.Now()
+	caller := r.Header.Get("X-Gt-Caller")
 	if g.closing.Load() {
-		refuse(w, http.StatusServiceUnavailable, codeUnavailable, "the gateway is shutting down")
+		g.refuseLogged(w, CallRecord{Caller: caller}, start, http.StatusServiceUnavailable, codeUnavailable, "the gateway is shutting down")
 		return
 	}
-	start := time.Now()
 	req, stdin, err := ReadRequest(r.Body)
 	if err != nil {
-		refuse(w, http.StatusBadRequest, codeBadRequest, err.Error())
+		g.refuseLogged(w, CallRecord{Caller: caller}, start, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
 	ident, err := g.auth.Authenticate(r.Header.Get("Authorization"))
 	if err != nil {
-		refuseAuth(w, err)
+		// A 401 is a refusal and gets its line. Any other status is a failure inside
+		// the gateway: refuseAuth answers it 500, and it writes no refusal line.
+		if HTTPStatus(err) != http.StatusUnauthorized {
+			refuseAuth(w, err)
+			return
+		}
+		g.refuseLogged(w, CallRecord{Caller: caller, Argv: req.Argv}, start, http.StatusUnauthorized, codeUnauthorized, err.Error())
 		return
 	}
 	verb, err := g.policy.Authorize(ident.Class, req.Argv)
 	if err != nil {
-		refuse(w, http.StatusForbidden, codeForbidden, err.Error())
+		g.refuseLogged(w, CallRecord{Class: string(ident.Class), Caller: caller, Actor: CallActor(req.Env), Argv: req.Argv}, start, http.StatusForbidden, codeForbidden, err.Error())
 		return
 	}
 	req.TimeoutMS = CapTimeout(req.TimeoutMS, verb)
@@ -346,6 +353,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 			// record costs the one line the log makes of it (its scan and marshal),
 			// and the queue never blocks: a full buffer drops the line and counts it,
 			// so the refusal is not delayed by the log.
+			rec.Refusal = codeTooManyCalls
 			g.log.LogUncounted(rec)
 		}
 		refuse(w, status, code, message)
@@ -516,6 +524,19 @@ func refuseAuth(w http.ResponseWriter, err error) {
 		code = codeInternal
 	}
 	refuse(w, status, code, err.Error())
+}
+
+// refuseLogged answers a refusal the gateway makes before bd runs, and writes the
+// call's line first, with the refusal's code as its reason. rec holds only what
+// the gateway knows at that point: a request that never authenticated has no
+// class and no actor, and an argv it did not parse is absent. The line keeps no
+// error text, so the log never repeats the request.
+func (g *Gateway) refuseLogged(w http.ResponseWriter, rec CallRecord, start time.Time, status int, code, message string) {
+	rec.ExitCode = ExitRefused
+	rec.Duration = time.Since(start)
+	rec.Refusal = code
+	g.log.Log(rec)
+	refuse(w, status, code, message)
 }
 
 // refuse answers with a JSON error body. The status line goes out with the

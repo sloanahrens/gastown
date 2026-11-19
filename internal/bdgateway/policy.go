@@ -430,7 +430,10 @@ type scanResult struct {
 
 // scanArgs reads argv once the way bd's root parse does, returning the command
 // words, the flags in option position and the operands, or ErrAmbiguousVerb
-// when a token cannot be placed. One scan decides all three, because a token
+// when a token cannot be placed. On that error the result holds the flags read
+// up to and including the token that could not be placed, for the call log; the
+// policy refuses on the error and reads nothing else from the result. One scan
+// decides all three, because a token
 // one check reads as a value the other must not read as a flag: in "--format --
 // --db=/x show", --format takes "--" as its value and --db is a flag bd acts
 // on.
@@ -490,14 +493,14 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 		case p.extends(res.words):
 			// A listed verb path can still claim the next word, so an unknown
 			// flag here could be taking that word as its value.
-			return scanResult{}, ambiguousFlag(arg)
+			return res, ambiguousFlag(arg)
 		case i+1 < len(argv) && swallowsNextFlag(argv[i+1]):
 			// If the unknown flag takes a value, bd takes this next token as
 			// that value and still reads the tokens after it as flags. Read as
 			// boolean, the scan would let the token end the options ("--") or
 			// take the following token as its own value (a root flag without an
 			// attached value), and miss a refused flag behind it.
-			return scanResult{}, ambiguousFlag(arg)
+			return res, ambiguousFlag(arg)
 		}
 	}
 	return res, nil

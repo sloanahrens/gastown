@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -548,9 +549,14 @@ func TestBdgwCapRefusalLogsNoFlagValueOrStdin(t *testing.T) {
 	if len(line.Flags) != 1 || line.Flags[0] != "-C" {
 		t.Errorf("flags = %v, want only -C", line.Flags)
 	}
-	// Same fields as the 500 refusal's line: nothing rides along unseen.
-	if got, want := keys(decodeLine(t, capLine[0])), keys(decodeLine(t, failLine[0])); !reflect.DeepEqual(got, want) {
-		t.Errorf("cap line fields = %v, want the 500 line's %v", got, want)
+	// The 500 refusal's fields, plus the reason code the cap refusal names:
+	// nothing rides along unseen.
+	capKeys := keys(decodeLine(t, capLine[0]))
+	if got, want := slices.DeleteFunc(capKeys, func(k string) bool { return k == "refusal" }), keys(decodeLine(t, failLine[0])); !reflect.DeepEqual(got, want) {
+		t.Errorf("cap line fields besides refusal = %v, want the 500 line's %v", got, want)
+	}
+	if got := decodeLine(t, capLine[0])["refusal"]; got != codeTooManyCalls {
+		t.Errorf("cap line refusal = %v, want %s", got, codeTooManyCalls)
 	}
 }
 
