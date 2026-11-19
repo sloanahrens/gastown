@@ -5,7 +5,7 @@
     "annotations": {
       "deployment.kubernetes.io/revision": "4"
     },
-    "creationTimestamp": "2026-11-18T10:00:00Z",
+    "creationTimestamp": "2026-11-15T10:00:00Z",
     "generation": 4,
     "labels": {
       "app.kubernetes.io/managed-by": "gt",
@@ -31,7 +31,7 @@
     "template": {
       "metadata": {
         "annotations": {
-          "kubectl.kubernetes.io/restartedAt": "2026-11-18T10:30:00Z"
+          "kubectl.kubernetes.io/restartedAt": "2026-11-15T10:30:00Z"
         },
         "creationTimestamp": null,
         "labels": {
@@ -93,7 +93,18 @@
               }
             ],
             "workingDir": "/data"
-          },
+          }
+        ],
+        "dnsPolicy": "ClusterFirst",
+        "hostAliases": [
+          {
+            "hostnames": [
+              "forgejo"
+            ],
+            "ip": "10.43.130.32"
+          }
+        ],
+        "initContainers": [
           {
             "args": [
               "--insecure-registry=forgejo:3000"
@@ -117,8 +128,20 @@
                 "memory": "12Gi"
               }
             },
+            "restartPolicy": "Always",
             "securityContext": {
               "privileged": true
+            },
+            "startupProbe": {
+              "exec": {
+                "command": [
+                  "test",
+                  "-f",
+                  "/certs/client/cert.pem"
+                ]
+              },
+              "failureThreshold": 60,
+              "periodSeconds": 2
             },
             "terminationMessagePath": "/dev/termination-log",
             "volumeMounts": [
@@ -133,18 +156,9 @@
             ]
           }
         ],
-        "dnsPolicy": "ClusterFirst",
-        "hostAliases": [
-          {
-            "hostnames": [
-              "forgejo"
-            ],
-            "ip": "10.43.130.32"
-          }
-        ],
         "priorityClassName": "gt-ci-gate",
         "restartPolicy": "Always",
-        "terminationGracePeriodSeconds": 30,
+        "terminationGracePeriodSeconds": 660,
         "volumes": [
           {
             "configMap": {

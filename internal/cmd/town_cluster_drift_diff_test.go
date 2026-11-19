@@ -212,6 +212,20 @@ func driftContainers(object map[string]any) []any {
 	return driftPodSpec(object)["containers"].([]any)
 }
 
+// driftPodContainers returns the pod spec's init containers and then its regular
+// ones: every container the API server fills its defaults in for.
+func driftPodContainers(object map[string]any) []any {
+	spec := driftPodSpec(object)
+	var entries []any
+	if initContainers, ok := spec["initContainers"].([]any); ok {
+		entries = append(entries, initContainers...)
+	}
+	if containers, ok := spec["containers"].([]any); ok {
+		entries = append(entries, containers...)
+	}
+	return entries
+}
+
 // driftEntry returns the entry named name in the pod spec's list.
 func driftEntry(t *testing.T, object map[string]any, list, name string) map[string]any {
 	t.Helper()

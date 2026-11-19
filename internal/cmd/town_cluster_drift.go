@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -65,6 +66,16 @@ type clusterDriftDeps struct {
 // kubectl, and the command's output.
 func realClusterDriftDeps(out io.Writer) clusterDriftDeps {
 	return clusterDriftDeps{render: realClusterRenderDeps(out), runner: realRunnerDriftTargets, kubectl: realRunFunc(), out: out}
+}
+
+// runnerTargets is the gate runner's targets through the seam. A deps value built
+// without one fails the run instead of panicking on the call: a run that cannot
+// render the runner must not report a cluster in step.
+func (d clusterDriftDeps) runnerTargets() ([]driftTarget, error) {
+	if d.runner == nil {
+		return nil, errors.New("no render of the gate runner is wired, so the runner cannot be compared")
+	}
+	return d.runner()
 }
 
 // realRunnerDriftTargets is the gate runner's render: the control cluster's
@@ -166,7 +177,7 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	}
 	// The runner is rendered from the checked-in control values, so its targets
 	// exist whether or not the recorded flags name it.
-	runnerTargets, err := d.runner()
+	runnerTargets, err := d.runnerTargets()
 	if err != nil {
 		return fmt.Errorf("cannot render the gate runner to compare: %w", err)
 	}
