@@ -1571,6 +1571,9 @@ type DiskMaintenanceConfig struct {
 	// CICacheWarnBytes is the size above which a trim that removed nothing is an
 	// attention item. Empty means DiskMaintenanceDefaultCICacheWarnBytes.
 	CICacheWarnBytes string `json:"ci_cache_warn_bytes,omitempty"` // size such as "30GB"
+	// CIGocacheCapBytes is the size cap for the ci-gocache volume, the CI
+	// runner's Go build cache. Empty means DiskMaintenanceDefaultCIGocacheCapBytes.
+	CIGocacheCapBytes string `json:"ci_gocache_cap_bytes,omitempty"` // size such as "40GB"
 	// CIEnginePruneInterval is how often the CI runner's docker-in-docker engine
 	// is pruned, in any window. Empty means DiskMaintenanceDefaultCIEnginePruneInterval.
 	CIEnginePruneInterval string `json:"ci_engine_prune_interval,omitempty"` // Go duration such as "1h"
@@ -1724,6 +1727,21 @@ func (c DiskMaintenanceConfig) CICacheWarnLimit() (int64, error) {
 	limit, err := parseDiskMaintenanceSize(raw)
 	if err != nil {
 		return 0, fmt.Errorf("patrols.disk_maintenance.ci_cache_warn_bytes: %w", err)
+	}
+	return limit, nil
+}
+
+// CIGocacheCapLimit returns the size cap for the ci-gocache volume: the default
+// when the setting is empty, and an error naming the setting for a value that is
+// not a positive size. It never falls back to the default on an error.
+func (c DiskMaintenanceConfig) CIGocacheCapLimit() (int64, error) {
+	raw := c.CIGocacheCapBytes
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCIGocacheCapBytes
+	}
+	limit, err := parseDiskMaintenanceSize(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_gocache_cap_bytes: %w", err)
 	}
 	return limit, nil
 }
@@ -1979,6 +1997,9 @@ const (
 	// DiskMaintenanceDefaultCICacheWarnBytes is the size above which a CI cache
 	// trim that removed nothing raises its attention item (gt-gg9hv.57).
 	DiskMaintenanceDefaultCICacheWarnBytes = "30GB"
+	// DiskMaintenanceDefaultCIGocacheCapBytes is the size cap for the ci-gocache
+	// volume when the setting is empty (gt-zyu539).
+	DiskMaintenanceDefaultCIGocacheCapBytes = "40GB"
 	// DiskMaintenanceDefaultCIEnginePruneInterval is the CI runner engine prune's
 	// cadence: the engine fills its claim in hours, not days (gt-i02983).
 	DiskMaintenanceDefaultCIEnginePruneInterval = "1h"
@@ -2076,6 +2097,9 @@ func (c *DiskMaintenanceConfig) validate() error {
 		return err
 	}
 	if _, err := c.CICacheWarnLimit(); err != nil {
+		return err
+	}
+	if _, err := c.CIGocacheCapLimit(); err != nil {
 		return err
 	}
 	if _, err := c.CIEnginePruneEvery(); err != nil {

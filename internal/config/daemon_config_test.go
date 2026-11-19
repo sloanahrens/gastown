@@ -1464,6 +1464,78 @@ func TestDiskMaintenanceCICacheSettings(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceCIGocacheCap: the ci-gocache size cap is the 40GB default
+// when unset and the parsed size otherwise, at the accessor and at config load
+// alike, so an empty setting is never an error (gt-zyu539).
+func TestDiskMaintenanceCIGocacheCap(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+		doc   string
+		want  int64
+	}{
+		{name: "empty is the 40GB default", doc: `{"disk_maintenance": {}}`, want: 40 << 30},
+		{name: "an explicit size is read", value: "20GB", doc: `{"disk_maintenance": {"ci_gocache_cap_bytes": "20GB"}}`, want: 20 << 30},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := (DiskMaintenanceConfig{CIGocacheCapBytes: tt.value}).CIGocacheCapLimit()
+			if err != nil {
+				t.Fatalf("CIGocacheCapLimit(%q): %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("CIGocacheCapLimit(%q) = %d, want %d", tt.value, got, tt.want)
+			}
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(tt.doc), &p); err != nil {
+				t.Fatalf("config load with ci_gocache_cap_bytes %q: %v", tt.value, err)
+			}
+			got, err = p.DiskMaintenance.CIGocacheCapLimit()
+			if err != nil {
+				t.Fatalf("config load with ci_gocache_cap_bytes %q: CIGocacheCapLimit: %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("config load with ci_gocache_cap_bytes %q = %d, want %d", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiskMaintenanceCIGocacheCapRefuses: a cap the trim cannot act on is
+// refused naming its own key, from the accessor and at config load, and is
+// never read as the default (gt-zyu539).
+func TestDiskMaintenanceCIGocacheCapRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "zero is refused", value: "0", wantErr: "zero"},
+		{name: "negative is refused", value: "-1GB", wantErr: "not a size"},
+		{name: "malformed is refused", value: "lots", wantErr: "not a size"},
+		{name: "overflow is refused", value: "99999999TB", wantErr: "too large"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := (DiskMaintenanceConfig{CIGocacheCapBytes: tt.value}).CIGocacheCapLimit(); err == nil ||
+				!strings.Contains(err.Error(), "patrols.disk_maintenance.ci_gocache_cap_bytes") ||
+				!strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("CIGocacheCapLimit(%q) = %v; want an error naming the key and %q", tt.value, err, tt.wantErr)
+			}
+			doc := `{"disk_maintenance": {"ci_gocache_cap_bytes": "` + tt.value + `"}}`
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil ||
+				!strings.Contains(err.Error(), "patrols.disk_maintenance.ci_gocache_cap_bytes") {
+				t.Errorf("config load with ci_gocache_cap_bytes %q = %v; want an error naming the key", tt.value, err)
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceCIEnginePruneSettings: the CI engine prune's settings default
 // to 1h, 48h, 6h and ["ci-base"]; a value the patrol cannot act on is refused naming
 // its own key, and an explicit empty keep list is refused rather than read as

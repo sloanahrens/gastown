@@ -227,10 +227,11 @@ namespace. The trim runs on its own interval (`ci_cache_trim_interval`) in any
 window and does not wait for the town to be quiet, as the shared cache claim's
 trim does, so a landing pass in flight does not hold it off.
 
-- The three settings sit under `patrols.disk_maintenance`: `ci_cache_trim_interval`
-  (default `1h`), `ci_cache_max_age` (default `12h`) and `ci_cache_warn_bytes`
-  (default `30GB`). An empty setting is the default. Zero or less is refused, and
-  the error names the setting.
+- The four settings sit under `patrols.disk_maintenance`:
+  `ci_cache_trim_interval` (default `1h`), `ci_cache_max_age` (default `12h`),
+  `ci_cache_warn_bytes` (default `30GB`) and `ci_gocache_cap_bytes` (default
+  `40GB`). An empty setting is the default. Zero or less is refused, and the
+  error names the setting.
 - The exec goes to the control cluster, which is the context
   `patrols.tier_sweep.runner.context` names. The runner must be on the kubernetes
   backend with that context set. On any other backend, or with no tier sweep
@@ -242,7 +243,11 @@ trim does, so a landing pass in flight does not hold it off.
   every empty directory below the top level, including any that was already
   empty before the run. The volume's top level is left to Go: its `trim.txt`
   bookkeeping and its 256 two-hex-digit shard directories, which Go creates once
-  and does not recreate. `ci-gomod` and `ci-npm` are not touched.
+  and does not recreate. `ci-gomod` and `ci-npm` are not touched. The cap is
+  `ci_gocache_cap_bytes`: the trim that enforces it (gt-wwx09z) removes the least
+  recently used files, oldest last write first, once the age rule has run, until
+  the volume is back under the cap, and never a file written within the last
+  hour, whatever the cap.
 - The mode applies as it does to the rest of the patrol. `dry_run` lists what
   would be removed and removes nothing; `apply` removes. An applied run logs one
   line, `disk_maintenance: ci cache trim: removed N files, X to Y (older than 12h)`,
