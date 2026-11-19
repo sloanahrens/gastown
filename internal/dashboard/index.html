@@ -409,6 +409,17 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 .echip.info{color:var(--blue)}.echip.warn{color:var(--amber)}.echip.crit{color:var(--red)}
 .evrow .k{font-weight:700}
 .evrow.info .k{color:var(--blue)}.evrow.warn .k{color:var(--amber)}.evrow.crit .k{color:var(--red)}
+/* Town activity (gt-l98ykr): the time column as wide as its stamp, the rig and
+   kind as wide as their words, the text taking the rest, so a narrow panel wraps
+   a line rather than scrolling sideways. */
+#activity{max-height:40vh;overflow:auto;padding:4px 0}
+.atrow{display:grid;grid-template-columns:max-content max-content max-content minmax(0,1fr);gap:8px;padding:2px 12px;overflow-wrap:anywhere}
+.atrow .t,.atrow .g,.atrow .k{white-space:nowrap}
+.atrow .t,.atrow .g{color:var(--dim)}
+.atrow .k{font-weight:700}
+/* A line's class in the page's tokens: failure red, warning amber, success
+   green, landing teal, dispatch blue, restart violet, plain the body colour. */
+.at-failure{color:var(--red)}.at-warning{color:var(--amber)}.at-success{color:var(--green)}.at-landing{color:var(--teal)}.at-dispatch{color:var(--blue)}.at-restart{color:var(--violet)}.at-plain{color:var(--text)}
 .alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
 .alvl.info{color:var(--blue)}.alvl.warn{color:var(--amber)}.alvl.crit{color:var(--red)}
 .arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
@@ -529,6 +540,7 @@ a.hrow:hover{background:#19212b}
     <section data-fold="birds" data-default-collapsed><h2>Birds <span class="r" id="birdsnote"></span></h2><div class="body" id="birds"></div></section>
     <section data-fold="attention"><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section id="eventssec" data-fold="events" data-default-collapsed><h2>EVENTS <span class="chips" id="eventschips"></span> <span class="r" id="eventsnote"></span></h2><div class="body" id="events"></div></section>
+    <section id="activitysec" data-fold="activity" data-default-collapsed><h2>Town activity <span class="r" id="activitynote"></span></h2><div class="body" id="activity"></div></section>
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
@@ -5198,6 +5210,68 @@ function renderEvents(s) {
 // eventsRead is the operator opening the panel: what it held is read.
 function eventsRead() { eventsUnread = 0; paintEvents(); }
 
+// TOWN ACTIVITY is the town's own feed (gt-l98ykr): every line the hub sends as
+// an entry frame, and the whole ring as one backlog frame on connect, drawn
+// newest first and the last ACTIVITY_KEPT. The hub has always sent those frames;
+// until this pane the page only took them as a sign the stream was alive.
+const ACTIVITY_KEPT = 200;
+let activityLines = []; // newest first
+// ACTIVITY_CLASS is the colour a line's class draws in, from the page's tokens.
+// A class the page has not seen draws plain rather than guessing at a colour.
+const ACTIVITY_CLASS = {failure: "at-failure", warning: "at-warning", success: "at-success", landing: "at-landing", dispatch: "at-dispatch", restart: "at-restart", plain: "at-plain"};
+// activityAt is a line's stamp in milliseconds, or null when it carries none the
+// page can date: the row then draws no time and the note no age.
+function activityAt(e) {
+  const t = e && e.at ? Date.parse(e.at) : NaN;
+  return isNaN(t) ? null : t;
+}
+function activityRow(e) {
+  const at = activityAt(e);
+  const r = el("div", "atrow " + (ACTIVITY_CLASS[e && e.class] || "at-plain"));
+  r.append(el("span", "t", at == null ? "" : clock(e.at)), el("span", "g", e.rig || ""), el("span", "k", e.kind || ""), el("span", "x", e.text || ""));
+  return r;
+}
+// paintActivityNote says how much the feed holds and how old its newest line is.
+// The fold copies it into a shut pane's summary, so the header says it either way.
+function paintActivityNote() {
+  const at = activityLines.length ? activityAt(activityLines[0]) : null;
+  const age = at == null ? null : Math.max(0, Math.round((Date.now() - at) / 1000));
+  $("activitynote").textContent = activityLines.length + (activityLines.length === 1 ? " row" : " rows") + (age == null ? "" : " · newest " + fmtDur(age) + " ago");
+}
+// paintActivity draws the feed, its note and the fold's summary. A text cell goes
+// in through textContent, so markup in a journal line reads as itself.
+function paintActivity() {
+  const box = $("activity");
+  box.replaceChildren(...activityLines.map(activityRow));
+  if (!activityLines.length) box.append(el("div", "empty", "no activity in the window"));
+  paintActivityNote();
+  paintFolds(state);
+}
+// takeBacklog replaces the feed with the ring the hub sends on connect. The ring
+// is oldest first, so it is reversed to draw newest first and cut to the newest
+// ACTIVITY_KEPT.
+function takeBacklog(entries) {
+  activityLines = (entries || []).filter(e => e).reverse().slice(0, ACTIVITY_KEPT);
+  paintActivity();
+}
+// takeActivity adds one line the stream carried at the top of the feed, newest
+// first, and drops the oldest past ACTIVITY_KEPT. What arrives most often is one
+// line, so it is drawn as one row rather than by redrawing the feed.
+function takeActivity(e) {
+  if (!e) return;
+  activityLines.unshift(e);
+  if (activityLines.length > ACTIVITY_KEPT) activityLines.pop();
+  const box = $("activity");
+  const only = box.children.length === 1 ? box.firstChild : null;
+  if (only && only.className === "empty") box.replaceChildren(activityRow(e));
+  else {
+    box.prepend(activityRow(e));
+    while (box.children.length > ACTIVITY_KEPT) box.children.item(box.children.length - 1).remove();
+  }
+  paintActivityNote();
+  paintFolds(state);
+}
+
 function notify(a) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   try { new Notification(a.title || "Gas Town", {body: a.text || ""}); } catch (e) {}
@@ -5846,9 +5920,11 @@ function connect() {
   // A list event is only stored: the state frame the hub sends right after it is
   // the one that draws it.
   for (const name of ["trend.recent", "queue.ready", "queue.blocked"]) es.addEventListener(name, ev => { seen(); lists[name] = JSON.parse(ev.data); });
-  // The activity feed is gone from the page, but the hub still sends its frames
-  // and each one is a sign the stream is alive.
-  for (const name of ["backlog", "entry"]) es.addEventListener(name, () => { seen(); });
+  // The hub sends the ring as one backlog frame on connect and each new line as
+  // an entry frame. Both draw the Town activity pane, and each is a sign the
+  // stream is alive.
+  es.addEventListener("backlog", ev => { seen(); takeBacklog(JSON.parse(ev.data)); });
+  es.addEventListener("entry", ev => { seen(); takeActivity(JSON.parse(ev.data)); });
   es.addEventListener("alert", ev => { seen(); onAlert(JSON.parse(ev.data)); });
 }
 // dropStream records that the page's stream is gone, whether the browser said so
@@ -6122,6 +6198,10 @@ $("forgejofeedhead").addEventListener("click", toggleFeed);
 foldFeed(false); // no state has arrived yet, so there is no Actions section
 $("models").addEventListener("click", toggleModels);
 paintModelsLine();
+// The feed is empty until a frame arrives, and a pane opened before then says so.
+// Painted here rather than with the pane's code because the fold it repaints does
+// not exist until setupCollapse has run.
+paintActivity();
 connect();
 // A tab that comes back has a stream whose events may still be queued behind
 // the tab's own held timers, so the silence belongs to the tab, not the
@@ -6160,7 +6240,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>

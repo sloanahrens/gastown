@@ -345,6 +345,7 @@ var ageAllowList = map[string]string{
 	"$(\"tiersweepnote\").textContent = rows.length + \" sweeps · last \" + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + \" ago\";":                                                                                                                                                                                                                           "the newest sweep's stamp: a sweep record, not a read",
 	"return isNaN(t) ? null : (Date.now() - t) / 1000;":                                                         "secsSince: a run's start or stop stamp; an unreadable one is null",
 	"return {counts: counts, ageSec: newest === null ? null : Math.max(0, Math.round((now - newest) / 1000))};": "age of the newest alert event: the feed's own stamp, not a read",
+	"const age = at == null ? null : Math.max(0, Math.round((Date.now() - at) / 1000));":                        "age of the newest activity line: the feed's own stamp, not a read",
 	"const since = now - EVENT_STATS_WINDOW_MS;":                                                                "the start of the event stats window: a count of milliseconds",
 	"const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;":                                          "the page's watchdog clock, not a stamp from the server",
 	"if (now - lastEvent < SILENT_MS) return;":                                                                  "the page's watchdog clock, not a stamp from the server",
