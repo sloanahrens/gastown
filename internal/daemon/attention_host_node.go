@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +26,14 @@ import (
 const controlNodeNameReuse = time.Hour
 
 // hostNodeDisk is the control node's image filesystem as the rules read it: the
-// node that answered and the volume's usage.
+// node that answered and the volume's usage. The byte counts are kept beside
+// the share so the record shows the figures the read took, not a share
+// recomputed from them (gt-9bt0of).
 type hostNodeDisk struct {
-	Node string
-	Disk hostDisk
+	Node          string
+	Disk          hostDisk
+	UsedBytes     int64
+	CapacityBytes int64
 }
 
 // hostNodeRead is one control node's read: its reading, or the error that
@@ -102,6 +107,8 @@ func parseNodeStatsImageFs(summary []byte) (hostNodeDisk, error) {
 			UsedPct: float64(used) / float64(capacity) * 100,
 			FreeGB:  float64(available) / (1 << 30),
 		},
+		UsedBytes:     used,
+		CapacityBytes: capacity,
 	}, nil
 }
 
@@ -237,7 +244,32 @@ func (d *Daemon) controlNodeDisk(ctx context.Context) ([]hostNodeRead, error) {
 	if failed {
 		d.controlNodes.forget()
 	}
+	d.recordNodeDiskReads(reads)
 	return reads, nil
+}
+
+// recordNodeDiskReads writes one pass's readings to the town's node disk
+// record, so the next pass can be read against them (gt-9bt0of). A write that
+// fails is logged once and changes no rule: the rules decide on the readings
+// this pass took.
+func (d *Daemon) recordNodeDiskReads(reads []hostNodeRead) {
+	now := d.clk().Now()
+	entries := make(map[string]nodeDiskEntry, len(reads))
+	for _, r := range reads {
+		if r.Err != nil {
+			entries[r.Node] = nodeDiskEntry{Err: r.Err.Error(), ErrAt: now}
+			continue
+		}
+		entries[r.Node] = nodeDiskEntry{
+			UsedPercent:   int(math.Round(r.Disk.UsedPct)),
+			UsedBytes:     r.UsedBytes,
+			CapacityBytes: r.CapacityBytes,
+			ReadAt:        now,
+		}
+	}
+	if err := recordNodeDisk(d.config.TownRoot, entries); err != nil {
+		d.logger.Printf("control node disk: the readings were not recorded (%v)", err)
+	}
 }
 
 // readNodeDisk reads one node's image filesystem: its stats summary through the
