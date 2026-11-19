@@ -65,10 +65,10 @@ spec:
               value: /certs
           resources:
             requests:
-              cpu: "6"
+              cpu: "8"
               memory: 12Gi
             limits:
-              cpu: "6"
+              cpu: "8"
               memory: 12Gi
           securityContext:
             privileged: true
