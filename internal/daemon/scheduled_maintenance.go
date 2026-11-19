@@ -443,6 +443,12 @@ func (d *Daemon) runTownStateBackupStep(now time.Time) townStateNightlyOutcome {
 		d.townStateNightlyLog.logAs(d.logger.Printf, "off", now.Format(time.DateOnly),
 			fmt.Sprintf("scheduled_maintenance: town-state backup is off: %s is empty",
 				config.MaintenanceTownStateBackupRootKey))
+		// Off is the operator's choice, so the step's alert is settled on every
+		// off run: an alert raised on an earlier night must not outlive turning
+		// the step off on purpose.
+		d.clearAlerts("the nightly town-state backup is off: "+
+			config.MaintenanceTownStateBackupRootKey+" is empty",
+			alertKeyTownStateNightly)
 		return townStateNightlyOff
 	case err != nil:
 		d.townStateNightlyAlert(err)

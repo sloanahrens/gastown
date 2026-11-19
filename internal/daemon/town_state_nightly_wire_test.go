@@ -69,33 +69,56 @@ func TestTownStateNightlyWireAbsentConfigAlerts(t *testing.T) {
 
 // TestTownStateNightlyWireRootEmptyIsOffOncePerDay is the second acceptance
 // box's off half, observed at the step rather than inferred from a silent
-// alert: the step reports its off outcome, raises no alert, and says why once
-// per day.
+// alert: a failing night raises the step's alert, and the operator's next run
+// with the root empty in the same present config reports the off outcome,
+// clears that alert, files no new one, and says why once per day.
 func TestTownStateNightlyWireRootEmptyIsOffOncePerDay(t *testing.T) {
 	t.Parallel()
+	root := filepath.Join(t.TempDir(), "town-state")
+	// A file where the root's directory belongs makes the night fail, which
+	// raises the alert the off branch has to settle.
+	if err := os.WriteFile(root, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	section := &ScheduledMaintenanceConfig{TownStateBackupRoot: root}
 	var logs strings.Builder
 	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		ScheduledMaintenance: &ScheduledMaintenanceConfig{},
+		ScheduledMaintenance: section,
 	}}, &logs)
 	day := nightlyTestNow()
 
+	if got := d.runTownStateBackupStep(day); got != townStateNightlyFailed {
+		t.Fatalf("failing run outcome = %v, want failed", got)
+	}
+	if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 1 {
+		t.Fatalf("open escalations after a failing night = %+v, want one", open)
+	}
+
+	// The operator turns the step off in the same, present config.
+	section.TownStateBackupRoot = ""
 	for run := 0; run < 2; run++ {
 		if got := d.runTownStateBackupStep(day); got != townStateNightlyOff {
-			t.Fatalf("run %d outcome = %v, want off", run+1, got)
+			t.Fatalf("off run %d outcome = %v, want off", run+1, got)
 		}
 	}
-	if got := strings.Count(logs.String(), "town-state backup is off"); got != 1 {
+	if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 0 {
+		t.Errorf("open escalations after the step was turned off = %+v, want the earlier alert cleared", open)
+	}
+	if got := strings.Count(logs.String(), "scheduled_maintenance: town-state backup is off"); got != 1 {
 		t.Errorf("off lines after two runs on one day = %d, want 1:\n%s", got, logs.String())
+	}
+	if got := len(rec.Escalations()); got != 1 {
+		t.Errorf("escalations filed = %d, want only the failing night's one:\n%+v", got, rec.Escalations())
 	}
 
 	if got := d.runTownStateBackupStep(day.AddDate(0, 0, 1)); got != townStateNightlyOff {
 		t.Fatalf("next-day outcome = %v, want off", got)
 	}
-	if got := strings.Count(logs.String(), "town-state backup is off"); got != 2 {
+	if got := strings.Count(logs.String(), "scheduled_maintenance: town-state backup is off"); got != 2 {
 		t.Errorf("off lines after a second day = %d, want 2:\n%s", got, logs.String())
 	}
-	if got := rec.Escalations(); len(got) != 0 {
-		t.Errorf("off step escalated: %+v", got)
+	if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 0 {
+		t.Errorf("the off step raised an escalation: %+v", open)
 	}
 }
 
