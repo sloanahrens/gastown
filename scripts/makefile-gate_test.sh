@@ -19,6 +19,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# The host's go before the stub leads PATH: the stub forwards the gate's
+# verdict line to the real gateverdict (gt-0h1w5j).
+REAL_GO="$(command -v go)"
+export REAL_GO
 # The CPU-class wrapper fronts the go steps only in a crew checkout (gt-bq68w);
 # this fixture stubs go, so it takes the class out of the recipes and checks
 # them unwrapped. internal/makegate's CPU-class case runs the real wrapper.
@@ -75,10 +79,10 @@ if ! grep -q -F -- '-strict-wall' <<<"$out" && tout=$(dry tier-check) && grep -q
 else
   fail "gate only warns on wall time; make tier-check runs the unit tier with -strict-wall and no lint or build (gt-z7qtk)" "${tout:-}"
 fi
-if grep -q -E 'gate: PASSED in \$\{wall\}s wall' <<<"$out"; then
-  pass "gate prints its wall time"
+if grep -q -F 'gateverdict -unit $go_rc -vet $vet_rc -wall $wall' <<<"$out"; then
+  pass "gate prints its wall time: the last line is gateverdict's over both stage statuses"
 else
-  fail "gate prints its wall time" "$out"
+  fail "gate prints its wall time: the last line is gateverdict's over both stage statuses" "$out"
 fi
 
 if grep -q -F 'golangci-lint run --timeout=5m --allow-serial-runners' <<<"$out" && lout=$(dry lint) && ! grep -q -F -- '--allow-serial-runners' <<<"$lout" && grep -q -F 'scripts/lint-lock-wait.sh 600 golangci-lint run --timeout=5m' <<<"$lout"; then
@@ -781,6 +785,9 @@ fi
 # The tierwall series run: STUB_TIERWALL_EXIT makes it fail without touching
 # the Go suite's status, and it drains its stream the way the real one reads it.
 if [[ "$1" == run && "$*" == *cmd/tierwall* ]]; then cat >/dev/null; exit "${STUB_TIERWALL_EXIT:-0}"; fi
+# The last line and the exit status are gateverdict's, so the real command runs:
+# a stub verdict could not tell a miswired -unit or -vet from a correct one.
+if [[ "$1" == run && "$2" == ./internal/testpolicy/cmd/gateverdict ]]; then shift 2; exec "$REAL_GO" run ./internal/testpolicy/cmd/gateverdict "$@"; fi
 exit 0
 STUB
 cat >"$TMP/bin/golangci-lint" <<'STUB'

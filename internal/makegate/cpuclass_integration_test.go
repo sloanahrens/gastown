@@ -30,11 +30,14 @@ var (
 	cpuClassErr  error
 )
 
-// TestMain removes the wrapper the CPU-class cases built.
+// TestMain removes the binaries the cases built (gt-0h1w5j).
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if cpuClassBin != "" {
 		_ = os.RemoveAll(filepath.Dir(cpuClassBin))
+	}
+	if gateverdictShared.bin != "" {
+		_ = os.RemoveAll(filepath.Dir(gateverdictShared.bin))
 	}
 	os.Exit(code)
 }

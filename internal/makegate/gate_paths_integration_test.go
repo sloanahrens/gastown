@@ -41,6 +41,9 @@ func TestIntegrationGatePathsGreenStubs(t *testing.T) {
 	if !r.hasCall("go test GT_TEST_DOCKER=0") {
 		t.Fatalf("the unit tier did not see GT_TEST_DOCKER=0 despite an inherited 1\ncalls:\n%s", r.callLog())
 	}
+	if !r.hasCall("integrationvet") {
+		t.Fatalf("the gate never ran the integration vet\ncalls:\n%s", r.callLog())
+	}
 	if r.hasCall("shell-tests") {
 		t.Fatalf("the gate ran the shell tests, which belong to test-slow\ncalls:\n%s", r.callLog())
 	}
@@ -137,6 +140,18 @@ func TestIntegrationGatePathsBuildFailsStopsTheUnitTier(t *testing.T) {
 	}
 	if r.hasCallWithPrefix("go test") {
 		t.Fatalf("the unit tier started after the build failed\ncalls:\n%s", r.callLog())
+	}
+}
+
+// TestIntegrationGatePathsIntegrationVetFailsNamesTheVet checks "the
+// integration vet fails: non-zero, names the vet stage".
+// Mutation: drop -vet $$vet_rc from the gateverdict line, or the wait that
+// captures the vet's status, and a red vet passes (gt-0h1w5j).
+func TestIntegrationGatePathsIntegrationVetFailsNamesTheVet(t *testing.T) {
+	r := newGateSandbox(t).Run([]string{"-o", "lint"}, "STUB_VET_FAIL=1")
+
+	if r.Code == 0 || !strings.Contains(r.Stderr, "gate: FAILED at integration vet") {
+		t.Fatalf("the gate exited %d and did not name the integration vet stage\nstderr:\n%s\ncalls:\n%s", r.Code, r.Stderr, r.callLog())
 	}
 }
 

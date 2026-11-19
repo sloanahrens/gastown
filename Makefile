@@ -13,7 +13,10 @@
 #                          gt-s1vff). The gate runs no budget runner and
 #                          measures no wall, CPU or idle time, so a landing is
 #                          never refused for contention (gt-z7qtk). Prints its
-#                          wall time at the end.
+#                          wall time at the end. It runs the integration vet
+#                          (`go run ./internal/testpolicy/cmd/integrationvet`,
+#                          which type-checks what the tag adds, gt-w3aby)
+#                          beside the unit tier.
 #   make tier-check        the unit tier through the budget runner, whose only
 #                          caller it is: the runner judges each package's CPU
 #                          budget and wall time, and a wall overrun fails
@@ -514,9 +517,8 @@ gate-lint: exec-tax-preflight lint
 # gates that started in the same second.
 GATE_WALLS = -jsonl .runtime/metrics/gate-walls.jsonl -run gate-$$(date +%s)-$$$$
 
-# gate-test is build plus the unit tier. Its printed wall is its own: lint
-# reports separately (a target-specific value here wins over the one gate
-# would pass down).
+# gate-test is build plus the unit tier and the integration vet. Its printed
+# wall is its own: lint reports separately (a value here wins over gate's).
 gate-test: GATE_START := $(shell date +%s)
 gate-test:
 	@echo "gate: build (go build ./... and the nested modules: $(NESTED_MODULES))" >&2
@@ -534,7 +536,9 @@ gate-test:
 	@# The suite runs in the background so the trap fires at once on INT or
 	@# TERM (bash defers traps until a foreground child exits); the trap walks
 	@# this shell's whole descendant tree (pgrep -P), so it stops the suite
-	@# whether it is a direct child or behind the CPU-class wrapper.
+	@# whether it is a direct child or behind the CPU-class wrapper. The
+	@# integration vet runs in the background beside it and the same trap
+	@# stops it (gt-w3aby, gt-0h1w5j).
 	@# The JSON is written to a temp file and fed to tierwall once the suite
 	@# ends, not piped: a backgrounded pipeline reports only its last element,
 	@# so a pipe would hand back tierwall's status instead of go test's, and
@@ -546,18 +550,20 @@ gate-test:
 	@# code 4 (go run folds any program code to 1 and prints "exit status N"), and
 	@# a passing suite with a non-zero tierwall prints the incomplete-series alarm. -json sits after the
 	@# package list, where the go tool still parses it, so the unit tier's line
-	@# keeps the shape the gate-shape tests pin.
+	@# keeps the shape the gate-shape tests pin. The last line is gateverdict's:
+	@# it names a red stage, exits 1, and keeps the PASSED wording (gt-w3aby).
 	@trap 'killtree() { for c in $$(pgrep -P "$$1" 2>/dev/null); do killtree "$$c"; done; kill "$$1" 2>/dev/null; }; for c in $$(pgrep -P $$$$ 2>/dev/null); do killtree "$$c"; done; [ -n "$$stream" ] && rm -f "$$stream"; exit 130' INT TERM; \
 	stream=$$(mktemp); \
+	go run ./internal/testpolicy/cmd/integrationvet & vet=$$!; \
 	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... -json >"$$stream" & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
 	go run ./internal/testpolicy/cmd/tierwall -slow-tests $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
 	rm -f "$$stream"; \
 	if [ $$go_rc -eq 0 ] && [ $$tw_rc -ne 0 ]; then echo "gate: tierwall exited $$tw_rc, so the wall series may be incomplete; the Go suite's verdict stands" >&2; fi; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; ($(CPU_CLASS) go -C "$$m" vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go -C "$$m" test ./...) || { go_rc=$$?; break; }; done; fi; \
+	wait $$vet; vet_rc=$$?; \
 	wall=$$(( $$(date +%s) - $(GATE_START) )); \
-	if [ $$go_rc -ne 0 ]; then echo "gate: FAILED at unit tier (Go suite, exit $$go_rc) after $${wall}s wall" >&2; exit 1; fi; \
-	echo "gate: PASSED in $${wall}s wall" >&2
+	go run ./internal/testpolicy/cmd/gateverdict -unit $$go_rc -vet $$vet_rc -wall $$wall
 
 # The preflight the gate runs before lint. It prints at most a warning, so a
 # preflight that cannot measure (no `go run`, a temp dir it cannot write)

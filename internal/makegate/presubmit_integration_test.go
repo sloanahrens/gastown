@@ -42,7 +42,7 @@ const gateStubGoInterrupt = "#!/bin/bash\n" + gateStubHead + `if [ "$1" = test ]
 	fi
 	echo "go test survived the interrupt" >>"$STUB_LOG"
 fi
-` + gateStubTail
+` + gateStubGoPlusVetAndVerdict + gateStubTail
 
 // gateStubShellTestsFail is the shell-tests stub: it logs its call and fails
 // when STUB_SHELL_FAIL is set, as the shell fixture's stub does.

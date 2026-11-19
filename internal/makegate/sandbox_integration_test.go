@@ -6,10 +6,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -236,7 +238,19 @@ exit 0
 	exit 0
 fi
 `
-	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubGoPlusLintpin + gateStubTail
+	gateStubGo = "#!/bin/sh\n" + gateStubHead + gateStubGoPlusLintpin + gateStubGoPlusVetAndVerdict + gateStubTail
+
+	// gateStubGoPlusVetAndVerdict makes the vet stage real: the vet exits with
+	// STUB_VET_FAIL, and the verdict runs the real gateverdict (gt-0h1w5j).
+	gateStubGoPlusVetAndVerdict = `if [ "$1" = run ] && [ "$2" = ./internal/testpolicy/cmd/integrationvet ]; then
+	echo "integrationvet" >>"$STUB_LOG"
+	exit "${STUB_VET_FAIL:-0}"
+fi
+if [ "$1" = run ] && [ "$2" = ./internal/testpolicy/cmd/gateverdict ]; then
+	shift 2
+	exec "$STUB_GATEVERDICT" "$@"
+fi
+`
 
 	// gateStubLint stands in for golangci-lint, including the one behaviour the
 	// gate relies on it for: with STUB_LINT_CONTEND=n another run holds the module
@@ -354,6 +368,36 @@ func newGateSandbox(t *testing.T) *GateSandbox {
 	return g
 }
 
+// gateverdictShared is the real verdict printer, built once per test process:
+// the gate's last line and its exit status are that command's (gt-0h1w5j).
+var gateverdictShared struct {
+	sync.Once
+	bin string
+	err error
+}
+
+// gateverdictBinary builds gateverdict with the host's go, not a case's stub.
+func gateverdictBinary(t *testing.T) string {
+	t.Helper()
+	gateverdictShared.Do(func() {
+		dir, err := os.MkdirTemp("", "makegate-verdict-")
+		if err != nil {
+			gateverdictShared.err = err
+			return
+		}
+		gateverdictShared.bin = filepath.Join(dir, "gateverdict")
+		cmd := exec.Command("go", "build", "-o", gateverdictShared.bin, "./internal/testpolicy/cmd/gateverdict")
+		cmd.Dir = repoRoot(t)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			gateverdictShared.err = fmt.Errorf("build gateverdict: %v\n%s", err, out)
+		}
+	})
+	if gateverdictShared.err != nil {
+		t.Fatalf("%v", gateverdictShared.err)
+	}
+	return gateverdictShared.bin
+}
+
 // gateScratchFiles is what the gate recipes read from the tree: the checkout
 // under test's Makefile and lint-lock-wait script, a tracker module and the
 // docker package list.
@@ -450,7 +494,7 @@ func (g *GateSandbox) runTarget(target string, makeFlags []string, vars ...strin
 // below the stubs because the recipe itself runs bash, date, mktemp and find,
 // as the shell fixture's `PATH="$TMP/bin:$PATH"` leaves them.
 func (g *GateSandbox) gateEnv(vars []string) []string {
-	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "STUB_REPO": true, "GT_TEST_DOCKER": true, "CPU_CLASS": true, "GOFLAGS": true}
+	drop := map[string]bool{"PATH": true, "STUB_LOG": true, "STUB_REPO": true, "GT_TEST_DOCKER": true, "CPU_CLASS": true, "GOFLAGS": true, "STUB_GATEVERDICT": true, "STUB_VET_FAIL": true}
 	for _, kv := range vars {
 		key, _, _ := strings.Cut(kv, "=")
 		drop[key] = true
@@ -471,7 +515,8 @@ func (g *GateSandbox) gateEnv(vars []string) []string {
 	// The stub linter answers the Makefile's own pin, so a case that sets no
 	// STUB_LINT_VERSION carries the version the recipe requires.
 	env = append(env, "GT_TEST_DOCKER=1", "STUB_LOG="+g.Path("calls"), "STUB_REPO="+repo,
-		"STUB_LINT_SHORT="+strings.TrimPrefix(golangciPin(g.t), "v"))
+		"STUB_LINT_SHORT="+strings.TrimPrefix(golangciPin(g.t), "v"),
+		"STUB_GATEVERDICT="+gateverdictBinary(g.t))
 	return append(env, vars...)
 }
 
