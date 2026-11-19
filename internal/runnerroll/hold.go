@@ -40,9 +40,13 @@ var (
 	ErrBadReason = errors.New("landing hold reason is not one line of at most 120 characters")
 	// ErrBadOwner refuses an owner that cannot sit in the owner= field.
 	ErrBadOwner = errors.New("landing hold owner is blank or has a space or control character")
-	// ErrRewritten means Release found the file without this hold's token, or
-	// malformed. The file is left in place.
+	// ErrRewritten means Release found a well-formed file without this hold's
+	// token. The file is left in place.
 	ErrRewritten = errors.New("landing hold was rewritten by someone else; left in place")
+	// ErrMalformed means Release found a file that carries no token and is not a
+	// whole hold: no second line, or one without the owner=, token= or at= field.
+	// Release leaves it in place; ReleaseForce removes it.
+	ErrMalformed = errors.New("landing hold file is malformed; left in place")
 	// ErrGone means the file is absent and this hold did not remove it.
 	ErrGone = errors.New("landing hold is already gone; this hold did not remove it")
 )
@@ -113,8 +117,9 @@ func takeWith(ctx context.Context, store HoldStore, owner, reason string, now ti
 // Release gives the hold back. It removes the file only while the file still
 // carries this hold's token. A second call after a successful release does
 // nothing and returns nil. A file that is gone without this hold removing it is
-// ErrGone, and a file with another token, or malformed, is ErrRewritten. Both
-// leave the file alone and are never success.
+// ErrGone, a well-formed file with another token is ErrRewritten, and a
+// malformed file that is not this hold's is ErrMalformed. All leave the file
+// alone and are never success.
 //
 // Read and Remove are two calls, and the store cannot make the removal depend on
 // the token. A rewrite between the read and the removal is removed with the
@@ -124,9 +129,10 @@ func (h *Hold) Release(ctx context.Context) error {
 }
 
 // ReleaseForce is Release for an operator who has decided the hold goes. It also
-// removes a malformed file: one whose second line lacks an owner=, token= or at=
-// field, so no later Release could ever match it. A well-formed file with another
-// token is still left in place and reported as ErrRewritten.
+// removes a malformed file, which Release reports as ErrMalformed: one without
+// this hold's token whose second line lacks an owner=, token= or at= field, so
+// no later Release could ever match it. A well-formed file with another token is
+// still left in place and reported as ErrRewritten.
 func (h *Hold) ReleaseForce(ctx context.Context) error {
 	return h.release(ctx, true)
 }
@@ -143,9 +149,14 @@ func (h *Hold) release(ctx context.Context, force bool) error {
 	if !present {
 		return ErrGone
 	}
-	if !carriesToken(content, h.Token) && (!force || wellFormed(content)) {
+	if !carriesToken(content, h.Token) {
 		first, _ := splitHold(content)
-		return fmt.Errorf("%w (its first line is %q)", ErrRewritten, first)
+		if wellFormed(content) {
+			return fmt.Errorf("%w (its first line is %q)", ErrRewritten, first)
+		}
+		if !force {
+			return fmt.Errorf("%w (its first line is %q)", ErrMalformed, first)
+		}
 	}
 	if err := h.store.Remove(ctx); err != nil {
 		return fmt.Errorf("runnerroll: removing the landing hold: %w", err)
