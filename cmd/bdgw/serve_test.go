@@ -268,6 +268,12 @@ func pipeConn(context.Context, string, string) (net.Conn, error) {
 	return client, nil
 }
 
+// successProbeBound is the readiness probe's deadline for the TestReadyDoltExit
+// rows that answer at once. It is a ceiling on a hang that is never reached,
+// far above the 20 ms the deadline row uses, so a loaded runner cannot fail a
+// row that does not test the deadline.
+const successProbeBound = 5 * time.Second
+
 // TestReadyDoltExit: bdgw ready exits 0 when the files load and the Dolt dial
 // passes, and exits 1 naming dolt when the dial fails or never answers.
 func TestReadyDoltExit(t *testing.T) {
@@ -277,21 +283,30 @@ func TestReadyDoltExit(t *testing.T) {
 	blocked := make(chan struct{})
 	t.Cleanup(func() { close(blocked) })
 	cases := []struct {
-		name       string
-		dial       func(context.Context, string, string) (net.Conn, error)
-		wantStatus int
-		wantStderr string
+		name string
+		dial func(context.Context, string, string) (net.Conn, error)
+		// probeTimeout belongs to the row that tests the deadline: the last
+		// row, at 20 ms, is meant to time out. The other rows answer at once
+		// and do not test it, so a short bound there only measures the host's
+		// scheduling; they get successProbeBound, 5 s, a ceiling on a hang that
+		// is never reached, not a wait and not a raised timeout. No sleep is
+		// added.
+		probeTimeout time.Duration
+		wantStatus   int
+		wantStderr   string
 	}{
 		{
-			name:       "all pass",
-			dial:       pipeConn,
-			wantStatus: exitOK,
+			name:         "all pass",
+			dial:         pipeConn,
+			probeTimeout: successProbeBound,
+			wantStatus:   exitOK,
 		},
 		{
-			name:       "dolt unreachable",
-			dial:       func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
-			wantStatus: exitFailed,
-			wantStderr: "not ready: dolt: connection refused",
+			name:         "dolt unreachable",
+			dial:         func(context.Context, string, string) (net.Conn, error) { return nil, errors.New("connection refused") },
+			probeTimeout: successProbeBound,
+			wantStatus:   exitFailed,
+			wantStderr:   "not ready: dolt: connection refused",
 		},
 		{
 			name: "dial never answers",
@@ -299,15 +314,16 @@ func TestReadyDoltExit(t *testing.T) {
 				<-blocked
 				return nil, errors.New("released")
 			},
-			wantStatus: exitFailed,
-			wantStderr: "not ready: dolt: context deadline exceeded",
+			probeTimeout: 20 * time.Millisecond,
+			wantStatus:   exitFailed,
+			wantStderr:   "not ready: dolt: context deadline exceeded",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rc := newReadyTestConfig(t)
-			rc.probeTimeout = 20 * time.Millisecond
+			rc.probeTimeout = tc.probeTimeout
 			var mu sync.Mutex
 			var dialed []string
 			rc.dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
