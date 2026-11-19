@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -54,7 +55,8 @@ func dnsRow(run Runner) Row {
 
 // TestRebootCheckNetworkDNSRows pins the DNS check's findings: OK when both
 // lookups answer, a not-OK row naming each profile that does not answer with
-// its nameservers and the start fix, and a not-OK row naming a read error.
+// its nameservers and the start fix, and a not-OK row naming a read error,
+// which does not show the VM stopped and so carries no start fix (gt-x0ijs7).
 func TestRebootCheckNetworkDNSRows(t *testing.T) {
 	t.Parallel()
 	answering := dnsResponse{out: answeringConf + lookupAnswer}
@@ -83,7 +85,12 @@ func TestRebootCheckNetworkDNSRows(t *testing.T) {
 			name:       "a read error",
 			responses:  map[string]dnsResponse{"gt-control": readError, "gt-sbx": answering},
 			wantDetail: "read DNS in gt-control: ssh: connect: connection refused",
-			wantFix:    "gt town vms start",
+		},
+		{
+			name:      "both read errors",
+			responses: map[string]dnsResponse{"gt-control": readError, "gt-sbx": readError},
+			wantDetail: "read DNS in gt-control: ssh: connect: connection refused; " +
+				"read DNS in gt-sbx: ssh: connect: connection refused",
 		},
 		{
 			name:      "both broken",
@@ -131,17 +138,39 @@ func TestRebootCheckNetworkDNSRows(t *testing.T) {
 	}
 }
 
+// writeVerbs are the verbs that change the VM or its host; CheckDNS passes its
+// read to the VM as an sh -c string, so a check that composed a repair there
+// would hide it inside one argv element unless the element is split too.
+var writeVerbs = map[string]bool{
+	"start": true, "restart": true, "cancel": true, "stop": true,
+	"rm": true, "delete": true, "kill": true, "write": true,
+}
+
+// shellTokens splits one argv element into the words a shell would run from it,
+// so a write verb composed into the sh -c string is seen as a word of its own
+// (gt-x0ijs7).
+func shellTokens(arg string) []string {
+	tokens := strings.FieldsFunc(arg, func(r rune) bool {
+		switch r {
+		case ' ', '\t', '\n', ';', '&', '|', '(', ')':
+			return true
+		}
+		return false
+	})
+	for i, tok := range tokens {
+		tokens[i] = strings.Trim(tok, "\"'`")
+	}
+	return tokens
+}
+
 // TestRebootCheckNetworkDNSReadOnly pins that the check only reads: the Runner
 // sees one colima ssh read per profile and no start, restart, cancel or write
-// verb, whether or not a lookup answers.
+// verb in any argv word, including one composed into the sh -c string, whether
+// or not a lookup answers (gt-x0ijs7).
 func TestRebootCheckNetworkDNSReadOnly(t *testing.T) {
 	t.Parallel()
 	answering := dnsResponse{out: answeringConf + lookupAnswer}
 	deadLookup := dnsResponse{out: deadConf, err: errors.New("exit status 1")}
-	writeVerbs := map[string]bool{
-		"start": true, "restart": true, "cancel": true, "stop": true,
-		"rm": true, "delete": true, "kill": true, "write": true,
-	}
 	tests := []struct {
 		name      string
 		responses map[string]dnsResponse
@@ -176,8 +205,10 @@ func TestRebootCheckNetworkDNSReadOnly(t *testing.T) {
 					t.Errorf("call %d profile = %q, want %q", i, call[3], dnsProfiles[i])
 				}
 				for _, arg := range call {
-					if writeVerbs[arg] {
-						t.Errorf("runner saw the write verb %q in %q", arg, call)
+					for _, tok := range shellTokens(arg) {
+						if writeVerbs[tok] {
+							t.Errorf("runner saw the write verb %q in %q", tok, call)
+						}
 					}
 				}
 			}

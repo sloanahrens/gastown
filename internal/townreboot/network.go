@@ -29,6 +29,7 @@ func DNSCheck(run Runner) Check {
 			}
 			vrun := vmstart.Runner(run)
 			var problems []string
+			lookupFailed := false
 			for _, profile := range dnsProfiles {
 				state, err := vmstart.CheckDNS(ctx, vrun, profile)
 				if err != nil {
@@ -39,12 +40,20 @@ func DNSCheck(run Runner) Check {
 					continue
 				}
 				if !state.Answers {
+					lookupFailed = true
 					problems = append(problems, fmt.Sprintf("%s does not answer (nameservers: %s)",
 						profile, nameserverList(state.Nameservers)))
 				}
 			}
 			if len(problems) > 0 {
-				return Result{Detail: strings.Join(problems, "; "), Fix: dnsFix}
+				result := Result{Detail: strings.Join(problems, "; ")}
+				if lookupFailed {
+					// Only a lookup that failed shows the VM stopped; a read
+					// error can come from a running VM, so starting it is not
+					// the repair that row names (gt-x0ijs7).
+					result.Fix = dnsFix
+				}
+				return result
 			}
 			return Result{OK: true, Detail: strings.Join(dnsProfiles, ", ") + " answer"}
 		},
