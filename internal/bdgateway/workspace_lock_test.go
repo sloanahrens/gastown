@@ -11,25 +11,32 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// workspaceTestFailsafe bounds every barrier and channel receive in these tests:
-// a lock bug fails the test instead of hanging it.
-const workspaceTestFailsafe = 5 * time.Second
+// workspaceTestYields bounds every barrier and channel receive in these tests:
+// a lock bug fails the test instead of hanging it. It counts scheduler yields
+// rather than reading a clock or a timer, so the bound is the same on every
+// machine and no test waits on the wall clock.
+const workspaceTestYields = 10_000_000
 
-// recvBounded receives from ch, or fails the test after the failsafe.
+// recvBounded receives from ch, yielding to the scheduler between attempts, or
+// fails the test once the yield budget is spent.
 func recvBounded[T any](t *testing.T, ch <-chan T) T {
 	t.Helper()
-	select {
-	case v := <-ch:
-		return v
-	case <-time.After(workspaceTestFailsafe):
-		t.Fatalf("no value within %s: a barrier or the lock is stuck", workspaceTestFailsafe)
-		var zero T
-		return zero
+	for i := 0; i < workspaceTestYields; i++ {
+		select {
+		case v := <-ch:
+			return v
+		default:
+			runtime.Gosched()
+		}
 	}
+	t.Fatalf("no value after %d yields: a barrier or the lock is stuck", workspaceTestYields)
+	var zero T
+	return zero
 }
 
 // fakeLock is the in-process lock seam: one holder per path, shared by every
@@ -89,9 +96,9 @@ func (c *fakeClock) jump(d time.Duration) {
 // jumps the clock to the deadline, so a holder that never releases fails the
 // test instead of hanging it.
 func yieldWhileHeld(clock *fakeClock) func(time.Duration) {
-	started := time.Now()
+	var yields atomic.Int64
 	return func(time.Duration) {
-		if time.Since(started) > workspaceTestFailsafe {
+		if yields.Add(1) > workspaceTestYields {
 			clock.jump(workspaceLockWait)
 			return
 		}
@@ -145,6 +152,7 @@ func writeFilesUnder(t *testing.T, dir string, files map[string]string) {
 // holds one whole document. Without the lock the swaps interleave and a push
 // fails; the rounds make that interleaving likely.
 func TestWorkspaceTwoStoresPushConcurrently(t *testing.T) {
+	t.Parallel()
 	type pushed struct {
 		manifest string
 		err      error
@@ -171,12 +179,9 @@ func TestWorkspaceTwoStoresPushConcurrently(t *testing.T) {
 			files map[string]string
 		}{{first, filesA}, {second, filesB}} {
 			go func() {
-				select {
-				case <-start:
-				case <-time.After(workspaceTestFailsafe):
-					results <- pushed{err: errors.New("the start barrier never opened")}
-					return
-				}
+				// The test closes start right after launching both goroutines, so this
+				// receive cannot outlast the test's own flow.
+				<-start
 				manifest, err := push.store.Put(WorkspaceDocument{ManifestSHA: WorkspaceManifest(push.files), Files: push.files})
 				results <- pushed{manifest, err}
 			}()
@@ -200,6 +205,7 @@ func TestWorkspaceTwoStoresPushConcurrently(t *testing.T) {
 // restores nothing; with no swap in flight, an open recovers the tree a crashed
 // swap moved aside.
 func TestWorkspaceOpenWaitsForASwapInFlight(t *testing.T) {
+	t.Parallel()
 	t.Run("the open waits, reads the finished tree and restores nothing", func(t *testing.T) {
 		fsys := testLockedFS()
 		root := filepath.Join(t.TempDir(), "ws")
@@ -286,6 +292,7 @@ func TestWorkspaceOpenWaitsForASwapInFlight(t *testing.T) {
 // ErrWorkspaceLockTimeout, the HTTP push answers 503 workspace_lock_timeout, and
 // nothing on disk changes.
 func TestWorkspacePushLockTimeout(t *testing.T) {
+	t.Parallel()
 	fsys := testLockedFS()
 	root := filepath.Join(t.TempDir(), "ws")
 	s, err := openWorkspaceStore(root, fsys)
@@ -334,6 +341,7 @@ func TestWorkspacePushLockTimeout(t *testing.T) {
 // next Put, here refused before any write, reports the manifest of the tree the
 // peer published, read from the tree under the lock.
 func TestWorkspacePeerSwapIsReported(t *testing.T) {
+	t.Parallel()
 	fsys := testLockedFS()
 	root := filepath.Join(t.TempDir(), "ws")
 	stale, err := openWorkspaceStore(root, fsys)
@@ -361,6 +369,7 @@ func TestWorkspacePeerSwapIsReported(t *testing.T) {
 // TestWorkspaceLockFailures are the lock's refusal branches. Each one leaves the
 // tree as it was and says what failed.
 func TestWorkspaceLockFailures(t *testing.T) {
+	t.Parallel()
 	t.Run("an open whose lock file cannot be locked is refused", func(t *testing.T) {
 		fsys := testLockedFS()
 		fsys.tryLock = func(string) (func() error, bool, error) { return nil, false, errors.New("permission denied") }
@@ -421,6 +430,7 @@ func TestWorkspaceLockFailures(t *testing.T) {
 // created 0600 beside the root, and Put releases the lock when it returns an
 // error.
 func TestWorkspaceFlockExcludes(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	root := filepath.Join(dir, "ws")
 	lockFile := testLockPath(root)
