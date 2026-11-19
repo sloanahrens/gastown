@@ -60,8 +60,10 @@ func (c *AdminKubeconfigCheck) Run(ctx *CheckContext) *CheckResult {
 	data, err := os.ReadFile(c.path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		// No file holds no admin entry: the convention holds on this machine.
-		return c.result(StatusOK, "No kubeconfig exists at "+c.path, nil, "")
+		// No file was read, so nothing about the convention was proved: a
+		// wrong path must not look like a clean town.
+		return c.result(StatusSkipped, "No kubeconfig exists at "+c.path+", so no file was checked", nil,
+			"Pass the path of the kubeconfig the convention covers, then re-run the check")
 	case err != nil:
 		return c.result(StatusError, "Cannot read the kubeconfig "+c.path, []string{err.Error()},
 			"Make the kubeconfig a readable regular file and re-run the check")
@@ -119,18 +121,13 @@ type adminKubeconfigContextData struct {
 	User    string `yaml:"user"`
 }
 
+// adminKubeconfigUser holds the user record's fields by name, so presence
+// alone decides the answer and no field value is copied into a result. The
+// yaml library applies merge keys to a map, so a credential inherited through
+// `<<` is present.
 type adminKubeconfigUser struct {
-	Name string                  `yaml:"name"`
-	User adminKubeconfigUserData `yaml:"user"`
-}
-
-// adminKubeconfigUserData points at the credential fields rather than reading
-// them, so a test can show that none of their values reaches a result.
-type adminKubeconfigUserData struct {
-	ClientCertificateData *string    `yaml:"client-certificate-data"`
-	ClientKeyData         *string    `yaml:"client-key-data"`
-	Token                 *string    `yaml:"token"`
-	Exec                  *yaml.Node `yaml:"exec"`
+	Name string               `yaml:"name"`
+	User map[string]yaml.Node `yaml:"user"`
 }
 
 // adminKubeconfigFindings returns one line per control-cluster context whose
@@ -148,7 +145,7 @@ func adminKubeconfigFindings(data []byte) (findings []string, problem string) {
 	for _, cluster := range cfg.Clusters {
 		servers[cluster.Name] = append(servers[cluster.Name], cluster.Cluster.Server)
 	}
-	users := make(map[string][]adminKubeconfigUserData, len(cfg.Users))
+	users := make(map[string][]map[string]yaml.Node, len(cfg.Users))
 	for _, user := range cfg.Users {
 		users[user.Name] = append(users[user.Name], user.User)
 	}
@@ -202,36 +199,55 @@ func adminKubeconfigLoopbackHTTPS(server string) bool {
 }
 
 // adminKubeconfigEmbeddedCredential names the credential forms a user record
-// carries, or returns "" when it carries none. A field present with an empty
-// value still counts: the convention removes the field, not only its bytes.
-func adminKubeconfigEmbeddedCredential(user adminKubeconfigUserData) string {
+// carries, or returns "" when it carries none. Only the field names are read:
+// a credential field present with a null or empty value still counts, because
+// the convention removes the field, not only its bytes.
+func adminKubeconfigEmbeddedCredential(user map[string]yaml.Node) string {
+	_, hasCertificate := user["client-certificate-data"]
+	_, hasKey := user["client-key-data"]
+	_, hasToken := user["token"]
+	_, hasExec := user["exec"]
+
 	var forms []string
-	if user.ClientCertificateData != nil || user.ClientKeyData != nil {
+	if hasCertificate || hasKey {
 		forms = append(forms, "an embedded client certificate")
 	}
-	if user.Token != nil {
+	if hasToken {
 		forms = append(forms, "an embedded token")
 	}
-	if user.Exec != nil {
+	if hasExec {
 		forms = append(forms, "an exec credential command")
 	}
 	return strings.Join(forms, " and ")
 }
 
-var adminKubeconfigYAMLLineRE = regexp.MustCompile(`line (\d+)`)
+var (
+	// adminKubeconfigTypeErrorLineRE matches the line prefix yaml puts at the
+	// start of each entry of a *yaml.TypeError. The prefix is yaml's own text,
+	// so a line number cannot come from the quoted scalar that follows it.
+	adminKubeconfigTypeErrorLineRE = regexp.MustCompile(`^line (\d+):`)
+	// adminKubeconfigSyntaxLineRE matches the prefix of a yaml parser error.
+	adminKubeconfigSyntaxLineRE = regexp.MustCompile(`^yaml: line (\d+):`)
+)
 
 // adminKubeconfigParseProblem says why the file did not parse without echoing
-// the document. A yaml type error quotes a short scalar, which can be a token,
-// so only the line numbers survive; a file naming a bad field reads as invalid
-// YAML at that line, never as a clean file.
+// the document. A yaml type error quotes a scalar, which can be a token, so
+// only the line numbers yaml itself wrote survive; a file naming a bad field
+// reads as invalid YAML at that line, never as a clean file.
 func adminKubeconfigParseProblem(err error) string {
-	matches := adminKubeconfigYAMLLineRE.FindAllStringSubmatch(err.Error(), -1)
-	if len(matches) == 0 {
-		return "the file is not valid YAML"
-	}
-	lines := make([]string, 0, len(matches))
-	for _, m := range matches {
+	var lines []string
+	var typeErr *yaml.TypeError
+	if errors.As(err, &typeErr) {
+		for _, entry := range typeErr.Errors {
+			if m := adminKubeconfigTypeErrorLineRE.FindStringSubmatch(entry); m != nil {
+				lines = append(lines, m[1])
+			}
+		}
+	} else if m := adminKubeconfigSyntaxLineRE.FindStringSubmatch(err.Error()); m != nil {
 		lines = append(lines, m[1])
+	}
+	if len(lines) == 0 {
+		return "the file is not valid YAML"
 	}
 	return "the file is not valid YAML at line " + strings.Join(lines, ", ")
 }

@@ -172,6 +172,112 @@ users:
 	}
 }
 
+// TestAdminKubeconfigCheckNullCredential: a credential field present with a
+// null or empty value is still a field the convention removes, so it is an
+// error although it carries no bytes. A credential a user record inherits
+// through a YAML merge key is present too.
+func TestAdminKubeconfigCheckNullCredential(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		users string
+		want  string
+	}{
+		{
+			name: "null token",
+			users: `users:
+  - name: control-admin
+    user:
+      token:
+`,
+			want: "an embedded token",
+		},
+		{
+			name: "empty token",
+			users: `users:
+  - name: control-admin
+    user:
+      token: ""
+`,
+			want: "an embedded token",
+		},
+		{
+			name: "null certificate data",
+			users: `users:
+  - name: control-admin
+    user:
+      client-certificate-data:
+`,
+			want: "an embedded client certificate",
+		},
+		{
+			name: "null key data",
+			users: `users:
+  - name: control-admin
+    user:
+      client-key-data:
+`,
+			want: "an embedded client certificate",
+		},
+		{
+			name: "null exec",
+			users: `users:
+  - name: control-admin
+    user:
+      exec:
+`,
+			want: "an exec credential command",
+		},
+		{
+			name: "empty exec mapping",
+			users: `users:
+  - name: control-admin
+    user:
+      exec: {}
+`,
+			want: "an exec credential command",
+		},
+		{
+			name: "token inherited through a merge key",
+			users: `users:
+  - name: shared
+    user: &embedded
+      token: c2VjcmV0
+  - name: control-admin
+    user:
+      <<: *embedded
+`,
+			want: "an embedded token",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			kubeconfig := `apiVersion: v1
+kind: Config
+clusters:
+  - name: control
+    cluster:
+      server: https://10.20.30.40:6443
+contexts:
+  - name: colima-gt-control
+    context:
+      cluster: control
+      user: control-admin
+` + tc.users
+			path := adminKubeconfigFixture(t, kubeconfig)
+			res := NewAdminKubeconfigCheck(path).Run(&CheckContext{})
+			if res.Status != StatusError {
+				t.Fatalf("Status = %v, want StatusError: %+v", res.Status, res)
+			}
+			want := fmt.Sprintf("context %q uses user %q, which carries %s", "colima-gt-control", "control-admin", tc.want)
+			if got := strings.Join(res.Details, "\n"); !strings.Contains(got, want) {
+				t.Errorf("details = %q, want a line containing %q", got, want)
+			}
+		})
+	}
+}
+
 // TestAdminKubeconfigCheckClean: a control context that stores no credential,
 // and a context that does not reach the control cluster, are both OK.
 func TestAdminKubeconfigCheckClean(t *testing.T) {
@@ -268,6 +374,9 @@ func TestAdminKubeconfigCheckNoLeak(t *testing.T) {
 	cases := []struct {
 		name       string
 		kubeconfig string
+		// wantLine is the line yaml reports for the problem, the only number
+		// the result may carry.
+		wantLine string
 	}{
 		{
 			name: "syntax error after the secret",
@@ -277,10 +386,17 @@ func TestAdminKubeconfigCheckNoLeak(t *testing.T) {
       user: ` + secret + `
 users: [
 `,
+			wantLine: "5",
 		},
 		{
 			name:       "type error that quotes the secret",
 			kubeconfig: "users: " + secret + "\n",
+			wantLine:   "1",
+		},
+		{
+			name:       "quoted value looks like a line number",
+			kubeconfig: "users: \"line 99: " + secret + "\"\n",
+			wantLine:   "1",
 		},
 	}
 	for _, tc := range cases {
@@ -294,8 +410,15 @@ users: [
 			if !strings.Contains(res.Message, path) {
 				t.Errorf("Message = %q, want it to name the file %q", res.Message, path)
 			}
-			if got := adminKubeconfigResultText(res); strings.Contains(got, secret) {
+			got := adminKubeconfigResultText(res)
+			if strings.Contains(got, secret) {
 				t.Errorf("result text prints %q from the unparseable file: %q", secret, got)
+			}
+			if want := "at line " + tc.wantLine; !strings.Contains(got, want) {
+				t.Errorf("result text = %q, want it to say %q", got, want)
+			}
+			if strings.Contains(got, "line 99") {
+				t.Errorf("result text took a line number from quoted content: %q", got)
 			}
 		})
 	}
@@ -314,17 +437,21 @@ func TestAdminKubeconfigCheckPathEmpty(t *testing.T) {
 	}
 }
 
-// TestAdminKubeconfigCheckMissingFile: a path with no file holds no admin
-// credential, so the convention holds and the check says so.
+// TestAdminKubeconfigCheckMissingFile: a path with no file proves nothing
+// about the convention, so the check reports it could not look rather than a
+// pass a wrong path would earn.
 func TestAdminKubeconfigCheckMissingFile(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "absent")
 	res := NewAdminKubeconfigCheck(path).Run(&CheckContext{})
-	if res.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK: %+v", res.Status, res)
+	if res.Status != StatusSkipped {
+		t.Fatalf("Status = %v, want StatusSkipped: %+v", res.Status, res)
 	}
 	if !strings.Contains(res.Message, path) {
 		t.Errorf("Message = %q, want it to name the path %q", res.Message, path)
+	}
+	if !strings.Contains(res.Message, "no file was checked") {
+		t.Errorf("Message = %q, want it to say no file was checked", res.Message)
 	}
 }
 
