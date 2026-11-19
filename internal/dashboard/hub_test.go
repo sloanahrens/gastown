@@ -914,3 +914,112 @@ func TestAPIStateCountsOnlyAReadTakenSinceTheRequest(t *testing.T) {
 		assert.Equal(t, c.want, h.healthReadSince(start), c.name)
 	}
 }
+
+// The follow-up flow the Landings pane draws comes from its reader, polled on
+// its own clock: the value a poll reads reaches the state the page is sent.
+func TestHubPollsFollowups(t *testing.T) {
+	t.Parallel()
+
+	want := &FollowupFlow{Open: 37, FiledWeek: 351, LandedWeek: 1000, SharePct: 35}
+	polled := make(chan struct{}, 1)
+	h := NewHub(Config{
+		Followups: func() *FollowupFlow {
+			select {
+			case polled <- struct{}{}:
+			default:
+			}
+			return want
+		},
+		FollowupsEvery: time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wantSignal(t, done, "Run did not stop")
+	})
+
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	wantSignal(t, polled, "Run never polled the follow-up reader")
+	assert.Equal(t, want, h.State().Followups)
+}
+
+// A read that finds no flow clears the flow the state holds: the pane draws no
+// line, where the last flow left standing would draw stale beads as current.
+func TestHubPollsFollowupsNilReadClearsTheFlow(t *testing.T) {
+	t.Parallel()
+
+	var next *FollowupFlow
+	h := NewHub(Config{
+		Now:       func() time.Time { return time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC) },
+		Followups: func() *FollowupFlow { return next },
+	})
+	next = &FollowupFlow{Open: 4, FiledWeek: 9, LandedWeek: 20, SharePct: 45}
+	h.pollFollowups()
+	require.NotNil(t, h.State().Followups, "a read with a flow drew none")
+
+	next = nil
+	h.pollFollowups()
+	assert.Nil(t, h.State().Followups, "a read that found no flow left the last one drawing")
+}
+
+// A hub with no follow-up reader starts no poll at all. A poll started by
+// mistake ticks every millisecond and clears the flow the state already holds,
+// so the beacon reader polls three times on that same clock before the check.
+func TestHubPollsFollowupsNilReaderStartsNoPoll(t *testing.T) {
+	t.Parallel()
+
+	beacon := make(chan struct{}, 1)
+	seeded := &FollowupFlow{Open: 4, FiledWeek: 9, LandedWeek: 20, SharePct: 45}
+	h := NewHub(Config{
+		Now: func() time.Time { return time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC) },
+		Hold: func() *Hold {
+			select {
+			case beacon <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+		Followups:      func() *FollowupFlow { return seeded },
+		HoldEvery:      time.Millisecond,
+		FollowupsEvery: time.Millisecond,
+	})
+	h.pollFollowups()     // the state holds the flow the pane would draw
+	h.cfg.Followups = nil // the run below has no reader to poll it from
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Run(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		wantSignal(t, done, "Run did not stop")
+	})
+
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	for range 3 {
+		wantSignal(t, beacon, "the beacon reader never polled")
+	}
+	assert.Equal(t, seeded, h.State().Followups, "Run started a follow-up poll with no reader wired")
+}
+
+// The follow-up poll defaults to a minute, the clock the feed's slow readers
+// share: Run hands it to time.NewTicker, which panics on a non-positive
+// interval.
+func TestFollowupsEveryDefaultsToAMinute(t *testing.T) {
+	t.Parallel()
+
+	var c Config
+	c.defaults()
+	assert.Equal(t, time.Minute, c.FollowupsEvery)
+}

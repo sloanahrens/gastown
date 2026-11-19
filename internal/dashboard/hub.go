@@ -225,6 +225,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
+	if h.cfg.Followups != nil {
+		start(h.cfg.FollowupsEvery, h.pollFollowups)
+	}
 	if h.cfg.Dispatch != nil {
 		start(h.cfg.DispatchEvery, h.pollDispatch)
 	}
@@ -1091,6 +1094,20 @@ func (h *Hub) pollEscalation() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Escalations = e
+	h.publishLocked()
+}
+
+// pollFollowups carries the Landings pane's follow-up flow. A read that finds
+// no flow, and a hub with no reader, clear the field: a flow the feed cannot
+// stand behind would draw as current, so a failed read draws no line (gt-8ncq1t).
+func (h *Hub) pollFollowups() {
+	var f *FollowupFlow
+	if h.cfg.Followups != nil {
+		f = h.cfg.Followups()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Followups = f
 	h.publishLocked()
 }
 
