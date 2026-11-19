@@ -137,6 +137,9 @@ type AnalysisOptions struct {
 	// caller can do its once-a-period work on the same due decision the analysis
 	// makes. It cannot fail the run: a caller reports its own failures.
 	BeforeRun func(ctx context.Context, period string)
+	// BdGateway is the gateway check the in-process extract runs before it reads
+	// the town; nil runs with none. It is ignored when Extract is set.
+	BdGateway BdGatewayCheck
 }
 
 // withDefaults fills the zero fields with the daily run's values.
@@ -215,7 +218,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	now := env.Now().UTC()
 	inProcess := o.Extract == nil
 	if inProcess {
-		o.Extract = inProcessExtract(now, o.Home, env.RunDir)
+		o.Extract = inProcessExtract(now, o.Home, env.RunDir, o.BdGateway)
 	}
 	stamp, err := readStamp(env, filepath.Join(dir, stampName))
 	if err != nil {
@@ -380,15 +383,17 @@ func readStamp(env Env, path string) (time.Time, error) {
 // the local day, and the caches saved so the next run reads each bead and
 // commit once. It returns the day directory the extract wrote. run is the
 // runner every git and bd command goes through; home is the directory the
-// extract's town and docs defaults join to, empty for the process's own.
-func inProcessExtract(now time.Time, home string, run RunnerDir) func(ctx context.Context, town, docsDir string) (string, error) {
+// extract's town and docs defaults join to, empty for the process's own;
+// bdGateway is the check RealEnv runs before it reads the town, nil for none.
+func inProcessExtract(now time.Time, home string, run RunnerDir, bdGateway BdGatewayCheck) func(ctx context.Context, town, docsDir string) (string, error) {
 	return func(ctx context.Context, town, docsDir string) (string, error) {
 		real, err := RealEnv(ctx, RealEnvOptions{
-			Today:   now.Local().Format("2006-01-02"),
-			Town:    town,
-			DocsDir: docsDir,
-			Home:    home,
-			Run:     run,
+			Today:     now.Local().Format("2006-01-02"),
+			Town:      town,
+			DocsDir:   docsDir,
+			Home:      home,
+			Run:       run,
+			BdGateway: bdGateway,
 		})
 		if err != nil {
 			return "", err
