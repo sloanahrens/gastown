@@ -230,6 +230,25 @@ func TestBdGatewayServiceAdmissionBindsGt(t *testing.T) {
 	if got := rule["operations"]; !sameStrings(got, "CREATE", "UPDATE") {
 		t.Errorf("the policy's operations are %v, want CREATE and UPDATE", got)
 	}
+
+	// The push Service's validation names bd-gateway-push and its one port, 7441. This
+	// package cannot import the renderer (deploy/k8s/daemon imports it), so the daemon
+	// package's test holds these literals to BdGatewayPushName and BdGatewayPushPort.
+	validations, ok := at(t, policy, "spec", "validations").([]any)
+	if !ok || len(validations) != 3 {
+		t.Fatalf("the policy holds %d validations, want 3", len(validations))
+	}
+	push, _ := validations[1].(map[string]any)
+	pushExpr, _ := at(t, push, "expression").(string)
+	for _, want := range []string{"object.metadata.name != 'bd-gateway-push'", "object.spec.ports.all(p, p.port == 7441)"} {
+		if !strings.Contains(pushExpr, want) {
+			t.Errorf("the bd-gateway-push validation does not carry %q", want)
+		}
+	}
+	others, _ := validations[2].(map[string]any)
+	if expr, _ := at(t, others, "expression").(string); !strings.Contains(expr, "object.metadata.name == 'bd-gateway-push' ||") {
+		t.Errorf("the other-Service validation does not exempt the Service named bd-gateway-push")
+	}
 }
 
 // sameStrings reports whether v is a list of strings holding exactly want, in any order.

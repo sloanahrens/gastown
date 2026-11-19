@@ -1,16 +1,19 @@
-# The ValidatingAdmissionPolicy that makes the bd gateway's Service name safe to hand to
-# the update Job (gt-dsyh4t). deploy/k8s/update-admission.yaml admits the Job's
-# BD_GATEWAY_URL as http://bd-gateway.gt.svc:7440, and the daemon-class gateway token
-# the Job mounts goes to whatever Service bd-gateway in gt is, and so to the pods that
-# Service selects. This policy bounds both.
+# The ValidatingAdmissionPolicy that makes the bd gateway's Service names safe to hand to
+# the update Job and the daemon (gt-dsyh4t, gt-ozn0j0). deploy/k8s/update-admission.yaml
+# admits the Job's BD_GATEWAY_URL as http://bd-gateway.gt.svc:7440, and the daemon-class
+# gateway token the Job mounts goes to whatever Service bd-gateway in gt is, and so to the
+# pods that Service selects. The daemon's push to bd-gateway-push carries the same token,
+# so this policy bounds that Service the same way.
 #
 # A Service named bd-gateway in gt must be ClusterIP, with no externalIPs and no
 # externalName, and must select exactly app.kubernetes.io/name=bd-gateway, the one
 # selector the renderer gives the gateway's Service (bdGatewaySelectorLabels in
-# deploy/k8s/daemon). No other Service in gt may select the gateway's pods: a selector
-# whose every pair is one the gateway's pods carry (app.kubernetes.io/name=bd-gateway
-# or app.kubernetes.io/managed-by=gt) is refused. An empty selector selects nothing, so
-# it is allowed.
+# deploy/k8s/daemon). A Service named bd-gateway-push in gt gets the same bounds, the same
+# one selector, and exactly one port, 7441, the push listener's (BdGatewayPushPort). No
+# other Service in gt may select the gateway's pods: a selector whose every pair is one
+# the gateway's pods carry (app.kubernetes.io/name=bd-gateway or
+# app.kubernetes.io/managed-by=gt) is refused, and only the two names above are exempt
+# from that refusal. An empty selector selects nothing, so it is allowed.
 #
 # The policy is bound to Service creates and updates in gt for every requester, since
 # it bounds what the Services are and not who writes them. A request that does not
@@ -30,6 +33,9 @@
 #   kubectl -n gt create --dry-run=server -f <a bd-gateway Service rendered by gt>   # must be admitted
 #   kubectl -n gt create --dry-run=server -f <the same Service with type NodePort>   # must be refused
 #   kubectl -n gt create --dry-run=server -f <another Service selecting app.kubernetes.io/name=bd-gateway> # must be refused
+#   kubectl -n gt create --dry-run=server -f <a bd-gateway-push Service rendered by gt>   # must be admitted
+#   kubectl -n gt create --dry-run=server -f <the same Service with type NodePort>   # must be refused
+#   kubectl -n gt create --dry-run=server -f <the same Service with a second port>   # must be refused
 #
 # TestBdGatewayServiceAdmissionBindsGt (deploy/k8s/manifests_test.go) reads this file
 # for its shape and binding, and the daemon package's policy test holds its literals to
@@ -62,19 +68,38 @@ spec:
       message: >-
         the Service bd-gateway in gt must be ClusterIP, with no externalIPs and no
         externalName, and select exactly app.kubernetes.io/name=bd-gateway
+    # The push Service bd-gateway-push carries the daemon's write-class token, so it gets
+    # the same bounds as bd-gateway and one more: exactly one port, the push listener's.
+    # The port is the renderer's BdGatewayPushPort.
+    - expression: >-
+        object.metadata.name != 'bd-gateway-push' ||
+        (has(object.spec.type) && object.spec.type == 'ClusterIP' &&
+        (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0) &&
+        !has(object.spec.externalName) &&
+        has(object.spec.selector) && size(object.spec.selector) == 1 &&
+        object.spec.selector.exists(k, k == 'app.kubernetes.io/name' &&
+        object.spec.selector[k] == 'bd-gateway') &&
+        has(object.spec.ports) && size(object.spec.ports) == 1 &&
+        object.spec.ports.all(p, p.port == 7441))
+      message: >-
+        the Service bd-gateway-push in gt must be ClusterIP, with no externalIPs and no
+        externalName, select exactly app.kubernetes.io/name=bd-gateway, and publish
+        exactly port 7441
     # No other Service may select the gateway's pods. A selector whose pairs are all
     # the gateway's labels selects them; one that names any other pair does not. An
-    # empty selector selects nothing and is allowed.
+    # empty selector selects nothing and is allowed. The two gateway Services above are
+    # the only names exempt from this refusal.
     - expression: >-
         object.metadata.name == 'bd-gateway' ||
+        object.metadata.name == 'bd-gateway-push' ||
         !has(object.spec.selector) ||
         size(object.spec.selector) == 0 ||
         !object.spec.selector.all(k,
         (k == 'app.kubernetes.io/name' && object.spec.selector[k] == 'bd-gateway') ||
         (k == 'app.kubernetes.io/managed-by' && object.spec.selector[k] == 'gt'))
       message: >-
-        only the Service bd-gateway in gt may select the bd gateway's pods; this
-        Service's selector selects only labels those pods carry
+        only the Services bd-gateway and bd-gateway-push in gt may select the bd
+        gateway's pods; this Service's selector selects only labels those pods carry
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
