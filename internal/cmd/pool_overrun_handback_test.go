@@ -36,6 +36,10 @@ func TestPoolRosterDoesNotCountAHandedBackSeat(t *testing.T) {
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "ember")
 			reads := poolSeatReadsAnswering(t, stuck, assessPolecatAssignedIssueWork(c.assigned))
+			// The stop keeps the seat's worktree (the guard keeps the sandbox as
+			// it was); the sessionless read frees the handed-back seat only
+			// against that clean, measured answer.
+			reads.probe = stageCleanProbeSeat(t, town, "gastown", "ember")
 
 			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
 			if err != nil {

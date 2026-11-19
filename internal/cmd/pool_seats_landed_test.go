@@ -83,7 +83,7 @@ func TestPoolOccupancyIgnoresALandedSeat(t *testing.T) {
 			if c.live {
 				sessions["gt-ruby"] = map[string]string{"GT_ROLE": "gastown/polecats/ruby", "GT_AGENT": "deepseek-flash"}
 			}
-			got, err := poolSeatSessionsWith(&fakeLister{sessions: sessions}, town, nil, noHeldHooks,
+			got, err := poolSeatSessionsWith(&fakeLister{sessions: sessions}, town, freeDeadSeats, noHeldHooks,
 				submittedWork("gt-ruby", "gt-opal"), pool)
 			if c.wantErr {
 				if err == nil {
@@ -181,7 +181,7 @@ func TestPoolOccupancyFailsWhenALiveSeatsLandingLogIsUnreadable(t *testing.T) {
 	sessions := map[string]map[string]string{
 		"gt-ruby": {"GT_ROLE": "gastown/polecats/ruby", "GT_AGENT": "deepseek-flash"},
 	}
-	got, err := poolSeatSessionsWith(&fakeLister{sessions: sessions}, town, nil, noHeldHooks,
+	got, err := poolSeatSessionsWith(&fakeLister{sessions: sessions}, town, freeDeadSeats, noHeldHooks,
 		submittedWork("gt-ruby"), seatPool("deepseek-flash", 3))
 	if err == nil {
 		t.Fatalf("want an error for a live seat whose landing log cannot be read, got %+v", got)

@@ -33,10 +33,14 @@ func seatReadsOver(store beads.Client) poolSeatReads {
 	}
 }
 
-// seedPolecatAgentBead gives name an agent bead naming hook as its hook.
+// seedPolecatAgentBead gives name an agent bead naming hook as its hook. The
+// seat reports a clean cleanup status: an idle polecat that finished cleanly,
+// which is the state these fixtures test (a seat with no recorded cleanup and
+// no worktree reads as cleanup-unknown and counts, as `gt polecat list`
+// counts it — gt-v5n2be).
 func seedPolecatAgentBead(db *beadsfake.Fake, town, rig, name, hook string) {
 	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, rig), rig, name)
-	desc := beads.FormatAgentDescription(id, &beads.AgentFields{RoleType: "polecat", Rig: rig, AgentState: "idle", HookBead: hook})
+	desc := beads.FormatAgentDescription(id, &beads.AgentFields{RoleType: "polecat", Rig: rig, AgentState: "idle", CleanupStatus: "clean", HookBead: hook})
 	db.Seed(beads.Issue{ID: id, Title: id, Type: "agent", Labels: []string{"gt:agent"}, Description: desc})
 }
 
@@ -527,7 +531,7 @@ func hookTown(t *testing.T, hooks []hookCase) (town string, db *beadsfake.Fake, 
 	for _, h := range hooks {
 		writeTownPolecatDir(t, town, "gastown", h.name)
 		id := beads.PolecatBeadIDWithPrefix(prefix, "gastown", h.name)
-		desc := beads.FormatAgentDescription(id, &beads.AgentFields{RoleType: "polecat", Rig: "gastown", AgentState: "idle", HookBead: h.hook, LastSourceIssue: h.hint})
+		desc := beads.FormatAgentDescription(id, &beads.AgentFields{RoleType: "polecat", Rig: "gastown", AgentState: "idle", CleanupStatus: "clean", HookBead: h.hook, LastSourceIssue: h.hint})
 		db.Seed(beads.Issue{ID: id, Title: id, Type: "agent", Labels: []string{"gt:agent"}, Description: desc})
 		if h.status != "" {
 			db.Seed(beads.Issue{ID: h.hook, Status: h.status})
