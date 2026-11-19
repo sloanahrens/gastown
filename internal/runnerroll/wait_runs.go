@@ -24,7 +24,7 @@ const runsPageLimit = 50
 const (
 	runStatusSuccess   = "success"
 	runStatusFailure   = "failure"
-	runStatusCancelled = "cancelled"
+	runStatusCancelled = "cancelled" //nolint:misspell // the status the Forgejo API reports
 	runStatusSkipped   = "skipped"
 )
 
