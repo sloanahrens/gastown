@@ -213,9 +213,11 @@ Head (JSON):
   client closing the connection the gateway kills bd's whole process group and
   returns frame 4, then exit 124. An orphan bd must never outlive its request.
 - `GET /healthz` (no token): 200 when the process serves; `GET /readyz` (token,
-  class `read`): 200 only when it can run `bd --version` and read `routes.jsonl`
-  from the workspace. The compose health check uses `readyz` from inside the
-  container.
+  class `read`): 200 only when a read-class token authenticates, the token
+  table, the verbs file and a workspace are loaded, and Dolt answers at
+  `--dolt-host`:`--dolt-port` (one TCP dial, with its own bound). `bdgw ready`
+  answers the same questions for the container's exec probe. The compose health
+  check uses `readyz` from inside the container.
 - `PUT /v1/workspace` (class `daemon` only): see [The workspace](#the-workspace).
 
 ### Environment allowlist
