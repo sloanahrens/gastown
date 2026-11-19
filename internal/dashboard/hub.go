@@ -1098,8 +1098,7 @@ func (h *Hub) pollEscalation() {
 }
 
 // pollFollowups carries the Landings pane's follow-up flow. A read that finds
-// no flow, and a hub with no reader, clear the field: a flow the feed cannot
-// stand behind would draw as current, so a failed read draws no line (gt-8ncq1t).
+// no flow clears the field: a stale flow would draw as current (gt-8ncq1t).
 func (h *Hub) pollFollowups() {
 	var f *FollowupFlow
 	if h.cfg.Followups != nil {

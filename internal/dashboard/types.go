@@ -664,11 +664,10 @@ type LandingsPause struct {
 	Unknown bool   `json:"unknown,omitempty"`
 }
 
-// FollowupFlow is the follow-up flow the Landings pane draws in one line: the
-// open follow-up beads (Open), the follow-ups filed and landings taken in the
-// last seven days (FiledWeek, LandedWeek), and the filed share of those
-// landings in whole percent (SharePct). A nil one is left out of the state,
-// never shown as a zero flow (Q37).
+// FollowupFlow is the follow-up flow the Landings pane draws in one line: open
+// follow-up beads, follow-ups filed and landings taken in the last seven days,
+// and the filed share of those landings in whole percent (Q37). A nil one is
+// left out of the state, never shown as a zero flow.
 type FollowupFlow struct {
 	Open       int `json:"open"`
 	FiledWeek  int `json:"filed_week"`
@@ -983,10 +982,9 @@ type State struct {
 	Escalations *Escalations `json:"escalations,omitempty"`
 	Queue       *Queue       `json:"queue,omitempty"`
 	Trend       *Trend       `json:"trend,omitempty"`
-	// Followups is the follow-up flow the Landings pane draws. It is nil until
-	// the reader first reports, and nil again when a read finds no flow: the
-	// last flow is not kept, since a failed read that left it drawing would
-	// show stale beads as current.
+	// Followups is the follow-up flow the Landings pane draws, nil when a read
+	// finds none: the last flow is never kept, as stale beads would draw as
+	// current.
 	Followups *FollowupFlow `json:"followups,omitempty"`
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
 	// at alertsKept.
@@ -1129,7 +1127,7 @@ type Config struct {
 	// host load.
 	Trend func() *Trend
 	// Followups reads the follow-up flow the Landings pane draws, nil when the
-	// read found none: the hub then clears the flow it holds (FollowupFlow).
+	// read found none (FollowupFlow).
 	Followups func() *FollowupFlow
 	// LoadSample records one machine sample for the trend's load history. The
 	// hub calls it from its machine poll, which runs only while a page is open.
@@ -1259,8 +1257,7 @@ func (c *Config) defaults() {
 	def(&c.HoldEvery, 60*time.Second)
 	def(&c.QueueEvery, 60*time.Second)
 	def(&c.TrendEvery, 60*time.Second)
-	// The flow aggregates a week of filings and landings, a feed that moves a
-	// few times an hour at most: a minute is slack to spare.
+	// A week's aggregate needs no clock tighter than a minute.
 	def(&c.FollowupsEvery, 60*time.Second)
 	if c.RingSize <= 0 {
 		c.RingSize = 500
