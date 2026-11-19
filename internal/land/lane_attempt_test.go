@@ -190,7 +190,7 @@ func TestRejectionPriorEscalated(t *testing.T) {
 			w := f.work
 			w.Branch, w.Head = tc.branch, "head-now"
 			rej := tc.rej
-			if err := f.lander().reject(f.bead(), w, &rej, nil); err != &rej || rej.RecordErr != nil {
+			if err := f.lander().reject(context.Background(), f.bead(), w, &rej, nil); err != &rej || rej.RecordErr != nil {
 				t.Fatalf("reject = %v, record error %v; want the refusal recorded", err, rej.RecordErr)
 			}
 			if rej.PriorEscalated != tc.want {
