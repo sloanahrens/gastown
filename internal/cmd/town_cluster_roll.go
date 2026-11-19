@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,10 +34,13 @@ no deployer credential.
 
 The render is built the way drift builds its: from the flags the last live
 render recorded and the image values file, so run gt town cluster render
---record-flags first. In the render's order the roll applies the claims, the
-ServiceAccount, the Services, the Deployments and the tracker-backup CronJob
-through kubectl, then waits for each Deployment's rollout and its Available
-condition. The Namespace and the Secret documents are not applied: the
+--record-flags first. The roll applies the claims, the ServiceAccount and the
+Services, then the bd gateway, the daemon, the dashboard and trackerd, waiting
+for each Deployment's rollout and its Available condition before it applies the
+next object. The gateway moves first and finishes first, so a gateway change
+works with the previous daemon for one roll and the daemon with the previous
+gateway; a Deployment that does not come back stops the roll with nothing
+further applied. The Namespace and the Secret documents are not applied: the
 namespace the recorded flags name must already exist, and Secrets stay
 operator-created. A render that holds a static document, a Secret, an admission
 policy or a Role among them, is refused by name before the hold is taken.
@@ -50,6 +54,13 @@ never restarted: the roll says so and exits 0 without taking the hold. An input
 it cannot read stops it there too, since an unread object is not one in step.
 --dry-run prints the steps, their bounds and the diff lines, and takes no hold
 and writes nothing.
+
+Before the first apply the roll prints the kubectl rollout undo command for
+every Deployment that changes, with the revision the live Deployment records
+read from the cluster then; a changed Deployment that records no revision stops
+the roll before anything is applied. The roll prints those commands and never
+runs one, so an operator can undo by hand with only kubectl and a kubeconfig,
+which works while the daemon is down.
 
 The hold is released on every exit path, SIGINT and SIGTERM included, so a
 failed apply, rollout or Ready wait releases it and exits non-zero.
@@ -165,7 +176,7 @@ func (d clusterRollDeps) step(n int) string {
 	case 3:
 		return fmt.Sprintf("wait for the gate and post-land runs to finish (bound %s)", d.runsWait)
 	case 4:
-		return fmt.Sprintf("apply the daemon namespace's manifests, then wait for each Deployment's rollout (bound %s) and its Available condition", d.rolloutWait)
+		return fmt.Sprintf("apply the daemon namespace's objects, the bd gateway first, waiting for each Deployment's rollout (bound %s) and its Available condition before the next", d.rolloutWait)
 	default:
 		return "release the landing hold"
 	}
@@ -263,7 +274,7 @@ func runTownClusterRoll(d clusterRollDeps) error {
 	if err != nil {
 		return err
 	}
-	target := clusterRollTarget{applier: d.apply, manifests: m}
+	target := &clusterRollTarget{applier: d.apply, manifests: m}
 
 	if !d.dryRun {
 		lines, err := target.Diff(ctx)
@@ -301,46 +312,58 @@ func runTownClusterRoll(d clusterRollDeps) error {
 }
 
 // clusterRollTarget is the daemon namespace as runnerroll.Run's target: the one
-// render the run built, so the diff, the apply and the ready wait cannot read
-// different renders.
+// render the run built, so the diff, the apply and the waits cannot read
+// different renders, and the Deployments the diff found changed so the apply
+// prints their undo lines.
 type clusterRollTarget struct {
 	applier   *clusterRollApplier
 	manifests k8sdaemon.Manifests
+	// changed is the Deployments the compare found differing, in the roll's
+	// order. Diff records them, and Apply reads their recorded revisions before
+	// the first apply.
+	changed []driftTarget
 }
 
 // Name names the target in the roll's messages.
-func (t clusterRollTarget) Name() string { return t.applier.Name() }
+func (t *clusterRollTarget) Name() string { return t.applier.Name() }
 
 // DiffMatch is the line the roll prints when the compare finds nothing. Only the
 // rendered Deployments are compared, so the line names the Deployments and never
 // the namespace or the manifests.
-func (t clusterRollTarget) DiffMatch() string {
+func (t *clusterRollTarget) DiffMatch() string {
 	return "the live Deployments match the rendered Deployments"
 }
 
 // DiffHeading introduces the lines where the Deployments differ.
-func (t clusterRollTarget) DiffHeading() string {
+func (t *clusterRollTarget) DiffHeading() string {
 	return "the live Deployments differ from the rendered Deployments:"
 }
 
 // Diff is the drift compare's lines for every rendered Deployment, each prefixed
 // with the resource it describes, or none when the live objects match the render.
-func (t clusterRollTarget) Diff(ctx context.Context) ([]string, error) {
-	return t.applier.diff(ctx, t.manifests)
+// It records which Deployments differ, since Apply prints an undo line for each.
+func (t *clusterRollTarget) Diff(ctx context.Context) ([]string, error) {
+	compare, err := t.applier.compare(ctx, t.manifests)
+	if err != nil {
+		return nil, err
+	}
+	t.changed = compare.changed
+	return compare.lines, nil
 }
 
-// Apply writes the apply set through the cluster client, one object per call. An
-// apply that fails returns an error, so the roll stops and leaves the caller to
-// release the hold.
-func (t clusterRollTarget) Apply(ctx context.Context) error {
-	return t.applier.apply(ctx, t.manifests)
+// Apply writes the apply set through the cluster client, waiting for each
+// Deployment before the next object, so a gateway that does not come back stops
+// the roll before the daemon behind it is replaced. An apply or a wait that
+// fails returns an error, so the roll stops and leaves the caller to release the
+// hold.
+func (t *clusterRollTarget) Apply(ctx context.Context) error {
+	return t.applier.apply(ctx, t.manifests, t.changed)
 }
 
-// WaitReady waits for each rendered Deployment's rollout within rolloutWait, then
-// reads its Available condition.
-func (t clusterRollTarget) WaitReady(ctx context.Context) error {
-	return t.applier.waitReady(ctx, t.manifests)
-}
+// WaitReady has nothing left to wait for: Apply waits for each Deployment's
+// rollout and Available condition before it applies the next object, so the roll
+// reaches this step with the namespace already ready.
+func (t *clusterRollTarget) WaitReady(context.Context) error { return nil }
 
 // clusterRollApplier is the daemon namespace as the roll applies it: it
 // renders from the recorded flags the way drift does, applies the workload
@@ -448,13 +471,17 @@ type clusterApplyObject struct {
 	object any
 }
 
-// clusterRollObjects is the apply set in the render's own order, which is the
-// order the render writes its numbered files: the claims, the ServiceAccount,
-// the Services, the Deployments and the tracker-backup CronJob. The Namespace is
-// left out (the roll applies into the namespace the recorded flags name), and so
-// are the Secret documents and the role bindings, which stay operator-created or
-// belong to the deployer plan.
-func clusterRollObjects(m k8sdaemon.Manifests) []clusterApplyObject {
+// daemonRollOrder is the apply set in the order the roll applies it: the claims,
+// the ServiceAccount, the Services, the bd gateway, the daemon, the dashboard,
+// trackerd and the tracker-backup CronJob. The gateway leads the Deployments
+// because the roll waits for each one before it applies the next, so the
+// gateway is ready before the daemon it fronts is replaced; a gateway change and
+// a daemon change each then work with the other's previous version for one roll
+// (the order gt-x3ddys adopts for phase W). The Namespace is left out (the roll
+// applies into the namespace the recorded flags name), and so are the Secret
+// documents and the role bindings, which stay operator-created or belong to the
+// deployer plan.
+func daemonRollOrder(m k8sdaemon.Manifests) []clusterApplyObject {
 	var objects []clusterApplyObject
 	add := func(kind, name string, object any) {
 		objects = append(objects, clusterApplyObject{kind: kind, name: name, object: object})
@@ -486,10 +513,10 @@ func clusterRollObjects(m k8sdaemon.Manifests) []clusterApplyObject {
 		}
 	}
 	for _, deployment := range []k8sdaemon.Deployment{
+		m.BdGatewayDeployment,
 		m.Deployment,
 		m.DashboardDeployment,
 		m.TrackerDeployment,
-		m.BdGatewayDeployment,
 	} {
 		if deployment.Kind != "" {
 			add("deployment", deployment.Metadata.Name, deployment)
@@ -510,47 +537,127 @@ func claimIfSet(c k8sdaemon.PersistentVolumeClaim) *k8sdaemon.PersistentVolumeCl
 	return &c
 }
 
-// diff is the drift compare's lines for every Deployment in the render, each
-// prefixed with the resource it describes, or none when the live objects match.
-func (a clusterRollApplier) diff(ctx context.Context, m k8sdaemon.Manifests) ([]string, error) {
+// clusterRollCompare is the roll's compare: the drift lines, each prefixed with
+// the resource it describes, and the Deployments whose live objects differ from
+// the render, the ones whose undo lines the apply prints.
+type clusterRollCompare struct {
+	lines   []string
+	changed []driftTarget
+}
+
+// compare is the drift compare over every rendered Deployment, in the render's
+// order, and the ones that differ.
+func (a clusterRollApplier) compare(ctx context.Context, m k8sdaemon.Manifests) (clusterRollCompare, error) {
 	d := clusterDriftDeps{
 		render:  clusterRenderDeps{encode: a.render.encode},
 		kubectl: a.kubectl,
 	}
-	var lines []string
+	var compare clusterRollCompare
 	for _, target := range clusterRollDeploymentTargets(m) {
 		differences, err := target.differences(ctx, d)
 		if err != nil {
-			return nil, err
+			return clusterRollCompare{}, err
 		}
 		for _, line := range differences {
-			lines = append(lines, target.resource+": "+line)
+			compare.lines = append(compare.lines, target.resource+": "+line)
+		}
+		if len(differences) > 0 {
+			compare.changed = append(compare.changed, target)
 		}
 	}
-	return lines, nil
+	return compare, nil
 }
 
-// apply writes the render's apply set through the cluster client, one object per
-// call. A call that fails returns an error, so the roll stops and leaves the
-// caller to release the hold.
-func (a clusterRollApplier) apply(ctx context.Context, m k8sdaemon.Manifests) error {
-	for _, object := range clusterRollObjects(m) {
+// apply prints the undo line of every Deployment that changes, read from the
+// live Deployment before anything is applied, then applies the render's objects
+// in daemonRollOrder, waiting for each Deployment's rollout and Available
+// condition before it applies the next. A revision it cannot read, an apply and
+// a Deployment that does not come back each stop the roll with nothing further
+// applied, and the caller releases the hold.
+func (a clusterRollApplier) apply(ctx context.Context, m k8sdaemon.Manifests, changed []driftTarget) error {
+	if err := a.printRollbackLines(ctx, m, changed); err != nil {
+		return err
+	}
+	for _, object := range daemonRollOrder(m) {
 		if err := a.applyObject(ctx, object); err != nil {
 			return err
 		}
-	}
-	return nil
-}
-
-// waitReady waits for each rendered Deployment's rollout within rolloutWait, then
-// reads its Available condition.
-func (a clusterRollApplier) waitReady(ctx context.Context, m k8sdaemon.Manifests) error {
-	for _, target := range clusterRollDeploymentTargets(m) {
-		if err := waitDeploymentReady(ctx, a.kubectl, a.out, target.namespace, target.resource, a.rolloutWait); err != nil {
+		deployment, ok := object.object.(k8sdaemon.Deployment)
+		if !ok {
+			// A claim, the ServiceAccount, a Service or the CronJob has nothing to
+			// roll out, so the next object follows at once.
+			continue
+		}
+		resource := "deployment/" + deployment.Metadata.Name
+		if err := waitDeploymentReady(ctx, a.kubectl, a.out, deployment.Metadata.Namespace, resource, a.rolloutWait); err != nil {
+			fmt.Fprintf(a.out, "stopping: %s did not come back, so no further object is applied\n", resource)
 			return err
 		}
 	}
 	return nil
+}
+
+// deploymentRevisionJSONPath reads the revision the live Deployment records, the
+// number a rollout undo names. jsonpath reads a key's dot as a path separator, so
+// the annotation's key is escaped.
+const deploymentRevisionJSONPath = `jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}`
+
+// printRollbackLines prints the command that undoes each Deployment that will
+// change, in the roll's own order, with the revision the live Deployment records
+// now. Every revision is read before the first apply, so a missing one stops the
+// roll with nothing applied, and the lines are printed before the roll can fail:
+// a roll stopped at a gateway that does not come back still leaves the operator a
+// command that needs only kubectl and a kubeconfig, which works while the daemon
+// is down. The roll prints the commands and never runs one.
+func (a clusterRollApplier) printRollbackLines(ctx context.Context, m k8sdaemon.Manifests, changed []driftTarget) error {
+	differing := make(map[string]bool, len(changed))
+	for _, target := range changed {
+		differing[target.resource] = true
+	}
+	var lines []string
+	for _, object := range daemonRollOrder(m) {
+		deployment, ok := object.object.(k8sdaemon.Deployment)
+		if !ok || !differing["deployment/"+deployment.Metadata.Name] {
+			continue
+		}
+		revision, err := liveDeploymentRevision(ctx, a.kubectl, deployment.Metadata.Namespace, deployment.Metadata.Name)
+		if err != nil {
+			return err
+		}
+		lines = append(lines, fmt.Sprintf("kubectl rollout undo deployment/%s -n %s --to-revision=%s", deployment.Metadata.Name, deployment.Metadata.Namespace, revision))
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	fmt.Fprintln(a.out, "the roll never rolls back by itself; to undo each Deployment it changes, run:")
+	for _, line := range lines {
+		fmt.Fprintln(a.out, line)
+	}
+	return nil
+}
+
+// liveDeploymentRevision reads the revision the live Deployment records. An
+// unset revision, or one that is not a positive number, stops the roll before
+// any apply: the command the operator would copy names no revision that exists.
+// The value stays out of the errors, since an annotation is a value the operator
+// wrote.
+func liveDeploymentRevision(ctx context.Context, kubectl update.RunFunc, namespace, name string) (string, error) {
+	resource := "deployment/" + name
+	out, exit, err := kubectl(ctx, "", nil, "kubectl", "get", "deployment", name, "-n", namespace, "-o", deploymentRevisionJSONPath)
+	if err != nil {
+		return "", fmt.Errorf("reading the recorded revision of %s: %w", resource, err)
+	}
+	if exit != 0 {
+		return "", fmt.Errorf("reading the recorded revision of %s: kubectl exited %d", resource, exit)
+	}
+	revision := strings.TrimSpace(out)
+	if revision == "" {
+		return "", fmt.Errorf("%s records no revision, so its undo command would name none: deployment.kubernetes.io/revision is unset; nothing was applied", resource)
+	}
+	if n, convErr := strconv.Atoi(revision); convErr != nil || n < 1 {
+		return "", fmt.Errorf("%s records a revision that is not a positive number, so its undo command would name none; nothing was applied", resource)
+	}
+	return revision, nil
 }
 
 // applyObject encodes one manifest and hands it to kubectl on stdin. The error
