@@ -298,17 +298,27 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 	frames := &httpFrames{w: w}
 	if err := g.runner.Exec(r.Context(), req, stdin, frames); !frames.Started() {
 		status, code, message := execRefusal(err)
-		if status == http.StatusInternalServerError {
+		rec := CallRecord{
+			Class:    string(ident.Class),
+			Caller:   r.Header.Get("X-Gt-Caller"),
+			Argv:     req.Argv,
+			ExitCode: ExitRefused,
+			Duration: time.Since(start),
+			Error:    internalDetail(err),
+		}
+		switch status {
+		case http.StatusInternalServerError:
 			// The caller reads the fixed message; the operator reads the cause in the
 			// call log, which counts this refusal as the gateway's failed call.
-			g.log.Log(CallRecord{
-				Class:    string(ident.Class),
-				Caller:   r.Header.Get("X-Gt-Caller"),
-				Argv:     req.Argv,
-				ExitCode: ExitRefused,
-				Duration: time.Since(start),
-				Error:    internalDetail(err),
-			})
+			g.log.Log(rec)
+		case http.StatusTooManyRequests:
+			// A call refused at the concurrency cap is one the gateway never served,
+			// so its line moves none of the call, error and verb counters GET
+			// /v1/stats serves; the executor counts it as too_many_calls there. The
+			// record costs the one line the log makes of it (its scan and marshal),
+			// and the queue never blocks: a full buffer drops the line and counts it,
+			// so the refusal is not delayed by the log.
+			g.log.LogUncounted(rec)
 		}
 		refuse(w, status, code, message)
 		return

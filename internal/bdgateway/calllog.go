@@ -94,8 +94,10 @@ type CallRecord struct {
 	ExitCode int
 	// Duration is how long the call took.
 	Duration time.Duration
-	// Error is the failure the gateway answered its caller with a fixed message
-	// for. The log keeps the full text for the operator; the caller never sees it.
+	// Error is the cause the gateway recorded for a refused call. For a failure
+	// inside the gateway the caller reads a fixed message and the text stays in
+	// the log; a call refused at the concurrency cap is logged with the text the
+	// caller was given.
 	Error string
 }
 
@@ -226,10 +228,24 @@ var (
 	beadSuffixRe = regexp.MustCompile(`^[a-z0-9]+(?:[-.][a-z0-9]+){0,3}$`)
 )
 
-// Log records one call. It never blocks: a full buffer or a closed log drops the
-// line and counts the drop, and a line is discarded rather than delay the call
-// (gt-itjuwu).
+// Log records one call and counts it for GET /v1/stats. It never blocks: a full
+// buffer or a closed log drops the line and counts the drop, and a line is
+// discarded rather than delay the call (gt-itjuwu).
 func (l *CallLog) Log(rec CallRecord) {
+	l.log(rec, true)
+}
+
+// LogUncounted records a call's line without moving the counters Log keeps for
+// GET /v1/stats: a call refused at the concurrency cap is counted there by the
+// executor's too_many_calls instead. A line this log cannot store still counts
+// as dropped, which is the log's health and not the call's.
+func (l *CallLog) LogUncounted(rec CallRecord) {
+	l.log(rec, false)
+}
+
+// log writes rec's line and, when counted, moves the call, error and verb
+// counters with it.
+func (l *CallLog) log(rec CallRecord, counted bool) {
 	parsed := l.parseArgv(rec.Argv)
 	e := entry{
 		TS:         l.now().UTC().Format(time.RFC3339Nano),
@@ -246,12 +262,14 @@ func (l *CallLog) Log(rec CallRecord) {
 
 	l.sendMu.RLock()
 	l.mu.Lock()
-	l.calls++
-	if rec.ExitCode != 0 {
-		l.errors++
-	}
-	if parsed.verb != "" {
-		l.countVerb(parsed.verb)
+	if counted {
+		l.calls++
+		if rec.ExitCode != 0 {
+			l.errors++
+		}
+		if parsed.verb != "" {
+			l.countVerb(parsed.verb)
+		}
 	}
 	if marshalErr != nil {
 		l.dropped++

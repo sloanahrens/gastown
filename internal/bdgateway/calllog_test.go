@@ -568,6 +568,60 @@ func TestCallLogAfterClose(t *testing.T) {
 	}
 }
 
+// TestCallLogUncountedWritesTheLineAndMovesNoCounter: LogUncounted writes its
+// line with the fields Log writes, and moves none of the counters GET /v1/stats
+// serves, since a call the gateway refused is not one it served.
+func TestCallLogUncountedWritesTheLineAndMovesNoCounter(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.LogUncounted(CallRecord{
+		Class:    "daemon",
+		Caller:   "daemon.spec-tick",
+		Argv:     []string{"show", "gt-a"},
+		ExitCode: ExitRefused,
+		Duration: 3 * time.Millisecond,
+		Error:    "the concurrency cap is full",
+	})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	lines := readLines(t, filepath.Join(opts.Dir, DefaultCallLogName))
+	if len(lines) != 1 {
+		t.Fatalf("got %d lines, want 1", len(lines))
+	}
+	line := decodeLine(t, lines[0])
+	if line["caller"] != "daemon.spec-tick" || line["verb"] != "show" || line["exit_code"] != float64(ExitRefused) {
+		t.Errorf("line = %v, want the caller, the verb and ExitRefused", line)
+	}
+	if got := l.Stats(); got.Calls != 0 || got.Errors != 0 || got.Dropped != 0 || len(got.Verbs) != 0 {
+		t.Errorf("Stats = %+v, want every counter at zero", got)
+	}
+}
+
+// TestCallLogUncountedStillCountsADroppedLine: a line LogUncounted cannot store
+// is counted as dropped, which is the log's health, while the call counters it
+// leaves alone stay at zero.
+func TestCallLogUncountedStillCountsADroppedLine(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	l.LogUncounted(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"show", "gt-a"}, ExitCode: ExitRefused})
+	got := l.Stats()
+	if got.Dropped != 1 || got.Calls != 0 || got.Errors != 0 {
+		t.Errorf("Stats = calls %d errors %d dropped %d, want 0, 0 and 1", got.Calls, got.Errors, got.Dropped)
+	}
+}
+
 // TestCallLogBoundedFields checks the class and caller, which the caller
 // writes, are bounded and stripped of control characters before they reach a
 // line.
