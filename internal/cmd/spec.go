@@ -2889,6 +2889,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: %s", id, specStaleReason, why)})
 			continue
 		}
+		// A bead whose lost bond scheduled a retry that is still ahead waits that
+		// retry out before it takes a seat (gt-6kg6xb). The schedule is read from
+		// the fresh bead, so a loss written after the candidate read holds too. A
+		// schedule that cannot be read has no retry time set and does not hold:
+		// the later beads bound it.
+		if rec := specContentionOf(latest.Metadata); rec != nil && specdispatch.ContentionWaiting(*rec, env.Now()) {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipContentionBackoff, rec.RetryAt.UTC().Format(time.RFC3339))})
+			continue
+		}
 		// The story-point step (gt-5d9k2f.14, gt-5d9k2f.18) runs on a bead the
 		// tick has decided to sling, after its last-moment re-read and before
 		// the sling. The shadow setting only observes; the split route reads the

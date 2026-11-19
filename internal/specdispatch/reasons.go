@@ -23,6 +23,11 @@ const (
 	// SkipStartupBackoff starts the reason a bead stays unslung while its rest
 	// after a failed session start runs (dispatch.StartupBackoff).
 	SkipStartupBackoff = "startup backoff:"
+	// SkipContentionBackoff starts the reason a bead stays unslung while the
+	// retry its lost bond scheduled is still ahead (ContentionWaiting); the
+	// retry time follows. Like SkipStartupBackoff it ends by itself, so the
+	// daemon's idle rule does not list it.
+	SkipContentionBackoff = "contention backoff until "
 	// SkipBlocked starts the tick's skip reason for a candidate a blocking
 	// dependency keeps off a seat, with the blockers following (gt-ndad8). The
 	// daemon's dispatch.idle rule matches this prefix, so the tick's skip line
