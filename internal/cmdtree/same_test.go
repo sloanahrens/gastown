@@ -60,3 +60,37 @@ func TestSameRefsScanError(t *testing.T) {
 		}
 	}
 }
+
+// seamSrc holds a bd seam call, which ScanGo reads only under internal/beads/.
+const seamSrc = `package beads
+func f() { b.run("show", "x") }
+`
+
+func TestSameRefsAt(t *testing.T) {
+	t.Parallel()
+	const plain, seam = "internal/x/x.go", "internal/beads/x.go"
+	cases := []struct {
+		name             string
+		oldFile, newFile string
+		old, new         string
+		want, wantErr    bool
+	}{
+		{"the path decides whether the seam call counts", seam, plain, seamSrc, seamSrc, false, false},
+		{"two plain paths read the same source alike", plain, "internal/y/y.go", sameSrc, sameSrc, true, false},
+		{"identical source under one path", plain, plain, sameSrc, sameSrc, true, false},
+		{"old source does not parse", plain, plain, "package p\nfunc (", sameSrc, false, true},
+		{"new source does not parse", plain, plain, sameSrc, "package p\nfunc (", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := SameRefsAt(tc.oldFile, []byte(tc.old), tc.newFile, []byte(tc.new))
+			if (err != nil) != tc.wantErr || tc.wantErr && got {
+				t.Fatalf("SameRefsAt = %v, err = %v; wantErr %v", got, err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Fatalf("SameRefsAt = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
