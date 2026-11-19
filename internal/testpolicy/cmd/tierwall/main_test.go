@@ -15,8 +15,9 @@ import (
 )
 
 // fixedHost is the seam run reads outside the stream: one fixed clock, no
-// load, no town, real files under the test's own temporary directory, and a
-// fixed 16 CPUs with no cgroup quota file, so no test reads the host.
+// load, no town, an environment with no CI variable, real files under the
+// test's own temporary directory, and a fixed 16 CPUs with no cgroup quota
+// file, so no test reads the host.
 func fixedHost() host {
 	return host{
 		now:      func() time.Time { return time.Date(2026, 11, 1, 14, 42, 0, 0, time.UTC) },
@@ -27,6 +28,7 @@ func fixedHost() host {
 		numCPU:   func() int { return 16 },
 		maxProcs: func() int { return 16 },
 		readFile: func(string) ([]byte, error) { return nil, fs.ErrNotExist },
+		env:      func(string) string { return "" },
 	}
 }
 
@@ -477,23 +479,166 @@ func TestJSONLSeriesRelativePathIsTakenFromTheTown(t *testing.T) {
 	}
 }
 
-// TestJSONLSeriesRelativePathWithoutATownWritesNothing checks that a relative
-// path the tool cannot place is reported, not silently read as a clean run.
-func TestJSONLSeriesRelativePathWithoutATownWritesNothing(t *testing.T) {
+// TestJSONLSeriesRelativePathWithoutATownPrintsToTheLog pins what a CI gate,
+// whose checkout sits in no town, reads from its job log: the lines its series
+// file would have carried, printed under tierwall-series: with a notice, and a
+// passing run still exits 0. Mutation: return the old "no town root" error and
+// the run exits 4 with no series line.
+func TestJSONLSeriesRelativePathWithoutATownPrintsToTheLog(t *testing.T) {
 	t.Parallel()
-	code, stdout, stderr := runFileWith(t, "pass.jsonl", fixedHost(),
-		"-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
+	const path = ".runtime/metrics/gate-walls.jsonl"
+	h := fixedHost()
+	h.env = func(key string) string {
+		if key == "GITHUB_ACTIONS" {
+			return "true"
+		}
+		return ""
+	}
+	code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0: a series printed to the log fails nothing; stderr = %q", code, stderr)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	if !strings.HasPrefix(stdout, "tierwall: github.com/steveyegge/gastown/internal/cmd 203.4s\n") {
+		t.Errorf("stdout = %q, want the report's package lines first", stdout)
+	}
+	var pkgs []string
+	for _, line := range strings.Split(stdout, "\n") {
+		if !strings.HasPrefix(line, seriesLogPrefix) {
+			continue
+		}
+		var got struct {
+			Pkg   string   `json:"pkg"`
+			WallS *float64 `json:"wall_s"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, seriesLogPrefix)), &got); err != nil {
+			t.Fatalf("series line %q is not JSON: %v", line, err)
+		}
+		if got.WallS == nil {
+			t.Errorf("series line for %s carries no wall_s: %s", got.Pkg, line)
+		}
+		pkgs = append(pkgs, got.Pkg)
+	}
+	want := strings.Join([]string{
+		"github.com/steveyegge/gastown/internal/cmd",
+		"github.com/steveyegge/gastown/internal/git",
+		"github.com/steveyegge/gastown/internal/none",
+		"github.com/steveyegge/gastown/internal/slot",
+		"github.com/steveyegge/gastown/internal/tmux",
+	}, ",")
+	if got := strings.Join(pkgs, ","); got != want {
+		t.Errorf("series packages = %v, want every package the stream reported: %s", pkgs, want)
+	}
+	notice := "tierwall: no town root was found, so the wall series above went into this log instead of " + path
+	if !strings.Contains(stdout, notice+"\n") {
+		t.Errorf("stdout = %q, want the notice %q", stdout, notice)
+	}
+	if cpus := "tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable\n"; !strings.HasSuffix(stdout, cpus) {
+		t.Errorf("stdout = %q, want it to end with the cpus line", stdout)
+	}
+}
+
+// TestJSONLSeriesRelativePathWithoutATownOutsideCINeedsATown pins the town
+// gate's alarm: a CI run is GITHUB_ACTIONS=true and nothing else, so a run with
+// the variable unset or false and no town root still exits 4 and prints no
+// series lines. Mutation: drop the CI check in appendSeries and every row
+// exits 0.
+func TestJSONLSeriesRelativePathWithoutATownOutsideCINeedsATown(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		ci   string
+	}{
+		{"unset", ""},
+		{"false", "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			const path = ".runtime/metrics/gate-walls.jsonl"
+			h := fixedHost()
+			h.env = func(string) string { return tc.ci }
+			code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
+			if code != 4 {
+				t.Errorf("exit code = %d, want 4: a no-town run outside CI is the gate's alarm", code)
+			}
+			if !strings.Contains(stderr, path) {
+				t.Errorf("stderr = %q, want it to name the path it could not place", stderr)
+			}
+			if !strings.Contains(stderr, "no town root") {
+				t.Errorf("stderr = %q, want it to say why nothing was appended", stderr)
+			}
+			if strings.Contains(stdout, seriesLogPrefix) {
+				t.Errorf("stdout = %q, want no series line outside CI", stdout)
+			}
+			if !strings.Contains(stdout, "tierwall: tier ") {
+				t.Errorf("stdout = %q, want the report still printed", stdout)
+			}
+		})
+	}
+}
+
+// TestJSONLSeriesTownPathThatCannotBeWrittenKeepsTheAlarm pins the town gate's
+// alarm: with a town root found, a series its file cannot take still exits 4
+// and names the path, and nothing is printed into the log, even in CI.
+// Mutation: treat a town path's write failure as the log fallback and the run
+// exits 0.
+func TestJSONLSeriesTownPathThatCannotBeWrittenKeepsTheAlarm(t *testing.T) {
+	t.Parallel()
+	const path = ".runtime/metrics/gate-walls.jsonl"
+	h := fixedHost()
+	h.town = func() string { return t.TempDir() }
+	h.mkdir = func(string) error { return errors.New("read-only file system") }
+	h.env = func(string) string { return "true" }
+	code, stdout, stderr := runFileWith(t, "pass.jsonl", h, "-jsonl", path, "-run", "gate-1")
 	if code != 4 {
-		t.Errorf("exit code = %d, want 4: a series with no town to go in is the gate's alarm", code)
+		t.Errorf("exit code = %d, want 4: a town's series it cannot write is the gate's alarm", code)
 	}
-	if !strings.Contains(stderr, ".runtime/metrics/gate-walls.jsonl") {
-		t.Errorf("stderr = %q, want it to name the path it could not place", stderr)
+	if !strings.Contains(stderr, path) {
+		t.Errorf("stderr = %q, want it to name %s", stderr, path)
 	}
-	if !strings.Contains(stderr, "no town root") {
-		t.Errorf("stderr = %q, want it to say why nothing was appended", stderr)
+	if strings.Contains(stdout, seriesLogPrefix) {
+		t.Errorf("stdout = %q, want no series printed to the log: the town's file is where it goes", stdout)
 	}
-	if !strings.Contains(stdout, "tierwall: tier ") {
-		t.Errorf("stdout = %q, want the report still printed", stdout)
+}
+
+// TestJSONLSeriesRelativePathNoEventsPrintsNothing pins the empty stream ahead
+// of the town lookup, on the CI path where the log fallback would otherwise
+// fire: a run with no package events has nothing to print to the log either,
+// and says so on stderr. Mutation: look for the town before checking for
+// events and the notice is printed with an empty series line under it.
+func TestJSONLSeriesRelativePathNoEventsPrintsNothing(t *testing.T) {
+	t.Parallel()
+	h := fixedHost()
+	h.env = func(string) string { return "true" }
+	var out, errOut bytes.Buffer
+	code := run([]string{"-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1"},
+		strings.NewReader("go: downloading something\n"), &out, &errOut, h)
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: an empty stream fails nothing", code)
+	}
+	if strings.Contains(out.String(), seriesLogPrefix) {
+		t.Errorf("stdout = %q, want no series line: there was nothing to print", out.String())
+	}
+	if !strings.Contains(errOut.String(), "no package events") {
+		t.Errorf("stderr = %q, want it to say nothing was appended", errOut.String())
+	}
+}
+
+// TestJSONLSeriesLogLeavesTheVerdictAlone pins the log fallback against a red
+// stream: a failed package still exits 1 with its series printed to the log.
+func TestJSONLSeriesLogLeavesTheVerdictAlone(t *testing.T) {
+	t.Parallel()
+	h := fixedHost()
+	h.env = func(string) string { return "true" }
+	code, stdout, _ := runFileWith(t, "fail.jsonl", h,
+		"-jsonl", ".runtime/metrics/gate-walls.jsonl", "-run", "gate-1")
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: the report's own verdict stands", code)
+	}
+	if !strings.Contains(stdout, seriesLogPrefix) {
+		t.Errorf("stdout = %q, want the series printed to the log", stdout)
 	}
 }
 
@@ -575,7 +720,7 @@ func TestAppendSeries_UnencodableLineIsAnError(t *testing.T) {
 	r.results["example.com/a"] = "pass"
 	r.first = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
 
-	if err := appendSeries(path, "gate-1", r, fixedHost(), io.Discard); err == nil {
+	if _, err := appendSeries(path, "gate-1", r, fixedHost(), io.Discard); err == nil {
 		t.Fatal("appendSeries returned no error for a timestamp json cannot encode")
 	}
 	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {

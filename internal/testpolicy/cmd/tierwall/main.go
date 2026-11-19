@@ -40,9 +40,12 @@
 // checkout sits in, so the gate names the town's series without being told
 // where the town is. A package go test served from its result cache is still
 // recorded, with "cached": true and no wall_s, because a cache hit measured
-// nothing. The report and the exit code do not change: a series the tool
-// cannot write, or a run it finds no town for, is reported on stderr and fails
-// nothing, because the gate's verdict is go test's alone.
+// nothing. A run with no town root above it, as in a CI gate, has no file to
+// append to: when it is CI (GITHUB_ACTIONS=true) it prints the same lines to
+// stdout under `tierwall-series: `, then a notice, so the job log carries the
+// series (gt-0fwgr3). The report and the exit code do not change for that: the
+// gate's verdict is go test's alone. A series the tool cannot write, and a
+// no-town run outside CI, still exit 4, the gate's incomplete-series alarm.
 //
 // The last line of the report is the cpus line (cpuLine), which says what CPUs
 // the run had, so a gate log shows the limits it ran under (gt-50ujsx). It
@@ -108,15 +111,17 @@ func main() {
 		numCPU:   runtime.NumCPU,
 		maxProcs: func() int { return runtime.GOMAXPROCS(0) },
 		readFile: os.ReadFile,
+		env:      os.Getenv,
 	}))
 }
 
 // host is what run reads outside the stream: the clock a stream with no
 // timestamps is stamped from, the load a series line carries, the town a
 // relative series path is taken from, the directory and file the series
-// appends through, and the CPU facts the report's cpus line prints. main wires
-// the real ones; a test injects them, so no test reads the host and every path
-// the series can take has a case.
+// appends through, the CPU facts the report's cpus line prints, and the
+// environment that says whether the run is a CI job. main wires the real ones;
+// a test injects them, so no test reads the host and every path the series can
+// take has a case.
 type host struct {
 	now   func() time.Time
 	load1 func() (float64, bool)
@@ -131,6 +136,11 @@ type host struct {
 	// readFile reads the cgroup quota files; any read error counts the file as
 	// unreadable, and the cpus line says so.
 	readFile func(path string) ([]byte, error)
+	// env reads the run's environment. A relative -jsonl path with no town
+	// root is printed into the log only in CI, which is GITHUB_ACTIONS=true;
+	// that variable is not a GT_ variable, so this reads nothing of the town's
+	// own configuration.
+	env func(string) string
 }
 
 // run reads a go test -json stream from stdin and writes the report to
@@ -147,7 +157,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	fs.SetOutput(stderr)
 	bar := fs.Duration("bar", 90*time.Second, "the wall the tier line is judged against (OK or OVER); it fails nothing")
 	maxWall := fs.Duration("max-wall", 0, "exit 3 when the tier is over this wall; 0 turns the check off")
-	jsonl := fs.String("jsonl", "", "append one JSON line per package, and one per slow test with -slow-tests, to this file (needs -run); a relative path is taken from the town root")
+	jsonl := fs.String("jsonl", "", "append one JSON line per package, and one per slow test with -slow-tests, to this file (needs -run); a relative path is taken from the town root, or printed to the log in CI when there is none")
 	runID := fs.String("run", "", "the run id each -jsonl line carries")
 	slowTests := fs.Bool("slow-tests", false, "list each test of 5s or more under its package, and tag them in -jsonl")
 	if err := fs.Parse(args); err != nil {
@@ -196,17 +206,23 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	// tests are checked against them after it.
 	r.keepSlow(slow)
 	seriesFailed := false
+	var seriesLog string
 	if *jsonl != "" {
 		// A series that cannot be written is reported on stderr and by exit
 		// code 4, and it fails no verdict: the gate's verdict is go test's, and
 		// wall time never fails a run. The code is how the gate learns the
 		// series is incomplete, since stderr is not something its recipe reads.
-		if err := appendSeries(*jsonl, *runID, r, h, stderr); err != nil {
+		// A relative series with no town root to go in has nowhere to be
+		// written, but in CI no town root exists at all, so the series is
+		// printed into the job log instead; outside CI that stays the alarm.
+		var err error
+		seriesLog, err = appendSeries(*jsonl, *runID, r, h, stderr)
+		if err != nil {
 			fmt.Fprintln(stderr, "tierwall:", err)
 			seriesFailed = true
 		}
 	}
-	if err := r.print(*bar, cpuLine(h)); err != nil {
+	if err := r.print(*bar, cpuLine(h), seriesLog); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
@@ -400,9 +416,10 @@ func (r *report) verdict(e event) {
 }
 
 // print writes the per-package lines, slowest first, then the tier line, then
-// cpus, the line cpuLine renders. Ties go by package name, so one stream always
-// prints one report.
-func (r *report) print(bar time.Duration, cpus string) error {
+// seriesLog, then cpus, the line cpuLine renders. Ties go by package name, so
+// one stream always prints one report. seriesLog is empty for every run whose
+// series reached its file; the cpus line ends the report either way.
+func (r *report) print(bar time.Duration, cpus, seriesLog string) error {
 	pkgs := make([]string, 0, len(r.elapsed))
 	for pkg := range r.elapsed {
 		pkgs = append(pkgs, pkg)
@@ -436,6 +453,7 @@ func (r *report) print(bar time.Duration, cpus string) error {
 	}
 	r.write(fmt.Sprintf("tierwall: tier %s bar %s %s\n", secs(r.tier()), secs(bar), verdict))
 	r.poleWarnings(pkgs)
+	r.write(seriesLog)
 	r.write(cpus)
 	return r.err
 }
@@ -632,24 +650,51 @@ func (r *report) series(runID string, h host) ([]byte, error) {
 // names. A stream with no package verdicts appends nothing and says so: an
 // empty run must not read as a run with nothing slow to report. An absolute
 // path is taken as given; a relative one is joined to the town root, so the
-// gate names the town's series without knowing where the town is.
-func appendSeries(path, runID string, r *report, h host, stderr io.Writer) error {
+// gate names the town's series without knowing where the town is. A relative
+// path with no town root above it, as in a CI gate, has nowhere to be written:
+// when the run is CI the series is returned as the text to print into the job
+// log; outside CI that is still the incomplete-series alarm, an error the
+// caller turns into exit 4.
+func appendSeries(path, runID string, r *report, h host, stderr io.Writer) (string, error) {
 	data, err := r.series(runID, h)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(data) == 0 {
 		fmt.Fprintf(stderr, "tierwall: no package events in the stream; nothing appended to %s\n", path)
-		return nil
+		return "", nil
 	}
 	if !filepath.IsAbs(path) {
 		town := h.town()
 		if town == "" {
-			return fmt.Errorf("%s is relative and no town root was found above the checkout; nothing appended", path)
+			if h.env("GITHUB_ACTIONS") == "true" {
+				return seriesLogText(path, data), nil
+			}
+			return "", fmt.Errorf("%s is relative and no town root was found above the checkout; nothing appended", path)
 		}
 		path = filepath.Join(town, path)
 	}
-	return appendLines(path, data, h.mkdir, h.open)
+	return "", appendLines(path, data, h.mkdir, h.open)
+}
+
+// seriesLogPrefix marks each series line printed into the log in place of a
+// file.
+const seriesLogPrefix = "tierwall-series: "
+
+// seriesLogText is the series printed into the job log when a CI run has no
+// town root to append it to: every line the file would have carried, each under
+// seriesLogPrefix, then the notice that says where they went and why. The
+// prefix keeps the lines out of the report's own line shapes, and out of
+// internal/land's gate-log parser, which reads tierwall: lines.
+func seriesLogText(path string, data []byte) string {
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		b.WriteString(seriesLogPrefix)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "tierwall: no town root was found, so the wall series above went into this log instead of %s\n", path)
+	return b.String()
 }
 
 // appendLines appends data to path in one write, opened O_APPEND so two runs

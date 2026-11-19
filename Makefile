@@ -510,13 +510,16 @@ gate-lint: exec-tax-preflight lint
 # to the town's .runtime/metrics/gate-walls.jsonl, so the gate's time can be
 # read per package over weeks. The path is relative because tierwall finds the
 # town itself (above the checkout, or above the repository a landing's
-# throwaway worktree belongs to), so this file reads no environment of its own:
+# throwaway worktree belongs to), so this path reads no environment of its own:
 # the town walk is workspace.Find, whose only read is the test harness's
-# GT_TEST_FORBIDDEN_TOWN_ROOT guard. A run with no town above it, as in CI,
-# records nothing and says so on stderr. -run is the run's id, expanded by the
-# recipe rather than when make parsed the Makefile, so `make -n` prints one
-# shape; the id's second and the recipe shell's pid together tell apart two
-# gates that started in the same second.
+# GT_TEST_FORBIDDEN_TOWN_ROOT guard. A run with no town above it and
+# GITHUB_ACTIONS=true (every CI gate) prints the same lines into its job log
+# under "tierwall-series: " instead, so CI still records its walls (gt-0fwgr3).
+# A no-town run outside CI, and a series the town's file cannot take, still
+# exit 4, and the gate prints the incomplete-series alarm. -run is the run's id,
+# expanded by the recipe rather than when make parsed the Makefile, so `make -n`
+# prints one shape; the id's second and the recipe shell's pid together tell
+# apart two gates that started in the same second.
 GATE_WALLS = -jsonl .runtime/metrics/gate-walls.jsonl -run gate-$$(date +%s)-$$$$
 
 # gate-test is build plus the unit tier and the integration vet. Its printed
