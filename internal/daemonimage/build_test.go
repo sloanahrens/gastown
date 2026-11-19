@@ -820,7 +820,9 @@ func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
 
 // TestBDPinMatchesThePolecatImageFlow compares the argv the daemon image builds
 // bd with against the argv bdbuild.Compile builds the polecat image's bd with,
-// both run through their production calls.
+// both run through their production calls. The polecat bd is linked with the
+// -s -w the daemon image has not gained yet (gt-aermmg), so the flags are
+// compared with the ldflags aside and both ldflags values are pinned.
 func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
@@ -843,19 +845,27 @@ func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	}
 	// Drop the leading "go": bdbuild's argv starts at the go subcommand.
 	got := run.calls[1].argv[1:]
-	// Both images' bd are stamped with the same build id (gt-glsx8, gt-15amz),
-	// so the whole argv is pinned, ldflags included.
-	if !reflect.DeepEqual(withOut(got), withOut(compiled)) {
+	// The daemon image's bd has not gained the -s -w the polecat bd is stripped
+	// with yet (gt-aermmg), so the argv is compared with its ldflags aside; both
+	// ldflags values are pinned below.
+	if !reflect.DeepEqual(withOut(withoutLdflags(got)), withOut(withoutLdflags(compiled))) {
 		t.Errorf("the daemon image builds bd with %q, the polecat image with %q", got, compiled)
 	}
-	if want := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit}; !reflect.DeepEqual(ldflagsOf(got), want) {
-		t.Errorf("the daemon image stamps bd with %q, want %q", ldflagsOf(got), want)
+	// Both images' bd are stamped with the same build id (gt-glsx8, gt-15amz).
+	wantDaemon := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit}
+	if !reflect.DeepEqual(ldflagsOf(got), wantDaemon) {
+		t.Errorf("the daemon image stamps bd with %q, want %q", ldflagsOf(got), wantDaemon)
+	}
+	wantPolecat := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit + " -s -w"}
+	if !reflect.DeepEqual(ldflagsOf(compiled), wantPolecat) {
+		t.Errorf("the polecat image stamps bd with %q, want %q", ldflagsOf(compiled), wantPolecat)
 	}
 }
 
 // TestGTPinMatchesTheSharedBuildArgv compares the argv the daemon image builds
 // gt with against bdbuild.GoBuildArgv, the shared argv the polecat context
-// command compiles gt with, bar the rev stamp the daemon image adds on purpose.
+// command compiles gt with, bar the rev stamp the daemon image adds on purpose
+// and the -s -w strip flags it has not gained yet (gt-aermmg).
 // The polecat side's recorded call is compared in that package's
 // TestGTPinMatchesTheDaemonImageGtBuild: this package's test cannot import it
 // (the context package imports this one), so here the shared helper is what
@@ -868,7 +878,10 @@ func TestGTPinMatchesTheSharedBuildArgv(t *testing.T) {
 	}
 	got := withoutLdflags(run.calls[0].argv)
 	polecat := append([]string{"go"}, bdbuild.GoBuildArgv(filepath.Join("bin", "gt"), GTPackage)...)
-	if !reflect.DeepEqual(withOut(got), withOut(polecat)) {
+	// The daemon image has not gained the -s -w strip flags the shared polecat
+	// argv carries yet (gt-aermmg), so the ldflags are compared aside; every
+	// other flag must still match.
+	if !reflect.DeepEqual(withOut(got), withOut(withoutLdflags(polecat))) {
 		t.Errorf("the daemon image builds gt with %q, the polecat image with %q", got, polecat)
 	}
 }
@@ -932,13 +945,16 @@ func ldflagsOf(argv []string) []string {
 	return flags
 }
 
-// withoutLdflags drops every -ldflags and its value, so a test compares the rest
-// of a build argv as one list.
+// withoutLdflags drops every -ldflags and its value, and every -ldflags=<value>,
+// so a test compares the rest of a build argv as one list.
 func withoutLdflags(argv []string) []string {
 	out := make([]string, 0, len(argv))
 	for i := 0; i < len(argv); i++ {
 		if argv[i] == "-ldflags" && i+1 < len(argv) {
 			i++
+			continue
+		}
+		if strings.HasPrefix(argv[i], "-ldflags=") {
 			continue
 		}
 		out = append(out, argv[i])

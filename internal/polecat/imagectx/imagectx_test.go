@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemonimage"
+	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	"github.com/steveyegge/gastown/internal/polecat/seed"
 )
 
@@ -414,7 +415,7 @@ func TestContextFromPinsFetchesEverySourceByURL(t *testing.T) {
 				t.Errorf("a fetch named a URL other than the pinned sources: %s", c)
 			}
 		}
-		want := "go " + srcDir + " build -trimpath -o " + filepath.Join(out, "bin", "gt") + " ./cmd/gt"
+		want := "go " + srcDir + " build -trimpath -ldflags=-s -w -o " + filepath.Join(out, "bin", "gt") + " ./cmd/gt"
 		if !contains(w.goCalls, want) {
 			t.Errorf("gt was not built from the checkout at --rev\nwant %q\n%s", want, w.dump())
 		}
@@ -493,10 +494,14 @@ func TestContextHoldsThePayloadTheDockerfileCopies(t *testing.T) {
 // command runs with the one the daemon image runs, each recorded from its own
 // production call. The daemon image stamps gt's rev on purpose (gt-yjzepk), and
 // the two write to different directories, so the stamp and the output path are
-// compared aside. The polecat half of this pin belongs here, not in the daemon
-// image's own test: that package cannot import this one, so a comparison there
-// can only name the shared argv helper, never this package's recorded call.
-// Mutation: add a flag to either flow's gt build, and this fails.
+// compared aside. The daemon image has not gained the -s -w strip flags the
+// polecat binaries are linked with yet (gt-aermmg), so the ldflags are compared
+// aside too, and the polecat side's strip flag is asserted here. The polecat
+// half of this pin belongs here, not in the daemon image's own test: that
+// package cannot import this one, so a comparison there can only name the
+// shared argv helper, never this package's recorded call.
+// Mutation: add a flag other than -ldflags to either flow's gt build, and this
+// fails.
 func TestGTPinMatchesTheDaemonImageGtBuild(t *testing.T) {
 	t.Parallel()
 	w := newWorld(t)
@@ -531,8 +536,34 @@ func TestGTPinMatchesTheDaemonImageGtBuild(t *testing.T) {
 		t.Fatalf("the daemon image's first build is not gt: %v", calls)
 	}
 	daemon := withoutLdflagsArgv(calls[0][1:]) // drop the leading "go"
-	if !reflect.DeepEqual(normalizeOut(polecat), normalizeOut(daemon)) {
+	if !reflect.DeepEqual(normalizeOut(withoutLdflagsArgv(polecat)), normalizeOut(daemon)) {
 		t.Errorf("the context command builds gt with %q, the daemon image with %q", polecat, daemon)
+	}
+	if !contains(polecat, "-ldflags=-s -w") {
+		t.Errorf("the context command builds gt with %q, which lacks the -s -w strip flags", polecat)
+	}
+}
+
+// TestTheThreeBinariesAreBuiltThroughGoBuildArgv checks the context command
+// builds gt, polecat-image and sweep-run with bdbuild.GoBuildArgv and no other
+// argv, so the shared flags cannot drift between this command and the daemon
+// image. Mutation: give one binary its own argv, and this fails.
+func TestTheThreeBinariesAreBuiltThroughGoBuildArgv(t *testing.T) {
+	t.Parallel()
+	w := newWorld(t)
+	out := t.TempDir()
+	if _, err := Build(context.Background(), w.inputs(out), w.seams()); err != nil {
+		t.Fatalf("Build: %v\n%s", err, w.dump())
+	}
+	for _, b := range []struct{ name, pkg string }{
+		{"gt", "./cmd/gt"},
+		{"polecat-image", "./plugins/polecat-image"},
+		{"sweep-run", "./cmd/sweep-run"},
+	} {
+		want := bdbuild.GoBuildArgv(filepath.Join(out, "bin", b.name), b.pkg)
+		if got := goArgvOf(t, w, b.pkg); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s was built with %q, want GoBuildArgv %q", b.name, got, want)
+		}
 	}
 }
 
@@ -554,12 +585,16 @@ func goArgvOf(t *testing.T, w *world, pkg string) []string {
 	return found
 }
 
-// withoutLdflagsArgv returns argv with any "-ldflags" and its value removed.
+// withoutLdflagsArgv returns argv with any "-ldflags" and its value, and any
+// "-ldflags=<value>", removed, so a test compares the rest of a build argv.
 func withoutLdflagsArgv(argv []string) []string {
 	var out []string
 	for i := 0; i < len(argv); i++ {
 		if argv[i] == "-ldflags" {
 			i++
+			continue
+		}
+		if strings.HasPrefix(argv[i], "-ldflags=") {
 			continue
 		}
 		out = append(out, argv[i])
