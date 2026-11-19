@@ -56,6 +56,7 @@ func (f *fakeSeams) seams() seams {
 			f.importedFrom = dirs
 			return f.importers, f.importErr
 		},
+		run: func([]string) ([]byte, error) { return nil, errors.New("unscripted git call") },
 	}
 }
 
@@ -68,6 +69,104 @@ func nameStatus(records ...string) string {
 		b.WriteString("\x00")
 	}
 	return b.String()
+}
+
+// fakeGit maps "ref:path" to a file's text for the content reader's git calls.
+// A spec it does not hold is missing from that ref's tree: ls-tree succeeds
+// with no output, the one positive answer. probeFail makes ls-tree fail (a bad
+// revision or a corrupt object) and readFail makes it find the path while show
+// fails.
+type fakeGit map[string]string
+
+const (
+	probeFail = "\x00probe"
+	readFail  = "\x00fail"
+)
+
+func (g fakeGit) run(argv []string) ([]byte, error) {
+	spec := argv[len(argv)-1]
+	if argv[1] == "ls-tree" {
+		spec = argv[4] + ":" + argv[6]
+	}
+	src, ok := g[spec]
+	switch {
+	case !ok:
+		return nil, nil
+	case src == probeFail && argv[1] == "ls-tree":
+		return nil, errors.New("exit status 128")
+	case argv[1] == "ls-tree":
+		return []byte(argv[6] + "\x00"), nil
+	case src == readFail:
+		return nil, errors.New("exit status 128")
+	}
+	return []byte(src), nil
+}
+
+// TestRunGuardsContentJudgesANonCmdGoChangeByItsInvocations: in -guards mode
+// the internal/cmd guard runs for a non-cmd Go change only when the file's gt
+// and bd invocations differ between the base and HEAD, read through the
+// runner; a failed show and the path rules keep it (gt-jvv5qb).
+func TestRunGuardsContentJudgesANonCmdGoChangeByItsInvocations(t *testing.T) {
+	t.Parallel()
+	const (
+		path  = "internal/daemon/patrol.go"
+		moved = "internal/daemon/moved.go"
+		base  = "origin/main:"
+		sling = "package daemon\n\nvar _ = exec.Command(\"gt\", \"sling\")\n"
+		hook  = "package daemon\n\nvar _ = exec.Command(\"gt\", \"hook\")\n"
+		none  = "package daemon\n"
+	)
+	tests := []struct {
+		name string
+		diff string
+		git  fakeGit
+		want bool
+	}{
+		{"unchanged invocations", nameStatus("M " + path), fakeGit{base + path: sling, "HEAD:" + path: sling}, false},
+		{"a changed invocation", nameStatus("M " + path), fakeGit{base + path: sling, "HEAD:" + path: hook}, true},
+		{"an added file holding one", nameStatus("A " + path), fakeGit{"HEAD:" + path: sling}, true},
+		{"an added file holding none", nameStatus("A " + path), fakeGit{"HEAD:" + path: none}, false},
+		{"a deleted file that held one", nameStatus("D " + path), fakeGit{base + path: sling}, true},
+		{"a rename that changes one", nameStatus("R100 " + path + " " + moved), fakeGit{base + path: sling, "HEAD:" + moved: hook}, true},
+		{"a rename that keeps them", nameStatus("R100 " + path + " " + moved), fakeGit{base + path: sling, "HEAD:" + moved: sling}, false},
+		{"a failed probe on the base keeps the guard", nameStatus("M " + path), fakeGit{base + path: probeFail, "HEAD:" + path: none}, true},
+		{"a failed probe on HEAD keeps the guard", nameStatus("M " + path), fakeGit{base + path: none, "HEAD:" + path: probeFail}, true},
+		{"a failed show keeps the guard", nameStatus("M " + path), fakeGit{base + path: none, "HEAD:" + path: readFail}, true},
+		{"an internal/cmd Go change still fires on its path", nameStatus("M internal/cmd/root.go"), fakeGit{}, true},
+		{"a Makefile change still fires on its path", nameStatus("M Makefile"), fakeGit{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := (&fakeSeams{doc: testDoc}).seams()
+			s.run = tt.git.run
+			var stdout, stderr bytes.Buffer
+			if code := run(options{guards: true, base: "origin/main"}, tt.diff, s, &stdout, &stderr); code != 0 {
+				t.Fatalf("run = %d, stderr %q; want 0", code, stderr.String())
+			}
+			got := slices.Contains(strings.Fields(stdout.String()), "./internal/cmd")
+			if got != tt.want {
+				t.Errorf("internal/cmd listed = %t, want %t; stdout %q", got, tt.want, stdout.String())
+			}
+		})
+	}
+}
+
+// TestRunGuardsContentKeepsTheGuardWithNoBaseRef: the reader refuses an empty
+// base ref, so a caller that never set one keeps the guard (fail closed).
+func TestRunGuardsContentKeepsTheGuardWithNoBaseRef(t *testing.T) {
+	t.Parallel()
+	s := (&fakeSeams{doc: testDoc}).seams()
+	// HEAD holds a file with no invocation, so a reader that fell back to the
+	// index would judge the change same and drop the guard.
+	s.run = fakeGit{"HEAD:internal/daemon/patrol.go": "package daemon\n"}.run
+	var stdout, stderr bytes.Buffer
+	if code := run(options{guards: true}, nameStatus("M internal/daemon/patrol.go"), s, &stdout, &stderr); code != 0 {
+		t.Fatalf("run = %d, stderr %q; want 0", code, stderr.String())
+	}
+	if !slices.Contains(strings.Fields(stdout.String()), "./internal/cmd") {
+		t.Error("internal/cmd absent, want it kept with no base ref")
+	}
 }
 
 func TestRunRefusesAnUnreadableDocumentInEveryModeWithoutRunningTheInventory(t *testing.T) {
