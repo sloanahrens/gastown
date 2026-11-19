@@ -41,6 +41,41 @@ func TestParseNodeStatsGivesUsedPercent(t *testing.T) {
 	}
 }
 
+// TestParseNodeStatsUsageKeepsTheBytesTheShareCameFrom: the used and total
+// bytes are the same two numbers the share is computed from, so a trend records
+// them rather than a percent it cannot take back to bytes (gt-gj8zbw).
+func TestParseNodeStatsUsageKeepsTheBytesTheShareCameFrom(t *testing.T) {
+	t.Parallel()
+	got, err := ParseNodeStatsUsage(`{"node":{"fs":{"capacityBytes":160000000000,"usedBytes":120000000000}}}`)
+	if err != nil {
+		t.Fatalf("ParseNodeStatsUsage = error %v, want a reading", err)
+	}
+	want := Usage{UsedPct: 75, UsedBytes: 120000000000, TotalBytes: 160000000000}
+	if got != want {
+		t.Fatalf("ParseNodeStatsUsage = %+v, want %+v", got, want)
+	}
+}
+
+// TestParseNodeStatsUsageRefusesWhatItCannotRead: the byte-keeping parser
+// refuses the same summaries ParseNodeStats does, so a caller that records
+// bytes never records a reading the share would have refused.
+func TestParseNodeStatsUsageRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	for name, summary := range map[string]string{
+		"no node.fs":         `{"node":{"nodeName":"kind-worker"}}`,
+		"no usedBytes":       `{"node":{"fs":{"capacityBytes":100}}}`,
+		"zero capacity":      `{"node":{"fs":{"capacityBytes":0,"usedBytes":0}}}`,
+		"used over capacity": `{"node":{"fs":{"capacityBytes":100,"usedBytes":101}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got, err := ParseNodeStatsUsage(summary); err == nil {
+				t.Fatalf("ParseNodeStatsUsage(%s) = %+v, nil; want an error", summary, got)
+			}
+		})
+	}
+}
+
 func TestParseNodeStatsRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	for name, summary := range map[string]string{

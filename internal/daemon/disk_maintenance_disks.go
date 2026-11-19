@@ -65,9 +65,10 @@ type diskMaintDisk struct {
 	name string
 	// df measures the disk with a command the daemon runs itself.
 	df DFReader
-	// parse turns the reader's output into the disk's used share; nil is
-	// disks.ParseDF. It applies only to a df reading.
-	parse func(string) (float64, error)
+	// parse turns the reader's output into the disk's used share, and the byte
+	// counts it when the output names them; nil reads the share with
+	// disks.ParseDF and no byte counts. It applies only to a df reading.
+	parse func(string) (disks.Usage, error)
 	// detail names the biggest consumers in the same output; nil names none. A
 	// detail that cannot be read makes the reading an error.
 	detail func(string) (string, error)
@@ -102,7 +103,7 @@ func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
 // is gone (gt-gg9hv.24). The sandbox disk is read the same way in both modes,
 // through the town's kubeconfig (gt-gg9hv.24.3).
 func (d *Daemon) diskMaintTownDisks(kubeconfig string) []diskMaintDisk {
-	colima := diskMaintDisk{name: diskMaintDiskColima, df: d.diskMaintSandboxDisk(kubeconfig), parse: disks.ParseNodeStats}
+	colima := diskMaintDisk{name: diskMaintDiskColima, df: d.diskMaintSandboxDisk(kubeconfig), parse: disks.ParseNodeStatsUsage}
 	if d.containerMode {
 		return []diskMaintDisk{
 			{name: diskMaintDiskMac, probe: func(p hostprobe.Probes) hostprobe.Field[hostprobe.Disk] { return p.Disk }},
@@ -196,7 +197,7 @@ func (d *Daemon) diskMaintControl(kubeconfig string) (diskMaintDisk, bool) {
 	return diskMaintDisk{
 		name:      diskMaintDiskControl,
 		df:        d.diskMaintClusterDisk(diskmaint.KubectlArgs(kubeconfig, runner.Context)),
-		parse:     disks.ParseNodeStats,
+		parse:     disks.ParseNodeStatsUsage,
 		detail:    disks.TopConsumers,
 		alertOnly: true,
 	}, true
@@ -286,26 +287,32 @@ func (d *Daemon) diskMaintenanceReadings(ctx context.Context, now time.Time, inj
 	return readings
 }
 
-// readDF runs one disk's reader and parses its used share and, when the disk
-// names them, its biggest consumers from the same output. A failure in either
-// is that disk's reading error.
+// readDF runs one disk's reader and parses its used share, the byte counts the
+// share came from when the parser reports them, and its biggest consumers when
+// the disk names them, all from the same output. A failure in any of them is
+// that disk's reading error.
 func readDF(ctx context.Context, disk diskMaintDisk, df DFReader) disks.Reading {
 	r := disks.Reading{Name: disk.name, AlertOnly: disk.alertOnly}
 	parse := disk.parse
 	if parse == nil {
-		parse = disks.ParseDF
+		parse = func(out string) (disks.Usage, error) {
+			pct, err := disks.ParseDF(out)
+			return disks.Usage{UsedPct: pct}, err
+		}
 	}
 	out, err := df(ctx)
 	if err != nil {
 		r.Err = err
 		return r
 	}
-	pct, err := parse(string(out))
+	usage, err := parse(string(out))
 	if err != nil {
 		r.Err = err
 		return r
 	}
-	r.UsedPct = pct
+	r.UsedPct = usage.UsedPct
+	r.UsedBytes = usage.UsedBytes
+	r.TotalBytes = usage.TotalBytes
 	if disk.detail != nil {
 		detail, err := disk.detail(string(out))
 		if err != nil {
@@ -472,10 +479,13 @@ func (d *Daemon) readAndApplyDiskAlertsLogging(ctx context.Context, now time.Tim
 		// is slow to answer: this pass reads the disks for its own decisions and
 		// leaves the alerts to that one, so its targets are not held off.
 		fallbackLog(err)
-		return d.diskMaintenanceSeams().readDisks(ctx), true
+		readings := d.diskMaintenanceSeams().readDisks(ctx)
+		d.recordDiskGrowth(now, readings)
+		return readings, true
 	}
 	defer release()
 	readings := d.diskMaintenanceSeams().readDisks(ctx)
+	d.recordDiskGrowth(now, readings)
 	d.applyDiskAlerts(ctx, readings, now)
 	d.diskMaintAlerts.recordApplied(now)
 	return readings, true
