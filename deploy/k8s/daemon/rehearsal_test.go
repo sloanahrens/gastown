@@ -327,11 +327,11 @@ func TestRehearsalRefusesTagProxyImage(t *testing.T) {
 }
 
 // refusedInRehearsal reports whether a rehearsal may never carry the entry
-// named file: a promote key, jev.env, the landing bot's token or the write-capable
-// om token and its meta file.
+// named file: a promote key, jev.env, the landing bot's token, the write-capable
+// om token and its meta file, or the write-capable registry bot's token.
 func refusedInRehearsal(file string) bool {
 	promote := strings.HasPrefix(file, "promote-") && strings.HasSuffix(file, ".key")
-	return promote || file == "jev.env" || file == ForgeTokenFile || file == OMTokenFile || file == OMTokenMetaFile
+	return promote || file == "jev.env" || file == ForgeTokenFile || file == OMTokenFile || file == OMTokenMetaFile || file == RegistryTokenFile
 }
 
 // volumeMountAt returns the mount at path, or nil.

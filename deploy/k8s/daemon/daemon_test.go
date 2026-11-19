@@ -3547,7 +3547,9 @@ func TestRenderCarriesTheLedgerReaderSecret(t *testing.T) {
 // TestSecretVolumesCarryTheirManifestMode holds every Secret volume the loop
 // renders to its entry's manifest mode as the defaultMode. The reader refuses a
 // file readable by group or others, so a volume left at the Kubernetes default
-// 0644 would fail the cloud step closed (gt-nlf1i6).
+// 0644 would fail the cloud step closed (gt-nlf1i6). The registry bot's token is
+// the one entry rendered narrower than its manifest mode allows: owner-read
+// only, because the token can write packages (gt-h53ixs).
 func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
@@ -3562,8 +3564,11 @@ func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("entry %q mode %q does not parse as octal: %v", file.Name, file.Mode, err)
 		}
+		if file.Name == RegistryTokenFile {
+			want = 0o400
+		}
 		if got := *vol.Secret.DefaultMode; int64(got) != want {
-			t.Errorf("entry %q volume defaultMode = %o, want its manifest mode %s", file.Name, got, file.Mode)
+			t.Errorf("entry %q volume defaultMode = %o, want %04o", file.Name, got, want)
 		}
 	}
 }
