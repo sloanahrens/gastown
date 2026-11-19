@@ -23,8 +23,9 @@ const commandToday = "2026-10-23"
 // commandExtract is the fixture town's extract: two gastown landings in one
 // week, one of them by hand, a shaped bead whose notes hold a rejection, a
 // usage file and an overrun stop. Every landing's diff is cached, so the
-// extract's size columns come from the fixture and no git runs.
-func commandExtract(t *testing.T, outDir string) ExtractEnv {
+// extract's size columns come from the fixture and no git runs. The town's
+// gate-runs log is read from town, which has none.
+func commandExtract(t *testing.T, town, outDir string) ExtractEnv {
 	t.Helper()
 	return ExtractEnv{
 		LedgerLines: map[string][]string{"gastown": {
@@ -49,9 +50,10 @@ func commandExtract(t *testing.T, outDir string) ExtractEnv {
 		OMCommits: map[string][]OMCommit{"gastown": {
 			{At: "2026-09-01T00:00:00Z", Text: `{"threshold": 0.7}`},
 		}},
-		OutDir: outDir,
-		Today:  commandToday,
-		JevLog: jevLogFile(t),
+		OutDir:   outDir,
+		Today:    commandToday,
+		JevLog:   jevLogFile(t),
+		TownRoot: town,
 	}
 }
 
@@ -83,7 +85,7 @@ func newCommandTown(t *testing.T) *commandTown {
 		real: RealTown{
 			Town:    town,
 			DocsDir: docs,
-			Extract: commandExtract(t, filepath.Join(town, ".runtime", "metrics", commandToday)),
+			Extract: commandExtract(t, town, filepath.Join(town, ".runtime", "metrics", commandToday)),
 		},
 		env: Env{Town: town, ReadFile: os.ReadFile, ReadDir: listDir},
 		out: &bytes.Buffer{},

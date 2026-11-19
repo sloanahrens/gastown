@@ -190,11 +190,13 @@ func boolCell(v bool) string {
 }
 
 // WriteLandingSidecar writes landings.sidecar.json: the explain-only columns,
-// which the mango stage drops from its predictors, in indent=1 JSON bytes.
-func WriteLandingSidecar(w io.Writer) error {
+// which the mango stage drops from its predictors, and how many gate-run lines
+// the day's gate_runs.csv left out, in indent=1 JSON bytes.
+func WriteLandingSidecar(w io.Writer, gateRunsSkipped int) error {
 	sidecar := struct {
-		ExplainOnly []string `json:"explain_only"`
-	}{ExplainOnly: explainOnlyColumns}
+		ExplainOnly     []string `json:"explain_only"`
+		GateRunsSkipped int      `json:"gate_runs_skipped"`
+	}{ExplainOnly: explainOnlyColumns, GateRunsSkipped: gateRunsSkipped}
 	data, err := json.MarshalIndent(sidecar, "", " ")
 	if err != nil {
 		return fmt.Errorf("landings.sidecar.json: %w", err)

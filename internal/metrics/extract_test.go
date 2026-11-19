@@ -14,6 +14,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The cases below drive the extract from fake sources, with every file it
@@ -161,6 +164,8 @@ func extractCase(t *testing.T) (ExtractEnv, *extractFiles) {
 		Create:   files.create,
 		// An empty log is read and has no answers, so it adds no footer gap.
 		JevLog: jevLogFile(t),
+		// An empty town has no gate-runs log, so it has no gate runs.
+		TownRoot: t.TempDir(),
 	}, files
 }
 
@@ -359,14 +364,14 @@ func TestExtractWritesItsFilesInOrder(t *testing.T) {
 		{
 			name:  "every source read",
 			runBd: extractBd,
-			want:  []string{landingsName, sidecarName, weeklyName, beadsName, footerName},
+			want:  []string{landingsName, sidecarName, gateRunsName, weeklyName, beadsName, footerName},
 		},
 		{
 			name: "every bd list failed",
 			runBd: func(*[]bdCall) BdRun {
 				return func(string, []string) ([]byte, error) { return nil, errors.New("bd failed") }
 			},
-			want: []string{landingsName, sidecarName, weeklyName, footerName},
+			want: []string{landingsName, sidecarName, gateRunsName, weeklyName, footerName},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -384,6 +389,168 @@ func TestExtractWritesItsFilesInOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+// extractGateRun is one gate run of the fixture town, at a time the extract
+// reads back unchanged.
+func extractGateRun(bead string, queueS float64) land.GateRun {
+	return land.GateRun{
+		TS:     time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
+		Rig:    "gastown",
+		Bead:   bead,
+		SHA:    "abc123",
+		RunID:  "run-" + bead,
+		QueueS: queueS,
+		RunS:   42.5,
+		Passed: true,
+	}
+}
+
+// TestExtractWritesGateRuns checks each gate run in the town's log is one row of
+// the day's gate_runs.csv, in log order.
+func TestExtractWritesGateRuns(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	town := t.TempDir()
+	env.TownRoot = town
+	for _, run := range []land.GateRun{extractGateRun("gt-a", 1.5), extractGateRun("gt-b", 2.25)} {
+		if err := land.AppendGateRun(town, run); err != nil {
+			t.Fatalf("AppendGateRun: %v", err)
+		}
+	}
+	extractRun(t, env)
+
+	rows := files.rows(t, gateRunsName)
+	if len(rows) != 2 {
+		t.Fatalf("gate_runs.csv has %d rows, want 2: %v", len(rows), rows)
+	}
+	for i, want := range []struct{ bead, queue string }{{"gt-a", "1.5"}, {"gt-b", "2.25"}} {
+		if rows[i]["bead"] != want.bead || rows[i]["queue_s"] != want.queue {
+			t.Errorf("row %d = bead %q queue_s %q, want bead %q queue_s %q", i, rows[i]["bead"], rows[i]["queue_s"], want.bead, want.queue)
+		}
+	}
+}
+
+// TestExtractWritesAHeaderOnlyGateRunsCSVForATownWithoutTheLog checks a town
+// with no gate-runs.jsonl still publishes gate_runs.csv, as its header alone.
+func TestExtractWritesAHeaderOnlyGateRunsCSVForATownWithoutTheLog(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	extractRun(t, env)
+
+	if !files.has(gateRunsName) {
+		t.Fatalf("gate_runs.csv was not written; wrote %v", files.names)
+	}
+	want := strings.Join(gateRunHeader, ",") + "\r\n"
+	if got := files.data[gateRunsName].String(); got != want {
+		t.Errorf("gate_runs.csv = %q, want the header alone %q", got, want)
+	}
+}
+
+// TestWriteGateRunsNamesTheFileItCannotWrite checks a failed write of
+// gate_runs.csv is reported as that file's, and still wraps the write's cause.
+func TestWriteGateRunsNamesTheFileItCannotWrite(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	err := writeGateRuns(causeWriter{cause: boom}, gateRunHeader, nil)
+	if err == nil {
+		t.Fatal("writeGateRuns to a failing writer returned no error")
+	}
+	if !strings.HasPrefix(err.Error(), "gate_runs.csv header:") {
+		t.Errorf("error = %q, want a gate_runs.csv header: prefix", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %q, want it to wrap the write's cause", err)
+	}
+}
+
+// writesThenFail accepts its first ok writes and fails every write after them.
+type writesThenFail struct {
+	ok    int
+	cause error
+}
+
+func (w *writesThenFail) Write(p []byte) (int, error) {
+	if w.ok > 0 {
+		w.ok--
+		return len(p), nil
+	}
+	return 0, w.cause
+}
+
+// TestWriteGateRunsNamesTheRowItCannotWrite checks a gate run that cannot be
+// written is named by its line in gate_runs.csv, after the header, and wraps the
+// write's cause.
+func TestWriteGateRunsNamesTheRowItCannotWrite(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	err := writeGateRuns(&writesThenFail{ok: 1, cause: boom}, gateRunHeader, [][]string{make([]string, len(gateRunHeader))})
+	if err == nil {
+		t.Fatal("writeGateRuns with a failing row returned no error")
+	}
+	if !strings.HasPrefix(err.Error(), "gate_runs.csv row 2:") {
+		t.Errorf("error = %q, want a gate_runs.csv row 2: prefix", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Errorf("error = %q, want it to wrap the write's cause", err)
+	}
+}
+
+// TestExtractCarriesASkippedGateRunLineIntoTheSidecar checks a torn line in the
+// gate-runs log is left out of gate_runs.csv and counted in the landings
+// sidecar, so the day's files say a run was skipped.
+func TestExtractCarriesASkippedGateRunLineIntoTheSidecar(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	town := t.TempDir()
+	env.TownRoot = town
+	if err := land.AppendGateRun(town, extractGateRun("gt-a", 1)); err != nil {
+		t.Fatalf("AppendGateRun: %v", err)
+	}
+	logPath := filepath.Join(town, ".runtime", "metrics", "gate-runs.jsonl")
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read the gate-runs log: %v", err)
+	}
+	if err := os.WriteFile(logPath, append(log, []byte("{\"ts\":\n")...), 0o644); err != nil {
+		t.Fatalf("append a torn line: %v", err)
+	}
+	extractRun(t, env)
+
+	if rows := files.rows(t, gateRunsName); len(rows) != 1 || rows[0]["bead"] != "gt-a" {
+		t.Errorf("gate_runs.csv rows = %v, want the one readable run gt-a", rows)
+	}
+	var sidecar struct {
+		GateRunsSkipped int `json:"gate_runs_skipped"`
+	}
+	if err := json.Unmarshal(files.data[sidecarName].Bytes(), &sidecar); err != nil {
+		t.Fatalf("decode the sidecar: %v", err)
+	}
+	if sidecar.GateRunsSkipped != 1 {
+		t.Errorf("sidecar gate_runs_skipped = %d, want 1", sidecar.GateRunsSkipped)
+	}
+}
+
+// TestExtractRefusesAnUnreadableGateRunLog checks a gate-runs log the extract
+// cannot read stops it before any file is written, rather than publishing a
+// day's gate_runs.csv as though the town had no gate runs.
+func TestExtractRefusesAnUnreadableGateRunLog(t *testing.T) {
+	t.Parallel()
+	env, files := extractCase(t)
+	town := t.TempDir()
+	env.TownRoot = town
+	// A directory where the log file belongs: it opens, but reading it fails.
+	if err := os.MkdirAll(filepath.Join(town, ".runtime", "metrics", "gate-runs.jsonl"), 0o755); err != nil {
+		t.Fatalf("make the log a directory: %v", err)
+	}
+	_, err := Extract(context.Background(), env)
+	if err == nil {
+		t.Fatal("Extract succeeded, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "gate-runs.jsonl") {
+		t.Errorf("error = %q, want it to name gate-runs.jsonl", err)
+	}
+	assertNoFilesWritten(t, files)
 }
 
 // TestExtractDropsACorruptLedgerLineAndNamesIt checks a line the loader cannot
@@ -1025,6 +1192,7 @@ func TestExtractRefusesAnEnvWithNoOutputOrDiffSource(t *testing.T) {
 		{"no diff source", func(env *ExtractEnv) { env.Diffs = nil }, "Diffs"},
 		{"no bd runner", func(env *ExtractEnv) { env.RunBd = nil }, "RunBd"},
 		{"no Jev log path", func(env *ExtractEnv) { env.JevLog = "" }, "JevLog"},
+		{"no town root", func(env *ExtractEnv) { env.TownRoot = "" }, "TownRoot"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
