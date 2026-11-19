@@ -190,21 +190,26 @@ func probeAllowStale(ctx context.Context, bdPath string, env []string) (supporte
 }
 
 // allowStaleAnswer reads a probe's outcome: whether bd accepted
-// --allow-stale, and whether that is a definitive answer worth caching. Only
-// two outcomes are: bd exited 0 (it ran the command, so it parsed the flag),
-// or bd said "unknown flag", whatever its exit status. Any other failure (a
-// timeout, a failure to start, or a nonzero exit over a lock or an
+// --allow-stale, and whether that is a definitive answer worth caching. Three
+// outcomes are: bd exited 0 (it ran the command, so it parsed the flag); bd
+// said "unknown flag"; or the bd gateway refused --allow-stale with HTTP 403,
+// gtwrap's wording for the flag being unplaceable (gt-d3v0iu). Any other
+// failure (a timeout, a failure to start, or a nonzero exit over a lock or an
 // unreachable database) says nothing about the flag, and is unsupported for
 // this call only (gt-22hdp.27).
 func allowStaleAnswer(ctx context.Context, err error, output string) (supported, definitive bool) {
 	out := strings.TrimSpace(output)
 	unknownFlag := strings.Contains(out, "unknown flag")
+	// The gateway refuses --allow-stale because it is a flag of import only,
+	// not a root flag. Caching that answer stops one wasted round trip per bd
+	// call; the status and the flag name both have to be the gateway's.
+	gatewayRefused := strings.Contains(out, "refused the call with HTTP 403") && strings.Contains(out, "--allow-stale")
 	supported = err == nil && out != "" && !unknownFlag
 	if ctx.Err() != nil {
 		return false, false
 	}
 	var exit interface{ ExitCode() int }
-	definitive = err == nil || (errors.As(err, &exit) && unknownFlag)
+	definitive = err == nil || (errors.As(err, &exit) && (unknownFlag || gatewayRefused))
 	return supported && definitive, definitive
 }
 
