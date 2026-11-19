@@ -12,9 +12,9 @@ import (
 	"time"
 )
 
-// maxCallReadBytes bounds what ReadCalls reads: the live log's tail, where the
-// dashboard's recent window lives. A full 50 MB file is never loaded into the
-// gateway's memory.
+// maxCallReadBytes bounds what ReadCalls reads from each live log: its tail,
+// where the dashboard's recent window lives. A full 50 MB file is never loaded
+// into the gateway's memory.
 const maxCallReadBytes int64 = 8 << 20
 
 // CallEntry is one call the log recorded: exactly the fields Log writes, so a
@@ -39,19 +39,90 @@ type CallEntry struct {
 	Conflict   bool     `json:"conflict,omitempty"`
 }
 
-// ReadCalls returns the live call log's entries stamped after since, oldest
-// first, at most limit; it reads the last maxCallReadBytes of that one file and
-// never a rotated one. A missing log is an empty list and no error.
+// stamped is one parsed call log line with its stamp, the key ReadCalls merges on.
+type stamped struct {
+	entry CallEntry
+	ts    time.Time
+}
+
+// ReadCalls returns the call log entries stamped after since, oldest first, at
+// most limit. dir holds the live call.log and, under --log-per-pod, one
+// subdirectory per pod with its own call.log. Every such file is read as its
+// last maxCallReadBytes, never a rotated one; the entries of all of them are
+// merged by stamp, and since and limit apply to the merged list. A missing log
+// is no entries and no error. A pod log that cannot be read is an error that
+// names its directory: skipping it would show a partial window as the whole.
 func ReadCalls(dir string, since time.Time, limit int) ([]CallEntry, error) {
+	return readCalls(dir, since, limit, os.ReadDir)
+}
+
+// readCalls is ReadCalls with the directory listing injected: a real directory
+// cannot fail a listing without permissions a test cannot set portably, so a
+// test passes a listing that fails.
+func readCalls(dir string, since time.Time, limit int, readDir func(string) ([]os.DirEntry, error)) ([]CallEntry, error) {
 	if dir == "" {
 		return nil, errors.New("bdgateway: read calls needs a log directory")
 	}
 	if limit <= 0 {
 		return nil, errors.New("bdgateway: read calls needs a positive limit")
 	}
-	f, err := os.Open(filepath.Join(dir, DefaultCallLogName))
+	kept, err := readCallFile(filepath.Join(dir, DefaultCallLogName))
+	if err != nil {
+		return nil, err
+	}
+	pods, err := podLogDirs(dir, readDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, pod := range pods {
+		entries, err := readCallFile(filepath.Join(pod, DefaultCallLogName))
+		if err != nil {
+			return nil, fmt.Errorf("bdgateway: read pod call log in %s: %w", pod, err)
+		}
+		kept = append(kept, entries...)
+	}
+	kept = slices.DeleteFunc(kept, func(s stamped) bool { return !s.ts.After(since) })
+	// Log stamps a call before it queues the line, and each pod writes its own
+	// file, so the merged list can be out of stamp order. The stable sort keeps
+	// the root log's lines ahead of a pod's on a tie, and the pods in name order.
+	slices.SortStableFunc(kept, func(a, b stamped) int { return a.ts.Compare(b.ts) })
+	if len(kept) > limit {
+		kept = kept[:limit]
+	}
+	out := make([]CallEntry, len(kept))
+	for i, s := range kept {
+		out[i] = s.entry
+	}
+	return out, nil
+}
+
+// podLogDirs lists dir's subdirectories, the per-pod directories --log-per-pod
+// writes, in name order. A missing dir has none; any other listing failure is
+// an error, never an empty list.
+func podLogDirs(dir string, readDir func(string) ([]os.DirEntry, error)) ([]string, error) {
+	entries, err := readDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
-		return []CallEntry{}, nil
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bdgateway: list call log directory: %w", err)
+	}
+	var pods []string
+	for _, e := range entries {
+		if e.IsDir() {
+			pods = append(pods, filepath.Join(dir, e.Name()))
+		}
+	}
+	return pods, nil
+}
+
+// readCallFile parses the entries of one call log file, each with its stamp, in
+// file order. A missing file is no entries and no error. A torn line, or one
+// whose stamp does not parse, is skipped: it cannot be placed in the merge.
+func readCallFile(path string) ([]stamped, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("bdgateway: open call log: %w", err)
@@ -64,11 +135,7 @@ func ReadCalls(dir string, since time.Time, limit int) ([]CallEntry, error) {
 		return nil, readErr
 	}
 
-	type stamped struct {
-		entry CallEntry
-		ts    time.Time
-	}
-	var kept []stamped
+	var out []stamped
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
@@ -81,23 +148,10 @@ func ReadCalls(dir string, since time.Time, limit int) ([]CallEntry, error) {
 		}
 		ts, err := time.Parse(time.RFC3339Nano, e.TS)
 		if err != nil {
-			// Without a stamp the entry cannot be shown to be after since.
+			// Without a stamp the entry cannot be placed in the merge.
 			continue
 		}
-		if !ts.After(since) {
-			continue
-		}
-		kept = append(kept, stamped{entry: e, ts: ts})
-	}
-	// Log stamps a call before it queues the line, so a writer preempted in
-	// between can leave the file out of stamp order.
-	slices.SortStableFunc(kept, func(a, b stamped) int { return a.ts.Compare(b.ts) })
-	if len(kept) > limit {
-		kept = kept[:limit]
-	}
-	out := make([]CallEntry, len(kept))
-	for i, s := range kept {
-		out[i] = s.entry
+		out = append(out, stamped{entry: e, ts: ts})
 	}
 	return out, nil
 }

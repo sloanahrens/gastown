@@ -277,6 +277,221 @@ func getCalls(t *testing.T, g *Gateway, token, query string) *httptest.ResponseR
 	return rec
 }
 
+// writePodLog makes the per-pod directory pod under dir and writes its call log.
+func writePodLog(t *testing.T, dir, pod string, lines ...string) string {
+	t.Helper()
+	podDir := filepath.Join(dir, pod)
+	if err := os.MkdirAll(podDir, 0o755); err != nil {
+		t.Fatalf("make pod directory: %v", err)
+	}
+	writeCallLog(t, podDir, lines...)
+	return podDir
+}
+
+// TestReadCallsPodsMerge is acceptance box 1: the root log and every pod's log
+// come back as one list, oldest first, with since and limit applied after the
+// merge.
+func TestReadCallsPodsMerge(t *testing.T) {
+	t.Parallel()
+	at := func(s int) time.Time { return callLogBase.Add(time.Duration(s) * time.Second) }
+	dir := t.TempDir()
+	writeCallLog(t, dir,
+		callLine(t, at(1), "root-1"),
+		callLine(t, at(5), "root-5"),
+	)
+	// Each pod's file is out of stamp order too, so the merge must sort it.
+	writePodLog(t, dir, "pod-a",
+		callLine(t, at(4), "a-4"),
+		callLine(t, at(2), "a-2"),
+	)
+	writePodLog(t, dir, "pod-b",
+		callLine(t, at(0), "b-0"),
+		callLine(t, at(3), "b-3"),
+		callLine(t, at(6), "b-6"),
+	)
+
+	t.Run("every log merged oldest first, since excluded", func(t *testing.T) {
+		got, err := ReadCalls(dir, callLogBase, 10)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if want := []string{"root-1", "a-2", "b-3", "a-4", "root-5", "b-6"}; !slices.Equal(callers(got), want) {
+			t.Errorf("callers = %v, want %v", callers(got), want)
+		}
+	})
+
+	t.Run("since and limit apply after the merge", func(t *testing.T) {
+		// a-2 is at since, so it is out; the oldest three after it across all
+		// the logs are b-3, a-4 and root-5.
+		got, err := ReadCalls(dir, at(2), 3)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if want := []string{"b-3", "a-4", "root-5"}; !slices.Equal(callers(got), want) {
+			t.Errorf("callers = %v, want %v", callers(got), want)
+		}
+	})
+
+	t.Run("limit keeps the oldest after since across every log", func(t *testing.T) {
+		// root-1 is at since, so the oldest after it is a-2 in pod-a, not the
+		// root log's own next entry.
+		got, err := ReadCalls(dir, at(1), 1)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if want := []string{"a-2"}; !slices.Equal(callers(got), want) {
+			t.Errorf("callers = %v, want %v", callers(got), want)
+		}
+	})
+
+	t.Run("a missing root log still reads the pods", func(t *testing.T) {
+		podsOnly := t.TempDir()
+		writePodLog(t, podsOnly, "pod-a", callLine(t, at(2), "a-2"))
+		got, err := ReadCalls(podsOnly, callLogBase, 10)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if want := []string{"a-2"}; !slices.Equal(callers(got), want) {
+			t.Errorf("callers = %v, want %v", callers(got), want)
+		}
+	})
+
+	t.Run("only one level of pod directories is read", func(t *testing.T) {
+		nested := t.TempDir()
+		writePodLog(t, nested, filepath.Join("pod-a", "deeper"), callLine(t, at(2), "too-deep"))
+		got, err := ReadCalls(nested, callLogBase, 10)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("callers = %v, want none", callers(got))
+		}
+	})
+}
+
+// TestReadCallsPodsErrors is acceptance box 2: a pod log that cannot be read is
+// an error naming its directory, never a skipped pod; an empty pod directory
+// adds nothing.
+func TestReadCallsPodsErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("an unreadable pod log is an error naming its directory", func(t *testing.T) {
+		dir := t.TempDir()
+		writeCallLog(t, dir, callLine(t, callLogBase, "root"))
+		podDir := filepath.Join(dir, "pod-b")
+		// A directory where the pod's log should be: it opens, and reading it fails.
+		if err := os.MkdirAll(filepath.Join(podDir, DefaultCallLogName), 0o755); err != nil {
+			t.Fatalf("make unreadable pod log: %v", err)
+		}
+		_, err := ReadCalls(dir, time.Time{}, 10)
+		if err == nil {
+			t.Fatal("ReadCalls error = nil, want the unreadable pod log refused")
+		}
+		if !strings.Contains(err.Error(), podDir) {
+			t.Errorf("error %q does not name the pod directory %s", err, podDir)
+		}
+	})
+
+	t.Run("an empty pod directory adds nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		writeCallLog(t, dir, callLine(t, callLogBase, "root"))
+		if err := os.MkdirAll(filepath.Join(dir, "pod-c"), 0o755); err != nil {
+			t.Fatalf("make empty pod directory: %v", err)
+		}
+		got, err := ReadCalls(dir, time.Time{}, 10)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if want := []string{"root"}; !slices.Equal(callers(got), want) {
+			t.Errorf("callers = %v, want %v", callers(got), want)
+		}
+	})
+
+	t.Run("an unreadable root log is an error and no pods are read", func(t *testing.T) {
+		dir := t.TempDir()
+		writePodLog(t, dir, "pod-a", callLine(t, callLogBase, "from-a"))
+		// A directory where the root log should be: it opens, and reading it fails.
+		if err := os.MkdirAll(filepath.Join(dir, DefaultCallLogName), 0o755); err != nil {
+			t.Fatalf("make unreadable root log: %v", err)
+		}
+		if got, err := ReadCalls(dir, time.Time{}, 10); err == nil {
+			t.Errorf("ReadCalls = %v, want the unreadable root log refused", callers(got))
+		}
+	})
+
+	t.Run("a pod directory listing that fails is an error", func(t *testing.T) {
+		boom := errors.New("listing refused")
+		failListing := func(string) ([]os.DirEntry, error) { return nil, boom }
+		if _, err := readCalls(t.TempDir(), time.Time{}, 10, failListing); !errors.Is(err, boom) {
+			t.Errorf("readCalls error = %v, want %v", err, boom)
+		}
+	})
+
+	t.Run("a log directory that is a file is an error", func(t *testing.T) {
+		notADir := filepath.Join(t.TempDir(), "log-dir")
+		if err := os.WriteFile(notADir, nil, 0o600); err != nil {
+			t.Fatalf("write placeholder file: %v", err)
+		}
+		if got, err := ReadCalls(notADir, time.Time{}, 10); err == nil {
+			t.Errorf("ReadCalls = %v, want the file refused as a log directory", callers(got))
+		}
+	})
+}
+
+// TestServeCallsShowsEveryPod is the bead's goal: a gateway whose own log is one
+// pod's directory answers GET /v1/calls with every pod's calls when it is given
+// the shared root, and with its own log alone when it is not.
+func TestServeCallsShowsEveryPod(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	podA := writePodLog(t, root, "pod-a", callLine(t, callLogBase.Add(time.Second), "from-a"))
+	writePodLog(t, root, "pod-b", callLine(t, callLogBase.Add(2*time.Second), "from-b"))
+	log, err := NewCallLog(CallLogOptions{
+		Dir:          podA,
+		Policy:       mustPolicy(t),
+		BeadPrefixes: []string{"gt"},
+	})
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := log.Close(); err != nil {
+			t.Errorf("close call log: %v", err)
+		}
+	})
+
+	gatewayWith := func(callsDir string) *Gateway {
+		t.Helper()
+		g, err := NewGateway(GatewayOptions{
+			Auth:       testAuthenticator(t),
+			Policy:     mustPolicy(t),
+			Workspaces: mustStore(t),
+			Log:        log,
+			CallsDir:   callsDir,
+			Runner:     exitByVerb{"show": 0},
+			Caps:       fixedCaps{},
+		})
+		if err != nil {
+			t.Fatalf("NewGateway: %v", err)
+		}
+		return g
+	}
+
+	t.Run("the shared root shows every pod's calls", func(t *testing.T) {
+		body := decodeCalls(t, getCalls(t, gatewayWith(root), testReadToken, ""))
+		if want := []string{"from-a", "from-b"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
+		}
+	})
+
+	t.Run("no CallsDir reads the log's own directory alone", func(t *testing.T) {
+		body := decodeCalls(t, getCalls(t, gatewayWith(""), testReadToken, ""))
+		if want := []string{"from-a"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
+		}
+	})
+}
+
 // decodeCalls returns the 200 body GET /v1/calls answered, failing the test
 // with the body when the status is not 200.
 func decodeCalls(t *testing.T, rec *httptest.ResponseRecorder) callsBody {

@@ -122,9 +122,12 @@ func serve(ctx context.Context, sc *serveConfig) error {
 		Policy:     policy,
 		Workspaces: workspaces,
 		Log:        log,
-		Runner:     runner,
-		Caps:       runner,
-		DoltProbe:  newDoltProbe(sc.doltHost, sc.doltPort, doltProbeTimeout, sc.dial),
+		// The shared root, not the pod's own directory: GET /v1/calls must show
+		// every pod's calls, and each pod writes under this root.
+		CallsDir:  sc.logDir,
+		Runner:    runner,
+		Caps:      runner,
+		DoltProbe: newDoltProbe(sc.doltHost, sc.doltPort, doltProbeTimeout, sc.dial),
 	})
 	if err != nil {
 		return err
