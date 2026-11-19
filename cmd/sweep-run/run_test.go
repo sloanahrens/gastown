@@ -71,6 +71,7 @@ func newHarness(t *testing.T, clone func(repo, sha, work string) error, sweep fu
 		// The work directory is the case's own temp dir: removing it would take
 		// the rest of the case's files with it.
 		RemoveAll: func(string) error { return nil },
+		Lstat:     os.Lstat,
 		Environ:   []string{},
 		Now: func() time.Time {
 			calls++
@@ -445,6 +446,368 @@ func TestRunFailsWhenItCannotPrepareTheRun(t *testing.T) {
 			t.Errorf("stderr = %q, want it to name the failure", h.stderr.String())
 		}
 	})
+}
+
+// TestWorkDirUsesTheCacheClaim: the clone lands in <parent of
+// GOCACHE>/work/<rig>-<tiers>, so later sweeps of the same rig and tiers hit
+// the Go build cache, and a leftover clone is removed before the clone starts
+// (gt-1cmla6).
+func TestWorkDirUsesTheCacheClaim(t *testing.T) {
+	t.Parallel()
+	t.Run("a fixed directory named for the rig and tiers", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		h.deps.RemoveAll = os.RemoveAll
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git", "--tiers", "integration,race"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		want := filepath.Join(claim, "work", "gastown-integration+race")
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != want {
+			t.Errorf("clone ran in %q, want %q", h.cloneAt, want)
+		}
+		if strings.Contains(h.stderr.String(), "temporary work directory") {
+			t.Errorf("stderr = %q, want no fallback line", h.stderr.String())
+		}
+	})
+	t.Run("two tier sets get two directories", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		env := []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		first := newHarness(t, nil, nil)
+		first.deps.Environ = env
+		first.deps.RemoveAll = os.RemoveAll
+		if code := first.run("--rig", "gastown", "--sha", testSHA, "--out", first.out, "--repo", "/repo.git", "--tiers", "integration"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, first.stderr.String())
+		}
+		second := newHarness(t, nil, nil)
+		second.deps.Environ = env
+		second.deps.RemoveAll = os.RemoveAll
+		if code := second.run("--rig", "gastown", "--sha", testSHA, "--out", second.out, "--repo", "/repo.git", "--tiers", "race"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, second.stderr.String())
+		}
+		if len(first.cloneAt) != 3 || len(second.cloneAt) != 3 || first.cloneAt[2] == second.cloneAt[2] {
+			t.Errorf("the two tier sets shared a work directory: %q and %q", first.cloneAt, second.cloneAt)
+		}
+	})
+	t.Run("a leftover clone is removed before the clone starts", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		stale := filepath.Join(claim, "work", "gastown-integration", "stale")
+		if err := os.MkdirAll(filepath.Dir(stale), 0o755); err != nil {
+			t.Fatalf("making the leftover clone: %v", err)
+		}
+		if err := os.WriteFile(stale, []byte("old"), 0o644); err != nil {
+			t.Fatalf("writing the leftover file: %v", err)
+		}
+		h := newHarness(t, func(_, _, _ string) error {
+			if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the leftover clone is still there when the clone starts: %v", err)
+			}
+			return nil
+		}, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		h.deps.RemoveAll = os.RemoveAll
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git", "--tiers", "integration"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+	})
+}
+
+// TestWorkDirFallsBackToATempDirectory: every way the stable path can be
+// unusable falls back to a temporary directory with one stderr line and never
+// fails the run (gt-1cmla6).
+func TestWorkDirFallsBackToATempDirectory(t *testing.T) {
+	t.Parallel()
+	t.Run("GOCACHE is empty", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, nil)
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		for _, want := range []string{"GOCACHE is empty", "build-cache saving is lost"} {
+			if !strings.Contains(h.stderr.String(), want) {
+				t.Errorf("stderr = %q, want it to contain %q", h.stderr.String(), want)
+			}
+		}
+	})
+	t.Run("GOCACHE is not absolute", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=relative/gocache"}
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		if !strings.Contains(h.stderr.String(), "is not absolute") {
+			t.Errorf("stderr = %q, want it to name the unusable GOCACHE", h.stderr.String())
+		}
+	})
+	t.Run("the stable directory cannot be made", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		h.deps.MkdirAll = func(path string, perm fs.FileMode) error {
+			if strings.HasPrefix(path, claim) {
+				return errors.New("read-only file system")
+			}
+			return os.MkdirAll(path, perm)
+		}
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		if !strings.Contains(h.stderr.String(), "read-only file system") {
+			t.Errorf("stderr = %q, want it to name the failure", h.stderr.String())
+		}
+	})
+	t.Run("the leftover clone cannot be removed", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		h.deps.RemoveAll = func(string) error { return errors.New("device busy") }
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		if !strings.Contains(h.stderr.String(), "device busy") {
+			t.Errorf("stderr = %q, want it to name the removal that failed", h.stderr.String())
+		}
+	})
+	t.Run("the entry cannot be read", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		h.deps.Lstat = func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		if !strings.Contains(h.stderr.String(), "permission denied") {
+			t.Errorf("stderr = %q, want it to name the unreadable entry", h.stderr.String())
+		}
+	})
+	t.Run("the work directory is not a directory", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		work := filepath.Join(claim, "work", "gastown-integration")
+		if err := os.MkdirAll(filepath.Dir(work), 0o755); err != nil {
+			t.Fatalf("making the work parent: %v", err)
+		}
+		if err := os.WriteFile(work, []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("planting the file: %v", err)
+		}
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git", "--tiers", "integration"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		if !strings.Contains(h.stderr.String(), work+" is not a directory") {
+			t.Errorf("stderr = %q, want it to name the entry", h.stderr.String())
+		}
+	})
+	t.Run("the filesystem seams are not wired", func(t *testing.T) {
+		t.Parallel()
+		claim, fallback := t.TempDir(), t.TempDir()
+		d := Deps{
+			Environ:   []string{"GOCACHE=" + filepath.Join(claim, "gocache")},
+			MkdirTemp: func(string, string) (string, error) { return fallback, nil },
+		}
+		var stderr bytes.Buffer
+		work, err := workDirectory(d, options{Rig: "gastown", Tiers: []string{"integration"}}, &stderr)
+		if err != nil {
+			t.Fatalf("workDirectory: %v", err)
+		}
+		if work != fallback {
+			t.Errorf("work directory = %q, want the fallback %q", work, fallback)
+		}
+		if !strings.Contains(stderr.String(), "not wired") {
+			t.Errorf("stderr = %q, want it to name the unwired seams", stderr.String())
+		}
+	})
+	t.Run("the fallback seam is not wired either", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		d := Deps{Environ: []string{"GOCACHE=" + filepath.Join(claim, "gocache")}}
+		var stderr bytes.Buffer
+		if _, err := workDirectory(d, options{Rig: "gastown", Tiers: []string{"integration"}}, &stderr); err == nil {
+			t.Fatal("workDirectory returned no error with no way to make a work directory")
+		}
+		if !strings.Contains(stderr.String(), "not wired") {
+			t.Errorf("stderr = %q, want the fallback line", stderr.String())
+		}
+	})
+}
+
+// TestWorkDirFallsBackWhenTheClaimPathIsPlanted: a symlink at the work parent
+// or at the work directory could make a removal or the clone land outside the
+// claim, so the run falls back and leaves the link's target untouched
+// (gt-1cmla6).
+func TestWorkDirFallsBackWhenTheClaimPathIsPlanted(t *testing.T) {
+	t.Parallel()
+	t.Run("the work parent is a symlink", func(t *testing.T) {
+		t.Parallel()
+		claim, outside := t.TempDir(), t.TempDir()
+		sentinel := filepath.Join(outside, "keep")
+		if err := os.WriteFile(sentinel, []byte("x"), 0o644); err != nil {
+			t.Fatalf("writing the sentinel: %v", err)
+		}
+		workParent := filepath.Join(claim, "work")
+		if err := os.Symlink(outside, workParent); err != nil {
+			t.Fatalf("planting the symlink: %v", err)
+		}
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		var removed []string
+		h.deps.RemoveAll = func(path string) error { removed = append(removed, path); return nil }
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		for _, want := range []string{workParent + " is a symlink", "build-cache saving is lost"} {
+			if !strings.Contains(h.stderr.String(), want) {
+				t.Errorf("stderr = %q, want it to contain %q", h.stderr.String(), want)
+			}
+		}
+		if _, err := os.Stat(sentinel); err != nil {
+			t.Errorf("the sentinel outside the claim was touched: %v", err)
+		}
+		if entries, err := os.ReadDir(outside); err != nil || len(entries) != 1 {
+			t.Errorf("the link target holds %d entries, want only the sentinel (err %v)", len(entries), err)
+		}
+		for _, path := range removed {
+			if strings.HasPrefix(path, claim+string(filepath.Separator)) {
+				t.Errorf("RemoveAll ran on %q, built under the claim", path)
+			}
+		}
+	})
+	t.Run("the work directory is a symlink", func(t *testing.T) {
+		t.Parallel()
+		claim, outside := t.TempDir(), t.TempDir()
+		sentinel := filepath.Join(outside, "keep")
+		if err := os.WriteFile(sentinel, []byte("x"), 0o644); err != nil {
+			t.Fatalf("writing the sentinel: %v", err)
+		}
+		work := filepath.Join(claim, "work", "gastown-integration")
+		if err := os.MkdirAll(filepath.Dir(work), 0o755); err != nil {
+			t.Fatalf("making the work parent: %v", err)
+		}
+		if err := os.Symlink(outside, work); err != nil {
+			t.Fatalf("planting the symlink: %v", err)
+		}
+		h := newHarness(t, nil, nil)
+		h.deps.Environ = []string{"GOCACHE=" + filepath.Join(claim, "gocache")}
+		var removed []string
+		h.deps.RemoveAll = func(path string) error { removed = append(removed, path); return nil }
+		if code := h.run("--rig", "gastown", "--sha", testSHA, "--out", h.out, "--repo", "/repo.git", "--tiers", "integration"); code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, h.stderr.String())
+		}
+		if len(h.cloneAt) != 3 || h.cloneAt[2] != h.work {
+			t.Errorf("clone ran in %q, want the temporary directory %q", h.cloneAt, h.work)
+		}
+		for _, want := range []string{work + " is a symlink", "build-cache saving is lost"} {
+			if !strings.Contains(h.stderr.String(), want) {
+				t.Errorf("stderr = %q, want it to contain %q", h.stderr.String(), want)
+			}
+		}
+		if _, err := os.Stat(sentinel); err != nil {
+			t.Errorf("the sentinel outside the claim was touched: %v", err)
+		}
+		if entries, err := os.ReadDir(outside); err != nil || len(entries) != 1 {
+			t.Errorf("the link target holds %d entries, want only the sentinel (err %v)", len(entries), err)
+		}
+		for _, path := range removed {
+			if strings.HasPrefix(path, claim+string(filepath.Separator)) {
+				t.Errorf("RemoveAll ran on %q, built under the claim", path)
+			}
+		}
+	})
+}
+
+// TestWorkDirRefusesUnsafeNames: a rig or tier that is not one path element
+// never reaches a path under the claim, because a value such as "../x" would
+// make filepath.Join resolve outside it and the removal would delete there.
+// The rows call workDirectory directly: parseArgs already refuses these values
+// before a run starts, so this is the path builder's own guard (gt-1cmla6).
+func TestWorkDirRefusesUnsafeNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, field, value, rig string
+		tiers                   []string
+	}{
+		{"rig ../x", "rig", "../x", "../x", []string{"integration"}},
+		{"rig a/b", "rig", "a/b", "a/b", []string{"integration"}},
+		{"rig ..", "rig", "..", "..", []string{"integration"}},
+		{"rig empty", "rig", "", "", []string{"integration"}},
+		{"rig absolute", "rig", "/etc", "/etc", []string{"integration"}},
+		{"tier ../x", "tier", "../x", "gastown", []string{"../x"}},
+		{"tier a/b", "tier", "a/b", "gastown", []string{"a/b"}},
+		{"tier ..", "tier", "..", "gastown", []string{".."}},
+		{"tier empty", "tier", "", "gastown", []string{""}},
+		{"tier absolute", "tier", "/etc", "gastown", []string{"/etc"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			claim, outside, fallback := t.TempDir(), t.TempDir(), t.TempDir()
+			sentinel := filepath.Join(outside, "keep")
+			if err := os.WriteFile(sentinel, []byte("x"), 0o644); err != nil {
+				t.Fatalf("writing the sentinel: %v", err)
+			}
+			var removed []string
+			d := Deps{
+				Environ:   []string{"GOCACHE=" + filepath.Join(claim, "gocache")},
+				MkdirTemp: func(string, string) (string, error) { return fallback, nil },
+				MkdirAll:  os.MkdirAll,
+				RemoveAll: func(path string) error { removed = append(removed, path); return nil },
+				Lstat:     os.Lstat,
+			}
+			var stderr bytes.Buffer
+			work, err := workDirectory(d, options{Rig: tc.rig, Tiers: tc.tiers}, &stderr)
+			if err != nil {
+				t.Fatalf("workDirectory: %v", err)
+			}
+			if work != fallback {
+				t.Errorf("work directory = %q, want the fallback %q", work, fallback)
+			}
+			for _, want := range []string{tc.field + " " + fmt.Sprintf("%q", tc.value), "build-cache saving is lost"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+				}
+			}
+			if _, err := os.Stat(sentinel); err != nil {
+				t.Errorf("the sentinel outside the claim was touched: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(claim, "work")); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the claim gained %q: %v", filepath.Join(claim, "work"), err)
+			}
+			for _, path := range removed {
+				if strings.HasPrefix(path, claim+string(filepath.Separator)) {
+					t.Errorf("RemoveAll ran on %q, built under the claim", path)
+				}
+			}
+		})
+	}
 }
 
 // TestRunKeepsTheResultWhenCleanupFails: the work tree is scratch, so a

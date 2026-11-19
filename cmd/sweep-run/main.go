@@ -38,6 +38,7 @@ func depsWith(env []string) Deps {
 		MkdirTemp:   os.MkdirTemp,
 		MkdirAll:    os.MkdirAll,
 		RemoveAll:   os.RemoveAll,
+		Lstat:       os.Lstat,
 		Environ:     env,
 		Now:         time.Now,
 		Trim:        diskCacheTrim(sweepCacheRoot),
