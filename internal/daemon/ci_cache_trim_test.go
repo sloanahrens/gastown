@@ -809,6 +809,92 @@ func TestCICacheTrimReplyMustBeExact(t *testing.T) {
 	}
 }
 
+// TestCICacheTrimSelection: the list program's reply is one line per selected
+// file and then the three figures. Every file line is under the volume root and
+// there is one for each removed file; a reply that breaks either rule is refused
+// with the rule (and the line number for a bad line), never the file name.
+func TestCICacheTrimSelection(t *testing.T) {
+	t.Parallel()
+	const root = "/vol/ci-gocache/_data"
+	good, err := parseCICacheTrimSelection([]byte(
+		root+"/aa/one\n"+root+"/bb/two\nbefore_kib=9\nremoved=2\nafter_kib=9\n"), root)
+	if err != nil {
+		t.Fatalf("a well-formed selection does not parse: %v", err)
+	}
+	if good.beforeKiB != 9 || good.removed != 2 || good.afterKiB != 9 {
+		t.Errorf("parsed %+v, want before 9, removed 2, after 9", good)
+	}
+	if got, err := parseCICacheTrimSelection([]byte("before_kib=9\nremoved=0\nafter_kib=9\n"), root); err != nil || got.removed != 0 {
+		t.Errorf("a reply with no file lines = %+v, %v; want removed 0 and no error", got, err)
+	}
+	if _, err := parseCICacheTrimSelection([]byte("before_kib=9\nremoved=0\nafter_kib=9\n"), ""); err == nil {
+		t.Error("an empty root parsed without an error")
+	}
+
+	tests := []struct {
+		name string
+		out  string
+		want string // the rule the refusal must name
+		file string // file text that must never reach the error
+	}{
+		{
+			name: "a file line outside the root",
+			out:  root + "/aa/one\n/vol/ci-npm/_data/other\nbefore_kib=9\nremoved=2\nafter_kib=9\n",
+			want: "line 2",
+			file: "/vol/ci-npm/_data/other",
+		},
+		{
+			name: "a sibling of the root passes for a file under it",
+			out:  root + "2/other\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			want: "line 1",
+			file: root + "2/other",
+		},
+		{
+			name: "an empty file line",
+			out:  "\n" + root + "/aa/one\nbefore_kib=9\nremoved=2\nafter_kib=9\n",
+			want: "line 1 is empty",
+		},
+		{
+			name: "fewer file lines than removed",
+			out:  root + "/aa/one\nbefore_kib=9\nremoved=2\nafter_kib=9\n",
+			want: "removed=2",
+			file: root + "/aa/one",
+		},
+		{
+			name: "more file lines than removed",
+			out:  root + "/aa/one\n" + root + "/bb/two\nbefore_kib=9\nremoved=1\nafter_kib=9\n",
+			want: "removed=1",
+			file: root + "/aa/one",
+		},
+		{
+			name: "the three figure lines are not the three keys",
+			out:  root + "/aa/one\nbefore_kib=9\nremoved=1\nnoise\n",
+			want: "after_kib",
+			file: root + "/aa/one",
+		},
+		{
+			name: "fewer than three figure lines",
+			out:  "before_kib=9\nremoved=1\n",
+			want: "line(s)",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseCICacheTrimSelection([]byte(tc.out), root)
+			if err == nil {
+				t.Fatalf("parsed %+v without an error, want a refusal", got)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not carry %q", err, tc.want)
+			}
+			if tc.file != "" && strings.Contains(err.Error(), tc.file) {
+				t.Errorf("error %q names the file %q", err, tc.file)
+			}
+		})
+	}
+}
+
 // TestCICacheTrimVolumesRunInTableOrderAndOneFailureDoesNotStopTheNext: a pass
 // execs once per volume in table order. A failed exec on the first volume is
 // logged under that volume, still leaves the second to run, and fails the pass.

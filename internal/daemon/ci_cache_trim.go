@@ -408,6 +408,40 @@ func parseCICacheTrimReply(out []byte) (ciCacheTrimReply, error) {
 	return ciCacheTrimReply{beforeKiB: values[0], removed: values[1], afterKiB: values[2]}, nil
 }
 
+// parseCICacheTrimSelection reads the list program's reply: one line per selected
+// file, then the three figures parseCICacheTrimReply reads. Every file line must
+// be under root and there must be one for each removed file, so a line outside
+// the root or a count that differs from removed is refused rather than read as a
+// smaller selection. A refusal names the rule and, for a bad line, its number; it
+// never carries the file name, which is not logged.
+func parseCICacheTrimSelection(out []byte, root string) (ciCacheTrimReply, error) {
+	if root == "" {
+		return ciCacheTrimReply{}, errors.New("the selection needs a volume root: every file line is checked against it")
+	}
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(lines) < 3 {
+		return ciCacheTrimReply{}, fmt.Errorf("the reply has %d line(s), want a file line per removal and then before_kib, removed and after_kib", len(lines))
+	}
+	reply, err := parseCICacheTrimReply([]byte(strings.Join(lines[len(lines)-3:], "\n")))
+	if err != nil {
+		return ciCacheTrimReply{}, err
+	}
+	files := lines[:len(lines)-3]
+	under := root + "/"
+	for i, line := range files {
+		if line == "" {
+			return ciCacheTrimReply{}, fmt.Errorf("the reply's line %d is empty: every line before the three figures is a selected file", i+1)
+		}
+		if !strings.HasPrefix(line, under) {
+			return ciCacheTrimReply{}, fmt.Errorf("the reply's line %d is not a file under %s", i+1, root)
+		}
+	}
+	if int64(len(files)) != reply.removed {
+		return ciCacheTrimReply{}, fmt.Errorf("the reply has %d file line(s) but removed=%d", len(files), reply.removed)
+	}
+	return reply, nil
+}
+
 // ciCacheTrimSettings reads the CI trim's three settings from the patrol's
 // block, returning the default for each one that is empty. A value the patrol
 // cannot act on is an error naming its key.
