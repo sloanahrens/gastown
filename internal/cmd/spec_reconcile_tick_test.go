@@ -55,8 +55,9 @@ func TestSpecTickNotesAnUnreadableSandboxListing(t *testing.T) {
 	t.Parallel()
 	f := specGoldenTown()
 	env := f.env()
+	failing := poolReconcileReads{Running: func() ([]string, error) { return nil, errors.New("gateway down") }}
 	env.Roster = func() (specRoster, error) {
-		return specRoster{Reconcile: poolReconcileNotes{Unavailable: true}}, nil
+		return specRoster{Reconcile: failing.notes(nil)}, nil
 	}
 
 	r := runSpecDispatchCycle(env)
