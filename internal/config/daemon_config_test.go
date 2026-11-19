@@ -1472,6 +1472,88 @@ func TestDiskMaintenanceCIEnginePruneSettings(t *testing.T) {
 	})
 }
 
+// TestDiskMaintenanceSweepRunsPruneSettings: the three sweep-runs prune settings
+// read their defaults when empty, read an override, and refuse a value the patrol
+// cannot use, each error naming its key.
+func TestDiskMaintenanceSweepRunsPruneSettings(t *testing.T) {
+	t.Parallel()
+	t.Run("defaults are 6h, keep 30, min age 72h", func(t *testing.T) {
+		t.Parallel()
+		c := DiskMaintenanceConfig{}
+		every, err := c.SweepRunsPruneEvery()
+		if err != nil || every.String() != "6h0m0s" {
+			t.Fatalf("empty interval = %v, %v; want 6h0m0s", every, err)
+		}
+		keep, err := c.SweepRunsKeepCount()
+		if err != nil || keep != 30 {
+			t.Fatalf("empty keep = %v, %v; want 30", keep, err)
+		}
+		age, err := c.SweepRunsMinAgeDuration()
+		if err != nil || age.String() != "72h0m0s" {
+			t.Fatalf("empty min age = %v, %v; want 72h0m0s", age, err)
+		}
+	})
+	t.Run("overrides are read", func(t *testing.T) {
+		t.Parallel()
+		keep := 5
+		c := DiskMaintenanceConfig{SweepRunsPruneInterval: "2h", SweepRunsKeep: &keep, SweepRunsMinAge: "24h"}
+		if every, err := c.SweepRunsPruneEvery(); err != nil || every.String() != "2h0m0s" {
+			t.Errorf("interval 2h = %v, %v", every, err)
+		}
+		if got, err := c.SweepRunsKeepCount(); err != nil || got != 5 {
+			t.Errorf("keep 5 = %v, %v", got, err)
+		}
+		if age, err := c.SweepRunsMinAgeDuration(); err != nil || age.String() != "24h0m0s" {
+			t.Errorf("min age 24h = %v, %v", age, err)
+		}
+	})
+	t.Run("invalid values are refused naming their key", func(t *testing.T) {
+		t.Parallel()
+		zero := 0
+		for name, tc := range map[string]struct {
+			cfg DiskMaintenanceConfig
+			key string
+			run func(DiskMaintenanceConfig) error
+		}{
+			"interval zero": {DiskMaintenanceConfig{SweepRunsPruneInterval: "0s"}, "patrols.disk_maintenance.sweep_runs_prune_interval",
+				func(c DiskMaintenanceConfig) error { _, err := c.SweepRunsPruneEvery(); return err }},
+			"interval hourly": {DiskMaintenanceConfig{SweepRunsPruneInterval: "hourly"}, "patrols.disk_maintenance.sweep_runs_prune_interval",
+				func(c DiskMaintenanceConfig) error { _, err := c.SweepRunsPruneEvery(); return err }},
+			"keep zero": {DiskMaintenanceConfig{SweepRunsKeep: &zero}, "patrols.disk_maintenance.sweep_runs_keep",
+				func(c DiskMaintenanceConfig) error { _, err := c.SweepRunsKeepCount(); return err }},
+			"min age zero": {DiskMaintenanceConfig{SweepRunsMinAge: "0h"}, "patrols.disk_maintenance.sweep_runs_min_age",
+				func(c DiskMaintenanceConfig) error { _, err := c.SweepRunsMinAgeDuration(); return err }},
+		} {
+			err := tc.run(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.key) {
+				t.Errorf("%s: error %v, want one naming %s", name, err, tc.key)
+			}
+		}
+	})
+	t.Run("the patrol block refuses a bad value at decode", func(t *testing.T) {
+		t.Parallel()
+		for name, doc := range map[string]string{
+			"interval zero": `{"disk_maintenance": {"sweep_runs_prune_interval": "0s"}}`,
+			"keep zero":     `{"disk_maintenance": {"sweep_runs_keep": 0}}`,
+			"min age zero":  `{"disk_maintenance": {"sweep_runs_min_age": "0h"}}`,
+		} {
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Errorf("%s decoded without an error: %+v", name, p.DiskMaintenance)
+			}
+		}
+		var p PatrolsConfig
+		doc := `{"disk_maintenance": {"sweep_runs_prune_interval": "3h", "sweep_runs_keep": 12, "sweep_runs_min_age": "48h"}}`
+		if err := json.Unmarshal([]byte(doc), &p); err != nil {
+			t.Fatalf("valid sweep_runs settings do not decode: %v", err)
+		}
+		if p.DiskMaintenance.SweepRunsPruneInterval != "3h" || p.DiskMaintenance.SweepRunsKeep == nil ||
+			*p.DiskMaintenance.SweepRunsKeep != 12 || p.DiskMaintenance.SweepRunsMinAge != "48h" {
+			t.Errorf("sweep_runs settings decoded as %+v", p.DiskMaintenance)
+		}
+	})
+}
+
 // TestDiskMaintenanceTargetEvery: a cadence is a Go duration of at least a
 // minute, and an empty one keeps the daily window.
 func TestDiskMaintenanceTargetEvery(t *testing.T) {

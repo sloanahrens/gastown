@@ -314,6 +314,26 @@ the `dind` container and the same `dry_run` default as the cache trim above.
   an earlier one did, and the size after is still read; the run then fails once,
   with one log line per failed kind, and the next run plans again.
 
+## Sweep run directories
+
+The tier sweep writes one output directory per run under
+`.runtime/sweep-runs/<rig>` of the town root. The patrol prunes them on its own
+interval (`sweep_runs_prune_interval`, default `6h`), in any window and under the
+same `dry_run` default as the targets above.
+
+- The settings sit under `patrols.disk_maintenance`: `sweep_runs_prune_interval`
+  (default `6h`), `sweep_runs_keep` (default `30`, the newest run directories
+  kept per rig whatever their age) and `sweep_runs_min_age` (default `72h`). An
+  empty setting is the default. A zero interval or age, and a keep below one, are
+  refused, and each error names its setting.
+- A dry run logs one line: `would remove N directories, X GB, keeping M`, followed
+  by the directories it would remove. An apply removes exactly those directories
+  and logs the same counts as removed.
+- Only a real directory directly under a rig directory is ever removed. A file, a
+  symlink, or a directory the sweep did not write is never named, and each listed
+  directory is checked again before it is removed. A listing or size failure
+  removes nothing; a remove failure stops the run and logs the directory's name.
+
 ## Rollback
 
 A wrong delete costs a rebuild, not data: any per-commit image is rebuilt from

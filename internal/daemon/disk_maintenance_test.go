@@ -92,12 +92,18 @@ func diskMaintTestDaemon(t *testing.T) (*Daemon, *bytes.Buffer, *diskMaintFakes)
 	t.Helper()
 	var buf bytes.Buffer
 	f := &diskMaintFakes{target: &diskMaintFakeTarget{}, quiet: true, notify: notifyfake.New()}
+	patrol := diskMaintEnabled("", "")
+	// The sweep-runs prune runs on the patrol too. Its interval is held past these
+	// tests' span, with its last run recorded at the start, as the engine prune is
+	// in the CI cache fixtures, so its pass does not count among theirs (gt-hhxczt).
+	patrol.Patrols.DiskMaintenance.SweepRunsPruneInterval = "1000h"
 	d := &Daemon{
 		config:       &Config{TownRoot: t.TempDir()},
 		logger:       log.New(&buf, "", 0),
-		patrolConfig: diskMaintEnabled("", ""),
+		patrolConfig: patrol,
 		notifier:     f.notify,
 	}
+	d.diskMaintSchedule.record(sweepRunsPruneName, diskMaintNow)
 	d.maint.quiet = func(*Daemon) (bool, string) { return f.quiet, f.quietWhy }
 	d.diskMaint.now = func() time.Time { return diskMaintNow }
 	d.diskMaint.getenv = func(key string) string { return f.env[key] }
