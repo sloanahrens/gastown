@@ -42,6 +42,7 @@ func scripted(rs ...reading) (func(context.Context) (string, int, bool, error), 
 }
 
 func TestWaitLandingIdleReturnsWhenRollPauseClears(t *testing.T) {
+	t.Parallel()
 	read, _ := scripted(
 		reading{pause: "", passes: 2, known: true},
 		reading{pause: "someone else", passes: 0, known: true},
@@ -59,6 +60,7 @@ func TestWaitLandingIdleReturnsWhenRollPauseClears(t *testing.T) {
 }
 
 func TestWaitLandingIdlePrintsEachChangeOnce(t *testing.T) {
+	t.Parallel()
 	read, _ := scripted(
 		reading{pause: RollPause, passes: 2, known: true},
 		reading{pause: RollPause, passes: 2, known: true},
@@ -80,6 +82,7 @@ landing: pause "runner roll", 0 passes in flight
 }
 
 func TestWaitLandingTimeoutNamesPasses(t *testing.T) {
+	t.Parallel()
 	read, _ := scripted(reading{pause: RollPause, passes: 3, known: true})
 	clock := &fakeClock{}
 	start := clock.Now()
@@ -97,6 +100,7 @@ func TestWaitLandingTimeoutNamesPasses(t *testing.T) {
 }
 
 func TestWaitLandingUnknownPassesIsError(t *testing.T) {
+	t.Parallel()
 	// The roll's own pause with zero passes would read as idle if the unknown
 	// flag were ignored, so the reading below must be refused, not accepted.
 	read, calls := scripted(reading{pause: RollPause, passes: 0, known: false})
@@ -113,6 +117,7 @@ func TestWaitLandingUnknownPassesIsError(t *testing.T) {
 }
 
 func TestWaitLandingReadErrorIsReturned(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("health file torn")
 	read, _ := scripted(reading{err: boom})
 	err := WaitLandingIdle(context.Background(), read, &fakeClock{}, time.Minute, &bytes.Buffer{})
@@ -122,6 +127,7 @@ func TestWaitLandingReadErrorIsReturned(t *testing.T) {
 }
 
 func TestWaitLandingCancelDuringReadIsNotIdle(t *testing.T) {
+	t.Parallel()
 	// The read is canceled after it returns an idle reading: that reading was
 	// taken while the wait was being stopped, so it must not decide the wait.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -136,6 +142,7 @@ func TestWaitLandingCancelDuringReadIsNotIdle(t *testing.T) {
 }
 
 func TestWaitLandingCanceledContextStops(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	read, calls := scripted(reading{pause: RollPause, passes: 0, known: true})
