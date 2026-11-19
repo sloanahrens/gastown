@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -77,7 +78,7 @@ func newFollowupFixture(t *testing.T, score float64, findings []Finding) *follow
 	reviews := reviewsFileIn(t)
 	return &followupFixture{
 		t: t, bd: bd, fake: fake, repo: repo, reviews: reviews,
-		lander: &Lander{Beads: bd, Followups: fake, Reviews: reviews},
+		lander: &Lander{Beads: bd, Followups: fake, Reviews: reviews, sleep: func(time.Duration) {}},
 		work:   Work{BeadID: "gt-abc", Rig: "gastown", Branch: fixtureBranch, Head: "aaa1111", Target: "main"},
 		result: Result{LandedCommit: "0123456789abcdef0123456789abcdef01234567",
 			Verdict: Verdict{Verdict: VerdictApprove, Score: score, Findings: findings}},

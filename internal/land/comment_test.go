@@ -309,6 +309,7 @@ func TestLandSurvivesAVerdictCommentFailure(t *testing.T) {
 			f := newLandFixture(t)
 			l := f.lander()
 			l.Beads = tc.beads(f.bd)
+			l.sleep = func(time.Duration) {}
 			var log strings.Builder
 			l.Out = &log
 			res, err := l.Land(context.Background(), f.work)
@@ -336,6 +337,7 @@ type commentBeads struct {
 	failComments bool
 	failComment  bool
 	failShow     bool
+	flaky        int
 }
 
 func (b *commentBeads) Show(id string) (*beads.Issue, error) {
@@ -353,8 +355,70 @@ func (b *commentBeads) Comments(id string) ([]beads.Comment, error) {
 }
 
 func (b *commentBeads) AddComment(id, text string) error {
+	if b.flaky > 0 {
+		b.flaky--
+		return errors.New("dolt: connection refused")
+	}
 	if b.failComment {
 		return errors.New("database is locked")
 	}
 	return b.Fake.AddComment(id, text)
+}
+
+// TestCommentVerdictRetries: a comment that fails twice is written; one that
+// fails three times is left off and logged (gt-y82k93).
+func TestCommentVerdictRetries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		fails int
+		want  int
+		alarm bool
+	}{
+		{"a comment that fails twice is written", 2, 1, false},
+		{"a comment that fails three times is logged", 3, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l := f.lander()
+			l.Beads = &commentBeads{Fake: f.bd, flaky: tc.fails}
+			l.sleep = func(time.Duration) {}
+			var log strings.Builder
+			l.Out = &log
+			l.commentVerdict(f.work, Verdict{Verdict: VerdictApprove, Score: 0.91, Version: "v1"}, time.Now(), time.Now())
+			if got := len(f.beadComments()); got != tc.want {
+				t.Errorf("%d comment(s) on the bead; want %d", got, tc.want)
+			}
+			if got := strings.Contains(log.String(), "could not comment the om verdict"); got != tc.alarm {
+				t.Errorf("logged %q; want the alarm %v", log.String(), tc.alarm)
+			}
+		})
+	}
+}
+
+// hangingCommentBeads never answers a comment write until it is released.
+type hangingCommentBeads struct {
+	*beadsfake.Fake
+	release <-chan struct{}
+}
+
+func (b *hangingCommentBeads) AddComment(string, string) error { <-b.release; return nil }
+
+// TestCommentVerdictTimeoutLogs: a write that never answers logs 'did not
+// finish' and returns, so the landing is unaffected (gt-y82k93).
+func TestCommentVerdictTimeoutLogs(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	l := f.lander()
+	l.Beads = &hangingCommentBeads{Fake: f.bd, release: release}
+	l.auditTimeout = 10 * time.Millisecond
+	var out strings.Builder
+	l.Out = &out
+	l.commentVerdict(f.work, Verdict{Verdict: VerdictApprove}, time.Time{}, time.Time{})
+	if want := "did not finish in 10ms; the landing is unaffected"; !strings.Contains(out.String(), want) {
+		t.Errorf("log = %q, want %q", out.String(), want)
+	}
 }

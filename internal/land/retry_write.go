@@ -13,11 +13,18 @@ import (
 var retryWaits = []time.Duration{2 * time.Second, 5 * time.Second}
 
 // retryWrite runs op and reruns it after each wait while it fails, returning
-// the last error. A missing bead or a canceled ctx stops it at once.
+// the last error. A missing bead, a canceled ctx, or a wait past ctx's deadline
+// stops it; a nil sleep is realWait (gt-hounmt, gt-y82k93).
 func retryWrite(ctx context.Context, sleep func(time.Duration), op func() error) error {
+	if sleep == nil {
+		sleep = realWait
+	}
 	err := op()
 	for _, wait := range retryWaits {
 		if err == nil || errors.Is(err, beads.ErrNotFound) || ctx.Err() != nil {
+			return err
+		}
+		if d, ok := ctx.Deadline(); ok && time.Until(d) <= wait {
 			return err
 		}
 		sleep(wait)

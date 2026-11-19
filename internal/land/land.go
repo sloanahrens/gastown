@@ -2462,11 +2462,7 @@ func (l *Lander) reject(ctx context.Context, issue *beads.Issue, w Work, rej *Re
 	if !repeat {
 		// A transient bd failure is retried before the note is reported as not
 		// written (gt-hounmt).
-		wait := l.sleep
-		if wait == nil {
-			wait = realWait
-		}
-		if err := retryWrite(ctx, wait, func() error {
+		if err := retryWrite(ctx, l.sleep, func() error {
 			return l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note))
 		}); err != nil {
 			rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)

@@ -1,6 +1,7 @@
 package land
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -25,8 +26,11 @@ const commentTimeout = 10 * time.Second
 func (l *Lander) commentVerdict(w Work, v Verdict, start, end time.Time) {
 	text := verdictCommentText(v, w.CandidateHead, start, end)
 	head, prefix := verdictCommentHead(w.CandidateHead), "om "+verdictCommentWord(v)+" "
+	budget := l.acceptedRiskTimeout()
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
 	done := make(chan commentOutcome, 1)
-	go func() { done <- l.writeComment(w.BeadID, text, head, prefix) }()
+	go func() { done <- l.writeComment(ctx, w.BeadID, text, head, prefix) }()
 	select {
 	case out := <-done:
 		switch {
@@ -37,8 +41,8 @@ func (l *Lander) commentVerdict(w Work, v Verdict, start, end time.Time) {
 		case out.readErr != nil:
 			l.logf("%s: could not read the bead's comments to check for this landing's om verdict (%v); the comment was written anyway", w.BeadID, out.readErr)
 		}
-	case <-time.After(commentTimeout):
-		l.logf("%s: commenting the om verdict on the bead did not finish in %s; the landing is unaffected", w.BeadID, commentTimeout)
+	case <-ctx.Done():
+		l.logf("%s: commenting the om verdict on the bead did not finish in %s; the landing is unaffected", w.BeadID, budget)
 	}
 }
 
@@ -54,13 +58,16 @@ type commentOutcome struct {
 // attempt's verdict, named by the head marker and the verdict the text opens
 // with. The read is a duplicate guard rather than a precondition, so a bead
 // whose comments cannot be read still gets the comment; the worst that costs
-// is a second line on a retry.
-func (l *Lander) writeComment(id, text, head, prefix string) commentOutcome {
+// is a second line on a retry. The write retries a transient bd failure within
+// ctx, which bounds every try and wait (gt-y82k93).
+func (l *Lander) writeComment(ctx context.Context, id, text, head, prefix string) commentOutcome {
 	comments, readErr := l.Beads.Comments(id)
 	if readErr == nil && verdictCommented(comments, head, prefix) {
 		return commentOutcome{}
 	}
-	if err := l.Beads.AddComment(id, text); err != nil {
+	if err := retryWrite(ctx, l.sleep, func() error {
+		return l.Beads.AddComment(id, text)
+	}); err != nil {
 		return commentOutcome{readErr: readErr, writeErr: err}
 	}
 	return commentOutcome{wrote: true, readErr: readErr}
