@@ -1179,19 +1179,20 @@ func TestCallLogArgvParse(t *testing.T) {
 		{
 			// bd's tree records no arity for a command flag, so the scanner
 			// cannot tell --title's value from an operand: an id-shaped token
-			// stays, free text does not.
-			name:  "an id-shaped value of a command flag is never logged",
+			// is logged and free text is not. An extra id-shaped value is a
+			// harmless over-log; a dropped id is the bug (gt-37qy44).
+			name:  "an id-shaped value of a command flag is logged",
 			argv:  []string{"create", "--title", "gt-fake", "refactor-sling"},
 			verb:  "create",
 			flags: []string{"--title"},
-			beads: []string{},
+			beads: []string{"gt-fake"},
 		},
 		{
-			name:  "an id after a command flag is not kept: the flag may take it as its value",
+			name:  "an id after an unknown command flag is logged",
 			argv:  []string{"list", "--ready", "gt-abc"},
 			verb:  "list",
 			flags: []string{"--ready"},
-			beads: []string{},
+			beads: []string{"gt-abc"},
 		},
 		{
 			name:  "clustered short token logs its first name only",
@@ -1319,30 +1320,66 @@ func waitCtx(t *testing.T) context.Context {
 	return ctx
 }
 
-// TestCallLogBeadsOnlyBeforeFlags: a bead-shaped token after a command flag may
-// be that flag's value (--parent gt-b), and a value is never logged, so only
-// operands that precede every flag are read as bead ids.
-func TestCallLogBeadsOnlyBeforeFlags(t *testing.T) {
+// TestCallLogBeadsAnyPosition: a bead id is logged wherever it sits in argv,
+// before or after a flag. The scanner decides which tokens are operands, so an
+// id-shaped value of an unknown command flag (--reason gt-b) is logged too: a
+// dropped id is the bug, an extra id-shaped value a harmless over-log. The line
+// is read back through Log, so the call site that builds it is tested.
+func TestCallLogBeadsAnyPosition(t *testing.T) {
+	t.Parallel()
+	tooLong := "gt-" + strings.Repeat("a", 100)
+	for _, tc := range []struct {
+		name string
+		argv []string
+		want []string
+	}{
+		{"ids after a value flag are logged", []string{"close", "--reason", "fixed", "gt-abc1", "gt-abc2"}, []string{"gt-abc1", "gt-abc2"}},
+		{"an id and a later id-shaped value are both logged", []string{"close", "gt-abc1", "--reason", "gt-abc2"}, []string{"gt-abc1", "gt-abc2"}},
+		{"an id-shaped value before an id is logged too", []string{"close", "--reason", "gt-abc2", "gt-abc1"}, []string{"gt-abc2", "gt-abc1"}},
+		{"an id after an unknown command flag is logged", []string{"close", "--force", "gt-abc1"}, []string{"gt-abc1"}},
+		{"ids after -- are logged", []string{"close", "--", "gt-abc1", "gt-abc2"}, []string{"gt-abc1", "gt-abc2"}},
+		{"a known root flag's value is not logged, the id after it is", []string{"--db", "gt-bbbb", "show", "gt-aaaa"}, []string{"gt-aaaa"}},
+		{"a boolean root flag keeps the id after it", []string{"show", "--json", "gt-abc1"}, []string{"gt-abc1"}},
+		{"an unknown prefix is not logged", []string{"close", "gt-abc1", "zz-abc2"}, []string{"gt-abc1"}},
+		{"a suffix past the bound is not logged", []string{"close", "gt-abc1", tooLong}, []string{"gt-abc1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var line []byte
+			l, err := newCallLog(testOptions(t), func(b []byte) error {
+				line = b
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("newCallLog: %v", err)
+			}
+			l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: tc.argv})
+			if err := l.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			got := decodeLine(t, string(line))["beads"]
+			if !reflect.DeepEqual(got, asAny(tc.want)) {
+				t.Errorf("argv %q logged beads %v, want %v", tc.argv, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCallLogBeadsCapAfterFlag: ids after a flag count against maxLoggedItems
+// the way ids before one do.
+func TestCallLogBeadsCapAfterFlag(t *testing.T) {
 	t.Parallel()
 	l, err := newCallLog(testOptions(t), func([]byte) error { return nil })
 	if err != nil {
 		t.Fatalf("newCallLog: %v", err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	for _, tc := range []struct {
-		name string
-		argv []string
-		want []string
-	}{
-		{"id before a command flag with an id-shaped value", []string{"update", "gt-aaaa", "--parent", "gt-bbbb"}, []string{"gt-aaaa"}},
-		{"id after a command flag is not read", []string{"update", "--parent", "gt-bbbb", "gt-aaaa"}, []string{}},
-		{"several ids before any flag", []string{"close", "gt-aaaa", "gt-cccc"}, []string{"gt-aaaa", "gt-cccc"}},
-		{"no flags at all", []string{"show", "gt-aaaa"}, []string{"gt-aaaa"}},
-	} {
-		got := l.parseArgv(tc.argv).beads
-		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("%s: beads = %v, want %v", tc.name, got, tc.want)
-		}
+	argv := []string{"close", "--reason", "fixed"}
+	for i := 0; i < 3*maxLoggedItems; i++ {
+		argv = append(argv, "gt-aaaa")
+	}
+	if got := len(l.parseArgv(argv).beads); got != maxLoggedItems {
+		t.Errorf("beads logged = %d, want %d", got, maxLoggedItems)
 	}
 }
 

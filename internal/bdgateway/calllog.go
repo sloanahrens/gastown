@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,8 +109,11 @@ type CallRecord struct {
 	// Actor is the acting agent the caller named, BEADS_ACTOR or BD_ACTOR, or
 	// empty when it named none.
 	Actor string
-	// Argv is bd's arguments. Its verb, flag names and bead ids are logged; a
-	// flag's value and every other operand are data and stay out.
+	// Argv is bd's arguments. Its verb, flag names and the bead ids among the
+	// scanner's operands are logged; every other operand, and a value the scan
+	// consumes for a known root flag, is data and stays out. An id-shaped value
+	// of an unknown command flag is logged as an operand, since the scan cannot
+	// tell it from one.
 	Argv []string
 	// Write reports whether the authorized verb may change beads; a read verb
 	// leaves it false.
@@ -551,12 +553,19 @@ type logParts struct {
 	beads []string
 }
 
-// parseArgv reads argv with the policy's own scanner, so the log and the policy
-// can never disagree about which token is a flag, a flag's value or an operand.
-// It keeps the first command word as the verb, each flag's name (never a
-// value), and the operands that are bead ids. Operands that are not bead ids —
-// titles, descriptions, comment bodies — are never kept, and neither is an
-// id-shaped token after a flag, which may be that flag's value.
+// parseArgv reads argv with the policy's own scanner: the scan decides the
+// verb, the flags and which tokens are operands, and the log adds only the
+// bead-id filter and the per-field bounds on top. It keeps the first command
+// word as the verb, each flag's name (never a value), and the operands that are
+// bead ids in any position (gt-37qy44). Operands that are not bead ids — titles,
+// descriptions, comment bodies — are never kept.
+//
+// An id-shaped value of an unknown command flag is an operand to the scanner,
+// which cannot tell `--reason gt-abc` from `--force gt-abc` once the verb is
+// settled, so the log keeps it: a dropped id is the bug (gt-37qy44) and an
+// extra id-shaped value is a harmless over-log. Do not add a value-skipping
+// rule back here; a known value-taking root flag already takes its value inside
+// the scan, so that value is never an operand.
 //
 // An argv the scanner cannot place is counted under unparsedVerb, so an
 // unreadable call is visible rather than blank (gt-itjuwu review). It keeps no
@@ -579,28 +588,25 @@ func (l *CallLog) parseArgv(argv []string) logParts {
 		parts.verb = scan.words[0]
 	}
 	parts.flags = loggedFlags(scan.flags)
-	// Only an operand that precedes every flag is positional for certain: after
-	// a command flag it may be that flag's value, and a value is never logged.
-	positional := argv
-	for i, arg := range argv {
-		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
-			continue
-		}
-		if kind, known, attached := rootFlag(arg); known && !attached && kind != flagValue {
-			continue // a boolean root flag takes no value, so the next token is not its value
-		}
-		positional = argv[:i]
-		break
-	}
-	for _, token := range positional {
-		if len(parts.beads) >= maxLoggedItems {
+	parts.beads = beadOperands(scan.operands, l.prefixes)
+	return parts
+}
+
+// beadOperands returns the bead ids among the scanner's operands, in order, up
+// to maxLoggedItems. The scanner alone decides which tokens are operands,
+// including the ones after "--"; the log adds only the prefix and id-form
+// filter, so the log and the policy cannot disagree about a token's place.
+func beadOperands(operands []string, prefixes map[string]bool) []string {
+	ids := []string{}
+	for _, token := range operands {
+		if len(ids) >= maxLoggedItems {
 			break
 		}
-		if isBeadID(token, l.prefixes) && slices.Contains(scan.operands, token) {
-			parts.beads = append(parts.beads, token)
+		if isBeadID(token, prefixes) {
+			ids = append(ids, token)
 		}
 	}
-	return parts
+	return ids
 }
 
 // loggedFlags is the spelling of each flag name a line may keep, up to
