@@ -4,14 +4,21 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/outbox"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // outboxPollTestHangGuard bounds how long a test waits for a call that must
@@ -206,9 +213,9 @@ func TestNoBeadAccessOutboxPollRefusesWhileATickRuns(t *testing.T) {
 	}
 }
 
-// TestNoBeadAccessOutboxPollTickWithoutASeamCompletes: the production skeleton
-// has no seam yet, and its tick is a no-op that still ends and frees the guard
-// (gt-0hkj0c).
+// TestNoBeadAccessOutboxPollTickWithoutASeamCompletes: a daemon with no tick
+// seam runs the live poll, which refuses while no filing seam is wired; the
+// refusal still ends the tick and frees the guard (gt-0hkj0c, gt-nvii5d).
 func TestNoBeadAccessOutboxPollTickWithoutASeamCompletes(t *testing.T) {
 	t.Parallel()
 	d := outboxPollTestDaemon(t, true, io.Discard)
@@ -217,7 +224,25 @@ func TestNoBeadAccessOutboxPollTickWithoutASeamCompletes(t *testing.T) {
 	d.outboxPollCycles.Wait()
 
 	if d.outboxPollRunning.Load() {
-		t.Error("the no-op tick left the single-flight guard held")
+		t.Error("the refused tick left the single-flight guard held")
+	}
+}
+
+// TestNoBeadAccessOutboxPollUnwiredFilingSeamLogsOnce: until the filing seam
+// is wired, every tick of the live poll refuses; the daemon says so once
+// rather than once per interval (gt-nvii5d).
+func TestNoBeadAccessOutboxPollUnwiredFilingSeamLogsOnce(t *testing.T) {
+	t.Parallel()
+	var logged bytes.Buffer
+	d := outboxPollTestDaemon(t, true, &logged)
+
+	for range 2 {
+		d.startOutboxPollTick()
+		d.outboxPollCycles.Wait()
+	}
+
+	if got := strings.Count(logged.String(), "no filing seam is wired"); got != 1 {
+		t.Errorf("the unwired seam was logged %d times over two ticks, want once: %q", got, logged.String())
 	}
 }
 
@@ -278,3 +303,494 @@ func TestNoBeadAccessOutboxPollStopLeavesALateTick(t *testing.T) {
 		t.Errorf("the stop's log is %q, want the late tick named", logged.String())
 	}
 }
+
+// fakeOutboxPollExec is the read seam a test fills: it answers each seat's read
+// and records the calls it was handed, so a test can see which seats a tick
+// read and what it asked them for.
+type fakeOutboxPollExec struct {
+	reads     map[string]string
+	errs      map[string]error
+	calls     []string
+	argvs     [][]string
+	deadlines []time.Time
+}
+
+func (f *fakeOutboxPollExec) Exec(ctx context.Context, name string, env map[string]string, argv []string, stdin []byte) ([]byte, []byte, error) {
+	f.calls = append(f.calls, name)
+	f.argvs = append(f.argvs, append([]string(nil), argv...))
+	deadline, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, deadline)
+	if len(env) != 0 || len(stdin) != 0 {
+		return nil, nil, errors.New("the read handed the exec env or stdin")
+	}
+	if err := f.errs[name]; err != nil {
+		return nil, nil, err
+	}
+	return []byte(f.reads[name]), nil, nil
+}
+
+// fakeOutboxPollFile is the filing seam a test fills: it records each request
+// a tick handed it.
+type fakeOutboxPollFile struct {
+	requests []outboxPollRequest
+	err      error
+}
+
+func (f *fakeOutboxPollFile) file(_ context.Context, req outboxPollRequest) error {
+	f.requests = append(f.requests, req)
+	return f.err
+}
+
+// outboxPollTestPoll returns a poll over town that reads through exec and
+// files through file, logging into logged.
+func outboxPollTestPoll(t *testing.T, town string, exec outboxPollExec, file outboxPollFileFunc, logged io.Writer) *outboxPoll {
+	t.Helper()
+	return newOutboxPoll(town, exec, file, log.New(logged, "", 0), time.Second)
+}
+
+// outboxPollSeatRecord writes the sandbox record of one running seat: rig
+// gastown, the polecat the seat is named after, and the bead it was given.
+func outboxPollSeatRecord(t *testing.T, townRoot, seat, bead string) {
+	t.Helper()
+	rec := session.SandboxRecord{
+		Session:  seat,
+		Rig:      "gastown",
+		Polecat:  strings.TrimPrefix(seat, "sbx-"),
+		Profile:  "polecat-default",
+		WorkBead: bead,
+	}
+	if err := session.WriteSandboxRecord(townRoot, rec); err != nil {
+		t.Fatalf("writing the record of %s: %v", seat, err)
+	}
+}
+
+// outboxPollRawRecord writes a registry record a test builds by hand, for the
+// records the record writer refuses to make.
+func outboxPollRawRecord(t *testing.T, townRoot, fileName, body string) {
+	t.Helper()
+	dir := session.SandboxRegistryDir(townRoot)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("creating the sandbox registry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, fileName+".json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("writing the record of %s: %v", fileName, err)
+	}
+}
+
+// outboxPollReadText is the text outboxPollReadArgv prints for one seat's
+// outbox: a marker per file, each present file's bytes straight after its
+// marker, and the end marker. It formats the markers from the same constants
+// the read script embeds, so the test cannot agree with the parser on a shape
+// the sandbox is never asked for. A nil file is one the seat did not write.
+func outboxPollReadText(result, notes *string) string {
+	var b strings.Builder
+	for _, f := range []struct {
+		name    string
+		content *string
+	}{{outbox.ResultFile, result}, {outbox.NotesFile, notes}} {
+		if f.content == nil {
+			fmt.Fprintf(&b, outboxPollAbsentFormat, f.name)
+			continue
+		}
+		fmt.Fprintf(&b, outboxPollPresentFormat, f.name, strconv.Itoa(len(*f.content)))
+		b.WriteString(*f.content)
+	}
+	b.WriteString(outboxPollEndMarker + "\n")
+	return b.String()
+}
+
+// TestNoBeadAccessOutboxPollReadArgvBoundsEachFile: the command the sandbox is
+// asked to run caps the bytes it prints for each file, so a seat that writes a
+// huge outbox cannot make the exec buffer it (gt-nvii5d).
+func TestNoBeadAccessOutboxPollReadArgvBoundsEachFile(t *testing.T) {
+	t.Parallel()
+	argv := outboxPollReadArgv()
+	if len(argv) != 3 || argv[0] != "sh" || argv[1] != "-c" {
+		t.Fatalf("the read argv is %v, want sh -c <script>", argv)
+	}
+	if want := "head -c " + strconv.Itoa(outboxPollFileCap+1); !strings.Contains(argv[2], want) {
+		t.Errorf("the read script is %q, want it to print at most %s bytes of each file", argv[2], want)
+	}
+}
+
+// TestNoBeadAccessOutboxPollTickHandsEachSeatOutboxOnce: one tick reads every
+// running seat's outbox exactly once through the in-sandbox exec, and hands
+// the seat identity and the two files' bytes to the filing seam (gt-nvii5d).
+func TestNoBeadAccessOutboxPollTickHandsEachSeatOutboxOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	outboxPollSeatRecord(t, town, "sbx-baker", "gt-baker")
+	result := `{"bead_id":"gt-able","status":"deferred","escalation":{"text":"HELP: the acceptance names a file outside the worktree"}}`
+	notes := "I stopped at the second criterion.\n"
+	exec := &fakeOutboxPollExec{reads: map[string]string{
+		"sbx-able":  outboxPollReadText(&result, &notes),
+		"sbx-baker": outboxPollReadText(nil, nil),
+	}}
+	file := &fakeOutboxPollFile{}
+	poll := outboxPollTestPoll(t, town, exec, file.file, io.Discard)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if want := []string{"sbx-able", "sbx-baker"}; !slices.Equal(exec.calls, want) {
+		t.Errorf("the tick read seats %v, want each running seat once: %v", exec.calls, want)
+	}
+	if want := outboxPollReadArgv(); !slices.Equal(exec.argvs[0], want) {
+		t.Errorf("the read ran %v, want the outbox read %v", exec.argvs[0], want)
+	}
+	if len(file.requests) != 1 {
+		t.Fatalf("the tick filed %d requests, want the one seat that wrote a result.json", len(file.requests))
+	}
+	req := file.requests[0]
+	if req.Seat != "sbx-able" || req.Rig != "gastown" || req.Polecat != "able" || req.Bead != "gt-able" {
+		t.Errorf("the request names %+v, want seat sbx-able of gastown/able on bead gt-able", req)
+	}
+	if string(req.Result) != result {
+		t.Errorf("the request's result is %q, want the bytes the seat wrote %q", req.Result, result)
+	}
+	if string(req.Notes) != notes {
+		t.Errorf("the request's notes are %q, want the bytes the seat wrote %q", req.Notes, notes)
+	}
+}
+
+// TestNoBeadAccessOutboxPollUnreadableOutboxIsLoggedAndSkipped: a read that
+// fails or does not parse is logged with its seat named and skipped, and the
+// other seats' outboxes are still handed to the filing seam (gt-nvii5d).
+func TestNoBeadAccessOutboxPollUnreadableOutboxIsLoggedAndSkipped(t *testing.T) {
+	t.Parallel()
+	good := outboxPollReadText(ptrText(`{"bead_id":"gt-baker","status":"done"}`), nil)
+	tests := []struct {
+		name string
+		read *fakeOutboxPollExec
+	}{
+		{
+			name: "the exec fails",
+			read: &fakeOutboxPollExec{errs: map[string]error{"sbx-able": errors.New("openshell sandbox exec: i/o timeout")}},
+		},
+		{
+			name: "the read is cut short",
+			read: &fakeOutboxPollExec{reads: map[string]string{"sbx-able": "@@ result.json present 40 @@\n{\"bead_id\":\"gt-able\""}},
+		},
+		{
+			name: "the read holds a line that is not a marker",
+			read: &fakeOutboxPollExec{reads: map[string]string{"sbx-able": "{\"bead_id\":\"gt-able\"}\n@@ end @@\n"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+			outboxPollSeatRecord(t, town, "sbx-baker", "gt-baker")
+			if tc.read.reads == nil {
+				tc.read.reads = map[string]string{}
+			}
+			if tc.read.errs == nil {
+				tc.read.errs = map[string]error{}
+			}
+			tc.read.reads["sbx-baker"] = good
+			var logged bytes.Buffer
+			file := &fakeOutboxPollFile{}
+			poll := outboxPollTestPoll(t, town, tc.read, file.file, &logged)
+
+			if err := poll.tick(context.Background()); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if len(file.requests) != 1 || file.requests[0].Seat != "sbx-baker" {
+				t.Errorf("the tick filed %+v, want only the readable seat's request", file.requests)
+			}
+			if !strings.Contains(logged.String(), "seat sbx-able: its outbox is not read") {
+				t.Errorf("the tick's log is %q, want the unreadable seat named", logged.String())
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollSeatWithoutOutboxIsNotFiled: a running seat that
+// has written no result.json has no request to file, so the tick files
+// nothing and logs nothing; one that wrote notes first is logged, since the
+// poll has nothing to do with them (gt-nvii5d).
+func TestNoBeadAccessOutboxPollSeatWithoutOutboxIsNotFiled(t *testing.T) {
+	t.Parallel()
+	notes := "I am still on the first criterion.\n"
+	tests := []struct {
+		name    string
+		read    map[string]string
+		wantLog string
+	}{
+		{name: "the seat wrote no outbox", read: map[string]string{"sbx-able": outboxPollReadText(nil, nil)}},
+		{
+			name:    "the seat wrote notes and no result",
+			read:    map[string]string{"sbx-able": outboxPollReadText(nil, &notes)},
+			wantLog: "its outbox holds notes.md but no result.json, so nothing is filed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+			var logged bytes.Buffer
+			file := &fakeOutboxPollFile{}
+			poll := outboxPollTestPoll(t, town, &fakeOutboxPollExec{reads: tc.read}, file.file, &logged)
+
+			if err := poll.tick(context.Background()); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if len(file.requests) != 0 {
+				t.Errorf("the tick filed %+v, want nothing for a seat with no result.json", file.requests)
+			}
+			if got := strings.Contains(logged.String(), "sbx-able"); got != (tc.wantLog != "") {
+				t.Errorf("the tick's log is %q, want the seat named only when it wrote notes", logged.String())
+			}
+			if tc.wantLog != "" && !strings.Contains(logged.String(), tc.wantLog) {
+				t.Errorf("the tick's log is %q, want it to say %q", logged.String(), tc.wantLog)
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollSkipsSeatItCannotFileFor: a record whose session
+// is not a name an exec may address, whose rig or polecat is not a path
+// segment, or that names no bead is logged and skipped, and the exec is never
+// handed the seat (gt-nvii5d).
+func TestNoBeadAccessOutboxPollSkipsSeatItCannotFileFor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "a record that names no seat", body: `{"rig":"gastown","polecat":"able","work_bead":"gt-able"}`},
+		{name: "a record whose seat is not its file's name", body: `{"session":"sbx-other","rig":"gastown","polecat":"able","work_bead":"gt-able"}`},
+		{name: "a seat name that is not a sandbox name", body: `{"session":"sbx able","rig":"gastown","polecat":"able","work_bead":"gt-able"}`},
+		{name: "a polecat that is not a path segment", body: `{"session":"sbx-able","rig":"gastown","polecat":"../able","work_bead":"gt-able"}`},
+		{name: "a record that names no bead", body: `{"session":"sbx-able","rig":"gastown","polecat":"able"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			outboxPollRawRecord(t, town, "sbx-able", tc.body)
+			var logged bytes.Buffer
+			exec := &fakeOutboxPollExec{}
+			file := &fakeOutboxPollFile{}
+			poll := outboxPollTestPoll(t, town, exec, file.file, &logged)
+
+			if err := poll.tick(context.Background()); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if len(exec.calls) != 0 {
+				t.Errorf("the tick ran execs for %v, want no exec for a seat it cannot file for", exec.calls)
+			}
+			if len(file.requests) != 0 {
+				t.Errorf("the tick filed %+v, want nothing for a seat it cannot file for", file.requests)
+			}
+			if !strings.Contains(logged.String(), "seat sbx-able: its outbox is not read") {
+				t.Errorf("the tick's log is %q, want the seat and its refused read named", logged.String())
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollRefusesTheWholeTick: a poll with no town root, no
+// exec seam, no filing seam, or a registry it cannot list is the tick's error,
+// never the empty answer of a town with no seat (gt-nvii5d).
+func TestNoBeadAccessOutboxPollRefusesTheWholeTick(t *testing.T) {
+	t.Parallel()
+	file := &fakeOutboxPollFile{}
+	tests := []struct {
+		name string
+		poll func(town string) *outboxPoll
+		want string
+	}{
+		{
+			name: "no town root",
+			poll: func(string) *outboxPoll {
+				return newOutboxPoll("", &fakeOutboxPollExec{}, file.file, log.New(io.Discard, "", 0), time.Second)
+			},
+			want: "no town root",
+		},
+		{
+			name: "no exec seam",
+			poll: func(town string) *outboxPoll {
+				return newOutboxPoll(town, nil, file.file, log.New(io.Discard, "", 0), time.Second)
+			},
+			want: "no exec seam",
+		},
+		{
+			name: "no filing seam",
+			poll: func(town string) *outboxPoll {
+				return newOutboxPoll(town, &fakeOutboxPollExec{}, nil, log.New(io.Discard, "", 0), time.Second)
+			},
+			want: "no filing seam is wired",
+		},
+		{
+			name: "a registry that cannot be listed",
+			poll: func(town string) *outboxPoll {
+				if err := os.MkdirAll(filepath.Dir(session.SandboxRegistryDir(town)), 0o755); err != nil {
+					t.Fatalf("creating the runtime directory: %v", err)
+				}
+				if err := os.WriteFile(session.SandboxRegistryDir(town), []byte("not a directory\n"), 0o644); err != nil {
+					t.Fatalf("writing over the registry directory: %v", err)
+				}
+				return newOutboxPoll(town, &fakeOutboxPollExec{}, file.file, log.New(io.Discard, "", 0), time.Second)
+			},
+			want: "listing the sandbox records",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.poll(t.TempDir()).tick(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the tick's error is %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollStopsWhenItsContextIsDone: a tick whose bound has
+// passed reads no seat, so a daemon shutting down spends no gateway call on
+// the poll (gt-nvii5d).
+func TestNoBeadAccessOutboxPollStopsWhenItsContextIsDone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(nil, nil)}}
+	poll := outboxPollTestPoll(t, town, exec, (&fakeOutboxPollFile{}).file, io.Discard)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := poll.tick(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("the tick's error is %v, want the tick's own cancellation", err)
+	}
+	if len(exec.calls) != 0 {
+		t.Errorf("the tick ran execs for %v after its context was done", exec.calls)
+	}
+}
+
+// TestNoBeadAccessOutboxPollBoundsEachSeatRead: each seat's read runs under the
+// per-seat bound, shorter than the tick's, so one wedged gateway call costs its
+// own seat and not the tick (gt-nvii5d).
+func TestNoBeadAccessOutboxPollBoundsEachSeatRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(nil, nil)}}
+	poll := newOutboxPoll(town, exec, (&fakeOutboxPollFile{}).file, log.New(io.Discard, "", 0), outboxPollSeatTimeout)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(exec.deadlines) != 1 || exec.deadlines[0].IsZero() {
+		t.Fatalf("the seat's read carried deadlines %v, want one under the per-seat bound", exec.deadlines)
+	}
+	if left := time.Until(exec.deadlines[0]); left <= 0 || left > outboxPollSeatTimeout {
+		t.Errorf("the seat's read is bounded by %v, want at most %v", left, outboxPollSeatTimeout)
+	}
+	if outboxPollSeatTimeout >= outboxPollTickTimeout {
+		t.Errorf("the per-seat bound %v leaves the tick's %v no room", outboxPollSeatTimeout, outboxPollTickTimeout)
+	}
+}
+
+// TestNoBeadAccessOutboxPollFilingFailureIsLoggedAndOtherSeatsStillFile: a
+// filing seam that refuses one seat's request is logged with the seat named,
+// and the other seats' requests are still filed (gt-nvii5d).
+func TestNoBeadAccessOutboxPollFilingFailureIsLoggedAndOtherSeatsStillFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	outboxPollSeatRecord(t, town, "sbx-baker", "gt-baker")
+	exec := &fakeOutboxPollExec{reads: map[string]string{
+		"sbx-able":  outboxPollReadText(ptrText(`{"bead_id":"gt-able","status":"deferred"}`), nil),
+		"sbx-baker": outboxPollReadText(ptrText(`{"bead_id":"gt-baker","status":"deferred"}`), nil),
+	}}
+	var logged bytes.Buffer
+	file := &fakeOutboxPollFile{err: errors.New("the store refused the escalation")}
+	poll := outboxPollTestPoll(t, town, exec, file.file, &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(file.requests) != 2 {
+		t.Errorf("the tick filed %d requests, want both seats' requests tried", len(file.requests))
+	}
+	if !strings.Contains(logged.String(), "seat sbx-able: its outbox is not filed: the store refused the escalation") {
+		t.Errorf("the tick's log is %q, want the refused filing named", logged.String())
+	}
+}
+
+// TestNoBeadAccessOutboxPollParseRefusals: a read the sandbox chooses is held
+// to the outbox's shape, and every way it fails that shape is an error rather
+// than a shorter outbox (gt-nvii5d). Every row here is one refusal branch in
+// parseOutboxPollRead or parseOutboxPollMarker.
+func TestNoBeadAccessOutboxPollParseRefusals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "a read over the byte bound", text: strings.Repeat("x", outboxPollReadMax+1), want: "more than the"},
+		{name: "an empty read", text: "", want: "ends inside a marker line"},
+		{name: "a read that stops after a marker", text: "@@ result.json present 0 @@\n", want: "ends inside a marker line"},
+		{name: "a line that is not a marker", text: "junk\n@@ end @@\n", want: "not a marker"},
+		{name: "a marker that names no outbox file", text: "@@ other.txt present 0 @@\n@@ end @@\n", want: "names no outbox file"},
+		{name: "a marker line with no field after the file", text: "@@ result.json @@\n@@ end @@\n", want: "not in the outbox's shape"},
+		{name: "a marker that does not end in @@", text: "@@ result.json present 0\n@@ end @@\n", want: "does not end in"},
+		{name: "a file reported twice", text: "@@ result.json absent @@\n@@ result.json absent @@\n@@ end @@\n", want: "reports result.json twice"},
+		{name: "a marker that is neither present nor absent", text: "@@ result.json maybe @@\n@@ end @@\n", want: "neither present nor absent"},
+		{name: "an absent marker that carries a count", text: "@@ result.json absent 3 @@\n@@ end @@\n", want: "not in the outbox's shape"},
+		{name: "a present marker with no count", text: "@@ result.json present @@\n@@ end @@\n", want: "names no byte count"},
+		{name: "a byte count that is not a number", text: "@@ result.json present x @@\n@@ end @@\n", want: "names no byte count"},
+		{name: "a negative byte count", text: "@@ result.json present -1 @@\n@@ end @@\n", want: "names no byte count"},
+		{name: "a file over the cap", text: fmt.Sprintf("@@ result.json present %d @@\n", outboxPollFileCap+1), want: "more than the"},
+		{name: "content shorter than its count", text: "@@ result.json present 40 @@\n{\"bead_id\":\"gt-able\"}", want: "and the read holds"},
+		{name: "one file and not the other", text: "@@ result.json absent @@\n@@ end @@\n", want: "one outbox file and not the other"},
+		{name: "bytes after the end marker", text: "@@ end @@\nextra\n", want: "after its end marker"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := parseOutboxPollRead([]byte(tc.text)); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the read's error is %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollParseKeepsTheSeatsBytes: the framing is the byte
+// count the shell prints, so a notes.md that holds marker text is the seat's
+// notes and not the end of the read, and the bytes reach the request exactly
+// as the seat wrote them (gt-nvii5d).
+func TestNoBeadAccessOutboxPollParseKeepsTheSeatsBytes(t *testing.T) {
+	t.Parallel()
+	result := `{"bead_id":"gt-able","status":"deferred"}`
+	notes := "@@ end @@\n@@ result.json present 0 @@\n@@ notes.md absent @@\n"
+	read, err := parseOutboxPollRead([]byte(outboxPollReadText(&result, &notes)))
+	if err != nil {
+		t.Fatalf("the read's text: %v", err)
+	}
+	if !read.resultOK || string(read.result) != result {
+		t.Errorf("the read's result is %q (present %v), want the seat's bytes %q", read.result, read.resultOK, result)
+	}
+	if !read.notesOK || string(read.notes) != notes {
+		t.Errorf("the read's notes are %q (present %v), want the seat's bytes %q", read.notes, read.notesOK, notes)
+	}
+
+	empty := ""
+	read, err = parseOutboxPollRead([]byte(outboxPollReadText(&empty, nil)))
+	if err != nil {
+		t.Fatalf("the read of an empty result.json: %v", err)
+	}
+	if !read.resultOK || len(read.result) != 0 {
+		t.Errorf("the read of an empty result.json is %q (present %v), want a present empty file", read.result, read.resultOK)
+	}
+	if read.notesOK {
+		t.Error("the read reports notes.md the seat did not write")
+	}
+}
+
+// ptrText returns a pointer to text, for a read's file contents.
+func ptrText(text string) *string { return &text }

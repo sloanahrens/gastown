@@ -1483,10 +1483,13 @@ type Daemon struct {
 	outboxPollCycles  sync.WaitGroup
 	// outboxPollJoinWait overrides outboxPollJoinWait in tests.
 	outboxPollJoinWait time.Duration
-	// outboxPollTick is the patrol's one seam per tick: nil is
-	// outboxPollNoopTick, which reads nothing until the next bead fills the
-	// body (gt-dq4ce6), and a test sets it to count the ticks.
+	// outboxPollTick is the patrol's one seam per tick: nil is the live poll
+	// over the town's running seats, and a test sets it to count the ticks.
 	outboxPollTick outboxPollTickFunc
+	// outboxPollNoSeamOnce logs the missing filing seam once per daemon, so an
+	// enabled patrol that has no seam yet says so without a line every tick
+	// (gt-nvii5d).
+	outboxPollNoSeamOnce sync.Once
 	// newOutboxPollTicker is where the patrol's ticker comes from: nil is
 	// time.NewTicker, and a test sets it to record the cadence.
 	newOutboxPollTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())
