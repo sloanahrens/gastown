@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -114,6 +115,25 @@ func (c *SandboxCensus) seatPhase(gateway, name string) (phase string, listed bo
 	}
 	phase, listed = l.rows[name]
 	return phase, listed, nil
+}
+
+// Running returns the names of the sandboxes gateway lists as Ready, sorted,
+// from the listing this census reads once per sling. A listing that cannot be
+// read, or that names no sandboxes, is an error: an unknown listing must not
+// read as "no sandbox is running".
+func (c *SandboxCensus) Running(gateway string) ([]string, error) {
+	l := c.listingOf(gateway)
+	if l.err != nil {
+		return nil, l.err
+	}
+	var names []string
+	for name, phase := range l.rows {
+		if livenessOf(phase) == seatLive {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // seatLiveness is how the census reads one phase the gateway lists.
