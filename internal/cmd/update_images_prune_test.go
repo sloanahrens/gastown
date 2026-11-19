@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,26 +21,22 @@ import (
 )
 
 // pruneTestVersion is one package version the fake packages listing serves, in
-// the shape the reader reads.
+// the shape the listing answers: no manifest digest.
 type pruneTestVersion struct {
 	Name      string    `json:"name"`
 	Version   string    `json:"version"`
 	CreatedAt time.Time `json:"created_at"`
-	Metadata  struct {
-		ManifestDigest string `json:"manifest_digest"`
-	} `json:"metadata"`
 }
 
 // pruneTestTag is one tag of an image in the fake listing.
 type pruneTestTag struct {
 	name   string
-	digest string
 	pushed time.Time
 }
 
 // pruneTestRegistry is the registry an injected HTTP client answers for. It
-// serves the packages listing from tags, and it records every request, so a test
-// sees what the command sent.
+// serves the packages listing from tags, and each tag's manifest, and it records
+// every request, so a test sees what the command sent.
 type pruneTestRegistry struct {
 	tags    map[string][]pruneTestTag
 	status  map[string]int
@@ -46,10 +44,14 @@ type pruneTestRegistry struct {
 	paths   []string
 }
 
-// RoundTrip answers a packages listing request for the image its q names.
+// RoundTrip answers a packages listing request for the image its q names, and a
+// manifest read for the tag its path names.
 func (f *pruneTestRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 	f.methods = append(f.methods, req.Method)
 	f.paths = append(f.paths, req.URL.Path)
+	if parts := strings.Split(req.URL.Path, "/"); len(parts) == 6 && parts[4] == "manifests" {
+		return f.manifest(req, parts[3], parts[5]), nil
+	}
 	image := req.URL.Query().Get("q")
 	if code := f.status[image]; code != 0 {
 		return pruneTestResponse(req, code, nil, 0), nil
@@ -57,10 +59,7 @@ func (f *pruneTestRegistry) RoundTrip(req *http.Request) (*http.Response, error)
 	var items []pruneTestVersion
 	if req.URL.Query().Get("page") == "1" {
 		for _, t := range f.tags[image] {
-			var v pruneTestVersion
-			v.Name, v.Version, v.CreatedAt = image, t.name, t.pushed
-			v.Metadata.ManifestDigest = t.digest
-			items = append(items, v)
+			items = append(items, pruneTestVersion{Name: image, Version: t.name, CreatedAt: t.pushed})
 		}
 	}
 	body, err := json.Marshal(items)
@@ -68,6 +67,20 @@ func (f *pruneTestRegistry) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, err
 	}
 	return pruneTestResponse(req, http.StatusOK, body, len(f.tags[image])), nil
+}
+
+// manifest answers a manifest read of image at tag with the tag's manifest bytes
+// and their digest, as a registry does. A tag the fake does not hold is a 404.
+func (f *pruneTestRegistry) manifest(req *http.Request, image, tag string) *http.Response {
+	for _, t := range f.tags[image] {
+		if t.name == tag {
+			body := pruneTestManifest(tag)
+			resp := pruneTestResponse(req, http.StatusOK, body, 0)
+			resp.Header.Set("Docker-Content-Digest", pruneTestDigestOf(body))
+			return resp
+		}
+	}
+	return pruneTestResponse(req, http.StatusNotFound, nil, 0)
 }
 
 // pruneTestResponse answers one request with code, body and the listing total.
@@ -89,8 +102,19 @@ func (l pruneTestLedger) Read() (update.ImageRecord, error) { return l.rec, l.er
 
 // pruneTestName and pruneTestDigest are the tag name and manifest digest of the
 // n-th tag a fixture makes.
-func pruneTestName(n int) string   { return fmt.Sprintf("%012x", n) }
-func pruneTestDigest(n int) string { return fmt.Sprintf("sha256:%064x", n) }
+func pruneTestName(n int) string { return fmt.Sprintf("%012x", n) }
+
+// pruneTestManifest is the manifest a tag names, and pruneTestDigestOf its
+// digest: the hash of its bytes, the form the registry reports and the reader
+// checks.
+func pruneTestManifest(tag string) []byte { return []byte("manifest " + tag) }
+
+func pruneTestDigestOf(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func pruneTestDigest(n int) string { return pruneTestDigestOf(pruneTestManifest(pruneTestName(n))) }
 
 // pruneTestRef is the pair ref the record holds for image at digest n.
 func pruneTestRef(image string, n int) string {
@@ -118,11 +142,11 @@ func pruneTestPopulated() *pruneTestRegistry {
 	var daemon []pruneTestTag
 	for i := 0; i < 22; i++ {
 		n := i + 1
-		daemon = append(daemon, pruneTestTag{name: pruneTestName(n), digest: pruneTestDigest(n), pushed: base.Add(time.Duration(i) * time.Hour)})
+		daemon = append(daemon, pruneTestTag{name: pruneTestName(n), pushed: base.Add(time.Duration(i) * time.Hour)})
 	}
 	return &pruneTestRegistry{tags: map[string][]pruneTestTag{
 		imagevalues.DaemonImage: daemon,
-		imagevalues.BdImage:     {{name: pruneTestName(100), digest: pruneTestDigest(100), pushed: base}},
+		imagevalues.BdImage:     {{name: pruneTestName(100), pushed: base}},
 	}}
 }
 
@@ -250,6 +274,42 @@ func TestUpdateImagesPrunePrintsEachImagesKeepAndDeleteLines(t *testing.T) {
 
 	if out != want.String() {
 		t.Fatalf("prune output:\n%s\nwant:\n%s", out, want.String())
+	}
+}
+
+// TestUpdateImagesPruneDigestWired holds that the plan reads each listed tag's
+// digest from the registry: every tag gets a manifest read, and each plan entry
+// carries the digest the registry holds for its tag. A reader built without the
+// digest read would refuse the plan instead.
+func TestUpdateImagesPruneDigestWired(t *testing.T) {
+	t.Parallel()
+	reg := pruneTestPopulated()
+	plan, err := planUpdateImagesPrune(context.Background(), pruneTestSeams(reg))
+	if err != nil {
+		t.Fatalf("planUpdateImagesPrune() error = %v", err)
+	}
+	var manifests int
+	for _, p := range reg.paths {
+		if strings.Contains(p, "/manifests/") {
+			manifests++
+		}
+	}
+	// The fixture lists 22 daemon tags and 1 bd tag, so 23 manifest reads.
+	if manifests != 23 {
+		t.Errorf("manifest reads = %d, want one per listed tag (23)", manifests)
+	}
+	want := map[string]string{pruneTestName(100): pruneTestDigest(100)}
+	for n := 1; n <= 22; n++ {
+		want[pruneTestName(n)] = pruneTestDigest(n)
+	}
+	entries := append(plan.Keep, plan.Delete...)
+	if len(entries) != 23 {
+		t.Fatalf("plan holds %d entries, want 23", len(entries))
+	}
+	for _, e := range entries {
+		if e.Digest != want[e.Tag] {
+			t.Errorf("%s:%s planned with digest %s, want the registry's %s", e.Image, e.Tag, e.Digest, want[e.Tag])
+		}
 	}
 }
 
