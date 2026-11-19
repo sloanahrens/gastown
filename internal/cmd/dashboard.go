@@ -374,16 +374,33 @@ func closeCloudLedger(s cloudledger.Source) {
 }
 
 // dashboardTailOptions selects the feed's sources: the landings, the daemon log
-// and the watch feed. journalFor stays nil, so buildTailSources opens no store's
-// bd events journal for the hub (gt-ug7zed). deploys is passed through as the
-// caller set it: with a tracker, the daemon source is wrapped in that tracker.
-func dashboardTailOptions(townRoot string, cutoff time.Time, loc *time.Location, rigNames func(townRoot string) ([]string, error), beads *tailBeads, deploys *tailDeploys) tailOptions {
+// and the watch feed, and the gateway's call log when gateway is set. journalFor
+// stays nil, so buildTailSources opens no store's bd events journal for the hub
+// (gt-ug7zed). deploys is passed through as the caller set it: with a tracker,
+// the daemon source is wrapped in that tracker.
+func dashboardTailOptions(townRoot string, cutoff time.Time, loc *time.Location, rigNames func(townRoot string) ([]string, error), beads *tailBeads, deploys *tailDeploys, gateway tailGatewayReader) tailOptions {
+	kinds := map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true}
+	if gateway != nil {
+		kinds[tailKindGateway] = true
+	}
 	return tailOptions{
 		townRoot: townRoot,
-		kinds:    map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true},
+		kinds:    kinds,
 		cutoff:   cutoff, loc: loc, now: time.Now,
 		rigNames: rigNames, beads: beads, deploys: deploys,
+		gateway: gateway,
 	}
+}
+
+// dashboardGatewayReader is the feed's gateway reader: the pusher the daemon
+// sends the workspace with, built from the URL and token settings the doctor
+// reads. It is nil when either is unset, so the feed leaves the source out.
+func dashboardGatewayReader(getenv func(string) string) tailGatewayReader {
+	pusher := bdGatewayPusherFromEnv(getenv)
+	if pusher.URL == "" || pusher.TokenFile == "" {
+		return nil
+	}
+	return pusher
 }
 
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
@@ -419,7 +436,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// before the tracker.
 	dispatches := events.NewDispatchReader(townRoot)
 	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog, dispatches)
-	sources, preface, err := buildTailSources(dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys))
+	sources, preface, err := buildTailSources(dashboardTailOptions(townRoot, cutoff, loc, knownRigNames, beadReads, deploys, dashboardGatewayReader(os.Getenv)))
 	if err != nil {
 		return nil, nil, err
 	}

@@ -18,7 +18,7 @@ func dashboardTestRigs(string) ([]string, error) { return []string{"gastown"}, n
 // and builds no events source from those options.
 func TestDashboardTailOptionsReadsNoEventsJournal(t *testing.T) {
 	t.Parallel()
-	opts := dashboardTailOptions(t.TempDir(), tailNow, tailTestLoc, dashboardTestRigs, nil, nil)
+	opts := dashboardTailOptions(t.TempDir(), tailNow, tailTestLoc, dashboardTestRigs, nil, nil, nil)
 	want := map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true}
 	if !reflect.DeepEqual(opts.kinds, want) {
 		t.Fatalf("kinds = %v, want %v", opts.kinds, want)
@@ -68,7 +68,7 @@ func TestDashboardTailOptionsFeedMergesTheThreeSourcesByTime(t *testing.T) {
 	appendFile(t, filepath.Join(watchDir, "alerts.jsonl"),
 		`{"ts":"2026-09-30T13:50:00Z","class":"bd-slow","severity":"low","text":"bd took 4s"}`+"\n")
 
-	sources, preface, err := buildTailSources(dashboardTailOptions(town, at("2026-09-30T13:00:00Z"), tailTestLoc, dashboardTestRigs, nil, nil))
+	sources, preface, err := buildTailSources(dashboardTailOptions(town, at("2026-09-30T13:00:00Z"), tailTestLoc, dashboardTestRigs, nil, nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
