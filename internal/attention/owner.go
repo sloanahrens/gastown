@@ -157,6 +157,10 @@ var ruleOwners = map[string]Owner{
 	// A stale hold is the overseer's to release: it reads the hold's reason and
 	// releases the label or closes the bead (gt-j669b4.19).
 	RuleHoldStale: OwnerOverseer,
+	// An overdue job is the town's own maintenance to restart or repair before a
+	// person is woken, and its waking twin is the same job (gt-toiff6).
+	RuleJobOverdue:     OwnerOverseer,
+	RuleJobOverdueWake: OwnerOverseer,
 	// A stale, gapped or unreadable metrics extract is the town's own run to
 	// look at: the overseer reads why the extract stopped or what its read could
 	// not see before a person is woken (gt-mi4cem).

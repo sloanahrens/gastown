@@ -21,6 +21,12 @@ func itemsForRules() []Item {
 			out = append(out, Item{Kind: k, Key: RuleHostNodeDiskWarn}, Item{Kind: k, Key: RuleHostNodeDiskCrit})
 			continue
 		}
+		// A job-overdue item is its key's: the wake key raises the wake rule, the
+		// rest raise the info rule.
+		if k == KindJobOverdue {
+			out = append(out, Item{Kind: k, Key: jobOverdueWakePrefix + "dolt_gc"}, Item{Kind: k, Key: "job-overdue:dolt_gc"})
+			continue
+		}
 		out = append(out, Item{Kind: k, Key: "k:" + string(k)})
 	}
 	return out
