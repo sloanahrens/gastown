@@ -39,16 +39,29 @@ func (i fakeSweepInfo) ModTime() time.Time { return i.modTime }
 func (i fakeSweepInfo) IsDir() bool        { return i.mode.IsDir() }
 func (i fakeSweepInfo) Sys() any           { return nil }
 
-func (i fakeSweepInfo) Type() fs.FileMode          { return i.mode.Type() }
-func (i fakeSweepInfo) Info() (fs.FileInfo, error) { return i, nil }
+func (i fakeSweepInfo) Type() fs.FileMode { return i.mode.Type() }
+
+// fakeSweepEntry is a directory entry whose Info may be made to fail.
+type fakeSweepEntry struct {
+	fakeSweepInfo
+	infoErr error
+}
+
+func (e fakeSweepEntry) Info() (fs.FileInfo, error) {
+	if e.infoErr != nil {
+		return nil, e.infoErr
+	}
+	return e.fakeSweepInfo, nil
+}
 
 // fakeSweepRunsFS is an in-memory tree the prune lists, sizes, checks and
 // removes through. Every failure a test needs is set on it by path.
 type fakeSweepRunsFS struct {
 	nodes     map[string]fakeSweepInfo
 	readErr   map[string]error
-	sizeErr   map[string]error
+	infoErr   map[string]error
 	lstatMode map[string]fs.FileMode
+	vanish    map[string]bool
 	removeErr map[string]error
 	removed   []string
 }
@@ -57,8 +70,9 @@ func newFakeSweepRunsFS() *fakeSweepRunsFS {
 	return &fakeSweepRunsFS{
 		nodes:     map[string]fakeSweepInfo{},
 		readErr:   map[string]error{},
-		sizeErr:   map[string]error{},
+		infoErr:   map[string]error{},
 		lstatMode: map[string]fs.FileMode{},
+		vanish:    map[string]bool{},
 		removeErr: map[string]error{},
 	}
 }
@@ -94,25 +108,16 @@ func (f *fakeSweepRunsFS) ReadDir(dir string) ([]fs.DirEntry, error) {
 	slices.Sort(children)
 	out := make([]fs.DirEntry, 0, len(children))
 	for _, p := range children {
-		out = append(out, f.nodes[p])
+		out = append(out, fakeSweepEntry{fakeSweepInfo: f.nodes[p], infoErr: f.infoErr[p]})
 	}
 	return out, nil
 }
 
-func (f *fakeSweepRunsFS) TreeBytes(dir string) (int64, error) {
-	if err := f.sizeErr[dir]; err != nil {
-		return 0, err
-	}
-	var total int64
-	for p, n := range f.nodes {
-		if p == dir || strings.HasPrefix(p, dir+string(filepath.Separator)) {
-			total += n.size
-		}
-	}
-	return total, nil
-}
-
 func (f *fakeSweepRunsFS) Lstat(path string) (fs.FileInfo, error) {
+	if f.vanish[path] {
+		// A directory that goes away between the plan and its check.
+		delete(f.nodes, path)
+	}
 	n, ok := f.nodes[path]
 	if !ok {
 		return nil, &fs.PathError{Op: "lstat", Path: path, Err: fs.ErrNotExist}
@@ -181,6 +186,10 @@ func (f *sweepRunsFixture) rigTree() (planned []string) {
 		p := filepath.Join(rig, name)
 		f.fsys.dir(p, sweepRunsNow.Add(-age))
 		f.fsys.file(filepath.Join(p, "out.log"), 1e9, sweepRunsNow.Add(-age))
+		// A nested directory with an empty file: sizing descends into it and the
+		// run's total is still the 1 GB its out.log holds.
+		f.fsys.dir(filepath.Join(p, "logs"), sweepRunsNow.Add(-age))
+		f.fsys.file(filepath.Join(p, "logs", "empty.log"), 0, sweepRunsNow.Add(-age))
 		if i < 3 {
 			planned = append(planned, p)
 		}
@@ -271,8 +280,18 @@ func TestSweepRunsPruneRefusesWhatItCannotList(t *testing.T) {
 			f.fsys.dir(filepath.Join(f.root, "zeta"), sweepRunsNow)
 			f.fsys.readErr[filepath.Join(f.root, "zeta")] = fs.ErrPermission
 		},
-		"a run cannot be sized": func(f *sweepRunsFixture, rig string) {
-			f.fsys.sizeErr[filepath.Join(rig, sweepRunsName("gastown", "0a1b2c3d"))] = fs.ErrPermission
+		"a run cannot be read for its size": func(f *sweepRunsFixture, rig string) {
+			f.fsys.readErr[filepath.Join(rig, sweepRunsName("gastown", "0a1b2c3d"))] = fs.ErrPermission
+		},
+		"a directory inside a run cannot be read": func(f *sweepRunsFixture, rig string) {
+			logs := filepath.Join(rig, sweepRunsName("gastown", "0a1b2c3d"), "logs")
+			f.fsys.readErr[logs] = fs.ErrPermission
+		},
+		"a run cannot be stat'd": func(f *sweepRunsFixture, rig string) {
+			f.fsys.infoErr[filepath.Join(rig, sweepRunsName("gastown", "0a1b2c3d"))] = fs.ErrPermission
+		},
+		"a file inside a run cannot be stat'd": func(f *sweepRunsFixture, rig string) {
+			f.fsys.infoErr[filepath.Join(rig, sweepRunsName("gastown", "0a1b2c3d"), "out.log")] = fs.ErrPermission
 		},
 	}
 	for name, breakTree := range cases {
@@ -332,6 +351,121 @@ func TestSweepRunsPruneRecheckRefusesAReplacedDirectory(t *testing.T) {
 	}
 }
 
+// TestSweepRunsPruneVanishedDirectoryStopsTheRun: a planned directory that is gone
+// when its check runs is not removed, the run stops, and the name is logged.
+func TestSweepRunsPruneVanishedDirectoryStopsTheRun(t *testing.T) {
+	t.Parallel()
+	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+	planned := f.rigTree()
+	f.fsys.vanish[planned[0]] = true
+	f.d.runSweepRunsPruneTick()
+
+	if len(f.fsys.removed) != 0 {
+		t.Fatalf("a vanished directory was removed: %v", f.fsys.removed)
+	}
+	lines := f.logLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "stopped") || !strings.Contains(lines[0], "gastown/"+sweepRunsName("gastown", "0a1b2c3d")) {
+		t.Errorf("vanished directory logged %q, want one stopped line naming it", lines)
+	}
+}
+
+// TestSweepRunsPruneRunsNothingWhenInFlightNotDueOrRefused: a tick that finds a
+// pass in flight, a run not yet due, or a mode the patrol cannot act on removes
+// nothing, and a refused mode says so by name.
+func TestSweepRunsPruneRunsNothingWhenInFlightNotDueOrRefused(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		setup func(f *sweepRunsFixture)
+		logs  string
+	}{
+		"a pass is in flight": {
+			setup: func(f *sweepRunsFixture) { f.d.sweepRunsPruneRunning.Store(true) },
+		},
+		"the run is not due": {
+			setup: func(f *sweepRunsFixture) { f.d.diskMaintSchedule.record(sweepRunsPruneName, sweepRunsNow) },
+		},
+		"the mode is unknown": {
+			setup: func(f *sweepRunsFixture) { f.d.patrolConfig.Patrols.DiskMaintenance.Mode = "bogus" },
+			logs:  "patrols.disk_maintenance.mode",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+			planned := f.rigTree()
+			tc.setup(f)
+			f.d.runSweepRunsPruneTick()
+
+			if len(f.fsys.removed) != 0 {
+				t.Fatalf("removed %v; a tick that must not act removed something (planned %v)", f.fsys.removed, planned)
+			}
+			if tc.logs == "" {
+				if lines := f.logLines(); len(lines) != 0 {
+					t.Errorf("logged %q, want nothing", lines)
+				}
+				return
+			}
+			if !strings.Contains(f.logs.String(), tc.logs) {
+				t.Errorf("refusal does not name %s:\n%s", tc.logs, f.logs.String())
+			}
+		})
+	}
+}
+
+// TestSweepRunsPrunePassRefusesASettingItCannotAct: the pass re-reads its settings
+// when it starts, and an invalid one refuses the run there too.
+func TestSweepRunsPrunePassRefusesASettingItCannotAct(t *testing.T) {
+	t.Parallel()
+	zero := 0
+	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+	f.rigTree()
+	f.d.patrolConfig.Patrols.DiskMaintenance.SweepRunsKeep = &zero
+	f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+
+	if len(f.fsys.removed) != 0 {
+		t.Fatalf("an invalid setting removed %v", f.fsys.removed)
+	}
+	if !strings.Contains(f.logs.String(), "patrols.disk_maintenance.sweep_runs_keep") {
+		t.Errorf("pass refusal does not name the setting:\n%s", f.logs.String())
+	}
+}
+
+// TestSweepRunsPrunePassReadsDueAgainWhenItStarts: a pass dispatched by a tick
+// that found the run due does not run it again when a run concluded after the
+// tick's decision, so the pass removes nothing and says nothing.
+func TestSweepRunsPrunePassReadsDueAgainWhenItStarts(t *testing.T) {
+	t.Parallel()
+	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+	f.rigTree()
+	f.d.diskMaintSchedule.record(sweepRunsPruneName, sweepRunsNow)
+	f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+
+	if len(f.fsys.removed) != 0 || len(f.logLines()) != 0 {
+		t.Errorf("a pass that is not due removed %v and logged %q", f.fsys.removed, f.logLines())
+	}
+}
+
+// TestSweepRunsPruneDryRunWithNothingOldEnoughNamesNothing: a dry run whose plan
+// is empty still logs its line, with zero directories and no list after it.
+func TestSweepRunsPruneDryRunWithNothingOldEnoughNamesNothing(t *testing.T) {
+	t.Parallel()
+	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeDryRun, 2)
+	rig := filepath.Join(f.root, "gastown")
+	f.fsys.dir(f.root, sweepRunsNow)
+	f.fsys.dir(rig, sweepRunsNow)
+	for i, age := range []time.Duration{10 * time.Hour, 5 * time.Hour} {
+		p := filepath.Join(rig, sweepRunsName("gastown", []string{"0a1b2c3d", "1a1b2c3d"}[i]))
+		f.fsys.dir(p, sweepRunsNow.Add(-age))
+	}
+	f.d.runSweepRunsPruneTick()
+
+	want := "disk_maintenance: sweep runs prune dry_run: would remove 0 directories, 0.0 GB, keeping 2"
+	if lines := f.logLines(); len(lines) != 1 || lines[0] != want {
+		t.Errorf("empty plan logged %q, want %q", lines, want)
+	}
+}
+
 // TestSweepRunsPruneMissingRootIsAnEmptyPlan: before the sweep has written
 // anything there is nothing to plan, so the run concludes and says nothing.
 func TestSweepRunsPruneMissingRootIsAnEmptyPlan(t *testing.T) {
@@ -347,19 +481,34 @@ func TestSweepRunsPruneMissingRootIsAnEmptyPlan(t *testing.T) {
 	}
 }
 
-// TestSweepRunsPruneRefusesAnInvalidSettingByName: a setting the patrol cannot
-// act on runs nothing and is refused by its key.
+// TestSweepRunsPruneRefusesAnInvalidSettingByName: each setting the patrol cannot
+// act on runs nothing, and the refusal names the setting by its key.
 func TestSweepRunsPruneRefusesAnInvalidSettingByName(t *testing.T) {
 	t.Parallel()
-	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 0)
-	f.rigTree()
-	f.d.runSweepRunsPruneTick()
-
-	if len(f.fsys.removed) != 0 {
-		t.Fatalf("an invalid setting removed %v", f.fsys.removed)
+	zero := 0
+	cases := map[string]struct {
+		key   string
+		apply func(*agentconfig.DiskMaintenanceConfig)
+	}{
+		"interval": {"sweep_runs_prune_interval", func(c *agentconfig.DiskMaintenanceConfig) { c.SweepRunsPruneInterval = "hourly" }},
+		"keep":     {"sweep_runs_keep", func(c *agentconfig.DiskMaintenanceConfig) { c.SweepRunsKeep = &zero }},
+		"min age":  {"sweep_runs_min_age", func(c *agentconfig.DiskMaintenanceConfig) { c.SweepRunsMinAge = "0h" }},
 	}
-	if !strings.Contains(f.logs.String(), "patrols.disk_maintenance.sweep_runs_keep") {
-		t.Errorf("refusal does not name the setting:\n%s", f.logs.String())
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+			f.rigTree()
+			tc.apply(f.d.patrolConfig.Patrols.DiskMaintenance)
+			f.d.runSweepRunsPruneTick()
+
+			if len(f.fsys.removed) != 0 {
+				t.Fatalf("an invalid setting removed %v", f.fsys.removed)
+			}
+			if !strings.Contains(f.logs.String(), "patrols.disk_maintenance."+tc.key) {
+				t.Errorf("refusal does not name %s:\n%s", tc.key, f.logs.String())
+			}
+		})
 	}
 }
 

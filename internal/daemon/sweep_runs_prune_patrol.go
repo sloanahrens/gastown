@@ -39,9 +39,6 @@ const (
 type sweepRunsFileSystem interface {
 	// ReadDir lists dir's direct children, sorted by name.
 	ReadDir(dir string) ([]fs.DirEntry, error)
-	// TreeBytes is the total size of the regular files under dir. It does not
-	// follow symlinks, and an unreadable part of the tree is an error.
-	TreeBytes(dir string) (int64, error)
 	// Lstat describes path without following a symlink.
 	Lstat(path string) (fs.FileInfo, error)
 	// RemoveAll removes path and everything under it.
@@ -53,23 +50,36 @@ type osSweepRunsFS struct{}
 
 func (osSweepRunsFS) ReadDir(dir string) ([]fs.DirEntry, error) { return os.ReadDir(dir) }
 
-func (osSweepRunsFS) TreeBytes(dir string) (int64, error) {
+// sweepRunsTreeBytes is the total size of the regular files under dir, read
+// through fsys. It does not follow symlinks, and an unreadable part of the tree
+// is an error, so a run that cannot be sized is refused rather than counted as
+// small.
+func sweepRunsTreeBytes(fsys sweepRunsFileSystem, dir string) (int64, error) {
+	children, err := fsys.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
 	var total int64
-	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	for _, child := range children {
+		path := filepath.Join(dir, child.Name())
+		if child.IsDir() {
+			n, err := sweepRunsTreeBytes(fsys, path)
+			if err != nil {
+				return 0, err
+			}
+			total += n
+			continue
 		}
-		if !entry.Type().IsRegular() {
-			return nil
+		if !child.Type().IsRegular() {
+			continue
 		}
-		info, err := entry.Info()
+		info, err := child.Info()
 		if err != nil {
-			return err
+			return 0, err
 		}
 		total += info.Size()
-		return nil
-	})
-	return total, err
+	}
+	return total, nil
 }
 
 func (osSweepRunsFS) Lstat(path string) (fs.FileInfo, error) { return os.Lstat(path) }
@@ -202,7 +212,7 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 				d.sweepRunsPruneLogf("stat", "disk_maintenance: sweep runs prune: cannot read %s: %v; nothing removed", filepath.Join(rigDir, child.Name()), err)
 				return false
 			}
-			bytes, err := fsys.TreeBytes(filepath.Join(rigDir, child.Name()))
+			bytes, err := sweepRunsTreeBytes(fsys, filepath.Join(rigDir, child.Name()))
 			if err != nil {
 				d.sweepRunsPruneLogf("size", "disk_maintenance: sweep runs prune: cannot size %s: %v; nothing removed", filepath.Join(rigDir, child.Name()), err)
 				return false
