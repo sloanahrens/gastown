@@ -144,6 +144,11 @@ func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition po
 	if err != nil {
 		return nil, probed, &poolOccupancyError{err: err}
 	}
+	// A sessionless seat can be read two ways — the dead walk reads its agent
+	// bead, the landing read confirms its intent record against its work bead —
+	// and it is one seat. The landing read owns it when it names it: it carries
+	// the work bead the roster matches running slings against (gt-75fma5).
+	dead = withoutSeatsNamed(dead, landing)
 	occupied, err := withoutLandedSeats(townRoot, seatRecords, append(append(live, dead...), landing...))
 	if err != nil {
 		return nil, probed, &poolOccupancyError{err: err}
@@ -217,6 +222,12 @@ func withoutLandedSeats(townRoot string, read poolSeatRecordFunc, sessions []poo
 			out = append(out, s)
 			continue
 		}
+		if s.agentWorking {
+			// A stale landed record does not free a seat the agent bead says is
+			// working: the list reads it as WORKING too (gt-v5n2be).
+			out = append(out, s)
+			continue
+		}
 		rec, err := poolSeatRecord(read, s.rig, s.polecat)
 		if err != nil {
 			out = append(out, s)
@@ -231,6 +242,23 @@ func withoutLandedSeats(townRoot string, read poolSeatRecordFunc, sessions []poo
 		}
 	}
 	return out, nil
+}
+
+// withoutSeatsNamed drops the seats named by named, so a seat two reads
+// describe is one seat. A seat that names no polecat holds nothing to match.
+func withoutSeatsNamed(seats, named []poolSession) []poolSession {
+	if len(named) == 0 {
+		return seats
+	}
+	keys := liveSeatKeys(named)
+	out := seats[:0:0]
+	for _, s := range seats {
+		if s.rig != "" && s.polecat != "" && keys[s.rig+"/"+s.polecat] {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // liveSeatKeys names the seats a live session already accounts for, keyed
@@ -1105,14 +1133,16 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 	}
 }
 
-// poolDeadHookedSessions lists the seats whose tmux session is gone but whose
-// agent bead still names hooked, non-terminal work: a polecat that crashed and
-// whose supervised restart is due (gt-tldj4). Such a seat keeps holding the
-// pool's seat while it waits — the supervisor brings the polecat back within
-// minutes, so dropping the seat in the gap is what let a restart push the town
-// past its cap (the 4/3 on 2026-10-04: sapphire's session died at 18:06 with
-// gt-rwp7z.10 still hooked, the roster read 2/3 at 18:07 and slung a fourth
-// polecat, and the restart at 18:08 made that four).
+// poolDeadHookedSessions lists the sessionless seats whose measured read still
+// counts toward capacity: a polecat that crashed with work in flight and whose
+// supervised restart is due (gt-tldj4), and since gt-v5n2be any sessionless
+// seat `gt polecat list` counts, which is the seat most likely to hold unsaved
+// work. Such a seat keeps holding the pool's seat while it waits — the
+// supervisor brings the polecat back within minutes, so dropping the seat in
+// the gap is what let a restart push the town past its cap (the 4/3 on
+// 2026-10-04: sapphire's session died at 18:06 with gt-rwp7z.10 still hooked,
+// the roster read 2/3 at 18:07 and slung a fourth polecat, and the restart at
+// 18:08 made that four).
 //
 // Seats are enumerated the way `gt polecat list` and the capacity snapshot
 // enumerate them — the polecat directories under each rig (listPolecatDirectoryNames)
@@ -1123,20 +1153,26 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // (gt-bc9b6) — is not counted here any more than it is by a live session
 // (gt-b9ud0).
 //
-// A seat whose full state cannot be read is skipped, as it always was: the
-// live seats are already counted, and counting every unreadable directory would
-// let a bead-database hiccup fill every seat and refuse every sling.
+// Every sessionless directory is read, hooked or not, so the pool counts what
+// `gt polecat list` counts for it: a dead seat whose git check failed is the
+// seat most likely to hold unsaved work, and handing its slot to a new session
+// is the failure this walk exists to prevent (gt-v5n2be, decision A). The seat
+// is freed only on a measured answer that it does not count, which is what the
+// list frees it on too; a probe that fails counts the seat as occupied.
 //
-// The hook-held question is asked first, from the seat's beads alone, and the
-// full seat state (with its worktree probe) only for a seat that holds a hook.
-// A polecat with no hook is skipped whatever its worktree says, so probing
-// that worktree was work no answer used; the probe is the expensive half of
-// this read (gt-gg9hv.73). The count returned beside the seats is how many
-// seats ran the full read, which the roster logs.
+// The probe is the expensive half of this read and the list pays one per dead
+// directory as well, so the walk runs each directory's full read at most once
+// per pass. Keeping the probe behind the hook read cut a probe per dead
+// directory (gt-gg9hv.73) until this parity fix; the hook read is kept as the
+// cheap primer that fills the batch's bead cache for the full read, and its
+// answer no longer decides the seat. Dropping it and moving the
+// agentbead_shadow comparison into the batch disposition read is gt-9h7c2n.
+// The count returned beside the seats is how many ran the full read, which the
+// roster logs.
 //
-// A seat whose hook cannot be read is not proven free, so it stays counted,
-// and the first such read error is returned beside the seats: a sling that
-// counted the seat free on a failed read would take an occupied seat.
+// A seat whose hook read or state read fails is not proven free, so it stays
+// counted, and the first such read error is returned beside the seats: a sling
+// that counted the seat free on a failed read would take an occupied seat.
 //
 // The seat is rendered on the agent it was slung on, read from the seat's
 // intent record (intent.MarkSlung) — a dead seat's tmux session is what carried
@@ -1181,8 +1217,11 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			if liveSeats[rigName+"/"+name] {
 				continue
 			}
-			held, err := hookHeld(rigName, name)
-			if err != nil {
+			// The primer: it fills the batch's bead cache for the full read
+			// below. Its answer no longer decides the seat (gt-v5n2be); the
+			// read itself stays until gt-9h7c2n moves the shadow comparison
+			// into the disposition read.
+			if _, err := hookHeld(rigName, name); err != nil {
 				// A seat whose hold cannot be read is not proven free, so it
 				// stays counted; the read error goes back beside the seats.
 				if holdErr == nil {
@@ -1191,20 +1230,15 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", now))
 				continue
 			}
-			if !held {
-				continue
-			}
-			// The seat holds a hook, so the rest of its state is worth the
-			// worktree probe. A held seat with no disposition to read it is a
-			// seam not wired, which must not pass as an empty walk.
+			// Every sessionless seat is read. A seat with no disposition to
+			// read it is a seam not wired, which must not pass as an empty walk.
 			if disposition == nil {
-				return nil, probed, errors.New("the dead-hooked walk needs a seat disposition for a held seat")
+				return nil, probed, errors.New("the dead-hooked walk needs a seat disposition")
 			}
 			state, err := disposition(rigName, name)
 			if err != nil {
-				// The hook read proved the seat held, so a failed state read
-				// does not prove it free: it stays counted, and the error goes
-				// back beside the seats like the hook read's.
+				// A seat whose state cannot be read is not proven free: it
+				// stays counted, and the error goes back beside the seats.
 				if holdErr == nil {
 					holdErr = fmt.Errorf("reading the state of %s/%s: %w", rigName, name, err)
 				}
@@ -1212,7 +1246,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				continue
 			}
 			probed++
-			if !state.Disposition.CountsTowardCapacity {
+			if !poolDeadSeatCounted(state) {
 				continue
 			}
 			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), state.HookedBead, now))
@@ -1220,6 +1254,15 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, probed, holdErr
+}
+
+// poolDeadSeatCounted reports whether a sessionless seat holds the pool's
+// seat: unless its dead read was measured and says it does not count toward
+// capacity. A read that never reached a disposition (no agent bead, an early
+// return) has DeadRead false, and that zero value counts the seat rather than
+// freeing it.
+func poolDeadSeatCounted(state poolSeatState) bool {
+	return !state.DeadRead || state.DeadDisposition.CountsTowardCapacity
 }
 
 // deadHookedSeat is the dead-hooked session a seat counts as. The seat's own

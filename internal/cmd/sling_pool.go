@@ -90,6 +90,11 @@ type poolSession struct {
 	// landing marks a seat mid-landing: its polecat ran gt done and the
 	// landing worker has not closed its bead (poolLandingSessions).
 	landing bool
+	// agentWorking marks a live session whose agent bead names an active
+	// state. `gt polecat list` reads that seat as WORKING, which counts toward
+	// capacity, so neither a sandbox record nor a stale intent record frees it
+	// (gt-v5n2be).
+	agentWorking bool
 	// claim marks a seat another sling reserved before its session existed
 	// (poolSeatLedger.claimSessions). It holds the seat like a session does, and
 	// a refusal names it as a source of its count (gt-cx16fq).
@@ -652,7 +657,23 @@ func (r poolSeatReads) openClient(dir string) beads.Client {
 // the seat's work, not from one reference to it (gt-bc9b6).
 type poolSeatState struct {
 	Disposition polecat.WorkstateDisposition
-	HookHeld    bool
+	// AgentWorking reports that the agent bead names an active lifecycle state
+	// (working, running, spawning or patrolling). `gt polecat list` reads that
+	// state as a working seat, which counts toward capacity, so the pool does
+	// not free it on an idle exemption (gt-v5n2be).
+	AgentWorking bool
+	// DeadDisposition is the seat's disposition as a sessionless read decides
+	// it: the same facts with AgentBeadRead set, so the missing cleanup_status
+	// a live git probe has already answered does not block a dead seat the list
+	// frees (gt-v5n2be, decision A2).
+	DeadDisposition polecat.WorkstateDisposition
+	// DeadRead reports that DeadDisposition was measured. Its zero value is not
+	// a free seat: a read that never reached the disposition — a polecat
+	// directory with no agent bead, or a disposition the read could not
+	// compute — counts the seat as occupied, the answer that refuses a sling
+	// rather than one that takes an occupied seat (gt-v5n2be, gt-dtx3ht).
+	DeadRead bool
+	HookHeld bool
 	// HookedBead is the id of the live work the seat's hook reference names,
 	// "" when the reference is absent, cannot be read, or names no live work.
 	// A running sling and the seat hooking its bead are one seat, so the pool
@@ -738,6 +759,7 @@ func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, dispo
 		// A role that names no seat names no record to read either.
 		agent := ""
 		var hookedBead string
+		var agentWorking bool
 		if ok {
 			state, occupied := poolSeatReadState(disposition, rigName, polecatName)
 			if !occupied {
@@ -747,12 +769,13 @@ func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, dispo
 			// names, so the roster can count a running sling and this seat
 			// once without a second read (gt-75fma5).
 			hookedBead = state.HookedBead
+			agentWorking = state.AgentWorking
 			agent, err = poolSeatAgent(seatAgent, rigName, polecatName)
 			if err != nil {
 				agent = config.UnknownSeatAgent
 			}
 		}
-		out = append(out, poolSession{name: n, agent: agent, created: created, sandbox: n, rig: rigName, polecat: polecatName, hookedBead: hookedBead})
+		out = append(out, poolSession{name: n, agent: agent, created: created, sandbox: n, rig: rigName, polecat: polecatName, hookedBead: hookedBead, agentWorking: agentWorking})
 	}
 	return out, nil
 }
@@ -796,7 +819,9 @@ func sandboxSeatDeathsFor(townRoot string) sandboxSeatDeadFunc {
 
 // withoutDeadSandboxSeats drops the live sessions the patrol has recorded as
 // dead. The seat is not freed: the caller's dead-hooked read counts it as held
-// while no working session answers for it.
+// while no working session answers for it — and a seat whose agent bead names
+// an active state is kept, because the list still reads that seat as working
+// (gt-v5n2be).
 func withoutDeadSandboxSeats(live []poolSession, dead sandboxSeatDeadFunc) []poolSession {
 	kept, _ := partitionDeadSandboxSeats(live, dead)
 	return kept
@@ -814,6 +839,10 @@ func partitionDeadSandboxSeats(live []poolSession, dead sandboxSeatDeadFunc) ([]
 	kept := live[:0:0]
 	var deadSeats map[string]bool
 	for _, s := range live {
+		if s.agentWorking {
+			kept = append(kept, s)
+			continue
+		}
 		if s.rig != "" && s.polecat != "" && dead(s.name, s.rig, s.polecat) {
 			if deadSeats == nil {
 				deadSeats = make(map[string]bool)
@@ -876,10 +905,23 @@ func poolSeatStateOccupied(state poolSeatState, err error) bool {
 	if err != nil {
 		return true
 	}
+	// A seat whose agent bead names an active state is working, and a working
+	// seat counts toward capacity whatever else its record says: the list reads
+	// the same state as WORKING, so freeing it here would spend a seat the
+	// list counts (gt-v5n2be).
+	if state.AgentWorking {
+		return true
+	}
 	d := state.Disposition
+	// A seat that still holds live work keeps the pool's count: the list reads
+	// a live one as WORKING, and freeing a held seat is the sling this pool
+	// exists to refuse — the direction gt-v5n2be requires, one refused sling
+	// rather than an occupied seat handed out. The seats the exemptions were
+	// written for — work handed off, nothing in flight — read HookHeld false
+	// and are still freed.
 	if d.ReuseStatus == "idle-pr-open" {
 		// A done seat waiting on the refinery is not spending the seat (gt-2nft).
-		return false
+		return state.HookHeld
 	}
 	// A seat whose only capacity-counting blocker is commits preserved on its
 	// branch, and whose bead is already terminal, is not spending the seat
@@ -887,7 +929,7 @@ func poolSeatStateOccupied(state poolSeatState, err error) bool {
 	// recoverable from origin. It stays NEEDS_RECOVERY in `gt polecat list`, so
 	// it is still visible and recoverable — it just stops filling the roster.
 	if d.CommitsPreservedOnBranch {
-		return false
+		return state.HookHeld
 	}
 	return true
 }
@@ -1122,7 +1164,22 @@ func poolPolecatSeatStateFromBeadRead(townRoot, rigName, polecatName string, rea
 		}
 	}
 	d := polecat.DecideWorkstate(polecat.NewWorkstateInput(facts))
-	return poolSeatState{Disposition: d, HookHeld: seat.held, HookedBead: seat.hookedBead}, nil
+	// The sessionless read decides the same facts as a dead seat's, where the
+	// list has read the agent bead: AgentBeadRead lets a missing cleanup_status
+	// the live probe answered clear, so a dead seat with no unsaved work is
+	// freed here exactly as the list frees it (gt-v5n2be, decision A2). The
+	// live read above keeps the fail-closed answer, so no seat the pool counts
+	// today is freed by this one.
+	dead := facts
+	dead.AgentBeadRead = true
+	return poolSeatState{
+		Disposition:     d,
+		AgentWorking:    beads.AgentState(strings.TrimSpace(seat.fields.AgentState)).IsActive(),
+		DeadDisposition: polecat.DecideWorkstate(polecat.NewWorkstateInput(dead)),
+		DeadRead:        true,
+		HookHeld:        seat.held,
+		HookedBead:      seat.hookedBead,
+	}, nil
 }
 
 // poolAssignedWorkEvidence reads the work bead assigned to one polecat and

@@ -490,7 +490,7 @@ func (w *testPoolTown) process() *poolRouter {
 		townRoot:    w.root,
 		pool:        func() *config.PolecatPool { return w.pool },
 		sessions:    func() sessionLister { return w.lister },
-		disposition: nil,
+		disposition: freeDeadSeats,
 		hookHeld:    noHeldHooks,
 		seats: &poolSeatLedger{
 			townRoot: w.root,
@@ -987,7 +987,9 @@ func (b *seatReadBarrier) reads() []polecatDispositionFunc {
 		var once sync.Once
 		out[i] = func(string, string) (poolSeatState, error) {
 			once.Do(func() { b.arrive(i) })
-			return poolSeatState{}, nil
+			// A measured free seat: these tests measure where the read sits
+			// against the lock, not the dead-seat rule (gt-v5n2be).
+			return deadSeatRead(true), nil
 		}
 	}
 	return out
@@ -1176,7 +1178,7 @@ func TestSeatDecisionHoldsTheLockAcrossNoBdRead(t *testing.T) {
 	}
 	r.disposition = func(string, string) (poolSeatState, error) {
 		reader.note()
-		return poolSeatState{}, nil
+		return deadSeatRead(true), nil
 	}
 	r.work = func(ids []string) (map[string]*beads.Issue, error) {
 		reader.note()
@@ -1280,7 +1282,7 @@ func TestRouteCountsLiveSessionsWhenTheSeatPictureCannotBeRead(t *testing.T) {
 	}
 	r.disposition = func(string, string) (poolSeatState, error) {
 		reader.note()
-		return poolSeatState{}, nil
+		return deadSeatRead(true), nil
 	}
 	r.work = func([]string) (map[string]*beads.Issue, error) {
 		reader.note()
@@ -1358,7 +1360,8 @@ func TestSeatDecisionCountsTheSessionTheSeatPictureDidNotRead(t *testing.T) {
 			// that releases it is what this test is about (gt-gg9hv.73).
 			r.hookHeld = func(string, string) (bool, error) { return true, nil }
 			r.disposition = func(string, string) (poolSeatState, error) {
-				return poolSeatState{Disposition: polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}}, nil
+				d := polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}
+				return poolSeatState{Disposition: d, DeadDisposition: d, DeadRead: true}, nil
 			}
 			r.now = func() time.Time { return poolTestNow }
 			// The session takes the seat as this decision reaches the lock, after
@@ -2104,7 +2107,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 
 			// The picture `gt daemon dispatch-check` nudges from and the spec
 			// dispatcher's roster reads.
-			picture, err := poolSeatSessionsWith(c.lister, town, nil, noHeldHooks, work, pool)
+			picture, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -2118,7 +2121,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 				townRoot:    town,
 				pool:        func() *config.PolecatPool { return pool },
 				sessions:    func() sessionLister { return c.lister },
-				disposition: nil,
+				disposition: freeDeadSeats,
 				hookHeld:    noHeldHooks,
 				work:        work,
 				seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
@@ -2155,7 +2158,7 @@ func TestRouteRefusesASeatMidLanding(t *testing.T) {
 		townRoot:    town,
 		pool:        func() *config.PolecatPool { return pool },
 		sessions:    func() sessionLister { return &fakeLister{} },
-		disposition: nil,
+		disposition: freeDeadSeats,
 		hookHeld:    noHeldHooks,
 		work:        submittedWork("gt-ruby"),
 		seats:       poolSeatLedgerFor(town, newPoolSeatClaimStore()),
@@ -2436,6 +2439,19 @@ func hookHeldOf(disposition polecatDispositionFunc) polecatHookHeldFunc {
 	}
 }
 
+// deadSeatRead fakes a sessionless seat's read: a measured disposition, free
+// when free says it does not count toward capacity. Since gt-v5n2be the walk
+// decides from this read rather than from HookHeld, so a fixture that means
+// "this seat is free" says so here.
+func deadSeatRead(free bool) poolSeatState {
+	d := polecat.WorkstateDisposition{CountsTowardCapacity: !free}
+	return poolSeatState{Disposition: d, DeadDisposition: d, DeadRead: true}
+}
+
+// freeDeadSeats is the sessionless seat read a test passes when it is not
+// measuring the walk itself: every seat reads as measured and free.
+func freeDeadSeats(string, string) (poolSeatState, error) { return deadSeatRead(true), nil }
+
 // deferredExitFields is the agent bead a polecat leaves behind when its turn
 // ends with `gt done --status DEFERRED` (or the hand-off that redirects to it):
 // agent_state=stuck, the recorded cleanup status has_unpushed, and — the fact
@@ -2478,8 +2494,13 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 	ts.PolecatPool = pool
 
 	stillAssigned := assignedActiveWork("gt-92qx3")
+	// A bead waiting to land is submitted evidence, not a restart: the
+	// production assessor (assessPolecatAssignedIssueWork) gives it neither the
+	// restart nor the capacity count, which is why the list frees the seat.
 	submitted := stillAssigned
 	submitted.Submitted = true
+	submitted.RequiresRestart = false
+	submitted.CountsTowardCapacity = false
 
 	cases := []struct {
 		name     string
@@ -2500,6 +2521,9 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "ember")
 			reads := poolSeatReadsAnswering(t, deferredExitFields(), c.assigned)
+			// The seat keeps its clean worktree after the turn ends; the
+			// sessionless read frees it only against that measured answer.
+			reads.probe = stageCleanProbeSeat(t, town, "gastown", "ember")
 
 			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
 			if err != nil {

@@ -120,7 +120,9 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 			writeTownPolecatDir(t, town, "gastown", "jade")
 			seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "jade"}
 			rec := intent.Record{Agent: c.slungAgent}
-			var disposition polecatDispositionFunc
+			// The seat's directory is read either way (gt-v5n2be); the landing
+			// rows read it as a measured free seat and the dead row holds it.
+			disposition := polecatDispositionFunc(freeDeadSeats)
 			var work poolSeatWorkFunc
 			if c.deadHooked {
 				disposition = hookedNeedsRecovery

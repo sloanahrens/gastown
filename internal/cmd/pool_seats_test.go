@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -324,7 +322,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 				work = submittedWork("gt-ruby")
 			}
 
-			got, err := poolSeatSessionsWith(c.lister, town, nil, noHeldHooks, work, pool)
+			got, err := poolSeatSessionsWith(c.lister, town, freeDeadSeats, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -335,25 +333,20 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 	}
 }
 
-// TestPoolSeatSessionsCountsDeadHookedSeats pins gt-tldj4: a polecat whose tmux
-// session is gone but whose bead is still hooked — its supervised restart is
-// due — holds the pool's seat, the way `gt polecat list` counts it, while a
-// seat whose bead is terminal or that has no hooked bead does not (gt-b9ud0
-// unchanged). The last case is the restart transition one step on: the same
+// TestPoolSeatSessionsCountsDeadHookedSeats pins gt-tldj4 with the sessionless
+// read gt-v5n2be settled on: a dead seat holds the pool's seat unless its
+// measured read says it does not count toward capacity, whatever its hook
+// holds. An unmeasured read — the zero value no path sets on purpose — counts
+// the seat, so a bead-database hiccup refuses a sling rather than taking an
+// occupied seat. The last case is the restart transition one step on: the same
 // seat, live again, is one seat, so the restart cannot push the town over the
 // cap.
 func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 	t.Parallel()
 	pool := seatPool("deepseek-flash", 3)
 
-	held := polecat.WorkstateDisposition{
-		Verdict:              polecat.WorkstateVerdictNeedsRecovery,
-		Reason:               "hook-still-set",
-		NeedsRecovery:        true,
-		CountsTowardCapacity: true,
-		ReuseStatus:          "idle-recovery-needed",
-	}
-	finished := polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSafeToNuke}
+	held := deadSeatRead(false)
+	held.HookHeld = true
 
 	cases := []struct {
 		name     string
@@ -363,29 +356,17 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 	}{
 		{
 			name:  "dead session with the bead still hooked holds the seat",
-			state: poolSeatState{Disposition: held, HookHeld: true},
+			state: held,
 			want:  1,
 		},
 		{
-			name: "a terminal bead is not held by a dead session",
-			// CountsTowardCapacity is true on purpose: the terminal bead alone
-			// must keep the seat out, not the capacity field.
-			state: poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, CountsTowardCapacity: true}, HookHeld: false},
-			want:  0,
-		},
-		{
-			name:  "no hooked bead is not held by a dead session",
-			state: poolSeatState{Disposition: finished, HookHeld: false},
-			want:  0,
-		},
-		{
-			name:  "a hooked seat whose state does not count toward capacity is not held",
-			state: poolSeatState{Disposition: finished, HookHeld: true},
+			name:  "a measured read that does not count frees the seat",
+			state: deadSeatRead(true),
 			want:  0,
 		},
 		{
 			name:  "the same seat live again is still exactly one seat",
-			state: poolSeatState{Disposition: held, HookHeld: true},
+			state: held,
 			sessions: map[string]map[string]string{
 				"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
 			},
@@ -528,13 +509,9 @@ func TestSandboxSeatDeathsAreThePatrolsRecordedVerdict(t *testing.T) {
 func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 	t.Parallel()
 	pool := seatPool("deepseek-flash", 3)
-	held := poolSeatState{
-		Disposition: polecat.WorkstateDisposition{
-			Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true,
-		},
-		HookHeld: true,
-	}
-	free := poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSafeToNuke}}
+	held := deadSeatRead(false)
+	held.HookHeld = true
+	free := deadSeatRead(true)
 	const sandbox = "gt-ember"
 	answering := &fakeLister{sessions: map[string]map[string]string{
 		sandbox: {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
@@ -877,7 +854,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 		}
 		return out, nil
 	}
-	got, err := poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, over, pool)
+	got, err := poolSeatSessionsWith(&fakeLister{}, town, freeDeadSeats, noHeldHooks, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -887,7 +864,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 
 	// A record with no work bead names nothing to confirm, so it holds nothing.
 	writeLandingSeat(t, town, "gastown", "opal", "")
-	got, err = poolSeatSessionsWith(&fakeLister{}, town, nil, noHeldHooks, over, pool)
+	got, err = poolSeatSessionsWith(&fakeLister{}, town, freeDeadSeats, noHeldHooks, over, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -975,7 +952,7 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 				agent = "deepseek-flash"
 			}
 
-			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, nil, noHeldHooks, work, pool)
+			sessions, err := poolSeatSessionsWith(&fakeLister{sessions: c.sessions}, town, freeDeadSeats, noHeldHooks, work, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
@@ -1083,7 +1060,9 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 
 			seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "jade"}
 			rec := intent.Record{Agent: c.slungAgent}
-			var disposition polecatDispositionFunc
+			// The seat's directory is read either way (gt-v5n2be); the landing
+			// rows read it as a measured free seat and the dead row holds it.
+			disposition := polecatDispositionFunc(freeDeadSeats)
 			var work poolSeatWorkFunc
 			if c.deadHooked {
 				// A crashed polecat whose bead is still hooked: the seat-state
@@ -1310,6 +1289,9 @@ func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *tes
 					return handedBack, nil
 				},
 			}
+			// The stop keeps the seat's worktree (the overrun guard keeps the
+			// sandbox as it was); it is clean, so the reset seat is free.
+			reads.probe = stageCleanProbeSeat(t, town, "gastown", "nux")
 			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, pool)
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
@@ -1318,6 +1300,47 @@ func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *tes
 				t.Fatalf("pool seat count = %d, want %d (%+v)", n, c.want, sessions)
 			}
 		})
+	}
+}
+
+// stageCleanProbeSeat leaves the seat a probeable worktree and returns the
+// probe that answers it clean. A sessionless read that never probes — the
+// recorded cleanup_status standing in — counts a seat the list frees; the
+// worktree is what makes the two reads agree (gt-v5n2be).
+func stageCleanProbeSeat(t *testing.T, town, rig, name string) func(string) polecat.LiveGitState {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(town, rig, "polecats", name, rig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return func(string) polecat.LiveGitState {
+		return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/gt-x"}
+	}
+}
+
+// TestPoolSeatSessionsFreesACleanProbeWithoutACleanupStatus bridges the seat
+// read's live and sessionless answers over a town fixture: a stop that keeps
+// the worktree (the overrun guard keeps the sandbox as it was, and a hand-back
+// keeps the seat's checkout) leaves a clean, probeable worktree behind, and the
+// sessionless read frees that seat the way the list does.
+func TestPoolSeatSessionsFreesACleanProbeWithoutACleanupStatus(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "ember")
+	if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "ember", "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reads := poolSeatReadsAnswering(t, &beads.AgentFields{AgentState: string(beads.AgentStateNuked)}, polecatActiveWorkEvidence{})
+	reads.probe = func(string) polecat.LiveGitState {
+		return polecat.LiveGitState{Source: polecat.GitStateSourceLive, Branch: "polecat/gt-x"}
+	}
+
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, poolDispositionAnswering(town, reads), poolHookHeldAnswering(town, reads), nil, seatPool("deepseek-flash", 3))
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith: %v", err)
+	}
+	if n := poolSeatCount("deepseek-flash", sessions); n != 0 {
+		t.Fatalf("pool seat count = %d, want the clean-probe seat freed (%+v)", n, sessions)
 	}
 }
 
@@ -1494,73 +1517,26 @@ func deadHookedWalkTestTown(t *testing.T, names ...string) (string, *config.Pole
 	return town, seatPool("deepseek-flash", 3)
 }
 
-// poolDeadHookedSessionsBeforeTheSplit is the dead-hooked walk as it was before
-// gt-gg9hv.73: the full seat read for every polecat directory that is not a
-// live seat, HookHeld taken from that read. It is the equivalence test's oracle,
-// kept here rather than in production so the two walks can be compared.
-func poolDeadHookedSessionsBeforeTheSplit(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession, now time.Time) ([]poolSession, error) {
-	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil {
-		return nil, nil
-	}
-	fallback := unrecordedSeatAgent(townRoot, pool)
-	liveSeats := liveSeatKeys(live)
-	rigs, err := knownRigNames(townRoot)
-	if err != nil {
-		return nil, err
-	}
-	var out []poolSession
-	for _, rigName := range rigs {
-		names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rigName))
-		if err != nil {
-			return nil, fmt.Errorf("listing polecats in %s: %w", rigName, err)
-		}
-		for _, name := range names {
-			if liveSeats[rigName+"/"+name] {
-				continue
-			}
-			state, err := disposition(rigName, name)
-			if err != nil || !state.HookHeld || !state.Disposition.CountsTowardCapacity {
-				continue
-			}
-			rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
-			stale := parkedStale(townRoot, rigName, name, now)
-			out = append(out, poolSession{
-				name:        "dead/" + rigName + "/" + name,
-				agent:       slungAgent(rec, fallback(rigName)),
-				sandbox:     session.PolecatSessionName(beads.GetPrefixForRig(townRoot, rigName), name),
-				rig:         rigName,
-				polecat:     name,
-				deadHooked:  !stale,
-				parkedStale: stale,
-			})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
-	return out, nil
-}
-
-// TestPoolDeadHookedEquivalentToTheOldWalk is gt-gg9hv.73's behaviour proof:
-// the walk that reads the hook before the worktree probe returns exactly the
-// seats the old walk returned, over every combination of a hook held or not, a
-// session live or not, and a state counting toward capacity or not. The old
-// walk is the oracle; the probe is the full seat read's fake, counted here.
-func TestPoolDeadHookedEquivalentToTheOldWalk(t *testing.T) {
+// TestPoolDeadHookedCountsTheMeasuredDeadRead is the walk's behaviour after
+// gt-v5n2be: a sessionless seat counts unless its measured read says it does
+// not count toward capacity. The hook's answer no longer decides the seat, and
+// a read that never reached a disposition (DeadRead false) counts it. A live
+// session keeps its own seat, so the walk never runs for it.
+func TestPoolDeadHookedCountsTheMeasuredDeadRead(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1760000000, 0)
 	cases := []struct {
 		name   string
-		held   bool
+		state  poolSeatState
 		live   bool
-		counts bool
+		want   int
+		probed int
 	}{
-		{"a held hook on a dead seat counts", true, false, true},
-		{"a held hook whose state does not count", true, false, false},
-		{"a held hook on a live seat", true, true, true},
-		{"a held hook on a live seat whose state does not count", true, true, false},
-		{"no held hook on a dead seat", false, false, true},
-		{"no held hook and a state that does not count", false, false, false},
-		{"no held hook on a live seat", false, true, true},
-		{"no held hook on a live seat whose state does not count", false, true, false},
+		{"a measured read that counts holds the seat", deadSeatRead(false), false, 1, 1},
+		{"a measured read that does not count frees the seat", deadSeatRead(true), false, 0, 1},
+		{"an unmeasured read counts the seat", poolSeatState{}, false, 1, 1},
+		{"a held hook does not override a measured free read", deadSeatRead(true), false, 0, 1},
+		{"a live session keeps its seat and is not walked", deadSeatRead(false), true, 0, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1570,71 +1546,65 @@ func TestPoolDeadHookedEquivalentToTheOldWalk(t *testing.T) {
 			if c.live {
 				live = []poolSession{{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember"}}
 			}
-			disposition := func(rigName, polecatName string) (poolSeatState, error) {
-				return poolSeatState{
-					Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: c.counts},
-					HookHeld:    c.held,
-				}, nil
-			}
-			hookHeld := func(string, string) (bool, error) { return c.held, nil }
+			disposition := func(string, string) (poolSeatState, error) { return c.state, nil }
+			hookHeld := func(string, string) (bool, error) { return c.state.HookHeld, nil }
 
-			want, err := poolDeadHookedSessionsBeforeTheSplit(town, pool, disposition, live, now)
-			if err != nil {
-				t.Fatalf("the old walk: %v", err)
-			}
 			got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, live, now)
 			if err != nil {
 				t.Fatalf("poolDeadHookedSessions: %v", err)
 			}
-			if !reflect.DeepEqual(got, want) {
-				t.Fatalf("dead-hooked seats = %+v, want the old walk's %+v", got, want)
+			if len(got) != c.want {
+				t.Fatalf("dead-hooked seats = %+v, want %d", got, c.want)
 			}
-			// The full seat read (the worktree probe) runs only for a seat
-			// whose hook is held and whose session is gone.
-			wantProbed := 0
-			if c.held && !c.live {
-				wantProbed = 1
-			}
-			if probed != wantProbed {
-				t.Fatalf("probed %d worktrees, want %d", probed, wantProbed)
+			if probed != c.probed {
+				t.Fatalf("probed %d worktrees, want %d", probed, c.probed)
 			}
 		})
 	}
 }
 
-// TestPoolDeadHookedProbesOnlyHeldHooks is gt-gg9hv.73's cost proof: the
-// worktree probe (the full seat read) runs for the seats whose hook is held and
-// for no other, while the cheap hook read runs for every dead seat. Moving the
-// probe back before the hook read makes the probed names include the seat whose
-// hook is not held.
-func TestPoolDeadHookedProbesOnlyHeldHooks(t *testing.T) {
+// TestPoolDeadHookedProbesEachDeadSeatOnce is the cost bound gt-v5n2be owes
+// after reversing gt-gg9hv.73's probe cut (decision A): every sessionless
+// directory is probed, and each exactly once per pass, while a directory a live
+// session already holds is not probed at all. A walk that probed twice, or that
+// probed a live seat, makes one of the counts below larger.
+func TestPoolDeadHookedProbesEachDeadSeatOnce(t *testing.T) {
 	t.Parallel()
-	town, pool := deadHookedWalkTestTown(t, "amber", "basalt", "cobalt")
-	held := map[string]bool{"amber": true, "basalt": false, "cobalt": true}
-	var hookReads, probedNames []string
+	const deadDirs = 20
+	names := make([]string, 0, deadDirs+1)
+	for i := 0; i < deadDirs; i++ {
+		names = append(names, fmt.Sprintf("p%02d", i))
+	}
+	town, pool := deadHookedWalkTestTown(t, append(names, "live1")...)
+	live := []poolSession{{name: "gt-live1", agent: "deepseek-flash", rig: "gastown", polecat: "live1"}}
+
+	probes := map[string]int{}
+	hookReads := map[string]int{}
 	disposition := func(_ string, polecatName string) (poolSeatState, error) {
-		probedNames = append(probedNames, polecatName)
-		return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: held[polecatName]}, nil
+		probes[polecatName]++
+		return deadSeatRead(false), nil
 	}
 	hookHeld := func(_ string, polecatName string) (bool, error) {
-		hookReads = append(hookReads, polecatName)
-		return held[polecatName], nil
+		hookReads[polecatName]++
+		return false, nil
 	}
-	got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, time.Unix(1760000000, 0))
+	got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, live, time.Unix(1760000000, 0))
 	if err != nil {
 		t.Fatalf("poolDeadHookedSessions: %v", err)
 	}
-	if want := []string{"amber", "basalt", "cobalt"}; !reflect.DeepEqual(hookReads, want) {
-		t.Fatalf("the hook read ran for %v, want every dead seat %v", hookReads, want)
+	if probed != deadDirs || len(got) != deadDirs {
+		t.Fatalf("probed %d seats, counted %d, want %d of each", probed, len(got), deadDirs)
 	}
-	if want := []string{"amber", "cobalt"}; !reflect.DeepEqual(probedNames, want) {
-		t.Fatalf("the worktree probe ran for %v, want only the held hooks %v", probedNames, want)
+	for _, name := range names {
+		if probes[name] != 1 {
+			t.Fatalf("seat %s was probed %d times in one pass, want once", name, probes[name])
+		}
+		if hookReads[name] != 1 {
+			t.Fatalf("seat %s's hook was read %d times in one pass, want once", name, hookReads[name])
+		}
 	}
-	if probed != 2 {
-		t.Fatalf("probed = %d, want 2", probed)
-	}
-	if len(got) != 2 {
-		t.Fatalf("dead-hooked seats = %+v, want the two held ones", got)
+	if probes["live1"] != 0 {
+		t.Fatalf("the live seat was probed %d times, want none", probes["live1"])
 	}
 }
 
@@ -1817,22 +1787,22 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}
 	})
 
-	t.Run("a nil disposition is an error only for a held seat", func(t *testing.T) {
+	t.Run("a nil disposition is an error", func(t *testing.T) {
 		t.Parallel()
 		town, pool := deadHookedWalkTestTown(t, "ember")
-		if _, _, err := poolDeadHookedSessions(town, pool, nil, heldHook, nil, now); err == nil {
-			t.Fatal("a held seat with a nil disposition walked to an empty result without an error")
-		}
-		got, _, err := poolDeadHookedSessions(town, pool, nil, noHeldHooks, nil, now)
-		if err != nil || len(got) != 0 {
-			t.Fatalf("no held hook with a nil disposition = %+v, %v, want no seats and no error", got, err)
+		// Every sessionless seat is read now (gt-v5n2be), so a nil read is a
+		// seam not wired wherever one is found.
+		if _, _, err := poolDeadHookedSessions(town, pool, nil, noHeldHooks, nil, now); err == nil {
+			t.Fatal("a sessionless seat with a nil disposition walked to an empty result without an error")
 		}
 	})
 }
 
 // TestRosterLogsTheProbedWorktreeCount is gt-gg9hv.73's observable effect: the
 // tick's roster read counts the worktrees its dead-hooked walk probed, and the
-// report logs that count, zero for a roster of polecats with no held hook.
+// report logs that count. Since gt-v5n2be reversed the probe cut (the pool
+// counts what the list counts, decision A), that is every sessionless polecat
+// directory, hooked or not.
 func TestRosterLogsTheProbedWorktreeCount(t *testing.T) {
 	t.Parallel()
 	now := time.Unix(1760000000, 0)
@@ -1841,8 +1811,8 @@ func TestRosterLogsTheProbedWorktreeCount(t *testing.T) {
 		held       func(string) bool
 		wantProbed int
 	}{
-		{"a roster of polecats with no held hook", func(string) bool { return false }, 0},
-		{"a roster with one held hook", func(name string) bool { return name == "cobalt" }, 1},
+		{"a roster of polecats with no held hook", func(string) bool { return false }, 2},
+		{"a roster with one held hook", func(name string) bool { return name == "cobalt" }, 2},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
