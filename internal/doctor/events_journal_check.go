@@ -5,16 +5,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
-// EventsJournalCheck fails when a store's config leaves bd's events journal
-// off. gt tail reads the journal, and bd writes one only when the store's
-// config.yaml turns it on (gt-7iwy0.7). The value is read with any inherited
-// BD_EVENTS_JOURNAL removed.
+// EventsJournalCheck reports whether each store's config has bd's events
+// journal on. gt tail reads the journal, and bd writes one only when the
+// store's config.yaml turns it on (gt-7iwy0.7). A store that has it off is
+// named in the details, not failed; only a store whose setting cannot be read
+// fails the check. The value is read with any inherited BD_EVENTS_JOURNAL
+// removed.
 type EventsJournalCheck struct {
 	BaseCheck
 	// environ is the environment bd runs under before the check pins it to
@@ -27,7 +30,7 @@ func NewEventsJournalCheck() *EventsJournalCheck {
 	return &EventsJournalCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        "events-journal",
-			CheckDescription: "Check every beads store has the events journal on",
+			CheckDescription: "Report whether every beads store has the events journal on",
 			CheckCategory:    CategoryConfig,
 		},
 	}
@@ -57,7 +60,7 @@ func (c *EventsJournalCheck) Run(ctx *CheckContext) *CheckResult {
 		env = c.environ
 	}
 
-	var off, details []string
+	var on, off, unreadable, details []string
 	checked := 0
 	for _, name := range stores {
 		dir := doltserver.FindRigBeadsDir(ctx.TownRoot, name)
@@ -66,28 +69,34 @@ func (c *EventsJournalCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		checked++
 		v, err := ctx.bd(filepath.Dir(dir), beads.EventsJournalProbeEnv(env(), dir)).ConfigGet(beads.EventsJournalKey)
+		configPath := filepath.Join(dir, "config.yaml")
 		switch {
 		case err != nil:
-			off = append(off, name)
+			unreadable = append(unreadable, name)
 			details = append(details, fmt.Sprintf("%s: cannot read %s: %s", name, beads.EventsJournalKey, bdOutput(err)))
-		case !beads.EventsJournalOn(v):
+		case beads.EventsJournalOn(v):
+			on = append(on, name)
+		case strings.TrimSpace(v) == "":
 			off = append(off, name)
-			details = append(details, fmt.Sprintf("%s: %s is off in %s", name, beads.EventsJournalKey, filepath.Join(dir, "config.yaml")))
+			details = append(details, fmt.Sprintf("%s: %s is not set in %s; bd's default is off", name, beads.EventsJournalKey, configPath))
+		default:
+			off = append(off, name)
+			details = append(details, fmt.Sprintf("%s: %s is off in %s", name, beads.EventsJournalKey, configPath))
 		}
 	}
 
-	if len(off) == 0 {
+	if len(unreadable) > 0 {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Events journal on in %d store(s)", checked),
+			Status:  StatusError,
+			Message: fmt.Sprintf("Cannot read the %s setting in %d store(s)", beads.EventsJournalKey, len(unreadable)),
+			Details: details,
 		}
 	}
 	return &CheckResult{
 		Name:    c.Name(),
-		Status:  StatusError,
-		Message: fmt.Sprintf("Events journal off in %d store(s): gt tail reads no events from them", len(off)),
+		Status:  StatusOK,
+		Message: fmt.Sprintf("Events journal on in %d of %d store(s)", len(on), checked),
 		Details: details,
-		FixHint: fmt.Sprintf("In each store's beads dir run 'BEADS_DIR=<dir> bd config set %s true', then commit config.yaml where it is git-tracked", beads.EventsJournalKey),
 	}
 }
