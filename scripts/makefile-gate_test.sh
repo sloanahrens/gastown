@@ -53,7 +53,7 @@ fi
 
 lint=$(line_of "$out" "golangci-lint run")
 build=$(line_of "$out" "go build ./...")
-unit=$(line_of "$out" "go test -timeout 20m ./...")
+unit=$(line_of "$out" 'go test -p $q -timeout 20m ./...')
 shell=$(line_of "$out" "internal/shelltier/cmd/shelltier")
 if [[ -n "$lint" && -n "$build" && -n "$unit" && "$lint" -lt "$build" && "$build" -lt "$unit" ]]; then
   pass "gate runs lint, then go build ./..., then the cached unit tier"
@@ -69,7 +69,7 @@ fi
 # reruns only the packages a landing can affect; the budget runner's -exec
 # wrapper bypassed the cache and reran every test on every landing. Budgets
 # stay enforced by make tier-check (the hourly sweep), not the landing path.
-if grep -q -F 'go test -timeout 20m ./...' <<<"$out" && ! grep -q -F 'cmd/budget' <<<"$out" && ! grep -q -E -- '-count[= ]1|-exec' <<<"$out" && ! grep -q -E -- '-slow( |=)|slow\.txt' <<<"$out"; then
+if grep -q -F 'go test -p $q -timeout 20m ./...' <<<"$out" && ! grep -q -F 'cmd/budget' <<<"$out" && ! grep -q -E -- '-count[= ]1|-exec' <<<"$out" && ! grep -q -E -- '-slow( |=)|slow\.txt' <<<"$out"; then
   pass "gate runs the unit tier over every package through the test cache (no budget -exec, no -count=1)"
 else
   fail "gate runs the unit tier over every package through the test cache (no budget -exec, no -count=1)" "$out"
@@ -97,7 +97,7 @@ else
   pass "gate never takes the container-gate slot"
 fi
 
-if grep -q -F 'GT_TEST_DOCKER=0 go test -timeout 20m ./...' <<<"$out"; then
+if grep -q -F 'GT_TEST_DOCKER=0 go test -p $q -timeout 20m ./...' <<<"$out"; then
   pass "gate writes the container opt-in off where the unit tier starts"
 else
   fail "gate writes the container opt-in off where the unit tier starts" "$out"
@@ -116,7 +116,7 @@ else
   fail "an inherited GT_TEST_DOCKER=1 does not change the gate"
 fi
 
-if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- 'go test -timeout 20m ./...' <<<"$out"; then
+if [[ "$(grep -v -E '^[[:space:]]*#' <<<"$out" | grep -c -E -- '(^| )-timeout[ =]')" == 1 ]] && grep -q -F -- 'go test -p $q -timeout 20m ./...' <<<"$out"; then
   pass "gate carries one -timeout, on the unit tier's go test (the one gate definition)"
 else
   fail "gate carries one -timeout, on the unit tier's go test (the one gate definition)" "$(grep -n -E -- '-timeout' <<<"$out")"
@@ -159,9 +159,9 @@ if sout=$(dry test-slow); then
 else
   fail "make -n test-slow exits 0" "$sout"
 fi
-sgate=$(line_of "$sout" "go test -timeout 20m ./...")
+sgate=$(line_of "$sout" 'go test -p $q -timeout 20m ./...')
 sshell=$(line_of "$sout" "GT_TEST_DOCKER=0 go run ./internal/shelltier/cmd/shelltier --all")
-if [[ -n "$sgate" && -n "$sshell" && "$sgate" -lt "$sshell" ]] && grep -q -F 'go test -timeout 20m ./...' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
+if [[ -n "$sgate" && -n "$sshell" && "$sgate" -lt "$sshell" ]] && grep -q -F 'go test -p $q -timeout 20m ./...' <<<"$sout" && ! grep -q -E 'GT_TEST_DOCKER=[^0]|slot +run' <<<"$sout"; then
   pass "test-slow runs the gate, then the shell tests, containers off, no slot"
 else
   fail "test-slow runs the gate, then the shell tests, containers off, no slot (lines: gate=$sgate shell=$sshell)" "$sout"
@@ -782,6 +782,13 @@ if [[ -n "${STUB_GO_FAIL_DIR:-}" ]]; then
   fi
 fi
 [[ "$1" == "${STUB_GO_FAIL:-}" && $dir_ok == 1 ]] && exit 1
+# The CPU quota the unit tier reads: a number, so GOMAXPROCS and -p carry a real
+# value; STUB_CPU_QUOTA_FAIL drives the recipe's refusal of a failed run.
+if [[ "$1" == run && "$2" == ./internal/testpolicy/cmd/cpuquota ]]; then
+  [[ -z "${STUB_CPU_QUOTA_FAIL:-}" ]] || exit 1
+  echo "${STUB_CPU_QUOTA:-2}"
+  exit 0
+fi
 # The tierwall series run: STUB_TIERWALL_EXIT makes it fail without touching
 # the Go suite's status, and it drains its stream the way the real one reads it.
 if [[ "$1" == run && "$*" == *cmd/tierwall* ]]; then cat >/dev/null; exit "${STUB_TIERWALL_EXIT:-0}"; fi
@@ -890,6 +897,15 @@ if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at build' "$TMP/err" && ! grep -
   pass "build fails: non-zero, names the build stage, unit tier never starts"
 else
   fail "build fails: non-zero, names the build stage, unit tier never starts (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+# The unit tier's width is the CPU quota (gt-g9fnsa): a cpuquota run that fails
+# stops the gate rather than running the tier at a default width.
+rc=$(run_gate -o lint -- STUB_CPU_QUOTA_FAIL=1)
+if [[ "$rc" != 0 ]] && grep -q -F 'gate: FAILED at cpuquota' "$TMP/err" && ! grep -q -E '^go test' "$TMP/calls"; then
+  pass "cpuquota fails: non-zero, names the stage, the unit tier never starts"
+else
+  fail "cpuquota fails: non-zero, names the stage, the unit tier never starts (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 rc=$(run_gate -o lint -- STUB_GO_FAIL=test)

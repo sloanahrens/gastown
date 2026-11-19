@@ -58,7 +58,7 @@ func TestIntegrationGateRunsLintThenBuildThenUnitTier(t *testing.T) {
 	out := dryGate(t, RealMake(repoRoot(t)))
 	lint := lineOf(out, "golangci-lint run")
 	build := lineOf(out, "go build ./...")
-	unit := lineOf(out, "go test -timeout 20m ./...")
+	unit := lineOf(out, unitTierLine)
 	if lint == 0 || build == 0 || unit == 0 || lint >= build || build >= unit {
 		t.Fatalf("gate's stages are out of order (lint=%d build=%d unit=%d), want lint < build < unit\n%s", lint, build, unit, out)
 	}
@@ -94,13 +94,38 @@ func TestIntegrationGateLeavesShellTestsToTestSlow(t *testing.T) {
 // slow list, and go test's result cache no longer serves a landing.
 func TestIntegrationGateUnitTierRunsThroughTheCache(t *testing.T) {
 	out := dryGate(t, RealMake(repoRoot(t)))
-	if !strings.Contains(out, "go test -timeout 20m ./...") {
+	if !strings.Contains(out, unitTierLine) {
 		t.Fatalf("gate does not run the unit tier over every package\n%s", out)
 	}
 	for _, bad := range cachedUnitTierViolations {
 		if bad.match(out) {
 			t.Fatalf("gate's unit tier carries %s, so the result cache no longer serves it\n%s", bad.name, out)
 		}
+	}
+}
+
+// unitTierLine is gate's one unit-tier go test, as `make -n gate` prints it.
+const unitTierLine = "GOMAXPROCS=$q GT_TEST_DOCKER=0 go test -p $q -timeout 20m ./..."
+
+// quotaCommand is the command whose output the unit tier's parallelism is
+// (gt-g9fnsa).
+const quotaCommand = "go run ./internal/testpolicy/cmd/cpuquota"
+
+// TestIntegrationGateTakesTheUnitTierWidthFromTheCPUQuota checks "gate computes
+// the CPU quota once, before the unit tier, and the unit tier takes GOMAXPROCS
+// and -p from it, with GOMAXPROCS on no other line".
+// Mutation: drop the cpuquota run, run it once per knob, drop either knob, or
+// give the nested-module tier a quota of its own (gt-g9fnsa).
+func TestIntegrationGateTakesTheUnitTierWidthFromTheCPUQuota(t *testing.T) {
+	out := dryGate(t, RealMake(repoRoot(t)))
+	if n := strings.Count(out, quotaCommand); n != 1 {
+		t.Fatalf("gate runs %s on %d lines, want once\n%s", quotaCommand, n, out)
+	}
+	if q, unit := lineOf(out, "q=$("+quotaCommand+")"), lineOf(out, unitTierLine); q == 0 || unit == 0 || q >= unit {
+		t.Fatalf("gate's quota is at line %d and the unit tier at %d, want the quota computed first\n%s", q, unit, out)
+	}
+	if n := strings.Count(out, "GOMAXPROCS=$q"); n != 1 {
+		t.Fatalf("GOMAXPROCS=$q appears on %d lines, want only the unit tier's\n%s", n, out)
 	}
 }
 

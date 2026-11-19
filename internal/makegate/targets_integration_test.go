@@ -77,7 +77,7 @@ var targetsSlotRun = regexp.MustCompile(`slot +run`)
 // write GT_TEST_DOCKER=1 on either line, or wrap a line in `gt slot run`.
 func TestIntegrationTargetsTestSlowRunsTheGateThenTheShellTests(t *testing.T) {
 	out := dryTarget(t, defaultsMake(t, repoRoot(t)), "test-slow")
-	gate := lineOf(out, "go test -timeout 20m ./...")
+	gate := lineOf(out, "go test -p $q -timeout 20m ./...")
 	shell := lineOf(out, shellTestsLine)
 	if gate == 0 || shell == 0 || gate >= shell {
 		t.Fatalf("test-slow does not run the gate before the shell tests (gate line %d, shell line %d), want both present and the gate first\n%s", gate, shell, out)

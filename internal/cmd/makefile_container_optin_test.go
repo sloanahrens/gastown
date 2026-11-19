@@ -93,12 +93,12 @@ func TestMakefileHandsTheContainerOptInToTheSuite(t *testing.T) {
 				continue // a recipe comment, not a command
 			}
 			// A suite line is one that starts the tests: the gate's recipe runs
-			// `go test -timeout 20m ./...` directly (through the test cache,
-			// gt-s1vff), tier-check the budget wrapper
+			// `go test -p $$q -timeout 20m ./...` directly (through the test
+			// cache, gt-s1vff), tier-check the budget wrapper
 			// (internal/testpolicy/cmd/budget), and the integration recipe
 			// $(INTEGRATION_GO_TEST), go test by default. A line that merely
 			// mentions go test, such as a guard's message, is not one.
-			if !strings.Contains(line, "go test -timeout 20m ./...") && !strings.Contains(line, "go run ./internal/testpolicy/cmd/budget") && !strings.Contains(line, "$(INTEGRATION_GO_TEST) ") {
+			if !strings.Contains(line, "go test -p $$q -timeout 20m ./...") && !strings.Contains(line, "go run ./internal/testpolicy/cmd/budget") && !strings.Contains(line, "$(INTEGRATION_GO_TEST) ") {
 				continue
 			}
 			suiteLines++
