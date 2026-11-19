@@ -33,8 +33,9 @@ func renderFlagsPathIn(townRoot string) string {
 // the flag struct stays free of tags (gt-uzllg0).
 //
 // Every field of clusterRenderFlags that names a flag has a field here of the
-// same name and type; TestRenderFlagsRecordCoversTheFlagStruct fails until a
-// newly added flag is recorded or named as deliberately not recorded.
+// same name and type, apart from the two retired Mac-directory flags;
+// TestRenderFlagsRecordCoversTheFlagStruct fails until a newly added flag is
+// recorded or named there as deliberately not recorded.
 type renderFlagsRecord struct {
 	Dir                    string `json:"dir"`
 	Out                    string `json:"out"`
@@ -52,11 +53,9 @@ type renderFlagsRecord struct {
 	ForgeHost              string `json:"forge_host"`
 	DoltBackupHostPath     string `json:"dolt_backup_host_path"`
 	Dashboard              bool   `json:"dashboard"`
-	DashboardClaudeDir     string `json:"dashboard_claude_dir"`
 	BdGatewayURL           string `json:"bd_gateway_url"`
 	BdGatewayTokenSecret   string `json:"bd_gateway_token_secret"`
 	BdGatewayMaxConcurrent int    `json:"bd_gateway_max_concurrent"`
-	DaemonClaudeDir        string `json:"daemon_claude_dir"`
 	Tracker                bool   `json:"tracker"`
 	TrackerDSNSecret       string `json:"tracker_dsn_secret"`
 	TrackerBackup          bool   `json:"tracker_backup"`
@@ -70,6 +69,12 @@ type renderFlagsRecord struct {
 type renderFlagsFile struct {
 	renderFlagsRecord
 	BdGatewayMaxConcurrent *int `json:"bd_gateway_max_concurrent"`
+	// The two retired Mac-directory flags (gt-ja7otj). A file written before the
+	// mounts were removed still carries their keys; they are decoded here only so
+	// DisallowUnknownFields reads the record instead of refusing it, and their
+	// values are dropped rather than replayed.
+	DashboardClaudeDir json.RawMessage `json:"dashboard_claude_dir"`
+	DaemonClaudeDir    json.RawMessage `json:"daemon_claude_dir"`
 }
 
 // record is f as the file holds it.
@@ -91,11 +96,9 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		ForgeHost:              f.forgeHost,
 		DoltBackupHostPath:     f.doltBackupHostPath,
 		Dashboard:              f.dashboard,
-		DashboardClaudeDir:     f.dashboardClaudeDir,
 		BdGatewayURL:           f.bdGatewayURL,
 		BdGatewayTokenSecret:   f.bdGatewayTokenSecret,
 		BdGatewayMaxConcurrent: f.bdGatewayMaxConcurrent,
-		DaemonClaudeDir:        f.daemonClaudeDir,
 		Tracker:                f.tracker,
 		TrackerDSNSecret:       f.trackerDSNSecret,
 		TrackerBackup:          f.trackerBackup,
@@ -125,11 +128,9 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		forgeHost:              r.ForgeHost,
 		doltBackupHostPath:     r.DoltBackupHostPath,
 		dashboard:              r.Dashboard,
-		dashboardClaudeDir:     r.DashboardClaudeDir,
 		bdGatewayURL:           r.BdGatewayURL,
 		bdGatewayTokenSecret:   r.BdGatewayTokenSecret,
 		bdGatewayMaxConcurrent: r.BdGatewayMaxConcurrent,
-		daemonClaudeDir:        r.DaemonClaudeDir,
 		tracker:                r.Tracker,
 		trackerDSNSecret:       r.TrackerDSNSecret,
 		trackerBackup:          r.TrackerBackup,

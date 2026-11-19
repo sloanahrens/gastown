@@ -104,6 +104,10 @@ type clusterRenderFlags struct {
 	forgeHost          string
 	doltBackupHostPath string
 	dashboard          bool
+	// dashboardClaudeDir and daemonClaudeDir are the retired Mac-directory
+	// mounts. The flags stay registered so naming one is refused with the rows
+	// that replaced it, never read as an unknown flag; validate refuses either
+	// value and nothing copies it into Values (gt-ja7otj).
 	dashboardClaudeDir string
 	bdGatewayURL       string
 	// bdGatewayTokenSecret names the Secret the bd gateway's tokens are read from;
@@ -233,11 +237,11 @@ func init() {
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.dashboard, "dashboard", false,
 		"also write the dashboard's Service and Deployment beside the daemon's; the secrets manifest must name "+k8sdaemon.ViewerTokenFile+" (a live render only)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardClaudeDir, "dashboard-claude-dir", "",
-		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the dashboard at /root/.claude; it needs --dashboard")
+		"retired: the dashboard reads cost_samples and usage_records rows, so it mounts no Mac directory; naming it is refused")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayURL, "bd-gateway-url", "",
 		"the bd gateway's base URL, http or https with a host, for the dashboard's bd forwarder: the dashboard carries BD_GATEWAY_URL and BD_GATEWAY_TOKEN_FILE and mounts the "+k8sdaemon.BdGatewayDashboardSecretName+" Secret read-only; the render names the Secret and never creates it; it needs --dashboard")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonClaudeDir, "daemon-claude-dir", "",
-		"the Mac's ~/.claude directory, an absolute path, whose projects directory is mounted read-only in the daemon at /root/.claude-host/projects, beside the pod's own /root/.claude, where the usage scan reads the host's transcripts")
+		"retired: the daemon reads cost_samples and usage_records rows, so it mounts no Mac directory; naming it is refused")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.tracker, "tracker", false,
 		"also write trackerd's Service and Deployment beside the daemon's; it needs --tracker-dsn-secret and --proxy-image (a live render only)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerDSNSecret, "tracker-dsn-secret", "",
@@ -289,6 +293,13 @@ func xdgConfigSubdir(sub string, getenv func(string) string, home func() (string
 // read or written.
 func (f clusterRenderFlags) validate() error {
 	switch {
+	// The two Mac-directory mounts are retired, so their flags are refused here,
+	// ahead of every other check: the operator hears why the flag is gone rather
+	// than a missing --dir. Each message names the rows that replaced the mount.
+	case f.dashboardClaudeDir != "":
+		return errors.New("--dashboard-claude-dir is retired: the dashboard reads cost_samples and usage_records rows, so it mounts no Mac directory; drop the flag")
+	case f.daemonClaudeDir != "":
+		return errors.New("--daemon-claude-dir is retired: the daemon reads cost_samples and usage_records rows, so it mounts no Mac directory; drop the flag")
 	case strings.TrimSpace(f.dir) == "":
 		return errors.New("--dir is required: name the repo directory that holds the image values file (see imagevalues)")
 	case strings.TrimSpace(f.out) == "":
@@ -311,10 +322,6 @@ func (f clusterRenderFlags) validate() error {
 		return fmt.Errorf("--dolt-backup-host-path %q: want %q, the host directory the Dolt container writes its backups to", f.doltBackupHostPath, k8sdaemon.DoltBackupPath)
 	case f.rehearsal && f.dashboard:
 		return errors.New("--dashboard is for a live render: a rehearsal renders no dashboard, so drop --rehearsal or --dashboard")
-	case f.dashboardClaudeDir != "" && !f.dashboard:
-		return errors.New("--dashboard-claude-dir is for the dashboard: name --dashboard with it, or drop the flag")
-	case f.dashboardClaudeDir != "" && !filepath.IsAbs(f.dashboardClaudeDir):
-		return fmt.Errorf("--dashboard-claude-dir %q must be an absolute path: the pod names the host directory", f.dashboardClaudeDir)
 	case f.bdGatewayURL != "" && strings.TrimSpace(f.bdGatewayURL) == "":
 		return errors.New("--bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
 	case f.bdGatewayURL != "" && !f.dashboard:
@@ -325,8 +332,6 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--daemon-bd-gateway-url is empty: name the bd gateway's URL, or drop the flag")
 	case f.bdGatewayMaxConcurrent < 0:
 		return fmt.Errorf("--bd-gateway-max-concurrent %d is negative: name a positive cap, or zero for the gateway's own default", f.bdGatewayMaxConcurrent)
-	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
-		return fmt.Errorf("--daemon-claude-dir %q must be an absolute path: the pod names the host directory", f.daemonClaudeDir)
 	case f.rehearsal && f.tracker:
 		return errors.New("--tracker is for a live render: a rehearsal never runs trackerd, so drop --rehearsal or --tracker")
 	case f.tracker && strings.TrimSpace(f.trackerDSNSecret) == "":
@@ -379,10 +384,8 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"openshell-config-dir", &f.openShellConfigDir, r.openShellConfigDir},
 		{"forge-host", &f.forgeHost, r.forgeHost},
 		{"dolt-backup-host-path", &f.doltBackupHostPath, r.doltBackupHostPath},
-		{"dashboard-claude-dir", &f.dashboardClaudeDir, r.dashboardClaudeDir},
 		{"bd-gateway-url", &f.bdGatewayURL, r.bdGatewayURL},
 		{"bd-gateway-token-secret", &f.bdGatewayTokenSecret, r.bdGatewayTokenSecret},
-		{"daemon-claude-dir", &f.daemonClaudeDir, r.daemonClaudeDir},
 		{"tracker-dsn-secret", &f.trackerDSNSecret, r.trackerDSNSecret},
 		{"tracker-backup-image", &f.trackerBackupImage, r.trackerBackupImage},
 		{"daemon-bd-gateway-url", &f.daemonBdGatewayURL, r.daemonBdGatewayURL},
@@ -709,9 +712,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		ConfirmContainerStopped: f.confirmStopped,
 		HostGatewayIP:           f.hostGateway,
 		Dashboard:               f.dashboard,
-		DashboardClaudeDir:      f.dashboardClaudeDir,
 		BdGatewayURL:            strings.TrimSpace(f.bdGatewayURL),
-		DaemonClaudeDir:         f.daemonClaudeDir,
 		Tracker:                 f.tracker,
 		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),
 		TrackerBackup:           f.trackerBackup,
