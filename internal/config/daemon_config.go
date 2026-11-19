@@ -1577,6 +1577,11 @@ type DiskMaintenanceConfig struct {
 	// CIEnginePruneAge is how old an image must be before the engine prune
 	// removes it when nothing uses it. Empty means DiskMaintenanceDefaultCIEnginePruneAge.
 	CIEnginePruneAge string `json:"ci_engine_prune_age,omitempty"` // Go duration such as "48h"
+	// CIEngineUnusedAge is how long a stopped container, an unused anonymous
+	// volume and an unused build cache record may sit before the engine prune
+	// removes them. Empty means DiskMaintenanceDefaultCIEngineUnusedAge; a value
+	// under DiskMaintenanceMinCIEngineUnusedAge is refused, never read as the age.
+	CIEngineUnusedAge string `json:"ci_engine_unused_age,omitempty"` // Go duration such as "6h"
 	// CIEngineKeepRepos names the image repositories the engine prune never
 	// removes, an image also tagged with one included. ci-base's own rule is in
 	// docs/guides/disk-maintenance.md. Nil means
@@ -1796,6 +1801,27 @@ func (c DiskMaintenanceConfig) SweepRunsMinAgeDuration() (time.Duration, error) 
 	return age, nil
 }
 
+// CIEngineUnusedAgeDuration returns how long a stopped container, an unused
+// anonymous volume and an unused build cache record may sit before the engine
+// prune removes them: the default when the setting is empty, and an error naming
+// the setting for a value that is not a Go duration or is under the minimum. It
+// never falls back to the default on an error.
+func (c DiskMaintenanceConfig) CIEngineUnusedAgeDuration() (time.Duration, error) {
+	raw := c.CIEngineUnusedAge
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCIEngineUnusedAge
+	}
+	age, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_unused_age: %q is not a Go duration such as \"6h\"", raw)
+	}
+	if age < DiskMaintenanceMinCIEngineUnusedAge {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_unused_age = %q: want at least %s",
+			raw, DiskMaintenanceMinCIEngineUnusedAge)
+	}
+	return age, nil
+}
+
 // CIEngineKeepRepoList returns the repositories the engine prune keeps: the
 // default when the setting is absent, and an error naming the setting for an
 // explicit empty list or a name that is not a repository name. It never falls
@@ -1969,6 +1995,14 @@ const (
 	// DiskMaintenanceDefaultSweepRunsMinAge is how old a sweep run directory must
 	// be before the prune may remove it.
 	DiskMaintenanceDefaultSweepRunsMinAge = "72h"
+	// DiskMaintenanceDefaultCIEngineUnusedAge is how long a stopped container, an
+	// unused anonymous volume and an unused build cache record may sit before the
+	// engine prune removes them: the runner fills its claim in hours, not days
+	// (gt-w9nv86).
+	DiskMaintenanceDefaultCIEngineUnusedAge = "6h"
+	// DiskMaintenanceMinCIEngineUnusedAge is the lowest accepted unused age: below
+	// it a job that just stopped would lose what it could resume from (gt-w9nv86).
+	DiskMaintenanceMinCIEngineUnusedAge = time.Hour
 	// DiskMaintenanceDefaultActionsRetentionDays is how old a Forgejo Actions run
 	// must be before the retention step may delete it: the runs table grows
 	// without bound otherwise (gt-573420).
@@ -2056,6 +2090,9 @@ func (c *DiskMaintenanceConfig) validate() error {
 		}
 	}
 	if _, err := c.CIEnginePruneAgeDuration(); err != nil {
+		return err
+	}
+	if _, err := c.CIEngineUnusedAgeDuration(); err != nil {
 		return err
 	}
 	if _, err := c.CIEngineKeepRepoList(); err != nil {

@@ -1382,9 +1382,9 @@ func TestDiskMaintenanceCICacheSettings(t *testing.T) {
 }
 
 // TestDiskMaintenanceCIEnginePruneSettings: the CI engine prune's settings default
-// to 1h, 48h and ["ci-base"]; a value the patrol cannot act on is refused naming
+// to 1h, 48h, 6h and ["ci-base"]; a value the patrol cannot act on is refused naming
 // its own key, and an explicit empty keep list is refused rather than read as
-// the default (gt-i02983).
+// the default (gt-i02983, gt-w9nv86).
 func TestDiskMaintenanceCIEnginePruneSettings(t *testing.T) {
 	t.Parallel()
 	t.Run("interval empty is the 1h default, override is read", func(t *testing.T) {
@@ -1468,6 +1468,33 @@ func TestDiskMaintenanceCIEnginePruneSettings(t *testing.T) {
 		if p.DiskMaintenance.CIEnginePruneInterval != "2h" || p.DiskMaintenance.CIEnginePruneAge != "72h" ||
 			!slices.Equal(p.DiskMaintenance.CIEngineKeepRepos, []string{"ci-base"}) {
 			t.Errorf("ci_engine settings decoded as %+v", p.DiskMaintenance)
+		}
+	})
+	t.Run("unused age empty is 6h, an override is read, and a value under 1h is refused naming the key", func(t *testing.T) {
+		t.Parallel()
+		age, err := DiskMaintenanceConfig{}.CIEngineUnusedAgeDuration()
+		if err != nil || age != 6*time.Hour {
+			t.Fatalf("empty unused age = %v, %v; want 6h0m0s", age, err)
+		}
+		age, err = DiskMaintenanceConfig{CIEngineUnusedAge: "12h"}.CIEngineUnusedAgeDuration()
+		if err != nil || age != 12*time.Hour {
+			t.Fatalf("unused age 12h = %v, %v; want 12h0m0s", age, err)
+		}
+		for _, bad := range []string{"59m", "0h", "-1h", "six hours"} {
+			_, err := DiskMaintenanceConfig{CIEngineUnusedAge: bad}.CIEngineUnusedAgeDuration()
+			if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_unused_age") {
+				t.Errorf("unused age %q: error %v, want one naming the key", bad, err)
+			}
+		}
+		// gt config validate refuses the same values through the patrol block's
+		// decode, which is the load it performs.
+		for _, bad := range []string{"30m", "six hours"} {
+			var p PatrolsConfig
+			doc := `{"disk_maintenance": {"ci_engine_unused_age": "` + bad + `"}}`
+			if err := json.Unmarshal([]byte(doc), &p); err == nil ||
+				!strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_unused_age") {
+				t.Errorf("unused age %q decoded with error %v, want a refusal naming the key", bad, err)
+			}
 		}
 	})
 }

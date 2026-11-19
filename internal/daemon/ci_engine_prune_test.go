@@ -154,7 +154,7 @@ func engineBaseListing(t *testing.T) ciEngineListing {
 // removes the rest, with the stopped container's image freed by its removal.
 func TestCIEnginePruneKeepsCIBaseAndUsedImages(t *testing.T) {
 	t.Parallel()
-	plan, err := planCIEnginePrune(engineBaseListing(t), ciCacheTestStart, 48*time.Hour, []string{"ci-base", "org/tools"})
+	plan, err := planCIEnginePrune(engineBaseListing(t), ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base", "org/tools"})
 	if err != nil {
 		t.Fatalf("planning: %v", err)
 	}
@@ -188,6 +188,35 @@ func TestCIEnginePruneKeepsCIBaseAndUsedImages(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneKeepsTheBaseTheRollbackAndInUseImagesAtOneHour: the shortest
+// unused age the patrol accepts frees more stopped containers and volumes but keeps
+// every image the base rule or a container that stays protects: ci-base:latest, the
+// rollback id before it, and the image each running container uses.
+func TestCIEnginePruneKeepsTheBaseTheRollbackAndInUseImagesAtOneHour(t *testing.T) {
+	t.Parallel()
+	plan, err := planCIEnginePrune(engineBaseListing(t), ciCacheTestStart, 48*time.Hour, time.Hour, []string{"ci-base", "org/tools"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	planned := map[string]bool{}
+	for _, img := range plan.images {
+		planned[img.ID] = true
+	}
+	for _, keep := range []struct {
+		id   string
+		what string
+	}{
+		{engImageID('a'), "the ci-base:latest image"},
+		{engImageID('b'), "the rollback image before latest"},
+		{engImageID('2'), "the image the running container uses"},
+		{engImageID('d'), "the ci-base image the running container uses"},
+	} {
+		if planned[keep.id] {
+			t.Errorf("%s (%s) is planned for removal at a one-hour unused age", keep.what, keep.id)
+		}
+	}
+}
+
 // TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor: the ci-base rollback
 // is the id built just before the latest tag's id, not the newest other id. A base
 // built after the latest, under another tag, waits out the age like any image;
@@ -207,7 +236,7 @@ func TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor(t *testing.T)
 		// Another id not kept by the rule and past the age: removed.
 		engImg('e', 150*time.Hour, []string{"sha256:layer-e"}, "ci-base:stale-build"),
 	}
-	plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)), ciCacheTestStart, 48*time.Hour, []string{"ci-base"})
+	plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)), ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base"})
 	if err != nil {
 		t.Fatalf("planning: %v", err)
 	}
@@ -259,7 +288,7 @@ func TestCIEnginePruneKeepReposProtectASharedCIBaseImage(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, tc.keepRepos)
+			plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, 24*time.Hour, tc.keepRepos)
 			if err != nil {
 				t.Fatalf("planning: %v", err)
 			}
@@ -319,7 +348,7 @@ func TestCIEnginePruneRefusesAListingItCannotRead(t *testing.T) {
 			t.Parallel()
 			l := ok(t)
 			mutate(&l)
-			if _, err := planCIEnginePrune(l, now, 48*time.Hour, []string{"ci-base"}); err == nil {
+			if _, err := planCIEnginePrune(l, now, 48*time.Hour, 24*time.Hour, []string{"ci-base"}); err == nil {
 				t.Errorf("a listing with %s was planned without an error", name)
 			}
 		})
@@ -542,8 +571,8 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 			}
 		}
 		prunes := engineDockerExecs(f, "builder prune")
-		if len(prunes) != 1 || !slices.Contains(prunes[0].args, "until=24h") {
-			t.Errorf("build cache prune = %q, want one run with until=24h", prunes)
+		if len(prunes) != 1 || !slices.Contains(prunes[0].args, "until=6h") {
+			t.Errorf("build cache prune = %q, want one run with until=6h", prunes)
 		}
 		// The list program is shell by design; no removal is.
 		for _, c := range engineDockerExecs(f, "") {
@@ -629,6 +658,52 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 			t.Errorf("objects absent from the engine did not reach a verdict:\n%s", f.logs.String())
 		}
 	})
+}
+
+// TestCIEnginePruneUsesTheConfiguredUnusedAge: the patrol's ci_engine_unused_age
+// reaches the planner and the build cache prune. At 2h a 3h-old stopped container,
+// its image and an unused volume go, and docker is told until=2h; at 8h a 7h-old
+// container and volume stay, and docker is still told until=8h. An absent setting
+// is 6h: a 7h-old one goes and docker is told until=6h.
+func TestCIEnginePruneUsesTheConfiguredUnusedAge(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		setting    string
+		age        time.Duration
+		wantRemove bool
+		wantUntil  string
+	}{
+		"absent setting is six hours":       {age: 7 * time.Hour, wantRemove: true, wantUntil: "until=6h"},
+		"two hours removes what is older":   {setting: "2h", age: 3 * time.Hour, wantRemove: true, wantUntil: "until=2h"},
+		"eight hours keeps what is younger": {setting: "8h", age: 7 * time.Hour, wantRemove: false, wantUntil: "until=8h"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			listing := engListing(t,
+				[]map[string]any{engCtr('4', 'e', "exited", tc.age)},
+				[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
+				[]map[string]any{engVol(engHex64('1'), tc.age)},
+			)
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
+			f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineUnusedAge = tc.setting
+			f.tick()
+			f.drain()
+
+			for _, verb := range []string{"rm", "rmi", "volume rm"} {
+				want := 0
+				if tc.wantRemove {
+					want = 1
+				}
+				if got := len(engineDockerExecs(f, verb)); got != want {
+					t.Errorf("docker %s ran %d time(s), want %d:\n%s", verb, got, want, f.logs.String())
+				}
+			}
+			prunes := engineDockerExecs(f, "builder prune")
+			if len(prunes) != 1 || !slices.Contains(prunes[0].args, tc.wantUntil) {
+				t.Errorf("build cache prune = %q, want one run with %s", prunes, tc.wantUntil)
+			}
+		})
+	}
 }
 
 // TestCIEngineRemovedReadsDockersOutput: docker rm and docker volume rm print each
@@ -987,7 +1062,7 @@ func TestCIEnginePrunePrunesAnonymousVolumesNamedWith64HexDigits(t *testing.T) {
 			engVol("ci-npm", 400*time.Hour),
 		},
 	)
-	plan, err := planCIEnginePrune(engDecode(t, listing), ciCacheTestStart, 48*time.Hour, []string{"ci-base"})
+	plan, err := planCIEnginePrune(engDecode(t, listing), ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base"})
 	if err != nil {
 		t.Fatalf("planning: %v", err)
 	}
@@ -1029,18 +1104,46 @@ func TestCIEngineRemovalsAreOneDockerCommandPerKind(t *testing.T) {
 }
 
 // TestCIEngineBuildCachePruneArgvUsesADuration: docker's until filter takes a duration,
-// so the build cache prune spells its unused age as one: 24h for the engine's age,
+// so the build cache prune spells its unused age as one: 6h for the default age,
 // never a timestamp.
 func TestCIEngineBuildCachePruneArgvUsesADuration(t *testing.T) {
 	t.Parallel()
 	for age, want := range map[time.Duration]string{
-		ciEngineUnusedAge: "24h",
-		48 * time.Hour:    "48h",
-		90 * time.Minute:  "90m",
+		6 * time.Hour:    "6h",
+		24 * time.Hour:   "24h",
+		48 * time.Hour:   "48h",
+		90 * time.Minute: "90m",
 	} {
 		got := ciEngineBuildCachePruneArgv(age)
 		if wantArgv := []string{"docker", "builder", "prune", "-af", "--filter", "until=" + want}; !slices.Equal(got, wantArgv) {
 			t.Errorf("build cache prune argv for %v = %q, want %q", age, got, wantArgv)
+		}
+	}
+}
+
+// TestCIEnginePrunePlansByTheUnusedAgeItIsGiven: a stopped container and an unused
+// anonymous volume past the unused age are planned, and both below it are kept; the
+// image age does not decide either.
+func TestCIEnginePrunePlansByTheUnusedAgeItIsGiven(t *testing.T) {
+	t.Parallel()
+	listing := engDecode(t, engListing(t,
+		[]map[string]any{engCtr('4', 'e', "exited", 7*time.Hour)},
+		[]map[string]any{engImg('e', 7*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
+		[]map[string]any{engVol(engHex64('1'), 7*time.Hour)},
+	))
+	for unusedAge, want := range map[time.Duration]bool{
+		6 * time.Hour: true,
+		8 * time.Hour: false,
+	} {
+		plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, unusedAge, []string{"ci-base"})
+		if err != nil {
+			t.Fatalf("planning at %v: %v", unusedAge, err)
+		}
+		if got := len(plan.containers) == 1; got != want {
+			t.Errorf("stopped container 7h old at unused age %v: planned = %v, want %v", unusedAge, got, want)
+		}
+		if got := len(plan.volumes) == 1; got != want {
+			t.Errorf("anonymous volume 7h old at unused age %v: planned = %v, want %v", unusedAge, got, want)
 		}
 	}
 }
@@ -1170,7 +1273,7 @@ func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
 			if len(warns) != 1 {
 				t.Fatalf("logged %d WARN line(s), want one:\n%s", len(warns), logs)
 			}
-			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=24h", "cache younger than the filter is not removed"} {
+			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=6h", "cache younger than the filter is not removed"} {
 				if !strings.Contains(warns[0], want) {
 					t.Errorf("the WARN line lacks %q:\n%s", want, warns[0])
 				}
@@ -1297,6 +1400,12 @@ func TestCIEnginePruneRefusesASettingItCannotActOn(t *testing.T) {
 			breakSetting: func(f *ciCacheFixture) { f.d.patrolConfig.Patrols.TierSweep.Runner.Context = "" },
 			wantLog:      "names no control cluster",
 		},
+		"an unused age under the floor": {
+			breakSetting: func(f *ciCacheFixture) {
+				f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineUnusedAge = "30m"
+			},
+			wantLog: "ci_engine_unused_age",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1331,13 +1440,17 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 			set:     func(c *DiskMaintenanceConfig) { c.CIEnginePruneAge = "0h" },
 			wantKey: "ci_engine_prune_age",
 		},
+		"an unused age under the floor": {
+			set:     func(c *DiskMaintenanceConfig) { c.CIEngineUnusedAge = "30m" },
+			wantKey: "ci_engine_unused_age",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			cfg := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
 			tc.set(cfg.Patrols.DiskMaintenance)
-			_, _, _, err := ciEnginePruneSettings(cfg)
+			_, _, _, _, err := ciEnginePruneSettings(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.wantKey) {
 				t.Errorf("ciEnginePruneSettings() error = %v, want one naming %s", err, tc.wantKey)
 			}
