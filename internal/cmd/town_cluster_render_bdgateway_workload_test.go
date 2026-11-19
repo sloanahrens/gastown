@@ -18,6 +18,9 @@ const clusterRenderBdDigest = "registry.example.test/gastown/gastown-bd@sha256:"
 // clusterRenderInClusterURL is the gateway's Service URL in the default namespace.
 const clusterRenderInClusterURL = "http://bd-gateway.gt.svc:7440"
 
+// clusterRenderInClusterPushURL is the push Service's URL in the default namespace.
+const clusterRenderInClusterPushURL = "http://bd-gateway-push.gt.svc:7441"
+
 // withBdImage rewrites the fixture's values file to name a bd image beside the
 // daemon's, and sets the host address the gateway's Dolt host resolves through.
 func withBdImage(t *testing.T, f clusterRenderFlags) clusterRenderFlags {
@@ -112,6 +115,46 @@ func TestClusterRenderBdGatewayWorkload(t *testing.T) {
 	if !strings.Contains(out.String(), "Secret "+defaultBdGatewayTokenSecret) {
 		t.Errorf("the output names no note for the gateway's token Secret:\n%s", out.String())
 	}
+}
+
+// TestClusterRenderBdGatewayPushURL holds the render's push Service default: a
+// values file with a bd image writes the push Service and points the daemon and,
+// with --dashboard, the dashboard at it, and a render with no bd image does neither.
+func TestClusterRenderBdGatewayPushURL(t *testing.T) {
+	t.Parallel()
+	t.Run("a bd image writes the push Service and names it", func(t *testing.T) {
+		t.Parallel()
+		f := withBdImage(t, clusterRenderFixture(t))
+		f.dashboard = true
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		renderedFile(t, f.out, "-service-bd-gateway-push.yaml")
+		for _, tc := range []struct{ name, suffix string }{
+			{"the daemon", "-deployment-daemon.yaml"},
+			{"the dashboard", "-deployment-dashboard.yaml"},
+		} {
+			if got := deploymentEnv(t, f.out, tc.suffix)[k8sdaemon.BdGatewayPushURLEnv]; got != clusterRenderInClusterPushURL {
+				t.Errorf("%s names %s = %q, want the in-cluster %q", tc.name, k8sdaemon.BdGatewayPushURLEnv, got, clusterRenderInClusterPushURL)
+			}
+		}
+	})
+
+	t.Run("no bd image names no push Service", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if objects := renderedBdGatewayObjects(t, f.out); len(objects) != 0 {
+			t.Errorf("the render wrote gateway objects %q, want none", objects)
+		}
+		if _, ok := deploymentEnv(t, f.out, "-deployment-daemon.yaml")[k8sdaemon.BdGatewayPushURLEnv]; ok {
+			t.Errorf("the daemon names %s with no bd image", k8sdaemon.BdGatewayPushURLEnv)
+		}
+	})
 }
 
 // TestClusterRenderBdGatewayAbsent holds the renders that carry no gateway: a values

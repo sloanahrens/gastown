@@ -61,6 +61,12 @@ spec:
             - host.docker.internal
             - --dolt-port
             - "3307"
+            - --push-addr
+            - :7441
+          ports:
+            - name: push
+              containerPort: 7441
+              protocol: TCP
           volumeMounts:
             - name: bd-gateway-tokens
               mountPath: /run/bdgw/tokens

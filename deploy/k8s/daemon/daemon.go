@@ -826,6 +826,13 @@ type Values struct {
 	// the render without it. Set, Dashboard must be set, and the URL must be http or
 	// https with a host and no user information (bdgateway.go).
 	BdGatewayURL string
+	// BdGatewayPushURL points the dashboard's bd pusher at the gateway's push
+	// Service, which publishes a pod that is not ready, so the dashboard carries
+	// BD_GATEWAY_PUSH_URL beside its gateway pair. Empty, the dashboard renders
+	// byte-identical to the render without it. Set, it needs Dashboard and the
+	// gateway workload, which renders the push Service, and a URL of the gateway
+	// URL's form.
+	BdGatewayPushURL string
 	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container reads
 	// read-only, as a hostPath of type Directory so a missing directory fails the
 	// pod rather than creating one. Empty mounts nothing. Set, it must be absolute.
@@ -867,6 +874,14 @@ type Values struct {
 	// Empty renders no gateway. It is for the live pod only, since a rehearsal
 	// mounts no token. The dashboard's Values.BdGatewayURL is separate.
 	DaemonBdGatewayURL string
+	// DaemonBdGatewayPushURL points the daemon's workspace pusher at the gateway's
+	// push Service, which publishes a pod that is not ready, so the pusher reaches
+	// the listener while the gateway's readiness is still false: the daemon carries
+	// BD_GATEWAY_PUSH_URL beside its gateway pair. Empty, the daemon renders
+	// byte-identical to the render without it. It is for the live pod only, as
+	// DaemonBdGatewayURL is, needs the gateway workload, and takes a URL of the
+	// gateway URL's form.
+	DaemonBdGatewayPushURL string
 	// BdGatewayImage is the bd gateway's image, by digest (repo@sha256:<64 lowercase
 	// hex>), as deploy/values/images.yaml writes it. Set, Build renders the gateway
 	// Deployment, its Service and its workspace claim; a tag is refused. Empty renders
@@ -916,6 +931,7 @@ type Manifests struct {
 	DashboardService     Service
 	TrackerService       Service
 	BdGatewayService     Service
+	BdGatewayPushService Service
 	Secrets              []Secret
 	Deployment           Deployment
 	DashboardDeployment  Deployment
@@ -1015,6 +1031,7 @@ func Build(v Values) (Manifests, error) {
 	if v.BdGatewayImage != "" {
 		m.BdGatewayClaim = claim(BdGatewayWorkspaceClaim, namespace, BdGatewayWorkspaceSize, v.StorageClass)
 		m.BdGatewayService = bdGatewayService(namespace)
+		m.BdGatewayPushService = bdGatewayPushService(namespace)
 		m.BdGatewayDeployment = bdGatewayDeployment(v, namespace)
 	}
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
@@ -1428,9 +1445,9 @@ func daemonArgs(v Values) []string {
 }
 
 // daemonEnvironment is the daemon container's environment: the shared pod
-// environment, the daemon's own bd gateway pair, then the caller's names, and
-// last the Ollama endpoint its weekly story-points retrain embeds with. The
-// dashboard runs no retrain and reads no daemon gateway, so its container takes
+// environment, the daemon's own bd gateway pair and push URL, then the caller's
+// names, and last the Ollama endpoint its weekly story-points retrain embeds with.
+// The dashboard runs no retrain and reads no daemon gateway, so its container takes
 // containerEnvironment and its own pair (dashboardContainer) (gt-mu7e87,
 // gt-2bi7es).
 //
@@ -1446,6 +1463,11 @@ func daemonEnvironment(v Values) []EnvVar {
 	// both would list each name twice, which kubectl refuses.
 	if v.DaemonBdGatewayURL != "" {
 		env = append(env, BdGatewayEnv(v.DaemonBdGatewayURL)...)
+	}
+	// The pusher's name is the daemon's alone, for the same reason, and it is set
+	// only when the render names the push Service.
+	if v.DaemonBdGatewayPushURL != "" {
+		env = append(env, BdGatewayPushEnv(v.DaemonBdGatewayPushURL)...)
 	}
 	env = append(env, callerEnvironment(v)...)
 	if len(hostAliases(v)) == 0 {
@@ -1607,8 +1629,9 @@ func dashboardDeployment(v Values, namespace string) (Deployment, error) {
 // shared pod environment, so GT_DAEMON_SUPERVISOR resolves Dolt to the container
 // host here as it does in the daemon; it carries no STORYPOINTS_EMBED_URL, which
 // only the daemon's retrain reads (daemonEnvironment). Set, Values.BdGatewayURL
-// adds the dashboard's own gateway pair after that list; the daemon's pair is
-// never carried here, since the dashboard mounts no daemon token (gt-2bi7es).
+// adds the dashboard's own gateway pair after that list, and Values.BdGatewayPushURL
+// adds BD_GATEWAY_PUSH_URL; the daemon's pair is never carried here, since the
+// dashboard mounts no daemon token (gt-2bi7es).
 //
 // Its probes are curl on the index. The index is static HTML that reads no Dolt
 // (internal/dashboard/server.go), so a Dolt outage on the Mac does not restart the
@@ -1619,6 +1642,11 @@ func dashboardContainer(v Values) Container {
 	// so with the URL unset the container carries no gateway pair at all.
 	if v.BdGatewayURL != "" {
 		env = append(env, BdGatewayEnv(v.BdGatewayURL)...)
+	}
+	// The pusher's name is the dashboard's own, added only when the render names
+	// the push Service.
+	if v.BdGatewayPushURL != "" {
+		env = append(env, BdGatewayPushEnv(v.BdGatewayPushURL)...)
 	}
 	return Container{
 		Name:           DashboardName,
@@ -2864,9 +2892,13 @@ func Render(w io.Writer, m Manifests) error {
 	if m.TrackerService.Kind != "" {
 		docs = append(docs, m.TrackerService)
 	}
-	// Build leaves the bd gateway Service zero unless Values.BdGatewayImage is set.
+	// Build leaves the bd gateway Service and its push Service zero unless
+	// Values.BdGatewayImage is set.
 	if m.BdGatewayService.Kind != "" {
 		docs = append(docs, m.BdGatewayService)
+	}
+	if m.BdGatewayPushService.Kind != "" {
+		docs = append(docs, m.BdGatewayPushService)
 	}
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
@@ -3006,6 +3038,11 @@ type ServiceSpec struct {
 	ExternalName string            `yaml:"externalName,omitempty"`
 	Selector     map[string]string `yaml:"selector,omitempty"`
 	Ports        []ServicePort     `yaml:"ports"`
+	// PublishNotReadyAddresses publishes a selected pod before its readiness
+	// probe passes, so a reader reaches a pod that is starting up. It is false on
+	// every Service but the gateway's push listener, and omitted then, so those
+	// Services render byte-identically to the render before the field.
+	PublishNotReadyAddresses bool `yaml:"publishNotReadyAddresses,omitempty"`
 }
 
 // ServicePort is one port the Service publishes.
@@ -3199,23 +3236,35 @@ type JobSpec struct {
 // the image's entrypoint, which the seed helper uses to run a plain sleep; the
 // daemon container carries none and runs the entrypoint.
 type Container struct {
-	Name           string              `yaml:"name"`
-	Image          string              `yaml:"image"`
-	Command        []string            `yaml:"command,omitempty"`
-	Args           []string            `yaml:"args,omitempty"`
-	WorkingDir     string              `yaml:"workingDir,omitempty"`
-	Env            []EnvVar            `yaml:"env,omitempty"`
-	Resources      *ContainerResources `yaml:"resources,omitempty"`
-	VolumeMounts   []VolumeMount       `yaml:"volumeMounts,omitempty"`
-	StartupProbe   *Probe              `yaml:"startupProbe,omitempty"`
-	ReadinessProbe *Probe              `yaml:"readinessProbe,omitempty"`
-	LivenessProbe  *Probe              `yaml:"livenessProbe,omitempty"`
+	Name       string              `yaml:"name"`
+	Image      string              `yaml:"image"`
+	Command    []string            `yaml:"command,omitempty"`
+	Args       []string            `yaml:"args,omitempty"`
+	WorkingDir string              `yaml:"workingDir,omitempty"`
+	Env        []EnvVar            `yaml:"env,omitempty"`
+	Resources  *ContainerResources `yaml:"resources,omitempty"`
+	// Ports are the ports the container declares. Only the gateway declares one,
+	// its push listener, so the pod's spec names the port its push Service
+	// forwards to; every other container omits the field.
+	Ports          []ContainerPort `yaml:"ports,omitempty"`
+	VolumeMounts   []VolumeMount   `yaml:"volumeMounts,omitempty"`
+	StartupProbe   *Probe          `yaml:"startupProbe,omitempty"`
+	ReadinessProbe *Probe          `yaml:"readinessProbe,omitempty"`
+	LivenessProbe  *Probe          `yaml:"livenessProbe,omitempty"`
 	// RestartPolicy is Always on a native sidecar (an init container), and empty on
 	// every other container.
 	RestartPolicy string `yaml:"restartPolicy,omitempty"`
 	// SecurityContext is the container's privilege setting. Nil, the container
 	// carries none, as every container did before the bd gateway.
 	SecurityContext *ContainerSecurityContext `yaml:"securityContext,omitempty"`
+}
+
+// ContainerPort is one port a container declares: a name, the port its process
+// listens on, and the protocol.
+type ContainerPort struct {
+	Name          string `yaml:"name"`
+	ContainerPort int32  `yaml:"containerPort"`
+	Protocol      string `yaml:"protocol"`
 }
 
 // ContainerSecurityContext is the container's privilege setting. The field is a

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bd-gateway-push
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: bd-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: bd-gateway
+  ports:
+    - name: push
+      port: 7441
+      protocol: TCP
+  publishNotReadyAddresses: true
