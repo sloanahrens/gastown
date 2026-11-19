@@ -2,11 +2,11 @@
 
 package daemon
 
-// The trim's two programs run as root inside the runner's dind container: they
-// are shell text, not Go, so the only proof of what they delete is running the
-// text. This is the integration tier because each case starts sh, which the
-// unit tier forbids; the temporary tree each case builds stands in for the
-// ci-gocache volume (gt-by8lm5).
+// The trim's programs run as root inside the runner's dind container: they are
+// shell text, not Go, so the only proof of what they select and delete is
+// running the text. This is the integration tier because each case starts sh,
+// which the unit tier forbids; the temporary tree each case builds stands in
+// for the ci-gocache volume (gt-by8lm5).
 
 import (
 	"bytes"
@@ -398,6 +398,92 @@ func ciCacheModuleKept() []string {
 	return kept
 }
 
+// ciCacheLRUPaths joins each tree name under root, the way the program prints
+// the names it selects.
+func ciCacheLRUPaths(root string, names ...string) []string {
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		out = append(out, filepath.Join(root, filepath.FromSlash(name)))
+	}
+	return out
+}
+
+// TestIntegrationCICacheTrimLRUSelects: over its cap the list program selects
+// the age rule's files and then the window's files oldest first, only until
+// their sizes cover the excess, and removes nothing. When the floor keeps the
+// volume over the cap, every window file is selected and none younger than the
+// floor is, whatever the cap.
+func TestIntegrationCICacheTrimLRUSelects(t *testing.T) {
+	t.Parallel()
+
+	// The volume is over its cap by the age rule's file plus what the window
+	// has to cover after it, in KiB: the age rule's file is selected whatever
+	// the cap and counts toward the excess, and 400 KiB is more than one 256 KiB
+	// window file covers and less than two.
+	const (
+		ageFileKiB      = 256
+		windowExcessKiB = 400
+	)
+
+	t.Run("over the cap the oldest files are selected until the excess is covered", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		before := ciCacheScriptFiles(t, root)
+		capKiB := ciCacheLRUBefore(t, root) - ageFileKiB - windowExcessKiB
+
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", strconv.FormatInt(capKiB, 10), strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		want := ciCacheLRUPaths(root, "00/old-3h", "ab/lru-100m", "00/lru-96m")
+		if !slices.Equal(files, want) {
+			t.Errorf("selected %v, want %v: the age rule's file (%d KiB), then the window's oldest until the %d KiB beyond it is covered, %d KiB over the cap in all", files, want, ageFileKiB, windowExcessKiB, ageFileKiB+windowExcessKiB)
+		}
+		if reply.removed != int64(len(want)) {
+			t.Errorf("removed = %d, want %d", reply.removed, len(want))
+		}
+		if reply.afterKiB != reply.beforeKiB {
+			t.Errorf("list reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+		}
+		if after := ciCacheScriptFiles(t, root); !slices.Equal(after, before) {
+			t.Errorf("the list removed files: %v, before %v", after, before)
+		}
+	})
+
+	t.Run("a floor that keeps the volume over the cap selects no younger file", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		before := ciCacheScriptFiles(t, root)
+
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		want := ciCacheLRUPaths(root, "00/old-3h", "ab/lru-100m", "00/lru-96m", "ab/lru-90m")
+		if !slices.Equal(files, want) {
+			t.Errorf("selected %v, want every file past the floor, oldest first, and no other: %v", files, want)
+		}
+		for _, kept := range ciCacheLRUPaths(root, "ab/mid-45m", "ab/fresh-10m", "trim.txt") {
+			if slices.Contains(files, kept) {
+				t.Errorf("%s was selected, younger than the floor or above the top level", kept)
+			}
+		}
+		if reply.removed != int64(len(want)) {
+			t.Errorf("removed = %d, want %d", reply.removed, len(want))
+		}
+		if reply.afterKiB != reply.beforeKiB {
+			t.Errorf("list reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+		}
+		if after := ciCacheScriptFiles(t, root); !slices.Equal(after, before) {
+			t.Errorf("the list removed files: %v, before %v", after, before)
+		}
+	})
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh
@@ -752,6 +838,60 @@ func TestIntegrationCICacheTrimLRUHelpers(t *testing.T) {
 		}
 		if got := ciCacheLRUBefore(t, root) - before; got != grownKiB {
 			t.Errorf("a %d KiB file grew the measured volume by %d KiB", grownKiB, got)
+		}
+	})
+}
+
+// TestIntegrationCICacheTrimLRUArguments: the program computes with its three
+// numbers in shell arithmetic, so a value that is not digits is refused with exit
+// 2 before anything is computed or printed. A path that holds a newline is left
+// out of the listing: it is never selected, and never read as a fragment of a path.
+func TestIntegrationCICacheTrimLRUArguments(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a number that is not digits is refused", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUTreeWrite(t, root, time.Now())
+		good := map[string]string{"age": "120", "cap": "0", "floor": "60"}
+		for _, field := range []string{"age", "cap", "floor"} {
+			for _, bad := range []string{"", "-1", "1+1", "$(id)", "1 2", "0x10"} {
+				args := map[string]string{"age": good["age"], "cap": good["cap"], "floor": good["floor"]}
+				args[field] = bad
+				stdout, _, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, args["age"], args["cap"], args["floor"])
+				if status != 2 || stdout != "" {
+					t.Errorf("%s %q: exit %d with output %q, want exit 2 and none", field, bad, status, stdout)
+				}
+			}
+		}
+	})
+
+	t.Run("a path with a newline is never selected", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		now := time.Now()
+		ciCacheLRUTreeWrite(t, root, now)
+		odd := filepath.Join(root, "ab", "odd\nname")
+		if err := os.WriteFile(odd, bytes.Repeat([]byte{'x'}, 4096), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(odd, now.Add(-95*time.Minute), now.Add(-95*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+		if status != 0 {
+			t.Fatalf("the LRU program exited %d: %s", status, stderr)
+		}
+		files, reply := ciCacheLRURead(t, stdout)
+		want := ciCacheLRUPaths(root, "00/old-3h", "ab/lru-100m", "00/lru-96m", "ab/lru-90m")
+		if !slices.Equal(files, want) {
+			t.Errorf("selected %v, want %v and no path with a newline in it", files, want)
+		}
+		if strings.Contains(stdout, "odd") || strings.Contains(stdout, "name") {
+			t.Errorf("the newline path, or a fragment of it, was printed:\n%s", stdout)
+		}
+		if reply.removed != int64(len(want)) {
+			t.Errorf("removed = %d, want %d", reply.removed, len(want))
 		}
 	})
 }

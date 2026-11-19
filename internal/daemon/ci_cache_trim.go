@@ -69,6 +69,14 @@ const (
 	// 5 GiB. It is a constant: no setting names it.
 	ciCacheGomodCapKiB = 5 << 20
 
+	// ciCacheLRUFloorMinutes is the youngest a ci-gocache file may be and still
+	// be selected by the size cap: a file whose mtime is inside this many
+	// minutes is never selected, whatever the cap. Go touches a used entry's
+	// mtime at most once an hour (cmd/go/internal/cache mtimeInterval), so an
+	// mtime alone cannot say a file is unused; the polecat cache's trim keeps
+	// the same hour as its floor (gt-enplmw).
+	ciCacheLRUFloorMinutes = 60
+
 	// ciCacheMissingPathExit is the status the script exits with when the volume
 	// path is not in the container. kubectl exec passes a remote command's status
 	// through, so this is told apart from a failure of kubectl itself.
@@ -220,6 +228,89 @@ echo "after_kib=$before"
 exit 0
 fi
 ` + ciCacheAgeRemoval
+
+// ciCacheLRUTrimScript is the ci-gocache program: every file below the top level
+// past the age, then, while the selection still leaves the volume over its cap,
+// the files after them in mtime order, oldest first, until their sizes cover the
+// excess over the cap. Its arguments are argv data: the mode, the volume root,
+// the age in minutes, the cap in KiB and the floor in minutes. Its only mode is
+// list: it removes nothing, prints one line per selected file and then the three
+// lines the other programs print, with the size after equal to the size before.
+// Go touches a cache file's mtime when it uses it, so the oldest mtime is the
+// least recently used.
+//
+// The program lists once and sorts once. The floor is the one bound of the
+// listing (find -mmin +floor), so a file younger than the floor is not in the
+// list and nothing after it can select one, whatever the cap or the age. The
+// list is sorted once by mtime, oldest first, and read once: a file is selected
+// while it is past the age or the sizes taken so far are below the excess, and
+// the read stops at the first file that is neither, so the order is the sort's
+// and nothing past the file that covers the excess is selected. A size is the
+// file's bytes rounded up to a 4 KiB block, as du counts a cache file. The
+// mtime and size come from stat in the form the host has (GNU and busybox -c,
+// BSD -f). Every line the program reads is one path, so the listing leaves out
+// any path that holds a newline (find -path with a newline pattern): such a path
+// is never selected, rather than read as a fragment of one. The three numbers it
+// is given are used in shell arithmetic, so it refuses anything but digits with
+// exit 2 before it computes with them; ciCacheLRUArgv builds them from integers.
+//
+// Why this is shell and not Go: it runs inside the runner's dind container
+// through the same exec as ciCacheTrimScript, which is shell for that reason and
+// is this one's precedent, and the container holds no gt binary to run Go in. Its
+// behavior is tested, not trusted: the integration tier runs it through the real
+// sh, stat and find (ci_cache_trim_scripts_integration_test.go), and the Go that
+// builds its arguments is a unit test.
+const ciCacheLRUTrimScript = `set -eu
+mode=$1; root=$2; age=$3; cap=$4; floor=$5
+[ "$mode" = list ] || { echo "the mode $mode is not this program's: only list" >&2; exit 2; }
+[ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
+for n in "$age" "$cap" "$floor"; do
+case "$n" in ''|*[!0-9]*) echo "the age, the cap and the floor are whole numbers, not $n" >&2; exit 2;; esac
+done
+if [ "$age" -lt "$floor" ]; then age=$floor; fi
+nlpath=$(printf '*\n*')
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+before=$(du -sk "$root" | cut -f1)
+if stat -c %Y "$root" > /dev/null 2>&1; then
+find "$root" -mindepth 2 -type f -mmin +"$floor" ! -path "$nlpath" -exec stat -c '%Y %s %n' {} + > "$tmp/files"
+else
+find "$root" -mindepth 2 -type f -mmin +"$floor" ! -path "$nlpath" -exec stat -f '%m %z %N' {} + > "$tmp/files"
+fi
+sort -n "$tmp/files" > "$tmp/sorted"
+awk -v now="$(date +%s)" -v age="$age" -v excess="$((before - cap))" '
+NF >= 3 {
+if (taken >= excess && now - $1 <= age * 60) exit
+p = $0; sub(/^[0-9]+ [0-9]+ /, "", p)
+print p
+taken += int(($2 + 4095) / 4096) * 4
+}' "$tmp/sorted" > "$tmp/selected"
+cat "$tmp/selected"
+echo "before_kib=$before"
+echo "removed=$(wc -l < "$tmp/selected" | tr -d ' ')"
+echo "after_kib=$before"
+`
+
+// ciCacheLRUArgv is the argv the LRU program runs with: sh -c, the script and
+// its arguments (the mode, the root, the age in minutes, the cap in KiB and the
+// floor in minutes), the numbers formatted from integers so the script's shell
+// arithmetic can only ever read digits. A negative number, an empty root and a
+// mode the program does not have are refused, never passed on.
+func ciCacheLRUArgv(mode, root string, ageMin, capKiB, floorMin int64) ([]string, error) {
+	if mode != "list" {
+		return nil, fmt.Errorf("the LRU program has no mode %q: only list", mode)
+	}
+	if root == "" {
+		return nil, errors.New("the LRU program needs a volume root")
+	}
+	for name, n := range map[string]int64{"age": ageMin, "cap": capKiB, "floor": floorMin} {
+		if n < 0 {
+			return nil, fmt.Errorf("the LRU program's %s is %d: a negative number is refused", name, n)
+		}
+	}
+	return []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", mode, root,
+		strconv.FormatInt(ageMin, 10), strconv.FormatInt(capKiB, 10), strconv.FormatInt(floorMin, 10)}, nil
+}
 
 // ciCacheModuleOpen opens both module programs. Their arguments are the volume
 // root, the age in minutes and the cap in KiB. The module path is the constant
