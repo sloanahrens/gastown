@@ -212,14 +212,33 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 }
 
 // dropContention takes the contention label and the schedule off a bead, as
-// the drop a failure of another kind makes does (gt-nnq9a2). A test wires it
-// as the env's writer: the fake's own env drops nothing by default, so a test
-// that asserts the drop is the one that asked for it.
+// production's specDropContentionFrom does (gt-nnq9a2). It removes the
+// label and the three contention keys and nothing else, so a test can assert
+// that the bead's other labels and metadata survive. A test wires it as the
+// env's writer: the fake's own env drops nothing by default, so a test that
+// asserts the drop is the one that asked for it.
 func (f *fakeSpecTown) dropContention(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s := f.specs[id]
-	s.Metadata = nil
+	fields := map[string]any{}
+	if len(s.Metadata) > 0 {
+		if err := json.Unmarshal(s.Metadata, &fields); err != nil {
+			return err
+		}
+	}
+	delete(fields, specdispatch.ContentionFirstKey)
+	delete(fields, specdispatch.ContentionAttemptsKey)
+	delete(fields, specdispatch.ContentionRetryAtKey)
+	if len(fields) == 0 {
+		s.Metadata = nil
+	} else {
+		meta, err := json.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		s.Metadata = meta
+	}
 	s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.ContentionLabel })
 	f.specs[id] = s
 	f.labels[id] = slices.DeleteFunc(f.labels[id], func(l string) bool { return l == specdispatch.ContentionLabel })

@@ -2242,15 +2242,21 @@ func specContentionStore(townRoot string) (record func(beadID string, rec specdi
 // it carries (gt-nnq9a2).
 func specDropContention(townRoot string) func(beadID string) error {
 	return func(id string) error {
-		return beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id)).Update(id, beads.UpdateOptions{
-			RemoveLabels: []string{specdispatch.ContentionLabel},
-			UnsetMetadata: []string{
-				specdispatch.ContentionFirstKey,
-				specdispatch.ContentionAttemptsKey,
-				specdispatch.ContentionRetryAtKey,
-			},
-		})
+		return specDropContentionFrom(beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id)), id)
 	}
+}
+
+// specDropContentionFrom is specDropContention over a store the caller
+// supplies, so a test runs the drop against a fake instead of a live bd.
+func specDropContentionFrom(b beads.Client, beadID string) error {
+	return b.Update(beadID, beads.UpdateOptions{
+		RemoveLabels: []string{specdispatch.ContentionLabel},
+		UnsetMetadata: []string{
+			specdispatch.ContentionFirstKey,
+			specdispatch.ContentionAttemptsKey,
+			specdispatch.ContentionRetryAtKey,
+		},
+	})
 }
 
 // specContentionOf is the contention schedule a bead's metadata records, nil
@@ -3461,15 +3467,17 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			}
 			// A spent schedule is the host's contention outlasting every retry
 			// the bead is owed: it is held for a person under its own label,
-			// beside the failed one, and the dispatcher's retry after the pause
-			// is dated on it (gt-nnq9a2). A schedule that cannot be read is
-			// held the same way, so a run nothing can trust is never retried
-			// blind. A retry_at that cannot be written leaves the bead labeled
-			// and held, which is the fail-safe side (the apply reports it).
+			// beside the failed one, and the time a retry is owed is dated on it
+			// (gt-nnq9a2). The note promises nothing past that: the reader that
+			// re-admits the bead once retry_at has passed is gt-5udj56's work.
+			// A schedule that cannot be read is held the same way, so a run
+			// nothing can trust is never retried blind. A retry_at that cannot
+			// be written leaves the bead labeled and held, which is the
+			// fail-safe side (the apply reports it).
 			next.RetryAt = env.Now().Add(specdispatch.ContentionPause)
 			retryAt := next.RetryAt.Format(time.RFC3339)
-			why := fmt.Sprintf("database contention outlasted the %s schedule; the dispatcher retries after %s",
-				specdispatch.ContentionWindow, retryAt)
+			why := fmt.Sprintf("database contention outlasted the %s schedule; held under %s, retry_at %s",
+				specdispatch.ContentionWindow, specdispatch.ContentionLabel, retryAt)
 			excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
 			failLine := fmt.Sprintf("%s: dispatch failed, %s: %s; %s", id, why, firstErrLine(err), excluded)
 			entry.Line = failLine
