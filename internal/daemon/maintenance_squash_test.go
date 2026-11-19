@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -972,14 +973,82 @@ func TestSquashRecordHoldsTheNextCheckAfterAFailure(t *testing.T) {
 	}
 }
 
+// TestSquashRecordUnreadableStateFailsClosed is the bead's box: a state file
+// the check cannot read is not "no run recorded". The check decides for no
+// database, starts no run and sends no statement, raises one squash:state
+// alert however many checks the file stays unreadable, and the first readable
+// check clears it.
+func TestSquashRecordUnreadableStateFailsClosed(t *testing.T) {
+	t.Parallel()
+	d, server, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+	path := maintenanceGCStatePath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first check, then a second the retry delay makes due: the repeat
+	// must not become a second alert.
+	d.runScheduledMaintenance()
+	later := squashTestNow.Add(squashCheckRetryAfter + time.Minute)
+	d.maint.now = func() time.Time { return later }
+	d.runScheduledMaintenance()
+
+	if calls != 0 {
+		t.Fatalf("a check with an unreadable state file started %d runs, want 0", calls)
+	}
+	if len(server.queries) != 0 {
+		t.Errorf("the check sent %d statements with no run record to compare them to, want 0", len(server.queries))
+	}
+	if got := logs.String(); !strings.Contains(got, "the check ran no database") {
+		t.Errorf("the check did not log the state file as unreadable: %q", got)
+	}
+	rec := d.notify().(*notifyfake.Recorder)
+	if open := rec.OpenEscalations(squashStateAlertKey); len(open) != 1 {
+		t.Fatalf("the checks leave %d open %q alerts, want 1: %+v", len(open), squashStateAlertKey, rec.Escalations())
+	}
+
+	// A readable state file, its one run recorded two hours back, so no
+	// database is due when the next check reads it.
+	if _, err := updateMaintenanceGCState(d.config.TownRoot, func(st *maintenanceGCState) {
+		st.Squash["gt"] = squashRunRecord{LastRun: squashTestNow, Outcome: squashOutcomeCompleted}
+	}); err != nil {
+		t.Fatalf("writing the readable state: %v", err)
+	}
+	third := later.Add(squashCheckRetryAfter + time.Minute)
+	d.maint.now = func() time.Time { return third }
+	d.runScheduledMaintenance()
+
+	if calls != 0 {
+		t.Errorf("the readable check started %d runs although the recorded run holds the day", calls)
+	}
+	if open := rec.OpenEscalations(squashStateAlertKey); len(open) != 0 {
+		t.Errorf("a readable state file left the %q alert open: %+v", squashStateAlertKey, open)
+	}
+	cleared := false
+	for _, c := range rec.Clears() {
+		if slices.Equal(c.Fingerprints, []string{squashStateAlertKey}) {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Errorf("the readable check did not clear %q: %+v", squashStateAlertKey, rec.Clears())
+	}
+}
+
 // TestSquashRecordWarnsWhenAWriteFails drives both writes at their call site: a
 // record that cannot be written is a WARNING naming the file, and the run is
 // still logged, so a full disk or a blocked path is never a silent loss.
 func TestSquashRecordWarnsWhenAWriteFails(t *testing.T) {
 	t.Parallel()
 	// failOne replaces one of the real ledger's operations with a failing one.
-	failOne := func(fail func(*squashLedger)) func(d *Daemon) {
-		return func(d *Daemon) {
+	failOne := func(fail func(*squashLedger)) func(t *testing.T, d *Daemon) {
+		return func(_ *testing.T, d *Daemon) {
 			d.maint.squashLedger = func(townRoot string) squashLedger {
 				l := newSquashLedger(townRoot)
 				fail(&l)
@@ -990,16 +1059,29 @@ func TestSquashRecordWarnsWhenAWriteFails(t *testing.T) {
 	cases := map[string]struct {
 		// block is a path made a directory, so the real operation on it fails.
 		block   func(townRoot string) string
-		setup   func(d *Daemon)
+		setup   func(t *testing.T, d *Daemon)
 		wantLog []string
 	}{
 		"the state file": {
-			block: maintenanceGCStatePath,
-			wantLog: []string{
-				"cannot record the run in " + maintenanceGCStateFileName,
-				// The unreadable state holds no run back: the check runs anyway.
-				"no last run is known, so the 24-hour gate holds nothing back",
+			// The check reads the state before a run starts, and a state it
+			// cannot read now fails closed, so the write is made to fail under
+			// the run: the path becomes a directory, which no rename writes over.
+			setup: func(t *testing.T, d *Daemon) {
+				if _, err := updateMaintenanceGCState(d.config.TownRoot, func(*maintenanceGCState) {}); err != nil {
+					t.Fatalf("writing the readable state: %v", err)
+				}
+				d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+					path := maintenanceGCStatePath(d.config.TownRoot)
+					if err := os.RemoveAll(path); err != nil {
+						return doltsquash.RunResult{}, err
+					}
+					if err := os.MkdirAll(path, 0o755); err != nil {
+						return doltsquash.RunResult{}, err
+					}
+					return doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil
+				}
 			},
+			wantLog: []string{"cannot record the run in " + maintenanceGCStateFileName},
 		},
 		"the ledger path is blocked": {
 			block:   func(townRoot string) string { return filepath.Join(townRoot, "daemon", squashLedgerFile) },
@@ -1032,7 +1114,7 @@ func TestSquashRecordWarnsWhenAWriteFails(t *testing.T) {
 			calls := 0
 			scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
 			if tc.setup != nil {
-				tc.setup(d)
+				tc.setup(t, d)
 			}
 			if tc.block != nil {
 				if err := os.MkdirAll(tc.block(d.config.TownRoot), 0o755); err != nil {

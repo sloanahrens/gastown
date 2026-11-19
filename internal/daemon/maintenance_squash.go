@@ -88,6 +88,12 @@ const (
 	// for a run to start: the 24 hours the design's step 1 allows, which is
 	// also the age the restore path can use.
 	squashRunBackupFreshness = 24 * time.Hour
+
+	// squashStateAlertKey is the alert a state file the check cannot read
+	// raises. One key for the condition, not one per database: `gt escalate`
+	// records a repeat on the bead already open under the key, so a file that
+	// stays unreadable leaves exactly one escalation behind.
+	squashStateAlertKey = "squash:state"
 )
 
 // squashMarkerPath is the run marker's file: <town>/daemon/squash_run.lock.
@@ -244,7 +250,11 @@ func (d *Daemon) triggerSquashCheck() {
 //
 // A number that cannot be read is a WARNING naming it, and no verdict is
 // logged for that database: a quiet-day line over an unreadable input would
-// read a failed read as a clean day.
+// read a failed read as a clean day. The state file itself is the exception
+// that fails closed: when it cannot be read no database is checked, one
+// squash:state alert is raised, and the check is due again after
+// squashCheckRetryAfter, so an unreadable file stops the step instead of
+// reopening the gate it holds.
 func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	undecided := false
 	defer func() {
@@ -257,14 +267,22 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 		d.recordPatrolRun(&d.squashCheckRun, squashCheckPatrol, at)
 	}()
 
-	// Each database's 24-hour gate is its last recorded run. A state file that
-	// cannot be read reads as no run at all, never as "not due": the run it
-	// would let start is held by its own marker, and a gate that silently
-	// stopped holding is the starvation this check exists to avoid.
+	// Each database's 24-hour gate is its last recorded run, so a state file
+	// that cannot be read leaves every database's gate unknown. It is not read
+	// as "no run recorded": that would start a destructive run again on every
+	// check the file stayed unreadable. The check decides for no database,
+	// raises one squash:state alert, and is due again after the retry delay; a
+	// later check that reads the file clears the alert.
 	st, err := loadMaintenanceGCState(d.config.TownRoot)
 	if err != nil {
-		d.logger.Printf("squash: WARNING: %v — no last run is known, so the 24-hour gate holds nothing back", err)
+		undecided = true
+		d.logger.Printf("squash: WARNING: %v — the check ran no database: the run record's 24-hour gate cannot be read", err)
+		d.escalateAlert(squashStateAlertKey, "squash", fmt.Sprintf(
+			"the squash check cannot read %s, so it ran no database: the 24-hour gate is each database's last recorded run, and a run started without it could repeat on every check: %v",
+			maintenanceGCStateFileName, err))
+		return
 	}
+	d.clearAlerts("the squash check read the run record", squashStateAlertKey)
 
 	settings := doltsquash.Settings{
 		Thresholds: doltsquash.Thresholds{
