@@ -35,6 +35,12 @@ package daemon
 // ledger. A refused item the check already holds survives an unreadable ledger,
 // which cannot say the refusal is gone (gt-t8vf15).
 //
+// A pair whose bd pin carries another schema level than the live database would
+// roll a daemon its startup handshake refuses, so the check raises that skew
+// instead of the ready item, and raises an unreadable item beside the ready one
+// when it cannot read the level (gt-5f0kue; "The roll" in docs/architecture.md
+// names the items).
+//
 // Whether a green commit is newer than the running one is read from the rig's
 // bare clone, with no fetch: running is an ancestor of green. The Forgejo
 // comparison answers only when the clone lacks one of the two commits, or when
@@ -51,6 +57,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -59,8 +66,11 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/bdskew"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/daemonimage"
+	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/land"
@@ -120,6 +130,13 @@ const (
 	// pairReadyStuckAfter is how long a green commit newer than the running one
 	// may wait for its pair before the check raises deploy-pair-stuck (gt-afwjb4).
 	pairReadyStuckAfter = 90 * time.Minute
+	// pairReadySkewPrefix keys one skewed pair: deploy-pair-skew:<rig>:<sha12>.
+	pairReadySkewPrefix = "deploy-pair-skew:"
+	// pairReadySkewKeep bounds each map of the skew guard's cache of immutable
+	// commits: the pin each green names and the level each bd commit carries.
+	// The maps start over at the bound, so a town's history of greens and pins
+	// cannot grow them without end.
+	pairReadySkewKeep = 64
 )
 
 // pairReadyAPI is the viewer's read of a rig's Forgejo repository: its green
@@ -153,6 +170,34 @@ type pairReadyAged interface {
 	CommitTime(rev string) (time.Time, error)
 }
 
+// pairReadyPinsReader is the clone's read of a file at a commit: the green
+// commit's image pins name the bd commit the pair would roll.
+type pairReadyPinsReader interface {
+	ShowFileAtRev(ref, path string) (string, error)
+}
+
+// pairReadyPinsRead reads the image-pins file a green commit carries from the
+// rig's bare clone. nil is a rig with no clone to read, which the skew guard
+// reports as an unread pin rather than a ready pair.
+type pairReadyPinsRead func(sha string) (string, error)
+
+// pairReadySchemaStore is the part of the startup handshake's store the skew
+// guard reads: the migration level of the database the town's bd serves.
+type pairReadySchemaStore interface {
+	SchemaLevel() (int, error)
+}
+
+// pairReadySkewReads is the skew guard's two town-wide reads: the schema level
+// a bd commit carries and the live database's level. A nil field is unwired,
+// and the guard reads it as an error rather than as an agreeing level.
+type pairReadySkewReads struct {
+	// LevelAt reads the schema level the bd commit carries.
+	LevelAt func(ctx context.Context, commit string) (int, error)
+	// Database reads the live database's schema level. It is called once per
+	// pass, so a migration that moves the level is noticed on the next pass.
+	Database func(ctx context.Context) (int, error)
+}
+
 // pairReadyRig is one image rig as the check reads it: its repository, the
 // viewer's API for that repository and the registry its images sit in. Err is
 // set when the rig could not be resolved, so the check says so and keeps what
@@ -169,7 +214,11 @@ type pairReadyRig struct {
 	// than the running one without a Forgejo call. A rig the daemon has no clone
 	// for has nil, and every green is compared through the API instead.
 	Git pairReadyGit
-	Err error
+	// Pins reads the image-pins file at a green commit from the same clone, for
+	// the bd pin the skew guard checks. nil is a rig without that read, and the
+	// guard then reports the pin unread rather than the pair ready.
+	Pins pairReadyPinsRead
+	Err  error
 }
 
 // pairReadyFailedRun is a failed images run a read found for a green commit: its
@@ -218,6 +267,65 @@ type pairReadyCheck struct {
 	// reported once per outage rather than on every pass.
 	ledger    pairReadyLedgerRead
 	ledgerErr string
+	// skew is the skew guard's town-wide reads, or nil when the check builds
+	// the production ones from the town root. A test sets agreeing reads.
+	skew *pairReadySkewReads
+	// skewCache remembers the guard's reads of immutable commits across passes.
+	skewCache *pairReadySkewCache
+}
+
+// pairReadySkewCache remembers what the skew guard reads from commits, whose
+// content cannot change: the bd commit a green commit's image pins name, keyed
+// rig:sha, and the schema level a bd commit carries. A failed read is not
+// stored, so the next pass asks again. Each map starts over at
+// pairReadySkewKeep, so a town's history of greens and pins cannot grow it
+// without bound.
+type pairReadySkewCache struct {
+	mu     sync.Mutex
+	pins   map[string]string
+	levels map[string]int
+}
+
+// pinOf returns the bd commit cached for a green commit.
+func (c *pairReadySkewCache) pinOf(key string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	pin, ok := c.pins[key]
+	return pin, ok
+}
+
+// keepPin records the bd commit a green commit names.
+func (c *pairReadySkewCache) keepPin(key, pin string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pins) >= pairReadySkewKeep {
+		c.pins = nil
+	}
+	if c.pins == nil {
+		c.pins = make(map[string]string, pairReadySkewKeep)
+	}
+	c.pins[key] = pin
+}
+
+// levelOf returns the schema level cached for a bd commit.
+func (c *pairReadySkewCache) levelOf(commit string) (int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	level, ok := c.levels[commit]
+	return level, ok
+}
+
+// keepLevel records the schema level a bd commit carries.
+func (c *pairReadySkewCache) keepLevel(commit string, level int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.levels) >= pairReadySkewKeep {
+		c.levels = nil
+	}
+	if c.levels == nil {
+		c.levels = make(map[string]int, pairReadySkewKeep)
+	}
+	c.levels[commit] = level
 }
 
 // run makes the check when it is due at now, and does nothing otherwise. A
@@ -245,6 +353,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 		return
 	}
 	refused := c.readRefused(townRoot, logf)
+	skew := c.skewPass(townRoot)
 	prev, fails, failed := c.snapshot()
 	out := make(map[string][]attention.Item, len(list))
 	next := make(map[string]int, len(list))
@@ -257,7 +366,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 			carryFailedRuns(nextFailed, failed, out[r.Rig])
 			continue
 		}
-		items, found, scanErr, err := pairReadyItems(ctx, r, running, now, prev[r.Rig], failed, refused, logf)
+		items, found, scanErr, err := pairReadyItems(ctx, r, running, now, prev[r.Rig], failed, refused, skew, logf)
 		for key, f := range found {
 			nextFailed[key] = f
 		}
@@ -286,6 +395,132 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 	c.held = out
 	c.fails = next
 	c.failed = nextFailed
+}
+
+// skewPass is one pass's skew guard: its reads and the level the database was
+// at when the pass asked. The database level is read once per pass, since a
+// migration can move it while the pass runs, and a failed read is settled for
+// the rest of the pass so a broken store is not asked once per green commit.
+// c.skew is nil in production, where the reads come from the town root.
+func (c *pairReadyCheck) skewPass(townRoot string) *pairReadySkewPass {
+	reads := c.skew
+	if reads == nil {
+		reads = pairReadySkewReadsAt(townRoot, pairReadySkewGitRun, func(ctx context.Context) (pairReadySchemaStore, error) {
+			return deps.NewHandshakeStore(ctx, townRoot), nil
+		})
+	}
+	c.mu.Lock()
+	if c.skewCache == nil {
+		c.skewCache = &pairReadySkewCache{}
+	}
+	cache := c.skewCache
+	c.mu.Unlock()
+	return &pairReadySkewPass{
+		reads: reads,
+		cache: cache,
+		owner: func() (string, error) { return config.ResolveForgeOwner(townRoot) },
+	}
+}
+
+// pairReadySkewPass is one pass's skew reads: the memoized pin and level reads,
+// and the database level asked at most once.
+type pairReadySkewPass struct {
+	reads *pairReadySkewReads
+	cache *pairReadySkewCache
+	// owner expands the {owner} placeholder an image-pins file can carry. It is
+	// called only when the file holds the placeholder.
+	owner  func() (string, error)
+	db     int
+	dbRead bool
+	dbErr  error
+}
+
+// database returns the live database's schema level, read once per pass.
+func (p *pairReadySkewPass) database(ctx context.Context) (int, error) {
+	if p.dbRead {
+		return p.db, p.dbErr
+	}
+	p.dbRead = true
+	if p.reads.Database == nil {
+		p.dbErr = errors.New("the database's schema level read is not wired")
+		return 0, p.dbErr
+	}
+	p.db, p.dbErr = p.reads.Database(ctx)
+	return p.db, p.dbErr
+}
+
+// levelAt returns the schema level the bd commit carries, from the cache when an
+// earlier pass read it, since a commit's content cannot change. A failed read is
+// not cached.
+func (p *pairReadySkewPass) levelAt(ctx context.Context, commit string) (int, error) {
+	if level, ok := p.cache.levelOf(commit); ok {
+		return level, nil
+	}
+	if p.reads.LevelAt == nil {
+		return 0, errors.New("the bd schema level read is not wired")
+	}
+	level, err := p.reads.LevelAt(ctx, commit)
+	if err != nil {
+		return 0, err
+	}
+	p.cache.keepLevel(commit, level)
+	return level, nil
+}
+
+// bdPin returns the bd commit green's image pins name, from the cache when an
+// earlier pass read it.
+func (p *pairReadySkewPass) bdPin(r pairReadyRig, g pairReadyGreen) (string, error) {
+	key := r.Rig + ":" + g.sha
+	if pin, ok := p.cache.pinOf(key); ok {
+		return pin, nil
+	}
+	if r.Pins == nil {
+		return "", errors.New("the rig has no local clone to read the bd pin from")
+	}
+	text, err := r.Pins(g.sha)
+	if err != nil {
+		return "", fmt.Errorf("reading %s at green/%s: %w", daemonimage.PinsPath, g.sha12, err)
+	}
+	pins, err := parseImagePins([]byte(text), p.owner)
+	if err != nil {
+		return "", fmt.Errorf("reading the bd pin from %s at green/%s: %w", daemonimage.PinsPath, g.sha12, err)
+	}
+	pin := pairReadyBdPin(pins)
+	p.cache.keepPin(key, pin)
+	return pin, nil
+}
+
+// pairReadyBdPin returns the bd commit pins names. parseImagePins refuses a file
+// that does not name each of daemonimage.PinNames once, so bd is always there;
+// should it be missing anyway, the empty answer is not a full sha and the lister
+// refuses it, so it is an error and never a level.
+func pairReadyBdPin(pins []daemonimage.Pin) string {
+	for _, pin := range pins {
+		if pin.Name == "bd" {
+			return pin.Commit
+		}
+	}
+	return ""
+}
+
+// pairReadySkewFor compares the schema levels for one green commit whose pair is
+// published. It returns the bd pin and the skew when the levels disagree, and a
+// nil skew when they agree. An error names the read that could not be made, so
+// the caller raises neither a skew item nor a ready one.
+func pairReadySkewFor(ctx context.Context, r pairReadyRig, g pairReadyGreen, pass *pairReadySkewPass) (string, *bdskew.Skew, error) {
+	pin, err := pass.bdPin(r, g)
+	if err != nil {
+		return "", nil, err
+	}
+	level, err := pass.levelAt(ctx, pin)
+	if err != nil {
+		return pin, nil, fmt.Errorf("the schema level bd %s carries: %w", greenRefShortSHA(pin), err)
+	}
+	database, err := pass.database(ctx)
+	if err != nil {
+		return pin, nil, fmt.Errorf("the database's schema level: %w", err)
+	}
+	return pin, bdskew.Compare(level, database), nil
 }
 
 // readRefused reads the update ledger's refused pair. known is false when the
@@ -346,13 +581,21 @@ func (c *pairReadyCheck) townFailed(key string, err error) {
 }
 
 // pairReadyCommitItem reports whether kind is one of the per-commit items the
-// check raises: a pair ready to roll or stuck, a pair the update ledger
+// check raises: a pair ready to roll, stuck or skewed, a pair the update ledger
 // refuses, or an image build that failed or whose status is unknown for the
 // commit.
 func pairReadyCommitItem(kind attention.Kind) bool {
 	return kind == attention.KindDeployPairReady || kind == attention.KindDeployPairStuck ||
-		kind == attention.KindDeployPairRefused ||
+		kind == attention.KindDeployPairRefused || kind == attention.KindDeployPairSkew ||
 		kind == attention.KindImagesFailed || kind == attention.KindImagesUnknown
+}
+
+// pairReadyKeptItem reports whether an item the check holds is one it rebuilds
+// with its commit each pass: a per-commit verdict, or the skew guard's
+// per-commit unreadable item, which is re-judged with the commit it names. The
+// rig's own unreadable item is rebuilt beside these and is not one of them.
+func pairReadyKeptItem(it attention.Item) bool {
+	return pairReadyCommitItem(it.Kind) || strings.HasPrefix(it.Key, pairReadySkewUnreadableKeyPrefix)
 }
 
 // carryFailedRuns keeps the failed-run answer of each images-failed item a rig
@@ -382,7 +625,7 @@ func pairReadyKept(prev []attention.Item, fails int, unreadable attention.Item, 
 	var out []attention.Item
 	if fails < pairReadyForgetAfter {
 		for _, it := range prev {
-			if !pairReadyCommitItem(it.Kind) {
+			if !pairReadyKeptItem(it) {
 				continue
 			}
 			if it.Kind == attention.KindDeployPairRefused && pairRefusedStale(it, refused, running) {
@@ -427,8 +670,10 @@ func (c *pairReadyCheck) snapshot() (map[string][]attention.Item, map[string]int
 // whose first 12 characters key its items: failed when it holds a failed images
 // run for the commit, published when it holds the commit's pair of images in the
 // registry (the images run succeeded), and neither when it holds no answer. A
-// check that has not run, or whose read did not reach the commit, holds neither
-// answer, which is no success (gt-ogt6jh, gt-opkfch).
+// skewed pair holds the images just as a ready one does, so it answers published
+// too: the images are there, only the roll is refused (gt-5f0kue). A check that
+// has not run, or whose read did not reach the commit, holds neither answer,
+// which is no success (gt-ogt6jh, gt-opkfch).
 func (c *pairReadyCheck) imagesAnswerFor(rig, sha string) (failed, published bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -437,8 +682,12 @@ func (c *pairReadyCheck) imagesAnswerFor(rig, sha string) (failed, published boo
 		return true, false
 	}
 	key := pairReadyKey(rig, sha12)
+	skewKey := pairReadySkewKey(rig, sha12)
 	for _, it := range c.held[rig] {
 		if it.Key == key && it.Kind == attention.KindDeployPairReady {
+			return false, true
+		}
+		if it.Key == skewKey && it.Kind == attention.KindDeployPairSkew {
 			return false, true
 		}
 	}
@@ -481,9 +730,12 @@ type pairReadyGreen struct {
 // pass either: that commit raises its images-unknown item and the pass goes on. A
 // ledger the check could not read suppresses the pair-ready item, since a
 // published pair may be the one the pre-swap check refused; a refused item the
-// rig holds stays. found is the failed runs this read settled, for the next read
-// to reuse.
-func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now time.Time, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
+// rig holds stays. A published pair is checked against the bd pin's schema
+// level: a skew raises the skew item instead of the ready one, and a level the
+// pass cannot read raises the guard's unreadable item beside the ready one, so
+// an unread level never passes for agreement. found is the failed runs this read
+// settled, for the next read to reuse.
+func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now time.Time, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, skew *pairReadySkewPass, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
 		return nil, nil, nil, err
@@ -500,6 +752,8 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 		seen[pairReadyStuckKey(r.Rig, sha12)] = true
 		seen[imagesFailedKey(r.Rig, sha12)] = true
 		seen[imagesUnknownKey(r.Rig, sha12)] = true
+		seen[pairReadySkewKey(r.Rig, sha12)] = true
+		seen[pairReadySkewUnreadableKey(r.Rig, sha12)] = true
 	}
 	// refusedSettled names the refused items this pass decided: the commit it
 	// judged, whether the verdict was that the pair is refused or that it is not
@@ -553,6 +807,18 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 			if !refused.known {
 				continue
 			}
+			pin, skewed, err := pairReadySkewFor(ctx, r, g, skew)
+			if err != nil {
+				// The pair is published, so the ready item stands; the unreadable
+				// item beside it says the levels were not checked (gt-5f0kue).
+				logf("deploy pair check: %s: green/%s: %v", r.Rig, g.sha12, err)
+				out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v), pairReadySkewUnreadableItem(r.Rig, g, err))
+				continue
+			}
+			if skewed != nil {
+				out = append(out, pairReadySkewItem(r.Rig, g, pin, *skewed))
+				continue
+			}
 			out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v))
 			continue
 		}
@@ -571,7 +837,7 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 	}
 	if incomplete != nil {
 		for _, it := range prev {
-			if !pairReadyCommitItem(it.Kind) {
+			if !pairReadyKeptItem(it) {
 				continue
 			}
 			if it.Kind == attention.KindDeployPairRefused {
@@ -741,6 +1007,52 @@ func pairReadyItem(rig string, g pairReadyGreen, running, daemonDigest, polecatD
 		SHA:      g.sha,
 		Summary: fmt.Sprintf("the images for green/%s are published: daemon %s and polecat %s, %s; roll the daemon onto them%s",
 			g.sha12, daemonDigest, polecatDigest, newer, v.note),
+	}
+}
+
+// pairReadySkewKey is one skewed pair's key: deploy-pair-skew:<rig>:<sha12>.
+func pairReadySkewKey(rig, sha12 string) string {
+	return pairReadySkewPrefix + rig + ":" + sha12
+}
+
+// pairReadySkewItem is the item for a green commit whose published pair names a
+// bd pin at another schema level than the live database's: the daemon the roll
+// would start is refused at its startup handshake, so no pair-ready item is
+// raised beside it.
+func pairReadySkewItem(rig string, g pairReadyGreen, pin string, skew bdskew.Skew) attention.Item {
+	return attention.Item{
+		Key:      pairReadySkewKey(rig, g.sha12),
+		Kind:     attention.KindDeployPairSkew,
+		Severity: attention.SeverityHigh,
+		Rig:      rig,
+		SHA:      g.sha,
+		Summary: fmt.Sprintf("green/%s pins bd %s at schema level %d but the database is at %d, so the roll would start a daemon its startup handshake refuses",
+			g.sha12, greenRefShortSHA(pin), skew.Pin, skew.Database),
+	}
+}
+
+// pairReadySkewUnreadableKeyPrefix keys the skew guard's per-commit unreadable
+// item: deploy-pair-unreadable:skew:<rig>:<sha12>.
+const pairReadySkewUnreadableKeyPrefix = pairReadyUnreadablePrefix + "skew:"
+
+// pairReadySkewUnreadableKey is one commit's unread skew key.
+func pairReadySkewUnreadableKey(rig, sha12 string) string {
+	return pairReadySkewUnreadableKeyPrefix + rig + ":" + sha12
+}
+
+// pairReadySkewUnreadableItem is the item for a published pair whose bd pin's
+// schema level the pass could not read. It stands beside the pair-ready item
+// and never beside a skew, so "could not verify" is raised as itself and an
+// unread level never passes for agreement. The read failure is quoted as data.
+func pairReadySkewUnreadableItem(rig string, g pairReadyGreen, err error) attention.Item {
+	return attention.Item{
+		Key:      pairReadySkewUnreadableKey(rig, g.sha12),
+		Kind:     attention.KindDeployPairUnreadable,
+		Severity: attention.SeverityLow,
+		Rig:      rig,
+		SHA:      g.sha,
+		Summary: fmt.Sprintf("the schema level of the bd pin green/%s names could not be read, so the pair is not verified free of skew: %s",
+			g.sha12, oneLine(err.Error())),
 	}
 }
 
@@ -1109,7 +1421,71 @@ func (d *Daemon) pairReadyRig(name, tokenDir string, tokenErr error) pairReadyRi
 	fc, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, name)
 	out := pairReadyRigFrom(name, fc, err, tokenDir, tokenErr)
 	out.Git = d.pairReadyBareClone(name)
+	out.Pins = pairReadyPinsAt(out.Git)
 	return out
+}
+
+// pairReadyPinsAt reads the image-pins file at a commit through the rig's bare
+// clone. A nil clone, or one that cannot read a file at a commit, is no reader:
+// the skew guard then reports the pin unread rather than the pair ready.
+func pairReadyPinsAt(clone pairReadyGit) pairReadyPinsRead {
+	if clone == nil {
+		return nil
+	}
+	reader, ok := clone.(pairReadyPinsReader)
+	if !ok {
+		return nil
+	}
+	return func(sha string) (string, error) {
+		return reader.ShowFileAtRev(sha, daemonimage.PinsPath)
+	}
+}
+
+// pairReadySkewReadsAt builds the skew guard's town-wide reads for the town at
+// townRoot: the schema level a bd commit carries, read through run over the
+// beads rig's bare clone, and the live database's level, read through open. A
+// nil run or open leaves that read unwired, and the guard then reports the pair
+// unread rather than ready.
+func pairReadySkewReadsAt(townRoot string, run func(ctx context.Context, dir string, args ...string) ([]byte, error), open func(context.Context) (pairReadySchemaStore, error)) *pairReadySkewReads {
+	reads := &pairReadySkewReads{}
+	if run != nil {
+		lister := bdskew.GitLister{Run: run, Repo: bdskew.BeadsRigRepo(townRoot)}
+		reads.LevelAt = func(ctx context.Context, commit string) (int, error) {
+			return bdskew.LevelAtCommit(ctx, lister, commit)
+		}
+	}
+	if open != nil {
+		reads.Database = func(ctx context.Context) (int, error) {
+			store, err := open(ctx)
+			if err != nil {
+				return 0, err
+			}
+			if store == nil {
+				return 0, errors.New("no store to read the database's schema level from")
+			}
+			return store.SchemaLevel()
+		}
+	}
+	return reads
+}
+
+// pairReadySkewGitRun runs git for the skew guard's lister under ctx.
+func pairReadySkewGitRun(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec // G204: fixed binary; the lister validates the commit and dir
+	cmd.Dir = dir
+	return pairReadyGitOutput(cmd)
+}
+
+// pairReadyGitOutput runs cmd and returns its standard output. The error names
+// the call, never git's output, which a failed git can fill with the repository
+// path it was given. A command that cannot start is the failure a test drives
+// in-process, so the branch is judged without a subprocess.
+func pairReadyGitOutput(cmd *exec.Cmd) ([]byte, error) {
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git %s: %w", strings.Join(cmd.Args, " "), err)
+	}
+	return out, nil
 }
 
 // pairReadyBareClone opens the rig's bare clone, which the daemon keeps and
@@ -1238,6 +1614,14 @@ func (s *attentionSources) collectPairStuck(context.Context) ([]attention.Item, 
 // check (gt-t8vf15). It is a collector of its own, like the failed builds.
 func (s *attentionSources) collectPairRefused(context.Context) ([]attention.Item, error) {
 	return s.pairReadyItemsOfKind(attention.KindDeployPairRefused), nil
+}
+
+// collectPairSkew returns the skewed pairs the same read finds: one per green
+// commit whose published pair names a bd pin at a schema level the live
+// database does not have (gt-5f0kue). It is a collector of its own, for the
+// same reason the pair's other kinds are.
+func (s *attentionSources) collectPairSkew(context.Context) ([]attention.Item, error) {
+	return s.pairReadyItemsOfKind(attention.KindDeployPairSkew), nil
 }
 
 // pairReadyItemsOfKind is the pair check's held items of one kind.
