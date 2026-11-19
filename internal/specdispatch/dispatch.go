@@ -270,10 +270,11 @@ type Seat struct {
 	Cap   int // live polecats allowed on this agent
 	Live  int // live polecats (and in-flight claims) on this agent
 	// InFlight is the part of Live that is slings still running from an earlier
-	// dispatch: the roster may not show them yet, and the tick adds each one to
-	// Live (specLiveWithInFlight) before ChooseSeat compares it to Cap. Named
-	// apart from Live, a seat reading above its cap reads as a double count
-	// rather than an admission past the cap (gt-la4r78).
+	// dispatch: the roster may not show them yet, and the tick adds each one
+	// whose bead no roster seat hooks to Live (specLiveWithInFlight) before
+	// ChooseSeat compares it to Cap. Named apart from Live, a seat reading
+	// above its cap reads as a double count rather than an admission past the
+	// cap (gt-la4r78).
 	InFlight int
 	// DeadHooked counts how many of Live hold the seat with no tmux session:
 	// their polecat crashed and is waiting for a supervised restart. They count
@@ -433,13 +434,15 @@ func SplitLiveDead(total, inFlight, dead int) string {
 // to its agent's count, and the roster shows the same polecat once it spawns, so
 // until that sling returns the seat counts it twice. The error is toward fewer
 // slings, never more, and the in-flight term is the one that reads the double
-// count.
+// count. A sling the roster already shows as a seat hooking its bead is not
+// added, so that seat is not the double count the term names (gt-75fma5).
 //
 // Budget keeps no reservation across ticks, and none is needed. A sling
 // dispatched in an earlier tick is in the daemon's in-flight set from enqueue
-// until end, and the tick adds every entry to Live (specLiveWithInFlight) before
-// ChooseSeat runs. Bump and Release cover only the slings planned in this tick.
-// A reservation here would count the same sling a second time.
+// until end, and the tick adds every entry whose bead no roster seat hooks to
+// Live (specLiveWithInFlight) before ChooseSeat runs. Bump and Release cover
+// only the slings planned in this tick. A reservation here would count the same
+// sling a second time.
 func (b Budget) Picture() string {
 	parts := make([]string, 0, len(b.Seats))
 	for _, s := range b.Seats {

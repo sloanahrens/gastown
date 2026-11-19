@@ -36,7 +36,7 @@ func TestSeatPictureGolden(t *testing.T) {
 		{Agent: "deepseek-flash"}, {Agent: "deepseek-flash"},
 		{Agent: "sbx-haiku"}, {Agent: "sbx-haiku"},
 	}
-	b.SetLive(specLiveWithInFlight(live, running))
+	b.SetLive(specLiveWithInFlight(live, nil, running))
 	b.SetInFlight(specInFlightByAgent(running))
 	b.SetDeadHooked(dead)
 	show := poolShowLive{live: live, dead: dead, ok: true}

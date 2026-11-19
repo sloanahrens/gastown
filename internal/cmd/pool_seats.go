@@ -1188,7 +1188,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				if holdErr == nil {
 					holdErr = fmt.Errorf("reading the hook of %s/%s: %w", rigName, name, err)
 				}
-				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), now))
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", now))
 				continue
 			}
 			if !held {
@@ -1208,14 +1208,14 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				if holdErr == nil {
 					holdErr = fmt.Errorf("reading the state of %s/%s: %w", rigName, name, err)
 				}
-				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), now))
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", now))
 				continue
 			}
 			probed++
 			if !state.Disposition.CountsTowardCapacity {
 				continue
 			}
-			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), now))
+			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), state.HookedBead, now))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
@@ -1224,8 +1224,10 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 
 // deadHookedSeat is the dead-hooked session a seat counts as. The seat's own
 // record is read here, once the seat is counted: only an occupant's agent is
-// worth a read.
-func deadHookedSeat(townRoot, rigName, name, fallbackAgent string, now time.Time) poolSession {
+// worth a read. hookedBead is the live work the seat's hook names when the
+// caller read it, so a running sling for that bead and this seat count once
+// (gt-75fma5); a hook that could not be read passes "".
+func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead string, now time.Time) poolSession {
 	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
 	stale := parkedStale(townRoot, rigName, name, now)
 	return poolSession{
@@ -1235,6 +1237,7 @@ func deadHookedSeat(townRoot, rigName, name, fallbackAgent string, now time.Time
 		polecat:     name,
 		deadHooked:  !stale,
 		parkedStale: stale,
+		hookedBead:  hookedBead,
 	}
 }
 
@@ -1406,7 +1409,7 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 		// created is left zero on purpose: a landing seat is not a spawn, and
 		// the spec dispatcher's stagger (min_spawn_gap) must not arm from a
 		// submission.
-		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: c.agent, rig: c.rig, polecat: c.name, landing: true})
+		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: c.agent, rig: c.rig, polecat: c.name, landing: true, hookedBead: c.bead})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil
