@@ -643,6 +643,18 @@ func TestWorkDirFallsBackToATempDirectory(t *testing.T) {
 			t.Errorf("stderr = %q, want it to name the unwired seams", stderr.String())
 		}
 	})
+	t.Run("the fallback seam is not wired either", func(t *testing.T) {
+		t.Parallel()
+		claim := t.TempDir()
+		d := Deps{Environ: []string{"GOCACHE=" + filepath.Join(claim, "gocache")}}
+		var stderr bytes.Buffer
+		if _, err := workDirectory(d, options{Rig: "gastown", Tiers: []string{"integration"}}, &stderr); err == nil {
+			t.Fatal("workDirectory returned no error with no way to make a work directory")
+		}
+		if !strings.Contains(stderr.String(), "not wired") {
+			t.Errorf("stderr = %q, want the fallback line", stderr.String())
+		}
+	})
 }
 
 // TestWorkDirFallsBackWhenTheClaimPathIsPlanted: a symlink at the work parent
