@@ -61,6 +61,7 @@ func bindServe(fs *flag.FlagSet, sc *serveConfig) {
 	fs.StringVar(&sc.addr, "addr", sc.addr, "the address to listen on")
 	fs.StringVar(&sc.pushAddr, "push-addr", sc.pushAddr, "the push-only listener's address; empty turns it off")
 	fs.DurationVar(&sc.shutdownGrace, "shutdown-grace", sc.shutdownGrace, "how long a graceful shutdown waits for calls in flight")
+	fs.BoolVar(&sc.logPerPod, "log-per-pod", sc.logPerPod, "write the call log under <log-dir>/<hostname>, so each pod has its own")
 }
 
 func runServe(args []string, stderr io.Writer) int {
