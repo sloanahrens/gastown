@@ -259,6 +259,11 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 	if c.FollowupBackpressure < 0 {
 		return fmt.Errorf("%w: followup_backpressure must be non-negative", ErrMissingField)
 	}
+	// Zero is the default of 25 and a negative turns the budget off, so only
+	// a value above 100 — more than every landing of the week — is refused.
+	if c.FollowupBudgetPercent > 100 {
+		return fmt.Errorf("%w: followup_budget_percent must be at most 100", ErrMissingField)
+	}
 	if c.Forgejo != nil {
 		if err := validateForgejoPromoteVia(c.Forgejo.PromoteVia, true); err != nil {
 			return err

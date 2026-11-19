@@ -1344,6 +1344,13 @@ type MergeQueueConfig struct {
 	// means the feed's own default of 40 (land.DefaultFollowupBackpressure).
 	FollowupBackpressure int `json:"followup_backpressure,omitempty"`
 
+	// FollowupBudgetPercent is the share of the week's landings the landing
+	// worker's follow-up feed may file as new beads for this rig (gt-wwpfo7).
+	// Zero or unset means the feed's own default of 25
+	// (land.DefaultFollowupBudgetPercent); a negative value turns the budget
+	// off. Anything above 100 is refused when the config loads.
+	FollowupBudgetPercent int `json:"followup_budget_percent,omitempty"`
+
 	// Editorial configures the om editorial gate: whether a merge requires
 	// an om review before it can land, and how that review runs. Nil means
 	// no tier has set an editorial block; Required defaults to false so
