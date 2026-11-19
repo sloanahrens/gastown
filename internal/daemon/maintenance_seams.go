@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
+	"github.com/steveyegge/gastown/internal/doltsquash"
 )
 
 // maintenanceSeams are scheduled maintenance's side effects and host reads,
@@ -64,6 +65,12 @@ type maintenanceSeams struct {
 	// test injects a fake driver so the check's readings, and a read that
 	// fails, are reachable without a server.
 	squashOpenDB func(dsn string) (*sql.DB, error)
+	// squashRun runs one due database's squash. A test scripts it so the
+	// recording of a completed or failed run is reachable without a server.
+	squashRun func(ctx context.Context, in doltsquash.RunInput) (doltsquash.RunResult, error)
+	// squashLedger is the run ledger one line is appended to. A test replaces
+	// one of its operations so every way a line fails to land is reachable.
+	squashLedger func(townRoot string) squashLedger
 	// archiveAppend appends one gzip CSV member to an archive file and returns
 	// only once the file is closed. A test injects one that observes the state
 	// file while the member is written, proving the watermark moves after the
@@ -157,6 +164,12 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.squashOpenDB == nil {
 		s.squashOpenDB = func(dsn string) (*sql.DB, error) { return sql.Open("mysql", dsn) }
+	}
+	if s.squashRun == nil {
+		s.squashRun = doltsquash.Run
+	}
+	if s.squashLedger == nil {
+		s.squashLedger = newSquashLedger
 	}
 	if s.archiveAppend == nil {
 		s.archiveAppend = appendArchiveTable
