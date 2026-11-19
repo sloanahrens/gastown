@@ -620,6 +620,8 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		BirdOwned:      birdOwnedAssignee,
 		RejectionAlert: d.rejectionAlert(),
 		UsageSink:      usage.record,
+		// A landing record a bead write could not make waits here (gt-r2rmz6).
+		Records: land.TownRecordQueue(townRoot),
 	}
 	// A rig lands through its Forgejo CI: the candidate gate runs the merged
 	// tree and the PR merger writes the target. merge_queue.forgejo is

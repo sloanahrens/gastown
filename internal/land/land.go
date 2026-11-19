@@ -207,6 +207,9 @@ type Lander struct {
 	// RecordErr: the owner's only notice must not fail silently. Nil reports
 	// nothing.
 	RejectionAlert func(key, message string) error
+	// Records keeps landing records a bead write could not make, so the process
+	// does not lose them (gt-r2rmz6). Nil keeps none.
+	Records *RecordQueue
 	// auditTimeout overrides commentTimeout for the accepted-risk writes, so a
 	// test can reach the timeout without waiting it out. Zero keeps
 	// commentTimeout.
@@ -2461,11 +2464,16 @@ func (l *Lander) reject(ctx context.Context, issue *beads.Issue, w Work, rej *Re
 	l.logf("%s", line)
 	if !repeat {
 		// A transient bd failure is retried before the note is reported as not
-		// written (gt-hounmt).
+		// written (gt-hounmt); one that still fails is queued (gt-r2rmz6).
+		text := FormatRejectionNote(note)
 		if err := retryWrite(ctx, l.sleep, func() error {
-			return l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note))
+			return l.Beads.AppendNotes(w.BeadID, text)
 		}); err != nil {
 			rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
+			if qerr := l.queueRecord(PendingRecord{Bead: w.BeadID, Kind: RecordKindNotes, Key: w.Head + " " + kind, Text: text}); qerr != nil {
+				rej.RecordErr = fmt.Errorf("%w; queueing it for a later pass failed: %v", rej.RecordErr, qerr)
+				l.logf("%s: could not queue the rejection note for a later pass (%v)", w.BeadID, qerr)
+			}
 			return rej
 		}
 	}

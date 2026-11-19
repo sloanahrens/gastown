@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // PendingRecord is one landing record a landing could not write to its bead
@@ -30,6 +32,12 @@ const (
 
 // RecordQueue is a JSON-lines queue of landing records at the caller's Path.
 type RecordQueue struct{ Path string }
+
+// TownRecordQueue is <town>/.runtime/landings/records.jsonl, in the private
+// landings directory the backoff and reviews files use (gt-r2rmz6).
+func TownRecordQueue(townRoot string) *RecordQueue {
+	return &RecordQueue{Path: filepath.Join(constants.TownRuntimePath(townRoot), "landings", "records.jsonl")}
+}
 
 // queueEntry is one non-empty line: the record it parses as, and its bytes, so
 // a rewrite keeps a torn line and any field this version does not know.
@@ -136,6 +144,15 @@ func (q RecordQueue) Remove(rec PendingRecord) error {
 		}
 		return nil
 	})
+}
+
+// queueRecord keeps rec in the record queue once its bead write failed (gt-r2rmz6).
+func (l *Lander) queueRecord(rec PendingRecord) error {
+	if l.Records == nil {
+		return nil
+	}
+	rec.At = l.now()
+	return l.Records.Enqueue(rec)
 }
 
 // sameEntry reports whether two records name the same queued write.

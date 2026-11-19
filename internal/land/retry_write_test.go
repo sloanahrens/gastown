@@ -3,7 +3,10 @@ package land
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +124,74 @@ func TestRejectRetriesTheNote(t *testing.T) {
 			_, noted := ParseRejectionNote(f.bead().Notes)
 			if (rej.RecordErr == nil) != tc.recorded || noted != tc.recorded {
 				t.Errorf("RecordErr = %v, noted = %v; want recorded = %v", rej.RecordErr, noted, tc.recorded)
+			}
+		})
+	}
+}
+
+// queueAt is a queue in a directory the queue accepts, or with blocked a queue
+// whose directory is a file, so it cannot be made (gt-r2rmz6). t.TempDir is 0777
+// under the CI runner's open umask, which the queue refuses.
+func queueAt(t *testing.T, blocked bool) RecordQueue {
+	t.Helper()
+	dir := t.TempDir()
+	if blocked {
+		blocker := filepath.Join(dir, "blocker")
+		if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return RecordQueue{Path: filepath.Join(blocker, "landing-records.jsonl")}
+	}
+	//testpolicy:allow no-exec-files — a directory, not a file: its owner search bit lets the queue reach its file
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return RecordQueue{Path: filepath.Join(dir, "landing-records.jsonl")}
+}
+
+// TestRejectQueuesTheNote: a note that fails all three tries is queued, one
+// that is written is not, and a queue that also fails is named (gt-r2rmz6).
+func TestRejectQueuesTheNote(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		fails   int
+		blocked bool // the queue's directory cannot be made
+		queued  int
+	}{
+		{"a note that fails all three tries is queued", 3, false, 1},
+		{"a note that is written queues nothing", 0, false, 0},
+		{"a note that cannot be queued either names both", 3, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l := f.lander()
+			l.Beads = &flakyNoteBeads{Fake: f.bd, fails: tc.fails}
+			l.sleep = func(time.Duration) {}
+			q := queueAt(t, tc.blocked)
+			l.Records = &q
+			rej := &Rejection{Kind: RejectGate, Rework: true, Reason: "r"}
+			if err := l.reject(context.Background(), f.bead(), f.work, rej, nil); err != rej {
+				t.Fatalf("reject = %v; want the rejection", err)
+			}
+			if (rej.RecordErr != nil) != (tc.fails > 0) {
+				t.Errorf("RecordErr = %v; want it set = %v", rej.RecordErr, tc.fails > 0)
+			}
+			if tc.blocked {
+				if !strings.Contains(rej.RecordErr.Error(), "queueing it for a later pass failed") {
+					t.Errorf("RecordErr = %v; want the failed queue named", rej.RecordErr)
+				}
+				return
+			}
+			got, err := q.Pending()
+			if err != nil || len(got) != tc.queued {
+				t.Fatalf("Pending = %+v, %v; want %d queued", got, err, tc.queued)
+			}
+			if tc.queued == 1 {
+				if n, ok := ParseRejectionNote(got[0].Text); !ok || n.Reason != "r" || n.Head != f.work.Head || got[0].Kind != RecordKindNotes {
+					t.Errorf("queued %+v; want the notes block for head %s", got[0], f.work.Head)
+				}
 			}
 		})
 	}
