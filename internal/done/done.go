@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -1025,6 +1026,19 @@ type doneRun struct {
 	// bead in; nil is beads.ForAgentBead(beads.New(<town>/<rig>)), the rig
 	// directory the write still resolves through when the worktree is gone.
 	agentBD beads.Client
+	// gateNote is what the local gate cost, rendered for the READY TO LAND
+	// note's Gate line by runDoneLocalGate (gt-7o5cql).
+	gateNote string
+	// now is the clock the presubmit slot wait is measured on. nil means
+	// time.Now; a test advances it instead of waiting out a slot.
+	now func() time.Time
+}
+
+func (r *doneRun) nowTime() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
 }
 
 // warnf reports a failed write the way gt done reports every other non-fatal
@@ -1492,7 +1506,7 @@ func submitForLanding(r *doneRun) error {
 	}
 	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
 
-	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target, Worker: r.polecatName}
+	work := land.Work{BeadID: r.issueID, Rig: r.rigName, Branch: r.branch, Head: head, Target: target, Worker: r.polecatName, Gate: r.gateNote}
 	if err := markReadyToLand(sub.sourceBD, r.townRoot, work); err != nil {
 		return doneExit(doneExitReadyFailed, fmt.Sprintf("branch %s is on origin at %s but the work bead could not be marked ready to land", r.branch, ShortSHA(head)), err)
 	}
@@ -1700,9 +1714,60 @@ func squashAutoSaveBeforeSubmit(g *git.Git, cwd, branch, baseRef string, issue *
 	return nil
 }
 
+// localGateNoteMaxPackages bounds the packages the Gate line names.
+const localGateNoteMaxPackages = 5
+
+// localGatePreVerifiedNote is the Gate line for a run that skipped the gate.
+const localGatePreVerifiedNote = "skipped (--pre-verified)"
+
+// localGateNote renders the READY TO LAND note's Gate text: the verdict, the
+// gate's name, its wall (the sum of the steps' Elapsed), the slot wait, then
+// the slowest timed packages. The verdict comes first so gateField's 300-byte
+// cut keeps the figures; a gate of none or several steps is named "gate".
+func localGateNote(res land.GateResult, slotWait time.Duration) string {
+	verdict := "fail"
+	if res.Passed {
+		verdict = "pass"
+	}
+	var wall time.Duration
+	var pkgs []land.PackageResult
+	for _, s := range res.Steps {
+		wall += s.Elapsed
+		for _, p := range s.Packages {
+			if p.Timed { // a cached package cost no gate minutes (gt-1d8u0)
+				pkgs = append(pkgs, p)
+			}
+		}
+	}
+	sort.SliceStable(pkgs, func(i, j int) bool { return pkgs[i].Elapsed > pkgs[j].Elapsed })
+	if len(pkgs) > localGateNoteMaxPackages {
+		pkgs = pkgs[:localGateNoteMaxPackages]
+	}
+	slowest := make([]string, 0, len(pkgs))
+	for _, p := range pkgs {
+		slowest = append(slowest, p.Package+" "+p.Elapsed.Round(time.Second).String())
+	}
+	step := "gate"
+	if len(res.Steps) == 1 && res.Steps[0].Name != "" {
+		step = res.Steps[0].Name
+	}
+	note := fmt.Sprintf("%s %s %s, slot wait %s", verdict, step, wall.Round(time.Second), slotWait.Round(time.Second))
+	if len(slowest) > 0 {
+		note += ", slowest: " + strings.Join(slowest, ", ")
+	}
+	return note
+}
+
 // runDoneLocalGate runs the local pre-submit gate on the rebased tree at
-// head. A red gate exits 15 before anything is pushed.
+// head. A red gate exits 15 before anything is pushed. The run's cost is kept
+// on r for the READY TO LAND note (gt-7o5cql).
 func runDoneLocalGate(r *doneRun, head string) error {
+	if r.opts.preVerified {
+		// No path reaches here today (a polecat's Run refuses the flag and the
+		// crew checks it itself); skipping keeps the note and the run agreeing.
+		r.gateNote = localGatePreVerifiedNote
+		return nil
+	}
 	gate, err := r.deps.localGate(r.townRoot, r.rigName, r.cwd)
 	if err != nil {
 		return doneExit(doneExitGateUnavailable, "no local gate could be built; this is not a verdict on your change, so escalate (gt escalate -s medium) rather than edit code", err)
@@ -1715,7 +1780,9 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	// A presubmit slot caps how many of these gates run townwide. Its wait is
 	// spent from the same budget as the gate, so a long queue shortens the run
 	// rather than extending it.
+	slotAsked := r.nowTime()
 	releaseSlot, err := acquirePresubmitSlot(ctx, r)
+	slotWait := r.nowTime().Sub(slotAsked)
 	if err != nil {
 		cancel()
 		stopHeartbeat()
@@ -1725,6 +1792,7 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	releaseSlot()
 	cancel()
 	stopHeartbeat()
+	r.gateNote = localGateNote(res, slotWait)
 	if res.Err != nil {
 		return doneExit(doneExitGateUnavailable, "the local gate could not run ("+res.Summary()+"); this is not a verdict on your change, so re-run gt done once, and escalate (gt escalate -s medium) if it repeats", res.Err)
 	}
