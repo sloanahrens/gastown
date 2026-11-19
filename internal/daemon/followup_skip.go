@@ -67,7 +67,7 @@ func isDocNit(c land.FollowupCandidate) bool {
 		return true
 	}
 	// The comment-claim class also joins a finding on the claim phrase "the
-	// code does not", which a finding about missing behaviour states too
+	// code does not", which a finding about missing behavior states too
 	// (gt-4qbe1w). A finding whose title never names a comment is about the
 	// code, so it stays filed; the class check runs first, so a finding an
 	// earlier class claims is never skipped here.
