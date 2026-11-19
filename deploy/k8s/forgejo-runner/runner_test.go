@@ -6,10 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -431,6 +433,7 @@ func TestRunnerEnvsReachEngine(t *testing.T) {
 		"DOCKER_HOST":       "tcp://localhost:2376",
 		"DOCKER_TLS_VERIFY": "1",
 		"DOCKER_CERT_PATH":  "/certs/client",
+		"CI_CPU_QUOTA":      strconv.Itoa(roundedUpCPUs(t, DefaultDindCPU)),
 	}
 	for name, value := range want {
 		if got := doc.Runner.Envs[name]; got != value {
@@ -456,6 +459,85 @@ func TestJobOptionsInitAndCerts(t *testing.T) {
 	}
 	if !slices.Contains(doc.Container.ValidVolumes, "/certs/client") {
 		t.Errorf("valid_volumes = %q, want it to allow %q", doc.Container.ValidVolumes, "/certs/client")
+	}
+}
+
+// roundedUpCPUs is the whole cores a CPU quantity rounds up to, read independently
+// of the renderer: "6500m" is 6.5 cores.
+func roundedUpCPUs(t *testing.T, cpu string) int {
+	t.Helper()
+	cores, millis := strings.CutSuffix(cpu, "m")
+	n, err := strconv.ParseFloat(cores, 64)
+	if err != nil {
+		t.Fatalf("CPU quantity %q does not parse: %v", cpu, err)
+	}
+	if millis {
+		n /= 1000
+	}
+	return int(math.Ceil(n))
+}
+
+// TestRunnerConfigCPUQuota drives runner.envs CI_CPU_QUOTA against the dind limit
+// the engine container renders, rounded up.
+func TestRunnerConfigCPUQuota(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		dindCPU string
+		want    string
+	}{
+		{name: "whole cores", dindCPU: "4", want: "4"},
+		{name: "millicores round up", dindCPU: "6500m", want: "7"},
+		{name: "decimal cores round up", dindCPU: "2.5", want: "3"},
+		{name: "sub-core share rounds up to one", dindCPU: "500m", want: "1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			v := goldenValues()
+			v.DindResources.CPU = tt.dindCPU
+			m := mustBuild(t, v)
+			got := decodeConfig(t, m).Runner.Envs["CI_CPU_QUOTA"]
+			if got != tt.want {
+				t.Errorf("runner.envs CI_CPU_QUOTA = %q, want %q", got, tt.want)
+			}
+			limit := containerNamed(t, m.Deployment.Spec.Template.Spec, dindContainerName).Resources.Limits.CPU
+			if want := strconv.Itoa(roundedUpCPUs(t, limit)); got != want {
+				t.Errorf("runner.envs CI_CPU_QUOTA = %q, want the dind limit %q rounded up: %q", got, limit, want)
+			}
+		})
+	}
+}
+
+// TestWholeCPUsRefusesUnreadableQuantity drives the refusal in wholeCPUs: a
+// quantity it cannot read is an error, never a zero quota. Build's validation
+// stops such a value first, so this row is the only way the branch is driven.
+func TestWholeCPUsRefusesUnreadableQuantity(t *testing.T) {
+	t.Parallel()
+	for _, cpu := range []string{"ten", "6500mm", ""} {
+		if got, err := wholeCPUs(cpu); err == nil {
+			t.Errorf("wholeCPUs(%q) = %d, want a refusal", cpu, got)
+		}
+	}
+}
+
+// TestRunnerConfigCPUQuotaRefusesOverflow: a CPU cpuRE accepts whose whole cores
+// overflow an int is refused by name, never rendered with a wrapped quota.
+func TestRunnerConfigCPUQuotaRefusesOverflow(t *testing.T) {
+	t.Parallel()
+	v := goldenValues()
+	v.DindResources.CPU = "99999999999999999999"
+	if _, err := Build(v); err == nil || !strings.Contains(err.Error(), v.DindResources.CPU) {
+		t.Errorf("Build with a dind CPU of %q = %v, want a refusal naming the CPU", v.DindResources.CPU, err)
+	}
+}
+
+// TestRunnerConfigCPUQuotaDefault: the default render carries DefaultDindCPU's cores.
+func TestRunnerConfigCPUQuotaDefault(t *testing.T) {
+	t.Parallel()
+	want := strconv.Itoa(roundedUpCPUs(t, DefaultDindCPU))
+	if got := decodeConfig(t, mustBuild(t, goldenValues())).Runner.Envs["CI_CPU_QUOTA"]; got != want {
+		t.Errorf("default CI_CPU_QUOTA = %q, want %q, the whole cores of DefaultDindCPU %q", got, want, DefaultDindCPU)
 	}
 }
 
