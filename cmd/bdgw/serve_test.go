@@ -1302,6 +1302,91 @@ func TestServeLogPerPodPath(t *testing.T) {
 	}
 }
 
+// writePodCallLog writes one call log line under root's directory for pod, the
+// layout --log-per-pod gives each pod. The caller names the line; the stamp is
+// fixed.
+func writePodCallLog(t *testing.T, root, pod, caller string) {
+	t.Helper()
+	dir := filepath.Join(root, pod)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("make pod directory %s: %v", dir, err)
+	}
+	line, err := json.Marshal(bdgateway.CallEntry{
+		TS:         "2026-11-18T10:00:00Z",
+		Class:      "read",
+		Caller:     caller,
+		Verb:       "show",
+		Flags:      []string{},
+		Beads:      []string{},
+		DurationMS: 5,
+	})
+	if err != nil {
+		t.Fatalf("marshal call entry: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, bdgateway.DefaultCallLogName), string(line)+"\n", 0o600)
+}
+
+// TestServeCallsPodsWiring: under --log-per-pod a live serve answers GET
+// /v1/calls with every pod's calls, not only its own. Serve's own log is pod
+// gw-0's directory, so the line from gw-1 reaches the answer only when serve
+// passes the shared root as CallsDir. Deleting that line in serve makes this
+// test fail.
+func TestServeCallsPodsWiring(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := logPerPodServeConfig(t)
+	parseServeFlags(t, sc, "--log-per-pod")
+	sc.hostname = func() (string, error) { return "gw-0", nil }
+	writePodCallLog(t, sc.logDir, "gw-0", "from-gw-0")
+	writePodCallLog(t, sc.logDir, "gw-1", "from-gw-1")
+	pl, pushPl := newPipeListener(), newPipeListener()
+	sc.listen = listenByAddr(sc.addr, pl, sc.pushAddr, pushPl)
+	client := dialClient(t, pl)
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	waitFor(t, bound, "the listener accepts", func() bool {
+		return acceptsNow(t, bound, pl)
+	})
+
+	calls := send(bound, client, http.MethodGet, "/v1/calls", testReadToken, nil)
+	if calls.err != nil {
+		t.Fatalf("GET /v1/calls: %v", calls.err)
+	}
+	if calls.status != http.StatusOK {
+		t.Fatalf("GET /v1/calls = %d, want 200; body %s", calls.status, calls.body)
+	}
+	var got struct {
+		Calls []bdgateway.CallEntry `json:"calls"`
+	}
+	if err := json.Unmarshal(calls.body, &got); err != nil {
+		t.Fatalf("decode GET /v1/calls: %v; body %s", err, calls.body)
+	}
+	seen := make(map[string]bool)
+	for _, c := range got.Calls {
+		seen[c.Caller] = true
+	}
+	for _, want := range []string{"from-gw-0", "from-gw-1"} {
+		if !seen[want] {
+			t.Errorf("GET /v1/calls lacks the call from %s; callers %v", want, seen)
+		}
+	}
+
+	stop()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("serve after the drain = %v, want nil", err)
+		}
+	case <-bound.Done():
+		t.Fatal("serve did not return after the drain")
+	}
+}
+
 // TestServeLogPerPodRefuses: a hostname that is empty, holds a slash or an
 // upper-case letter, or cannot be read stops serve, and the error names the
 // flag. No call log is written in the shared directory instead.
