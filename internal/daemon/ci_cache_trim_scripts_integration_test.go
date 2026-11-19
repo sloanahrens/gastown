@@ -484,6 +484,43 @@ func TestIntegrationCICacheTrimLRUSelects(t *testing.T) {
 	})
 }
 
+// TestIntegrationCICacheTrimLRUStrictOrder proves the selection's order: the
+// files past the floor are printed strictly oldest first by mtime, not merely
+// as a set holding the right names. The cap is 0, so the excess is the volume's
+// whole size, more than the past-floor files total, and the cut never stops the
+// read: every past-floor file is printed and the order is the sort's alone.
+// Reversing that sort (sort -n to sort -rn) or shuffling it reorders the
+// selection and turns this test red.
+func TestIntegrationCICacheTrimLRUStrictOrder(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	ciCacheLRUTreeWrite(t, root, time.Now())
+	before := ciCacheLRUBefore(t, root)
+
+	stdout, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "list", root, "120", "0", strconv.Itoa(ciCacheLRUFloorMinutes))
+	if status != 0 {
+		t.Fatalf("the LRU program exited %d: %s", status, stderr)
+	}
+	files, reply := ciCacheLRURead(t, stdout)
+
+	// The rows whose age passes the floor, oldest first: 180, 100, 96 and 90
+	// minutes. mid-45m and fresh-10m are inside the floor, and trim.txt is above
+	// the top level.
+	want := ciCacheLRUPaths(root, "00/old-3h", "ab/lru-100m", "00/lru-96m", "ab/lru-90m")
+	if !slices.Equal(files, want) {
+		t.Fatalf("selected %v, want the files past the floor in mtime order, oldest first: %v", files, want)
+	}
+	if reply.beforeKiB != before {
+		t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+	}
+	if reply.removed != int64(len(want)) {
+		t.Errorf("removed = %d, want %d", reply.removed, len(want))
+	}
+	if reply.afterKiB != before {
+		t.Errorf("after_kib = %d, want the volume's %d KiB: the list removes nothing", reply.afterKiB, before)
+	}
+}
+
 // TestIntegrationCICacheTrimModuleScripts runs the module programs against a
 // temporary pkg/mod tree: the dry run reports the old module directories and
 // removes none; the apply removes exactly those, whole, and keeps the fresh
