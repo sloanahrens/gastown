@@ -220,6 +220,48 @@ func TestPinnedInputMtimeFailureStagesNothing(t *testing.T) {
 	}
 }
 
+// TestPinnedInputMtimeRollbackFailureIsReported: when the fixed time cannot be
+// set and the file cannot be taken back out either, the error names both, so a
+// caller never reads a clean refusal over a context this call left changed.
+func TestPinnedInputMtimeRollbackFailureIsReported(t *testing.T) {
+	t.Parallel()
+	chtimesErr := errors.New("chtimes refused")
+	removeErr := errors.New("remove refused")
+	failTime := func(string, time.Time, time.Time) error { return chtimesErr }
+	failRemove := func(string) error { return removeErr }
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T) error
+	}{
+		{
+			name: "an extracted archive member",
+			run: func(t *testing.T) error {
+				archive := tgzOf(t, map[string]string{"openshell": "binary"}, []string{"openshell"})
+				b := Builder{Out: t.TempDir(), Fetch: fetchOf(archive), chtimes: failTime, remove: failRemove}
+				pin := templates.ClientToolPin{Name: "openshell", URL: "https://example.test/openshell", SHA256: sumHex(archive), Member: "openshell"}
+				_, err := b.fetchClientTool(context.Background(), pin, clientToolMaxBytes)
+				return err
+			},
+		},
+		{
+			name: "the known hosts file",
+			run: func(t *testing.T) error {
+				b := Builder{Out: t.TempDir(), Dockerfile: repoFile(t, DockerfilePath), chtimes: failTime, remove: failRemove}
+				return b.stageKnownHosts()
+			},
+		},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.run(t)
+			if !errors.Is(err, chtimesErr) || !errors.Is(err, removeErr) {
+				t.Fatalf("error = %v, want both the chtimes and the rollback failures", err)
+			}
+		})
+	}
+}
+
 // clientToolNamesForMtime keeps the three pinned tool names next to the test
 // that walks them, so a fourth pin added to templates is noticed here.
 var clientToolNamesForMtime = []string{"openshell", "docker", "kubectl"}
