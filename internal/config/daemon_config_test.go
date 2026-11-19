@@ -1135,6 +1135,74 @@ func TestSweepRunnerPodTotalMinimum(t *testing.T) {
 	}
 }
 
+// TestTierSweepRunnerConfigDindCPUs holds dind_cpus to the sidecar's CPU share:
+// a value below cpus loads, 0 and an omitted key mean the default 2, and a
+// value no rendered sidecar would read is refused at decode naming the key, so
+// a setting cannot load looking effective and do nothing (gt-h7497c).
+func TestTierSweepRunnerConfigDindCPUs(t *testing.T) {
+	t.Parallel()
+	const k8s = `"image":"i","jobs":4,"output_root":"/out","context":"gt-control","backend":"kubernetes","memory":8,"dind":true`
+	for _, tc := range []struct {
+		name  string
+		block string
+		want  int
+		// wantErr is the error a refused block must hold; empty loads.
+		wantErr string
+	}{
+		{name: "a share below cpus loads", block: `{` + k8s + `,"cpus":6,"dind_cpus":3}`, want: 3},
+		{name: "an omitted share is the default", block: `{` + k8s + `,"cpus":6}`, want: 2},
+		{name: "a zero share is the default", block: `{` + k8s + `,"cpus":6,"dind_cpus":0}`, want: 2},
+		{name: "a negative share", block: `{` + k8s + `,"cpus":6,"dind_cpus":-1}`, wantErr: "runner.dind_cpus"},
+		{name: "a share equal to cpus", block: `{` + k8s + `,"cpus":6,"dind_cpus":6}`, wantErr: "runner.dind_cpus"},
+		{
+			name:    "a share with dind off",
+			block:   `{"image":"i","jobs":4,"output_root":"/out","context":"gt-control","backend":"kubernetes","memory":8,"dind":false,"cpus":6,"dind_cpus":3}`,
+			wantErr: "runner.dind_cpus",
+		},
+		{
+			name:    "a share on the docker backend",
+			block:   `{"image":"i","jobs":4,"output_root":"/out","context":"c","backend":"docker","memory":8,"dind":true,"cpus":6,"dind_cpus":3}`,
+			wantErr: "runner.dind_cpus",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			err := json.Unmarshal([]byte(`{"tier_sweep":{"runner":`+tc.block+`}}`), &p)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("decoded a dind_cpus setting no sidecar reads: %+v", p.TierSweep.Runner)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %v, want it to name %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("a runner block with dind_cpus does not decode: %v", err)
+			}
+			r := p.TierSweep.Runner
+			if r == nil {
+				t.Fatal("the runner block decoded as nil")
+			}
+			if got := r.DindCPUShare(); got != tc.want {
+				t.Errorf("DindCPUShare() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+
+	// The accepted key also survives the config kernel's strict walk, which is
+	// the path a town's settings.json takes.
+	doc := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"runner":{` + k8s + `,"cpus":6,"dind_cpus":3}}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("settings.json", []byte(doc), &cfg); err != nil {
+		t.Fatalf("settings.json with runner.dind_cpus = %v", err)
+	}
+	if cfg.Patrols.TierSweep.Runner == nil || cfg.Patrols.TierSweep.Runner.DindCPUShare() != 3 {
+		t.Errorf("the kernel's decode lost runner.dind_cpus: %+v", cfg.Patrols.TierSweep.Runner)
+	}
+}
+
 // TestTierSweepConfigRunnerShellDefaultsFalse: runner.shell is the opt-in that
 // sends the shell stage to the runner. A block that omits it keeps the shell
 // stage on the host, and one that sets it decodes true through both the plain

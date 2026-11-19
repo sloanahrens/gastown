@@ -75,6 +75,69 @@ func TestRenderJobDindIsANativeSidecar(t *testing.T) {
 	}
 }
 
+// TestDindCPUsShareRendersTheSidecarAndTheRunner holds the sidecar's CPU share
+// to the Spec's DindCPUs and the runner to the pod total less it: a Spec that
+// names none keeps the default 2, and one whose share leaves the runner nothing
+// is refused before a Job is rendered (gt-h7497c).
+func TestDindCPUsShareRendersTheSidecarAndTheRunner(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		dindCPUs    int
+		wantSidecar string
+		wantRunner  string
+	}{
+		{name: "the default share", wantSidecar: "2", wantRunner: "4"},
+		{name: "a larger share", dindCPUs: 3, wantSidecar: "3", wantRunner: "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := goldenSpec()
+			spec.CPUs, spec.MemoryGB, spec.Dind, spec.DindCPUs = 6, 24, true, tc.dindCPUs
+			plan, err := Kubernetes{}.Render(spec)
+			if err != nil {
+				t.Fatalf("rendering a 6-CPU pod with dind_cpus %d: %v", tc.dindCPUs, err)
+			}
+			dind, ok := containerNamed(plan.Job, dindContainerName)
+			if !ok {
+				t.Fatalf("the Job renders no %q sidecar", dindContainerName)
+			}
+			if got := dind.Resources.Requests.CPU; got != tc.wantSidecar {
+				t.Errorf("the sidecar asks for %s CPUs, want %s", got, tc.wantSidecar)
+			}
+			runner, ok := containerNamed(plan.Job, runnerContainerName)
+			if !ok {
+				t.Fatalf("the Job renders no %q container", runnerContainerName)
+			}
+			if got := runner.Resources.Requests.CPU; got != tc.wantRunner {
+				t.Errorf("the runner asks for %s CPUs, want %s: the pod total less the sidecar's share", got, tc.wantRunner)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		dindCPUs int
+		dind     bool
+	}{
+		{name: "a share equal to the pod's CPUs", dindCPUs: 6, dind: true},
+		{name: "a share above the pod's CPUs", dindCPUs: 7, dind: true},
+		{name: "a share with no sidecar", dindCPUs: 3, dind: false},
+		{name: "a negative share", dindCPUs: -1, dind: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := goldenSpec()
+			spec.CPUs, spec.MemoryGB, spec.Dind, spec.DindCPUs = 6, 24, tc.dind, tc.dindCPUs
+			if _, err := (Kubernetes{}).Render(spec); err == nil {
+				t.Fatalf("rendered dind_cpus %d with dind %v, want the Spec refused", tc.dindCPUs, tc.dind)
+			} else if !strings.Contains(err.Error(), "dindCPUs") {
+				t.Errorf("error = %v, want it to name dindCPUs", err)
+			}
+		})
+	}
+}
+
 // TestRenderJobStartupProbeRunsInsideThePod holds the engine's startup probe to
 // an exec action, which the kubelet runs inside the dind container beside
 // dockerd. A tcpSocket or httpGet probe is dialed by the kubelet from the node's
