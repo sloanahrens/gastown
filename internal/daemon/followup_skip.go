@@ -3,14 +3,17 @@ package daemon
 // The follow-up skip policy (gt-4qbe1w, Q34): the feed files beads for the
 // minor findings of an approved landing, and a finding that asks for a doc or
 // wording fix, or names a file no agent push may change, is a bead nobody can
-// act on. It lives here rather than in internal/land because it reads the
-// lessons table, and omlessons imports land.
+// act on. The lessons hold-out withholds two classes for some beads instead, so
+// the report can compare those findings with the ones filed (Q37). It lives
+// here rather than in internal/land because it reads the lessons table, and
+// omlessons imports land.
 
 import (
 	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
@@ -23,6 +26,10 @@ const (
 	// followupReasonProtectedPath marks a finding about a file under
 	// protectedWorkflowDir, which no agent push may change.
 	followupReasonProtectedPath = "protected-path"
+	// followupReasonHoldOut marks a finding the lessons hold-out withholds for
+	// this bead: it stays in the reviews log for the report to compare, and no
+	// bead is filed for it (Q37).
+	followupReasonHoldOut = "hold-out"
 
 	// commentClaimClass is the omlessons class id for a comment that carries a
 	// line number or an untrue claim (internal/omlessons/omlessons.go).
@@ -44,21 +51,40 @@ var (
 	commentWord = regexp.MustCompile(`(?i)\bcomments?\b`)
 )
 
-// applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built.
-func applyFollowupPolicy(l *land.Lander) {
-	l.FollowupSkip = followupSkipReason
+// followupPolicy is the skip policy and its clock. The clock is a field so the
+// hold-out window can be tested without the wall clock (Q37).
+type followupPolicy struct {
+	now func() time.Time
 }
 
-// followupSkipReason is the skip policy: the reason a minor finding is filed
-// nowhere, or "" to file it.
-func followupSkipReason(_ land.Work, c land.FollowupCandidate) string {
+// applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built.
+func applyFollowupPolicy(l *land.Lander) {
+	p := followupPolicy{now: time.Now}
+	l.FollowupSkip = p.reason
+}
+
+// reason is the skip policy: the reason a minor finding is filed nowhere, or
+// "" to file it.
+func (p followupPolicy) reason(w land.Work, c land.FollowupCandidate) string {
 	if isProtectedFollowupPath(c.Path) {
 		return followupReasonProtectedPath
 	}
 	if isDocNit(c) {
 		return followupReasonDocNit
 	}
+	// The hold-out runs last, so a finding an earlier rule already skipped is
+	// not counted as held out.
+	if p.heldOut(w, c) {
+		return followupReasonHoldOut
+	}
 	return ""
+}
+
+// heldOut reports whether the finding's class is withheld for the landing's
+// bead at the policy's clock.
+func (p followupPolicy) heldOut(w land.Work, c land.FollowupCandidate) bool {
+	class := omlessons.Classify(land.ReviewFindingText{Title: c.Title, Claim: c.Claim})
+	return omlessons.HeldOut(w.BeadID, class, p.now())
 }
 
 // isDocNit reports whether a finding asks for a doc or wording fix.
