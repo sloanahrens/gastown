@@ -511,7 +511,13 @@ func TestCallLogStats(t *testing.T) {
 	l.Log(CallRecord{Class: "read", Caller: "c", Argv: []string{"show", "gt-other"}})
 
 	got := l.Stats()
-	want := Stats{Calls: 3, Errors: 1, Dropped: 0, Verbs: map[string]uint64{"show": 2, "list": 1}}
+	want := Stats{
+		Calls:   3,
+		Errors:  1,
+		Dropped: 0,
+		Verbs:   map[string]uint64{"show": 2, "list": 1},
+		Actors:  map[string]ActorStats{"(none)": {Reads: 3}},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Stats = %+v, want %+v", got, want)
 	}
@@ -575,6 +581,7 @@ func TestCallConflictLogStats(t *testing.T) {
 		Verbs:         map[string]uint64{"update": 2, "show": 1},
 		Conflicts:     2,
 		ConflictVerbs: map[string]uint64{"update": 2},
+		Actors:        map[string]ActorStats{"(none)": {Reads: 3, Conflicts: 2}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Stats = %+v, want %+v", got, want)
@@ -602,6 +609,72 @@ func TestCallConflictLogStats(t *testing.T) {
 	}
 	if want := uint64(verbs - maxVerbKeys); cs.ConflictVerbs[otherVerb] != want {
 		t.Errorf("conflict_verbs[%s] = %d, want %d", otherVerb, cs.ConflictVerbs[otherVerb], want)
+	}
+}
+
+// TestCallActorStatsCounts: Stats counts each counted call as a read or a write
+// under its actor, adds a conflict to the actor that had one, and moves nothing
+// for a call LogUncounted records.
+func TestCallActorStatsCounts(t *testing.T) {
+	t.Parallel()
+	opts := testOptions(t)
+	l, err := NewCallLog(opts)
+	if err != nil {
+		t.Fatalf("NewCallLog: %v", err)
+	}
+	l.Log(CallRecord{Class: "daemon", Caller: "a", Actor: "alice", Argv: []string{"update", "gt-a"}, Write: true})
+	l.Log(CallRecord{Class: "daemon", Caller: "a", Actor: "alice", Argv: []string{"show", "gt-a"}})
+	l.Log(CallRecord{Class: "daemon", Caller: "b", Actor: "bob", Argv: []string{"update", "gt-b"}, Write: true, Conflict: true})
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"list"}})
+	l.LogUncounted(CallRecord{Class: "daemon", Caller: "d", Actor: "carol", Argv: []string{"update", "gt-c"}, Write: true, Conflict: true})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := l.Stats().Actors
+	want := map[string]ActorStats{
+		"alice":  {Reads: 1, Writes: 1},
+		"bob":    {Writes: 1, Conflicts: 1},
+		"(none)": {Reads: 1},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Actors = %+v, want %+v", got, want)
+	}
+}
+
+// TestCallActorStatsCap: the maxActorKeys+1st named actor counts under (other),
+// an empty actor under (none), and a named actor already kept keeps its own key.
+func TestCallActorStatsCap(t *testing.T) {
+	t.Parallel()
+	const named = maxActorKeys + 1
+	l, err := newCallLog(testOptions(t), func([]byte) error { return nil })
+	if err != nil {
+		t.Fatalf("newCallLog: %v", err)
+	}
+	for i := 0; i < named; i++ {
+		l.Log(CallRecord{Class: "daemon", Caller: "c", Actor: fmt.Sprintf("actor%02d", i), Argv: []string{"list"}})
+	}
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Actor: "actor00", Argv: []string{"list"}})
+	l.Log(CallRecord{Class: "daemon", Caller: "c", Argv: []string{"list"}})
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	got := l.Stats().Actors
+	if len(got) != maxActorKeys+2 {
+		t.Errorf("kept %d actor keys, want %d", len(got), maxActorKeys+2)
+	}
+	if want := (ActorStats{Reads: 1}); got["(other)"] != want {
+		t.Errorf("actor (other) = %+v, want %+v", got["(other)"], want)
+	}
+	if want := (ActorStats{Reads: 1}); got["(none)"] != want {
+		t.Errorf("actor (none) = %+v, want %+v", got["(none)"], want)
+	}
+	if _, ok := got[fmt.Sprintf("actor%02d", maxActorKeys)]; ok {
+		t.Errorf("actor%02d kept its own key past the cap", maxActorKeys)
+	}
+	if want := (ActorStats{Reads: 2}); got["actor00"] != want {
+		t.Errorf("actor00 = %+v, want %+v", got["actor00"], want)
 	}
 }
 
