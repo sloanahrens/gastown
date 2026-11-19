@@ -103,10 +103,12 @@ func failingPackages(res PostLandResult) []string {
 	return out
 }
 
-// Red handles a red run of cmd at pl.Commit.
+// Red handles a red run of cmd at pl.Commit: a package whose rerun could not
+// run files nothing and keeps the commit from being recorded green
+// (gt-7t9zrm, Q36).
 func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLandResult) {
 	pkgs := failingPackages(res)
-	var stillRed, flaky []string
+	var stillRed, flaky, couldNotRun []string
 	tails := map[string]string{}
 	if len(pkgs) == 0 {
 		// Nothing to rerun: the whole command is the failing unit.
@@ -126,9 +128,8 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 		}
 		switch {
 		case rr.Err != nil:
-			r.logf("rerun of %s at %s could not run (%v); counting it red", pkg, short(pl.Commit), rr.Err)
-			stillRed = append(stillRed, pkg)
-			tails[pkg] = res.Tail
+			r.logf("rerun of %s at %s could not run (%v); no bead for it", pkg, short(pl.Commit), rr.Err)
+			couldNotRun = append(couldNotRun, pkg)
 		case rr.ExitCode == 0:
 			r.logf("%s passed its rerun at %s: flaky, no bead", pkg, short(pl.Commit))
 			flaky = append(flaky, pkg)
@@ -137,7 +138,14 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 			tails[pkg] = rr.Tail
 		}
 	}
-	r.recordVerdict(pl, len(stillRed) == 0)
+	// A green verdict would claim every failing package was rerun and passed;
+	// one that could not run was never checked. With nothing else failing,
+	// record no verdict and let the next post-land run decide; a package that
+	// did rerun and fail still makes the commit red.
+	noVerdict := len(couldNotRun) > 0 && len(stillRed) == 0
+	if !noVerdict {
+		r.recordVerdict(pl, len(stillRed) == 0)
+	}
 	open := r.openBeads()
 	var filed []string
 	for _, pkg := range stillRed {
@@ -149,6 +157,10 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 	line := fmt.Sprintf("main GREEN at %s after rerun (%s)", short(pl.Commit), pl.by())
 	if len(filed) > 0 {
 		line = fmt.Sprintf("main RED at %s (%s): %s", short(pl.Commit), pl.by(), strings.Join(filed, ", "))
+	}
+	if noVerdict {
+		line = fmt.Sprintf("main UNKNOWN at %s (%s): the rerun could not run for %s; no verdict, the next post-land run decides",
+			short(pl.Commit), pl.by(), strings.Join(couldNotRun, ", "))
 	}
 	if len(flaky) > 0 {
 		line += "; flaky (passed on rerun): " + strings.Join(flaky, ", ")
