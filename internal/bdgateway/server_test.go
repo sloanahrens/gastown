@@ -1228,6 +1228,152 @@ func TestBdgwConflictIsLogged(t *testing.T) {
 	}
 }
 
+// newStderrTestGateway runs the HTTP handler, the policy, the real executor and
+// a fake bd process, so a test reads the call log line the production path
+// writes for a call bd ran.
+func newStderrTestGateway(t *testing.T, proc Process) (*Gateway, func() []entry) {
+	t.Helper()
+	root := t.TempDir()
+	store, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceStore: %v", err)
+	}
+	doc := WorkspaceDocument{Files: map[string]string{
+		"gastown/.beads/metadata.json": "{}",
+		".beads/routes.jsonl":          `{"prefix":"gt","path":"gastown/.beads"}`,
+	}}
+	doc.ManifestSHA = WorkspaceManifest(doc.Files)
+	if _, err := store.Put(doc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	runner := &fakeRunner{queue: []Process{proc}, bound: waitCtx(t)}
+	exec := newTestExecutor(t, root, runner)
+	log, entries := newCapturingCallLog(t)
+	return newTestGateway(t, store, log, exec), entries
+}
+
+// serveExecOnce runs one exec request against g and returns its recorder and
+// the frames it streamed.
+func serveExecOnce(t *testing.T, g *Gateway, head Request) (*httptest.ResponseRecorder, []Frame) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, head, ""))
+	return rec, readFrames(t, rec.Body.Bytes())
+}
+
+// TestCallLogStderrNamesBdsFirstLine: a call bd itself failed carries bd's
+// first stderr line in its log line's error, and the caller still reads the
+// full stderr, so a failing write is no longer silent (gt-hbhi39).
+func TestCallLogStderrNamesBdsFirstLine(t *testing.T) {
+	t.Parallel()
+	const stderr = "Error resolving gt-x: no issue found\nsecond line\n"
+	g, entries := newStderrTestGateway(t, newExitedFake(1, "", stderr))
+	rec, frames := serveExecOnce(t, g, Request{Argv: []string{"show", "gt-x"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got, err := frames[len(frames)-1].ExitStatus(); err != nil || got != 1 {
+		t.Fatalf("exit status = %d (%v), want 1", got, err)
+	}
+	if got := streamOf(frames, FrameStderr); got != stderr {
+		t.Errorf("stderr frames = %q, want the full bd stderr %q", got, stderr)
+	}
+	got := entries()
+	if len(got) != 1 {
+		t.Fatalf("got %d log lines, want 1", len(got))
+	}
+	if got[0].ExitCode != 1 {
+		t.Errorf("line exit_code = %d, want 1", got[0].ExitCode)
+	}
+	if want := "Error resolving gt-x: no issue found"; got[0].Error != want {
+		t.Errorf("line error = %q, want bd's first stderr line %q", got[0].Error, want)
+	}
+}
+
+// TestCallLogStderrKeepsExistingValues: a zero exit, a stdout-only failure and
+// a gateway refusal keep the error value their line had before the stderr head
+// was kept (gt-hbhi39).
+func TestCallLogStderrKeepsExistingValues(t *testing.T) {
+	t.Parallel()
+	t.Run("a zero exit records no error", func(t *testing.T) {
+		t.Parallel()
+		g, entries := newStderrTestGateway(t, newExitedFake(0, "", "warning: nothing failed\n"))
+		if code := postExec(t, g, testReadToken, Request{Argv: []string{"show", "gt-x"}}); code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		got := entries()
+		if len(got) != 1 {
+			t.Fatalf("got %d log lines, want 1", len(got))
+		}
+		if got[0].Error != "" {
+			t.Errorf("line error = %q for a zero exit, want empty", got[0].Error)
+		}
+	})
+	t.Run("a stdout-only failure records no error", func(t *testing.T) {
+		t.Parallel()
+		g, entries := newStderrTestGateway(t, newExitedFake(1, "boom\n", ""))
+		if code := postExec(t, g, testReadToken, Request{Argv: []string{"show", "gt-x"}}); code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", code)
+		}
+		got := entries()
+		if len(got) != 1 {
+			t.Fatalf("got %d log lines, want 1", len(got))
+		}
+		if got[0].ExitCode != 1 {
+			t.Errorf("line exit_code = %d, want 1", got[0].ExitCode)
+		}
+		if got[0].Error != "" {
+			t.Errorf("line error = %q for a failure with no stderr, want empty", got[0].Error)
+		}
+	})
+	t.Run("a gateway refusal keeps its own error text", func(t *testing.T) {
+		t.Parallel()
+		log, entries := newCapturingCallLog(t)
+		g := newTestGateway(t, mustStore(t), log, &stubRunner{err: errors.New("disk on fire")})
+		if code := postExec(t, g, testReadToken, Request{Argv: []string{"show", "gt-x"}}); code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500", code)
+		}
+		got := entries()
+		if len(got) != 1 {
+			t.Fatalf("got %d log lines, want 1", len(got))
+		}
+		if got[0].Error != "disk on fire" {
+			t.Errorf("line error = %q, want the gateway's own text %q", got[0].Error, "disk on fire")
+		}
+	})
+}
+
+// TestCallLogStderrIsBoundedAndStripped: a long stderr with control characters
+// logs at most the bounded first line, controls stripped, while the caller
+// still reads every byte (gt-hbhi39).
+func TestCallLogStderrIsBoundedAndStripped(t *testing.T) {
+	t.Parallel()
+	const escape, stripped = "\x1b[31m", "[31m"
+	stderr := escape + strings.Repeat("x", 10000) + escape + "\nsecond line\n"
+	g, entries := newStderrTestGateway(t, newExitedFake(1, "", stderr))
+	rec, frames := serveExecOnce(t, g, Request{Argv: []string{"show", "gt-x"}})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := streamOf(frames, FrameStderr); got != stderr {
+		t.Errorf("stderr frames lost bytes: got %d bytes, want %d", len(got), len(stderr))
+	}
+	got := entries()
+	if len(got) != 1 {
+		t.Fatalf("got %d log lines, want 1", len(got))
+	}
+	// The head is the first 256 bytes of stderr; the escape's control byte is
+	// stripped, so the line is 255 bytes.
+	want := stripped + strings.Repeat("x", 256-len(escape))
+	if got[0].Error != want {
+		t.Errorf("line error = %q (%d bytes), want the bounded first line %q (%d bytes)",
+			got[0].Error, len(got[0].Error), want, len(want))
+	}
+	if len(got[0].Error) > maxErrorBytes {
+		t.Errorf("line error is %d bytes, over the log's %d-byte bound", len(got[0].Error), maxErrorBytes)
+	}
+}
+
 // TestBdgwNewGatewayRefusesUnwired refuses a gateway missing any piece by name.
 func TestBdgwNewGatewayRefusesUnwired(t *testing.T) {
 	t.Parallel()

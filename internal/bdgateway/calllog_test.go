@@ -837,6 +837,36 @@ func TestCallLogBoundsErrorText(t *testing.T) {
 	}
 }
 
+// TestCallLogStderrErrorRule: SetStderrError fills a failed call's Error with
+// bd's first stderr line, and leaves the record alone for a zero exit, an
+// empty head or error text the gateway already set (gt-hbhi39).
+func TestCallLogStderrErrorRule(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		head     string
+		exit     int
+		existing string
+		want     string
+	}{
+		{name: "failed call names bd's first line", head: "Error resolving gt-x: no issue found\nmore", exit: 1, want: "Error resolving gt-x: no issue found"},
+		{name: "a carriage return also ends the line", head: "first\rsecond", exit: 1, want: "first"},
+		{name: "a zero exit records no error", head: "warning", exit: 0, want: ""},
+		{name: "an empty head records no error", head: "", exit: 1, want: ""},
+		{name: "the gateway's own text wins", head: "bd text", exit: 1, existing: "gateway text", want: "gateway text"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := CallRecord{ExitCode: tc.exit, Error: tc.existing}
+			rec.SetStderrError(tc.head)
+			if rec.Error != tc.want {
+				t.Errorf("Error = %q, want %q", rec.Error, tc.want)
+			}
+		})
+	}
+}
+
 // TestCallLogWriteError checks a failed write is reported by Close, not read as
 // a clean log.
 func TestCallLogWriteError(t *testing.T) {

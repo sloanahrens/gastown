@@ -369,7 +369,7 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		// gateway's failed call rather than a status bd chose.
 		status = ExitRefused
 	}
-	g.log.Log(CallRecord{
+	rec := CallRecord{
 		Class:    string(ident.Class),
 		Caller:   r.Header.Get("X-Gt-Caller"),
 		Actor:    actor,
@@ -378,7 +378,9 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 		ExitCode: status,
 		Duration: time.Since(start),
 		Conflict: frames.Conflict(),
-	})
+	}
+	rec.SetStderrError(frames.StderrHead())
+	g.log.Log(rec)
 }
 
 // serveWorkspace is PUT /v1/workspace. Only a class that may write may push:
@@ -631,8 +633,9 @@ var conflictMarkers = [][]byte{
 // the workspace header go out with the first frame, which is what keeps a
 // pre-start refusal an HTTP status. It also scans the stderr frames for a lost
 // Dolt transaction, keeping only whether one appeared and the rolling tail a
-// phrase split across frames is found with: bd's stderr text is never kept
-// beyond that tail.
+// phrase split across frames is found with. The executor keeps the bounded
+// start of stderr beside that scan, so a failed call's log line can name bd's
+// error; the frames themselves pass through unchanged.
 type httpFrames struct {
 	mu      sync.Mutex
 	w       http.ResponseWriter
@@ -645,6 +648,12 @@ type httpFrames struct {
 	tail          [conflictTailBytes]byte // last bytes of the stderr scanned so far
 	tailLen       int
 	window        []byte // reused scan buffer holding tail + frame
+
+	// headMu guards stderrHead apart from mu: a pump blocked writing to a
+	// client that stopped reading holds mu, and SetStderrHead must not wait on
+	// it when the call ends.
+	headMu     sync.Mutex
+	stderrHead string
 }
 
 // Write forwards one frame. A frame it cannot read is returned as a write
@@ -733,6 +742,22 @@ func foldEqualASCII(a, m []byte) bool {
 		}
 	}
 	return true
+}
+
+// SetStderrHead takes the start of bd's stderr the executor kept for this
+// call. It implements StderrHeadSink.
+func (f *httpFrames) SetStderrHead(head string) {
+	f.headMu.Lock()
+	defer f.headMu.Unlock()
+	f.stderrHead = head
+}
+
+// StderrHead returns the start of bd's stderr the executor kept, for the log
+// line's error text.
+func (f *httpFrames) StderrHead() string {
+	f.headMu.Lock()
+	defer f.headMu.Unlock()
+	return f.stderrHead
 }
 
 // Conflict reports whether bd's stderr carried a Dolt commit conflict during
