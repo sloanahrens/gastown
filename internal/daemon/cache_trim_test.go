@@ -1871,6 +1871,30 @@ func TestCacheTrimKeepsBuildFilesInsideTheMinimumAge(t *testing.T) {
 	}
 }
 
+// TestCacheTrimPairsAnActionFileWithItsOutput pins the pairing through the
+// pass: the listing's output field reaches PlanTrim, so a trim whose cap the -a
+// file alone reaches still names the -d file it points at (gt-udrvfw).
+func TestCacheTrimPairsAnActionFileWithItsOutput(t *testing.T) {
+	t.Parallel()
+	actionID, outputID := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	action := "gocache/11/" + actionID + "-a"
+	output := "gocache/22/" + outputID + "-d"
+	const when = `"atime":"2026-10-29T00:00:00Z","mtime":"2026-10-29T00:00:00Z"`
+	listing := `[{"path":"` + action + `","cache":"build","size":1000,` + when + `,"output":"` + output + `"},` +
+		`{"path":"` + output + `","cache":"build","size":100,` + when + `}]`
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb: {stdout: listing},
+	})
+
+	f.d.runDiskMaintenance()
+	if !f.appliedContaining(action) {
+		t.Fatalf("the applied trim does not name %s: %v (log %s)", action, f.applied(t), f.log.String())
+	}
+	if !f.appliedContaining(output) {
+		t.Errorf("the applied trim does not name the -d file %s the -a file names: %v", output, f.applied(t))
+	}
+}
+
 // TestCacheTrimRefusesAZeroClock pins the plan's clock refusal at the pass: a
 // clock seam that answers the zero time plans nothing and says so, rather than
 // applying a trim whose file ages were never judged.

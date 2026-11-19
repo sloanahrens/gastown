@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -192,13 +193,15 @@ const (
 )
 
 // trimListEntry is one claim file as the trim-list helper prints it: the path a trim removes, the
-// cache it belongs to, its size, and the last use PlanTrim orders by.
+// cache it belongs to, its size, the last use PlanTrim orders by, and the -d file an -a file's header
+// names, so a reader plans the pair as one removal (gt-udrvfw).
 type trimListEntry struct {
-	Path  string    `json:"path"`
-	Cache string    `json:"cache"`
-	Size  int64     `json:"size"`
-	Atime time.Time `json:"atime"`
-	Mtime time.Time `json:"mtime"`
+	Path   string    `json:"path"`
+	Cache  string    `json:"cache"`
+	Size   int64     `json:"size"`
+	Atime  time.Time `json:"atime"`
+	Mtime  time.Time `json:"mtime"`
+	Output string    `json:"output,omitempty"`
 }
 
 // trimListing returns the claim at root as the listing a caller builds a trim manifest from: the
@@ -220,7 +223,7 @@ func trimListing(root string, walk fileWalk) ([]trimListEntry, error) {
 		if e.Cache == cachevol.ModuleCache {
 			cache = TrimListCacheModule
 		}
-		out = append(out, trimListEntry{Path: e.Path, Cache: cache, Size: e.Size, Atime: e.Atime, Mtime: e.Mtime})
+		out = append(out, trimListEntry{Path: e.Path, Cache: cache, Size: e.Size, Atime: e.Atime, Mtime: e.Mtime, Output: e.Output})
 	}
 	return out, nil
 }
@@ -231,7 +234,8 @@ func trimListing(root string, walk fileWalk) ([]trimListEntry, error) {
 // list it is reading.
 //
 // Entry's times are both the file's last use, the later of its access and modification times: that is
-// the one figure PlanTrim orders by, and the walk is the same one the cache trim takes.
+// the one figure PlanTrim orders by, and the walk is the same one the cache trim takes. Each action
+// file carries the -d path its header names, so the plan removes a pair together (gt-udrvfw).
 func claimListing(root string, walk fileWalk) ([]cachevol.Entry, error) {
 	// The claim root itself is checked first: a root that is gone or is a symlink would have the walk
 	// of both cache trees answer "no files", which plans a trim of nothing for a claim that is there.
@@ -266,13 +270,23 @@ func claimListing(root string, walk fileWalk) ([]cachevol.Entry, error) {
 			if err != nil {
 				return nil, fmt.Errorf("the claim path %s: %w", f.path, err)
 			}
-			listing = append(listing, cachevol.Entry{
+			entry := cachevol.Entry{
 				Path:  filepath.ToSlash(rel),
 				Cache: c.cache,
 				Size:  f.size,
 				Atime: f.used,
 				Mtime: f.used,
-			})
+			}
+			if c.cache == cachevol.BuildCache {
+				output, err := cachevol.BuildActionOutputFrom(entry.Path, func() (io.ReadCloser, error) {
+					return os.Open(f.path)
+				})
+				if err != nil {
+					return nil, fmt.Errorf("reading the build-cache header of %s: %w", entry.Path, err)
+				}
+				entry.Output = output
+			}
+			listing = append(listing, entry)
 		}
 	}
 	return listing, nil
