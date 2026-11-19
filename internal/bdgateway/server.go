@@ -552,17 +552,47 @@ func execRefusal(err error) (status int, code, message string) {
 	}
 }
 
+const (
+	// conflictScanLimit bounds the stderr bytes one call is scanned for a
+	// conflict; a call that writes more is not scanned further.
+	conflictScanLimit = 64 << 10
+	// conflictTailBytes is how much of the stderr already scanned the scan
+	// carries into the next frame, so a phrase split across frames is found
+	// however short the frames are. It is the length of the longer phrase
+	// ("serialization failure") minus one: enough for all but that phrase's
+	// last byte to arrive in earlier frames.
+	conflictTailBytes = 20
+)
+
+// conflictMarkers are the two phrases bd writes to stderr when Dolt rolled the
+// transaction back (MySQL Error 1213, SQLSTATE 40001, or the serialization
+// failure beside it). They are matched case-insensitively, so they are stored
+// lower-cased.
+var conflictMarkers = [][]byte{
+	[]byte("error 1213"),
+	[]byte("serialization failure"),
+}
+
 // httpFrames forwards the executor's frames to an HTTP response. It reads each
 // frame the executor writes (WriteFrame writes a whole frame in one Write) so it
 // knows whether the stream began and what exit status it carried. The 200 and
 // the workspace header go out with the first frame, which is what keeps a
-// pre-start refusal an HTTP status.
+// pre-start refusal an HTTP status. It also scans the stderr frames for a lost
+// Dolt transaction, keeping only whether one appeared and the rolling tail a
+// phrase split across frames is found with: bd's stderr text is never kept
+// beyond that tail.
 type httpFrames struct {
 	mu      sync.Mutex
 	w       http.ResponseWriter
 	started bool
 	status  int
 	exited  bool
+
+	conflict      bool
+	stderrScanned int                     // stderr payload bytes scanned so far
+	tail          [conflictTailBytes]byte // last bytes of the stderr scanned so far
+	tailLen       int
+	window        []byte // reused scan buffer holding tail + frame
 }
 
 // Write forwards one frame. A frame it cannot read is returned as a write
@@ -574,6 +604,9 @@ func (f *httpFrames) Write(p []byte) (int, error) {
 	frame, err := ReadFrame(bytes.NewReader(p))
 	if err != nil {
 		return 0, err
+	}
+	if frame.Kind == FrameStderr {
+		f.noteStderr(frame.Payload)
 	}
 	if !f.started {
 		f.w.WriteHeader(http.StatusOK)
@@ -592,6 +625,70 @@ func (f *httpFrames) Write(p []byte) (int, error) {
 		flusher.Flush()
 	}
 	return len(p), nil
+}
+
+// noteStderr scans one stderr frame for a conflict, within the call's scan
+// budget, together with the tail of all the stderr scanned before it. Only the
+// boolean is kept between frames, plus the tail the next frame is searched with.
+func (f *httpFrames) noteStderr(payload []byte) {
+	if f.conflict || f.stderrScanned >= conflictScanLimit {
+		return
+	}
+	if remaining := conflictScanLimit - f.stderrScanned; len(payload) > remaining {
+		payload = payload[:remaining]
+	}
+	f.stderrScanned += len(payload)
+
+	f.window = append(f.window[:0], f.tail[:f.tailLen]...)
+	f.window = append(f.window, payload...)
+	if containsConflict(f.window) {
+		f.conflict = true
+	}
+
+	// Carry the end of what was scanned so far, so a phrase split across the
+	// next frame boundary is still found when the next frame arrives.
+	tailLen := len(f.window)
+	if tailLen > conflictTailBytes {
+		tailLen = conflictTailBytes
+	}
+	copy(f.tail[:], f.window[len(f.window)-tailLen:])
+	f.tailLen = tailLen
+}
+
+// containsConflict reports whether b holds either conflict marker, folding
+// ASCII case, without allocating.
+func containsConflict(b []byte) bool {
+	for i := 0; i < len(b); i++ {
+		for _, marker := range conflictMarkers {
+			if len(b)-i >= len(marker) && foldEqualASCII(b[i:i+len(marker)], marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// foldEqualASCII reports whether a equals the lower-case marker m once ASCII
+// letters in a are folded to lower case.
+func foldEqualASCII(a, m []byte) bool {
+	for i := 0; i < len(m); i++ {
+		c := a[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != m[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// Conflict reports whether bd's stderr carried a Dolt commit conflict during
+// this call.
+func (f *httpFrames) Conflict() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.conflict
 }
 
 // Started reports whether any frame reached the caller, which is whether bd
