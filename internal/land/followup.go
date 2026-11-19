@@ -77,6 +77,53 @@ type FollowupBeads interface {
 	ListFollowups(label string) ([]ExistingFollowup, error)
 }
 
+// followupSkips is what a landing's feed dropped because FollowupSkip named a
+// reason: how many findings, and each reason once (gt-3v8jno). A finding is
+// keyed by its fingerprint because the feed reads a queue line more than once
+// while it decides whether the line is covered.
+type followupSkips struct {
+	findings   map[string]bool
+	reasons    map[string]bool
+	count      int
+	reasonList []string
+}
+
+func newFollowupSkips() *followupSkips {
+	return &followupSkips{findings: map[string]bool{}, reasons: map[string]bool{}}
+}
+
+// record counts a finding the policy skipped and keeps its reason once.
+func (s *followupSkips) record(c FollowupCandidate, reason string) {
+	if key := Fingerprint(c.Path, c.Title); !s.findings[key] {
+		s.findings[key] = true
+		s.count++
+	}
+	if !s.reasons[reason] {
+		s.reasons[reason] = true
+		s.reasonList = append(s.reasonList, reason)
+	}
+}
+
+// skippedCandidates drops the candidates FollowupSkip names a reason for,
+// before the de-duplication decision, the queue or a bead body sees them, and
+// records each so the feed logs it (gt-3v8jno). A nil hook keeps every
+// candidate, which is how every rig behaves until the daemon sets one.
+func (l *Lander) skippedCandidates(w Work, cands []FollowupCandidate, skips *followupSkips) []FollowupCandidate {
+	if l.FollowupSkip == nil {
+		return cands
+	}
+	kept := make([]FollowupCandidate, 0, len(cands))
+	for _, c := range cands {
+		reason := l.FollowupSkip(w, c)
+		if reason == "" {
+			kept = append(kept, c)
+			continue
+		}
+		skips.record(c, reason)
+	}
+	return kept
+}
+
 // fileFollowups files the follow-up beads this landing earns, or comments on
 // the bead an earlier landing already filed for one of its findings, and files
 // what an earlier landing's backpressure bound held back (gt-s01pn, gt-3arxj).
@@ -103,12 +150,14 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 		l.logf("%s: could not read the .om.json threshold the follow-up feed floors on (%v); reading it as 0", w.BeadID, err)
 	}
 	var findings []FollowupCandidate
+	skips := newFollowupSkips()
 	if res.Verdict.Score >= threshold {
-		findings = followupCandidates(followupFindings(res.Verdict.Findings))
+		findings = l.skippedCandidates(w, followupCandidates(followupFindings(res.Verdict.Findings)), skips)
 	}
 	// The feed runs for a landing with nothing of its own to file too, because
-	// that landing is the room a held landing was waiting for (gt-3arxj).
-	if len(findings) == 0 && l.Reviews == nil {
+	// that landing is the room a held landing was waiting for (gt-3arxj), and
+	// when the policy skipped everything: the line is the only record (gt-3v8jno).
+	if len(findings) == 0 && l.Reviews == nil && skips.count == 0 {
 		return
 	}
 	// The feed runs on its own goroutine so its timeout can abandon it, and it
@@ -116,7 +165,7 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 	// outlives the timeout cannot interleave with the next landing's log
 	// (gt-s01pn).
 	done := make(chan []string, 1)
-	go func() { done <- l.followupFeed(w, res, findings) }()
+	go func() { done <- l.followupFeed(w, res, findings, skips) }()
 	select {
 	case lines := <-done:
 		for _, line := range lines {
@@ -131,11 +180,16 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 // comments a repeat earns, and the beads the new findings earn. It returns the
 // lines it wants logged and never returns an error — every failure is a line
 // the caller logs and the landing does not see.
-func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) []string {
+func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, skips *followupSkips) (lines []string) {
+	// Logged on every path, including a feed that files nothing (gt-3v8jno).
+	defer func() {
+		if skips.count > 0 {
+			lines = append(lines, fmt.Sprintf("skipped %s: %s", findingsPhrase(skips.count), strings.Join(skips.reasonList, "; ")))
+		}
+	}()
 	// The queue is read first, so a landing with nothing of its own to file and
 	// no queue behind it costs one read of the review log and nothing else
 	// (gt-3arxj).
-	var lines []string
 	queued, err := l.queuedForRig(w.Rig)
 	if err != nil {
 		lines = append(lines, fmt.Sprintf("could not read the %s queue the reviews log keeps (%v); filing nothing from it for this landing", FollowUpLabel, err))
@@ -164,9 +218,9 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	// landing's findings, so it goes out first, while the bound leaves it room
 	// (gt-3arxj).
 	var consumed int
-	lines, existing, consumed = l.drainQueue(queued, existing, lines)
+	lines, existing, consumed = l.drainQueue(queued, existing, lines, skips)
 	if consumed > 0 {
-		lines = append(lines, l.compactQueue(w.Rig, existing)...)
+		lines = append(lines, l.compactQueue(w.Rig, existing, skips)...)
 	}
 	// The beads an earlier attempt at this landing filed. They are this
 	// landing's own work, so a retry says nothing to them — the "seen again"
@@ -228,7 +282,7 @@ func (l *Lander) queuedForRig(rig string) ([]QueuedFollowup, error) {
 // beads the drain filed so the caller de-duplicates against them too, and how
 // many queue lines are now consumed: every finding on them is covered, so the
 // compaction may drop them (gt-3arxj).
-func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string) ([]string, []ExistingFollowup, int) {
+func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup, lines []string, skips *followupSkips) ([]string, []ExistingFollowup, int) {
 	bound := l.followupBackpressure()
 	consumed := 0
 	for _, q := range queued {
@@ -237,7 +291,7 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 			// waits for the count to fall.
 			return lines, existing, consumed
 		}
-		fresh := queuedCandidates(q, existing)
+		fresh := l.queuedCandidates(q, existing, skips)
 		if len(fresh) == 0 {
 			consumed++
 			continue
@@ -253,7 +307,7 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 		// A line is consumed only once every finding on it is covered: a bead
 		// that could not be filed leaves its line waiting, whatever the feed
 		// logged about it (gt-3arxj).
-		if len(queuedCandidates(q, existing)) == 0 {
+		if len(l.queuedCandidates(q, existing, skips)) == 0 {
 			consumed++
 		}
 	}
@@ -271,12 +325,12 @@ func (l *Lander) drainQueue(queued []QueuedFollowup, existing []ExistingFollowup
 // lines can be judged covered: another rig's line whose findings read like one
 // of this rig's beads is still waiting to be filed in its own rig, and
 // dropping it would lose the finding (gt-3arxj).
-func (l *Lander) compactQueue(rig string, existing []ExistingFollowup) []string {
+func (l *Lander) compactQueue(rig string, existing []ExistingFollowup, skips *followupSkips) []string {
 	if l.Reviews == nil {
 		return nil
 	}
 	res, err := l.Reviews.Compact(func(q QueuedFollowup) bool {
-		return q.Rig == rig && len(queuedCandidates(q, existing)) == 0
+		return q.Rig == rig && len(l.queuedCandidates(q, existing, skips)) == 0
 	})
 	if err != nil {
 		return []string{fmt.Sprintf("could not compact the %s of its consumed queue lines (%v)", ReviewsFileName, err)}
@@ -352,10 +406,13 @@ func (l *Lander) queueHeld(w Work, res Result, held []FollowupCandidate) []strin
 }
 
 // queuedCandidates is a queue line's findings as the feed files them: the
-// minors om raised that no bead already carries (gt-3arxj).
-func queuedCandidates(q QueuedFollowup, existing []ExistingFollowup) []FollowupCandidate {
+// minors om raised that FollowupSkip keeps and that no bead already carries
+// (gt-3arxj, gt-3v8jno).
+func (l *Lander) queuedCandidates(q QueuedFollowup, existing []ExistingFollowup, skips *followupSkips) []FollowupCandidate {
+	// The queue line keeps the landing's bead and rig, not its branch or head.
+	cands := l.skippedCandidates(Work{BeadID: q.Bead, Rig: q.Rig}, followupCandidates(followupFindings(queuedFindings(q.Findings))), skips)
 	var fresh []FollowupCandidate
-	for _, c := range followupCandidates(followupFindings(queuedFindings(q.Findings))) {
+	for _, c := range cands {
 		if Decide(c, existing, 0).Action == DedupeComment {
 			continue
 		}
