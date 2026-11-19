@@ -18,8 +18,9 @@ import (
 // (Lander.roundsText) and the operator identities (operator.names) the
 // decision comments are entitled by. BuildReviewInput reads none of them
 // itself: it does no I/O, so what it assembles is exactly what the caller
-// passed in.
-func BuildReviewInput(issue *beads.Issue, comments []beads.Comment, op *config.OperatorConfig, accepted, roundsText, base, head, dir string, repo Repo) ReviewInput {
+// passed in. branch is the work's branch: the round is numbered in its lane
+// (gt-df37yo).
+func BuildReviewInput(issue *beads.Issue, comments []beads.Comment, op *config.OperatorConfig, accepted, roundsText, base, head, branch, dir string, repo Repo) ReviewInput {
 	return ReviewInput{
 		Dir: dir, Base: base, Head: head, Repo: repo,
 		BeadID:            issue.ID,
@@ -28,7 +29,7 @@ func BuildReviewInput(issue *beads.Issue, comments []beads.Comment, op *config.O
 		AcceptedRisksText: accepted,
 		BriefText:         BeadBrief(issue.Description, comments, op),
 		PolicyText:        policy.PolicyBlock(),
-		Round:             reviewAttempt(issue.Notes),
+		Round:             reviewAttempt(issue.Notes, branch),
 		RoundsText:        roundsText,
 	}
 }

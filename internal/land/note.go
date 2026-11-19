@@ -183,11 +183,12 @@ func RejectionBlocks(notes string) int {
 }
 
 // reviewAttempt is the rework attempt a verdict on notes belongs to: the review
-// rejections the bead carries, plus one. The reviews log and the rounds ledger
-// both read it here, so a reviewed round and its record cannot disagree about
-// which attempt it is (gt-yphcl).
-func reviewAttempt(notes string) int {
-	return CountRejections(notes) + 1
+// rejections in branch's lane, plus one. That is the number the refusal header
+// writes for the lane before the ceiling caps it (gt-df37yo). The reviews log
+// and the rounds ledger both read it here, so a reviewed round and its record
+// cannot disagree about which attempt it is (gt-yphcl).
+func reviewAttempt(notes, branch string) int {
+	return laneAttempt(notes, branch, string(RejectReview)) + 1
 }
 
 // rejectionKinds returns the class of every rejection block in notes, in the
