@@ -62,6 +62,12 @@ const LabelSpecDispatchFailed = "spec-dispatch-failed"
 // the labels are spelled outside internal/specdispatch.
 const LabelSpecDispatchTimeout = "spec-dispatch-timeout"
 
+// LabelSpecDispatchContention marks a work bead whose sling lost its bond to
+// database contention after its retry schedule was spent (gt-iv5n4l). It sits
+// beside the other spec-dispatch labels so the daemon and the dispatcher spell
+// it the same way.
+const LabelSpecDispatchContention = "spec-dispatch-contention"
+
 // NonDispatchableBeadLabels are the "gt:" labels that mark a bead as a member
 // of a runtime family, regardless of the issue_type it carries. An escalation
 // waits on the operator, a message on its recipient, an agent
