@@ -77,7 +77,7 @@ const (
 	DefaultRunnerMemory = "1Gi"
 	// DefaultDindCPU and DefaultDindMemory are the engine sidecar's share when
 	// Values name none.
-	DefaultDindCPU    = "6"
+	DefaultDindCPU    = "8"
 	DefaultDindMemory = "12Gi"
 )
 

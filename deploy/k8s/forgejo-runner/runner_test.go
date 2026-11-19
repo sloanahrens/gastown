@@ -941,6 +941,35 @@ func TestBuildRefusesInvalidValues(t *testing.T) {
 	}
 }
 
+// TestDindCPUShare drives the engine's CPU share: the default is the 8 cores the
+// live gate runner runs with, and a Values override still reaches both the
+// requests and the limits.
+func TestDindCPUShare(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		cpu  string
+		want string
+	}{
+		{"default is 8 cores", "", "8"},
+		{"override of 6 is kept", "6", "6"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			values := goldenValues()
+			values.DindResources = Share{CPU: tc.cpu}
+			pod := mustBuild(t, values).Deployment.Spec.Template.Spec
+			dind := containerNamed(t, pod, dindContainerName)
+			if got := dind.Resources.Limits.CPU; got != tc.want {
+				t.Errorf("the engine CPU limit = %q, want %q", got, tc.want)
+			}
+			if got := dind.Resources.Requests.CPU; got != tc.want {
+				t.Errorf("the engine CPU request = %q, want %q (requests equal limits)", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestConfigYAMLQuotesAnyLabel drives the scalar quoting: a label holding a
 // single quote and a YAML comment character must read back as the label it was,
 // not as a document a reader would have to repair.
