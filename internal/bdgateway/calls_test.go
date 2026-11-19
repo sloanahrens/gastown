@@ -3,7 +3,11 @@ package bdgateway
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -257,6 +261,255 @@ func TestReadCallsFile(t *testing.T) {
 	t.Run("a missing directory is refused", func(t *testing.T) {
 		if got, err := ReadCalls("", time.Time{}, 10); err == nil {
 			t.Errorf("ReadCalls with no directory = %v, want a refusal", callers(got))
+		}
+	})
+}
+
+// getCalls drives GET /v1/calls with a token, if any, and the query string.
+func getCalls(t *testing.T, g *Gateway, token, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, callsPath+query, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	g.ServeHTTP(rec, req)
+	return rec
+}
+
+// decodeCalls returns the 200 body GET /v1/calls answered, failing the test
+// with the body when the status is not 200.
+func decodeCalls(t *testing.T, rec *httptest.ResponseRecorder) callsBody {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+	}
+	var body callsBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode calls: %v", err)
+	}
+	return body
+}
+
+// TestCallsEndpointQuery is acceptance box 1: the endpoint returns the entries
+// after since, oldest first, honours limit and its default, and refuses a limit
+// over 500 and a bad since.
+func TestCallsEndpointQuery(t *testing.T) {
+	t.Parallel()
+	t0 := callLogBase
+	t1 := t0.Add(time.Second)
+	t2 := t0.Add(2 * time.Second)
+	t3 := t0.Add(3 * time.Second)
+	dir := t.TempDir()
+	log := newTestCallLogWithDir(t, dir)
+	// File order is deliberately not stamp order, which Log can produce when a
+	// writer is preempted between stamping a call and queueing its line.
+	writeCallLog(t, dir,
+		callLine(t, t3, "third"),
+		"{not json",
+		callLine(t, t1, "at-since"),
+		callLine(t, t2, "second"),
+	)
+	g := newTestGateway(t, mustStore(t), log, exitByVerb{"show": 0})
+
+	sinceQuery := func(at time.Time) string {
+		return "?" + url.Values{"since": {at.Format(time.RFC3339)}}.Encode()
+	}
+
+	t.Run("after since, oldest first", func(t *testing.T) {
+		body := decodeCalls(t, getCalls(t, g, testReadToken, sinceQuery(t1)))
+		if want := []string{"second", "third"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
+		}
+		first := body.Calls[0]
+		if first.TS != t2.Format(time.RFC3339Nano) || first.Verb != "show" ||
+			!slices.Equal(first.Flags, []string{"--json"}) || !slices.Equal(first.Beads, []string{"gt-qxllxo"}) {
+			t.Errorf("entry = %+v, want the fields the log wrote", first)
+		}
+	})
+
+	t.Run("limit keeps the oldest after since", func(t *testing.T) {
+		q := "?" + url.Values{"since": {t0.Format(time.RFC3339)}, "limit": {"1"}}.Encode()
+		body := decodeCalls(t, getCalls(t, g, testReadToken, q))
+		if want := []string{"at-since"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
+		}
+	})
+
+	t.Run("without since the whole log is served", func(t *testing.T) {
+		body := decodeCalls(t, getCalls(t, g, testReadToken, ""))
+		if want := []string{"at-since", "second", "third"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
+		}
+	})
+
+	t.Run("an absent limit is the default", func(t *testing.T) {
+		dir := t.TempDir()
+		log := newTestCallLogWithDir(t, dir)
+		lines := make([]string, 0, defaultCallsLimit+5)
+		for i := 0; i < defaultCallsLimit+5; i++ {
+			lines = append(lines, callLine(t, callLogBase.Add(time.Duration(i)*time.Second), fmt.Sprintf("n%03d", i)))
+		}
+		writeCallLog(t, dir, lines...)
+		g := newTestGateway(t, mustStore(t), log, exitByVerb{"show": 0})
+
+		body := decodeCalls(t, getCalls(t, g, testReadToken, ""))
+		if len(body.Calls) != defaultCallsLimit {
+			t.Fatalf("got %d entries, want the default %d", len(body.Calls), defaultCallsLimit)
+		}
+		if body.Calls[0].Caller != "n000" || body.Calls[len(body.Calls)-1].Caller != fmt.Sprintf("n%03d", defaultCallsLimit-1) {
+			t.Errorf("window = %s..%s, want the oldest %d entries",
+				body.Calls[0].Caller, body.Calls[len(body.Calls)-1].Caller, defaultCallsLimit)
+		}
+	})
+
+	t.Run("a limit under the cap is honoured", func(t *testing.T) {
+		q := "?" + url.Values{"limit": {"3"}}.Encode()
+		body := decodeCalls(t, getCalls(t, g, testReadToken, q))
+		if want := []string{"at-since", "second", "third"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
+		}
+	})
+
+	t.Run("an out-of-bounds or unreadable limit is refused", func(t *testing.T) {
+		for _, limit := range []string{fmt.Sprint(maxCallsLimit + 1), "0", "-1", "many", "1.5"} {
+			t.Run(limit, func(t *testing.T) {
+				q := "?" + url.Values{"limit": {limit}}.Encode()
+				rec := getCalls(t, g, testReadToken, q)
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+				}
+				var refused ErrorPayload
+				if err := json.Unmarshal(rec.Body.Bytes(), &refused); err != nil {
+					t.Fatalf("decode refusal: %v", err)
+				}
+				if refused.Code != codeBadRequest || refused.Message == "" {
+					t.Errorf("refusal = %+v, want code %q and a message", refused, codeBadRequest)
+				}
+			})
+		}
+	})
+
+	t.Run("a bad since is refused", func(t *testing.T) {
+		rec := getCalls(t, g, testReadToken, "?"+url.Values{"since": {"yesterday"}}.Encode())
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+		}
+		var refused ErrorPayload
+		if err := json.Unmarshal(rec.Body.Bytes(), &refused); err != nil {
+			t.Fatalf("decode refusal: %v", err)
+		}
+		if refused.Code != codeBadRequest || refused.Message == "" {
+			t.Errorf("refusal = %+v, want code %q and a message", refused, codeBadRequest)
+		}
+	})
+}
+
+// TestCallsEndpointLog is acceptance box 2: a missing log answers an empty
+// list with 200, an unreadable log answers 500, and a request without a token
+// is refused; the body carries the log's dropped counter.
+func TestCallsEndpointLog(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a missing log is an empty list", func(t *testing.T) {
+		dir := t.TempDir()
+		log := newTestCallLogWithDir(t, dir)
+		// NewCallLog creates the live file; removing it is the volume whose log
+		// has not been written yet, which must read as empty, not as a failure.
+		if err := os.Remove(filepath.Join(dir, DefaultCallLogName)); err != nil {
+			t.Fatalf("remove live log: %v", err)
+		}
+		g := newTestGateway(t, mustStore(t), log, exitByVerb{"show": 0})
+
+		body := decodeCalls(t, getCalls(t, g, testReadToken, ""))
+		if body.Calls == nil {
+			t.Fatal("got nil, want an empty list: the endpoint answers [] and never null")
+		}
+		if len(body.Calls) != 0 {
+			t.Errorf("got %d entries, want 0", len(body.Calls))
+		}
+	})
+
+	t.Run("an unreadable log is a 500 with a fixed message", func(t *testing.T) {
+		dir := t.TempDir()
+		log := newTestCallLogWithDir(t, dir)
+		if err := os.Remove(filepath.Join(dir, DefaultCallLogName)); err != nil {
+			t.Fatalf("remove live log: %v", err)
+		}
+		// A directory at the log's path opens but cannot be read: the failure an
+		// operator sees when the log path is wrong.
+		if err := os.Mkdir(filepath.Join(dir, DefaultCallLogName), 0o700); err != nil {
+			t.Fatalf("mkdir log path: %v", err)
+		}
+		g := newTestGateway(t, mustStore(t), log, exitByVerb{"show": 0})
+
+		rec := getCalls(t, g, testReadToken, "")
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500; body %s", rec.Code, rec.Body.String())
+		}
+		var refused ErrorPayload
+		if err := json.Unmarshal(rec.Body.Bytes(), &refused); err != nil {
+			t.Fatalf("decode refusal: %v", err)
+		}
+		if refused.Code != codeInternal || refused.Message != callsLogUnreadableMessage {
+			t.Errorf("refusal = %+v, want code %q and the fixed message", refused, codeInternal)
+		}
+		var served map[string]json.RawMessage
+		if err := json.Unmarshal(rec.Body.Bytes(), &served); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if _, ok := served["calls"]; ok {
+			t.Errorf("a 500 carries a calls field: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("a request without a token is refused", func(t *testing.T) {
+		g := newTestGateway(t, mustStore(t), newTestCallLog(t), exitByVerb{"show": 0})
+		rec := getCalls(t, g, "", "")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401; body %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("the body carries the log's dropped counter", func(t *testing.T) {
+		dir := t.TempDir()
+		writeCallLog(t, dir, callLine(t, callLogBase, "shown"))
+		// A writer that cannot store a line is the drop this test counts; the
+		// hook makes that failure happen without a disk error.
+		log, err := newCallLog(CallLogOptions{
+			Dir:          dir,
+			Policy:       mustPolicy(t),
+			BeadPrefixes: []string{"gt", "hq"},
+		}, func([]byte) error { return errors.New("log volume gone") })
+		if err != nil {
+			t.Fatalf("newCallLog: %v", err)
+		}
+		log.Log(CallRecord{Argv: []string{"show"}})
+		// Close returns the hook's failure, which is the drop being counted.
+		_ = log.Close()
+		g := newTestGateway(t, mustStore(t), log, exitByVerb{"show": 0})
+
+		rec := getCalls(t, g, testReadToken, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body %s", rec.Code, rec.Body.String())
+		}
+		// The counter is a pointer, so a body that dropped the field reads as nil
+		// rather than the zero a real value could not be told from.
+		var body struct {
+			Calls   []CallEntry `json:"calls"`
+			Dropped *uint64     `json:"dropped"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode calls: %v", err)
+		}
+		if body.Dropped == nil {
+			t.Fatal("the body carries no dropped counter")
+		}
+		if *body.Dropped != 1 {
+			t.Errorf("dropped = %d, want 1", *body.Dropped)
+		}
+		if want := []string{"shown"}; !slices.Equal(callers(body.Calls), want) {
+			t.Errorf("callers = %v, want %v", callers(body.Calls), want)
 		}
 	})
 }
