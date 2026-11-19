@@ -1125,3 +1125,37 @@ func noopKeys(items []attention.Item) []string {
 	}
 	return keys
 }
+
+// TestCICacheTrimLRUArgv: the LRU program's argv is built from integers, so the
+// numbers the script computes with are digits; a negative number, an empty root
+// and a mode the program does not have are refused rather than passed on.
+func TestCICacheTrimLRUArgv(t *testing.T) {
+	t.Parallel()
+	good, err := ciCacheLRUArgv("list", "/vol/ci-gocache/_data", 120, 41943040, ciCacheLRUFloorMinutes)
+	if err != nil {
+		t.Fatalf("ciCacheLRUArgv = %v, want nil", err)
+	}
+	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", "/vol/ci-gocache/_data", "120", "41943040", "60"}
+	if !slices.Equal(good, want) {
+		t.Errorf("argv = %q, want %q", good, want)
+	}
+	cases := []struct {
+		name  string
+		mode  string
+		root  string
+		age   int64
+		cap   int64
+		floor int64
+	}{
+		{name: "a negative age", mode: "list", root: "/v", age: -1, cap: 1, floor: 60},
+		{name: "a negative cap", mode: "list", root: "/v", age: 120, cap: -1, floor: 60},
+		{name: "a negative floor", mode: "list", root: "/v", age: 120, cap: 1, floor: -60},
+		{name: "an empty root", mode: "list", root: "", age: 120, cap: 1, floor: 60},
+		{name: "a mode the program does not have", mode: "apply", root: "/v", age: 120, cap: 1, floor: 60},
+	}
+	for _, tc := range cases {
+		if argv, err := ciCacheLRUArgv(tc.mode, tc.root, tc.age, tc.cap, tc.floor); err == nil {
+			t.Errorf("%s: argv %q, want an error", tc.name, argv)
+		}
+	}
+}
