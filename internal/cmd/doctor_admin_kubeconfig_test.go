@@ -22,6 +22,7 @@ func TestDoctorAdminKubeconfigOptIn(t *testing.T) {
 
 	adminPath := writeKubeconfig(t, adminKubeconfigText)
 	cleanPath := writeKubeconfig(t, cleanKubeconfigText)
+	sep := string(filepath.ListSeparator)
 
 	cases := []struct {
 		name       string
@@ -54,6 +55,17 @@ func TestDoctorAdminKubeconfigOptIn(t *testing.T) {
 			checks:    []string{doctor.AdminKubeconfigCheckName},
 			configEnv: adminPath,
 			wantErr:   "doctor found 1 error(s)",
+		},
+		{
+			name:      "--check admin-kubeconfig skips a leading empty $KUBECONFIG entry and reads the file after it",
+			checks:    []string{doctor.AdminKubeconfigCheckName},
+			configEnv: sep + adminPath,
+			wantErr:   "doctor found 1 error(s)",
+		},
+		{
+			name:      "--check admin-kubeconfig skips a trailing empty $KUBECONFIG entry and reads the file before it",
+			checks:    []string{doctor.AdminKubeconfigCheckName},
+			configEnv: cleanPath + sep,
 		},
 		{
 			name:       "--check admin-kubeconfig fails the run on a kubeconfig it cannot read",
@@ -114,6 +126,60 @@ func TestDoctorAdminKubeconfigOptIn(t *testing.T) {
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("runDoctor = %v, want an error holding %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestDoctorAdminKubeconfigRegistration: the check is opt-in by name. A default
+// run, which names no check, and a run that names other checks register nothing
+// and read no kubeconfig, even inside a pod or with no HOME; a run that names
+// admin-kubeconfig, by --check or by position, registers it exactly once and, in
+// a pod, is refused. Mutation: drop the name guard from
+// registerAdminKubeconfigIfNamed and the default-run rows go red.
+func TestDoctorAdminKubeconfigRegistration(t *testing.T) {
+	t.Parallel()
+	registered := func(d *doctor.Doctor) int {
+		n := 0
+		for _, c := range d.Checks() {
+			if c.Name() == doctor.AdminKubeconfigCheckName {
+				n++
+			}
+		}
+		return n
+	}
+	cases := []struct {
+		name    string
+		flags   []string
+		args    []string
+		env     map[string]string
+		want    int
+		wantErr string
+	}{
+		{name: "a default run registers nothing", want: 0},
+		{name: "a default run in a pod registers nothing and is not refused", env: map[string]string{podEnv: "10.20.30.40"}, want: 0},
+		{name: "a run naming another check registers nothing", flags: []string{"disk-space"}, env: map[string]string{podEnv: "10.20.30.40"}, want: 0},
+		{name: "--check admin-kubeconfig registers it once", flags: []string{doctor.AdminKubeconfigCheckName}, env: map[string]string{"HOME": "/home/x"}, want: 1},
+		{name: "naming it by position registers it once", args: []string{doctor.AdminKubeconfigCheckName}, env: map[string]string{"HOME": "/home/x"}, want: 1},
+		{name: "naming it in a pod is refused and registers nothing", flags: []string{doctor.AdminKubeconfigCheckName}, env: map[string]string{podEnv: "10.20.30.40", "HOME": "/home/x"}, want: 0, wantErr: "refuses inside a pod"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := newDoctorForCommand("")
+			before := registered(d)
+			if before != 0 {
+				t.Fatalf("the default doctor already registers %s %d time(s)", doctor.AdminKubeconfigCheckName, before)
+			}
+			err := registerAdminKubeconfigIfNamed(d, doctorCheckNames(tc.flags, tc.args), "", adminCheckGetenv(tc.env))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("registerAdminKubeconfigIfNamed = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("registerAdminKubeconfigIfNamed = %v, want an error holding %q", err, tc.wantErr)
+			}
+			if got := registered(d); got != tc.want {
+				t.Errorf("%s registered %d time(s), want %d", doctor.AdminKubeconfigCheckName, got, tc.want)
 			}
 		})
 	}

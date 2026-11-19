@@ -218,12 +218,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// default run never registers it.
 		d.Register(doctor.NewMacCrewHooksCheck())
 	}
-	if slices.Contains(names, doctor.AdminKubeconfigCheckName) {
-		// Opt-in by name: the kubeconfig it reads is the Mac's, not the pod's,
-		// so a default run never registers it.
-		if err := registerAdminKubeconfigCheck(d, doctorKubeconfig, os.Getenv); err != nil {
-			return err
-		}
+	if err := registerAdminKubeconfigIfNamed(d, names, doctorKubeconfig, os.Getenv); err != nil {
+		return err
 	}
 	registerDataUnitCheck(d, names, doltComposeRealDeps(), realBdGatewayClusterDeps(bdGatewayPusherFromEnv(os.Getenv)))
 	if err := selectDoctorChecks(d, names); err != nil {
@@ -274,13 +270,23 @@ func podTownRefusal(names []string, podTown string) error {
 	return nil
 }
 
+// registerAdminKubeconfigIfNamed registers the admin-kubeconfig check only for a
+// run that names it: opt-in by name, because the kubeconfig it reads is the
+// Mac's, not the pod's, so a default run, or a run naming other checks, never
+// registers it and never reads a kubeconfig.
+func registerAdminKubeconfigIfNamed(d *doctor.Doctor, names []string, kubeconfigFlag string, getenv func(string) string) error {
+	if !slices.Contains(names, doctor.AdminKubeconfigCheckName) {
+		return nil
+	}
+	return registerAdminKubeconfigCheck(d, kubeconfigFlag, getenv)
+}
+
 // registerAdminKubeconfigCheck registers the admin-kubeconfig check over the
-// host kubeconfig, for a run that names the check. The kubeconfig is the
-// Mac's, so a pod refuses: inside one the check would read a path that is not
-// the operator's file.
+// host kubeconfig. The kubeconfig is the Mac's, so a pod refuses, through the
+// refusal the command gives too.
 func registerAdminKubeconfigCheck(d *doctor.Doctor, kubeconfigFlag string, getenv func(string) string) error {
-	if getenv(podEnv) != "" {
-		return fmt.Errorf("%s runs on the Mac, where the kubeconfig is, so it refuses inside a pod, where %s is set", doctor.AdminKubeconfigCheckName, podEnv)
+	if err := adminKubeconfigPodRefusal(doctor.AdminKubeconfigCheckName, getenv); err != nil {
+		return err
 	}
 	path, err := resolveAdminKubeconfigPath(kubeconfigFlag, getenv)
 	if err != nil {

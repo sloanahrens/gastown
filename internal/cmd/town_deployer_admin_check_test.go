@@ -135,11 +135,15 @@ func TestTownDeployerAdminCheckPod(t *testing.T) {
 }
 
 // TestTownDeployerAdminCheckResolvesPath: the flag wins, then $KUBECONFIG, then
-// $HOME/.kube/config, and the resolved file is the one checked.
+// $HOME/.kube/config, and the resolved file is the one checked. Empty
+// $KUBECONFIG entries are skipped: each row below reads a file that the test
+// can tell apart (an admin kubeconfig fails, a clean one passes), so an empty
+// entry that became an empty path would show as a read of no file.
 func TestTownDeployerAdminCheckResolvesPath(t *testing.T) {
 	t.Parallel()
 	adminPath := writeKubeconfig(t, adminKubeconfigText)
 	cleanPath := writeKubeconfig(t, cleanKubeconfigText)
+	sep := string(filepath.ListSeparator)
 	home := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(home, ".kube"), 0o755); err != nil {
 		t.Fatal(err)
@@ -168,6 +172,25 @@ func TestTownDeployerAdminCheckResolvesPath(t *testing.T) {
 		{
 			name:    "HOME names the default",
 			env:     map[string]string{"HOME": home},
+			wantErr: true,
+		},
+		{
+			name:    "a leading empty KUBECONFIG entry is skipped and the file after it is checked",
+			env:     map[string]string{"KUBECONFIG": sep + adminPath},
+			wantErr: true,
+		},
+		{
+			name:    "a trailing empty KUBECONFIG entry is skipped and the file before it is checked",
+			env:     map[string]string{"KUBECONFIG": adminPath + sep},
+			wantErr: true,
+		},
+		{
+			name: "empty entries around a clean file leave the clean file checked",
+			env:  map[string]string{"KUBECONFIG": sep + cleanPath + sep},
+		},
+		{
+			name:    "a KUBECONFIG of empty entries only reads as unset and falls back to HOME",
+			env:     map[string]string{"KUBECONFIG": sep + sep, "HOME": home},
 			wantErr: true,
 		},
 	}
@@ -205,14 +228,9 @@ func TestTownDeployerAdminCheckRefusals(t *testing.T) {
 			want: "names 2 files",
 		},
 		{
-			name: "KUBECONFIG has a trailing empty entry",
-			env:  map[string]string{"KUBECONFIG": "/kube/one.config:"},
-			want: "empty entry",
-		},
-		{
-			name: "KUBECONFIG is one empty entry",
-			env:  map[string]string{"KUBECONFIG": ":"},
-			want: "empty entry",
+			name: "KUBECONFIG names two files beside an empty entry",
+			env:  map[string]string{"KUBECONFIG": "/kube/one.config::/kube/two.config"},
+			want: "names 2 files",
 		},
 		{
 			name: "HOME is not set",
