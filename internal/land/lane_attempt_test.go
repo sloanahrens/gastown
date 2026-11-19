@@ -15,6 +15,44 @@ func laneBlocks(branch string, n int, kind RejectionKind) string {
 	return b.String()
 }
 
+// TestRejectionEscalateFlag: a human refusal is NoEscalate once its lane has
+// escalated. Each row runs a fresh Lander over its notes alone (gt-dtx3ht).
+func TestRejectionEscalateFlag(t *testing.T) {
+	t.Parallel()
+	const head = "head-now"
+	capped := func(branch, prev string, kind RejectionKind) string {
+		return FormatRejectionNote(RejectionNote{Attempt: MaxReworkAttempts, Kind: string(kind), Reason: loopEscalatedNote, Branch: branch, Head: prev}) + "\n"
+	}
+	for _, tc := range []struct {
+		name   string
+		notes  string
+		branch string
+		rej    Rejection
+		want   bool
+	}{
+		{"first human refusal escalates", "", fixtureBranch, Rejection{Kind: RejectPolicy, Reason: "r"}, false},
+		{"second human refusal in an escalated lane does not", capped(fixtureBranch, "old-head", RejectReview), fixtureBranch, Rejection{Kind: RejectReview, Reason: "r"}, true},
+		{"new lane after an escalated block escalates", capped(fixtureBranch, "old-head", RejectReview), "crew/overseer/gt-x", Rejection{Kind: RejectReview, Reason: "r"}, false},
+		{"other kind on a never-escalated bead escalates", laneBlocks(fixtureBranch, 2, RejectGate), fixtureBranch, Rejection{Kind: RejectPolicy, Reason: "r"}, false},
+		{"capped refusal after an escalated cap does not", laneBlocks(fixtureBranch, MaxReworkAttempts-1, RejectReview) + capped(fixtureBranch, "old-head", RejectReview), fixtureBranch, Rejection{Kind: RejectReview, Rework: true, Reason: "r"}, true},
+		{"interrupted capped block is not a second escalation", laneBlocks(fixtureBranch, MaxReworkAttempts-1, RejectGate) + capped(fixtureBranch, head, RejectGate), fixtureBranch, Rejection{Kind: RejectGate, Rework: true, Reason: "r"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLandFixture(t)
+			f.reseed(f.work, func(is *beads.Issue) { is.Notes = tc.notes })
+			w := f.work
+			w.Branch, w.Head = tc.branch, head
+			rej := tc.rej
+			if err := f.lander().reject(f.bead(), w, &rej, nil); err != &rej || rej.RecordErr != nil {
+				t.Fatalf("reject = %v, record error %v; want the refusal recorded", err, rej.RecordErr)
+			}
+			if rej.NoEscalate != tc.want {
+				t.Errorf("NoEscalate = %v; want %v", rej.NoEscalate, tc.want)
+			}
+		})
+	}
+}
+
 // TestLaneAttemptRefusalIsNumberedByLane: a crew takeover is attempt 1, for
 // every kind; a polecat stays capped (gt-mo4uj3).
 func TestLaneAttemptRefusalIsNumberedByLane(t *testing.T) {

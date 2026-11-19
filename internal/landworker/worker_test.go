@@ -495,6 +495,24 @@ func TestPassHumanRejectionEscalates(t *testing.T) {
 	}
 }
 
+// TestPassHumanRejectionEscalatesOncePerLane: a refusal whose lane already
+// escalated (NoEscalate) raises no escalation (gt-dtx3ht).
+func TestPassHumanRejectionEscalatesOncePerLane(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	var escalations atomic.Int32
+	h.w.Escalate = func(string, string) { escalations.Add(1) }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.Rejection{Kind: land.RejectReview, Reason: "no verdict", NoEscalate: true}
+	}
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	if n := escalations.Load(); n != 0 {
+		t.Fatalf("escalated %d times; want 0", n)
+	}
+}
+
 // TestPassReworkRejectionDoesNotEscalate: rework goes back to the polecat,
 // so the operator is not alerted (gt-j8ade).
 func TestPassReworkRejectionDoesNotEscalate(t *testing.T) {

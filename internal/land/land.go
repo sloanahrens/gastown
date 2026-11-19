@@ -347,6 +347,9 @@ type Rejection struct {
 	// MaxReworkAttempts refusals of its kind, whatever that kind is: the loop,
 	// not the refusal, is what the ceiling stops (gt-phftg).
 	Rework bool
+	// NoEscalate is set on a human refusal whose lane already escalated. The zero
+	// value escalates, so a refusal the lane check never reached still alarms (gt-dtx3ht).
+	NoEscalate bool
 	// TargetTip is the target commit the merge was built on, set on a conflict
 	// and on a gate refusal. The rejection line carries it for a conflict only:
 	// a conflicted merge writes no merge line, and the conflict scorecard reads
@@ -2370,6 +2373,7 @@ func (l *Lander) rejectionAlreadyRecorded(issue *beads.Issue, w Work, rej *Rejec
 func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Verdict) error {
 	repeat, err := l.rejectionAlreadyRecorded(issue, w, rej)
 	if err != nil {
+		// Without repeat the lane check cannot run, so NoEscalate stays false (gt-dtx3ht).
 		rej.RecordErr = err
 		return rej
 	}
@@ -2409,9 +2413,11 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	capped := rej.Rework && attempt >= MaxReworkAttempts
 	reason := rej.Reason
 	if capped {
-		reason = fmt.Sprintf("%s (attempt %d of %d: the loop is escalated, not reworked again)",
-			reason, min(attempt, MaxReworkAttempts), MaxReworkAttempts)
+		reason = fmt.Sprintf("%s (attempt %d of %d: %s)",
+			reason, min(attempt, MaxReworkAttempts), MaxReworkAttempts, loopEscalatedNote)
 	}
+	// Set before any return below, so a failed note or bead write keeps the answer (gt-dtx3ht).
+	rej.NoEscalate = (!rej.Rework || capped) && escalatedInLane(issue.Notes, lane, repeat)
 	note := RejectionNote{
 		Attempt:     attempt,
 		Kind:        string(rej.Kind),

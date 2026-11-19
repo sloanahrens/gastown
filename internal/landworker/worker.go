@@ -1102,8 +1102,12 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 			return
 		}
 		w.logf("%s: %v (left for the overseer: %s)", work.BeadID, err, land.LabelNeedsOverseer)
-		w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for the overseer (%s): %s",
-			work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
+		// NoEscalate is set when an earlier block of the refusal's lane already
+		// escalated the loop, so the operator is not alerted again (gt-dtx3ht).
+		if !rej.NoEscalate {
+			w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for the overseer (%s): %s",
+				work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
+		}
 		if rej.RecordErr != nil {
 			w.closeFailureRun(work.BeadID)
 			st.until = w.now().Add(rejectRecordBackoff)

@@ -218,6 +218,9 @@ func countKind(kinds []string, kind string) int {
 	return n
 }
 
+// loopEscalatedNote closes a capped block's reason; the writer and the lane check share it (gt-dtx3ht).
+const loopEscalatedNote = "the loop is escalated, not reworked again"
+
 // laneOther is the lane every branch outside polecat/ and crew/ counts in. It
 // is one lane rather than one per branch so renaming the branch cannot reset
 // the rework cap (gt-mo4uj3).
@@ -248,6 +251,20 @@ func laneAttempt(notes, branch, kind string) int {
 		}
 	}
 	return n
+}
+
+// escalatedInLane reports whether branch's lane has a block carrying loopEscalatedNote.
+// With repeat, the last block is the one this pass completes, so it is not earlier (gt-dtx3ht).
+func escalatedInLane(notes, branch string, repeat bool) bool {
+	if starts := rejectionBlockRE.FindAllStringIndex(notes, -1); repeat && len(starts) > 0 {
+		notes = notes[:starts[len(starts)-1][0]]
+	}
+	for _, rej := range rejectionBlocks(notes) {
+		if laneOf(rej.Branch) == laneOf(branch) && strings.Contains(rej.Reason, loopEscalatedNote) {
+			return true
+		}
+	}
+	return false
 }
 
 // rejectionBlockRE finds a rejection block's header. The marker must open a
