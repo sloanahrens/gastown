@@ -84,6 +84,11 @@ type DaemonPatrolConfig struct {
 	// repository path, such as forgejo:3000/bot-registry/gastown-polecat. Read
 	// through PolecatImageSource, so the default lives in one place (gt-f1igu0).
 	PolecatImageSourceSetting string `json:"polecat_image_source,omitempty"`
+
+	// BondRootOnly asks for a root-only bond: a sling that reads it bonds the
+	// polecat work molecule root-only, so the bond spawns no step issues. Off
+	// (the default) bonds every step.
+	BondRootOnly bool `json:"bond_root_only,omitempty"`
 }
 
 // DefaultPolecatImageSource is the CI registry repository the polecat image is

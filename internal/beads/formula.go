@@ -15,6 +15,12 @@ func WithWorkDir(dir string) Option {
 	return func(f *beadsFields) { f.workDir = dir }
 }
 
+// WithBondRootOnly makes Bond pass --root-only, so bd bonds only the molecule
+// root and pours no step issues. Without it Bond's argv is unchanged.
+func WithBondRootOnly() Option {
+	return func(f *beadsFields) { f.bondRootOnly = true }
+}
+
 // Cook runs bd's formula engine on formula with vars ("key=value") and
 // returns the step tree bd printed (bd cook). A failure's message is bd's
 // own: the machine envelope's error message, else what bd wrote to stderr.
@@ -28,9 +34,13 @@ func (b *Beads) Cook(formula string, vars []string) ([]byte, error) {
 
 // Bond spawns proto as an ephemeral molecule attached to beadID (bd mol
 // bond --ephemeral) and returns bd's JSON answer, which names the spawned
-// root. Failures read as Cook's do.
+// root. A wrapper built with WithBondRootOnly adds --root-only, so only the
+// root is bonded. Failures read as Cook's do.
 func (b *Beads) Bond(proto, beadID string, vars []string) ([]byte, error) {
 	args := append([]string{"mol", "bond", proto, beadID, "--json", "--ephemeral"}, varArgs(vars)...)
+	if b.bondRootOnly {
+		args = append(args, "--root-only")
+	}
 	out, err := b.run(args...)
 	if err != nil {
 		return nil, withBDMessage(err)
