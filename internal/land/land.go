@@ -2377,11 +2377,20 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// The number this refusal is on within its kind and lane: the blocks of that
 	// kind its lane already carries, plus itself. A block an interrupted pass
 	// already wrote is this refusal's own, already counted among them, so a
-	// repeat completes it in place rather than counting it twice (gt-zqqcr).
+	// repeat completes it in place rather than counting it twice (gt-zqqcr),
+	// and it numbers in the lane that block names: a block written before the
+	// bead changed hands sits in the earlier lane, and counting the lane of
+	// the branch it is resubmitted on would count none of them (gt-mo4uj3).
 	// A review numbers among reviews, and every other kind among its own, so
 	// two gate refusals never write the same header and neither claims a
 	// review's number (gt-l3zak).
-	attempt := laneAttempt(issue.Notes, w.Branch, kind)
+	lane := w.Branch
+	if repeat {
+		if last, ok := ParseRejectionNote(issue.Notes); ok {
+			lane = last.Branch
+		}
+	}
+	attempt := laneAttempt(issue.Notes, lane, kind)
 	if !repeat {
 		attempt++
 	}
