@@ -2,6 +2,10 @@ package townhealth
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +58,126 @@ func TestLineNamesALandingPause(t *testing.T) {
 	in.LandingPaused = "overseer: drain the queue"
 	if got := Compute(context.Background(), in).LandingPaused; got != "overseer: drain the queue" {
 		t.Errorf("Compute dropped the landing pause: report carries %q", got)
+	}
+}
+
+// TestLandingPassesRoundTrip: the report carries the in-flight count from its
+// inputs, writes it as landing_passes (zero included), and reads back as known.
+func TestLandingPassesRoundTrip(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	in := inputs(healthy())
+	in.LandingPasses = 3
+	r := Compute(context.Background(), in)
+	if r.LandingPasses != 3 || !r.PassesKnown {
+		t.Fatalf("Compute carried passes %d known %v, want 3 known", r.LandingPasses, r.PassesKnown)
+	}
+	if err := Write(root, r); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDiskPasses(t, root); got == nil || *got != 3 {
+		t.Errorf("file landing_passes = %v, want 3", got)
+	}
+	got, err := Read(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LandingPasses != 3 || !got.PassesKnown {
+		t.Errorf("read back passes %d known %v, want 3 known", got.LandingPasses, got.PassesKnown)
+	}
+
+	in.LandingPasses = 0
+	if err := Write(root, Compute(context.Background(), in)); err != nil {
+		t.Fatal(err)
+	}
+	if got := onDiskPasses(t, root); got == nil || *got != 0 {
+		t.Errorf("file landing_passes = %v when no pass is in flight, want 0", got)
+	}
+}
+
+// onDiskPasses is the landing_passes key of the health file, nil when the key
+// is absent.
+func onDiskPasses(t *testing.T, root string) *int {
+	t.Helper()
+	raw, err := os.ReadFile(Path(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		LandingPasses *int `json:"landing_passes"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatal(err)
+	}
+	return f.LandingPasses
+}
+
+// TestReadWithoutLandingPassesIsUnknown: a report an older daemon wrote has no
+// landing_passes key, so it reads as passes unknown, not as zero passes.
+func TestReadWithoutLandingPassesIsUnknown(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeRaw := func(body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(Path(root)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(Path(root), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeRaw(`{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[]}`)
+	got, err := Read(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PassesKnown || got.LandingPasses != 0 {
+		t.Errorf("older report read passes %d known %v, want unknown", got.LandingPasses, got.PassesKnown)
+	}
+
+	writeRaw(`{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[],"landing_passes":0}`)
+	got, err = Read(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.PassesKnown || got.LandingPasses != 0 {
+		t.Errorf("report with landing_passes 0 read passes %d known %v, want known 0", got.LandingPasses, got.PassesKnown)
+	}
+
+	writeRaw(`{"at":"2026-11-19T11:00:00Z","verdict":"green","fields":[],"landing_passes":"two"}`)
+	if _, err := Read(root); err == nil {
+		t.Error("a landing_passes that is not a number read without error")
+	}
+}
+
+// TestLandingPassesLeaveVerdictAndLineUnchanged: the count is shown nowhere on
+// the line or in the verdict, so the same inputs judge and render the same
+// whether one pass or none is in flight.
+func TestLandingPassesLeaveVerdictAndLineUnchanged(t *testing.T) {
+	t.Parallel()
+	in := inputs(healthy())
+	none := Compute(context.Background(), in)
+	in.LandingPasses = 3
+	some := Compute(context.Background(), in)
+
+	if none.Verdict != some.Verdict {
+		t.Errorf("verdict %s with passes, %s without", some.Verdict, none.Verdict)
+	}
+	if a, b := Line(none, now, DefaultStaleAfter), Line(some, now, DefaultStaleAfter); a != b {
+		t.Errorf("line %q with passes, %q without", b, a)
+	}
+	if a, b := Lines(none, now, DefaultStaleAfter), Lines(some, now, DefaultStaleAfter); !slices.Equal(a, b) {
+		t.Errorf("status lines differ with passes:\n%q\n%q", b, a)
+	}
+
+	red := Report{At: ago(40 * time.Second), Verdict: Red, Landed: intp(7), Fields: []Field{
+		{Name: FieldMain, Rig: "gastown", Tag: Recorded, Verdict: Red, Value: "red"},
+	}}
+	before := Line(red, now, DefaultStaleAfter)
+	red.LandingPasses = 3
+	if got := Line(red, now, DefaultStaleAfter); got != before {
+		t.Errorf("red line %q with passes, want %q", got, before)
 	}
 }
 

@@ -168,6 +168,15 @@ type Report struct {
 	// no pause is on. The line and the dashboard's Landings pane say why no
 	// landing starts (gt-ckc93z).
 	LandingPaused string `json:"landing_paused,omitempty"`
+	// LandingPasses is the number of landing-worker passes in flight when the
+	// report was computed, so a caller can wait for a quiet town (gt-u98suh).
+	// It is always written; a report from a daemon that predates the field
+	// lacks the key, and Read leaves PassesKnown false for it.
+	LandingPasses int `json:"landing_passes"`
+	// PassesKnown is false when the report read from disk has no landing_passes
+	// key: LandingPasses is then unknown, not zero. Compute sets it true. It is
+	// not written.
+	PassesKnown bool `json:"-"`
 }
 
 // Limits is a degraded and a red threshold. A zero limit never trips.
@@ -678,6 +687,9 @@ type Inputs struct {
 	// LandingPaused is the reason the overseer's landing hold stands, "" when
 	// no pause is on; Compute copies it to the report (gt-ckc93z).
 	LandingPaused string
+	// LandingPasses is the landing-worker passes in flight; Compute copies it
+	// to the report (gt-u98suh).
+	LandingPasses int
 
 	Dolt        Dolt
 	ExecTax     ExecTax
@@ -706,7 +718,7 @@ var errNotWired = errors.New("no source wired")
 // Compute builds the report. It runs every source once, in order, on the
 // calling goroutine.
 func Compute(ctx context.Context, in Inputs) Report {
-	r := Report{At: in.Now, LandingPaused: in.LandingPaused}
+	r := Report{At: in.Now, LandingPaused: in.LandingPaused, LandingPasses: in.LandingPasses, PassesKnown: true}
 	h, hErr := hostReading(ctx, in)
 	r.Fields = append(r.Fields, dolt(ctx, in))
 	et, ms := execTax(ctx, in, h)

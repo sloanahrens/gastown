@@ -352,6 +352,48 @@ func TestWriteTownHealth_BrokenHealthBlockFallsBackToDefaults(t *testing.T) {
 	}
 }
 
+// TestWriteTownHealth_CarriesTheLandingPassesInFlight: the report the daemon
+// writes carries the landing passes the daemon has in flight, and 0 once none
+// is, so a roll can wait for a quiet town from the health file alone (gt-u98suh).
+func TestWriteTownHealth_CarriesTheLandingPassesInFlight(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+
+	d.landingPasses.Store(2)
+	d.writeTownHealth()
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LandingPasses != 2 || !r.PassesKnown {
+		t.Errorf("report carries %d passes known %v, want 2 known", r.LandingPasses, r.PassesKnown)
+	}
+
+	d.landingPasses.Store(0)
+	d.writeTownHealth()
+	raw, err := os.ReadFile(townhealth.Path(d.config.TownRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk struct {
+		LandingPasses *int `json:"landing_passes"`
+	}
+	if err := json.Unmarshal(raw, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.LandingPasses == nil || *onDisk.LandingPasses != 0 {
+		t.Errorf("report with no pass in flight wrote landing_passes %v, want 0", onDisk.LandingPasses)
+	}
+	r, err = townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.LandingPasses != 0 || !r.PassesKnown {
+		t.Errorf("report carries %d passes known %v, want 0 known", r.LandingPasses, r.PassesKnown)
+	}
+}
+
 // A rig with no post_land_command never runs a post-landing check, so its
 // lack of a verdict is n/a rather than UNKNOWN; configuring the command makes
 // the missing verdict an open question again. Both read the rig's own

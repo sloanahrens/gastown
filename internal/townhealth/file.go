@@ -34,9 +34,21 @@ func Read(townRoot string) (Report, error) {
 	if err != nil {
 		return r, err
 	}
-	if err := json.Unmarshal(data, &r); err != nil {
+	// The landing_passes key decodes beside the report, shadowing the report's
+	// own tag: a report from a daemon before the field has no key, and reads as
+	// passes unknown, not zero (gt-u98suh).
+	var f struct {
+		Report
+		LandingPasses *int `json:"landing_passes"`
+	}
+	if err := json.Unmarshal(data, &f); err != nil {
 		return r, fmt.Errorf("parse %s: %w", FileName, err)
 	}
+	r = f.Report
+	if f.LandingPasses != nil {
+		r.LandingPasses = *f.LandingPasses
+	}
+	r.PassesKnown = f.LandingPasses != nil
 	if r.At.IsZero() {
 		return r, fmt.Errorf("%s has no tick time", FileName)
 	}
