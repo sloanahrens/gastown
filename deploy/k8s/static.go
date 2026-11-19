@@ -26,9 +26,10 @@ var staticFileNames = []string{
 	"mac-watch-rbac.yaml",
 	"priority-classes.yaml",
 	"drift-rbac.yaml",
+	"deployer-rbac.yaml",
 }
 
-//go:embed bd-gateway-service-admission.yaml update-admission.yaml update-rbac.yaml sweep-rbac.yaml mac-watch-rbac.yaml priority-classes.yaml drift-rbac.yaml
+//go:embed bd-gateway-service-admission.yaml update-admission.yaml update-rbac.yaml sweep-rbac.yaml mac-watch-rbac.yaml priority-classes.yaml drift-rbac.yaml deployer-rbac.yaml
 var staticManifests embed.FS
 
 // StaticObject is one Kubernetes object from the static manifests, with its
@@ -46,7 +47,7 @@ type StaticObject struct {
 	Doc          []byte
 }
 
-// Static returns every object the seven embedded manifests hold, in file order
+// Static returns every object the eight embedded manifests hold, in file order
 // and then document order.
 func Static() ([]StaticObject, error) {
 	return staticObjects(staticManifests, staticFileNames)

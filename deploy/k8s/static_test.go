@@ -43,7 +43,7 @@ func docObject(t *testing.T, doc []byte) (apiVersion, kind, name, namespace stri
 	return parsed.APIVersion, parsed.Kind, parsed.Metadata.Name, parsed.Metadata.Namespace
 }
 
-// The control cluster's static set: every document of the seven embedded files,
+// The control cluster's static set: every document of the eight embedded files,
 // in file order. sweep-rbac.yaml holds nine documents, not the eight the bead
 // first counted: its eight "---" separators sit between nine documents.
 func TestStaticObjectsDocuments(t *testing.T) {
@@ -88,6 +88,12 @@ func TestStaticObjectsDocuments(t *testing.T) {
 		{"priority-classes.yaml", sched, "PriorityClass", "gt-ci", "", true, false},
 		{"drift-rbac.yaml", rbac, "ClusterRole", driftReaderRole, "", true, false},
 		{"drift-rbac.yaml", rbac, "ClusterRoleBinding", driftReaderRole, "", true, false},
+		{"deployer-rbac.yaml", rbac, "Role", deployerApplyRole, deployerNamespace, false, false},
+		{"deployer-rbac.yaml", rbac, "RoleBinding", deployerApplyRole, deployerNamespace, false, false},
+		{"deployer-rbac.yaml", rbac, "ClusterRole", deployerPolicyRole, "", true, false},
+		{"deployer-rbac.yaml", rbac, "ClusterRoleBinding", deployerPolicyRole, "", true, false},
+		{"deployer-rbac.yaml", rbac, "ClusterRole", deployerReaderRole, "", true, false},
+		{"deployer-rbac.yaml", rbac, "ClusterRoleBinding", deployerReaderRole, "", true, false},
 	}
 
 	objects, err := Static()

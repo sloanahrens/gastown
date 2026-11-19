@@ -587,6 +587,74 @@ subjects:
     name: daemon
     namespace: gt
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: deployer-policy
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Creating or updating a role that grants verbs the caller does not hold is an
+  # escalation, and binding a role is what makes it reach a subject; both need
+  # their own verb.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles"]
+    verbs: ["escalate", "bind"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: deployer-policy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: deployer-policy
+subjects:
+  - kind: User
+    name: gt-deployer-policy
+    apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-deployer-reader-extra
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-deployer-reader-extra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-deployer-reader-extra
+subjects:
+  - kind: Group
+    name: gt-deployers
+    apiGroup: rbac.authorization.k8s.io
+---
 # The cluster access the pod-update Job runs as (gt-360i18): the gt-update
 # ServiceAccount in the gt namespace, its namespaced Role and the RoleBinding that
 # grants it. A daemon that runs as a pod is moved by four kinds of kubectl call: a
@@ -820,3 +888,58 @@ subjects:
   - kind: ServiceAccount
     name: mac-watch
     namespace: gt
+---
+# Read docs/architecture.md for the two deployer roles, what each writes, and the
+# read supplement: this file holds their grants and does not restate them
+# (gt-57u2we).
+#
+# This file is not applied by the daemon. The overseer applies it with the admin
+# credential (gt-77r621). TestDeployerRBAC* in deploy/k8s holds each grant to an
+# allowlist, the bindings to the subjects the certificates carry, and every rule
+# here to a no-secrets refusal.
+#
+# That refusal is not a boundary for deployer-policy. It holds escalate and bind
+# on roles and clusterroles and create on clusterrolebindings (operator decision
+# 2026-11-18, map ticket claude-30uf), so it can bind the built-in cluster-admin
+# ClusterRole to itself. Its real reach is cluster-admin, not only secrets. The
+# control is not this file: its certificate is issued per use through an
+# operator-approved CertificateSigningRequest in a root window with the
+# break-glass credential, a one-day lifetime against 30 days for deployer-apply
+# (gt-negjz0). escalate and bind stay in the role; narrowing them is the
+# operator's call, filed as the open decision bead gt-924m6x.
+#
+# The same refusal does not bound deployer-apply either. It may create and update
+# Deployments, CronJobs and ServiceAccounts in gt, so it can apply a Deployment
+# whose pod spec mounts any Secret in gt or runs as any ServiceAccount there,
+# including gt-update. This file holds neither fact down. What bounds the apply
+# credential is its use: it applies only the plan the operator approved by hash
+# (gt-igz5vn), and its certificate is the one that lasts 30 days.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer-apply
+  namespace: gt
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: deployer-apply
+  namespace: gt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: deployer-apply
+subjects:
+  - kind: User
+    name: gt-deployer-apply
+    apiGroup: rbac.authorization.k8s.io
