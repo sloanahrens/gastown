@@ -1118,7 +1118,7 @@ func (l *Lander) logRounds(issue *beads.Issue, w Work, v Verdict) {
 		return
 	}
 	ledger := RoundsLedger{OutDir: l.RoundsDir, Bead: w.BeadID, Now: l.now}
-	if err := ledger.Append(reviewAttempt(issue.Notes, w.Branch), w.Head, v.Findings); err != nil {
+	if err := ledger.AppendLane(ledgerLane(w.Branch), reviewAttempt(issue.Notes, w.Branch), w.Head, v.Findings); err != nil {
 		if errors.Is(err, ErrRoundsCorrupt) && !l.firstRoundsWarning(w.BeadID) {
 			return
 		}
