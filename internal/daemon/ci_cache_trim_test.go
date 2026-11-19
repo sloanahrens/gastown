@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -198,9 +199,9 @@ func volumeExecs(f *ciCacheFixture, name string) int {
 }
 
 // TestCICacheTrimArgv: each volume's exec names the runner's dind container, the
-// control context, the volume's path and the age in minutes; the uncapped
-// ci-gocache argv is the one the trim has always sent, and the capped ci-npm argv
-// adds the cap; a dry run sends no deletion; and the kubectl calls name the
+// control context, the volume's path and the age in minutes; the ci-gocache argv
+// is the LRU apply program at the default cap, and the capped ci-npm argv adds
+// its cap; a dry run sends no deletion; and the kubectl calls name the
 // kubeconfig and the context.
 func TestCICacheTrimArgv(t *testing.T) {
 	t.Parallel()
@@ -219,8 +220,10 @@ func TestCICacheTrimArgv(t *testing.T) {
 		if !slices.Equal(argv[:4], wantPrefix) {
 			t.Fatalf("kubectl prefix = %q, want the kubeconfig and the control context %q", argv[:4], wantPrefix)
 		}
+		// The default ci_gocache_cap_bytes, 40 GiB, in KiB as the volume is sized.
 		want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
-			"sh", "-c", ciCacheTrimScript, "ci-cache-trim", ciCacheTestGocacheRoot, ciCacheTestMinutes}
+			"sh", "-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", ciCacheTestGocacheRoot, ciCacheTestMinutes,
+			strconv.Itoa(40 << 20), strconv.Itoa(ciCacheLRUFloorMinutes)}
 		if !slices.Equal(argv[4:], want) {
 			t.Errorf("exec argv = %q\nwant %q", argv[4:], want)
 		}
@@ -254,6 +257,115 @@ func TestCICacheTrimArgv(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestCICacheTrimGocacheRunsTheLRUProgram: an apply pass execs the LRU program
+// over ci-gocache with apply, the volume root, the age in minutes, the cap from
+// ci_gocache_cap_bytes and the floor; ci-npm and ci-gomod keep the programs they
+// ran before.
+func TestCICacheTrimGocacheRunsTheLRUProgram(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIGocacheCapBytes = "20GB"
+	f.tick()
+	f.drain()
+
+	if n := len(f.execs()); n != len(ciCacheVolumes) {
+		t.Fatalf("ran %d execs, want %d: one per volume", n, len(ciCacheVolumes))
+	}
+	argvOf := func(root string) []string {
+		for _, c := range f.execs() {
+			if slices.Contains(c.args, root) {
+				return c.args[4:]
+			}
+		}
+		return nil
+	}
+
+	// The cap is ci_gocache_cap_bytes, 20 GiB, in KiB as the volume is sized.
+	wantGocache := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+		"sh", "-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", ciCacheTestGocacheRoot,
+		ciCacheTestMinutes, strconv.Itoa(20 << 20), strconv.Itoa(ciCacheLRUFloorMinutes)}
+	if got := argvOf(ciCacheTestGocacheRoot); !slices.Equal(got, wantGocache) {
+		t.Errorf("ci-gocache exec argv = %q\nwant %q", got, wantGocache)
+	}
+
+	wantNpm := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+		"sh", "-c", ciCacheCappedTrimScript, "ci-cache-trim", ciCacheVolumeRoot(ciCacheNpmVolume), ciCacheTestMinutes, ciCacheTestNpmCapKiB}
+	if got := argvOf(ciCacheVolumeRoot(ciCacheNpmVolume)); !slices.Equal(got, wantNpm) {
+		t.Errorf("ci-npm exec argv = %q\nwant %q", got, wantNpm)
+	}
+
+	wantGomod := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+		"sh", "-c", ciCacheModuleTrimScript, "ci-cache-trim", ciCacheVolumeRoot(ciCacheGomodVolume), ciCacheTestMinutes, ciCacheTestGomodCapKiB}
+	if got := argvOf(ciCacheVolumeRoot(ciCacheGomodVolume)); !slices.Equal(got, wantGomod) {
+		t.Errorf("ci-gomod exec argv = %q\nwant %q", got, wantGomod)
+	}
+}
+
+// TestCICacheTrimGocacheDryRunAndRefusedCap: a dry run still execs the list
+// program ci-gocache ran before the cap and reads its three-line reply, and a
+// ci_gocache_cap_bytes the patrol cannot act on trims nothing and names the
+// setting.
+func TestCICacheTrimGocacheDryRunAndRefusedCap(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a dry run runs the list program it ran before", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
+		f.tick()
+		f.drain()
+
+		var got []string
+		for _, c := range f.execs() {
+			if slices.Contains(c.args, ciCacheTestGocacheRoot) {
+				got = c.args[4:]
+			}
+		}
+		want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+			"sh", "-c", ciCacheListScript, "ci-cache-trim", ciCacheTestGocacheRoot, ciCacheTestMinutes}
+		if !slices.Equal(got, want) {
+			t.Errorf("ci-gocache dry-run argv = %q\nwant %q", got, want)
+		}
+		if want := ciCacheGocacheVolume + ": would remove 3 files"; !strings.Contains(f.logs.String(), want) {
+			t.Errorf("the three-line reply is not read and reported (%q):\n%s", want, f.logs.String())
+		}
+	})
+
+	t.Run("a refused cap setting trims nothing", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.d.patrolConfig.Patrols.DiskMaintenance.CIGocacheCapBytes = "0GB"
+		f.tick()
+		f.drain()
+
+		if n := len(f.cli.recorded()); n != 0 {
+			t.Errorf("a refused cap made %d kubectl call(s), want none", n)
+		}
+		if !strings.Contains(f.logs.String(), "ci_gocache_cap_bytes") {
+			t.Errorf("logs do not name the refused setting:\n%s", f.logs.String())
+		}
+	})
+}
+
+// TestCICacheTrimGocacheRefusesAnArgvItCannotBuild: the LRU program's arguments
+// are built by ciCacheLRUArgv, which refuses a negative number; a row it refuses
+// is a failed run that execs nothing.
+func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
+	at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+
+	if ok := f.d.ciCacheTrimVolume(context.Background(), agentconfig.DiskMaintenanceModeApply, at, row, 12*time.Hour, 30<<20); ok {
+		t.Errorf("a row whose LRU arguments cannot be built reached a verdict")
+	}
+	if n := len(f.execs()); n != 0 {
+		t.Errorf("a refused argv made %d exec(s), want none", n)
+	}
+	if want := "the volume's program could not be built"; !strings.Contains(f.logs.String(), want) {
+		t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
+	}
 }
 
 // TestCICacheTrimConstantsMatchTheRunnerManifest holds the runner names and the
@@ -748,7 +860,7 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		f.tick()
 		f.drain()
 
-		_, _, warn, err := ciCacheTrimSettings(f.d.patrolConfig)
+		_, _, warn, _, err := ciCacheTrimSettings(f.d.patrolConfig)
 		if err != nil {
 			t.Fatalf("reading the settings: %v", err)
 		}
@@ -1276,6 +1388,14 @@ func TestCICacheTrimLRUArgv(t *testing.T) {
 	if !slices.Equal(good, want) {
 		t.Errorf("argv = %q, want %q", good, want)
 	}
+	apply, err := ciCacheLRUArgv("apply", "/vol/ci-gocache/_data", 120, 41943040, ciCacheLRUFloorMinutes)
+	if err != nil {
+		t.Fatalf("ciCacheLRUArgv(apply) = %v, want nil", err)
+	}
+	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", "/vol/ci-gocache/_data", "120", "41943040", "60"}
+	if !slices.Equal(apply, wantApply) {
+		t.Errorf("apply argv = %q, want %q", apply, wantApply)
+	}
 	cases := []struct {
 		name  string
 		mode  string
@@ -1288,7 +1408,7 @@ func TestCICacheTrimLRUArgv(t *testing.T) {
 		{name: "a negative cap", mode: "list", root: "/v", age: 120, cap: -1, floor: 60},
 		{name: "a negative floor", mode: "list", root: "/v", age: 120, cap: 1, floor: -60},
 		{name: "an empty root", mode: "list", root: "", age: 120, cap: 1, floor: 60},
-		{name: "a mode the program does not have", mode: "apply", root: "/v", age: 120, cap: 1, floor: 60},
+		{name: "a mode the program does not have", mode: "delete", root: "/v", age: 120, cap: 1, floor: 60},
 	}
 	for _, tc := range cases {
 		if argv, err := ciCacheLRUArgv(tc.mode, tc.root, tc.age, tc.cap, tc.floor); err == nil {

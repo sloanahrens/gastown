@@ -98,12 +98,15 @@ const (
 // from a reply. capKiB is the size above which the volume is trimmed; 0 means no
 // cap, so the age rule alone applies. modules marks a volume whose entries are
 // whole module directories under pkg/mod, trimmed by the module programs, not
-// single files; such a volume is always capped.
+// single files; such a volume is always capped. lru marks a volume trimmed by
+// the least-recently-used program: its cap is no constant in this table but the
+// setting ci_gocache_cap_bytes, which the pass copies into the row it runs.
 type ciCacheVolume struct {
 	name    string
 	root    string
 	capKiB  int64
 	modules bool
+	lru     bool
 }
 
 // unit names what a volume's trim removes, for its log lines.
@@ -114,10 +117,19 @@ func (v ciCacheVolume) unit() string {
 	return "files"
 }
 
+// capped reports whether a reading of the volume is measured against its cap. A
+// module or file volume's cap is the table's constant and its reading uses it. An
+// lru volume's cap is the setting the pass copies into the row it runs, and the
+// volume's no-op item and dry-run line are measured against the warn figure
+// instead.
+func (v ciCacheVolume) capped() bool {
+	return v.capKiB > 0 && !v.lru
+}
+
 // ciCacheVolumes is the table a pass runs, in order. ci-gomod is last, so the
 // order the first two volumes run in is unchanged.
 var ciCacheVolumes = []ciCacheVolume{
-	{name: ciCacheGocacheVolume, root: ciCacheVolumeRoot(ciCacheGocacheVolume)},
+	{name: ciCacheGocacheVolume, root: ciCacheVolumeRoot(ciCacheGocacheVolume), lru: true},
 	{name: ciCacheNpmVolume, root: ciCacheVolumeRoot(ciCacheNpmVolume), capKiB: ciCacheNpmCapKiB},
 	{name: ciCacheGomodVolume, root: ciCacheVolumeRoot(ciCacheGomodVolume), capKiB: ciCacheGomodCapKiB, modules: true},
 }
@@ -157,7 +169,7 @@ func (d *Daemon) ciCacheRetryDue(due []ciCacheVolume, concluded time.Time) {
 // ciCacheNoOpKeyOf is the attention item key of a volume's no-op reading. The
 // uncapped volume keeps the key it has always had; a capped volume names itself.
 func ciCacheNoOpKeyOf(v ciCacheVolume) string {
-	if v.capKiB == 0 {
+	if !v.capped() {
 		return ciCacheNoOpKey
 	}
 	return ciCacheNoOpKey + "-" + v.name
@@ -317,8 +329,8 @@ echo "after_kib=$after"
 // arithmetic can only ever read digits. A negative number, an empty root and a
 // mode the program does not have are refused, never passed on.
 func ciCacheLRUArgv(mode, root string, ageMin, capKiB, floorMin int64) ([]string, error) {
-	if mode != "list" {
-		return nil, fmt.Errorf("the LRU program has no mode %q: only list", mode)
+	if mode != "list" && mode != agentconfig.DiskMaintenanceModeApply {
+		return nil, fmt.Errorf("the LRU program has no mode %q: only list and apply", mode)
 	}
 	if root == "" {
 		return nil, errors.New("the LRU program needs a volume root")
@@ -492,27 +504,32 @@ func parseCICacheTrimSelection(out []byte, root string) (ciCacheTrimReply, error
 	return reply, nil
 }
 
-// ciCacheTrimSettings reads the CI trim's three settings from the patrol's
-// block, returning the default for each one that is empty. A value the patrol
-// cannot act on is an error naming its key.
-func ciCacheTrimSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duration, int64, error) {
+// ciCacheTrimSettings reads the CI trim's four settings from the patrol's
+// block, returning the default for each one that is empty. The last is the
+// ci-gocache cap in bytes. A value the patrol cannot act on is an error naming
+// its key.
+func ciCacheTrimSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duration, int64, int64, error) {
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
 	}
 	every, err := settings.CICacheTrimEvery()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	age, err := settings.CICacheMaxAgeDuration()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	warn, err := settings.CICacheWarnLimit()
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
-	return every, age, warn, nil
+	gocacheCap, err := settings.CIGocacheCapLimit()
+	if err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return every, age, warn, gocacheCap, nil
 }
 
 // ciCacheTrimContext is the kubectl context of the control cluster the runner
@@ -555,7 +572,7 @@ func (d *Daemon) runCICacheTrimTick() {
 	if _, configured, _ := ciCacheTrimContext(pc); !configured {
 		return
 	}
-	every, _, _, err := ciCacheTrimSettings(pc)
+	every, _, _, _, err := ciCacheTrimSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -583,7 +600,7 @@ func (d *Daemon) runCICacheTrimTick() {
 func (d *Daemon) runCICacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	if _, _, _, err := ciCacheTrimSettings(d.patrol()); err != nil {
+	if _, _, _, _, err := ciCacheTrimSettings(d.patrol()); err != nil {
 		d.refuseDiskMaintenance(err)
 		return
 	}
@@ -602,7 +619,7 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	every, maxAge, warn, err := ciCacheTrimSettings(pc)
+	every, maxAge, warn, gocacheCap, err := ciCacheTrimSettings(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("settings", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
@@ -632,6 +649,11 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	at := ciCacheExecTarget{kubeconfig: kubeconfig, kubeContext: kubeContext, pod: pod}
 	verdict := true
 	for _, v := range due {
+		// The lru volume's cap is the setting, in the same KiB the volume is
+		// sized in, carried on a copy so the table's cap stays zero.
+		if v.lru {
+			v.capKiB = gocacheCap / 1024
+		}
 		// A run that could not reach a verdict is tried again soon, not after the
 		// full interval, as the cache trim's failed run is (gt-gg9hv.24.6).
 		if d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn) {
@@ -644,25 +666,37 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	return verdict
 }
 
-// ciCacheTrimProgram is the program a volume's exec runs, and the arguments that
-// follow its root and age. A dry run lists for every volume. A module volume runs
-// its module programs, which take the cap in both modes, since the module dry run
-// lists only what the apply would remove. An apply on a capped file volume passes
-// the cap, and an apply on an uncapped volume runs the age rule alone, exactly as
-// the trim always has.
-func ciCacheTrimProgram(mode string, v ciCacheVolume) (string, []string) {
-	capArg := []string{strconv.FormatInt(v.capKiB, 10)}
+// ciCacheTrimScriptArgs is the program a volume's exec runs: sh's -c, the script
+// and its arguments, which begin with the volume root and the age in minutes and
+// end with extra.
+func ciCacheTrimScriptArgs(script string, v ciCacheVolume, minutes int64, extra ...string) []string {
+	args := []string{"-c", script, "ci-cache-trim", v.root, strconv.FormatInt(minutes, 10)}
+	return append(args, extra...)
+}
+
+// ciCacheTrimProgram is the program a volume's exec runs, as the arguments after
+// kubectl's "--": a dry run lists for every volume. A module volume runs its
+// module programs, which take the cap in both modes, since the module dry run
+// lists only what the apply would remove. An apply on an lru volume runs the LRU
+// program at the cap and the floor, an apply on a capped file volume passes the
+// cap, and an apply on an uncapped volume runs the age rule alone, exactly as the
+// trim always has. The LRU program's arguments are refused when they cannot be
+// built from digits, never passed on.
+func ciCacheTrimProgram(mode string, v ciCacheVolume, minutes int64) ([]string, error) {
+	capArg := strconv.FormatInt(v.capKiB, 10)
 	switch {
+	case v.lru && mode == agentconfig.DiskMaintenanceModeApply:
+		return ciCacheLRUArgv(agentconfig.DiskMaintenanceModeApply, v.root, minutes, v.capKiB, ciCacheLRUFloorMinutes)
 	case v.modules && mode != agentconfig.DiskMaintenanceModeApply:
-		return ciCacheModuleListScript, capArg
+		return ciCacheTrimScriptArgs(ciCacheModuleListScript, v, minutes, capArg), nil
 	case v.modules:
-		return ciCacheModuleTrimScript, capArg
+		return ciCacheTrimScriptArgs(ciCacheModuleTrimScript, v, minutes, capArg), nil
 	case mode != agentconfig.DiskMaintenanceModeApply:
-		return ciCacheListScript, nil
+		return ciCacheTrimScriptArgs(ciCacheListScript, v, minutes), nil
 	case v.capKiB > 0:
-		return ciCacheCappedTrimScript, capArg
+		return ciCacheTrimScriptArgs(ciCacheCappedTrimScript, v, minutes, capArg), nil
 	default:
-		return ciCacheTrimScript, nil
+		return ciCacheTrimScriptArgs(ciCacheTrimScript, v, minutes), nil
 	}
 }
 
@@ -671,9 +705,12 @@ func ciCacheTrimProgram(mode string, v ciCacheVolume) (string, []string) {
 // volume and removes nothing.
 func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration, warn int64) bool {
 	minutes := int64(maxAge / time.Minute)
-	script, extra := ciCacheTrimProgram(mode, v)
-	args := append([]string{"exec", "-n", ciCacheNamespace, at.pod, "-c", ciCacheContainer, "--",
-		"sh", "-c", script, "ci-cache-trim", v.root, strconv.FormatInt(minutes, 10)}, extra...)
+	program, err := ciCacheTrimProgram(mode, v, minutes)
+	if err != nil {
+		d.ciCacheTrimLogf("program refused "+v.name, "disk_maintenance: ci cache trim: %s: the volume's program could not be built: %v; nothing trimmed", v.name, err)
+		return false
+	}
+	args := append([]string{"exec", "-n", ciCacheNamespace, at.pod, "-c", ciCacheContainer, "--", "sh"}, program...)
 	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
 	if err != nil {
 		var status interface{ ExitCode() int }
@@ -698,7 +735,7 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	case mode == agentconfig.DiskMaintenanceModeApply:
 		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d %s, %s to %s (older than %s)",
 			v.name, reply.removed, v.unit(), before, after, ageText)
-	case v.capKiB > 0:
+	case v.capped():
 		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s) while it is over its cap of %s; nothing removed",
 			v.name, reply.removed, v.unit(), before, ageText, polecatimage.Human(v.capKiB*1024))
 	default:
@@ -721,7 +758,7 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 	}
 	key := ciCacheNoOpKeyOf(v)
 	threshold, limit := warn, "the warn figure of "
-	if v.capKiB > 0 {
+	if v.capped() {
 		threshold, limit = v.capKiB*1024, "its cap of "
 	}
 	after := reply.afterKiB * 1024
@@ -733,7 +770,7 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 		return
 	}
 	holder := "CI cache trim removed no file while the Go build cache holds"
-	if v.capKiB > 0 {
+	if v.capped() {
 		holder = "CI cache trim of " + v.name + " removed no " + v.unit() + " while the volume holds"
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
