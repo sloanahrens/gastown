@@ -57,12 +57,12 @@ var agentSandboxObjectScopes = map[string]bool{
 // nodeSelector and requests equal to limits on every container and init
 // container of the controller Deployment.
 func AgentSandbox(read func(path string) ([]byte, error), path string) ([]k8s.StaticObject, error) {
-	return agentSandbox(read, path, AgentSandboxSHA256)
+	return agentSandbox(read, path, AgentSandboxSHA256, yaml.Marshal)
 }
 
-// agentSandbox is AgentSandbox against digest, so a test can render its own
-// fixture, whose bytes are not the release's.
-func agentSandbox(read func(path string) ([]byte, error), path, digest string) ([]k8s.StaticObject, error) {
+// agentSandbox is AgentSandbox against digest and marshal, so a test renders a
+// fixture whose bytes are not the release's and drives the encoder's failure.
+func agentSandbox(read func(path string) ([]byte, error), path, digest string, marshal func(any) ([]byte, error)) ([]k8s.StaticObject, error) {
 	raw, err := read(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading the agent-sandbox %s manifest %s: %w", AgentSandboxVersion, path, err)
@@ -72,7 +72,7 @@ func agentSandbox(read func(path string) ([]byte, error), path, digest string) (
 		return nil, fmt.Errorf("agent-sandbox %s manifest %s is sha256 %s, want %s: refusing to render a manifest that is not the pinned release",
 			AgentSandboxVersion, path, actual, digest)
 	}
-	objects, err := agentSandboxObjects(raw)
+	objects, err := agentSandboxObjects(raw, marshal)
 	if err != nil {
 		return nil, fmt.Errorf("agent-sandbox %s manifest %s: %w", AgentSandboxVersion, path, err)
 	}
@@ -81,7 +81,7 @@ func agentSandbox(read func(path string) ([]byte, error), path, digest string) (
 
 // agentSandboxObjects parses the manifest's documents and returns them with the
 // controller's patches applied.
-func agentSandboxObjects(raw []byte) ([]k8s.StaticObject, error) {
+func agentSandboxObjects(raw []byte, marshal func(any) ([]byte, error)) ([]k8s.StaticObject, error) {
 	docs := splitDocuments(raw)
 	if len(docs) == 0 {
 		return nil, errors.New("holds no document")
@@ -117,7 +117,7 @@ func agentSandboxObjects(raw []byte) ([]k8s.StaticObject, error) {
 	if err := patchController(nodes[index]); err != nil {
 		return nil, err
 	}
-	patched, err := yaml.Marshal(nodes[index])
+	patched, err := marshal(nodes[index])
 	if err != nil {
 		return nil, fmt.Errorf("re-encoding Deployment %s: %w", controllerDeployment, err)
 	}
@@ -153,12 +153,9 @@ func readAgentSandboxObject(doc []byte, node *yaml.Node) (k8s.StaticObject, erro
 	root := node.Content[0]
 	apiVersion := scalarValue(root, "apiVersion")
 	kind := scalarValue(root, "kind")
-	name := ""
-	namespace := ""
-	if metadata := mappingValue(root, "metadata"); metadata != nil && metadata.Kind == yaml.MappingNode {
-		name = scalarValue(metadata, "name")
-		namespace = scalarValue(metadata, "namespace")
-	}
+	metadata := mappingValue(root, "metadata")
+	name := scalarValue(metadata, "name")
+	namespace := scalarValue(metadata, "namespace")
 	switch {
 	case apiVersion == "":
 		return k8s.StaticObject{}, errors.New("no apiVersion")

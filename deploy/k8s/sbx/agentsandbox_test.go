@@ -80,7 +80,7 @@ func TestAgentSandboxRefusesADifferentDigest(t *testing.T) {
 func TestAgentSandboxPatchesController(t *testing.T) {
 	t.Parallel()
 	raw := readFixture(t)
-	objects, err := agentSandbox(readerOf(raw), fixturePath, digestOf(raw))
+	objects, err := agentSandbox(readerOf(raw), fixturePath, digestOf(raw), yaml.Marshal)
 	if err != nil {
 		t.Fatalf("agentSandbox(fixture): %v", err)
 	}
@@ -149,7 +149,7 @@ func TestAgentSandboxPatchesController(t *testing.T) {
 func TestAgentSandboxRequiresTheControllerDeployment(t *testing.T) {
 	t.Parallel()
 	raw := []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: agent-sandbox-system\n")
-	objects, err := agentSandbox(readerOf(raw), "manifest.yaml", digestOf(raw))
+	objects, err := agentSandbox(readerOf(raw), "manifest.yaml", digestOf(raw), yaml.Marshal)
 	if err == nil || !strings.Contains(err.Error(), controllerDeployment) {
 		t.Fatalf("agentSandbox(no controller) = %d objects, %v; want a refusal naming %s", len(objects), err, controllerDeployment)
 	}
@@ -164,7 +164,7 @@ func TestAgentSandboxReadsOnlyItsPath(t *testing.T) {
 		reads = append(reads, p)
 		return raw, nil
 	}
-	if _, err := agentSandbox(read, path, digestOf(raw)); err != nil {
+	if _, err := agentSandbox(read, path, digestOf(raw), yaml.Marshal); err != nil {
 		t.Fatalf("agentSandbox(): %v", err)
 	}
 	if !slices.Equal(reads, []string{path}) {
@@ -175,7 +175,7 @@ func TestAgentSandboxReadsOnlyItsPath(t *testing.T) {
 func TestAgentSandboxReaderFailure(t *testing.T) {
 	t.Parallel()
 	read := func(path string) ([]byte, error) { return nil, errors.New("planted failure") }
-	_, err := agentSandbox(read, "manifest.yaml", digestOf(nil))
+	_, err := agentSandbox(read, "manifest.yaml", digestOf(nil), yaml.Marshal)
 	if err == nil || !strings.Contains(err.Error(), "planted failure") {
 		t.Fatalf("agentSandbox() = %v, want the reader's error", err)
 	}
@@ -211,11 +211,16 @@ func TestAgentSandboxRefusals(t *testing.T) {
 		{"a document with no apiVersion", []byte("kind: Namespace\nmetadata:\n  name: x\n"), "no apiVersion"},
 		{"a document with no kind", []byte("apiVersion: v1\nmetadata:\n  name: x\n"), "no kind"},
 		{"a document with no metadata.name", []byte("apiVersion: v1\nkind: Namespace\nmetadata: {}\n"), "no metadata.name"},
+		{"a document whose metadata is not a mapping", []byte("apiVersion: v1\nkind: Namespace\nmetadata: x\n"), "no metadata.name"},
 		{"a kind the release does not carry", []byte("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"), "kind ConfigMap"},
 		{"a namespaced kind with no namespace", []byte("apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: x\n"), "metadata.namespace"},
 		{"a document that is not a mapping", []byte("- one\n- two\n"), "not a YAML mapping"},
+		{"a document that is not YAML", []byte("apiVersion: [\n"), "not a YAML object"},
 		{"a separator the splitter missed", []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n--- # second\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: b\n"), "more than one YAML document"},
+		{"a second document that is not YAML", []byte("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: a\n--- # second\nkind: [\n"), "second document"},
 		{"a Deployment with no spec.template", []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: agent-sandbox-controller\n  namespace: agent-sandbox-system\nspec: {}\n"), "no spec.template"},
+		{"a Deployment whose spec is not a mapping", []byte("apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: agent-sandbox-controller\n  namespace: agent-sandbox-system\nspec: not-a-mapping\n"), "spec is not a mapping"},
+		{"a controller whose nodeSelector is not a mapping", controllerManifest("      nodeSelector: core\n      containers:\n        - name: c\n"), "nodeSelector is not a mapping"},
 		{"a controller with no containers", controllerManifest("      serviceAccountName: agent-sandbox-controller\n"), "containers is missing"},
 		{"a controller with an empty container list", controllerManifest("      containers: []\n"), "containers is empty"},
 		{"a controller whose containers are not a sequence", controllerManifest("      containers: {}\n"), "containers is not a sequence"},
@@ -225,7 +230,7 @@ func TestAgentSandboxRefusals(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
-			objects, err := agentSandbox(readerOf(row.manifest), "manifest.yaml", digestOf(row.manifest))
+			objects, err := agentSandbox(readerOf(row.manifest), "manifest.yaml", digestOf(row.manifest), yaml.Marshal)
 			if err == nil {
 				t.Fatalf("agentSandbox() = %d objects, nil error; want a refusal naming %s", len(objects), row.want)
 			}
@@ -239,11 +244,46 @@ func TestAgentSandboxRefusals(t *testing.T) {
 	}
 }
 
+// A release with no init containers is sized like any other: every container
+// gets the pair, and the missing init container list is not an error.
+func TestAgentSandboxSizesAPodWithNoInitContainers(t *testing.T) {
+	t.Parallel()
+	raw := controllerManifest("      containers:\n        - name: c\n")
+	objects, err := agentSandbox(readerOf(raw), "manifest.yaml", digestOf(raw), yaml.Marshal)
+	if err != nil {
+		t.Fatalf("agentSandbox(pod with no init containers): %v", err)
+	}
+	var deployment deploymentDoc
+	if err := yaml.Unmarshal(objects[0].Doc, &deployment); err != nil {
+		t.Fatalf("parsing the patched Deployment: %v", err)
+	}
+	want := map[string]string{"cpu": controllerCPU, "memory": controllerMemory}
+	if !maps.Equal(deployment.Spec.Template.Spec.Containers[0].Resources.Requests, want) {
+		t.Errorf("requests = %v, want %v", deployment.Spec.Template.Spec.Containers[0].Resources.Requests, want)
+	}
+}
+
+func TestAgentSandboxRefusesAnUnencodableManifest(t *testing.T) {
+	t.Parallel()
+	raw := readFixture(t)
+	marshal := func(any) ([]byte, error) { return nil, errors.New("planted failure") }
+	objects, err := agentSandbox(readerOf(raw), "manifest.yaml", digestOf(raw), marshal)
+	if err == nil || !strings.Contains(err.Error(), "planted failure") {
+		t.Fatalf("agentSandbox() = %d objects, %v; want the encoder's error", len(objects), err)
+	}
+	if objects != nil {
+		t.Errorf("agentSandbox() returned %d objects beside the error", len(objects))
+	}
+	if !strings.Contains(err.Error(), "re-encoding") {
+		t.Errorf("error %q does not say which step failed", err)
+	}
+}
+
 func TestAgentSandboxRefusesTwoControllers(t *testing.T) {
 	t.Parallel()
 	raw := append(controllerManifest("      containers:\n        - name: c\n"), "---\n"...)
 	raw = append(raw, controllerManifest("      containers:\n        - name: c\n")...)
-	_, err := agentSandbox(readerOf(raw), "manifest.yaml", digestOf(raw))
+	_, err := agentSandbox(readerOf(raw), "manifest.yaml", digestOf(raw), yaml.Marshal)
 	if err == nil || !strings.Contains(err.Error(), "want one") {
 		t.Fatalf("agentSandbox(two controllers) = %v, want a refusal naming the count", err)
 	}
