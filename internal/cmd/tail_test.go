@@ -117,13 +117,72 @@ func TestParseTailSince(t *testing.T) {
 
 func TestParseTailKinds(t *testing.T) {
 	t.Parallel()
-	got, err := parseTailKinds("events, daemon")
-	if err != nil || !reflect.DeepEqual(got, map[string]bool{"events": true, "daemon": true}) {
+	got, err := parseTailKinds("landings, daemon")
+	if err != nil || !reflect.DeepEqual(got, map[string]bool{"landings": true, "daemon": true}) {
 		t.Fatalf("kinds = %v, %v", got, err)
 	}
-	for _, bad := range []string{"", "events,bogus", ","} {
+	for _, bad := range []string{"", "landings,bogus", ","} {
 		if _, err := parseTailKinds(bad); err == nil {
 			t.Errorf("parseTailKinds(%q) accepted", bad)
+		}
+	}
+}
+
+// TestTailKinds_DefaultIsLandingsDaemonWatch: gt tail offers the landings, the
+// daemon log and the watch feed, and --kind defaults to all three. The retired
+// events journal is not among them (gt-itjvy8).
+func TestTailKinds_DefaultIsLandingsDaemonWatch(t *testing.T) {
+	t.Parallel()
+	want := []string{tailKindLandings, tailKindDaemon, tailKindWatch}
+	if !reflect.DeepEqual(tailKinds, want) {
+		t.Fatalf("tailKinds = %v, want %v", tailKinds, want)
+	}
+	flag := tailCmd.Flags().Lookup("kind")
+	if flag == nil {
+		t.Fatal("gt tail has no --kind flag")
+	}
+	if flag.DefValue != "landings,daemon,watch" {
+		t.Fatalf("--kind default = %q, want landings,daemon,watch", flag.DefValue)
+	}
+	got, err := parseTailKinds(flag.DefValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, map[string]bool{tailKindLandings: true, tailKindDaemon: true, tailKindWatch: true}) {
+		t.Fatalf("the default --kind selects %v", got)
+	}
+}
+
+// TestTailCommandHelp_OffersNoEventsSource: --kind's help names the three
+// sources gt tail reads and does not offer the retired events journal.
+func TestTailCommandHelp_OffersNoEventsSource(t *testing.T) {
+	t.Parallel()
+	usage := tailCmd.Flags().Lookup("kind").Usage
+	if !strings.Contains(usage, "landings, daemon, watch") {
+		t.Fatalf("--kind usage = %q; want the three sources", usage)
+	}
+	if strings.Contains(usage, "events") {
+		t.Fatalf("--kind usage still offers the events journal: %q", usage)
+	}
+}
+
+// TestParseTailKinds_EventsIsRetired: a --kind that names the events journal
+// is refused with the retirement message, alone or beside another kind, so
+// runTail returns before any source is built (gt-itjvy8).
+func TestParseTailKinds_EventsIsRetired(t *testing.T) {
+	t.Parallel()
+	const want = "the events journal is retired: use the dashboard's Town activity pane"
+	for _, kind := range []string{"events", "events,daemon", "daemon, events"} {
+		got, err := parseTailKinds(kind)
+		if err == nil {
+			t.Errorf("parseTailKinds(%q) accepted the retired events journal", kind)
+			continue
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("parseTailKinds(%q) = %v; want the retirement message", kind, err)
+		}
+		if got != nil {
+			t.Errorf("parseTailKinds(%q) returned %v beside the error; want no kinds", kind, got)
 		}
 	}
 }
