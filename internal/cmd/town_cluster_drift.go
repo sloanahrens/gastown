@@ -19,10 +19,11 @@ import (
 var townClusterDriftCmd = &cobra.Command{
 	Use:   "drift",
 	Short: "Report the live Deployments' differences from the render, ignoring image rolls",
-	Long: `Render the daemon's Deployment, and the dashboard's when the recorded flags name
-it, from the flags the last live render recorded and the image values file. Read
-each of those live Deployments through kubectl and print every field the render
-names and the live object carries differently.
+	Long: `Render the daemon's Deployment, and the dashboard's, trackerd's and the bd
+gateway's when the recorded flags name each, from the flags the last live render
+recorded and the image values file. Read each of those live Deployments through
+kubectl and print every field the render names and the live object carries
+differently.
 
 An image roll is not a difference: the container images, the polecat-image and
 restartedAt annotations, and the fields the API server fills in are skipped, so a
@@ -115,9 +116,16 @@ func compareClusterDrift(ctx context.Context, d clusterDriftDeps) error {
 	}
 	targets := []driftTarget{{name: k8sdaemon.Name, deployment: m.Deployment}}
 	// Build leaves the dashboard objects zero unless the flags render one, so a
-	// cluster running no dashboard is never asked for one.
+	// cluster running no dashboard is never asked for one. The tracker and the bd
+	// gateway follow the same rule.
 	if m.DashboardDeployment.Kind != "" {
 		targets = append(targets, driftTarget{name: k8sdaemon.DashboardName, deployment: m.DashboardDeployment})
+	}
+	if m.TrackerDeployment.Kind != "" {
+		targets = append(targets, driftTarget{name: k8sdaemon.TrackerName, deployment: m.TrackerDeployment})
+	}
+	if m.BdGatewayDeployment.Kind != "" {
+		targets = append(targets, driftTarget{name: k8sdaemon.BdGatewayName, deployment: m.BdGatewayDeployment})
 	}
 	differed := false
 	for _, target := range targets {

@@ -78,8 +78,15 @@ func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T,
 			deployment = m.Deployment
 		case "deployment/" + k8sdaemon.DashboardName:
 			deployment = m.DashboardDeployment
+		case "deployment/" + k8sdaemon.TrackerName:
+			deployment = m.TrackerDeployment
+		case "deployment/" + k8sdaemon.BdGatewayName:
+			deployment = m.BdGatewayDeployment
 		default:
 			t.Fatalf("kubectl read %q, which the run did not render", resource)
+		}
+		if deployment.Kind == "" {
+			t.Fatalf("kubectl read %q, which the render did not build", args[1])
 		}
 		return driftLiveAnswer(t, deployment, mutate), 0, nil
 	}
@@ -197,6 +204,139 @@ func driftLines(out *bytes.Buffer) []string {
 		}
 	}
 	return lines
+}
+
+// driftNameBdImage rewrites the repo's values file to name a bd image, so a render
+// of the flags builds the bd gateway.
+func driftNameBdImage(t *testing.T, town string) {
+	t.Helper()
+	dir := driftTestFlags(t, town).dir
+	if err := imagevalues.Write(imagevalues.PathIn(dir), imagevalues.Values{
+		Daemon:  clusterRenderDaemonDigest,
+		Polecat: clusterRenderDaemonDigest,
+		Commit:  strings.Repeat("a", 40),
+		Bd:      "registry.example.test/gastown-bd@sha256:" + strings.Repeat("3", 64),
+	}); err != nil {
+		t.Fatalf("writing the values file with a bd image: %v", err)
+	}
+}
+
+// driftFourDeploymentSeams is a drift host whose flags render the dashboard,
+// trackerd and the bd gateway beside the daemon, so a run has four Deployments to
+// read.
+func driftFourDeploymentSeams(t *testing.T) (clusterDriftDeps, *bytes.Buffer, string) {
+	t.Helper()
+	d, out, town := driftTestSeams(t, func(f *clusterRenderFlags) {
+		f.dashboard = true
+		f.tracker = true
+		f.trackerDSNSecret = "gt-trackerd-dsn"
+		f.proxyImage = clusterRenderDaemonDigest
+		f.hostGateway = "192.168.64.1"
+		f.bdGatewayTokenSecret = "bd-gateway-tokens"
+	})
+	driftNameBdImage(t, town)
+	return d, out, town
+}
+
+// driftRecordReads wraps answer so each Deployment the run asks kubectl for is
+// kept, in the order it asks.
+func driftRecordReads(answer update.RunFunc, reads *[]string) update.RunFunc {
+	return func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+		if len(args) > 1 {
+			*reads = append(*reads, args[1])
+		}
+		return answer(ctx, dir, env, name, args...)
+	}
+}
+
+// TestTownClusterDriftComparesTrackerdAndTheBdGateway holds a render of the
+// dashboard, trackerd and the bd gateway to four live reads by name, and a gateway
+// difference to a line naming deployment/bd-gateway and its JSON path.
+func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
+	t.Parallel()
+	d, out, town := driftFourDeploymentSeams(t)
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	var reads []string
+	d.kubectl = driftRecordReads(driftAnswering(t, m, func(_ *testing.T, live map[string]any) {
+		if live["metadata"].(map[string]any)["name"] != k8sdaemon.BdGatewayName {
+			return
+		}
+		driftObjectAt(live, "spec", "strategy")["type"] = "RollingUpdate"
+	}), &reads)
+	err := runClusterDrift(context.Background(), d)
+	if got := driftExit(err); got != 1 {
+		t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
+	}
+	wantReads := []string{
+		"deployment/" + k8sdaemon.Name,
+		"deployment/" + k8sdaemon.DashboardName,
+		"deployment/" + k8sdaemon.TrackerName,
+		"deployment/" + k8sdaemon.BdGatewayName,
+	}
+	if !slices.Equal(reads, wantReads) {
+		t.Errorf("read %q, want %q", reads, wantReads)
+	}
+	wantLines := []string{"deployment/" + k8sdaemon.BdGatewayName + ": " + driftWantDifference(t, "spec.strategy.type", "Recreate", "RollingUpdate")}
+	if got := driftLines(out); !slices.Equal(got, wantLines) {
+		t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
+	}
+}
+
+// TestTownClusterDriftRefusesATrackerdOrGatewayTheClusterDoesNotHold holds a
+// Deployment the render builds and the cluster does not hold to the unreadable
+// exit status, never 0 or 1.
+func TestTownClusterDriftRefusesATrackerdOrGatewayTheClusterDoesNotHold(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		resource string
+	}{
+		{name: "the bd gateway is absent", resource: "deployment/" + k8sdaemon.BdGatewayName},
+		{name: "trackerd is absent", resource: "deployment/" + k8sdaemon.TrackerName},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, out, town := driftFourDeploymentSeams(t)
+			answer := driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil)
+			d.kubectl = func(ctx context.Context, dir string, env []string, name string, args ...string) (string, int, error) {
+				if len(args) > 1 && args[1] == tc.resource {
+					// kubectl's status for a Deployment the cluster does not hold.
+					return "", 1, nil
+				}
+				return answer(ctx, dir, env, name, args...)
+			}
+			err := runClusterDrift(context.Background(), d)
+			if got := driftExit(err); got != driftExitUnreadable {
+				t.Fatalf("exit = %d, want %d (err: %v); printed:\n%s", got, driftExitUnreadable, err, out.String())
+			}
+			if want := "the live " + tc.resource + " could not be read"; !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not hold %q", err, want)
+			}
+			if got := driftLines(out); got != nil {
+				t.Errorf("printed %q beside the refusal, want nothing", got)
+			}
+		})
+	}
+}
+
+// TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender holds flags that render
+// no trackerd and no bd gateway to the two reads the run made before, the daemon
+// and the dashboard.
+func TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender(t *testing.T) {
+	t.Parallel()
+	d, out, town := driftTestSeams(t, func(f *clusterRenderFlags) { f.dashboard = true })
+	m := driftTestRendered(t, d, driftTestFlags(t, town))
+	var reads []string
+	d.kubectl = driftRecordReads(driftAnswering(t, m, nil), &reads)
+	err := runClusterDrift(context.Background(), d)
+	if got := driftExit(err); got != 0 {
+		t.Fatalf("exit = %d, want 0 (err: %v); printed:\n%s", got, err, out.String())
+	}
+	wantReads := []string{"deployment/" + k8sdaemon.Name, "deployment/" + k8sdaemon.DashboardName}
+	if !slices.Equal(reads, wantReads) {
+		t.Errorf("read %q, want %q", reads, wantReads)
+	}
 }
 
 // TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll drives the
