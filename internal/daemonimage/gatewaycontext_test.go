@@ -35,7 +35,7 @@ func TestBuildBDOnly(t *testing.T) {
 		t.Fatalf("recorded %d builds, want the one bd build", len(run.calls))
 	}
 	call := run.calls[0]
-	wantArgv := []string{"go", "build", "-trimpath", "-ldflags", bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit, "-o", "OUT", BDPackage}
+	wantArgv := []string{"go", "build", "-trimpath", "-ldflags", "-s -w " + bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit, "-o", "OUT", BDPackage}
 	if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
 		t.Errorf("bd build argv = %q, want %q", call.argv, wantArgv)
 	}
@@ -134,7 +134,7 @@ func TestStageGatewayContext(t *testing.T) {
 		if bdWorktree := run.adds[1].dir; run.shortDirs[0] != bdWorktree {
 			t.Errorf("git was asked for the short sha in %q, want the bd worktree %q", run.shortDirs[0], bdWorktree)
 		}
-		if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + bdCommit}) {
+		if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{"-s -w " + bdBuildFlag + testBDShort + " " + bdCommitFlag + bdCommit}) {
 			t.Errorf("bd.real ldflags = %q, want the returned commit %s stamped", got, bdCommit)
 		}
 	})

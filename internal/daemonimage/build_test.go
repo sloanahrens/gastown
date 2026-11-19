@@ -285,8 +285,8 @@ func TestBuildBinariesRecordsTheCrossCompile(t *testing.T) {
 
 // TestBuildBinariesBuildsGtWrap: the image's bd is the gt-wrap forwarder, so
 // BuildBinaries builds cmd/gt-wrap from the gt checkout at rev for linux/arm64,
-// beside the five binaries, with no -ldflags stamp and from the worktree root
-// rather than the tracker module (gt-p4xncz).
+// beside the five binaries, with the -s -w strip flags and no -ldflags stamp, and
+// from the worktree root rather than the tracker module (gt-p4xncz).
 func TestBuildBinariesBuildsGtWrap(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
@@ -299,7 +299,7 @@ func TestBuildBinariesBuildsGtWrap(t *testing.T) {
 		t.Fatalf("BuildBinaries paths = %q, want them to hold %s", paths, filepath.Join(b.Out, "gt-wrap"))
 	}
 	call := run.calls[at]
-	wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", GtWrapPackage}
+	wantArgv := []string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", "OUT", GtWrapPackage}
 	if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
 		t.Errorf("gt-wrap build argv = %q, want %q", call.argv, wantArgv)
 	}
@@ -386,7 +386,7 @@ func TestFakeWorktreeRemoveRefusesAPathItDidNotAdd(t *testing.T) {
 // TestBuildBinariesBuildsFromTheTrackerModule: trackerd and trackerbackup are
 // compiled from their own packages in the tracker module directory of a clean
 // worktree of the gt checkout at the gt commit, to their paths under b.Out, with
-// no -ldflags stamp.
+// the -s -w strip flags and no -ldflags stamp.
 func TestBuildBinariesBuildsFromTheTrackerModule(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
@@ -405,7 +405,7 @@ func TestBuildBinariesBuildsFromTheTrackerModule(t *testing.T) {
 			t.Fatalf("BuildBinaries path %d = %q, want the %s build %q", base+i, got, build.name, want)
 		}
 		call := run.calls[base+i]
-		wantArgv := []string{"go", "build", "-trimpath", "-o", "OUT", build.pkg}
+		wantArgv := []string{"go", "build", "-trimpath", "-ldflags", "-s -w", "-o", "OUT", build.pkg}
 		if got := withOut(call.argv); !reflect.DeepEqual(got, wantArgv) {
 			t.Errorf("%s build argv = %q, want %q", build.name, call.argv, wantArgv)
 		}
@@ -472,7 +472,7 @@ func TestGTCommitStampUsesBuildstamp(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), short); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := []string{gtLdflags(testRev[:buildstamp.Len])}
+	want := []string{"-s -w " + gtLdflags(testRev[:buildstamp.Len])}
 	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
 		t.Errorf("gt build ldflags = %q, want the first %d characters of the resolved %s: %q", got, buildstamp.Len, testRev, want)
 	}
@@ -480,8 +480,9 @@ func TestGTCommitStampUsesBuildstamp(t *testing.T) {
 
 // TestGTBuildStampsVersionAndCommit: the image's gt link line stamps Version and
 // Commit with the same short commit, so `gt version` names that commit on its
-// first line (gt-yjzepk.14). It goes red if the Version flag is dropped, or if
-// the two flags carry different values.
+// first line (gt-yjzepk.14), and carries the -s -w strip flags ahead of those
+// stamps (gt-aermmg). It goes red if the Version flag is dropped, if the two
+// flags carry different values, or if the strip flags go.
 func TestGTBuildStampsVersionAndCommit(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
@@ -489,23 +490,24 @@ func TestGTBuildStampsVersionAndCommit(t *testing.T) {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
 	stamp := testRev[:buildstamp.Len]
-	want := []string{"-X github.com/steveyegge/gastown/internal/cmd.Version=" + stamp + " -X github.com/steveyegge/gastown/internal/cmd.Commit=" + stamp}
+	want := []string{"-s -w -X github.com/steveyegge/gastown/internal/cmd.Version=" + stamp + " -X github.com/steveyegge/gastown/internal/cmd.Commit=" + stamp}
 	if got := ldflagsOf(run.calls[0].argv); !reflect.DeepEqual(got, want) {
 		t.Errorf("gt build ldflags = %q, want %q", got, want)
 	}
 }
 
-// TestBDBuildFlagsAreUnchanged: the image's bd link line keeps the stamps it had
-// before gt's Version flag was added: main.Build from git's abbreviation of the
-// commit, then main.Commit with the full sha (gt-glsx8). It goes red if a change
-// touches bd's flags.
-func TestBDBuildFlagsAreUnchanged(t *testing.T) {
+// TestBDBuildStampsFollowTheStripFlags: the image's bd link line leads with the
+// -s -w strip flags (gt-aermmg) and keeps the stamps it had before gt's Version
+// flag was added: main.Build from git's abbreviation of the commit, then
+// main.Commit with the full sha (gt-glsx8). It goes red if a change touches bd's
+// flags or drops the strip.
+func TestBDBuildStampsFollowTheStripFlags(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := []string{"-X main.Build=" + testBDShort + " -X main.Commit=" + testBDCommit}
+	want := []string{"-s -w -X main.Build=" + testBDShort + " -X main.Commit=" + testBDCommit}
 	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, want) {
 		t.Errorf("bd build ldflags = %q, want %q", got, want)
 	}
@@ -594,21 +596,86 @@ func TestBuildBinariesStillChecksOutTheFullCommit(t *testing.T) {
 	}
 }
 
-// TestBuildBinariesBdAndOmStampsUnchanged: the image's bd carries both halves of
-// the build id `bd version` prints, main.Build before main.Commit, the way
-// bdbuild stamps the polecat image's bd (gt-glsx8), and om carries none.
-func TestBuildBinariesBdAndOmStampsUnchanged(t *testing.T) {
+// TestBuildBinariesBdAndOmLinkFlags: the image's bd carries the -s -w strip
+// flags and both halves of the build id `bd version` prints, main.Build before
+// main.Commit, the way bdbuild stamps the polecat image's bd (gt-glsx8,
+// gt-aermmg), and om carries the strip flags and no stamp.
+func TestBuildBinariesBdAndOmLinkFlags(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit
+	want := "-s -w " + bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit
 	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
 		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
 	}
-	if got := ldflagsOf(run.calls[2].argv); len(got) != 0 {
-		t.Errorf("om build ldflags = %q, want none", got)
+	if got := ldflagsOf(run.calls[2].argv); !reflect.DeepEqual(got, []string{"-s -w"}) {
+		t.Errorf("om build ldflags = %q, want [%q]", got, "-s -w")
+	}
+}
+
+// TestEveryImageBinaryLinksWithStripFlags: -s -w reaches every Go binary the
+// daemon image builds, through each call that builds one (gt-aermmg): the six
+// binaries of BuildBinaries, the two plugins, the gateway's bdgw and the four
+// tools. Every call's one -ldflags value is the strip flags, or begins with them
+// ahead of a binary's own stamps.
+func TestEveryImageBinaryLinksWithStripFlags(t *testing.T) {
+	t.Parallel()
+	t.Run("BuildBinaries", func(t *testing.T) {
+		t.Parallel()
+		b, run := builderFor(t)
+		if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+			t.Fatalf("BuildBinaries: %v", err)
+		}
+		checkStripped(t, run.calls, wantBinaryNames)
+	})
+	t.Run("BuildPlugins", func(t *testing.T) {
+		t.Parallel()
+		b, run := builderFor(t)
+		if _, err := b.BuildPlugins(context.Background(), testRev); err != nil {
+			t.Fatalf("BuildPlugins: %v", err)
+		}
+		names := make([]string, 0, len(imagePlugins))
+		for _, p := range imagePlugins {
+			names = append(names, p.name)
+		}
+		checkStripped(t, run.calls, names)
+	})
+	t.Run("BuildGateway", func(t *testing.T) {
+		t.Parallel()
+		b, run := gatewayBuilder(t)
+		if _, err := b.BuildGateway(context.Background(), testRev); err != nil {
+			t.Fatalf("BuildGateway: %v", err)
+		}
+		checkStripped(t, run.calls, []string{"bdgw"})
+	})
+	t.Run("BuildTools", func(t *testing.T) {
+		t.Parallel()
+		b, run, _ := toolsBuilder(t)
+		if _, err := b.BuildTools(context.Background()); err != nil {
+			t.Fatalf("BuildTools: %v", err)
+		}
+		checkStripped(t, run.calls, []string{"hm", "devops-reporter", "release-reporter", "cloudcheck"})
+	})
+}
+
+// checkStripped fails unless every recorded build call links with -s -w ahead of
+// its own ldflags, naming each build by names[i].
+func checkStripped(t *testing.T, calls []recorded, names []string) {
+	t.Helper()
+	if len(calls) != len(names) {
+		t.Fatalf("recorded %d builds, want one per binary (%d): %v", len(calls), len(names), names)
+	}
+	for i, call := range calls {
+		got := ldflagsOf(call.argv)
+		if len(got) != 1 {
+			t.Errorf("%s build ldflags = %q, want one -ldflags value carrying -s -w", names[i], got)
+			continue
+		}
+		if got[0] != "-s -w" && !strings.HasPrefix(got[0], "-s -w ") {
+			t.Errorf("%s build ldflags = %q, want -s -w ahead of any stamp", names[i], got[0])
+		}
 	}
 }
 
@@ -627,7 +694,7 @@ func TestBuildBinariesStampsTheAbbreviationGitGives(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	want := bdBuildFlag + testBDCommit[:8] + " " + bdCommitFlag + testBDCommit
+	want := "-s -w " + bdBuildFlag + testBDCommit[:8] + " " + bdCommitFlag + testBDCommit
 	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
 		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
 	}
@@ -820,9 +887,12 @@ func TestBuildBinariesRefusesBeforeAnyBuild(t *testing.T) {
 
 // TestBDPinMatchesThePolecatImageFlow compares the argv the daemon image builds
 // bd with against the argv bdbuild.Compile builds the polecat image's bd with,
-// both run through their production calls. The polecat bd is linked with the
-// -s -w the daemon image has not gained yet (gt-aermmg), so the flags are
-// compared with the ldflags aside and both ldflags values are pinned.
+// both run through their production calls. Each side's full argv is pinned, so
+// the position and form of every flag are too (gt-aermmg, rework of gt-vmg7uw):
+// the two carry the same stamps (gt-glsx8) and the same -s -w, but the daemon
+// image puts the strip flags ahead of the stamps (gt-aermmg) while the polecat
+// build appends them (gt-rn1h6p), so the argvs are pinned side by side rather
+// than compared equal.
 func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
@@ -845,27 +915,25 @@ func TestBDPinMatchesThePolecatImageFlow(t *testing.T) {
 	}
 	// Drop the leading "go": bdbuild's argv starts at the go subcommand.
 	got := run.calls[1].argv[1:]
-	// The daemon image's bd has not gained the -s -w the polecat bd is stripped
-	// with yet (gt-aermmg), so the argv is compared with its ldflags aside; both
-	// ldflags values are pinned below.
-	if !reflect.DeepEqual(withOut(withoutLdflags(got)), withOut(withoutLdflags(compiled))) {
-		t.Errorf("the daemon image builds bd with %q, the polecat image with %q", got, compiled)
-	}
 	// Both images' bd are stamped with the same build id (gt-glsx8, gt-15amz).
-	wantDaemon := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit}
-	if !reflect.DeepEqual(ldflagsOf(got), wantDaemon) {
-		t.Errorf("the daemon image stamps bd with %q, want %q", ldflagsOf(got), wantDaemon)
+	stamps := bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit
+	wantDaemon := []string{"build", "-trimpath", "-ldflags", "-s -w " + stamps, "-o", "OUT", BDPackage}
+	if !reflect.DeepEqual(withOut(got), wantDaemon) {
+		t.Errorf("the daemon image builds bd with %q, want %q", got, wantDaemon)
 	}
-	wantPolecat := []string{bdBuildFlag + testBDShort + " " + bdCommitFlag + testBDCommit + " -s -w"}
-	if !reflect.DeepEqual(ldflagsOf(compiled), wantPolecat) {
-		t.Errorf("the polecat image stamps bd with %q, want %q", ldflagsOf(compiled), wantPolecat)
+	wantPolecat := []string{"build", "-trimpath", "-ldflags", stamps + " -s -w", "-o", "OUT", BDPackage}
+	if !reflect.DeepEqual(withOut(compiled), wantPolecat) {
+		t.Errorf("the polecat image builds bd with %q, want %q", compiled, wantPolecat)
 	}
 }
 
 // TestGTPinMatchesTheSharedBuildArgv compares the argv the daemon image builds
 // gt with against bdbuild.GoBuildArgv, the shared argv the polecat context
-// command compiles gt with, bar the rev stamp the daemon image adds on purpose
-// and the -s -w strip flags it has not gained yet (gt-aermmg).
+// command compiles gt with (gt-gg9hv.33). Each side's full argv is pinned, so
+// the position and form of every flag are pinned too (gt-aermmg, rework of
+// gt-vmg7uw): the polecat argv writes its strip flags in the joined
+// -ldflags=-s -w form, and the daemon image passes -ldflags separately, ahead of
+// the rev stamp it adds on purpose (gt-yjzepk.14).
 // The polecat side's recorded call is compared in that package's
 // TestGTPinMatchesTheDaemonImageGtBuild: this package's test cannot import it
 // (the context package imports this one), so here the shared helper is what
@@ -876,13 +944,15 @@ func TestGTPinMatchesTheSharedBuildArgv(t *testing.T) {
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
 		t.Fatalf("BuildBinaries: %v", err)
 	}
-	got := withoutLdflags(run.calls[0].argv)
+	got := run.calls[0].argv
+	wantDaemon := []string{"go", "build", "-trimpath", "-ldflags", "-s -w " + gtLdflags(testRev[:buildstamp.Len]), "-o", "OUT", GTPackage}
+	if !reflect.DeepEqual(withOut(got), wantDaemon) {
+		t.Errorf("the daemon image builds gt with %q, want %q", got, wantDaemon)
+	}
 	polecat := append([]string{"go"}, bdbuild.GoBuildArgv(filepath.Join("bin", "gt"), GTPackage)...)
-	// The daemon image has not gained the -s -w strip flags the shared polecat
-	// argv carries yet (gt-aermmg), so the ldflags are compared aside; every
-	// other flag must still match.
-	if !reflect.DeepEqual(withOut(got), withOut(withoutLdflags(polecat))) {
-		t.Errorf("the daemon image builds gt with %q, the polecat image with %q", got, polecat)
+	wantPolecat := []string{"go", "build", "-trimpath", "-ldflags=-s -w", "-o", "OUT", GTPackage}
+	if !reflect.DeepEqual(withOut(polecat), wantPolecat) {
+		t.Errorf("the polecat image builds gt with %q, want %q", polecat, wantPolecat)
 	}
 }
 

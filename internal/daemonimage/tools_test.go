@@ -194,8 +194,8 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 			t.Errorf("build %d env = %q, want the linux/arm64 cross-compile", i, c.env)
 		}
 	}
-	if got := argAfter(run.calls[0].argv, "-ldflags"); got != "" {
-		t.Errorf("hm ldflags = %q, want none", got)
+	if got := argAfter(run.calls[0].argv, "-ldflags"); got != "-s -w" {
+		t.Errorf("hm ldflags = %q, want the -s -w strip flags", got)
 	}
 
 	if len(g.adds) != 4 {
