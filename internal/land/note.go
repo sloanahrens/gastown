@@ -243,6 +243,11 @@ func laneOf(branch string) string {
 	return laneOther
 }
 
+// LaneOf is laneOf for callers outside the package: the worker keys a capped
+// loop's escalation by it, so the lane it asks about is the lane the refusals
+// count in (gt-fjzstx).
+func LaneOf(branch string) string { return laneOf(branch) }
+
 // laneAttempt counts the refusals of kind in notes within branch's lane (gt-mo4uj3).
 func laneAttempt(notes, branch, kind string) int {
 	n := 0

@@ -353,6 +353,10 @@ type Rejection struct {
 	// NoEscalate is set on a human refusal whose lane already escalated. The zero
 	// value escalates, so a refusal the lane check never reached still alarms (gt-dtx3ht).
 	NoEscalate bool
+	// PriorEscalated is set when the lane's notes already carry the escalated
+	// marker, whatever this refusal's kind or rework: the worker raises again
+	// once the escalation that marker names has been closed (gt-fjzstx).
+	PriorEscalated bool
 	// TargetTip is the target commit the merge was built on, set on a conflict
 	// and on a gate refusal. The rejection line carries it for a conflict only:
 	// a conflicted merge writes no merge line, and the conflict scorecard reads
@@ -2420,7 +2424,8 @@ func (l *Lander) reject(ctx context.Context, issue *beads.Issue, w Work, rej *Re
 			reason, min(attempt, MaxReworkAttempts), MaxReworkAttempts, loopEscalatedNote)
 	}
 	// Set before any return below, so a failed note or bead write keeps the answer (gt-dtx3ht).
-	rej.NoEscalate = (!rej.Rework || capped) && escalatedInLane(issue.Notes, lane, repeat)
+	rej.PriorEscalated = escalatedInLane(issue.Notes, lane, repeat)
+	rej.NoEscalate = (!rej.Rework || capped) && rej.PriorEscalated
 	note := RejectionNote{
 		Attempt:     attempt,
 		Kind:        string(rej.Kind),

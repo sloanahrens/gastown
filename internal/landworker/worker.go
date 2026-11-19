@@ -213,6 +213,12 @@ type Worker struct {
 	// CISilenceEscalateAfter times in a row. It runs in its own goroutine,
 	// which recovers and logs a panic; the pass does not wait.
 	Escalate func(beadID, message string)
+	// EscalationOpen, when set, answers whether beadID's lane already has an
+	// open escalation, so a lane whose capped-loop escalation was closed
+	// raises one on a new rejection and none while it is open (gt-fjzstx). A
+	// nil seam or an error counts as open: a doubt never raises a second one
+	// (the doubt is logged once).
+	EscalationOpen func(beadID, lane string) (bool, error)
 	// CISilenceEscalateAfter is how many consecutive candidate-gate silences
 	// on one bead raise a single escalation; 0 means
 	// DefaultCISilenceEscalateAfter.
@@ -248,6 +254,9 @@ type Worker struct {
 	memo *outcomeMemos
 	// escWG lets a test wait for Escalate goroutines.
 	escWG sync.WaitGroup
+	// escalationOpenSaid is set once the worker has said why it cannot tell
+	// whether a lane's escalation is open; the doubt line is not repeated.
+	escalationOpenSaid bool
 	// pendingRepair holds landings whose record was left incomplete; the
 	// next pass finishes them before landing anything new.
 	pendingRepair map[string]land.Work
@@ -1104,7 +1113,7 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		w.logf("%s: %v (left for the overseer: %s)", work.BeadID, err, land.LabelNeedsOverseer)
 		// NoEscalate is set when an earlier block of the refusal's lane already
 		// escalated the loop, so the operator is not alerted again (gt-dtx3ht).
-		if !rej.NoEscalate {
+		if w.shouldEscalate(work, rej) {
 			w.escalate(work.BeadID, fmt.Sprintf("Landing of %s (%s @ %s) left for the overseer (%s): %s",
 				work.BeadID, work.Branch, work.Head, rej.Kind, land.NoteField(rej.Reason)))
 		}
@@ -1164,6 +1173,40 @@ func (w *Worker) supersededRejection(work land.Work, rej *land.Rejection) {
 	w.logf("%s: %v; the bead changed during the landing, so no comment and no escalation", work.BeadID, rej.RecordErr)
 	w.endFailureRun(work.BeadID)
 	w.bead(work.BeadID).until = w.now().Add(humanWaitBackoff)
+}
+
+// shouldEscalate reports whether a human refusal raises the operator's
+// escalation. A lane that never escalated raises as it always has. A lane
+// that escalated raises again once that escalation is closed, and stays
+// silent while the seam shows it open or cannot say: a doubt raises no second
+// escalation and is logged once (gt-dtx3ht, gt-fjzstx).
+func (w *Worker) shouldEscalate(work land.Work, rej *land.Rejection) bool {
+	if !rej.NoEscalate {
+		return true
+	}
+	if !rej.PriorEscalated {
+		return false
+	}
+	if w.EscalationOpen == nil {
+		w.sayEscalationDoubt("%s: no seam reads the lane's escalations; not raising its closed one again", work.BeadID)
+		return false
+	}
+	open, err := w.EscalationOpen(work.BeadID, land.LaneOf(work.Branch))
+	if err != nil {
+		w.sayEscalationDoubt("%s: reading the lane's open escalation: %v; not raising it again", work.BeadID, err)
+		return false
+	}
+	return !open
+}
+
+// sayEscalationDoubt logs the one line a worker says when it cannot tell
+// whether a lane's escalation is open, however many beads meet the doubt.
+func (w *Worker) sayEscalationDoubt(format string, args ...any) {
+	if w.escalationOpenSaid {
+		return
+	}
+	w.escalationOpenSaid = true
+	w.logf(format, args...)
 }
 
 // escalate calls Escalate in its own goroutine. A panic in it is logged, not
