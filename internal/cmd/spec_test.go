@@ -3311,9 +3311,9 @@ func TestSpecCandidatesRetriesASlingKilledAtItsBound(t *testing.T) {
 	var listed []string
 	var cleared []string
 	retry := &specTimeoutRetry{
-		due: func(rigPath string) (map[string]bool, error) {
+		due: func(rigPath string) (specRetryDue, error) {
 			listed = append(listed, rigPath)
-			return map[string]bool{"gt-retry": true}, nil
+			return specRetryDue{Due: map[string]bool{"gt-retry": true}}, nil
 		},
 		clear: func(rigPath, beadID string) error {
 			cleared = append(cleared, beadID)
@@ -3350,7 +3350,7 @@ func TestSpecCandidatesReportsAFailedRetryProbe(t *testing.T) {
 	}
 	var cleared int
 	retry := &specTimeoutRetry{
-		due:   func(string) (map[string]bool, error) { return nil, errors.New("dolt: connection refused") },
+		due:   func(string) (specRetryDue, error) { return specRetryDue{}, errors.New("dolt: connection refused") },
 		clear: func(string, string) error { cleared++; return nil },
 	}
 
@@ -3378,7 +3378,7 @@ func TestSpecCandidatesReportsAFailedClear(t *testing.T) {
 		return []*beads.Issue{{ID: "gt-stuck", Type: "task", Status: "open", Priority: 2, Labels: []string{specdispatch.DispatchFailedLabel}}}, nil
 	}
 	retry := &specTimeoutRetry{
-		due:   func(string) (map[string]bool, error) { return map[string]bool{"gt-stuck": true}, nil },
+		due:   func(string) (specRetryDue, error) { return specRetryDue{Due: map[string]bool{"gt-stuck": true}}, nil },
 		clear: func(string, string) error { return errors.New("dolt: connection refused") },
 	}
 
@@ -3459,7 +3459,7 @@ func TestSpecTimedOutRetriesFromReportsAFailedList(t *testing.T) {
 	store := newCountingStore(beadsfake.New())
 	store.failBatch = true
 
-	if _, err := specTimedOutRetriesFrom(store); err == nil || !strings.Contains(err.Error(), "bd list: boom") {
+	if _, err := specTimedOutRetriesFrom(store, specTestNow); err == nil || !strings.Contains(err.Error(), "bd list: boom") {
 		t.Errorf("err = %v, want the failed list named", err)
 	}
 }
@@ -3485,13 +3485,14 @@ func TestSpecTimedOutRetriesFromIsOneListCall(t *testing.T) {
 	db.Seed(beads.Issue{ID: "gt-other", Status: "open", Labels: []string{specdispatch.DispatchFailedLabel}})
 
 	store := newCountingStore(db)
-	due, err := specTimedOutRetriesFrom(store)
+	got, err := specTimedOutRetriesFrom(store, specTestNow)
 	if err != nil {
 		t.Fatalf("specTimedOutRetriesFrom: %v", err)
 	}
 	if store.lists != 1 || len(store.shows) != 0 {
 		t.Errorf("the probe took %d list and %d show call(s), want one list call and no per-bead read", store.lists, len(store.shows))
 	}
+	due := got.Due
 	want := []string{"gt-a", "gt-b", "gt-c"}
 	for _, id := range want {
 		if !due[id] {

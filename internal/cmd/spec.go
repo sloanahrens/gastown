@@ -4214,9 +4214,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			var retry *specTimeoutRetry
 			if !specDispatchDryRun {
 				retry = &specTimeoutRetry{
-					due: func(rigPath string) (map[string]bool, error) {
+					due: func(rigPath string) (specRetryDue, error) {
 						reads.call()
-						return specTimedOutRetriesIn(rigPath)
+						return specTimedOutRetriesIn(rigPath, time.Now())
 					},
 					clear:       specRetryTimedOutSling,
 					respawnGate: specRespawnGateIn(townRoot),
@@ -4789,7 +4789,7 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 		}
 		// The rig's retry set is read on the first labeled bead the board
 		// holds, once: a rig whose board holds none pays nothing for it.
-		var retries map[string]bool
+		var retries specRetryDue
 		var retryErr error
 		probed := false
 		for _, issue := range issues {
@@ -4802,14 +4802,19 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 				if retry != nil && !probed {
 					probed = true
 					retries, retryErr = retry.due(rigPath)
+					// A bead whose contention schedule could not be read is not
+					// in the retry set; the line says which and why, so the hold
+					// is an answer the operator can act on rather than a silent
+					// absence (gt-5udj56).
+					read.Errors = append(read.Errors, retries.Errors...)
 					if retryErr != nil {
-						read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot tell which beads a kill at the bound may retry: %v", name, retryErr))
+						read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot tell which labeled beads the dispatcher may retry: %v", name, retryErr))
 					}
 				}
 				// A retry set that could not be read is no answer: only a bead
 				// the set names is slung again, so a failed read holds every
 				// labeled bead out rather than retrying on a guess.
-				if retryErr != nil || retry == nil || !retries[s.ID] {
+				if retryErr != nil || retry == nil || !retries.Due[s.ID] {
 					labeled[s.ID] = true
 					continue
 				}
@@ -4822,15 +4827,23 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 						continue
 					}
 				}
+				contended := s.HasLabel(specdispatch.ContentionLabel)
 				if err := retry.clear(rigPath, s.ID); err != nil {
 					read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", s.ID, err))
 					labeled[s.ID] = true
 					continue
 				}
-				// The row was read with the label on it, and Eligible refuses
-				// the label; the bead's store no longer carries it.
-				s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.DispatchFailedLabel })
-				read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s for a retry of a sling killed at its bound", s.ID, specdispatch.DispatchFailedLabel))
+				// The row was read with the labels on it and the store no
+				// longer carries them: the failed label holds a bead out, and a
+				// contention bead's clear removes its own label beside it.
+				s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool {
+					return l == specdispatch.DispatchFailedLabel || l == specdispatch.ContentionLabel
+				})
+				if contended {
+					read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s and %s for a retry of a contention pause that is over", s.ID, specdispatch.DispatchFailedLabel, specdispatch.ContentionLabel))
+				} else {
+					read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s for a retry of a sling killed at its bound", s.ID, specdispatch.DispatchFailedLabel))
+				}
 			}
 			// The split route's record is reported as the route's own hold
 			// rather than as one more excluded label: its reason names the
@@ -4876,13 +4889,23 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 	return read
 }
 
-// specTimeoutRetry is the read's answer for beads a sling killed at its bound
-// left labeled: due names, in one list call per rig, the beads whose retries
-// remain, and clear removes one such bead's failure label so it can be slung
-// again. Both are passed in, so a test drives the decision and the write
-// without a live bd. nil retries nothing and leaves every labeled bead held.
+// specRetryDue is the retry probe's answer: Due names the beads the dispatcher
+// may sling again, and Errors names the labeled beads whose contention schedule
+// could not be read, which stay held rather than being retried on a guess.
+type specRetryDue struct {
+	Due    map[string]bool
+	Errors []string
+}
+
+// specTimeoutRetry is the read's answer for beads a failed sling left labeled:
+// due names, in one list call per rig, the beads the dispatcher retries by
+// itself — a kill at the bound with a retry left (gt-vaivp) or a spent
+// contention schedule whose pause has passed (gt-5udj56) — and clear removes
+// one such bead's labels so it can be slung again. Both are passed in, so a
+// test drives the decision and the write without a live bd. nil retries
+// nothing and leaves every labeled bead held.
 type specTimeoutRetry struct {
-	due   func(rigPath string) (map[string]bool, error)
+	due   func(rigPath string) (specRetryDue, error)
 	clear func(rigPath, beadID string) error
 	// respawnGate settles the bead's submitted round, then reports whether its
 	// respawn budget is still spent. A held bead is not retried: the spawn would
@@ -4894,43 +4917,87 @@ type specTimeoutRetry struct {
 }
 
 // specTimedOutRetriesIn is the retry probe over the rig's own store.
-func specTimedOutRetriesIn(rigPath string) (map[string]bool, error) {
-	return specTimedOutRetriesFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)))
+func specTimedOutRetriesIn(rigPath string, now time.Time) (specRetryDue, error) {
+	return specTimedOutRetriesFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)), now)
 }
 
 // specTimedOutRetriesFrom is specTimedOutRetriesIn over a store the caller
 // supplies, so a test runs the probe against a fake instead of a live bd.
-func specTimedOutRetriesFrom(b beads.Client) (map[string]bool, error) {
+//
+// The probe reads the beads the failed label holds, in one list call, and
+// answers which of them the dispatcher may sling again: a sling killed at its
+// bound while a retry remains (gt-vaivp), or a spent contention schedule whose
+// pause has passed (gt-5udj56). A contention record that cannot be read leaves
+// its bead held, and the line saying so goes to the caller's log: a schedule
+// nothing can trust is never retried blind.
+func specTimedOutRetriesFrom(b beads.Client, now time.Time) (specRetryDue, error) {
 	issues, err := b.List(beads.ListOptions{
-		Labels: []string{specdispatch.DispatchFailedLabel, specdispatch.TimeoutLabel},
+		Labels: []string{specdispatch.DispatchFailedLabel},
 		Limit:  0,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing the beads a kill at the bound left labeled: %w", err)
+		return specRetryDue{}, fmt.Errorf("listing the beads a failed sling left labeled: %w", err)
 	}
-	retries := make(map[string]bool, len(issues))
+	retries := specRetryDue{Due: make(map[string]bool, len(issues))}
 	for _, issue := range issues {
 		if _, retry := specdispatch.RetryAfterTimeout(issue.Labels, issue.Metadata); retry {
-			retries[issue.ID] = true
+			retries.Due[issue.ID] = true
+			continue
+		}
+		if !slices.Contains(issue.Labels, specdispatch.ContentionLabel) {
+			continue
+		}
+		rec, recorded := specdispatch.ContentionRecord(issue.Metadata)
+		if !recorded || rec.Spent {
+			retries.Errors = append(retries.Errors, fmt.Sprintf("%s: the contention schedule cannot be read, so the bead stays held", issue.ID))
+			continue
+		}
+		if specdispatch.ContentionPauseOver(rec, now) {
+			retries.Due[issue.ID] = true
 		}
 	}
 	return retries, nil
 }
 
-// specRetryTimedOutSling clears the spec-dispatch-failed label of a bead whose
-// sling was killed at its bound while a retry is left: the kill is the host's
-// load, which clears by itself, so the label is what would keep the bead
-// waiting for a person (gt-vaivp). The timeout label and the kill count stay,
-// so the next kill counts on from them.
+// specRetryTimedOutSling clears the labels a failed sling left on a bead the
+// dispatcher retries by itself. A bead killed at its bound loses the failed
+// label; the timeout label and the kill count stay, so the next kill counts on
+// from them (gt-vaivp). A bead held under a spent contention schedule loses
+// both that label and the failed one, and the schedule goes with them: its
+// pause is over, so the bead starts its next run as if it had never contended
+// (gt-5udj56).
 func specRetryTimedOutSling(rigPath, beadID string) error {
 	return specRetryTimedOutSlingFrom(beads.NewPinned(beads.ResolveBeadsDir(rigPath)), beadID)
 }
 
 // specRetryTimedOutSlingFrom is specRetryTimedOutSling over a store the caller
-// supplies, so a test runs the clear against a fake instead of a live bd.
+// supplies, so a test runs the clear against a fake instead of a live bd. The
+// bead is read first, so what the clear removes is what it wears now rather
+// than what the probe saw a write earlier. A bead that cannot be read is an
+// error, and the caller leaves its labels on.
 func specRetryTimedOutSlingFrom(b beads.Client, beadID string) error {
-	if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{specdispatch.DispatchFailedLabel}}); err != nil {
-		return fmt.Errorf("clearing the failed label: %w", err)
+	issue, err := b.Show(beadID)
+	if err != nil {
+		return fmt.Errorf("reading the bead to retry: %w", err)
+	}
+	if issue == nil {
+		return fmt.Errorf("reading the bead to retry: no bead %s", beadID)
+	}
+	if !slices.Contains(issue.Labels, specdispatch.ContentionLabel) {
+		if err := b.Update(beadID, beads.UpdateOptions{RemoveLabels: []string{specdispatch.DispatchFailedLabel}}); err != nil {
+			return fmt.Errorf("clearing the failed label: %w", err)
+		}
+		return nil
+	}
+	if err := b.Update(beadID, beads.UpdateOptions{
+		RemoveLabels: []string{specdispatch.DispatchFailedLabel, specdispatch.ContentionLabel},
+		UnsetMetadata: []string{
+			specdispatch.ContentionFirstKey,
+			specdispatch.ContentionAttemptsKey,
+			specdispatch.ContentionRetryAtKey,
+		},
+	}); err != nil {
+		return fmt.Errorf("clearing the contention retry: %w", err)
 	}
 	return nil
 }
