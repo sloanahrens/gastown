@@ -699,6 +699,19 @@ func TestNoBeadAccessOutboxPollRefusesTheWholeTick(t *testing.T) {
 			want: "no filing seam is wired",
 		},
 		{
+			name: "no record of what the poll filed",
+			poll: func(town string) *outboxPoll {
+				return &outboxPoll{
+					townRoot: town,
+					exec:     &fakeOutboxPollExec{},
+					file:     file.file,
+					logger:   log.New(io.Discard, "", 0),
+					timeout:  time.Second,
+				}
+			},
+			want: "no record of the requests the poll filed",
+		},
+		{
 			name: "a registry that cannot be listed",
 			poll: func(town string) *outboxPoll {
 				if err := os.MkdirAll(filepath.Dir(session.SandboxRegistryDir(town)), 0o755); err != nil {
@@ -901,6 +914,354 @@ func TestNoBeadAccessOutboxPollRefusesAnInvalidRequest(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollFilesARequestOnceAcrossTicks: one request in a
+// running seat's outbox creates one escalation across three ticks. The
+// escalation is closed between the ticks, so the seat end's fingerprint — which
+// leaves an open escalation alone by itself — cannot be what stops the second
+// and the third tick; the poll's own memory of the request's content hash is.
+// The seat is still read on every tick (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollFilesARequestOnceAcrossTicks(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+	poll := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("the first tick: %v", err)
+	}
+	open, err := beads.ListEscalations(bd)
+	if err != nil {
+		t.Fatalf("listing the escalations: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("the first tick filed %d escalation beads, want one: %+v", len(open), open)
+	}
+	if err := bd.Close(open[0].ID); err != nil {
+		t.Fatalf("closing the first tick's escalation: %v", err)
+	}
+
+	for tick := 2; tick <= 3; tick++ {
+		if err := poll.tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		if open, err := beads.ListEscalations(bd); err != nil {
+			t.Fatalf("listing the escalations after tick %d: %v", tick, err)
+		} else if len(open) != 0 {
+			t.Errorf("tick %d refiled a request the first tick filed: %+v", tick, open)
+		}
+	}
+	if got := outboxPollEscalations(t, bd); len(got) != 1 {
+		t.Errorf("three ticks over one request created %d escalation beads, want one: %+v", len(got), got)
+	}
+	if want := []string{"sbx-able", "sbx-able", "sbx-able"}; !slices.Equal(exec.calls, want) {
+		t.Errorf("the ticks read seats %v, want every tick to read the running seat", exec.calls)
+	}
+	if _, err := os.Stat(outboxPollFiledPath(town)); err != nil {
+		t.Errorf("the poll kept no record of what it filed: %v", err)
+	}
+	if strings.Contains(logged.String(), "is not filed") {
+		t.Errorf("a tick refused a request: %q", logged.String())
+	}
+}
+
+// TestNoBeadAccessOutboxPollRestartedPollDoesNotRefile: a poll built after
+// another one filed a request — the daemon restarted — reads what the first
+// left under the town's .runtime and does not file that request again, even
+// though the escalation the first filed is closed (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollRestartedPollDoesNotRefile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+
+	first := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+	if err := first.tick(context.Background()); err != nil {
+		t.Fatalf("the first poll's tick: %v", err)
+	}
+	open, err := beads.ListEscalations(bd)
+	if err != nil {
+		t.Fatalf("listing the escalations: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("the first poll filed %d escalation beads, want one: %+v", len(open), open)
+	}
+	if err := bd.Close(open[0].ID); err != nil {
+		t.Fatalf("closing the first poll's escalation: %v", err)
+	}
+
+	// The restarted daemon: a new poll with no memory of the first, over the
+	// same town and the same fake sandbox.
+	restarted := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+	if err := restarted.tick(context.Background()); err != nil {
+		t.Fatalf("the restarted poll's tick: %v", err)
+	}
+	if got := outboxPollEscalations(t, bd); len(got) != 1 {
+		t.Errorf("a restarted poll refiled the request, creating %d escalation beads in all, want one: %+v", len(got), got)
+	}
+	if open, err := beads.ListEscalations(bd); err != nil {
+		t.Fatalf("listing the open escalations: %v", err)
+	} else if len(open) != 0 {
+		t.Errorf("the restarted poll raised %d escalations, want none: %+v", len(open), open)
+	}
+}
+
+// TestNoBeadAccessOutboxPollRefusesToReadSeatsItCannotRemember: a record of
+// what the poll filed that does not parse, or cannot be read, is the tick's
+// error and no seat is read: a poll that forgot what it filed would file every
+// request again, which is the duplicate it exists to prevent (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollRefusesToReadSeatsItCannotRemember(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		write func(t *testing.T, town string)
+		want  string
+	}{
+		{
+			name: "the file does not parse",
+			write: func(t *testing.T, town string) {
+				t.Helper()
+				outboxPollWriteFiled(t, town, "not the file's shape\n")
+			},
+			want: "do not parse",
+		},
+		{
+			name: "the file cannot be read",
+			write: func(t *testing.T, town string) {
+				t.Helper()
+				if err := os.MkdirAll(outboxPollFiledPath(town), 0o700); err != nil {
+					t.Fatalf("making a directory where the file belongs: %v", err)
+				}
+			},
+			want: "reading the requests the poll has filed",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tc.write(t, town)
+			outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+			result := `{"bead_id":"gt-able","status":"deferred","escalation":{"text":"HELP: x"}}`
+			exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+			bd := beadsfake.New()
+			var logged bytes.Buffer
+			poll := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+
+			err := poll.tick(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("the tick's error is %v, want it to name %q", err, tc.want)
+			}
+			if len(exec.calls) != 0 {
+				t.Errorf("the tick read seats %v, want no seat read when what it filed cannot be read", exec.calls)
+			}
+			if got := outboxPollEscalations(t, bd); len(got) != 0 {
+				t.Errorf("the tick filed %d escalation beads it cannot remember, want none: %+v", len(got), got)
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollFilesAgainARequestItCouldNotFile: a request the
+// filing seam refuses is not recorded as filed, so the next tick hands it to
+// the seam again; the request it does file is handed over once (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollFilesAgainARequestItCouldNotFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred","escalation":{"text":"HELP: x"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	var logged bytes.Buffer
+	calls := 0
+	file := func(context.Context, outboxPollRequest) error {
+		calls++
+		if calls == 1 {
+			return errors.New("the store is refusing writes")
+		}
+		return nil
+	}
+	poll := outboxPollTestPoll(t, town, exec, file, &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("the first tick: %v", err)
+	}
+	if !strings.Contains(logged.String(), "its outbox is not filed: the store is refusing writes") {
+		t.Errorf("the first tick's log is %q, want the refused filing named", logged.String())
+	}
+	for tick := 2; tick <= 3; tick++ {
+		if err := poll.tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+	}
+	if calls != 2 {
+		t.Errorf("the seam was handed the request %d times over three ticks, want the refused filing and one retry", calls)
+	}
+}
+
+// TestNoBeadAccessOutboxPollFilesAChangedRequestAgain: a seat that writes a
+// different outbox has written a new request, which the poll files although it
+// filed the earlier one; the new content is then left alone like the first
+// (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollFilesAChangedRequestAgain(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	first := `{"bead_id":"gt-able","status":"deferred","escalation":{"text":"HELP: the seat is stuck"}}`
+	second := `{"bead_id":"gt-able","status":"deferred","escalation":{"text":"HELP: the seat needs a decision on the second criterion"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&first, nil)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+	poll := outboxPollTestPoll(t, town, exec, outboxPollTestFiling(t, town, bd, &logged), &logged)
+
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("the first tick: %v", err)
+	}
+	exec.reads["sbx-able"] = outboxPollReadText(&second, nil)
+	for tick := 2; tick <= 3; tick++ {
+		if err := poll.tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+	}
+	open, err := beads.ListEscalations(bd)
+	if err != nil {
+		t.Fatalf("listing the escalations: %v", err)
+	}
+	var titles []string
+	for _, escalation := range open {
+		titles = append(titles, escalation.Title)
+	}
+	slices.Sort(titles)
+	want := []string{"HELP: the seat is stuck", "HELP: the seat needs a decision on the second criterion"}
+	if !slices.Equal(titles, want) {
+		t.Errorf("the tick's escalations are %v, want the first request and the changed one once each: %v", titles, want)
+	}
+}
+
+// TestNoBeadAccessOutboxPollFiledRecordRefusesAFileItCannotRead: both reads of
+// the record — the look-up a tick does before filing, and the write after it —
+// refuse a file that does not parse instead of starting over with an empty set,
+// which would file every request again (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollFiledRecordRefusesAFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		drive func(f *outboxPollFiled) error
+	}{
+		{
+			name: "the look-up before filing",
+			drive: func(f *outboxPollFiled) error {
+				_, err := f.has("a-hash")
+				return err
+			},
+		},
+		{
+			name: "the write after filing",
+			drive: func(f *outboxPollFiled) error {
+				return f.record("a-hash")
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			outboxPollWriteFiled(t, town, "not the file's shape\n")
+			err := tc.drive(newOutboxPollFiled(outboxPollFiledPath(town)))
+			if err == nil || !strings.Contains(err.Error(), "do not parse") {
+				t.Errorf("the record's error is %v, want it to refuse the file it cannot read", err)
+			}
+		})
+	}
+}
+
+// TestNoBeadAccessOutboxPollFiledRecordReportsAWriteItCannotMake: a record
+// whose file's directory has been replaced by a file, and one whose file has
+// been replaced by a directory, return the failed write rather than reading it
+// as a record (gt-0ghqvp).
+func TestNoBeadAccessOutboxPollFiledRecordReportsAWriteItCannotMake(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		breakIt func(t *testing.T, path string)
+		want    string
+	}{
+		{
+			name: "the directory it writes into is a file",
+			breakIt: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+					t.Fatalf("removing the poll's runtime directory: %v", err)
+				}
+				if err := os.WriteFile(filepath.Dir(path), []byte("not a directory\n"), 0o600); err != nil {
+					t.Fatalf("writing a file over the poll's runtime directory: %v", err)
+				}
+			},
+			want: "creating",
+		},
+		{
+			name: "the file it writes is a directory",
+			breakIt: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatalf("making a directory where the file belongs: %v", err)
+				}
+			},
+			want: "writing the poll's filed requests",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := outboxPollFiledPath(town)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatalf("creating the poll's runtime directory: %v", err)
+			}
+			filed := newOutboxPollFiled(path)
+			if err := filed.load(); err != nil {
+				t.Fatalf("reading a record that does not exist yet: %v", err)
+			}
+			tc.breakIt(t, path)
+			if err := filed.record("a-hash"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the record's error is %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// outboxPollEscalations returns every escalation bead the fake holds, open or
+// closed, so a test can count the ones ever created: closing an escalation
+// between ticks is what shows a poll filing a request it already filed.
+func outboxPollEscalations(t *testing.T, bd *beadsfake.Fake) []*beads.Issue {
+	t.Helper()
+	all, err := beads.ListAllEscalationsAcrossRigs(bd)
+	if err != nil {
+		t.Fatalf("listing every escalation: %v", err)
+	}
+	return all
+}
+
+// outboxPollWriteFiled writes body where the poll records the requests it has
+// filed.
+func outboxPollWriteFiled(t *testing.T, town, body string) {
+	t.Helper()
+	path := outboxPollFiledPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("creating the poll's runtime directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing the poll's filed requests: %v", err)
 	}
 }
 
