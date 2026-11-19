@@ -25,6 +25,12 @@ const (
 	// adds finds the one already open by it (gt-6bav5t).
 	imagePinsRefreshLabel = "image-pins-refresh"
 
+	// imagePinsRefreshPriority files a refresh bead at P0: once a pin crosses
+	// its bound the refresh blocks every image roll, so it goes ahead of the
+	// backlog. gt-xuntgv was filed at P2, waited behind that backlog while its
+	// source moved, crossed the bound, and a roll was lost (gt-hc7fk3).
+	imagePinsRefreshPriority = 0
+
 	// imagePinsRefreshSize is the Size section: a bead that moved the pins is a
 	// diff of a few commit columns, which one worker takes in one landing.
 	imagePinsRefreshSize = "One worker, one landing."
@@ -223,7 +229,7 @@ func imagePinsFileRefreshBead(create imagePinsBeadCreate, pins []ImagePinState) 
 		Description: draft.Description,
 		Acceptance:  draft.Acceptance,
 		Labels:      draft.Labels,
-		Priority:    2,
+		Priority:    imagePinsRefreshPriority,
 	})
 	if err != nil {
 		return "", fmt.Errorf("image pins refresh bead: filing %q: %w", draft.Title, err)

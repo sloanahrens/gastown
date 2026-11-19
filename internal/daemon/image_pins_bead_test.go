@@ -434,7 +434,8 @@ func TestImagePinsFileRefreshBeadRecordsNothingOnFailure(t *testing.T) {
 
 // TestImagePinsFileRefreshBeadFilesTheDraft: a successful file returns the new
 // bead's id, and the bead it files carries the draft's title, description,
-// acceptance and label at P2.
+// acceptance and label, filed at P0 (a refresh bead blocks every roll once a pin
+// crosses the bound, so it dispatches ahead of the backlog).
 func TestImagePinsFileRefreshBeadFilesTheDraft(t *testing.T) {
 	t.Parallel()
 	store := &refreshStore{}
@@ -462,7 +463,7 @@ func TestImagePinsFileRefreshBeadFilesTheDraft(t *testing.T) {
 	if len(got.Labels) != 1 || got.Labels[0] != imagePinsRefreshLabel {
 		t.Errorf("labels = %v, want [%s]", got.Labels, imagePinsRefreshLabel)
 	}
-	if got.Priority != 2 {
-		t.Errorf("priority = %d, want 2", got.Priority)
+	if got.Priority != 0 {
+		t.Errorf("priority = %d, want 0", got.Priority)
 	}
 }
