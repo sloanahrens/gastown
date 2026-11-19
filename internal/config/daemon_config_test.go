@@ -1136,10 +1136,10 @@ func TestSweepRunnerPodTotalMinimum(t *testing.T) {
 }
 
 // TestTierSweepRunnerConfigDindCPUs holds dind_cpus to the sidecar's CPU share:
-// the default 2, explicit or omitted, loads; a value no rendered sidecar would
-// read is refused at decode naming the key, and so is a non-default value until
-// the daemon passes it into the sweep's Spec (gt-esfo9p), so a setting cannot
-// load looking effective and do nothing (gt-h7497c).
+// the default 2, explicit or omitted, loads, and so does a non-default share,
+// which the daemon now passes into the sweep's Spec (gt-esfo9p); a value no
+// rendered sidecar would read is refused at decode naming the key, so a setting
+// cannot load looking effective and do nothing (gt-h7497c).
 func TestTierSweepRunnerConfigDindCPUs(t *testing.T) {
 	t.Parallel()
 	const k8s = `"image":"i","jobs":4,"output_root":"/out","context":"gt-control","backend":"kubernetes","memory":8,"dind":true`
@@ -1153,11 +1153,7 @@ func TestTierSweepRunnerConfigDindCPUs(t *testing.T) {
 		{name: "an explicit default share loads", block: `{` + k8s + `,"cpus":6,"dind_cpus":2}`, want: 2},
 		{name: "an omitted share is the default", block: `{` + k8s + `,"cpus":6}`, want: 2},
 		{name: "a zero share is the default", block: `{` + k8s + `,"cpus":6,"dind_cpus":0}`, want: 2},
-		{
-			name:    "a non-default share waits for the wiring",
-			block:   `{` + k8s + `,"cpus":6,"dind_cpus":3}`,
-			wantErr: []string{"runner.dind_cpus", "gt-esfo9p"},
-		},
+		{name: "a non-default share loads", block: `{` + k8s + `,"cpus":6,"dind_cpus":3}`, want: 3},
 		{name: "a negative share", block: `{` + k8s + `,"cpus":6,"dind_cpus":-1}`, wantErr: []string{"runner.dind_cpus"}},
 		{name: "a share equal to cpus", block: `{` + k8s + `,"cpus":6,"dind_cpus":6}`, wantErr: []string{"runner.dind_cpus", "want below cpus"}},
 		{
@@ -1211,18 +1207,14 @@ func TestTierSweepRunnerConfigDindCPUs(t *testing.T) {
 		t.Errorf("the kernel's decode lost runner.dind_cpus: %+v", cfg.Patrols.TierSweep.Runner)
 	}
 
-	// A non-default share is refused through the kernel's walk too, so the
-	// operator's settings.json names the key and the bead that makes it take
-	// effect rather than loading a value the daemon ignores.
-	bad := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"runner":{` + k8s + `,"cpus":6,"dind_cpus":3}}}}`
-	err := DecodeJSONFile("settings.json", []byte(bad), &cfg)
-	if err == nil {
-		t.Fatalf("settings.json with runner.dind_cpus 3 loaded: %+v", cfg.Patrols.TierSweep.Runner)
+	// A non-default share survives the kernel's walk too, so the operator's
+	// settings.json reaches the Spec the daemon builds with it (gt-esfo9p).
+	nonDefault := `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"runner":{` + k8s + `,"cpus":6,"dind_cpus":3}}}}`
+	if err := DecodeJSONFile("settings.json", []byte(nonDefault), &cfg); err != nil {
+		t.Fatalf("settings.json with runner.dind_cpus 3 = %v", err)
 	}
-	for _, want := range []string{"runner.dind_cpus", "gt-esfo9p"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %v, want it to hold %q", err, want)
-		}
+	if cfg.Patrols.TierSweep.Runner == nil || cfg.Patrols.TierSweep.Runner.DindCPUs != 3 {
+		t.Errorf("the kernel's decode lost runner.dind_cpus 3: %+v", cfg.Patrols.TierSweep.Runner)
 	}
 }
 

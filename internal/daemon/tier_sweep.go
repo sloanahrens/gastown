@@ -2137,6 +2137,8 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		OutDir:   filepath.Join(cfg.OutputRoot, st.rig, runID),
 		RepoDir:  constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, st.rig)),
 		Dind:     cfg.Dind,
+		// The sidecar's share; zero renders the default (gt-esfo9p).
+		DindCPUs: cfg.DindCPUs,
 		RunID:    runID,
 		Context:  cfg.Context,
 		// In a pod with no kubeconfig naming the context, the kubectl steps use the

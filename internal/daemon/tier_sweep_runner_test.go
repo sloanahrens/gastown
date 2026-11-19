@@ -1948,3 +1948,30 @@ func TestTierSweepRunnerSpecCarriesTheSweepNamespace(t *testing.T) {
 		}
 	}
 }
+
+// TestTierSweepRunnerSpecCarriesDindCPUs: the Spec carries
+// tier_sweep.runner.dind_cpus, and a block that names none leaves it zero, which
+// the render reads as the default share (gt-esfo9p).
+func TestTierSweepRunnerSpecCarriesDindCPUs(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		setting, want int
+	}{
+		{"unset is the render's default", 0, 0},
+		{"the setting", 3, 3},
+	} {
+		d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+		cfg := runnerTestConfig(t)
+		cfg.DindCPUs = tc.setting
+		d.patrolConfig.Patrols.TierSweep.Runner = cfg
+
+		spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
+		if err != nil || !ok {
+			t.Fatalf("%s: spec = %+v, ok = %v, err = %v", tc.name, spec, ok, err)
+		}
+		if spec.DindCPUs != tc.want {
+			t.Errorf("%s: Spec.DindCPUs = %d, want %d", tc.name, spec.DindCPUs, tc.want)
+		}
+	}
+}
