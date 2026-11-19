@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/runnerroll"
 )
@@ -340,5 +342,66 @@ func TestTownRunnerRollPrintsRemovalCommandWhenReleaseFails(t *testing.T) {
 	}
 	if want := "rm -f -- /town/landing.hold"; !strings.Contains(f.out.String(), want) {
 		t.Errorf("output lacks the removal command %q; got:\n%s", want, f.out.String())
+	}
+}
+
+func TestTownRunnerRollRefusesWithoutAHoldStoreBeforeTheHold(t *testing.T) {
+	t.Parallel()
+	f := newRollFixture()
+	f.deps.store = nil
+
+	if err := runTownRunnerRoll(context.Background(), f.deps); err == nil {
+		t.Fatal("roll with no landing hold store succeeded")
+	}
+	if len(f.events.calls) != 0 {
+		t.Errorf("calls = %v, want none", f.events.calls)
+	}
+}
+
+// rollFlagsCmd is the roll command with every flag defined except missing.
+func rollFlagsCmd(missing string) *cobra.Command {
+	cmd := &cobra.Command{}
+	if missing != "landing-wait" {
+		cmd.Flags().Duration("landing-wait", 10*time.Minute, "")
+	}
+	if missing != "runs-wait" {
+		cmd.Flags().Duration("runs-wait", 20*time.Minute, "")
+	}
+	if missing != "dry-run" {
+		cmd.Flags().Bool("dry-run", false, "")
+	}
+	return cmd
+}
+
+func TestTownRunnerRollRefusesAFlagItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"landing-wait", "runs-wait", "dry-run"} {
+		findTown := func() (string, error) {
+			t.Errorf("the town was looked up although --%s could not be read", name)
+			return "", nil
+		}
+
+		err := runTownRunnerRollIn(rollFlagsCmd(name), findTown)
+
+		if err == nil || !strings.Contains(err.Error(), "reading --"+name) {
+			t.Errorf("--%s missing: error = %v, want it to name reading --%s", name, err, name)
+		}
+	}
+}
+
+func TestTownRunnerRollRefusesWhenTheTownIsNotFound(t *testing.T) {
+	t.Parallel()
+	out := &bytes.Buffer{}
+	cmd := rollFlagsCmd("")
+	cmd.SetOut(out)
+	findTown := func() (string, error) { return "", errors.New("no town above the working directory") }
+
+	err := runTownRunnerRollIn(cmd, findTown)
+
+	if err == nil || !strings.Contains(err.Error(), "finding the town root") {
+		t.Fatalf("error = %v, want it to name finding the town root", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the roll printed %q before refusing", out.String())
 	}
 }

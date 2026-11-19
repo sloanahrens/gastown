@@ -107,9 +107,16 @@ func init() {
 	townRunnerRollCmd.Flags().Bool("dry-run", false, "print the steps and their bounds; take no hold and write nothing")
 }
 
-// runTownRunnerRollCmd is what `gt town runner roll` runs. A SIGINT or SIGTERM
-// cancels the roll's context, so each wait returns and the hold is released.
+// runTownRunnerRollCmd is what `gt town runner roll` runs, in the town the
+// working directory is in.
 func runTownRunnerRollCmd(cmd *cobra.Command, _ []string) error {
+	return runTownRunnerRollIn(cmd, workspace.FindFromCwdOrError)
+}
+
+// runTownRunnerRollIn reads the roll's flags from cmd and runs the roll in the
+// town findTown names. A SIGINT or SIGTERM cancels the roll's context, so each
+// wait returns and the hold is released.
+func runTownRunnerRollIn(cmd *cobra.Command, findTown func() (string, error)) error {
 	landingWait, err := cmd.Flags().GetDuration("landing-wait")
 	if err != nil {
 		return fmt.Errorf("reading --landing-wait: %w", err)
@@ -122,11 +129,11 @@ func runTownRunnerRollCmd(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("reading --dry-run: %w", err)
 	}
-	townRoot, err := workspace.FindFromCwdOrError()
+	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return runTownRunnerRoll(ctx, runnerRollDepsFor(townRoot, cmd.OutOrStdout(), landingWait, runsWait, dryRun))
 }
@@ -201,6 +208,7 @@ func runTownRunnerRoll(ctx context.Context, d runnerRollDeps) (err error) {
 	if werr := d.apply.Wired(); werr != nil {
 		return werr
 	}
+	// Refuse before the hold here too: a roll missing any seam must not take it.
 	if d.store == nil || d.landing == nil || d.runs == nil || d.clock == nil || d.now == nil {
 		return errors.New("the roll has no landing hold store or wait reads wired, so it cannot take the hold")
 	}
