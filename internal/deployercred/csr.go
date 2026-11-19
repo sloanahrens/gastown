@@ -1,6 +1,7 @@
-// Package deployercred builds the deployer's cluster credentials: the client
-// key and the CertificateSigningRequest the break-glass operator approves
-// (gt-660bl8). It writes no file; the caller owns the key bytes.
+// Package deployercred builds and stores the deployer's cluster credentials:
+// the client key and the CertificateSigningRequest the break-glass operator
+// approves (gt-660bl8), and the verified directory the key, certificate and
+// kubeconfig are written into (gt-1pipf0).
 package deployercred
 
 import (
