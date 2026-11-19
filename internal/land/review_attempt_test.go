@@ -58,7 +58,7 @@ func TestLogRoundsKeepsThePolecatRoundsUnderATakeover(t *testing.T) {
 	l.logRounds(issue, Work{BeadID: "gt-x", Branch: "crew/overseer/gt-x", Head: "crewhead"},
 		Verdict{Verdict: VerdictRequestChanges, Findings: []Finding{{ID: "F1", Severity: "major"}}})
 	rounds := renderedOf(t, &RoundsLedger{OutDir: dir, Bead: "gt-x"}, 0)
-	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Round != 1 || rounds[1].Head != "crewhead" {
+	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Head != "p2" || rounds[2].Head != "p3" || rounds[3].Round != 1 || rounds[3].Head != "crewhead" {
 		t.Fatalf("rounds = %+v, want the polecat's rounds kept and the crew's round 1 added", rounds)
 	}
 	// A polecat landing's lane is "", so it replaces its own round 1.

@@ -16,8 +16,8 @@ import (
 
 // DefaultRoundsCap bounds Render's output in bytes when the caller names no
 // cap: the 16 KiB a landing's rounds file is designed to stay under, small
-// enough for om to read whole. Over the cap Render drops the oldest rounds
-// whole and keeps the newest even alone over it (gt-yphcl).
+// enough for om to read whole. Over the cap Render drops the earliest rounds
+// whole, keeping every lane's newest even over the cap (gt-yphcl, gt-sp439m).
 const DefaultRoundsCap = 16 << 10
 
 // ErrRoundsCorrupt reports a ledger file that does not parse: a caller treats
@@ -251,7 +251,7 @@ func (l *RoundsLedger) AppendLane(lane string, round int, head string, findings 
 		return l.save(doc)
 	}
 	doc.Rounds = append(doc.Rounds, next)
-	sort.SliceStable(doc.Rounds, func(i, j int) bool { return doc.Rounds[i].Round < doc.Rounds[j].Round })
+	sortRounds(doc.Rounds)
 	return l.save(doc)
 }
 
@@ -288,11 +288,12 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 	return l.save(doc)
 }
 
-// Render returns the ledger as the JSON array gt-3l5qy writes for om, newest
-// rounds first kept: trimming follows the round number, so an output over
-// maxBytes loses its lowest-numbered rounds whole and keeps the newest even
-// alone over the cap. Zero or negative maxBytes means DefaultRoundsCap. A ledger
-// that does not parse is ErrRoundsCorrupt, which the caller treats as no history.
+// Render returns the ledger as the JSON array gt-3l5qy writes for om, each
+// lane's rounds together and ascending. Over maxBytes it drops the
+// lowest-numbered round among the lanes that still hold more than one (ties:
+// the lane that appeared first) until the output fits, so every lane keeps its
+// newest round, returned even over the cap; maxBytes <= 0 means DefaultRoundsCap
+// and an unparseable ledger is ErrRoundsCorrupt.
 func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRoundsCap
@@ -302,16 +303,41 @@ func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 		return nil, err
 	}
 	rounds := doc.Rounds
-	for n := len(rounds); n > 0; n-- {
-		data, err := json.Marshal(omRounds(renderRounds(rounds[len(rounds)-n:])))
+	for {
+		data, err := json.Marshal(omRounds(renderRounds(rounds)))
 		if err != nil {
 			return nil, fmt.Errorf("rounds ledger: rendering: %w", err)
 		}
-		if len(data) <= maxBytes || n == 1 {
+		if len(data) <= maxBytes {
 			return data, nil
 		}
+		trimmed, ok := dropEarliest(rounds)
+		if !ok {
+			return data, nil
+		}
+		rounds = trimmed
 	}
-	return []byte("[]"), nil
+}
+
+// dropEarliest drops the lowest-numbered round among the lanes that still hold
+// more than one, ties going to the lane that appeared first, and reports false
+// when every lane holds a single round (gt-sp439m). rounds is lane-grouped and
+// ascending, so the first match for a round number is the earliest lane's.
+func dropEarliest(rounds []ledgerRound) ([]ledgerRound, bool) {
+	holds := make(map[string]int, len(rounds))
+	for _, r := range rounds {
+		holds[r.Lane]++
+	}
+	drop := -1
+	for i, r := range rounds {
+		if holds[r.Lane] > 1 && (drop < 0 || r.Round < rounds[drop].Round) {
+			drop = i
+		}
+	}
+	if drop < 0 {
+		return nil, false
+	}
+	return append(rounds[:drop], rounds[drop+1:]...), true
 }
 
 // FindingOutcome is what became of key, the finding an earlier round raised:
@@ -464,8 +490,23 @@ func (l *RoundsLedger) load() (ledgerDoc, error) {
 	if err := doc.check(name, l.Bead); err != nil {
 		return ledgerDoc{}, err
 	}
-	sort.SliceStable(doc.Rounds, func(i, j int) bool { return doc.Rounds[i].Round < doc.Rounds[j].Round })
+	sortRounds(doc.Rounds)
 	return doc, nil
+}
+
+// sortRounds orders rounds by lane, lanes in first-appearance order and rounds
+// ascending inside one, so a lane's rounds read together (gt-sp439m).
+func sortRounds(rounds []ledgerRound) {
+	rank := map[string]int{}
+	for _, r := range rounds {
+		if _, ok := rank[r.Lane]; !ok {
+			rank[r.Lane] = len(rank)
+		}
+	}
+	sort.SliceStable(rounds, func(i, j int) bool {
+		a, b := rank[rounds[i].Lane], rank[rounds[j].Lane]
+		return a < b || a == b && rounds[i].Round < rounds[j].Round
+	})
 }
 
 // check reports a document that cannot be this landing's ledger: another bead's
