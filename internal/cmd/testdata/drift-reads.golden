@@ -1,7 +1,8 @@
 # The cluster reads the drift compare makes (gt-cd1iso): it reads the rendered
-# Deployments and the gate runner's ConfigMap by name, `kubectl get
-# <kind>/<name> -n <namespace> -o json`, through the daemon's service account.
-# One line per read as `<verb> <resource>`, granted by the one ClusterRole in
+# Deployments, the Services, the claims, the ServiceAccount, the tracker backup
+# CronJob and the gate runner's ConfigMap by name, `kubectl get <kind>/<name> -n
+# <namespace> -o json`, through the daemon's service account. One line per read
+# as `<verb> <resource>`, granted by the one ClusterRole in
 # deploy/k8s/drift-rbac.yaml, which reads in every namespace.
 #
 # A kind the compare comes to read joins this file and the ClusterRole together;
@@ -10,3 +11,7 @@
 # golden and the grant to one another.
 get deployments
 get configmaps
+get services
+get persistentvolumeclaims
+get serviceaccounts
+get cronjobs

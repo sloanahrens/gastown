@@ -65,7 +65,7 @@ func driftTestRendered(t *testing.T, d clusterDriftDeps, flags clusterRenderFlag
 }
 
 // driftAnswering answers each kubectl read with the live form of the object the
-// run rendered, then applies mutate to the Deployments the flags render. The
+// run rendered, then applies mutate to each object the flags render. The
 // runner's objects come from the control values, as the run's own render does,
 // and carry no mutation, since a case's mutation names a flag-rendered object.
 func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T, map[string]any)) update.RunFunc {
@@ -81,6 +81,41 @@ func driftAnswering(t *testing.T, m k8sdaemon.Manifests, mutate func(*testing.T,
 			objects[resource] = deployment
 		}
 	}
+	// The Services, the claims, the ServiceAccount and the backup CronJob are
+	// named here rather than derived from the run's target list, so the answer
+	// does not follow a kind the compare forgets to read.
+	for resource, service := range map[string]k8sdaemon.Service{
+		"service/" + k8sdaemon.ForgejoName:       m.ForgejoService,
+		"service/" + k8sdaemon.DashboardName:     m.DashboardService,
+		"service/" + k8sdaemon.TrackerName:       m.TrackerService,
+		"service/" + k8sdaemon.BdGatewayName:     m.BdGatewayService,
+		"service/" + k8sdaemon.BdGatewayPushName: m.BdGatewayPushService,
+	} {
+		if service.Kind != "" {
+			objects[resource] = service
+		}
+	}
+	for resource, claim := range map[string]k8sdaemon.PersistentVolumeClaim{
+		"persistentvolumeclaim/" + k8sdaemon.TownStateClaim:          m.TownStateClaim,
+		"persistentvolumeclaim/" + k8sdaemon.LandingWorkClaim:        m.LandingWorkClaim,
+		"persistentvolumeclaim/" + k8sdaemon.TrackerBackupClaim:      m.TrackerBackupClaim,
+		"persistentvolumeclaim/" + k8sdaemon.BdGatewayWorkspaceClaim: m.BdGatewayClaim,
+		"persistentvolumeclaim/" + k8sdaemon.BdGatewayLogClaim:       m.BdGatewayLogClaim,
+	} {
+		if claim.Kind != "" {
+			objects[resource] = claim
+		}
+	}
+	if m.DoltBackupClaim != nil {
+		objects["persistentvolumeclaim/"+k8sdaemon.DoltBackupClaim] = *m.DoltBackupClaim
+	}
+	if m.ServiceAccount.Kind != "" {
+		objects["serviceaccount/"+k8sdaemon.ServiceAccountName] = m.ServiceAccount
+	}
+	if m.TrackerBackupCronJob.Kind != "" {
+		objects["cronjob/"+k8sdaemon.TrackerBackupName] = m.TrackerBackupCronJob
+	}
+
 	runnerTargets, err := realRunnerDriftTargets()
 	if err != nil {
 		t.Fatalf("rendering the gate runner: %v", err)
@@ -158,15 +193,28 @@ func driftDecodedObject(t *testing.T, rendered any) map[string]any {
 
 // driftServerFields adds what the API server fills in after the render is
 // applied: the metadata it stamps, the defaults it sets, and a status. A
-// ConfigMap gets only the metadata, since the server sets no pod fields on it.
+// ConfigMap or a ServiceAccount gets only the metadata, since the server sets no
+// other field on it, and an ExternalName Service gets no cluster IP.
 func driftServerFields(live map[string]any) {
 	metadata := driftObjectAt(live, "metadata")
 	metadata["resourceVersion"] = "12345"
 	metadata["uid"] = "5d0e6a2c-0000-4000-8000-000000000000"
 	metadata["creationTimestamp"] = "2026-11-15T10:00:00Z"
-	if live["kind"] != "Deployment" {
-		return
+	switch live["kind"] {
+	case "Deployment":
+		driftDeploymentServerFields(live, metadata)
+	case "Service":
+		driftServiceServerFields(live)
+	case "PersistentVolumeClaim":
+		driftClaimServerFields(live)
+	case "CronJob":
+		driftCronJobServerFields(live)
 	}
+}
+
+// driftDeploymentServerFields adds the metadata and pod-template fields a
+// Deployment gains: the generation, the defaulted pod fields and a status.
+func driftDeploymentServerFields(live map[string]any, metadata map[string]any) {
 	metadata["generation"] = 4
 	driftObjectAt(metadata, "annotations")["deployment.kubernetes.io/revision"] = "4"
 
@@ -193,6 +241,55 @@ func driftServerFields(live map[string]any) {
 		container["imagePullPolicy"] = "IfNotPresent"
 	}
 	live["status"] = map[string]any{"readyReplicas": float64(1)}
+}
+
+// driftServiceServerFields adds the fields a Service gains: the cluster IP the
+// API server assigns, which an ExternalName Service does not get, and the
+// defaults it sets on the ports and the session.
+func driftServiceServerFields(live map[string]any) {
+	spec := driftObjectAt(live, "spec")
+	if spec["type"] != "ExternalName" {
+		spec["clusterIP"] = "10.43.0.17"
+		spec["clusterIPs"] = []any{"10.43.0.17"}
+		spec["ipFamilies"] = []any{"IPv4"}
+		spec["ipFamilyPolicy"] = "SingleStack"
+		spec["internalTrafficPolicy"] = "Cluster"
+	}
+	spec["sessionAffinity"] = "None"
+	ports, ok := spec["ports"].([]any)
+	if !ok {
+		return
+	}
+	for _, entry := range ports {
+		port, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		// The server copies an unnamed targetPort from the port.
+		port["targetPort"] = port["port"]
+	}
+}
+
+// driftClaimServerFields adds the fields a claim gains: the volume the
+// controller bound to it, and the status it reports.
+func driftClaimServerFields(live map[string]any) {
+	spec := driftObjectAt(live, "spec")
+	spec["volumeName"] = "pvc-0f0e0d0c-0000-4000-8000-000000000000"
+	spec["volumeMode"] = "Filesystem"
+	live["status"] = map[string]any{"phase": "Bound", "accessModes": []any{"ReadWriteOnce"}}
+}
+
+// driftCronJobServerFields adds the fields a CronJob's job template gains: the
+// pod defaults the server sets, and a status.
+func driftCronJobServerFields(live map[string]any) {
+	template := driftObjectAt(live, "spec", "jobTemplate", "spec", "template")
+	driftObjectAt(template, "metadata")["creationTimestamp"] = nil
+	podSpec := driftObjectAt(template, "spec")
+	podSpec["dnsPolicy"] = "ClusterFirst"
+	if _, named := podSpec["terminationGracePeriodSeconds"]; !named {
+		podSpec["terminationGracePeriodSeconds"] = 30
+	}
+	live["status"] = map[string]any{"active": []any{}}
 }
 
 // driftObjectAt walks decoded objects by key, making each one it passes through,
@@ -250,6 +347,25 @@ func driftNameBdImage(t *testing.T, town string) {
 // read.
 func driftFourDeploymentSeams(t *testing.T) (clusterDriftDeps, *bytes.Buffer, string) {
 	t.Helper()
+	return driftControlObjectSeams(t, nil)
+}
+
+// driftEveryObjectSeams is driftFourDeploymentSeams with the tracker backup
+// rendered too, so the run reads every namespaced object a control-cluster render
+// builds: the Services, the claims, the ServiceAccount and the CronJob beside the
+// four Deployments.
+func driftEveryObjectSeams(t *testing.T) (clusterDriftDeps, *bytes.Buffer, string) {
+	t.Helper()
+	return driftControlObjectSeams(t, func(f *clusterRenderFlags) {
+		f.trackerBackup = true
+		f.trackerBackupImage = "registry.example.test/postgres@sha256:" + strings.Repeat("4", 64)
+	})
+}
+
+// driftControlObjectSeams renders the dashboard, trackerd and the bd gateway,
+// then applies adjust to the flags.
+func driftControlObjectSeams(t *testing.T, adjust func(*clusterRenderFlags)) (clusterDriftDeps, *bytes.Buffer, string) {
+	t.Helper()
 	d, out, town := driftTestSeams(t, func(f *clusterRenderFlags) {
 		f.dashboard = true
 		f.tracker = true
@@ -260,6 +376,9 @@ func driftFourDeploymentSeams(t *testing.T) (clusterDriftDeps, *bytes.Buffer, st
 		// The bd image renders the push URL, which needs the operator's
 		// attestation that the Service admission policy is applied.
 		f.bdGatewayServicePolicyApplied = true
+		if adjust != nil {
+			adjust(f)
+		}
 	})
 	driftNameBdImage(t, town)
 	return d, out, town
@@ -285,7 +404,7 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
 	var reads []string
 	d.kubectl = driftRecordReads(driftAnswering(t, m, func(_ *testing.T, live map[string]any) {
-		if live["metadata"].(map[string]any)["name"] != k8sdaemon.BdGatewayName {
+		if live["kind"] != "Deployment" || live["metadata"].(map[string]any)["name"] != k8sdaemon.BdGatewayName {
 			return
 		}
 		// The cluster has not rolled yet: it still runs Recreate, with no rollingUpdate.
@@ -304,6 +423,17 @@ func TestTownClusterDriftComparesTrackerdAndTheBdGateway(t *testing.T) {
 		"deployment/" + k8sdaemon.BdGatewayName,
 		"deployment/" + forgejorunner.Name,
 		"configmap/" + forgejorunner.Name + "-config",
+		"service/" + k8sdaemon.ForgejoName,
+		"service/" + k8sdaemon.DashboardName,
+		"service/" + k8sdaemon.TrackerName,
+		"service/" + k8sdaemon.BdGatewayName,
+		"service/" + k8sdaemon.BdGatewayPushName,
+		"persistentvolumeclaim/" + k8sdaemon.TownStateClaim,
+		"persistentvolumeclaim/" + k8sdaemon.LandingWorkClaim,
+		"persistentvolumeclaim/" + k8sdaemon.DoltBackupClaim,
+		"persistentvolumeclaim/" + k8sdaemon.BdGatewayWorkspaceClaim,
+		"persistentvolumeclaim/" + k8sdaemon.BdGatewayLogClaim,
+		"serviceaccount/" + k8sdaemon.ServiceAccountName,
 	}
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
@@ -357,11 +487,11 @@ func TestTownClusterDriftRefusesATrackerdOrGatewayTheClusterDoesNotHold(t *testi
 	}
 }
 
-// TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender holds flags that render
-// no trackerd and no bd gateway to the two flag-rendered reads the run made
-// before, the daemon and the dashboard, followed by the runner the control
-// values always render.
-func TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender(t *testing.T) {
+// TestTownClusterDriftReadsOnlyTheObjectsTheFlagsRender holds flags that render
+// no trackerd, no backup and no bd gateway to the objects a render of the daemon
+// and the dashboard builds: their Deployments and Services, the daemon's claims,
+// the ServiceAccount, and the runner the control values always render.
+func TestTownClusterDriftReadsOnlyTheObjectsTheFlagsRender(t *testing.T) {
 	t.Parallel()
 	d, out, town := driftTestSeams(t, func(f *clusterRenderFlags) { f.dashboard = true })
 	m := driftTestRendered(t, d, driftTestFlags(t, town))
@@ -376,6 +506,12 @@ func TestTownClusterDriftReadsOnlyTheDeploymentsTheFlagsRender(t *testing.T) {
 		"deployment/" + k8sdaemon.DashboardName,
 		"deployment/" + forgejorunner.Name,
 		"configmap/" + forgejorunner.Name + "-config",
+		"service/" + k8sdaemon.ForgejoName,
+		"service/" + k8sdaemon.DashboardName,
+		"persistentvolumeclaim/" + k8sdaemon.TownStateClaim,
+		"persistentvolumeclaim/" + k8sdaemon.LandingWorkClaim,
+		"persistentvolumeclaim/" + k8sdaemon.DoltBackupClaim,
+		"serviceaccount/" + k8sdaemon.ServiceAccountName,
 	}
 	if !slices.Equal(reads, wantReads) {
 		t.Errorf("read %q, want %q", reads, wantReads)
@@ -398,6 +534,9 @@ func TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll(t *testing.
 			name:   "an image roll and the fields the server fills in, dashboard included",
 			adjust: func(f *clusterRenderFlags) { f.dashboard = true },
 			mutate: func(t *testing.T, live map[string]any) {
+				if live["kind"] != "Deployment" {
+					return
+				}
 				for _, entry := range driftContainers(live) {
 					entry.(map[string]any)["image"] = driftDigest("rolled")
 				}
@@ -408,6 +547,9 @@ func TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll(t *testing.
 		{
 			name: "a differing daemon env var",
 			mutate: func(t *testing.T, live map[string]any) {
+				if live["kind"] != "Deployment" {
+					return
+				}
 				driftEnvOf(t, driftContainer(t, live, k8sdaemon.Name), "TZ")["value"] = "UTC"
 			},
 			wantExit: 1,
@@ -419,7 +561,7 @@ func TestTownClusterDriftReportsOnlyDifferencesThatAreNotAnImageRoll(t *testing.
 			name:   "a differing dashboard env var",
 			adjust: func(f *clusterRenderFlags) { f.dashboard = true },
 			mutate: func(t *testing.T, live map[string]any) {
-				if live["metadata"].(map[string]any)["name"] != k8sdaemon.DashboardName {
+				if live["kind"] != "Deployment" || live["metadata"].(map[string]any)["name"] != k8sdaemon.DashboardName {
 					return
 				}
 				driftEnvOf(t, driftContainer(t, live, k8sdaemon.DashboardName), "TZ")["value"] = "UTC"
@@ -1146,15 +1288,21 @@ func TestRunnerDriftTargetsRefusesAValueOrBuildItCannotRead(t *testing.T) {
 
 // driftReadPlurals maps a drift read's kind, before the slash, to its granted resource.
 var driftReadPlurals = map[string]string{
-	"deployment": "deployments",
-	"configmap":  "configmaps",
+	"deployment":            "deployments",
+	"configmap":             "configmaps",
+	"service":               "services",
+	"persistentvolumeclaim": "persistentvolumeclaims",
+	"serviceaccount":        "serviceaccounts",
+	"cronjob":               "cronjobs",
 }
 
 // TestTownClusterDriftReadsMatchTheGolden derives the compare's reads from the
 // run itself and holds the set to the golden the ClusterRole is checked against.
+// The seams render every namespaced object, so a kind the compare gains or drops
+// shows here whichever flag renders it.
 func TestTownClusterDriftReadsMatchTheGolden(t *testing.T) {
 	t.Parallel()
-	d, _, town := driftFourDeploymentSeams(t)
+	d, _, town := driftEveryObjectSeams(t)
 	var calls []string
 	d.kubectl = driftRecordReads(driftAnswering(t, driftTestRendered(t, d, driftTestFlags(t, town)), nil), &calls)
 	if err := compareClusterDrift(context.Background(), d); err != nil {
