@@ -134,10 +134,12 @@ type ledgerDoc struct {
 	Rounds []ledgerRound `json:"rounds"`
 }
 
-// ledgerRound is one om round as stored: the attempt it belongs to, the work
-// branch head it was submitted at, and its findings with what became of each.
+// ledgerRound is one om round as stored: the attempt it belongs to, the lane it
+// was reviewed in, its head and its findings. A round is keyed by its lane and
+// number, so two lanes may each hold a round 1 (gt-p28de8).
 type ledgerRound struct {
 	Round    int             `json:"round"`
+	Lane     string          `json:"lane,omitempty"`
 	Head     string          `json:"head"`
 	At       time.Time       `json:"at"`
 	Findings []ledgerFinding `json:"findings"`
@@ -207,12 +209,26 @@ func omRounds(rounds []renderedRound) []omRound {
 	return out
 }
 
-// Append records one round of findings for head, the work branch head the
-// round was submitted at, stamped with the injected clock. A round already in
-// the ledger is replaced, keeping the outcome every finding it does not
-// re-raise still carries: a retry of the same attempt re-reviews the same
-// findings, and a settled outcome is the bead's, not the retry's.
+// ledgerLane is the lane a branch's rounds are keyed by: "" is the polecat
+// lane, the one a record written before this change belongs to (gt-p28de8).
+func ledgerLane(branch string) string {
+	if lane := laneOf(branch); lane != "polecat" {
+		return lane
+	}
+	return ""
+}
+
+// Append records one round for head in the polecat lane, the lane a record with
+// no lane field belongs to.
 func (l *RoundsLedger) Append(round int, head string, findings []Finding) error {
+	return l.AppendLane("", round, head, findings)
+}
+
+// AppendLane records one round for head in lane, stamped with the injected
+// clock. A round already in lane is replaced, keeping the outcome every finding
+// it does not re-raise still carries: a settled outcome is the bead's, not the
+// retry's. Another lane's round of the same number is kept (gt-p28de8).
+func (l *RoundsLedger) AppendLane(lane string, round int, head string, findings []Finding) error {
 	if round < 1 {
 		return fmt.Errorf("rounds ledger: round %d is not a landing attempt", round)
 	}
@@ -220,9 +236,9 @@ func (l *RoundsLedger) Append(round int, head string, findings []Finding) error 
 	if err != nil {
 		return err
 	}
-	next := ledgerRound{Round: round, Head: head, At: l.now().UTC(), Findings: recordFindings(findings)}
+	next := ledgerRound{Round: round, Lane: lane, Head: head, At: l.now().UTC(), Findings: recordFindings(findings)}
 	for i, have := range doc.Rounds {
-		if have.Round != round {
+		if have.Round != round || have.Lane != lane {
 			continue
 		}
 		for j := range next.Findings {
@@ -273,10 +289,10 @@ func (l *RoundsLedger) Settle(key FindingKey, outcome Outcome) error {
 }
 
 // Render returns the ledger as the JSON array gt-3l5qy writes for om, newest
-// rounds first kept: an output over maxBytes loses its oldest rounds whole,
-// and the newest round stays even alone over the cap. Zero or negative
-// maxBytes means DefaultRoundsCap. A ledger that does not parse is
-// ErrRoundsCorrupt, which the caller treats as no history.
+// rounds first kept: trimming follows the round number, so an output over
+// maxBytes loses its lowest-numbered rounds whole and keeps the newest even
+// alone over the cap. Zero or negative maxBytes means DefaultRoundsCap. A ledger
+// that does not parse is ErrRoundsCorrupt, which the caller treats as no history.
 func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultRoundsCap
@@ -452,22 +468,27 @@ func (l *RoundsLedger) load() (ledgerDoc, error) {
 	return doc, nil
 }
 
-// check reports a document that cannot be this landing's ledger: another
-// bead's rounds, a round number a landing never has, two entries for one
-// round, or an outcome the ledger never writes.
+// check reports a document that cannot be this landing's ledger: another bead's
+// rounds, a round number a landing never has, a round twice in one lane, or an
+// outcome the ledger never writes. A round is keyed by its lane too (gt-p28de8).
 func (d ledgerDoc) check(name, bead string) error {
 	if d.Bead != "" && d.Bead != bead {
 		return fmt.Errorf("%w: %s records bead %q, not %q", ErrRoundsCorrupt, name, d.Bead, bead)
 	}
-	seen := make(map[int]bool, len(d.Rounds))
+	type laneRound struct {
+		lane  string
+		round int
+	}
+	seen := make(map[laneRound]bool, len(d.Rounds))
 	for _, r := range d.Rounds {
 		if r.Round < 1 {
 			return fmt.Errorf("%w: %s records round %d", ErrRoundsCorrupt, name, r.Round)
 		}
-		if seen[r.Round] {
-			return fmt.Errorf("%w: %s records round %d twice", ErrRoundsCorrupt, name, r.Round)
+		key := laneRound{lane: r.Lane, round: r.Round}
+		if seen[key] {
+			return fmt.Errorf("%w: %s records round %d twice in lane %q", ErrRoundsCorrupt, name, r.Round, r.Lane)
 		}
-		seen[r.Round] = true
+		seen[key] = true
 		for _, f := range r.Findings {
 			if !f.Outcome.valid() {
 				return fmt.Errorf("%w: %s records finding %s with outcome %q", ErrRoundsCorrupt, name, f.key(), f.Outcome)

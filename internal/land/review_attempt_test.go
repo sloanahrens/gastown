@@ -2,6 +2,8 @@ package land
 
 import (
 	"context"
+	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -35,6 +37,35 @@ func TestReviewAttemptLogLedgerAndHeaderAgree(t *testing.T) {
 	}
 	if recs[0].Attempt != 1 || rounds[0].Round != 1 || header.Attempt != 1 {
 		t.Errorf("reviews log names %d, ledger %d, header %d; want round 1 in all three", recs[0].Attempt, rounds[0].Round, header.Attempt)
+	}
+}
+
+// TestLogRoundsKeepsThePolecatRoundsUnderATakeover: a takeover's first review
+// is its lane's round 1, added beside the polecat's rounds (gt-p28de8).
+func TestLogRoundsKeepsThePolecatRoundsUnderATakeover(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	//testpolicy:allow no-exec-files — a directory, not a file: t.TempDir is 0777 under the runner's open umask, so it is made private
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledger := RoundsLedger{OutDir: dir, Bead: "gt-x"}
+	for i, head := range []string{"p1", "p2", "p3"} {
+		must(t, ledger.Append(i+1, head, nil))
+	}
+	l := &Lander{RoundsDir: dir, Out: io.Discard}
+	issue := &beads.Issue{ID: "gt-x", Notes: laneBlocks("polecat/furiosa/gt-x+nonce", 3, RejectReview)}
+	l.logRounds(issue, Work{BeadID: "gt-x", Branch: "crew/overseer/gt-x", Head: "crewhead"},
+		Verdict{Verdict: VerdictRequestChanges, Findings: []Finding{{ID: "F1", Severity: "major"}}})
+	rounds := renderedOf(t, &RoundsLedger{OutDir: dir, Bead: "gt-x"}, 0)
+	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Round != 1 || rounds[1].Head != "crewhead" {
+		t.Fatalf("rounds = %+v, want the polecat's rounds kept and the crew's round 1 added", rounds)
+	}
+	// A polecat landing's lane is "", so it replaces its own round 1.
+	l.logRounds(&beads.Issue{ID: "gt-x"}, Work{BeadID: "gt-x", Branch: "polecat/nux/gt-x+nonce", Head: "p1b"},
+		Verdict{Verdict: VerdictRequestChanges})
+	if rounds := renderedOf(t, &RoundsLedger{OutDir: dir, Bead: "gt-x"}, 0); len(rounds) != 4 || rounds[0].Head != "p1b" {
+		t.Errorf("a polecat round rendered %+v, want the polecat lane's round 1 replaced", rounds)
 	}
 }
 

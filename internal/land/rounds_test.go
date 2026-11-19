@@ -22,6 +22,14 @@ func ledgerIn(t *testing.T, bead string) *RoundsLedger {
 	}}
 }
 
+// must fails t on err: a ledger call a test only makes to set up its state.
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // rendered is Render's output as the test reads it: the schema gt-3l5qy hands
 // om through --rounds-file.
 type rendered []struct {
@@ -229,27 +237,33 @@ func TestRoundsLedgerReappendDoesNotSettleIdlessFindings(t *testing.T) {
 }
 
 // TestRoundsLedgerReappendKeepsSettledOutcomes: a retry of the same attempt
-// re-appends the round, and the outcomes the bead already settled survive it
-// (gt-yphcl).
+// re-appends the round, and the outcomes it recorded survive it; a takeover's
+// retry keeps its own lane's outcomes and inherits none from the polecat's
+// (gt-yphcl, gt-p28de8).
 func TestRoundsLedgerReappendKeepsSettledOutcomes(t *testing.T) {
 	t.Parallel()
-	l := ledgerIn(t, "gt-abc")
-	key := FindingKey{File: "a.go", ID: "F1"}
-	if err := l.Append(1, "head1", []Finding{{ID: "F1", Path: "a.go", Title: "raised"}, {ID: "F2", Path: "a.go", Title: "other"}}); err != nil {
-		t.Fatalf("Append: %v", err)
-	}
-	if err := l.Settle(key, OutcomeAccepted); err != nil {
-		t.Fatalf("Settle: %v", err)
-	}
-	if err := l.Append(1, "head1", []Finding{{ID: "F1", Path: "a.go", Title: "raised"}, {ID: "F2", Path: "a.go", Title: "other"}}); err != nil {
-		t.Fatalf("re-append: %v", err)
-	}
-	rounds := renderedOf(t, l, 0)
-	if len(rounds) != 1 {
-		t.Fatalf("re-appending round 1 left %d round(s), want 1", len(rounds))
-	}
-	if got := rounds[0].Findings[0].Outcome; got != string(OutcomeAccepted) {
-		t.Errorf("the re-appended round records F1 as %q, want the settled accepted", got)
+	both := []Finding{{ID: "F1", Path: "a.go", Title: "raised"}, {ID: "F2", Path: "a.go", Title: "other"}}
+	for _, tc := range []struct {
+		name, lane string
+		f1         Outcome
+	}{
+		{"polecat retry", "", OutcomeAccepted},
+		{"takeover retry inherits none of the polecat's round 1", "crew/overseer", OutcomeOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l := ledgerIn(t, "gt-abc")
+			must(t, l.Append(1, "head1", both))
+			must(t, l.Settle(FindingKey{File: "a.go", ID: "F1"}, OutcomeAccepted))
+			must(t, l.AppendLane(tc.lane, 1, "head2", both))
+			must(t, l.Settle(FindingKey{File: "a.go", ID: "F2"}, OutcomeFixed))
+			must(t, l.AppendLane(tc.lane, 1, "head3", both))
+			rounds := renderedOf(t, l, 0)
+			last := rounds[len(rounds)-1]
+			if last.Head != "head3" || last.Findings[0].Outcome != string(tc.f1) || last.Findings[1].Outcome != string(OutcomeFixed) {
+				t.Errorf("retried round = %+v, want F1 %q (its own lane's) and F2 fixed", last, tc.f1)
+			}
+		})
 	}
 }
 
@@ -294,6 +308,7 @@ func TestRoundsLedgerReportsACorruptFile(t *testing.T) {
 	}{
 		{name: "not json", body: "{\"bead\": \"gt-abc\", "},
 		{name: "two entries for one round", body: `{"bead":"gt-abc","rounds":[{"round":1},{"round":1}]}`},
+		{name: "two entries for one lane and round", body: `{"bead":"gt-abc","rounds":[{"round":1,"lane":"crew/overseer"},{"round":1,"lane":"crew/overseer"}]}`},
 		{name: "an outcome the ledger never writes", body: `{"bead":"gt-abc","rounds":[{"round":1,"findings":[{"id":"F1","outcome":"maybe"}]}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,6 +335,39 @@ func TestRoundsLedgerReportsACorruptFile(t *testing.T) {
 				t.Errorf("the corrupt ledger was rewritten to %q", after)
 			}
 		})
+	}
+}
+
+// TestRoundsLedgerKeepsEachLanesRound: a round is keyed by its lane and its
+// number, so a takeover's round 1 adds beside the polecat's round 1 (gt-p28de8).
+func TestRoundsLedgerKeepsEachLanesRound(t *testing.T) {
+	t.Parallel()
+	l := ledgerIn(t, "gt-abc")
+	finding := []Finding{{ID: "F1", Severity: "major", Path: "a.go", Line: 1, Title: "not atomic"}}
+	for i, head := range []string{"p1", "p2", "p3"} {
+		must(t, l.Append(i+1, head, finding))
+	}
+	must(t, l.AppendLane("crew/overseer", 1, "crewhead", finding))
+	rounds := renderedOf(t, l, 0)
+	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Head != "crewhead" || rounds[1].Round != 1 || rounds[2].Head != "p2" || rounds[3].Head != "p3" || len(rounds[0].Findings) != 1 || rounds[0].Findings[0].ID != "F1" {
+		t.Fatalf("rendered rounds = %+v, want p1 with its F1, p2 and p3, and the crew's round 1 beside them", rounds)
+	}
+
+	// A retry of the same lane and round still replaces its own record.
+	must(t, l.AppendLane("crew/overseer", 1, "crewhead2", finding))
+	if rounds = renderedOf(t, l, 0); len(rounds) != 4 || rounds[1].Head != "crewhead2" {
+		t.Errorf("a retried crew round rendered %+v, want four rounds with crewhead2 at round 1", rounds)
+	}
+
+	// A record written before the ledger keyed on lane is the polecat lane: an
+	// Append replaces it, and a crew round 1 joins it rather than displacing it.
+	old := ledgerIn(t, "gt-def")
+	data := []byte(`{"bead":"gt-def","rounds":[{"round":1,"head":"old","at":"2026-10-26T12:00:00Z","findings":[]}]}`)
+	must(t, os.WriteFile(filepath.Join(old.OutDir, "rounds-gt-def.json"), data, 0o600))
+	must(t, old.Append(1, "new", nil))
+	must(t, old.AppendLane("crew/overseer", 1, "crewhead", nil))
+	if got := renderedOf(t, old, 0); len(got) != 2 || got[0].Head != "new" {
+		t.Errorf("a lane-less round 1 took Append's %+v, want it replaced by \"new\" and joined by the crew's round 1", got)
 	}
 }
 
