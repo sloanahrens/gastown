@@ -1236,3 +1236,103 @@ func TestBdgwRunDispatch(t *testing.T) {
 		})
 	}
 }
+
+// logPerPodServeConfig is a serve config whose pieces are in temp directories
+// and whose listeners are in-memory, so a call to serve returns without a socket.
+func logPerPodServeConfig(t *testing.T) *serveConfig {
+	t.Helper()
+	sc := newServeConfig()
+	sc.tokensDir = t.TempDir()
+	writeFile(t, filepath.Join(sc.tokensDir, "read.dash.token"), testReadToken, 0o600)
+	sc.verbsPath = filepath.Join(t.TempDir(), "verbs.json")
+	writeFile(t, sc.verbsPath, cmdPolicy, 0o644)
+	sc.logDir = t.TempDir()
+	sc.workspaceRoot = t.TempDir()
+	sc.listen = listenByAddr(sc.addr, newPipeListener(), sc.pushAddr, newPipeListener())
+	return sc
+}
+
+// parseServeFlags parses args with the same flag binding runServe uses, so a
+// test that names --log-per-pod drives the flag the command reads.
+func parseServeFlags(t *testing.T, sc *serveConfig, args ...string) {
+	t.Helper()
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	bindServe(fs, sc)
+	if err := fs.Parse(args); err != nil {
+		t.Fatalf("parse %v: %v", args, err)
+	}
+}
+
+// TestServeLogPerPodPath: with --log-per-pod serve writes the call log under
+// <log-dir>/<hostname>, and without it directly under <log-dir>. The context is
+// already done, so serve builds the call log and drains at once.
+func TestServeLogPerPodPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		perPod  bool
+		want    string
+		notWant string
+	}{
+		{name: "per pod", perPod: true, want: filepath.Join("gw-0", "call.log"), notWant: "call.log"},
+		{name: "shared", perPod: false, want: "call.log", notWant: filepath.Join("gw-0", "call.log")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sc := logPerPodServeConfig(t)
+			var args []string
+			if tc.perPod {
+				args = []string{"--log-per-pod"}
+			}
+			parseServeFlags(t, sc, args...)
+			sc.hostname = func() (string, error) { return "gw-0", nil }
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			if err := serve(ctx, sc); err != nil {
+				t.Fatalf("serve = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(sc.logDir, tc.want)); err != nil {
+				t.Errorf("call log %s: %v", tc.want, err)
+			}
+			if _, err := os.Stat(filepath.Join(sc.logDir, tc.notWant)); !os.IsNotExist(err) {
+				t.Errorf("call log written at %s too: stat = %v", tc.notWant, err)
+			}
+		})
+	}
+}
+
+// TestServeLogPerPodRefuses: a hostname that is empty, holds a slash or an
+// upper-case letter, or cannot be read stops serve, and the error names the
+// flag. No call log is written in the shared directory instead.
+func TestServeLogPerPodRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		hostname func() (string, error)
+	}{
+		{name: "empty hostname", hostname: func() (string, error) { return "", nil }},
+		{name: "slash in hostname", hostname: func() (string, error) { return "gw/0", nil }},
+		{name: "upper-case hostname", hostname: func() (string, error) { return "GW-0", nil }},
+		{name: "parent directory hostname", hostname: func() (string, error) { return "..", nil }},
+		{name: "hostname read error", hostname: func() (string, error) { return "", errors.New("no hostname") }},
+		{name: "no hostname source", hostname: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sc := logPerPodServeConfig(t)
+			parseServeFlags(t, sc, "--log-per-pod")
+			sc.hostname = tc.hostname
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := serve(ctx, sc)
+			if err == nil || !strings.Contains(err.Error(), "--log-per-pod") {
+				t.Fatalf("serve = %v, want a refusal naming --log-per-pod", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(sc.logDir, "call.log")); !os.IsNotExist(statErr) {
+				t.Errorf("a call log was written in the shared directory: stat = %v", statErr)
+			}
+		})
+	}
+}

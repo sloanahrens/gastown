@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
@@ -39,6 +40,11 @@ type config struct {
 	tokensDir        string
 	beadPrefixes     string
 	maxConcurrent    int
+	// logPerPod puts the call log in a subdirectory named for the pod, so two
+	// gateway pods never append to one call.log.
+	logPerPod bool
+	// hostname names the pod. A test replaces it, so no real hostname is read.
+	hostname func() (string, error)
 }
 
 func defaultConfig() config {
@@ -53,6 +59,7 @@ func defaultConfig() config {
 		trackerTokenFile: os.Getenv("TRACKER_TOKEN_FILE"),
 		beadPrefixes:     "gt,hq",
 		maxConcurrent:    bdgateway.DefaultMaxConcurrent,
+		hostname:         os.Hostname,
 	}
 }
 
@@ -136,13 +143,58 @@ func (c config) executor() (*bdgateway.Executor, error) {
 	return e, nil
 }
 
+// callLogDir is the directory the call log is written in. With --log-per-pod it
+// is a subdirectory named for the pod. A hostname that is not a plain directory
+// name is refused, never replaced by the shared directory: two pods must not
+// write one call.log.
+func (c config) callLogDir() (string, error) {
+	if !c.logPerPod {
+		return c.logDir, nil
+	}
+	if c.hostname == nil {
+		return "", errors.New("--log-per-pod: no hostname source")
+	}
+	host, err := c.hostname()
+	if err != nil {
+		return "", fmt.Errorf("--log-per-pod: read the hostname: %w", err)
+	}
+	if !podDirName(host) {
+		return "", fmt.Errorf("--log-per-pod: hostname %q is not a directory name (lowercase letters, digits, - and . after a letter or digit)", host)
+	}
+	return filepath.Join(c.logDir, host), nil
+}
+
+// podDirName reports whether a hostname is safe as one path element: it starts
+// with a lowercase letter or digit, so "." and ".." cannot escape the log
+// directory, and holds only lowercase letters, digits, "-" and ".".
+func podDirName(host string) bool {
+	if host == "" {
+		return false
+	}
+	for i, r := range host {
+		lower := r >= 'a' && r <= 'z'
+		digit := r >= '0' && r <= '9'
+		switch {
+		case lower || digit:
+		case i > 0 && (r == '-' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // callLog opens the JSONL call log in the configured directory.
 func (c config) callLog(policy *bdgateway.Policy) (*bdgateway.CallLog, error) {
 	if c.logDir == "" {
 		return nil, errors.New("--log-dir is required")
 	}
+	dir, err := c.callLogDir()
+	if err != nil {
+		return nil, err
+	}
 	log, err := bdgateway.NewCallLog(bdgateway.CallLogOptions{
-		Dir:          c.logDir,
+		Dir:          dir,
 		Policy:       policy,
 		BeadPrefixes: c.prefixes(),
 	})
