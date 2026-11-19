@@ -9,7 +9,7 @@ import (
 )
 
 // releaseBound bounds the hold's release. The release runs after a signal may
-// have cancelled the roll's context, so it gets a context of its own.
+// have canceled the roll's context, so it gets a context of its own.
 const releaseBound = time.Minute
 
 // Target is what a roll changes: the gate runner's Deployment, or a cluster's.
@@ -58,7 +58,7 @@ type RollOptions struct {
 // landing pass, wait for the gate and post-land runs, apply, wait for the target
 // to be ready, and release the hold.
 //
-// Every exit after the take releases the hold, a cancelled context and a failing
+// Every exit after the take releases the hold, a canceled context and a failing
 // step included; the release runs on a context the cancel does not reach. A
 // release that fails is returned unless a step already failed. A dry run takes
 // no hold, applies nothing, and prints the steps and t's diff lines.

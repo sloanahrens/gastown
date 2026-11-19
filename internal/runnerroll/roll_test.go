@@ -22,7 +22,7 @@ func (l *stepLog) add(call string) { l.calls = append(l.calls, call) }
 
 // loggedStore is the landing hold in memory, recording each take and release.
 // Remove records the context state it ran on, so a release on the roll's
-// cancelled context fails here instead of passing.
+// canceled context fails here instead of passing.
 type loggedStore struct {
 	log           *stepLog
 	content       string
@@ -251,16 +251,16 @@ func TestRunReleasesTheHoldAfterAFailureInEveryStep(t *testing.T) {
 				t.Error("the landing hold was not released")
 			}
 			if f.store.releaseCtxErr != nil {
-				t.Errorf("the release ran on a cancelled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
+				t.Errorf("the release ran on a canceled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
 			}
 		})
 	}
 }
 
-// TestRunReleasesTheHoldOnACancelledContext: a signal that cancels the roll
+// TestRunReleasesTheHoldOnACanceledContext: a signal that cancels the roll
 // during a wait stops the roll before it applies, and the release still reaches
 // the store on a context the cancel does not reach.
-func TestRunReleasesTheHoldOnACancelledContext(t *testing.T) {
+func TestRunReleasesTheHoldOnACanceledContext(t *testing.T) {
 	t.Parallel()
 	f := newRollFixture()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -283,14 +283,14 @@ func TestRunReleasesTheHoldOnACancelledContext(t *testing.T) {
 		t.Error("the landing hold was not released")
 	}
 	if f.store.releaseCtxErr != nil {
-		t.Errorf("the release ran on a cancelled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
+		t.Errorf("the release ran on a canceled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
 	}
 }
 
-// TestRunReleasesTheHoldCancelledDuringApply: a cancel that lands during the
-// apply step leaves the roll's context cancelled for the release, which must
+// TestRunReleasesTheHoldCanceledDuringApply: a cancel that lands during the
+// apply step leaves the roll's context canceled for the release, which must
 // still remove the hold.
-func TestRunReleasesTheHoldCancelledDuringApply(t *testing.T) {
+func TestRunReleasesTheHoldCanceledDuringApply(t *testing.T) {
 	t.Parallel()
 	f := newRollFixture()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -305,13 +305,13 @@ func TestRunReleasesTheHoldCancelledDuringApply(t *testing.T) {
 		t.Error("the landing hold was not released")
 	}
 	if f.store.releaseCtxErr != nil {
-		t.Errorf("the release ran on a cancelled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
+		t.Errorf("the release ran on a canceled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
 	}
 }
 
 // cancellingTarget cancels the roll's context in Apply, then behaves as its
 // target does, so the roll continues into the ready wait and the release on a
-// cancelled context.
+// canceled context.
 type cancellingTarget struct {
 	target *recordingTarget
 	cancel context.CancelFunc
