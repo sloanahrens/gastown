@@ -172,6 +172,39 @@ func TestReadSkipsOverlongLine(t *testing.T) {
 	}
 }
 
+// TestReadUnterminatedLastLine covers damage a whole-file write leaves behind:
+// the lines before the cut are still the ring, and a cut line over the cap is
+// one more corrupt line rather than a failed read.
+func TestReadUnterminatedLastLine(t *testing.T) {
+	t.Parallel()
+	first := line(t, at(1))
+	cases := []struct {
+		name        string
+		content     string
+		wantSamples int
+		wantCorrupt int
+	}{
+		{"no trailing newline", first, 1, 0},
+		{"unterminated overlong line", first + "\n" + strings.Repeat("x", maxLineBytes+1), 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "growth.jsonl")
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatalf("writing ring: %v", err)
+			}
+			got, corrupt, err := ReadCount(path)
+			if err != nil {
+				t.Fatalf("ReadCount: %v", err)
+			}
+			if len(got) != tc.wantSamples || corrupt != tc.wantCorrupt {
+				t.Fatalf("ReadCount = %d samples, %d corrupt; want %d, %d", len(got), corrupt, tc.wantSamples, tc.wantCorrupt)
+			}
+		})
+	}
+}
+
 func TestReadEmptyPathRefuses(t *testing.T) {
 	t.Parallel()
 	if _, _, err := ReadCount(""); !errors.Is(err, errEmptyPath) {

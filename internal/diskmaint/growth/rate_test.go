@@ -57,6 +57,19 @@ func TestRatePruneDropStillReportsGrowth(t *testing.T) {
 	}
 }
 
+// TestRateReadsSamplesInAnyOrder: the file's order is Append's, and a fit that
+// took the first reading as the oldest would read this series backwards.
+func TestRateReadsSamplesInAnyOrder(t *testing.T) {
+	t.Parallel()
+	got, ok := Rate(samplesAt(24, 0, 12), base.Add(24*time.Hour), 24*time.Hour)
+	if !ok {
+		t.Fatal("Rate reported not ok on three readings filling the window")
+	}
+	if math.Abs(got-24) > 0.01 {
+		t.Fatalf("Rate = %v GiB/day, want about 24 from the readings taken out of order", got)
+	}
+}
+
 func TestRateRefuses(t *testing.T) {
 	t.Parallel()
 	now := base.Add(24 * time.Hour)
