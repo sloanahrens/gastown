@@ -1748,8 +1748,11 @@ func TestSpecDispatchContentionThatOutlastsItsRetriesIsADeferral(t *testing.T) {
 		t.Errorf("labels = %v, want none: %s must not stick after contention clears", got, specdispatch.DispatchFailedLabel)
 	}
 	// The bead is still a candidate, so the next tick slings it once the
-	// contention is gone.
-	if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+	// contention is gone. That tick runs at the retry time the deferral wrote
+	// (five seconds on): before it, the bead waits out its backoff (gt-6kg6xb).
+	later := f.env()
+	later.Now = func() time.Time { return specTestNow.Add(5 * time.Second) }
+	if r := runSpecDispatchCycle(later); len(r.Dispatched) != 1 || len(f.slung) != 1 {
 		t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
 	}
 }
