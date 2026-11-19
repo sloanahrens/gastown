@@ -237,6 +237,102 @@ func TestSbxRenderChecksThePinnedManifest(t *testing.T) {
 	}
 }
 
+// hasRef reports whether refs holds the named object.
+func hasRef(refs []ObjectRef, kind, namespace, name string) bool {
+	for _, ref := range refs {
+		if ref.Kind == kind && ref.Namespace == namespace && ref.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// Runtime names a member of each class of object the sandbox cluster creates
+// itself, and not a lookalike of a bootstrap ClusterRole.
+func TestSbxRuntimeNamesTheClusterObjects(t *testing.T) {
+	t.Parallel()
+	sandbox := readFixture(t)
+	var calls []runnerCall
+	set, err := renderSet(context.Background(), renderInputs(sandbox, readChartFixture(t), &calls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("renderSet(): %v", err)
+	}
+	// The gateway and cache-trim objects.
+	for _, ref := range []ObjectRef{
+		{Kind: "NetworkPolicy", Namespace: openshellName, Name: "openshell-sandbox-supervisors"},
+		{Kind: "Job", Namespace: openshellName, Name: "gt-cache-trim-gt-cache"},
+	} {
+		if !hasRef(set.Runtime, ref.Kind, ref.Namespace, ref.Name) {
+			t.Errorf("Runtime holds no %+v", ref)
+		}
+	}
+	// The five namespaces.
+	for _, name := range []string{"default", "kube-system", "kube-public", "kube-node-lease", "local-path-storage"} {
+		if !hasRef(set.Runtime, "Namespace", "", name) {
+			t.Errorf("Runtime holds no Namespace %s", name)
+		}
+	}
+	// The local-path storage objects.
+	if !hasRef(set.Runtime, "Deployment", "local-path-storage", "local-path-provisioner") {
+		t.Errorf("Runtime holds no local-path provisioner")
+	}
+	// The fixed-name cluster-scoped objects.
+	if !hasRef(set.Runtime, "ClusterRole", "", "admin") {
+		t.Errorf("Runtime holds no ClusterRole admin")
+	}
+	if !hasRef(set.Runtime, "ClusterRoleBinding", "", "cluster-admin") {
+		t.Errorf("Runtime holds no ClusterRoleBinding cluster-admin")
+	}
+	if hasRef(set.Runtime, "ClusterRole", "", "admin-reader") {
+		t.Errorf("Runtime holds the lookalike ClusterRole admin-reader")
+	}
+}
+
+// Runtime and the rendered Objects never name the same object.
+func TestSbxRuntimeDoesNotOverlapObjects(t *testing.T) {
+	t.Parallel()
+	sandbox := readFixture(t)
+	var calls []runnerCall
+	set, err := renderSet(context.Background(), renderInputs(sandbox, readChartFixture(t), &calls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("renderSet(): %v", err)
+	}
+	rendered := make(map[string]bool, len(set.Objects))
+	for _, object := range set.Objects {
+		rendered[objectKey(object)] = true
+	}
+	for _, ref := range set.Runtime {
+		key := objectKey(k8s.StaticObject{Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name})
+		if rendered[key] {
+			t.Errorf("Runtime names the rendered object %s", key)
+		}
+	}
+}
+
+// A caller that changes the Runtime it got does not change the next render.
+func TestSbxRuntimeIsACopy(t *testing.T) {
+	t.Parallel()
+	sandbox := readFixture(t)
+	chartRaw := readChartFixture(t)
+	var firstCalls, secondCalls []runnerCall
+	first, err := renderSet(context.Background(), renderInputs(sandbox, chartRaw, &firstCalls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("first renderSet(): %v", err)
+	}
+	before := slices.Clone(first.Runtime)
+	if len(before) == 0 {
+		t.Fatal("Runtime is empty")
+	}
+	first.Runtime[0] = ObjectRef{Kind: "ClusterRole", Name: "planted"}
+	second, err := renderSet(context.Background(), renderInputs(sandbox, chartRaw, &secondCalls), k8s.SbxStatic, digestOf(sandbox))
+	if err != nil {
+		t.Fatalf("second renderSet(): %v", err)
+	}
+	if !slices.Equal(second.Runtime, before) {
+		t.Errorf("a change to one render's Runtime changed the next render's Runtime")
+	}
+}
+
 // Every input the render cannot read, and every static set it cannot place, is
 // refused with no set returned.
 func TestSbxRenderRefusals(t *testing.T) {
