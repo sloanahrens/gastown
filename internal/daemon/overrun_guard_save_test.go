@@ -110,9 +110,53 @@ func TestOverrunSaveWork_UnpushedCommitIsPushedWithoutACommit(t *testing.T) {
 	}
 }
 
+// A tip origin refused as diverged is saved to a rescue branch named for the
+// kept branch and the tip's first seven characters, the name nuke's preserve
+// uses: a sha-suffixed ref is new for every tip, so a second rescue of the
+// seat is never a non-fast-forward. The kept branch is left as origin has it,
+// and the diverged refusal is not retried.
+func TestOverrunSaveRescue_DivergedTipIsSavedToARescueBranch(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.divergeOriginBranch(t)
+	keptBefore := w.f.Ref(w.origin, "refs/heads/"+stopSeat.Branch)
+
+	got, err := w.d.overrunSaveWork(stopSeat)
+
+	if err != nil {
+		t.Fatalf("save = %v, want the diverged tip saved to a rescue branch", err)
+	}
+	rescue := stopSeat.Branch + "-" + w.tip[:7]
+	if got.Head != w.tip || got.Rescue != rescue {
+		t.Errorf("save = %+v, want the head %s with rescue branch %s", got, w.tip, rescue)
+	}
+	if origin := w.f.Ref(w.origin, "refs/heads/"+rescue); origin != w.tip {
+		t.Errorf("origin holds %q for the rescue branch %s, want the saved head %s", origin, rescue, w.tip)
+	}
+	if kept := w.f.Ref(w.origin, "refs/heads/"+stopSeat.Branch); kept != keptBefore {
+		t.Errorf("origin's kept branch moved from %s to %q; want it left as it was", keptBefore, kept)
+	}
+}
+
+// pushRefusingGit is the seat's git with its push answering the given error
+// while refuse is nil or points at true, so a test can hold the stop on a push
+// failure and then let it through.
+type pushRefusingGit struct {
+	daemonGit
+	refuse *bool
+	err    error
+}
+
+func (g pushRefusingGit) Push(remote, refspec string, force bool) error {
+	if g.refuse == nil || *g.refuse {
+		return g.err
+	}
+	return g.daemonGit.Push(remote, refspec, force)
+}
+
 // Each refusal of the save is an error that names nothing as pushed, so the
-// stop keeps the sandbox. The push refused as non-fast-forward with work
-// origin lacks is the divergence error, and nothing is forced.
+// stop keeps the sandbox. The push refused here is a plain failure, the remote
+// unreachable, not a divergent origin: that one is saved to a rescue branch.
 func TestOverrunSaveWork_RefusedPushIsAnError(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -125,15 +169,17 @@ func TestOverrunSaveWork_RefusedPushIsAnError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := newResetWorld(t)
-			w.divergeOriginBranch(t)
+			open := w.d.openGitFn
+			w.d.openGitFn = func(dir string) daemonGit {
+				return pushRefusingGit{daemonGit: open(dir), err: errors.New("remote unreachable")}
+			}
 			if tc.dirty {
 				writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
 			}
 
 			got, err := w.d.overrunSaveWork(stopSeat)
-			var diverged *overrunPushDivergedError
-			if !errors.As(err, &diverged) {
-				t.Fatalf("save = %+v, %v; want the divergence error", got, err)
+			if err == nil {
+				t.Fatalf("save = %+v, nil; want the refused push named", got)
 			}
 			if got != (overrunSave{}) {
 				t.Errorf("save result = %+v on a refused push, want nothing reported as pushed", got)
@@ -356,8 +402,12 @@ func tickUntilSaveCap(t *testing.T, w *resetWorld, f *overrunFake, s overrunSeam
 func TestOverrunStop_RefusedSaveIsRetriedOnTheNextTick(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
-	w.divergeOriginBranch(t)
 	writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+	refuse := true
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingGit{daemonGit: open(dir), refuse: &refuse, err: errors.New("remote unreachable")}
+	}
 
 	f := newOverrunFake(20*time.Minute, stopSeat)
 	f.removeSandbox = func(overrunSeat) error { return nil }
@@ -379,9 +429,8 @@ func TestOverrunStop_RefusedSaveIsRetriedOnTheNextTick(t *testing.T) {
 			st.SavedAt, st.SaveFailure, st.SaveFailures)
 	}
 
-	// The refusal clears: origin's branch no longer holds a commit the seat's
-	// tip lacks, so the next tick's push goes through.
-	w.f.SetRef(t, w.origin, "refs/heads/"+stopSeat.Branch, w.baseSHA)
+	// The refusal clears: the next tick's push reaches origin.
+	refuse = false
 	w.d.runOverrunGuard(s)
 
 	head, err := w.git().Rev("HEAD")
@@ -416,7 +465,10 @@ func TestOverrunStop_RefusedSaveIsRetriedOnTheNextTick(t *testing.T) {
 func TestOverrunStop_PermanentlyRefusedSaveParksAfterTheCap(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
-	w.divergeOriginBranch(t)
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingGit{daemonGit: open(dir), err: errors.New("remote unreachable")}
+	}
 	writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
 
 	f := newOverrunFake(20*time.Minute, stopSeat)
@@ -464,6 +516,109 @@ func TestOverrunStop_CleanPushedSeatAddsNoSaveNote(t *testing.T) {
 
 	if len(f.handBackNotes) != 1 || f.handBackNotes[0] != "" {
 		t.Errorf("hand-back note = %q, want none", f.handBackNotes)
+	}
+}
+
+// pushRecordingGit records every refspec the seat's git pushed, then delegates:
+// a test reads which refs the save sent, and how many times.
+type pushRecordingGit struct {
+	daemonGit
+	refspecs *[]string
+}
+
+func (g pushRecordingGit) Push(remote, refspec string, force bool) error {
+	*g.refspecs = append(*g.refspecs, refspec)
+	return g.daemonGit.Push(remote, refspec, force)
+}
+
+// A save that rescued a diverged tip counts as done on the first attempt, not
+// after five: the stop removes the sandbox and hands the bead back in one tick,
+// the note names the rescue branch and its sha, and the kept branch is pushed
+// once (the save's refused attempt) and never again.
+func TestOverrunStop_RescuedSaveCountsDoneOnTheFirstAttempt(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.divergeOriginBranch(t)
+	writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+	var refspecs []string
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRecordingGit{daemonGit: open(dir), refspecs: &refspecs}
+	}
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+
+	w.d.runOverrunGuard(s)
+
+	head, err := w.git().Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rescue := stopSeat.Branch + "-" + head[:7]
+	if len(f.handedBack) != 1 {
+		t.Fatalf("hand-backs = %q after one tick, want the save counted as done and the bead handed back once", f.handedBack)
+	}
+	if !slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q, want the sandbox removed: the save counts as done", f.calls)
+	}
+	if note := f.handBackNotes[0]; !strings.Contains(note, rescue) || !strings.Contains(note, head) {
+		t.Errorf("hand-back note = %q, want it to name the rescue branch %s and its sha %s", note, rescue, head)
+	}
+	if got := w.f.Ref(w.origin, "refs/heads/"+rescue); got != head {
+		t.Errorf("origin holds %q for the rescue branch %s, want the saved head %s", got, rescue, head)
+	}
+	if kept := w.f.Ref(w.origin, "refs/heads/"+stopSeat.Branch); kept == head {
+		t.Error("origin's kept branch holds the saved head: it must be left as origin had it")
+	}
+	keptPushes := 0
+	for _, refspec := range refspecs {
+		if strings.HasSuffix(refspec, ":refs/heads/"+stopSeat.Branch) {
+			keptPushes++
+		}
+	}
+	if keptPushes != 1 {
+		t.Errorf("the kept branch was pushed %d times (%q), want the save's one refused attempt and no retry", keptPushes, refspecs)
+	}
+	if len(f.pushed) != 0 {
+		t.Errorf("the stop's push step pushed %q, want none: the work is already on origin at the rescue branch", f.pushed)
+	}
+	st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.SavedAt.IsZero() || st.SaveFailures != 0 || st.SaveGaveUp || st.SavedHead != head || st.SaveRescue != rescue {
+		t.Errorf("state = SavedAt %v, SaveFailures %d, SaveGaveUp %v, SavedHead %q, SaveRescue %q; want the rescue recorded with the save done",
+			st.SavedAt, st.SaveFailures, st.SaveGaveUp, st.SavedHead, st.SaveRescue)
+	}
+}
+
+// A clean worktree whose tip origin refused as diverged gets the rescue note
+// without the WIP-commit sentence: this save made no commit.
+func TestOverrunStop_RescuedCleanTipNoteNamesNoWIPCommit(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.divergeOriginBranch(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+
+	w.d.runOverrunGuard(s)
+
+	rescue := stopSeat.Branch + "-" + w.tip[:7]
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-backs = %q, want the bead handed back once", f.handedBack)
+	}
+	note := f.handBackNotes[0]
+	if !strings.Contains(note, rescue) || !strings.Contains(note, w.tip) {
+		t.Errorf("hand-back note = %q, want it to name the rescue branch %s and its sha %s", note, rescue, w.tip)
+	}
+	if strings.Contains(note, "WIP commit") {
+		t.Errorf("hand-back note = %q, want no WIP-commit sentence: the worktree was clean", note)
 	}
 }
 
@@ -589,6 +744,11 @@ func TestOverrunStop_LateEditIsSavedBeforeTheSandboxGoes(t *testing.T) {
 func TestOverrunStop_LateEditThatCannotBeSavedKeepsTheSandbox(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
+	refuse := false
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingGit{daemonGit: open(dir), refuse: &refuse, err: errors.New("remote unreachable")}
+	}
 
 	f := newOverrunFake(20*time.Minute, stopSeat)
 	f.removeSandbox = func(overrunSeat) error { return nil }
@@ -597,7 +757,7 @@ func TestOverrunStop_LateEditThatCannotBeSavedKeepsTheSandbox(t *testing.T) {
 	stopSession := s.stopSession
 	s.stopSession = func(seat overrunSeat) error {
 		writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
-		w.divergeOriginBranch(t)
+		refuse = true
 		return stopSession(seat)
 	}
 
@@ -618,6 +778,11 @@ func TestOverrunStop_LateEditThatCannotBeSavedKeepsTheSandbox(t *testing.T) {
 func TestOverrunStop_LateEditRefusedForeverParksAfterTheCap(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
+	refuse := false
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingGit{daemonGit: open(dir), refuse: &refuse, err: errors.New("remote unreachable")}
+	}
 
 	f := newOverrunFake(20*time.Minute, stopSeat)
 	f.removeSandbox = func(overrunSeat) error { return nil }
@@ -626,7 +791,7 @@ func TestOverrunStop_LateEditRefusedForeverParksAfterTheCap(t *testing.T) {
 	stopSession := s.stopSession
 	s.stopSession = func(seat overrunSeat) error {
 		writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
-		w.divergeOriginBranch(t)
+		refuse = true
 		return stopSession(seat)
 	}
 
