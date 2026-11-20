@@ -286,10 +286,7 @@ func (g *Git) runOutput(args ...string) (string, error) {
 	// args stays undecorated: wrapError names the first argument that is not a
 	// flag and a timeout reports args[0], so the hook options would be reported
 	// as the command that ran.
-	callArgs := args
-	if g.noHooks {
-		callArgs = hooksOffArgs(args)
-	}
+	callArgs := g.hookArgs(args)
 
 	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: callArgs, env: g.env, unset: g.unset, timeout: g.timeout})
 	if err != nil {
@@ -414,8 +411,11 @@ func (g *Git) runWithEnvAndTimeout(args []string, extraEnv []string, timeout tim
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
+	// args stays undecorated for wrapError and the timeout error; only the argv
+	// handed to the runner carries the hook options.
+	callArgs := g.hookArgs(args)
 	timeout = g.deadline(timeout)
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: append(append([]string(nil), g.env...), extraEnv...), unset: g.unset, timeout: timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: callArgs, env: append(append([]string(nil), g.env...), extraEnv...), unset: g.unset, timeout: timeout})
 	if err != nil {
 		if timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: timeout}
@@ -617,6 +617,17 @@ func gitSubcommand(args []string) (string, []string) {
 		}
 	}
 	return "", nil
+}
+
+// hookArgs returns args as this handle's calls must run: with the repository's
+// local hooks off when the handle came from WithoutLocalHooks, and unchanged
+// otherwise. runOutput and runWithEnvAndTimeout build their gitCall from it;
+// the timed, stdin and merge-check paths still send args undecorated.
+func (g *Git) hookArgs(args []string) []string {
+	if !g.noHooks {
+		return args
+	}
+	return hooksOffArgs(args)
 }
 
 // hooksOffArgs returns args with `-c core.hooksPath=/dev/null` inserted before

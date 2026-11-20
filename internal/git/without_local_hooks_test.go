@@ -1,6 +1,7 @@
 package git
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -98,6 +99,56 @@ func TestWithoutLocalHooksRunsTheSubcommandWithHooksOff(t *testing.T) {
 		}
 	}
 	s.noUnscripted(t)
+}
+
+// TestWithoutLocalHooksCoversWorktreeAndEnvPaths: a worktree add and the
+// commit-tree of a message rewrite, which build their argv in
+// runWithEnvAndTimeout, also run with the repository's local hooks off; a plain
+// handle sends neither with the option (gt-4sm3lp).
+func TestWithoutLocalHooksCoversWorktreeAndEnvPaths(t *testing.T) {
+	t.Parallel()
+	const (
+		hooksOff       = "-c core.hooksPath=/dev/null "
+		oldTip, newTip = "1111", "2222"
+		identity       = "a\x00a@x\x002020-01-01T00:00:00Z\x00c\x00c@x\x002020-01-01T00:00:00Z\n"
+	)
+	for _, tt := range []struct{ name, prefix string }{{"hooks off", hooksOff}, {"plain handle", ""}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			wt := filepath.Join(dir, "wt")
+			s := newScripted(map[string]reply{
+				// The safety guard asks the runner for the top level directly.
+				"-C " + dir + " rev-parse --show-toplevel":                                        ok(dir),
+				tt.prefix + "worktree add --detach " + wt + " main":                               ok(""),
+				tt.prefix + "rev-parse HEAD":                                                      ok(oldTip),
+				tt.prefix + "rev-list --reverse --topo-order --parents base..HEAD":                ok(oldTip),
+				tt.prefix + "log -1 --format=%B " + oldTip:                                        ok("old"),
+				tt.prefix + "log -1 --format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI " + oldTip:    ok(identity),
+				tt.prefix + "commit-tree " + oldTip + "^{tree} -m new":                            ok(newTip),
+				tt.prefix + "update-ref -m rewrite commit messages HEAD " + newTip + " " + oldTip: ok(""),
+			})
+			g := &Git{workDir: dir, exec: s.run}
+			if tt.prefix != "" {
+				g = g.WithoutLocalHooks()
+			}
+			if err := g.WorktreeAddDetached(wt, "main"); err != nil {
+				t.Fatalf("WorktreeAddDetached: %v", err)
+			}
+			if _, err := g.RewriteCommitMessages("base", func(string, string) (string, error) { return "new", nil }); err != nil {
+				t.Fatalf("RewriteCommitMessages: %v", err)
+			}
+			s.noUnscripted(t)
+			for _, want := range []string{
+				tt.prefix + "worktree add --detach " + wt + " main",
+				tt.prefix + "commit-tree " + oldTip + "^{tree} -m new",
+			} {
+				if !s.hasSent(want) {
+					t.Errorf("no call recorded as %q; sent %q", want, s.sent())
+				}
+			}
+		})
+	}
 }
 
 // TestWithoutLocalHooksLeavesTheReceiverAndPlainHandlesAlone: the receiver of
