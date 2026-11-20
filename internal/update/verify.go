@@ -234,46 +234,130 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 // line without the "<VERDICT> tick <age> ago" head — is not ok, so a shape
 // this does not know fails rather than passes.
 func queueOnlyHealthLine(line string) (queue []string, ok bool) {
-	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
-	if !found {
-		return nil, false
-	}
-	degraded := false
-	switch strings.ToUpper(verdict) {
-	case "GREEN":
-	case "DEGRADED":
-		degraded = true
-	default:
-		return nil, false
-	}
-	rest, found = strings.CutPrefix(rest, "tick ")
-	if !found {
-		return nil, false
-	}
-	age, tail, found := strings.Cut(rest, " ago")
-	if !found || age == "" {
-		return nil, false
-	}
-	if !degraded {
-		return nil, true
-	}
-	reasons, found := strings.CutPrefix(tail, ":")
-	if !found {
-		return nil, false
-	}
-	tokens := strings.FieldsFunc(reasons, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
-	if len(tokens) == 0 {
+	_, tokens, ok := healthReasons(line)
+	if !ok {
 		return nil, false
 	}
 	for _, reason := range tokens {
-		key, value, found := strings.Cut(reason, "=")
-		accept, known := queueReasons[strings.ToLower(key)]
-		if !found || !known || !accept(value) {
+		if !isQueueState(reason) {
 			return nil, false
 		}
 		queue = append(queue, reason)
 	}
 	return queue, true
+}
+
+// isQueueState reports whether reason is a queue state: a queueReasons key
+// carrying the value its field writes.
+func isQueueState(reason string) bool {
+	key, value, found := strings.Cut(reason, "=")
+	accept, known := queueReasons[strings.ToLower(key)]
+	return found && known && accept(value)
+}
+
+// healthReasons splits a health line into its verdict and the reason tokens it
+// lists: degraded is whether the verdict is DEGRADED, and tokens are the
+// reasons after the colon, separated by commas or by spaces, so both the
+// comma-separated form and the space-separated line the town renders read. ok
+// is false for any shape this does not know — a RED or UNKNOWN verdict, a line
+// without the "<VERDICT> tick <age> ago" head, a DEGRADED line with no reason.
+func healthReasons(line string) (degraded bool, tokens []string, ok bool) {
+	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
+	if !found {
+		return false, nil, false
+	}
+	switch strings.ToUpper(verdict) {
+	case "GREEN":
+	case "DEGRADED":
+		degraded = true
+	default:
+		return false, nil, false
+	}
+	rest, found = strings.CutPrefix(rest, "tick ")
+	if !found {
+		return false, nil, false
+	}
+	age, tail, found := strings.Cut(rest, " ago")
+	if !found || age == "" {
+		return false, nil, false
+	}
+	if !degraded {
+		return false, nil, true
+	}
+	reasons, found := strings.CutPrefix(tail, ":")
+	if !found {
+		return false, nil, false
+	}
+	tokens = strings.FieldsFunc(reasons, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	if len(tokens) == 0 {
+		return false, nil, false
+	}
+	return true, tokens, true
+}
+
+// healthClass is what the verify step makes of a health line: the town passed,
+// it is still settling into the new daemon, or it has a fault.
+type healthClass string
+
+const (
+	healthPass     healthClass = "pass"
+	healthSettling healthClass = "settling"
+	healthFail     healthClass = "fail"
+)
+
+// classifyHealthLine classifies line for the verify step. A GREEN line, and a
+// DEGRADED one whose every reason is a queue state, pass as queueOnlyHealthLine
+// reads them. A DEGRADED line whose every reason is a queue state or a RECORDED
+// tick reason — "tick:<patrol>=<age>/<interval>[R]", a patrol whose last pass
+// predates the restart and is late until its first pass finishes — settles,
+// since that pass clears the reason. Everything else fails: another verdict, a
+// tick reason without the tag or with a value that is not the town's, another
+// key, a shape this does not know.
+func classifyHealthLine(line string) healthClass {
+	degraded, tokens, ok := healthReasons(line)
+	if !ok {
+		return healthFail
+	}
+	if !degraded {
+		return healthPass
+	}
+	settling := false
+	for _, reason := range tokens {
+		if isQueueState(reason) {
+			continue
+		}
+		key, value, _ := strings.Cut(reason, "=")
+		if !recordedTickReason(key, value) {
+			return healthFail
+		}
+		settling = true
+	}
+	if settling {
+		return healthSettling
+	}
+	return healthPass
+}
+
+// recordedTickReason reports whether key=value is a tick field as the town's
+// line renders one, "tick:<patrol>=<age>/<interval>[R]": a patrol with a short
+// duration either side of the slash, carrying the [R] of a RECORDED field.
+func recordedTickReason(key, value string) bool {
+	patrol, found := strings.CutPrefix(key, "tick:")
+	value, tagged := strings.CutSuffix(value, "[R]")
+	age, interval, shaped := strings.Cut(value, "/")
+	return found && tagged && shaped && patrol != "" &&
+		isShortDuration(age) && isShortDuration(interval)
+}
+
+// isShortDuration reports whether s is a duration as internal/townhealth.Short
+// renders it: a count and one unit, such as 400ms, 28s, 5m, 2h or 3d.
+func isShortDuration(s string) bool {
+	for _, unit := range []string{"ms", "s", "m", "h", "d"} {
+		if count, found := strings.CutSuffix(s, unit); found {
+			return isCount(count)
+		}
+	}
+	return false
 }
 
 // isOldestAge reports whether s is the value the town's escalation field
