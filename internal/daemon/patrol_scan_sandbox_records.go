@@ -276,10 +276,19 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 		// with nothing left to name it, so it is kept for the operator.
 		return "no sandbox deleter is linked, so its ended sandbox cannot be deleted"
 	}
+	// A files-mode seat's result lives only in its outbox, which the deleter
+	// does not copy, so the outbox is copied to the host first; a copy that
+	// fails keeps the sandbox with the copy's reason (gt-qem69c). A record that
+	// names no seat has no outbox to read.
+	if rec.Rig != "" && rec.Polecat != "" {
+		if reason := h.copySeatOutbox(rec.Rig, rec.Polecat, rec.Gateway); reason != "" {
+			return reason
+		}
+	}
 	if err := deleter(h.town(), rec); err != nil {
 		return "its ended sandbox could not be deleted: " + err.Error()
 	}
-	h.d.logger.Printf("%s: sandbox record %s deleted: its seat ended and the sandbox's ended marker is set; its transcripts are copied before the delete, and a failed copy is warned (%s/%s)", caller, name, rec.Rig, rec.Polecat)
+	h.d.logger.Printf("%s: sandbox record %s deleted: its seat ended and the sandbox's ended marker is set; its outbox and transcripts are copied before the delete, and a failed transcript copy is warned (%s/%s)", caller, name, rec.Rig, rec.Polecat)
 	return ""
 }
 
@@ -295,6 +304,8 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 // landing facts, bound to the seat's current bead and branch, authorizes the
 // delete. It returns the reason the sandbox is kept, or "" when it was deleted
 // (gt-7h38pd).
+// A Stopped sandbox cannot answer an exec, so its outbox cannot be copied out
+// either: the delete below goes on without it, warned like the transcripts.
 func (h *patrolScanHost) endStoppedSandbox(caller, name string, rec session.SandboxRecord) string {
 	if rec.Rig == "" || rec.Polecat == "" {
 		return "its record names no seat, so its seat's end cannot be read"
