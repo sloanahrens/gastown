@@ -44,6 +44,13 @@ const (
 	updateRestartWait = 15 * time.Minute
 	updateRestartPoll = 15 * time.Second
 
+	// updateHealthWait and updateHealthPoll bound the wait, after the restart,
+	// for a health line that is still settling: minutes cover a first pass of
+	// the town's checks on a loaded host, so a good roll is not recorded
+	// partial on a late tick.
+	updateHealthWait = 5 * time.Minute
+	updateHealthPoll = 10 * time.Second
+
 	// updateMaintWait and updateMaintPoll bound the wait for the daemon's
 	// maintenance cycle.
 	updateMaintWait = 30 * time.Minute
@@ -682,6 +689,8 @@ func updateOptions(req updateRequest, skip, only map[update.StepName]bool) updat
 		RestartPoll: updateRestartPoll,
 		MaintWait:   updateMaintWait,
 		MaintPoll:   updateMaintPoll,
+		HealthWait:  updateHealthWait,
+		HealthPoll:  updateHealthPoll,
 	}
 }
 
