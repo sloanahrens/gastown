@@ -2258,20 +2258,12 @@ func TestTownClusterRenderClaudeDirRecorded(t *testing.T) {
 	replay := clusterRenderFlags{out: filepath.Join(t.TempDir(), "replay")}
 	var out bytes.Buffer
 	d := clusterRenderDepsAt(t, town, &out)
-	var seen k8sdaemon.Values
-	d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
-		seen = v
-		return k8sdaemon.Build(v)
-	}
 	d.record = clusterRenderRecordOptions{
 		use:   true,
 		named: func(flag string) bool { return flag == "out" },
 	}
 	if err := runClusterRender(d, replay); err != nil {
 		t.Fatalf("the replay: %v", err)
-	}
-	if seen.DashboardClaudeDir != "" || seen.DaemonClaudeDir != "" {
-		t.Errorf("Values carries the retired directories: dashboard %q, daemon %q, want both empty", seen.DashboardClaudeDir, seen.DaemonClaudeDir)
 	}
 	for _, suffix := range []string{"-deployment-daemon.yaml", "-deployment-dashboard.yaml"} {
 		if got := renderedHostPaths(t, replay.out, suffix); len(got) != 0 {

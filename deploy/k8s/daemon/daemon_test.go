@@ -19,7 +19,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -293,8 +292,7 @@ func TestDashboardGolden(t *testing.T) {
 // TestDashboardMountsTheClaimReadOnly walks the dashboard pod: the town state is
 // the only claim and it is read-only, the /tmp emptyDir is the only writable
 // mount, the ServiceAccount token is not mounted, the viewer token is the only
-// Secret, and the claude directory is the only host path, read-only, as a
-// Directory.
+// Secret, and the pod has no host path.
 func TestDashboardMountsTheClaimReadOnly(t *testing.T) {
 	t.Parallel()
 	pod := mustBuild(t, dashboardValues(t)).DashboardDeployment.Spec.Template.Spec
@@ -343,100 +341,10 @@ func TestDashboardMountsTheClaimReadOnly(t *testing.T) {
 		t.Errorf("the dashboard pod mounts %d Secrets, want the viewer token alone", secrets)
 	}
 	if hostPaths != 0 {
-		t.Errorf("the dashboard pod has %d host paths with no Values.DashboardClaudeDir, want none", hostPaths)
+		t.Errorf("the dashboard pod has %d host paths, want none", hostPaths)
 	}
 	if got := podEnvMap(ctr)[ConfigHomeEnv]; got != manifestdata.LiveOpenShellConfigHome {
 		t.Errorf("XDG_CONFIG_HOME = %q, want %q, where the viewer token is mounted", got, manifestdata.LiveOpenShellConfigHome)
-	}
-
-	v := dashboardValues(t)
-	v.DashboardClaudeDir = "/Users/sloan/.claude"
-	pod = mustBuild(t, v).DashboardDeployment.Spec.Template.Spec
-	ctr = pod.Containers[0]
-	var host *HostPathVolumeSource
-	for _, vol := range pod.Volumes {
-		if vol.HostPath != nil {
-			if host != nil {
-				t.Fatalf("the dashboard pod has two host paths, want the claude directory alone")
-			}
-			host = vol.HostPath
-		}
-	}
-	if host == nil || host.Path != v.DashboardClaudeDir || host.Type != "Directory" {
-		t.Fatalf("the claude host path = %+v, want %s of type Directory, never DirectoryOrCreate", host, v.DashboardClaudeDir)
-	}
-	if m := volumeMountAt(ctr.VolumeMounts, ClaudeHomePath); m == nil || !m.ReadOnly {
-		t.Errorf("the claude mount = %+v, want %s read-only", m, ClaudeHomePath)
-	}
-}
-
-// TestDaemonClaudeMountIsReadOnlyDirectory holds the daemon's claude directory to
-// the golden that shows it: one host path, the Mac's ~/.claude as a Directory, and
-// in the daemon container only its projects subtree, mounted read-only at
-// DaemonHostClaudeProjectsPath, beside the pod's own config dir rather than over
-// it. No other host path exists.
-func TestDaemonClaudeMountIsReadOnlyDirectory(t *testing.T) {
-	t.Parallel()
-	v := goldenValues(t)
-	v.DaemonClaudeDir = "/Users/sloan/.claude"
-	built := mustBuild(t, v)
-	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-daemon-claude.yaml", document(t, built.Deployment))
-
-	pod := built.Deployment.Spec.Template.Spec
-	var host *Volume
-	hostPaths := 0
-	for i := range pod.Volumes {
-		if pod.Volumes[i].HostPath != nil {
-			hostPaths++
-			host = &pod.Volumes[i]
-		}
-	}
-	if hostPaths != 1 || host.Name != DaemonClaudeVolume || host.HostPath.Path != v.DaemonClaudeDir || host.HostPath.Type != "Directory" {
-		t.Fatalf("the daemon pod has %d host paths, want the claude directory alone: %s of type Directory", hostPaths, v.DaemonClaudeDir)
-	}
-	m := volumeMountAt(pod.Containers[0].VolumeMounts, DaemonHostClaudeProjectsPath)
-	if m == nil || m.Name != DaemonClaudeVolume || m.SubPath != DaemonClaudeProjectsSub || !m.ReadOnly {
-		t.Errorf("the claude mount = %+v, want %s from %s subPath %s read-only", m, DaemonHostClaudeProjectsPath, DaemonClaudeVolume, DaemonClaudeProjectsSub)
-	}
-	if whole := volumeMountAt(pod.Containers[0].VolumeMounts, ClaudeHomePath); whole != nil {
-		t.Errorf("the daemon mounts %s as a whole (%+v), want only the host's projects subtree beside it", ClaudeHomePath, whole)
-	}
-	// The pod's own config dir must stay the container's: a mount at
-	// $HOME/.claude/projects shadows the transcripts the om reviews write
-	// there, which is what the 11:00 roll broke (gt-xxhzf6).
-	if own := volumeMountAt(pod.Containers[0].VolumeMounts, filepath.Join(ClaudeHomePath, "projects")); own != nil {
-		t.Errorf("the daemon mounts %+v at %s, over the pod's own Claude projects dir", own, filepath.Join(ClaudeHomePath, "projects"))
-	}
-}
-
-// TestDaemonHostClaudePathMatchesAgentlog holds the daemon's host-projects mount
-// to the path the usage scan searches: internal/agentlog reads the host's
-// transcripts under HostClaudeProjectsDir(home), which is a sibling of the
-// config dir. A drift leaves every host transcript unread (gt-xxhzf6). The
-// import rule (imports_test.go) reads only non-test files, so this test imports
-// internal/agentlog and compares the exported paths.
-func TestDaemonHostClaudePathMatchesAgentlog(t *testing.T) {
-	t.Parallel()
-	if got, want := DaemonHostClaudeProjectsPath, agentlog.HostClaudeProjectsDir(DaemonHomePath); got != want {
-		t.Errorf("the daemon mounts the host's projects at %q, so the usage scan must look there; agentlog looks in %q", got, want)
-	}
-	if strings.HasPrefix(DaemonHostClaudeProjectsPath, ClaudeHomePath+"/") {
-		t.Errorf("the host's projects mount %q is under the pod's own config dir %q, so it shadows the om reviews' transcripts", DaemonHostClaudeProjectsPath, ClaudeHomePath)
-	}
-}
-
-// TestDaemonClaudeDirRefusesARelativePath holds a relative claude directory to a
-// refusal that names the value, since the pod names the host directory.
-func TestDaemonClaudeDirRefusesARelativePath(t *testing.T) {
-	t.Parallel()
-	v := goldenValues(t)
-	v.DaemonClaudeDir = "Users/sloan/.claude"
-	_, err := Build(v)
-	if err == nil {
-		t.Fatal("Build accepted a relative DaemonClaudeDir")
-	}
-	if !strings.Contains(err.Error(), "Values.DaemonClaudeDir") || !strings.Contains(err.Error(), "absolute") {
-		t.Errorf("Build refused with %q, want Values.DaemonClaudeDir and absolute named", err)
 	}
 }
 
@@ -543,8 +451,8 @@ func TestDashboardEnvEqualsTheDaemonEnv(t *testing.T) {
 }
 
 // TestDashboardRefusals drives each refusal the dashboard values have: the
-// dashboard with a rehearsal, with no viewer entry, and a claude directory that
-// is relative or given without the dashboard. Each names the value at fault.
+// dashboard with a rehearsal, with no viewer entry, and a viewer entry whose
+// mode is not private. Each names the value at fault.
 func TestDashboardRefusals(t *testing.T) {
 	t.Parallel()
 	rehearsal := rehearsalValues(t)
@@ -557,10 +465,6 @@ func TestDashboardRefusals(t *testing.T) {
 			badMode.Secrets[i].Mode = "0644"
 		}
 	}
-	relative := dashboardValues(t)
-	relative.DashboardClaudeDir = "Users/sloan/.claude"
-	orphan := goldenValues(t)
-	orphan.DashboardClaudeDir = "/Users/sloan/.claude"
 	for _, tc := range []struct {
 		name string
 		v    Values
@@ -569,8 +473,6 @@ func TestDashboardRefusals(t *testing.T) {
 		{"a rehearsal", rehearsal, "Values.Rehearsal"},
 		{"no viewer entry", noViewer, ViewerTokenFile},
 		{"a viewer entry with a mode that is not private", badMode, ViewerTokenFile},
-		{"a relative claude directory", relative, "absolute"},
-		{"a claude directory without the dashboard", orphan, "Values.Dashboard"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
