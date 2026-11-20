@@ -79,9 +79,9 @@ type verdictTick struct {
 	env    specDispatchEnv
 }
 
-// newVerdictTick is a tick over n clean beads. No seat is free, so a candidate
-// that reaches the per-tick limit is skipped there: the tick runs every check
-// up to the sling and hooks nothing between ticks.
+// newVerdictTick is a tick over n clean beads. No seat is free, so every
+// candidate is skipped at the seat choice: the tick runs every check up to the
+// sling and hooks nothing between ticks (gt-myexrt).
 func newVerdictTick(t *testing.T, n int) *verdictTick {
 	t.Helper()
 	v := &verdictTick{
@@ -120,9 +120,11 @@ func (v *verdictTick) wire(f *fakeSpecTown, verdicts *specCandidateVerdicts) spe
 	reads := newSpecTickReads()
 	v.reads = reads
 	env.Reads = reads
-	// No seat, so the per-tick limit (the free seats) is zero: every candidate
-	// runs the checks below the lint and none is hooked between ticks.
-	env.PerTick = 0
+	// The seat pool is empty, so the per-tick limit is set above every fixture
+	// candidate: each reaches the seat choice and is skipped there, after the
+	// checks above it (the children read included), and none is hooked between
+	// ticks (gt-myexrt).
+	env.PerTick = specCandidateFixtureSize + 1
 	env.Verdicts = verdicts
 	board := env.Candidates
 	var children func(beadID string) ([]specdispatch.Child, error)

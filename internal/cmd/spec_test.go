@@ -1094,6 +1094,42 @@ func TestSpecDispatchPerTickLimit(t *testing.T) {
 	}
 }
 
+// A tick with no free seat slings nothing, so it reads no candidate's
+// children: the per-tick limit holds each candidate back before the children
+// read (gt-myexrt).
+func TestTickEffNoSeatReadsNoChildren(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-c00", 2, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-c01", 2, "2026-09-29T10:01:00Z"),
+		cleanSpec("gt-c02", 2, "2026-09-29T10:02:00Z"),
+	)
+	// Every seat is at its cap, so the tick's default limit is zero free seats.
+	f.roster = specRoster{Live: map[string]int{"deepseek-flash": 2, "claude-sonnet": 2}}
+	env := f.env()
+	env.PerTick = 0
+	reads := 0
+	env.Children = func(string) ([]specdispatch.Child, error) {
+		reads++
+		return nil, nil
+	}
+	r := runSpecDispatchCycle(env)
+	if reads != 0 {
+		t.Fatalf("children read %d times with no free seat, want none", reads)
+	}
+	if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+		t.Fatalf("slung %v, dispatched %d; want none", f.slung, len(r.Dispatched))
+	}
+	if len(r.Skipped) != 3 {
+		t.Fatalf("skipped %d candidates, want 3: %+v", len(r.Skipped), r.Skipped)
+	}
+	for _, s := range r.Skipped {
+		if !strings.Contains(s.Line, specdispatch.SkipNoSeat) {
+			t.Errorf("%s: line %q, want the no-seat line", s.Bead, s.Line)
+		}
+	}
+}
+
 func TestSpecDispatchRefusesAndAnnotatesOnce(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
