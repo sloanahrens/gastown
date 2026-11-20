@@ -3,18 +3,27 @@ package daemon
 import (
 	"context"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/jobledger"
 )
 
 // nodeImagePruneKeep is how many images of each repository a node prune keeps: the
 // newest three, so the node can still roll back two releases.
 const nodeImagePruneKeep = 3
 
+// The job every node prune run records under in the town's job ledger, and the
+// outcome of a run that reached its report.
+const (
+	nodeImagePruneJob       = "node_image_prune"
+	nodeImagePruneOutcomeOK = "ok"
+)
+
 // nodeImagePruneOnce runs one node image prune: the Job nodePruneJobName names from
-// runID, running the running polecat image, as a dry run unless apply. It records
-// nothing itself -- the dry run's log lines and the ledger rows are the beads that own
-// them -- so every error is handed to the caller. now is the run's start time, which
-// those rows record.
-func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, runID string, apply bool, now time.Time) error { //nolint:unparam // now is the run's start time, which the ledger row beads gt-08qnmf and gt-i8zplo record
+// runID, running the running polecat image, as a dry run unless apply. Only the dry
+// run records its row here: one ok row of job nodeImagePruneJob with the summary's
+// figures and now as its start. An apply run's row and a failed run's are beads
+// gt-i8zplo and gt-eg0ji0. Every runner error is handed to the caller.
+func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, runID string, apply bool, now time.Time) error {
 	name, err := nodePruneJobName(runID)
 	if err != nil {
 		return err
@@ -23,6 +32,29 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 	if err != nil {
 		return err
 	}
-	_, err = runNodeImagePrune(ctx, kube, name, image, nodeImagePruneKeep, apply)
-	return err
+	rep, err := runNodeImagePrune(ctx, kube, name, image, nodeImagePruneKeep, apply)
+	if err != nil {
+		return err
+	}
+	if apply {
+		return nil
+	}
+	_, stats := nodeImagePruneSummary(rep, false)
+	return d.nodeImagePruneRecord(jobledger.Run{
+		Job:       nodeImagePruneJob,
+		StartedAt: now,
+		EndedAt:   d.clk().Now(),
+		Outcome:   nodeImagePruneOutcomeOK,
+		Stats:     stats,
+	})
+}
+
+// nodeImagePruneRecord appends one run to the town's job ledger. A ledger that
+// cannot record it is logged once and returns nil: the ledger records the run and
+// does not decide it, so the run's result is unchanged.
+func (d *Daemon) nodeImagePruneRecord(run jobledger.Run) error { //nolint:unparam // a failed append is logged, not returned: the ledger records the run and does not decide it
+	if err := d.appendJobRun(run); err != nil {
+		d.logger.Printf("node_image_prune: the job ledger could not record the run: %v", err)
+	}
+	return nil
 }
