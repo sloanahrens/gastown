@@ -54,12 +54,13 @@ type GateRunTest struct {
 // gateWallRE reads the wall seconds off a verdict line: "after 139s wall" or "PASSED in 139s wall".
 var gateWallRE = regexp.MustCompile(`(?:after|PASSED in) (\d+)s wall`)
 
-// ParseGateRunLog reads a gate job log into a GateRun. Setup runs from the task line to the first
-// lint line, lint to the build line and build to the unit tier line; the verdict line gives the
-// unit wall and passed. The tierwall report gives the tier, packages, slow tests, CPUs and pole;
-// a "(cached)" ok line counts one cached package. A missing marker, or a stage that does not run
-// forward, leaves its field zero, a tierwall line it cannot read is skipped rather than read as a
-// value, and a line without a leading RFC3339 timestamp is skipped.
+// ParseGateRunLog reads a gate job log into a GateRun. Setup runs from the runner's task line
+// ("Runner <id> ... received task <n> ...") to the first lint line, lint to the build line and
+// build to the unit tier line; the verdict line gives the unit wall and passed. The tierwall
+// report gives the tier, packages, slow tests, CPUs and pole; a "(cached)" ok line counts one
+// cached package. A missing marker, or a stage that does not run forward, leaves its field zero,
+// a tierwall line it cannot read is skipped rather than read as a value, and a line without a
+// leading RFC3339 timestamp is skipped.
 func ParseGateRunLog(log string) GateRun {
 	var run GateRun
 	var task, lint, build, unit time.Time
@@ -73,7 +74,7 @@ func ParseGateRunLog(log string) GateRun {
 			run.CachedPkgs++
 		}
 		switch {
-		case task.IsZero() && strings.HasPrefix(msg, "task received"):
+		case task.IsZero() && strings.HasPrefix(msg, "Runner ") && strings.Contains(msg, " received task "):
 			task = at
 		case lint.IsZero() && strings.HasPrefix(msg, "lint:"):
 			lint = at

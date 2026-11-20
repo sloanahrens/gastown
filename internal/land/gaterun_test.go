@@ -6,18 +6,22 @@ import (
 	"testing"
 )
 
-// TestParseGateRunLog reads a passing gate's log. The repeated lint line at 10:00:04 leaves lint_s
-// at 1.5: the stage starts at the first lint line.
+// runnerTaskLine is the first line of a gate job log, as Forgejo's runner writes it.
+const runnerTaskLine = "Runner 14b9572a-0fbc-4368-ac6b-63af30a5f49c (version:v13.2.0) " +
+	"received task 20031 of job gate, triggered by event: push"
+
+// TestParseGateRunLog reads a passing gate's log. Setup runs from the runner's task line to the
+// first lint line, 16s; the repeated lint line at 10:00:17 leaves lint_s at 1.5.
 func TestParseGateRunLog(t *testing.T) {
 	t.Parallel()
-	log := "2026-11-19T10:00:00Z task received\r\n" +
-		"2026-11-19T10:00:03.5Z lint: golangci-lint run --timeout=5m\r\n" +
-		"2026-11-19T10:00:04Z lint: hygiene scan\r\n" +
-		"2026-11-19T10:00:05Z gate: build (go build ./...)\r\n" +
-		"2026-11-19T10:00:09Z gate: unit tier (every package)\r\n" +
-		"2026-11-19T10:02:28Z gate: PASSED in 139s wall\r\n"
+	log := "2026-11-19T10:00:00Z " + runnerTaskLine + "\r\n" +
+		"2026-11-19T10:00:16Z lint: golangci-lint run --timeout=5m\r\n" +
+		"2026-11-19T10:00:17Z lint: hygiene scan\r\n" +
+		"2026-11-19T10:00:17.5Z gate: build (go build ./...)\r\n" +
+		"2026-11-19T10:00:21.5Z gate: unit tier (every package)\r\n" +
+		"2026-11-19T10:02:30Z gate: PASSED in 139s wall\r\n"
 
-	want := GateRun{SetupS: 3.5, LintS: 1.5, BuildS: 4, UnitWallS: 139, Passed: true}
+	want := GateRun{SetupS: 16, LintS: 1.5, BuildS: 4, UnitWallS: 139, Passed: true}
 	if got := ParseGateRunLog(log); !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseGateRunLog() = %+v, want %+v", got, want)
 	}
@@ -27,7 +31,7 @@ func TestParseGateRunLog(t *testing.T) {
 // is false.
 func TestParseGateRunLogFailed(t *testing.T) {
 	t.Parallel()
-	log := "2026-11-19T10:00:00Z task received\r\n" +
+	log := "2026-11-19T10:00:00Z " + runnerTaskLine + "\r\n" +
 		"2026-11-19T10:00:03Z lint: golangci-lint run\r\n" +
 		"2026-11-19T10:00:05Z gate: build (go build ./...)\r\n" +
 		"2026-11-19T10:00:09Z gate: unit tier (every package)\r\n" +
@@ -50,13 +54,25 @@ func TestParseGateRunLogPartial(t *testing.T) {
 	}{
 		{name: "empty log", log: "", want: GateRun{}},
 		{name: "no gate markers", log: "2026-11-19T10:00:00Z go test ./internal/land\r\n", want: GateRun{}},
-		{name: "markers without a timestamp", log: "task received\nlint: x\ngate: build\ngate: unit tier\ngate: PASSED in 139s wall\n", want: GateRun{}},
+		{name: "markers without a timestamp", log: runnerTaskLine + "\nlint: x\ngate: build\ngate: unit tier\ngate: PASSED in 139s wall\n", want: GateRun{}},
 		{name: "marker after an untimed first word", log: "run gate: PASSED in 139s wall\n", want: GateRun{}},
 		{name: "lint and build with no task line", log: "2026-11-19T10:00:03Z lint: x\n2026-11-19T10:00:05Z gate: build\n", want: GateRun{LintS: 2}},
-		{name: "task with no lint line", log: "2026-11-19T10:00:00Z task received\n", want: GateRun{}},
+		{name: "task with no lint line", log: "2026-11-19T10:00:00Z " + runnerTaskLine + "\n", want: GateRun{}},
+		{
+			name: "received task without the Runner prefix",
+			log: "2026-11-19T10:00:00Z the runner received task 20031 of job gate\n" +
+				"2026-11-19T10:00:16Z lint: x\n",
+			want: GateRun{},
+		},
+		{
+			name: "Runner line that received no task",
+			log: "2026-11-19T10:00:00Z Runner 14b9572a-0fbc-4368-ac6b-63af30a5f49c (version:v13.2.0) starting job gate\n" +
+				"2026-11-19T10:00:16Z lint: x\n",
+			want: GateRun{},
+		},
 		{
 			name: "lint before the task line",
-			log: "2026-11-19T10:00:05Z task received\n" +
+			log: "2026-11-19T10:00:05Z " + runnerTaskLine + "\n" +
 				"2026-11-19T10:00:00Z lint: x\n" +
 				"2026-11-19T10:00:05Z gate: build\n" +
 				"2026-11-19T10:00:09Z gate: unit tier\n",
