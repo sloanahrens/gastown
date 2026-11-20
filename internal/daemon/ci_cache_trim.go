@@ -10,11 +10,12 @@ package daemon
 // as the shared cache trim does (gt-gg9hv.48). Each volume in ciCacheVolumes keeps
 // its own interval and retry, so a failure on one volume does not move another's
 // cadence (gt-4q3qfb). Each run lists the runner's pod once, then execs once per
-// volume that is due, in table order, into the pod's dind container. A volume
-// with no cap (ci-gocache) gets the age rule alone: a constant script removes the
-// volume's entries that have gone unwritten for ci_cache_max_age. A capped volume
-// (ci-npm) gets the same removal only while it is over its cap; at or under the
-// cap the script removes nothing. ci-gomod is capped the same way, but its entries
+// volume that is due, in table order, into the pod's dind container. ci-gocache
+// is trimmed by the least-recently-used program: the entries older than both
+// ci_cache_max_age and the floor, then the oldest above the floor while the
+// volume is over its cap of ci_gocache_cap_bytes. A capped volume (ci-npm) gets
+// the age removal only while it is over its cap; at or under the cap the script
+// removes nothing. ci-gomod is capped the same way, but its entries
 // are whole module directories under pkg/mod and never single files: a module with
 // files missing breaks the next build. Its script removes a module directory whole,
 // by the directory's time, and never touches pkg/mod/cache. Each exec reports the
@@ -87,9 +88,9 @@ const (
 	// It is not a target name, so it cannot collide with one.
 	ciCacheTrimName = "ci_cache_trim"
 
-	// ciCacheNoOpKey is the attention item key of the uncapped volume's trim that
-	// removed no file while the volume stayed over ci_cache_warn_bytes. A capped
-	// volume's key is this one with its name after it (ciCacheNoOpKeyOf).
+	// ciCacheNoOpKey is the attention item key of ci-gocache's trim that removed
+	// no file while the volume stayed over its cap. A capped volume's key is this
+	// one with its name after it (ciCacheNoOpKeyOf).
 	ciCacheNoOpKey = "ci-cache-trim-noop"
 )
 
@@ -117,11 +118,10 @@ func (v ciCacheVolume) unit() string {
 	return "files"
 }
 
-// capped reports whether a reading of the volume is measured against its cap. A
-// module or file volume's cap is the table's constant and its reading uses it. An
-// lru volume's cap is the setting the pass copies into the row it runs, and the
-// volume's no-op item and dry-run line are measured against the warn figure
-// instead.
+// capped reports whether the volume's cap is the table's constant, which its
+// no-op item key and dry-run line read. An lru volume's cap is the setting the
+// pass copies into the row it runs, and it keeps the key it has always had and
+// measures its item against that copy.
 func (v ciCacheVolume) capped() bool {
 	return v.capKiB > 0 && !v.lru
 }
@@ -166,8 +166,8 @@ func (d *Daemon) ciCacheRetryDue(due []ciCacheVolume, concluded time.Time) {
 	}
 }
 
-// ciCacheNoOpKeyOf is the attention item key of a volume's no-op reading. The
-// uncapped volume keeps the key it has always had; a capped volume names itself.
+// ciCacheNoOpKeyOf is the attention item key of a volume's no-op reading.
+// ci-gocache keeps the key it has always had; a capped volume names itself.
 func ciCacheNoOpKeyOf(v ciCacheVolume) string {
 	if !v.capped() {
 		return ciCacheNoOpKey
@@ -745,6 +745,11 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	after := polecatimage.Human(reply.afterKiB * 1024)
 	ageText := ciCacheAgeText(time.Duration(minutes) * time.Minute)
 	switch {
+	case mode == agentconfig.DiskMaintenanceModeApply && v.lru:
+		// The selection removes past the age and then, while the volume is over
+		// its cap, down to the floor, so the line names the cap, not the age.
+		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d %s, %s to %s, against its cap of %s",
+			v.name, reply.removed, v.unit(), before, after, polecatimage.Human(v.capKiB*1024))
 	case mode == agentconfig.DiskMaintenanceModeApply:
 		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d %s, %s to %s (older than %s)",
 			v.name, reply.removed, v.unit(), before, after, ageText)
@@ -765,18 +770,21 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 }
 
 // ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's
-// reading. The threshold is the warn figure for an uncapped volume and the
-// volume's cap for a capped one. A trim that removed no file while the volume is
-// over the threshold raises the item, and a reading at or under it clears the
-// item. A reading over the threshold after removals leaves the item as it is. A
-// dry run measures nothing, since it removes nothing by design.
+// reading. The threshold is the volume's cap: the table's constant for a capped
+// volume, and the setting the pass copies into the row for ci-gocache. Only a
+// volume with no cap at all is measured against the warn figure. A trim that
+// removed no file while the volume is over the threshold raises the item, and a
+// reading at or under it clears the item. A reading over the threshold after
+// removals leaves the item as it is. A dry run measures nothing, since it removes
+// nothing by design.
 func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply, warn int64) {
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		return
 	}
 	key := ciCacheNoOpKeyOf(v)
+	capMeasured := v.capped() || v.lru
 	threshold, limit := warn, "the warn figure of "
-	if v.capped() {
+	if capMeasured {
 		threshold, limit = v.capKiB*1024, "its cap of "
 	}
 	after := reply.afterKiB * 1024
@@ -788,7 +796,7 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 		return
 	}
 	holder := "CI cache trim removed no file while the Go build cache holds"
-	if v.capped() {
+	if capMeasured {
 		holder = "CI cache trim of " + v.name + " removed no " + v.unit() + " while the volume holds"
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
