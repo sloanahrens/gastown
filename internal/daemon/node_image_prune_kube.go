@@ -160,19 +160,66 @@ func (k kubectlNodePrune) runBounded(ctx context.Context, limit time.Duration, v
 	return "", -1, fmt.Errorf("running kubectl %s: %w", verb, err)
 }
 
-// WaitComplete blocks until the node-prune Job completes, under nodePruneWaitTimeout.
-// kubectl's own timeout is the Job's deadline plus 60 seconds. A non-zero exit is an
-// error naming the verb, the status and the head of kubectl's answer (gt-d4zhkq).
+// WaitComplete blocks until the node-prune Job completes or fails, under
+// nodePruneWaitTimeout. kubectl's own timeout is the Job's deadline plus 60 seconds.
+// The Job has backoffLimit 0, so a helper that fails at once leaves a Failed Job
+// that never becomes complete; waiting only on complete would hold for kubectl's
+// whole timeout. Two waits run at once under the one bound, one for each condition:
+// the first to exit 0 decides, the other kubectl is canceled and waited for, and a
+// wait that exits non-zero names the condition, the status and the head of kubectl's
+// answer (gt-d4zhkq). A Job that reaches neither condition is an error naming both,
+// and the deadline error keeps the bound's text.
 func (k kubectlNodePrune) WaitComplete(ctx context.Context, name string) error {
+	bounded, cancel := context.WithTimeout(ctx, nodePruneWaitTimeout)
+	defer cancel()
 	timeout := "--timeout=" + strconv.Itoa(nodeImagePruneDeadlineSec+60) + "s"
-	out, exit, err := k.runBounded(ctx, nodePruneWaitTimeout, "wait", "-n", nodeImagePruneNamespace, "wait", "--for=condition=complete", "job/"+name, timeout)
-	if err != nil {
-		return err
+
+	type waitResult struct {
+		condition string
+		out       string
+		exit      int
+		err       error
 	}
-	if exit != 0 {
-		return fmt.Errorf("kubectl wait for the node-prune Job exited %d: %s", exit, nodePruneErrHead(out))
+	results := make(chan waitResult, 2)
+	wait := func(condition string) {
+		out, exit, err := k.runBounded(bounded, nodePruneWaitTimeout, "wait", "-n", nodeImagePruneNamespace, "wait", "--for=condition="+condition, "job/"+name, timeout)
+		results <- waitResult{condition: condition, out: out, exit: exit, err: err}
 	}
-	return nil
+	go wait("complete")
+	go wait("failed")
+
+	// decide reports the condition a wait that exited 0 reached: a Failed Job is an
+	// error naming the Job, and a Complete one is a finished prune.
+	decide := func(r waitResult) error {
+		if r.condition == "failed" {
+			return fmt.Errorf("kubectl wait: the node-prune Job %s failed", name)
+		}
+		return nil
+	}
+
+	first := <-results
+	if first.err == nil && first.exit == 0 {
+		// The Job reached the condition this wait asked for. The other kubectl is
+		// canceled through the bound and waited for, so none outlives this call.
+		cancel()
+		<-results
+		return decide(first)
+	}
+	// The first wait ended without its condition; the other still may reach its own.
+	second := <-results
+	if second.err == nil && second.exit == 0 {
+		return decide(second)
+	}
+	if errors.Is(first.err, context.DeadlineExceeded) && errors.Is(second.err, context.DeadlineExceeded) {
+		return first.err
+	}
+	status := func(r waitResult) string {
+		if r.err != nil {
+			return r.condition + ": " + r.err.Error()
+		}
+		return fmt.Sprintf("%s: exited %d: %s", r.condition, r.exit, nodePruneErrHead(r.out))
+	}
+	return fmt.Errorf("kubectl wait: the node-prune Job %s reported neither complete nor failed: %s; %s", name, status(first), status(second))
 }
 
 // Logs returns the node-prune Job's log, untrimmed, under nodePruneCallTimeout. A

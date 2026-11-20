@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -13,6 +14,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// waitConditionArgv returns the condition a wait argv asks kubectl for, or "".
+func waitConditionArgv(args []string) string {
+	for _, arg := range args {
+		if condition, ok := strings.CutPrefix(arg, "--for=condition="); ok {
+			return condition
+		}
+	}
+	return ""
+}
 
 // TestNodeImagePruneKubeArgv: ListJSON and Apply run kubectl through the exec seam
 // with exactly the argv the node-prune run needs, and no --request-timeout or
@@ -205,7 +216,13 @@ func TestNodeImagePruneKubeWaitArgv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var gotArgs []string
-			run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+			run := func(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				if waitConditionArgv(args) == "failed" {
+					// The complete wait is the argv under test; the failed wait
+					// ends when WaitComplete cancels it.
+					<-ctx.Done()
+					return "", -1, ctx.Err()
+				}
 				gotArgs = args
 				return tt.out, 0, nil
 			}
@@ -230,11 +247,15 @@ func TestNodeImagePruneKubeWaitIsBounded(t *testing.T) {
 		name string
 		call func(k kubectlNodePrune) error
 		want time.Duration
+		// calls is how many kubectl calls the seam takes: WaitComplete runs the
+		// complete and failed waits at once.
+		calls int
 	}{
 		{
-			name: "WaitComplete",
-			call: func(k kubectlNodePrune) error { return k.WaitComplete(context.Background(), job) },
-			want: 1020 * time.Second,
+			name:  "WaitComplete",
+			call:  func(k kubectlNodePrune) error { return k.WaitComplete(context.Background(), job) },
+			want:  1020 * time.Second,
+			calls: 2,
 		},
 		{
 			name: "Logs",
@@ -242,30 +263,47 @@ func TestNodeImagePruneKubeWaitIsBounded(t *testing.T) {
 				_, err := k.Logs(context.Background(), job)
 				return err
 			},
-			want: 120 * time.Second,
+			want:  120 * time.Second,
+			calls: 1,
 		},
 		{
-			name: "Delete",
-			call: func(k kubectlNodePrune) error { return k.Delete(context.Background(), job) },
-			want: 120 * time.Second,
+			name:  "Delete",
+			call:  func(k kubectlNodePrune) error { return k.Delete(context.Background(), job) },
+			want:  120 * time.Second,
+			calls: 1,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var got time.Duration
-			var hasDeadline bool
-			run := func(ctx context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
-				var deadline time.Time
-				deadline, hasDeadline = ctx.Deadline()
-				got = time.Until(deadline)
+			type call struct {
+				limit time.Duration
+				ok    bool
+			}
+			// The fake records its deadline as each wait starts, and WaitComplete
+			// returns only after both end, so a buffered channel keeps it race-free.
+			calls := make(chan call, tt.calls)
+			run := func(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				deadline, ok := ctx.Deadline()
+				calls <- call{limit: time.Until(deadline), ok: ok}
+				if waitConditionArgv(args) == "failed" {
+					<-ctx.Done()
+					return "", -1, ctx.Err()
+				}
 				return "", 0, nil
 			}
 			require.NoError(t, tt.call(kubectlNodePrune{dir: t.TempDir(), run: run}))
 
-			require.True(t, hasDeadline, "kubectl ran with no deadline")
-			// The seam reads the deadline a moment after it is set; a few seconds of
-			// slack keeps the assertion about which bound was chosen.
-			assert.InDelta(t, tt.want.Seconds(), got.Seconds(), 5, "the deadline is %s, want about %s", got, tt.want)
+			for i := 0; i < tt.calls; i++ {
+				select {
+				case got := <-calls:
+					require.True(t, got.ok, "kubectl ran with no deadline")
+					// The seam reads the deadline a moment after it is set; a few
+					// seconds of slack keeps the assertion about which bound was chosen.
+					assert.InDelta(t, tt.want.Seconds(), got.limit.Seconds(), 5, "the deadline is %s, want about %s", got.limit, tt.want)
+				default:
+					t.Fatalf("kubectl ran %d times, want %d", i, tt.calls)
+				}
+			}
 		})
 	}
 }
@@ -355,7 +393,7 @@ func TestNodeImagePruneKubeWaitErrors(t *testing.T) {
 		{
 			name:     "WaitComplete",
 			call:     func(k kubectlNodePrune) error { return k.WaitComplete(context.Background(), job) },
-			wantExit: "kubectl wait for the node-prune Job exited 1",
+			wantExit: "complete: exited 1",
 			wantRun:  "running kubectl wait",
 		},
 		{
@@ -514,4 +552,124 @@ func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
 			assert.True(t, utf8.ValidString(err.Error()), "the cut left half a rune")
 		})
 	}
+}
+
+// TestNodeImagePruneKubeWaitSeesAFailedJob: a node-prune Job has backoffLimit 0,
+// so a helper that fails at once leaves a Failed Job that never becomes complete.
+// Waiting only on complete held for kubectl's whole 960 second timeout. WaitComplete
+// races a wait on complete and a wait on failed: the first to exit 0 decides, the
+// other kubectl is cancelled and waited for, and the Failed Job is an error naming
+// the Job (gt-25fx5t).
+func TestNodeImagePruneKubeWaitSeesAFailedJob(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+
+	tests := []struct {
+		name       string
+		first      string // the condition whose wait exits 0
+		wantFailed bool
+	}{
+		{name: "failed exits 0 first", first: "failed", wantFailed: true},
+		{name: "complete exits 0 first", first: "complete"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var mu sync.Mutex
+			argvs := map[string][]string{}
+			cancelled := make(chan string, 1)
+			run := func(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				condition := waitConditionArgv(args)
+				mu.Lock()
+				argvs[condition] = args
+				mu.Unlock()
+				if condition == tt.first {
+					return "", 0, nil
+				}
+				<-ctx.Done()
+				cancelled <- condition
+				return "", -1, ctx.Err()
+			}
+
+			err := kubectlNodePrune{dir: t.TempDir(), run: run}.WaitComplete(context.Background(), job)
+
+			// WaitComplete returns only after the cancelled wait's exec returned,
+			// so no goroutine or kubectl is left behind.
+			select {
+			case condition := <-cancelled:
+				assert.Equal(t, cancelledCondition(tt.first), condition)
+			default:
+				t.Fatalf("WaitComplete returned with the %s wait still running", cancelledCondition(tt.first))
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			for _, condition := range []string{"complete", "failed"} {
+				assert.Equal(t, []string{"-n", "gt", "wait", "--for=condition=" + condition, "job/" + job, "--timeout=960s"}, argvs[condition])
+			}
+
+			if !tt.wantFailed {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "the node-prune Job "+job+" failed")
+		})
+	}
+
+	// The wait that errors need not be the one that reports the Job's condition:
+	// the first to exit 0 decides whichever order the two end in.
+	t.Run("one wait errors, the other exits 0", func(t *testing.T) {
+		cases := []struct {
+			name      string
+			exitsZero string
+			wantNoErr bool
+		}{
+			{name: "failed exits 0", exitsZero: "failed", wantNoErr: false},
+			{name: "complete exits 0", exitsZero: "complete", wantNoErr: true},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+					if waitConditionArgv(args) == c.exitsZero {
+						return "", 0, nil
+					}
+					return "", 1, nil
+				}
+				err := kubectlNodePrune{dir: t.TempDir(), run: run}.WaitComplete(context.Background(), job)
+
+				if c.wantNoErr {
+					assert.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "the node-prune Job "+job+" failed")
+			})
+		}
+	})
+}
+
+// cancelledCondition names the wait that is not the first to exit 0.
+func cancelledCondition(first string) string {
+	if first == "failed" {
+		return "complete"
+	}
+	return "failed"
+}
+
+// TestNodeImagePruneKubeWaitNamesBothStatuses: when neither wait reports its
+// condition, WaitComplete is an error naming both, so a refused wait is never
+// read as a clean one (gt-25fx5t).
+func TestNodeImagePruneKubeWaitNamesBothStatuses(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+
+	run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+		return "", 1, nil
+	}
+	err := kubectlNodePrune{dir: t.TempDir(), run: run}.WaitComplete(context.Background(), job)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), job)
+	assert.Contains(t, err.Error(), "complete: exited 1")
+	assert.Contains(t, err.Error(), "failed: exited 1")
 }
