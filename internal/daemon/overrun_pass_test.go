@@ -274,3 +274,62 @@ func TestOverrunPassTicksWithoutDaemonStart(t *testing.T) {
 		}
 	})
 }
+
+// TestOverrunPassReadSeat: a pass's three per-seat reads come back from one
+// function (overrunReadSeat), each answer and each error in its own field, made
+// in order for the seat it was given, with the escalation wait read only
+// outside a gate (gt-872lkl).
+func TestOverrunPassReadSeat(t *testing.T) {
+	t.Parallel()
+	answered := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	answerErr, gateErr, waitErr := errors.New("answer unreadable"), errors.New("container-gate slot status: boom"), errors.New("escalation unreadable")
+	seat := overrunSeat{Rig: "gastown", Polecat: "toast", Bead: "gt-872lkl"}
+	who := "gastown/toast/gt-872lkl"
+
+	tests := []struct {
+		name                        string
+		inGate, waiting             bool
+		gateErr, waitErr, answerErr error
+		answeredAt                  time.Time
+		want                        overrunSeatReads
+		wantWaitRead                bool
+	}{
+		{name: "outside a gate reads the escalation wait", waiting: true, answeredAt: answered,
+			want: overrunSeatReads{waiting: true, answeredAt: answered}, wantWaitRead: true},
+		{name: "inside a gate reads no escalation wait", inGate: true, waiting: true, answeredAt: answered,
+			want: overrunSeatReads{inGate: true, answeredAt: answered}},
+		{name: "each failed read keeps its own error", gateErr: gateErr, waitErr: waitErr, answerErr: answerErr,
+			want: overrunSeatReads{gateErr: gateErr, waitingErr: waitErr, answeredErr: answerErr}, wantWaitRead: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			call := func(read string, got overrunSeat) {
+				calls = append(calls, read+" "+got.Rig+"/"+got.Polecat+"/"+got.Bead)
+			}
+			s := overrunSeams{
+				escalationAnsweredAt: func(got overrunSeat) (time.Time, error) {
+					call("answered", got)
+					return tc.answeredAt, tc.answerErr
+				},
+				gateRunning: func(got overrunSeat) (bool, error) { call("gate", got); return tc.inGate, tc.gateErr },
+				escalationWaiting: func(got overrunSeat) (bool, error) {
+					call("waiting", got)
+					return tc.waiting, tc.waitErr
+				},
+			}
+
+			if got := overrunReadSeat(s, seat); got != tc.want {
+				t.Errorf("overrunReadSeat = %+v, want %+v", got, tc.want)
+			}
+			wantCalls := "answered " + who + ", gate " + who
+			if tc.wantWaitRead {
+				wantCalls += ", waiting " + who
+			}
+			if got := strings.Join(calls, ", "); got != wantCalls {
+				t.Errorf("seam calls = %q, want %q", got, wantCalls)
+			}
+		})
+	}
+}

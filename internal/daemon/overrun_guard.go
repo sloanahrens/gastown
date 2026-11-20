@@ -375,6 +375,42 @@ type overrunSeams struct {
 	spanEnd func(seat overrunSeat, at time.Time) error
 }
 
+// overrunSeatReads is one seat's per-seat reads for a pass (overrunReadSeat):
+// each seam's answer, with the error the read failed with, so the seat loop can
+// log a failure and decide it where the seat's state is known.
+type overrunSeatReads struct {
+	// answeredAt is when the escalation the seat's ESCALATED stop was for was
+	// answered, zero when it was not.
+	answeredAt  time.Time
+	answeredErr error
+	// inGate reports whether the seat is inside its own gate now. The error is
+	// the failed gate read's; the loop then carries the record's last answer.
+	inGate  bool
+	gateErr error
+	// waiting reports whether the seat is waiting on an open escalation it
+	// raised. It is read only outside a gate and used only outside one.
+	waiting    bool
+	waitingErr error
+}
+
+// overrunReadSeat makes the three per-seat reads a pass judges a seat by, one
+// after another: the escalation answer, the gate state, and — outside a gate,
+// which is already exempt, so one stretch is never exempt twice — whether the
+// seat waits on an escalation it raised. Each read's answer comes back with its
+// error. The escalation wait is still read when the gate read fails, because
+// the carried gate answer is not known here; the loop uses it only if the seat
+// turns out not to be in its gate.
+func overrunReadSeat(s overrunSeams, seat overrunSeat) overrunSeatReads {
+	var r overrunSeatReads
+	r.answeredAt, r.answeredErr = s.escalationAnsweredAt(seat)
+	r.inGate, r.gateErr = s.gateRunning(seat)
+	if r.gateErr == nil && r.inGate {
+		return r
+	}
+	r.waiting, r.waitingErr = s.escalationWaiting(seat)
+	return r
+}
+
 // overrunGuardConfig returns the patrol's config, or nil when absent.
 func overrunGuardConfig(c *DaemonPatrolConfig) *OverrunGuardConfig {
 	if c == nil || c.Patrols == nil {
@@ -501,19 +537,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		splitAddedLines = cfg.SplitAddedLinesOrOff()
 	}
 	// An unset gate seam is no exemption: every seat's time counts.
-	gateRunning := s.gateRunning
-	if gateRunning == nil {
-		gateRunning = func(overrunSeat) (bool, error) { return false, nil }
+	if s.gateRunning == nil {
+		s.gateRunning = func(overrunSeat) (bool, error) { return false, nil }
 	}
 	// An unset escalation seam is no exemption, as for the gate.
-	escalationWaiting := s.escalationWaiting
-	if escalationWaiting == nil {
-		escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
+	if s.escalationWaiting == nil {
+		s.escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
 	}
 	// An unset answer seam leaves the clock where the stop left it.
-	escalationAnsweredAt := s.escalationAnsweredAt
-	if escalationAnsweredAt == nil {
-		escalationAnsweredAt = func(overrunSeat) (time.Time, error) { return time.Time{}, nil }
+	if s.escalationAnsweredAt == nil {
+		s.escalationAnsweredAt = func(overrunSeat) (time.Time, error) { return time.Time{}, nil }
 	}
 	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(pc))
 	// The ceiling on the gate time one sling may bank is the configured
@@ -558,14 +591,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		slung = slungFloor(slung, seat.SessionStart, seat.RestartedAt)
+		// The three per-seat reads of the pass, made once for the seat.
+		reads := overrunReadSeat(s, seat)
 		// A seat whose ESCALATED stop was answered could not resume before the
 		// answer, so its clock starts there (gt-bdlg6o). An answer that cannot be
 		// read leaves the clock where the stop left it: the direction that stops.
-		answered, err := escalationAnsweredAt(seat)
-		if err != nil {
+		answered := reads.answeredAt
+		if reads.answeredErr != nil {
 			if !escalationReadFailed {
 				escalationReadFailed = true
-				d.logger.Printf("overrun_guard: %s: cannot read the escalation answer for %s, not restarting its clock: %v", who, seat.Bead, err)
+				d.logger.Printf("overrun_guard: %s: cannot read the escalation answer for %s, not restarting its clock: %v", who, seat.Bead, reads.answeredErr)
 			}
 			answered = time.Time{}
 		}
@@ -598,15 +633,15 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// consecutive failures, then counts all of its time: the failure is
 		// recorded before the carry is judged, so the third one in a row is the
 		// one that stops it (recordGateRead, carriedGate).
-		inGate, err := gateRunning(seat)
-		if err != nil {
+		inGate := reads.inGate
+		if reads.gateErr != nil {
 			state.recordGateRead(false, false)
 			var carried bool
 			inGate, carried = state.carriedGate()
 			if carried {
-				d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s (failure %d in a row), carrying its last gate answer: %v", who, seat.Bead, state.GateReadFailures, err)
+				d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s (failure %d in a row), carrying its last gate answer: %v", who, seat.Bead, state.GateReadFailures, reads.gateErr)
 			} else {
-				d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s (failure %d in a row), counting all of its time: %v", who, seat.Bead, state.GateReadFailures, err)
+				d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s (failure %d in a row), counting all of its time: %v", who, seat.Bead, state.GateReadFailures, reads.gateErr)
 			}
 		} else {
 			state.recordGateRead(true, inGate)
@@ -618,11 +653,11 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// outside a gate, which is already exempt, so no stretch is exempt twice.
 		waiting := false
 		if !inGate {
-			waiting, err = escalationWaiting(seat)
-			if err != nil {
+			waiting = reads.waiting
+			if reads.waitingErr != nil {
 				if !escalationReadFailed {
 					escalationReadFailed = true
-					d.logger.Printf("overrun_guard: %s: cannot read the escalation state for %s, counting all of its time: %v", who, seat.Bead, err)
+					d.logger.Printf("overrun_guard: %s: cannot read the escalation state for %s, counting all of its time: %v", who, seat.Bead, reads.waitingErr)
 				}
 				waiting = false
 			}
