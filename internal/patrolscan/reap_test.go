@@ -634,11 +634,10 @@ func TestReapBlocksAnUnpushedSeatWhoseGitCheckFailed(t *testing.T) {
 	}
 }
 
-// TestReapSandboxUnpushedSeatKeepsEveryOtherRisk guards gt-aimwqy: only the
-// unpushed commits are the nuke's to preserve. Any other at-risk fact, a seat
-// the host does not name sandbox, a git state not measured live, and a nuke
-// that refuses or fails each keep the seat off the removed list.
-func TestReapSandboxUnpushedSeatKeepsEveryOtherRisk(t *testing.T) {
+// TestReapBlocksASandboxUnpushedSeatWithAnyOtherBlocker guards gt-aimwqy: only
+// the measured unpushed commits are the nuke's to preserve, so a second at-risk
+// blocker entry (production writes one per cause) keeps the seat blocked.
+func TestReapBlocksASandboxUnpushedSeatWithAnyOtherBlocker(t *testing.T) {
 	t.Parallel()
 	const unpushed = "git_state=has_unpushed unpushed_commits=1"
 	rows := []struct {
@@ -663,14 +662,6 @@ func TestReapSandboxUnpushedSeatKeepsEveryOtherRisk(t *testing.T) {
 		{"reason not git-unpushed", func(e *fakeReapEnv) {
 			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "landed-differs", GitStateSource: "live", Blockers: []string{unpushed}}
 		}, true, OutcomeBlocked},
-		{"git state not measured live", func(e *fakeReapEnv) {
-			unpushedSeat(e, unpushed)
-			rv := e.recovery["onyx"]
-			rv.GitStateSource = "recorded"
-			e.recovery["onyx"] = rv
-		}, true, OutcomeBlocked},
-		{"nuke refused", func(e *fakeReapEnv) { unpushedSeat(e, unpushed); e.reapErr["onyx"] = errRefused }, true, OutcomeBlocked},
-		{"nuke failed", func(e *fakeReapEnv) { unpushedSeat(e, unpushed); e.reapErr["onyx"] = errors.New("exec failed") }, true, OutcomeFailed},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -686,6 +677,46 @@ func TestReapSandboxUnpushedSeatKeepsEveryOtherRisk(t *testing.T) {
 				t.Fatalf("reaped %v", env.reaped)
 			}
 		})
+	}
+}
+
+// TestReapBlocksASandboxUnpushedSeatOnANukeRefusalAndFailsOnOtherNukeErrors
+// guards gt-aimwqy: an exit-3 nuke refusal is Blocked; any other failure is Failed.
+func TestReapBlocksASandboxUnpushedSeatOnANukeRefusalAndFailsOnOtherNukeErrors(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		err  error
+		want Outcome
+	}{{"nuke refused", errRefused, OutcomeBlocked}, {"nuke failed", errors.New("exec failed"), OutcomeFailed}}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			env := eligible()
+			unpushedSeat(env, "git_state=has_unpushed unpushed_commits=1")
+			env.reapErr["onyx"] = row.err
+			if f, ok := reapFinding(t, reapScanner(singleUseSeat(env, true), ReapOptions{}).Tick("gastown"), "onyx"); !ok || f.Outcome != row.want {
+				t.Fatalf("finding = %+v, %v; want %s", f, ok, row.want)
+			}
+			if len(env.reaped) != 0 {
+				t.Fatalf("reaped %v", env.reaped)
+			}
+		})
+	}
+}
+
+// TestReapBlocksASandboxUnpushedSeatWithARecordedGitState guards gt-aimwqy: the
+// nuke's route needs a live git state, so a recorded one keeps the seat blocked.
+func TestReapBlocksASandboxUnpushedSeatWithARecordedGitState(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	env.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "git-unpushed", GitStateSource: "recorded",
+		Blockers: []string{"git_state=has_unpushed unpushed_commits=1"}, Branch: "polecat/onyx/gt-1"}
+	if f, ok := reapFinding(t, reapScanner(singleUseSeat(env, true), ReapOptions{}).Tick("gastown"), "onyx"); !ok || f.Outcome != OutcomeBlocked {
+		t.Fatalf("finding = %+v, %v; want blocked", f, ok)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v", env.reaped)
 	}
 }
 
