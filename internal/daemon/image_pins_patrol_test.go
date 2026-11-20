@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1375,18 +1377,79 @@ func TestImagePinsPathCountRefusesATipThatIsNotFortyLowercaseHex(t *testing.T) {
 	}
 }
 
+// newImagePinsForgejo is the httptest Forgejo the patrol tests that read a bd
+// pin point their town at: its viewer token file authenticates the compare, a
+// head at BDSamplesFloor answers zero commits, and an unanswered head is a 404.
+func newImagePinsForgejo(t *testing.T) *Daemon {
+	t.Helper()
+	compares := map[string]int{daemonimage.BDSamplesFloor: 0}
+	//testpolicy:allow no-network — the compare is the subject, an httptest server answers it in-process on loopback, and the daemon reads it through the production client
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "token image-pins-viewer" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		i := strings.LastIndex(r.URL.Path, "/compare/")
+		if i < 0 {
+			http.NotFound(w, r)
+			return
+		}
+		_, head, ok := strings.Cut(r.URL.Path[i+len("/compare/"):], "...")
+		n, answered := compares[head]
+		if !ok || !answered {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"total_commits":`+strconv.Itoa(n)+`}`)
+	}))
+	t.Cleanup(srv.Close)
+	tokenPath := filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	if err := os.WriteFile(tokenPath, []byte("FORGEJO_TOKEN=image-pins-viewer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	town := forgejoTown(t, map[string]string{"gastown": rigForgejoSettings(srv.URL + "/owner/gastown.git")})
+	d := forgejoTownDaemon(t, town)
+	d.imagePinsTokenFile = tokenPath
+	return d
+}
+
+// TestImagePinsForgejoAnswersTheBDFloor: the floor compare answers zero commits,
+// and a head no test answered and a request without the viewer token are refused.
+func TestImagePinsForgejoAnswersTheBDFloor(t *testing.T) {
+	t.Parallel()
+	d := newImagePinsForgejo(t)
+	cmp, err := d.imagePinsCompare()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if info, err := cmp.CompareCommits(ctx, pinsReadOwner, "beads", pinsReadBDTip, daemonimage.BDSamplesFloor); err != nil || info == nil || info.TotalCommits != 0 {
+		t.Errorf("the floor compare = %+v, %v; want zero commits", info, err)
+	}
+	if _, err := cmp.CompareCommits(ctx, pinsReadOwner, "beads", pinsReadBDTip, pinsReadOtherTip); err == nil {
+		t.Error("a head no test answered read as an answer, want a refusal")
+	}
+	d.imagePinsTokenFile = filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	if err := os.WriteFile(d.imagePinsTokenFile, []byte("FORGEJO_TOKEN=wrong\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmp, err = d.imagePinsCompare()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cmp.CompareCommits(ctx, pinsReadOwner, "beads", pinsReadBDTip, daemonimage.BDSamplesFloor); err == nil {
+		t.Error("a compare without the viewer token read as an answer, want a refusal")
+	}
+}
+
 // TestImagePinsPatrolWiresThePathCountSeam: the patrol's production read passes
 // the path count, so a devops pin's lag is the count the seam answers through
 // git, and the same read fills devops's Age through the age seam; a read wired
 // with no seam reports that pin's Err instead (gt-wz5ct4, gt-ojtslh).
 func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 	t.Parallel()
-	d := forgejoTownDaemon(t, forgejoTown(t, map[string]string{"gastown": rigForgejoSettings("http://forgejo:3000/owner/gastown.git")}))
-	token := filepath.Join(t.TempDir(), "forgejo-viewer.env")
-	if err := os.WriteFile(token, []byte("FORGEJO_TOKEN=placeholder\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	d.imagePinsTokenFile = token
+	d := newImagePinsForgejo(t)
 	// The three compared pins answer at their own commits, so no pin but devops
 	// trails its tip and nothing asks the compare for a count.
 	tips := map[string]string{
@@ -1554,12 +1617,7 @@ func TestFillImagePinAgesLogsOneLinePerFailedRead(t *testing.T) {
 // read fills a trailing pin's Age and costs a pin at its tip no age read (gt-ojtslh).
 func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 	t.Parallel()
-	d := forgejoTownDaemon(t, forgejoTown(t, map[string]string{"gastown": rigForgejoSettings("http://forgejo:3000/owner/gastown.git")}))
-	token := filepath.Join(t.TempDir(), "forgejo-viewer.env")
-	if err := os.WriteFile(token, []byte("FORGEJO_TOKEN=placeholder\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	d.imagePinsTokenFile = token
+	d := newImagePinsForgejo(t)
 	// Every pin but devops is at its tip, so only devops costs an age read.
 	tips := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit, pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsTip}
 	shows := 0
