@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +30,48 @@ var nodeImagePruneStart = time.Date(2026, 11, 4, 20, 6, 48, 0, time.UTC)
 // nodeImagePruneKubeList is a listing the prune can take spares from.
 func nodeImagePruneKubeList() []byte {
 	return []byte(jsonList(jsonDeployment("gt-daemon", digestN("a"))))
+}
+
+// nodeImagePruneLogApplied is an applied run's log, which holds no would-remove line.
+const nodeImagePruneLogApplied = "node-prune: removed sha256:aaa\n" +
+	"node-prune: applied removed 1 failed 0\n"
+
+// TestNodeImagePruneOnceLogsTheDryRun: a dry run logs the summary line first and
+// then each would-remove line it planned, one logger call per line; an applied run
+// logs none of them.
+func TestNodeImagePruneOnceLogsTheDryRun(t *testing.T) {
+	t.Parallel()
+	// A prefix on the rig's logger marks each call, not each newline in a
+	// message: a call carrying several lines shows the prefix once, as the
+	// daemon's timestamp does, so four prefixed lines mean four calls.
+	t.Run("dry run", func(t *testing.T) {
+		t.Parallel()
+		r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+		var logs bytes.Buffer
+		r.d.logger = log.New(&logs, "daemon: ", 0)
+		kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDryThree)}
+
+		require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart))
+
+		want := []string{
+			"daemon: node_image_prune: dry run planned 3 images",
+			"daemon: node-prune: would remove sha256:aaa gastown-polecat created 2026-11-20T03:00:00Z",
+			"daemon: node-prune: would remove sha256:bbb gastown-daemon created 2026-11-20T03:01:00Z",
+			"daemon: node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z",
+		}
+		assert.Equal(t, want, strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n"))
+	})
+	t.Run("apply run", func(t *testing.T) {
+		t.Parallel()
+		r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+		var logs bytes.Buffer
+		r.d.logger = log.New(&logs, "daemon: ", 0)
+		kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodeImagePruneLogApplied)}
+
+		require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart))
+
+		assert.Empty(t, logs.String(), "an applied run logs no would-remove line")
+	})
 }
 
 // TestNodeImagePruneOnceUsesTheRunningPolecatImage: the applied Job is named as
@@ -111,10 +155,13 @@ func TestNodeImagePruneOnceDryRowLedgerRefused(t *testing.T) {
 
 	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart))
 
-	lines := strings.Split(strings.TrimSuffix(r.logs.String(), "\n"), "\n")
-	require.Len(t, lines, 1, "the refused ledger logs one line")
-	assert.Contains(t, lines[0], "node_image_prune")
-	assert.Contains(t, lines[0], "job ledger")
+	// The dry run logs its report lines as well; the refused ledger adds exactly one.
+	assert.Equal(t, 1, strings.Count(r.logs.String(), "job ledger"), "the refused ledger logs one line")
+	for _, line := range strings.Split(r.logs.String(), "\n") {
+		if strings.Contains(line, "job ledger") {
+			assert.Contains(t, line, "node_image_prune")
+		}
+	}
 }
 
 // TestNodeImagePruneOnceRefuses: an id nodePruneJobName refuses and a town with no
