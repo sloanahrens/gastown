@@ -79,6 +79,38 @@ func TestBatteryCapIgnoresNonBatteryCallers(t *testing.T) {
 	}
 }
 
+// A ledger line that names no caller, or names one no list excludes, is the
+// batteries' spend: it counts toward the cap until someone names it in
+// NonBatteryCallers.
+func TestBatteryCapCountsUnnamedCallers(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 15, 0, 0, 0, time.Local)
+	clock := func() time.Time { return now }
+	tests := []struct {
+		name   string
+		caller string
+	}{
+		{"no caller name", ""},
+		{"caller no list names", "someone-else"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// 1.5 billion tokens at 1 USD per billion.
+			ledger := writeLedger(t, t.TempDir(), ledgerRec(now.Add(-time.Hour), tt.caller, 1_500_000_000, 0))
+			c := Cap{Ledger: ledger, MaxUSDPerDay: 1, USDPerBillionTokens: 1}
+
+			got, err := c.Spent(clock)
+			if err != nil || math.Abs(got-1.5) > 1e-9 {
+				t.Errorf("Spent = %v, %v, want 1.5 and no error", got, err)
+			}
+			if ok, err := c.Allows(clock); err != nil || ok {
+				t.Errorf("Allows = %v, %v, want false and no error", ok, err)
+			}
+		})
+	}
+}
+
 func TestBatteryCapAllows(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 20, 15, 0, 0, 0, time.Local)
