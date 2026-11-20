@@ -491,7 +491,7 @@ func TestSpecEstimateWiringCarriesTheBeadsRigAndWritesTheStore(t *testing.T) {
 	}
 	db := specEstimateSeed()
 	stub := specEstimateOK()
-	var gotRig string
+	var gotRig, gotTownRoot string
 	var storeFor []string
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
@@ -505,7 +505,7 @@ func TestSpecEstimateWiringCarriesTheBeadsRigAndWritesTheStore(t *testing.T) {
 			return db
 		},
 		func(ctx context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error) {
-			gotRig = deps.Rig
+			gotRig, gotTownRoot = deps.Rig, deps.TownRoot
 			return stub.run(ctx, deps, issue)
 		})
 	if err != nil {
@@ -513,6 +513,10 @@ func TestSpecEstimateWiringCarriesTheBeadsRigAndWritesTheStore(t *testing.T) {
 	}
 	if gotRig != "gastown" {
 		t.Errorf("the estimator got rig %q, want gastown (the rig the gt- prefix routes to)", gotRig)
+	}
+	// The prior reader reads where the run appends: the same town root.
+	if gotTownRoot != town {
+		t.Errorf("the estimator got town root %q, want %q", gotTownRoot, town)
 	}
 	if !slices.Equal(storeFor, []string{town, "gt-est"}) {
 		t.Errorf("the store was built for %v, want the town and the bead", storeFor)
@@ -978,6 +982,88 @@ func TestSpecEstimateChangedTextAppendsASecondLine(t *testing.T) {
 	}
 	if want := specEstimateHashOf(t, db); records[1].DescriptionHash != want {
 		t.Errorf("the second line's hash = %q, want the changed text's %q", records[1].DescriptionHash, want)
+	}
+}
+
+// specEstimatePriorStub answers from deps.Prior when the run wired one, as
+// estimate.Estimate does, summing the logged component minutes, the seed's 6.3.
+type specEstimatePriorStub struct {
+	calls      int
+	priorWired bool
+}
+
+func (s *specEstimatePriorStub) run(_ context.Context, deps estimate.Deps, issue *beads.Issue) (estimate.Result, error) {
+	s.calls++
+	s.priorWired = deps.Prior != nil
+	r := estimate.Result{Points: 8, Minutes: 20, Inputs: []string{"shape"}, Rung: "shape"}
+	if s.priorWired {
+		if prior, ok := deps.Prior(issue.ID, estimate.SectionHash(issue)); ok {
+			r = estimate.Result{Points: 5, Minutes: prior.Embed + prior.Jev, Inputs: []string{"shape", "embed", "jev"}, Rung: "all"}
+		}
+	}
+	r.Hash = estimate.SectionHash(issue)
+	return r, nil
+}
+
+// TestSpecEstimateForceReusesLoggedMinutes: a forced re-estimate of text whose
+// latest note already names its hash hands the estimator the logged embed and
+// Jev minutes, so it returns the minutes the earlier estimate logged.
+func TestSpecEstimateForceReusesLoggedMinutes(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	db := specEstimateSeed()
+	hash := specEstimateHashOf(t, db)
+	if err := db.AddComment("gt-est", "SP ESTIMATE v1 sp:5 rung:all hash:"+hash); err != nil {
+		t.Fatal(err)
+	}
+	embed, jev := 4.0, 2.3
+	if err := estlog.Append(town, estlog.Record{BeadID: "gt-est", DescriptionHash: hash, Minutes: estlog.Minutes{Embed: &embed, Jev: &jev}, BlendedMinutes: 6.3}); err != nil {
+		t.Fatalf("append the logged estimate: %v", err)
+	}
+	stub := &specEstimatePriorStub{}
+	run := specEstimateRunner{Estimate: stub.run, Deps: func() (estimate.Deps, error) { return estimate.Deps{TownRoot: town}, nil }}
+	var out bytes.Buffer
+	if err := runSpecEstimateOn(&out, "gt-est", db, specEstimateOpts{Force: true}, run); err != nil {
+		t.Fatalf("runSpecEstimateOn: %v", err)
+	}
+	if stub.calls != 1 || !stub.priorWired {
+		t.Fatalf("estimate calls = %d, prior wired = %v: a forced re-estimate must reuse the log", stub.calls, stub.priorWired)
+	}
+	if got := specEstimateLabelsOn(t, db); !strings.Contains(out.String(), "gt-est: sp:5 rung:all minutes:6.3") || !slices.Contains(got, "sp-minutes:6.3") {
+		t.Errorf("output = %q, labels = %v, want the logged estimate", out.String(), got)
+	}
+}
+
+// TestSpecEstimateNewTextReadsNoLog: a bead whose latest note names another
+// hash, or that has no note, is estimated afresh and its deps carry no Prior.
+func TestSpecEstimateNewTextReadsNoLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	embed, jev := 4.0, 2.3
+	if err := estlog.Append(town, estlog.Record{BeadID: "gt-est", DescriptionHash: "deadbeef", Minutes: estlog.Minutes{Embed: &embed, Jev: &jev}}); err != nil {
+		t.Fatalf("append the logged estimate: %v", err)
+	}
+	for name, note := range map[string]string{"no note": "", "another hash": "SP ESTIMATE v1 sp:5 rung:all hash:deadbeef"} {
+		t.Run(name, func(t *testing.T) {
+			db := specEstimateSeed()
+			if note != "" {
+				if err := db.AddComment("gt-est", note); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stub := &specEstimatePriorStub{}
+			run := specEstimateRunner{Estimate: stub.run, Deps: func() (estimate.Deps, error) { return estimate.Deps{TownRoot: town}, nil }}
+			var out bytes.Buffer
+			if err := runSpecEstimateOn(&out, "gt-est", db, specEstimateOpts{}, run); err != nil {
+				t.Fatalf("runSpecEstimateOn: %v", err)
+			}
+			if stub.calls != 1 || stub.priorWired {
+				t.Fatalf("estimate calls = %d, prior wired = %v: new text is estimated afresh with no Prior", stub.calls, stub.priorWired)
+			}
+			if !strings.Contains(out.String(), "gt-est: sp:8 rung:shape minutes:20") {
+				t.Errorf("output = %q, want the fresh estimate", out.String())
+			}
+		})
 	}
 }
 
