@@ -223,7 +223,8 @@ func TestLaunchCleansUpSandboxWhenTheLaunchPanics(t *testing.T) {
 }
 
 // workDirBackend is a preparingBackend whose sandbox worktree mirrors the host
-// one under a different town root, as the openshell backend's does.
+// one under a different town root, as the openshell backend's does. Like the
+// openshell backend it names that worktree in GT_POLECAT_PATH.
 type workDirBackend struct {
 	*preparingBackend
 	sandboxTown string
@@ -238,7 +239,8 @@ func (b workDirBackend) Prepare(ctx context.Context, spec session.SpawnSpec) (*s
 	if err != nil {
 		return nil, err
 	}
-	return &session.Prepared{WorkDir: b.sandboxTown + "/" + filepath.ToSlash(rel)}, nil
+	workDir := b.sandboxTown + "/" + filepath.ToSlash(rel)
+	return &session.Prepared{WorkDir: workDir, Env: map[string]string{"GT_POLECAT_PATH": workDir}}, nil
 }
 
 // envCapturingTmux records the environment the launch hands the new session,
