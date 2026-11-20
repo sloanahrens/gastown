@@ -390,12 +390,19 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 }
 
 // imagePinsAge is the production age read: the tip's committer time minus the
-// pin's, fetched the way imagePinsPathCount fetches. A failed git call or an
-// answer that is not the two commits' integer committer times is an error,
-// never a 0 that reads as a pin which never aged (gt-qi51ka).
+// pin's, fetched the way imagePinsPathCount fetches. A pin or tip that is not 40
+// lowercase hex is refused before any git call. A failed git call, a non-numeric
+// answer or a negative age (the pin newer than its tip) is an error (gt-qi51ka).
 func (d *Daemon) imagePinsAge(ctx context.Context) func(url, pin, tip string) (time.Duration, error) {
 	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
 	return func(url, pin, tip string) (time.Duration, error) {
+		// Both shas are refused before any git call: they reach git show below.
+		if !pinShaForm.MatchString(pin) {
+			return 0, fmt.Errorf("git show -s --format=%%ct: pin %q is not a full 40-character lowercase hex sha", pin)
+		}
+		if !pinShaForm.MatchString(tip) {
+			return 0, fmt.Errorf("git show -s --format=%%ct: tip %q is not a full 40-character lowercase hex sha", tip)
+		}
 		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
 			return 0, err
 		}
@@ -416,7 +423,11 @@ func (d *Daemon) imagePinsAge(ctx context.Context) func(url, pin, tip string) (t
 			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered a non-number for the tip", sha12(pin), sha12(tip))
 		}
 		// Through time.Time, so an absurd pair saturates instead of wrapping.
-		return time.Unix(tipSec, 0).Sub(time.Unix(pinSec, 0)), nil
+		age := time.Unix(tipSec, 0).Sub(time.Unix(pinSec, 0))
+		if age < 0 {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s: the pin's committer time is after the tip's, a negative age %s", sha12(pin), sha12(tip), age)
+		}
+		return age, nil
 	}
 }
 

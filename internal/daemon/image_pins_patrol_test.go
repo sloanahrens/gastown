@@ -1364,8 +1364,32 @@ func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
 	}
 }
 
+// TestImagePinsAgeRefusesAShaThatIsNotFullHex: a pin or tip that is not 40
+// lowercase hex is an error naming the value, and no git call runs, the fetch
+// included: both are spliced into the show's argv (gt-qi51ka).
+func TestImagePinsAgeRefusesAShaThatIsNotFullHex(t *testing.T) {
+	t.Parallel()
+	for _, tt := range imagePinsRefusedShas {
+		for _, side := range []struct{ name, pin, tip string }{{"pin", tt.sha, pinsReadDevopsTip}, {"tip", pinsReadDevopsCommit, tt.sha}} {
+			t.Run(tt.name+" as the "+side.name, func(t *testing.T) {
+				t.Parallel()
+				d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+				d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+					t.Error("git ran for a sha that is not 40 lowercase hex")
+					return []byte("100\n518500\n"), nil, nil
+				}
+				got, err := d.imagePinsAge(context.Background())(pinsReadPinURL("devops"), side.pin, side.tip)
+				if err == nil || got != 0 || !strings.Contains(err.Error(), strconv.Quote(tt.sha)) {
+					t.Fatalf("a %s of %s = %v, %v; want an error naming %q, with no age", side.name, tt.name, got, err, tt.sha)
+				}
+			})
+		}
+	}
+}
+
 // TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer: a failed git call and an
-// answer that is not two integers are errors, never a zero age.
+// answer that is not two integers are errors, never a zero age; a negative age
+// (a pin newer than its tip) is an error, and a failed fetch runs no show.
 func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("git exited 128")
@@ -1377,11 +1401,14 @@ func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
 		{name: "a non-number pin", answer: "yesterday\n100\n", want: "non-number for the pin"},
 		{name: "a non-number tip", answer: "100\nyesterday\n", want: "non-number for the tip"},
 		{name: "one timestamp", answer: "100\n", want: "two commits' committer times"},
+		{name: "a negative age", answer: "518500\n100\n", want: "negative"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			calls := 0
 			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
 			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				calls++
 				if tt.fails != "" && slices.Contains(cmd.Args, tt.fails) {
 					return nil, []byte("fatal: bad revision\nhint: more\n"), boom
 				}
@@ -1391,6 +1418,9 @@ func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
 				return nil, nil, nil
 			}
 			got, err := d.imagePinsAge(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip)
+			if tt.fails == "fetch" && calls != 1 {
+				t.Errorf("git ran %d time(s) after the failed fetch, want the failed fetch alone", calls)
+			}
 			if err == nil || got != 0 || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("the age read = %v, %v; want an error naming %q, never a zero age", got, err, tt.want)
 			}
