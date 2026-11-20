@@ -96,10 +96,9 @@ func TestPassRepeatedFailuresEscalateOnceAndClearOnLanding(t *testing.T) {
 	for i := 0; i < DefaultFailingEscalateAfter+2; i++ {
 		h.w.Pass(context.Background())
 		h.w.escWG.Wait()
-		want := 0
-		if i+1 >= DefaultFailingEscalateAfter {
-			want = 1
-		}
+		// Every failure after a park ran out is a new run and as loud as the
+		// first: one escalation per failed attempt, never a silent retry.
+		want := i + 1
 		if got := rec.specs(); len(got) != want {
 			t.Fatalf("after %d failures: %d escalations (%v), want %d", i+1, len(got), got, want)
 		}
@@ -172,8 +171,8 @@ func TestPassCISilenceDoesNotAlsoEscalateGenerally(t *testing.T) {
 		h.w.escWG.Wait()
 		h.now = h.now.Add(infraParkWait)
 	}
-	if got := rec.general(); len(got) != 1 || !strings.Contains(got[0], "candidate gate") {
-		t.Fatalf("CI silence escalations %v; want exactly the one naming the candidate gate", got)
+	if got := rec.general(); len(got) != DefaultCISilenceEscalateAfter+2 || !strings.Contains(got[0], "candidate gate") {
+		t.Fatalf("CI silence escalations %v; want one per attempt, each naming the candidate gate", got)
 	}
 	if got := rec.specs(); len(got) != 0 {
 		t.Fatalf("general escalations %v; want none beside the silence one", got)

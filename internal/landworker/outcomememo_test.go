@@ -296,8 +296,8 @@ func TestPassDoesNotRepostAnAnnotationWhenOutcomesAlternate(t *testing.T) {
 			infraNotices++
 		}
 	}
-	if infraNotices != 1 || len(cs) != 2 {
-		t.Fatalf("comments %q; want one infrastructure notice and one refusal", cs)
+	if infraNotices != infraAnnounceAfter+1 || len(cs) != infraAnnounceAfter+2 {
+		t.Fatalf("comments %q; want one infrastructure notice per failed attempt and one refusal", cs)
 	}
 }
 

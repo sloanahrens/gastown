@@ -1263,8 +1263,8 @@ func (w *Worker) closeFailureRun(beadID string) {
 
 // countCISilence tracks consecutive candidate-gate silences on one bead and
 // escalates once, on reaching CISilenceEscalateAfter. The design gives CI
-// silence the infra backoff, and a forced runner outage would otherwise idle
-// the bead until the queue is read by hand.
+// silence the same fail-loud park as any infrastructure failure (the first
+// silence escalates, naming the candidate gate, and the bead is parked).
 func (w *Worker) countCISilence(work land.Work, err error) {
 	st := w.bead(work.BeadID)
 	if !errors.Is(err, land.ErrCISilence) {
@@ -1281,7 +1281,7 @@ func (w *Worker) countCISilence(work land.Work, err error) {
 	}
 	st.escalated = true
 	// The CI-silence alert names no lane: its key stays per bead (gt-il3out).
-	w.escalate(work.BeadID, "", fmt.Sprintf("Landing of %s (%s @ %s) has waited on the candidate gate %d times in a row with no verdict (%v). The worker keeps retrying with backoff and no rework is needed; look for a down, busy or hung Forgejo runner.",
+	w.escalate(work.BeadID, "", fmt.Sprintf("Landing of %s (%s @ %s) has waited on the candidate gate %d times in a row with no verdict (%v). The bead is parked, not retried, until the cause is fixed and the daemon restarts; no rework is needed; look for a down, busy or hung Forgejo runner.",
 		work.BeadID, work.Branch, work.Head, st.ciSilences, err))
 }
 
@@ -1424,11 +1424,17 @@ func reviewVerdictWord(verdict string) string {
 func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 	rep.Failed++
 	st := w.bead(id)
+	if !st.until.IsZero() && !w.now().Before(st.until) {
+		// The park ran out in a process that never restarted: the cause is
+		// still there, so this failure is a new run and is as loud as the first.
+		st.failures, st.ciSilences, st.escalated, st.failingEscalated = 0, 0, false, false
+		delete(st.annotated, "infra")
+	}
 	st.failures++
 	st.stage = failureStage(stage, err)
 	st.lastErr = errorLine(err)
 	st.until = w.now().Add(infraParkWait)
-	w.logf("%s: %s failed (%d in a row), PARKED, not retried until the cause is fixed and the daemon restarts: %v", id, stage, st.failures, err)
+	w.logf("%s: %s failed, PARKED until the cause is fixed and the daemon restarts: %v", id, stage, err)
 	if st.failures == infraAnnounceAfter {
 		w.announce(id, "infra", fmt.Sprintf("Landing worker: %s FAILED on infrastructure, not on the work (%s: %v). It is parked and will not be retried until the cause is fixed and the daemon restarts; no rework needed.", id, stage, err))
 	}
