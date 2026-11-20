@@ -182,3 +182,95 @@ func TestOverrunPassStartMarkerFile(t *testing.T) {
 		}
 	})
 }
+
+// TestOverrunPassTicksFillRunningSince: Ticks carries the overrun_guard pass
+// start while it runs, and zero for other patrols and after it ends (gt-6yyt2j).
+func TestOverrunPassTicksFillRunningSince(t *testing.T) {
+	t.Parallel()
+	read := func(t *testing.T, d *Daemon) map[string]time.Time {
+		t.Helper()
+		ticks, err := (&healthSources{d: d}).Ticks()
+		if err != nil {
+			t.Fatalf("Ticks: %v", err)
+		}
+		got := map[string]time.Time{}
+		for _, tk := range ticks {
+			got[tk.Name] = tk.RunningSince
+		}
+		return got
+	}
+	d := passDaemon(t)
+	d.patrolConfig.Patrols.WispReaper = &WispReaperConfig{Enabled: true}
+	if err := SaveState(d.config.TownRoot, &State{StartedAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	before := time.Now()
+	var during map[string]time.Time
+	d.runOverrunGuardPass(func() { during = read(t, d) })
+	after := time.Now()
+	if s := during["overrun_guard"]; s.IsZero() || s.Before(before) || s.After(after) {
+		t.Errorf("RunningSince for overrun_guard in its pass = %v, want a time between %v and %v", s, before, after)
+	}
+	if got, ok := during["wisp_reaper"]; !ok || !got.IsZero() {
+		t.Errorf("RunningSince for wisp_reaper = %v (listed %v), want it listed and zero", got, ok)
+	}
+	if got := read(t, d)["overrun_guard"]; !got.IsZero() {
+		t.Errorf("RunningSince for overrun_guard after its pass = %v, want zero", got)
+	}
+}
+
+// TestOverrunPassTicksWithoutDaemonStart: an unknown daemon start blanks no
+// tick. Only a marker in flight needs the start to be told from a stale one, so
+// only a pass in flight fails the read (gt-6yyt2j).
+func TestOverrunPassTicksWithoutDaemonStart(t *testing.T) {
+	t.Parallel()
+
+	t.Run("no pass in flight reads every tick", func(t *testing.T) {
+		t.Parallel()
+		d := passDaemon(t)
+		got, err := (&healthSources{d: d}).Ticks()
+		if err != nil {
+			t.Fatalf("Ticks with no daemon start and no pass in flight: %v", err)
+		}
+		listed := false
+		for _, tk := range got {
+			if tk.Name != "overrun_guard" {
+				continue
+			}
+			listed = true
+			if !tk.RunningSince.IsZero() {
+				t.Errorf("RunningSince for overrun_guard = %v, want zero with no pass in flight", tk.RunningSince)
+			}
+		}
+		if !listed {
+			t.Errorf("Ticks = %+v, want overrun_guard listed", got)
+		}
+	})
+
+	t.Run("a pass in flight is an error, not a read", func(t *testing.T) {
+		t.Parallel()
+		d := passDaemon(t)
+		var err error
+		d.runOverrunGuardPass(func() { _, err = (&healthSources{d: d}).Ticks() })
+		if err == nil {
+			t.Error("Ticks with a pass in flight and no daemon start = nil error, want an error")
+		}
+	})
+
+	t.Run("a corrupt record is an error, not an empty read", func(t *testing.T) {
+		t.Parallel()
+		d := passDaemon(t)
+		path := filepath.Join(d.config.TownRoot, "daemon", "patrol_last_run.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
+			t.Fatalf("write corrupt file: %v", err)
+		}
+		_, err := (&healthSources{d: d}).Ticks()
+		if !errors.Is(err, ErrPatrolLastRunCorrupt) {
+			t.Errorf("Ticks on a corrupt record: err = %v, want ErrPatrolLastRunCorrupt", err)
+		}
+	})
+}

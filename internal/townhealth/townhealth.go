@@ -369,11 +369,12 @@ type Heartbeat interface {
 }
 
 // Tick is one daemon tick's interval and last-fired time; a zero LastFired
-// means none is recorded.
+// means none is recorded, and a zero RunningSince means no pass is in flight.
 type Tick struct {
-	Name      string
-	Interval  time.Duration
-	LastFired time.Time
+	Name         string
+	Interval     time.Duration
+	LastFired    time.Time
+	RunningSince time.Time
 }
 
 // Ticks lists the daemon's enabled ticks.

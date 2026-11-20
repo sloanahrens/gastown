@@ -55,42 +55,60 @@ type patrolLastRunState struct {
 // The daemon's per-patrol loader and the jev health command both read through
 // here, so they agree on what the record says.
 func ReadPatrolLastRuns(townRoot string) (map[string]time.Time, error) {
-	data, err := os.ReadFile(patrolLastRunPath(townRoot))
+	state, err := readPatrolLastRunFile(townRoot)
 	if err != nil {
 		return nil, err
+	}
+	return state.LastRun, nil
+}
+
+// readPatrolLastRunFile reads and parses the whole record in one read. A missing
+// file is the read's own error, wrapping fs.ErrNotExist; a file that is not
+// valid JSON wraps ErrPatrolLastRunCorrupt.
+func readPatrolLastRunFile(townRoot string) (patrolLastRunState, error) {
+	data, err := os.ReadFile(patrolLastRunPath(townRoot))
+	if err != nil {
+		return patrolLastRunState{}, err
 	}
 
 	var state patrolLastRunState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, ErrPatrolLastRunCorrupt, err)
+		return patrolLastRunState{}, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, ErrPatrolLastRunCorrupt, err)
 	}
-	return state.LastRun, nil
+	return state, nil
 }
 
 // ReadPatrolRunningSince returns when the pass in flight for a patrol started,
 // as the persisted start marker records it, or the zero time when none is
 // running. A marker older than daemonStarted was left by a previous daemon
 // process whose pass never ended, so it reads as not running. A missing file or
-// entry reads as not running; an unreadable file is an error, and so is a zero
-// daemonStarted, since without the start no marker can be told from a stale one.
+// entry reads as not running; an unreadable file is an error, as is a marker
+// whose daemonStarted is zero (see runningSinceOf).
 func ReadPatrolRunningSince(townRoot, patrol string, daemonStarted time.Time) (time.Time, error) {
-	if daemonStarted.IsZero() {
-		return time.Time{}, fmt.Errorf("read %s running_since for %s: daemon start unknown", patrolLastRunFileName, patrol)
-	}
-	data, err := os.ReadFile(patrolLastRunPath(townRoot))
+	state, err := readPatrolLastRunFile(townRoot)
 	if errors.Is(err, fs.ErrNotExist) {
 		return time.Time{}, nil
 	}
 	if err != nil {
 		return time.Time{}, err
 	}
+	return runningSinceOf(state, patrol, daemonStarted)
+}
 
-	var state patrolLastRunState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return time.Time{}, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, ErrPatrolLastRunCorrupt, err)
-	}
+// runningSinceOf picks a patrol's pass start out of a record read once. The
+// daemon start is needed only to tell a marker this daemon wrote from one a
+// previous daemon left, so a patrol with no marker reads as not running whatever
+// the start is. A marker with no known start is an error: it cannot be told from
+// a stale one, and reading it as not running would hide a pass in flight.
+func runningSinceOf(state patrolLastRunState, patrol string, daemonStarted time.Time) (time.Time, error) {
 	since, ok := state.RunningSince[patrol]
-	if !ok || since.IsZero() || since.Before(daemonStarted) {
+	if !ok || since.IsZero() {
+		return time.Time{}, nil
+	}
+	if daemonStarted.IsZero() {
+		return time.Time{}, fmt.Errorf("read %s running_since for %s: daemon start unknown", patrolLastRunFileName, patrol)
+	}
+	if since.Before(daemonStarted) {
 		return time.Time{}, nil
 	}
 	return since, nil
