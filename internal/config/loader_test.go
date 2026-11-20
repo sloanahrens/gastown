@@ -607,6 +607,29 @@ func TestFollowupMaxAccessors(t *testing.T) {
 	}
 }
 
+// TestFollowupMaxJSONKeys pins the JSON key names of the two follow-up budget
+// keys: TestFollowupMaxAccessors sets the struct in Go, so a misspelled tag
+// would leave a rig's configured budget silently at its default. The body is a
+// rig's settings/config.json, which the follow-up feed loads (gt-c9cp26).
+func TestFollowupMaxJSONKeys(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"type":"rig-settings","version":1,"merge_queue":{"followup_max_added_lines":120,"followup_max_files":7}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("LoadRigSettings: %v", err)
+	}
+	if got := loaded.MergeQueue.GetFollowupMaxAddedLines(80); got != 120 {
+		t.Errorf("GetFollowupMaxAddedLines(80) = %d, want 120 decoded from followup_max_added_lines", got)
+	}
+	if got := loaded.MergeQueue.GetFollowupMaxFiles(3); got != 7 {
+		t.Errorf("GetFollowupMaxFiles(3) = %d, want 7 decoded from followup_max_files", got)
+	}
+}
+
 // TestMergeSettingsCommand_Editorial guards the whole-block override
 // semantics for Editorial: a more specific tier that sets any editorial
 // field replaces the entire block rather than deep-merging individual
