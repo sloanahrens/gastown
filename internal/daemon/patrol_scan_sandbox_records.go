@@ -272,7 +272,10 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 // copies the seat's transcripts and deletes the sandbox and its seat token. It returns the reason the sandbox and its record are kept, or
 // "" when the sandbox is deleted. Every answer short of a set marker, every
 // failure, and a binary with no deleter linked keep the sandbox and its record,
-// so a seat still starting or crashed is never deleted here. caller labels the
+// so a seat still starting or crashed is never deleted here. With copyOutbox,
+// the patrol's own path, a seat whose agent bead still hooks a bead, or whose
+// agent bead cannot be read, keeps the sandbox and its record as well
+// (gt-oxahwh). caller labels the
 // delete it logs, since both the record pass and the landing's end call it.
 func (h *patrolScanHost) endHeldSandboxWith(caller, name string, rec session.SandboxRecord, copyOutbox bool) string {
 	ended, err := h.sandboxEndedMarkerSet(rec.Gateway, name)
@@ -293,6 +296,18 @@ func (h *patrolScanHost) endHeldSandboxWith(caller, name string, rec session.San
 	// no second read of the record; a copy that fails keeps the sandbox with the
 	// copy's reason (gt-qem69c). A record that names no seat has no outbox to read.
 	if copyOutbox && rec.Rig != "" && rec.Polecat != "" {
+		// A seat that still hooks a bead may hold work nothing saved: the overrun
+		// stop that left it hooked could not push it, so the patrol keeps the
+		// seat's sandbox and record as the landing's own end does (gt-oxahwh). An
+		// agent bead that cannot be read keeps them too: the hook is unknown,
+		// never clear. The read comes before the outbox copy and the delete.
+		fields, err := h.seatAgentFields(rec.Rig, rec.Polecat)
+		if err != nil {
+			return "cannot read its agent bead: " + err.Error()
+		}
+		if fields != nil && strings.TrimSpace(fields.HookBead) != "" {
+			return "hook_bead=" + fields.HookBead + " is still set"
+		}
 		if reason := h.copySeatOutboxFor(rec); reason != "" {
 			return reason
 		}
