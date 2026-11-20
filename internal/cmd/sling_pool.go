@@ -433,10 +433,10 @@ func poolRefusalAgent(pool *config.PolecatPool, requested string) string {
 }
 
 // poolCountSources names where a full count came from: the live sessions,
-// dead-hooked seats, seats mid-landing and claims inside it, e.g.
-// ": 5 sessions, 1 dead-hooked, 2 claims". The operator otherwise sees "8/8"
+// seats with no session, seats mid-landing and claims inside it, e.g.
+// ": 5 sessions, 1 with no session, 2 claims". The operator otherwise sees "8/8"
 // with no way to tell which sessions, crashed seats or other slings filled it
-// (gt-cx16fq). The breakdown appears when a dead-hooked seat or a claim is
+// (gt-cx16fq). The breakdown appears when a seat with no session or a claim is
 // inside, so a count of live sessions alone keeps the short wording it has
 // always had. agent "" counts every agent's seats, for the town's total.
 //
@@ -444,8 +444,8 @@ func poolRefusalAgent(pool *config.PolecatPool, requested string) string {
 // "held: gastown/a:session, gastown/b:claim", read from the same sessions and
 // filtered by the same agent as the count, so the list has one entry per seat
 // counted (gt-5y87fp). A count at its cap keeps the wording above: it is full,
-// not above, and its sources already name what filled it. A dead-hooked count
-// names the classes its seats were read in (gt-01svoq).
+// not above, and its sources already name what filled it. A count of seats with
+// no session names the classes its seats were read in (gt-01svoq).
 func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 	var live, dead, landing, claims int
 	classes := map[string]int{}
@@ -517,6 +517,12 @@ func poolHeldSeats(agent string, sessions []poolSession) []specdispatch.HeldSeat
 	return held
 }
 
+// poolHeldSeatNoSession is the word a held seat prints when no session holds
+// it: the same words the count prints for that seat, so the list under a count
+// and the count read alike (gt-lroj0r). deadHooked stays the name of the read;
+// only the printed word changed.
+const poolHeldSeatNoSession = "with no session"
+
 // poolHeldSeatState is the state a held seat prints, read in the precedence
 // poolCountSources counts it in: a claimed seat is a claim even when its bead
 // is also hooked, so the seat is one entry in the list as it is one seat in
@@ -526,7 +532,7 @@ func poolHeldSeatState(s poolSession) string {
 	case s.claim:
 		return specdispatch.SeatStateClaim
 	case s.deadHooked:
-		return specdispatch.SeatStateDeadHooked
+		return poolHeldSeatNoSession
 	case s.landing:
 		return specdispatch.SeatStateLanding
 	default:

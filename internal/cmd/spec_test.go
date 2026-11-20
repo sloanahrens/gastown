@@ -2711,7 +2711,7 @@ func TestSpecDispatchNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 	r := runSpecDispatchCycle(f.env())
 	want := "deepseek-flash 9/8 (8 live + 1 with no session) (held: gastown/alpha:session, gastown/bravo:session, " +
 		"gastown/charlie:session, gastown/delta:session, gastown/echo:session, gastown/foxtrot:session, " +
-		"gastown/golf:landing, gastown/hotel:dead-hooked, pool-claim/c1:claim)"
+		"gastown/golf:landing, gastown/hotel:with no session, pool-claim/c1:claim)"
 	if r.Roster != want {
 		t.Fatalf("roster = %q, want %q", r.Roster, want)
 	}
