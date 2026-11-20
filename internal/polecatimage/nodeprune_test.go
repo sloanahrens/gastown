@@ -187,18 +187,23 @@ func TestNodePruneDryRunFailedRead(t *testing.T) {
 	}
 }
 
-// TestNodePruneDryRunSpareKeepsImage: a --spare value, an image id or a digest, is in use, so the plan
-// leaves that image out. The last row is a node whose container list is present but empty.
-func TestNodePruneDryRunSpareKeepsImage(t *testing.T) {
+// TestNodePruneDryRunSpares: a --spare value, an image id or a digest, is in use, so the plan leaves that
+// image out. The rows cover a node whose ps reply lists a container, and each way crictl says a node has
+// none: JSON null, an empty object and an empty list.
+func TestNodePruneDryRunSpares(t *testing.T) {
 	t.Parallel()
+	const listed = `{"containers":[{"id":"c1","imageRef":"docker.io/library/busybox@sha256:b1"}]}`
 	tests := []struct {
 		name  string
 		spare string
 		ps    string
 	}{
-		{"id", imageID("gastown-daemon", 2), "{}"},
-		{"digest", imageDigest("gastown-daemon", 2), "{}"},
-		{"id on a node with no containers listed", imageID("gastown-daemon", 2), `{"containers":[]}`},
+		{"id on a node with a container listed", imageID("gastown-daemon", 2), listed},
+		{"id on a node with no containers (null)", imageID("gastown-daemon", 2), "null"},
+		{"digest on a node with no containers (null)", imageDigest("gastown-daemon", 2), "null"},
+		{"id on a node with an empty object", imageID("gastown-daemon", 2), "{}"},
+		{"digest on a node with an empty object", imageDigest("gastown-daemon", 2), "{}"},
+		{"id on a node with an empty list", imageID("gastown-daemon", 2), `{"containers":[]}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,9 +230,9 @@ func TestNodePruneDryRunSpareKeepsImage(t *testing.T) {
 	}
 }
 
-// TestNodePruneDryRunRefusesUnreadableContainers: a ps reply that is not a JSON object cannot say which
-// images a container uses. Read as no containers, it would plan removing images in use, so the node is
-// refused with exit 3 and no would-remove line, with or without a --spare.
+// TestNodePruneDryRunRefusesUnreadableContainers: a ps reply that is neither JSON null nor a JSON object
+// cannot say which images a container uses. Read as no containers, it would plan removing images in use, so
+// the node is refused with exit 3 and no would-remove line, with or without a --spare.
 func TestNodePruneDryRunRefusesUnreadableContainers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -235,9 +240,8 @@ func TestNodePruneDryRunRefusesUnreadableContainers(t *testing.T) {
 		ps   string
 		args []string
 	}{
-		{"null reply", "null", nil},
-		{"null reply with a spare", "null", []string{"--spare", imageID("gastown-daemon", 2)}},
 		{"reply that is not JSON", "not json", nil},
+		{"reply that is not JSON with a spare", "not json", []string{"--spare", imageID("gastown-daemon", 2)}},
 		{"containers that is not a list", `{"containers":"oops"}`, nil},
 	}
 	for _, tc := range tests {
