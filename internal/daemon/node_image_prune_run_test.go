@@ -49,6 +49,11 @@ const nodePruneLogDry = "node-prune: would remove sha256:bbb gastown-polecat cre
 	"node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z\n" +
 	"node-prune: dry run planned 2 images\n"
 
+// zeroNodePruneReport reports whether rep is the zero report: no lines and no counts.
+func zeroNodePruneReport(rep nodePruneReport) bool {
+	return len(rep.Lines) == 0 && rep.Planned == 0 && rep.Removed == 0 && rep.Failed == 0
+}
+
 // TestNodeImagePruneRunDry runs a dry run against a fake helper log. The planned
 // count is the summary's, the calls run in order, and the Job's command has no --apply.
 func TestNodeImagePruneRunDry(t *testing.T) {
@@ -76,7 +81,8 @@ func TestNodeImagePruneRunDry(t *testing.T) {
 
 // TestNodeImagePruneRunStopsAtFailure refuses one step at a time. Each refusal
 // returns an error and no step after it runs, except the Job's delete once the apply
-// was attempted; a bad listing or image never reaches Apply.
+// was attempted; a bad listing or image never reaches Apply. A refusal before the
+// log is read returns the zero report; the refused delete keeps the log's report.
 func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 	t.Parallel()
 
@@ -85,6 +91,7 @@ func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 		name, fail, calls string
 		list              []byte
 		emptyImage        bool
+		keepsReport       bool
 	}{
 		{name: "list refused", fail: "ListJSON", calls: "ListJSON", list: good},
 		{name: "listing has no items", calls: "ListJSON", list: []byte(`{"kind":"List","items":[]}`)},
@@ -92,7 +99,7 @@ func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 		{name: "apply refused", fail: "Apply", calls: "ListJSON Apply Delete", list: good},
 		{name: "wait refused", fail: "WaitComplete", calls: "ListJSON Apply WaitComplete Delete", list: good},
 		{name: "logs refused", fail: "Logs", calls: "ListJSON Apply WaitComplete Logs Delete", list: good},
-		{name: "delete refused", fail: "Delete", calls: "ListJSON Apply WaitComplete Logs Delete", list: good},
+		{name: "delete refused", fail: "Delete", calls: "ListJSON Apply WaitComplete Logs Delete", list: good, keepsReport: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -102,13 +109,45 @@ func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 			if tc.emptyImage {
 				image = ""
 			}
-			if _, err := runNodeImagePrune(context.Background(), kube, "node-prune-x", image, 2, false); err == nil {
+			rep, err := runNodeImagePrune(context.Background(), kube, "node-prune-x", image, 2, false)
+			if err == nil {
 				t.Fatalf("runNodeImagePrune error = nil, want a refusal")
+			}
+			if tc.keepsReport {
+				if rep.Planned != 2 || len(rep.Lines) != 2 {
+					t.Errorf("report = %+v, want the log's report: Planned 2 with 2 lines", rep)
+				}
+			} else if !zeroNodePruneReport(rep) {
+				t.Errorf("report = %+v, want the zero report for a refusal before the log is read", rep)
 			}
 			if got := strings.Join(kube.calls, " "); got != tc.calls {
 				t.Errorf("calls = %q, want %q", got, tc.calls)
 			}
 		})
+	}
+}
+
+// TestNodeImagePruneRunMalformedLogIsAnError feeds the run a cut log: a would-remove
+// line, then the summary with no final newline. The run returns an error naming the
+// log and the zero report, never one that reads as an empty plan, and deletes the Job.
+func TestNodeImagePruneRunMalformedLogIsAnError(t *testing.T) {
+	t.Parallel()
+
+	cut := "node-prune: would remove sha256:bbb gastown-polecat created 2026-11-20T03:00:00Z\n" +
+		"node-prune: dry run planned 2 images"
+	kube := &fakeKube{list: []byte(jsonList(jsonDeployment("gt-daemon", digestN("a")))), logs: []byte(cut)}
+	rep, err := runNodeImagePrune(context.Background(), kube, "node-prune-cut", "gt-bd:1", 2, false)
+	if err == nil {
+		t.Fatalf("runNodeImagePrune(cut log) error = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "log") {
+		t.Errorf("error = %q, want it to name the log", err)
+	}
+	if !zeroNodePruneReport(rep) {
+		t.Errorf("report = %+v, want the zero report for a log that does not parse", rep)
+	}
+	if got, want := strings.Join(kube.calls, " "), "ListJSON Apply WaitComplete Logs Delete"; got != want {
+		t.Errorf("calls = %q, want %q", got, want)
 	}
 }
 
