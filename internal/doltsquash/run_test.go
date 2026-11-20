@@ -779,6 +779,54 @@ func TestRecoverAfterTheFirstRenamePutsTheOldMainBack(t *testing.T) {
 	checkRecoveryStopsAtEveryStatement(t, script, len(want))
 }
 
+// TestRecoverOnlyRecoversADeadRunsBranches drives RecoverOnly over the catalog a
+// run leaves when it stops between the swap's two renames: main-pre-squash holds
+// the old main and no branch is named main. RecoverOnly recovers it the way Run's
+// own recovery does, without starting a squash, and returns the Recovery naming
+// the state. The statements are the recovery's alone (gt-an57lb).
+func TestRecoverOnlyRecoversADeadRunsBranches(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture()
+	found := map[string]string{"main-pre-squash": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
+	restored := map[string]string{"main": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
+	after := map[string]string{"main": fx.before.Tip}
+	f := NewFakeExec()
+	f.Respond(branchesStatement, branchesRows(found))
+	f.Respond("CALL DOLT_BRANCH", Rows{})
+	f.Respond("CALL DOLT_CHECKOUT", Rows{})
+	f.Respond(branchesStatement, branchesRows(restored))
+	f.Respond(recoveryNewerStatement("main"), identitiesRows(fx.newer))
+	f.Respond(recoveryNewerStatement("compact-work"), identitiesRows(fx.newer))
+	f.Respond(recoveryNewerStatement("compact-base"), identitiesRows(nil))
+	f.Respond(branchesStatement, branchesRows(after))
+
+	got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()})
+	if err != nil {
+		t.Fatalf("RecoverOnly: %v", err)
+	}
+	if got == nil || got.State != RecoveryFirstRename {
+		t.Fatalf("the recovery is %+v, want state %q", got, RecoveryFirstRename)
+	}
+	if want := []string{"compact-work", "compact-base"}; !slices.Equal(got.Dropped, want) {
+		t.Errorf("the dropped branches are %q, want %q", got.Dropped, want)
+	}
+	want := []string{
+		branchesStatement,
+		swapRenameBack[1],
+		sqlCheckoutMain,
+		branchesStatement,
+		recoveryNewerStatement("main"),
+		recoveryNewerStatement("compact-work"),
+		sqlDropWork,
+		recoveryNewerStatement("compact-base"),
+		sqlDropBase,
+		branchesStatement,
+	}
+	if got := f.Statements(); !slices.Equal(got, want) {
+		t.Errorf("RecoverOnly sent\n%q\nwant the recovery's statements alone\n%q", got, want)
+	}
+}
+
 // TestRecoverFirstRenameKeepsALandedCommit drives the first-rename row over the
 // catalog a row-three recovery leaves when it dies between its own renames:
 // compact-work holds a writer's commit, so it is kept rather than dropped

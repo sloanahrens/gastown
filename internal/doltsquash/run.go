@@ -38,6 +38,25 @@ type RunInput struct {
 	Cut time.Time
 }
 
+// RecoverInput is what RecoverOnly reads: the Dolt seam and the cut the check
+// chose.
+type RecoverInput struct {
+	Exec Exec
+	// Cut is the instant a commit must predate to be squashed, as for Run.
+	Cut time.Time
+}
+
+// RecoverOnly recovers the branches a dead or failed run left, without starting
+// a squash: it calls Recover with the cut and returns its Recovery (nil when the
+// database holds nothing to recover) or its error. Run recovers only at its own
+// start, and the 24-hour gate keeps a failed run's database from reaching Run, so
+// a caller that must recover without running uses this (gt-an57lb). It does not
+// hold the run marker: that is gt-2x4rx5, and nothing calls this function before
+// then.
+func RecoverOnly(ctx context.Context, in RecoverInput) (*Recovery, error) {
+	return Recover(ctx, in.Exec, in.Cut)
+}
+
 // RunSummary is what one run did, for the ledger line the design records per
 // run.
 type RunSummary struct {
