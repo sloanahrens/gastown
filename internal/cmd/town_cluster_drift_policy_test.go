@@ -262,7 +262,7 @@ func TestClusterShapeDriftPolicyRefusesABrokenEmbed(t *testing.T) {
 		},
 		{
 			name: "a kind the compare does not read",
-			spec: spec("ServiceAccount", updateRoleName, true, "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: gt-update\n"),
+			spec: spec("ConfigMap", updateRoleName, true, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: gt-update\n"),
 			want: "is a kind the policy compare does not read",
 		},
 	}
