@@ -160,6 +160,15 @@ func gasTownLocalExcludePatterns() []string {
 	return append(patterns, ".beads/")
 }
 
+// LocalExcludePatterns returns a fresh copy of the patterns
+// EnsureLocalExcludePatterns writes into .git/info/exclude. Read it before
+// writing the seat clone's exclude file (the sandbox seat clone), so the
+// Gas Town pattern list lives in one place. The caller may modify the returned
+// slice without affecting a later call.
+func LocalExcludePatterns() []string {
+	return gasTownLocalExcludePatterns()
+}
+
 // EnsureLocalExcludePatterns writes the standard Gas Town ignore patterns to the
 // worktree-local git exclude file so the worktree stays clean without mutating a
 // tracked .gitignore.
