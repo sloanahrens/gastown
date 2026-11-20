@@ -1338,11 +1338,11 @@ func TestOverrunSeatFor_ReadsTheSessionCreationTime(t *testing.T) {
 }
 
 // A seat's bead read answers the whole bead, submission end included, so the
-// guard's clock costs no second read (gt-chd44). A bead it cannot read is not
-// judged, and the drop is logged: the submission it may hold is the run end the
-// clock has to start after, so acting on the log alone could date a rework from
-// the dispatch its submission ended.
-func TestOverrunSeatFor_ReadsTheSubmissionAndDropsAnUnreadableBead(t *testing.T) {
+// guard's clock costs no second read (gt-chd44). A bead this tick cannot read
+// is judged on the read just kept, marked stale and logged: the kept read still
+// answers the submission that dates the run, where acting on the log alone
+// could date a rework from the dispatch its submission ended (gt-80rmki).
+func TestOverrunSeatFor_ReadsTheSubmissionAndJudgesAnUnreadableBeadOnTheKeptRead(t *testing.T) {
 	t.Parallel()
 	d, buf := newOverrunDaemon(t, false)
 	tm := newFakeTmux(newFixedClock())
@@ -1377,8 +1377,12 @@ func TestOverrunSeatFor_ReadsTheSubmissionAndDropsAnUnreadableBead(t *testing.T)
 	}
 
 	d.openWorkBeads = unreadableBeads{}.open
-	if seat, ok := d.overrunSeatFor(t.TempDir(), "gastown", "capable"); ok {
-		t.Fatalf("judged a seat whose bead could not be read: %+v", seat)
+	stale, ok := d.overrunSeatFor(t.TempDir(), "gastown", "capable")
+	if !ok || !stale.Stale {
+		t.Fatalf("seat = %+v, ok = %v; want the seat judged on the read just kept", stale, ok)
+	}
+	if want := time.Date(2026, 10, 13, 12, 5, 0, 0, time.UTC); !stale.SubmittedAt.Equal(want) {
+		t.Errorf("SubmittedAt = %v, want the kept read's %v", stale.SubmittedAt, want)
 	}
 	if !strings.Contains(buf.String(), "cannot read bead gt-aaa11") {
 		t.Errorf("no alarm for the unreadable bead:\n%s", buf.String())

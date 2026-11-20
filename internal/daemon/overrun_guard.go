@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -33,6 +34,15 @@ const (
 	// defaultOverrunGuardScheduledStopAfter is the one limit on a scheduled
 	// sling. A deliberate deep-review runs long, but not without end.
 	defaultOverrunGuardScheduledStopAfter = 60 * time.Minute
+
+	// overrunKeptReadMaxAge is how old the last good read of a seat's bead may
+	// be and still stand in when this tick's read fails. Past it the seat is
+	// left unjudged, as it was when every failed read dropped it (gt-80rmki).
+	overrunKeptReadMaxAge = 15 * time.Minute
+	// overrunKeptReadRetention is how long the guard keeps a good read at all.
+	// A read no failing tick has needed for this long is dropped, so the memory
+	// holds only the beads read in the window (gt-80rmki).
+	overrunKeptReadRetention = 30 * time.Minute
 )
 
 // overrunMaxGateCharge is how much gate time one tick may charge a seat: twice
@@ -102,6 +112,12 @@ type overrunSeat struct {
 	// cannot be read. The guard never measures a run from before it
 	// (slungFloor, gt-i6recg).
 	SessionStart time.Time
+	// Stale is set when this tick could not read the seat's bead and the guard
+	// judged it on the last good read it kept, which StaleFor dates. A stale
+	// seat may be marked but never stopped (overrunStaleStopRefusal, gt-80rmki).
+	Stale bool
+	// StaleFor is how old the kept read a Stale seat is judged on is.
+	StaleFor time.Duration
 	// Scheduled is set when the bead carries a scheduled: label, the mark of a
 	// run the daemon's scheduled_slings patrol created. Those run long by
 	// design (the deep-review is report-only), so the guard never marks them
@@ -126,6 +142,64 @@ type overrunSeat struct {
 	// seat's finished work was already on origin: the commit both hold for the
 	// kept branch. It turns the hand-back into rework (overrunStop, step 5).
 	ReworkSHA string
+}
+
+// overrunKeptRead is one bead's last good read and when the guard made it.
+type overrunKeptRead struct {
+	state  workBeadState
+	readAt time.Time
+}
+
+// overrunKeptReadStore holds the last good read of each bead the guard judges,
+// so a tick where bd cannot be read still marks its seat on a read minutes old
+// instead of dropping it unwatched (gt-80rmki). It lives in memory only and is
+// bounded by overrunKeptReadRetention: keep prunes every entry past it, and a
+// closed bead's read is dropped rather than kept.
+type overrunKeptReadStore struct {
+	mu      sync.Mutex
+	entries map[string]overrunKeptRead
+}
+
+// keep records st, read at at, as bead's last good read.
+func (s *overrunKeptReadStore) keep(bead string, st workBeadState, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, e := range s.entries {
+		if at.Sub(e.readAt) > overrunKeptReadRetention {
+			delete(s.entries, id)
+		}
+	}
+	delete(s.entries, bead)
+	if st.closed {
+		return
+	}
+	if s.entries == nil {
+		s.entries = make(map[string]overrunKeptRead)
+	}
+	s.entries[bead] = overrunKeptRead{state: st, readAt: at}
+}
+
+// judgeable returns bead's kept read and its age at now, false when the guard
+// has none young enough to judge on. A read past overrunKeptReadMaxAge, or one
+// of a closed bead, is dropped: neither can be judged this tick or a later one.
+func (s *overrunKeptReadStore) judgeable(bead string, now time.Time) (workBeadState, time.Duration, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[bead]
+	if !ok {
+		return workBeadState{}, 0, false
+	}
+	age := now.Sub(e.readAt)
+	if age < 0 {
+		// A clock that stepped back dates the read ahead of now. A stale seat
+		// is never stopped, so nothing acts on the age it loses.
+		age = 0
+	}
+	if e.state.closed || age > overrunKeptReadMaxAge {
+		delete(s.entries, bead)
+		return workBeadState{}, 0, false
+	}
+	return e.state, age, true
 }
 
 // overrunSeams are the guard's reads and side effects. A test sets all of
@@ -574,13 +648,19 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			in.NudgeAt, in.StopAt = scheduledStopAfter, scheduledStopAfter
 		}
 		action := decideOverrun(in)
+		// A seat judged on a kept read may be marked but never stopped: the
+		// submission that ends its run is what this tick's read could not see
+		// (gt-80rmki). Both stop paths below refuse it and say why.
+		staleRefusal := overrunStaleStopRefusal(seat)
 
 		switch action {
 		case overrunNudge:
 			if dry {
 				d.logger.Printf("overrun_guard: dry run: would mark %s on %s after %s", who, seat.Bead, elapsed.Round(time.Second))
-				if reason := d.overrunTripwireReason(s, seat, elapsed, splitAddedLines, true); reason != "" {
-					d.logger.Printf("overrun_guard: dry run: would stop %s on %s for the tripwire: %s", who, seat.Bead, reason)
+				if staleRefusal == "" {
+					if reason := d.overrunTripwireReason(s, seat, elapsed, splitAddedLines, true); reason != "" {
+						d.logger.Printf("overrun_guard: dry run: would stop %s on %s for the tripwire: %s", who, seat.Bead, reason)
+					}
 				}
 				continue
 			}
@@ -601,6 +681,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			// the limit's worth of lines is stopped here and its bead handed
 			// back for a split, rather than run on to the 20 minute stop.
 			if reason := d.overrunTripwireReason(s, seat, elapsed, splitAddedLines, false); reason != "" {
+				if staleRefusal != "" {
+					d.logger.Printf("overrun_guard: not stopping %s on %s for the tripwire: %s", who, seat.Bead, staleRefusal)
+					continue
+				}
 				seat.StopReason = reason
 				// The stop's rework decision needs the sling it is stopping, as
 				// in the stop case.
@@ -608,6 +692,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				d.overrunStop(s, seat, state, elapsed)
 			}
 		case overrunStop:
+			if staleRefusal != "" {
+				d.logger.Printf("overrun_guard: not stopping %s on %s: %s", who, seat.Bead, staleRefusal)
+				continue
+			}
 			// The stop ran for this run of the bead already and the bead is
 			// back in the pool, labeled for a split or as rework. The stop
 			// itself ends the run — it records events.TypeOverrunStop before
@@ -673,6 +761,19 @@ func (d *Daemon) overrunTripwireReason(s overrunSeams, seat overrunSeat, elapsed
 	}
 	return fmt.Sprintf("tripwire: %d added lines at %s, at or over split_added_lines %d; split the bead",
 		n, elapsed.Round(time.Second), limit)
+}
+
+// overrunStaleStopRefusal returns why the guard will not stop a seat judged on
+// the kept read of its bead, and "" for a seat judged on this tick's read. A
+// stop ends the run and hands the bead back, so it must rest on a read that can
+// see the submission ending that run; one taken before the read failed cannot
+// (gt-80rmki).
+func overrunStaleStopRefusal(seat overrunSeat) string {
+	if !seat.Stale {
+		return ""
+	}
+	return fmt.Sprintf("its bead could not be read this tick and the kept read is %d minutes old; a stop rests on a fresh read",
+		int(seat.StaleFor.Minutes()))
 }
 
 // overrunProdSeams returns the production seams: the daemon's rigs, event
@@ -782,13 +883,22 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	}
 	// One read answers the seat's whole bead: whether its work is over, its
 	// labels, and the end of the run a submission made. A bead that cannot be
-	// read is not judged: the submission it may hold is the run end the clock
-	// has to start after, so acting on the log alone could date a rework from
-	// the dispatch its submission ended (gt-chd44).
+	// read is judged on the last good read the guard kept, when that is young
+	// enough; with none it is not judged, because the submission it may hold is
+	// the run end the clock has to start after (gt-chd44, gt-80rmki).
 	st, err := d.workBeadState(bead)
 	if err != nil {
-		d.logger.Printf("overrun_guard: %s/%s: cannot read bead %s, not judging it this tick: %v", rigName, name, bead, err)
-		return seat, false
+		kept, age, ok := d.overrunKeptReads.judgeable(bead, d.clk().Now())
+		if !ok {
+			d.logger.Printf("overrun_guard: %s/%s: cannot read bead %s, not judging it this tick: %v", rigName, name, bead, err)
+			return seat, false
+		}
+		d.logger.Printf("overrun_guard: %s/%s: cannot read bead %s, judged on a read %d minutes old: %v", rigName, name, bead, int(age.Minutes()), err)
+		st = kept
+		seat.Stale = true
+		seat.StaleFor = age
+	} else {
+		d.overrunKeptReads.keep(bead, st, d.clk().Now())
 	}
 	if st.closed {
 		return seat, false
