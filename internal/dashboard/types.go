@@ -584,13 +584,20 @@ type LandingRow struct {
 	// ends. Verdict is om's reading of a landing: "approved", "skipped"
 	// (landed with no review of its own) or "error". Kind is why a rejection
 	// was refused: review, gate, conflict, policy or empty.
-	Outcome  string   `json:"outcome"`
-	Verdict  string   `json:"verdict,omitempty"`
-	Kind     string   `json:"kind,omitempty"`
-	Score    *float64 `json:"score,omitempty"`
-	LintSecs *float64 `json:"lint_secs,omitempty"`
-	GateSecs *float64 `json:"gate_secs,omitempty"`
-	OMSecs   *float64 `json:"om_secs,omitempty"`
+	Outcome string `json:"outcome"`
+	// RejectCount is how many times the bead's landing has been refused by the
+	// row's own time: on a rejected row the refusal it shows is the last one
+	// counted, and on a landed row the refusals before it landed (0 is a first
+	// try). It is counted over every rejection record the reader handed in,
+	// not only the day the table draws, so a retry still reads as one when its
+	// first refusal is older than the window (gt-qyc95m).
+	RejectCount int      `json:"reject_count,omitempty"`
+	Verdict     string   `json:"verdict,omitempty"`
+	Kind        string   `json:"kind,omitempty"`
+	Score       *float64 `json:"score,omitempty"`
+	LintSecs    *float64 `json:"lint_secs,omitempty"`
+	GateSecs    *float64 `json:"gate_secs,omitempty"`
+	OMSecs      *float64 `json:"om_secs,omitempty"`
 	// ShipSecs is the landing's total ship time, dispatched to shipped in
 	// seconds: the number the Ship time tile reports as a median. It is nil for
 	// a landing with no dispatch line (hand-slung), a rejection, and a landing
