@@ -384,10 +384,13 @@ type overrunState struct {
 	// SavedAt is when the save step (overrunStop, step 1b) succeeded, or gave
 	// up; a stop resumed later does not save again once it is set. SavedHead is
 	// the branch head that save pushed (empty when it had nothing to push),
-	// SaveCommitted says it made the WIP commit. A refused save (step 1b, or the
-	// late re-save of step 2a) records SaveFailure, why its push or commit was
-	// refused, and counts in SaveFailures: the stop holds and the next tick
-	// saves again. A success clears both. At overrunSaveMaxAttempts consecutive
+	// SaveCommitted says it made the WIP commit, and SaveRescue is the rescue
+	// branch SavedHead went to instead of the kept branch when origin held a
+	// different history for it (empty when the kept branch took the push). A
+	// refused save (step 1b, or the late re-save of step 2a) records
+	// SaveFailure, why its push or commit was refused, and counts in
+	// SaveFailures: the stop holds and the next tick saves again. A success
+	// clears both. At overrunSaveMaxAttempts consecutive
 	// refusals the stop gives up on the save (SaveGaveUp): the seat is parked
 	// with SaveFailure as the reason, and the sandbox is kept. A late check
 	// (step 2a) that cannot read the worktree counts in the same SaveFailures
@@ -395,6 +398,7 @@ type overrunState struct {
 	SavedAt        time.Time `json:"saved_at,omitzero"`
 	SavedHead      string    `json:"saved_head,omitempty"`
 	SaveCommitted  bool      `json:"save_committed,omitempty"`
+	SaveRescue     string    `json:"save_rescue,omitempty"`
 	SaveFailure    string    `json:"save_failure,omitempty"`
 	SaveFailures   int       `json:"save_failures,omitempty"`
 	SaveFailedLate bool      `json:"save_failed_late,omitempty"`

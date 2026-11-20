@@ -92,7 +92,8 @@ const (
 // Between steps 1 and 2 the save step (overrunSaveWork, 1b) commits the seat's
 // uncommitted work as one WIP commit named for the bead and pushes the kept
 // branch, once per stop, before the session stops and before the sandbox is
-// removed. A refused save holds the stop with the seat paused, and the next
+// removed; a head origin refuses as diverged goes to a rescue branch instead.
+// A refused save holds the stop with the seat paused, and the next
 // tick saves again; after overrunSaveMaxAttempts consecutive refusals the stop
 // gives up on the save: the sandbox is kept, the bead is handed back with the
 // refusal named, and the seat stays parked. An unresolvable worktree is a
@@ -230,11 +231,13 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 		// 1b. Save the seat's work before the session stops and the sandbox
 		// goes (overrunSaveWork): uncommitted edits become one WIP commit and
-		// the kept branch is pushed. It runs after the re-check above, so a
-		// seat taken back is never committed. A refusal holds the stop with the
-		// seat paused and the session running, and the next tick saves again,
-		// up to overrunSaveMaxAttempts refusals; the cap then parks the seat, and
-		// the stop goes on with the sandbox kept and the reason in the note.
+		// the kept branch is pushed, or its head is rescued to a sha-suffixed
+		// branch when origin holds a different history for it. It runs after the
+		// re-check above, so a seat taken back is never committed. A refusal
+		// holds the stop with the seat paused and the session running, and the
+		// next tick saves again, up to overrunSaveMaxAttempts refusals; the cap
+		// then parks the seat, and the stop goes on with the sandbox kept and
+		// the reason in the note.
 		if st.SavedAt.IsZero() && s.saveWork != nil {
 			saveSeat := seat
 			saveSeat.Bead, saveSeat.Branch, saveSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
@@ -254,7 +257,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			} else {
 				st.SavedAt = now
 				st.SaveFailure, st.SaveFailures, st.SaveFailedLate = "", 0, false
-				st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
+				st.SavedHead, st.SaveCommitted, st.SaveRescue = saved.Head, saved.Committed, saved.Rescue
 			}
 			if !save() {
 				return
@@ -390,7 +393,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 				} else {
 					st.SaveFailure, st.SaveFailures, st.SaveFailedLate = "", 0, false
 					if saved.Head != "" {
-						st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
+						st.SavedHead, st.SaveCommitted, st.SaveRescue = saved.Head, saved.Committed, saved.Rescue
 					}
 				}
 				if !save() {
@@ -545,8 +548,11 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// push is retried every tick: the hand-back waits for it, up to
 	// overrunPushMaxAttempts; a non-fast-forward rejection, which no retry
 	// changes, gives up at once. A stop that gave up on the origin read skips
-	// it with the checkpoint above.
-	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil && originReadGaveUp == "" {
+	// it with the checkpoint above. A save that rescued a diverged head
+	// (SaveRescue) skips it too: the seat's work is already on origin at the
+	// rescue branch, the kept branch is left as origin has it, and pushing it
+	// again could only be refused a second time and alarm the hand-back.
+	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil && originReadGaveUp == "" && st.SaveRescue == "" {
 		pushSeat := seat
 		pushSeat.Bead, pushSeat.Branch, pushSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 		// Read before the push: afterwards origin holds the head whatever it
@@ -609,10 +615,17 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		notes = append(notes, reason)
 	}
 	if st.SavedHead != "" {
-		if st.SaveCommitted {
+		switch {
+		case st.SaveRescue != "" && st.SaveCommitted:
+			notes = append(notes, fmt.Sprintf("The seat's uncommitted work was saved before the stop as a WIP commit, and because origin holds a different history for branch %s that branch was left as it was: the saved head is on origin at the rescue branch %s, sha %s.",
+				branch, st.SaveRescue, st.SavedHead))
+		case st.SaveRescue != "":
+			notes = append(notes, fmt.Sprintf("Because origin holds a different history for branch %s that branch was left as it was, and its saved head was pushed to the rescue branch %s, sha %s.",
+				branch, st.SaveRescue, st.SavedHead))
+		case st.SaveCommitted:
 			notes = append(notes, fmt.Sprintf("The seat's uncommitted work was saved before the stop as a WIP commit, and branch %s was pushed at %s.",
 				branch, st.SavedHead))
-		} else {
+		default:
 			notes = append(notes, fmt.Sprintf("Branch %s was pushed at %s before the stop.", branch, st.SavedHead))
 		}
 	}
@@ -992,10 +1005,13 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 }
 
 // overrunSave is what the save step (overrunSaveWork) left on origin: the
-// branch head it pushed, and whether that head is a WIP commit it made.
+// branch head it pushed, whether that head is a WIP commit it made, and the
+// rescue branch it pushed the head to instead of the kept branch when origin
+// held a different history for it (empty otherwise).
 type overrunSave struct {
 	Head      string
 	Committed bool
+	Rescue    string
 }
 
 // overrunSaveMessage is the subject of the WIP commit the save step makes.
@@ -1007,11 +1023,12 @@ func overrunSaveMessage(bead string) string {
 // one WIP commit, named for the bead, through the checkpoint's staging and
 // guards, so the runtime files and throwaway paths the checkpoint leaves out
 // stay out here too; the kept branch is then pushed, unforced, when origin
-// does not hold its head. A worktree that is clean and already pushed changes
-// nothing. A worktree that cannot be resolved is an error, never nothing to
-// save. A WIP commit made on no branch, or on a HEAD that is not the kept
-// branch, cannot reach that branch, so it is refused rather than left
-// unpushed. A refused commit or push is an error, and the stop keeps the
+// does not hold its head, and a head origin refuses as diverged is pushed once
+// to a rescue branch (overrunRescueBranch) instead. A worktree that is clean
+// and already pushed changes nothing. A worktree that cannot be resolved is an
+// error, never nothing to save. A WIP commit made on no branch, or on a HEAD
+// that is not the kept branch, cannot reach that branch, so it is refused
+// rather than left unpushed. A refused commit or push is an error, and the stop keeps the
 // sandbox. A sandbox that reports it is gone is errSandboxGone, never a
 // successful save.
 func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
@@ -1077,9 +1094,38 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	pushSeat := seat
 	pushSeat.Branch = branch
 	if err := d.overrunPushBranch(pushSeat); err != nil {
-		return overrunSave{}, err
+		var diverged *overrunPushDivergedError
+		if !errors.As(err, &diverged) {
+			return overrunSave{}, err
+		}
+		// Origin holds a different history for the kept branch, and the push is
+		// never forced: no retry of it can land. The saved head goes instead to
+		// a new sha-suffixed ref, which a second rescue of the seat with a new
+		// tip can never be ahead of, so the work reaches origin and the stop
+		// counts the save as done (gt-2w44eb). A rescue ref that already holds
+		// other history refuses the push like any other refusal, and the stop
+		// retries it.
+		rescue := overrunRescueBranch(branch, sha)
+		if rescueErr := g.Push("origin", sha+":refs/heads/"+rescue, false); rescueErr != nil {
+			return overrunSave{}, fmt.Errorf("rescue push of the saved head %s to %s, after origin refused %s: %w", sha, rescue, branch, rescueErr)
+		}
+		d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as diverged; pushed the saved head %s to the rescue branch %s, kept branch left as it was",
+			seat.Rig, seat.Polecat, branch, sha, rescue)
+		return overrunSave{Head: sha, Committed: committed, Rescue: rescue}, nil
 	}
 	return overrunSave{Head: sha, Committed: committed}, nil
+}
+
+// overrunRescueBranch is the branch a diverged saved head is pushed to: the
+// kept branch's name with the head's first seven characters, the name nuke's
+// preserve uses. A sha-suffixed name is a new ref for every new tip, so a
+// second rescue of the same seat is never a non-fast-forward.
+func overrunRescueBranch(branch, sha string) string {
+	suffix := sha
+	if len(suffix) > 7 {
+		suffix = suffix[:7]
+	}
+	return branch + "-" + suffix
 }
 
 // errOverrunNoWorktree is the answer a seat with no resolvable worktree gets
