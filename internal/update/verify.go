@@ -260,8 +260,10 @@ var queueReasons = map[string]func(string) bool{
 //
 // A probe set that also implements ReadyProbes is asked the town's readiness
 // question after a successful health read instead, and the readiness answer
-// decides the check whatever the line's verdict; a line that does not read as a
-// health line still fails. The roll is thus judged by readiness, so a red rig
+// decides the check, except for a line that holds a daemon or tick reason,
+// which this function's line rule above still judges (classifyHealthLine, so a
+// RED verdict fails at once and a DEGRADED line of recorded late ticks
+// settles); a line that does not read as a health line still fails. A red rig
 // main on the line is reported beside the outcome rather than folded into it.
 // See readyHealthCheck.
 func healthCheck(ctx context.Context, p VerifyProbes) Check {
@@ -287,12 +289,17 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 // GREEN, saying the line is reported beside the roll and is not part of it.
 const readyNote = " (ready: the town's own recorded and queue states are reported beside the roll, not part of it)"
 
-// readyHealthCheck passes the health check exactly when the town's readiness
-// answer says it is ready, whatever the line's verdict, and its detail is the
-// line as read; a line that is not GREEN carries the ready note. A line that
-// does not read as a health line fails with the line as read before readiness
-// is asked, so an unreadable line never passes. A not-ready answer fails naming
-// the reason and the line, and a Ready error fails with the error text.
+// readyHealthCheck passes the health check when the town's readiness answer says
+// it is ready and the line holds no daemon or tick reason, whatever the line's
+// verdict, and its detail is the line as read; a line that is not GREEN carries
+// the ready note. A line that
+// holds a reason keyed daemon or beginning tick:, a state readiness excuses, is
+// judged by classifyHealthLine instead: a passing or GREEN line passes, and a
+// settling or failing one fails with the line as read, so VerifyWithSettle
+// settles a RECORDED late tick and fails a fresh red. A line that does not read
+// as a health line fails with the line as read before readiness is asked, so an
+// unreadable line never passes. A not-ready answer fails naming the reason and
+// the line, and a Ready error fails with the error text.
 func readyHealthCheck(ctx context.Context, ready ReadyProbes, line string) Check {
 	verdict, _, ok := healthLineHead(line)
 	if !ok {
@@ -305,10 +312,43 @@ func readyHealthCheck(ctx context.Context, ready ReadyProbes, line string) Check
 	if !isReady {
 		return Check{Name: checkHealth, Detail: fmt.Sprintf("not ready: %s: %s", reason, line)}
 	}
+	if daemonOrTickReason(line) {
+		switch classifyHealthLine(line) {
+		case healthSettling, healthFail:
+			return Check{Name: checkHealth, Detail: line}
+		}
+	}
 	if verdict == "GREEN" {
 		return Check{Name: checkHealth, OK: true, Detail: line}
 	}
 	return Check{Name: checkHealth, OK: true, Detail: line + readyNote}
+}
+
+// daemonOrTickReason reports whether line lists a reason keyed daemon or
+// beginning tick:, the two RECORDED states readiness reads in full and so would
+// excuse. It reads every verdict's reasons, so a red line is seen too, and a
+// field with no value, rendered "daemon[?]", still has its key.
+func daemonOrTickReason(line string) bool {
+	_, tail, ok := healthLineHead(line)
+	if !ok {
+		return false
+	}
+	reasons, _ := strings.CutPrefix(tail, ":")
+	for _, reason := range healthReasonTokens(reasons) {
+		key, _, _ := strings.Cut(reason, "=")
+		key, _, _ = strings.Cut(key, "[")
+		if key == "daemon" || strings.HasPrefix(key, "tick:") {
+			return true
+		}
+	}
+	return false
+}
+
+// healthReasonTokens splits a health line's reasons, the text after its head
+// colon, into tokens: separated by commas or spaces, so both the comma-separated
+// form and the space-separated line the town renders read.
+func healthReasonTokens(reasons string) []string {
+	return strings.FieldsFunc(reasons, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
 }
 
 // queueOnlyHealthLine reports whether line is a health line a roll may pass on,
@@ -391,7 +431,7 @@ func healthReasons(line string) (degraded bool, tokens []string, ok bool) {
 	if !found {
 		return false, nil, false
 	}
-	tokens = strings.FieldsFunc(reasons, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	tokens = healthReasonTokens(reasons)
 	if len(tokens) == 0 {
 		return false, nil, false
 	}
