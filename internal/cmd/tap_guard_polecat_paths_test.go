@@ -142,8 +142,14 @@ func (p polecatTestTown) proc() guardProcess {
 // run invokes the guard exactly as the PreToolUse hook does: a Claude Code
 // payload on stdin, the guard's exit status as the verdict.
 func (p polecatTestTown) run(t *testing.T, tool, toolInput string) error {
+	return p.runFrom(t, p.worktree, tool, toolInput)
+}
+
+// runFrom is run with the payload's cwd set to cwd, for sessions that stand
+// somewhere other than the worktree itself.
+func (p polecatTestTown) runFrom(t *testing.T, cwd, tool, toolInput string) error {
 	t.Helper()
-	payload := fmt.Sprintf(`{"tool_name":%q,"cwd":%q,"tool_input":%s}`, tool, p.worktree, toolInput)
+	payload := fmt.Sprintf(`{"tool_name":%q,"cwd":%q,"tool_input":%s}`, tool, cwd, toolInput)
 	return tapGuardPolecatPaths(strings.NewReader(payload), io.Discard, p.proc())
 }
 
@@ -308,6 +314,54 @@ func TestPolecatPathGuardFollowsSymlinks(t *testing.T) {
 	}
 	if err := p.run(t, "Write", fileInput(filepath.Join(link, "new.go"))); err == nil {
 		t.Error("expected a new file written through that symlink to be blocked (fail closed)")
+	}
+}
+
+// TestPolecatPathGuardCommonWork pins the sandbox seat's common start path
+// (gt-f80lq2) against the guard (gt-po7rdq): the seat stands in a link to its
+// real worktree while GT_POLECAT_PATH keeps the real path, so a write spelled
+// through the link must land in the seat's own worktree, and one that steps
+// out of it into a sibling's must still be denied.
+func TestPolecatPathGuardCommonWork(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	link := filepath.Join(p.town, "work") // the production shape, sandboxCommonWork
+	if err := os.Symlink(p.worktree, link); err != nil {
+		t.Fatalf("linking %s to the worktree: %v", link, err)
+	}
+
+	// Concatenated, never filepath.Join'd: Join cleans lexically, dropping the
+	// ".." against the link's spelling instead of the worktree the kernel
+	// resolves the link to.
+	sep := string(filepath.Separator)
+	out := ".." + sep + ".." + sep + p.other + sep + p.rig + sep
+
+	cases := []struct {
+		name      string
+		cwd       string // payload cwd: where the seat's shell stands
+		tool      string
+		input     string
+		wantBlock bool
+	}{
+		{"write under the link", link, "Write", fileInput(filepath.Join(link, "internal", "new.go")), false},
+		{"bash write under the link", link, "Bash", commandInput("cp a.go " + filepath.Join(link, "internal", "new.go")), false},
+		{"write relative to the link", link, "Write", fileInput("internal/relative.go"), false},
+		{"the link and .. spelled toward a sibling", link, "Write", fileInput(link + sep + ".." + sep + "polecats" + sep + p.other + sep + p.rig + sep + "x.go"), true},
+		{".. out of the worktree into the sibling", link, "Write", fileInput(link + sep + out + "x.go"), true},
+		{"relative escape from the link", link, "Write", fileInput(out + "x.go"), true},
+		{"absolute sibling path from the link", link, "Write", fileInput(filepath.Join(p.sibling, "internal.go")), true},
+		{"bash into the sibling from the link", link, "Bash", commandInput("cp a.go " + filepath.Join(p.sibling, "new.go")), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.runFrom(t, tc.cwd, tc.tool, tc.input)
+			if tc.wantBlock && err == nil {
+				t.Errorf("%s: expected BLOCK, got allow", tc.name)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("%s: expected allow, got block: %v", tc.name, err)
+			}
+		})
 	}
 }
 
