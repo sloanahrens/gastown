@@ -229,8 +229,13 @@ func TestRoundsLedgerReappendDoesNotSettleIdlessFindings(t *testing.T) {
 	if err := l.Append(1, "head1", idless); err != nil {
 		t.Fatalf("re-append: %v", err)
 	}
-	findings := renderedOf(t, l, 0)[0].Findings
-	if findings[0].Outcome != string(OutcomeOpen) || findings[1].Outcome != string(OutcomeOpen) {
+	// read the ledger, not Render: Render refuses an id-less finding (gt-2rvuze).
+	held, err := l.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	findings := held.Rounds[0].Findings
+	if findings[0].Outcome != OutcomeOpen || findings[1].Outcome != OutcomeOpen {
 		t.Errorf("re-appended outcomes = %q and %q, want both open: an id-less finding cannot be told from its neighbor",
 			findings[0].Outcome, findings[1].Outcome)
 	}
