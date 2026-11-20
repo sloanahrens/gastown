@@ -1,6 +1,7 @@
 package polecatimage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -37,9 +38,11 @@ func (l *stringList) Set(v string) error {
 // removed. With --apply each planned image is removed, one at a time, and reported. run executes each crictl
 // call's program and returns its standard output; the dispatcher gives execProgram, and a test gives a fake.
 //
-// Exit 0 means the node was read and the plan printed, or every apply removal succeeded. Exit 3 means the
-// node could not be read, with the reason on stderr and no would-remove line, so a missing plan is never
-// read as an empty one; it also means an apply removal failed. Exit 2 is a usage error; -h exits 0.
+// Exit 0 means the node was read and the plan printed, or every apply removal succeeded, and -h prints the
+// usage and exits 0. Exit 3 means the node could not be read, with the reason on stderr and no would-remove
+// line, so a missing plan is never read as an empty one; it also means an apply removal failed, or a flag
+// the helper does not parse (an unknown one, or a value it cannot read). Exit 2 is a usage error the helper
+// checks itself.
 func nodePruneWith(args []string, stdout, stderr io.Writer, run func(name string, args ...string) ([]byte, error)) int {
 	flags := flag.NewFlagSet("node-prune", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -56,7 +59,7 @@ func nodePruneWith(args []string, stdout, stderr io.Writer, run func(name string
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
-		return 2
+		return 3
 	}
 	if *keep < 0 {
 		fmt.Fprintf(stderr, "node-prune: -keep must be 0 or more, got %d\n", *keep)
@@ -138,19 +141,21 @@ func crictlVerb(args []string) string {
 }
 
 // withSpares answers a `crictl ps` reply with one container per spare, each using that spare, so the
-// plan reads the spare as in use. A JSON null is no containers, which is how crictl prints a node with
-// none. Any other reply must be a JSON object: one that is unreadable and read as no containers would let
-// the plan remove images a container still uses.
+// plan reads the spare as in use. The reply is read in the forms the plan understands: JSON null (no
+// containers, which is how crictl prints a node with none), or an object with no key other than containers,
+// whose value is a list or null. Any other reply is refused: one read as no containers would let the plan
+// remove images a container still uses.
 func withSpares(ps []byte, spares []string) ([]byte, error) {
-	var object map[string]json.RawMessage
-	if err := json.Unmarshal(ps, &object); err != nil {
-		return nil, errors.New("crictl ps: the reply is not a JSON object")
-	}
 	var reply struct {
 		Containers []json.RawMessage `json:"containers"`
 	}
-	if err := json.Unmarshal(ps, &reply); err != nil {
-		return nil, fmt.Errorf("crictl ps: %w", err)
+	dec := json.NewDecoder(bytes.NewReader(ps))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&reply); err != nil {
+		return nil, fmt.Errorf("crictl ps: the reply is not a containers object: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("crictl ps: the reply holds more than one JSON value")
 	}
 	for _, s := range spares {
 		reply.Containers = append(reply.Containers, fmt.Appendf(nil, `{"image":{"image":%q},"imageRef":%q}`, s, s))
