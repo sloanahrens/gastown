@@ -1132,22 +1132,31 @@ func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
 // fetch is not followed by a count (gt-wz5ct4).
 func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
 	t.Parallel()
-	for _, fails := range []string{"fetch", "rev-list"} {
-		t.Run("the "+fails+" fails", func(t *testing.T) {
+	const fatal = "fatal: could not read username for 'http://forgejo:3000'"
+	for _, tt := range []struct {
+		name, fails string
+		stderr      []byte
+		want        string
+	}{
+		{"the fetch fails", "fetch", []byte(fatal + "\nhint: more\n"), "git fetch: git exited 128: " + fatal},
+		{"the rev-list fails", "rev-list", []byte(fatal + "\nhint: more\n"), "git rev-list: git exited 128: " + fatal},
+		{"the fetch fails silently", "fetch", nil, "git fetch: git exited 128"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			boom := errors.New("git exited 128")
 			calls := 0
 			n, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
 				calls++
-				if slices.Contains(cmd.Args, fails) {
-					return []byte("stdout that is not the error"), []byte("fatal: could not read username for 'http://forgejo:3000'\nhint: more\n"), boom
+				if slices.Contains(cmd.Args, tt.fails) {
+					return []byte("stdout that is not the error"), tt.stderr, boom
 				}
 				return nil, nil, nil
 			})
-			if !errors.Is(err, boom) || n != 0 || !strings.Contains(err.Error(), "fatal:") || strings.Contains(err.Error(), "hint: more") {
-				t.Fatalf("a failed %s = %d, %v; want the git error, with no count and git's first stderr line", fails, n, err)
+			if !errors.Is(err, boom) || n != 0 || err == nil || err.Error() != tt.want {
+				t.Fatalf("a failed %s = %d, %v; want %q, with no count", tt.fails, n, err, tt.want)
 			}
-			if fails == "fetch" && calls != 1 {
+			if tt.fails == "fetch" && calls != 1 {
 				t.Errorf("git ran %d times, want the failed fetch alone", calls)
 			}
 		})
