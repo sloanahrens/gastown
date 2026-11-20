@@ -117,6 +117,15 @@ type specEstimateOpts struct {
 	JSON   bool
 }
 
+// specEstimateComponents is each input's minutes in the outcome's JSON: the
+// shape, embedding and Jev minutes the estimate blended, each omitted when that
+// input was skipped.
+type specEstimateComponents struct {
+	Shape *float64 `json:"shape,omitempty"`
+	Embed *float64 `json:"embed,omitempty"`
+	Jev   *float64 `json:"jev,omitempty"`
+}
+
 // specEstimateOutcome is what one run did, or would do, to one bead.
 type specEstimateOutcome struct {
 	ID string `json:"id"`
@@ -128,7 +137,12 @@ type specEstimateOutcome struct {
 	Points  int     `json:"sp,omitempty"`
 	Rung    string  `json:"rung,omitempty"`
 	Minutes float64 `json:"minutes,omitempty"`
-	Hash    string  `json:"hash"`
+	// Components is the minutes each input contributed to the estimate this run
+	// made, so a reader of a number can say which input moved it. It is absent
+	// when the run estimated nothing, or when the estimator recorded no
+	// component minutes.
+	Components *specEstimateComponents `json:"components,omitempty"`
+	Hash       string                  `json:"hash"`
 	// Reason says why there is no estimate; empty otherwise.
 	Reason string `json:"reason,omitempty"`
 	// LogError is the one line a failed estimate-log append reported; it never
@@ -306,11 +320,22 @@ func planSpecEstimate(beadID, hash string, existing []string, r estimate.Result,
 		Points:       r.Points,
 		Rung:         r.Rung,
 		Minutes:      minutes,
+		Components:   specEstimateComponentsOf(r.ComponentMinutes),
 		AddLabels:    add,
 		RemoveLabels: staleEstimateLabels(existing, add),
 		Comment:      estimate.Note(r),
 		Neighbors:    estimate.NeighborsLine(r),
 	}
+}
+
+// specEstimateComponentsOf copies a result's component minutes into the
+// outcome, or returns nil when the result records none, so the JSON carries no
+// empty components object.
+func specEstimateComponentsOf(c estimate.ComponentMinutes) *specEstimateComponents {
+	if c.Shape == nil && c.Embed == nil && c.Jev == nil {
+		return nil
+	}
+	return &specEstimateComponents{Shape: c.Shape, Embed: c.Embed, Jev: c.Jev}
 }
 
 // specEstimateLabelable refuses a result whose labels would not parse back:

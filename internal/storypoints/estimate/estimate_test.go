@@ -156,8 +156,9 @@ func TestEstimateAllInputs(t *testing.T) {
 	if !regexp.MustCompile(`^SP ESTIMATE v1 sp:\d+ rung:[a-z-]+ hash:[0-9a-f]{64}$`).MatchString(first) {
 		t.Fatalf("first line %q is not the note's format", first)
 	}
+	wantInputs := fmt.Sprintf("inputs: shape %.1f, embed %.1f, jev %.1f", shape, embed, jev)
 	for _, line := range []string{
-		"inputs: shape, embed, jev",
+		wantInputs,
 		"nearest beads: gt-a (gastown) first neighbor; dv-b (devops) second neighbor",
 	} {
 		if !strings.Contains(note, line) {
@@ -220,10 +221,11 @@ func TestEstimateResultCarriesTheFeaturesTheEstimatorRead(t *testing.T) {
 	}
 }
 
-// TestEstimateComponentMinutesFollowTheInputs: a component the estimate did not
-// have leaves its minutes nil and its embedding absent, so the log cannot
-// record a number the estimate never made.
-func TestEstimateComponentMinutesFollowTheInputs(t *testing.T) {
+// TestEstimateComponentsResult: a result carries the shape, embed and Jev
+// minutes the inputs contributed, and a component the estimate did not have
+// leaves its minutes nil and its embedding absent, so the log cannot record a
+// number the estimate never made.
+func TestEstimateComponentsResult(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name          string
