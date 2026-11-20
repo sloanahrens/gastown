@@ -243,9 +243,10 @@ type overrunSeams struct {
 	// a slot of the town's container-gate pool, or a gate suite is running
 	// under its tmux pane (overrun_guard_gate.go). The time it spends there is
 	// subtracted from the sling's elapsed time, so waiting on a gate is not an
-	// overrun. An error means the seat's gate state could not be read, and the
-	// guard then counts all of its time — the direction that stops. nil means
-	// the same: an unset seam is no exemption.
+	// overrun. An error means the seat's gate state could not be read: the guard
+	// carries the seat's last gate answer for two failures in a row, then counts
+	// all of its time — the direction that stops. nil means the same: an unset
+	// seam is no exemption.
 	gateRunning func(seat overrunSeat) (bool, error)
 
 	// escalationWaiting reports whether the seat is waiting on an open
@@ -476,10 +477,11 @@ func (d *Daemon) runOverrunGuardPass(cycle func()) {
 // scheduled_stop_after alone (zero leaves it alone). The clock it judges is the
 // later of the bead's dispatch (slungAt) and a restart of the seat since then,
 // less the time the seat spends inside its gate, or waiting on an escalation it
-// raised; a state that cannot be read counts all of its time
-// (overrun_guard_gate.go, overrun_guard_escalation.go, withRestart). In dry-run
-// mode nothing is stopped or written, no hook is called, and the log says what
-// would have happened.
+// raised. A failed gate read carries the seat's last gate answer for two
+// consecutive failures, then counts all of its time; a state that cannot be
+// read counts all of its time (overrun_guard_gate.go, overrun_guard_escalation.go,
+// withRestart). In dry-run mode nothing is stopped or written, no hook is
+// called, and the log says what would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	pc := d.patrol()
 	if !d.isPatrolActive("overrun_guard") {
@@ -591,12 +593,23 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// keeps the clock, and the mark was already made for it.
 		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(clockStart)
 
-		// Gate time does not count (overrun_guard_gate.go). A state that cannot
-		// be read counts all of the seat's time, the direction that stops.
+		// Gate time does not count (overrun_guard_gate.go). A failed gate read
+		// carries the seat's last gate answer for overrunGateReadCarryMax
+		// consecutive failures, then counts all of its time: the failure is
+		// recorded before the carry is judged, so the third one in a row is the
+		// one that stops it (recordGateRead, carriedGate).
 		inGate, err := gateRunning(seat)
 		if err != nil {
-			d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s, counting all of its time: %v", who, seat.Bead, err)
-			inGate = false
+			state.recordGateRead(false, false)
+			var carried bool
+			inGate, carried = state.carriedGate()
+			if carried {
+				d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s (failure %d in a row), carrying its last gate answer: %v", who, seat.Bead, state.GateReadFailures, err)
+			} else {
+				d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s (failure %d in a row), counting all of its time: %v", who, seat.Bead, state.GateReadFailures, err)
+			}
+		} else {
+			state.recordGateRead(true, inGate)
 		}
 		state, gateSpent := state.withGate(clockStart, now, inGate, maxGateCharge, maxGateTotal)
 

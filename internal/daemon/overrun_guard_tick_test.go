@@ -1,14 +1,92 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // gateTickRead is one gate read: ok is whether the read answered, inGate its
 // answer.
 type gateTickRead struct{ ok, inGate bool }
+
+// scriptedGateReads serves the reads in order, then fails every read after them.
+func scriptedGateReads(reads ...gateTickRead) func(overrunSeat) (bool, error) {
+	i := 0
+	return func(overrunSeat) (bool, error) {
+		i++
+		if i > len(reads) || !reads[i-1].ok {
+			return false, errors.New("container-gate slot status: boom")
+		}
+		return reads[i-1].inGate, nil
+	}
+}
+
+// tickUntilStop ticks once a minute and returns the wall time of the first stop,
+// zero when there is none within maxTicks.
+func tickUntilStop(d *Daemon, f *overrunFake, maxTicks int) time.Time {
+	for i := 1; i <= maxTicks; i++ {
+		f.now = overrunSlung.Add(time.Duration(i) * time.Minute)
+		d.runOverrunGuard(f.seams())
+		if len(f.stops) > 0 {
+			return f.now
+		}
+	}
+	return time.Time{}
+}
+
+// A failed gate read carries the seat's last in-gate answer for two failures in
+// a row and counts all of its time from the third; a successful read starts the
+// run over. The log says which the guard did (gt-fsgn30).
+func TestTickEffGateReadFailureCarriesState(t *testing.T) {
+	t.Parallel()
+
+	t.Run("two failures carry, the third counts all of the time", func(t *testing.T) {
+		t.Parallel()
+		d, buf := newOverrunDaemon(t, false)
+		f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-carry1"})
+		f.gateRunning = scriptedGateReads(gateTickRead{true, true})
+
+		// Tick 1 opens the in-gate stretch; ticks 2 and 3 carry it and bank two
+		// minutes. Tick 4, the third failure, counts the seat's own time, so the
+		// 20 minute stop lands at 22 minutes of wall time. With the carry unbounded
+		// the stop would wait for the 40 minute gate ceiling: 60 minutes.
+		stoppedAt := tickUntilStop(d, f, 60)
+		if want := overrunSlung.Add(22 * time.Minute); !stoppedAt.Equal(want) {
+			t.Errorf("stopped at %v, want %v: two carried failures, then the third counts all its time",
+				stoppedAt.Sub(overrunSlung), want.Sub(overrunSlung))
+		}
+		if got := strings.Count(buf.String(), "carrying its last gate answer"); got != 2 {
+			t.Errorf("carry lines = %d, want 2 (one per carried failure):\n%s", got, buf.String())
+		}
+		if !strings.Contains(buf.String(), "(failure 3 in a row), counting all of its time") {
+			t.Errorf("log does not say the third failure counts all of its time:\n%s", buf.String())
+		}
+	})
+
+	t.Run("a successful read starts the run over", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-carry2"})
+		// Two failures, an in-gate read that resets the run, then two more failures
+		// that carry: the third failure after the reset is the one that stops.
+		f.gateRunning = scriptedGateReads(
+			gateTickRead{true, true}, gateTickRead{false, false}, gateTickRead{false, false},
+			gateTickRead{true, true}, gateTickRead{false, false}, gateTickRead{false, false},
+		)
+
+		// Ticks 2, 3, 4 bank the first minutes; tick 5 and 6 carry and bank two more:
+		// five minutes of gate time, so the stop lands at 25 minutes of wall time.
+		stoppedAt := tickUntilStop(d, f, 60)
+		if want := overrunSlung.Add(25 * time.Minute); !stoppedAt.Equal(want) {
+			t.Errorf("stopped at %v, want %v: the successful read resets the failure run",
+				stoppedAt.Sub(overrunSlung), want.Sub(overrunSlung))
+		}
+	})
+}
 
 // The state carries the last in-gate answer across failed gate reads for at
 // most two failures: a broken read does not exempt the seat for good, and one
