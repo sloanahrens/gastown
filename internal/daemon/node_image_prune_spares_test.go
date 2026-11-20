@@ -215,6 +215,11 @@ func TestNodeImagePruneSparesRefuses(t *testing.T) {
 			wantSub: "no items",
 		},
 		{
+			name:    "Deployment whose pod template has no containers",
+			listDoc: `{"kind":"List","items":[{"kind":"Deployment","metadata":{"name":"gt-daemon"},"spec":{"template":{"spec":{"containers":[]}}}}]}`,
+			wantSub: "names no image digest",
+		},
+		{
 			name:    "list with no Deployment",
 			listDoc: jsonList(`{"kind":"Job","metadata":{"name":"gt-update-only"},"spec":{"template":{"spec":{"containers":[{"name":"update","image":"forgejo:3000/bot-registry/gastown-daemon@` + digestN("c") + `"}]}}}}`),
 			wantSub: "no Deployment",
