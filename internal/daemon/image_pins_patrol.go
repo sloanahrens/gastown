@@ -50,9 +50,9 @@ const (
 	imagePinsTickTimeout = 10 * time.Minute
 
 	// imagePinsGitTimeout bounds one pin's ls-remote and one path count (its
-	// fetch, its unshallow and its rev-list, each separately), and
-	// imagePinsHTTPTimeout one compare request and imagePinsBdTimeout one bd
-	// call.
+	// fetch, its is-shallow read, its unshallow and its rev-list, each
+	// separately), and imagePinsHTTPTimeout one compare request and
+	// imagePinsBdTimeout one bd call.
 	imagePinsGitTimeout  = 2 * time.Minute
 	imagePinsHTTPTimeout = 30 * time.Second
 	imagePinsBdTimeout   = 30 * time.Second
@@ -414,11 +414,17 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
 			return 0, err
 		}
-		// The clone is shallow, so its boundary commit has no local parent and
-		// rev-list reads it as a root touching every path. The unshallow's error
-		// is returned unchanged.
-		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--unshallow", "--filter=blob:none", url); err != nil {
+		// A shallow clone's boundary commit has no local parent, so rev-list
+		// reads it as a root touching every path. Only a shallow clone is
+		// unshallowed: git refuses --unshallow on a complete one.
+		shallow, err := d.imagePinsGit(ctx, repo, "rev-parse", "--is-shallow-repository")
+		if err != nil {
 			return 0, err
+		}
+		if strings.TrimSpace(string(shallow)) == "true" {
+			if _, err := d.imagePinsGit(ctx, repo, "fetch", "--unshallow", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
+				return 0, err
+			}
 		}
 		argv := append([]string{"rev-list", "--count", pin + ".." + tip, "--"}, paths...)
 		out, err := d.imagePinsGit(ctx, repo, argv...)
