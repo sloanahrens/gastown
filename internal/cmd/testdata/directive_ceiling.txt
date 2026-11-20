@@ -4,5 +4,5 @@
 # to the size it renders; no commit raises it.
 # The target is 12 KB (12,288 bytes), set in docs/design/rework-program.md item 4.
 # The number below is the polecat directive's rendered size as TestDirectiveCeiling
-# renders it as of this commit: 2,351 bytes over the target.
-14639
+# renders it as of this commit: 2,340 bytes over the target.
+14628

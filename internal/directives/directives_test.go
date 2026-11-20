@@ -216,6 +216,23 @@ func TestPolecatDirectiveRule17HasItsBody(t *testing.T) {
 	}
 }
 
+// TestPolecatDirectiveLineLimitIsACap holds rule 9 to its line-limit bullet in
+// rule 9's own section, so the same words in another rule fail it.
+func TestPolecatDirectiveLineLimitIsACap(t *testing.T) {
+	t.Parallel()
+	text := readDirective(t, "polecat.md")
+	start := strings.Index(text, "\n## 9. Stay in scope\n")
+	end := strings.Index(text[start+1:], "\n## 10.")
+	if start < 0 || end < 0 {
+		t.Fatalf("polecat.md has no rule 9 section: heading at %d, rule 10 at %d", start, end)
+	}
+	for _, clause := range []string{"is a cap, not an estimate", "1.5 times"} {
+		if !strings.Contains(text[start:start+1+end], clause) {
+			t.Errorf("rule 9 lacks the clause %q", clause)
+		}
+	}
+}
+
 // TestPolecatDirectiveChecklistPointsAtRule17 pins gt-qgum2's rework: line 11
 // of the "Before gt done" checklist is the checklist's caller of rule 17. It
 // points at the rule instead of restating its command, and its search covers
