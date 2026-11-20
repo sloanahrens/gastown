@@ -465,7 +465,7 @@ func (d *Daemon) runOverrunGuardPass(cycle func()) {
 	defer func() {
 		d.recordPatrolRun(&d.overrunGuardRun, "overrun_guard", time.Now())
 	}()
-	d.recordPatrolStart(&d.overrunGuardRun, time.Now())
+	d.recordPatrolStart(&d.overrunGuardRun, "overrun_guard", time.Now())
 	cycle()
 }
 
