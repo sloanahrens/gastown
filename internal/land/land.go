@@ -876,16 +876,21 @@ func (l *Lander) review(ctx context.Context, in ReviewInput) (Verdict, error) {
 	return l.Reviewer.Review(ctx, in.Dir, in.Base, in.Head)
 }
 
+// open opens the lander's clone as the Git its reads and local commands are
+// made through, with the clone's tracked hooks off: a hook the repository
+// tracks cannot fail a landing (gt-sjwr7a).
 func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return CommittingGit(dir)
+	return CommittingGit(dir).WithoutLocalHooks()
 }
 
 // openLanding opens the merge candidate's worktree through a handle whose every
 // call carries env (CommittingEnv), so the merge commit's committer and author
-// are set explicitly (gt-dc4y3, gt-vuv2n).
+// are set explicitly (gt-dc4y3, gt-vuv2n), and runs with the repository's local
+// hooks off, so a hook the target tracks cannot fail the merge (gt-sjwr7a).
+// Push keeps its pre-push hook: WithoutLocalHooks leaves a push alone.
 func (l *Lander) openLanding(dir string, env []string) Repo {
 	if l.landingEnv != nil {
 		l.landingEnv(env)
@@ -893,7 +898,7 @@ func (l *Lander) openLanding(dir string, env []string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return git.NewGit(dir).WithEnv(env).WithConfigReadRetry()
+	return git.NewGit(dir).WithEnv(env).WithConfigReadRetry().WithoutLocalHooks()
 }
 
 // landingCommitEnv is the environment the landing's merge commit is made under:
