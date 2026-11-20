@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
 // nodePruneJobDoc is the part of the node-prune Job document the tests read, by
@@ -25,6 +27,7 @@ type nodePruneJobDoc struct {
 					RunAsUser *int `json:"runAsUser"`
 				} `json:"securityContext"`
 				Containers []struct {
+					Image        string   `json:"image"`
 					Command      []string `json:"command"`
 					VolumeMounts []struct {
 						Name      string `json:"name"`
@@ -58,8 +61,12 @@ func nodePruneFlagValues(argv []string, flag string) []string {
 func TestNodeImagePruneManifestArgs(t *testing.T) {
 	t.Parallel()
 	spares := []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)}
+	const (
+		name  = "prune-17"
+		image = "registry.gt/node-prune:2c1d"
+	)
 
-	dry, err := nodeImagePruneManifest("prune", "image:1", 3, false, spares)
+	dry, err := nodeImagePruneManifest(name, image, 3, false, spares)
 	if err != nil {
 		t.Fatalf("a dry run manifest: %v", err)
 	}
@@ -67,7 +74,30 @@ func TestNodeImagePruneManifestArgs(t *testing.T) {
 	if err := json.Unmarshal(dry, &dryDoc); err != nil {
 		t.Fatalf("the dry run manifest is not JSON: %v", err)
 	}
+	if dryDoc.Metadata.Name != name {
+		t.Errorf("the Job name is %q, want the name it was given %q", dryDoc.Metadata.Name, name)
+	}
+	if got := dryDoc.Spec.Template.Spec.Containers[0].Image; got != image {
+		t.Errorf("the container image is %q, want the image it was given %q", got, image)
+	}
 	dryArgv := dryDoc.Spec.Template.Spec.Containers[0].Command
+	if len(dryArgv) < 2 || dryArgv[0] != cachevol.HelperPath || dryArgv[1] != "node-prune" {
+		t.Fatalf("the command starts %v, want exactly the helper %q and node-prune as its first two elements", dryArgv, cachevol.HelperPath)
+	}
+	for i, a := range dryArgv {
+		if a == "sh" || a == "-c" || strings.HasSuffix(a, "sh") {
+			t.Errorf("the command element %d is %q, want no shell anywhere in the command", i, a)
+		}
+	}
+	for flag, want := range map[string]string{
+		"--crictl-bin": "/host/k3s",
+		"--crictl-arg": "crictl",
+		"--endpoint":   "unix:///run/containerd/containerd.sock",
+	} {
+		if got := nodePruneFlagValues(dryArgv, flag); !slices.Equal(got, []string{want}) {
+			t.Errorf("the %s values are %v, want [%s]", flag, got, want)
+		}
+	}
 	if slices.Contains(dryArgv, "--apply") {
 		t.Errorf("a dry run holds --apply: %v", dryArgv)
 	}
@@ -78,7 +108,7 @@ func TestNodeImagePruneManifestArgs(t *testing.T) {
 		t.Errorf("the --keep values are %v, want [3]", got)
 	}
 
-	applied, err := nodeImagePruneManifest("prune", "image:1", 3, true, spares)
+	applied, err := nodeImagePruneManifest(name, image, 3, true, spares)
 	if err != nil {
 		t.Fatalf("an apply manifest: %v", err)
 	}
@@ -118,6 +148,7 @@ func TestNodeImagePruneManifestRefuses(t *testing.T) {
 		{name: "a spare with no hex digits", podName: "prune", image: "image:1", keep: 3, spare: []string{"sha256:aaa"}, wantArg: "spare"},
 		{name: "a spare with 63 hex digits", podName: "prune", image: "image:1", keep: 3, spare: []string{"sha256:" + strings.Repeat("a", 63)}, wantArg: "spare"},
 		{name: "a spare with upper-case hex", podName: "prune", image: "image:1", keep: 3, spare: []string{"sha256:" + strings.Repeat("A", 64)}, wantArg: "spare"},
+		{name: "a spare with one extra character after 64 hex digits", podName: "prune", image: "image:1", keep: 3, spare: []string{validSpare + "0"}, wantArg: "spare"},
 		{name: "a spare starting with a dash", podName: "prune", image: "image:1", keep: 3, spare: []string{"-" + validSpare}, wantArg: "spare"},
 		{name: "a spare that is a flag", podName: "prune", image: "image:1", keep: 3, spare: []string{"--apply"}, wantArg: "spare"},
 	}
