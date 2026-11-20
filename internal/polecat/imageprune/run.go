@@ -49,6 +49,23 @@ var ErrNoNodes = errors.New("no kind nodes found to prune")
 // creation time of each (an image whose time cannot be read is kept), and the
 // containers in use; if any of the first two reads fails, nothing is removed.
 func PruneNode(node string, crictl Crictl, keep int, dry bool) NodeResult {
+	return pruneNode(node, crictl, dry, func(images []Image, inUse map[string]bool) []Image {
+		return Plan(images, inUse, keep)
+	})
+}
+
+// PruneNodeRepos is PruneNode over several repositories: each keeps its newest
+// keep images (PlanRepos). Every crictl call goes through Timed, so each read
+// carries the explicit deadline the 208-image node needs (gt-hhi6a5).
+func PruneNodeRepos(node string, crictl Crictl, keep int, repos []string, dry bool) NodeResult {
+	return pruneNode(node, Timed(crictl), dry, func(images []Image, inUse map[string]bool) []Image {
+		return PlanRepos(images, inUse, keep, repos)
+	})
+}
+
+// pruneNode is the read, plan and remove run that PruneNode and PruneNodeRepos
+// share; plan chooses the images to remove from the reads.
+func pruneNode(node string, crictl Crictl, dry bool, plan func([]Image, map[string]bool) []Image) NodeResult {
 	res := NodeResult{Node: node, Failed: map[string]error{}}
 	raw, err := crictl("images", "-o", "json")
 	if err != nil {
@@ -80,7 +97,7 @@ func PruneNode(node string, crictl Crictl, keep int, dry bool) NodeResult {
 		res.Err = err
 		return res
 	}
-	res.Planned = Plan(images, inUse, keep)
+	res.Planned = plan(images, inUse)
 	if dry {
 		return res
 	}
