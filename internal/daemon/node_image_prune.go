@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jobledger"
@@ -13,18 +14,23 @@ import (
 const nodeImagePruneKeep = 3
 
 // The job every node prune run records under in the town's job ledger, and the
-// outcome of a run that reached its report.
+// outcome of a run that reached its report or failed before it.
 const (
-	nodeImagePruneJob       = "node_image_prune"
-	nodeImagePruneOutcomeOK = "ok"
+	nodeImagePruneJob           = "node_image_prune"
+	nodeImagePruneOutcomeOK     = "ok"
+	nodeImagePruneOutcomeFailed = "failed"
 )
+
+// nodeImagePruneStepPrefix opens the message of every runNodeImagePrune error.
+const nodeImagePruneStepPrefix = "node-prune: "
 
 // nodeImagePruneOnce runs one node image prune: the Job nodePruneJobName names from
 // runID, running the running polecat image, as a dry run unless apply. A dry run
 // logs the lines of nodeImagePruneSummary, one logger call per line, and records one
 // ok row of job nodeImagePruneJob with the summary's figures and now as its start;
-// an applied run logs its summary line and records its row the same way. The failed
-// run's row is bead gt-eg0ji0. Every runner error is handed to the caller.
+// an applied run logs its summary line and records its row the same way. A run that
+// returns an error before its log gave a report records the failed row of
+// nodeImagePruneFailed instead. Every runner error is handed to the caller.
 func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, runID string, apply bool, now time.Time) error {
 	name, err := nodePruneJobName(runID)
 	if err != nil {
@@ -35,6 +41,13 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 		return err
 	}
 	rep, err := runNodeImagePrune(ctx, kube, name, image, nodeImagePruneKeep, apply)
+	if err != nil {
+		var logRead *nodePruneLogReadError
+		if !errors.As(err, &logRead) {
+			d.nodeImagePruneFailed(err, now)
+			return err
+		}
+	}
 	if apply {
 		return d.nodeImagePruneApply(rep, err, now)
 	}
@@ -56,15 +69,11 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 }
 
 // nodeImagePruneApply logs an applied run's summary line and records its ledger row,
-// both from the report the runner returned, and returns the runner's error. A run
-// that failed before its log was read has no figures to record and returns before
-// either; the runner marks the one error that comes after a parsed log, so a
-// zero-removal apply whose Job delete failed still records the report it returned.
+// both from the report the runner returned, and returns the runner's error. The caller
+// hands it a run that reached its log, with no error or with the nodePruneLogReadError
+// a failed Job delete leaves, so a zero-removal apply still records the zeros its log
+// gave (bead gt-i8zplo).
 func (d *Daemon) nodeImagePruneApply(rep nodePruneReport, runErr error, started time.Time) error {
-	var logRead *nodePruneLogReadError
-	if runErr != nil && !errors.As(runErr, &logRead) {
-		return runErr
-	}
 	lines, stats := nodeImagePruneSummary(rep, true)
 	for _, line := range lines {
 		d.logger.Printf("%s", line)
@@ -80,6 +89,45 @@ func (d *Daemon) nodeImagePruneApply(rep nodePruneReport, runErr error, started 
 		Stats:     stats,
 	})
 	return runErr
+}
+
+// nodeImagePruneFailed logs a run that returned an error before its log gave a
+// report and records its failed row: no figures, because the run has none. The log
+// names the step alone; the runner's error text can carry the command's output, which
+// neither the log nor the ledger keeps. The caller returns the error (bead gt-eg0ji0).
+func (d *Daemon) nodeImagePruneFailed(runErr error, started time.Time) {
+	d.logger.Printf("node_image_prune: failed: %s", nodeImagePruneStep(runErr))
+	d.nodeImagePruneRecord(jobledger.Run{
+		Job:       nodeImagePruneJob,
+		StartedAt: started,
+		EndedAt:   d.clk().Now(),
+		Outcome:   nodeImagePruneOutcomeFailed,
+	})
+}
+
+// nodeImagePruneSteps are the steps a runNodeImagePrune error can name, in the order
+// the runner reaches them: each message reads "node-prune: <step>: <cause>", and a
+// failed Job delete is joined after its cause.
+var nodeImagePruneSteps = []string{
+	"list the gt namespace",
+	"work out the spare digests",
+	"build the job manifest",
+	"apply job",
+	"wait for job",
+	"read the log of job",
+}
+
+// nodeImagePruneStep names the step a failed run stopped at, from that list alone: a
+// parse error quotes the log, so no error's own text is repeated here, and the one
+// failure that names no step of its own is the parse.
+func nodeImagePruneStep(runErr error) string {
+	msg := strings.TrimPrefix(runErr.Error(), nodeImagePruneStepPrefix)
+	for _, step := range nodeImagePruneSteps {
+		if strings.HasPrefix(msg, step) {
+			return step
+		}
+	}
+	return "parse the log"
 }
 
 // nodeImagePruneRecord appends one run to the town's job ledger. A ledger that
