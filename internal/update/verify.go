@@ -343,12 +343,14 @@ const (
 
 // classifyHealthLine classifies line for the verify step. A GREEN line, and a
 // DEGRADED one whose every reason is a queue state, pass as queueOnlyHealthLine
-// reads them. A DEGRADED line whose every reason is a queue state or a RECORDED
+// reads them. A DEGRADED line whose every reason is a queue state, a RECORDED
 // tick reason — "tick:<patrol>=<age>/<interval>[R]", a patrol whose last pass
-// predates the restart and is late until its first pass finishes — settles,
-// since that pass clears the reason. Everything else fails: another verdict, a
-// tick reason without the tag or with a value that is not the town's, another
-// key, a shape this does not know.
+// predates the restart and is late until its first pass finishes — or a
+// RECORDED dead seat — "seat/<rig>:polecat/<name>=dead[R]", a polecat whose
+// session is down while it is re-slung — settles, since a later read clears
+// the reason or the bound names the seat. Everything else fails: another verdict, a
+// tick or seat reason without the tag or with a value that is not the town's,
+// another key, a shape this does not know.
 func classifyHealthLine(line string) healthClass {
 	degraded, tokens, ok := healthReasons(line)
 	if !ok {
@@ -363,7 +365,7 @@ func classifyHealthLine(line string) healthClass {
 			continue
 		}
 		key, value, _ := strings.Cut(reason, "=")
-		if !recordedTickReason(key, value) {
+		if !recordedTickReason(key, value) && !recordedDeadSeatReason(key, value) {
 			return healthFail
 		}
 		settling = true
@@ -383,6 +385,17 @@ func recordedTickReason(key, value string) bool {
 	age, interval, shaped := strings.Cut(value, "/")
 	return found && tagged && shaped && patrol != "" &&
 		isShortDuration(age) && isShortDuration(interval)
+}
+
+// recordedDeadSeatReason reports whether key=value is a polecat seat dead in
+// consecutive samples as the town's line renders it,
+// "seat/<rig>:polecat/<name>=dead[R]": the value is exactly dead with the [R]
+// of a RECORDED field, and the key names a rig and a polecat. A seat frozen or
+// stalled, a dead seat without the tag, and any other seat kind do not match.
+func recordedDeadSeatReason(key, value string) bool {
+	seat, found := strings.CutPrefix(key, "seat/")
+	rig, name, shaped := strings.Cut(seat, ":polecat/")
+	return found && value == "dead[R]" && shaped && rig != "" && name != ""
 }
 
 // isShortDuration reports whether s is a duration as internal/townhealth.Short
