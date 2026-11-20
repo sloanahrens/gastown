@@ -36,12 +36,22 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 	t.Parallel()
 
 	var f nodePruneFlight
-	started, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	if !f.Start(context.Background(), func(context.Context) {
-		close(started)
-		<-release
-		close(finished)
-	}) {
+	started, release := make(chan struct{}), make(chan struct{})
+	// The first Start runs in a goroutine and reports its answer: a Start that
+	// ran the work inline would block on release, so awaiting the answer fails
+	// (bounded, naming it) instead of hanging the package.
+	firstStart := make(chan bool, 1)
+	go func() {
+		firstStart <- f.Start(context.Background(), func(context.Context) {
+			close(started)
+			// The run waits on release or the test's end, never forever.
+			select {
+			case <-release:
+			case <-t.Context().Done():
+			}
+		})
+	}()
+	if !awaitNodePruneFlight(t, firstStart, "the first Start to return while its run is still blocked") {
 		t.Fatal("first Start = false, want true")
 	}
 	awaitNodePruneFlight(t, started, "the first run to start")
@@ -52,11 +62,6 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 	select {
 	case <-secondRan:
 		t.Fatal("the refused Start launched its run")
-	default:
-	}
-	select {
-	case <-finished:
-		t.Fatal("Start returned only once the run finished")
 	default:
 	}
 	close(release)
