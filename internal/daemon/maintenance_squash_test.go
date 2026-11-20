@@ -66,6 +66,12 @@ func squashTickDaemon(t *testing.T, squash *agentconfig.SquashConfig) (*Daemon, 
 	d.maint.squashOpenDB = func(string) (*sql.DB, error) {
 		return sql.OpenDB(squashFakeConnector{server: server}), nil
 	}
+	// The check calls the recovery seam for every database (gt-ngculo). These
+	// tests count the check's own reads and its run, so the seam finds nothing to
+	// recover and sends no statement; the recovery tests set their own.
+	d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+		return nil, nil
+	}
 	return d, server, &escalations, logs
 }
 
@@ -1423,6 +1429,7 @@ func TestSquashItemCompletedRefusedAndHeldRunsRaiseNothing(t *testing.T) {
 func TestSquashRecoverSeamDefaultCallsRecoverOnlyWithTheCut(t *testing.T) {
 	t.Parallel()
 	d, server, _, _ := squashTickDaemon(t, squashEnabled())
+	d.maint.squashRecover = nil // the default seam is what this test drives
 	const mainTip = "0123456789abcdefghijklmnopqrstuv"
 	const workTip = "vutsrqponmlkjihgfedcba9876543210"
 	catalogReads := 0
@@ -1462,6 +1469,7 @@ func TestSquashRecoverSeamDefaultCallsRecoverOnlyWithTheCut(t *testing.T) {
 func TestSquashRecoverSeamRefusesAConnectionThatDoesNotOpen(t *testing.T) {
 	t.Parallel()
 	d, server, _, _ := squashTickDaemon(t, squashEnabled())
+	d.maint.squashRecover = nil // the default seam is what this test drives
 	d.maint.squashOpenDB = func(string) (*sql.DB, error) { return nil, errors.New("no route to the server") }
 	settings := &agentconfig.SquashSettings{KeepDays: 14, MaxRuntime: time.Minute}
 
@@ -1474,6 +1482,43 @@ func TestSquashRecoverSeamRefusesAConnectionThatDoesNotOpen(t *testing.T) {
 	}
 	if len(server.queries) != 0 {
 		t.Errorf("the recovery sent %d statements over an unopened connection, want none: %q", len(server.queries), server.queries)
+	}
+}
+
+// TestSquashCheckRecoversAfterAFailedRunInsideTheGate: a database whose last
+// recorded run failed two hours ago is held by the 24-hour gate, and no threshold
+// trips, so the check never reaches its run. The recovery seam is still called
+// for it, with the database, the check's clock and the squash settings, because
+// a failed run can leave a database with no main that only a recovery repairs
+// (gt-ngculo).
+func TestSquashCheckRecoversAfterAFailedRunInsideTheGate(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := squashTickDaemon(t, squashEnabled())
+	root := squashBackupRoot(t, d)
+	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	if err := recordSquashRun(d.config.TownRoot, "gt", squashTestNow.Add(-2*time.Hour), squashOutcomeFailed); err != nil {
+		t.Fatal(err)
+	}
+	type call struct {
+		db       string
+		now      time.Time
+		keepDays int
+	}
+	var recovered []call
+	d.maint.squashRecover = func(_ context.Context, _ *Daemon, db string, now time.Time, settings *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+		recovered = append(recovered, call{db, now, settings.KeepDays})
+		return nil, nil
+	}
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		t.Error("the run was started for a database inside its 24-hour gate")
+		return doltsquash.RunResult{}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	want := []call{{"gt", squashTestNow, agentconfig.DefaultSquashKeepDays}}
+	if !slices.Equal(recovered, want) {
+		t.Errorf("the recovery seam was called %+v, want %+v: once for gt, with the check's clock", recovered, want)
 	}
 }
 
