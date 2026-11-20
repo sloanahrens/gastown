@@ -272,7 +272,8 @@ func TestResolveIgnoreCleanupStatusPartialSpawnStillGated(t *testing.T) {
 			name:   "non-partial-spawn missing status still fails closed unconditionally",
 			status: "",
 			// allowPartial false, and workTerminal/hookSafe/activeMRSafe/gitSafe
-			// all true: CanIgnoreStaleCleanupStatus never waives ""/Unknown.
+			// all true: ResolveIgnoreCleanupStatus refuses "" here, since only
+			// a hatch above proves the same evidence for a missing status.
 			workTerminal: true,
 			hookSafe:     true,
 			activeMRSafe: true,
@@ -643,7 +644,8 @@ func TestWorkstateFactsCanIgnoreStaleCleanupStatusForNuke(t *testing.T) {
 		{"hook bead terminal counts as terminal work", func(f *WorkstateFacts) { f.AssignedBeadTerminal, f.HookBeadTerminal = false, true }, true, true},
 		{"active MR source terminal counts as terminal work", func(f *WorkstateFacts) { f.AssignedBeadTerminal, f.ActiveMRSourceTerminal = false, true }, true, true},
 		{"unknown status is never waived", func(f *WorkstateFacts) { f.CleanupStatus = CleanupUnknown }, true, false},
-		{"missing status is never waived", func(f *WorkstateFacts) { f.CleanupStatus = "" }, true, false},
+		{"missing status is waived on the same evidence", func(f *WorkstateFacts) { f.CleanupStatus = "" }, true, true},
+		{"missing status is refused when git is not safe", func(f *WorkstateFacts) { f.CleanupStatus = "" }, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -653,5 +655,49 @@ func TestWorkstateFactsCanIgnoreStaleCleanupStatusForNuke(t *testing.T) {
 				t.Fatalf("CanIgnoreStaleCleanupStatusForNuke(%v) = %v, want %v", tt.gitSafe, got, tt.want)
 			}
 		})
+	}
+}
+
+// A seat whose agent bead has no cleanup_status (the seat never ran gt done)
+// is finished when the same evidence the dirty statuses need holds: terminal
+// work, a safe hook, no active MR and a clean live git probe (gt-pojsio).
+func TestCanIgnoreStaleCleanupStatusAcceptsAMissingStatusOnTheSameEvidence(t *testing.T) {
+	t.Parallel()
+	if !CanIgnoreStaleCleanupStatus("", true, true, true, true) {
+		t.Fatal("CanIgnoreStaleCleanupStatus(missing, terminal work, safe hook, no active MR, git safe) = false, want true")
+	}
+}
+
+// Each of the four evidence facts is required on its own: a missing status is
+// refused when any one of them is missing, so a nuke never trusts an absent
+// status without the full proof the dirty statuses already need.
+func TestCanIgnoreStaleCleanupStatusRefusesAMissingStatusWithAnyEvidenceMissing(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                                          string
+		workTerminal, hookSafe, activeMRSafe, gitSafe bool
+	}{
+		{name: "work not terminal", workTerminal: false, hookSafe: true, activeMRSafe: true, gitSafe: true},
+		{name: "hook not safe", workTerminal: true, hookSafe: false, activeMRSafe: true, gitSafe: true},
+		{name: "active MR pending", workTerminal: true, hookSafe: true, activeMRSafe: false, gitSafe: true},
+		{name: "git not safe", workTerminal: true, hookSafe: true, activeMRSafe: true, gitSafe: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if CanIgnoreStaleCleanupStatus("", tt.workTerminal, tt.hookSafe, tt.activeMRSafe, tt.gitSafe) {
+				t.Fatal("CanIgnoreStaleCleanupStatus(missing) = true, want false")
+			}
+		})
+	}
+}
+
+// An unknown status says the state could not be determined, which is not the
+// same as a seat that never recorded one: it stays blocking on every evidence
+// combination, including the one that clears a missing status.
+func TestCanIgnoreStaleCleanupStatusStillRefusesAnUnknownStatus(t *testing.T) {
+	t.Parallel()
+	if CanIgnoreStaleCleanupStatus(CleanupUnknown, true, true, true, true) {
+		t.Fatal("CanIgnoreStaleCleanupStatus(unknown, all evidence true) = true, want false")
 	}
 }
