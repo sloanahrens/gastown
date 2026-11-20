@@ -152,19 +152,23 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 	}
 }
 
-// nodeImagePruneNoRowJob is the job the row beads (gt-08qnmf, gt-i8zplo,
-// gt-eg0ji0) record a node prune run under; until they land, none exists.
-const nodeImagePruneNoRowJob = "node_image_prune"
+// nodeImagePruneRowJob is the job the row beads (gt-08qnmf, gt-i8zplo,
+// gt-eg0ji0) record a node prune run under.
+const nodeImagePruneRowJob = "node_image_prune"
 
-// TestNodeImagePruneOnceAppendsNoRow: a dry run, an apply of removed 1 failed 1
-// and a runner error leave no node_image_prune ledger row; the error is returned.
-func TestNodeImagePruneOnceAppendsNoRow(t *testing.T) {
+// TestNodeImagePruneOnceAppendsNoRowOfItsOwn: a dry run appends exactly the one
+// node_image_prune row bead gt-08qnmf owns, and no second; an apply of removed 1
+// failed 1 and a runner error append none, because those rows are beads
+// gt-i8zplo's and gt-eg0ji0's and this test holds the line until they land.
+// The runner error is returned.
+func TestNodeImagePruneOnceAppendsNoRowOfItsOwn(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
 		name, logs, fail, wantErr string
 		apply                     bool
+		wantRows                  int
 	}{
-		{name: "dry run", logs: nodePruneLogDry},
+		{name: "dry run", logs: nodePruneLogDry, wantRows: 1},
 		{name: "apply removed 1 failed 1", apply: true, logs: "node-prune: removed sha256:bbb gastown-polecat\n" +
 			"node-prune: applied removed 1 failed 1\n"},
 		{name: "runner error", logs: nodePruneLogDry, fail: "Apply", wantErr: "Apply refused"},
@@ -184,9 +188,9 @@ func TestNodeImagePruneOnceAppendsNoRow(t *testing.T) {
 			}
 			ledger, err := jobledger.NewLedger(r.town)
 			require.NoError(t, err)
-			runs, err := ledger.Tail(nodeImagePruneNoRowJob, 10)
+			runs, err := ledger.Tail(nodeImagePruneRowJob, 10)
 			require.NoError(t, err)
-			assert.Empty(t, runs, "nodeImagePruneOnce appended a %s ledger row of its own", nodeImagePruneNoRowJob)
+			assert.Len(t, runs, row.wantRows, "the job ledger's %s rows after the run", nodeImagePruneRowJob)
 		})
 	}
 }
