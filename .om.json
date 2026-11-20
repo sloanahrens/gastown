@@ -62,7 +62,7 @@
     {
       "name": "exemption-to-satisfy-a-box",
       "weight": 3,
-      "guidance": "An exemption, allowlist row, special case, quantity-word or kind carve-out, or an edited fixture or threshold added so that an acceptance box and a Constraint both pass is a MAJOR finding: the two cannot both hold, and the right move was to stop and escalate the contradiction instead of carving out the one that failed. An exemption the bead's Goal or Constraints name, or a per-site exemption with a written reason that the Constraints allow, is not this finding; the finding is a carve-out that contradicts a Constraint. The example is gt-s7suwn, where a rule \"name contains TOKEN, any non-empty string\" met the box \"zero findings on livetown settings\" and the seat added a quantity-word exemption; gt-s7suwn and gt-4kf6kk each cost three seats."
+      "guidance": "An exemption, allowlist row, special case, quantity-word or kind carve-out, or an edited fixture or threshold added so that an acceptance box and a Constraint both pass is a MAJOR finding: the two cannot both hold, and the right move was to stop and escalate the contradiction instead of carving out the one that failed. An exemption named in the bead's Goal or Constraints, or a per-site exemption with a written reason whose kind the Constraints name: a Constraint that does not forbid it is not enough, is not this finding; the finding is a carve-out that contradicts a Constraint. The example is gt-s7suwn, where a rule \"name contains TOKEN, any non-empty string\" met the box \"zero findings on livetown settings\" and the seat added a quantity-word exemption; gt-s7suwn and gt-4kf6kk each cost three seats."
     }
   ]
 }
