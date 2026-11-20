@@ -287,6 +287,11 @@ the `dind` container and the same `dry_run` default as the cache trim above.
   - images no container uses that were created more than `ci_engine_prune_age`
     ago and carry no tag in a `ci_engine_keep_repos` repository other than
     `ci-base`;
+  - unused images of each `gastown-*` repository past its newest 5: the newest 5
+    stay and every older one is removed in the same run, whatever its age. The
+    runner builds a `gastown-polecat`, `gastown-daemon` and `gastown-bd` image
+    about every 50 minutes, so the age rule alone does not bound how many
+    accumulate;
   - `ci-base` images other than the one `ci-base:latest` names, and the id created
     just before it, which is kept as the rollback. With no `ci-base:latest` tag, the
     newest `ci-base` id is the latest. The others wait out `ci_engine_prune_age`
