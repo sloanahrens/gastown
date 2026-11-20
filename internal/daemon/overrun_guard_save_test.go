@@ -504,46 +504,71 @@ func TestOverrunStop_RefusedSaveIsRetriedOnTheNextTick(t *testing.T) {
 	}
 }
 
-// A refusal that never clears parks the seat once, on the cap tick: the seat is
-// stopped, the sandbox is kept, and the hand-back names the reason. Later ticks
-// add no hand-back.
-func TestOverrunStop_PermanentlyRefusedSaveParksAfterTheCap(t *testing.T) {
+// A refused save is retried on the next tick and, when it never clears, parks
+// the seat once on the cap tick: stopped, sandbox kept, the reason in the
+// hand-back note, no hand-back on later ticks. A rescue push origin refuses too
+// and a push that fails without a diverged origin each count as a refused save
+// on every attempt (gt-xfza4j).
+func TestOverrunSaveRescue_RefusedSaveParksAfterTheCap(t *testing.T) {
 	t.Parallel()
-	w := newResetWorld(t)
-	open := w.d.openGitFn
-	w.d.openGitFn = func(dir string) daemonGit {
-		return pushRefusingGit{daemonGit: open(dir), err: errors.New("remote unreachable")}
-	}
-	writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+	for _, tc := range []struct {
+		name     string
+		diverged bool
+		dirty    bool
+		reason   string
+	}{
+		{name: "a non-diverged push error", dirty: true, reason: "remote unreachable"},
+		{name: "a rescue push refused too", diverged: true, reason: "rescue push"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newResetWorld(t)
+			open := w.d.openGitFn
+			if tc.diverged {
+				w.divergeOriginBranch(t)
+				rescue := ":refs/heads/" + stopSeat.Branch + "-" + w.tip[:7]
+				w.d.openGitFn = func(dir string) daemonGit {
+					return pushRefusingRefGit{daemonGit: open(dir), suffix: rescue, err: errors.New("refusing the rescue ref")}
+				}
+			} else {
+				w.d.openGitFn = func(dir string) daemonGit {
+					return pushRefusingGit{daemonGit: open(dir), err: errors.New("remote unreachable")}
+				}
+			}
+			if tc.dirty {
+				writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+			}
 
-	f := newOverrunFake(20*time.Minute, stopSeat)
-	f.removeSandbox = func(overrunSeat) error { return nil }
-	s := f.seams()
-	s.saveWork = w.d.overrunSaveWork
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			f.removeSandbox = func(overrunSeat) error { return nil }
+			s := f.seams()
+			s.saveWork = w.d.overrunSaveWork
 
-	tickUntilSaveCap(t, w, f, s)
+			tickUntilSaveCap(t, w, f, s)
 
-	if !slices.Contains(f.stops, "gastown/capable") {
-		t.Errorf("stops = %q, want the seat stopped on the cap tick", f.stops)
-	}
-	if slices.Contains(f.calls, "sandbox gastown/capable") {
-		t.Errorf("calls = %q: the sandbox was removed though the work was never saved", f.calls)
-	}
-	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "could not be saved before the stop") {
-		t.Fatalf("hand-back note = %q, want the refused save named", f.handBackNotes)
-	}
-	st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !st.SaveGaveUp || st.SaveFailure == "" || !strings.Contains(f.handBackNotes[0], st.SaveFailure) {
-		t.Errorf("state = SaveGaveUp %v, SaveFailure %q; want the park recorded with the reason named in the note %q",
-			st.SaveGaveUp, st.SaveFailure, f.handBackNotes[0])
-	}
+			if !slices.Contains(f.stops, "gastown/capable") || slices.Contains(f.calls, "sandbox gastown/capable") {
+				t.Errorf("stops %q, calls %q; want the seat stopped on the cap tick and the sandbox kept", f.stops, f.calls)
+			}
+			if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "could not be saved before the stop") {
+				t.Fatalf("hand-back note = %q, want the refused save named", f.handBackNotes)
+			}
+			st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !st.SaveGaveUp || st.SaveFailures != overrunSaveMaxAttempts || !strings.Contains(st.SaveFailure, tc.reason) {
+				t.Errorf("state = SaveGaveUp %v, SaveFailures %d, SaveFailure %q; want the park after %d counted refusals naming %q",
+					st.SaveGaveUp, st.SaveFailures, st.SaveFailure, overrunSaveMaxAttempts, tc.reason)
+			}
+			if !strings.Contains(f.handBackNotes[0], st.SaveFailure) {
+				t.Errorf("hand-back note = %q, want it to name the saved reason %q", f.handBackNotes[0], st.SaveFailure)
+			}
 
-	w.d.runOverrunGuard(s)
-	if len(f.handedBack) != 1 {
-		t.Errorf("hand-backs = %q after a later tick, want the seat parked once", f.handedBack)
+			w.d.runOverrunGuard(s)
+			if len(f.handedBack) != 1 {
+				t.Errorf("hand-backs = %q after a later tick, want the seat parked once", f.handedBack)
+			}
+		})
 	}
 }
 
