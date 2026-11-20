@@ -79,6 +79,43 @@ func TestBatteryCapIgnoresNonBatteryCallers(t *testing.T) {
 	}
 }
 
+// The exclusion leaves hm-rerank out, but a battery caller's spend must still
+// use up the cap: 5 dollars stops it, and spend exactly at the cap is not under
+// it. hm-rerank's spend changes neither answer.
+func TestBatteryCapKeepsBatterySpendCounted(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 15, 0, 0, 0, time.Local)
+	clock := func() time.Time { return now }
+	tests := []struct {
+		name       string
+		battery    int // jev-dispatch tokens today, at 1 USD per billion
+		nonBattery int // hm-rerank tokens today, at 1 USD per billion
+		want       bool
+	}{
+		{"5 dollars under a battery caller stops the cap", 5_000_000_000, 0, false},
+		{"exactly the cap is not under it", 1_000_000_000, 0, false},
+		{"0.99 under the cap allows", 990_000_000, 0, true},
+		{"hm-rerank does not change 5 dollars", 5_000_000_000, 5_000_000_000, false},
+		{"hm-rerank does not change exactly the cap", 1_000_000_000, 5_000_000_000, false},
+		{"hm-rerank does not change 0.99", 990_000_000, 5_000_000_000, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			recs := []string{ledgerRec(now.Add(-time.Hour), "jev-dispatch", tt.battery, 0)}
+			if tt.nonBattery > 0 {
+				recs = append(recs, ledgerRec(now.Add(-time.Hour), "hm-rerank", tt.nonBattery, 0))
+			}
+			ledger := writeLedger(t, t.TempDir(), recs...)
+			c := Cap{Ledger: ledger, MaxUSDPerDay: 1, USDPerBillionTokens: 1}
+			got, err := c.Allows(clock)
+			if err != nil || got != tt.want {
+				t.Errorf("Allows = %v, %v, want %v and no error", got, err, tt.want)
+			}
+		})
+	}
+}
+
 // A ledger line that names no caller, or names one no list excludes, is the
 // batteries' spend: it counts toward the cap until someone names it in
 // NonBatteryCallers.
