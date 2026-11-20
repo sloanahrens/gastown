@@ -4693,6 +4693,34 @@ func TestCacheTrimLedgerLeavesOutWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// TestCacheTrimLedgerLeavesOutALogItCannotParse is the bead's box: a Job log
+// that exits clean but whose text the parser refuses records none of the three
+// counts -- never a zero as a figure -- logs one line, and leaves the run's
+// outcome and after-size reading alone.
+func TestCacheTrimLedgerLeavesOutALogItCannotParse(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimTrimLogsVerb: {stdout: "scanning the claim\n"},
+	})
+	if verdict := f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !verdict {
+		t.Fatalf("cacheTrim = false, want a verdict; log:\n%s", f.log.String())
+	}
+	runs := f.jobRuns(t)
+	if len(runs) != 1 {
+		t.Fatalf("the ledger holds %d run(s), want one: %+v", len(runs), runs)
+	}
+	want := map[string]int64{cacheTrimStatBytesBefore: 3000, cacheTrimStatBytesAfter: 1024}
+	if !reflect.DeepEqual(runs[0].Stats, want) {
+		t.Errorf("run stats = %v, want %v, none of the three counts", runs[0].Stats, want)
+	}
+	if runs[0].Outcome != cacheTrimRunOK {
+		t.Errorf("run outcome = %q, want %q, unchanged by the log the parser refused", runs[0].Outcome, cacheTrimRunOK)
+	}
+	if got := strings.Count(f.log.String(), "the removal Job's result line could not be read"); got != 1 {
+		t.Errorf("the log holds %d unreadable-result-line line(s), want one:\n%s", got, f.log.String())
+	}
+}
+
 // TestCacheTrimRunWithoutATownRoot drives a run whose ledger cannot be built at
 // all: the trim still reaches its verdict and logs the one line saying the run
 // was not recorded.
