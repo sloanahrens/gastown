@@ -3,6 +3,7 @@ package rig
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -569,6 +570,69 @@ func TestGasTownLocalExcludePatterns_IncludesBeads(t *testing.T) {
 			t.Error("gasTownIgnorePatterns() must NOT include .beads/ - that breaks bd sync (see overlay.go)")
 		}
 	}
+}
+
+// TestLocalExcludePatterns pins the exported list the sandbox seat clone will
+// write: its contents, that it is what EnsureLocalExcludePatterns writes into
+// a fresh clone, and that a caller cannot change a later call's slice.
+func TestLocalExcludePatterns(t *testing.T) {
+	t.Parallel()
+
+	t.Run("holds the seat clone patterns", func(t *testing.T) {
+		t.Parallel()
+		got := LocalExcludePatterns()
+		for _, want := range []string{".runtime/", ".claude/", ".beads/"} {
+			if !slices.Contains(got, want) {
+				t.Errorf("LocalExcludePatterns() = %v, missing %s", got, want)
+			}
+		}
+	})
+
+	t.Run("equals what EnsureLocalExcludePatterns writes", func(t *testing.T) {
+		t.Parallel()
+		f := gitfake.New()
+		tmp := t.TempDir()
+		origin := filepath.Join(tmp, "origin.git")
+		f.InitBare(t, origin)
+		f.Commit(t, origin, "main", "initial", map[string]string{"README.md": "hi"})
+		clone := filepath.Join(tmp, "clone")
+		f.Clone(t, origin, clone)
+
+		// Through the In form so the test stays in-process; it is the same
+		// write path as EnsureLocalExcludePatterns, whose only other work is
+		// opening a real git.
+		if err := EnsureLocalExcludePatternsIn(clone, f.Open(clone)); err != nil {
+			t.Fatalf("EnsureLocalExcludePatternsIn() error = %v", err)
+		}
+		content, err := os.ReadFile(filepath.Join(clone, ".git", "info", "exclude"))
+		if err != nil {
+			t.Fatalf("reading info/exclude: %v", err)
+		}
+
+		var written []string
+		for _, line := range splitLines(string(content)) {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			written = append(written, line)
+		}
+		if !slices.Equal(written, LocalExcludePatterns()) {
+			t.Errorf("info/exclude patterns = %v, LocalExcludePatterns() = %v", written, LocalExcludePatterns())
+		}
+	})
+
+	t.Run("caller cannot change the next call", func(t *testing.T) {
+		t.Parallel()
+		got := LocalExcludePatterns()
+		if len(got) == 0 {
+			t.Fatal("LocalExcludePatterns() is empty")
+		}
+		got[0] = "mutated"
+		if slices.Contains(LocalExcludePatterns(), "mutated") {
+			t.Errorf("mutating the returned slice changed a later call: %v", LocalExcludePatterns())
+		}
+	})
 }
 
 // TestEnsureLocalExcludePatterns_LinkedWorktreeUsesCommonDir is a regression
