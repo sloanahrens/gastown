@@ -1,8 +1,13 @@
 package git
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -243,4 +248,82 @@ func TestWithoutLocalHooksCoversTimedStdinMergeCheck(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unhookedRunSubcommands returns "file:line subcommand" for every call of g.run
+// or g.runOutput in src whose first literal arguments name a git subcommand that
+// is neither in hooked nor push. A call whose first argument is not a string
+// literal (args...) is another scan's: it is skipped, not reported.
+func unhookedRunSubcommands(t *testing.T, name string, src []byte, hooked map[string]bool) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	var missing []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (sel.Sel.Name != "run" && sel.Sel.Name != "runOutput") {
+			return true
+		}
+		var lits []string
+		for _, a := range call.Args {
+			lit, ok := a.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				break
+			}
+			v, err := strconv.Unquote(lit.Value)
+			if err != nil {
+				break
+			}
+			lits = append(lits, v)
+		}
+		if sub, _ := gitSubcommand(lits); sub != "" && sub != "push" && !hooked[sub] {
+			missing = append(missing, fset.Position(call.Pos()).String()+" "+sub)
+		}
+		return true
+	})
+	return missing
+}
+
+// TestHookedSubcommandsCoverEverySubcommandThePackageSends holds
+// hookedSubcommands to the package's own source: a subcommand g.run or
+// g.runOutput sends that is not in the set keeps the repository's local hooks on
+// for every call that sends it, which is the failure be-4sgb names (gt-37hfo6).
+func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the scan names a subcommand outside the set", func(t *testing.T) {
+		src := []byte("package git\nfunc f(g *Git) { g.run(\"checkout\", \"x\"); g.runOutput(\"-C\", \"d\", \"pull\"); g.run(\"push\"); g.run(args...) }\n")
+		got := unhookedRunSubcommands(t, "x.go", src, map[string]bool{"checkout": true})
+		if len(got) != 1 || !strings.HasSuffix(got[0], " pull") {
+			t.Fatalf("unhooked = %q, want exactly pull (checkout is in the set, push and args... are skipped)", got)
+		}
+	})
+
+	t.Run("the package's own source", func(t *testing.T) {
+		files, err := filepath.Glob("*.go")
+		if err != nil || len(files) == 0 {
+			t.Fatalf("glob the package source: %v, %d files", err, len(files))
+		}
+		var missing []string
+		for _, f := range files {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			missing = append(missing, unhookedRunSubcommands(t, f, src, hookedSubcommands)...)
+		}
+		if len(missing) > 0 {
+			t.Fatalf("subcommands the package sends that hookedSubcommands lacks, so their hooks stay on: %s", strings.Join(missing, "; "))
+		}
+	})
 }
