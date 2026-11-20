@@ -812,10 +812,6 @@ func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 	}
 }
 
-// verifyReadyNote is the detail a passing health check appends to a line that is
-// not green, saying the line is reported beside the roll and is not part of it.
-const verifyReadyNote = " (ready: the town's own recorded and queue states are reported beside the roll, not part of it)"
-
 // TestVerifyHealthReady drives Verify on a probe set that implements ReadyProbes:
 // the readiness answer decides the health check, whatever the line's verdict, so
 // a town that is ready passes even with a red rig main on its line. A line that
@@ -830,12 +826,12 @@ func TestVerifyHealthReady(t *testing.T) {
 		{
 			name: "a red rig main, with the ready note",
 			line: "RED tick 4s ago: main/devops=red[R]",
-			want: "RED tick 4s ago: main/devops=red[R]" + verifyReadyNote,
+			want: "RED tick 4s ago: main/devops=red[R]" + readyNote,
 		},
 		{
 			name: "a queue-only degraded line, with the ready note",
 			line: "DEGRADED tick 5s ago: needs-human=1",
-			want: "DEGRADED tick 5s ago: needs-human=1" + verifyReadyNote,
+			want: "DEGRADED tick 5s ago: needs-human=1" + readyNote,
 		},
 		{
 			name: "a green line, no note",
@@ -913,6 +909,39 @@ func TestVerifyHealthNotReady(t *testing.T) {
 			}
 			if probes.readyCalls != tt.readyCalls {
 				t.Errorf("asked Ready %d times, want %d", probes.readyCalls, tt.readyCalls)
+			}
+		})
+	}
+}
+
+// TestVerifyHealthUnreadableLine pins that a ready probe set does not pass a
+// line that does not read as a health line: the check fails with the line as
+// read and readiness is never asked.
+func TestVerifyHealthUnreadableLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "empty", line: ""},
+		{name: "no head", line: "gt status --line --ready said yes"},
+		{name: "an unknown verdict", line: "BANANA tick 4s ago: main/devops=red[R]"},
+		{name: "no age before ago", line: "RED tick 4s: main/devops=red[R]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := readyGreenProbes()
+			probes.health = tt.line
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertOnlyFailed(t, checks, checkHealth)
+			if detail := findCheck(t, checks, checkHealth).Detail; detail != tt.line {
+				t.Errorf("health detail = %q, want the line as read %q", detail, tt.line)
+			}
+			if probes.readyCalls != 0 {
+				t.Errorf("asked Ready %d times on an unreadable line, want none", probes.readyCalls)
 			}
 		})
 	}
