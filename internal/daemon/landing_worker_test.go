@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
@@ -1059,6 +1060,51 @@ func TestGitRemoteDeleteLocalBranch(t *testing.T) {
 	if have, _ := g.RefExists("refs/heads/polecat/opal/gt-wt+x1"); !have {
 		t.Error("a branch a worktree has checked out was deleted")
 	}
+}
+
+// The worker's remote is built as production builds it, and a branch delete it
+// sends is a push: the delete's argv carries `-c core.hooksPath=/dev/null`
+// ahead of push, so a rig's tracked pre-push that chains `bd hooks run` cannot
+// fail every delete in a pod whose bd gateway refuses that verb (gt-kq221z).
+func TestLandingWorkerRemoteBranchDeleteRunsWithHooksOff(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "promote-gastown.key")
+	promoteRigConfig(t, townRoot, "gastown", keyFile)
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	d := newForgejoPromoteDaemon(t, townRoot, "")
+
+	var calls [][]string
+	d.landingRemoteGitFn = func(dir string) *git.Git {
+		return git.NewGitWithExec(dir, func(c git.ExecCall) (string, string, error) {
+			calls = append(calls, c.Args())
+			return "", "", nil
+		})
+	}
+	w, err := d.newRigLandingWorker("gastown")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	remote, ok := w.Remote.(gitRemote)
+	if !ok {
+		t.Fatalf("Remote = %T, want the daemon's gitRemote", w.Remote)
+	}
+
+	const branch, hash = "polecat/opal/gt-abc+x1", "1111"
+	if err := remote.DeleteRemoteBranchIfAt(branch, hash); err != nil {
+		t.Fatalf("DeleteRemoteBranchIfAt(%s): %v", branch, err)
+	}
+	want := []string{"-c", "core.hooksPath=/dev/null", "push",
+		"--force-with-lease=refs/heads/" + branch + ":" + hash, remote.remote, ":refs/heads/" + branch}
+	for _, got := range calls {
+		if slices.Contains(got, "push") {
+			if !slices.Equal(got, want) {
+				t.Fatalf("the delete's push args = %q, want %q so the rig's pre-push never runs", got, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("no push recorded through the worker's remote; calls = %q", calls)
 }
 
 // A direct push is seen on origin only: the post-land run fetches the target
