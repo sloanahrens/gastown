@@ -75,7 +75,8 @@ func planBuilder(t *testing.T) Builder {
 // commit, the cut the build stamps. The bd line prints planBuildID for
 // main.Build, the argv value only the worktree a build makes can answer: Plan
 // makes none, and the Git seam above fails the test if it reads one from
-// anywhere. The om line names its pin, never HEAD.
+// anywhere. The om line names its pin, never HEAD, and stamps that named commit
+// as om's main.version (gt-odrkbm).
 func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
@@ -104,7 +105,7 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 		{"pin devops: ", testPinURL("devops") + " at " + testDevopsCommit},
 		{"build gt: ", "go build -trimpath -ldflags -s -w " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags -s -w " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
-		{"build om: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
+		{"build om: ", "go build -trimpath -ldflags -s -w " + omVersionFlag + testOMCommit + " -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
 		{"build gt-wrap: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "gt-wrap") + " " + GtWrapPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build trackerd: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "trackerd") + " " + TrackerdPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
 		{"build trackerbackup: ", "go build -trimpath -ldflags -s -w -o " + filepath.Join(b.Out, "trackerbackup") + " " + TrackerbackupPackage + "   (in " + TrackerdModuleDir + "/ of a clean worktree of /src/gt at " + testRev + ")"},
