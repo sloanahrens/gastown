@@ -140,10 +140,10 @@ type Lander struct {
 	// (operator.names, gt-ywuip). Empty entitles no operator identity: a
 	// lander that was not told its town reads no name as the operator's.
 	TownRoot string
-	// BeadsDir is the rig's .beads directory, exported to the git handles as
-	// BEADS_DIR: a push runs the repository's tracked pre-push, and the beads
-	// rig's chains `bd hooks run pre-push`, which the pod's bd gateway refuses
-	// when the call sets no BEADS_DIR (gt-xg33gs). Empty exports nothing.
+	// BeadsDir is the rig's .beads directory, exported as BEADS_DIR on the git
+	// handles the lander opens for its own reads and pushes (gt-xg33gs). Those
+	// handles run with every hook off, so no hook of the landing's reads it
+	// (gt-5nmfx4, gt-m0eiwk). Empty exports nothing.
 	BeadsDir string
 
 	// Candidate is the Forgejo gate that runs on the merged tree: the tree is
@@ -881,12 +881,11 @@ func (l *Lander) review(ctx context.Context, in ReviewInput) (Verdict, error) {
 	return l.Reviewer.Review(ctx, in.Dir, in.Base, in.Head)
 }
 
-// beadsEnv is BEADS_DIR for the lander's git handles when it was told its
-// rig's beads store: the handle the lander's reads and refs/landed push are
-// made through keeps the repository's tracked pre-push, and the beads rig's
-// chains `bd hooks run pre-push`, which the pod's bd gateway refuses when the
-// call sets no BEADS_DIR (gt-xg33gs). Nil exports nothing, so a lander never
-// told a store behaves as before.
+// beadsEnv is BEADS_DIR for the two git handles the lander opens for its own
+// reads and pushes, when it was told its rig's beads store (gt-xg33gs). Both
+// run with every hook off, so the export reaches no hook of the landing's
+// (gt-5nmfx4, gt-m0eiwk). Nil exports nothing, so a lander never told a store
+// behaves as before.
 func (l *Lander) beadsEnv() []string {
 	if l.BeadsDir == "" {
 		return nil
@@ -894,15 +893,16 @@ func (l *Lander) beadsEnv() []string {
 	return []string{"BEADS_DIR=" + l.BeadsDir}
 }
 
-// open opens the lander's clone as the Git its reads and local commands are
-// made through, with the clone's tracked hooks off: a hook the repository
-// tracks cannot fail a landing (gt-sjwr7a). A push keeps the pre-push hook and
-// carries BEADS_DIR, so a tracked pre-push that runs bd passes (gt-xg33gs).
+// open opens the lander's clone as the Git its reads and the landed-ref push
+// are made through, with every repository hook off, that push's pre-push
+// included: the worker is the one legitimate pusher, so a rig's tracked
+// pre-push that runs `bd hooks run` cannot fail the landing in a pod whose bd
+// gateway refuses that verb (gt-sjwr7a, gt-m0eiwk).
 func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return CommittingGit(dir).WithEnv(l.beadsEnv()).WithoutLocalHooks()
+	return CommittingGit(dir).WithEnv(l.beadsEnv()).WithoutAllHooks()
 }
 
 // openLanding opens the merge candidate's worktree through a handle whose every

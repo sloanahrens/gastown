@@ -526,27 +526,28 @@ func TestIntegrationLandCandidatePushesPastTrackedPrePush(t *testing.T) {
 	})
 }
 
-// TestIntegrationLandBeadsDirReachesTheReadHandle: the handle the landing's
-// reads and refs/landed push are made through carries BEADS_DIR too, so the
-// tracked pre-push passes there; with none it refuses (gt-xg33gs). BEADS_DIR
-// is pinned empty first, so neither case reads one from the caller.
-func TestIntegrationLandBeadsDirReachesTheReadHandle(t *testing.T) {
-	t.Setenv("BEADS_DIR", "")
+// TestIntegrationLandLandedRefPushesPastTrackedPrePush: the landed-ref push
+// runs with the repository's hooks off, so a tracked pre-push that refuses
+// every push cannot keep refs/landed/<bead> off the remote, and a pod lands a
+// rig whose pre-push runs `bd hooks run` (gt-m0eiwk). The second subtest is the
+// fence's control: the same push through a generic WithoutLocalHooks handle
+// still runs that hook and fails, so the first case passes because the read
+// handle asks for hook-free calls, not because the hook never ran.
+func TestIntegrationLandLandedRefPushesPastTrackedPrePush(t *testing.T) {
 	f := newRealLandFixture(t)
-	prePushHookOnMain(t, f, "#!/bin/sh\n[ -n \"$BEADS_DIR\" ] || exit 1\n")
+	prePushHookOnMain(t, f, "#!/bin/sh\nexit 1\n")
 	gitT(t, f.repo, "pull", "-q", "--ff-only", "origin", "main")
 	l := f.lander()
 
-	t.Run("a configured BeadsDir reaches the hook", func(t *testing.T) {
-		l.BeadsDir = filepath.Join(f.town, ".beads")
+	t.Run("the landed ref's push runs hook-free", func(t *testing.T) {
 		if err := l.open(f.repo).Push("origin", f.work.Head+":refs/landed/gt-abc", false); err != nil {
-			t.Fatalf("push through the read handle with BeadsDir set: %v", err)
+			t.Fatalf("landed-ref push under a tracked pre-push that always exits 1: %v", err)
 		}
 	})
-	t.Run("no BeadsDir leaves the hook to refuse the push", func(t *testing.T) {
-		l.BeadsDir = ""
-		if err := l.open(f.repo).Push("origin", f.work.Head+":refs/landed/gt-def", false); err == nil {
-			t.Fatal("push through the read handle with no BeadsDir = nil error, want the pre-push hook's refusal")
+	t.Run("a generic handle keeps the pre-push fence", func(t *testing.T) {
+		g := git.NewGit(f.repo).WithoutLocalHooks()
+		if err := g.Push("origin", f.work.Head+":refs/landed/gt-fenced", false); err == nil {
+			t.Fatal("push through WithoutLocalHooks under the refusing pre-push = nil error, want the hook's refusal")
 		}
 	})
 }
