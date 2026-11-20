@@ -260,6 +260,45 @@ func TestSandboxTownRootFromPolecatPath(t *testing.T) {
 	}
 }
 
+// The launch the link bead's gate has to cover (gt-f80lq2): every seat's
+// Prepared.WorkDir is the one link /sandbox/gt/work, and the real worktree is
+// named only in GT_POLECAT_PATH. The town root mapping reads the real path, so
+// the launch starts the session in the link and rewrites the startup command's
+// host town root to the sandbox's.
+//
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestSandboxLaunchCommonWork(t *testing.T) {
+	const linkPath = "/sandbox/gt/work"
+	r := newLaunchRigAt(t, "gastown/polecats/box/gastown")
+
+	err := r.launch(&pathBackend{
+		preparingBackend: preparingBackend{town: r.town},
+		workDir:          linkPath,
+		env:              map[string]string{"GT_POLECAT_PATH": "/sandbox/gt/gastown/polecats/box/gastown"},
+	})
+
+	// The capturing tmux stops the launch on purpose, but only after the town
+	// root mapping succeeded: any error from that mapping ends the launch
+	// before a session starts.
+	if err == nil || !strings.Contains(err.Error(), "stop after capturing the command") {
+		t.Fatalf("launch error = %v, want only the tmux stop after the town root mapping", err)
+	}
+	if r.tm.startIn != linkPath {
+		t.Errorf("the session starts in %q, want the link work dir %q", r.tm.startIn, linkPath)
+	}
+	if strings.Contains(r.tm.command, r.town) {
+		t.Errorf("the startup command still names the host town root %s:\n%s", r.town, r.tm.command)
+	}
+	for _, want := range []string{
+		"--settings /sandbox/gt/gastown/polecats/.claude/settings.json",
+		"--append-system-prompt-file /sandbox/gt/gastown/polecats/.claude/system-prompt-box.md",
+	} {
+		if !strings.Contains(r.tm.command, want) {
+			t.Errorf("the startup command lacks %q:\n%s", want, r.tm.command)
+		}
+	}
+}
+
 // Before the link path the prepared environment named no GT_POLECAT_PATH and
 // the prepared work dir was the real one: that maps to the same town root, and
 // a work dir that maps to nothing is still refused.
