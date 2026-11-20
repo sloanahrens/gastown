@@ -66,6 +66,11 @@ const (
 	// appends one short line per target, so a mebibyte holds thousands.
 	diskMaintLedgerMaxBytes = 1 << 20
 
+	// DiskMaintLedgerRelPath is the disk maintenance ledger's path under the
+	// town root. The writer here and the job list's reader both build it from
+	// this one value, so the two cannot name different files.
+	DiskMaintLedgerRelPath = ".runtime/diskmaint/ledger.jsonl"
+
 	// diskMaintRegistryContainer is the registry container garbage collect
 	// execs into; deploy/k8s/kind/up.sh creates it.
 	diskMaintRegistryContainer = "gt-registry"
@@ -1085,7 +1090,8 @@ func (d *Daemon) diskMaintenanceTargets(mode string, getenv func(string) string,
 // cluster they see.
 func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, home string, getenv func(string) string) (registry.Config, error) {
 	town := d.config.TownRoot
-	ledgerDir := filepath.Join(town, ".runtime", "diskmaint")
+	ledgerPath := filepath.Join(town, DiskMaintLedgerRelPath)
+	ledgerDir := filepath.Dir(ledgerPath)
 	if mode == agentconfig.DiskMaintenanceModeApply {
 		if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
 			return registry.Config{}, fmt.Errorf("creating the maintenance ledger directory: %w", err)
@@ -1108,7 +1114,7 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 		PushInFlight: gate.pushInFlight,
 		Lock:         gate.withLock,
 		Run:          d.diskMaintRunner,
-		Ledger:       diskmaint.NewLedger(filepath.Join(ledgerDir, "ledger.jsonl"), diskMaintLedgerMaxBytes),
+		Ledger:       diskmaint.NewLedger(ledgerPath, diskMaintLedgerMaxBytes),
 	}
 	if containerMode(getenv) {
 		regCfg.CollectUnavailable = diskMaintCollectUnavailable
