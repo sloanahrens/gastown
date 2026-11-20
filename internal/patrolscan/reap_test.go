@@ -158,7 +158,8 @@ func TestReapVetoes(t *testing.T) {
 			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, GitStateSource: "unknown"}
 		}, false, OutcomeBlocked},
 		{"needs recovery", func(e *fakeReapEnv) {
-			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Blockers: []string{"3 unpushed commits"}, GitStateSource: "live"}
+			// The measured shape; this host names no sandbox seat (gt-aimwqy).
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "git-unpushed", Blockers: []string{"git_state=has_unpushed unpushed_commits=3"}, GitStateSource: "live"}
 		}, false, OutcomeBlocked},
 		{"needs mq submit", func(e *fakeReapEnv) {
 			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_MQ_SUBMIT", GitStateSource: "live"}
@@ -473,7 +474,8 @@ func TestReapSandboxSeatVetoesStillHold(t *testing.T) {
 		}, true, ""},
 		{"branch claimed by open bead", func(e *fakeReapEnv) { e.claimed["polecat/onyx/gt-1"] = "gt-2" }, false, OutcomeSkipped},
 		{"verdict not safe to nuke", func(e *fakeReapEnv) {
-			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", SafeToNuke: true, Reusable: true, Blockers: []string{"3 unpushed commits"}, GitStateSource: "live", Branch: "polecat/onyx/gt-1"}
+			// An at-risk second blocker; unpushed commits alone reap now.
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", SafeToNuke: true, Reusable: true, Blockers: []string{"git_state=has_unpushed unpushed_commits=3", "git_state=has_stash stash_count=1"}, GitStateSource: "live", Branch: "polecat/onyx/gt-1"}
 		}, false, OutcomeBlocked},
 		{"git state not measured live", func(e *fakeReapEnv) {
 			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "recorded", Branch: "polecat/onyx/gt-1"}
@@ -539,6 +541,125 @@ func TestReapWithoutSingleUseEnvIsUnchanged(t *testing.T) {
 	}
 }
 
+// unpushedSeat makes onyx a NEEDS_RECOVERY seat on the git-unpushed reason.
+func unpushedSeat(e *fakeReapEnv, blockers ...string) {
+	e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "git-unpushed", GitStateSource: "live",
+		Blockers: blockers, Branch: "polecat/onyx/gt-1"}
+}
+
+// TestReapReapsASandboxSeatWithAMeasuredUnpushedBlocker guards gt-aimwqy: the
+// nuke pushes the tip to origin before it removes the seat, so a sandbox seat
+// whose only blocker is its unpushed commits is handed to Reap, and the nuke's
+// own check and preserving push decide.
+//
+// The blocker is production's one entry: workstate.go appends the landed
+// probe's detail to it, so the text after "; " is part of the same blocker.
+func TestReapReapsASandboxSeatWithAMeasuredUnpushedBlocker(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	unpushedSeat(env, "git_state=has_unpushed unpushed_commits=1; bead gt-1 is not closed")
+	r := reapScanner(singleUseSeat(env, true), ReapOptions{}).Tick("gastown")
+	f, ok := reapFinding(t, r, "onyx")
+	if !ok || f.Outcome != OutcomeReaped {
+		t.Fatalf("finding = %+v, %v; want reaped", f, ok)
+	}
+	if !strings.Contains(f.Detail, "single-use sandbox seat") {
+		t.Errorf("detail = %q; want the single-use seat named", f.Detail)
+	}
+	if len(env.reaped) != 1 || env.reaped[0] != "onyx" {
+		t.Fatalf("reaped = %v, want [onyx]", env.reaped)
+	}
+}
+
+// TestReapReapsASandboxSeatWithARecordedAndAMeasuredUnpushedBlocker guards
+// gt-aimwqy: the recorded cleanup status is a blocker entry of its own beside
+// the measured one, and together they still name only work the nuke preserves.
+func TestReapReapsASandboxSeatWithARecordedAndAMeasuredUnpushedBlocker(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	env.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "cleanup-has_unpushed", GitStateSource: "live",
+		Blockers: []string{"cleanup_status=has_unpushed", "git_state=has_unpushed unpushed_commits=1"}, Branch: "polecat/onyx/gt-1"}
+	r := reapScanner(singleUseSeat(env, true), ReapOptions{}).Tick("gastown")
+	if f, ok := reapFinding(t, r, "onyx"); !ok || f.Outcome != OutcomeReaped {
+		t.Fatalf("finding = %+v, %v; want reaped", f, ok)
+	}
+	if len(env.reaped) != 1 || env.reaped[0] != "onyx" {
+		t.Fatalf("reaped = %v, want [onyx]", env.reaped)
+	}
+}
+
+// TestReapUnpushedSeatWhoseSandboxReadFailsIsUnknown guards gt-aimwqy: a seat
+// the host cannot classify is not read as a host seat, and nothing is removed.
+func TestReapUnpushedSeatWhoseSandboxReadFailsIsUnknown(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	unpushedSeat(env, "git_state=has_unpushed unpushed_commits=1")
+	tick := singleUseSeat(env, true)
+	tick.err["onyx"] = errors.New("gateway unreadable")
+	r := reapScanner(tick, ReapOptions{}).Tick("gastown")
+	if f, ok := reapFinding(t, r, "onyx"); !ok || f.Outcome != OutcomeUnknown {
+		t.Fatalf("finding = %+v, %v; want unknown", f, ok)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v on an unreadable sandbox seat", env.reaped)
+	}
+}
+
+// TestReapSandboxUnpushedSeatKeepsEveryOtherRisk guards gt-aimwqy: only the
+// unpushed commits are the nuke's to preserve. Any other at-risk fact, a seat
+// the host does not name sandbox, a git state not measured live, and a nuke
+// that refuses or fails each keep the seat off the removed list.
+func TestReapSandboxUnpushedSeatKeepsEveryOtherRisk(t *testing.T) {
+	t.Parallel()
+	const unpushed = "git_state=has_unpushed unpushed_commits=1"
+	rows := []struct {
+		name    string
+		mutate  func(*fakeReapEnv)
+		sandbox bool
+		want    Outcome
+	}{
+		{"uncommitted file", func(e *fakeReapEnv) { unpushedSeat(e, unpushed, "git_state=has_uncommitted") }, true, OutcomeBlocked},
+		{"stash", func(e *fakeReapEnv) { unpushedSeat(e, unpushed, "git_state=has_stash stash_count=1") }, true, OutcomeBlocked},
+		{"push failed", func(e *fakeReapEnv) { unpushedSeat(e, unpushed, "push_failed=true") }, true, OutcomeBlocked},
+		{"hook still set", func(e *fakeReapEnv) { unpushedSeat(e, unpushed, "has work on hook (gt-1)") }, true, OutcomeBlocked},
+		{"open merge request", func(e *fakeReapEnv) { unpushedSeat(e, unpushed, "active-mr-open pr#12") }, true, OutcomeBlocked},
+		{"not a sandbox seat", func(e *fakeReapEnv) { unpushedSeat(e, unpushed) }, false, OutcomeBlocked},
+		{"unpushed text mid-blocker", func(e *fakeReapEnv) { unpushedSeat(e, "x "+unpushed) }, true, OutcomeBlocked},
+		{"recorded status alone", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "cleanup-has_unpushed", GitStateSource: "live", Blockers: []string{"cleanup_status=has_unpushed"}}
+		}, true, OutcomeBlocked},
+		{"verdict not needs-recovery", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_MQ_SUBMIT", Reason: "git-unpushed", GitStateSource: "live", Blockers: []string{unpushed}}
+		}, true, OutcomeBlocked},
+		{"reason not git-unpushed", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "landed-differs", GitStateSource: "live", Blockers: []string{unpushed}}
+		}, true, OutcomeBlocked},
+		{"git state not measured live", func(e *fakeReapEnv) {
+			unpushedSeat(e, unpushed)
+			rv := e.recovery["onyx"]
+			rv.GitStateSource = "recorded"
+			e.recovery["onyx"] = rv
+		}, true, OutcomeBlocked},
+		{"nuke refused", func(e *fakeReapEnv) { unpushedSeat(e, unpushed); e.reapErr["onyx"] = errRefused }, true, OutcomeBlocked},
+		{"nuke failed", func(e *fakeReapEnv) { unpushedSeat(e, unpushed); e.reapErr["onyx"] = errors.New("exec failed") }, true, OutcomeFailed},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			env := eligible()
+			row.mutate(env)
+			r := reapScanner(singleUseSeat(env, row.sandbox), ReapOptions{}).Tick("gastown")
+			f, ok := reapFinding(t, r, "onyx")
+			if !ok || f.Outcome != row.want {
+				t.Fatalf("finding = %+v, %v; want %s", f, ok, row.want)
+			}
+			if len(env.reaped) != 0 {
+				t.Fatalf("reaped %v", env.reaped)
+			}
+		})
+	}
+}
+
 // TestDirCapTrimReapsIdleCleanSandboxSeat guards gt-xlazq. The seat is reusable
 // capacity, which the pass leaves alone, and the host names it trimmable
 // because the rig is at its directory cap: the removal is what admits a new
@@ -593,8 +714,10 @@ func TestDirCapTrimReapsTheOldestIdleSeatFirst(t *testing.T) {
 }
 
 // TestDirCapTrimNeverReapsPreservedWork: the trim lifts the reusable veto and
-// nothing else. A seat whose work is not proven safe, or whose branch another
-// bead claims, is never removed at the cap.
+// nothing else. A seat not proven safe, or whose branch another bead claims, is
+// not removed — except a sandbox seat whose only blocker is unpushed commits,
+// which the nuke preserves on origin: gt-xlazq's rule, reversed for sandbox
+// seats on the overseer's decision of 2026-11-19 (gt-aimwqy).
 func TestDirCapTrimNeverReapsPreservedWork(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
@@ -604,7 +727,8 @@ func TestDirCapTrimNeverReapsPreservedWork(t *testing.T) {
 		want   Outcome
 	}{
 		{"unpushed work", func(e *fakeReapEnv) {
-			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reusable: true, Blockers: []string{"3 unpushed commits"}, GitStateSource: "live"}
+			// The trim names the seat, but the host names no sandbox seat.
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "git-unpushed", Reusable: true, Blockers: []string{"git_state=has_unpushed unpushed_commits=3"}, GitStateSource: "live"}
 		}, false, OutcomeBlocked},
 		{"uncommitted files", func(e *fakeReapEnv) {
 			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reusable: true, Blockers: []string{"2 uncommitted files"}, GitStateSource: "live"}

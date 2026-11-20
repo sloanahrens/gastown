@@ -199,6 +199,17 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 	}
 
 	safe := rv.SafeToNuke && rv.Verdict == "SAFE_TO_NUKE" && rv.GitStateSource == "live"
+	if !safe && unpushedOnly(rv) {
+		// The nuke pushes the tip to origin before it removes the seat, so it
+		// preserves a sandbox seat's only blocker (gt-aimwqy, reverses gt-xlazq).
+		sandbox := false
+		if su, ok := s.reapEnv.(SingleUseEnv); ok {
+			if sandbox, err = su.SandboxSeat(rig, name); err != nil {
+				return unknown("sandbox seat unreadable", err)
+			}
+		}
+		safe, singleUse = sandbox, sandbox
+	}
 	if !safe {
 		f.Outcome, f.Detail = OutcomeBlocked, blockedDetail(rv)
 		return f, true
@@ -233,6 +244,24 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 	*left--
 	f.Outcome, f.Detail = OutcomeReaped, removedDetail()
 	return f, true
+}
+
+// unpushedOnly reports whether the only at-risk work is commits measured live on
+// the branch alone, beside the recorded status naming the same fact (gt-aimwqy).
+func unpushedOnly(rv Recovery) bool {
+	if rv.Verdict != "NEEDS_RECOVERY" || rv.GitStateSource != "live" ||
+		(rv.Reason != "git-unpushed" && rv.Reason != "cleanup-has_unpushed") {
+		return false
+	}
+	measured := false
+	for _, b := range rv.Blockers {
+		if strings.HasPrefix(b, "git_state=has_unpushed ") {
+			measured = true
+		} else if b != "cleanup_status=has_unpushed" {
+			return false
+		}
+	}
+	return measured
 }
 
 // trimAtDirCap is the tick's trim order: the seats the rig's directory cap may
