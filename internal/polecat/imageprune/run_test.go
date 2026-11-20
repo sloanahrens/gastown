@@ -141,6 +141,28 @@ func TestPruneAllContinuesPastANodeThatCannotBeRead(t *testing.T) {
 	}
 }
 
+// Every crictl read of the node needs an explicit deadline: with crictl's
+// default 2 second timeout a run failed one time in three at 208 images
+// (1.2 to 2.3 seconds a call). Timed puts --timeout before the call's own
+// arguments, where crictl accepts it.
+func TestTimedPrependsTheTimeout(t *testing.T) {
+	t.Parallel()
+	var got []string
+	want := []byte(`{"images":[]}`)
+	boom := errors.New("DeadlineExceeded")
+	timed := Timed(func(args ...string) ([]byte, error) {
+		got = append([]string(nil), args...)
+		return want, boom
+	})
+	out, err := timed("images", "-o", "json")
+	if wantArgs := []string{"--timeout", CrictlTimeout, "images", "-o", "json"}; !reflect.DeepEqual(got, wantArgs) {
+		t.Errorf("Timed passed %v, want %v", got, wantArgs)
+	}
+	if !reflect.DeepEqual(out, want) || !errors.Is(err, boom) {
+		t.Errorf("Timed returned (%q, %v), want the fake's output and error unchanged", out, err)
+	}
+}
+
 func TestPruneAllRefusesAnEmptyNodeList(t *testing.T) {
 	t.Parallel()
 	_, err := PruneAll(nil, func(string) Crictl { return healthy().crictl }, 0, false)
