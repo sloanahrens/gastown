@@ -304,9 +304,14 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 		// A failed or killed run can leave the database with no main, and its own
 		// record then holds the 24-hour gate shut, so recovery runs first, before
 		// the readings and Decide, whatever either says (gt-ngculo). What the
-		// call returns is handled by the sibling beads: logging a Recovery, the
-		// held marker, an error and a clean catalog.
-		_, _ = d.maintenance().squashRecover(ctx, d, db, now, step.settings)
+		// call returns: a Recovery is logged here (gt-oym2v2); the sibling beads
+		// handle the held marker, an error and a clean catalog, and the error is
+		// dropped until they land.
+		recovery, _ := d.maintenance().squashRecover(ctx, d, db, now, step.settings)
+		if recovery != nil {
+			d.logger.Printf("squash: %s: recovered a dead run (%s): dropped %s, kept %s: %s",
+				db, recovery.State, squashBranchList(recovery.Dropped), squashBranchList(recovery.Kept), recovery.Reason)
+		}
 		readings := d.readSquashInputs(ctx, db, now)
 		if names := readings.unreadable(); len(names) > 0 {
 			undecided = true
@@ -841,4 +846,12 @@ func squashRows(rows *sql.Rows) (doltsquash.Rows, error) {
 		return doltsquash.Rows{}, err
 	}
 	return doltsquash.Rows{Columns: columns, Data: data}, nil
+}
+
+// squashBranchList names the branches of a recovery for its log line, or "none".
+func squashBranchList(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
