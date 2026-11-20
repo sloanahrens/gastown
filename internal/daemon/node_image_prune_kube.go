@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/update"
 )
@@ -39,10 +40,30 @@ const nodePruneCallTimeout = 120 * time.Second
 // kubectlNodePrune is the cluster seam a node-prune run drives.
 var _ nodePruneKube = kubectlNodePrune{}
 
+// nodePruneErrHeadMax bounds how much of kubectl's answer an error carries.
+const nodePruneErrHeadMax = 300
+
+// nodePruneErrHead returns the head of kubectl's answer for an error: at most
+// nodePruneErrHeadMax bytes, newlines and tabs turned to spaces, cut at a rune
+// boundary with "..." where it was cut. The reason kubectl gave tells a Forbidden,
+// an AlreadyExists and a policy denial apart in the log; the ledger records no error
+// text (gt-eg0ji0).
+func nodePruneErrHead(out string) string {
+	head := strings.NewReplacer("\n", " ", "\t", " ").Replace(out)
+	if len(head) <= nodePruneErrHeadMax {
+		return head
+	}
+	cut := nodePruneErrHeadMax
+	for cut > 0 && !utf8.RuneStart(head[cut]) {
+		cut--
+	}
+	return head[:cut] + "..."
+}
+
 // ListJSON returns the gt namespace's Jobs, Deployments and Pods as kubectl's JSON
-// object. A non-zero exit is an error naming the verb and the status, not kubectl's
-// output. The bound is a context deadline, not --request-timeout (see
-// kubectlUpdateJob.CreateJob).
+// object. A non-zero exit is an error naming the verb, the status and the head of
+// kubectl's answer (gt-d4zhkq). The bound is a context deadline, not
+// --request-timeout (see kubectlUpdateJob.CreateJob).
 func (k kubectlNodePrune) ListJSON(ctx context.Context) ([]byte, error) {
 	bounded, cancel := context.WithTimeout(ctx, nodePruneKubeTimeout)
 	defer cancel()
@@ -51,7 +72,7 @@ func (k kubectlNodePrune) ListJSON(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("running kubectl get: %w", err)
 	}
 	if exit != 0 {
-		return nil, fmt.Errorf("kubectl get of the gt namespace exited %d", exit)
+		return nil, fmt.Errorf("kubectl get of the gt namespace exited %d: %s", exit, nodePruneErrHead(out))
 	}
 	return listJSONObject("get", out)
 }
@@ -97,7 +118,7 @@ func nodePruneManifestName(manifest []byte) string {
 
 // Apply creates the node-prune Job from manifest. The manifest is written under the
 // update directory and removed when Apply returns. A non-zero exit is an error naming
-// the verb and the status, not kubectl's output.
+// the verb, the status and the head of kubectl's answer (gt-d4zhkq).
 func (k kubectlNodePrune) Apply(ctx context.Context, manifest []byte) error {
 	if err := os.MkdirAll(k.dir, 0o700); err != nil {
 		return fmt.Errorf("create the update directory %s: %w", k.dir, err)
@@ -113,12 +134,12 @@ func (k kubectlNodePrune) Apply(ctx context.Context, manifest []byte) error {
 
 	bounded, cancel := context.WithTimeout(ctx, nodePruneKubeTimeout)
 	defer cancel()
-	_, exit, err := k.run(bounded, "", nil, "kubectl", "-n", nodeImagePruneNamespace, "create", "-f", path)
+	out, exit, err := k.run(bounded, "", nil, "kubectl", "-n", nodeImagePruneNamespace, "create", "-f", path)
 	if err != nil {
 		return fmt.Errorf("running kubectl create: %w", err)
 	}
 	if exit != 0 {
-		return fmt.Errorf("kubectl create of the node-prune Job exited %d", exit)
+		return fmt.Errorf("kubectl create of the node-prune Job exited %d: %s", exit, nodePruneErrHead(out))
 	}
 	return nil
 }
@@ -141,42 +162,43 @@ func (k kubectlNodePrune) runBounded(ctx context.Context, limit time.Duration, v
 
 // WaitComplete blocks until the node-prune Job completes, under nodePruneWaitTimeout.
 // kubectl's own timeout is the Job's deadline plus 60 seconds. A non-zero exit is an
-// error naming the verb and the status, not kubectl's output.
+// error naming the verb, the status and the head of kubectl's answer (gt-d4zhkq).
 func (k kubectlNodePrune) WaitComplete(ctx context.Context, name string) error {
 	timeout := "--timeout=" + strconv.Itoa(nodeImagePruneDeadlineSec+60) + "s"
-	_, exit, err := k.runBounded(ctx, nodePruneWaitTimeout, "wait", "-n", nodeImagePruneNamespace, "wait", "--for=condition=complete", "job/"+name, timeout)
+	out, exit, err := k.runBounded(ctx, nodePruneWaitTimeout, "wait", "-n", nodeImagePruneNamespace, "wait", "--for=condition=complete", "job/"+name, timeout)
 	if err != nil {
 		return err
 	}
 	if exit != 0 {
-		return fmt.Errorf("kubectl wait for the node-prune Job exited %d", exit)
+		return fmt.Errorf("kubectl wait for the node-prune Job exited %d: %s", exit, nodePruneErrHead(out))
 	}
 	return nil
 }
 
 // Logs returns the node-prune Job's log, untrimmed, under nodePruneCallTimeout. A
-// non-zero exit is an error naming the verb and the status, not kubectl's output.
+// non-zero exit is an error naming the verb, the status and the head of kubectl's
+// answer (gt-d4zhkq).
 func (k kubectlNodePrune) Logs(ctx context.Context, name string) ([]byte, error) {
 	out, exit, err := k.runBounded(ctx, nodePruneCallTimeout, "logs", "-n", nodeImagePruneNamespace, "logs", "job/"+name)
 	if err != nil {
 		return nil, err
 	}
 	if exit != 0 {
-		return nil, fmt.Errorf("kubectl logs of the node-prune Job exited %d", exit)
+		return nil, fmt.Errorf("kubectl logs of the node-prune Job exited %d: %s", exit, nodePruneErrHead(out))
 	}
 	return []byte(out), nil
 }
 
 // Delete removes the node-prune Job, and succeeds when it is already gone, under
-// nodePruneCallTimeout. A non-zero exit is an error naming the verb and the status,
-// not kubectl's output.
+// nodePruneCallTimeout. A non-zero exit is an error naming the verb, the status and
+// the head of kubectl's answer (gt-d4zhkq).
 func (k kubectlNodePrune) Delete(ctx context.Context, name string) error {
-	_, exit, err := k.runBounded(ctx, nodePruneCallTimeout, "delete", "-n", nodeImagePruneNamespace, "delete", "job", name, "--ignore-not-found", "--wait=true")
+	out, exit, err := k.runBounded(ctx, nodePruneCallTimeout, "delete", "-n", nodeImagePruneNamespace, "delete", "job", name, "--ignore-not-found", "--wait=true")
 	if err != nil {
 		return err
 	}
 	if exit != 0 {
-		return fmt.Errorf("kubectl delete of the node-prune Job exited %d", exit)
+		return fmt.Errorf("kubectl delete of the node-prune Job exited %d: %s", exit, nodePruneErrHead(out))
 	}
 	return nil
 }

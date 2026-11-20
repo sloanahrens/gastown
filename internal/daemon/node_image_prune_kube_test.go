@@ -5,8 +5,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +17,8 @@ import (
 // TestNodeImagePruneKubeArgv: ListJSON and Apply run kubectl through the exec seam
 // with exactly the argv the node-prune run needs, and no --request-timeout or
 // --context flag, since the bound is a context deadline (gt-ye543d). A non-zero
-// exit is an error naming the verb and the exit status, never kubectl's output.
+// exit is an error naming the verb, the exit status and the head of kubectl's
+// answer (gt-d4zhkq).
 func TestNodeImagePruneKubeArgv(t *testing.T) {
 	t.Parallel()
 	const manifest = "kind: Job\nsecret: none\n"
@@ -54,7 +57,9 @@ func TestNodeImagePruneKubeArgv(t *testing.T) {
 				}
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantMsg)
-				assert.NotContains(t, err.Error(), leak, "kubectl's output reached the error")
+				if tt.exit != 0 {
+					assert.Contains(t, err.Error(), tt.out, "the error did not carry the head of kubectl's answer")
+				}
 			})
 		}
 	})
@@ -100,7 +105,9 @@ func TestNodeImagePruneKubeArgv(t *testing.T) {
 				}
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantMsg)
-				assert.NotContains(t, err.Error(), leak, "kubectl's output reached the error")
+				if tt.exit != 0 {
+					assert.Contains(t, err.Error(), tt.out, "the error did not carry the head of kubectl's answer")
+				}
 			})
 		}
 	})
@@ -325,8 +332,8 @@ func TestNodeImagePruneKubeWaitDeadlineError(t *testing.T) {
 }
 
 // TestNodeImagePruneKubeWaitErrors: a non-zero exit of WaitComplete, Logs or Delete is
-// an error naming the verb and the exit status, never kubectl's output, and a run
-// that fails to start is an error naming the verb.
+// an error naming the verb, the exit status and the head of kubectl's answer
+// (gt-d4zhkq), and a run that fails to start is an error naming the verb.
 func TestNodeImagePruneKubeWaitErrors(t *testing.T) {
 	t.Parallel()
 	const job = "node-prune-abc123"
@@ -370,7 +377,7 @@ func TestNodeImagePruneKubeWaitErrors(t *testing.T) {
 
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), v.wantExit)
-				assert.NotContains(t, err.Error(), leak, "kubectl's output reached the error")
+				assert.Contains(t, err.Error(), leak, "the error did not carry the head of kubectl's answer")
 			})
 			t.Run("run error", func(t *testing.T) {
 				run := func(context.Context, string, []string, string, ...string) (string, int, error) {
@@ -452,6 +459,52 @@ func TestNodeImagePruneKubeListJSONToleratesWarnings(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantOut, string(got))
+		})
+	}
+}
+
+// TestNodeImagePruneKubeErrorsCarryTheHead: a non-zero exit carries the verb, the
+// exit status and the first 300 bytes of kubectl's answer, newlines turned to spaces
+// and "..." where it was cut, so a Forbidden, an AlreadyExists and a policy refusal
+// read apart in the log (gt-d4zhkq). Every verb's exit branch asserts the head in its
+// own table above.
+func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
+	t.Parallel()
+	const refusal = "Error from server (Forbidden): jobs.batch is forbidden\n"
+	const tail = "TAILMARK"
+	// Exactly 1000 bytes, so the head is the first 300 and the tail is past it.
+	answer := refusal + strings.Repeat("x", 1000-len(refusal)-len(tail)) + tail
+
+	const short = "Error\tfrom server (NotFound): jobs.batch \"x\" not found\n"
+	tests := []struct {
+		name string
+		out  string
+		want string
+		cut  bool
+	}{
+		{name: "answer past the bound", out: answer, want: strings.ReplaceAll(answer[:300], "\n", " ") + "...", cut: true},
+		{name: "answer under the bound", out: short, want: strings.NewReplacer("\n", " ", "\t", " ").Replace(short)},
+		// Byte 300 falls inside the hundredth three-byte rune, so the head ends a
+		// rune early and stays valid UTF-8.
+		{name: "cut inside a rune", out: "a" + strings.Repeat("世", 100), want: "a" + strings.Repeat("世", 99) + "...", cut: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return tt.out, 1, nil
+			}
+			err := kubectlNodePrune{dir: t.TempDir(), run: run}.Delete(context.Background(), "node-prune-abc123")
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "kubectl delete of the node-prune Job exited 1")
+			assert.Contains(t, err.Error(), tt.want)
+			if !tt.cut {
+				assert.NotContains(t, err.Error(), "...", "an answer under the bound was cut")
+			}
+			assert.NotContains(t, err.Error(), tail, "the error carries the answer past the 300-byte head")
+			assert.NotContains(t, err.Error(), "\n", "a newline reached the log line")
+			assert.NotContains(t, err.Error(), "\t", "a tab reached the log line")
+			assert.True(t, utf8.ValidString(err.Error()), "the cut left half a rune")
 		})
 	}
 }
