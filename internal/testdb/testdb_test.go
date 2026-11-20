@@ -48,6 +48,11 @@ func repoRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A sandbox seat reaches the checkout through a symlink, and WalkDir
+	// does not descend a symlink root: resolve it or the walk sees nothing.
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("%s has no go.mod: %v", root, err)
 	}
@@ -70,6 +75,7 @@ func TestOneDefinition(t *testing.T) {
 		prefixUse[i] = regexp.MustCompile(`(^|[^A-Za-z0-9_])` + regexp.QuoteMeta(p))
 	}
 	fset := token.NewFileSet()
+	scanned := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -94,6 +100,7 @@ func TestOneDefinition(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		scanned++
 		ast.Inspect(f, func(n ast.Node) bool {
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
@@ -115,5 +122,10 @@ func TestOneDefinition(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A walk that visited no Go file passes on any tree, so an empty scan is
+	// a failure: it is what a symlinked root used to produce.
+	if scanned == 0 {
+		t.Fatalf("scanned no Go file under %s: the walk saw nothing, so the check proved nothing", root)
 	}
 }

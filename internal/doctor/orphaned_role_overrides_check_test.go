@@ -170,6 +170,11 @@ func TestRoleOverridesHaveNoReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A sandbox seat reaches the checkout through a symlink, and WalkDir
+	// does not descend a symlink root: resolve it or the walk sees nothing.
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("repo root %s has no go.mod: %v", root, err)
 	}
