@@ -1445,10 +1445,14 @@ func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 	// Every pin but devops is at its tip, so only devops costs an age read.
 	tips := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit, pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsTip}
 	shows := 0
+	var fetches []string
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		switch {
 		case slices.Contains(cmd.Args, "ls-remote"):
 			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "fetch") && cmd.Args[len(cmd.Args)-1] == "+main:refs/gt/pin-tip":
+			fetches = append(fetches, cmd.Args[len(cmd.Args)-2])
+			return nil, nil, nil
 		case slices.Contains(cmd.Args, "show"):
 			shows++
 			return []byte("100\n100000\n"), nil, nil
@@ -1463,6 +1467,13 @@ func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 	}
 	if want := 99900 * time.Second; shows != 1 || len(states) != 4 || states[3].Err != nil || states[3].Age != want {
 		t.Fatalf("the read = %+v with %d age read(s), want its four pins, devops alone aged %v, one age read", states, shows, want)
+	}
+	// Devops's count and its age read each fetch, and the age read's fetch is
+	// the last one: it must fetch devops's own URL as the file names it, never
+	// a fixed URL or another pin's (gt-svlajt).
+	wantURL := pinsReadPinURL("devops")
+	if len(fetches) != 2 || fetches[0] != wantURL || fetches[1] != wantURL {
+		t.Fatalf("the pin fetches = %v, want devops's own URL %s for its count and its age read, never another pin's", fetches, wantURL)
 	}
 	// A file the parser refuses is the read's error, before any git.
 	if _, err := d.readImagePinTips(context.Background(), []byte("bd "+pinsReadPinURL("beads")+" "+pinsReadBDCommit+"\n")); err == nil || !strings.Contains(err.Error(), "missing pin") {
