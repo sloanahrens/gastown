@@ -276,6 +276,54 @@ func TestHookIntegrityFailsClosed(t *testing.T) {
 	})
 }
 
+// TestHookWorktreeIntegrityResolvesLinks pins the directory the guard judges: a
+// seat started in a symlink to its worktree is judged as the real directory.
+// The resolvers read the path lexically, so from the link the guard finds no
+// town, checks nothing, and passes.
+func TestHookWorktreeIntegrityResolvesLinks(t *testing.T) {
+	t.Parallel()
+	townRoot := resolvedTempDir(t)
+	writeTownRoot(t, townRoot)
+	realWorktree := filepath.Join(townRoot, "gastown", "crew", "eagle")
+	if err := os.MkdirAll(realWorktree, 0755); err != nil {
+		t.Fatalf("mkdir the crew worktree: %v", err)
+	}
+	writeGitMetadata(t, realWorktree)
+	link := filepath.Join(resolvedTempDir(t), "work")
+	if err := os.Symlink(realWorktree, link); err != nil {
+		t.Fatalf("symlink %s: %v", link, err)
+	}
+	var seen string
+	record := func(dir string) (string, error) { seen = dir; return workspace.Find(dir) }
+	errFromLink := hookWorktreeIntegrityIn(func() (string, error) { return link, nil }, record)
+	linkSaw := seen
+	errFromReal := hookWorktreeIntegrityIn(func() (string, error) { return realWorktree, nil }, record)
+	if linkSaw != realWorktree {
+		t.Fatalf("findTown received %q from the link, want the real directory %q", linkSaw, realWorktree)
+	}
+	if (errFromLink == nil) != (errFromReal == nil) || (errFromLink != nil && errFromLink.Error() != errFromReal.Error()) {
+		t.Fatalf("the link's verdict (%v) differs from the real directory's (%v)", errFromLink, errFromReal)
+	}
+}
+
+// TestHookWorktreeIntegrityLinkFailsClosed pins the other side: a link the
+// guard cannot resolve is a FAILURE that names the directory, never a pass.
+func TestHookWorktreeIntegrityLinkFailsClosed(t *testing.T) {
+	t.Parallel()
+	dir := resolvedTempDir(t)
+	link := filepath.Join(dir, "work")
+	if err := os.Symlink(filepath.Join(dir, "missing"), link); err != nil {
+		t.Fatalf("symlink %s: %v", link, err)
+	}
+	err := hookWorktreeIntegrityIn(func() (string, error) { return link, nil }, workspace.Find)
+	if err == nil {
+		t.Fatalf("hookWorktreeIntegrityIn = nil, want the unresolvable link refused (fail closed)")
+	}
+	if !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "resolving") {
+		t.Fatalf("error %q is not the resolution refusal naming %q", err, link)
+	}
+}
+
 // writeGitMetadata makes dir a valid regular clone: a .git directory with the
 // HEAD that worktree integrity requires.
 func writeGitMetadata(t *testing.T, dir string) {

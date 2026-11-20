@@ -761,27 +761,37 @@ func ensureCurrentHookWorktreeIntegrity() error {
 // pass: with no directory there is no worktree to validate, and a guard that
 // reports "checked and fine" for something it could not check is fail-open
 // (gt-yjzepk.1 rework).
+//
+// The directory is resolved to its real path before it is judged: a seat may
+// start in a symlink to its worktree (the sandbox links one at a fixed path),
+// while findTown and detectRole read the path lexically. Through the link the
+// town is not found, or is found with no role, so nothing is checked and the
+// guard passes. A link that cannot be resolved is a FAILURE that names the
+// directory, never a pass.
 func hookWorktreeIntegrityIn(getwd func() (string, error), findTown func(string) (string, error)) error {
 	cwd, err := getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}
-	info, statErr := os.Stat(cwd)
-	if statErr != nil {
-		return fmt.Errorf("hook integrity: the current directory %s is not present here: %w", cwd, statErr)
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return fmt.Errorf("hook integrity: resolving the current directory %s: %w", cwd, err)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("hook integrity: the current directory %s is not a directory", cwd)
+	// EvalSymlinks above proved the path resolves; the stat only decides whether
+	// it is a directory. A file, or a path that vanished between the two calls,
+	// is refused rather than passed.
+	if info, statErr := os.Stat(resolved); statErr != nil || !info.IsDir() {
+		return fmt.Errorf("hook integrity: the current directory %s is not a usable directory", resolved)
 	}
-	townRoot, err := findTown(cwd)
+	townRoot, err := findTown(resolved)
 	if err != nil {
 		return fmt.Errorf("hook integrity: finding workspace: %w", err)
 	}
 	if townRoot == "" {
 		return nil
 	}
-	roleCtx := detectRole(cwd, townRoot)
-	return ensureRoleWorktreeIntegrity(cwd, townRoot, roleCtx.Role)
+	roleCtx := detectRole(resolved, townRoot)
+	return ensureRoleWorktreeIntegrity(resolved, townRoot, roleCtx.Role)
 }
 
 // normalizeHookShowTarget resolves target aliases/shorthand to canonical agent IDs.
