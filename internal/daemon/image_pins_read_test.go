@@ -153,27 +153,61 @@ func (f *fakePinCompare) CompareCommits(_ context.Context, owner, repo, base, he
 // the tip as head.
 func pinsReadCompareKey(base, head string) string { return base + "..." + head }
 
-// pinsReadAllHealthy is a git and a compare that answer every fixture source:
-// each pin trails its tip by one commit.
-func pinsReadAllHealthy() (*fakePinTips, *fakePinCompare) {
+// pinsReadPathCountCall is one path-limited count the reader asked for, as the
+// seam received it.
+type pinsReadPathCountCall struct {
+	url, pin, tip string
+	paths         []string
+}
+
+// fakePinPathCount is the injected path-limited count: the answer every call
+// gets, and the calls it received. Only the devops pin carries an input list, so
+// a call for another pin is visible in calls.
+type fakePinPathCount struct {
+	behind int
+	err    error
+	calls  []pinsReadPathCountCall
+}
+
+func (f *fakePinPathCount) count(url, pin, tip string, paths []string) (int, error) {
+	f.calls = append(f.calls, pinsReadPathCountCall{url: url, pin: pin, tip: tip, paths: paths})
+	return f.behind, f.err
+}
+
+// pinsReadPinsBeforeDevops is what the reader must report for the fixture's bd,
+// om and hm pins, each one commit behind, beside a devops state under test.
+func pinsReadPinsBeforeDevops() []ImagePinState {
+	return []ImagePinState{
+		{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1},
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip, Behind: 1},
+		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Behind: 1},
+	}
+}
+
+// pinsReadAllHealthy is a git, a compare and a path count that answer every
+// fixture source: each pin trails its tip by one commit, the devops pin counted
+// through its inputs and the other three through the compare. The compare
+// answers nothing for devops, so a reader that compared it would fail.
+func pinsReadAllHealthy() (*fakePinTips, *fakePinCompare, *fakePinPathCount) {
 	git := &fakePinTips{answers: map[string]string{}, errs: map[string]error{}}
 	cmp := &fakePinCompare{behind: map[string]int{}, nilFor: map[string]bool{}, errs: map[string]error{}}
 	for _, p := range []struct{ repo, pin, tip string }{
 		{"beads", pinsReadBDCommit, pinsReadBDTip},
 		{"organic-mechanic", pinsReadOMCommit, pinsReadOMTip},
 		{"history-man", pinsReadHMCommit, pinsReadHMTip},
-		{"devops", pinsReadDevopsCommit, pinsReadDevopsTip},
 	} {
 		git.answers[pinsReadPinURL(p.repo)] = pinsReadLS(p.tip)
 		cmp.behind[pinsReadCompareKey(p.pin, p.tip)] = 1
 	}
-	return git, cmp
+	git.answers[pinsReadPinURL("devops")] = pinsReadLS(pinsReadDevopsTip)
+	return git, cmp, &fakePinPathCount{behind: 1}
 }
 
 // TestImagePinsReadTipsAndBehind drives the read over the four pins of the
 // fixture file: each row's source answers its own tip and commit count, so the
-// read must report that pin's tip and count and address that pin's repository
-// and commits.
+// read must report that pin's tip and count, addressing a compare pin's
+// repository and commits through the compare and counting devops through its
+// inputs.
 func TestImagePinsReadTipsAndBehind(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -190,18 +224,26 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 	}
 	git := &fakePinTips{answers: map[string]string{}, errs: map[string]error{}}
 	cmp := &fakePinCompare{behind: map[string]int{}}
+	pathCount := &fakePinPathCount{}
 	for _, tt := range tests {
 		git.answers[pinsReadPinURL(tt.repo)] = pinsReadLS(tt.tip)
+		if tt.name == "devops" {
+			pathCount.behind = tt.behind
+			continue
+		}
 		cmp.behind[pinsReadCompareKey(tt.pin, tt.tip)] = tt.behind
 	}
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
 	require.NoError(t, err)
 
 	require.Len(t, states, len(tests))
 	for i, tt := range tests {
 		want := ImagePinState{Name: tt.name, Pin: tt.pin, Tip: tt.tip, Behind: tt.behind}
 		assert.Equal(t, want, states[i], "%s pin read", tt.name)
+		if tt.name == "devops" {
+			continue
+		}
 		wantCall := pinsReadCompareCall{owner: pinsReadOwner, repo: tt.repo, base: tt.pin, head: tt.tip}
 		assert.Equal(t, wantCall, cmp.calls[i], "%s pin comparison", tt.name)
 	}
@@ -212,19 +254,20 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 }
 
 // TestImagePinsReadAtTipSkipsCompare: a pin whose commit is its source's tip is
-// read as zero behind, and the compare API is asked about the other three only.
+// read as zero behind, and the compare API is asked about om and hm only: neither
+// the pin at its tip nor the devops pin, counted through its inputs, is compared.
 func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadAllHealthy()
+	git, cmp, pathCount := pinsReadAllHealthy()
 	git.answers[pinsReadPinURL("beads")] = pinsReadLS(pinsReadBDCommit)
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
 	require.NoError(t, err)
 
 	require.Len(t, states, 4)
 	assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDCommit, Behind: 0}, states[0],
 		"a pin at its tip is zero behind")
-	require.Len(t, cmp.calls, 3, "the pin at its tip is not compared")
+	require.Len(t, cmp.calls, 2, "the pin at its tip is not compared")
 	for _, call := range cmp.calls {
 		assert.NotEqual(t, pinsReadBDCommit, call.base, "the bd pin is at its tip")
 	}
@@ -235,17 +278,17 @@ func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 // owner's repository.
 func TestImagePinsReadExpandsTheForgeOwner(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadAllHealthy()
+	git, cmp, pathCount := pinsReadAllHealthy()
 	placeholderURL := func(repo string) string {
 		return "http://forgejo:3000/" + config.ForgeOwnerPlaceholder + "/" + repo + ".git"
 	}
 	ownerOf := func() (string, error) { return pinsReadOwner, nil }
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(placeholderURL), ownerOf, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(placeholderURL), ownerOf, git.read, pathCount.count, cmp)
 	require.NoError(t, err)
 
 	require.Len(t, states, 4)
-	require.Len(t, cmp.calls, 4)
+	require.Len(t, cmp.calls, 3)
 	for i, call := range cmp.calls {
 		assert.Equal(t, pinsReadOwner, call.owner, "comparison %d names the expanded owner", i)
 	}
@@ -258,14 +301,14 @@ func TestImagePinsReadExpandsTheForgeOwner(t *testing.T) {
 // and counts its calls, so a read that asks it early fails on the count alone.
 func TestImagePinsReadLeavesTheOwnerResolverUncalled(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadAllHealthy()
+	git, cmp, pathCount := pinsReadAllHealthy()
 	calls := 0
 	ownerOf := func() (string, error) {
 		calls++
 		return pinsReadOwner, nil
 	}
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), ownerOf, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), ownerOf, git.read, pathCount.count, cmp)
 	require.NoError(t, err)
 
 	require.Len(t, states, 4)
@@ -277,10 +320,10 @@ func TestImagePinsReadLeavesTheOwnerResolverUncalled(t *testing.T) {
 // pins are read rather than skipped, and no pin is reported with a guessed tip.
 func TestImagePinsReadAFailedTipIsThatPinsError(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadAllHealthy()
+	git, cmp, pathCount := pinsReadAllHealthy()
 	git.errs[pinsReadPinURL("beads")] = errors.New("remote hung up")
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
 	require.NoError(t, err, "a pin's failed read is not the file's error")
 	require.Len(t, states, 4)
 
@@ -301,10 +344,10 @@ func TestImagePinsReadAFailedTipIsThatPinsError(t *testing.T) {
 // and the other three pins are read rather than skipped.
 func TestImagePinsReadAFailedCompareIsThatPinsError(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadAllHealthy()
+	git, cmp, pathCount := pinsReadAllHealthy()
 	cmp.errs[pinsReadCompareKey(pinsReadBDCommit, pinsReadBDTip)] = errors.New("forgejo: server error")
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
 	require.NoError(t, err, "a pin's failed compare is not the file's error")
 	require.Len(t, states, 4)
 
@@ -319,10 +362,10 @@ func TestImagePinsReadAFailedCompareIsThatPinsError(t *testing.T) {
 // URL is never handed to git.
 func TestImagePinsReadAnUnparseableURLIsThatPinsError(t *testing.T) {
 	t.Parallel()
-	git, cmp := pinsReadAllHealthy()
+	git, cmp, pathCount := pinsReadAllHealthy()
 	badURL := "http://forgejo:3000/%zz/beads.git"
 
-	states, err := ReadImagePinTips(context.Background(), pinsReadFixtureWithBDURL(badURL), nil, git.read, cmp)
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixtureWithBDURL(badURL), nil, git.read, pathCount.count, cmp)
 	require.NoError(t, err, "a pin's URL failure is not the file's error")
 	require.Len(t, states, 4)
 
@@ -411,7 +454,7 @@ func TestImagePinsReadOnePinRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			git, cmp := pinsReadAllHealthy()
+			git, cmp, pathCount := pinsReadAllHealthy()
 			file := tt.file
 			if file == nil {
 				file = pinsReadFixture(pinsReadPinURL)
@@ -420,7 +463,7 @@ func TestImagePinsReadOnePinRefused(t *testing.T) {
 				tt.setup(git, cmp)
 			}
 
-			states, err := ReadImagePinTips(context.Background(), file, nil, git.read, cmp)
+			states, err := ReadImagePinTips(context.Background(), file, nil, git.read, pathCount.count, cmp)
 			require.NoError(t, err, "one pin's failure is not the file's error")
 			require.Len(t, states, 4)
 			require.Error(t, states[0].Err, "the bd pin's failure is its error")
@@ -503,7 +546,7 @@ func TestImagePinsReadFileRefusals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			git, cmp := pinsReadAllHealthy()
+			git, cmp, _ := pinsReadAllHealthy()
 			file := tt.file
 			if file == nil {
 				file = pinsReadFixture(pinsReadPinURL)
@@ -517,7 +560,7 @@ func TestImagePinsReadFileRefusals(t *testing.T) {
 				compare = nil
 			}
 
-			states, err := ReadImagePinTips(context.Background(), file, tt.ownerOf, tipGit, compare)
+			states, err := ReadImagePinTips(context.Background(), file, tt.ownerOf, tipGit, nil, compare)
 			require.ErrorContains(t, err, tt.want)
 			assert.Nil(t, states, "a refused read reports no pins")
 		})
@@ -578,8 +621,8 @@ func TestImagePinsReadFileShapeAgreesWithTheGuardParser(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, guardErr := daemonimage.ParsePins(tt.file)
-			git, cmp := pinsReadAllHealthy()
-			_, readErr := ReadImagePinTips(context.Background(), tt.file, nil, git.read, cmp)
+			git, cmp, pathCount := pinsReadAllHealthy()
+			_, readErr := ReadImagePinTips(context.Background(), tt.file, nil, git.read, pathCount.count, cmp)
 
 			if !tt.refuse {
 				require.NoError(t, guardErr, "the guard parser accepts the fixture file")
@@ -590,4 +633,82 @@ func TestImagePinsReadFileShapeAgreesWithTheGuardParser(t *testing.T) {
 			require.Error(t, readErr, "the reader refuses the file the guard parser refuses")
 		})
 	}
+}
+
+// TestReadImagePinTipsCountsOnlyInputCommitsForADevopsPin: the devops pin's lag
+// is the path-limited count, asked for its URL, its pin, its tip and the inputs
+// the image builds it from, and the compare API, which cannot name the paths a
+// commit changed, is not asked about it; the three pins with no input list keep
+// the compare count.
+func TestReadImagePinTipsCountsOnlyInputCommitsForADevopsPin(t *testing.T) {
+	t.Parallel()
+	git, cmp, _ := pinsReadAllHealthy()
+	pathCount := &fakePinPathCount{behind: 3}
+
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+	require.NoError(t, err)
+
+	require.Len(t, states, 4)
+	assert.Equal(t, ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3}, states[3],
+		"a devops pin's Behind is the path-limited count, not the compare answer")
+	assert.Equal(t, []pinsReadPathCountCall{{
+		url: pinsReadPinURL("devops"), pin: pinsReadDevopsCommit, tip: pinsReadDevopsTip,
+		paths: daemonimage.PinInputPaths("devops"),
+	}}, pathCount.calls, "the devops pin is counted once, with its inputs")
+	require.Len(t, cmp.calls, 3, "the three pins with no input list are compared")
+	for _, call := range cmp.calls {
+		assert.NotEqual(t, "devops", call.repo, "the devops pin is counted through its inputs, not the compare")
+	}
+}
+
+// TestReadImagePinTipsPathCountFailureIsThePinsErr: a path-limited count that
+// fails, or answers a negative number, is that pin's Err naming it, and the
+// other three pins are still read.
+func TestReadImagePinTipsPathCountFailureIsThePinsErr(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		pathCount *fakePinPathCount
+		want      string
+	}{
+		{"a count that fails", &fakePinPathCount{err: errors.New("git fetch exited 128")}, "devops pin " + pinsReadDevopsCommit[:12] + ": cannot count"},
+		{"a count below zero", &fakePinPathCount{behind: -1}, "which is not a count"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			git, cmp, _ := pinsReadAllHealthy()
+
+			states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, tt.pathCount.count, cmp)
+			require.NoError(t, err, "a pin's failed count is not the file's error")
+			require.Len(t, states, 4)
+
+			require.Error(t, states[3].Err, "the failed devops count is that pin's error")
+			assert.Contains(t, states[3].Err.Error(), tt.want)
+			assert.Equal(t, "devops", states[3].Name, "the failed state still names its pin")
+			assert.Equal(t, pinsReadDevopsCommit, states[3].Pin, "the failed state still names the file's commit")
+			assert.Equal(t, pinsReadDevopsTip, states[3].Tip, "the tip read before the count is kept")
+			assert.Equal(t, pinsReadPinsBeforeDevops(), states[:3], "the other three pins are still read")
+		})
+	}
+}
+
+// TestReadImagePinTipsNilPathSeamIsThePinsErr: a devops pin read with no
+// path-count seam is that pin's Err naming it, never the compare count, which
+// cannot say which of the commits touch its inputs; the other three pins are
+// still read.
+func TestReadImagePinTipsNilPathSeamIsThePinsErr(t *testing.T) {
+	t.Parallel()
+	git, cmp, _ := pinsReadAllHealthy()
+
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, nil, cmp)
+	require.NoError(t, err, "a pin's missing seam is not the file's error")
+	require.Len(t, states, 4)
+
+	require.Error(t, states[3].Err, "the devops pin read with no seam is its error")
+	assert.Contains(t, states[3].Err.Error(), "devops pin "+pinsReadDevopsCommit[:12]+": no path count")
+	assert.Equal(t, "devops", states[3].Name, "the failed state still names its pin")
+	assert.Equal(t, pinsReadDevopsTip, states[3].Tip, "the tip read before the count is kept")
+	assert.Equal(t, pinsReadPinsBeforeDevops(), states[:3], "the other three pins are still read")
+	assert.Len(t, cmp.calls, 3, "the devops pin is not compared in place of the missing seam")
 }

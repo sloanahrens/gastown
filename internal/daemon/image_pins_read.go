@@ -24,6 +24,12 @@ type ImagePinCompare interface {
 // git, so a test supplies a fake and no unit test reaches a network.
 type PinTipGit func(url string) ([]byte, error)
 
+// PinPathCount counts the commits a pin trails its source's tip by that touch
+// paths, the inputs the image builds the pin's source from: the injected seam
+// for the git read in the daemon's clone, which can name the paths a commit
+// changed where the compare API cannot.
+type PinPathCount func(url, pin, tip string, paths []string) (int, error)
+
 // pinTipRef is the ref an image pin's source tip is read from.
 const pinTipRef = "refs/heads/main"
 
@@ -37,20 +43,22 @@ var pinShaForm = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var pinRepoForm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // ReadImagePinTips reads every pin in an image-pins file: its source's
-// origin/main tip through tipGit, and how many commits the pin trails that tip
-// through cmp, which is not called for a pin already at its tip. ownerOf names
-// the Forgejo owner a {owner} placeholder expands to and is called only when
-// the file holds one; the owner and repository the comparison addresses are
-// read from the expanded pin URL.
+// origin/main tip through tipGit, and how many commits the pin trails that tip,
+// through pathCount limited to the pin's inputs when it has a list (devops) and
+// through cmp otherwise, neither of which is called for a pin already at its
+// tip. ownerOf names the Forgejo owner a {owner} placeholder expands to and is
+// called only when the file holds one; the owner and repository the comparison
+// addresses are read from the expanded pin URL.
 //
 // Each pin is read on its own. A pin's URL that does not name one usable,
-// credential-free http(s) repository, a tip read that fails, and a compare that
+// credential-free http(s) repository, a tip read that fails, a path-limited
+// count that fails or is missing for a pin that needs one, and a compare that
 // fails are that pin's Err, and the pins after it are still read: a failed read
 // is never reported with a guessed answer. The error return is the file's
 // alone: a missing seam, a {owner} that cannot be expanded, and a file that
 // does not name its four pins. A state with Err is not a read, whatever its Tip
 // and Behind hold, so no caller may take it for a fresh pin.
-func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, error), tipGit PinTipGit, cmp ImagePinCompare) ([]ImagePinState, error) {
+func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, error), tipGit PinTipGit, pathCount PinPathCount, cmp ImagePinCompare) ([]ImagePinState, error) {
 	if tipGit == nil {
 		return nil, errors.New("image pins read: no git to read each source's origin/main with")
 	}
@@ -63,7 +71,7 @@ func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, 
 	}
 	states := make([]ImagePinState, 0, len(pins))
 	for _, pin := range pins {
-		states = append(states, readImagePin(ctx, cmp, tipGit, pin))
+		states = append(states, readImagePin(ctx, cmp, tipGit, pathCount, pin))
 	}
 	return states, nil
 }
@@ -71,7 +79,7 @@ func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, 
 // readImagePin reads one pin: its source's tip, and its lag behind that tip. The
 // first failure is the state's Err, with the pin's Name and Pin from the file, so
 // the caller can tell which pin failed and no pin is read with a guessed answer.
-func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pin daemonimage.Pin) ImagePinState {
+func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pathCount PinPathCount, pin daemonimage.Pin) ImagePinState {
 	state := ImagePinState{Name: pin.Name, Pin: pin.Commit}
 	owner, repo, err := pinRepo(pin)
 	if err != nil {
@@ -85,7 +93,7 @@ func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pi
 	}
 	state.Tip = tip
 	if pin.Commit != tip {
-		behind, err := imagePinBehind(ctx, cmp, pin, owner, repo, tip)
+		behind, err := imagePinBehind(ctx, cmp, pathCount, pin, owner, repo, tip)
 		if err != nil {
 			state.Err = err
 			return state
@@ -235,11 +243,27 @@ func imagePinTip(tipGit PinTipGit, pin daemonimage.Pin) (string, error) {
 	return tips[0], nil
 }
 
-// imagePinBehind counts the commits the tip has and the pin does not, the
-// compare API's answer with the pin as base and the tip as head. A compare that
-// fails, an answer with no body, and a negative count are errors: the reader
-// reports a count it was given, never the zero a healthy pin reports.
-func imagePinBehind(ctx context.Context, cmp ImagePinCompare, pin daemonimage.Pin, owner, repo, tip string) (int, error) {
+// imagePinBehind counts the commits the tip has and the pin does not: through
+// pathCount, limited to the inputs the image builds the pin's source from, for a
+// pin with such a list; through the compare API, which cannot name the paths a
+// commit changed, for a pin without one. A failed count, a missing pathCount
+// where a pin needs one, an answer with no body, and a negative count are
+// errors: the reader reports a count it was given, never the zero a healthy pin
+// reports.
+func imagePinBehind(ctx context.Context, cmp ImagePinCompare, pathCount PinPathCount, pin daemonimage.Pin, owner, repo, tip string) (int, error) {
+	if paths := daemonimage.PinInputPaths(pin.Name); len(paths) != 0 {
+		if pathCount == nil {
+			return 0, fmt.Errorf("image pins read: %s pin %s: no path count to count the commits it trails %s by that touch its inputs", pin.Name, sha12(pin.Commit), pinTipRef)
+		}
+		n, err := pathCount(pin.URL, pin.Commit, tip, paths)
+		if err != nil {
+			return 0, fmt.Errorf("image pins read: %s pin %s: cannot count the commits it trails %s of %s that touch its inputs: %w", pin.Name, sha12(pin.Commit), pinTipRef, pin.URL, err)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("image pins read: %s pin %s: counting the commits it trails %s by that touch its inputs answered %d, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, n)
+		}
+		return n, nil
+	}
 	info, err := cmp.CompareCommits(ctx, owner, repo, pin.Commit, tip)
 	if err != nil {
 		return 0, fmt.Errorf("image pins read: %s pin %s: cannot compare it with %s of %s/%s: %w", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, err)
