@@ -259,7 +259,7 @@ func (l poolShowLive) seatCount(agent string, cap int) string {
 	// This read holds no separate in-flight input, so it passes 0: the count
 	// is the roster's own and the line keeps its wording. The formatter is the
 	// tick line's, so both readers print a seat the same way (gt-la4r78).
-	if n := specdispatch.SplitLiveDead(l.live[agent], 0, l.dead[agent], nil); n != "" {
+	if n := specdispatch.SplitLiveDead(l.live[agent], 0, l.dead[agent], l.deadClasses[agent]); n != "" {
 		count += " " + n
 	}
 	if n := parkedStaleCount(l.parked[agent]); n != "" {
@@ -474,6 +474,10 @@ func printPoolSeatChanges(w io.Writer, before map[string]config.SeatConfig, chan
 type poolShowLive struct {
 	live map[string]int
 	dead map[string]int
+	// deadClasses splits each agent's dead count by the class its dead seats
+	// were read in, so the seat's line names them as the tick line does
+	// (gt-01svoq). An agent whose dead seat named no class carries no split.
+	deadClasses map[string]map[string]int
 	// held is every seat the count took, from the same read: a seat or the town
 	// total above its cap lists its seats from it (gt-f4wwm7).
 	held []specdispatch.HeldSeat
@@ -538,7 +542,7 @@ func poolLiveForWithReconcile(townRoot string, readSeats func(pool *config.Polec
 		return poolShowLive{}
 	}
 	r := specRosterFrom(sessions, ts)
-	out := poolShowLive{live: r.Live, dead: r.DeadHooked, held: r.Held, parked: r.ParkedStale, ok: true,
+	out := poolShowLive{live: r.Live, dead: r.DeadHooked, deadClasses: r.DeadHookedClasses, held: r.Held, parked: r.ParkedStale, ok: true,
 		reconcile: reconcile.notes(sessions)}
 	for _, n := range r.Live {
 		out.total += n

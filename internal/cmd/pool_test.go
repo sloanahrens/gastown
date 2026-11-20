@@ -752,12 +752,36 @@ func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	for first, want := range map[string]string{
-		"deepseek-flash": "deepseek-flash 1/3 (0 live + 1 dead-hooked) open",
+		// The seat's dead read names its class, so the line names it too (gt-01svoq).
+		"deepseek-flash": "deepseek-flash 1/3 (0 live + 1 dead-hooked (1 idle-recovery-needed)) open",
 		"total":          "total 1/4",
 	} {
 		if got := poolTestShowLine(out.String(), first); got != want {
 			t.Errorf("show line for %s = %q, want %q:\n%s", first, got, want, out.String())
 		}
+	}
+}
+
+// TestPoolShowNamesTheDeadHookedClasses is gt-01svoq's show half: a seat names
+// its dead-hooked seats' classes on its line, as the tick line does; a seat
+// whose read named no class keeps the plain term (TestPoolShowNamesEveryHeldSeatAboveTheCap).
+func TestPoolShowNamesTheDeadHookedClasses(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"a":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"a":{"cap":3}}}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) { return deadClassedSessions(), nil })
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {
+		t.Fatal(err)
+	}
+	want := "a 3/3 (0 live + 3 dead-hooked (2 idle-submitted, 1 idle-recovery-needed)) open"
+	if got := poolTestShowLine(out.String(), "a"); got != want {
+		t.Fatalf("seat line = %q, want %q:\n%s", got, want, out.String())
 	}
 }
 
