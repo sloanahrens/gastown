@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/update"
@@ -23,6 +24,9 @@ type kubectlNodePrune struct {
 	dir string
 	run update.RunFunc
 }
+
+// kubectlNodePrune is the cluster seam a node-prune run drives.
+var _ nodePruneKube = kubectlNodePrune{}
 
 // ListJSON returns the gt namespace's Jobs, Deployments and Pods as kubectl's JSON.
 // A non-zero exit is an error naming the verb and the status, not kubectl's output.
@@ -71,6 +75,47 @@ func (k kubectlNodePrune) Apply(ctx context.Context, manifest []byte) error {
 	}
 	if exit != 0 {
 		return fmt.Errorf("kubectl create of the node-prune Job exited %d", exit)
+	}
+	return nil
+}
+
+// WaitComplete blocks until the node-prune Job completes. kubectl's own timeout is the
+// Job's deadline plus 60 seconds. A non-zero exit is an error naming the verb and the
+// status, not kubectl's output.
+func (k kubectlNodePrune) WaitComplete(ctx context.Context, name string) error {
+	timeout := "--timeout=" + strconv.Itoa(nodeImagePruneDeadlineSec+60) + "s"
+	_, exit, err := k.run(ctx, "", nil, "kubectl", "-n", nodeImagePruneNamespace, "wait", "--for=condition=complete", "job/"+name, timeout)
+	if err != nil {
+		return fmt.Errorf("running kubectl wait: %w", err)
+	}
+	if exit != 0 {
+		return fmt.Errorf("kubectl wait for the node-prune Job exited %d", exit)
+	}
+	return nil
+}
+
+// Logs returns the node-prune Job's log, untrimmed. A non-zero exit is an error naming
+// the verb and the status, not kubectl's output.
+func (k kubectlNodePrune) Logs(ctx context.Context, name string) ([]byte, error) {
+	out, exit, err := k.run(ctx, "", nil, "kubectl", "-n", nodeImagePruneNamespace, "logs", "job/"+name)
+	if err != nil {
+		return nil, fmt.Errorf("running kubectl logs: %w", err)
+	}
+	if exit != 0 {
+		return nil, fmt.Errorf("kubectl logs of the node-prune Job exited %d", exit)
+	}
+	return []byte(out), nil
+}
+
+// Delete removes the node-prune Job, and succeeds when it is already gone. A non-zero
+// exit is an error naming the verb and the status, not kubectl's output.
+func (k kubectlNodePrune) Delete(ctx context.Context, name string) error {
+	_, exit, err := k.run(ctx, "", nil, "kubectl", "-n", nodeImagePruneNamespace, "delete", "job", name, "--ignore-not-found", "--wait=true")
+	if err != nil {
+		return fmt.Errorf("running kubectl delete: %w", err)
+	}
+	if exit != 0 {
+		return fmt.Errorf("kubectl delete of the node-prune Job exited %d", exit)
 	}
 	return nil
 }
