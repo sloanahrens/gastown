@@ -1380,3 +1380,145 @@ func TestPassCrewLandingAsksNoSeatForAnAgent(t *testing.T) {
 		t.Errorf("crew landing recorded agent %q, want none", got)
 	}
 }
+
+// failingUpdateStore is the fake whose Update never reaches the bead: reads
+// answer as usual, and the pass's label write fails (gt-46bh2y).
+type failingUpdateStore struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (s failingUpdateStore) Update(string, beads.UpdateOptions) error { return s.err }
+
+// TestPassLandingRetryLabelUnparksOneBead: an operator's gt:landing-retry
+// label unparks one bead without a daemon restart. The pass removes the label
+// and lands that bead again, and the ready bead beside it is not retried
+// (gt-46bh2y).
+func TestPassLandingRetryLabelUnparksOneBead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-parked")
+	h.seedReady(t, "gt-other")
+	attempts := map[string]int{}
+	h.lander.fn = func(_ int, w land.Work) (land.Result, error) {
+		attempts[w.BeadID]++
+		if w.BeadID == "gt-parked" && attempts[w.BeadID] == 1 {
+			return land.Result{}, &land.InfraError{Stage: "merge", Err: errors.New("gtwrap: the call sets no BEADS_DIR")}
+		}
+		return land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"}, nil
+	}
+	h.w.Pass(context.Background())
+	if n := h.landedTimes("gt-parked"); n != 1 {
+		t.Fatalf("first pass: gt-parked attempted %d times; want the one failing attempt", n)
+	}
+	if n := h.landedTimes("gt-other"); n != 1 {
+		t.Fatalf("first pass: gt-other landed %d times; want once", n)
+	}
+	// Without the label the park holds.
+	h.now = h.now.Add(time.Hour)
+	h.w.Pass(context.Background())
+	if n := h.landedTimes("gt-parked"); n != 1 {
+		t.Fatalf("before the label: gt-parked attempted %d times; want the park to hold", n)
+	}
+	if n := h.landedTimes("gt-other"); n != 2 {
+		t.Fatalf("before the label: gt-other attempted %d times; want once per pass", n)
+	}
+
+	if err := h.bd.Update("gt-parked", beads.UpdateOptions{AddLabels: []string{LabelLandingRetry}}); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(time.Hour)
+	h.w.Pass(context.Background())
+	if n := h.landedTimes("gt-parked"); n != 2 {
+		t.Fatalf("after the label: gt-parked attempted %d times; want one more attempt", n)
+	}
+	bead, err := h.bd.Show("gt-parked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beads.HasLabel(bead, LabelLandingRetry) {
+		t.Fatalf("gt-parked still carries %s; want it removed", LabelLandingRetry)
+	}
+	if n := h.landedTimes("gt-other"); n != 3 {
+		t.Fatalf("gt-other attempted %d times; the retry pass landed it more than once", n)
+	}
+}
+
+// TestPassLandingRetryLabelFailureAnnouncesAgain: a failure after the label is
+// a new run, so it posts a new announcement and raises a new escalation on the
+// same failure count as the first (gt-46bh2y).
+func TestPassLandingRetryLabelFailureAnnouncesAgain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	rec := &escalateRecorder{}
+	h.w.FailingEscalate = rec.failingRaise
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.InfraError{Stage: "merge", Err: errors.New("gtwrap: the call sets no BEADS_DIR")}
+	}
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	if got := rec.specs(); len(got) != 1 {
+		t.Fatalf("after the first failure: escalations %v; want one", got)
+	}
+	if cs := h.comments(t, "gt-abc"); len(cs) != 1 {
+		t.Fatalf("after the first failure: comments %q; want one notice", cs)
+	}
+
+	if err := h.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{LabelLandingRetry}}); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(time.Hour)
+	h.w.Pass(context.Background())
+	h.w.escWG.Wait()
+	if got := rec.specs(); len(got) != 2 {
+		t.Fatalf("after the label: escalations %v; want the new run to raise a second one", got)
+	}
+	if cs := h.comments(t, "gt-abc"); len(cs) != 2 || !strings.Contains(cs[1], "parked") {
+		t.Fatalf("after the label: comments %q; want a second notice saying the bead is parked", cs)
+	}
+}
+
+// TestPassLandingRetryLabelWriteFailureKeepsThePark: when the label cannot be
+// removed the pass attempts no landing and the park stands, so the label is
+// tried again on the next pass rather than the bead retrying against a state
+// the operator never cleared (gt-46bh2y).
+func TestPassLandingRetryLabelWriteFailureKeepsThePark(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		return land.Result{}, &land.InfraError{Stage: "merge", Err: errors.New("gtwrap: the call sets no BEADS_DIR")}
+	}
+	h.w.Pass(context.Background())
+	if n := h.landedTimes("gt-abc"); n != 1 {
+		t.Fatalf("first pass: gt-abc attempted %d times; want the one failing attempt", n)
+	}
+	if err := h.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{LabelLandingRetry}}); err != nil {
+		t.Fatal(err)
+	}
+	store := h.w.Beads
+	h.w.Beads = failingUpdateStore{Fake: h.bd, err: errors.New("bd: write refused")}
+	h.now = h.now.Add(time.Hour)
+	if rep := h.w.Pass(context.Background()); rep.Landed != 0 {
+		t.Fatalf("report %v; a failed label write landed something", rep)
+	}
+	if n := h.landedTimes("gt-abc"); n != 1 {
+		t.Fatalf("after the failed label write: gt-abc attempted %d times; want the park to stand", n)
+	}
+	bead, err := h.bd.Show("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !beads.HasLabel(bead, LabelLandingRetry) {
+		t.Fatalf("gt-abc lost %s though the write failed; want it kept for the next pass", LabelLandingRetry)
+	}
+
+	// The next pass with the store healthy removes the label and lands again.
+	h.w.Beads = store
+	h.now = h.now.Add(time.Hour)
+	h.w.Pass(context.Background())
+	if n := h.landedTimes("gt-abc"); n != 2 {
+		t.Fatalf("the pass after the write recovered attempted gt-abc %d times; want the retry", n)
+	}
+}
