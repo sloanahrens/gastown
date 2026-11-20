@@ -368,6 +368,85 @@ func TestPreloadFirstArmNamesEveryColumn(t *testing.T) {
 	}
 }
 
+// TestTickEffRigHeadsQuery: RigHeads' statement reads four Dolt variables in
+// one SELECT, passes ReadOnly, and carries a database name it cannot use as
+// the query's error instead of sending it.
+func TestTickEffRigHeadsQuery(t *testing.T) {
+	t.Parallel()
+	s, err := RigHeads([]string{"gt", "om"}).Inline()
+	if err != nil {
+		t.Fatalf("Inline: %v", err)
+	}
+	if got := strings.Count(s, "@@"); got != 4 || strings.Count(strings.ToUpper(s), "SELECT") != 1 {
+		t.Errorf("RigHeads is not one SELECT of four variables:\n%s", s)
+	}
+	for _, want := range []string{
+		"@@gt_head AS gt_head", "@@gt_working AS gt_working",
+		"@@om_head AS om_head", "@@om_working AS om_working",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("RigHeads lacks %q:\n%s", want, s)
+		}
+	}
+	if err := ReadOnly(s); err != nil {
+		t.Errorf("ReadOnly: %v", err)
+	}
+	for _, tc := range []struct {
+		name    string
+		q       Query
+		wantErr string
+	}{
+		{"unsafe name", RigHeads([]string{"gt", "x`; DROP TABLE issues"}), "invalid identifier"},
+		{"dashed name", RigHeads([]string{"claude-beads"}), "cannot be named in a @@ variable"},
+		{"no database", RigHeads(nil), "needs at least one database"},
+		{"too many", RigHeads(make([]string, RigHeadLimit+1)), "at most 32 databases"},
+	} {
+		if _, err := tc.q.Inline(); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: Inline = %v, want an error saying %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
+// TestTickEffParseRigHeads: columns pair by name, not by position — the row
+// interleaves the two databases, so positional pairing misattributes it — and
+// a column that pairs with nothing is refused.
+func TestTickEffParseRigHeads(t *testing.T) {
+	t.Parallel()
+	got, err := ParseRigHeads(
+		[]string{"gt_head", "om_head", "gt_working", "om_working"},
+		[]string{"g1", "o1", "g2", "o2"})
+	if err != nil {
+		t.Fatalf("ParseRigHeads: %v", err)
+	}
+	want := map[string]RigHash{"gt": {Head: "g1", Working: "g2"}, "om": {Head: "o1", Working: "o2"}}
+	if len(got) != len(want) {
+		t.Fatalf("ParseRigHeads read %d databases, want %d: %v", len(got), len(want), got)
+	}
+	for db, w := range want {
+		if got[db] != w {
+			t.Errorf("%s = %+v, want %+v", db, got[db], w)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		columns []string
+		row     []string
+		wantErr string
+	}{
+		{"head without working", []string{"gt_head", "om_head", "om_working"}, []string{"h1", "h2", "w2"}, "has no gt_working column"},
+		{"working without head", []string{"gt_head", "gt_working", "om_working"}, []string{"h1", "w1", "w2"}, "has no om_head column"},
+		{"unknown column", []string{"gt_head", "gt_working", "om_commit"}, []string{"h1", "w1", "h2"}, "is neither"},
+		{"empty database name", []string{"_head", "_working"}, []string{"h", "w"}, "is neither"},
+		{"read twice", []string{"gt_head", "gt_head", "gt_working"}, []string{"h1", "h2", "w1"}, "is read twice"},
+		{"working read twice", []string{"gt_head", "gt_working", "gt_working"}, []string{"h1", "w1", "w2"}, "is read twice"},
+		{"short row", []string{"gt_head", "gt_working"}, []string{"h1"}, "column names for"},
+	} {
+		if _, err := ParseRigHeads(tc.columns, tc.row); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("%s: ParseRigHeads = %v, want an error saying %q", tc.name, err, tc.wantErr)
+		}
+	}
+}
+
 // selectFieldCount counts a SELECT list's fields.
 func selectFieldCount(t *testing.T, selectList string) int {
 	t.Helper()

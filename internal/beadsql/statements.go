@@ -155,6 +155,86 @@ func TableRowCount(database, table string) Query {
 	return declared("SELECT COUNT(*) AS cnt FROM `" + database + "`.`" + table + "`")
 }
 
+// RigHeadLimit is the most databases RigHeads reads in one statement.
+const RigHeadLimit = 32
+
+// RigHash is one database's commit hashes: Head is the commit its branch
+// points at, Working the hash of its uncommitted working set.
+type RigHash struct {
+	Head    string
+	Working string
+}
+
+// RigHeads reads @@<database>_head and @@<database>_working for every database
+// named, in one statement, so one call reports whether each rig's database
+// moved (gt-h4iq48). Each column is aliased to <database>_head or
+// <database>_working because Dolt names an unaliased variable's column after
+// the variable itself. A name is spliced into a Dolt variable, which holds
+// letters, digits and underscores: a dash, legal in ident, is refused here
+// rather than sent as a statement Dolt cannot parse.
+func RigHeads(databases []string) Query {
+	if len(databases) == 0 {
+		return Query{err: errors.New("beadsql: RigHeads needs at least one database")}
+	}
+	if len(databases) > RigHeadLimit {
+		return Query{err: fmt.Errorf("beadsql: RigHeads reads at most %d databases, got %d", RigHeadLimit, len(databases))}
+	}
+	var vars []string
+	for _, db := range databases {
+		if err := ident(db); err != nil {
+			return Query{err: err}
+		}
+		if strings.Contains(db, "-") {
+			return Query{err: fmt.Errorf("beadsql: database %q cannot be named in a @@ variable", db)}
+		}
+		vars = append(vars, "@@"+db+"_head AS "+db+"_head", "@@"+db+"_working AS "+db+"_working")
+	}
+	return declared("SELECT " + strings.Join(vars, ", "))
+}
+
+// ParseRigHeads pairs a RigHeads row's columns with its values by name: each
+// <database>_head with the <database>_working of the same database. A column
+// that is neither, one read twice, and a database with only one of its two
+// columns are errors: pairing by position would attribute one database's hash
+// to another.
+func ParseRigHeads(columns, row []string) (map[string]RigHash, error) {
+	if len(columns) != len(row) {
+		return nil, fmt.Errorf("beadsql: %d column names for %d values", len(columns), len(row))
+	}
+	heads, workings := map[string]string{}, map[string]string{}
+	for i, name := range columns {
+		if db, ok := strings.CutSuffix(name, "_head"); ok && db != "" {
+			if _, dup := heads[db]; dup {
+				return nil, fmt.Errorf("beadsql: column %q is read twice", name)
+			}
+			heads[db] = row[i]
+			continue
+		}
+		if db, ok := strings.CutSuffix(name, "_working"); ok && db != "" {
+			if _, dup := workings[db]; dup {
+				return nil, fmt.Errorf("beadsql: column %q is read twice", name)
+			}
+			workings[db] = row[i]
+			continue
+		}
+		return nil, fmt.Errorf("beadsql: column %q is neither <database>_head nor <database>_working", name)
+	}
+	out := make(map[string]RigHash, len(heads))
+	for db, head := range heads {
+		working, ok := workings[db]
+		if !ok {
+			return nil, fmt.Errorf("beadsql: column %q has no %s_working column", db+"_head", db)
+		}
+		out[db] = RigHash{Head: head, Working: working}
+	}
+	for db := range workings {
+		if _, ok := heads[db]; !ok {
+			return nil, fmt.Errorf("beadsql: column %q has no %s_head column", db+"_working", db)
+		}
+	}
+	return out, nil
+}
+
 // Doctor checks' reads. `bd list` has no ephemeral filter and folds the
 // wisps tier in with --include-infra, so these stay SQL over issues alone.
 
