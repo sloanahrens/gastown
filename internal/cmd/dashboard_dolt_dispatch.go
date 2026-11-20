@@ -53,7 +53,7 @@ func doltDispatchSection(ctx context.Context, list func(townRoot, rig string) ([
 	}
 	section := dashboard.DoltSection{
 		Title: doltDispatchTitle,
-		Note:  "open beads labelled " + constants.LabelSpecDispatchFailed + ", listed from each rig's own bd store",
+		Note:  "open beads labeled " + constants.LabelSpecDispatchFailed + ", listed from each rig's own bd store",
 		Head:  []string{"rig", "open", "beads"},
 	}
 	for _, rig := range rigs {
