@@ -1328,6 +1328,76 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 	}
 }
 
+// TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin: the age read fetches
+// the filtered main, then answers the tip's committer time minus the pin's.
+func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	repo := filepath.Join(town, "devops", ".repo.git")
+	url, pin, tip := pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip
+	var argv [][]string
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		argv = append(argv, cmd.Args)
+		if slices.Contains(cmd.Args, "fetch") {
+			return nil, nil, nil
+		}
+		return []byte("100\n518500\n"), nil, nil
+	}
+
+	got, err := d.imagePinsAge(context.Background())(url, pin, tip)
+	if err != nil {
+		t.Fatalf("the age read = %v", err)
+	}
+	if want := 6 * 24 * time.Hour; got != want {
+		t.Errorf("the age = %v, want the tip's committer time minus the pin's, %v", got, want)
+	}
+	if len(argv) != 2 {
+		t.Fatalf("git ran %d time(s), want the fetch and then the show: %v", len(argv), argv)
+	}
+	wantFetch := []string{"git", "--git-dir=" + repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"}
+	if !slices.Equal(argv[0], wantFetch) {
+		t.Errorf("the first git call = %v, want the filtered fetch %v", argv[0], wantFetch)
+	}
+	wantShow := []string{"git", "--git-dir=" + repo, "show", "-s", "--format=%ct", pin, tip}
+	if !slices.Equal(argv[1], wantShow) {
+		t.Errorf("the second git call = %v, want the two commits' committer times %v", argv[1], wantShow)
+	}
+}
+
+// TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer: a failed git call and an
+// answer that is not two integers are errors, never a zero age.
+func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("git exited 128")
+	for _, tt := range []struct {
+		name, fails, answer, want string
+	}{
+		{name: "the fetch fails", fails: "fetch", want: "git fetch"},
+		{name: "the show fails", fails: "show", want: "git show"},
+		{name: "a non-number", answer: "100\nyesterday\n", want: "non-number"},
+		{name: "one timestamp", answer: "100\n", want: "two commits' committer times"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				if tt.fails != "" && slices.Contains(cmd.Args, tt.fails) {
+					return nil, []byte("fatal: bad revision\nhint: more\n"), boom
+				}
+				if slices.Contains(cmd.Args, "show") {
+					return []byte(tt.answer), nil, nil
+				}
+				return nil, nil, nil
+			}
+			got, err := d.imagePinsAge(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip)
+			if err == nil || got != 0 || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("the age read = %v, %v; want an error naming %q, never a zero age", got, err, tt.want)
+			}
+		})
+	}
+}
+
 // TestImagePinsCompareForRefusesAMissingToken: the compare needs the viewer's
 // token, and a token file that is not there is the build's error, never a client
 // that reads as anonymous (gt-01lcq2).

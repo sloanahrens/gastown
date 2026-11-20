@@ -389,6 +389,37 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 	}
 }
 
+// imagePinsAge is the production age read: the tip's committer time minus the
+// pin's, fetched the way imagePinsPathCount fetches. A failed git call or an
+// answer that is not the two commits' integer committer times is an error,
+// never a 0 that reads as a pin which never aged (gt-qi51ka).
+func (d *Daemon) imagePinsAge(ctx context.Context) func(url, pin, tip string) (time.Duration, error) {
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
+	return func(url, pin, tip string) (time.Duration, error) {
+		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
+			return 0, err
+		}
+		out, err := d.imagePinsGit(ctx, repo, "show", "-s", "--format=%ct", pin, tip)
+		if err != nil {
+			return 0, err
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) != 2 {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered %d timestamps, not the two commits' committer times", sha12(pin), sha12(tip), len(fields))
+		}
+		pinSec, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered a non-number for the pin", sha12(pin), sha12(tip))
+		}
+		tipSec, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered a non-number for the tip", sha12(pin), sha12(tip))
+		}
+		// Through time.Time, so an absurd pair saturates instead of wrapping.
+		return time.Unix(tipSec, 0).Sub(time.Unix(pinSec, 0)), nil
+	}
+}
+
 // imagePinsGit runs one git command in repo, bounded by imagePinsGitTimeout and
 // never waiting on a credential prompt. The error names the command and carries
 // git's first stderr line only: the rest of the output can repeat the URL it was
