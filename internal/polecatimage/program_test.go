@@ -520,6 +520,33 @@ func TestRunProgramDispatchesARun(t *testing.T) {
 	}
 }
 
+// TestHelperTableRunsNodePrune pins node-prune as a helper the table dispatches:
+// with a crictl program that cannot be run, the verb reaches node-prune, which
+// refuses with exit 3 and names the unread node, and starts no plugin run.
+func TestHelperTableRunsNodePrune(t *testing.T) {
+	t.Parallel()
+	if _, known := helperRunFor("node-prune"); !known {
+		t.Fatal("the helper table does not hold node-prune")
+	}
+	var out, errOut bytes.Buffer
+	runs := 0
+	entry := func(io.Writer, func(string) string) int { runs++; return 0 }
+	missing := filepath.Join(t.TempDir(), "no-such-crictl")
+	code := runProgramWith([]string{"node-prune", "--endpoint", nodeEndpoint, "--crictl-bin", missing}, &out, &errOut, envMap(map[string]string{}), entry)
+	if code != 3 {
+		t.Errorf("runProgram(node-prune) = %d, want 3 (%s)", code, errOut.String())
+	}
+	if runs != 0 {
+		t.Errorf("runProgram(node-prune) started %d plugin runs, want none", runs)
+	}
+	if !strings.Contains(errOut.String(), "node-prune: cannot read the node") {
+		t.Errorf("runProgram(node-prune) said %q, want the unread node named", errOut.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("runProgram(node-prune) wrote %q to stdout, want nothing", out.String())
+	}
+}
+
 // TestRunProgramRefusesAnUnknownSubcommand is the refusal a stale Job meets: a
 // first argument this program does not know exits 2 and names it, and starts no
 // plugin run, which would build, publish and trim instead of trimming what the
@@ -548,7 +575,7 @@ func TestRunProgramRefusesAnUnknownSubcommand(t *testing.T) {
 			if runs != 0 {
 				t.Errorf("runProgram(%q) started %d plugin runs, want none", tc.arg, runs)
 			}
-			want := "polecat-image: unknown subcommand " + tc.want + ": known are run, trim-cache, trim-paths, trim-list, trim-list-write, seed-clone, seed-cache\n"
+			want := "polecat-image: unknown subcommand " + tc.want + ": known are run, trim-cache, trim-paths, trim-list, node-prune, trim-list-write, seed-clone, seed-cache\n"
 			if got := errOut.String(); got != want {
 				t.Errorf("runProgram(%q) said %q, want %q", tc.arg, got, want)
 			}
@@ -599,6 +626,7 @@ func TestRunProgramKeepsTheKnownEntries(t *testing.T) {
 		{"trim-paths", []string{"trim-paths"}, false, 3, "trim-paths: --shards needs a whole number of shards, at least 1", ""},
 		{"trim-list", []string{"trim-list"}, true, 0, "", "[]"},
 		{"trim-list-write", []string{"trim-list-write"}, false, 3, "trim-list-write: --cap-bytes needs a whole number of bytes", ""},
+		{"node-prune", []string{"node-prune"}, false, 2, "node-prune: --endpoint names the node's CRI socket; give it", ""},
 		{"seed-clone", []string{"seed-clone"}, false, 3, "seed-clone: no --pins: the seed Job passes the pins it renders", ""},
 		{"seed-cache", []string{"seed-cache"}, false, 3, "seed-cache: no --pins: the seed Job passes the pins it renders", ""},
 	} {

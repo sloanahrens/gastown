@@ -182,6 +182,7 @@ var helperRuns = []helperRun{
 	{"trim-cache", func(c helperCall) int { return trimCacheMain(c.args, c.stdout, c.stderr) }},
 	{"trim-paths", func(c helperCall) int { return trimPathsMain(c.args, c.stdout, c.stderr) }},
 	{"trim-list", func(c helperCall) int { return trimListMain(c.args, c.stdout, c.stderr) }},
+	{"node-prune", func(c helperCall) int { return nodePruneMain(c.args, c.stdout, c.stderr) }},
 	{"trim-list-write", func(c helperCall) int { return trimListWriteMain(c.args, c.stdout, c.stderr) }},
 	{"seed-clone", func(c helperCall) int { return seedCloneMain(c.args, c.stdout, c.stderr) }},
 	{"seed-cache", func(c helperCall) int { return seedCacheMain(c.args, c.stdout, c.stderr) }},
