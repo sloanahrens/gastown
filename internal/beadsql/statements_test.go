@@ -438,6 +438,7 @@ func TestTickEffParseRigHeads(t *testing.T) {
 		{"unknown column", []string{"gt_head", "gt_working", "om_commit"}, []string{"h1", "w1", "h2"}, "is neither"},
 		{"empty database name", []string{"_head", "_working"}, []string{"h", "w"}, "is neither"},
 		{"read twice", []string{"gt_head", "gt_head", "gt_working"}, []string{"h1", "h2", "w1"}, "is read twice"},
+		{"working read twice", []string{"gt_head", "gt_working", "gt_working"}, []string{"h1", "w1", "w2"}, "is read twice"},
 		{"short row", []string{"gt_head", "gt_working"}, []string{"h1"}, "column names for"},
 	} {
 		if _, err := ParseRigHeads(tc.columns, tc.row); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
