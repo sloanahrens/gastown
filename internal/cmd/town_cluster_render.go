@@ -156,9 +156,10 @@ var clusterRender clusterRenderFlags
 const defaultBdGatewayTokenSecret = "bd-gateway-tokens" //nolint:gosec // a Secret name, not a credential
 
 // defaultBdGatewayMaxConcurrent is the bd gateway's concurrency cap across its pods
-// when --bd-gateway-max-concurrent is not given. It is above the gateway's own
-// default of 16 (gt-jz9gn7), so at the default one replica each pod runs 32.
-const defaultBdGatewayMaxConcurrent = 32
+// when --bd-gateway-max-concurrent is not given: 8, below the about 12 simultaneous
+// new connections the path from the gateway's VM to the host's Dolt admits, since
+// each bd process opens its own (gt-w0iqhu).
+const defaultBdGatewayMaxConcurrent = 8
 
 // defaultBdGatewayReplicas is the bd gateway's replica count when --bd-gateway-replicas
 // is not given: one, the count a render keeps until an operator sets two.
