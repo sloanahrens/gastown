@@ -92,15 +92,23 @@ func loadPatrolLastRun(townRoot, patrol string) (time.Time, bool, error) {
 type patrolLastRunMemory struct {
 	mu      sync.Mutex
 	lastRun time.Time
+	// runningSince is when the pass in flight started, zero when none is. The
+	// completion record clears it, so a pass that reaches its end no longer
+	// reads as running.
+	runningSince time.Time
 }
 
 // record keeps at without its monotonic clock reading. The persisted record has
 // none, and a due-ness check subtracts one time from the other: with a reading
 // on the in-memory side, the interval counts awake time only, so after a failed
 // save and a host sleep the patrol would not come due when its interval ran out.
+//
+// The completion is also the end of the pass the start marker belongs to, so
+// it clears that marker: the mark never outlives the pass it was set for.
 func (m *patrolLastRunMemory) record(at time.Time) {
 	m.mu.Lock()
 	m.lastRun = at.Round(0)
+	m.runningSince = time.Time{}
 	m.mu.Unlock()
 }
 
@@ -109,6 +117,23 @@ func (m *patrolLastRunMemory) last() time.Time {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastRun
+}
+
+// recordStart keeps when the pass in flight started, so a patrol that is
+// running can be told from one that is merely overdue. A pass that never
+// records its completion leaves the mark set until the process ends.
+func (m *patrolLastRunMemory) recordStart(at time.Time) {
+	m.mu.Lock()
+	m.runningSince = at.Round(0)
+	m.mu.Unlock()
+}
+
+// RunningSince is when the pass in flight started, the zero time when none is
+// running.
+func (m *patrolLastRunMemory) RunningSince() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.runningSince
 }
 
 // patrolDueDecision is one due-ness evaluation for a ticker-driven patrol
@@ -260,4 +285,11 @@ func (d *Daemon) recordPatrolRun(mem *patrolLastRunMemory, patrol string, at tim
 		d.logger.Printf("%s: WARNING: cannot persist last-run time (%v) — "+
 			"the next daemon start will run the pass again", patrol, err)
 	}
+}
+
+// recordPatrolStart marks a patrol's pass as started in memory; recordPatrolRun
+// clears the mark when the pass ends. The mark stays in memory: persisting it
+// to patrol_last_run.json is gt-v9ynaw's.
+func (d *Daemon) recordPatrolStart(mem *patrolLastRunMemory, at time.Time) {
+	mem.recordStart(at)
 }
