@@ -2225,3 +2225,103 @@ func TestDashboardRejectedRowFieldsReadOnlyTheKeptRows(t *testing.T) {
 		t.Errorf("asked for %v, want only the kept bead gt-new", asked[0])
 	}
 }
+
+// TestDashboardRejectCountRejectedRows: a rejected row carries how often its
+// bead was refused by the row's own time, counted over every record the reader
+// handed in, so a bead first refused before the day the table draws still
+// reads 2 on its second refusal (gt-qyc95m).
+func TestDashboardRejectCountRejectedRows(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	rejs := []omRejection{
+		{At: now.Add(-30 * time.Hour), Bead: "gt-old", Kind: "review"}, // before the day drawn, still counted
+		{At: now.Add(-2 * time.Hour), Bead: "gt-old", Kind: "gate"},
+		{At: now.Add(-5 * time.Hour), Bead: "gt-twice", Kind: "review"},
+		{At: now.Add(-3 * time.Hour), Bead: "gt-twice", Kind: "review"},
+	}
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
+
+	type rowKey struct {
+		bead  string
+		count int
+	}
+	var got []rowKey
+	for _, r := range rows {
+		got = append(got, rowKey{r.Bead, r.RejectCount})
+	}
+	want := []rowKey{{"gt-old", 2}, {"gt-twice", 2}, {"gt-twice", 1}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rows (bead, reject count) = %v, want %v: the 30-hour-old refusal counts but is not drawn", got, want)
+	}
+}
+
+// TestDashboardRejectCountLandedRow: a landed row carries the refusals before
+// its landing, 0 on a first try, and a refusal after the landing is not rework
+// the landing took (gt-qyc95m).
+func TestDashboardRejectCountLandedRow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	recs := []omRecord{
+		{Record: landings.Record{Bead: "gt-reworked", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
+		{Record: landings.Record{Bead: "gt-firsttry", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Hour)}},
+	}
+	rejs := []omRejection{
+		{At: now.Add(-30 * time.Hour), Bead: "gt-reworked", Kind: "review"},
+		{At: now.Add(-5 * time.Hour), Bead: "gt-reworked", Kind: "review"},
+		{At: now.Add(-30 * time.Minute), Bead: "gt-reworked", Kind: "review"}, // refused again after it landed
+	}
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
+
+	landed := map[string]int{}
+	for _, r := range rows {
+		if r.Outcome == "landed" {
+			landed[r.Bead] = r.RejectCount
+		}
+	}
+	want := map[string]int{"gt-reworked": 2, "gt-firsttry": 0}
+	if !reflect.DeepEqual(landed, want) {
+		t.Errorf("landed rows' reject counts = %v, want %v", landed, want)
+	}
+}
+
+// TestDashboardRejectCountUnreadableRecords: a rejection read that returns no
+// records, and a bead read that fails, both leave the row built — never an
+// error — with the count the records it did get carry (gt-qyc95m).
+func TestDashboardRejectCountUnreadableRecords(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	recs := []omRecord{{Record: landings.Record{Bead: "gt-landed", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}}}
+	rejs := []omRejection{
+		{At: now.Add(-30 * time.Hour), Bead: "gt-retry", Kind: "review"},
+		{At: now.Add(-10 * time.Minute), Bead: "gt-retry", Kind: "review"},
+	}
+	cases := []struct {
+		name  string
+		recs  []omRecord
+		rejs  []omRejection
+		bead  string
+		count int
+	}{
+		{name: "the rejection read returns nothing", recs: recs, bead: "gt-landed", count: 0},
+		{name: "the bead read fails", rejs: rejs, bead: "gt-retry", count: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := buildRecentLandings(now, tc.recs, nil, tc.rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil,
+				rejectedFieldsFor(t, nil, fmt.Errorf("bd show: store unavailable"), nil), recentLandingRows)
+			var found *dashboard.LandingRow
+			for i := range rows {
+				if rows[i].Bead == tc.bead {
+					found = &rows[i]
+				}
+			}
+			if found == nil {
+				t.Fatalf("rows = %+v, want the %s row still built", rows, tc.bead)
+			}
+			if found.RejectCount != tc.count {
+				t.Errorf("RejectCount = %d, want %d", found.RejectCount, tc.count)
+			}
+		})
+	}
+}

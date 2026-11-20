@@ -432,6 +432,32 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		}
 		r.LintSecs, r.GateSecs, r.OMSecs = secsPtr(st.Lint), secsPtr(st.Gate), secsPtr(st.OM)
 	}
+	// rejectTimes indexes every rejection record read by bead, oldest first, so
+	// a row's count reaches back past the day the table draws: a bead refused
+	// before the window and retried inside it is still a retry (gt-qyc95m).
+	rejectTimes := make(map[string][]time.Time, len(rejs))
+	for _, rj := range rejs {
+		if rj.Bead == "" {
+			continue
+		}
+		rejectTimes[rj.Bead] = append(rejectTimes[rj.Bead], rj.At)
+	}
+	for _, ts := range rejectTimes {
+		sort.Slice(ts, func(i, j int) bool { return ts[i].Before(ts[j]) })
+	}
+	// rejectionsThrough counts a bead's refusals at or before at: the refusal a
+	// rejected row shows is itself the last one counted (gt-qyc95m).
+	rejectionsThrough := func(bead string, at time.Time) int {
+		ts := rejectTimes[bead]
+		return sort.Search(len(ts), func(i int) bool { return ts[i].After(at) })
+	}
+	// reworkBefore counts a bead's refusals before at, the rounds a landed row
+	// took to land; a refusal after the landing is a later submission's, not
+	// rework this landing did (gt-qyc95m).
+	reworkBefore := func(bead string, at time.Time) int {
+		ts := rejectTimes[bead]
+		return sort.Search(len(ts), func(i int) bool { return !ts[i].Before(at) })
+	}
 	for _, rec := range recs {
 		if rec.LandedAt.Before(since) {
 			continue
@@ -442,6 +468,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			Route: rec.Route, Risk: len(rec.RiskPaths) > 0, Crew: isCrewLandingBranch(rec.Branch),
 			Agent: rec.Agent, Priority: rec.Priority, SPEstimate: rec.SPEstimate,
 		}
+		row.RejectCount = reworkBefore(rec.Bead, rec.LandedAt)
 		if row.Crew {
 			// Polecat already names a crew branch's agent segment; carry it
 			// for the By cell.
@@ -488,6 +515,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			rig = "gastown" // the only rig with a landing worker running
 		}
 		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Polecat: landingName(names.who, rig, rj.Bead), Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
+		row.RejectCount = rejectionsThrough(rj.Bead, rj.At)
 		if landed {
 			// The bead's own landed record, from an earlier attempt, already
 			// carries what the bead would be read for.
