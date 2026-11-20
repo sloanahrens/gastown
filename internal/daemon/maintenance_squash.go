@@ -301,6 +301,12 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 	// to cancel: a daemon shutdown does not have to cut a read short.
 	ctx := context.Background()
 	for _, db := range step.settings.Databases {
+		// A failed or killed run can leave the database with no main, and its own
+		// record then holds the 24-hour gate shut, so recovery runs first, before
+		// the readings and Decide, whatever either says (gt-ngculo). What the
+		// call returns is handled by the sibling beads: logging a Recovery, the
+		// held marker, an error and a clean catalog.
+		_, _ = d.maintenance().squashRecover(ctx, d, db, now, step.settings)
 		readings := d.readSquashInputs(ctx, db, now)
 		if names := readings.unreadable(); len(names) > 0 {
 			undecided = true
