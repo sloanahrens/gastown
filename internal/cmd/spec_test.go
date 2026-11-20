@@ -2721,6 +2721,53 @@ func TestSpecDispatchNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 	}
 }
 
+// deadClassedSessions is the tally the class split is read from: three
+// dead-hooked seats on agent "a", two idle-submitted and one
+// idle-recovery-needed (gt-ueb3g2).
+func deadClassedSessions() []poolSession {
+	return []poolSession{
+		{name: "dead/gastown/a", agent: "a", deadHooked: true, deadClass: "idle-submitted"},
+		{name: "dead/gastown/b", agent: "a", deadHooked: true, deadClass: "idle-submitted"},
+		{name: "dead/gastown/c", agent: "a", deadHooked: true, deadClass: "idle-recovery-needed"},
+	}
+}
+
+// TestSpecRosterCarriesDeadHookedClasses pins the split the roster carries per
+// agent beside its dead-hooked count (gt-ueb3g2). A dead-hooked seat whose read
+// named no class counts under "": the agent carries no split, since a blank
+// class name is not one the tick line can print.
+func TestSpecRosterCarriesDeadHookedClasses(t *testing.T) {
+	t.Parallel()
+	r := specRosterFrom(deadClassedSessions(), nil)
+	want := map[string]map[string]int{"a": {"idle-submitted": 2, "idle-recovery-needed": 1}}
+	if !reflect.DeepEqual(r.DeadHookedClasses, want) {
+		t.Fatalf("DeadHookedClasses = %v, want %v", r.DeadHookedClasses, want)
+	}
+	if got := r.DeadHooked["a"]; got != 3 {
+		t.Fatalf("DeadHooked = %d, want 3: the split is carried beside the count, never instead of it", got)
+	}
+	unclassed := append(deadClassedSessions(), poolSession{name: "dead/gastown/d", agent: "a", deadHooked: true})
+	if r := specRosterFrom(unclassed, nil); r.DeadHookedClasses != nil || r.DeadHooked["a"] != 4 {
+		t.Fatalf("an unclassed seat carried a split %v for %d dead-hooked seats, want none for 4",
+			r.DeadHookedClasses, r.DeadHooked["a"])
+	}
+}
+
+// TestSpecTickLineNamesTheDeadHookedClasses is the tick line's half: the split
+// the roster carries reaches the picture the tick reports, so a seat whose
+// sessions died reads why it holds its number (gt-ueb3g2).
+func TestSpecTickLineNamesTheDeadHookedClasses(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown()
+	f.seats = []specdispatch.Seat{{Agent: "a", Cap: 4}}
+	f.roster = specRosterFrom(deadClassedSessions(), nil)
+
+	r := runSpecDispatchCycle(f.env())
+	if want := "a 3/4 (0 live + 3 dead-hooked (2 idle-submitted, 1 idle-recovery-needed))"; r.Roster != want {
+		t.Fatalf("roster = %q, want %q", r.Roster, want)
+	}
+}
+
 // specSeatTown is town settings whose pool holds seats. Each seat's agent is
 // defined in agents, so the loader's known-agent check (the one a tick reads
 // through) passes without a settings file on disk.

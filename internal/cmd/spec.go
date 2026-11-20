@@ -1950,6 +1950,11 @@ type specRoster struct {
 	// DeadHooked counts, per agent, the seats inside Live that no tmux session
 	// holds: a crashed polecat waiting for its supervised restart (gt-tldj4).
 	DeadHooked map[string]int
+	// DeadHookedClasses splits each agent's DeadHooked by the disposition class
+	// its dead read named, read from the same tally (gt-ueb3g2). An agent one of
+	// whose dead-hooked seats named no class carries no split: the line prints
+	// the plain count rather than a blank class.
+	DeadHookedClasses map[string]map[string]int
 	// ParkedStale counts, per agent, the parked seats with no session that have
 	// been parked past agentpause.ParkedSeatRelease. They are not in Live: the seat is
 	// released, and the count says so (gt-t7k92).
@@ -2513,7 +2518,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// that seat, already among the live sessions, not a second seat in flight
 	// (gt-75fma5).
 	budget.SetInFlight(specInFlightByAgent(specInFlightAdded(env.InFlight, roster.HookedBeads)))
-	budget.SetDeadHooked(roster.DeadHooked, nil)
+	budget.SetDeadHooked(roster.DeadHooked, roster.DeadHookedClasses)
 	budget.SetDraining(roster.Draining)
 	// The seats the picture names: the roster's, the draining ones SetDraining
 	// added and the running slings SetLive added, so a count above its cap has
@@ -3809,6 +3814,15 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 		r.Live[agent] = t.Total
 		if t.DeadHooked > 0 {
 			r.DeadHooked[agent] = t.DeadHooked
+			// The split is carried only when every dead-hooked seat named its
+			// class: a seat whose read named none counts under "", and a blank
+			// class is not one the tick line can print (gt-ueb3g2).
+			if t.DeadHookedByClass[""] == 0 {
+				if r.DeadHookedClasses == nil {
+					r.DeadHookedClasses = map[string]map[string]int{}
+				}
+				r.DeadHookedClasses[agent] = t.DeadHookedByClass
+			}
 		}
 	}
 	for _, s := range seats {
