@@ -227,9 +227,9 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 	if d.updateJob == nil {
 		return errors.New("no cluster client is wired into this daemon")
 	}
-	running, ok, err := imagevalues.LoadIn(filepath.Join(d.config.TownRoot, "gastown"))
+	running, ok, err := d.runningImages()
 	if err != nil {
-		return fmt.Errorf("read the running images: %w", err)
+		return err
 	}
 	if !ok {
 		return errors.New("no values file names the running daemon image")
@@ -258,6 +258,17 @@ func (d *Daemon) launchUpdateJob(ctx context.Context, settings config.UpdateSett
 		return fmt.Errorf("encode the update Job: %w", err)
 	}
 	return d.updateJob.CreateJob(ctx, name, buf.Bytes(), d.updateJobRequestTimeout())
+}
+
+// runningImages is the image pair the running values file names, read from the
+// town's gastown directory. A missing file answers false with no error; a file that
+// cannot be read or parsed is an error, so the caller never takes it for absent.
+func (d *Daemon) runningImages() (imagevalues.Values, bool, error) {
+	running, ok, err := imagevalues.LoadIn(filepath.Join(d.config.TownRoot, "gastown"))
+	if err != nil {
+		return imagevalues.Values{}, false, fmt.Errorf("read the running images: %w", err)
+	}
+	return running, ok, nil
 }
 
 // bdGatewayServiceHost is the host name of the bd gateway's in-cluster Service in the
