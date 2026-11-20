@@ -1263,7 +1263,8 @@ func TestImagePinsPathCountRefusesATipThatIsNotFortyLowercaseHex(t *testing.T) {
 
 // TestImagePinsPatrolWiresThePathCountSeam: the patrol's production read passes
 // the path count, so a devops pin's lag is the count the seam answers through
-// git; a read wired with no seam reports that pin's Err instead (gt-wz5ct4).
+// git, and the same read fills devops's Age through the age seam; a read wired
+// with no seam reports that pin's Err instead (gt-wz5ct4, gt-ojtslh).
 func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 	t.Parallel()
 	d := forgejoTownDaemon(t, forgejoTown(t, map[string]string{"gastown": rigForgejoSettings("http://forgejo:3000/owner/gastown.git")}))
@@ -1286,6 +1287,8 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
 		case slices.Contains(cmd.Args, "rev-list"):
 			return []byte("3\n"), nil, nil
+		case slices.Contains(cmd.Args, "show"):
+			return []byte("100\n518500\n"), nil, nil
 		}
 		return nil, nil, nil
 	}
@@ -1294,7 +1297,7 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readImagePinTips: %v", err)
 	}
-	want := ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3}
+	want := ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3, Age: 6 * 24 * time.Hour}
 	if len(states) != 4 || states[3] != want {
 		t.Fatalf("the read = %+v, want its four pins with devops as %+v: the patrol must count it through its path count seam", states, want)
 	}
@@ -1325,6 +1328,93 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 	}
 	if states[3].Err == nil || !strings.Contains(states[3].Err.Error(), "no path count") {
 		t.Fatalf("devops with no seam = %+v, want its Err to name the missing path count", states[3])
+	}
+}
+
+// TestFillImagePinAgesSetsAgeOnlyForATrailingPin: the age read runs for a pin
+// that trails its tip and for no other: a pin at its tip has not aged against
+// it, and a pin whose read failed is already unreadable (gt-ojtslh).
+func TestFillImagePinAgesSetsAgeOnlyForATrailingPin(t *testing.T) {
+	t.Parallel()
+	states := []ImagePinState{
+		{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDCommit},
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip},
+		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Err: errors.New("cannot read refs/heads/main")},
+	}
+	var asked string
+	fillImagePinAges(states,
+		func(string) string { return pinsReadPinURL("organic-mechanic") },
+		func(url, pin, tip string) (time.Duration, error) {
+			asked = url + " " + pin + " " + tip
+			return 3 * time.Hour, nil
+		})
+	if want := pinsReadPinURL("organic-mechanic") + " " + pinsReadOMCommit + " " + pinsReadOMTip; asked != want {
+		t.Errorf("the age read ran for %q, want only the trailing pin as %q", asked, want)
+	}
+	if states[0].Age != 0 || states[1].Age != 3*time.Hour || states[2].Age != 0 {
+		t.Errorf("the ages = %v, %v, %v; want only the trailing pin's 3h", states[0].Age, states[1].Age, states[2].Age)
+	}
+}
+
+// TestFillImagePinAgesFailedReadIsThatPinsErr: an age read that fails is that
+// pin's Err with no Age, and the pin after it still gets its age (gt-ojtslh).
+func TestFillImagePinAgesFailedReadIsThatPinsErr(t *testing.T) {
+	t.Parallel()
+	states := []ImagePinState{
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip},
+		{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip},
+	}
+	fillImagePinAges(states, pinsReadPinURL,
+		func(_ string, pin, _ string) (time.Duration, error) {
+			if pin == pinsReadOMCommit {
+				// A non-zero age with the error, so an ignored error cannot pass.
+				return 5 * time.Hour, errors.New("git show: exit status 128")
+			}
+			return 2 * time.Hour, nil
+		})
+	if got := states[0]; got.Err == nil || !strings.Contains(got.Err.Error(), "exit status 128") || got.Age != 0 {
+		t.Errorf("the failed read = %+v, want its Err and no age", got)
+	}
+	if got := states[1]; got.Err != nil || got.Age != 2*time.Hour {
+		t.Errorf("the pin after the failed read = %+v, want its 2h age and no error", got)
+	}
+}
+
+// TestReadImagePinTipsFillsTheAgeThroughTheProductionRead: the production tip
+// read fills a trailing pin's Age and costs a pin at its tip no age read (gt-ojtslh).
+func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
+	t.Parallel()
+	d := forgejoTownDaemon(t, forgejoTown(t, map[string]string{"gastown": rigForgejoSettings("http://forgejo:3000/owner/gastown.git")}))
+	token := filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	if err := os.WriteFile(token, []byte("FORGEJO_TOKEN=placeholder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.imagePinsTokenFile = token
+	// Every pin but devops is at its tip, so only devops costs an age read.
+	tips := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit, pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsTip}
+	shows := 0
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "ls-remote"):
+			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "show"):
+			shows++
+			return []byte("100\n100000\n"), nil, nil
+		case slices.Contains(cmd.Args, "rev-list"):
+			return []byte("3\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
+	states, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL))
+	if err != nil {
+		t.Fatalf("readImagePinTips: %v", err)
+	}
+	if want := 99900 * time.Second; shows != 1 || len(states) != 4 || states[3].Err != nil || states[3].Age != want {
+		t.Fatalf("the read = %+v with %d age read(s), want its four pins, devops alone aged %v, one age read", states, shows, want)
+	}
+	// A file the parser refuses is the read's error, before any git.
+	if _, err := d.readImagePinTips(context.Background(), []byte("bd "+pinsReadPinURL("beads")+" "+pinsReadBDCommit+"\n")); err == nil || !strings.Contains(err.Error(), "missing pin") {
+		t.Errorf("a file naming one pin = %v, want the parse's refusal", err)
 	}
 }
 
