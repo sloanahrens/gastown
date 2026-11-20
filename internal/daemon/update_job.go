@@ -398,15 +398,36 @@ func updateJobBackoff(failures int) time.Duration {
 // judges ancestry with no fetch, the same read the pair check makes. Among several
 // candidates the one every other descends from is the roll. It returns the sha, or
 // "" and the reason no roll starts. A candidate the clone cannot judge refuses the
-// whole decision, so an unjudged pair never stands in for a judged one.
+// whole decision, so an unjudged pair never stands in for a judged one. A candidate
+// whose commit carries the skew guard's unreadable item is skipped, so one unread
+// level does not stop a roll to a commit that reads fine; when nothing is left to
+// roll and a candidate was shadowed, the reason names the unread level (gt-p1wckq).
 func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig string) pairReadyGit) (string, string) {
 	type candidate struct {
 		sha string
 		git pairReadyGit
 	}
+	// The guard's unreadable item can sit beside a ready item for the same commit
+	// when the two cross passes; that commit is not a roll target (gt-p1wckq).
+	unread := map[string]bool{}
+	for _, it := range items {
+		if it.Kind == attention.KindDeployPairUnreadable && strings.HasPrefix(it.Key, pairReadySkewUnreadableKeyPrefix) {
+			unread[it.SHA] = true
+		}
+	}
 	var cands []candidate
+	shadowed := ""
 	for _, it := range items {
 		if it.Kind != attention.KindDeployPairReady || it.SHA == running {
+			continue
+		}
+		// A commit whose schema level the pass could not read is skipped, never
+		// a reason to refuse the whole decision: a ready pair for a commit that
+		// reads fine still rolls (gt-p1wckq).
+		if unread[it.SHA] {
+			if shadowed == "" {
+				shadowed = it.SHA
+			}
 			continue
 		}
 		git := clone(it.Rig)
@@ -423,6 +444,11 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 	}
 	switch len(cands) {
 	case 0:
+		// A shadowed commit is skipped above, so the reason names why nothing
+		// was left to roll (gt-p1wckq).
+		if shadowed != "" {
+			return "", fmt.Sprintf("the schema level of the bd pin of green/%s could not be read, so no roll starts", greenRefShortSHA(shadowed))
+		}
 		// A pair equal to the running commit is the build the daemon already
 		// runs: naming it says why no roll starts (gt-5z8ac2).
 		for _, it := range items {
