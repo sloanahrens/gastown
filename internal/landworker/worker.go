@@ -91,6 +91,11 @@ var (
 // after the rejection's own MERGE REJECTION block.
 const ReworkComment = "rebase onto main and re-gate"
 
+// LabelLandingRetry is the operator's label for starting one parked bead on a
+// new run without a daemon restart: the pass removes it, forgets the bead's
+// park and run, and lands the bead on that same pass (gt-46bh2y).
+const LabelLandingRetry = "gt:landing-retry"
+
 // Defaults for the worker's timing.
 const (
 	DefaultLandTimeout = 90 * time.Minute
@@ -552,6 +557,29 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		// "0 pending" field sits over a queue that still lands (gt-y7n1u).
 		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
 			continue
+		}
+		// The operator's retry label starts a parked bead on a new run
+		// without a daemon restart. It comes off first: only a write that
+		// succeeded clears the park and the run, so a failed write leaves
+		// both as they were for the next pass (gt-46bh2y).
+		if beads.HasLabel(issue, LabelLandingRetry) {
+			err := w.Beads.Update(issue.ID, beads.UpdateOptions{RemoveLabels: []string{LabelLandingRetry}})
+			if err != nil {
+				w.logf("%s: removing %s: %v; the park stands and the next pass tries the label again", issue.ID, LabelLandingRetry, err)
+				rep.Skipped++
+				continue
+			}
+			// The run is dropped whole, so a field added later starts at
+			// zero; the annotations the bead already carries outlive it as
+			// they do any other run, except the infrastructure notice, which
+			// the new run posts again (gt-46bh2y).
+			st := w.state[issue.ID]
+			delete(w.state, issue.ID)
+			if st != nil && len(st.annotated) > 0 {
+				delete(st.annotated, "infra")
+				w.bead(issue.ID).annotated = st.annotated
+			}
+			w.outcomeMemo().forget(issue.ID)
 		}
 		// A parked bead is skipped before the pass does anything with it:
 		// any write to it moves updated_at, so a hold keyed on the row lifts
