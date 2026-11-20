@@ -287,7 +287,7 @@ func TestSpecDispatchDryRunListsTheFreeSeats(t *testing.T) {
 func TestSpecTickCostNamesTheParallelSlings(t *testing.T) {
 	t.Parallel()
 	reads := newSpecTickReads()
-	got := specTickCost(reads, 1500*time.Millisecond, 3, 900*time.Millisecond)
+	got := specTickCost(reads, 1500*time.Millisecond, 3, 900*time.Millisecond, 0, 0, 0)
 	want := "tick cost: 0 bd read call(s) outside the sling path in 1.5s; 3 sling(s) in parallel, slowest 900ms"
 	if got != want {
 		t.Fatalf("cost line = %q, want %q", got, want)

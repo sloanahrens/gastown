@@ -180,8 +180,30 @@ func TestSpecTickReads(t *testing.T) {
 		t.Errorf("nil ledger counted %d calls", none.Calls())
 	}
 	want := "tick cost: 4 bd read call(s) outside the sling path in 1.234s"
-	if line := specTickCost(reads, 1234*time.Millisecond, 0, 0); line != want {
+	if line := specTickCost(reads, 1234*time.Millisecond, 0, 0, 0, 0, 0); line != want {
 		t.Errorf("specTickCost = %q, want %q", line, want)
+	}
+}
+
+// The cost line names the bd subprocess time, summed, after the read count (gt-9oo03n).
+func TestSpecTickCostPrintsBdTime(t *testing.T) {
+	t.Parallel()
+	reads := newSpecTickReads()
+	got := specTickCost(reads, 1500*time.Millisecond, 3, 900*time.Millisecond, 7, 2100*time.Millisecond, 900*time.Millisecond)
+	want := "tick cost: 0 bd read call(s) outside the sling path in 1.5s; bd time summed 2.1s in 7 subprocess(es), slowest 900ms; 3 sling(s) in parallel, slowest 900ms"
+	if got != want {
+		t.Fatalf("cost line = %q, want %q", got, want)
+	}
+}
+
+// A tick that ran no bd subprocess prints the line it always has (gt-9oo03n).
+func TestSpecTickCostWithoutBdTimeIsUnchanged(t *testing.T) {
+	t.Parallel()
+	reads := newSpecTickReads()
+	got := specTickCost(reads, 1500*time.Millisecond, 3, 900*time.Millisecond, 0, 0, 0)
+	want := "tick cost: 0 bd read call(s) outside the sling path in 1.5s; 3 sling(s) in parallel, slowest 900ms"
+	if got != want {
+		t.Fatalf("cost line = %q, want %q", got, want)
 	}
 }
 
