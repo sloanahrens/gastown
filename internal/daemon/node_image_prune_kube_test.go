@@ -558,7 +558,7 @@ func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
 // so a helper that fails at once leaves a Failed Job that never becomes complete.
 // Waiting only on complete held for kubectl's whole 960 second timeout. WaitComplete
 // races a wait on complete and a wait on failed: the first to exit 0 decides, the
-// other kubectl is cancelled and waited for, and the Failed Job is an error naming
+// other kubectl is canceled and waited for, and the Failed Job is an error naming
 // the Job (gt-25fx5t).
 func TestNodeImagePruneKubeWaitSeesAFailedJob(t *testing.T) {
 	t.Parallel()
@@ -576,7 +576,7 @@ func TestNodeImagePruneKubeWaitSeesAFailedJob(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var mu sync.Mutex
 			argvs := map[string][]string{}
-			cancelled := make(chan string, 1)
+			canceled := make(chan string, 1)
 			run := func(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
 				condition := waitConditionArgv(args)
 				mu.Lock()
@@ -586,19 +586,19 @@ func TestNodeImagePruneKubeWaitSeesAFailedJob(t *testing.T) {
 					return "", 0, nil
 				}
 				<-ctx.Done()
-				cancelled <- condition
+				canceled <- condition
 				return "", -1, ctx.Err()
 			}
 
 			err := kubectlNodePrune{dir: t.TempDir(), run: run}.WaitComplete(context.Background(), job)
 
-			// WaitComplete returns only after the cancelled wait's exec returned,
+			// WaitComplete returns only after the canceled wait's exec returned,
 			// so no goroutine or kubectl is left behind.
 			select {
-			case condition := <-cancelled:
-				assert.Equal(t, cancelledCondition(tt.first), condition)
+			case condition := <-canceled:
+				assert.Equal(t, canceledCondition(tt.first), condition)
 			default:
-				t.Fatalf("WaitComplete returned with the %s wait still running", cancelledCondition(tt.first))
+				t.Fatalf("WaitComplete returned with the %s wait still running", canceledCondition(tt.first))
 			}
 
 			mu.Lock()
@@ -648,8 +648,8 @@ func TestNodeImagePruneKubeWaitSeesAFailedJob(t *testing.T) {
 	})
 }
 
-// cancelledCondition names the wait that is not the first to exit 0.
-func cancelledCondition(first string) string {
+// canceledCondition names the wait that is not the first to exit 0.
+func canceledCondition(first string) string {
 	if first == "failed" {
 		return "complete"
 	}
