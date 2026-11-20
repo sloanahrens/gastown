@@ -58,6 +58,7 @@ type renderFlagsRecord struct {
 	BdGatewayTokenSecret          string `json:"bd_gateway_token_secret"`
 	BdGatewayMaxConcurrent        int    `json:"bd_gateway_max_concurrent"`
 	BdGatewayReplicas             int    `json:"bd_gateway_replicas"`
+	BdGatewayCPURequest           string `json:"bd_gateway_cpu_request"`
 	Tracker                       bool   `json:"tracker"`
 	TrackerDSNSecret              string `json:"tracker_dsn_secret"`
 	TrackerBackup                 bool   `json:"tracker_backup"`
@@ -105,6 +106,7 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		BdGatewayTokenSecret:          f.bdGatewayTokenSecret,
 		BdGatewayMaxConcurrent:        f.bdGatewayMaxConcurrent,
 		BdGatewayReplicas:             f.bdGatewayReplicas,
+		BdGatewayCPURequest:           f.bdGatewayCPURequest,
 		Tracker:                       f.tracker,
 		TrackerDSNSecret:              f.trackerDSNSecret,
 		TrackerBackup:                 f.trackerBackup,
@@ -140,6 +142,7 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		bdGatewayTokenSecret:          r.BdGatewayTokenSecret,
 		bdGatewayMaxConcurrent:        r.BdGatewayMaxConcurrent,
 		bdGatewayReplicas:             r.BdGatewayReplicas,
+		bdGatewayCPURequest:           r.BdGatewayCPURequest,
 		tracker:                       r.Tracker,
 		trackerDSNSecret:              r.TrackerDSNSecret,
 		trackerBackup:                 r.TrackerBackup,

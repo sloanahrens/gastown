@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -363,4 +364,51 @@ func TestClusterRenderBdGatewayRefusals(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTickEffGatewayCPURequestFlag holds --bd-gateway-cpu-request to the gateway
+// container: the flag's value is the request a live render writes, with no limit; an
+// empty flag writes no resources; and a recorded request replays as the flag's value.
+func TestTickEffGatewayCPURequestFlag(t *testing.T) {
+	t.Parallel()
+	t.Run("the flag writes the request it names, with no limit", func(t *testing.T) {
+		t.Parallel()
+		f := withBdImage(t, clusterRenderFixture(t))
+		f.bdGatewayCPURequest = "4"
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		res := renderedDeployment(t, f.out, "-deployment-bd-gateway.yaml").Spec.Template.Spec.Containers[0].Resources
+		if res == nil || res.Requests["cpu"] != "4" || len(res.Limits) != 0 {
+			t.Errorf("the gateway's resources are %+v, want requests.cpu 4 and no limit", res)
+		}
+	})
+	t.Run("no flag writes no resources", func(t *testing.T) {
+		t.Parallel()
+		f := withBdImage(t, clusterRenderFixture(t))
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if res := renderedDeployment(t, f.out, "-deployment-bd-gateway.yaml").Spec.Template.Spec.Containers[0].Resources; res != nil {
+			t.Errorf("the gateway's resources are %+v, want none", res)
+		}
+	})
+	t.Run("a recorded request replays", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), "render-flags.json")
+		f := renderFlagsFixture()
+		f.bdGatewayCPURequest = "4"
+		if err := saveRenderFlags(path, f); err != nil {
+			t.Fatalf("saveRenderFlags: %v", err)
+		}
+		got, ok, err := loadRenderFlags(path)
+		if err != nil || !ok {
+			t.Fatalf("loadRenderFlags = (ok %v, err %v), want the record", ok, err)
+		}
+		if got.bdGatewayCPURequest != "4" {
+			t.Errorf("the replayed request = %q, want 4", got.bdGatewayCPURequest)
+		}
+	})
 }

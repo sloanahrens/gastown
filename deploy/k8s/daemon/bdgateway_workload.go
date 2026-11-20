@@ -71,6 +71,26 @@ func (v Values) validateBdGatewayReplicas() error {
 	return nil
 }
 
+// validateBdGatewayCPURequest refuses a CPU request cpuRE does not read: whole cores or
+// millicores, positive. Empty is no request. It runs with or without the gateway
+// image, as the replica count's refusal does, so a value is refused rather than ignored.
+func (v Values) validateBdGatewayCPURequest() error {
+	if v.BdGatewayCPURequest == "" || cpuRE.MatchString(v.BdGatewayCPURequest) {
+		return nil
+	}
+	return fmt.Errorf("Values.BdGatewayCPURequest %q: want a positive whole number of cores or millicores, such as 4 or 500m, or empty for no request", v.BdGatewayCPURequest)
+}
+
+// bdGatewayResources is the gateway container's share: a CPU request when
+// Values.BdGatewayCPURequest is set, and no limit, so the container is Burstable. Empty
+// is nil, so the container renders no resources block, as it did before the request.
+func bdGatewayResources(v Values) *ContainerResources {
+	if v.BdGatewayCPURequest == "" {
+		return nil
+	}
+	return &ContainerResources{Requests: map[string]string{"cpu": v.BdGatewayCPURequest}}
+}
+
 // bdGatewayReplicas is the Deployment's replica count: Values.BdGatewayReplicas, with
 // zero read as one. validateBdGatewayReplicas has already bounded the value.
 func (v Values) bdGatewayReplicas() int32 {
@@ -217,7 +237,8 @@ func bdGatewayContainer(v Values, doltHost string, doltPort int) Container {
 		Command: command,
 		// The push listener is the one port the container declares, so the pod's
 		// spec names the port bdGatewayPushService forwards to.
-		Ports: []ContainerPort{{Name: bdGatewayPushPortName, ContainerPort: BdGatewayPushPort, Protocol: "TCP"}},
+		Ports:     []ContainerPort{{Name: bdGatewayPushPortName, ContainerPort: BdGatewayPushPort, Protocol: "TCP"}},
+		Resources: bdGatewayResources(v),
 		SecurityContext: &ContainerSecurityContext{
 			AllowPrivilegeEscalation: &allowEscalation,
 		},

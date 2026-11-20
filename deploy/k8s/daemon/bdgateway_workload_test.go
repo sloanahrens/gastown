@@ -782,3 +782,62 @@ func TestBdGatewayLogVolumeRest(t *testing.T) {
 		t.Errorf("the token copies are not on an emptyDir: %+v", d.Spec.Template.Spec.Volumes)
 	}
 }
+
+// TestTickEffGatewayCPURequest holds Values.BdGatewayCPURequest to the gateway
+// container's share: a request of 4 renders requests.cpu 4 and no limit, since a limit
+// throttles the gateway under contention; an empty request renders the golden the
+// gateway had before the request existed, byte for byte.
+func TestTickEffGatewayCPURequest(t *testing.T) {
+	t.Parallel()
+	t.Run("a request of 4 renders the cpu request and no limit", func(t *testing.T) {
+		t.Parallel()
+		v := bdGatewayWorkloadValues(t)
+		v.BdGatewayCPURequest = "4"
+		res := mustBuild(t, v).BdGatewayDeployment.Spec.Template.Spec.Containers[0].Resources
+		if res == nil || res.Requests["cpu"] != "4" {
+			t.Fatalf("the gateway's resources are %+v, want requests.cpu 4", res)
+		}
+		if len(res.Limits) != 0 {
+			t.Errorf("the gateway's limits are %v, want none", res.Limits)
+		}
+	})
+	t.Run("an empty request renders the golden", func(t *testing.T) {
+		t.Parallel()
+		m := mustBuild(t, bdGatewayWorkloadValues(t))
+		compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-bd-gateway.yaml", document(t, m.BdGatewayDeployment))
+	})
+}
+
+// TestTickEffGatewayCPURequestInvalid holds the request to the cpuRE grammar: zero and
+// a unit word fail the render naming the field, and whole cores and millicores pass.
+func TestTickEffGatewayCPURequestInvalid(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		value   string
+		refused bool
+	}{
+		{"zero is refused", "0", true},
+		{"a unit word is refused", "4cores", true},
+		{"whole cores pass", "4", false},
+		{"millicores pass", "500m", false},
+		{"empty is no request", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := bdGatewayWorkloadValues(t)
+			v.BdGatewayCPURequest = tc.value
+			_, err := Build(v)
+			if !tc.refused {
+				if err != nil {
+					t.Errorf("Build(%q) error = %v, want none", tc.value, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "Values.BdGatewayCPURequest") {
+				t.Errorf("Build(%q) error = %v, want a refusal naming Values.BdGatewayCPURequest", tc.value, err)
+			}
+		})
+	}
+}
