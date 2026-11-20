@@ -162,10 +162,9 @@ func TestNoBeadAccessSeatEndSkipsTheCopyWhenTheSandboxIsGone(t *testing.T) {
 	}
 }
 
-// A sandbox record the host cannot read is not copied from this step's account:
-// the copy is not asked, the log names the read failure, and the delete steps
-// that follow re-read the record and keep the seat with their own reason, so no
-// sandbox is deleted on a record this step could not read (gt-c6tofd).
+// A sandbox record the host cannot read keeps the seat at the copy step: the
+// copy is not asked, the kept reason names the read failure, and no sandbox is
+// deleted on a record this step could not read (gt-c6tofd, gt-p0nzjw).
 func TestNoBeadAccessSeatEndUnreadableRecordIsNotCopied(t *testing.T) {
 	t.Parallel()
 	f := newSeatEndFake(t)
@@ -215,11 +214,120 @@ func TestNoBeadAccessSeatEndUnreadableRecordIsNotCopied(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the kept record: %v", err)
 	}
-	if strings.Contains(kept.Reason, outboxNotCopiedReason) {
-		t.Errorf("kept reason = %q, want the delete step's own reason, not this step's read failure", kept.Reason)
+	if want := "its sandbox record cannot be read, so its outbox is not copied out"; !strings.Contains(kept.Reason, want) {
+		t.Errorf("kept reason = %q, want the copy step's record read failure %q", kept.Reason, want)
 	}
-	if !strings.Contains(kept.Reason, "cannot be read") {
-		t.Errorf("kept reason = %q, want the delete step's record read failure", kept.Reason)
+}
+
+// A record the copy step cannot read keeps the seat there: no copy is made, no
+// deleter runs, and the reason names the record. A seat with no record at all is
+// still copied from the gateway-built record (gt-p0nzjw).
+func TestCopySeatOutboxKeepsTheSeatWhenItsRecordCannotBeRead(t *testing.T) {
+	t.Parallel()
+	t.Run("unparseable record keeps the seat", func(t *testing.T) {
+		t.Parallel()
+		r := newRecordReap(t, recordReapOpts{gateway: "gw1"})
+		registry := session.SandboxRegistryDir(r.town)
+		if err := os.WriteFile(filepath.Join(registry, recordReapSession+".json"), []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		reason := r.host.copySeatOutbox("gastown", "capable", "gw1")
+		if !strings.Contains(reason, "its sandbox record cannot be read, so its outbox is not copied out") {
+			t.Errorf("reason = %q, want the record read failure as the keep reason", reason)
+		}
+		if !strings.Contains(reason, recordReapSession) {
+			t.Errorf("reason = %q, want it to name the record %q", reason, recordReapSession)
+		}
+		if len(r.order) != 0 {
+			t.Errorf("steps = %v, want no copy and no delete for a record it could not read", r.order)
+		}
+	})
+	t.Run("absent record copies from the gateway", func(t *testing.T) {
+		t.Parallel()
+		r := newRecordReap(t, recordReapOpts{gateway: "gw1"})
+		if err := os.Remove(filepath.Join(session.SandboxRegistryDir(r.town), recordReapSession+".json")); err != nil {
+			t.Fatal(err)
+		}
+
+		if reason := r.host.copySeatOutbox("gastown", "capable", "gw1"); reason != "" {
+			t.Fatalf("reason = %q, want the outbox copied with no keep reason", reason)
+		}
+		want := session.SandboxRecord{Session: r.host.sessionName("gastown", "capable"), Rig: "gastown", Polecat: "capable", Gateway: "gw1"}
+		if len(r.copied) != 1 || r.copied[0] != want {
+			t.Errorf("outbox copied from %+v, want the gateway-built record %+v", r.copied, want)
+		}
+	})
+}
+
+// beforeHasSessionTmux is a sessionTmux that runs before each HasSession: the
+// seat end's first tmux question, which endHeldSandboxAtLanding asks after the
+// copy step.
+type beforeHasSessionTmux struct {
+	sessionTmux
+	before func()
+}
+
+func (t beforeHasSessionTmux) HasSession(name string) (bool, error) {
+	t.before()
+	return t.sessionTmux.HasSession(name)
+}
+
+// A sandbox record that the copy step cannot read, and that reads again before
+// the delete step asks for it, must not delete the sandbox: the first call keeps
+// the seat before any delete, and a later call copies the outbox before it
+// deletes (gt-p0nzjw).
+func TestCopySeatOutboxKeepsTheSeatWhenTheRecordReturnsBeforeTheDelete(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	sessionName := f.host.sessionName(endRig, endPolecat)
+	record := session.SandboxRecord{Session: sessionName, Rig: endRig, Polecat: endPolecat, Gateway: "k8s"}
+	if err := session.WriteSandboxRecord(f.town, record); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(session.SandboxRegistryDir(f.town), sessionName+".json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+	f.host.sandboxEndedMarker = func(string, string) (bool, error) { return true, nil }
+	var order []string
+	f.host.sandboxOutboxCopy = func(string, session.SandboxRecord) error {
+		order = append(order, "copy")
+		return nil
+	}
+	f.host.sandboxDeleter = func(string, session.SandboxRecord) error {
+		order = append(order, "delete")
+		return nil
+	}
+	f.host.d.tmux = beforeHasSessionTmux{sessionTmux: f.host.d.tmux, before: func() {
+		if err := session.WriteSandboxRecord(f.town, record); err != nil {
+			t.Errorf("restoring the record: %v", err)
+		}
+	}}
+
+	landed := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end removed a seat whose record it could not read at the copy")
+	}
+	if len(order) != 0 {
+		t.Fatalf("seat-end steps = %v before the record was copied, want none", order)
+	}
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat directory was removed, want it kept")
+	}
+
+	if err := session.WriteSandboxRecord(f.town, record); err != nil {
+		t.Fatal(err)
+	}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, landed) {
+		t.Fatal("the seat end did not finish a seat whose outbox was copied out")
+	}
+	if want := []string{"copy", "delete"}; len(order) != 2 || order[0] != want[0] || order[1] != want[1] {
+		t.Fatalf("seat-end steps = %v, want %v", order, want)
 	}
 }
 

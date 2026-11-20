@@ -525,9 +525,11 @@ func TestSeatEndAtLandingLeavesTheSandboxToThePatrolOtherwise(t *testing.T) {
 			wantReason: "its sandbox record is absent, so no deleter names its sandbox",
 		},
 		{
+			// The copy step reads the record first and keeps the seat on that
+			// read (gt-p0nzjw), so the landing never reaches its own read.
 			name: "an unreadable record keeps the sandbox", landing: landed, marker: true,
 			corruptRec: true,
-			wantReason: "its sandbox record cannot be read, so the sandbox is left for the patrol:",
+			wantReason: "its sandbox record cannot be read, so its outbox is not copied out:",
 		},
 	}
 	for _, tt := range tests {

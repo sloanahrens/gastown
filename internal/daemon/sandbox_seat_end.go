@@ -631,16 +631,15 @@ func (h *patrolScanHost) seatAgentFields(rig, name string) (*beads.AgentFields, 
 // A record that names the sandbox is copied from as it stands; a seat with no
 // record is copied from the gateway the end measured its sandbox at, the record
 // the errored-sandbox delete builds when none names it. A record that cannot be
-// read is not copied and not kept on this step's account: the delete steps that
-// follow re-read it and keep the seat with their own reason, so no sandbox is
-// deleted on a record this step could not read. A copy that fails keeps the
-// seat, naming the copy failure (gt-c6tofd).
+// read keeps the seat: the delete steps that follow read the record again, and
+// a read that succeeds then would delete a sandbox whose outbox this step never
+// copied (gt-p0nzjw). A copy that fails keeps the seat, naming the copy failure
+// (gt-c6tofd).
 func (h *patrolScanHost) copySeatOutbox(rig, name, gateway string) string {
 	sessionName := h.sessionName(rig, name)
 	rec, recorded, err := session.ReadSandboxRecord(h.town(), sessionName)
 	if err != nil {
-		h.d.logger.Printf("sandbox seat end %s/%s: its outbox is not copied out: %v; the delete steps keep the seat on the same fact", rig, name, err)
-		return ""
+		return "its sandbox record cannot be read, so its outbox is not copied out: " + err.Error()
 	}
 	if !recorded {
 		rec = session.SandboxRecord{Session: sessionName, Rig: rig, Polecat: name, Gateway: gateway}
