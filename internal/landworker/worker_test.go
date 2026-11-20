@@ -792,7 +792,7 @@ func TestPassInfraFailureBacksOffAndAnnouncesOnce(t *testing.T) {
 		if n := cs.countOf("Show", "Children", "Comments", "AddComment"); n != 0 {
 			t.Fatalf("the pass inside the backoff made %d reads of the bead; want it held on the row it left", n)
 		}
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	if len(h.lander.calls) != infraAnnounceAfter+2 {
 		t.Fatalf("landed %d times; want one attempt per backoff window", len(h.lander.calls))
@@ -854,7 +854,7 @@ func TestPassReadBackBacksOffAndAnnounces(t *testing.T) {
 		return land.Result{}, &land.InfraError{Stage: "read-back", Err: fmt.Errorf("%w: tip is x", land.ErrReadBack)}
 	}
 	h.w.Pass(context.Background())
-	h.now = h.now.Add(infraBackoffMax - time.Minute)
+	h.now = h.now.Add(readBackBackoff - time.Minute)
 	h.w.Pass(context.Background())
 	if len(h.lander.calls) != 1 {
 		t.Fatalf("landed %d times inside the read-back backoff", len(h.lander.calls))
@@ -1269,7 +1269,7 @@ func TestPassRepeatedCISilencesEscalateOnce(t *testing.T) {
 		if n != want {
 			t.Fatalf("after %d silences: %d escalations, want %d", i+1, n, want)
 		}
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	if len(h.lander.calls) != attempts {
 		t.Fatalf("landed %d times; want %d", len(h.lander.calls), attempts)
@@ -1297,7 +1297,7 @@ func TestPassCISilenceRunIsBrokenByAnotherOutcome(t *testing.T) {
 	// silence, other failure, silence: never two in a row.
 	for i := 0; i < 3; i++ {
 		h.w.Pass(context.Background())
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	h.w.escWG.Wait()
 	if n := escalations.Load(); n != 0 {
