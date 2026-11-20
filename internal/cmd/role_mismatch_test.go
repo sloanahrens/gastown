@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -45,5 +46,44 @@ func TestRoleMismatchTownRootIsNeutral(t *testing.T) {
 					info.Role, info.Source, info.Mismatch, tt.wantRole, tt.wantSource, tt.wantMismatch)
 			}
 		})
+	}
+}
+
+// TestRoleFromTheCommonWorkPath pins the sandbox common work path (gt-f80lq2):
+// a seat starts in the link /sandbox/gt/work instead of its real worktree path,
+// and gt must resolve the same identity from both without a mismatch. The town
+// layout is built under t.TempDir() with the production names, so the test
+// never reads the live town tree.
+func TestRoleFromTheCommonWorkPath(t *testing.T) {
+	t.Parallel()
+	const rig, name = "gastown", "slit"
+	townRoot := filepath.Join(t.TempDir(), "gt")
+	worktree := filepath.Join(townRoot, rig, "polecats", name, "gastown")
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("create worktree: %v", err)
+	}
+	commonPath := filepath.Join(townRoot, "work")
+	if err := os.Symlink(worktree, commonPath); err != nil {
+		t.Fatalf("link the common work path: %v", err)
+	}
+
+	vars := map[string]string{EnvGTRole: rig + "/polecats/" + name, "GT_RIG": rig, "GT_POLECAT": name}
+	env := func(k string) string { return vars[k] }
+
+	fromWorktree, err := getRoleWithContextEnv(worktree, townRoot, env)
+	if err != nil {
+		t.Fatalf("getRoleWithContextEnv from the worktree: %v", err)
+	}
+	fromCommon, err := getRoleWithContextEnv(commonPath, townRoot, env)
+	if err != nil {
+		t.Fatalf("getRoleWithContextEnv from the common work path: %v", err)
+	}
+
+	// Assert the seat's identity explicitly, so two empty answers cannot pass.
+	for what, info := range map[string]RoleInfo{"worktree": fromWorktree, "common work path": fromCommon} {
+		if info.Role != RolePolecat || info.Rig != rig || info.Polecat != name || info.Source != "env" || info.Mismatch {
+			t.Errorf("%s: got role=%q rig=%q polecat=%q source=%q mismatch=%v, want %q/%q/%q/env/false",
+				what, info.Role, info.Rig, info.Polecat, info.Source, info.Mismatch, RolePolecat, rig, name)
+		}
 	}
 }
