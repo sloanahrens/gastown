@@ -316,6 +316,16 @@ func TestTownClusterDriftStaticRefusesABrokenObject(t *testing.T) {
 			want:   "holds no document to compare",
 		},
 		{
+			name:   "an empty document",
+			object: driftStaticObject(roleKind, "gt-mac-watch", "gt", false, "{}"),
+			want:   "holds no document to compare",
+		},
+		{
+			name:   "a broken second document",
+			object: driftStaticObject(roleKind, "gt-mac-watch", "gt", false, role+"---\nkind: [\n"),
+			want:   "decoding the static Role gt/gt-mac-watch",
+		},
+		{
 			name:   "more than one document",
 			object: driftStaticObject(roleKind, "gt-mac-watch", "gt", false, role+"---\n"+role),
 			want:   "holds more than one document",
