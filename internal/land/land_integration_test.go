@@ -273,6 +273,47 @@ func TestIntegrationLandTrackedHookSquash(t *testing.T) {
 	}
 }
 
+// TestIntegrationLandTrackedHookRevert: the landing's revert commit runs with
+// the target's local hooks off too. The landing lands onto a base that tracks
+// .githooks, the lander's clone points core.hooksPath at them, and the revert is
+// cut in a throwaway worktree of the landed commit, the way the landing worker
+// cuts it; the tracked prepare-commit-msg exits 1, so a revert that ran it would
+// fail and leave no revert commit (gt-ha8jsc, gt-sjwr7a).
+func TestIntegrationLandTrackedHookRevert(t *testing.T) {
+	t.Parallel()
+
+	f := newRealLandFixture(t)
+	f.base = trackedHooksOnMain(t, f)
+	gitT(t, f.repo, "config", "core.hooksPath", ".githooks")
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land in a repo whose tracked hooks each exit 1: %v", err)
+	}
+
+	dir := filepath.Join(t.TempDir(), "wt")
+	if err := git.NewGit(f.repo).WorktreeAddDetached(dir, res.LandedCommit); err != nil {
+		t.Fatalf("worktree at %s: %v", res.LandedCommit, err)
+	}
+	wt := RevertGit(dir)
+	if err := wt.RevertNoEdit(res.LandedCommit, 1); err != nil {
+		t.Fatalf("reverting %s in a repo whose tracked hooks each exit 1: %v", res.LandedCommit, err)
+	}
+	head, err := wt.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("HEAD after the revert: %v", err)
+	}
+	if got := gitT(t, dir, "show", "-s", "--format=%s", head); !strings.HasPrefix(got, "Revert ") {
+		t.Fatalf("revert commit subject = %q, want one that starts with %q", got, "Revert ")
+	}
+	tree := gitT(t, dir, "ls-tree", "--name-only", head)
+	for _, name := range strings.Split(tree, "\n") {
+		if name == "b.txt" {
+			t.Fatalf("the revert's tree still carries the merged b.txt:\n%s", tree)
+		}
+	}
+}
+
 func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newRealLandFixture(t))
 }
