@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/land/landtest"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -2191,6 +2192,52 @@ type fakeAssignedIssues struct {
 func (f *fakeAssignedIssues) GetAssignedIssue(assignee string) (*beads.Issue, error) {
 	f.seen = assignee
 	return f.issue, f.err
+}
+
+// TestSlingNeverNamesASubmittedSeat pins the sling half of what a submitted
+// seat rests on: the polecat ran `gt done`, so it has no session, and its seat
+// reads free in the dead-hooked walk here (freeDeadSeats). The landing read of
+// its Submitted intent record is then the only thing holding the seat, and no
+// sling may be handed it while that landing is unrecorded. The second row is
+// the discriminator: the same seat is free once its landing is recorded, so the
+// first row cannot pass by the seat being held forever.
+func TestSlingNeverNamesASubmittedSeat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		landed bool
+	}{
+		{"a submitted seat whose landing is unrecorded is not handed to a sling", false},
+		{"the seat is free once its landing is recorded", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			w := newTestPoolTown(t, seatPool(claimAgent, 1))
+			writeLandingSeat(t, w.root, "gastown", "ruby", "gt-ruby")
+			if c.landed {
+				landtest.WriteLandingLog(t, w.root, "gastown", land.LandingRecord{
+					BeadID: "gt-ruby", Rig: "gastown", Head: "abc123", LandedAt: poolTestNow.Add(-time.Hour),
+				})
+			}
+			r := w.process()
+			r.work = submittedWork("gt-ruby")
+
+			agent, reason, err := r.route("", true)
+			if c.landed {
+				if err != nil {
+					t.Fatalf("the seat is free once its landing is recorded: got %q (%s) %v", agent, reason, err)
+				}
+				return
+			}
+			if !errors.Is(err, errPoolBackpressure) || !strings.Contains(reason, "pool: full (1/1)") {
+				t.Fatalf("a sling was handed %q (%s) while ruby's submitted landing is unrecorded", agent, reason)
+			}
+			if claims := w.claims(t); len(claims) != 0 {
+				t.Errorf("the refused sling claimed a seat: %v", claims)
+			}
+		})
+	}
 }
 
 // TestPoolAssignedWorkEvidence pins the pool's read of the seat's own work: the
