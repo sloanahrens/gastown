@@ -20,7 +20,7 @@ const (
 	// other is a commit the context must not be staged at.
 	other = "fedcba9876543210fedcba9876543210fedcba98"
 	// bdPin is the bd commit the polecat image is built from.
-	bdPin = "0f9f640fe0f1a4162f3aebdef7994135b1167a85"
+	bdPin = "c1efb992c9ee42046f9a6188625b11fe88e05f53"
 	// floor is the Go floor the image build takes.
 	floor = "1.10.0"
 )
@@ -306,7 +306,7 @@ func TestSeedPinMatchesBDPin(t *testing.T) {
 // schema-66 build (gt-fenu9p).
 func TestPreRollGuardPinsNameTheSamplesBuild(t *testing.T) {
 	t.Parallel()
-	const samplesBuild = "0f9f640fe0f1a4162f3aebdef7994135b1167a85"
+	const samplesBuild = "c1efb992c9ee42046f9a6188625b11fe88e05f53"
 	if bdPin != samplesBuild {
 		t.Errorf("bdPin = %s, want %s", bdPin, samplesBuild)
 	}
