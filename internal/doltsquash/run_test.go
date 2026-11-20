@@ -800,9 +800,13 @@ func TestRecoverOnlyRecoversADeadRunsBranches(t *testing.T) {
 	f.Respond(recoveryNewerStatement("compact-base"), identitiesRows(nil))
 	f.Respond(branchesStatement, branchesRows(after))
 
-	got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()})
+	marker := &runMarker{}
+	got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
 	if err != nil {
 		t.Fatalf("RecoverOnly: %v", err)
+	}
+	if marker.holds != 1 || marker.releases != 1 || marker.held {
+		t.Errorf("RecoverOnly held the marker %d times and released it %d times (held now %v), want one hold and one release", marker.holds, marker.releases, marker.held)
 	}
 	if got == nil || got.State != RecoveryFirstRename {
 		t.Fatalf("the recovery is %+v, want state %q", got, RecoveryFirstRename)
@@ -837,13 +841,17 @@ func TestRecoverOnlyErrorAndCleanCatalog(t *testing.T) {
 		t.Parallel()
 		f := NewFakeExec()
 		f.RespondErr(branchesStatement, errDeath)
+		marker := &runMarker{}
 
-		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()})
+		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
 		if !errors.Is(err, errDeath) {
 			t.Errorf("RecoverOnly returned %v, want the recovery's error %v", err, errDeath)
 		}
 		if got != nil {
 			t.Errorf("RecoverOnly returned the recovery %+v beside the error, want nil", got)
+		}
+		if marker.held || marker.releases != 1 {
+			t.Errorf("the failed recovery held %v with %d releases, want the marker released", marker.held, marker.releases)
 		}
 	})
 	t.Run("a clean catalog returns nothing and writes nothing", func(t *testing.T) {
@@ -852,7 +860,7 @@ func TestRecoverOnlyErrorAndCleanCatalog(t *testing.T) {
 		f := NewFakeExec()
 		f.Respond(branchesStatement, branchesRows(map[string]string{"main": fx.before.Tip}))
 
-		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()})
+		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: &runMarker{}, Cut: cutOf()})
 		if err != nil {
 			t.Fatalf("RecoverOnly: %v", err)
 		}
@@ -863,6 +871,47 @@ func TestRecoverOnlyErrorAndCleanCatalog(t *testing.T) {
 			t.Errorf("RecoverOnly sent\n%q\nwant the catalog read alone\n%q", f.Statements(), want)
 		}
 	})
+}
+
+// TestRecoverOnlyRefusesAHeldMarker drives RecoverOnly over the catalog a dead
+// run leaves while a live run holds the marker. Without the marker the live
+// run's branches would read as a dead run's, so RecoverOnly refuses before it
+// sends a statement and leaves the live run's hold in place (gt-2x4rx5).
+func TestRecoverOnlyRefusesAHeldMarker(t *testing.T) {
+	t.Parallel()
+	fx := newRunFixture()
+	f := NewFakeExec()
+	f.Respond(branchesStatement, branchesRows(map[string]string{"main-pre-squash": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}))
+	marker := &runMarker{held: true}
+
+	got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
+	if !errors.Is(err, ErrRunMarkerHeld) {
+		t.Fatalf("RecoverOnly returned %v, want the held marker's refusal", err)
+	}
+	if got != nil {
+		t.Errorf("RecoverOnly returned the recovery %+v beside the refusal, want nil", got)
+	}
+	if n := len(f.Statements()); n != 0 {
+		t.Errorf("the refused recovery sent %d statements, want none", n)
+	}
+	if !marker.held || marker.releases != 0 {
+		t.Errorf("the refused recovery held %v with %d releases, want the live run's hold untouched", marker.held, marker.releases)
+	}
+}
+
+// TestRecoverOnlyRefusesNoMarker pins the fail-closed branch: a RecoverOnly
+// with no marker would recover beside a live run, so it refuses before it reads
+// the catalog (gt-2x4rx5).
+func TestRecoverOnlyRefusesNoMarker(t *testing.T) {
+	t.Parallel()
+	f := NewFakeExec()
+
+	if _, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()}); err == nil {
+		t.Error("RecoverOnly with no marker returned nil, want a refusal")
+	}
+	if n := len(f.Statements()); n != 0 {
+		t.Errorf("RecoverOnly with no marker sent %d statements, want none", n)
+	}
 }
 
 // TestRecoverFirstRenameKeepsALandedCommit drives the first-rename row over the
