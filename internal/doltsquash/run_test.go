@@ -827,6 +827,44 @@ func TestRecoverOnlyRecoversADeadRunsBranches(t *testing.T) {
 	}
 }
 
+// TestRecoverOnlyErrorAndCleanCatalog pins the two results the squash check reads
+// from RecoverOnly: a recovery error comes back as it is, and a catalog with
+// nothing to recover returns a nil Recovery and a nil error with no write sent
+// (gt-hr0ozv).
+func TestRecoverOnlyErrorAndCleanCatalog(t *testing.T) {
+	t.Parallel()
+	t.Run("the recovery error is returned", func(t *testing.T) {
+		t.Parallel()
+		f := NewFakeExec()
+		f.RespondErr(branchesStatement, errDeath)
+
+		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()})
+		if !errors.Is(err, errDeath) {
+			t.Errorf("RecoverOnly returned %v, want the recovery's error %v", err, errDeath)
+		}
+		if got != nil {
+			t.Errorf("RecoverOnly returned the recovery %+v beside the error, want nil", got)
+		}
+	})
+	t.Run("a clean catalog returns nothing and writes nothing", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		f := NewFakeExec()
+		f.Respond(branchesStatement, branchesRows(map[string]string{"main": fx.before.Tip}))
+
+		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Cut: cutOf()})
+		if err != nil {
+			t.Fatalf("RecoverOnly: %v", err)
+		}
+		if got != nil {
+			t.Errorf("RecoverOnly returned %+v for a clean catalog, want a nil Recovery", got)
+		}
+		if want := []string{branchesStatement}; !slices.Equal(f.Statements(), want) {
+			t.Errorf("RecoverOnly sent\n%q\nwant the catalog read alone\n%q", f.Statements(), want)
+		}
+	})
+}
+
 // TestRecoverFirstRenameKeepsALandedCommit drives the first-rename row over the
 // catalog a row-three recovery leaves when it dies between its own renames:
 // compact-work holds a writer's commit, so it is kept rather than dropped
