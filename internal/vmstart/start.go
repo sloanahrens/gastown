@@ -16,12 +16,6 @@ const (
 	startPause = 20 * time.Second
 )
 
-// startProfiles is the order Start brings the VMs up in. The sandbox VM goes
-// first because the launchd job started gt-control first, which let its 5001
-// forward loop while the sandbox registry had not yet bound the port
-// (gt-igzpx9).
-var startProfiles = []string{profileSandbox, profileControl}
-
 // containerStartArgv starts the sandbox VM's kind nodes and registry. The
 // docker context is named here because colima start switches Docker's global
 // context to the VM it started, so the global one cannot be trusted to reach
@@ -67,11 +61,49 @@ func (r Report) String() string {
 	return b.String()
 }
 
-// Start brings both VMs up sandbox first, starts the sandbox VM's containers,
-// repairs the DNS of both VMs and then the registry forward, and returns the
-// report of every step run; a failed step is recorded and the later steps that
-// can still run are still tried, and Start returns one error naming each
-// failed step at the end, never a success (gt-igzpx9, gt-4eig1r).
+// StartStep is one step of a start and the work it runs.
+type StartStep struct {
+	// Name is the step's name, which `gt town vms start --dry-run` prints.
+	Name string
+	// profile is the VM a VM start brings up, empty for the other steps.
+	profile string
+	// run is the step's work, passed its own entry so one func serves both VM
+	// steps.
+	run func(*startRun, StartStep)
+}
+
+// StartPlan is every step a start runs, in the order Start runs them, so the
+// order the dry run prints cannot disagree with the run (gt-dzduz6). The
+// sandbox VM goes first because the launchd job started gt-control first, which
+// let its 5001 forward loop while the sandbox registry had not yet bound the
+// port (gt-igzpx9).
+var StartPlan = []StartStep{
+	{Name: profileSandbox, profile: profileSandbox, run: (*startRun).startVM},
+	{Name: profileControl, profile: profileControl, run: (*startRun).startVM},
+	{Name: "containers", run: (*startRun).startContainers},
+	{Name: "DNS", run: (*startRun).repairDNS},
+	{Name: "registry", run: (*startRun).repairRegistry},
+}
+
+// startRun is one run of Start: the plan it runs, what it runs commands
+// through, and what it has recorded so far.
+type startRun struct {
+	// plan is the list Start runs. The DNS step repairs this list's VM steps;
+	// reading StartPlan there would make its own initializer a cycle.
+	plan   []StartStep
+	ctx    context.Context
+	run    Runner
+	sleep  func(time.Duration)
+	now    func() time.Time
+	home   string
+	report Report
+	failed []error
+}
+
+// Start runs StartPlan's steps in order and returns the report of every step
+// run; a failed step is recorded and the later steps that can still run are
+// still tried, and Start returns one error naming each failed step at the end,
+// never a success (gt-igzpx9, gt-4eig1r).
 func Start(ctx context.Context, run Runner, sleep func(time.Duration), now func() time.Time, home string) (Report, error) {
 	if run == nil {
 		return nil, errors.New("Start: nil runner")
@@ -79,56 +111,73 @@ func Start(ctx context.Context, run Runner, sleep func(time.Duration), now func(
 	if sleep == nil {
 		return nil, errors.New("Start: nil sleep")
 	}
-	var report Report
-	var failed []error
-	for _, profile := range startProfiles {
-		argv := []string{"colima", "start", "-p", profile, "--activate=false"}
-		var lastErr error
-		for try := 1; try <= startTries; try++ {
-			_, err := run(ctx, argv[0], argv[1:]...)
-			report.add(profile, strings.Join(argv, " "), err)
-			lastErr = err
-			if err == nil {
-				break
-			}
-			if try < startTries {
-				sleep(startPause)
-			}
+	s := &startRun{plan: StartPlan, ctx: ctx, run: run, sleep: sleep, now: now, home: home}
+	for _, step := range s.plan {
+		step.run(s, step)
+	}
+	if len(s.failed) > 0 {
+		return s.report, fmt.Errorf("start: %w", errors.Join(s.failed...))
+	}
+	return s.report, nil
+}
+
+// startVM brings the step's VM up, trying startTries times with startPause
+// between failed tries.
+func (s *startRun) startVM(step StartStep) {
+	argv := []string{"colima", "start", "-p", step.profile, "--activate=false"}
+	var lastErr error
+	for try := 1; try <= startTries; try++ {
+		_, err := s.run(s.ctx, argv[0], argv[1:]...)
+		s.report.add(step.profile, strings.Join(argv, " "), err)
+		lastErr = err
+		if err == nil {
+			break
 		}
-		if lastErr != nil {
-			failed = append(failed, fmt.Errorf("%s: %w", strings.Join(argv, " "), lastErr))
+		if try < startTries {
+			s.sleep(startPause)
 		}
 	}
-	_, err := run(ctx, containerStartArgv[0], containerStartArgv[1:]...)
-	report.add(profileSandbox, strings.Join(containerStartArgv, " "), err)
+	if lastErr != nil {
+		s.failed = append(s.failed, fmt.Errorf("%s: %w", strings.Join(argv, " "), lastErr))
+	}
+}
+
+func (s *startRun) startContainers(StartStep) {
+	_, err := s.run(s.ctx, containerStartArgv[0], containerStartArgv[1:]...)
+	s.report.add(profileSandbox, strings.Join(containerStartArgv, " "), err)
 	if err != nil {
-		failed = append(failed, fmt.Errorf("%s: %w", strings.Join(containerStartArgv, " "), err))
+		s.failed = append(s.failed, fmt.Errorf("%s: %w", strings.Join(containerStartArgv, " "), err))
 	}
-	// The repairs follow the container start: DNS for each VM in the start
-	// order, sandbox first, then the registry forward (gt-4eig1r).
-	for _, profile := range startProfiles {
-		steps, err := RepairDNS(ctx, run, profile, now)
-		for _, step := range steps {
-			report.add(profile, step.Command, nil)
+}
+
+// repairDNS repairs each VM the plan starts, in plan order, so the repairs
+// follow the starts (gt-4eig1r).
+func (s *startRun) repairDNS(StartStep) {
+	for _, step := range s.plan {
+		if step.profile == "" {
+			continue
+		}
+		steps, err := RepairDNS(s.ctx, s.run, step.profile, s.now)
+		for _, repair := range steps {
+			s.report.add(step.profile, repair.Command, nil)
 		}
 		if err != nil {
-			report.add(profile, dnsRepairRow, err)
-			failed = append(failed, err)
+			s.report.add(step.profile, dnsRepairRow, err)
+			s.failed = append(s.failed, err)
 		}
 	}
-	// Every registry repair step is reported for the sandbox VM, whose registry
-	// the repair restarts; canceling gt-control's forward of the port is part
-	// of that same repair (gt-4eig1r).
-	steps, err := RepairRegistry(ctx, run, home)
+}
+
+// repairRegistry repairs the registry forward once, for the sandbox VM whose
+// registry the repair restarts; canceling gt-control's forward of the port is
+// part of that same repair (gt-4eig1r).
+func (s *startRun) repairRegistry(StartStep) {
+	steps, err := RepairRegistry(s.ctx, s.run, s.home)
 	for _, step := range steps {
-		report.add(profileSandbox, step.Command, nil)
+		s.report.add(profileSandbox, step.Command, nil)
 	}
 	if err != nil {
-		report.add(profileSandbox, registryRepairRow, err)
-		failed = append(failed, err)
+		s.report.add(profileSandbox, registryRepairRow, err)
+		s.failed = append(s.failed, err)
 	}
-	if len(failed) > 0 {
-		return report, fmt.Errorf("start: %w", errors.Join(failed...))
-	}
-	return report, nil
 }
