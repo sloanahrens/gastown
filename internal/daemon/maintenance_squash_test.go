@@ -1415,6 +1415,68 @@ func TestSquashItemCompletedRefusedAndHeldRunsRaiseNothing(t *testing.T) {
 	})
 }
 
+// TestSquashRecoverSeamDefaultCallsRecoverOnlyWithTheCut is the bead's first
+// box: the default recovery seam recovers through doltsquash.RecoverOnly with
+// the cut now minus keep_days, and that cut reaches the statements the recovery
+// sends. The catalog holds a dead run's compact-work branch, so the recovery
+// reads main's commits after the cut before it drops the branch.
+func TestSquashRecoverSeamDefaultCallsRecoverOnlyWithTheCut(t *testing.T) {
+	t.Parallel()
+	d, server, _, _ := squashTickDaemon(t, squashEnabled())
+	const mainTip = "0123456789abcdefghijklmnopqrstuv"
+	const workTip = "vutsrqponmlkjihgfedcba9876543210"
+	catalogReads := 0
+	server.script = func(statement string) ([][]driver.Value, bool) {
+		switch {
+		case strings.Contains(statement, "dolt_branches"):
+			// The first read sees the dead run's work branch; the read after
+			// the drop sees main alone.
+			catalogReads++
+			if catalogReads == 1 {
+				return [][]driver.Value{{"compact-work", workTip}, {"main", mainTip}}, true
+			}
+			return [][]driver.Value{{"main", mainTip}}, true
+		case strings.Contains(statement, "author_date >"):
+			return [][]driver.Value{}, true
+		}
+		return nil, false
+	}
+	settings := &agentconfig.SquashSettings{KeepDays: 14, MaxRuntime: time.Minute}
+
+	rec, err := d.maintenance().squashRecover(context.Background(), d, "gt", squashTestNow, settings)
+	if err != nil {
+		t.Fatalf("the default recovery seam: %v", err)
+	}
+	if rec == nil || !slices.Contains(rec.Dropped, "compact-work") {
+		t.Fatalf("the default recovery seam dropped %+v, want the dead run's compact-work", rec)
+	}
+	wantCut := squashTestNow.AddDate(0, 0, -14).Format("2006-01-02 15:04:05")
+	if !slices.ContainsFunc(server.queries, func(q string) bool { return strings.Contains(q, wantCut) }) {
+		t.Errorf("no statement carries the cut %s (now minus keep_days); statements: %q", wantCut, server.queries)
+	}
+}
+
+// TestSquashRecoverSeamRefusesAConnectionThatDoesNotOpen is the refusal row for
+// the default recovery seam: a connection that does not open returns an error
+// naming the database and sends no statement, so no branch is read or dropped.
+func TestSquashRecoverSeamRefusesAConnectionThatDoesNotOpen(t *testing.T) {
+	t.Parallel()
+	d, server, _, _ := squashTickDaemon(t, squashEnabled())
+	d.maint.squashOpenDB = func(string) (*sql.DB, error) { return nil, errors.New("no route to the server") }
+	settings := &agentconfig.SquashSettings{KeepDays: 14, MaxRuntime: time.Minute}
+
+	rec, err := d.maintenance().squashRecover(context.Background(), d, "gt", squashTestNow, settings)
+	if err == nil || !strings.Contains(err.Error(), "gt") {
+		t.Fatalf("the recovery over an unopened connection returned (%+v, %v), want an error naming gt", rec, err)
+	}
+	if rec != nil {
+		t.Errorf("the recovery over an unopened connection returned %+v, want no recovery", rec)
+	}
+	if len(server.queries) != 0 {
+		t.Errorf("the recovery sent %d statements over an unopened connection, want none: %q", len(server.queries), server.queries)
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
@@ -1498,7 +1560,15 @@ type squashFakeRows struct {
 	nextErr error
 }
 
-func (r *squashFakeRows) Columns() []string { return []string{"value"} }
+// Columns is as wide as the rows: a branch catalog's record holds a name and a
+// tip, and a single column would drop the tip before the reader sees it.
+func (r *squashFakeRows) Columns() []string {
+	width := 1
+	if len(r.rows) > 0 {
+		width = len(r.rows[0])
+	}
+	return make([]string, width)
+}
 
 func (r *squashFakeRows) Close() error { return nil }
 

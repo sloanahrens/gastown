@@ -6,6 +6,7 @@ import (
 	"os"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/doltsquash"
@@ -68,6 +69,10 @@ type maintenanceSeams struct {
 	// squashRun runs one due database's squash. A test scripts it so the
 	// recording of a completed or failed run is reachable without a server.
 	squashRun func(ctx context.Context, in doltsquash.RunInput) (doltsquash.RunResult, error)
+	// squashRecover recovers the branches a dead or failed run left in one
+	// database, with the cut now minus keep_days. A test points squashOpenDB at
+	// a fake driver to see the statements it sends.
+	squashRecover func(ctx context.Context, d *Daemon, db string, now time.Time, settings *agentconfig.SquashSettings) (*doltsquash.Recovery, error)
 	// squashLedger is the run ledger one line is appended to. A test replaces
 	// one of its operations so every way a line fails to land is reachable.
 	squashLedger func(townRoot string) squashLedger
@@ -167,6 +172,11 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.squashRun == nil {
 		s.squashRun = doltsquash.Run
+	}
+	if s.squashRecover == nil {
+		s.squashRecover = func(ctx context.Context, d *Daemon, db string, now time.Time, settings *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+			return d.recoverSquashDatabase(ctx, db, now, settings)
+		}
 	}
 	if s.squashLedger == nil {
 		s.squashLedger = newSquashLedger

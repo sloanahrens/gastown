@@ -402,6 +402,26 @@ func (d *Daemon) runSquashDatabase(ctx context.Context, db string, cut time.Time
 	return res, err
 }
 
+// recoverSquashDatabase is the default recovery seam: it recovers a dead run's
+// branches in one database through doltsquash.RecoverOnly, with the cut now
+// minus keep_days as doltsquash.Decide computes it. The run marker is held for
+// the recovery's length, so a live run's branches are not read as a dead run's.
+func (d *Daemon) recoverSquashDatabase(ctx context.Context, db string, now time.Time, settings *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+	conn, err := d.maintenance().squashOpenDB(d.maintenanceDSN(db, settings.MaxRuntime))
+	if err != nil {
+		return nil, fmt.Errorf("squash: opening the connection to %s: %w", db, err)
+	}
+	defer conn.Close()
+	conn.SetMaxOpenConns(1)
+	runCtx, cancel := context.WithTimeout(ctx, settings.MaxRuntime)
+	defer cancel()
+	return doltsquash.RecoverOnly(runCtx, doltsquash.RecoverInput{
+		Exec:   squashDoltExec{conn: conn},
+		Marker: &squashMarker{path: squashMarkerPath(d.config.TownRoot)},
+		Cut:    now.Add(-time.Duration(settings.KeepDays) * 24 * time.Hour),
+	})
+}
+
 // squashRunRecord is, per database, the rolling squash's last run: the start
 // the 24-hour gate compares, and how the run ended.
 type squashRunRecord struct {
