@@ -35,57 +35,63 @@ type Image struct {
 // not count toward keep. The newest keep other candidates are kept. keep 0 keeps
 // only the images in use and the dev tag.
 func Plan(images []Image, inUse map[string]bool, keep int) []Image {
-	var candidates []Image
-	for _, im := range images {
-		if im.Unknown || !onlyPolecatRefs(im) {
-			continue
-		}
-		candidates = append(candidates, im)
-	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].Created.After(candidates[j].Created)
-	})
-	kept := 0
+	return PlanRepos(images, inUse, keep, []string{Repo})
+}
+
+// PlanRepos is Plan run over each repository in repos, in order.
+func PlanRepos(images []Image, inUse map[string]bool, keep int, repos []string) []Image {
 	var remove []Image
-	for _, im := range candidates {
-		switch {
-		case inUse[im.ID] || anyInUse(im.Digests, inUse):
-			continue
-		case hasTag(im.Tags, "dev"):
-			continue
-		case kept < keep:
-			kept++
-			continue
+	for _, repo := range repos {
+		var candidates []Image
+		for _, im := range images {
+			if !im.Unknown && onlyRepoRefs(im, repo) {
+				candidates = append(candidates, im)
+			}
 		}
-		remove = append(remove, im)
+		sort.SliceStable(candidates, func(i, j int) bool {
+			return candidates[i].Created.After(candidates[j].Created)
+		})
+		kept := 0
+		for _, im := range candidates {
+			switch {
+			case inUse[im.ID] || anyInUse(im.Digests, inUse):
+				continue
+			case hasTag(im.Tags, repo, "dev"):
+				continue
+			case kept < keep:
+				kept++
+				continue
+			}
+			remove = append(remove, im)
+		}
 	}
 	return remove
 }
 
-// onlyPolecatRefs reports whether the image has at least one reference and
-// every tag and digest is a gastown-polecat reference. An image that also names
-// another repository is left alone.
-func onlyPolecatRefs(im Image) bool {
+// onlyRepoRefs reports whether the image has at least one reference and every
+// tag and digest is a reference to repo. An image that also names another
+// repository is left alone.
+func onlyRepoRefs(im Image, repo string) bool {
 	if len(im.Tags) == 0 && len(im.Digests) == 0 {
 		return false
 	}
 	for _, t := range im.Tags {
-		if !isPolecat(t, ":") {
+		if !isRepoRef(t, repo, ":") {
 			return false
 		}
 	}
 	for _, d := range im.Digests {
-		if !isPolecat(d, "@") {
+		if !isRepoRef(d, repo, "@") {
 			return false
 		}
 	}
 	return true
 }
 
-// isPolecat reports whether ref names the polecat repository, with or without a
-// registry host, using sep (":" for a tag, "@" for a digest) before the rest.
-func isPolecat(ref, sep string) bool {
-	if i := strings.Index(ref, Repo+sep); i >= 0 {
+// isRepoRef reports whether ref names repo, with or without a registry host,
+// using sep (":" for a tag, "@" for a digest) before the rest.
+func isRepoRef(ref, repo, sep string) bool {
+	if i := strings.Index(ref, repo+sep); i >= 0 {
 		return i == 0 || ref[i-1] == '/'
 	}
 	return false
@@ -100,9 +106,9 @@ func anyInUse(refs []string, inUse map[string]bool) bool {
 	return false
 }
 
-func hasTag(tags []string, tag string) bool {
+func hasTag(tags []string, repo, tag string) bool {
 	for _, t := range tags {
-		if t == Repo+":"+tag || strings.HasSuffix(t, "/"+Repo+":"+tag) {
+		if t == repo+":"+tag || strings.HasSuffix(t, "/"+repo+":"+tag) {
 			return true
 		}
 	}

@@ -1,6 +1,7 @@
 package imageprune
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -68,6 +69,36 @@ func TestPlanRemovesDigestOnlyPolecatImages(t *testing.T) {
 	got := ids(Plan(images, map[string]bool{}, 0))
 	if want := []string{"untagged"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("Plan removed %v, want %v (an untagged polecat image is a candidate)", got, want)
+	}
+}
+
+func TestPlanReposKeepsTheNewestOfEachRepository(t *testing.T) {
+	t.Parallel()
+	repos := []string{"gastown-polecat", "gastown-daemon", "gastown-bd"}
+	var images []Image
+	var want []string
+	for _, repo := range repos {
+		for age := 1; age <= 8; age++ {
+			id := fmt.Sprintf("%s-%d", repo, age)
+			images = append(images, img(id, age, []string{"localhost:5001/" + repo + ":" + id}, nil))
+			if age > 3 {
+				want = append(want, id)
+			}
+		}
+	}
+	if got := ids(PlanRepos(images, map[string]bool{}, 3, repos)); !reflect.DeepEqual(got, want) {
+		t.Errorf("PlanRepos keep 3 removed %v, want the 5 oldest of each repository %v", got, want)
+	}
+}
+
+func TestPlanReposNeverPlansAnUnknownAgeOrAMixedImage(t *testing.T) {
+	t.Parallel()
+	images := []Image{
+		{ID: "no-age", Tags: []string{"localhost:5001/gastown-bd:aaa"}, Unknown: true},
+		img("mixed", 100, []string{"localhost:5001/gastown-bd:bbb", "localhost:5001/gastown-daemon:bbb"}, nil),
+	}
+	if got := PlanRepos(images, map[string]bool{}, 0, []string{"gastown-bd", "gastown-daemon"}); len(got) != 0 {
+		t.Errorf("PlanRepos removed %v, want nothing: an unknown age or a mixed-repository image is never planned", ids(got))
 	}
 }
 
