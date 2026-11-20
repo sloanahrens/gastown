@@ -510,6 +510,45 @@ func TestTicksAgainstInterval(t *testing.T) {
 	}
 }
 
+// gt-kwlnj1: a tick whose pass is in flight is judged by how long it has run.
+func TestOverrunPassHealthRunning(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		lastFired time.Time
+		running   time.Duration
+		want      Verdict
+		value     string
+		detail    string
+	}{
+		{"under three intervals is green", ago(time.Hour), 80 * time.Second, Green, "running 1m20s/1m", ""},
+		{"three intervals is degraded", ago(time.Hour), 3 * time.Minute, Degraded, "running 3m/1m", "pass running for 3m"},
+		{"six intervals is red", ago(time.Hour), 6 * time.Minute, Red, "running 6m/1m", "pass running for 6m"},
+		{"a first pass has no earlier end", time.Time{}, 80 * time.Second, Green, "running 1m20s/1m", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: tc.lastFired, RunningSince: ago(tc.running)}}
+			got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
+			if got.Verdict != tc.want || got.Value != tc.value || got.Detail != tc.detail {
+				t.Errorf("tick:overrun_guard = %+v, want %s %q detail %q", got, tc.want, tc.value, tc.detail)
+			}
+		})
+	}
+}
+
+func TestOverrunPassHealthNotRunning(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: ago(2 * time.Minute)}}
+	got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
+	if got.Verdict != Degraded || got.Value != "2m/1m" || got.Detail != "last fired 2m ago, interval 1m" {
+		t.Errorf("tick:overrun_guard = %+v, want DEGRADED 2m/1m last fired 2m ago", got)
+	}
+}
+
 // gt-m36as: the landing field judges the oldest pending submission's own age,
 // not the time since the rig last landed. A submission made after hours of
 // quiet is green, one that has outlived a whole gate plus a pass is red
