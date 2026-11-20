@@ -41,6 +41,16 @@ var releaseReporterVersionShape = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-
 // a binary in the build context root and a COPY into /usr/local/bin.
 var toolNames = []string{"hm", "devops-reporter", "release-reporter", "cloudcheck"}
 
+// hmLdflags is the stamp the hm build carries: the -X target versionVar names, set
+// to the commit the pin resolved, so the image's `hm version` answers the skew
+// monitor instead of "dev"; an empty versionVar stamps nothing (gt-q81f1j).
+func hmLdflags(versionVar, commit string) string {
+	if versionVar == "" {
+		return ""
+	}
+	return "-X " + versionVar + "=" + commit
+}
+
 // BuildTools writes hm, devops-reporter, release-reporter and cloudcheck to
 // b.Out and returns their paths in that order, and stages the cloud check's app
 // list beside its binary. Each is built for linux/arm64 in a clean worktree of
@@ -84,7 +94,7 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	builds := []binary{
-		{name: "hm", src: hmSrc, commit: hmCommit, pkg: HMPackage},
+		{name: "hm", src: hmSrc, commit: hmCommit, pkg: HMPackage, ldflags: hmLdflags(b.HMVersionVar, hmCommit)},
 		{name: "devops-reporter", src: devopsSrc, commit: devopsCommit, pkg: DevopsReporterPackage},
 		{name: "release-reporter", src: devopsSrc, commit: devopsCommit, pkg: ReleaseReporterPackage},
 		{name: "cloudcheck", src: devopsSrc, commit: devopsCommit, pkg: DevopsCloudCheckPackage},
