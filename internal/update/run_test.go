@@ -1221,6 +1221,68 @@ func TestRunRestartTimeoutIsPartialInstalledRestartPending(t *testing.T) {
 	}
 }
 
+// TestTownHealthDetail drives the detail a verify step records beside a passing
+// roll: the line a ready health check passed, without its ready note, cut to
+// townHealthDetailMax bytes. A green line, a failed check and a missing one
+// carry no detail.
+func TestTownHealthDetail(t *testing.T) {
+	t.Parallel()
+	const redLine = "RED tick 4s ago: main/devops=red[R]"
+	// The prefixes differ in parity so the byte cut below does and does not
+	// land inside a rune: longPrefix is 22 bytes, so byte 200 is an ASCII
+	// boundary; redLine's 35 bytes put byte 200 inside a two-byte rune.
+	const longPrefix = "DEGRADED tick 4s ago: "
+	longLine := longPrefix + strings.Repeat("x", 220)
+	multibyteLine := redLine + strings.Repeat("é", 100)
+	tests := []struct {
+		name   string
+		checks []Check
+		want   string
+	}{
+		{
+			name:   "a green line carries no detail",
+			checks: []Check{{Name: checkHealth, OK: true, Detail: verifyTestGreen}},
+			want:   "",
+		},
+		{
+			name: "a passing red line is named without its ready note",
+			checks: []Check{
+				{Name: checkGTVersion, OK: true, Detail: "0123456" + readyNote},
+				{Name: checkHealth, OK: true, Detail: redLine + readyNote},
+			},
+			want: "town health: " + redLine,
+		},
+		{
+			name:   "a line over the limit is cut at 200 bytes",
+			checks: []Check{{Name: checkHealth, OK: true, Detail: longLine + readyNote}},
+			want:   "town health: " + longPrefix + strings.Repeat("x", 178),
+		},
+		{
+			name:   "a failed health check carries no detail",
+			checks: []Check{{Name: checkHealth, Detail: redLine + readyNote}},
+			want:   "",
+		},
+		{
+			name:   "a missing health check carries no detail",
+			checks: []Check{{Name: checkDaemonVersion, OK: true, Detail: redLine + readyNote}},
+			want:   "",
+		},
+		{
+			name:   "a multibyte line is cut on a rune boundary",
+			checks: []Check{{Name: checkHealth, OK: true, Detail: multibyteLine + readyNote}},
+			want:   "town health: " + redLine + strings.Repeat("é", 82),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := townHealthDetail(tt.checks); got != tt.want {
+				t.Errorf("townHealthDetail() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunVerifyFailureIsPartialNamingTheChecks(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)
