@@ -790,12 +790,18 @@ func TestSeatGoFlagsAcceptsOnlyTheDwarfFlag(t *testing.T) {
 	const dwarf = "-gcflags=all=-dwarf=false"
 	tests := []struct {
 		name, goFlags, want string // want "" means the load is refused
+		named               string // the flag a refusal must name; goFlags when empty
 	}{
-		{"the dwarf flag beside a cap", "-p=4 " + dwarf, "-p=4 " + dwarf},
-		{"another gcflag", "-gcflags=all=-N", ""},
-		{"the dwarf flag without all=", "-gcflags=-dwarf=false", ""},
-		{"ldflags", "-ldflags=-w", ""},
-		{"toolexec", "-toolexec=x", ""},
+		{"the dwarf flag alone", dwarf, dwarf, ""},
+		{"the dwarf flag beside a cap", "-p=4 " + dwarf, "-p=4 " + dwarf, ""},
+		{"a suffix on the dwarf flag", "-gcflags=all=-dwarf=false=x", "", ""},
+		{"a comma suffix on the dwarf flag", "-gcflags=all=-dwarf=false,-N", "", ""},
+		{"the dwarf flag beside a refused flag", dwarf + " -toolexec=x", "", "-toolexec=x"},
+		{"the dwarf flag in another case", "-GCFLAGS=all=-dwarf=false", "", ""},
+		{"another gcflag", "-gcflags=all=-N", "", ""},
+		{"the dwarf flag without all=", "-gcflags=-dwarf=false", "", ""},
+		{"ldflags", "-ldflags=-w", "", ""},
+		{"toolexec", "-toolexec=x", "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -807,7 +813,11 @@ func TestSeatGoFlagsAcceptsOnlyTheDwarfFlag(t *testing.T) {
 				if err == nil {
 					t.Fatalf("go_flags %q loaded as %+v, want a refusal", tt.goFlags, seats)
 				}
-				for _, want := range []string{"seat-trial", tt.goFlags} {
+				named := tt.named
+				if named == "" {
+					named = tt.goFlags
+				}
+				for _, want := range []string{"seat-trial", named} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("error = %q, want it to name %q", err, want)
 					}
