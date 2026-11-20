@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -32,11 +33,13 @@ type nodeCall struct {
 
 // fakeNode is a node of nodeRepos: image n of each repository is created on day n of November 2026,
 // tagged <repo>:v<n> and digested <repo>@sha256:d<n>. ps is the reply to `crictl ps`; failImages makes
-// the images read fail. run answers the program calls and records each one in calls.
+// the images read fail; failRemove is the image id whose `crictl rmi` fails. run answers the program
+// calls and records each one in calls.
 type fakeNode struct {
 	t          *testing.T
 	ps         string
 	failImages bool
+	failRemove string
 	images     []byte
 	created    map[string]string
 	calls      []nodeCall
@@ -91,6 +94,11 @@ func (n *fakeNode) run(name string, args ...string) ([]byte, error) {
 		return data, nil
 	case "ps":
 		return []byte(n.ps), nil
+	case "rmi":
+		if args[len(args)-1] == n.failRemove {
+			return nil, errors.New("exit status 1")
+		}
+		return nil, nil
 	}
 	return nil, fmt.Errorf("unexpected crictl verb %q", verb)
 }
@@ -106,15 +114,31 @@ func crictlVerbOf(args []string) string {
 	return ""
 }
 
-// removals counts the calls that remove an image; a dry run makes none.
-func (n *fakeNode) removals() int {
-	count := 0
+// removedIDs is the image id of each rmi call, in call order; a dry run makes none.
+func (n *fakeNode) removedIDs() []string {
+	var ids []string
 	for _, c := range n.calls {
 		if c.verb == "rmi" {
-			count++
+			ids = append(ids, c.args[len(c.args)-1])
 		}
 	}
-	return count
+	return ids
+}
+
+// removals counts the calls that remove an image.
+func (n *fakeNode) removals() int {
+	return len(n.removedIDs())
+}
+
+// plannedIDs is the image id on each would-remove line of a dry run's output.
+func plannedIDs(out string) []string {
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(line, "node-prune: would remove "); ok {
+			ids = append(ids, strings.Fields(rest)[0])
+		}
+	}
+	return ids
 }
 
 // runNodePrune runs the helper against node, the fake, and returns its exit code and output.
@@ -256,6 +280,71 @@ func TestNodePruneRunsCrictlThroughTheProgram(t *testing.T) {
 	wantPrefix := "crictl --runtime-endpoint " + nodeEndpoint + " --timeout 120s images"
 	if got := strings.Join(first.args, " "); !strings.HasPrefix(got, wantPrefix) {
 		t.Errorf("arguments %q, want the prefix %q", got, wantPrefix)
+	}
+}
+
+// TestNodePruneApplyRemovesThePlan: --apply removes exactly the images the dry run named, in the same
+// order, prints one removed line each and the summary, and exits 0.
+func TestNodePruneApplyRemovesThePlan(t *testing.T) {
+	t.Parallel()
+	dry := newFakeNode(t, "{}", false)
+	dryCode, dryOut, dryErr := runNodePrune(dry, "--endpoint", nodeEndpoint)
+	if dryCode != 0 {
+		t.Fatalf("dry run exit %d, want 0; stderr %q", dryCode, dryErr)
+	}
+	planned := plannedIDs(dryOut)
+	if len(planned) == 0 {
+		t.Fatal("the dry run planned no images, so there is nothing to apply")
+	}
+
+	node := newFakeNode(t, "{}", false)
+	code, out, errOut := runNodePrune(node, "--endpoint", nodeEndpoint, "--apply")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stderr %q", code, errOut)
+	}
+	var want strings.Builder
+	for _, id := range planned {
+		want.WriteString("node-prune: removed " + id + "\n")
+	}
+	fmt.Fprintf(&want, "node-prune: applied removed %d failed 0\n", len(planned))
+	if out != want.String() {
+		t.Errorf("stdout:\n%s\nwant:\n%s", out, want.String())
+	}
+	if got := node.removedIDs(); !slices.Equal(got, planned) {
+		t.Errorf("rmi calls %v, want the dry run's plan %v", got, planned)
+	}
+}
+
+// TestNodePruneApplyReportsAFailure: one rmi failing does not stop the others. The failed image is named
+// on stderr, the summary counts it, and the exit status is 3.
+func TestNodePruneApplyReportsAFailure(t *testing.T) {
+	t.Parallel()
+	plan := []string{
+		imageID("gastown-polecat", 2), imageID("gastown-polecat", 1),
+		imageID("gastown-daemon", 2), imageID("gastown-daemon", 1),
+		imageID("gastown-bd", 2), imageID("gastown-bd", 1),
+	}
+	node := newFakeNode(t, "{}", false)
+	node.failRemove = imageID("gastown-daemon", 2)
+	code, out, errOut := runNodePrune(node, "--endpoint", nodeEndpoint, "--apply")
+	if code != 3 {
+		t.Errorf("exit %d, want 3", code)
+	}
+	var want strings.Builder
+	for _, id := range plan {
+		if id != node.failRemove {
+			want.WriteString("node-prune: removed " + id + "\n")
+		}
+	}
+	want.WriteString("node-prune: applied removed 5 failed 1\n")
+	if out != want.String() {
+		t.Errorf("stdout:\n%s\nwant:\n%s", out, want.String())
+	}
+	if !strings.Contains(errOut, "node-prune: cannot remove "+node.failRemove) {
+		t.Errorf("stderr %q, want the failed image named", errOut)
+	}
+	if got := node.removedIDs(); !slices.Equal(got, plan) {
+		t.Errorf("rmi calls %v, want every planned image %v", got, plan)
 	}
 }
 
