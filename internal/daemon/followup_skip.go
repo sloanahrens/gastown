@@ -95,9 +95,24 @@ type followupPolicy struct {
 	now func() time.Time
 }
 
+// newFollowupPolicy returns the skip policy with the wall clock, so the
+// hold-out window is judged by the same clock the rest of the daemon reads.
+func newFollowupPolicy() followupPolicy {
+	return followupPolicy{now: time.Now}
+}
+
+// clock returns the policy's clock, falling back to the wall clock for a
+// policy built by hand with none.
+func (p followupPolicy) clock() func() time.Time {
+	if p.now == nil {
+		return time.Now
+	}
+	return p.now
+}
+
 // applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built.
 func applyFollowupPolicy(l *land.Lander) {
-	p := followupPolicy{now: time.Now}
+	p := newFollowupPolicy()
 	l.FollowupSkip = p.reason
 }
 
@@ -122,7 +137,7 @@ func (p followupPolicy) reason(w land.Work, c land.FollowupCandidate) string {
 // bead at the policy's clock.
 func (p followupPolicy) heldOut(w land.Work, c land.FollowupCandidate) bool {
 	class := omlessons.Classify(land.ReviewFindingText{Title: c.Title, Claim: c.Claim})
-	return omlessons.HeldOut(w.BeadID, class, p.now())
+	return omlessons.HeldOut(w.BeadID, class, p.clock()())
 }
 
 // isDocNit reports whether a finding asks for a doc or wording fix only. A
