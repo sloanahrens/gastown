@@ -1563,6 +1563,119 @@ func TestPoolDeadHookedCountsTheMeasuredDeadRead(t *testing.T) {
 	}
 }
 
+// TestPoolDeadHookedSeatCarriesItsDispositionClass pins that a counted
+// dead-hooked seat names the class its measured disposition reads (gt-fp32o8):
+// the ReuseStatus when it has one, the verdict when it has none, and unread for
+// a measured read with no verdict to name.
+func TestPoolDeadHookedSeatCarriesItsDispositionClass(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	cases := []struct {
+		name        string
+		disposition polecat.WorkstateDisposition
+		want        string
+	}{
+		{"a submitted seat is idle-submitted", polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSubmitted, ReuseStatus: "idle-submitted", CountsTowardCapacity: true}, "idle-submitted"},
+		{"a seat with no reuse status is its verdict", polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictNeedsRecovery, CountsTowardCapacity: true}, "needs_recovery"},
+		{"a measured read with no verdict is unread", polecat.WorkstateDisposition{CountsTowardCapacity: true}, "unread"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, pool := deadHookedWalkTestTown(t, "ember")
+			state := poolSeatState{Disposition: c.disposition, DeadDisposition: c.disposition, DeadRead: true}
+			disposition := func(string, string) (poolSeatState, error) { return state, nil }
+			hookHeld := func(string, string) (bool, error) { return false, nil }
+
+			got, _, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
+			if err != nil {
+				t.Fatalf("poolDeadHookedSessions: %v", err)
+			}
+			if len(got) != 1 || !got[0].deadHooked || got[0].deadClass != c.want {
+				t.Fatalf("dead-hooked seats = %+v, want one dead-hooked seat of class %q", got, c.want)
+			}
+		})
+	}
+}
+
+// TestPoolDeadHookedSeatWhoseReadFailedIsClassUnread pins that a seat whose
+// hook or state read failed, or whose state was never measured, is counted
+// with the class unread. A failed read is returned beside the seat, so the
+// count stays fail-closed and the overseer can tell it from a measured class.
+func TestPoolDeadHookedSeatWhoseReadFailedIsClassUnread(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	okHook := func(string, string) (bool, error) { return false, nil }
+	cases := []struct {
+		name        string
+		disposition polecatDispositionFunc
+		hookHeld    polecatHookHeldFunc
+		wantErr     bool
+	}{
+		{
+			name:        "a state read that fails",
+			disposition: func(string, string) (poolSeatState, error) { return poolSeatState{}, errors.New("state unavailable") },
+			hookHeld:    okHook,
+			wantErr:     true,
+		},
+		{
+			name:        "a hook read that fails",
+			disposition: func(string, string) (poolSeatState, error) { return deadSeatRead(false), nil },
+			hookHeld:    func(string, string) (bool, error) { return false, errors.New("beads unavailable") },
+			wantErr:     true,
+		},
+		{
+			// The disposition names a reuse status, but DeadRead is false: the
+			// read never measured the seat, so the class is unread, not idle-submitted.
+			name: "an unmeasured read",
+			disposition: func(string, string) (poolSeatState, error) {
+				d := polecat.WorkstateDisposition{ReuseStatus: "idle-submitted", CountsTowardCapacity: true}
+				return poolSeatState{Disposition: d, DeadDisposition: d}, nil
+			},
+			hookHeld: okHook,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town, pool := deadHookedWalkTestTown(t, "ember")
+			got, _, err := poolDeadHookedSessions(town, pool, c.disposition, c.hookHeld, nil, now)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("poolDeadHookedSessions error = %v, want error %v", err, c.wantErr)
+			}
+			if len(got) != 1 || got[0].deadClass != "unread" {
+				t.Fatalf("dead-hooked seats = %+v, want one seat of class unread", got)
+			}
+		})
+	}
+}
+
+// TestPoolDeadHookedSeatClassIsWorkingForAWorkingVerdict pins that a seat whose
+// disposition reads WORKING is class working even when the disposition still
+// carries a finished bead's ReuseStatus. A seat re-slung under a finished seat's
+// name is working on its new bead, not the old bead's idle-submitted.
+func TestPoolDeadHookedSeatClassIsWorkingForAWorkingVerdict(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1760000000, 0)
+	town, pool := deadHookedWalkTestTown(t, "ember")
+	working := polecat.WorkstateDisposition{
+		Verdict:              polecat.WorkstateVerdictWorking,
+		ReuseStatus:          "idle-submitted",
+		CountsTowardCapacity: true,
+	}
+	state := poolSeatState{Disposition: working, DeadDisposition: working, DeadRead: true, HookedBead: "gt-new"}
+	disposition := func(string, string) (poolSeatState, error) { return state, nil }
+	hookHeld := func(string, string) (bool, error) { return false, nil }
+
+	got, _, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
+	if err != nil {
+		t.Fatalf("poolDeadHookedSessions: %v", err)
+	}
+	if len(got) != 1 || got[0].deadClass != "working" {
+		t.Fatalf("dead-hooked seats = %+v, want one seat of class working", got)
+	}
+}
+
 // TestPoolDeadHookedProbesEachDeadSeatOnce is the cost bound gt-v5n2be owes
 // after reversing gt-gg9hv.73's probe cut (decision A): every sessionless
 // directory is probed, and each exactly once per pass, while a directory a live

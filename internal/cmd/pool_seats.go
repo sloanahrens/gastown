@@ -1227,7 +1227,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				if holdErr == nil {
 					holdErr = fmt.Errorf("reading the hook of %s/%s: %w", rigName, name, err)
 				}
-				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", now))
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", deadClassUnread, now))
 				continue
 			}
 			// Every sessionless seat is read. A seat with no disposition to
@@ -1242,14 +1242,14 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				if holdErr == nil {
 					holdErr = fmt.Errorf("reading the state of %s/%s: %w", rigName, name, err)
 				}
-				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", now))
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), "", deadClassUnread, now))
 				continue
 			}
 			probed++
 			if !poolDeadSeatCounted(state) {
 				continue
 			}
-			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), state.HookedBead, now))
+			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), state.HookedBead, deadSeatClass(state), now))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
@@ -1265,12 +1265,42 @@ func poolDeadSeatCounted(state poolSeatState) bool {
 	return !state.DeadRead || state.DeadDisposition.CountsTowardCapacity
 }
 
+// deadClassUnread and deadClassWorking are the dead-hooked classes that are not
+// a reuse status (gt-fp32o8): unread when the hook or state read failed or never
+// measured the seat, working when the disposition reads WORKING.
+const (
+	deadClassUnread  = "unread"
+	deadClassWorking = "working"
+)
+
+// deadSeatClass is the disposition class a counted dead-hooked seat names. A
+// WORKING verdict is working even when the disposition still carries a reuse
+// status, which belongs to the bead the seat held before it was re-slung. A
+// measured seat with no reuse status is named by its verdict, and a seat with
+// neither is unread: no class is named without a measurement.
+func deadSeatClass(state poolSeatState) string {
+	d := state.DeadDisposition
+	switch {
+	case !state.DeadRead:
+		return deadClassUnread
+	case d.Verdict == polecat.WorkstateVerdictWorking:
+		return deadClassWorking
+	case d.ReuseStatus != "":
+		return d.ReuseStatus
+	case d.Verdict != "":
+		return strings.ToLower(d.Verdict)
+	default:
+		return deadClassUnread
+	}
+}
+
 // deadHookedSeat is the dead-hooked session a seat counts as. The seat's own
 // record is read here, once the seat is counted: only an occupant's agent is
 // worth a read. hookedBead is the live work the seat's hook names when the
 // caller read it, so a running sling for that bead and this seat count once
-// (gt-75fma5); a hook that could not be read passes "".
-func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead string, now time.Time) poolSession {
+// (gt-75fma5); a hook that could not be read passes "". class is the seat's
+// disposition class (deadSeatClass), or deadClassUnread when it was not read.
+func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead, class string, now time.Time) poolSession {
 	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
 	stale := parkedStale(townRoot, rigName, name, now)
 	return poolSession{
@@ -1280,6 +1310,7 @@ func deadHookedSeat(townRoot, rigName, name, fallbackAgent, hookedBead string, n
 		rig:         rigName,
 		polecat:     name,
 		deadHooked:  !stale,
+		deadClass:   class,
 		parkedStale: stale,
 		hookedBead:  hookedBead,
 	}
