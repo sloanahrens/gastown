@@ -6,7 +6,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+// TestMain runs the unit tier, so a goroutine outliving its test fails the run.
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 // zone is the reading's own zone, six hours behind UTC.
 var zone = time.FixedZone("CST", -6*3600)
