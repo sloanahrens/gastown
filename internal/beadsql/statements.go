@@ -235,6 +235,33 @@ func ParseRigHeads(columns, row []string) (map[string]RigHash, error) {
 	return out, nil
 }
 
+// ChildStatusesLimit is the most parents ChildStatuses reads in one statement.
+const ChildStatusesLimit = 64
+
+// ChildStatuses reads each parent that exists with its parent-child children
+// and their statuses, in one statement. A parent with no children is one row
+// with NULL child columns. No ids, or more than ChildStatusesLimit, is an error
+// carried in the Query.
+func ChildStatuses(parentIDs ...string) Query {
+	if len(parentIDs) == 0 {
+		return Query{err: errors.New("beadsql: ChildStatuses needs at least one parent id")}
+	}
+	if len(parentIDs) > ChildStatusesLimit {
+		return Query{err: fmt.Errorf("beadsql: ChildStatuses reads at most %d parents, got %d", ChildStatusesLimit, len(parentIDs))}
+	}
+	args := make([]any, len(parentIDs))
+	for i, id := range parentIDs {
+		args[i] = id
+	}
+	return Query{
+		text: "SELECT p.id, c.id, c.status FROM issues p" +
+			" LEFT JOIN dependencies d ON d.depends_on_issue_id = p.id AND d.type = 'parent-child'" +
+			" LEFT JOIN issues c ON c.id = d.issue_id" +
+			" WHERE p.id IN (" + strings.TrimSuffix(strings.Repeat("?, ", len(parentIDs)), ", ") + ")",
+		args: args,
+	}
+}
+
 // Doctor checks' reads. `bd list` has no ephemeral filter and folds the
 // wisps tier in with --include-infra, so these stay SQL over issues alone.
 
