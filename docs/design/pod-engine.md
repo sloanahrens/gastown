@@ -127,6 +127,7 @@ These runners are in the daemon's closure. Each runs the program its caller pass
 - `internal/notify/pushcmd/pushcmd.go` `Run`
 - `internal/nudge/poller.go` `buildPollerCommand`
 - `internal/polecat/manager.go` `runSetupProcess`
+- `internal/polecatimage/nodeprune.go` `execProgram` — the node-prune helper's runner: `nodePruneWith` passes it, and it runs the `--crictl-bin` program (crictl, or k3s with `--crictl-arg crictl`), never docker
 - `internal/rig/setuphooks.go` `runHook`
 - `internal/sandbox/cli.go` `execRunner`
 - `internal/session/backend_openshell.go` `hostGitEmail`
