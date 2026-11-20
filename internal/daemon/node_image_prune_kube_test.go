@@ -132,3 +132,113 @@ func TestNodeImagePruneKubeArgv(t *testing.T) {
 		assert.Contains(t, err.Error(), "the update directory")
 	})
 }
+
+// TestNodeImagePruneKubeWaitArgv: WaitComplete, Logs and Delete run kubectl through
+// the exec seam with exactly the argv the node-prune run needs, and no
+// --request-timeout or --context flag (gt-ye543d). Logs returns kubectl's stdout
+// untrimmed, because the parser needs the log's final newline.
+func TestNodeImagePruneKubeWaitArgv(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+
+	tests := []struct {
+		name     string
+		call     func(k kubectlNodePrune) ([]byte, error)
+		out      string
+		wantArgs []string
+		wantOut  string
+	}{
+		{
+			name:     "WaitComplete",
+			call:     func(k kubectlNodePrune) ([]byte, error) { return nil, k.WaitComplete(context.Background(), job) },
+			wantArgs: []string{"-n", "gt", "wait", "--for=condition=complete", "job/" + job, "--timeout=960s"},
+		},
+		{
+			name:     "Logs",
+			call:     func(k kubectlNodePrune) ([]byte, error) { return k.Logs(context.Background(), job) },
+			out:      "pruned 3 images\n",
+			wantArgs: []string{"-n", "gt", "logs", "job/" + job},
+			wantOut:  "pruned 3 images\n",
+		},
+		{
+			name:     "Delete",
+			call:     func(k kubectlNodePrune) ([]byte, error) { return nil, k.Delete(context.Background(), job) },
+			wantArgs: []string{"-n", "gt", "delete", "job", job, "--ignore-not-found", "--wait=true"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotArgs []string
+			run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+				gotArgs = args
+				return tt.out, 0, nil
+			}
+			got, err := tt.call(kubectlNodePrune{dir: t.TempDir(), run: run})
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantArgs, gotArgs)
+			assert.Equal(t, tt.wantOut, string(got))
+		})
+	}
+}
+
+// TestNodeImagePruneKubeWaitErrors: a non-zero exit of WaitComplete, Logs or Delete is
+// an error naming the verb and the exit status, never kubectl's output, and a run
+// that fails to start is an error naming the verb.
+func TestNodeImagePruneKubeWaitErrors(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+	const leak = "secret-token"
+
+	verbs := []struct {
+		name     string
+		call     func(k kubectlNodePrune) error
+		wantExit string
+		wantRun  string
+	}{
+		{
+			name:     "WaitComplete",
+			call:     func(k kubectlNodePrune) error { return k.WaitComplete(context.Background(), job) },
+			wantExit: "kubectl wait for the node-prune Job exited 1",
+			wantRun:  "running kubectl wait",
+		},
+		{
+			name: "Logs",
+			call: func(k kubectlNodePrune) error {
+				_, err := k.Logs(context.Background(), job)
+				return err
+			},
+			wantExit: "kubectl logs of the node-prune Job exited 1",
+			wantRun:  "running kubectl logs",
+		},
+		{
+			name:     "Delete",
+			call:     func(k kubectlNodePrune) error { return k.Delete(context.Background(), job) },
+			wantExit: "kubectl delete of the node-prune Job exited 1",
+			wantRun:  "running kubectl delete",
+		},
+	}
+	for _, v := range verbs {
+		t.Run(v.name, func(t *testing.T) {
+			t.Run("non-zero exit", func(t *testing.T) {
+				run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+					return leak, 1, nil
+				}
+				err := v.call(kubectlNodePrune{dir: t.TempDir(), run: run})
+
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), v.wantExit)
+				assert.NotContains(t, err.Error(), leak, "kubectl's output reached the error")
+			})
+			t.Run("run error", func(t *testing.T) {
+				run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+					return "", 0, errors.New("exec: kubectl not found")
+				}
+				err := v.call(kubectlNodePrune{dir: t.TempDir(), run: run})
+
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), v.wantRun)
+			})
+		})
+	}
+}
