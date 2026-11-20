@@ -66,7 +66,8 @@ node-prune: applied removed 2 failed 1
 // log, a log with no summary, a summary of the wrong shape or with a count
 // that does not parse or is negative, a log with both summaries, a truncated
 // would-remove line, and a summary whose count disagrees with the lines the
-// log holds are each an error, never a zero report.
+// log holds, a log cut before its final newline, and a would-remove line cut
+// after its kind are each an error, never a zero report.
 func TestNodePruneReportRefuses(t *testing.T) {
 	t.Parallel()
 
@@ -91,6 +92,9 @@ func TestNodePruneReportRefuses(t *testing.T) {
 		{"applied removed without lines", "node-prune: applied removed 3 failed 0\n"},
 		{"applied removed more than its lines", "node-prune: removed sha256:aaa\nnode-prune: applied removed 2 failed 0\n"},
 		{"applied removed fewer than its lines", "node-prune: removed sha256:aaa\nnode-prune: removed sha256:bbb\nnode-prune: applied removed 1 failed 0\n"},
+		{"applied summary with no final newline", "node-prune: removed sha256:aaa\nnode-prune: applied removed 1 failed 0"},
+		{"dry run summary with no final newline", "node-prune: would remove sha256:aaa gastown-polecat created 2026-11-20T03:00:00Z\nnode-prune: dry run planned 1 images"},
+		{"would-remove cut after created", "node-prune: would remove sha256:aaa gastown-polecat created\nnode-prune: dry run planned 1 images\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
