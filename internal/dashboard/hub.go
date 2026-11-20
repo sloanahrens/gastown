@@ -183,6 +183,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Jobs != nil {
 		start(h.cfg.JobsEvery, h.pollJobs)
 	}
+	if h.cfg.Dolt != nil {
+		start(h.cfg.DoltEvery, h.pollDolt)
+	}
 	if h.cfg.OM != nil {
 		start(h.cfg.OMEvery, h.pollOM)
 	}
@@ -1375,6 +1378,25 @@ func (h *Hub) pollJobs() {
 	}
 	h.state.Jobs = j
 	h.readOKLocked(SourceJobs, h.cfg.JobsEvery)
+	h.publishLocked()
+}
+
+// pollDolt reads the Dolt panel and keeps the last good one across a failed
+// read, like the job list beside it.
+func (h *Hub) pollDolt() {
+	if h.cfg.Dolt == nil {
+		return
+	}
+	d := h.cfg.Dolt()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if d == nil {
+		h.readFailedLocked(SourceDolt, h.cfg.DoltEvery)
+		h.publishLocked()
+		return
+	}
+	h.state.Dolt = d
+	h.readOKLocked(SourceDolt, h.cfg.DoltEvery)
 	h.publishLocked()
 }
 

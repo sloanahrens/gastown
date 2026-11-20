@@ -181,6 +181,8 @@ const (
 	SourceQueue        = "queue"
 	// SourceJobs is the maintenance job list `gt jobs --json` prints.
 	SourceJobs = "jobs"
+	// SourceDolt is the Dolt panel's sections, read as one panel.
+	SourceDolt = "dolt"
 	// SourceReworkNumbers is the rework program's document, read apart from
 	// the rework table beside it.
 	SourceReworkNumbers = "rework_numbers"
@@ -962,6 +964,10 @@ type State struct {
 	// Jobs is the maintenance job list the last good read of `gt jobs --json`
 	// folded; nil until a read has succeeded.
 	Jobs *Jobs `json:"jobs,omitempty"`
+	// Dolt is the Dolt panel's sections from the last good read. It is nil
+	// until the reader first reports; a failed read keeps it and says so in
+	// Reads.
+	Dolt *DoltPanel `json:"dolt,omitempty"`
 	// JevSummary is the JEV page's summary, built from the scorecard and the
 	// spend row beside it. It is nil until the scorecard first reports.
 	JevSummary *JevSummary `json:"jev_summary,omitempty"`
@@ -1051,6 +1057,8 @@ type Config struct {
 	JevScorecard func() *JevScorecard
 	// Jobs returns the maintenance job list, nil when the read failed.
 	Jobs func() *Jobs
+	// Dolt returns the Dolt panel's sections, nil when the read failed.
+	Dolt func() *DoltPanel
 	// JevCap reads the configured daily Jev cap in dollars. It returns nil and no
 	// error when no cap is configured, and an error when the config cannot be
 	// read, so the summary says the cap is unknown rather than unset. A nil
@@ -1159,6 +1167,7 @@ type Config struct {
 	SpendEvery        time.Duration
 	JevSpendEvery     time.Duration
 	JobsEvery         time.Duration
+	DoltEvery         time.Duration
 	JevScorecardEvery time.Duration
 	OMEvery           time.Duration
 	TierSweepEvery    time.Duration
@@ -1214,6 +1223,7 @@ func (c *Config) defaults() {
 	// The jobs run hourly or daily, so a read every five minutes shows a run
 	// within minutes of its ledger line.
 	def(&c.JobsEvery, 5*time.Minute)
+	def(&c.DoltEvery, 5*time.Minute)
 	// The scorecard is a file read of the cache a refresh writes, so the panel
 	// picks up a new score within a minute of it being written.
 	def(&c.JevScorecardEvery, time.Minute)
