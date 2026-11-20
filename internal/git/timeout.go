@@ -69,3 +69,16 @@ func (g *Git) WithoutLocalHooks() *Git {
 	c.noHooks = true
 	return &c
 }
+
+// WithoutAllHooks returns a copy of g whose every call runs with the
+// repository's local git hooks off, a push's pre-push included, the receiver
+// left as it was. It is for the one legitimate pusher, the landing worker,
+// whose pushes must not run a pre-push hook a pod's bd gateway refuses; a
+// polecat or crew handle takes WithoutLocalHooks instead, so the fence stays
+// on for its pushes (gt-gh0vkk).
+func (g *Git) WithoutAllHooks() *Git {
+	c := *g
+	c.noHooks = true
+	c.noPushHooks = true
+	return &c
+}
