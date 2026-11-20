@@ -1285,6 +1285,31 @@ func TestRunVerifySettlesOnARecordedLateTick(t *testing.T) {
 	}
 }
 
+// TestRunVerifyWithAZeroHealthPollUsesTheDefaultPoll: a positive HealthWait with
+// a zero HealthPoll waits the default poll between reads, never a zero wait, so
+// the settling line is re-read after the default poll and the run settles.
+func TestRunVerifyWithAZeroHealthPollUsesTheDefaultPoll(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.verify.healthLines = []string{verifyTestSettling, verifyTestGreen}
+	f.opts.HealthWait = time.Minute
+	f.opts.HealthPoll = 0
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeOK)
+	}
+	if got := step(t, final, StepVerify).Result; got != ResultOK {
+		t.Errorf("verify Result = %q, want %q", got, ResultOK)
+	}
+	if want := []time.Duration{10 * time.Second}; !slices.Equal(f.clock.sleeps, want) {
+		t.Errorf("sleeps = %v, want %v: a zero HealthPoll takes the default poll", f.clock.sleeps, want)
+	}
+}
+
 // TestRunVerifyWithZeroHealthWaitReadsOnce: a zero HealthWait keeps today's
 // single read: a settling line fails verify as recorded today, with no settle
 // suffix and no wait.
