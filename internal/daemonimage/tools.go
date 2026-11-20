@@ -260,11 +260,13 @@ func mainModuleVersion(info string) string {
 }
 
 // toolPlanLines are Plan's lines for BuildTools: the argv each build runs, and the
-// check that reads release-reporter's version back from its binary. hmSrc and
-// devopsSrc are the directories the tools are built from: the named checkouts, or
-// the directories their pins are fetched into.
+// check that reads release-reporter's version back from its binary. hm's line
+// carries the stamp its build carries, from HMVersionVar and the pin as written:
+// a full sha, the form the pins file requires, is the commit pinnedCommit resolves
+// (gt-k8u7ap). hmSrc and devopsSrc are the directories the tools are built from:
+// the named checkouts, or the directories their pins are fetched into.
 func (b Builder) toolPlanLines(hmSrc, devopsSrc string) []string {
-	hm := strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, ""), " ")
+	hm := strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, hmLdflags(b.HMVersionVar, strings.TrimSpace(b.HMCommit))), " ")
 	devops := strings.Join(goBuildArgv(filepath.Join(b.Out, "devops-reporter"), DevopsReporterPackage, ""), " ")
 	release := strings.Join(goBuildArgv(filepath.Join(b.Out, "release-reporter"), ReleaseReporterPackage, ""), " ")
 	cloud := strings.Join(goBuildArgv(filepath.Join(b.Out, "cloudcheck"), DevopsCloudCheckPackage, ""), " ")
