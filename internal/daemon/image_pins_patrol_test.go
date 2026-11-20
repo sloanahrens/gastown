@@ -1164,15 +1164,23 @@ func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
 }
 
 // TestImagePinsPathCountNonNumberIsAnError: a count git answers with anything but
-// a number is an error, never a zero that reads as a pin touching none of its
-// inputs (gt-wz5ct4).
+// a count of commits, a non-number or a negative one, is an error, never a zero
+// that reads as a pin touching none of its inputs (gt-wz5ct4).
 func TestImagePinsPathCountNonNumberIsAnError(t *testing.T) {
 	t.Parallel()
-	n, err := imagePinsPathCountResult(t, func(*exec.Cmd) ([]byte, []byte, error) {
-		return []byte("lots\n"), nil, nil
-	})
-	if err == nil || !strings.Contains(err.Error(), "non-number") {
-		t.Fatalf("a non-number count = %d, %v; want an error saying it is not a number", n, err)
+	for _, tt := range []struct{ name, answer, want string }{
+		{"a non-number", "lots\n", "non-number"},
+		{"a negative count", "-3\n", "negative"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n, err := imagePinsPathCountResult(t, func(*exec.Cmd) ([]byte, []byte, error) {
+				return []byte(tt.answer), nil, nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("%s count = %d, %v; want an error saying %q", tt.name, n, err, tt.want)
+			}
+		})
 	}
 }
 
