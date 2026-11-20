@@ -102,6 +102,34 @@ func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 	awaitNodePruneFlight(t, f.done(), "the run after the panic to end")
 }
 
+// TestNodePruneFlightClearsTheMarkBeforeReporting: a panicking run clears the
+// running mark before it calls report, so a report that blocks does not hold
+// the mark: a Start is accepted while the report is still running.
+func TestNodePruneFlightClearsTheMarkBeforeReporting(t *testing.T) {
+	t.Parallel()
+
+	var f nodePruneFlight
+	reporting, release := make(chan struct{}), make(chan struct{})
+	if !f.Start(context.Background(), func(context.Context) { panic("node prune blew up") },
+		func(any) {
+			close(reporting)
+			// The report waits on release or the test's end, never forever.
+			select {
+			case <-release:
+			case <-t.Context().Done():
+			}
+		}) {
+		t.Fatal("Start = false, want true")
+	}
+	awaitNodePruneFlight(t, reporting, "the panic report to start")
+	// The report is blocked, so only a mark cleared before it can accept this.
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
+		t.Fatal("Start while the report blocks = false, want true: the mark was cleared after the report")
+	}
+	close(release)
+	awaitNodePruneFlight(t, f.done(), "the run whose report blocked to end")
+}
+
 // TestNodePruneFlightSurvivesAPanicWithNilReport: a nil report does not turn the
 // recovered panic into a crash; the mark is cleared and the next Start is accepted.
 func TestNodePruneFlightSurvivesAPanicWithNilReport(t *testing.T) {
