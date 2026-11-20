@@ -2515,20 +2515,22 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	}
 	budget := env.Budget
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
-	budget.SetLive(specLiveWithInFlight(roster.Live, roster.HookedBeads, env.InFlight))
+	// Running slings match the roster's seats by bead and by assignee (gt-7vmtta).
+	seats := specSlingSeats{Hooked: roster.HookedBeads, Live: roster.LiveSeatNames, Assignee: specSlingAssignees(env.Show)}
+	budget.SetLive(specLiveWithInFlight(roster.Live, seats, env.InFlight))
 	// The in-flight term is named apart from the roster in the picture, so a
 	// count above a cap reads as a double count rather than an admission past
 	// it (gt-la4r78). SetLive has set Live, which the term is part of. It names
 	// only the slings SetLive added: a sling whose bead a roster seat hooks is
 	// that seat, already among the live sessions, not a second seat in flight
 	// (gt-75fma5).
-	budget.SetInFlight(specInFlightByAgent(specInFlightAdded(env.InFlight, roster.HookedBeads)))
+	budget.SetInFlight(specInFlightByAgent(specInFlightAdded(env.InFlight, seats)))
 	budget.SetDeadHooked(roster.DeadHooked, roster.DeadHookedClasses)
 	budget.SetDraining(roster.Draining)
 	// The seats the picture names: the roster's, the draining ones SetDraining
 	// added and the running slings SetLive added, so a count above its cap has
 	// one list entry per seat counted (gt-5y87fp).
-	budget.SetHeld(specHeldSeats(roster, env.InFlight))
+	budget.SetHeld(specHeldSeats(roster, seats, env.InFlight))
 	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)
 	// The picture reads each seat's window at the tick's clock; the budget was
 	// built a moment before, and its construction time is no longer the one the
