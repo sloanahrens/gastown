@@ -220,7 +220,32 @@ func (d *Daemon) liveOutboxPoll() *outboxPoll {
 	if d.config != nil {
 		townRoot = d.config.TownRoot
 	}
-	return newOutboxPoll(townRoot, &sandbox.CLI{}, d.outboxPollFiling(), d.logger, outboxPollSeatTimeout)
+	poll := newOutboxPoll(townRoot, &sandbox.CLI{}, d.outboxPollFiling(), d.logger, outboxPollSeatTimeout)
+	if townRoot != "" {
+		poll.filed = d.outboxPollFiledRecord(townRoot)
+	}
+	return poll
+}
+
+// outboxPollFiledRecord returns the record of filed requests the daemon keeps for
+// townRoot, built on first use. The poll is built for every tick, so a record
+// built per poll forgets, at the next tick, a request whose record file could
+// not be written, and files it again each tick for as long as the write fails
+// (a full disk, a read-only .runtime/outbox-poll). A record that failed to read
+// its file is replaced by a new one, so a read failure lasts one tick and not
+// the daemon's life; a restart still reads the file (gt-93p10b).
+func (d *Daemon) outboxPollFiledRecord(townRoot string) *outboxPollFiled {
+	d.outboxPollFiledMu.Lock()
+	defer d.outboxPollFiledMu.Unlock()
+	if rec := d.outboxPollFiledByRoot[townRoot]; rec != nil && !rec.readFailed() {
+		return rec
+	}
+	rec := newOutboxPollFiled(outboxPollFiledPath(townRoot))
+	if d.outboxPollFiledByRoot == nil {
+		d.outboxPollFiledByRoot = make(map[string]*outboxPollFiled)
+	}
+	d.outboxPollFiledByRoot[townRoot] = rec
+	return rec
 }
 
 // tick reads every running seat's outbox once and hands each one it finds to
@@ -740,6 +765,14 @@ func (f *outboxPollFiled) loadLocked() error {
 		f.hashes[hash] = struct{}{}
 	}
 	return nil
+}
+
+// readFailed reports whether the record's file could not be read or parsed. A
+// record that has not been asked yet has not failed.
+func (f *outboxPollFiled) readFailed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.err != nil
 }
 
 // has reports whether hash is a request the poll already filed.
