@@ -243,6 +243,36 @@ func TestIntegrationLandTrackedHookMerge(t *testing.T) {
 	}
 }
 
+// TestIntegrationLandTrackedHookSquash: the landing's squash runs with the
+// target's local hooks off too. The base tracks .githooks and the lander's
+// clone points core.hooksPath at them, and the range carries an auto-save
+// commit, so mergeWork squashes and commits on the target's tree; a
+// prepare-commit-msg or pre-commit the repository tracks exits 1, so a squash
+// that ran one would fail the landing and never move the target (gt-sjwr7a,
+// be-4sgb).
+func TestIntegrationLandTrackedHookSquash(t *testing.T) {
+	t.Parallel()
+
+	f := newRealLandFixture(t)
+	f.base = trackedHooksOnMain(t, f)
+	gitT(t, f.repo, "config", "core.hooksPath", ".githooks")
+	realAutoSaveOnBranch(t, f)
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("squash landing in a repo whose tracked hooks each exit 1: %v", err)
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want landed %s", got, res.LandedCommit)
+	}
+	if parents := f.parents(res.LandedCommit); len(parents) != 1 || parents[0] != f.base {
+		t.Fatalf("landed commit parents = %v, want the squash's single parent %s", parents, f.base)
+	}
+	if got := gitT(t, f.origin, "show", res.LandedCommit+":c.txt"); got != "wip" {
+		t.Errorf("landed c.txt = %q, want the auto-save's work", got)
+	}
+}
+
 func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newRealLandFixture(t))
 }
