@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/metrics"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -1143,20 +1144,35 @@ func (d *Daemon) attentionLandingStuckBudget(stage string) time.Duration {
 	return townhealth.LandingWaitBudget
 }
 
-// attentionSeatWork reports whether the polecat holds assigned open work: a
-// bead assigned to its seat with one of the statuses a sling sets
-// (Daemon.hasAssignedOpenWork's set). Work already submitted for landing is
-// not open work — that seat's record has no samples to be stalled on anyway.
-// The read's error is kept, so an unanswered query is UNKNOWN rather than "no
-// work", which would quietly clear a real stall (townhealth's UNKNOWN rule).
+// attentionSeatWork reports whether the polecat holds assigned open work.
 func (d *Daemon) attentionSeatWork(rig, name string) (bool, error) {
 	assignee := rig + "/polecats/" + name
+	holds, err := seatHoldsOpenWork(func(status string) ([]*beads.Issue, error) {
+		return d.assignedWork(rig, assignee, status)
+	})
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", assignee, err)
+	}
+	return holds, nil
+}
+
+// seatHoldsOpenWork reports whether list answers any work bead in a status a
+// sling sets (Daemon.hasAssignedOpenWork's set) that is not submitted for
+// landing: a seat whose bead carries gt:ready-to-land has finished its turn
+// and awaits the landing worker, so it is not stalled on work in hand
+// (gt-kd866f). The read's error is kept, so an unanswered query is UNKNOWN
+// rather than "no work", which would quietly clear a real stall (townhealth's
+// UNKNOWN rule).
+func seatHoldsOpenWork(list func(status string) ([]*beads.Issue, error)) (bool, error) {
 	for _, status := range []string{"hooked", "in_progress", "open"} {
-		issues, err := d.assignedWork(rig, assignee, status)
+		issues, err := list(status)
 		if err != nil {
-			return false, fmt.Errorf("%s: bd list --status=%s: %w", assignee, status, err)
+			return false, fmt.Errorf("bd list --status=%s: %w", status, err)
 		}
-		if len(issues) > 0 {
+		for _, issue := range issues {
+			if polecat.IsSubmittedWork(issue) {
+				continue
+			}
 			return true, nil
 		}
 	}
