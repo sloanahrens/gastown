@@ -520,6 +520,31 @@ func seatAssignee(reader beadReader) func(beadID string) (string, error) {
 	}
 }
 
+// newRigLander builds the Lander for one rig out of the paths that name it;
+// newRigLandingWorker attaches the collaborators it resolves afterwards (the
+// repo, reviewer, gate, merger and alerts). BeadsDir is the rig's resolved
+// beads store, which the landing's git handles export as BEADS_DIR: a push runs
+// the repository's tracked pre-push, and the beads rig's chains `bd hooks run
+// pre-push`, which refuses a call that sets no BEADS_DIR (gt-s6gney).
+func newRigLander(rigPath, townRoot string) *land.Lander {
+	return &land.Lander{
+		Route:              "daemon",
+		TownRoot:           townRoot,
+		BeadsDir:           beads.ResolveBeadsDir(rigPath),
+		Reviews:            land.TownReviewsFile(townRoot),
+		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
+		ReviewErrorRejects: true,
+		// A revert of a red main lands without om rather than wait on it.
+		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
+		// A bird's rejection keeps the bead with the bird and reaches them as
+		// an attention item, where the town puts what its owners must read
+		// (gt-h4cvi).
+		BirdOwned: birdOwnedAssignee,
+		// A landing record a bead write could not make waits here (gt-r2rmz6).
+		Records: land.TownRecordQueue(townRoot),
+	}
+}
+
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
 	pc := d.patrol()
@@ -629,38 +654,24 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// (gt-ox6ee1). The sink lives as long as this rig's worker, so a bead's
 	// no-transcript note is logged once for it.
 	usage := d.omUsageSinkFor(townRoot)
-	lander := &land.Lander{
-		Repo:               repo,
-		Remote:             landingRemote,
-		WorkRoot:           workRoot,
-		Route:              "daemon",
-		TownRoot:           townRoot,
-		Reviewer:           reviewer,
-		Beads:              bd,
-		Landings:           landings,
-		Reviews:            land.TownReviewsFile(townRoot),
-		RoundsDir:          roundsDirFor(reviewer, omDir),
-		Out:                out,
-		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
-		ReviewErrorRejects: true,
-		Slow:               d.landingSlowAlarm(rigName, cfg),
-		// The Stage callback lets the landing-stuck item judge the pass by the
-		// stage it is running rather than by the whole pipeline, so a long but
-		// healthy gate is not an item (gt-84gcp).
-		Stage: func(_ string, stage string) {
-			d.landingStates.setStage(rigName, stage, d.clk().Now())
-		},
-		// A revert of a red main lands without om rather than wait on it.
-		ReviewErrorLandsLabels: []string{landworker.LabelRevert},
-		// A bird's rejection keeps the bead with the bird and reaches them as
-		// an attention item, where the town puts what its owners must read
-		// (gt-h4cvi).
-		BirdOwned:      birdOwnedAssignee,
-		RejectionAlert: d.rejectionAlert(),
-		UsageSink:      usage.record,
-		// A landing record a bead write could not make waits here (gt-r2rmz6).
-		Records: land.TownRecordQueue(townRoot),
+	lander := newRigLander(rigPath, townRoot)
+	lander.Repo = repo
+	lander.Remote = landingRemote
+	lander.WorkRoot = workRoot
+	lander.Reviewer = reviewer
+	lander.Beads = bd
+	lander.Landings = landings
+	lander.RoundsDir = roundsDirFor(reviewer, omDir)
+	lander.Out = out
+	lander.Slow = d.landingSlowAlarm(rigName, cfg)
+	// The Stage callback lets the landing-stuck item judge the pass by the
+	// stage it is running rather than by the whole pipeline, so a long but
+	// healthy gate is not an item (gt-84gcp).
+	lander.Stage = func(_ string, stage string) {
+		d.landingStates.setStage(rigName, stage, d.clk().Now())
 	}
+	lander.RejectionAlert = d.rejectionAlert()
+	lander.UsageSink = usage.record
 	// A rig lands through its Forgejo CI: the candidate gate runs the merged
 	// tree and the PR merger writes the target. merge_queue.forgejo is
 	// mandatory — the local gate and the force-push were removed once every
