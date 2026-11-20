@@ -416,15 +416,20 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 		}
 		// A shallow clone's boundary commit has no local parent, so rev-list
 		// reads it as a root touching every path. Only a shallow clone is
-		// unshallowed: git refuses --unshallow on a complete one.
+		// unshallowed: git refuses --unshallow on a complete one. Any answer
+		// but true or false is an error, never read as either clone.
 		shallow, err := d.imagePinsGit(ctx, repo, "rev-parse", "--is-shallow-repository")
 		if err != nil {
 			return 0, err
 		}
-		if strings.TrimSpace(string(shallow)) == "true" {
+		switch strings.TrimSpace(string(shallow)) {
+		case "true":
 			if _, err := d.imagePinsGit(ctx, repo, "fetch", "--unshallow", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
 				return 0, err
 			}
+		case "false":
+		default:
+			return 0, fmt.Errorf("git rev-parse --is-shallow-repository answered %q, not true or false", strings.TrimSpace(string(shallow)))
 		}
 		argv := append([]string{"rev-list", "--count", pin + ".." + tip, "--"}, paths...)
 		out, err := d.imagePinsGit(ctx, repo, argv...)
