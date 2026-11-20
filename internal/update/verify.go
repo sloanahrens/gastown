@@ -260,8 +260,10 @@ var queueReasons = map[string]func(string) bool{
 //
 // A probe set that also implements ReadyProbes is asked the town's readiness
 // question after a successful health read instead, and the readiness answer
-// decides the check whatever the line's verdict; a line that does not read as a
-// health line still fails. The roll is thus judged by readiness, so a red rig
+// decides the check, except for a line that holds a daemon or tick reason,
+// which this function's line rule above still judges (classifyHealthLine, so a
+// RED verdict fails at once and a DEGRADED line of recorded late ticks
+// settles); a line that does not read as a health line still fails. A red rig
 // main on the line is reported beside the outcome rather than folded into it.
 // See readyHealthCheck.
 func healthCheck(ctx context.Context, p VerifyProbes) Check {
@@ -287,9 +289,10 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 // GREEN, saying the line is reported beside the roll and is not part of it.
 const readyNote = " (ready: the town's own recorded and queue states are reported beside the roll, not part of it)"
 
-// readyHealthCheck passes the health check exactly when the town's readiness
-// answer says it is ready, whatever the line's verdict, and its detail is the
-// line as read; a line that is not GREEN carries the ready note. A line that
+// readyHealthCheck passes the health check when the town's readiness answer says
+// it is ready and the line holds no daemon or tick reason, whatever the line's
+// verdict, and its detail is the line as read; a line that is not GREEN carries
+// the ready note. A line that
 // holds a reason keyed daemon or beginning tick:, a state readiness excuses, is
 // judged by classifyHealthLine instead: a passing or GREEN line passes, and a
 // settling or failing one fails with the line as read, so VerifyWithSettle
