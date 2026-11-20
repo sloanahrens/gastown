@@ -120,6 +120,7 @@ type Git struct {
 	timeout         time.Duration // deadline for every call when set (WithTimeout)
 	env             []string      // added to every call's environment (WithEnv)
 	unset           []string      // removed from every call's environment (WithoutEnv)
+	noHooks         bool          // run with the repo's local hooks off (WithoutLocalHooks)
 
 	configRetry bool                           // retry once when git cannot read its config files (WithConfigReadRetry)
 	retryWait   func(time.Duration)            // the wait before that retry; nil means time.Sleep
@@ -282,7 +283,15 @@ func (g *Git) runOutput(args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, timeout: g.timeout})
+	// args stays undecorated: wrapError names the first argument that is not a
+	// flag and a timeout reports args[0], so the hook options would be reported
+	// as the command that ran.
+	callArgs := args
+	if g.noHooks {
+		callArgs = hooksOffArgs(args)
+	}
+
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: callArgs, env: g.env, unset: g.unset, timeout: g.timeout})
 	if err != nil {
 		if g.timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: g.timeout}
@@ -608,6 +617,23 @@ func gitSubcommand(args []string) (string, []string) {
 		}
 	}
 	return "", nil
+}
+
+// hooksOffArgs returns args with `-c core.hooksPath=/dev/null` inserted before
+// the subcommand, after the global options, so the call runs none of the
+// repository's local hooks. A push comes back unchanged: its pre-push hook is
+// the fence that refuses a polecat's push to the default branch, and the
+// landing relies on it.
+func hooksOffArgs(args []string) []string {
+	sub, rest := gitSubcommand(args)
+	if sub == "" || sub == "push" {
+		return args
+	}
+	at := len(args) - len(rest) - 1 // the subcommand's own index
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[:at]...)
+	out = append(out, "-c", "core.hooksPath=/dev/null")
+	return append(out, args[at:]...)
 }
 
 func gitSubcommandMutatesWorktree(cmd string, args []string) bool {
