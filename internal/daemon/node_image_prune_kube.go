@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/update"
@@ -37,9 +39,10 @@ const nodePruneCallTimeout = 120 * time.Second
 // kubectlNodePrune is the cluster seam a node-prune run drives.
 var _ nodePruneKube = kubectlNodePrune{}
 
-// ListJSON returns the gt namespace's Jobs, Deployments and Pods as kubectl's JSON.
-// A non-zero exit is an error naming the verb and the status, not kubectl's output.
-// The bound is a context deadline, not --request-timeout (see kubectlUpdateJob.CreateJob).
+// ListJSON returns the gt namespace's Jobs, Deployments and Pods as kubectl's JSON
+// object. A non-zero exit is an error naming the verb and the status, not kubectl's
+// output. The bound is a context deadline, not --request-timeout (see
+// kubectlUpdateJob.CreateJob).
 func (k kubectlNodePrune) ListJSON(ctx context.Context) ([]byte, error) {
 	bounded, cancel := context.WithTimeout(ctx, nodePruneKubeTimeout)
 	defer cancel()
@@ -50,7 +53,39 @@ func (k kubectlNodePrune) ListJSON(ctx context.Context) ([]byte, error) {
 	if exit != 0 {
 		return nil, fmt.Errorf("kubectl get of the gt namespace exited %d", exit)
 	}
-	return []byte(out), nil
+	return listJSONObject("get", out)
+}
+
+// listJSONObject returns the one JSON object in kubectl's answer to verb. kubectl
+// prints a deprecation warning on stdout and still exits 0, so the object is not the
+// whole answer: lines before the first line that begins with "{" are skipped, one
+// value is decoded and what follows is ignored. An answer with no such line, or a
+// value that does not decode, is an error naming the verb, because a prune with no
+// list must not run.
+func listJSONObject(verb, out string) ([]byte, error) {
+	start := -1
+	for off := 0; off < len(out); {
+		end := strings.IndexByte(out[off:], '\n')
+		if end < 0 {
+			end = len(out)
+		} else {
+			end += off
+		}
+		if strings.HasPrefix(out[off:end], "{") {
+			start = off
+			break
+		}
+		off = end + 1
+	}
+	if start < 0 {
+		return nil, fmt.Errorf("kubectl %s answered no JSON object", verb)
+	}
+	var object json.RawMessage
+	if err := json.NewDecoder(strings.NewReader(out[start:])).Decode(&object); err != nil {
+		// The decoder's error quotes a byte of kubectl's answer, so it is not wrapped.
+		return nil, fmt.Errorf("kubectl %s answered a JSON object that does not decode", verb)
+	}
+	return object, nil
 }
 
 // nodePruneManifestName names the manifest file by its content. Two applies of one
