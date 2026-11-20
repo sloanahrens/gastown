@@ -199,6 +199,35 @@ func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge, max
 	return s, s.GateSpent
 }
 
+// overrunGateReadCarryMax is how many consecutive failed gate reads may still
+// carry the last answer. Past it the guard counts all of the seat's time, the
+// direction that stops: a gate read that stays broken is a guard that cannot
+// tell a working seat from a stuck one.
+const overrunGateReadCarryMax = 2
+
+// recordGateRead folds one gate read into the record: a successful read keeps
+// its answer and starts the run of failures over, a failed one lengthens it.
+func (s *overrunState) recordGateRead(ok, inGate bool) {
+	if !ok {
+		s.GateReadFailures++
+		return
+	}
+	s.GateIn, s.GateReadFailures = inGate, 0
+}
+
+// carriedGate is the answer of the last successful gate read, for the caller to
+// use while reads fail: it carries for at most overrunGateReadCarryMax
+// consecutive failures and answers false, false past that, so the caller counts
+// all of the seat's time. Only an in-gate answer is carried — outside is the
+// answer the caller falls back to anyway, and a false answer is the zero value
+// a record with no answer holds, so it cannot be told from one never read.
+func (s overrunState) carriedGate() (inGate, carried bool) {
+	if s.GateIn && s.GateReadFailures <= overrunGateReadCarryMax {
+		return true, true
+	}
+	return false, false
+}
+
 // withEscalation is withGate for the seat's own open escalation
 // (overrun_guard_escalation.go): the same banking, kept in its own counters
 // with its own ceiling, so a forgotten escalation cannot hold the clock for good.
@@ -241,9 +270,12 @@ func chargeWait(spent time.Duration, seenAt, now time.Time, inWait bool, maxChar
 }
 
 // sameWait reports whether two records carry the same gate, escalation and
-// restart accounting, so a tick writes the state only when one moved.
+// restart accounting, so a tick writes the state only when one moved. The gate
+// read's last answer and failure run are part of the accounting: a failed read
+// that lengthens the run must reach the next tick, or the carry never expires.
 func (s overrunState) sameWait(o overrunState) bool {
-	return s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt) &&
+	return s.GateIn == o.GateIn && s.GateReadFailures == o.GateReadFailures &&
+		s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt) &&
 		s.EscalationSeenAt.Equal(o.EscalationSeenAt) && s.EscalationSpent == o.EscalationSpent &&
 		s.EscalationSlingAt.Equal(o.EscalationSlingAt) &&
 		s.RestartSlingAt.Equal(o.RestartSlingAt) && s.RestartedAt.Equal(o.RestartedAt)
@@ -273,6 +305,15 @@ type overrunState struct {
 	GateSlingAt time.Time     `json:"gate_sling_at,omitzero"`
 	GateSpent   time.Duration `json:"gate_spent,omitempty"`
 	GateSeenAt  time.Time     `json:"gate_seen_at,omitzero"`
+
+	// GateIn is the answer of the last successful gate read: whether the seat
+	// was inside its own gate. GateReadFailures counts the consecutive failed
+	// reads since the last successful one, so a short run of them carries that
+	// answer instead of counting all of the seat's time (recordGateRead,
+	// carriedGate). A record written before these fields existed holds false
+	// and zero, which carries nothing.
+	GateIn           bool `json:"gate_in,omitempty"`
+	GateReadFailures int  `json:"gate_read_failures,omitempty"`
 
 	// EscalationSlingAt, EscalationSpent and EscalationSeenAt are the same
 	// accounting for the time the seat waits on an escalation it raised
