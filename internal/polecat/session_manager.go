@@ -872,10 +872,14 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			Branch:      polecatGitBranch,
 			RepoURL:     repoURL,
 			HostWorkDir: workDir,
-			WorkBeadID:  opts.Issue,
-			TaskFile:    m.taskFileFor(workIssue, workDir),
-			Env:         envVars,
-			Trace:       opts.Trace,
+			// The seat clone owes the same worktree-local ignores as a host
+			// polecat clone, so the runtime paths stay untracked where the
+			// repo's .gitignore does not name them (gt-nzzisj).
+			LocalExcludePatterns: rig.LocalExcludePatterns(),
+			WorkBeadID:           opts.Issue,
+			TaskFile:             m.taskFileFor(workIssue, workDir),
+			Env:                  envVars,
+			Trace:                opts.Trace,
 		})
 		if perr != nil {
 			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, perr)

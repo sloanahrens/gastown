@@ -41,6 +41,11 @@ const (
 	openshellProvisioningReply = `{"name":"gt-gastown-sandbox-ace","phase":"Provisioning","conditions":[{"type":"Ready","status":"False"}]}`
 )
 
+// openshellTestExcludePatterns stands in for rig.LocalExcludePatterns(): the
+// session package does not import internal/rig, whose closure carries beads,
+// and internal/polecat pins the caller's wiring of the real list.
+var openshellTestExcludePatterns = []string{".runtime/", ".claude/", ".beads/"}
+
 var openshellTestProfile = Profile{
 	Name:      "polecat-default",
 	Image:     "gastown-polecat:dev",
@@ -88,6 +93,8 @@ func openshellSpawn(town, work string) SpawnSpec {
 		Branch:      openshellTestBranch,
 		RepoURL:     openshellTestRepoURL,
 		HostWorkDir: work,
+
+		LocalExcludePatterns: openshellTestExcludePatterns,
 		Env: map[string]string{
 			"GT_TOWN_ROOT":         town,
 			"GT_POLECAT_PATH":      work,
@@ -236,6 +243,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/polecat-runtime.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/polecat-runtime.tgz", "-C", "/sandbox"),
 		sandboxExec("sh", "-c", cloneScript, "sh", openshellTestBranch, openshellTestRepoURL, openshellTestWorkDir, strconv.Itoa(sandboxCloneDepth)),
+		sandboxExec("sh", "-c", excludeScript, "sh", openshellTestWorkDir, strings.Join(openshellTestExcludePatterns, "\n")),
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/workspace.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/workspace.tgz", "-C", openshellTestWorkDir),
 		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
@@ -1582,6 +1590,52 @@ func TestOpenShellPrepareCloneFailureDeletesTheSandbox(t *testing.T) {
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a failed Prepare left a sandbox record behind")
+	}
+}
+
+// A clone that succeeds but whose exclude step fails stops the create with an
+// error naming the exclude step, so a seat is never started with .runtime/,
+// .claude/ and .beads/ left visible to git add -A.
+func TestOpenShellPrepareExcludeFailureNamesTheStep(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	run := b.cli.Run
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
+		if slices.ContainsFunc(argv, func(a string) bool { return a == excludeScript }) {
+			return nil, []byte("mkdir: cannot create directory"), errors.New("exit status 1")
+		}
+		return run(ctx, argv, stdin, env)
+	}
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), "writing local exclude patterns") {
+		t.Fatalf("err = %v, want the exclude failure named", err)
+	}
+	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
+		t.Fatal("a failed Prepare left a sandbox record behind")
+	}
+}
+
+// A spec that names no exclude patterns is refused before the clone: writing an
+// empty exclude file would leave .runtime/, .claude/ and .beads/ committable.
+func TestOpenShellPrepareRefusesASpecWithNoExcludePatterns(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	spec := openshellSpawn(town, work)
+	spec.LocalExcludePatterns = nil
+
+	_, err := b.Prepare(context.Background(), spec)
+	if err == nil || !strings.Contains(err.Error(), "writing local exclude patterns") {
+		t.Fatalf("err = %v, want the missing-patterns refusal", err)
+	}
+	if slices.ContainsFunc(fake.Calls(), func(argv []string) bool {
+		return slices.ContainsFunc(argv, func(a string) bool { return a == cloneScript || a == excludeScript })
+	}) {
+		t.Fatal("the clone or the exclude step ran with no exclude patterns")
 	}
 }
 

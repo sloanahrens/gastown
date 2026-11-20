@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -246,6 +247,23 @@ func TestLaunchGivesSandboxPrepareTheWorkBead(t *testing.T) {
 	}
 	if b.got.WorkBeadID != issue.ID {
 		t.Errorf("SpawnSpec.WorkBeadID = %q, want the slung bead %q", b.got.WorkBeadID, issue.ID)
+	}
+}
+
+// The seat clone writes the same local exclude patterns a host polecat worktree
+// gets, so .runtime/, .claude/ and .beads/ stay untracked without the repo's
+// .gitignore (gt-nzzisj).
+func TestLaunchGivesSandboxPrepareTheLocalExcludePatterns(t *testing.T) {
+	t.Parallel()
+	b, err := launchOnSandbox(t, "http://forgejo:3000/owner/gastown.git")
+	if err == nil || !strings.Contains(err.Error(), "stop after prepare") {
+		t.Fatalf("launch = %v, want the backend's stop error", err)
+	}
+	if b.got == nil {
+		t.Fatal("Prepare was never called")
+	}
+	if want := rig.LocalExcludePatterns(); !slices.Equal(b.got.LocalExcludePatterns, want) {
+		t.Errorf("SpawnSpec.LocalExcludePatterns = %q, want %q", b.got.LocalExcludePatterns, want)
 	}
 }
 
