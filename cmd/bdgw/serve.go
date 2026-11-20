@@ -117,6 +117,24 @@ func serve(ctx context.Context, sc *serveConfig) error {
 	if err != nil {
 		return err
 	}
+	// The busy minutes' slot peaks are worth a log line each, so the cap is
+	// tuned from data and a burst shows in the log (gt-easis6). The logger's
+	// context is serve's own, so it stops and is waited for when serve returns,
+	// not only when the process's context ends.
+	peakCtx, stopPeak := context.WithCancel(ctx)
+	peakTicker := time.NewTicker(time.Minute)
+	peakDone := make(chan struct{})
+	go func() {
+		defer close(peakDone)
+		bdgateway.RunPeakLog(peakCtx, peakTicker.C, runner.TakeWindowStats, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "bdgw serve: "+format+"\n", args...)
+		})
+	}()
+	defer func() {
+		stopPeak()
+		peakTicker.Stop()
+		<-peakDone
+	}()
 	gateway, err := sc.newGateway(bdgateway.GatewayOptions{
 		Auth:       auth,
 		Policy:     policy,
