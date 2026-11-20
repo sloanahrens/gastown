@@ -58,8 +58,18 @@ func TestLogRoundsKeepsThePolecatRoundsUnderATakeover(t *testing.T) {
 	l.logRounds(issue, Work{BeadID: "gt-x", Branch: "crew/overseer/gt-x", Head: "crewhead"},
 		Verdict{Verdict: VerdictRequestChanges, Findings: []Finding{{ID: "F1", Severity: "major"}}})
 	rounds := renderedOf(t, &RoundsLedger{OutDir: dir, Bead: "gt-x"}, 0)
-	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Head != "p2" || rounds[2].Head != "p3" || rounds[3].Round != 1 || rounds[3].Head != "crewhead" {
+	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Head != "p2" || rounds[2].Head != "p3" || rounds[3].Head != "crewhead" {
 		t.Fatalf("rounds = %+v, want the polecat's rounds kept and the crew's round 1 added", rounds)
+	}
+	// The findings stay with the round that raised them: the polecat's rounds
+	// carry none, and the takeover's round carries its F1.
+	for i := 0; i < 3; i++ {
+		if len(rounds[i].Findings) != 0 {
+			t.Errorf("polecat round %d carries %+v, want no findings", i+1, rounds[i].Findings)
+		}
+	}
+	if len(rounds[3].Findings) != 1 || rounds[3].Findings[0].ID != "F1" {
+		t.Errorf("the takeover's round carries %+v, want its F1", rounds[3].Findings)
 	}
 	// A polecat landing's lane is "", so it replaces its own round 1.
 	l.logRounds(&beads.Issue{ID: "gt-x"}, Work{BeadID: "gt-x", Branch: "polecat/nux/gt-x+nonce", Head: "p1b"},
