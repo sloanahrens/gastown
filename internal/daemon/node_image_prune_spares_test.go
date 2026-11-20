@@ -236,6 +236,11 @@ func TestNodeImagePruneSparesRefuses(t *testing.T) {
 			listDoc: `{"kind":"List","items":[`,
 			wantSub: "does not parse",
 		},
+		{
+			name:    "item that is not an object",
+			listDoc: jsonList(ok, `"gt-update-x"`),
+			wantSub: "an item does not parse",
+		},
 	}
 
 	for _, tt := range tests {
