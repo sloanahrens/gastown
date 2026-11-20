@@ -914,6 +914,97 @@ func TestRecoverOnlyRefusesNoMarker(t *testing.T) {
 	}
 }
 
+// heldWatch wraps the Exec seam and records whether the run marker is held when
+// each statement is sent, so a test sees the marker during the recovery and not
+// only before and after it.
+type heldWatch struct {
+	inner  Exec
+	marker *runMarker
+	heldAt []bool
+}
+
+func (w *heldWatch) Exec(ctx context.Context, statement string) (Rows, error) {
+	w.heldAt = append(w.heldAt, w.marker.held)
+	return w.inner.Exec(ctx, statement)
+}
+
+// TestRecoverOnlyReleasesTheMarkerOnEveryPath pins the run marker across
+// RecoverOnly's exits: it is held for every statement the recovery sends, and it
+// is released after a successful recovery, after a recovery error and after a
+// clean catalog that recovers nothing (gt-grsuzd, gt-2x4rx5).
+func TestRecoverOnlyReleasesTheMarkerOnEveryPath(t *testing.T) {
+	t.Parallel()
+	t.Run("a successful recovery holds the marker for every statement and releases it", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		found := map[string]string{"main-pre-squash": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
+		restored := map[string]string{"main": fx.before.Tip, "compact-work": fx.before.Tip, "compact-base": fx.initial}
+		after := map[string]string{"main": fx.before.Tip}
+		f := NewFakeExec()
+		f.Respond(branchesStatement, branchesRows(found))
+		f.Respond("CALL DOLT_BRANCH", Rows{})
+		f.Respond("CALL DOLT_CHECKOUT", Rows{})
+		f.Respond(branchesStatement, branchesRows(restored))
+		f.Respond(recoveryNewerStatement("main"), identitiesRows(fx.newer))
+		f.Respond(recoveryNewerStatement("compact-work"), identitiesRows(fx.newer))
+		f.Respond(recoveryNewerStatement("compact-base"), identitiesRows(nil))
+		f.Respond(branchesStatement, branchesRows(after))
+
+		marker := &runMarker{}
+		watch := &heldWatch{inner: f, marker: marker}
+		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: watch, Marker: marker, Cut: cutOf()})
+		if err != nil {
+			t.Fatalf("RecoverOnly: %v", err)
+		}
+		if got == nil || got.State != RecoveryFirstRename {
+			t.Fatalf("the recovery is %+v, want state %q", got, RecoveryFirstRename)
+		}
+		if len(watch.heldAt) == 0 {
+			t.Fatal("the recovery sent no statement, so the marker was never read while held")
+		}
+		for i, held := range watch.heldAt {
+			if !held {
+				t.Errorf("statement %d ran with the run marker released, want it held while Recover runs", i)
+			}
+		}
+		if marker.held || marker.releases != 1 {
+			t.Errorf("after the successful recovery the marker is held %v with %d releases, want released once", marker.held, marker.releases)
+		}
+	})
+	t.Run("a recovery error releases the marker", func(t *testing.T) {
+		t.Parallel()
+		f := NewFakeExec()
+		f.RespondErr(branchesStatement, errDeath)
+		marker := &runMarker{}
+
+		_, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
+		if !errors.Is(err, errDeath) {
+			t.Fatalf("RecoverOnly returned %v, want the recovery's error %v", err, errDeath)
+		}
+		if marker.held || marker.releases != 1 {
+			t.Errorf("after the recovery error the marker is held %v with %d releases, want released once", marker.held, marker.releases)
+		}
+	})
+	t.Run("a clean catalog releases the marker", func(t *testing.T) {
+		t.Parallel()
+		fx := newRunFixture()
+		f := NewFakeExec()
+		f.Respond(branchesStatement, branchesRows(map[string]string{"main": fx.before.Tip}))
+		marker := &runMarker{}
+
+		got, err := RecoverOnly(context.Background(), RecoverInput{Exec: f, Marker: marker, Cut: cutOf()})
+		if err != nil {
+			t.Fatalf("RecoverOnly: %v", err)
+		}
+		if got != nil {
+			t.Errorf("RecoverOnly returned %+v for a clean catalog, want a nil Recovery", got)
+		}
+		if marker.held || marker.releases != 1 {
+			t.Errorf("after the clean catalog the marker is held %v with %d releases, want released once", marker.held, marker.releases)
+		}
+	})
+}
+
 // TestRecoverFirstRenameKeepsALandedCommit drives the first-rename row over the
 // catalog a row-three recovery leaves when it dies between its own renames:
 // compact-work holds a writer's commit, so it is kept rather than dropped
