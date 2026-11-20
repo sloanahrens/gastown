@@ -270,10 +270,10 @@ func TestWaitForRestartTimesOutAndStopsOnCancel(t *testing.T) {
 	})
 }
 
-// settleVerify runs VerifyWithSettle on green probes answering lines.
-func settleVerify(t *testing.T, wait time.Duration, lines ...string) ([]Check, *[]time.Duration) {
+// settleProbes runs VerifyWithSettle on probes whose health answers lines, with
+// wait as the bound, and returns the checks and the sleeps it recorded.
+func settleProbes(t *testing.T, probes *fakeVerifyProbes, wait time.Duration, lines ...string) ([]Check, *[]time.Duration) {
 	t.Helper()
-	probes := greenProbes()
 	probes.healthLines = lines
 	clock := &fakeVerifyClock{now: parseVerifyTime(t)}
 	sleep, sleeps := verifySleeps(clock)
@@ -282,6 +282,12 @@ func settleVerify(t *testing.T, wait time.Duration, lines ...string) ([]Check, *
 		t.Fatalf("VerifyWithSettle: %v", err)
 	}
 	return checks, sleeps
+}
+
+// settleVerify runs VerifyWithSettle on green probes answering lines.
+func settleVerify(t *testing.T, wait time.Duration, lines ...string) ([]Check, *[]time.Duration) {
+	t.Helper()
+	return settleProbes(t, greenProbes(), wait, lines...)
 }
 
 // TestVerifyWithSettlePassesWhenTheLateTickClears: two settling reads then
@@ -320,6 +326,63 @@ func TestVerifyWithSettleReturnsAFailedSleepError(t *testing.T) {
 	_, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, verifyTestPoll)
 	if err == nil || err.Error() != "canceled" {
 		t.Fatalf("VerifyWithSettle error = %v, want the sleep's", err)
+	}
+}
+
+// TestVerifyWithSettleFailsAtOnceOnARedLine: a RED line is a fault, not a
+// settle, so it is read once and not waited on.
+func TestVerifyWithSettleFailsAtOnceOnARedLine(t *testing.T) {
+	t.Parallel()
+	const red = "RED tick 1m ago: landing=stuck"
+	probes := greenProbes()
+	checks, sleeps := settleProbes(t, probes, verifyTestTimeout, red)
+
+	assertFailedChecks(t, checks, checkHealth)
+	if health := findCheck(t, checks, checkHealth); health.Detail != red {
+		t.Errorf("health detail = %q, want the red line as read", health.Detail)
+	}
+	if probes.healthCalls != 1 {
+		t.Errorf("read the health line %d times, want 1: a red line must not be read again", probes.healthCalls)
+	}
+	if len(*sleeps) != 0 {
+		t.Errorf("slept %d times, want none: a red line is not a settle", len(*sleeps))
+	}
+}
+
+// TestVerifyWithSettleDoesNotRetryAProbeError: a health probe that errors is
+// not read again and does not wait.
+func TestVerifyWithSettleDoesNotRetryAProbeError(t *testing.T) {
+	t.Parallel()
+	probes := greenProbes()
+	probes.errHealth = errors.New("health probe timed out")
+	checks, sleeps := settleProbes(t, probes, verifyTestTimeout)
+
+	assertFailedChecks(t, checks, checkHealth)
+	if health := findCheck(t, checks, checkHealth); health.Detail != "health probe timed out" {
+		t.Errorf("health detail = %q, want the probe's error", health.Detail)
+	}
+	if probes.healthCalls != 1 {
+		t.Errorf("read the health line %d times, want 1: a probe error is not retried", probes.healthCalls)
+	}
+	if len(*sleeps) != 0 {
+		t.Errorf("slept %d times, want none: a probe error is not waited on", len(*sleeps))
+	}
+}
+
+// TestVerifyWithSettleKeepsTheVersionChecksFromTheFirstRun: the settle re-reads
+// only the health line, so the version and image probes are asked once.
+func TestVerifyWithSettleKeepsTheVersionChecksFromTheFirstRun(t *testing.T) {
+	t.Parallel()
+	probes := greenProbes()
+	checks, _ := settleProbes(t, probes, verifyTestTimeout, verifyTestSettling, verifyTestGreen)
+
+	assertFailedChecks(t, checks)
+	if probes.gtCalls != 1 || probes.daemonCalls != 1 || probes.imageCalls != 1 {
+		t.Errorf("version and image probes called %d, %d and %d times, want 1 each: the settle re-reads only the health line",
+			probes.gtCalls, probes.daemonCalls, probes.imageCalls)
+	}
+	if probes.healthCalls != 2 {
+		t.Errorf("read the health line %d times, want 2: the first read and one settling re-read", probes.healthCalls)
 	}
 }
 
