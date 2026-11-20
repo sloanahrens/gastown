@@ -7,17 +7,18 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeKube records the seam calls in order, serves canned reads, and refuses the
 // calls named fail and alsoFail. The call named cancelOn runs cancel first, and
-// Delete records whether its context was cancelled and whether it has a deadline.
+// Delete records whether its context was cancelled and the deadline it carries.
 type fakeKube struct {
 	calls                    []string
 	fail, alsoFail, cancelOn string
 	cancel                   context.CancelFunc
 	deleteErr                error
-	deleteDeadline           bool
+	deleteDeadline           time.Time
 	list, logs, sent         []byte
 }
 
@@ -37,7 +38,9 @@ func (k *fakeKube) WaitComplete(context.Context, string) error   { return k.call
 func (k *fakeKube) Logs(context.Context, string) ([]byte, error) { return k.logs, k.call("Logs") }
 func (k *fakeKube) Delete(ctx context.Context, _ string) error {
 	k.deleteErr = ctx.Err()
-	_, k.deleteDeadline = ctx.Deadline()
+	if deadline, ok := ctx.Deadline(); ok {
+		k.deleteDeadline = deadline
+	}
 	return k.call("Delete")
 }
 
@@ -205,8 +208,31 @@ func TestNodeImagePruneRunFailsClosedDeletesTheJob(t *testing.T) {
 			if kube.deleteErr != nil {
 				t.Errorf("Delete context err = %v, want it not cancelled with the caller's", kube.deleteErr)
 			}
-			if !kube.deleteDeadline {
+			if kube.deleteDeadline.IsZero() {
 				t.Errorf("Delete context has no deadline, want one so a hung delete ends")
+			}
+		})
+	}
+}
+
+// TestNodeImagePruneRunDeleteDeadlineIsShort pins that the delete deadline the
+// failed-wait and good-read runs give Delete is at most 120 seconds away.
+func TestNodeImagePruneRunDeleteDeadlineIsShort(t *testing.T) {
+	t.Parallel()
+
+	for _, fail := range []string{"WaitComplete", ""} {
+		t.Run("fail="+fail, func(t *testing.T) {
+			t.Parallel()
+			kube := &fakeKube{fail: fail, list: []byte(jsonList(jsonDeployment("gt-daemon", digestN("a")))), logs: []byte(nodePruneLogDry)}
+			before := time.Now()
+			if _, err := runNodeImagePrune(context.Background(), kube, "node-prune-x", "gt-bd:1", 2, false); (err != nil) != (fail != "") {
+				t.Fatalf("runNodeImagePrune error = %v, want error=%v", err, fail != "")
+			}
+			if kube.deleteDeadline.IsZero() {
+				t.Fatalf("Delete context has no deadline, want one so a hung delete ends")
+			}
+			if away := kube.deleteDeadline.Sub(before); away > 120*time.Second {
+				t.Errorf("Delete deadline is %v away, want at most 2m", away)
 			}
 		})
 	}
