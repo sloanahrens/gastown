@@ -447,6 +447,29 @@ func TestTickEffParseRigHeads(t *testing.T) {
 	}
 }
 
+// TestTickEffChildStatusesQuery: ChildStatuses inlines both ids into one SELECT
+// that passes ReadOnly; no ids, and one id over the limit, are refused.
+func TestTickEffChildStatusesQuery(t *testing.T) {
+	t.Parallel()
+	s, err := ChildStatuses("gt-a", "gt-b").Inline()
+	if err != nil {
+		t.Fatalf("Inline: %v", err)
+	}
+	want := "SELECT p.id, c.id, c.status FROM issues p" +
+		" LEFT JOIN dependencies d ON d.depends_on_issue_id = p.id AND d.type = 'parent-child'" +
+		" LEFT JOIN issues c ON c.id = d.issue_id" +
+		" WHERE p.id IN ('gt-a', 'gt-b')"
+	if s != want {
+		t.Errorf("ChildStatuses =\n%s\nwant\n%s", s, want)
+	}
+	if _, err := ChildStatuses().Inline(); err == nil {
+		t.Error("no parent ids: Inline accepted the statement")
+	}
+	if _, err := ChildStatuses(make([]string, ChildStatusesLimit+1)...).Inline(); err == nil {
+		t.Errorf("%d parent ids: Inline accepted the statement", ChildStatusesLimit+1)
+	}
+}
+
 // selectFieldCount counts a SELECT list's fields.
 func selectFieldCount(t *testing.T, selectList string) int {
 	t.Helper()
