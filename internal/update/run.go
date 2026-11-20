@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Step details for a step that ends with less than the run set out to do.
@@ -639,6 +640,39 @@ func checksDetail(checks []Check) string {
 		parts[i] = c.Name + ": " + c.Detail
 	}
 	return strings.Join(parts, "; ")
+}
+
+// townHealthDetailMax bounds the health line a verify step records beside a
+// passing roll, so the line stays readable in the state file, `gt update
+// status` and the dashboard.
+const townHealthDetailMax = 200
+
+// townHealthDetail names the town health line beside a passing roll: the line
+// of an OK health check that carries the ready note, the note removed. A green
+// line (no note) and a failed or missing health check give "". A line over
+// townHealthDetailMax bytes is cut on a rune boundary.
+func townHealthDetail(checks []Check) string {
+	for _, c := range checks {
+		if c.Name != checkHealth {
+			continue
+		}
+		if !c.OK {
+			return ""
+		}
+		line, found := strings.CutSuffix(c.Detail, readyNote)
+		if !found {
+			return ""
+		}
+		if len(line) > townHealthDetailMax {
+			cut := townHealthDetailMax
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			line = line[:cut]
+		}
+		return "town health: " + line
+	}
+	return ""
 }
 
 // lift releases the hold when this run owns it and records the release. A hold
