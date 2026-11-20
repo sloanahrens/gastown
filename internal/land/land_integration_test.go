@@ -425,3 +425,112 @@ func TestIntegrationHeadAuthorFailsClosed(t *testing.T) {
 		}
 	})
 }
+
+// prePushHookOnMain commits a tracked .githooks/pre-push that runs body as the
+// new main tip and points the lander's clone (and the worktrees cut from it)
+// at .githooks. The rigs track their hooks there — the beads rig's pre-push
+// chains `bd hooks run pre-push` — and in a pod bd refuses a call with no
+// BEADS_DIR (gt-xg33gs, be-4sgb).
+func prePushHookOnMain(t *testing.T, f *landFixture, body string) string {
+	t.Helper()
+	seed := filepath.Join(filepath.Dir(f.origin), "seed")
+	if err := os.MkdirAll(filepath.Join(seed, ".githooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join(".githooks", "pre-push")
+	if err := os.WriteFile(filepath.Join(seed, rel), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitT(t, seed, "add", rel)
+	gitT(t, seed, "update-index", "--chmod=+x", rel)
+	gitT(t, seed, "commit", "-q", "-m", "main: tracked pre-push")
+	gitT(t, seed, "push", "-q", "origin", "main")
+	gitT(t, f.repo, "fetch", "-q", "origin")
+	gitT(t, f.repo, "config", "core.hooksPath", ".githooks")
+	return gitT(t, seed, "rev-parse", "HEAD")
+}
+
+// pushCandidate pushes the fixture's head as branch through the handle the
+// lander opens at a worktree cut from base: the push the candidate gate makes.
+func pushCandidate(t *testing.T, l *Lander, f *landFixture, branch string) error {
+	t.Helper()
+	dir := filepath.Join(f.workRoot, "wt")
+	gitT(t, f.repo, "worktree", "add", "-q", "--detach", dir, f.base)
+	t.Cleanup(func() {
+		if err := git.NewGit(f.repo).WorktreeRemove(dir, true); err != nil {
+			t.Errorf("removing the test worktree: %v", err)
+		}
+	})
+	return (&CandidateGate{}).push(l.openLanding(dir, nil), branch, f.work.Head)
+}
+
+// TestIntegrationLandBeadsDirReachesPrePush: the candidate handle the landing
+// opens carries the rig's BEADS_DIR, so the tracked pre-push that runs bd finds
+// its store and the candidate push passes; with no BEADS_DIR the same hook
+// refuses that push (gt-xg33gs). The empty case also proves the hook runs at
+// all, so the first case is not green because the hook was never invoked.
+//
+// The test pins BEADS_DIR empty itself rather than leaning on the hermetic
+// harness to scrub it, so neither case reads the caller's environment: an
+// empty value is unset to the hook's `[ -n "$BEADS_DIR" ]`, and the handle's
+// own entry lands after the process's, where git keeps the last one.
+func TestIntegrationLandBeadsDirReachesPrePush(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	f := newRealLandFixture(t)
+	f.base = prePushHookOnMain(t, f, "#!/bin/sh\n[ -n \"$BEADS_DIR\" ] || exit 1\n")
+	l := f.lander()
+
+	t.Run("a configured BeadsDir reaches the hook", func(t *testing.T) {
+		l.BeadsDir = filepath.Join(f.town, ".beads")
+		if err := pushCandidate(t, l, f, "land/gt-abc"); err != nil {
+			t.Fatalf("candidate push with BeadsDir set: %v", err)
+		}
+	})
+	t.Run("no BeadsDir leaves the hook to refuse the push", func(t *testing.T) {
+		l.BeadsDir = ""
+		if err := pushCandidate(t, l, f, "land/gt-def"); err == nil {
+			t.Fatal("candidate push with no BeadsDir = nil error, want the pre-push hook's refusal")
+		}
+	})
+}
+
+// TestIntegrationLandBeadsDirKeepsThePrePushFence: a tracked pre-push that
+// refuses every push still refuses it with BeadsDir set. The landing exports
+// BEADS_DIR to its handles; it never switches the fence off (gt-xg33gs,
+// gt-sjwr7a). BEADS_DIR is pinned empty first so the case cannot inherit one
+// from the caller (gt-xg33gs).
+func TestIntegrationLandBeadsDirKeepsThePrePushFence(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	f := newRealLandFixture(t)
+	f.base = prePushHookOnMain(t, f, "#!/bin/sh\nexit 1\n")
+	l := f.lander()
+	l.BeadsDir = filepath.Join(f.town, ".beads")
+	if err := pushCandidate(t, l, f, "land/gt-abc"); err == nil {
+		t.Fatal("candidate push under a pre-push that always exits 1 = nil error, want the hook's refusal")
+	}
+}
+
+// TestIntegrationLandBeadsDirReachesTheReadHandle: the handle the landing's
+// reads and refs/landed push are made through carries BEADS_DIR too, so the
+// tracked pre-push passes there; with none it refuses (gt-xg33gs). BEADS_DIR
+// is pinned empty first, for the same reason as the candidate test.
+func TestIntegrationLandBeadsDirReachesTheReadHandle(t *testing.T) {
+	t.Setenv("BEADS_DIR", "")
+	f := newRealLandFixture(t)
+	prePushHookOnMain(t, f, "#!/bin/sh\n[ -n \"$BEADS_DIR\" ] || exit 1\n")
+	gitT(t, f.repo, "pull", "-q", "--ff-only", "origin", "main")
+	l := f.lander()
+
+	t.Run("a configured BeadsDir reaches the hook", func(t *testing.T) {
+		l.BeadsDir = filepath.Join(f.town, ".beads")
+		if err := l.open(f.repo).Push("origin", f.work.Head+":refs/landed/gt-abc", false); err != nil {
+			t.Fatalf("push through the read handle with BeadsDir set: %v", err)
+		}
+	})
+	t.Run("no BeadsDir leaves the hook to refuse the push", func(t *testing.T) {
+		l.BeadsDir = ""
+		if err := l.open(f.repo).Push("origin", f.work.Head+":refs/landed/gt-def", false); err == nil {
+			t.Fatal("push through the read handle with no BeadsDir = nil error, want the pre-push hook's refusal")
+		}
+	})
+}

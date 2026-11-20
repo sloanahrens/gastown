@@ -179,3 +179,40 @@ func TestLandMergeHandleCarriesTheLandingIdentity(t *testing.T) {
 		t.Fatalf("merge handle env = %q, want %q", got, want)
 	}
 }
+
+// The merge handle carries the rig's BEADS_DIR after the identity entries when
+// the lander was told its beads store, and no BEADS_DIR entry at all when it
+// was not: a tracked pre-push that runs bd finds its store, and a lander never
+// told one leaves the environment exactly as before (gt-xg33gs).
+func TestLandMergeHandleCarriesTheBeadsDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		beadsDir string
+		want     []string
+	}{
+		{name: "a configured beads store", beadsDir: "/town/gastown/.beads", want: []string{"BEADS_DIR=/town/gastown/.beads"}},
+		{name: "no beads store", beadsDir: "", want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newLandFixture(t)
+			l := f.lander()
+			l.BeadsDir = tt.beadsDir
+			var got []string
+			l.landingEnv = func(env []string) { got = env }
+
+			if _, err := l.Land(context.Background(), f.work); err != nil {
+				t.Fatalf("Land: %v", err)
+			}
+			identity, err := CommittingEnv(Identity{Name: "Seat Opal", Email: "opal@gastown.local"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append(slices.Clone(identity), tt.want...)
+			if !slices.Equal(got, want) {
+				t.Fatalf("merge handle env = %q, want %q", got, want)
+			}
+		})
+	}
+}
