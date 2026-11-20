@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -249,21 +250,23 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 		{"git_hygiene", gitHygieneInterval(cfg)},
 		{"events_prune", pruneEvery},
 	}
+	// One read of the record serves every patrol. A missing file is an empty
+	// record: no run recorded and no pass in flight.
+	rec, err := readPatrolLastRunFile(s.townRoot())
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
 	started := s.daemonStarted()
 	var out []townhealth.Tick
 	for _, p := range all {
 		if !s.d.isPatrolActive(p.name) {
 			continue
 		}
-		last, _, err := loadPatrolLastRun(s.townRoot(), p.name)
+		running, err := runningSinceOf(rec, p.name, started)
 		if err != nil {
 			return nil, err
 		}
-		running, err := ReadPatrolRunningSince(s.townRoot(), p.name, started)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: last, RunningSince: running})
+		out = append(out, townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: rec.LastRun[p.name], RunningSince: running})
 	}
 	return out, nil
 }
