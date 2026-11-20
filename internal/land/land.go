@@ -882,10 +882,11 @@ func (l *Lander) review(ctx context.Context, in ReviewInput) (Verdict, error) {
 }
 
 // beadsEnv is BEADS_DIR for the lander's git handles when it was told its
-// rig's beads store: a push through them runs the repository's tracked
-// pre-push, and the beads rig's chains `bd hooks run pre-push`, which the
-// pod's bd gateway refuses when the call sets no BEADS_DIR (gt-xg33gs). Nil
-// exports nothing, so a lander never told a store behaves as before.
+// rig's beads store: the handle the lander's reads and refs/landed push are
+// made through keeps the repository's tracked pre-push, and the beads rig's
+// chains `bd hooks run pre-push`, which the pod's bd gateway refuses when the
+// call sets no BEADS_DIR (gt-xg33gs). Nil exports nothing, so a lander never
+// told a store behaves as before.
 func (l *Lander) beadsEnv() []string {
 	if l.BeadsDir == "" {
 		return nil
@@ -906,11 +907,12 @@ func (l *Lander) open(dir string) Repo {
 
 // openLanding opens the merge candidate's worktree through a handle whose every
 // call carries env (CommittingEnv), so the merge commit's committer and author
-// are set explicitly (gt-dc4y3, gt-vuv2n), and runs with the repository's local
-// hooks off, so a hook the target tracks cannot fail the merge (gt-sjwr7a).
-// Push keeps its pre-push hook: WithoutLocalHooks leaves a push alone, and
-// BEADS_DIR rides with it so a tracked pre-push that runs bd passes
-// (gt-xg33gs).
+// are set explicitly (gt-dc4y3, gt-vuv2n), and runs with every repository hook
+// off, the candidate push's pre-push included: the worker is the one legitimate
+// pusher, and a rig whose tracked pre-push runs `bd hooks run` can never pass it
+// in a pod where the bd gateway refuses that verb (gt-sjwr7a, gt-5nmfx4). The
+// polecat and crew handles take WithoutLocalHooks instead, so the fence stays on
+// for their pushes.
 func (l *Lander) openLanding(dir string, env []string) Repo {
 	if beads := l.beadsEnv(); len(beads) > 0 {
 		env = append(slices.Clone(env), beads...)
@@ -921,7 +923,7 @@ func (l *Lander) openLanding(dir string, env []string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return git.NewGit(dir).WithEnv(env).WithConfigReadRetry().WithoutLocalHooks()
+	return git.NewGit(dir).WithEnv(env).WithConfigReadRetry().WithoutAllHooks()
 }
 
 // landingCommitEnv is the environment the landing's merge commit is made under:

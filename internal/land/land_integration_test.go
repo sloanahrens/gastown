@@ -450,9 +450,10 @@ func prePushHookOnMain(t *testing.T, f *landFixture, body string) string {
 	return gitT(t, seed, "rev-parse", "HEAD")
 }
 
-// pushCandidate pushes the fixture's head as branch through the handle the
-// lander opens at a worktree cut from base: the push the candidate gate makes.
-func pushCandidate(t *testing.T, l *Lander, f *landFixture, branch string) error {
+// candidateWorktree cuts a detached worktree at the fixture's base: the
+// directory the candidate gate pushes from. The cleanup is the caller's test,
+// so two subtests can each cut one.
+func candidateWorktree(t *testing.T, f *landFixture) string {
 	t.Helper()
 	dir := filepath.Join(f.workRoot, "wt")
 	gitT(t, f.repo, "worktree", "add", "-q", "--detach", dir, f.base)
@@ -461,59 +462,46 @@ func pushCandidate(t *testing.T, l *Lander, f *landFixture, branch string) error
 			t.Errorf("removing the test worktree: %v", err)
 		}
 	})
-	return (&CandidateGate{}).push(l.openLanding(dir, nil), branch, f.work.Head)
+	return dir
 }
 
-// TestIntegrationLandBeadsDirReachesPrePush: the candidate handle the landing
-// opens carries the rig's BEADS_DIR, so the tracked pre-push that runs bd finds
-// its store and the candidate push passes; with no BEADS_DIR the same hook
-// refuses that push (gt-xg33gs). The empty case also proves the hook runs at
-// all, so the first case is not green because the hook was never invoked.
-//
-// The test pins BEADS_DIR empty itself rather than leaning on the hermetic
-// harness to scrub it, so neither case reads the caller's environment: an
-// empty value is unset to the hook's `[ -n "$BEADS_DIR" ]`, and the handle's
-// own entry lands after the process's, where git keeps the last one.
-func TestIntegrationLandBeadsDirReachesPrePush(t *testing.T) {
-	t.Setenv("BEADS_DIR", "")
-	f := newRealLandFixture(t)
-	f.base = prePushHookOnMain(t, f, "#!/bin/sh\n[ -n \"$BEADS_DIR\" ] || exit 1\n")
-	l := f.lander()
-
-	t.Run("a configured BeadsDir reaches the hook", func(t *testing.T) {
-		l.BeadsDir = filepath.Join(f.town, ".beads")
-		if err := pushCandidate(t, l, f, "land/gt-abc"); err != nil {
-			t.Fatalf("candidate push with BeadsDir set: %v", err)
-		}
-	})
-	t.Run("no BeadsDir leaves the hook to refuse the push", func(t *testing.T) {
-		l.BeadsDir = ""
-		if err := pushCandidate(t, l, f, "land/gt-def"); err == nil {
-			t.Fatal("candidate push with no BeadsDir = nil error, want the pre-push hook's refusal")
-		}
-	})
+// pushCandidate pushes the fixture's head as branch through the handle the
+// lander opens at a worktree cut from base: the push the candidate gate makes.
+func pushCandidate(t *testing.T, l *Lander, f *landFixture, branch string) error {
+	t.Helper()
+	return (&CandidateGate{}).push(l.openLanding(candidateWorktree(t, f), nil), branch, f.work.Head)
 }
 
-// TestIntegrationLandBeadsDirKeepsThePrePushFence: a tracked pre-push that
-// refuses every push still refuses it with BeadsDir set. The landing exports
-// BEADS_DIR to its handles; it never switches the fence off (gt-xg33gs,
-// gt-sjwr7a). BEADS_DIR is pinned empty first so the case cannot inherit one
-// from the caller (gt-xg33gs).
-func TestIntegrationLandBeadsDirKeepsThePrePushFence(t *testing.T) {
-	t.Setenv("BEADS_DIR", "")
+// TestIntegrationLandCandidatePushesPastTrackedPrePush: the landing's
+// candidate push runs with the repository's hooks off, so a tracked pre-push
+// that refuses every push cannot fail a landing, which in a pod must land a
+// rig whose pre-push runs `bd hooks run` (gt-5nmfx4). The second subtest is
+// the fence's control: the same push through a generic WithoutLocalHooks
+// handle still runs that hook and fails, so the first case passes because the
+// landing handle asks for hook-free calls, not because the hook never ran.
+func TestIntegrationLandCandidatePushesPastTrackedPrePush(t *testing.T) {
 	f := newRealLandFixture(t)
 	f.base = prePushHookOnMain(t, f, "#!/bin/sh\nexit 1\n")
 	l := f.lander()
-	l.BeadsDir = filepath.Join(f.town, ".beads")
-	if err := pushCandidate(t, l, f, "land/gt-abc"); err == nil {
-		t.Fatal("candidate push under a pre-push that always exits 1 = nil error, want the hook's refusal")
-	}
+
+	t.Run("the landing's candidate push runs hook-free", func(t *testing.T) {
+		if err := pushCandidate(t, l, f, "land/gt-abc"); err != nil {
+			t.Fatalf("candidate push under a tracked pre-push that always exits 1: %v", err)
+		}
+	})
+	t.Run("a generic handle keeps the pre-push fence", func(t *testing.T) {
+		dir := candidateWorktree(t, f)
+		g := git.NewGit(dir).WithoutLocalHooks()
+		if err := g.Push("origin", f.work.Head+":refs/heads/land/gt-fenced", true); err == nil {
+			t.Fatal("push through WithoutLocalHooks under the refusing pre-push = nil error, want the hook's refusal")
+		}
+	})
 }
 
 // TestIntegrationLandBeadsDirReachesTheReadHandle: the handle the landing's
 // reads and refs/landed push are made through carries BEADS_DIR too, so the
 // tracked pre-push passes there; with none it refuses (gt-xg33gs). BEADS_DIR
-// is pinned empty first, for the same reason as the candidate test.
+// is pinned empty first, so neither case reads one from the caller.
 func TestIntegrationLandBeadsDirReachesTheReadHandle(t *testing.T) {
 	t.Setenv("BEADS_DIR", "")
 	f := newRealLandFixture(t)
