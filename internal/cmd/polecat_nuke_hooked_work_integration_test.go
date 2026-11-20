@@ -97,7 +97,13 @@ func TestIntegrationPolecatNukeHookedWorkRealGitAndBd(t *testing.T) {
 			assertNoLiveHostSession(t, polecat.NewSessionManager(tmux.NewTmux(), w.rig, townRegistry()).SessionName(w.polecatName))
 
 			// Drive the production function, not a restatement of its ordering.
-			if err := nukePolecatFullWithOptions(w.polecatName, w.rigName, w.mgr, w.rig, nukePolecatOptions{}); err != nil {
+			// The seat question is answered a host seat, as the unit tier's nuke
+			// fixture does: this test is about the hooked work, and the
+			// sandbox-seat preserve answers are pinned by the unit tier
+			// (gt-0wyoc0).
+			if err := nukePolecatFullWithOptions(w.polecatName, w.rigName, w.mgr, w.rig, nukePolecatOptions{
+				Deps: &nukeDeps{SeatOrigin: nukeE2EHostSeat},
+			}); err != nil {
 				t.Fatalf("nukePolecatFullWithOptions: %v", err)
 			}
 
