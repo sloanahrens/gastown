@@ -330,6 +330,11 @@ type beadState struct {
 	// wrote is whether this pass commented on the bead, which moves its row.
 	// The pass consumes it when it records the bead's outcome (gt-r9pj9).
 	wrote bool
+	// parked is whether an infrastructure failure holds the bead until its
+	// park runs out. The park lives on this state, not on the bead's row, so
+	// no write to the bead lifts it; it ends when the park runs out or the
+	// bead's run ends (gt-5phoiv).
+	parked bool
 }
 
 // BackoffWriter records a rig's failing landings for readers outside the
@@ -376,6 +381,14 @@ func (w *Worker) bead(id string) *beadState {
 		w.state[id] = s
 	}
 	return s
+}
+
+// parked reports whether an infrastructure failure holds id until a time that
+// has not yet passed. The pass skips such a bead without reading it, and no
+// write to the bead lifts the hold (gt-5phoiv).
+func (w *Worker) parked(id string) bool {
+	st := w.state[id]
+	return st != nil && st.parked && w.now().Before(st.until)
 }
 
 func (w *Worker) outcomeMemo() *outcomeMemos {
@@ -538,6 +551,14 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		// the worker must read the same park the health count reports, or a
 		// "0 pending" field sits over a queue that still lands (gt-y7n1u).
 		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
+			continue
+		}
+		// A parked bead is skipped before the pass does anything with it:
+		// any write to it moves updated_at, so a hold keyed on the row lifts
+		// at the next pass and the fail-loud park would last one pass
+		// (gt-5phoiv).
+		if w.parked(issue.ID) {
+			rep.Skipped++
 			continue
 		}
 		// Before the landing, which is what removes the label: a submission
@@ -1421,7 +1442,9 @@ func reviewVerdictWord(verdict string) string {
 // parked, so someone fixes the cause instead of the worker retrying a
 // deterministic failure on a timer (be-4sgb failed six times in a row on a
 // missing BEADS_DIR). The park is in memory: a restart, which is how a fix
-// rolls out, lets the bead land again.
+// rolls out, lets the bead land again. It is held on the bead's state, not on
+// its list row, so a comment or a label anyone writes does not lift it
+// (gt-5phoiv).
 func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 	rep.Failed++
 	st := w.bead(id)
@@ -1429,12 +1452,14 @@ func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 		// The park ran out (only a clock that jumped past it gets here): this
 		// failure is a new run and is as loud as the first.
 		st.failures, st.ciSilences, st.escalated, st.failingEscalated = 0, 0, false, false
+		st.parked = false
 		delete(st.annotated, "infra")
 	}
 	st.failures++
 	st.stage = failureStage(stage, err)
 	st.lastErr = errorLine(err)
 	st.until = w.now().Add(infraParkWait)
+	st.parked = true
 	w.logf("%s: %s failed, PARKED until the cause is fixed and the daemon restarts: %s", id, stage, st.lastErr)
 	if st.failures == infraAnnounceAfter {
 		w.announce(id, "infra", fmt.Sprintf("Landing worker: %s FAILED on infrastructure, not on the work (%s: %v). It is parked and will not be retried until the cause is fixed and the daemon restarts; no rework needed.", id, stage, err))
