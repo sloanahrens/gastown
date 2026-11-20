@@ -212,6 +212,26 @@ func specSplitRungActs(rung string) bool {
 	return false
 }
 
+// specSplitLabelStale reports whether a bead's split label is stale: its own
+// labels record an estimate the route acts on, and that estimate reads under
+// the trigger. A bird that splits a bead and re-estimates it updates sp-minutes
+// and leaves the split label in place, so the label outlives the estimate it
+// was cut for (gt-07z6ay). A label set with no readable estimate, a shape-only
+// rung, or a trigger of 0 is never stale.
+func specSplitLabelStale(labels []string, trigger float64) bool {
+	spec := specdispatch.Spec{Labels: labels}
+	if trigger <= 0 || !spec.HasLabel(specdispatch.SplitLabel) {
+		return false
+	}
+	var o specEstimateOutcome
+	specEstimateFromLabels(&o, labels)
+	minutes, rung, reason := specSplitVerdict(specStoryPointAnswer{outcome: o})
+	if reason != "" || !specSplitRungActs(rung) {
+		return false
+	}
+	return minutes < trigger
+}
+
 // specSplitHeldLine is the tick's skip line for a bead wearing the split label:
 // the route that holds it, the estimate the bead's own labels record, and the
 // trigger that estimate is at or over. The label is the split's record and

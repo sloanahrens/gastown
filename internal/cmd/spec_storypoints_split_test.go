@@ -441,6 +441,38 @@ func TestSpecStoryPointStepReworkExemptionCoversTheSplitHold(t *testing.T) {
 	}
 }
 
+// TestSplitLabelStale: the split label is stale only when the bead's own labels
+// record an estimate the route acts on that reads under the trigger. A re-stamp
+// of sp-minutes without the label updated is the case the function exists for;
+// no readable estimate, a shape-only rung and the route off all leave the label
+// standing.
+func TestSplitLabelStale(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		labels  []string
+		trigger float64
+		want    bool
+	}{
+		{"under the trigger", []string{"split", "sp-minutes:9.3", "sp-rung:all"}, 10, true},
+		{"at the trigger", []string{"split", "sp-minutes:10", "sp-rung:all"}, 10, false},
+		{"over the trigger", []string{"split", "sp-minutes:10.4", "sp-rung:all"}, 10, false},
+		{"no minutes", []string{"split", "sp-rung:all"}, 10, false},
+		{"unreadable minutes spelling", []string{"split", "sp-minutes:10.0", "sp-rung:all"}, 10, false},
+		{"shape-only rung", []string{"split", "sp-minutes:9.3", "sp-rung:shape"}, 10, false},
+		{"unreadable rung", []string{"split", "sp-minutes:9.3", "sp-rung:bogus"}, 10, false},
+		{"trigger off", []string{"split", "sp-minutes:9.3", "sp-rung:all"}, 0, false},
+		{"no split label", []string{"sp-minutes:9.3", "sp-rung:all"}, 10, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specSplitLabelStale(tc.labels, tc.trigger); got != tc.want {
+				t.Errorf("specSplitLabelStale(%v, %v) = %v, want %v", tc.labels, tc.trigger, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSpecDispatchSplitRouteEstimateFromLabels: an estimate that is already
 // current has no fresh numbers, so the route reads the labels the command
 // wrote. Two labels that disagree leave the value unset, and the route then
