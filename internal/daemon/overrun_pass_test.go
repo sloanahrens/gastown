@@ -579,3 +579,34 @@ func TestOverrunPassStatsNoSeats(t *testing.T) {
 		t.Errorf("failedReads = %d, want 0", got.failedReads)
 	}
 }
+
+// TestOverrunPassLine: the production passDone hook logs one line per pass: its
+// seat count and wall time, the slowest seat with its exempt reads, and the
+// reads that failed. A pass that read no seat has no slowest seat (gt-0r6j2r).
+func TestOverrunPassLine(t *testing.T) {
+	t.Parallel()
+	// The slowest seat's three reads: 1 s answering, 7 s in its gate and 1 s
+	// waiting on its escalation; the answer is inside the total.
+	slow := passSeatReads{rig: "gastown", polecat: "furiosa", bead: "gt-slow11",
+		reads: overrunSeatReads{answeredTook: time.Second, gateTook: 7 * time.Second, waitingTook: time.Second}}
+	for _, tc := range []struct {
+		name  string
+		stats passStats
+		want  string
+	}{
+		{"two seats, a slowest seat and a failed read",
+			passStats{seats: 2, wall: 48 * time.Second, slowest: slow, failedReads: 1},
+			"overrun_guard: pass: 2 seats in 48s; slowest gastown/furiosa 9s (gate 7s, escalation 1s); 1 read failed\n"},
+		{"no seats", passStats{wall: time.Second}, "overrun_guard: pass: 0 seats in 1s\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, buf := newOverrunDaemon(t, false)
+			// The production seam, so the wiring and the line are both under test.
+			d.overrunProdSeams().passDone(tc.stats)
+			if got := buf.String(); got != tc.want {
+				t.Errorf("pass line = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
