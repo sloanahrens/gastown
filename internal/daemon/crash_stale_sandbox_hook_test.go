@@ -129,6 +129,7 @@ func TestReapStaleSandboxHook(t *testing.T) {
 		{"gateway_has_the_sandbox_is_left", staleHookOpts{agent: sandboxAgent, hook: staleHookWork, workStatus: "open", exists: true}, false, true},
 		{"gateway_unreachable_is_left", staleHookOpts{agent: sandboxAgent, hook: staleHookWork, workStatus: "open", existsErr: errors.New("connection refused")}, false, true},
 		{"work_still_assigned_is_left", staleHookOpts{agent: sandboxAgent, hook: staleHookWork, workStatus: "in_progress", workAssignee: "gastown/polecats/capable"}, false, false},
+		{"open_work_still_this_seats_is_left", staleHookOpts{agent: sandboxAgent, hook: staleHookWork, workStatus: "open", workAssignee: "gastown/polecats/capable"}, false, false},
 		{"work_bead_unreadable_is_left", staleHookOpts{agent: sandboxAgent, hook: staleHookWork, workStatus: ""}, false, false},
 		{"seat_took_new_work_is_left", staleHookOpts{agent: sandboxAgent, hook: "gt-newer", workStatus: "open"}, false, true},
 	}
