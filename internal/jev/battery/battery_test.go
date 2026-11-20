@@ -55,6 +55,30 @@ func TestBatteryCapSpentCountsEveryCallerSinceMidnight(t *testing.T) {
 	}
 }
 
+// A caller with its own budget does not use up the batteries' room: its spend
+// stays out of Spent and cannot switch the batteries off.
+func TestBatteryCapIgnoresNonBatteryCallers(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 15, 0, 0, 0, time.Local)
+	ledger := writeLedger(t, t.TempDir(),
+		ledgerRec(now.Add(-time.Minute), "hm-rerank", 5_000_000_000, 0),
+		ledgerRec(now.Add(-time.Minute), "jev-dispatch", 200_000_000, 0),
+	)
+	c := Cap{Ledger: ledger, MaxUSDPerDay: 1, USDPerBillionTokens: 1}
+	clock := func() time.Time { return now }
+
+	got, err := c.Spent(clock)
+	if err != nil {
+		t.Fatalf("Spent: %v", err)
+	}
+	if math.Abs(got-0.2) > 1e-9 {
+		t.Errorf("spent = %v, want 0.2 from jev-dispatch alone", got)
+	}
+	if ok, err := c.Allows(clock); err != nil || !ok {
+		t.Errorf("Allows = %v, %v, want true and no error", ok, err)
+	}
+}
+
 func TestBatteryCapAllows(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 20, 15, 0, 0, 0, time.Local)

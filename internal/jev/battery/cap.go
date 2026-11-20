@@ -6,14 +6,20 @@ package battery
 import (
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev"
 )
 
+// NonBatteryCallers name the callers whose spend the batteries' cap does not
+// count. Each has its own budget, and its traffic must not switch every
+// battery off for the rest of the day (gt-8b1gw1).
+var NonBatteryCallers = []string{"hm-rerank"}
+
 // Cap is the daily spend cap. There is one cap for the whole town: Spent
-// counts every caller in the usage ledger, so a second battery's spend today
-// uses up the first one's room.
+// counts every caller in the usage ledger except those in NonBatteryCallers,
+// so a second battery's spend today uses up the first one's room.
 type Cap struct {
 	// Ledger is the usage ledger path, jev.UsageLedgerPath(townRoot).
 	Ledger string
@@ -35,8 +41,9 @@ func (c Cap) Validate() error {
 	return nil
 }
 
-// Spent is what every caller has spent since local midnight on clock, priced
-// at USDPerBillionTokens. A missing ledger is zero. A nil clock is time.Now.
+// Spent is what the batteries' callers have spent since local midnight on
+// clock, priced at USDPerBillionTokens; the callers named in NonBatteryCallers
+// are left out. A missing ledger is zero. A nil clock is time.Now.
 func (c Cap) Spent(clock func() time.Time) (float64, error) {
 	if clock == nil {
 		clock = time.Now
@@ -48,7 +55,14 @@ func (c Cap) Spent(clock func() time.Time) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return rep.USD, nil
+	var spent float64
+	for caller, s := range rep.ByCaller {
+		if slices.Contains(NonBatteryCallers, caller) {
+			continue
+		}
+		spent += s.USD
+	}
+	return spent, nil
 }
 
 // Allows says whether another call may be made: today's spend is still under
