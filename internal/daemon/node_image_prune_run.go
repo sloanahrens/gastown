@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -16,7 +17,8 @@ type nodePruneKube interface {
 }
 
 // runNodeImagePrune runs the node-prune Job name on the control node and returns
-// the report its log gives. Without apply the Job only plans.
+// the report its log gives. Without apply the Job only plans. Once the apply was
+// attempted the Job is deleted on every path, and a refused delete is reported with the run's error.
 func runNodeImagePrune(ctx context.Context, kube nodePruneKube, name, image string, keep int, apply bool) (nodePruneReport, error) {
 	listed, err := kube.ListJSON(ctx)
 	if err != nil {
@@ -31,18 +33,36 @@ func runNodeImagePrune(ctx context.Context, kube nodePruneKube, name, image stri
 		return nodePruneReport{}, fmt.Errorf("node-prune: build the job manifest: %w", err)
 	}
 	if err := kube.Apply(ctx, manifest); err != nil {
-		return nodePruneReport{}, fmt.Errorf("node-prune: apply job %s: %w", name, err)
+		applyErr := fmt.Errorf("node-prune: apply job %s: %w", name, err)
+		return nodePruneReport{}, deleteNodePruneJob(ctx, kube, name, applyErr)
 	}
+	out, err := readNodePruneJob(ctx, kube, name)
+	err = deleteNodePruneJob(ctx, kube, name, err)
+	if err != nil {
+		return nodePruneReport{}, err
+	}
+	return parseNodePruneLog(out)
+}
+
+// readNodePruneJob waits for the applied Job and reads its log.
+func readNodePruneJob(ctx context.Context, kube nodePruneKube, name string) ([]byte, error) {
 	if err := kube.WaitComplete(ctx, name); err != nil {
-		return nodePruneReport{}, fmt.Errorf("node-prune: wait for job %s: %w", name, err)
+		return nil, fmt.Errorf("node-prune: wait for job %s: %w", name, err)
 	}
 	// Untrimmed: the parser needs the log's final newline to tell a whole log from a cut one.
 	out, err := kube.Logs(ctx, name)
 	if err != nil {
-		return nodePruneReport{}, fmt.Errorf("node-prune: read the log of job %s: %w", name, err)
+		return nil, fmt.Errorf("node-prune: read the log of job %s: %w", name, err)
 	}
-	if err := kube.Delete(ctx, name); err != nil {
-		return nodePruneReport{}, fmt.Errorf("node-prune: delete job %s: %w", name, err)
+	return out, nil
+}
+
+// deleteNodePruneJob deletes the Job after the apply was attempted. The delete runs on
+// a context the caller's cancellation cannot reach, so a canceled run still deletes
+// it. It returns cause, joined with the delete's own error when the delete fails too.
+func deleteNodePruneJob(ctx context.Context, kube nodePruneKube, name string, cause error) error {
+	if err := kube.Delete(context.WithoutCancel(ctx), name); err != nil {
+		return errors.Join(cause, fmt.Errorf("node-prune: delete job %s: %w", name, err))
 	}
-	return parseNodePruneLog(out)
+	return cause
 }

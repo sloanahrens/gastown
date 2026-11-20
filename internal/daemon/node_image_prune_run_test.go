@@ -10,16 +10,22 @@ import (
 )
 
 // fakeKube records the seam calls in order, serves canned reads, and refuses the
-// call named fail.
+// calls named fail and alsoFail. The call named cancelOn runs cancel first, and
+// Delete keeps the context it was given.
 type fakeKube struct {
-	calls            []string
-	fail             string
-	list, logs, sent []byte
+	calls                    []string
+	fail, alsoFail, cancelOn string
+	cancel                   context.CancelFunc
+	deleteCtx                context.Context
+	list, logs, sent         []byte
 }
 
 func (k *fakeKube) call(name string) error {
 	k.calls = append(k.calls, name)
-	if name == k.fail {
+	if name == k.cancelOn {
+		k.cancel()
+	}
+	if name == k.fail || name == k.alsoFail {
 		return fmt.Errorf("%s refused", name)
 	}
 	return nil
@@ -28,7 +34,10 @@ func (k *fakeKube) ListJSON(context.Context) ([]byte, error)     { return k.list
 func (k *fakeKube) Apply(_ context.Context, m []byte) error      { k.sent = m; return k.call("Apply") }
 func (k *fakeKube) WaitComplete(context.Context, string) error   { return k.call("WaitComplete") }
 func (k *fakeKube) Logs(context.Context, string) ([]byte, error) { return k.logs, k.call("Logs") }
-func (k *fakeKube) Delete(context.Context, string) error         { return k.call("Delete") }
+func (k *fakeKube) Delete(ctx context.Context, _ string) error {
+	k.deleteCtx = ctx
+	return k.call("Delete")
+}
 
 // nodePruneLogDry is a dry run's log as the helper writes it: every line ends in a newline.
 const nodePruneLogDry = "node-prune: would remove sha256:bbb gastown-polecat created 2026-11-20T03:00:00Z\n" +
@@ -61,7 +70,8 @@ func TestNodeImagePruneRunDry(t *testing.T) {
 }
 
 // TestNodeImagePruneRunStopsAtFailure refuses one step at a time. Each refusal
-// returns an error and no later step runs; a bad listing or image never reaches Apply.
+// returns an error and no step after it runs, except the Job's delete once the apply
+// was attempted; a bad listing or image never reaches Apply.
 func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 	t.Parallel()
 
@@ -74,9 +84,9 @@ func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 		{name: "list refused", fail: "ListJSON", calls: "ListJSON", list: good},
 		{name: "listing has no items", calls: "ListJSON", list: []byte(`{"kind":"List","items":[]}`)},
 		{name: "empty image", calls: "ListJSON", list: good, emptyImage: true},
-		{name: "apply refused", fail: "Apply", calls: "ListJSON Apply", list: good},
-		{name: "wait refused", fail: "WaitComplete", calls: "ListJSON Apply WaitComplete", list: good},
-		{name: "logs refused", fail: "Logs", calls: "ListJSON Apply WaitComplete Logs", list: good},
+		{name: "apply refused", fail: "Apply", calls: "ListJSON Apply Delete", list: good},
+		{name: "wait refused", fail: "WaitComplete", calls: "ListJSON Apply WaitComplete Delete", list: good},
+		{name: "logs refused", fail: "Logs", calls: "ListJSON Apply WaitComplete Logs Delete", list: good},
 		{name: "delete refused", fail: "Delete", calls: "ListJSON Apply WaitComplete Logs Delete", list: good},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,6 +135,51 @@ func TestNodeImagePruneRunFailsClosedBeforeTheJob(t *testing.T) {
 			}
 			if slices.Contains(kube.calls, "Apply") || kube.sent != nil {
 				t.Errorf("calls = %q, want Apply not called", strings.Join(kube.calls, " "))
+			}
+		})
+	}
+}
+
+// TestNodeImagePruneRunFailsClosedDeletesTheJob refuses a step once the apply was
+// attempted and cancels the caller's context while that step runs. The Job is still
+// deleted, on a context the cancellation does not reach, and the error names each
+// step that failed: a refused delete joins its own error to the step's.
+func TestNodeImagePruneRunFailsClosedDeletesTheJob(t *testing.T) {
+	t.Parallel()
+
+	good := []byte(jsonList(jsonDeployment("gt-daemon", digestN("a"))))
+	for _, tc := range []struct {
+		name, fail, alsoFail string
+		steps                []string
+	}{
+		{name: "apply refused", fail: "Apply", steps: []string{"apply job"}},
+		{name: "wait refused", fail: "WaitComplete", steps: []string{"wait for job"}},
+		{name: "logs refused", fail: "Logs", steps: []string{"read the log of job"}},
+		{name: "wait and delete refused", fail: "WaitComplete", alsoFail: "Delete", steps: []string{"wait for job", "delete job"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			kube := &fakeKube{fail: tc.fail, alsoFail: tc.alsoFail, cancelOn: tc.fail, cancel: cancel, list: good, logs: []byte(nodePruneLogDry)}
+			_, err := runNodeImagePrune(ctx, kube, "node-prune-x", "gt-bd:1", 2, false)
+			if err == nil {
+				t.Fatalf("runNodeImagePrune error = nil, want a refusal")
+			}
+			for _, step := range tc.steps {
+				if !strings.Contains(err.Error(), step) {
+					t.Errorf("error = %q, want it to name the step %q", err, step)
+				}
+			}
+			if ctx.Err() == nil {
+				t.Fatalf("caller's context not cancelled; the run never saw a cancellation")
+			}
+			if !slices.Contains(kube.calls, "Delete") {
+				t.Fatalf("calls = %q, want Delete called after the refusal", strings.Join(kube.calls, " "))
+			}
+			if derr := kube.deleteCtx.Err(); derr != nil {
+				t.Errorf("Delete context err = %v, want it not cancelled with the caller's", derr)
 			}
 		})
 	}
