@@ -84,6 +84,9 @@ type Options struct {
 	// RestartWait, RestartPoll, MaintWait and MaintPoll bound the restart and
 	// maintenance waits.
 	RestartWait, RestartPoll, MaintWait, MaintPoll time.Duration
+	// HealthWait and HealthPoll bound the wait, after the restart, for a health
+	// line that is still settling. A zero HealthWait reads the health line once.
+	HealthWait, HealthPoll time.Duration
 }
 
 // Run plans one update, records the plan and every step's progress, and
@@ -574,14 +577,25 @@ func (r *runner) restart(i int) (Outcome, error) {
 	return OutcomePartial, nil
 }
 
-// verify checks every probe against the target build. A check that fails makes
-// the run partial: the install happened, so the town is not untouched, but it
-// is not on the build the run installed.
+// verify checks every probe against the target build. With a positive
+// HealthWait it waits, bounded, for a settling health line to pass; a zero one
+// reads the line once. A check that fails makes the run partial: the install
+// happened, so the town is not untouched, but it is not on the build the run
+// installed.
 func (r *runner) verify(i int) (Outcome, error) {
 	if err := r.beginStep(i); err != nil {
 		return "", err
 	}
-	checks := Verify(r.ctx, r.d.Verify, r.st.Target.SHA)
+	var checks []Check
+	var err error
+	if r.o.HealthWait > 0 {
+		checks, err = VerifyWithSettle(r.ctx, r.d.Clock, r.d.Sleep, r.d.Verify, r.st.Target.SHA, r.o.HealthWait, r.o.HealthPoll)
+	} else {
+		checks = Verify(r.ctx, r.d.Verify, r.st.Target.SHA)
+	}
+	if err != nil {
+		return "", err
+	}
 	if r.ctx.Err() != nil {
 		return r.failStep(i, "canceled", OutcomeInterrupted)
 	}
