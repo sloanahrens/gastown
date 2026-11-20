@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -104,6 +105,36 @@ func TestQueueRowCarriesTheBeadsLastUpdate(t *testing.T) {
 	// zero time the page would read as 1970.
 	if b, err := json.Marshal(dashboard.QueueBead{ID: "gt-2"}); err != nil || strings.Contains(string(b), "updated_at") {
 		t.Errorf("a row with no update must omit updated_at: %s err=%v", b, err)
+	}
+}
+
+// A bead waiting to land carries the polecat time its seat already logged: the
+// seat finished before the bead was queued, so the spans log reads the way a
+// rejected row's does (the whole attempt, asOf zero) (gt-du2p9d).
+func TestDashboardQueuedRowPolecatSecs(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	start := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
+	store := spans.New(spans.DefaultDir(town), spanTestClock{at: start})
+	if err := store.Start("gt-queued", "gastown/opal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.End("gt-queued", "gastown/opal", spans.ReasonDone, start.Add(9*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	st := &fakeQueueStore{landing: []*beads.Issue{{
+		ID: "gt-queued", Title: "waits to land", Status: "open", Labels: []string{land.LabelReadyToLand},
+	}}}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").
+		withPolecatTimes(spanPolecatTimes(town)).read(time.Now())
+	if q == nil || len(q.Landing) != 1 {
+		t.Fatalf("landing = %+v", q)
+	}
+	if got := q.Landing[0].PolecatSecs; got == nil || *got != 540 {
+		t.Errorf("polecat secs = %v, want 540 from the 9 minute span", got)
+	}
+	if b, err := json.Marshal(q.Landing[0]); err != nil || !strings.Contains(string(b), `"polecat_secs":540`) {
+		t.Errorf("a waiting row does not carry polecat_secs to the page: %s err=%v", b, err)
 	}
 }
 

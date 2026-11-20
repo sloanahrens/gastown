@@ -480,8 +480,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		}
 		return ""
 	}
-	// The polecat time a rejected or running Landings row draws, read from the
-	// spans log through the landing worker's reader (gt-kmp7c).
+	// The polecat time a queued, rejected or running Landings row draws, read
+	// from the spans log through the landing worker's reader (gt-kmp7c, gt-du2p9d).
 	polecatTimes := spanPolecatTimes(townRoot)
 	om := newOMReader(townRoot, recs, polecatFor)
 	models := newModelsReader(townRoot)
@@ -497,7 +497,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	updateStatus := newUpdateStatusReader(townRoot).withLogf(dashboardLogf(out))
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
-	queue := newDashQueueReader(townRoot)
+	queue := newDashQueueReader(townRoot).withPolecatTimes(polecatTimes)
 	cloudSettings := townSettings.ResolveCloud(os.Getenv)
 	cloudSource := cloudledger.NewSource(cloudSettings)
 	cloud := dashboard.NewCloudReaderFromSource(cloudSource).
