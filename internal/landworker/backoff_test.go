@@ -314,3 +314,64 @@ func TestPassInfraFailureFailsLoudAtOnceAndParks(t *testing.T) {
 		t.Fatalf("landed %d times after a restart; want the parked bead tried again", len(h.lander.calls))
 	}
 }
+
+// TestPassInfraParkHoldsWhateverTheBeadsUpdatedAt: anyone's write to a parked
+// bead — a comment, a label, a status change — moves its updated_at, which the
+// outcome memo keys on, so the memo alone lifts the park at the next pass. The
+// park holds anyway, and the ready bead beside it keeps landing (gt-5phoiv).
+func TestPassInfraParkHoldsWhateverTheBeadsUpdatedAt(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-parked")
+	h.seedReady(t, "gt-other")
+	h.lander.fn = func(_ int, w land.Work) (land.Result, error) {
+		if w.BeadID == "gt-parked" {
+			return land.Result{}, &land.InfraError{Stage: "merge", Err: errors.New("gtwrap: the call sets no BEADS_DIR")}
+		}
+		return land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"}, nil
+	}
+	h.w.Pass(context.Background())
+	if n := h.landedTimes("gt-parked"); n != 1 {
+		t.Fatalf("the parked bead was landed %d times in the first pass; want the one failed attempt", n)
+	}
+	if n := h.landedTimes("gt-other"); n != 1 {
+		t.Fatalf("the bead beside it was landed %d times in the first pass; want once", n)
+	}
+	// A write moves the parked bead's row before each later pass.
+	for i, moved := range []string{"2026-09-30T12:01:00Z", "2026-09-30T12:02:00Z"} {
+		h.now = h.now.Add(2 * time.Minute)
+		h.reseedRow(t, "gt-parked", moved)
+		h.w.Pass(context.Background())
+		if n := h.landedTimes("gt-parked"); n != 1 {
+			t.Fatalf("after the parked bead's row moved to %s it was landed %d times; want the park to hold", moved, n)
+		}
+		if n := h.landedTimes("gt-other"); n != i+2 {
+			t.Fatalf("after the parked bead's row moved to %s the bead beside it was landed %d times; want once per pass", moved, n)
+		}
+	}
+}
+
+// landedTimes counts the landing attempts the fake lander saw for id.
+func (h *harness) landedTimes(id string) int {
+	n := 0
+	for _, c := range h.lander.calls {
+		if c.BeadID == id {
+			n++
+		}
+	}
+	return n
+}
+
+// reseedRow rewrites id's list row with a later updated_at, as any write to
+// the bead (a comment, a label, a status change) does.
+func (h *harness) reseedRow(t *testing.T, id, updatedAt string) {
+	t.Helper()
+	is, err := h.bd.Show(id)
+	if err != nil || is == nil {
+		t.Fatalf("reading %s to move its row: %v", id, err)
+	}
+	moved := *is
+	moved.UpdatedAt = updatedAt
+	moved.Comments = nil
+	h.bd.Seed(moved)
+}
