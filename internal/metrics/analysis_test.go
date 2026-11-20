@@ -80,6 +80,37 @@ func TestDuePeriod(t *testing.T) {
 	}
 }
 
+// The daily run is due one hourly tick before DailyEvery, so the hourly plugin
+// keeps the run's hour fixed instead of slipping a tick a day. A stamp 22h59m
+// old is not due, one 23h old is, and a future stamp is due so a clock set
+// back cannot wedge the run.
+func TestRunAnalysisDailyHourBounds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		age  time.Duration
+		want bool
+	}{
+		{"a stamp 22h59m old is not due", 22*time.Hour + 59*time.Minute, false},
+		{"a stamp 23h old is due", 23 * time.Hour, true},
+		{"a future stamp is due", -time.Hour, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, dayDir := analysisTown(t)
+			stamp := analyseNow.Add(-tc.age)
+			writeTownFile(t, filepath.Join(town, ".runtime", "metrics", analysisDirName, stampName), stamp.Format(time.RFC3339)+"\n")
+			env, _ := analysisEnv(t, town, dayDir, nil)
+			if res, err := RunAnalysis(context.Background(), env, analysisOptions(town)); err != nil {
+				t.Fatalf("RunAnalysis: %v", err)
+			} else if res.Ran != tc.want {
+				t.Fatalf("RunAnalysis with the stamp %s = ran %v, want %v", stamp, res.Ran, tc.want)
+			}
+		})
+	}
+}
+
 // BeforeRun is the dataset refresh's seam: on a due run it is called once with
 // the run's due period, before the run's first step, and a second run finds the
 // analysis's stamp current, so it is not due and the refresh does not run again.

@@ -27,6 +27,11 @@ const (
 	// DailyEvery is how often the analysis is due: a stamp younger than it
 	// means the last run is still current.
 	DailyEvery = 24 * time.Hour
+	// DailyDueAfter is when the daily run is due, one hourly tick before it is
+	// 24h old: the plugin ticks hourly and the stamp is written when a run
+	// finishes, so due at 24h would slip one tick a day; due one tick early
+	// keeps the hour fixed while the run takes less than an hour.
+	DailyDueAfter = DailyEvery - time.Hour
 	// JoinMaxAge is how old a snapshot may be and still be the one in force
 	// for a landing: two hourly snapshots, so one skipped hour still joins.
 	JoinMaxAge = 90 * time.Minute
@@ -122,6 +127,9 @@ type AnalysisOptions struct {
 	LookPath func(string) (string, error)
 	// Every is the stamp's interval; zero is DailyEvery.
 	Every time.Duration
+	// DueAfter is how old the stamp must be for the run to be due; zero is
+	// DailyDueAfter.
+	DueAfter time.Duration
 	// MaxAge is the oldest snapshot the join accepts; zero is JoinMaxAge.
 	MaxAge time.Duration
 	// Reportf takes the notes a run does not fail on: a file it skipped and the
@@ -155,6 +163,9 @@ func (o AnalysisOptions) withDefaults() AnalysisOptions {
 	}
 	if o.Every == 0 {
 		o.Every = DailyEvery
+	}
+	if o.DueAfter == 0 {
+		o.DueAfter = DailyDueAfter
 	}
 	if o.MaxAge == 0 {
 		o.MaxAge = JoinMaxAge
@@ -196,7 +207,7 @@ type AnalysisResult struct {
 	BeadChangesDropped []DroppedItem
 }
 
-// RunAnalysis runs the daily analysis when its stamp is older than Every, and
+// RunAnalysis runs the daily analysis when its stamp is older than DueAfter, and
 // publishes panel.json, the joined landings and the stamp into
 // <town>/.runtime/metrics/latest. A run that is not due returns Ran false and
 // no error.
@@ -229,7 +240,7 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	if err != nil {
 		return res, err
 	}
-	if !Due(stamp, now, o.Every) {
+	if !Due(stamp, now, o.DueAfter) {
 		return res, nil
 	}
 	// The command seams are checked only once a run is due: an hour that is not
