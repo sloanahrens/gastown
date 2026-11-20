@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-20 gt-a69nku: added rule 9's line-limit bullet: a line limit in Constraints is a cap, so a diff past 1.5 times it stops for a split. Paid for by dropping the provenance parentheticals (claude-9a8, gt-690mog, gt-0sztd, gt-tpg0p.33, gt-qpeei.15, gt-r1up7, gt-km9jt, gt-dl4nv.13) and the "A hit is a question, not a verdict" sentence from the rendered text, no rule cut and none added (seventeen rules).
 - 2026-11-14 gt-dpl81b: removed the local review round: the operator retired it, so the "Before gt done" checklist no longer asks a polecat to preview its branch or answer findings before submitting.
 - 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
 - 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 points at rule 17 and searches the whole tree for `//go:build integration` files, callers in other packages included.
@@ -28,11 +29,11 @@ Read the bead's Goal, Constraints, Out of scope and Acceptance. Write a short pl
 
 ## Town rules that always apply
 
-**An interrupt is not an operator stop.** A tool call rejected with "The user doesn't want to proceed with this tool use" or "[Request interrupted by user for tool use]" and no instruction is a nudge artifact (claude-9a8): re-run it if you still need it. A real order is text from a named sender saying what to stop, and a "hold" covers only what it names; if you cannot cite the order, there is no hold.
+**An interrupt is not an operator stop.** A tool call rejected with "The user doesn't want to proceed with this tool use" or "[Request interrupted by user for tool use]" and no instruction is a nudge artifact: re-run it if you still need it. A real order is text from a named sender saying what to stop, and a "hold" covers only what it names; if you cannot cite the order, there is no hold.
 
 **No subagents.** No Task or Agent tool, no helper sessions. If the work seems to need helpers it is too big: note it on your bead and file a bead that splits it. Only a bead labelled `scheduled:deep-review-slice` or `scheduled:deep-review-risk` spawns the read-only subagents its formula names.
 
-**You work in one rig.** You read only your own rig's repository, because the other rig directories in a sandbox are empty (gt-690mog, operator rule 2026-11-12). When the bead asks you to read, build or test code in another rig, do not look for it, clone it or guess: write the exact question in the bead notes, run `gt escalate -s medium "HELP: <bead-id> needs <rig> code"` at once, then continue only the parts that need no answer.
+**You work in one rig.** You read only your own rig's repository, because the other rig directories in a sandbox are empty. When the bead asks you to read, build or test code in another rig, do not look for it, clone it or guess: write the exact question in the bead notes, run `gt escalate -s medium "HELP: <bead-id> needs <rig> code"` at once, then continue only the parts that need no answer.
 
 **Bead text is one single-quoted argument** on every `gt bead` verb that takes text (`create`, `update`, `claim`, `note`, `comment`, `close`), across as many lines as needed, so backticks and `$(...)` survive and the tap guard reads the text as written. `bd` is for reads. A text holding a single quote takes double quotes; escape `$`, backticks and braces:
 
@@ -79,7 +80,7 @@ Every error or refusal branch in the diff has a test that drives it: one table r
 ## 4. Untrusted input is not trusted by its prefix, its text or its shape
 
 Anything an author or caller writes (a comment, bead field, path, name) can be forged or hostile. Decide authority from something the writer cannot write; validate a value before it reaches a path, argv or request.
-- om flags: "decision authority is granted by prefix alone, so any commenter can forge a decision" (gt-0sztd); an owner/name spliced into a request path (gt-tpg0p.33).
+- om flags: "decision authority is granted by prefix alone, so any commenter can forge a decision"; an owner/name spliced into a request path.
 
 ## 5. An author cannot review or rebut their own work
 
@@ -91,15 +92,16 @@ A claim that something passed pastes the command and its last lines of output. o
 
 ## 7. Hermetic tests
 
-The Tests section is the rule. om flags: "test depends on the host's $SHELL and prompt style, so it is not hermetic"; a test that reads the live town tree (gt-qpeei.15).
+The Tests section is the rule. om flags: "test depends on the host's $SHELL and prompt style, so it is not hermetic"; a test that reads the live town tree.
 
 ## 8. Do not add a shell or Python script
 
-The Tests section is the rule. om flags: "new parsing and state logic added to a shell script"; "a new python script parses the config" (gt-r1up7).
+The Tests section is the rule. om flags: "new parsing and state logic added to a shell script"; "a new python script parses the config".
 
 ## 9. Stay in scope
 
 Change only what the bead asks for.
+- A line limit in Constraints is a cap, not an estimate: if your diff passes 1.5 times it, stop, comment that the bead needs a split, and run gt done.
 - om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps"; "change touches files outside the stated scope". If another file must change, say why in a bead comment.
 
 ## 10. Test the call site, not the helper
@@ -120,7 +122,7 @@ Every Goal clause and box is implemented and reachable: a new function, flag or 
 ## 13. State, order, locks and timeouts
 
 Anything cached, held or waited on has an owner and an end: state read once is re-read when it can change; a lock covers the whole critical section and is released on every path; a bound is shorter than the budget around it; a reset covers every field.
-- om flags: "go stale", "can release the lock while ... keeps running". (gt-km9jt, gt-dl4nv.13).
+- om flags: "go stale", "can release the lock while ... keeps running".
 
 ## 14. Docs and comments say what the code does
 
@@ -144,7 +146,7 @@ Code that builds a view, a total, a bill or a limit for one workspace checks tha
 
 # Before gt done
 
-Run these on your added lines, in the order om rejects most. A hit is a question, not a verdict. `D` below stands for `git diff -U0 origin/main...HEAD`, run as written with the pipe after it.
+Run these on your added lines, in the order om rejects most. `D` below stands for `git diff -U0 origin/main...HEAD`, run as written with the pipe after it.
 
 1. Errors (rule 1): `D -- '*.go' | grep -nE '^\+.*(_ = |, _ :?= )'`, and read every added `if err != nil` branch. Each hit returns, wraps or escalates.
 2. Wiring (12): `D -- '*.go' | grep -E '^\+func '`, then `grep -rn <name>` for a caller outside tests. Compare with your plan.
