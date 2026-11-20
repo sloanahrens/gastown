@@ -29,3 +29,31 @@ func TestCallTimeSeamRecordsOneCall(t *testing.T) {
 		t.Fatalf("snapshot = %d calls, %v total, %v slowest; want one call of 300ms", calls, total, slowest)
 	}
 }
+
+// TestCallTimeSeamCountsTheFlatRetryTwice: a bd that rejects --flat is asked a
+// second time without it, and the timer counts that retry as the second
+// subprocess it is (gt-csgn6r).
+//
+//testpolicy:allow parallel — it swaps the package-level callNow clock, so no test may run beside it
+func TestCallTimeSeamCountsTheFlatRetryTwice(t *testing.T) {
+	resetCallTime(t)
+	prior := callNow
+	//testpolicy:allow no-global-swap — restores the clock seam swapped below
+	t.Cleanup(func() { callNow = prior })
+	reads := 0
+	//testpolicy:allow no-global-swap — the stepping fake clock is the swap this test makes
+	callNow = func() time.Time { reads++; return time.Unix(0, 0).Add(time.Duration(reads) * 300 * time.Millisecond) }
+	r := newRecorder(func(args []string) reply {
+		if hasArg(args, "--flat") {
+			return reply{stderr: "Error: unknown flag: --flat\n", err: exitError{code: 1}}
+		}
+		return reply{stdout: "[]"}
+	})
+	b := newRecordedBeads(t.TempDir(), r)
+	if _, err := b.runBdOnce(context.Background(), nil, nil, []string{"list", "--json", "--flat"}); err != nil {
+		t.Fatalf("runBdOnce: %v", err)
+	}
+	if calls, total, slowest := CallTimeSnapshotAndReset(); calls != 2 || total != 600*time.Millisecond || slowest != 300*time.Millisecond {
+		t.Fatalf("snapshot = %d calls, %v total, %v slowest; want two calls of 300ms", calls, total, slowest)
+	}
+}
