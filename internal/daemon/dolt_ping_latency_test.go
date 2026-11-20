@@ -80,6 +80,8 @@ func TestDoltPingLatencySlowOnlyAtTheThreshold(t *testing.T) {
 	}{
 		{"a 600 ms answer is slow", 600 * time.Millisecond, true},
 		{"a 100 ms answer is not", 100 * time.Millisecond, false},
+		{"an answer one tick under doltPingSlowAfter is not slow", doltPingSlowAfter - time.Millisecond, false},
+		{"an answer at doltPingSlowAfter is slow", doltPingSlowAfter, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
