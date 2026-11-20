@@ -37,11 +37,30 @@ func TestPoolOccupancyCountsEachStateOnce(t *testing.T) {
 		t.Errorf("total %d, claim %d, dead-hooked %d, landing %d, sessions %d; want 6, 2, 2, 1, 2",
 			c.Total, c.Claim, c.DeadHooked, c.Landing, c.Sessions)
 	}
-	if got, want := c.ByAgent["a"], (poolOccupancyTally{Total: 5, Claim: 2, DeadHooked: 2, Landing: 1, Sessions: 1}); got != want {
+	// The fixture's dead-hooked seats carry no class, so both count under "".
+	if got, want := c.ByAgent["a"], (poolOccupancyTally{Total: 5, Claim: 2, DeadHooked: 2, DeadHookedByClass: map[string]int{"": 2}, Landing: 1, Sessions: 1}); !reflect.DeepEqual(got, want) {
 		t.Errorf("agent a = %+v, want %+v", got, want)
 	}
-	if got, want := c.ByAgent["b"], (poolOccupancyTally{Total: 1, Sessions: 1}); got != want {
+	if got, want := c.ByAgent["b"], (poolOccupancyTally{Total: 1, Sessions: 1}); !reflect.DeepEqual(got, want) {
 		t.Errorf("agent b = %+v, want %+v", got, want)
+	}
+}
+
+// TestPoolOccupancyCountsDeadHookedByClass pins that the dead-hooked seats are
+// counted once each under the class they carry (gt-fp32o8): two idle-submitted
+// and one idle-recovery-needed are three dead-hooked seats, split two and one.
+func TestPoolOccupancyCountsDeadHookedByClass(t *testing.T) {
+	t.Parallel()
+	c := poolOccupancy([]poolSession{
+		{name: "dead/gastown/a", agent: "a", deadHooked: true, deadClass: "idle-submitted"},
+		{name: "dead/gastown/b", agent: "a", deadHooked: true, deadClass: "idle-submitted"},
+		{name: "dead/gastown/c", agent: "a", deadHooked: true, deadClass: "idle-recovery-needed"},
+	})
+	if c.DeadHooked != 3 {
+		t.Fatalf("dead-hooked = %d, want 3", c.DeadHooked)
+	}
+	if want := map[string]int{"idle-submitted": 2, "idle-recovery-needed": 1}; !reflect.DeepEqual(c.DeadHookedByClass, want) {
+		t.Errorf("dead-hooked by class = %v, want %v", c.DeadHookedByClass, want)
 	}
 }
 

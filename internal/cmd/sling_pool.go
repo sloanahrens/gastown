@@ -82,6 +82,11 @@ type poolSession struct {
 	// supervised restart (gt-tldj4). It counts, and naming it explains a full
 	// seat that has fewer live sessions than its number.
 	deadHooked bool
+	// deadClass names the disposition class of a dead-hooked seat: its
+	// ReuseStatus, "working" for a WORKING verdict, the verdict when it has no
+	// ReuseStatus, or "unread" when its hook or state read failed (gt-fp32o8).
+	// Empty for every seat that is not dead-hooked.
+	deadClass string
 	// parkedStale marks a parked seat with no session that has been parked
 	// longer than agentpause.ParkedSeatRelease: it no longer holds its seat
 	// (gt-t7k92). poolHeldCount, poolSeatCount and the roster's Live skip it;

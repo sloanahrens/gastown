@@ -6,8 +6,10 @@ type poolOccupancyTally struct {
 	Total      int
 	Claim      int
 	DeadHooked int
-	Landing    int
-	Sessions   int
+	// DeadHookedByClass splits DeadHooked by each seat's deadClass (gt-fp32o8).
+	DeadHookedByClass map[string]int
+	Landing           int
+	Sessions          int
 }
 
 // poolOccupancyCount is the pool's one count of the seats it holds, in total
@@ -25,6 +27,10 @@ func (t *poolOccupancyTally) add(s poolSession) {
 	}
 	if s.deadHooked {
 		t.DeadHooked++
+		if t.DeadHookedByClass == nil {
+			t.DeadHookedByClass = map[string]int{}
+		}
+		t.DeadHookedByClass[s.deadClass]++
 	}
 	if s.landing {
 		t.Landing++
@@ -41,6 +47,7 @@ func (t *poolOccupancyTally) add(s poolSession) {
 //
 //   - Claim: a seat another sling reserved before its session existed (claim).
 //   - DeadHooked: a seat whose polecat crashed with its bead still hooked (deadHooked).
+//   - DeadHookedByClass: the DeadHooked seats split by their disposition class (deadClass), not a flag of its own.
 //   - Landing: a seat mid-landing, whose polecat ran gt done and whose bead the landing worker has not closed (landing).
 //   - Sessions: a seat carrying none of Claim, DeadHooked or Landing.
 //
