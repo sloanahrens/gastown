@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 type resetWorld struct {
 	d       *Daemon
 	f       *gitfake.Fake
+	log     *bytes.Buffer
 	origin  string
 	work    string
 	tip     string
@@ -26,9 +28,9 @@ type resetWorld struct {
 
 func newResetWorld(t *testing.T) *resetWorld {
 	t.Helper()
-	d, _ := newOverrunDaemon(t, false)
+	d, buf := newOverrunDaemon(t, false)
 	f := useGitfake(t, d)
-	w := &resetWorld{d: d, f: f}
+	w := &resetWorld{d: d, f: f, log: buf}
 	w.origin = filepath.Join(t.TempDir(), "origin.git")
 	w.work = filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
 	f.InitBare(t, w.origin)
@@ -157,22 +159,23 @@ func TestStop_FailedPushLeavesTheWorktreeAndBranch(t *testing.T) {
 func TestOverrunResetWorktree_NeedsOriginToHoldTheBranchTip(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name string
-		prep func(t *testing.T, w *resetWorld)
+		name    string
+		prep    func(t *testing.T, w *resetWorld)
+		wantLog string
 	}{
-		{"origin lacks the branch", func(*testing.T, *resetWorld) {}},
+		{"origin lacks the branch", func(*testing.T, *resetWorld) {}, "origin does not hold"},
 		{"origin holds another commit", func(t *testing.T, w *resetWorld) {
 			w.f.Commit(t, w.origin, stopSeat.Branch, "someone else's", map[string]string{"x.txt": "x\n"})
-		}},
+		}, "origin does not hold"},
 		{"origin cannot be asked", func(t *testing.T, w *resetWorld) {
 			w.f.RemoveRemote(t, w.work, "origin")
-		}},
+		}, "origin does not hold"},
 		{"the worktree holds uncommitted work", func(t *testing.T, w *resetWorld) {
 			if err := w.git().Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
 				t.Fatal(err)
 			}
 			writeWorkFiles(t, w.work, map[string]string{"dirty.txt": "unsaved\n"})
-		}},
+		}, "worktree is"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -183,6 +186,9 @@ func TestOverrunResetWorktree_NeedsOriginToHoldTheBranchTip(t *testing.T) {
 				t.Fatalf("reset: %v, want nil (nothing to reset is not a failure)", err)
 			}
 
+			if !strings.Contains(w.log.String(), tc.wantLog) {
+				t.Errorf("log does not carry the refusal %q:\n%s", tc.wantLog, w.log.String())
+			}
 			if head, _ := w.git().Rev("HEAD"); head != w.tip {
 				t.Errorf("HEAD = %s, want the seat's tip %s", head, w.tip)
 			}
@@ -190,6 +196,40 @@ func TestOverrunResetWorktree_NeedsOriginToHoldTheBranchTip(t *testing.T) {
 				t.Errorf("branches %v lost %s", got, stopSeat.Branch)
 			}
 		})
+	}
+}
+
+// Origin's tip may be a descendant of the worktree tip: the tip is in origin's
+// history, so the push step counts that as done and the reset confirms it the
+// same way, detaching the worktree and dropping the branch. The exact-tip
+// comparison left such a seat behind (gt-czoguq, gt-7rv1ee on 2026-11-19).
+func TestOverrunResetOriginDescendant(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	if err := w.git().Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
+		t.Fatal(err)
+	}
+	descendant := w.f.Commit(t, w.origin, stopSeat.Branch, "someone's later work", map[string]string{"later.txt": "later\n"})
+	// A fetch leaves origin's commit in the worktree's history, which is what
+	// lets git compare the tip with the head ls-remote named.
+	w.f.SetRef(t, w.work, "refs/remotes/origin/"+stopSeat.Branch, descendant)
+
+	if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+		t.Fatalf("reset: %v, want nil", err)
+	}
+
+	if strings.Contains(w.log.String(), "origin does not hold") {
+		t.Errorf("log says origin does not hold the branch:\n%s", w.log.String())
+	}
+	g := w.git()
+	if branch, _ := g.CurrentBranch(); branch != "" && branch != "HEAD" {
+		t.Errorf("worktree is on branch %q, want detached", branch)
+	}
+	if head, err := g.Rev("HEAD"); err != nil || head != w.baseSHA {
+		t.Errorf("HEAD = %q (%v), want origin/main %s", head, err, w.baseSHA)
+	}
+	if got := w.branches(t); slices.Contains(got, stopSeat.Branch) {
+		t.Errorf("branches %v still hold %s", got, stopSeat.Branch)
 	}
 }
 

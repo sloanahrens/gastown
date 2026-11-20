@@ -1401,16 +1401,18 @@ func overrunTipInHistory(g daemonGit, tip, upstream string) bool {
 // overrunResetWorktree is the resetWorktree seam: it puts a released seat's
 // worktree back to its idle state, detached at origin's default branch with the
 // kept branch deleted, once the push is confirmed. Confirmed means origin, asked
-// now with ls-remote, holds for the branch exactly the commit the worktree's
-// HEAD is on, and the worktree holds nothing uncommitted and no stash. Anything
-// else — no worktree or branch, a branch already gone, origin unreachable or
-// holding another commit, HEAD off the branch, work at risk — leaves the
+// now with ls-remote, holds the commit the worktree's HEAD is on, or a history
+// carrying every patch of it (the ancestry-then-patch test the push step uses),
+// and the worktree holds nothing uncommitted and no stash. Anything else — no
+// worktree or branch, a branch already gone, origin unreachable or holding a
+// history without the tip, HEAD off the branch, work at risk — leaves the
 // worktree untouched and returns nil: the push step already stands for the
-// branch, and the seat reads as it did before this reset existed. A git handle
-// the seam cannot pick for any other reason is an error, so a failure to reach
-// the worktree is not read as nothing to reset. The delete is forced because
-// the branch is no longer merged into the HEAD the detach leaves; origin
-// holding its tip is what makes that safe.
+// branch, and the seat reads as it did before this reset existed.
+// A git handle the seam cannot pick for any other reason is an error, so a
+// failure to reach the worktree is not read as nothing to reset. The delete is
+// forced because the branch is no longer merged into the HEAD the detach
+// leaves, and the confirmation has just found origin carrying every patch of
+// the deleted tip, so the ref's content survives in origin.
 func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	who := seat.Rig + "/" + seat.Polecat
 	g, err := d.overrunSeatGit(seat)
@@ -1441,7 +1443,12 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 		d.logger.Printf("overrun_guard: %s: HEAD is not on branch %s; worktree left as it is (in the %s)", who, branch, overrunWorktreeLabel(g))
 		return nil
 	}
-	if origin := originBranchSHA(g, branch); origin != tip {
+	// An origin that cannot be asked, like one holding no such branch, answers
+	// "": no history git can compare is not a confirmation either, so both
+	// refuse here rather than handing the helper an empty ref and relying on
+	// git to reject it.
+	origin := originBranchSHA(g, branch)
+	if origin == "" || !overrunTipInHistory(g, tip, origin) {
 		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s; worktree left as it is (in the %s)", who, branch, tip, overrunWorktreeLabel(g))
 		return nil
 	}
