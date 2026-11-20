@@ -189,7 +189,7 @@ func TestNodePruneDryRunFailedRead(t *testing.T) {
 
 // TestNodePruneDryRunSpares: a --spare value, an image id or a digest, is in use, so the plan leaves that
 // image out. The rows cover a node whose ps reply lists a container, and each way crictl says a node has
-// none: JSON null, an empty object and an empty list.
+// none: JSON null, an empty object, an empty containers list and a containers key that is null.
 func TestNodePruneDryRunSpares(t *testing.T) {
 	t.Parallel()
 	const listed = `{"containers":[{"id":"c1","imageRef":"docker.io/library/busybox@sha256:b1"}]}`
@@ -204,6 +204,7 @@ func TestNodePruneDryRunSpares(t *testing.T) {
 		{"id on a node with an empty object", imageID("gastown-daemon", 2), "{}"},
 		{"digest on a node with an empty object", imageDigest("gastown-daemon", 2), "{}"},
 		{"id on a node with an empty list", imageID("gastown-daemon", 2), `{"containers":[]}`},
+		{"id on a node with a containers key that is null", imageID("gastown-daemon", 2), `{"containers":null}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,10 +231,11 @@ func TestNodePruneDryRunSpares(t *testing.T) {
 	}
 }
 
-// TestNodePruneDryRunRefusesUnreadableContainers: a ps reply that is neither JSON null nor a JSON object
-// cannot say which images a container uses. Read as no containers, it would plan removing images in use, so
-// the node is refused with exit 3 and no would-remove line, with or without a --spare.
-func TestNodePruneDryRunRefusesUnreadableContainers(t *testing.T) {
+// TestNodePruneRefusesAnUnreadablePsReply: a ps reply that is not one of the forms the plan reads (JSON null,
+// an object whose only key is containers, a list or null) cannot say which images a container uses. Read as
+// no containers, it would plan removing images in use, so the node is refused with exit 3, the reason on
+// stderr and no would-remove line, with or without a --spare.
+func TestNodePruneRefusesAnUnreadablePsReply(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
@@ -243,6 +245,9 @@ func TestNodePruneDryRunRefusesUnreadableContainers(t *testing.T) {
 		{"reply that is not JSON", "not json", nil},
 		{"reply that is not JSON with a spare", "not json", []string{"--spare", imageID("gastown-daemon", 2)}},
 		{"containers that is not a list", `{"containers":"oops"}`, nil},
+		{"reply that is a list, not an object", `[]`, nil},
+		{"object with a key the plan does not read", `{"foo":1}`, nil},
+		{"two JSON values in one reply", `{}{}`, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -255,8 +260,8 @@ func TestNodePruneDryRunRefusesUnreadableContainers(t *testing.T) {
 			if out != "" {
 				t.Errorf("stdout %q, want nothing", out)
 			}
-			if errOut == "" {
-				t.Errorf("stderr empty, want the reason the containers could not be read")
+			if !strings.Contains(errOut, "cannot read the node") || !strings.Contains(errOut, "crictl ps") {
+				t.Errorf("stderr %q, want the reason the containers could not be read", errOut)
 			}
 			if n := node.removals(); n != 0 {
 				t.Errorf("made %d rmi calls, want 0", n)
@@ -352,7 +357,40 @@ func TestNodePruneApplyReportsAFailure(t *testing.T) {
 	}
 }
 
-// TestNodePruneUsageRefusals: a usage error exits 2 before any program runs, and -h exits 0.
+// TestNodePruneRefusesFlagsItDoesNotKnow: -h and --help print the usage and exit 0. A flag the helper does not
+// parse, an unknown one or a value it cannot read, exits 3 with the reason on stderr, and no program runs.
+func TestNodePruneRefusesFlagsItDoesNotKnow(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		args    []string
+		want    int
+		wantErr string
+	}{
+		{"-h prints the usage", []string{"-h"}, 0, "Usage of node-prune:"},
+		{"--help prints the usage", []string{"--help"}, 0, "Usage of node-prune:"},
+		{"unknown flag", []string{"--endpoint", nodeEndpoint, "--bogus"}, 3, "flag provided but not defined: -bogus"},
+		{"value that is not a number", []string{"--endpoint", nodeEndpoint, "--keep", "abc"}, 3, "invalid value"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			node := newFakeNode(t, "{}", false)
+			code, _, errOut := runNodePrune(node, tc.args...)
+			if code != tc.want {
+				t.Errorf("exit %d, want %d; stderr %q", code, tc.want, errOut)
+			}
+			if !strings.Contains(errOut, tc.wantErr) {
+				t.Errorf("stderr %q, want it to contain %q", errOut, tc.wantErr)
+			}
+			if len(node.calls) != 0 {
+				t.Errorf("made %d program calls, want none", len(node.calls))
+			}
+		})
+	}
+}
+
+// TestNodePruneUsageRefusals: a usage error the helper checks itself exits 2 before any program runs.
 func TestNodePruneUsageRefusals(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -360,8 +398,6 @@ func TestNodePruneUsageRefusals(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"help", []string{"-h"}, 0},
-		{"unknown flag", []string{"--endpoint", nodeEndpoint, "--bogus"}, 2},
 		{"no endpoint", []string{"--keep", "3"}, 2},
 		{"negative keep", []string{"--endpoint", nodeEndpoint, "--keep", "-1"}, 2},
 		{"empty repository", []string{"--endpoint", nodeEndpoint, "--repos", "gastown-polecat,"}, 2},
