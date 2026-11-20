@@ -830,15 +830,17 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	}
 	// The finished Job's own result line is what the run records: it keeps a
 	// file used since the listing and finds one already gone, so the plan's
-	// count is not what it did.
+	// count is not what it did. The item reads the count too; nil is unknown.
+	var removedCount *int64
 	if removed, absent, kept, err := d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName); err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the removal Job's result line could not be read: %v; the run records no file counts", claim.ClaimName, namespace, err)
 	} else {
 		run.trimmed, run.absent, run.kept = &removed, &absent, &kept
+		removedCount = &removed
 	}
 	run.outcome = cacheTrimRunOK
 	if len(sources) > 0 {
-		if used, measured := d.cacheTrimMeasure(ctx, kubeconfig, sources[0], claim.ClaimName, capBytes, planned.Protected); measured {
+		if used, measured := d.cacheTrimMeasure(ctx, kubeconfig, sources[0], claim.ClaimName, capBytes, planned.Protected, removedCount, len(planned.Removals)); measured {
 			run.after = &used
 			if cacheTrimOverTheCap(used, capBytes) {
 				run.outcome = cacheTrimRunOverCap
@@ -939,12 +941,15 @@ func (d *Daemon) cacheTrimDeleteListerJob(ctx context.Context, kubeconfig, names
 // While the claim is over the cap by no more than those, the item says the floor
 // holds the claim there and names how much, since the trim removed all its rules
 // allow; only a larger overflow says the Job may have run the wrong helper.
+// removed and plannedFiles are the Job's own removed count and the files the plan
+// listed, removed nil when that line could not be read: the floor wording is for
+// a Job that removed the whole plan, and one that removed less says so first.
 //
 // A du that cannot be read logs once an hour under a key of its own and raises
 // nothing. This check never fails the trim: the trim reached a verdict, and a
 // claim nobody could measure is not a claim that stayed full. It returns the
 // reading and whether one was made: a failed du is unknown, never a zero.
-func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes, protected int64) (used int64, measured bool) {
+func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes, protected int64, removed *int64, plannedFiles int) (used int64, measured bool) {
 	used, err := d.cacheTrimDu(ctx, kubeconfig, source)
 	if err != nil {
 		// An item an earlier trim raised stays in place: an unreadable claim is
@@ -959,9 +964,24 @@ func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source
 		d.cacheTrimNoOp.clear(key)
 		return used, true
 	}
-	why := "the Job may have run the wrong helper. " + cacheTrimNoOpOpenSandboxes
-	if used-capBytes <= protected {
-		why = fmt.Sprintf("%s of it is younger than the age floor and cannot be removed yet; the cap is below what the seats write inside the floor", polecatimage.Human(protected))
+	holdsFloor := used-capBytes <= protected
+	floor := fmt.Sprintf("%s of it is younger than the age floor and cannot be removed yet; the cap is below what the seats write inside the floor", polecatimage.Human(protected))
+	var why string
+	switch {
+	case removed == nil:
+		why = "the removal Job's result line could not be read"
+	case *removed < int64(plannedFiles):
+		why = fmt.Sprintf("the Job removed %d of %d planned files", *removed, plannedFiles)
+	case holdsFloor:
+		why = floor
+	default:
+		why = "the Job may have run the wrong helper. " + cacheTrimNoOpOpenSandboxes
+	}
+	if removed == nil || *removed < int64(plannedFiles) {
+		if holdsFloor {
+			why += ". " + floor
+		}
+		why += ". " + cacheTrimNoOpOpenSandboxes
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      key,
