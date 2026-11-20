@@ -8,7 +8,7 @@ import (
 )
 
 // nodePruneDeleteTimeout bounds the Job's delete, which runs after the caller's
-// context may be cancelled, so a hung delete cannot block the run forever.
+// context may be canceled, so a hung delete cannot block the run forever.
 const nodePruneDeleteTimeout = 60 * time.Second
 
 // nodePruneKube is the cluster seam a node-prune run drives. ListJSON reads the gt
