@@ -601,6 +601,28 @@ func TestOverrunPassHealthStaleLastRunNotRunning(t *testing.T) {
 	}
 }
 
+// gt-q1hyxt: a tick carrying its own error is one UNKNOWN field naming that
+// tick and the error, and every other tick is judged as it would be alone.
+func TestTicksOneErroredTickDoesNotBlankTheOthers(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.ticks = []Tick{
+		{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(10 * time.Minute)},
+		{Name: "dead", Interval: 15 * time.Minute, LastFired: ago(time.Hour)},
+		{Name: "spec_dispatch", Err: errors.New("daemon start unknown")},
+	}
+	r := Compute(context.Background(), inputs(f))
+	if got := field(t, r, "tick:spec_dispatch"); got.Tag != Unknown || got.Verdict != VerdictUnknown || got.Detail != "daemon start unknown" {
+		t.Errorf("tick:spec_dispatch = %+v, want UNKNOWN naming the error", got)
+	}
+	if got := field(t, r, "tick:wisp_reaper"); got.Verdict != Green || got.Value != "10m/30m" {
+		t.Errorf("tick:wisp_reaper = %+v, want GREEN 10m/30m", got)
+	}
+	if got := field(t, r, "tick:dead"); got.Verdict != Red || got.Value != "1h/15m" {
+		t.Errorf("tick:dead = %+v, want RED 1h/15m", got)
+	}
+}
+
 // gt-m36as: the landing field judges the oldest pending submission's own age,
 // not the time since the rig last landed. A submission made after hours of
 // quiet is green, one that has outlived a whole gate plus a pass is red

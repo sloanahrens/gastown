@@ -376,11 +376,14 @@ type Heartbeat interface {
 
 // Tick is one daemon tick's interval and last-fired time; a zero LastFired
 // means none is recorded, and a zero RunningSince means no pass is in flight.
+// Err is a failed read for this one tick, and the rest of it is then ignored:
+// the tick reads UNKNOWN and the other ticks are still judged (gt-q1hyxt).
 type Tick struct {
 	Name         string
 	Interval     time.Duration
 	LastFired    time.Time
 	RunningSince time.Time
+	Err          error
 }
 
 // Ticks lists the daemon's enabled ticks.
@@ -967,6 +970,11 @@ func ticks(in Inputs) []Field {
 	fs := make([]Field, 0, len(ts))
 	for _, t := range ts {
 		switch {
+		case t.Err != nil:
+			// One tick's failed read is that tick's UNKNOWN, never the
+			// others' (gt-q1hyxt).
+			fs = append(fs, unknown(FieldTick, "", t.Name, t.Err))
+			continue
 		case t.Interval <= 0:
 			fs = append(fs, unknown(FieldTick, "", t.Name, errors.New("no interval")))
 			continue
