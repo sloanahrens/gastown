@@ -180,6 +180,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.JevScorecard != nil {
 		start(h.cfg.JevScorecardEvery, h.pollJevScorecard)
 	}
+	if h.cfg.Jobs != nil {
+		start(h.cfg.JobsEvery, h.pollJobs)
+	}
 	if h.cfg.OM != nil {
 		start(h.cfg.OMEvery, h.pollOM)
 	}
@@ -1357,6 +1360,22 @@ func jevSpendForRows(jev *JevSpend, r ReadStatus) *JevSpend {
 	marked.ReadFailed = r.Error
 	marked.Stale = true
 	return &marked
+}
+
+// pollJobs reads the maintenance job list and keeps the last good one across a
+// failed read, like the Jev spend row beside it.
+func (h *Hub) pollJobs() {
+	j := h.cfg.Jobs()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if j == nil {
+		h.readFailedLocked(SourceJobs, h.cfg.JobsEvery)
+		h.publishLocked()
+		return
+	}
+	h.state.Jobs = j
+	h.readOKLocked(SourceJobs, h.cfg.JobsEvery)
+	h.publishLocked()
 }
 
 // pollJevSpend keeps the last good Jev row across a failed read, like the
