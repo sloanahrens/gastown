@@ -493,9 +493,9 @@ A bead with no text has no estimate, and a canceled run has none either.
 - `shadow` turns on the estimate that runs before each sling. It is off by
   default. **Shadow mode** below states what each setting does.
 - `split_over_minutes` turns on the split route: a bead whose estimate is at or
-  over this many minutes, on a rung of two or more inputs, is held for splitting
-  instead of slung. Zero, the default, is off. **Shadow mode** below states what
-  the route does.
+  over this many minutes, on the `all` or `shape-jev` rung, is held for
+  splitting instead of slung. Zero, the default, is off. **Shadow mode** below
+  states what the route does.
 - `lint_over_minutes` is the size gate's trigger: `gt spec lint` refuses a bead
   whose `sp-minutes` label is at or over this many minutes and says to split it
   (gt-mtzx6s). The check reads the label already on the bead and never estimates
@@ -543,15 +543,17 @@ the timeout cancels may still write its `sp-rung:none` outcome after the sling
 has started.
 
 **Split route.** With `story_points.split_over_minutes` at zero, the default,
-the route is off and the estimate changes nothing else. With it set, a bead
-whose rung is `all`, `shape-jev` or `shape-embed` and whose blended minutes are
-at or over the trigger is not slung. The dispatcher adds the split label, writes
-a comment with the estimate and the nearest beads, and logs one line; no seat is
-taken. A bead on the `shape` rung is slung whatever its estimate. A bead the
-route cannot judge (an estimate that errors or times out, or no rung) is slung,
-records `sp-rung:none`, and the shadow report counts it under rung `none`, not
-as below the trigger. A bead already carrying the split label is held and
-not touched again.
+the route is off and the estimate changes nothing else. With it set, the route
+acts on `all` and `shape-jev` only: a bead whose rung is one of those and whose
+blended minutes are at or over the trigger is not slung. The dispatcher adds the
+split label, writes a comment with the estimate and the nearest beads, and logs
+one line; no seat is taken. A bead on the `shape-embed` or `shape` rung is slung
+whatever its estimate; a shape-embed estimate is a fallback that reads high on
+unchanged text, so the tick logs a line saying the route cannot judge it
+(gt-s93y6n). A bead the route cannot judge at all (an estimate that errors or
+times out, or no rung) is slung, records `sp-rung:none`, and the shadow report
+counts it under rung `none`, not as below the trigger. A bead already carrying
+the split label is held and not touched again.
 
 The landings pane's points velocity is a separate reading of polecat time; see
 [Story-point velocity](#story-point-velocity).
