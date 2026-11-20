@@ -27,6 +27,11 @@ type EvalRow struct {
 	ShapeMinutes   *float64
 	EmbedMinutes   *float64
 	JevMinutes     *float64
+	// OMRounds and Agent are the review rounds and the seat agent the landing
+	// record carries, which the evaluation splits its rows by (gt-he1f8o). A
+	// record with no review rows and a crew landing leave them zero and empty.
+	OMRounds int
+	Agent    string
 }
 
 // EvalCounts accounts for every input the join read: the landing records it
@@ -110,6 +115,8 @@ func joinEval(townRoot string) ([]EvalRow, EvalCounts, error) {
 			ShapeMinutes:   est.Minutes.Shape,
 			EmbedMinutes:   est.Minutes.Embed,
 			JevMinutes:     est.Minutes.Jev,
+			OMRounds:       l.rec.OMRounds,
+			Agent:          l.rec.Agent,
 		})
 	}
 	// A stable sort keeps the ledgers' order for landings at the same instant,
