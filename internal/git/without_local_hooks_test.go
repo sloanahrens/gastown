@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -291,10 +292,100 @@ func unhookedRunSubcommands(t *testing.T, name string, src []byte, hooked map[st
 	return missing
 }
 
+// runHelpers are the methods that hand their argv to hookArgs.
+var runHelpers = map[string]bool{
+	"run": true, "runOutput": true, "runWithTimeout": true, "runWithEnv": true,
+	"runWithEnvAndTimeout": true, "runWithStdin": true, "runMergeCheck": true,
+}
+
+// subcommandShaped matches a git subcommand name: lower case, digits and
+// dashes, no leading dash.
+var subcommandShaped = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
+
+// unhookedSliceSubcommands returns "file:line subcommand" for every []string
+// literal whose first element names a git subcommand outside hooked and push
+// and that a run helper receives, as an argument or through the variable args
+// of the same function (gt-8bezs0). A dash-led first element is the literal
+// scan's: skipped, not reported.
+func unhookedSliceSubcommands(t *testing.T, name string, src []byte, hooked map[string]bool) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, name, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	var missing []string
+	report := func(n *ast.CompositeLit) {
+		lit, ok := n.Elts[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return
+		}
+		sub, err := strconv.Unquote(lit.Value)
+		if err != nil || !subcommandShaped.MatchString(sub) || sub == "push" || hooked[sub] {
+			return
+		}
+		missing = append(missing, fset.Position(n.Pos()).String()+" "+sub)
+	}
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+		var argsVals []ast.Expr
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.AssignStmt:
+				for i, lhs := range n.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == "args" && i < len(n.Rhs) {
+						argsVals = append(argsVals, n.Rhs[i])
+					}
+				}
+			case *ast.RangeStmt:
+				if id, ok := n.Value.(*ast.Ident); ok && id.Name == "args" {
+					argsVals = append(argsVals, n.X)
+				}
+			}
+			return true
+		})
+		var check func(ast.Expr, bool)
+		check = func(e ast.Expr, followArgs bool) {
+			ast.Inspect(e, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.Ident:
+					if followArgs && n.Name == "args" {
+						for _, v := range argsVals {
+							check(v, false)
+						}
+					}
+				case *ast.CompositeLit:
+					if len(n.Elts) > 0 {
+						report(n)
+					}
+				}
+				return true
+			})
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && runHelpers[sel.Sel.Name] {
+					for _, arg := range call.Args {
+						check(arg, true)
+					}
+				}
+			}
+			return true
+		})
+		return false
+	})
+	slices.Sort(missing)
+	return slices.Compact(missing)
+}
+
 // TestHookedSubcommandsCoverEverySubcommandThePackageSends holds
-// hookedSubcommands to the package's own source: a subcommand g.run or
-// g.runOutput sends that is not in the set keeps the repository's local hooks on
-// for every call that sends it, which is the failure be-4sgb names (gt-37hfo6).
+// hookedSubcommands to the package's own source: a subcommand a run helper
+// sends, as a string literal or built into an args slice, that is not in the
+// set keeps the repository's local hooks on for every call that sends it,
+// which is the failure be-4sgb names (gt-37hfo6, gt-8bezs0).
 func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
 	t.Parallel()
 
@@ -303,6 +394,14 @@ func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
 		got := unhookedRunSubcommands(t, "x.go", src, map[string]bool{"checkout": true})
 		if len(got) != 1 || !strings.HasSuffix(got[0], " pull") {
 			t.Fatalf("unhooked = %q, want exactly pull (checkout is in the set, push and args... are skipped)", got)
+		}
+	})
+
+	t.Run("the slice scan names a subcommand outside the set", func(t *testing.T) {
+		src := []byte("package git\nfunc f(g *Git) {\n\targs := []string{\"gc\", \"x\"}\n\tg.run(args...)\n\tg.runOutput(append([]string{\"status\"}, args...)...)\n\tg.runWithEnv([]string{\"checkout\"}, nil)\n\tg.runWithEnv([]string{\"push\"}, nil)\n\tg.runWithEnv([]string{\"-C\", \"d\", \"unknown\"}, nil)\n}\n")
+		got := unhookedSliceSubcommands(t, "x.go", src, map[string]bool{"checkout": true})
+		if len(got) != 2 || !strings.HasSuffix(got[0], " gc") || !strings.HasSuffix(got[1], " status") {
+			t.Fatalf("unhooked = %q, want gc (through args) and status (built slice); checkout is in the set, push and the dash-led slice are skipped", got)
 		}
 	})
 
@@ -321,6 +420,7 @@ func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
 				t.Fatal(err)
 			}
 			missing = append(missing, unhookedRunSubcommands(t, f, src, hookedSubcommands)...)
+			missing = append(missing, unhookedSliceSubcommands(t, f, src, hookedSubcommands)...)
 		}
 		if len(missing) > 0 {
 			t.Fatalf("subcommands the package sends that hookedSubcommands lacks, so their hooks stay on: %s", strings.Join(missing, "; "))
