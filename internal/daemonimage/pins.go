@@ -175,11 +175,23 @@ const fetchTipDepth = MaxPinBehind + 1
 // rather than reads from a checkout. dir was fetched at pin.Commit and holds no
 // origin/main, so the guard first fetches that source's main tip from pin.URL
 // into origin/main, through git, and then applies the rules CheckPins applies to
-// a checkout. A tip fetch that fails and a tip that cannot be read are errors: a
-// fetched pin with no main to compare against is refused, never passed. Its
-// caller has refused a nil git, as FetchSource does before the fetch runs.
+// a checkout. A pin with input paths is counted only over the commits touching
+// them, which needs the history back to the pin: that fetch takes no --depth and
+// asks for no blobs, since the count compares trees. A pin without input paths
+// needs only the commits a whole-repository count walks, so its fetch stays at
+// fetchTipDepth. A tip fetch that fails and a tip that cannot be read are
+// errors: a fetched pin with no main to compare against is refused, never
+// passed. Its caller has refused a nil git, as FetchSource does before the
+// fetch runs.
 func checkFetchedPin(git bdbuild.Git, dir string, pin Pin, pinsPath string) error {
-	if _, err := git(dir, "fetch", "--depth", strconv.Itoa(fetchTipDepth), pin.URL, "main:refs/remotes/origin/main"); err != nil {
+	argv := []string{"fetch"}
+	if len(PinInputPaths(pin.Name)) != 0 {
+		argv = append(argv, "--filter=blob:none")
+	} else {
+		argv = append(argv, "--depth", strconv.Itoa(fetchTipDepth))
+	}
+	argv = append(argv, pin.URL, "main:refs/remotes/origin/main")
+	if _, err := git(dir, argv...); err != nil {
 		return fmt.Errorf("pin-drift guard: cannot fetch main of the %s pin from its pin URL: %w", pin.Name, err)
 	}
 	out, err := git(dir, "rev-parse", "--verify", "origin/main^{commit}")

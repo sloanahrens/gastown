@@ -498,6 +498,76 @@ func TestCheckPinsRefusesAnInputCountItCannotRead(t *testing.T) {
 	}
 }
 
+// fetchedMainKey is the fake git key of the fetch checkFetchedPin runs for a
+// pin's main tip, with flags between "fetch" and the pin URL.
+func fetchedMainKey(url string, flags ...string) string {
+	return pinsTestDir + " fetch " + strings.Join(flags, " ") + " " + url + " main:refs/remotes/origin/main"
+}
+
+// TestCheckFetchedPinFetchesFilteredFullHistoryForAPinWithPaths: a pin the image
+// builds from listed paths is compared against a main fetched with
+// --filter=blob:none and no --depth, since the path-limited count needs history
+// back to a pin more than fetchTipDepth commits behind.
+func TestCheckFetchedPinFetchesFilteredFullHistoryForAPinWithPaths(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	devopsCounts(f, 54, 1, time.Hour)
+	want := fetchedMainKey(devopsPin.URL, "--filter=blob:none")
+	f.answer[want] = ""
+	if err := checkFetchedPin(f.run, pinsTestDir, devopsPin, pinsTestPath); err != nil {
+		t.Fatalf("checkFetchedPin: %v", err)
+	}
+	if !hasCall(f, want) {
+		t.Errorf("the guard did not fetch main filtered for a pin with paths: calls %v, want %q", f.calls, want)
+	}
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, pinsTestDir+" fetch") && strings.Contains(call, "--depth") {
+			t.Errorf("the guard depth-limited the fetch for a pin with paths: %q", call)
+		}
+	}
+}
+
+// TestCheckFetchedPinKeepsTheDepthLimitForAPinWithoutPaths: a pin the image
+// builds from its whole repository still fetches its main tip at fetchTipDepth.
+func TestCheckFetchedPinKeepsTheDepthLimitForAPinWithoutPaths(t *testing.T) {
+	t.Parallel()
+	pin := Pin{Name: "bd", URL: testPinURL("beads"), Commit: pinsTestPin}
+	f := newPinsGit()
+	f.pinTable(pinsTestPin, pinsTestMain, 3, time.Hour)
+	want := fetchedMainKey(pin.URL, "--depth", strconv.Itoa(MaxPinBehind+1))
+	f.answer[want] = ""
+	if err := checkFetchedPin(f.run, pinsTestDir, pin, pinsTestPath); err != nil {
+		t.Fatalf("checkFetchedPin: %v", err)
+	}
+	if !hasCall(f, want) {
+		t.Errorf("the guard did not fetch main at the depth limit for a pin with no paths: calls %v, want %q", f.calls, want)
+	}
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, pinsTestDir+" fetch") && strings.Contains(call, "--filter") {
+			t.Errorf("the guard filtered the fetch for a pin with no paths: %q", call)
+		}
+	}
+}
+
+// TestCheckFetchedPinFetchFailureIsStillRefused: a failed filtered fetch is the
+// existing refusal naming the pin, never a pass.
+func TestCheckFetchedPinFetchFailureIsStillRefused(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	devopsCounts(f, 54, 1, time.Hour)
+	f.answer[fetchedMainKey(devopsPin.URL, "--depth", strconv.Itoa(MaxPinBehind+1))] = ""
+	f.errs[fetchedMainKey(devopsPin.URL, "--filter=blob:none")] = errors.New("no such ref")
+	err := checkFetchedPin(f.run, pinsTestDir, devopsPin, pinsTestPath)
+	if err == nil {
+		t.Fatal("checkFetchedPin passed a pin whose main fetch failed")
+	}
+	for _, want := range []string{"pin-drift guard:", "cannot fetch main", "devops"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("checkFetchedPin error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
 // TestCommittedImagePinsParse reads the committed file with the real parser, so
 // a hand edit that breaks its syntax or drops a name fails the gate.
 func TestCommittedImagePinsParse(t *testing.T) {
