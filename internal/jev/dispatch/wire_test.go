@@ -145,6 +145,43 @@ func TestJevDispatchOpenKeepsTheConfiguredCap(t *testing.T) {
 	}
 }
 
+// The batteries' cap leaves out the non-battery callers (gt-8b1gw1), so five
+// dollars of hm-rerank spend does not switch the opened pass off, while the
+// same spend under jev-dispatch does.
+func TestJevDispatchOpenAllowsDespiteNonBatterySpend(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		caller string
+		want   bool
+	}{
+		{name: "non-battery caller spend leaves the pass allowed", caller: "hm-rerank", want: true},
+		{name: "battery caller spend stops the pass", caller: Caller, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := townWithBeads(t)
+			p, err := open(town, Settings{USDPerBillionTokens: 4}, nil,
+				keyedClient(t), func(string) beadLister { return &fakeBeadStore{} })
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+
+			// 1.25 billion tokens at 4 USD per billion is five dollars, five times
+			// the default one-dollar cap.
+			writeSpend(t, town, 1_250_000_000, tt.caller)
+			ok, err := p.Allows()
+			if err != nil {
+				t.Fatalf("Allows: %v", err)
+			}
+			if ok != tt.want {
+				t.Errorf("Allows = %v with five dollars from %s, want %v", ok, tt.caller, tt.want)
+			}
+		})
+	}
+}
+
 // A placement slung and closed between two passes is returned by Placed. Only
 // the closed read can see it: a bead that finishes inside one quarter-hour
 // interval holds no seat when the pass runs, so without this read the log
