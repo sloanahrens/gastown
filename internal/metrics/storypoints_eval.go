@@ -3,8 +3,12 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // The story-points evaluation step (gt-htz2cb): the held-out error of the
@@ -15,6 +19,21 @@ import (
 // from. Under it the part is too small to read, so the step prints the join's
 // counts alone rather than a figure an operator would trust.
 const storyPointsEvalMinTest = 30
+
+// storyPointsEvalMinGroup is the fewest test rows a split group prints its
+// figures from. A group is one review-round bucket or one seat class, small by
+// nature, so under this many rows its error is the few beads' own time rather
+// than a figure an operator would read.
+const storyPointsEvalMinGroup = 5
+
+// EvalSplit is one group of the test part a split prints, carrying the same
+// predictor figures the base table does when it holds storyPointsEvalMinGroup
+// rows or more and nil figures when it holds fewer.
+type EvalSplit struct {
+	Name  string
+	Rows  int
+	Stats []PredictorStats
+}
 
 // runStoryPointsEval is main's storypoints-eval step: the join over the wired
 // town, split into the part the figures are read from, and printed to Out.
@@ -28,11 +47,23 @@ func (c Commands) runStoryPointsEval(real RealTown) error {
 		return err
 	}
 	train, test := splitEval(rows, since)
+	enough := len(test) >= storyPointsEvalMinTest
 	var stats []PredictorStats
-	if len(test) >= storyPointsEvalMinTest {
+	if enough {
 		stats = evalStats(train, test)
 	}
-	return writeStoryPointsEval(c.Out, counts, len(test), stats)
+	if err := writeStoryPointsEval(c.Out, counts, len(test), stats); err != nil {
+		return err
+	}
+	if !enough {
+		// The base table printed no figure from a part too small to read, so
+		// the splits print none either, from groups smaller still.
+		return nil
+	}
+	if err := writeEvalSplits(c.Out, "by review rounds (the test part)", evalRoundSplits(train, test)); err != nil {
+		return err
+	}
+	return writeEvalSplits(c.Out, "by seat class (the test part)", evalSeatSplits(train, test))
 }
 
 // storyPointsEvalSince reads the --since value. Empty is the zero time, which
@@ -65,12 +96,29 @@ func writeStoryPointsEval(w io.Writer, counts EvalCounts, testRows int, stats []
 		_, err := fmt.Fprintf(w, "  the test part is under %d rows, so no error figures are printed\n", storyPointsEvalMinTest)
 		return err
 	}
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "predictor\tn\tMAE (min)\tmedian AE (min)\twithin 1.5x\trank rho\tlog n\tlog RMS\tlog bias")
+	_, err := io.WriteString(w, predictorTable("", stats))
+	return err
+}
+
+// predictorTable is the predictor table as text: the header, then one row per
+// predictor. indent prefixes every line so a table under a group heading stands
+// inside it. The table is built in a strings.Builder, which cannot fail.
+func predictorTable(indent string, stats []PredictorStats) string {
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
+	writePredictorRows(tw, indent, stats)
+	_ = tw.Flush()
+	return b.String()
+}
+
+// writePredictorRows writes the predictor table to tw, whose writes cannot fail
+// because it wraps a strings.Builder.
+func writePredictorRows(tw *tabwriter.Writer, indent string, stats []PredictorStats) {
+	fmt.Fprintf(tw, "%spredictor\tn\tMAE (min)\tmedian AE (min)\twithin 1.5x\trank rho\tlog n\tlog RMS\tlog bias\n", indent)
 	for _, s := range stats {
 		logN := s.N - s.SkippedLog
-		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			s.Name, s.N,
+		fmt.Fprintf(tw, "%s%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			indent, s.Name, s.N,
 			evalFigure(s.N != 0, s.MAE),
 			evalFigure(s.N != 0, s.MedianAE),
 			fmtShare(s.Within, s.WithinOK),
@@ -79,7 +127,109 @@ func writeStoryPointsEval(w io.Writer, counts EvalCounts, testRows int, stats []
 			evalFigure(logN != 0, s.LogRMS),
 			evalFigure(logN != 0, s.LogBias))
 	}
-	return tw.Flush()
+}
+
+// writeEvalSplits writes one split of the evaluation (gt-he1f8o): the section
+// title, then for each group its test row count and, when the group holds
+// storyPointsEvalMinGroup rows or more, the same predictor table the evaluation
+// prints. A group under the minimum prints its count alone, never a figure from
+// the few beads it holds.
+//
+// The section is built in a strings.Builder and written once, so a refused
+// write is the run's error and a section half printed does not read as a whole.
+func writeEvalSplits(w io.Writer, title string, splits []EvalSplit) error {
+	var b strings.Builder
+	// One tabwriter over the whole section aligns every group's table alike.
+	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(tw, "\n%s\n", title)
+	for _, s := range splits {
+		fmt.Fprintf(tw, "  %s: %s\n", s.Name, evalRowCount(s.Rows))
+		if s.Stats == nil {
+			fmt.Fprintf(tw, "    under %d test rows, so no figures\n", storyPointsEvalMinGroup)
+			continue
+		}
+		writePredictorRows(tw, "    ", s.Stats)
+	}
+	_ = tw.Flush()
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// evalRowCount is a row count with its noun, so a group of one reads "1 test
+// row" rather than "1 test rows".
+func evalRowCount(n int) string {
+	if n == 1 {
+		return "1 test row"
+	}
+	return fmt.Sprintf("%d test rows", n)
+}
+
+// evalRoundSplits groups the test rows by the review rounds their landing
+// record carries (gt-hx18i9): one, two and three or more. A record with no
+// rounds is neither — the landing record leaves zero for a bead with no review
+// rows and for a review ledger it could not read — so those rows are counted in
+// a group of their own, named for what the record holds.
+func evalRoundSplits(train, test []EvalRow) []EvalSplit {
+	buckets := []struct {
+		name string
+		in   func(rounds int) bool
+	}{
+		{"1 round", func(rounds int) bool { return rounds == 1 }},
+		{"2 rounds", func(rounds int) bool { return rounds == 2 }},
+		{"3+ rounds", func(rounds int) bool { return rounds >= 3 }},
+		{"no rounds recorded", func(rounds int) bool { return rounds <= 0 }},
+	}
+	splits := make([]EvalSplit, 0, len(buckets))
+	for _, bucket := range buckets {
+		var rows []EvalRow
+		for _, row := range test {
+			if bucket.in(row.OMRounds) {
+				rows = append(rows, row)
+			}
+		}
+		if len(rows) == 0 {
+			continue
+		}
+		splits = append(splits, evalSplitOf(bucket.name, train, rows))
+	}
+	return splits
+}
+
+// evalSeatSplits groups the test rows by the seat class of the agent their
+// landing record carries, in class name order. The classes are the ones the
+// rows hold, so a class storypoints.SeatClass learns later is never dropped
+// from the table; a record with no agent is the group "(no seat class)".
+func evalSeatSplits(train, test []EvalRow) []EvalSplit {
+	byClass := map[string][]EvalRow{}
+	for _, row := range test {
+		class := storypoints.SeatClass(row.Agent)
+		if class == "" {
+			class = "(no seat class)"
+		}
+		byClass[class] = append(byClass[class], row)
+	}
+	names := make([]string, 0, len(byClass))
+	for name := range byClass {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	splits := make([]EvalSplit, 0, len(names))
+	for _, name := range names {
+		splits = append(splits, evalSplitOf(name, train, byClass[name]))
+	}
+	return splits
+}
+
+// evalSplitOf is one group's entry: its rows and, at storyPointsEvalMinGroup
+// rows or more, the figures of the same predictors the base table holds, read
+// over the group. The constant predictor keeps the training part's median, so
+// every group is scored against the same baseline as the whole.
+func evalSplitOf(name string, train, rows []EvalRow) EvalSplit {
+	split := EvalSplit{Name: name, Rows: len(rows)}
+	if len(rows) >= storyPointsEvalMinGroup {
+		split.Stats = evalStats(train, rows)
+	}
+	return split
 }
 
 // evalFigure is one figure as the table prints it: two decimals, or n/a when
