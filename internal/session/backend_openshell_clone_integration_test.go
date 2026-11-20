@@ -52,6 +52,55 @@ func TestIntegrationCloneScriptLeavesOriginMainForGTDone(t *testing.T) {
 	}
 }
 
+// TestIntegrationSeatCloneIgnoresRuntimeFiles runs the clone and exclude
+// scripts the backend sends into a sandbox, against a remote whose branches
+// carry no .gitignore, and checks the fresh clone ignores the seat's runtime
+// files through .git/info/exclude alone. An hm seat committed
+// .runtime/agent.lock, .beads/redirect and .claude/commands/*.md when that file
+// was still git's untouched template (hm-b7c).
+func TestIntegrationSeatCloneIgnoresRuntimeFiles(t *testing.T) {
+	t.Parallel()
+	remote := cloneReplayRemote(t, []string{"main", openshellTestBranch})
+	dest := filepath.Join(t.TempDir(), "clone")
+	clone := exec.Command("sh", "-c", cloneScript, "sh", openshellTestBranch, remote, dest, strconv.Itoa(sandboxCloneDepth))
+	clone.Env = cloneReplayEnv()
+	if out, err := clone.CombinedOutput(); err != nil {
+		t.Fatalf("clone script: %v\n%s", err, out)
+	}
+	// Without this step the clone's exclude file is git's template, which names
+	// no Gas Town path, so every check below fails.
+	exclude := exec.Command("sh", "-c", excludeScript, "sh", dest, strings.Join(openshellTestExcludePatterns, "\n"))
+	exclude.Env = cloneReplayEnv()
+	if out, err := exclude.CombinedOutput(); err != nil {
+		t.Fatalf("exclude script: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".gitignore")); err == nil {
+		t.Fatalf("the clone carries a .gitignore, so it cannot show that .git/info/exclude alone ignores the files")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat .gitignore: %v: the test cannot tell whether the clone carries one", err)
+	}
+	for _, name := range []string{
+		filepath.Join(".runtime", "agent.lock"),
+		filepath.Join(".claude", "commands", "done.md"),
+		filepath.Join(".beads", "redirect"),
+	} {
+		p := filepath.Join(dest, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("runtime\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ignore := exec.Command("git", "check-ignore", "-q", "--", name)
+		ignore.Dir = dest
+		ignore.Env = cloneReplayEnv()
+		if out, err := ignore.CombinedOutput(); err != nil {
+			body, readErr := os.ReadFile(filepath.Join(dest, ".git", "info", "exclude"))
+			t.Fatalf("git check-ignore -q %s: %v\n%s\n.git/info/exclude (read: %v):\n%s", name, err, out, readErr, body)
+		}
+	}
+}
+
 // TestIntegrationCloneScriptPinsNoPolecatBranch checks the fetch refspec the
 // clone script leaves behind, then deletes the polecat branch on the remote the
 // way a landing does. The bare fetch that gt done runs before a rebase must
