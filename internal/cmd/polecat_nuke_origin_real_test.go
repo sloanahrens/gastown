@@ -1,3 +1,5 @@
+//go:build integration
+
 package cmd
 
 import (
@@ -31,7 +33,7 @@ func originGit(t *testing.T, dir string, args ...string) string {
 // A rig's bare repository is cloned from a real origin, so the remote that
 // answers the read is the one clone configured. When origin holds the seat's
 // branch at its tip, the read answers that tip.
-func TestNukeSeatOriginTipRealOriginHoldingTheTipAnswersTheTip(t *testing.T) {
+func TestIntegrationNukeSeatOriginTipRealOriginHoldingTheTipAnswersTheTip(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	origin := filepath.Join(root, "origin.git")
