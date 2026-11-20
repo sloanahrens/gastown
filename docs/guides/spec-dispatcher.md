@@ -376,10 +376,12 @@ no seat is less guarded than another.
 A seat's `go_flags` adds space-separated go flags to its polecats' `GOFLAGS`,
 appended to the value the spawn already has (the agent's own, else the spawning
 environment's) and ahead of the seat's computed `-p` parallelism, which is left
-off when either value names a `-p`. Only `-trimpath`, `-mod=readonly`, `-race`
-and `-p=<n>` load; the loader refuses any other flag by name, so a settings file
-cannot retarget the toolchain, linker or compiler with `-toolexec` or `-ldflags`
-(gt-gg9hv.42).
+off when either value names a `-p`. Only `-trimpath`, `-mod=readonly`, `-race`,
+`-gcflags=all=-dwarf=false` and `-p=<n>` load; the loader refuses any other flag
+by name, so a settings file cannot retarget the toolchain, linker or compiler
+with `-toolexec` or `-ldflags` (gt-gg9hv.42). `-gcflags=all=-dwarf=false` drops
+DWARF debug information, which shrinks the big test archives by about a third,
+and it is part of Go's cache key, so the first run after a seat adds it is cold.
 
 `polecat_pool.max_total`, when set, caps live polecats across every seat: a
 seat's cap is per agent, so seats each inside their own cap can still run more
