@@ -172,10 +172,10 @@ func (l *tailSpecTickLatch) visible(text string) bool {
 // the second to be the same event written twice.
 const tailDuplicateWindow = 2 * time.Second
 
-// tailJournalOps are the operations a bd events record carries
+// tailEventOps are the operations a bd events record carries
 // (internal/beads/events.go). A line whose first field is not one of them is
 // not a record — a source's own error line, say — and is never a duplicate.
-var tailJournalOps = map[string]bool{
+var tailEventOps = map[string]bool{
 	"create": true, "update": true, "close": true, "delete": true,
 	"dep_add": true, "dep_remove": true, "comment": true,
 }
@@ -188,7 +188,7 @@ var tailJournalOps = map[string]bool{
 // record — a source's own error line, say — which is never a duplicate.
 func tailEventKey(text string) string {
 	f := strings.Fields(text)
-	if len(f) < 2 || !tailJournalOps[f[0]] || f[1] == "" {
+	if len(f) < 2 || !tailEventOps[f[0]] || f[1] == "" {
 		return ""
 	}
 	key := f[0] + "\x00" + f[1] + "\x00"
