@@ -824,13 +824,46 @@ func TestPoolShowNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 	held := poolTestShowLine(page, "held:")
 	want := "held: gastown/alpha:session, gastown/bravo:session, gastown/charlie:session, " +
 		"gastown/delta:session, gastown/echo:session, gastown/foxtrot:session, " +
-		"gastown/golf:landing, gastown/hotel:dead-hooked, pool-claim/c1:claim"
+		"gastown/golf:landing, gastown/hotel:with no session, pool-claim/c1:claim"
 	if held != want {
 		t.Fatalf("held line = %q, want %q:\n%s", held, want, page)
 	}
 	entries := strings.Split(strings.TrimPrefix(held, "held: "), ", ")
 	if len(entries) != live.live["deepseek-flash"] || len(entries) != 9 {
 		t.Errorf("the list names %d seats, the seat counts %d:\n%s", len(entries), live.live["deepseek-flash"], page)
+	}
+}
+
+// TestPoolShowSaysNoSessionNotDeadHooked is gt-lroj0r's show half: the page
+// prints a seat with no session with the count's own word, "with no session",
+// in the seat line's split and in the held list under it, and the class working
+// prints as starting. dead-hooked names the read, never a line the operator
+// reads.
+func TestPoolShowSaysNoSessionNotDeadHooked(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"agents":{"a":{"command":"claude"}},`+
+		`"polecat_pool":{"seats":{"a":{"cap":1}}}}`, "")
+	writeTestRigsConfig(t, root, "gastown")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := []poolSession{
+		{name: "gt-a", agent: "a"},
+		{name: "dead/gastown/hotel", agent: "a", rig: "gastown", polecat: "hotel", deadHooked: true, deadClass: "working"},
+	}
+	live := poolLiveForWith(root, func(*config.PolecatPool) ([]poolSession, error) { return sessions, nil })
+
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {
+		t.Fatal(err)
+	}
+	page := out.String()
+	if got, want := poolTestShowLine(page, "a"), "a 2/1 (1 live + 1 with no session (1 starting)) open"; got != want {
+		t.Fatalf("seat line = %q, want %q:\n%s", got, want, page)
+	}
+	if got, want := poolTestShowLine(page, "held:"), "held: gastown/hotel:with no session, gt-a:session"; got != want {
+		t.Fatalf("held line = %q, want %q:\n%s", got, want, page)
 	}
 }
 
