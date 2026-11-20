@@ -17,6 +17,7 @@ import (
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	updatejob "github.com/steveyegge/gastown/deploy/k8s/update-job"
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -422,6 +423,13 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 	}
 	switch len(cands) {
 	case 0:
+		// A pair equal to the running commit is the build the daemon already
+		// runs: naming it says why no roll starts (gt-5z8ac2).
+		for _, it := range items {
+			if it.Kind == attention.KindDeployPairReady && it.SHA == running {
+				return "", "the daemon already runs " + greenRefShortSHA(running)
+			}
+		}
 		return "", "no pair-ready green commit is ahead of the running commit"
 	case 1:
 		return cands[0].sha, ""
@@ -448,13 +456,27 @@ func pairReadySHAForRoll(items []attention.Item, running string, clone func(rig 
 	return "", "commits not linear: the pair-ready green commits do not form one line; not launching"
 }
 
+// runningCommit is the commit the running daemon was rendered from: its own full
+// build commit when it is one, else the commit line of the town's values file. A
+// partial roll leaves the values file naming the old commit, so the file alone
+// makes the build already live read as newer than the one the daemon runs; the
+// daemon's own commit is the authority when it is known in full (gt-5z8ac2).
+func (d *Daemon) runningCommit() (string, error) {
+	if sha, err := d.fullBuildCommit(); err == nil {
+		if _, err := buildstamp.Short(sha); err == nil {
+			return sha, nil
+		}
+	}
+	return pairReadyRunningCommit(d.config.TownRoot)
+}
+
 // triggerPodUpdate is the due decision for a daemon that runs as a pod. The roll
 // starts only when a pair-ready green commit is ahead of the running one, and it
 // starts as the Job the cluster runs, never as a child this process would lose
 // when the roll replaces it. A pair whose Job the daemon has seen in the cluster
 // is not due: its roll ran, and only a newer pair starts one.
 func (d *Daemon) triggerPodUpdate(now time.Time, settings config.UpdateSettings, reason string, facts UpdateFacts) {
-	running, err := pairReadyRunningCommit(d.config.TownRoot)
+	running, err := d.runningCommit()
 	if err != nil {
 		d.noteUpdateNotDue("running commit unreadable: " + err.Error())
 		return
