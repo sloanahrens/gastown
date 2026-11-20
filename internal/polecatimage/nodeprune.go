@@ -33,11 +33,12 @@ func (l *stringList) Set(v string) error {
 }
 
 // nodePruneMain is the node-prune helper. It plans the images to remove from the node whose CRI socket is
-// --endpoint and prints one line per planned image. The plan is always a dry run: nothing is removed.
+// --endpoint and prints one line per planned image. Without --apply the plan is a dry run: nothing is
+// removed. With --apply each planned image is removed, one at a time, and reported.
 //
-// Exit 0 means the node was read and the plan printed. Exit 3 means the node could not be read, with the
-// reason on stderr and no would-remove line, so a missing plan is never read as an empty one. Exit 2 is a
-// usage error; -h exits 0.
+// Exit 0 means the node was read and the plan printed, or every apply removal succeeded. Exit 3 means the
+// node could not be read, with the reason on stderr and no would-remove line, so a missing plan is never
+// read as an empty one; it also means an apply removal failed. Exit 2 is a usage error; -h exits 0.
 func nodePruneMain(args []string, stdout, stderr io.Writer) int {
 	return nodePruneWith(args, stdout, stderr, execProgram)
 }
@@ -55,6 +56,7 @@ func nodePruneWith(args []string, stdout, stderr io.Writer, run func(name string
 	var crictlArgs stringList
 	flags.Var(&crictlArgs, "crictl-arg", "an argument placed before each crictl call, such as crictl when the program is k3s; repeatable")
 	endpoint := flags.String("endpoint", "", "the CRI socket of the node, passed as --runtime-endpoint")
+	apply := flags.Bool("apply", false, "remove the planned images; without it nothing is removed")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -84,16 +86,31 @@ func nodePruneWith(args []string, stdout, stderr io.Writer, run func(name string
 	}
 
 	crictl := nodePruneCrictl(run, *crictlBin, crictlArgs, *endpoint, spares)
-	res := imageprune.PruneNodeRepos(*endpoint, crictl, *keep, names, true)
+	res := imageprune.PruneNodeRepos(*endpoint, crictl, *keep, names, !*apply)
 	if res.Err != nil {
 		fmt.Fprintf(stderr, "node-prune: cannot read the node %s: %v\n", *endpoint, res.Err)
 		return 3
 	}
-	for _, im := range res.Planned {
-		fmt.Fprintf(stdout, "node-prune: would remove %s %s created %s\n",
-			im.ID, repositoryOf(im, names), im.Created.UTC().Format(time.RFC3339))
+	if !*apply {
+		for _, im := range res.Planned {
+			fmt.Fprintf(stdout, "node-prune: would remove %s %s created %s\n",
+				im.ID, repositoryOf(im, names), im.Created.UTC().Format(time.RFC3339))
+		}
+		fmt.Fprintf(stdout, "node-prune: dry run planned %d images\n", len(res.Planned))
+		return 0
 	}
-	fmt.Fprintf(stdout, "node-prune: dry run planned %d images\n", len(res.Planned))
+	// A failed removal is named on stderr and the run goes on; the exit status carries the failure.
+	for _, im := range res.Planned {
+		if err, failed := res.Failed[im.ID]; failed {
+			fmt.Fprintf(stderr, "node-prune: cannot remove %s: %v\n", im.ID, err)
+			continue
+		}
+		fmt.Fprintf(stdout, "node-prune: removed %s\n", im.ID)
+	}
+	fmt.Fprintf(stdout, "node-prune: applied removed %d failed %d\n", len(res.Removed), len(res.Failed))
+	if len(res.Failed) > 0 {
+		return 3
+	}
 	return 0
 }
 
