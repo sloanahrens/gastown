@@ -192,8 +192,11 @@ func checkFetchedPin(git bdbuild.Git, dir string, pin Pin, pinsPath string) erro
 
 // checkPinAgainstMain applies the three pin-drift rules to one pin: a pin at
 // main passes silently; one that is not an ancestor of main, more than
-// MaxPinBehind commits behind it, or whose commit is more than MaxPinAge older
-// than main's tip is refused; one inside both bounds passes with one note.
+// MaxPinBehind commits behind it counting only the commits that touch its inputs
+// (every commit, for a source with no input list), or whose commit is more than
+// MaxPinAge older than main's tip is refused; one inside both bounds passes with
+// one note. The note and each refusal print both the commits it is behind main by
+// and how many of them touch its inputs.
 func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath string) (notes []string, err error) {
 	if pin.Commit == main {
 		return nil, nil
@@ -208,17 +211,24 @@ func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath st
 	if err != nil {
 		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot count the commits to main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
 	}
-	if behind > MaxPinBehind {
-		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, over the %d-commit bound: %s", pin.Name, short(pin.Commit), behind, short(main), MaxPinBehind, pinEdit(pin, pinsPath, main))
+	touching := behind
+	if paths := PinInputPaths(pin.Name); len(paths) != 0 {
+		touching, err = commitsBehind(git, dir, pin.Commit, main, paths...)
+		if err != nil {
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot count the commits to main %s that touch its inputs in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+		}
+	}
+	if touching > MaxPinBehind {
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, over the %d-commit bound: %s", pin.Name, short(pin.Commit), behind, short(main), touching, MaxPinBehind, pinEdit(pin, pinsPath, main))
 	}
 	age, err := commitAge(git, dir, pin.Commit, main)
 	if err != nil {
 		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot read the commit times against main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
 	}
 	if age > MaxPinAge {
-		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, and its commit is %s older than main's tip, over the %s bound: %s", pin.Name, short(pin.Commit), behind, short(main), age.Round(time.Hour), MaxPinAge, pinEdit(pin, pinsPath, main))
+		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, and its commit is %s older than main's tip, over the %s bound: %s", pin.Name, short(pin.Commit), behind, short(main), touching, age.Round(time.Hour), MaxPinAge, pinEdit(pin, pinsPath, main))
 	}
-	return []string{fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), MaxPinBehind, MaxPinAge)}, nil
+	return []string{fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), touching, MaxPinBehind, MaxPinAge)}, nil
 }
 
 // pinEdit is the exact edit a refused pin needs, for the reader to paste from
@@ -236,10 +246,16 @@ func isNotAncestor(err error) bool {
 	return errors.As(err, &coded) && coded.ExitCode() == 1
 }
 
-// commitsBehind counts the commits from pin to main; the caller has checked
-// that pin is an ancestor of main.
-func commitsBehind(git bdbuild.Git, dir, pin, main string) (int, error) {
-	out, err := git(dir, "rev-list", "--count", pin+".."+main)
+// commitsBehind counts the commits from pin to main, and with paths only those
+// among them that touch paths, the files the image builds the source from, so a
+// source that changes anywhere else does not count against its pin. The caller
+// has checked that pin is an ancestor of main.
+func commitsBehind(git bdbuild.Git, dir, pin, main string, paths ...string) (int, error) {
+	argv := []string{"rev-list", "--count", pin + ".." + main}
+	if len(paths) != 0 {
+		argv = append(append(argv, "--"), paths...)
+	}
+	out, err := git(dir, argv...)
 	if err != nil {
 		return 0, err
 	}

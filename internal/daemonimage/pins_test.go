@@ -1,9 +1,11 @@
 package daemonimage
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -143,6 +145,9 @@ var pinsMainAt = time.Unix(1_780_000_000, 0)
 type pinsGit struct {
 	answer map[string]string
 	errs   map[string]error
+	// calls records every key the guard asked git for, so a test can assert
+	// which counts it ran.
+	calls []string
 }
 
 // exitStatus is the error a git command that exited with code gives: the exit
@@ -156,6 +161,7 @@ func (e exitStatus) ExitCode() int { return int(e) }
 
 func (f *pinsGit) run(dir string, args ...string) ([]byte, error) {
 	key := dir + " " + strings.Join(args, " ")
+	f.calls = append(f.calls, key)
 	if err, ok := f.errs[key]; ok {
 		return nil, err
 	}
@@ -338,6 +344,155 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 				if strings.Contains(err.Error(), notWant) {
 					t.Errorf("CheckPins error = %q, must not echo %q", err, notWant)
 				}
+			}
+		})
+	}
+}
+
+// devopsInputs is what the image builds from the devops repository, written out
+// independently of PinInputPaths so a drifted list leaves the fake git with no
+// answer for the path-limited count.
+var devopsInputs = []string{
+	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/ledgerdb",
+	"pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
+}
+
+// devopsPin is the devops fixture pin the counts below drive.
+var devopsPin = Pin{Name: "devops", URL: testPinURL("devops"), Commit: pinsTestPin}
+
+// inputCountKey is the fake git key of the count over the devops build inputs.
+func inputCountKey() string {
+	return pinsTestDir + " rev-list --count " + pinsTestPin + ".." + pinsTestMain + " -- " + strings.Join(devopsInputs, " ")
+}
+
+// devopsCounts fills the answers a devops pin takes: pinTable's, plus the count
+// over its build inputs.
+func devopsCounts(f *pinsGit, behind, touching int, pinAge time.Duration) {
+	f.pinTable(pinsTestPin, pinsTestMain, behind, pinAge)
+	f.answer[inputCountKey()] = strconv.Itoa(touching) + "\n"
+}
+
+// checkDevopsPins runs the guard on the devops fixture pin.
+func checkDevopsPins(f *pinsGit) ([]string, error) {
+	return CheckPins([]Pin{devopsPin}, func(Pin) (string, error) { return pinsTestDir, nil }, pinsTestPath, f.run)
+}
+
+// newPinsGit is a fake git a test has planned no answer for.
+func newPinsGit() *pinsGit { return &pinsGit{answer: map[string]string{}, errs: map[string]error{}} }
+
+// TestPinInputPathsNameTheDevopsBuildInputs checks the devops pin's inputs are
+// exactly the three commands the image builds, the packages they import, the
+// cloud-check file staged beside cloudcheck and the module files, and that a
+// source the image builds from its whole repository has no input list.
+func TestPinInputPathsNameTheDevopsBuildInputs(t *testing.T) {
+	t.Parallel()
+	if got := PinInputPaths("devops"); !reflect.DeepEqual(got, devopsInputs) {
+		t.Errorf("PinInputPaths(devops) = %v, want %v", got, devopsInputs)
+	}
+	for _, name := range []string{"bd", "om", "hm", "tracker"} {
+		if got := PinInputPaths(name); got != nil {
+			t.Errorf("PinInputPaths(%s) = %v, want nil: that source is built from its whole repository", name, got)
+		}
+	}
+}
+
+// TestCommitsBehindCountsOnlyInputPaths checks the devops pin's count is asked
+// for the commits touching its inputs, and a source with no input list is
+// counted with no path limiting at all.
+func TestCommitsBehindCountsOnlyInputPaths(t *testing.T) {
+	t.Parallel()
+	devops := newPinsGit()
+	devopsCounts(devops, 3, 1, time.Hour)
+	if _, err := checkDevopsPins(devops); err != nil {
+		t.Fatalf("CheckPins: %v", err)
+	}
+	if !hasCall(devops, inputCountKey()) {
+		t.Errorf("the guard ran no count over the devops inputs: %v", devops.calls)
+	}
+	bd := newPinsGit()
+	bd.pinTable(pinsTestPin, pinsTestMain, 3, time.Hour)
+	if _, err := CheckPins([]Pin{{Name: "bd", URL: testPinURL("beads"), Commit: pinsTestPin}},
+		func(Pin) (string, error) { return pinsTestDir, nil }, pinsTestPath, bd.run); err != nil {
+		t.Fatalf("CheckPins: %v", err)
+	}
+	for _, call := range bd.calls {
+		if strings.HasPrefix(call, pinsTestDir+" rev-list") && strings.Contains(call, " -- ") {
+			t.Errorf("the guard ran a path-limited count for a whole-repository source: %q", call)
+		}
+	}
+}
+
+// hasCall reports whether the fake git was asked key.
+func hasCall(f *pinsGit, key string) bool {
+	for _, call := range f.calls {
+		if call == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCheckPinsPassesAPinBehindOnlyByOtherFiles checks a devops pin far behind
+// main fails only when the commits touch what the image builds from it: 54
+// commits behind with 1 touching its inputs passes, with a note naming both
+// numbers.
+func TestCheckPinsPassesAPinBehindOnlyByOtherFiles(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	devopsCounts(f, 54, 1, 2*24*time.Hour)
+	notes, err := checkDevopsPins(f)
+	if err != nil {
+		t.Fatalf("CheckPins: %v", err)
+	}
+	want := "rig devops pin " + pinsTestPin[:12] + " is 54 commits behind main " + pinsTestMain[:12] + ", 1 touching its inputs"
+	if len(notes) != 1 || !strings.Contains(notes[0], want) {
+		t.Errorf("CheckPins notes = %v, want one containing %q", notes, want)
+	}
+}
+
+// TestCheckPinsRefusesAPinBehindOnItsInputs checks the 40-commit bound applies to
+// the commits touching the devops inputs: 41 of them behind fails with both
+// counts in the refusal.
+func TestCheckPinsRefusesAPinBehindOnItsInputs(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	devopsCounts(f, 50, MaxPinBehind+1, time.Hour)
+	_, err := checkDevopsPins(f)
+	if err == nil {
+		t.Fatal("CheckPins passed a pin 41 commits behind on its inputs")
+	}
+	for _, want := range []string{
+		"pin-drift guard:",
+		"rig devops pin " + pinsTestPin[:12] + " is 50 commits behind main " + pinsTestMain[:12],
+		"41 touching its inputs",
+		"over the 40-commit bound",
+		"set the devops line in " + pinsTestPath + " to " + pinsTestMain,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckPins error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// TestCheckPinsRefusesAnInputCountItCannotRead checks a path-limited count git
+// fails or answers with a non-number is refused, never read as zero commits
+// touching the inputs.
+func TestCheckPinsRefusesAnInputCountItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		breakIt func(*pinsGit)
+	}{
+		{"a count git refuses", func(f *pinsGit) { f.errs[inputCountKey()] = errors.New("bad pathspec") }},
+		{"a count that is not a number", func(f *pinsGit) { f.answer[inputCountKey()] = "lots\n" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPinsGit()
+			f.pinTable(pinsTestPin, pinsTestMain, 50, time.Hour)
+			tc.breakIt(f)
+			if _, err := checkDevopsPins(f); err == nil || !strings.Contains(err.Error(), "cannot count the commits to main") {
+				t.Fatalf("CheckPins error = %v, want a refusal naming the count", err)
 			}
 		})
 	}
