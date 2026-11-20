@@ -121,6 +121,45 @@ func TestWithoutAllHooksDecoratesPush(t *testing.T) {
 	}
 }
 
+// TestWithoutAllHooksDecoratesTheOtherPushBuilders: the branch deletes, env push
+// and notes push each send `-c core.hooksPath=/dev/null` before push on a
+// WithoutAllHooks handle, and bare on a WithoutLocalHooks one (gt-kcvawn).
+func TestWithoutAllHooksDecoratesTheOtherPushBuilders(t *testing.T) {
+	t.Parallel()
+	const off = "-c core.hooksPath=/dev/null "
+	s := newScripted(map[string]reply{
+		off + "symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
+		off + "push *": ok(""),
+		"push *":       ok(""),
+	})
+	for _, h := range []struct {
+		name, push string
+		wrap       func(*Git) *Git
+	}{
+		{"without all hooks", off, (*Git).WithoutAllHooks},
+		{"without local hooks", "", (*Git).WithoutLocalHooks},
+	} {
+		g := h.wrap(newTestGit(t, s))
+		for _, c := range []struct {
+			what, want string
+			err        error
+		}{
+			{"DeleteRemoteBranch", "push origin --delete gone", g.DeleteRemoteBranch("origin", "gone")},
+			{"DeleteRemoteBranchIfAt", "push --force-with-lease=refs/heads/gone-at:1111 origin :refs/heads/gone-at", g.DeleteRemoteBranchIfAt("origin", "gone-at", "1111")},
+			{"PushWithEnv", "push origin via-env", g.PushWithEnv("origin", "via-env", false, []string{EnvRefineryMerge})},
+			{"PushNotes", "push origin refs/notes/verdicts", g.PushNotes("origin", "verdicts")},
+		} {
+			if c.err != nil {
+				t.Fatalf("%s %s: %v", h.name, c.what, c.err)
+			}
+			if !s.hasSent(h.push + c.want) {
+				t.Errorf("%s %s: no call recorded as %q; sent %q", h.name, c.what, h.push+c.want, s.sent())
+			}
+		}
+	}
+	s.noUnscripted(t)
+}
+
 // TestWithoutAllHooksKeepsAnUnnameablePushHooked: a call whose subcommand reads
 // as anything but push, an alias here, keeps the pre-push fence even on a
 // WithoutAllHooks handle: without a name for the real subcommand, decorating it
