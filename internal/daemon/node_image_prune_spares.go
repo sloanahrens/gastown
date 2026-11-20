@@ -51,8 +51,8 @@ type kubeObject struct {
 // namespace's Jobs, Deployments and Pods run, from
 // `kubectl -n gt get job,deploy,pod -o json`. An image with no digest cannot be
 // spared by digest, so it refuses the whole list, naming the object. So does a
-// list with no items or no Deployment: a live town always has Deployments, so an
-// empty answer is a failed read, never "spare nothing".
+// list with no items, no Deployment, or no digest at all: a live town always has
+// Deployments, so an empty answer is a failed read, never "spare nothing".
 func nodeImagePruneSpares(listJSON []byte) ([]string, error) {
 	var list struct {
 		Kind     string `json:"kind"`
@@ -99,6 +99,9 @@ func nodeImagePruneSpares(listJSON []byte) ([]string, error) {
 	}
 	if deployments == 0 {
 		return nil, fmt.Errorf("nodeImagePruneSpares: the listing has no Deployment, so it cannot say what the node runs")
+	}
+	if len(spares) == 0 {
+		return nil, fmt.Errorf("nodeImagePruneSpares: the listing names no image digest, so it cannot say what the node runs")
 	}
 
 	out := make([]string, 0, len(spares))

@@ -122,6 +122,7 @@ func TestNodeImagePruneRunFailsClosedBeforeTheJob(t *testing.T) {
 	}{
 		{name: "list refused", fail: "ListJSON", list: good, image: "gt-bd:1", step: "list the gt namespace"},
 		{name: "spare list refused", list: []byte(`{"kind":"List","items":[]}`), image: "gt-bd:1", step: "work out the spare digests"},
+		{name: "deployment with no containers refused", list: []byte(`{"kind":"List","items":[{"kind":"Deployment","metadata":{"name":"gt-daemon"},"spec":{"template":{"spec":{"containers":[]}}}}]}`), image: "gt-bd:1", step: "work out the spare digests"},
 		{name: "manifest refused", list: good, image: "", step: "build the job manifest"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
