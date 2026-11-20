@@ -327,7 +327,9 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 		return nil, err
 	}
 	ownerOf := func() (string, error) { return config.ResolveForgeOwner(d.config.TownRoot) }
-	return ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), cmp)
+	// The production path count is gt-wz5ct4; until it lands, a devops pin's read
+	// is its Err rather than a compare count that cannot name its inputs.
+	return ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), nil, cmp)
 }
 
 // imagePinsTipGit is the one git read a pin's tip takes: ls-remote of the
