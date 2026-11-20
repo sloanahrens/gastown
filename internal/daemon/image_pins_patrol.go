@@ -357,12 +357,8 @@ func (d *Daemon) imagePinsTipGit(ctx context.Context) PinTipGit {
 	}
 }
 
-// imagePinsPathCount is the production PinPathCount: the commits from the pin to
-// the tip that touch the paths, or an error, never a zero, when git cannot count.
-//
-// The count runs in the devops rig's bare clone, after a forced filtered fetch of
-// the source's main into the scratch ref refs/gt/pin-tip, which is overwritten
-// each tick and is no branch the town uses.
+// imagePinsPathCount is the production PinPathCount: git's count of the commits
+// from the pin to the tip that touch the paths, or an error when git cannot count.
 func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
 	return func(url, pin, tip string, paths []string) (int, error) {
@@ -377,6 +373,9 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 		n, err := strconv.Atoi(strings.TrimSpace(string(out)))
 		if err != nil {
 			return 0, fmt.Errorf("git rev-list --count %s..%s answered a non-number", sha12(pin), sha12(tip))
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("git rev-list --count %s..%s answered a negative count", sha12(pin), sha12(tip))
 		}
 		return n, nil
 	}
