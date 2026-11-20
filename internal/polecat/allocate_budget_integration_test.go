@@ -192,12 +192,19 @@ func TestIntegrationGitProcessRecorderSeesEveryProcess(t *testing.T) {
 	runGit(t, rec.runIn, "worktree", "add", "-q", "-b", "recbranch", seat, "origin/main")
 
 	two := git.NewGitWithExec(seat, rec.run)
-	if msg := processesMismatch("CommonDir", rec.countDuring(func() { _, _ = two.CommonDir() }), 2); msg != "" {
+	var err error
+	if msg := processesMismatch("CommonDir", rec.countDuring(func() { _, err = two.CommonDir() }), 2); msg != "" {
 		t.Fatal(msg)
 	}
+	if err != nil {
+		t.Fatalf("CommonDir: %v", err)
+	}
 	missing := git.NewGitWithExec(filepath.Join(t.TempDir(), "gone"), rec.run)
-	if msg := processesMismatch("a missing directory's ConfigGet", rec.countDuring(func() { _, _ = missing.ConfigGet("x") }), 0); msg != "" {
+	if msg := processesMismatch("a missing directory's ConfigGet", rec.countDuring(func() { _, err = missing.ConfigGet("x") }), 0); msg != "" {
 		t.Fatal(msg)
+	}
+	if err == nil {
+		t.Fatal("ConfigGet on a missing directory returned no error, so the zero-process call did not refuse before git")
 	}
 	// The same check rejects a count one off in either direction, so neither
 	// assertion above is vacuous.
