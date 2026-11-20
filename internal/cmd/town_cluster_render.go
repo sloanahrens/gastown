@@ -125,12 +125,15 @@ type clusterRenderFlags struct {
 	// written as --max-concurrent with a values file's bd image; each pod runs its
 	// share of the total, and zero means the gateway's own default of 16 in total.
 	bdGatewayMaxConcurrent int
-	daemonClaudeDir        string
-	tracker                bool
-	trackerDSNSecret       string
-	trackerBackup          bool
-	trackerBackupImage     string
-	daemonBdGatewayURL     string
+	// bdGatewayCPURequest is the bd gateway container's CPU request, written as its
+	// requests.cpu; empty renders no request, and the gateway carries no limit.
+	bdGatewayCPURequest string
+	daemonClaudeDir     string
+	tracker             bool
+	trackerDSNSecret    string
+	trackerBackup       bool
+	trackerBackupImage  string
+	daemonBdGatewayURL  string
 	// daemonBdGatewayURLSet is whether the flag was named at all, so an empty value
 	// is refused rather than read as absent.
 	daemonBdGatewayURLSet bool
@@ -283,6 +286,8 @@ func init() {
 		"the most bd processes all the gateway's pods run at once, a positive total, or zero for the gateway's own default of 16 in total; each pod runs the total divided by --bd-gateway-replicas, rounded up; a rehearsal renders no gateway, so the cap reaches only a live render; a negative cap is refused")
 	townClusterRenderCmd.Flags().IntVar(&clusterRender.bdGatewayReplicas, "bd-gateway-replicas", defaultBdGatewayReplicas,
 		"the bd gateway's pod count, one or two; two pods serve from one Service and share its claims, one serving while the other rolls (gt-yz0s8v); a rehearsal renders no gateway, so the count reaches only a live render; a count below zero or above two is refused")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.bdGatewayCPURequest, "bd-gateway-cpu-request", "",
+		"the bd gateway container's CPU request, whole cores or millicores such as 4 or 500m, with no CPU limit so the gateway is Burstable and not throttled under contention; empty renders no request; a value that is not whole cores or millicores is refused")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.includeStatic, "include-static", false,
 		"also write the static control-cluster manifests deploy/k8s embeds, after the ServiceAccount, so one command writes one desired set; a static Secret is written as its reviewed document and gets no create line")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRenderRecord.record, "record-flags", false,
@@ -419,6 +424,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"tracker-dsn-secret", &f.trackerDSNSecret, r.trackerDSNSecret},
 		{"tracker-backup-image", &f.trackerBackupImage, r.trackerBackupImage},
 		{"daemon-bd-gateway-url", &f.daemonBdGatewayURL, r.daemonBdGatewayURL},
+		{"bd-gateway-cpu-request", &f.bdGatewayCPURequest, r.bdGatewayCPURequest},
 	}
 	for _, p := range texts {
 		if !named(p.flag) {
@@ -754,6 +760,7 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		TrackerBackup:           f.trackerBackup,
 		TrackerBackupImage:      strings.TrimSpace(f.trackerBackupImage),
 		DaemonBdGatewayURL:      strings.TrimSpace(f.daemonBdGatewayURL),
+		BdGatewayCPURequest:     strings.TrimSpace(f.bdGatewayCPURequest),
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token

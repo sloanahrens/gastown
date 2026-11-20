@@ -445,6 +445,7 @@ var renderFlagRecordNames = map[string]string{
 	"bdGatewayTokenSecret":          "BdGatewayTokenSecret",
 	"bdGatewayMaxConcurrent":        "BdGatewayMaxConcurrent",
 	"bdGatewayReplicas":             "BdGatewayReplicas",
+	"bdGatewayCPURequest":           "BdGatewayCPURequest",
 	"tracker":                       "Tracker",
 	"trackerDSNSecret":              "TrackerDSNSecret",
 	"trackerBackup":                 "TrackerBackup",

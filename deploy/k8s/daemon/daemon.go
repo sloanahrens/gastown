@@ -891,6 +891,12 @@ type Values struct {
 	// BdGatewayImage. Two pods share the gateway's claims and serve from one Service,
 	// as gt-yz0s8v checked and bdgateway_workload.go describes.
 	BdGatewayReplicas int
+	// BdGatewayCPURequest is the bd gateway container's CPU request, whole cores or
+	// millicores as cpuRE reads them, such as 4 or 500m. It sets requests.cpu only:
+	// the gateway carries no CPU limit, so it is Burstable and is not throttled under
+	// contention. Empty renders no resources, as the gateway did before the request.
+	// A value cpuRE does not read is refused, with or without BdGatewayImage.
+	BdGatewayCPURequest string
 	// IncludeStatic renders the six static control-cluster manifests
 	// (deploy/k8s/static.go) right after the ServiceAccount: the cluster-scoped
 	// objects first, then the namespaced ones, each as its reviewed bytes. Off by
@@ -2364,6 +2370,9 @@ func (v Values) validate() error {
 	if err := v.validateBdGatewayReplicas(); err != nil {
 		return err
 	}
+	if err := v.validateBdGatewayCPURequest(); err != nil {
+		return err
+	}
 	if err := v.validateTracker(); err != nil {
 		return err
 	}
@@ -3358,11 +3367,12 @@ type SecretKeySelector struct {
 	Key  string `yaml:"key"`
 }
 
-// ContainerResources is a container's share. Requests equal limits, so the
-// scheduler promises it the share instead of letting it burst into a neighbor.
+// ContainerResources is a container's share. The proxies and the tracker set requests
+// equal to limits, so the scheduler promises the share and the container cannot burst
+// into a neighbor. The bd gateway sets a request alone, so it carries no limit.
 type ContainerResources struct {
 	Requests map[string]string `yaml:"requests"`
-	Limits   map[string]string `yaml:"limits"`
+	Limits   map[string]string `yaml:"limits,omitempty"`
 }
 
 // VolumeMount is where one volume appears in the container. A subPath mounts one
