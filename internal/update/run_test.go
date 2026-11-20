@@ -1257,6 +1257,81 @@ func TestRunVerifyFailureIsPartialNamingTheChecks(t *testing.T) {
 	}
 }
 
+// TestRunVerifySettlesOnARecordedLateTick: the first health read is the
+// recorded late tick of 2026-11-19, still settling; the re-read after the poll
+// is GREEN, so the roll settles and the run ends ok with the verify step ok.
+func TestRunVerifySettlesOnARecordedLateTick(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.verify.healthLines = []string{verifyTestSettling, verifyTestGreen}
+	f.opts.HealthWait = time.Minute
+	f.opts.HealthPoll = 15 * time.Second
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeOK)
+	}
+	if got := step(t, final, StepVerify).Result; got != ResultOK {
+		t.Errorf("verify Result = %q, want %q", got, ResultOK)
+	}
+	if f.verify.healthCalls != 2 {
+		t.Errorf("read the health line %d times, want 2: the first read and one settling re-read", f.verify.healthCalls)
+	}
+	if len(f.clock.sleeps) != 1 || f.clock.sleeps[0] != 15*time.Second {
+		t.Errorf("sleeps = %v, want one %v wait between the two reads", f.clock.sleeps, 15*time.Second)
+	}
+}
+
+// TestRunVerifyWithZeroHealthWaitReadsOnce: a zero HealthWait keeps today's
+// single read: a settling line fails verify as recorded today, with no settle
+// suffix and no wait.
+func TestRunVerifyWithZeroHealthWaitReadsOnce(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.verify.healthLines = []string{verifyTestSettling}
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomePartial {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomePartial)
+	}
+	verify := step(t, final, StepVerify)
+	if verify.Result != ResultFailed {
+		t.Errorf("verify Result = %q, want %q", verify.Result, ResultFailed)
+	}
+	if want := checkHealth + ": " + verifyTestSettling; verify.Detail != want {
+		t.Errorf("verify Detail = %q, want %q", verify.Detail, want)
+	}
+	if f.verify.healthCalls != 1 {
+		t.Errorf("read the health line %d times, want 1: no wait was asked for", f.verify.healthCalls)
+	}
+	if len(f.clock.sleeps) != 0 {
+		t.Errorf("sleeps = %v, want none", f.clock.sleeps)
+	}
+}
+
+// TestRunVerifySettleSleepErrorIsReturned: a settle wait that cannot complete
+// returns the sleep's error, so the run does not report the town verified.
+func TestRunVerifySettleSleepErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.verify.healthLines = []string{verifyTestSettling}
+	f.opts.HealthWait = time.Minute
+	f.opts.HealthPoll = 15 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.clock.onSleep = func() { cancel() }
+
+	if _, err := f.run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want %v: the settle wait's error is returned", err, context.Canceled)
+	}
+}
+
 func TestRunMaintenanceOnlyTakesNoHold(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)
