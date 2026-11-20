@@ -20,6 +20,7 @@ const (
 	verifyTestOtherPolecat = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	verifyTestGreen        = "GREEN tick 2m ago"
 	verifyTestSettling     = "DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R]"
+	verifyTestDeadSeat     = "DEGRADED tick 20s ago: seat/gastown:polecat/nux=dead[R]"
 	verifyTestStart        = "2026-11-03T12:00:00Z"
 	verifyTestPoll         = 15 * time.Second
 	verifyTestTimeout      = time.Minute
@@ -301,6 +302,33 @@ func TestVerifyWithSettlePassesWhenTheLateTickClears(t *testing.T) {
 	}
 }
 
+// TestVerifyWithSettleSettlesWhenADeadSeatClears: a recorded dead seat that
+// clears on a later read passes, and the check names the settle time.
+func TestVerifyWithSettleSettlesWhenADeadSeatClears(t *testing.T) {
+	t.Parallel()
+	checks, _ := settleVerify(t, verifyTestTimeout, verifyTestDeadSeat, verifyTestGreen)
+	assertFailedChecks(t, checks)
+	if health := findCheck(t, checks, checkHealth); health.Detail != verifyTestGreen+" (settled after 15s)" {
+		t.Errorf("health detail = %q, want the settled line and its settle time", health.Detail)
+	}
+}
+
+// TestVerifyWithSettleStillDeadPastTheBoundIsPartialNamingTheSeat: a seat that
+// stays dead past the bound is a partial, and the detail names the seat so the
+// escalation says which seat to clear.
+func TestVerifyWithSettleStillDeadPastTheBoundIsPartialNamingTheSeat(t *testing.T) {
+	t.Parallel()
+	checks, sleeps := settleVerify(t, 5*time.Minute, verifyTestDeadSeat)
+
+	assertFailedChecks(t, checks, checkHealth)
+	if health := findCheck(t, checks, checkHealth); health.Detail != verifyTestDeadSeat+" (still settling after 5m0s)" {
+		t.Errorf("health detail = %q, want the seat line as read and the bound", health.Detail)
+	}
+	if len(*sleeps) != 20 {
+		t.Errorf("slept %d times, want 20: one per poll inside the 5m bound", len(*sleeps))
+	}
+}
+
 // TestVerifyWithSettleFailsAtTheWaitBound: a line that stays settling fails at
 // the bound, carrying the last line read.
 func TestVerifyWithSettleFailsAtTheWaitBound(t *testing.T) {
@@ -458,6 +486,37 @@ func TestClassifyHealthLineSettlesOnARecordedLateTick(t *testing.T) {
 		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R] needs-human=1",
 		"DEGRADED tick 6m ago: tick:wisp_reaper=70m/30m[R], tick:overrun_guard=2m/1m[R]",
 	}, healthSettling)
+}
+
+// TestClassifyHealthLineSettlesARecordedDeadSeat drives classifyHealthLine on
+// the line the 2026-11-20 roll recorded: a polecat seat dead in consecutive
+// samples while it was re-slung onto another bead, alone, beside a queue state
+// and beside a late tick.
+func TestClassifyHealthLineSettlesARecordedDeadSeat(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=dead[R]",
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=dead[R] needs-human=1",
+		"DEGRADED tick 6m ago: seat/gastown:polecat/nux=dead[R], tick:overrun_guard=2m/1m[R]",
+	}, healthSettling)
+}
+
+// TestClassifyHealthLineFailsASeatReasonThatIsNotARecordedDeadOne drives
+// classifyHealthLine on seat reasons that are not a recorded dead polecat: a
+// frozen seat, a stalled one, a dead seat without the recorded tag, and a dead
+// seat beside a reason this does not know.
+func TestClassifyHealthLineFailsASeatReasonThatIsNotARecordedDeadOne(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=frozen[R]",
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=stalled_12m[R]",
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=dead",
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=dead[R] main/gastown=behind",
+		"DEGRADED tick 20s ago: seat/gastown:polecat/nux=dead[R]x",
+		"DEGRADED tick 20s ago: seat/gastown:crew/nux=dead[R]",
+		"DEGRADED tick 20s ago: seat/gastown:polecat/=dead[R]",
+		"DEGRADED tick 20s ago: seat/:polecat/nux=dead[R]",
+	}, healthFail)
 }
 
 // TestClassifyHealthLineFailsARedLine drives classifyHealthLine on the
