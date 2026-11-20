@@ -1,6 +1,7 @@
 package land
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -134,6 +135,94 @@ func TestParseGateRunLogTierwall(t *testing.T) {
 	}
 	if got := ParseGateRunLog(log); !reflect.DeepEqual(got, want) {
 		t.Errorf("ParseGateRunLog() = %+v, want %+v", got, want)
+	}
+}
+
+// TestParseGateRunLogVet reads the integration vet's report line: its wall is a Go duration, so
+// "1m5.8s" is 65.8 seconds. The vet's other lines, a duration that does not parse and a negative
+// wall leave VetS zero, and so does a log without the line.
+func TestParseGateRunLogVet(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, log string
+		want      float64
+	}{
+		{
+			name: "sub-minute wall",
+			log:  "2026-11-19T10:02:40Z integration vet: 79 packages in 2 modules type-check with -tags integration in 12.3s\r\n",
+			want: 12.3,
+		},
+		{
+			name: "minute and seconds",
+			log:  "2026-11-19T10:02:40Z integration vet: 79 packages in 2 modules type-check with -tags integration in 1m5.8s\n",
+			want: 65.8,
+		},
+		{
+			name: "no vet line",
+			log:  "2026-11-19T10:02:40Z gate: PASSED in 139s wall\n",
+			want: 0,
+		},
+		{
+			name: "failed vet",
+			log:  "2026-11-19T10:02:40Z integration vet: FAILED in 1 of 2 modules after 12.3s\n",
+			want: 0,
+		},
+		{
+			name: "vet selection error",
+			log:  "2026-11-19T10:02:40Z integration vet: no package under . adds files with the integration tag; the selection or -root is wrong\n",
+			want: 0,
+		},
+		{
+			name: "line missing the module count",
+			log:  "2026-11-19T10:02:40Z integration vet: 79 packages type-check with -tags integration in 12.3s\n",
+			want: 0,
+		},
+		{
+			name: "duration that is not a duration",
+			log:  "2026-11-19T10:02:40Z integration vet: 79 packages in 2 modules type-check with -tags integration in soon\n",
+			want: 0,
+		},
+		{
+			name: "duration with no unit",
+			log:  "2026-11-19T10:02:40Z integration vet: 79 packages in 2 modules type-check with -tags integration in 12\n",
+			want: 0,
+		},
+		{
+			name: "negative duration",
+			log:  "2026-11-19T10:02:40Z integration vet: 79 packages in 2 modules type-check with -tags integration in -5s\n",
+			want: 0,
+		},
+		{
+			name: "vet line without a timestamp",
+			log:  "integration vet: 79 packages in 2 modules type-check with -tags integration in 12.3s\n",
+			want: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ParseGateRunLog(tc.log).VetS; got != tc.want {
+				t.Errorf("VetS = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseGateRunLogVetJSON: the vet wall a parsed log carries reaches the record's JSON as
+// vet_s, the key gate-runs.jsonl holds.
+func TestParseGateRunLogVetJSON(t *testing.T) {
+	t.Parallel()
+	log := "2026-11-19T10:02:40Z integration vet: 79 packages in 2 modules type-check with -tags integration in 1m5.8s\n"
+	b, err := json.Marshal(ParseGateRunLog(log))
+	if err != nil {
+		t.Fatalf("marshal gate run: %v", err)
+	}
+	var rec map[string]any
+	if err := json.Unmarshal(b, &rec); err != nil {
+		t.Fatalf("unmarshal gate run: %v", err)
+	}
+	if got, ok := rec["vet_s"]; !ok || got != 65.8 {
+		t.Errorf("record vet_s = %v (present %v), want 65.8", got, ok)
 	}
 }
 

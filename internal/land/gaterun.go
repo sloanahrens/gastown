@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// GateRun is one gate run's record. ParseGateRunLog fills the stage and verdict fields from the
-// run's job log; the other fields are set by whatever records the run, not by the parser.
+// GateRun is one gate run's record. ParseGateRunLog fills the stage, verdict and vet fields from
+// the run's job log; the other fields are set by whatever records the run, not by the parser.
 type GateRun struct {
 	TS                  time.Time        `json:"ts"`
 	Rig                 string           `json:"rig"`
@@ -21,6 +21,7 @@ type GateRun struct {
 	LintS               float64          `json:"lint_s"`
 	BuildS              float64          `json:"build_s"`
 	UnitWallS           float64          `json:"unit_wall_s"`
+	VetS                float64          `json:"vet_s"`
 	TierS               float64          `json:"tier_s"`
 	TierBarS            float64          `json:"tier_bar_s"`
 	Over                bool             `json:"over"`
@@ -54,13 +55,20 @@ type GateRunTest struct {
 // gateWallRE reads the wall seconds off a verdict line: "after 139s wall" or "PASSED in 139s wall".
 var gateWallRE = regexp.MustCompile(`(?:after|PASSED in) (\d+)s wall`)
 
+// vetWallRE reads the integration vet's summary line, as internal/testpolicy/cmd/integrationvet
+// writes it: "integration vet: 79 packages in 2 modules type-check with -tags integration in
+// 1m5.8s". The package and module counts are not kept. The line is matched whole, so the vet's
+// failure and error lines, which share the prefix, are not read as a wall.
+var vetWallRE = regexp.MustCompile(`^integration vet: \d+ packages in \d+ modules type-check with -tags integration in (\S+)$`)
+
 // ParseGateRunLog reads a gate job log into a GateRun. Setup runs from the runner's task line
 // ("Runner <id> ... received task <n> ...") to the first lint line, lint to the build line and
-// build to the unit tier line; the verdict line gives the unit wall and passed. The tierwall
-// report gives the tier, packages, slow tests, CPUs and pole; a "(cached)" ok line counts one
-// cached package. A missing marker, or a stage that does not run forward, leaves its field zero,
-// a tierwall line it cannot read is skipped rather than read as a value, and a line without a
-// leading RFC3339 timestamp is skipped.
+// build to the unit tier line; the verdict line gives the unit wall and passed. The integration
+// vet's summary line gives its wall in seconds as VetS. The tierwall report gives the tier,
+// packages, slow tests, CPUs and pole; a "(cached)" ok line counts one cached package. A missing
+// marker, or a stage that does not run forward, leaves its field zero, a tierwall line or a vet
+// duration it cannot read is skipped rather than read as a value, and a line without a leading
+// RFC3339 timestamp is skipped.
 func ParseGateRunLog(log string) GateRun {
 	var run GateRun
 	var task, lint, build, unit time.Time
@@ -88,6 +96,13 @@ func ParseGateRunLog(log string) GateRun {
 			if m := gateWallRE.FindStringSubmatch(msg); m != nil {
 				if wall, err := strconv.ParseFloat(m[1], 64); err == nil {
 					run.UnitWallS = wall
+				}
+			}
+		case strings.HasPrefix(msg, "integration vet: "):
+			// A duration that does not parse, or a negative one, is no wall: leave VetS zero.
+			if m := vetWallRE.FindStringSubmatch(strings.TrimSuffix(msg, "\r")); m != nil {
+				if d, err := time.ParseDuration(m[1]); err == nil && d > 0 {
+					run.VetS = d.Seconds()
 				}
 			}
 		case strings.HasPrefix(msg, "tierwall: "):
