@@ -3,8 +3,8 @@
 // node's disk reading, with the last completion, the outcome, the cadence, the
 // due time and whether it is overdue. The list is read-only. It reads the
 // daemon's patrol config, last-run record, maintenance state, update history,
-// backup root, node disk record and run ledger, and writes nothing, calls no
-// daemon and runs no bd.
+// backup root, node disk record, disk maintenance ledger and run ledger, and
+// writes nothing, calls no daemon and runs no bd.
 package jobs
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"os"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -97,16 +98,30 @@ type Options struct {
 	// scheduled_maintenance passes to doltbackup.Commit. Empty means the
 	// caller did not resolve it, and the dolt_backup row is unknown.
 	BackupRoot string
+	// diskmaintFS is the filesystem the disk maintenance ledger is read
+	// through, rooted at the town root. A nil field reads the town root itself;
+	// a test hands it an fstest.MapFS, which cannot be written.
+	diskmaintFS fs.FS
+}
+
+// diskmaintLedgerFS returns the filesystem the disk maintenance ledger is read
+// through: the caller's when it named one, else the town root's.
+func (o Options) diskmaintLedgerFS(townRoot string) fs.FS {
+	if o.diskmaintFS != nil {
+		return o.diskmaintFS
+	}
+	return os.DirFS(townRoot)
 }
 
 // List returns one Job per daemon step in config.DaemonSteps, one for the
-// nightly Dolt backup, the Dolt gc row when the daemon has recorded one, and one
-// per node in the node disk record, judged at now. A row named in the run ledger
+// nightly Dolt backup, the Dolt gc row when the daemon has recorded one, one
+// per node in the node disk record and one per target in the disk maintenance
+// ledger, judged at now. A row named in the run ledger
 // takes its newest run's outcome, stats and time and its recent runs from there.
 // An unreadable patrol config is an error, because no cadence can be trusted, as
 // is an empty town root. An unreadable last-run record, update history, backup
-// root, maintenance state, node disk record or run ledger is not: its rows come
-// back as StateUnknown.
+// root, maintenance state, node disk record, disk maintenance ledger or run
+// ledger is not: its rows come back as StateUnknown.
 func List(townRoot string, opts Options, now time.Time) ([]Job, error) {
 	return list(townRoot, opts, config.DaemonSteps(), now)
 }
@@ -143,6 +158,7 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 	jobs = append(jobs, doltBackupRow(backup, backupNight, backupErr, now))
 	jobs = append(jobs, doltGCRows(townRoot, now)...)
 	jobs = append(jobs, nodeDiskRows(townRoot, now)...)
+	jobs = append(jobs, diskmaintRows(opts.diskmaintLedgerFS(townRoot), now)...)
 	return withLedger(townRoot, jobs, now)
 }
 
