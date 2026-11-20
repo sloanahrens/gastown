@@ -1310,6 +1310,58 @@ func TestRunVerifyRecordsTownHealthBeside(t *testing.T) {
 	}
 }
 
+// TestRunVerifyGreenNoDetail: every check passes and the town health line is
+// GREEN, so the verify step is ok with no detail and the run ends ok, as it did
+// before a passing roll recorded a health line beside it.
+func TestRunVerifyGreenNoDetail(t *testing.T) {
+	t.Parallel()
+	// The plain probes answer GREEN with no ready note, so a green town has
+	// nothing to record beside the roll.
+	f := newRunFixture(t)
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomeOK)
+	}
+	verify := step(t, final, StepVerify)
+	if verify.Result != ResultOK {
+		t.Errorf("verify Result = %q, want %q", verify.Result, ResultOK)
+	}
+	if verify.Detail != "" {
+		t.Errorf("verify Detail = %q, want none: a green town leaves the step empty", verify.Detail)
+	}
+}
+
+// TestRunVerifyFailedCheckPartial: a failed check records checksDetail in the
+// verify step and the run ends partial; the passing health check is not folded
+// into that detail.
+func TestRunVerifyFailedCheckPartial(t *testing.T) {
+	t.Parallel()
+	f := newRunFixture(t)
+	f.verify.gt = verifyTestOld
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomePartial {
+		t.Errorf("Outcome = %q, want %q", final.Outcome, OutcomePartial)
+	}
+	verify := step(t, final, StepVerify)
+	if verify.Result != ResultFailed {
+		t.Errorf("verify Result = %q, want %q", verify.Result, ResultFailed)
+	}
+	if want := fmt.Sprintf("%s: got %q, want %q", checkGTVersion, verifyTestOld, runTestSHA); verify.Detail != want {
+		t.Errorf("verify Detail = %q, want %q", verify.Detail, want)
+	}
+	if strings.Contains(verify.Detail, checkHealth) {
+		t.Errorf("verify Detail = %q, want only the failed check", verify.Detail)
+	}
+}
+
 func TestRunVerifyFailureIsPartialNamingTheChecks(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)
