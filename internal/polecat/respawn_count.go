@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -303,6 +304,55 @@ func ShouldBlockRespawn(workDir, beadID string) bool {
 		return false
 	}
 	return rec.Count >= maxRespawns
+}
+
+// RespawnCount is one tracked bead's respawn count as the Dolt panel lists it:
+// Bead, its Count, the Limit it is blocked at, and whether it has reached it.
+type RespawnCount struct {
+	Bead    string
+	Count   int
+	Limit   int
+	AtLimit bool
+}
+
+// RespawnCounts returns every tracked bead's respawn count, sorted by count then
+// bead id, for the panel that lists the beads at the respawn limit (gt-6ttbf0).
+// It takes the same lock as ShouldBlockRespawn and writes nothing; a state it
+// cannot read is an error, never an empty list.
+func RespawnCounts(townRoot string) ([]RespawnCount, error) {
+	respawnMu.Lock()
+	defer respawnMu.Unlock()
+
+	unlock, err := lockRespawnState(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	limit := config.LoadOperationalConfig(townRoot).GetRecoveryConfig().MaxBeadRespawnsV()
+	counts := make([]RespawnCount, 0, len(state.Beads))
+	for id, rec := range state.Beads {
+		if rec == nil {
+			continue
+		}
+		counts = append(counts, RespawnCount{
+			Bead:    id,
+			Count:   rec.Count,
+			Limit:   limit,
+			AtLimit: rec.Count >= limit,
+		})
+	}
+	sort.Slice(counts, func(i, j int) bool {
+		if counts[i].Count != counts[j].Count {
+			return counts[i].Count < counts[j].Count
+		}
+		return counts[i].Bead < counts[j].Bead
+	})
+	return counts, nil
 }
 
 // RecordBeadRespawn increments the respawn count for beadID and returns the new

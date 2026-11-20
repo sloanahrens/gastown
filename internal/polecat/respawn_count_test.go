@@ -1,11 +1,14 @@
 package polecat
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -866,5 +869,192 @@ func TestGiveBackBeadRespawn_ConcurrentAttemptsEitherOrder(t *testing.T) {
 				t.Errorf("count after both give-backs = %d, want 0", got)
 			}
 		})
+	}
+}
+
+// TestRespawnCounts_ListsSortedWithAtLimit: the panel lists every tracked bead
+// by count then id and marks the ones at the limit the sling blocks on
+// (gt-6ttbf0).
+func TestRespawnCounts_ListsSortedWithAtLimit(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	limit := config.DefaultRecoveryMaxBeadRespawns
+	writeRespawnStateFile(t, respawnStatePath(townRoot), &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-limit": {BeadID: "bead-limit", Count: limit},
+			"bead-two":   {BeadID: "bead-two", Count: 2},
+			"bead-one":   {BeadID: "bead-one", Count: 1},
+		},
+	})
+
+	counts, err := RespawnCounts(townRoot)
+	if err != nil {
+		t.Fatalf("RespawnCounts: %v", err)
+	}
+
+	want := []RespawnCount{
+		{Bead: "bead-one", Count: 1, Limit: limit},
+		{Bead: "bead-two", Count: 2, Limit: limit},
+		{Bead: "bead-limit", Count: limit, Limit: limit, AtLimit: true},
+	}
+	if !reflect.DeepEqual(counts, want) {
+		t.Errorf("RespawnCounts = %+v, want %+v", counts, want)
+	}
+}
+
+// TestRespawnCounts_SortsByCountFirst: the count orders the list ahead of the
+// id. Eight beads in shuffled counts, so a listing that leaves them in the
+// state map's iteration order cannot pass by chance (gt-6ttbf0).
+func TestRespawnCounts_SortsByCountFirst(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRespawnStateFile(t, respawnStatePath(townRoot), &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-0": {BeadID: "bead-0", Count: 5},
+			"bead-1": {BeadID: "bead-1", Count: 2},
+			"bead-2": {BeadID: "bead-2", Count: 7},
+			"bead-3": {BeadID: "bead-3", Count: 1},
+			"bead-4": {BeadID: "bead-4", Count: 4},
+			"bead-5": {BeadID: "bead-5", Count: 6},
+			"bead-6": {BeadID: "bead-6", Count: 3},
+			"bead-7": {BeadID: "bead-7", Count: 0},
+		},
+	})
+
+	counts, err := RespawnCounts(townRoot)
+	if err != nil {
+		t.Fatalf("RespawnCounts: %v", err)
+	}
+
+	var got []int
+	for _, c := range counts {
+		got = append(got, c.Count)
+	}
+	want := []int{0, 1, 2, 3, 4, 5, 6, 7}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("counts listed as %v, want %v", got, want)
+	}
+}
+
+// TestRespawnCounts_TiesSortByBeadID: beads on the same count come out in id
+// order, so the panel's rows do not shuffle between reads (gt-6ttbf0).
+//
+// Ten tied beads, not three: a listing that skips the id tie-break leaves them
+// in the state map's iteration order, and ten ids make the chance that order is
+// already sorted one in 3,628,800.
+func TestRespawnCounts_TiesSortByBeadID(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	beads := map[string]*beadRespawnRecord{}
+	var want []string
+	for _, id := range []string{"bead-09", "bead-08", "bead-07", "bead-06", "bead-05", "bead-04", "bead-03", "bead-02", "bead-01", "bead-00"} {
+		beads[id] = &beadRespawnRecord{BeadID: id, Count: 2}
+	}
+	for i := 0; i < 10; i++ {
+		want = append(want, fmt.Sprintf("bead-%02d", i))
+	}
+	writeRespawnStateFile(t, respawnStatePath(townRoot), &beadRespawnState{Beads: beads})
+
+	counts, err := RespawnCounts(townRoot)
+	if err != nil {
+		t.Fatalf("RespawnCounts: %v", err)
+	}
+
+	var got []string
+	for _, c := range counts {
+		got = append(got, c.Bead)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("tied beads listed as %v, want %v", got, want)
+	}
+}
+
+// TestRespawnCounts_CorruptStateFileIsAnError: a state that will not parse is an
+// error and no list — an empty list would show the panel a town with no bead
+// near its limit (gt-6ttbf0).
+func TestRespawnCounts_CorruptStateFileIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(respawnStatePath(townRoot)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := RespawnCounts(townRoot)
+	if err == nil {
+		t.Fatalf("RespawnCounts = %+v, nil error, want a parse error", counts)
+	}
+	if counts != nil {
+		t.Errorf("RespawnCounts returned %+v alongside its error, want no list", counts)
+	}
+}
+
+// TestRespawnCounts_UnreadableStateFileIsAnError: a file that cannot be read is
+// an error too. The state path is a directory here, which fails the open for
+// every user, root included, where a permission bit may not (gt-6ttbf0).
+func TestRespawnCounts_UnreadableStateFileIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(respawnStatePath(townRoot), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := RespawnCounts(townRoot)
+	if err == nil {
+		t.Fatalf("RespawnCounts = %+v, nil error, want a read error", counts)
+	}
+	if counts != nil {
+		t.Errorf("RespawnCounts returned %+v alongside its error, want no list", counts)
+	}
+}
+
+// TestRespawnCounts_UnlockableStateIsAnError: a state the lock cannot guard is
+// not read at all. The town root is a regular file here, so creating the lock's
+// directory fails (gt-6ttbf0).
+func TestRespawnCounts_UnlockableStateIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(townRoot, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := RespawnCounts(townRoot)
+	if err == nil {
+		t.Fatalf("RespawnCounts = %+v, nil error, want a lock error", counts)
+	}
+	if counts != nil {
+		t.Errorf("RespawnCounts returned %+v alongside its error, want no list", counts)
+	}
+}
+
+// TestRespawnCounts_LeavesStateFileByteIdentical: the panel's read writes
+// nothing, so it cannot re-arm a bead's budget or rewrite the file (gt-6ttbf0).
+func TestRespawnCounts_LeavesStateFileByteIdentical(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRespawnStateFile(t, respawnStatePath(townRoot), &beadRespawnState{
+		Beads: map[string]*beadRespawnRecord{
+			"bead-1": {BeadID: "bead-1", Count: 1},
+			"bead-2": {BeadID: "bead-2", Count: 2},
+		},
+	})
+	path := respawnStatePath(townRoot)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := RespawnCounts(townRoot); err != nil {
+		t.Fatalf("RespawnCounts: %v", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading state after RespawnCounts: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Errorf("state file rewritten:\nbefore %q\nafter  %q", before, after)
 	}
 }
