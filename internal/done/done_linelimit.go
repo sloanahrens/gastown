@@ -1,7 +1,10 @@
 package done
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 )
 
@@ -44,4 +47,33 @@ func lineLimitVerdict(limits []int, added int) (refuse bool, lines []string) {
 		return false, []string{line}
 	}
 	return false, nil
+}
+
+// lineLimitOut is where reportLineLimit prints its verdict lines; a test
+// replaces it to read them (gt-zqg4m2).
+var lineLimitOut io.Writer = os.Stdout
+
+// reportLineLimit prints the added-line check's verdict and, for a polecat
+// past twice the declared limit, returns the refusal; a crew branch is only
+// warned, and a count that cannot be read is an error (gt-zqg4m2). With no
+// limit declared the count is not read, so the no-limit line is printed.
+func reportLineLimit(count func() (int, error), description string, polecat bool) error {
+	limits := DeclaredLineLimits(description)
+	if len(limits) == 0 {
+		_, lines := lineLimitVerdict(limits, 0)
+		fmt.Fprintln(lineLimitOut, lines[0])
+		return nil
+	}
+	added, err := count()
+	if err != nil {
+		return fmt.Errorf("added-line check: %w", err)
+	}
+	refuse, lines := lineLimitVerdict(limits, added)
+	for _, line := range lines {
+		fmt.Fprintln(lineLimitOut, line)
+	}
+	if refuse && polecat {
+		return errors.New(strings.Join(lines, "\n"))
+	}
+	return nil
 }
