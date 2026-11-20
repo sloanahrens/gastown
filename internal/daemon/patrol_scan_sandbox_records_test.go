@@ -48,6 +48,8 @@ type recordReapOpts struct {
 	deleterErr error         // the record deleter fails
 	noDeleter  bool          // neither a seam nor a linked deleter exists
 	copyErr    error         // the outbox copy fails
+	hook       string        // the seat's agent bead hook
+	agentErr   error         // the seat's agent bead cannot be read
 }
 
 const recordReapSession = "gt-capable"
@@ -68,8 +70,27 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 	if err := session.WriteSandboxRecord(town, rec); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&r.logs, "", 0), tmux: tm, clock: clk}
-	r.host = &patrolScanHost{d: d, sandboxExists: func(gateway, name string) (bool, error) {
+	// The seat's agent bead: its hook decides whether the patrol may end a held
+	// sandbox, and a store that refuses the read keeps it (gt-oxahwh).
+	agents := beadsfake.New()
+	id := beads.AgentBeadIDFor(constants.RolePolecat, rec.Rig, rec.Polecat, town)
+	if _, err := agents.Create(beads.CreateOptions{
+		ID: id, Title: id, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(id, &beads.AgentFields{
+			RoleType: "polecat", Rig: rec.Rig, HookBead: o.hook,
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	openRecoveryBeads := func([]string) beads.Client { return agents }
+	if o.agentErr != nil {
+		openRecoveryBeads = func([]string) beads.Client {
+			return failingShowClient{Client: agents, err: o.agentErr}
+		}
+	}
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&r.logs, "", 0), tmux: tm, clock: clk,
+		openRecoveryBeads: openRecoveryBeads}
+	r.host = &patrolScanHost{d: d, openRecoveryBeads: openRecoveryBeads, sandboxExists: func(gateway, name string) (bool, error) {
 		r.asked = append(r.asked, gateway+"|"+name)
 		return o.exists, o.existsErr
 	}, sandboxStatus: func(string, string) (sandbox.Status, error) {
@@ -102,6 +123,64 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 		}
 	}
 	return r
+}
+
+// failingShowClient is the town's bead store refusing a read, every other call
+// answering as the fake does.
+type failingShowClient struct {
+	beads.Client
+	err error
+}
+
+func (c failingShowClient) Show(string) (*beads.Issue, error) { return nil, c.err }
+
+// A held sandbox whose seat still hooks a bead is kept with its record, and
+// neither its outbox nor its sandbox is touched: the seat's work is not saved
+// yet, so the delete would lose it (gt-oxahwh).
+func TestPatrolScanSandboxRecordsKeepsAHeldSandboxWhoseSeatStillHooksABead(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, hook: "gt-1"})
+	r.host.patrolScanSandboxRecords()
+	if !r.recorded() {
+		t.Error("the record was removed although its seat still hooks gt-1")
+	}
+	if len(r.order) != 0 {
+		t.Errorf("the pass went on to %v although the seat still hooks gt-1", r.order)
+	}
+	if want := "hook_bead=gt-1 is still set"; !strings.Contains(r.logs.String(), want) {
+		t.Errorf("log = %q, want it to name %q", r.logs.String(), want)
+	}
+}
+
+// An agent bead that cannot be read keeps the held sandbox and its record: the
+// hook is unknown, never clear (gt-oxahwh).
+func TestPatrolScanSandboxRecordsKeepsAHeldSandboxWhoseAgentBeadCannotBeRead(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, agentErr: errors.New("dolt unavailable")})
+	r.host.patrolScanSandboxRecords()
+	if !r.recorded() {
+		t.Error("the record was removed although its agent bead could not be read")
+	}
+	if len(r.order) != 0 {
+		t.Errorf("the pass went on to %v although the agent bead could not be read", r.order)
+	}
+	if want := "cannot read its agent bead: dolt unavailable"; !strings.Contains(r.logs.String(), want) {
+		t.Errorf("log = %q, want it to name %q", r.logs.String(), want)
+	}
+}
+
+// A held sandbox whose seat hooks nothing is deleted through the deleter as it
+// was before the hook check: the outbox copy comes first (gt-oxahwh).
+func TestPatrolScanSandboxRecordsStillDeletesAHeldSandboxWhoseHookIsClear(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true})
+	r.host.patrolScanSandboxRecords()
+	if got, want := strings.Join(r.order, ","), "copy,delete"; got != want {
+		t.Fatalf("order of the copy and the delete = %q, want %q", got, want)
+	}
+	if r.recorded() {
+		t.Error("the record survived the deleted sandbox")
+	}
 }
 
 func (r *recordReap) recorded() bool {
