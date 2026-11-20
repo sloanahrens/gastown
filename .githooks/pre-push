@@ -52,16 +52,16 @@ fi
 #                        does not have, and refuses the default branch, so
 #                        the branch must be pushable (internal/cmd/done_crew.go).
 #   revert/<bead>-<sha>  the daemon's red-main owner builds it in a throwaway
-#                        worktree of the rig's bare repo, whose relative
-#                        core.hooksPath resolves to this file as checked out in
-#                        that worktree (internal/daemon/landing_worker.go).
+#                        worktree of the rig's bare repo and pushes it with
+#                        every hook off (internal/land/committer.go).
 #   land/<bead>          the landing worker's Forgejo candidate gate pushes the
-#                        merge candidate from its own throwaway worktree, where
-#                        the same relative core.hooksPath resolves here
-#                        (internal/land/candidate.go). Refusing it stranded a
+#                        merge candidate from its own throwaway worktree with
+#                        every hook off (internal/land/land.go), refusing it stranded a
 #                        rig's first Forgejo landing at the candidate push.
-# None of the three is the default branch, so nothing here reaches it: each
-# still passes the gates that govern it.
+# The worker's handles run hook-free, the candidate's pre-push included: the beads rig's
+# tracked pre-push runs `bd hooks run`, but the pod's bd gateway allowlist has no `hooks`
+# verb (HTTP 403), so it cannot succeed there (gt-5nmfx4, gt-m0eiwk, gt-gd5egc). Polecat and
+# crew pushes keep this fence; a hand push still runs it. Forgejo guards the default branch.
 
 # is_polecat_caller reports whether the process running this hook belongs to a
 # polecat, as opposed to crew / refinery / witness / any non-agent caller. Two

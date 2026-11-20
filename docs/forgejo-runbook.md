@@ -209,10 +209,12 @@ To prove the gate before a cutover, ask the overseer for that rig's rule and run
 which proves the last of those before anything changes: it clones the rig's
 GitHub `main`, pushes it to the rig's Forgejo copy as `land/probe-<rig>` from a
 throwaway worktree of the rig's own repository — the same push the landing
-worker makes, so the rig's pre-push hook runs and a hook that refuses `land/*`
-fails the probe rather than the first landing — then waits for the real gate
-status and requires green; the branch and the worktree are deleted on every
+worker makes, done by hand, so the rig's pre-push hook runs and a hook that refuses
+`land/*` fails the probe rather than a later landing — then waits for the real
+gate status and requires green; the branch and the worktree are deleted on every
 path, red, timed out or green.
+The landing worker's own pushes run hook-free (see the header of `.githooks/pre-push`);
+polecat and crew pushes keep the fence, and Forgejo protects the target.
 `--town-root` says which town holds the rig; where that repository is absent the
 probe pushes from the clone instead, warns that the hooks were not exercised and
 exits 3, which the cutover reads as not green. The cutover runs the probe in
