@@ -451,6 +451,33 @@ func (p *passStats) add(seat overrunSeat, r overrunSeatReads) {
 	}
 }
 
+// overrunPassLine is the line the passDone hook logs when a pass ends. The
+// slowest seat's time is all three of its reads, the escalation answer
+// included, so only the two exempt reads, gate and escalation, are named; a
+// pass that read no seat names no slowest seat (gt-0r6j2r).
+func overrunPassLine(stats passStats) string {
+	line := fmt.Sprintf("overrun_guard: pass: %s in %s",
+		countNoun(stats.seats, "seat"), stats.wall.Round(time.Second))
+	if stats.seats > 0 {
+		s := stats.slowest
+		line += fmt.Sprintf("; slowest %s/%s %s (gate %s, escalation %s)",
+			s.rig, s.polecat, s.reads.took().Round(time.Second),
+			s.reads.gateTook.Round(time.Second), s.reads.waitingTook.Round(time.Second))
+	}
+	if stats.failedReads > 0 {
+		line += fmt.Sprintf("; %s failed", countNoun(stats.failedReads, "read"))
+	}
+	return line
+}
+
+// countNoun is the count and its noun, plural unless the count is one.
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 // overrunReadSeat makes the three per-seat reads a pass judges a seat by, one
 // after another, timing each on the pass's clock: the escalation answer, the
 // gate state, and — outside a gate, which is already exempt, so one stretch is
@@ -954,6 +981,7 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		escalationWaiting:    escalation.waiting,
 		escalationAnsweredAt: escalation.answeredAt,
 		nudged:               d.enqueueJevProgress,
+		passDone:             func(stats passStats) { d.logger.Printf("%s", overrunPassLine(stats)) },
 	})
 }
 
