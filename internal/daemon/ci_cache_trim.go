@@ -258,12 +258,13 @@ fi
 // the age in minutes, the cap in KiB and the floor in minutes. It has two modes.
 // list removes nothing: it prints one line per selected file and then the three
 // lines the other programs print, with the size after equal to the size before.
-// apply removes exactly the files list selects, passing their names NUL-separated
-// to rm, then removes the empty directories the removal left below the top level
-// (gt-5y4cmu), as the age rule does, and prints only those three lines, the size
-// after read again once both steps are done. The top level's 256 two-hex-digit
-// shard directories stay, empty or not: Go creates them once and does not
-// recreate them, so removing one loses every write that hashes into it
+// apply removes the files list selects that are still past the floor when it
+// removes them, passing their names NUL-separated to rm, then removes the empty
+// directories the removal left below the top level (gt-5y4cmu), as the age rule
+// does, and prints only those three lines, removed= counting the files it removed
+// and the size after read again once both steps are done. The top level's 256
+// two-hex-digit shard directories stay, empty or not: Go creates them once and
+// does not recreate them, so removing one loses every write that hashes into it
 // (gt-qaqvf4). Go touches a cache file's mtime when it uses it, so the oldest
 // mtime is the least recently used.
 //
@@ -285,6 +286,18 @@ fi
 // is never selected, rather than read as a fragment of one. The three numbers it
 // is given are used in shell arithmetic, so it refuses anything but digits with
 // exit 2 before it computes with them; ciCacheLRUArgv builds them from integers.
+//
+// A selected file's age is only as good as the moment the listing was taken: Go
+// touches a cache file when it uses it, so a gate that reads one between the
+// listing and the removal would have what it just wrote thrown away. The apply
+// therefore reads each selected file's age again, at removal, with the same
+// floor predicate (find -mmin +floor), and removes only the files still past it
+// (gt-s6vs9e). That second read covers the selected files alone, never a walk of
+// the cache. A selected path that is gone by then is skipped, as rm -f would
+// have ignored it; a recheck that cannot read a selected file ends the program
+// under set -e, so a volume run that cannot re-read the floor fails rather than
+// reporting a smaller trim. The window between the recheck and rm is narrowed,
+// not closed.
 //
 // Why this is shell and not Go: it runs inside the runner's dind container
 // through the same exec as ciCacheTrimScript, which is shell for that reason and
@@ -323,7 +336,14 @@ if [ "$mode" = list ]; then
 cat "$tmp/selected"
 after=$before
 else
-if [ "$removed" -gt 0 ]; then tr '\n' '\000' < "$tmp/selected" | xargs -0 rm -f; fi
+if [ "$removed" -gt 0 ]; then
+while IFS= read -r p; do
+[ -e "$p" ] || continue
+find "$p" -maxdepth 0 -type f -mmin +"$floor" -print
+done < "$tmp/selected" > "$tmp/again"
+removed=$(wc -l < "$tmp/again" | tr -d ' ')
+if [ "$removed" -gt 0 ]; then tr '\n' '\000' < "$tmp/again" | xargs -0 rm -f; fi
+fi
 find "$root" -mindepth 2 -type d -empty -delete
 after=$(du -sk "$root" | cut -f1)
 fi
