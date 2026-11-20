@@ -120,6 +120,11 @@ func TestOverrunSaveRescue_DivergedTipIsSavedToARescueBranch(t *testing.T) {
 	w := newResetWorld(t)
 	w.divergeOriginBranch(t)
 	keptBefore := w.f.Ref(w.origin, "refs/heads/"+stopSeat.Branch)
+	var pushes []recordedPush
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushForceRecordingGit{daemonGit: open(dir), pushes: &pushes}
+	}
 
 	got, err := w.d.overrunSaveWork(stopSeat)
 
@@ -129,6 +134,18 @@ func TestOverrunSaveRescue_DivergedTipIsSavedToARescueBranch(t *testing.T) {
 	rescue := stopSeat.Branch + "-" + w.tip[:7]
 	if got.Head != w.tip || got.Rescue != rescue {
 		t.Errorf("save = %+v, want the head %s with rescue branch %s", got, w.tip, rescue)
+	}
+	rescueSaw := false
+	for _, p := range pushes {
+		if strings.HasSuffix(p.refspec, ":refs/heads/"+rescue) {
+			rescueSaw = true
+		}
+		if p.force {
+			t.Errorf("push %q was forced; want every save push unforced", p.refspec)
+		}
+	}
+	if !rescueSaw {
+		t.Errorf("pushes = %+v, want the rescue push to refs/heads/%s", pushes, rescue)
 	}
 	if origin := w.f.Ref(w.origin, "refs/heads/"+rescue); origin != w.tip {
 		t.Errorf("origin holds %q for the rescue branch %s, want the saved head %s", origin, rescue, w.tip)
@@ -598,6 +615,23 @@ type pushRecordingGit struct {
 
 func (g pushRecordingGit) Push(remote, refspec string, force bool) error {
 	*g.refspecs = append(*g.refspecs, refspec)
+	return g.daemonGit.Push(remote, refspec, force)
+}
+
+// pushForceRecordingGit records every push's refspec and force flag, then
+// delegates, so a test reads whether the save forced a push.
+type pushForceRecordingGit struct {
+	daemonGit
+	pushes *[]recordedPush
+}
+
+type recordedPush struct {
+	refspec string
+	force   bool
+}
+
+func (g pushForceRecordingGit) Push(remote, refspec string, force bool) error {
+	*g.pushes = append(*g.pushes, recordedPush{refspec: refspec, force: force})
 	return g.daemonGit.Push(remote, refspec, force)
 }
 
