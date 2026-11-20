@@ -325,23 +325,30 @@ func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 			return nil, fmt.Errorf("rounds ledger: rendering: %w", err)
 		}
 		if len(data) <= maxBytes {
-			return checkFindingIDs(data, out)
+			return checkOMRounds(data, out)
 		}
 		trimmed, ok := dropEarliest(rounds)
 		if !ok {
-			return checkFindingIDs(data, out)
+			return checkOMRounds(data, out)
 		}
 		rounds = trimmed
 	}
 }
 
-// checkFindingIDs returns data, or refuses it when a finding has no id: om's
-// ParseRounds requires one (internal/verdict/rounds.go in the om rig), so an
-// id-less finding costs the landing its rounds here rather than blocking the
-// whole landing at om (gt-2rvuze). It checks the emitted rounds, so an id-less
-// finding the byte cap drops never refuses.
-func checkFindingIDs(data []byte, rounds []omRound) ([]byte, error) {
+// checkOMRounds returns data, or refuses it when the emitted rounds break om's
+// ParseRounds rules (internal/verdict/rounds.go in the om rig): a round number
+// below 1, a round number twice, or a finding without an id. A break costs the
+// landing its rounds, not the review (gt-2rvuze, gt-smmlw4).
+func checkOMRounds(data []byte, rounds []omRound) ([]byte, error) {
+	seen := make(map[int]bool, len(rounds))
 	for _, r := range rounds {
+		if r.Round < 1 {
+			return nil, fmt.Errorf("%w: round number %d is below 1", ErrRoundsCorrupt, r.Round)
+		}
+		if seen[r.Round] {
+			return nil, fmt.Errorf("%w: round number %d appears twice", ErrRoundsCorrupt, r.Round)
+		}
+		seen[r.Round] = true
 		for i, f := range r.Findings {
 			if f.ID == "" {
 				return nil, fmt.Errorf("%w: round %d, finding %d: id is required", ErrRoundsCorrupt, r.Round, i)
