@@ -1283,6 +1283,33 @@ func TestTownHealthDetail(t *testing.T) {
 	}
 }
 
+// TestRunVerifyRecordsTownHealthBeside: a roll whose checks all pass records
+// the town health line in the verify step's detail, so a red rig main shows
+// beside the outcome while the run itself ends ok.
+func TestRunVerifyRecordsTownHealthBeside(t *testing.T) {
+	t.Parallel()
+	const redLine = "RED tick 4s ago: main/devops=red[R]"
+	f := newRunFixture(t)
+	probes := &fakeReadyProbes{fakeVerifyProbes: runVerifyProbes(runTestSHA), ready: true}
+	probes.health = redLine
+	f.deps.Verify = probes
+
+	final, err := f.run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if final.Outcome != OutcomeOK {
+		t.Errorf("Outcome = %q, want %q: a red rig main is reported beside the roll, not folded into it", final.Outcome, OutcomeOK)
+	}
+	verify := step(t, final, StepVerify)
+	if verify.Result != ResultOK {
+		t.Errorf("verify Result = %q, want %q", verify.Result, ResultOK)
+	}
+	if want := "town health: " + redLine; verify.Detail != want {
+		t.Errorf("verify Detail = %q, want %q", verify.Detail, want)
+	}
+}
+
 func TestRunVerifyFailureIsPartialNamingTheChecks(t *testing.T) {
 	t.Parallel()
 	f := newRunFixture(t)

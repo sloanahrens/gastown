@@ -610,7 +610,9 @@ func (r *runner) verify(i int) (Outcome, error) {
 	}
 	failed := failedChecks(checks)
 	if len(failed) == 0 {
-		if err := r.endStep(i, ResultOK, ""); err != nil {
+		// The roll passed. The town health line is recorded beside it, not
+		// folded into it: a red rig main shows here while the outcome stays ok.
+		if err := r.endStep(i, ResultOK, townHealthDetail(checks)); err != nil {
 			return "", err
 		}
 		return "", nil
