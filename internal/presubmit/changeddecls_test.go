@@ -146,6 +146,11 @@ func TestChangedDeclsRefuses(t *testing.T) {
 			base: "main",
 		},
 		{
+			name: "a diff with an unreadable hunk header is returned",
+			git:  fakeGit{diff: "+++ b/pkg/a.go\n@@ bogus @@\n+func F() {}\n"},
+			base: "main",
+		},
+		{
 			name: "a file that does not parse is returned",
 			git: fakeGit{
 				diff: unifiedDiff(addition{path: "pkg/a.go", start: 3, lines: []string{"func f( {"}}),
