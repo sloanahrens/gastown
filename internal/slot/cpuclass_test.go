@@ -63,16 +63,17 @@ func mustAcquireCPU(t *testing.T, tg *testGate, town, role string, size int) *CP
 	return h
 }
 
-// driveCPU drives the fake clock until done yields. Unlike driveClock it allows
-// for a moment when no waiter is sleeping — a second waiter may be midway
-// through a pass, or already finishing — by reading the result before calling
-// that a failure.
-func driveCPU(t *testing.T, tg *testGate, done <-chan acquiredCPU) acquiredCPU {
+// driveCPU drives the fake clock until done yields. It advances one poll only
+// once waiters callers are asleep, so each poll is one pass by every caller
+// still waiting. Advancing on any one sleeper let a descheduled caller's cap
+// run out (gt-2nwgmv). The result is read before each advance, so no poll
+// follows a grant.
+func driveCPU(t *testing.T, tg *testGate, done <-chan acquiredCPU, waiters int) acquiredCPU {
 	t.Helper()
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		blocked := make(chan error, 1)
-		go func() { blocked <- tg.clk.BlockUntilContext(ctx, 1) }()
+		go func() { blocked <- tg.clk.BlockUntilContext(ctx, waiters) }()
 		select {
 		case got := <-done:
 			cancel()
@@ -84,8 +85,13 @@ func driveCPU(t *testing.T, tg *testGate, done <-chan acquiredCPU) acquiredCPU {
 				case got := <-done:
 					return got
 				default:
-					t.Fatal("no CPU-class waiter is sleeping and none returned")
+					t.Fatalf("fewer than %d CPU-class caller(s) sleeping on the fake clock, and none returned", waiters)
 				}
+			}
+			select {
+			case got := <-done:
+				return got
+			default:
 			}
 			tg.clk.Advance(tg.pollInterval)
 		}
@@ -139,7 +145,7 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	}
 
 	releaseCPU(t, first)
-	third := driveCPU(t, tg, thirdDone)
+	third := driveCPU(t, tg, thirdDone, 1)
 	if third.err != nil {
 		t.Fatalf("third caller after a release: %v", third.err)
 	}
@@ -160,6 +166,7 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	})
 	waitCPUQueued(t, tg, town, 2)
 
+	releasedAt := tg.clk.Now()
 	releaseCPU(t, second)
 	late, _, err := tg.admitCPU(town, "gastown/crew/latecomer", "latecomer", 2)
 	if err != nil {
@@ -171,9 +178,15 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	}
 	tg.withdrawCPUTicket(town, "latecomer")
 
-	fourth := driveCPU(t, tg, fourthDone)
+	fourth := driveCPU(t, tg, fourthDone, 2)
 	if fourth.err != nil {
 		t.Fatalf("fourth caller after a release: %v", fourth.err)
+	}
+	// The fourth is admitted by the first poll after the release, so the fifth
+	// saw exactly one poll; more fake time means polls ran while the fourth was
+	// still waiting for its pass.
+	if waited := tg.clk.Since(releasedAt); waited != tg.pollInterval {
+		t.Fatalf("fourth caller was granted %s of fake time after the release, want one poll interval %s", waited, tg.pollInterval)
 	}
 	if fourth.h.Index != 1 {
 		t.Fatalf("fourth caller took slot %d, want the released slot 1", fourth.h.Index)
@@ -185,7 +198,7 @@ func TestCPUClassQueuesBeyondSize(t *testing.T) {
 	}
 
 	releaseCPU(t, fourth.h)
-	fifth := driveCPU(t, tg, fifthDone)
+	fifth := driveCPU(t, tg, fifthDone, 1)
 	if fifth.err != nil {
 		t.Fatalf("fifth caller after a release: %v", fifth.err)
 	}
