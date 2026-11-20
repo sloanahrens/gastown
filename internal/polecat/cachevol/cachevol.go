@@ -194,11 +194,22 @@ func PlanTrim(listing []Entry, capBytes int64, sandboxesRunning bool, now time.T
 // withinMinAge reports whether e is too young to remove: its last use is inside buildCacheMinAge of
 // now, in the future (a clock that disagrees with the filesystem), or unset.
 func (e Entry) withinMinAge(now time.Time) bool {
-	used := e.lastUsed()
-	if used.IsZero() {
-		return true
+	return withinAgeFloor(e.lastUsed(), now)
+}
+
+// withinAgeFloor is the one age comparison the floor makes: an unset used, or one inside buildCacheMinAge
+// of now (future included), is too young to remove. Entry and BuildCacheInUse both judge by it.
+func withinAgeFloor(used, now time.Time) bool {
+	return used.IsZero() || now.Sub(used) < buildCacheMinAge
+}
+
+// BuildCacheInUse reports whether the age floor keeps the build-cache file rel, last modified at mtime,
+// as of now. A module-cache or other path, or one not claim-relative, is never in use.
+func BuildCacheInUse(rel string, mtime, now time.Time) bool {
+	if !claimRelative(rel) || !strings.HasPrefix(rel, SeedBuildCacheDir+"/") {
+		return false
 	}
-	return now.Sub(used) < buildCacheMinAge
+	return withinAgeFloor(mtime, now)
 }
 
 // sortedLRU is the entries of one cache, least recently used first, ties broken by path.
