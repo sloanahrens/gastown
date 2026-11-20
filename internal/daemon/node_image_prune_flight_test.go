@@ -49,14 +49,14 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 			case <-release:
 			case <-t.Context().Done():
 			}
-		})
+		}, nil)
 	}()
 	if !awaitNodePruneFlight(t, firstStart, "the first Start to return while its run is still blocked") {
 		t.Fatal("first Start = false, want true")
 	}
 	awaitNodePruneFlight(t, started, "the first run to start")
 	secondRan := make(chan struct{}, 1)
-	if f.Start(context.Background(), func(context.Context) { secondRan <- struct{}{} }) {
+	if f.Start(context.Background(), func(context.Context) { secondRan <- struct{}{} }, nil) {
 		t.Fatal("Start while a run is going = true, want false")
 	}
 	select {
@@ -66,38 +66,55 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 	}
 	close(release)
 	awaitNodePruneFlight(t, f.done(), "the first run to end")
-	if !f.Start(context.Background(), func(context.Context) {}) {
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
 		t.Fatal("Start after the run finished = false, want true: the mark never cleared")
 	}
 	awaitNodePruneFlight(t, f.done(), "the second run to end")
 }
 
-// TestNodePruneFlightSurvivesAPanic: a panicking run is recovered, logged, and
-// clears its mark so the daemon stays up and a later Start is accepted.
+// TestNodePruneFlightSurvivesAPanic: a panicking run is recovered so the
+// daemon survives, report is called once with the panic value cut to the cap on
+// a rune boundary, and the mark is cleared so a later Start is accepted.
 func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 	t.Parallel()
 
+	// The cap splits é's two bytes, so a plain byte cut would report half a rune.
+	value := strings.Repeat("x", nodePrunePanicMax-1) + "é" + strings.Repeat("x", 100)
 	var f nodePruneFlight
-	logged := make(chan string, 1)
-	f.logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
-	if !f.Start(context.Background(), func(context.Context) {
-		panic("prune exploded")
-	}) {
+	reported := make(chan any, 1)
+	if !f.Start(context.Background(), func(context.Context) { panic(value) },
+		func(v any) { reported <- v }) {
 		t.Fatal("Start = false, want true")
 	}
 	awaitNodePruneFlight(t, f.done(), "the panicking run to end")
-	select {
-	case line := <-logged:
-		if !strings.Contains(line, "panicked") || !strings.Contains(line, "prune exploded") {
-			t.Fatalf("recovered panic logged as %q, want the panic named", line)
-		}
-	default:
-		t.Fatal("recovered panic was not logged")
+	if got := awaitNodePruneFlight(t, reported, "the panic report"); got != value[:nodePrunePanicMax-1] {
+		t.Fatalf("report got %d bytes, want the value cut whole at %d", len(fmt.Sprint(got)), nodePrunePanicMax-1)
 	}
-	if !f.Start(context.Background(), func(context.Context) {}) {
-		t.Fatal("Start after the run panicked = false, want true: the mark never cleared")
+	select {
+	case again := <-reported:
+		t.Fatalf("report called again with %q, want once", again)
+	default:
+	}
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
+		t.Fatal("Start after the panic = false, want true: the mark never cleared")
 	}
 	awaitNodePruneFlight(t, f.done(), "the run after the panic to end")
+}
+
+// TestNodePruneFlightSurvivesAPanicWithNilReport: a nil report does not turn the
+// recovered panic into a crash; the mark is cleared and the next Start is accepted.
+func TestNodePruneFlightSurvivesAPanicWithNilReport(t *testing.T) {
+	t.Parallel()
+
+	var f nodePruneFlight
+	if !f.Start(context.Background(), func(context.Context) { panic("node prune blew up") }, nil) {
+		t.Fatal("Start = false, want true")
+	}
+	awaitNodePruneFlight(t, f.done(), "the panicking run with a nil report")
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
+		t.Fatal("Start after the nil-report panic = false, want true: the mark never cleared")
+	}
+	awaitNodePruneFlight(t, f.done(), "the run after the nil-report panic")
 }
 
 // TestNodePruneFlightRunContextCancelsWithTheParent: the run's context derives
@@ -117,7 +134,7 @@ func TestNodePruneFlightRunContextCancelsWithTheParent(t *testing.T) {
 		case <-ctx.Done():
 		case <-guard.Done(): // the test ended without the parent's cancel reaching the run
 		}
-	}) {
+	}, nil) {
 		t.Fatal("Start = false, want true")
 	}
 	ctx := awaitNodePruneFlight(t, runCtx, "the run to start")
@@ -128,24 +145,24 @@ func TestNodePruneFlightRunContextCancelsWithTheParent(t *testing.T) {
 	awaitNodePruneFlight(t, f.done(), "the run to end")
 }
 
-// TestNodePruneFlightRefusesADoneParent: a parent already canceled starts no
-// run, and leaves the flight free for the next Start.
-func TestNodePruneFlightRefusesADoneParent(t *testing.T) {
+// TestNodePruneFlightDoneParent: a parent already done starts no run, and
+// leaves the flight free for the next Start.
+func TestNodePruneFlightDoneParent(t *testing.T) {
 	t.Parallel()
 
 	var f nodePruneFlight
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 	ran := make(chan struct{}, 1)
-	if f.Start(parent, func(context.Context) { ran <- struct{}{} }) {
-		t.Fatal("Start with a canceled parent = true, want false")
+	if f.Start(parent, func(context.Context) { ran <- struct{}{} }, nil) {
+		t.Fatal("Start with a done parent = true, want false")
 	}
 	select {
 	case <-ran:
-		t.Fatal("Start with a canceled parent launched its run")
+		t.Fatal("Start with a done parent launched its run")
 	default:
 	}
-	if !f.Start(context.Background(), func(context.Context) {}) {
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
 		t.Fatal("Start after the refusal = false, want true: the mark was left set")
 	}
 	awaitNodePruneFlight(t, f.done(), "the run after the refusal to end")
