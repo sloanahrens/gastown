@@ -201,7 +201,8 @@ func TestOverrunResetWorktree_NeedsOriginToHoldTheBranchTip(t *testing.T) {
 
 // Origin's tip may be a descendant of the worktree tip: the tip is in origin's
 // history, so the push step counts that as done and the reset confirms it the
-// same way, detaching the worktree and dropping the branch. The exact-tip
+// same way, detaching the worktree and dropping the branch. The worktree never
+// fetched that commit, so the reset fetches it before comparing. The exact-tip
 // comparison left such a seat behind (gt-czoguq, gt-7rv1ee on 2026-11-19).
 func TestOverrunResetOriginDescendant(t *testing.T) {
 	t.Parallel()
@@ -209,10 +210,7 @@ func TestOverrunResetOriginDescendant(t *testing.T) {
 	if err := w.git().Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
 		t.Fatal(err)
 	}
-	descendant := w.f.Commit(t, w.origin, stopSeat.Branch, "someone's later work", map[string]string{"later.txt": "later\n"})
-	// A fetch leaves origin's commit in the worktree's history, which is what
-	// lets git compare the tip with the head ls-remote named.
-	w.f.SetRef(t, w.work, "refs/remotes/origin/"+stopSeat.Branch, descendant)
+	w.f.Commit(t, w.origin, stopSeat.Branch, "someone's later work", map[string]string{"later.txt": "later\n"})
 
 	if err := w.d.overrunResetWorktree(stopSeat); err != nil {
 		t.Fatalf("reset: %v, want nil", err)
@@ -230,6 +228,39 @@ func TestOverrunResetOriginDescendant(t *testing.T) {
 	}
 	if got := w.branches(t); slices.Contains(got, stopSeat.Branch) {
 		t.Errorf("branches %v still hold %s", got, stopSeat.Branch)
+	}
+}
+
+// Origin may hold the tip's patches in commits of its own (a rebase or
+// cherry-pick): the push step counts that as done, so the reset detaches the
+// worktree, but it keeps the branch, because the commits themselves are not in
+// origin and deleting the branch would drop them. The branch still points at
+// the seat's tip.
+func TestOverrunResetOriginPatchEquivalentKeepsTheBranch(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.f.SetRef(t, w.origin, "refs/heads/"+stopSeat.Branch, w.baseSHA)
+	w.f.Commit(t, w.origin, stopSeat.Branch, "the same work, rebased", map[string]string{"work.txt": "work\n"})
+
+	if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+		t.Fatalf("reset: %v, want nil", err)
+	}
+
+	if strings.Contains(w.log.String(), "origin does not hold") {
+		t.Errorf("log says origin does not hold the branch:\n%s", w.log.String())
+	}
+	if !strings.Contains(w.log.String(), "branch "+stopSeat.Branch+" kept") {
+		t.Errorf("log does not say the branch was kept:\n%s", w.log.String())
+	}
+	g := w.git()
+	if branch, _ := g.CurrentBranch(); branch != "" && branch != "HEAD" {
+		t.Errorf("worktree is on branch %q, want detached", branch)
+	}
+	if head, err := g.Rev("HEAD"); err != nil || head != w.baseSHA {
+		t.Errorf("HEAD = %q (%v), want origin/main %s", head, err, w.baseSHA)
+	}
+	if head, err := g.Rev("refs/heads/" + stopSeat.Branch); err != nil || head != w.tip {
+		t.Errorf("branch %s = %q (%v), want the seat's tip %s kept", stopSeat.Branch, head, err, w.tip)
 	}
 }
 

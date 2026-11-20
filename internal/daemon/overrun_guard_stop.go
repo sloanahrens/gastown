@@ -81,13 +81,13 @@ const (
 //     one write — so the polecat name and its worktree can take new work and
 //     nothing reads the sessionless seat as a running seat whose session died.
 //     The kept branch is safe without the park: it is on origin and the bead's
-//     comment names it. When the push is confirmed — origin's head for the
-//     branch, read back with ls-remote, is the worktree's HEAD, and the worktree
-//     holds nothing uncommitted — the release also resets the worktree to
-//     origin's default branch, detached, and deletes the local branch
-//     (resetWorktree), so that once another seat lands the branch the retired
-//     seat does not read as unpushed work. A readback that does not confirm
-//     leaves the worktree as it is.
+//     comment names it. When the push is confirmed — origin, read back with
+//     ls-remote, holds the worktree's HEAD or a history carrying every patch of
+//     it, and the worktree holds nothing uncommitted — the release also resets
+//     the worktree to origin's default branch, detached, and drops the local
+//     branch (resetWorktree) when origin holds its commits, so that once another
+//     seat lands the branch the retired seat does not read as unpushed work. A
+//     readback that does not confirm leaves the worktree as it is.
 //
 // Between steps 1 and 2 the save step (overrunSaveWork, 1b) commits the seat's
 // uncommitted work as one WIP commit named for the bead and pushes the kept
@@ -1398,21 +1398,59 @@ func overrunTipInHistory(g daemonGit, tip, upstream string) bool {
 	return git.CountCherryUnmergedCommits(out) == 0
 }
 
+// overrunTipContained reports whether every commit tip carries is in
+// upstream's history: the tip is upstream, or an ancestor of it. Patch
+// identity is not enough: it finds the tip's changes upstream without the
+// commits themselves, which a forced branch delete drops (gt-tt4nzg).
+func overrunTipContained(g daemonGit, tip, upstream string) bool {
+	if tip == upstream {
+		return true
+	}
+	ancestor, err := g.IsAncestor(tip, upstream)
+	return err == nil && ancestor
+}
+
+// overrunOriginCommitHeld reports whether the worktree's repository holds
+// origin's commit for branch, fetching the branch when it does not: the
+// ancestry and patch tests need the object, so a worktree that lagged origin
+// would otherwise find nothing to compare and leave a released seat behind.
+// The fetch names no destination ref, so no branch or remote-tracking ref
+// moves: callers pass a branch origin has just listed as refs/heads/<branch>,
+// and git's ref rules admit no ':' in a branch name. A read or fetch that
+// fails is false, because a comparison that cannot be made is not a
+// confirmation.
+func overrunOriginCommitHeld(g daemonGit, branch, origin string) bool {
+	held, err := g.HasObject(origin)
+	if err != nil {
+		return false
+	}
+	if held {
+		return true
+	}
+	if err := g.FetchRefspecWithTimeout("origin", "refs/heads/"+branch, git.RemoteQueryTimeout); err != nil {
+		return false
+	}
+	return true
+}
+
 // overrunResetWorktree is the resetWorktree seam: it puts a released seat's
-// worktree back to its idle state, detached at origin's default branch with the
-// kept branch deleted, once the push is confirmed. Confirmed means origin, asked
-// now with ls-remote, holds the commit the worktree's HEAD is on, or a history
-// carrying every patch of it (the ancestry-then-patch test the push step uses),
-// and the worktree holds nothing uncommitted and no stash. Anything else — no
+// worktree back to its idle state, detached at origin's default branch, once
+// the push is confirmed. Confirmed means origin, asked now with ls-remote,
+// holds the commit the worktree's HEAD is on, or a history carrying every
+// patch of it (the ancestry-then-patch test the push step uses), and the
+// worktree holds nothing uncommitted and no stash. Anything else — no
 // worktree or branch, a branch already gone, origin unreachable or holding a
 // history without the tip, HEAD off the branch, work at risk — leaves the
 // worktree untouched and returns nil: the push step already stands for the
 // branch, and the seat reads as it did before this reset existed.
+//
+// The branch is force-deleted only when origin's history holds the tip's
+// commits, so the delete loses none of them; a tip origin holds by patch
+// identity alone is detached from but kept, because its commits are not in
+// origin and the branch is what keeps them reachable (gt-tt4nzg).
+//
 // A git handle the seam cannot pick for any other reason is an error, so a
-// failure to reach the worktree is not read as nothing to reset. The delete is
-// forced because the branch is no longer merged into the HEAD the detach
-// leaves, and the confirmation has just found origin carrying every patch of
-// the deleted tip, so the ref's content survives in origin.
+// failure to reach the worktree is not read as nothing to reset.
 func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	who := seat.Rig + "/" + seat.Polecat
 	g, err := d.overrunSeatGit(seat)
@@ -1446,12 +1484,15 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	// An origin that cannot be asked, like one holding no such branch, answers
 	// "": no history git can compare is not a confirmation either, so both
 	// refuse here rather than handing the helper an empty ref and relying on
-	// git to reject it.
+	// git to reject it. A worktree that lags origin's head is fetched first: a
+	// comparison needs origin's commit locally, and a fetch that fails is no
+	// confirmation.
 	origin := originBranchSHA(g, branch)
-	if origin == "" || !overrunTipInHistory(g, tip, origin) {
+	if origin == "" || (origin != tip && !overrunOriginCommitHeld(g, branch, origin)) || !overrunTipInHistory(g, tip, origin) {
 		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s; worktree left as it is (in the %s)", who, branch, tip, overrunWorktreeLabel(g))
 		return nil
 	}
+	contained := overrunTipContained(g, tip, origin)
 	if status := overrunCleanupStatus(g); status != string(polecat.CleanupClean) {
 		d.logger.Printf("overrun_guard: %s: worktree is %s; left as it is (in the %s)", who, status, overrunWorktreeLabel(g))
 		return nil
@@ -1459,6 +1500,10 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	base := g.CleanDefaultBranchBaseRef("origin", g.RemoteDefaultBranch())
 	if err := g.CheckoutDetach(base); err != nil {
 		return fmt.Errorf("detach at %s: %w", base, err)
+	}
+	if !contained {
+		d.logger.Printf("overrun_guard: %s: worktree reset to %s, branch %s kept: origin's history carries its patches under other commits, not the commit %s itself (in the %s)", who, base, branch, tip, overrunWorktreeLabel(g))
+		return nil
 	}
 	if err := g.DeleteBranch(branch, true); err != nil {
 		return fmt.Errorf("delete branch %s: %w", branch, err)
