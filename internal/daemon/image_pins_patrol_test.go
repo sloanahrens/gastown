@@ -1096,8 +1096,8 @@ func imagePinsPathCountResult(t *testing.T, run cmdRunFunc) (int, error) {
 
 // TestImagePinsPathCountRunsFilteredFetchThenRevList: the production path count
 // fetches the source's main, filtered to no blobs, into the scratch ref of the
-// devops rig clone, then counts the commits from the pin to the tip that touch
-// the paths (gt-wz5ct4).
+// devops rig clone, reads that it is complete, counts the commits from the pin
+// to the tip that touch the paths (gt-wz5ct4, gt-6bits7).
 func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -1108,6 +1108,9 @@ func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
 	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		argv = append(argv, cmd.Args)
+		if slices.Contains(cmd.Args, "--is-shallow-repository") {
+			return []byte("false\n"), nil, nil
+		}
 		return []byte("1\n"), nil, nil
 	}
 
@@ -1115,22 +1118,51 @@ func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
 	if err != nil || got != 1 {
 		t.Fatalf("the path count = %d, %v; want git's answer 1", got, err)
 	}
-	if len(argv) != 2 {
-		t.Fatalf("git ran %d time(s), want the fetch and then the count: %v", len(argv), argv)
+	if len(argv) != 3 {
+		t.Fatalf("git ran %d time(s), want the fetch, the is-shallow read and then the count: %v", len(argv), argv)
 	}
 	wantFetch := []string{"git", "--git-dir=" + repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"}
 	if !slices.Equal(argv[0], wantFetch) {
 		t.Errorf("the first git call = %v, want the filtered fetch %v", argv[0], wantFetch)
 	}
+	if want := []string{"git", "--git-dir=" + repo, "rev-parse", "--is-shallow-repository"}; !slices.Equal(argv[1], want) {
+		t.Errorf("the second git call = %v, want the is-shallow read %v", argv[1], want)
+	}
 	wantCount := append([]string{"git", "--git-dir=" + repo, "rev-list", "--count", pin + ".." + tip, "--"}, paths...)
-	if !slices.Equal(argv[1], wantCount) {
-		t.Errorf("the second git call = %v, want the path-limited count %v", argv[1], wantCount)
+	if !slices.Equal(argv[2], wantCount) {
+		t.Errorf("the third git call = %v, want the path-limited count %v", argv[2], wantCount)
 	}
 }
 
-// TestImagePinsPathCountFetchFailureIsAnError: a fetch or a count that fails is
-// an error naming the call and carrying git's first stderr line, and a failed
-// fetch is not followed by a count (gt-wz5ct4).
+// TestImagePinsPathCountUnshallowsBeforeCounting: a shallow clone's boundary
+// commit has no local parent, so rev-list answers 2 where the pin touches it
+// once; the unshallow the is-shallow read leads to makes it answer 1 and
+// carries the refspec of the counted tip (gt-6bits7).
+func TestImagePinsPathCountUnshallowsBeforeCounting(t *testing.T) {
+	t.Parallel()
+	var unshallow []string
+	got, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("true\n"), nil, nil
+		case slices.Contains(cmd.Args, "--unshallow"):
+			unshallow = cmd.Args
+		case slices.Contains(cmd.Args, "rev-list") && unshallow == nil:
+			return []byte("2\n"), nil, nil
+		}
+		return []byte("1\n"), nil, nil
+	})
+	if err != nil || got != 1 {
+		t.Fatalf("the path count over a shallow clone = %d, %v; want 1 after the unshallow", got, err)
+	}
+	if !slices.Contains(unshallow, "+main:refs/gt/pin-tip") {
+		t.Fatalf("the unshallow = %v; want it to carry the refspec +main:refs/gt/pin-tip", unshallow)
+	}
+}
+
+// TestImagePinsPathCountFetchFailureIsAnError: a fetch, an is-shallow read, an
+// unshallow or a count that fails is an error naming the call and carrying
+// git's first stderr line, and no count follows a failed read (gt-6bits7).
 func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
 	t.Parallel()
 	const fatal = "fatal: could not read username for 'http://forgejo:3000'"
@@ -1140,6 +1172,8 @@ func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
 		want        string
 	}{
 		{"the fetch fails", "fetch", []byte(fatal + "\nhint: more\n"), "git fetch: git exited 128: " + fatal},
+		{"the is-shallow read fails", "--is-shallow-repository", []byte(fatal + "\nhint: more\n"), "git rev-parse: git exited 128: " + fatal},
+		{"the unshallow fails", "--unshallow", []byte(fatal + "\nhint: more\n"), "git fetch: git exited 128: " + fatal},
 		{"the rev-list fails", "rev-list", []byte(fatal + "\nhint: more\n"), "git rev-list: git exited 128: " + fatal},
 		{"the fetch fails silently", "fetch", nil, "git fetch: git exited 128"},
 	} {
@@ -1152,13 +1186,13 @@ func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
 				if slices.Contains(cmd.Args, tt.fails) {
 					return []byte("stdout that is not the error"), tt.stderr, boom
 				}
-				return nil, nil, nil
+				return []byte("true\n"), nil, nil
 			})
 			if !errors.Is(err, boom) || n != 0 || err == nil || err.Error() != tt.want {
 				t.Fatalf("a failed %s = %d, %v; want %q, with no count", tt.fails, n, err, tt.want)
 			}
-			if tt.fails == "fetch" && calls != 1 {
-				t.Errorf("git ran %d times, want the failed fetch alone", calls)
+			if want := map[string]int{"fetch": 1, "--is-shallow-repository": 2, "--unshallow": 3, "rev-list": 4}[tt.fails]; calls != want {
+				t.Errorf("git ran %d times for a failed %s, want %d and no count", calls, tt.fails, want)
 			}
 		})
 	}
