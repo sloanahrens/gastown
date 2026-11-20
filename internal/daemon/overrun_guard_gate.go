@@ -117,9 +117,10 @@ func newOverrunGateReader(d *Daemon) *overrunGateReader {
 }
 
 // running reports whether the seat is inside its own gate now. An error means
-// the seat's gate state could not be read; the caller then counts all of its
-// time, the direction that stops rather than lets a seat run unbounded
-// (gt-vfwuc).
+// the seat's gate state could not be read; the caller then carries its last
+// gate answer for a short run of failures and counts all of its time after
+// that, the direction that stops rather than lets a seat run unbounded
+// (gt-vfwuc, overrun_guard.go).
 func (r *overrunGateReader) running(seat overrunSeat) (bool, error) {
 	found, err := polecat.LiveSuite(r, polecat.SuiteQuery{
 		Session: session.PolecatSessionName(r.d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat),
