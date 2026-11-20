@@ -596,11 +596,13 @@ func TestBuildBinariesStillChecksOutTheFullCommit(t *testing.T) {
 	}
 }
 
-// TestBuildBinariesBdAndOmStampsUnchanged: the image's bd carries the -s -w strip
-// flags and both halves of the build id `bd version` prints, main.Build before
+// TestBuildBinariesBdAndOmStamps: the image's bd carries the -s -w strip flags
+// and both halves of the build id `bd version` prints, main.Build before
 // main.Commit, the way bdbuild stamps the polecat image's bd (gt-glsx8,
-// gt-aermmg), and om carries the strip flags and no stamp.
-func TestBuildBinariesBdAndOmStampsUnchanged(t *testing.T) {
+// gt-aermmg), and om carries the strip flags and main.version, the full commit
+// its pin resolved, so `om version` names the commit the om skew monitor
+// compares with the om rig's main (gt-odrkbm).
+func TestBuildBinariesBdAndOmStamps(t *testing.T) {
 	t.Parallel()
 	b, run := builderFor(t)
 	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
@@ -610,8 +612,43 @@ func TestBuildBinariesBdAndOmStampsUnchanged(t *testing.T) {
 	if got := ldflagsOf(run.calls[1].argv); !reflect.DeepEqual(got, []string{want}) {
 		t.Errorf("bd build ldflags = %q, want [%q]", got, want)
 	}
-	if got := ldflagsOf(run.calls[2].argv); !reflect.DeepEqual(got, []string{"-s -w"}) {
-		t.Errorf("om build ldflags = %q, want [%q]", got, "-s -w")
+	if got, want := ldflagsOf(run.calls[2].argv), []string{"-s -w -X main.version=" + testOMCommit}; !reflect.DeepEqual(got, want) {
+		t.Errorf("om build ldflags = %q, want %q", got, want)
+	}
+}
+
+// TestBuildStampsOMWithItsCommit: the image's om is built with -X
+// main.version=<the pinned om commit> after the -s -w strip flags, the way om's
+// own Makefile stamps it, so `om version` names the commit the pin resolved and
+// the om skew monitor can compare it with the om rig's main (gt-odrkbm). The
+// plan prints the same flag, so the plan and the build agree.
+func TestBuildStampsOMWithItsCommit(t *testing.T) {
+	t.Parallel()
+	b, run := builderFor(t)
+	if _, err := b.BuildBinaries(context.Background(), testRev); err != nil {
+		t.Fatalf("BuildBinaries: %v", err)
+	}
+	want := []string{"-s -w -X main.version=" + testOMCommit}
+	if got := ldflagsOf(run.calls[2].argv); !reflect.DeepEqual(got, want) {
+		t.Errorf("om build ldflags = %q, want %q", got, want)
+	}
+
+	plan, err := planBuilder(t).Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	var line string
+	for _, l := range plan {
+		if strings.HasPrefix(l, "build om: ") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("plan has no build om: line:\n%s", strings.Join(plan, "\n"))
+	}
+	if want := "-ldflags -s -w -X main.version=" + testOMCommit + " -o "; !strings.Contains(line, want) {
+		t.Errorf("plan om line = %q, want it to carry %q", line, want)
 	}
 }
 

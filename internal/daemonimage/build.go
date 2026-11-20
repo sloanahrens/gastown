@@ -73,6 +73,10 @@ const (
 	gtCommitFlag  = "-X github.com/steveyegge/gastown/internal/cmd.Commit="
 	bdBuildFlag   = "-X main.Build="
 	bdCommitFlag  = "-X main.Commit="
+	// omVersionFlag stamps om with the commit its pin names, the same variable
+	// om's own Makefile stamps, so `om version` in the image answers the om skew
+	// monitor's "om version <sha>" instead of "dev" (gt-odrkbm).
+	omVersionFlag = "-X main.version="
 )
 
 // gtLdflags is the link line of the image's gt. Version carries the same short
@@ -82,6 +86,15 @@ const (
 // from here, so the plan prints the flags the build runs.
 func gtLdflags(stamp string) string {
 	return gtVersionFlag + stamp + " " + gtCommitFlag + stamp
+}
+
+// omLdflags is the link line of the image's om: main.version carries the commit
+// the om pin resolved, the stamp om's own Makefile writes, so `om version` in
+// the image names that commit for the om skew monitor (gt-odrkbm). Build and
+// Plan both take their om flag from here, so the plan prints what the build
+// runs.
+func omLdflags(commit string) string {
+	return omVersionFlag + commit
 }
 
 // planCommitStamp returns the stamp Plan prints for the commit the caller
@@ -336,7 +349,7 @@ func (b Builder) BuildBinaries(ctx context.Context, rev string) ([]string, error
 	builds := []binary{
 		{name: "gt", src: b.GTSrc, commit: gtCommit, pkg: GTPackage, ldflags: gtLdflags(gtStamp)},
 		bdBinary(bdSrc, bdCommit, "bd"),
-		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage, pinned: true},
+		{name: "om", src: omSrc, commit: omCommit, pkg: OMPackage, ldflags: omLdflags(omCommit), pinned: true},
 		// gt-wrap is the forwarder the image installs as bd, with the real bd
 		// beside it as bd.real (gt-p4xncz): an in-cluster bd call must reach
 		// this binary, or BD_GATEWAY_URL changes nothing.
@@ -791,8 +804,9 @@ func isCommit(s string) bool {
 // named, and the fetched-pin check a build makes on a source it fetches. A plan
 // that prints can still fail there. The commits in it are the ones named, not
 // resolved: the gt line stamps buildstamp.Len characters of the named commit,
-// and the bd line's main.Build is planBuildID, since the build id is git's
-// abbreviation of the commit in the worktree a build makes and Plan makes none.
+// the om line stamps the named om commit whole, and the bd line's main.Build is
+// planBuildID, since the build id is git's abbreviation of the commit in the
+// worktree a build makes and Plan makes none.
 func (b Builder) Plan(rev string) ([]string, error) { return b.plan(rev, false) }
 
 // PlanContext returns the steps a context-only build of rev would run: the same
@@ -857,7 +871,7 @@ func (b Builder) plan(rev string, contextOnly bool) ([]string, error) {
 	lines = append(lines, bd.fetch...)
 	lines = append(lines, fmt.Sprintf("build bd: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "bd"), BDPackage, bdBuildFlag+planBuildID+" "+bdCommitFlag+bdCommit), " "), bd.dir, bdCommit))
 	lines = append(lines, om.fetch...)
-	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, ""), " "), om.dir, omCommit))
+	lines = append(lines, fmt.Sprintf("build om: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "om"), OMPackage, omLdflags(omCommit)), " "), om.dir, omCommit))
 	lines = append(lines, fmt.Sprintf("build gt-wrap: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "gt-wrap"), GtWrapPackage, ""), " "), b.GTSrc, rev))
 	lines = append(lines, fmt.Sprintf("build trackerd: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerd"), TrackerdPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
 	lines = append(lines, fmt.Sprintf("build trackerbackup: %s   (in %s/ of a clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "trackerbackup"), TrackerbackupPackage, ""), " "), TrackerdModuleDir, b.GTSrc, rev))
