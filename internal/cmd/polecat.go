@@ -3220,7 +3220,20 @@ type nukeDeps struct {
 	// test that has no git to push from. nil: preserveBranchBeforeNuke on the
 	// worktree or bare repo that holds the branch.
 	Preserve func(branch string) (preserveOutcome, error)
+	// SeatOrigin says where the seat's work is: whether it is a sandbox seat
+	// and, if so, the tip of its branch on origin. nil: the production read,
+	// wired where the preserve step runs.
+	SeatOrigin nukeSeatOrigin
+	// Out receives the nuke's own step lines (session, preserve, worktree,
+	// branch); the helpers it calls keep their writers. nil: os.Stdout.
+	Out io.Writer
 }
+
+// nukeSeatOrigin answers whether the seat is a sandbox seat and, for one, the
+// tip origin holds for its branch (empty when origin does not hold it). An
+// error means the seat's kind or its origin ref could not be read, and the
+// nuke must not treat the host's local ref as the seat's work (gt-wz5ct4).
+type nukeSeatOrigin func(branch string) (tip string, sandboxed bool, err error)
 
 // polecatSessionStopper is the session surface the nuke's first step uses.
 // *polecat.SessionManager implements it.
@@ -3309,10 +3322,44 @@ func preserveFailureBlocker(rigName, polecatName string, force, acknowledged boo
 		rigName, polecatName, cause, remediation)
 }
 
+// nukeSeatOriginFromReads is the seat question with its reads passed in: the
+// agent name and seat kind of polecatGitStateReadsFor, and origin's tip read.
+// A missing agent bead is a host seat, as checkPolecatSafety answers it; an
+// unreadable one leaves the seat's kind unknown, which is an error because an
+// unknown seat cannot be shown to be a host seat.
+func nukeSeatOriginFromReads(reads polecatGitStateReads, originTip func(branch string) (string, error), sessionName string) nukeSeatOrigin {
+	return func(branch string) (string, bool, error) {
+		agent, err := reads.agent()
+		if err != nil {
+			return "", false, fmt.Errorf("the polecat's agent bead is unreadable, so the seat kind is unknown: %w", err)
+		}
+		if _, sandboxed := reads.probe(agent, sessionName); !sandboxed {
+			return "", false, nil
+		}
+		tip, err := originTip(branch)
+		if err != nil {
+			return "", true, fmt.Errorf("the seat is a sandbox seat and origin's refs/heads/%s could not be read: %w", branch, err)
+		}
+		return tip, true, nil
+	}
+}
+
+// sha7 is a commit id shortened for a message an operator reads.
+func sha7(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
+}
+
 func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manager, r *rig.Rig, opts nukePolecatOptions) error {
 	deps := opts.Deps
 	if deps == nil {
 		deps = &nukeDeps{}
+	}
+	out := deps.Out
+	if out == nil {
+		out = os.Stdout
 	}
 
 	// Refuse before any step mutates state: the session kill, molecule burn and
@@ -3344,10 +3391,10 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	}
 	if err := sessMgr.Stop(polecatName, true); err != nil {
 		if !errors.Is(err, polecat.ErrSessionNotFound) {
-			fmt.Printf("  %s session kill failed: %v\n", style.Warning.Render("⚠"), err)
+			fmt.Fprintf(out, "  %s session kill failed: %v\n", style.Warning.Render("⚠"), err)
 		}
 	} else {
-		fmt.Printf("  %s killed session\n", style.Success.Render("✓"))
+		fmt.Fprintf(out, "  %s killed session\n", style.Success.Render("✓"))
 	}
 
 	// Step 2: Get polecat info before deletion (for branch name + hooked work bead)
@@ -3366,14 +3413,35 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// was already reachable", which Step 4 reports differently: a merged branch
 	// is not waiting on the refinery.
 	var alreadyOnRemote bool
+	// onOriginUnmerged marks a sandbox seat's branch found on origin: it is not
+	// merged, so Step 4 must not report it as already on the target branch.
+	var onOriginUnmerged bool
+	// seatTip is the sha origin held for that branch, for Step 4.
+	var seatTip string
 	if branchToDelete != "" {
+		// Where the seat's work is. A sandbox seat works inside its sandbox and
+		// pushes from there, so the host's local ref of its branch stays at the
+		// spawn base — an ancestor of main that says nothing about the work
+		// (gt-wz5ct4). Only a host seat's local ref is the seat's work.
+		seatOrigin := deps.SeatOrigin
+		if seatOrigin == nil {
+			seatOrigin = nukeSeatOriginFromReads(
+				polecatGitStateReadsFor(beads.New(r.Path), filepath.Dir(r.Path), polecatBeadIDForRig(r, rigName, polecatName)),
+				func(branch string) (string, error) {
+					return git.NewGitWithDir(filepath.Join(r.Path, ".repo.git"), "").RemoteBranchTip("origin", branch)
+				},
+				polecatSessionNameIn(rigName, polecatName),
+			)
+		}
+		tip, sandboxed, seatErr := seatOrigin(branchToDelete)
+
 		// Pick a repo that holds the branch's ref. Which checkout the push runs
 		// from is decided inside PreserveBranch, from the worktrees' HEADs; this
 		// only has to find one repository that can read the branch.
 		// Use ClonePath from the polecat record — the worktree lives at
 		// <rig>/polecats/<name>/<rigName>/, not <rig>/polecats/<name>/.
 		var candidates []*git.Git
-		if deps.Preserve == nil {
+		if deps.Preserve == nil && !sandboxed && seatErr == nil {
 			if polecatInfo != nil && polecatInfo.ClonePath != "" {
 				if _, statErr := os.Stat(polecatInfo.ClonePath); statErr == nil {
 					candidates = append(candidates, git.NewGit(polecatInfo.ClonePath))
@@ -3399,11 +3467,31 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		}
 
 		switch {
+		case seatErr != nil:
+			// The seat's kind, or the origin ref of a sandbox seat, could not be
+			// read: an unknown seat cannot be shown to be a host seat, and its
+			// host ref is the false "nothing to preserve" this bead removes.
+			// Fail closed through the override a failed push takes.
+			if blocker := preserveFailureBlocker(rigName, polecatName, opts.Force, opts.AcknowledgeUnpreserved, seatErr); blocker != nil {
+				return blocker
+			}
+			fmt.Fprintf(out, "  %s %v\n  %s proceeding under --force with %s — %s will be deleted with no remote copy\n",
+				style.Error.Render("✗"), seatErr, style.Warning.Render("⚠"),
+				NukeAcknowledgeUnpreservedFlag, branchToDelete)
+		case sandboxed && tip != "":
+			preservedRef = "origin/" + branchToDelete
+			onOriginUnmerged = true
+			seatTip = tip
+			fmt.Fprintf(out, "  %s the seat's branch is on origin at %s; the host's local ref is a placeholder\n",
+				style.Success.Render("✓"), sha7(tip))
+		case sandboxed:
+			fmt.Fprintf(out, "  %s the seat's work is not on origin: no refs/heads/%s there, so this nuke has no remote copy of it\n",
+				style.Warning.Render("⚠"), branchToDelete)
 		case pushGit == nil && deps.Preserve == nil:
 			// Not in any local ref: there is no committed copy of this branch
 			// to lose, so the nuke can proceed. Uncommitted work in the
 			// worktree is what the safety gates above are for.
-			fmt.Printf("  %s branch %s has no local ref — nothing to preserve\n",
+			fmt.Fprintf(out, "  %s branch %s has no local ref — nothing to preserve\n",
 				style.Dim.Render("○"), branchToDelete)
 		default:
 			outcome, preserveErr := preserve(branchToDelete)
@@ -3411,12 +3499,12 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 				preservedRef = outcome.RemoteRef
 				alreadyOnRemote = outcome.AlreadyThere
 				if outcome.AlreadyThere {
-					fmt.Printf("  %s %s already reachable from %s — nothing to preserve\n",
+					fmt.Fprintf(out, "  %s %s already reachable from %s — nothing to preserve\n",
 						style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
 				} else {
-					fmt.Printf("  %s preserved branch %s as %s\n", style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
+					fmt.Fprintf(out, "  %s preserved branch %s as %s\n", style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
 					if outcome.RemoteRef != "origin/"+branchToDelete {
-						fmt.Printf("  %s origin/%s was not fast-forwardable; work parked on %s instead\n",
+						fmt.Fprintf(out, "  %s origin/%s was not fast-forwardable; work parked on %s instead\n",
 							style.Warning.Render("⚠"), branchToDelete, outcome.RemoteRef)
 					}
 				}
@@ -3426,7 +3514,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 				return blocker
 			}
 			if preserveErr != nil {
-				fmt.Printf("  %s %v\n  %s proceeding under --force with %s — %s will be deleted with no remote copy\n",
+				fmt.Fprintf(out, "  %s %v\n  %s proceeding under --force with %s — %s will be deleted with no remote copy\n",
 					style.Error.Render("✗"), preserveErr, style.Warning.Render("⚠"),
 					NukeAcknowledgeUnpreservedFlag, branchToDelete)
 			}
@@ -3481,13 +3569,13 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		Judged:  hookedWork.judged(),
 	}); err != nil {
 		if errors.Is(err, polecat.ErrPolecatNotFound) {
-			fmt.Printf("  %s worktree already gone\n", style.Dim.Render("○"))
+			fmt.Fprintf(out, "  %s worktree already gone\n", style.Dim.Render("○"))
 			resetPolecatAgentBeadForReuse(r, rigName, polecatName)
 		} else {
 			return fmt.Errorf("worktree removal failed: %w", err)
 		}
 	} else {
-		fmt.Printf("  %s deleted worktree\n", style.Success.Render("✓"))
+		fmt.Fprintf(out, "  %s deleted worktree\n", style.Success.Render("✓"))
 	}
 
 	// Step 4: Delete local branch (if we know it)
@@ -3499,23 +3587,26 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	if branchToDelete != "" {
 		deleteErr := deleteRigPolecatBranch(r.Path, branchToDelete)
 		if deleteErr != nil {
-			fmt.Printf("  %s branch delete: %v\n", style.Dim.Render("○"), deleteErr)
+			fmt.Fprintf(out, "  %s branch delete: %v\n", style.Dim.Render("○"), deleteErr)
 		} else {
-			fmt.Printf("  %s deleted local branch %s\n", style.Success.Render("✓"), branchToDelete)
+			fmt.Fprintf(out, "  %s deleted local branch %s\n", style.Success.Render("✓"), branchToDelete)
 		}
 		// Only claim preservation for a ref this run actually verified. When the
 		// override let an unpreserved branch through, say so — silence here is
 		// how a nuke reports success after destroying the only copy (gt-yxys).
 		switch {
+		case preservedRef != "" && onOriginUnmerged:
+			fmt.Fprintf(out, "  %s %s is on origin at %s; the landing worker takes it from there\n",
+				style.Dim.Render("○"), branchToDelete, sha7(seatTip))
 		case preservedRef != "" && alreadyOnRemote:
-			fmt.Printf("  %s %s's work already on %s\n", style.Dim.Render("○"), branchToDelete, preservedRef)
+			fmt.Fprintf(out, "  %s %s's work already on %s\n", style.Dim.Render("○"), branchToDelete, preservedRef)
 		case preservedRef != "":
-			fmt.Printf("  %s remote ref %s preserved for the landing worker\n", style.Dim.Render("○"), preservedRef)
+			fmt.Fprintf(out, "  %s remote ref %s preserved for the landing worker\n", style.Dim.Render("○"), preservedRef)
 		case opts.AcknowledgeUnpreserved:
-			fmt.Printf("  %s %s deleted with no remote copy (%s)\n",
+			fmt.Fprintf(out, "  %s %s deleted with no remote copy (%s)\n",
 				style.Warning.Render("⚠"), branchToDelete, NukeAcknowledgeUnpreservedFlag)
 		default:
-			fmt.Printf("  %s %s had no remote copy to report\n",
+			fmt.Fprintf(out, "  %s %s had no remote copy to report\n",
 				style.Warning.Render("⚠"), branchToDelete)
 		}
 	}

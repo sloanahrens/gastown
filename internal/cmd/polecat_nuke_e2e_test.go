@@ -42,6 +42,13 @@ const (
 	nukeE2EBranch  = "polecat/basalt/gt-bxrji+m1abcd"
 )
 
+// nukeE2EHostSeat answers the nuke's seat question for the fixture's seat: a
+// host seat, the kind whose local branch ref is its work. The fixture is a
+// plain directory with no git and no agent bead, so the production read has no
+// seat to classify; the sandbox answers are pinned by the unit tier
+// (polecat_preserve_test.go).
+func nukeE2EHostSeat(string) (string, bool, error) { return "", false, nil }
+
 // releaserCall is one entry in the stub's log: what the nuke asked for, and
 // whether the polecat sandbox was already gone when it asked. The second half
 // is what makes the order observable: the release lands before removal, the
@@ -160,7 +167,7 @@ func (f *nukeE2E) nuke(survives func(beadID string) (string, error), opts nukePo
 		},
 	}
 	sessions := &noSession{}
-	opts.Deps = &nukeDeps{Sessions: sessions, Releaser: releaser, SurvivingWork: survives, MoleculeBeads: f.store}
+	opts.Deps = &nukeDeps{Sessions: sessions, Releaser: releaser, SurvivingWork: survives, MoleculeBeads: f.store, SeatOrigin: nukeE2EHostSeat}
 
 	r := &rig.Rig{Name: nukeE2ERig, Path: f.rigPath}
 	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), f.store)
@@ -429,6 +436,7 @@ func TestNukeRefusedByPreserveGateKeepsTheMolecule(t *testing.T) {
 			Releaser:      releaser,
 			SurvivingWork: func(string) (string, error) { return "", nil },
 			MoleculeBeads: mol,
+			SeatOrigin:    nukeE2EHostSeat,
 			Preserve: func(string) (preserveOutcome, error) {
 				return preserveOutcome{}, errors.New("fetch origin before nuke: origin unreachable")
 			},
@@ -482,6 +490,7 @@ func TestNukeThatProceedsBurnsTheMolecule(t *testing.T) {
 			Releaser:      releaser,
 			SurvivingWork: func(string) (string, error) { return "", nil },
 			MoleculeBeads: mol,
+			SeatOrigin:    nukeE2EHostSeat,
 			Preserve: func(string) (preserveOutcome, error) {
 				return preserveOutcome{RemoteRef: "origin/" + nukeE2EBranch, AlreadyThere: true}, nil
 			},
