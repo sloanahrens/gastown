@@ -164,6 +164,40 @@ func TestNodeImagePruneOnceDryRowLedgerRefused(t *testing.T) {
 	}
 }
 
+// TestNodeImagePruneRecordLedgerFailsToOpen: a ledger the town root cannot open
+// leaves the run's result unchanged and logs the failure once.
+func TestNodeImagePruneRecordLedgerFailsToOpen(t *testing.T) {
+	t.Parallel()
+	d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+	// jobledger.NewLedger refuses a town root of nothing, so the ledger is never
+	// opened and no append is attempted.
+	d.config.TownRoot = ""
+
+	require.NoError(t, d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob}))
+
+	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
+	require.Len(t, lines, 1, "the ledger that cannot be opened logs one line")
+	assert.Contains(t, lines[0], "node_image_prune")
+	assert.Contains(t, lines[0], "job ledger")
+}
+
+// TestNodeImagePruneRecordLedgerFailsToAppend: an Append that fails leaves the
+// run's result unchanged and logs the failure once.
+func TestNodeImagePruneRecordLedgerFailsToAppend(t *testing.T) {
+	t.Parallel()
+	d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+	// A regular file where the ledger's directory belongs refuses every append.
+	require.NoError(t, os.MkdirAll(filepath.Join(d.config.TownRoot, ".runtime"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(d.config.TownRoot, ".runtime", "jobs"), []byte("not a directory"), 0o644))
+
+	require.NoError(t, d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob}))
+
+	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
+	require.Len(t, lines, 1, "a failing Append logs one line")
+	assert.Contains(t, lines[0], "node_image_prune")
+	assert.Contains(t, lines[0], "job ledger")
+}
+
 // TestNodeImagePruneOnceRefuses: an id nodePruneJobName refuses and a town with no
 // running polecat image both return an error and touch no cluster; a runner error is
 // returned after the Job was applied and deleted. Each is one row.
