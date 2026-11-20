@@ -531,6 +531,187 @@ func TestSpecStoryPointStepReworkExemptionCoversTheSplitHold(t *testing.T) {
 	}
 }
 
+// splitSlungLabels returns the sp-slung labels a fake town's bead wears.
+func splitSlungLabels(f *fakeSpecTown, id string) []string {
+	var out []string
+	for _, l := range f.labels[id] {
+		if strings.HasPrefix(l, specSPSlungPrefix) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// TestSpecStoryPointSlungReasons is gt-l04nj0: a bead the split route slings at
+// or over its trigger records why it was slung instead of held — the rework
+// exemption, a shape-only estimate, an estimate the route could not judge, or
+// the trigger being off — and one sp-slung label lands, exactly. A bead under
+// the trigger, and a bead with no estimate the route can read, records nothing.
+func TestSpecStoryPointSlungReasons(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		trigger   float64
+		shadow    bool
+		labels    []string
+		estimate  func(context.Context, string) (specEstimateOutcome, error)
+		wantLabel string
+		wantCalls int
+	}{
+		{
+			name:    "a rework bead",
+			trigger: 11,
+			labels:  []string{reworkLabel, "sp:13", "sp-rung:all", "sp-minutes:12"},
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 13, 12, "all", ""), nil
+			},
+			wantLabel: "sp-slung:rework",
+		},
+		{
+			name:    "a shape-only estimate",
+			trigger: 11,
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 13, 12, "shape", ""), nil
+			},
+			wantLabel: "sp-slung:shape",
+			wantCalls: 1,
+		},
+		{
+			name:    "an estimate the route cannot judge",
+			trigger: 11,
+			labels:  []string{"sp:13", "sp-rung:all", "sp-minutes:12"},
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return specEstimateOutcome{}, errors.New("embedder unreachable")
+			},
+			wantLabel: "sp-slung:unjudged",
+			wantCalls: 1,
+		},
+		{
+			name:    "the route off",
+			trigger: 0,
+			shadow:  true,
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 13, 12, "all", ""), nil
+			},
+			wantLabel: "sp-slung:off",
+			wantCalls: 1,
+		},
+		{
+			name:    "a bead under the trigger",
+			trigger: 11,
+			labels:  []string{"sp:8", "sp-rung:all", "sp-minutes:9.3"},
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 8, 9.3, "all", ""), nil
+			},
+			wantCalls: 1,
+		},
+		{
+			name:    "a shape-only estimate under the trigger",
+			trigger: 11,
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 8, 9.3, "shape", ""), nil
+			},
+			wantCalls: 1,
+		},
+		{
+			name:    "the route off with no estimate the route can read",
+			trigger: 0,
+			shadow:  true,
+			estimate: func(context.Context, string) (specEstimateOutcome, error) {
+				return specEstimateOutcome{}, errors.New("embedder unreachable")
+			},
+			wantCalls: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+			spec.Labels = tc.labels
+			f := newFakeSpecTown(spec)
+			env := f.env()
+			env.StoryPointSplitOver = tc.trigger
+			env.StoryPointShadow = tc.shadow
+			calls := 0
+			env.StoryPointEstimate = func(ctx context.Context, id string) (specEstimateOutcome, error) {
+				calls++
+				return tc.estimate(ctx, id)
+			}
+			runSpecDispatchCycle(env)
+
+			if calls != tc.wantCalls {
+				t.Errorf("estimated the bead %d time(s), want %d", calls, tc.wantCalls)
+			}
+			if got := strings.Join(f.slung, " "); got != "gt-a" {
+				t.Fatalf("slung %q, want gt-a: the bead is slung either way", got)
+			}
+			got := splitSlungLabels(f, "gt-a")
+			if tc.wantLabel == "" {
+				if len(got) != 0 {
+					t.Errorf("sp-slung labels = %q, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != tc.wantLabel {
+				t.Errorf("sp-slung labels = %q, want exactly [%q]", got, tc.wantLabel)
+			}
+		})
+	}
+}
+
+// TestSpecStoryPointSlungOnce is gt-l04nj0: the reason is written once, so a
+// second tick on a bead that already wears an sp-slung label adds no second
+// one, and an AddLabel that fails is reported on the tick rather than
+// swallowed.
+func TestSpecStoryPointSlungOnce(t *testing.T) {
+	t.Parallel()
+	t.Run("a second tick adds no second label", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		env := f.env()
+		env.StoryPointSplitOver = 11
+		env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+			return splitOutcome("estimated", 13, 12, "shape", ""), nil
+		}
+		runSpecDispatchCycle(env)
+		// The sling hooks the bead, so the board no longer offers it; the second
+		// tick's own step, run on the bead as the tick re-reads it, is the case
+		// the guard covers.
+		f.mu.Lock()
+		latest := f.specs["gt-a"]
+		f.mu.Unlock()
+		step := specStoryPointStep(env, "gt-a", latest)
+
+		if len(step.Errors) != 0 {
+			t.Errorf("errors = %q, want none", step.Errors)
+		}
+		if got := splitSlungLabels(f, "gt-a"); len(got) != 1 || got[0] != "sp-slung:shape" {
+			t.Errorf("sp-slung labels after two ticks = %q, want exactly one sp-slung:shape", got)
+		}
+	})
+	t.Run("a failed AddLabel is reported", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		env := f.env()
+		env.StoryPointSplitOver = 11
+		env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+			return splitOutcome("estimated", 13, 12, "shape", ""), nil
+		}
+		env.AddLabel = func(string, string) error { return errors.New("bd refused") }
+		r := runSpecDispatchCycle(env)
+
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "gt-a") ||
+			!strings.Contains(r.Errors[0], "sp-slung:shape") || !strings.Contains(r.Errors[0], "bd refused") {
+			t.Errorf("errors = %q, want one naming the bead, the label and the failed write", r.Errors)
+		}
+		if got := splitSlungLabels(f, "gt-a"); len(got) != 0 {
+			t.Errorf("sp-slung labels = %q, want none written", got)
+		}
+		if got := strings.Join(f.slung, " "); got != "gt-a" {
+			t.Errorf("slung %q, want gt-a: a failed reason write does not hold the bead", got)
+		}
+	})
+}
+
 // TestSplitLabelStale: the split label is stale only when the bead's own labels
 // record an estimate the route acts on that reads under the trigger. A re-stamp
 // of sp-minutes without the label updated is the case the function exists for;
