@@ -132,11 +132,13 @@ type Executor struct {
 	defaultTimeout time.Duration
 	killGrace      time.Duration
 	slots          chan struct{}
-	// capRefusals and peakInFlight are atomics rather than a lock: the stats
-	// route reads them while calls run, and the refusal path must not take a
-	// lock per call the cap turns away.
+	// capRefusals, peakInFlight and windowPeak are atomics rather than a lock:
+	// the stats route reads them while calls run, and the refusal path must not
+	// take a lock per call the cap turns away. peakInFlight is the peak since
+	// start; windowPeak is the peak since TakeWindowStats last read it.
 	capRefusals  atomic.Uint64
 	peakInFlight atomic.Uint64
+	windowPeak   atomic.Uint64
 	runner       processRunner
 }
 
@@ -226,14 +228,36 @@ func (e *Executor) CapStats() CapSnapshot {
 	}
 }
 
-// recordInFlight raises the peak to the number of calls holding a slot now. It
-// runs at admission, when len(slots) counts the call just admitted, so the peak
-// is the highest number in flight at once rather than the number admitted.
+// TakeWindowStats returns the concurrency-cap reading for the window since the
+// last call and starts a new one. peak is the most calls that held a slot at
+// once in that window, inFlight the calls holding one now, capacity the slots
+// the executor admits at once, and refused how many calls the cap has turned
+// away since start. A call in flight now starts in the next window too, since it
+// is still running; a zero-value executor answers zeros, since it holds no slots
+// to read.
+func (e *Executor) TakeWindowStats() (peak, inFlight, capacity, refused uint64) {
+	if e == nil || e.slots == nil {
+		return 0, 0, 0, 0
+	}
+	inFlight = uint64(len(e.slots))
+	return e.windowPeak.Swap(inFlight), inFlight, uint64(cap(e.slots)), e.capRefusals.Load()
+}
+
+// recordInFlight raises the peaks to the number of calls holding a slot now. It
+// runs at admission, when len(slots) counts the call just admitted, so a peak is
+// the highest number in flight at once rather than the number admitted.
 func (e *Executor) recordInFlight() {
 	n := uint64(len(e.slots))
+	raisePeak(&e.peakInFlight, n)
+	raisePeak(&e.windowPeak, n)
+}
+
+// raisePeak raises a peak counter to n, and leaves it alone when it already
+// holds n or more.
+func raisePeak(peak *atomic.Uint64, n uint64) {
 	for {
-		peak := e.peakInFlight.Load()
-		if n <= peak || e.peakInFlight.CompareAndSwap(peak, n) {
+		old := peak.Load()
+		if n <= old || peak.CompareAndSwap(old, n) {
 			return
 		}
 	}
