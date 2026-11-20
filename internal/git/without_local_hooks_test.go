@@ -75,6 +75,64 @@ func TestHooksOffArgs(t *testing.T) {
 	}
 }
 
+// TestWithoutAllHooksDecoratesPush: a WithoutAllHooks handle sends
+// `-c core.hooksPath=/dev/null` before push for Push, PushWithTimeout and
+// PushForceWithLease; a WithoutLocalHooks handle and a plain one send a bare
+// push, so the pre-push fence stays on for everyone but the landing worker's
+// handle (gt-gh0vkk).
+func TestWithoutAllHooksDecoratesPush(t *testing.T) {
+	t.Parallel()
+	const off = "-c core.hooksPath=/dev/null "
+	for _, tt := range []struct {
+		name, hooks, push string
+		wrap              func(*Git) *Git
+	}{
+		{"without all hooks", off, off, (*Git).WithoutAllHooks},
+		{"without local hooks", off, "", (*Git).WithoutLocalHooks},
+		{"plain handle", "", "", func(g *Git) *Git { return g }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(map[string]reply{
+				tt.hooks + "symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n"),
+				tt.push + "push *": ok(""),
+			})
+			g := tt.wrap(newTestGit(t, s))
+			if err := g.Push("origin", "side", false); err != nil {
+				t.Fatalf("Push: %v", err)
+			}
+			if err := g.PushWithTimeout("origin", "timed", false, time.Second); err != nil {
+				t.Fatalf("PushWithTimeout: %v", err)
+			}
+			if err := g.PushForceWithLease("origin", "refs/heads/lease", "refs/heads/lease", "1111"); err != nil {
+				t.Fatalf("PushForceWithLease: %v", err)
+			}
+			for _, want := range []string{
+				"push origin side",
+				"push origin timed",
+				"push origin refs/heads/lease --force-with-lease=refs/heads/lease:1111",
+			} {
+				if !s.hasSent(tt.push + want) {
+					t.Errorf("no call recorded as %q; sent %q", tt.push+want, s.sent())
+				}
+			}
+			s.noUnscripted(t)
+		})
+	}
+}
+
+// TestWithoutAllHooksKeepsAnUnnameablePushHooked: a call whose subcommand reads
+// as anything but push, an alias here, keeps the pre-push fence even on a
+// WithoutAllHooks handle: without a name for the real subcommand, decorating it
+// could switch a fence off (gt-ae4m5e).
+func TestWithoutAllHooksKeepsAnUnnameablePushHooked(t *testing.T) {
+	t.Parallel()
+	args := []string{"-c", "alias.p=push", "p"}
+	if got := (&Git{}).WithoutAllHooks().hookArgs(append([]string(nil), args...)); !slices.Equal(got, args) {
+		t.Fatalf("hookArgs(%q) = %q, want it unchanged", args, got)
+	}
+}
+
 // TestWithoutLocalHooksRunsTheSubcommandWithHooksOff: a commit and a no-ff
 // merge through the handle each send `-c core.hooksPath=/dev/null` and then the
 // subcommand, and a push through the same handle sends no core.hooksPath at

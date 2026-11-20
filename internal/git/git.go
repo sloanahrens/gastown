@@ -121,6 +121,7 @@ type Git struct {
 	env             []string      // added to every call's environment (WithEnv)
 	unset           []string      // removed from every call's environment (WithoutEnv)
 	noHooks         bool          // run with the repo's local hooks off (WithoutLocalHooks)
+	noPushHooks     bool          // run a push with hooks off too (WithoutAllHooks)
 
 	configRetry bool                           // retry once when git cannot read its config files (WithConfigReadRetry)
 	retryWait   func(time.Duration)            // the wait before that retry; nil means time.Sleep
@@ -623,14 +624,30 @@ func gitSubcommand(args []string) (string, []string) {
 }
 
 // hookArgs returns args as this handle's calls must run: with the repository's
-// local hooks off when the handle came from WithoutLocalHooks, and unchanged
-// otherwise. Every runner call builds its gitCall from it: runOutput,
-// runWithTimeout, runWithEnvAndTimeout, runWithStdin and runMergeCheck.
+// local hooks off when the handle came from WithoutLocalHooks — and, for a
+// push, only when it came from WithoutAllHooks — and unchanged otherwise.
+// Every runner call builds its gitCall from it: runOutput, runWithTimeout,
+// runWithEnvAndTimeout, runWithStdin and runMergeCheck.
 func (g *Git) hookArgs(args []string) []string {
+	if g.noPushHooks {
+		if sub, rest := gitSubcommand(args); sub == "push" {
+			return hooksOffBeforeSubcommand(args, rest)
+		}
+	}
 	if !g.noHooks {
 		return args
 	}
 	return hooksOffArgs(args)
+}
+
+// hooksOffBeforeSubcommand returns args with `-c core.hooksPath=/dev/null`
+// inserted before the subcommand whose own arguments are rest.
+func hooksOffBeforeSubcommand(args, rest []string) []string {
+	at := len(args) - len(rest) - 1 // the subcommand's own index
+	out := make([]string, 0, len(args)+2)
+	out = append(out, args[:at]...)
+	out = append(out, "-c", "core.hooksPath=/dev/null")
+	return append(out, args[at:]...)
 }
 
 // hooksOffArgs returns args with `-c core.hooksPath=/dev/null` inserted before
@@ -648,11 +665,7 @@ func hooksOffArgs(args []string) []string {
 	if !hookedSubcommands[sub] {
 		return args
 	}
-	at := len(args) - len(rest) - 1 // the subcommand's own index
-	out := make([]string, 0, len(args)+2)
-	out = append(out, args[:at]...)
-	out = append(out, "-c", "core.hooksPath=/dev/null")
-	return append(out, args[at:]...)
+	return hooksOffBeforeSubcommand(args, rest)
 }
 
 // hookedSubcommands names every subcommand a method of this package sends
@@ -660,7 +673,9 @@ func hooksOffArgs(args []string) []string {
 // runWithEnvAndTimeout, runWithStdin and runMergeCheck). A method that starts
 // sending a new subcommand must add it here, or its calls keep the local hooks
 // on. push is absent on purpose: its pre-push hook is the fence that refuses a
-// polecat's push to the default branch, and the landing relies on it.
+// polecat's push to the default branch, and the landing relies on it. The
+// landing worker's own handle comes from WithoutAllHooks, which decorates a
+// push ahead of this set instead (gt-gh0vkk).
 var hookedSubcommands = map[string]bool{
 	"add":             true,
 	"branch":          true,
