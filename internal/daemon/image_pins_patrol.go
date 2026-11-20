@@ -362,6 +362,14 @@ func (d *Daemon) imagePinsTipGit(ctx context.Context) PinTipGit {
 func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
 	return func(url, pin, tip string, paths []string) (int, error) {
+		// Both shas are refused before any git call: the fetch runs first, and an
+		// option-shaped pin or tip is spliced into the rev-list argument below.
+		if !pinShaForm.MatchString(pin) {
+			return 0, fmt.Errorf("git rev-list --count: pin %q is not a full 40-character lowercase hex sha", pin)
+		}
+		if !pinShaForm.MatchString(tip) {
+			return 0, fmt.Errorf("git rev-list --count: tip %q is not a full 40-character lowercase hex sha", tip)
+		}
 		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
 			return 0, err
 		}
@@ -375,7 +383,7 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 			return 0, fmt.Errorf("git rev-list --count %s..%s answered a non-number", sha12(pin), sha12(tip))
 		}
 		if n < 0 {
-			return 0, fmt.Errorf("git rev-list --count %s..%s answered a negative count", sha12(pin), sha12(tip))
+			return 0, fmt.Errorf("git rev-list --count %s..%s answered a negative count %d", sha12(pin), sha12(tip), n)
 		}
 		return n, nil
 	}

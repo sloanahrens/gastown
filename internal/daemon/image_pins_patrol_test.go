@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1179,6 +1180,82 @@ func TestImagePinsPathCountNonNumberIsAnError(t *testing.T) {
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("%s count = %d, %v; want an error saying %q", tt.name, n, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestImagePinsPathCountRefusesANegativeCount: a count git answers below zero is
+// an error that names the count, never a count a caller could read as a lag
+// (gt-yeiehx).
+func TestImagePinsPathCountRefusesANegativeCount(t *testing.T) {
+	t.Parallel()
+	n, err := imagePinsPathCountResult(t, func(*exec.Cmd) ([]byte, []byte, error) {
+		return []byte("-3\n"), nil, nil
+	})
+	if err == nil || n != 0 || !strings.Contains(err.Error(), "-3") {
+		t.Fatalf("a negative count = %d, %v; want an error naming the count -3, with no count", n, err)
+	}
+}
+
+// imagePinsPathCountCalled runs the production path count over pin and tip and
+// returns its answer, its error, and how many git calls it made.
+func imagePinsPathCountCalled(t *testing.T, pin, tip string) (int, int, error) {
+	t.Helper()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	calls := 0
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+		calls++
+		return []byte("1\n"), nil, nil
+	}
+	n, err := d.imagePinsPathCount(context.Background())(pinsReadPinURL("devops"), pin, tip, []string{"cmd/"})
+	return n, calls, err
+}
+
+// imagePinsRefusedShas are the values a pin or tip must refuse before git sees
+// them: an option git would parse, a hyphen-led value, a short sha, an upper-case
+// sha and an empty value (gt-yeiehx).
+var imagePinsRefusedShas = []struct{ name, sha string }{
+	{"an option-shaped value", "--upload-pack=x"},
+	{"a hyphen-led value", "-4444444444444444444444444444444444444444"},
+	{"a short sha", "444444"},
+	{"an upper-case sha", "ABCDEF0123456789ABCDEF0123456789ABCDEF01"},
+	{"an empty value", ""},
+}
+
+// TestImagePinsPathCountRefusesAPinThatIsNotFortyLowercaseHex: a pin that is not
+// 40 lowercase hex is an error naming the pin, and no git call runs, the fetch
+// included (gt-yeiehx).
+func TestImagePinsPathCountRefusesAPinThatIsNotFortyLowercaseHex(t *testing.T) {
+	t.Parallel()
+	for _, tt := range imagePinsRefusedShas {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n, calls, err := imagePinsPathCountCalled(t, tt.sha, pinsReadDevopsTip)
+			if err == nil || n != 0 || !strings.Contains(err.Error(), strconv.Quote(tt.sha)) {
+				t.Fatalf("a pin of %s = %d, %v; want an error naming the pin %q, with no count", tt.name, n, err, tt.sha)
+			}
+			if calls != 0 {
+				t.Errorf("git ran %d time(s) for a refused pin, want none", calls)
+			}
+		})
+	}
+}
+
+// TestImagePinsPathCountRefusesATipThatIsNotFortyLowercaseHex: a tip that is not
+// 40 lowercase hex is an error naming the tip, and no git call runs, the fetch
+// included (gt-yeiehx).
+func TestImagePinsPathCountRefusesATipThatIsNotFortyLowercaseHex(t *testing.T) {
+	t.Parallel()
+	for _, tt := range imagePinsRefusedShas {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n, calls, err := imagePinsPathCountCalled(t, pinsReadDevopsCommit, tt.sha)
+			if err == nil || n != 0 || !strings.Contains(err.Error(), strconv.Quote(tt.sha)) {
+				t.Fatalf("a tip of %s = %d, %v; want an error naming the tip %q, with no count", tt.name, n, err, tt.sha)
+			}
+			if calls != 0 {
+				t.Errorf("git ran %d time(s) for a refused tip, want none", calls)
 			}
 		})
 	}
