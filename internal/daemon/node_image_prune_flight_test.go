@@ -2,7 +2,8 @@ package daemon
 
 import (
 	"context"
-	"runtime"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -22,8 +23,14 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 		t.Fatal("first Start = false, want true")
 	}
 	<-started
-	if f.Start(context.Background(), func(context.Context) {}) {
+	secondRan := make(chan struct{}, 1)
+	if f.Start(context.Background(), func(context.Context) { secondRan <- struct{}{} }) {
 		t.Fatal("Start while a run is going = true, want false")
+	}
+	select {
+	case <-secondRan:
+		t.Fatal("the refused Start launched its run")
+	default:
 	}
 	select {
 	case <-finished:
@@ -31,55 +38,82 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 	default:
 	}
 	close(release)
-	<-finished
-	assertNodePruneFlightStarts(t, &f, "after the run finished")
+	<-f.done()
+	if !f.Start(context.Background(), func(context.Context) {}) {
+		t.Fatal("Start after the run finished = false, want true: the mark never cleared")
+	}
+	<-f.done()
 }
 
-// TestNodePruneFlightSurvivesAPanicAndCancels: a panicking run is recovered and
-// clears its mark, and cancelling the parent cancels the run's context.
-func TestNodePruneFlightSurvivesAPanicAndCancels(t *testing.T) {
+// TestNodePruneFlightSurvivesAPanic: a panicking run is recovered, logged, and
+// clears its mark so the daemon stays up and a later Start is accepted.
+func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 	t.Parallel()
 
 	var f nodePruneFlight
-	panicked := make(chan struct{})
+	logged := make(chan string, 1)
+	f.logf = func(format string, args ...any) { logged <- fmt.Sprintf(format, args...) }
 	if !f.Start(context.Background(), func(context.Context) {
-		defer close(panicked)
 		panic("prune exploded")
 	}) {
 		t.Fatal("Start = false, want true")
 	}
-	<-panicked
-	assertNodePruneFlightStarts(t, &f, "after the run panicked")
+	<-f.done()
+	select {
+	case line := <-logged:
+		if !strings.Contains(line, "panicked") || !strings.Contains(line, "prune exploded") {
+			t.Fatalf("recovered panic logged as %q, want the panic named", line)
+		}
+	default:
+		t.Fatal("recovered panic was not logged")
+	}
+	if !f.Start(context.Background(), func(context.Context) {}) {
+		t.Fatal("Start after the run panicked = false, want true: the mark never cleared")
+	}
+	<-f.done()
+}
 
+// TestNodePruneFlightRunContextCancelsWithTheParent: the run's context derives
+// from the parent, not from the caller.
+func TestNodePruneFlightRunContextCancelsWithTheParent(t *testing.T) {
+	t.Parallel()
+
+	var f nodePruneFlight
 	parent, cancel := context.WithCancel(context.Background())
 	runCtx := make(chan context.Context, 1)
-	done := make(chan struct{})
 	if !f.Start(parent, func(ctx context.Context) {
 		runCtx <- ctx
 		<-ctx.Done()
-		close(done)
 	}) {
-		t.Fatal("Start before cancelling the parent = false, want true")
+		t.Fatal("Start = false, want true")
 	}
 	ctx := <-runCtx
 	cancel()
 	if ctx.Err() == nil {
-		t.Fatal("cancelling the parent left the run's context live")
+		t.Fatal("canceling the parent left the run's context live")
 	}
-	<-done
+	<-f.done()
 }
 
-// assertNodePruneFlightStarts waits, bounded, for a start to be accepted: the
-// flight clears its mark on its own goroutine, just after run returns.
-func assertNodePruneFlightStarts(t *testing.T, f *nodePruneFlight, when string) {
-	t.Helper()
-	done := make(chan struct{})
-	for i := 0; i < 10000; i++ {
-		if f.Start(context.Background(), func(context.Context) { close(done) }) {
-			<-done
-			return
-		}
-		runtime.Gosched()
+// TestNodePruneFlightRefusesADoneParent: a parent already canceled starts no
+// run, and leaves the flight free for the next Start.
+func TestNodePruneFlightRefusesADoneParent(t *testing.T) {
+	t.Parallel()
+
+	var f nodePruneFlight
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	ran := make(chan struct{}, 1)
+	if f.Start(parent, func(context.Context) { ran <- struct{}{} }) {
+		t.Fatal("Start with a canceled parent = true, want false")
 	}
-	t.Fatalf("Start %s = false, want true: the mark never cleared", when)
+	select {
+	case <-ran:
+		t.Fatal("Start with a canceled parent launched its run")
+	default:
+	}
+	if !f.Start(context.Background(), func(context.Context) {}) {
+		t.Fatal("Start after the refusal = false, want true: the mark was left set")
+	}
+	<-f.done()
 }
