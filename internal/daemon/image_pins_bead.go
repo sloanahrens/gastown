@@ -160,17 +160,36 @@ var imagePinsSeedLines = map[string]string{
 	"devops": "devops",
 }
 
+// imagePinsAgeDays rounds a pin's age to whole days, the unit the goal states
+// it in: the age is read from committer times, so hours carry no meaning to the
+// seat. A half day rounds up, so the text never understates how near the bound
+// the pin is.
+func imagePinsAgeDays(age time.Duration) int {
+	return int((age + 12*time.Hour) / (24 * time.Hour))
+}
+
+// imagePinsAgeBoundDays is the drift guard's age bound in whole days, so the
+// goal names the bound the guard refuses a pin over.
+const imagePinsAgeBoundDays = int(daemonimage.MaxPinAge / (24 * time.Hour))
+
 // imagePinsRefreshGoal names each pin's pinned commit and source tip, the
 // instant the tips were read in UTC (a source moves about twenty commits an
-// hour, gt-fcsoy8), and the commit columns a seat edits to move it by hand.
+// hour, gt-fcsoy8), and the commit columns a seat edits to move it by hand. A
+// pin whose commit is at or past imagePinsFileAge says how old it is, because
+// its commit count alone does not show how near the guard's age bound it sits
+// (gt-yroxx2).
 // The apply command, which needs checkouts a seat does not have, follows under
 // its own heading and is never the instruction.
 func imagePinsRefreshGoal(pins []ImagePinState, filedAt time.Time) string {
 	var b strings.Builder
-	b.WriteString("These image pins trail their sources' origin/main, and the pin-drift guard refuses an image roll once a pin is more than 40 commits behind its tip (gt-wmoa0d). A seat has no source checkout, so set each pin named here by hand.\n\n")
+	fmt.Fprintf(&b, "These image pins trail their sources' origin/main, and the pin-drift guard refuses an image roll once a pin is more than %d commits behind its tip, or more than %d days older (gt-wmoa0d). A seat has no source checkout, so set each pin named here by hand.\n\n", daemonimage.MaxPinBehind, imagePinsAgeBoundDays)
 	fmt.Fprintf(&b, "These tips were read at %s from each source's origin/main. A source that has moved since is fine: pin the tip named here.\n\n", filedAt.UTC().Format(time.RFC3339))
 	for _, pin := range pins {
-		line := fmt.Sprintf("- %s: pinned at %s; its source's origin/main is %s, %d commits behind. Set the %s commit column in deploy/daemon/image-pins", pin.Name, pin.Pin, pin.Tip, pin.Behind, pin.Name)
+		line := fmt.Sprintf("- %s: pinned at %s; its source's origin/main is %s, %d commits behind", pin.Name, pin.Pin, pin.Tip, pin.Behind)
+		if pin.Age >= imagePinsFileAge {
+			line += fmt.Sprintf(", and its commit is %d days older than its tip, near the guard's %d-day bound", imagePinsAgeDays(pin.Age), imagePinsAgeBoundDays)
+		}
+		line += fmt.Sprintf(". Set the %s commit column in deploy/daemon/image-pins", pin.Name)
 		if seed, ok := imagePinsSeedLines[pin.Name]; ok {
 			line += fmt.Sprintf(" and the %s commit column in deploy/polecat/seed-pins", seed)
 		}

@@ -76,6 +76,67 @@ func TestImagePinsRefreshBeadNamesEachPin(t *testing.T) {
 	}
 }
 
+// goalPinLine returns the Goal bullet the description carries for a pin, or ""
+// when it carries none: the bullet is one line, so a pin's wording is compared
+// whole.
+func goalPinLine(description, name string) string {
+	for _, line := range strings.Split(description, "\n") {
+		if strings.HasPrefix(line, "- "+name+": ") {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestImagePinsRefreshBeadNamesTheAgeOfAnAgeFiledPin: a pin whose age is at or
+// past imagePinsFileAge says how old it is and how near the guard's 7-day bound
+// that is, and the goal names both bounds the guard refuses over (gt-yroxx2).
+func TestImagePinsRefreshBeadNamesTheAgeOfAnAgeFiledPin(t *testing.T) {
+	t.Parallel()
+	pin := refreshPin("hm", pinHM, tipHM, 6)
+	pin.Age = 6 * 24 * time.Hour
+	draft, err := imagePinsRefreshBead([]ImagePinState{pin}, refreshFiledAt)
+	if err != nil {
+		t.Fatalf("imagePinsRefreshBead: %v", err)
+	}
+	line := goalPinLine(draft.Description, "hm")
+	if want := "6 commits behind, and its commit is 6 days older than its tip, near the guard's 7-day bound"; !strings.Contains(line, want) {
+		t.Errorf("hm line does not carry %q:\n%s", want, line)
+	}
+	if want := "more than 40 commits behind its tip, or more than 7 days older"; !strings.Contains(draft.Description, want) {
+		t.Errorf("goal does not name the age bound %q:\n%s", want, draft.Description)
+	}
+}
+
+// TestImagePinsRefreshBeadKeepsTodaysWordingWithoutAnAge: a pin with no age
+// read, or one under imagePinsFileAge, keeps today's bullet byte for byte: the
+// age text is for a pin past that threshold, not every pin (gt-yroxx2).
+func TestImagePinsRefreshBeadKeepsTodaysWordingWithoutAnAge(t *testing.T) {
+	t.Parallel()
+	want := "- hm: pinned at " + pinHM + "; its source's origin/main is " + tipHM + ", 6 commits behind. Set the hm commit column in deploy/daemon/image-pins."
+	tests := []struct {
+		name string
+		age  time.Duration
+	}{
+		{"no age read", 0},
+		{"two days old", 48 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pin := refreshPin("hm", pinHM, tipHM, 6)
+			pin.Age = tt.age
+			draft, err := imagePinsRefreshBead([]ImagePinState{pin}, refreshFiledAt)
+			if err != nil {
+				t.Fatalf("imagePinsRefreshBead: %v", err)
+			}
+			if got := goalPinLine(draft.Description, "hm"); got != want {
+				t.Errorf("hm line = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 // TestImagePinsRefreshBeadNamesWhenTheTipsWereRead: the description says the
 // instant the tips were read, in RFC 3339 UTC whatever zone the patrol's clock
 // is in (gt-fcsoy8).
