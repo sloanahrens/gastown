@@ -277,7 +277,7 @@ func TestPassDoesNotRepostAnAnnotationWhenOutcomesAlternate(t *testing.T) {
 	}
 	for i := 0; i < infraAnnounceAfter; i++ {
 		h.w.Pass(context.Background())
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	// The refusal, once its own wait is due.
 	h.w.Pass(context.Background())
@@ -286,7 +286,7 @@ func TestPassDoesNotRepostAnAnnotationWhenOutcomesAlternate(t *testing.T) {
 	// notice, so it is not posted a second time.
 	for i := 0; i < infraAnnounceAfter; i++ {
 		h.w.Pass(context.Background())
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 
 	var infraNotices int
@@ -296,8 +296,8 @@ func TestPassDoesNotRepostAnAnnotationWhenOutcomesAlternate(t *testing.T) {
 			infraNotices++
 		}
 	}
-	if infraNotices != 1 || len(cs) != 2 {
-		t.Fatalf("comments %q; want one infrastructure notice and one refusal", cs)
+	if infraNotices != infraAnnounceAfter+1 || len(cs) != infraAnnounceAfter+2 {
+		t.Fatalf("comments %q; want one infrastructure notice per failed attempt and one refusal", cs)
 	}
 }
 

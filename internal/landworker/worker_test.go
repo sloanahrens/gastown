@@ -775,7 +775,7 @@ func TestPassStartupRepairsOpenBeadsFromTheLandingsFile(t *testing.T) {
 	}
 }
 
-func TestPassInfraFailureBacksOffAndAnnouncesOnce(t *testing.T) {
+func TestPassInfraFailureParksAndAnnouncesEachAttempt(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	cs := newCountingStore()
@@ -792,14 +792,14 @@ func TestPassInfraFailureBacksOffAndAnnouncesOnce(t *testing.T) {
 		if n := cs.countOf("Show", "Children", "Comments", "AddComment"); n != 0 {
 			t.Fatalf("the pass inside the backoff made %d reads of the bead; want it held on the row it left", n)
 		}
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	if len(h.lander.calls) != infraAnnounceAfter+2 {
 		t.Fatalf("landed %d times; want one attempt per backoff window", len(h.lander.calls))
 	}
 	comments := h.comments(t, "gt-abc")
-	if len(comments) != 1 || !strings.Contains(comments[0], "infrastructure") {
-		t.Fatalf("comments %q; want one infrastructure notice", comments)
+	if len(comments) != infraAnnounceAfter+2 || !strings.Contains(comments[0], "infrastructure") {
+		t.Fatalf("comments %q; want one infrastructure notice per failed attempt", comments)
 	}
 	if len(h.cleared) != 0 {
 		t.Fatal("intent cleared on an infrastructure failure")
@@ -854,7 +854,7 @@ func TestPassReadBackBacksOffAndAnnounces(t *testing.T) {
 		return land.Result{}, &land.InfraError{Stage: "read-back", Err: fmt.Errorf("%w: tip is x", land.ErrReadBack)}
 	}
 	h.w.Pass(context.Background())
-	h.now = h.now.Add(infraBackoffMax - time.Minute)
+	h.now = h.now.Add(readBackBackoff - time.Minute)
 	h.w.Pass(context.Background())
 	if len(h.lander.calls) != 1 {
 		t.Fatalf("landed %d times inside the read-back backoff", len(h.lander.calls))
@@ -1240,10 +1240,10 @@ func TestClassifyCISilenceIsInfrastructure(t *testing.T) {
 	}
 }
 
-// TestPassRepeatedCISilencesEscalateOnce: DefaultCISilenceEscalateAfter
+// TestPassRepeatedCISilencesEscalateEachAttempt: DefaultCISilenceEscalateAfter
 // candidate-gate silences in a row raise one escalation naming the bead, and
 // further silences stay quiet (gt-fn9e6.5).
-func TestPassRepeatedCISilencesEscalateOnce(t *testing.T) {
+func TestPassRepeatedCISilencesEscalateEachAttempt(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")
@@ -1262,14 +1262,12 @@ func TestPassRepeatedCISilencesEscalateOnce(t *testing.T) {
 		mu.Lock()
 		n := len(got)
 		mu.Unlock()
-		want := 0
-		if i+1 >= DefaultCISilenceEscalateAfter {
-			want = 1
-		}
-		if n != want {
+		// Every silence after a park ran out is a new run and as loud as the
+		// first: one escalation per attempt.
+		if want := i + 1; n != want {
 			t.Fatalf("after %d silences: %d escalations, want %d", i+1, n, want)
 		}
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	if len(h.lander.calls) != attempts {
 		t.Fatalf("landed %d times; want %d", len(h.lander.calls), attempts)
@@ -1297,7 +1295,7 @@ func TestPassCISilenceRunIsBrokenByAnotherOutcome(t *testing.T) {
 	// silence, other failure, silence: never two in a row.
 	for i := 0; i < 3; i++ {
 		h.w.Pass(context.Background())
-		h.now = h.now.Add(infraBackoffMax)
+		h.now = h.now.Add(infraParkWait)
 	}
 	h.w.escWG.Wait()
 	if n := escalations.Load(); n != 0 {
