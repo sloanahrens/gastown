@@ -444,8 +444,7 @@ func TestSpecStoryPointStepReworkExemptionCoversTheSplitHold(t *testing.T) {
 // TestSplitLabelStale: the split label is stale only when the bead's own labels
 // record an estimate the route acts on that reads under the trigger. A re-stamp
 // of sp-minutes without the label updated is the case the function exists for;
-// no readable estimate, a shape-only rung and the route off all leave the label
-// standing.
+// no readable estimate and the route off both leave the label standing.
 func TestSplitLabelStale(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -459,7 +458,6 @@ func TestSplitLabelStale(t *testing.T) {
 		{"over the trigger", []string{"split", "sp-minutes:10.4", "sp-rung:all"}, 10, false},
 		{"no minutes", []string{"split", "sp-rung:all"}, 10, false},
 		{"unreadable minutes spelling", []string{"split", "sp-minutes:10.0", "sp-rung:all"}, 10, false},
-		{"shape-only rung", []string{"split", "sp-minutes:9.3", "sp-rung:shape"}, 10, false},
 		{"unreadable rung", []string{"split", "sp-minutes:9.3", "sp-rung:bogus"}, 10, false},
 		{"trigger off", []string{"split", "sp-minutes:9.3", "sp-rung:all"}, 0, false},
 		{"no split label", []string{"sp-minutes:9.3", "sp-rung:all"}, 10, false},
@@ -468,6 +466,34 @@ func TestSplitLabelStale(t *testing.T) {
 			t.Parallel()
 			if got := specSplitLabelStale(tc.labels, tc.trigger); got != tc.want {
 				t.Errorf("specSplitLabelStale(%v, %v) = %v, want %v", tc.labels, tc.trigger, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSplitLabelStaleOnWeakRung: a split label recorded at a weak rung the
+// route should not hold a bead on is stale whatever minutes it carries, while
+// an acting rung keeps the minutes-under-trigger rule and a label set with no
+// readable rung keeps its label (gt-ie2ehm).
+func TestSplitLabelStaleOnWeakRung(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"shape-embed under the trigger", []string{"split", "sp-minutes:9.3", "sp-rung:shape-embed"}, true},
+		{"shape-embed over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:shape-embed"}, true},
+		{"shape rung over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:shape"}, true},
+		{"shape-embed with no minutes", []string{"split", "sp-rung:shape-embed"}, true},
+		{"an acting rung over the trigger", []string{"split", "sp-minutes:12.8", "sp-rung:all"}, false},
+		{"an acting rung under the trigger", []string{"split", "sp-minutes:9.3", "sp-rung:all"}, true},
+		{"no rung", []string{"split", "sp-minutes:12.8"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specSplitLabelStale(tc.labels, 10); got != tc.want {
+				t.Errorf("specSplitLabelStale(%v, 10) = %v, want %v", tc.labels, got, tc.want)
 			}
 		})
 	}
@@ -506,16 +532,25 @@ func splitStaleLabels() []string {
 // the bead's own estimate has outlived off, once, with one note, and offers the
 // bead to the same tick's candidate scan; a label the estimate still stands up
 // stays held with the line it had; and a removal that failed keeps the bead
-// held and reports the error.
+// held and reports the error. A weak-rung label is dropped whatever its
+// minutes, and its note names the rung rather than a trigger (gt-ie2ehm).
 func TestSplitLabelStaleDropped(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name      string
-		labels    []string
-		removeErr error
-		wantSlung bool
+		name       string
+		labels     []string
+		removeErr  error
+		wantSlung  bool
+		wantNote   []string
+		refuseNote []string
 	}{
-		{name: "stale under the trigger", labels: splitStaleLabels(), wantSlung: true},
+		{name: "stale under the trigger", labels: splitStaleLabels(), wantSlung: true,
+			wantNote: []string{"9.3 min", "under the 10-minute split trigger"}},
+		{name: "a weak rung over the trigger",
+			labels:     []string{"sp:8", "sp-rung:shape-embed", "sp-minutes:12.8", specdispatch.SplitLabel},
+			wantSlung:  true,
+			wantNote:   []string{"rung shape-embed", "should not hold a bead on"},
+			refuseNote: []string{"trigger", "12.8"}},
 		{name: "over the trigger", labels: []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", specdispatch.SplitLabel}},
 		{name: "a failed removal", labels: splitStaleLabels(), removeErr: errors.New("bd refused")},
 	} {
@@ -552,14 +587,24 @@ func TestSplitLabelStaleDropped(t *testing.T) {
 				if strings.Contains(notes[0], "\n") {
 					t.Errorf("stale note %q is not one line", notes[0])
 				}
-				for _, want := range []string{"9.3 min", "under the 10-minute split trigger"} {
+				for _, want := range tc.wantNote {
 					if !strings.Contains(notes[0], want) {
 						t.Errorf("stale note %q lacks %q", notes[0], want)
 					}
 				}
+				for _, refuse := range tc.refuseNote {
+					if strings.Contains(notes[0], refuse) {
+						t.Errorf("stale note %q claims %q, which the labels do not stand up", notes[0], refuse)
+					}
+				}
 				notices := splitStaleNotices(r.Notices)
 				if len(notices) != 1 || !strings.Contains(notices[0], "offered to dispatch again") {
-					t.Errorf("notices = %q, want one saying the bead is offered again", notices)
+					t.Fatalf("notices = %q, want one saying the bead is offered again", notices)
+				}
+				for _, refuse := range tc.refuseNote {
+					if strings.Contains(notices[0], refuse) {
+						t.Errorf("notice %q claims %q, which the labels do not stand up", notices[0], refuse)
+					}
 				}
 				if lines := splitHoldLines(r.Skipped); len(lines) != 0 {
 					t.Errorf("split hold lines = %q, want none for a dropped label", lines)
@@ -965,10 +1010,10 @@ func TestSpecDispatchReportsASplitHeldBeadSkipped(t *testing.T) {
 // A split-labelled bead the route's labels no longer stand up is still held —
 // the label is the split's record — so it is still reported, and the line says
 // what the labels say instead of claiming a trigger that does not hold. Rows:
-// no estimate at all, minutes with no rung, the trigger off, and a shape-only
-// rung the route never acts on (gt-4yq0js). A readable estimate under the
-// trigger is not in this table: that label is stale, and the tick drops it and
-// offers the bead instead of holding it (gt-71y4v3, TestSplitLabelStaleDropped).
+// no estimate at all, minutes with no rung, the trigger off (gt-4yq0js), and a
+// weak rung whose label the tick could not remove (gt-ie2ehm). A label the tick
+// reads as stale is not in this table: it drops the label and offers the bead
+// instead of holding it (gt-71y4v3, TestSplitLabelStaleDropped).
 func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1014,11 +1059,14 @@ func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
 			refuse:  []string{"trigger", "at or over"},
 		},
 		{
-			name:    "a shape-only rung",
-			labels:  []string{specdispatch.SplitLabel, "sp-rung:shape", "sp-minutes:10.4"},
-			trigger: 11,
-			want:    []string{"gt-split: split: ", "estimated 10.4 min (sp:8, rung shape)"},
-			refuse:  []string{"trigger", "at or over"},
+			// A weak rung makes the label stale, so a failed removal is the one
+			// way the bead is still held (gt-ie2ehm).
+			name:      "a shape-only rung, the removal failed",
+			labels:    []string{specdispatch.SplitLabel, "sp-rung:shape", "sp-minutes:10.4"},
+			trigger:   11,
+			removeErr: errors.New("bd refused"),
+			want:      []string{"gt-split: split: ", "estimated 10.4 min (sp:8, rung shape)"},
+			refuse:    []string{"trigger", "at or over"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

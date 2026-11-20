@@ -235,8 +235,9 @@ func specSplitRungActs(rung string) bool {
 // labels record an estimate the route acts on, and that estimate reads under
 // the trigger. A bird that splits a bead and re-estimates it updates sp-minutes
 // and leaves the split label in place, so the label outlives the estimate it
-// was cut for (gt-07z6ay). A label set with no readable estimate, a shape-only
-// rung, or a trigger of 0 is never stale.
+// was cut for (gt-07z6ay). A label at a rung the route does not act on is stale
+// whatever minutes it carries; a label set with no readable rung, or a trigger
+// of 0, is never stale (gt-ie2ehm).
 func specSplitLabelStale(labels []string, trigger float64) bool {
 	spec := specdispatch.Spec{Labels: labels}
 	if trigger <= 0 || !spec.HasLabel(specdispatch.SplitLabel) {
@@ -244,11 +245,26 @@ func specSplitLabelStale(labels []string, trigger float64) bool {
 	}
 	var o specEstimateOutcome
 	specEstimateFromLabels(&o, labels)
+	if specSplitRungWeak(o.Rung) {
+		return true
+	}
 	minutes, rung, reason := specSplitVerdict(specStoryPointAnswer{outcome: o})
 	if reason != "" || !specSplitRungActs(rung) {
 		return false
 	}
 	return minutes < trigger
+}
+
+// specSplitRungWeak reports whether rung is one the split route should not hold
+// a bead on: the weak rungs a label can still record from an earlier estimate.
+// They are named here rather than read from specSplitRungActs, so the route's
+// next rung decision does not move which labels count as stale (gt-ie2ehm).
+func specSplitRungWeak(rung string) bool {
+	switch rung {
+	case "shape-embed", "shape":
+		return true
+	}
+	return false
 }
 
 // specSplitStaleDrop is the tick's drop of a split label its own estimate has
@@ -289,24 +305,31 @@ func specSplitStaleDropper(trigger float64, dryRun bool, annotate func(beadID, k
 }
 
 // specSplitStaleLine is the tick's line for a split label its own estimate has
-// outlived: the minutes and rung the labels record, and the trigger they are
-// under.
+// outlived: the minutes and rung the labels record and the trigger they are
+// under, or the weak rung that made the label stale by itself.
 func specSplitStaleLine(beadID string, labels []string, trigger float64) string {
 	var o specEstimateOutcome
 	specEstimateFromLabels(&o, labels)
 	minutes, rung, _ := specSplitVerdict(specStoryPointAnswer{outcome: o})
+	if specSplitRungWeak(o.Rung) {
+		return fmt.Sprintf("%s: split label stale: its own labels record rung %s, one the route should not hold a bead on", beadID, o.Rung)
+	}
 	return fmt.Sprintf("%s: split label stale: its own labels read %s min (rung %s), under the %s-minute trigger",
 		beadID, specMinutesText(minutes), rung, specTriggerText(trigger))
 }
 
 // specSplitStaleNote is the one-line note the drop leaves on the bead: the
-// estimate its own labels record, under the trigger, and what the route did
-// with the label. One line, because it is a record of a decision and not a
-// second copy of the hold note.
+// estimate its own labels record and the trigger it is under, or the weak rung
+// that made the label stale, and what the route did with the label. One line,
+// because it is a record of a decision and not a second copy of the hold note.
 func specSplitStaleNote(labels []string, trigger float64) string {
 	var o specEstimateOutcome
 	specEstimateFromLabels(&o, labels)
 	minutes, rung, _ := specSplitVerdict(specStoryPointAnswer{outcome: o})
+	if specSplitRungWeak(o.Rung) {
+		return fmt.Sprintf("%s: its own labels record rung %s, one the route should not hold a bead on; the label is stale, so the dispatcher drops it and offers the bead to dispatch again.",
+			specSplitStaleNotePrefix, o.Rung)
+	}
 	points := o.Points
 	if !storypoints.Valid(points) {
 		// An estimate whose bead kept no sp: label still has its minutes, so
