@@ -920,7 +920,7 @@ func TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat(t *testing.T) {
 	budget := poolTestTownBudget(t, root)
 	roster := specRosterFrom(sessions, ts)
 	budget.SetLive(roster.Live)
-	budget.SetDeadHooked(roster.DeadHooked)
+	budget.SetDeadHooked(roster.DeadHooked, nil)
 
 	// The page: the same seats, occupied from the same seats' picture.
 	live := poolLiveForWith(root, func(pool *config.PolecatPool) ([]poolSession, error) {

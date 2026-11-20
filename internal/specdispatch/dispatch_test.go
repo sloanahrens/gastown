@@ -540,7 +540,7 @@ func TestBudgetPictureNamesDeadHookedSeats(t *testing.T) {
 	t.Parallel()
 	b := baseBudget()
 	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
-	b.SetDeadHooked(map[string]int{"deepseek-flash": 1})
+	b.SetDeadHooked(map[string]int{"deepseek-flash": 1}, nil)
 	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 dead-hooked), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
@@ -568,7 +568,7 @@ func TestBudgetPictureNamesTheInFlightPartApart(t *testing.T) {
 	b := baseBudget()
 	b.SetLive(map[string]int{"deepseek-flash": 4, "claude-sonnet": 1})
 	b.SetInFlight(map[string]int{"deepseek-flash": 2})
-	b.SetDeadHooked(map[string]int{"deepseek-flash": 1})
+	b.SetDeadHooked(map[string]int{"deepseek-flash": 1}, nil)
 	if got, want := b.Picture(), "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 dead-hooked), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
@@ -686,10 +686,10 @@ func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := SplitLiveDead(tc.total, tc.inFlight, tc.dead); got != tc.wantSplit {
+			if got := SplitLiveDead(tc.total, tc.inFlight, tc.dead, nil); got != tc.wantSplit {
 				t.Errorf("SplitLiveDead(%d, %d, %d) = %q, want %q", tc.total, tc.inFlight, tc.dead, got, tc.wantSplit)
 			}
-			if got := DeadHookedCount(tc.dead); got != tc.wantDeadWord {
+			if got := DeadHookedCount(tc.dead, nil); got != tc.wantDeadWord {
 				t.Errorf("DeadHookedCount(%d) = %q, want %q", tc.dead, got, tc.wantDeadWord)
 			}
 		})
@@ -700,8 +700,67 @@ func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 // negative dead-hooked count, which the split must not print as a live figure.
 func TestSplitLiveDeadRefusesANegativeDeadHookedCount(t *testing.T) {
 	t.Parallel()
-	if got, want := SplitLiveDead(3, 0, -1), "(counts do not add up: 0 in flight, -1 dead-hooked, 3 counted)"; got != want {
+	if got, want := SplitLiveDead(3, 0, -1, nil), "(counts do not add up: 0 in flight, -1 dead-hooked, 3 counted)"; got != want {
 		t.Errorf("SplitLiveDead(3, 0, -1) = %q, want %q", got, want)
+	}
+}
+
+// TestDeadHookedCountNamesItsClasses names the dead-hooked seats by their
+// disposition class: the larger count first, then by name (gt-4h6z5c).
+func TestDeadHookedCountNamesItsClasses(t *testing.T) {
+	t.Parallel()
+	got := DeadHookedCount(4, map[string]int{"unread": 1, "idle-submitted": 2, "idle-recovery-needed": 1})
+	if want := "4 dead-hooked (2 idle-submitted, 1 idle-recovery-needed, 1 unread)"; got != want {
+		t.Errorf("DeadHookedCount(4, classes) = %q, want %q", got, want)
+	}
+}
+
+// TestDeadHookedCountWithNoClassIsUnchanged keeps the plain term when no class is
+// known, when the classes fall short of or pass the count, and when one is negative.
+func TestDeadHookedCountWithNoClassIsUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, classes := range []map[string]int{
+		nil,
+		{"unread": 1},
+		{"unread": 3, "idle-submitted": 2},
+		{"unread": 3, "idle-submitted": -1},
+	} {
+		if got, want := DeadHookedCount(2, classes), "2 dead-hooked"; got != want {
+			t.Errorf("DeadHookedCount(2, %v) = %q, want %q", classes, got, want)
+		}
+	}
+}
+
+// TestSplitLiveDeadCarriesTheClasses hands the classes through the split, so the
+// tick line and gt pool show name them where they print the dead-hooked term.
+func TestSplitLiveDeadCarriesTheClasses(t *testing.T) {
+	t.Parallel()
+	got := SplitLiveDead(11, 0, 4, map[string]int{"unread": 1, "idle-submitted": 2, "idle-recovery-needed": 1})
+	if want := "(7 live + 4 dead-hooked (2 idle-submitted, 1 idle-recovery-needed, 1 unread))"; got != want {
+		t.Errorf("SplitLiveDead(11, 0, 4, classes) = %q, want %q", got, want)
+	}
+}
+
+// TestBudgetPictureCarriesTheDeadHookedClasses checks the Budget path: a seat's
+// classes reach the picture, and SetLive clears them (gt-4h6z5c).
+func TestBudgetPictureCarriesTheDeadHookedClasses(t *testing.T) {
+	t.Parallel()
+	b := baseBudget()
+	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
+	b.SetDeadHooked(map[string]int{"deepseek-flash": 1}, map[string]map[string]int{"deepseek-flash": {"unread": 1}})
+	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 dead-hooked (1 unread)), claude-sonnet 1/2"; got != want {
+		t.Fatalf("Picture() = %q, want %q", got, want)
+	}
+	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
+	if got, want := b.Picture(), "deepseek-flash 2/2, claude-sonnet 1/2"; got != want {
+		t.Fatalf("Picture() after SetLive = %q, want %q", got, want)
+	}
+	// The picture renders classes only with a dead-hooked count, so the cleared
+	// classes are checked on the seat: SetLive must not keep a stale class map.
+	for _, s := range b.Seats {
+		if s.DeadClasses != nil {
+			t.Errorf("SetLive kept DeadClasses %v on %s, want nil", s.DeadClasses, s.Agent)
+		}
 	}
 }
 

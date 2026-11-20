@@ -2513,7 +2513,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// that seat, already among the live sessions, not a second seat in flight
 	// (gt-75fma5).
 	budget.SetInFlight(specInFlightByAgent(specInFlightAdded(env.InFlight, roster.HookedBeads)))
-	budget.SetDeadHooked(roster.DeadHooked)
+	budget.SetDeadHooked(roster.DeadHooked, nil)
 	budget.SetDraining(roster.Draining)
 	// The seats the picture names: the roster's, the draining ones SetDraining
 	// added and the running slings SetLive added, so a count above its cap has
