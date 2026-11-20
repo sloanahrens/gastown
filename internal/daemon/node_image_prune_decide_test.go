@@ -62,6 +62,46 @@ func TestNodeImagePruneDecisionMode(t *testing.T) {
 	}
 }
 
+// TestNodeImagePruneDecisionJobListUnreadable drives an ok run whose update Job
+// list read fails: the decision refuses with that failure and its error text in
+// the why, because the gate takes a nil or empty list as no Job active and would
+// prune during a roll. An empty list read without error decides ok, so the test
+// holds both sides of the read.
+func TestNodeImagePruneDecisionJobListUnreadable(t *testing.T) {
+	t.Parallel()
+	ended := time.Date(2026, 11, 20, 4, 0, 0, 0, time.UTC)
+	okState := update.State{RunID: "run-2", Outcome: update.OutcomeOK, EndedAt: ended}
+
+	t.Run("an unreadable Job list refuses", func(t *testing.T) {
+		t.Parallel()
+		d, town := newNodeImagePruneDecisionDaemon(t, agentconfig.DiskMaintenanceModeApply)
+		writeNodeImagePruneDecisionState(t, town, okState)
+		d.updateJob = &fakeUpdateJob{listErr: errors.New("kubectl get jobs exited 1")}
+
+		_, apply, ok, why := d.nodeImagePruneDecision()
+		if ok || apply {
+			t.Fatalf("nodeImagePruneDecision() ok = %v, apply = %v, want a refusal", ok, apply)
+		}
+		for _, want := range []string{"update Job list could not be read", "kubectl get jobs exited 1"} {
+			if !strings.Contains(why, want) {
+				t.Errorf("why = %q, want it to contain %q", why, want)
+			}
+		}
+	})
+
+	t.Run("an empty Job list with no error decides ok", func(t *testing.T) {
+		t.Parallel()
+		d, town := newNodeImagePruneDecisionDaemon(t, agentconfig.DiskMaintenanceModeApply)
+		writeNodeImagePruneDecisionState(t, town, okState)
+		d.updateJob = &fakeUpdateJob{active: []string{}}
+
+		runID, apply, ok, why := d.nodeImagePruneDecision()
+		if !ok || runID != "run-2" || !apply {
+			t.Fatalf("nodeImagePruneDecision() = %q, %v, ok %v (%s), want run-2, true, ok", runID, apply, ok, why)
+		}
+	})
+}
+
 // TestNodeImagePruneDecisionRefuses drives a partial run, an active Job, an
 // already pruned id and an unreadable read through the decision: each refuses
 // with its reason. A Job whose conditions say Failed or Complete has finished
