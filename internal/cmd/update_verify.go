@@ -344,7 +344,7 @@ func (p *verifyProbes) Ready(ctx context.Context) (bool, string, error) {
 		return true, "", nil
 	}
 	if exit < 1 || exit > 3 {
-		return false, "", fmt.Errorf("%s status --line --ready exited %d: %s", exe, exit, out)
+		return false, "", fmt.Errorf("%s status --line --ready exited %d", exe, exit)
 	}
 	line, rest, _ := strings.Cut(out, "\n")
 	if reason := strings.TrimSpace(rest); reason != "" {
