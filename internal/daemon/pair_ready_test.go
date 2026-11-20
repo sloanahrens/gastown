@@ -499,6 +499,33 @@ func TestPairReadyUnreadableCloneRaisesTheUnreadableItem(t *testing.T) {
 	}
 }
 
+// TestPairReadyUnreadableSkewRaisesNoReadyItem: a published pair whose bd pin's
+// schema level cannot be read raises the medium-severity unreadable item for the
+// commit, and no pair-ready item, so the update patrol has nothing to roll. The
+// item names the commit, the read that failed and that no roll starts until the
+// level can be read.
+func TestPairReadyUnreadableSkewRaisesNoReadyItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.check.skew = &pairReadySkewReads{
+		LevelAt:  func(context.Context, string) (int, error) { return 0, errors.New("the clone cannot read that commit") },
+		Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+	}
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "an unreadable level raised %v; want the unreadable item only", pairSkewItemKinds(items))
+	it := items[0]
+	assert.Equal(t, attention.KindDeployPairUnreadable, it.Kind)
+	assert.Equal(t, "deploy-pair-unreadable:skew:gastown:"+pairGreen12, it.Key)
+	assert.Equal(t, attention.SeverityMedium, it.Severity)
+	assert.Equal(t, pairGreen, it.SHA)
+	assert.Contains(t, it.Summary, "green/"+pairGreen12, "the item does not name the commit")
+	assert.Contains(t, it.Summary, "the clone cannot read that commit", "the item does not name the read that failed")
+	assert.Contains(t, it.Summary, "no roll starts", "the item does not say that no roll starts")
+}
+
 // pairReadyTownDaemon is a daemon over town whose git seam records every
 // directory it opens.
 func pairReadyTownDaemon(town string) (*Daemon, map[string]daemonGit) {
