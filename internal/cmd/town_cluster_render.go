@@ -142,8 +142,7 @@ type clusterRenderFlags struct {
 	// values file's bd image; zero reads as one, as Values.BdGatewayReplicas does.
 	bdGatewayReplicas int
 	// includeStatic renders the static control-cluster set with the daemon's
-	// desired set. The recorded-flags file has no field for it until gt-76p406,
-	// so a run that tried to record it is refused rather than dropping it.
+	// desired set. The record carries it, so a replay renders the same set.
 	includeStatic bool
 }
 
@@ -444,6 +443,7 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"bd-gateway-service-policy-applied", &f.bdGatewayServicePolicyApplied, r.bdGatewayServicePolicyApplied},
 		{"tracker", &f.tracker, r.tracker},
 		{"tracker-backup", &f.trackerBackup, r.trackerBackup},
+		{"include-static", &f.includeStatic, r.includeStatic},
 	}
 	for _, p := range switches {
 		if !named(p.flag) {
@@ -483,13 +483,6 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	// flags answer this alone, so it is refused before the town is looked up.
 	if d.record.record && f.rehearsal {
 		return errors.New("--record-flags is for a live render: the recorded flags describe the pair that is running, so drop --rehearsal, or drop --record-flags")
-	}
-	// The record file has no field for --include-static until gt-76p406, so a
-	// recording run would drop it and a later replay would render a desired set
-	// without the static objects: refused rather than recorded as something the
-	// file cannot hold.
-	if d.record.record && f.includeStatic {
-		return errors.New("--record-flags cannot record --include-static until the recorded flags carry it (gt-76p406): a replay would render the desired set without the static objects, so drop one of the two flags")
 	}
 	// A run with either record flag needs the town before its flags resolve: the
 	// record is under the town root, and --use-recorded fills --dir, --out and the
