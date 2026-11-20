@@ -431,6 +431,15 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, imageAge, unusedAge tim
 		}
 	}
 
+	// An unused gastown-* image past the newest five of its repository goes whatever its
+	// age. An image tagged ci-base stays with the ci-base rule above, so its rollback and
+	// its age still decide it.
+	for id := range ciEngineBuiltExcess(images, created, usedImage, protected) {
+		if !slices.Contains(ciEngineRepoTags(images[id].RepoTags), ciEngineBaseRepo) {
+			removable[id] = true
+		}
+	}
+
 	// A candidate that is a parent of an image that stays cannot go: docker refuses
 	// a parent with dependent children. Removing one candidate can free another, so
 	// the check repeats until no candidate changes.

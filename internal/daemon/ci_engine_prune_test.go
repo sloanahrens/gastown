@@ -1174,6 +1174,47 @@ func TestCIEnginePrunePlansByTheUnusedAgeItIsGiven(t *testing.T) {
 	}
 }
 
+// TestCIEnginePlanKeepsTheNewestBuiltPerRepository: an unused gastown-* image past the
+// newest five of its repository goes at any age; these eight are all younger than 48h.
+func TestCIEnginePlanKeepsTheNewestBuiltPerRepository(t *testing.T) {
+	t.Parallel()
+	var images []map[string]any
+	for i := range 8 {
+		images = append(images, engImg(byte('1'+i), time.Duration(8-i)*5*time.Minute,
+			[]string{"sha256:layer-" + string(rune('a'+i))}, "gastown-polecat:ci-"+string(rune('a'+i))))
+	}
+	plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)), ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	gotImages := map[string]bool{}
+	for _, img := range plan.images {
+		gotImages[img.ID] = true
+	}
+	if want := []string{engImageID('1'), engImageID('2'), engImageID('3')}; len(gotImages) != 3 || !gotImages[want[0]] || !gotImages[want[1]] || !gotImages[want[2]] {
+		t.Errorf("planned images = %v, want exactly the three oldest %v", gotImages, want)
+	}
+}
+
+// TestCIEnginePlanKeepsTheNewestBuiltCIBaseRules: a ci-base image past the cut stays with the ci-base rule.
+func TestCIEnginePlanKeepsTheNewestBuiltCIBaseRules(t *testing.T) {
+	t.Parallel()
+	images := []map[string]any{
+		engImg('f', time.Hour, []string{"sha256:layer-f"}, "gastown-polecat:ci-f", "ci-base:wip"),
+		engImg('9', 100*time.Hour, []string{"sha256:layer-9"}, "gastown-polecat:ci-9", "ci-base:latest"),
+	}
+	for i, id := range []byte("abcde") {
+		images = append(images, engImg(id, time.Duration(i+1)*10*time.Minute, []string{"sha256:layer-" + string(id)}, "gastown-polecat:ci-"+string(id)))
+	}
+	plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)), ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	for _, img := range plan.images {
+		t.Errorf("image %s (%v) is planned for removal, want none", img.ID, img.RepoTags)
+	}
+}
+
 // TestCIEnginePruneMeasuresAStoppedContainersAgeFromItsStop: a stopped container's
 // unused age runs from when it stopped, not from when it was created, so a job that
 // ran longer than the age and stopped a moment ago stays. A container in "created"
