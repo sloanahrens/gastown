@@ -9,11 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/jobledger"
 )
 
 // nodeImagePruneRunID is a real-shaped update run id: a stamp whose T a Job name
@@ -62,6 +64,57 @@ func TestNodeImagePruneOnceUsesTheRunningPolecatImage(t *testing.T) {
 		assert.Empty(t, kube.calls, "a run with no values file must not touch the cluster")
 		assert.Nil(t, kube.sent, "a run with no values file must apply nothing")
 	})
+}
+
+// nodePruneLogDryThree is a dry run's log of three would-remove lines, as the
+// helper writes it.
+const nodePruneLogDryThree = "node-prune: would remove sha256:aaa gastown-polecat created 2026-11-20T03:00:00Z\n" +
+	"node-prune: would remove sha256:bbb gastown-daemon created 2026-11-20T03:01:00Z\n" +
+	"node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z\n" +
+	"node-prune: dry run planned 3 images\n"
+
+// TestNodeImagePruneOnceDryRow is the bead's box: a dry run appends one ok row
+// of job node_image_prune with the report's planned count and no removals.
+func TestNodeImagePruneOnceDryRow(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	ended := nodeImagePruneStart.Add(time.Minute)
+	r.d.clock = clockwork.NewFakeClockAt(ended)
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDryThree)}
+
+	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart))
+
+	ledger, err := jobledger.NewLedger(r.town)
+	require.NoError(t, err)
+	runs, err := ledger.Tail(nodeImagePruneJob, 10)
+	require.NoError(t, err)
+	require.Len(t, runs, 1, "a dry run appends one row")
+	assert.Equal(t, jobledger.Run{
+		Job:       nodeImagePruneJob,
+		StartedAt: nodeImagePruneStart,
+		EndedAt:   ended,
+		Outcome:   "ok",
+		Stats:     map[string]int64{"planned": 3, "removed": 0, "failed": 0},
+	}, runs[0])
+}
+
+// TestNodeImagePruneOnceDryRowLedgerRefused: a ledger that cannot record the row
+// leaves the dry run's result unchanged and logs the failure once: the ledger
+// records the run, it does not decide it.
+func TestNodeImagePruneOnceDryRowLedgerRefused(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	// A regular file where the ledger's directory belongs refuses every append.
+	require.NoError(t, os.MkdirAll(filepath.Join(r.town, ".runtime"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(r.town, ".runtime", "jobs"), []byte("not a directory"), 0o644))
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDryThree)}
+
+	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart))
+
+	lines := strings.Split(strings.TrimSuffix(r.logs.String(), "\n"), "\n")
+	require.Len(t, lines, 1, "the refused ledger logs one line")
+	assert.Contains(t, lines[0], "node_image_prune")
+	assert.Contains(t, lines[0], "job ledger")
 }
 
 // TestNodeImagePruneOnceRefuses: an id nodePruneJobName refuses and a town with no
