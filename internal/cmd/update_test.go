@@ -481,6 +481,36 @@ func TestUpdateFromDaemonSetsSource(t *testing.T) {
 	}
 }
 
+// TestUpdateHealthWaitAndPollAreSetForRuns proves a run's Options carry the
+// verify settle bound and poll, on the manual and the daemon-run path alike: a
+// settling health line is waited for, not read once.
+func TestUpdateHealthWaitAndPollAreSetForRuns(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"manual", nil},
+		{"daemon", []string{"--from-daemon"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingUpdateRun{state: update.State{Outcome: update.OutcomeOK}}
+			seams := updateTestSeams(t.TempDir(), updateTestDeps(t), rec.call)
+			code, _, stderr := runUpdateCommand(t, context.Background(), seams, tc.args...)
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
+			}
+			if want := 5 * time.Minute; rec.opts.HealthWait != want {
+				t.Errorf("HealthWait = %v, want %v", rec.opts.HealthWait, want)
+			}
+			if want := 10 * time.Second; rec.opts.HealthPoll != want {
+				t.Errorf("HealthPoll = %v, want %v", rec.opts.HealthPoll, want)
+			}
+		})
+	}
+}
+
 // TestUpdateJSONPrintsTheState proves --json replaces the text report with the
 // final state.
 func TestUpdateJSONPrintsTheState(t *testing.T) {
