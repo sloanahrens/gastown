@@ -816,10 +816,12 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 			}
 			pin, skewed, err := pairReadySkewFor(ctx, r, g, skew)
 			if err != nil {
-				// The pair is published, so the ready item stands; the unreadable
-				// item beside it says the levels were not checked (gt-5f0kue).
+				// The levels are unread, so no ready item is raised: the update
+				// patrol rolls only a ready item, and an unread level must not
+				// start a roll (gt-5f0kue). The unreadable item holds the commit
+				// until a later pass reads the levels.
 				logf("deploy pair check: %s: green/%s: %v", r.Rig, g.sha12, err)
-				out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v), pairReadySkewUnreadableItem(r.Rig, g, err))
+				out = append(out, pairReadySkewUnreadableItem(r.Rig, g, err))
 				continue
 			}
 			if skewed != nil {
@@ -1048,17 +1050,18 @@ func pairReadySkewUnreadableKey(rig, sha12 string) string {
 }
 
 // pairReadySkewUnreadableItem is the item for a published pair whose bd pin's
-// schema level the pass could not read. It stands beside the pair-ready item
-// and never beside a skew, so "could not verify" is raised as itself and an
-// unread level never passes for agreement. The read failure is quoted as data.
+// schema level the pass could not read. It stands in place of the pair-ready
+// item, never beside a skew, so "could not verify" is raised as itself and an
+// unread level never passes for agreement. The item fails the roll closed: the
+// update patrol rolls only a ready item. The read failure is quoted as data.
 func pairReadySkewUnreadableItem(rig string, g pairReadyGreen, err error) attention.Item {
 	return attention.Item{
 		Key:      pairReadySkewUnreadableKey(rig, g.sha12),
 		Kind:     attention.KindDeployPairUnreadable,
-		Severity: attention.SeverityLow,
+		Severity: attention.SeverityMedium,
 		Rig:      rig,
 		SHA:      g.sha,
-		Summary: fmt.Sprintf("the schema level of the bd pin green/%s names could not be read, so the pair is not verified free of skew: %s",
+		Summary: fmt.Sprintf("green/%s is not announced ready: the schema level of its bd pin could not be read, so the pair is not verified free of skew and no roll starts until it can be read: %s",
 			g.sha12, oneLine(err.Error())),
 	}
 }

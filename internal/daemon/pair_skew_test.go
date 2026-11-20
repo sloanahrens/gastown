@@ -150,11 +150,11 @@ func TestPreRollGuardTheSkewItemClearsWhenNoLongerNewer(t *testing.T) {
 	assert.Empty(t, fx.check.observed(), "a commit the running one reached kept its skew item")
 }
 
-// TestPreRollGuardAnUnreadableLevelRaisesTheUnreadableItemBesideReady: a pin or
-// level the guard cannot read raises the pair-ready item with the guard's own
-// per-commit unreadable item beside it and never a skew item, so an unread level
-// is never taken for agreement. The failed read is logged.
-func TestPreRollGuardAnUnreadableLevelRaisesTheUnreadableItemBesideReady(t *testing.T) {
+// TestPreRollGuardAnUnreadableLevelRaisesTheUnreadableItemWithNoReady: a pin or
+// level the guard cannot read raises the guard's own per-commit unreadable item
+// and no pair-ready item and never a skew item, so an unread level is never taken
+// for agreement or rolled. The failed read is logged.
+func TestPreRollGuardAnUnreadableLevelRaisesTheUnreadableItemWithNoReady(t *testing.T) {
 	t.Parallel()
 	failRead := errors.New("the clone cannot read that commit")
 	rows := []struct {
@@ -221,18 +221,13 @@ func TestPreRollGuardAnUnreadableLevelRaisesTheUnreadableItemBesideReady(t *test
 			fx.run(pairT0)
 
 			items := fx.check.observed()
-			require.Len(t, items, 2, "an unreadable level raised %v; want the pair-ready item and the unreadable item beside it", pairSkewItemKinds(items))
-			byKind := make(map[attention.Kind]attention.Item, len(items))
-			for _, it := range items {
-				byKind[it.Kind] = it
-			}
-			assert.NotContains(t, byKind, attention.KindDeployPairSkew, "an unread level was raised as a skew")
-			ready, ok := byKind[attention.KindDeployPairReady]
-			require.True(t, ok, "the published pair's ready item was dropped beside the unreadable item")
-			assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, ready.Key)
-			it, ok := byKind[attention.KindDeployPairUnreadable]
-			require.True(t, ok, "an unread level was not raised as unread")
+			require.Len(t, items, 1, "an unreadable level raised %v; want the unreadable item only", pairSkewItemKinds(items))
+			it := items[0]
+			assert.NotEqual(t, attention.KindDeployPairSkew, it.Kind, "an unread level was raised as a skew")
+			assert.NotEqual(t, attention.KindDeployPairReady, it.Kind, "an unread level was raised as a ready pair")
+			assert.Equal(t, attention.KindDeployPairUnreadable, it.Kind, "an unread level was not raised as unread")
 			assert.Equal(t, "deploy-pair-unreadable:skew:gastown:"+pairGreen12, it.Key)
+			assert.Equal(t, attention.SeverityMedium, it.Severity)
 			assert.Equal(t, pairGreen, it.SHA)
 			assert.NotEmpty(t, fx.logs, "the unreadable read was not logged")
 			logged := false
@@ -249,7 +244,7 @@ func TestPreRollGuardAnUnreadableLevelRaisesTheUnreadableItemBesideReady(t *test
 
 // TestPreRollGuardTheUnreadableItemClearsWhenTheLevelReadsAgain: the unreadable
 // item raised for an unread level is gone on the next pass once the level reads,
-// while the pair-ready item it stood beside stays.
+// and the pair-ready item the pass raises in its place is the only one.
 func TestPreRollGuardTheUnreadableItemClearsWhenTheLevelReadsAgain(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
@@ -266,7 +261,8 @@ func TestPreRollGuardTheUnreadableItemClearsWhenTheLevelReadsAgain(t *testing.T)
 
 	fx.run(pairT0)
 	items := fx.check.observed()
-	require.Len(t, items, 2, "an unread level did not raise the unreadable item beside the ready one: %v", pairSkewItemKinds(items))
+	require.Len(t, items, 1, "an unread level did not raise the unreadable item alone: %v", pairSkewItemKinds(items))
+	require.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
 
 	unreadable = false
 	fx.run(pairT0.Add(pairReadyInterval))
@@ -609,8 +605,8 @@ func TestPreRollGuardTheUnreadableItemSurvivesAnIncompleteScan(t *testing.T) {
 	}
 	assert.True(t, keys["deploy-pair-unreadable:skew:gastown:"+pairGreen12],
 		"the guard's unreadable item was dropped by an incomplete scan: %v", fx.check.observed())
-	assert.True(t, keys["deploy-pair-ready:gastown:"+pairGreen12],
-		"the pair-ready item the unreadable item stood beside was dropped by an incomplete scan: %v", fx.check.observed())
+	assert.False(t, keys["deploy-pair-ready:gastown:"+pairGreen12],
+		"an incomplete scan raised a ready item beside the unread level: %v", fx.check.observed())
 	assert.True(t, keys["deploy-pair-unreadable:rig:gastown"],
 		"the rig's unreadable item was not raised: %v", fx.check.observed())
 }
