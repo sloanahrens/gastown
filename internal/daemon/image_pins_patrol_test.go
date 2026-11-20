@@ -1160,6 +1160,34 @@ func TestImagePinsPathCountUnshallowsBeforeCounting(t *testing.T) {
 	}
 }
 
+// TestImagePinsPathCountFailedUnshallowIsAnError: when the unshallow a shallow
+// clone needs fails, the count is an error carrying git's stderr and no
+// rev-list runs, so the pin reads Err and never a count from a shallow
+// boundary commit (gt-lk437u).
+func TestImagePinsPathCountFailedUnshallowIsAnError(t *testing.T) {
+	t.Parallel()
+	const fatal = "fatal: cannot unshallow this repository"
+	boom := errors.New("git exited 128")
+	revListRan := false
+	n, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("true\n"), nil, nil
+		case slices.Contains(cmd.Args, "--unshallow"):
+			return []byte("stdout that is not the error"), []byte(fatal + "\nhint: more\n"), boom
+		case slices.Contains(cmd.Args, "rev-list"):
+			revListRan = true
+		}
+		return []byte("1\n"), nil, nil
+	})
+	if !errors.Is(err, boom) || n != 0 || err == nil || err.Error() != "git fetch: git exited 128: "+fatal {
+		t.Fatalf("the path count after a failed unshallow = %d, %v; want no count and git fetch's error carrying %q", n, err, fatal)
+	}
+	if revListRan {
+		t.Error("rev-list ran after the unshallow failed; want the error and no count from a shallow boundary commit")
+	}
+}
+
 // TestImagePinsPathCountFetchFailureIsAnError: a fetch, an is-shallow read, an
 // unshallow or a count that fails is an error naming the call and carrying
 // git's first stderr line, and no count follows a failed read (gt-6bits7).
