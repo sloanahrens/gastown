@@ -288,3 +288,75 @@ func TestPlanImagePinsStaleAndUnreadableItemsNameTheirPin(t *testing.T) {
 		t.Fatalf("Items = %+v, want %+v", got.Items, want)
 	}
 }
+
+// TestPlanImagePinsFilesAPinWithinADayOfTheAgeBound: a pin whose commit is old
+// enough against its tip files even under the commit threshold, so a
+// low-traffic source is refreshed before the guard's age bound.
+func TestPlanImagePinsFilesAPinWithinADayOfTheAgeBound(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	// Behind stays under imagePinsFileBehind: only the age can file this pin.
+	pin := func(age time.Duration) ImagePinState {
+		return ImagePinState{Name: "hm", Pin: "pin-hm", Tip: "tip-hm", Behind: 6, Age: age}
+	}
+
+	tests := []struct {
+		name string
+		age  time.Duration
+		want bool
+	}{
+		{"six days files", 6 * 24 * time.Hour, true},
+		{"one hour short of five days files nothing", 5*24*time.Hour - time.Hour, false},
+		{"exactly five days files", 5 * 24 * time.Hour, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := PlanImagePins([]ImagePinState{pin(tt.age)}, nil, at)
+			if filed := len(got.File) == 1; filed != tt.want {
+				t.Errorf("a pin Behind 6 with Age %s: filed = %v, want %v (File %+v)", tt.age, filed, tt.want, got.File)
+			}
+		})
+	}
+}
+
+// TestPlanImagePinsAgeFilesAPinWithNoInputCommits: a devops pin whose commits
+// do not touch its inputs has Behind zero, so only its age files it.
+func TestPlanImagePinsAgeFilesAPinWithNoInputCommits(t *testing.T) {
+	t.Parallel()
+	pin := ImagePinState{Name: "devops", Pin: "pin-devops", Tip: "tip-devops", Behind: 0, Age: 6 * 24 * time.Hour}
+
+	got := PlanImagePins([]ImagePinState{pin}, nil, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+
+	if len(got.File) != 1 || got.File[0] != pin {
+		t.Fatalf("File = %+v, want exactly %+v", got.File, pin)
+	}
+}
+
+// TestPlanImagePinsAgeNeverFilesAPinAtItsTip: a pin equal to its tip has not
+// aged against it, so an Age value alone does not file it.
+func TestPlanImagePinsAgeNeverFilesAPinAtItsTip(t *testing.T) {
+	t.Parallel()
+	pin := ImagePinState{Name: "bd", Pin: "same-sha", Tip: "same-sha", Behind: 0, Age: 9 * 24 * time.Hour}
+
+	got := PlanImagePins([]ImagePinState{pin}, nil, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+
+	if len(got.File) != 0 {
+		t.Errorf("File = %+v, want a pin at its tip to file nothing", got.File)
+	}
+}
+
+// TestPlanImagePinsAgeIgnoresAPinWhoseReadFailed: an Age does not override a
+// failed read: the pin is named in Unreadable and files nothing.
+func TestPlanImagePinsAgeIgnoresAPinWhoseReadFailed(t *testing.T) {
+	t.Parallel()
+	pin := ImagePinState{Name: "om", Pin: "pin-om", Tip: "tip-om", Behind: 0, Age: 6 * 24 * time.Hour, Err: errors.New("ls-remote exited 128")}
+
+	got := PlanImagePins([]ImagePinState{pin}, nil, time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC))
+
+	if len(got.File) != 0 {
+		t.Errorf("File = %+v, want no pin filed on a failed read", got.File)
+	}
+	if len(got.Unreadable) != 1 || got.Unreadable[0] != "om" {
+		t.Errorf("Unreadable = %q, want [om]", got.Unreadable)
+	}
+}

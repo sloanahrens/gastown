@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -35,6 +36,14 @@ const (
 	// 15 leaves 25 commits, about 75 minutes at a commit every three minutes
 	// (gt-hc7fk3, gt-3gcvcc).
 	imagePinsFileBehind = 15
+	// imagePinsFileAge is how much older than its source's tip a pin's commit
+	// may be before the planner files a refresh bead: two days under the drift
+	// guard's daemonimage.MaxPinAge bound, so a low-traffic source the commit
+	// count never catches still lands a refresh before the guard refuses the
+	// build (gt-263ppi). Both read the age from committer times, as Age does.
+	// The margin is two days, not one: the refresh must land, not just be
+	// filed, inside it.
+	imagePinsFileAge = daemonimage.MaxPinAge - 48*time.Hour
 	// imagePinsStaleKey and imagePinsUnreadableKey are the per-pin items this
 	// planner raises. Each names its pin in ImagePinItem.Pin.
 	imagePinsStaleKey      = "image-pins-stale"
@@ -49,6 +58,10 @@ type ImagePinState struct {
 	Pin    string
 	Tip    string
 	Behind int
+	// Age is the tip's committer time minus the pin's, zero where it was not
+	// read. A pin at its tip has not aged against it, so Age files nothing
+	// there however the field reads.
+	Age time.Duration
 	// Err is the read failure for this pin. Its distance from the tip is
 	// unknown, so the planner never files on it, whatever Behind holds.
 	Err error
@@ -89,14 +102,16 @@ type ImagePinPlan struct {
 // PlanImagePins decides whether the daemon files a refresh bead and which pins
 // it names, and raises the items the states show now. A pin files at
 // imagePinsFileBehind commits behind its source tip, below the pins command's
-// threshold so the refresh lands before the guard. A pin whose read failed
-// never files and is named in Unreadable, and raises image-pins-unreadable:
-// its distance is unknown, so it is never treated as fresh. A pin
-// imagePinsStaleBehind commits behind or more raises image-pins-stale. These
-// pin items are raised whether or not a refresh bead is open. An open refresh
-// bead blocks a second file and raises image-pins-refresh-stuck once it is
-// older than imagePinsRefreshStuck. A bead with no OpenedAt raises that item
-// too: an age that cannot be shown to be under the bound is not fresh.
+// threshold so the refresh lands before the guard; a pin that is not at its tip
+// also files once its commit is imagePinsFileAge older than the tip, whatever
+// its count. A pin whose read failed never files and is named in Unreadable,
+// and raises image-pins-unreadable: its distance is unknown, so it is never
+// treated as fresh. A pin imagePinsStaleBehind commits behind or more raises
+// image-pins-stale. These pin items are raised whether or not a refresh bead is
+// open. An open refresh bead blocks a second file and raises
+// image-pins-refresh-stuck once it is older than imagePinsRefreshStuck. A bead
+// with no OpenedAt raises that item too: an age that cannot be shown to be
+// under the bound is not fresh.
 func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Time) ImagePinPlan {
 	var plan ImagePinPlan
 	for _, pin := range pins {
@@ -120,10 +135,12 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 				Summary:  fmt.Sprintf("image pin %s is %d commits behind its source's origin/main, at or over the %d-commit stale bound", pin.Name, pin.Behind, imagePinsStaleBehind),
 			})
 		}
-		if pin.Behind < imagePinsFileBehind {
-			continue
+		// A source that moves rarely ages past the guard's bound with few
+		// commits behind it, so an old commit files too; a pin at its tip has
+		// not aged against it.
+		if pin.Behind >= imagePinsFileBehind || (pin.Tip != pin.Pin && pin.Age >= imagePinsFileAge) {
+			plan.File = append(plan.File, pin)
 		}
-		plan.File = append(plan.File, pin)
 	}
 	if open == nil {
 		return plan
