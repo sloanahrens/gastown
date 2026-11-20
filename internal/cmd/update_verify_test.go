@@ -264,9 +264,9 @@ func TestUpdateVerifyImageLabel(t *testing.T) {
 	})
 }
 
-// TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode: the line still
-// describes a degraded town, so the exit status does not hide it.
-func TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode(t *testing.T) {
+// TestVerifyProbesHealth: Health stays the installed gt's first line whatever
+// its exit status, so answering readiness leaves the health answer as it was.
+func TestVerifyProbesHealth(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
@@ -338,6 +338,144 @@ func TestUpdateVerifyHealthTakesTheFirstLineIgnoringTheExitCode(t *testing.T) {
 
 			if line, err := probes.Health(ctx); err == nil {
 				t.Errorf("output %q: health = %q with no error, want an error", output, line)
+			}
+		}
+	})
+}
+
+// TestVerifyProbesReady: readiness is the installed gt's own answer. Exit 0 is
+// ready; exit 1, 2 and 3 are the town's not-ready verdicts and carry the reason
+// the command printed after its health line, or the line and the exit status
+// when Run returned no text there.
+func TestVerifyProbesReady(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		output     string
+		exit       int
+		wantReady  bool
+		wantReason string
+	}{
+		{
+			name:      "exit zero is ready",
+			output:    "GREEN tick 1m ago\n",
+			exit:      0,
+			wantReady: true,
+		},
+		{
+			name:       "a degraded exit is not ready with the printed reason",
+			output:     "DEGRADED tick 2m ago: main/devops=red[?]\nnot ready: main/devops is unknown\n",
+			exit:       1,
+			wantReason: "not ready: main/devops is unknown",
+		},
+		{
+			name:       "a red exit is not ready with the printed reason",
+			output:     "RED tick 3m ago: main/devops=red[R]\nnot ready: main/devops is red\n",
+			exit:       2,
+			wantReason: "not ready: main/devops is red",
+		},
+		{
+			name:       "an unknown exit is not ready with the printed reason",
+			output:     "UNKNOWN tick 20m ago: report is stale\nnot ready: report is stale\n",
+			exit:       3,
+			wantReason: "not ready: report is stale",
+		},
+		{
+			name:       "no text after the line names the line and the exit",
+			output:     "RED tick 3m ago: main/devops=red[R]\n",
+			exit:       2,
+			wantReason: "RED tick 3m ago: main/devops=red[R] (exit 2)",
+		},
+		{
+			name:       "no output at all is not ready with the exit status",
+			output:     "",
+			exit:       3,
+			wantReason: "exit 3",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			run := &verifyProbeRun{output: tt.output, exit: tt.exit}
+			probes, ok := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run}).(update.ReadyProbes)
+			if !ok {
+				t.Fatal("the verify probes do not answer readiness")
+			}
+
+			ready, reason, err := probes.Ready(ctx)
+			if err != nil {
+				t.Fatalf("ready: %v", err)
+			}
+			if ready != tt.wantReady {
+				t.Errorf("ready = %v, want %v", ready, tt.wantReady)
+			}
+			if reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+			want := verifyProbeCall{name: "/opt/gt/bin/gt", args: []string{"status", "--line", "--ready"}}
+			if len(run.calls) != 1 || run.calls[0].name != want.name || !slices.Equal(run.calls[0].args, want.args) {
+				t.Errorf("ran %+v, want [%+v]", run.calls, want)
+			}
+		})
+	}
+}
+
+// TestVerifyProbesReadyErrors: a probe that cannot ask the town is an error,
+// never a ready or not-ready answer. The executable that cannot be found, the
+// command that cannot run, and an exit code the town never writes all name the
+// executable, so the operator reads why the check could not be made.
+func TestVerifyProbesReadyErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	t.Run("a command that cannot run is an error naming the executable", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("exec: no such file")
+		run := &verifyProbeRun{err: boom}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		ready, _, err := probes.(update.ReadyProbes).Ready(ctx)
+		if !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the run error", err)
+		}
+		if ready {
+			t.Error("ready = true with the run error, want no answer")
+		}
+		if !strings.Contains(err.Error(), "/opt/gt/bin/gt") {
+			t.Errorf("error %q does not name the executable", err)
+		}
+	})
+
+	t.Run("an unresolved executable is an error", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("no executable")
+		probes := newVerifyProbes(verifyProbeEnv{Exe: func() (string, error) { return "", boom }})
+
+		ready, _, err := probes.(update.ReadyProbes).Ready(ctx)
+		if !errors.Is(err, boom) {
+			t.Fatalf("error = %v, want the exe error", err)
+		}
+		if ready {
+			t.Error("ready = true with the exe error, want no answer")
+		}
+	})
+
+	t.Run("an exit code the town never writes is an error", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: "RED tick 3m ago: main/devops=red[R]\n", exit: 4}
+		probes := newVerifyProbes(verifyProbeEnv{Exe: verifyProbeExe, Run: run.run})
+
+		ready, reason, err := probes.(update.ReadyProbes).Ready(ctx)
+		if err == nil {
+			t.Fatalf("exit 4 = ready %v, reason %q with no error, want an error", ready, reason)
+		}
+		if ready {
+			t.Error("ready = true with an exit the town never writes, want no answer")
+		}
+		for _, want := range []string{"/opt/gt/bin/gt", "4"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
 			}
 		}
 	})

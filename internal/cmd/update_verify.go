@@ -85,6 +85,8 @@ type verifyProbes struct {
 	env verifyProbeEnv
 }
 
+var _ update.ReadyProbes = (*verifyProbes)(nil)
+
 // GTVersion is the commit of the gt file at the executable's path.
 func (p *verifyProbes) GTVersion(ctx context.Context) (string, error) {
 	exe, err := p.env.Exe()
@@ -319,4 +321,37 @@ func (p *verifyProbes) Health(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%s status --line printed no health line", exe)
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// Ready is the town's readiness answer from the installed gt: `status --line
+// --ready` exits 0 when the town can take traffic, and otherwise exits the
+// verdict's code, 1 degraded, 2 red or 3 unknown. A nonzero exit is not ready,
+// with the reason the command prints to stderr after the health line; when Run
+// returns no text there, the reason names the health line and the exit status,
+// or the exit status alone when it printed no line. A command that cannot run,
+// and an exit code the town never writes, are errors naming the executable, so
+// a probe that could not ask never reports the town's verdict.
+func (p *verifyProbes) Ready(ctx context.Context) (bool, string, error) {
+	exe, err := p.env.Exe()
+	if err != nil {
+		return false, "", fmt.Errorf("finding the installed gt: %w", err)
+	}
+	out, exit, err := p.env.Run(ctx, "", nil, exe, "status", "--line", "--ready")
+	if err != nil {
+		return false, "", fmt.Errorf("running %s status --line --ready: %w", exe, err)
+	}
+	if exit == 0 {
+		return true, "", nil
+	}
+	if exit < 1 || exit > 3 {
+		return false, "", fmt.Errorf("%s status --line --ready exited %d: %s", exe, exit, out)
+	}
+	line, rest, _ := strings.Cut(out, "\n")
+	if reason := strings.TrimSpace(rest); reason != "" {
+		return false, reason, nil
+	}
+	if line = strings.TrimSpace(line); line == "" {
+		return false, fmt.Sprintf("exit %d", exit), nil
+	}
+	return false, fmt.Sprintf("%s (exit %d)", line, exit), nil
 }
