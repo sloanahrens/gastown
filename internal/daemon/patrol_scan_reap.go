@@ -67,6 +67,7 @@ type reapClaim struct {
 }
 
 var _ patrolscan.ReapEnv = (*patrolScanHost)(nil)
+var _ patrolscan.SingleUseEnv = (*patrolScanHost)(nil)
 
 // reapCleanup is the worktree_cleanup block this host reaps under, nil when
 // the tick carries none.
@@ -267,6 +268,21 @@ func parseRecoveryBatch(rig string, out []byte) (reapBatch, error) {
 		}
 	}
 	return reapBatch{byName: byName}, nil
+}
+
+// SandboxSeat implements patrolscan.SingleUseEnv: whether rig/polecat is a
+// single-use sandbox seat, through the read TrimmableSeats makes. A seat the
+// read cannot classify is an error, never false: it may be a tmux seat, and the
+// pass must never remove one. An uncovered rig is refused, as Reap refuses it.
+func (h *patrolScanHost) SandboxSeat(rig, polecat string) (bool, error) {
+	if !h.reapCoversRig(rig) {
+		return false, h.reapNotCovered(rig)
+	}
+	_, sandboxed, err := h.openshellSeat(rig, polecat)
+	if err != nil {
+		return false, fmt.Errorf("telling a sandbox seat from a host seat in %s/%s: %w", rig, polecat, err)
+	}
+	return sandboxed, nil
 }
 
 // Reap removes one seat through `gt polecat nuke <rig>/<name>`, never with
