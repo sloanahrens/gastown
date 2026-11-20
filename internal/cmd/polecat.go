@@ -3344,6 +3344,14 @@ func nukeSeatOriginFromReads(reads polecatGitStateReads, originTip func(branch s
 	}
 }
 
+// rigOriginTip reads a branch's tip on origin through the rig's bare repository
+// at rigPath/.repo.git. An empty tip with no error means origin lacks the branch.
+func rigOriginTip(rigPath string) func(branch string) (string, error) {
+	return func(branch string) (string, error) {
+		return git.NewGitWithDir(filepath.Join(rigPath, ".repo.git"), "").RemoteBranchTip("origin", branch)
+	}
+}
+
 // sha7 is a commit id shortened for a message an operator reads.
 func sha7(sha string) string {
 	if len(sha) > 7 {
@@ -3427,9 +3435,7 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 		if seatOrigin == nil {
 			seatOrigin = nukeSeatOriginFromReads(
 				polecatGitStateReadsFor(beads.New(r.Path), filepath.Dir(r.Path), polecatBeadIDForRig(r, rigName, polecatName)),
-				func(branch string) (string, error) {
-					return git.NewGitWithDir(filepath.Join(r.Path, ".repo.git"), "").RemoteBranchTip("origin", branch)
-				},
+				rigOriginTip(r.Path),
 				polecatSessionNameIn(rigName, polecatName),
 			)
 		}
