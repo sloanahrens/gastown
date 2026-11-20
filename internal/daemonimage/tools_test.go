@@ -16,6 +16,9 @@ const (
 	testDevopsCommit = "1234567890abcdef1234567890abcdef12345678"
 	// testOtherCommit is a commit neither checkout is pinned to.
 	testOtherCommit = "9999999999999999999999999999999999999999"
+	// testHMVersionVar is the -X target the tools fixture stamps hm with, a
+	// made-up path: no file here spells hm's own module path (gt-q81f1j).
+	testHMVersionVar = "example.test/hm/internal/cli.Version"
 )
 
 // testReleaseVersion is the version the go command stamps release-reporter with
@@ -124,6 +127,7 @@ func toolsBuilder(t *testing.T) (Builder, *fakeRunner, *toolsGit) {
 		Out:          t.TempDir(),
 		HMSrc:        "/src/hm",
 		HMCommit:     testHMCommit,
+		HMVersionVar: testHMVersionVar,
 		DevopsSrc:    "/src/devops",
 		DevopsCommit: testDevopsCommit,
 	}, run, g
@@ -194,8 +198,8 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 			t.Errorf("build %d env = %q, want the linux/arm64 cross-compile", i, c.env)
 		}
 	}
-	if got := argAfter(run.calls[0].argv, "-ldflags"); got != "-s -w" {
-		t.Errorf("hm ldflags = %q, want the -s -w strip flags", got)
+	if got, want := argAfter(run.calls[0].argv, "-ldflags"), "-s -w -X "+testHMVersionVar+"="+testHMCommit; got != want {
+		t.Errorf("hm ldflags = %q, want the strip flags and the stamp %q", got, want)
 	}
 
 	if len(g.adds) != 4 {
@@ -216,27 +220,39 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 
 // TestBuildToolsStampsHMWithItsCommit: hm's build carries the whole -ldflags value
 // of the variable HMVersionVar names, set to the commit the pin resolved, so the
-// image's `hm version` answers the skew monitor; an empty HMVersionVar builds hm
-// with the strip flags alone. The symbol is made up: no file here spells hm's
-// module path (gt-q81f1j).
+// image's `hm version` answers the skew monitor (gt-q81f1j). The symbol is the
+// fixture's: no file here spells hm's module path.
 func TestBuildToolsStampsHMWithItsCommit(t *testing.T) {
 	t.Parallel()
-	const versionVar = "example.test/hm/internal/cli.Version"
-	for _, tc := range []struct{ name, set, want string }{
-		{"a named variable", versionVar, "-s -w -X " + versionVar + "=" + testHMCommit},
-		{"no variable", "", "-s -w"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			b, run, _ := toolsBuilder(t)
-			b.HMVersionVar = tc.set
-			if _, err := b.BuildTools(context.Background()); err != nil {
-				t.Fatalf("BuildTools: %v", err)
-			}
-			if got := argAfter(run.calls[0].argv, "-ldflags"); got != tc.want {
-				t.Errorf("hm -ldflags = %q, want %q", got, tc.want)
-			}
-		})
+	b, run, _ := toolsBuilder(t)
+	if _, err := b.BuildTools(context.Background()); err != nil {
+		t.Fatalf("BuildTools: %v", err)
+	}
+	if got, want := argAfter(run.calls[0].argv, "-ldflags"), "-s -w -X "+testHMVersionVar+"="+testHMCommit; got != want {
+		t.Errorf("hm -ldflags = %q, want %q", got, want)
+	}
+}
+
+// TestBuildToolsRefusesAnEmptyHMVersionVar: a Builder with no HMVersionVar runs
+// no build and returns an error naming the field, so an image build never leaves
+// hm unstamped and reporting "dev" to the skew monitor (gt-d6j2mo). The builder
+// is otherwise ready, so the empty symbol is the only refused input.
+func TestBuildToolsRefusesAnEmptyHMVersionVar(t *testing.T) {
+	t.Parallel()
+	b, run, _ := toolsBuilder(t)
+	b.HMVersionVar = ""
+	_, err := b.BuildTools(context.Background())
+	if err == nil {
+		t.Fatal("BuildTools built the tools with no HMVersionVar")
+	}
+	if !strings.Contains(err.Error(), "HMVersionVar") {
+		t.Errorf("error = %v, want it to name HMVersionVar", err)
+	}
+	if len(run.calls) != 0 {
+		t.Errorf("ran %d builds, want none", len(run.calls))
+	}
+	if names := entriesIn(b.Out); len(names) != 0 {
+		t.Errorf("wrote %v, want nothing", names)
 	}
 }
 
@@ -246,11 +262,10 @@ func TestBuildToolsStampsHMWithItsCommit(t *testing.T) {
 // spells hm's module path.
 func TestBuildToolsPlanLineStampsHM(t *testing.T) {
 	t.Parallel()
-	const symbol = "example.test/hm/internal/cli.Version"
-	stamp := "-X " + symbol + "=" + testHMCommit
+	stamp := "-X " + testHMVersionVar + "=" + testHMCommit
 
 	p := planBuilder(t)
-	p.HMVersionVar = symbol
+	p.HMVersionVar = testHMVersionVar
 	lines, err := p.Plan(testRev)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
@@ -261,7 +276,6 @@ func TestBuildToolsPlanLineStampsHM(t *testing.T) {
 	}
 
 	b, run, _ := toolsBuilder(t)
-	b.HMVersionVar = symbol
 	if _, err := b.BuildTools(context.Background()); err != nil {
 		t.Fatalf("BuildTools: %v", err)
 	}

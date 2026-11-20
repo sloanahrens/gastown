@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
@@ -475,6 +476,7 @@ func newDaemonImageBuilder(f daemonImageFlags, d daemonImageDeps, pins []daemoni
 		OMCommit:     commits["om"],
 		HMSrc:        f.hmSrc,
 		HMCommit:     commits["hm"],
+		HMVersionVar: daemon.HMVersionVar(),
 		DevopsSrc:    f.devopsSrc,
 		DevopsCommit: commits["devops"],
 		MangoSrc:     f.mangoSrc,

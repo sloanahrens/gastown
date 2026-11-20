@@ -61,7 +61,9 @@ func hmLdflags(versionVar, commit string) string {
 // commit, or has uncommitted changes, is refused before any build runs.
 // release-reporter's version is the one the go command stamps from the
 // checkout; it is read back from the built binary and refused unless it has the
-// form run.sh accepts. Staging and the move into b.Out follow BuildBinaries.
+// form run.sh accepts. An empty HMVersionVar is refused before any build runs,
+// so hm is never built unstamped. Staging and the move into b.Out follow
+// BuildBinaries.
 func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build the tools with")
@@ -71,6 +73,9 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	}
 	if b.Go == nil {
 		return nil, errors.New("daemonimage: no go to read the release-reporter version with")
+	}
+	if b.HMVersionVar == "" {
+		return nil, errors.New("daemonimage: no HMVersionVar to stamp hm with: an empty symbol builds hm unstamped, reporting \"dev\"")
 	}
 	if err := b.checkToolInputs(); err != nil {
 		return nil, err
