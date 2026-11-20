@@ -253,9 +253,10 @@ func weightsFor(deps Deps) storypoints.Weights {
 
 // Note renders the comment that carries r. The first line identifies the
 // estimate, its rung and the hash of the bead text it was made from; the rest
-// gives the minutes, the weights the estimate used, the inputs used, each
-// skipped input with its reason, and the nearest past beads, or why they are
-// missing. The weights line is written when r names a weights version.
+// gives the minutes, the weights the estimate used, the inputs used with each
+// component's minutes, each skipped input with its reason, and the nearest past
+// beads, or why they are missing. The weights line is written when r names a
+// weights version.
 func Note(r Result) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "SP ESTIMATE v1 sp:%d rung:%s hash:%s\n", r.Points, r.Rung, r.Hash)
@@ -263,12 +264,44 @@ func Note(r Result) string {
 	if r.WeightsVersion != "" {
 		fmt.Fprintf(&b, "weights: %s\n", r.WeightsVersion)
 	}
-	fmt.Fprintf(&b, "inputs: %s\n", strings.Join(r.Inputs, ", "))
+	fmt.Fprintf(&b, "inputs: %s\n", inputsLine(r))
 	for _, s := range r.Skipped {
 		fmt.Fprintf(&b, "skipped %s: %s\n", s.Input, oneLine(s.Reason))
 	}
 	b.WriteString(NeighborsLine(r) + "\n")
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// inputsLine renders the inputs the blend averaged, each component followed by
+// the minutes it contributed: "shape 11.0, embed 7.5, jev 5.5". An input that
+// has no minutes of its own, as size caps the blend without one, is named alone;
+// so is every input of a result built without component minutes.
+func inputsLine(r Result) string {
+	parts := make([]string, 0, len(r.Inputs))
+	for _, input := range r.Inputs {
+		m := minutesForInput(r.ComponentMinutes, input)
+		if m == nil {
+			parts = append(parts, input)
+			continue
+		}
+		parts = append(parts, input+" "+strconv.FormatFloat(*m, 'f', 1, 64))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// minutesForInput returns the minutes the named blend input contributed, or nil
+// for an input that has none.
+func minutesForInput(c ComponentMinutes, input string) *float64 {
+	switch input {
+	case "shape":
+		return c.Shape
+	case "embed":
+		return c.Embed
+	case "jev":
+		return c.Jev
+	default:
+		return nil
+	}
 }
 
 // NeighborsLine is Note's nearest-beads sentence: the past beads hm ranked

@@ -2,6 +2,7 @@ package estimate
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -106,7 +107,8 @@ func TestEstimateCapsTheBlendWithTheSizeInput(t *testing.T) {
 			if got.Minutes != tc.wantMin {
 				t.Errorf("minutes = %v, want %v", got.Minutes, tc.wantMin)
 			}
-			named := strings.Contains(Note(got), "inputs: shape, size")
+			wantInputs := fmt.Sprintf("inputs: shape %.1f, size", *got.ComponentMinutes.Shape)
+			named := strings.Contains(Note(got), wantInputs)
 			if named != tc.wantSize {
 				t.Errorf("note names the size input = %v, want %v:\n%s", named, tc.wantSize, Note(got))
 			}

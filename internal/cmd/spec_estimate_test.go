@@ -465,6 +465,64 @@ func TestSpecEstimateJSONReportsTheOutcome(t *testing.T) {
 	}
 }
 
+// TestSpecEstimateComponentsJSON: --json names each input's minutes under
+// components, and the note's inputs line names them beside the input, while the
+// sp, rung and minutes labels and the note's sp, rung and minutes lines are the
+// ones the estimate made.
+func TestSpecEstimateComponentsJSON(t *testing.T) {
+	t.Parallel()
+	db := specEstimateSeed()
+	shape, embed, jev := 11.04, 7.46, 5.54
+	stub := &specEstimateStub{result: estimate.Result{
+		Points:           8,
+		Minutes:          10.8,
+		ComponentMinutes: estimate.ComponentMinutes{Shape: &shape, Embed: &embed, Jev: &jev},
+		Inputs:           []string{"shape", "embed", "jev"},
+		Rung:             "all",
+	}}
+	var out bytes.Buffer
+	if err := runSpecEstimateOn(&out, "gt-est", db, specEstimateOpts{JSON: true}, specEstimateRunnerFor(stub)); err != nil {
+		t.Fatalf("runSpecEstimateOn: %v", err)
+	}
+	var got specEstimateOutcome
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not JSON: %v\n%s", err, out.String())
+	}
+	if got.Components == nil {
+		t.Fatalf("--json outcome has no components:\n%s", out.String())
+	}
+	for _, c := range []struct {
+		name string
+		got  *float64
+		want float64
+	}{
+		{"shape", got.Components.Shape, shape},
+		{"embed", got.Components.Embed, embed},
+		{"jev", got.Components.Jev, jev},
+	} {
+		if c.got == nil || *c.got != c.want {
+			t.Errorf("components.%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	if got.Points != 8 || got.Rung != "all" || got.Minutes != 10.8 {
+		t.Errorf("outcome = sp:%d rung:%s minutes:%v, want sp:8 rung:all minutes:10.8", got.Points, got.Rung, got.Minutes)
+	}
+	for _, label := range []string{"sp:8", "sp-rung:all", "sp-minutes:10.8"} {
+		if !slices.Contains(got.AddLabels, label) {
+			t.Errorf("add_labels = %v, want %s", got.AddLabels, label)
+		}
+	}
+	for _, line := range []string{
+		"SP ESTIMATE v1 sp:8 rung:all hash:" + specEstimateHashOf(t, db),
+		"minutes: 10.8",
+		"inputs: shape 11.0, embed 7.5, jev 5.5",
+	} {
+		if !strings.Contains(got.Comment, line) {
+			t.Errorf("comment %q does not contain %q", got.Comment, line)
+		}
+	}
+}
+
 // The command refuses to run outside a town, before it reads any bead.
 func TestSpecEstimateRefusesOutsideATown(t *testing.T) {
 	t.Parallel()
