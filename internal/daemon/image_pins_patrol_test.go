@@ -1344,7 +1344,6 @@ func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
 		}
 		return []byte("100\n518500\n"), nil, nil
 	}
-
 	got, err := d.imagePinsAge(context.Background())(url, pin, tip)
 	if err != nil {
 		t.Fatalf("the age read = %v", err)
@@ -1375,7 +1374,8 @@ func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
 	}{
 		{name: "the fetch fails", fails: "fetch", want: "git fetch"},
 		{name: "the show fails", fails: "show", want: "git show"},
-		{name: "a non-number", answer: "100\nyesterday\n", want: "non-number"},
+		{name: "a non-number pin", answer: "yesterday\n100\n", want: "non-number for the pin"},
+		{name: "a non-number tip", answer: "100\nyesterday\n", want: "non-number for the tip"},
 		{name: "one timestamp", answer: "100\n", want: "two commits' committer times"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
