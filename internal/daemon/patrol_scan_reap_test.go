@@ -656,3 +656,69 @@ func TestReapUnlistedSeatsRunAtTheCap(t *testing.T) {
 		t.Fatalf("log %q, want it to contain %q", logged.String(), want)
 	}
 }
+
+// TestSandboxSeatKind guards gt-k2sy7x: the host tells the pure pass whether a
+// rig seat is a single-use sandbox seat, through the read TrimmableSeats makes.
+// A seat it cannot classify is an error, never false: it may be a tmux seat.
+// An uncovered rig is refused, as Reap refuses it.
+func TestSandboxSeatKind(t *testing.T) {
+	t.Parallel()
+	t.Run("a sandbox seat is single-use", func(t *testing.T) {
+		t.Parallel()
+		h := trimHost(t, 1, map[string]string{"agate": endSandboxIn})
+
+		got, err := h.SandboxSeat("gastown", "agate")
+		if err != nil {
+			t.Fatalf("SandboxSeat: %v", err)
+		}
+		if !got {
+			t.Error("SandboxSeat = false for a sandbox seat")
+		}
+	})
+
+	t.Run("a tmux seat is not", func(t *testing.T) {
+		t.Parallel()
+		h := trimHost(t, 1, map[string]string{"agate": endHostAgent})
+
+		got, err := h.SandboxSeat("gastown", "agate")
+		if err != nil {
+			t.Fatalf("SandboxSeat: %v", err)
+		}
+		if got {
+			t.Error("SandboxSeat = true for a tmux seat")
+		}
+	})
+
+	t.Run("a seat that cannot be classified is an error", func(t *testing.T) {
+		t.Parallel()
+		h := trimHost(t, 1, nil)
+		h.agentRecord = func(_, _ string) (string, error) { return "", errors.New("bd unavailable") }
+
+		got, err := h.SandboxSeat("gastown", "agate")
+		if err == nil {
+			t.Fatal("SandboxSeat answered for a seat it could not classify")
+		}
+		if got {
+			t.Error("SandboxSeat = true beside an unclassifiable seat")
+		}
+		if !strings.Contains(err.Error(), "gastown") || !strings.Contains(err.Error(), "agate") {
+			t.Errorf("error %q does not name the rig and seat", err)
+		}
+	})
+
+	t.Run("an uncovered rig is refused", func(t *testing.T) {
+		t.Parallel()
+		h := trimHost(t, 1, map[string]string{"agate": endSandboxIn})
+
+		got, err := h.SandboxSeat("beads", "agate")
+		if err == nil {
+			t.Fatal("SandboxSeat answered for an uncovered rig")
+		}
+		if got {
+			t.Error("SandboxSeat = true for an uncovered rig")
+		}
+	})
+}
+
+// The host must satisfy the half the pure pass type-asserts, so a reap sees it.
+var _ patrolscan.SingleUseEnv = (*patrolScanHost)(nil)
