@@ -216,10 +216,13 @@ func ParseWindow(s string, loc *time.Location) (*Window, error) {
 }
 
 // seatGoFlags returns the extra go flags seat agent may add to its GOFLAGS,
-// space-normalized. Only -trimpath, -mod=readonly, -race and -p=<n> are
-// accepted; every other flag is refused by name, so a seat's go_flags can
-// change build modes but cannot replace the toolchain, linker or compiler a
-// flag such as -toolexec or -ldflags would retarget (gt-gg9hv.42).
+// space-normalized. Only -trimpath, -mod=readonly, -race,
+// -gcflags=all=-dwarf=false and -p=<n> are accepted; every other flag is
+// refused by name, so a seat's go_flags can change build modes but cannot
+// replace the toolchain, linker or compiler a flag such as -toolexec or
+// -ldflags would retarget (gt-gg9hv.42). The -gcflags entry turns DWARF
+// generation off for every package the seat builds, keeping its cache archives
+// small, and names no replacement tool the way -toolexec could (gt-h5ksj7).
 func seatGoFlags(agent, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -233,15 +236,17 @@ func seatGoFlags(agent, value string) (string, error) {
 		if seatGoFlagAccepted(f) {
 			continue
 		}
-		return "", fmt.Errorf("polecat_pool.seats.%s.go_flags: flag %q is not accepted; want -trimpath, -mod=readonly, -race or -p=<n>", agent, f)
+		return "", fmt.Errorf("polecat_pool.seats.%s.go_flags: flag %q is not accepted; want -trimpath, -mod=readonly, -race, -gcflags=all=-dwarf=false or -p=<n>", agent, f)
 	}
 	return strings.Join(tokens, " "), nil
 }
 
 // seatGoFlagAccepted reports whether f is one of the go flags a seat may add.
+// The -gcflags entry is the exact string: any other compiler flag, including
+// another -dwarf=false spelling, is still refused (gt-h5ksj7).
 func seatGoFlagAccepted(f string) bool {
 	switch f {
-	case "-trimpath", "-mod=readonly", "-race":
+	case "-trimpath", "-mod=readonly", "-race", "-gcflags=all=-dwarf=false":
 		return true
 	}
 	n, ok := strings.CutPrefix(f, "-p=")
