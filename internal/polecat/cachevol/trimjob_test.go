@@ -670,6 +670,51 @@ func TestBuildTrimManifestRefusesAClaimThatIsUnderItsCap(t *testing.T) {
 	}
 }
 
+// TestBuildTrimManifestNothingToRemoveNamesTheFloor pins the refusal of a trim whose listing the
+// age floor keeps whole: the message says how many bytes the floor kept and the floor's age, so a
+// reader learns why almost nothing was removed rather than suspecting the helper (gt-b07gj8).
+func TestBuildTrimManifestNothingToRemoveNamesTheFloor(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	// The file's last use is the planning time itself, inside the floor, so the build pass is
+	// stopped before a single unit is removed.
+	in.Listing = []Entry{file("gocache/ab/cdef", BuildCache, 100, 24, 24)}
+	in.CapBytes = 50
+	_, err := BuildTrimManifest(in)
+	if err == nil {
+		t.Fatalf("BuildTrimManifest returned a manifest for a listing the age floor keeps, want a refusal")
+	}
+	for _, want := range []string{
+		"the listing is 100 bytes",
+		"the cap is 50",
+		fmt.Sprintf("100 bytes are younger than the age floor of %s", buildCacheMinAge),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to contain %q", err.Error(), want)
+		}
+	}
+}
+
+// TestBuildTrimManifestNothingToRemoveWithoutAFloor pins the other side: a claim already under its
+// cap has no bytes the age floor kept, so the refusal keeps its original message and names no floor
+// (gt-b07gj8).
+func TestBuildTrimManifestNothingToRemoveWithoutAFloor(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	in.CapBytes = 1 << 40
+	_, err := BuildTrimManifest(in)
+	if err == nil {
+		t.Fatalf("BuildTrimManifest returned a manifest for a claim under its cap, want a refusal")
+	}
+	want := fmt.Sprintf("the trim Job on %s would remove nothing: the listing is %d bytes, and the cap is %d", in.ClaimName, 100, in.CapBytes)
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), "younger than the age floor") {
+		t.Errorf("error = %q, want no age floor clause when the floor kept nothing", err.Error())
+	}
+}
+
 // TestTrimManifestExportsNoJobAccessor pins the claim Documents makes: it is the manifest's only
 // route to the Jobs, so no caller can apply a Job without what it reads. An exported method that
 // returns the Jobs would break it (gt-284u5).

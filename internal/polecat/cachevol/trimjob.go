@@ -192,7 +192,14 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 		return nil, err
 	}
 	if len(plan.Removals) == 0 {
-		return nil, fmt.Errorf("the trim Job on %s would remove nothing: the listing is %d bytes, and the cap is %d", in.ClaimName, plan.Total, in.CapBytes)
+		// The age floor, rather than the claim being small or the helper failing, is often why
+		// nothing is removed: a listing younger than the floor keeps every byte. Say how many bytes
+		// the floor kept and the floor it applied, so the reader knows which one did it.
+		floor := ""
+		if plan.Protected > 0 {
+			floor = fmt.Sprintf("; %d bytes are younger than the age floor of %s", plan.Protected, buildCacheMinAge)
+		}
+		return nil, fmt.Errorf("the trim Job on %s would remove nothing: the listing is %d bytes, and the cap is %d%s", in.ClaimName, plan.Total, in.CapBytes, floor)
 	}
 	paths, err := removalPaths(plan.Removals)
 	if err != nil {
