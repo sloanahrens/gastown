@@ -140,6 +140,11 @@ type Lander struct {
 	// (operator.names, gt-ywuip). Empty entitles no operator identity: a
 	// lander that was not told its town reads no name as the operator's.
 	TownRoot string
+	// BeadsDir is the rig's .beads directory, exported to the git handles as
+	// BEADS_DIR: a push runs the repository's tracked pre-push, and the beads
+	// rig's chains `bd hooks run pre-push`, which the pod's bd gateway refuses
+	// when the call sets no BEADS_DIR (gt-xg33gs). Empty exports nothing.
+	BeadsDir string
 
 	// Candidate is the Forgejo gate that runs on the merged tree: the tree is
 	// pushed as land/<bead> and its CI verdict decides. It is required —
@@ -876,22 +881,40 @@ func (l *Lander) review(ctx context.Context, in ReviewInput) (Verdict, error) {
 	return l.Reviewer.Review(ctx, in.Dir, in.Base, in.Head)
 }
 
+// beadsEnv is BEADS_DIR for the lander's git handles when it was told its
+// rig's beads store: a push through them runs the repository's tracked
+// pre-push, and the beads rig's chains `bd hooks run pre-push`, which the
+// pod's bd gateway refuses when the call sets no BEADS_DIR (gt-xg33gs). Nil
+// exports nothing, so a lander never told a store behaves as before.
+func (l *Lander) beadsEnv() []string {
+	if l.BeadsDir == "" {
+		return nil
+	}
+	return []string{"BEADS_DIR=" + l.BeadsDir}
+}
+
 // open opens the lander's clone as the Git its reads and local commands are
 // made through, with the clone's tracked hooks off: a hook the repository
-// tracks cannot fail a landing (gt-sjwr7a).
+// tracks cannot fail a landing (gt-sjwr7a). A push keeps the pre-push hook and
+// carries BEADS_DIR, so a tracked pre-push that runs bd passes (gt-xg33gs).
 func (l *Lander) open(dir string) Repo {
 	if l.openRepo != nil {
 		return l.openRepo(dir)
 	}
-	return CommittingGit(dir).WithoutLocalHooks()
+	return CommittingGit(dir).WithEnv(l.beadsEnv()).WithoutLocalHooks()
 }
 
 // openLanding opens the merge candidate's worktree through a handle whose every
 // call carries env (CommittingEnv), so the merge commit's committer and author
 // are set explicitly (gt-dc4y3, gt-vuv2n), and runs with the repository's local
 // hooks off, so a hook the target tracks cannot fail the merge (gt-sjwr7a).
-// Push keeps its pre-push hook: WithoutLocalHooks leaves a push alone.
+// Push keeps its pre-push hook: WithoutLocalHooks leaves a push alone, and
+// BEADS_DIR rides with it so a tracked pre-push that runs bd passes
+// (gt-xg33gs).
 func (l *Lander) openLanding(dir string, env []string) Repo {
+	if beads := l.beadsEnv(); len(beads) > 0 {
+		env = append(slices.Clone(env), beads...)
+	}
 	if l.landingEnv != nil {
 		l.landingEnv(env)
 	}
