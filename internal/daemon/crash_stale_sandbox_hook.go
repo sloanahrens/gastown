@@ -17,9 +17,10 @@ import (
 const staleSandboxHookTimeout = 15 * time.Second
 
 // reapStaleSandboxHook clears a sandbox seat's agent-bead hook once its sandbox
-// is gone and its work bead was handed back, and reports whether it did. A
-// condition it cannot answer leaves the hook alone, and the reset applies only
-// while the hook still names hookBead.
+// is gone and the work bead is no longer this seat's: it was handed back, went
+// to another seat, or is closed. It reports whether it did. A condition it
+// cannot answer leaves the hook alone, and the reset applies only while the
+// hook still names hookBead.
 func (h *patrolScanHost) reapStaleSandboxHook(rig, name, sessionName, hookBead string) bool {
 	log := func(format string, args ...any) {
 		h.d.logger.Printf("Stale sandbox hook of %s/%s (%s): "+format, append([]any{rig, name, hookBead}, args...)...)
@@ -29,7 +30,16 @@ func (h *patrolScanHost) reapStaleSandboxHook(rig, name, sessionName, hookBead s
 		log("not reaped: cannot read the work bead: %v", err)
 		return false
 	}
-	if issue.Status != "open" || strings.TrimSpace(issue.Assignee) != "" {
+	assignee := strings.TrimSpace(issue.Assignee)
+	reason := ""
+	switch {
+	case issue.Status == "closed":
+		reason = "the work is closed"
+	case assignee != "" && assignee != rig+"/polecats/"+name:
+		reason = "the work went to another seat"
+	case issue.Status == "open" && assignee == "":
+		reason = "the work was handed back"
+	default:
 		return false
 	}
 	seat, ok, err := h.openshellSeat(rig, name)
@@ -64,7 +74,7 @@ func (h *patrolScanHost) reapStaleSandboxHook(rig, name, sessionName, hookBead s
 		return false
 	}
 	if reset {
-		log("agent bead %s reset: the sandbox is gone and the work was handed back", id)
+		log("agent bead %s reset: the sandbox is gone and %s", id, reason)
 	}
 	return reset
 }
