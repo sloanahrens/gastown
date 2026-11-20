@@ -40,6 +40,10 @@ const (
 	SeedTokenKey = "token"
 	// SeedTokenPath is the token file the clone helper reads at run time.
 	SeedTokenPath = SeedTokenDir + "/" + SeedTokenKey
+	// GoCompileFlags is the go compile flag the seed container passes, so the entries it writes
+	// are the ones a seat compiled with the same flag reuses: -gcflags is part of Go's build cache
+	// key, and DWARF is about a third of a package archive (gt-pk7noy).
+	GoCompileFlags = "-gcflags=all=-dwarf=false"
 )
 
 // SeedJobInput is what the seed Job is built from: the polecat image tag its containers run, the
@@ -398,8 +402,9 @@ func cloneContainer(image, pins, tokenSecret string) Container {
 }
 
 // seedContainer runs the PlanSeed steps per rig, hands the claim to SeedUserID, and writes the
-// marker. Its image carries the Go toolchain, and GOFLAGS matches the Dockerfile seed RUN's, so the
-// entries a sandbox compiles against are the ones the image build used to write.
+// marker. Its image carries the Go toolchain. GOFLAGS is the Dockerfile seed RUN's flags plus
+// GoCompileFlags: the compile flags are part of Go's cache key, so an entry the seed writes without
+// them is one no seat with the flag can reuse (gt-pk7noy).
 func seedContainer(image, pins string) Container {
 	return Container{
 		Name:            "seed",
@@ -410,7 +415,7 @@ func seedContainer(image, pins string) Container {
 		Env: []EnvVar{
 			{Name: "GOCACHE", Value: path.Join(SeedCacheRoot, SeedBuildCacheDir)},
 			{Name: "GOMODCACHE", Value: path.Join(SeedCacheRoot, SeedModuleCacheDir)},
-			{Name: "GOFLAGS", Value: "-p=4 -modcacherw"},
+			{Name: "GOFLAGS", Value: "-p=4 -modcacherw " + GoCompileFlags},
 		},
 		VolumeMounts: []VolumeMount{
 			{Name: "cache", MountPath: SeedCacheRoot},

@@ -93,8 +93,8 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	if env["GOCACHE"] != "/cache/gocache" || env["GOMODCACHE"] != "/cache/gomodcache" {
 		t.Errorf("env = %d entries, want the two caches under /cache", len(env))
 	}
-	if env["GOFLAGS"] != "-p=4 -modcacherw" {
-		t.Errorf("GOFLAGS = %q, want the Dockerfile seed RUN's flags so cache keys match", env["GOFLAGS"])
+	if want := "-p=4 -modcacherw " + GoCompileFlags; env["GOFLAGS"] != want {
+		t.Errorf("GOFLAGS = %q, want %q so cache keys match", env["GOFLAGS"], want)
 	}
 	if got, want := seed.Args[0], "--pins"; got != want {
 		t.Errorf("seed args = %v, want the pins first", seed.Args)
@@ -106,6 +106,26 @@ func TestBuildSeedJobMountsTheClaimAndPutsTheCachesUnderIt(t *testing.T) {
 	}
 	if envValue(clone.Env, "GIT_TERMINAL_PROMPT") != "0" {
 		t.Errorf("clone GIT_TERMINAL_PROMPT must be 0: a prompt would hang the Job")
+	}
+}
+
+// TestSeedContainerGOFLAGS pins the seed's compile flags: -gcflags is part of Go's build cache
+// key, so a seed entry written without the seats' flag is one no seat can reuse (gt-pk7noy).
+func TestSeedContainerGOFLAGS(t *testing.T) {
+	t.Parallel()
+	job, err := BuildSeedJob(seedInput())
+	if err != nil {
+		t.Fatalf("BuildSeedJob: %v", err)
+	}
+	if got, want := GoCompileFlags, "-gcflags=all=-dwarf=false"; got != want {
+		t.Errorf("GoCompileFlags = %q, want %q: DWARF is about a third of a package archive", got, want)
+	}
+	goflags := envValue(job.Spec.Template.Spec.Containers[0].Env, "GOFLAGS")
+	if want := "-p=4 -modcacherw -gcflags=all=-dwarf=false"; goflags != want {
+		t.Errorf("seed GOFLAGS = %q, want %q", goflags, want)
+	}
+	if !strings.Contains(goflags, GoCompileFlags) {
+		t.Errorf("seed GOFLAGS = %q does not hold GoCompileFlags %q: the seed writes entries no seat with the flag can reuse", goflags, GoCompileFlags)
 	}
 }
 
@@ -304,8 +324,9 @@ func TestBuildSeedJobMountsTokenOnlyInCloneContainer(t *testing.T) {
 	}
 }
 
-// TestBuildSeedJobWithoutTokenSecretIsUnchanged pins the default manifest against the rendering
-// taken before the token flag existed: an input naming no Secret applies exactly as it did.
+// TestBuildSeedJobWithoutTokenSecretIsUnchanged pins the whole document for an input naming no
+// token Secret against a golden rendering: the token flag's absence changes nothing, and any other
+// change to the default manifest is made deliberate by updating the golden with it.
 func TestBuildSeedJobWithoutTokenSecretIsUnchanged(t *testing.T) {
 	t.Parallel()
 	golden, err := os.ReadFile(filepath.Join("testdata", "seedjob-no-token.json"))
