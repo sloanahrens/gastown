@@ -138,11 +138,12 @@ func crictlVerb(args []string) string {
 }
 
 // withSpares answers a `crictl ps` reply with one container per spare, each using that spare, so the
-// plan reads the spare as in use. The reply must be a JSON object: a null or other reply would parse as
-// no containers, and the plan would then remove images a container still uses.
+// plan reads the spare as in use. A JSON null is no containers, which is how crictl prints a node with
+// none. Any other reply must be a JSON object: one that is unreadable and read as no containers would let
+// the plan remove images a container still uses.
 func withSpares(ps []byte, spares []string) ([]byte, error) {
 	var object map[string]json.RawMessage
-	if err := json.Unmarshal(ps, &object); err != nil || object == nil {
+	if err := json.Unmarshal(ps, &object); err != nil {
 		return nil, errors.New("crictl ps: the reply is not a JSON object")
 	}
 	var reply struct {
