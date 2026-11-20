@@ -80,11 +80,10 @@ func (r *escalateRecorder) general() []string {
 	return append([]string(nil), r.escalate...)
 }
 
-// TestPassRepeatedFailuresEscalateOnceAndClearOnLanding: a landing failing at
-// any stage DefaultFailingEscalateAfter times in a row raises exactly one
-// escalation naming the stage, the count and the error, and the bead's
-// landing clears it (gt-fn9e6.44).
-func TestPassRepeatedFailuresEscalateOnceAndClearOnLanding(t *testing.T) {
+// TestPassRepeatedFailuresEscalateEachAttemptAndClearOnLanding: a landing failing at
+// any stage raises one escalation per failed attempt naming the stage and the
+// error, and the bead's landing clears it (gt-fn9e6.44).
+func TestPassRepeatedFailuresEscalateEachAttemptAndClearOnLanding(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")

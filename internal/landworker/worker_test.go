@@ -1240,10 +1240,10 @@ func TestClassifyCISilenceIsInfrastructure(t *testing.T) {
 	}
 }
 
-// TestPassRepeatedCISilencesEscalateOnce: DefaultCISilenceEscalateAfter
+// TestPassRepeatedCISilencesEscalateEachAttempt: DefaultCISilenceEscalateAfter
 // candidate-gate silences in a row raise one escalation naming the bead, and
 // further silences stay quiet (gt-fn9e6.5).
-func TestPassRepeatedCISilencesEscalateOnce(t *testing.T) {
+func TestPassRepeatedCISilencesEscalateEachAttempt(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedReady(t, "gt-abc")

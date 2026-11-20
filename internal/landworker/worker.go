@@ -98,9 +98,10 @@ const (
 	// first pass checks for a landed bead whose record is incomplete.
 	recentRepairWindow = 50
 	// infraParkWait is how long a bead that failed on infrastructure stays
-	// parked: no exponential retry, a failure fails loud and stops (operator
-	// 2026-11-20). The park is in memory, so a daemon restart ends it.
-	infraParkWait = 24 * time.Hour
+	// parked: no retry on a timer, a failure fails loud and stops (operator
+	// 2026-11-20). It is the life of the process, in effect: the park is in
+	// memory, so a daemon restart, which is how a fix rolls out, ends it.
+	infraParkWait = 10 * 365 * 24 * time.Hour
 	// humanWaitBackoff spaces re-checks of a bead only a human can unblock
 	// (branch missing, no landing request): cheap to re-check, noisy to log.
 	humanWaitBackoff = 15 * time.Minute
@@ -112,15 +113,15 @@ const (
 	// one bead earn it a comment saying why it is not landing.
 	infraAnnounceAfter = 1
 	// DefaultCISilenceEscalateAfter is the run of candidate-gate silences on
-	// one bead that earns an escalation, for the same reason: the worker backs
-	// off and retries a runner that is down or hung, and only an escalation
-	// says so out loud (gt-fn9e6.5).
+	// one bead that earns an escalation: the first, because a silence is an
+	// infrastructure failure and parks the bead like any other, so only the
+	// escalation says out loud that a runner is down or hung (gt-fn9e6.5).
 	DefaultCISilenceEscalateAfter = 1
 	// DefaultFailingEscalateAfter is the run of failures at any landing stage
 	// on one bead that earns an escalation: a landing failing repeatedly is
 	// otherwise visible only in daemon.log (gt-fn9e6.44).
 	DefaultFailingEscalateAfter = 1
-	// maxErrorLine bounds the error text a backoff record and a health detail
+	// maxErrorLine bounds the error text a failing-landing record and a health detail
 	// carry, so a failure whose message is a wall of output stays one phrase.
 	maxErrorLine = 160
 	// readyListCeiling bounds how long a submission can wait when a pass skipped
@@ -1425,8 +1426,8 @@ func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 	rep.Failed++
 	st := w.bead(id)
 	if !st.until.IsZero() && !w.now().Before(st.until) {
-		// The park ran out in a process that never restarted: the cause is
-		// still there, so this failure is a new run and is as loud as the first.
+		// The park ran out (only a clock that jumped past it gets here): this
+		// failure is a new run and is as loud as the first.
 		st.failures, st.ciSilences, st.escalated, st.failingEscalated = 0, 0, false, false
 		delete(st.annotated, "infra")
 	}
@@ -1434,7 +1435,7 @@ func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 	st.stage = failureStage(stage, err)
 	st.lastErr = errorLine(err)
 	st.until = w.now().Add(infraParkWait)
-	w.logf("%s: %s failed, PARKED until the cause is fixed and the daemon restarts: %v", id, stage, err)
+	w.logf("%s: %s failed, PARKED until the cause is fixed and the daemon restarts: %s", id, stage, st.lastErr)
 	if st.failures == infraAnnounceAfter {
 		w.announce(id, "infra", fmt.Sprintf("Landing worker: %s FAILED on infrastructure, not on the work (%s: %v). It is parked and will not be retried until the cause is fixed and the daemon restarts; no rework needed.", id, stage, err))
 	}
