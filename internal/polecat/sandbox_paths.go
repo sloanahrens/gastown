@@ -1,12 +1,26 @@
 package polecat
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/session"
 )
+
+// sandboxWorktreeFromEnv is the real worktree path a sandbox backend reports
+// for a session: the value of GT_POLECAT_PATH in the prepared environment. The
+// prepared work dir cannot stand in for it, because a backend may make it a
+// link path every seat shares (gt-f80lq2). A prepared environment that names
+// no GT_POLECAT_PATH therefore has no worktree to map, and the launch refuses
+// it rather than place the sandbox town root where nothing exists.
+func sandboxWorktreeFromEnv(env map[string]string) (string, error) {
+	if p := env["GT_POLECAT_PATH"]; p != "" {
+		return p, nil
+	}
+	return "", errors.New("the prepared env names no GT_POLECAT_PATH: no sandbox town root")
+}
 
 // sandboxTownRoot is the town root inside a sandbox, derived from where
 // Prepare put the worktree: the host worktree sits at <hostTownRoot>/<rel>

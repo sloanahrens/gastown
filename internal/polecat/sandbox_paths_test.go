@@ -69,19 +69,47 @@ func TestRewriteTownRootInPathEnvLeavesNonPathValuesAlone(t *testing.T) {
 	}
 }
 
+// The sandbox town root is mapped from the worktree GT_POLECAT_PATH names; a
+// prepared environment that names none has no worktree, so it is refused.
+func TestSandboxWorktreeFromEnv(t *testing.T) {
+	t.Parallel()
+	if got, err := sandboxWorktreeFromEnv(map[string]string{"GT_POLECAT_PATH": "/sandbox/gt/r/p"}); err != nil || got != "/sandbox/gt/r/p" {
+		t.Fatalf("sandboxWorktreeFromEnv = %q, %v; want /sandbox/gt/r/p", got, err)
+	}
+	for name, env := range map[string]map[string]string{
+		"absent": nil,
+		"empty":  {"GT_POLECAT_PATH": ""},
+	} {
+		if got, err := sandboxWorktreeFromEnv(env); err == nil {
+			t.Errorf("%s: sandboxWorktreeFromEnv = %q, want an error", name, got)
+		}
+	}
+}
+
 // pathBackend is a sandbox backend whose Prepare reports a work dir inside
-// the sandbox's town root, and the environment the agent gets there.
+// the sandbox's town root, and the environment the agent gets there. Like the
+// openshell backend it always names the real worktree in GT_POLECAT_PATH: the
+// work dir unless env names its own. omitPolecatPath drops it, modelling a
+// backend that reports no worktree.
 type pathBackend struct {
 	preparingBackend
-	workDir string
-	env     map[string]string
+	workDir         string
+	env             map[string]string
+	omitPolecatPath bool
 }
 
 func (b *pathBackend) Prepare(ctx context.Context, spec session.SpawnSpec) (*session.Prepared, error) {
 	if _, err := b.preparingBackend.Prepare(ctx, spec); err != nil {
 		return nil, err
 	}
-	return &session.Prepared{WorkDir: b.workDir, Env: b.env}, nil
+	env := make(map[string]string, len(b.env)+1)
+	for k, v := range b.env {
+		env[k] = v
+	}
+	if _, named := env["GT_POLECAT_PATH"]; !named && !b.omitPolecatPath {
+		env["GT_POLECAT_PATH"] = b.workDir
+	}
+	return &session.Prepared{WorkDir: b.workDir, Env: env}, nil
 }
 
 // capturingTmux records the command and the start directory the launch opens
@@ -299,9 +327,9 @@ func TestSandboxLaunchCommonWork(t *testing.T) {
 	}
 }
 
-// Before the link path the prepared environment named no GT_POLECAT_PATH and
-// the prepared work dir was the real one: that maps to the same town root, and
-// a work dir that maps to nothing is still refused.
+// Before the link path the backend named the real worktree in GT_POLECAT_PATH
+// and the prepared work dir was that same path: it maps as before, and a
+// worktree that maps to nothing is still refused.
 //
 //testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestSandboxTownRootFromPolecatPathOldShape(t *testing.T) {
@@ -333,5 +361,27 @@ func TestLaunchFailsWhenTheSandboxWorkDirHasNoTownRoot(t *testing.T) {
 	}
 	if r.tm.command != "" {
 		t.Errorf("the session was started despite the unmappable work dir:\n%s", r.tm.command)
+	}
+}
+
+// A Prepared that names no GT_POLECAT_PATH has no worktree to map the sandbox
+// town root from, so the launch refuses it before any session starts, even
+// though its work dir would map on its own.
+//
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestLaunchRefusesAPreparedWithNoPolecatPath(t *testing.T) {
+	r := newLaunchRigAt(t, "gastown/polecats/p/gastown")
+
+	err := r.launch(&pathBackend{
+		preparingBackend: preparingBackend{town: r.town},
+		workDir:          "/sandbox/gt/gastown/polecats/p/gastown",
+		omitPolecatPath:  true,
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "GT_POLECAT_PATH") {
+		t.Fatalf("launch error = %v, want one naming the missing GT_POLECAT_PATH", err)
+	}
+	if r.tm.command != "" {
+		t.Errorf("the session was started despite the missing GT_POLECAT_PATH:\n%s", r.tm.command)
 	}
 }
