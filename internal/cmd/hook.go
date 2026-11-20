@@ -437,16 +437,16 @@ func runHook(_ *cobra.Command, args []string) error {
 			return nil
 		}
 
-		// Check if existing bead is complete
-		isComplete, hasAttachment := checkPinnedBeadComplete(b, existing)
+		// Decide how the new hook replaces the existing bead.
+		action, hasAttachment := hookReplacementActionFor(b, existing, hookForce)
 
-		switch {
-		case isComplete:
+		switch action {
+		case hookReplaceCompleted:
 			// Auto-replace completed bead: a molecule is closed, a naked bead
 			// is only unpinned (it might still have value).
 			fmt.Printf("%s Replacing completed bead %s...\n", style.Dim.Render("ℹ"), existing.ID)
 			displaced, displacedByClose = existing, hasAttachment
-		case hookForce:
+		case hookForceReplace:
 			// Force replace incomplete bead
 			fmt.Printf("%s Force-replacing incomplete bead %s...\n", style.Dim.Render("⚠"), existing.ID)
 			displaced = existing
@@ -607,6 +607,36 @@ func checkPinnedBeadComplete(b beads.Client, issue *beads.Issue) (isComplete boo
 	}
 
 	return progress.Complete, true
+}
+
+// hookReplacementAction is what a new hook does to the bead already hooked.
+type hookReplacementAction int
+
+const (
+	// hookReplaceCompleted replaces the bead: a molecule is closed, a naked
+	// bead is only released (it might still have value).
+	hookReplaceCompleted hookReplacementAction = iota
+	// hookForceReplace replaces an incomplete bead because --force was given.
+	hookForceReplace
+	// hookRefuseIncomplete keeps the existing bead: the caller refuses the
+	// new hook without --force.
+	hookRefuseIncomplete
+)
+
+// hookReplacementActionFor decides what a new hook does to the bead already
+// hooked. An incomplete bead is replaced only under force, so a pinned bead
+// attached to a root-only molecule is refused without --force (gt-thyafn).
+// hasAttachment says the decision concerns an attached molecule.
+func hookReplacementActionFor(b beads.Client, existing *beads.Issue, force bool) (action hookReplacementAction, hasAttachment bool) {
+	isComplete, hasAttachment := checkPinnedBeadComplete(b, existing)
+	switch {
+	case isComplete:
+		return hookReplaceCompleted, hasAttachment
+	case force:
+		return hookForceReplace, hasAttachment
+	default:
+		return hookRefuseIncomplete, hasAttachment
+	}
 }
 
 // runHookShow displays another agent's hook in compact one-line format.

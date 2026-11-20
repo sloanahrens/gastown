@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -286,4 +288,137 @@ func TestMoleculeNoStepsStatusPrintsTheLine(t *testing.T) {
 	if strings.Contains(out.String(), "Progress:") {
 		t.Errorf("output = %q, want no progress bar for a molecule with no steps", out.String())
 	}
+}
+
+// TestMoleculeNoStepsSquashDigest: the squash digest of a molecule that
+// poured no steps carries no execution summary, since it would read 0/0
+// steps, partial; a molecule with steps still carries one (gt-thyafn).
+func TestMoleculeNoStepsSquashDigest(t *testing.T) {
+	t.Parallel()
+
+	t.Run("root-only molecule", func(t *testing.T) {
+		t.Parallel()
+
+		db := squashDB(t, "gt-wisp-rootonly")
+		squashForDigest(t, db)
+		desc := digestDescription(t, db, "gt-wisp-rootonly")
+		if strings.Contains(desc, "Execution Summary") {
+			t.Errorf("digest = %q, want no Execution Summary for a molecule with no steps", desc)
+		}
+		if strings.Contains(desc, "0/0") {
+			t.Errorf("digest = %q, want no 0/0 step count", desc)
+		}
+	})
+
+	t.Run("molecule with steps", func(t *testing.T) {
+		t.Parallel()
+
+		db := squashDB(t, "gt-wisp-stepped",
+			beads.Issue{ID: "gt-step-1", Title: "Step 1", Status: "closed"},
+			beads.Issue{ID: "gt-step-2", Title: "Step 2", Status: "open"})
+		squashForDigest(t, db)
+		desc := digestDescription(t, db, "gt-wisp-stepped")
+		if !strings.Contains(desc, "Execution Summary") || !strings.Contains(desc, "Steps: 1/2 completed") {
+			t.Errorf("digest = %q, want an Execution Summary reading Steps: 1/2 completed", desc)
+		}
+	})
+}
+
+// squashDB is the store a squash over a witness handoff bead pinned to a
+// molecule-typed root sees, with steps as the root's poured children.
+func squashDB(t *testing.T, rootID string, steps ...beads.Issue) *beadsfake.Fake {
+	t.Helper()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-handoff-1", Title: "witness Handoff", Status: string(beads.StatusPinned), Description: "attached_molecule: " + rootID},
+		beads.Issue{ID: rootID, Title: "mol-polecat-work", Status: string(beads.StatusHooked), Type: moleculeIssueType, Ephemeral: true},
+	)
+	seedChildren(t, db, rootID, steps...)
+	return db
+}
+
+// squashForDigest runs gt mol squash for witness over db with its digest on.
+func squashForDigest(t *testing.T, db *beadsfake.Fake) {
+	t.Helper()
+	e := testMoleculeEnv(t.TempDir(), &doneRecorder{Client: db, mu: &sync.Mutex{}, closes: &[]string{}})
+	e.noDigest = false
+	if err := moleculeSquash(squashCmd(context.Background()), e, []string{"witness"}); err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+}
+
+// digestDescription returns the description of the digest the squash wrote
+// for rootID.
+func digestDescription(t *testing.T, db *beadsfake.Fake, rootID string) string {
+	t.Helper()
+	digests, err := db.List(beads.ListOptions{Ephemeral: true, Status: "all", Priority: -1})
+	if err != nil {
+		t.Fatalf("listing digests: %v", err)
+	}
+	for _, is := range digests {
+		if is.Title == "Digest: "+rootID {
+			return is.Description
+		}
+	}
+	t.Fatalf("no digest written for %s", rootID)
+	return ""
+}
+
+// TestMoleculeNoStepsHookRefusesWithoutForce: a pinned bead attached to a
+// molecule that poured no steps is not complete, so gt hook refuses it without
+// --force (the switch's refusal branch) and replaces it with it; a completed
+// molecule is replaced without --force (gt-thyafn).
+func TestMoleculeNoStepsHookRefusesWithoutForce(t *testing.T) {
+	t.Parallel()
+
+	t.Run("root-only molecule without --force is refused", func(t *testing.T) {
+		t.Parallel()
+
+		fake, root := rootOnlyMolecule(t)
+		action, _ := hookReplacementActionFor(fake, hookedTo(root.ID), false)
+		if action != hookRefuseIncomplete {
+			t.Errorf("action = %v, want the incomplete refusal without --force", action)
+		}
+	})
+
+	t.Run("root-only molecule under --force is replaced", func(t *testing.T) {
+		t.Parallel()
+
+		fake, root := rootOnlyMolecule(t)
+		action, attached := hookReplacementActionFor(fake, hookedTo(root.ID), true)
+		if action != hookForceReplace {
+			t.Errorf("action = %v, want the forced replacement under --force", action)
+		}
+		if !attached {
+			t.Error("hasAttachment = false, want true: the displaced bead is a molecule")
+		}
+	})
+
+	t.Run("completed molecule is closed", func(t *testing.T) {
+		t.Parallel()
+
+		fake := beadsfake.New()
+		fake.Seed(beads.Issue{ID: "gt-wisp-done", Title: "mol-polecat-work", Type: moleculeIssueType})
+		step, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: "gt-wisp-done"})
+		if err != nil {
+			t.Fatalf("create step: %v", err)
+		}
+		if err := fake.Close(step.ID); err != nil {
+			t.Fatalf("close step: %v", err)
+		}
+
+		action, attached := hookReplacementActionFor(fake, hookedTo("gt-wisp-done"), false)
+		if action != hookReplaceCompleted || !attached {
+			t.Errorf("action = %v, attached = %v, want a completed molecule closed", action, attached)
+		}
+	})
+
+	t.Run("bead with no molecule is released", func(t *testing.T) {
+		t.Parallel()
+
+		action, attached := hookReplacementActionFor(beadsfake.New(), &beads.Issue{ID: "gt-task", Title: "a plain task"}, false)
+		if action != hookReplaceCompleted || attached {
+			t.Errorf("action = %v, attached = %v, want the naked bead released, not closed", action, attached)
+		}
+	})
 }
