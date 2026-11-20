@@ -6,4 +6,4 @@
 bd http://forgejo:3000/{owner}/beads.git 0f9f640fe0f1a4162f3aebdef7994135b1167a85
 om http://forgejo:3000/{owner}/organic-mechanic.git 50bb8fb1964dda98a22697a6396a75a1fd7b000f
 hm http://forgejo:3000/{owner}/history-man.git 7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb
-devops http://forgejo:3000/{owner}/devops.git 3be3c2c80cc60de88a86428588bea8e919ebce1e
+devops http://forgejo:3000/{owner}/devops.git 352c90e76fd0f36e7135946b42afaaddd742f2eb
