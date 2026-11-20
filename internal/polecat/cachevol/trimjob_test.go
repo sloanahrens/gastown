@@ -1164,3 +1164,69 @@ func TestTrimJobSelectsAndToleratesThePool(t *testing.T) {
 		})
 	}
 }
+
+// TestCacheTrimClaimJobBuildsTheClaimRoute pins the builder the daemon takes once it stops listing the
+// claim (cache trim 1/10): the claim route from the claim's name, cap, sandbox count and clock alone,
+// the pod's plan container writing the list, and no shard ConfigMap.
+func TestCacheTrimClaimJobBuildsTheClaimRoute(t *testing.T) {
+	t.Parallel()
+	in := trimInput()
+	in.Listing, in.CapBytes, in.SandboxesRunning = nil, 3, 2
+	m, err := BuildClaimTrimManifest(in)
+	if err != nil {
+		t.Fatalf("BuildClaimTrimManifest: %v", err)
+	}
+	job := m.jobs()[0]
+	if job.Metadata.Name != DefaultTrimJobName || m.Route() != TrimRouteClaim || len(m.Shards()) != 0 {
+		t.Fatalf("manifest = name %q route %v with %d shards, want %q on the claim alone",
+			job.Metadata.Name, m.Route(), len(m.Shards()), DefaultTrimJobName)
+	}
+	pod := job.Spec.Template.Spec
+	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != "plan" {
+		t.Fatalf("init containers = %+v, want the plan container", pod.InitContainers)
+	}
+	if want := []string{"--root", SeedCacheRoot, "--cap-bytes", "3", "--sandboxes", "2", "--now", trimNow.UTC().Format(time.RFC3339Nano)}; !reflect.DeepEqual(pod.InitContainers[0].Args, want) {
+		t.Errorf("plan args = %v, want the caller's cap, sandbox count and clock: %v", pod.InitContainers[0].Args, want)
+	}
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != "trim" {
+		t.Fatalf("containers = %+v, want the trim container", pod.Containers)
+	}
+	if want := []string{"--root", SeedCacheRoot, "--list-file", TrimClaimListPath, "--list-sha256-file", TrimClaimDigestPath}; !reflect.DeepEqual(pod.Containers[0].Args, want) {
+		t.Errorf("trim args = %v, want the list file and its digest: %v", pod.Containers[0].Args, want)
+	}
+	if doc := string(job.JSON()); strings.Contains(doc, "ConfigMap") {
+		t.Errorf("the Job carries a shard ConfigMap: %s", doc)
+	}
+}
+
+// TestCacheTrimClaimJobRefusals pins the inputs the builder refuses, each error naming the field, and
+// that a caller with no listing is accepted: the pod plans the list itself.
+func TestCacheTrimClaimJobRefusals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, field string
+		edit        func(*TrimJobInput)
+	}{
+		{"no clock", "clock", func(in *TrimJobInput) { in.Now = time.Time{} }},
+		{"a negative cap", "cap", func(in *TrimJobInput) { in.CapBytes = -1 }},
+		{"a negative sandbox count", "sandbox count", func(in *TrimJobInput) { in.SandboxesRunning = -1 }},
+		{"a claim that is not a label", "claim", func(in *TrimJobInput) { in.ClaimName = "gt cache" }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			in := trimInput()
+			tc.edit(&in)
+			if m, err := BuildClaimTrimManifest(in); err == nil {
+				t.Fatalf("BuildClaimTrimManifest(%+v) = %+v, want a refusal", in, m)
+			} else if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("error %q does not name the field %q", err, tc.field)
+			}
+		})
+	}
+	in := trimInput()
+	in.Listing = nil
+	if _, err := BuildClaimTrimManifest(in); err != nil {
+		t.Errorf("BuildClaimTrimManifest with no listing: %v, want the manifest", err)
+	}
+}
