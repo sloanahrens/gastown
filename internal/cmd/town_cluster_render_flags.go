@@ -63,6 +63,7 @@ type renderFlagsRecord struct {
 	TrackerBackup                 bool   `json:"tracker_backup"`
 	TrackerBackupImage            string `json:"tracker_backup_image"`
 	DaemonBdGatewayURL            string `json:"daemon_bd_gateway_url"`
+	IncludeStatic                 bool   `json:"include_static"`
 }
 
 // renderFlagsFile is the record as the file's JSON decodes into it. Its cap and
@@ -109,6 +110,7 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		TrackerBackup:                 f.trackerBackup,
 		TrackerBackupImage:            f.trackerBackupImage,
 		DaemonBdGatewayURL:            f.daemonBdGatewayURL,
+		IncludeStatic:                 f.includeStatic,
 	}
 }
 
@@ -144,6 +146,9 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		trackerBackupImage:            r.TrackerBackupImage,
 		daemonBdGatewayURL:            r.DaemonBdGatewayURL,
 		daemonBdGatewayURLSet:         r.DaemonBdGatewayURL != "",
+		// A file written before the flag was recorded has no key for it, and false
+		// is what such a record meant: the flag's default.
+		includeStatic: r.IncludeStatic,
 	}
 }
 

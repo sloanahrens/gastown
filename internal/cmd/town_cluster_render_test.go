@@ -2848,6 +2848,83 @@ func TestTownClusterRenderRecordsItsFlagsAndReplaysThem(t *testing.T) {
 	}
 }
 
+// TestTownClusterRenderStaticRecorded holds --include-static to the record file:
+// --record-flags saves it, --use-recorded restores it so a replay renders the
+// same static set, and a record written before the key existed reads it false,
+// the flag's default (gt-76p406).
+func TestTownClusterRenderStaticRecorded(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.includeStatic = true
+	town := clusterRenderTestTown(t)
+	d := clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{record: true}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("the recording render: %v", err)
+	}
+
+	// The save: the file carries the key, rather than the loader answering true
+	// from a default no file holds.
+	recordPath := renderFlagsPathIn(town)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(renderedText(t, recordPath)), &raw); err != nil {
+		t.Fatalf("decoding the recorded flags: %v", err)
+	}
+	if got, ok := raw["include_static"]; !ok || string(got) != "true" {
+		t.Fatalf("the record's include_static = %s (present %t), want true: --record-flags dropped --include-static", got, ok)
+	}
+	rec, ok, err := loadRenderFlags(recordPath)
+	if err != nil {
+		t.Fatalf("reading the recorded flags: %v", err)
+	}
+	if !ok {
+		t.Fatalf("the render recorded no flags at %s", recordPath)
+	}
+	if !rec.includeStatic {
+		t.Error("the loaded record has include-static false, want the true the run recorded")
+	}
+
+	// The restore: a replay that names only a fresh --out renders the recorded
+	// run's files, the static set among them.
+	replay := clusterRenderFlags{out: filepath.Join(t.TempDir(), "replay")}
+	d = clusterRenderDepsAt(t, town, io.Discard)
+	d.record = clusterRenderRecordOptions{
+		use:   true,
+		named: func(flag string) bool { return flag == "out" },
+	}
+	if err := runClusterRender(d, replay); err != nil {
+		t.Fatalf("the replay: %v", err)
+	}
+	if got, want := dirNames(t, replay.out), dirNames(t, f.out); !slices.Equal(got, want) {
+		t.Fatalf("the replay wrote %v, want the recorded render's %v", got, want)
+	}
+	written := make(map[string]bool)
+	for _, file := range writtenFiles(t, replay.out) {
+		written[file.key] = true
+	}
+	for _, key := range staticFileKeys(t) {
+		if !written[key] {
+			t.Errorf("the replay wrote no file for the static %s: --use-recorded did not restore --include-static", key)
+		}
+	}
+
+	// An older record: no key for the flag reads as the flag's default, false.
+	legacy := filepath.Join(t.TempDir(), "render-flags.json")
+	if err := os.WriteFile(legacy, []byte(`{"dir": "/repo/gastown"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := loadRenderFlags(legacy)
+	if err != nil {
+		t.Fatalf("reading a record without include_static: %v", err)
+	}
+	if !ok {
+		t.Fatal("loadRenderFlags reported no record for a file holding one")
+	}
+	if got.includeStatic {
+		t.Error("a record without include_static loaded the flag true, want the default false")
+	}
+}
+
 // TestTownClusterRenderCommandLineFlagWinsOverTheRecordedOne: a flag named on the
 // replay's command line wins over its recorded value.
 func TestTownClusterRenderCommandLineFlagWinsOverTheRecordedOne(t *testing.T) {
@@ -2924,14 +3001,6 @@ func TestTownClusterRenderRefusesTheRecordedFlags(t *testing.T) {
 				d.record = clusterRenderRecordOptions{record: true}
 			},
 			cause: "--record-flags is for a live render",
-		},
-		{
-			name: "recording a render that includes the static set",
-			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps, f *clusterRenderFlags) {
-				f.includeStatic = true
-				d.record = clusterRenderRecordOptions{record: true}
-			},
-			cause: "--record-flags cannot record --include-static",
 		},
 		{
 			name: "a recorded file that the loader refuses",
@@ -3094,9 +3163,6 @@ func TestRenderFlagsWithRecordedCoversTheFlagStruct(t *testing.T) {
 		case "dashboardClaudeDir", "daemonClaudeDir":
 			// Retired: the flags are refused, so the record holds neither and a
 			// replay leaves both empty (gt-ja7otj).
-		case "includeStatic":
-			// Not recorded until gt-76p406; a recording run refuses the flag, so a
-			// replay leaves it false.
 		default:
 			t.Fatalf("clusterRenderFlags.%s is zero after the record fill, so the record has no field for it and nothing here would see withRecorded drop it", name)
 		}

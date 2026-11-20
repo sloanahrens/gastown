@@ -13,8 +13,8 @@ import (
 // renderFlagsFixture is a live render's flags with a distinct value in every
 // string field and a mixture of true and false booleans, so a record that
 // swaps, drops or duplicates two fields fails the round trip rather than
-// matching by accident. The six booleans cannot all differ in one fixture, so
-// TestRenderFlagsBooleansRoundTripDistinctly gives each its own run.
+// matching by accident. A fixture cannot give every boolean a distinct value,
+// so TestRenderFlagsBooleansRoundTripDistinctly gives each its own run.
 func renderFlagsFixture() clusterRenderFlags {
 	return clusterRenderFlags{
 		dir:                   "/repo/gastown",
@@ -86,6 +86,7 @@ func renderFlagBooleans() []renderFlagBool {
 		{"bdGatewayServicePolicyApplied", func(f clusterRenderFlags) bool { return f.bdGatewayServicePolicyApplied }, func(f *clusterRenderFlags, v bool) { f.bdGatewayServicePolicyApplied = v }},
 		{"tracker", func(f clusterRenderFlags) bool { return f.tracker }, func(f *clusterRenderFlags, v bool) { f.tracker = v }},
 		{"trackerBackup", func(f clusterRenderFlags) bool { return f.trackerBackup }, func(f *clusterRenderFlags, v bool) { f.trackerBackup = v }},
+		{"includeStatic", func(f clusterRenderFlags) bool { return f.includeStatic }, func(f *clusterRenderFlags, v bool) { f.includeStatic = v }},
 	}
 }
 
@@ -130,9 +131,10 @@ func TestRenderFlagsBooleansNamingIsComplete(t *testing.T) {
 
 // TestRenderFlagsBooleansRoundTripDistinctly gives each boolean flag its own
 // run: that flag true and every other boolean false. The shared fixture holds
-// six booleans with two values, so a record that confuses two of them compares
-// equal there; here a boolean that is dropped, read from another flag's field
-// or written to another flag's field loads with the wrong value and fails.
+// its booleans with only two values, so a record that confuses two of them
+// compares equal there; here a boolean that is dropped, read from another
+// flag's field or written to another flag's field loads with the wrong value
+// and fails.
 func TestRenderFlagsBooleansRoundTripDistinctly(t *testing.T) {
 	t.Parallel()
 	bools := renderFlagBooleans()
@@ -448,6 +450,7 @@ var renderFlagRecordNames = map[string]string{
 	"trackerBackup":                 "TrackerBackup",
 	"trackerBackupImage":            "TrackerBackupImage",
 	"daemonBdGatewayURL":            "DaemonBdGatewayURL",
+	"includeStatic":                 "IncludeStatic",
 }
 
 // TestRenderFlagsRecordCoversTheFlagStruct: every field of the render's flag
@@ -462,7 +465,6 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 		"daemonBdGatewayURLSet": "derived: whether the flag was named, which a non-empty recorded URL already answers on load",
 		"dashboardClaudeDir":    "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
 		"daemonClaudeDir":       "retired: the flag is refused, so a replay never carries it (gt-ja7otj)",
-		"includeStatic":         "refused: a recording run refuses the flag until the record file carries it, so a replay never drops it (gt-76p406)",
 	}
 	flagType := reflect.TypeOf(clusterRenderFlags{})
 	recordType := reflect.TypeOf(renderFlagsRecord{})
