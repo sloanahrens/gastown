@@ -155,6 +155,41 @@ func TestReapStaleSandboxHook(t *testing.T) {
 	}
 }
 
+// A dead seat whose work bead went to another seat has its hook cleared too:
+// the bead is no longer this seat's to keep. Only the sandbox being gone is
+// required, as for a handed-back bead.
+func TestReapStaleSandboxHookClearsAHookWhoseBeadWentToAnotherSeat(t *testing.T) {
+	t.Parallel()
+	s := newStaleHook(t, staleHookOpts{
+		agent: "deepseek-flash-sandbox", hook: staleHookWork,
+		workStatus: "open", workAssignee: "gastown/polecats/immortan",
+	})
+	if !s.reap() {
+		t.Fatal("reapStaleSandboxHook = false, want the hook cleared")
+	}
+	if got := s.hook(); got != "" {
+		t.Errorf("agent bead hook = %q after the reap, want cleared", got)
+	}
+	if len(s.gateway) != 1 || s.gateway[0] != "gw1|"+staleHookSession {
+		t.Errorf("gateway asked %v, want the seat profile's gateway and the session's sandbox name", s.gateway)
+	}
+}
+
+// A dead seat whose work bead is closed has its hook cleared: nothing is left
+// to run.
+func TestReapStaleSandboxHookClearsAHookWhoseBeadIsClosed(t *testing.T) {
+	t.Parallel()
+	s := newStaleHook(t, staleHookOpts{
+		agent: "deepseek-flash-sandbox", hook: staleHookWork, workStatus: "closed",
+	})
+	if !s.reap() {
+		t.Fatal("reapStaleSandboxHook = false, want the hook cleared")
+	}
+	if got := s.hook(); got != "" {
+		t.Errorf("agent bead hook = %q after the reap, want cleared", got)
+	}
+}
+
 // A registry record that cannot be read reaps nothing and asks the gateway
 // nothing: the record cannot say whether the sandbox is orphaned.
 func TestReapStaleSandboxHookWithUnreadableRegistryReapsNothing(t *testing.T) {
