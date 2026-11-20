@@ -40,10 +40,11 @@ import (
 func init() { NewOpenShellBackend = newOpenShellBackend }
 
 const (
-	sandboxHome             = "/sandbox"        // the sandbox's root; uploads land here
-	sandboxTownRoot         = "/sandbox/gt"     // the skeleton's town root inside the sandbox (SandboxTownRootPath)
-	sandboxCacheDir         = "/tmp/gt-cache"   // the cache claim's mount point, outside /sandbox
-	dockerCacheDir          = "/sandbox/.cache" // the docker cache volume's mount point
+	sandboxHome             = "/sandbox"         // the sandbox's root; uploads land here
+	sandboxTownRoot         = "/sandbox/gt"      // the skeleton's town root inside the sandbox (SandboxTownRootPath)
+	sandboxCommonWork       = "/sandbox/gt/work" // the link each seat's worktree sits behind; the seat starts here (gt-f80lq2)
+	sandboxCacheDir         = "/tmp/gt-cache"    // the cache claim's mount point, outside /sandbox
+	dockerCacheDir          = "/sandbox/.cache"  // the docker cache volume's mount point
 	sandboxDoltPort         = "3307"
 	defaultControlPlaneHost = "host.docker.internal"
 	skeletonArchive         = "town-skel.tgz"
@@ -993,7 +994,10 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	}
 
 	b.tmux = tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(b.profile.Gateway, spec.Session)).Routed()
-	return &Prepared{WorkDir: workDir, Env: b.agentEnv(spec, workDir, tracker), OmitSecretPrefix: true}, nil
+	// The agent starts in the link: its shell and every go command see the
+	// logical path, which Go takes from $PWD. The env and the record keep the
+	// real worktree, which the host side names.
+	return &Prepared{WorkDir: sandboxCommonWork, Env: b.agentEnv(spec, workDir, tracker), OmitSecretPrefix: true}, nil
 }
 
 // createOrReplaceEndedSeat creates the sandbox, and a create the gateway
@@ -1131,6 +1135,12 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 		}
 		if err := b.run(ctx, spec.Session, "sh", "-c", redirectScript, "sh", workDir, redirect); err != nil {
 			return fmt.Errorf("writing beads redirect: %w", err)
+		}
+		// The seat starts in the common path, so Go's cache key holds it and
+		// not the seat's name. Linked before the record, which is the last thing
+		// populate writes, so a failed link rolls back with no record behind.
+		if err := b.run(ctx, spec.Session, "ln", "-sfn", workDir, sandboxCommonWork); err != nil {
+			return fmt.Errorf("linking %s to %s: %w", sandboxCommonWork, workDir, err)
 		}
 		return WriteSandboxRecord(b.townRoot, SandboxRecord{
 			Session:   spec.Session,
