@@ -1,9 +1,10 @@
 // Package jobs lists the town's maintenance jobs: every daemon step, the jobs
 // the daemon runs inside one (the Dolt gc), the nightly Dolt backup and each
-// node's disk reading, with the last completion, the cadence and whether it is
-// overdue. The list is read-only. It reads the daemon's patrol config, last-run
-// record, maintenance state, update history, backup root and node disk record,
-// and writes nothing, calls no daemon and runs no bd.
+// node's disk reading, with the last completion, the outcome, the cadence, the
+// due time and whether it is overdue. The list is read-only. It reads the
+// daemon's patrol config, last-run record, maintenance state, update history,
+// backup root, node disk record and run ledger, and writes nothing, calls no
+// daemon and runs no bd.
 package jobs
 
 import (
@@ -11,10 +12,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/jobledger"
 )
 
 // State is where a job stands against its cadence.
@@ -56,27 +59,35 @@ const minGrace = 10 * time.Minute
 
 // Job is one maintenance job as the list shows it.
 type Job struct {
-	Name string
+	Name string `json:"name"`
 	// Kind is the daemon step kind the job belongs to: a job that runs inside a
 	// patrol, like the Dolt gc, carries that patrol's kind.
-	Kind config.DaemonStepKind
+	Kind config.DaemonStepKind `json:"kind,omitempty"`
 	// LastRun is the job's last completion, nil when none is recorded or the
 	// job's own reader cannot read it.
-	LastRun *time.Time
+	LastRun *time.Time `json:"last_run,omitempty"`
 	// Cadence is the interval from the daemon's patrol config, zero when the
-	// job has none.
-	Cadence time.Duration
-	State   State
+	// job has none. JSON omits it: it is a Go duration, and no reader of the
+	// array reads it.
+	Cadence time.Duration `json:"-"`
+	// Due is when the job is next due: the newest run's own next-due time when
+	// the ledger recorded one, else LastRun plus the cadence and its grace. Nil
+	// when nothing says when the job is due.
+	Due   *time.Time `json:"due,omitempty"`
+	State State      `json:"state"`
 	// Outcome is how the last run ended, empty when no run is recorded or the
 	// row's reader has no outcome for it.
-	Outcome Outcome
+	Outcome Outcome `json:"outcome,omitempty"`
 	// Stats are the row's headline numbers, keyed by the name the dashboard
 	// reads (duration_ms, databases, reclaimed_bytes). Nil when the reader has
 	// none.
-	Stats map[string]int64
+	Stats map[string]int64 `json:"stats,omitempty"`
+	// Runs are the job's newest runs from the run ledger, oldest first, at most
+	// ledgerRunCap. Nil when the ledger holds none.
+	Runs []jobledger.Run `json:"runs,omitempty"`
 	// Source names the config the cadence was read from, empty when the
 	// cadence is not read from a config file.
-	Source string
+	Source string `json:"source,omitempty"`
 }
 
 // Options are the list's inputs that do not come from the town root.
@@ -90,10 +101,11 @@ type Options struct {
 
 // List returns one Job per daemon step in config.DaemonSteps, one for the
 // nightly Dolt backup, the Dolt gc row when the daemon has recorded one, and one
-// per node in the node disk record, judged at now. An unreadable patrol config
-// is an error, because no cadence can be trusted. An unreadable last-run record,
-// update history, backup root, maintenance state or node disk record is not: its
-// rows come back as StateUnknown.
+// per node in the node disk record, judged at now. A row named in the run ledger
+// takes its newest run's outcome, stats and time and its recent runs from there.
+// An unreadable patrol config is an error, because no cadence can be trusted. An
+// unreadable last-run record, update history, backup root, maintenance state,
+// node disk record or run ledger is not: its rows come back as StateUnknown.
 func List(townRoot string, opts Options, now time.Time) ([]Job, error) {
 	return list(townRoot, opts, config.DaemonSteps(), now)
 }
@@ -129,7 +141,122 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 	}
 	jobs = append(jobs, doltBackupRow(backup, backupNight, backupErr, now))
 	jobs = append(jobs, doltGCRows(townRoot, now)...)
-	return append(jobs, nodeDiskRows(townRoot, now)...), nil
+	jobs = append(jobs, nodeDiskRows(townRoot, now)...)
+	return withLedger(townRoot, jobs, now), nil
+}
+
+// ledgerRunCap is how many of a job's runs the list carries.
+const ledgerRunCap = 5
+
+// withLedger fills the rows from the town's run ledger. A row the ledger names
+// takes its newest run's outcome, stats and time, the run's own next-due time
+// when it recorded one, and its newest runs. A ledger that cannot be opened or
+// read makes every row unknown: no row's run history can be vouched for.
+func withLedger(townRoot string, rows []Job, now time.Time) []Job {
+	ledger, err := jobledger.NewLedger(townRoot)
+	if err != nil {
+		return ledgerUnreadable(rows)
+	}
+	for i := range rows {
+		rows[i] = ledgerRow(rows[i], ledger, now)
+	}
+	return rows
+}
+
+// ledgerUnreadable marks every row unknown, so a ledger no reader can open
+// never leaves a row showing ok.
+func ledgerUnreadable(rows []Job) []Job {
+	for i := range rows {
+		rows[i].State = StateUnknown
+	}
+	return rows
+}
+
+// ledgerRow applies the ledger to one row. A read error marks the row unknown.
+// A job with no run keeps the state its own reader gave it and gains a computed
+// due time. A run's own next-due time judges the job in place of its cadence.
+func ledgerRow(j Job, ledger *jobledger.Ledger, now time.Time) Job {
+	runs, err := ledger.Tail(j.Name, ledgerRunCap)
+	if err != nil {
+		j.State = StateUnknown
+		return j
+	}
+	if len(runs) == 0 {
+		j.Due = dueOf(j)
+		return j
+	}
+	// Tail returns the runs oldest first, so the newest is the last.
+	newest := runs[len(runs)-1]
+	j.Runs = runs
+	if at := runTime(newest); at != nil {
+		j.LastRun = at
+	}
+	j.Outcome = ledgerOutcome(newest.Outcome)
+	j.Stats = maps.Clone(newest.Stats)
+	if newest.NextDue != nil {
+		due := *newest.NextDue
+		j.Due = &due
+		j.State = stateAtDue(due, now)
+		return j
+	}
+	j.Due = dueOf(j)
+	if j.Cadence > 0 && j.State != StateUnknown {
+		// The run replaced the time the row was judged on, so judge it again;
+		// a cadence that could not be read left the row unknown, and a run with
+		// no next-due time cannot repair that.
+		j.State = stateOf(j, false, false, now)
+	}
+	return j
+}
+
+// runTime is when a run finished, else when it started: nil when it recorded
+// neither.
+func runTime(r jobledger.Run) *time.Time {
+	at := r.EndedAt
+	if at.IsZero() {
+		at = r.StartedAt
+	}
+	if at.IsZero() {
+		return nil
+	}
+	return &at
+}
+
+// ledgerOutcome maps a run's outcome to the row's. The empty string is a run
+// that recorded no outcome; any other string this list does not know is
+// failed, because a run whose outcome cannot be read did not succeed.
+func ledgerOutcome(s string) Outcome {
+	switch Outcome(s) {
+	case OutcomeOK, OutcomeFailed, OutcomeRefused, OutcomeDeferred:
+		return Outcome(s)
+	case "":
+		return ""
+	}
+	return OutcomeFailed
+}
+
+// graceOf is the slack an overdue check allows past the cadence.
+func graceOf(cadence time.Duration) time.Duration {
+	return max(cadence/4, minGrace)
+}
+
+// dueOf is when a row is due by its cadence: its last run plus the cadence and
+// its grace. Nil when the row has no last run or no cadence.
+func dueOf(j Job) *time.Time {
+	if j.LastRun == nil || j.Cadence <= 0 {
+		return nil
+	}
+	due := j.LastRun.Add(j.Cadence + graceOf(j.Cadence))
+	return &due
+}
+
+// stateAtDue judges a job by a due time it recorded itself: ok until that time
+// passes, overdue after it.
+func stateAtDue(due, now time.Time) State {
+	if now.After(due) {
+		return StateOverdue
+	}
+	return StateOK
 }
 
 // doltGCName is the job list's row for the Dolt gc, which runs inside the
@@ -176,7 +303,7 @@ func stateOf(j Job, runsUnreadable, cadenceUnreadable bool, now time.Time) State
 	case j.LastRun == nil:
 		return StateNeverRun
 	}
-	grace := max(j.Cadence/4, minGrace)
+	grace := graceOf(j.Cadence)
 	if now.Sub(*j.LastRun) > j.Cadence+grace {
 		return StateOverdue
 	}

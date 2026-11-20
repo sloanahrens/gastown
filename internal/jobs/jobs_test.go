@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/jobledger"
 	"github.com/steveyegge/gastown/internal/testutil"
 )
 
@@ -223,6 +224,141 @@ func findJob(jobs []Job, name string) (Job, bool) {
 		}
 	}
 	return Job{}, false
+}
+
+// appendLedgerRuns writes runs to the town's run ledger in the order given.
+func appendLedgerRuns(t *testing.T, root string, runs ...jobledger.Run) {
+	t.Helper()
+	ledger, err := jobledger.NewLedger(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range runs {
+		if err := ledger.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestJobsLedgerSource is bead gt-pqgbd7: a job named in the run ledger takes
+// its newest run's outcome, stats and time, the run's own next-due time (in
+// place of the cadence's) and its newest five runs, and the array carries them.
+func TestJobsLedgerSource(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeMayorDaemon(t, root, `{"job":{"interval":"1h"}}`)
+
+	// Five older runs, then the newest. The newest is due five minutes ago,
+	// while the cadence alone would put it due in 1h05m: only the run's own
+	// next-due time makes the row overdue.
+	older := make([]jobledger.Run, 0, 5)
+	for i := range 5 {
+		started := testNow.Add(-6*time.Hour + time.Duration(i)*30*time.Minute)
+		older = append(older, jobledger.Run{
+			Job:       "job",
+			StartedAt: started,
+			EndedAt:   started.Add(time.Minute),
+			Outcome:   "ok",
+			Stats:     map[string]int64{"bytes_freed": int64(i)},
+		})
+	}
+	due := testNow.Add(-5 * time.Minute)
+	newest := jobledger.Run{
+		Job:       "job",
+		StartedAt: testNow.Add(-11 * time.Minute),
+		EndedAt:   testNow.Add(-10 * time.Minute),
+		Outcome:   "failed",
+		Stats:     map[string]int64{"bytes_freed": 4242, "trimmed_files": 7},
+		NextDue:   &due,
+	}
+	appendLedgerRuns(t, root, append(older, newest)...)
+
+	jobs, err := list(root, Options{}, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, testNow)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	row := jobs[0]
+
+	if row.LastRun == nil || !row.LastRun.Equal(newest.EndedAt) {
+		t.Errorf("LastRun = %v, want the newest run's end %v", row.LastRun, newest.EndedAt)
+	}
+	if row.Outcome != OutcomeFailed {
+		t.Errorf("Outcome = %q, want failed from the newest run", row.Outcome)
+	}
+	if got := row.Stats["bytes_freed"]; got != 4242 {
+		t.Errorf("Stats[bytes_freed] = %d, want 4242", got)
+	}
+	if got := row.Stats["trimmed_files"]; got != 7 {
+		t.Errorf("Stats[trimmed_files] = %d, want 7", got)
+	}
+	if row.Due == nil || !row.Due.Equal(due) {
+		t.Errorf("Due = %v, want the run's next due %v", row.Due, due)
+	}
+	if row.State != StateOverdue {
+		t.Errorf("State = %q, want overdue by the run's own due time", row.State)
+	}
+	if len(row.Runs) != ledgerRunCap {
+		t.Fatalf("got %d runs, want the newest %d", len(row.Runs), ledgerRunCap)
+	}
+	if got := row.Runs[0].Stats["bytes_freed"]; got != 1 {
+		t.Errorf("Runs[0].bytes_freed = %d, want 1: the oldest of the newest five", got)
+	}
+	if got := row.Runs[len(row.Runs)-1]; got.Outcome != "failed" || got.Stats["bytes_freed"] != 4242 {
+		t.Errorf("newest carried run = %+v, want the failed 4242 run last", got)
+	}
+
+	// The array gt jobs --json prints carries the same five runs and the due
+	// time under the keys the dashboard reads.
+	data, err := json.Marshal(jobs)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var report []struct {
+		Name    string           `json:"name"`
+		State   string           `json:"state"`
+		Outcome string           `json:"outcome"`
+		LastRun *time.Time       `json:"last_run"`
+		Due     *time.Time       `json:"due"`
+		Stats   map[string]int64 `json:"stats"`
+		Runs    []jobledger.Run  `json:"runs"`
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(report) != len(jobs) {
+		t.Fatalf("JSON holds %d rows, want %d", len(report), len(jobs))
+	}
+	got := report[0]
+	if got.Name != "job" || got.State != "overdue" || got.Outcome != "failed" {
+		t.Errorf("JSON row = %+v, want job/overdue/failed", got)
+	}
+	if len(got.Runs) != ledgerRunCap {
+		t.Errorf("JSON runs = %d, want %d", len(got.Runs), ledgerRunCap)
+	}
+	if got.Due == nil || !got.Due.Equal(due) {
+		t.Errorf("JSON due = %v, want %v", got.Due, due)
+	}
+}
+
+// TestJobsLedgerSourceUnreadable is bead gt-pqgbd7: a ledger that exists but
+// cannot be read gives the job State unknown, never ok.
+func TestJobsLedgerSourceUnreadable(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeMayorDaemon(t, root, `{"job":{"interval":"1h"}}`)
+	// A directory where the live ledger file belongs: the ledger is there, but
+	// every read of it fails.
+	if err := os.MkdirAll(filepath.Join(root, ".runtime", "jobs", "runs.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs, err := list(root, Options{}, []config.DaemonStep{{Name: "job", Kind: config.DaemonStepPatrol}}, testNow)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if jobs[0].State != StateUnknown {
+		t.Errorf("State = %q, want unknown for an unreadable ledger", jobs[0].State)
+	}
 }
 
 func TestJobsDoltGC(t *testing.T) {
