@@ -188,7 +188,7 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 // a call that starts none records none.
 func TestIntegrationGitProcessRecorderSeesEveryProcess(t *testing.T) {
 	_, rec := newAllocateFixture(t)
-	seat := filepath.Join(t.TempDir(), "seat")
+	seat := filepath.Join(privateTempDir(t), "seat")
 	runGit(t, rec.runIn, "worktree", "add", "-q", "-b", "recbranch", seat, "origin/main")
 
 	two := git.NewGitWithExec(seat, rec.run)
@@ -199,7 +199,7 @@ func TestIntegrationGitProcessRecorderSeesEveryProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CommonDir: %v", err)
 	}
-	missing := git.NewGitWithExec(filepath.Join(t.TempDir(), "gone"), rec.run)
+	missing := git.NewGitWithExec(filepath.Join(privateTempDir(t), "gone"), rec.run)
 	if msg := processesMismatch("a missing directory's ConfigGet", rec.countDuring(func() { _, err = missing.ConfigGet("x") }), 0); msg != "" {
 		t.Fatal(msg)
 	}
@@ -213,14 +213,22 @@ func TestIntegrationGitProcessRecorderSeesEveryProcess(t *testing.T) {
 	}
 }
 
+// privateTempDir is t.TempDir() made 0700: the directory is the test's alone,
+// whatever the umask the gate runs under.
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod %s: %v", dir, err)
+	}
+	return dir
+}
+
 // newAllocateFixture builds a rig whose .repo.git has origin/main and a Manager
 // over an injected store, every git handle backed by a gitProcessRecorder.
 func newAllocateFixture(t *testing.T) (*Manager, *gitProcessRecorder) {
 	t.Helper()
-	root := t.TempDir()
-	if err := os.Chmod(root, 0o700); err != nil {
-		t.Fatalf("chmod fixture root: %v", err)
-	}
+	root := privateTempDir(t)
 	work := filepath.Join(root, "work")
 	runGit(t, root, "init", "-q", work)
 	runGit(t, work, "symbolic-ref", "HEAD", "refs/heads/main")
