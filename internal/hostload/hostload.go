@@ -6,6 +6,7 @@ package hostload
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -50,15 +51,34 @@ func Line(now time.Time, load [3]float64, ncpu int) string {
 // Append appends line to dir's file for now's own local date, YYYY-MM-DD.log,
 // creating dir (0755) and the file (0644) and never rewriting one.
 func Append(dir string, now time.Time, line string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	return appendLine(dir, now, line, hostSeams())
+}
+
+// seams is appendLine's directory maker and file opener, so a test can drive
+// the write failures a host cannot be made to produce.
+type seams struct {
+	mkdirAll func(string, os.FileMode) error
+	open     func(string, int, os.FileMode) (io.WriteCloser, error)
+}
+
+// hostSeams is the process's own filesystem.
+func hostSeams() seams {
+	return seams{mkdirAll: os.MkdirAll, open: func(name string, flag int, perm os.FileMode) (io.WriteCloser, error) {
+		return os.OpenFile(name, flag, perm)
+	}}
+}
+
+// appendLine is Append through seams.
+func appendLine(dir string, now time.Time, line string, s seams) error {
+	if err := s.mkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating host load directory %s: %w", dir, err)
 	}
 	path := filepath.Join(dir, now.Format("2006-01-02")+".log")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := s.open(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening host load file %s: %w", path, err)
 	}
-	_, err = f.WriteString(line + "\n")
+	_, err = io.WriteString(f, line+"\n")
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}

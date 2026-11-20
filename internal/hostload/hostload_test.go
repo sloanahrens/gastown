@@ -1,6 +1,8 @@
 package hostload
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,8 +89,15 @@ func TestHostLoadAppend(t *testing.T) {
 	}
 }
 
-// TestHostLoadAppendRefuses holds the two ways a write cannot start: a
-// directory that cannot be made and a day file that cannot be opened.
+// failingFile fails every write, as a full disk does.
+type failingFile struct{}
+
+func (failingFile) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+func (failingFile) Close() error              { return nil }
+
+// TestHostLoadAppendRefuses holds each way a write cannot happen: a directory
+// that cannot be made, a day file that cannot be opened, and a write that
+// fails after the open.
 func TestHostLoadAppendRefuses(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 20, 16, 24, 0, 0, zone)
@@ -99,12 +108,18 @@ func TestHostLoadAppendRefuses(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(tmp, "logs", "2026-11-20.log"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range []struct{ dir, want string }{
-		{filepath.Join(tmp, "file"), "creating host load directory"},
-		{filepath.Join(tmp, "logs"), "opening host load file"},
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{Append(filepath.Join(tmp, "file"), now, "x"), "creating host load directory"},
+		{Append(filepath.Join(tmp, "logs"), now, "x"), "opening host load file"},
+		{appendLine(tmp, now, "x", seams{os.MkdirAll, func(string, int, os.FileMode) (io.WriteCloser, error) {
+			return failingFile{}, nil
+		}}), "appending to host load file"},
 	} {
-		if err := Append(c.dir, now, "x"); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("Append(%s) = %v: want %q", c.dir, err, c.want)
+		if c.err == nil || !strings.Contains(c.err.Error(), c.want) {
+			t.Errorf("Append = %v: want %q", c.err, c.want)
 		}
 	}
 }
