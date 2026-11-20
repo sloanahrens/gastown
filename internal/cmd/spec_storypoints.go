@@ -246,6 +246,11 @@ func specSPSlung(env specDispatchEnv, beadID string, latest specdispatch.Spec, s
 		}
 	}
 	label := specSPSlungPrefix + reason
+	// A seam that is not wired cannot write the reason, and the tick must not
+	// read the missing label as a bead that was never at or over the trigger.
+	if env.AddLabel == nil {
+		return fmt.Sprintf("%s: %s label: no label writer is wired", beadID, label)
+	}
 	if err := env.AddLabel(beadID, label); err != nil {
 		return fmt.Sprintf("%s: %s label: %v", beadID, label, err)
 	}

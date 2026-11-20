@@ -710,6 +710,25 @@ func TestSpecStoryPointSlungOnce(t *testing.T) {
 			t.Errorf("slung %q, want gt-a: a failed reason write does not hold the bead", got)
 		}
 	})
+	t.Run("no label writer is wired", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		env := f.env()
+		env.StoryPointSplitOver = 11
+		env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+			return splitOutcome("estimated", 13, 12, "shape", ""), nil
+		}
+		env.AddLabel = nil
+		r := runSpecDispatchCycle(env)
+
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "gt-a") ||
+			!strings.Contains(r.Errors[0], "sp-slung:shape") || !strings.Contains(r.Errors[0], "no label writer is wired") {
+			t.Errorf("errors = %q, want one naming the bead, the label and the unwired seam", r.Errors)
+		}
+		if got := strings.Join(f.slung, " "); got != "gt-a" {
+			t.Errorf("slung %q, want gt-a: an unwired writer does not hold the bead", got)
+		}
+	})
 }
 
 // TestSplitLabelStale: the split label is stale only when the bead's own labels
