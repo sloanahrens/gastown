@@ -153,6 +153,49 @@ func TestOrphanedRoleOverridesCheck(t *testing.T) {
 	}
 }
 
+// resolveRoot makes rel absolute and follows symlinks. A sandbox seat reaches
+// its checkout through a symlink, and filepath.WalkDir does not descend a
+// symlink root, so an unresolved root is walked as a single file.
+func resolveRoot(rel string) (string, error) {
+	root, err := filepath.Abs(rel)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(root)
+}
+
+func TestResolveRootFollowsASymlink(t *testing.T) {
+	t.Parallel()
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "work")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	visited := func(root string) int {
+		n := 0
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && strings.HasSuffix(path, ".go") {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+	if got := visited(link); got != 0 {
+		t.Fatalf("premise: WalkDir over the symlink visited %d Go files, want 0", got)
+	}
+	root, err := resolveRoot(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := visited(root); got != 1 {
+		t.Fatalf("WalkDir over the resolved root %s visited %d Go files, want 1", root, got)
+	}
+}
+
 // TestRoleOverridesHaveNoReader pins the premise of
 // OrphanedRoleOverridesCheck (gt-yip5x): no non-test Go file passes a "roles"
 // segment to filepath.Join, the shape every on-disk path in this repo is built
@@ -166,7 +209,7 @@ func TestOrphanedRoleOverridesCheck(t *testing.T) {
 // otherwise tell users to delete live config.
 func TestRoleOverridesHaveNoReader(t *testing.T) {
 	t.Parallel()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
+	root, err := resolveRoot(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
