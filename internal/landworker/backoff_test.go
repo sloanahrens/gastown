@@ -307,4 +307,12 @@ func TestPassInfraFailureFailsLoudAtOnceAndParks(t *testing.T) {
 	if len(h.lander.calls) != 1 {
 		t.Fatalf("landed %d times inside the park; want the one failed attempt and no retry", len(h.lander.calls))
 	}
+
+	// A restart (the worker's state is in memory) ends the park: a daemon that
+	// carries the fix lands the bead again.
+	h.w.state = nil
+	h.w.Pass(context.Background())
+	if len(h.lander.calls) != 2 {
+		t.Fatalf("landed %d times after a restart; want the parked bead tried again", len(h.lander.calls))
+	}
 }
