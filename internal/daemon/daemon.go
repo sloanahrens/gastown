@@ -1140,6 +1140,11 @@ type Daemon struct {
 	// (overrun_guard.go).
 	overrunGuardRunning atomic.Bool
 
+	// overrunKeptReads is the guard's memory of the last good read of each
+	// bead, so a tick where bd cannot be read still judges the bead's seat on
+	// it (overrun_guard.go, gt-80rmki).
+	overrunKeptReads overrunKeptReadStore
+
 	// gitHygieneRunning is the git_hygiene patrol's single-flight guard
 	// (git_hygiene.go).
 	gitHygieneRunning atomic.Bool
