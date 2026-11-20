@@ -165,6 +165,9 @@ type helperCall struct {
 	stderr io.Writer
 	get    func(string) string
 	plugin pluginRun
+	// run is the program a helper runs, such as crictl; the field lets a test
+	// give a fake so a dispatch runs no process.
+	run func(name string, args ...string) ([]byte, error)
 }
 
 // helperRun is one first argument runProgram dispatches: the verb, and the
@@ -182,6 +185,7 @@ var helperRuns = []helperRun{
 	{"trim-cache", func(c helperCall) int { return trimCacheMain(c.args, c.stdout, c.stderr) }},
 	{"trim-paths", func(c helperCall) int { return trimPathsMain(c.args, c.stdout, c.stderr) }},
 	{"trim-list", func(c helperCall) int { return trimListMain(c.args, c.stdout, c.stderr) }},
+	{"node-prune", func(c helperCall) int { return nodePruneWith(c.args, c.stdout, c.stderr, c.run) }},
 	{"trim-list-write", func(c helperCall) int { return trimListWriteMain(c.args, c.stdout, c.stderr) }},
 	{"seed-clone", func(c helperCall) int { return seedCloneMain(c.args, c.stdout, c.stderr) }},
 	{"seed-cache", func(c helperCall) int { return seedCacheMain(c.args, c.stdout, c.stderr) }},
@@ -189,11 +193,17 @@ var helperRuns = []helperRun{
 
 // runProgramWith answers runProgram over entry, the plugin run it starts.
 func runProgramWith(args []string, stdout, stderr io.Writer, get func(string) string, entry pluginRun) int {
+	return runProgramWithRunner(args, stdout, stderr, get, entry, execProgram)
+}
+
+// runProgramWithRunner answers runProgramWith over run, the program a helper
+// runs: runProgramWith gives the real process, and a test gives a fake.
+func runProgramWithRunner(args []string, stdout, stderr io.Writer, get func(string) string, entry pluginRun, run func(name string, args ...string) ([]byte, error)) int {
 	if len(args) == 0 {
 		return entry(stdout, get)
 	}
 	if h, ok := helperRunFor(args[0]); ok {
-		return h.help(helperCall{args: args[1:], stdout: stdout, stderr: stderr, get: get, plugin: entry})
+		return h.help(helperCall{args: args[1:], stdout: stdout, stderr: stderr, get: get, plugin: entry, run: run})
 	}
 	fmt.Fprintf(stderr, "polecat-image: unknown subcommand %q: known are %s\n", oneLineArgument(args[0]), helperVerbNames())
 	return 2
