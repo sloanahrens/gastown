@@ -138,8 +138,25 @@ func countMismatches(table, got []commandCount) []string {
 	return msgs
 }
 
-// processesMismatch is the recorder test's check; the mutation rows feed it a
-// wrong count, so the check itself is shown to fail.
+// pinProblems is the pin's one failure path, the test and its mutation rows
+// alike: every command whose count differs from the table, and a total that
+// differs from the table's sum.
+func pinProblems(table []commandCount, rec *gitProcessRecorder) []string {
+	msgs := countMismatches(table, rec.counts())
+	total := 0
+	for _, c := range table {
+		total += c.count
+	}
+	if n := rec.processCount(); n != total {
+		msgs = append(msgs, fmt.Sprintf("total: ran %d git processes, table sums to %d", n, total))
+	}
+	return msgs
+}
+
+// processesMismatch is the recorder test's check of one call's measured process
+// count against the count expected of it. The recorder test feeds it the
+// measured count once with the true expectation and once with an expectation one
+// off, so each assertion is shown able to fail.
 func processesMismatch(call string, got, want int) string {
 	if got != want {
 		return fmt.Sprintf("%s ran %d git processes, want %d", call, got, want)
@@ -159,15 +176,8 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 		{"cat-file", 1}, {"config", 4}, {"fetch", 1}, {"rev-parse", 4},
 		{"show-ref", 1}, {"worktree", 2},
 	}
-	if msgs := countMismatches(table, rec.counts()); len(msgs) > 0 {
+	if msgs := pinProblems(table, rec); len(msgs) > 0 {
 		t.Fatalf("allocate ran git commands the table does not pin:\n%s", strings.Join(msgs, "\n"))
-	}
-	total := 0
-	for _, c := range table {
-		total += c.count
-	}
-	if n := rec.processCount(); n != total {
-		t.Fatalf("allocate ran %d git processes, table sums to %d", n, total)
 	}
 	for _, mut := range []struct {
 		name string
@@ -191,30 +201,38 @@ func TestIntegrationGitProcessRecorderSeesEveryProcess(t *testing.T) {
 	seat := filepath.Join(privateTempDir(t), "seat")
 	runGit(t, rec.runIn, "worktree", "add", "-q", "-b", "recbranch", seat, "origin/main")
 
-	two := git.NewGitWithExec(seat, rec.run)
+	// Both calls are production git.Git methods driven through the recorder:
+	// CommonDir on a seat starts two git processes (the town-root guard's
+	// rev-parse --show-toplevel and the rev-parse --git-common-dir read), and
+	// ConfigGet on a directory that does not exist is refused before git starts.
 	var err error
-	if msg := processesMismatch("CommonDir", rec.countDuring(func() { _, err = two.CommonDir() }), 2); msg != "" {
-		t.Fatal(msg)
-	}
+	two := git.NewGitWithExec(seat, rec.run)
+	gotTwo := rec.countDuring(func() { _, err = two.CommonDir() })
 	if err != nil {
 		t.Fatalf("CommonDir: %v", err)
 	}
-	missing := git.NewGitWithExec(filepath.Join(privateTempDir(t), "gone"), rec.run)
-	if msg := processesMismatch("a missing directory's ConfigGet", rec.countDuring(func() { _, err = missing.ConfigGet("x") }), 0); msg != "" {
+	if msg := processesMismatch("CommonDir", gotTwo, 2); msg != "" {
 		t.Fatal(msg)
 	}
+	missing := git.NewGitWithExec(filepath.Join(privateTempDir(t), "gone"), rec.run)
+	gotNone := rec.countDuring(func() { _, err = missing.ConfigGet("x") })
 	if err == nil {
 		t.Fatal("ConfigGet on a missing directory returned no error, so the zero-process call did not refuse before git")
 	}
-	// The same check rejects a count one off in either direction, so neither
-	// assertion above is vacuous.
-	if processesMismatch("none-call", 1, 0) == "" || processesMismatch("two-call", 1, 2) == "" {
-		t.Fatal("processesMismatch accepted a count one off")
+	if msg := processesMismatch("a missing directory's ConfigGet", gotNone, 0); msg != "" {
+		t.Fatal(msg)
+	}
+	// The same check, fed the measured counts against an expectation one off,
+	// reports a mismatch, so neither assertion above is vacuous.
+	if processesMismatch("CommonDir", gotTwo, 2+1) == "" || processesMismatch("ConfigGet", gotNone, 0+1) == "" {
+		t.Fatal("processesMismatch accepted a measured count one off")
 	}
 }
 
-// privateTempDir is t.TempDir() made 0700: the directory is the test's alone,
-// whatever the umask the gate runs under.
+// privateTempDir is t.TempDir() made 0700, which is what the test standard asks
+// of a test that needs a private directory (docs/standards/test-engineering.md,
+// rule 8). The fixture's other directories are made inside it, so they are as
+// private as it is.
 func privateTempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
