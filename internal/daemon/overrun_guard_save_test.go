@@ -138,6 +138,36 @@ func TestOverrunSaveRescue_DivergedTipIsSavedToARescueBranch(t *testing.T) {
 	}
 }
 
+// A rescue push origin refuses too (a ref of that name already holding other
+// history) is an ordinary save error: nothing is reported saved, and the stop
+// retries it as it retries any refusal.
+func TestOverrunSaveWork_RefusedRescuePushIsAnError(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.divergeOriginBranch(t)
+	rescue := stopSeat.Branch + "-" + w.tip[:7]
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingRefGit{daemonGit: open(dir), suffix: ":refs/heads/" + rescue, err: errors.New("refusing the rescue ref")}
+	}
+
+	got, err := w.d.overrunSaveWork(stopSeat)
+
+	if err == nil {
+		t.Fatalf("save = %+v, nil; want the refused rescue push named", got)
+	}
+	var diverged *overrunPushDivergedError
+	if errors.As(err, &diverged) {
+		t.Errorf("save error = %v; want an ordinary refusal, not the divergence error the rescue answers", err)
+	}
+	if got != (overrunSave{}) {
+		t.Errorf("save result = %+v on a refused rescue push, want nothing reported as saved", got)
+	}
+	if origin := w.f.Ref(w.origin, "refs/heads/"+rescue); origin != "" {
+		t.Errorf("origin holds %q for the rescue branch, want none: its push was refused", origin)
+	}
+}
+
 // pushRefusingGit is the seat's git with its push answering the given error
 // while refuse is nil or points at true, so a test can hold the stop on a push
 // failure and then let it through.
@@ -149,6 +179,21 @@ type pushRefusingGit struct {
 
 func (g pushRefusingGit) Push(remote, refspec string, force bool) error {
 	if g.refuse == nil || *g.refuse {
+		return g.err
+	}
+	return g.daemonGit.Push(remote, refspec, force)
+}
+
+// pushRefusingRefGit refuses the push whose refspec ends with the given suffix
+// and delegates every other, so a test can refuse the rescue push alone.
+type pushRefusingRefGit struct {
+	daemonGit
+	suffix string
+	err    error
+}
+
+func (g pushRefusingRefGit) Push(remote, refspec string, force bool) error {
+	if strings.HasSuffix(refspec, g.suffix) {
 		return g.err
 	}
 	return g.daemonGit.Push(remote, refspec, force)
