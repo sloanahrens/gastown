@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -126,6 +127,51 @@ func TestSpecChildrenReadDefaultWiringCostsTwoReadsForChildless(t *testing.T) {
 	}
 	if client.childrenOf != chunks || client.showMultiple != chunks {
 		t.Errorf("fifty childless candidates cost %d ChildrenOf and %d ShowMultiple reads; want %d of each, one per chunk", client.childrenOf, client.showMultiple, chunks)
+	}
+}
+
+// A chunk read the deadline ended is left for the next tick: one call, no
+// per-bead call, and every id of the chunk reports the timeout. A failure that
+// is not a timeout keeps the per-bead fallback, for that chunk's ids only
+// (gt-qrz8rm). Mutation: dropping the isBDTimeout branch reads each id alone
+// and reports the reader's own error.
+func TestTickEffTimeoutDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	read := specCandidateBoardRead(t, specCandidateFixture())
+	cands := read.Candidates[:specChildrenChunkSize]
+	for _, tc := range []struct {
+		fail     error
+		fallback bool
+	}{
+		{fmt.Errorf("bd show --children: %w", context.DeadlineExceeded), false},
+		{fakeExit(124), false}, // the gateway's kill
+		{errors.New("bd show --children: refused"), true},
+	} {
+		reads := newSpecTickReads()
+		var singles []string
+		children := specCandidateChildren(root, reads, cands, nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+			if len(ids) > 1 {
+				return nil, tc.fail
+			}
+			singles = append(singles, ids[0])
+			return map[string][]*beads.Issue{ids[0]: {}}, nil
+		})
+		for _, c := range cands {
+			kids, err := children(c.Spec.ID)
+			if tc.fallback && (err != nil || len(kids) != 0) {
+				t.Errorf("children(%s) after %v = %v, %v; want no children and no error", c.Spec.ID, tc.fail, kids, err)
+			}
+			if !tc.fallback && !errors.Is(err, errSpecChildrenTimeout) {
+				t.Errorf("children(%s) after %v = %v; want the timeout", c.Spec.ID, tc.fail, err)
+			}
+		}
+		if tc.fallback && (len(singles) != len(cands) || reads.Calls() > 2*specChildrenChunkSize) {
+			t.Errorf("the refused chunk read %v per bead and cost %d calls; want each of its %d ids once and at most %d calls", singles, reads.Calls(), len(cands), 2*specChildrenChunkSize)
+		}
+		if !tc.fallback && (len(singles) != 0 || reads.Calls() != 1) {
+			t.Errorf("the timed-out chunk (%v) read %v per bead and cost %d calls; want none and one", tc.fail, singles, reads.Calls())
+		}
 	}
 }
 
