@@ -34,7 +34,7 @@ func TestTownClusterRenderBdGatewayMaxConcurrentWritesTheCap(t *testing.T) {
 		// want is the value the gateway's command carries; empty means no flag.
 		want string
 	}{
-		{name: "no flag writes the default 32", cap: defaultBdGatewayMaxConcurrent, want: "32"},
+		{name: "no flag writes the default 8", cap: defaultBdGatewayMaxConcurrent, want: "8"},
 		{name: "the flag writes the cap it names", cap: 48, want: "48"},
 		{name: "zero leaves the gateway's own default", cap: 0, want: ""},
 	}
@@ -58,6 +58,19 @@ func TestTownClusterRenderBdGatewayMaxConcurrentWritesTheCap(t *testing.T) {
 				t.Errorf("the gateway's --max-concurrent = %q (named %v), want %q", got, named, tc.want)
 			}
 		})
+	}
+}
+
+// TestTownClusterRenderBdGatewayMaxConcurrentDefaultPinned holds the default cap at
+// 8, which is what the render writes when no cap is named. Raising it is a
+// deliberate edit to the burst the VM-to-host path carries: read bead gt-w0iqhu
+// first, because the path admits about 12 simultaneous new connections and each bd
+// process opens its own.
+func TestTownClusterRenderBdGatewayMaxConcurrentDefaultPinned(t *testing.T) {
+	t.Parallel()
+	const want = 8
+	if defaultBdGatewayMaxConcurrent != want {
+		t.Fatalf("defaultBdGatewayMaxConcurrent = %d, want %d; read bead gt-w0iqhu before changing the gateway's default cap", defaultBdGatewayMaxConcurrent, want)
 	}
 }
 
