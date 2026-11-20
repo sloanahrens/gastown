@@ -143,6 +143,27 @@ func TestNodeImagePruneRunFailsClosedBeforeTheJob(t *testing.T) {
 	}
 }
 
+// TestNodeImagePruneRunDeleteFailureKeepsTheReport refuses the Job's delete after
+// an apply whose log reads and parses. The run returns the log's report and an
+// error naming the delete, never a zero report.
+func TestNodeImagePruneRunDeleteFailureKeepsTheReport(t *testing.T) {
+	t.Parallel()
+
+	applied := strings.Repeat("node-prune: removed sha256:a1\n", 7) +
+		"node-prune: applied removed 7 failed 2\n"
+	kube := &fakeKube{fail: "Delete", list: []byte(jsonList(jsonDeployment("gt-daemon", digestN("a")))), logs: []byte(applied)}
+	rep, err := runNodeImagePrune(context.Background(), kube, "node-prune-apply", "gt-bd:1", 2, true)
+	if err == nil {
+		t.Fatalf("runNodeImagePrune error = nil, want the delete's error")
+	}
+	if !strings.Contains(err.Error(), "delete job") {
+		t.Errorf("error = %q, want it to name the delete", err)
+	}
+	if rep.Removed != 7 || rep.Failed != 2 {
+		t.Errorf("Removed/Failed = %d/%d, want 7/2", rep.Removed, rep.Failed)
+	}
+}
+
 // TestNodeImagePruneRunFailsClosedDeletesTheJob refuses a step once the apply was
 // attempted and cancels the caller's context while that step runs. The Job is still
 // deleted, on a context the cancellation does not reach, and the error names each
