@@ -30,6 +30,14 @@ const (
 	// next landing (gt-4ty22).
 	DefaultFollowupBackpressure = 40
 
+	// DefaultFollowupMaxAddedLines is the added-line budget a follow-up bead
+	// may spend for a rig that configures none (gt-eyum7q).
+	DefaultFollowupMaxAddedLines = 80
+
+	// DefaultFollowupMaxFiles is the file-count budget a follow-up bead may
+	// touch for a rig that configures none (gt-eyum7q).
+	DefaultFollowupMaxFiles = 3
+
 	// followUpGroupFindings is the finding count above which a landing's
 	// findings file one bead per package rather than one bead in all.
 	followUpGroupFindings = 6

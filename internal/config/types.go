@@ -1344,6 +1344,12 @@ type MergeQueueConfig struct {
 	// means the feed's own default of 40 (land.DefaultFollowupBackpressure).
 	FollowupBackpressure int `json:"followup_backpressure,omitempty"`
 
+	// FollowupMaxAddedLines and FollowupMaxFiles cap the added lines and files
+	// a follow-up bead (label om-followup) may change; zero or unset takes the
+	// caller's default.
+	FollowupMaxAddedLines int `json:"followup_max_added_lines,omitempty"`
+	FollowupMaxFiles      int `json:"followup_max_files,omitempty"`
+
 	// FollowupBudgetPercent is the share of the week's landings the landing
 	// worker's follow-up feed may file as new beads for this rig (gt-wwpfo7).
 	// Zero or unset means the feed's own default of 25
@@ -1549,6 +1555,24 @@ func (c *MergeQueueConfig) GetMaxReadyForDispatch() int {
 		return 0
 	}
 	return c.MaxReadyForDispatch
+}
+
+// GetFollowupMaxAddedLines returns the added-line budget, or def when the rig
+// sets a non-positive one. Nil-safe.
+func (c *MergeQueueConfig) GetFollowupMaxAddedLines(def int) int {
+	if c == nil || c.FollowupMaxAddedLines <= 0 {
+		return def
+	}
+	return c.FollowupMaxAddedLines
+}
+
+// GetFollowupMaxFiles returns the file-count budget, or def when the rig sets a
+// non-positive one. Nil-safe.
+func (c *MergeQueueConfig) GetFollowupMaxFiles(def int) int {
+	if c == nil || c.FollowupMaxFiles <= 0 {
+		return def
+	}
+	return c.FollowupMaxFiles
 }
 
 // boolPtr returns a pointer to a bool value.
