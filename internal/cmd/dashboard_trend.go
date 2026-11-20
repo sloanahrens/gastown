@@ -357,6 +357,23 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 	return who(rig, bead)
 }
 
+// rejectedBeadKey names a rejected row's bead with the rig the row draws, so
+// the reader can name the polecat identity bead the bead's assignee records
+// the agent on.
+type rejectedBeadKey struct {
+	Rig  string
+	Bead string
+}
+
+// rejectedBeadFields are what a bead carries for a rejected Landings row that
+// has no landed record: the priority it was filed at, its sp: estimate, and
+// the agent that built it. A field the bead does not carry is empty.
+type rejectedBeadFields struct {
+	Priority   *int
+	SPEstimate *int
+	Agent      string
+}
+
 // buildRecentLandings joins the last 24 hours of landings and rejections with
 // the stage lines that say what each cost, newest first, keeping the newest
 // limit rows: limit is the table's row bound, and the caller always passes one
@@ -395,13 +412,19 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // routes table (gt-a64mi). An empty answer falls back to gastown. names fills
 // the By and Polecat cells: who names a row whose record carries no branch,
 // and submitter names a landing on the reserved ops branch (gt-6ua0sn), asked
-// only when the branch naming the row is that reserved one.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, names landingNames, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfBead func(bead string) string, cachedTitle func(rig, bead string) (string, bool), limit int) []dashboard.LandingRow {
+// only when the branch naming the row is that reserved one. A rejected row
+// takes its priority, sp: estimate and agent from the landed record of its
+// bead when recs holds one; a bead with no landed record carries them itself,
+// so rejectedFields reads them from the bead — asked once, with the beads of
+// every kept rejection, so a poll costs a batched read rather than one bd call
+// per row (gt-4ppnp3). A read that fails leaves those cells empty, as they
+// were, and never blocks the row.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, names landingNames, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfBead func(bead string) string, cachedTitle func(rig, bead string) (string, bool), rejectedFields func(keys []rejectedBeadKey) (map[rejectedBeadKey]rejectedBeadFields, error), limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
-	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
+	recOf := map[string]omRecord{} // a rejection line names no rig; a landing of the same bead does
 	for _, rec := range recs {
-		rigOf[rec.Bead] = rec.Rig
+		recOf[rec.Bead] = rec
 	}
 	timing := func(r *dashboard.LandingRow, st *omStage) {
 		if st == nil {
@@ -456,7 +479,8 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		if rj.At.Before(since) {
 			continue
 		}
-		rig := rigOf[rj.Bead]
+		rec, landed := recOf[rj.Bead]
+		rig := rec.Rig
 		if rig == "" && rigOfBead != nil {
 			rig = rigOfBead(rj.Bead)
 		}
@@ -464,6 +488,11 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			rig = "gastown" // the only rig with a landing worker running
 		}
 		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Polecat: landingName(names.who, rig, rj.Bead), Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
+		if landed {
+			// The bead's own landed record, from an earlier attempt, already
+			// carries what the bead would be read for.
+			row.Agent, row.Priority, row.SPEstimate = rec.Agent, rec.Priority, rec.SPEstimate
+		}
 		timing(&row, omStageFor(stages, rj.Bead, rj.At))
 		rows = append(rows, row)
 	}
@@ -473,6 +502,51 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 	}
 	if len(live) > 0 {
 		rows = append(append([]dashboard.LandingRow(nil), live...), rows...)
+	}
+	if rejectedFields != nil {
+		// The beads are collected after the bound, so the read covers the rows
+		// the table keeps; a row that already carries all three asks for none.
+		var keys []rejectedBeadKey
+		asked := map[rejectedBeadKey]bool{}
+		for i := range rows {
+			r := &rows[i]
+			if r.Outcome != "rejected" || (r.Priority != nil && r.SPEstimate != nil && r.Agent != "") {
+				continue
+			}
+			key := rejectedBeadKey{Rig: r.Rig, Bead: r.Bead}
+			if !asked[key] {
+				asked[key] = true
+				keys = append(keys, key)
+			}
+		}
+		if len(keys) > 0 {
+			got, err := rejectedFields(keys)
+			if err != nil {
+				// A failed read leaves the cells empty, as the page drew them
+				// before this read existed: the row itself is built from the
+				// rejection line, and a bead read must not block it (gt-4ppnp3).
+				got = nil
+			}
+			for i := range rows {
+				r := &rows[i]
+				if r.Outcome != "rejected" {
+					continue
+				}
+				f, ok := got[rejectedBeadKey{Rig: r.Rig, Bead: r.Bead}]
+				if !ok {
+					continue
+				}
+				if r.Priority == nil {
+					r.Priority = f.Priority
+				}
+				if r.SPEstimate == nil {
+					r.SPEstimate = f.SPEstimate
+				}
+				if r.Agent == "" {
+					r.Agent = f.Agent
+				}
+			}
+		}
 	}
 	for i := range rows {
 		// A landed row carries its own branch; a rejected or running row has

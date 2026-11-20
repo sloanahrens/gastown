@@ -589,7 +589,12 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, livePolecatName(polecatFor, names.who))
 			title := func(rig, id string) string { return beadReads.title(rig, id) }
 			cachedTitle := func(rig, id string) (string, bool) { return beadReads.cachedTitle(id) }
-			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, names, crew, polecatTimes, rigOfBead, cachedTitle, recentLandingRows)
+			// A rejected row with no landed record takes its priority, sp:
+			// estimate and agent from the bead (gt-4ppnp3).
+			rejectedFields := func(keys []rejectedBeadKey) (map[rejectedBeadKey]rejectedBeadFields, error) {
+				return beadReads.rejectedBeadFields(townRoot, keys)
+			}
+			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, names, crew, polecatTimes, rigOfBead, cachedTitle, rejectedFields, recentLandingRows)
 			tr.Recent = withBackoffRows(recent, backoff.get(), title, names.who)
 			tr.LandingsPaused = dashboardLandingsPause(townRoot, now)
 			return tr
