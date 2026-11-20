@@ -1509,6 +1509,12 @@ type Daemon struct {
 	// outboxPollTick is the patrol's one seam per tick: nil is the live poll
 	// over the town's running seats, and a test sets it to count the ticks.
 	outboxPollTick outboxPollTickFunc
+	// outboxPollFiledMu guards outboxPollFiledByRoot: the outbox poll's record of
+	// the requests it has filed, one per town root, kept for the daemon's life so
+	// a request whose record cannot be written still counts as filed on the next
+	// tick (outbox_poll.go, gt-93p10b).
+	outboxPollFiledMu     sync.Mutex
+	outboxPollFiledByRoot map[string]*outboxPollFiled
 	// outboxPollNoSeamOnce logs the missing filing seam once per daemon, so an
 	// enabled patrol that has no seam yet says so without a line every tick
 	// (gt-nvii5d).

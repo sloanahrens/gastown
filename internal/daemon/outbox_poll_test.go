@@ -1055,6 +1055,96 @@ func TestNoBeadAccessOutboxPollRestartedPollDoesNotRefile(t *testing.T) {
 	}
 }
 
+// TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks: the daemon
+// builds a new poll for every tick, so a request whose record cannot be written
+// (a read-only .runtime/outbox-poll) must still count as filed for the daemon's
+// life, not for one tick's poll. Three ticks over one read-only record directory,
+// with the overseer closing the escalation between ticks, file it once (gt-93p10b).
+func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+	d := outboxPollTestDaemon(t, true, &logged)
+	d.config.TownRoot = town
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
+	d.prefixRegistryFn = rigPrefixes("gastown")
+	d.openRecoveryBeads = func([]string) beads.Client { return bd }
+
+	dir := filepath.Dir(outboxPollFiledPath(town))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("creating the record directory: %v", err)
+	}
+	//testpolicy:allow no-exec-files — the target is the record directory: a read-only dir needs its search bit
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("making the record directory read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the record directory: t.TempDir's cleanup needs its write and search bits back
+		_ = os.Chmod(dir, 0o700)
+	})
+
+	for tick := 1; tick <= 3; tick++ {
+		poll := d.liveOutboxPoll()
+		poll.exec = exec
+		if err := poll.tick(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		open, err := beads.ListEscalations(bd)
+		if err != nil {
+			t.Fatalf("listing the open escalations after tick %d: %v", tick, err)
+		}
+		for _, esc := range open {
+			if err := bd.Close(esc.ID); err != nil {
+				t.Fatalf("closing the escalation after tick %d: %v", tick, err)
+			}
+		}
+	}
+	if got := outboxPollEscalations(t, bd); len(got) != 1 {
+		t.Errorf("three ticks over a read-only record directory filed %d escalation beads, want one: %+v", len(got), got)
+	}
+}
+
+// TestNoBeadAccessOutboxPollUnreadableRecordIsRetriedNextTick: the record the
+// daemon keeps for its life must not keep a read failure for its life too. A
+// record file that does not parse refuses the tick it is read in; once the file
+// is fixed the next tick reads it and files (gt-93p10b).
+func TestNoBeadAccessOutboxPollUnreadableRecordIsRetriedNextTick(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	outboxPollSeatRecord(t, town, "sbx-able", "gt-able")
+	result := `{"bead_id":"gt-able","status":"deferred",` +
+		`"escalation":{"text":"HELP: the seat is stuck\n\nSeverity: high"}}`
+	exec := &fakeOutboxPollExec{reads: map[string]string{"sbx-able": outboxPollReadText(&result, nil)}}
+	bd := beadsfake.New()
+	var logged bytes.Buffer
+	d := outboxPollTestDaemon(t, true, &logged)
+	d.config.TownRoot = town
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC))
+	d.prefixRegistryFn = rigPrefixes("gastown")
+	d.openRecoveryBeads = func([]string) beads.Client { return bd }
+
+	outboxPollWriteFiled(t, town, "not the file's shape\n")
+	first := d.liveOutboxPoll()
+	first.exec = exec
+	if err := first.tick(context.Background()); err == nil {
+		t.Fatal("the tick over an unparseable record succeeded, want a refusal")
+	}
+	outboxPollWriteFiled(t, town, `{"filed":[]}`)
+	second := d.liveOutboxPoll()
+	second.exec = exec
+	if err := second.tick(context.Background()); err != nil {
+		t.Fatalf("the tick after the record was fixed: %v", err)
+	}
+	if got := outboxPollEscalations(t, bd); len(got) != 1 {
+		t.Errorf("the tick after the record was fixed filed %d escalation beads, want one: %+v", len(got), got)
+	}
+}
+
 // TestNoBeadAccessOutboxPollRefusesToReadSeatsItCannotRemember: a record of
 // what the poll filed that does not parse, or cannot be read, is the tick's
 // error and no seat is read: a poll that forgot what it filed would file every
