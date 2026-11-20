@@ -16,55 +16,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 )
-
-// fakeTailJournal serves a journal the way bd events tail does: records with
-// seq above since, at most limit, More when the limit cut the page.
-type fakeTailJournal struct {
-	records   []beads.EventRecord
-	config    string
-	configErr error
-	errs      []error // returned, in order, by the next EventsTail calls
-	trunc     *beads.EventsTruncatedError
-	calls     []int64
-}
-
-func (f *fakeTailJournal) ConfigGet(key string) (string, error) {
-	if key != "events-journal" {
-		return "", errors.New("unexpected key " + key)
-	}
-	return f.config, f.configErr
-}
-
-func (f *fakeTailJournal) EventsTail(since int64, limit int) (*beads.EventsPage, error) {
-	f.calls = append(f.calls, since)
-	if len(f.errs) > 0 {
-		err := f.errs[0]
-		f.errs = f.errs[1:]
-		return nil, err
-	}
-	if f.trunc != nil && since < f.trunc.Floor-1 {
-		t := *f.trunc
-		t.Since = since
-		f.trunc = nil
-		return nil, &t
-	}
-	page := &beads.EventsPage{NextSince: since}
-	for _, r := range f.records {
-		if r.Seq <= since {
-			continue
-		}
-		if limit > 0 && len(page.Records) == limit {
-			page.More = true
-			break
-		}
-		page.Records = append(page.Records, r)
-		page.NextSince = r.Seq
-	}
-	return page, nil
-}
 
 func texts(lines []tailLine) []string {
 	var out []string
@@ -77,110 +30,6 @@ func texts(lines []tailLine) []string {
 var tailNow = at("2026-09-30T14:00:00Z")
 
 func fixedNow() time.Time { return tailNow }
-
-func TestEventsSource_JournalOffBacklogPagingAndFollow(t *testing.T) {
-	t.Parallel()
-	j := &fakeTailJournal{config: "false", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T12:00:00Z", Op: "create", IssueID: "gt-old", Actor: "a", Status: "open"},
-		{Seq: 2, TS: "2026-09-30T13:50:00Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
-		{Seq: 3, TS: "2026-09-30T13:51:00.5Z", Op: "close", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "closed"},
-		{Seq: 4, TS: "not-a-time", Op: "delete", IssueID: "gt-2"},
-	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, pageSize: 2}
-	got := s.Poll()
-	want := []string{
-		"gastown events journal off in config (events-journal=false): nothing is journaled",
-		"gastown events update gt-1 status=in_progress actor=gastown/polecats/opal seq=2",
-		"gastown events close gt-1 status=closed actor=gastown/polecats/opal seq=3",
-		"gastown events delete gt-2 seq=4 ts=not-a-time",
-	}
-	if !reflect.DeepEqual(texts(got), want) {
-		t.Fatalf("first poll:\n%q\nwant\n%q", texts(got), want)
-	}
-	if !got[2].At.Equal(at("2026-09-30T13:51:00.5Z")) || !got[3].At.Equal(tailNow) || !got[0].At.Equal(tailNow) {
-		t.Fatalf("times: %v %v %v", got[0].At, got[2].At, got[3].At)
-	}
-	if !reflect.DeepEqual(j.calls, []int64{0, 2}) {
-		t.Fatalf("paging cursors = %v", j.calls)
-	}
-
-	if got := s.Poll(); len(got) != 0 {
-		t.Fatalf("idle poll = %q", texts(got))
-	}
-	// Follow: a record after the cursor prints; the notice does not repeat.
-	j.records = append(j.records, beads.EventRecord{Seq: 5, TS: "2026-09-30T14:00:01Z", Op: "comment", IssueID: "gt-3", Actor: "mayor"})
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"gastown events comment gt-3 actor=mayor seq=5"}) {
-		t.Fatalf("follow poll = %q", got)
-	}
-}
-
-func TestEventsSource_JournalOnSaysNothing(t *testing.T) {
-	t.Parallel()
-	j := &fakeTailJournal{config: "true"}
-	if got := (&eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}).Poll(); len(got) != 0 {
-		t.Fatalf("journal on, empty: %q", texts(got))
-	}
-}
-
-func TestEventsSource_UnreadableConfigSaysSoOnce(t *testing.T) {
-	t.Parallel()
-	j := &fakeTailJournal{configErr: errors.New("boom")}
-	s := &eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"hq events cannot read events-journal config (boom): the journal may be off"}) {
-		t.Fatalf("got %q", got)
-	}
-	if got := s.Poll(); len(got) != 0 {
-		t.Fatalf("second poll repeated: %q", texts(got))
-	}
-}
-
-func TestEventsSource_PrunedJournalResumesWithOneLine(t *testing.T) {
-	t.Parallel()
-	j := &fakeTailJournal{config: "true",
-		trunc: &beads.EventsTruncatedError{Floor: 7, Head: 8},
-		records: []beads.EventRecord{
-			{Seq: 7, TS: "2026-09-30T13:59:00Z", Op: "create", IssueID: "gt-7"},
-			{Seq: 8, TS: "2026-09-30T13:59:30Z", Op: "create", IssueID: "gt-8"},
-		}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
-	want := []string{
-		"gastown events journal pruned past seq 0 (oldest retained 7, head 8): records before 7 are gone",
-		"gastown events create gt-7 seq=7",
-		"gastown events create gt-8 seq=8",
-	}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %q\nwant %q", got, want)
-	}
-}
-
-func TestEventsSource_ReadErrorsPrintOncePerDistinctFailure(t *testing.T) {
-	t.Parallel()
-	down := errors.New("bd events tail: exit status 25")
-	j := &fakeTailJournal{config: "true", errs: []error{down, down}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: tailNow, now: fixedNow}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"gastown events read failed: bd events tail: exit status 25"}) {
-		t.Fatalf("first failure: %q", got)
-	}
-	if got := s.Poll(); len(got) != 0 {
-		t.Fatalf("repeated failure printed again: %q", texts(got))
-	}
-	s.Poll() // recovers
-	j.errs = []error{down}
-	if got := s.Poll(); len(got) != 1 {
-		t.Fatalf("failure after recovery not printed: %q", texts(got))
-	}
-}
-
-func TestEventsSource_OpenErrorIsOneLine(t *testing.T) {
-	t.Parallel()
-	s := &eventsSource{rig: "mango", openErr: errors.New("no beads directory"), now: fixedNow}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"mango events cannot read the journal: no beads directory"}) {
-		t.Fatalf("got %q", got)
-	}
-	if got := s.Poll(); len(got) != 0 {
-		t.Fatalf("repeated: %q", texts(got))
-	}
-}
 
 func TestLandingsSource_BacklogFollowAndBadLines(t *testing.T) {
 	t.Parallel()
@@ -690,22 +539,6 @@ func TestDaemonSource_MissingLogSaysSoOnce(t *testing.T) {
 	}
 }
 
-func TestEventsSource_PruneThatCannotAdvanceIsAReadFailure(t *testing.T) {
-	t.Parallel()
-	// bd reports a floor and head at or below the cursor: resuming would not
-	// move forward, so the read fails once instead of looping.
-	j := &fakeTailJournal{config: "true", errs: []error{&beads.EventsTruncatedError{Since: 0, Floor: 0, Head: 0}}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: tailNow, now: fixedNow}
-	got := texts(s.Poll())
-	want := []string{"gastown events read failed: events journal pruned past --since 0 (oldest retained 0, head 0)"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %q\nwant %q", got, want)
-	}
-	if len(j.calls) != 1 {
-		t.Fatalf("calls = %v", j.calls)
-	}
-}
-
 func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -720,50 +553,6 @@ func TestDaemonSource_CorruptBackupIsOneLineAndTheLogStillReads(t *testing.T) {
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %q\nwant %q", got, want)
-	}
-}
-
-// The seam answers "" both for a key the store does not set and for one it
-// sets to an empty value (bd's contract for config get). The journal is off
-// either way, and saying so is what keeps an unset key from reading as a
-// healthy store that journals nothing.
-func TestEventsSource_UnsetConfigSaysTheJournalIsOff(t *testing.T) {
-	t.Parallel()
-	j := &fakeTailJournal{config: ""}
-	s := &eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}
-	want := []string{"hq events journal off in config (events-journal=): nothing is journaled"}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %q\nwant %q", got, want)
-	}
-}
-
-func TestEventsSource_TruthyConfigIsOn(t *testing.T) {
-	t.Parallel()
-	for _, v := range []string{"true", "1", "TRUE"} {
-		j := &fakeTailJournal{config: v}
-		if got := (&eventsSource{rig: "hq", journal: j, cutoff: tailNow, now: fixedNow}).Poll(); len(got) != 0 {
-			t.Errorf("events-journal=%s printed %q", v, texts(got))
-		}
-	}
-}
-
-func TestEventsSource_FailedFirstReadIsRetriedAsABacklogRead(t *testing.T) {
-	t.Parallel()
-	down := errors.New("bd events tail: exit status 25")
-	j := &fakeTailJournal{config: "false", errs: []error{down}, records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T12:00:00Z", Op: "create", IssueID: "gt-old"},
-		{Seq: 2, TS: "2026-09-30T13:59:00Z", Op: "create", IssueID: "gt-new"},
-	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
-	want := []string{
-		"gastown events journal off in config (events-journal=false): nothing is journaled",
-		"gastown events read failed: bd events tail: exit status 25",
-	}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
-		t.Fatalf("failed first poll = %q", got)
-	}
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"gastown events create gt-new seq=2"}) {
-		t.Fatalf("retry ignored the cutoff or repeated the notice: %q", got)
 	}
 }
 
@@ -1034,86 +823,6 @@ func TestTailBeads_EvictsTheLeastRecentlyUsed(t *testing.T) {
 	}
 	if n := store.readsFor("gt-2"); n != 1 {
 		t.Fatalf("gt-2 was read %d times; a recently used title stays cached", n)
-	}
-}
-
-// TestEventsSource_TitlesTheBeadAndReadsAVerdict: the source stamps the bead
-// the stream should name and the review loop's own words, with one bd show per
-// bead per poll, and never repeats a verdict already shown.
-func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
-	t.Parallel()
-	store := &fakeTailStore{issues: map[string]*beads.Issue{
-		"gt-1": {
-			ID: "gt-1", Title: "one line per thing that happened",
-			Notes:    "MERGE REJECTION (attempt 1): gate-failed - make gate is red\n  findings:\n",
-			Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}},
-		},
-		"gt-2": {
-			ID: "gt-2", Title: "a bead with nothing to say",
-			Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}},
-		},
-	}}
-	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-1", Actor: "Test Operator", Status: "open"},
-		{Seq: 2, TS: "2026-09-30T13:50:00.5Z", Op: "update", IssueID: "gt-1", Actor: "daemon", Status: "open"},
-		{Seq: 3, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
-		{Seq: 4, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-2", Actor: "witness"},
-		{Seq: 5, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-gastown-polecat-opal", Actor: "daemon"},
-	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
-	got := s.Poll()
-	if len(got) != 5 {
-		t.Fatalf("poll = %q", texts(got))
-	}
-	// The text is the journal's; the verdict is the only thing added.
-	if got[0].Text != "create gt-1 status=open actor=Test Operator seq=1" {
-		t.Fatalf("create line = %q", got[0].Text)
-	}
-	wantVerdicts := []string{
-		"",
-		"MERGE REJECTION (attempt 1): gate-failed - make gate is red",
-		"",
-		"OVERSEER REVIEW aaaa PASS: reads well",
-		"",
-	}
-	for i, want := range wantVerdicts {
-		if got[i].Verdict != want {
-			t.Errorf("line %d (%q) verdict = %q, want %q", i, got[i].Text, got[i].Verdict, want)
-		}
-	}
-	// One bd show per bead per poll, and none for a line the default view
-	// hides: a worker's own agent bead is not read.
-	if n := store.readsFor("gt-1"); n != 1 {
-		t.Errorf("gt-1 was read %d times in one poll", n)
-	}
-	if n := store.readsFor("gt-gastown-polecat-opal"); n != 0 {
-		t.Errorf("a polecat agent bead was read %d times", n)
-	}
-
-	// The next poll adds a comment the bead already answered with: it is not
-	// the review loop's, and a verdict already shown is not shown again.
-	j.records = append(j.records,
-		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
-		beads.EventRecord{Seq: 7, TS: "2026-09-30T13:55:00Z", Op: "update", IssueID: "gt-1", Actor: "daemon"},
-	)
-	got = s.Poll()
-	if len(got) != 2 || got[0].Verdict != "" || got[1].Verdict != "" {
-		t.Fatalf("a verdict was repeated: %+v", got)
-	}
-}
-
-// TestEventsSource_UnreadableBeadIsNotAnErrorLine: a store that cannot answer
-// costs the title and the verdict, and says nothing about it.
-func TestTailEventsSource_UnreadableBeadIsNotAnErrorLine(t *testing.T) {
-	t.Parallel()
-	store := &fakeTailStore{errs: map[string]error{"gt-1": errors.New("dolt: connection refused")}}
-	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
-	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
-	got := s.Poll()
-	if len(got) != 1 || got[0].Text != "comment gt-1 actor=Test Operator seq=1" || got[0].Verdict != "" {
-		t.Fatalf("poll = %+v", got)
 	}
 }
 
@@ -1407,65 +1116,6 @@ func TestTailDeploySource_PrintsTheDeployedLineInItsWindow(t *testing.T) {
 	}
 	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("stream = %q\nwant %q", got, want)
-	}
-}
-
-// TestEventsSource_CommentTextAndSubmittedLine: a plain comment carries its
-// first 60 characters, a work bead's READY TO LAND block carries a submitted
-// line, a comment with a review marker keeps the verdict instead, and neither
-// annotation repeats (gt-vxr95).
-func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
-	t.Parallel()
-	long := strings.Repeat("x", 70)
-	store := &fakeTailStore{issues: map[string]*beads.Issue{
-		"gt-1": {ID: "gt-1", Title: "t", Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}}},
-		"gt-2": {ID: "gt-2", Title: "t", Labels: []string{land.LabelReadyToLand}, Notes: "READY TO LAND\nBranch: polecat/opal/gt-2\nHead: abcdef1234567890\nTarget: main\nWorker: gastown/polecats/opal\n"},
-		"gt-3": {ID: "gt-3", Title: "t", Comments: []beads.Comment{{Text: long}}},
-		"gt-4": {ID: "gt-4", Title: "t", Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}}},
-	}}
-	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
-		{Seq: 2, TS: "2026-09-30T13:51:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
-		{Seq: 3, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "Test Operator"},
-		{Seq: 4, TS: "2026-09-30T13:53:00Z", Op: "comment", IssueID: "gt-4", Actor: "witness"},
-	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
-	got := s.Poll()
-	if len(got) != 4 {
-		t.Fatalf("poll = %q", texts(got))
-	}
-	if got[0].Comment != "pushed: crew/x at 9f4171a4" || got[0].Verdict != "" {
-		t.Errorf("plain comment = comment %q verdict %q", got[0].Comment, got[0].Verdict)
-	}
-	if got[1].Submit != "submitted gt-2 @ abcdef1 for landing" || got[1].Verdict != "" {
-		t.Errorf("submission = submit %q verdict %q", got[1].Submit, got[1].Verdict)
-	}
-	if want := strings.Repeat("x", 60) + "…"; got[2].Comment != want {
-		t.Errorf("a long comment = %q, want %q", got[2].Comment, want)
-	}
-	if got[3].Comment != "" || got[3].Verdict != "OVERSEER REVIEW aaaa PASS: reads well" {
-		t.Errorf("a verdict comment = comment %q verdict %q", got[3].Comment, got[3].Verdict)
-	}
-	// One bd show per bead per poll answers every annotation read.
-	if n := store.readsFor("gt-1"); n != 1 {
-		t.Errorf("gt-1 was read %d times in one poll", n)
-	}
-	// The same text is not shown twice, however often the bead is rewritten.
-	j.records = append(j.records,
-		beads.EventRecord{Seq: 5, TS: "2026-09-30T13:54:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
-		beads.EventRecord{Seq: 6, TS: "2026-09-30T13:55:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "open"},
-	)
-	got = s.Poll()
-	if len(got) != 2 || got[0].Comment != "" || got[1].Submit != "" {
-		t.Fatalf("an annotation repeated: %+v", got)
-	}
-	// A landing takes the ready-to-land label, so an update after it does not
-	// reprint a submission that is over.
-	store.issues["gt-2"].Labels = nil
-	j.records = append(j.records, beads.EventRecord{Seq: 7, TS: "2026-09-30T13:56:00Z", Op: "update", IssueID: "gt-2", Actor: "opal", Status: "closed"})
-	got = s.Poll()
-	if len(got) != 1 || got[0].Submit != "" {
-		t.Fatalf("a landed bead reprinted its submission: %+v", got)
 	}
 }
 
@@ -2016,69 +1666,5 @@ func TestOpenTailBeadsWithoutATown(t *testing.T) {
 	}
 	if _, err := b.comments("gastown", "gt-1"); err == nil {
 		t.Error("comments read with no beads directory answered no error")
-	}
-}
-
-// TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls: a journal that keeps
-// naming a bead bd reports as not found makes one bd show for it in the whole
-// run. pollIssue's per-poll map is cleared every poll, so it is the not-found
-// cache that answers the later polls.
-func TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls(t *testing.T) {
-	t.Parallel()
-	store := &fakeTailStore{errs: map[string]error{"gt-gone": beads.ErrNotFound}}
-	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-gone"},
-		{Seq: 2, TS: "2026-09-30T13:50:01Z", Op: "update", IssueID: "gt-gone", Status: "in_progress"},
-	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
-	s.Poll()
-	j.records = append(j.records, beads.EventRecord{Seq: 3, TS: "2026-09-30T13:50:02Z", Op: "comment", IssueID: "gt-gone"})
-	lines := s.Poll()
-	if len(lines) != 1 {
-		t.Fatalf("second poll lines = %q, want the one new comment", texts(lines))
-	}
-	if lines[0].Comment != "" || lines[0].Verdict != "" {
-		t.Fatalf("gt-gone line was annotated: %+v", lines[0])
-	}
-	if n := store.readsFor("gt-gone"); n != 1 {
-		t.Fatalf("gt-gone read %d times across two polls, want 1", n)
-	}
-}
-
-// TestEventsSource_DeletedInPageIsNotRead: a journal page that creates,
-// updates, comments on and deletes one bead makes no bd show for it, and its
-// lines carry no title; a bead the page leaves alone is still read.
-func TestEventsSource_DeletedInPageIsNotRead(t *testing.T) {
-	t.Parallel()
-	store := &fakeTailStore{issues: map[string]*beads.Issue{
-		"gt-gone": {ID: "gt-gone", Title: "a throwaway"},
-		"gt-live": {ID: "gt-live", Title: "a kept bead", Comments: []beads.Comment{{Text: "pushed: x"}}},
-	}}
-	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-gone", Status: "open"},
-		{Seq: 2, TS: "2026-09-30T13:50:01Z", Op: "update", IssueID: "gt-gone", Status: "in_progress"},
-		{Seq: 3, TS: "2026-09-30T13:50:02Z", Op: "comment", IssueID: "gt-gone"},
-		{Seq: 4, TS: "2026-09-30T13:50:03Z", Op: "create", IssueID: "gt-live", Status: "open"},
-		{Seq: 5, TS: "2026-09-30T13:50:04Z", Op: "comment", IssueID: "gt-live"},
-		{Seq: 6, TS: "2026-09-30T13:50:05Z", Op: "delete", IssueID: "gt-gone"},
-	}}
-	beadReads := newTailBeads(store.show, tailTitleCacheSize)
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: beadReads}
-	lines := s.Poll()
-	if len(lines) != 6 {
-		t.Fatalf("lines = %q", texts(lines))
-	}
-	view := newTailView(tailTestLoc, tailViewOptions{beads: beadReads, now: fixedNow})
-	for _, l := range lines {
-		rendered := view.renderLine(l)
-		if strings.Contains(l.Text, "gt-gone") && (strings.Contains(rendered, "a throwaway") || l.Comment != "" || l.Verdict != "" || l.Submit != "") {
-			t.Fatalf("gt-gone line was annotated: %q %+v", rendered, l)
-		}
-	}
-	if n := store.readsFor("gt-gone"); n != 0 {
-		t.Fatalf("gt-gone read %d times, want 0", n)
-	}
-	if n := store.readsFor("gt-live"); n == 0 {
-		t.Fatal("gt-live was never read")
 	}
 }

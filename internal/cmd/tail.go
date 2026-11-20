@@ -22,8 +22,6 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/style"
@@ -440,24 +438,6 @@ func allTailKinds() map[string]bool {
 	return m
 }
 
-// openTailJournal opens a store's journal: the journal read over a connection
-// of gastown's own, with bd answering the polls that connection cannot
-// (gt-jw9sr), both pinned to that store's beads directory.
-func openTailJournal(townRoot, rig string) (tailJournal, error) {
-	dir := doltserver.FindRigBeadsDir(townRoot, rig)
-	if dir == "" {
-		return nil, fmt.Errorf("no beads directory for %s", rig)
-	}
-	if _, err := os.Stat(dir); err != nil {
-		return nil, fmt.Errorf("beads directory %s: %w", dir, err)
-	}
-	// The seam pins bd to the store's beads directory and clears any inherited
-	// BD_EVENTS_JOURNAL, so events-journal answers from the store's config (as
-	// the daemon's startup check reads it), not the caller's environment.
-	bd := beads.NewWithBeadsDir(townRoot, dir)
-	return newTailJournalStore(bd, func() (tailJournalRead, error) { return openTailJournalSQL(townRoot, dir) }), nil
-}
-
 // buildTailSources returns the selected sources in tie order: each rig's
 // landings by name (hq names no landings file), then the daemon, then the watch
 // feed. preface holds lines about the selection itself. Only an unknown --rig
@@ -543,9 +523,9 @@ type tailView struct {
 	GitUser    string
 	Beads      *tailBeads
 	// collapse folds a bead's repeated status updates into one line, and
-	// newAnnotations prints the comment text and the submitted line the
-	// events source resolved. Both are the plain default view's; --iso,
-	// --all and --verbose leave them nil and false (gt-vxr95).
+	// newAnnotations prints the comment text and the submitted line a line
+	// carries. Both are the plain default view's; --iso, --all and --verbose
+	// leave them nil and false (gt-vxr95).
 	collapse       *tailUpdateCollapse
 	newAnnotations bool
 }
@@ -806,8 +786,9 @@ func closeTailSources(sources []tailSource) {
 // The kinds gt tail merges, in the order ties print.
 const (
 	// tailKindEvents names a line from a store's bd events journal. The kind is
-	// retired as a selection: parseTailKinds refuses it and no source is built
-	// for it (gt-itjvy8). The journal source and its filters still name it.
+	// retired: parseTailKinds refuses it, no source is built for it and its
+	// source is deleted (gt-itjvy8, gt-ysuu89). The filters, the title reader
+	// and parseTailKinds still name it.
 	tailKindEvents   = "events"
 	tailKindLandings = "landings"
 	tailKindDaemon   = "daemon"

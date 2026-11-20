@@ -10,9 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/land"
 )
 
 // tailTickQuiet is a spec-dispatch tick with nothing to do, matching the
@@ -173,23 +170,6 @@ func TestBuildTailSources_DefaultKinds(t *testing.T) {
 	}
 }
 
-// TestBuildTailSources_DefaultKindsBuildNoEventsSource: no source of the
-// default kinds reads a store's bd events journal.
-func TestBuildTailSources_DefaultKindsBuildNoEventsSource(t *testing.T) {
-	t.Parallel()
-	o := fakeTailTown(t, []string{"gastown", "hm"}, nil)
-	o.kinds, o.cutoff = allTailKinds(), at("2026-09-30T13:00:00Z")
-	sources, _, err := buildTailSources(o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, s := range sources {
-		if _, ok := s.(*eventsSource); ok {
-			t.Fatalf("the default kinds built an events source: %T", s)
-		}
-	}
-}
-
 // TestBuildTailSources_DaemonLinesCarryTheirRig: the stream resolves a daemon
 // line's rig through the town's routes, so the landing and sweep lines print
 // under the rig they belong to and the daemon's own lines stay "town".
@@ -316,51 +296,6 @@ func TestBuildTailSources_WatchIsTownWide(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("--rig gastown built %d watch sources; want 1", n)
-	}
-}
-
-// TestRunTailStream_DefaultViewGolden: the plain default view folds the churn
-// each rule names — one bead's repeated status updates, a repeated spec tick —
-// and prints what the rules add: a comment's first 60 characters and a
-// submitted-for-landing line. The same records under --verbose are
-// testdata/tail_golden.txt's concern (gt-vxr95).
-func TestRunTailStream_DefaultViewGolden(t *testing.T) {
-	t.Parallel()
-	store := &fakeTailStore{issues: map[string]*beads.Issue{
-		"gt-1": {ID: "gt-1", Title: "one line per thing that happened", Comments: []beads.Comment{{Text: "pushed: crew/x at 9f4171a4"}}},
-		"gt-2": {ID: "gt-2", Title: "the submitted bead", Labels: []string{land.LabelReadyToLand}, Notes: "READY TO LAND\nBranch: polecat/opal/gt-2\nHead: abcdef1234567890\nTarget: main\nWorker: gastown/polecats/opal\n"},
-		"gt-3": {ID: "gt-3", Title: "a reviewed bead", Comments: []beads.Comment{{Text: "OVERSEER REVIEW aaaa PASS: reads well"}}},
-		"gt-4": {ID: "gt-4", Title: "a fresh bead"},
-	}}
-	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
-		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
-		{Seq: 2, TS: "2026-09-30T13:50:05Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "in_progress"},
-		{Seq: 3, TS: "2026-09-30T13:50:10Z", Op: "update", IssueID: "gt-1", Actor: "gastown/polecats/opal", Status: "open"},
-		{Seq: 4, TS: "2026-09-30T13:51:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
-		{Seq: 5, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "witness"},
-		{Seq: 6, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-2", Actor: "gastown/polecats/quartz", Status: "open"},
-		{Seq: 7, TS: "2026-09-30T13:53:30Z", Op: "create", IssueID: "gt-4", Actor: "Test Operator", Status: "open"},
-	}}
-	events := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
-	const tickDispatched = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)"
-	daemon := &scriptedTailSource{batches: [][]tailLine{{
-		{At: at("2026-09-30T13:54:00Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
-		{At: at("2026-09-30T13:54:05Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
-		{At: at("2026-09-30T13:54:10Z"), Rig: "town", Kind: tailKindDaemon, Text: tickDispatched},
-		{At: at("2026-09-30T13:54:12Z"), Rig: "town", Kind: tailKindDaemon, Text: "Heartbeat complete (#531)"},
-	}}}
-
-	var buf bytes.Buffer
-	view := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(store.show, tailTitleCacheSize), now: fixedNow})
-	if err := runTailStream(context.Background(), &buf, []tailSource{events, daemon}, nil, false, nil, view, nil); err != nil {
-		t.Fatal(err)
-	}
-	golden, err := os.ReadFile(filepath.Join("testdata", "tail_default_golden.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if buf.String() != string(golden) {
-		t.Fatalf("default view differs from testdata/tail_default_golden.txt:\n%s", buf.String())
 	}
 }
 
