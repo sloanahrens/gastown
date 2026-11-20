@@ -27,7 +27,8 @@ type nodePruneKube interface {
 // Once the apply was attempted, the Job is deleted on every path. The apply may
 // have created the Job before it returned an error, and the next heartbeat would
 // otherwise meet AlreadyExists for the same name. A failed delete after a good
-// log keeps the report the log gave, beside the delete's error.
+// log keeps the report the log gave, in a nodePruneLogReadError beside the
+// delete's own, so the caller tells it from a failure before the log.
 func runNodeImagePrune(ctx context.Context, kube nodePruneKube, name, image string, keep int, apply bool) (nodePruneReport, error) {
 	listed, err := kube.ListJSON(ctx)
 	if err != nil {
@@ -51,6 +52,9 @@ func runNodeImagePrune(ctx context.Context, kube nodePruneKube, name, image stri
 	}
 	rep, parseErr := parseNodePruneLog(out)
 	if err := deleteNodePruneJob(ctx, kube, name, parseErr); err != nil {
+		if parseErr == nil {
+			err = &nodePruneLogReadError{err: err}
+		}
 		return rep, err
 	}
 	return rep, nil

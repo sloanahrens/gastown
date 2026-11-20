@@ -32,13 +32,9 @@ func nodeImagePruneKubeList() []byte {
 	return []byte(jsonList(jsonDeployment("gt-daemon", digestN("a"))))
 }
 
-// nodeImagePruneLogApplied is an applied run's log, which holds no would-remove line.
-const nodeImagePruneLogApplied = "node-prune: removed sha256:aaa\n" +
-	"node-prune: applied removed 1 failed 0\n"
-
 // TestNodeImagePruneOnceLogsTheDryRun: a dry run logs the summary line first and
 // then each would-remove line it planned, one logger call per line; an applied run
-// logs none of them.
+// logs only its summary line.
 func TestNodeImagePruneOnceLogsTheDryRun(t *testing.T) {
 	t.Parallel()
 	// A prefix on the rig's logger marks each call, not each newline in a
@@ -70,7 +66,8 @@ func TestNodeImagePruneOnceLogsTheDryRun(t *testing.T) {
 
 		require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart))
 
-		assert.Empty(t, logs.String(), "an applied run logs no would-remove line")
+		assert.Equal(t, "daemon: node_image_prune: applied removed 7 failed 2\n", logs.String(),
+			"an applied run logs its summary line and no would-remove line")
 	})
 }
 
@@ -173,7 +170,7 @@ func TestNodeImagePruneRecordLedgerFailsToOpen(t *testing.T) {
 	// opened and no append is attempted.
 	d.config.TownRoot = ""
 
-	require.NoError(t, d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob}))
+	d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob})
 
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
 	require.Len(t, lines, 1, "the ledger that cannot be opened logs one line")
@@ -190,12 +187,132 @@ func TestNodeImagePruneRecordLedgerFailsToAppend(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(d.config.TownRoot, ".runtime"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(d.config.TownRoot, ".runtime", "jobs"), []byte("not a directory"), 0o644))
 
-	require.NoError(t, d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob}))
+	d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob})
 
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
 	require.Len(t, lines, 1, "a failing Append logs one line")
 	assert.Contains(t, lines[0], "node_image_prune")
 	assert.Contains(t, lines[0], "job ledger")
+}
+
+// nodeImagePruneLogApplied is an applied run's log as the helper writes it: 7
+// removed lines, 2 that failed and the summary.
+var nodeImagePruneLogApplied = strings.Repeat("node-prune: removed sha256:a\n", 7) +
+	strings.Repeat("node-prune: cannot remove sha256:b: exit status 1\n", 2) +
+	"node-prune: applied removed 7 failed 2\n"
+
+// lastNodeImagePruneRun reads the newest node image prune row from the town's job ledger.
+func lastNodeImagePruneRun(t *testing.T, town string) (jobledger.Run, bool) {
+	t.Helper()
+	ledger, err := jobledger.NewLedger(town)
+	require.NoError(t, err)
+	run, ok, err := ledger.Last(nodeImagePruneJob)
+	require.NoError(t, err)
+	return run, ok
+}
+
+// TestNodeImagePruneOnceApplyRecords: an applied run logs the summary line of
+// its report and appends one ledger row carrying the report's figures.
+func TestNodeImagePruneOnceApplyRecords(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodeImagePruneLogApplied)}
+
+	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart))
+
+	assert.Contains(t, r.logs.String(), "node_image_prune: applied removed 7 failed 2\n")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the apply run appended no ledger row")
+	assert.Equal(t, nodeImagePruneJob, run.Job)
+	assert.Equal(t, "ok", run.Outcome)
+	assert.Equal(t, nodeImagePruneStart, run.StartedAt)
+	assert.Equal(t, updateTriggerTestTime, run.EndedAt)
+	assert.Equal(t, map[string]int64{"planned": 9, "removed": 7, "failed": 2}, run.Stats)
+}
+
+// TestNodeImagePruneOnceApplyRecordsError: a Delete that fails after a good log
+// leaves the apply done: its figures are logged and recorded, and the error is
+// logged and returned beside them.
+func TestNodeImagePruneOnceApplyRecordsError(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodeImagePruneLogApplied), fail: "Delete"}
+
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "delete job")
+	assert.Contains(t, r.logs.String(), "node_image_prune: applied removed 7 failed 2\n")
+	assert.Contains(t, r.logs.String(), "Delete refused")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the apply run appended no ledger row")
+	assert.Equal(t, map[string]int64{"planned": 9, "removed": 7, "failed": 2}, run.Stats)
+}
+
+// TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords: an apply that removed
+// nothing still ran, so a Job delete that fails after its log was read leaves its
+// summary line logged and its row recorded, beside the error.
+func TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte("node-prune: applied removed 0 failed 0\n"), fail: "Delete"}
+
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "delete job")
+	assert.Contains(t, r.logs.String(), "node_image_prune: applied removed 0 failed 0\n")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the zero-removal apply appended no ledger row")
+	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0}, run.Stats)
+}
+
+// TestNodeImagePruneOnceApplyMalformedLogRecordsNothing: a log that does not parse
+// gives no report to record even when the Job delete fails too: no summary line, no
+// row, and the error returned.
+func TestNodeImagePruneOnceApplyMalformedLogRecordsNothing(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte("node-prune: applied removed 7 failed 2"), fail: "Delete"}
+
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart)
+
+	require.Error(t, err)
+	assert.NotContains(t, r.logs.String(), "node_image_prune: applied")
+	_, ok := lastNodeImagePruneRun(t, r.town)
+	assert.False(t, ok, "a run whose log did not parse appended a ledger row")
+}
+
+// TestNodeImagePruneOnceApplyRowNotRecorded: an append the ledger refuses logs
+// one line, and the applied run's result stands.
+func TestNodeImagePruneOnceApplyRowNotRecorded(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	// A plain file where the ledger's directory belongs makes the append fail.
+	require.NoError(t, os.MkdirAll(filepath.Join(r.town, ".runtime"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(r.town, ".runtime", "jobs"), nil, 0o644))
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodeImagePruneLogApplied)}
+
+	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart))
+
+	assert.Contains(t, r.logs.String(), "node_image_prune: applied removed 7 failed 2\n")
+	assert.Contains(t, r.logs.String(), "the job ledger could not record the run")
+}
+
+// TestNodeImagePruneOnceApplyFailedRunRecordsNothing: a run that fails before
+// its log gives a report appends no figures and returns the error.
+func TestNodeImagePruneOnceApplyFailedRunRecordsNothing(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodeImagePruneLogApplied), fail: "Apply"}
+
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "apply job")
+	assert.NotContains(t, r.logs.String(), "node_image_prune: applied")
+	_, ok := lastNodeImagePruneRun(t, r.town)
+	assert.False(t, ok, "a failed run appended a ledger row")
 }
 
 // TestNodeImagePruneOnceRefuses: an id nodePruneJobName refuses and a town with no
@@ -238,10 +355,10 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 const nodeImagePruneRowJob = "node_image_prune"
 
 // TestNodeImagePruneOnceAppendsNoRowOfItsOwn: a dry run appends exactly the one
-// node_image_prune row bead gt-08qnmf owns, and no second; an apply of removed 1
-// failed 1 and a runner error append none, because those rows are beads
-// gt-i8zplo's and gt-eg0ji0's and this test holds the line until they land.
-// The runner error is returned.
+// node_image_prune row bead gt-08qnmf owns and an apply of removed 1 failed 1
+// exactly the one bead gt-i8zplo owns; neither appends a second. A runner error
+// appends none, because that row is bead gt-eg0ji0's, and this test holds the
+// line until it lands. The runner error is returned.
 func TestNodeImagePruneOnceAppendsNoRowOfItsOwn(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
@@ -251,7 +368,7 @@ func TestNodeImagePruneOnceAppendsNoRowOfItsOwn(t *testing.T) {
 	}{
 		{name: "dry run", logs: nodePruneLogDry, wantRows: 1},
 		{name: "apply removed 1 failed 1", apply: true, logs: "node-prune: removed sha256:bbb gastown-polecat\n" +
-			"node-prune: applied removed 1 failed 1\n"},
+			"node-prune: applied removed 1 failed 1\n", wantRows: 1},
 		{name: "runner error", logs: nodePruneLogDry, fail: "Apply", wantErr: "Apply refused"},
 	}
 	for _, row := range rows {
