@@ -267,10 +267,11 @@ func TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords(t *testing.T) {
 	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0}, run.Stats)
 }
 
-// TestNodeImagePruneOnceApplyMalformedLogRecordsNothing: a log that does not parse
-// gives no report to record even when the Job delete fails too: no summary line, no
-// row, and the error returned.
-func TestNodeImagePruneOnceApplyMalformedLogRecordsNothing(t *testing.T) {
+// TestNodeImagePruneOnceApplyMalformedLogRecordsTheFailedRow: a log that does not
+// parse gives no report to record even when the Job delete fails too: the run records
+// the figures-free failed row of its parse step, logs no summary line, and returns the
+// error.
+func TestNodeImagePruneOnceApplyMalformedLogRecordsTheFailedRow(t *testing.T) {
 	t.Parallel()
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte("node-prune: applied removed 7 failed 2"), fail: "Delete"}
@@ -279,8 +280,12 @@ func TestNodeImagePruneOnceApplyMalformedLogRecordsNothing(t *testing.T) {
 
 	require.Error(t, err)
 	assert.NotContains(t, r.logs.String(), "node_image_prune: applied")
-	_, ok := lastNodeImagePruneRun(t, r.town)
-	assert.False(t, ok, "a run whose log did not parse appended a ledger row")
+	assert.Equal(t, "node_image_prune: failed: parse the log\n", r.logs.String(),
+		"the log names the step, not the parse error, which quotes the log")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "a run whose log did not parse appended no failed row")
+	assert.Equal(t, nodeImagePruneOutcomeFailed, run.Outcome)
+	assert.Empty(t, run.Stats, "a run that gave no report keeps no figures")
 }
 
 // TestNodeImagePruneOnceApplyRowNotRecorded: an append the ledger refuses logs
@@ -299,20 +304,46 @@ func TestNodeImagePruneOnceApplyRowNotRecorded(t *testing.T) {
 	assert.Contains(t, r.logs.String(), "the job ledger could not record the run")
 }
 
-// TestNodeImagePruneOnceApplyFailedRunRecordsNothing: a run that fails before
-// its log gives a report appends no figures and returns the error.
-func TestNodeImagePruneOnceApplyFailedRunRecordsNothing(t *testing.T) {
+// TestNodeImagePruneOnceFailedRowHasNoFigures is the bead's first box: a run that
+// fails before its log gives a report appends one row with outcome failed and no
+// planned, removed or failed key, logs its step alone -- no error text and no
+// figures -- and returns the error.
+func TestNodeImagePruneOnceFailedRowHasNoFigures(t *testing.T) {
 	t.Parallel()
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
 	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodeImagePruneLogApplied), fail: "Apply"}
 
 	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart)
 
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "apply job")
-	assert.NotContains(t, r.logs.String(), "node_image_prune: applied")
-	_, ok := lastNodeImagePruneRun(t, r.town)
-	assert.False(t, ok, "a failed run appended a ledger row")
+	require.ErrorContains(t, err, "apply job")
+	assert.Equal(t, "node_image_prune: failed: apply job\n", r.logs.String(),
+		"a failed run logs its step, not the error text and not a summary")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the failed run appended no ledger row")
+	assert.Equal(t, jobledger.Run{
+		Job:       nodeImagePruneJob,
+		StartedAt: nodeImagePruneStart,
+		EndedAt:   updateTriggerTestTime,
+		Outcome:   nodeImagePruneOutcomeFailed,
+	}, run, "a failed row carries no figures")
+}
+
+// TestNodeImagePruneOnceFailedRowKeepsRealZeros is the bead's second box and its
+// mutation guard: an apply that ran and removed 0 and failed 0 returned no error, so
+// its zero figures are a real report and the row carries them. Keying the
+// figures-free row on all-zero figures instead of the error path turns this red.
+func TestNodeImagePruneOnceFailedRowKeepsRealZeros(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte("node-prune: applied removed 0 failed 0\n")}
+
+	require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, true, nodeImagePruneStart))
+
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the zero-removal apply appended no ledger row")
+	assert.Equal(t, nodeImagePruneOutcomeOK, run.Outcome)
+	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0}, run.Stats,
+		"a real zero report keeps its figures")
 }
 
 // TestNodeImagePruneOnceRefuses: an id nodePruneJobName refuses and a town with no
@@ -354,12 +385,11 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 // gt-eg0ji0) record a node prune run under.
 const nodeImagePruneRowJob = "node_image_prune"
 
-// TestNodeImagePruneOnceAppendsNoRowOfItsOwn: a dry run appends exactly the one
-// node_image_prune row bead gt-08qnmf owns and an apply of removed 1 failed 1
-// exactly the one bead gt-i8zplo owns; neither appends a second. A runner error
-// appends none, because that row is bead gt-eg0ji0's, and this test holds the
-// line until it lands. The runner error is returned.
-func TestNodeImagePruneOnceAppendsNoRowOfItsOwn(t *testing.T) {
+// TestNodeImagePruneOnceAppendsOneRowPerRun: a dry run appends exactly the one
+// node_image_prune row bead gt-08qnmf owns, an apply of removed 1 failed 1 exactly
+// the one bead gt-i8zplo owns, and a runner error exactly the one failed row bead
+// gt-eg0ji0 owns; no run appends a second. Each error is returned.
+func TestNodeImagePruneOnceAppendsOneRowPerRun(t *testing.T) {
 	t.Parallel()
 	rows := []struct {
 		name, logs, fail, wantErr string
@@ -369,7 +399,7 @@ func TestNodeImagePruneOnceAppendsNoRowOfItsOwn(t *testing.T) {
 		{name: "dry run", logs: nodePruneLogDry, wantRows: 1},
 		{name: "apply removed 1 failed 1", apply: true, logs: "node-prune: removed sha256:bbb gastown-polecat\n" +
 			"node-prune: applied removed 1 failed 1\n", wantRows: 1},
-		{name: "runner error", logs: nodePruneLogDry, fail: "Apply", wantErr: "Apply refused"},
+		{name: "runner error", logs: nodePruneLogDry, fail: "Apply", wantErr: "Apply refused", wantRows: 1},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
