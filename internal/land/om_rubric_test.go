@@ -204,8 +204,8 @@ const exemptionCriterion = "exemption-to-satisfy-a-box"
 
 // TestShippedOMRubricCarriesExemptionCriterion pins the criterion once, at
 // weight 3, immediately after scripts-are-debt, and the guidance a reviewer
-// needs to apply it: the MAJOR severity, the exemption the bead itself allows,
-// and the example it cites.
+// needs to apply it: the MAJOR severity, the exemption the bead itself names,
+// that a Constraint silent on the kind is not enough, and the example it cites.
 func TestShippedOMRubricCarriesExemptionCriterion(t *testing.T) {
 	t.Parallel()
 	r := shippedRubric(t)
@@ -235,7 +235,7 @@ func TestShippedOMRubricCarriesExemptionCriterion(t *testing.T) {
 	if c.Weight == nil || *c.Weight != 3 {
 		t.Errorf("%s weight = %v, want 3: the shortcut lets a failing box through, so it outranks the style criteria", exemptionCriterion, c.Weight)
 	}
-	for _, want := range []string{"MAJOR", "gt-s7suwn", "is not this finding; the finding is a carve-out that contradicts a Constraint"} {
+	for _, want := range []string{"MAJOR", "gt-s7suwn", "is not this finding; the finding is a carve-out that contradicts a Constraint", "a Constraint that does not forbid it is not enough"} {
 		if !strings.Contains(c.Guidance, want) {
 			t.Errorf("%s guidance no longer carries %q: %q", exemptionCriterion, want, c.Guidance)
 		}
