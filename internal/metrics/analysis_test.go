@@ -111,6 +111,51 @@ func TestRunAnalysisDailyHourBounds(t *testing.T) {
 	}
 }
 
+// The plugin ticks hourly and a due run finishes five minutes later, so the
+// stamp the next tick reads is the finish, not the start. Due one tick before
+// 24h (gt-ct6f3o) the next run is the tick 24 hours after the last, keeping the
+// hour of day; due at 24h it is the tick 25 hours after, slipping an hour a day
+// (gt-dvp8w4).
+func TestRunAnalysisDailyHourStaysFixed(t *testing.T) {
+	t.Parallel()
+	town, dayDir := analysisTown(t)
+	opts := analysisOptions(town)
+	stampPath := filepath.Join(town, ".runtime", "metrics", analysisDirName, stampName)
+	const runLength = 5 * time.Minute
+	tick := time.Date(2026, 10, 1, 19, 0, 0, 0, time.UTC)
+	clock := tick
+	env, _ := analysisEnv(t, town, dayDir, nil)
+	env.Now = func() time.Time { return clock }
+	var finished time.Time
+	var starts []time.Time
+	for i := 0; i < 10*24; i++ {
+		// The plugin's stamp is when the last due run finished, which is what
+		// the hour's due check reads.
+		if !finished.IsZero() {
+			writeTownFile(t, stampPath, finished.Format(time.RFC3339)+"\n")
+		}
+		clock = tick
+		res, err := RunAnalysis(context.Background(), env, opts)
+		if err != nil {
+			t.Fatalf("tick %s: RunAnalysis: %v", tick, err)
+		}
+		if res.Ran {
+			starts = append(starts, clock)
+			finished = clock.Add(runLength)
+		}
+		tick = tick.Add(time.Hour)
+	}
+	if len(starts) != 10 {
+		t.Fatalf("ten days made %d runs, want one a day: %v", len(starts), starts)
+	}
+	want := starts[0].Hour()
+	for _, at := range starts[1:] {
+		if at.Hour() != want {
+			t.Errorf("the run at %s started in hour %d, want every run in hour %d: %v", at, at.Hour(), want, starts)
+		}
+	}
+}
+
 // BeforeRun is the dataset refresh's seam: on a due run it is called once with
 // the run's due period, before the run's first step, and a second run finds the
 // analysis's stamp current, so it is not due and the refresh does not run again.
