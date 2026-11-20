@@ -32,7 +32,7 @@ func TestJobOverdueAttention(t *testing.T) {
 	t.Parallel()
 	f := newAttentionFixture(t, jobOverdueNow)
 
-	overdue := JobReading{Name: "dolt_gc", State: "overdue", LastRun: jobOverdueNow.Add(-3 * time.Hour), Cadence: time.Hour}
+	overdue := JobReading{Name: "cache_trim", State: "overdue", LastRun: jobOverdueNow.Add(-3 * time.Hour), Cadence: time.Hour}
 	items := jobOverdueItems(t, f, []JobReading{
 		overdue,
 		{Name: "dolt_backup", State: "ok", LastRun: jobOverdueNow.Add(-time.Hour), Cadence: 24 * time.Hour},
@@ -41,10 +41,10 @@ func TestJobOverdueAttention(t *testing.T) {
 		t.Fatalf("items = %+v, want one for the overdue job only", items)
 	}
 	it := items[0]
-	if it.Key != "job-overdue:dolt_gc" || it.Kind != attention.KindJobOverdue || it.Severity != attention.SeverityLow {
-		t.Errorf("item = %+v, want a low job-overdue item keyed job-overdue:dolt_gc", it)
+	if it.Key != "job-overdue:cache_trim" || it.Kind != attention.KindJobOverdue || it.Severity != attention.SeverityLow {
+		t.Errorf("item = %+v, want a low job-overdue item keyed job-overdue:cache_trim", it)
 	}
-	for _, want := range []string{"dolt_gc", "3h0m", "1h0m0s"} {
+	for _, want := range []string{"cache_trim", "3h0m", "1h0m0s"} {
 		if !strings.Contains(it.Summary, want) {
 			t.Errorf("summary %q does not name %q", it.Summary, want)
 		}
@@ -55,6 +55,91 @@ func TestJobOverdueAttention(t *testing.T) {
 	ranAgain.LastRun = jobOverdueNow.Add(-time.Minute)
 	if items := jobOverdueItems(t, f, []JobReading{ranAgain}); len(items) != 0 {
 		t.Errorf("a job that ran again still raises %+v, want the item cleared", items)
+	}
+}
+
+// The wake key is raised only for the jobs of jobOverdueWakeJobs, and only
+// once now is more than twice their cadence past their last run: one test row
+// per entry of that table, each resolving through attention.RuleFor to
+// job.overdue_wake. Every other key resolves to the info rule (gt-obe5qp).
+func TestJobOverdueWake(t *testing.T) {
+	t.Parallel()
+
+	// The row per entry of the wake table, at the cadence each job runs at:
+	// dolt_gc is the weekly maintenance gc and dolt_backup the nightly one.
+	wakeRows := map[string]struct {
+		cadence time.Duration
+		age     time.Duration
+	}{
+		"dolt_gc":     {cadence: MaintenanceGCCadence, age: 3 * MaintenanceGCCadence},
+		"dolt_backup": {cadence: 24 * time.Hour, age: 3 * 24 * time.Hour},
+	}
+	for name := range jobOverdueWakeJobs {
+		row, ok := wakeRows[name]
+		if !ok {
+			t.Fatalf("jobOverdueWakeJobs names %q with no test row", name)
+		}
+		t.Run("wake/"+name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, jobOverdueNow)
+			items := jobOverdueItems(t, f, []JobReading{{
+				Name:    name,
+				State:   jobStateOverdue,
+				LastRun: jobOverdueNow.Add(-row.age),
+				Cadence: row.cadence,
+			}})
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one for %s", items, name)
+			}
+			if got, want := items[0].Key, jobOverdueWakePrefix+name; got != want {
+				t.Errorf("key = %q, want the wake key %q", got, want)
+			}
+			if rule := attention.RuleFor(items[0]); rule != attention.RuleJobOverdueWake {
+				t.Errorf("RuleFor(%q) = %q, want %q", items[0].Key, rule, attention.RuleJobOverdueWake)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name    string
+		reading JobReading
+	}{
+		{
+			// Overdue, but the last run is an hour short of two cadences.
+			name:    "waking job before two cadences",
+			reading: JobReading{Name: "dolt_gc", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-(2*MaintenanceGCCadence - time.Hour)), Cadence: MaintenanceGCCadence},
+		},
+		{
+			// Exactly two cadences is not "more than twice".
+			name:    "waking job at exactly two cadences",
+			reading: JobReading{Name: "dolt_backup", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-48 * time.Hour), Cadence: 24 * time.Hour},
+		},
+		{
+			// A cadence that says nothing proves no missed cadence: the key
+			// stays the info one however old the last run.
+			name:    "waking job with no cadence",
+			reading: JobReading{Name: "dolt_gc", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-100 * time.Hour)},
+		},
+		{
+			// A job outside the wake table keeps the info key however late.
+			name:    "other job past two cadences",
+			reading: JobReading{Name: "cache_trim", State: jobStateOverdue, LastRun: jobOverdueNow.Add(-100 * time.Hour), Cadence: time.Hour},
+		},
+	} {
+		t.Run("info/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, jobOverdueNow)
+			items := jobOverdueItems(t, f, []JobReading{tc.reading})
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one for %s", items, tc.reading.Name)
+			}
+			if got, want := items[0].Key, "job-overdue:"+tc.reading.Name; got != want {
+				t.Errorf("key = %q, want the info key %q", got, want)
+			}
+			if rule := attention.RuleFor(items[0]); rule != attention.RuleJobOverdue {
+				t.Errorf("RuleFor(%q) = %q, want %q", items[0].Key, rule, attention.RuleJobOverdue)
+			}
+		})
 	}
 }
 
