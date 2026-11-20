@@ -252,6 +252,52 @@ func TestPlanTrimKeepsBuildFilesYoungerThanTheMinimumAge(t *testing.T) {
 	}
 }
 
+// TestPlanTrimFloorIsTheGoTouchIntervalPlusMargin: the floor protects a file a gate used, which Go's
+// hourly mtime touch can leave almost an hour older than the use. With the claim over its cap, a
+// file used 74 minutes before the trim is kept and one used 76 minutes before is planned.
+func TestPlanTrimFloorIsTheGoTouchIntervalPlusMargin(t *testing.T) {
+	t.Parallel()
+	now := at(24)
+	tests := []struct {
+		name     string
+		used     time.Time
+		wantGone bool
+	}{
+		{name: "74 minutes old is inside the floor", used: now.Add(-74 * time.Minute), wantGone: false},
+		{name: "76 minutes old is past the floor", used: now.Add(-76 * time.Minute), wantGone: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			listing := []Entry{{Path: "gocache/tested", Cache: BuildCache, Size: 60, Atime: tc.used, Mtime: tc.used}}
+			plan := planTrim(t, listing, 50, false, now)
+			got := removedPaths(plan)
+			if removed := len(got) == 1; removed != tc.wantGone {
+				t.Errorf("removed = %v, want the file removed = %v (used %v before the trim)", got, tc.wantGone, now.Sub(tc.used))
+			}
+			wantOverBytes := int64(10)
+			if tc.wantGone {
+				wantOverBytes = 0
+			}
+			if plan.OverBytes != wantOverBytes {
+				t.Errorf("overflow = %v over %d, want %d (60 bytes against a 50-byte cap, the file %s)", plan.Overflow, plan.OverBytes, wantOverBytes, map[bool]string{true: "removed", false: "kept"}[tc.wantGone])
+			}
+		})
+	}
+}
+
+// TestBuildCacheMinAgeCoversTheGoTouchInterval: the floor is Go's touch interval plus the gate
+// margin, and the margin keeps every file a gate that started within the last fifteen minutes uses.
+func TestBuildCacheMinAgeCoversTheGoTouchInterval(t *testing.T) {
+	t.Parallel()
+	if buildCacheMinAge != goCacheTouchInterval+gateMargin {
+		t.Errorf("buildCacheMinAge = %v, want goCacheTouchInterval %v plus gateMargin %v", buildCacheMinAge, goCacheTouchInterval, gateMargin)
+	}
+	if gateMargin < 15*time.Minute {
+		t.Errorf("gateMargin = %v, want at least 15 minutes", gateMargin)
+	}
+}
+
 // TestPlanTrimJudgesTheAgeByTheLaterOfAtimeAndMtime: the age is the later of atime and mtime, so a
 // stale access time never makes a file Go touched look old, and a recent atime protects a file whose
 // mtime is old (gt-enplmw).

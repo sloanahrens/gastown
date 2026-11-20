@@ -523,7 +523,7 @@ func failingTrimHarness(t *testing.T, trim func(root string) *CacheTrim) *harnes
 // failingRemoveTrim is a trim with one planned removal, which fails with err.
 func failingRemoveTrim(err error) func(root string) *CacheTrim {
 	return func(root string) *CacheTrim {
-		claim := fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, sweepTrimNow().Add(-time.Hour))})
+		claim := fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(10, sweepTrimNow().Add(-76*time.Minute))})
 		return &CacheTrim{
 			Root: root, CapBytes: 1,
 			Claim:  fakeClaimOf(claim),
@@ -540,7 +540,7 @@ func TestTrimSweepCacheRefusesAClaimItCannotOpen(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "gone")
 	trim := &CacheTrim{
 		Root: root, CapBytes: 1,
-		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(1000, sweepTrimNow().Add(-time.Hour))})),
+		Claim:  fakeClaimOf(fakeClaim(map[string]*fstest.MapFile{"gocache/entry": fakeFile(1000, sweepTrimNow().Add(-76*time.Minute))})),
 		Remove: removeSweepCacheFile,
 		Now:    sweepTrimNow,
 	}

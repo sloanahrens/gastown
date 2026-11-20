@@ -124,12 +124,23 @@ type TrimPlan struct {
 	OverBytes int64
 }
 
+// goCacheTouchInterval is Go's cache mtimeInterval: a reused build-cache entry has its mtime reset to
+// now at most once this often, so its mtime is older than its last use by up to this much
+// (cmd/go/internal/cache, cache.go: "The mtimes therefore roughly reflect 'time of last use' but may
+// in fact be older by at most an hour").
+const goCacheTouchInterval = time.Hour
+
+// gateMargin is how long after a gate started the trim still keeps every file the gate uses.
+const gateMargin = 15 * time.Minute
+
 // buildCacheMinAge is the youngest a build-cache file may be and still be planned for removal: a
-// file whose later of atime and mtime is inside this age is left in the claim. Go sets both times
-// when it uses a cache entry, but at most once an hour (cmd/go/internal/cache mtimeInterval), so a
-// file a seat read within the hour can still carry times older than an hour. A file under the floor
-// stays even when that leaves the claim over its cap; Overflow reports it.
-const buildCacheMinAge = time.Hour
+// file whose later of atime and mtime is inside this age is left in the claim, so no file used
+// within gateMargin of the trim is planned. Go resets a reused entry's mtime at most once a
+// goCacheTouchInterval, so the floor is that interval plus the margin: a file used a minute before
+// the trim can carry an mtime almost goCacheTouchInterval plus that minute, and a floor of the
+// interval alone keeps nothing a gate used. A file under the floor stays even when that leaves the
+// claim over its cap; Overflow reports it.
+const buildCacheMinAge = goCacheTouchInterval + gateMargin
 
 // PlanTrim returns the removals that bring the listing under capBytes, judged as of now. Build-cache
 // files go first, least recently used first (by the later of atime and mtime, ties by path), and never
