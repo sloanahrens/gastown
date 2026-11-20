@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -115,6 +116,37 @@ func TestNodePruneFlightSurvivesAPanicWithNilReport(t *testing.T) {
 		t.Fatal("Start after the nil-report panic = false, want true: the mark never cleared")
 	}
 	awaitNodePruneFlight(t, f.done(), "the run after the nil-report panic")
+}
+
+// TestNodePruneFlightSurvivesAPanickingReport: a report that panics is recovered
+// and logged through the standard logger, and the mark is cleared so a later
+// Start is accepted instead of the panic ending the process.
+//
+//testpolicy:allow parallel — captures the process-wide standard logger, which is where the report's panic is logged
+func TestNodePruneFlightSurvivesAPanickingReport(t *testing.T) {
+	// Not parallel: it captures the process-wide standard logger.
+	var logged syncBuffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	// The cap splits é's two bytes here too: a plain byte cut would log half a
+	// rune.
+	value := strings.Repeat("y", nodePrunePanicMax-1) + "é" + strings.Repeat("y", 100)
+	var f nodePruneFlight
+	if !f.Start(context.Background(), func(context.Context) { panic("node prune blew up") },
+		func(any) { panic(value) }) {
+		t.Fatal("Start = false, want true")
+	}
+	awaitNodePruneFlight(t, f.done(), "the run whose report panicked to end")
+	want := "node image prune: report panicked: " + value[:nodePrunePanicMax-1]
+	if got := logged.String(); !strings.Contains(got, want) {
+		t.Fatalf("the standard logger got %q, want a line holding %q", got, want)
+	}
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
+		t.Fatal("Start after the panicking report = false, want true: the mark never cleared")
+	}
+	awaitNodePruneFlight(t, f.done(), "the run after the panicking report to end")
 }
 
 // TestNodePruneFlightRunContextCancelsWithTheParent: the run's context derives
