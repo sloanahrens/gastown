@@ -349,8 +349,9 @@ func TestPlanImagePinsAgeNeverFilesAPinAtItsTip(t *testing.T) {
 
 // TestPlanImagePinsAgeReadFailureKeepsTheCountRules: a failed age read is the
 // age's failure alone, never the pin's. Its commit count was read, so the pin
-// files at the file threshold and raises the stale item at the stale bound,
-// while a pin whose tip read failed stays unreadable and files nothing.
+// files at the file threshold, raises the stale item at the stale bound, and
+// raises its age's unreadable item, while a pin whose tip read failed stays
+// unreadable and files nothing.
 func TestPlanImagePinsAgeReadFailureKeepsTheCountRules(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
@@ -378,10 +379,20 @@ func TestPlanImagePinsAgeReadFailureKeepsTheCountRules(t *testing.T) {
 		t.Errorf("File names %v, want [om hm]: a failed age read does not switch off the commit-count file rule", filed)
 	}
 	want := []ImagePinItem{{
+		Key:      imagePinsUnreadableKey,
+		Pin:      "om",
+		Severity: attention.SeverityMedium,
+		Summary:  "image pin om: its age could not be read, so only its commit count rules apply",
+	}, {
 		Key:      imagePinsStaleKey,
 		Pin:      "hm",
 		Severity: attention.SeverityMedium,
 		Summary:  "image pin hm is 45 commits behind its source's origin/main, at or over the 30-commit stale bound",
+	}, {
+		Key:      imagePinsUnreadableKey,
+		Pin:      "hm",
+		Severity: attention.SeverityMedium,
+		Summary:  "image pin hm: its age could not be read, so only its commit count rules apply",
 	}, {
 		Key:      imagePinsUnreadableKey,
 		Pin:      "bd",
@@ -389,10 +400,45 @@ func TestPlanImagePinsAgeReadFailureKeepsTheCountRules(t *testing.T) {
 		Summary:  "image pin bd cannot be read: it is not counted as fresh, and no refresh bead is filed for it",
 	}}
 	if !slices.Equal(got.Items, want) {
-		t.Errorf("Items = %+v, want the stale item for hm and the unreadable item for bd", got.Items)
+		t.Errorf("Items = %+v, want the age items for om and hm, the stale item for hm, and the unreadable item for bd", got.Items)
 	}
 	if !slices.Equal(got.Unreadable, []string{"bd"}) {
 		t.Errorf("Unreadable = %q, want [bd]: an age read that failed is not a pin whose distance is unknown", got.Unreadable)
+	}
+}
+
+// TestPlanImagePinsAgeErrRaisesAnAgeUnreadableItem: a pin whose age read
+// failed is readable by count, so it still files, and its missing age raises
+// an unreadable item naming the pin and the age (gt-0hb3sx). A pin with no
+// AgeErr raises no such item.
+func TestPlanImagePinsAgeErrRaisesAnAgeUnreadableItem(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	// Behind is over the file threshold, so a planner that turned the AgeErr
+	// into an Err would file nothing.
+	aged := ImagePinState{Name: "om", Pin: "pin-om", Tip: "tip-om", Behind: 22, AgeErr: errors.New("git show: exit status 128")}
+	read := ImagePinState{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: 22}
+
+	got := PlanImagePins([]ImagePinState{aged, read}, nil, at)
+
+	var filed []string
+	for _, pin := range got.File {
+		filed = append(filed, pin.Name)
+	}
+	if !slices.Equal(filed, []string{"om", "bd"}) {
+		t.Errorf("File names %v, want [om bd]: a failed age read keeps the commit-count file rule", filed)
+	}
+	if len(got.Unreadable) != 0 {
+		t.Errorf("Unreadable = %q, want none: a pin whose age read failed is readable by count", got.Unreadable)
+	}
+	want := []ImagePinItem{{
+		Key:      imagePinsUnreadableKey,
+		Pin:      "om",
+		Severity: attention.SeverityMedium,
+		Summary:  "image pin om: its age could not be read, so only its commit count rules apply",
+	}}
+	if !slices.Equal(got.Items, want) {
+		t.Fatalf("Items = %+v, want the one age item for om and none for bd", got.Items)
 	}
 }
 
