@@ -231,6 +231,11 @@ type overrunSeams struct {
 	// so the progress battery can ask about the seat (jev_progress.go). nil
 	// means nothing is asked.
 	nudged func(seat overrunSeat, at time.Time)
+	// passDone is told what the pass measured when it ends: its seat count,
+	// wall time, slowest seat and failed reads. It is called once per pass,
+	// also for a dry run and for a pass with no seats; its log line is
+	// gt-0r6j2r. nil means nothing is told.
+	passDone func(stats passStats)
 
 	// submittedNow re-reads, at the moment of acting, whether the seat has
 	// submitted its work: gt done is running (a fresh exiting heartbeat) or the
@@ -379,6 +384,8 @@ type overrunSeams struct {
 // each seam's answer, with the error the read failed with, so the seat loop can
 // log a failure and decide it where the seat's state is known.
 type overrunSeatReads struct {
+	// The time each of the three reads took on the pass's clock (overrunReadSeat).
+	answeredTook, gateTook, waitingTook time.Duration
 	// answeredAt is when the escalation the seat's ESCALATED stop was for was
 	// answered, zero when it was not.
 	answeredAt  time.Time
@@ -394,21 +401,84 @@ type overrunSeatReads struct {
 	waitingErr error
 }
 
+// failed is the number of the seat's reads that answered an error.
+func (r overrunSeatReads) failed() int {
+	n := 0
+	for _, err := range [...]error{r.answeredErr, r.gateErr, r.waitingErr} {
+		if err != nil {
+			n++
+		}
+	}
+	return n
+}
+
+// took is how long the seat's three reads took together.
+func (r overrunSeatReads) took() time.Duration {
+	return r.answeredTook + r.gateTook + r.waitingTook
+}
+
+// passStats is what one pass measured of itself, told to the passDone hook when
+// the pass ends: its seat count, wall time, the seat whose reads took longest
+// and the reads that failed.
+type passStats struct {
+	// seats is the number of seats the pass read. A seat skipped before its
+	// reads — submitted, parked, no bead, undated, a bead with a stop still in
+	// flight, or an overrun state that cannot be read — is not counted.
+	seats int
+	// wall is the pass's duration on its own clock.
+	wall time.Duration
+	// slowest is the seat whose three reads took longest together, with each
+	// read's time; it is zero when no seat was read.
+	slowest passSeatReads
+	// failedReads counts the per-seat reads that answered an error.
+	failedReads int
+}
+
+// passSeatReads names the seat whose reads took longest in a pass, and those
+// reads.
+type passSeatReads struct {
+	rig, polecat, bead string
+	reads              overrunSeatReads
+}
+
+// add records one seat the pass read; the first seat read is the slowest until
+// another takes longer, so a tie keeps the earlier seat.
+func (p *passStats) add(seat overrunSeat, r overrunSeatReads) {
+	p.seats++
+	p.failedReads += r.failed()
+	if p.seats == 1 || r.took() > p.slowest.reads.took() {
+		p.slowest = passSeatReads{rig: seat.Rig, polecat: seat.Polecat, bead: seat.Bead, reads: r}
+	}
+}
+
 // overrunReadSeat makes the three per-seat reads a pass judges a seat by, one
-// after another: the escalation answer, the gate state, and — outside a gate,
-// which is already exempt, so one stretch is never exempt twice — whether the
-// seat waits on an escalation it raised. Each read's answer comes back with its
-// error. The escalation wait is still read when the gate read fails, because
-// the carried gate answer is not known here; the loop uses it only if the seat
-// turns out not to be in its gate.
+// after another, timing each on the pass's clock: the escalation answer, the
+// gate state, and — outside a gate, which is already exempt, so one stretch is
+// never exempt twice — whether the seat waits on an escalation it raised. Each
+// read's answer comes back with its error and its time. The escalation wait is
+// still read when the gate read fails, because the carried gate answer is not
+// known here; the loop uses it only if the seat turns out not to be in its
+// gate.
 func overrunReadSeat(s overrunSeams, seat overrunSeat) overrunSeatReads {
 	var r overrunSeatReads
+	// The pass sets s.now before the seat loop; a caller that did not gets the
+	// wall clock, as the pass's own guard does.
+	clock := s.now
+	if clock == nil {
+		clock = time.Now
+	}
+	start := clock()
 	r.answeredAt, r.answeredErr = s.escalationAnsweredAt(seat)
+	r.answeredTook = clock().Sub(start)
+	start = clock()
 	r.inGate, r.gateErr = s.gateRunning(seat)
+	r.gateTook = clock().Sub(start)
 	if r.gateErr == nil && r.inGate {
 		return r
 	}
+	start = clock()
 	r.waiting, r.waitingErr = s.escalationWaiting(seat)
+	r.waitingTook = clock().Sub(start)
 	return r
 }
 
@@ -517,8 +587,10 @@ func (d *Daemon) runOverrunGuardPass(cycle func()) {
 // raised. A failed gate read carries the seat's last gate answer for two
 // consecutive failures, then counts all of its time; a state that cannot be
 // read counts all of its time (overrun_guard_gate.go, overrun_guard_escalation.go,
-// withRestart). In dry-run mode nothing is stopped or written, no hook is
-// called, and the log says what would have happened.
+// withRestart). In dry-run mode nothing is stopped or written and no mark is
+// made; the log says what would have happened, while the pass's own stats are
+// still reported. The pass tells passDone what it measured when it ends,
+// including a dry run and a pass with no seats.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	pc := d.patrol()
 	if !d.isPatrolActive("overrun_guard") {
@@ -527,6 +599,15 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	// The pass's own report, made once on every path that runs a pass.
+	stats := passStats{}
+	passStart := s.now()
+	defer func() {
+		stats.wall = s.now().Sub(passStart)
+		if s.passDone != nil {
+			s.passDone(stats)
+		}
+	}()
 	nudgeAfter, stopAfter := overrunGuardThresholds(pc)
 	scheduledStopAfter := overrunScheduledStopAfter(pc)
 	dry := false
@@ -600,8 +681,9 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		// The three per-seat reads of the pass, made once for a seat whose state
-		// is known to be readable.
+		// is known to be readable, and folded into the pass's own stats.
 		reads := overrunReadSeat(s, seat)
+		stats.add(seat, reads)
 		// A seat whose ESCALATED stop was answered could not resume before the
 		// answer, so its clock starts there (gt-bdlg6o). An answer that cannot be
 		// read leaves the clock where the stop left it: the direction that stops.

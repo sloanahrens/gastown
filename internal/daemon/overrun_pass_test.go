@@ -361,6 +361,8 @@ func TestOverrunPassReadSeat(t *testing.T) {
 				calls = append(calls, read+" "+got.Rig+"/"+got.Polecat+"/"+got.Bead)
 			}
 			s := overrunSeams{
+				// A still clock: the reads take no time, so their times stay zero.
+				now: func() time.Time { return answered },
 				escalationAnsweredAt: func(got overrunSeat) (time.Time, error) {
 					call("answered", got)
 					return tc.answeredAt, tc.answerErr
@@ -431,5 +433,149 @@ func TestOverrunPassSeatLoopReads(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "cannot read state for "+skipped.Bead) {
 		t.Errorf("log does not report the unreadable state that skipped the seat:\n%s", buf.String())
+	}
+}
+
+// TestOverrunPassStats: a pass times each seat's three reads on its own clock
+// and, when it ends, tells passDone how many seats it read, the wall time it
+// took, the seat whose reads took longest with each read's time, and how many
+// reads failed. A dry run is reported too (gt-m0c0im).
+func TestOverrunPassStats(t *testing.T) {
+	t.Parallel()
+
+	t.Run("two seats: the slowest seat, its read times and no failed reads", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		slow := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-slow11"}
+		fast := overrunSeat{Rig: "gastown", Polecat: "toast", Bead: "gt-fast11"}
+		// The quick seat is read first, so the slowest seat has to be chosen
+		// from the read times, not from the seat order.
+		f := newOverrunFake(5*time.Minute, fast, slow)
+		// Each read advances the fake clock: slow's answer 7 s and gate 1 s,
+		// fast's answer 2 s; every other read takes none.
+		answerTook := map[string]time.Duration{slow.Bead: 7 * time.Second, fast.Bead: 2 * time.Second}
+		f.escalationAnsweredAt = func(seat overrunSeat) (time.Time, error) {
+			f.now = f.now.Add(answerTook[seat.Bead])
+			return time.Time{}, nil
+		}
+		f.gateRunning = func(seat overrunSeat) (bool, error) {
+			if seat.Bead == slow.Bead {
+				f.now = f.now.Add(time.Second)
+			}
+			return false, nil
+		}
+		f.escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
+
+		var got passStats
+		calls := 0
+		s := f.seams()
+		s.passDone = func(stats passStats) { calls++; got = stats }
+		d.runOverrunGuard(s)
+
+		if calls != 1 {
+			t.Fatalf("passDone calls = %d, want 1", calls)
+		}
+		if got.seats != 2 {
+			t.Errorf("seats = %d, want 2", got.seats)
+		}
+		if got.failedReads != 0 {
+			t.Errorf("failedReads = %d, want 0", got.failedReads)
+		}
+		if got.wall != 10*time.Second {
+			t.Errorf("wall = %s, want 10s (the reads' own time on the pass clock)", got.wall)
+		}
+		want := passSeatReads{rig: slow.Rig, polecat: slow.Polecat, bead: slow.Bead,
+			reads: overrunSeatReads{answeredTook: 7 * time.Second, gateTook: time.Second}}
+		if got.slowest != want {
+			t.Errorf("slowest = %+v, want %+v", got.slowest, want)
+		}
+	})
+
+	t.Run("a failed gate read counts as one failed read", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		f := newOverrunFake(5*time.Minute, overrunSeat{Rig: "gastown", Polecat: "nux", Bead: "gt-fail11"})
+		f.gateRunning = func(overrunSeat) (bool, error) {
+			return false, errors.New("container-gate slot status: boom")
+		}
+
+		var got passStats
+		s := f.seams()
+		s.passDone = func(stats passStats) { got = stats }
+		d.runOverrunGuard(s)
+
+		if got.seats != 1 {
+			t.Errorf("seats = %d, want 1", got.seats)
+		}
+		if got.failedReads != 1 {
+			t.Errorf("failedReads = %d, want 1", got.failedReads)
+		}
+	})
+
+	t.Run("a seat list that cannot be read still reports", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		f := newOverrunFake(5 * time.Minute)
+
+		var got passStats
+		calls := 0
+		s := f.seams()
+		s.workingSeats = func() ([]overrunSeat, error) { return nil, errors.New("bd list: store unavailable") }
+		s.passDone = func(stats passStats) { calls++; got = stats }
+		d.runOverrunGuard(s)
+
+		// The failure is logged; the pass still ends with the report it has.
+		if calls != 1 {
+			t.Fatalf("passDone calls = %d, want 1", calls)
+		}
+		if got.seats != 0 {
+			t.Errorf("seats = %d, want 0", got.seats)
+		}
+	})
+
+	t.Run("a dry run is reported too", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, true)
+		f := newOverrunFake(5*time.Minute, overrunSeat{Rig: "gastown", Polecat: "toast", Bead: "gt-dry11"})
+
+		var got passStats
+		calls := 0
+		s := f.seams()
+		s.passDone = func(stats passStats) { calls++; got = stats }
+		d.runOverrunGuard(s)
+
+		if calls != 1 {
+			t.Fatalf("passDone calls = %d, want 1", calls)
+		}
+		if got.seats != 1 {
+			t.Errorf("seats = %d, want 1", got.seats)
+		}
+	})
+}
+
+// TestOverrunPassStatsNoSeats: a pass with no working seats still ends with a
+// report: 0 seats, no slowest seat and no failed reads (gt-m0c0im).
+func TestOverrunPassStatsNoSeats(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(5 * time.Minute)
+
+	var got passStats
+	calls := 0
+	s := f.seams()
+	s.passDone = func(stats passStats) { calls++; got = stats }
+	d.runOverrunGuard(s)
+
+	if calls != 1 {
+		t.Fatalf("passDone calls = %d, want 1", calls)
+	}
+	if got.seats != 0 {
+		t.Errorf("seats = %d, want 0", got.seats)
+	}
+	if got.slowest != (passSeatReads{}) {
+		t.Errorf("slowest = %+v, want none", got.slowest)
+	}
+	if got.failedReads != 0 {
+		t.Errorf("failedReads = %d, want 0", got.failedReads)
 	}
 }
