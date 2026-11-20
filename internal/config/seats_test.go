@@ -780,3 +780,46 @@ func TestSandboxQuantityValueRejectsUnparsable(t *testing.T) {
 		t.Fatalf("500m = %v, %v; want 0.5", got, err)
 	}
 }
+
+// A seat may drop DWARF from the packages it compiles, cutting the build cache
+// it writes; the one accepted spelling is -gcflags=all=-dwarf=false, and every
+// other compiler, linker or tool flag is still refused by name (gt-h5ksj7).
+func TestSeatGoFlagsAcceptsOnlyTheDwarfFlag(t *testing.T) {
+	t.Parallel()
+
+	const dwarf = "-gcflags=all=-dwarf=false"
+	tests := []struct {
+		name, goFlags, want string // want "" means the load is refused
+	}{
+		{"the dwarf flag beside a cap", "-p=4 " + dwarf, "-p=4 " + dwarf},
+		{"another gcflag", "-gcflags=all=-N", ""},
+		{"the dwarf flag without all=", "-gcflags=-dwarf=false", ""},
+		{"ldflags", "-ldflags=-w", ""},
+		{"toolexec", "-toolexec=x", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ts := NewTownSettings()
+			ts.PolecatPool = &PolecatPool{Seats: map[string]SeatConfig{"seat-trial": {Cap: 1, GoFlags: tt.goFlags}}}
+			seats, err := Seats(ts, nil)
+			if tt.want == "" {
+				if err == nil {
+					t.Fatalf("go_flags %q loaded as %+v, want a refusal", tt.goFlags, seats)
+				}
+				for _, want := range []string{"seat-trial", tt.goFlags} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %q, want it to name %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("go_flags %q: %v", tt.goFlags, err)
+			}
+			if len(seats) != 1 || seats[0].GoFlags != tt.want {
+				t.Fatalf("seats = %+v, want one seat with go_flags %q", seats, tt.want)
+			}
+		})
+	}
+}
