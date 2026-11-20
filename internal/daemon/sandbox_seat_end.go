@@ -645,6 +645,12 @@ func (h *patrolScanHost) copySeatOutbox(rig, name, gateway string) string {
 	if !recorded {
 		rec = session.SandboxRecord{Session: sessionName, Rig: rig, Polecat: name, Gateway: gateway}
 	}
+	return h.copySeatOutboxFor(rec)
+}
+
+// copySeatOutboxFor copies the outbox of the sandbox rec names, from the record
+// as it stands, and returns the reason the seat is kept when the copy fails.
+func (h *patrolScanHost) copySeatOutboxFor(rec session.SandboxRecord) string {
 	copyOut := h.sandboxOutboxCopy
 	if copyOut == nil {
 		copyOut = session.CopySandboxSeatOutbox

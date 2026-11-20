@@ -29,9 +29,11 @@ type recordReap struct {
 	t            *testing.T
 	town         string
 	host         *patrolScanHost
-	asked        []string // "gateway|sandbox" questions, in order
-	markerAsked  []string // "gateway|sandbox" ended-marker questions, in order
-	deleterCalls []string // sandboxes the record deleter was asked to delete
+	asked        []string                // "gateway|sandbox" questions, in order
+	markerAsked  []string                // "gateway|sandbox" ended-marker questions, in order
+	deleterCalls []string                // sandboxes the record deleter was asked to delete
+	order        []string                // "copy" and "delete", in the order the pass made them
+	copied       []session.SandboxRecord // the records the outbox copy was asked to copy
 	logs         strings.Builder
 }
 
@@ -45,6 +47,7 @@ type recordReapOpts struct {
 	markerErr  error         // the held sandbox cannot be asked for its marker
 	deleterErr error         // the record deleter fails
 	noDeleter  bool          // neither a seam nor a linked deleter exists
+	copyErr    error         // the outbox copy fails
 }
 
 const recordReapSession = "gt-capable"
@@ -76,8 +79,24 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 		r.markerAsked = append(r.markerAsked, gateway+"|"+name)
 		return o.marker, o.markerErr
 	}, noSandboxDeleterLinked: o.noDeleter}
+	// The outbox copy never reaches a real gateway: the seam writes a result
+	// file into the copy directory, as the real copy does for a seat that wrote
+	// one, and records the order against the deleter.
+	r.host.sandboxOutboxCopy = func(town string, rec session.SandboxRecord) error {
+		r.order = append(r.order, "copy")
+		r.copied = append(r.copied, rec)
+		if o.copyErr != nil {
+			return o.copyErr
+		}
+		dir := session.SandboxOutboxCopyDir(town, rec.Rig, rec.Polecat)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, "result.json"), []byte(`{"bead_id":"gt-x"}`), 0o600)
+	}
 	if !o.noDeleter {
 		r.host.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+			r.order = append(r.order, "delete")
 			r.deleterCalls = append(r.deleterCalls, rec.Session)
 			return o.deleterErr
 		}
@@ -149,6 +168,68 @@ func TestPatrolScanSandboxRecords(t *testing.T) {
 				t.Errorf("log = %q, want it to contain %q", r.logs.String(), tt.wantLog)
 			}
 		})
+	}
+}
+
+// A held sandbox whose ended marker is set has its outbox copied to the host
+// before the deleter runs, and the copy is on disk afterwards: a files-mode
+// seat's result is in that outbox and nowhere else (gt-qem69c).
+func TestPatrolScanSandboxRecordsCopiesTheOutboxBeforeDeletingAHeldSandbox(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true})
+	r.host.patrolScanSandboxRecords()
+	if got, want := strings.Join(r.order, ","), "copy,delete"; got != want {
+		t.Fatalf("order of the copy and the delete = %q, want %q", got, want)
+	}
+	copied := filepath.Join(session.SandboxOutboxCopyDir(r.town, "gastown", "capable"), "result.json")
+	if _, err := os.Stat(copied); err != nil {
+		t.Fatalf("the host copy of the outbox is not on disk after the pass: %v", err)
+	}
+	if r.recorded() {
+		t.Error("the record is still there after the sandbox was deleted")
+	}
+}
+
+// A failed outbox copy keeps the sandbox and its record with the copy's reason,
+// and the deleter never runs: a seat's outbox is never deleted unread
+// (gt-qem69c).
+func TestPatrolScanSandboxRecordsKeepsASandboxWhoseOutboxCopyFailed(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, copyErr: errors.New("exec: transport error")})
+	r.host.patrolScanSandboxRecords()
+	if !r.recorded() {
+		t.Error("the record was removed although the outbox copy failed")
+	}
+	if len(r.deleterCalls) != 0 {
+		t.Errorf("the deleter ran (%v) after a failed outbox copy", r.deleterCalls)
+	}
+	if !strings.Contains(r.logs.String(), outboxNotCopiedReason) || !strings.Contains(r.logs.String(), "transport error") {
+		t.Errorf("log = %q, want the kept reason and the copy's own error", r.logs.String())
+	}
+}
+
+// The patrol copies from the record it holds, so a record that cannot be read
+// again cannot turn the copy into a no-op before the delete.
+func TestPatrolScanSandboxRecordsCopiesFromTheRecordItHolds(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true})
+	r.host.patrolScanSandboxRecords()
+	if len(r.copied) != 1 || r.copied[0].Session != recordReapSession || r.copied[0].Gateway != "gw1" || r.copied[0].Rig != "gastown" || r.copied[0].Polecat != "capable" {
+		t.Fatalf("the copy was asked for %+v, want the held record of %s on gw1", r.copied, recordReapSession)
+	}
+}
+
+// The landing's own end copied the outbox before it ends the held sandbox, so
+// endHeldSandbox, which it calls, does not copy a second time.
+func TestEndHeldSandboxAtTheLandingDoesNotCopyTheOutboxAgain(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true})
+	rec := session.SandboxRecord{Session: recordReapSession, Rig: "gastown", Polecat: "capable", Gateway: "gw1"}
+	if why := r.host.endHeldSandbox("sandbox seat end", recordReapSession, rec); why != "" {
+		t.Fatalf("endHeldSandbox kept the sandbox: %s", why)
+	}
+	if got, want := strings.Join(r.order, ","), "delete"; got != want {
+		t.Errorf("order = %q, want %q: the landing's end already copied the outbox", got, want)
 	}
 }
 
