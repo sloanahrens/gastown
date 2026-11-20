@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -30,6 +31,11 @@ type trimPathsFS struct {
 	remove func(root, rel string) error
 	// resolve follows every symlink in a path and returns the real name.
 	resolve func(name string) (string, error)
+	// modTime returns the modification time of rel, a path below root, a link itself rather than its
+	// target. It is read through root as remove is, so a directory swapped out of the claim is refused.
+	modTime func(root, rel string) (time.Time, error)
+	// now is the clock a removal judges a file's age by.
+	now func() time.Time
 }
 
 // diskTrimPathsFS is the filesystem of the container that runs the trim Job: the claim at its mount
@@ -50,7 +56,29 @@ func diskTrimPathsFS() trimPathsFS {
 		read:    os.ReadFile,
 		remove:  removeInRoot,
 		resolve: filepath.EvalSymlinks,
+		modTime: modTimeInRoot,
+		now:     time.Now,
 	}
+}
+
+// modTimeInRoot is the modification time of rel, read through an os.Root opened on root, the way
+// removeInRoot removes it: a directory swapped for a link out of the claim fails the read rather than
+// being followed to a file outside it.
+func modTimeInRoot(root, rel string) (mtime time.Time, err error) {
+	r, err := os.OpenRoot(root)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() {
+		if cerr := r.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	info, err := r.Lstat(rel)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
 }
 
 // removeInRoot deletes rel through an os.Root opened on root, so the kernel-level walk refuses a
@@ -69,11 +97,12 @@ func removeInRoot(root, rel string) (err error) {
 	return r.Remove(rel)
 }
 
-// TrimPathsResult is what one trim-paths run did: how many of the listed files it removed, and how
-// many were already gone.
+// TrimPathsResult is what one trim-paths run did: how many of the listed files it removed, how many
+// were already gone, and how many a seat used since the listing, which the age floor keeps.
 type TrimPathsResult struct {
 	Removed int
 	Absent  int
+	Kept    int
 }
 
 // RemoveTrimPaths removes every path the shard mounts under listDir list, relative to root.
@@ -262,17 +291,17 @@ func trimTargets(realRoot string, list []string, w trimPathsFS) ([]string, int, 
 }
 
 // removeTargets removes the targets trimTargets resolved, and counts the entries it found gone as
-// absent. A removal that fails does not stop the rest, and the count comes back in the error.
+// absent. A target a seat used since the listing is kept, not removed. A removal that fails does not
+// stop the rest, and the count comes back in the error.
 func removeTargets(realRoot string, targets []string, gone int, w trimPathsFS) (TrimPathsResult, error) {
 	res := TrimPathsResult{Absent: gone}
 	failed, firstPath := 0, ""
 	var firstErr error
 	for _, target := range targets {
-		rel, err := filepath.Rel(realRoot, target)
-		if err == nil {
-			err = w.remove(realRoot, rel)
-		}
+		kept, err := removeTarget(realRoot, target, w)
 		switch {
+		case err == nil && kept:
+			res.Kept++
 		case err == nil:
 			res.Removed++
 		case errors.Is(err, fs.ErrNotExist):
@@ -288,6 +317,25 @@ func removeTargets(realRoot string, targets []string, gone int, w trimPathsFS) (
 		return res, fmt.Errorf("%d of %d listed paths could not be removed, the first %s: %w", failed, len(targets), firstPath, firstErr)
 	}
 	return res, nil
+}
+
+// removeTarget removes one resolved target, unless the build-cache age floor keeps it. The time is read
+// at the moment of removal, not at the listing, so a file a seat used since the listing is kept. A
+// time that cannot be read is an error, never a removal; a file gone before its time is read comes
+// back as fs.ErrNotExist and counts as absent.
+func removeTarget(realRoot, target string, w trimPathsFS) (bool, error) {
+	rel, err := filepath.Rel(realRoot, target)
+	if err != nil {
+		return false, err
+	}
+	mtime, err := w.modTime(realRoot, rel)
+	if err != nil {
+		return false, err
+	}
+	if cachevol.BuildCacheInUse(rel, mtime, w.now()) {
+		return true, nil
+	}
+	return false, w.remove(realRoot, rel)
 }
 
 // trimShardPaths is every path the mounted shards list, in shard order: shard i is the directory

@@ -288,10 +288,11 @@ func trimPathsMain(args []string, stdout, stderr io.Writer) int {
 //
 // The list comes from the mounted shards, or from the file a caller wrote into the
 // claim when --list-file names it. Once the run reaches the list, stdout carries
-// "removed N absent M", the counts of what it did, so a run that fails part way still
-// says how much it removed. Exit 3 with a reason on stderr means the list could not be
-// read whole or a removal failed: a trim the helper cannot vouch for is reported
-// rather than passed off as a partial success.
+// "removed N absent M kept K", the counts of what it did, so a run that fails part way
+// still says how much it removed. K counts the build-cache files a seat used since the
+// list was made, which the age floor keeps. Exit 3 with a reason on stderr means the list
+// could not be read whole or a removal failed: a trim the helper cannot vouch for is
+// reported rather than passed off as a partial success.
 func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 	flags := flag.NewFlagSet("trim-paths", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -327,7 +328,7 @@ func trimPathsRun(args []string, stdout, stderr io.Writer, w trimPathsFS) int {
 		}
 		res, err = RemoveTrimPaths(*root, *list, shards, w)
 	}
-	fmt.Fprintf(stdout, "removed %d absent %d\n", res.Removed, res.Absent)
+	fmt.Fprintf(stdout, "removed %d absent %d kept %d\n", res.Removed, res.Absent, res.Kept)
 	if err != nil {
 		fmt.Fprintf(stderr, "trim-paths: %v\n", err)
 		return 3
