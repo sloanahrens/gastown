@@ -45,11 +45,12 @@ func newDaemonImagePinsCmd(run func(out io.Writer, f daemonImagePinsFlags) error
 the image-pins file and the seed-pins file so they agree.
 
 A pin is moved when its commit is an ancestor of its source's origin/main and
-at least 20 commits behind it, half the 40-commit bound the pin-drift guard
-enforces. A pin nearer the tip keeps its line, so the diff stays quiet. The tip
-is read from each --<name>-src checkout's origin/main through git; nothing is
-fetched. A pin that is not an ancestor of its tip (ahead or diverged) is
-refused: set it by hand.
+it is at least 20 commits behind the tip, half the 40-commit bound the pin-drift
+guard enforces, or five days or more older than it, two days inside the guard's
+seven-day age bound. A pin inside both bounds keeps its line, so the diff stays
+quiet. The tip is read from each --<name>-src checkout's origin/main through
+git; nothing is fetched. A pin that is not an ancestor of its tip (ahead or
+diverged), or whose commit time cannot be read, is refused: set it by hand.
 
 Only the commit column of each line changes: comments, URLs, spacing and line
 order stay as they are. The seed-pins file's beads and devops lines take the
