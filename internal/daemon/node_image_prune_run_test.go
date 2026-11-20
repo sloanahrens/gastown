@@ -96,3 +96,36 @@ func TestNodeImagePruneRunStopsAtFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeImagePruneRunFailsClosedBeforeTheJob refuses each step before the Job is
+// applied: a failed list, a refused spare list and a refused manifest. Each run ends
+// with an error naming its step, and Apply is never called.
+func TestNodeImagePruneRunFailsClosedBeforeTheJob(t *testing.T) {
+	t.Parallel()
+
+	good := []byte(jsonList(jsonDeployment("gt-daemon", digestN("a"))))
+	for _, tc := range []struct {
+		name, fail, image, step string
+		list                    []byte
+	}{
+		{name: "list refused", fail: "ListJSON", list: good, image: "gt-bd:1", step: "list the gt namespace"},
+		{name: "spare list refused", list: []byte(`{"kind":"List","items":[]}`), image: "gt-bd:1", step: "work out the spare digests"},
+		{name: "manifest refused", list: good, image: "", step: "build the job manifest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			kube := &fakeKube{fail: tc.fail, list: tc.list, logs: []byte(nodePruneLogDry)}
+			_, err := runNodeImagePrune(context.Background(), kube, "node-prune-x", tc.image, 2, false)
+			if err == nil {
+				t.Fatalf("runNodeImagePrune error = nil, want a refusal")
+			}
+			if !strings.Contains(err.Error(), tc.step) {
+				t.Errorf("error = %q, want it to name the step %q", err, tc.step)
+			}
+			if slices.Contains(kube.calls, "Apply") || kube.sent != nil {
+				t.Errorf("calls = %q, want Apply not called", strings.Join(kube.calls, " "))
+			}
+		})
+	}
+}
