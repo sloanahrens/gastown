@@ -2913,6 +2913,48 @@ func TestSpecRosterCountsDeadHookedSeats(t *testing.T) {
 	}
 }
 
+// TestSpecRosterCarriesTheNamesOfItsLiveSeats pins that a live seat is named
+// rig/polecat, so a running sling can be matched to it (gt-nih4xu). A dead-hooked
+// seat has no live session and is not named.
+func TestSpecRosterCarriesTheNamesOfItsLiveSeats(t *testing.T) {
+	t.Parallel()
+	r := specRosterFrom([]poolSession{
+		{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember"},
+		{name: "gt-jade", agent: "deepseek-flash", rig: "gastown", polecat: "jade"},
+		{name: "dead/gastown/mariner", agent: "deepseek-flash", rig: "gastown", polecat: "mariner", deadHooked: true},
+	}, nil)
+	if want := map[string]bool{"gastown/ember": true, "gastown/jade": true}; !reflect.DeepEqual(r.LiveSeatNames, want) {
+		t.Fatalf("LiveSeatNames = %v, want %v", r.LiveSeatNames, want)
+	}
+}
+
+// TestSpecRosterLiveSeatNamesLeaveOutParkedStaleSeats pins that a released parked
+// seat (gt-t7k92), which is not in Live, is not named live either.
+func TestSpecRosterLiveSeatNamesLeaveOutParkedStaleSeats(t *testing.T) {
+	t.Parallel()
+	r := specRosterFrom([]poolSession{
+		{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember"},
+		{name: "dead/gastown/mariner", agent: "deepseek-flash", rig: "gastown", polecat: "mariner", parkedStale: true},
+	}, nil)
+	if want := map[string]bool{"gastown/ember": true}; !reflect.DeepEqual(r.LiveSeatNames, want) {
+		t.Fatalf("LiveSeatNames = %v, want %v", r.LiveSeatNames, want)
+	}
+}
+
+// TestSpecRosterLiveSeatNamesLeaveOutLandingSeats pins that a seat mid-landing is
+// not named live: its polecat has run gt done, so a sling for its bead is not
+// that seat (gt-nih4xu).
+func TestSpecRosterLiveSeatNamesLeaveOutLandingSeats(t *testing.T) {
+	t.Parallel()
+	r := specRosterFrom([]poolSession{
+		{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember"},
+		{name: "landing/gastown/jade", agent: "deepseek-flash", rig: "gastown", polecat: "jade", landing: true},
+	}, nil)
+	if want := map[string]bool{"gastown/ember": true}; !reflect.DeepEqual(r.LiveSeatNames, want) {
+		t.Fatalf("LiveSeatNames = %v, want %v", r.LiveSeatNames, want)
+	}
+}
+
 func TestSpecLintCommandExitCodes(t *testing.T) {
 	t.Parallel()
 	tmpl := filepath.Join(t.TempDir(), "spec-template.md")

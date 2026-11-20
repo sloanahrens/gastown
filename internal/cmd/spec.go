@@ -1984,6 +1984,11 @@ type specRoster struct {
 	// running for one of them is that seat, not a second one, so it adds no
 	// seat to the count the dispatcher decides with (gt-75fma5).
 	HookedBeads map[string]bool
+	// LiveSeatNames names, as rig/polecat, the seats inside Live that hold a live
+	// session, so a running sling for its bead can be matched to that seat by
+	// name (gt-nih4xu). A dead-hooked, landing or claimed seat has no live
+	// session and is not named; a released parked seat is not in Live at all.
+	LiveSeatNames map[string]bool
 	// Held names every seat counted in Live, with its state, from the same
 	// seat read the count used. A picture above its cap prints them, so the
 	// reading can be attributed to seats (gt-5y87fp).
@@ -3842,6 +3847,15 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 				r.HookedBeads = map[string]bool{}
 			}
 			r.HookedBeads[s.hookedBead] = true
+		}
+		// A seat with a live session is named by its polecat, so a sling still
+		// running for it is matched to that seat by name (gt-nih4xu). A claim
+		// names no polecat, so seatKey is empty for it and it is never named.
+		if key := s.seatKey(); key != "" && !s.deadHooked && !s.landing {
+			if r.LiveSeatNames == nil {
+				r.LiveSeatNames = map[string]bool{}
+			}
+			r.LiveSeatNames[key] = true
 		}
 		if s.created.After(r.Newest) {
 			r.Newest = s.created
