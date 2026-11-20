@@ -544,15 +544,49 @@ func TestSpecSlingHoldStopsAPlannedSlingIntoaHeldRig(t *testing.T) {
 func TestSpecLiveWithInFlight(t *testing.T) {
 	t.Parallel()
 	live := map[string]int{"claude-sonnet": 1}
-	got := specLiveWithInFlight(live, nil, []specInFlight{{Bead: "gt-a", Agent: "claude-sonnet"}, {Bead: "gt-b", Agent: "deepseek-flash"}})
+	got := specLiveWithInFlight(live, specSlingSeats{}, []specInFlight{{Bead: "gt-a", Agent: "claude-sonnet"}, {Bead: "gt-b", Agent: "deepseek-flash"}})
 	if got["claude-sonnet"] != 2 || got["deepseek-flash"] != 1 {
 		t.Errorf("live = %v, want claude-sonnet 2 and deepseek-flash 1", got)
 	}
 	if live["claude-sonnet"] != 1 || len(live) != 1 {
 		t.Errorf("the roster's own map = %v, want it left alone", live)
 	}
-	if got := specLiveWithInFlight(nil, nil, nil); got != nil {
+	if got := specLiveWithInFlight(nil, specSlingSeats{}, nil); got != nil {
 		t.Errorf("nothing in flight = %v, want the roster's map as it is", got)
+	}
+}
+
+// A running sling whose bead is assigned to a polecat with a live session is
+// that seat, which the roster already counts, so it adds nothing (gt-7vmtta).
+// The seat is matched by name, because its bead may not be hooked in the
+// roster yet.
+func TestSpecInFlightAddedSkipsASlingWhoseSeatIsLiveByName(t *testing.T) {
+	t.Parallel()
+	live := map[string]int{"claude-sonnet": 1}
+	seats := specSlingSeats{
+		Live:     map[string]bool{"gastown/capable": true},
+		Assignee: func(string) string { return "gastown/polecats/capable" },
+	}
+	inFlight := []specInFlight{{Bead: "gt-b", Rig: "gastown", Agent: "claude-sonnet"}}
+	if got := specInFlightAdded(inFlight, seats); len(got) != 0 {
+		t.Fatalf("specInFlightAdded = %v, want none: the sling's seat is live", got)
+	}
+	if got := specLiveWithInFlight(live, seats, inFlight)["claude-sonnet"]; got != 1 {
+		t.Errorf("live claude-sonnet = %d, want the seat counted once", got)
+	}
+}
+
+// A running sling whose assignee names no live seat is still added: it is
+// filling a seat the roster cannot show yet (gt-7vmtta).
+func TestSpecInFlightAddedKeepsASlingWhoseAssigneeIsNotLive(t *testing.T) {
+	t.Parallel()
+	seats := specSlingSeats{
+		Live:     map[string]bool{"gastown/capable": true},
+		Assignee: func(string) string { return "gastown/polecats/ghost" },
+	}
+	inFlight := []specInFlight{{Bead: "gt-b", Rig: "gastown", Agent: "claude-sonnet"}}
+	if got := specInFlightAdded(inFlight, seats); len(got) != 1 {
+		t.Fatalf("specInFlightAdded = %v, want the sling kept: its assignee is not a live seat", got)
 	}
 }
 

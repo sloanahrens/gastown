@@ -134,19 +134,59 @@ func specInFlightByAgent(inFlight []specInFlight) map[string]int {
 	return out
 }
 
+// specSlingSeats is what the tick knows of the seats its running slings may
+// fill: the beads a roster seat hooks, the seats with a live session (rig/polecat)
+// and the assignee of a sling's bead.
+type specSlingSeats struct {
+	Hooked   map[string]bool
+	Live     map[string]bool
+	Assignee func(bead string) string // "" when none or unreadable; nil names none
+}
+
+// namesLiveSeat reports whether a sling's bead is assigned to a polecat with a
+// live session: the sling took that seat, which the roster counts (gt-7vmtta).
+func (s specSlingSeats) namesLiveSeat(bead string) bool {
+	if s.Assignee == nil {
+		return false
+	}
+	rig, polecat, ok := strings.Cut(s.Assignee(bead), "/polecats/")
+	return ok && polecat != "" && s.Live[rig+"/"+polecat]
+}
+
+// specSlingAssignees reads a running sling's bead for its assignee, once per bead
+// per tick, so the counts share one read. A bead that cannot be read has no
+// assignee, and its sling is added as before (the read-failure row is gt-txe9ew).
+func specSlingAssignees(show func(beadID string) (specdispatch.Spec, error)) func(bead string) string {
+	memo := map[string]string{}
+	return func(bead string) string {
+		if a, ok := memo[bead]; ok {
+			return a
+		}
+		var a string
+		if show != nil {
+			if s, err := show(bead); err == nil {
+				a = s.Assignee
+			}
+		}
+		memo[bead] = a
+		return a
+	}
+}
+
 // specInFlightAdded is the running slings that add a seat: those whose bead no
-// roster seat hooks. A sling whose bead a seat inside the roster hooks is that
-// seat, which the roster already counts, so adding it would count one polecat
-// twice (gt-75fma5). A sling whose bead no seat hooks is still added: it is
-// filling a seat the roster cannot show yet. A seat whose hook could not be
-// read carries no bead in hooked, so a sling for that bead is added as before.
-func specInFlightAdded(inFlight []specInFlight, hooked map[string]bool) []specInFlight {
+// roster seat hooks and whose assignee names no live seat. Either one makes the
+// sling that seat, which the roster already counts, so adding it would count one
+// polecat twice (gt-75fma5, gt-7vmtta). A sling that matches neither is still
+// added: it is filling a seat the roster cannot show yet. A seat whose hook could
+// not be read carries no bead in Hooked, so a sling for that bead is added as
+// before.
+func specInFlightAdded(inFlight []specInFlight, seats specSlingSeats) []specInFlight {
 	if len(inFlight) == 0 {
 		return nil
 	}
 	out := make([]specInFlight, 0, len(inFlight))
 	for _, f := range inFlight {
-		if hooked[f.Bead] {
+		if seats.Hooked[f.Bead] || seats.namesLiveSeat(f.Bead) {
 			continue
 		}
 		out = append(out, f)
@@ -160,8 +200,8 @@ func specInFlightAdded(inFlight []specInFlight, hooked map[string]bool) []specIn
 // sling's bead — its hook not recorded yet — is still counted twice until the
 // sling returns; that errs toward fewer slings, never more, and the sling is
 // the slow part either way.
-func specLiveWithInFlight(live map[string]int, hooked map[string]bool, inFlight []specInFlight) map[string]int {
-	extra := specInFlightByAgent(specInFlightAdded(inFlight, hooked))
+func specLiveWithInFlight(live map[string]int, seats specSlingSeats, inFlight []specInFlight) map[string]int {
+	extra := specInFlightByAgent(specInFlightAdded(inFlight, seats))
 	if extra == nil {
 		return live
 	}
@@ -180,9 +220,9 @@ func specLiveWithInFlight(live map[string]int, hooked map[string]bool, inFlight 
 // specLiveWithInFlight added to Live. A sling whose bead a roster seat hooks
 // added no seat, so it names none here either, and the list has one entry per
 // seat the count took (gt-5y87fp).
-func specHeldSeats(roster specRoster, inFlight []specInFlight) []specdispatch.HeldSeat {
+func specHeldSeats(roster specRoster, seats specSlingSeats, inFlight []specInFlight) []specdispatch.HeldSeat {
 	held := append([]specdispatch.HeldSeat(nil), roster.Held...)
-	for _, f := range specInFlightAdded(inFlight, roster.HookedBeads) {
+	for _, f := range specInFlightAdded(inFlight, seats) {
 		name := f.Bead
 		if f.Rig != "" {
 			name = f.Rig + "/" + f.Bead
