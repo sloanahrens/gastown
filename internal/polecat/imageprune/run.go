@@ -10,6 +10,20 @@ import (
 // standard output. The command binds it to a node; tests pass a fake.
 type Crictl func(args ...string) ([]byte, error)
 
+// CrictlTimeout is the deadline every crictl call carries. Measured 2026-11-20
+// on the control node (colima gt-control, k3s): with crictl's default 2 second
+// deadline, reading its 208 images failed one run in three, each call taking
+// 1.2 to 2.3 seconds.
+const CrictlTimeout = "120s"
+
+// Timed returns a Crictl that runs c with an explicit deadline. The flag goes
+// before the call's own arguments, where crictl accepts a global option.
+func Timed(c Crictl) Crictl {
+	return func(args ...string) ([]byte, error) {
+		return c(append([]string{"--timeout", CrictlTimeout}, args...)...)
+	}
+}
+
 // NodeResult is what pruning one node did. Err is set when the node could not
 // be read (its images, a creation time that was needed, or its containers): the
 // node is then left alone, which is the fail-closed rule. Removed and Failed
