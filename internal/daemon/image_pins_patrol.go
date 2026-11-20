@@ -321,16 +321,50 @@ func (d *Daemon) readImagePinsFile(ctx context.Context) ([]byte, error) {
 }
 
 // readImagePinTips reads every pin's source tip and its lag, through the town's
-// Forgejo and git. A compare that cannot be built is the read's error: a tick
-// with no compare cannot tell a fresh pin from a trailing one, so it reports
-// that rather than a file of fresh pins.
+// Forgejo and git, then fills each trailing pin's Age through the same git. A
+// compare that cannot be built is the read's error: a tick with no compare
+// cannot tell a fresh pin from a trailing one, so it reports that rather than a
+// file of fresh pins.
 func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinState, error) {
 	cmp, err := d.imagePinsCompare()
 	if err != nil {
 		return nil, err
 	}
 	ownerOf := func() (string, error) { return config.ResolveForgeOwner(d.config.TownRoot) }
-	return ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), d.imagePinsPathCount(ctx), cmp)
+	pins, err := parseImagePins(data, ownerOf)
+	var states []ImagePinState
+	if err == nil {
+		states, err = ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), d.imagePinsPathCount(ctx), cmp)
+	}
+	if err != nil {
+		return nil, err
+	}
+	urls := make(map[string]string, len(pins))
+	for _, pin := range pins {
+		urls[pin.Name] = pin.URL
+	}
+	fillImagePinAges(states, func(name string) string { return urls[name] }, d.imagePinsAge(ctx))
+	return states, nil
+}
+
+// fillImagePinAges fills each trailing pin's Age from ageOf: a state read
+// without error whose Tip differs from its Pin is measured against that tip, at
+// the URL urlOf names for it. A pin at its tip has not aged against it, and a
+// state with an Err is already unreadable, so neither makes a call. A failed age
+// read is that pin's Err with no Age: an unknown age is never taken for fresh.
+func fillImagePinAges(states []ImagePinState, urlOf func(name string) string, ageOf func(url, pin, tip string) (time.Duration, error)) {
+	for i := range states {
+		st := &states[i]
+		if st.Err != nil || st.Tip == st.Pin {
+			continue
+		}
+		age, err := ageOf(urlOf(st.Name), st.Pin, st.Tip)
+		if err != nil {
+			st.Err = err
+			continue
+		}
+		st.Age = age
+	}
 }
 
 // imagePinsTipGit is the one git read a pin's tip takes: ls-remote of the
