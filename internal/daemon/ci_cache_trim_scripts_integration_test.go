@@ -949,6 +949,112 @@ func TestIntegrationCICacheTrimLRUApplyEmptySelection(t *testing.T) {
 	}
 }
 
+// TestIntegrationCICacheTrimLRUApplyKeepsAFileUsedSinceTheListing: the apply
+// removes a selected file only if it is still past the floor at the moment it
+// removes it (gt-s6vs9e), so a file a gate read in the window between the
+// listing and the removal survives with what the gate wrote. The program has no
+// seam for that window, so each case drives it from outside: its PATH puts a
+// fixture find first, which acts on the path the program rechecks — the one
+// moment the program reads a selected file's age again — and then runs the
+// system find. The fixture performs a build's read (a touch, as Go's use of a
+// cache file is); the recheck and the removal are the program's own.
+//
+// The window's cases: a file used since the listing is kept and not counted; a
+// selected file gone by the recheck is skipped and not counted; and a recheck
+// that cannot read its file ends the run, so a volume that cannot re-read the
+// floor fails rather than being reported as a smaller trim.
+func TestIntegrationCICacheTrimLRUApplyKeepsAFileUsedSinceTheListing(t *testing.T) {
+	t.Parallel()
+
+	const (
+		ageMinutes   = "120"
+		capKiB       = "0"
+		floorMinutes = "60"
+	)
+	now := time.Now()
+
+	t.Run("a file used since the listing is kept", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUWindowTree(t, root, now)
+		stale, used := filepath.Join(root, "00", "stale"), filepath.Join(root, "00", "used")
+		path := ciCacheLRUFindFixture(t, `if [ "$1" = "`+used+`" ]; then /usr/bin/touch "`+used+`"; fi`)
+		before := ciCacheLRUBefore(t, root)
+
+		stdout, stderr, status := ciCacheLRURunPath(t, path, "apply", root, ageMinutes, capKiB, floorMinutes)
+		if status != 0 {
+			t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+		}
+		reply, err := parseCICacheTrimReply([]byte(stdout))
+		if err != nil {
+			t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+		}
+		if reply.removed != 1 {
+			t.Errorf("removed = %d, want 1: the file used since the listing is kept, only the stale one is removed", reply.removed)
+		}
+		if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the stale selected file is still present (stat error %v)", err)
+		}
+		for _, kept := range []string{used, filepath.Join(root, "ab", "fresh"), filepath.Join(root, "trim.txt")} {
+			if _, err := os.Stat(kept); err != nil {
+				t.Errorf("%s was removed, want it kept: %v", kept, err)
+			}
+		}
+		if reply.beforeKiB != before {
+			t.Errorf("before_kib = %d, want the volume's %d KiB", reply.beforeKiB, before)
+		}
+		if reply.afterKiB >= reply.beforeKiB {
+			t.Errorf("after_kib = %d, want under before_kib = %d: the stale file's 4 KiB is gone", reply.afterKiB, reply.beforeKiB)
+		}
+	})
+
+	t.Run("a selected file gone by the recheck is skipped", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUWindowTree(t, root, now)
+		stale, used := filepath.Join(root, "00", "stale"), filepath.Join(root, "00", "used")
+		// The recheck lists stale first; before it runs the program's find, the
+		// fixture removes used, as a file that another trim or a go clean could.
+		path := ciCacheLRUFindFixture(t, `if [ "$1" = "`+stale+`" ]; then rm -f "`+used+`"; fi`)
+
+		stdout, stderr, status := ciCacheLRURunPath(t, path, "apply", root, ageMinutes, capKiB, floorMinutes)
+		if status != 0 {
+			t.Fatalf("the LRU apply exited %d: %s", status, stderr)
+		}
+		reply, err := parseCICacheTrimReply([]byte(stdout))
+		if err != nil {
+			t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+		}
+		if reply.removed != 1 {
+			t.Errorf("removed = %d, want 1: the file gone by the recheck is not counted", reply.removed)
+		}
+		if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the stale selected file is still present (stat error %v)", err)
+		}
+	})
+
+	t.Run("a recheck that cannot read a file ends the run", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheLRUWindowTree(t, root, now)
+		stale := filepath.Join(root, "00", "stale")
+		// The fixture removes the file the program is rechecking, so the system
+		// find is handed a path that is not there and fails.
+		path := ciCacheLRUFindFixture(t, `if [ "$1" = "`+stale+`" ]; then rm -f "$1"; fi`)
+
+		stdout, stderr, status := ciCacheLRURunPath(t, path, "apply", root, ageMinutes, capKiB, floorMinutes)
+		if status == 0 {
+			t.Fatalf("the LRU apply exited 0 after a recheck it could not complete:\n%s", stdout)
+		}
+		if stdout != "" {
+			t.Errorf("the apply reported a trim of a run that failed: %q", stdout)
+		}
+		if stderr == "" {
+			t.Error("stderr is empty, want the find's message that the file is not there")
+		}
+	})
+}
+
 // TestIntegrationCICacheTrimLRUApplyDirs runs apply over the LRU tree with one
 // file added below the top level and one top-level shard left empty: with a cap
 // of zero every file past the floor is selected, so the removal empties the
@@ -1388,12 +1494,28 @@ func ciCacheLRUTreeWrite(t *testing.T, root string, now time.Time) {
 // KiB and the floor in minutes as argv data — and returns its output and exit
 // status. The script is a parameter so the helpers do not depend on the program
 // existing. The environment is exactly PATH and TMPDIR, so neither a tool on
-// the caller's PATH nor the shell itself can be swapped for the system's.
+// the caller's PATH nor the shell itself can be swapped for the system's; a
+// window case, which does put a fixture find first on PATH, runs
+// ciCacheLRURunPath.
 func ciCacheLRURun(t *testing.T, script, mode, root, age, capKiB, floor string) (string, string, int) {
+	t.Helper()
+	return ciCacheLRURunIn(t, script, "/usr/bin:/bin", mode, root, age, capKiB, floor)
+}
+
+// ciCacheLRURunPath is ciCacheLRURun over the LRU program with path first in its
+// PATH, so a window case's fixture find is the one the program's recheck runs.
+func ciCacheLRURunPath(t *testing.T, path, mode, root, age, capKiB, floor string) (string, string, int) {
+	t.Helper()
+	return ciCacheLRURunIn(t, ciCacheLRUTrimScript, path+":/usr/bin:/bin", mode, root, age, capKiB, floor)
+}
+
+// ciCacheLRURunIn runs the program with path as its whole PATH: the system's,
+// except for the fixture directory a window case prepends.
+func ciCacheLRURunIn(t *testing.T, script, path, mode, root, age, capKiB, floor string) (string, string, int) {
 	t.Helper()
 	args := []string{"-c", script, "ci-cache-trim", mode, root, age, capKiB, floor}
 	cmd := exec.Command("/bin/sh", args...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
+	cmd.Env = []string{"PATH=" + path, "TMPDIR=" + t.TempDir()}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -1406,6 +1528,54 @@ func ciCacheLRURun(t *testing.T, script, mode, root, age, capKiB, floor string) 
 		t.Fatalf("running the LRU program: %v", err)
 	}
 	return stdout.String(), stderr.String(), exitErr.ExitCode()
+}
+
+// ciCacheLRUFindFixture writes a find to a new directory and returns the
+// directory: body runs first, with the invocation's first operand in $1, and the
+// system find runs the arguments the program passed. The window cases use it to
+// act on a selected file at the one moment the program reads its age again — the
+// recheck, whose operand is the file itself — the way a build's read touches the
+// cache file it uses, with no seam in the program and no sleep in the test.
+func ciCacheLRUFindFixture(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" + body + "\nexec /usr/bin/find \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "find"), []byte(script), 0o755); err != nil {
+		t.Fatalf("writing the fixture find: %v", err)
+	}
+	return dir
+}
+
+// ciCacheLRUWindowTree writes the volume the removal-window cases run over: two
+// files past the floor (00/stale three hours old and 00/used two hours old, so
+// the selection lists stale first), a file inside the floor, and the root's own
+// file, which the depth keeps out of the listing.
+func ciCacheLRUWindowTree(t *testing.T, root string, now time.Time) {
+	t.Helper()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatalf("chmod %s: %v", root, err)
+	}
+	for _, f := range []struct {
+		path string
+		age  time.Duration
+	}{
+		{path: filepath.Join("00", "stale"), age: 3 * time.Hour},
+		{path: filepath.Join("00", "used"), age: 2 * time.Hour},
+		{path: filepath.Join("ab", "fresh"), age: 10 * time.Minute},
+		{path: "trim.txt", age: 3 * time.Hour},
+	} {
+		full := filepath.Join(root, f.path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatalf("making the directory of %s: %v", f.path, err)
+		}
+		if err := os.WriteFile(full, bytes.Repeat([]byte{'x'}, 4096), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", f.path, err)
+		}
+		mtime := now.Add(-f.age)
+		if err := os.Chtimes(full, mtime, mtime); err != nil {
+			t.Fatalf("dating %s: %v", f.path, err)
+		}
+	}
 }
 
 // ciCacheLRURead splits an LRU program's output: the file lines it selected, in
