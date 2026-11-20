@@ -198,6 +198,49 @@ func TestShippedOMRubricCarriesScriptsAreDebtCriterion(t *testing.T) {
 	}
 }
 
+// exemptionCriterion is the criterion gt-q85e0c appended: a carve-out added so
+// that an acceptance box and a Constraint both pass is the finding, not the fix.
+const exemptionCriterion = "exemption-to-satisfy-a-box"
+
+// TestShippedOMRubricCarriesExemptionCriterion pins the criterion once, at
+// weight 3, immediately after scripts-are-debt, and the guidance a reviewer
+// needs to apply it: the MAJOR severity and the example it cites.
+func TestShippedOMRubricCarriesExemptionCriterion(t *testing.T) {
+	t.Parallel()
+	r := shippedRubric(t)
+	var found []int
+	for i, c := range r.Rubric {
+		if c.Name == exemptionCriterion {
+			found = append(found, i)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("the shipped rubric %s carries %d %q criteria, want exactly 1: a carve-out added so an acceptance box and a Constraint both pass is ungraded without it, and a duplicate double-counts the finding", shippedRubricPath(t), len(found), exemptionCriterion)
+	}
+	idx := found[0]
+	debt := -1
+	for i, c := range r.Rubric {
+		if c.Name == scriptsAreDebtCriterion {
+			debt = i
+		}
+	}
+	if debt < 0 {
+		t.Fatalf("the shipped rubric %s carries no %q criterion, so this pin cannot check that %s follows it", shippedRubricPath(t), scriptsAreDebtCriterion, exemptionCriterion)
+	}
+	if idx != debt+1 {
+		t.Errorf("%s sits at rubric[%d], want rubric[%d] immediately after %s: gt-q85e0c appends it there", exemptionCriterion, idx, debt+1, scriptsAreDebtCriterion)
+	}
+	c := r.Rubric[idx]
+	if c.Weight == nil || *c.Weight != 3 {
+		t.Errorf("%s weight = %v, want 3: the shortcut lets a failing box through, so it outranks the style criteria", exemptionCriterion, c.Weight)
+	}
+	for _, want := range []string{"MAJOR", "gt-s7suwn"} {
+		if !strings.Contains(c.Guidance, want) {
+			t.Errorf("%s guidance no longer carries %q: %q", exemptionCriterion, want, c.Guidance)
+		}
+	}
+}
+
 // docsAndCommentsArchitecturePage is the page the docs-and-comments guidance
 // requires a landing to update when it changes what the page describes. The
 // guidance must keep naming it: without the name, om is not told which page a
