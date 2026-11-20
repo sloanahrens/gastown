@@ -86,8 +86,8 @@ func TestSpecDispatchSplitRouteOffChangesNothing(t *testing.T) {
 	}
 }
 
-// TestSpecDispatchSplitRouteHoldsOverTrigger: at and over the trigger on a rung
-// of at least two inputs the bead is not slung, gets the split label and a
+// TestSpecDispatchSplitRouteHoldsOverTrigger: at and over the trigger on the
+// `all` or `shape-jev` rung the bead is not slung, gets the split label and a
 // comment naming the estimate and the nearest beads, and one line is logged.
 func TestSpecDispatchSplitRouteHoldsOverTrigger(t *testing.T) {
 	t.Parallel()
@@ -97,7 +97,6 @@ func TestSpecDispatchSplitRouteHoldsOverTrigger(t *testing.T) {
 	}{
 		{"all", splitOutcome("estimated", 13, 20, "all", "nearest beads: gt-b (gastown) first, gt-c (gastown) second")},
 		{"shape-jev", splitOutcome("estimated", 13, 15, "shape-jev", "nearest beads: gt-b (gastown) first")},
-		{"shape-embed", splitOutcome("estimated", 13, 20, "shape-embed", "nearest beads: gt-b (gastown) first")},
 		{"an unchanged estimate", splitOutcome("unchanged", 13, 20, "all", "nearest beads: gt-b (gastown) first")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -184,6 +183,97 @@ func TestSpecDispatchSplitRouteSlingsShapeOnly(t *testing.T) {
 	}
 	if lines := splitHoldLines(r.Skipped); len(lines) != 0 {
 		t.Errorf("split hold lines = %q, want none", lines)
+	}
+}
+
+// TestSplitRungShapeEmbedDoesNotAct: the route acts on `all` and `shape-jev`
+// only, and the verdict for a shape-embed estimate names the rung and carries
+// no minutes, so the caller slings the bead (gt-s93y6n).
+func TestSplitRungShapeEmbedDoesNotAct(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		rung string
+		want bool
+	}{
+		{"all", true},
+		{"shape-jev", true},
+		{"shape-embed", false},
+		{"shape", false},
+		{"", false},
+	} {
+		t.Run(tc.rung, func(t *testing.T) {
+			t.Parallel()
+			if got := specSplitRungActs(tc.rung); got != tc.want {
+				t.Errorf("specSplitRungActs(%q) = %v, want %v", tc.rung, got, tc.want)
+			}
+		})
+	}
+	minutes, rung, reason := specSplitVerdict(specStoryPointAnswer{outcome: splitOutcome("estimated", 13, 12.8, "shape-embed", "")})
+	if minutes != 0 || rung != "" || !strings.Contains(reason, "shape-embed") || strings.Contains(reason, "12.8") {
+		t.Errorf("verdict = %v min, rung %q, reason %q; want no minutes, no rung, and a reason naming the rung", minutes, rung, reason)
+	}
+}
+
+// TestSplitRungShapeEmbedIsNotHeld: a bead estimated at shape-embed over the
+// trigger is slung with the notice saying the route cannot judge it, and gets
+// no split label or note (gt-s93y6n).
+func TestSplitRungShapeEmbedIsNotHeld(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.StoryPointSplitOver = 15
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		return splitOutcome("estimated", 13, 20, "shape-embed", ""), nil
+	}
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "gt-a" {
+		t.Fatalf("slung %q, want gt-a: a shape-embed estimate never holds a bead", got)
+	}
+	if slices.Contains(f.labels["gt-a"], specdispatch.SplitLabel) {
+		t.Errorf("labels = %v, want no split label", f.labels["gt-a"])
+	}
+	if notes := splitNotes(f, "gt-a"); len(notes) != 0 {
+		t.Errorf("split notes = %q, want none", notes)
+	}
+	notices := splitNotices(r.Notices)
+	if len(notices) != 1 || !strings.Contains(notices[0], "shape-embed") || !strings.Contains(notices[0], "cannot judge it") {
+		t.Errorf("notices = %q, want one naming the rung and saying the route cannot judge it", notices)
+	}
+	if lines := splitHoldLines(r.Skipped); len(lines) != 0 {
+		t.Errorf("split hold lines = %q, want none", lines)
+	}
+}
+
+// TestSplitRungShapeEmbedStaleLabelReleased: specSplitLabelStale is the other
+// caller of the acting-rung set. A split label recorded at shape-embed is
+// stale whatever minutes it carries, because the weak-rung rule fires before
+// the acting set is consulted (gt-s93y6n, gt-ie2ehm).
+func TestSplitRungShapeEmbedStaleLabelReleased(t *testing.T) {
+	t.Parallel()
+	held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
+	held.Labels = []string{"sp:8", "sp-rung:shape-embed", "sp-minutes:12.8", specdispatch.SplitLabel}
+	f := newFakeSpecTown(held)
+	env := f.env()
+	env.Candidates = f.productionCandidates(t, 10, false)
+	env.StoryPointSplitOver = 10
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+		return splitOutcome("estimated", 8, 12.8, "shape-embed", ""), nil
+	}
+	r := runSpecDispatchCycle(env)
+
+	if got := strings.Join(f.slung, " "); got != "gt-split" {
+		t.Fatalf("slung %q, want gt-split: the stale label is dropped and the bead taken", got)
+	}
+	if slices.Contains(f.specs["gt-split"].Labels, specdispatch.SplitLabel) || len(f.unlabels) != 1 {
+		t.Errorf("labels = %v removals = %v, want the split label taken off once", f.specs["gt-split"].Labels, f.unlabels)
+	}
+	notes := splitStaleNotes(f, "gt-split")
+	if len(notes) != 1 || !strings.Contains(notes[0], "rung shape-embed") || strings.Contains(notes[0], "12.8") {
+		t.Fatalf("stale notes = %q, want one naming rung shape-embed rather than a trigger", notes)
+	}
+	if notices := splitStaleNotices(r.Notices); len(notices) != 1 {
+		t.Errorf("notices = %q, want one saying the bead is offered again", notices)
 	}
 }
 

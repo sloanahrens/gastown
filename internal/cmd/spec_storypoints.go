@@ -220,12 +220,16 @@ func specSplitVerdict(answer specStoryPointAnswer) (minutes float64, rung, reaso
 	return answer.outcome.Minutes, answer.outcome.Rung, ""
 }
 
-// specSplitRungActs reports whether rung names at least two inputs, the rungs
-// the route acts on. The design sets the shape-only rung aside until the shadow
-// recompute clears its correlation bar.
+// specSplitRungActs reports whether the route acts on an estimate made at
+// rung. The route acts on `all` and `shape-jev` only, and it does not act on
+// `shape-embed` or `shape`: a shape-embed estimate is the fallback made when
+// Jev is unavailable, and under host load it reads minutes higher than the
+// same text's all-rung estimate, so the bead is slung with the route's notice
+// instead of held (gt-s93y6n). The design sets the shape-only rung aside until
+// the shadow recompute clears its correlation bar.
 func specSplitRungActs(rung string) bool {
 	switch rung {
-	case "all", "shape-jev", "shape-embed":
+	case "all", "shape-jev":
 		return true
 	}
 	return false
