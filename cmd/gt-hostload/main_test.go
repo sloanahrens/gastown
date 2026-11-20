@@ -53,6 +53,45 @@ func TestHostLoadRunWritesOneLine(t *testing.T) {
 	}
 }
 
+// failsOne answers both sysctl questions but fails the named one (gt-phge44).
+func failsOne(name string) func(string, ...string) (string, error) {
+	ok := read("{ 21.53 22.70 21.14 }", "24")
+	return func(n string, args ...string) (string, error) {
+		if args[1] == name {
+			return "", errors.New("sysctl: read failed")
+		}
+		return ok(n, args...)
+	}
+}
+
+// checkLoudFailure pins a failed read: 1, the step in one stderr line, no file (gt-phge44).
+func checkLoudFailure(t *testing.T, step string) {
+	t.Helper()
+	dir := t.TempDir()
+	var stderr bytes.Buffer
+	if code := run([]string{"--dir", dir}, &stderr, func() time.Time { return at }, failsOne(step)); code != 1 {
+		t.Errorf("run = %d, want 1", code)
+	}
+	if want := "gt-hostload: " + step + ": "; !strings.HasPrefix(stderr.String(), want) || strings.Count(stderr.String(), "\n") != 1 {
+		t.Errorf("stderr = %q, want one line starting %q", stderr.String(), want)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("dir = %v, %v: want empty, so no day file", entries, err)
+	}
+}
+
+// TestHostLoadRunFailsLoudOnLoad: a failing vm.loadavg read returns 1, names the step, writes no file (gt-phge44).
+func TestHostLoadRunFailsLoudOnLoad(t *testing.T) {
+	t.Parallel()
+	checkLoudFailure(t, "vm.loadavg")
+}
+
+// TestHostLoadRunFailsLoudOnNcpu: a failing hw.ncpu read after a good load read returns 1, names the step, writes no file (gt-phge44).
+func TestHostLoadRunFailsLoudOnNcpu(t *testing.T) {
+	t.Parallel()
+	checkLoudFailure(t, "hw.ncpu")
+}
+
 // TestHostLoadRunRefuses: each failing step names itself in one stderr line,
 // returns 1, and leaves no day file behind (gt-emjwp9).
 func TestHostLoadRunRefuses(t *testing.T) {
