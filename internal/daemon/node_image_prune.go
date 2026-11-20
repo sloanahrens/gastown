@@ -19,10 +19,11 @@ const (
 )
 
 // nodeImagePruneOnce runs one node image prune: the Job nodePruneJobName names from
-// runID, running the running polecat image, as a dry run unless apply. Only the dry
-// run records its row here: one ok row of job nodeImagePruneJob with the summary's
-// figures and now as its start. An apply run's row and a failed run's are beads
-// gt-i8zplo and gt-eg0ji0. Every runner error is handed to the caller.
+// runID, running the running polecat image, as a dry run unless apply. A dry run
+// logs the lines of nodeImagePruneSummary, one logger call per line, and records one
+// ok row of job nodeImagePruneJob with the summary's figures and now as its start.
+// An apply run's row and a failed run's are beads gt-i8zplo and gt-eg0ji0. Every
+// runner error is handed to the caller.
 func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, runID string, apply bool, now time.Time) error {
 	name, err := nodePruneJobName(runID)
 	if err != nil {
@@ -39,7 +40,10 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 	if apply {
 		return nil
 	}
-	_, stats := nodeImagePruneSummary(rep, false)
+	lines, stats := nodeImagePruneSummary(rep, false)
+	for _, line := range lines {
+		d.logger.Printf("%s", line)
+	}
 	return d.nodeImagePruneRecord(jobledger.Run{
 		Job:       nodeImagePruneJob,
 		StartedAt: now,
