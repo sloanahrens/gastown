@@ -1215,6 +1215,62 @@ func TestCIEnginePlanKeepsTheNewestBuiltCIBaseRules(t *testing.T) {
 	}
 }
 
+// TestCIEnginePlanKeepsTheNewestBuiltExceptions: the newest-five cut of each
+// gastown-* repository spares what the keep rule protects: an image a running
+// container uses, even when it is the oldest of its repository; an image of a
+// repository without the gastown- prefix under the age limit; and an image tagged in
+// a kept repository other than ci-base.
+func TestCIEnginePlanKeepsTheNewestBuiltExceptions(t *testing.T) {
+	t.Parallel()
+	// builtNewest is five unused gastown-daemon images from id first, each newer than
+	// the image age, so only the newest-five cut can name them.
+	builtNewest := func(first byte) []map[string]any {
+		var images []map[string]any
+		for i := range 5 {
+			images = append(images, engImg(first+byte(i), time.Duration(i+2)*time.Hour,
+				[]string{"sha256:layer-" + string(rune('a'+i))}, "gastown-daemon:ci-"+string(rune('a'+i))))
+		}
+		return images
+	}
+	t.Run("used", func(t *testing.T) {
+		t.Parallel()
+		// The running container's image is the oldest of its repository, past the five
+		// the cut keeps and older than the image age: only the used rule spares it.
+		images := append([]map[string]any{
+			engImg('1', 100*time.Hour, []string{"sha256:layer-used"}, "gastown-daemon:ci-used"),
+		}, builtNewest('2')...)
+		plan, err := planCIEnginePrune(engDecode(t, engListing(t,
+			[]map[string]any{engCtr('1', '1', "running", 30*time.Hour)}, images, nil)),
+			ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base"})
+		if err != nil {
+			t.Fatalf("planning: %v", err)
+		}
+		if len(plan.images) != 0 {
+			t.Errorf("planned images = %v, want none: a running container's image is kept", plan.images)
+		}
+	})
+	t.Run("foreign", func(t *testing.T) {
+		t.Parallel()
+		// The oldest of gastown-daemon, past the cut, carries a kept tag other than ci-base.
+		images := append([]map[string]any{
+			engImg('7', 100*time.Hour, []string{"sha256:layer-shared"}, "gastown-daemon:ci-shared", "org/tools:1"),
+		}, builtNewest('a')...)
+		// Six images of a repository CI does not build, all under the age limit.
+		for i := range 6 {
+			images = append(images, engImg(byte('1'+i), time.Duration(i+1)*time.Hour,
+				[]string{"sha256:layer-f" + string(rune('a'+i))}, "pgvector/pgvector:pg"+string(rune('a'+i))))
+		}
+		plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)),
+			ciCacheTestStart, 48*time.Hour, 24*time.Hour, []string{"ci-base", "org/tools"})
+		if err != nil {
+			t.Fatalf("planning: %v", err)
+		}
+		if len(plan.images) != 0 {
+			t.Errorf("planned images = %v, want none: neither a foreign repository's young image nor a kept-tag image may be cut", plan.images)
+		}
+	})
+}
+
 // TestCIEnginePruneMeasuresAStoppedContainersAgeFromItsStop: a stopped container's
 // unused age runs from when it stopped, not from when it was created, so a job that
 // ran longer than the age and stopped a moment ago stays. A container in "created"
