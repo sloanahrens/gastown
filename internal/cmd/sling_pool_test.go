@@ -136,6 +136,29 @@ func TestChoosePoolAgent(t *testing.T) {
 	}
 }
 
+// TestSlingRefusalNamesTheDeadHookedClasses is gt-01svoq's refusal half: a full
+// seat names the classes its dead-hooked seats were counted in, as the tick
+// line does; a seat whose read named no class keeps the plain term.
+func TestSlingRefusalNamesTheDeadHookedClasses(t *testing.T) {
+	t.Parallel()
+	unclassed := append(deadClassedSessions()[:2], poolSession{name: "dead/gastown/c", agent: "a", deadHooked: true})
+	for _, c := range []struct {
+		name     string
+		sessions []poolSession
+		want     string
+	}{
+		{"classed", deadClassedSessions(),
+			"pool: full (3/3: 3 dead-hooked (2 idle-submitted, 1 idle-recovery-needed)) -> no seat for a"},
+		{"a seat whose read named no class", unclassed,
+			"pool: full (3/3: 3 dead-hooked) -> no seat for a"},
+	} {
+		_, reason, refused, _ := choosePoolAgent(seatPool("a", 3), "", c.sessions, poolTestNow)
+		if !refused || reason != c.want {
+			t.Errorf("%s: refusal = %q refused=%v, want %q", c.name, reason, refused, c.want)
+		}
+	}
+}
+
 // TestChoosePoolAgentNamesEveryHeldSeatAboveTheCap is gt-5y87fp's refusal half:
 // a town total above its cap lists every seat inside it with its state, from the
 // same read the count used, so the list has one entry per seat counted and reads
@@ -2593,7 +2616,7 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 			if refused != (c.wantSeats > 0) {
 				t.Fatalf("refused = %v, want %v (%s)", refused, c.wantSeats > 0, reason)
 			}
-			if c.wantSeats > 0 && (!strings.Contains(reason, "pool: full (1/1: 1 dead-hooked)") || raise != "polecat_pool.seats.deepseek-flash.cap") {
+			if c.wantSeats > 0 && (!strings.Contains(reason, "pool: full (1/1: 1 dead-hooked (1 idle-recovery-needed))") || raise != "polecat_pool.seats.deepseek-flash.cap") {
 				t.Fatalf("the refusal names the dead-hooked seat: %q raise=%q", reason, raise)
 			}
 		})

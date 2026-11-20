@@ -444,9 +444,11 @@ func poolRefusalAgent(pool *config.PolecatPool, requested string) string {
 // "held: gastown/a:session, gastown/b:claim", read from the same sessions and
 // filtered by the same agent as the count, so the list has one entry per seat
 // counted (gt-5y87fp). A count at its cap keeps the wording above: it is full,
-// not above, and its sources already name what filled it.
+// not above, and its sources already name what filled it. A dead-hooked count
+// names the classes its seats were read in (gt-01svoq).
 func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 	var live, dead, landing, claims int
+	classes := map[string]int{}
 	for _, s := range sessions {
 		if s.parkedStale || (agent != "" && s.agent != agent) {
 			continue
@@ -456,6 +458,7 @@ func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 			claims++
 		case s.deadHooked:
 			dead++
+			classes[s.deadClass]++
 		case s.landing:
 			landing++
 		default:
@@ -482,7 +485,13 @@ func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 		parts = append(parts, count(live, "session", "sessions"))
 	}
 	if dead > 0 {
-		parts = append(parts, specdispatch.DeadHookedCount(dead, nil))
+		// The split names the classes the dead seats were counted in; a seat
+		// whose read named no class carries no split, as on the tick line.
+		split := classes
+		if classes[""] > 0 {
+			split = nil
+		}
+		parts = append(parts, specdispatch.DeadHookedCount(dead, split))
 	}
 	if landing > 0 {
 		parts = append(parts, fmt.Sprintf("%d mid-landing", landing))
