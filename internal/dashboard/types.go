@@ -545,16 +545,21 @@ type LandingRow struct {
 	Title   string    `json:"title,omitempty"`
 	Polecat string    `json:"polecat,omitempty"`
 	// Agent is the agent the landing's polecat seat ran on, from the landing
-	// record. A crew landing, a running or rejected row, and a record written
-	// before the field existed leave it empty (gt-tnml1k).
+	// record. A rejected row has no record of its own, so it reads the agent
+	// from the bead instead (gt-4ppnp3). A crew landing, a running row, and a
+	// record written before the field existed leave it empty (gt-tnml1k).
 	Agent string `json:"agent,omitempty"`
 	// Priority is the landed bead's priority (0 is the highest), from the
-	// landing record. It is nil on a row with no record, or one written before
-	// the landing worker recorded it (gt-tnml1k).
+	// landing record. A rejected row takes it from the bead when the day holds
+	// no record of the bead (gt-4ppnp3). It is nil on a row with no record or
+	// bead answer, or a record written before the landing worker recorded it
+	// (gt-tnml1k).
 	Priority *int `json:"priority,omitempty"`
-	// SPEstimate is the landed bead's sp: estimate, from the landing record. It
-	// is nil on a row with no record, or one written before the landing worker
-	// recorded it, or a bead with no estimate (gt-cdhagm).
+	// SPEstimate is the landed bead's sp: estimate, from the landing record. A
+	// rejected row takes it from the bead when the day holds no record of the
+	// bead (gt-4ppnp3). It is nil on a row with no record or bead answer, one
+	// written before the landing worker recorded it, or a bead with no estimate
+	// (gt-cdhagm).
 	SPEstimate *int `json:"sp_estimate,omitempty"`
 	// SPActual is the points the landing's polecat time earns, by the same
 	// measure as the velocity series (storypoints.Actual). It is nil unless the

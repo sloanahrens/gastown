@@ -87,7 +87,7 @@ func TestDashboardLandedRowSPActual(t *testing.T) {
 			t.Parallel()
 			tt.rec.Bead, tt.rec.Rig, tt.rec.OMVerdict = "gt-abc", "gastown", "approve"
 			tt.rec.LandedAt = now.Add(-time.Minute)
-			rows := buildRecentLandings(now, []omRecord{{Record: tt.rec}}, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, recentLandingRows)
+			rows := buildRecentLandings(now, []omRecord{{Record: tt.rec}}, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
 			if len(rows) != 1 {
 				t.Fatalf("rows = %d; want the one landing", len(rows))
 			}

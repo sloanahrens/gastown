@@ -311,7 +311,7 @@ func TestBuildRecentLandingsJoinsStagesAndOrdersNewestFirst(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-20 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "om requested changes (score 0.55, 5 finding(s))", Score: &score}}
 
 	var asked []string
-	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, landingNames{}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, stages, rejs, nil, nil, func(rig, id string) string { asked = append(asked, rig+"/"+id); return "title of " + id }, landingNames{}, nil, nil, nil, nil, nil, 30)
 
 	if len(rows) != 4 {
 		t.Fatalf("%d rows, want 4 (the 30-hour-old landing is outside the day): %+v", len(rows), rows)
@@ -350,7 +350,7 @@ func TestBuildRecentLandingsKeepsEveryRowAndAsksTitlesOnlyForTheFirstTen(t *test
 		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Minute)}})
 	}
 	asked := 0
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, landingNames{}, nil, nil, nil, nil, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, func(rig, id string) string { asked++; return "" }, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
 	if len(rows) != 50 {
 		t.Fatalf("rows = %d, want every landing in the window (50): the pane scrolls them, nothing is cut at ten", len(rows))
 	}
@@ -373,7 +373,7 @@ func TestBuildRecentLandingsCarriesAgentAndPriority(t *testing.T) {
 		{Record: landings.Record{Bead: "gt-new", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Minute), Agent: "claude-haiku", Priority: &p1}},
 		{Record: landings.Record{Bead: "gt-old", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Minute)}},
 	}
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
 	if len(rows) != 2 || rows[0].Bead != "gt-new" {
 		t.Fatalf("rows = %+v, want gt-new then gt-old", rows)
 	}
@@ -452,7 +452,7 @@ func TestRecentLandingsUseCachedTitlesPastTen(t *testing.T) {
 	var asked []string
 	title := func(rig, id string) string { asked = append(asked, id); return reads.title(rig, id) }
 	cached := func(rig, id string) (string, bool) { return reads.cachedTitle(id) }
-	rows := buildRecentLandings(now, pastTenLandings(now, 30), nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, recentLandingRows)
+	rows := buildRecentLandings(now, pastTenLandings(now, 30), nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, nil, recentLandingRows)
 	if len(rows) != 30 {
 		t.Fatalf("rows = %d, want 30", len(rows))
 	}
@@ -487,7 +487,7 @@ func TestRecentLandingsFillTitlesOverPolls(t *testing.T) {
 	var rows []dashboard.LandingRow
 	for poll := 1; poll <= 4; poll++ {
 		before := shownTotal(shown)
-		rows = buildRecentLandings(now, pastTenLandings(now, 30), nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, recentLandingRows)
+		rows = buildRecentLandings(now, pastTenLandings(now, 30), nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, nil, recentLandingRows)
 		if n := shownTotal(shown) - before; n > bound {
 			t.Fatalf("poll %d read %d titles, want at most %d", poll, n, bound)
 		}
@@ -532,7 +532,7 @@ func TestRecentLandingsConvergeOnFullPage(t *testing.T) {
 	polls := recentLandingRows/recentExtraTitleLookups + 1
 	var rows []dashboard.LandingRow
 	for poll := 0; poll < polls; poll++ {
-		rows = buildRecentLandings(now, recs, nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, recentLandingRows)
+		rows = buildRecentLandings(now, recs, nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, nil, recentLandingRows)
 	}
 	if len(rows) != recentLandingRows {
 		t.Fatalf("rows = %d, want %d", len(rows), recentLandingRows)
@@ -561,7 +561,7 @@ func TestRecentLandingsFailedLookupIsNotRetriedInPoll(t *testing.T) {
 	// so only the poll's own answer for gt-3 can keep it from a second read.
 	recs := pastTenLandings(now, 12)
 	recs = append(recs, omRecord{Record: landings.Record{Bead: "gt-3", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-40 * time.Minute)}})
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, nil, recentLandingRows)
 	if shown["gt-3"] != 1 {
 		t.Errorf("bd reads for gt-3 = %d, want 1: a failed lookup is not asked again in the same poll", shown["gt-3"])
 	}
@@ -600,7 +600,7 @@ func TestBuildRecentLandingsFillsShipTime(t *testing.T) {
 	}
 	rejs := []omRejection{{At: at("2026-10-03T17:15:00Z"), Bead: "gt-rejected", Kind: "review"}}
 
-	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead+":"+r.Outcome] = r
@@ -655,7 +655,7 @@ func TestBuildRecentLandingsShipCellPerRig(t *testing.T) {
 		{Record: landings.Record{Bead: "dv-nothing", Rig: "devops", OMVerdict: "approve", LandedAt: at("2026-10-03T17:02:00Z")}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -707,7 +707,7 @@ func TestLandingRowsOpsBranchNamesItsSubmitter(t *testing.T) {
 		return "town/crew/overseer"
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: submittedBy}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: submittedBy}, nil, nil, nil, nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want the one landing", len(rows))
 	}
@@ -751,7 +751,7 @@ func TestLandingRowsOpsBranchWithoutASubmitterReadsOperator(t *testing.T) {
 		"no submitter lookup":   nil,
 		"blank submitter actor": func(string, string) string { return "  " },
 	} {
-		rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: submittedBy}, nil, nil, nil, nil, 30)
+		rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: submittedBy}, nil, nil, nil, nil, nil, 30)
 		if len(rows) != 1 {
 			t.Fatalf("%s: rows = %d, want the one landing", name, len(rows))
 		}
@@ -775,7 +775,7 @@ func TestLandingRowsOpsBranchWithUnreadableCommentsReadsUnknown(t *testing.T) {
 		OMVerdict: "approve", LandedAt: now.Add(-time.Minute),
 	}}}
 	unreadable := func(string, string) string { return submitterUnknown }
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: unreadable}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: unreadable}, nil, nil, nil, nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want the one landing", len(rows))
 	}
@@ -805,7 +805,7 @@ func TestLandingRowsOtherBranchesKeepTheirBuilder(t *testing.T) {
 		}}}
 		asked := false
 		submittedBy := func(string, string) string { asked = true; return "town/crew/overseer" }
-		rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: submittedBy}, nil, nil, nil, nil, 30)
+		rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{submitter: submittedBy}, nil, nil, nil, nil, nil, 30)
 		if len(rows) != 1 {
 			t.Fatalf("%s: rows = %d, want the one landing", branch, len(rows))
 		}
@@ -830,14 +830,14 @@ func TestLandingRowsOpsRejectedRowNamesItsSubmitter(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-30 * time.Minute), Bead: "gt-dxtrer", Kind: "review"}}
 	submittedBy := func(string, string) string { return "town/crew/overseer" }
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{submitter: submittedBy}.withSubmissions(subs), nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{submitter: submittedBy}.withSubmissions(subs), nil, nil, nil, nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want the one rejection", len(rows))
 	}
 	if got := rows[0].Polecat; got != "overseer" {
 		t.Errorf("rejected ops row Polecat = %q, want overseer", got)
 	}
-	rows = buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, 30)
+	rows = buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, nil, 30)
 	if got := rows[0].Polecat; got != "operator" {
 		t.Errorf("rejected ops row with no submitter = %q, want operator", got)
 	}
@@ -865,7 +865,7 @@ func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
 		{At: now.Add(-50 * time.Minute), Bead: "gt-unknown", Kind: "review"},
 	}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -883,7 +883,7 @@ func TestBuildRecentLandingsNamesARejectedRowFromItsBranch(t *testing.T) {
 
 	// A caller with no lookup names no one: the rejection is still a row, and
 	// nothing is read to fill its By in.
-	for _, r := range buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil, 30) {
+	for _, r := range buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, 30) {
 		if r.Polecat != "" {
 			t.Errorf("%s By = %q with no lookup, want a dash", r.Bead, r.Polecat)
 		}
@@ -917,7 +917,7 @@ func TestAReassignedBeadsRejectedRowStillNamesItsSubmitter(t *testing.T) {
 	)
 	rejs := []omRejection{{At: now.Add(-time.Hour), Bead: "gt-reassigned", Kind: "review"}}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, nil, 30)
 	var rejected, running *dashboard.LandingRow
 	for i := range rows {
 		switch rows[i].Outcome {
@@ -958,7 +958,7 @@ func TestBuildRecentLandingsRejectedRowOfAnUnlandedBeadTakesItsRigFromThePrefix(
 	who := func(rig, bead string) string { whoAsked = append(whoAsked, rig); return submitters(rig, bead) }
 	crew := func(rig, bead string) bool { crewAsked = append(crewAsked, rig); return crewOf(rig, bead) }
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{who: who}, crew, nil, rigOfBead, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{who: who}, crew, nil, rigOfBead, nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("%d rows, want 1: %+v", len(rows), rows)
 	}
@@ -991,7 +991,7 @@ func TestBuildRecentLandingsLandedRigOutranksThePrefix(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-30 * time.Minute), Bead: "be-xu2.22", Kind: "review"}}
 	rigOfBead := func(string) string { return "gastown" }
 
-	rows := buildRecentLandings(now, recs, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, rigOfBead, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, rigOfBead, nil, nil, 30)
 	var rejected *dashboard.LandingRow
 	for i := range rows {
 		if rows[i].Outcome == "rejected" {
@@ -1018,8 +1018,8 @@ func TestBuildRecentLandingsUnknownPrefixKeepsTodaysRow(t *testing.T) {
 	rejs := []omRejection{{At: now.Add(-30 * time.Minute), Bead: "gt-unrouted", Kind: "review"}}
 	unrouted := func(string) string { return "" }
 
-	withPrefix := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, unrouted, nil, 30)
-	before := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, 30)
+	withPrefix := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, unrouted, nil, nil, 30)
+	before := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, nil, 30)
 	if !reflect.DeepEqual(withPrefix, before) {
 		t.Errorf("rows with an unrouted prefix = %+v, want the same as with no prefix lookup = %+v", withPrefix, before)
 	}
@@ -1065,7 +1065,7 @@ func TestBuildRecentLandingsRigComesFromTheProductionRoutesFile(t *testing.T) {
 		return crewOf(rig, bead)
 	}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{who: who}, crew, nil, landingRig(townRoot), nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{who: who}, crew, nil, landingRig(townRoot), nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("%d rows, want 1: %+v", len(rows), rows)
 	}
@@ -1089,7 +1089,7 @@ func TestBuildRecentLandingsLeavesALandedRowsByAlone(t *testing.T) {
 		{Record: landings.Record{Bead: "gt-nobranch", Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Hour)}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}.withSubmissions(subs), nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1408,7 +1408,7 @@ func TestBuildRecentLandingsPutsRunningRowsOnTopUncapped(t *testing.T) {
 		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i+1)*time.Minute)))
 	}
 	live := []dashboard.LandingRow{{At: now.Add(-time.Minute), Bead: "gt-live", Rig: "gastown", Outcome: "running"}}
-	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, landingNames{}, nil, nil, nil, nil, capRows)
+	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, landingNames{}, nil, nil, nil, nil, nil, capRows)
 
 	if len(rows) != capRows+1 {
 		t.Fatalf("rows = %d, want %d: the live row is not one of the capped finished rows", len(rows), capRows+1)
@@ -1441,7 +1441,7 @@ func TestBuildRecentLandingsBoundsTheTableAtTheProductionCap(t *testing.T) {
 	for i := range recentLandingRows + over {
 		recs = append(recs, omTestRec(fmt.Sprintf("gt-%d", i), "approve", 0.9, "daemon", now.Add(-time.Duration(i)*time.Second)))
 	}
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, recentLandingRows)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, recentLandingRows)
 	if len(rows) != recentLandingRows {
 		t.Fatalf("rows = %d, want %d: the table keeps its bound", len(rows), recentLandingRows)
 	}
@@ -1582,7 +1582,7 @@ func TestBuildRecentLandingsCarriesThePolecatTime(t *testing.T) {
 		}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1634,7 +1634,7 @@ func TestBuildRecentLandingsReadsARejectedRowsPolecatTime(t *testing.T) {
 		return 1380, []land.PolecatAttempt{{Seat: "gastown/opal", Secs: 1380}}, false
 	}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, read, nil, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, read, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1665,7 +1665,7 @@ func TestBuildRecentLandingsReadsARunningRowsTimeSoFar(t *testing.T) {
 		return secs, []land.PolecatAttempt{{Seat: "gastown/onyx", Secs: secs, LowerBound: true}}, true
 	}
 
-	rows := buildRecentLandings(now, nil, nil, nil, live, nil, nil, landingNames{}, nil, read, nil, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, nil, live, nil, nil, landingNames{}, nil, read, nil, nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %+v, want the one running row", rows)
 	}
@@ -1687,7 +1687,7 @@ func TestBuildRecentLandingsMarksACrewBranchRow(t *testing.T) {
 		{Record: landings.Record{Bead: "gt-pc", Rig: "gastown", Branch: "polecat/opal/gt-pc+x", OMVerdict: "approve", LandedAt: now.Add(-2 * time.Minute)}},
 	}
 
-	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1726,7 +1726,7 @@ func TestBuildRecentLandingsMarksANoAgentCrewBranchRow(t *testing.T) {
 	}
 	subs := []land.SubmissionRecord{{Rig: "gastown", Bead: "gt-running", Branch: "crew//gt-running"}}
 
-	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, landingNames{}.withSubmissions(subs), crewLandingLookup(subs), nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, nil, live, nil, nil, landingNames{}.withSubmissions(subs), crewLandingLookup(subs), nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1896,7 +1896,7 @@ func TestBuildRecentLandingsMarksARejectedOrRunningCrewRow(t *testing.T) {
 		return "overseer"
 	}
 
-	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNames{who: who}, crew, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, nil, nil, rejs, live, nil, nil, landingNames{who: who}, crew, nil, nil, nil, nil, 30)
 	byBead := map[string]dashboard.LandingRow{}
 	for _, r := range rows {
 		byBead[r.Bead] = r
@@ -1975,7 +1975,7 @@ func TestDashboardLandingsNoRowAfterNow(t *testing.T) {
 		Bead: "gt-l", Rig: "gastown", Branch: "polecat/coma/gt-l+abc", LandedCommit: "0123456789abcdef",
 		OMVerdict: "approve", LandedAt: time.Date(2026, 11, 5, 22, 40, 0, 0, time.UTC),
 	}}}
-	rows := buildRecentLandings(now, recs, nil, r.rejects, nil, nil, nil, landingNames{}, nil, nil, nil, nil, 30)
+	rows := buildRecentLandings(now, recs, nil, r.rejects, nil, nil, nil, landingNames{}, nil, nil, nil, nil, nil, 30)
 	if len(rows) != 2 {
 		t.Fatalf("rows = %+v, want the landed record and the rejection inside the day", rows)
 	}
@@ -2083,4 +2083,145 @@ func loadSeriesReadOnly(t *testing.T) {
 			t.Errorf("the read-only rewrite logged %d lines, want one: %q", len(logs), logs)
 		}
 	})
+}
+
+// rejectedFieldsFor builds the batched reader buildRecentLandings takes, from
+// one answer per bead, and records the keys it was asked for.
+func rejectedFieldsFor(t *testing.T, answers map[string]rejectedBeadFields, err error, asked *[][]rejectedBeadKey) func([]rejectedBeadKey) (map[rejectedBeadKey]rejectedBeadFields, error) {
+	t.Helper()
+	return func(keys []rejectedBeadKey) (map[rejectedBeadKey]rejectedBeadFields, error) {
+		if asked != nil {
+			*asked = append(*asked, keys)
+		}
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[rejectedBeadKey]rejectedBeadFields, len(keys))
+		for _, k := range keys {
+			if f, ok := answers[k.Bead]; ok {
+				out[k] = f
+			}
+		}
+		return out, nil
+	}
+}
+
+// TestDashboardRejectedRowShowsTheBeadsModelPriorityAndPoints: a rejection with
+// no landed record draws the model, the P-pill and the points estimate its bead
+// carries, which today it does not (gt-4ppnp3).
+func TestDashboardRejectedRowShowsTheBeadsModelPriorityAndPoints(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	rejs := []omRejection{{At: now.Add(-10 * time.Minute), Bead: "gt-4ppnp3", Kind: "review", Detail: "om requested changes"}}
+	fields := rejectedFieldsFor(t, map[string]rejectedBeadFields{
+		"gt-4ppnp3": {Priority: ptrInt(1), SPEstimate: ptrInt(8), Agent: "sbx-flash"},
+	}, nil, nil)
+
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil, fields, 30)
+	if len(rows) != 1 {
+		t.Fatalf("%d rows, want the one rejection: %+v", len(rows), rows)
+	}
+	r := rows[0]
+	if r.Outcome != "rejected" {
+		t.Fatalf("outcome = %q, want rejected", r.Outcome)
+	}
+	if r.Priority == nil || *r.Priority != 1 {
+		t.Errorf("Priority = %v, want 1", r.Priority)
+	}
+	if r.SPEstimate == nil || *r.SPEstimate != 8 {
+		t.Errorf("SPEstimate = %v, want 8", r.SPEstimate)
+	}
+	if r.Agent != "sbx-flash" {
+		t.Errorf("Agent = %q, want sbx-flash", r.Agent)
+	}
+}
+
+// TestDashboardRejectedRowFieldsStayEmptyWhenTheReadFails: a read that errors,
+// or that finds no bead, leaves the row as it was and never blocks it
+// (gt-4ppnp3).
+func TestDashboardRejectedRowFieldsStayEmptyWhenTheReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	rejs := []omRejection{{At: now.Add(-10 * time.Minute), Bead: "gt-4ppnp3", Kind: "review", Detail: "om requested changes"}}
+	cases := []struct {
+		name    string
+		answers map[string]rejectedBeadFields
+		err     error
+	}{
+		{name: "the read errors", err: fmt.Errorf("bd show: store unavailable")},
+		{name: "the bead is not found", answers: map[string]rejectedBeadFields{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil,
+				rejectedFieldsFor(t, tc.answers, tc.err, nil), 30)
+			if len(rows) != 1 {
+				t.Fatalf("%d rows, want the rejection still built: %+v", len(rows), rows)
+			}
+			r := rows[0]
+			if r.Outcome != "rejected" || r.Kind != "review" || r.Detail == "" {
+				t.Errorf("row = %+v, want the rejection built with its kind and detail", r)
+			}
+			if r.Priority != nil || r.SPEstimate != nil || r.Agent != "" {
+				t.Errorf("fields = P%v sp %v agent %q, want all empty", r.Priority, r.SPEstimate, r.Agent)
+			}
+		})
+	}
+}
+
+// TestDashboardRejectedRowTakesTheLandedRecordsFields: a rejection whose bead
+// landed earlier takes the record's fields and asks the bead reader for
+// nothing (gt-4ppnp3).
+func TestDashboardRejectedRowTakesTheLandedRecordsFields(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	recs := []omRecord{{Record: landings.Record{
+		Bead: "gt-4ppnp3", Rig: "gastown", Branch: "polecat/x/gt-4ppnp3+y", OMVerdict: "approve",
+		LandedAt: now.Add(-2 * time.Hour), Agent: "sbx-haiku", Priority: ptrInt(2), SPEstimate: ptrInt(5),
+	}}}
+	rejs := []omRejection{{At: now.Add(-time.Hour), Bead: "gt-4ppnp3", Kind: "gate", Detail: "gate failed"}}
+	var asked [][]rejectedBeadKey
+
+	rows := buildRecentLandings(now, recs, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil,
+		rejectedFieldsFor(t, nil, nil, &asked), 30)
+	var rejected *dashboard.LandingRow
+	for i := range rows {
+		if rows[i].Outcome == "rejected" {
+			rejected = &rows[i]
+		}
+	}
+	if rejected == nil {
+		t.Fatalf("no rejected row in %+v", rows)
+	}
+	if rejected.Agent != "sbx-haiku" || rejected.Priority == nil || *rejected.Priority != 2 || rejected.SPEstimate == nil || *rejected.SPEstimate != 5 {
+		t.Errorf("rejected row = agent %q P%v sp %v, want the landed record's sbx-haiku, P2, sp5", rejected.Agent, rejected.Priority, rejected.SPEstimate)
+	}
+	if len(asked) != 0 {
+		t.Errorf("the bead reader was asked %v, want nothing for a bead whose record carries the fields", asked)
+	}
+}
+
+// TestDashboardRejectedRowFieldsReadOnlyTheKeptRows: the batch read covers the
+// rows the table keeps after its bound, not the day's rejections (gt-4ppnp3).
+func TestDashboardRejectedRowFieldsReadOnlyTheKeptRows(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 18, 18, 0, 0, 0, time.UTC)
+	rejs := []omRejection{
+		{At: now.Add(-2 * time.Hour), Bead: "gt-old", Kind: "review", Detail: "old"},
+		{At: now.Add(-10 * time.Minute), Bead: "gt-new", Kind: "review", Detail: "new"},
+	}
+	var asked [][]rejectedBeadKey
+
+	rows := buildRecentLandings(now, nil, nil, rejs, nil, nil, nil, landingNames{}, nil, nil, nil, nil,
+		rejectedFieldsFor(t, nil, nil, &asked), 1)
+	if len(rows) != 1 || rows[0].Bead != "gt-new" {
+		t.Fatalf("rows = %+v, want the newest rejection only", rows)
+	}
+	if len(asked) != 1 {
+		t.Fatalf("asked %d times (%v), want one batched read", len(asked), asked)
+	}
+	if len(asked[0]) != 1 || asked[0][0].Bead != "gt-new" {
+		t.Errorf("asked for %v, want only the kept bead gt-new", asked[0])
+	}
 }

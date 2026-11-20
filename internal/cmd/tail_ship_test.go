@@ -535,7 +535,7 @@ func TestTailDeploys_JournalErrorLeavesNoShipFields(t *testing.T) {
 	})
 	rows := buildRecentLandings(fixedNow(),
 		[]omRecord{omTestRec("gt-e", "approve", 0.9, "daemon", at("2026-09-30T13:03:00Z"))},
-		nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, 30)
+		nil, nil, nil, track.shipStatus, func(string, string) string { return "" }, landingNames{}, nil, nil, nil, nil, nil, 30)
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d (%+v); want the table built with the unread journal", len(rows), rows)
 	}

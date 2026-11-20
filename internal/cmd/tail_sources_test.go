@@ -1558,6 +1558,13 @@ type fakeCommentStore struct {
 	shows    int
 	comment  int
 
+	// issues answers ShowMultiple; multiErr fails it, on the call numbered
+	// multiFailOn when that is set, and on every call otherwise.
+	issues      map[string]*beads.Issue
+	multiErr    error
+	multiFailOn int
+	multi       int
+
 	sampleRows []beads.Sample
 	sampleErr  error
 	kind       string
@@ -1567,6 +1574,22 @@ type fakeCommentStore struct {
 func (s *fakeCommentStore) Show(id string) (*beads.Issue, error) {
 	s.shows++
 	return &beads.Issue{ID: id, Title: "title of " + id}, nil
+}
+
+// ShowMultiple answers the issues the test put in s.issues, so a batched read
+// sees the same store the single-id read does.
+func (s *fakeCommentStore) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	s.multi++
+	out := make(map[string]*beads.Issue, len(ids))
+	if s.multiErr != nil && (s.multiFailOn == 0 || s.multi == s.multiFailOn) {
+		return nil, s.multiErr
+	}
+	for _, id := range ids {
+		if issue, ok := s.issues[id]; ok {
+			out[id] = issue
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeCommentStore) Comments(string) ([]beads.Comment, error) {
@@ -1667,4 +1690,123 @@ func TestOpenTailBeadsWithoutATown(t *testing.T) {
 	if _, err := b.comments("gastown", "gt-1"); err == nil {
 		t.Error("comments read with no beads directory answered no error")
 	}
+}
+
+// TestRejectedBeadFieldsReadsTheBeadsInBatches: a rejected Landings row's
+// priority, sp: estimate and agent come from one batched read of the beads and
+// one of the polecat identity beads they name — never one bd call per row
+// (gt-4ppnp3).
+func TestRejectedBeadFieldsReadsTheBeadsInBatches(t *testing.T) {
+	t.Parallel()
+	store := &fakeCommentStore{issues: map[string]*beads.Issue{
+		"gt-4ppnp3": {ID: "gt-4ppnp3", Priority: 1, Labels: []string{"sp:8"}, Assignee: "gastown/polecats/rictus"},
+		"gt-other":  {ID: "gt-other", Priority: 2, Labels: []string{"sp:13"}, Assignee: "gastown/polecats/rictus"},
+		"gt-gastown-polecat-rictus": {ID: "gt-gastown-polecat-rictus",
+			Description: "gt-gastown-polecat-rictus\n\nrole_type: polecat\nrig: gastown\nagent: sbx-flash"},
+	}}
+	b := newTailBeadsFromStore(func(string) (tailStore, error) { return store, nil }, tailTitleCacheSize)
+	townRoot := t.TempDir()
+	keys := []rejectedBeadKey{
+		{Rig: "gastown", Bead: "gt-4ppnp3"},
+		{Rig: "gastown", Bead: "gt-other"},
+		{Rig: "gastown", Bead: "gt-4ppnp3"}, // a second rejection of the same bead
+	}
+
+	got, err := b.rejectedBeadFields(townRoot, keys)
+	if err != nil {
+		t.Fatalf("rejectedBeadFields: %v", err)
+	}
+	f := got[rejectedBeadKey{Rig: "gastown", Bead: "gt-4ppnp3"}]
+	if f.Priority == nil || *f.Priority != 1 || f.SPEstimate == nil || *f.SPEstimate != 8 || f.Agent != "sbx-flash" {
+		t.Errorf("gt-4ppnp3 fields = P%v sp %v agent %q, want P1 sp 8 sbx-flash", f.Priority, f.SPEstimate, f.Agent)
+	}
+	if f := got[rejectedBeadKey{Rig: "gastown", Bead: "gt-other"}]; f.SPEstimate == nil || *f.SPEstimate != 13 {
+		t.Errorf("gt-other sp = %v, want 13", f.SPEstimate)
+	}
+	if store.multi != 2 {
+		t.Errorf("read the store %d times, want one batched read of the beads and one of the identity beads", store.multi)
+	}
+}
+
+// TestRejectedBeadFieldsLeavesWhatTheBeadDoesNotCarry: a field the bead does
+// not carry is empty, a failed batch read is an error, and a reader with no
+// store reports that (gt-4ppnp3).
+func TestRejectedBeadFieldsLeavesWhatTheBeadDoesNotCarry(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	key := rejectedBeadKey{Rig: "gastown", Bead: "gt-1"}
+
+	t.Run("a field the bead does not carry is empty", func(t *testing.T) {
+		t.Parallel()
+		store := &fakeCommentStore{issues: map[string]*beads.Issue{
+			"gt-1": {ID: "gt-1", Priority: 3, Labels: []string{"sp:5", "sp:8"}, Assignee: "gastown/crew/max"},
+		}}
+		b := newTailBeadsFromStore(func(string) (tailStore, error) { return store, nil }, tailTitleCacheSize)
+		got, err := b.rejectedBeadFields(townRoot, []rejectedBeadKey{key})
+		if err != nil {
+			t.Fatalf("rejectedBeadFields: %v", err)
+		}
+		f := got[key]
+		if f.Priority == nil || *f.Priority != 3 {
+			t.Errorf("priority = %v, want the bead's 3", f.Priority)
+		}
+		if f.SPEstimate != nil {
+			t.Errorf("sp = %v with two conflicting labels, want none", *f.SPEstimate)
+		}
+		if f.Agent != "" {
+			t.Errorf("agent = %q for an assignee that names no polecat, want empty", f.Agent)
+		}
+	})
+
+	t.Run("a missing bead is left out", func(t *testing.T) {
+		t.Parallel()
+		b := newTailBeadsFromStore(func(string) (tailStore, error) { return &fakeCommentStore{}, nil }, tailTitleCacheSize)
+		got, err := b.rejectedBeadFields(townRoot, []rejectedBeadKey{key})
+		if err != nil {
+			t.Fatalf("rejectedBeadFields: %v", err)
+		}
+		if _, ok := got[key]; ok {
+			t.Errorf("a never-found bead answered %+v, want no entry", got[key])
+		}
+	})
+
+	t.Run("a failed read is an error", func(t *testing.T) {
+		t.Parallel()
+		store := &fakeCommentStore{multiErr: fmt.Errorf("bd show: store unavailable")}
+		b := newTailBeadsFromStore(func(string) (tailStore, error) { return store, nil }, tailTitleCacheSize)
+		if _, err := b.rejectedBeadFields(townRoot, []rejectedBeadKey{key}); err == nil {
+			t.Error("a failed batch read answered no error")
+		}
+	})
+
+	t.Run("a failed identity read is an error", func(t *testing.T) {
+		t.Parallel()
+		store := &fakeCommentStore{
+			issues: map[string]*beads.Issue{
+				"gt-1": {ID: "gt-1", Priority: 3, Assignee: "gastown/polecats/rictus"},
+			},
+			multiErr:    fmt.Errorf("bd show: store unavailable"),
+			multiFailOn: 2, // the bead read succeeds; the identity read fails
+		}
+		b := newTailBeadsFromStore(func(string) (tailStore, error) { return store, nil }, tailTitleCacheSize)
+		if _, err := b.rejectedBeadFields(townRoot, []rejectedBeadKey{key}); err == nil {
+			t.Error("a failed identity read answered no error")
+		}
+	})
+
+	t.Run("a store that cannot be opened is an error", func(t *testing.T) {
+		t.Parallel()
+		b := newTailBeadsFromStore(func(string) (tailStore, error) { return nil, fmt.Errorf("no store") }, tailTitleCacheSize)
+		if _, err := b.rejectedBeadFields(townRoot, []rejectedBeadKey{key}); err == nil {
+			t.Error("a store that cannot be opened answered no error")
+		}
+	})
+
+	t.Run("a reader with no store reports it", func(t *testing.T) {
+		t.Parallel()
+		var b *tailBeads
+		if _, err := b.rejectedBeadFields(townRoot, []rejectedBeadKey{key}); err == nil {
+			t.Error("a reader with no store answered no error")
+		}
+	})
 }

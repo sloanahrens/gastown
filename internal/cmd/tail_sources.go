@@ -28,6 +28,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/report"
+	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -114,7 +115,11 @@ type tailBeads struct {
 	// samples reads the town's cost sample rows. It is nil for a reader built
 	// without a store opener, and then costSamples reports that.
 	samples func(kind string, since time.Time, limit int) ([]beads.Sample, error)
-	max     int
+	// showMany reads many beads in one batched bd show, which routes each id
+	// to the store that owns it. It is nil for a reader built without a store
+	// opener, and then rejectedBeadFields reports that.
+	showMany func(ids []string) (map[string]*beads.Issue, error)
+	max      int
 
 	mu     sync.Mutex
 	titles map[string]string
@@ -266,6 +271,97 @@ func (b *tailBeads) cachedTitle(id string) (title string, settled bool) {
 	return title, true
 }
 
+// rejectedBeadFields reads what a bead carries for a rejected Landings row that
+// has no landed record: the priority it was filed at, its sp: estimate, and
+// the agent that built it, from the polecat identity bead its assignee names
+// (gt-4ppnp3). The beads are read in one batched bd show and the identity beads
+// in a second, so a poll costs two reads rather than one per row; townRoot is
+// the town whose routes name each rig's bead prefix. A bead that cannot be
+// read is left out of the answer, and a field the bead does not carry is
+// empty, but a failed read returns its error: the caller then leaves the rows
+// as they were rather than drawing a guess.
+func (b *tailBeads) rejectedBeadFields(townRoot string, keys []rejectedBeadKey) (map[rejectedBeadKey]rejectedBeadFields, error) {
+	if b == nil || b.showMany == nil {
+		return nil, fmt.Errorf("no beads store is open to read rejected rows from")
+	}
+	ids := make([]string, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if k.Bead == "" || seen[k.Bead] {
+			continue
+		}
+		seen[k.Bead] = true
+		ids = append(ids, k.Bead)
+	}
+	issues, err := b.showMany(ids)
+	if err != nil {
+		return nil, err
+	}
+	// The agent is on the polecat's own identity bead, which the bead's
+	// assignee, "<rig>/polecats/<name>", names. The assignee's rig must be the
+	// row's: an assignee naming another rig names a seat that did not build
+	// this row's bead, so it answers no agent rather than another rig's.
+	agentOf := make(map[rejectedBeadKey]string, len(keys))
+	agentIDs := make([]string, 0, len(keys))
+	asked := map[string]bool{}
+	for _, k := range keys {
+		rig, name, ok := assigneePolecat(issues[k.Bead])
+		if !ok || rig != k.Rig {
+			continue
+		}
+		id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, rig), rig, name)
+		if id == "" {
+			continue
+		}
+		agentOf[k] = id
+		if !asked[id] {
+			asked[id] = true
+			agentIDs = append(agentIDs, id)
+		}
+	}
+	agents := map[string]string{}
+	if len(agentIDs) > 0 {
+		identity, err := b.showMany(agentIDs)
+		if err != nil {
+			return nil, err
+		}
+		for id, issue := range identity {
+			if issue == nil {
+				continue
+			}
+			agents[id] = strings.TrimSpace(beads.ParseAgentFields(issue.Description).Agent)
+		}
+	}
+	out := make(map[rejectedBeadKey]rejectedBeadFields, len(keys))
+	for _, k := range keys {
+		issue := issues[k.Bead]
+		if issue == nil {
+			continue
+		}
+		priority := issue.Priority
+		f := rejectedBeadFields{Priority: &priority, Agent: agents[agentOf[k]]}
+		if points, ok := storypoints.EstimateOf(issue.Labels); ok {
+			f.SPEstimate = &points
+		}
+		out[k] = f
+	}
+	return out, nil
+}
+
+// assigneePolecat reads the rig and polecat name a bead's assignee names,
+// "<rig>/polecats/<name>". Any other shape names no polecat, so it yields no
+// identity bead.
+func assigneePolecat(issue *beads.Issue) (rig, name string, ok bool) {
+	if issue == nil {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimSpace(issue.Assignee), "/")
+	if len(parts) != 3 || parts[1] != "polecats" || parts[0] == "" || parts[2] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[2], true
+}
+
 // submittedBy names the actor of a bead's newest "Submitted for landing"
 // comment, the builder a landing on the reserved ops branch shows: the comment
 // is gt done's own record of who submitted the bead (gt-6ua0sn). A successful
@@ -389,6 +485,7 @@ func tailTitleBeadID(l tailLine) (string, bool) {
 // production store is *beads.Beads; a test drives the same reads with a fake.
 type tailStore interface {
 	Show(id string) (*beads.Issue, error)
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
 	Comments(id string) ([]beads.Comment, error)
 	ReadCostSamples(ctx context.Context, kind string, since time.Time, limit int) ([]beads.Sample, error)
 }
@@ -421,6 +518,15 @@ func newTailBeadsFromStore(open func(rig string) (tailStore, error), max int) *t
 			return nil, err
 		}
 		return s.ReadCostSamples(context.Background(), kind, since, limit)
+	}
+	b.showMany = func(ids []string) (map[string]*beads.Issue, error) {
+		// bd show routes each id to the store that owns it, so the town's
+		// store answers for a bead in any rig (see openTailBeads).
+		s, err := open(tailTownRig)
+		if err != nil {
+			return nil, err
+		}
+		return s.ShowMultiple(ids)
 	}
 	return b
 }
