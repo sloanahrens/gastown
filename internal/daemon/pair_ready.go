@@ -267,6 +267,9 @@ type pairReadyCheck struct {
 	// reported once per outage rather than on every pass.
 	ledger    pairReadyLedgerRead
 	ledgerErr string
+	// runningCommit reads the commit the running daemon was rendered from. nil
+	// reads the town's values file, which a partial roll leaves stale.
+	runningCommit func() (string, error)
 	// skew is the skew guard's town-wide reads, or nil when the check builds
 	// the production ones from the town root. A test sets agreeing reads.
 	skew *pairReadySkewReads
@@ -340,7 +343,11 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 		return
 	}
 	c.next = now.Add(pairReadyInterval)
-	running, err := pairReadyRunningCommit(townRoot)
+	readRunning := c.runningCommit
+	if readRunning == nil {
+		readRunning = func() (string, error) { return pairReadyRunningCommit(townRoot) }
+	}
+	running, err := readRunning()
 	if err != nil {
 		logf("deploy pair check: %v", err)
 		c.townFailed(pairReadyUnreadablePrefix+"town:running-commit", err)
@@ -1389,6 +1396,7 @@ func (d *Daemon) checkPairReady() {
 	}
 	ctx, cancel := context.WithTimeout(parent, pairReadyBudget)
 	defer cancel()
+	d.pairReady.runningCommit = d.runningCommit
 	d.pairReady.run(ctx, d.config.TownRoot, d.clk().Now(), d.productionPairReadyRigs, d.logger.Printf)
 }
 
