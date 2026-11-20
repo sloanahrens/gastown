@@ -333,3 +333,51 @@ func TestOverrunPassReadSeat(t *testing.T) {
 		})
 	}
 }
+
+// TestOverrunPassSeatLoopReads: the seat loop makes the three per-seat reads
+// through overrunReadSeat, in order, only for a seat whose overrun state it
+// could read. A seat whose state cannot be read is skipped before any per-seat
+// read, so it is never judged on a partial read (gt-872lkl).
+func TestOverrunPassSeatLoopReads(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	judged := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-ok111"}
+	skipped := overrunSeat{Rig: "gastown", Polecat: "nux", Bead: "gt-bad22"}
+	f := newOverrunFake(5*time.Minute, judged, skipped)
+
+	// A state file that cannot be parsed: the seat is skipped before any read.
+	path, err := overrunStatePath(d.config.TownRoot, skipped.Bead)
+	if err != nil {
+		t.Fatalf("overrunStatePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir state dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	var calls []string
+	f.escalationAnsweredAt = func(seat overrunSeat) (time.Time, error) {
+		calls = append(calls, "answered "+seat.Bead)
+		return time.Time{}, nil
+	}
+	f.gateRunning = func(seat overrunSeat) (bool, error) {
+		calls = append(calls, "gate "+seat.Bead)
+		return false, nil
+	}
+	f.escalationWaiting = func(seat overrunSeat) (bool, error) {
+		calls = append(calls, "waiting "+seat.Bead)
+		return false, nil
+	}
+
+	d.runOverrunGuard(f.seams())
+
+	want := "answered " + judged.Bead + ", gate " + judged.Bead + ", waiting " + judged.Bead
+	if got := strings.Join(calls, ", "); got != want {
+		t.Errorf("per-seat reads = %q, want %q (none for the unreadable-state seat)", got, want)
+	}
+	if !strings.Contains(buf.String(), "cannot read state for "+skipped.Bead) {
+		t.Errorf("log does not report the unreadable state that skipped the seat:\n%s", buf.String())
+	}
+}

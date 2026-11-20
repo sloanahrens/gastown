@@ -388,7 +388,8 @@ type overrunSeatReads struct {
 	inGate  bool
 	gateErr error
 	// waiting reports whether the seat is waiting on an open escalation it
-	// raised. It is read only outside a gate and used only outside one.
+	// raised. The read is skipped only when the gate read succeeded and found
+	// the seat inside its gate; the loop uses waiting only outside one.
 	waiting    bool
 	waitingErr error
 }
@@ -591,7 +592,15 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			continue
 		}
 		slung = slungFloor(slung, seat.SessionStart, seat.RestartedAt)
-		// The three per-seat reads of the pass, made once for the seat.
+		state, err := readOverrunState(d.config.TownRoot, seat.Bead)
+		if err != nil {
+			// An unreadable record could hide a mark already made; act on
+			// nothing until it reads, so it makes no per-seat read either.
+			d.logger.Printf("overrun_guard: %s: cannot read state for %s: %v", who, seat.Bead, err)
+			continue
+		}
+		// The three per-seat reads of the pass, made once for a seat whose state
+		// is known to be readable.
 		reads := overrunReadSeat(s, seat)
 		// A seat whose ESCALATED stop was answered could not resume before the
 		// answer, so its clock starts there (gt-bdlg6o). An answer that cannot be
@@ -605,13 +614,6 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			answered = time.Time{}
 		}
 		slung = overrunAnsweredFloor(slung, answered)
-		state, err := readOverrunState(d.config.TownRoot, seat.Bead)
-		if err != nil {
-			// An unreadable record could hide a mark already made; act on
-			// nothing until it reads.
-			d.logger.Printf("overrun_guard: %s: cannot read state for %s: %v", who, seat.Bead, err)
-			continue
-		}
 		state.Bead = seat.Bead
 		// Everything that outlives this tick is compared against before, written
 		// below only when it moved.
