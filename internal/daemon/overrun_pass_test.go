@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -161,6 +162,23 @@ func TestOverrunPassStartMarkerFile(t *testing.T) {
 		_, err := ReadPatrolRunningSince(root, "overrun_guard", time.Now())
 		if !errors.Is(err, ErrPatrolLastRunCorrupt) {
 			t.Errorf("ReadPatrolRunningSince on a corrupt file: err = %v, want ErrPatrolLastRunCorrupt", err)
+		}
+	})
+
+	t.Run("an unreadable file is an error, not read as idle", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		// A directory where the record should be: the file exists but cannot be
+		// read, which is not the missing-file case.
+		if err := os.MkdirAll(patrolLastRunPath(root), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		_, err := ReadPatrolRunningSince(root, "overrun_guard", time.Now())
+		if err == nil {
+			t.Error("ReadPatrolRunningSince on an unreadable file = nil error, want an error")
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ReadPatrolRunningSince on an unreadable file: err = %v, want a read error, not a missing file", err)
 		}
 	})
 }
