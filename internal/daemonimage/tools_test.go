@@ -240,6 +240,36 @@ func TestBuildToolsStampsHMWithItsCommit(t *testing.T) {
 	}
 }
 
+// TestBuildToolsPlanLineStampsHM: the plan line of the hm build carries the stamp
+// the build runs, so for the full sha the pins file requires the plan an operator
+// reads is the command that runs (gt-k8u7ap). The symbol is made up: no file here
+// spells hm's module path.
+func TestBuildToolsPlanLineStampsHM(t *testing.T) {
+	t.Parallel()
+	const symbol = "example.test/hm/internal/cli.Version"
+	stamp := "-X " + symbol + "=" + testHMCommit
+
+	p := planBuilder(t)
+	p.HMVersionVar = symbol
+	lines, err := p.Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	want := "build hm: " + strings.Join(goBuildArgv(filepath.Join(p.Out, "hm"), HMPackage, stamp), " ") + "   (clean worktree of /src/hm at " + testHMCommit + ")"
+	if !slices.Contains(lines, want) {
+		t.Errorf("Plan has no %q:\n%s", want, strings.Join(lines, "\n"))
+	}
+
+	b, run, _ := toolsBuilder(t)
+	b.HMVersionVar = symbol
+	if _, err := b.BuildTools(context.Background()); err != nil {
+		t.Fatalf("BuildTools: %v", err)
+	}
+	if got, want := argAfter(run.calls[0].argv, "-ldflags"), "-s -w "+stamp; got != want {
+		t.Errorf("hm build -ldflags = %q, want %q, the plan line's stamp", got, want)
+	}
+}
+
 // TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources: each refusal names the pin
 // or the checkout the operator must fix, and runs nothing and writes nothing.
 func TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources(t *testing.T) {
