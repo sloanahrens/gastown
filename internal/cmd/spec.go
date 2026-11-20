@@ -4503,8 +4503,10 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 	}
 	if report.Hold == "" {
 		// The slings of a background tick run after it, so they are no part of
-		// its cost.
-		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling, 0, 0, 0))
+		// its cost. The bd subprocess time is read once here, at the end of the
+		// tick, so the counters hold every call the tick made (gt-d2hzix).
+		bdCalls, bdTotal, bdSlowest := tickCallTime()
+		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling, bdCalls, bdTotal, bdSlowest))
 	}
 	// The census is written for the daemon that started the tick, so it can log
 	// the subprocess's calls under its own census line; a failure to write it is
@@ -4525,6 +4527,10 @@ func specWriteCensus(townRoot, owner string, dryRun bool) error {
 	}
 	return beads.WriteCensusSink(dispatch.SpecCensusPath(townRoot), beads.CensusSnapshotAndReset())
 }
+
+// tickCallTime reads the bd subprocess time the tick spent, as calls, their
+// total and the slowest; a test supplies a reading instead of running bd (gt-d2hzix).
+var tickCallTime = beads.CallTimeSnapshotAndReset
 
 // specTickCost is the tick's one cost line. It counts the reads the tick makes
 // itself. The sling path, the pre-sling re-read and the writes are not counted.
