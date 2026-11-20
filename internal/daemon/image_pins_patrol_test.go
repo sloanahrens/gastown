@@ -1084,6 +1084,173 @@ func TestImagePinsTipGit(t *testing.T) {
 	}
 }
 
+// imagePinsPathCountResult runs the production path count over the fixture's
+// devops pin, with run answering git, and returns its answer and error.
+func imagePinsPathCountResult(t *testing.T, run cmdRunFunc) (int, error) {
+	t.Helper()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
+	d.execCmd = run
+	return d.imagePinsPathCount(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip, []string{"cmd/"})
+}
+
+// TestImagePinsPathCountRunsFilteredFetchThenRevList: the production path count
+// fetches the source's main, filtered to no blobs, into the scratch ref of the
+// devops rig clone, then counts the commits from the pin to the tip that touch
+// the paths (gt-wz5ct4).
+func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	repo := filepath.Join(town, "devops", ".repo.git")
+	url, pin, tip := pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip
+	paths := []string{"cmd/", "deploy/"}
+	var argv [][]string
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		argv = append(argv, cmd.Args)
+		return []byte("1\n"), nil, nil
+	}
+
+	got, err := d.imagePinsPathCount(context.Background())(url, pin, tip, paths)
+	if err != nil || got != 1 {
+		t.Fatalf("the path count = %d, %v; want git's answer 1", got, err)
+	}
+	if len(argv) != 2 {
+		t.Fatalf("git ran %d time(s), want the fetch and then the count: %v", len(argv), argv)
+	}
+	wantFetch := []string{"git", "--git-dir=" + repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"}
+	if !slices.Equal(argv[0], wantFetch) {
+		t.Errorf("the first git call = %v, want the filtered fetch %v", argv[0], wantFetch)
+	}
+	wantCount := append([]string{"git", "--git-dir=" + repo, "rev-list", "--count", pin + ".." + tip, "--"}, paths...)
+	if !slices.Equal(argv[1], wantCount) {
+		t.Errorf("the second git call = %v, want the path-limited count %v", argv[1], wantCount)
+	}
+}
+
+// TestImagePinsPathCountFetchFailureIsAnError: a fetch or a count that fails is
+// an error naming the call and carrying git's first stderr line, and a failed
+// fetch is not followed by a count (gt-wz5ct4).
+func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
+	t.Parallel()
+	const fatal = "fatal: could not read username for 'http://forgejo:3000'"
+	for _, tt := range []struct {
+		name, fails string
+		stderr      []byte
+		want        string
+	}{
+		{"the fetch fails", "fetch", []byte(fatal + "\nhint: more\n"), "git fetch: git exited 128: " + fatal},
+		{"the rev-list fails", "rev-list", []byte(fatal + "\nhint: more\n"), "git rev-list: git exited 128: " + fatal},
+		{"the fetch fails silently", "fetch", nil, "git fetch: git exited 128"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			boom := errors.New("git exited 128")
+			calls := 0
+			n, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				calls++
+				if slices.Contains(cmd.Args, tt.fails) {
+					return []byte("stdout that is not the error"), tt.stderr, boom
+				}
+				return nil, nil, nil
+			})
+			if !errors.Is(err, boom) || n != 0 || err == nil || err.Error() != tt.want {
+				t.Fatalf("a failed %s = %d, %v; want %q, with no count", tt.fails, n, err, tt.want)
+			}
+			if tt.fails == "fetch" && calls != 1 {
+				t.Errorf("git ran %d times, want the failed fetch alone", calls)
+			}
+		})
+	}
+}
+
+// TestImagePinsPathCountNonNumberIsAnError: a count git answers with anything but
+// a count of commits, a non-number or a negative one, is an error, never a zero
+// that reads as a pin touching none of its inputs (gt-wz5ct4).
+func TestImagePinsPathCountNonNumberIsAnError(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct{ name, answer, want string }{
+		{"a non-number", "lots\n", "non-number"},
+		{"a negative count", "-3\n", "negative"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			n, err := imagePinsPathCountResult(t, func(*exec.Cmd) ([]byte, []byte, error) {
+				return []byte(tt.answer), nil, nil
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("%s count = %d, %v; want an error saying %q", tt.name, n, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestImagePinsPatrolWiresThePathCountSeam: the patrol's production read passes
+// the path count, so a devops pin's lag is the count the seam answers through
+// git; a read wired with no seam reports that pin's Err instead (gt-wz5ct4).
+func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
+	t.Parallel()
+	d := forgejoTownDaemon(t, forgejoTown(t, map[string]string{"gastown": rigForgejoSettings("http://forgejo:3000/owner/gastown.git")}))
+	token := filepath.Join(t.TempDir(), "forgejo-viewer.env")
+	if err := os.WriteFile(token, []byte("FORGEJO_TOKEN=placeholder\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.imagePinsTokenFile = token
+	// The three compared pins answer at their own commits, so no pin but devops
+	// trails its tip and nothing asks the compare for a count.
+	tips := map[string]string{
+		pinsReadPinURL("beads"):            pinsReadBDCommit,
+		pinsReadPinURL("organic-mechanic"): pinsReadOMCommit,
+		pinsReadPinURL("history-man"):      pinsReadHMCommit,
+		pinsReadPinURL("devops"):           pinsReadDevopsTip,
+	}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "ls-remote"):
+			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "rev-list"):
+			return []byte("3\n"), nil, nil
+		}
+		return nil, nil, nil
+	}
+
+	states, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL))
+	if err != nil {
+		t.Fatalf("readImagePinTips: %v", err)
+	}
+	want := ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3}
+	if len(states) != 4 || states[3] != want {
+		t.Fatalf("the read = %+v, want its four pins with devops as %+v: the patrol must count it through its path count seam", states, want)
+	}
+
+	// A rev-list that fails leaves devops's state with its Err and no count: the
+	// Behind it carries is zero, and the Err is git's first stderr line.
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "ls-remote"):
+			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "rev-list"):
+			return nil, []byte("fatal: bad revision\nhint: more\n"), errors.New("git exited 128")
+		}
+		return nil, nil, nil
+	}
+	states, err = d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL))
+	if err != nil {
+		t.Fatalf("readImagePinTips with a failed count: %v", err)
+	}
+	if states[3].Err == nil || states[3].Behind != 0 || !strings.Contains(states[3].Err.Error(), "fatal: bad revision") {
+		t.Fatalf("devops with a failed count = %+v, want its Err carrying git's first stderr line and no count", states[3])
+	}
+
+	// A read wired with no seam names the missing path count on devops's Err.
+	states, err = ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, d.imagePinsTipGit(context.Background()), nil, &fakePinCompare{})
+	if err != nil {
+		t.Fatalf("ReadImagePinTips with no seam: %v", err)
+	}
+	if states[3].Err == nil || !strings.Contains(states[3].Err.Error(), "no path count") {
+		t.Fatalf("devops with no seam = %+v, want its Err to name the missing path count", states[3])
+	}
+}
+
 // TestImagePinsCompareForRefusesAMissingToken: the compare needs the viewer's
 // token, and a token file that is not there is the build's error, never a client
 // that reads as anonymous (gt-01lcq2).
