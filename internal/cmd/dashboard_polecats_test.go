@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	gtevents "github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -190,6 +191,66 @@ func TestBuildDashPolecatsCapsTheBeadDescription(t *testing.T) {
 	}
 	if got["none"] != "" {
 		t.Errorf("a bead with no description carries %q", got["none"])
+	}
+}
+
+// A seat's row carries how many times its bead was refused for review, so a
+// rework round shows beside the seat. The count is read from the notes the
+// issue the row already holds carries, so the row costs no bead read of its
+// own (gt-k9s5lv).
+func TestPolecatRowReworkCountsRejections(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC)
+	rejection := func(attempt int) string {
+		return land.FormatRejectionNote(land.RejectionNote{
+			Attempt: attempt, Kind: string(land.RejectReview), Reason: "one finding",
+			Branch: "polecat/dag/gt-x+abc", Target: "main", MR: "gt-mr",
+		})
+	}
+	for _, tc := range []struct {
+		name  string
+		notes string
+		want  int
+	}{
+		{"two review rejections", rejection(1) + "\n" + rejection(2), 2},
+		{"no rejection", "a note the dispatcher wrote", 0},
+	} {
+		got := buildDashPolecats(dashPolecatInputs{
+			Now: now, SessionsKnown: true,
+			Seats: []dashSeat{{
+				Rig: "gastown", Name: "rework", Session: "gt-rework",
+				Item:  dashItem(polecat.StateWorking, polecat.WorkstateDisposition{CountsTowardCapacity: true}),
+				Issue: &beads.Issue{ID: "gt-x", Title: "the work", Notes: tc.notes},
+			}},
+		})
+		if len(got) != 1 {
+			t.Fatalf("%s: built %d rows, want one", tc.name, len(got))
+		}
+		if got[0].RejectCount != tc.want {
+			t.Errorf("%s: RejectCount = %d, want %d", tc.name, got[0].RejectCount, tc.want)
+		}
+	}
+}
+
+// A seat whose bead notes could not be read keeps an empty count and its row:
+// the table is built as before rather than failing over the bead's notes
+// (gt-k9s5lv).
+func TestPolecatRowReworkUnreadableNotes(t *testing.T) {
+	t.Parallel()
+
+	got := buildDashPolecats(dashPolecatInputs{
+		Now: time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC), SessionsKnown: true,
+		Seats: []dashSeat{{
+			Rig: "gastown", Name: "unread", Session: "gt-unread",
+			Item: dashItem(polecat.StateWorking, polecat.WorkstateDisposition{CountsTowardCapacity: true}),
+		}},
+	})
+	if len(got) != 1 {
+		t.Fatalf("built %d rows, want the seat's row even when its bead notes were not read", len(got))
+	}
+	if got[0].Name != "unread" || got[0].RejectCount != 0 {
+		t.Errorf("row = %+v, want the seat's row with an empty count", got[0])
 	}
 }
 
