@@ -65,6 +65,7 @@ var bdHandshakeNotTownRunning = map[string]string{
 	"gt dolt start":       "starts the Dolt server, which recovery needs when bd is broken",
 	"gt dolt restart":     "restarts the Dolt server, which recovery needs when bd is broken",
 	"gt bird start":       "starts claude, not a town session, and must run when bd is missing or outdated (gt-qipl5)",
+	"gt town vms start":   "starts the Colima VMs on the Mac, not a session, daemon or polecat; a reboot runs it before the bead store is up (gt-czoguq)",
 }
 
 // bdHandshakeTimeout bounds the whole handshake: the version and schema reads,
