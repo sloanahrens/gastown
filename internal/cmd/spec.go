@@ -673,7 +673,15 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 			}
 			reads.call()
 			group, err := read(dir, ids)
-			if err != nil {
+			switch {
+			case isBDTimeout(err):
+				// A timed-out chunk read is the gateway's cap, not one bad
+				// parent: each id is left for the next tick rather than read
+				// alone at two bd calls each (gt-qrz8rm).
+				for _, id := range ids {
+					errs[id] = errSpecChildrenTimeout
+				}
+			case err != nil:
 				// One parent the grouped read could not answer fails the whole
 				// read, so each bead is read alone: the rest still get their
 				// children and only the unreadable bead reports. With the default
@@ -727,6 +735,18 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 // specChildrenChunkSize bounds one children read: the grouped read of every
 // wanted candidate is one 11 to 30 s call (gt-8gvizh).
 const specChildrenChunkSize = 8
+
+// errSpecChildrenTimeout is what every id of a chunk reports when its read
+// timed out: the read's own end, not one bad parent, so the ids are left for
+// the next tick rather than retried one bead at a time (gt-qrz8rm).
+var errSpecChildrenTimeout = errors.New("children read timed out")
+
+// isBDTimeout reports whether err is a bd call the deadline ended: one that
+// wraps context.DeadlineExceeded, or the gateway's kill, which exits 124
+// (gt-qrz8rm).
+func isBDTimeout(err error) bool {
+	return err != nil && (errors.Is(err, context.DeadlineExceeded) || exitCodeOf(err) == 124)
+}
 
 // specChildrenChunk is the read that serves the loop when it reaches asked:
 // asked, then the unread wanted ids after it in order, until the chunk holds
