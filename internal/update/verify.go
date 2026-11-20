@@ -55,6 +55,18 @@ type CrashProbes interface {
 	PodCrashing(ctx context.Context) (crashing bool, why string, err error)
 }
 
+// ReadyProbes is the optional extension of VerifyProbes a run implements when it
+// can ask the town the question readiness answers: whether the town can take
+// traffic, given a report whose non-green fields it reads in full rather than
+// through the health line's lossy rendering. A run that implements it decides
+// the health check by this answer, as long as the line reads as a health line;
+// one that does not keeps the line's rule.
+type ReadyProbes interface {
+	// Ready reports whether the town is ready and, when it is not, why: the
+	// reason a person reads in the check's detail.
+	Ready(ctx context.Context) (ready bool, reason string, err error)
+}
+
 // CrashLoopError is why a restart wait ended before its bound: the daemon's
 // newest pod is crash-looping, so it cannot report the new build however long
 // the wait lasts. The caller tells it apart from a canceled or failed sleep
@@ -237,16 +249,28 @@ var queueReasons = map[string]func(string) bool{
 	"escalation":     isOldestAge,
 }
 
-// healthCheck verifies the install, not the town's queue: it passes on a GREEN
-// line and on a DEGRADED line whose only reasons are queue states, naming the
-// reasons it ignored. Any other verdict, a DEGRADED line with any other reason
-// or with no reason, and a line that does not read
-// "<VERDICT> tick <age> ago" fails, and the detail carries the line as read. A
-// probe error fails the check with the probe's message.
+// healthCheck verifies the install, not the town's queue. A probe error fails
+// the check with the probe's message.
+//
+// For a probe set that does not implement ReadyProbes it passes on a GREEN line
+// and on a DEGRADED line whose only reasons are queue states, naming the reasons
+// it ignored. Any other verdict, a DEGRADED line with any other reason or with
+// no reason, and a line that does not read "<VERDICT> tick <age> ago" fails, and
+// the detail carries the line as read.
+//
+// A probe set that also implements ReadyProbes is asked the town's readiness
+// question after a successful health read instead, and the readiness answer
+// decides the check whatever the line's verdict; a line that does not read as a
+// health line still fails. The roll is thus judged by readiness, so a red rig
+// main on the line is reported beside the outcome rather than folded into it.
+// See readyHealthCheck.
 func healthCheck(ctx context.Context, p VerifyProbes) Check {
 	line, err := p.Health(ctx)
 	if err != nil {
 		return Check{Name: checkHealth, Detail: err.Error()}
+	}
+	if ready, ok := p.(ReadyProbes); ok {
+		return readyHealthCheck(ctx, ready, line)
 	}
 	queue, ok := queueOnlyHealthLine(line)
 	if !ok {
@@ -257,6 +281,34 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 	}
 	return Check{Name: checkHealth, OK: true,
 		Detail: fmt.Sprintf("%s (queue states, not a failed roll; ignored %s)", line, strings.Join(queue, ", "))}
+}
+
+// readyNote is what a passing ready check appends to a health line that is not
+// GREEN, saying the line is reported beside the roll and is not part of it.
+const readyNote = " (ready: the town's own recorded and queue states are reported beside the roll, not part of it)"
+
+// readyHealthCheck passes the health check exactly when the town's readiness
+// answer says it is ready, whatever the line's verdict, and its detail is the
+// line as read; a line that is not GREEN carries the ready note. A line that
+// does not read as a health line fails with the line as read before readiness
+// is asked, so an unreadable line never passes. A not-ready answer fails naming
+// the reason and the line, and a Ready error fails with the error text.
+func readyHealthCheck(ctx context.Context, ready ReadyProbes, line string) Check {
+	verdict, _, ok := healthLineHead(line)
+	if !ok {
+		return Check{Name: checkHealth, Detail: line}
+	}
+	isReady, reason, err := ready.Ready(ctx)
+	if err != nil {
+		return Check{Name: checkHealth, Detail: err.Error()}
+	}
+	if !isReady {
+		return Check{Name: checkHealth, Detail: fmt.Sprintf("not ready: %s: %s", reason, line)}
+	}
+	if verdict == "GREEN" {
+		return Check{Name: checkHealth, OK: true, Detail: line}
+	}
+	return Check{Name: checkHealth, OK: true, Detail: line + readyNote}
 }
 
 // queueOnlyHealthLine reports whether line is a health line a roll may pass on,
@@ -291,6 +343,32 @@ func isQueueState(reason string) bool {
 	return found && known && accept(value)
 }
 
+// healthLineHead reads a health line's shape: one of the four verdicts the town
+// writes, the "tick " marker, and a non-empty age before " ago". It returns the
+// verdict and everything after " ago". ok is false for any other shape, so a
+// line this does not know is refused rather than read.
+func healthLineHead(line string) (verdict, tail string, ok bool) {
+	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
+	if !found {
+		return "", "", false
+	}
+	verdict = strings.ToUpper(verdict)
+	switch verdict {
+	case "GREEN", "DEGRADED", "RED", "UNKNOWN":
+	default:
+		return "", "", false
+	}
+	rest, found = strings.CutPrefix(rest, "tick ")
+	if !found {
+		return "", "", false
+	}
+	age, tail, found := strings.Cut(rest, " ago")
+	if !found || age == "" {
+		return "", "", false
+	}
+	return verdict, tail, true
+}
+
 // healthReasons splits a health line into its verdict and the reason tokens it
 // lists: degraded is whether the verdict is DEGRADED, and tokens are the
 // reasons after the colon, separated by commas or by spaces, so both the
@@ -298,27 +376,16 @@ func isQueueState(reason string) bool {
 // is false for any shape this does not know — a RED or UNKNOWN verdict, a line
 // without the "<VERDICT> tick <age> ago" head, a DEGRADED line with no reason.
 func healthReasons(line string) (degraded bool, tokens []string, ok bool) {
-	verdict, rest, found := strings.Cut(strings.TrimSpace(line), " ")
-	if !found {
+	verdict, tail, ok := healthLineHead(line)
+	if !ok {
 		return false, nil, false
 	}
-	switch strings.ToUpper(verdict) {
+	switch verdict {
 	case "GREEN":
+		return false, nil, true
 	case "DEGRADED":
-		degraded = true
 	default:
 		return false, nil, false
-	}
-	rest, found = strings.CutPrefix(rest, "tick ")
-	if !found {
-		return false, nil, false
-	}
-	age, tail, found := strings.Cut(rest, " ago")
-	if !found || age == "" {
-		return false, nil, false
-	}
-	if !degraded {
-		return false, nil, true
 	}
 	reasons, found := strings.CutPrefix(tail, ":")
 	if !found {
