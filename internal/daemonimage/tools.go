@@ -37,6 +37,15 @@ const (
 // the binary is placed, so a version run.sh would refuse fails the build instead.
 var releaseReporterVersionShape = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$`)
 
+// abbreviatedPinNote ends the hm plan line when the pin is not a full sha: the
+// plan prints the pin as written, and the build stamps the full sha git resolves
+// it to (gt-uh6u2g).
+const abbreviatedPinNote = "(pin not a full sha: the build stamps its resolved full sha)"
+
+// fullSHAShape is the form of a pin a build stamps as written: hm's pin, like
+// every tool pin, may be an abbreviation, which the build resolves with git.
+var fullSHAShape = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
 // toolNames are the tools BuildTools builds, in the order it writes them. Each is
 // a binary in the build context root and a COPY into /usr/local/bin.
 var toolNames = []string{"hm", "devops-reporter", "release-reporter", "cloudcheck"}
@@ -267,16 +276,22 @@ func mainModuleVersion(info string) string {
 // toolPlanLines are Plan's lines for BuildTools: the argv each build runs, and the
 // check that reads release-reporter's version back from its binary. hm's line
 // carries the stamp its build carries, from HMVersionVar and the pin as written:
-// a full sha, the form the pins file requires, is the commit pinnedCommit resolves
-// (gt-k8u7ap). hmSrc and devopsSrc are the directories the tools are built from:
-// the named checkouts, or the directories their pins are fetched into.
+// a full sha is the commit pinnedCommit resolves (gt-k8u7ap), and a shorter pin
+// adds abbreviatedPinNote because the build stamps the sha git resolves rather
+// than the plan's text (gt-uh6u2g). hmSrc and devopsSrc are the directories the
+// tools are built from: the named checkouts, or the directories their pins are
+// fetched into.
 func (b Builder) toolPlanLines(hmSrc, devopsSrc string) []string {
-	hm := strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, hmLdflags(b.HMVersionVar, strings.TrimSpace(b.HMCommit))), " ")
+	pin := strings.TrimSpace(b.HMCommit)
+	hm := fmt.Sprintf("build hm: %s   (clean worktree of %s at %s)", strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, hmLdflags(b.HMVersionVar, pin)), " "), hmSrc, pin)
+	if b.HMVersionVar != "" && !fullSHAShape.MatchString(pin) {
+		hm += " " + abbreviatedPinNote
+	}
 	devops := strings.Join(goBuildArgv(filepath.Join(b.Out, "devops-reporter"), DevopsReporterPackage, ""), " ")
 	release := strings.Join(goBuildArgv(filepath.Join(b.Out, "release-reporter"), ReleaseReporterPackage, ""), " ")
 	cloud := strings.Join(goBuildArgv(filepath.Join(b.Out, "cloudcheck"), DevopsCloudCheckPackage, ""), " ")
 	return []string{
-		fmt.Sprintf("build hm: %s   (clean worktree of %s at %s)", hm, hmSrc, strings.TrimSpace(b.HMCommit)),
+		hm,
 		fmt.Sprintf("build devops-reporter: %s   (clean worktree of %s at %s)", devops, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
 		fmt.Sprintf("build release-reporter: %s   (clean worktree of %s at %s)", release, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
 		fmt.Sprintf("build cloudcheck: %s   (clean worktree of %s at %s)", cloud, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
