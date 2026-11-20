@@ -17,6 +17,10 @@ import (
 // The unit tier lands through gitfake. These run the same landings through
 // real git: the clone, the throwaway worktree, the merge, the lease push and
 // the read-back.
+//
+// The integration tag selects this tier, so a run must carry it (gt-sjwr7a):
+//
+//	go test -tags integration ./internal/land -run TestIntegrationLandTrackedHookMerge -count=1
 
 func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
