@@ -182,3 +182,40 @@ func TestOverrunPassStartMarkerFile(t *testing.T) {
 		}
 	})
 }
+
+// TestOverrunPassTicksFillRunningSince: Ticks carries the overrun_guard pass
+// start while it runs, and zero for other patrols and after it ends (gt-6yyt2j).
+func TestOverrunPassTicksFillRunningSince(t *testing.T) {
+	t.Parallel()
+	read := func(t *testing.T, d *Daemon) map[string]time.Time {
+		t.Helper()
+		ticks, err := (&healthSources{d: d}).Ticks()
+		if err != nil {
+			t.Fatalf("Ticks: %v", err)
+		}
+		got := map[string]time.Time{}
+		for _, tk := range ticks {
+			got[tk.Name] = tk.RunningSince
+		}
+		return got
+	}
+	d := passDaemon(t)
+	d.patrolConfig.Patrols.WispReaper = &WispReaperConfig{Enabled: true}
+	if err := SaveState(d.config.TownRoot, &State{StartedAt: time.Now().Add(-time.Hour)}); err != nil {
+		t.Fatalf("SaveState: %v", err)
+	}
+
+	before := time.Now()
+	var during map[string]time.Time
+	d.runOverrunGuardPass(func() { during = read(t, d) })
+	after := time.Now()
+	if s := during["overrun_guard"]; s.IsZero() || s.Before(before) || s.After(after) {
+		t.Errorf("RunningSince for overrun_guard in its pass = %v, want a time between %v and %v", s, before, after)
+	}
+	if got, ok := during["wisp_reaper"]; !ok || !got.IsZero() {
+		t.Errorf("RunningSince for wisp_reaper = %v (listed %v), want it listed and zero", got, ok)
+	}
+	if got := read(t, d)["overrun_guard"]; !got.IsZero() {
+		t.Errorf("RunningSince for overrun_guard after its pass = %v, want zero", got)
+	}
+}

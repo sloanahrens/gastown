@@ -249,6 +249,7 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 		{"git_hygiene", gitHygieneInterval(cfg)},
 		{"events_prune", pruneEvery},
 	}
+	started := s.daemonStarted()
 	var out []townhealth.Tick
 	for _, p := range all {
 		if !s.d.isPatrolActive(p.name) {
@@ -258,7 +259,11 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: last})
+		running, err := ReadPatrolRunningSince(s.townRoot(), p.name, started)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: last, RunningSince: running})
 	}
 	return out, nil
 }
