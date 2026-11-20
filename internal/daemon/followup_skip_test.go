@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -129,6 +130,28 @@ func TestFollowupSkipPolicyIsWired(t *testing.T) {
 	defect := land.FollowupCandidate{Path: "internal/land/advice.go", Title: "the retry never resets its counter", Claim: "the code does not reset it", Severity: "minor"}
 	if got := l.FollowupSkip(land.Work{}, defect); got != "" {
 		t.Errorf("FollowupSkip(real defect) = %q, want it filed", got)
+	}
+}
+
+// TestFollowupPolicyClockIsTimeNow: the policy the daemon builds names the wall
+// clock, so the hold-out window is judged by the clock the rest of the daemon
+// reads (gt-ahffi6). The two function values are compared, never called: a test
+// that read a clock to decide its outcome could flip on its own.
+func TestFollowupPolicyClockIsTimeNow(t *testing.T) {
+	t.Parallel()
+	if got, want := reflect.ValueOf(newFollowupPolicy().now).Pointer(), reflect.ValueOf(time.Now).Pointer(); got != want {
+		t.Errorf("newFollowupPolicy().now = %#x, want time.Now = %#x: the hold-out would be judged by a clock nothing names", got, want)
+	}
+}
+
+// TestFollowupPolicyNilClockFallsBackToTimeNow: a policy built by hand with no
+// clock falls back to the wall clock rather than panicking (gt-ahffi6). Only
+// the function value is compared, so the outcome never depends on the wall
+// clock or on which beads are held out.
+func TestFollowupPolicyNilClockFallsBackToTimeNow(t *testing.T) {
+	t.Parallel()
+	if got, want := reflect.ValueOf(followupPolicy{}.clock()).Pointer(), reflect.ValueOf(time.Now).Pointer(); got != want {
+		t.Errorf("followupPolicy{}.clock() = %#x, want time.Now = %#x", got, want)
 	}
 }
 
