@@ -302,6 +302,86 @@ func TestVerifyReportsEachFailure(t *testing.T) {
 	})
 }
 
+// assertHealthClass requires every line to classify as want.
+func assertHealthClass(t *testing.T, lines []string, want healthClass) {
+	t.Helper()
+	for _, line := range lines {
+		if got := classifyHealthLine(line); got != want {
+			t.Errorf("classifyHealthLine(%q) = %q, want %q", line, got, want)
+		}
+	}
+}
+
+// TestClassifyHealthLinePassesGreenAndQueueOnlyLines drives classifyHealthLine
+// on the lines a roll passes on today: a GREEN line, and a DEGRADED one whose
+// every reason is a queue a person works through, as queueOnlyHealthLine reads
+// them.
+func TestClassifyHealthLinePassesGreenAndQueueOnlyLines(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"GREEN tick 2m ago",
+		"GREEN tick 2m ago, 3 landed/24h",
+		"DEGRADED tick 28s ago: needs-overseer=1",
+		"DEGRADED tick 4ms ago: escalation=oldest_2h needs-human=1",
+		"DEGRADED tick 5s ago: needs-overseer=1, needs-human=2, escalation=oldest_2h",
+	}, healthPass)
+}
+
+// TestClassifyHealthLineSettlesOnARecordedLateTick drives classifyHealthLine
+// on the line the 2026-11-19 roll recorded: a patrol late against its interval
+// until its first pass on the new daemon, alone and beside a queue state.
+func TestClassifyHealthLineSettlesOnARecordedLateTick(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R]",
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R] needs-human=1",
+		"DEGRADED tick 6m ago: tick:wisp_reaper=70m/30m[R], tick:overrun_guard=2m/1m[R]",
+	}, healthSettling)
+}
+
+// TestClassifyHealthLineFailsARedLine drives classifyHealthLine on the
+// verdicts that are no settling state: a RED line alone, beside a queue state
+// and beside a late tick, and a stale UNKNOWN line.
+func TestClassifyHealthLineFailsARedLine(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"RED tick 1m ago: landing=stuck",
+		"RED tick 1m ago: needs-overseer=1",
+		"RED tick 1m ago: tick:overrun_guard=2m/1m[R]",
+		"UNKNOWN tick 3d ago (stale; last GREEN)",
+	}, healthFail)
+}
+
+// TestClassifyHealthLineFailsATickReasonWithoutTheRecordedTag drives
+// classifyHealthLine on tick tokens the town does not render: no tag, an
+// UNKNOWN tag, no patrol, and a value that is not "<age>/<interval>" in the
+// town's short durations.
+func TestClassifyHealthLineFailsATickReasonWithoutTheRecordedTag(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m",
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[?]",
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m[R]",
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/soon[R]",
+		"DEGRADED tick 20s ago: tick:overrun_guard=1h30m/1m[R]",
+		"DEGRADED tick 20s ago: tick:=2m/1m[R]",
+	}, healthFail)
+}
+
+// TestClassifyHealthLineFailsAnUnknownReasonBesideATick drives
+// classifyHealthLine on a late tick beside a reason that is neither a queue
+// state nor a tick, and on a DEGRADED line with no reason at all.
+func TestClassifyHealthLineFailsAnUnknownReasonBesideATick(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R] main/gastown=behind",
+		"DEGRADED tick 20s ago: promote/gastown=3_behind[R] tick:overrun_guard=2m/1m[R]",
+		"DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R] needs-overseer=lots",
+		"DEGRADED tick 20s ago",
+		"DEGRADED tick 20s ago:",
+	}, healthFail)
+}
+
 // TestVerifyHealthIsAQueueStateNotAFailedRoll drives Verify: a town whose line
 // is DEGRADED only for a queue a person works through is not a failed roll, so
 // the health check passes and names the reasons it ignored; every other line
