@@ -30,6 +30,11 @@ const (
 // whose plan could not be read must not look like an empty one.
 func parseNodePruneLog(out []byte) (nodePruneReport, error) {
 	var rep nodePruneReport
+	// The helper ends every line with a newline, so a log that does not is cut
+	// and its last line may be a count cut short ("failed 1" of "failed 12").
+	if len(out) > 0 && out[len(out)-1] != '\n' {
+		return nodePruneReport{}, errors.New("node-prune: the log does not end in a newline, so its last line is cut")
+	}
 	summary := ""
 	removedLines := 0
 	for _, raw := range strings.Split(string(out), "\n") {
