@@ -296,6 +296,16 @@ func TestPassInfraFailureFailsLoudAtOnceAndParks(t *testing.T) {
 	if len(comments) != 1 || !strings.Contains(comments[0], "parked") {
 		t.Fatalf("comments %q; want one notice saying the bead is parked", comments)
 	}
+	// The notice and the escalation name the operator's unpark: a daemon
+	// restart is not the only way out of the park (gt-2q0jwr).
+	for _, tc := range []struct{ what, text string }{
+		{"escalation", rec.specs()[0]},
+		{"notice", comments[0]},
+	} {
+		if !strings.Contains(tc.text, LabelLandingRetry) {
+			t.Errorf("%s %q; want it to name %s as the unpark", tc.what, tc.text, LabelLandingRetry)
+		}
+	}
 
 	// Every later pass inside the park window leaves the bead alone.
 	for _, wait := range []time.Duration{time.Minute, time.Hour, 20 * time.Hour} {
