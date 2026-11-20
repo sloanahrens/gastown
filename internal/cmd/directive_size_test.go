@@ -259,6 +259,21 @@ func TestDirectiveCeilingTracksRenderedSize(t *testing.T) {
 	}
 }
 
+// TestDirectiveSizeCommittedPolecatNamesLintRule checks the committed polecat
+// directive tells a seat that an acceptance box saying lint passes is ticked on
+// go vet and the Gate's test commands. Without the rule a seat that may not run
+// make lint stalls on a box it cannot honestly tick.
+func TestDirectiveSizeCommittedPolecatNamesLintRule(t *testing.T) {
+	t.Parallel()
+
+	text := strings.Join(strings.Fields(committedPolecatDirectiveText(t)), " ")
+	for _, want := range []string{"box", "lint passes", "go vet", "Gate"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("committed polecat directive does not name %q: a seat cannot tick its lint box", want)
+		}
+	}
+}
+
 // checkDirectiveCeiling returns the failure message for a rendered polecat
 // directive of size bytes against ceiling, or "" when it fits. The ceiling only
 // moves down, so the message sends the editor back to cut first and lower the
@@ -271,9 +286,16 @@ func checkDirectiveCeiling(size, ceiling int) string {
 }
 
 // committedPolecatDirectiveBytes measures the repo's committed directives as a
+// polecat seat receives them.
+func committedPolecatDirectiveBytes(t *testing.T) int {
+	t.Helper()
+	return len(committedPolecatDirectiveText(t))
+}
+
+// committedPolecatDirectiveText renders the repo's committed directives as a
 // polecat seat receives them: staged into a temp town's central layer, then
 // read and rendered by the same functions that write the seat prompt.
-func committedPolecatDirectiveBytes(t *testing.T) int {
+func committedPolecatDirectiveText(t *testing.T) string {
 	t.Helper()
 	town := t.TempDir()
 	for _, name := range []string{config.SharedDirectiveName, "polecat"} {
@@ -283,11 +305,11 @@ func committedPolecatDirectiveBytes(t *testing.T) int {
 		}
 		stageDirectiveFile(t, filepath.Join(config.CentralDirectiveDir(town), name+".md"), string(data))
 	}
-	size, err := readDirectiveSize("polecat", town, "")
+	directives, err := config.ReadRoleDirectives("polecat", town, "")
 	if err != nil {
-		t.Fatalf("measure the committed polecat directive: %v", err)
+		t.Fatalf("read the committed polecat directive: %v", err)
 	}
-	return size.Bytes
+	return renderDirectiveSection(directives)
 }
 
 // readDirectiveCeiling reads the committed ceiling, refusing a file that holds
