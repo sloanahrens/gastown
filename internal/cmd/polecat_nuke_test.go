@@ -4,7 +4,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // A refusal is not a failure: the nuke did not happen, so the gate must return
@@ -114,5 +121,49 @@ func TestNukeNonRefusalFailureExitsOne(t *testing.T) {
 				t.Errorf("exit code for %v = %d, want 1", tc.err, got)
 			}
 		})
+	}
+}
+
+// A finished seat whose agent bead never recorded a cleanup_status (it was
+// hand-slung and never ran gt done) is not blocked by that gap alone: its hook
+// bead is closed, so the hook is stale, its work is terminal, and the live git
+// probe is clean, so the nuke gate reads it as clear (gt-pojsio).
+func TestNukeSafetyClearsAFinishedSeatWithAMissingCleanupStatus(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+	fake := mrlessBeads{beadsfake.New()}
+	agentID := polecatBeadIDForRig(r, "gastown", "ember")
+	if _, err := fake.Create(beads.CreateOptions{
+		ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+			RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateSpawning),
+			Agent: sandboxSeatAgent, Branch: "polecat/ember/gt-a+x", LastSourceIssue: "gt-work", HookBead: "gt-work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+		t.Fatal(err)
+	}
+	closed := "closed"
+	if err := fake.Update("gt-work", beads.UpdateOptions{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	env := sandboxSeatEnv{
+		probe: func(string, string) (polecat.LiveGitState, bool) {
+			return polecat.SandboxSeatGitState("", false, nil, "gt-ember"), true
+		},
+		hostGitState: gatewayOnlySeat,
+		remoteBranch: func(string, string) (bool, error) { return false, nil },
+	}
+	get := func(string) (*polecat.Polecat, error) {
+		return &polecat.Polecat{Name: "ember", Branch: "polecat/ember/gt-a+x", ClonePath: filepath.Join(town, "gastown", "polecats", "ember", "gastown")}, nil
+	}
+
+	result := checkPolecatSafetyWith("gastown", "ember", r, get, fake, env)
+
+	if result.Blocked || len(result.Reasons) != 0 {
+		t.Fatalf("nuke refused a finished seat with a missing cleanup_status: blocked=%v reasons=%q", result.Blocked, strings.Join(result.Reasons, " | "))
 	}
 }

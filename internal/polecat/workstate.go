@@ -561,6 +561,11 @@ func liveGitRiskBlockers(in WorkstateInput) []string {
 // The status remains unsafe globally; callers must opt into this reconciliation
 // path only after gathering live git, hook, work, and active-MR facts.
 //
+// A missing status (the agent bead never recorded one because the seat never
+// ran gt done) is waived on the same evidence (gt-pojsio). An unknown status is
+// not: it says the state could not be determined, not that the seat never
+// recorded one.
+//
 // claude-41j.1 D9: for the reuse verdict this is no longer the reconciliation
 // path — RecordedCleanupBlocks supersedes a git-derived recorded status on
 // live-git evidence alone, without requiring a terminal work ref. What remains
@@ -573,7 +578,7 @@ func CanIgnoreStaleCleanupStatus(status CleanupStatus, workTerminal, hookSafe, a
 		return false
 	}
 	switch status {
-	case CleanupUncommitted, CleanupStash, CleanupUnpushed:
+	case CleanupUncommitted, CleanupStash, CleanupUnpushed, "":
 		return true
 	default:
 		return false
@@ -635,6 +640,12 @@ func ResolveIgnoreCleanupStatus(status CleanupStatus, allowMissingForPartialSpaw
 		}
 		if agentBeadRead && liveGitProbeRan && hookSafe && activeMRSafe && gitSafe {
 			return true
+		}
+		// CanIgnoreStaleCleanupStatus now waives a missing status for the nuke
+		// gate (gt-pojsio). Keep the check-recovery path refusing it here,
+		// unless one of the hatches above proved the same evidence.
+		if status == "" {
+			return false
 		}
 	}
 	return CanIgnoreStaleCleanupStatus(status, workTerminal, hookSafe, activeMRSafe, gitSafe)
