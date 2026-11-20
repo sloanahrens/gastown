@@ -25,6 +25,11 @@ import (
 
 const doltCmdTimeout = 15 * time.Second
 
+// doltPingSlowAfter is the SQL ping time at or above which the health tick
+// logs the answer as slow: a stall worth a timeline, below which a healthy
+// tick stays silent (gt-lno4d3).
+const doltPingSlowAfter = 500 * time.Millisecond
+
 // doltServerStopBudget bounds how long stopLocked waits for the Dolt SQL
 // server to exit on its own before sending SIGKILL. It is part of
 // ShutdownBudget — the real wall-clock ceiling a daemon restart has to account
@@ -536,10 +541,16 @@ func (m *DoltServerManager) isRunningWithError() (int, bool, error) {
 		if !up {
 			return 0, false, nil
 		}
+		clk := m.clk()
+		pingStart := clk.Now()
 		running, err := m.containerIsRunning(m.townRoot)
+		elapsed := clk.Now().Sub(pingStart)
 		if err != nil {
-			m.logger("Dolt container %q is up but did not answer its SQL ping: %v", name, err)
+			m.logger("Dolt container %q is up but did not answer its SQL ping after %s: %v", name, elapsed, err)
 			return 0, false, err
+		}
+		if elapsed >= doltPingSlowAfter {
+			m.logger("Dolt container %q answered its SQL ping slowly: %s", name, elapsed)
 		}
 		return 0, running, nil
 	}
