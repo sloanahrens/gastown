@@ -13,9 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
+
+// fakeTrimNow is the clock a fake trim run is judged by. A file a case gives no mtime is a day old by
+// it, past the build-cache age floor, so the cases that are not about age remove it as they did.
+var fakeTrimNow = time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
 
 // fakeTrimFS is a trim-paths filesystem held in memory: the directories and files a case names,
 // and the answer each call gives by path.
@@ -24,6 +29,8 @@ type fakeTrimFS struct {
 	files      map[string]string
 	resolves   map[string]string
 	resolveErr map[string]error
+	mtimes     map[string]time.Time
+	modErr     map[string]error
 	removeErr  map[string]error
 	removed    []string
 }
@@ -34,6 +41,8 @@ func newFakeTrimFS() *fakeTrimFS {
 		files:      map[string]string{},
 		resolves:   map[string]string{},
 		resolveErr: map[string]error{},
+		mtimes:     map[string]time.Time{},
+		modErr:     map[string]error{},
 		removeErr:  map[string]error{},
 	}
 }
@@ -77,6 +86,17 @@ func (f *fakeTrimFS) fs() trimPathsFS {
 			}
 			return filepath.Clean(name), nil
 		},
+		modTime: func(root, rel string) (time.Time, error) {
+			name := filepath.Join(root, rel)
+			if err, ok := f.modErr[name]; ok {
+				return time.Time{}, err
+			}
+			if at, ok := f.mtimes[name]; ok {
+				return at, nil
+			}
+			return fakeTrimNow.Add(-24 * time.Hour), nil
+		},
+		now: func() time.Time { return fakeTrimNow },
 	}
 }
 
@@ -432,6 +452,86 @@ func TestRemoveTrimPathsRemovesEveryListedPath(t *testing.T) {
 	}
 }
 
+// TestTrimPathsKeepsAFileUsedSinceTheListing pins the trim's answer to a build-cache file the listing
+// named that a seat used after it: Go sets such a file's mtime to now, so the run keeps it and removes
+// the one whose last use is past the age floor.
+func TestTrimPathsKeepsAFileUsedSinceTheListing(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/ab/fresh", "gocache/ab/old")
+	f.mtimes["/cache/gocache/ab/fresh"] = fakeTrimNow.Add(-5 * time.Minute)
+	f.mtimes["/cache/gocache/ab/old"] = fakeTrimNow.Add(-3 * time.Hour)
+	res, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs())
+	if err != nil {
+		t.Fatalf("RemoveTrimPaths: %v", err)
+	}
+	if res.Removed != 1 || res.Kept != 1 || res.Absent != 0 {
+		t.Errorf("result = %+v, want the old file removed and the fresh one kept", res)
+	}
+	if want := []string{"/cache/gocache/ab/old"}; !reflect.DeepEqual(f.removed, want) {
+		t.Errorf("removed %v, want %v", f.removed, want)
+	}
+}
+
+// TestTrimPathsKeepsWhenTheTimeCannotBeRead pins that a file whose mtime cannot be read is not removed:
+// a permission error on the time is a failed removal, counted in the error, never a removal the run
+// cannot vouch for.
+func TestTrimPathsKeepsWhenTheTimeCannotBeRead(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/ab/unreadable")
+	f.modErr["/cache/gocache/ab/unreadable"] = fs.ErrPermission
+	res, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs())
+	if err == nil {
+		t.Fatal("RemoveTrimPaths reported success for a file whose time it could not read")
+	}
+	if res.Removed != 0 || res.Kept != 0 || res.Absent != 0 {
+		t.Errorf("result = %+v, want nothing removed, kept, or absent", res)
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+	if !strings.Contains(err.Error(), "1 of 1") {
+		t.Errorf("error = %v, want the one failed removal of one", err)
+	}
+}
+
+// TestTrimPathsCountsAFileGoneBeforeItsTimeIsReadAsAbsent pins that a file already gone when its time
+// is read is absent, as a file gone at the removal is, and not a failed removal.
+func TestTrimPathsCountsAFileGoneBeforeItsTimeIsReadAsAbsent(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/ab/gone")
+	f.modErr["/cache/gocache/ab/gone"] = fs.ErrNotExist
+	res, err := RemoveTrimPaths("/cache", "/trim", 1, f.fs())
+	if err != nil {
+		t.Fatalf("RemoveTrimPaths: %v", err)
+	}
+	if res.Absent != 1 || res.Removed != 0 || res.Kept != 0 {
+		t.Errorf("result = %+v, want the file counted absent", res)
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
+	}
+}
+
+// TestTrimPathsRunReportsAKeptFile pins the count the run prints for a file the age floor kept: the
+// caller logs "kept K" beside the removals, so a file a seat used since the listing is reported.
+func TestTrimPathsRunReportsAKeptFile(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	f.addShard("/trim", 0, "gocache/ab/fresh")
+	f.mtimes["/cache/gocache/ab/fresh"] = fakeTrimNow.Add(-5 * time.Minute)
+	var out, errOut bytes.Buffer
+	code := trimPathsRun([]string{"--root", "/cache", "--list", "/trim", "--shards", "1"}, &out, &errOut, f.fs())
+	if code != 0 {
+		t.Fatalf("trimPathsRun = %d, want 0 (%s)", code, errOut.String())
+	}
+	if got := strings.TrimSpace(out.String()); got != "removed 0 absent 0 kept 1" {
+		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 0 absent 0 kept 1")
+	}
+}
+
 // TestRemoveTrimPathsCountsAnAbsentFile pins the one failure that is not one: a listed file that is
 // already gone leaves the claim as the trim wants it, so the run reports it apart from a removal.
 func TestRemoveTrimPathsCountsAnAbsentFile(t *testing.T) {
@@ -564,8 +664,8 @@ func TestTrimPathsRunReadsAClaimCarriedList(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("trimPathsRun = %d, want 0 (%s)", code, errOut.String())
 	}
-	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0" {
-		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0")
+	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0 kept 0" {
+		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0 kept 0")
 	}
 	want := []string{"/cache/" + cachevol.TrimClaimListPath, "/cache/" + cachevol.TrimClaimDigestPath, "/cache/gocache/one"}
 	if !reflect.DeepEqual(f.removed, want) {
@@ -745,8 +845,8 @@ func TestTrimPathsRunRemovesTheMountedList(t *testing.T) {
 	if want := []string{"/cache/gocache/ab/one"}; !reflect.DeepEqual(f.removed, want) {
 		t.Errorf("removed %v, want %v", f.removed, want)
 	}
-	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0" {
-		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0")
+	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 0 kept 0" {
+		t.Errorf("trimPathsRun printed %q, want %q", got, "removed 1 absent 0 kept 0")
 	}
 }
 
@@ -784,8 +884,8 @@ func TestTrimPathsRunReportsTheCountsOfAFailedRun(t *testing.T) {
 	if code != 3 {
 		t.Fatalf("trimPathsRun = %d, want 3 (%s)", code, errOut.String())
 	}
-	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 1" {
-		t.Errorf("trimPathsRun printed %q, want the counts %q", got, "removed 1 absent 1")
+	if got := strings.TrimSpace(out.String()); got != "removed 1 absent 1 kept 0" {
+		t.Errorf("trimPathsRun printed %q, want the counts %q", got, "removed 1 absent 1 kept 0")
 	}
 	if !strings.Contains(errOut.String(), "1 of 3") {
 		t.Errorf("stderr = %q, want the one failed removal of three", errOut.String())
@@ -816,6 +916,36 @@ func TestDiskTrimPathsFSReportsAShardDirectoryThatIsNotThere(t *testing.T) {
 	_, err := diskTrimPathsFS().names(filepath.Join(t.TempDir(), "absent"))
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("names of a missing shard directory = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// TestDiskTrimPathsFSReportsNoTimeUnderAClaimThatIsNotThere pins the time read's refusal: a claim the
+// run cannot open gives an error and no time, so the caller never removes on a time it did not read.
+func TestDiskTrimPathsFSReportsNoTimeUnderAClaimThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	mtime, err := diskTrimPathsFS().modTime(filepath.Join(t.TempDir(), "absent"), "gocache/ab/one")
+	if err == nil {
+		t.Fatal("modTime under a missing claim returned no error")
+	}
+	if !mtime.IsZero() {
+		t.Errorf("modTime under a missing claim = %v, want the zero time with the error", mtime)
+	}
+}
+
+// TestRemoveTargetsRefusesATargetItCannotPlaceInTheClaim pins that a target the claim root cannot
+// relate to is an error that removes nothing: there is no claim-relative path to remove by.
+func TestRemoveTargetsRefusesATargetItCannotPlaceInTheClaim(t *testing.T) {
+	t.Parallel()
+	f := newFakeTrimFS()
+	res, err := removeTargets("/cache", []string{"gocache/ab/one"}, 0, f.fs())
+	if err == nil {
+		t.Fatal("removeTargets reported success for a target the claim cannot place")
+	}
+	if res.Removed != 0 || res.Kept != 0 {
+		t.Errorf("result = %+v, want nothing removed or kept", res)
+	}
+	if len(f.removed) != 0 {
+		t.Errorf("removed %v, want nothing removed", f.removed)
 	}
 }
 
@@ -958,7 +1088,11 @@ func TestRemoveTrimPathsOnDiskRemovesAFileUnderTheClaim(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(listDir, "0", cachevol.TrimShardKey), list, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := RemoveTrimPaths(claim, listDir, 1, diskTrimPathsFS())
+	// the files were written just now, so the run's clock is a day ahead: they are past the age floor
+	w := diskTrimPathsFS()
+	later := time.Now().Add(24 * time.Hour)
+	w.now = func() time.Time { return later }
+	res, err := RemoveTrimPaths(claim, listDir, 1, w)
 	if err != nil {
 		t.Fatalf("RemoveTrimPaths: %v", err)
 	}
