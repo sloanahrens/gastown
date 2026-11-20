@@ -1868,7 +1868,7 @@ func TestCacheTrimKeepsBuildFilesInsideTheMinimumAge(t *testing.T) {
 	if logged := f.log.String(); !strings.Contains(logged, "would remove nothing") {
 		t.Errorf("the log does not say the trim had nothing it may remove: %s", logged)
 	}
-	// An hour later the same files are past the floor, and the retried pass trims them.
+	// An hour later the older file is past the floor, and the retried pass trims it.
 	now = diskMaintNow.Add(time.Hour)
 	f.d.runDiskMaintenance()
 	if got := f.applyCalls(); len(got) == 0 {
