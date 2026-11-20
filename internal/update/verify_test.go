@@ -19,6 +19,7 @@ const (
 	verifyTestPolecat      = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	verifyTestOtherPolecat = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	verifyTestGreen        = "GREEN tick 2m ago"
+	verifyTestSettling     = "DEGRADED tick 20s ago: tick:overrun_guard=2m/1m[R]"
 	verifyTestStart        = "2026-11-03T12:00:00Z"
 	verifyTestPoll         = 15 * time.Second
 	verifyTestTimeout      = time.Minute
@@ -32,11 +33,12 @@ type verifyAnswer struct {
 
 // fakeVerifyProbes answers each probe with what a test set, recording calls.
 // The daemon answers its script in order and repeats the last answer once the
-// script runs out.
+// script runs out; healthLines is a health script read the same way.
 type fakeVerifyProbes struct {
 	gt, image, health                             string
 	errGT, errImage, errHealth                    error
 	daemon                                        []verifyAnswer
+	healthLines                                   []string
 	daemonCalls, gtCalls, imageCalls, healthCalls int
 }
 
@@ -62,6 +64,9 @@ func (p *fakeVerifyProbes) ImageLabel(context.Context) (string, error) {
 
 func (p *fakeVerifyProbes) Health(context.Context) (string, error) {
 	p.healthCalls++
+	if len(p.healthLines) > 0 {
+		return p.healthLines[min(p.healthCalls-1, len(p.healthLines)-1)], nil
+	}
 	return p.health, p.errHealth
 }
 
@@ -263,6 +268,59 @@ func TestWaitForRestartTimesOutAndStopsOnCancel(t *testing.T) {
 			t.Fatalf("canceled wait polled %d times and slept %d times, want 0 and 0", probes.daemonCalls, len(*sleeps))
 		}
 	})
+}
+
+// settleVerify runs VerifyWithSettle on green probes answering lines.
+func settleVerify(t *testing.T, wait time.Duration, lines ...string) ([]Check, *[]time.Duration) {
+	t.Helper()
+	probes := greenProbes()
+	probes.healthLines = lines
+	clock := &fakeVerifyClock{now: parseVerifyTime(t)}
+	sleep, sleeps := verifySleeps(clock)
+	checks, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, wait, verifyTestPoll)
+	if err != nil {
+		t.Fatalf("VerifyWithSettle: %v", err)
+	}
+	return checks, sleeps
+}
+
+// TestVerifyWithSettlePassesWhenTheLateTickClears: two settling reads then
+// GREEN pass, and the check names the settle time.
+func TestVerifyWithSettlePassesWhenTheLateTickClears(t *testing.T) {
+	t.Parallel()
+	checks, _ := settleVerify(t, verifyTestTimeout, verifyTestSettling, verifyTestSettling, verifyTestGreen)
+	assertFailedChecks(t, checks)
+	if health := findCheck(t, checks, checkHealth); health.Detail != verifyTestGreen+" (settled after 30s)" {
+		t.Errorf("health detail = %q, want the settled line and its settle time", health.Detail)
+	}
+}
+
+// TestVerifyWithSettleFailsAtTheWaitBound: a line that stays settling fails at
+// the bound, carrying the last line read.
+func TestVerifyWithSettleFailsAtTheWaitBound(t *testing.T) {
+	t.Parallel()
+	checks, sleeps := settleVerify(t, verifyTestTimeout, verifyTestSettling)
+
+	assertFailedChecks(t, checks, checkHealth)
+	if health := findCheck(t, checks, checkHealth); health.Detail != verifyTestSettling+" (still settling after 1m0s)" {
+		t.Errorf("health detail = %q, want the last line read and the bound", health.Detail)
+	}
+	if len(*sleeps) != 4 {
+		t.Errorf("slept %d times, want 4: one per poll inside the bound", len(*sleeps))
+	}
+}
+
+// TestVerifyWithSettleReturnsAFailedSleepError: a failed sleep is not swallowed.
+func TestVerifyWithSettleReturnsAFailedSleepError(t *testing.T) {
+	t.Parallel()
+	probes := greenProbes()
+	probes.healthLines = []string{verifyTestSettling}
+	sleep := func(context.Context, time.Duration) error { return errors.New("canceled") }
+	clock := &fakeVerifyClock{now: parseVerifyTime(t)}
+	_, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, verifyTestPoll)
+	if err == nil || err.Error() != "canceled" {
+		t.Fatalf("VerifyWithSettle error = %v, want the sleep's", err)
+	}
 }
 
 func TestVerifyAllGreen(t *testing.T) {
