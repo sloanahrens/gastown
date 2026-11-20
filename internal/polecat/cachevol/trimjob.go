@@ -226,6 +226,30 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 	return &TrimManifest{route: TrimRouteShards, shards: shards, job: trimJob(in, name, annotations, shards)}, nil
 }
 
+// BuildClaimTrimManifest returns the claim-carried trim for in: one Job whose plan container walks the
+// claim its pod mounts, so in.Listing is ignored and no shard ConfigMap is built. Nothing calls it yet
+// (cache trim, bead 7/10: the chain's later beads are its callers). It refuses what BuildTrimManifest
+// refuses (job identity, negative cap, negative sandbox count) and a zero Now, since no plan runs here.
+func BuildClaimTrimManifest(in TrimJobInput) (*TrimManifest, error) {
+	name := in.Name
+	if name == "" {
+		name = DefaultTrimJobName
+	}
+	if err := checkJobIdentity(name, in.Namespace, in.Image, in.ClaimName); err != nil {
+		return nil, err
+	}
+	if in.CapBytes < 0 {
+		return nil, fmt.Errorf("the trim Job cap %d bytes: want the size the claim is trimmed under", in.CapBytes)
+	}
+	if in.SandboxesRunning < 0 {
+		return nil, fmt.Errorf("the trim Job sandbox count %d: want the caller's count of running sandboxes, 0 when none runs", in.SandboxesRunning)
+	}
+	if in.Now.IsZero() {
+		return nil, fmt.Errorf("the trim Job clock is unset: want the time the pod's plan judges file ages by")
+	}
+	return claimTrimManifest(in, name, nil), nil
+}
+
 // checkJobIdentity refuses the name, namespace, image or claim a cache Job cannot be rendered with.
 // The messages name the trim Job for every cache Job, so the lister Job refuses an input with the
 // same text as the trim: one refusal per input, whichever Job it reaches.
