@@ -382,6 +382,28 @@ func TestClassifyHealthLineFailsAnUnknownReasonBesideATick(t *testing.T) {
 	}, healthFail)
 }
 
+// TestClassifyHealthLineFailsALineWithoutReasonsOrHead drives
+// classifyHealthLine on lines that do not read "<VERDICT> tick <age> ago": no
+// verdict, no tick word directly after the verdict, no age or no "ago", and a
+// DEGRADED line whose reasons carry no colon, so a shape the parser does not
+// know fails.
+func TestClassifyHealthLineFailsALineWithoutReasonsOrHead(t *testing.T) {
+	t.Parallel()
+	assertHealthClass(t, []string{
+		"",
+		"GREEN",
+		"GREEN 2m ago",
+		"GREEN lately tick 2m ago",
+		"GREEN tick 2m",
+		"GREEN tick  ago",
+		"DEGRADED",
+		"DEGRADED tick 20s",
+		"DEGRADED tick 20s ago needs-human=1",
+		"tick 2m ago",
+		"needs-human=1",
+	}, healthFail)
+}
+
 // TestVerifyHealthIsAQueueStateNotAFailedRoll drives Verify: a town whose line
 // is DEGRADED only for a queue a person works through is not a failed roll, so
 // the health check passes and names the reasons it ignored; every other line
