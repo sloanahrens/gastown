@@ -69,9 +69,9 @@ func readDoltSlingSection(ctx context.Context, now time.Time) (dashboard.DoltSec
 	return doltSlingSection(filepath.Join(root, "daemon", "daemon.log"), now)
 }
 
-// doltSlingFile is an open log as the tail reader needs it: its size, its
-// seek and its reads. A test drives each unreadable-file branch with a fake,
-// so the section's failure path never needs a real file.
+// doltSlingFile is the narrow read-and-stat surface the log tail needs from an
+// open log: its size, its seek and its reads, so the tail reader bounds and
+// seeks what it opens without knowing the file's concrete type.
 type doltSlingFile interface {
 	io.ReadSeeker
 	Stat() (os.FileInfo, error)
@@ -154,31 +154,30 @@ type doltSlingSample struct {
 }
 
 // parseDoltSlingLines reads the sling lines stamped in the hour ending at now.
-// A line the dispatcher's shape does not explain is a line this reader cannot
-// trust, so it fails the reading rather than shrinking the count.
+// The window is the first check each line meets: a line outside it is never
+// drawn, so its shape and duration cannot cost the hour. A line whose stamp
+// cannot be read cannot be placed in any window and is skipped silently. Only a
+// sling line inside the window is validated, and one this reader cannot trust
+// then fails the reading, naming the line, rather than shrinking the count.
 func parseDoltSlingLines(lines []string, now time.Time) ([]doltSlingSample, error) {
 	start := now.Add(-doltSlingWindow)
 	var out []doltSlingSample
 	for _, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
+		at, ok := doltSlingLineStamp(line)
+		if !ok || at.Before(start) || at.After(now) {
+			continue
+		}
 		if !strings.Contains(line, "spec_dispatch: ") || !strings.Contains(line, "(sling took ") {
 			continue
 		}
-		m := doltSlingLineRe.FindStringSubmatch(strings.TrimSuffix(line, "\r"))
+		m := doltSlingLineRe.FindStringSubmatch(line)
 		if m == nil {
-			return nil, errors.New("a sling line is not in the dispatcher's shape")
-		}
-		at, err := time.ParseInLocation(doltSlingStampLayout, m[1], time.Local)
-		if err != nil {
-			return nil, errors.New("a sling line's stamp is not a time")
-		}
-		// A line outside the hour is not part of this reading: its duration is
-		// never drawn, so an unreadable one does not cost the hour.
-		if at.Before(start) || at.After(now) {
-			continue
+			return nil, fmt.Errorf("a sling line is not in the dispatcher's shape: %s", line)
 		}
 		took, err := time.ParseDuration(m[3])
 		if err != nil {
-			return nil, errors.New("a sling line's duration is not a duration")
+			return nil, fmt.Errorf("a sling line's duration is not a duration: %s", line)
 		}
 		out = append(out, doltSlingSample{at: at, took: took, bead: doltSlingBead(m[2])})
 	}

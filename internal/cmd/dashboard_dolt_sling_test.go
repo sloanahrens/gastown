@@ -195,8 +195,8 @@ func TestDoltSlingSectionNotesATailShorterThanTheHour(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the section failed: %v", err)
 	}
-	if !strings.Contains(sec.Note, "reached back") && !strings.Contains(sec.Note, "reach back") {
-		t.Errorf("the note is %q, want it to say the log did not reach back a full hour", sec.Note)
+	if sec.Note != "the log did not reach back a full hour" {
+		t.Errorf("the note is %q, want the exact text %q", sec.Note, "the log did not reach back a full hour")
 	}
 	if len(sec.Rows) != 1 || sec.Rows[0][0] != "2" {
 		t.Errorf("the section rows are %v, want the two slings it held", sec.Rows)
@@ -222,8 +222,8 @@ func TestDoltSlingSectionNotesNothingForAFullHour(t *testing.T) {
 	}
 }
 
-// A sling line whose shape, stamp or duration is not one the dispatcher writes
-// is a failure, never a silent drop from the count.
+// An in-window sling line whose shape or duration is not one the dispatcher
+// writes is a failure, never a silent drop from the count.
 func TestDoltSlingSectionRefusesAMalformedSlingLine(t *testing.T) {
 	t.Parallel()
 	now := doltSlingTestNow()
@@ -232,7 +232,6 @@ func TestDoltSlingSectionRefusesAMalformedSlingLine(t *testing.T) {
 		line string
 	}{
 		{name: "duration", line: doltSlingTestLine(now.Add(-10*time.Minute), "dispatched: gt-a: slung to gastown/p", "5x")},
-		{name: "stamp", line: "2026/13/45 99:00:00 spec_dispatch: dispatched: gt-a: slung to gastown/p (sling took 10s)"},
 		{name: "shape", line: now.Add(-10*time.Minute).Format(doltSlingTestLayout) + " spec_dispatch: dispatched: gt-a: slung to gastown/p (sling took 10s"},
 	}
 	for _, tc := range cases {
@@ -261,6 +260,71 @@ func TestDoltSlingSectionIgnoresAnOldLineItCannotRead(t *testing.T) {
 	sec, err := doltSlingSection(path, now)
 	if err != nil {
 		t.Fatalf("the section failed on a line outside its window: %v", err)
+	}
+	if len(sec.Rows) != 1 || sec.Rows[0][0] != "1" {
+		t.Errorf("the section rows are %v, want the hour's one sling", sec.Rows)
+	}
+}
+
+// A malformed sling line stamped before the hour is skipped before its shape is
+// checked, so it never blanks the hour beside it.
+func TestDoltSlingSectionOutOfWindowMalformedLineLeavesTheHourIntact(t *testing.T) {
+	t.Parallel()
+	now := doltSlingTestNow()
+	stale := now.Add(-24*time.Hour).Format(doltSlingTestLayout) +
+		" spec_dispatch: dispatched: gt-stale: slung to gastown/p (sling took 10s"
+	path := doltSlingTestLog(t,
+		doltSlingTestLine(now.Add(-50*time.Minute), "dispatched: gt-a: slung to gastown/p", "10s"),
+		doltSlingTestLine(now.Add(-40*time.Minute), "dispatched: gt-b: slung to gastown/p", "30s"),
+		doltSlingTestLine(now.Add(-30*time.Minute), "dispatched: gt-c: slung to gastown/p", "1m0s"),
+		doltSlingTestLine(now.Add(-20*time.Minute), "dispatched: gt-d: slung to gastown/p", "2m0s"),
+		doltSlingTestLine(now.Add(-10*time.Minute), "dispatched: gt-e: slung to gastown/p", "3m0s"),
+		stale,
+	)
+	sec, err := doltSlingSection(path, now)
+	if err != nil {
+		t.Fatalf("a malformed line before the hour failed the hour: %v", err)
+	}
+	if len(sec.Rows) != 1 || len(sec.Rows[0]) != len(sec.Head) {
+		t.Fatalf("the section is head %v rows %v, want one row of %d cells", sec.Head, sec.Rows, len(sec.Head))
+	}
+	want := []string{"5", "1m0s", "3m0s", "3m0s", "gt-e", "21:33:56"}
+	if got := strings.Join(sec.Rows[0], "|"); got != strings.Join(want, "|") {
+		t.Errorf("the hour reads %v, want %v", sec.Rows[0], want)
+	}
+}
+
+// A malformed sling line stamped inside the hour fails loud, naming the line,
+// rather than being silently dropped from the count.
+func TestDoltSlingSectionInWindowMalformedLineFailsLoud(t *testing.T) {
+	t.Parallel()
+	now := doltSlingTestNow()
+	bad := now.Add(-10*time.Minute).Format(doltSlingTestLayout) +
+		" spec_dispatch: dispatched: gt-bad: slung to gastown/p (sling took 10s"
+	sec, err := doltSlingSection(doltSlingTestLog(t, bad), now)
+	if err == nil {
+		t.Fatalf("a malformed line inside the hour drew %+v, want an error", sec)
+	}
+	if !strings.Contains(err.Error(), bad) {
+		t.Errorf("the error is %v, want it to name the line %q", err, bad)
+	}
+	if sec.Rows != nil || sec.Head != nil {
+		t.Errorf("the failed section carries head %v rows %v, want none", sec.Head, sec.Rows)
+	}
+}
+
+// A line whose stamp cannot be read cannot be placed in any window, so it is
+// skipped silently and never fails the hour around it.
+func TestDoltSlingSectionSkipsALineWhoseStampCannotBeRead(t *testing.T) {
+	t.Parallel()
+	now := doltSlingTestNow()
+	path := doltSlingTestLog(t,
+		"2026/13/45 99:00:00 spec_dispatch: dispatched: gt-x: slung to gastown/p (sling took 10s)",
+		doltSlingTestLine(now.Add(-10*time.Minute), "dispatched: gt-a: slung to gastown/p", "10s"),
+	)
+	sec, err := doltSlingSection(path, now)
+	if err != nil {
+		t.Fatalf("a line with no readable stamp failed the hour: %v", err)
 	}
 	if len(sec.Rows) != 1 || sec.Rows[0][0] != "1" {
 		t.Errorf("the section rows are %v, want the hour's one sling", sec.Rows)
