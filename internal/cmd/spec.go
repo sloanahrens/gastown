@@ -4639,6 +4639,25 @@ func rosterRigNames(townRoot string, pool *config.PolecatPool) ([]string, error)
 	return knownRigNames(townRoot)
 }
 
+// rigsWithPolecatDirs returns the names in rigs whose rig holds a polecat
+// directory with at least one polecat in it, in the order rigs lists them: a rig
+// with no polecat directory, or one holding none, has no seat the roster's read
+// can find (gt-khp9zg). The directory is listed as the read lists it
+// (listPolecatDirectoryNames). A rig whose directory cannot be listed is kept,
+// not dropped, and the first listing error is returned with the answer.
+func rigsWithPolecatDirs(townRoot string, rigs []string) (kept []string, first error) {
+	for _, rig := range rigs {
+		names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rig))
+		if err != nil && first == nil {
+			first = fmt.Errorf("listing polecats in %s: %w", rig, err)
+		}
+		if err != nil || len(names) > 0 {
+			kept = append(kept, rig)
+		}
+	}
+	return kept, first
+}
+
 // poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
 // seats the disposition releases, so a tick's slings can count them free too.
 func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
