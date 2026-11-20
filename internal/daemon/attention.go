@@ -260,6 +260,10 @@ type attentionSources struct {
 	// the setting that asked for them (gt-01lcq2).
 	imagePins func() ([]attention.Item, error)
 
+	// jobList lists the maintenance jobs for the job-overdue collector: nil
+	// until the daemon's start code has set JobListSource (job_overdue_attention.go).
+	jobList func(now time.Time) ([]JobReading, error)
+
 	// imagePinLayers is the image_pin_layers run's dead-layer record
 	// (image_pin_layers.go): nil while the patrol is off, so its items clear.
 	imagePinLayers func() ([]attention.Item, error)
@@ -772,6 +776,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// A held bead nobody has released (gt-j669b4.19). The owns predicate
 		// keeps only its own items when a list or show fails.
 		{kind: attention.KindHoldStale, collect: s.collectHoldStale, owns: holdStaleItem},
+		// A maintenance job past its cadence (gt-k63z2s). The owns predicate
+		// keeps only this kind's items when the job list cannot be read.
+		{kind: attention.KindJobOverdue, collect: s.collectJobOverdue, owns: jobOverdueItem},
 		// The daily metrics extract: a newest day past the stale bound, a footer
 		// with gaps, and a directory that cannot be read (gt-9zu4p4). The
 		// collector raises the unreadable item itself and returns no error, so
@@ -859,6 +866,10 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	// outliving the setting that asked for them.
 	if d.isPatrolActive("bird_reports") {
 		s.birdReports = d.birdReportStale.observed
+	}
+	if list := JobListSource; list != nil {
+		root := d.config.TownRoot
+		s.jobList = func(now time.Time) ([]JobReading, error) { return list(root, now) }
 	}
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
