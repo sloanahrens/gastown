@@ -3,7 +3,6 @@ package done
 import (
 	"bytes"
 	"errors"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -41,40 +40,42 @@ func TestLineLimitVerdict(t *testing.T) {
 }
 
 // TestLineLimitReportRefusesPolecatOnly: a polecat past twice the declared
-// limit is refused with the verdict text, a crew branch is given that text and
+// limit is refused on out, a crew branch gets prefixed warnings on errOut and
 // no error, and no declared limit means the count is never read (gt-zqg4m2).
-// parallel-global-ok: the only test that swaps lineLimitOut, and no peer test in package done calls reportLineLimit.
 func TestLineLimitReportRefusesPolecatOnly(t *testing.T) {
 	t.Parallel()
 	const desc = "Change: at most 70 added lines in 2 files."
 	refusal := "Change exceeds the 70-added-line constraint: 141 added lines against 70 declared"
-	var printed bytes.Buffer
-	//testpolicy:allow no-global-swap — lineLimitOut is the seam reportLineLimit prints through, and this test reads it
-	lineLimitOut = &printed
-	t.Cleanup(func() {
-		//testpolicy:allow no-global-swap — restores the seam swapped above
-		lineLimitOut = os.Stdout
-	})
-	var polecatErr, crewErr, noLimitErr error
+	var polecatOut, polecatErrOut, crewOut, crewErrOut, noLimitOut bytes.Buffer
 	countCalled := false
-	polecatErr = reportLineLimit(func() (int, error) { return 141, nil }, desc, true)
-	crewErr = reportLineLimit(func() (int, error) { return 141, nil }, desc, false)
-	noLimitErr = reportLineLimit(func() (int, error) { countCalled = true; return 0, nil }, "Change: at most 2 files.", false)
+	polecatErr := reportLineLimit(&polecatOut, &polecatErrOut, func() (int, error) { return 141, nil }, desc, true)
+	crewErr := reportLineLimit(&crewOut, &crewErrOut, func() (int, error) { return 141, nil }, desc, false)
+	noLimitErr := reportLineLimit(&noLimitOut, new(bytes.Buffer), func() (int, error) { countCalled = true; return 0, nil }, "Change: at most 2 files.", false)
 	if polecatErr == nil || !strings.Contains(polecatErr.Error(), refusal) || !strings.Contains(polecatErr.Error(), splitLine) {
 		t.Fatalf("reportLineLimit(polecat) = %v, want the refusal text", polecatErr)
 	}
-	if crewErr != nil || noLimitErr != nil || countCalled || strings.Count(printed.String(), refusal) != 2 || !strings.Contains(printed.String(), noLimitLine) {
-		t.Errorf("crew %v, no-limit %v, count called %v, printed %q; want no errors, no count, the refusal twice and the no-limit line", crewErr, noLimitErr, countCalled, printed.String())
+	if !strings.Contains(polecatOut.String(), refusal) || polecatErrOut.Len() != 0 {
+		t.Errorf("polecat out %q, errOut %q; want the refusal on out and nothing on errOut", polecatOut.String(), polecatErrOut.String())
+	}
+	if crewErr != nil || crewOut.Len() != 0 || !strings.Contains(crewErrOut.String(), crewWarningPrefix+refusal) {
+		t.Errorf("crew err %v, out %q, errOut %q; want no error, nothing on out and the prefixed warning on errOut", crewErr, crewOut.String(), crewErrOut.String())
+	}
+	if noLimitErr != nil || countCalled || !strings.Contains(noLimitOut.String(), noLimitLine) {
+		t.Errorf("no-limit err %v, count called %v, out %q; want no error, no count and the no-limit line", noLimitErr, countCalled, noLimitOut.String())
 	}
 }
 
 // TestLineLimitReportCountError: a count that cannot be read is returned
-// wrapped as added-line check, never ignored (gt-zqg4m2).
+// wrapped as added-line check, never ignored and never printed (gt-zqg4m2).
 func TestLineLimitReportCountError(t *testing.T) {
 	t.Parallel()
 	want := errors.New("numstat failed")
-	err := reportLineLimit(func() (int, error) { return 0, want }, "Change: at most 70 added lines in 2 files.", false)
+	var out, errOut bytes.Buffer
+	err := reportLineLimit(&out, &errOut, func() (int, error) { return 0, want }, "Change: at most 70 added lines in 2 files.", false)
 	if !errors.Is(err, want) || !strings.HasPrefix(err.Error(), "added-line check: ") {
 		t.Errorf("count error = %v, want %q", err, "added-line check: numstat failed")
+	}
+	if out.Len() != 0 || errOut.Len() != 0 {
+		t.Errorf("count error printed out %q, errOut %q; want nothing printed", out.String(), errOut.String())
 	}
 }
