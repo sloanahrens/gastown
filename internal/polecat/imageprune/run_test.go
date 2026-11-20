@@ -2,9 +2,11 @@ package imageprune
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 const (
@@ -168,5 +170,100 @@ func TestPruneAllRefusesAnEmptyNodeList(t *testing.T) {
 	_, err := PruneAll(nil, func(string) Crictl { return healthy().crictl }, 0, false)
 	if !errors.Is(err, ErrNoNodes) {
 		t.Errorf("PruneAll with no nodes = %v, want ErrNoNodes (an empty list must not read as a clean run)", err)
+	}
+}
+
+// timedFake answers PruneNodeRepos's crictl calls with serve. Each call must
+// carry the deadline Timed prepends; a call without it fails the test.
+func timedFake(t *testing.T, serve Crictl) Crictl {
+	t.Helper()
+	return func(args ...string) ([]byte, error) {
+		if len(args) < 2 || args[0] != "--timeout" || args[1] != CrictlTimeout {
+			t.Errorf("crictl %v carries no explicit timeout", args)
+			return nil, errors.New("no timeout")
+		}
+		return serve(args[2:]...)
+	}
+}
+
+// The 2026-11-20 control node: 72 gastown-polecat, 83 gastown-daemon, 42
+// gastown-bd and 11 other images. A container uses three old ones; with keep 3
+// the plan is every unused image beyond the newest three of each repository.
+func TestPruneNodeReposSelectsTheUnusedBeyondNewest(t *testing.T) {
+	t.Parallel()
+	repos := []string{"gastown-polecat", "gastown-daemon", "gastown-bd"}
+	counts := map[string]int{"gastown-polecat": 72, "gastown-daemon": 83, "gastown-bd": 42}
+	busy := map[string]bool{"sha256:gastown-polecat-40": true, "sha256:gastown-daemon-50": true, "sha256:gastown-bd-20": true}
+	base := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
+	var images, containers, want []string
+	created := map[string]string{}
+	for _, repo := range repos {
+		for i := 0; i < counts[repo]; i++ {
+			id := fmt.Sprintf("sha256:%s-%d", repo, i)
+			images = append(images, fmt.Sprintf(`{"id":%q,"repoTags":["localhost:5001/%s:t%d"],"repoDigests":["localhost:5001/%s@%s"]}`, id, repo, i, repo, id))
+			created[id] = fmt.Sprintf(`{"info":{"imageSpec":{"created":%q}}}`, base.Add(-time.Duration(i)*time.Hour).Format(time.RFC3339))
+			switch {
+			case busy[id]:
+				containers = append(containers, fmt.Sprintf(`{"image":{"image":%q}}`, id))
+			case i >= 3:
+				want = append(want, id)
+			}
+		}
+	}
+	for i := 0; i < 11; i++ {
+		id := fmt.Sprintf("sha256:other-%d", i)
+		images = append(images, fmt.Sprintf(`{"id":%q,"repoTags":["localhost:5001/kube-proxy:v%d"],"repoDigests":[]}`, id, i))
+		created[id] = `{"info":{"imageSpec":{"created":"2026-01-01T00:00:00Z"}}}`
+	}
+	var removed []string
+	serve := func(args ...string) ([]byte, error) {
+		switch args[0] {
+		case "images":
+			return []byte(`{"images":[` + strings.Join(images, ",") + `]}`), nil
+		case "inspecti":
+			return []byte(created[args[len(args)-1]]), nil
+		case "ps":
+			return []byte(`{"containers":[` + strings.Join(containers, ",") + `]}`), nil
+		case "rmi":
+			removed = append(removed, args[1])
+			return nil, nil
+		}
+		return nil, errors.New("unexpected " + strings.Join(args, " "))
+	}
+	res := PruneNodeRepos("gt-control", timedFake(t, serve), 3, repos, false)
+	var planned []string
+	for _, im := range res.Planned {
+		planned = append(planned, im.ID)
+	}
+	if !res.Ok() || !reflect.DeepEqual(planned, want) || !reflect.DeepEqual(removed, want) {
+		t.Errorf("PruneNodeRepos planned %d and removed %d, want the %d unused images beyond the newest three of each repository", len(planned), len(removed), len(want))
+	}
+}
+
+// PruneNodeRepos reads the node as PruneNode does: a failed read, or a dry run,
+// removes nothing.
+func TestPruneNodeReposFailsClosed(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		fail, images string
+		dry, wantErr bool
+	}{
+		"image list fails":     {fail: "images", wantErr: true},
+		"image list unparsed":  {images: "crictl: not json", wantErr: true},
+		"container list fails": {fail: "ps", wantErr: true},
+		"dry run":              {dry: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := healthy()
+			f.fail = tc.fail
+			if tc.images != "" {
+				f.images = tc.images
+			}
+			res := PruneNodeRepos("gt-control", timedFake(t, f.crictl), 0, []string{Repo}, tc.dry)
+			if (res.Err != nil) != tc.wantErr || len(f.rmis) != 0 || (len(res.Planned) == 1) == tc.wantErr {
+				t.Errorf("PruneNodeRepos = %+v rmis=%v, want error %v, the image planned only on a dry run, and no removal", res, f.rmis, tc.wantErr)
+			}
+		})
 	}
 }
