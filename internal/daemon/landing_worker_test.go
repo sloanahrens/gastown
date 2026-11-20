@@ -166,6 +166,61 @@ func TestNewRigLandingWorker_RefusesAnEmptyGateLogDir(t *testing.T) {
 	}
 }
 
+// The Lander a rig's worker is built with carries that rig's resolved beads
+// store: a landing's push runs the repository's tracked pre-push, and the beads
+// rig's chains `bd hooks run pre-push`, which refuses a call that sets no
+// BEADS_DIR (gt-s6gney). The redirect makes the resolved store differ from
+// <rig>/.beads, so a plain join fails the test as an unset field does.
+func TestLandingWorkerBeadsDirIsTheRigs(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "gastown")
+	store := filepath.Join(t.TempDir(), "gastown-beads")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte(store), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lander := newRigLander(rigPath, townRoot)
+
+	if lander.BeadsDir != store {
+		t.Fatalf("lander BeadsDir = %q, want the rig's resolved beads store %q", lander.BeadsDir, store)
+	}
+}
+
+// The worker builds the lander's beads dir from the rig's own path rather than
+// the town root: BEADS_DIR names the store a landing's pre-push runs against,
+// and the town's store is not the rig's (gt-s6gney).
+func TestLandingWorkerBeadsDirReachesTheRig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	keyFile := filepath.Join(t.TempDir(), "promote-gastown.key")
+	rigPath := promoteRigConfig(t, townRoot, "gastown", keyFile)
+	writeRigsJSON(t, townRoot, []string{"gastown"})
+	store := filepath.Join(t.TempDir(), "gastown-beads")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte(store), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d := newForgejoPromoteDaemon(t, townRoot, "")
+
+	w, err := d.newRigLandingWorker("gastown")
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("worker Lander = %T, want *land.Lander", w.Lander)
+	}
+	if lander.BeadsDir != store {
+		t.Fatalf("worker Lander BeadsDir = %q, want the rig's resolved beads store %q", lander.BeadsDir, store)
+	}
+}
+
 // The daemon's workers publish into the one view the burst sampler reads, so a
 // sample reports the count the rig's last pass listed (gt-hw6ih).
 func TestNewRigLandingWorker_PublishesIntoTheDaemonsQueueView(t *testing.T) {
