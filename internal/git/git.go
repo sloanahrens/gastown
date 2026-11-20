@@ -635,12 +635,17 @@ func (g *Git) hookArgs(args []string) []string {
 
 // hooksOffArgs returns args with `-c core.hooksPath=/dev/null` inserted before
 // the subcommand, after the global options, so the call runs none of the
-// repository's local hooks. A push comes back unchanged: its pre-push hook is
-// the fence that refuses a polecat's push to the default branch, and the
-// landing relies on it.
+// repository's local hooks. Only a subcommand in hookedSubcommands is
+// decorated; anything else, a push included, comes back unchanged.
+//
+// Decoration is opt-in because gitSubcommand cannot always name the real
+// subcommand: an alias (`-c alias.p=push p`) and the value of a global option
+// the parser does not know takes one (`--super-prefix x push`) both read as an
+// ordinary subcommand, and decorating one of those would switch the pre-push
+// fence off.
 func hooksOffArgs(args []string) []string {
 	sub, rest := gitSubcommand(args)
-	if sub == "" || sub == "push" {
+	if !hookedSubcommands[sub] {
 		return args
 	}
 	at := len(args) - len(rest) - 1 // the subcommand's own index
@@ -648,6 +653,58 @@ func hooksOffArgs(args []string) []string {
 	out = append(out, args[:at]...)
 	out = append(out, "-c", "core.hooksPath=/dev/null")
 	return append(out, args[at:]...)
+}
+
+// hookedSubcommands names every subcommand a method of this package sends
+// through the decorated run paths (run, runOutput, runWithTimeout, runWithEnv,
+// runWithEnvAndTimeout, runWithStdin and runMergeCheck). A method that starts
+// sending a new subcommand must add it here, or its calls keep the local hooks
+// on. push is absent on purpose: its pre-push hook is the fence that refuses a
+// polecat's push to the default branch, and the landing relies on it.
+var hookedSubcommands = map[string]bool{
+	"add":             true,
+	"branch":          true,
+	"cat-file":        true,
+	"check-ignore":    true,
+	"checkout":        true,
+	"cherry":          true,
+	"clean":           true,
+	"commit":          true,
+	"commit-tree":     true,
+	"config":          true,
+	"count-objects":   true,
+	"diff":            true,
+	"fetch":           true,
+	"gc":              true,
+	"grep":            true,
+	"init":            true,
+	"log":             true,
+	"ls-files":        true,
+	"ls-remote":       true,
+	"ls-tree":         true,
+	"merge":           true,
+	"merge-base":      true,
+	"merge-tree":      true,
+	"notes":           true,
+	"patch-id":        true,
+	"pull":            true,
+	"read-tree":       true,
+	"rebase":          true,
+	"remote":          true,
+	"reset":           true,
+	"rev-list":        true,
+	"rev-parse":       true,
+	"revert":          true,
+	"rm":              true,
+	"show":            true,
+	"show-ref":        true,
+	"sparse-checkout": true,
+	"stash":           true,
+	"status":          true,
+	"symbolic-ref":    true,
+	"update-ref":      true,
+	"worktree":        true,
+	"write-tree":      true,
 }
 
 func gitSubcommandMutatesWorktree(cmd string, args []string) bool {

@@ -8,8 +8,9 @@ import (
 	"time"
 )
 
-// TestHooksOffArgs pins where `-c core.hooksPath=/dev/null` lands: before the
-// subcommand but after every global option, and nowhere on a push.
+// TestHooksOffArgs pins where `-c core.hooksPath=/dev/null` lands: before a
+// subcommand the package sends, but after every global option, and nowhere on a
+// push or a subcommand it does not recognise.
 func TestHooksOffArgs(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -41,6 +42,16 @@ func TestHooksOffArgs(t *testing.T) {
 			name: "push behind a --git-dir flag",
 			args: []string{"--git-dir=/srv/repo.git", "push", "origin", "main"},
 			want: []string{"--git-dir=/srv/repo.git", "push", "origin", "main"},
+		},
+		{
+			name: "an alias push is left alone",
+			args: []string{"-c", "alias.p=push", "p"},
+			want: []string{"-c", "alias.p=push", "p"},
+		},
+		{
+			name: "a global option git does not know takes a value",
+			args: []string{"--super-prefix", "x", "push", "origin", "main"},
+			want: []string{"--super-prefix", "x", "push", "origin", "main"},
 		},
 		{
 			name: "no subcommand",
