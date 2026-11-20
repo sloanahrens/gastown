@@ -553,6 +553,7 @@ a.hrow:hover{background:#19212b}
     <section data-fold="forgejo"><h2>Forgejo <span class="r" id="forgejonote"></span></h2><div class="body"><div id="forgejoacts"></div><button id="forgejofeedhead" type="button" class="feedhead" aria-controls="forgejo"></button><div id="forgejo"></div></div></section>
     <section data-fold="om"><h2>om review <span class="r" id="omnote"></span></h2><div class="body" id="om"></div></section>
     <section id="jevsec" data-fold="jev" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>
+    <section id="doltsec" data-fold="dolt" data-default-collapsed hidden><h2>Dolt · <span class="r" id="doltnote"></span></h2><div class="body" id="dolt"></div></section>
     <section id="mangosec" data-fold="mango" data-default-collapsed hidden><h2>Mango · <span class="r" id="mangonote"></span></h2><div class="body" id="mango"></div></section>
   </div>
 </div>
@@ -4434,6 +4435,62 @@ function renderJev(s) {
   jevAllBatteries(box, jevBatteryTable(batteries, off, reused), batteries.filter(b => !off.has(b.name)).length);
 }
 
+// renderDolt draws the Dolt panel: one heading and table per section the hub
+// read, and for a section whose read failed one line saying so in place of its
+// table. A section with no rows says the window held nothing rather than
+// drawing an empty table, and a panel the hub kept across a failed read says so
+// above its sections instead of passing for current.
+function renderDolt(s) {
+  if (pushSkip("dolt", s)) return;
+  const sec = $("doltsec"), box = $("dolt"), note = $("doltnote");
+  const p = s.dolt, r = readOf(s, "dolt");
+  box.replaceChildren();
+  sec.hidden = !p && !r;
+  note.className = "r"; note.textContent = ""; note.title = "";
+  if (!p && !r) return;
+  if (!p) {
+    const failed = !!(r && r.error);
+    note.className = "r " + (failed ? "badc" : "warnc");
+    note.textContent = "unavailable — " + (failed ? "the read failed" : "the read went stale");
+    return;
+  }
+  const sections = p.sections || [];
+  const unreadable = sections.filter(d => d.err).length;
+  const parts = [sections.length + (sections.length === 1 ? " section" : " sections")];
+  if (unreadable) parts.push(unreadable + " unreadable");
+  note.textContent = parts.join(", ");
+  if (unreadable) note.className = "r warnc";
+  if (r && r.stale) box.append(el("div", "empty " + (r.error ? "badc" : "warnc"), r.error ? "the read failed; these are the last sections" : "these sections are stale"));
+  for (const d of sections) {
+    // The key names the reading when the reader gave the section no title, so a
+    // headingless section still reads as a named one.
+    const h = el("h3", "sub");
+    h.append(document.createTextNode(d.title || d.key));
+    if (d.note) h.append(el("span", "r", d.note));
+    box.append(h);
+    if (d.err) { box.append(el("div", "empty warnc", "unreadable: " + d.err)); continue; }
+    if (!(d.rows || []).length) { box.append(el("div", "empty", "nothing in the window")); continue; }
+    box.append(doltTable(d));
+  }
+}
+
+// doltTable draws one Dolt section's table: its head as the column headings and
+// its rows beneath, every cell set as text so a value holding markup reads as
+// the value the hub read.
+function doltTable(d) {
+  const table = el("table", "jvtable");
+  const hr = el("tr");
+  for (const c of d.head || []) hr.append(el("th", "", c));
+  const thead = document.createElement("thead"); thead.append(hr); table.append(thead);
+  const body = document.createElement("tbody"); table.append(body);
+  for (const row of d.rows) {
+    const tr = el("tr");
+    for (const c of row) tr.append(el("td", "", c));
+    body.append(tr);
+  }
+  return table;
+}
+
 // MG_WORDS gives the title line a word to count each verdict by, where a target
 // row keeps the panel's own word; MG_MEANING says what a verdict means for the
 // chip's tooltip in Mango's terms, not the Jev panel's labels.
@@ -5866,6 +5923,7 @@ const PANES = {
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
   tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
   jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
+  dolt: {sec: "dolt", body: ["dolt"], read: s => [s.dolt, readInput(s, "dolt")], draw: s => renderDolt(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
   // The om note and its rework fold both carry the review log's figures, so a
   // rework reading that moves draws the pane even when the om read has not
@@ -5932,7 +5990,7 @@ function openSection(key) {
 function renderAll() {
   if (!state) return;
   pushBegin(state);
-  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
+  try { renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderHold(state); renderUpdate(state); renderAttention(state); renderBirds(state); renderCost(state); renderRigs(state); renderPolecats(state); renderBeads(state); renderTrend(state); renderNews(state); renderMachine(state); renderDisk(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderJev(state); renderDolt(state); renderMango(state); renderOM(state); renderEvents(state); pushCommit(); }
   finally { pushEnd(); }
   paintFolds(state);
 }
@@ -6310,7 +6368,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) last
 // pane's reading, so the tick redraws the panes whose drawing carries one from
 // the reading the page already holds — forced past the push's skip, and still
 // leaving a closed section's body alone (gt-quuq5).
-setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
+setInterval(() => { if (state) { pushBegin(state, true); try { renderStrip(state); renderPolecats(state); renderBeads(state); renderTierSweep(state); renderForgejo(state); renderNews(state); renderHold(state); renderUpdate(state); renderRigs(state); renderMachine(state); renderDisk(state); renderCost(state); renderOM(state); renderJev(state); renderDolt(state); renderBirds(state); renderAttention(state); renderCloud(state); renderDeploys(state); renderTrend(state); renderMango(state); renderEvents(state); paintActivityNote(); pushCommit(); } finally { pushEnd(); } paintFolds(state); } }, 15000);
 </script>
 </body>
 </html>
