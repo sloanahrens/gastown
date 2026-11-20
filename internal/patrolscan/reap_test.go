@@ -453,6 +453,92 @@ func TestReapLeavesAReusableNonSandboxSeatAlone(t *testing.T) {
 	}
 }
 
+// TestReapSandboxSeatVetoesStillHold guards gt-2fi5ek: the reusable veto it
+// lifts is the only one a single-use sandbox seat is free of. Each row breaks
+// one fact the pass measures about the seat's work, and Reap is never called.
+func TestReapSandboxSeatVetoesStillHold(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name   string
+		mutate func(*fakeReapEnv)
+		quiet  bool
+		want   Outcome
+	}{
+		{"live session", func(e *fakeReapEnv) { e.sessions = map[string]bool{"onyx": true} }, true, ""},
+		{"fresh heartbeat", func(e *fakeReapEnv) {
+			e.heartbeats = map[string]*Heartbeat{"onyx": {State: "working", At: now.Add(-time.Minute)}}
+		}, true, ""},
+		{"open assigned work", func(e *fakeReapEnv) {
+			e.work = map[string]*Work{"onyx": {ID: "gt-9", Status: "in_progress"}}
+		}, true, ""},
+		{"branch claimed by open bead", func(e *fakeReapEnv) { e.claimed["polecat/onyx/gt-1"] = "gt-2" }, false, OutcomeSkipped},
+		{"verdict not safe to nuke", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", SafeToNuke: true, Reusable: true, Blockers: []string{"3 unpushed commits"}, GitStateSource: "live", Branch: "polecat/onyx/gt-1"}
+		}, false, OutcomeBlocked},
+		{"git state not measured live", func(e *fakeReapEnv) {
+			e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "recorded", Branch: "polecat/onyx/gt-1"}
+		}, false, OutcomeBlocked},
+		{"idle under the grace", func(e *fakeReapEnv) { e.idleSince["onyx"] = now.Add(-29 * time.Minute) }, true, ""},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			env := eligible()
+			reusableSeat(env)
+			row.mutate(env)
+			r := reapScanner(singleUseSeat(env, true), ReapOptions{}).Tick("gastown")
+			f, ok := reapFinding(t, r, "onyx")
+			if row.quiet && ok {
+				t.Fatalf("want no reap finding, got %+v", f)
+			}
+			if !row.quiet && (!ok || f.Outcome != row.want) {
+				t.Fatalf("finding = %+v, %v; want %s", f, ok, row.want)
+			}
+			if len(env.reaped) != 0 {
+				t.Fatalf("Reap called for %v", env.reaped)
+			}
+		})
+	}
+}
+
+// TestReapSandboxSeatReadFailureIsUnknown: a sandbox-seat read that fails is
+// Unknown, never read as "not a sandbox seat", and nothing is removed
+// (gt-2fi5ek).
+func TestReapSandboxSeatReadFailureIsUnknown(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	fake := singleUseSeat(env, true)
+	fake.err["onyx"] = errors.New("gateway unreadable")
+	r := reapScanner(fake, ReapOptions{}).Tick("gastown")
+	f, ok := reapFinding(t, r, "onyx")
+	if !ok || f.Outcome != OutcomeUnknown {
+		t.Fatalf("finding = %+v, %v; want unknown", f, ok)
+	}
+	if !strings.Contains(f.Detail, "sandbox seat unreadable") {
+		t.Errorf("detail = %q; want the failed read named", f.Detail)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v on an unreadable sandbox seat", env.reaped)
+	}
+}
+
+// TestReapWithoutSingleUseEnvIsUnchanged: a host with no SingleUseEnv has no
+// sandbox seats to reap, so a reusable done seat is capacity as before
+// (gt-2fi5ek).
+func TestReapWithoutSingleUseEnvIsUnchanged(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	r := reapScanner(env, ReapOptions{}).Tick("gastown")
+	if f, ok := reapFinding(t, r, "onyx"); ok {
+		t.Fatalf("finding = %+v; want a quiet skip", f)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v; want none", env.reaped)
+	}
+}
+
 // TestDirCapTrimReapsIdleCleanSandboxSeat guards gt-xlazq. The seat is reusable
 // capacity, which the pass leaves alone, and the host names it trimmable
 // because the rig is at its directory cap: the removal is what admits a new
