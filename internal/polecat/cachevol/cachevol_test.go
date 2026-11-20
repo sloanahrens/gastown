@@ -685,3 +685,34 @@ func TestBuildCacheInUse(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanTrimProtectedCountsTheFloor: three 5 GB units, a 4 GB cap and the pass stopped at the
+// first unit inside the age floor, so only the 3 hour unit goes and the other 10 GB is protected.
+func TestPlanTrimProtectedCountsTheFloor(t *testing.T) {
+	t.Parallel()
+	now := at(24)
+	listing := []Entry{
+		{Path: "gocache/3h", Cache: BuildCache, Size: 5 << 30, Atime: now.Add(-3 * time.Hour)},
+		{Path: "gocache/10m", Cache: BuildCache, Size: 5 << 30, Atime: now.Add(-10 * time.Minute)},
+		{Path: "gocache/30m", Cache: BuildCache, Size: 5 << 30, Atime: now.Add(-30 * time.Minute)},
+	}
+	plan := planTrim(t, listing, 4<<30, false, now)
+	if got := removedPaths(plan); !reflect.DeepEqual(got, []string{"gocache/3h"}) {
+		t.Errorf("removals = %v, want only the 3 hour unit: the pass stops at the 30 minute one", got)
+	}
+	if plan.Protected != 10<<30 {
+		t.Errorf("Protected = %d, want %d", plan.Protected, 10<<30)
+	}
+}
+
+// TestPlanTrimProtectedIsZeroWithoutAFloorStop: a claim under its cap and a pass that ran out of
+// build-cache units both protect nothing.
+func TestPlanTrimProtectedIsZeroWithoutAFloorStop(t *testing.T) {
+	t.Parallel()
+	now := at(24)
+	under := planTrim(t, []Entry{file("gocache/young", BuildCache, 60, 24, 24)}, 100, false, now)
+	past := planTrim(t, []Entry{file("gocache/a", BuildCache, 40, 1, 1), file("gocache/b", BuildCache, 40, 1, 1)}, 0, false, now)
+	if under.Protected != 0 || past.Protected != 0 {
+		t.Errorf("Protected = %d under the cap and %d past the floor, want 0", under.Protected, past.Protected)
+	}
+}

@@ -122,6 +122,10 @@ type TrimPlan struct {
 	Overflow bool
 	// OverBytes is how many bytes the claim is still over the cap, when Overflow is true.
 	OverBytes int64
+	// Protected is the size of the build-cache units the age floor kept in the claim: the unit the
+	// build pass stopped at and every unit after it, sorted as the plan sorts them. It is 0 when the
+	// build pass reached the end of the build cache or the claim was under the cap.
+	Protected int64
 }
 
 // goCacheTouchInterval is Go's cache mtimeInterval: a reused build-cache entry has its mtime reset to
@@ -176,8 +180,12 @@ func PlanTrim(listing []Entry, capBytes int64, sandboxesRunning bool, now time.T
 			break
 		}
 		if u.withinMinAge(now) {
+			// Every unit from here on is at least as young, so the pass keeps all of them.
 			buildPassStopped = true
-			break
+			for _, e := range u.entries {
+				plan.Protected += e.Size
+			}
+			continue
 		}
 		for _, e := range u.entries {
 			plan.Removals = append(plan.Removals, Removal{Path: e.Path, Size: e.Size})
