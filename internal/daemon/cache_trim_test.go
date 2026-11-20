@@ -163,6 +163,10 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return cliReply{stdout: cacheTrimListingJSON}
 		case strings.HasPrefix(verb, "logs job/"+cachevol.DefaultListJobName+"-"):
 			return cliReply{stdout: cacheTrimListingJSON}
+		case strings.HasPrefix(verb, "logs job/"+cachevol.DefaultTrimJobName+"-"):
+			// The result the removal Job prints for the fixture's listing:
+			// PlanTrim removes two of its three files.
+			return cliReply{stdout: "removed 2 absent 0 kept 0\n"}
 		case strings.Contains(verb, " df -Pk "):
 			return cliReply{stdout: cacheTrimDfReply(t, 1<<30)}
 		case verb == cacheTrimDuVerb:
@@ -4471,6 +4475,8 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 				cacheTrimStatBytesBefore:  3000,
 				cacheTrimStatBytesAfter:   1024,
 				cacheTrimStatTrimmedFiles: 2,
+				cacheTrimStatAbsentFiles:  0,
+				cacheTrimStatKeptFiles:    0,
 			},
 			wantRuns: 1,
 		},
@@ -4482,6 +4488,8 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 				cacheTrimStatBytesBefore:  3000,
 				cacheTrimStatBytesAfter:   4 << 10,
 				cacheTrimStatTrimmedFiles: 2,
+				cacheTrimStatAbsentFiles:  0,
+				cacheTrimStatKeptFiles:    0,
 			},
 			wantRuns: 1,
 		},
@@ -4558,6 +4566,72 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 
 // ptrInt64 returns a pointer to v, for a case's optional figure.
 func ptrInt64(v int64) *int64 { return &v }
+
+// cacheTrimTrimLogsVerb is the pass's read of the removal Job's result line,
+// the log of its trim container.
+const cacheTrimTrimLogsVerb = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c trim"
+
+// cacheTrimThirteenFilesJSON is a listing of thirteen build-cache files of
+// 1000 bytes each: a cap of 999 bytes plans every one of them for removal.
+func cacheTrimThirteenFilesJSON() string {
+	entries := make([]string, 13)
+	for i := range entries {
+		entries[i] = fmt.Sprintf(`{"path":"gocache/f%d/x","cache":"build","size":1000,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}`, i)
+	}
+	return "[" + strings.Join(entries, ",") + "]"
+}
+
+// TestCacheTrimLedgerRecordsWhatTheJobDid is the bead's first box: the ledger
+// carries the counts the finished Job reports, not the plan's thirteen files.
+func TestCacheTrimLedgerRecordsWhatTheJobDid(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimListVerb:     {stdout: cacheTrimThirteenFilesJSON()},
+		cacheTrimTrimLogsVerb: {stdout: "removed 7 absent 2 kept 4\n"},
+	})
+	inner := f.d.diskMaint.getenv
+	f.d.diskMaint.getenv = func(key string) string {
+		if key == cacheTrimCapEnv {
+			return "999B"
+		}
+		return inner(key)
+	}
+	if verdict := f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !verdict {
+		t.Fatalf("cacheTrim = false, want a verdict; log:\n%s", f.log.String())
+	}
+	want := map[string]int64{cacheTrimStatBytesBefore: 13000, cacheTrimStatBytesAfter: 1024,
+		cacheTrimStatTrimmedFiles: 7, cacheTrimStatAbsentFiles: 2, cacheTrimStatKeptFiles: 4}
+	if runs := f.jobRuns(t); len(runs) != 1 || !reflect.DeepEqual(runs[0].Stats, want) {
+		t.Fatalf("the ledger holds %+v, want one run with the stats %v", runs, want)
+	}
+}
+
+// TestCacheTrimLedgerLeavesOutWhatItCannotRead is the bead's second box: a Job
+// log that cannot be read records none of the three counts -- never the plan's
+// -- logs one line, and leaves the run's outcome and after-size reading alone.
+func TestCacheTrimLedgerLeavesOutWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimTrimLogsVerb: {stderr: "Error from server (NotFound): pods not found", code: 1},
+	})
+	if verdict := f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !verdict {
+		t.Fatalf("cacheTrim = false, want a verdict; log:\n%s", f.log.String())
+	}
+	runs := f.jobRuns(t)
+	if len(runs) != 1 {
+		t.Fatalf("the ledger holds %d run(s), want one: %+v", len(runs), runs)
+	}
+	want := map[string]int64{cacheTrimStatBytesBefore: 3000, cacheTrimStatBytesAfter: 1024}
+	if !reflect.DeepEqual(runs[0].Stats, want) {
+		t.Errorf("run stats = %v, want %v, none of the three counts", runs[0].Stats, want)
+	}
+	if runs[0].Outcome != cacheTrimRunOK {
+		t.Errorf("run outcome = %q, want %q, unchanged by the unreadable log", runs[0].Outcome, cacheTrimRunOK)
+	}
+	if got := strings.Count(f.log.String(), "the removal Job's result line could not be read"); got != 1 {
+		t.Errorf("the log holds %d unreadable-result-line line(s), want one:\n%s", got, f.log.String())
+	}
+}
 
 // TestCacheTrimRunWithoutATownRoot drives a run whose ledger cannot be built at
 // all: the trim still reaches its verdict and logs the one line saying the run
