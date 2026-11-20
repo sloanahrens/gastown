@@ -721,6 +721,28 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 	}
 }
 
+// specChildrenChunkSize bounds one children read: the grouped read of every
+// wanted candidate is one 11 to 30 s call (gt-8gvizh).
+const specChildrenChunkSize = 8
+
+// specChildrenChunk is the read that serves the loop when it reaches asked:
+// asked, then the unread wanted ids after it in order, until the chunk holds
+// size ids or the list ends. An asked id the list does not hold is read alone.
+func specChildrenChunk(wanted []string, asked string, read map[string]bool, size int) []string {
+	chunk := []string{asked}
+	if at := slices.Index(wanted, asked); at >= 0 {
+		for _, id := range wanted[at+1:] {
+			if len(chunk) >= size {
+				break
+			}
+			if !read[id] {
+				chunk = append(chunk, id)
+			}
+		}
+	}
+	return chunk
+}
+
 // specHoldKnobs is the dispatcher's own settings the peer-hold question reads:
 // the candidate filter's priority ceiling, and the shape gate with the
 // template it lints against. Reading them from the town is the caller's
