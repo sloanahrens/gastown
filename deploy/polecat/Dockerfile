@@ -201,9 +201,10 @@ COPY --chmod=0755 bin/polecat-image /usr/local/bin/polecat-image
 # keeps equal to this COPY's target.
 COPY --chmod=0755 bin/sweep-run /usr/local/bin/sweep-run
 
+# -gcflags is part of Go's build cache key: it must equal the seed job's flag (cachevol.GoCompileFlags).
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
-    GOFLAGS=-p=4 \
+    GOFLAGS="-p=4 -gcflags=all=-dwarf=false" \
     BD_DISABLE_METRICS=1 \
     DO_NOT_TRACK=1 \
     DISABLE_AUTOUPDATER=1 \
