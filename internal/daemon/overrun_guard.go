@@ -378,13 +378,20 @@ func (d *Daemon) triggerOverrunGuard() {
 		d.logger.Printf("overrun_guard: WARNING: %s — %s", dec.warn, dec.note)
 	}
 
-	go func() {
-		defer d.overrunGuardRunning.Store(false)
-		defer func() {
-			d.recordPatrolRun(&d.overrunGuardRun, "overrun_guard", time.Now())
-		}()
-		d.runOverrunGuard(d.overrunProdSeams())
+	go d.runOverrunGuardPass(func() { d.runOverrunGuard(d.overrunProdSeams()) })
+}
+
+// runOverrunGuardPass runs one overrun_guard pass: it marks the pass started
+// before the cycle, records the completion at its end, and releases the
+// single-flight guard. The cycle is passed in so a test can hold the pass open
+// and read the start marker between the two.
+func (d *Daemon) runOverrunGuardPass(cycle func()) {
+	defer d.overrunGuardRunning.Store(false)
+	defer func() {
+		d.recordPatrolRun(&d.overrunGuardRun, "overrun_guard", time.Now())
 	}()
+	d.recordPatrolStart(&d.overrunGuardRun, time.Now())
+	cycle()
 }
 
 // runOverrunGuard judges every working seat once. A seat that is submitted,
