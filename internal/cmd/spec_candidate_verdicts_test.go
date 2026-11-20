@@ -219,11 +219,12 @@ func TestSpecCandidateVerdictsSecondTickReadsNoEdgesButChildren(t *testing.T) {
 	if len(v.store.multis) != 1 || len(v.store.multis[0]) != specCandidateFixtureSize {
 		t.Fatalf("first tick's details batches = %v, want the one batch over the fixture", v.store.multis)
 	}
-	if v.groups != 1 || len(v.kidIDs[0]) != specCandidateFixtureSize {
-		t.Fatalf("first tick's children reads = %d calls %v, want one over the fixture", v.groups, v.kidIDs)
+	chunks := specCandidateFixtureSize / specChildrenChunkSize
+	if v.groups != chunks || len(v.kidIDs[0]) != specChildrenChunkSize {
+		t.Fatalf("first tick's children reads = %d calls %v, want %d chunks of %d (gt-0kwle3)", v.groups, v.kidIDs, chunks, specChildrenChunkSize)
 	}
-	if got := v.reads.Calls(); got != 2 {
-		t.Errorf("first tick counted %d bd reads, want the details view and the grouped children view", got)
+	if got := v.reads.Calls(); got != 1+chunks {
+		t.Errorf("first tick counted %d bd reads, want the details view and %d chunked children views", got, chunks)
 	}
 
 	second := runSpecDispatchCycle(v.retown(newFakeVerdictTown(v)))
@@ -233,11 +234,11 @@ func TestSpecCandidateVerdictsSecondTickReadsNoEdgesButChildren(t *testing.T) {
 	if len(v.store.multis) != 1 {
 		t.Errorf("the second tick's details batches = %v, want none: no candidate has an edge to read", v.store.multis)
 	}
-	if v.groups != 2 || len(v.kidIDs[1]) != specCandidateFixtureSize {
-		t.Errorf("the second tick's children reads = %d calls, want one grouped view over the fixture", v.groups-1)
+	if v.groups != 2*chunks {
+		t.Errorf("the second tick's children reads = %d calls, want %d chunked views over the fixture", v.groups-chunks, chunks)
 	}
-	if got := v.reads.Calls(); got != 1 {
-		t.Errorf("the second tick counted %d bd reads, want its grouped children view only", got)
+	if got := v.reads.Calls(); got != chunks {
+		t.Errorf("the second tick counted %d bd reads, want its %d chunked children views only", got, chunks)
 	}
 	// The phase costs at most half the bd reads a tick made before this change,
 	// over the same fixture (gt-km9jt).
@@ -513,7 +514,7 @@ func TestSpecCandidateChildrenSeeAChildChangeAtTheNextTick(t *testing.T) {
 	}
 }
 
-// The grouped children read answers eighty candidates with one view, and a
+// The grouped children read answers eighty candidates in chunks of eight, and a
 // grouped read that fails falls back to one read per bead so only the bead that
 // cannot be read reports (gt-km9jt).
 func TestSpecCandidateChildrenReadGrouped(t *testing.T) {
@@ -537,8 +538,8 @@ func TestSpecCandidateChildrenReadGrouped(t *testing.T) {
 			t.Fatalf("children %s = %v, %v; want the empty set", c.Spec.ID, kids, err)
 		}
 	}
-	if groups != 1 {
-		t.Errorf("eighty candidates cost %d grouped reads, want one", groups)
+	if want := len(read.Candidates) / specChildrenChunkSize; groups != want {
+		t.Errorf("%d candidates cost %d chunked reads, want %d (chunks of %d, gt-0kwle3)", len(read.Candidates), groups, want, specChildrenChunkSize)
 	}
 
 	// A grouped read that fails falls back per bead and reports only the bead it
@@ -1061,5 +1062,42 @@ func TestSpecCandidatesStaySilentOnBacklogPriority(t *testing.T) {
 	}
 	if len(got.Skipped) != 0 {
 		t.Errorf("skipped = %+v, want no line for backlog priority", got.Skipped)
+	}
+}
+
+// The first request reads its chunk in one call, a later request inside the
+// chunk reads nothing, and the 9th wanted candidate costs a second call
+// (gt-0kwle3). Restoring the whole-rig group read makes the first call carry
+// all ten ids.
+func TestTickEffChunkedChildren(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	read := specCandidateBoardRead(t, specCandidateFixture())
+	var calls [][]string
+	children := specCandidateChildren(root, newSpecTickReads(), read.Candidates[:10], nil, func(_ string, ids []string) (map[string][]*beads.Issue, error) {
+		calls = append(calls, append([]string(nil), ids...))
+		out := make(map[string][]*beads.Issue, len(ids))
+		for _, id := range ids {
+			out[id] = []*beads.Issue{}
+		}
+		return out, nil
+	})
+	ask := func(i int) {
+		t.Helper()
+		if _, err := children(read.Candidates[i].Spec.ID); err != nil {
+			t.Fatalf("children %s: %v", read.Candidates[i].Spec.ID, err)
+		}
+	}
+	ask(0)
+	if len(calls) != 1 || len(calls[0]) != specChildrenChunkSize {
+		t.Fatalf("the first request made calls %v, want one call of %d ids", calls, specChildrenChunkSize)
+	}
+	ask(5)
+	if len(calls) != 1 {
+		t.Errorf("a request inside the chunk made a call: %v", calls)
+	}
+	ask(8)
+	if len(calls) != 2 || len(calls[1]) != 2 {
+		t.Errorf("the 9th candidate made calls %v, want a second call of the 2 left", calls)
 	}
 }

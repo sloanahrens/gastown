@@ -120,11 +120,12 @@ func TestSpecChildrenReadDefaultWiringCostsTwoReadsForChildless(t *testing.T) {
 			t.Fatalf("children(%s) = %v, %v; want no children and no error", c.Spec.ID, kids, err)
 		}
 	}
-	if reads.Calls() != 1 {
-		t.Errorf("the tick made %d children reads for the rig; want one", reads.Calls())
+	chunks := (len(cands) + specChildrenChunkSize - 1) / specChildrenChunkSize
+	if reads.Calls() != chunks {
+		t.Errorf("the tick made %d children reads for the rig; want %d, one per chunk", reads.Calls(), chunks)
 	}
-	if client.childrenOf != 1 || client.showMultiple != 1 {
-		t.Errorf("fifty childless candidates cost %d ChildrenOf and %d ShowMultiple reads; want one of each", client.childrenOf, client.showMultiple)
+	if client.childrenOf != chunks || client.showMultiple != chunks {
+		t.Errorf("fifty childless candidates cost %d ChildrenOf and %d ShowMultiple reads; want %d of each, one per chunk", client.childrenOf, client.showMultiple, chunks)
 	}
 }
 

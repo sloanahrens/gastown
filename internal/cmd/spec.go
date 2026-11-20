@@ -654,7 +654,9 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 	var mu sync.Mutex
 	kids := map[string][]specdispatch.Child{}
 	errs := map[string]error{}
-	done := map[string]bool{}
+	// readIDs holds every id a read has been made for this tick, a failed read
+	// included, so an id is read at most once (gt-0kwle3).
+	readIDs := map[string]bool{}
 	return func(beadID string) ([]specdispatch.Child, error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -662,11 +664,12 @@ func specCandidateChildren(townRoot string, reads *specTickReads, cands []specCa
 			return nil, nil
 		}
 		dir := resolveBeadDirFromTownRoot(townRoot, beadID)
-		if !done[dir] {
-			done[dir] = true
-			ids := byDir[dir]
-			if len(ids) == 0 {
-				ids = []string{beadID}
+		if !readIDs[beadID] {
+			// The read is the chunk the loop's request opens, not the whole rig:
+			// the loop usually stops after a few candidates (gt-0kwle3).
+			ids := specChildrenChunk(byDir[dir], beadID, readIDs, specChildrenChunkSize)
+			for _, id := range ids {
+				readIDs[id] = true
 			}
 			reads.call()
 			group, err := read(dir, ids)
