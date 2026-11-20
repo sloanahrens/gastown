@@ -167,6 +167,8 @@ const (
 	cacheTrimStatBytesBefore  = "claim_bytes_before"
 	cacheTrimStatBytesAfter   = "claim_bytes_after"
 	cacheTrimStatTrimmedFiles = "trimmed_files"
+	cacheTrimStatAbsentFiles  = "absent_files"
+	cacheTrimStatKeptFiles    = "kept_files"
 )
 
 // errCacheTrimNoContext is the preflight's refusal for a kubeconfig that parses
@@ -826,10 +828,14 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		d.cacheTrimRecordRun(run)
 		return true
 	}
-	// A finished Job processed the whole removal list; one that could not
-	// remove a listed file fails instead.
-	removed := int64(len(planned.Removals))
-	run.trimmed = &removed
+	// The finished Job's own result line is what the run records: it keeps a
+	// file used since the listing and finds one already gone, so the plan's
+	// count is not what it did.
+	if removed, absent, kept, err := d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName); err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the removal Job's result line could not be read: %v; the run records no file counts", claim.ClaimName, namespace, err)
+	} else {
+		run.trimmed, run.absent, run.kept = &removed, &absent, &kept
+	}
 	run.outcome = cacheTrimRunOK
 	if len(sources) > 0 {
 		if used, measured := d.cacheTrimMeasure(ctx, kubeconfig, sources[0], claim.ClaimName, capBytes); measured {
@@ -971,9 +977,10 @@ func (s *attentionSources) collectCacheTrimNoOp(context.Context) ([]attention.It
 }
 
 // cacheTrimRun is one claim trim's record for the job ledger, built as the run
-// reaches its figures. before is the plan's listing size, always known; trimmed
-// is the removal list a finished Job processed, and after is the size du reads
-// once that Job is done. A figure the run did not read is absent, never zero.
+// reaches its figures. before is the plan's listing size, always known; trimmed,
+// absent and kept are the files a finished Job's log reports it removed, found
+// gone and kept, and after is the size du reads once that Job is done. A figure
+// the run did not read is absent, never zero.
 type cacheTrimRun struct {
 	claim     string
 	namespace string
@@ -981,6 +988,8 @@ type cacheTrimRun struct {
 	outcome   string
 	before    int64
 	trimmed   *int64
+	absent    *int64
+	kept      *int64
 	after     *int64
 }
 
@@ -991,6 +1000,12 @@ func (d *Daemon) cacheTrimRecordRun(run cacheTrimRun) {
 	stats := map[string]int64{cacheTrimStatBytesBefore: run.before}
 	if run.trimmed != nil {
 		stats[cacheTrimStatTrimmedFiles] = *run.trimmed
+	}
+	if run.absent != nil {
+		stats[cacheTrimStatAbsentFiles] = *run.absent
+	}
+	if run.kept != nil {
+		stats[cacheTrimStatKeptFiles] = *run.kept
 	}
 	if run.after != nil {
 		stats[cacheTrimStatBytesAfter] = *run.after
@@ -1856,6 +1871,19 @@ func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 		})
 	}
 	return listing, nil
+}
+
+// cacheTrimRemovedCounts reads a finished removal Job's log and returns the
+// counts of the files it removed, found absent and kept. The log is its "trim"
+// container's, the one cachevol's removeContainer and claimRemoveContainer run
+// the trim-paths helper in, so a Job's other containers' lines are not read as
+// the result.
+func (d *Daemon) cacheTrimRemovedCounts(ctx context.Context, kubeconfig, namespace, jobName string) (removed, absent, kept int64, err error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "logs", "job/"+jobName, "-n", namespace, "-c", "trim")
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("reading the removal Job's log: %w", err)
+	}
+	return cacheTrimParseRemoved(string(out))
 }
 
 // cacheTrimParseRemoved reads the removal Job's result line -- "removed N
