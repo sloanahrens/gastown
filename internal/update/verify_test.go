@@ -947,6 +947,92 @@ func TestVerifyHealthUnreadableLine(t *testing.T) {
 	}
 }
 
+// TestVerifyHealthReadyDoesNotExcuseADaemonOrTickReason pins that readiness
+// excuses only a line with no daemon or tick reason: such a line keeps
+// classifyHealthLine's rule, so a GREEN one passes, a settling tick settles
+// through the wait, and a red one fails with the line as read. A line whose
+// only reds are rig reasons still passes on readiness.
+func TestVerifyHealthReadyDoesNotExcuseADaemonOrTickReason(t *testing.T) {
+	t.Parallel()
+	t.Run("a daemon or tick reason keeps the line's rule", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name string
+			line string
+			ok   bool
+			want string
+		}{
+			{name: "a red line naming the daemon", line: "RED tick 4s ago: daemon=heartbeat_2m_ago[R]"},
+			{name: "an unknown daemon field", line: "UNKNOWN tick 1m ago: daemon[?]"},
+			{name: "a recorded late tick", line: verifyTestSettling},
+			{name: "a green line listing the daemon", line: "GREEN tick 4s ago: daemon=heartbeat_2m_ago[R]", ok: true},
+			{name: "a rig main only line", line: "RED tick 4s ago: main/devops=red[R]", ok: true,
+				want: "RED tick 4s ago: main/devops=red[R]" + readyNote},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				probes := readyGreenProbes()
+				probes.health = tt.line
+				want := tt.want
+				if want == "" {
+					want = tt.line
+				}
+
+				health := findCheck(t, Verify(context.Background(), probes, verifyTestWant), checkHealth)
+				if health.OK != tt.ok {
+					t.Fatalf("health OK = %v, want %v (detail: %s)", health.OK, tt.ok, health.Detail)
+				}
+				if health.Detail != want {
+					t.Errorf("health detail = %q, want %q", health.Detail, want)
+				}
+			})
+		}
+	})
+
+	t.Run("a settling tick still settles through the wait", func(t *testing.T) {
+		t.Parallel()
+		probes := readyGreenProbes()
+		probes.healthLines = []string{verifyTestSettling, verifyTestGreen}
+		clock := &fakeVerifyClock{now: parseVerifyTime(t)}
+		sleep, sleeps := verifySleeps(clock)
+
+		checks, err := VerifyWithSettle(context.Background(), clock, sleep, probes, verifyTestWant, verifyTestTimeout, verifyTestPoll)
+		if err != nil {
+			t.Fatalf("VerifyWithSettle: %v", err)
+		}
+		health := findCheck(t, checks, checkHealth)
+		if want := verifyTestGreen + " (settled after 15s)"; !health.OK || health.Detail != want {
+			t.Errorf("health = %+v, want a pass with detail %q", health, want)
+		}
+		if len(*sleeps) != 1 {
+			t.Errorf("slept %d times, want 1: one re-read that found GREEN", len(*sleeps))
+		}
+	})
+}
+
+// TestVerifyHealthNotReadyReasonReachesTheRunDetail pins that a not-ready reason
+// reaches the detail the run record and the escalation print, so the operator
+// reads why the roll is partial.
+func TestVerifyHealthNotReadyReasonReachesTheRunDetail(t *testing.T) {
+	t.Parallel()
+	const (
+		line   = "RED tick 4s ago: daemon=heartbeat_2m_ago[R]"
+		reason = "the daemon's heartbeat is red"
+	)
+	probes := readyGreenProbes()
+	probes.health = line
+	probes.ready, probes.reason = false, reason
+
+	detail := checksDetail(failedChecks(Verify(context.Background(), probes, verifyTestWant)))
+	if want := "not ready: " + reason; !strings.Contains(detail, want) {
+		t.Errorf("run detail = %q, want it to hold %q", detail, want)
+	}
+	if !strings.Contains(detail, line) {
+		t.Errorf("run detail = %q, want it to hold the line %q", detail, line)
+	}
+}
+
 // TestVerifyHealthLineRule pins the rule for a probe set without ReadyProbes: a
 // red line still fails with the line as read, and a queue-only degraded line
 // still passes naming the reasons it ignored, exactly as before the extension.
