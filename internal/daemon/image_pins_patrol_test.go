@@ -1188,6 +1188,52 @@ func TestImagePinsPathCountFailedUnshallowIsAnError(t *testing.T) {
 	}
 }
 
+// TestImagePinsPathCountSkipsTheUnshallowForAFullClone: a complete clone gets
+// no unshallow call, and the count is the one git answers (gt-7gww7r).
+func TestImagePinsPathCountSkipsTheUnshallowForAFullClone(t *testing.T) {
+	t.Parallel()
+	got, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if slices.Contains(cmd.Args, "--unshallow") {
+			t.Error("the unshallow ran for a full clone; want no unshallow call")
+		}
+		if slices.Contains(cmd.Args, "--is-shallow-repository") {
+			return []byte("false\n"), nil, nil
+		}
+		return []byte("4\n"), nil, nil
+	})
+	if err != nil || got != 4 {
+		t.Fatalf("the path count over a full clone = %d, %v; want git's count 4", got, err)
+	}
+}
+
+// TestImagePinsPathCountShallowReadFailureIsAnError: a failed is-shallow read,
+// and an answer that is neither true nor false, are errors carrying git's
+// stderr; no unshallow or rev-list runs, so the pin never counts (gt-7gww7r).
+func TestImagePinsPathCountShallowReadFailureIsAnError(t *testing.T) {
+	t.Parallel()
+	const fatal = "fatal: not a git repository"
+	assertRefused := func(t *testing.T, label string, answer, stderr []byte, fails error, want string) {
+		counted := false
+		n, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+			if slices.Contains(cmd.Args, "--is-shallow-repository") {
+				return answer, stderr, fails
+			}
+			if slices.Contains(cmd.Args, "--unshallow") || slices.Contains(cmd.Args, "rev-list") {
+				counted = true
+			}
+			return []byte("1\n"), nil, nil
+		})
+		if err == nil || n != 0 || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s = %d, %v; want an error saying %q, no count", label, n, err, want)
+		}
+		if counted {
+			t.Error("the unshallow or rev-list ran after the is-shallow read did not answer; want neither")
+		}
+	}
+	assertRefused(t, "the read fails", nil, []byte(fatal+"\nhint: more\n"), errors.New("git exited 128"), "git rev-parse: git exited 128: "+fatal)
+	assertRefused(t, "a word that is not true or false", []byte("maybe\n"), nil, nil, `answered "maybe"`)
+}
+
 // TestImagePinsPathCountFetchFailureIsAnError: a fetch, an is-shallow read, an
 // unshallow or a count that fails is an error naming the call and carrying
 // git's first stderr line, and no count follows a failed read (gt-6bits7).
@@ -1237,7 +1283,10 @@ func TestImagePinsPathCountNonNumberIsAnError(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			n, err := imagePinsPathCountResult(t, func(*exec.Cmd) ([]byte, []byte, error) {
+			n, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				if slices.Contains(cmd.Args, "--is-shallow-repository") {
+					return []byte("false\n"), nil, nil
+				}
 				return []byte(tt.answer), nil, nil
 			})
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
@@ -1252,7 +1301,10 @@ func TestImagePinsPathCountNonNumberIsAnError(t *testing.T) {
 // (gt-yeiehx).
 func TestImagePinsPathCountRefusesANegativeCount(t *testing.T) {
 	t.Parallel()
-	n, err := imagePinsPathCountResult(t, func(*exec.Cmd) ([]byte, []byte, error) {
+	n, err := imagePinsPathCountResult(t, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if slices.Contains(cmd.Args, "--is-shallow-repository") {
+			return []byte("false\n"), nil, nil
+		}
 		return []byte("-3\n"), nil, nil
 	})
 	if err == nil || n != 0 || !strings.Contains(err.Error(), "-3") {
@@ -1347,6 +1399,8 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 		switch {
 		case slices.Contains(cmd.Args, "ls-remote"):
 			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("false\n"), nil, nil
 		case slices.Contains(cmd.Args, "rev-list"):
 			return []byte("3\n"), nil, nil
 		case slices.Contains(cmd.Args, "show"):
@@ -1370,6 +1424,8 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 		switch {
 		case slices.Contains(cmd.Args, "ls-remote"):
 			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("false\n"), nil, nil
 		case slices.Contains(cmd.Args, "rev-list"):
 			return nil, []byte("fatal: bad revision\nhint: more\n"), errors.New("git exited 128")
 		}
@@ -1512,6 +1568,8 @@ func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 		switch {
 		case slices.Contains(cmd.Args, "ls-remote"):
 			return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+		case slices.Contains(cmd.Args, "--is-shallow-repository"):
+			return []byte("false\n"), nil, nil
 		case slices.Contains(cmd.Args, "fetch") && cmd.Args[len(cmd.Args)-1] == "+main:refs/gt/pin-tip":
 			fetches = append(fetches, cmd.Args[len(cmd.Args)-2])
 			return nil, nil, nil
