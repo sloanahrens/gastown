@@ -4,7 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
+
+// nodePruneDeleteTimeout bounds the Job's delete, which runs after the caller's
+// context may be cancelled, so a hung delete cannot block the run forever.
+const nodePruneDeleteTimeout = 60 * time.Second
 
 // nodePruneKube is the cluster seam a node-prune run drives. ListJSON reads the gt
 // namespace's Jobs, Deployments and Pods; the rest apply, wait for, read and delete the Job.
@@ -17,8 +22,11 @@ type nodePruneKube interface {
 }
 
 // runNodeImagePrune runs the node-prune Job name on the control node and returns
-// the report its log gives. Without apply the Job only plans. Once the apply was
-// attempted the Job is deleted on every path, and a refused delete is reported with the run's error.
+// the report its log gives. Without apply the Job only plans.
+//
+// Once the apply was attempted, the Job is deleted on every path. The apply may
+// have created the Job before it returned an error, and the next heartbeat would
+// otherwise meet AlreadyExists for the same name.
 func runNodeImagePrune(ctx context.Context, kube nodePruneKube, name, image string, keep int, apply bool) (nodePruneReport, error) {
 	listed, err := kube.ListJSON(ctx)
 	if err != nil {
@@ -57,11 +65,14 @@ func readNodePruneJob(ctx context.Context, kube nodePruneKube, name string) ([]b
 	return out, nil
 }
 
-// deleteNodePruneJob deletes the Job after the apply was attempted. The delete runs on
-// a context the caller's cancellation cannot reach, so a canceled run still deletes
-// it. It returns cause, joined with the delete's own error when the delete fails too.
+// deleteNodePruneJob deletes the Job after the apply was attempted. The delete runs
+// on a context the caller's cancellation cannot reach, so a canceled run still
+// deletes it, and it has its own deadline. It returns cause, joined with the
+// delete's own error when the delete fails too.
 func deleteNodePruneJob(ctx context.Context, kube nodePruneKube, name string, cause error) error {
-	if err := kube.Delete(context.WithoutCancel(ctx), name); err != nil {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodePruneDeleteTimeout)
+	defer cancel()
+	if err := kube.Delete(ctx, name); err != nil {
 		return errors.Join(cause, fmt.Errorf("node-prune: delete job %s: %w", name, err))
 	}
 	return cause

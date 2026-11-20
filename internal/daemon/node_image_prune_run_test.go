@@ -11,12 +11,13 @@ import (
 
 // fakeKube records the seam calls in order, serves canned reads, and refuses the
 // calls named fail and alsoFail. The call named cancelOn runs cancel first, and
-// Delete keeps the context it was given.
+// Delete records whether its context was cancelled and whether it has a deadline.
 type fakeKube struct {
 	calls                    []string
 	fail, alsoFail, cancelOn string
 	cancel                   context.CancelFunc
-	deleteCtx                context.Context
+	deleteErr                error
+	deleteDeadline           bool
 	list, logs, sent         []byte
 }
 
@@ -35,7 +36,8 @@ func (k *fakeKube) Apply(_ context.Context, m []byte) error      { k.sent = m; r
 func (k *fakeKube) WaitComplete(context.Context, string) error   { return k.call("WaitComplete") }
 func (k *fakeKube) Logs(context.Context, string) ([]byte, error) { return k.logs, k.call("Logs") }
 func (k *fakeKube) Delete(ctx context.Context, _ string) error {
-	k.deleteCtx = ctx
+	k.deleteErr = ctx.Err()
+	_, k.deleteDeadline = ctx.Deadline()
 	return k.call("Delete")
 }
 
@@ -178,8 +180,11 @@ func TestNodeImagePruneRunFailsClosedDeletesTheJob(t *testing.T) {
 			if !slices.Contains(kube.calls, "Delete") {
 				t.Fatalf("calls = %q, want Delete called after the refusal", strings.Join(kube.calls, " "))
 			}
-			if derr := kube.deleteCtx.Err(); derr != nil {
-				t.Errorf("Delete context err = %v, want it not cancelled with the caller's", derr)
+			if kube.deleteErr != nil {
+				t.Errorf("Delete context err = %v, want it not cancelled with the caller's", kube.deleteErr)
+			}
+			if !kube.deleteDeadline {
+				t.Errorf("Delete context has no deadline, want one so a hung delete ends")
 			}
 		})
 	}
