@@ -171,7 +171,7 @@ func TestNodeImagePruneOnceDryRow(t *testing.T) {
 		StartedAt: nodeImagePruneStart,
 		EndedAt:   ended,
 		Outcome:   "ok",
-		Stats:     map[string]int64{"planned": 3, "removed": 0, "failed": 0},
+		Stats:     map[string]int64{"planned": 3, "removed": 0, "failed": 0, "apply": 0},
 	}, runs[0])
 }
 
@@ -206,7 +206,7 @@ func TestNodeImagePruneRecordLedgerFailsToOpen(t *testing.T) {
 	// opened and no append is attempted.
 	d.config.TownRoot = ""
 
-	d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob})
+	d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob}, false)
 
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
 	require.Len(t, lines, 1, "the ledger that cannot be opened logs one line")
@@ -223,7 +223,7 @@ func TestNodeImagePruneRecordLedgerFailsToAppend(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(d.config.TownRoot, ".runtime"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(d.config.TownRoot, ".runtime", "jobs"), []byte("not a directory"), 0o644))
 
-	d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob})
+	d.nodeImagePruneRecord(jobledger.Run{Job: nodeImagePruneJob}, false)
 
 	lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
 	require.Len(t, lines, 1, "a failing Append logs one line")
@@ -263,7 +263,7 @@ func TestNodeImagePruneOnceApplyRecords(t *testing.T) {
 	assert.Equal(t, "ok", run.Outcome)
 	assert.Equal(t, nodeImagePruneStart, run.StartedAt)
 	assert.Equal(t, updateTriggerTestTime, run.EndedAt)
-	assert.Equal(t, map[string]int64{"planned": 9, "removed": 7, "failed": 2}, run.Stats)
+	assert.Equal(t, map[string]int64{"planned": 9, "removed": 7, "failed": 2, "apply": 1}, run.Stats)
 }
 
 // TestNodeImagePruneOnceApplyRecordsError: a Delete that fails after a good log
@@ -282,7 +282,7 @@ func TestNodeImagePruneOnceApplyRecordsError(t *testing.T) {
 	assert.Contains(t, r.logs.String(), "Delete refused")
 	run, ok := lastNodeImagePruneRun(t, r.town)
 	require.True(t, ok, "the apply run appended no ledger row")
-	assert.Equal(t, map[string]int64{"planned": 9, "removed": 7, "failed": 2}, run.Stats)
+	assert.Equal(t, map[string]int64{"planned": 9, "removed": 7, "failed": 2, "apply": 1}, run.Stats)
 }
 
 // TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords: an apply that removed
@@ -300,7 +300,7 @@ func TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords(t *testing.T) {
 	assert.Contains(t, r.logs.String(), "node_image_prune: applied removed 0 failed 0\n")
 	run, ok := lastNodeImagePruneRun(t, r.town)
 	require.True(t, ok, "the zero-removal apply appended no ledger row")
-	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0}, run.Stats)
+	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0, "apply": 1}, run.Stats)
 }
 
 // TestNodeImagePruneOnceApplyMalformedLogRecordsTheFailedRow: a log that does not
@@ -321,7 +321,7 @@ func TestNodeImagePruneOnceApplyMalformedLogRecordsTheFailedRow(t *testing.T) {
 	run, ok := lastNodeImagePruneRun(t, r.town)
 	require.True(t, ok, "a run whose log did not parse appended no failed row")
 	assert.Equal(t, nodeImagePruneOutcomeFailed, run.Outcome)
-	assert.Empty(t, run.Stats, "a run that gave no report keeps no figures")
+	assert.Equal(t, map[string]int64{"apply": 1}, run.Stats, "a run that gave no report keeps the mode alone")
 }
 
 // TestNodeImagePruneOnceApplyRowNotRecorded: an append the ledger refuses logs
@@ -361,7 +361,8 @@ func TestNodeImagePruneOnceFailedRowHasNoFigures(t *testing.T) {
 		StartedAt: nodeImagePruneStart,
 		EndedAt:   updateTriggerTestTime,
 		Outcome:   nodeImagePruneOutcomeFailed,
-	}, run, "a failed row carries no figures")
+		Stats:     map[string]int64{"apply": 1},
+	}, run, "a failed row carries the mode and no figures")
 }
 
 // TestNodeImagePruneOnceFailedRowKeepsRealZeros is the bead's second box and its
@@ -378,7 +379,7 @@ func TestNodeImagePruneOnceFailedRowKeepsRealZeros(t *testing.T) {
 	run, ok := lastNodeImagePruneRun(t, r.town)
 	require.True(t, ok, "the zero-removal apply appended no ledger row")
 	assert.Equal(t, nodeImagePruneOutcomeOK, run.Outcome)
-	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0}, run.Stats,
+	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0, "apply": 1}, run.Stats,
 		"a real zero report keeps its figures")
 }
 
@@ -455,6 +456,65 @@ func TestNodeImagePruneOnceAppendsOneRowPerRun(t *testing.T) {
 			runs, err := ledger.Tail(nodeImagePruneRowJob, 10)
 			require.NoError(t, err)
 			assert.Len(t, runs, row.wantRows, "the job ledger's %s rows after the run", nodeImagePruneRowJob)
+		})
+	}
+}
+
+// TestNodeImagePruneOnceMode is the bead's box (gt-1752lv): every row carries the
+// mode it ran in, so a dry run that planned 0 images and an apply that removed 0
+// and failed 0 are different rows, and a failed row carries the mode alone.
+func TestNodeImagePruneOnceMode(t *testing.T) {
+	t.Parallel()
+	const dryZero = "node-prune: dry run planned 0 images\n"
+	const appliedZero = "node-prune: applied removed 0 failed 0\n"
+	rows := []struct {
+		name  string
+		logs  string
+		apply bool
+		fail  string
+		want  map[string]int64
+	}{
+		{
+			name: "dry run planned 0",
+			logs: dryZero,
+			want: map[string]int64{"planned": 0, "removed": 0, "failed": 0, "apply": 0},
+		},
+		{
+			name:  "apply removed 0 failed 0",
+			logs:  appliedZero,
+			apply: true,
+			want:  map[string]int64{"planned": 0, "removed": 0, "failed": 0, "apply": 1},
+		},
+		{
+			name:  "failed apply run",
+			logs:  appliedZero,
+			apply: true,
+			fail:  "Apply",
+			want:  map[string]int64{"apply": 1},
+		},
+		{
+			name: "failed dry run",
+			logs: dryZero,
+			fail: "Apply",
+			want: map[string]int64{"apply": 0},
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(row.logs), fail: row.fail}
+
+			err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, row.apply, nodeImagePruneStart)
+
+			if row.fail == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			run, ok := lastNodeImagePruneRun(t, r.town)
+			require.True(t, ok, "the run appended no ledger row")
+			assert.Equal(t, row.want, run.Stats)
 		})
 	}
 }

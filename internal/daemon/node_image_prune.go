@@ -21,13 +21,22 @@ const (
 	nodeImagePruneOutcomeFailed = "failed"
 )
 
+// nodeImagePruneApplyStat is the ledger stat every node prune row carries the mode
+// of: 1 for an apply run and 0 for a dry run. Without it a dry run that planned no
+// images and an apply that removed none are the same row (bead gt-1752lv). The
+// value is a plain literal because the ledger's schema is this package's alone; the
+// daemon's kubectl-apply guard reads every "apply" literal as a verb, and this key's
+// reviewed entry in cacheTrimSmallApplies says it is not one.
+const nodeImagePruneApplyStat = "apply"
+
 // nodeImagePruneStepPrefix opens the message of every runNodeImagePrune error.
 const nodeImagePruneStepPrefix = "node-prune: "
 
 // nodeImagePruneOnce runs one node image prune: the Job nodePruneJobName names from
 // runID, running the running polecat image, as a dry run unless apply. A dry run
 // logs the lines of nodeImagePruneSummary, one logger call per line, and records one
-// ok row of job nodeImagePruneJob with the summary's figures and now as its start;
+// ok row of job nodeImagePruneJob with the summary's figures, the mode it ran in and
+// now as its start;
 // an applied run logs its summary line and records its row the same way. A run that
 // returns an error before its log gave a report records the failed row of
 // nodeImagePruneFailed instead. Every runner error is handed to the caller.
@@ -44,7 +53,7 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 	if err != nil {
 		var logRead *nodePruneLogReadError
 		if !errors.As(err, &logRead) {
-			d.nodeImagePruneFailed(err, now)
+			d.nodeImagePruneFailed(err, apply, now)
 			return err
 		}
 	}
@@ -64,7 +73,7 @@ func (d *Daemon) nodeImagePruneOnce(ctx context.Context, kube nodePruneKube, run
 		EndedAt:   d.clk().Now(),
 		Outcome:   nodeImagePruneOutcomeOK,
 		Stats:     stats,
-	})
+	}, false)
 	return nil
 }
 
@@ -87,22 +96,23 @@ func (d *Daemon) nodeImagePruneApply(rep nodePruneReport, runErr error, started 
 		EndedAt:   d.clk().Now(),
 		Outcome:   nodeImagePruneOutcomeOK,
 		Stats:     stats,
-	})
+	}, true)
 	return runErr
 }
 
 // nodeImagePruneFailed logs a run that returned an error before its log gave a
-// report and records its failed row: no figures, because the run has none. The log
-// names the step alone; the runner's error text can carry the command's output, which
-// neither the log nor the ledger keeps. The caller returns the error (bead gt-eg0ji0).
-func (d *Daemon) nodeImagePruneFailed(runErr error, started time.Time) {
+// report and records its failed row: no figures, because the run has none, and the
+// mode it ran in alone. The log names the step alone; the runner's error text can
+// carry the command's output, which neither the log nor the ledger keeps. The caller
+// returns the error (beads gt-eg0ji0, gt-1752lv).
+func (d *Daemon) nodeImagePruneFailed(runErr error, apply bool, started time.Time) {
 	d.logger.Printf("node_image_prune: failed: %s", nodeImagePruneStep(runErr))
 	d.nodeImagePruneRecord(jobledger.Run{
 		Job:       nodeImagePruneJob,
 		StartedAt: started,
 		EndedAt:   d.clk().Now(),
 		Outcome:   nodeImagePruneOutcomeFailed,
-	})
+	}, apply)
 }
 
 // nodeImagePruneSteps are the steps a runNodeImagePrune error can name, in the order
@@ -130,10 +140,21 @@ func nodeImagePruneStep(runErr error) string {
 	return "parse the log"
 }
 
-// nodeImagePruneRecord appends one run to the town's job ledger. A ledger that
-// cannot record it is logged once: the ledger records the run and does not decide
-// it, so the run's result is unchanged.
-func (d *Daemon) nodeImagePruneRecord(run jobledger.Run) {
+// nodeImagePruneRecord appends one run to the town's job ledger with the mode it
+// ran in stamped on its stats: every node prune row carries nodeImagePruneApplyStat,
+// and a run that gave no report carries it alone. A ledger
+// that cannot record it is logged once: the ledger records the run and does not
+// decide it, so the run's result is unchanged.
+func (d *Daemon) nodeImagePruneRecord(run jobledger.Run, apply bool) {
+	stats := make(map[string]int64, len(run.Stats)+1)
+	for key, value := range run.Stats {
+		stats[key] = value
+	}
+	stats[nodeImagePruneApplyStat] = 0
+	if apply {
+		stats[nodeImagePruneApplyStat] = 1
+	}
+	run.Stats = stats
 	if err := d.appendJobRun(run); err != nil {
 		d.logger.Printf("node_image_prune: the job ledger could not record the run: %v", err)
 	}

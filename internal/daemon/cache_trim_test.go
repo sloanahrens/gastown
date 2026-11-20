@@ -3639,11 +3639,12 @@ func cacheTrimArgList(ancestors []ast.Node) []ast.Expr {
 // package, the file and the expression whose document the call applies. The
 // trim's own applies carry --server-side and are not listed (gt-gg9hv.40).
 var cacheTrimSmallApplies = map[string]string{
-	"internal/sweeprunner/k8s.go: repoClaim.JSON()":  "a PersistentVolumeClaim: an access mode and a storage request",
-	"internal/sweeprunner/k8s.go: claim.JSON()":      "the run's output claim: the same fixed fields",
-	"internal/sweeprunner/k8s.go: cacheClaim.JSON()": "the rig's cache claim: the same fixed fields",
-	"internal/sweeprunner/k8s.go: job.JSON()":        "the sweep Job: its containers, mounts and command come from the Spec, which holds no file list",
-	"internal/sweeprunner/k8s.go: reader.JSON()":     "the result reader pod: one sleep container and one mounted claim",
+	"internal/daemon/node_image_prune.go: <no document>": "ledger stat key, not a kubectl verb",
+	"internal/sweeprunner/k8s.go: repoClaim.JSON()":      "a PersistentVolumeClaim: an access mode and a storage request",
+	"internal/sweeprunner/k8s.go: claim.JSON()":          "the run's output claim: the same fixed fields",
+	"internal/sweeprunner/k8s.go: cacheClaim.JSON()":     "the rig's cache claim: the same fixed fields",
+	"internal/sweeprunner/k8s.go: job.JSON()":            "the sweep Job: its containers, mounts and command come from the Spec, which holds no file list",
+	"internal/sweeprunner/k8s.go: reader.JSON()":         "the result reader pod: one sleep container and one mounted claim",
 }
 
 // TestCacheTrimNoOtherLargeClientSideApply pins every kubectl apply in the
