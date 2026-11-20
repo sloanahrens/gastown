@@ -236,6 +236,63 @@ func TestMetricsExtractStaleIsMeasuredFromTheWrite(t *testing.T) {
 	}
 }
 
+// TestMetricsExtractStaleIgnoresAFutureWriteTime: a footer mtime after now is
+// not a write time the stale rule can trust, so the age falls back to the day's
+// midnight, the way an unreadable footer does (gt-qc3wj8). A footer stamped
+// thirty days ahead of now does not hide a newest day five and a half days old;
+// a footer written in the evening is still aged from its write, so reading it
+// the next morning raises nothing.
+func TestMetricsExtractStaleIgnoresAFutureWriteTime(t *testing.T) {
+	t.Parallel()
+	const day = "2026-11-19"
+	tests := []struct {
+		name    string
+		now     time.Time
+		written time.Time // the footer mtime, set with os.Chtimes
+		want    bool      // whether the stale item is raised
+		age     string    // the write age the summary must carry, when wanted
+	}{
+		{
+			name:    "a footer stamped thirty days ahead of now",
+			now:     time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC),
+			written: time.Date(2026, 12, 24, 12, 0, 0, 0, time.UTC),
+			want:    true,
+			age:     "132h0m", // from the day's midnight, not from the future mtime
+		},
+		{
+			name:    "a footer written the evening before",
+			now:     time.Date(2026, 11, 20, 2, 1, 0, 0, time.UTC),
+			written: time.Date(2026, 11, 19, 21, 5, 0, 0, time.UTC),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := metricsExtractRig(t, tc.now)
+			writeExtractDay(t, f.d.config.TownRoot, day, cleanFooter)
+			path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metricsExtractFooterName)
+			if err := os.Chtimes(path, tc.written, tc.written); err != nil {
+				t.Fatal(err)
+			}
+			items := f.collect(t, f.src.collectMetricsExtract)
+			if !tc.want {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none", items)
+				}
+				return
+			}
+			if len(items) != 1 || items[0].Key != metricsExtractStaleKey {
+				t.Fatalf("items = %+v, want the one stale item", items)
+			}
+			for _, want := range []string{day, tc.age} {
+				if !strings.Contains(items[0].Summary, want) {
+					t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
+				}
+			}
+		})
+	}
+}
+
 // TestMetricsExtractStaleReadsTheFooterWriteTime: the read carries the newest
 // day's footer.json mtime as the extract's write time, and leaves it zero when
 // the footer cannot be statted, so the age falls back to the day's midnight.

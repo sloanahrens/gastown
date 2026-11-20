@@ -96,17 +96,17 @@ type metricsExtractRead struct {
 // collectMetricsExtract raises the metrics extract items: the newest day, its
 // footer and its landings' estimate column, read from the town's
 // .runtime/metrics and its estimate log. A newest extract written more than
-// metricsExtractStaleAfter ago — or, when its footer cannot be statted, a
-// newest day older than that — raises the stale item naming the day and the
-// write age; a newest footer with any gaps raises the gaps item naming the
-// count and the first gap; a newest day whose rows all lack sp_minutes while
-// the log holds at least metricsExtractEstimateFloor estimates since that day
-// raises the no-estimates item naming both counts, and rows that all lack it
-// beside a log with lines in that day's window that do not decode raise that
-// same item with the line counts; a directory or log that cannot be read
-// raises the unreadable item, never nothing. An unreadable extract that still
-// names its day raises the stale item beside the unreadable one: an old extract
-// is old whether or not its footer reads.
+// metricsExtractStaleAfter ago — or, when its footer cannot be statted or its
+// mtime is after now, a newest day older than that — raises the stale item
+// naming the day and the write age; a newest footer with any gaps raises the
+// gaps item naming the count and the first gap; a newest day whose rows all
+// lack sp_minutes while the log holds at least metricsExtractEstimateFloor
+// estimates since that day raises the no-estimates item naming both counts,
+// and rows that all lack it beside a log with lines in that day's window that
+// do not decode raise that same item with the line counts; a directory or log
+// that cannot be read raises the unreadable item, never nothing. An unreadable
+// extract that still names its day raises the stale item beside the unreadable
+// one: an old extract is old whether or not its footer reads.
 func (s *attentionSources) collectMetricsExtract(context.Context) ([]attention.Item, error) {
 	// The production sources always carry the read (attentionSources, pinned by
 	// TestMetricsExtractAttentionIsWiredAndRegistered). A hand-built sources
@@ -119,9 +119,9 @@ func (s *attentionSources) collectMetricsExtract(context.Context) ([]attention.I
 	var items []attention.Item
 	if !read.day.IsZero() {
 		written := read.written
-		if written.IsZero() {
-			// The footer could not be statted; the read still names the day, so
-			// the age falls back to the day's midnight.
+		if written.IsZero() || written.After(s.now) {
+			// An unstattable footer, or a write time after now, is no write time
+			// the age can trust; the read still names the day, so age from midnight.
 			written = read.day
 		}
 		if age := s.now.Sub(written); age > metricsExtractStaleAfter {
