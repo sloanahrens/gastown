@@ -3391,10 +3391,15 @@ func TestCacheTrimOldImageFreeSpace(t *testing.T) {
 
 // cacheTrimHelperSubcommands are the first arguments the image's helper
 // dispatches, read from internal/polecatimage/program.go runProgram at
-// cf0d2c17b. The daemon must never pass a helper argument outside them: the
+// c2bf1bad. The daemon must never pass a helper argument outside them: the
 // shipped runProgram sends any other first argument to runMain, a full plugin
 // run -- image refresh and cache work -- so an older image would not answer the
 // daemon's ask (gt-gg9hv.41).
+//
+// node-prune joins the list at c2bf1bad (gt-kpc4tp). Its Job runs the running
+// pair's image, which is the daemon's own commit, and every daemon that carries
+// the node-prune Job descends from c2bf1bad, so that image dispatches it. The
+// Job image must be the running pair, never a pinned older image.
 var cacheTrimHelperSubcommands = []string{
 	"trim-cache",
 	"trim-paths",
@@ -3402,6 +3407,7 @@ var cacheTrimHelperSubcommands = []string{
 	"trim-list-write",
 	"seed-clone",
 	"seed-cache",
+	"node-prune",
 }
 
 // cacheTrimHelperSubcommand returns the first argument a trim verb passes the
@@ -3464,7 +3470,7 @@ func TestCacheTrimNeverSendsAnUnknownHelperArgument(t *testing.T) {
 	}
 
 	// And no call site in the daemon can build another: the literal beside each
-	// cachevol.HelperPath in the production source is one of the six.
+	// cachevol.HelperPath in the production source is one of those subcommands.
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
