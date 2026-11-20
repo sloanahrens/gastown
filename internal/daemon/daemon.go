@@ -315,6 +315,11 @@ type Daemon struct {
 	// heartbeat advance check. Heartbeat goroutine only.
 	lastTownHealth *townhealth.Report
 
+	// ticksUnknown are the patrols whose tick the previous health read found
+	// UNKNOWN, so the tick log carries one line per change rather than one per
+	// heartbeat (townhealth.go, gt-gg176y). Heartbeat goroutine only.
+	ticksUnknown map[string]bool
+
 	// lastAttention is the previous attention tick: the queue state it wrote
 	// and the rejection-note cache (see attentionCache). Heartbeat goroutine
 	// only.
