@@ -5,7 +5,29 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
+
+// nodePruneFlightWait bounds every wait in these tests: a signal that never
+// arrives fails the test naming what it waited for instead of hanging the
+// package until the go test timeout.
+const nodePruneFlightWait = 30 * time.Second
+
+// awaitNodePruneFlight receives from ch, or fails the test naming what it
+// waited for once nodePruneFlightWait passes.
+func awaitNodePruneFlight[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), nodePruneFlightWait)
+	defer cancel()
+	select {
+	case v := <-ch:
+		return v
+	case <-ctx.Done():
+		var zero T
+		t.Fatalf("waited %v for %s", nodePruneFlightWait, what)
+		return zero
+	}
+}
 
 // TestNodePruneFlightStartsOneAtATime: a second Start while a run holds the
 // flight is refused, Start returns before that run finishes, and a Start after
@@ -22,7 +44,7 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 	}) {
 		t.Fatal("first Start = false, want true")
 	}
-	<-started
+	awaitNodePruneFlight(t, started, "the first run to start")
 	secondRan := make(chan struct{}, 1)
 	if f.Start(context.Background(), func(context.Context) { secondRan <- struct{}{} }) {
 		t.Fatal("Start while a run is going = true, want false")
@@ -38,11 +60,11 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 	default:
 	}
 	close(release)
-	<-f.done()
+	awaitNodePruneFlight(t, f.done(), "the first run to end")
 	if !f.Start(context.Background(), func(context.Context) {}) {
 		t.Fatal("Start after the run finished = false, want true: the mark never cleared")
 	}
-	<-f.done()
+	awaitNodePruneFlight(t, f.done(), "the second run to end")
 }
 
 // TestNodePruneFlightSurvivesAPanic: a panicking run is recovered, logged, and
@@ -58,7 +80,7 @@ func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 	}) {
 		t.Fatal("Start = false, want true")
 	}
-	<-f.done()
+	awaitNodePruneFlight(t, f.done(), "the panicking run to end")
 	select {
 	case line := <-logged:
 		if !strings.Contains(line, "panicked") || !strings.Contains(line, "prune exploded") {
@@ -70,7 +92,7 @@ func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 	if !f.Start(context.Background(), func(context.Context) {}) {
 		t.Fatal("Start after the run panicked = false, want true: the mark never cleared")
 	}
-	<-f.done()
+	awaitNodePruneFlight(t, f.done(), "the run after the panic to end")
 }
 
 // TestNodePruneFlightRunContextCancelsWithTheParent: the run's context derives
@@ -80,19 +102,25 @@ func TestNodePruneFlightRunContextCancelsWithTheParent(t *testing.T) {
 
 	var f nodePruneFlight
 	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard, stop := context.WithTimeout(t.Context(), nodePruneFlightWait)
+	defer stop()
 	runCtx := make(chan context.Context, 1)
 	if !f.Start(parent, func(ctx context.Context) {
 		runCtx <- ctx
-		<-ctx.Done()
+		select {
+		case <-ctx.Done():
+		case <-guard.Done(): // the test ended without the parent's cancel reaching the run
+		}
 	}) {
 		t.Fatal("Start = false, want true")
 	}
-	ctx := <-runCtx
+	ctx := awaitNodePruneFlight(t, runCtx, "the run to start")
 	cancel()
 	if ctx.Err() == nil {
 		t.Fatal("canceling the parent left the run's context live")
 	}
-	<-f.done()
+	awaitNodePruneFlight(t, f.done(), "the run to end")
 }
 
 // TestNodePruneFlightRefusesADoneParent: a parent already canceled starts no
@@ -115,5 +143,5 @@ func TestNodePruneFlightRefusesADoneParent(t *testing.T) {
 	if !f.Start(context.Background(), func(context.Context) {}) {
 		t.Fatal("Start after the refusal = false, want true: the mark was left set")
 	}
-	<-f.done()
+	awaitNodePruneFlight(t, f.done(), "the run after the refusal to end")
 }
