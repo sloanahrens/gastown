@@ -41,6 +41,7 @@ node-prune: dry run planned 3 images
 	}
 
 	applied := `node-prune: removed sha256:aaa
+node-prune: removed sha256:ccc
 node-prune: cannot remove sha256:bbb: exit status 1
 node-prune: applied removed 2 failed 1
 `
@@ -63,8 +64,9 @@ node-prune: applied removed 2 failed 1
 
 // TestNodePruneReportRefuses drives each log the report cannot read: an empty
 // log, a log with no summary, a summary of the wrong shape or with a count
-// that does not parse or is negative, a log with both summaries, and a
-// truncated would-remove line are each an error, never a zero report.
+// that does not parse or is negative, a log with both summaries, a truncated
+// would-remove line, and a summary whose count disagrees with the lines the
+// log holds are each an error, never a zero report.
 func TestNodePruneReportRefuses(t *testing.T) {
 	t.Parallel()
 
@@ -83,6 +85,12 @@ func TestNodePruneReportRefuses(t *testing.T) {
 		{"malformed planned summary", "node-prune: dry run planned 3\n"},
 		{"malformed applied summary", "node-prune: applied removed 1 of 2\n"},
 		{"truncated would-remove", "node-prune: would remove sha256:aaa\nnode-prune: dry run planned 1 images\n"},
+		{"dry run planned without lines", "node-prune: dry run planned 5 images\n"},
+		{"dry run planned more than its lines", "node-prune: would remove sha256:aaa gastown-polecat created 2026-11-20T03:00:00Z\nnode-prune: dry run planned 2 images\n"},
+		{"dry run planned fewer than its lines", "node-prune: would remove sha256:aaa gastown-polecat created 2026-11-20T03:00:00Z\nnode-prune: would remove sha256:bbb gastown-daemon created 2026-11-20T03:01:00Z\nnode-prune: dry run planned 1 images\n"},
+		{"applied removed without lines", "node-prune: applied removed 3 failed 0\n"},
+		{"applied removed more than its lines", "node-prune: removed sha256:aaa\nnode-prune: applied removed 2 failed 0\n"},
+		{"applied removed fewer than its lines", "node-prune: removed sha256:aaa\nnode-prune: removed sha256:bbb\nnode-prune: applied removed 1 failed 0\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
