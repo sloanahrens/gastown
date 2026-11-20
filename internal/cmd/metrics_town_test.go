@@ -20,6 +20,7 @@ func townMetricsSteps() []string {
 		metrics.CommandStoryPoints,
 		metrics.CommandStoryPointsTrain,
 		metrics.CommandStoryPointsAdopt,
+		metrics.CommandStoryPointsEval,
 	}
 }
 

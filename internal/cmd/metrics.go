@@ -41,6 +41,7 @@ var townMetricsCommands = []struct{ name, short string }{
 	{metrics.CommandStoryPoints, "Print the story-points shadow report from today's landings table"},
 	{metrics.CommandStoryPointsTrain, "Fit proposed story-points weights from today's landings table; writes a proposed file and a report, never the checked-in weights"},
 	{metrics.CommandStoryPointsAdopt, "Adopt the day's proposed story-points weights as the town's runtime weights, keeping the file it replaces; --revert restores the previous version"},
+	{metrics.CommandStoryPointsEval, "Print the held-out error of the story-points estimate over the landed beads; writes nothing"},
 	{metrics.CommandAll, "Run extract, mango, backtest and report in order"},
 }
 
