@@ -31,6 +31,12 @@ const specStoryPointTimeout = 20 * time.Second
 // tick cannot write a second copy.
 const specStoryPointSplitNotePrefix = "SPLIT ROUTE v1"
 
+// specSplitStaleNotePrefix begins the one-line note the stale-drop writes on a
+// bead whose split label it takes off. It deliberately does not begin with
+// specStoryPointSplitNotePrefix: the annotate seam matches by prefix, and the
+// drop's note must not stand in for a later hold note on the same bead.
+const specSplitStaleNotePrefix = "SPLIT LABEL STALE v1"
+
 // specSplitHysteresis is the band a bead already labeled under the split trigger
 // must clear before the route holds it: an estimate of unchanged text moves
 // between runs, so a bead near the trigger would otherwise flip between
@@ -98,9 +104,22 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 	splitOver := env.StoryPointSplitOver
 	if splitOver > 0 && latest.HasLabel(specdispatch.SplitLabel) {
 		// The ready board reads a split bead apart from the candidates, so this
-		// only catches a label that landed after the board read. The bead keeps
-		// the record it has; the route adds none and does not sling it.
-		res.Hold = specSplitHeldLine(beadID, latest.Labels, splitOver)
+		// only catches a label that landed after the board read. A label the
+		// bead's own estimate has outlived no longer holds it: the drop leaves
+		// its note and takes the label off, and this tick slings the bead
+		// (gt-71y4v3). A label that is not stale, and one whose drop failed,
+		// keeps the bead held as before.
+		dropped, line, err := specSplitStaleDropper(splitOver, env.DryRun, env.Annotate, env.RemoveLabel)(
+			&beads.Issue{ID: beadID, Labels: latest.Labels})
+		if line != "" {
+			res.Notices = append(res.Notices, line)
+		}
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", beadID, err))
+		}
+		if !dropped {
+			res.Hold = specSplitHeldLine(beadID, latest.Labels, splitOver)
+		}
 		return res
 	}
 	// The earlier estimate is read from the labels the board gave, before this
@@ -230,6 +249,74 @@ func specSplitLabelStale(labels []string, trigger float64) bool {
 		return false
 	}
 	return minutes < trigger
+}
+
+// specSplitStaleDrop is the tick's drop of a split label its own estimate has
+// outlived. It reports whether the label was dropped (or, in a dry run, would
+// be), the one line the tick logs for the decision, and the write that failed.
+// A failed drop leaves the label on, so the caller holds the bead.
+type specSplitStaleDrop func(issue *beads.Issue) (dropped bool, line string, err error)
+
+// specSplitStaleDropper is the drop over the tick's own seams: the note is
+// written first through annotate, then the label is taken off through remove.
+// The note goes first for the route's reason: a note that landed before a
+// failed removal leaves the label to hold the bead and names why it is stale,
+// and the annotate seam keys it by prefix so the retry writes no second copy.
+// A dry run writes nothing and says so, and the bead is treated as the writing
+// tick would treat it after the drop.
+func specSplitStaleDropper(trigger float64, dryRun bool, annotate func(beadID, key, text string) error, remove func(beadID, label string) error) specSplitStaleDrop {
+	return func(issue *beads.Issue) (bool, string, error) {
+		if !specSplitLabelStale(issue.Labels, trigger) {
+			return false, "", nil
+		}
+		line := specSplitStaleLine(issue.ID, issue.Labels, trigger)
+		if dryRun {
+			return true, line + "; a dry run drops nothing", nil
+		}
+		// A seam that is not wired cannot drop the label, so the bead stays
+		// held: unknown is never read as dropped.
+		if annotate == nil || remove == nil {
+			return false, "", errors.New("split label stale: no note writer and label remover are wired")
+		}
+		if err := annotate(issue.ID, specSplitStaleNotePrefix, specSplitStaleNote(issue.Labels, trigger)); err != nil {
+			return false, "", fmt.Errorf("split label stale note: %w", err)
+		}
+		if err := remove(issue.ID, specdispatch.SplitLabel); err != nil {
+			return false, "", fmt.Errorf("split label removal: %w", err)
+		}
+		return true, line + "; the label is dropped and the bead is offered to dispatch again", nil
+	}
+}
+
+// specSplitStaleLine is the tick's line for a split label its own estimate has
+// outlived: the minutes and rung the labels record, and the trigger they are
+// under.
+func specSplitStaleLine(beadID string, labels []string, trigger float64) string {
+	var o specEstimateOutcome
+	specEstimateFromLabels(&o, labels)
+	minutes, rung, _ := specSplitVerdict(specStoryPointAnswer{outcome: o})
+	return fmt.Sprintf("%s: split label stale: its own labels read %s min (rung %s), under the %s-minute trigger",
+		beadID, specMinutesText(minutes), rung, specTriggerText(trigger))
+}
+
+// specSplitStaleNote is the one-line note the drop leaves on the bead: the
+// estimate its own labels record, under the trigger, and what the route did
+// with the label. One line, because it is a record of a decision and not a
+// second copy of the hold note.
+func specSplitStaleNote(labels []string, trigger float64) string {
+	var o specEstimateOutcome
+	specEstimateFromLabels(&o, labels)
+	minutes, rung, _ := specSplitVerdict(specStoryPointAnswer{outcome: o})
+	points := o.Points
+	if !storypoints.Valid(points) {
+		// An estimate whose bead kept no sp: label still has its minutes, so
+		// the note names the point those minutes make.
+		if p, err := storypoints.FromMinutes(minutes); err == nil {
+			points = p
+		}
+	}
+	return fmt.Sprintf("%s: its own labels read %s min (sp:%d, rung %s), under the %s-minute split trigger; the label is stale, so the dispatcher drops it and offers the bead to dispatch again.",
+		specSplitStaleNotePrefix, specMinutesText(minutes), points, rung, specTriggerText(trigger))
 }
 
 // specSplitHeldLine is the tick's skip line for a bead wearing the split label:

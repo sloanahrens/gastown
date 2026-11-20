@@ -473,6 +473,266 @@ func TestSplitLabelStale(t *testing.T) {
 	}
 }
 
+// splitStaleNotes returns the stale-drop notes the tick left on a fake town's
+// bead.
+func splitStaleNotes(f *fakeSpecTown, id string) []string {
+	var out []string
+	for _, n := range f.notes[id] {
+		if strings.HasPrefix(n, specSplitStaleNotePrefix) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// splitStaleNotices returns the tick's notices that say a split label is stale.
+func splitStaleNotices(notices []string) []string {
+	var out []string
+	for _, n := range notices {
+		if strings.Contains(n, "split label stale") {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// splitStaleLabels is the labels a bead whose own estimate has outlived its
+// split label wears: 9.3 minutes under the 10-minute trigger.
+func splitStaleLabels() []string {
+	return []string{"sp:8", "sp-rung:all", "sp-minutes:9.3", specdispatch.SplitLabel}
+}
+
+// TestSplitLabelStaleDropped is gt-71y4v3: the board read takes a split label
+// the bead's own estimate has outlived off, once, with one note, and offers the
+// bead to the same tick's candidate scan; a label the estimate still stands up
+// stays held with the line it had; and a removal that failed keeps the bead
+// held and reports the error.
+func TestSplitLabelStaleDropped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		labels    []string
+		removeErr error
+		wantSlung bool
+	}{
+		{name: "stale under the trigger", labels: splitStaleLabels(), wantSlung: true},
+		{name: "over the trigger", labels: []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", specdispatch.SplitLabel}},
+		{name: "a failed removal", labels: splitStaleLabels(), removeErr: errors.New("bd refused")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
+			held.Labels = tc.labels
+			f := newFakeSpecTown(held)
+			if tc.removeErr != nil {
+				f.unlabelErrs["gt-split"] = tc.removeErr
+			}
+			env := f.env()
+			env.Candidates = f.productionCandidates(t, 10, false)
+			env.StoryPointSplitOver = 10
+			env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 8, 9.3, "all", ""), nil
+			}
+			r := runSpecDispatchCycle(env)
+
+			if tc.wantSlung {
+				if got := strings.Join(f.slung, " "); got != "gt-split" {
+					t.Fatalf("slung %q, want the stale bead taken by this tick", got)
+				}
+				if slices.Contains(f.specs["gt-split"].Labels, specdispatch.SplitLabel) {
+					t.Errorf("labels = %v, want the stale split label dropped", f.specs["gt-split"].Labels)
+				}
+				if got := f.unlabels; len(got) != 1 || got[0] != "gt-split:split" {
+					t.Errorf("removals = %v, want the split label taken off once", got)
+				}
+				notes := splitStaleNotes(f, "gt-split")
+				if len(notes) != 1 {
+					t.Fatalf("stale notes = %q, want one", notes)
+				}
+				if strings.Contains(notes[0], "\n") {
+					t.Errorf("stale note %q is not one line", notes[0])
+				}
+				for _, want := range []string{"9.3 min", "under the 10-minute split trigger"} {
+					if !strings.Contains(notes[0], want) {
+						t.Errorf("stale note %q lacks %q", notes[0], want)
+					}
+				}
+				notices := splitStaleNotices(r.Notices)
+				if len(notices) != 1 || !strings.Contains(notices[0], "offered to dispatch again") {
+					t.Errorf("notices = %q, want one saying the bead is offered again", notices)
+				}
+				if lines := splitHoldLines(r.Skipped); len(lines) != 0 {
+					t.Errorf("split hold lines = %q, want none for a dropped label", lines)
+				}
+				return
+			}
+			if len(f.slung) != 0 {
+				t.Fatalf("slung %v, want the bead held", f.slung)
+			}
+			if !slices.Contains(f.specs["gt-split"].Labels, specdispatch.SplitLabel) {
+				t.Errorf("labels = %v, want the split label still on", f.specs["gt-split"].Labels)
+			}
+			if len(f.unlabels) != 0 {
+				t.Errorf("removals = %v, want the label left on", f.unlabels)
+			}
+			// The note is written before the label comes off, so a removal
+			// that failed leaves its record and the next tick's retry writes no
+			// second copy.
+			wantNotes := 0
+			if tc.removeErr != nil {
+				wantNotes = 1
+				if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "gt-split") || !strings.Contains(r.Errors[0], "bd refused") {
+					t.Errorf("errors = %q, want one naming the bead and the failed removal", r.Errors)
+				}
+			}
+			if notes := splitStaleNotes(f, "gt-split"); len(notes) != wantNotes {
+				t.Errorf("stale notes = %q, want %d", notes, wantNotes)
+			}
+			lines := splitHoldLines(r.Skipped)
+			if len(lines) != 1 {
+				t.Fatalf("split hold lines = %q, want the bead still reported held", lines)
+			}
+			if tc.removeErr == nil && !strings.Contains(lines[0], "10.4 min (sp:8, rung all), at or over the 10-minute trigger; held for splitting") {
+				t.Errorf("hold line %q does not read as today's", lines[0])
+			}
+		})
+	}
+}
+
+// A split label that landed after the board read is caught by the story-point
+// step before the sling: the same drop leaves its note, takes the label off,
+// and nothing holds the bead (gt-71y4v3).
+func TestSplitLabelStaleDroppedMidTick(t *testing.T) {
+	t.Parallel()
+	held := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	held.Labels = splitStaleLabels()
+	f := newFakeSpecTown(held)
+	env := f.env()
+	env.StoryPointSplitOver = 10
+	step := specStoryPointStep(env, "gt-a", held)
+
+	if step.Hold != "" {
+		t.Fatalf("hold = %q, want the stale label dropped and the bead offered", step.Hold)
+	}
+	if len(step.Errors) != 0 {
+		t.Errorf("errors = %q, want none", step.Errors)
+	}
+	if notices := splitStaleNotices(step.Notices); len(notices) != 1 || !strings.Contains(notices[0], "offered to dispatch again") {
+		t.Errorf("notices = %q, want one saying the bead is offered again", step.Notices)
+	}
+	if slices.Contains(f.specs["gt-a"].Labels, specdispatch.SplitLabel) {
+		t.Errorf("labels = %v, want the stale split label dropped", f.specs["gt-a"].Labels)
+	}
+	if notes := splitStaleNotes(f, "gt-a"); len(notes) != 1 {
+		t.Errorf("stale notes = %q, want one", notes)
+	}
+}
+
+// TestSplitLabelStaleDropFailures: a note that cannot be written and a seam
+// that is not wired both leave the label on, hold the bead, and are reported.
+// A drop that cannot record its decision is never read as dropped.
+func TestSplitLabelStaleDropFailures(t *testing.T) {
+	t.Parallel()
+	t.Run("note writer fails", func(t *testing.T) {
+		t.Parallel()
+		held := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+		held.Labels = splitStaleLabels()
+		f := newFakeSpecTown(held)
+		env := f.env()
+		env.StoryPointSplitOver = 10
+		env.Annotate = func(string, string, string) error { return errors.New("bd refused") }
+		step := specStoryPointStep(env, "gt-a", held)
+
+		if step.Hold == "" {
+			t.Error("hold = \"\", want the bead held: the note did not land")
+		}
+		if len(step.Errors) != 1 || !strings.Contains(step.Errors[0], "bd refused") {
+			t.Errorf("errors = %q, want one naming the failed note", step.Errors)
+		}
+		if !slices.Contains(f.specs["gt-a"].Labels, specdispatch.SplitLabel) || len(f.unlabels) != 0 {
+			t.Errorf("labels = %v removals = %v, want the label left on", f.specs["gt-a"].Labels, f.unlabels)
+		}
+	})
+	t.Run("no note writer or remover wired", func(t *testing.T) {
+		t.Parallel()
+		held := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+		held.Labels = splitStaleLabels()
+		f := newFakeSpecTown(held)
+		env := f.env()
+		env.StoryPointSplitOver = 10
+		env.RemoveLabel = nil
+		step := specStoryPointStep(env, "gt-a", held)
+
+		if step.Hold == "" {
+			t.Error("hold = \"\", want the bead held: the remover is not wired")
+		}
+		if len(step.Errors) != 1 || !strings.Contains(step.Errors[0], "no note writer and label remover are wired") {
+			t.Errorf("errors = %q, want one naming the unwired seam", step.Errors)
+		}
+		if !slices.Contains(f.specs["gt-a"].Labels, specdispatch.SplitLabel) || len(f.unlabels) != 0 {
+			t.Errorf("labels = %v removals = %v, want the label left on", f.specs["gt-a"].Labels, f.unlabels)
+		}
+	})
+}
+
+// TestSplitLabelStaleDryRun: a dry run removes nothing and says the label is
+// stale, on the board read's held list and on a label that landed after it.
+func TestSplitLabelStaleDryRun(t *testing.T) {
+	t.Parallel()
+	t.Run("board read", func(t *testing.T) {
+		t.Parallel()
+		held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
+		held.Labels = splitStaleLabels()
+		f := newFakeSpecTown(held)
+		env := f.env()
+		env.Candidates = f.productionCandidates(t, 10, true)
+		env.StoryPointSplitOver = 10
+		env.DryRun = true
+		r := runSpecDispatchCycle(env)
+
+		if !slices.Contains(f.specs["gt-split"].Labels, specdispatch.SplitLabel) {
+			t.Errorf("labels = %v, want the stale split label left on by a dry run", f.specs["gt-split"].Labels)
+		}
+		if len(f.unlabels) != 0 || len(f.notes) != 0 {
+			t.Errorf("a dry run wrote removals %v and notes %v", f.unlabels, f.notes)
+		}
+		notices := splitStaleNotices(r.Notices)
+		if len(notices) != 1 {
+			t.Fatalf("notices = %q, want one saying the label is stale", notices)
+		}
+		for _, want := range []string{"gt-split", "9.3 min", "a dry run removes nothing"} {
+			if !strings.Contains(notices[0], want) {
+				t.Errorf("notice %q lacks %q", notices[0], want)
+			}
+		}
+		for _, e := range r.Skipped {
+			if e.Bead == "gt-split" {
+				t.Errorf("skipped %q, want the stale bead not read as held", e.Line)
+			}
+		}
+	})
+	t.Run("after the board read", func(t *testing.T) {
+		t.Parallel()
+		held := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+		held.Labels = splitStaleLabels()
+		f := newFakeSpecTown(held)
+		env := f.env()
+		env.StoryPointSplitOver = 10
+		env.DryRun = true
+		step := specStoryPointStep(env, "gt-a", held)
+
+		if step.Hold != "" {
+			t.Fatalf("hold = %q, want a dry run to drop nothing and hold nothing", step.Hold)
+		}
+		if notices := splitStaleNotices(step.Notices); len(notices) != 1 {
+			t.Fatalf("notices = %q, want one saying the label is stale", step.Notices)
+		}
+		if !slices.Contains(f.specs["gt-a"].Labels, specdispatch.SplitLabel) || len(f.unlabels) != 0 || len(f.notes) != 0 {
+			t.Errorf("a dry run wrote: labels %v removals %v notes %v", f.specs["gt-a"].Labels, f.unlabels, f.notes)
+		}
+	})
+}
+
 // TestSpecDispatchSplitRouteEstimateFromLabels: an estimate that is already
 // current has no fresh numbers, so the route reads the labels the command
 // wrote. Two labels that disagree leave the value unset, and the route then
@@ -677,7 +937,7 @@ func TestSpecDispatchReportsASplitHeldBeadSkipped(t *testing.T) {
 	held.Labels = []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", specdispatch.SplitLabel}
 	f := newFakeSpecTown(held, cleanSpec("gt-work", 1, "2026-09-29T11:00:00Z"))
 	env := f.env()
-	env.Candidates = f.productionCandidates(t)
+	env.Candidates = f.productionCandidates(t, 10, false)
 	env.StoryPointSplitOver = 10
 	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
 		return splitOutcome("estimated", 3, 4, "all", ""), nil
@@ -705,16 +965,21 @@ func TestSpecDispatchReportsASplitHeldBeadSkipped(t *testing.T) {
 // A split-labelled bead the route's labels no longer stand up is still held —
 // the label is the split's record — so it is still reported, and the line says
 // what the labels say instead of claiming a trigger that does not hold. Rows:
-// no estimate at all, minutes with no rung, an estimate under the trigger, the
-// trigger off, and a shape-only rung the route never acts on (gt-4yq0js).
+// no estimate at all, minutes with no rung, the trigger off, and a shape-only
+// rung the route never acts on (gt-4yq0js). A readable estimate under the
+// trigger is not in this table: that label is stale, and the tick drops it and
+// offers the bead instead of holding it (gt-71y4v3, TestSplitLabelStaleDropped).
 func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		labels  []string
 		trigger float64
-		want    []string
-		refuse  []string
+		// removeErr makes the stale label's removal fail, which is the one way
+		// an estimate under the trigger is still held (gt-71y4v3).
+		removeErr error
+		want      []string
+		refuse    []string
 	}{
 		{
 			name:    "no estimate at all",
@@ -731,11 +996,15 @@ func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
 			refuse:  []string{"trigger", "10.4"},
 		},
 		{
-			name:    "estimate under the trigger",
-			labels:  []string{specdispatch.SplitLabel, "sp:3", "sp-rung:all", "sp-minutes:4"},
-			trigger: 11,
-			want:    []string{"gt-split: split: ", "estimated 4.0 min (sp:3, rung all)"},
-			refuse:  []string{"trigger", "at or over"},
+			// The stale drop is the only thing that stands between an estimate
+			// under the trigger and the bead, so the line is read here on the
+			// path where that drop could not take the label off.
+			name:      "estimate under the trigger, the removal failed",
+			labels:    []string{specdispatch.SplitLabel, "sp:3", "sp-rung:all", "sp-minutes:4"},
+			trigger:   11,
+			removeErr: errors.New("bd refused"),
+			want:      []string{"gt-split: split: ", "estimated 4.0 min (sp:3, rung all)"},
+			refuse:    []string{"trigger", "at or over"},
 		},
 		{
 			name:    "the trigger is off now",
@@ -757,8 +1026,11 @@ func TestSpecDispatchReportsASplitHeldBeadItsLabelsDoNotExplain(t *testing.T) {
 			held := cleanSpec("gt-split", 1, "2026-09-29T10:00:00Z")
 			held.Labels = tc.labels
 			f := newFakeSpecTown(held)
+			if tc.removeErr != nil {
+				f.unlabelErrs["gt-split"] = tc.removeErr
+			}
 			env := f.env()
-			env.Candidates = f.productionCandidates(t)
+			env.Candidates = f.productionCandidates(t, tc.trigger, false)
 			env.StoryPointSplitOver = tc.trigger
 			r := runSpecDispatchCycle(env)
 

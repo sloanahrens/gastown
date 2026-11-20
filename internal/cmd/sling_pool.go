@@ -1706,6 +1706,14 @@ var poolBeadLabelAdd = func(townRoot, beadID, label string) error {
 	return pinnedBd(resolveBeadDirFromTownRoot(townRoot, beadID)).Update(beadID, beads.UpdateOptions{AddLabels: []string{label}})
 }
 
+// poolBeadLabelRemove takes a label off a bead, beside poolBeadLabelAdd and
+// through the same pinned store, so the spec dispatcher's drop of a stale split
+// label writes to the bead's own database. A var so tests can watch the write
+// without a live database.
+var poolBeadLabelRemove = func(townRoot, beadID, label string) error {
+	return pinnedBd(resolveBeadDirFromTownRoot(townRoot, beadID)).Update(beadID, beads.UpdateOptions{RemoveLabels: []string{label}})
+}
+
 // poolRouter is the pool decision for one town with its collaborators
 // explicit: the town's polecat_pool, the town root the seats mid-landing are
 // read from, the tmux sessions it counts, each polecat's own bead state, the
