@@ -480,6 +480,9 @@ var treeWideGuards = []treeWideGuard{
 			"TestNoNewGTEnvReads",
 			"TestNoAgentNamePresetLookups",
 			"TestRetiredConfigFilesAreReadThroughTheLoaders",
+			// Walks every non-test Go file under internal/ for a hand-built
+			// registry URL, so any such file is its input (gt-9grbnj).
+			"TestImageRegistryBaseNotPrependedInSource",
 		},
 		judges:  underInternalOrCmd,
 		removal: true,

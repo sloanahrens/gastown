@@ -346,6 +346,46 @@ func TestGuardSelects(t *testing.T) {
 	}
 }
 
+// TestGuardSelectsAVMStartChangeRunsTheImageRegistryGuard: a non-test Go file
+// under internal/vmstart is input to TestImageRegistryBaseNotPrependedInSource,
+// which walks the whole internal/ tree, so presubmit runs it (gt-9grbnj).
+func TestGuardSelectsAVMStartChangeRunsTheImageRegistryGuard(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	got, err := GuardSelects("M\x00internal/vmstart/registry.go\x00", hasGo)
+	if err != nil {
+		t.Fatalf("GuardSelects: %v", err)
+	}
+	for _, s := range got {
+		if s.Package != "internal/config" {
+			continue
+		}
+		for _, name := range s.Tests {
+			if name == "TestImageRegistryBaseNotPrependedInSource" {
+				return
+			}
+		}
+		t.Fatalf("%s tests = %v; want TestImageRegistryBaseNotPrependedInSource among them", s.Package, s.Tests)
+	}
+	t.Fatalf("GuardSelects = %v; want internal/config among them", got)
+}
+
+// TestGuardSelectsADocsOnlyChangeSkipsTheImageRegistryGuard: a docs-only diff
+// is no input of the internal/config guard, so presubmit leaves it out.
+func TestGuardSelectsADocsOnlyChangeSkipsTheImageRegistryGuard(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	got, err := GuardSelects(unguarded, hasGo)
+	if err != nil {
+		t.Fatalf("GuardSelects: %v", err)
+	}
+	for _, s := range got {
+		if s.Package == "internal/config" {
+			t.Fatalf("GuardSelects(%q) = %v; want no internal/config guard", unguarded, got)
+		}
+	}
+}
+
 // TestShellScriptAllowlistChangeRunsTheAllowlistControl: the clean-tree guard
 // passes an allowlist edit only if the branch broke nothing, so the control
 // that mutates the allowlist and expects the guard red is what a broken line
