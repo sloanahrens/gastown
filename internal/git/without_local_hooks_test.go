@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHooksOffArgs pins where `-c core.hooksPath=/dev/null` lands: before the
@@ -166,5 +167,69 @@ func TestWithoutLocalHooksLeavesTheReceiverAndPlainHandlesAlone(t *testing.T) {
 	}
 	if got := s.sent(); !slices.Equal(got, []string{"commit -m m", "commit -m m"}) {
 		t.Fatalf("calls = %q, want both plain `commit -m m`", got)
+	}
+}
+
+// TestWithoutLocalHooksCoversTimedStdinMergeCheck: the timed, stdin and
+// merge-check paths run with the local hooks off too; a push through them
+// keeps its pre-push hook, and a plain handle carries the option nowhere
+// (gt-eeinkv).
+func TestWithoutLocalHooksCoversTimedStdinMergeCheck(t *testing.T) {
+	t.Parallel()
+	const off = "-c core.hooksPath=/dev/null "
+	for _, tt := range []struct{ name, prefix string }{{"hooks off", off}, {"plain handle", ""}} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			s := newScripted(map[string]reply{
+				"-C " + dir + " rev-parse --show-toplevel": ok(dir),
+				tt.prefix + "fetch *":                      ok(""),
+				tt.prefix + "diff *":                       ok("d\n"),
+				tt.prefix + "patch-id *":                   ok("abc 1\n"),
+				tt.prefix + "merge *":                      ok(""),
+				tt.prefix + "reset *":                      ok(""),
+				tt.prefix + "symbolic-ref *":               ok("refs/remotes/origin/main\n"),
+				"push *":                                   ok(""),
+			})
+			g := &Git{workDir: dir, exec: s.run}
+			if tt.prefix != "" {
+				g = g.WithoutLocalHooks()
+			}
+			if err := g.FetchRefspecWithTimeout("origin", "main", time.Second); err != nil {
+				t.Fatalf("FetchRefspecWithTimeout: %v", err)
+			}
+			if _, err := g.PatchID("base", "HEAD"); err != nil {
+				t.Fatalf("PatchID: %v", err)
+			}
+			if _, err := g.CheckConflictsAtHead("side"); err != nil {
+				t.Fatalf("CheckConflictsAtHead: %v", err)
+			}
+			if err := g.PushWithTimeout("origin", "feature", false, time.Second); err != nil {
+				t.Fatalf("PushWithTimeout: %v", err)
+			}
+			if err := g.PushNotes("origin", "verdicts"); err != nil {
+				t.Fatalf("PushNotes: %v", err)
+			}
+			s.noUnscripted(t)
+			want := []string{
+				tt.prefix + "fetch origin main",
+				tt.prefix + "patch-id --stable",
+				tt.prefix + "merge --no-commit --no-ff side",
+			}
+			sent := s.sent()
+			for _, w := range want {
+				if !slices.Contains(sent, w) {
+					t.Errorf("no call recorded as %q; sent %q", w, sent)
+				}
+			}
+			for _, call := range sent {
+				if !strings.Contains(call, "core.hooksPath") {
+					continue
+				}
+				if strings.Contains(call, "push ") || tt.prefix == "" {
+					t.Errorf("ran with hooks off although it must not: %q", call)
+				}
+			}
+		})
 	}
 }

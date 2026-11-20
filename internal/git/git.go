@@ -383,8 +383,11 @@ func (g *Git) runWithTimeout(timeout time.Duration, args ...string) (_ string, _
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
+	// args stays undecorated for wrapError and the timeout error; only the argv
+	// handed to the runner carries the hook options.
+	callArgs := g.hookArgs(args)
 	timeout = g.deadline(timeout)
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, timeout: timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: callArgs, env: g.env, unset: g.unset, timeout: timeout})
 	if err != nil {
 		if errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: timeout}
@@ -437,7 +440,7 @@ func (g *Git) runWithStdin(stdin string, args ...string) (string, error) {
 		args = append([]string{"--git-dir=" + g.gitDir}, args...)
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, stdin: stdin, timeout: g.timeout})
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: g.hookArgs(args), env: g.env, unset: g.unset, stdin: stdin, timeout: g.timeout})
 	if err != nil {
 		if g.timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: g.timeout}
@@ -621,8 +624,8 @@ func gitSubcommand(args []string) (string, []string) {
 
 // hookArgs returns args as this handle's calls must run: with the repository's
 // local hooks off when the handle came from WithoutLocalHooks, and unchanged
-// otherwise. runOutput and runWithEnvAndTimeout build their gitCall from it;
-// the timed, stdin and merge-check paths still send args undecorated.
+// otherwise. Every runner call builds its gitCall from it: runOutput,
+// runWithTimeout, runWithEnvAndTimeout, runWithStdin and runMergeCheck.
 func (g *Git) hookArgs(args []string) []string {
 	if !g.noHooks {
 		return args
@@ -3090,7 +3093,9 @@ func (g *Git) runMergeCheck(args ...string) (string, error) {
 		return "", err
 	}
 
-	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: args, env: g.env, unset: g.unset, timeout: g.timeout})
+	// args stays undecorated for wrapError and the timeout error; only the argv
+	// handed to the runner carries the hook options.
+	stdout, stderr, err := g.runner()(gitCall{dir: g.workDir, args: g.hookArgs(args), env: g.env, unset: g.unset, timeout: g.timeout})
 	if err != nil {
 		if g.timeout > 0 && errors.Is(err, errTimedOut) {
 			return "", &timeoutError{command: args[0], after: g.timeout}
