@@ -165,6 +165,9 @@ type renderedRound struct {
 	// OpenAtLand is how many of the round's findings were still open when the
 	// ledger was rendered, the count a landing's unfinished rework shows.
 	OpenAtLand int `json:"open_at_land"`
+	// lane is the lane the round was reviewed in; omRounds numbers a later
+	// lane's rounds after the earlier lanes' (gt-fca95u).
+	lane string
 }
 
 // renderedFinding is one finding as Render emits it.
@@ -192,11 +195,23 @@ type omFinding struct {
 	Outcome Outcome `json:"outcome"`
 }
 
-// omRounds converts rendered rounds to the shape om reads.
+// omRounds converts rendered rounds to the shape om reads. The ledger numbers
+// each lane's rounds from 1 and om refuses a file that repeats a round number,
+// so a later lane's rounds are numbered after the highest number the earlier
+// lanes carry: a polecat's rounds 1 to 3 and a takeover's round 1 read as 1, 2,
+// 3 and 4. The first lane keeps its stored numbers (gt-fca95u).
 func omRounds(rounds []renderedRound) []omRound {
 	out := make([]omRound, 0, len(rounds))
-	for _, r := range rounds {
-		o := omRound{Round: r.Round, Head: r.Head, Findings: make([]omFinding, 0, len(r.Findings))}
+	var lane string
+	base, highest := 0, 0
+	for i, r := range rounds {
+		if i > 0 && r.lane != lane {
+			base = highest
+		}
+		lane = r.lane
+		number := base + r.Round
+		highest = max(highest, number)
+		o := omRound{Round: number, Head: r.Head, Findings: make([]omFinding, 0, len(r.Findings))}
 		for _, f := range r.Findings {
 			text := f.Text
 			if f.File != "" {
@@ -457,7 +472,7 @@ func (r ledgerRound) outcome(key FindingKey) (Outcome, bool) {
 func renderRounds(rounds []ledgerRound) []renderedRound {
 	out := make([]renderedRound, 0, len(rounds))
 	for _, r := range rounds {
-		rendered := renderedRound{Round: r.Round, Head: r.Head, Findings: make([]renderedFinding, 0, len(r.Findings))}
+		rendered := renderedRound{Round: r.Round, lane: r.Lane, Head: r.Head, Findings: make([]renderedFinding, 0, len(r.Findings))}
 		for _, f := range r.Findings {
 			rendered.Findings = append(rendered.Findings, renderedFinding{ID: f.ID, File: f.File, Text: f.Text, Outcome: f.Outcome})
 			if f.Outcome == OutcomeOpen {
