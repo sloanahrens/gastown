@@ -361,6 +361,130 @@ func TestJobsLedgerSourceUnreadable(t *testing.T) {
 	}
 }
 
+// TestJobsLedgerSourceKeepsUnknown is bead gt-pqgbd7 rework: a run that records
+// its own next-due time does not judge a row its own reader could not read. The
+// Dolt gc's state file does not parse, so the row is unknown; the ledger's clean
+// run with a future due time must leave it unknown and failed.
+func TestJobsLedgerSourceKeepsUnknown(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "daemon", "maintenance_state.json"), `{"last_gc":`)
+	due := testNow.Add(time.Hour)
+	appendLedgerRuns(t, root, jobledger.Run{
+		Job:       doltGCName,
+		StartedAt: testNow.Add(-2 * time.Minute),
+		EndedAt:   testNow.Add(-time.Minute),
+		Outcome:   "ok",
+		NextDue:   &due,
+	})
+
+	jobs, err := List(root, Options{}, testNow)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	row, ok := findJob(jobs, doltGCName)
+	if !ok {
+		t.Fatalf("no %q row in %d rows", doltGCName, len(jobs))
+	}
+	if row.State != StateUnknown {
+		t.Errorf("State = %q, want unknown: the state file does not parse, so a clean run cannot judge the row", row.State)
+	}
+	if row.Outcome != OutcomeFailed {
+		t.Errorf("Outcome = %q, want failed: the clean run does not repair the unreadable state file", row.Outcome)
+	}
+	if row.Due == nil || !row.Due.Equal(due) {
+		t.Errorf("Due = %v, want the run's recorded due time %v: a fact even though the row stays unknown", row.Due, due)
+	}
+	if len(row.Runs) != 1 {
+		t.Errorf("got %d runs, want the run the ledger holds", len(row.Runs))
+	}
+}
+
+// TestJobsLedgerSourceKeepsFailedOutcome is bead gt-pqgbd7 rework: a node whose
+// probe failed keeps its failed outcome, its figures and its own state when the
+// ledger holds a clean run under the row's name.
+func TestJobsLedgerSourceKeepsFailedOutcome(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	readAt := testNow.Add(-5 * time.Minute)
+	writeNodeDiskRecord(t, root, `{"nodes":{"colima-gt-control":`+
+		`{"used_percent":91,"read_at":"`+readAt.Format(time.RFC3339)+`","error":"df: no such file or directory"}}}`)
+	name := "node_disk:colima-gt-control"
+	appendLedgerRuns(t, root, jobledger.Run{
+		Job:       name,
+		StartedAt: testNow.Add(-2 * time.Minute),
+		EndedAt:   testNow.Add(-time.Minute),
+		Outcome:   "ok",
+	})
+
+	jobs, err := List(root, Options{}, testNow)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	rows := nodeDiskRowsNamed(jobs, name)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows named %q, want one: %+v", len(rows), name, jobs)
+	}
+	row := rows[0]
+	if row.Outcome != OutcomeFailed {
+		t.Errorf("Outcome = %q, want failed: the row's own reader reported the failed probe", row.Outcome)
+	}
+	if got := row.Stats["used_percent"]; got != 91 {
+		t.Errorf("Stats[used_percent] = %d, want the reader's 91 kept beside the run's figures", got)
+	}
+	if row.State != StateOK {
+		t.Errorf("State = %q, want ok: the reading is fresh, so the row's own state stands", row.State)
+	}
+}
+
+// TestJobsLedgerSourceMergesStats is bead gt-pqgbd7 rework: a run's stats join
+// the row's, so a figure only the reader recorded survives and a key both record
+// takes the run's value.
+func TestJobsLedgerSourceMergesStats(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	readAt := testNow.Add(-5 * time.Minute)
+	writeNodeDiskRecord(t, root, `{"nodes":{"colima-gt-control":`+
+		`{"used_percent":91,"used_bytes":1000,"read_at":"`+readAt.Format(time.RFC3339)+`"}}}`)
+	name := "node_disk:colima-gt-control"
+	appendLedgerRuns(t, root, jobledger.Run{
+		Job:       name,
+		StartedAt: testNow.Add(-2 * time.Minute),
+		EndedAt:   testNow.Add(-time.Minute),
+		Outcome:   "ok",
+		Stats:     map[string]int64{"used_percent": 80, "databases": 3},
+	})
+
+	jobs, err := List(root, Options{}, testNow)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	rows := nodeDiskRowsNamed(jobs, name)
+	if len(rows) != 1 {
+		t.Fatalf("got %d rows named %q, want one: %+v", len(rows), name, jobs)
+	}
+	row := rows[0]
+	if got := row.Stats["used_percent"]; got != 80 {
+		t.Errorf("Stats[used_percent] = %d, want the run's 80 on the shared key", got)
+	}
+	if got := row.Stats["used_bytes"]; got != 1000 {
+		t.Errorf("Stats[used_bytes] = %d, want the reader's 1000, which the run does not carry", got)
+	}
+	if got := row.Stats["databases"]; got != 3 {
+		t.Errorf("Stats[databases] = %d, want the run's 3", got)
+	}
+}
+
+// TestJobsEmptyTownRoot is bead gt-pqgbd7 rework: the one town root the ledger
+// refuses is the empty one, which no row can be read from, so the list is an
+// error rather than rows no reader can vouch for.
+func TestJobsEmptyTownRoot(t *testing.T) {
+	t.Parallel()
+	if _, err := List("", Options{}, testNow); err == nil {
+		t.Fatal("List returned no error for an empty town root")
+	}
+}
+
 func TestJobsDoltGC(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

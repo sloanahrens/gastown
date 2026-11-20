@@ -79,8 +79,8 @@ type Job struct {
 	// row's reader has no outcome for it.
 	Outcome Outcome `json:"outcome,omitempty"`
 	// Stats are the row's headline numbers, keyed by the name the dashboard
-	// reads (duration_ms, databases, reclaimed_bytes). Nil when the reader has
-	// none.
+	// reads (duration_ms, databases, reclaimed_bytes): the row's own reader's,
+	// with the newest ledger run's laid over them. Nil when neither has any.
 	Stats map[string]int64 `json:"stats,omitempty"`
 	// Runs are the job's newest runs from the run ledger, oldest first, at most
 	// ledgerRunCap. Nil when the ledger holds none.
@@ -103,9 +103,10 @@ type Options struct {
 // nightly Dolt backup, the Dolt gc row when the daemon has recorded one, and one
 // per node in the node disk record, judged at now. A row named in the run ledger
 // takes its newest run's outcome, stats and time and its recent runs from there.
-// An unreadable patrol config is an error, because no cadence can be trusted. An
-// unreadable last-run record, update history, backup root, maintenance state,
-// node disk record or run ledger is not: its rows come back as StateUnknown.
+// An unreadable patrol config is an error, because no cadence can be trusted, as
+// is an empty town root. An unreadable last-run record, update history, backup
+// root, maintenance state, node disk record or run ledger is not: its rows come
+// back as StateUnknown.
 func List(townRoot string, opts Options, now time.Time) ([]Job, error) {
 	return list(townRoot, opts, config.DaemonSteps(), now)
 }
@@ -142,7 +143,7 @@ func list(townRoot string, opts Options, steps []config.DaemonStep, now time.Tim
 	jobs = append(jobs, doltBackupRow(backup, backupNight, backupErr, now))
 	jobs = append(jobs, doltGCRows(townRoot, now)...)
 	jobs = append(jobs, nodeDiskRows(townRoot, now)...)
-	return withLedger(townRoot, jobs, now), nil
+	return withLedger(townRoot, jobs, now)
 }
 
 // ledgerRunCap is how many of a job's runs the list carries.
@@ -150,31 +151,27 @@ const ledgerRunCap = 5
 
 // withLedger fills the rows from the town's run ledger. A row the ledger names
 // takes its newest run's outcome, stats and time, the run's own next-due time
-// when it recorded one, and its newest runs. A ledger that cannot be opened or
-// read makes every row unknown: no row's run history can be vouched for.
-func withLedger(townRoot string, rows []Job, now time.Time) []Job {
+// when it recorded one, and its newest runs. The ledger is read once per row, so
+// a ledger file that cannot be read marks the row whose read failed unknown.
+func withLedger(townRoot string, rows []Job, now time.Time) ([]Job, error) {
 	ledger, err := jobledger.NewLedger(townRoot)
 	if err != nil {
-		return ledgerUnreadable(rows)
+		// The only town root the ledger refuses is the empty one, which no
+		// town supplies: a caller error, not a row no reader can vouch for.
+		return nil, err
 	}
 	for i := range rows {
 		rows[i] = ledgerRow(rows[i], ledger, now)
 	}
-	return rows
-}
-
-// ledgerUnreadable marks every row unknown, so a ledger no reader can open
-// never leaves a row showing ok.
-func ledgerUnreadable(rows []Job) []Job {
-	for i := range rows {
-		rows[i].State = StateUnknown
-	}
-	return rows
+	return rows, nil
 }
 
 // ledgerRow applies the ledger to one row. A read error marks the row unknown.
 // A job with no run keeps the state its own reader gave it and gains a computed
-// due time. A run's own next-due time judges the job in place of its cadence.
+// due time. A run's own next-due time becomes the row's due time and judges the
+// job in place of its cadence, except a row its own reader left unknown: a run
+// cannot repair that. A failed outcome from either source stays failed, and the
+// run's stats join the reader's rather than replace them.
 func ledgerRow(j Job, ledger *jobledger.Ledger, now time.Time) Job {
 	runs, err := ledger.Tail(j.Name, ledgerRunCap)
 	if err != nil {
@@ -191,12 +188,18 @@ func ledgerRow(j Job, ledger *jobledger.Ledger, now time.Time) Job {
 	if at := runTime(newest); at != nil {
 		j.LastRun = at
 	}
-	j.Outcome = ledgerOutcome(newest.Outcome)
-	j.Stats = maps.Clone(newest.Stats)
+	if j.Outcome != OutcomeFailed {
+		// A row whose own reader reported a failure keeps it: a clean run in
+		// the ledger does not repair an input the reader could not read.
+		j.Outcome = ledgerOutcome(newest.Outcome)
+	}
+	j.Stats = mergeStats(j.Stats, newest.Stats)
 	if newest.NextDue != nil {
 		due := *newest.NextDue
 		j.Due = &due
-		j.State = stateAtDue(due, now)
+		if j.State != StateUnknown {
+			j.State = stateAtDue(due, now)
+		}
 		return j
 	}
 	j.Due = dueOf(j)
@@ -207,6 +210,20 @@ func ledgerRow(j Job, ledger *jobledger.Ledger, now time.Time) Job {
 		j.State = stateOf(j, false, false, now)
 	}
 	return j
+}
+
+// mergeStats returns the row's stats with the run's figures laid over them: a
+// key the run recorded wins, and a key only the row's reader has stays.
+func mergeStats(row, run map[string]int64) map[string]int64 {
+	if len(run) == 0 {
+		return row
+	}
+	out := maps.Clone(row)
+	if out == nil {
+		out = make(map[string]int64, len(run))
+	}
+	maps.Copy(out, run)
+	return out
 }
 
 // runTime is when a run finished, else when it started: nil when it recorded
