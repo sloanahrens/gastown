@@ -213,6 +213,10 @@ type Thresholds struct {
 	// a multiple of its interval.
 	TickDegradedFactor float64
 	TickRedFactor      float64
+	// TickRunDegraded and TickRunRed judge a tick's pass in flight by how long it
+	// has run, as a multiple of its interval; compiled defaults (gt-kwlnj1).
+	TickRunDegraded float64
+	TickRunRed      float64
 	// Landing judges the age of a rig's oldest pending ready-to-land
 	// submission, so a waiting bead is measured from when it was submitted
 	// rather than from the rig's last landing (gt-m36as).
@@ -310,6 +314,8 @@ func DefaultThresholds() Thresholds {
 		Heartbeat:          Limits{Degraded: 10 * time.Minute, Red: 30 * time.Minute},
 		TickDegradedFactor: 2,
 		TickRedFactor:      4,
+		TickRunDegraded:    3,
+		TickRunRed:         6,
 		Landing:            Limits{Degraded: LandingStageBudget, Red: LandingWaitBudget},
 		Escalation:         Limits{Degraded: time.Hour, Red: 4 * time.Hour},
 		SlotHolder:         Limits{Degraded: 30 * time.Minute, Red: 2 * time.Hour},
@@ -964,6 +970,9 @@ func ticks(in Inputs) []Field {
 		case t.Interval <= 0:
 			fs = append(fs, unknown(FieldTick, "", t.Name, errors.New("no interval")))
 			continue
+		case !t.RunningSince.IsZero():
+			fs = append(fs, runningTick(in.Now, in.Thresholds, t))
+			continue
 		case t.LastFired.IsZero():
 			fs = append(fs, unknown(FieldTick, "", t.Name, errors.New("never recorded firing")))
 			continue
@@ -982,6 +991,22 @@ func ticks(in Inputs) []Field {
 		fs = append(fs, f)
 	}
 	return fs
+}
+
+// runningTick judges a tick whose pass is in flight by how long it has run (gt-kwlnj1).
+func runningTick(now time.Time, th Thresholds, t Tick) Field {
+	running := now.Sub(t.RunningSince)
+	f := Field{Name: FieldTick, Subject: t.Name, Tag: Recorded, Verdict: Green, Value: "running " + runningFor(running) + "/" + Short(t.Interval)}
+	switch {
+	case th.TickRunRed > 0 && float64(running) >= th.TickRunRed*float64(t.Interval):
+		f.Verdict = Red
+	case th.TickRunDegraded > 0 && float64(running) >= th.TickRunDegraded*float64(t.Interval):
+		f.Verdict = Degraded
+	}
+	if f.Verdict != Green {
+		f.Detail = "pass running for " + runningFor(running)
+	}
+	return f
 }
 
 // landings judges each rig's oldest pending submission age and counts the
@@ -1581,6 +1606,17 @@ func Short(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 	}
+}
+
+// runningFor renders a pass's run to the second under an hour: 1m20s, not 1m.
+func runningFor(d time.Duration) string {
+	if d < time.Minute || d >= time.Hour {
+		return Short(d)
+	}
+	if s := int(d % time.Minute / time.Second); s > 0 {
+		return fmt.Sprintf("%dm%ds", int(d/time.Minute), s)
+	}
+	return fmt.Sprintf("%dm", int(d/time.Minute))
 }
 
 // short abbreviates a commit id.
