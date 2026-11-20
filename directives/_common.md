@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-20 gt-d0rks4: the lint box is ticked after `go vet` and the Gate's test commands; the `gt done` and red-gate bullets merged into that rule.
 - 2026-11-01 gt-wguxe: a failing test outside the diff is reported with `gt done --finding`; the town files the Found bead and the polecat files nothing.
 - 2026-10-27 gt-3vgbi: moved the shared host-hygiene rules and the testing norms into the repo from ~/gt/gastown/directives/_common.md; the testing norms are the byte-identical 21-line text (md5 fc0141bd7290b193679763095c7a00dc) that five rigs carry, so "golden files for prompts" is now in the gastown norms too.
 - 2026-10-31 gt-pccx7: dropped the host-hygiene incident story, the CGO/ICU flags and the Test-load section (a polecat runs no full suite; the Makefile exports the flags).
@@ -32,11 +33,11 @@ Applies to every agent working this rig, whatever formula is running.
   implementation details.
 - While you work, run only the one test or file that covers what you just
   changed. Never run the same command twice without an edit in between.
-- When you are done, run `gt done` once: it runs this rig's presubmit gate on
-  your branch, and the landing then runs the full gate on the merge candidate.
-  Do not run `make test`, `make lint` or `make gate` yourself. om weighs test
-  quality via the repo rubric (.om.json).
-- If `gt done` reports red, fix the failure it names and run `gt done` again.
+- Run `gt done` once work is done: it runs the presubmit gate, lint included,
+  and refuses on red; fix what it names, rerun it. Never run `make test`,
+  `make lint` or `make gate` yourself. An acceptance box saying lint passes is
+  ticked once `go vet` and the Gate's tests pass; the landing lints again. Never
+  leave it unticked to wait for a human.
 - A failing test your diff does not touch has a cause. Do not file a bead: run
   `gt done --status DEFERRED --finding "<test name, full output, how you ran it>"`
   and the town files the Found bead. Do not retry it, and do not add retries,
