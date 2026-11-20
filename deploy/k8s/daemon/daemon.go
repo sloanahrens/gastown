@@ -1324,6 +1324,10 @@ func deployment(v Values, namespace string) (Deployment, error) {
 		owner = TownOwnerRehearsal
 	}
 	grace := int64(v.TerminationGraceSeconds)
+	// The pause container is PID 1 of the shared namespace and reaps the orphans
+	// the daemon's finished commands leave; the pod held 352 zombies with the
+	// daemon as PID 1 and no init (gt-cw9072).
+	shareProcessNamespace := true
 	vols, err := volumes(v)
 	if err != nil {
 		return Deployment{}, err
@@ -1331,6 +1335,7 @@ func deployment(v Values, namespace string) (Deployment, error) {
 	pod := PodSpec{
 		ServiceAccountName:            ServiceAccountName,
 		TerminationGracePeriodSeconds: &grace,
+		ShareProcessNamespace:         &shareProcessNamespace,
 		InitContainers:                proxyContainers(v),
 		Containers:                    []Container{daemonContainer(v)},
 		Volumes:                       vols,
@@ -3221,6 +3226,11 @@ type PodSpec struct {
 	// RestartPolicy is Never on a Job's pod, so a failed container fails the pod and
 	// the Job's backoffLimit counts it. Empty takes the API's default.
 	RestartPolicy string `yaml:"restartPolicy,omitempty"`
+	// ShareProcessNamespace makes the pod's containers share one process table. Set
+	// on the daemon pod alone: the pod's pause container is then PID 1 and reaps the
+	// children the daemon's finished commands leave, which no other pod in the render
+	// needs (gt-cw9072).
+	ShareProcessNamespace *bool `yaml:"shareProcessNamespace,omitempty"`
 }
 
 // PodSecurityContext is the identity a pod runs as when the builder pins it. The

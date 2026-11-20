@@ -312,3 +312,4 @@ spec:
             items:
               - key: key.json
                 path: key.json
+      shareProcessNamespace: true

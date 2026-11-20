@@ -313,3 +313,4 @@ spec:
             items:
               - key: token
                 path: token
+      shareProcessNamespace: true
