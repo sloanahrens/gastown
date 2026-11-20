@@ -55,6 +55,17 @@ type CrashProbes interface {
 	PodCrashing(ctx context.Context) (crashing bool, why string, err error)
 }
 
+// ReadyProbes is the optional extension of VerifyProbes a run implements when it
+// can ask the town the question readiness answers: whether the town can take
+// traffic, given a report whose non-green fields it reads in full rather than
+// through the health line's lossy rendering. A run that implements it decides
+// the health check by this answer; one that does not keeps the line's rule.
+type ReadyProbes interface {
+	// Ready reports whether the town is ready and, when it is not, why: the
+	// reason a person reads in the check's detail.
+	Ready(ctx context.Context) (ready bool, reason string, err error)
+}
+
 // CrashLoopError is why a restart wait ended before its bound: the daemon's
 // newest pod is crash-looping, so it cannot report the new build however long
 // the wait lasts. The caller tells it apart from a canceled or failed sleep
@@ -243,10 +254,18 @@ var queueReasons = map[string]func(string) bool{
 // or with no reason, and a line that does not read
 // "<VERDICT> tick <age> ago" fails, and the detail carries the line as read. A
 // probe error fails the check with the probe's message.
+//
+// A probe set that also implements ReadyProbes is asked the town's readiness
+// question instead, after a successful health read: the roll is judged by the
+// readiness answer, so a red rig main on the line is reported beside the outcome
+// rather than folded into it. See readyHealthCheck.
 func healthCheck(ctx context.Context, p VerifyProbes) Check {
 	line, err := p.Health(ctx)
 	if err != nil {
 		return Check{Name: checkHealth, Detail: err.Error()}
+	}
+	if ready, ok := p.(ReadyProbes); ok {
+		return readyHealthCheck(ctx, ready, line)
 	}
 	queue, ok := queueOnlyHealthLine(line)
 	if !ok {
@@ -257,6 +276,34 @@ func healthCheck(ctx context.Context, p VerifyProbes) Check {
 	}
 	return Check{Name: checkHealth, OK: true,
 		Detail: fmt.Sprintf("%s (queue states, not a failed roll; ignored %s)", line, strings.Join(queue, ", "))}
+}
+
+// readyHealthCheck passes the health check exactly when the town's readiness
+// answer says it is ready, whatever the line's verdict, and its detail is the
+// line as read; a line that is not GREEN carries the note that its recorded and
+// queue states are reported beside the roll, not part of it. A not-ready answer
+// fails naming the reason and the line, and a Ready error fails with the error
+// text.
+func readyHealthCheck(ctx context.Context, ready ReadyProbes, line string) Check {
+	isReady, reason, err := ready.Ready(ctx)
+	if err != nil {
+		return Check{Name: checkHealth, Detail: err.Error()}
+	}
+	if !isReady {
+		return Check{Name: checkHealth, Detail: fmt.Sprintf("not ready: %s: %s", reason, line)}
+	}
+	if isGreenHealthLine(line) {
+		return Check{Name: checkHealth, OK: true, Detail: line}
+	}
+	return Check{Name: checkHealth, OK: true,
+		Detail: line + " (ready: the town's own recorded and queue states are reported beside the roll, not part of it)"}
+}
+
+// isGreenHealthLine reports whether line is one the town renders with a GREEN
+// verdict, the only line a passing ready check leaves unannotated.
+func isGreenHealthLine(line string) bool {
+	degraded, _, ok := healthReasons(line)
+	return ok && !degraded
 }
 
 // queueOnlyHealthLine reports whether line is a health line a roll may pass on,
