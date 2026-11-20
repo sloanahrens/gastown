@@ -319,19 +319,36 @@ func (l *RoundsLedger) Render(maxBytes int) ([]byte, error) {
 	}
 	rounds := doc.Rounds
 	for {
-		data, err := json.Marshal(omRounds(renderRounds(rounds)))
+		out := omRounds(renderRounds(rounds))
+		data, err := json.Marshal(out)
 		if err != nil {
 			return nil, fmt.Errorf("rounds ledger: rendering: %w", err)
 		}
 		if len(data) <= maxBytes {
-			return data, nil
+			return checkFindingIDs(data, out)
 		}
 		trimmed, ok := dropEarliest(rounds)
 		if !ok {
-			return data, nil
+			return checkFindingIDs(data, out)
 		}
 		rounds = trimmed
 	}
+}
+
+// checkFindingIDs returns data, or refuses it when a finding has no id: om's
+// ParseRounds requires one (internal/verdict/rounds.go in the om rig), so an
+// id-less finding costs the landing its rounds here rather than blocking the
+// whole landing at om (gt-2rvuze). It checks the emitted rounds, so an id-less
+// finding the byte cap drops never refuses.
+func checkFindingIDs(data []byte, rounds []omRound) ([]byte, error) {
+	for _, r := range rounds {
+		for i, f := range r.Findings {
+			if f.ID == "" {
+				return nil, fmt.Errorf("%w: round %d, finding %d: id is required", ErrRoundsCorrupt, r.Round, i)
+			}
+		}
+	}
+	return data, nil
 }
 
 // dropEarliest drops the lowest-numbered round among the lanes that still hold
