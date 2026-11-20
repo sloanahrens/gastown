@@ -59,3 +59,13 @@ func (g *Git) WithoutEnv(keys ...string) *Git {
 	c.unset = append(append([]string(nil), g.unset...), keys...)
 	return &c
 }
+
+// WithoutLocalHooks returns a copy of g whose calls run with the repository's
+// local git hooks off, the receiver left as it was; a push keeps them, so the
+// pre-push fence stays on. A tracked hook that runs bd fails every merge and
+// commit in a pod where bd refuses a call with no BEADS_DIR (gt-7efzug).
+func (g *Git) WithoutLocalHooks() *Git {
+	c := *g
+	c.noHooks = true
+	return &c
+}
