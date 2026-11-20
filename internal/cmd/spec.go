@@ -2772,6 +2772,17 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			}
 		}
 
+		// A tick with no free seat slings nothing, so the per-tick limit is
+		// checked before the children read and a candidate it holds back leaves
+		// its children unread (gt-myexrt).
+		if len(pending)+len(report.Dispatched) >= perTick {
+			limit := fmt.Sprintf("%s %d reached", specdispatch.SkipPerTickLimit, perTick)
+			if perTick == 0 {
+				limit = specdispatch.SkipNoSeat + " no free seat this tick"
+			}
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, limit)})
+			continue
+		}
 		// A bead whose children are open is a container, not a unit of work:
 		// its scope is already sliced into children a seat will take, so
 		// spending one on the parent duplicates them (gt-gektq). An unreadable
@@ -2793,15 +2804,6 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		full.Children = children
 		if why := specdispatch.OpenChildHold(full); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
-			continue
-		}
-
-		if len(pending)+len(report.Dispatched) >= perTick {
-			limit := fmt.Sprintf("%s %d reached", specdispatch.SkipPerTickLimit, perTick)
-			if perTick == 0 {
-				limit = specdispatch.SkipNoSeat + " no free seat this tick"
-			}
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, limit)})
 			continue
 		}
 		// A bead whose last sling failed at session start rests out its backoff
