@@ -71,13 +71,22 @@ const (
 	// 5 GiB. It is a constant: no setting names it.
 	ciCacheGomodCapKiB = 5 << 20
 
+	// ciCacheGoTouchIntervalMinutes is Go's cache mtimeInterval: Go resets a
+	// reused entry's mtime at most once an hour, so an entry's mtime can be
+	// almost that much older than its last use (cmd/go/internal/cache, cache.go:
+	// "may in fact be older by at most an hour").
+	ciCacheGoTouchIntervalMinutes = 60
+
+	// ciCacheGateMarginMinutes is the recent use the floor covers beyond the
+	// touch interval: a job's file can carry an mtime almost the interval old.
+	ciCacheGateMarginMinutes = 15
+
 	// ciCacheLRUFloorMinutes is the youngest a ci-gocache file may be and still
 	// be selected by the size cap: a file whose mtime is inside this many
-	// minutes is never selected, whatever the cap. Go touches a used entry's
-	// mtime at most once an hour (cmd/go/internal/cache mtimeInterval), so an
-	// mtime alone cannot say a file is unused; the polecat cache's trim keeps
-	// the same hour as its floor (gt-enplmw).
-	ciCacheLRUFloorMinutes = 60
+	// minutes is never selected, whatever the cap. The floor is Go's touch
+	// interval plus the margin, so no file used within the margin of a trim run
+	// is selected: a mtime can lag its last use by almost the whole interval.
+	ciCacheLRUFloorMinutes = ciCacheGoTouchIntervalMinutes + ciCacheGateMarginMinutes
 
 	// ciCacheMissingPathExit is the status the script exits with when the volume
 	// path is not in the container. kubectl exec passes a remote command's status

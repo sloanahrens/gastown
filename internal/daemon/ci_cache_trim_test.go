@@ -1580,6 +1580,36 @@ func noopKeys(items []attention.Item) []string {
 	return keys
 }
 
+// TestCICacheTrimFloorCoversTheGoTouchInterval: the floor exceeds Go's touch
+// interval by the margin, which is at least fifteen minutes.
+func TestCICacheTrimFloorCoversTheGoTouchInterval(t *testing.T) {
+	t.Parallel()
+	if got := ciCacheLRUFloorMinutes - ciCacheGoTouchIntervalMinutes; got != ciCacheGateMarginMinutes {
+		t.Errorf("the floor exceeds Go's %d minute touch interval by %d, want the %d minute margin",
+			ciCacheGoTouchIntervalMinutes, got, ciCacheGateMarginMinutes)
+	}
+	if ciCacheGateMarginMinutes < 15 {
+		t.Errorf("ciCacheGateMarginMinutes = %d, want at least 15", ciCacheGateMarginMinutes)
+	}
+}
+
+// TestCICacheTrimFloorIsInTheArgv: the apply's argv and the dry run's list both
+// carry the floor of 75 minutes as their last element, where the LRU program
+// reads it.
+func TestCICacheTrimFloorIsInTheArgv(t *testing.T) {
+	t.Parallel()
+	row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: 40 << 20}
+	for _, mode := range []string{agentconfig.DiskMaintenanceModeApply, agentconfig.DiskMaintenanceModeDryRun} {
+		program, err := ciCacheTrimProgram(mode, row, 720)
+		if err != nil {
+			t.Fatalf("ciCacheTrimProgram(%s) = %v, want nil", mode, err)
+		}
+		if got := program[len(program)-1]; got != "75" {
+			t.Errorf("%s argv carries the floor %q, want 75", mode, got)
+		}
+	}
+}
+
 // TestCICacheTrimLRUArgv: the LRU program's argv is built from integers, so the
 // numbers the script computes with are digits; a negative number, an empty root
 // and a mode the program does not have are refused rather than passed on.
@@ -1589,7 +1619,7 @@ func TestCICacheTrimLRUArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ciCacheLRUArgv = %v, want nil", err)
 	}
-	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", "/vol/ci-gocache/_data", "120", "41943040", "60"}
+	want := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", "/vol/ci-gocache/_data", "120", "41943040", "75"}
 	if !slices.Equal(good, want) {
 		t.Errorf("argv = %q, want %q", good, want)
 	}
@@ -1597,7 +1627,7 @@ func TestCICacheTrimLRUArgv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ciCacheLRUArgv(apply) = %v, want nil", err)
 	}
-	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", "/vol/ci-gocache/_data", "120", "41943040", "60"}
+	wantApply := []string{"-c", ciCacheLRUTrimScript, "ci-cache-trim", "apply", "/vol/ci-gocache/_data", "120", "41943040", "75"}
 	if !slices.Equal(apply, wantApply) {
 		t.Errorf("apply argv = %q, want %q", apply, wantApply)
 	}
