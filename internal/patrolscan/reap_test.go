@@ -381,6 +381,78 @@ func reusableSeat(e *fakeReapEnv) {
 	e.recovery["onyx"] = Recovery{Verdict: "SAFE_TO_NUKE", SafeToNuke: true, Reusable: true, GitStateSource: "live", Branch: "polecat/onyx/gt-1"}
 }
 
+// fakeSingleUseEnv adds the single-use sandbox half to fakeReapEnv and records
+// the seats it was asked about.
+type fakeSingleUseEnv struct {
+	*fakeReapEnv
+	sandbox map[string]bool
+	err     map[string]error
+	reads   []string
+}
+
+func (f *fakeSingleUseEnv) SandboxSeat(_, p string) (bool, error) {
+	f.reads = append(f.reads, p)
+	return f.sandbox[p], f.err[p]
+}
+
+func singleUseSeat(e *fakeReapEnv, sandbox bool) *fakeSingleUseEnv {
+	return &fakeSingleUseEnv{fakeReapEnv: e, sandbox: map[string]bool{"onyx": sandbox}, err: map[string]error{}}
+}
+
+// TestReapReapsAFinishedSandboxSeatOutsideTheCap guards gt-2fi5ek: a sandbox
+// seat is single-use, so a done, reusable, safe seat past its grace is not
+// capacity and is removed under the rig's directory cap.
+func TestReapReapsAFinishedSandboxSeatOutsideTheCap(t *testing.T) {
+	t.Parallel()
+	for _, dry := range []bool{true, false} {
+		env := eligible()
+		reusableSeat(env)
+		r := reapScanner(singleUseSeat(env, true), ReapOptions{DryRun: dry}).Tick("gastown")
+		want := OutcomeReaped
+		if dry {
+			want = OutcomeWouldReap
+		}
+		f, ok := reapFinding(t, r, "onyx")
+		if !ok || f.Outcome != want {
+			t.Fatalf("dry=%v: finding = %+v, %v; want %s", dry, f, ok, want)
+		}
+		if !strings.Contains(f.Detail, "single-use sandbox seat") {
+			t.Errorf("dry=%v: detail = %q; want the single-use seat named", dry, f.Detail)
+		}
+		if reaped := len(env.reaped) == 1; reaped == dry {
+			t.Fatalf("dry=%v: reaped = %v", dry, env.reaped)
+		}
+	}
+}
+
+// TestReapLeavesAReusableNonSandboxSeatAlone: a reusable seat the read says is
+// not a sandbox seat is capacity as before, and the read waits for the grace so
+// a pool seat inside it costs no gateway read (gt-2fi5ek).
+func TestReapLeavesAReusableNonSandboxSeatAlone(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	reusableSeat(env)
+	tick := singleUseSeat(env, false)
+	r := reapScanner(tick, ReapOptions{}).Tick("gastown")
+	if f, ok := reapFinding(t, r, "onyx"); ok {
+		t.Fatalf("finding = %+v; want a quiet skip", f)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v; want none", env.reaped)
+	}
+	if len(tick.reads) != 1 {
+		t.Fatalf("SandboxSeat read %v past the grace; want exactly one read", tick.reads)
+	}
+	inside := eligible()
+	reusableSeat(inside)
+	inside.idleSince["onyx"] = now.Add(-29 * time.Minute)
+	tick2 := singleUseSeat(inside, true)
+	reapScanner(tick2, ReapOptions{}).Tick("gastown")
+	if len(tick2.reads) != 0 {
+		t.Fatalf("SandboxSeat read %v inside the grace; want no read", tick2.reads)
+	}
+}
+
 // TestDirCapTrimReapsIdleCleanSandboxSeat guards gt-xlazq. The seat is reusable
 // capacity, which the pass leaves alone, and the host names it trimmable
 // because the rig is at its directory cap: the removal is what admits a new

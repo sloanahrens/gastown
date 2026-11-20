@@ -31,10 +31,18 @@ type ReapEnv interface {
 	Reap(rig, polecat string) error
 }
 
+// SingleUseEnv is the optional half of ReapEnv naming the rig's sandbox seats,
+// whose seat is never handed out again, so a finished one is not reusable capacity.
+type SingleUseEnv interface {
+	// SandboxSeat reports whether polecat is a single-use sandbox seat in rig;
+	// an error leaves the seat alone.
+	SandboxSeat(rig, polecat string) (bool, error)
+}
+
 // TrimEnv is the optional half of ReapEnv the directory-cap trim needs. The
-// reap pass never touches a reusable seat: that is a rig's capacity, and a
+// reap pass leaves a reusable seat alone: that is a rig's capacity, and a
 // quiet skip is how a healthy pool reads. A rig at its polecat directory cap is
-// the exception the trim exists for — the seats it holds are a directory apiece,
+// an exception the trim exists for — the seats it holds are a directory apiece,
 // so a sandbox seat whose work is finished and safe leaves the rig one short of
 // admitting new work for ever. A host that does not implement it never trims.
 type TrimEnv interface {
@@ -80,13 +88,13 @@ type ReapOptions struct {
 
 // reap decides whether one seat is removed. Vetoes run cheapest first; the
 // first to fire wins. A failed read is Unknown and never acts. A quiet veto
-// (someone else owns the seat, or it is reusable capacity) reports nothing.
-// left is the removals still allowed this tick.
+// (someone else owns the seat, or it is reusable capacity that is not
+// single-use) reports nothing. left is the removals still allowed this tick.
 //
 // trim is nil for every seat the directory-cap trim did not name, and holds the
 // idle time the trim order was sorted by for one it did. A trim seat may be
-// reusable: that veto is the only one the trim lifts, so every fact the pass
-// measures about the seat's work still decides (gt-xlazq).
+// reusable, as may a seat the host names single-use: those two lifts leave every
+// fact the pass measures about the seat's work deciding (gt-xlazq, gt-2fi5ek).
 func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bool) {
 	if s.reapEnv == nil || s.o.Reap == nil {
 		return Finding{}, false
@@ -150,16 +158,30 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 	// the case this pass exists for — un-reapable forever (gt-2knum). Safety
 	// still rests on the SAFE_TO_NUKE verdict, live git state, the vetoes
 	// above, and the longer ParkedGrace below.
-	if rv.Reusable && !parked && trim == nil {
-		return Finding{}, false // reusable capacity is never reaped
-	}
-
 	var since time.Time
 	var idleErr error
 	if trim != nil {
 		since, idleErr = trim.idle, trim.idleErr
 	} else {
 		since, idleErr = s.reapEnv.IdleSince(rig, name)
+	}
+	// A reusable seat is capacity the pool hands out again, so the pass leaves
+	// it alone unless it is a single-use sandbox seat past its grace; reading
+	// SandboxSeat last keeps a pool seat inside the grace free of gateway reads.
+	singleUse := false
+	if rv.Reusable && !parked && trim == nil {
+		su, ok := s.reapEnv.(SingleUseEnv)
+		if !ok || idleErr != nil || since.IsZero() || now.Sub(since) < s.o.Reap.Grace {
+			return Finding{}, false
+		}
+		sandbox, err := su.SandboxSeat(rig, name)
+		if err != nil {
+			return unknown("sandbox seat unreadable", err)
+		}
+		if !sandbox {
+			return Finding{}, false
+		}
+		singleUse = true
 	}
 	if idleErr != nil {
 		return unknown("idle-since unreadable", idleErr)
@@ -185,6 +207,9 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 		detail := fmt.Sprintf("idle %s, %s, git state live", now.Sub(since).Round(time.Minute), rv.Verdict)
 		if trim != nil {
 			detail += ", trimmed at the rig's directory cap"
+		}
+		if singleUse {
+			detail += ", single-use sandbox seat"
 		}
 		return detail
 	}
