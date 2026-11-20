@@ -24,11 +24,11 @@ func runNodeImagePrune(ctx context.Context, kube nodePruneKube, name, image stri
 	}
 	spares, err := nodeImagePruneSpares(listed)
 	if err != nil {
-		return nodePruneReport{}, err
+		return nodePruneReport{}, fmt.Errorf("node-prune: work out the spare digests: %w", err)
 	}
 	manifest, err := nodeImagePruneManifest(name, image, keep, apply, spares)
 	if err != nil {
-		return nodePruneReport{}, err
+		return nodePruneReport{}, fmt.Errorf("node-prune: build the job manifest: %w", err)
 	}
 	if err := kube.Apply(ctx, manifest); err != nil {
 		return nodePruneReport{}, fmt.Errorf("node-prune: apply job %s: %w", name, err)
