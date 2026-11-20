@@ -675,18 +675,22 @@ func ciCacheTrimScriptArgs(script string, v ciCacheVolume, minutes int64, extra 
 }
 
 // ciCacheTrimProgram is the program a volume's exec runs, as the arguments after
-// kubectl's "--": a dry run lists for every volume. A module volume runs its
-// module programs, which take the cap in both modes, since the module dry run
-// lists only what the apply would remove. An apply on an lru volume runs the LRU
-// program at the cap and the floor, an apply on a capped file volume passes the
-// cap, and an apply on an uncapped volume runs the age rule alone, exactly as the
-// trim always has. The LRU program's arguments are refused when they cannot be
-// built from digits, never passed on.
+// kubectl's "--": a dry run lists for every volume. An lru volume runs the LRU
+// program in both modes, at the cap and the floor: list mode for a dry run, so
+// the list is the files the apply would remove, and apply mode for the removal.
+// A module volume runs its module programs, which take the cap in both modes,
+// since the module dry run lists only what the apply would remove. An apply on a
+// capped file volume passes the cap, and an apply on an uncapped volume runs the
+// age rule alone, exactly as the trim always has. The LRU program's arguments
+// are refused when they cannot be built from digits, never passed on.
 func ciCacheTrimProgram(mode string, v ciCacheVolume, minutes int64) ([]string, error) {
 	capArg := strconv.FormatInt(v.capKiB, 10)
 	switch {
 	case v.lru && mode == agentconfig.DiskMaintenanceModeApply:
 		return ciCacheLRUArgv(agentconfig.DiskMaintenanceModeApply, v.root, minutes, v.capKiB, ciCacheLRUFloorMinutes)
+	case v.lru:
+		// The program's dry run is its list mode, not the daemon's mode name.
+		return ciCacheLRUArgv("list", v.root, minutes, v.capKiB, ciCacheLRUFloorMinutes)
 	case v.modules && mode != agentconfig.DiskMaintenanceModeApply:
 		return ciCacheTrimScriptArgs(ciCacheModuleListScript, v, minutes, capArg), nil
 	case v.modules:
@@ -722,7 +726,16 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 			v.name, ciCacheContainer, err, lastLine(string(stderr)))
 		return false
 	}
-	reply, err := parseCICacheTrimReply(stdout)
+	// A dry run of an lru volume reads the LRU list program's reply: one line per
+	// selected file before the three figures, each checked and counted against the
+	// volume root. An apply, and every other volume, reads the three lines alone.
+	// A refusal names its rule and line, never a path.
+	var reply ciCacheTrimReply
+	if v.lru && mode != agentconfig.DiskMaintenanceModeApply {
+		reply, err = parseCICacheTrimSelection(stdout, v.root)
+	} else {
+		reply, err = parseCICacheTrimReply(stdout)
+	}
 	if err != nil {
 		d.ciCacheTrimLogf("reply unreadable "+v.name, "disk_maintenance: ci cache trim: %s: the volume's reply could not be read: %v; nothing trimmed", v.name, err)
 		return false
@@ -735,6 +748,11 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	case mode == agentconfig.DiskMaintenanceModeApply:
 		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d %s, %s to %s (older than %s)",
 			v.name, reply.removed, v.unit(), before, after, ageText)
+	case v.lru:
+		// The list selects past the age and then, while the volume is over its
+		// cap, down to the floor, so the line names the cap, not the age alone.
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, %s to %s, against its cap of %s; nothing removed",
+			v.name, reply.removed, v.unit(), before, after, polecatimage.Human(v.capKiB*1024))
 	case v.capped():
 		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s) while it is over its cap of %s; nothing removed",
 			v.name, reply.removed, v.unit(), before, ageText, polecatimage.Human(v.capKiB*1024))

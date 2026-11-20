@@ -75,9 +75,10 @@ type ciCacheFixture struct {
 }
 
 // newCICacheFixture builds the fixture for mode: a running runner pod and a
-// reply of an apply's figures, which a test may replace before it ticks. The npm
-// and module volumes read under their caps by default, so they raise no item
-// unless a test makes them.
+// reply the ci-gocache volume's exec gets, the apply's three figures or, in a
+// dry run, a list reply, which a test may replace before it ticks. The npm and
+// module volumes read under their caps by default, so they raise no item unless
+// a test makes them.
 func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	t.Helper()
 	var logs bytes.Buffer
@@ -85,7 +86,7 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 		logs:      &logs,
 		now:       ciCacheTestStart,
 		pods:      cliReply{stdout: ciCachePodsRunningJSON},
-		exec:      ciCacheReply(40<<20, 3, 10<<20),
+		exec:      ciCacheGocacheExecReply(mode, 40<<20, 3, 10<<20),
 		npmExec:   ciCacheReply(512<<10, 0, 512<<10),
 		gomodExec: ciCacheReply(512<<10, 0, 512<<10),
 	}
@@ -150,6 +151,23 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 // ciCacheReply is the script's three-line reply for the given KiB figures.
 func ciCacheReply(beforeKiB, removed, afterKiB int64) cliReply {
 	return cliReply{stdout: fmt.Sprintf("before_kib=%d\nremoved=%d\nafter_kib=%d\n", beforeKiB, removed, afterKiB)}
+}
+
+// ciCacheGocacheExecReply is the reply a pass of mode gets from the ci-gocache
+// volume's exec. An apply reads the three figures alone. A dry run reads the LRU
+// list program's selection: one file line per removed file under the root, then
+// the three figures, with the size after equal to the size before as the list
+// program reports it. afterKiB is an apply's figure only.
+func ciCacheGocacheExecReply(mode string, beforeKiB, removed, afterKiB int64) cliReply {
+	if mode == agentconfig.DiskMaintenanceModeApply {
+		return ciCacheReply(beforeKiB, removed, afterKiB)
+	}
+	var b strings.Builder
+	for i := int64(0); i < removed; i++ {
+		fmt.Fprintf(&b, "%s/%02x/file-%d\n", ciCacheTestGocacheRoot, i, i)
+	}
+	fmt.Fprintf(&b, "before_kib=%d\nremoved=%d\nafter_kib=%d\n", beforeKiB, removed, beforeKiB)
+	return cliReply{stdout: b.String()}
 }
 
 // at moves the fixture's clock to offset after its first instant.
@@ -246,13 +264,19 @@ func TestCICacheTrimArgv(t *testing.T) {
 		if len(execs) != len(ciCacheVolumes) {
 			t.Fatalf("ran %d execs, want %d: one per volume", len(execs), len(ciCacheVolumes))
 		}
-		for _, arg := range execs[0].args {
-			if strings.Contains(arg, "-delete") {
-				t.Errorf("a dry run sent a deletion: %q", arg)
+		// The LRU program carries both branches and the mode argument selects one;
+		// a dry run passes list, and the other dry-run programs remove nothing.
+		// Scanning the argv for a deletion would match the LRU script's own apply
+		// branch.
+		for _, c := range execs {
+			for _, arg := range c.args {
+				if arg == agentconfig.DiskMaintenanceModeApply {
+					t.Errorf("a dry run passed the apply mode: %q", cacheTrimVerb(c.args))
+				}
 			}
 		}
 		for _, c := range f.cli.recorded() {
-			if strings.Contains(cacheTrimVerb(c.args), "delete") {
+			if strings.HasPrefix(cacheTrimVerb(c.args), "delete ") {
 				t.Errorf("a dry run ran a delete: %q", cacheTrimVerb(c.args))
 			}
 		}
@@ -303,68 +327,171 @@ func TestCICacheTrimGocacheRunsTheLRUProgram(t *testing.T) {
 	}
 }
 
-// TestCICacheTrimGocacheDryRunAndRefusedCap: a dry run still execs the list
-// program ci-gocache ran before the cap and reads its three-line reply, and a
-// ci_gocache_cap_bytes the patrol cannot act on trims nothing and names the
-// setting.
-func TestCICacheTrimGocacheDryRunAndRefusedCap(t *testing.T) {
+// TestCICacheTrimGocacheDryRunReadsTheListReply: a dry run of ci-gocache runs
+// the LRU program in list mode, at the setting's cap and the floor, and reads
+// its reply as a selection: the volume is reported with the reply's three
+// figures and the cap, and no file name is logged.
+func TestCICacheTrimGocacheDryRunReadsTheListReply(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
+	// The list program reports after equal to before; distinct figures here show
+	// the line prints each figure the reply carries rather than before twice.
+	const (
+		beforeKiB = int64(40 << 10)
+		afterKiB  = int64(39 << 10)
+	)
+	f.exec = cliReply{stdout: strings.Join([]string{
+		ciCacheTestGocacheRoot + "/00/old-1",
+		ciCacheTestGocacheRoot + "/ab/old-2",
+		fmt.Sprintf("before_kib=%d", beforeKiB),
+		"removed=2",
+		fmt.Sprintf("after_kib=%d", afterKiB),
+	}, "\n") + "\n"}
+	f.tick()
+	f.drain()
+
+	var got []string
+	for _, c := range f.execs() {
+		if slices.Contains(c.args, ciCacheTestGocacheRoot) {
+			got = c.args[4:]
+		}
+	}
+	want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+		"sh", "-c", ciCacheLRUTrimScript, "ci-cache-trim", "list", ciCacheTestGocacheRoot,
+		ciCacheTestMinutes, strconv.Itoa(40 << 20), strconv.Itoa(ciCacheLRUFloorMinutes)}
+	if !slices.Equal(got, want) {
+		t.Errorf("ci-gocache dry-run argv = %q\nwant %q", got, want)
+	}
+
+	wantLine := fmt.Sprintf("%s: would remove 2 files, %s to %s, against its cap of %s",
+		ciCacheGocacheVolume, polecatimage.Human(beforeKiB*1024), polecatimage.Human(afterKiB*1024), polecatimage.Human(40<<30))
+	if !strings.Contains(f.logs.String(), wantLine) {
+		t.Errorf("the dry run does not report the three figures and the cap (%q):\n%s", wantLine, f.logs.String())
+	}
+	for _, name := range []string{"old-1", "old-2"} {
+		if strings.Contains(f.logs.String(), name) {
+			t.Errorf("the dry run logged the file name %q:\n%s", name, f.logs.String())
+		}
+	}
+}
+
+// TestCICacheTrimGocacheDryRunRefusedReply: a dry-run reply the selection parser
+// refuses is a failed run for ci-gocache that does not stop the next volume, and
+// an apply keeps reading the three-line reply, refusing file lines.
+func TestCICacheTrimGocacheDryRunRefusedReply(t *testing.T) {
 	t.Parallel()
 
-	t.Run("a dry run runs the list program it ran before", func(t *testing.T) {
+	t.Run("a refused selection reply fails ci-gocache and not the next volume", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
+		// The reply says one file and names none: the selection parser refuses the
+		// count at line 1, where the file lines should have ended.
+		f.exec = ciCacheReply(40<<20, 1, 40<<20)
 		f.tick()
 		f.drain()
 
-		var got []string
-		for _, c := range f.execs() {
-			if slices.Contains(c.args, ciCacheTestGocacheRoot) {
-				got = c.args[4:]
-			}
+		if n := len(f.execs()); n != len(ciCacheVolumes) {
+			t.Errorf("ran %d execs, want %d: a refusal stops no other volume", n, len(ciCacheVolumes))
 		}
-		want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
-			"sh", "-c", ciCacheListScript, "ci-cache-trim", ciCacheTestGocacheRoot, ciCacheTestMinutes}
-		if !slices.Equal(got, want) {
-			t.Errorf("ci-gocache dry-run argv = %q\nwant %q", got, want)
+		logs := f.logs.String()
+		if want := "ci-gocache: the volume's reply could not be read: the selection reply fails its file count check at line 1"; !strings.Contains(logs, want) {
+			t.Errorf("logs do not name the refusal's rule and line (%q):\n%s", want, logs)
 		}
-		if want := ciCacheGocacheVolume + ": would remove 3 files"; !strings.Contains(f.logs.String(), want) {
-			t.Errorf("the three-line reply is not read and reported (%q):\n%s", want, f.logs.String())
+		if !strings.Contains(logs, ciCacheNpmVolume+": would remove") {
+			t.Errorf("the refusal stopped a volume after it:\n%s", logs)
+		}
+		if strings.Contains(logs, ciCacheGocacheVolume+": would remove") {
+			t.Errorf("a refused volume was reported as a reading:\n%s", logs)
+		}
+		if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(cacheTrimRetryInterval); !got.Equal(want) {
+			t.Errorf("retry at %v, want %v: a failed run is retried soon", got, want)
 		}
 	})
 
-	t.Run("a refused cap setting trims nothing", func(t *testing.T) {
+	t.Run("a refused file line is logged by its rule and line, never by its path", func(t *testing.T) {
 		t.Parallel()
-		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.d.patrolConfig.Patrols.DiskMaintenance.CIGocacheCapBytes = "0GB"
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
+		// A file line outside the volume root is refused rather than removed; the
+		// line's own path never reaches the log.
+		f.exec = cliReply{stdout: strings.Join([]string{
+			"/etc/not-the-cache/secret-name",
+			"before_kib=40960",
+			"removed=1",
+			"after_kib=40960",
+		}, "\n") + "\n"}
 		f.tick()
 		f.drain()
 
-		if n := len(f.cli.recorded()); n != 0 {
-			t.Errorf("a refused cap made %d kubectl call(s), want none", n)
+		logs := f.logs.String()
+		if want := "ci-gocache: the volume's reply could not be read: the selection reply fails its inside the root check at line 1"; !strings.Contains(logs, want) {
+			t.Errorf("logs do not name the refusal's rule and line (%q):\n%s", want, logs)
 		}
-		if !strings.Contains(f.logs.String(), "ci_gocache_cap_bytes") {
-			t.Errorf("logs do not name the refused setting:\n%s", f.logs.String())
+		if strings.Contains(logs, "secret-name") {
+			t.Errorf("the refusal logged the refused line's path:\n%s", logs)
+		}
+	})
+
+	t.Run("an apply still reads the three-line reply", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = cliReply{stdout: strings.Join([]string{
+			ciCacheTestGocacheRoot + "/00/old-1",
+			"before_kib=40960",
+			"removed=1",
+			"after_kib=40960",
+		}, "\n") + "\n"}
+		f.tick()
+		f.drain()
+
+		logs := f.logs.String()
+		if want := "the reply has 4 line(s), want three"; !strings.Contains(logs, want) {
+			t.Errorf("apply does not refuse the file lines (%q):\n%s", want, logs)
+		}
+		if strings.Contains(logs, ciCacheGocacheVolume+": removed ") {
+			t.Errorf("an apply read a selection reply as a removal:\n%s", logs)
 		}
 	})
 }
 
-// TestCICacheTrimGocacheRefusesAnArgvItCannotBuild: the LRU program's arguments
-// are built by ciCacheLRUArgv, which refuses a negative number; a row it refuses
-// is a failed run that execs nothing.
-func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
+// TestCICacheTrimGocacheRefusedCap: a ci_gocache_cap_bytes the patrol cannot act
+// on trims nothing and names the setting.
+func TestCICacheTrimGocacheRefusedCap(t *testing.T) {
 	t.Parallel()
 	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-	row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
-	at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+	f.d.patrolConfig.Patrols.DiskMaintenance.CIGocacheCapBytes = "0GB"
+	f.tick()
+	f.drain()
 
-	if ok := f.d.ciCacheTrimVolume(context.Background(), agentconfig.DiskMaintenanceModeApply, at, row, 12*time.Hour, 30<<20); ok {
-		t.Errorf("a row whose LRU arguments cannot be built reached a verdict")
+	if n := len(f.cli.recorded()); n != 0 {
+		t.Errorf("a refused cap made %d kubectl call(s), want none", n)
 	}
-	if n := len(f.execs()); n != 0 {
-		t.Errorf("a refused argv made %d exec(s), want none", n)
+	if !strings.Contains(f.logs.String(), "ci_gocache_cap_bytes") {
+		t.Errorf("logs do not name the refused setting:\n%s", f.logs.String())
 	}
-	if want := "the volume's program could not be built"; !strings.Contains(f.logs.String(), want) {
-		t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
+}
+
+// TestCICacheTrimGocacheRefusesAnArgvItCannotBuild: the LRU program's arguments
+// are built by ciCacheLRUArgv, which refuses a negative number in either mode; a
+// row it refuses is a failed run that execs nothing.
+func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{agentconfig.DiskMaintenanceModeApply, agentconfig.DiskMaintenanceModeDryRun} {
+		t.Run(mode, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, mode)
+			row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
+			at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
+
+			if ok := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour, 30<<20); ok {
+				t.Errorf("a row whose LRU arguments cannot be built reached a verdict")
+			}
+			if n := len(f.execs()); n != 0 {
+				t.Errorf("a refused argv made %d exec(s), want none", n)
+			}
+			if want := "the volume's program could not be built"; !strings.Contains(f.logs.String(), want) {
+				t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
+			}
+		})
 	}
 }
 
