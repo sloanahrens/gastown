@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -343,7 +344,7 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 	for _, pin := range pins {
 		urls[pin.Name] = pin.URL
 	}
-	fillImagePinAges(states, func(name string) string { return urls[name] }, d.imagePinsAge(ctx))
+	fillImagePinAges(states, func(name string) string { return urls[name] }, d.imagePinsAge(ctx), d.logger)
 	return states, nil
 }
 
@@ -351,8 +352,9 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 // without error whose Tip differs from its Pin is measured against that tip, at
 // the URL urlOf names for it. A pin at its tip has not aged against it, and a
 // state with an Err is already unreadable, so neither makes a call. A failed age
-// read is that pin's Err with no Age: an unknown age is never taken for fresh.
-func fillImagePinAges(states []ImagePinState, urlOf func(name string) string, ageOf func(url, pin, tip string) (time.Duration, error)) {
+// read is that pin's AgeErr with no Age, logged once through logger: the age
+// rule's input is missing, while the pin's commit count still reads.
+func fillImagePinAges(states []ImagePinState, urlOf func(name string) string, ageOf func(url, pin, tip string) (time.Duration, error), logger *log.Logger) {
 	for i := range states {
 		st := &states[i]
 		if st.Err != nil || st.Tip == st.Pin {
@@ -360,7 +362,11 @@ func fillImagePinAges(states []ImagePinState, urlOf func(name string) string, ag
 		}
 		age, err := ageOf(urlOf(st.Name), st.Pin, st.Tip)
 		if err != nil {
-			st.Err = err
+			st.AgeErr = err
+			// An Age left on the state is cleared with the failure, so the
+			// planner's age rule cannot fire on an age this read did not take.
+			st.Age = 0
+			logger.Printf("image_pins: the age of image pin %s could not be read: %v", st.Name, err)
 			continue
 		}
 		st.Age = age
