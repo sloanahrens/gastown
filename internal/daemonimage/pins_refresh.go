@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
@@ -14,6 +15,12 @@ import (
 // `gt daemon image pins` moves it: half the drift guard's bound, so a pin a few
 // commits behind keeps its line and the diff stays quiet.
 const PinRefreshBehind = MaxPinBehind / 2
+
+// PinRefreshAge is how much older than its source tip a pin's commit must be
+// before `gt daemon image pins` moves it, even when it trails by fewer than
+// PinRefreshBehind commits: two days inside the drift guard's MaxPinAge bound,
+// so a run moves a pin that has come close to the bound the guard refuses at.
+const PinRefreshAge = MaxPinAge - 2*24*time.Hour
 
 // seedRigOf names the seed-pins rig that is the same repository as each
 // image pins source the seed file also pins: the seed names beads where the
@@ -34,10 +41,12 @@ type PinChange struct {
 
 // PlanPinRefresh reads each pin's source tip through mainOf and git, and
 // returns the pins to move: those behind the tip by PinRefreshBehind commits or
-// more. A pin at the tip or closer than that is not returned. A pin whose tip
-// cannot be read, or that is not an ancestor of its tip (ahead or diverged), is
-// an error naming the source: the refresh never writes a pin the drift guard
-// would refuse, and never guesses at a pin it cannot place.
+// more, and those not at the tip whose commit is PinRefreshAge or more older
+// than it. A pin at the tip, or inside both bounds, is not returned. A pin
+// whose tip cannot be read, that is not an ancestor of its tip (ahead or
+// diverged), or whose commit time cannot be read, is an error naming the
+// source: the refresh never writes a pin the drift guard would refuse, and
+// never guesses at a pin it cannot place.
 func PlanPinRefresh(pins []Pin, mainOf MainOf, git bdbuild.Git) ([]PinChange, error) {
 	if git == nil {
 		return nil, errors.New("pin refresh: no git to read origin/main with")
@@ -67,7 +76,13 @@ func PlanPinRefresh(pins []Pin, mainOf MainOf, git bdbuild.Git) ([]PinChange, er
 			return nil, fmt.Errorf("pin refresh: %s pin %s: cannot count the commits to origin/main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(tip), dir, err)
 		}
 		if behind < PinRefreshBehind {
-			continue
+			age, err := commitAge(git, dir, pin.Commit, tip)
+			if err != nil {
+				return nil, fmt.Errorf("pin refresh: %s pin %s: cannot read its commit time against origin/main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(tip), dir, err)
+			}
+			if age < PinRefreshAge {
+				continue
+			}
 		}
 		changes = append(changes, PinChange{Name: pin.Name, From: pin.Commit, To: tip, Behind: behind})
 	}

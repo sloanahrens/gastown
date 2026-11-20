@@ -111,9 +111,17 @@ func newPinsRefreshRig(t *testing.T) *pinsRefreshRig {
 	return r
 }
 
+// pinsRefreshTipTime and pinsRefreshPinTime are the committer times every
+// fixture checkout answers with: the pin's commit a day older than the tip,
+// inside PinRefreshAge, so only the commit count moves a fixture pin.
+const (
+	pinsRefreshTipTime = "1780000000"
+	pinsRefreshPinTime = "1779913600"
+)
+
 // setSource answers the git reads for source name: its origin/main is tip, and
-// its pin is an ancestor of tip behind by behind commits. A pin at its tip needs
-// no further read.
+// its pin is an ancestor of tip behind by behind commits, a day older. A pin at
+// its tip needs no further read.
 func (r *pinsRefreshRig) setSource(name, tip string, behind int) {
 	dir, pin := r.src[name], pinsRefreshPin[name]
 	r.git.answer[dir+" rev-parse --verify origin/main^{commit}"] = tip + "\n"
@@ -122,6 +130,8 @@ func (r *pinsRefreshRig) setSource(name, tip string, behind int) {
 	}
 	r.git.answer[dir+" merge-base --is-ancestor "+pin+" "+tip] = ""
 	r.git.answer[dir+" rev-list --count "+pin+".."+tip] = strconv.Itoa(behind) + "\n"
+	r.git.answer[dir+" show -s --format=%ct "+tip] = pinsRefreshTipTime + "\n"
+	r.git.answer[dir+" show -s --format=%ct "+pin] = pinsRefreshPinTime + "\n"
 }
 
 // deps is the command's host seams for the rig: its git, identity path

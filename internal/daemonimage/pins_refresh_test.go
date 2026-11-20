@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // refreshTip is the origin/main commit each fixture source checkout holds: a
@@ -25,14 +26,16 @@ func refreshSourceDir(name string) string { return "/src/" + name }
 func refreshMainOf(p Pin) (string, error) { return refreshSourceDir(p.Name), nil }
 
 // refreshAnswers is the git answers a healthy source takes: its origin/main is
-// its tip, its pin is an ancestor of the tip, and the pin is behind by behind
-// commits.
-func refreshAnswers(name, pin string, behind int) map[string]string {
+// its tip, its pin is an ancestor of the tip, the pin is behind by behind
+// commits, and its commit is pinAge older than the tip's.
+func refreshAnswers(name, pin string, behind int, pinAge time.Duration) map[string]string {
 	dir, tip := refreshSourceDir(name), refreshTip[name]
 	return map[string]string{
 		dir + " rev-parse --verify origin/main^{commit}":     tip + "\n",
 		dir + " merge-base --is-ancestor " + pin + " " + tip: "",
 		dir + " rev-list --count " + pin + ".." + tip:        strconv.Itoa(behind) + "\n",
+		dir + " show -s --format=%ct " + tip:                 strconv.FormatInt(pinsMainAt.Unix(), 10) + "\n",
+		dir + " show -s --format=%ct " + pin:                 strconv.FormatInt(pinsMainAt.Add(-pinAge).Unix(), 10) + "\n",
 	}
 }
 
@@ -45,7 +48,7 @@ func TestRefreshPinsMovesOnlyTheStalePins(t *testing.T) {
 	behind := map[string]int{"bd": 30, "om": 5, "hm": 19, "devops": 20}
 	answer := make(map[string]string)
 	for _, p := range pins {
-		for k, v := range refreshAnswers(p.Name, p.Commit, behind[p.Name]) {
+		for k, v := range refreshAnswers(p.Name, p.Commit, behind[p.Name], time.Hour) {
 			answer[k] = v
 		}
 	}
@@ -61,6 +64,69 @@ func TestRefreshPinsMovesOnlyTheStalePins(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("PlanPinRefresh = %+v, want %+v", got, want)
+	}
+}
+
+// refreshPlan plans one om pin behind its tip by behind commits and age older.
+func refreshPlan(t *testing.T, behind int, age time.Duration) ([]PinChange, error) {
+	t.Helper()
+	pin := Pin{Name: "om", URL: testPinURL("organic-mechanic"), Commit: pinOMCommit}
+	answer := refreshAnswers("om", pinOMCommit, behind, age)
+	return PlanPinRefresh([]Pin{pin}, refreshMainOf, (&pinsGit{answer: answer, errs: map[string]error{}}).run)
+}
+
+// TestRefreshPinsMovesAPinWithinADayOfTheAgeBound drives the age clause: a pin
+// under PinRefreshBehind commits behind moves once its commit is PinRefreshAge
+// or more older than the tip's.
+func TestRefreshPinsMovesAPinWithinADayOfTheAgeBound(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		age  time.Duration
+		move bool
+	}{
+		{6 * 24 * time.Hour, true},
+		{4*24*time.Hour + 23*time.Hour, false},
+		{5 * 24 * time.Hour, true},
+	} {
+		got, err := refreshPlan(t, 3, tc.age)
+		if err != nil {
+			t.Fatalf("pin %s older: PlanPinRefresh: %v", tc.age, err)
+		}
+		var want []PinChange
+		if tc.move {
+			want = []PinChange{{Name: "om", From: pinOMCommit, To: refreshTip["om"], Behind: 3}}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("pin %s older: PlanPinRefresh = %+v, want %+v", tc.age, got, want)
+		}
+	}
+}
+
+// TestRefreshPinsKeepsAFreshPinUnderBothBounds checks a pin three commits
+// behind and a day older keeps its line.
+func TestRefreshPinsKeepsAFreshPinUnderBothBounds(t *testing.T) {
+	t.Parallel()
+	got, err := refreshPlan(t, 3, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("PlanPinRefresh: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("PlanPinRefresh = %+v, want no pin moved", got)
+	}
+}
+
+// TestRefreshPinsAgeNeverMovesAPinAtItsTip checks a pin at its tip keeps its
+// line: only the tip is answered, so an age read would fail rather than move it.
+func TestRefreshPinsAgeNeverMovesAPinAtItsTip(t *testing.T) {
+	t.Parallel()
+	pin := Pin{Name: "om", URL: testPinURL("organic-mechanic"), Commit: pinOMCommit}
+	git := &pinsGit{answer: map[string]string{refreshSourceDir("om") + " rev-parse --verify origin/main^{commit}": pinOMCommit + "\n"}, errs: map[string]error{}}
+	got, err := PlanPinRefresh([]Pin{pin}, refreshMainOf, git.run)
+	if err != nil {
+		t.Fatalf("PlanPinRefresh: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("PlanPinRefresh = %+v, want a pin at its tip kept", got)
 	}
 }
 
@@ -110,6 +176,14 @@ func TestRefreshPinsRefusesWhatItCannotPlace(t *testing.T) {
 			wantErr: []string{"bd", "cannot count"},
 		},
 		{
+			name:   "a commit time that cannot be read",
+			source: "om",
+			breakIt: func(g *pinsGit, dir, pin, _ string) {
+				g.errs[dir+" show -s --format=%ct "+pin] = errors.New("bad object")
+			},
+			wantErr: []string{"om", "cannot read its commit time"},
+		},
+		{
 			name:    "a source with no checkout",
 			source:  "om",
 			noMain:  true,
@@ -120,7 +194,8 @@ func TestRefreshPinsRefusesWhatItCannotPlace(t *testing.T) {
 			t.Parallel()
 			answer := make(map[string]string)
 			for _, p := range pins {
-				for k, v := range refreshAnswers(p.Name, p.Commit, 30) {
+				// Every pin trails under PinRefreshBehind, so its commit time is read.
+				for k, v := range refreshAnswers(p.Name, p.Commit, 5, time.Hour) {
 					answer[k] = v
 				}
 			}
@@ -140,6 +215,9 @@ func TestRefreshPinsRefusesWhatItCannotPlace(t *testing.T) {
 			got, err := PlanPinRefresh(pins, mainOf, git.run)
 			if err == nil {
 				t.Fatalf("PlanPinRefresh = %+v, want a refusal", got)
+			}
+			if len(got) != 0 {
+				t.Errorf("a refused refresh planned %+v, want no pin moved", got)
 			}
 			for _, w := range tc.wantErr {
 				if !strings.Contains(err.Error(), w) {
