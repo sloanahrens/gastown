@@ -184,6 +184,36 @@ func TestReapVetoes(t *testing.T) {
 	}
 }
 
+// TestReapVetoesASubmittedVerdict: a seat whose work waits for the landing
+// worker is quiet, keeps its branch and is never reaped — under the rig's
+// directory cap and at it, where the trim lifts only the reusable veto. The
+// record says run because gt done's record write is best-effort (gt-xs1ni).
+func TestReapVetoesASubmittedVerdict(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		env  func(*fakeReapEnv) Env
+	}{
+		{"under the directory cap", func(e *fakeReapEnv) Env { return e }},
+		{"named by the trim at the cap", func(e *fakeReapEnv) Env { return trimmable(e, "onyx") }},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			env := eligible()
+			env.intents["onyx"] = intent.Record{WorkBead: "gt-1"}
+			env.recovery["onyx"] = Recovery{Verdict: "SUBMITTED", Reason: "submitted-for-landing", Branch: "polecat/onyx/gt-1"}
+			r := reapScanner(row.env(env), ReapOptions{}).Tick("gastown")
+			if f, ok := reapFinding(t, r, "onyx"); ok {
+				t.Fatalf("want no reap finding for a submitted verdict, got %+v", f)
+			}
+			if len(env.reaped) != 0 {
+				t.Fatalf("Reap called for a submitted verdict: %v", env.reaped)
+			}
+		})
+	}
+}
+
 func TestReapGraceBoundaries(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
