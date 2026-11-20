@@ -114,3 +114,41 @@ func TestPlanLeavesOtherImagesAlone(t *testing.T) {
 		t.Errorf("Plan removed %v, want nothing: other repos, mixed or reference-less images are not candidates", ids(got))
 	}
 }
+
+// TestPlanReposSparesTheNeverCandidates pairs each image PlanRepos must spare
+// with one old unused control that must be returned, so an empty plan cannot pass.
+func TestPlanReposSparesTheNeverCandidates(t *testing.T) {
+	t.Parallel()
+	const digest = "localhost:5001/gastown-polecat@sha256:beef"
+	images := []Image{
+		img("used-by-id", 10, []string{"localhost:5001/gastown-polecat:aaa"}, nil),
+		img("used-by-digest", 11, nil, []string{digest}),
+		{ID: "no-age", Tags: []string{"localhost:5001/gastown-polecat:bbb"}, Unknown: true},
+		img("mixed", 12, []string{"localhost:5001/gastown-polecat:ccc", "localhost:5001/gastown-daemon:ccc"}, nil),
+		img("dev", 13, []string{"localhost:5001/gastown-polecat:dev"}, nil),
+		img("old", 100, []string{"localhost:5001/gastown-polecat:ddd"}, nil),
+	}
+	inUse := map[string]bool{"used-by-id": true, digest: true}
+	got := ids(PlanRepos(images, inUse, 0, []string{"gastown-polecat", "gastown-daemon"}))
+	if want := []string{"old"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("PlanRepos removed %v, want only %v: an in-use, unknown-age, mixed-repository or dev image is never returned", got, want)
+	}
+}
+
+// TestPlanReposSparesTheUsedWithoutCounting checks that an image in use is
+// skipped without taking one of the keep slots, so the next unused image is kept.
+func TestPlanReposSparesTheUsedWithoutCounting(t *testing.T) {
+	t.Parallel()
+	images := []Image{
+		img("unused-1", 1, []string{"localhost:5001/gastown-polecat:a1"}, nil),
+		img("unused-2", 2, []string{"localhost:5001/gastown-polecat:a2"}, nil),
+		img("used", 3, []string{"localhost:5001/gastown-polecat:a3"}, nil),
+		img("unused-3", 4, []string{"localhost:5001/gastown-polecat:a4"}, nil),
+		img("unused-4", 5, []string{"localhost:5001/gastown-polecat:a5"}, nil),
+	}
+	inUse := map[string]bool{"used": true}
+	got := ids(PlanRepos(images, inUse, 3, []string{Repo}))
+	if want := []string{"unused-4"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("PlanRepos keep 3 removed %v, want only %v: the in-use image must not count toward keep", got, want)
+	}
+}
