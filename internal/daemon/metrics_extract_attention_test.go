@@ -31,7 +31,9 @@ func metricsExtractRig(t *testing.T, now time.Time) *attentionFixture {
 
 // writeExtractDay writes day's directory under town's metrics root with footer
 // as its footer.json and a healthy landings.csv; an empty footer writes no
-// footer file.
+// footer file. The footer's mtime is the day's own midnight, so a case that
+// measures the extract's age does not read the host clock; a case that needs
+// another write time sets it with os.Chtimes after this.
 func writeExtractDay(t *testing.T, town, day, footer string) {
 	t.Helper()
 	dir := filepath.Join(town, ".runtime", "metrics", day)
@@ -42,7 +44,15 @@ func writeExtractDay(t *testing.T, town, day, footer string) {
 	if footer == "" {
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, metricsExtractFooterName), []byte(footer), 0o644); err != nil {
+	stamp, err := time.Parse(time.DateOnly, day)
+	if err != nil {
+		t.Fatalf("day %q: %v", day, err)
+	}
+	path := filepath.Join(dir, metricsExtractFooterName)
+	if err := os.WriteFile(path, []byte(footer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -112,8 +122,8 @@ const healthyLandings = "bead,rig,sp_minutes\nb1,gastown,8.0\n"
 
 // TestMetricsExtractAttentionStale: the newest day directory older than the
 // stale window raises one item naming that day, and a day within the window
-// raises none. The age is measured from the day's own midnight, so the bound
-// is four rows: old, within, exactly at it, and a minute past it.
+// raises none. writeExtractDay stamps each footer at its day's own midnight, so
+// the bound is four rows: old, within, exactly at it, and a minute past it.
 func TestMetricsExtractAttentionStale(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -167,6 +177,107 @@ func TestMetricsExtractAttentionStale(t *testing.T) {
 			}
 			if !strings.Contains(items[0].Summary, tc.want) {
 				t.Errorf("summary = %q, want it to name the day %s", items[0].Summary, tc.want)
+			}
+		})
+	}
+}
+
+// TestMetricsExtractStaleIsMeasuredFromTheWrite: the stale item ages the newest
+// extract from its footer's write time, not its day's midnight (gt-thzlac). A
+// footer written 21:05 on the evening of its day is five hours old at 02:01 the
+// next morning and raises nothing; at 23:30 the next night it is 26h25m old and
+// raises the item naming that write age.
+func TestMetricsExtractStaleIsMeasuredFromTheWrite(t *testing.T) {
+	t.Parallel()
+	const day = "2026-11-19"
+	written := time.Date(2026, 11, 19, 21, 5, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool   // whether the stale item is raised
+		age  string // the write age the summary must carry, when wanted
+	}{
+		{
+			name: "five hours after the write",
+			now:  time.Date(2026, 11, 20, 2, 1, 0, 0, time.UTC),
+		},
+		{
+			name: "twenty-six hours and twenty-five minutes after the write",
+			now:  time.Date(2026, 11, 20, 23, 30, 0, 0, time.UTC),
+			want: true,
+			age:  "26h25m",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := metricsExtractRig(t, tc.now)
+			writeExtractDay(t, f.d.config.TownRoot, day, cleanFooter)
+			path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metricsExtractFooterName)
+			if err := os.Chtimes(path, written, written); err != nil {
+				t.Fatal(err)
+			}
+			items := f.collect(t, f.src.collectMetricsExtract)
+			if !tc.want {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none", items)
+				}
+				return
+			}
+			if len(items) != 1 || items[0].Key != metricsExtractStaleKey {
+				t.Fatalf("items = %+v, want the one stale item", items)
+			}
+			for _, want := range []string{day, tc.age} {
+				if !strings.Contains(items[0].Summary, want) {
+					t.Errorf("summary = %q, want it to carry %q", items[0].Summary, want)
+				}
+			}
+		})
+	}
+}
+
+// TestMetricsExtractStaleReadsTheFooterWriteTime: the read carries the newest
+// day's footer.json mtime as the extract's write time, and leaves it zero when
+// the footer cannot be statted, so the age falls back to the day's midnight.
+func TestMetricsExtractStaleReadsTheFooterWriteTime(t *testing.T) {
+	t.Parallel()
+	const day = "2026-11-19"
+	written := time.Date(2026, 11, 19, 21, 5, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		footer    bool
+		wantWrite time.Time // the write time the read must carry
+		wantErr   bool
+	}{
+		{name: "a footer whose mtime is set", footer: true, wantWrite: written},
+		{name: "a footer that cannot be statted leaves the write time zero", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			dir := filepath.Join(town, ".runtime", "metrics", day)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, metricsExtractLandingsName), []byte(healthyLandings), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.footer {
+				path := filepath.Join(dir, metricsExtractFooterName)
+				if err := os.WriteFile(path, []byte(cleanFooter), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(path, written, written); err != nil {
+					t.Fatal(err)
+				}
+			}
+			read, err := readMetricsExtract(town, metricsExtractTick)
+			if gotErr := err != nil; gotErr != tc.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tc.wantErr)
+			}
+			if !read.written.Equal(tc.wantWrite) {
+				t.Errorf("written = %v, want %v", read.written, tc.wantWrite)
 			}
 		})
 	}

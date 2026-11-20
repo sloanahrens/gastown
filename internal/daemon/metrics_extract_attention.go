@@ -19,11 +19,12 @@ import (
 )
 
 const (
-	// metricsExtractStaleAfter is how old the newest extract's day may be before
-	// the queue says the daily run has stopped. The extract writes one day's
-	// directory per day, named for its date, so the age is measured from that
-	// date's midnight: 26 hours lets the day's run arrive late the next morning
-	// and raises the day once 02:00 has passed with no newer one.
+	// metricsExtractStaleAfter is how long the newest extract may sit unrewritten
+	// before the queue says the daily run has stopped: the newest extract was
+	// written more than 26 hours ago. The extract writes about every 24h50m, in
+	// the evening of its day, so the bound leaves about an hour after the next
+	// expected write. A read whose footer cannot be statted falls back to the
+	// day's midnight.
 	metricsExtractStaleAfter = 26 * time.Hour
 
 	// metricsExtractFooterName is the file the extract writes last into a day's
@@ -65,6 +66,9 @@ type metricsExtractRead struct {
 	// day is midnight of the newest day directory, in the clock's location; the
 	// zero time when no day could be found.
 	day time.Time
+	// written is the modification time of the newest day's footer.json, the file
+	// the extract writes last; the zero time when that footer cannot be statted.
+	written time.Time
 	// gaps is the newest day's footer's gaps, each a (source, reason) pair.
 	gaps [][]string
 	// landingsRows is the row count of the newest day's landings.csv, for the
@@ -91,17 +95,18 @@ type metricsExtractRead struct {
 
 // collectMetricsExtract raises the metrics extract items: the newest day, its
 // footer and its landings' estimate column, read from the town's
-// .runtime/metrics and its estimate log. A newest day older than
-// metricsExtractStaleAfter raises the stale item naming the day; a newest
-// footer with any gaps raises the gaps item naming the count and the first gap;
-// a newest day whose rows all lack sp_minutes while the log holds at least
-// metricsExtractEstimateFloor estimates since that day raises the no-estimates
-// item naming both counts, and rows that all lack it beside a log with lines in
-// that day's window that do not decode raise that same item with the line
-// counts; a directory or log that cannot be read raises the unreadable item,
-// never nothing. An unreadable extract that still names its day raises the
-// stale item beside the unreadable one: an old extract is old whether or not
-// its footer reads.
+// .runtime/metrics and its estimate log. A newest extract written more than
+// metricsExtractStaleAfter ago — or, when its footer cannot be statted, a
+// newest day older than that — raises the stale item naming the day and the
+// write age; a newest footer with any gaps raises the gaps item naming the
+// count and the first gap; a newest day whose rows all lack sp_minutes while
+// the log holds at least metricsExtractEstimateFloor estimates since that day
+// raises the no-estimates item naming both counts, and rows that all lack it
+// beside a log with lines in that day's window that do not decode raise that
+// same item with the line counts; a directory or log that cannot be read
+// raises the unreadable item, never nothing. An unreadable extract that still
+// names its day raises the stale item beside the unreadable one: an old extract
+// is old whether or not its footer reads.
 func (s *attentionSources) collectMetricsExtract(context.Context) ([]attention.Item, error) {
 	// The production sources always carry the read (attentionSources, pinned by
 	// TestMetricsExtractAttentionIsWiredAndRegistered). A hand-built sources
@@ -113,13 +118,19 @@ func (s *attentionSources) collectMetricsExtract(context.Context) ([]attention.I
 	read, err := s.metricsExtract(s.now)
 	var items []attention.Item
 	if !read.day.IsZero() {
-		if age := s.now.Sub(read.day); age > metricsExtractStaleAfter {
+		written := read.written
+		if written.IsZero() {
+			// The footer could not be statted; the read still names the day, so
+			// the age falls back to the day's midnight.
+			written = read.day
+		}
+		if age := s.now.Sub(written); age > metricsExtractStaleAfter {
 			items = append(items, attention.Item{
 				Key:      metricsExtractStaleKey,
 				Kind:     attention.KindMetricsExtract,
 				Severity: attention.SeverityMedium,
 				Summary: fmt.Sprintf(
-					"metrics extract: the newest day %s is %s old, past %s; the daily extract has not run since",
+					"metrics extract: the newest extract (%s) was written %s ago, past %s; the daily extract has not run since",
 					read.day.Format(time.DateOnly), parkedAge(age), metricsExtractStaleAfter),
 			})
 		}
@@ -210,6 +221,12 @@ func readMetricsExtract(townRoot string, now time.Time) (metricsExtractRead, err
 	read := metricsExtractRead{day: day}
 	dayDir := filepath.Join(root, day.Format(time.DateOnly))
 	path := filepath.Join(dayDir, metricsExtractFooterName)
+	// The footer's mtime is when the extract finished the day: written sets the
+	// stale item's age. A footer that cannot be statted leaves it zero, and the
+	// stale item falls back to the day's midnight.
+	if info, err := os.Stat(path); err == nil {
+		read.written = info.ModTime()
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return read, fmt.Errorf("reading %s: %w", path, err)
