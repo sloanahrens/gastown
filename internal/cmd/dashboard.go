@@ -571,7 +571,11 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		SeatRoster:     func() dashboard.SeatRoster { return dashboardSeatRoster(poolLiveFor(townRoot)) },
 		Queue:          func() *dashboard.Queue { return queue.read(time.Now()) },
 		Bead:           queue.detail,
-		RigTheme:       newDashRigThemes(townRoot),
+		// The Dolt panel's sections register from their own init; this reads
+		// them every half minute, since the readings are live server state.
+		Dolt:      dashboardDolt(townRoot),
+		DoltEvery: 30 * time.Second,
+		RigTheme:  newDashRigThemes(townRoot),
 		Trend: func() *dashboard.Trend {
 			now := time.Now()
 			// One scan serves both windows: the trend buckets the last 24
