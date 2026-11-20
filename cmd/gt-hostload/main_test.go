@@ -28,6 +28,15 @@ func read(load, ncpu string) func(string, ...string) (string, error) {
 	}
 }
 
+// TestSysctlRefusesACommandThatCannotStart covers the exec error return: a
+// path that cannot exist fails before any process starts (gt-emjwp9).
+func TestSysctlRefusesACommandThatCannotStart(t *testing.T) {
+	t.Parallel()
+	if out, err := sysctl("/nonexistent-gt-hostload-sysctl", "-n", "vm.loadavg"); err == nil || out != "" {
+		t.Errorf("sysctl = %q, %v: want an error and no output", out, err)
+	}
+}
+
 // TestHostLoadRunWritesOneLine: the two sysctl answers become one line in the
 // 20th's file under --dir, and a clean run prints nothing (gt-emjwp9).
 func TestHostLoadRunWritesOneLine(t *testing.T) {
