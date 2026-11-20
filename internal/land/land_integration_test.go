@@ -428,9 +428,13 @@ func pushCandidate(t *testing.T, l *Lander, f *landFixture, branch string) error
 // its store and the candidate push passes; with no BEADS_DIR the same hook
 // refuses that push (gt-xg33gs). The empty case also proves the hook runs at
 // all, so the first case is not green because the hook was never invoked.
+//
+// The test pins BEADS_DIR empty itself rather than leaning on the hermetic
+// harness to scrub it, so neither case reads the caller's environment: an
+// empty value is unset to the hook's `[ -n "$BEADS_DIR" ]`, and the handle's
+// own entry lands after the process's, where git keeps the last one.
 func TestIntegrationLandBeadsDirReachesPrePush(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("BEADS_DIR", "")
 	f := newRealLandFixture(t)
 	f.base = prePushHookOnMain(t, f, "#!/bin/sh\n[ -n \"$BEADS_DIR\" ] || exit 1\n")
 	l := f.lander()
@@ -452,10 +456,10 @@ func TestIntegrationLandBeadsDirReachesPrePush(t *testing.T) {
 // TestIntegrationLandBeadsDirKeepsThePrePushFence: a tracked pre-push that
 // refuses every push still refuses it with BeadsDir set. The landing exports
 // BEADS_DIR to its handles; it never switches the fence off (gt-xg33gs,
-// gt-sjwr7a).
+// gt-sjwr7a). BEADS_DIR is pinned empty first so the case cannot inherit one
+// from the caller (gt-xg33gs).
 func TestIntegrationLandBeadsDirKeepsThePrePushFence(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("BEADS_DIR", "")
 	f := newRealLandFixture(t)
 	f.base = prePushHookOnMain(t, f, "#!/bin/sh\nexit 1\n")
 	l := f.lander()
@@ -467,10 +471,10 @@ func TestIntegrationLandBeadsDirKeepsThePrePushFence(t *testing.T) {
 
 // TestIntegrationLandBeadsDirReachesTheReadHandle: the handle the landing's
 // reads and refs/landed push are made through carries BEADS_DIR too, so the
-// tracked pre-push passes there; with none it refuses (gt-xg33gs).
+// tracked pre-push passes there; with none it refuses (gt-xg33gs). BEADS_DIR
+// is pinned empty first, for the same reason as the candidate test.
 func TestIntegrationLandBeadsDirReachesTheReadHandle(t *testing.T) {
-	t.Parallel()
-
+	t.Setenv("BEADS_DIR", "")
 	f := newRealLandFixture(t)
 	prePushHookOnMain(t, f, "#!/bin/sh\n[ -n \"$BEADS_DIR\" ] || exit 1\n")
 	gitT(t, f.repo, "pull", "-q", "--ff-only", "origin", "main")
