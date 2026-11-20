@@ -131,7 +131,7 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			}
 			// Both questions were answered, so the gateway is no longer silent.
 			h.d.clearGatewayTally(rec.Rig, rec.Polecat)
-			end := h.endHeldSandbox
+			end := h.endHeldSandboxCopyingOutbox
 			if isStoppedPhase(phase) {
 				end = h.endStoppedSandbox
 			}
@@ -254,15 +254,27 @@ func (h *patrolScanHost) withSeatLock(rig, name string, fn func() error) error {
 	return lock(filepath.Join(h.town(), rig), name, fn)
 }
 
-// endHeldSandbox ends a held sandbox the gateway still has, whose seat has
+// endHeldSandboxCopyingOutbox is the patrol pass's end of a held sandbox: it
+// copies the seat's outbox to the host first (gt-qem69c). The landing's own end
+// copies the outbox before it gets here, so it calls endHeldSandbox, which does
+// not.
+func (h *patrolScanHost) endHeldSandboxCopyingOutbox(caller, name string, rec session.SandboxRecord) string {
+	return h.endHeldSandboxWith(caller, name, rec, true)
+}
+
+func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.SandboxRecord) string {
+	return h.endHeldSandboxWith(caller, name, rec, false)
+}
+
+// endHeldSandboxWith ends a held sandbox the gateway still has, whose seat has
 // ended: the sandbox answers whether its ended marker is set, and when it is,
-// the record deleter copies the seat's transcripts and deletes the sandbox and
-// its seat token. It returns the reason the sandbox and its record are kept, or
+// the outbox is copied first when copyOutbox is set, then the record deleter
+// copies the seat's transcripts and deletes the sandbox and its seat token. It returns the reason the sandbox and its record are kept, or
 // "" when the sandbox is deleted. Every answer short of a set marker, every
 // failure, and a binary with no deleter linked keep the sandbox and its record,
 // so a seat still starting or crashed is never deleted here. caller labels the
 // delete it logs, since both the record pass and the landing's end call it.
-func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.SandboxRecord) string {
+func (h *patrolScanHost) endHeldSandboxWith(caller, name string, rec session.SandboxRecord, copyOutbox bool) string {
 	ended, err := h.sandboxEndedMarkerSet(rec.Gateway, name)
 	if err != nil {
 		return "cannot ask its sandbox for its ended marker: " + err.Error()
@@ -277,11 +289,11 @@ func (h *patrolScanHost) endHeldSandbox(caller, name string, rec session.Sandbox
 		return "no sandbox deleter is linked, so its ended sandbox cannot be deleted"
 	}
 	// A files-mode seat's result lives only in its outbox, which the deleter
-	// does not copy, so the outbox is copied to the host first; a copy that
-	// fails keeps the sandbox with the copy's reason (gt-qem69c). A record that
-	// names no seat has no outbox to read.
-	if rec.Rig != "" && rec.Polecat != "" {
-		if reason := h.copySeatOutbox(rec.Rig, rec.Polecat, rec.Gateway); reason != "" {
+	// does not copy, so the patrol copies it first from the record it holds, with
+	// no second read of the record; a copy that fails keeps the sandbox with the
+	// copy's reason (gt-qem69c). A record that names no seat has no outbox to read.
+	if copyOutbox && rec.Rig != "" && rec.Polecat != "" {
+		if reason := h.copySeatOutboxFor(rec); reason != "" {
 			return reason
 		}
 	}
