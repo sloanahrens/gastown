@@ -193,3 +193,52 @@ func TestSpecChildrenReadFailuresAreErrors(t *testing.T) {
 		}
 	}
 }
+
+// chunkReadSpy counts the reads of each id a children read is given.
+type chunkReadSpy struct{ counts map[string]int }
+
+func (s *chunkReadSpy) read(_ string, ids []string) (map[string][]*beads.Issue, error) {
+	kids := make(map[string][]*beads.Issue, len(ids))
+	for _, id := range ids {
+		s.counts[id]++
+		kids[id] = nil
+	}
+	return kids, nil
+}
+
+// A loop that stops after the third candidate reads the first chunk and no id of the second (gt-4n5f3c).
+func TestTickEffChunkNeverAskedNeverRead(t *testing.T) {
+	t.Parallel()
+	cands := specCandidateBoardRead(t, specCandidateFixture()).Candidates[:20]
+	counts := map[string]int{}
+	children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil, (&chunkReadSpy{counts: counts}).read)
+	for _, c := range cands[:3] {
+		if _, err := children(c.Spec.ID); err != nil {
+			t.Fatalf("children %s: %v", c.Spec.ID, err)
+		}
+	}
+	for _, c := range cands[:specChildrenChunkSize] {
+		if counts[c.Spec.ID] != 1 {
+			t.Errorf("%s read %d times; want once, in the first chunk", c.Spec.ID, counts[c.Spec.ID])
+		}
+	}
+	if len(counts) != specChildrenChunkSize {
+		t.Errorf("read ids %v; want only the first chunk", counts)
+	}
+}
+
+// An id the loop asks for twice is read once; dropping the served-from-memory check in specCandidateChildren turns this red (gt-4n5f3c).
+func TestTickEffChunkReadOncePerTick(t *testing.T) {
+	t.Parallel()
+	cands := specCandidateBoardRead(t, specCandidateFixture()).Candidates[:20]
+	counts := map[string]int{}
+	children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil, (&chunkReadSpy{counts: counts}).read)
+	for i := 0; i < 2; i++ {
+		if _, err := children(cands[3].Spec.ID); err != nil {
+			t.Fatalf("ask %d for %s: %v", i+1, cands[3].Spec.ID, err)
+		}
+	}
+	if got := counts[cands[3].Spec.ID]; got != 1 {
+		t.Errorf("%s read %d times; want once, the second ask served from memory", cands[3].Spec.ID, got)
+	}
+}
