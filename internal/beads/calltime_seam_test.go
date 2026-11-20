@@ -23,7 +23,7 @@ func (c *fakeCallClock) advance(d time.Duration) { c.now = c.now.Add(d) }
 func TestCallTimeSeam(t *testing.T) {
 	tests := []struct {
 		name      string
-		args      []string         // the call runBdOnce is asked to run
+		args      []string        // the call runBdOnce is asked to run
 		durations []time.Duration // time each subprocess spends, in order
 		answer    func(args []string) reply
 		wantErr   bool
