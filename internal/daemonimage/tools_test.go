@@ -214,6 +214,32 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 	}
 }
 
+// TestBuildToolsStampsHMWithItsCommit: hm's build carries the whole -ldflags value
+// of the variable HMVersionVar names, set to the commit the pin resolved, so the
+// image's `hm version` answers the skew monitor; an empty HMVersionVar builds hm
+// with the strip flags alone. The symbol is made up: no file here spells hm's
+// module path (gt-q81f1j).
+func TestBuildToolsStampsHMWithItsCommit(t *testing.T) {
+	t.Parallel()
+	const versionVar = "example.test/hm/internal/cli.Version"
+	for _, tc := range []struct{ name, set, want string }{
+		{"a named variable", versionVar, "-s -w -X " + versionVar + "=" + testHMCommit},
+		{"no variable", "", "-s -w"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b, run, _ := toolsBuilder(t)
+			b.HMVersionVar = tc.set
+			if _, err := b.BuildTools(context.Background()); err != nil {
+				t.Fatalf("BuildTools: %v", err)
+			}
+			if got := argAfter(run.calls[0].argv, "-ldflags"); got != tc.want {
+				t.Errorf("hm -ldflags = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources: each refusal names the pin
 // or the checkout the operator must fix, and runs nothing and writes nothing.
 func TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources(t *testing.T) {

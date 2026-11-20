@@ -160,6 +160,8 @@ type Builder struct {
 	// two reporters are built from, and its pinned commit.
 	HMSrc, HMCommit         string
 	DevopsSrc, DevopsCommit string
+	// HMVersionVar is the -X target the hm build stamps HMCommit into; empty builds hm unstamped.
+	HMVersionVar string
 	// MangoSrc is the mango checkout the image's mango is built from, and
 	// MangoCommit the commit it is built at. mango is compiled in a container of
 	// mangoBuildImage, never cross-compiled on the host, because its go-api
