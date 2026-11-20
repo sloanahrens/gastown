@@ -660,3 +660,28 @@ func TestReadBuildActionHeader(t *testing.T) {
 		t.Error("readBuildActionHeader read through a failing reader")
 	}
 }
+
+// TestBuildCacheInUse: build-cache files inside the age floor or dated after the clock are in use, old
+// ones are not; module-cache and escaping paths never are; an unset mtime or zero clock is kept (gt-40899r).
+func TestBuildCacheInUse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, rel  string
+		mtime, now time.Time
+		want       bool
+	}{
+		{"a build file used 10 minutes ago", "gocache/ab/x-d", at(24).Add(-10 * time.Minute), at(24), true},
+		{"a build file used 3 hours ago", "gocache/ab/x-d", at(21), at(24), false},
+		{"a module-cache file used 10 minutes ago", "gomodcache/dep", at(24).Add(-10 * time.Minute), at(24), false},
+		{"a module-cache file used 3 hours ago", "gomodcache/dep", at(21), at(24), false},
+		{"a build file dated after the clock", "gocache/ab/x-d", at(25), at(24), true},
+		{"a build file with no mtime", "gocache/ab/x-d", time.Time{}, at(24), true},
+		{"a build file under a zero clock", "gocache/ab/x-d", at(21), time.Time{}, true},
+		{"a path that escapes the claim", "gocache/../gomodcache/dep", at(24).Add(-10 * time.Minute), at(24), false},
+	}
+	for _, tc := range tests {
+		if got := BuildCacheInUse(tc.rel, tc.mtime, tc.now); got != tc.want {
+			t.Errorf("%s: BuildCacheInUse(%q, %v, %v) = %v, want %v", tc.name, tc.rel, tc.mtime, tc.now, got, tc.want)
+		}
+	}
+}
