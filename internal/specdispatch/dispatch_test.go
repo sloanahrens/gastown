@@ -755,6 +755,13 @@ func TestBudgetPictureCarriesTheDeadHookedClasses(t *testing.T) {
 	if got, want := b.Picture(), "deepseek-flash 2/2, claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() after SetLive = %q, want %q", got, want)
 	}
+	// The picture renders classes only with a dead-hooked count, so the cleared
+	// classes are checked on the seat: SetLive must not keep a stale class map.
+	for _, s := range b.Seats {
+		if s.DeadClasses != nil {
+			t.Errorf("SetLive kept DeadClasses %v on %s, want nil", s.DeadClasses, s.Agent)
+		}
+	}
 }
 
 // A release gives back only the charge a bump made. A bump charges the total
