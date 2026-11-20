@@ -521,9 +521,9 @@ func TestOverrunPassHealthRunning(t *testing.T) {
 		value     string
 		detail    string
 	}{
-		{"under three intervals is green", ago(time.Hour), 80 * time.Second, Green, "running 1m20s/1m", ""},
-		{"three intervals is degraded", ago(time.Hour), 3 * time.Minute, Degraded, "running 3m/1m", "pass running for 3m"},
-		{"six intervals is red", ago(time.Hour), 6 * time.Minute, Red, "running 6m/1m", "pass running for 6m"},
+		{"under three intervals is green", ago(time.Minute), 80 * time.Second, Green, "running 1m20s/1m", ""},
+		{"three intervals is degraded", ago(time.Minute), 3 * time.Minute, Degraded, "running 3m/1m", "pass running for 3m"},
+		{"six intervals is red", ago(time.Minute), 6 * time.Minute, Red, "running 6m/1m", "pass running for 6m"},
 		{"a first pass has no earlier end", time.Time{}, 80 * time.Second, Green, "running 1m20s/1m", ""},
 	}
 	for _, tc := range cases {
@@ -546,6 +546,58 @@ func TestOverrunPassHealthNotRunning(t *testing.T) {
 	got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
 	if got.Verdict != Degraded || got.Value != "2m/1m" || got.Detail != "last fired 2m ago, interval 1m" {
 		t.Errorf("tick:overrun_guard = %+v, want DEGRADED 2m/1m last fired 2m ago", got)
+	}
+}
+
+// gt-6gugus: a running tick whose last end is six intervals old is red, even
+// when its start marker says a pass is in flight; a last end one interval old
+// leaves the running rule to judge it.
+func TestOverrunPassHealthStaleLastRun(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		lastFired time.Time
+		want      Verdict
+		value     string
+		detail    string
+	}{
+		{"last end seven intervals ago is red", ago(7 * time.Minute), Red, "running 30s/1m", "last pass ended 7m ago"},
+		{"last end one interval ago is green", ago(time.Minute), Green, "running 30s/1m", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: tc.lastFired, RunningSince: ago(30 * time.Second)}}
+			got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
+			if got.Verdict != tc.want || got.Value != tc.value || got.Detail != tc.detail {
+				t.Errorf("tick:overrun_guard = %+v, want %s %q detail %q", got, tc.want, tc.value, tc.detail)
+			}
+		})
+	}
+}
+
+// gt-6gugus: a pass that has run ten minutes is red however recent its last
+// end, so a wedged pass never reads green.
+func TestOverrunPassHealthWedged(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: ago(10 * time.Second), RunningSince: ago(10 * time.Minute)}}
+	got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
+	if got.Verdict != Red || got.Value != "running 10m/1m" || got.Detail != "pass running for 10m" {
+		t.Errorf("tick:overrun_guard = %+v, want RED running 10m/1m pass running for 10m", got)
+	}
+}
+
+// gt-6gugus: with no pass in flight, a last end six intervals old stays red
+// as before.
+func TestOverrunPassHealthStaleLastRunNotRunning(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.ticks = []Tick{{Name: "overrun_guard", Interval: time.Minute, LastFired: ago(7 * time.Minute)}}
+	got := field(t, Compute(context.Background(), inputs(f)), "tick:overrun_guard")
+	if got.Verdict != Red || got.Value != "7m/1m" || got.Detail != "last fired 7m ago, interval 1m" {
+		t.Errorf("tick:overrun_guard = %+v, want RED 7m/1m last fired 7m ago", got)
 	}
 }
 

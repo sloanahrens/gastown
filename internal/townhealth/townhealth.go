@@ -994,6 +994,9 @@ func ticks(in Inputs) []Field {
 }
 
 // runningTick judges a tick whose pass is in flight by how long it has run (gt-kwlnj1).
+// The start marker's write can fail and is only logged, so the last end is a
+// second witness: a last end six intervals old is red whatever the marker says
+// (gt-6gugus). It is held to TickRunRed, the same six-interval red.
 func runningTick(now time.Time, th Thresholds, t Tick) Field {
 	running := now.Sub(t.RunningSince)
 	f := Field{Name: FieldTick, Subject: t.Name, Tag: Recorded, Verdict: Green, Value: "running " + runningFor(running) + "/" + Short(t.Interval)}
@@ -1005,6 +1008,10 @@ func runningTick(now time.Time, th Thresholds, t Tick) Field {
 	}
 	if f.Verdict != Green {
 		f.Detail = "pass running for " + runningFor(running)
+	}
+	if ended := now.Sub(t.LastFired); !t.LastFired.IsZero() && th.TickRunRed > 0 && float64(ended) >= th.TickRunRed*float64(t.Interval) {
+		f.Verdict = Red
+		f.Detail = joinDetail(f.Detail, "last pass ended "+Short(ended)+" ago")
 	}
 	return f
 }
