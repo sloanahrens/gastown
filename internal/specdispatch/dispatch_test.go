@@ -541,13 +541,13 @@ func TestBudgetPictureNamesDeadHookedSeats(t *testing.T) {
 	b := baseBudget()
 	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
 	b.SetDeadHooked(map[string]int{"deepseek-flash": 1}, nil)
-	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 dead-hooked), claude-sonnet 1/2"; got != want {
+	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 with no session), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
 
 	// The refusal a full town prints carries the same note.
 	b.Seats[1].Live, b.Seats[1].Cap = 2, 2
-	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Reason != "seats full: deepseek-flash 2/2 (1 live + 1 dead-hooked), claude-sonnet 2/2" {
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Reason != "seats full: deepseek-flash 2/2 (1 live + 1 with no session), claude-sonnet 2/2" {
 		t.Fatalf("ChooseSeat = %+v, want the dead-hooked seat named", got)
 	}
 
@@ -569,13 +569,13 @@ func TestBudgetPictureNamesTheInFlightPartApart(t *testing.T) {
 	b.SetLive(map[string]int{"deepseek-flash": 4, "claude-sonnet": 1})
 	b.SetInFlight(map[string]int{"deepseek-flash": 2})
 	b.SetDeadHooked(map[string]int{"deepseek-flash": 1}, nil)
-	if got, want := b.Picture(), "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 dead-hooked), claude-sonnet 1/2"; got != want {
+	if got, want := b.Picture(), "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 with no session), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
 
 	// The refusal a full town prints carries the same split.
 	b.Seats[1].Live, b.Seats[1].Cap = 2, 2
-	if got := ChooseSeat(b, goodSpec()); !got.Skip || !strings.Contains(got.Reason, "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 dead-hooked)") {
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || !strings.Contains(got.Reason, "deepseek-flash 4/2 (1 live + 2 in flight (may double count) + 1 with no session)") {
 		t.Fatalf("ChooseSeat = %+v, want the in-flight seat named", got)
 	}
 
@@ -674,15 +674,15 @@ func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 		wantDeadWord          string
 	}{
 		{"no dead-hooked or in-flight seat adds nothing", 3, 0, 0, "", ""},
-		{"one of two is dead-hooked", 2, 0, 1, "(1 live + 1 dead-hooked)", "1 dead-hooked"},
-		{"the overshoot names its live part", 10, 0, 2, "(8 live + 2 dead-hooked)", "2 dead-hooked"},
-		{"every session is dead-hooked", 3, 0, 3, "(0 live + 3 dead-hooked)", "3 dead-hooked"},
+		{"one of two is dead-hooked", 2, 0, 1, "(1 live + 1 with no session)", "1 with no session"},
+		{"the overshoot names its live part", 10, 0, 2, "(8 live + 2 with no session)", "2 with no session"},
+		{"every session is dead-hooked", 3, 0, 3, "(0 live + 3 with no session)", "3 with no session"},
 		{"a running sling is named apart from the roster", 3, 1, 0, "(2 live + 1 in flight (may double count))", ""},
 		{"two running slings and no dead-hooked seat", 12, 2, 0, "(10 live + 2 in flight (may double count))", ""},
-		{"a reading above a cap splits into its three parts", 11, 2, 1, "(8 live + 2 in flight (may double count) + 1 dead-hooked)", "1 dead-hooked"},
-		{"dead-hooked seats outnumber the count", 2, 0, 3, "(counts do not add up: 0 in flight, 3 dead-hooked, 2 counted)", "3 dead-hooked"},
-		{"in-flight and dead-hooked together outnumber the count", 2, 2, 1, "(counts do not add up: 2 in flight, 1 dead-hooked, 2 counted)", "1 dead-hooked"},
-		{"a negative in-flight count is refused", 3, -1, 0, "(counts do not add up: -1 in flight, 0 dead-hooked, 3 counted)", ""},
+		{"a reading above a cap splits into its three parts", 11, 2, 1, "(8 live + 2 in flight (may double count) + 1 with no session)", "1 with no session"},
+		{"dead-hooked seats outnumber the count", 2, 0, 3, "(counts do not add up: 0 in flight, 3 with no session, 2 counted)", "3 with no session"},
+		{"in-flight and dead-hooked together outnumber the count", 2, 2, 1, "(counts do not add up: 2 in flight, 1 with no session, 2 counted)", "1 with no session"},
+		{"a negative in-flight count is refused", 3, -1, 0, "(counts do not add up: -1 in flight, 0 with no session, 3 counted)", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -700,7 +700,7 @@ func TestSplitLiveDeadNamesTheDeadHookedPartApart(t *testing.T) {
 // negative dead-hooked count, which the split must not print as a live figure.
 func TestSplitLiveDeadRefusesANegativeDeadHookedCount(t *testing.T) {
 	t.Parallel()
-	if got, want := SplitLiveDead(3, 0, -1, nil), "(counts do not add up: 0 in flight, -1 dead-hooked, 3 counted)"; got != want {
+	if got, want := SplitLiveDead(3, 0, -1, nil), "(counts do not add up: 0 in flight, -1 with no session, 3 counted)"; got != want {
 		t.Errorf("SplitLiveDead(3, 0, -1) = %q, want %q", got, want)
 	}
 }
@@ -710,7 +710,7 @@ func TestSplitLiveDeadRefusesANegativeDeadHookedCount(t *testing.T) {
 func TestDeadHookedCountNamesItsClasses(t *testing.T) {
 	t.Parallel()
 	got := DeadHookedCount(4, map[string]int{"unread": 1, "idle-submitted": 2, "idle-recovery-needed": 1})
-	if want := "4 dead-hooked (2 idle-submitted, 1 idle-recovery-needed, 1 unread)"; got != want {
+	if want := "4 with no session (2 idle-submitted, 1 idle-recovery-needed, 1 unread)"; got != want {
 		t.Errorf("DeadHookedCount(4, classes) = %q, want %q", got, want)
 	}
 }
@@ -725,7 +725,7 @@ func TestDeadHookedCountWithNoClassIsUnchanged(t *testing.T) {
 		{"unread": 3, "idle-submitted": 2},
 		{"unread": 3, "idle-submitted": -1},
 	} {
-		if got, want := DeadHookedCount(2, classes), "2 dead-hooked"; got != want {
+		if got, want := DeadHookedCount(2, classes), "2 with no session"; got != want {
 			t.Errorf("DeadHookedCount(2, %v) = %q, want %q", classes, got, want)
 		}
 	}
@@ -736,8 +736,56 @@ func TestDeadHookedCountWithNoClassIsUnchanged(t *testing.T) {
 func TestSplitLiveDeadCarriesTheClasses(t *testing.T) {
 	t.Parallel()
 	got := SplitLiveDead(11, 0, 4, map[string]int{"unread": 1, "idle-submitted": 2, "idle-recovery-needed": 1})
-	if want := "(7 live + 4 dead-hooked (2 idle-submitted, 1 idle-recovery-needed, 1 unread))"; got != want {
+	if want := "(7 live + 4 with no session (2 idle-submitted, 1 idle-recovery-needed, 1 unread))"; got != want {
 		t.Errorf("SplitLiveDead(11, 0, 4, classes) = %q, want %q", got, want)
+	}
+}
+
+// TestNoSessionCountSaysNoSessionNotDeadHooked is gt-oyne3v's word: a seat no
+// tmux session holds is counted "with no session", because half the seats the
+// operator read as dead-hooked were working a bead a moment before their
+// session existed.
+func TestNoSessionCountSaysNoSessionNotDeadHooked(t *testing.T) {
+	t.Parallel()
+	if got, want := DeadHookedCount(2, nil), "2 with no session"; got != want {
+		t.Errorf("DeadHookedCount(2) = %q, want %q", got, want)
+	}
+	if got := DeadHookedCount(2, map[string]int{"unread": 2}); strings.Contains(got, "dead-hooked") {
+		t.Errorf("DeadHookedCount(2, classes) = %q, want the word dead-hooked gone", got)
+	}
+}
+
+// TestNoSessionCountPrintsWorkingAsStarting names the class a seat slung a fresh
+// bead carries: its disposition reads working, and the count says starting,
+// because its session does not exist yet (gt-oyne3v).
+func TestNoSessionCountPrintsWorkingAsStarting(t *testing.T) {
+	t.Parallel()
+	got := DeadHookedCount(4, map[string]int{"working": 3, "idle-submitted": 1})
+	if want := "4 with no session (3 starting, 1 idle-submitted)"; got != want {
+		t.Errorf("DeadHookedCount(4, classes) = %q, want %q", got, want)
+	}
+}
+
+// TestSplitLiveDeadUsesTheNoSessionWording carries the same word through the
+// split, so the tick line, gt pool show and the sling refusal say it too, and
+// through the refusal line that names the counts a split cannot hold
+// (gt-oyne3v).
+func TestSplitLiveDeadUsesTheNoSessionWording(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name                  string
+		total, inFlight, dead int
+		want                  string
+	}{
+		{"the split names the seat with no session", 2, 0, 1, "(1 live + 1 with no session)"},
+		{"the refusal names the counts with no session", 2, 0, 3, "(counts do not add up: 0 in flight, 3 with no session, 2 counted)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SplitLiveDead(tc.total, tc.inFlight, tc.dead, nil); got != tc.want {
+				t.Errorf("SplitLiveDead(%d, %d, %d) = %q, want %q", tc.total, tc.inFlight, tc.dead, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -748,7 +796,7 @@ func TestBudgetPictureCarriesTheDeadHookedClasses(t *testing.T) {
 	b := baseBudget()
 	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
 	b.SetDeadHooked(map[string]int{"deepseek-flash": 1}, map[string]map[string]int{"deepseek-flash": {"unread": 1}})
-	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 dead-hooked (1 unread)), claude-sonnet 1/2"; got != want {
+	if got, want := b.Picture(), "deepseek-flash 2/2 (1 live + 1 with no session (1 unread)), claude-sonnet 1/2"; got != want {
 		t.Fatalf("Picture() = %q, want %q", got, want)
 	}
 	b.SetLive(map[string]int{"deepseek-flash": 2, "claude-sonnet": 1})
