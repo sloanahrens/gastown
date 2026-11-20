@@ -133,6 +133,60 @@ func TestFollowupSkipPolicyIsWired(t *testing.T) {
 	}
 }
 
+// TestApplyFollowupPolicyBuildsThroughPolicyFor: applyFollowupPolicy builds its
+// hook through policyFor, so a fake fixed inside the hold-out window withholds
+// what the same fake fixed before it keeps (gt-l0q48h).
+// Swapping policyFor is deliberate: the acceptance names it, t.Cleanup restores the prior value, no test runs beside it, and it is the specDispatchTimeout idiom of proc_runner_integration_test.go.
+
+//testpolicy:allow parallel — it swaps policyFor for a counting fake, so no test may run beside it
+func TestApplyFollowupPolicyBuildsThroughPolicyFor(t *testing.T) {
+	prior := policyFor
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the prior value the test swapped
+		policyFor = prior
+	})
+	finding := land.FollowupCandidate{Path: "internal/daemon/landing_worker.go", Severity: "minor",
+		Title: "the doc says the policy is off by default", Claim: "the parser reads it as on, so the sentence is no longer true"}
+	for _, tc := range []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{"inside the window the finding is held out", followupHoldOutInside, followupReasonHoldOut},
+		{"before the window the finding is filed", followupBeforeHoldOut, ""},
+	} {
+		calls := 0
+		//testpolicy:allow no-global-swap — the counting fake is the swap this test makes
+		policyFor = func() followupPolicy {
+			calls++
+			return followupPolicy{now: func() time.Time { return tc.at }}
+		}
+		var l land.Lander
+		applyFollowupPolicy(&l)
+		if calls != 1 {
+			t.Fatalf("%s: policyFor called %d times, want 1: applyFollowupPolicy builds its own policy", tc.name, calls)
+		}
+		if got := l.FollowupSkip(land.Work{BeadID: "gt-b0000"}, finding); got != tc.want {
+			t.Errorf("%s: FollowupSkip(%q at %s) = %q, want %q", tc.name, finding.Title, tc.at.Format(time.RFC3339), got, tc.want)
+		}
+	}
+}
+
+// TestApplyFollowupPolicyDefault: with policyFor at its default, the hook applyFollowupPolicy installs on a zero Lander answers a clock-free protection decision, and the function takes only the Lander (gt-l0q48h).
+func TestApplyFollowupPolicyDefault(t *testing.T) {
+	t.Parallel()
+	if fn := reflect.ValueOf(applyFollowupPolicy).Type(); fn.NumIn() != 1 || fn.IsVariadic() {
+		t.Fatalf("applyFollowupPolicy takes %d parameter(s), variadic %v, want the one *land.Lander", fn.NumIn(), fn.IsVariadic())
+	}
+	var l land.Lander
+	applyFollowupPolicy(&l)
+	c := land.FollowupCandidate{Path: ".forgejo/workflows/gate.yml", Severity: "minor",
+		Title: "the gate workflow runs make test", Claim: "gate.yml runs make test where the Makefile target is gate"}
+	if got, want := l.FollowupSkip(land.Work{}, c), followupReasonProtectedPath; got != want {
+		t.Errorf("FollowupSkip(protected path) = %q, want %q", got, want)
+	}
+}
+
 // TestFollowupPolicyClockIsTimeNow: the policy the daemon builds names the wall
 // clock, so the hold-out window is judged by the clock the rest of the daemon
 // reads (gt-ahffi6). The two function values are compared, never called: a test

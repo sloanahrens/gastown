@@ -110,9 +110,13 @@ func (p followupPolicy) clock() func() time.Time {
 	return p.now
 }
 
+// policyFor builds the policy applyFollowupPolicy installs with the wall clock
+// the rest of the daemon reads, so it judges the hold-out window (gt-l0q48h).
+var policyFor = newFollowupPolicy
+
 // applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built.
 func applyFollowupPolicy(l *land.Lander) {
-	p := newFollowupPolicy()
+	p := policyFor()
 	l.FollowupSkip = p.reason
 }
 
