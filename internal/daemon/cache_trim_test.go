@@ -4488,6 +4488,50 @@ func TestCacheTrimNoOpItemKeepsTheHelperText(t *testing.T) {
 	wantNoOpSummary(t, newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)}), want)
 }
 
+// newCacheTrimPlanCountFixture trims a listing of 1200 old 894784-byte files and
+// the young unit the floor protects, under the 10GB cap, which plans every file
+// for removal. du answers used and the removal Job's log answers log.
+func newCacheTrimPlanCountFixture(t *testing.T, used int64, log cliReply) *cacheTrimFixture {
+	t.Helper()
+	files := make([]string, 0, 1201)
+	for i := 0; i < 1200; i++ {
+		files = append(files, fmt.Sprintf(`{"path":"gocache/f%d/x","cache":"build","size":894784,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}`, i))
+	}
+	files = append(files, fmt.Sprintf(`{"path":"gocache/young/y","cache":"build","size":%d,"atime":"2026-10-29T04:00:00Z","mtime":"2026-10-29T04:00:00Z"}`, cacheTrimFloorYoungSize))
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)})
+	f.answerFrom(cacheTrimListVerb, cliReply{stdout: "[" + strings.Join(files, ",") + "]"})
+	f.answerFrom(cacheTrimTrimLogsVerb, log)
+	return f
+}
+
+// TestCacheTrimNoOpItemNeedsTheJobToHaveRemovedThePlan is the bead's box: the
+// floor wording is for a Job that removed the whole plan, and one that removed
+// none says so first. The listing is the bead's 14.6GB; the reading 21.6GB is
+// the smallest the item is raised on (over twice the 10GB cap) inside the floor.
+func TestCacheTrimNoOpItemNeedsTheJobToHaveRemovedThePlan(t *testing.T) {
+	t.Parallel()
+	const used = 23192823808 // 21.6GB: over the cap by less than the floor's 13.6GB
+	floor := fmt.Sprintf("%s of it is younger than the age floor and cannot be removed yet; the cap is below what the seats write inside the floor", polecatimage.Human(cacheTrimFloorYoungSize))
+	prefix := fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: ", cacheTrimClaimName, polecatimage.Human(used), polecatimage.Human(cacheTrimNoOpCap))
+
+	t.Run("the Job removed none of the plan", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimPlanCountFixture(t, used, cliReply{stdout: "removed 0 absent 0 kept 1200\n"})
+		wantNoOpSummary(t, f, prefix+"the Job removed 0 of 1200 planned files. "+floor+". "+cacheTrimNoOpOpenSandboxes)
+	})
+
+	t.Run("the Job removed the whole plan", func(t *testing.T) {
+		t.Parallel()
+		wantNoOpSummary(t, newCacheTrimPlanCountFixture(t, used, cliReply{stdout: "removed 1200 absent 0 kept 0\n"}), prefix+floor)
+	})
+
+	t.Run("the Job's result line could not be read", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimPlanCountFixture(t, used, cliReply{stderr: "Error from server (NotFound): pods not found", code: 1})
+		wantNoOpSummary(t, f, prefix+"the removal Job's result line could not be read. "+floor+". "+cacheTrimNoOpOpenSandboxes)
+	})
+}
+
 // jobRuns reads the cache trim's runs from the town's job ledger, the file the
 // trim writes through the production ledger the job list reads.
 func (f *cacheTrimFixture) jobRuns(t *testing.T) []jobledger.Run {
