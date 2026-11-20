@@ -34,7 +34,7 @@ func TestSpecTickCountsAHookedSlingOnce(t *testing.T) {
 		want string
 	}{
 		{"a live session", poolSession{name: "gt-ember", agent: "deepseek-flash", rig: "gastown", polecat: "ember", hookedBead: "gt-a"}, "deepseek-flash 1/2"},
-		{"a dead-hooked seat", poolSession{name: "dead/gastown/jade", agent: "deepseek-flash", rig: "gastown", polecat: "jade", deadHooked: true, hookedBead: "gt-a"}, "deepseek-flash 1/2 (0 live + 1 dead-hooked)"},
+		{"a dead-hooked seat", poolSession{name: "dead/gastown/jade", agent: "deepseek-flash", rig: "gastown", polecat: "jade", deadHooked: true, hookedBead: "gt-a"}, "deepseek-flash 1/2 (0 live + 1 with no session)"},
 		{"a claim", poolSession{name: "pool-claim/c1", agent: "deepseek-flash", claim: true, hookedBead: "gt-a"}, "deepseek-flash 1/2"},
 		{"a landing seat", poolSession{name: "landing/gastown/pike", agent: "deepseek-flash", rig: "gastown", polecat: "pike", landing: true, hookedBead: "gt-a"}, "deepseek-flash 1/2"},
 	} {

@@ -1,5 +1,5 @@
-tick: deepseek-flash 12/8 (10 live + 2 in flight (may double count)), claude-sonnet 1/2, sbx-haiku 11/9 (8 live + 2 in flight (may double count) + 1 dead-hooked), claude-haiku 3/4 (1 live + 2 dead-hooked), total 27/10
+tick: deepseek-flash 12/8 (10 live + 2 in flight (may double count)), claude-sonnet 1/2, sbx-haiku 11/9 (8 live + 2 in flight (may double count) + 1 with no session), claude-haiku 3/4 (1 live + 2 with no session), total 27/10
 show: deepseek-flash 10/8
 show: claude-sonnet 1/2
-show: sbx-haiku 9/9 (8 live + 1 dead-hooked)
-show: claude-haiku 3/4 (1 live + 2 dead-hooked)
+show: sbx-haiku 9/9 (8 live + 1 with no session)
+show: claude-haiku 3/4 (1 live + 2 with no session)

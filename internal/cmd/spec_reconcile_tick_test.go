@@ -40,7 +40,7 @@ func TestSpecTickNamesUncountedSandboxesAndSeatsWithNone(t *testing.T) {
 
 	r := runSpecDispatchCycle(backgroundEnv(f))
 
-	const want = "deepseek-flash 2/2 (1 live + 1 dead-hooked); " +
+	const want = "deepseek-flash 2/2 (1 live + 1 with no session); " +
 		"uncounted sandboxes: gt-stray:" + polecat.WorkstateVerdictWorking + "; " +
 		"counted without a sandbox: gt-ember:" + polecat.WorkstateVerdictNeedsRecovery
 	if r.Roster != want {

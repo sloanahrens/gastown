@@ -2709,7 +2709,7 @@ func TestSpecDispatchNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 	}, nil)
 
 	r := runSpecDispatchCycle(f.env())
-	want := "deepseek-flash 9/8 (8 live + 1 dead-hooked) (held: gastown/alpha:session, gastown/bravo:session, " +
+	want := "deepseek-flash 9/8 (8 live + 1 with no session) (held: gastown/alpha:session, gastown/bravo:session, " +
 		"gastown/charlie:session, gastown/delta:session, gastown/echo:session, gastown/foxtrot:session, " +
 		"gastown/golf:landing, gastown/hotel:dead-hooked, pool-claim/c1:claim)"
 	if r.Roster != want {
@@ -2763,7 +2763,7 @@ func TestSpecTickLineNamesTheDeadHookedClasses(t *testing.T) {
 	f.roster = specRosterFrom(deadClassedSessions(), nil)
 
 	r := runSpecDispatchCycle(f.env())
-	if want := "a 3/4 (0 live + 3 dead-hooked (2 idle-submitted, 1 idle-recovery-needed))"; r.Roster != want {
+	if want := "a 3/4 (0 live + 3 with no session (2 idle-submitted, 1 idle-recovery-needed))"; r.Roster != want {
 		t.Fatalf("roster = %q, want %q", r.Roster, want)
 	}
 }
@@ -4733,7 +4733,7 @@ func TestSpecRosterFrom_ParkedStaleSeatIsListedNotCounted(t *testing.T) {
 	}
 	live := poolShowLive{live: r.Live, dead: r.DeadHooked, parked: r.ParkedStale, parkedTotal: 1, total: 2, ok: true}
 	text := live.seatCount("deepseek-flash", 3)
-	for _, want := range []string{"2/3", "(1 live + 1 dead-hooked)", "(1 parked-stale)"} {
+	for _, want := range []string{"2/3", "(1 live + 1 with no session)", "(1 parked-stale)"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("seat count %q does not contain %q", text, want)
 		}

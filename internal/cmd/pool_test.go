@@ -753,7 +753,7 @@ func TestPoolShowNamesTheDeadHookedSeatsInTheCount(t *testing.T) {
 	}
 	for first, want := range map[string]string{
 		// The seat's dead read names its class, so the line names it too (gt-01svoq).
-		"deepseek-flash": "deepseek-flash 1/3 (0 live + 1 dead-hooked (1 idle-recovery-needed)) open",
+		"deepseek-flash": "deepseek-flash 1/3 (0 live + 1 with no session (1 idle-recovery-needed)) open",
 		"total":          "total 1/4",
 	} {
 		if got := poolTestShowLine(out.String(), first); got != want {
@@ -779,7 +779,7 @@ func TestPoolShowNamesTheDeadHookedClasses(t *testing.T) {
 	if err := runPoolSeatMapShow(&out, root, ts, poolTestNow, live); err != nil {
 		t.Fatal(err)
 	}
-	want := "a 3/3 (0 live + 3 dead-hooked (2 idle-submitted, 1 idle-recovery-needed)) open"
+	want := "a 3/3 (0 live + 3 with no session (2 idle-submitted, 1 idle-recovery-needed)) open"
 	if got := poolTestShowLine(out.String(), "a"); got != want {
 		t.Fatalf("seat line = %q, want %q:\n%s", got, want, out.String())
 	}
@@ -818,7 +818,7 @@ func TestPoolShowNamesEveryHeldSeatAboveTheCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := out.String()
-	if got, want := poolTestShowLine(page, "deepseek-flash"), "deepseek-flash 9/8 (8 live + 1 dead-hooked) open"; got != want {
+	if got, want := poolTestShowLine(page, "deepseek-flash"), "deepseek-flash 9/8 (8 live + 1 with no session) open"; got != want {
 		t.Fatalf("seat line = %q, want %q:\n%s", got, want, page)
 	}
 	held := poolTestShowLine(page, "held:")
@@ -958,7 +958,7 @@ func TestPoolShowAndTheTickAgreeOnAMixedPoolsSessionlessSeat(t *testing.T) {
 
 	// The crash is on the seat it was slung on, in both readings, and the other
 	// seat is empty because nothing live sits on it.
-	for _, want := range []string{"claude-sonnet 0/2", "deepseek-flash 1/2 (0 live + 1 dead-hooked)"} {
+	for _, want := range []string{"claude-sonnet 0/2", "deepseek-flash 1/2 (0 live + 1 with no session)"} {
 		if !strings.Contains(budget.Picture(), want) {
 			t.Errorf("the tick line reads %q, want it to name %q", budget.Picture(), want)
 		}
