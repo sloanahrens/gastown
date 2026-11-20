@@ -58,3 +58,62 @@ func TestIntegrationNukeSeatOriginTipRealOriginHoldingTheTipAnswersTheTip(t *tes
 		t.Fatalf("tip = %q, want origin's %q", got, tip)
 	}
 }
+
+// Origin holding only an older commit, on refs other than the seat's branch,
+// does not answer the seat's tip: the read asks for the seat's branch by name.
+func TestIntegrationNukeSeatOriginTipRealOriginHoldingOnlyAnOlderCommitDoesNotAnswerTheSeatTip(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	seed := filepath.Join(root, "seed")
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("creating the rig: %v", err)
+	}
+
+	originGit(t, root, "init", "-q", "--bare", origin)
+	originGit(t, root, "init", "-q", seed)
+	originGit(t, seed, "commit", "-q", "--allow-empty", "-m", "older work")
+	older := originGit(t, seed, "rev-parse", "HEAD")
+	originGit(t, seed, "push", "-q", origin, "HEAD:refs/heads/main")
+	originGit(t, seed, "commit", "-q", "--allow-empty", "-m", "seat work")
+	originGit(t, seed, "push", "-q", origin, "HEAD:refs/heads/polecat/other")
+	originGit(t, root, "clone", "-q", "--bare", origin, filepath.Join(rigPath, ".repo.git"))
+
+	got, err := rigOriginTip(rigPath)(preserveBranch)
+	if err != nil {
+		t.Fatalf("rigOriginTip: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("tip = %q, want none: origin holds only %q, on other refs", got, older)
+	}
+}
+
+// An origin that cannot be reached is an error, never an empty tip: an empty
+// tip reads as origin lacking the seat's branch, which would let the nuke go on.
+func TestIntegrationNukeSeatOriginTipRealUnreachableOriginIsAnErrorNotOnOrigin(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	seed := filepath.Join(root, "seed")
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("creating the rig: %v", err)
+	}
+
+	originGit(t, root, "init", "-q", "--bare", origin)
+	originGit(t, root, "init", "-q", seed)
+	originGit(t, seed, "commit", "-q", "--allow-empty", "-m", "seat work")
+	originGit(t, seed, "push", "-q", origin, "HEAD:refs/heads/"+preserveBranch)
+	gitDir := filepath.Join(rigPath, ".repo.git")
+	originGit(t, root, "clone", "-q", "--bare", origin, gitDir)
+	originGit(t, gitDir, "remote", "set-url", "origin", filepath.Join(root, "missing.git"))
+
+	got, err := rigOriginTip(rigPath)(preserveBranch)
+	if err == nil {
+		t.Fatalf("tip = %q with no error, want an error: origin does not exist", got)
+	}
+	if got != "" {
+		t.Fatalf("tip = %q with an error, want none", got)
+	}
+}
