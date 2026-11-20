@@ -414,3 +414,44 @@ func TestNodeImagePruneKubeDeleteNotFoundIsSuccess(t *testing.T) {
 		assert.Contains(t, err.Error(), "kubectl delete of the node-prune Job exited 1")
 	})
 }
+
+// TestNodeImagePruneKubeListJSONToleratesWarnings: kubectl prints a deprecation
+// warning on stdout and still exits 0, so ListJSON's answer carries lines around
+// the JSON list. ListJSON returns exactly the object and nothing else; an answer
+// with no JSON line, or a value that does not decode, is an error naming the verb
+// (gt-x73zmz).
+func TestNodeImagePruneKubeListJSONToleratesWarnings(t *testing.T) {
+	t.Parallel()
+	const list = `{"kind":"List","items":[]}`
+	const warning = "Warning: v1 Pod is deprecated"
+
+	tests := []struct {
+		name    string
+		out     string
+		wantOut string
+		wantErr bool
+	}{
+		{name: "warning before and after", out: warning + "\n" + list + "\nWarning: another\n", wantOut: list},
+		{name: "pretty list", out: warning + "\n{\n  \"kind\": \"List\"\n}\n", wantOut: "{\n  \"kind\": \"List\"\n}"},
+		{name: "no JSON", out: warning + "\n", wantErr: true},
+		{name: "empty answer", out: "", wantErr: true},
+		{name: "truncated", out: warning + "\n" + `{"kind":"List","items":[` + "\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return tt.out, 0, nil
+			}
+			got, err := kubectlNodePrune{dir: t.TempDir(), run: run}.ListJSON(context.Background())
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "kubectl get")
+				assert.NotContains(t, err.Error(), warning, "kubectl's output reached the error")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantOut, string(got))
+		})
+	}
+}
