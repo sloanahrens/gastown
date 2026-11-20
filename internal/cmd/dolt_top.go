@@ -250,6 +250,17 @@ func aggregateSamples(readings [][]doltTopSample) []doltTopRow {
 	return rows
 }
 
+// doltTopRanking ranks the readings' statement shapes and keeps the limit
+// busiest. runDoltTop prints them and the Dolt panel's top section draws them,
+// so the table and the panel rank the server's statements by one rule.
+func doltTopRanking(readings [][]doltTopSample, limit int) []doltTopRow {
+	rows := aggregateSamples(readings)
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows
+}
+
 // renderTop writes the sample window and then rows as a table whose last
 // column ends at width. Each row's SEEN cell says how many of the reads saw
 // it, and EST is that count times the interval, so the table never claims more
@@ -517,13 +528,10 @@ func runDoltTop(ctx context.Context, deps doltTopDeps, samples int, interval tim
 		readings = append(readings, got)
 	}
 
-	rows := aggregateSamples(readings)
+	rows := doltTopRanking(readings, limit)
 	if len(rows) == 0 {
 		_, err := fmt.Fprintf(deps.out, "no statements sampled in %d process-list reads at %s\n", samples, interval)
 		return err
-	}
-	if len(rows) > limit {
-		rows = rows[:limit]
 	}
 	return renderTop(deps.out, rows, tailDisplayWidth(deps.out), samples, interval)
 }
