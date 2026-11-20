@@ -349,6 +349,156 @@ func TestPairReadySHAForRoll(t *testing.T) {
 	}
 }
 
+// rollTestAnc is the ancestry table a rollGitStub judges from.
+func rollTestAnc(pairs ...[2]string) map[[2]string]bool {
+	m := map[[2]string]bool{}
+	for _, p := range pairs {
+		m[p] = true
+	}
+	return m
+}
+
+// rollTestReady is a pair-ready item for one commit.
+func rollTestReady(rig, sha string) attention.Item {
+	return attention.Item{Kind: attention.KindDeployPairReady, Rig: rig, SHA: sha}
+}
+
+// rollTestUnreadable is the skew guard's unreadable item for one commit, built
+// as the pass builds it: the full commit in SHA, the same commit in the key.
+func rollTestUnreadable(rig, sha string) attention.Item {
+	return attention.Item{
+		Key:  pairReadySkewUnreadableKey(rig, greenRefShortSHA(sha)),
+		Kind: attention.KindDeployPairUnreadable,
+		Rig:  rig,
+		SHA:  sha,
+	}
+}
+
+// TestPairReadySHAForRollRefusesAnUnreadableSkewCommit: a commit whose bd pin
+// schema level the pass could not read is not a roll target, and another commit
+// that reads fine still rolls.
+func TestPairReadySHAForRollRefusesAnUnreadableSkewCommit(t *testing.T) {
+	t.Parallel()
+	const (
+		c1 = "2000000000000000000000000000000000000000"
+		c2 = "3000000000000000000000000000000000000000"
+		c3 = "4000000000000000000000000000000000000000"
+	)
+	const unreadable = "the schema level of the bd pin of green/"
+	tests := []struct {
+		name       string
+		items      []attention.Item
+		running    string
+		git        rollGitStub
+		wantSHA    string
+		wantReason string
+	}{
+		{
+			name:       "a ready commit shadowed by its unreadable item does not roll",
+			items:      []attention.Item{rollTestReady("gastown", c2), rollTestUnreadable("gastown", c2)},
+			running:    c1,
+			git:        rollGitStub{ancestors: rollTestAnc([2]string{c1, c2})},
+			wantReason: unreadable + c2[:12] + " could not be read",
+		},
+		{
+			name:    "a second commit with no unreadable item still rolls",
+			items:   []attention.Item{rollTestReady("gastown", c2), rollTestUnreadable("gastown", c3)},
+			running: c1,
+			git:     rollGitStub{ancestors: rollTestAnc([2]string{c1, c2})},
+			wantSHA: c2,
+		},
+		{
+			name: "an unreadable item that is not the skew guard's does not shadow",
+			items: []attention.Item{rollTestReady("gastown", c2), {
+				Key:  "deploy-pair-unreadable:rig:gastown",
+				Kind: attention.KindDeployPairUnreadable,
+				Rig:  "gastown",
+				SHA:  c2,
+			}},
+			running: c1,
+			git:     rollGitStub{ancestors: rollTestAnc([2]string{c1, c2})},
+			wantSHA: c2,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clone := func(rig string) pairReadyGit {
+				if rig != "gastown" {
+					return nil
+				}
+				return tt.git
+			}
+			gotSHA, gotReason := pairReadySHAForRoll(tt.items, tt.running, clone)
+			assert.Equal(t, tt.wantSHA, gotSHA)
+			if tt.wantReason == "" {
+				assert.Empty(t, gotReason)
+			} else {
+				assert.Contains(t, gotReason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestPairReadySHAForRollSkipsAShadowedCandidate: a shadowed pair-ready commit is
+// skipped, so a readable pair for another commit still rolls; only when every
+// candidate is shadowed does the reason name the unreadable level.
+func TestPairReadySHAForRollSkipsAShadowedCandidate(t *testing.T) {
+	t.Parallel()
+	const (
+		c1 = "2000000000000000000000000000000000000000"
+		c2 = "3000000000000000000000000000000000000000"
+		c3 = "4000000000000000000000000000000000000000"
+	)
+	const unreadable = "the schema level of the bd pin of green/"
+	tests := []struct {
+		name       string
+		items      []attention.Item
+		running    string
+		git        rollGitStub
+		wantSHA    string
+		wantReason string
+	}{
+		{
+			name: "a shadowed newer pair is skipped and the older ready pair rolls",
+			items: []attention.Item{
+				rollTestReady("gastown", c3),
+				rollTestUnreadable("gastown", c3),
+				rollTestReady("gastown", c2),
+			},
+			running: c1,
+			git: rollGitStub{ancestors: rollTestAnc(
+				[2]string{c1, c2}, [2]string{c1, c3}, [2]string{c2, c3})},
+			wantSHA: c2,
+		},
+		{
+			name:       "only a shadowed pair: the reason names the unreadable level",
+			items:      []attention.Item{rollTestReady("gastown", c3), rollTestUnreadable("gastown", c3)},
+			running:    c1,
+			git:        rollGitStub{ancestors: rollTestAnc([2]string{c1, c3})},
+			wantReason: unreadable + c3[:12] + " could not be read",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clone := func(rig string) pairReadyGit {
+				if rig != "gastown" {
+					return nil
+				}
+				return tt.git
+			}
+			gotSHA, gotReason := pairReadySHAForRoll(tt.items, tt.running, clone)
+			assert.Equal(t, tt.wantSHA, gotSHA)
+			if tt.wantReason == "" {
+				assert.Empty(t, gotReason)
+			} else {
+				assert.Contains(t, gotReason, tt.wantReason)
+			}
+		})
+	}
+}
+
 // TestUpdateJobOffCreatesNothingAndLogsOnce: a pod whose switch is off, with a
 // pair ready that would roll, creates no Job and says it is off once per start.
 func TestUpdateJobOffCreatesNothingAndLogsOnce(t *testing.T) {
@@ -453,6 +603,25 @@ func TestTriggerPodUpdateNeverStartsAJobForThePairTheDaemonRuns(t *testing.T) {
 			assert.Contains(t, r.logs.String(), "the daemon already runs "+running[:12])
 		})
 	}
+}
+
+// TestUpdateJobShadowedPairLogsTheRefusal: a ready item that crossed a pass with
+// the guard's unreadable item for the same commit starts no roll, and the patrol
+// logs the reason once per change like the other not-due reasons.
+func TestUpdateJobShadowedPairLogsTheRefusal(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	green := r.commits[2]
+	r.d.pairReady.held = map[string][]attention.Item{
+		"gastown": {rollTestReady("gastown", green), rollTestUnreadable("gastown", green)},
+	}
+
+	r.d.triggerUpdate()
+	r.d.triggerUpdate()
+
+	reason := "not due — the schema level of the bd pin of green/" + green[:12] + " could not be read, so no roll starts"
+	assert.Empty(t, r.cluster.calls, "a shadowed pair started a Job")
+	assert.Equal(t, 1, strings.Count(r.logs.String(), reason), "the refusal was not logged once per change")
 }
 
 // TestTriggerPodUpdateStillStartsForANewerPair: a pair ahead of the daemon's own
