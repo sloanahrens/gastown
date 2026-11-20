@@ -939,19 +939,19 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 	}
 }
 
-// TestCICacheTrimNoopItem: a trim that removed no file while the volume stays
-// over the warn figure raises one low attention item; a repeat keeps that one
-// item; a later reading under the figure clears it; a trim that removed files,
-// and a dry run, raise nothing.
+// TestCICacheTrimNoopItem: a trim that removed no file while ci-gocache stays
+// over its cap raises one low attention item; a repeat keeps that one item; a
+// later reading under the cap clears it; a trim that removed files, and a dry
+// run, raise nothing.
 func TestCICacheTrimNoopItem(t *testing.T) {
 	t.Parallel()
-	const overWarn = 40 << 20 // KiB: 40 GB, over the default 30 GB warn figure
-	const underWarn = 10 << 20
+	const overCap = 45 << 20 // KiB: 45 GiB, over the default 40 GiB ci_gocache_cap_bytes
+	const underCap = 35 << 20
 
-	t.Run("one item for a trim that removed nothing over the warn figure, cleared under it", func(t *testing.T) {
+	t.Run("one item for a trim that removed nothing over the cap, cleared under it", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.exec = ciCacheReply(overWarn, 0, overWarn)
+		f.exec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
 
@@ -964,7 +964,7 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		}
 
 		f.at(time.Hour)
-		f.exec = ciCacheReply(overWarn, 0, overWarn)
+		f.exec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 1 {
@@ -972,40 +972,18 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		}
 
 		f.at(2 * time.Hour)
-		f.exec = ciCacheReply(overWarn, 5, underWarn)
+		f.exec = ciCacheReply(overCap, 5, underCap)
 		f.tick()
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
-			t.Errorf("items after a reading under the figure = %+v, want none", items)
-		}
-	})
-
-	t.Run("the uncapped volume's item keeps its summary text", func(t *testing.T) {
-		t.Parallel()
-		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.exec = ciCacheReply(overWarn, 0, overWarn)
-		f.tick()
-		f.drain()
-
-		_, _, warn, _, err := ciCacheTrimSettings(f.d.patrolConfig)
-		if err != nil {
-			t.Fatalf("reading the settings: %v", err)
-		}
-		items := f.d.cacheTrimNoOp.observed()
-		if len(items) != 1 {
-			t.Fatalf("items = %+v, want one item", items)
-		}
-		want := fmt.Sprintf("CI cache trim removed no file while the Go build cache holds %s, over the warn figure of %s: nothing there is older than the max age, or the trim is not reaching it",
-			polecatimage.Human(overWarn*1024), polecatimage.Human(warn))
-		if items[0].Summary != want {
-			t.Errorf("summary = %q\nwant %q: the uncapped volume's item text is unchanged", items[0].Summary, want)
+			t.Errorf("items after a reading under the cap = %+v, want none", items)
 		}
 	})
 
 	t.Run("a trim that removed files raises nothing", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.exec = ciCacheReply(overWarn, 7, overWarn)
+		f.exec = ciCacheReply(overCap, 7, overCap)
 		f.tick()
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
@@ -1016,7 +994,7 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 	t.Run("a dry run raises nothing", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
-		f.exec = ciCacheReply(overWarn, 0, overWarn)
+		f.exec = ciCacheGocacheExecReply(agentconfig.DiskMaintenanceModeDryRun, overCap, 0, overCap)
 		f.tick()
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
@@ -1280,14 +1258,14 @@ func TestCICacheTrimCappedScriptReportsAndRemovesNothingUnderTheCap(t *testing.T
 	}
 }
 
-// TestCICacheTrimNoopItemPerVolume: the uncapped volume keeps the no-op item it
-// has always had, measured against the warn figure. A capped volume raises its
-// own item over its cap, even under the warn figure, clears it at or under the
-// cap, and leaves the other volume's item alone.
+// TestCICacheTrimNoopItemPerVolume: ci-gocache keeps the no-op item it has
+// always had, measured against its cap. A capped volume raises its own item over
+// its cap, even under the warn figure, clears it at or under the cap, and leaves
+// the other volume's item alone.
 func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 	t.Parallel()
-	const overWarn = 40 << 20 // KiB: 40 GB, over the default 30 GB warn figure
-	const overCap = 2 << 20   // KiB: 2 GiB, over the 1 GiB npm cap and under the warn figure
+	const overGocacheCap = 45 << 20 // KiB: 45 GiB, over the default 40 GiB ci_gocache_cap_bytes
+	const overCap = 2 << 20         // KiB: 2 GiB, over the 1 GiB npm cap and under the warn figure
 	const npmKey = "ci-cache-trim-noop-ci-npm"
 
 	t.Run("a capped volume raises its own item over its cap, under the warn figure", func(t *testing.T) {
@@ -1309,10 +1287,10 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 		}
 	})
 
-	t.Run("the uncapped item and the capped item clear apart", func(t *testing.T) {
+	t.Run("the ci-gocache item and the capped item clear apart", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
-		f.exec = ciCacheReply(overWarn, 0, overWarn)
+		f.exec = ciCacheReply(overGocacheCap, 0, overGocacheCap)
 		f.npmExec = ciCacheReply(overCap, 0, overCap)
 		f.tick()
 		f.drain()
@@ -1325,7 +1303,7 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 		f.tick()
 		f.drain()
 		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey}) {
-			t.Errorf("items after the npm volume is at its cap = %v, want only the uncapped volume's item", got)
+			t.Errorf("items after the npm volume is at its cap = %v, want only the ci-gocache item", got)
 		}
 	})
 
@@ -1339,6 +1317,106 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 			t.Errorf("a capped volume that removed files raised %+v", items)
 		}
 	})
+}
+
+// TestCICacheTrimGocacheNoopOverCap: the ci-gocache volume's no-op item is
+// measured against its cap, the setting the pass copies into the row, not the
+// warn figure. A run that removed nothing while the volume is over the cap raises
+// the item; a reading at or under the cap clears it, even between the warn figure
+// and the cap; and a run that removed files raises nothing.
+func TestCICacheTrimGocacheNoopOverCap(t *testing.T) {
+	t.Parallel()
+	const (
+		capKiB = 40 << 20 // KiB: the default ci_gocache_cap_bytes, 40 GiB
+		// betweenWarnAndCap is under the cap and over the default 30 GB warn
+		// figure: the warn figure would raise the item for it, the cap does not.
+		betweenWarnAndCap = 35 << 20
+		overCap           = 45 << 20
+	)
+
+	cases := []struct {
+		name     string
+		afterKiB int64
+		removed  int64
+		raised   bool
+	}{
+		{name: "a run that removed nothing over the cap raises the item", afterKiB: overCap, raised: true},
+		{name: "a reading at the cap", afterKiB: capKiB},
+		{name: "a reading under the cap and over the warn figure", afterKiB: betweenWarnAndCap},
+		{name: "a run that removed files while over the cap", afterKiB: overCap, removed: 7},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			f.exec = ciCacheReply(tt.afterKiB, tt.removed, tt.afterKiB)
+			f.tick()
+			f.drain()
+
+			items := f.d.cacheTrimNoOp.observed()
+			if !tt.raised {
+				if len(items) != 0 {
+					t.Errorf("%s raised %+v, want no item (after %d KiB, %d removed, cap %s)",
+						tt.name, items, tt.afterKiB, tt.removed, polecatimage.Human(capKiB*1024))
+				}
+				return
+			}
+			if got := noopKeys(items); !slices.Equal(got, []string{ciCacheNoOpKey}) {
+				t.Fatalf("items = %v, want one item keyed %q for ci-gocache", got, ciCacheNoOpKey)
+			}
+			if items[0].Kind != attention.KindCacheTrimNoOp || items[0].Severity != attention.SeverityLow {
+				t.Errorf("item kind %q severity %q, want the cache trim kind at low severity", items[0].Kind, items[0].Severity)
+			}
+			for _, want := range []string{ciCacheGocacheVolume, "its cap of " + polecatimage.Human(capKiB*1024)} {
+				if !strings.Contains(items[0].Summary, want) {
+					t.Errorf("summary %q does not carry %q", items[0].Summary, want)
+				}
+			}
+		})
+	}
+
+	t.Run("a later reading under the cap clears the item", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = ciCacheReply(overCap, 0, overCap)
+		f.tick()
+		f.drain()
+		if items := f.d.cacheTrimNoOp.observed(); len(items) != 1 {
+			t.Fatalf("items over the cap = %+v, want one", items)
+		}
+
+		f.at(time.Hour)
+		f.exec = ciCacheReply(betweenWarnAndCap, 0, betweenWarnAndCap)
+		f.tick()
+		f.drain()
+		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
+			t.Errorf("items after a reading under the cap = %+v, want none", items)
+		}
+	})
+}
+
+// TestCICacheTrimGocacheNoopLogNamesTheCap: the ci-gocache volume's run line
+// names its cap beside the before and after sizes, and carries no path or file
+// name.
+func TestCICacheTrimGocacheNoopLogNamesTheCap(t *testing.T) {
+	t.Parallel()
+	const (
+		capKiB   = 40 << 20
+		afterKiB = int64(45 << 20)
+	)
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.exec = ciCacheReply(afterKiB, 0, afterKiB)
+	f.tick()
+	f.drain()
+
+	want := fmt.Sprintf("%s: removed 0 files, %s to %s, against its cap of %s",
+		ciCacheGocacheVolume, polecatimage.Human(afterKiB*1024), polecatimage.Human(afterKiB*1024), polecatimage.Human(capKiB*1024))
+	if !strings.Contains(f.logs.String(), want) {
+		t.Fatalf("the run line does not name the cap beside the sizes (%q):\n%s", want, f.logs.String())
+	}
+	if strings.Contains(f.logs.String(), "/") {
+		t.Errorf("a log line holds a path:\n%s", f.logs.String())
+	}
 }
 
 // gomodRow is the table's ci-gomod row, which the module tests read.
