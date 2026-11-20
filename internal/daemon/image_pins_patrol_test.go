@@ -1347,7 +1347,8 @@ func TestFillImagePinAgesSetsAgeOnlyForATrailingPin(t *testing.T) {
 		func(url, pin, tip string) (time.Duration, error) {
 			asked = url + " " + pin + " " + tip
 			return 3 * time.Hour, nil
-		})
+		},
+		log.New(io.Discard, "", 0))
 	if want := pinsReadPinURL("organic-mechanic") + " " + pinsReadOMCommit + " " + pinsReadOMTip; asked != want {
 		t.Errorf("the age read ran for %q, want only the trailing pin as %q", asked, want)
 	}
@@ -1356,9 +1357,10 @@ func TestFillImagePinAgesSetsAgeOnlyForATrailingPin(t *testing.T) {
 	}
 }
 
-// TestFillImagePinAgesFailedReadIsThatPinsErr: an age read that fails is that
-// pin's Err with no Age, and the pin after it still gets its age (gt-ojtslh).
-func TestFillImagePinAgesFailedReadIsThatPinsErr(t *testing.T) {
+// TestFillImagePinAgesFailedReadSetsAgeErr: an age read that fails is that
+// pin's AgeErr with no Age, leaving Err nil so the commit count still counts,
+// and the pin after it still gets its age (gt-t7nf9s).
+func TestFillImagePinAgesFailedReadSetsAgeErr(t *testing.T) {
 	t.Parallel()
 	states := []ImagePinState{
 		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip},
@@ -1371,12 +1373,62 @@ func TestFillImagePinAgesFailedReadIsThatPinsErr(t *testing.T) {
 				return 5 * time.Hour, errors.New("git show: exit status 128")
 			}
 			return 2 * time.Hour, nil
-		})
-	if got := states[0]; got.Err == nil || !strings.Contains(got.Err.Error(), "exit status 128") || got.Age != 0 {
-		t.Errorf("the failed read = %+v, want its Err and no age", got)
+		},
+		log.New(io.Discard, "", 0))
+	if got := states[0]; got.Err != nil || got.AgeErr == nil || !strings.Contains(got.AgeErr.Error(), "exit status 128") || got.Age != 0 {
+		t.Errorf("the failed read = %+v, want its AgeErr, no Err and no age", got)
 	}
-	if got := states[1]; got.Err != nil || got.Age != 2*time.Hour {
+	if got := states[1]; got.Err != nil || got.AgeErr != nil || got.Age != 2*time.Hour {
 		t.Errorf("the pin after the failed read = %+v, want its 2h age and no error", got)
+	}
+}
+
+// TestFillImagePinAgesLogsOneLinePerFailedRead: a failed age read is logged
+// once, naming the pin and the error, and an age read that succeeds logs
+// nothing: the log is the alarm a pin below the file threshold would otherwise
+// lose (gt-t7nf9s).
+func TestFillImagePinAgesLogsOneLinePerFailedRead(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	summary := func() []string {
+		var lines []string
+		for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+
+	failed := []ImagePinState{
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip},
+		{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip},
+	}
+	fillImagePinAges(failed, pinsReadPinURL,
+		func(_ string, pin, _ string) (time.Duration, error) {
+			if pin == pinsReadOMCommit {
+				return 0, errors.New("git show: exit status 128")
+			}
+			return 2 * time.Hour, nil
+		},
+		log.New(&logs, "", 0))
+
+	lines := summary()
+	if len(lines) != 1 {
+		t.Fatalf("the log = %q, want exactly one line for the one failed read", lines)
+	}
+	if !strings.Contains(lines[0], "om") || !strings.Contains(lines[0], "exit status 128") {
+		t.Errorf("the log line = %q, want the pin name and the error", lines[0])
+	}
+
+	logs.Reset()
+	fillImagePinAges(failed, pinsReadPinURL,
+		func(string, string, string) (time.Duration, error) {
+			return 2 * time.Hour, nil
+		},
+		log.New(&logs, "", 0))
+	if lines := summary(); len(lines) != 0 {
+		t.Errorf("the log after good reads = %q, want nothing", lines)
 	}
 }
 

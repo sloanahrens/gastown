@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"io"
+	"log"
 	"slices"
 	"testing"
 	"time"
@@ -342,6 +344,55 @@ func TestPlanImagePinsAgeNeverFilesAPinAtItsTip(t *testing.T) {
 
 	if len(got.File) != 0 {
 		t.Errorf("File = %+v, want a pin at its tip to file nothing", got.File)
+	}
+}
+
+// TestPlanImagePinsAgeReadFailureKeepsTheCountRules: a failed age read is the
+// age's failure alone, never the pin's. Its commit count was read, so the pin
+// files at the file threshold and raises the stale item at the stale bound,
+// while a pin whose tip read failed stays unreadable and files nothing.
+func TestPlanImagePinsAgeReadFailureKeepsTheCountRules(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	states := []ImagePinState{
+		{Name: "om", Pin: "pin-om", Tip: "tip-om", Behind: 22},
+		{Name: "hm", Pin: "pin-hm", Tip: "tip-hm", Behind: 45},
+		{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: 30, Err: errors.New("ls-remote exited 128")},
+	}
+	fillImagePinAges(states,
+		func(name string) string { return "https://forge.example.com/town/" + name },
+		func(_, _, _ string) (time.Duration, error) {
+			return 0, errors.New("git show: exit status 128")
+		},
+		log.New(io.Discard, "", 0))
+
+	got := PlanImagePins(states, nil, now)
+
+	var filed []string
+	for _, pin := range got.File {
+		filed = append(filed, pin.Name)
+	}
+	// bd trails by the stale bound too, but its tip read failed: no count of
+	// its own, so it files nothing.
+	if !slices.Equal(filed, []string{"om", "hm"}) {
+		t.Errorf("File names %v, want [om hm]: a failed age read does not switch off the commit-count file rule", filed)
+	}
+	want := []ImagePinItem{{
+		Key:      imagePinsStaleKey,
+		Pin:      "hm",
+		Severity: attention.SeverityMedium,
+		Summary:  "image pin hm is 45 commits behind its source's origin/main, at or over the 30-commit stale bound",
+	}, {
+		Key:      imagePinsUnreadableKey,
+		Pin:      "bd",
+		Severity: attention.SeverityMedium,
+		Summary:  "image pin bd cannot be read: it is not counted as fresh, and no refresh bead is filed for it",
+	}}
+	if !slices.Equal(got.Items, want) {
+		t.Errorf("Items = %+v, want the stale item for hm and the unreadable item for bd", got.Items)
+	}
+	if !slices.Equal(got.Unreadable, []string{"bd"}) {
+		t.Errorf("Unreadable = %q, want [bd]: an age read that failed is not a pin whose distance is unknown", got.Unreadable)
 	}
 }
 

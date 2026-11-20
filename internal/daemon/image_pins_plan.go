@@ -65,6 +65,11 @@ type ImagePinState struct {
 	// Err is the read failure for this pin. Its distance from the tip is
 	// unknown, so the planner never files on it, whatever Behind holds.
 	Err error
+	// AgeErr is the age read's failure for this pin, recorded by
+	// fillImagePinAges. The pin's commit count and tip were read, so the
+	// planner's commit-count rules still apply to it. The attention item that
+	// surfaces an AgeErr is part two, gt-0hb3sx.
+	AgeErr error
 }
 
 // ImagePinRefreshBead is an open refresh bead the planner found: the id the
