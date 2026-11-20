@@ -1,6 +1,7 @@
 package testdb
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -41,16 +42,31 @@ func TestPrefixesIsACopy(t *testing.T) {
 	}
 }
 
+// resolveRoot makes rel absolute and follows symlinks. A sandbox seat reaches
+// its checkout through a symlink, and filepath.WalkDir does not descend a
+// symlink root, so an unresolved root is walked as a single file.
+func resolveRoot(rel string) (string, error) {
+	root, err := filepath.Abs(rel)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(root)
+}
+
+// emptyScanErr is the failure for a walk that read no Go file: such a check
+// passes on any tree, so it proves nothing.
+func emptyScanErr(scanned int, root string) error {
+	if scanned > 0 {
+		return nil
+	}
+	return fmt.Errorf("scanned no Go file under %s", root)
+}
+
 // repoRoot is the gastown module root, two directories up.
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
+	root, err := resolveRoot(filepath.Join("..", ".."))
 	if err != nil {
-		t.Fatal(err)
-	}
-	// A sandbox seat reaches the checkout through a symlink, and WalkDir
-	// does not descend a symlink root: resolve it or the walk sees nothing.
-	if root, err = filepath.EvalSymlinks(root); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
@@ -123,9 +139,49 @@ func TestOneDefinition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A walk that visited no Go file passes on any tree, so an empty scan is
-	// a failure: it is what a symlinked root used to produce.
-	if scanned == 0 {
-		t.Fatalf("scanned no Go file under %s: the walk saw nothing, so the check proved nothing", root)
+	if err := emptyScanErr(scanned, root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveRootFollowsASymlink(t *testing.T) {
+	t.Parallel()
+	real := t.TempDir()
+	if err := os.WriteFile(filepath.Join(real, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "work")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	visited := func(root string) int {
+		n := 0
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err == nil && strings.HasSuffix(path, ".go") {
+				n++
+			}
+			return nil
+		})
+		return n
+	}
+	if got := visited(link); got != 0 {
+		t.Fatalf("premise: WalkDir over the symlink visited %d Go files, want 0", got)
+	}
+	root, err := resolveRoot(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := visited(root); got != 1 {
+		t.Fatalf("WalkDir over the resolved root %s visited %d Go files, want 1", root, got)
+	}
+}
+
+func TestEmptyScanIsAFailure(t *testing.T) {
+	t.Parallel()
+	if err := emptyScanErr(0, "/x"); err == nil {
+		t.Fatal("an empty scan passed")
+	}
+	if err := emptyScanErr(3, "/x"); err != nil {
+		t.Fatalf("a scan of 3 files failed: %v", err)
 	}
 }
