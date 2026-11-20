@@ -84,3 +84,54 @@ func TestTownHealthColdStartProcessFields(t *testing.T) {
 		}
 	}
 }
+
+// TestTownHealthColdStartRecordedFields pins what the town health reads on the
+// first tick of a freshly rolled daemon for the fields a persisted record or a
+// bd read answers: landing, main, backup, config, seat, escalation and the
+// three person fields. Each of them answers here rather than reading UNKNOWN,
+// so this records today's values and names none as a cold-start defect
+// (gt-53pe0n). The fixture's rig names no promote_target, and a town where no
+// rig promotes grows no promote field, so the test pins that absence.
+func TestTownHealthColdStartRecordedFields(t *testing.T) {
+	t.Parallel()
+	in := coldStartHealth(t)
+	r := townhealth.Compute(context.Background(), in)
+
+	for _, want := range []struct {
+		key     string
+		tag     townhealth.Tag
+		verdict townhealth.Verdict
+		value   string
+		detail  string
+	}{
+		{key: "landing/gastown", tag: townhealth.Recorded, verdict: townhealth.Green, value: "1 pending, oldest 1m"},
+		{key: "escalation", tag: townhealth.Live, verdict: townhealth.Degraded, value: "oldest 1h",
+			detail: "oldest open escalation 1h old"},
+		{key: "backup", tag: townhealth.Recorded, verdict: townhealth.Red, value: "none",
+			detail: "no complete backup"},
+		{key: "main/gastown", tag: townhealth.Recorded, verdict: townhealth.Red, value: "red",
+			detail: "main red at bbbb"},
+		{key: "config", tag: townhealth.Live, verdict: townhealth.Green, value: "valid"},
+		{key: "needs-overseer", tag: townhealth.Live, verdict: townhealth.Green, value: "0"},
+		{key: "needs-operator", tag: townhealth.Live, verdict: townhealth.Green, value: "0"},
+		{key: "needs-human", tag: townhealth.Live, verdict: townhealth.Degraded, value: "1",
+			detail: "1 waiting for operator, oldest 2h"},
+		{key: "seat:mayor", tag: townhealth.Recorded, verdict: townhealth.Red, value: "frozen",
+			detail: "frozen by the supervisor"},
+		{key: "seat/gastown:polecat/opal", tag: townhealth.Recorded, verdict: townhealth.Degraded, value: "stalled 44m",
+			detail: "no progress for 44m"},
+	} {
+		got := healthField(t, r, want.key)
+		if got.Tag != want.tag || got.Verdict != want.verdict || got.Value != want.value || got.Detail != want.detail {
+			t.Errorf("%s = %s %s %q %q, want %s %s %q %q",
+				want.key, got.Tag, got.Verdict, got.Value, got.Detail,
+				want.tag, want.verdict, want.value, want.detail)
+		}
+	}
+	for _, f := range r.Fields {
+		if f.Name == townhealth.FieldPromote {
+			t.Errorf("promote = %s %s %q, want no promote field: the fixture's rig names no promote_target",
+				f.Verdict, f.Value, f.Detail)
+		}
+	}
+}
