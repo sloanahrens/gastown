@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"io/fs"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
 // passDaemon is a daemon with overrun_guard on and nothing else to read, so a
@@ -222,7 +225,8 @@ func TestOverrunPassTicksFillRunningSince(t *testing.T) {
 
 // TestOverrunPassTicksWithoutDaemonStart: an unknown daemon start blanks no
 // tick. Only a marker in flight needs the start to be told from a stale one, so
-// only a pass in flight fails the read (gt-6yyt2j).
+// only a pass in flight reads UNKNOWN, and only for that patrol (gt-6yyt2j,
+// gt-gg176y).
 func TestOverrunPassTicksWithoutDaemonStart(t *testing.T) {
 	t.Parallel()
 
@@ -248,13 +252,61 @@ func TestOverrunPassTicksWithoutDaemonStart(t *testing.T) {
 		}
 	})
 
-	t.Run("a pass in flight is an error, not a read", func(t *testing.T) {
+	t.Run("a pass in flight is that patrol's UNKNOWN, not the read's", func(t *testing.T) {
 		t.Parallel()
 		d := passDaemon(t)
+		d.patrolConfig.Patrols.WispReaper = &WispReaperConfig{Enabled: true}
+		var logs bytes.Buffer
+		d.logger = log.New(&logs, "", 0)
+		var ticks []townhealth.Tick
 		var err error
-		d.runOverrunGuardPass(func() { _, err = (&healthSources{d: d}).Ticks() })
-		if err == nil {
-			t.Error("Ticks with a pass in flight and no daemon start = nil error, want an error")
+		d.runOverrunGuardPass(func() {
+			ticks, err = (&healthSources{d: d}).Ticks()
+			if err != nil {
+				return
+			}
+			// A second read of the same state: the line is per change.
+			_, err = (&healthSources{d: d}).Ticks()
+		})
+		if err != nil {
+			t.Fatalf("Ticks with a pass in flight and no daemon start: %v", err)
+		}
+		byName := map[string]townhealth.Tick{}
+		for _, tk := range ticks {
+			byName[tk.Name] = tk
+		}
+		guard, ok := byName["overrun_guard"]
+		if !ok {
+			t.Fatalf("Ticks = %+v, want overrun_guard listed", ticks)
+		}
+		if guard.Err == nil {
+			t.Errorf("overrun_guard tick Err = nil, want the unknown daemon start")
+		}
+		if reaper, ok := byName["wisp_reaper"]; !ok || reaper.Err != nil {
+			t.Errorf("wisp_reaper tick = %+v (listed %v), want it listed with no error", reaper, ok)
+		}
+		want := "health ticks: overrun_guard: a pass is in flight and the daemon start is unknown; its tick is UNKNOWN"
+		if got := strings.Count(logs.String(), want); got != 1 {
+			t.Errorf("log carries the overrun_guard UNKNOWN line %d times, want once:\n%s", got, logs.String())
+		}
+		if strings.Contains(logs.String(), "health ticks: wisp_reaper:") {
+			t.Errorf("log names wisp_reaper, whose tick is fine:\n%s", logs.String())
+		}
+
+		// The pass ended and cleared its marker: nothing is unknown, so a later
+		// read is clean and logs nothing.
+		logs.Reset()
+		ticks, err = (&healthSources{d: d}).Ticks()
+		if err != nil {
+			t.Fatalf("Ticks after the pass: %v", err)
+		}
+		for _, tk := range ticks {
+			if tk.Err != nil {
+				t.Errorf("tick %s after the pass carries Err = %v, want none", tk.Name, tk.Err)
+			}
+		}
+		if logs.Len() != 0 {
+			t.Errorf("log after the pass = %q, want nothing", logs.String())
 		}
 	})
 

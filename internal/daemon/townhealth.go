@@ -234,7 +234,10 @@ func (s *healthSources) Heartbeat() (townhealth.HeartbeatRecord, error) {
 }
 
 // Ticks lists the enabled patrols whose last run the daemon persists
-// (patrol_last_run.json, gt-ima2), each with its run interval.
+// (patrol_last_run.json, gt-ima2), each with its run interval. A patrol whose
+// pass marker cannot be dated (in flight, with the daemon start unknown) comes
+// back as a tick with Err, so every other patrol's tick is still reported;
+// only a record that cannot be read at all ends the whole call (gt-gg176y).
 func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 	cfg := s.d.patrol()
 	pruneEvery, _ := eventsPruneSettings(cfg)
@@ -258,17 +261,42 @@ func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
 	}
 	started := s.daemonStarted()
 	var out []townhealth.Tick
+	var unknown []string
 	for _, p := range all {
 		if !s.d.isPatrolActive(p.name) {
 			continue
 		}
+		tick := townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: rec.LastRun[p.name]}
 		running, err := runningSinceOf(rec, p.name, started)
 		if err != nil {
-			return nil, err
+			tick.Err = err
+			unknown = append(unknown, p.name)
+		} else {
+			tick.RunningSince = running
 		}
-		out = append(out, townhealth.Tick{Name: p.name, Interval: p.interval, LastFired: rec.LastRun[p.name], RunningSince: running})
+		out = append(out, tick)
 	}
+	s.logUnknownTicks(unknown)
 	return out, nil
+}
+
+// logUnknownTicks logs one line for each patrol whose tick entered the UNKNOWN
+// state since the previous read, naming the patrol. The daemon keeps the set
+// the last read found, so a pass in flight that stays undatable is logged once
+// rather than on every heartbeat (gt-gg176y).
+func (s *healthSources) logUnknownTicks(patrols []string) {
+	if s.d == nil {
+		return
+	}
+	prev := s.d.ticksUnknown
+	now := make(map[string]bool, len(patrols))
+	for _, p := range patrols {
+		now[p] = true
+		if !prev[p] && s.d.logger != nil {
+			s.d.logger.Printf("health ticks: %s: a pass is in flight and the daemon start is unknown; its tick is UNKNOWN", p)
+		}
+	}
+	s.d.ticksUnknown = now
 }
 
 // landingRigs are the rigs a landing worker serves; none when it is off.
