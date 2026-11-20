@@ -2214,6 +2214,62 @@ func TestCacheTrimParseListingRefusesACacheItDoesNotKnow(t *testing.T) {
 	}
 }
 
+// TestCacheTrimParseRemoved reads the removal Job's result line as the three
+// counts the ledger's trimmed_files needs: the current image's line, an older
+// image's line without the kept count, and the last line of a text whose
+// earlier lines are not it. Everything else is refused, never read as zero.
+func TestCacheTrimParseRemoved(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		out     string
+		want    [3]int64
+		refused bool
+	}{
+		{"the current image's line", "removed 8 absent 1 kept 3\n", [3]int64{8, 1, 3}, false},
+		{"an older image's line", "removed 8 absent 1\n", [3]int64{8, 1, 0}, false},
+		{"the last non-empty line", "scanning the claim\nremoved 8 absent 1 kept 3\n\n", [3]int64{8, 1, 3}, false},
+		{"empty text", "", [3]int64{}, true},
+		{"a count that is not a number", "removed x absent 1 kept 3", [3]int64{}, true},
+		{"a negative count", "removed -1 absent 0 kept 0", [3]int64{}, true},
+		{"text after the counts", "removed 1 absent 0 kept 0 extra", [3]int64{}, true},
+		{"a label that is not the result line's", "removed 8 absent 1 trimmed 3", [3]int64{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			removed, absent, kept, err := cacheTrimParseRemoved(tt.out)
+			if tt.refused {
+				if err == nil {
+					t.Fatalf("cacheTrimParseRemoved read %q", tt.out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("cacheTrimParseRemoved(%q) = %v", tt.out, err)
+			}
+			if removed != tt.want[0] || absent != tt.want[1] || kept != tt.want[2] {
+				t.Errorf("cacheTrimParseRemoved(%q) = %d, %d, %d, want %v", tt.out, removed, absent, kept, tt.want)
+			}
+		})
+	}
+}
+
+// TestCacheTrimParseRemovedQuotes80Characters pins the refusal's quote: the
+// first 80 characters of the offending line, so a long line does not flood the
+// log with the whole text it refused.
+func TestCacheTrimParseRemovedQuotes80Characters(t *testing.T) {
+	t.Parallel()
+	out := "removed 1 absent 0 kept 0 " + strings.Repeat("x", 100)
+	_, _, _, err := cacheTrimParseRemoved(out)
+	if err == nil {
+		t.Fatal("cacheTrimParseRemoved read a line with text after the counts")
+	}
+	if !strings.Contains(err.Error(), out[:80]) || strings.Contains(err.Error(), out[:81]) {
+		t.Errorf("the refusal does not quote exactly the first 80 characters: %v", err)
+	}
+}
+
 // TestCacheTrimUsesTheHelpersKubeconfig pins that every cluster call the trim
 // makes carries the kubeconfig the helper picks for the process: the container's
 // file in container mode and the host's file otherwise. kubectl reads the

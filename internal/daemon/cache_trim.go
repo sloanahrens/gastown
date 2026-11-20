@@ -1858,6 +1858,48 @@ func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 	return listing, nil
 }
 
+// cacheTrimParseRemoved reads the removal Job's result line -- "removed N
+// absent M kept K", or an older image's line without the kept count -- as its
+// counts. The last non-empty line is the one read, and it must be exactly one
+// of those shapes: any other text is refused, quoting its first 80 characters,
+// because a line read as zero would record a run that trimmed nothing.
+func cacheTrimParseRemoved(out string) (removed, absent, kept int64, err error) {
+	line := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) != "" {
+			line = strings.TrimSuffix(l, "\r")
+		}
+	}
+	refuse := func() error {
+		shown := line
+		if r := []rune(shown); len(r) > 80 {
+			shown = string(r[:80])
+		}
+		return fmt.Errorf("the removal Job's result line %q is not \"removed N absent M kept K\" or an older image's \"removed N absent M\"", shown)
+	}
+	fields := strings.Split(line, " ")
+	if len(fields) == 4 {
+		fields = append(fields, "kept", "0")
+	}
+	if len(fields) != 6 || fields[0] != "removed" || fields[2] != "absent" || fields[4] != "kept" {
+		return 0, 0, 0, refuse()
+	}
+	var counts [3]int64
+	for i, field := range []string{fields[1], fields[3], fields[5]} {
+		for _, r := range field {
+			if r < '0' || r > '9' {
+				return 0, 0, 0, refuse()
+			}
+		}
+		n, perr := strconv.ParseInt(field, 10, 64)
+		if perr != nil {
+			return 0, 0, 0, refuse()
+		}
+		counts[i] = n
+	}
+	return counts[0], counts[1], counts[2], nil
+}
+
 // cacheTrimKubectlEnvKeys are the only variables a trim's kubectl runs with:
 // PATH and HOME for the binary and its cache, and KUBECONFIG for a config the
 // flag does not name.
