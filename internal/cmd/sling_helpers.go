@@ -889,20 +889,48 @@ func formulaBDFor(stores slingStores) formulaBD {
 }
 
 // engine is the formula engine at site, opened with this formulaBD's store
-// construction options.
-func (f formulaBD) engine(site formulaSite) formulaEngine {
-	return formulaCooker{open: f.open, opts: f.stores.opts}.engine(site)
+// construction options plus extra.
+func (f formulaBD) engine(site formulaSite, extra ...beads.Option) formulaEngine {
+	opts := f.stores.opts
+	if len(extra) > 0 {
+		opts = append(append([]beads.Option(nil), opts...), extra...)
+	}
+	return formulaCooker{open: f.open, opts: opts}.engine(site)
 }
 
 // beadEngine is the engine in formulaWorkDir, writing to the database
 // beadID's prefix routes to, so a polecat worktree's own .beads cannot
-// capture the wisp.
+// capture the wisp. The bond it runs adds --root-only when the town's daemon
+// settings ask for it (bondEngineOpts).
 func (f formulaBD) beadEngine(beadID, formulaWorkDir, townRoot string) formulaEngine {
 	return f.engine(formulaSite{
 		dir:      formulaWorkDir,
 		beadsDir: beads.ResolveBeadsDirForID(filepath.Join(townRoot, ".beads"), beadID),
 		townRoot: townRoot,
-	})
+	}, bondEngineOpts(townRoot)...)
+}
+
+// bondRootOnlySetting reports whether the town's daemon settings ask for a
+// root-only bond (bond_root_only in the town's daemon settings file). The
+// setting is off unless that file says otherwise: a file that is absent,
+// unreadable or invalid reads as off, so a sling that cannot see the setting
+// bonds every step as it always has rather than failing the dispatch.
+func bondRootOnlySetting(townRoot string) bool {
+	cfg, err := config.LoadDaemonPatrolConfig(config.DaemonPatrolConfigPath(townRoot))
+	if err != nil || cfg == nil {
+		return false
+	}
+	return cfg.BondRootOnly
+}
+
+// bondEngineOpts are what a bond's engine adds to the sling's own store
+// options: beads.WithBondRootOnly when the town's daemon settings ask for a
+// root-only bond, nothing otherwise.
+func bondEngineOpts(townRoot string) []beads.Option {
+	if !bondRootOnlySetting(townRoot) {
+		return nil
+	}
+	return []beads.Option{beads.WithBondRootOnly()}
 }
 
 // InstantiateFormulaOnBead bonds a formula directly to a bead.
