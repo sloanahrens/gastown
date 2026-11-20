@@ -63,6 +63,10 @@ const (
 	rebuildHMAlertKey = "hm-rebuild"
 )
 
+// HMVersionVar returns the -X target hm's build stamps its commit into: the same
+// target this job's install stamps.
+func HMVersionVar() string { return rebuildHMVersionVar }
+
 // rebuildHMRenameFunc is the seam for the two renames the swap makes. nil is
 // os.Rename. Tests answer it, so the order of renames is recorded and no file
 // moves.

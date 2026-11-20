@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
@@ -217,7 +218,7 @@ func TestDaemonImageDryRunPrintsThePlanAndRunsNothing(t *testing.T) {
 		"build trackerd: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "trackerd") + " ./cmd/trackerd   (in tracker/ of a clean worktree of " + r.flags.gtSrc + " at " + imageTestRev + ")",
 		"build trackerbackup: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "trackerbackup") + " ./cmd/trackerbackup   (in tracker/ of a clean worktree",
 		"build gt-wrap: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "gt-wrap") + " ./cmd/gt-wrap   (clean worktree of " + r.flags.gtSrc + " at " + imageTestRev + ")",
-		"build hm: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "hm") + " .",
+		"build hm: go build -trimpath -ldflags -s -w -X " + daemon.HMVersionVar() + "=" + imageTestHMCommit + " -o " + filepath.Join(r.flags.out, "hm") + " .",
 		"build devops-reporter: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "devops-reporter") + " ./cmd/reporter",
 		"build release-reporter: go build -trimpath -ldflags -s -w -o " + filepath.Join(r.flags.out, "release-reporter") + " ./cmd/release-reporter",
 		"check release-reporter: go version -m " + filepath.Join(r.flags.out, "release-reporter"),
@@ -651,8 +652,10 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 }
 
 // daemonModePlan is the plan a daemon build prints, recorded from the command
-// before --gateway was added; the rig's temporary root is written "<tmp>".
-const daemonModePlan = `pins: <tmp>/image-pins
+// before --gateway was added; the rig's temporary root is written "<tmp>". The
+// hm line carries daemon.HMVersionVar()'s symbol, spliced in from the daemon
+// package so the expectation names no path of its own (gt-d6j2mo).
+var daemonModePlan = strings.ReplaceAll(`pins: <tmp>/image-pins
 pin bd: http://forgejo:3000/owner/beads.git at fedcba9876543210fedcba9876543210fedcba98
 pin om: http://forgejo:3000/owner/organic-mechanic.git at 00112233445566778899aabbccddeeff00112233
 pin hm: http://forgejo:3000/owner/history-man.git at abcdef0123456789abcdef0123456789abcdef01
@@ -665,7 +668,7 @@ build trackerd: go build -trimpath -ldflags -s -w -o <tmp>/out/trackerd ./cmd/tr
 build trackerbackup: go build -trimpath -ldflags -s -w -o <tmp>/out/trackerbackup ./cmd/trackerbackup   (in tracker/ of a clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
 build app-promote: go build -trimpath -ldflags -s -w -o <tmp>/out/plugins/app-promote/app-promote ./plugins/app-promote   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
 build town-metrics: go build -trimpath -ldflags -s -w -o <tmp>/out/plugins/town-metrics/town-metrics ./plugins/town-metrics   (clean worktree of <tmp>/gt at 0123456789abcdef0123456789abcdef01234567)
-build hm: go build -trimpath -ldflags -s -w -o <tmp>/out/hm ./cmd/hm   (clean worktree of <tmp>/hm at abcdef0123456789abcdef0123456789abcdef01)
+build hm: go build -trimpath -ldflags -s -w -X {{HMVersionVar}}=abcdef0123456789abcdef0123456789abcdef01 -o <tmp>/out/hm ./cmd/hm   (clean worktree of <tmp>/hm at abcdef0123456789abcdef0123456789abcdef01)
 build devops-reporter: go build -trimpath -ldflags -s -w -o <tmp>/out/devops-reporter ./cmd/reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
 build release-reporter: go build -trimpath -ldflags -s -w -o <tmp>/out/release-reporter ./cmd/release-reporter   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
 build cloudcheck: go build -trimpath -ldflags -s -w -o <tmp>/out/cloudcheck ./cmd/cloudcheck   (clean worktree of <tmp>/devops at 1234567890abcdef1234567890abcdef12345678)
@@ -677,12 +680,13 @@ fetch openshell: GET https://github.com/NVIDIA/OpenShell/releases/download/v0.1.
 fetch docker: GET https://download.docker.com/linux/static/stable/aarch64/docker-29.8.2.tgz -> <tmp>/out/docker   (sha256 76a624e4a8e5da654d1150e808175125efb5a6f1b6aa1cbd9caee18f51047a50)
 fetch kubectl: GET https://dl.k8s.io/release/v1.37.0/bin/linux/arm64/kubectl -> <tmp>/out/kubectl   (sha256 922df28df248cc00a9e025f947704f1d1482de64ece54cfe57e61f19eaf1eef3)
 image: docker --context desktop-linux build -f <tmp>/gt/deploy/daemon/Dockerfile -t gt-daemon:0123456789abcdef0123456789abcdef01234567 <tmp>/out
-`
+`, "{{HMVersionVar}}", daemon.HMVersionVar())
 
 // The daemon mode's listings after the plan: the dry run's footer, or the tag
 // the apply prints.
-const (
-	daemonImageDryRunFooter = "dry run: nothing was run. Pass --apply to build.\n"
+const daemonImageDryRunFooter = "dry run: nothing was run. Pass --apply to build.\n"
+
+var (
 	daemonModeDryRunListing = daemonModePlan + daemonImageDryRunFooter
 	daemonModeApplyListing  = daemonModePlan + "gt-daemon:" + imageTestRev + "\n"
 )
@@ -813,6 +817,24 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		if strings.HasPrefix(kv, "DOCKER_CONTEXT=") || strings.HasPrefix(kv, "DOCKER_HOST=") {
 			t.Errorf("docker ran with %s from the shell", strings.SplitN(kv, "=", 2)[0])
 		}
+	}
+}
+
+// TestDaemonImageBuilderTakesHMsStampSymbolFromTheDaemon: the Builder the command
+// builds with carries the symbol daemon.HMVersionVar names, the one the rebuild
+// job stamps, so a production image build stamps hm and BuildTools refuses an
+// empty symbol. The two are compared, never spelled, so the expectation cannot
+// drift from the daemon's (gt-d6j2mo).
+func TestDaemonImageBuilderTakesHMsStampSymbolFromTheDaemon(t *testing.T) {
+	t.Parallel()
+	r := newImageRig(t)
+	pins, err := readImagePins(r.flags.pins, ownerIs(config.DefaultForgeOwner))
+	if err != nil {
+		t.Fatalf("readImagePins: %v", err)
+	}
+	b := newDaemonImageBuilder(r.flags, r.deps, pins)
+	if got, want := b.HMVersionVar, daemon.HMVersionVar(); got != want {
+		t.Fatalf("builder HMVersionVar = %q, want daemon.HMVersionVar() = %q", got, want)
 	}
 }
 

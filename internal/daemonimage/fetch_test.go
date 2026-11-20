@@ -258,7 +258,7 @@ func TestFetchedPinsAreStalenessChecked(t *testing.T) {
 			Go: versionGo(versionInfo(testReleaseVersion)), Environ: testEnv, Out: t.TempDir(),
 			GTSrc:    "/src/gt",
 			BDCommit: testBDCommit, OMCommit: testOMCommit,
-			HMCommit: testHMCommit, DevopsCommit: testDevopsCommit,
+			HMCommit: testHMCommit, HMVersionVar: testHMVersionVar, DevopsCommit: testDevopsCommit,
 			Pins: []Pin{
 				{Name: "bd", URL: "http://forgejo:3000/owner/beads.git", Commit: testBDCommit},
 				{Name: "om", URL: "http://forgejo:3000/owner/organic-mechanic.git", Commit: testOMCommit},
