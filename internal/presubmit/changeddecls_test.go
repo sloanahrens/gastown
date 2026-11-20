@@ -217,7 +217,7 @@ func TestChangedDeclsDeleted(t *testing.T) {
 			total: 4,
 		},
 		{
-			name: "a hunk that also adds lines is judged by its added lines only",
+			name: "a replaced function names both the function it removed and the one it adds",
 			git: fakeGit{
 				diff: "diff --git a/pkg/a.go b/pkg/a.go\n--- a/pkg/a.go\n+++ b/pkg/a.go\n" +
 					"@@ -3 +3 @@\n-func G() {}\n+func H() {}\n",
@@ -225,8 +225,8 @@ func TestChangedDeclsDeleted(t *testing.T) {
 				mergeBase: mergeSHA,
 				atBase:    map[string]string{"pkg/a.go": "package p\n\nfunc G() {}\n\nfunc F() {\n\t_ = 2\n}\n"},
 			},
-			want:  map[string][]string{"pkg": {"H"}},
-			total: 1,
+			want:  map[string][]string{"pkg": {"G", "H"}},
+			total: 2,
 		},
 		{
 			name: "a deleted test file is not read",
@@ -360,8 +360,9 @@ func TestChangedDeclsDeletedHunks(t *testing.T) {
 			want: []removal{{path: "pkg/a.go", start: 5, count: 1}},
 		},
 		{
-			name: "a hunk that also adds lines is not listed",
+			name: "a hunk that also adds lines lists its old lines",
 			diff: "diff --git a/pkg/a.go b/pkg/a.go\n--- a/pkg/a.go\n+++ b/pkg/a.go\n@@ -3 +3 @@\n-func G() {}\n+func H() {}\n",
+			want: []removal{{path: "pkg/a.go", start: 3, count: 1}},
 		},
 		{
 			name: "a file deleted outright lists its old path and every line",

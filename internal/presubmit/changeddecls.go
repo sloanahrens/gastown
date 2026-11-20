@@ -26,12 +26,12 @@ type ChangedDeclsResult struct {
 // gt-ezad81).
 //
 // A line the branch adds names the declaration whose span holds it, judged on
-// the file as it is at HEAD (declsTouching). A hunk that removes lines and adds
-// none names the declarations whose span at the merge base holds a removed line,
-// judged on the merge-base file, because the removed lines are not at HEAD. A
-// file the diff deletes outright names every top-level declaration it had at the
-// merge base. A hunk that also adds lines is judged by its added lines alone. The
-// diff runs without rename detection, so a renamed file reads as a deletion and
+// the file as it is at HEAD (declsTouching). A line the branch removes names the
+// declaration whose span at the merge base holds it, judged on the merge-base
+// file, because the removed lines are not at HEAD. So a hunk that replaces a
+// function names both the one it removed and the one it added. A file the diff
+// deletes outright names every top-level declaration it had at the merge base.
+// The diff runs without rename detection, so a renamed file reads as a deletion and
 // an addition. A test file is not read, and a file the go tool skips is not read
 // either. A git-quoted changed path is an error rather than a skipped file,
 // because a declaration in it would go unjudged. A file that does not parse, a
@@ -151,19 +151,19 @@ func mergeBase(run Runner, base string) (string, error) {
 // leaves out is 1, so the groups for b and d may be empty.
 var hunkRangeRE = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+\d+(?:,(\d+))? @@`)
 
-// removal is the run of old lines one hunk removes when it adds none. A file the
-// diff deletes outright is one removal that covers every line of the file.
+// removal is the run of old lines one hunk removes, whether or not it adds lines
+// back. A file the diff deletes outright is one removal that covers every line
+// of the file.
 type removal struct {
 	path  string
 	start int // the first old line removed
 	count int // how many old lines it removes
 }
 
-// removedLines reads a unified diff for the hunks that remove lines and add none,
-// a header "@@ -a,b +c,0 @@" with b greater than 0: the file each belongs to and
-// the old lines it removes. A hunk that also adds lines is not listed, because
-// addedLines judges it. A file the diff deletes is listed by its old path, since
-// its new side is /dev/null.
+// removedLines reads a unified diff for the hunks that remove lines, a header
+// "@@ -a,b +c,d @@" with b greater than 0: the file each belongs to and the old
+// lines it removes, whether or not the hunk adds lines back. A file the diff
+// deletes is listed by its old path, since its new side is /dev/null.
 func removedLines(r io.Reader) ([]removal, error) {
 	var out []removal
 	sc := newScanner(r)
@@ -194,12 +194,11 @@ func removedLines(r io.Reader) ([]removal, error) {
 			if err != nil {
 				return nil, fmt.Errorf("unreadable hunk header %q: %w", raw, err)
 			}
-			newCount, err := hunkCount(m[3])
-			if err != nil {
+			if _, err := hunkCount(m[3]); err != nil {
 				return nil, fmt.Errorf("unreadable hunk header %q: %w", raw, err)
 			}
 			inHunk = true
-			if newCount == 0 && oldCount > 0 {
+			if oldCount > 0 {
 				out = append(out, removal{path: oldFile, start: start, count: oldCount})
 			}
 		}
