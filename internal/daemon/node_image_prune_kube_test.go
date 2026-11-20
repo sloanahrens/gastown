@@ -363,3 +363,33 @@ func TestNodeImagePruneKubeWaitErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestNodeImagePruneKubeDeleteNotFoundIsSuccess: kubectl delete exits 0 with no output
+// for a Job that does not exist under --ignore-not-found, so Delete returns nil and an
+// Apply refusal adds no delete error of its own (gt-ej64ut, gt-lmpnfw).
+func TestNodeImagePruneKubeDeleteNotFoundIsSuccess(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+
+	t.Run("Job that does not exist", func(t *testing.T) {
+		var gotArgs []string
+		run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+			gotArgs = args
+			return "", 0, nil
+		}
+		err := kubectlNodePrune{dir: t.TempDir(), run: run}.Delete(context.Background(), job)
+
+		require.NoError(t, err)
+		assert.Contains(t, gotArgs, "--ignore-not-found", "kubectl delete fails on a missing Job without --ignore-not-found")
+	})
+
+	t.Run("non-zero exit", func(t *testing.T) {
+		run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+			return "", 1, nil
+		}
+		err := kubectlNodePrune{dir: t.TempDir(), run: run}.Delete(context.Background(), job)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "kubectl delete of the node-prune Job exited 1")
+	})
+}
