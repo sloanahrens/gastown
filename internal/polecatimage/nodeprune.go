@@ -32,19 +32,14 @@ func (l *stringList) Set(v string) error {
 	return nil
 }
 
-// nodePruneMain is the node-prune helper. It plans the images to remove from the node whose CRI socket is
+// nodePruneWith is the node-prune helper. It plans the images to remove from the node whose CRI socket is
 // --endpoint and prints one line per planned image. Without --apply the plan is a dry run: nothing is
-// removed. With --apply each planned image is removed, one at a time, and reported.
+// removed. With --apply each planned image is removed, one at a time, and reported. run executes each crictl
+// call's program and returns its standard output; the dispatcher gives execProgram, and a test gives a fake.
 //
 // Exit 0 means the node was read and the plan printed, or every apply removal succeeded. Exit 3 means the
 // node could not be read, with the reason on stderr and no would-remove line, so a missing plan is never
 // read as an empty one; it also means an apply removal failed. Exit 2 is a usage error; -h exits 0.
-func nodePruneMain(args []string, stdout, stderr io.Writer) int {
-	return nodePruneWith(args, stdout, stderr, execProgram)
-}
-
-// nodePruneWith is nodePruneMain with the program runner injected: run executes each crictl call's
-// program and returns its standard output.
 func nodePruneWith(args []string, stdout, stderr io.Writer, run func(name string, args ...string) ([]byte, error)) int {
 	flags := flag.NewFlagSet("node-prune", flag.ContinueOnError)
 	flags.SetOutput(stderr)

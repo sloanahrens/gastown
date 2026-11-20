@@ -3,6 +3,7 @@ package polecatimage
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -521,7 +522,7 @@ func TestRunProgramDispatchesARun(t *testing.T) {
 }
 
 // TestHelperTableRunsNodePrune pins node-prune as a helper the table dispatches:
-// with a crictl program that cannot be run, the verb reaches node-prune, which
+// with a crictl program that cannot be read, the verb reaches node-prune, which
 // refuses with exit 3 and names the unread node, and starts no plugin run.
 func TestHelperTableRunsNodePrune(t *testing.T) {
 	t.Parallel()
@@ -531,8 +532,8 @@ func TestHelperTableRunsNodePrune(t *testing.T) {
 	var out, errOut bytes.Buffer
 	runs := 0
 	entry := func(io.Writer, func(string) string) int { runs++; return 0 }
-	missing := filepath.Join(t.TempDir(), "no-such-crictl")
-	code := runProgramWith([]string{"node-prune", "--endpoint", nodeEndpoint, "--crictl-bin", missing}, &out, &errOut, envMap(map[string]string{}), entry)
+	crictl := func(string, ...string) ([]byte, error) { return nil, errors.New("crictl is not on this node") }
+	code := runProgramWithRunner([]string{"node-prune", "--endpoint", nodeEndpoint}, &out, &errOut, envMap(map[string]string{}), entry, crictl)
 	if code != 3 {
 		t.Errorf("runProgram(node-prune) = %d, want 3 (%s)", code, errOut.String())
 	}
