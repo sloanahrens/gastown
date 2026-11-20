@@ -247,6 +247,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/workspace.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/workspace.tgz", "-C", openshellTestWorkDir),
 		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
+		sandboxExec("ln", "-sfn", openshellTestWorkDir, "/sandbox/gt/work"),
 	}
 	if got := stageNames(fake.Calls()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("openshell calls:\n got %q\nwant %q", got, want)
@@ -727,8 +728,8 @@ func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if prep.WorkDir != openshellTestWorkDir {
-		t.Fatalf("WorkDir = %q, want %q", prep.WorkDir, openshellTestWorkDir)
+	if prep.WorkDir != "/sandbox/gt/work" {
+		t.Fatalf("WorkDir = %q, want the common path /sandbox/gt/work", prep.WorkDir)
 	}
 	if !prep.OmitSecretPrefix {
 		t.Fatal("OmitSecretPrefix = false; the provider, not settings/daemon.env, supplies the credentials")
@@ -2382,6 +2383,86 @@ func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("rollback left the sandbox record behind; routing would point at a deleted sandbox")
+	}
+}
+
+// The common work path is the seat's start directory: every seat links its
+// worktree at /sandbox/gt/work, so Go's cache key holds that path and not the
+// seat's name (gt-f80lq2).
+func TestSandboxCommonWorkLinksTheWorktree(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	// The link is the last exec of populate, right after the redirect: the
+	// record is written on the host once the exec has succeeded.
+	calls := stageNames(fake.Calls())
+	if len(calls) < 2 {
+		t.Fatalf("openshell calls = %q; want the redirect and the link at the end", calls)
+	}
+	got := calls[len(calls)-2:]
+	want := [][]string{
+		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
+		sandboxExec("ln", "-sfn", openshellTestWorkDir, "/sandbox/gt/work"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("last two calls:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestSandboxCommonWorkLinksTheWorktreeFailureNamesThePath(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	run := b.cli.Run
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
+		if slices.Contains(argv, "ln") {
+			return nil, []byte("ln: failed"), errors.New("exit status 1")
+		}
+		return run(ctx, argv, stdin, env)
+	}
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), "/sandbox/gt/work") {
+		t.Fatalf("err = %v, want the link failure naming /sandbox/gt/work", err)
+	}
+	last := fake.Calls()[len(fake.Calls())-1]
+	if want := []string{"openshell", "sandbox", "delete", openshellTestSession}; !reflect.DeepEqual(last, want) {
+		t.Fatalf("last call = %q, want %q (rollback)", last, want)
+	}
+	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
+		t.Fatal("a failed link left a sandbox record behind")
+	}
+}
+
+func TestSandboxCommonWorkIsTheStartDirectory(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+
+	prep, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if prep.WorkDir != "/sandbox/gt/work" {
+		t.Fatalf("WorkDir = %q, want the common path /sandbox/gt/work", prep.WorkDir)
+	}
+	// The host side and the record name the real worktree.
+	if got := prep.Env["GT_POLECAT_PATH"]; got != openshellTestWorkDir {
+		t.Fatalf("GT_POLECAT_PATH = %q, want the real worktree %q", got, openshellTestWorkDir)
+	}
+	rec, ok, err := ReadSandboxRecord(town, openshellTestSession)
+	if err != nil || !ok {
+		t.Fatalf("record: ok=%v err=%v", ok, err)
+	}
+	if rec.WorkDir != openshellTestWorkDir {
+		t.Fatalf("record WorkDir = %q, want the real worktree %q", rec.WorkDir, openshellTestWorkDir)
 	}
 }
 
