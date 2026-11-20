@@ -40,9 +40,13 @@ func patrolLastRunPath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", patrolLastRunFileName)
 }
 
-// patrolLastRunState is the on-disk shape: one completion time per patrol.
+// patrolLastRunState is the on-disk shape: one completion time per patrol, and
+// the start of each pass still in flight. A pass's entry is written at its start
+// and removed at its completion, so a file that carries one was left by a pass
+// that never reached its end.
 type patrolLastRunState struct {
-	LastRun map[string]time.Time `json:"last_run"`
+	LastRun      map[string]time.Time `json:"last_run"`
+	RunningSince map[string]time.Time `json:"running_since,omitempty"`
 }
 
 // ReadPatrolLastRuns reads the whole last-run record: each patrol's last
@@ -61,6 +65,35 @@ func ReadPatrolLastRuns(townRoot string) (map[string]time.Time, error) {
 		return nil, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, ErrPatrolLastRunCorrupt, err)
 	}
 	return state.LastRun, nil
+}
+
+// ReadPatrolRunningSince returns when the pass in flight for a patrol started,
+// as the persisted start marker records it, or the zero time when none is
+// running. A marker older than daemonStarted was left by a previous daemon
+// process whose pass never ended, so it reads as not running. A missing file or
+// entry reads as not running; an unreadable file is an error, and so is a zero
+// daemonStarted, since without the start no marker can be told from a stale one.
+func ReadPatrolRunningSince(townRoot, patrol string, daemonStarted time.Time) (time.Time, error) {
+	if daemonStarted.IsZero() {
+		return time.Time{}, fmt.Errorf("read %s running_since for %s: daemon start unknown", patrolLastRunFileName, patrol)
+	}
+	data, err := os.ReadFile(patrolLastRunPath(townRoot))
+	if errors.Is(err, fs.ErrNotExist) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	var state patrolLastRunState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return time.Time{}, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, ErrPatrolLastRunCorrupt, err)
+	}
+	since, ok := state.RunningSince[patrol]
+	if !ok || since.IsZero() || since.Before(daemonStarted) {
+		return time.Time{}, nil
+	}
+	return since, nil
 }
 
 // loadPatrolLastRun returns a patrol's last recorded completion time, and false
@@ -121,7 +154,8 @@ func (m *patrolLastRunMemory) last() time.Time {
 
 // recordStart keeps when the pass in flight started, so a patrol that is
 // running can be told from one that is merely overdue. A pass that never
-// records its completion leaves the mark set until the process ends.
+// records its completion leaves the mark set until the process ends; the
+// persisted entry outlives the process, and ReadPatrolRunningSince discounts it.
 func (m *patrolLastRunMemory) recordStart(at time.Time) {
 	m.mu.Lock()
 	m.runningSince = at.Round(0)
@@ -246,9 +280,9 @@ func shortPatrolCheckTick(interval time.Duration) time.Duration {
 	return tick
 }
 
-// savePatrolLastRun records a patrol's completion time, preserving the entries
-// of other patrols.
-func savePatrolLastRun(townRoot, patrol string, at time.Time) error {
+// updatePatrolLastRunState applies change to the on-disk record and writes it
+// back, preserving the entries of other patrols.
+func updatePatrolLastRunState(townRoot string, change func(state *patrolLastRunState)) error {
 	patrolLastRunWriteMu.Lock()
 	defer patrolLastRunWriteMu.Unlock()
 
@@ -264,12 +298,32 @@ func savePatrolLastRun(townRoot, patrol string, at time.Time) error {
 	if state.LastRun == nil {
 		state.LastRun = map[string]time.Time{}
 	}
-	state.LastRun[patrol] = at
+	change(&state)
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
 	return atomicfile.WriteJSON(path, state)
+}
+
+// savePatrolLastRun records a patrol's completion time. The same write clears
+// the patrol's start marker: the completion is the end of the pass the marker
+// belongs to.
+func savePatrolLastRun(townRoot, patrol string, at time.Time) error {
+	return updatePatrolLastRunState(townRoot, func(state *patrolLastRunState) {
+		state.LastRun[patrol] = at
+		delete(state.RunningSince, patrol)
+	})
+}
+
+// savePatrolRunningSince records when a patrol's pass started.
+func savePatrolRunningSince(townRoot, patrol string, at time.Time) error {
+	return updatePatrolLastRunState(townRoot, func(state *patrolLastRunState) {
+		if state.RunningSince == nil {
+			state.RunningSince = map[string]time.Time{}
+		}
+		state.RunningSince[patrol] = at
+	})
 }
 
 // recordPatrolRun records a patrol's completion time in memory and on disk.
@@ -287,9 +341,12 @@ func (d *Daemon) recordPatrolRun(mem *patrolLastRunMemory, patrol string, at tim
 	}
 }
 
-// recordPatrolStart marks a patrol's pass as started in memory; recordPatrolRun
-// clears the mark when the pass ends. The mark stays in memory: persisting it
-// to patrol_last_run.json is gt-v9ynaw's.
-func (d *Daemon) recordPatrolStart(mem *patrolLastRunMemory, at time.Time) {
+// recordPatrolStart marks a patrol's pass as started, in memory and in
+// patrol_last_run.json; recordPatrolRun clears both when the pass ends. A failed
+// write is logged and the in-memory mark still stands for this process.
+func (d *Daemon) recordPatrolStart(mem *patrolLastRunMemory, patrol string, at time.Time) {
 	mem.recordStart(at)
+	if err := savePatrolRunningSince(d.config.TownRoot, patrol, at); err != nil {
+		d.logger.Printf("%s: WARNING: cannot persist pass start (%v)", patrol, err)
+	}
 }

@@ -1,8 +1,13 @@
 package daemon
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +62,123 @@ func TestOverrunPassStartMarker(t *testing.T) {
 		}
 		if got := d.overrunGuardRun.RunningSince(); !got.IsZero() {
 			t.Errorf("RunningSince after the guard's pass = %v, want zero", got)
+		}
+	})
+}
+
+// TestOverrunPassStartMarkerFile: a pass persists its start to
+// patrol_last_run.json while it runs, and its completion removes the entry. A
+// start older than the daemon's own start reads as not running, so a pass a
+// dead daemon left behind is not shown as in flight (gt-v9ynaw).
+func TestOverrunPassStartMarkerFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a started pass writes running_since and its end removes it", func(t *testing.T) {
+		t.Parallel()
+		d := passDaemon(t)
+		root := d.config.TownRoot
+		before := time.Now()
+		var during time.Time
+		var duringErr error
+		d.runOverrunGuardPass(func() {
+			during, duringErr = ReadPatrolRunningSince(root, "overrun_guard", before)
+		})
+
+		if duringErr != nil {
+			t.Fatalf("ReadPatrolRunningSince inside the pass: %v", duringErr)
+		}
+		if during.IsZero() {
+			t.Fatal("running_since inside a started pass = zero, want the pass start in the file")
+		}
+		runs, err := ReadPatrolLastRuns(root)
+		if err != nil {
+			t.Fatalf("ReadPatrolLastRuns after the pass: %v", err)
+		}
+		if runs["overrun_guard"].IsZero() {
+			t.Fatal("the pass recorded no completion, so its end never cleared the marker")
+		}
+		got, err := ReadPatrolRunningSince(root, "overrun_guard", before)
+		if err != nil {
+			t.Fatalf("ReadPatrolRunningSince after the pass: %v", err)
+		}
+		if !got.IsZero() {
+			t.Errorf("running_since after the pass = %v, want the entry removed", got)
+		}
+		data, err := os.ReadFile(filepath.Join(root, "daemon", "patrol_last_run.json"))
+		if err != nil {
+			t.Fatalf("read patrol_last_run.json after the pass: %v", err)
+		}
+		if strings.Contains(string(data), "running_since") {
+			t.Errorf("patrol_last_run.json after the pass still carries running_since:\n%s", data)
+		}
+	})
+
+	t.Run("a start older than the daemon's start reads as not running", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		old := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+		if err := savePatrolRunningSince(root, "overrun_guard", old); err != nil {
+			t.Fatalf("savePatrolRunningSince: %v", err)
+		}
+
+		got, err := ReadPatrolRunningSince(root, "overrun_guard", old.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("ReadPatrolRunningSince with a later daemon start: %v", err)
+		}
+		if !got.IsZero() {
+			t.Errorf("running_since %v from before the daemon started = %v, want not running", old, got)
+		}
+
+		got, err = ReadPatrolRunningSince(root, "overrun_guard", old.Add(-time.Hour))
+		if err != nil {
+			t.Fatalf("ReadPatrolRunningSince with an earlier daemon start: %v", err)
+		}
+		if !got.Equal(old) {
+			t.Errorf("running_since from after the daemon started = %v, want %v", got, old)
+		}
+	})
+
+	t.Run("an unknown daemon start is an error, not a read", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := savePatrolRunningSince(root, "overrun_guard", time.Now()); err != nil {
+			t.Fatalf("savePatrolRunningSince: %v", err)
+		}
+		if _, err := ReadPatrolRunningSince(root, "overrun_guard", time.Time{}); err == nil {
+			t.Error("ReadPatrolRunningSince with no daemon start = nil error, want an error")
+		}
+	})
+
+	t.Run("a corrupt file is reported, not read as idle", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		path := filepath.Join(root, "daemon", "patrol_last_run.json")
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
+			t.Fatalf("write corrupt file: %v", err)
+		}
+		_, err := ReadPatrolRunningSince(root, "overrun_guard", time.Now())
+		if !errors.Is(err, ErrPatrolLastRunCorrupt) {
+			t.Errorf("ReadPatrolRunningSince on a corrupt file: err = %v, want ErrPatrolLastRunCorrupt", err)
+		}
+	})
+
+	t.Run("an unreadable file is an error, not read as idle", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		// A directory where the record should be: the file exists but cannot be
+		// read, which is not the missing-file case.
+		if err := os.MkdirAll(patrolLastRunPath(root), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		_, err := ReadPatrolRunningSince(root, "overrun_guard", time.Now())
+		if err == nil {
+			t.Error("ReadPatrolRunningSince on an unreadable file = nil error, want an error")
+		}
+		if errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ReadPatrolRunningSince on an unreadable file: err = %v, want a read error, not a missing file", err)
 		}
 	})
 }
