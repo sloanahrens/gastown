@@ -1522,6 +1522,39 @@ func TestSquashCheckRecoversAfterAFailedRunInsideTheGate(t *testing.T) {
 	}
 }
 
+// TestSquashCheckLogsTheRecovery: when the recovery seam returns a Recovery the
+// check logs it with the database, the state the recovery found, the branches it
+// dropped and the ones it kept (gt-oym2v2). The line is the one place an operator
+// reads that a dead run's branches were touched.
+func TestSquashCheckLogsTheRecovery(t *testing.T) {
+	t.Parallel()
+	d, _, _, logs := squashTickDaemon(t, squashEnabled())
+	root := squashBackupRoot(t, d)
+	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+		return &doltsquash.Recovery{
+			State:   doltsquash.RecoveryFirstRename,
+			Dropped: []string{"compact-work", "compact-base"},
+			Kept:    []string{"main-pre-squash"},
+			Reason:  "main was put back",
+		}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	for _, want := range []string{
+		"squash: gt: recovered a dead run",
+		string(doltsquash.RecoveryFirstRename),
+		"dropped compact-work, compact-base",
+		"kept main-pre-squash",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the recovery's log line lacks %q:\n%s", want, got)
+		}
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
