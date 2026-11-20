@@ -78,7 +78,7 @@ func (k kubectlNodePrune) Apply(ctx context.Context, manifest []byte) error {
 
 	bounded, cancel := context.WithTimeout(ctx, nodePruneKubeTimeout)
 	defer cancel()
-	_, exit, err := k.run(bounded, "", nil, "kubectl", "create", "-f", path)
+	_, exit, err := k.run(bounded, "", nil, "kubectl", "-n", nodeImagePruneNamespace, "create", "-f", path)
 	if err != nil {
 		return fmt.Errorf("running kubectl create: %w", err)
 	}

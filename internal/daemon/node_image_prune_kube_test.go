@@ -80,19 +80,19 @@ func TestNodeImagePruneKubeArgv(t *testing.T) {
 				run := func(ctx context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
 					gotArgs = args
 					_, hasDeadline = ctx.Deadline()
-					if len(args) == 3 {
-						gotManifest, _ = os.ReadFile(args[2])
+					if len(args) == 5 {
+						gotManifest, _ = os.ReadFile(args[4])
 					}
 					return tt.out, tt.exit, tt.runErr
 				}
 				err := kubectlNodePrune{dir: dir, run: run}.Apply(context.Background(), []byte(manifest))
 
-				require.Len(t, gotArgs, 3)
-				assert.Equal(t, []string{"create", "-f"}, gotArgs[:2])
-				assert.Equal(t, filepath.Join(dir, nodePruneManifestName([]byte(manifest))), gotArgs[2], "the manifest was not written under the update directory by its name")
+				require.Len(t, gotArgs, 5)
+				assert.Equal(t, []string{"-n", "gt", "create", "-f"}, gotArgs[:4])
+				assert.Equal(t, filepath.Join(dir, nodePruneManifestName([]byte(manifest))), gotArgs[4], "the manifest was not written under the update directory by its name")
 				assert.Equal(t, manifest, string(gotManifest), "kubectl did not read the rendered manifest")
 				assert.True(t, hasDeadline, "kubectl ran with no deadline")
-				_, statErr := os.Stat(gotArgs[2])
+				_, statErr := os.Stat(gotArgs[4])
 				assert.ErrorIs(t, statErr, os.ErrNotExist, "the manifest was left behind after the apply")
 				if tt.wantMsg == "" {
 					assert.NoError(t, err)
@@ -132,6 +132,27 @@ func TestNodeImagePruneKubeArgv(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "the update directory")
 	})
+}
+
+// TestNodeImagePruneKubeApplyNamesTheNamespace: Apply names the gt namespace with
+// -n before create and -f, so a manifest that lost its namespace still creates the
+// Job in the gt namespace and not in default (gt-rvasli).
+func TestNodeImagePruneKubeApplyNamesTheNamespace(t *testing.T) {
+	t.Parallel()
+	manifest := []byte("kind: Job\n")
+
+	dir := t.TempDir()
+	var gotArgs []string
+	run := func(_ context.Context, _ string, _ []string, _ string, args ...string) (string, int, error) {
+		gotArgs = args
+		return "", 0, nil
+	}
+	err := kubectlNodePrune{dir: dir, run: run}.Apply(context.Background(), manifest)
+
+	require.NoError(t, err)
+	require.Len(t, gotArgs, 5)
+	assert.Equal(t, []string{"-n", nodeImagePruneNamespace, "create", "-f"}, gotArgs[:4])
+	assert.Equal(t, filepath.Join(dir, nodePruneManifestName(manifest)), gotArgs[4])
 }
 
 // TestNodeImagePruneKubeWaitArgv: WaitComplete, Logs and Delete run kubectl through
