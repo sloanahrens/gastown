@@ -87,6 +87,7 @@ type MoleculeProgressInfo struct {
 	RootID       string   `json:"root_id"`
 	RootTitle    string   `json:"root_title"`
 	MoleculeID   string   `json:"molecule_id,omitempty"`
+	NoSteps      bool     `json:"no_steps,omitempty"` // the root poured no step beads (bonded root-only)
 	TotalSteps   int      `json:"total_steps"`
 	DoneSteps    int      `json:"done_steps"`
 	InProgress   int      `json:"in_progress_steps"`
@@ -95,6 +96,10 @@ type MoleculeProgressInfo struct {
 	Percent      int      `json:"percent_complete"`
 	Complete     bool     `json:"complete"`
 }
+
+// noStepsPouredLine is what a molecule reader prints for a molecule bonded
+// root-only: it carries its checklist in the formula and pours no step beads.
+const noStepsPouredLine = "no steps poured (root-only): the checklist is in the formula, read it with gt prime --step"
 
 // MoleculeStatusInfo contains status information for an agent's work.
 type MoleculeStatusInfo struct {
@@ -129,24 +134,38 @@ type MoleculeCurrentInfo struct {
 }
 
 func runMoleculeProgress(cmd *cobra.Command, args []string) error {
-	rootID := args[0]
-
 	workDir, err := findLocalBeadsDir()
 	if err != nil {
 		return fmt.Errorf("not in a beads workspace: %w", err)
 	}
 
-	b := beads.New(workDir)
+	return moleculeProgressRun{
+		out:    os.Stdout,
+		client: beads.New(workDir),
+		rootID: args[0],
+		asJSON: moleculeJSON,
+	}.run()
+}
 
+// moleculeProgressRun is one gt mol progress call with its environment
+// resolved, so a test drives it without a beads workspace.
+type moleculeProgressRun struct {
+	out    io.Writer
+	client beads.Client
+	rootID string
+	asJSON bool
+}
+
+func (r moleculeProgressRun) run() error {
 	// Get the root issue
-	root, err := b.Show(rootID)
+	root, err := r.client.Show(r.rootID)
 	if err != nil {
 		return fmt.Errorf("getting root issue: %w", err)
 	}
 
 	// Find all children of the root issue
-	children, err := b.List(beads.ListOptions{
-		Parent:   rootID,
+	children, err := r.client.List(beads.ListOptions{
+		Parent:   r.rootID,
 		Status:   "all",
 		Priority: -1,
 	})
@@ -155,104 +174,60 @@ func runMoleculeProgress(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(children) == 0 {
-		return fmt.Errorf("no steps found for %s (not a molecule root?)", rootID)
-	}
-
-	// Build progress info
-	progress := MoleculeProgressInfo{
-		RootID:    rootID,
-		RootTitle: root.Title,
-	}
-
-	// Try to find molecule ID from first child's description
-	for _, child := range children {
-		if molID := extractMoleculeID(child.Description); molID != "" {
-			progress.MoleculeID = molID
-			break
+		if root.Type != moleculeIssueType {
+			return fmt.Errorf("no steps found for %s (not a molecule root?)", r.rootID)
 		}
+		// A molecule bonded root-only carries its checklist in the formula and
+		// pours no step beads, so there is no progress to plot.
+		return r.write(&MoleculeProgressInfo{RootID: r.rootID, RootTitle: root.Title, NoSteps: true})
 	}
 
-	// Collect open step IDs for dependency checking
-	var openStepIDs []string
-	for _, child := range children {
-		if child.Status == "open" {
-			openStepIDs = append(openStepIDs, child.ID)
-		}
+	progress, err := buildProgressInfo(r.client, root, children)
+	if err != nil {
+		return err
 	}
+	return r.write(progress)
+}
 
-	// Fetch full details for open steps to get dependency info.
-	// bd list doesn't return dependencies, but bd show does.
-	var openStepsMap map[string]*beads.Issue
-	if len(openStepIDs) > 0 {
-		openStepsMap, err = b.ShowMultiple(openStepIDs)
-		if err != nil {
-			// Without the dependencies every open step would read as ready.
-			return fmt.Errorf("reading %d open step(s) of %s: %w", len(openStepIDs), rootID, err)
-		}
-	}
-
-	// Categorize steps
-	for _, child := range children {
-		progress.TotalSteps++
-
-		switch child.Status {
-		case "closed":
-			progress.DoneSteps++
-		case "in_progress":
-			progress.InProgress++
-		case "open":
-			// Dependencies come from bd show (bd list leaves DependsOn empty).
-			step := openStepsMap[child.ID]
-			if step == nil || moleculeStepReady(step) {
-				progress.ReadySteps = append(progress.ReadySteps, child.ID)
-			} else {
-				progress.BlockedSteps = append(progress.BlockedSteps, child.ID)
-			}
-		}
-	}
-
-	// Sort ready steps by sequence number so step 1 comes before step 2, etc.
-	sortStepIDsBySequence(progress.ReadySteps)
-
-	// Calculate completion percentage
-	if progress.TotalSteps > 0 {
-		progress.Percent = (progress.DoneSteps * 100) / progress.TotalSteps
-	}
-	progress.Complete = progress.DoneSteps == progress.TotalSteps
-
-	// JSON output
-	if moleculeJSON {
-		enc := json.NewEncoder(os.Stdout)
+// write prints progress to r.out, as JSON under --json and as the human
+// report otherwise.
+func (r moleculeProgressRun) write(progress *MoleculeProgressInfo) error {
+	if r.asJSON {
+		enc := json.NewEncoder(r.out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(progress)
 	}
 
-	// Human-readable output
-	fmt.Printf("\n%s %s\n\n", style.Bold.Render("🧬 Molecule Progress:"), root.Title)
-	fmt.Printf("  Root: %s\n", rootID)
+	fmt.Fprintf(r.out, "\n%s %s\n\n", style.Bold.Render("🧬 Molecule Progress:"), progress.RootTitle)
+	fmt.Fprintf(r.out, "  Root: %s\n", progress.RootID)
 	if progress.MoleculeID != "" {
-		fmt.Printf("  Molecule: %s\n", progress.MoleculeID)
+		fmt.Fprintf(r.out, "  Molecule: %s\n", progress.MoleculeID)
 	}
-	fmt.Println()
+	fmt.Fprintln(r.out)
+
+	if progress.NoSteps {
+		fmt.Fprintf(r.out, "  %s\n", noStepsPouredLine)
+		return nil
+	}
 
 	// Progress bar
 	barWidth := 20
 	filled := (progress.Percent * barWidth) / 100
 	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-	fmt.Printf("  [%s] %d%% (%d/%d)\n\n", bar, progress.Percent, progress.DoneSteps, progress.TotalSteps)
+	fmt.Fprintf(r.out, "  [%s] %d%% (%d/%d)\n\n", bar, progress.Percent, progress.DoneSteps, progress.TotalSteps)
 
 	// Step status
-	fmt.Printf("  Done:        %d\n", progress.DoneSteps)
-	fmt.Printf("  In Progress: %d\n", progress.InProgress)
-	fmt.Printf("  Ready:       %d", len(progress.ReadySteps))
+	fmt.Fprintf(r.out, "  Done:        %d\n", progress.DoneSteps)
+	fmt.Fprintf(r.out, "  In Progress: %d\n", progress.InProgress)
+	fmt.Fprintf(r.out, "  Ready:       %d", len(progress.ReadySteps))
 	if len(progress.ReadySteps) > 0 {
-		fmt.Printf(" (%s)", strings.Join(progress.ReadySteps, ", "))
+		fmt.Fprintf(r.out, " (%s)", strings.Join(progress.ReadySteps, ", "))
 	}
-	fmt.Println()
-	fmt.Printf("  Blocked:     %d\n", len(progress.BlockedSteps))
+	fmt.Fprintln(r.out)
+	fmt.Fprintf(r.out, "  Blocked:     %d\n", len(progress.BlockedSteps))
 
 	if progress.Complete {
-		fmt.Printf("\n  %s\n", style.Bold.Render("✓ Molecule complete!"))
+		fmt.Fprintf(r.out, "\n  %s\n", style.Bold.Render("✓ Molecule complete!"))
 	}
 
 	return nil
@@ -412,25 +387,7 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		status.PinnedBead = hookBead
 
 		// Check for attached molecule
-		attachment := beads.ParseAttachmentFields(hookBead)
-		if attachment != nil {
-			status.AttachedMolecule = attachment.AttachedMolecule
-			status.AttachedFormula = attachment.AttachedFormula
-			status.AttachedAt = attachment.AttachedAt
-			status.AttachedArgs = attachment.AttachedArgs
-			status.AttachedVars = attachment.AttachedVars
-
-			status.IsWisp = strings.Contains(hookBead.Description, "wisp: true") ||
-				strings.Contains(hookBead.Description, "is_wisp: true")
-
-			if attachment.AttachedMolecule != "" {
-				status.Progress = moleculeProgressOrWarn(os.Stderr, b, attachment.AttachedMolecule)
-				status.NextAction = determineNextAction(status)
-			} else if attachment.AttachedFormula != "" {
-				status.Progress = moleculeProgressOrWarn(os.Stderr, b, hookBead.ID)
-				status.NextAction = determineNextAction(status)
-			}
-		}
+		applyHookAttachment(os.Stderr, b, &status, hookBead)
 	}
 
 	// Determine next action if no work is slung
@@ -455,6 +412,37 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 		showRecentTrailSummary()
 	})
 	return nil
+}
+
+// applyHookAttachment reads hookBead's attachment into status, including the
+// attached molecule's progress and the next action. w receives the warning
+// when the molecule cannot be read; it is stderr because status prints to
+// stdout.
+func applyHookAttachment(w io.Writer, b beads.Client, status *MoleculeStatusInfo, hookBead *beads.Issue) {
+	attachment := beads.ParseAttachmentFields(hookBead)
+	if attachment == nil {
+		return
+	}
+	status.AttachedMolecule = attachment.AttachedMolecule
+	status.AttachedFormula = attachment.AttachedFormula
+	status.AttachedAt = attachment.AttachedAt
+	status.AttachedArgs = attachment.AttachedArgs
+	status.AttachedVars = attachment.AttachedVars
+
+	status.IsWisp = strings.Contains(hookBead.Description, "wisp: true") ||
+		strings.Contains(hookBead.Description, "is_wisp: true")
+
+	// A standalone formula keeps no molecule bead, so its steps hang off the
+	// hooked bead itself.
+	switch {
+	case attachment.AttachedMolecule != "":
+		status.Progress = moleculeProgressOrWarn(w, b, attachment.AttachedMolecule)
+	case attachment.AttachedFormula != "":
+		status.Progress = moleculeProgressOrWarn(w, b, hookBead.ID)
+	default:
+		return
+	}
+	status.NextAction = determineNextAction(*status)
 }
 
 // extractRoleFromIdentity extracts the role name from an agent identity string
@@ -510,13 +498,26 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 	}
 
 	if len(children) == 0 {
-		// No children - might be a simple issue, not a molecule
+		// A molecule bonded root-only pours no step beads: its checklist lives
+		// in the formula. Any other childless bead is a simple issue, not a
+		// molecule, and has no progress to report.
+		if root.Type == moleculeIssueType {
+			return &MoleculeProgressInfo{
+				RootID:    moleculeRootID,
+				RootTitle: root.Title,
+				NoSteps:   true,
+			}, nil
+		}
 		return nil, nil
 	}
 
-	// Build progress info
+	return buildProgressInfo(b, root, children)
+}
+
+// buildProgressInfo categorizes the poured steps of root into progress.
+func buildProgressInfo(b beads.Client, root *beads.Issue, children []*beads.Issue) (*MoleculeProgressInfo, error) {
 	progress := &MoleculeProgressInfo{
-		RootID:    moleculeRootID,
+		RootID:    root.ID,
 		RootTitle: root.Title,
 	}
 
@@ -540,11 +541,12 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 	// bd list doesn't return dependencies, but bd show does.
 	var openStepsMap map[string]*beads.Issue
 	if len(openStepIDs) > 0 {
+		var err error
 		openStepsMap, err = b.ShowMultiple(openStepIDs)
 		if err != nil {
 			// Without the dependencies every open step would read as ready, and
 			// a blocked step would be offered for claiming.
-			return nil, fmt.Errorf("reading %d open step(s) of %s: %w", len(openStepIDs), moleculeRootID, err)
+			return nil, fmt.Errorf("reading %d open step(s) of %s: %w", len(openStepIDs), root.ID, err)
 		}
 	}
 
@@ -584,6 +586,10 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 func determineNextAction(status MoleculeStatusInfo) string {
 	if status.Progress == nil {
 		return ""
+	}
+
+	if status.Progress.NoSteps {
+		return noStepsPouredLine
 	}
 
 	if status.Progress.Complete {
@@ -679,8 +685,9 @@ func outputMoleculeStatus(w io.Writer, status MoleculeStatusInfo, workspaceHints
 		fmt.Fprintf(w, "%s\n", style.Dim.Render("No molecule attached (hooked bead still triggers autonomous work)"))
 	}
 
-	// Show progress if available
-	if status.Progress != nil {
+	// Show progress if available. A root-only molecule has no steps to plot:
+	// the next action names where its checklist is instead.
+	if status.Progress != nil && !status.Progress.NoSteps {
 		fmt.Fprintln(w)
 
 		// Progress bar

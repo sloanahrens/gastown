@@ -277,7 +277,9 @@ squashed_at: %s
 			digestDesc += fmt.Sprintf("\n## Summary\n%s\n", e.summary)
 		}
 
-		if progress != nil {
+		// A molecule bonded root-only poured no steps: an execution summary
+		// would report it as 0/0 steps, partial (gt-thyafn).
+		if progress != nil && !progress.NoSteps {
 			digestDesc += fmt.Sprintf(`
 ## Execution Summary
 - Steps: %d/%d completed
