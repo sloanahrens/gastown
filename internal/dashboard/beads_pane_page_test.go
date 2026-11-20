@@ -41,7 +41,7 @@ func pageColumnKeys(t *testing.T) (left, right []string) {
 // tests take the pane above Beads from it instead of restating that pair.
 func beadsPageColumns() (left, right []string) {
 	return []string{"birds", "attention", "events", "activity", "cost", "rigs", "tiersweep", "beads"},
-		[]string{"news", "machine", "cloud", "forgejo", "om", "jev", "mango"}
+		[]string{"news", "machine", "cloud", "forgejo", "om", "jev", "dolt", "mango"}
 }
 
 // paneAbove is the key directly before key in panes. It fails the test when
