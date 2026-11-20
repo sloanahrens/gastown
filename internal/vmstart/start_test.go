@@ -101,6 +101,58 @@ func reportCommands(report Report) []string {
 	return cmds
 }
 
+// callIndex is where calls first holds argv, or -1.
+func callIndex(calls [][]string, argv []string) int {
+	for i, call := range calls {
+		if reflect.DeepEqual(call, argv) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestVMStartPlanOrder: StartPlan prints the order `gt town vms start
+// --dry-run` prints, and Start runs the steps in that order, each step's first
+// call after the previous step's.
+func TestVMStartPlanOrder(t *testing.T) {
+	t.Parallel()
+	var names []string
+	for _, step := range StartPlan {
+		names = append(names, step.Name)
+	}
+	if want := []string{"gt-sbx", "gt-control", "containers", "DNS", "registry"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("StartPlan prints %q, want %q", names, want)
+	}
+	// firstCall is the command each step runs first, written out here so a run
+	// that takes the steps in another order fails this test.
+	firstCall := map[string][]string{
+		"gt-sbx":     startArgv("gt-sbx"),
+		"gt-control": startArgv("gt-control"),
+		"containers": containersArgv,
+		"DNS":        readArgv("gt-sbx"),
+		"registry":   registryLsofArgv,
+	}
+	r := &queueRunner{queues: startQueues(startStarts())}
+	if _, err := Start(context.Background(), r.run, func(time.Duration) {}, time.Now, "/home/test"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	prev := -1
+	for _, step := range StartPlan {
+		argv, ok := firstCall[step.Name]
+		if !ok {
+			t.Fatalf("step %q has no first call written out for it", step.Name)
+		}
+		at := callIndex(r.calls, argv)
+		if at < 0 {
+			t.Fatalf("step %q ran no %q: calls = %q", step.Name, argv, r.calls)
+		}
+		if at <= prev {
+			t.Fatalf("step %q ran at call %d, not after the step before it at %d: calls = %q", step.Name, at, prev, r.calls)
+		}
+		prev = at
+	}
+}
+
 // TestVMStartRunOrder: the sandbox VM starts first, then the control VM, then
 // the containers, and a run where every step passes sleeps nowhere.
 func TestVMStartRunOrder(t *testing.T) {
