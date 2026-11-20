@@ -125,8 +125,9 @@ func (p followupPolicy) reason(w land.Work, c land.FollowupCandidate) string {
 	if isDocNit(c) {
 		return followupReasonDocNit
 	}
-	// The hold-out runs last, so a finding an earlier rule already skipped is
-	// not counted as held out.
+	// The hold-out runs last, so an earlier skip is never counted as held out:
+	// it withholds findings of the classes doc-contradicts-code and
+	// non-hermetic-test for 20 percent of beads for 28 days (gt-o2zvf1).
 	if p.heldOut(w, c) {
 		return followupReasonHoldOut
 	}
