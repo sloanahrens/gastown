@@ -29,6 +29,7 @@ func init() {
 		Entry{Path: "history", Group: "dolt", Use: "Use this when a bead's history shows a field that never changed, to check whether the record was cut off before it began."},
 		Entry{Path: "intervention", Group: "review", Use: "Use this to see or record the times a person or the overseer had to step in where the loop could not."},
 		Entry{Path: "intervention record", Group: "review", Use: "Use this to log why, right after you step in on a bead the loop could not handle, so the intervention is counted."},
+		Entry{Path: "jobs", Group: "orient", Use: "Use this to see whether the daemon's maintenance jobs, the nightly backup and the Dolt gc last ran and are overdue, before you rely on them.", Check: "gt jobs exits 0"},
 		Entry{Path: "log", Group: "orient", Use: "Use this to see what the town's agents have recently done, such as spawns, handoffs, nudges and crashes, in order."},
 		Entry{Path: "log crash", Group: "internal", Use: "Use this when an agent's tmux pane exits, to record how the session ended."},
 		Entry{Path: "log prune-worktree", Group: "internal", Use: "Use this when you have removed an orphaned worktree, so the removal shows in the town's log."},
