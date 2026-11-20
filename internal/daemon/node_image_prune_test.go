@@ -107,6 +107,42 @@ func TestNodeImagePruneOnceUsesTheRunningPolecatImage(t *testing.T) {
 	})
 }
 
+// TestNodeImagePruneOnceAppliesOnlyWhenAsked: the run's apply argument reaches the
+// Job's command, so a dry run plans and an applied run removes: --apply is the flag
+// that makes the root Job touch the control node's images. A hollowed-out call that
+// passes false, or true, to the runner reads green without it.
+func TestNodeImagePruneOnceAppliesOnlyWhenAsked(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		apply bool
+		logs  string
+		want  int
+	}{
+		{name: "dry run", apply: false, logs: nodePruneLogDry, want: 0},
+		{name: "apply run", apply: true, logs: nodeImagePruneLogApplied, want: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(tc.logs)}
+
+			require.NoError(t, r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, tc.apply, nodeImagePruneStart))
+
+			var doc nodePruneJobDoc
+			require.NoError(t, json.Unmarshal(kube.sent, &doc), "the applied manifest does not parse")
+			command := doc.Spec.Template.Spec.Containers[0].Command
+			got := 0
+			for _, arg := range command {
+				if arg == "--apply" {
+					got++
+				}
+			}
+			assert.Equal(t, tc.want, got, "command = %v", command)
+		})
+	}
+}
+
 // nodePruneLogDryThree is a dry run's log of three would-remove lines, as the
 // helper writes it.
 const nodePruneLogDryThree = "node-prune: would remove sha256:aaa gastown-polecat created 2026-11-20T03:00:00Z\n" +
