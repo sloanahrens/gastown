@@ -82,6 +82,32 @@ func TestStoryPointsAdoptRevertFlagReachesTheStep(t *testing.T) {
 	}
 }
 
+// TestStoryPointsEvalSinceFlagReachesTheStep: --since belongs to
+// storypoints-eval alone, and the step it runs sees the day it names.
+func TestStoryPointsEvalSinceFlagReachesTheStep(t *testing.T) {
+	t.Parallel()
+	sinceSeen := ""
+	run := func(_ context.Context, _ string, c metrics.Commands) error {
+		sinceSeen = c.StoryPointsSince
+		return nil
+	}
+	cmd := newTownMetricsCmd(metrics.CommandStoryPointsEval, "short", run)
+	cmd.SetOut(&bytes.Buffer{})
+	if err := cmd.Flags().Set("since", "2026-11-16"); err != nil {
+		t.Fatalf("set --since: %v", err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("RunE: %v", err)
+	}
+	if sinceSeen != "2026-11-16" {
+		t.Errorf("StoryPointsSince = %q, want the flag's day passed to the step", sinceSeen)
+	}
+	other := newTownMetricsCmd(metrics.CommandExtract, "short", run)
+	if other.Flags().Lookup("since") != nil {
+		t.Error("metrics extract has --since, want the flag on storypoints-eval alone")
+	}
+}
+
 // TestTownMetricsSubcommandsAreRegistered holds gt metrics to carrying each step
 // as a subcommand that refuses a positional argument.
 func TestTownMetricsSubcommandsAreRegistered(t *testing.T) {

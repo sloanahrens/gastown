@@ -47,24 +47,33 @@ var townMetricsCommands = []struct{ name, short string }{
 
 // newTownMetricsCmd is one town-metrics step as a subcommand; the step itself is
 // run, so the command carries no behavior of its own. storypoints-adopt alone
-// takes --revert, the one step with an option.
+// takes --revert and storypoints-eval alone takes --since; no other step has an
+// option.
 func newTownMetricsCmd(name, short string, run func(context.Context, string, metrics.Commands) error) *cobra.Command {
 	var revert bool
+	var since string
 	cmd := &cobra.Command{
 		Use:   name,
 		Short: short,
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return run(cmd.Context(), name, metrics.Commands{
+			c := metrics.Commands{
 				Today:             time.Now().Format(time.DateOnly),
 				Out:               cmd.OutOrStdout(),
 				StoryPointsRevert: name == metrics.CommandStoryPointsAdopt && revert,
 				BdGateway:         hostBdGateway(),
-			})
+			}
+			if name == metrics.CommandStoryPointsEval {
+				c.StoryPointsSince = since
+			}
+			return run(cmd.Context(), name, c)
 		},
 	}
 	if name == metrics.CommandStoryPointsAdopt {
 		cmd.Flags().BoolVar(&revert, "revert", false, "Restore the previous runtime weights version instead of adopting the day's proposal")
+	}
+	if name == metrics.CommandStoryPointsEval {
+		cmd.Flags().StringVar(&since, "since", "", "Score the beads landed at or after this YYYY-MM-DD day instead of the newest three rows in ten")
 	}
 	return cmd
 }
