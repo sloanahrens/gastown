@@ -21,6 +21,8 @@ type boxPhrase struct {
 	// re is the matcher when a plain substring is too loose; nil means text
 	// is matched case-insensitively as a substring.
 	re *regexp.Regexp
+	// hint is the fix sentence the refusal ends with; empty keeps it out (gt-n9p12q).
+	hint string
 }
 
 // acceptanceBoxPhrases are read in order, so an item naming two steps is
@@ -35,6 +37,7 @@ var acceptanceBoxPhrases = []boxPhrase{
 	{text: "colima"},
 	{text: "live town"},
 	{text: "the live"},
+	{text: "gate's lint", re: regexp.MustCompile(`(?i)\bgate'?s lint\b`), hint: "the landing worker runs the gate's lint after the seat submits, so leave it out of the boxes; the seat's own check is the narrow go vet or go test -run command"},
 }
 
 // findingResolvedPrefix opens an acceptance item that names a finding. It is
@@ -94,15 +97,15 @@ func (p boxPhrase) matches(subject string) bool {
 }
 
 // acceptanceBoxPhrase returns the first phrase in the item's subject (see
-// boxSubject), and "" when the subject names none.
-func acceptanceBoxPhrase(item string) string {
+// boxSubject), and false when the subject names none.
+func acceptanceBoxPhrase(item string) (boxPhrase, bool) {
 	subject := boxSubject(item)
 	for _, phrase := range acceptanceBoxPhrases {
 		if phrase.matches(subject) {
-			return phrase.text
+			return phrase, true
 		}
 	}
-	return ""
+	return boxPhrase{}, false
 }
 
 // acceptanceBoxRefusal is the shape failure an acceptance text earns when one
@@ -112,14 +115,15 @@ func acceptanceBoxPhrase(item string) string {
 // acceptance section, so the field is the list a filer is held to (gt-hgt9j.3).
 func acceptanceBoxRefusal(text string) (Refusal, bool) {
 	for _, item := range acceptanceItemTexts(text) {
-		phrase := acceptanceBoxPhrase(item)
-		if phrase == "" {
+		phrase, ok := acceptanceBoxPhrase(item)
+		if !ok {
 			continue
 		}
-		return Refusal{
-			Field:  acceptanceBoxField,
-			Reason: fmt.Sprintf("item %q names %q, a step a polecat cannot run; the overseer-run steps belong in the Gate, as owed by the overseer", firstLine(item), phrase),
-		}, true
+		reason := fmt.Sprintf("item %q names %q, a step a polecat cannot run; the overseer-run steps belong in the Gate, as owed by the overseer", firstLine(item), phrase.text)
+		if phrase.hint != "" {
+			reason += "; " + phrase.hint
+		}
+		return Refusal{Field: acceptanceBoxField, Reason: reason}, true
 	}
 	return Refusal{}, false
 }
