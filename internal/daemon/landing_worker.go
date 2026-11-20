@@ -545,6 +545,16 @@ func newRigLander(rigPath, townRoot string) *land.Lander {
 	}
 }
 
+// landingRemoteGitAt opens the base handle a rig's landing worker builds its
+// remote on: landingRemoteGitFn's when a test set one, else the rig repository
+// with the config-read retry.
+func (d *Daemon) landingRemoteGitAt(dir string) *git.Git {
+	if d.landingRemoteGitFn != nil {
+		return d.landingRemoteGitFn(dir)
+	}
+	return git.NewGit(dir).WithConfigReadRetry()
+}
+
 // newRigLandingWorker wires the production collaborators for one rig.
 func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error) {
 	pc := d.patrol()
@@ -812,12 +822,16 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if lander.Records != nil {
 		records = lander.Records
 	}
+	// The worker is the one legitimate pusher of a branch delete, which is a
+	// push, so its handle runs with every hook off, the pre-push included: a
+	// rig's tracked pre-push that chains `bd hooks run` cannot fail every delete
+	// in a pod whose bd gateway refuses that verb (gt-kq221z).
 	return &landworker.Worker{
 		Rig:        rigName,
 		TownRoot:   townRoot,
 		HumanActor: human.Name,
 		Beads:      bd,
-		Remote:     gitRemote{g: git.NewGit(repo).WithConfigReadRetry(), remote: landingRemote},
+		Remote:     gitRemote{g: d.landingRemoteGitAt(repo).WithoutAllHooks(), remote: landingRemote},
 		Lander:     lander,
 		Records:    records,
 		Landings:   landings,

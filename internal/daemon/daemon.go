@@ -383,6 +383,12 @@ type Daemon struct {
 	// dirty check, push and reset ran on.
 	overrunSeatGitFn func(seat overrunSeat) (daemonGit, error)
 
+	// landingRemoteGitFn replaces the base handle a rig's landing worker builds
+	// its remote on (see landingRemoteGitAt); nil is a *git.Git with the
+	// config-read retry. Tests hand it a recording runner, so a delete's argv is
+	// asserted without starting git.
+	landingRemoteGitFn func(dir string) *gitpkg.Git
+
 	// postLandIsAncestor is the ancestry reader a rig's post-land runner orders
 	// its verdicts with (see newRigLandingWorker); nil reads the rig's own
 	// repository. Tests hand it a fake.
