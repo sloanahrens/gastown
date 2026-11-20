@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -56,7 +57,7 @@ func nodePruneFlagValues(argv []string, flag string) []string {
 
 func TestNodeImagePruneManifestArgs(t *testing.T) {
 	t.Parallel()
-	spares := []string{"sha256:aaa", "sha256:bbb"}
+	spares := []string{"sha256:" + strings.Repeat("a", 64), "sha256:" + strings.Repeat("b", 64)}
 
 	dry, err := nodeImagePruneManifest("prune", "image:1", 3, false, spares)
 	if err != nil {
@@ -94,6 +95,52 @@ func TestNodeImagePruneManifestArgs(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("an apply manifest holds --apply %d times, want once: %v", n, appliedArgv)
+	}
+}
+
+func TestNodeImagePruneManifestRefuses(t *testing.T) {
+	t.Parallel()
+	validSpare := "sha256:" + strings.Repeat("a", 64)
+	tests := []struct {
+		name    string
+		podName string
+		image   string
+		keep    int
+		spare   []string
+		wantArg string
+	}{
+		{name: "a valid call builds", podName: "prune", image: "image:1", keep: 3, spare: []string{validSpare}},
+		{name: "an empty name", podName: "", image: "image:1", keep: 3, wantArg: "name"},
+		{name: "an empty image", podName: "prune", image: "", keep: 3, wantArg: "image"},
+		{name: "keep 0", podName: "prune", image: "image:1", keep: 0, wantArg: "keep"},
+		{name: "keep -1", podName: "prune", image: "image:1", keep: -1, wantArg: "keep"},
+		{name: "an empty spare", podName: "prune", image: "image:1", keep: 3, spare: []string{""}, wantArg: "spare"},
+		{name: "a spare with no hex digits", podName: "prune", image: "image:1", keep: 3, spare: []string{"sha256:aaa"}, wantArg: "spare"},
+		{name: "a spare with 63 hex digits", podName: "prune", image: "image:1", keep: 3, spare: []string{"sha256:" + strings.Repeat("a", 63)}, wantArg: "spare"},
+		{name: "a spare with upper-case hex", podName: "prune", image: "image:1", keep: 3, spare: []string{"sha256:" + strings.Repeat("A", 64)}, wantArg: "spare"},
+		{name: "a spare starting with a dash", podName: "prune", image: "image:1", keep: 3, spare: []string{"-" + validSpare}, wantArg: "spare"},
+		{name: "a spare that is a flag", podName: "prune", image: "image:1", keep: 3, spare: []string{"--apply"}, wantArg: "spare"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			manifest, err := nodeImagePruneManifest(tc.podName, tc.image, tc.keep, false, tc.spare)
+			if tc.wantArg == "" {
+				if err != nil {
+					t.Fatalf("a valid call is refused: %v", err)
+				}
+				if len(manifest) == 0 {
+					t.Fatalf("a valid call builds no manifest")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("the call is accepted, want an error naming %q", tc.wantArg)
+			}
+			if !strings.Contains(err.Error(), tc.wantArg) {
+				t.Errorf("the error %q does not name the argument %q", err, tc.wantArg)
+			}
+		})
 	}
 }
 
