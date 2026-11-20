@@ -78,6 +78,28 @@ func ProposalDraft(p Proposal, directivesDir string) string {
 	return b.String()
 }
 
+// ProposalNote returns one proposal as plain prose for the bead the daemon
+// files: the window, the class, its coverage, the counts, three example beads
+// and the directive directory, in sentences.
+//
+// It carries no shaped section, so the shape lint refuses the filed bead and
+// no dispatcher slings the overseer's directive edit to a seat (gt-dw2vj2).
+// ProposalDraft stays the shaped text `gt land om-lessons --propose` prints on
+// purpose. A too-few proposal is left out before this is called, as with
+// ProposalDraft.
+func ProposalNote(p Proposal, window, directivesDir string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "The om lessons pass read the window %s.\n", window)
+	fmt.Fprintf(&b, "The proposal is for the class %s (%s).\n", p.Name, p.ID)
+	fmt.Fprintf(&b, "Its rule coverage is %s.\n", p.Coverage)
+	fmt.Fprintf(&b, "It counted %d finding(s) on %d bead(s) with %d round(s) burned, against %d finding(s) on %d bead(s) with %d round(s) in the prior window.\n",
+		p.Current.Findings, p.Current.Beads, p.Current.Rounds,
+		p.Prior.Findings, p.Prior.Beads, p.Prior.Rounds)
+	fmt.Fprintf(&b, "The example beads are %s.\n", strings.Join(p.Examples, ", "))
+	fmt.Fprintf(&b, "The overseer writes the directive edit in %s.\n", directivesDir)
+	return b.String()
+}
+
 // coverage names a class's coverage. A class whose rule is in the directive is
 // violated-anyway when it still appears in the window. A class with no rule, or
 // whose rule number the directive does not carry, is a gap.

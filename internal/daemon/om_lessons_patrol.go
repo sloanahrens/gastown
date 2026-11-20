@@ -8,8 +8,9 @@ package daemon
 // The seam reads the review records of the window ending at the pass's clock,
 // and the numbered rules of the town's directives, and returns one proposal per
 // rejection class. Each proposal with enough findings is then filed as one
-// overseer-only bead through the town's beads client (gt-pawdfa), at most once
-// per class and ISO week (gt-ygtazd).
+// unshaped bead labeled overseer-only and hold:decision through the town's
+// beads client, so the shape lint refuses it and no dispatcher slings it
+// (gt-pawdfa, gt-dw2vj2), at most once per class and ISO week (gt-ygtazd).
 //
 // The ticker is a check cadence, not a run cadence: an in-process ticker resets
 // its countdown on every daemon start, so a ticker set to the 168h interval
@@ -53,6 +54,11 @@ const (
 	// after the ticker stopped. A pass left past it finishes its own bounded
 	// read, and the next start needs nothing it wrote.
 	omLessonsJoinWait = 10 * time.Second
+
+	// omLessonsDecisionHoldLabel keeps a filed proposal off every dispatch path
+	// even if its shape is waived: the directive edit is the overseer's
+	// decision, not a seat's work (gt-dw2vj2).
+	omLessonsDecisionHoldLabel = "hold:decision"
 
 	// omLessonsFilingRetryLimit bounds how many checks in a row a filing failure
 	// may retry. A filing failure leaves no last-run time, so a check a few
@@ -498,10 +504,12 @@ func (e *omLessonsFilingError) Unwrap() []error {
 	return e.failures
 }
 
-// fileOmLessonsProposals files one overseer-only bead for each proposal with
-// enough findings to draft an edit, at most once per class and ISO week. A
-// too-few class has no draft and files nothing. The counts named in each bead
-// are read over a window of days ending on at's day, the window the pass read.
+// fileOmLessonsProposals files one bead for each proposal with enough findings
+// to draft an edit, at most once per class and ISO week. The bead wears
+// overseer-only and hold:decision, and its text is unshaped prose, so the
+// shape lint refuses it and the dispatcher holds it (gt-dw2vj2). A too-few
+// class has no draft and files nothing. The counts named in each bead are read
+// over a window of days ending on at's day, the window the pass read.
 //
 // A class the week already filed is skipped and named in the log, so a second
 // pass in the week — a restart, a shorter configured interval, a rerun — files
@@ -551,9 +559,9 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 		}
 		_, err := writer.Create(beads.CreateOptions{
 			Title:       fmt.Sprintf("om lessons: %s (%s)", p.Name, p.ID),
-			Labels:      []string{dispatch.OverseerOnlyLabel},
+			Labels:      []string{dispatch.OverseerOnlyLabel, omLessonsDecisionHoldLabel},
 			Priority:    2,
-			Description: omLessonsProposalBody(p, window, directives),
+			Description: omlessons.ProposalNote(p, window, directives),
 			Actor:       daemonActor,
 		})
 		if err != nil {
@@ -583,24 +591,13 @@ func (d *Daemon) fileOmLessonsProposals(at time.Time, days int, proposals []omle
 	return nil
 }
 
-// omLessonsWindowLine names the two windows a proposal's counts are read over.
+// omLessonsWindowLine names the two windows a proposal's counts are read over,
+// as the clause the filed note's first sentence carries.
 func omLessonsWindowLine(span omlessons.Span) string {
 	first := func(b omlessons.Bounds) string { return b.Start.Format(omLessonsDayLayout) }
 	last := func(b omlessons.Bounds) string { return b.End.AddDate(0, 0, -1).Format(omLessonsDayLayout) }
-	return fmt.Sprintf("om lessons: %s to %s (%d days), against %s to %s",
+	return fmt.Sprintf("%s to %s (%d days), against %s to %s",
 		first(span.Current), last(span.Current), span.Days, first(span.Prior), last(span.Prior))
-}
-
-// omLessonsProposalBody is the text of the bead a proposal files: the window
-// it read, the class, and the draft an overseer works from. The draft is
-// omlessons.ProposalDraft, the same text `gt land om-lessons --propose`
-// prints, so the bead and the printed draft cannot drift (gt-f5oavm).
-func omLessonsProposalBody(p omlessons.Proposal, window, directives string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\n", window)
-	fmt.Fprintf(&b, "Class: %s (%s)\n", p.Name, p.ID)
-	b.WriteString(omlessons.ProposalDraft(p, directives))
-	return b.String()
 }
 
 // stopOmLessonsPatrol stops the patrol's ticker and joins the pass it may have

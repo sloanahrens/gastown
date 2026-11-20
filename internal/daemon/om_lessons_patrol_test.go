@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // omLessonsTestDaemon builds a daemon whose om_lessons patrol is enabled. Its
@@ -752,7 +753,7 @@ func TestReworkProgramOmLessonsOneFailedFilingDoesNotStopTheOthers(t *testing.T)
 	if len(filed) != 1 {
 		t.Fatalf("a pass with one refused create filed %d bead(s), want the other class's one", len(filed))
 	}
-	if want := "Class: a refusal branch has no test (missing-refusal-test)"; !strings.Contains(filed[0].Description, want) {
+	if want := "The proposal is for the class a refusal branch has no test (missing-refusal-test)."; !strings.Contains(filed[0].Description, want) {
 		t.Errorf("the pass filed a bead other than missing-refusal-test; text:\n%s", filed[0].Description)
 	}
 }
@@ -811,37 +812,46 @@ func TestReworkProgramOmLessonsOneFailedFilingIsLoggedOnce(t *testing.T) {
 	}
 }
 
-// TestReworkProgramOmLessonsProposalBodyIsTheSharedDraft: the bead's text is
-// the window it read, the class, and the same draft `gt land om-lessons
-// --propose` prints, so the two cannot drift (gt-f5oavm).
-func TestReworkProgramOmLessonsProposalBodyIsTheSharedDraft(t *testing.T) {
+// TestReworkProgramOmLessonsProposalBodyIsTheNote: the bead's text is
+// omlessons.ProposalNote over the pass's own window, so the filed note and the
+// prose function cannot drift (gt-dw2vj2).
+func TestReworkProgramOmLessonsProposalBodyIsTheNote(t *testing.T) {
 	t.Parallel()
-	p := omlessons.Proposal{
-		ID:       "fail-open",
-		Name:     "an error reads as success",
-		Coverage: "violated-anyway: rule #1 covers it and it still appears",
-		Current:  omlessons.ClassCounts{Findings: 6, Beads: 4, Rounds: 2},
-		Prior:    omlessons.ClassCounts{Findings: 1, Beads: 1},
-		Examples: []string{"gt-a", "gt-b", "gt-c"},
-	}
-	window := "om lessons: 2026-11-09 to 2026-11-15 (7 days), against 2026-11-02 to 2026-11-08"
-	want := window + "\n\n" +
-		"Class: an error reads as success (fail-open)\n" +
-		`Coverage: violated-anyway: rule #1 covers it and it still appears
-Counts: 6 finding(s) on 4 bead(s), 2 round(s) burned; prior window 1 finding(s) on 1 bead(s), 0 round(s)
-Examples: gt-a, gt-b, gt-c
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
 
-Goal: a directive edit that stops om raising this class.
-Constraints: the edit goes to the directive files in /town/directives; the edit text is the overseer's to write. A rule that changes what polecats may do needs the operator's yes.
-Out of scope: om's bar or threshold; turning anything on.
-Gate: go test ./internal/cmd -run TestLandOmLessons -count=1
-Size: one directive edit, one landing.
-Acceptance:
-- [ ] the rule for this class says what the case is and what to do instead
-- [ ] the next weekly pass counts fewer findings of this class than this window
-`
-	if got := omLessonsProposalBody(p, window, "/town/directives"); got != want {
-		t.Errorf("the proposal bead's text =\n%q\nwant\n%q", got, want)
+	bd := beadsfake.New()
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.openNoticeBeads = func() notifyBeadWriter { return bd }
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsFailOpenWeek(at), map[string]bool{"1": true}))
+
+	proposals, err := d.runOmLessonsTick(context.Background(), at)
+	if err != nil {
+		t.Fatalf("the pass over a fake record source: %v", err)
+	}
+	var drafts []omlessons.Proposal
+	for _, p := range proposals {
+		if !p.TooFew {
+			drafts = append(drafts, p)
+		}
+	}
+	if len(drafts) != 1 {
+		t.Fatalf("the week built %d draft(s), want the one fail-open class", len(drafts))
+	}
+	span, err := omlessons.Windows(at, time.Time{}, omlessons.DefaultDays)
+	if err != nil {
+		t.Fatalf("the pass's window: %v", err)
+	}
+	want := omlessons.ProposalNote(drafts[0], omLessonsWindowLine(span), agentconfig.CentralDirectiveDir(d.config.TownRoot))
+
+	filed, err := bd.List(beads.ListOptions{Status: "all"})
+	if err != nil {
+		t.Fatalf("listing the beads the pass filed: %v", err)
+	}
+	if len(filed) != 1 {
+		t.Fatalf("the pass filed %d bead(s), want the one draft class", len(filed))
+	}
+	if got := filed[0].Description; got != want {
+		t.Errorf("the proposal bead's text =\n%q\nwant ProposalNote's\n%q", got, want)
 	}
 }
 
@@ -1245,9 +1255,9 @@ func TestReworkProgramOmLessonsFilingRefusesAnUnreadableFiledRecord(t *testing.T
 
 // TestReworkProgramOmLessonsOneProposalFilesOneOverseerBead: a pass over a week
 // with one class past the proposal floor files one bead through the beads
-// client. The bead wears overseer-only alone, and its text carries the class,
-// the counts, the first three example beads and the directive edit. The classes
-// with too few findings to say file nothing.
+// client, carrying the class, the counts, the first three example beads and the
+// directive edit in prose. The classes with too few findings to say file
+// nothing.
 func TestReworkProgramOmLessonsOneProposalFilesOneOverseerBead(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
@@ -1268,19 +1278,90 @@ func TestReworkProgramOmLessonsOneProposalFilesOneOverseerBead(t *testing.T) {
 		t.Fatalf("the pass filed %d bead(s), want one: fail-open is the only class with enough findings", len(filed))
 	}
 	issue := filed[0]
-	if want := []string{dispatch.OverseerOnlyLabel}; !slices.Equal(issue.Labels, want) {
-		t.Errorf("the proposal bead wears labels %v, want only %v so no seat slings it", issue.Labels, want)
-	}
 	for _, want := range []string{
-		"Class: an error reads as success (fail-open)",
-		"Coverage: violated-anyway: rule #1 covers it and it still appears",
-		"Counts: 6 finding(s) on 6 bead(s), 2 round(s) burned; prior window 0 finding(s) on 0 bead(s), 0 round(s)",
-		"Examples: gt-a, gt-b, gt-c\n",
-		"Goal: a directive edit that stops om raising this class.",
+		"The proposal is for the class an error reads as success (fail-open).",
+		"Its rule coverage is violated-anyway: rule #1 covers it and it still appears.",
+		"It counted 6 finding(s) on 6 bead(s) with 2 round(s) burned, against 0 finding(s) on 0 bead(s) with 0 round(s) in the prior window.",
+		"The example beads are gt-a, gt-b, gt-c.",
+		"The overseer writes the directive edit in " + agentconfig.CentralDirectiveDir(d.config.TownRoot) + ".",
 	} {
 		if !strings.Contains(issue.Description, want) {
 			t.Errorf("the proposal bead's text lacks %q; text:\n%s", want, issue.Description)
 		}
+	}
+}
+
+// omLessonsShapedSectionLine returns the first line of text that opens a
+// shaped spec section: a "## " heading, or a required section's name followed
+// by a colon, the form omlessons.ProposalDraft uses. Empty means prose only.
+func omLessonsShapedSectionLine(text string, sections []string) string {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			return trimmed
+		}
+		for _, name := range sections {
+			if strings.HasPrefix(trimmed, name+":") {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+// TestReworkProgramOmLessonsFiledBeadIsUnshapedAndHeld: the filed bead wears
+// exactly overseer-only and hold:decision, and its text opens no shaped
+// section, so the shape lint refuses it and the dispatcher never slings the
+// overseer's directive edit to a seat (gt-dw2vj2). A line that opens a shaped
+// section turns this test red.
+func TestReworkProgramOmLessonsFiledBeadIsUnshapedAndHeld(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
+
+	bd := beadsfake.New()
+	d := omLessonsTestDaemon(t, io.Discard)
+	d.openNoticeBeads = func() notifyBeadWriter { return bd }
+	d.omLessonsRun = omLessonsPass(omLessonsFakeSources(omLessonsFailOpenWeek(at), map[string]bool{"1": true}))
+
+	if _, err := d.runOmLessonsTick(context.Background(), at); err != nil {
+		t.Fatalf("the pass over a fake record source: %v", err)
+	}
+	filed, err := bd.List(beads.ListOptions{Status: "all"})
+	if err != nil {
+		t.Fatalf("listing the beads the pass filed: %v", err)
+	}
+	if len(filed) != 1 {
+		t.Fatalf("the pass filed %d bead(s), want the one draft class", len(filed))
+	}
+	issue := filed[0]
+
+	gotLabels := slices.Clone(issue.Labels)
+	slices.Sort(gotLabels)
+	wantLabels := []string{dispatch.OverseerOnlyLabel, omLessonsDecisionHoldLabel}
+	slices.Sort(wantLabels)
+	if !slices.Equal(gotLabels, wantLabels) {
+		t.Errorf("the proposal bead wears labels %v, want exactly %v", issue.Labels, wantLabels)
+	}
+
+	sections := append(append([]string(nil), specdispatch.DefaultSections...), "Acceptance")
+	if line := omLessonsShapedSectionLine(issue.Description, sections); line != "" {
+		t.Errorf("the filed text opens the shaped section %q, want prose only", line)
+	}
+
+	spec := specdispatch.Spec{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Type:        issue.Type,
+		Labels:      issue.Labels,
+		Description: issue.Description,
+	}
+	template := specdispatch.Template{Sections: append([]string(nil), specdispatch.DefaultSections...)}
+	verdict := specdispatch.Lint(spec, template)
+	if verdict.Clean() {
+		t.Fatalf("the filed bead lints clean, so a dispatcher would sling the lesson to a seat; text:\n%s", issue.Description)
+	}
+	if reason := verdict.UnshapedReason(); !strings.Contains(reason, "## Goal") {
+		t.Errorf("the lint refuses the filed bead as %q, want the missing shaped sections named", reason)
 	}
 }
 

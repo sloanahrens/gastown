@@ -202,6 +202,38 @@ Acceptance:
 	}
 }
 
+// TestReworkProgramProposalNote: a note is plain prose for the bead the daemon
+// files — the window, the class, its coverage, the counts, three example beads
+// and the directive directory, in sentences — so the shape lint refuses it and
+// no dispatcher slings the overseer's edit to a seat.
+func TestReworkProgramProposalNote(t *testing.T) {
+	t.Parallel()
+	p := Proposal{
+		ID:       "fail-open",
+		Name:     "an error reads as success",
+		Coverage: "violated-anyway: rule #1 covers it and it still appears",
+		Current:  ClassCounts{Findings: 6, Beads: 4, Rounds: 2},
+		Prior:    ClassCounts{Findings: 1, Beads: 1},
+		Examples: []string{"gt-a", "gt-b", "gt-c"},
+	}
+	window := "2026-11-09 to 2026-11-15 (7 days), against 2026-11-02 to 2026-11-08"
+	want := "The om lessons pass read the window 2026-11-09 to 2026-11-15 (7 days), against 2026-11-02 to 2026-11-08.\n" +
+		"The proposal is for the class an error reads as success (fail-open).\n" +
+		"Its rule coverage is violated-anyway: rule #1 covers it and it still appears.\n" +
+		"It counted 6 finding(s) on 4 bead(s) with 2 round(s) burned, against 1 finding(s) on 1 bead(s) with 0 round(s) in the prior window.\n" +
+		"The example beads are gt-a, gt-b, gt-c.\n" +
+		"The overseer writes the directive edit in /town/directives.\n"
+	got := ProposalNote(p, window, "/town/directives")
+	if got != want {
+		t.Errorf("ProposalNote() =\n%q\nwant\n%q", got, want)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "## ") {
+			t.Errorf("the note carries a shaped section heading %q, want prose only", line)
+		}
+	}
+}
+
 // TestReworkProgramProposalCoverage: a class with enough findings names its
 // coverage against the rules the directive carries. Each row is one way a class
 // can be covered or a gap.
