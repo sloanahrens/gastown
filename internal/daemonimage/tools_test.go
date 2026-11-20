@@ -80,6 +80,12 @@ func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
 		if slices.Contains(co.holds, rev) {
 			return []byte(rev + "\n"), nil
 		}
+		// git resolves an abbreviation to the full commit it prefixes.
+		for _, h := range co.holds {
+			if strings.HasPrefix(h, rev) {
+				return []byte(h + "\n"), nil
+			}
+		}
 		return nil, errors.New("fatal: bad revision '" + rev + "'")
 	case args[0] == "status":
 		if co.fail == "status" {
@@ -281,6 +287,43 @@ func TestBuildToolsPlanLineStampsHM(t *testing.T) {
 	}
 	if got, want := argAfter(run.calls[0].argv, "-ldflags"), "-s -w "+stamp; got != want {
 		t.Errorf("hm build -ldflags = %q, want %q, the plan line's stamp", got, want)
+	}
+}
+
+// TestBuildToolsPlanLineNamesAnAbbreviatedPin: the plan prints the hm pin as
+// written, so an abbreviated pin's line ends by saying the build stamps the sha
+// git resolves it to, and the build's argv carries that sha; a full pin's line
+// has no note (gt-uh6u2g).
+func TestBuildToolsPlanLineNamesAnAbbreviatedPin(t *testing.T) {
+	t.Parallel()
+	short := testHMCommit[:7]
+	p := planBuilder(t)
+	p.HMVersionVar, p.HMCommit = testHMVersionVar, short
+	lines, err := p.Plan(testRev)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	want := "build hm: " + strings.Join(goBuildArgv(filepath.Join(p.Out, "hm"), HMPackage, "-X "+testHMVersionVar+"="+short), " ") + "   (clean worktree of /src/hm at " + short + ") " + abbreviatedPinNote
+	if !slices.Contains(lines, want) {
+		t.Errorf("Plan has no %q:\n%s", want, strings.Join(lines, "\n"))
+	}
+
+	b, run, _ := toolsBuilder(t)
+	b.HMCommit = short
+	if _, err := b.BuildTools(context.Background()); err != nil {
+		t.Fatalf("BuildTools: %v", err)
+	}
+	if got, want := argAfter(run.calls[0].argv, "-ldflags"), "-s -w -X "+testHMVersionVar+"="+testHMCommit; got != want {
+		t.Errorf("hm build -ldflags = %q, want the resolved full sha %q", got, want)
+	}
+
+	full := planBuilder(t)
+	full.HMVersionVar = testHMVersionVar
+	if lines, err = full.Plan(testRev); err != nil {
+		t.Fatalf("Plan with a full pin: %v", err)
+	}
+	if i := slices.IndexFunc(lines, func(l string) bool { return strings.Contains(l, abbreviatedPinNote) }); i >= 0 {
+		t.Errorf("a full pin's plan carries the abbreviated-pin note: %q", lines[i])
 	}
 }
 
