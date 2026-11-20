@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 )
 
@@ -23,13 +25,16 @@ type nodePruneFlight struct {
 // and returns false at once: when a run is already going, and when parent is
 // already done, since that run's context would be canceled on arrival. The
 // caller passes the daemon's long-lived context: the run derives from it, so
-// it outlives the call and only canceling that context ends it.
-//
-// A panicking run is recovered so the daemon survives and counts as a failed
-// run: the mark is cleared so the next heartbeat may start another, and report
-// is called once with the panic value as text, cut to nodePrunePanicMax bytes.
-// report runs on the run's goroutine and must not block, panic or be nil.
+// it outlives the call and only canceling that context ends it. A panicking run
+// is recovered so the daemon survives and counts as a failed run: the mark is
+// cleared so the next heartbeat may start another, and report is called once
+// with the panic value cut to nodePrunePanicMax bytes on a rune boundary. report
+// runs on the run's goroutine and must not block or panic; a nil report logs the
+// panic to the standard logger instead.
 func (f *nodePruneFlight) Start(parent context.Context, run func(ctx context.Context), report func(panicValue any)) bool {
+	if report == nil {
+		report = func(panicValue any) { log.Printf("node image prune: recovered panic: %v", panicValue) }
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.running || parent.Err() != nil {
@@ -46,7 +51,7 @@ func (f *nodePruneFlight) Start(parent context.Context, run func(ctx context.Con
 			if r := recover(); r != nil {
 				text := fmt.Sprint(r)
 				if len(text) > nodePrunePanicMax {
-					text = text[:nodePrunePanicMax]
+					text = strings.ToValidUTF8(text[:nodePrunePanicMax], "")
 				}
 				report(text)
 			}

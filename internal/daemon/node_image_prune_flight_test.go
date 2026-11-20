@@ -73,12 +73,13 @@ func TestNodePruneFlightStartsOneAtATime(t *testing.T) {
 }
 
 // TestNodePruneFlightSurvivesAPanic: a panicking run is recovered so the
-// daemon survives, report is called once with the panic value cut to the cap,
-// and the mark is cleared so a later Start is accepted.
+// daemon survives, report is called once with the panic value cut to the cap on
+// a rune boundary, and the mark is cleared so a later Start is accepted.
 func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 	t.Parallel()
 
-	value := strings.Repeat("x", nodePrunePanicMax+100)
+	// The cap splits é's two bytes, so a plain byte cut would report half a rune.
+	value := strings.Repeat("x", nodePrunePanicMax-1) + "é" + strings.Repeat("x", 100)
 	var f nodePruneFlight
 	reported := make(chan any, 1)
 	if !f.Start(context.Background(), func(context.Context) { panic(value) },
@@ -86,8 +87,8 @@ func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 		t.Fatal("Start = false, want true")
 	}
 	awaitNodePruneFlight(t, f.done(), "the panicking run to end")
-	if got := awaitNodePruneFlight(t, reported, "the panic report"); got != value[:nodePrunePanicMax] {
-		t.Fatalf("report got a value of %d bytes, want the value cut to %d", len(fmt.Sprint(got)), nodePrunePanicMax)
+	if got := awaitNodePruneFlight(t, reported, "the panic report"); got != value[:nodePrunePanicMax-1] {
+		t.Fatalf("report got %d bytes, want the value cut whole at %d", len(fmt.Sprint(got)), nodePrunePanicMax-1)
 	}
 	select {
 	case again := <-reported:
@@ -98,6 +99,22 @@ func TestNodePruneFlightSurvivesAPanic(t *testing.T) {
 		t.Fatal("Start after the panic = false, want true: the mark never cleared")
 	}
 	awaitNodePruneFlight(t, f.done(), "the run after the panic to end")
+}
+
+// TestNodePruneFlightSurvivesAPanicWithNilReport: a nil report does not turn the
+// recovered panic into a crash; the mark is cleared and the next Start is accepted.
+func TestNodePruneFlightSurvivesAPanicWithNilReport(t *testing.T) {
+	t.Parallel()
+
+	var f nodePruneFlight
+	if !f.Start(context.Background(), func(context.Context) { panic("node prune blew up") }, nil) {
+		t.Fatal("Start = false, want true")
+	}
+	awaitNodePruneFlight(t, f.done(), "the panicking run with a nil report")
+	if !f.Start(context.Background(), func(context.Context) {}, nil) {
+		t.Fatal("Start after the nil-report panic = false, want true: the mark never cleared")
+	}
+	awaitNodePruneFlight(t, f.done(), "the run after the nil-report panic")
 }
 
 // TestNodePruneFlightRunContextCancelsWithTheParent: the run's context derives
