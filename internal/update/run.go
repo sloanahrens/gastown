@@ -577,6 +577,10 @@ func (r *runner) restart(i int) (Outcome, error) {
 	return OutcomePartial, nil
 }
 
+// verifyDefaultPoll is the wait between settle re-reads when HealthPoll is not
+// positive, so a zero poll never turns the settle wait into a hot loop.
+const verifyDefaultPoll = 10 * time.Second
+
 // verify checks every probe against the target build. With a positive
 // HealthWait it waits, bounded, for a settling health line to pass; a zero one
 // reads the line once. A check that fails makes the run partial: the install
@@ -589,7 +593,11 @@ func (r *runner) verify(i int) (Outcome, error) {
 	var checks []Check
 	var err error
 	if r.o.HealthWait > 0 {
-		checks, err = VerifyWithSettle(r.ctx, r.d.Clock, r.d.Sleep, r.d.Verify, r.st.Target.SHA, r.o.HealthWait, r.o.HealthPoll)
+		poll := r.o.HealthPoll
+		if poll <= 0 {
+			poll = verifyDefaultPoll
+		}
+		checks, err = VerifyWithSettle(r.ctx, r.d.Clock, r.d.Sleep, r.d.Verify, r.st.Target.SHA, r.o.HealthWait, poll)
 	} else {
 		checks = Verify(r.ctx, r.d.Verify, r.st.Target.SHA)
 	}
