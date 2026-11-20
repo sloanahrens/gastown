@@ -296,6 +296,24 @@ func TestPairReadyRaisesOneItemForBothImages(t *testing.T) {
 	assert.Empty(t, fx.logs)
 }
 
+// TestPairReadyRaisesNoReadyItemForTheBuildTheDaemonRuns: a partial roll leaves
+// the values file naming the old commit, so through the file the green commit
+// the daemon already runs reads as newer. Judged against the commit the daemon
+// runs, that green is the running one, and a pair-ready item for it would
+// advertise a roll that is already done (gt-4mx0vs).
+func TestPairReadyRaisesNoReadyItemForTheBuildTheDaemonRuns(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	// The values file names pairRunning; the daemon was rendered from the green
+	// commit, which the file still does not name.
+	fx.check.runningCommit = func() (string, error) { return pairGreen, nil }
+
+	fx.run(pairT0)
+
+	assert.Empty(t, fx.check.observed())
+	assert.Empty(t, fx.logs)
+}
+
 // pairCloneHistory is a rig's bare clone as a gitfake repository, holding three
 // commits on main, oldest first. The check judges green commits against it and
 // never fetches into it.
