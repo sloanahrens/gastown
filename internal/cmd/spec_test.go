@@ -1130,6 +1130,33 @@ func TestTickEffNoSeatReadsNoChildren(t *testing.T) {
 	}
 }
 
+// The chunk starts at the asked id, not at the head of the wanted list, so the
+// loop pays for the candidate it reached and the ones after it (gt-8gvizh).
+func TestTickEffChunkSelection(t *testing.T) {
+	t.Parallel()
+	wanted := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"}
+	for _, tc := range []struct {
+		name  string
+		asked string
+		read  map[string]bool
+		size  int
+		want  string
+	}{
+		{"asked plus seven", "c", nil, 8, "cdefghij"},
+		{"skips ids already read", "c", map[string]bool{"d": true, "f": true}, 8, "ceghijk"},
+		{"fewer at the end", "j", nil, 8, "jk"},
+		{"asked is last", "k", nil, 8, "k"},
+		{"asked is not wanted", "z", nil, 8, "z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := strings.Join(specChildrenChunk(wanted, tc.asked, tc.read, tc.size), ""); got != tc.want {
+				t.Errorf("specChildrenChunk(asked %s) = %q, want %q", tc.asked, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSpecDispatchRefusesAndAnnotatesOnce(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
