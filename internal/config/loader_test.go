@@ -581,6 +581,32 @@ func TestMaxReadyForDispatchAccessor(t *testing.T) {
 	}
 }
 
+// TestFollowupMaxAccessors: each follow-up budget key wins when set above zero,
+// and the passed default applies to a nil config or a non-positive key.
+func TestFollowupMaxAccessors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		cfg  *MergeQueueConfig
+		get  func(*MergeQueueConfig, int) int
+		def  int
+		want int
+	}{
+		{"added lines, nil config", nil, (*MergeQueueConfig).GetFollowupMaxAddedLines, 80, 80},
+		{"added lines, unset key", &MergeQueueConfig{}, (*MergeQueueConfig).GetFollowupMaxAddedLines, 80, 80},
+		{"added lines, negative key", &MergeQueueConfig{FollowupMaxAddedLines: -5}, (*MergeQueueConfig).GetFollowupMaxAddedLines, 80, 80},
+		{"added lines, configured key", &MergeQueueConfig{FollowupMaxAddedLines: 120}, (*MergeQueueConfig).GetFollowupMaxAddedLines, 80, 120},
+		{"files, nil config", nil, (*MergeQueueConfig).GetFollowupMaxFiles, 3, 3},
+		{"files, unset key", &MergeQueueConfig{}, (*MergeQueueConfig).GetFollowupMaxFiles, 3, 3},
+		{"files, negative key", &MergeQueueConfig{FollowupMaxFiles: -5}, (*MergeQueueConfig).GetFollowupMaxFiles, 3, 3},
+		{"files, configured key", &MergeQueueConfig{FollowupMaxFiles: 7}, (*MergeQueueConfig).GetFollowupMaxFiles, 3, 7},
+	} {
+		if got := tc.get(tc.cfg, tc.def); got != tc.want {
+			t.Errorf("%s: %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
 // TestMergeSettingsCommand_Editorial guards the whole-block override
 // semantics for Editorial: a more specific tier that sets any editorial
 // field replaces the entire block rather than deep-merging individual
