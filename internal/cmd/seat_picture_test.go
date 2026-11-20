@@ -38,7 +38,7 @@ func TestSeatPictureGolden(t *testing.T) {
 	}
 	b.SetLive(specLiveWithInFlight(live, nil, running))
 	b.SetInFlight(specInFlightByAgent(running))
-	b.SetDeadHooked(dead)
+	b.SetDeadHooked(dead, nil)
 	show := poolShowLive{live: live, dead: dead, ok: true}
 
 	var got strings.Builder

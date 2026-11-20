@@ -281,6 +281,8 @@ type Seat struct {
 	// toward Cap, and naming them explains a full seat that shows fewer live
 	// sessions than its number (gt-tldj4).
 	DeadHooked int
+	// DeadClasses splits DeadHooked by disposition class (gt-4h6z5c); nil when none is known.
+	DeadClasses map[string]int
 	// Window is the seat's daily closed period, nil when it never shuts. It is
 	// carried rather than snapshotted into a Closed flag: the choice re-reads it
 	// against Budget.Now, so a seat whose window shuts between the budget's
@@ -448,13 +450,38 @@ func HeldSeatList(seats []HeldSeat) string {
 }
 
 // DeadHookedCount names the seats inside a count that no tmux session holds:
-// "2 dead-hooked". It is empty for none. The tick line, `gt pool show` and the
-// sling refusal all print through it, so one count reads the same everywhere.
-func DeadHookedCount(n int) string {
+// "2 dead-hooked", or "4 dead-hooked (2 idle-submitted, 1 unread)" with classes.
+// It is empty for none; negative or non-summing classes name none (gt-4h6z5c).
+func DeadHookedCount(n int, classes map[string]int) string {
 	if n == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d dead-hooked", n)
+	word := fmt.Sprintf("%d dead-hooked", n)
+	names := make([]string, 0, len(classes))
+	sum := 0
+	for name, k := range classes {
+		if k < 0 {
+			return word
+		}
+		sum += k
+		if k > 0 {
+			names = append(names, name)
+		}
+	}
+	if sum != n {
+		return word
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if a, b := classes[names[i]], classes[names[j]]; a != b {
+			return a > b
+		}
+		return names[i] < names[j]
+	})
+	parts := make([]string, len(names))
+	for i, name := range names {
+		parts[i] = fmt.Sprintf("%d %s", classes[name], name)
+	}
+	return word + " (" + strings.Join(parts, ", ") + ")"
 }
 
 // SplitLiveDead names a seat's count as its parts: its live sessions, the
@@ -468,7 +495,7 @@ func DeadHookedCount(n int) string {
 // keeps the short wording. A negative count, or in-flight and dead-hooked
 // together above total, is not a split: it names the counts as they are rather
 // than print a negative live figure.
-func SplitLiveDead(total, inFlight, dead int) string {
+func SplitLiveDead(total, inFlight, dead int, classes map[string]int) string {
 	if inFlight == 0 && dead == 0 {
 		return ""
 	}
@@ -480,7 +507,7 @@ func SplitLiveDead(total, inFlight, dead int) string {
 		parts = append(parts, fmt.Sprintf("%d in flight (may double count)", inFlight))
 	}
 	if dead > 0 {
-		parts = append(parts, DeadHookedCount(dead))
+		parts = append(parts, DeadHookedCount(dead, classes))
 	}
 	return "(" + strings.Join(parts, " + ") + ")"
 }
@@ -520,7 +547,7 @@ func (b Budget) Picture() string {
 	parts := make([]string, 0, len(b.Seats))
 	for _, s := range b.Seats {
 		p := fmt.Sprintf("%s %d/%d", s.Agent, s.Live, s.Cap)
-		if n := SplitLiveDead(s.Live, s.InFlight, s.DeadHooked); n != "" {
+		if n := SplitLiveDead(s.Live, s.InFlight, s.DeadHooked, s.DeadClasses); n != "" {
 			p += " " + n
 		}
 		if s.closed(b.Now) {
@@ -569,9 +596,9 @@ func (b *Budget) SetHeld(held []HeldSeat) { b.Held = held }
 
 // SetLive fills each seat's Live from a count per agent, and LiveTotal from the
 // whole count: a live polecat on an agent the seats do not name is still a live
-// polecat, so a total cap has to see it. It clears InFlight, DeadHooked and
-// Held, the breakdowns of Live, which are set afterwards by SetInFlight,
-// SetDeadHooked and SetHeld.
+// polecat, so a total cap has to see it. It clears InFlight, DeadHooked,
+// DeadClasses and Held, the breakdowns of Live, which are set afterwards by
+// SetInFlight, SetDeadHooked and SetHeld.
 func (b *Budget) SetLive(live map[string]int) {
 	total := 0
 	b.Held = nil
@@ -579,6 +606,7 @@ func (b *Budget) SetLive(live map[string]int) {
 		b.Seats[i].Live = live[b.Seats[i].Agent]
 		b.Seats[i].InFlight = 0
 		b.Seats[i].DeadHooked = 0
+		b.Seats[i].DeadClasses = nil
 	}
 	for _, n := range live {
 		total += n
@@ -595,11 +623,12 @@ func (b *Budget) SetInFlight(inFlight map[string]int) {
 	}
 }
 
-// SetDeadHooked fills each seat's dead-hooked count from a count per agent,
-// after SetLive has set Live (gt-tldj4).
-func (b *Budget) SetDeadHooked(dead map[string]int) {
+// SetDeadHooked fills each seat's dead-hooked count and classes per agent, after
+// SetLive has set Live (gt-tldj4, gt-4h6z5c).
+func (b *Budget) SetDeadHooked(dead map[string]int, classes map[string]map[string]int) {
 	for i := range b.Seats {
 		b.Seats[i].DeadHooked = dead[b.Seats[i].Agent]
+		b.Seats[i].DeadClasses = classes[b.Seats[i].Agent]
 	}
 }
 

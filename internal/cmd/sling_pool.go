@@ -482,7 +482,7 @@ func poolCountSources(agent string, sessions []poolSession, n, cap int) string {
 		parts = append(parts, count(live, "session", "sessions"))
 	}
 	if dead > 0 {
-		parts = append(parts, specdispatch.DeadHookedCount(dead))
+		parts = append(parts, specdispatch.DeadHookedCount(dead, nil))
 	}
 	if landing > 0 {
 		parts = append(parts, fmt.Sprintf("%d mid-landing", landing))
