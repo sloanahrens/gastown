@@ -205,7 +205,10 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 		sandbox := false
 		if su, ok := s.reapEnv.(SingleUseEnv); ok {
 			if sandbox, err = su.SandboxSeat(rig, name); err != nil {
-				return unknown("sandbox seat unreadable", err)
+				// The seat still needs recovery: the unreadable read closes the
+				// one route around its blocker, so it stays Blocked, not Unknown.
+				f.Outcome, f.Detail = OutcomeBlocked, blockedDetail(rv)+": sandbox seat unreadable: "+err.Error()
+				return f, true
 			}
 		}
 		safe, singleUse = sandbox, sandbox

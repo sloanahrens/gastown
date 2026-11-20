@@ -588,20 +588,49 @@ func TestReapReapsASandboxSeatWithARecordedAndAMeasuredUnpushedBlocker(t *testin
 	}
 }
 
-// TestReapUnpushedSeatWhoseSandboxReadFailsIsUnknown guards gt-aimwqy: a seat
-// the host cannot classify is not read as a host seat, and nothing is removed.
-func TestReapUnpushedSeatWhoseSandboxReadFailsIsUnknown(t *testing.T) {
+// TestReapBlocksAnUnpushedSeatWhoseSandboxSeatReadFailed guards gt-ssd8zb: a
+// seat the host cannot classify is not handed to the nuke, and its verdict
+// still reads Blocked — never Unknown, which would lose why it needs recovery.
+func TestReapBlocksAnUnpushedSeatWhoseSandboxSeatReadFailed(t *testing.T) {
 	t.Parallel()
 	env := eligible()
 	unpushedSeat(env, "git_state=has_unpushed unpushed_commits=1")
 	tick := singleUseSeat(env, true)
 	tick.err["onyx"] = errors.New("gateway unreadable")
 	r := reapScanner(tick, ReapOptions{}).Tick("gastown")
-	if f, ok := reapFinding(t, r, "onyx"); !ok || f.Outcome != OutcomeUnknown {
-		t.Fatalf("finding = %+v, %v; want unknown", f, ok)
+	f, ok := reapFinding(t, r, "onyx")
+	if !ok || f.Outcome != OutcomeBlocked {
+		t.Fatalf("finding = %+v, %v; want blocked", f, ok)
+	}
+	for _, want := range []string{"verdict NEEDS_RECOVERY", "sandbox seat unreadable: gateway unreadable"} {
+		if !strings.Contains(f.Detail, want) {
+			t.Errorf("detail = %q; want %q", f.Detail, want)
+		}
 	}
 	if len(env.reaped) != 0 {
 		t.Fatalf("reaped %v on an unreadable sandbox seat", env.reaped)
+	}
+}
+
+// TestReapBlocksAnUnpushedSeatWhoseGitCheckFailed guards gt-ssd8zb: a git check
+// that failed measured no unpushed count, so the seat has no route to the nuke
+// and stays Blocked. The blocker is production's shape for a failed sandbox
+// probe (sandbox_seat_probe.go), and the git state source is "unknown".
+func TestReapBlocksAnUnpushedSeatWhoseGitCheckFailed(t *testing.T) {
+	t.Parallel()
+	env := eligible()
+	env.recovery["onyx"] = Recovery{Verdict: "NEEDS_RECOVERY", Reason: "git-check-failed", GitStateSource: "unknown",
+		Blockers: []string{"git_state=unknown: sandbox probe: gateway read failed"}, Branch: "polecat/onyx/gt-1"}
+	r := reapScanner(singleUseSeat(env, true), ReapOptions{}).Tick("gastown")
+	f, ok := reapFinding(t, r, "onyx")
+	if !ok || f.Outcome != OutcomeBlocked {
+		t.Fatalf("finding = %+v, %v; want blocked", f, ok)
+	}
+	if !strings.Contains(f.Detail, "git_state=unknown: sandbox probe: gateway read failed") {
+		t.Errorf("detail = %q; want the failed git check named", f.Detail)
+	}
+	if len(env.reaped) != 0 {
+		t.Fatalf("reaped %v on a seat whose git check failed", env.reaped)
 	}
 }
 
