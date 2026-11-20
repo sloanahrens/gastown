@@ -389,6 +389,48 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 	}
 }
 
+// imagePinsAge is the production age read: the tip's committer time minus the
+// pin's, fetched the way imagePinsPathCount fetches. A pin or tip that is not 40
+// lowercase hex is refused before any git call. A failed git call, a non-numeric
+// answer or a negative age (the pin newer than its tip) is an error (gt-qi51ka).
+func (d *Daemon) imagePinsAge(ctx context.Context) func(url, pin, tip string) (time.Duration, error) {
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
+	return func(url, pin, tip string) (time.Duration, error) {
+		// Both shas are refused before any git call: they reach git show below.
+		if !pinShaForm.MatchString(pin) {
+			return 0, fmt.Errorf("git show -s --format=%%ct: pin %q is not a full 40-character lowercase hex sha", pin)
+		}
+		if !pinShaForm.MatchString(tip) {
+			return 0, fmt.Errorf("git show -s --format=%%ct: tip %q is not a full 40-character lowercase hex sha", tip)
+		}
+		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
+			return 0, err
+		}
+		out, err := d.imagePinsGit(ctx, repo, "show", "-s", "--format=%ct", pin, tip)
+		if err != nil {
+			return 0, err
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) != 2 {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered %d timestamps, not the two commits' committer times", sha12(pin), sha12(tip), len(fields))
+		}
+		pinSec, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered a non-number for the pin", sha12(pin), sha12(tip))
+		}
+		tipSec, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s answered a non-number for the tip", sha12(pin), sha12(tip))
+		}
+		// Through time.Time, so an absurd pair saturates instead of wrapping.
+		age := time.Unix(tipSec, 0).Sub(time.Unix(pinSec, 0))
+		if age < 0 {
+			return 0, fmt.Errorf("git show -s --format=%%ct %s %s: the pin's committer time is after the tip's, a negative age %s", sha12(pin), sha12(tip), age)
+		}
+		return age, nil
+	}
+}
+
 // imagePinsGit runs one git command in repo, bounded by imagePinsGitTimeout and
 // never waiting on a credential prompt. The error names the command and carries
 // git's first stderr line only: the rest of the output can repeat the URL it was
