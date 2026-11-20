@@ -235,7 +235,7 @@ func TestShippedOMRubricCarriesExemptionCriterion(t *testing.T) {
 	if c.Weight == nil || *c.Weight != 3 {
 		t.Errorf("%s weight = %v, want 3: the shortcut lets a failing box through, so it outranks the style criteria", exemptionCriterion, c.Weight)
 	}
-	for _, want := range []string{"MAJOR", "gt-s7suwn", "is not this finding; the finding is a carve-out that contradicts a Constraint", "a Constraint that does not forbid it is not enough"} {
+	for _, want := range []string{"MAJOR", "gt-s7suwn", "is not this finding; the finding is a carve-out that contradicts a Constraint", "a Constraint that does not forbid it is not enough", "as the bead was dispatched"} {
 		if !strings.Contains(c.Guidance, want) {
 			t.Errorf("%s guidance no longer carries %q: %q", exemptionCriterion, want, c.Guidance)
 		}
