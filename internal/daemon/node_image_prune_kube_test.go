@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -178,6 +179,126 @@ func TestNodeImagePruneKubeWaitArgv(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantArgs, gotArgs)
 			assert.Equal(t, tt.wantOut, string(got))
+		})
+	}
+}
+
+// TestNodeImagePruneKubeWaitIsBounded: WaitComplete, Logs and Delete each hand the
+// exec seam a context carrying a deadline of its own, so a hung kubectl cannot hold
+// the heartbeat. WaitComplete gets the Job's 900s deadline plus kubectl's 960s
+// timeout plus a 60s margin; Logs and Delete get 120s each (gt-eh9pvy).
+func TestNodeImagePruneKubeWaitIsBounded(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+
+	tests := []struct {
+		name string
+		call func(k kubectlNodePrune) error
+		want time.Duration
+	}{
+		{
+			name: "WaitComplete",
+			call: func(k kubectlNodePrune) error { return k.WaitComplete(context.Background(), job) },
+			want: 1020 * time.Second,
+		},
+		{
+			name: "Logs",
+			call: func(k kubectlNodePrune) error {
+				_, err := k.Logs(context.Background(), job)
+				return err
+			},
+			want: 120 * time.Second,
+		},
+		{
+			name: "Delete",
+			call: func(k kubectlNodePrune) error { return k.Delete(context.Background(), job) },
+			want: 120 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got time.Duration
+			var hasDeadline bool
+			run := func(ctx context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
+				var deadline time.Time
+				deadline, hasDeadline = ctx.Deadline()
+				got = time.Until(deadline)
+				return "", 0, nil
+			}
+			require.NoError(t, tt.call(kubectlNodePrune{dir: t.TempDir(), run: run}))
+
+			require.True(t, hasDeadline, "kubectl ran with no deadline")
+			// The seam reads the deadline a moment after it is set; a few seconds of
+			// slack keeps the assertion about which bound was chosen.
+			assert.InDelta(t, tt.want.Seconds(), got.Seconds(), 5, "the deadline is %s, want about %s", got, tt.want)
+		})
+	}
+}
+
+// TestNodeImagePruneKubeWaitDeadlineError: a call that outlives its deadline is an
+// error naming the verb and the deadline for WaitComplete, Logs and Delete, whether
+// the exec reports context.DeadlineExceeded or, as update.ExecRun does for a process
+// it killed, some other error (gt-eh9pvy).
+func TestNodeImagePruneKubeWaitDeadlineError(t *testing.T) {
+	t.Parallel()
+	const job = "node-prune-abc123"
+
+	tests := []struct {
+		name     string
+		call     func(k kubectlNodePrune, ctx context.Context) error
+		wantVerb string
+		wantBnd  string
+	}{
+		{
+			name:     "WaitComplete",
+			call:     func(k kubectlNodePrune, ctx context.Context) error { return k.WaitComplete(ctx, job) },
+			wantVerb: "kubectl wait",
+			wantBnd:  "1020s",
+		},
+		{
+			name: "Logs",
+			call: func(k kubectlNodePrune, ctx context.Context) error {
+				_, err := k.Logs(ctx, job)
+				return err
+			},
+			wantVerb: "kubectl logs",
+			wantBnd:  "120s",
+		},
+		{
+			name:     "Delete",
+			call:     func(k kubectlNodePrune, ctx context.Context) error { return k.Delete(ctx, job) },
+			wantVerb: "kubectl delete",
+			wantBnd:  "120s",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Run("exec reports the deadline", func(t *testing.T) {
+				run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+					return "", -1, context.DeadlineExceeded
+				}
+				err := tt.call(kubectlNodePrune{dir: t.TempDir(), run: run}, context.Background())
+
+				require.Error(t, err)
+				assert.ErrorIs(t, err, context.DeadlineExceeded)
+				assert.Contains(t, err.Error(), tt.wantVerb)
+				assert.Contains(t, err.Error(), tt.wantBnd)
+			})
+			t.Run("deadline fires, exec reports a kill", func(t *testing.T) {
+				// update.ExecRun reports the process it killed as its own error, not
+				// ctx.Err(), so the bound's state is what names the deadline.
+				expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				defer cancel()
+				run := func(context.Context, string, []string, string, ...string) (string, int, error) {
+					return "", -1, errors.New("signal: killed")
+				}
+				err := tt.call(kubectlNodePrune{dir: t.TempDir(), run: run}, expired)
+
+				require.Error(t, err)
+				assert.ErrorIs(t, err, context.DeadlineExceeded)
+				assert.Contains(t, err.Error(), tt.wantVerb)
+				assert.Contains(t, err.Error(), tt.wantBnd)
+			})
 		})
 	}
 }
