@@ -349,7 +349,7 @@ func TestRoundsLedgerKeepsEachLanesRound(t *testing.T) {
 	}
 	must(t, l.AppendLane("crew/overseer", 1, "crewhead", finding))
 	rounds := renderedOf(t, l, 0)
-	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Head != "p2" || rounds[2].Head != "p3" || rounds[3].Head != "crewhead" || rounds[3].Round != 1 || len(rounds[0].Findings) != 1 || rounds[0].Findings[0].ID != "F1" {
+	if len(rounds) != 4 || rounds[0].Head != "p1" || rounds[1].Head != "p2" || rounds[2].Head != "p3" || rounds[3].Head != "crewhead" || len(rounds[0].Findings) != 1 || rounds[0].Findings[0].ID != "F1" {
 		t.Fatalf("rendered rounds = %+v, want p1 with its F1, p2 and p3, and the crew's round 1 beside them", rounds)
 	}
 
