@@ -11,6 +11,7 @@ import (
 // file records, not its name; a rig whose metadata names none, does not parse,
 // or is absent is left out.
 func TestTickEffRigDatabases(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	writeMetadata := func(rig, content string) {
 		t.Helper()
