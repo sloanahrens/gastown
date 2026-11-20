@@ -1400,13 +1400,13 @@ func TestLandCandidateSilenceIsInfrastructure(t *testing.T) {
 
 // recordLogPass and recordLogRed are gate job logs with the stage markers
 // ParseGateRunLog reads: setup 3s, lint 2s, build 4s, unit wall 139s.
-const recordLogPass = "2026-11-19T10:00:00Z task received\n" +
+const recordLogPass = "2026-11-19T10:00:00Z " + runnerTaskLine + "\n" +
 	"2026-11-19T10:00:03Z lint: golangci-lint run\n" +
 	"2026-11-19T10:00:05Z gate: build (go build ./...)\n" +
 	"2026-11-19T10:00:09Z gate: unit tier (every package)\n" +
 	"2026-11-19T10:02:28Z gate: PASSED in 139s wall\n"
 
-const recordLogRed = "2026-11-19T10:00:00Z task received\n" +
+const recordLogRed = "2026-11-19T10:00:00Z " + runnerTaskLine + "\n" +
 	"⭐ Run Main actions/checkout@v4\n" +
 	"2026-11-19T10:00:03Z lint: golangci-lint run\n" +
 	"2026-11-19T10:00:05Z gate: build (go build ./...)\n" +
