@@ -209,13 +209,15 @@ func (h *patrolScanHost) shadowWorkBead(rig, name, beadHook string) {
 // record none are listed in the log once per tick (gt-mukgk).
 //
 // This is the live half of the pool's picture and not all of it: the pool also
-// counts the seats a crashed polecat still holds, the seats mid-landing and
-// the in-flight claims, because a dispatch must not fill a seat something else
-// is about to take. Those cannot be counted here — the seat this check is
-// about is one of them, and counting it would read the restart as spending a
-// seat it already holds, leaving it to wait on itself forever. The cap bounds
-// live sessions, and a restart that replaces one adds none: skipRole, the
-// GT_ROLE of the seat being restarted, names the session left out.
+// counts the seats a crashed polecat still holds (DeadHooked), the seats
+// mid-landing (Landing) and the in-flight claims (Claim) — the names
+// poolOccupancy gives them (internal/cmd/pool_occupancy.go) — because a
+// dispatch must not fill a seat something else is about to take. Those cannot
+// be counted here — the seat this check is about is one of them, and counting
+// it would read the restart as spending a seat it already holds, leaving it to
+// wait on itself forever. The cap bounds live sessions, and a restart that
+// replaces one adds none: skipRole, the GT_ROLE of the seat being restarted,
+// names the session left out.
 func (h *patrolScanHost) livePolecatCensus(skipRole string, pool *agentconfig.PolecatPool) (map[string]int, int, error) {
 	names, err := h.d.tmux.ListSessions()
 	if err != nil {
