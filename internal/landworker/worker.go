@@ -1359,7 +1359,7 @@ func (w *Worker) countFailingLanding(work land.Work, err error) {
 	st.failingEscalated = true
 	w.alertAsync(work.BeadID, func() {
 		w.FailingEscalate(work.BeadID, fmt.Sprintf(
-			"Landing of %s (%s @ %s) FAILED (failure %d in this run) at the %s stage (%v). The bead is parked, not retried, until the cause is fixed and the daemon restarts, or the bead is labelled %s; no rework is needed; read the landing worker's pass log for it.",
+			"Landing of %s (%s @ %s) FAILED (failure %d in this run) at the %s stage (%v). The bead is parked, not retried, until the cause is fixed and the daemon restarts, or the bead is labeled %s; no rework is needed; read the landing worker's pass log for it.",
 			work.BeadID, work.Branch, work.Head, st.failures, st.stage, err, LabelLandingRetry))
 	})
 }
@@ -1488,9 +1488,9 @@ func (w *Worker) infraFailure(id, stage string, err error, rep *Report) {
 	st.lastErr = errorLine(err)
 	st.until = w.now().Add(infraParkWait)
 	st.parked = true
-	w.logf("%s: %s failed, PARKED until the cause is fixed and the daemon restarts, or the bead is labelled %s: %s", id, stage, LabelLandingRetry, st.lastErr)
+	w.logf("%s: %s failed, PARKED until the cause is fixed and the daemon restarts, or the bead is labeled %s: %s", id, stage, LabelLandingRetry, st.lastErr)
 	if st.failures == infraAnnounceAfter {
-		w.announce(id, "infra", fmt.Sprintf("Landing worker: %s FAILED on infrastructure, not on the work (%s: %v). It is parked and will not be retried until the cause is fixed and the daemon restarts, or the bead is labelled %s; no rework needed.", id, stage, err, LabelLandingRetry))
+		w.announce(id, "infra", fmt.Sprintf("Landing worker: %s FAILED on infrastructure, not on the work (%s: %v). It is parked and will not be retried until the cause is fixed and the daemon restarts, or the bead is labeled %s; no rework needed.", id, stage, err, LabelLandingRetry))
 	}
 }
 
