@@ -205,7 +205,7 @@ func guardGit(run *fakeRunner, inner bdbuild.Git, g *staleGuard) bdbuild.Git {
 			return []byte(pin + "\n"), nil
 		case args[0] == "status":
 			return nil, nil
-		case len(args) == 5 && args[0] == "fetch" && args[1] == "--depth":
+		case args[0] == "fetch":
 			g.fetches = append(g.fetches, append([]string(nil), args...))
 			if g.tipFetchErr != nil {
 				return nil, g.tipFetchErr
@@ -279,7 +279,16 @@ func TestFetchedPinsAreStalenessChecked(t *testing.T) {
 		}
 		wantDepth := strconv.Itoa(MaxPinBehind + 1)
 		for _, argv := range guard.fetches {
-			if argv[1] != "--depth" || argv[2] != wantDepth || argv[4] != "main:refs/remotes/origin/main" {
+			if argv[len(argv)-1] != "main:refs/remotes/origin/main" {
+				t.Errorf("tip fetch = %v, want main:refs/remotes/origin/main", argv)
+			}
+			if strings.Contains(argv[len(argv)-2], "/devops.git") {
+				if len(argv) != 4 || argv[1] != "--filter=blob:none" {
+					t.Errorf("devops tip fetch = %v, want --filter=blob:none and no --depth", argv)
+				}
+				continue
+			}
+			if len(argv) != 5 || argv[1] != "--depth" || argv[2] != wantDepth {
 				t.Errorf("tip fetch = %v, want --depth %s main:refs/remotes/origin/main", argv, wantDepth)
 			}
 		}
