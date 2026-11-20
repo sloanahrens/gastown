@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -312,6 +315,45 @@ func TestPairReadyRaisesNoReadyItemForTheBuildTheDaemonRuns(t *testing.T) {
 
 	assert.Empty(t, fx.check.observed())
 	assert.Empty(t, fx.logs)
+}
+
+// TestPairReadyUsesTheValuesFileWhenTheDaemonCommitIsUnknown: a daemon whose own
+// commit is not a full sha has Daemon.runningCommit fall back to the values file.
+func TestPairReadyUsesTheValuesFileWhenTheDaemonCommitIsUnknown(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	d := &Daemon{
+		config:            &Config{TownRoot: fx.town},
+		fullBuildCommitFn: func() (string, error) { return "fe633c9e", nil },
+	}
+	fx.check.runningCommit = d.runningCommit
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "the check raised %d items, want one judged against the values file", len(items))
+	assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+	assert.Contains(t, items[0].Summary, "3 commits ahead of the running commit "+pairRunning[:12])
+	assert.Empty(t, fx.logs)
+}
+
+// TestCheckPairReadyWiresTheDaemonRunningCommit: the heartbeat step hands the check
+// the daemon's running-commit reader, so a green is judged against the running build.
+func TestCheckPairReadyWiresTheDaemonRunningCommit(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		config:            &Config{TownRoot: t.TempDir()}, // no values file: only the daemon's own commit answers
+		fullBuildCommitFn: func() (string, error) { return pairGreen, nil },
+		clock:             clockwork.NewFakeClockAt(pairT0),
+		logger:            log.New(io.Discard, "", 0),
+	}
+	d.pairReady.next = pairT0.Add(time.Hour) // not due: no production rigs are resolved
+
+	d.checkPairReady()
+
+	require.NotNil(t, d.pairReady.runningCommit, "checkPairReady did not wire the check to the daemon's running commit")
+	got, err := d.pairReady.runningCommit()
+	require.NoError(t, err)
+	assert.Equal(t, pairGreen, got, "the check's reader does not answer the daemon's running commit")
 }
 
 // pairCloneHistory is a rig's bare clone as a gitfake repository, holding three
