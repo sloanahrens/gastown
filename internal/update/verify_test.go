@@ -110,6 +110,26 @@ func pairGreenProbes() *fakePairProbes {
 	}
 }
 
+// fakeReadyProbes is fakeVerifyProbes with the readiness extension: the answer
+// the town's own readiness question gives and how often it was asked.
+type fakeReadyProbes struct {
+	*fakeVerifyProbes
+	ready      bool
+	reason     string
+	errReady   error
+	readyCalls int
+}
+
+func (p *fakeReadyProbes) Ready(context.Context) (bool, string, error) {
+	p.readyCalls++
+	return p.ready, p.reason, p.errReady
+}
+
+// readyGreenProbes is every probe matching want and a town that is ready.
+func readyGreenProbes() *fakeReadyProbes {
+	return &fakeReadyProbes{fakeVerifyProbes: greenProbes(), ready: true}
+}
+
 // fakeVerifyClock is a clock the fake sleep advances, so no test waits.
 type fakeVerifyClock struct{ now time.Time }
 
@@ -790,6 +810,145 @@ func TestVerifyHealthRefusesEveryOtherLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+// verifyReadyNote is the detail a passing health check appends to a line that is
+// not green, saying the line is reported beside the roll and is not part of it.
+const verifyReadyNote = " (ready: the town's own recorded and queue states are reported beside the roll, not part of it)"
+
+// TestVerifyHealthReady drives Verify on a probe set that implements ReadyProbes:
+// the readiness answer decides the health check, whatever the line's verdict, so
+// a town that is ready passes even with a red rig main on its line. A line that
+// is not green carries the ready note; a GREEN line carries none.
+func TestVerifyHealthReady(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "a red rig main, with the ready note",
+			line: "RED tick 4s ago: main/devops=red[R]",
+			want: "RED tick 4s ago: main/devops=red[R]" + verifyReadyNote,
+		},
+		{
+			name: "a queue-only degraded line, with the ready note",
+			line: "DEGRADED tick 5s ago: needs-human=1",
+			want: "DEGRADED tick 5s ago: needs-human=1" + verifyReadyNote,
+		},
+		{
+			name: "a green line, no note",
+			line: verifyTestGreen,
+			want: verifyTestGreen,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := readyGreenProbes()
+			probes.health = tt.line
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertFailedChecks(t, checks)
+			health := findCheck(t, checks, checkHealth)
+			if !health.OK {
+				t.Fatalf("health failed on a ready town: %s", health.Detail)
+			}
+			if health.Detail != tt.want {
+				t.Errorf("health detail = %q, want %q", health.Detail, tt.want)
+			}
+			if probes.readyCalls != 1 {
+				t.Errorf("asked Ready %d times, want once", probes.readyCalls)
+			}
+		})
+	}
+}
+
+// TestVerifyHealthNotReady drives the refusal branches of a ready probe set: a
+// town that is not ready fails the check naming the reason and the line, a Ready
+// error fails it with the error text, and a Health error fails it first without
+// asking Ready at all.
+func TestVerifyHealthNotReady(t *testing.T) {
+	t.Parallel()
+	const line = "RED tick 4s ago: main/devops=red[?]"
+	tests := []struct {
+		name       string
+		set        func(*fakeReadyProbes)
+		detail     string
+		readyCalls int
+	}{
+		{
+			name:       "the town is not ready",
+			set:        func(p *fakeReadyProbes) { p.ready, p.reason = false, "a stale report" },
+			detail:     "not ready: a stale report: " + line,
+			readyCalls: 1,
+		},
+		{
+			name:       "the ready probe fails",
+			set:        func(p *fakeReadyProbes) { p.errReady = errors.New("gt status --line --ready failed") },
+			detail:     "gt status --line --ready failed",
+			readyCalls: 1,
+		},
+		{
+			name:       "the health probe fails first",
+			set:        func(p *fakeReadyProbes) { p.errHealth = errors.New("gt status --line failed") },
+			detail:     "gt status --line failed",
+			readyCalls: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			probes := readyGreenProbes()
+			probes.health = line
+			tt.set(probes)
+
+			checks := Verify(context.Background(), probes, verifyTestWant)
+
+			assertOnlyFailed(t, checks, checkHealth)
+			if detail := findCheck(t, checks, checkHealth).Detail; detail != tt.detail {
+				t.Errorf("health detail = %q, want %q", detail, tt.detail)
+			}
+			if probes.readyCalls != tt.readyCalls {
+				t.Errorf("asked Ready %d times, want %d", probes.readyCalls, tt.readyCalls)
+			}
+		})
+	}
+}
+
+// TestVerifyHealthLineRule pins the rule for a probe set without ReadyProbes: a
+// red line still fails with the line as read, and a queue-only degraded line
+// still passes naming the reasons it ignored, exactly as before the extension.
+func TestVerifyHealthLineRule(t *testing.T) {
+	t.Parallel()
+	t.Run("a red line still fails", func(t *testing.T) {
+		t.Parallel()
+		probes := greenProbes()
+		probes.health = "RED tick 4s ago: main/devops=red[R]"
+
+		checks := Verify(context.Background(), probes, verifyTestWant)
+
+		assertOnlyFailed(t, checks, checkHealth)
+		if detail := findCheck(t, checks, checkHealth).Detail; detail != probes.health {
+			t.Errorf("health detail = %q, want the line as read %q", detail, probes.health)
+		}
+	})
+
+	t.Run("a queue-only degraded line still passes naming the ignored reasons", func(t *testing.T) {
+		t.Parallel()
+		probes := greenProbes()
+		probes.health = "DEGRADED tick 5s ago: needs-human=1"
+
+		checks := Verify(context.Background(), probes, verifyTestWant)
+
+		assertFailedChecks(t, checks)
+		want := probes.health + " (queue states, not a failed roll; ignored needs-human=1)"
+		if detail := findCheck(t, checks, checkHealth).Detail; detail != want {
+			t.Errorf("health detail = %q, want %q", detail, want)
+		}
+	})
 }
 
 func TestVerifyProbeErrorIsAFailedCheck(t *testing.T) {
