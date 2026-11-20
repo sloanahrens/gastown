@@ -178,16 +178,74 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	}
 }
 
+// runningRefs is the daemon and polecat references writeRunningImages records.
+func runningRefs() (daemon, polecat string) {
+	reg := imagevalues.Registry{Scheme: "https", Host: "registry.test:5000", Owner: "town"}
+	return reg.Ref(imagevalues.DaemonImage, digestOf([]byte("running daemon"))),
+		reg.Ref(imagevalues.PolecatImage, digestOf([]byte("running polecat")))
+}
+
 // writeRunningImages writes the values file the running commit and the running
 // daemon image are read from.
 func writeRunningImages(t *testing.T, town, commit string) {
 	t.Helper()
-	reg := imagevalues.Registry{Scheme: "https", Host: "registry.test:5000", Owner: "town"}
+	daemon, polecat := runningRefs()
 	require.NoError(t, imagevalues.Write(imagevalues.PathIn(filepath.Join(town, "gastown")), imagevalues.Values{
-		Daemon:  reg.Ref(imagevalues.DaemonImage, digestOf([]byte("running daemon"))),
-		Polecat: reg.Ref(imagevalues.PolecatImage, digestOf([]byte("running polecat"))),
+		Daemon:  daemon,
+		Polecat: polecat,
 		Commit:  commit,
 	}))
+}
+
+// TestRunningImages: runningImages reads both references of the running values
+// file, answers absent with no error when there is no file, and returns a file it
+// cannot read as an error, never as absent.
+func TestRunningImages(t *testing.T) {
+	t.Parallel()
+	daemon, polecat := runningRefs()
+	t.Run("reads the daemon and polecat references", func(t *testing.T) {
+		t.Parallel()
+		r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+		got, ok, err := r.d.runningImages()
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, daemon, got.Daemon)
+		assert.Equal(t, polecat, got.Polecat)
+	})
+	t.Run("no values file is absent, not an error", func(t *testing.T) {
+		t.Parallel()
+		r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+		require.NoError(t, os.Remove(imagevalues.PathIn(filepath.Join(r.town, "gastown"))))
+		_, ok, err := r.d.runningImages()
+		require.NoError(t, err)
+		assert.False(t, ok)
+	})
+	t.Run("unreadable values file is a wrapped error", func(t *testing.T) {
+		t.Parallel()
+		r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+		require.NoError(t, os.WriteFile(imagevalues.PathIn(filepath.Join(r.town, "gastown")), []byte("daemon: [\n"), 0o600))
+		_, ok, err := r.d.runningImages()
+		require.Error(t, err)
+		assert.ErrorContains(t, err, "read the running images: ")
+		assert.False(t, ok)
+	})
+}
+
+// TestLaunchUpdateJobUsesTheRunningDaemonImage: the update Job launchUpdateJob
+// creates runs the running daemon image, not the polecat image the same values
+// file names.
+func TestLaunchUpdateJobUsesTheRunningDaemonImage(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	green := r.commits[2]
+	daemon, polecat := runningRefs()
+
+	require.NoError(t, r.d.launchUpdateJob(context.Background(), config.UpdateSettings{MaxRuntime: time.Hour}, green))
+
+	manifest, ok := r.cluster.made[updateJobName(green)]
+	require.True(t, ok, "no Job was created for the commit")
+	assert.Contains(t, string(manifest), daemon, "the Job does not run the running daemon image")
+	assert.NotContains(t, string(manifest), polecat, "the Job runs the polecat image")
 }
 
 // pairFor runs the production pair check over the rig's clone for green, with
