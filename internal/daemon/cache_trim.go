@@ -838,7 +838,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	}
 	run.outcome = cacheTrimRunOK
 	if len(sources) > 0 {
-		if used, measured := d.cacheTrimMeasure(ctx, kubeconfig, sources[0], claim.ClaimName, capBytes); measured {
+		if used, measured := d.cacheTrimMeasure(ctx, kubeconfig, sources[0], claim.ClaimName, capBytes, planned.Protected); measured {
 			run.after = &used
 			if cacheTrimOverTheCap(used, capBytes) {
 				run.outcome = cacheTrimRunOverCap
@@ -935,11 +935,16 @@ func (d *Daemon) cacheTrimDeleteListerJob(ctx context.Context, kubeconfig, names
 // (gt-eyjgal). The item names open sandbox paths as another explanation. A
 // reading at or under the threshold drops the item: the trim did its work.
 //
+// protected is the plan's Protected: the build-cache bytes the age floor kept.
+// While the claim is over the cap by no more than those, the item says the floor
+// holds the claim there and names how much, since the trim removed all its rules
+// allow; only a larger overflow says the Job may have run the wrong helper.
+//
 // A du that cannot be read logs once an hour under a key of its own and raises
 // nothing. This check never fails the trim: the trim reached a verdict, and a
 // claim nobody could measure is not a claim that stayed full. It returns the
 // reading and whether one was made: a failed du is unknown, never a zero.
-func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes int64) (used int64, measured bool) {
+func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes, protected int64) (used int64, measured bool) {
 	used, err := d.cacheTrimDu(ctx, kubeconfig, source)
 	if err != nil {
 		// An item an earlier trim raised stays in place: an unreadable claim is
@@ -954,12 +959,16 @@ func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source
 		d.cacheTrimNoOp.clear(key)
 		return used, true
 	}
+	why := "the Job may have run the wrong helper. " + cacheTrimNoOpOpenSandboxes
+	if used-capBytes <= protected {
+		why = fmt.Sprintf("%s of it is younger than the age floor and cannot be removed yet; the cap is below what the seats write inside the floor", polecatimage.Human(protected))
+	}
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      key,
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityLow,
-		Summary: fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: the Job may have run the wrong helper. %s",
-			claim, polecatimage.Human(used), polecatimage.Human(capBytes), cacheTrimNoOpOpenSandboxes),
+		Summary: fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: %s",
+			claim, polecatimage.Human(used), polecatimage.Human(capBytes), why),
 	})
 	return used, true
 }
