@@ -1212,6 +1212,59 @@ func TestPromotions(t *testing.T) {
 	}
 }
 
+// A release-driven rig's GitHub main advances only when a prod-proven release
+// is published, so a green candidate that waits is by design, not a stuck
+// promotion (gt-9nigqs). Every failure the record carries still reads as it
+// did, so awaiting is never how a failed promotion is read.
+func TestPromoteAwaitingRelease(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.promotions = []RigPromotion{
+		{Rig: "awaiting", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(DefaultPromoteWait), ReleaseDriven: true},
+		{Rig: "untimed", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, ReleaseDriven: true},
+		{Rig: "at-green", LastPromoted: "aaaa1111", Green: "aaaa1111", ReleaseDriven: true},
+		{Rig: "failed", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(DefaultPromoteWait), ReleaseDriven: true, LastError: "pushing bbbb2222: rejected"},
+		{Rig: "diverged", LastPromoted: "aaaa1111", Green: "bbbb2222", ReleaseDriven: true, Diverged: true, DivergedTip: "cccc3333"},
+		{Rig: "never", Green: "bbbb2222", GreenAt: ago(time.Hour), ReleaseDriven: true},
+		{Rig: "unreadable", ReleaseDriven: true, Err: errors.New("corrupt state")},
+		// The same candidate on a rig the green verdict promotes still waits
+		// out PromoteWait.
+		{Rig: "not-release-driven", LastPromoted: "aaaa1111", Green: "bbbb2222", Behind: 3, GreenAt: ago(DefaultPromoteWait)},
+	}
+	r := Compute(context.Background(), inputs(f))
+	for key, want := range map[string]Verdict{
+		"promote/awaiting":           Green,
+		"promote/untimed":            Green,
+		"promote/at-green":           Green,
+		"promote/failed":             Degraded,
+		"promote/diverged":           Red,
+		"promote/never":              VerdictUnknown,
+		"promote/unreadable":         VerdictUnknown,
+		"promote/not-release-driven": Degraded,
+	} {
+		if got := field(t, r, key); got.Verdict != want {
+			t.Errorf("%s = %+v, want %s", key, got, want)
+		}
+	}
+	for _, key := range []string{"promote/awaiting", "promote/untimed"} {
+		if got := field(t, r, key); got.Value != "3 behind" || got.Detail != "awaiting the next release" {
+			t.Errorf("%s = %+v, want `3 behind` and the awaiting detail", key, got)
+		}
+	}
+	if got := field(t, r, "promote/at-green"); got.Value != "0 behind" || got.Detail != "" {
+		t.Errorf("promote/at-green = %+v, want no lag and no detail", got)
+	}
+	if got := field(t, r, "promote/failed"); got.Detail != "pushing bbbb2222: rejected" {
+		t.Errorf("promote/failed detail = %q, want the recorded error", got.Detail)
+	}
+	if got := field(t, r, "promote/never"); !strings.Contains(got.Detail, "never promoted") {
+		t.Errorf("promote/never detail = %q, want the never-promoted reason", got.Detail)
+	}
+	if got := field(t, r, "promote/not-release-driven"); !strings.Contains(got.Detail, "unpromoted for 6h") {
+		t.Errorf("promote/not-release-driven detail = %q, want the wait", got.Detail)
+	}
+}
+
 // A rig that promotes nothing is not listed at all, so a town with no
 // promotion grows no field (gt-fn9e6.39).
 func TestPromotionsWithoutARig(t *testing.T) {

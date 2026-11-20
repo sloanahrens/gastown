@@ -558,6 +558,10 @@ type RigPromotion struct {
 	// DivergedTip is the target's main tip the divergence was recorded at,
 	// the commit an operator has to reconcile by hand; "" when unknown.
 	DivergedTip string
+	// ReleaseDriven is true when the rig's GitHub main follows prod: it
+	// advances only to a published release, so a green candidate waits for
+	// the next release instead of for a promotion of its own (gt-9nigqs).
+	ReleaseDriven bool
 	// Err is a failed read of the rig's promotion record; the rest is
 	// ignored.
 	Err error
@@ -1293,9 +1297,11 @@ func promotions(in Inputs) []Field {
 
 // promoteField is one rig's verdict: RED when the two mains diverged, DEGRADED
 // when the last promotion failed or a green candidate has waited past
-// PromoteWait, and otherwise green with the lag GitHub is behind by. A question
-// the record cannot answer — a rig that never promoted, a candidate with no
-// verdict time — is UNKNOWN with its reason rather than red.
+// PromoteWait, and otherwise green with the lag GitHub is behind by. A
+// release-driven rig is never judged by the wait: its candidate awaits the
+// next release. A question the record cannot answer — a rig that never
+// promoted, a candidate with no verdict time — is UNKNOWN with its reason
+// rather than red.
 func promoteField(in Inputs, p RigPromotion) Field {
 	switch {
 	case p.Err != nil:
@@ -1324,6 +1330,14 @@ func promoteField(in Inputs, p RigPromotion) Field {
 		// The target is at the green commit: nothing is waiting to be
 		// promoted, and no age matters.
 		return Field{Name: FieldPromote, Rig: p.Rig, Tag: Recorded, Verdict: Green, Value: value}
+	}
+	if p.ReleaseDriven {
+		// The target advances only to a published release, so this green
+		// candidate waits for the next one however long that takes: no wait
+		// degrades it, and a missing verdict time is not a question here
+		// (gt-9nigqs).
+		return Field{Name: FieldPromote, Rig: p.Rig, Tag: Recorded, Verdict: Green, Value: value,
+			Detail: "awaiting the next release"}
 	}
 	if p.GreenAt.IsZero() {
 		// A candidate is pending and nobody recorded when it appeared, so the
