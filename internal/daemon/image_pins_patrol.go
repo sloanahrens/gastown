@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
@@ -46,8 +48,9 @@ const (
 	// included, so a stuck read frees the patrol's single-flight guard.
 	imagePinsTickTimeout = 10 * time.Minute
 
-	// imagePinsGitTimeout bounds one pin's ls-remote, and imagePinsHTTPTimeout
-	// one compare request and imagePinsBdTimeout one bd call.
+	// imagePinsGitTimeout bounds one pin's ls-remote and one path count (its
+	// fetch and its rev-list, each separately), and imagePinsHTTPTimeout one
+	// compare request and imagePinsBdTimeout one bd call.
 	imagePinsGitTimeout  = 2 * time.Minute
 	imagePinsHTTPTimeout = 30 * time.Second
 	imagePinsBdTimeout   = 30 * time.Second
@@ -327,9 +330,7 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 		return nil, err
 	}
 	ownerOf := func() (string, error) { return config.ResolveForgeOwner(d.config.TownRoot) }
-	// The production path count is gt-wz5ct4; until it lands, a devops pin's read
-	// is its Err rather than a compare count that cannot name its inputs.
-	return ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), nil, cmp)
+	return ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), d.imagePinsPathCount(ctx), cmp)
 }
 
 // imagePinsTipGit is the one git read a pin's tip takes: ls-remote of the
@@ -354,6 +355,50 @@ func (d *Daemon) imagePinsTipGit(ctx context.Context) PinTipGit {
 		}
 		return stdout, nil
 	}
+}
+
+// imagePinsPathCount is the production PinPathCount: the commits from the pin to
+// the tip that touch the paths, or an error, never a zero, when git cannot count.
+//
+// The count runs in the devops rig's bare clone, after a forced filtered fetch of
+// the source's main into the scratch ref refs/gt/pin-tip, which is overwritten
+// each tick and is no branch the town uses.
+func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
+	return func(url, pin, tip string, paths []string) (int, error) {
+		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
+			return 0, err
+		}
+		argv := append([]string{"rev-list", "--count", pin + ".." + tip, "--"}, paths...)
+		out, err := d.imagePinsGit(ctx, repo, argv...)
+		if err != nil {
+			return 0, err
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+		if err != nil {
+			return 0, fmt.Errorf("git rev-list --count %s..%s answered a non-number", sha12(pin), sha12(tip))
+		}
+		return n, nil
+	}
+}
+
+// imagePinsGit runs one git command in repo, bounded by imagePinsGitTimeout and
+// never waiting on a credential prompt. The error names the command and carries
+// git's first stderr line only: the rest of the output can repeat the URL it was
+// given, and pinRepo has already refused a URL that carries a credential.
+func (d *Daemon) imagePinsGit(ctx context.Context, repo string, args ...string) ([]byte, error) {
+	callCtx, cancel := context.WithTimeout(ctx, imagePinsGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(callCtx, "git", append([]string{"--git-dir=" + repo}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, stderr, err := d.runCmd(cmd)
+	if err != nil {
+		if first := strings.TrimSpace(firstLine(string(stderr))); first != "" {
+			return nil, fmt.Errorf("git %s: %w: %s", args[0], err, first)
+		}
+		return nil, fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return out, nil
 }
 
 // imagePinsCompare builds the compare a pin's lag is counted with: the town's
