@@ -314,6 +314,34 @@ func TestIntegrationLandTrackedHookRevert(t *testing.T) {
 	}
 }
 
+// TestIntegrationRevertPushesPastTrackedPrePush: the landing worker's revert
+// branch is pushed through land.RevertGit, so that push runs with the target's
+// hooks off, a push's pre-push included, and it lands in a rig whose tracked
+// pre-push can never succeed in the pod (gt-gd5egc). A plain handle's push of
+// the same shape is refused by that hook first, so a revert push that is green
+// did not get there by never running the hook.
+func TestIntegrationRevertPushesPastTrackedPrePush(t *testing.T) {
+	t.Parallel()
+
+	f := newRealLandFixture(t)
+	f.base = prePushHookOnMain(t, f, "#!/bin/sh\nexit 1\n")
+	dir := filepath.Join(t.TempDir(), "wt")
+	if err := git.NewGit(f.repo).WorktreeAddDetached(dir, f.base); err != nil {
+		t.Fatalf("worktree at %s: %v", f.base, err)
+	}
+	if err := git.NewGit(dir).Push("origin", "HEAD:refs/heads/revert/plain", false); err == nil {
+		t.Fatal("a plain handle's push under a pre-push that always exits 1 = nil error, want the hook's refusal")
+	}
+	branch := "revert/gt-gd5egc-abcd1234"
+	wt := RevertGit(dir)
+	if err := wt.Push("origin", "HEAD:refs/heads/"+branch, false); err != nil {
+		t.Fatalf("revert push under a pre-push that always exits 1: %v", err)
+	}
+	if got := f.realRef(f.origin, "refs/heads/"+branch); got != f.base {
+		t.Fatalf("origin %s = %q, want the pushed head %s", branch, got, f.base)
+	}
+}
+
 func TestIntegrationLandMergesGatesPushesAndRecords(t *testing.T) {
 	landsAndRecords(t, newRealLandFixture(t))
 }
