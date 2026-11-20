@@ -183,6 +183,13 @@ func TestNodeImagePruneKubeWaitArgv(t *testing.T) {
 			wantOut:  "pruned 3 images\n",
 		},
 		{
+			name:     "Logs keeps the bytes untouched",
+			call:     func(k kubectlNodePrune) ([]byte, error) { return k.Logs(context.Background(), job) },
+			out:      "a\nb\n",
+			wantArgs: []string{"-n", "gt", "logs", "job/" + job},
+			wantOut:  "a\nb\n",
+		},
+		{
 			name:     "Delete",
 			call:     func(k kubectlNodePrune) ([]byte, error) { return nil, k.Delete(context.Background(), job) },
 			wantArgs: []string{"-n", "gt", "delete", "job", job, "--ignore-not-found", "--wait=true"},
