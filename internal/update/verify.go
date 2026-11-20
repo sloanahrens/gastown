@@ -103,6 +103,42 @@ func Verify(ctx context.Context, p VerifyProbes, want string) []Check {
 	)
 }
 
+// VerifyWithSettle runs Verify once, then re-reads a health line that classifies
+// as settling until it passes (naming the settle time) or wait has passed since
+// the first read, failing with the last line and "still settling after <wait>";
+// any other answer ends it at once; a failed sleep returns its error.
+func VerifyWithSettle(ctx context.Context, clock Clock, sleep func(context.Context, time.Duration) error, p VerifyProbes, want string, wait, poll time.Duration) ([]Check, error) {
+	checks := Verify(ctx, p, want)
+	health := &checks[3] // Verify reports the four checks in a fixed order; health is fourth.
+	if health.OK || classifyHealthLine(health.Detail) == healthFail {
+		return checks, nil
+	}
+	start := clock.Now()
+	for {
+		if clock.Now().Sub(start) >= wait {
+			health.Detail += fmt.Sprintf(" (still settling after %s)", wait)
+			return checks, nil
+		}
+		if err := sleep(ctx, poll); err != nil {
+			return checks, err
+		}
+		line, err := p.Health(ctx)
+		if err != nil {
+			*health = Check{Name: checkHealth, Detail: err.Error()}
+			return checks, nil
+		}
+		*health = Check{Name: checkHealth, Detail: line}
+		switch classifyHealthLine(line) {
+		case healthPass:
+			health.OK = true
+			health.Detail += fmt.Sprintf(" (settled after %s)", clock.Now().Sub(start))
+			return checks, nil
+		case healthFail:
+			return checks, nil
+		}
+	}
+}
+
 // WaitForRestart polls the daemon until it reports want or timeout passes,
 // which is measured from the first poll. The poll that finds the timeout passed
 // is the last one, so a sleep that ends on the timeout still gets its poll; a
