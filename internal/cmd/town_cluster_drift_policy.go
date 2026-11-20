@@ -173,8 +173,14 @@ func findPolicyDoc(docs []staticPolicyDoc, file, kind, name string) (staticPolic
 // the object's identity kept so the live answer is matched to it:
 //   - a ValidatingAdmissionPolicy's spec,
 //   - a ValidatingAdmissionPolicyBinding's policyName and validationActions,
-//   - a Role's rules,
-//   - a RoleBinding's roleRef and subjects.
+//   - a Role's and a ClusterRole's rules,
+//   - a RoleBinding's and a ClusterRoleBinding's roleRef and subjects,
+//   - a PriorityClass's value, globalDefault and description,
+//   - a Namespace's and a ServiceAccount's identity, since their documents name
+//     nothing else the compare reads,
+//   - the metadata labels and annotations the document names, for every kind,
+//     since a label can steer admission or selection and one only the live
+//     object carries is not drift (gt-cd1iso).
 //
 // A field the compare names and the document lacks is an error: a missing field
 // would otherwise read as nothing to compare.
@@ -186,6 +192,13 @@ func policyComparedObject(doc staticPolicyDoc) (map[string]any, error) {
 	metadata := map[string]any{"name": doc.name}
 	if doc.namespace != "" {
 		metadata["namespace"] = doc.namespace
+	}
+	if named, ok := doc.body["metadata"].(map[string]any); ok {
+		for _, key := range []string{"labels", "annotations"} {
+			if value, present := named[key]; present {
+				metadata[key] = value
+			}
+		}
 	}
 	object := map[string]any{"apiVersion": apiVersion, "kind": doc.kind, "metadata": metadata}
 	switch doc.kind {
@@ -209,13 +222,13 @@ func policyComparedObject(doc staticPolicyDoc) (map[string]any, error) {
 			selected[key] = value
 		}
 		object["spec"] = selected
-	case roleKind:
+	case roleKind, clusterRoleKind:
 		rules, ok := doc.body["rules"]
 		if !ok {
 			return nil, fmt.Errorf("%s %s %s has no rules to compare", doc.file, doc.kind, doc.name)
 		}
 		object["rules"] = rules
-	case roleBindingKind:
+	case roleBindingKind, clusterRoleBindingKind:
 		for _, key := range []string{"roleRef", "subjects"} {
 			value, ok := doc.body[key]
 			if !ok {
@@ -223,6 +236,18 @@ func policyComparedObject(doc staticPolicyDoc) (map[string]any, error) {
 			}
 			object[key] = value
 		}
+	case priorityClassKind:
+		for _, key := range []string{"value", "globalDefault", "description"} {
+			value, ok := doc.body[key]
+			if !ok {
+				return nil, fmt.Errorf("%s %s %s has no %s to compare", doc.file, doc.kind, doc.name, key)
+			}
+			object[key] = value
+		}
+	case namespaceKind, serviceAccountKind:
+		// The identity and named metadata above are all these documents state
+		// the compare reads; the server fills in the rest, such as a Namespace's
+		// spec.finalizers and a ServiceAccount's token fields.
 	default:
 		return nil, fmt.Errorf("%s %s %s is a kind the policy compare does not read", doc.file, doc.kind, doc.name)
 	}
