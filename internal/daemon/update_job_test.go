@@ -149,6 +149,9 @@ func newUpdateJobRig(t *testing.T, cfg *config.UpdateConfig) *updateJobRig {
 	}
 	d.openGitFn = func(dir string) daemonGit { return world.Open(dir).(daemonGit) }
 	d.podMode = true
+	// The daemon was built from the commit the values file names, the normal
+	// state; a test that models a partial roll sets its own build commit.
+	d.fullBuildCommitFn = func() (string, error) { return commits[1], nil }
 	// Nothing in this rig reads the host's environment or a resolver: the gateway
 	// URL is empty unless a test sets one, and a lookup is a test's fake.
 	d.getenv = func(string) string { return "" }
@@ -278,11 +281,11 @@ func TestPairReadySHAForRoll(t *testing.T) {
 			wantSHA: c3,
 		},
 		{
-			name:       "a pair equal to running is not ahead",
+			name:       "a pair equal to running is the build the daemon runs",
 			items:      []attention.Item{item("gastown", c1)},
 			running:    c1,
 			git:        rollGitStub{},
-			wantReason: "no pair-ready green commit is ahead of the running commit",
+			wantReason: "the daemon already runs " + c1[:12],
 		},
 		{
 			name:       "a pair behind running is not ahead",
@@ -417,6 +420,79 @@ func TestUpdateJobCreatesNothingForAPairThatIsNotAhead(t *testing.T) {
 
 			assert.Empty(t, r.cluster.calls)
 			assert.Contains(t, r.logs.String(), "no pair-ready green commit is ahead of the running commit")
+		})
+	}
+}
+
+// TestTriggerPodUpdateNeverStartsAJobForThePairTheDaemonRuns: a partial roll
+// leaves the values file naming an old commit, so the values file alone makes
+// the build the daemon already runs look newer than it is. The daemon's own
+// build commit is the running one, whatever the file names at the decision, so
+// the matching pair starts no Job and the note names that build.
+func TestTriggerPodUpdateNeverStartsAJobForThePairTheDaemonRuns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		atDecision func(r *updateJobRig) string
+	}{
+		{name: "values file still names the old commit", atDecision: func(r *updateJobRig) string { return r.commits[0] }},
+		{name: "values file names another commit at the decision", atDecision: func(r *updateJobRig) string { return r.commits[2] }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			running := r.commits[1]
+			writeRunningImages(t, r.town, r.commits[0])
+			r.pairFor(t, running, true, true)
+			writeRunningImages(t, r.town, tt.atDecision(r))
+
+			r.d.triggerUpdate()
+
+			assert.Empty(t, r.cluster.calls, "a Job was created for the build the daemon already runs")
+			assert.Contains(t, r.logs.String(), "the daemon already runs "+running[:12])
+		})
+	}
+}
+
+// TestTriggerPodUpdateStillStartsForANewerPair: a pair ahead of the daemon's own
+// build commit is due as before, and its Job is created.
+func TestTriggerPodUpdateStillStartsForANewerPair(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	green := r.commits[2]
+	r.pairFor(t, green, true, true)
+
+	r.d.triggerUpdate()
+
+	assert.Equal(t, []string{"gt-update-" + green[:12]}, r.cluster.calls, "the Job for the newer pair was not created")
+}
+
+// TestRunningCommitFallsBackToTheValuesFileWhenTheBuildIsNotAFullSha: the
+// daemon's own build commit is the running one only when it is a full sha. A
+// build that cannot name one falls back to the values file's commit.
+func TestRunningCommitFallsBackToTheValuesFileWhenTheBuildIsNotAFullSha(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		build func() (string, error)
+	}{
+		{name: "short sha", build: func() (string, error) { return "fe633c9e", nil }},
+		{name: "no build commit", build: func() (string, error) { return "", errors.New("the binary records no build info") }},
+		{name: "not lowercase hex", build: func() (string, error) { return strings.Repeat("F", 40), nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, nil)
+			values := r.commits[2]
+			writeRunningImages(t, r.town, values)
+			r.d.fullBuildCommitFn = tt.build
+
+			got, err := r.d.runningCommit()
+
+			require.NoError(t, err)
+			assert.Equal(t, values, got, "the values file's commit was not used")
 		})
 	}
 }
@@ -581,9 +657,11 @@ func TestUpdateJobPresentRefusesNoClient(t *testing.T) {
 func TestUpdateJobNewerPairLaunchesItsOwnJob(t *testing.T) {
 	t.Parallel()
 	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
-	// Both pair-ready commits are ahead of the running one, so the newest is the
+	// The daemon was built from commits[0] and the values file names it too, so
+	// both pair-ready commits are ahead of the running one, and the newest is the
 	// roll's target.
 	writeRunningImages(t, r.town, r.commits[0])
+	r.d.fullBuildCommitFn = func() (string, error) { return r.commits[0], nil }
 	older := r.commits[1]
 	olderName := "gt-update-" + older[:12]
 	r.cluster.made[olderName] = []byte("earlier")
@@ -778,6 +856,9 @@ func TestUpdateJobRefusalsLogTheirReason(t *testing.T) {
 		{
 			name: "running commit unreadable",
 			setup: func(t *testing.T, r *updateJobRig) {
+				// A build that cannot name its own commit in full reads the file,
+				// which is the read this row leaves unparseable.
+				r.d.fullBuildCommitFn = func() (string, error) { return "fe633c9e", nil }
 				require.NoError(t, os.WriteFile(imagevalues.PathIn(filepath.Join(r.town, "gastown")), []byte("daemon: [\n"), 0o600))
 			},
 			wantReason: "running commit unreadable: ",
