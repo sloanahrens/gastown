@@ -45,6 +45,15 @@ var (
 // so an abbreviation another commit can claim never reaches the lister.
 var commitForm = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// nonMigrationNames are the files bd keeps in MigrationsDir that are not
+// migrations (README.md, ignored, nondeterminism-allowlist.txt at the pinned
+// commit), skipped by exact whole name; any other unnumbered entry is refused.
+var nonMigrationNames = map[string]struct{}{
+	"README.md":                    {},
+	"ignored":                      {},
+	"nondeterminism-allowlist.txt": {},
+}
+
 // Lister lists the file names a directory holds at one commit of a
 // repository.
 type Lister interface {
@@ -59,16 +68,17 @@ type Lister interface {
 //
 // An empty listing is ErrEmptyListing, an entry that does not start with a
 // number and an underscore is ErrUnnumbered, and one whose number does not fit
-// an int is ErrNumberOutOfRange. Every entry must be a migration file name:
-// skipping a name this function does not understand would let a mistyped
-// migration hide a level the commit does not carry, so the listing is refused
-// instead.
+// an int is ErrNumberOutOfRange. The known non-migration files in
+// nonMigrationNames are skipped by exact name; every other entry must be a
+// migration, because skipping a name this function does not understand would
+// let a mistyped migration hide a level. A listing with no migration once the
+// known names are skipped is ErrEmptyListing, never level zero.
 func MaxMigration(names []string) (int, error) {
-	if len(names) == 0 {
-		return 0, ErrEmptyListing
-	}
-	max := 0
+	max := -1
 	for _, name := range names {
+		if _, ok := nonMigrationNames[name]; ok {
+			continue
+		}
 		number, err := migrationNumber(name)
 		if err != nil {
 			return 0, err
@@ -76,6 +86,9 @@ func MaxMigration(names []string) (int, error) {
 		if number > max {
 			max = number
 		}
+	}
+	if max < 0 {
+		return 0, ErrEmptyListing
 	}
 	return max, nil
 }
