@@ -59,6 +59,53 @@ func (w *resetWorld) branches(t *testing.T) []string {
 	return got
 }
 
+// resetRecordingGit is the seat's git with the calls the reset makes to compare
+// the branch with origin recorded, so a test can pin that an origin holding no
+// branch is asked for no comparison at all. When isAncestorErr is set the
+// ancestry test answers it, while every other method asks the handle it wraps.
+type resetRecordingGit struct {
+	daemonGit
+	isAncestorErr error
+	calls         []string
+}
+
+func (g *resetRecordingGit) IsAncestor(ancestor, descendant string) (bool, error) {
+	g.calls = append(g.calls, "IsAncestor")
+	if g.isAncestorErr != nil {
+		return false, g.isAncestorErr
+	}
+	return g.daemonGit.IsAncestor(ancestor, descendant)
+}
+
+func (g *resetRecordingGit) HasObject(sha string) (bool, error) {
+	g.calls = append(g.calls, "HasObject")
+	return g.daemonGit.HasObject(sha)
+}
+
+func (g *resetRecordingGit) FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error {
+	g.calls = append(g.calls, "FetchRefspecWithTimeout")
+	return g.daemonGit.FetchRefspecWithTimeout(remote, refspec, timeout)
+}
+
+func (g *resetRecordingGit) Cherry(upstream, head string) (string, error) {
+	g.calls = append(g.calls, "Cherry")
+	return g.daemonGit.Cherry(upstream, head)
+}
+
+// recordGit puts a resetRecordingGit in place of the seat's git, with the
+// ancestry test answering err when it is not nil.
+func (w *resetWorld) recordGit(err error) *resetRecordingGit {
+	open := w.d.openGitFn
+	rec := &resetRecordingGit{daemonGit: open(w.work), isAncestorErr: err}
+	w.d.openGitFn = func(dir string) daemonGit {
+		if dir == w.work {
+			return rec
+		}
+		return open(dir)
+	}
+	return rec
+}
+
 // A stop whose push the ls-remote read-back confirms leaves the worktree
 // detached at origin's main with no local branch, and the hand-back that ran
 // before still names the pushed branch.
@@ -159,33 +206,45 @@ func TestStop_FailedPushLeavesTheWorktreeAndBranch(t *testing.T) {
 func TestOverrunResetWorktree_NeedsOriginToHoldTheBranchTip(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		prep    func(t *testing.T, w *resetWorld)
+		name string
+		prep func(t *testing.T, w *resetWorld)
+		// wantLog is the refusal the reset logs.
 		wantLog string
+		// recordCalls has the reset ask a handle that records the comparisons,
+		// and the row then asserts it asked git none of them.
+		recordCalls bool
 	}{
-		{"origin lacks the branch", func(*testing.T, *resetWorld) {}, "origin does not hold"},
+		{"origin lacks the branch", func(*testing.T, *resetWorld) {}, "origin does not hold", false},
+		{"origin holds no branch, so git is asked nothing", func(*testing.T, *resetWorld) {}, "origin does not hold", true},
 		{"origin holds another commit", func(t *testing.T, w *resetWorld) {
 			w.f.Commit(t, w.origin, stopSeat.Branch, "someone else's", map[string]string{"x.txt": "x\n"})
-		}, "origin does not hold"},
+		}, "origin does not hold", false},
 		{"origin cannot be asked", func(t *testing.T, w *resetWorld) {
 			w.f.RemoveRemote(t, w.work, "origin")
-		}, "origin does not hold"},
+		}, "origin does not hold", false},
 		{"the worktree holds uncommitted work", func(t *testing.T, w *resetWorld) {
 			if err := w.git().Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
 				t.Fatal(err)
 			}
 			writeWorkFiles(t, w.work, map[string]string{"dirty.txt": "unsaved\n"})
-		}, "worktree is"},
+		}, "worktree is", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := newResetWorld(t)
 			tc.prep(t, w)
+			var rec *resetRecordingGit
+			if tc.recordCalls {
+				rec = w.recordGit(nil)
+			}
 
 			if err := w.d.overrunResetWorktree(stopSeat); err != nil {
 				t.Fatalf("reset: %v, want nil (nothing to reset is not a failure)", err)
 			}
 
+			if tc.recordCalls && len(rec.calls) != 0 {
+				t.Errorf("reset asked git %v for an origin that holds no branch, want no comparison", rec.calls)
+			}
 			if !strings.Contains(w.log.String(), tc.wantLog) {
 				t.Errorf("log does not carry the refusal %q:\n%s", tc.wantLog, w.log.String())
 			}
@@ -254,6 +313,39 @@ func TestOverrunResetOriginPatchEquivalentKeepsTheBranch(t *testing.T) {
 	}
 	g := w.git()
 	if branch, _ := g.CurrentBranch(); branch != "" && branch != "HEAD" {
+		t.Errorf("worktree is on branch %q, want detached", branch)
+	}
+	if head, err := g.Rev("HEAD"); err != nil || head != w.baseSHA {
+		t.Errorf("HEAD = %q (%v), want origin/main %s", head, err, w.baseSHA)
+	}
+	if head, err := g.Rev("refs/heads/" + stopSeat.Branch); err != nil || head != w.tip {
+		t.Errorf("branch %s = %q (%v), want the seat's tip %s kept", stopSeat.Branch, head, err, w.tip)
+	}
+}
+
+// An ancestry test that cannot answer is not a confirmation the branch can be
+// dropped on: the patch test that confirms origin may still be answered, and git
+// cherry speaks to patch identity, which a forced delete drops. The worktree is
+// detached and the branch kept, its tip still resolving (gt-8wk2l7).
+func TestOverrunResetWorktree_AnAncestryErrorKeepsTheBranch(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.f.SetRef(t, w.origin, "refs/heads/"+stopSeat.Branch, w.baseSHA)
+	w.f.Commit(t, w.origin, stopSeat.Branch, "the same work, rebased", map[string]string{"work.txt": "work\n"})
+	w.recordGit(errors.New("merge-base cannot read the objects"))
+
+	if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+		t.Fatalf("reset: %v, want nil", err)
+	}
+
+	if strings.Contains(w.log.String(), "origin does not hold") {
+		t.Errorf("log says origin does not hold the branch:\n%s", w.log.String())
+	}
+	if !strings.Contains(w.log.String(), "branch "+stopSeat.Branch+" kept") {
+		t.Errorf("log does not say the branch was kept:\n%s", w.log.String())
+	}
+	g := w.git()
+	if branch, err := g.CurrentBranch(); err != nil || (branch != "" && branch != "HEAD") {
 		t.Errorf("worktree is on branch %q, want detached", branch)
 	}
 	if head, err := g.Rev("HEAD"); err != nil || head != w.baseSHA {
