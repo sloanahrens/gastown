@@ -590,6 +590,39 @@ func TestSpecInFlightAddedKeepsASlingWhoseAssigneeIsNotLive(t *testing.T) {
 	}
 }
 
+// A running sling whose bead cannot be read is added as before, even when the
+// failed read carries an assignee that names a live seat: an error is no
+// assignee, so the error goes toward fewer slings and never more (gt-txe9ew).
+func TestSpecInFlightAddedKeepsASlingWhenTheBeadReadFails(t *testing.T) {
+	t.Parallel()
+	show := func(string) (specdispatch.Spec, error) {
+		return specdispatch.Spec{Assignee: "gastown/polecats/capable"}, errors.New("bd show: unreadable")
+	}
+	seats := specSlingSeats{
+		Live:     map[string]bool{"gastown/capable": true},
+		Assignee: specSlingAssignees(show),
+	}
+	inFlight := []specInFlight{{Bead: "gt-b", Rig: "gastown", Agent: "claude-sonnet"}}
+	if got := specInFlightAdded(inFlight, seats); len(got) != 1 {
+		t.Fatalf("specInFlightAdded = %v, want the sling kept: its bead cannot be read", got)
+	}
+}
+
+// A running sling whose bead has no assignee yet names no seat, so it is added
+// as before; the seat it fills is one the roster cannot show yet (gt-txe9ew).
+func TestSpecInFlightAddedKeepsASlingWhoseBeadHasNoAssigneeYet(t *testing.T) {
+	t.Parallel()
+	show := func(string) (specdispatch.Spec, error) { return specdispatch.Spec{}, nil }
+	seats := specSlingSeats{
+		Live:     map[string]bool{"gastown/capable": true},
+		Assignee: specSlingAssignees(show),
+	}
+	inFlight := []specInFlight{{Bead: "gt-b", Rig: "gastown", Agent: "claude-sonnet"}}
+	if got := specInFlightAdded(inFlight, seats); len(got) != 1 {
+		t.Fatalf("specInFlightAdded = %v, want the sling kept: its bead has no assignee yet", got)
+	}
+}
+
 func withNote(s specdispatch.Spec, note string) specdispatch.Spec {
 	s.Notes = note
 	return s
