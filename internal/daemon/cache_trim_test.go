@@ -4508,11 +4508,15 @@ func newCacheTrimPlanCountFixture(t *testing.T, used int64, log cliReply) *cache
 // floor wording is for a Job that removed the whole plan, and one that removed
 // none says so first. The listing is the bead's 14.6GB; the reading 21.6GB is
 // the smallest the item is raised on (over twice the 10GB cap) inside the floor.
+// The 25GB rows are over the cap by more than the floor's 13.6GB, so the floor
+// cannot account for the overflow and is not named beside the Job's shortfall.
 func TestCacheTrimNoOpItemNeedsTheJobToHaveRemovedThePlan(t *testing.T) {
 	t.Parallel()
 	const used = 23192823808 // 21.6GB: over the cap by less than the floor's 13.6GB
 	floor := fmt.Sprintf("%s of it is younger than the age floor and cannot be removed yet; the cap is below what the seats write inside the floor", polecatimage.Human(cacheTrimFloorYoungSize))
 	prefix := fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: ", cacheTrimClaimName, polecatimage.Human(used), polecatimage.Human(cacheTrimNoOpCap))
+	const usedPastFloor = 26843545600 // 25GB: over the cap by 15GB, more than the floor's 13.6GB
+	prefixPastFloor := fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: ", cacheTrimClaimName, polecatimage.Human(usedPastFloor), polecatimage.Human(cacheTrimNoOpCap))
 
 	t.Run("the Job removed none of the plan", func(t *testing.T) {
 		t.Parallel()
@@ -4529,6 +4533,18 @@ func TestCacheTrimNoOpItemNeedsTheJobToHaveRemovedThePlan(t *testing.T) {
 		t.Parallel()
 		f := newCacheTrimPlanCountFixture(t, used, cliReply{stderr: "Error from server (NotFound): pods not found", code: 1})
 		wantNoOpSummary(t, f, prefix+"the removal Job's result line could not be read. "+floor+". "+cacheTrimNoOpOpenSandboxes)
+	})
+
+	t.Run("the Job removed none past what the floor holds", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimPlanCountFixture(t, usedPastFloor, cliReply{stdout: "removed 0 absent 0 kept 1200\n"})
+		wantNoOpSummary(t, f, prefixPastFloor+"the Job removed 0 of 1200 planned files. "+cacheTrimNoOpOpenSandboxes)
+	})
+
+	t.Run("the Job's result line could not be read past what the floor holds", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimPlanCountFixture(t, usedPastFloor, cliReply{stderr: "Error from server (NotFound): pods not found", code: 1})
+		wantNoOpSummary(t, f, prefixPastFloor+"the removal Job's result line could not be read. "+cacheTrimNoOpOpenSandboxes)
 	})
 }
 
