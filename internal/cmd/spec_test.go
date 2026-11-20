@@ -135,7 +135,13 @@ type fakeSpecTown struct {
 	// so a test drives the path where the dispatcher cannot tell a lost count
 	// from a fresh bead (gt-a4cdcd).
 	lockTimeoutHistoryErr error
-	slingRecords          []specSlingRecord
+	// unlabelErrs fails the split label's removal for the bead it names, so a
+	// test drives the path where the stale label cannot be taken off and the
+	// bead has to stay held (gt-71y4v3).
+	unlabelErrs map[string]error
+	// unlabels records each label removal the fake's remove seam made, in order.
+	unlabels     []string
+	slingRecords []specSlingRecord
 	// mu guards the fields the tick's concurrent slings touch (the show
 	// sequence, the sling record, sleeps); the rest run on the tick goroutine.
 	mu sync.Mutex
@@ -204,7 +210,8 @@ func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
 		children: map[string][]specdispatch.Child{}, childErrs: map[string]error{}, showSeq: map[string][]specRead{}, blockers: map[string][]beads.IssueDep{},
 		omThreshold: map[string]float64{}, omThresholdErr: map[string]error{}, omThresholdReads: map[string]int{},
 		aheadComments: map[string][]beads.Comment{}, aheadErr: map[string]error{},
-		lockTimeoutWriteErr: map[string]error{}, contentionWriteErr: map[string]error{}}
+		lockTimeoutWriteErr: map[string]error{}, contentionWriteErr: map[string]error{},
+		unlabelErrs: map[string]error{}}
 	for _, s := range specs {
 		f.specs[s.ID] = s
 	}
@@ -246,11 +253,12 @@ func (f *fakeSpecTown) dropContention(id string) error {
 }
 
 // productionCandidates is the tick's candidate read run through the production
-// board read: specCandidatesWith over specReadyBoardFrom, with the fake's split
-// beads on the split list and its other beads on the ready list. The split
-// route's classification is then the production one, not a copy the fake keeps
-// (gt-4yq0js).
-func (f *fakeSpecTown) productionCandidates(t *testing.T) func() specBoardRead {
+// board read: specCandidatesDropping over specReadyBoardFrom, with the fake's
+// split beads on the split list and its other beads on the ready list, and the
+// split route's trigger applied through the fake's own note and label seams.
+// The split route's classification is then the production one, not a copy the
+// fake keeps (gt-4yq0js, gt-71y4v3). A trigger of 0 drops nothing.
+func (f *fakeSpecTown) productionCandidates(t *testing.T, splitOver float64, dryRun bool) func() specBoardRead {
 	t.Helper()
 	townRoot := specTown(t)
 	notDocked := func(string, string) (bool, string) { return false, "" }
@@ -264,8 +272,40 @@ func (f *fakeSpecTown) productionCandidates(t *testing.T) func() specBoardRead {
 				store.issues = append(store.issues, &issue)
 			}
 		}
-		return specCandidatesWith(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked)
+		var drop specSplitStaleDrop
+		if splitOver > 0 && !dryRun {
+			drop = specSplitStaleDropper(splitOver, false, f.annotateOnce, f.removeLabel)
+		}
+		return specCandidatesDropping(townRoot, 2, func(string) ([]*beads.Issue, error) { return specReadyBoardFrom(store) }, notDocked, nil, drop)
 	}
+}
+
+// annotateOnce is the fake's once-keyed annotate seam: a comment whose key is
+// already on the bead is not written a second time.
+func (f *fakeSpecTown) annotateOnce(id, key, text string) error {
+	for _, n := range f.notes[id] {
+		if strings.HasPrefix(n, key) {
+			return nil
+		}
+	}
+	f.notes[id] = append(f.notes[id], text)
+	return nil
+}
+
+// removeLabel takes a label off a bead and records the write, as production's
+// poolBeadLabelRemove does. A bead whose write the test failed keeps its label.
+func (f *fakeSpecTown) removeLabel(id, label string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.unlabelErrs[id]; err != nil {
+		return err
+	}
+	s := f.specs[id]
+	s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == label })
+	f.specs[id] = s
+	f.labels[id] = slices.DeleteFunc(f.labels[id], func(l string) bool { return l == label })
+	f.unlabels = append(f.unlabels, id+":"+label)
+	return nil
 }
 
 // specDispatchTestInFlight is the fixture's sling cap: above every candidate
@@ -403,6 +443,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			f.specs[id] = s
 			return nil
 		},
+		RemoveLabel: f.removeLabel,
 		// The bead's metadata is the fake's own record: the count a deferred
 		// sling writes is read back by the next tick's fresh read, as bd's
 		// metadata is (gt-a4cdcd).

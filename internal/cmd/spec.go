@@ -2059,6 +2059,9 @@ type specDispatchEnv struct {
 	// comment starting with key, so each kind of note lands once.
 	Annotate func(beadID, key, text string) error
 	AddLabel func(beadID, label string) error
+	// RemoveLabel takes a label off a bead through the same seam AddLabel
+	// writes with: the split route's stale drop uses it (gt-71y4v3).
+	RemoveLabel func(beadID, label string) error
 	// DropTimeoutRetry removes the timeout label and the kill count a sling
 	// killed at its bound left on a bead. A failure of any other kind calls it,
 	// so the dispatcher does not sling that bead again on a kill's retries
@@ -2539,6 +2542,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report.Candidates = len(read.Candidates)
 	report.LabeledFailed = read.LabeledFailed
 	report.Notices = append(report.Notices, read.Retried...)
+	report.Notices = append(report.Notices, read.Notices...)
 	if n := specRespawnHeldNotice(read.RespawnHeld); n != "" {
 		report.Notices = append(report.Notices, n)
 	}
@@ -2550,6 +2554,13 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// reason: the ledger entry is what the dashboard's ready row reads to say
 	// why no seat takes it (gt-4yq0js).
 	for _, c := range read.SplitHeld {
+		// A dry run drops nothing, so a stale label's bead is still on the
+		// held list here; the run says the label is stale rather than reading
+		// it as the hold a writing tick would have dropped (gt-71y4v3).
+		if env.DryRun && specSplitLabelStale(c.Spec.Labels, env.StoryPointSplitOver) {
+			report.Notices = append(report.Notices, specSplitStaleLine(c.Spec.ID, c.Spec.Labels, env.StoryPointSplitOver)+"; a dry run removes nothing")
+			continue
+		}
 		report.Skipped = append(report.Skipped, specDispatchEntry{Bead: c.Spec.ID, Rig: c.Rig, Line: specSplitHeldLine(c.Spec.ID, c.Spec.Labels, env.StoryPointSplitOver)})
 	}
 	// The tick slings at most perTick candidates. The config ceiling wins when
@@ -4257,14 +4268,18 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		specCandidateInputsFor(template, ts.PolecatPool.GetShapeGate(), maxPriority, sd.StoryPointsLintOver(), targetOf, townRigs))
 	// The tick's children read, grouped per rig once the board is known.
 	var children func(beadID string) ([]specdispatch.Child, error)
+	// The split route's trigger, read once: the board read drops a split label
+	// the bead's own estimate has outlived (gt-71y4v3).
+	splitOver := sd.StoryPointsSplitOver()
 	// board is the candidate read both the tick and a held tick take: the ready
 	// rows and their details. retry is the timed-out sling retry, nil on a read
-	// that must write nothing; memo is the verdict memo, nil on the same read.
-	board := func(retry *specTimeoutRetry, memo *specCandidateVerdicts) specBoardRead {
-		read := specCandidatesRetrying(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
+	// that must write nothing; memo is the verdict memo, nil on the same read;
+	// drop is the stale split label's drop, nil on the same read.
+	board := func(retry *specTimeoutRetry, memo *specCandidateVerdicts, drop specSplitStaleDrop) specBoardRead {
+		read := specCandidatesDropping(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 			reads.call()
 			return specReadyBoard(rigPath)
-		}, docked.parkedOrDocked, retry)
+		}, docked.parkedOrDocked, retry, drop)
 		return specBoardDetails(reads, func(rig string) beads.Client {
 			return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 		}, read, memo)
@@ -4289,14 +4304,24 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 					respawnGate: specRespawnGateIn(townRoot),
 				}
 			}
-			read := board(retry, verdicts)
+			// The stale split label's drop (gt-71y4v3): its note and the label
+			// write are the tick's own, so a dry run drops nothing and the
+			// held list reports the stale label instead.
+			var drop specSplitStaleDrop
+			if splitOver > 0 && !dryRun {
+				drop = specSplitStaleDropper(splitOver, false, annotations.annotate, func(id, label string) error {
+					return poolBeadLabelRemove(townRoot, id, label)
+				})
+			}
+			read := board(retry, verdicts, drop)
 			annotations.observe(read)
 			children = specCandidateChildren(townRoot, reads, read.Candidates, verdicts, nil)
 			return read
 		},
 		// A held tick reads the same board with no retry to clear, no memo to
-		// fill and no annotation to observe, so the read writes nothing.
-		HoldCandidates: func() specBoardRead { return board(nil, nil) },
+		// fill, no stale label to drop and no annotation to observe, so the
+		// read writes nothing.
+		HoldCandidates: func() specBoardRead { return board(nil, nil, nil) },
 		HoldFileOnly:   func() bool { return specOperatorHoldOnly(townRoot) },
 		Verdicts:       verdicts,
 		Show: func(id string) (specdispatch.Spec, error) {
@@ -4332,6 +4357,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		Annotate:    annotations.annotate,
 		AddLabel: func(id, label string) error {
 			return poolBeadLabelAdd(townRoot, id, label)
+		},
+		RemoveLabel: func(id, label string) error {
+			return poolBeadLabelRemove(townRoot, id, label)
 		},
 		DropTimeoutRetry: func(id string) error {
 			return beads.NewPinned(resolveBeadDirFromTownRoot(townRoot, id)).Update(id, beads.UpdateOptions{
@@ -4789,6 +4817,9 @@ type specBoardRead struct {
 	// Retried names the beads whose failure label the read cleared so they could
 	// be slung again (specTimedOutRetries). The tick logs them as notices.
 	Retried []string
+	// Notices are the lines the read itself logged: the split route's stale
+	// drop reports what it did with a label there (gt-71y4v3).
+	Notices []string
 	// RespawnHeld names the beads a kill at the bound left labeled whose retries
 	// remain but whose respawn budget is spent, so the read left them labeled
 	// instead of retrying them. The tick reports them once.
@@ -4816,6 +4847,16 @@ func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigSt
 // beads a killed-at-its-bound sling left labeled and whose retries remain: the
 // tick slings such a bead again instead of waiting for a person (gt-vaivp).
 func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry) specBoardRead {
+	return specCandidatesDropping(townRoot, maxPriority, board, rigStatus, retry, nil)
+}
+
+// specCandidatesDropping is specCandidatesRetrying with drop, the tick's
+// removal of a split label the bead's own estimate has outlived (gt-71y4v3).
+// The drop runs before the bead is classified, so a stale bead is a candidate
+// of this tick like any other and a label that is not stale stays held as
+// before. nil drops nothing, which is what a tick that must write nothing and
+// a test that reads the board alone pass.
+func specCandidatesDropping(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string), retry *specTimeoutRetry, drop specSplitStaleDrop) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -4910,6 +4951,25 @@ func specCandidatesRetrying(townRoot string, maxPriority int, board specBoard, r
 					read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s and %s for a retry of a contention pause that is over", s.ID, specdispatch.DispatchFailedLabel, specdispatch.ContentionLabel))
 				} else {
 					read.Retried = append(read.Retried, fmt.Sprintf("%s: cleared %s for a retry of a sling killed at its bound", s.ID, specdispatch.DispatchFailedLabel))
+				}
+			}
+			// A split label the bead's own estimate has outlived is stale: a
+			// bird re-estimated the bead under the trigger and left the label,
+			// which now holds the bead off the board for no reason (gt-07z6ay).
+			// The drop leaves the route's note and takes the label off before
+			// the bead is classified, so a stale bead is offered to this tick's
+			// candidate scan; a label that is not stale, and one whose drop
+			// failed, stays on and the bead stays held (gt-71y4v3).
+			if drop != nil && s.HasLabel(specdispatch.SplitLabel) && specdispatch.NotWorkBead(s) == "" {
+				dropped, line, dropErr := drop(issue)
+				if line != "" {
+					read.Notices = append(read.Notices, line)
+				}
+				if dropErr != nil {
+					read.Errors = append(read.Errors, fmt.Sprintf("%s: %v", s.ID, dropErr))
+				}
+				if dropped {
+					s.Labels = slices.DeleteFunc(s.Labels, func(l string) bool { return l == specdispatch.SplitLabel })
 				}
 			}
 			// The split route's record is reported as the route's own hold
