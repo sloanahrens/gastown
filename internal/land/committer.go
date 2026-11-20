@@ -60,9 +60,11 @@ func RevertEnv() []string {
 }
 
 // RevertGit opens dir as the Git a revert commit is made through, with
-// RevertEnv set on every call (gt-vuv2n).
+// RevertEnv set on every call (gt-vuv2n) and the repository's local hooks off,
+// so a hook the target tracks cannot fail the revert (gt-ha8jsc). A push keeps
+// its pre-push hook: WithoutLocalHooks leaves a push alone.
 func RevertGit(dir string) *git.Git {
-	return git.NewGit(dir).WithEnv(RevertEnv())
+	return git.NewGit(dir).WithEnv(RevertEnv()).WithoutLocalHooks()
 }
 
 // CommittingGit opens dir as the Git a landing's reads are made through, with
