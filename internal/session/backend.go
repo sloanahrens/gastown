@@ -68,6 +68,12 @@ type SpawnSpec struct {
 	Branch      string // the polecat branch, created on the host before Prepare
 	RepoURL     string // the sandbox-side clone URL (Forgejo through the profile's Forgejo host)
 	HostWorkDir string // the host worktree; the tmux backend's WorkDir
+	// LocalExcludePatterns are the Gas Town local exclude patterns the sandbox
+	// clone writes into .git/info/exclude. The caller fills them from
+	// rig.LocalExcludePatterns(); the session package must not import
+	// internal/rig, which pulls the beads and doltserver closure into every
+	// package that links a session test binary.
+	LocalExcludePatterns []string
 	// WorkBeadID is the bead the polecat was slung, "" when it was not slung
 	// one. The spawn stamps it with the stored prompt's hash, joining a
 	// landing's rejection to the prompt version its author had (gt-2lu00).

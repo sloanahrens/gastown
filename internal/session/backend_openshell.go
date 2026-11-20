@@ -84,6 +84,13 @@ const sandboxCloneDepth = 1000
 // $2 the redirect target.
 const redirectScript = `mkdir -p "$1/.beads" && printf '%s\n' "$2" > "$1/.beads/redirect"`
 
+// excludeScript appends the Gas Town local exclude patterns to the clone's
+// .git/info/exclude, so a seat ignores .runtime/, .claude/ and .beads/ even
+// where the repository's own .gitignore does not name them. $1 is the worktree
+// and $2 the newline-joined patterns; the whole list arrives as one argument,
+// so no pattern is spliced into the script text.
+const excludeScript = `mkdir -p "$1/.git/info" && printf '%s\n' "$2" >> "$1/.git/info/exclude"`
+
 // sandboxHolderSession names the tmux session the main process creates to
 // start the server. It must never equal a polecat session id: the session
 // start creates that one on this server, and tmux refuses a duplicate.
@@ -1097,8 +1104,17 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 		return err
 	}
 	if err := spec.Trace.Phase("clone", func() error {
+		// Refuse an unwired spec before the clone: an empty list would write an
+		// empty exclude file, leaving the runtime paths committable, which is
+		// the failure this step exists to prevent.
+		if len(spec.LocalExcludePatterns) == 0 {
+			return fmt.Errorf("writing local exclude patterns: the spawn spec lists none")
+		}
 		if err := b.run(ctx, spec.Session, "sh", "-c", cloneScript, "sh", spec.Branch, spec.RepoURL, workDir, strconv.Itoa(sandboxCloneDepth)); err != nil {
 			return fmt.Errorf("cloning %s: %w", spec.Branch, err)
+		}
+		if err := b.run(ctx, spec.Session, "sh", "-c", excludeScript, "sh", workDir, strings.Join(spec.LocalExcludePatterns, "\n")); err != nil {
+			return fmt.Errorf("writing local exclude patterns: %w", err)
 		}
 		return nil
 	}); err != nil {
