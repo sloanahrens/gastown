@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/bdskew"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
@@ -524,6 +525,72 @@ func TestPairReadyUnreadableSkewRaisesNoReadyItem(t *testing.T) {
 	assert.Contains(t, it.Summary, "green/"+pairGreen12, "the item does not name the commit")
 	assert.Contains(t, it.Summary, "the clone cannot read that commit", "the item does not name the read that failed")
 	assert.Contains(t, it.Summary, "no roll starts", "the item does not say that no roll starts")
+}
+
+// pairBdTree is the listing git prints for bd's migrations directory at a commit
+// whose migrations run from 0001 to last: bd's three non-migration files beside
+// them, as the pinned bd commit holds them.
+func pairBdTree(last int) []string {
+	names := []string{"README.md", "ignored", "nondeterminism-allowlist.txt"}
+	for n := 1; n <= last; n++ {
+		names = append(names, fmt.Sprintf("%04d_migration.up.sql", n))
+	}
+	return names
+}
+
+// pairTreeRun is the git seam under the production lister: ls-tree prints names
+// under the migrations directory, NUL-terminated as bdskew reads them. Any other
+// git call fails the test.
+func pairTreeRun(t *testing.T, names []string) func(context.Context, string, ...string) ([]byte, error) {
+	t.Helper()
+	var out strings.Builder
+	for _, name := range names {
+		out.WriteString(bdskew.MigrationsDir + "/" + name + "\x00")
+	}
+	return func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if !assert.Contains(t, args, "ls-tree", "the lister asked git for something other than a listing: %v", args) {
+			return nil, errors.New("not a listing")
+		}
+		return []byte(out.String()), nil
+	}
+}
+
+// TestPairReadyReadsTheLevelOfARealBdTree: the level of the real bd tree, read
+// through the pass, is 67 with bd's three non-migration files beside it, so the
+// pair at a database of 67 raises the ready item and no unreadable item. Removing
+// README.md from the skip list in bdskew turns it red, since the file then has no
+// leading number. Changing the pass to ignore the level turns it red too.
+func TestPairReadyReadsTheLevelOfARealBdTree(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.check.skew = pairReadySkewReadsAt(fx.town, pairTreeRun(t, pairBdTree(67)), func(context.Context) (pairReadySchemaStore, error) {
+		return fakeSkewStore{level: 67}, nil
+	})
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a real bd tree at level 67 against a database at 67 raised %v; want the ready item only", pairSkewItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+}
+
+// TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnlistedName: the same bd tree
+// with one more unnumbered name is not a known non-migration file, so the pass
+// raises the unreadable item naming that file and no ready item.
+func TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnlistedName(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	names := append(pairBdTree(67), "notes.txt")
+	fx.check.skew = pairReadySkewReadsAt(fx.town, pairTreeRun(t, names), func(context.Context) (pairReadySchemaStore, error) {
+		return fakeSkewStore{level: 67}, nil
+	})
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a bd tree with an unlisted name raised %v; want the unreadable item only", pairSkewItemKinds(items))
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "notes.txt", "the item does not name the entry it refused")
 }
 
 // pairReadyTownDaemon is a daemon over town whose git seam records every
