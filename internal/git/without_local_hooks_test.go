@@ -251,10 +251,23 @@ func TestWithoutLocalHooksCoversTimedStdinMergeCheck(t *testing.T) {
 	}
 }
 
-// unhookedRunSubcommands returns "file:line subcommand" for every call of g.run
-// or g.runOutput in src whose first literal arguments name a git subcommand that
-// is neither in hooked nor push. A call whose first argument is not a string
-// literal (args...) is another scan's: it is skipped, not reported.
+// runHelperArgvStart is the index of the first argument each run helper hands
+// to git: the ones before it are the helper's own parameters (runWithTimeout's
+// timeout, runWithStdin's stdin text), not argv.
+var runHelperArgvStart = map[string]int{
+	"run":                  0,
+	"runOutput":            0,
+	"runWithTimeout":       1,
+	"runWithEnv":           0,
+	"runWithEnvAndTimeout": 0,
+	"runWithStdin":         1,
+	"runMergeCheck":        0,
+}
+
+// unhookedRunSubcommands returns "file:line subcommand" for every call of a run
+// helper in src whose literal argv names a git subcommand that is neither in
+// hooked nor push. A call whose argv is not literal (args...) is another scan's:
+// it is skipped, not reported.
 func unhookedRunSubcommands(t *testing.T, name string, src []byte, hooked map[string]bool) []string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -269,11 +282,15 @@ func unhookedRunSubcommands(t *testing.T, name string, src []byte, hooked map[st
 			return true
 		}
 		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || (sel.Sel.Name != "run" && sel.Sel.Name != "runOutput") {
+		if !ok {
+			return true
+		}
+		start, ok := runHelperArgvStart[sel.Sel.Name]
+		if !ok || start > len(call.Args) {
 			return true
 		}
 		var lits []string
-		for _, a := range call.Args {
+		for _, a := range call.Args[start:] {
 			lit, ok := a.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
 				break
@@ -290,12 +307,6 @@ func unhookedRunSubcommands(t *testing.T, name string, src []byte, hooked map[st
 		return true
 	})
 	return missing
-}
-
-// runHelpers are the methods that hand their argv to hookArgs.
-var runHelpers = map[string]bool{
-	"run": true, "runOutput": true, "runWithTimeout": true, "runWithEnv": true,
-	"runWithEnvAndTimeout": true, "runWithStdin": true, "runMergeCheck": true,
 }
 
 // subcommandShaped matches a git subcommand name: lower case, digits and
@@ -367,9 +378,11 @@ func unhookedSliceSubcommands(t *testing.T, name string, src []byte, hooked map[
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && runHelpers[sel.Sel.Name] {
-					for _, arg := range call.Args {
-						check(arg, true)
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if _, isHelper := runHelperArgvStart[sel.Sel.Name]; isHelper {
+						for _, arg := range call.Args {
+							check(arg, true)
+						}
 					}
 				}
 			}
@@ -394,6 +407,14 @@ func TestHookedSubcommandsCoverEverySubcommandThePackageSends(t *testing.T) {
 		got := unhookedRunSubcommands(t, "x.go", src, map[string]bool{"checkout": true})
 		if len(got) != 1 || !strings.HasSuffix(got[0], " pull") {
 			t.Fatalf("unhooked = %q, want exactly pull (checkout is in the set, push and args... are skipped)", got)
+		}
+	})
+
+	t.Run("the scan reaches the timed, stdin and merge-check helpers", func(t *testing.T) {
+		src := []byte("package git\nfunc f(g *Git) {\n\tg.runWithTimeout(time.Second, \"gc\")\n\tg.runWithStdin(d, \"patch-id\", \"--stable\")\n\tg.runMergeCheck(\"merge\", \"-m\", \"m\")\n\tg.runWithTimeout(time.Second, \"push\")\n}\n")
+		got := unhookedRunSubcommands(t, "x.go", src, map[string]bool{"merge": true})
+		if len(got) != 2 || !strings.HasSuffix(got[0], " gc") || !strings.HasSuffix(got[1], " patch-id") {
+			t.Fatalf("unhooked = %q, want gc (timed) and patch-id (stdin); merge is in the set and push is allowed", got)
 		}
 	})
 
