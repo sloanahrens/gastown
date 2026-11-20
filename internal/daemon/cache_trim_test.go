@@ -4428,6 +4428,66 @@ func TestCacheTrimNoOpSummaryAllowsForOpenSandboxPaths(t *testing.T) {
 	}
 }
 
+// cacheTrimFloorYoungSize is the build-cache unit in the floor fixture that is
+// younger than the age floor, so the plan reports it as Protected and the 10GB
+// cap cannot remove it: it renders as 13.6GB.
+const cacheTrimFloorYoungSize = 14602889216
+
+// newCacheTrimFloorFixture trims a listing of one old 1GB unit, which the plan
+// removes, and one unit of cacheTrimFloorYoungSize younger than the floor, under
+// the 10GB cap in apply mode, answering the post-trim du with used.
+func newCacheTrimFloorFixture(t *testing.T, used int64) *cacheTrimFixture {
+	t.Helper()
+	listing := fmt.Sprintf(`[`+
+		`{"path":"gocache/aa/old","cache":"build","size":1073741824,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"},`+
+		`{"path":"gocache/bb/young","cache":"build","size":%d,"atime":"2026-10-29T04:00:00Z","mtime":"2026-10-29T04:00:00Z"}]`,
+		cacheTrimFloorYoungSize)
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)})
+	f.answerFrom(cacheTrimListVerb, cliReply{stdout: listing})
+	return f
+}
+
+// wantNoOpSummary runs the pass on f and fails unless its one item says want.
+func wantNoOpSummary(t *testing.T, f *cacheTrimFixture, want string) {
+	t.Helper()
+	f.d.runDiskMaintenance()
+	items := f.noOpItems(t)
+	if len(items) != 1 {
+		t.Fatalf("the collector yielded %d items, want one for a claim over the cap: %+v\nlog: %s", len(items), items, f.log.String())
+	}
+	if got := items[0].Summary; got != want {
+		t.Errorf("item summary = %q, want %q", got, want)
+	}
+}
+
+// TestCacheTrimNoOpItemNamesTheFloor is the bead's first box: a completed trim
+// that leaves the claim over twice the cap by no more than the plan's Protected
+// bytes says the age floor holds the claim there, not that the Job ran the wrong
+// helper.
+func TestCacheTrimNoOpItemNamesTheFloor(t *testing.T) {
+	t.Parallel()
+	for _, used := range []int64{
+		23192823808, // 21.6GB: over the cap by less than the floor's 13.6GB
+		cacheTrimNoOpCap + cacheTrimFloorYoungSize, // over by exactly the floor's bytes
+	} {
+		want := fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: %s of it is younger than the age floor and cannot be removed yet; the cap is below what the seats write inside the floor",
+			cacheTrimClaimName, polecatimage.Human(used), polecatimage.Human(cacheTrimNoOpCap), polecatimage.Human(cacheTrimFloorYoungSize))
+		wantNoOpSummary(t, newCacheTrimFloorFixture(t, used), want)
+	}
+}
+
+// TestCacheTrimNoOpItemKeepsTheHelperText is the bead's second box: a claim over
+// the cap by more than the plan's Protected bytes keeps the wrong-helper text,
+// whether the floor holds some of the claim or the plan protected nothing.
+func TestCacheTrimNoOpItemKeepsTheHelperText(t *testing.T) {
+	t.Parallel()
+	const used = 25 << 30 // 25.0GB
+	want := fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: the Job may have run the wrong helper. %s",
+		cacheTrimClaimName, polecatimage.Human(used), polecatimage.Human(cacheTrimNoOpCap), cacheTrimNoOpOpenSandboxes)
+	wantNoOpSummary(t, newCacheTrimFloorFixture(t, used), want)
+	wantNoOpSummary(t, newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)}), want)
+}
+
 // jobRuns reads the cache trim's runs from the town's job ledger, the file the
 // trim writes through the production ledger the job list reads.
 func (f *cacheTrimFixture) jobRuns(t *testing.T) []jobledger.Run {
