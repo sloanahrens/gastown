@@ -73,7 +73,9 @@ sp:, sp-rung: and sp-minutes: labels, and a comment says why. The command
 exits 0.
 
 --dry-run prints the labels and the note it would write and writes nothing.
---force estimates again even when the hash matches.`,
+--force estimates again even when the hash matches; the estimate reuses the
+embed and Jev minutes that earlier estimate logged instead of asking those
+inputs again.`,
 	Args:         cobra.ExactArgs(1),
 	SilenceUsage: true,
 	RunE:         runSpecEstimate,
@@ -220,6 +222,15 @@ func specEstimateBead(ctx context.Context, beadID string, store specEstimateStor
 	deps, err := run.Deps()
 	if err != nil {
 		return specEstimateOutcome{}, fmt.Errorf("estimating %s: %w", beadID, err)
+	}
+	// A bead whose latest note already names this text was estimated before,
+	// the case --force reaches: the run reuses the embed and Jev minutes that
+	// estimate logged instead of asking those inputs again, so a forced
+	// re-estimate returns the same minutes when the text and weights are
+	// unchanged. New text has no line for its hash, so it gets no Prior and
+	// reads no log.
+	if estimatedBefore {
+		deps.Prior = specEstimatePrior(deps.TownRoot)
 	}
 	estCtx, cancel := context.WithTimeout(ctx, specEstimateTimeout)
 	defer cancel()
