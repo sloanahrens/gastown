@@ -67,8 +67,8 @@ type ImagePinState struct {
 	Err error
 	// AgeErr is the age read's failure for this pin, recorded by
 	// fillImagePinAges. The pin's commit count and tip were read, so the
-	// planner's commit-count rules still apply to it. The attention item that
-	// surfaces an AgeErr is part two, gt-0hb3sx.
+	// planner's commit-count rules still apply to it, and it raises an
+	// image-pins-unreadable item naming the age it could not read (gt-0hb3sx).
 	AgeErr error
 }
 
@@ -111,10 +111,12 @@ type ImagePinPlan struct {
 // also files once its commit is imagePinsFileAge older than the tip, whatever
 // its count. A pin whose read failed never files and is named in Unreadable,
 // and raises image-pins-unreadable: its distance is unknown, so it is never
-// treated as fresh. A pin imagePinsStaleBehind commits behind or more raises
-// image-pins-stale. These pin items are raised whether or not a refresh bead is
-// open. An open refresh bead blocks a second file and raises
-// image-pins-refresh-stuck once it is older than imagePinsRefreshStuck. A bead
+// treated as fresh. A pin whose age read failed keeps its count rules and
+// raises image-pins-unreadable naming its unreadable age. A pin
+// imagePinsStaleBehind commits behind or more raises image-pins-stale. These
+// pin items are raised whether or not a refresh bead is open. An open refresh
+// bead blocks a second file and raises image-pins-refresh-stuck once it is
+// older than imagePinsRefreshStuck. A bead
 // with no OpenedAt raises that item too: an age that cannot be shown to be
 // under the bound is not fresh.
 func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Time) ImagePinPlan {
@@ -138,6 +140,16 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 				Pin:      pin.Name,
 				Severity: attention.SeverityMedium,
 				Summary:  fmt.Sprintf("image pin %s is %d commits behind its source's origin/main, at or over the %d-commit stale bound", pin.Name, pin.Behind, imagePinsStaleBehind),
+			})
+		}
+		if pin.AgeErr != nil {
+			// The pin's count was read, so the rules above and below still
+			// judge it; only its age is unknown, and the item says so.
+			plan.Items = append(plan.Items, ImagePinItem{
+				Key:      imagePinsUnreadableKey,
+				Pin:      pin.Name,
+				Severity: attention.SeverityMedium,
+				Summary:  fmt.Sprintf("image pin %s: its age could not be read, so only its commit count rules apply", pin.Name),
 			})
 		}
 		// A source that moves rarely ages past the guard's bound with few
