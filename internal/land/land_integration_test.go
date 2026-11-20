@@ -17,6 +17,10 @@ import (
 // The unit tier lands through gitfake. These run the same landings through
 // real git: the clone, the throwaway worktree, the merge, the lease push and
 // the read-back.
+//
+// The integration tag selects this tier, so a run must carry it (gt-sjwr7a):
+//
+//	go test -tags integration ./internal/land -run TestIntegrationLandTrackedHookMerge -count=1
 
 func gitT(t *testing.T, dir string, args ...string) string {
 	t.Helper()
@@ -185,6 +189,57 @@ func TestIntegrationLandUnionMergesTwoAppends(t *testing.T) {
 	rej := g.assertRejected(t, err, RejectConflict, LabelRework)
 	if len(rej.Conflicting) != 1 || rej.Conflicting[0] != "plain.txt" {
 		t.Errorf("control conflicting = %v, want [plain.txt]", rej.Conflicting)
+	}
+}
+
+// trackedHooksOnMain commits .githooks scripts that each exit 1 on main and
+// pushes it, returning the new main tip: the local hooks a landing must not
+// run. The beads rig tracks these (bd hooks) and, in a pod, bd is the gtwrap
+// wrapper that refuses a call with no BEADS_DIR, so a merge that runs one ends
+// "Not committing merge" and fails the landing (gt-sjwr7a, be-4sgb).
+func trackedHooksOnMain(t *testing.T, f *landFixture) string {
+	t.Helper()
+	seed := filepath.Join(filepath.Dir(f.origin), "seed")
+	gitT(t, seed, "checkout", "-q", "main")
+	gitT(t, seed, "pull", "-q", "--ff-only", "origin", "main")
+	if err := os.MkdirAll(filepath.Join(seed, ".githooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pre-commit", "post-merge", "prepare-commit-msg"} {
+		rel := filepath.Join(".githooks", name)
+		if err := os.WriteFile(filepath.Join(seed, rel), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitT(t, seed, "add", rel)
+		gitT(t, seed, "update-index", "--chmod=+x", rel)
+	}
+	gitT(t, seed, "commit", "-q", "-m", "main: tracked hooks that exit 1")
+	gitT(t, seed, "push", "-q", "origin", "main")
+	return gitT(t, seed, "rev-parse", "HEAD")
+}
+
+// TestIntegrationLandTrackedHookMerge: the landing's merge runs with the
+// target's local hooks off, so a hook the repository tracks cannot fail it.
+// The worktree is cut from main, whose tree carries the tracked .githooks and
+// whose clone points core.hooksPath at them; prepare-commit-msg exits 1, so a
+// merge that ran it would end "Not committing merge" and never move the target
+// (gt-sjwr7a, be-4sgb).
+func TestIntegrationLandTrackedHookMerge(t *testing.T) {
+	t.Parallel()
+
+	f := newRealLandFixture(t)
+	f.base = trackedHooksOnMain(t, f)
+	gitT(t, f.repo, "config", "core.hooksPath", ".githooks")
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("Land in a repo whose tracked hooks each exit 1: %v", err)
+	}
+	if got := f.originMain(); got != res.LandedCommit {
+		t.Fatalf("origin/main = %s, want landed %s", got, res.LandedCommit)
+	}
+	if parents := f.parents(res.LandedCommit); len(parents) != 2 || parents[0] != f.base || parents[1] != f.work.Head {
+		t.Fatalf("landed commit parents = %v, want [%s %s]", parents, f.base, f.work.Head)
 	}
 }
 
