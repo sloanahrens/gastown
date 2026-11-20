@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -240,5 +241,34 @@ func TestTickEffChunkReadOncePerTick(t *testing.T) {
 	}
 	if got := counts[cands[3].Spec.ID]; got != 1 {
 		t.Errorf("%s read %d times; want once, the second ask served from memory", cands[3].Spec.ID, got)
+	}
+}
+
+// Nine wanted candidates asked for in order read eight, then the ninth alone:
+// the chunk's read does not cover the boundary. A chunk size of nine reads all
+// nine once and turns this red (gt-7fv8vp).
+func TestTickEffChunkBoundary(t *testing.T) {
+	t.Parallel()
+	cands := specCandidateBoardRead(t, specCandidateFixture()).Candidates[:9]
+	counts := map[string]int{}
+	spy := &chunkReadSpy{counts: counts}
+	var sizes []int
+	read := func(dir string, ids []string) (map[string][]*beads.Issue, error) {
+		sizes = append(sizes, len(ids))
+		return spy.read(dir, ids)
+	}
+	children := specCandidateChildren(t.TempDir(), newSpecTickReads(), cands, nil, read)
+	for _, c := range cands {
+		if _, err := children(c.Spec.ID); err != nil {
+			t.Fatalf("children %s: %v", c.Spec.ID, err)
+		}
+	}
+	if want := []int{8, 1}; !slices.Equal(sizes, want) {
+		t.Errorf("read sizes = %v; want %v: the ninth id costs its own read", sizes, want)
+	}
+	for _, c := range cands {
+		if counts[c.Spec.ID] != 1 {
+			t.Errorf("%s read %d times; want once across the two chunks", c.Spec.ID, counts[c.Spec.ID])
+		}
 	}
 }
