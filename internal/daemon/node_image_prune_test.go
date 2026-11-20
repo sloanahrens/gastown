@@ -151,3 +151,42 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 		})
 	}
 }
+
+// nodeImagePruneNoRowJob is the job the row beads (gt-08qnmf, gt-i8zplo,
+// gt-eg0ji0) record a node prune run under; until they land, none exists.
+const nodeImagePruneNoRowJob = "node_image_prune"
+
+// TestNodeImagePruneOnceAppendsNoRow: a dry run, an apply of removed 1 failed 1
+// and a runner error leave no node_image_prune ledger row; the error is returned.
+func TestNodeImagePruneOnceAppendsNoRow(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name, logs, fail, wantErr string
+		apply                     bool
+	}{
+		{name: "dry run", logs: nodePruneLogDry},
+		{name: "apply removed 1 failed 1", apply: true, logs: "node-prune: removed sha256:bbb gastown-polecat\n" +
+			"node-prune: applied removed 1 failed 1\n"},
+		{name: "runner error", logs: nodePruneLogDry, fail: "Apply", wantErr: "Apply refused"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+			kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(row.logs), fail: row.fail}
+
+			err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, row.apply, nodeImagePruneStart)
+
+			if row.wantErr != "" {
+				require.ErrorContains(t, err, row.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			ledger, err := jobledger.NewLedger(r.town)
+			require.NoError(t, err)
+			runs, err := ledger.Tail(nodeImagePruneNoRowJob, 10)
+			require.NoError(t, err)
+			assert.Empty(t, runs, "nodeImagePruneOnce appended a %s ledger row of its own", nodeImagePruneNoRowJob)
+		})
+	}
+}
