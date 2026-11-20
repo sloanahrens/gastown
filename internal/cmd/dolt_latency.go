@@ -58,6 +58,10 @@ type doltLatencySummary struct {
 	P50     time.Duration
 	P95     time.Duration
 	Max     time.Duration
+	// Slowest is the step whose sample was the run's max, the first such step
+	// in mix order. summarizeDoltLatency leaves it empty: a list of durations
+	// carries no step names.
+	Slowest string
 }
 
 // summarizeDoltLatency sorts a copy of samples and reads p50, p95 and max by
@@ -98,10 +102,10 @@ type doltLatencyRun struct {
 	Rounds   int
 }
 
-// runDoltLatencyProbe runs the mix Rounds times and prints the summary. now is
+// runDoltLatencyProbe runs the mix Rounds times and returns the summary. now is
 // the clock each step is timed on. A connection failure, a failed step and an
-// empty run each return an error and print no summary.
-func runDoltLatencyProbe(ctx context.Context, w io.Writer, dial doltLatencyDialer, now func() time.Time, run doltLatencyRun) error {
+// empty run each return an error and no summary.
+func runDoltLatencyProbe(ctx context.Context, dial doltLatencyDialer, now func() time.Time, run doltLatencyRun) (doltLatencySummary, error) {
 	addr := fmt.Sprintf("%s:%d", run.Host, run.Port)
 	// Opening a connection also reads the schema level, so a server that
 	// accepts the socket and then stalls must not hang the probe. The dial
@@ -111,7 +115,7 @@ func runDoltLatencyProbe(ctx context.Context, w io.Writer, dial doltLatencyDiale
 	conn, err := dial(dialCtx, run.Host, run.Port, run.Database)
 	cancelDial()
 	if err != nil {
-		return fmt.Errorf("cannot connect to %s (database %s): %w", addr, run.Database, err)
+		return doltLatencySummary{}, fmt.Errorf("cannot connect to %s (database %s): %w", addr, run.Database, err)
 	}
 	// The summary is already decided by the time the connection closes, so a
 	// close error does not change the result.
@@ -120,6 +124,8 @@ func runDoltLatencyProbe(ctx context.Context, w io.Writer, dial doltLatencyDiale
 	// A count below one runs no rounds, so the empty series is refused below. The
 	// clamp keeps a negative count from making the buffer negative.
 	samples := make([]time.Duration, 0, max(run.Rounds, 0)*len(doltLatencyMix))
+	var slowest string
+	var slowestAt time.Duration
 	for round := 0; round < run.Rounds; round++ {
 		for _, step := range doltLatencyMix {
 			stepCtx, cancel := context.WithTimeout(ctx, doltLatencyQueryTimeout)
@@ -128,22 +134,43 @@ func runDoltLatencyProbe(ctx context.Context, w io.Writer, dial doltLatencyDiale
 			elapsed := now().Sub(start)
 			cancel()
 			if err != nil {
-				return fmt.Errorf("query %s failed on %s: %w", step.name, addr, err)
+				return doltLatencySummary{}, fmt.Errorf("query %s failed on %s: %w", step.name, addr, err)
 			}
 			samples = append(samples, elapsed)
+			// Strictly greater keeps the first step at the max, so two equally
+			// slow steps always name the earlier one.
+			if slowest == "" || elapsed > slowestAt {
+				slowest, slowestAt = step.name, elapsed
+			}
 		}
 	}
 
 	sum, err := summarizeDoltLatency(samples)
 	if err != nil {
-		return err
+		return doltLatencySummary{}, err
 	}
+	sum.Slowest = slowest
+	return sum, nil
+}
+
+// printDoltLatencySummary writes the run and its summary in the command's fixed
+// text form.
+func printDoltLatencySummary(w io.Writer, run doltLatencyRun, sum doltLatencySummary) {
 	fmt.Fprintf(w, "host %s\n", run.Host)
 	fmt.Fprintf(w, "port %d\n", run.Port)
 	fmt.Fprintf(w, "samples %d\n", sum.Samples)
 	fmt.Fprintf(w, "p50 %s\n", sum.P50)
 	fmt.Fprintf(w, "p95 %s\n", sum.P95)
 	fmt.Fprintf(w, "max %s\n", sum.Max)
+}
+
+// doltLatencyTo runs the probe and prints its summary to w.
+func doltLatencyTo(w io.Writer, dial doltLatencyDialer, now func() time.Time, run doltLatencyRun) error {
+	sum, err := runDoltLatencyProbe(context.Background(), dial, now, run)
+	if err != nil {
+		return err
+	}
+	printDoltLatencySummary(w, run, sum)
 	return nil
 }
 
@@ -244,7 +271,7 @@ func init() {
 }
 
 func runDoltLatency(cmd *cobra.Command, args []string) error {
-	return runDoltLatencyProbe(context.Background(), cmd.OutOrStdout(), dialBeadsLatency, time.Now, doltLatencyRun{
+	return doltLatencyTo(cmd.OutOrStdout(), dialBeadsLatency, time.Now, doltLatencyRun{
 		Host:     doltLatencyHost,
 		Port:     doltLatencyPort,
 		Database: doltLatencyDatabase,

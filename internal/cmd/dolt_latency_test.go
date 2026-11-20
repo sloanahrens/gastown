@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strconv"
@@ -183,9 +182,8 @@ func TestRunDoltLatencyRunsFixedMixThroughInjectedConnection(t *testing.T) {
 		1 * time.Millisecond, 2 * time.Millisecond, 3 * time.Millisecond,
 	}, failAt: -1}
 	var dialed []string
-	var out bytes.Buffer
 
-	err := runDoltLatencyProbe(context.Background(), &out, fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
+	sum, err := runDoltLatencyProbe(context.Background(), fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
 		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: 2,
 	})
 	if err != nil {
@@ -209,10 +207,12 @@ func TestRunDoltLatencyRunsFixedMixThroughInjectedConnection(t *testing.T) {
 	}
 
 	// Samples are 1,2,3,1,2,3 ms. Sorted: 1,1,2,2,3,3. p50 rank 3 = 2ms,
-	// p95 rank 6 = 3ms, max = 3ms.
-	want := "host 127.0.0.1\nport 3307\nsamples 6\np50 2ms\np95 3ms\nmax 3ms\n"
-	if out.String() != want {
-		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
+	// p95 rank 6 = 3ms, max = 3ms, and the count step is the slowest.
+	if sum.Samples != 6 || sum.P50 != 2*time.Millisecond || sum.P95 != 3*time.Millisecond || sum.Max != 3*time.Millisecond {
+		t.Fatalf("summary = %+v; want samples 6, p50 2ms, p95 3ms, max 3ms", sum)
+	}
+	if sum.Slowest != "count" {
+		t.Errorf("slowest step = %q; want count", sum.Slowest)
 	}
 }
 
@@ -225,9 +225,7 @@ func TestRunDoltLatencyBoundsTheDial(t *testing.T) {
 		_, bounded = ctx.Deadline()
 		return conn, nil
 	}
-	var out bytes.Buffer
-
-	err := runDoltLatencyProbe(context.Background(), &out, dial, clock.now, doltLatencyRun{
+	_, err := runDoltLatencyProbe(context.Background(), dial, clock.now, doltLatencyRun{
 		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: 1,
 	})
 	if err != nil {
@@ -242,10 +240,9 @@ func TestRunDoltLatencyRefusesConnectionFailure(t *testing.T) {
 	t.Parallel()
 	clock := &fakeLatencyClock{t: time.Unix(1_700_000_000, 0)}
 	var dialed []string
-	var out bytes.Buffer
 	dialErr := errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
 
-	err := runDoltLatencyProbe(context.Background(), &out, fakeLatencyDialer(nil, dialErr, &dialed), clock.now, doltLatencyRun{
+	_, err := runDoltLatencyProbe(context.Background(), fakeLatencyDialer(nil, dialErr, &dialed), clock.now, doltLatencyRun{
 		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: 5,
 	})
 	if err == nil {
@@ -257,9 +254,6 @@ func TestRunDoltLatencyRefusesConnectionFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "cannot connect to 127.0.0.1:3307") {
 		t.Errorf("error %q does not name the host and port", err)
 	}
-	if out.Len() != 0 {
-		t.Errorf("printed output on a failed connection: %q", out.String())
-	}
 }
 
 func TestRunDoltLatencyRefusesNegativeRounds(t *testing.T) {
@@ -267,16 +261,12 @@ func TestRunDoltLatencyRefusesNegativeRounds(t *testing.T) {
 	clock := &fakeLatencyClock{t: time.Unix(1_700_000_000, 0)}
 	conn := &fakeLatencyConn{clock: clock, failAt: -1}
 	var dialed []string
-	var out bytes.Buffer
 
-	err := runDoltLatencyProbe(context.Background(), &out, fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
+	_, err := runDoltLatencyProbe(context.Background(), fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
 		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: -1,
 	})
 	if !errors.Is(err, errNoDoltLatencySamples) {
 		t.Fatalf("negative-rounds run error = %v; want errNoDoltLatencySamples", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("printed a summary for a negative-rounds run: %q", out.String())
 	}
 }
 
@@ -285,16 +275,12 @@ func TestRunDoltLatencyRefusesRunWithNoSamples(t *testing.T) {
 	clock := &fakeLatencyClock{t: time.Unix(1_700_000_000, 0)}
 	conn := &fakeLatencyConn{clock: clock, failAt: -1}
 	var dialed []string
-	var out bytes.Buffer
 
-	err := runDoltLatencyProbe(context.Background(), &out, fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
+	_, err := runDoltLatencyProbe(context.Background(), fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
 		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: 0,
 	})
 	if !errors.Is(err, errNoDoltLatencySamples) {
 		t.Fatalf("zero-round run error = %v; want errNoDoltLatencySamples", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("printed a summary for a run with no samples: %q", out.String())
 	}
 }
 
@@ -304,9 +290,8 @@ func TestRunDoltLatencyRefusesFailedStep(t *testing.T) {
 	// The second step (the lookup) fails on the first round.
 	conn := &fakeLatencyConn{clock: clock, costs: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}, failAt: 1}
 	var dialed []string
-	var out bytes.Buffer
 
-	err := runDoltLatencyProbe(context.Background(), &out, fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
+	_, err := runDoltLatencyProbe(context.Background(), fakeLatencyDialer(conn, nil, &dialed), clock.now, doltLatencyRun{
 		Host: "127.0.0.1", Port: 3307, Database: "beads", Rounds: 1,
 	})
 	if !errors.Is(err, errLatencyRun) {
@@ -314,9 +299,6 @@ func TestRunDoltLatencyRefusesFailedStep(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "query lookup failed") {
 		t.Errorf("error %q does not name the failed step", err)
-	}
-	if out.Len() != 0 {
-		t.Errorf("printed a summary from a run with a failed step: %q", out.String())
 	}
 }
 
