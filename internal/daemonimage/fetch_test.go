@@ -223,6 +223,10 @@ func guardGit(run *fakeRunner, inner bdbuild.Git, g *staleGuard) bdbuild.Git {
 			return nil, nil
 		case args[0] == "rev-list":
 			return []byte(strconv.Itoa(g.behind) + "\n"), nil
+		case args[0] == "ls-tree":
+			return []byte(args[len(args)-1] + "main.go\n"), nil
+		case args[0] == "show" && strings.HasSuffix(args[len(args)-1], ".go"):
+			return []byte("package main\n"), nil
 		case args[0] == "show":
 			if args[len(args)-1] == pin {
 				return []byte(strconv.FormatInt(g.now.Add(-g.age).Unix(), 10) + "\n"), nil
