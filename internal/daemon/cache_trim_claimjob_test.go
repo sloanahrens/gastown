@@ -13,9 +13,53 @@ import (
 // the fifteen-minute bound the claim route allows the walk of a large claim.
 const cacheTrimClaimJobWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=900s"
 
-// cacheTrimClaimJobRun calls the claim-Job run on the fixture's claim.
-func cacheTrimClaimJobRun(f *cacheTrimFixture, claim cacheTrimClaim, apply bool) error {
+// cacheTrimClaimJobLogVerb is the read of the claim Job's trim container log,
+// the one cacheTrimRemovedCounts parses.
+const cacheTrimClaimJobLogVerb = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c trim"
+
+// cacheTrimClaimJobCounts calls the claim-Job run on the fixture's claim.
+func cacheTrimClaimJobCounts(f *cacheTrimFixture, claim cacheTrimClaim, apply bool) (removed, absent, kept int64, err error) {
 	return f.d.cacheTrimClaimJobRun(context.Background(), "/kubeconfig", claim, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, apply)
+}
+
+// cacheTrimClaimJobRun calls the claim-Job run on the fixture's claim and keeps
+// only its error.
+func cacheTrimClaimJobRun(f *cacheTrimFixture, claim cacheTrimClaim, apply bool) error {
+	_, _, _, err := cacheTrimClaimJobCounts(f, claim, apply)
+	return err
+}
+
+// TestCacheTrimClaimJobReadsTheResultLine pins that a finished Job's result
+// line is the run's counts: the line the trim container prints last is what the
+// run reports.
+func TestCacheTrimClaimJobReadsTheResultLine(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobLogVerb: {stdout: "removed 12 absent 1 kept 3\n"},
+	})
+	removed, absent, kept, err := cacheTrimClaimJobCounts(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+	if err != nil {
+		t.Fatalf("a finished Job with a result line = %v, want nil", err)
+	}
+	if removed != 12 || absent != 1 || kept != 3 {
+		t.Errorf("the run read %d removed, %d absent, %d kept; want 12, 1, 3", removed, absent, kept)
+	}
+}
+
+// TestCacheTrimClaimJobFailsOnAMissingOrMalformedLine pins that a finished Job
+// whose result line cannot be read fails the run: a line read as zero would
+// record a trim that removed nothing.
+func TestCacheTrimClaimJobFailsOnAMissingOrMalformedLine(t *testing.T) {
+	t.Parallel()
+	for _, log := range []string{"", "removed twelve absent 1 kept 3\n"} {
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimClaimJobLogVerb: {stdout: log},
+		})
+		removed, absent, kept, err := cacheTrimClaimJobCounts(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+		if err == nil {
+			t.Fatalf("a finished Job whose log is %q = %d, %d, %d, nil; want an error, never zero counts with nil", log, removed, absent, kept)
+		}
+	}
 }
 
 // TestCacheTrimClaimJobDryRunAppliesNothing is the bead's gate: a dry run logs
@@ -23,8 +67,12 @@ func cacheTrimClaimJobRun(f *cacheTrimFixture, claim cacheTrimClaim, apply bool)
 func TestCacheTrimClaimJobDryRunAppliesNothing(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", nil)
-	if err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, false); err != nil {
+	removed, absent, kept, err := cacheTrimClaimJobCounts(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, false)
+	if err != nil {
 		t.Fatalf("a dry run = %v, want nil", err)
+	}
+	if removed != 0 || absent != 0 || kept != 0 {
+		t.Errorf("a dry run read %d removed, %d absent, %d kept; want zero counts", removed, absent, kept)
 	}
 	if calls := f.verbs(); len(calls) != 0 {
 		t.Errorf("a dry run made cluster calls %v; want none", calls)
