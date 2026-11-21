@@ -4239,14 +4239,14 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	// spawning + hook_bead before it hooks the work bead, and in that gap the
 	// seat read idle, so a second sling took the seat the first had been given
 	// (gt-lgcwd6). Past the spawn grace the claim is stale and proves nothing.
-	if issueID == "" && spawning && fields != nil && fields.HookBead != "" {
+	if claim := freshClaim(spawning, fields); issueID == "" && claim != "" {
 		return &Polecat{
 			Name:      name,
 			Rig:       m.rig.Name,
 			State:     StateSpawning,
 			ClonePath: clonePath,
 			Branch:    branchName,
-			Issue:     fields.HookBead,
+			Issue:     claim,
 		}, nil
 	}
 
@@ -4268,6 +4268,18 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 		Branch:    branchName,
 		Issue:     issueID,
 	}, nil
+}
+
+// freshClaim is the work bead the agent bead's claim names while the claim is
+// fresh, and "" when there is none. A sling writes spawning + hook_bead before
+// it hooks the work bead, so a spawning agent bead inside the spawn grace
+// (spawning, from SpawnGrace) with a hook_bead is a seat already taken
+// (gt-lgcwd6); past the grace the claim is stale and proves nothing.
+func freshClaim(spawning bool, fields *beads.AgentFields) string {
+	if !spawning || fields == nil {
+		return ""
+	}
+	return fields.HookBead
 }
 
 func (m *Manager) polecatSessionState(name string) (running bool, stale bool) {
