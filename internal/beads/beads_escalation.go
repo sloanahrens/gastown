@@ -730,7 +730,7 @@ func escalationStores(b *Beads) ([]escalationStore, error) {
 
 // readEscalationStore lists one store's escalations at status. --limit=0
 // because bd list pages at 50 by default (gt-mm38p); the town store keeps the
-// routed call TestListEscalationsAcrossRigsUncapsBdPage and its neighbours pin.
+// routed call TestListEscalationsAcrossRigsUncapsBdPage and its neighbors pin.
 func readEscalationStore(b *Beads, s escalationStore, status string) ([]*Issue, error) {
 	args := []string{"list", "--label=gt:escalation", "--status=" + status, "--include-infra", "--limit=0", "--json"}
 	var out []byte
