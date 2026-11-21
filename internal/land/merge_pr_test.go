@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
@@ -568,5 +569,75 @@ func TestForgejoMergerKeepsAnAPIErrorsClassificationWhenAVerifierIsSet(t *testin
 	var race *RaceError
 	if !errors.As(err, &race) || !race.Rebuild {
 		t.Fatalf("Merge = %T %v, want a rebuild *RaceError", err, err)
+	}
+}
+
+// showFailsOnce is a bead reader whose Show fails once armed: the read the
+// merge step makes is the one that must fail closed.
+type showFailsOnce struct {
+	Beads
+	armed bool
+}
+
+func (b *showFailsOnce) Show(id string) (*beads.Issue, error) {
+	if b.armed {
+		return nil, errors.New("bd: database is locked")
+	}
+	return b.Beads.Show(id)
+}
+
+// TestLandRefusesABeadClosedAfterTheCandidateIsBuilt: the candidate build and
+// the review take minutes, and a bead closed or stripped of gt:ready-to-land in
+// that time (a withdrawal, gt-fpvvbc) must not merge. The bead is read again at
+// the merge step, and a read that fails refuses the merge too (gt-b3zpjb).
+func TestLandRefusesABeadClosedAfterTheCandidateIsBuilt(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		flip func(f *landFixture)
+		want string // "" leaves the beads fixture's own reader
+	}{
+		{name: "the bead is closed", want: "bead closed", flip: func(f *landFixture) {
+			if err := f.bd.ForceCloseWithReason("withdrawn", "gt-abc"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "the ready label is removed", want: LabelReadyToLand, flip: func(f *landFixture) {
+			if err := f.bd.Update("gt-abc", beads.UpdateOptions{RemoveLabels: []string{LabelReadyToLand}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "both at once", want: "bead closed", flip: func(f *landFixture) {
+			_ = f.bd.Update("gt-abc", beads.UpdateOptions{RemoveLabels: []string{LabelReadyToLand}})
+			_ = f.bd.ForceCloseWithReason("withdrawn", "gt-abc")
+		}},
+		{name: "the re-read fails", want: "re-read", flip: func(*landFixture) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			l := f.lander()
+			reader := &showFailsOnce{Beads: f.bd}
+			l.Beads = reader
+			// The gate runs while the candidate is built, after every readiness check.
+			f.gate.fn = func(string) GateResult {
+				tc.flip(f)
+				reader.armed = tc.name == "the re-read fails"
+				return GateResult{Passed: true, Steps: []StepResult{{Name: "test"}}}
+			}
+			merger := &fakeMerger{}
+			l.Merger = merger
+
+			_, err := l.Land(context.Background(), f.work)
+			if err == nil || !errors.Is(err, ErrNotReady) && tc.name != "the re-read fails" {
+				t.Fatalf("Land = %v, want ErrNotReady", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not say %q", err, tc.want)
+			}
+			if len(merger.calls) != 0 {
+				t.Errorf("the merger ran %d time(s) on a bead that must not land", len(merger.calls))
+			}
+		})
 	}
 }

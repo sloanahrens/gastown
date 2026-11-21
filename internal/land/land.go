@@ -1731,6 +1731,18 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, &InfraError{Stage: "merge pull request",
 			Err: errors.New("the candidate gate reported no status context, so the merge's creator check has nothing to verify")}
 	}
+	// The candidate build and the review take minutes: a bead closed or stripped
+	// of its ready label in that time is a withdrawal, and the merge must not
+	// land it (gt-b3zpjb). A read that fails refuses too: an unknown state does
+	// not merge, and the infrastructure error retries the landing.
+	cur, err := l.Beads.Show(w.BeadID)
+	if err != nil {
+		return Result{}, &InfraError{Stage: "re-read bead before merge", Err: err}
+	}
+	if !beads.IssueStatus(strings.TrimSpace(cur.Status)).IsActionable() || !beads.HasLabel(cur, LabelReadyToLand) {
+		l.discardCandidate(ctx, w, candRes)
+		return Result{}, fmt.Errorf("%w: %s changed while its candidate was built (bead closed or %s removed: status %s)", ErrNotReady, w.BeadID, LabelReadyToLand, cur.Status)
+	}
 	if err := l.Merger.Merge(ctx, MergeRequest{Work: w, Head: merged, Verdict: verdict, GateContext: ciContext,
 		TargetHasCommit: l.targetHasCommit(g, w.Target)}); err != nil {
 		var refused *MergeRefusedError
