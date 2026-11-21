@@ -52,6 +52,10 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		return false
 	}
 	d.cacheTrimClearAlert(ctx, cacheTrimNoPodListKey(namespace), "the sandbox may list pods in "+namespace)
+	// A trim through the claim Job measures nothing, so an item an earlier measure
+	// raised describes nothing this pass can judge. It is cleared only now that the
+	// pod read has succeeded: a failed read is an unknown reading and keeps it.
+	d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim.ClaimName))
 	// This refusal is the town's config, the same on every pass, so it is a
 	// verdict: the claim is judged again at the full interval, not soon.
 	if other, taken := trimmed[namespace]; taken {
@@ -76,7 +80,9 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
 		trimmed: &removed, absent: &absent, kept: &kept}
 	d.cacheTrimRecordRun(run)
+	// A success is logged every time: the once-an-hour hold of cacheTrimLogf is for
+	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
-	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
+	d.logger.Printf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
 	return true
 }
