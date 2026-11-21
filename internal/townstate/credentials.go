@@ -152,10 +152,11 @@ func (f *jsonFrame) stepInto() pathSeg {
 }
 
 // jsonHits walks valid JSON token by token, so every occurrence of a key is seen
-// (duplicates included). A string under a credential name is a key hit, unless the
-// name rule is exempt at its path; every other string value, in an object, an array
-// or at the top, is checked by shape. The walk is linear in the document: opening a
-// container costs O(1) and the path test reads three steps.
+// (duplicates included). A string under a credential name is a key hit, and so is
+// every string element of an array that key opened, nested arrays included, unless
+// the name rule is exempt at its path; every other string value, in an object, an
+// array or at the top, is checked by shape. The walk is linear in the document:
+// opening a container costs O(1) and the path test reads three steps.
 func jsonHits(data []byte) ([]hit, error) {
 	var stack []*jsonFrame
 	var out []hit
@@ -180,6 +181,14 @@ func jsonHits(data []byte) ([]hit, error) {
 				if top != nil {
 					f.depth, f.seg = top.depth+1, top.stepInto()
 				}
+				// A credential-named key owns its array value, so each string element
+				// is a finding like a direct value; without this the key list was
+				// copied into the backup unredacted. The name exemption is decided
+				// once, where the key is read, since the element's frame is the
+				// array, not the member that holds it.
+				if d == '[' && top != nil && top.cred && (!top.object || !nameRuleExempt(top)) {
+					f.key, f.cred = top.key, true
+				}
 				stack = append(stack, f)
 			default:
 				stack = stack[:len(stack)-1]
@@ -193,7 +202,11 @@ func jsonHits(data []byte) ([]hit, error) {
 		switch {
 		case top == nil || !top.object:
 			if isString {
-				out = appendValueShape(out, data, s, end)
+				if top != nil && top.cred && isSecret(top.key, s) {
+					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
+				} else {
+					out = appendValueShape(out, data, s, end)
+				}
 			}
 		case top.wantKey:
 			top.key, top.cred, top.wantKey = s, credentialName(s), false
