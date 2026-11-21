@@ -159,7 +159,7 @@ func TestEstimateAllInputs(t *testing.T) {
 	wantInputs := fmt.Sprintf("inputs: shape %.1f, embed %.1f, jev %.1f", shape, embed, jev)
 	for _, line := range []string{
 		wantInputs,
-		"nearest beads: gt-a (gastown) first neighbor; dv-b (devops) second neighbor",
+		"nearest beads: gt-a (gastown) first neighbor (no time recorded); dv-b (devops) second neighbor (no time recorded)",
 	} {
 		if !strings.Contains(note, line) {
 			t.Fatalf("note %q does not contain %q", note, line)
@@ -611,6 +611,118 @@ func TestEstimateNeighborsNone(t *testing.T) {
 	}
 	if !strings.Contains(Note(got), "nearest beads: none") {
 		t.Fatalf("note %q does not say there are no neighbors", Note(got))
+	}
+}
+
+// TestEstimateNeighborMinutesNote: the nearest-beads line prints each known
+// neighbor's actual minutes and says when none is recorded, without changing
+// the hash or the labels the estimate writes.
+func TestEstimateNeighborMinutesNote(t *testing.T) {
+	t.Parallel()
+	deps := workingDeps()
+	deps.NeighborMinutes = func(rig, id string) (float64, bool) {
+		if rig == "gastown" && id == "gt-a" {
+			return 14, true
+		}
+		return 0, false
+	}
+	got, err := Estimate(context.Background(), deps, sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+
+	if len(got.Neighbors) != 2 {
+		t.Fatalf("neighbors = %+v, want two", got.Neighbors)
+	}
+	if got.Neighbors[0].Minutes == nil || *got.Neighbors[0].Minutes != 14 {
+		t.Fatalf("gt-a minutes = %v, want 14", got.Neighbors[0].Minutes)
+	}
+	if got.Neighbors[1].Minutes != nil {
+		t.Fatalf("dv-b minutes = %v, want nil", *got.Neighbors[1].Minutes)
+	}
+
+	note := Note(got)
+	for _, want := range []string{
+		"gt-a (gastown) first neighbor (took 14 min)",
+		"dv-b (devops) second neighbor (no time recorded)",
+	} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note %q does not contain %q", note, want)
+		}
+	}
+
+	// The minutes are outside the hash and the blend, so a plain run labels the
+	// bead the same.
+	plain, err := Estimate(context.Background(), workingDeps(), sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate without minutes: %v", err)
+	}
+	if got.Hash != plain.Hash {
+		t.Fatalf("hash = %q, want %q unchanged", got.Hash, plain.Hash)
+	}
+	if got.Points != plain.Points || got.Rung != plain.Rung {
+		t.Fatalf("sp:rung = %d:%s, want %d:%s unchanged", got.Points, got.Rung, plain.Points, plain.Rung)
+	}
+	gotFirst, _, _ := strings.Cut(note, "\n")
+	plainFirst, _, _ := strings.Cut(Note(plain), "\n")
+	if gotFirst != plainFirst {
+		t.Fatalf("first line = %q, want %q unchanged", gotFirst, plainFirst)
+	}
+}
+
+// TestEstimateNeighborMinutesNil: a nil NeighborMinutes leaves every neighbor
+// as no time recorded.
+func TestEstimateNeighborMinutesNil(t *testing.T) {
+	t.Parallel()
+	got, err := Estimate(context.Background(), workingDeps(), sampleBead())
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	for _, n := range got.Neighbors {
+		if n.Minutes != nil {
+			t.Fatalf("%s minutes = %v, want nil", n.ID, *n.Minutes)
+		}
+	}
+	want := "nearest beads: gt-a (gastown) first neighbor (no time recorded); dv-b (devops) second neighbor (no time recorded)"
+	if !strings.Contains(Note(got), want) {
+		t.Fatalf("note %q does not contain %q", Note(got), want)
+	}
+	if strings.Contains(Note(got), "took ") {
+		t.Fatalf("note %q records a time with no NeighborMinutes", Note(got))
+	}
+}
+
+// TestEstimateNeighborMinutesRejectsBadValue: a reader that answers ok with a
+// value the note cannot print leaves the neighbor as no time recorded.
+func TestEstimateNeighborMinutesRejectsBadValue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		minutes float64
+	}{
+		{name: "NaN", minutes: math.NaN()},
+		{name: "positive infinity", minutes: math.Inf(1)},
+		{name: "negative infinity", minutes: math.Inf(-1)},
+		{name: "negative", minutes: -3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			deps := workingDeps()
+			deps.NeighborMinutes = func(string, string) (float64, bool) { return tt.minutes, true }
+			got, err := Estimate(context.Background(), deps, sampleBead())
+			if err != nil {
+				t.Fatalf("Estimate: %v", err)
+			}
+			for _, n := range got.Neighbors {
+				if n.Minutes != nil {
+					t.Fatalf("%s minutes = %v, want nil for %s", n.ID, *n.Minutes, tt.name)
+				}
+			}
+			if strings.Contains(Note(got), "took ") {
+				t.Fatalf("note %q prints a %s time", Note(got), tt.name)
+			}
+		})
 	}
 }
 
