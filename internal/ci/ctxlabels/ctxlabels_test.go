@@ -495,6 +495,9 @@ func TestPinsWithBDNamesTheCommit(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParsePins: %v", err)
 		}
+		if len(pins) != len(base) {
+			t.Fatalf("pinsWithBD(%s) gave %d pins, want %d", commit, len(pins), len(base))
+		}
 		for i, p := range pins {
 			want := base[i]
 			if want.Name == "bd" {
