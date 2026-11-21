@@ -1,7 +1,9 @@
 package done
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -44,4 +46,37 @@ func lineLimitVerdict(limits []int, added int) (refuse bool, lines []string) {
 		return false, []string{line}
 	}
 	return false, nil
+}
+
+// crewWarningPrefix marks a crew's over-limit lines apart from a polecat refusal (gt-zqg4m2).
+const crewWarningPrefix = "warning (crew branch, not refused): "
+
+// reportLineLimit prints the added-line check's verdict and returns the refusal
+// for a polecat past twice the declared limit; a crew branch is warned on errOut
+// instead, an unreadable count is an error, and no declared limit skips the count.
+func reportLineLimit(out, errOut io.Writer, count func() (int, error), description string, polecat bool) error {
+	limits := DeclaredLineLimits(description)
+	if len(limits) == 0 {
+		_, lines := lineLimitVerdict(limits, 0)
+		fmt.Fprintln(out, lines[0])
+		return nil
+	}
+	added, err := count()
+	if err != nil {
+		return fmt.Errorf("added-line check: %w", err)
+	}
+	refuse, lines := lineLimitVerdict(limits, added)
+	if refuse && !polecat {
+		for _, line := range lines {
+			fmt.Fprintln(errOut, crewWarningPrefix+line)
+		}
+		return nil
+	}
+	for _, line := range lines {
+		fmt.Fprintln(out, line)
+	}
+	if refuse {
+		return errors.New(strings.Join(lines, "\n"))
+	}
+	return nil
 }
