@@ -173,7 +173,7 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 		t.Fatalf("AllocateAndAdd: %v", err)
 	}
 	table := []commandCount{
-		{"cat-file", 1}, {"config", 4}, {"fetch", 1}, {"rev-parse", 4},
+		{"cat-file", 1}, {"config", 4}, {"fetch", 1}, {"rev-parse", 3},
 		{"show-ref", 1}, {"worktree", 2},
 	}
 	if msgs := pinProblems(table, rec); len(msgs) > 0 {
