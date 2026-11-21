@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -383,6 +384,10 @@ type overrunSeams struct {
 	// overrunReadPoolSize. Production never sets it. A test whose fake clock is shared by
 	// the seats' reads sets 1 so their times are not mixed.
 	readPoolSize int
+
+	// after is the deadline timer of each per-seat read (overrunBoundedRead); nil means
+	// time.After. A test fires it by hand, so no read waits on the wall clock.
+	after func(d time.Duration) <-chan time.Time
 }
 
 // overrunSeatReads is one seat's per-seat reads for a pass (overrunReadSeat):
@@ -500,18 +505,60 @@ func overrunReadSeat(s overrunSeams, seat overrunSeat) overrunSeatReads {
 		clock = time.Now
 	}
 	start := clock()
-	r.answeredAt, r.answeredErr = s.escalationAnsweredAt(seat)
+	r.answeredAt, r.answeredErr = overrunBoundedRead(s, clock, func() (time.Time, error) { return s.escalationAnsweredAt(seat) })
 	r.answeredTook = clock().Sub(start)
 	start = clock()
-	r.inGate, r.gateErr = s.gateRunning(seat)
+	r.inGate, r.gateErr = overrunBoundedRead(s, clock, func() (bool, error) { return s.gateRunning(seat) })
 	r.gateTook = clock().Sub(start)
 	if r.gateErr == nil && r.inGate {
 		return r
 	}
 	start = clock()
-	r.waiting, r.waitingErr = s.escalationWaiting(seat)
+	r.waiting, r.waitingErr = overrunBoundedRead(s, clock, func() (bool, error) { return s.escalationWaiting(seat) })
 	r.waitingTook = clock().Sub(start)
 	return r
+}
+
+// overrunSeatReadDeadline bounds each per-seat read (overrunReadSeat). A read still
+// running at it, or whose clock reading ran past it, fails for that seat only; the
+// pool does not bound a read, so a hung one would hold the pass (gt-jhthh0).
+const overrunSeatReadDeadline = 8 * time.Second
+
+var errOverrunSeatReadDeadline = errors.New("seat read ran past its deadline")
+
+// overrunBoundedRead returns read's answer, or errOverrunSeatReadDeadline when read
+// has not returned by the deadline or its clock reading ran past it. A panic in read
+// is raised again in the caller.
+func overrunBoundedRead[T any](s overrunSeams, clock func() time.Time, read func() (T, error)) (T, error) {
+	type answer struct {
+		v     T
+		err   error
+		panic any
+	}
+	done := make(chan answer, 1)
+	start := clock()
+	go func() {
+		var a answer
+		defer func() { a.panic = recover(); done <- a }()
+		a.v, a.err = read()
+	}()
+	after := s.after
+	if after == nil {
+		after = time.After
+	}
+	var zero T
+	select {
+	case a := <-done:
+		if a.panic != nil {
+			panic(a.panic)
+		}
+		if clock().Sub(start) > overrunSeatReadDeadline {
+			return zero, errOverrunSeatReadDeadline
+		}
+		return a.v, a.err
+	case <-after(overrunSeatReadDeadline):
+		return zero, errOverrunSeatReadDeadline
+	}
 }
 
 // overrunGuardConfig returns the patrol's config, or nil when absent.
