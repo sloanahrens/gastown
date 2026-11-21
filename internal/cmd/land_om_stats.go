@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -157,17 +158,35 @@ func parseLandOmStatsSince(value string) (time.Time, error) {
 
 // landOmStatsFromFiles opens both sources and aggregates them.
 func landOmStatsFromFiles(fsys landOmStatsFS, in landOmStatsInputs, since time.Time) (land.OmStats, error) {
-	records, closeRecords, err := openLandOmStatsSource(fsys, in.records, in.recordsNamed)
+	records, err := readLandOmStatsRecords(fsys, in)
 	if err != nil {
 		return land.OmStats{}, err
 	}
-	defer closeRecords()
 	logFile, closeLog, err := openLandOmStatsSource(fsys, in.log, in.logNamed)
 	if err != nil {
 		return land.OmStats{}, err
 	}
 	defer closeLog()
-	return land.AggregateOmStats(records, logFile, since)
+	return land.AggregateOmStats(bytes.NewReader(records), logFile, since)
+}
+
+// readLandOmStatsRecords reads the records source into memory once, so one
+// snapshot answers every report built from it. An absent default is nil; a
+// missing named path is the error openLandOmStatsSource gives (gt-4be1z5).
+func readLandOmStatsRecords(fsys landOmStatsFS, in landOmStatsInputs) ([]byte, error) {
+	f, closeRecords, err := openLandOmStatsSource(fsys, in.records, in.recordsNamed)
+	if err != nil {
+		return nil, err
+	}
+	defer closeRecords()
+	if f == nil {
+		return nil, nil
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", in.records, err)
+	}
+	return data, nil
 }
 
 // openLandOmStatsSource opens path for reading; a missing named path is an
