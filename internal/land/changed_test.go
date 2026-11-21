@@ -197,6 +197,10 @@ var guardTriggers = []struct {
 	{"internal/testpolicy", "M\x00internal/land/gate_test.go\x00"},
 	{"internal/cmdtree", "M\x00internal/templates/roles/polecat.md.tmpl\x00"},
 	{"internal/cmd", "M\x00Makefile\x00"},
+	// The cluster-render and runner-drift tests render deploy/k8s from the
+	// values internal/imagevalues writes, so a manifest change is their input
+	// (gt-dvfv93).
+	{"internal/cmd", "M\x00deploy/k8s/forgejo-runner/runner.go\x00"},
 	{"internal/daemonimage", "M\x00deploy/daemon/Dockerfile\x00"},
 	{"deploy/k8s/daemon", "M\x00deploy/daemon/Dockerfile\x00"},
 	{"internal/makegate", "M\x00Makefile\x00"},
@@ -405,6 +409,67 @@ func TestGuardSelectsADocsOnlyChangeSkipsTheImageRegistryGuard(t *testing.T) {
 			t.Fatalf("GuardSelects(%q) = %v; want no internal/config guard", unguarded, got)
 		}
 	}
+}
+
+// TestGuardSelectsAClusterRenderChangeRunsTheBdGatewayRenderTests: the three
+// internal/cmd cluster-render and runner-drift tests render deploy/k8s from the
+// values internal/imagevalues writes, and two landings failed the Forgejo gate
+// on them after presubmit left internal/cmd out as heavy (gt-dvfv93). A diff
+// under either path must select them; one outside both must not.
+func TestGuardSelectsAClusterRenderChangeRunsTheBdGatewayRenderTests(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	required := []string{
+		"TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota",
+		"TestClusterRenderBdGatewayWorkload",
+		"TestClusterRenderBdGatewayTokenSecret",
+	}
+	internalCmdTests := func(t *testing.T, diff string) []string {
+		t.Helper()
+		sel, err := GuardSelects(diff, hasGo)
+		if err != nil {
+			t.Fatalf("GuardSelects(%q): %v", diff, err)
+		}
+		for _, s := range sel {
+			if s.Package == "internal/cmd" {
+				return s.Tests
+			}
+		}
+		return nil
+	}
+	for _, diff := range []string{
+		"M\x00deploy/k8s/forgejo-runner/runner.go\x00",
+		"M\x00deploy/k8s/daemon/bdgateway.go\x00",
+		"M\x00internal/imagevalues/imagevalues.go\x00",
+	} {
+		tests := internalCmdTests(t, diff)
+		for _, name := range required {
+			if !contains(tests, name) {
+				t.Errorf("GuardSelects(%q) internal/cmd tests = %v; want %s among them", diff, tests, name)
+			}
+		}
+	}
+	// deploy/daemon is outside deploy/k8s, and the doc is outside both paths:
+	// neither is input to the render tests.
+	for _, diff := range []string{unguarded, "M\x00deploy/daemon/Dockerfile\x00"} {
+		if tests := internalCmdTests(t, diff); tests != nil {
+			t.Errorf("GuardSelects(%q) internal/cmd tests = %v; want none", diff, tests)
+		}
+	}
+	// The selection sorts its names, so the stated order lives in the entry.
+	for _, g := range treeWideGuards {
+		if g.pkg != "internal/cmd" || g.judges == nil || !g.judges("deploy/k8s/forgejo-runner/runner.go") {
+			continue
+		}
+		if !reflect.DeepEqual(g.tests, required) {
+			t.Errorf("internal/cmd cluster-render entry tests = %v, want %v in that order", g.tests, required)
+		}
+		if g.removal {
+			t.Errorf("internal/cmd cluster-render entry carries removal; a rendered path is judged only as it stands after the change")
+		}
+		return
+	}
+	t.Error("no internal/cmd entry judges deploy/k8s/forgejo-runner/runner.go")
 }
 
 // TestShellScriptAllowlistChangeRunsTheAllowlistControl: the clean-tree guard

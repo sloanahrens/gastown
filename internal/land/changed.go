@@ -316,8 +316,10 @@ func inNestedModule(repoRoot, dir string) bool {
 // Left out on purpose: internal/guardlint, docs-lint and repo-guards (make
 // lint already runs them before presubmit tests anything); internal/config's
 // env-read guard, which the table triggers by path, so widen it only if a bead
-// shows a miss; the internal/cmd guard tests, slow to compile and not shown to
-// be tree-wide; the repoguard and docslint integration tests (build tag
+// shows a miss; the rest of internal/cmd's guard tests, slow to compile and not
+// shown to be tree-wide — its cluster-render and runner-drift tests are in on
+// purpose, since two landings failed the gate on them (runs 13463 and 12995); the
+// repoguard and docslint integration tests (build tag
 // integration, covered by lint). None of the always entries needs Docker, the
 // network or the Dolt container.
 //
@@ -402,6 +404,25 @@ var treeWideGuards = []treeWideGuard{
 		judges:        func(rel string) bool { return rel == "Makefile" || commandTreeInputs(rel) },
 		contentPaths:  commandTokenContent,
 		judgesContent: commandTokensChanged,
+	},
+	{
+		// The cluster-render and runner-drift tests render deploy/k8s from the
+		// values internal/imagevalues writes, but live in internal/cmd, which
+		// presubmit leaves out as heavy. Two landings reached the Forgejo gate
+		// having broken them (runs 13463 and 12995: the dind share drift, and
+		// the bd gateway workload and its token secret). -run keeps the run to
+		// these three tests; the cost is compiling the internal/cmd test
+		// binary (about 10 to 30 seconds), paid only by a diff under these two
+		// paths. The rest of internal/cmd's guard tests stay out.
+		pkg: "internal/cmd",
+		tests: []string{
+			"TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota",
+			"TestClusterRenderBdGatewayWorkload",
+			"TestClusterRenderBdGatewayTokenSecret",
+		},
+		judges: func(rel string) bool {
+			return strings.HasPrefix(rel, "deploy/k8s/") || strings.HasPrefix(rel, "internal/imagevalues/")
+		},
 	},
 	{
 		// TestGTPinMatchesTheSharedBuildArgv pins the daemon image's gt build
