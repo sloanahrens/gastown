@@ -445,12 +445,17 @@ func (s *attentionSources) collectHostNodeDisk(ctx context.Context) ([]attention
 		}
 	}
 	// A node that could not be read may hold a rule it raised on an earlier
-	// tick, and its last reading is not a clear. One rule stands at a time: of
-	// the fresh rule and the held ones, the worst level is kept, so a held
-	// warning never sits beside a fresh critical, nor a fresh warning beside a
-	// held critical (gt-x1po96, review round 3).
+	// tick, and its last reading is not a clear. Only the two rule keys are
+	// held: a probe line is not a rule, and every node that fails is raised
+	// afresh below (gt-ezoq2o). One rule stands at a time: of the fresh rule
+	// and the held ones, the worst level is kept, so a held warning never sits
+	// beside a fresh critical, nor a fresh warning beside a held critical
+	// (gt-x1po96, review round 3).
 	if len(probes) > 0 {
 		for _, held := range prevOfKind(s.prev, attention.KindHostNodeDisk) {
+			if nodeDiskRuleLevel(held.Key) == nodeDiskLevelQuiet {
+				continue
+			}
 			rated = worseNodeDiskRule(rated, held)
 		}
 	}
