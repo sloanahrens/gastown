@@ -2,6 +2,8 @@ package git
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -29,6 +31,12 @@ func showFileGit(t *testing.T, o showFileOutcome) *Git {
 	}}
 }
 
+// exitStatus is a git failure that carries the exit code git exited with.
+type exitStatus int
+
+func (e exitStatus) Error() string { return "exit status " + strconv.Itoa(int(e)) }
+func (e exitStatus) ExitCode() int { return int(e) }
+
 func TestShowFileBytesAtRevReturnsExactBytes(t *testing.T) {
 	t.Parallel()
 	g := showFileGit(t, showFileOutcome{content: "prefix: tk\n\n"})
@@ -49,9 +57,24 @@ func TestShowFileBytesAtRevErrors(t *testing.T) {
 		outcome showFileOutcome
 		// notAtRef is true when the path is absent: the answer, not a failure.
 		notAtRef bool
+		// refNotFound is true when rev-parse exited 1: the ref does not resolve.
+		refNotFound bool
+		// wantPrefix is how the message of an error from the resolve step begins,
+		// whichever way rev-parse failed; the later steps' errors have none.
+		wantPrefix string
 	}{
 		"unresolved ref is a real error": {
-			outcome: showFileOutcome{revParse: gitFailed},
+			outcome:    showFileOutcome{revParse: gitFailed},
+			wantPrefix: "resolving main: ",
+		},
+		"rev-parse exit 1 is ErrRefNotFound": {
+			outcome:     showFileOutcome{revParse: exitStatus(1)},
+			refNotFound: true,
+			wantPrefix:  "resolving main: ",
+		},
+		"rev-parse exit 128 is not ErrRefNotFound": {
+			outcome:    showFileOutcome{revParse: exitStatus(128)},
+			wantPrefix: "resolving main: ",
 		},
 		"absent path is ErrNotAtRef": {
 			outcome:  showFileOutcome{catFile: gitFailed},
@@ -74,6 +97,12 @@ func TestShowFileBytesAtRevErrors(t *testing.T) {
 				}
 				if got := errors.Is(err, ErrNotAtRef); got != tc.notAtRef {
 					t.Errorf("%s error is ErrNotAtRef = %v, want %v (err: %v)", label, got, tc.notAtRef, err)
+				}
+				if got := errors.Is(err, ErrRefNotFound); got != tc.refNotFound {
+					t.Errorf("%s error is ErrRefNotFound = %v, want %v (err: %v)", label, got, tc.refNotFound, err)
+				}
+				if !strings.HasPrefix(err.Error(), tc.wantPrefix) {
+					t.Errorf("%s error message %q does not begin %q", label, err.Error(), tc.wantPrefix)
 				}
 			}
 		})

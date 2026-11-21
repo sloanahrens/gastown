@@ -397,7 +397,7 @@ func (h *handle) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
 	}
 	id, ok := h.resolve(r, wt, ref)
 	if !ok {
-		return nil, unknownRevision(ref, args...)
+		return nil, fmt.Errorf("%w: %w", git.ErrRefNotFound, unknownRevision(ref, args...))
 	}
 	content, ok := h.f.treeOf(id)[path]
 	if !ok {
