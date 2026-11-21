@@ -24,6 +24,40 @@ func wireTestDaemon(t *testing.T, patrol *DaemonPatrolConfig, logs *strings.Buil
 	return d, rec
 }
 
+// TestTownStateNightlyWireCountsTheStepThroughTheSeam is this bead's
+// acceptance box: with the patrol config present and a root set, one run calls
+// the seam once with that root, so "the step did not run" is observed at the
+// seam rather than inferred from a silent alert.
+func TestTownStateNightlyWireCountsTheStepThroughTheSeam(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "town-state")
+	var logs strings.Builder
+	d, _ := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: root},
+	}}, &logs)
+	now := nightlyTestNow()
+	var calls int
+	var gotRoot string
+	d.townStateNightlyStep = func(r string, _ time.Time) error {
+		calls++
+		gotRoot = r
+		return nil
+	}
+
+	if got := d.runTownStateBackupStep(now); got != townStateNightlyDone {
+		t.Fatalf("outcome = %v, want done", got)
+	}
+	if calls != 1 {
+		t.Fatalf("seam calls = %d, want 1", calls)
+	}
+	if gotRoot != root {
+		t.Errorf("seam root = %q, want %q", gotRoot, root)
+	}
+	if townbackup.Taken(root, now) {
+		t.Errorf("the seam ran and the real export also wrote a night under %s", root)
+	}
+}
+
 // TestTownStateNightlyWireAbsentConfigAlerts is the first acceptance box's
 // absent-config half: a config that is nil, or holds no scheduled_maintenance
 // section, is an error that alerts under town_state_backup:nightly and names

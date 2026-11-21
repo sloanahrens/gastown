@@ -454,7 +454,11 @@ func (d *Daemon) runTownStateBackupStep(now time.Time) townStateNightlyOutcome {
 		d.townStateNightlyAlert(err)
 		return townStateNightlyFailed
 	}
-	if err := d.maintenanceTownStateBackup(root, now); err != nil {
+	step := d.townStateNightlyStep
+	if step == nil {
+		step = d.maintenanceTownStateBackup
+	}
+	if err := step(root, now); err != nil {
 		d.townStateNightlyAlert(err)
 		return townStateNightlyFailed
 	}
