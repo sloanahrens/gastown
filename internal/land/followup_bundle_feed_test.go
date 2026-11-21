@@ -95,3 +95,42 @@ func TestFeedHoldsAGroupWhenTheAppendFails(t *testing.T) {
 		t.Errorf("queued = %+v (%v), want the group's one finding held for a later landing", queued, err)
 	}
 }
+
+// feedTwoPackages is a feed over one finding in internal/aaa and one in
+// internal/zzz, which file in that order, with the bound set to bound.
+func feedTwoPackages(t *testing.T, bound int, existing []ExistingFollowup) (*followupFixture, string) {
+	t.Helper()
+	f := newFollowupFixture(t, 0.8, []Finding{minorAt("internal/aaa/a.go", 1, "first"), minorAt("internal/zzz/z.go", 1, "second")})
+	f.lander.FollowupBackpressure = bound
+	f.fake.existing = existing
+	return f, f.run()
+}
+
+// TestFeedAppendTakesNoBoundSlot: an append never counts against the
+// backpressure bound. With one open bundle in internal/aaa and a bound of 2, the
+// first group appends and the second still files its bead; nothing is held
+// (gt-njnteb, owl's mutation pass on gt-n9v7r7).
+func TestFeedAppendTakesNoBoundSlot(t *testing.T) {
+	t.Parallel()
+	bundle := openBundleFor(followupDay, "internal/aaa", "open")
+	f, log := feedTwoPackages(t, 2, []ExistingFollowup{bundle})
+	if len(f.fake.created) != 1 || len(f.fake.appended) != 1 || strings.Contains(log, "backpressure bound") {
+		t.Errorf("created %d, appended %d, want one of each and no hold:\n%s", len(f.fake.created), len(f.fake.appended), log)
+	}
+}
+
+// TestFeedAppendsAfterTheFeedStopsCreating: once the bound stops the feed from
+// creating, a group with an open bundle still appends. The bound is reached by an
+// open bead of another package, internal/aaa has no bundle and is held,
+// internal/zzz has one and appends, and the stop is logged once.
+func TestFeedAppendsAfterTheFeedStopsCreating(t *testing.T) {
+	t.Parallel()
+	bundle := openBundleFor(followupDay, "internal/zzz", "open")
+	f, log := feedTwoPackages(t, 2, append([]ExistingFollowup{bundle}, openFollowupBeads(1)...))
+	if len(f.fake.created) != 0 || len(f.fake.appended) != 1 || f.fake.appended[0].ID != "gt-bundle" {
+		t.Errorf("created %d, appended %+v, want the second group appended and nothing created:\n%s", len(f.fake.created), f.fake.appended, log)
+	}
+	if n := strings.Count(log, "2-bead backpressure bound; held back 1 finding"); n != 1 {
+		t.Errorf("the stop is logged %d times, want once:\n%s", n, log)
+	}
+}
