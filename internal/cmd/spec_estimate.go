@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hmhints"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/storypoints"
@@ -538,13 +539,44 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 		return estimate.Deps{}, err
 	}
 	return estimate.Deps{
-		Weights:  &weights,
-		TownRoot: townRoot,
-		Embedder: embedder,
-		JevAsk:   specEstimateJev(townRoot, errw),
-		HMRunner: hmhints.ExecRunner,
-		Rig:      rig,
+		Weights:         &weights,
+		TownRoot:        townRoot,
+		Embedder:        embedder,
+		JevAsk:          specEstimateJev(townRoot, errw),
+		HMRunner:        hmhints.ExecRunner,
+		Rig:             rig,
+		NeighborMinutes: specEstimateNeighborMinutes(townRoot),
 	}, nil
+}
+
+// specEstimateNeighborMinutes is the reader the estimate hands to
+// Deps.NeighborMinutes: the minutes the newest landing of a past bead took,
+// read from that rig's landing ledger the way gt land size-stats reads it. A
+// record naming another rig, and a neighbour with no ledger, an unreadable
+// one, no record, no polecat time or a bound flag, has no time recorded.
+func specEstimateNeighborMinutes(townRoot string) func(rig, id string) (float64, bool) {
+	return func(rig, id string) (float64, bool) {
+		path, err := landings.Path(townRoot, rig)
+		if err != nil {
+			return 0, false
+		}
+		recs, _, err := (&landings.Reader{Path: path}).ReadNew()
+		if err != nil {
+			return 0, false
+		}
+		var newest *landings.Record
+		for i := range recs {
+			// The ledger is append-ordered, so the last record for the bead is
+			// its newest landing.
+			if recs[i].Rig == rig && recs[i].Bead == id {
+				newest = &recs[i]
+			}
+		}
+		if newest == nil || newest.PolecatSecs <= 0 || newest.PolecatLowerBound || newest.PolecatUpperBound {
+			return 0, false
+		}
+		return newest.PolecatSecs / 60, true
+	}
 }
 
 // specEstimateEmbedder builds the embedder from story_points, or returns a nil
