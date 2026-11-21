@@ -137,6 +137,9 @@ func diskMaintEnabled(window, mode string) *DaemonPatrolConfig {
 				Interval: agentconfig.DiskMaintenanceIntervalDaily,
 				Window:   window,
 				Mode:     mode,
+				// The fixtures pin the cadence they assert, so a change of the
+				// default does not move them.
+				CacheTrimInterval: "2h",
 			},
 		},
 	}
@@ -2366,5 +2369,20 @@ func TestDiskMaintCollectMessage(t *testing.T) {
 	t.Parallel()
 	if strings.Contains(diskMaintCollectUnavailable, "registry-collect") {
 		t.Errorf("collect message %q names the registry-collect job, which no job runs", diskMaintCollectUnavailable)
+	}
+}
+
+// TestDiskMaintEnabledPinsTheCacheTrimInterval pins that the patrol config every
+// cache trim, CI cache trim and disk maintenance fixture starts from sets the
+// cache trim interval to two hours itself, so a change of the default cadence
+// does not move the tests that assert theirs.
+func TestDiskMaintEnabledPinsTheCacheTrimInterval(t *testing.T) {
+	t.Parallel()
+	cfg := diskMaintEnabled("", "").Patrols.DiskMaintenance
+	if cfg.CacheTrimInterval != "2h" {
+		t.Fatalf("diskMaintEnabled leaves CacheTrimInterval %q; want \"2h\" so the default can change without moving the fixtures", cfg.CacheTrimInterval)
+	}
+	if got, err := cfg.CacheTrimEvery(); err != nil || got != 2*time.Hour {
+		t.Errorf("CacheTrimEvery = %v, %v; want two hours", got, err)
 	}
 }
