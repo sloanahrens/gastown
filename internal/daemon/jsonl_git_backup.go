@@ -718,8 +718,14 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 
 // recordJsonlExportSamples wraps exportTable so a call that returns without an
 // error is remembered as db's last good export of that table, timed by the
-// daemon's clock. A failed export records nothing, so a later cycle's slowdown
-// ratio compares against the last read that completed, not a partial one.
+// daemon's clock, and the ratio of this call's duration to the remembered one
+// is collected in d.jsonlRatios. The ratio is taken before the new sample
+// replaces the old, so it compares against the previous read that completed,
+// not a partial one. A failed export records nothing and adds no ratio.
+//
+// The events table is skipped: it is read both whole and from a boundary (only
+// the rows after it), and the two are not the same quantity, so their ratio is
+// not a slowdown. gt-mzkucw records its full reads only.
 func (d *Daemon) recordJsonlExportSamples(db string, exportTable jsonlTableExporter) jsonlTableExporter {
 	return func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
 		start := d.clk().Now()
@@ -727,7 +733,14 @@ func (d *Daemon) recordJsonlExportSamples(db string, exportTable jsonlTableExpor
 		if err != nil {
 			return n, err
 		}
-		d.jsonlRates.Record(db, table, n, d.clk().Since(start))
+		if table == "events" {
+			return n, nil
+		}
+		took := d.clk().Since(start)
+		if ratio, ok := d.jsonlRates.Ratio(db, table, took); ok {
+			d.jsonlRatios = append(d.jsonlRatios, ratio)
+		}
+		d.jsonlRates.Record(db, table, n, took)
 		return n, nil
 	}
 }

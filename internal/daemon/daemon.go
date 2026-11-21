@@ -685,9 +685,17 @@ type Daemon struct {
 
 	// jsonlRates remembers each (database, table) export's last good rows and
 	// duration, so a later cycle can compare it against that sample
-	// (jsonl_export_rates.go). The next bead's ratios read it (gt-d85v5p);
-	// nothing else does.
+	// (jsonl_export_rates.go). The export wrapper takes that comparison and
+	// records the new sample (gt-d85v5p); the budget reads it next (gt-o1euzs).
 	jsonlRates jsonlExportRates
+
+	// jsonlRatios holds the slowdown ratios the current backup cycle has
+	// collected, one per (database, table) export that completed and had an
+	// earlier sample to compare against (recordJsonlExportSamples). It grows
+	// until a cycle starts: gt-sctvqf empties it there, and gt-o1euzs's budget
+	// reads it. Until those land nothing empties or reads it. Only the
+	// jsonl_git_backup goroutine touches it.
+	jsonlRatios []float64
 
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.

@@ -3814,6 +3814,183 @@ func TestJSONLBackupRecordsSamples(t *testing.T) {
 	})
 }
 
+// ratioExportFake returns a jsonlTableExportFn that advances clk by took[table]
+// on every call and writes rows[table] lines. A table in failing returns its
+// rows with the error after advancing, so the positive work a failed export did
+// makes "a failed export adds no ratio" go red when the guard is removed. The
+// events rows carry a created_at, because the export parses the newest row back
+// to record the boundary the next cycle appends from.
+func ratioExportFake(t *testing.T, clk *clockwork.FakeClock, rows map[string]int, took map[string]time.Duration, failing map[string]bool) jsonlTableExporter {
+	t.Helper()
+	return func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
+		clk.Advance(took[table])
+		if failing[table] {
+			return rows[table], errors.New("signal: killed: context deadline exceeded")
+		}
+		if table == "events" {
+			var buf []byte
+			for i := 0; i < rows[table]; i++ {
+				line, _ := json.Marshal(map[string]string{"id": "ev-" + itoa(i), "created_at": "2026-10-21 12:00:00"})
+				buf = append(buf, line...)
+				buf = append(buf, '\n')
+			}
+			path := filepath.Join(dir, table+".jsonl")
+			if err := os.WriteFile(path, buf, 0644); err != nil {
+				t.Fatalf("writing %s: %v", path, err)
+			}
+			return rows[table], nil
+		}
+		writeNLines(t, filepath.Join(dir, table+".jsonl"), rows[table])
+		return rows[table], nil
+	}
+}
+
+// TestJSONLBackupCollectsRatios: each successful table export records the ratio
+// of its duration to the table's previous sample, so the budget bead can tell
+// how much slower than normal the cycle ran (gt-d85v5p). A first export and a
+// failed export add nothing. Any events read adds nothing: the table is read
+// whole and from a boundary, the two are not the same quantity, so it is
+// neither sampled nor compared here.
+func TestJSONLBackupCollectsRatios(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	tables := append([]string{"issues"}, supplementalTables...)
+	rows := make(map[string]int, len(tables))
+	for _, table := range tables {
+		rows[table] = 10
+	}
+	tookFor := func(d time.Duration) map[string]time.Duration {
+		out := make(map[string]time.Duration, len(tables))
+		for _, table := range tables {
+			out[table] = d
+		}
+		return out
+	}
+	// newDaemon gives every subtest a fake clock and a budget wide enough for
+	// the durations it drives: the production supplemental budget is minutes.
+	newDaemon := func(t *testing.T) (*Daemon, *clockwork.FakeClock) {
+		t.Helper()
+		d, _ := backupTestDaemon(t)
+		clk := clockwork.NewFakeClockAt(start)
+		d.clock = clk
+		d.jsonlSupplementalTimeout = time.Hour
+		return d, clk
+	}
+	export := func(t *testing.T, d *Daemon, clk *clockwork.FakeClock, took map[string]time.Duration, failing map[string]bool, gitRepo, dataDir string) error {
+		t.Helper()
+		d.jsonlTableExportFn = ratioExportFake(t, clk, rows, took, failing)
+		_, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false)
+		return err
+	}
+
+	t.Run("a second export 20 times slower adds the ratio 20", func(t *testing.T) {
+		t.Parallel()
+		d, clk := newDaemon(t)
+		if err := export(t, d, clk, tookFor(time.Second), nil, t.TempDir(), t.TempDir()); err != nil {
+			t.Fatalf("first cycle: %v", err)
+		}
+		if len(d.jsonlRatios) != 0 {
+			t.Fatalf("first cycle collected ratios %v, want none: no table had a sample yet", d.jsonlRatios)
+		}
+		if err := export(t, d, clk, tookFor(20*time.Second), nil, t.TempDir(), t.TempDir()); err != nil {
+			t.Fatalf("second cycle: %v", err)
+		}
+		want := make([]float64, len(tables)-1) // every table but events
+		for i := range want {
+			want[i] = 20
+		}
+		if !slices.Equal(d.jsonlRatios, want) {
+			t.Errorf("ratios = %v, want %v (one per non-events table, all 20)", d.jsonlRatios, want)
+		}
+	})
+
+	t.Run("a first export adds no ratio", func(t *testing.T) {
+		t.Parallel()
+		d, clk := newDaemon(t)
+		if err := export(t, d, clk, tookFor(2*time.Second), nil, t.TempDir(), t.TempDir()); err != nil {
+			t.Fatalf("cycle: %v", err)
+		}
+		if len(d.jsonlRatios) != 0 {
+			t.Errorf("first cycle collected ratios %v, want none", d.jsonlRatios)
+		}
+	})
+
+	t.Run("a failed supplemental export adds no ratio", func(t *testing.T) {
+		t.Parallel()
+		d, clk := newDaemon(t)
+		if err := export(t, d, clk, tookFor(time.Second), nil, t.TempDir(), t.TempDir()); err != nil {
+			t.Fatalf("first cycle: %v", err)
+		}
+		slow := tookFor(time.Second)
+		slow["comments"] = 5 * time.Second // would add ratio 5 if it were recorded
+		slow["config"] = 20 * time.Second  // its sibling that succeeds in the same cycle
+		if err := export(t, d, clk, slow, map[string]bool{"comments": true}, t.TempDir(), t.TempDir()); err == nil {
+			t.Fatal("second cycle = nil error, want the failed comments export reported")
+		}
+		if slices.Contains(d.jsonlRatios, 5) {
+			t.Errorf("ratios = %v hold the failed comments export's 5", d.jsonlRatios)
+		}
+		if !slices.Contains(d.jsonlRatios, 20) {
+			t.Errorf("ratios = %v lack the successful config export's 20", d.jsonlRatios)
+		}
+		gotRows, perRow, ok := d.jsonlRates.PerRow("hq", "comments")
+		if !ok {
+			t.Fatal("the second cycle erased the comments sample")
+		}
+		if want := time.Second / time.Duration(rows["comments"]); gotRows != rows["comments"] || perRow != want {
+			t.Errorf("comments sample = (%d rows, %s/row), want the first cycle's (%d, %s)", gotRows, perRow, rows["comments"], want)
+		}
+	})
+
+	t.Run("an events read adds no ratio and no sample", func(t *testing.T) {
+		t.Parallel()
+		d, clk := newDaemon(t)
+		gitRepo, dataDir := t.TempDir(), t.TempDir()
+		var bounds []string
+		cycle := func(took map[string]time.Duration) error {
+			t.Helper()
+			raw := ratioExportFake(t, clk, rows, took, nil)
+			d.jsonlTableExportFn = func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+				if table == "events" {
+					bound, _ := eventsQueryBound(q.String())
+					bounds = append(bounds, bound)
+				}
+				return raw(table, q, dir, dataDir, budget)
+			}
+			_, err := d.exportDatabaseToJsonl("hq", gitRepo, dataDir, false)
+			return err
+		}
+
+		// The first cycle reads the whole events table.
+		if err := cycle(tookFor(time.Second)); err != nil {
+			t.Fatalf("full-events cycle: %v", err)
+		}
+		if _, _, ok := d.jsonlRates.PerRow("hq", "events"); ok {
+			t.Fatal("the full events read was recorded as a sample")
+		}
+		// The second cycle, on the same export, reads events from its boundary.
+		slow := tookFor(time.Second)
+		slow["events"] = 20 * time.Second
+		if err := cycle(slow); err != nil {
+			t.Fatalf("incremental-events cycle: %v", err)
+		}
+		if len(bounds) != 2 || bounds[0] != "" || bounds[1] != "2026-10-21 12:00:00" {
+			t.Fatalf("events read bounds = %v, want the whole table then its recorded boundary", bounds)
+		}
+		if _, _, ok := d.jsonlRates.PerRow("hq", "events"); ok {
+			t.Error("an events read was recorded as a sample")
+		}
+		if slices.Contains(d.jsonlRatios, 20) {
+			t.Errorf("ratios = %v hold an events read's 20", d.jsonlRatios)
+		}
+		for _, ratio := range d.jsonlRatios {
+			if ratio != 1 {
+				t.Errorf("ratio %v collected, want only the other tables' 1", ratio)
+			}
+		}
+	})
+}
+
 // TestSyncJsonlGitBackupSupplementalFailureNoFalseSpike: a tick whose events
 // export fails raises the export alert, and the rows it lost do not reach the
 // spike guard as "possible data loss".
