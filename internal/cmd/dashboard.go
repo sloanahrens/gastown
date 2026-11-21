@@ -496,6 +496,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// same as a town where no run has happened.
 	updateStatus := newUpdateStatusReader(townRoot).withLogf(dashboardLogf(out))
 	escalations := newDashEscalationReader(townRoot)
+	followups := newDashFollowupReader(townRoot)
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot).withPolecatTimes(polecatTimes)
 	cloudSettings := townSettings.ResolveCloud(os.Getenv)
@@ -561,6 +562,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Rework:         func() *dashboard.Rework { return rework.read(time.Now()) },
 		ReworkNumbers:  reworkNumbers.read,
 		Escalation:     func() *dashboard.Escalations { return escalations.read(time.Now()) },
+		Followups:      func() *dashboard.FollowupFlow { return followups.read(time.Now()) },
+		FollowupsEvery: 60 * time.Second,
 		Dispatch:       om.dispatch,
 		Attention:      dashboard.NewAttentionFollower(townRoot).Read,
 		AttentionItems: dashboard.NewAttentionFollower(townRoot).Items,
