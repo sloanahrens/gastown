@@ -255,6 +255,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 	out := make([]dashboard.Polecat, 0, len(in.Seats))
 	for _, s := range in.Seats {
 		p := dashboard.Polecat{Rig: s.Rig, Name: s.Name, RigParked: s.RigParked, Agent: s.Item.Agent, CountsTowardCapacity: s.Item.Disposition.CountsTowardCapacity}
+		p.RejectCount = dashSeatRejectCount(s.Issue)
 		if x := record[s.Rig+"/"+s.Name]; x != nil {
 			p.Landed24h, p.Approved24h = x.landed, x.approved
 			if x.scoreN > 0 {
@@ -331,6 +332,18 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 		return out[i].Rig+"/"+out[i].Name < out[j].Rig+"/"+out[j].Name
 	})
 	return out
+}
+
+// dashSeatRejectCount is the rework round a seat row carries: how many times
+// the bead it holds was refused for review. The notes ride the issue the row
+// already reads for its description, so the count costs no bead read of its
+// own. A seat whose bead record was not read has no notes to count and keeps
+// an empty count, so the row is built as before (gt-k9s5lv).
+func dashSeatRejectCount(issue *beads.Issue) int {
+	if issue == nil {
+		return 0
+	}
+	return land.CountRejections(issue.Notes)
 }
 
 // dashBeadSummary is what a seat's hover says about its bead: the description

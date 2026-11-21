@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	gtevents "github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -193,19 +194,87 @@ func TestBuildDashPolecatsCapsTheBeadDescription(t *testing.T) {
 	}
 }
 
+// reworkRows builds the seat's row from the issue the poll read for it.
+func reworkRows(issue *beads.Issue) []dashboard.Polecat {
+	seat := dashSeat{Rig: "gastown", Name: "rework", Session: "gt-rework", Issue: issue, Item: dashItem(polecat.StateWorking, polecat.WorkstateDisposition{CountsTowardCapacity: true})}
+	return buildDashPolecats(dashPolecatInputs{Now: time.Date(2026, 11, 20, 18, 0, 0, 0, time.UTC), SessionsKnown: true, Seats: []dashSeat{seat}})
+}
+
+// A seat's row carries how many times its bead was refused for review (gt-k9s5lv).
+func TestPolecatRowReworkCountsRejections(t *testing.T) {
+	t.Parallel()
+	rejection := func(attempt int) string {
+		return land.FormatRejectionNote(land.RejectionNote{Attempt: attempt, Kind: string(land.RejectReview), Reason: "one finding"})
+	}
+	for _, tc := range []struct {
+		name, notes string
+		want        int
+	}{
+		{"two review rejections", rejection(1) + "\n" + rejection(2), 2},
+		{"no rejection", "a note the dispatcher wrote", 0},
+	} {
+		// The notes live only on the listing issue; the row is built from what the poll read.
+		bd := &countingBeads{listing: []*beads.Issue{{ID: "gt-x", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/rework", Notes: tc.notes}}}
+		active, err := listActivePolecatWorkByName(bd, "gastown", map[string]string{"rework": "gt-x"})
+		if err != nil || active["rework"] == nil || active["rework"].Notes != tc.notes {
+			t.Fatalf("%s: seat read = %+v, err = %v; want the issue with its notes", tc.name, active["rework"], err)
+		}
+		got := reworkRows(active["rework"])
+		if len(got) != 1 || got[0].RejectCount != tc.want {
+			t.Errorf("%s: rows = %+v, want one with RejectCount %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A seat whose bead was not read keeps its row and an empty count; a failing
+// listing returns the poll's error instead (gt-k9s5lv). Inputs are built: (a)
+// an unlisted hook, (b) notes with a quoted cut-off header, (c) a failing listing.
+func TestPolecatRowReworkUnreadableNotes(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, hook string
+		bd         *countingBeads
+		wantErr    bool
+	}{
+		{"(a) missing bead record", "gt-gone", &countingBeads{}, false},
+		{"(b) garbled notes", "gt-x", &countingBeads{listing: []*beads.Issue{{ID: "gt-x", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/rework", Notes: "\x00 junk quoting \"MERGE REJECTION (attempt\" mid-line\n\xff junk"}}}, false},
+		{"(c) failing listing", "gt-x", &countingBeads{listErr: fmt.Errorf("store down")}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			active, err := listActivePolecatWorkByName(tc.bd, "gastown", map[string]string{"rework": tc.hook})
+			if err != nil && !tc.wantErr {
+				t.Fatalf("listActivePolecatWorkByName: %v", err)
+			}
+			if err == nil && tc.wantErr {
+				t.Fatal("failing listing: listActivePolecatWorkByName returned no error")
+			}
+			if tc.wantErr {
+				return
+			}
+			got := reworkRows(active["rework"])
+			if len(got) != 1 || got[0].Name != "rework" || got[0].RejectCount != 0 {
+				t.Errorf("rows = %+v, want the seat's row with an empty count", got)
+			}
+		})
+	}
+}
+
 // countingBeads counts the reads a seat's work costs. It embeds a nil
 // beads.Client, so any read it does not count (Show, List, ...) panics the
 // test rather than passing unnoticed.
 type countingBeads struct {
 	beads.Client
 	listing      []*beads.Issue
+	listErr      error
 	listCalls    int
 	showMultiple int
 }
 
 func (c *countingBeads) ListIssueStatuses(...beads.IssueStatus) ([]*beads.Issue, error) {
 	c.listCalls++
-	return c.listing, nil
+	return c.listing, c.listErr
 }
 
 func (c *countingBeads) ShowMultiple([]string) (map[string]*beads.Issue, error) {

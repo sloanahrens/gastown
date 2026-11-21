@@ -109,6 +109,13 @@ type Polecat struct {
 	// from Labels, so it rides its own field; absent when the bead has none
 	// or two that conflict (gt-cdhagm).
 	SPEstimate *int `json:"sp_estimate,omitempty"`
+	// RejectCount is how many times the seat's bead has been refused for
+	// review: the rework round the seat is on, counted from the notes the
+	// row's issue read already carries. Zero means no count — the seat holds
+	// no bead, or its bead was never refused; the table does not tell them
+	// apart, and the pill is drawn only above zero, so the field stays a
+	// plain int (gt-k9s5lv, gt-addb76).
+	RejectCount int `json:"reject_count,omitempty"`
 
 	// Slung is when the seat's bead was dispatched (Hooked, when the dispatch
 	// record dates it) and ElapsedSec is that time read against the hub's
