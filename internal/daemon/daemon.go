@@ -109,6 +109,11 @@ type Daemon struct {
 	// window) does not repeat it (gt-5dgbcy).
 	townStateNightlyLog logLatch
 
+	// townStateNightlyStep, when a test sets it, replaces the night's export so
+	// the wiring tests count the step's calls; production leaves it nil and the
+	// step runs maintenanceTownStateBackup (gt-i3880l).
+	townStateNightlyStep func(root string, now time.Time) error
+
 	// sandboxRecordCursor is the name the last sandbox record pass ended on.
 	// The next pass starts after it, so the walk rotates over the records and
 	// survives records coming and going between ticks.
