@@ -39,6 +39,24 @@ func TestLineLimitVerdict(t *testing.T) {
 	}
 }
 
+// TestSplitLineTellsTheSeatToPushFirst: the refusal past twice the limit sends
+// the seat to push, check ls-remote and comment both shas before the split.
+func TestSplitLineTellsTheSeatToPushFirst(t *testing.T) {
+	t.Parallel()
+	err := reportLineLimit(new(bytes.Buffer), new(bytes.Buffer), func() (int, error) { return 141, nil }, "Change: at most 70 added lines in 2 files.", true)
+	if err == nil {
+		t.Fatal("reportLineLimit accepted 141 added lines against a declared limit of 70")
+	}
+	_, second, _ := strings.Cut(err.Error(), "\n")
+	push, lsRemote := strings.Index(second, "git push origin HEAD:refs/heads/"), strings.Index(second, "git ls-remote origin")
+	split := strings.Index(second, "then comment that the bead needs a split")
+	if push < 0 || lsRemote < 0 || split < 0 || push > lsRemote || lsRemote > split ||
+		!strings.Contains(second, "never --force") || !strings.Contains(second, "check the tip is your HEAD") ||
+		!strings.Contains(second, "comment both shas") {
+		t.Fatalf("the split line does not push, check ls-remote, comment both shas, then ask for a split: %s", second)
+	}
+}
+
 // TestLineLimitReportRefusesPolecatOnly: a polecat past twice the declared
 // limit is refused on out, a crew branch gets prefixed warnings on errOut and
 // no error, and no declared limit means the count is never read (gt-zqg4m2).
