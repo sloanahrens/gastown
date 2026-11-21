@@ -370,3 +370,44 @@ func TestNukePreserveRepoPicksWorktreeThenBareRepo(t *testing.T) {
 		t.Error("nukePreserveRepo = nil for a departed worktree with a bare repo present, want the bare repo")
 	}
 }
+
+// TestPolecatAssignedIssue pins the decision: a spawning seat carries its
+// claim's hook_bead and reports no assigned issue; every other state keeps it.
+func TestPolecatAssignedIssue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state polecat.State
+		issue string
+		want  string
+	}{
+		{"a spawning seat with its claim", polecat.StateSpawning, "gt-claim", ""},
+		{"a working seat", polecat.StateWorking, "gt-work", "gt-work"},
+		{"a stalled seat", polecat.StateStalled, "gt-work", "gt-work"},
+		{"a spawning seat with no claim", polecat.StateSpawning, "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := polecatAssignedIssue(tc.state, tc.issue); got != tc.want {
+				t.Errorf("polecatAssignedIssue(%q, %q) = %q, want %q", tc.state, tc.issue, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPolecatListSpawning drives the list's rows: the spawning row shows no
+// issue and the working row keeps its own.
+func TestPolecatListSpawning(t *testing.T) {
+	t.Parallel()
+	rows := polecatListRows([]PolecatListItem{
+		{Name: "ember", State: polecat.StateSpawning, Issue: "gt-claim"},
+		{Name: "pike", State: polecat.StateWorking, Issue: "gt-work"},
+	})
+	if rows[0].Issue != "" {
+		t.Errorf("spawning row issue = %q, want none", rows[0].Issue)
+	}
+	if rows[1].Issue != "gt-work" {
+		t.Errorf("working row issue = %q, want gt-work", rows[1].Issue)
+	}
+}
