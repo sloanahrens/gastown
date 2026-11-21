@@ -385,7 +385,8 @@ func (l *Lander) compactQueue(rig string, existing []ExistingFollowup, skips *fo
 // is held back with the findings below it (gt-y5wvum). It returns the beads it
 // filed, the findings the bound held back, and the lines it wants logged.
 func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, existing []ExistingFollowup) (filed []ExistingFollowup, held []FollowupCandidate, lines []string) {
-	plans := FollowupPlans(w, res, fresh)
+	day := l.now().UTC()
+	plans := FollowupPlans(w, res, day, fresh)
 	bound := l.followupBackpressure()
 	open := openFollowups(existing)
 	// The budget measures a week of the feed: the beads it has filed in the
@@ -417,7 +418,6 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	// an append never counts against the bound or the budget, so the plans below
 	// the stop that have an open bundle still append (gt-n9v7r7).
 	var stop func(held int) string
-	day := l.now().UTC()
 	groups := followupGroups(fresh)
 	for i, p := range plans {
 		g := groups[i]
@@ -480,7 +480,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 			held = append(held, p.Findings...)
 			continue
 		}
-		spec := bundleSpec(w, res, day, g)
+		spec := p.Spec
 		id, err := l.Followups.CreateFollowup(spec)
 		if err != nil {
 			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(p.Findings)), err))
@@ -713,56 +713,18 @@ type FollowupPlan struct {
 }
 
 // FollowupPlans is the follow-up beads for the fresh findings of a landing, one
-// per group, in the order the feed visits them. The feed no longer files these
-// specs: since gt-n9v7r7 it files bundleSpec (a bundle of the package and UTC
-// day) or appends to the open one, and a plan's Spec keeps the old per-landing
-// shape until gt-4x669z makes the two one value. A plan's Findings are what the
-// feed uses from it (gt-4unmqk).
-func FollowupPlans(w Work, res Result, fresh []FollowupCandidate) []FollowupPlan {
+// per group, in the order the feed visits them. A plan's Spec is bundleSpec for
+// the group's package and the UTC day, the bead the feed creates when no open
+// bundle takes the group, so the plan and the bead the feed files are one value
+// (gt-4x669z), and the daemon test drives its findings through the same function
+// to the bead the store holds (gt-4unmqk).
+func FollowupPlans(w Work, res Result, day time.Time, fresh []FollowupCandidate) []FollowupPlan {
 	groups := followupGroups(fresh)
 	plans := make([]FollowupPlan, 0, len(groups))
 	for _, g := range groups {
-		plans = append(plans, FollowupPlan{Spec: followupSpec(w, res, g), Findings: g.Findings})
+		plans = append(plans, FollowupPlan{Spec: bundleSpec(w, res, day, g), Findings: g.Findings})
 	}
 	return plans
-}
-
-// followupSpec is the one bead a group of a landing's findings files: the
-// title the retired refinery's beads carried, the shaped body, and the labels
-// the next landing de-duplicates on — one fingerprint per finding it files for.
-func followupSpec(w Work, res Result, g followupGroup) FollowupSpec {
-	labels := []string{FollowUpLabel}
-	for _, c := range g.Findings {
-		labels = append(labels, Fingerprint(c.Path, c.Title))
-	}
-	acceptance := followupAcceptance(g.Findings)
-	return FollowupSpec{
-		Title:      followupTitle(w, res, g),
-		Body:       followupBody(w, res, g, acceptance),
-		Acceptance: acceptance,
-		Labels:     labels,
-		Priority:   followUpPriority,
-	}
-}
-
-// followupTitle names the first finding, the count when one bead groups
-// several, the package a split bead was filed for, and what raised them:
-// "Found: <finding> and 2 more in internal/land (om minor on gt-abc approved
-// at 0.62)".
-func followupTitle(w Work, res Result, g followupGroup) string {
-	first := g.Findings[0]
-	more := ""
-	if n := len(g.Findings) - 1; n > 0 {
-		more = fmt.Sprintf(" and %d more", n)
-	}
-	if g.Package != "" {
-		more += " in " + g.Package
-	}
-	raised := fmt.Sprintf("on %s approved at %.2f", w.BeadID, res.Verdict.Score)
-	if severity := strings.TrimSpace(first.Severity); severity != "" {
-		raised = "om " + severity + " " + raised
-	}
-	return fmt.Sprintf("Found: %s%s (%s)", NoteField(first.Title), more, raised)
 }
 
 // followupBody is the filed bead's description in the shape the spec

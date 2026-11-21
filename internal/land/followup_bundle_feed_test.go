@@ -2,6 +2,7 @@ package land
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -132,5 +133,25 @@ func TestFeedAppendsAfterTheFeedStopsCreating(t *testing.T) {
 	}
 	if n := strings.Count(log, "2-bead backpressure bound; held back 1 finding"); n != 1 {
 		t.Errorf("the stop is logged %d times, want once:\n%s", n, log)
+	}
+}
+
+// TestFollowupPlansAreTheBeadTheFeedFiles: FollowupPlans and the feed read one spec.
+// Over a landing with findings in two packages, each bead the feed creates equals
+// the plan FollowupPlans returns for the same day, field by field: title, body,
+// acceptance, labels and priority (gt-4x669z).
+func TestFollowupPlansAreTheBeadTheFeedFiles(t *testing.T) {
+	t.Parallel()
+	findings := []Finding{minorAt("internal/aaa/a.go", 1, "first"), minorAt("internal/zzz/z.go", 1, "second")}
+	f := newFollowupFixture(t, 0.8, findings)
+	f.run()
+	plans := FollowupPlans(f.work, f.result, followupDay, followupCandidates(findings))
+	if len(f.fake.created) != 2 || len(plans) != 2 {
+		t.Fatalf("created %d beads from %d plans, want two of each", len(f.fake.created), len(plans))
+	}
+	for i, p := range plans {
+		if !reflect.DeepEqual(f.fake.created[i], p.Spec) {
+			t.Errorf("bead %d = %+v, want the plan's spec %+v", i, f.fake.created[i], p.Spec)
+		}
 	}
 }
