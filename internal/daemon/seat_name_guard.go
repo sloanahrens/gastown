@@ -43,11 +43,12 @@ type StaleSeatSandbox struct {
 }
 
 // Line is the dispatcher's log line for the sandbox: the seat name it keeps out
-// of the draw, the phase, and the command that frees the name. The dispatcher
-// logs it once per tick, so a name drawn for three beads does not name the same
-// sandbox three times.
+// of the draw, the phase, the check and runbook that say whether the sandbox
+// holds unsaved work, and the command that frees the name after that check.
+// The dispatcher logs it once per tick, so a name drawn for three beads does
+// not name the same sandbox three times.
 func (f StaleSeatSandbox) Line() string {
-	return fmt.Sprintf("seat sandbox %s is in phase %s: its seat name is not slung to until the sandbox is deleted (%s)",
+	return fmt.Sprintf("seat sandbox %s is in phase %s: its seat name is not slung to until the sandbox is deleted; the sandbox may hold unsaved work, so check its seat with gt polecat check-recovery <rig>/<seat> and docs/sandbox-rescue-runbook.md, and delete it only when check-recovery reads clean (%s)",
 		f.Sandbox, f.Phase, seatSandboxDeleteCommand(f.Sandbox))
 }
 

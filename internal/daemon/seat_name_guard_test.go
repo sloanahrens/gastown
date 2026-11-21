@@ -116,6 +116,33 @@ func TestSeatNameGuardQuotesTheSandboxNameDeleteCommand(t *testing.T) {
 	}
 }
 
+// TestSeatNameGuardLineWarnsBeforeTheDeleteCommand: a failed sandbox may hold
+// unsaved work, so the dispatcher line names the check and the runbook before
+// the delete command, which stays quoted after them (gt-1h6tbf).
+func TestSeatNameGuardLineWarnsBeforeTheDeleteCommand(t *testing.T) {
+	t.Parallel()
+	guard := NewSeatNameGuard([]sandbox.Entry{{Name: "gt-dag", Phase: "Error"}}, seatNameGuardNow)
+	finding, ok := guard.Stale("gt-dag")
+	if !ok {
+		t.Fatal("Stale(gt-dag) = no finding, want the Error sandbox")
+	}
+	line := finding.Line()
+	del := strings.Index(line, "openshell sandbox delete 'gt-dag'")
+	if del < 0 {
+		t.Fatalf("Line() = %q, want the quoted delete command", line)
+	}
+	for _, want := range []string{"gt polecat check-recovery", "docs/sandbox-rescue-runbook.md"} {
+		at := strings.Index(line, want)
+		if at < 0 {
+			t.Errorf("Line() = %q, want it to name %q", line, want)
+			continue
+		}
+		if at > del {
+			t.Errorf("Line() names %q after the delete command; want the check and runbook first: %q", want, line)
+		}
+	}
+}
+
 // TestGatewaySandboxListingBoundsTheReadWithTheCallersTimeout: the one listing
 // the attention collector and the sling tick share applies the caller's bound
 // to the gateway call (gt-xrt3pb).
