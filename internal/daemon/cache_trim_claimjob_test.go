@@ -143,6 +143,38 @@ func TestCacheTrimClaimJobRunReportsAnUnfinishedJob(t *testing.T) {
 	}
 }
 
+// TestCacheTrimClaimJobApplyErrorsAreReturned is the bead's acceptance: an apply
+// the cluster refuses and a Job still running at the wait each come back as an
+// error, the second naming the Job and the wait.
+func TestCacheTrimClaimJobApplyErrorsAreReturned(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]cliReply
+		want      string
+	}{
+		{
+			name:      "the cluster refuses the apply",
+			overrides: map[string]cliReply{cacheTrimApplyVerb: {stderr: "Error from server: forbidden", code: 1}},
+			want:      "Error from server: forbidden",
+		},
+		{
+			name:      "the Job is still running at the wait",
+			overrides: map[string]cliReply{cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1}},
+			want:      "the trim Job " + cacheTrimJob + " did not finish within 15m0s",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", tc.overrides)
+			err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the run = %v, want an error carrying %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestCacheTrimClaimJobRunRefusesAnUnsetClock pins that the manifest's refusal
 // is returned before any cluster call: the pod's plan judges file ages by the
 // clock, so a Job built without one would remove files by an unknown age.
