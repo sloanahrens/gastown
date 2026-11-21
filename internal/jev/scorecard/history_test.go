@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -252,8 +253,20 @@ func TestHistoryLockFailureLeavesHistory(t *testing.T) {
 func TestHistoryDefaultLockFailureIsLogged(t *testing.T) {
 	t.Parallel()
 	path := HistoryPath(t.TempDir())
-	if err := os.MkdirAll(path+".lock", 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	// A link to itself fails an O_CREATE open with ELOOP on unix. A directory
+	// fails it only on Linux (EISDIR); macOS takes the flock on it instead.
+	if err := os.Symlink(filepath.Base(path)+".lock", path+".lock"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDONLY, 0o600)
+	if f != nil {
+		f.Close()
+	}
+	if !errors.Is(err, syscall.ELOOP) {
+		t.Fatalf("opening the lock path: %v, want ELOOP so the default lock fails here", err)
 	}
 	var log bytes.Buffer
 
