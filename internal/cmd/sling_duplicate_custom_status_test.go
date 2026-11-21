@@ -291,3 +291,37 @@ func TestDuplicateCustomStatusConcurrentMiss(t *testing.T) {
 		t.Errorf("the third fetch = %v, %v after %d reads, want one of the two held answers and no third read", third, err, reads.Load())
 	}
 }
+
+// TestDuplicateCustomStatusExpiryAndRecovery: an entry older than
+// duplicatePoolTTL is read again, a failed entry inside the TTL is still served,
+// and a failed entry past the TTL is replaced by a recovered read. The entries
+// are seeded stale because customStatuses stamps with time.Now(): there is no
+// clock to inject and nothing sleeps (gt-18sp1c).
+func TestDuplicateCustomStatusExpiryAndRecovery(t *testing.T) {
+	t.Parallel()
+	down := errors.New("bd down")
+	for _, tc := range []struct {
+		name      string
+		age       time.Duration
+		seeded    customStatusEntry
+		wantReads int32
+		want      []string
+		wantErr   error
+	}{
+		{"fresh entry is served", 0, customStatusEntry{statuses: []string{"old"}}, 0, []string{"old"}, nil},
+		{"stale entry is read again", 2 * duplicatePoolTTL, customStatusEntry{statuses: []string{"old"}}, 1, []string{"new"}, nil},
+		{"failed entry inside the TTL is still served", 0, customStatusEntry{err: down}, 0, nil, down},
+		{"failed entry past the TTL is replaced by the recovered read", 2 * duplicatePoolTTL, customStatusEntry{err: down}, 1, []string{"new"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reads atomic.Int32
+			tc.seeded.fetchedAt = time.Now().Add(-tc.age)
+			c := &duplicateDetailCache{registered: map[string]customStatusEntry{"/rig": tc.seeded}}
+			got, err := c.customStatuses("/rig", func() ([]string, error) { reads.Add(1); return []string{"new"}, nil })
+			if !slices.Equal(got, tc.want) || !errors.Is(err, tc.wantErr) || reads.Load() != tc.wantReads {
+				t.Errorf("= %v, %v after %d reads, want %v, %v after %d", got, err, reads.Load(), tc.want, tc.wantErr, tc.wantReads)
+			}
+		})
+	}
+}

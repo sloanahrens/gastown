@@ -684,7 +684,11 @@ func registeredCustomStatuses(store beads.Client, beadsDir string, details *dupl
 
 // customStatuses returns the registered custom statuses for beadsDir, read by
 // read when no read inside duplicatePoolTTL is held. A failed read is held too,
-// so a fetch inside the TTL reports it without asking bd again. read is a bd
+// so a fetch inside the TTL reports it without asking bd again. The trade-off:
+// a bd that recovers is not noticed until the TTL ends, so every fetch in that
+// time still warns and skips custom-status blockers; the alternative, reading
+// again on every failed fetch, would start a bd subprocess per fetch while bd is
+// down. read is a bd
 // subprocess, so it runs outside c.mu: a fetch that misses releases the lock,
 // reads, and takes it again to store, and two fetches of one directory that both
 // miss each read once, the later store winning (gt-18sp1c).
