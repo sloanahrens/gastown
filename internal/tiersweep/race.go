@@ -17,10 +17,13 @@ var raceArgs = []string{"-race", "-tags", "integration", "-run", "^TestCommandTr
 type raceRun struct {
 	pkg  string
 	args []string
+	// label keeps two entries on one package's log and resume key apart; a
+	// record written under the old unlabelled name is not matched once.
+	label string
 }
 
 // raceRuns is the race tier's table: the packages the race detector covers.
-var raceRuns = []raceRun{{racePkg, raceArgs}}
+var raceRuns = []raceRun{{racePkg, raceArgs, "integration walk"}}
 
 // Race runs the race tier and returns its summary line and whether it is RED.
 func (s *Sweep) Race() (line string, red bool) {
@@ -47,6 +50,7 @@ func (s *Sweep) raceTier(runs []raceRun) (line string, red bool) {
 	passed, failed, skipped := 0, 0, 0
 	var names []string
 	for _, run := range runs {
+		runner.Label = run.label
 		c := runner.Tier(TierRace, ".", slotPrefix(s.Opts.Nice, s.Opts.NoSlot), run.args, []string{run.pkg})
 		passed += c.Passed
 		failed += c.Failed

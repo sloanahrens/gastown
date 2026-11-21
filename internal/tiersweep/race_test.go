@@ -3,6 +3,8 @@ package tiersweep
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -74,7 +76,7 @@ func TestRaceSummary(t *testing.T) {
 		{
 			name: "fail",
 			code: 1,
-			want: "tier-sweep: race RED passed=0 failed=1 skipped=0 failed: ./internal/cmd (logs %s) in 0s",
+			want: "tier-sweep: race RED passed=0 failed=1 skipped=0 failed: ./internal/cmd [integration walk] (logs %s) in 0s",
 			red:  true,
 		},
 	}
@@ -130,5 +132,45 @@ func TestRaceTierRunsEveryEntryAndSumsTheirCounts(t *testing.T) {
 	line, red = s.raceTier(runs)
 	if w := fmt.Sprintf("tier-sweep: race RED passed=1 failed=1 skipped=0 failed: ./one (logs %s) in 0s", s.Opts.LogDir); line != w || !red {
 		t.Errorf("raceTier() = %q, %v; want %q, true", line, red, w)
+	}
+}
+
+// TestRaceTierKeepsTwoEntriesOnOnePackageApart: a label in an entry's name
+// gives two entries on one package their own log file and resume key, and an
+// entry with no label keeps the name it has today (gt-lzqiin).
+func TestRaceTierKeepsTwoEntriesOnOnePackageApart(t *testing.T) {
+	t.Parallel()
+	first := raceRun{pkg: "./a", args: []string{"-run", "First"}, label: "first"}
+	plain := raceRun{pkg: "./a", args: []string{"-run", "Plain"}}
+	// Either order: neither entry inherits the other's label.
+	for _, runs := range [][]raceRun{{first, plain}, {plain, first}} {
+		fake := &fakeTier{}
+		s := raceSweep(t, fake)
+		want := fmt.Sprintf("tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs %s) in 0s", s.Opts.LogDir)
+		if line, red := s.raceTier(runs); line != want || red {
+			t.Errorf("raceTier(%v) = %q, %v; want %q, false", runs, line, red, want)
+		}
+		if entries, err := os.ReadDir(s.Opts.LogDir); err != nil || len(entries) != 2 {
+			t.Errorf("raceTier(%v) logs = %v, %v; want one per entry", runs, entries, err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "resume.jsonl")
+	seedResume(t, path, "shaA", "", TierRace, "./a [first]")
+	fake := &fakeTier{}
+	s := raceSweep(t, fake)
+	s.Resume = &Resume{Path: path, Key: primeKey("shaA"), ReadFile: os.ReadFile, AppendFile: appendToFile}
+	want := fmt.Sprintf("tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs %s) in 0s", s.Opts.LogDir)
+	if line, red := s.raceTier([]raceRun{first, plain}); line != want || red {
+		t.Errorf("raceTier with a record for the labelled entry = %q, %v; want %q", line, red, want)
+	}
+	if c := fake.calls; len(c) != 1 || c[0].argv[len(c[0].argv)-2] != "Plain" {
+		t.Errorf("raceTier ran %v, want only the plain entry", c)
+	}
+	fake = &fakeTier{codes: map[string]int{". ./a": 1}}
+	s = raceSweep(t, fake)
+	line, red := s.raceTier([]raceRun{plain})
+	want = fmt.Sprintf("tier-sweep: race RED passed=0 failed=1 skipped=0 failed: ./a (logs %s) in 0s", s.Opts.LogDir)
+	if line != want || !red {
+		t.Errorf("raceTier with no label = %q, %v; want %q, true", line, red, want)
 	}
 }
