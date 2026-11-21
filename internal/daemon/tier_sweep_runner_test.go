@@ -1284,6 +1284,225 @@ func syncCreate(plan sweeprunner.Plan) sweeprunner.Step {
 	return sweeprunner.Step{}
 }
 
+// mirrorFSRecorder is the mirror's filesystem, in memory: the paths that exist, and
+// every operation in order.
+type mirrorFSRecorder struct {
+	paths map[string]bool
+	ops   []string
+	// fail makes the named operation (removeAll, mkdirAll, create, remove) fail.
+	fail map[string]error
+}
+
+func (m *mirrorFSRecorder) fs() *tierSweepMirrorFS {
+	return &tierSweepMirrorFS{
+		exists: func(p string) bool { return m.paths[p] },
+		removeAll: func(p string) error {
+			m.ops = append(m.ops, "removeAll "+p)
+			delete(m.paths, p)
+			return m.fail["removeAll"]
+		},
+		mkdirAll: func(p string) error { return m.fail["mkdirAll"] },
+		create:   func(p string) error { m.ops = append(m.ops, "create "+p); m.paths[p] = true; return m.fail["create"] },
+		remove:   func(p string) error { m.ops = append(m.ops, "remove "+p); delete(m.paths, p); return m.fail["remove"] },
+	}
+}
+
+// TestTierSweepMirrorRebuildsAfterAnInterruptedUpdate holds the rule: the updating
+// marker is written before the plan's steps, a launch that finds it removes exactly
+// the built mirror path and the marker before the steps (so the clone rebuilds it),
+// a launch that succeeds removes the marker and keeps the mirror, one that fails
+// leaves the marker, and a rig name that is not one path segment is refused before
+// any removal (gt-kx3plk).
+func TestTierSweepMirrorRebuildsAfterAnInterruptedUpdate(t *testing.T) {
+	t.Parallel()
+	// run builds one daemon whose mirror is the rig's built path and launches twice
+	// on it, the cluster failing the HEAD check only when fail says so.
+	run := func(t *testing.T, rec *mirrorFSRecorder, fails ...bool) (errs []error, mirror string) {
+		t.Helper()
+		d, spec, st := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		d.tierSweepSeams.mirrorFS = rec.fs()
+		mirror = filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+		spec.Snapshot = mirror
+		for _, fail := range fails {
+			cluster := &runnerCluster{t: t, status: "Complete", failRevParse: fail}
+			d.execCmd = (&runnerFakeCmds{answer: cluster.answer}).run
+			errs = append(errs, d.tierSweepLaunchRunner(context.Background(), st, spec).err)
+		}
+		return errs, mirror
+	}
+	t.Run("a marker left by a killed update removes the mirror and the marker, then the steps run", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}}
+		// The same town for the fixture and the pre-seeded marker: seed after the path is known.
+		d, spec, st := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		mirror := filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+		spec.Snapshot = mirror
+		rec.paths[mirror], rec.paths[mirror+".updating"] = true, true // a half-written clone: the directory and the marker
+		d.tierSweepSeams.mirrorFS = rec.fs()
+		cmds := &runnerFakeCmds{answer: (&runnerCluster{t: t, status: "Complete"}).answer}
+		d.execCmd = cmds.run
+		got := d.tierSweepLaunchRunner(context.Background(), st, spec)
+		if got.err != nil {
+			t.Fatalf("the launch failed: %v", got.err)
+		}
+		want := []string{"removeAll " + mirror, "remove " + mirror + ".updating", "create " + mirror + ".updating", "remove " + mirror + ".updating"}
+		if !slices.Equal(rec.ops, want) {
+			t.Errorf("filesystem operations %q, want %q: exactly the built path removed, the marker written before the steps and removed after them", rec.ops, want)
+		}
+		if len(runnerCalls(cmds.ran, "clone")) != 1 {
+			t.Errorf("the plan's clone did not run once after the removal: %q", cmds.ran)
+		}
+	})
+	t.Run("a launch that succeeds keeps the mirror and removes only its own marker", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}}
+		errs, mirror := run(t, rec, false)
+		want := []string{"create " + mirror + ".updating", "remove " + mirror + ".updating"}
+		if errs[0] != nil || !slices.Equal(rec.ops, want) {
+			t.Errorf("err %v, filesystem operations %q, want %q", errs[0], rec.ops, want)
+		}
+	})
+	t.Run("a launch that fails leaves the marker, and the next one rebuilds", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}}
+		errs, mirror := run(t, rec, true, false)
+		if errs[0] == nil {
+			t.Fatal("a failed HEAD check did not fail the launch")
+		}
+		want := []string{"create " + mirror + ".updating", "removeAll " + mirror, "remove " + mirror + ".updating", "create " + mirror + ".updating", "remove " + mirror + ".updating"}
+		if errs[1] != nil || !slices.Equal(rec.ops, want) {
+			t.Errorf("second launch err %v, operations %q, want %q: the failed one's marker stays and the next removes the mirror, then updates", errs[1], rec.ops, want)
+		}
+	})
+	t.Run("an active sweep Job refuses the launch before anything is removed", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}}
+		d, spec, st := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		d.tierSweepSeams.mirrorFS = rec.fs()
+		mirror := filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+		spec.Snapshot = mirror
+		rec.paths[mirror], rec.paths[mirror+".updating"] = true, true // a marker, and a Job still reading the mirror
+		cluster := &runnerCluster{t: t, jobs: "gt-sweep-gastown-deadbeef-otherrun\n", status: "Complete"}
+		d.execCmd = (&runnerFakeCmds{answer: cluster.answer}).run
+		var busy *sweeprunner.ActiveJob
+		if got := d.tierSweepLaunchRunner(context.Background(), st, spec); !errors.As(got.err, &busy) || len(rec.ops) != 0 {
+			t.Errorf("err %v, operations %q, want the launch refused for the running Job with nothing removed", got.err, rec.ops)
+		}
+	})
+	t.Run("a marker that cannot be removed after a good run fails the launch loud", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}, fail: map[string]error{"remove": errors.New("denied")}}
+		errs, _ := run(t, rec, false)
+		if errs[0] == nil || !strings.Contains(errs[0].Error(), "could not be removed") {
+			t.Errorf("err %v, want the launch failed naming the marker", errs[0])
+		}
+	})
+	for _, rig := range []string{"a/b", "..", ".", "", "x\\y"} {
+		t.Run("the rig name "+rig+" is refused before any removal", func(t *testing.T) {
+			t.Parallel()
+			rec := &mirrorFSRecorder{paths: map[string]bool{}}
+			d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+			d.tierSweepSeams.mirrorFS = rec.fs()
+			spec.Rig = rig
+			spec.Snapshot = filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", rig+".git")
+			rec.paths[spec.Snapshot+".updating"] = true // a marker that would otherwise remove the path
+			if marker, err := d.tierSweepMirrorPrepare(spec); err == nil || marker != "" || len(rec.ops) != 0 {
+				t.Errorf("rig %q: marker %q, err %v, operations %q: want the preparation refused with nothing removed", rig, marker, err, rec.ops)
+			}
+		})
+	}
+	t.Run("a Snapshot that is not the built path is refused with nothing removed", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}}
+		d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		d.tierSweepSeams.mirrorFS = rec.fs()
+		spec.Snapshot = "/elsewhere/gastown.git"
+		rec.paths[spec.Snapshot+".updating"] = true
+		if _, err := d.tierSweepMirrorPrepare(spec); err == nil || len(rec.ops) != 0 {
+			t.Errorf("err %v, operations %q, want the foreign path refused", err, rec.ops)
+		}
+	})
+}
+
+// TestTierSweepMirrorPreparationFailuresAreLoud holds that every filesystem failure of
+// the marker and the rebuild fails the launch with the operation's own error and the
+// path it was about, never a silent skip (gt-kx3plk).
+func TestTierSweepMirrorPreparationFailuresAreLoud(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		op      string
+		marker  bool // the marker is already there, so the rebuild runs
+		wantErr string
+	}{
+		{"removeAll", true, "removing the unfinished mirror"},
+		{"remove", true, "removing the marker"},
+		{"mkdirAll", false, "creating"},
+		{"create", false, "writing the marker"},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			t.Parallel()
+			rec := &mirrorFSRecorder{paths: map[string]bool{}, fail: map[string]error{tc.op: errors.New("denied")}}
+			d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+			d.tierSweepSeams.mirrorFS = rec.fs()
+			spec.Snapshot = filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+			rec.paths[spec.Snapshot+".updating"] = tc.marker
+			if _, err := d.tierSweepMirrorPrepare(spec); err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "denied") || (tc.op == "mkdirAll" && !strings.Contains(err.Error(), "sweep-repo")) {
+				t.Errorf("%s failing: err %v, want it naming %q and the cause", tc.op, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestTierSweepMirrorLaunchesAreSequential pins the ordering the shared mirror needs:
+// a launch returns only after its copy out of the mirror has run, and the marker is
+// removed before the next launch writes its own, so no fetch runs while a copy of
+// the previous launch is still reading (gt-kx3plk).
+func TestTierSweepMirrorLaunchesAreSequential(t *testing.T) {
+	t.Parallel()
+	d, spec, st := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+	rec := &mirrorFSRecorder{paths: map[string]bool{}}
+	d.tierSweepSeams.mirrorFS = rec.fs()
+	mirror := filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+	spec.Snapshot = mirror
+	cmds := &runnerFakeCmds{answer: (&runnerCluster{t: t, status: "Complete"}).answer}
+	d.execCmd = cmds.run
+	firstEnd := 0
+	for i := 0; i < 2; i++ {
+		if got := d.tierSweepLaunchRunner(context.Background(), st, spec); got.err != nil {
+			t.Fatalf("launch %d failed: %v", i+1, got.err)
+		}
+		if i == 0 {
+			firstEnd = len(cmds.ran)
+		}
+	}
+	plan, err := sweeprunner.Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the spec: %v", err)
+	}
+	var copyArgv, fetchArgv string
+	for _, step := range plan.Apply {
+		joined := strings.Join(step.Argv, " ")
+		if slices.Contains(step.Argv, "cp") {
+			copyArgv = joined
+		}
+		if slices.Contains(step.Argv, "fetch") {
+			fetchArgv = joined
+		}
+	}
+	// The fake records the exact argv of each command; launch one's commands end at
+	// firstEnd, so a copy found before it is launch one's and a fetch found after it
+	// is launch two's.
+	cp, fetch1 := slices.Index(cmds.ran[:firstEnd], copyArgv), slices.Index(cmds.ran[:firstEnd], fetchArgv)
+	fetch2 := slices.Index(cmds.ran[firstEnd:], fetchArgv)
+	if copyArgv == "" || fetchArgv == "" || fetch1 < 0 || cp < fetch1 || fetch2 < 0 {
+		t.Errorf("copy %d and first fetch %d in launch one (of %d commands), second fetch %d in launch two: want launch one's fetch, then its copy, then launch two's fetch", cp, fetch1, firstEnd, fetch2)
+	}
+	want := []string{"create " + mirror + ".updating", "remove " + mirror + ".updating", "create " + mirror + ".updating", "remove " + mirror + ".updating"}
+	if !slices.Equal(rec.ops, want) {
+		t.Errorf("marker operations %q, want %q: each launch's marker is gone before the next is written", rec.ops, want)
+	}
+}
+
 // TestSweepMirrorStepsLogTheirSeconds holds the log line the delta-fetch reading
 // depends on: the mirror's clone and its fetch each log the rig and the seconds
 // the command took, and no other command does (gt-4dx0su).

@@ -654,6 +654,9 @@ type tierSweepSeams struct {
 	// result, so a test fakes the launch by writing one there. Nil resolves to
 	// the daemon's own launcher over the configured backend.
 	launch func(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch
+	// mirrorFS is the filesystem the sweep mirror's updating marker and its
+	// rebuild use. Nil is the real one.
+	mirrorFS *tierSweepMirrorFS
 	// pollInterval is how long a launched run's status and result are read
 	// between looks. Zero is tierSweepRunnerPollInterval; a test sets it short
 	// so a retried read does not wait out real seconds.
@@ -3319,12 +3322,95 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	// through: a launch the claim guard holds is retried each poll, and a line
 	// per retry would read as a run started each time.
 	d.logger.Printf("tier_sweep: %s: launching %s on %s (run %s)", spec.Rig, strings.Join(st.tiers, ", "), cfg.Backend, spec.RunID)
+	marker, err := d.tierSweepMirrorPrepare(spec)
+	if err != nil {
+		launch.output, launch.exitCode, launch.err = "sweep-run: "+err.Error()+"\n", -1, err
+		return launch
+	}
 	out, code := tierSweepRunSteps(ctx, d, start)
 	launch.output, launch.exitCode = out, code
 	if code != 0 {
 		launch.err = fmt.Errorf("the run did not start (exit %d)", code)
+	} else if marker != "" {
+		// The mirror steps and the copy succeeded: the update is finished. A marker
+		// that cannot be removed fails the launch loud: the next launch then sees it
+		// and rebuilds the mirror, which is the safe direction.
+		if err := d.mirrorFS().remove(marker); err != nil {
+			launch.exitCode, launch.err = -1, fmt.Errorf("the mirror's updating marker %s could not be removed: %w; the next launch rebuilds the mirror", marker, err)
+			launch.output += "sweep-run: " + launch.err.Error() + "\n"
+		}
 	}
 	return launch
+}
+
+// tierSweepMirrorFS is the filesystem the sweep mirror's marker and rebuild touch.
+type tierSweepMirrorFS struct {
+	exists    func(path string) bool
+	removeAll func(path string) error
+	mkdirAll  func(path string) error
+	create    func(path string) error
+	remove    func(path string) error
+}
+
+func (d *Daemon) mirrorFS() *tierSweepMirrorFS {
+	if d.tierSweepSeams.mirrorFS != nil {
+		return d.tierSweepSeams.mirrorFS
+	}
+	return &tierSweepMirrorFS{
+		exists:    func(path string) bool { _, err := os.Lstat(path); return err == nil },
+		removeAll: os.RemoveAll,
+		mkdirAll:  func(path string) error { return os.MkdirAll(path, 0o700) },
+		create:    func(path string) error { return os.WriteFile(path, nil, 0o600) },
+		remove:    func(path string) error { return os.Remove(path) },
+	}
+}
+
+// tierSweepMirrorPath is the rig's persistent mirror, <town>/.runtime/sweep-repo/<rig>.git,
+// built from a rig name that is one path segment: a name with a separator, a dot
+// segment or nothing is refused, so no removal can reach another path.
+func tierSweepMirrorPath(town, rig string) (string, error) {
+	if town == "" || rig == "" || rig == "." || rig == ".." || strings.ContainsAny(rig, "/\\\x00") {
+		return "", fmt.Errorf("the sweep mirror of rig %q has no safe path under %q", rig, town)
+	}
+	return filepath.Join(town, ".runtime", "sweep-repo", rig+".git"), nil
+}
+
+// tierSweepMirrorPrepare marks the mirror as being updated before the plan's steps
+// run, so a crash, roll or OOM from the clone's start on leaves the marker, and a
+// launch that finds the marker removes the mirror and the marker first and lets the
+// plan's clone build it again: no repair in place and no retry. It returns the marker
+// to remove once the steps succeed, "" when the spec carries no mirror (the Docker
+// backend), and an error, with nothing removed, for a rig name or a Snapshot that is
+// not the built path (gt-kx3plk).
+func (d *Daemon) tierSweepMirrorPrepare(spec sweeprunner.Spec) (string, error) {
+	if spec.Snapshot == "" {
+		return "", nil
+	}
+	mirror, err := tierSweepMirrorPath(d.config.TownRoot, spec.Rig)
+	if err != nil {
+		return "", err
+	}
+	if spec.Snapshot != mirror {
+		return "", fmt.Errorf("the spec's mirror %q is not the rig's built path %q; nothing was removed", spec.Snapshot, mirror)
+	}
+	fsys := d.mirrorFS()
+	marker := mirror + ".updating"
+	if fsys.exists(marker) {
+		d.logger.Printf("tier_sweep: %s: the last update of the mirror did not finish; removing %s and cloning it again", spec.Rig, mirror)
+		if err := fsys.removeAll(mirror); err != nil {
+			return "", fmt.Errorf("removing the unfinished mirror %s: %w", mirror, err)
+		}
+		if err := fsys.remove(marker); err != nil {
+			return "", fmt.Errorf("removing the marker %s: %w", marker, err)
+		}
+	}
+	if err := fsys.mkdirAll(filepath.Dir(mirror)); err != nil {
+		return "", fmt.Errorf("creating %s: %w", filepath.Dir(mirror), err)
+	}
+	if err := fsys.create(marker); err != nil {
+		return "", fmt.Errorf("writing the marker %s: %w", marker, err)
+	}
+	return marker, nil
 }
 
 // errSweepPreflightUnwired is the reason a Kubernetes plan with no capacity
