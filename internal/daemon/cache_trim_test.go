@@ -4616,14 +4616,18 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 		du *int64
 		// mode is the trim's mode; empty is an apply.
 		mode string
+		// clockStep is how far the disk maintenance clock moves when the pod read
+		// runs; zero keeps the clock fixed.
+		clockStep time.Duration
 		// wantOutcome and wantStats are the run's record; wantRuns is 0 for a
 		// run that trims nothing.
 		wantOutcome string
 		wantStats   map[string]int64
 		wantRuns    int
-		// wantNoVerdict marks a case whose pass reports no verdict: an apply
-		// the cluster refused is retried soon.
-		wantNoVerdict bool
+		// wantVerdict is the verdict the pass reports. An apply the cluster
+		// refused reports false and is retried soon; every other case reports
+		// true. A zero value is false, so each case sets it.
+		wantVerdict bool
 	}{
 		{
 			name:        "applied under the cap",
@@ -4635,7 +4639,22 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 				cacheTrimStatAbsentFiles:  0,
 				cacheTrimStatKeptFiles:    0,
 			},
-			wantRuns: 1,
+			wantRuns:    1,
+			wantVerdict: true,
+		},
+		{
+			name:        "the clock moves while the pod reads run",
+			clockStep:   10 * time.Minute,
+			wantOutcome: cacheTrimRunOK,
+			wantStats: map[string]int64{
+				cacheTrimStatBytesBefore:  3000,
+				cacheTrimStatBytesAfter:   1024,
+				cacheTrimStatTrimmedFiles: 2,
+				cacheTrimStatAbsentFiles:  0,
+				cacheTrimStatKeptFiles:    0,
+			},
+			wantRuns:    1,
+			wantVerdict: true,
 		},
 		{
 			name:        "applied and still over twice the cap",
@@ -4648,16 +4667,17 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 				cacheTrimStatAbsentFiles:  0,
 				cacheTrimStatKeptFiles:    0,
 			},
-			wantRuns: 1,
+			wantRuns:    1,
+			wantVerdict: true,
 		},
 		{
-			name:          "the apply failed",
-			answerFrom:    "apply ",
-			reply:         cliReply{stderr: "the shard ConfigMap was refused", code: 1},
-			wantOutcome:   cacheTrimRunFailed,
-			wantStats:     map[string]int64{cacheTrimStatBytesBefore: 3000},
-			wantRuns:      1,
-			wantNoVerdict: true,
+			name:        "the apply failed",
+			answerFrom:  "apply ",
+			reply:       cliReply{stderr: "the shard ConfigMap was refused", code: 1},
+			wantOutcome: cacheTrimRunFailed,
+			wantStats:   map[string]int64{cacheTrimStatBytesBefore: 3000},
+			wantRuns:    1,
+			wantVerdict: false,
 		},
 		{
 			name:        "the trim Job did not finish",
@@ -4666,11 +4686,13 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 			wantOutcome: cacheTrimRunFailed,
 			wantStats:   map[string]int64{cacheTrimStatBytesBefore: 3000},
 			wantRuns:    1,
+			wantVerdict: true,
 		},
 		{
-			name:     "a dry run records nothing",
-			mode:     agentconfig.DiskMaintenanceModeDryRun,
-			wantRuns: 0,
+			name:        "a dry run records nothing",
+			mode:        agentconfig.DiskMaintenanceModeDryRun,
+			wantRuns:    0,
+			wantVerdict: true,
 		},
 	}
 	for _, tc := range cases {
@@ -4681,14 +4703,17 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 				mode = tc.mode
 			}
 			f := newCacheTrimFixture(t, mode, nil)
+			if tc.clockStep != 0 {
+				f.moveClockOnPodRead(tc.clockStep)
+			}
 			if tc.answerFrom != "" {
 				f.answerFrom(tc.answerFrom, tc.reply)
 			}
 			if tc.du != nil {
 				f.setDuReply(cliReply{stdout: cacheTrimDuReply(t, *tc.du)})
 			}
-			if verdict := f.d.cacheTrim(context.Background(), mode); verdict == tc.wantNoVerdict {
-				t.Fatalf("cacheTrim(%s) = %v, want the verdict %v; log:\n%s", mode, verdict, !tc.wantNoVerdict, f.log.String())
+			if verdict := f.d.cacheTrim(context.Background(), mode); verdict != tc.wantVerdict {
+				t.Fatalf("cacheTrim(%s) = %v, want %v; log:\n%s", mode, verdict, tc.wantVerdict, f.log.String())
 			}
 
 			runs := f.jobRuns(t)
@@ -4708,12 +4733,15 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 			if !reflect.DeepEqual(run.Stats, tc.wantStats) {
 				t.Errorf("run stats = %v, want %v", run.Stats, tc.wantStats)
 			}
-			if !run.StartedAt.Equal(diskMaintNow) || !run.EndedAt.Equal(diskMaintNow) {
-				t.Errorf("run runs %v to %v, want both %v, the daemon's clock", run.StartedAt, run.EndedAt, diskMaintNow)
+			// The run starts on the clock before the pod reads and ends on it after
+			// the listing, so a clock the pod read moves records two times.
+			wantEnded := diskMaintNow.Add(tc.clockStep)
+			if !run.StartedAt.Equal(diskMaintNow) || !run.EndedAt.Equal(wantEnded) {
+				t.Errorf("run runs %v to %v, want %v to %v, the daemon's clock", run.StartedAt, run.EndedAt, diskMaintNow, wantEnded)
 			}
 			// The due time comes from the configured cache_trim_interval, the
 			// default here since the fixture's patrol block names none.
-			wantDue := diskMaintNow.Add(2 * time.Hour)
+			wantDue := wantEnded.Add(2 * time.Hour)
 			if run.NextDue == nil || !run.NextDue.Equal(wantDue) {
 				t.Errorf("run next due = %v, want %v", run.NextDue, wantDue)
 			}
@@ -4723,6 +4751,21 @@ func TestCacheTrimRecordsRun(t *testing.T) {
 
 // ptrInt64 returns a pointer to v, for a case's optional figure.
 func ptrInt64(v int64) *int64 { return &v }
+
+// moveClockOnPodRead makes the pod read of a pass take step of the disk
+// maintenance clock, so a run that reads its start before the pod read and its
+// end after it records two different times, with no sleep.
+func (f *cacheTrimFixture) moveClockOnPodRead(step time.Duration) {
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+	run := f.d.execCmd
+	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(cmd.Args, " "), "get pods ") {
+			now = now.Add(step)
+		}
+		return run(cmd)
+	}
+}
 
 // cacheTrimTrimLogsVerb is the pass's read of the removal Job's result line,
 // the log of its trim container.
