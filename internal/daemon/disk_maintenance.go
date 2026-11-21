@@ -162,7 +162,7 @@ type diskMaintSeams struct {
 	// through; nil is the operating system's.
 	sweepRunsFS sweepRunsFileSystem
 	// jobLedger returns the ledger a maintenance job appends its run to; nil is
-	// the town's ledger under <town>/.runtime/jobs.
+	// the town's ledger, whose layout the jobledger package owns.
 	jobLedger func() (jobRunAppender, error)
 	// recordNodeDisk writes a pass's node disk entries into the town's record;
 	// nil is recordNodeDisk against the town root.
