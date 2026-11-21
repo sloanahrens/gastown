@@ -71,6 +71,7 @@ func TestHelpOffersVerb(t *testing.T) {
 		{"prose line starting with the verb", "Available Commands:\n  show             Show issue details\n\nsample rows live in Dolt.\n", "sample", false},
 		{"example line under another section", "Available Commands:\n  show             Show issue details\n\nExamples:\n  sample add --kind claude_plan\n", "sample", false},
 		{"verb after the table ended", "Available Commands:\n  show             Show issue details\nsample           Cost and usage samples\n", "sample", false},
+		{"indented paragraph after a blank line", "Available Commands:\n  show             Show issue details\n\n  sample rows live in Dolt.\n", "sample", false},
 	} {
 		if got := HelpOffersVerb([]byte(tc.help), tc.verb); got != tc.want {
 			t.Errorf("%s: HelpOffersVerb(%q) = %v, want %v", tc.name, tc.verb, got, tc.want)

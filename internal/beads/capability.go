@@ -49,7 +49,10 @@ var nonCommandHeadings = map[string]bool{
 func HelpOffersVerb(help []byte, verb string) bool {
 	heading := ""
 	for _, line := range strings.Split(string(help), "\n") {
+		// A blank line ends the group, so an indented paragraph beneath it is
+		// not read as a command row.
 		if strings.TrimSpace(line) == "" {
+			heading = ""
 			continue
 		}
 		// Only an unindented heading that ends in ":" has command rows beneath

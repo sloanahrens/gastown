@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// bdHelpFixturePath is the pinned capture of the bd build the town pins, the
-// text HelpOffersVerb is tested against (gt-dtibiv, gt-c2tetm).
+// bdHelpFixturePath is a scratch capture of fork build 0f9f640fe0f1, not the
+// pod image, the text HelpOffersVerb is tested against (gt-dtibiv, gt-c2tetm).
 const bdHelpFixturePath = "testdata/bd-help-0f9f640.txt"
 
 // bdHelpBuild is the build hash the fixture's header names.
