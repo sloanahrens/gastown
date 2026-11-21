@@ -18,6 +18,39 @@ func hookBranchTestOptions() Options {
 	return opts
 }
 
+// branchBeadShapes is every branch shape branchBead decides: the two polecat
+// branches it names a bead for and the six it refuses. The landing worker's
+// parser reads the same rows so the two agree on which branch carries which
+// bead's work (gt-u9fqky, gt-4p6lw6).
+var branchBeadShapes = []struct {
+	branch, want string
+}{
+	{"polecat/opal/gt-abc+x1", "gt-abc"},
+	{"polecat/agate/gt-abc.10+x0", "gt-abc.10"},
+	{"polecat//gt-x+y", ""},
+	{"polecat/s/gt-x+", ""},
+	{"polecat/s/gt-x", ""},
+	{"polecat/s/-x+y", ""},
+	{"owner/gt-abc+x1", ""},
+	{"", ""},
+}
+
+// TestBranchBeadShapes: the hook guard decides which bead a seat's branch
+// carries. Misreading an accept shape hooks a bead onto another bead's work;
+// misreading a reject shape claims a branch the town does not name a seat by
+// (gt-4p6lw6).
+func TestBranchBeadShapes(t *testing.T) {
+	t.Parallel()
+	for _, tc := range branchBeadShapes {
+		t.Run(tc.branch, func(t *testing.T) {
+			t.Parallel()
+			if got := branchBead(tc.branch); got != tc.want {
+				t.Errorf("branchBead(%q) = %q, want %q", tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunHookBranchGuardRefusesAnotherBeadsBranch: a seat the pool was asked
 // for again may still have its worktree on the branch a first sling made for
 // another bead. Hooking here would put this bead's hook onto that work, which
