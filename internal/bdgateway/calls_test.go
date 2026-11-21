@@ -223,6 +223,64 @@ func TestReadCallsTailErrors(t *testing.T) {
 	}
 }
 
+// TestReadCallsWindow is acceptance box 1 of the tail read: a window that opens
+// on a line boundary keeps its first line, and a window that opens inside a
+// line drops that partial line, even when it would parse whole.
+func TestReadCallsWindow(t *testing.T) {
+	t.Parallel()
+	first := callLine(t, callLogBase.Add(time.Second), "first-whole-line")
+	fragment := callLine(t, callLogBase, "cut-fragment")
+	cases := []struct {
+		name   string
+		before string // the bytes ahead of the window; the window is the last 8 MiB
+		window string // the window's first line, then whole lines
+		want   []string
+	}{
+		{
+			name:   "window opens on a line boundary",
+			before: callLine(t, callLogBase, "beyond-the-window") + "\n",
+			window: first + "\n",
+			want:   []string{"first-whole-line"},
+		},
+		{
+			name:   "window opens inside a line",
+			before: callLine(t, callLogBase, "beyond-the-window"),
+			window: fragment + "\n" + first + "\n",
+			want:   []string{"first-whole-line"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// One unparsable filler line pads the window to exactly maxCallReadBytes.
+			pad := maxCallReadBytes - int64(len(tc.window))
+			content := tc.before + tc.window + strings.Repeat("y", int(pad)-1) + "\n"
+			if err := os.WriteFile(filepath.Join(dir, DefaultCallLogName), []byte(content), 0o600); err != nil {
+				t.Fatalf("write call log: %v", err)
+			}
+
+			got, err := ReadCalls(dir, time.Time{}, 10)
+			if err != nil {
+				t.Fatalf("ReadCalls: %v", err)
+			}
+			if !slices.Equal(callers(got), tc.want) {
+				t.Errorf("callers = %v, want %v", callers(got), tc.want)
+			}
+		})
+	}
+
+	t.Run("a log that shrank after it was measured reads as empty", func(t *testing.T) {
+		// The file measures past the window but reads back no bytes.
+		got, err := readCallLogTail(&failingCallFile{})
+		if err != nil {
+			t.Fatalf("readCallLogTail: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("readCallLogTail = %q, want no bytes", got)
+		}
+	})
+}
+
 // TestReadCallsFile is acceptance box 2: a missing log is an empty list, an
 // unreadable one is an error, and only the last 8 MiB are read.
 func TestReadCallsFile(t *testing.T) {
@@ -267,9 +325,9 @@ func TestReadCallsFile(t *testing.T) {
 
 	t.Run("only the last 8 MiB are read", func(t *testing.T) {
 		dir := t.TempDir()
-		// The window starts three bytes into a line ("zzz" + a whole entry), so
-		// the first line ReadCalls sees is a line's tail that would parse as an
-		// entry held whole: it must be dropped as a fragment, not served.
+		// The window starts at the fragment's first byte: the "zzz" before it is
+		// outside the window. The fragment is a whole entry that would parse, but
+		// the window opens inside a line, so it must be dropped, not served.
 		fragment := callLine(t, callLogBase, "cut-fragment")
 		tail := "\n" + callLine(t, callLogBase.Add(time.Second), "in-the-window") + "\n"
 		need := maxCallReadBytes - int64(len(fragment)+len(tail))
