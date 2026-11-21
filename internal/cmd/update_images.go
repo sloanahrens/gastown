@@ -345,33 +345,53 @@ func planUpdateImagesPrune(ctx context.Context, seams updateImagesSeams) (update
 }
 
 // validateUpdateImagesPruneSeams refuses a prune that would report a plan over a
-// read it never made.
+// read it never made. Its errors carry no command prefix: runUpdateImagesPrune
+// adds it once, so a refusal names the command a single time.
 func validateUpdateImagesPruneSeams(s updateImagesSeams) error {
 	switch {
 	case s.FindTownRoot == nil:
-		return errors.New("gt update images prune: no town lookup is wired")
+		return errors.New("no town lookup is wired")
 	case s.Registry == nil:
-		return errors.New("gt update images prune: no registry is wired")
+		return errors.New("no registry is wired")
 	case s.Credentials == nil:
-		return errors.New("gt update images prune: no credential reader is wired")
+		return errors.New("no credential reader is wired")
 	case s.HTTPClient == nil:
-		return errors.New("gt update images prune: no HTTP client is wired")
+		return errors.New("no HTTP client is wired")
 	case s.PruneLedger == nil:
-		return errors.New("gt update images prune: no digest install record is wired")
+		return errors.New("no digest install record is wired")
 	case s.PruneGreen == nil:
-		return errors.New("gt update images prune: no green refs reader is wired")
+		return errors.New("no green refs reader is wired")
 	case s.PlanPrune == nil:
-		return errors.New("gt update images prune: no retention planner is wired")
+		return errors.New("no retention planner is wired")
 	}
 	return nil
 }
 
 // writeUpdateImagesPrunePlan prints the plan image by image, in the order the
-// gastown images are named: the keep lines, the delete lines with their reasons,
-// then the image's counts. The total follows the last image.
+// gastown images are named and then every other image the plan names, in the
+// order it first appears: the keep lines, the delete lines with their reasons,
+// then the image's counts and its bytes figure. Every entry of the plan is
+// printed and counted, so the total is the plan's own, whatever image an entry
+// names. The bytes step makes a figure for the three gastown images only, so an
+// image outside them prints its figure as left out. The total follows the last
+// image.
 func writeUpdateImagesPrunePlan(w io.Writer, plan update.PrunePlan, figures update.PruneFigures) {
+	images := []string{imagevalues.DaemonImage, imagevalues.PolecatImage, imagevalues.BdImage}
+	named := map[string]bool{
+		imagevalues.DaemonImage:  true,
+		imagevalues.PolecatImage: true,
+		imagevalues.BdImage:      true,
+	}
+	for _, entries := range [][]update.PruneEntry{plan.Keep, plan.Delete} {
+		for _, e := range entries {
+			if !named[e.Image] {
+				named[e.Image] = true
+				images = append(images, e.Image)
+			}
+		}
+	}
 	var keep, del int
-	for _, image := range []string{imagevalues.DaemonImage, imagevalues.PolecatImage, imagevalues.BdImage} {
+	for _, image := range images {
 		var k, d int
 		for _, e := range plan.Keep {
 			if e.Image == image {
