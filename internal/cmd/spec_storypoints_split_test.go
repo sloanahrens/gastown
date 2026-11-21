@@ -1070,8 +1070,8 @@ func TestSplitLabelStaleDryRun(t *testing.T) {
 
 // TestSpecDispatchSplitRouteEstimateFromLabels: an estimate that is already
 // current has no fresh numbers, so the route reads the labels the command
-// wrote. Two labels that disagree leave the value unset, and the route then
-// treats the bead as one it cannot judge.
+// wrote. Two rungs or two points that disagree leave the value unset; two
+// minutes give the larger (gt-9bjb3m).
 func TestSpecDispatchSplitRouteEstimateFromLabels(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1084,7 +1084,9 @@ func TestSpecDispatchSplitRouteEstimateFromLabels(t *testing.T) {
 		{"a complete estimate", []string{"sp:13", "sp-rung:all", "sp-minutes:20"}, 13, "all", 20},
 		{"a none estimate", []string{"sp-rung:none"}, 0, "none", 0},
 		{"two rungs disagree", []string{"sp:13", "sp-rung:all", "sp-rung:shape", "sp-minutes:20"}, 13, "", 20},
-		{"two minutes disagree", []string{"sp:13", "sp-rung:all", "sp-minutes:20", "sp-minutes:10"}, 13, "all", 0},
+		{"two minutes: the larger stands", []string{"sp:13", "sp-rung:all", "sp-minutes:20", "sp-minutes:10"}, 13, "all", 20},
+		{"two minutes, the larger first", []string{"sp:13", "sp-rung:all", "sp-minutes:10.5", "sp-minutes:9.7"}, 13, "all", 10.5},
+		{"three minutes: the largest stands", []string{"sp:13", "sp-rung:all", "sp-minutes:9.7", "sp-minutes:12", "sp-minutes:10"}, 13, "all", 12},
 		{"two points disagree", []string{"sp:13", "sp:8", "sp-rung:all", "sp-minutes:20"}, 0, "all", 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
