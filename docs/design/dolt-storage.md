@@ -392,6 +392,24 @@ Per database, `daemon/maintenance_state.json` (atomic write) records
 `reclaimed_bytes`. If the size cannot be re-measured after a gc, no run is
 recorded, so the next window gc's that database again.
 
+The same file's `squash` map holds, per database, the rolling squash's last
+run: `last_run` and `outcome`, one of `completed`, `failed` or `conflict`.
+`last_run` is the 24-hour gate a run must pass (gt-5v1fye), so it survives a
+daemon restart. Each run also appends one JSON line to
+`daemon/squash_ledger.jsonl`: `db`, `started`, `finished`, `outcome`,
+`commits_before` and `commits_after`, the step durations `rebase_ms`,
+`catchup_ms` and `swap_ms`, `retries`, and `error` (or `conflict`) when the run
+did not complete. A run refused by the run marker (`squash_run.lock`, held by
+another daemon) is not a run: it writes neither the state record nor a ledger
+line.
+
+The squash check fails closed. A state file it cannot read stops it: it checks
+no database, raises one `squash:state` alert, and is due again after an hour,
+because an unreadable record would otherwise reopen the 24-hour gate it holds.
+A run record refuses to overwrite a state file it cannot parse: the file is
+left as it is and its bytes are kept once as `<file>.corrupt`, a later refusal
+leaving that first copy standing.
+
 Before any gc, the same cycle takes the night's backup (gt-8z769.5): per
 database, under its own pause marker, `CALL dolt_backup('sync-url',
 'file://~/gt-backups/dolt/<date>.partial/<db>')` through the running server,
