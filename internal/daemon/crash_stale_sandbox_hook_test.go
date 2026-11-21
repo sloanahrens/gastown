@@ -191,6 +191,41 @@ func TestReapStaleSandboxHookClearsAHookWhoseBeadIsClosed(t *testing.T) {
 	}
 }
 
+// A dead seat that still holds its own open work keeps the hook: the bead is
+// this seat's to run, so the reap does not clear it even with the sandbox gone.
+func TestReapStaleSandboxHookKeepsAHookThisSeatStillHolds(t *testing.T) {
+	t.Parallel()
+	s := newStaleHook(t, staleHookOpts{
+		agent: "deepseek-flash-sandbox", hook: staleHookWork,
+		workStatus: "in_progress", workAssignee: "gastown/polecats/capable",
+	})
+	if s.reap() {
+		t.Fatal("reapStaleSandboxHook = true, want the hook kept for this seat's own work")
+	}
+	if got := s.hook(); got != staleHookWork {
+		t.Errorf("agent bead hook = %q, want %q untouched", got, staleHookWork)
+	}
+}
+
+// A dead seat whose work bead went to another seat keeps its hook while the
+// gateway still has the sandbox: the reap waits for the sandbox to be gone.
+func TestReapStaleSandboxHookKeepsAHookWhileTheSandboxExists(t *testing.T) {
+	t.Parallel()
+	s := newStaleHook(t, staleHookOpts{
+		agent: "deepseek-flash-sandbox", hook: staleHookWork,
+		workStatus: "open", workAssignee: "gastown/polecats/immortan", exists: true,
+	})
+	if s.reap() {
+		t.Fatal("reapStaleSandboxHook = true, want the hook kept while the sandbox exists")
+	}
+	if got := s.hook(); got != staleHookWork {
+		t.Errorf("agent bead hook = %q, want %q untouched", got, staleHookWork)
+	}
+	if len(s.gateway) != 1 || s.gateway[0] != "gw1|"+staleHookSession {
+		t.Errorf("gateway asked %v, want the seat profile's gateway and the session's sandbox name", s.gateway)
+	}
+}
+
 // A registry record that cannot be read reaps nothing and asks the gateway
 // nothing: the record cannot say whether the sandbox is orphaned.
 func TestReapStaleSandboxHookWithUnreadableRegistryReapsNothing(t *testing.T) {
