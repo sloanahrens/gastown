@@ -198,12 +198,13 @@ const redactedWord = "<redacted>"
 // scrubClaim replaces every token-shaped run in a finding's claim with
 // redactedWord and keeps every other byte: om's claim quotes the reviewed code,
 // and a credential in it must not reach the review log (gt-uxbi5y). It decides
-// no boundaries by word: at each letter or digit not glued to one before it, it
-// takes the run of token bytes that starts there and asks the rule, which is
+// no boundaries by word: at each letter or digit not glued to one before it (or
+// starting a distinctive prefix, glued or not), it takes the run of token bytes that starts there and asks the rule, which is
 // anchored at the start of what it is given, so a token in backticks, brackets,
 // quotes, a URL query or after any name or joiner starts at its own offset. A
-// token glued to a letter before it (`keyAKIA...`) is not found, unless the
-// letter ends an escape (`\n`, `%3D`): that is the boundary kept, since the rule's prefixes (`sk-`) occur inside ordinary words.
+// token with an ambiguous short prefix (`sk-`) glued to a letter before it is not
+// found, unless the letter ends an escape (`\n`, `%3D`): that is the one residual,
+// kept because the rule's prefixes (`sk-`) occur inside ordinary words.
 // The scrub cannot consult config.IsSecretKey (it needs a key name), so only
 // token shape counts. It runs before boundedClaim, which never cuts a marker.
 func scrubClaim(s string) string {
@@ -224,7 +225,7 @@ func scrubClaim(s string) string {
 // tokenEnd is the end of the token-shaped run of token bytes that starts at i,
 // or i when none does. A trailing '.' or ':' is the sentence's, not the token's.
 func tokenEnd(s string, i int) int {
-	if !isAlnum(s[i]) || i > 0 && isAlnum(s[i-1]) && !escapedBefore(s, i) {
+	if !isAlnum(s[i]) || i > 0 && isAlnum(s[i-1]) && !escapedBefore(s, i) && !startsDistinctivePrefix(s[i:]) {
 		return i
 	}
 	end := i
@@ -239,7 +240,20 @@ func tokenEnd(s string, i int) int {
 			return i + n
 		}
 	}
+	// ... and cut where its upper-case and digit bytes end, for a key id followed
+	// by lower-case letters (`ASIA...z9`).
+	if n := upperDigitPrefix(run); n < len(run) && config.LooksLikeSecret("", run[:n]) {
+		return i + n
+	}
 	return i
+}
+
+func upperDigitPrefix(s string) int {
+	n := 0
+	for n < len(s) && (s[n] >= '0' && s[n] <= '9' || s[n] >= 'A' && s[n] <= 'Z') {
+		n++
+	}
+	return n
 }
 
 // tokenJoiners are the non-alphanumeric bytes a token run holds.
@@ -256,6 +270,33 @@ func escapedBefore(s string, i int) bool {
 }
 
 func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
+
+// distinctivePrefixLen is the length from which a token prefix is taken not to
+// occur inside ordinary words: AKIA, AIza, xoxb-, ghp_ do not, sk- and sk_ do
+// (risk-assessment-framework, ask_user_for_input).
+const distinctivePrefixLen = 4
+
+// distinctivePrefixes are the rule's own prefixes of that length, and the ASIA of
+// its temporary-key shape: a token that starts with one is found at any offset,
+// glued to what is before it or not.
+var distinctivePrefixes = func() []string {
+	out := []string{"ASIA"}
+	for _, p := range config.SecretValuePrefixes() {
+		if len(p) >= distinctivePrefixLen {
+			out = append(out, p)
+		}
+	}
+	return out
+}()
+
+func startsDistinctivePrefix(s string) bool {
+	for _, p := range distinctivePrefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
 
 func isAlnum(c byte) bool {
 	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'

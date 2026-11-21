@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // The tokens are built from parts so this file holds no token-shaped literal.
@@ -60,12 +62,12 @@ func TestReviewLogScrubKeepsWhatIsNoSecret(t *testing.T) {
 
 // TestReviewLogScrubATokenFollowedByTokenBytes: the ASIA shape is whole-value, so a
 // key id followed by token bytes ('+x', '-x', '.x', '/x', '=x', ':x') is cut at
-// the joiner and replaced with the tail kept; a prefix token takes such a tail
+// the joiner, or ('z9', 'key') where its upper-case bytes end, and replaced with the tail kept; a prefix token takes such a tail
 // with it (more redaction, never less); a sentence's '.' or ':' after any token
 // is not part of it.
 func TestReviewLogScrubATokenFollowedByTokenBytes(t *testing.T) {
 	t.Parallel()
-	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x"} {
+	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x", "z9", "key"} {
 		claim := "id " + scrubTestFamilies["asia"] + tail + " end"
 		if got, want := scrubClaim(claim), "id <redacted>"+tail+" end"; got != want {
 			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
@@ -142,5 +144,58 @@ func TestReviewLogScrubHeldFinding(t *testing.T) {
 	}
 	if want := "the token [<redacted>] is logged"; held[0].Claim != want {
 		t.Errorf("queued claim = %q, want %q", held[0].Claim, want)
+	}
+}
+
+// scrubTestPrefixes are the rule's own prefixes, read from it, so a prefix added
+// to the rule is tested without a row for it.
+func scrubTestPrefixes(distinctive bool) []string {
+	var out []string
+	for _, p := range config.SecretValuePrefixes() {
+		if (len(p) >= distinctivePrefixLen) == distinctive {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// TestReviewLogScrubDistinctivePrefixesAreFoundGlued: a prefix too long to occur
+// in an ordinary word (AKIA, AIza, xoxb-, ghp_ ...) starts a token wherever it is,
+// glued to a letter, a digit or an underscore before it.
+func TestReviewLogScrubDistinctivePrefixesAreFoundGlued(t *testing.T) {
+	t.Parallel()
+	prefixes := append(scrubTestPrefixes(true), "AS"+"IA")
+	if len(prefixes) < 5 {
+		t.Fatalf("only %d distinctive prefixes: the rule's list was not read", len(prefixes))
+	}
+	for _, p := range prefixes {
+		token := p + strings.Repeat("Q", 16)
+		for _, before := range []string{"k", "Z", "7", "_"} {
+			claim := "pre" + before + token + " post"
+			if got, want := scrubClaim(claim), "pre"+before+"<redacted> post"; got != want {
+				t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+			}
+		}
+	}
+}
+
+// TestReviewLogScrubAmbiguousPrefixesKeepTheGlueRule: a short prefix (sk-, sk_)
+// occurs inside ordinary words, so it starts a token only after a byte that is
+// not a letter or digit; glued to a letter it is left, which is the one residual.
+func TestReviewLogScrubAmbiguousPrefixesKeepTheGlueRule(t *testing.T) {
+	t.Parallel()
+	prefixes := scrubTestPrefixes(false)
+	if len(prefixes) == 0 {
+		t.Fatal("no ambiguous prefix: the rule's list was not read")
+	}
+	for _, p := range prefixes {
+		inWord := "the ri" + p + "assessment-framework stays"
+		if got := scrubClaim(inWord); got != inWord {
+			t.Errorf("scrubClaim(%q) = %q, want it unchanged", inWord, got)
+		}
+		token := p + strings.Repeat("q", 16)
+		if got, want := scrubClaim("key "+token+" end"), "key <redacted> end"; got != want {
+			t.Errorf("an unglued %q token: scrubClaim = %q, want %q", p, got, want)
+		}
 	}
 }
