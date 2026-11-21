@@ -503,6 +503,10 @@ type Daemon struct {
 	// cacheTrimCtxSeen is a test seam: the context each cache trim cluster call
 	// runs under, handed over just before the call runs. nil in production.
 	cacheTrimCtxSeen func(ctx context.Context)
+	// cacheTrimClaimJobRoute routes cacheTrimClaim to the claim Job. It is true
+	// in production; false keeps the old listing route reachable for the tests
+	// that still drive it, until bead gt-wnet9c deletes both.
+	cacheTrimClaimJobRoute bool
 	// doltImage is the Dolt image check's item: the town's Dolt container runs
 	// an image more than one patch release behind the newest release, which the
 	// attention queue raises (gt-goda5m).
@@ -1914,6 +1918,9 @@ func New(config *Config) (*Daemon, error) {
 	}
 
 	d := &Daemon{
+		// The one route production takes (see the field).
+		cacheTrimClaimJobRoute: true,
+
 		config:          config,
 		patrolConfig:    patrolConfig,
 		patrolStamp:     startStamp,

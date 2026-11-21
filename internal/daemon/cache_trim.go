@@ -677,6 +677,9 @@ func cacheTrimOverTheCap(used, capBytes int64) bool {
 // interval. A claim no pod holds at all is cleared and reports false too. A
 // claim the config refuses, and a listing at or under the cap, are verdicts.
 func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string, listerDeadline time.Time) bool {
+	if d.cacheTrimClaimJobRoute {
+		return d.cacheTrimClaimViaJob(ctx, kubeconfig, claim, image, namespace, capBytes, apply, trimmed)
+	}
 	// started is the start of this claim's run for the job ledger, read from the
 	// daemon's injected clock: the run begins with the pod and listing reads
 	// below. Only a claim whose trim is applied records one.
