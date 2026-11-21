@@ -353,24 +353,61 @@ func (d *Daemon) syncTownStateBackup() {
 	defer d.recordPatrolRun(&d.townStateBackupRun, "town_state_backup", now)
 
 	gitRepo, _ := JsonlBackupRepo(d.config.TownRoot, d.patrol())
-	if err := d.runTownStateBackup(gitRepo); err != nil {
+	refused, err := d.runTownStateBackup(gitRepo)
+	if err != nil {
 		d.logger.Printf("town_state_backup: %v", err)
 		d.escalateAlert(alertKeyTownStateBackup, "town_state_backup", fmt.Sprintf("the town's configuration is not backed up to %s: %v", gitRepo, err))
 		return
 	}
 	d.clearAlerts("town_state_backup ran clean", alertKeyTownStateBackup)
+	d.reconcileTownStateRefusals(refused)
+}
+
+// reconcileTownStateRefusals raises one attention item for each path the tick
+// refused and clears the item of each path it no longer refuses. A failed raise
+// or clear leaves townStateRaised as it was, so the next tick tries again. The
+// text names the path, never a value. townStateRaised is touched only inside a
+// cycle, which jsonlGitBackupRunning serializes.
+func (d *Daemon) reconcileTownStateRefusals(refused []string) {
+	now := make(map[string]struct{}, len(refused))
+	for _, path := range refused {
+		now[path] = struct{}{}
+		if _, ok := d.townStateRaised[path]; ok {
+			continue
+		}
+		if err := d.escalateAlertErr(townStateRefusedKey(path), "town_state_backup", path+" holds a credential and is not backed up"); err != nil {
+			continue
+		}
+		if d.townStateRaised == nil {
+			d.townStateRaised = map[string]struct{}{}
+		}
+		d.townStateRaised[path] = struct{}{}
+	}
+	for path := range d.townStateRaised {
+		if _, ok := now[path]; ok {
+			continue
+		}
+		if err := d.clearAlertsErr("town_state_backup path is clean", townStateRefusedKey(path)); err == nil {
+			delete(d.townStateRaised, path)
+		}
+	}
+}
+
+// townStateRefusedKey is the alert key of one refused path.
+func townStateRefusedKey(path string) string {
+	return "town_state_backup:refused:" + path
 }
 
 // runTownStateBackup is one cycle's work: read the town, write its snapshot
-// under town-state/, commit what changed, push.
-func (d *Daemon) runTownStateBackup(gitRepo string) error {
+// under town-state/, commit what changed, push; it returns the refused paths.
+func (d *Daemon) runTownStateBackup(gitRepo string) ([]string, error) {
 	rigs, err := d.townStateRigNames()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	snap, err := collectTownState(d.townStateFileSystem(), rigs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	note := townStateCredentialNote(snap)
 	if note != "" {
@@ -381,11 +418,11 @@ func (d *Daemon) runTownStateBackup(gitRepo string) error {
 		// A failing tick's alert names the redacted and refused files too:
 		// their paths, never their values.
 		if note != "" {
-			return fmt.Errorf("%w; %s", err, note)
+			return nil, fmt.Errorf("%w; %s", err, note)
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return snap.Refused, nil
 }
 
 // writeTownStateSnapshot writes one collected snapshot under town-state/,
