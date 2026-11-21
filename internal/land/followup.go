@@ -81,6 +81,9 @@ type FollowupBeads interface {
 	// ListFollowups returns the beads labeled label, open and closed, at most
 	// a bounded number of them: the set a landing de-duplicates against.
 	ListFollowups(label string) ([]ExistingFollowup, error)
+	// AppendFollowup adds a landing's lines, boxes and labels to the open bundle
+	// id, wrapping ErrBundleFull when it has no room for them.
+	AppendFollowup(id string, add FollowupAddition) error
 }
 
 // ErrBundleFull is what appending to an open bundle reports, wrapped, when the
