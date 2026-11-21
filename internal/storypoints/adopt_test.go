@@ -292,3 +292,91 @@ func TestAdoptRefusesAnUnmeasurableHoldout(t *testing.T) {
 		})
 	}
 }
+
+// pairs is n log ratios alternating a and b, so their mean is (a+b)/2 and their
+// root mean square is sqrt((a²+b²)/2).
+func pairs(a, b float64, n int) []float64 {
+	v := make([]float64, n)
+	for i := range v {
+		v[i] = a
+		if i%2 == 1 {
+			v[i] = b
+		}
+	}
+	return v
+}
+
+// errorHoldout builds one bead per log ratio given, each with the same measured
+// minutes, so a bead's estimate is those minutes over e raised to its ratio and the
+// log of measured over estimated is the ratio passed in.
+func errorHoldout(firstRound bool, proposed, checked []float64) []Holdout {
+	const measured = 10.0
+	h := make([]Holdout, len(proposed))
+	for i := range h {
+		h[i] = Holdout{
+			Actual:     measured,
+			Proposed:   measured / math.Exp(proposed[i]),
+			Checked:    measured / math.Exp(checked[i]),
+			FirstRound: firstRound,
+		}
+	}
+	return h
+}
+
+// TestAdoptByErrorRules: the error rule adopts only when the first-round rmse falls
+// and the bias does not widen past its margin, and it reads only the first-round
+// beads. pairs(a, b, n) gives log ratios whose mean is (a+b)/2 and root mean square
+// is sqrt((a²+b²)/2), so each row's decision follows from the numbers it passes.
+func TestAdoptByErrorRules(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		holdout     []Holdout
+		wantAdopted bool
+		wantReason  []string
+	}{
+		// rmse falls from 0.2 to 0.1, both biases are zero.
+		{"lower first-round rmse, unchanged bias",
+			errorHoldout(true, pairs(-0.1, 0.1, 10), pairs(-0.2, 0.2, 10)),
+			true, []string{"adopted", "0.1000", "0.2000"}},
+		// rmse rises from 0.2 to 0.3, both biases are zero.
+		{"higher first-round rmse",
+			errorHoldout(true, pairs(-0.3, 0.3, 10), pairs(-0.2, 0.2, 10)),
+			false, []string{"rejected", "0.3000", "0.2000", "not lower"}},
+		// rmse falls from 0.5 to 0.3606, but the bias grows from 0 to 0.3.
+		{"bias widens by more than the margin",
+			errorHoldout(true, pairs(0.1, 0.5, 10), pairs(-0.5, 0.5, 10)),
+			false, []string{"rejected", "0.3606", "0.3000", "0.02"}},
+		// rmse falls from 0.5 to 0.4001 and the bias grows only to 0.01.
+		{"bias widens inside the margin",
+			errorHoldout(true, pairs(-0.39, 0.41, 10), pairs(-0.5, 0.5, 10)),
+			true, []string{"adopted", "0.4001", "0.5000", "0.0100"}},
+		// 12 beads, but only 9 of them first-round.
+		{"first-round holdout under the minimum size",
+			append(errorHoldout(true, pairs(-0.1, 0.1, 9), pairs(-0.2, 0.2, 9)),
+				errorHoldout(false, pairs(0, 0, 3), pairs(0, 0, 3))...),
+			false, []string{"rejected", "first-round holdout", "9 beads", "10", "not measurable"}},
+		// Ten non-first-round beads whose ratios would fail the comparison outright.
+		{"non-first-round beads are not read",
+			append(errorHoldout(true, pairs(-0.1, 0.1, 10), pairs(-0.2, 0.2, 10)),
+				errorHoldout(false, pairs(3, 3, 10), pairs(0, 0, 10))...),
+			true, []string{"adopted", "0.1000", "0.2000"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := AdoptByError(tc.holdout)
+			if got.Adopted != tc.wantAdopted {
+				t.Fatalf("AdoptByError = %+v, want adopted %v", got, tc.wantAdopted)
+			}
+			for _, want := range tc.wantReason {
+				if !strings.Contains(got.Reason, want) {
+					t.Errorf("reason %q does not name %q", got.Reason, want)
+				}
+			}
+			if strings.Contains(got.Reason, "\n") {
+				t.Errorf("reason is not one line: %q", got.Reason)
+			}
+		})
+	}
+}

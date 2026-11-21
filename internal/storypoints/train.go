@@ -43,11 +43,13 @@ type Sample struct {
 
 // Holdout is one holdout sample: its measured minutes, and the minutes the
 // proposed weights and the checked-in weights predict for it. Both predictions
-// are the blend of the shape and embedding models.
+// are the blend of the shape and embedding models. FirstRound marks the sample whose
+// prediction is the first the system made for the bead, before any re-estimate.
 type Holdout struct {
-	Actual   float64
-	Proposed float64
-	Checked  float64
+	Actual     float64
+	Proposed   float64
+	Checked    float64
+	FirstRound bool
 }
 
 // Model is one retrain: the proposed weights, the penalties they were fitted at,
