@@ -3977,6 +3977,8 @@ func tierSweepNoRunResult(ts tierSweepTierResult) bool {
 }
 
 // tierSweepNoResultCause names the step that stopped a no-result stage, without the runner's prefix (gt-jie24r).
+// With no failed step in the output it falls back to the stage's own error, the first sweep-run line, so a
+// no-result stage never names no cause.
 func tierSweepNoResultCause(output string) string {
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -3985,6 +3987,11 @@ func tierSweepNoResultCause(output string) string {
 				return line
 			}
 			return line + "; " + strings.TrimSpace(lines[i+1])
+		}
+	}
+	for _, line := range lines {
+		if why, ok := strings.CutPrefix(line, "sweep-run: "); ok {
+			return why
 		}
 	}
 	return ""

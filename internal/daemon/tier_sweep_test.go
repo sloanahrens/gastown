@@ -1450,8 +1450,15 @@ error: archive/tar: missed writing 93 bytes
 sweep-run: the run did not start (exit 1)
 sweep-run: no result was written
 `
+	// The 13:37 record of sweep a2cb3a03: the sync pod of the replaced daemon was still terminating.
+	const restart = `sweep-run: the run did not start (exit 1)
+persistentvolumeclaim/gt-sweep-repo-gastown unchanged
+sweep-run: kubectl -n gt-sweeps create -f - failed (exit 1): exit status 1
+Error from server (AlreadyExists): error when creating "STDIN": object is being deleted: pods "gt-sweep-sync-gastown" already exists
+`
+	const restartCause = `kubectl -n gt-sweeps create -f - failed (exit 1): exit status 1; Error from server (AlreadyExists): error when creating "STDIN": object is being deleted: pods "gt-sweep-sync-gastown" already exists`
 	const cause = "kubectl -n gt-sweeps cp /Users/sloan/gt/gastown/.repo.git/. gt-sweep-sync-gastown:/repo.git failed on attempt 2 of 2 (exit 1): exit status 1; error: archive/tar: missed writing 93 bytes"
-	for _, tc := range []struct{ in, want string }{{output, cause}, {"sweep-run: kubectl cp: context deadline exceeded\n", ""}, {"sweep-run: kubectl cp failed (exit 1)\n", "kubectl cp failed (exit 1)"}} {
+	for _, tc := range []struct{ in, want string }{{output, cause}, {"sweep-run: kubectl cp: context deadline exceeded\n", "kubectl cp: context deadline exceeded"}, {"no output at all\n", ""}, {restart, restartCause}, {"sweep-run: kubectl cp failed (exit 1)\n", "kubectl cp failed (exit 1)"}} {
 		if got := tierSweepNoResultCause(tc.in); got != tc.want {
 			t.Errorf("tierSweepNoResultCause(%q) = %q, want %q", tc.in, got, tc.want)
 		}
