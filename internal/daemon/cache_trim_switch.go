@@ -25,6 +25,12 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	// A claim whose trim failed stays parked until the daemon restarts: a
 	// verdict, no retry and no cluster call.
 	if d.cacheTrimParked(namespace, claim.ClaimName) {
+		// The parked claim's failed Job and pods may still be there, so it keeps the
+		// namespace's marker: a second claim here is refused, as it was when this
+		// claim failed.
+		if _, taken := trimmed[namespace]; !taken {
+			trimmed[namespace] = claim.ClaimName
+		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: PARKED after a failure; nothing trimmed until the daemon restarts", claim.ClaimName, namespace)
 		return true
 	}
@@ -38,6 +44,11 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 			return false
 		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the pods that mount it could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
+		// Any other failed read fails loud and stops, like a failed Job: parked, not
+		// retried on the next pass. A refused read above is the exception: its alert
+		// clears on its own when the sandbox may list pods.
+		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+		d.cacheTrimPark(namespace, claim.ClaimName, err)
 		return false
 	}
 	d.cacheTrimClearAlert(ctx, cacheTrimNoPodListKey(namespace), "the sandbox may list pods in "+namespace)

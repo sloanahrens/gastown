@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"slices"
@@ -206,10 +207,10 @@ func TestCacheTrimSwitchRecordsTheRun(t *testing.T) {
 	}
 }
 
-// TestCacheTrimSwitchRecordsNothingUnlessTrimmed pins that a dry run records no
+// TestCacheTrimSwitchRecordsNoRunOnADryRunAndAFailedRunOnAnUnreadableResult pins that a dry run records no
 // run, and that a Job whose result cannot be read records a failed run and never
 // an ok run with zero counts.
-func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
+func TestCacheTrimSwitchRecordsNoRunOnADryRunAndAFailedRunOnAnUnreadableResult(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
@@ -283,6 +284,7 @@ func TestCacheTrimSwitchParksOnEveryFailure(t *testing.T) {
 			cacheTrimFailWaitTrimLogVerb: {stdout: "could not remove /claim/x: permission denied\n"},
 		}, true},
 		{"an unreadable result line", map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}, false},
+		{"a pod list that cannot be read", map[string]cliReply{"get pods -n " + cacheTrimNamespace + " -o json": {stderr: "error: connection refused", code: 1}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -333,5 +335,34 @@ func TestCacheTrimSwitchDoesNotParkAPendingJob(t *testing.T) {
 	}
 	if runs := f.jobRuns(t); len(runs) != 0 {
 		t.Errorf("a pending Job recorded %+v, want no run", runs)
+	}
+}
+
+// TestCacheTrimSwitchParkedClaimStillHoldsItsNamespace pins that a parked claim
+// keeps the same-namespace marker: the failed Job and pods of the parked claim
+// may still be there and a trim's labels cannot tell two claims' objects apart,
+// so a second claim in that namespace is refused on the pass after the failure
+// and applies nothing.
+func TestCacheTrimSwitchParkedClaimStillHoldsItsNamespace(t *testing.T) {
+	t.Parallel()
+	const second = "gt-other-cache"
+	f := newCacheTrimFixture(t, "", nil)
+	f.d.cacheTrimPark(cacheTrimNamespace, cacheTrimClaimName, errors.New("an earlier pass failed"))
+	trimmed := map[string]string{} // one pass's ledger, as cacheTrim builds it
+	run := func(claim string) bool {
+		return f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: claim},
+			"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, trimmed)
+	}
+	if !run(cacheTrimClaimName) {
+		t.Fatalf("a parked claim = false, want true (a verdict)")
+	}
+	if !run(second) {
+		t.Fatalf("a second claim in the parked claim's namespace = false, want true (refused)")
+	}
+	if applied := f.applied(t); len(applied) != 0 {
+		t.Errorf("the second claim applied %v, want nothing: the parked claim still holds the namespace", applied)
+	}
+	if !strings.Contains(f.log.String(), "is trimmed in the same namespace") {
+		t.Errorf("the second claim's refusal is not logged; log: %s", f.log.String())
 	}
 }
