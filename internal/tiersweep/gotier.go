@@ -75,7 +75,7 @@ type Runner struct {
 	SkipList string
 	// Label, when not empty, is appended as "~label" to each package's name, so
 	// two runs of one package keep their own log and resume key. The skip list
-	// names the labelled entry; a record for the unlabelled name is not matched.
+	// names the labeled entry; a record for the unlabeled name is not matched.
 	Label string
 	// Env is the environment each package's command runs in. Nil inherits the
 	// process's environment.

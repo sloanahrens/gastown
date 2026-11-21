@@ -15,7 +15,7 @@ const racePkg = "./internal/cmd"
 // parallel tests. Only -race shows a regression there.
 var raceArgs = []string{"-race", "-tags", "integration", "-run", "^TestCommandTreeWalkIsReadOnlyUnderParallelTests$"}
 
-// raceLabelRE is what an entry's label may hold: the daemon reads the labelled
+// raceLabelRE is what an entry's label may hold: the daemon reads the labeled
 // name as a path and refuses a space or bracket (tierSweepUnitRE).
 var raceLabelRE = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 

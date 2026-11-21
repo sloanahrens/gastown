@@ -136,7 +136,7 @@ func TestRaceTierRunsEveryEntryAndSumsTheirCounts(t *testing.T) {
 	}
 }
 
-// TestRaceTierKeepsTwoEntriesOnOnePackageApart: a labelled entry keeps its own
+// TestRaceTierKeepsTwoEntriesOnOnePackageApart: a labeled entry keeps its own
 // log file and resume key from another entry on the same package, an empty
 // label keeps the name it has today, and a bad label is refused before any run.
 func TestRaceTierKeepsTwoEntriesOnOnePackageApart(t *testing.T) {
@@ -175,14 +175,14 @@ func TestRaceTierKeepsTwoEntriesOnOnePackageApart(t *testing.T) {
 	s.Resume = &Resume{Path: path, Key: primeKey("shaA"), ReadFile: os.ReadFile, AppendFile: appendToFile}
 	s.raceTier([]raceRun{first, plain})
 	if got := ran(fake); !slices.Equal(got, []string{"Plain"}) {
-		t.Errorf("with a record for the labelled entry raceTier ran %q, want only the plain entry", got)
+		t.Errorf("with a record for the labeled entry raceTier ran %q, want only the plain entry", got)
 	}
 	fake = &fakeTier{}
 	s = raceSweep(t, fake)
 	s.Opts.SkipList = "race:./a~first"
 	want := fmt.Sprintf("tier-sweep: race GREEN passed=1 failed=0 skipped=1 (logs %s) in 0s", s.Opts.LogDir)
 	if line, red := s.raceTier([]raceRun{first, plain}); line != want || red || !slices.Equal(ran(fake), []string{"Plain"}) {
-		t.Errorf("skipping the labelled entry = %q, %v, ran %q; want %q, false, [Plain]", line, red, ran(fake), want)
+		t.Errorf("skipping the labeled entry = %q, %v, ran %q; want %q, false, [Plain]", line, red, ran(fake), want)
 	}
 	fake = &fakeTier{codes: map[string]int{". ./a": 1}}
 	s = raceSweep(t, fake)

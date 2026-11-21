@@ -1022,7 +1022,7 @@ func TestTierSweepBead_ReadsOnlyItsOwnUnitsFailures(t *testing.T) {
 }
 
 // A race failure's unit carries the entry's label, so the daemon finds the log
-// the sweep wrote under the labelled name and quotes the failing test from it
+// the sweep wrote under the labeled name and quotes the failing test from it
 // (gt-lzqiin).
 func TestTierSweepBead_ReadsTheLabelledRaceLog(t *testing.T) {
 	t.Parallel()
@@ -1042,7 +1042,7 @@ func TestTierSweepBead_ReadsTheLabelledRaceLog(t *testing.T) {
 		t.Fatalf("created = %+v, want one bead", bd.created)
 	}
 	if want := "  --- FAIL: TestRaceOnly\n      walk_test.go:9: nope"; !strings.Contains(bd.created[0].Description, want) {
-		t.Errorf("description does not quote the labelled unit's log:\n%s", bd.created[0].Description)
+		t.Errorf("description does not quote the labeled unit's log:\n%s", bd.created[0].Description)
 	}
 }
 
