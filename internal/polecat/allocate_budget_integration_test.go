@@ -173,7 +173,7 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 		t.Fatalf("AllocateAndAdd: %v", err)
 	}
 	table := []commandCount{
-		{"cat-file", 1}, {"config", 4}, {"fetch", 1}, {"rev-parse", 3},
+		{"cat-file", 1}, {"config", 2}, {"fetch", 1}, {"rev-parse", 3},
 		{"show-ref", 1}, {"worktree", 2},
 	}
 	if msgs := pinProblems(table, rec); len(msgs) > 0 {
@@ -190,6 +190,32 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 		if countMismatches(mut.edit(append([]commandCount(nil), table...)), rec.counts()) == nil {
 			t.Fatalf("%s was not reported", mut.name)
 		}
+	}
+}
+
+// TestIntegrationAllocateAndAddRecordsTheUpstream: the branch's upstream is what
+// its work merges into on every start point. Git records it itself when the
+// start point is a remote-tracking ref (the default), so the pin is not run
+// there; a base that is a local branch is not tracked by git, so the pin still
+// writes it (gt-gol613).
+func TestIntegrationAllocateAndAddRecordsTheUpstream(t *testing.T) {
+	for _, tt := range []struct{ name, base, merge string }{
+		{"the default start point", "", "refs/heads/main"},
+		{"a base that is a local branch", "devx", "refs/heads/devx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, rec := newAllocateFixture(t)
+			runGit(t, rec.runIn, "branch", "devx", "origin/main")
+			_, p, err := m.AllocateAndAdd(AddOptions{BaseBranch: tt.base})
+			if err != nil {
+				t.Fatalf("AllocateAndAdd: %v", err)
+			}
+			got := strings.TrimSpace(gitOut(t, rec.runIn, "config", "--get", "branch."+p.Branch+".merge")) + " " +
+				strings.TrimSpace(gitOut(t, rec.runIn, "config", "--get", "branch."+p.Branch+".remote"))
+			if want := tt.merge + " origin"; got != want {
+				t.Errorf("upstream of %s = %q, want %q", p.Branch, got, want)
+			}
+		})
 	}
 }
 

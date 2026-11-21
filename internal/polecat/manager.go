@@ -1262,7 +1262,12 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		worktreeCreated = true
 	}
 
-	pinBranchUpstream(repoGit, branchName, m.branchBaseRef(opts.BaseBranch))
+	// With no base the start point is origin/<default>, a remote-tracking ref, and
+	// the worktree add above already recorded it as the branch's upstream: the
+	// pin would write the same two values again (gt-gol613).
+	if opts.BaseBranch != "" {
+		pinBranchUpstream(repoGit, branchName, m.branchBaseRef(opts.BaseBranch))
+	}
 
 	// Provision CLAUDE.md with gt done instructions (same as AddWithOptions path).
 	lockedRigName := filepath.Base(m.rig.Path)
