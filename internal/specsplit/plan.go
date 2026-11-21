@@ -36,6 +36,9 @@ type SplitPlan struct {
 // that cannot become a tested piece is refused, and so are groups that do not
 // hold each of the spec's boxes exactly once.
 func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
+	if spec.BaseFiles == nil {
+		return SplitPlan{}, fmt.Errorf("BaseFiles not supplied: the planner needs the files that exist on the base branch to say which files a piece creates; pass an empty map when none exists")
+	}
 	if len(groups) < 2 {
 		return SplitPlan{}, fmt.Errorf("a split needs at least two file groups, got %d", len(groups))
 	}
@@ -246,9 +249,9 @@ func (n createdName) note() string {
 var (
 	// backtickSpanRe matches one span of backticked code.
 	backtickSpanRe = regexp.MustCompile("`([^`]*)`")
-	// symbolSpanRe matches a code span that names a symbol: an identifier that
-	// is called or stands alone, not one followed by a selector.
-	symbolSpanRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|$)`)
+	// declSpanRe matches a code span that declares a Go symbol: a func, a method,
+	// a type, a const or a var, and captures the declared name.
+	declSpanRe = regexp.MustCompile(`^(?:func\s+(?:\([^)]*\)\s*)?|type\s+|const\s+|var\s+)([A-Za-z_][A-Za-z0-9_]*)`)
 )
 
 // createdNames returns the files, in aPackages, and the symbols one bullet
@@ -263,7 +266,7 @@ func createdNames(bullet string, aPackages map[string]bool) []createdName {
 		names = append(names, createdName{text: path})
 	}
 	for _, span := range backtickSpanRe.FindAllStringSubmatch(bullet, -1) {
-		if m := symbolSpanRe.FindStringSubmatch(strings.TrimSpace(span[1])); m != nil {
+		if m := declSpanRe.FindStringSubmatch(strings.TrimSpace(span[1])); m != nil {
 			names = append(names, createdName{text: m[1], symbol: true})
 		}
 	}
@@ -296,12 +299,16 @@ func citesPath(bullets []string, path string) bool {
 	return false
 }
 
-// citesSymbol reports whether any of the bullets cites the symbol by name.
+// citesSymbol reports whether any of the bullets cites the symbol in a code
+// span: the symbol as a whole identifier inside backticks. The same word in prose
+// cites nothing.
 func citesSymbol(bullets []string, symbol string) bool {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(symbol) + `\b`)
 	for _, bullet := range bullets {
-		if re.MatchString(bullet) {
-			return true
+		for _, span := range backtickSpanRe.FindAllStringSubmatch(bullet, -1) {
+			if re.MatchString(span[1]) {
+				return true
+			}
 		}
 	}
 	return false

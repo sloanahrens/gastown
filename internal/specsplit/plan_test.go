@@ -19,14 +19,15 @@ func acceptanceText(list ...Box) string {
 func twoPieceSpec() Spec {
 	return Spec{
 		Constraints: strings.Join([]string{
-			"- Add internal/config/env.go with `Read()`.",
+			"- Add internal/config/env.go with `func Read() string`.",
 			"- Create internal/specsplit/plan.go, which calls `Read()` with internal/config/env.go.",
 		}, "\n"),
 		Acceptance: strings.Join([]string{
 			"- [ ] The setting is read. Run: go test ./internal/config -run TestEnv; go vet ./...",
 			"- [ ] The plan is built. Run: go test ./internal/specsplit -run TestPlan",
 		}, "\n"),
-		Dirs: testDirs,
+		Dirs:      testDirs,
+		BaseFiles: map[string]bool{},
 	}
 }
 
@@ -124,7 +125,8 @@ func TestSplitPlanKeepsBoxes(t *testing.T) {
 			"- [ ] The grouping holds. Run: go test ./internal/specsplit -run TestGroup",
 			"- [ ] The plan holds. Run: go test ./internal/specsplit -run TestPlan",
 		}, "\n"),
-		Dirs: testDirs,
+		Dirs:      testDirs,
+		BaseFiles: map[string]bool{},
 	}
 	groups, err := Group(spec)
 	if err != nil {
@@ -154,7 +156,7 @@ func TestSplitPlanFirstHalfRoundedUp(t *testing.T) {
 		{Text: "The plan holds. Run: go test ./internal/specsplit -run TestPlan", Run: "go test ./internal/specsplit -run TestPlan"},
 		{Text: "The check holds. Run: go test ./internal/hygiene -run TestCheck", Run: "go test ./internal/hygiene -run TestCheck"},
 	}
-	spec := Spec{Acceptance: acceptanceText(original...), Dirs: testDirs}
+	spec := Spec{Acceptance: acceptanceText(original...), Dirs: testDirs, BaseFiles: map[string]bool{}}
 	groups := []FileGroup{
 		{Package: "internal/config", Boxes: original[:1]},
 		{Package: "internal/specsplit", Boxes: original[1:2]},
@@ -178,7 +180,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 	t.Parallel()
 	boxA := Box{Text: "The setting is read. Run: go test ./internal/config -run TestEnv", Run: "go test ./internal/config -run TestEnv"}
 	boxB := Box{Text: "The plan is built. Run: go test ./internal/specsplit -run TestPlan", Run: "go test ./internal/specsplit -run TestPlan"}
-	spec := Spec{Acceptance: acceptanceText(boxA, boxB), Dirs: testDirs}
+	spec := Spec{Acceptance: acceptanceText(boxA, boxB), Dirs: testDirs, BaseFiles: map[string]bool{}}
 	tests := []struct {
 		name    string
 		spec    Spec
@@ -211,7 +213,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 		},
 		{
 			name: "a box with no command",
-			spec: Spec{Acceptance: acceptanceText(boxA, Box{Text: "The plan is built."}), Dirs: testDirs},
+			spec: Spec{Acceptance: acceptanceText(boxA, Box{Text: "The plan is built."}), Dirs: testDirs, BaseFiles: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{{Text: "The plan is built."}}},
@@ -223,7 +225,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 			spec: Spec{Acceptance: acceptanceText(boxA, Box{
 				Text: "The plan is built. Run: make gate",
 				Run:  "make gate",
-			}), Dirs: testDirs},
+			}), Dirs: testDirs, BaseFiles: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{{Text: "The plan is built. Run: make gate", Run: "make gate"}}},
@@ -232,7 +234,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 		},
 		{
 			name: "a group box the spec does not hold",
-			spec: Spec{Acceptance: acceptanceText(boxA), Dirs: testDirs},
+			spec: Spec{Acceptance: acceptanceText(boxA), Dirs: testDirs, BaseFiles: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{boxB}},
@@ -244,7 +246,7 @@ func TestSplitPlanRefuses(t *testing.T) {
 			spec: Spec{Acceptance: acceptanceText(boxA, boxB, Box{
 				Text: "The check holds. Run: go test ./internal/hygiene -run TestCheck",
 				Run:  "go test ./internal/hygiene -run TestCheck",
-			}), Dirs: testDirs},
+			}), Dirs: testDirs, BaseFiles: map[string]bool{}},
 			groups: []FileGroup{
 				{Package: "internal/config", Boxes: []Box{boxA}},
 				{Package: "internal/specsplit", Boxes: []Box{boxB}},
@@ -282,7 +284,6 @@ func TestSplitPlanCreatedByNeedsACreation(t *testing.T) {
 		wantNote  bool
 	}{
 		{"a file absent from the base branch is created", map[string]bool{}, true},
-		{"no base file list reads every file as absent", nil, true},
 		{"a file A edits that exists on the base branch is not created", map[string]bool{"internal/config/env.go": true}, false},
 		{"another existing file does not hide the creation", map[string]bool{"internal/specsplit/specsplit.go": true}, true},
 	}
@@ -303,5 +304,92 @@ func TestSplitPlanCreatedByNeedsACreation(t *testing.T) {
 				t.Errorf("piece B created-by note for internal/config/env.go = %v, want %v:\n%s", got, tc.wantNote, plan.B.Text)
 			}
 		})
+	}
+}
+
+// symbolSpec is a two-package bead whose A bullets and B bullets are the ones a
+// row passes; both boxes are as in twoPieceSpec.
+func symbolSpec(aBullets, bBullets []string) Spec {
+	spec := twoPieceSpec()
+	spec.Constraints = strings.Join(append(append([]string{}, aBullets...), bBullets...), "\n")
+	spec.BaseFiles = map[string]bool{}
+	return spec
+}
+
+// TestSplitPlanSymbolCreatedByNeedsADeclaration: B says a symbol "is created by
+// bead PIECE_A" only when A's bullets declare it in a Go declaration code span
+// and B cites it in a code span. A symbol A only calls, and the same word in B's
+// prose, cite nothing.
+func TestSplitPlanSymbolCreatedByNeedsADeclaration(t *testing.T) {
+	t.Parallel()
+	const readNote = "`Read` is created by bead PIECE_A."
+	const configNote = "`Config` is created by bead PIECE_A."
+	declare := []string{"- Add internal/config/env.go with `func Read() string` and `type Config struct{}`."}
+	tests := []struct {
+		name     string
+		a, b     []string
+		want     []string
+		wantNone []string
+	}{
+		{"a declared function cited in a code span of B",
+			declare,
+			[]string{"- Create internal/specsplit/plan.go, which calls `Read()`."},
+			[]string{readNote}, []string{configNote}},
+		{"a declared type cited in a code span of B",
+			declare,
+			[]string{"- Create internal/specsplit/plan.go with a field of type `Config`."},
+			[]string{configNote}, []string{readNote}},
+		{"a symbol A only calls is not created",
+			[]string{"- Edit internal/config/env.go: it calls `Read()`."},
+			[]string{"- Create internal/specsplit/plan.go, which calls `Read()`."},
+			nil, []string{readNote}},
+		{"the word in B's prose cites nothing",
+			append(append([]string{}, declare...), "- Callers in internal/config/env.go use `Read()`."),
+			[]string{"- Create internal/specsplit/plan.go and Read the setting once."},
+			nil, []string{readNote, configNote}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := symbolSpec(tc.a, tc.b)
+			groups, err := Group(spec)
+			if err != nil {
+				t.Fatalf("Group() error = %v, want none", err)
+			}
+			plan, err := Plan(spec, groups)
+			if err != nil {
+				t.Fatalf("Plan() error = %v, want none", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(plan.B.Text, want) {
+					t.Errorf("piece B text lacks %q:\n%s", want, plan.B.Text)
+				}
+			}
+			for _, none := range tc.wantNone {
+				if strings.Contains(plan.B.Text, none) {
+					t.Errorf("piece B text holds %q, which nothing here creates:\n%s", none, plan.B.Text)
+				}
+			}
+		})
+	}
+}
+
+// TestSplitPlanRequiresBaseFiles: a nil BaseFiles is an error, since a caller
+// that forgot it would get the created-by trap with no signal; an empty non-nil
+// map is the legitimate "nothing exists" input.
+func TestSplitPlanRequiresBaseFiles(t *testing.T) {
+	t.Parallel()
+	spec := twoPieceSpec()
+	groups, err := Group(spec)
+	if err != nil {
+		t.Fatalf("Group() error = %v, want none", err)
+	}
+	spec.BaseFiles = nil
+	if _, err := Plan(spec, groups); err == nil || !strings.Contains(err.Error(), "BaseFiles not supplied") {
+		t.Errorf("Plan() with a nil BaseFiles error = %v, want one naming %q", err, "BaseFiles not supplied")
+	}
+	spec.BaseFiles = map[string]bool{}
+	if _, err := Plan(spec, groups); err != nil {
+		t.Errorf("Plan() with an empty BaseFiles error = %v, want none", err)
 	}
 }
