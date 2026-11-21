@@ -1567,8 +1567,12 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 //
 // It shares the revival rule's heartbeat guard, work checks and cooldown, so a
 // seat is revived for a bead at most once per reviveCooldown, whichever rule
-// revived it. A failed read is Unknown and nothing is acted on. It reports
-// ok=false when the rule does not apply.
+// revived it. The agent record is read before the escalations: only one that
+// says the seat stopped on an escalated exit can be waiting on an answer
+// (StoppedOnEscalated, the record SeatEscalationHold gates on), so the
+// town-wide list is not read for a seat whose record says otherwise. A failed
+// read is Unknown and nothing is acted on. It reports ok=false when the rule
+// does not apply.
 func (s *Scanner) reviveAnswered(rig, name string, res liveness.Result) (Finding, bool) {
 	f := Finding{Kind: "seat", Subject: name}
 	// A close at or before now-escalationGrace that is after now-QuietFor needs
@@ -1587,6 +1591,19 @@ func (s *Scanner) reviveAnswered(rig, name string, res liveness.Result) (Finding
 		return f, true
 	}
 	if work == nil {
+		return Finding{}, false
+	}
+	// The escalation list is one town-wide read, and a seat whose record is not
+	// the escalated stop is not waiting on an answer: a seat that raised an
+	// escalation and kept working is not held (SeatEscalationHold), so no close
+	// is owed to it. Read the list only for a seat that stopped on one, and a
+	// list outage is Unknown only for those (gt-ywpshe).
+	agent, err := s.env.AgentRecord(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "agent state unreadable: "+err.Error()
+		return f, true
+	}
+	if !agent.StoppedOnEscalated() {
 		return Finding{}, false
 	}
 	raised, err := s.env.PolecatEscalations(rig)
