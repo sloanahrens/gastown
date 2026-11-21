@@ -877,3 +877,38 @@ func TestDispatchClockADoneWithAnyStatusEndsTheRun(t *testing.T) {
 		})
 	}
 }
+
+// spawnEv builds the spawn line the polecat spawn writes for rig's seat polecat.
+func spawnEv(at, rig, polecat string) Event {
+	return Event{Timestamp: at, Type: TypeSpawn, Actor: "gt", Payload: SpawnPayload(rig, polecat)}
+}
+
+// TestLastSpawn: the latest spawn of the seat by timestamp, zero when none parses.
+func TestLastSpawn(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		evs  []Event
+		want string // "" for zero
+	}{
+		{"two spawns of the seat, the later wins", []Event{spawnEv(t11, "gastown", "nux"), spawnEv(t9, "gastown", "nux")}, t11},
+		{"another rig's seat of the same name is ignored", []Event{spawnEv(t9, "gastown", "nux"), spawnEv(t11, "longeye", "nux")}, t9},
+		{"another seat in the same rig is ignored", []Event{spawnEv(t9, "gastown", "nux"), spawnEv(t11, "gastown", "capable")}, t9},
+		{"no spawn of the seat is zero", []Event{spawnEv(t9, "gastown", "capable")}, ""},
+		{"only spawn of the seat has an unparseable timestamp is zero", []Event{spawnEv("not-a-time", "gastown", "nux")}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := LastSpawn(tt.evs, "gastown", "nux")
+			if tt.want == "" {
+				if !got.IsZero() {
+					t.Errorf("LastSpawn = %v, want zero time", got)
+				}
+				return
+			}
+			if !got.Equal(mustTime(t, tt.want)) {
+				t.Errorf("LastSpawn = %v, want %s", got, tt.want)
+			}
+		})
+	}
+}
