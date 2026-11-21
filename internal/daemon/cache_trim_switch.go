@@ -61,13 +61,15 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	trimmed[namespace] = claim.ClaimName
 	removed, absent, kept, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply)
 	if err != nil {
-		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: failed: %v", claim.ClaimName, namespace, err)
-		// A Job still running at the wait's end is no failure: it is read at a
-		// later pass, so nothing is recorded or parked.
-		if !errors.Is(err, errCacheTrimJobPending) {
-			d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
-			d.cacheTrimPark(namespace, claim.ClaimName, err)
+		// A Job still running at the wait's end is a verdict, not a failure: its
+		// result is read at a later pass, so nothing is recorded or parked.
+		if errors.Is(err, errCacheTrimJobPending) {
+			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the trim Job %s is still running; its result is read at the next pass", claim.ClaimName, namespace, cacheTrimJobName(claim.ClaimName))
+			return true
 		}
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: failed: %v", claim.ClaimName, namespace, err)
+		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+		d.cacheTrimPark(namespace, claim.ClaimName, err)
 		return false
 	}
 	if !apply {
