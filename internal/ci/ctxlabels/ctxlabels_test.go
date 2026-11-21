@@ -373,3 +373,85 @@ func TestSeedPinMatchesRefuses(t *testing.T) {
 		})
 	}
 }
+
+// knownOlderBDBuilds lists the bd commits deploy/daemon/image-pins named before
+// the samples build (gt-4zyqzl). Pin locations are from `git log -S<sha> --
+// deploy/daemon/image-pins` on origin/main; each entry is an ancestor of
+// daemonimage.BDSamplesFloor (0f9f640f) and of the current bd pin (c1efb992),
+// per `git merge-base --is-ancestor` in the beads repository (all exit 0).
+var knownOlderBDBuilds = []string{
+	// b7e5e9ce: pinned in 583fb26ff (gt-nmy5yu), 5c3305180 (gt-smitrf), and
+	// 914b0586e (gt-fenu9p, a revert to the schema-66 build); left by 1ba150e37 (gt-tgje6t).
+	"b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+	// 44cb296b: pinned in bbb4bf198 (gt-xvaxs9); left by 583fb26ff.
+	"44cb296bbe4180f31553cb61f753aa8bfb3f9321",
+	// ecf0fc58: pinned in 6d36955f0 (gt-f4bcht); left by bbb4bf198.
+	"ecf0fc58c789b6d5a158bcf4b485662bc15f296d",
+	// d0f0010e: pinned in 343d2c5a4 (gt-gg9hv.31); left by 6d36955f0.
+	"d0f0010ef037e8de0006f2a4d0e01019120a5d8c",
+}
+
+// TestKnownOlderBDBuildsAreFullShas holds the list to 40 lowercase hex commits
+// with no repeats, so the image-pins read is never handed a bad or duplicate sha.
+// fullShaProblems names each way a list of commit ids is not a list of distinct
+// full lowercase shas: a wrong length, a character outside 0-9a-f, a repeat.
+func fullShaProblems(entries []string) []string {
+	var problems []string
+	seen := make(map[string]bool, len(entries))
+	for _, sha := range entries {
+		if len(sha) != 40 {
+			problems = append(problems, fmt.Sprintf("%q has %d characters, want 40", sha, len(sha)))
+		}
+		for _, r := range sha {
+			if !('0' <= r && r <= '9' || 'a' <= r && r <= 'f') {
+				problems = append(problems, fmt.Sprintf("%q holds %q, want only lowercase hex", sha, r))
+				break
+			}
+		}
+		if seen[sha] {
+			problems = append(problems, fmt.Sprintf("%q is named twice", sha))
+		}
+		seen[sha] = true
+	}
+	return problems
+}
+
+func TestKnownOlderBDBuildsAreFullShas(t *testing.T) {
+	t.Parallel()
+	for _, p := range fullShaProblems(knownOlderBDBuilds) {
+		t.Errorf("knownOlderBDBuilds entry %s", p)
+	}
+}
+
+// TestFullShaProblemsNamesEachFailure drives every branch of the entry check:
+// the real list passes, so only a case that breaks the rule shows the check can fail.
+func TestFullShaProblemsNamesEachFailure(t *testing.T) {
+	t.Parallel()
+	good := "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f"
+	for _, tc := range []struct {
+		name    string
+		entries []string
+		want    []string
+	}{
+		{"a full lowercase sha passes", []string{good}, nil},
+		{"a 39 character sha is short", []string{good[:39]}, []string{"has 39 characters, want 40"}},
+		{"a 41 character sha is long", []string{good + "0"}, []string{"has 41 characters, want 40"}},
+		{"an uppercase sha is refused", []string{strings.ToUpper(good)}, []string{"want only lowercase hex"}},
+		{"a non-hex character is refused", []string{good[:39] + "g"}, []string{"want only lowercase hex"}},
+		{"a repeated sha is refused", []string{good, good}, []string{"is named twice"}},
+		{"an empty entry is short", []string{""}, []string{"has 0 characters, want 40"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := fullShaProblems(tc.entries)
+			if len(got) != len(tc.want) {
+				t.Fatalf("fullShaProblems(%q) = %q, want %d problem(s)", tc.entries, got, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(got[i], w) {
+					t.Errorf("problem %d = %q, want it to contain %q", i, got[i], w)
+				}
+			}
+		})
+	}
+}
