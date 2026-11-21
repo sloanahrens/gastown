@@ -672,6 +672,83 @@ func TestImagePinsFailedTickRaisesUnreadable(t *testing.T) {
 	}
 }
 
+// TestImagePinsBDFloorFailureRaisesUnreadable: a bd tip that does not contain
+// the samples build is that pin's Err, so the tick files no refresh bead and
+// the attention source raises image-pins-unreadable for bd; a bd tip that holds
+// the floor reads clean, files nothing and raises nothing (gt-2f8n6k).
+func TestImagePinsBDFloorFailureRaisesUnreadable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		pin   string // the commit the pins file pins bd to
+		floor int    // the samples-build compare's answer
+	}{
+		{name: "a bd tip that lacks the samples build", pin: pinsReadBDCommit, floor: 3},
+		{name: "a bd tip that holds the samples build", pin: pinsReadBDTip},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := newImagePinsForgejoAnswering(t, tt.floor)
+			d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{ImagePins: &PatrolConfig{Enabled: true}}}
+			d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC))
+			// Every pin but bd is at its source tip, so the floor compare is the
+			// tick's only compare: a lag compare the test Forgejo 404s would be a
+			// second unreadable item, not bd's floor alarm.
+			tips := map[string]string{
+				pinsReadPinURL("beads"):            pinsReadBDTip,
+				pinsReadPinURL("organic-mechanic"): pinsReadOMCommit,
+				pinsReadPinURL("history-man"):      pinsReadHMCommit,
+				pinsReadPinURL("devops"):           pinsReadDevopsCommit,
+			}
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				if slices.Contains(cmd.Args, "ls-remote") {
+					return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+				}
+				t.Errorf("the tick ran git %q, want only each pin's ls-remote", cmd.Args)
+				return nil, nil, errors.New("unexpected git call")
+			}
+			pins := strings.Replace(string(pinsReadFixture(pinsReadPinURL)), pinsReadBDCommit, tt.pin, 1)
+			var states []ImagePinState
+			d.newImagePinsSeams = func(context.Context) imagePinsTickSeams {
+				seams := d.imagePinsSeams(context.Background())
+				seams.readPins = func() ([]byte, error) { return []byte(pins), nil }
+				seams.openBead = func() (*ImagePinRefreshBead, error) { return nil, nil }
+				seams.file = func([]ImagePinState, time.Time) (string, error) {
+					t.Error("the tick filed a refresh bead for a bd pin whose floor it did not hold")
+					return "", nil
+				}
+				read := seams.readTips
+				seams.readTips = func(ctx context.Context, data []byte) ([]ImagePinState, error) {
+					var err error
+					states, err = read(ctx, data)
+					return states, err
+				}
+				return seams
+			}
+
+			d.triggerImagePins()
+
+			items := imagePinsCollected(t, d, attention.KindImagePinsUnreadable)
+			if tt.floor == 0 {
+				if len(states) != 4 || states[0].Err != nil || len(items) != 0 {
+					t.Fatalf("a bd tip that holds the floor read %+v and raised %+v, want four pins, bd clean, nothing raised", states, items)
+				}
+				return
+			}
+			// The floor is named on the pin's Err, which this item is the alarm
+			// for: the planner's item text is generic (image_pins_plan.go).
+			if len(states) != 4 || states[0].Err == nil || !strings.Contains(states[0].Err.Error(), daemonimage.BDSamplesFloor) ||
+				!strings.Contains(states[0].Err.Error(), "does not contain the samples build") {
+				t.Fatalf("the tick read %+v, want the bd state's Err naming the samples build", states)
+			}
+			if len(items) != 1 || items[0].Key != imagePinsUnreadableKey+":bd" {
+				t.Fatalf("the tick raised %+v, want the one unreadable item for bd", items)
+			}
+		})
+	}
+}
+
 // TestImagePinsItemsClearOnTheNextTickThatFindsThemGone is the acceptance test
 // for gt-9oap8n: the tick that finds a pin stale, a pin unreadable and the
 // refresh bead stuck raises each item, and the next tick that finds none of
@@ -1382,7 +1459,15 @@ func TestImagePinsPathCountRefusesATipThatIsNotFortyLowercaseHex(t *testing.T) {
 // head at BDSamplesFloor answers zero commits, and an unanswered head is a 404.
 func newImagePinsForgejo(t *testing.T) *Daemon {
 	t.Helper()
-	compares := map[string]int{daemonimage.BDSamplesFloor: 0}
+	return newImagePinsForgejoAnswering(t, 0)
+}
+
+// newImagePinsForgejoAnswering is newImagePinsForgejo with the samples-build
+// compare answering floorBehind commits: zero is a bd tip that contains the
+// floor, any other count a tip that lacks it.
+func newImagePinsForgejoAnswering(t *testing.T, floorBehind int) *Daemon {
+	t.Helper()
+	compares := map[string]int{daemonimage.BDSamplesFloor: floorBehind}
 	//testpolicy:allow no-network — the compare is the subject, an httptest server answers it in-process on loopback, and the daemon reads it through the production client
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "token image-pins-viewer" {
