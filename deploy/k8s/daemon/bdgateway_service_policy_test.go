@@ -247,8 +247,10 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 			t.Errorf("the other-Service validation does not exempt the Service named bd-gateway-push: %q", others)
 		}
 	})
-	// The bead this pin answers (gt-yypwpn) numbered the other-Service refusal 2, when it
-	// was the second validation; gt-ozn0j0 inserted the push validation, so it is index 2.
+	// The other-Service refusal is validation index 2 because the push validation (gt-ozn0j0) sits at index 1.
+	if n := len(policy.Spec.Validations); n != 3 {
+		t.Fatalf("the policy holds %d validations, want 3", n)
+	}
 	t.Run("the two pinned validations match the policy text", func(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {
@@ -330,8 +332,8 @@ func otherServiceGuardAdmits(s serviceFixture, gateway map[string]string) bool {
 // The Service guard's three validations, with the whitespace the YAML's folded scalars
 // leave collapsed. A changed expression in the policy file fails the test that pins it
 // until the pinned text is changed with the file: bdGatewayShapeExpression and
-// bdGatewayOtherServiceExpression in TestBdGatewayServicePolicyStructure, the push and
-// other-Service ones in TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions.
+// bdGatewayOtherServiceExpression in TestBdGatewayServicePolicyStructure, the push one in
+// TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions.
 const (
 	bdGatewayShapeExpression        = "object.metadata.name != 'bd-gateway' || (has(object.spec.type) && object.spec.type == 'ClusterIP' && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0) && !has(object.spec.externalName) && has(object.spec.selector) && size(object.spec.selector) == 1 && object.spec.selector.exists(k, k == 'app.kubernetes.io/name' && object.spec.selector[k] == 'bd-gateway'))"
 	bdGatewayPushExpression         = "object.metadata.name != 'bd-gateway-push' || (has(object.spec.type) && object.spec.type == 'ClusterIP' && (!has(object.spec.externalIPs) || size(object.spec.externalIPs) == 0) && !has(object.spec.externalName) && has(object.spec.selector) && size(object.spec.selector) == 1 && object.spec.selector.exists(k, k == 'app.kubernetes.io/name' && object.spec.selector[k] == 'bd-gateway') && has(object.spec.ports) && size(object.spec.ports) == 1 && object.spec.ports.all(p, p.port == 7441))"
@@ -431,7 +433,7 @@ func TestBdGatewayServiceAdmissionPushRefusals(t *testing.T) {
 }
 
 // TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions compares the push validation
-// and the other-Service validation in the policy file with the pinned constants, with
+// in the policy file with its pinned constant, with
 // whitespace collapsed on both sides. The refusal model above restates these rules, so
 // a change to the policy text that is not made to the model and the constants fails here.
 func TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions(t *testing.T) {
@@ -446,7 +448,6 @@ func TestBdGatewayServiceAdmissionPushRefusalsPinsExpressions(t *testing.T) {
 		want string
 	}{
 		{"the bd-gateway-push validation", exprs[1], bdGatewayPushExpression},
-		{"the other-Service validation", exprs[2], bdGatewayOtherServiceExpression},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
