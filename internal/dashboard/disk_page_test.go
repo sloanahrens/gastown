@@ -37,26 +37,14 @@ func TestDiskBlockSitsInsideTheMachineSectionAfterTheBody(t *testing.T) {
 	}
 }
 
-// The block's four states are worded on the page and none of them is a blank:
-// a push skips the pane when its reading has not moved, a snapshot with no disk
-// reading says it is still reading, and a row says which of the two ways it has
-// no share — a failed read is never drawn as an empty disk.
-func TestDiskBlockDrawsEveryStateItCanRead(t *testing.T) {
+// renderDisk leaves an unmoved pane where it is: its first statement is the
+// pushSkip call. The states it draws are asserted by output in the tests below.
+func TestDiskBlockLeavesAnUnmovedPaneWhereItIs(t *testing.T) {
 	t.Parallel()
 
 	draw := pageFunc(t, "renderDisk")
 	if !strings.Contains(draw, "function renderDisk(s) {\n  if (pushSkip(\"disk\", s)) return;") {
 		t.Error("renderDisk does not start with the pushSkip call that leaves an unmoved pane where it is")
-	}
-	for _, want := range []string{
-		`box.append(el("div", "empty", "reading the disk samples…"))`,
-		`if (r.err) { box.append(el("div", "empty", r.name + " disk: could not read its samples")); continue; }`,
-		`if (r.no_samples) { box.append(el("div", "empty", r.name + " disk: no samples yet")); continue; }`,
-		`r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB), " + diskGrowthText(r)`,
-	} {
-		if !strings.Contains(draw, want) {
-			t.Errorf("renderDisk has no %q", want)
-		}
 	}
 }
 
@@ -82,6 +70,22 @@ func TestDiskBlockDrawsTheShareLine(t *testing.T) {
 	}
 	if line.Class != "" {
 		t.Errorf("a share under 90 wears %q, want the line's own plain class", line.Class)
+	}
+}
+
+// A row the server sent without a total draws the same fallback the used count
+// does: the byte count reads as zero, never as NaN GiB.
+func TestDiskBlockDrawsARowWithNoTotal(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderDisk", map[string]any{"disk": map[string]any{
+		"rows": []any{map[string]any{"name": "control", "used_bytes": int64(410) << 30, "used_pct": 82}},
+	}})
+
+	want := "control disk 82% used (410.0 of 0.0 GiB), growth: not enough samples yet"
+	if got := dom.descend(t, "disk", 0).Text; got != want {
+		t.Errorf("the row draws %q, want %q", got, want)
 	}
 }
 
