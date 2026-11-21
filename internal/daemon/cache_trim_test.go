@@ -2686,14 +2686,15 @@ func (f *cacheTrimFixture) noOpItems(t *testing.T) []attention.Item {
 }
 
 // TestCacheTrimNoOpClearsWhenTheClaimVanishes is the bead's first box: an item a
-// completed trim raised goes when a later pass finds the claim gone -- the claim
-// listing names no claim of that name, or no pod holds it -- while a pass whose
-// cluster call cannot tell leaves it.
+// completed trim raised goes when a later pass finds the claim listing names no
+// claim of that name, while a pass whose cluster call cannot tell leaves it. A
+// pass that finds no pod holding the claim still trims it (the Job mounts it),
+// so that pass decides the item by the disk its finished trim reads.
 func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 	t.Parallel()
 	failWith := cliReply{stderr: "Error from server (Timeout): the server did not respond", code: 1}
-	// raised puts the claim's item up directly: the claim Job measures nothing, so
-	// no trim raises it.
+	// raised puts the claim's item up directly, the way a finished trim on a full
+	// disk does.
 	raised := func(t *testing.T) *cacheTrimFixture {
 		t.Helper()
 		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{})
@@ -2716,10 +2717,15 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 		t.Parallel()
 		f := raised(t)
 		f.answerFrom("get pods ", cliReply{stdout: `{"items":[]}`})
+		// The claim is trimmed anyway: the Job mounts it itself. Its finished trim
+		// reads a disk under the percent, and that clears the item.
+		f.d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+			return []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 50}}
+		}
 		f.trimDue()
 		f.d.runDiskMaintenance()
 		if got := f.noOpItems(t); len(got) != 0 {
-			t.Errorf("a pass that found no pod holding the claim yielded %+v, want no item", got)
+			t.Errorf("a pass that found no pod holding the claim yielded %+v, want the item cleared by its finished trim's disk read", got)
 		}
 	})
 
@@ -2747,12 +2753,10 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 		}
 	})
 
-	// The old route measured the claim and left its record alone when a read
-	// failed, because an unreadable claim is not thereby under the cap. The claim
-	// route clears the item BEFORE its pod read, by design (gt-zc1d92): it
-	// measures nothing, so nothing here raises the over-cap item a failed read
-	// would have to protect. Only the claim listing's failure, which happens
-	// before the route, leaves the item in place.
+	// An item is decided only by the disk a finished trim reads, so a claim read
+	// that fails leaves the item in place: the job is never applied and no trim
+	// reads a disk. The claim listing's failure happens before the route and
+	// leaves it for the same reason.
 	for _, tc := range []struct {
 		name    string
 		prefix  string
