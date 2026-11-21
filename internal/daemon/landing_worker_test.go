@@ -2299,3 +2299,70 @@ func TestLandingWorkerGateRecorderAbsent(t *testing.T) {
 		t.Errorf("the gate run log holds %d row(s) for a rig with no candidate gate, want none", len(runs))
 	}
 }
+
+// updateRecorder is a beads client that records every Update it is asked for,
+// and fails them when err is set.
+type updateRecorder struct {
+	*beadsfake.Fake
+	updates []beads.UpdateOptions
+	err     error
+}
+
+func (u *updateRecorder) Update(id string, opts beads.UpdateOptions) error {
+	u.updates = append(u.updates, opts)
+	if u.err != nil {
+		return u.err
+	}
+	return u.Fake.Update(id, opts)
+}
+
+// TestFollowupBeadsAppend: AppendFollowup adds a landing's line, box and labels
+// to an open bundle with one Update, and writes nothing to a bead that is not
+// open or whose body InsertFollowupLines refuses; a failing Update is returned.
+func TestFollowupBeadsAppend(t *testing.T) {
+	t.Parallel()
+	const body = "## Goal\n- the first finding\n\n## Acceptance\n- [ ] the first box\n"
+	add := land.FollowupAddition{Lines: []string{"- the second finding"}, Boxes: []string{"- [ ] the second box"}, Labels: []string{"fp:second"}}
+	tests := []struct {
+		name        string
+		status      string
+		body        string
+		updateErr   error
+		wantUpdates int
+		wantErr     string
+	}{
+		{name: "an open bead gets one update", status: "open", body: body, wantUpdates: 1},
+		{name: "an in_progress bead is refused", status: "in_progress", body: body, wantErr: "in_progress"},
+		{name: "a body with no box to place by is refused", status: "open", body: "## Goal\n- a finding\n", wantErr: "no room"},
+		{name: "a failing update is returned", status: "open", body: body, updateErr: errors.New("dolt is down"), wantUpdates: 1, wantErr: "dolt is down"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := &updateRecorder{Fake: beadsfake.New(beadsfake.WithPrefix("gt")), err: tt.updateErr}
+			bd.Seed(beads.Issue{ID: "gt-b", Title: "Found: bundle", Status: tt.status, Type: "task", Description: tt.body, AcceptanceCriteria: "- [ ] the first box"})
+
+			err := followupBeads{client: bd}.AppendFollowup("gt-b", add)
+
+			if tt.wantErr == "" && err != nil || tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("AppendFollowup error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if len(bd.updates) != tt.wantUpdates {
+				t.Fatalf("updates = %d, want %d", len(bd.updates), tt.wantUpdates)
+			}
+			if tt.wantUpdates == 0 || tt.updateErr != nil {
+				return
+			}
+			up := bd.updates[0]
+			if up.Description == nil || !strings.Contains(*up.Description, "- the first finding\n- the second finding\n") {
+				t.Errorf("description = %v, want the line after the first", up.Description)
+			}
+			if up.Acceptance == nil || *up.Acceptance != "- [ ] the first box\n- [ ] the second box" {
+				t.Errorf("acceptance = %v, want the existing box and the new one", up.Acceptance)
+			}
+			if !slices.Equal(up.AddLabels, add.Labels) {
+				t.Errorf("labels = %v, want %v", up.AddLabels, add.Labels)
+			}
+		})
+	}
+}
