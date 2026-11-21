@@ -2,11 +2,26 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
 
 const cacheTrimJobStateVerb = "get job " + cacheTrimJob + " -n " + cacheTrimNamespace + " -o json"
+
+// TestCacheTrimJobStateCancelledContextIsAnError pins that a read whose context
+// ended is an error wrapping context.Canceled, never active. The fixture's
+// runner ignores the context and answers a reply that reads active.
+func TestCacheTrimJobStateCancelledContextIsAnError(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimJobStateVerb: {stdout: `{"status":{"active":2}}`}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got, err := f.d.cacheTrimJobState(ctx, "/kubeconfig", cacheTrimNamespace, cacheTrimJob)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cacheTrimJobState = %v, %v; want an error wrapping context.Canceled", got, err)
+	}
+}
 
 // TestCacheTrimJobStateReadsTheThreeStates pins the three states, complete and
 // failed winning over active, and that the read is made exactly once.
