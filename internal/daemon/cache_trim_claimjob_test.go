@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -319,19 +320,23 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	})
 	_, endPass := context.WithCancel(context.Background())
 	defer endPass()
-	calls := 0
+	// The wait legs run on two goroutines, so the count is atomic. The budget is
+	// the twenty-minute wait plus the two-minute slack, written as literals: a
+	// bound read from the constants would move with a changed slack and pass.
+	const wantBudget = 20*time.Minute + 2*time.Minute
+	var calls atomic.Int32
 	f.d.cacheTrimCtxSeen = func(ctx context.Context) {
-		calls++
+		n := calls.Add(1)
 		if err := ctx.Err(); err != nil {
-			t.Errorf("cluster call %d ran on a context already ended (%v); want the claim's own live budget", calls, err)
+			t.Errorf("cluster call %d ran on a context already ended (%v); want the claim's own live budget", n, err)
 		}
 		deadline, ok := ctx.Deadline()
 		if !ok {
-			t.Errorf("cluster call %d had no deadline; want the claim's own, the wait plus the slack", calls)
+			t.Errorf("cluster call %d had no deadline; want the claim's own, the wait plus the slack", n)
 			return
 		}
-		if left := time.Until(deadline); left < cacheTrimClaimWaitTimeout-5*time.Minute || left > cacheTrimClaimWaitTimeout+cacheTrimClaimSlack {
-			t.Errorf("cluster call %d had a deadline %v away; want the wait plus the slack, %v at most", calls, left, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
+		if left := time.Until(deadline); left < wantBudget-time.Minute || left > wantBudget {
+			t.Errorf("cluster call %d had a deadline %v away; want the wait plus the slack, %v within a minute", n, left, wantBudget)
 		}
 	}
 	f.onClaimJobCall(cacheTrimClaimJobWaitVerb, endPass)
@@ -339,8 +344,8 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	if err != nil || removed != 4 || absent != 1 || kept != 2 {
 		t.Fatalf("a run whose pass context ends during the wait = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
 	}
-	if calls < 3 {
-		t.Errorf("the probe saw %d cluster calls; want the apply, the wait and the result read at least", calls)
+	if n := calls.Load(); n < 3 {
+		t.Errorf("the probe saw %d cluster calls; want the apply, the wait and the result read at least", n)
 	}
 }
 
