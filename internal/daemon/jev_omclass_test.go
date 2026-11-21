@@ -249,7 +249,10 @@ func TestOMClassRunLogsTheStartAndTheCap(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 11, 14, 11, 0, 0, 0, time.UTC)
 	var findings []land.ReviewFindingText
-	for i := 0; i < omclass.MaxFindingsPerRun+1; i++ {
+	// The pass takes its own small cap, so the cap is reached with four findings
+	// and not 301: each finding is a directory made and a file read.
+	const passCap = 3
+	for i := 0; i < passCap+1; i++ {
 		findings = append(findings, land.ReviewFindingText{Title: fmt.Sprintf("finding %d", i), Claim: "claim"})
 	}
 	recs := []land.ReviewRecord{{BeadID: "gt-big", Rig: "gastown", Attempt: 1, At: at.Add(time.Minute), FindingText: findings}}
@@ -259,7 +262,7 @@ func TestOMClassRunLogsTheStartAndTheCap(t *testing.T) {
 		want      string
 	}{
 		{"first pass names its start", false, "first pass set the cursor"},
-		{"a run at the cap names the rest", true, "stopped at 300 findings this run"},
+		{"a run at the cap names the rest", true, "stopped at 3 findings this run; the rest wait for the next pass"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -279,11 +282,12 @@ func TestOMClassRunLogsTheStartAndTheCap(t *testing.T) {
 				},
 				jevOMClassOpen: func(string, omclass.Settings, io.Writer) (*omclass.Pass, error) {
 					return &omclass.Pass{
-						Asker:      &omclassAsker{choice: omclass.NoneLabel},
-						Reviews:    omclassReviews{recs: recs},
-						LogPath:    omclass.LogPath(town),
-						CursorPath: omclass.CursorPath(town),
-						Allows:     func() (bool, error) { return true, nil },
+						Asker:       &omclassAsker{choice: omclass.NoneLabel},
+						Reviews:     omclassReviews{recs: recs},
+						LogPath:     omclass.LogPath(town),
+						CursorPath:  omclass.CursorPath(town),
+						Allows:      func() (bool, error) { return true, nil },
+						MaxFindings: passCap,
 					}, nil
 				},
 			}

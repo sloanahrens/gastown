@@ -88,7 +88,11 @@ func (d *Daemon) runJevOMClass() {
 		d.logger.Printf("jev_omclass: first pass set the cursor; findings written before it are not asked")
 	}
 	if sum.Capped {
-		d.logger.Printf("jev_omclass: stopped at %d findings this run; the rest wait for the next pass", omclass.MaxFindingsPerRun)
+		limit := pass.MaxFindings // the pass's own cap; zero is the production one
+		if limit == 0 {
+			limit = omclass.MaxFindingsPerRun
+		}
+		d.logger.Printf("jev_omclass: stopped at %d findings this run; the rest wait for the next pass", limit)
 	}
 	if sum.Asked > 0 || sum.Skipped > 0 || sum.Failed > 0 || sum.CapReached {
 		d.logger.Printf("jev_omclass: asked %d findings, skipped %d, gave up on %d (daily cap reached: %v)", sum.Asked, sum.Skipped, sum.Failed, sum.CapReached)
