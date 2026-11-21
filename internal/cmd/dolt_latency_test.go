@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // fakeLatencyClock is the probe's clock. A fake conn advances it by each
@@ -153,10 +154,11 @@ func TestDoltLatencyDSNEscapesDatabaseName(t *testing.T) {
 	t.Parallel()
 	// Each name holds a character that means something in a DSN: a query
 	// string, a path separator, a fragment, a space, an at sign.
+	creds := &doltserver.Config{User: doltserver.DefaultUser}
 	for _, database := range []string{"beads", "beads?parseTime=true", "a/b", "a#b", "a b", "x@y"} {
 		t.Run(database, func(t *testing.T) {
 			t.Parallel()
-			got, err := mysql.ParseDSN(doltLatencyDSN("127.0.0.1", 3307, database))
+			got, err := mysql.ParseDSN(doltLatencyDSN("127.0.0.1", 3307, database, creds))
 			if err != nil {
 				t.Fatalf("ParseDSN: %v", err)
 			}
@@ -170,6 +172,58 @@ func TestDoltLatencyDSNEscapesDatabaseName(t *testing.T) {
 				t.Errorf("user %q with a password set; want the default user and no password", got.User)
 			}
 		})
+	}
+}
+
+// The latency DSN carries the town's configured user and password, and the
+// host, port and database the command was given.
+func TestDoltLatencyDSNCarriesConfiguredCredentials(t *testing.T) {
+	t.Parallel()
+	creds := &doltserver.Config{User: "gt-latency", Password: "town-secret"}
+	got, err := mysql.ParseDSN(doltLatencyDSN("10.0.0.5", 4406, "beads", creds))
+	if err != nil {
+		t.Fatalf("ParseDSN: %v", err)
+	}
+	if got.User != "gt-latency" || got.Passwd != "town-secret" {
+		t.Errorf("user = %q; want the configured user and its password", got.User)
+	}
+	if got.Net != "tcp" || got.Addr != "10.0.0.5:4406" || got.DBName != "beads" {
+		t.Errorf("target = %s %s/%s; want tcp 10.0.0.5:4406/beads", got.Net, got.Addr, got.DBName)
+	}
+}
+
+// A Config with no password yields today's DSN: the default user, no password.
+// An empty User is the default user, the rule Config.UserDSN applies.
+func TestDoltLatencyDSNWithoutPasswordIsUnchanged(t *testing.T) {
+	t.Parallel()
+	for _, creds := range []*doltserver.Config{{User: doltserver.DefaultUser}, {}} {
+		if got, want := doltLatencyDSN("127.0.0.1", 3307, "beads", creds), "root@tcp(127.0.0.1:3307)/beads"; got != want {
+			t.Errorf("DSN = %q; want today's %q", got, want)
+		}
+	}
+}
+
+func TestDoltLatencyCredentials(t *testing.T) {
+	t.Parallel()
+	cfg, err := doltLatencyCredentials(func() (string, error) { return t.TempDir(), nil })
+	if err != nil {
+		t.Fatalf("credentials from a town root: %v", err)
+	}
+	if cfg.User != doltserver.DefaultUser {
+		t.Errorf("User = %q; want the default user DefaultConfig sets", cfg.User)
+	}
+}
+
+// Outside a workspace the probe's dialer refuses before it opens anything.
+func TestLatencyDialerRefusesOutsideWorkspace(t *testing.T) {
+	t.Parallel()
+	dial := latencyDialerFor(func() (string, error) { return "", errors.New("no town root here") })
+	conn, err := dial(context.Background(), "127.0.0.1", 3307, "beads")
+	if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+		t.Fatalf("dial error = %v; want it to say it is outside a workspace", err)
+	}
+	if conn != nil {
+		t.Error("dial returned a connection alongside the error")
 	}
 }
 

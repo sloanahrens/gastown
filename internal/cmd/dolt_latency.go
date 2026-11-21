@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // doltLatencyStep is one read in the fixed mix.
@@ -216,25 +217,57 @@ func wrapBeadsLatencyConn(db *beadsql.DB, err error) (doltLatencyConn, error) {
 	return beadsLatencyConn{db: db}, nil
 }
 
-// doltLatencyDSN is the DSN the probe opens database with on host:port. It is
-// built by the driver's formatter, which escapes the database name, so a name
-// with a reserved character cannot change the target. The probe connects as the
-// default user with no password, because the Config it builds carries none; the
-// DSN is passed to beadsql and never printed.
-func doltLatencyDSN(host string, port int, database string) string {
+// doltLatencyDSN is the DSN the probe opens database with on host:port. The
+// user and password come from creds, the town's Dolt config; the host and port
+// are the command's. The driver's formatter escapes the database name, so a
+// reserved character in it cannot change the target. An empty creds.User is the
+// default user, the rule Config.UserDSN applies; the DSN is never printed.
+func doltLatencyDSN(host string, port int, database string, creds *doltserver.Config) string {
 	cfg := doltserver.Config{Host: host, Port: port}
 	m := mysql.NewConfig()
-	m.User = doltserver.DefaultUser
+	m.User, m.Passwd = creds.User, creds.Password
+	if m.User == "" {
+		m.User = doltserver.DefaultUser
+	}
 	m.Net = "tcp"
 	m.Addr = cfg.HostPort()
 	m.DBName = database
 	return m.FormatDSN()
 }
 
-// dialBeadsLatency opens a beadsql handle on database at host:port. Its errors
-// name only the database, from beadsql, and the driver's own dial error.
+// dialBeadsLatency opens a beadsql handle as the default user, for the
+// dashboard's latency panel.
 func dialBeadsLatency(ctx context.Context, host string, port int, database string) (doltLatencyConn, error) {
-	return wrapBeadsLatencyConn(beadsql.Open(ctx, doltLatencyDSN(host, port, database), database))
+	return dialBeadsLatencyWithCredentials(ctx, host, port, database, &doltserver.Config{User: doltserver.DefaultUser})
+}
+
+// dialBeadsLatencyWithCredentials opens a beadsql handle on database at
+// host:port as creds, the town's Dolt config. Its errors name only the
+// database, from beadsql, and the driver's own dial error.
+func dialBeadsLatencyWithCredentials(ctx context.Context, host string, port int, database string, creds *doltserver.Config) (doltLatencyConn, error) {
+	return wrapBeadsLatencyConn(beadsql.Open(ctx, doltLatencyDSN(host, port, database, creds), database))
+}
+
+// doltLatencyCredentials returns the town's Dolt config, whose User and
+// Password the latency DSN carries: the DefaultConfig every gt client reads.
+func doltLatencyCredentials(findTownRoot func() (string, error)) (*doltserver.Config, error) {
+	townRoot, err := findTownRoot()
+	if err != nil {
+		return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	return doltserver.DefaultConfig(townRoot), nil
+}
+
+// latencyDialerFor returns the probe's dialer, which opens as the town's Dolt
+// user; outside a town it refuses rather than connecting as the default user.
+func latencyDialerFor(findTownRoot func() (string, error)) doltLatencyDialer {
+	return func(ctx context.Context, host string, port int, database string) (doltLatencyConn, error) {
+		creds, err := doltLatencyCredentials(findTownRoot)
+		if err != nil {
+			return nil, err
+		}
+		return dialBeadsLatencyWithCredentials(ctx, host, port, database, creds)
+	}
 }
 
 // `gt dolt latency` measures bd-style round trips against a Dolt SQL server and
@@ -271,7 +304,7 @@ func init() {
 }
 
 func runDoltLatency(cmd *cobra.Command, args []string) error {
-	return doltLatencyTo(cmd.OutOrStdout(), dialBeadsLatency, time.Now, doltLatencyRun{
+	return doltLatencyTo(cmd.OutOrStdout(), latencyDialerFor(workspace.FindFromCwdOrError), time.Now, doltLatencyRun{
 		Host:     doltLatencyHost,
 		Port:     doltLatencyPort,
 		Database: doltLatencyDatabase,
