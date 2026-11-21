@@ -98,6 +98,9 @@ type TierResult struct {
 	SlotWaitSeconds int `json:"slot_wait_seconds,omitempty"`
 	// SHA is the commit the verdict was taken at.
 	SHA string `json:"sha,omitempty"`
+	// Cause names the step that stopped a no-result stage. The daemon sets it
+	// from a stage's output, so a runner record carries none (gt-jie24r).
+	Cause string `json:"cause,omitempty"`
 }
 
 // tierSummaryRE is a copy of the daemon's tierSweepSummaryRE

@@ -2182,7 +2182,7 @@ func (s *attentionSources) collectTierSweepRed(ctx context.Context) ([]attention
 				Severity: attention.SeverityHigh,
 				Rig:      rig,
 				SHA:      res.SHA,
-				Summary:  fmt.Sprintf("tier sweep %s %s RED (%d failed%s)", rig, tier, res.Failed, tierSweepFailureNames(res.FailedNames)),
+				Summary:  fmt.Sprintf("tier sweep %s %s RED (%d failed%s)%s", rig, tier, res.Failed, tierSweepFailureNames(res.FailedNames), tierSweepCauseNote(res.Cause)),
 			})
 		}
 	}

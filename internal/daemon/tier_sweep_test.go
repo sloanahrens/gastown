@@ -1437,6 +1437,61 @@ func TestRunTierSweep_RunnerNoResultFilesNoBeadAndRaisesAnAttention(t *testing.T
 	}
 }
 
+// A stage with no result names its cause on the RED line, the persisted tier
+// and the attention item; an output with no failed step reads as before (gt-jie24r).
+func TestTierSweepNoResultNamesItsCause(t *testing.T) {
+	t.Parallel()
+	const output = `sweep-run: the run did not start (exit 1)
+sweep-run: kubectl -n gt-sweeps cp /Users/sloan/gt/gastown/.repo.git/. gt-sweep-sync-gastown:/repo.git failed on attempt 1 of 2 (exit 1): exit status 1
+error: archive/tar: write too long
+sweep-run: retrying kubectl cp
+sweep-run: kubectl -n gt-sweeps cp /Users/sloan/gt/gastown/.repo.git/. gt-sweep-sync-gastown:/repo.git failed on attempt 2 of 2 (exit 1): exit status 1
+error: archive/tar: missed writing 93 bytes
+sweep-run: the run did not start (exit 1)
+sweep-run: no result was written
+`
+	// The 13:37 record of sweep a2cb3a03: the sync pod of the replaced daemon was still terminating.
+	const restart = `sweep-run: the run did not start (exit 1)
+persistentvolumeclaim/gt-sweep-repo-gastown unchanged
+sweep-run: kubectl -n gt-sweeps create -f - failed (exit 1): exit status 1
+Error from server (AlreadyExists): error when creating "STDIN": object is being deleted: pods "gt-sweep-sync-gastown" already exists
+`
+	const restartCause = `kubectl -n gt-sweeps create -f - failed (exit 1): exit status 1; Error from server (AlreadyExists): error when creating "STDIN": object is being deleted: pods "gt-sweep-sync-gastown" already exists`
+	const cause = "kubectl -n gt-sweeps cp /Users/sloan/gt/gastown/.repo.git/. gt-sweep-sync-gastown:/repo.git failed on attempt 2 of 2 (exit 1): exit status 1; error: archive/tar: missed writing 93 bytes"
+	for _, tc := range []struct{ in, want string }{{output, cause}, {"sweep-run: kubectl cp: context deadline exceeded\n", "kubectl cp: context deadline exceeded"}, {"no output at all\n", ""}, {restart, restartCause}, {"sweep-run: kubectl cp failed (exit 1)\n", "kubectl cp failed (exit 1)"}} {
+		if got := tierSweepNoResultCause(tc.in); got != tc.want {
+			t.Errorf("tierSweepNoResultCause(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	d, rec, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	rec.result = func(tierSweepStage) tierSweepStageResult {
+		return tierSweepStageResult{output: output, exitCode: -1, ran: true, reason: tierSweepRunnerNoResult}
+	}
+	if !d.runTierSweep() {
+		t.Fatal("the cycle did not judge every rig")
+	}
+	if ts := tierSweepTestState(t, d, "gastown").Tiers["integration"]; ts.Cause != cause {
+		t.Errorf("integration cause = %q, want %q", ts.Cause, cause)
+	}
+	if !strings.Contains(logs.String(), "runner: no result: "+cause) || !strings.Contains(logs.String(), "next sweep: "+cause) {
+		t.Errorf("logs do not end the RED lines with the cause; logs:\n%s", logs.String())
+	}
+	for _, tc := range []struct{ cause, want string }{
+		{cause, "tier sweep gastown integration RED (1 failed: runner: no result): " + cause},
+		{"", "tier sweep gastown integration RED (1 failed: runner: no result)"},
+	} {
+		src := &attentionSources{tierSweepRigs: func() []string { return []string{"gastown"} }, tierSweep: func(string) (tierSweepState, error) {
+			return tierSweepState{Tiers: map[string]tierSweepTierResult{"integration": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{tierSweepRunnerNoResult}, Cause: tc.cause}}}, nil
+		}}
+		items, err := src.collectTierSweepRed(context.Background())
+		if err != nil || len(items) != 1 || items[0].Summary != tc.want {
+			t.Errorf("items = %+v, err = %v, want %q", items, err, tc.want)
+		}
+	}
+}
+
 // A failing package still files its bead when another tier in the same cycle
 // has no run result: the no-result tier files nothing, the failed package files
 // exactly the bead it did before (gt-856oaq).
