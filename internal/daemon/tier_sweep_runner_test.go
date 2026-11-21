@@ -1166,7 +1166,7 @@ func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 			claimAt = i
 		case jobAt < 0 && bytes.Equal(cmds.stdin[i], plan.Job.JSON()):
 			jobAt = i
-		case syncAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[4].Stdin):
+		case syncAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[2].Stdin):
 			syncAt = i
 		}
 	}
