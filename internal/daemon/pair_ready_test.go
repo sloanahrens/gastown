@@ -1807,3 +1807,111 @@ func TestImagesFailedHasItsOwnCollector(t *testing.T) {
 	}
 	assert.True(t, found, "no collector raises the images-failed kind, so its items never reach the queue")
 }
+
+// newPairSupersedeFixture is the rig at running with two greens: failed, whose
+// images run ended failed and whose pair is missing, and ready, whose pair both
+// images published. The clone is the rig's bare clone.
+func newPairSupersedeFixture(t *testing.T, clone pairReadyGit, running, failed, ready string) *pairFixture {
+	t.Helper()
+	fx := newPairCloneFixture(t, clone, running, ready)
+	fx.api.branches = []forgejo.Branch{pairBranch(failed), pairBranch(ready)}
+	fx.setImagesRun(failed, deployRunFailed)
+	return fx
+}
+
+// TestPairReadyClearsAFailedBuildSupersededByAReadyPair: a failed build for a
+// green commit that is an ancestor of a ready green can never be rolled, so its
+// items and its failed-run entry are dropped and only the ready item stands.
+func TestPairReadyClearsAFailedBuildSupersededByAReadyPair(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a superseded failed build raised %d items, want the ready one only", len(items))
+	assert.Equal(t, "deploy-pair-ready:gastown:"+c[2][:12], items[0].Key)
+	_, held := fx.check.failed[imagesFailedKey("gastown", c[1][:12])]
+	assert.False(t, held, "the superseded failed build kept its failed-run entry")
+}
+
+// TestPairReadyKeepsAFailedBuildThatIsNotSuperseded: a failed build for a green
+// commit that is not an ancestor of the ready green is not superseded, so its
+// item and failed-run entry stand beside the ready item.
+func TestPairReadyKeepsAFailedBuildThatIsNotSuperseded(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fx := newPairSupersedeFixture(t, clone, c[0], c[2], c[1])
+
+	fx.run(pairT0)
+
+	keys := pairItemKeys(fx.check.observed())
+	assert.Contains(t, keys, "deploy-pair-ready:gastown:"+c[1][:12])
+	assert.Contains(t, keys, "images-failed:gastown:"+c[2][:12], "a failed build not behind the ready green was dropped")
+	_, held := fx.check.failed[imagesFailedKey("gastown", c[2][:12])]
+	assert.True(t, held, "the unsuperseded failed build lost its failed-run entry")
+}
+
+// TestPairReadyDoesNotSupersedeByAGreenWhosePairIsMissing: a green commit whose
+// pair is missing is not a ready green, so it supersedes nothing and the failed
+// build behind it stands.
+func TestPairReadyDoesNotSupersedeByAGreenWhosePairIsMissing(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
+	fx.reg = &fakePairRegistry{}
+
+	fx.run(pairT0)
+
+	keys := pairItemKeys(fx.check.observed())
+	assert.Contains(t, keys, "images-failed:gastown:"+c[1][:12], "a green with a missing pair superseded the failed build behind it")
+	assert.NotContains(t, keys, "deploy-pair-ready:gastown:"+c[2][:12])
+}
+
+// pairAncestryFailClone is a clone whose ancestry read of failFrom fails, so a
+// supersede pass cannot judge that green.
+type pairAncestryFailClone struct {
+	pairReadyGit
+	failFrom string
+}
+
+func (c pairAncestryFailClone) IsAncestor(ancestor, descendant string) (bool, error) {
+	if ancestor == c.failFrom {
+		return false, errors.New("the clone could not judge the ancestry")
+	}
+	return c.pairReadyGit.IsAncestor(ancestor, descendant)
+}
+
+// TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild: when ancestry cannot be
+// judged, a clone read that fails or a rig with no clone at all, the failed build
+// stands and the scan says it is incomplete rather than clearing the item.
+func TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	cases := map[string]func(fx *pairFixture){
+		"clone read fails": func(fx *pairFixture) { fx.git = pairAncestryFailClone{pairReadyGit: clone, failFrom: c[1]} },
+		"no clone": func(fx *pairFixture) {
+			fx.git = nil
+			fx.api.compares = map[string]int{c[1] + "..." + c[0]: 0, c[0] + "..." + c[1]: 1, c[2] + "..." + c[0]: 0, c[0] + "..." + c[2]: 2}
+		},
+	}
+	for name, setup := range cases {
+		fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
+		setup(fx)
+
+		fx.run(pairT0)
+
+		assert.Contains(t, pairItemKeys(fx.check.observed()), "images-failed:gastown:"+c[1][:12], name+": the failed build was cleared without a judged ancestry")
+		assert.NotEmpty(t, fx.logs, name+": the incomplete scan was not logged")
+	}
+}
+
+// pairItemKeys is the key of each item, for asserting what a pass holds.
+func pairItemKeys(items []attention.Item) []string {
+	keys := make([]string, 0, len(items))
+	for _, it := range items {
+		keys = append(keys, it.Key)
+	}
+	return keys
+}
