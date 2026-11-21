@@ -163,6 +163,34 @@ func TestBuildPolecatInventoryItemSpawnGrace(t *testing.T) {
 	}
 }
 
+// TestPolecatInventoryItemSpawningIsNotAssigned: the inventory reports no issue
+// for a spawning seat, whose hook_bead is a claim and not yet hooked work, and a
+// working seat keeps its issue (gt-9d12ys; the decision is polecatAssignedIssue).
+func TestPolecatInventoryItemSpawningIsNotAssigned(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 19, 16, 32, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		agentState beads.AgentState
+		sessions   polecatSessionSet
+		wantState  polecat.State
+		wantIssue  string
+	}{
+		{"a spawning seat", beads.AgentStateSpawning, polecatSessionSet{}, polecat.StateSpawning, ""},
+		{"a working seat", beads.AgentStateWorking, newPolecatSessionSet(polecatTestRegistry(), []string{"gt-topaz"}), polecat.StateWorking, "gt-hook"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hooked := &beads.Issue{ID: "gt-hook", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/topaz"}
+			env := polecatInventoryEnv{Spawn: polecatSpawnFacts{UpdatedAt: now.Add(-30 * time.Second), Grace: 5 * time.Minute, Now: now}}
+			fields := &beads.AgentFields{AgentState: string(tc.agentState), CleanupStatus: string(polecat.CleanupClean)}
+			item := buildPolecatInventoryItem("gastown", "topaz", fields, hooked, tc.sessions, env)
+			if item.State != tc.wantState || item.Issue != tc.wantIssue {
+				t.Errorf("state %q issue %q, want %q and %q", item.State, item.Issue, tc.wantState, tc.wantIssue)
+			}
+		})
+	}
+}
+
 // TestBuildPolecatInventoryItemSubmittedIsNotStalled pins gt-obbx2: a polecat
 // whose hooked bead is gt:ready-to-land has no session because gt done ended
 // it, so list must say submitted — stalled reads as "dead polecat with work"

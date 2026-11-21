@@ -551,6 +551,8 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	item.CleanupStatusSource = item.Disposition.CleanupStatusSource
 	item.GitStateSource = item.Disposition.GitStateSource
 	item.GitStateReason = item.Disposition.GitStateReason
+	// A spawning seat's hook_bead is a claim, not yet assigned work (gt-9d12ys).
+	item.Issue = polecatAssignedIssue(item.State, item.Issue)
 	return item
 }
 
