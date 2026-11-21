@@ -971,21 +971,22 @@ func TestTakeoverSeatEndOffersASeatWhoseHookWasCleared(t *testing.T) {
 		fields      beads.AgentFields
 		wantOffered bool
 		wantLog     string
+		notDone     bool
 	}{
 		{"a done seat with an empty hook is offered", beads.AgentFields{
 			LastSourceIssue: endBead, AgentState: string(beads.AgentStateDone), Branch: aceBranch,
-		}, true, ""},
+		}, true, "", false},
 		{"an empty hook on another bead's seat is not offered", beads.AgentFields{
 			LastSourceIssue: "gt-other1", AgentState: string(beads.AgentStateDone), Branch: aceBranch,
-		}, false, `last source issue is "gt-other1", not the landed bead`},
-		// The offer does not ask the agent state: a seat the bead has not
-		// marked done is offered, and the end's own ended-marker read decides.
+		}, false, `last source issue is "gt-other1", not the landed bead`, false},
+		// The offer does not ask the gateway: a seat the bead has not marked
+		// done is offered, flagged, and the end decides on its sandbox.
 		{"an empty hook on a seat that is not done is still offered", beads.AgentFields{
 			LastSourceIssue: endBead, AgentState: string(beads.AgentStateWorking), Branch: aceBranch,
-		}, true, ""},
+		}, true, "", true},
 		{"a seat that still hooks the landed bead is offered as before", beads.AgentFields{
 			HookBead: endBead, Branch: aceBranch,
-		}, true, ""},
+		}, true, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1008,6 +1009,9 @@ func TestTakeoverSeatEndOffersASeatWhoseHookWasCleared(t *testing.T) {
 			}
 			if call := (*got)[0]; call.name != "ace" || call.landing.Branch != aceBranch {
 				t.Errorf("offered %s on branch %q, want ace on its own %q", call.name, call.landing.Branch, aceBranch)
+			}
+			if call := (*got)[0]; call.landing.AgentNotDone != tt.notDone {
+				t.Errorf("landing AgentNotDone = %v, want %v: the end must know the offer rests on a sandbox marker", call.landing.AgentNotDone, tt.notDone)
 			}
 			if call := (*got)[0]; call.landing.BeadID != endBead || !call.landing.Landed {
 				t.Errorf("landing facts = %+v, want the bead's landed record", call.landing)
@@ -1470,6 +1474,7 @@ func TestTakeoverSeatEndEndsADoneSeatWithNoReadyBlock(t *testing.T) {
 		hook       string
 		lastSource string
 		held       bool
+		errored    bool
 		marker     bool
 		wantGone   bool
 		wantLog    string
@@ -1494,6 +1499,20 @@ func TestTakeoverSeatEndEndsADoneSeatWithNoReadyBlock(t *testing.T) {
 			state: string(beads.AgentStateWorking), lastSource: endBead,
 			held:    true,
 			wantLog: "kept: its ended marker is not set",
+		},
+		{
+			// The offer lets a not-done seat through, and only a held sandbox's
+			// ended marker shows it finished: with no sandbox, or one in a
+			// terminal failure, nothing does, and the seat is kept.
+			name:  "a working seat whose sandbox the gateway no longer has is kept",
+			state: string(beads.AgentStateWorking), lastSource: endBead,
+			wantLog: "kept: its agent bead is not done",
+		},
+		{
+			name:  "a working seat whose sandbox is in a terminal failure is kept",
+			state: string(beads.AgentStateWorking), lastSource: endBead,
+			held: true, errored: true,
+			wantLog: "kept: its agent bead is not done",
 		},
 		{
 			// Offered as before, and kept by keepReason's own hook rule: an
@@ -1528,6 +1547,11 @@ func TestTakeoverSeatEndEndsADoneSeatWithNoReadyBlock(t *testing.T) {
 				f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
 			}
 			f.host.sandboxEndedMarker = func(string, string) (bool, error) { return tt.marker, nil }
+			if tt.errored {
+				f.host.sandboxStatus = func(_, name string) (sandbox.Status, error) {
+					return sandbox.Status{Name: name, Phase: "Error"}, nil
+				}
+			}
 			var logs strings.Builder
 			d := f.host.d
 			d.logger = log.New(&logs, "", 0)
