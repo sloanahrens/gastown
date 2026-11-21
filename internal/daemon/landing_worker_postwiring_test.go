@@ -54,6 +54,7 @@ type postLandWiringFixture struct {
 	f      *attentionFixture
 	clk    *clockwork.FakeClock
 	client *statusClientByRef
+	runs   *runListerBySHA
 	store  *switchMainState
 	runner *landworker.PostLandRunner
 	wiring postLandWiring
@@ -68,6 +69,7 @@ func newPostLandWiringFixture(t *testing.T, timeout time.Duration) *postLandWiri
 		f:      newAttentionFixture(t, now),
 		clk:    clockwork.NewFakeClockAt(now),
 		client: &statusClientByRef{byRef: map[string]*forgejo.CombinedStatus{}, missing: &forgejo.CombinedStatus{}},
+		runs:   &runListerBySHA{bySHA: map[string]*forgejo.RunList{}},
 		store:  &switchMainState{},
 		older:  "1111111111111111111111111111111111111111",
 		newer:  "2222222222222222222222222222222222222222",
@@ -82,7 +84,7 @@ func newPostLandWiringFixture(t *testing.T, timeout time.Duration) *postLandWiri
 	isAncestor := func(ancestor, descendant string) (bool, error) {
 		return ancestor == w.older && descendant == w.newer, nil
 	}
-	w.wiring = newPostLandWiring(w.client, postLandTestOwner, "gastown", w.store, timeout, nil, redMain.Beads, redMain, isAncestor)
+	w.wiring = newPostLandWiring(w.client, w.runs, postLandTestOwner, "gastown", w.store, timeout, nil, redMain.Beads, redMain, isAncestor)
 	rigPath := t.TempDir()
 	writeRigPostLandStatusContext(t, rigPath, wiringContext)
 	w.runner = w.f.d.newPostLandRunner(attentionRig, rigPath, w.wiring)
