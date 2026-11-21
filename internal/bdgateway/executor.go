@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -809,8 +810,8 @@ var errRead = errors.New("bdgateway: reading bd's output")
 // the call's log line. Both transports' sinks implement it; a runner that is
 // not an Executor never calls SetStderrHead, and its call logs no stderr text.
 type StderrHeadSink interface {
-	// SetStderrHead takes the first stderrHeadBytes of bd's stderr, or fewer
-	// when bd wrote less, and may be called once when the call ends.
+	// SetStderrHead takes the start of bd's stderr, at most stderrHeadBytes and
+	// never ending inside a rune, and may be called once when the call ends.
 	SetStderrHead(head string)
 }
 
@@ -822,7 +823,8 @@ type stderrHead struct {
 	full bool
 }
 
-// note appends p to the head until stderrHeadBytes are kept.
+// note appends p to the head until stderrHeadBytes are kept, cutting on a rune
+// boundary so the kept bytes never end with part of a rune.
 func (h *stderrHead) note(p []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -832,10 +834,26 @@ func (h *stderrHead) note(p []byte) {
 	room := stderrHeadBytes - len(h.buf)
 	if len(p) >= room {
 		h.buf = append(h.buf, p[:room]...)
+		h.buf = trimIncompleteRune(h.buf)
 		h.full = true
 		return
 	}
 	h.buf = append(h.buf, p...)
+}
+
+// trimIncompleteRune drops a final rune that b holds only part of, so a cut
+// through a rune does not leave the rune's first bytes at the end.
+func trimIncompleteRune(b []byte) []byte {
+	for i := len(b) - 1; i >= 0 && len(b)-i <= utf8.UTFMax; i-- {
+		if !utf8.RuneStart(b[i]) {
+			continue
+		}
+		if r, size := utf8.DecodeRune(b[i:]); r == utf8.RuneError && size == 1 {
+			return b[:i]
+		}
+		return b
+	}
+	return b
 }
 
 // text returns the bytes kept so far.

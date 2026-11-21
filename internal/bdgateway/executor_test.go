@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestExecutorPathMapping: rig and cwd select the directory bd runs in and the
@@ -1837,5 +1838,39 @@ func TestEndingIsOneLockHold(t *testing.T) {
 	frames := readFrames(t, out.Bytes())
 	if len(frames) != 2 || frames[0].Kind != FrameError || frames[1].Kind != FrameExit {
 		t.Errorf("the ending wrote %+v, want the error frame then the exit frame", frames)
+	}
+}
+
+// TestStderrHeadIsValidUTF8: a 3-byte rune across the head's 256-byte cut is
+// left whole, so the call's logged error is valid UTF-8 and no longer than the
+// head, while the caller still reads every stderr byte (gt-0s1wne).
+func TestStderrHeadIsValidUTF8(t *testing.T) {
+	t.Parallel()
+	// 254 single-byte runes put the euro sign at bytes 254, 255 and 256, so a
+	// head of 256 bytes would end after the rune's second byte.
+	const prefix = "a"
+	stderr := strings.Repeat(prefix, stderrHeadBytes-2) + "€" + "tail\n"
+	g, entries := newStderrTestGateway(t, newExitedFake(1, "", stderr))
+	rec, frames := serveExecOnce(t, g, Request{Argv: []string{"show", "gt-x"}})
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := streamOf(frames, FrameStderr); got != stderr {
+		t.Errorf("stderr frames = %q, want the full bd stderr %q", got, stderr)
+	}
+	got := entries()
+	if len(got) != 1 {
+		t.Fatalf("got %d log lines, want 1", len(got))
+	}
+	errText := got[0].Error
+	if !utf8.ValidString(errText) {
+		t.Errorf("line error = %q, not valid UTF-8", errText)
+	}
+	if len(errText) > stderrHeadBytes {
+		t.Errorf("line error is %d bytes, over the head's %d-byte bound", len(errText), stderrHeadBytes)
+	}
+	if want := strings.Repeat(prefix, stderrHeadBytes-2); errText != want {
+		t.Errorf("line error = %q, want the %d-byte prefix that ends on the rune boundary",
+			errText, len(want))
 	}
 }
