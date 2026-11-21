@@ -2059,8 +2059,9 @@ type specRoster struct {
 	// its bead, so a bead a record's Branch still names is held off a second
 	// seat (gt-712i5k).
 	SandboxRecords []session.SandboxRecord
-	// HookedBeads names the beads the seats inside Live hook: a sling still
-	// running for one of them is that seat, not a second one, so it adds no
+	// HookedBeads names the beads the seats inside Live hook, each keyed by
+	// specHookedKey (the seat's agent and the bead): a sling still running for
+	// that bead on that agent is that seat, not a second one, so it adds no
 	// seat to the count the dispatcher decides with (gt-75fma5).
 	HookedBeads map[string]bool
 	// LiveSeatNames names, as rig/polecat, the seats inside Live that hold a live
@@ -3951,7 +3952,7 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 			if r.HookedBeads == nil {
 				r.HookedBeads = map[string]bool{}
 			}
-			r.HookedBeads[s.hookedBead] = true
+			r.HookedBeads[specHookedKey(s.agent, s.hookedBead)] = true
 		}
 		// A seat with a live session is named by its polecat, so a sling still
 		// running for it is matched to that seat by name (gt-nih4xu). A claim

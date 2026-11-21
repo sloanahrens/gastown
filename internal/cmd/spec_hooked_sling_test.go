@@ -180,12 +180,12 @@ func TestPoolSeatSessionsCarryTheBeadTheirHookNames(t *testing.T) {
 	ts.PolecatPool = pool
 	roster := specRosterFrom(seats, ts)
 	for _, bead := range []string{"gt-live", "gt-dead", "gt-claim", "gt-ruby"} {
-		if !roster.HookedBeads[bead] {
+		if !roster.HookedBeads[specHookedKey("deepseek-flash", bead)] {
 			t.Errorf("the roster does not name %s among its hooked beads (%v)", bead, roster.HookedBeads)
 		}
 	}
 	for _, bead := range []string{"gt-landed", "gt-nowhere"} {
-		if roster.HookedBeads[bead] {
+		if roster.HookedBeads[specHookedKey("deepseek-flash", bead)] {
 			t.Errorf("the roster names %s among its hooked beads, want only the live hooks (%v)", bead, roster.HookedBeads)
 		}
 	}
@@ -202,7 +202,7 @@ func TestSpecRosterHookedBeadsSkipAParkedStaleSeat(t *testing.T) {
 	if roster.Live["deepseek-flash"] != 0 {
 		t.Fatalf("a parked stale seat was counted in Live (%v)", roster.Live)
 	}
-	if roster.HookedBeads["gt-a"] {
+	if roster.HookedBeads[specHookedKey("deepseek-flash", "gt-a")] {
 		t.Fatalf("a parked stale seat's bead reached HookedBeads (%v), want it released with the seat", roster.HookedBeads)
 	}
 }
@@ -228,6 +228,34 @@ func TestSpecHookedMatch(t *testing.T) {
 			t.Parallel()
 			if got := seats.hooks(tc.agent, tc.bead); got != tc.want {
 				t.Errorf("hooks(%q, %q) = %v, want %v", tc.agent, tc.bead, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSpecInFlightMatchesAgentAndBead drives the roster into the in-flight
+// term: a seat on agent-a hooking gt-x covers a running sling for gt-x on
+// agent-a and leaves one for gt-x on agent-b counted (gt-s0p4q0).
+func TestSpecInFlightMatchesAgentAndBead(t *testing.T) {
+	t.Parallel()
+	roster := specRosterFrom([]poolSession{
+		{name: "gt-ember", agent: "agent-a", rig: "gastown", polecat: "ember", hookedBead: "gt-x"},
+	}, nil)
+	seats := specSlingSeats{Hooked: roster.HookedBeads}
+	tests := []struct {
+		name  string
+		agent string
+		want  int
+	}{
+		{"the sling on the seat's agent is that seat", "agent-a", 0},
+		{"the sling on another agent is a second seat", "agent-b", 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := specInFlightAdded([]specInFlight{{Bead: "gt-x", Rig: "gastown", Agent: tc.agent}}, seats)
+			if len(got) != tc.want {
+				t.Errorf("specInFlightAdded kept %d slings (%v), want %d", len(got), got, tc.want)
 			}
 		})
 	}
