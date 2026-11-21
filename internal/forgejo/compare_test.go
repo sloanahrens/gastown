@@ -37,6 +37,47 @@ func TestCompareCommits_EqualCommitsAreZero(t *testing.T) {
 	assert.Equal(t, 0, got.TotalCommits)
 }
 
+// TestCompareCommits_RefusesABodyWithoutTheCount: an empty 200 body, a 204,
+// `{}`, a body with only other fields and a null count each leave the count
+// unread. The zero they would decode to is the answer "the head is already
+// contained", so each has to be an error instead.
+func TestCompareCommits_RefusesABodyWithoutTheCount(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"empty 200 body", 0, ""},
+		{"204", http.StatusNoContent, ""},
+		{"empty object", 0, `{}`},
+		{"other fields only", 0, `{"commits":[]}`},
+		{"null count", 0, `{"total_commits":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &recorder{status: tc.status, body: []byte(tc.body)}
+			c := newTestClient(t, rec)
+
+			_, err := c.CompareCommits(context.Background(), "owner", "fractals-nextjs", "aa", "bb")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "total_commits")
+		})
+	}
+}
+
+// TestCompareCommits_ExplicitZeroIsTheAnswer: a body that does carry zero is a
+// success with the count, because zero is the ancestry answer the caller reads.
+func TestCompareCommits_ExplicitZeroIsTheAnswer(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{body: []byte(`{"total_commits":0}`)}
+	c := newTestClient(t, rec)
+
+	got, err := c.CompareCommits(context.Background(), "owner", "fractals-nextjs", "aa", "bb")
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.TotalCommits)
+}
+
 // TestCompareCommits_RefusesAServerError: a viewer that cannot read the
 // repository is an error, not an empty answer that would read as "no commits".
 func TestCompareCommits_RefusesAServerError(t *testing.T) {

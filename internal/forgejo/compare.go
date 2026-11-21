@@ -2,6 +2,7 @@ package forgejo
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 )
@@ -20,11 +21,24 @@ type CompareInfo struct {
 
 // CompareCommits compares base and head, the two commit-ish names the API
 // accepts.
+//
+// A body that carries no total_commits number is an error. The field can be
+// absent, null, or in a body the client never decodes (an empty 200 or a 204),
+// and each of those would otherwise leave the count at zero: the answer that
+// says the head is already contained by the base. Refusing it keeps a missing
+// count from being read as a fresh pin.
 func (c *Client) CompareCommits(ctx context.Context, owner, repo, base, head string) (*CompareInfo, error) {
-	var out CompareInfo
+	// The pointer reads presence: an absent field, null and an undecoded body
+	// all leave it nil, while a real count (zero included) fills it.
+	var out struct {
+		TotalCommits *int `json:"total_commits"`
+	}
 	path := repoPath(owner, repo, "/compare/"+url.PathEscape(base)+"..."+url.PathEscape(head))
 	if err := c.call(ctx, http.MethodGet, path, nil, nil, &out); err != nil {
 		return nil, err
 	}
-	return &out, nil
+	if out.TotalCommits == nil {
+		return nil, fmt.Errorf("forgejo: compare %s...%s: response has no total_commits", base, head)
+	}
+	return &CompareInfo{TotalCommits: *out.TotalCommits}, nil
 }
