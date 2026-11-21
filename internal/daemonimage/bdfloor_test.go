@@ -47,6 +47,39 @@ func TestCheckBDFloor(t *testing.T) {
 	}
 }
 
+// The floor's two judgments are refusals, so a hold that keeps a failed pin's last good state
+// can tell them from a failed compare, which is a plain error (gt-4yarr6).
+func TestCheckBDFloorJudgmentsAreRefusalsAndACompareErrorIsNot(t *testing.T) {
+	t.Parallel()
+	const tip = "0123456789abcdef0123456789abcdef01234567"
+	compareErr := errors.New("compare failed")
+	for _, tc := range []struct {
+		name        string
+		onlyInFloor int
+		err         error
+		refusal     bool
+		text        string
+	}{
+		{"a count above zero", 3, nil, true, "bd-floor guard: bd tip " + tip + " does not contain the samples build " + BDSamplesFloor + ": 3 commit(s) reachable only from the floor"},
+		{"a negative count", -1, nil, true, "bd-floor guard: bd tip " + tip + " against the samples build " + BDSamplesFloor + ": commit count -1 is negative"},
+		{"a compare error", 0, compareErr, false, "bd-floor guard: cannot compare bd tip " + tip + " with the samples build " + BDSamplesFloor + ": compare failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := CheckBDFloor(tip, tc.onlyInFloor, tc.err)
+			if got == nil || got.Error() != tc.text {
+				t.Fatalf("CheckBDFloor(%q, %d, %v) = %v, want the error %q", tip, tc.onlyInFloor, tc.err, got, tc.text)
+			}
+			if refused := errors.Is(got, ErrPinRefused); refused != tc.refusal {
+				t.Errorf("errors.Is(%v, ErrPinRefused) = %v, want %v", got, refused, tc.refusal)
+			}
+			if tc.err != nil && !errors.Is(got, tc.err) {
+				t.Errorf("%v does not wrap the compare error %v", got, tc.err)
+			}
+		})
+	}
+}
+
 func TestBDSamplesFloorIsAFullSHA(t *testing.T) {
 	t.Parallel()
 	t.Run("40 characters", func(t *testing.T) {
