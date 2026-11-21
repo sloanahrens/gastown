@@ -373,3 +373,41 @@ func TestSeedPinMatchesRefuses(t *testing.T) {
 		})
 	}
 }
+
+// knownOlderBDBuilds lists the bd commits deploy/daemon/image-pins named before
+// the samples build (gt-4zyqzl). Pin locations are from `git log -S<sha> --
+// deploy/daemon/image-pins` on origin/main; each entry is an ancestor of
+// daemonimage.BDSamplesFloor (0f9f640f) and of the current bd pin (c1efb992),
+// per `git merge-base --is-ancestor` in the beads repository (all exit 0).
+var knownOlderBDBuilds = []string{
+	// b7e5e9ce: pinned in 583fb26ff (gt-nmy5yu), 5c3305180 (gt-smitrf), and
+	// 914b0586e (gt-fenu9p, a revert to the schema-66 build); left by 1ba150e37 (gt-tgje6t).
+	"b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f",
+	// 44cb296b: pinned in bbb4bf198 (gt-xvaxs9); left by 583fb26ff.
+	"44cb296bbe4180f31553cb61f753aa8bfb3f9321",
+	// ecf0fc58: pinned in 6d36955f0 (gt-f4bcht); left by bbb4bf198.
+	"ecf0fc58c789b6d5a158bcf4b485662bc15f296d",
+	// d0f0010e: pinned in 343d2c5a4 (gt-gg9hv.31); left by 6d36955f0.
+	"d0f0010ef037e8de0006f2a4d0e01019120a5d8c",
+}
+
+// TestKnownOlderBDBuildsAreFullShas holds the list to 40 lowercase hex commits
+// with no repeats, so the image-pins read is never handed a bad or duplicate sha.
+func TestKnownOlderBDBuildsAreFullShas(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]bool, len(knownOlderBDBuilds))
+	for _, sha := range knownOlderBDBuilds {
+		if len(sha) != 40 {
+			t.Errorf("knownOlderBDBuilds entry %q has %d characters, want 40", sha, len(sha))
+		}
+		for _, r := range sha {
+			if !('0' <= r && r <= '9' || 'a' <= r && r <= 'f') {
+				t.Errorf("knownOlderBDBuilds entry %q holds %q, want only lowercase hex", sha, r)
+			}
+		}
+		if seen[sha] {
+			t.Errorf("knownOlderBDBuilds names %s twice", sha)
+		}
+		seen[sha] = true
+	}
+}
