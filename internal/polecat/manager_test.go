@@ -4010,12 +4010,14 @@ func (assignedLookupFails) GetAssignedIssue(string) (*beads.Issue, error) {
 	return nil, errors.New("bd: dolt unreachable")
 }
 
-// TestLoadFromBeadsClaimSurvivesOutage pins that a sling's fresh claim on the
-// agent bead (spawning, hook_bead set, inside the spawn grace) is honoured when
-// the assigned-issue query fails: the seat reads spawning and carries the
-// claimed bead, with the session down or up, so a second sling is not handed a
-// seat the first was given. The claim is the agent bead's own evidence and was
-// read without the failed query, so it wins over the review-needed fallback.
+// TestLoadFromBeadsClaimSurvivesOutage pins both halves of the decision
+// loadFromBeads makes beside a failing assigned-issue query. A sling's fresh
+// claim on the agent bead (spawning, hook_bead set, inside the spawn grace) is
+// honoured: the seat reads spawning and carries the claimed bead, with the
+// session down or up, so a second sling is not handed a seat the first was
+// given. The claim was read without the failed query, so it wins over the
+// fallback. Past the grace the claim proves nothing and the fallback decides as
+// before: stalled with the session down, review-needed with it up.
 func TestLoadFromBeadsClaimSurvivesOutage(t *testing.T) {
 	t.Parallel()
 	const (
@@ -4024,13 +4026,24 @@ func TestLoadFromBeadsClaimSurvivesOutage(t *testing.T) {
 		agentBeadID = "gt-testrig-polecat-basalt"
 		workID      = "gt-testrig-work"
 	)
-	fresh := time.Now().UTC().Truncate(time.Second).Add(-30 * time.Second).Format(time.RFC3339)
-	for _, liveSession := range []bool{false, true} {
-		name := "session down"
-		if liveSession {
-			name = "session up"
-		}
-		t.Run(name, func(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	// 30 s is a 10x margin inside the 5m window; 10m is past it.
+	fresh := now.Add(-30 * time.Second).Format(time.RFC3339)
+	stale := now.Add(-10 * time.Minute).Format(time.RFC3339)
+	tests := []struct {
+		name        string
+		updatedAt   string
+		liveSession bool
+		wantState   State
+		wantIssue   string
+	}{
+		{"fresh claim, session down", fresh, false, StateSpawning, workID},
+		{"fresh claim, session up", fresh, true, StateSpawning, workID},
+		{"claim past the grace, session down", stale, false, StateStalled, ""},
+		{"claim past the grace, session up", stale, true, StateReviewNeeded, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
 			rigPath := filepath.Join(root, rigName)
@@ -4042,7 +4055,7 @@ func TestLoadFromBeadsClaimSurvivesOutage(t *testing.T) {
 			db := newPolecatDB()
 			db.Seed(
 				beads.Issue{
-					ID: agentBeadID, Title: "agent", Labels: []string{"gt:agent"}, Status: "open", UpdatedAt: fresh,
+					ID: agentBeadID, Title: "agent", Labels: []string{"gt:agent"}, Status: "open", UpdatedAt: tc.updatedAt,
 					Description: beads.FormatAgentDescription("agent", &beads.AgentFields{
 						RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: workID, CleanupStatus: "clean",
 					}),
@@ -4053,7 +4066,7 @@ func TestLoadFromBeadsClaimSurvivesOutage(t *testing.T) {
 			mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, nil, tm, db)
 			mgr.spawnGraceWindow = 5 * time.Minute
 			mgr.beads = assignedLookupFails{mgr.beads}
-			if liveSession {
+			if tc.liveSession {
 				sessionName := mgr.sessionName(agentName)
 				if err := tm.NewSessionWithCommandAndEnv(sessionName, rigPath, "sleep 300", nil); err != nil {
 					t.Fatalf("create session: %v", err)
@@ -4065,8 +4078,8 @@ func TestLoadFromBeadsClaimSurvivesOutage(t *testing.T) {
 			if err != nil {
 				t.Fatalf("loadFromBeads: %v", err)
 			}
-			if p.State != StateSpawning || p.Issue != workID {
-				t.Errorf("seat = state %q issue %q, want %q and %q: the claim was not honoured beside the beads error", p.State, p.Issue, StateSpawning, workID)
+			if p.State != tc.wantState || p.Issue != tc.wantIssue {
+				t.Errorf("seat = state %q issue %q, want %q and %q", p.State, p.Issue, tc.wantState, tc.wantIssue)
 			}
 		})
 	}
