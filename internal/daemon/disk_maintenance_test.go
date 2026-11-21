@@ -1552,10 +1552,11 @@ func TestDiskMaintTrimDoesNotRunTwiceInOneInterval(t *testing.T) {
 }
 
 // TestDiskMaintBusyTrimFailureIsLoggedOnceAndTargetsWait: a trim that fails on
-// a busy tick records the short retry, so the next ticks try it again, and its
-// failure line is held to once by its own key rather than repeated on every
-// retry. The targets the busy ticks deferred stay due, and the disk alerts
-// still go up (gt-gg9hv.48).
+// a busy tick records the full interval like a verdict, so the interval does
+// not make it due again and only the hot disk's early check runs it a second
+// time; its failure line is said once across both runs. The targets the busy
+// tick deferred stay due, and the disk alerts still go up (gt-gg9hv.48,
+// gt-wkjdql).
 func TestDiskMaintBusyTrimFailureIsLoggedOnceAndTargetsWait(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
@@ -1570,21 +1571,30 @@ func TestDiskMaintBusyTrimFailureIsLoggedOnceAndTargetsWait(t *testing.T) {
 	now := diskMaintNow
 	d.diskMaint.now = func() time.Time { return now }
 
-	// 04:45 fails and asks to be retried in fifteen minutes; 05:00 and 05:15
-	// are the retries, still in the window and all still busy.
-	for _, at := range []time.Time{diskMaintNow, diskMaintNow.Add(15 * time.Minute), diskMaintNow.Add(30 * time.Minute)} {
-		now = at
-		d.runDiskMaintenance()
+	// 04:45 fails and records the full interval; 05:00 is inside it and the
+	// early check's gap has not passed, so nothing runs; 05:15 is past the gap,
+	// and the disk's 88% runs the trim early. Every tick is in the window and
+	// busy.
+	now = diskMaintNow
+	d.runDiskMaintenance()
+	if got := trims.Load(); got != 1 {
+		t.Fatalf("trimmed %d times at the first tick, want 1", got)
 	}
-
-	if got := trims.Load(); got != 3 {
-		t.Errorf("trimmed %d times over three ticks, want 3: a failed trim records the short retry", got)
+	now = diskMaintNow.Add(15 * time.Minute)
+	d.runDiskMaintenance()
+	if got := trims.Load(); got != 1 {
+		t.Errorf("trimmed %d times fifteen minutes after the failure, want 1: the failure records the full interval", got)
+	}
+	now = diskMaintNow.Add(30 * time.Minute)
+	d.runDiskMaintenance()
+	if got := trims.Load(); got != 2 {
+		t.Errorf("trimmed %d times past the gap, want 2: the hot disk's early check runs the trim", got)
 	}
 	if got := strings.Count(logs.String(), "disk_maintenance: cache trim:"); got != 1 {
 		t.Errorf("logged the trim failure %d times, want 1: its own key holds the line for the hour: %q", got, logs.String())
 	}
-	if got := strings.Count(logs.String(), "targets skipped"); got != 3 {
-		t.Errorf("logged the targets' skip %d times, want 3: a busy tick still defers them", got)
+	if got := strings.Count(logs.String(), "targets skipped"); got != 1 {
+		t.Errorf("logged the targets' skip %d times, want 1: only the tick with the trim due has targets to defer", got)
 	}
 	if len(f.target.policies) != 0 {
 		t.Errorf("planned the target %d times while the town was busy, want 0", len(f.target.policies))
