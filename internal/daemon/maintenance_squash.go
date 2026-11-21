@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -440,12 +441,60 @@ type squashRunRecord struct {
 	Outcome string    `json:"outcome"`
 }
 
+// squashStateCorruptSuffix names the copy recordSquashRun keeps of a state
+// file it cannot parse, beside the file itself.
+const squashStateCorruptSuffix = ".corrupt"
+
 // recordSquashRun records one run's start and outcome in maintenance_state.json.
+// An absent file is written fresh and a parseable one is read, merged and
+// written atomically. A file that cannot be read or parsed is never replaced:
+// the run is not recorded, the file is left exactly as it is, and its bytes are
+// kept once at maintenance_state.json.corrupt, which a later refusal leaves
+// standing. The read and the write hold the state lock together.
 func recordSquashRun(townRoot, db string, started time.Time, outcome string) error {
-	_, err := updateMaintenanceGCState(townRoot, func(st *maintenanceGCState) {
-		st.Squash[db] = squashRunRecord{LastRun: started, Outcome: outcome}
-	})
-	return err
+	maintenanceGCStateMu.Lock()
+	defer maintenanceGCStateMu.Unlock()
+
+	path := maintenanceGCStatePath(townRoot)
+	st, err := readMaintenanceGCState(townRoot)
+	if err != nil && !errors.Is(err, errMaintenanceGCStateAbsent) {
+		return squashRecordRefusal(path, err)
+	}
+	st.Squash[db] = squashRunRecord{LastRun: started, Outcome: outcome}
+	return atomicfile.EnsureDirAndWriteJSON(path, st)
+}
+
+// squashRecordRefusal keeps one copy of the state file recordSquashRun cannot
+// read or parse and returns the refusal naming what happened to the copy. The
+// original file is only read here, never written. A copy that already exists is
+// the first refusal's and is left as it is.
+func squashRecordRefusal(path string, stateErr error) error {
+	copyPath := path + squashStateCorruptSuffix
+	refuse := func(note string) error {
+		return fmt.Errorf("squash: %s is unreadable, so the run is not recorded and the file is left as it is (%v); %s",
+			maintenanceGCStateFileName, stateErr, note)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return refuse(fmt.Sprintf("keeping a copy at %s failed: %v", copyPath, err))
+	}
+	f, err := os.OpenFile(copyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	switch {
+	case errors.Is(err, os.ErrExist):
+		return refuse(fmt.Sprintf("the copy kept at %s stands", copyPath))
+	case err != nil:
+		return refuse(fmt.Sprintf("keeping a copy at %s failed: %v", copyPath, err))
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(copyPath)
+		return refuse(fmt.Sprintf("writing the copy at %s failed: %v", copyPath, err))
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(copyPath)
+		return refuse(fmt.Sprintf("closing the copy at %s failed: %v", copyPath, err))
+	}
+	return refuse(fmt.Sprintf("its bytes are kept at %s", copyPath))
 }
 
 // squashLedgerEntry is one run's line in daemon/squash_ledger.jsonl: commits

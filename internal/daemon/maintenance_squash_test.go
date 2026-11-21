@@ -1068,6 +1068,53 @@ func TestSquashRecordUnreadableStateFailsClosed(t *testing.T) {
 	}
 }
 
+// writeSquashStateFile writes data as the town's maintenance_state.json and
+// returns its path.
+func writeSquashStateFile(t *testing.T, townRoot string, data []byte) string {
+	t.Helper()
+	path := maintenanceGCStatePath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestSquashRecordRefusesAStateFileItCannotParse is this bead's box: a state
+// file that cannot be parsed is refused, left byte for byte as it is, and its
+// bytes are kept in one copy beside it that a later refusal leaves standing.
+func TestSquashRecordRefusesAStateFileItCannotParse(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	first := []byte("{first\n")
+	path := writeSquashStateFile(t, townRoot, first)
+
+	if err := recordSquashRun(townRoot, "gt", squashTestNow, squashOutcomeCompleted); err == nil {
+		t.Fatal("recordSquashRun recorded a run over a state file it cannot parse")
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, first) {
+		t.Errorf("the corrupt state file was changed: %q, err %v, want %q", got, err, first)
+	}
+	if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, first) {
+		t.Errorf("the copy beside the state file holds %q, err %v, want %q", got, err, first)
+	}
+
+	// A later refusal over different corrupt bytes keeps the first copy.
+	second := []byte("{second\n")
+	writeSquashStateFile(t, townRoot, second)
+	if err := recordSquashRun(townRoot, "gt", squashTestNow, squashOutcomeCompleted); err == nil {
+		t.Fatal("the second refusal returned no error")
+	}
+	if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, first) {
+		t.Errorf("a later refusal overwrote the copy: %q, err %v, want the first refusal's %q", got, err, first)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, second) {
+		t.Errorf("the state file holds %q, err %v, want the file as the refusal found it, %q", got, err, second)
+	}
+}
+
 // TestSquashRecordWarnsWhenAWriteFails drives both writes at their call site: a
 // record that cannot be written is a WARNING naming the file, and the run is
 // still logged, so a full disk or a blocked path is never a silent loss.
