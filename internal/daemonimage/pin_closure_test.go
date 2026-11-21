@@ -113,3 +113,25 @@ func TestInputClosureRefusesAToolWithNoGoFiles(t *testing.T) {
 		})
 	}
 }
+
+// TestInputClosureIgnoresTestFiles pins that only the non-test sources of a tool
+// are read: a test file importing a directory outside the input list is not a
+// gap, since the image never builds it.
+func TestInputClosureIgnoresTestFiles(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	f.answer[closureRepo+" ls-tree --name-only main cmd/reporter/"] = "cmd/reporter/main.go\ncmd/reporter/main_test.go\n"
+	f.answer[closureRepo+" show main:cmd/reporter/main.go"] = "package main\n"
+	f.answer[closureRepo+" show main:cmd/reporter/main_test.go"] = `package main
+import "gt.local/devops/internal/onlytest"
+`
+	answerTool(f, "cmd/release-reporter", "cmd/release-reporter/main.go", "package main\n")
+	answerTool(f, "cmd/cloudcheck", "cmd/cloudcheck/main.go", "package main\n")
+	got, err := inputClosureGaps(f.run, closureRepo, "main")
+	if err != nil {
+		t.Fatalf("inputClosureGaps: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("gaps = %v, want none: a test file's import is not built into the image", got)
+	}
+}
