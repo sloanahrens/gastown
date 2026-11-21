@@ -59,13 +59,16 @@ This step writes, creating a rescue ref on origin: the overseer runs it from the
 
 ```bash
 cd <overseer-clone>
-git fetch ~/gt/.runtime/rescue/cheedo-gt-o9qmfe-95b0512c.bundle HEAD:refs/rescue/cheedo-o9qmfe
-git push origin \
-  refs/rescue/cheedo-o9qmfe:refs/heads/polecat/cheedo/gt-o9qmfe+mwo83624-95b0512
+git fetch ~/gt/.runtime/rescue/cheedo-gt-o9qmfe-95b0512c.bundle HEAD
+git worktree add -b polecat/cheedo/gt-o9qmfe+mwo83624-95b0512 \
+  ~/gt/gastown/crew/overseer-rescue FETCH_HEAD
+cd ~/gt/gastown/crew/overseer-rescue
+git push origin HEAD
 git ls-remote origin 'refs/heads/polecat/cheedo/gt-o9qmfe*'
+git worktree remove ~/gt/gastown/crew/overseer-rescue
 ```
 
-The push uses the branch's own name when origin does not hold it; gt-cheedo's name already existed on origin at 00f1095c, a different commit, so the push created a new branch carrying the `-<sha7>` suffix the nuke's fallback uses. The read-back must print 95b0512c on the rescue ref; on 2026-11-19 `git ls-remote` read both refs back, the original at 00f1095c and the rescue ref at 95b0512c. `preserveBranchBeforeNuke` and `unpreservedBranchRefusal` in `internal/cmd/polecat.go` guard the nuke: a branch origin already holds at another commit is parked on `<branch>-<sha7>`, and work no remote ref holds is a refusal to delete, not a silent loss. The pre-push guard (`.githooks/pre-push`, explained by `preserveCheckout` in `internal/git/preserve.go`) refuses a `refs/heads` push from a checkout on another branch, so the rescue push reads from `refs/rescue/`. The earlier nukes of dementus and rictus parked `polecat/dementus/gt-d0glu1+mwnrm11d-301dec4` and `polecat/rictus/gt-9p2wh7+mwo2agyv-1dbca18` on origin the same way.
+The push uses the branch's own name when origin does not hold it; gt-cheedo's name already existed on origin at 00f1095c, a different commit, so the push created a new branch carrying the `-<sha7>` suffix the nuke's fallback uses. The read-back must print 95b0512c on the rescue ref; on 2026-11-19 `git ls-remote` read both refs back, the original at 00f1095c and the rescue ref at 95b0512c. `preserveBranchBeforeNuke` and `unpreservedBranchRefusal` in `internal/cmd/polecat.go` guard the nuke: a branch origin already holds at another commit is parked on `<branch>-<sha7>`, and work no remote ref holds is a refusal to delete, not a silent loss. The pre-push guard (`.githooks/pre-push`, explained by `preserveCheckout` in `internal/git/preserve.go`) refuses a `refs/heads` push from a checkout on another branch, so the rescue branch is checked out in its own worktree and pushed as `HEAD`: the guard sees the branch it is told to push, and nothing is pushed around it. The earlier nukes of dementus and rictus parked `polecat/dementus/gt-d0glu1+mwnrm11d-301dec4` and `polecat/rictus/gt-9p2wh7+mwo2agyv-1dbca18` on origin the same way.
 
 Hand the nuke no local ref and no `--force`: step 4 is the only push this runbook makes, and the nuke's own preserve step finds the tip on origin. Its `--force` with `--acknowledge-unpreserved` is for a branch whose only copy is local, after a patch-id proof that origin holds the same change, as the operator handbook `gastown-operations.md` says; it is not a way past the `has_unpushed` verdict that sent you here.
 
