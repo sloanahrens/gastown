@@ -168,6 +168,10 @@ const (
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
+	// RuleOverrunBlind is the overrun guard's blind read: it could not read
+	// beads for three ticks in a row, so no seat was judged against the
+	// overrun bound (gt-uor98u).
+	RuleOverrunBlind = "overrun.blind"
 	// RuleJobOverdue is a maintenance job past its cadence, or one whose newest
 	// run failed: a record the overseer reads on its next look (gt-toiff6).
 	RuleJobOverdue = "job.overdue"
@@ -346,6 +350,10 @@ var ruleFlags = map[string]RuleFlags{
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
+	// A guard that cannot read beads is a measurement that stopped, not a
+	// failure: the item records that no seat was judged, and it waits for the
+	// overseer's next look rather than waking anyone (gt-uor98u).
+	RuleOverrunBlind: flagsInfo,
 	// A job past its cadence is a record for the overseer's next look; the jobs
 	// the town cannot let slip raise job.overdue_wake instead (gt-toiff6).
 	RuleJobOverdue: flagsInfo,
@@ -512,6 +520,7 @@ var kindRules = map[Kind]string{
 	KindSandboxSeatKept:               RuleSandboxSeatKept,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
 	KindHoldStale:                     RuleHoldStale,
+	KindOverrunBlind:                  RuleOverrunBlind,
 	KindJobOverdue:                    RuleJobOverdue,
 	KindMetricsExtract:                RuleMetricsExtract,
 	KindSandboxPending:                RuleSandboxPending,

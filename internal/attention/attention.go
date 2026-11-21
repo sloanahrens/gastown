@@ -174,6 +174,10 @@ const (
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
 	KindHoldStale Kind = "hold-stale"
+	// KindOverrunBlind: the overrun guard could not read beads for three ticks
+	// in a row, so whether any seat passed its overrun bound is unknown
+	// (gt-uor98u).
+	KindOverrunBlind Kind = "overrun-blind"
 	// KindJobOverdue: a maintenance job is past its cadence or its newest run
 	// failed, so the work it does has not happened (gt-toiff6).
 	KindJobOverdue Kind = "job-overdue"
@@ -241,7 +245,7 @@ func Kinds() []Kind {
 		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
+		KindHoldStale, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow, KindSeatFinishedLingering,
