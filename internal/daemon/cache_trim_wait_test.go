@@ -19,6 +19,11 @@ func TestCacheTrimClaimJobWaitIsTheParameter(t *testing.T) {
 	}{
 		{90 * time.Second, "--timeout=90s", cliReply{}, true},
 		{30 * time.Second, "--timeout=30s", cliReply{stderr: "error: timed out waiting for the condition", code: 1}, false},
+		// Sub-second waits are rounded up: kubectl reads --timeout=0s as no
+		// limit, so 1 ns and 500 ms must reach it as one whole second.
+		{time.Nanosecond, "--timeout=1s", cliReply{}, true},
+		{500 * time.Millisecond, "--timeout=1s", cliReply{}, true},
+		{1500 * time.Millisecond, "--timeout=2s", cliReply{}, true},
 	} {
 		verb := "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " " + tc.timeout
 		f := newCacheTrimFixture(t, "", map[string]cliReply{verb: tc.reply})
@@ -49,7 +54,7 @@ func TestCacheTrimClaimJobWaitApplyRefusesAPlainWait(t *testing.T) {
 // refused before any cluster call: kubectl reads --timeout=0s as no limit.
 func TestCacheTrimClaimJobWaitZeroIsRefused(t *testing.T) {
 	t.Parallel()
-	for _, wait := range []time.Duration{0, -time.Minute} {
+	for _, wait := range []time.Duration{0, -time.Minute, -time.Nanosecond} {
 		f := newCacheTrimFixture(t, "", nil)
 		finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, wait)
 		if err == nil || finished {
