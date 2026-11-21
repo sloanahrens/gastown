@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,6 +227,54 @@ func TestPlanImagePinsNamesAPinWhoseReadFailed(t *testing.T) {
 	}
 }
 
+// TestPlanImagePinsUnreadableItemCarriesTheErrorLine: the unreadable item ends
+// with the first line of the pin's read error, so the next flap says why the
+// pin cannot be read (gt-r8v4wu).
+func TestPlanImagePinsUnreadableItemCarriesTheErrorLine(t *testing.T) {
+	t.Parallel()
+	failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New("git fetch: exit status 128: fatal: unable to access")}
+
+	got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
+
+	const want = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it: git fetch: exit status 128: fatal: unable to access"
+	if len(got.Items) != 1 || got.Items[0].Summary != want {
+		t.Fatalf("Items = %+v, want one unreadable item with Summary %q", got.Items, want)
+	}
+}
+
+// TestPlanImagePinsUnreadableItemCutsALongOrMultiLineError: the error line is
+// cut to 160 characters and holds no newline, so a long or multi-line error
+// cannot break the attention item's text (gt-r8v4wu).
+func TestPlanImagePinsUnreadableItemCutsALongOrMultiLineError(t *testing.T) {
+	t.Parallel()
+	failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New(strings.Repeat("x", 300) + "\nsecond line")}
+
+	got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
+
+	const head = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it: "
+	want := head + strings.Repeat("x", 160)
+	if len(got.Items) != 1 || got.Items[0].Summary != want {
+		t.Fatalf("Items = %+v, want one unreadable item with Summary %q", got.Items, want)
+	}
+}
+
+// TestPlanImagePinsUnreadableItemWithAnEmptyErrorKeepsTodaysText: an error with
+// no text to show adds no suffix, so the item reads as it did before
+// (gt-r8v4wu).
+func TestPlanImagePinsUnreadableItemWithAnEmptyErrorKeepsTodaysText(t *testing.T) {
+	t.Parallel()
+	const want = "image pin devops cannot be read: it is not counted as fresh, and no refresh bead is filed for it"
+	for _, msg := range []string{"", "\n  \n"} {
+		failed := ImagePinState{Name: "devops", Pin: "pin-devops", Err: errors.New(msg)}
+
+		got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
+
+		if len(got.Items) != 1 || got.Items[0].Summary != want {
+			t.Fatalf("Err %q: Items = %+v, want one unreadable item with Summary %q", msg, got.Items, want)
+		}
+	}
+}
+
 // TestPlanImagePinsOpenBeadWithoutAnAgeSaysItsAgeIsUnknown: a bead with no
 // recorded open time raises the stuck item with a summary that names no
 // duration, not one measured from the zero time.
@@ -297,7 +346,7 @@ func TestPlanImagePinsStaleAndUnreadableItemsNameTheirPin(t *testing.T) {
 			Key:      imagePinsUnreadableKey,
 			Pin:      "om",
 			Severity: attention.SeverityMedium,
-			Summary:  "image pin om cannot be read: it is not counted as fresh, and no refresh bead is filed for it",
+			Summary:  "image pin om cannot be read: it is not counted as fresh, and no refresh bead is filed for it: ls-remote exited 128",
 		},
 	}
 	if !slices.Equal(got.Items, want) {
@@ -411,7 +460,7 @@ func TestPlanImagePinsAgeReadFailureKeepsTheCountRules(t *testing.T) {
 		Key:      imagePinsUnreadableKey,
 		Pin:      "bd",
 		Severity: attention.SeverityMedium,
-		Summary:  "image pin bd cannot be read: it is not counted as fresh, and no refresh bead is filed for it",
+		Summary:  "image pin bd cannot be read: it is not counted as fresh, and no refresh bead is filed for it: ls-remote exited 128",
 	}}
 	if !slices.Equal(got.Items, want) {
 		t.Errorf("Items = %+v, want the age items for om and hm, the stale item for hm, and the unreadable item for bd", got.Items)

@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/townhealth"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -48,6 +49,10 @@ const (
 	// planner raises. Each names its pin in ImagePinItem.Pin.
 	imagePinsStaleKey      = "image-pins-stale"
 	imagePinsUnreadableKey = "image-pins-unreadable"
+	// imagePinsErrLineMax is how many characters of a failed read's first line
+	// the unreadable item carries: the command and git's first stderr line fit,
+	// and a long line cannot push the item past one line (gt-r8v4wu).
+	imagePinsErrLineMax = 160
 )
 
 // ImagePinState is one image pin as the planner sees it: the pin file's name
@@ -122,8 +127,8 @@ type ImagePinPlan struct {
 // also files once its commit is imagePinsFileAge older than the tip, whatever
 // its count, and a pin whose own commit lacks the samples build files at once.
 // A pin whose read failed never files and is named in Unreadable,
-// and raises image-pins-unreadable: its distance is unknown, so it is never
-// treated as fresh. A pin whose age read failed keeps its count rules and
+// and raises image-pins-unreadable naming the first line of its read error:
+// its distance is unknown, so it is never treated as fresh. A pin whose age read failed keeps its count rules and
 // raises image-pins-unreadable naming its unreadable age. A pin
 // imagePinsStaleBehind commits behind or more raises image-pins-stale. These
 // pin items are raised whether or not a refresh bead is open. An open refresh
@@ -142,7 +147,7 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 				Key:      imagePinsUnreadableKey,
 				Pin:      pin.Name,
 				Severity: attention.SeverityMedium,
-				Summary:  fmt.Sprintf("image pin %s cannot be read: it is not counted as fresh, and no refresh bead is filed for it", pin.Name),
+				Summary:  unreadableSummary(pin),
 			})
 			continue
 		}
@@ -183,6 +188,22 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 		plan.Items = append(plan.Items, item)
 	}
 	return plan
+}
+
+// unreadableSummary is the image-pins-unreadable item for a pin whose read
+// failed: the sentence that says the pin is not counted as fresh, then the first
+// line of the read error, cut to imagePinsErrLineMax characters, so the item
+// says why the read failed. An error with no text adds nothing.
+func unreadableSummary(pin ImagePinState) string {
+	summary := fmt.Sprintf("image pin %s cannot be read: it is not counted as fresh, and no refresh bead is filed for it", pin.Name)
+	line := util.FirstLine(pin.Err.Error())
+	if line == "" {
+		return summary
+	}
+	if runes := []rune(line); len(runes) > imagePinsErrLineMax {
+		line = string(runes[:imagePinsErrLineMax])
+	}
+	return summary + ": " + line
 }
 
 // refreshStuckItem is the image-pins-refresh-stuck item for an open refresh
