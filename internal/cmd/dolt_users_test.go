@@ -319,6 +319,7 @@ func TestDoltUsersReadsTheAccounts(t *testing.T) {
 	server := &usersFakeServer{rows: [][]driver.Value{
 		{"app", "10.0.0.1", int64(0)},
 		{"root", "%", int64(1)},
+		{"repl", "10.0.0.2", uint64(1)},
 	}}
 
 	got, err := openFakeUsersReader(t, server).ReadAccounts(context.Background())
@@ -329,6 +330,7 @@ func TestDoltUsersReadsTheAccounts(t *testing.T) {
 	want := []doltUserAccount{
 		{User: "app", Host: "10.0.0.1", EmptyPassword: false},
 		{User: "root", Host: "%", EmptyPassword: true},
+		{User: "repl", Host: "10.0.0.2", EmptyPassword: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("ReadAccounts returned %d accounts, want %d: %+v", len(got), len(want), got)
@@ -369,6 +371,25 @@ func TestDoltUsersRefusesAPasswordString(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "super-secret-hash") {
 		t.Errorf("the scan error echoes the value it could not read: %v", err)
+	}
+}
+
+// The empty-password column is read only in the driver's integer shape (int64,
+// or uint64 for an unsigned BIGINT, valued 0 or 1). Anything else is refused,
+// even when bool parsing would accept it, so a statement changed to select the
+// authentication string fails to scan instead of reporting a weak or strong
+// account; a []byte '0' is refused on purpose (the driver gives it only for a
+// string-like column, never for the TINY comparison).
+func TestDoltUsersScanGuard(t *testing.T) {
+	t.Parallel()
+	for _, answer := range []driver.Value{"1", "true", "0", []byte("0"), []byte("1"), []byte("2"), []byte(""), int64(2), int64(-1), uint64(2), float64(1)} {
+		t.Run(fmt.Sprintf("%T %v", answer, answer), func(t *testing.T) {
+			t.Parallel()
+			server := &usersFakeServer{rows: [][]driver.Value{{"root", "%", answer}}}
+			if got, err := openFakeUsersReader(t, server).ReadAccounts(context.Background()); err == nil {
+				t.Fatalf("ReadAccounts accepted %T %v as the empty-password answer: %+v", answer, answer, got)
+			}
+		})
 	}
 }
 
