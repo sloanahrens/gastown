@@ -241,6 +241,71 @@ func reportFailed(report Report, profile string) bool {
 	return false
 }
 
+// TestVMStartCancelStopsRun: a canceled context ends Start: no later try, no
+// pause after the cancel, and no later step runs. Start still returns an error
+// that wraps the context's error.
+func TestVMStartCancelStopsRun(t *testing.T) {
+	t.Parallel()
+	exit := errors.New("exit status 1")
+	cases := map[string]struct {
+		preCancel  bool
+		sbxReplies []reply
+		cancelOn   []string
+		wantCalls  [][]string
+	}{
+		"canceled before the first start": {
+			preCancel:  true,
+			sbxReplies: []reply{{}},
+		},
+		"canceled during a failed try": {
+			sbxReplies: []reply{{err: exit}, {}, {}},
+			cancelOn:   startArgv("gt-sbx"),
+			wantCalls:  [][]string{startArgv("gt-sbx")},
+		},
+		"canceled before the container step": {
+			sbxReplies: []reply{{}},
+			cancelOn:   startArgv("gt-control"),
+			wantCalls:  [][]string{startArgv("gt-sbx"), startArgv("gt-control")},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			r := &queueRunner{queues: startQueues(map[string][]reply{
+				cmdKey(startArgv("gt-sbx")):     tc.sbxReplies,
+				cmdKey(startArgv("gt-control")): {{}},
+				cmdKey(containersArgv):          {{}},
+			})}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.preCancel {
+				cancel()
+			}
+			run := func(c context.Context, name string, args ...string) ([]byte, error) {
+				out, err := r.run(c, name, args...)
+				if tc.cancelOn != nil && reflect.DeepEqual(append([]string{name}, args...), tc.cancelOn) {
+					cancel()
+				}
+				return out, err
+			}
+			var slept []time.Duration
+			report, err := Start(ctx, run, recordingSleep(&slept), time.Now, "/home/test")
+			if err == nil {
+				t.Fatalf("Start returned nil over a canceled context: %s", report)
+			}
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("error = %q, want it to wrap %v", err, context.Canceled)
+			}
+			if len(slept) != 0 {
+				t.Fatalf("slept %v after the cancel, want no pause", slept)
+			}
+			if !reflect.DeepEqual(r.calls, tc.wantCalls) {
+				t.Fatalf("calls = %q, want %q", r.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
 // TestVMStartRunError: a failed container start makes Start return an error
 // naming that command, after both VM starts ran, and the repairs still read
 // their state.

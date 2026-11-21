@@ -103,7 +103,8 @@ type startRun struct {
 // Start runs StartPlan's steps in order and returns the report of every step
 // run; a failed step is recorded and the later steps that can still run are
 // still tried, and Start returns one error naming each failed step at the end,
-// never a success (gt-igzpx9, gt-4eig1r).
+// never a success (gt-igzpx9, gt-4eig1r). A canceled context stops the run
+// before the next step or try (gt-v6trh9).
 func Start(ctx context.Context, run Runner, sleep func(time.Duration), now func() time.Time, home string) (Report, error) {
 	if run == nil {
 		return nil, errors.New("Start: nil runner")
@@ -113,6 +114,10 @@ func Start(ctx context.Context, run Runner, sleep func(time.Duration), now func(
 	}
 	s := &startRun{plan: StartPlan, ctx: ctx, run: run, sleep: sleep, now: now, home: home}
 	for _, step := range s.plan {
+		if err := ctx.Err(); err != nil {
+			s.failed = append(s.failed, fmt.Errorf("start stopped before %s: %w", step.Name, err))
+			break
+		}
 		step.run(s, step)
 	}
 	if len(s.failed) > 0 {
@@ -133,9 +138,12 @@ func (s *startRun) startVM(step StartStep) {
 		if err == nil {
 			break
 		}
-		if try < startTries {
-			s.sleep(startPause)
+		// A canceled context ends the start here: no pause and no further try
+		// (gt-v6trh9).
+		if s.ctx.Err() != nil || try == startTries {
+			break
 		}
+		s.sleep(startPause)
 	}
 	if lastErr != nil {
 		s.failed = append(s.failed, fmt.Errorf("%s: %w", strings.Join(argv, " "), lastErr))
