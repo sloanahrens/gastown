@@ -94,3 +94,72 @@ func TestSlingGiveBackReason(t *testing.T) {
 		})
 	}
 }
+
+// TestSlingGiveBackReasonAnchored pins gt-uauwit: a message counts for one of
+// the three phrases only where it has the shape the town prints, so an error
+// that merely embeds the phrase keeps its respawn count. The sentinel, or the
+// anchored shape, gives it back.
+func TestSlingGiveBackReasonAnchored(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		err      error
+		giveBack bool
+	}{
+		{
+			name: "an assignee-lock phrase embedded in prose",
+			err:  errors.New("the audit log says timed out acquiring assignee sling lock for gastown/polecats/toast after 10s (stale) and was not retried"),
+		},
+		{
+			name: "a session phrase embedded in prose",
+			err:  errors.New("reconcile: session already running: gt-cheedo was left behind by the last tick"),
+		},
+		{
+			name: "a gateway phrase embedded in prose",
+			err:  errors.New("the dispatcher logged gtwrap: the bd gateway at http://bd-gateway.gt.svc:7440 did not answer, so the call did not run: earlier"),
+		},
+		{
+			name:     "an assignee-lock sentinel",
+			err:      fmt.Errorf("serializing hook write: %w", assigneeLockTimeout{agent: "gastown/polecats/toast", seconds: 10}),
+			giveBack: true,
+		},
+		{
+			name:     "an assignee-lock timeout as the town prints it",
+			err:      errors.New("serializing hook write for gastown/polecats/toast: timed out acquiring assignee sling lock after 10s (held by pid 10297)"),
+			giveBack: true,
+		},
+		{
+			name:     "a session already running as the town prints it",
+			err:      errors.New("starting polecat session: session already running: gt-cheedo"),
+			giveBack: true,
+		},
+		{
+			name:     "a session already running with a healthy agent as the tmux layer prints it",
+			err:      errors.New("starting polecat session: session already running with healthy agent"),
+			giveBack: true,
+		},
+		{
+			name:     "a session already running with no id after it",
+			err:      errors.New("starting polecat session: session already running"),
+			giveBack: true,
+		},
+		{
+			name: "a session phrase that continues into other words",
+			err:  errors.New("starting polecat session: session already running with a stale agent left over by the last tick"),
+		},
+		{
+			name:     "a bd gateway that did not answer as the town prints it",
+			err:      errors.New("gtwrap: the bd gateway at http://bd-gateway.gt.svc:7440 did not answer, so the call did not run: connection refused"),
+			giveBack: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reason, giveBack := slingGiveBackReason(tc.err)
+			if giveBack != tc.giveBack {
+				t.Fatalf("giveBack = %v, want %v (reason %q)", giveBack, tc.giveBack, reason)
+			}
+		})
+	}
+}
