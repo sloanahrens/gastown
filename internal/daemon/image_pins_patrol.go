@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -454,10 +455,38 @@ func (d *Daemon) imagePinsTipGit(ctx context.Context) PinTipGit {
 	}
 }
 
+// imagePinsScratchRepo is the bare repository the patrol's counting fetches run
+// in. A filtered fetch by URL writes remote.<url>.promisor keys into the
+// repository it runs in, and git lists such a section as a remote name: run in
+// the devops rig's landing repository it broke every devops landing, so the
+// patrol keeps its own.
+func imagePinsScratchRepo(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "image-pins", "count.git")
+}
+
+// imagePinsEnsureScratch creates the scratch repository when it does not
+// exist. Any other stat error, and a failed init, is an error naming the path:
+// a count never falls back to another repository.
+func (d *Daemon) imagePinsEnsureScratch(ctx context.Context, repo string) error {
+	if _, err := os.Stat(repo); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("image pins scratch repository %s: %w", repo, err)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, imagePinsGitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(callCtx, "git", "init", "--bare", "--quiet", repo)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if _, stderr, err := d.runCmd(cmd); err != nil {
+		return fmt.Errorf("creating the image pins scratch repository %s: %w: %s", repo, err, strings.TrimSpace(firstLine(string(stderr))))
+	}
+	return nil
+}
+
 // imagePinsPathCount is the production PinPathCount: git's count of the commits
 // from the pin to the tip that touch the paths, or an error when git cannot count.
 func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
-	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
+	repo := imagePinsScratchRepo(d.config.TownRoot)
 	return func(url, pin, tip string, paths []string) (int, error) {
 		// Both shas are refused before any git call: the fetch runs first, and an
 		// option-shaped pin or tip is spliced into the rev-list argument below.
@@ -466,6 +495,9 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 		}
 		if !pinShaForm.MatchString(tip) {
 			return 0, fmt.Errorf("git rev-list --count: tip %q is not a full 40-character lowercase hex sha", tip)
+		}
+		if err := d.imagePinsEnsureScratch(ctx, repo); err != nil {
+			return 0, err
 		}
 		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
 			return 0, err
