@@ -38,8 +38,9 @@ func containerSuiteGateRefusal(gate string) (Refusal, bool) {
 	packages := ContainerSuitePackages()
 	for _, line := range strings.Split(gate, "\n") {
 		for _, segment := range shellSegments(line) {
-			args, ok := goTestArgs(strings.Fields(segment))
-			if !ok || hasRunFilter(args) {
+			fields := strings.Fields(segment)
+			args, ok := goTestArgs(fields)
+			if !ok || hasRunFilter(args) || dockerOffPrefix(fields) {
 				continue
 			}
 			for _, arg := range args {
@@ -130,4 +131,26 @@ func containerSuitePackageArg(packages []string, arg string) string {
 		}
 	}
 	return ""
+}
+
+// dockerOffPrefix reports whether the words before "go test" are only
+// environment assignments and the last GT_TEST_DOCKER among them is exactly 0
+// (the shell keeps the last assignment): testutil starts a container only for
+// GT_TEST_DOCKER=1 (internal/testutil/dockeroptin.go, DockerTestsEnabled), and
+// the runtime guard blocks a run only then, so the whole package is safe to run. The name is spelled out because
+// this package does not import testutil (testutil.DockerTestsEnv).
+func dockerOffPrefix(fields []string) bool {
+	off := false
+	for i, field := range fields {
+		if isGoBinaryArg(field) && i+1 < len(fields) && fields[i+1] == "test" {
+			return off
+		}
+		if !strings.Contains(field, "=") || strings.HasPrefix(field, "-") {
+			return false
+		}
+		if strings.HasPrefix(field, "GT_TEST_DOCKER=") {
+			off = field == "GT_TEST_DOCKER=0" // the shell keeps the last assignment
+		}
+	}
+	return false
 }
