@@ -8,10 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // fakeUsersReader answers a read from a scripted list. With err set, every
@@ -491,5 +494,57 @@ func TestDoltUsersRegistersTheCheckFlag(t *testing.T) {
 	}
 	if f.DefValue != "false" {
 		t.Errorf("--check defaults to %q, want false", f.DefValue)
+	}
+}
+
+// capturingUsersDB is fakeUsersDB that also records the dsn the opener built,
+// which fakeUsersDB discards.
+func capturingUsersDB(t *testing.T, got *string) func(string) (*sql.DB, error) {
+	t.Helper()
+	open := fakeUsersDB(t, &usersFakeServer{})
+	return func(dsn string) (*sql.DB, error) {
+		*got = dsn
+		return open(dsn)
+	}
+}
+
+// TestDoltUsersBuildsTheRealDSN drives the production DSN builder over a temp
+// town: the DSN the opener hands the driver names the town's Dolt user and
+// port, over TCP or the socket the builder prefers, and carries the two
+// timeouts the opener asks for. A failure never prints the DSN, which holds
+// the credential: it prints the part after the credential's "@".
+func TestDoltUsersBuildsTheRealDSN(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var dsn string
+	opener := doltUsersOpener{
+		findTownRoot: func() (string, error) { return town, nil },
+		openDB:       capturingUsersDB(t, &dsn),
+	}
+	reader, err := opener.open(context.Background())
+	if err != nil {
+		t.Fatalf("open over the temp town: %v", err)
+	}
+	_ = reader.Close()
+
+	port := doltserver.DefaultConfig(town).Port
+	userPart, rest, found := strings.Cut(dsn, "@")
+	if !found {
+		t.Fatal("the opener's DSN has no user part")
+	}
+	if user, _, _ := strings.Cut(userPart, ":"); user != doltserver.DefaultUser {
+		t.Errorf("the DSN's user is %q, want the town's %q", user, doltserver.DefaultUser)
+	}
+	tests := []struct {
+		name string
+		want *regexp.Regexp
+	}{
+		{"the user and the town's address", regexp.MustCompile(fmt.Sprintf(`^(tcp\(127\.0\.0\.1:%d\)|unix\(/tmp/mysql(\.%d)?\.sock\))/`, port, port))},
+		{"the two timeouts", regexp.MustCompile(`\?timeout=5s&readTimeout=30s$`)},
+	}
+	for _, tc := range tests {
+		if !tc.want.MatchString(rest) {
+			t.Errorf("%s: the DSN after its user part is %q, want it to match %s", tc.name, rest, tc.want)
+		}
 	}
 }
