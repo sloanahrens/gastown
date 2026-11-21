@@ -43,15 +43,10 @@ func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 		return SplitPlan{}, err
 	}
 	half := (len(groups) + 1) / 2
-	a, err := buildPiece("A", groups[:half], groups, nil, "")
-	if err != nil {
-		return SplitPlan{}, err
-	}
-	b, err := buildPiece("B", groups[half:], groups, groups[:half], "A")
-	if err != nil {
-		return SplitPlan{}, err
-	}
-	return SplitPlan{A: a, B: b}, nil
+	return SplitPlan{
+		A: buildPiece("A", groups[:half], groups, nil, ""),
+		B: buildPiece("B", groups[half:], groups, groups[:half], "A"),
+	}, nil
 }
 
 // checkGroups refuses a group the pieces could not carry: no package, no box, a
@@ -73,6 +68,9 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 			if strings.TrimSpace(box.Run) == "" {
 				return fmt.Errorf("file group %s has the box %q with no Run command", group.Package, box.Text)
 			}
+			if len(testCommands(box.Run)) == 0 {
+				return fmt.Errorf("file group %s has the box %q whose Run names no go test command", group.Package, box.Text)
+			}
 			if !inSpec[box] {
 				return fmt.Errorf("file group %s holds the box %q, which the spec does not", group.Package, box.Text)
 			}
@@ -92,7 +90,7 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 
 // buildPiece shapes one piece from its groups, reading allGroups for the guard
 // commands and createdFrom for the files and symbols the piece depends on.
-func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string) (Piece, error) {
+func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string) Piece {
 	var packages []string
 	var ownBoxes []Box
 	var constraints []string
@@ -100,10 +98,6 @@ func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, depends
 		packages = append(packages, group.Package)
 		ownBoxes = append(ownBoxes, group.Boxes...)
 		constraints = append(constraints, group.Constraints...)
-	}
-	gate, err := pieceGate(ownBoxes, allGroups)
-	if err != nil {
-		return Piece{}, err
 	}
 	if dependsOn != "" {
 		constraints = append(constraints, createdNotes(createdFrom, groups)...)
@@ -114,8 +108,8 @@ func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, depends
 		Boxes:     ownBoxes,
 		DependsOn: dependsOn,
 	}
-	piece.Text = pieceText(piece, constraints, gate, otherPackages(packages, allGroups))
-	return piece, nil
+	piece.Text = pieceText(piece, constraints, pieceGate(ownBoxes, allGroups), otherPackages(packages, allGroups))
+	return piece
 }
 
 // otherPackages returns the packages the other piece carries, in group order.
@@ -135,14 +129,10 @@ func otherPackages(packages []string, allGroups []FileGroup) []string {
 
 // pieceGate returns the piece's Gate: its own boxes' go test commands, then the
 // guard commands every original box carries, each once in first-seen order.
-func pieceGate(ownBoxes []Box, allGroups []FileGroup) (string, error) {
+func pieceGate(ownBoxes []Box, allGroups []FileGroup) string {
 	var commands []string
 	for _, box := range ownBoxes {
-		tests := testCommands(box.Run)
-		if len(tests) == 0 {
-			return "", fmt.Errorf("the box %q names no go test command, so it cannot be gated", box.Text)
-		}
-		commands = append(commands, tests...)
+		commands = append(commands, testCommands(box.Run)...)
 	}
 	for _, group := range allGroups {
 		for _, box := range group.Boxes {
@@ -153,7 +143,7 @@ func pieceGate(ownBoxes []Box, allGroups []FileGroup) (string, error) {
 			}
 		}
 	}
-	return strings.Join(unique(commands), " && "), nil
+	return strings.Join(unique(commands), " && ")
 }
 
 // pieceText renders the piece as a bead description, the sections in the order
