@@ -85,9 +85,10 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.record("autocommit off")
 			return func() { h.record("autocommit restore") }
 		},
-		releaseSeat: func(*SpawnedPolecatInfo) { h.record("release seat") },
-		findTown:    func() (string, error) { return slingTestTown, nil },
-		townOrEnv:   func() (string, error) { return slingTestTown, nil },
+		releaseSeat:    func(*SpawnedPolecatInfo) { h.record("release seat") },
+		worktreeBranch: func(string) (string, error) { return "main", nil },
+		findTown:       func() (string, error) { return slingTestTown, nil },
+		townOrEnv:      func() (string, error) { return slingTestTown, nil },
 		pendingInstall: func(_ string, now time.Time) (*installpending.Marker, error) {
 			return installpending.StoreIn(h.pendingMarkerPath).Pending(now)
 		},

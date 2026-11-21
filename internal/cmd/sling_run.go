@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/sling"
@@ -95,8 +96,10 @@ type slingDeps struct {
 	// releaseSeat drops the pool seat one spawn reserved; nil spawn means the
 	// dispatch made none. See slingDeps.engineReleaseSeat.
 	releaseSeat func(*SpawnedPolecatInfo)
-	findTown    func() (string, error)
-	townOrEnv   func() (string, error)
+	// worktreeBranch reads the branch checked out in a seat worktree.
+	worktreeBranch func(dir string) (string, error)
+	findTown       func() (string, error)
+	townOrEnv      func() (string, error)
 	// pendingInstall is the pending-install marker in force at now, or nil when
 	// no install is pending: the reader is installpending.Store.Pending, and a
 	// sling refuses on a marker that stands and proceeds without one
@@ -238,14 +241,15 @@ func realSlingDeps() *slingDeps {
 // counts nothing.
 func realSlingDepsFor(stores slingStores) *slingDeps {
 	d := &slingDeps{
-		getenv:        os.Getenv,
-		out:           os.Stdout,
-		stdin:         os.Stdin,
-		steps:         slingSteps,
-		autoCommitOff: setBDAutoCommitOff,
-		releaseSeat:   func(s *SpawnedPolecatInfo) { s.releaseSeatClaim() },
-		findTown:      workspace.FindFromCwd,
-		townOrEnv:     workspace.FindFromCwdOrError,
+		getenv:         os.Getenv,
+		out:            os.Stdout,
+		stdin:          os.Stdin,
+		steps:          slingSteps,
+		autoCommitOff:  setBDAutoCommitOff,
+		releaseSeat:    func(s *SpawnedPolecatInfo) { s.releaseSeatClaim() },
+		worktreeBranch: func(dir string) (string, error) { return git.NewGit(dir).CurrentBranch() },
+		findTown:       workspace.FindFromCwd,
+		townOrEnv:      workspace.FindFromCwdOrError,
 		pendingInstall: func(townRoot string, now time.Time) (*installpending.Marker, error) {
 			return installpending.StoreFor(townRoot).Pending(now)
 		},

@@ -127,6 +127,7 @@ func slingCallDeps(t *testing.T, townRoot string, trace *session.SandboxTrace, f
 	d.rigParked = func(string, string) (bool, string) { return false, "" }
 	d.agentDead = func(string) bool { return false }
 	d.releaseSeat = func(*SpawnedPolecatInfo) {}
+	d.worktreeBranch = func(string) (string, error) { return "main", nil }
 	d.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
 		return &SpawnedPolecatInfo{
 			RigName:       rigName,
