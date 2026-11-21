@@ -1,9 +1,11 @@
 package land
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -197,5 +199,53 @@ func TestReviewLogScrubAmbiguousPrefixesKeepTheGlueRule(t *testing.T) {
 		if got, want := scrubClaim("key "+token+" end"), "key <redacted> end"; got != want {
 			t.Errorf("an unglued %q token: scrubClaim = %q, want %q", p, got, want)
 		}
+	}
+}
+
+// scrubBounded runs the scrub and fails the test if it does not return within
+// the test's bound, so a regression that goes quadratic or worse fails and does
+// not hang the suite.
+func scrubBounded(t *testing.T, claim string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan string, 1)
+	go func() { done <- scrubClaim(claim) }()
+	select {
+	case got := <-done:
+		return got
+	case <-ctx.Done():
+		t.Fatalf("scrubClaim did not return within the bound on a %d-byte claim", len(claim))
+		return ""
+	}
+}
+
+// TestReviewLogScrubLongRunsAreBounded: a long claim made of one run with many
+// joiner bytes (a path, a base64 blob, a dashed hex dump, an id list), including
+// runs that start with the ASIA shape at every few bytes, is scrubbed in bounded
+// time: the cost is fixed by scrubInputBound and maxTokenRun, not by the claim.
+func TestReviewLogScrubLongRunsAreBounded(t *testing.T) {
+	t.Parallel()
+	for _, unit := range []string{"a-", "a_", "a.", "a/", "a+", "a=", "a:", "ASIAa-", "ASIA-", "ASIAQ/"} {
+		t.Run(unit, func(t *testing.T) {
+			t.Parallel()
+			claim := strings.Repeat(unit, 20000)
+			got := scrubBounded(t, claim)
+			if len(got) > scrubInputBound {
+				t.Errorf("scrubClaim returned %d bytes of a %d-byte claim, more than the %d it reads", len(got), len(claim), scrubInputBound)
+			}
+		})
+	}
+}
+
+// TestReviewLogScrubATokenRunIsTriedUpToMaxTokenRun: no real token is longer than
+// maxTokenRun, so a longer run is taken in pieces: the first piece is replaced
+// and the rest, which starts no prefix, is kept.
+func TestReviewLogScrubATokenRunIsTriedUpToMaxTokenRun(t *testing.T) {
+	t.Parallel()
+	claim := scrubTestFamilies["aws"] + strings.Repeat("Q", maxTokenRun)
+	got := scrubBounded(t, claim)
+	if want := redactedWord + strings.Repeat("Q", len(claim)-maxTokenRun); got != want {
+		t.Errorf("scrubClaim of a %d-byte run kept %d bytes after the marker, want %d", len(claim), len(got)-len(redactedWord), len(claim)-maxTokenRun)
 	}
 }

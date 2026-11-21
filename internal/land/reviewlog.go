@@ -207,7 +207,10 @@ const redactedWord = "<redacted>"
 // kept because the rule's prefixes (`sk-`) occur inside ordinary words.
 // The scrub cannot consult config.IsSecretKey (it needs a key name), so only
 // token shape counts. It runs before boundedClaim, which never cuts a marker.
+// It reads at most scrubInputBound bytes and tries a run of at most maxTokenRun,
+// so its cost is bounded whatever the claim: O(scrubInputBound x maxTokenRun).
 func scrubClaim(s string) string {
+	s = cutAtRune(s, scrubInputBound)
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -222,31 +225,64 @@ func scrubClaim(s string) string {
 	return b.String()
 }
 
+// scrubInputBound is how much of a claim the scrub reads. A recorded claim is cut
+// to maxRecordedClaimBytes after the scrub and a marker (10 bytes) stands for a
+// token of at least 16, so the scrubbed text is never under 5/8 of what was read:
+// the first maxRecordedClaimBytes of the output come from the first 8/5 of that
+// in the input, and twice the bound reads everything that is recorded. The bound
+// fixes the cost: the scrub is O(scrubInputBound x maxTokenRun) however long om's
+// detail is.
+const scrubInputBound = 2 * maxRecordedClaimBytes
+
+// maxTokenRun is the longest run of token bytes tried as one token; no real
+// token is longer, and a longer run is tried in pieces from each later offset.
+const maxTokenRun = 512
+
+// cutAtRune is s cut to at most n bytes on a rune boundary.
+func cutAtRune(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 // tokenEnd is the end of the token-shaped run of token bytes that starts at i,
 // or i when none does. A trailing '.' or ':' is the sentence's, not the token's.
+// Only a run that starts with one of the rule's prefixes can be accepted (the
+// rule is called with no key name), so every other offset is refused by one
+// prefix test and the run is built only where a prefix starts.
 func tokenEnd(s string, i int) int {
 	if !isAlnum(s[i]) || i > 0 && isAlnum(s[i-1]) && !escapedBefore(s, i) && !startsDistinctivePrefix(s[i:]) {
 		return i
 	}
+	if !startsKnownPrefix(s[i:]) {
+		return i
+	}
 	end := i
-	for end < len(s) && (isAlnum(s[end]) || strings.IndexByte(tokenJoiners, s[end]) >= 0) {
+	for end < len(s) && end-i < maxTokenRun && (isAlnum(s[end]) || strings.IndexByte(tokenJoiners, s[end]) >= 0) {
 		end++
 	}
 	run := strings.TrimRight(s[i:end], ".:")
-	// The rule's ASIA shape takes the whole value, so a token followed by more
-	// token bytes (`ASIA...+x`) is also tried cut at each joiner, longest first.
-	for n := len(run); n > 0; n = strings.LastIndexAny(run[:n], tokenJoiners) {
-		if config.LooksLikeSecret("", run[:n]) {
-			return i + n
-		}
+	if config.LooksLikeSecret("", run) {
+		return i + len(run)
 	}
-	// ... and cut where its upper-case and digit bytes end, for a key id followed
-	// by lower-case letters (`ASIA...z9`).
+	if !strings.HasPrefix(run, "ASIA") {
+		return i
+	}
+	// The ASIA shape takes the whole value, so a key id followed by more token
+	// bytes (`ASIA...+x`, `ASIA...z9`) is tried cut where its upper-case and digit
+	// bytes end: the longest cut the shape can accept.
 	if n := upperDigitPrefix(run); n < len(run) && config.LooksLikeSecret("", run[:n]) {
 		return i + n
 	}
 	return i
 }
+
+// tokenJoiners are the non-alphanumeric bytes a token run holds.
+const tokenJoiners = "-_.+/=:"
 
 func upperDigitPrefix(s string) int {
 	n := 0
@@ -255,9 +291,6 @@ func upperDigitPrefix(s string) int {
 	}
 	return n
 }
-
-// tokenJoiners are the non-alphanumeric bytes a token run holds.
-const tokenJoiners = "-_.+/=:"
 
 // escapedBefore reports whether the letter before i belongs to an escape that
 // ends at i: a backslash escape (`\n`, `\t`) or a percent-encoded byte (`%3D`),
@@ -276,21 +309,27 @@ func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' ||
 // (risk-assessment-framework, ask_user_for_input).
 const distinctivePrefixLen = 4
 
-// distinctivePrefixes are the rule's own prefixes of that length, and the ASIA of
-// its temporary-key shape: a token that starts with one is found at any offset,
-// glued to what is before it or not.
-var distinctivePrefixes = func() []string {
-	out := []string{"ASIA"}
+// knownPrefixes are all the rule's prefixes and the ASIA of its temporary-key
+// shape: the only starts a token the rule accepts can have; distinctivePrefixes
+// are those of them long enough to be found at any offset, glued or not.
+var knownPrefixes, distinctivePrefixes = func() (all, distinctive []string) {
+	all = []string{"ASIA"}
+	distinctive = []string{"ASIA"}
 	for _, p := range config.SecretValuePrefixes() {
+		all = append(all, p)
 		if len(p) >= distinctivePrefixLen {
-			out = append(out, p)
+			distinctive = append(distinctive, p)
 		}
 	}
-	return out
+	return all, distinctive
 }()
 
-func startsDistinctivePrefix(s string) bool {
-	for _, p := range distinctivePrefixes {
+func startsKnownPrefix(s string) bool { return startsWithAny(s, knownPrefixes) }
+
+func startsDistinctivePrefix(s string) bool { return startsWithAny(s, distinctivePrefixes) }
+
+func startsWithAny(s string, prefixes []string) bool {
+	for _, p := range prefixes {
 		if strings.HasPrefix(s, p) {
 			return true
 		}
