@@ -376,7 +376,8 @@ func (d *Daemon) logImagePinReads(states []ImagePinState, took time.Duration) {
 // holdFailedImagePins reads a pin whose read failed from its last good state for
 // its first imagePinHoldTicks failures at the same pinned commit, then keeps the
 // error; a good read starts the count over, a pin with no good read or a failed
-// read at a moved commit keeps its error at once, and each held pin is logged
+// read at a moved commit keeps its error at once, so does a refusal (a judgment
+// that the pin must not move, not a failed call), and each held pin is logged
 // instead of queued as an item.
 func (d *Daemon) holdFailedImagePins(states []ImagePinState) {
 	if d.imagePinsLast == nil {
@@ -386,6 +387,11 @@ func (d *Daemon) holdFailedImagePins(states []ImagePinState) {
 		st := &states[i]
 		if st.Err == nil {
 			d.imagePinsLast[st.Name], d.imagePinsFails[st.Name] = *st, 0
+			continue
+		}
+		// A refusal is a judgment, not a failed call: it is kept at once and uses
+		// none of the hold (gt-rtxkwt).
+		if errors.Is(st.Err, daemonimage.ErrPinRefused) {
 			continue
 		}
 		last, ok := d.imagePinsLast[st.Name]
