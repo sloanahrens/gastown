@@ -1244,9 +1244,11 @@ type overrunSlungReader struct {
 	d      *Daemon
 	loaded bool
 	clock  *events.DispatchClock
+	evs    []events.Event
 }
 
-// slungAt is the time the seat's bead was dispatched, false when it is unknown.
+// slungAt is the later of the seat's bead's dispatch and the seat's first spawn
+// beyond overrunSessionGrace of it (gt-fv0ezj), false when it is unknown.
 // The clock belongs to the bead, not to the seat holding it: it is the earliest
 // sling event for the bead that its last run-end event does not end
 // (events.DispatchStart), so a bead handed from one seat to another keeps the
@@ -1266,6 +1268,7 @@ func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 			r.d.logger.Printf("overrun_guard: reading events: %v", err)
 		}
 		r.clock.Add(evs)
+		r.evs = evs
 	}
 	// The later end wins: a bead submitted after an escalation was dated from
 	// the submission, and one escalated after a submission from the escalation.
@@ -1276,6 +1279,12 @@ func (r *overrunSlungReader) slungAt(seat overrunSeat) (time.Time, bool) {
 		end = seat.EscalatedEnd
 	}
 	if start, ok := r.clock.StartSince(seat.Bead, end); ok {
+		// A seat that ended without a run-end event keeps the run, so its first
+		// spawn beyond the startup grace is where the next run began. Only the
+		// first counts: a later respawn must not move the clock again (gt-fv0ezj).
+		if sp := events.FirstSpawnAfter(r.evs, seat.Rig, seat.Polecat, start.Add(overrunSessionGrace)); !sp.IsZero() {
+			return sp, true
+		}
 		return start, true
 	}
 
