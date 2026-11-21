@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -458,4 +459,26 @@ func TestReviewLogScrubPlanErrorsNameTheFileOnly(t *testing.T) {
 			assertNoScrubToken(t, err.Error(), token)
 		})
 	}
+}
+
+// TestReviewLogScrubPlanBeadIDsNeverCarryAToken: a log row whose bead field is a
+// token-shaped string is reported as the marker, a normal id is reported as it
+// is, and no part of the token reaches the result (gt-6r1l6k).
+func TestReviewLogScrubPlanBeadIDsNeverCarryAToken(t *testing.T) {
+	t.Parallel()
+	idToken := "gh" + "p_" + strings.Repeat("a", 36)
+	claimToken := scrubTestFamilies["aws"]
+	rows := []ReviewRecord{{BeadID: idToken}, {BeadID: "gt-1"}}
+	for i := range rows {
+		rows[i].FindingText = []ReviewFindingText{{ID: "f-1", Claim: "it logs " + claimToken + " verbatim"}}
+	}
+	logf, _ := writeScrubTestLog(t, scrubTestLogBytes(t, rows...))
+	res, err := logf.ScrubPlan()
+	if err != nil {
+		t.Fatalf("ScrubPlan: %v", err)
+	}
+	if want := []string{redactedWord, "gt-1"}; !slices.Equal(res.Beads, want) {
+		t.Errorf("Beads = %v, want %v", res.Beads, want)
+	}
+	assertNoScrubToken(t, fmt.Sprintf("%+v", res), idToken)
 }

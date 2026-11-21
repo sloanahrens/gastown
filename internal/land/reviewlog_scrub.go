@@ -64,7 +64,7 @@ func (f *ReviewsFile) ScrubPlan() (ScrubResult, error) {
 		if _, words := scrubRawLine(line, rec); words > 0 {
 			res.RowsChanged++
 			res.Words += words
-			res.Beads = append(res.Beads, rec.BeadID)
+			res.Beads = append(res.Beads, safeBeadID(rec.BeadID))
 		}
 	})
 	if cerr := fh.Close(); err == nil {
@@ -75,6 +75,12 @@ func (f *ReviewsFile) ScrubPlan() (ScrubResult, error) {
 	}
 	return res, nil
 }
+
+// safeBeadID is the only way a bead id enters a ScrubResult: the log's bead
+// field is whatever a row held, so a token-shaped id is reported as the marker
+// like a claim's token is. Beads, SkippedBeads (gt-btleae) and the apply's
+// report (gt-9h1asy) call it, so no id is printed raw (gt-6r1l6k).
+func safeBeadID(id string) string { return scrubClaim(id) }
 
 // isJSONObject reports whether line opens as a JSON object: a record is an
 // object, and everything else is copied through rather than judged. Syntax is
