@@ -240,6 +240,16 @@ const (
 	// running: its last turn ended and its bead is closed, and it has been left
 	// in recovery past the linger bound (gt-klpqb3).
 	RuleSeatFinishedLingering = "seat.finished_lingering"
+
+	// RuleClusterDrift is a live control cluster that differs from the render
+	// of the running binary by a field an image roll does not explain: a hand
+	// edit has moved an object the deploy owns (gt-y705n1).
+	RuleClusterDrift = "cluster.drift"
+
+	// RuleClusterDriftUnreadable is the drift compare's own failure: it could
+	// not read an object or the recorded render flags, so it judged no object
+	// (gt-y705n1).
+	RuleClusterDriftUnreadable = "cluster.drift_unreadable"
 )
 
 var (
@@ -446,6 +456,14 @@ var ruleFlags = map[string]RuleFlags{
 	// The last runs of a rig were slow for the same reason: the overseer is
 	// woken to read the pole package (gt-l0t2tg).
 	RuleGateSlow: flagsWake,
+	// A drifted cluster is the overseer's next look, not a page: it rolls the
+	// cluster or reads the hand edit against the render, and no image roll is
+	// blocked while it waits (gt-y705n1).
+	RuleClusterDrift: flagsAsk,
+	// A compare that could not read is a measurement that stopped, not a
+	// failure: it queues beside the drift row, and an unread cluster is not
+	// reported as one in step (gt-y705n1).
+	RuleClusterDriftUnreadable: flagsAsk,
 }
 
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
@@ -545,6 +563,8 @@ var kindRules = map[Kind]string{
 	KindImagePinsRefreshStuck:         RuleImagePinsRefreshStuck,
 	KindImagePinsDeadLayer:            RuleImagePinsDeadLayer,
 	KindGateSlow:                      RuleGateSlow,
+	KindClusterDrift:                  RuleClusterDrift,
+	KindClusterDriftUnreadable:        RuleClusterDriftUnreadable,
 }
 
 // jobOverdueWakePrefix is the key a job that missed two cadences raises under

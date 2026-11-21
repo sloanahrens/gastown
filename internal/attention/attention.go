@@ -231,6 +231,14 @@ const (
 	// closed is still in the walk past the linger bound, so the town wants it
 	// running and nothing is running it (gt-klpqb3).
 	KindSeatFinishedLingering Kind = "seat-finished-lingering"
+	// KindClusterDrift: the live control cluster differs from the render of the
+	// running binary by a field an image roll does not explain, so a hand edit
+	// has moved an object the deploy owns (gt-y705n1).
+	KindClusterDrift Kind = "cluster-drift"
+	// KindClusterDriftUnreadable: the drift compare could not read an object or
+	// the recorded render flags, so whether the cluster is in step is unknown
+	// (gt-y705n1).
+	KindClusterDriftUnreadable Kind = "cluster-drift-unreadable"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -254,6 +262,7 @@ func Kinds() []Kind {
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow, KindSeatFinishedLingering,
+		KindClusterDrift, KindClusterDriftUnreadable,
 	}
 }
 
