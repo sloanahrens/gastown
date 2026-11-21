@@ -80,10 +80,22 @@ func ReadGateRuns(townRoot string) ([]GateRun, int, error) {
 	defer func() { _ = f.Close() }() // read-only: a close error cannot lose a run
 	var runs []GateRun
 	unparsed := 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	br := bufio.NewReaderSize(f, 64*1024)
+	for {
+		raw, over, err := readGateRunLine(br)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, 0, fmt.Errorf("land: reading %s: %w", path, err)
+		}
+		// An over-long line is skipped and counted, as a torn one is: the rows
+		// after it still read (gt-hykdcz).
+		if over {
+			unparsed++
+			continue
+		}
+		line := strings.TrimSpace(string(raw))
 		if line == "" {
 			continue
 		}
@@ -96,8 +108,43 @@ func ReadGateRuns(townRoot string) ([]GateRun, int, error) {
 		}
 		runs = append(runs, *r)
 	}
-	if err := sc.Err(); err != nil {
-		return nil, 0, fmt.Errorf("land: reading %s: %w", path, err)
-	}
 	return runs, unparsed, nil
+}
+
+// gateRunLineMax is the longest line, newline excluded, that ReadGateRuns
+// parses. A longer line is skipped to its newline and counted as unparsed.
+const gateRunLineMax = 1 << 20
+
+// readGateRunLine returns the next line without its newline. A line over
+// gateRunLineMax comes back with over set and no bytes, once the reader has
+// read past its newline or the end of the file. At end of file it returns
+// io.EOF, or the final line if the file does not end in a newline.
+func readGateRunLine(br *bufio.Reader) (line []byte, over bool, err error) {
+	for {
+		chunk, rerr := br.ReadSlice('\n')
+		body := chunk
+		if rerr == nil {
+			body = chunk[:len(chunk)-1]
+		}
+		if !over {
+			if len(line)+len(body) > gateRunLineMax {
+				over, line = true, nil
+			} else {
+				line = append(line, body...)
+			}
+		}
+		switch {
+		case rerr == nil:
+			return line, over, nil
+		case errors.Is(rerr, bufio.ErrBufferFull):
+			// The line runs past the read buffer; keep reading it.
+		case errors.Is(rerr, io.EOF):
+			if !over && len(line) == 0 && len(chunk) == 0 {
+				return nil, false, io.EOF
+			}
+			return line, over, nil
+		default:
+			return nil, false, rerr
+		}
+	}
 }
