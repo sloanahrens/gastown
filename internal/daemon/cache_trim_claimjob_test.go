@@ -189,6 +189,26 @@ func TestCacheTrimClaimJobPendingNeedsAReadableActiveStatus(t *testing.T) {
 	}
 }
 
+// TestCacheTrimClaimJobPendingEarlierJobRunning is the bead's acceptance: an
+// earlier trim Job still running when this trim applies makes the run pending,
+// not failed, and the refusal keeps the text that names the Job and why it is
+// left alone.
+func TestCacheTrimClaimJobPendingEarlierJobRunning(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+		cacheTrimJobPodsVerb(cacheTrimJob): cacheTrimPodsReply(cacheTrimJobPodJSON("Running", diskMaintNow, "", cacheTrimForgejoPolecat)),
+	})
+	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+	if !errors.Is(err, errCacheTrimJobPending) {
+		t.Fatalf("a run beside an earlier Job still running = %v, want an error wrapping errCacheTrimJobPending", err)
+	}
+	want := "the earlier trim Job " + cacheTrimJob + " is still running; its pods mount the claim, so it is left to finish"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("the error %q does not carry the refusal %q", err, want)
+	}
+}
+
 // TestCacheTrimClaimJobRunRefusesAnUnsetClock pins that the manifest's refusal
 // is returned before any cluster call: the pod's plan judges file ages by the
 // clock, so a Job built without one would remove files by an unknown age.
