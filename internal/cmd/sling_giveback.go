@@ -13,11 +13,14 @@ import (
 // survive the trip out of the process that made it. Each one must open the
 // message or a wrap segment (after ": ") and carries the rest of the shape the
 // town prints, so prose that merely contains the phrase does not match. The
+// session shape ends the message: it takes the polecat layer's ": <session id>"
+// form, the tmux layer's " with healthy agent" form and the bare phrase, and
+// nothing that goes on after them. The
 // gateway failure has no sentinel to fall back on: gtwrap wraps the transport
 // error without one.
 var (
 	assigneeLockTextShape   = regexp.MustCompile(`(?:^|: )timed out acquiring assignee sling lock (?:for \S+ )?after \d+s \(`)
-	sessionRunningTextShape = regexp.MustCompile(`(?:^|: )session already running: \S+$`)
+	sessionRunningTextShape = regexp.MustCompile(`(?:^|: )session already running(?:: \S+| with healthy agent)?$`)
 	gatewayDownTextShape    = regexp.MustCompile(`(?:^|: )gtwrap: the bd gateway at \S+ did not answer, so the call did not run: `)
 )
 

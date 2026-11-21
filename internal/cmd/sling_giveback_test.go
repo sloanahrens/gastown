@@ -134,6 +134,20 @@ func TestSlingGiveBackReasonAnchored(t *testing.T) {
 			giveBack: true,
 		},
 		{
+			name:     "a session already running with a healthy agent as the tmux layer prints it",
+			err:      errors.New("starting polecat session: session already running with healthy agent"),
+			giveBack: true,
+		},
+		{
+			name:     "a session already running with no id after it",
+			err:      errors.New("starting polecat session: session already running"),
+			giveBack: true,
+		},
+		{
+			name: "a session phrase that continues into other words",
+			err:  errors.New("starting polecat session: session already running with a stale agent left over by the last tick"),
+		},
+		{
 			name:     "a bd gateway that did not answer as the town prints it",
 			err:      errors.New("gtwrap: the bd gateway at http://bd-gateway.gt.svc:7440 did not answer, so the call did not run: connection refused"),
 			giveBack: true,
