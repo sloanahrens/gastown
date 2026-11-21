@@ -33,6 +33,15 @@ var adviceReadStepRe = regexp.MustCompile(`(?i)\b(read|reads|reading|unreadable|
 // advisory; the caller prints it as one "advice:" line.
 const adviceFailureText = "the Goal or Constraints mentions %q but no acceptance box says what happens when the read or step fails: add a box naming the failure behavior"
 
+// adviceLintBoxText is the sentence Advice returns for a box a seat cannot tick.
+const adviceLintBoxText = "an acceptance box demands that lint passes: a seat cannot run lint and the landing gate does; drop the box or say go vet"
+
+// adviceLintPassRe matches a lint word and a pass word within 40 characters.
+var adviceLintPassRe = regexp.MustCompile(`(?i)\blint\b.{0,40}\bpass(?:es|ed)?\b|\bpass(?:es|ed)?\b.{0,40}\blint\b`)
+
+// adviceSpecLintRe matches the seat's own "spec lint", which is not the gate's.
+var adviceSpecLintRe = regexp.MustCompile(`(?i)\bspec\s+lint\b`)
+
 // adviceExcludedLabelText is the sentence Advice returns for a bead an excluded
 // label keeps off the dispatcher. Callers outside this package get it only
 // through Advice, so they never read this constant.
@@ -64,6 +73,9 @@ var otherRigVerbRe = regexp.MustCompile(`(?i)\b(?:read|reads|reading|check|check
 // failure, a refusal, an unreadable input, a "cannot" or a timeout with a read
 // or a step, Advice says to add one.
 //
+// The lint advisory: an acceptance box that says lint passes gets one line,
+// since a seat cannot run that lint. "spec lint" does not count.
+//
 // The excluded-label advisory: a bead wearing a label in ExcludedLabels() is
 // one the dispatcher never takes, so a clean lint result would overstate its
 // readiness. Advice names each such label on its own line, matching the
@@ -82,6 +94,9 @@ func Advice(s Spec) []string {
 	if match := adviceTriggerRe.FindString(trigger); match != "" && !adviceNamesFailure(s, sections) {
 		advice = append(advice, fmt.Sprintf(adviceFailureText, strings.ToLower(match)))
 	}
+	if adviceDemandsLint(s, sections) {
+		advice = append(advice, adviceLintBoxText)
+	}
 	advice = append(advice, otherRigAdvice(s, sections)...)
 	for _, label := range ExcludedLabels() {
 		if s.HasLabel(label) {
@@ -97,6 +112,16 @@ func Advice(s Spec) []string {
 func adviceNamesFailure(s Spec, sections map[string]string) bool {
 	for _, item := range acceptanceItemTexts(acceptanceText(s, sections)) {
 		if adviceFailureRe.MatchString(item) && adviceReadStepRe.MatchString(item) {
+			return true
+		}
+	}
+	return false
+}
+
+// adviceDemandsLint reports whether one acceptance box demands that lint passes.
+func adviceDemandsLint(s Spec, sections map[string]string) bool {
+	for _, item := range acceptanceItemTexts(acceptanceText(s, sections)) {
+		if adviceLintPassRe.MatchString(adviceSpecLintRe.ReplaceAllString(item, "")) {
 			return true
 		}
 	}
