@@ -161,6 +161,7 @@ func TestReadMaintenanceGC(t *testing.T) {
 	cases := []struct {
 		name          string
 		state         string // written to the state path; empty means no file
+		dirAtPath     bool   // a directory at the state path, so the read fails
 		wantLast      time.Time
 		wantReclaimed int64
 		wantMissing   bool
@@ -186,16 +187,29 @@ func TestReadMaintenanceGC(t *testing.T) {
 			state:   `{"last_gc":`,
 			wantErr: true,
 		},
+		{
+			name:      "a directory at the state path is a read error, not an empty state",
+			dirAtPath: true,
+			wantErr:   true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			town := t.TempDir()
-			if c.state != "" {
+			//testpolicy:allow no-exec-files — the target is the TempDir root: a directory's search bit, kept private under the gate's umask 000
+			if err := os.Chmod(town, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if c.state != "" || c.dirAtPath {
 				path := maintenanceGCStatePath(town)
 				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, []byte(c.state), 0o644); err != nil {
+				if c.dirAtPath {
+					if err := os.Mkdir(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(path, []byte(c.state), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
