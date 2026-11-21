@@ -58,6 +58,9 @@ var pinRepoForm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // alone: a missing seam, a {owner} that cannot be expanded, and a file that
 // does not name its four pins. A state with Err is not a read, whatever its Tip
 // and Behind hold, so no caller may take it for a fresh pin.
+//
+// A bd tip that does not contain the samples build is that pin's Err, so a
+// refresh never moves bd back to a build without `bd sample`.
 func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, error), tipGit PinTipGit, pathCount PinPathCount, cmp ImagePinCompare) ([]ImagePinState, error) {
 	if tipGit == nil {
 		return nil, errors.New("image pins read: no git to read each source's origin/main with")
@@ -76,9 +79,11 @@ func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, 
 	return states, nil
 }
 
-// readImagePin reads one pin: its source's tip, and its lag behind that tip. The
-// first failure is the state's Err, with the pin's Name and Pin from the file, so
-// the caller can tell which pin failed and no pin is read with a guessed answer.
+// readImagePin reads one pin: its source's tip, and its lag behind that tip. A
+// bd pin's tip is held to the samples build every bd image needs, whether or not
+// the pin is at it (imagePinBDFloor). The first failure is the state's Err, with
+// the pin's Name and Pin from the file, so the caller can tell which pin failed
+// and no pin is read with a guessed answer.
 func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pathCount PinPathCount, pin daemonimage.Pin) ImagePinState {
 	state := ImagePinState{Name: pin.Name, Pin: pin.Commit}
 	owner, repo, err := pinRepo(pin)
@@ -92,6 +97,12 @@ func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pa
 		return state
 	}
 	state.Tip = tip
+	if pin.Name == "bd" {
+		if err := imagePinBDFloor(ctx, cmp, owner, repo, tip); err != nil {
+			state.Err = err
+			return state
+		}
+	}
 	if pin.Commit != tip {
 		behind, err := imagePinBehind(ctx, cmp, pathCount, pin, owner, repo, tip)
 		if err != nil {
