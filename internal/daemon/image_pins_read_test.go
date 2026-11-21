@@ -298,6 +298,8 @@ func TestReadImagePinTipsBDFloor(t *testing.T) {
 		{name: "a bd tip that contains the samples build"},
 		{name: "a bd tip that lacks the samples build", only: 3, want: "does not contain the samples build"},
 		{name: "another pin's tip never makes the floor call", pin: "om", pinCommit: pinsReadOMCommit, tip: pinsReadOMTip},
+		{name: "the hm pin's tip never makes the floor call", pin: "hm", pinCommit: pinsReadHMCommit, tip: pinsReadHMTip},
+		{name: "the devops pin's tip never makes the floor call", pin: "devops", pinCommit: pinsReadDevopsCommit, tip: pinsReadDevopsTip},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
