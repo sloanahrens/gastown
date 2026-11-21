@@ -612,6 +612,125 @@ func TestCacheTrimSwitchRaisesWhenTheDiskStaysFull(t *testing.T) {
 	}
 }
 
+// TestCacheTrimSwitchDiskItem pins the claim's no-op item by the disk a finished
+// trim reads, not by the start of a pass: a finished trim on a full disk raises
+// it and the next pass, whose Job is still running, leaves it raised; a finished
+// trim under the percent clears it; an unreadable disk leaves it as it was; and
+// a trim that completed after its wait decides it in that pass.
+func TestCacheTrimSwitchDiskItem(t *testing.T) {
+	t.Parallel()
+	key := cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)
+	claimItems := func(t *testing.T, f *cacheTrimFixture) int {
+		t.Helper()
+		var n int
+		for _, it := range f.noOpItems(t) {
+			if it.Key == key {
+				n++
+			}
+		}
+		return n
+	}
+	raise := func(f *cacheTrimFixture) {
+		f.d.cacheTrimNoOp.raise(attention.Item{Key: key})
+	}
+	reading := func(pct float64) []disks.Reading {
+		return []disks.Reading{{Name: diskMaintDiskColima, UsedPct: pct}}
+	}
+	// pending answers the claim Job's wait as one that ran out with the Job still
+	// active, the state a pass that leaves the item undecided carries.
+	pending := func(f *cacheTrimFixture) {
+		f.answerFrom(cacheTrimClaimJobWaitVerb, cliReply{stderr: "error: timed out waiting for the condition\n", code: 1})
+		f.answerFrom(cacheTrimJobStateVerb, cliReply{stdout: `{"status":{"active":1}}`})
+	}
+
+	t.Run("a full disk keeps its item through a pass whose Job is pending", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", nil)
+		reads := 0
+		f.d.diskMaint.readDisks = func(context.Context) []disks.Reading { reads++; return reading(99) }
+		if !viaJob(t, f, true, map[string]string{}) {
+			t.Fatalf("a finished trim on a full disk = false, want true; log: %s", f.log.String())
+		}
+		if got := claimItems(t, f); got != 1 {
+			t.Fatalf("a finished trim on a disk at 99%% left %d item(s), want the one it raises", got)
+		}
+		pending(f)
+		if !viaJob(t, f, true, map[string]string{}) {
+			t.Fatalf("a pass whose Job is pending = false, want true (a verdict); log: %s", f.log.String())
+		}
+		if got := claimItems(t, f); got != 1 {
+			t.Errorf("a pass whose Job is pending on the still-full disk left %d item(s), want the item the finished trim raised", got)
+		}
+		if reads != 1 {
+			t.Errorf("the disk was read %d times, want the one read of the finished trim: a pending pass decides nothing", reads)
+		}
+	})
+
+	t.Run("a finished trim under the percent clears the item", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", nil)
+		f.d.diskMaint.readDisks = func(context.Context) []disks.Reading { return reading(50) }
+		raise(f)
+		if !viaJob(t, f, true, map[string]string{}) {
+			t.Fatalf("a finished trim under the percent = false, want true; log: %s", f.log.String())
+		}
+		if got := claimItems(t, f); got != 0 {
+			t.Errorf("a finished trim on a disk at 50%% left %d item(s), want none", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		raised bool
+	}{
+		{"an unreadable disk leaves the item raised", true},
+		{"an unreadable disk raises nothing", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", nil)
+			f.d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+				return []disks.Reading{{Name: diskMaintDiskColima, Err: errors.New("df failed")}}
+			}
+			if tc.raised {
+				raise(f)
+			}
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("%s: a finished trim = false, want true; log: %s", tc.name, f.log.String())
+			}
+			want := 0
+			if tc.raised {
+				want = 1
+			}
+			if got := claimItems(t, f); got != want {
+				t.Errorf("%s: %d item(s) after the trim, want %d: an unreadable disk is neither full nor empty", tc.name, got, want)
+			}
+			if logged := f.log.String(); !strings.Contains(logged, "the attention item is left as it was") {
+				t.Errorf("%s: the unreadable disk is not logged: %s", tc.name, logged)
+			}
+		})
+	}
+
+	t.Run("a late-completed trim under the percent clears a stale item", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
+			cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
+		})
+		// The new Job stays pending, so only the late trim's own decision can
+		// clear the item in this pass.
+		pending(f)
+		f.d.diskMaint.readDisks = func(context.Context) []disks.Reading { return reading(50) }
+		raise(f)
+		if !viaJob(t, f, true, map[string]string{}) {
+			t.Fatalf("a pass beside a late-completed trim = false, want true; log: %s", f.log.String())
+		}
+		if got := claimItems(t, f); got != 0 {
+			t.Errorf("a trim that completed after its wait on a disk at 50%% left %d item(s), want the stale item cleared in that pass", got)
+		}
+	})
+}
+
 // TestCacheTrimSwitchPendingMark pins the pending mark the claim route keeps: a
 // Job still running when its wait ends sets the claim's mark (and parks nothing),
 // and a dry run neither sets a mark nor clears one the claim already carries.

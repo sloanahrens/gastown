@@ -21,9 +21,9 @@ import (
 // body, and the pod-read block below is copied from the old body of cacheTrimClaim and
 // dies with it (bead gt-4bgici). cacheTrimClaim routes to it (bead gt-zc1d92).
 //
-// A finished apply is recorded as one run with the Job's counts. A dry run
-// applies nothing, so it records no run. The no-op item is cleared by the route
-// that calls this, not here.
+// A finished apply is recorded as one run with the Job's counts and decides the
+// claim's no-op item by the disk it reads (cacheTrimDiskItem). A dry run applies
+// nothing, so it records no run and leaves the item as it is.
 func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
 	// A claim whose trim failed stays parked until the daemon restarts: a
 	// verdict, no retry and no cluster call.
@@ -55,10 +55,6 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		return false
 	}
 	d.cacheTrimClearAlert(ctx, cacheTrimNoPodListKey(namespace), "the sandbox may list pods in "+namespace)
-	// A trim through the claim Job measures nothing, so an item an earlier measure
-	// raised describes nothing this pass can judge. It is cleared only now that the
-	// pod read has succeeded: a failed read is an unknown reading and keeps it.
-	d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim.ClaimName))
 	// This refusal is the town's config, the same on every pass, so it is a
 	// verdict: the claim is judged again at the full interval, not soon.
 	if other, taken := trimmed[namespace]; taken {
@@ -99,7 +95,7 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
 	d.logger.Printf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
-	d.cacheTrimDiskStillFull(ctx, claim.ClaimName, namespace)
+	d.cacheTrimDiskItem(ctx, claim.ClaimName, namespace)
 	return true
 }
 
@@ -130,15 +126,19 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 	d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
 		trimmed: &removed, absent: &absent, kept: &kept})
 	d.logger.Printf("disk_maintenance: cache trim %s in %s: the earlier trim Job %s completed after its wait; recorded: removed %d absent %d kept %d", claim.ClaimName, namespace, jobName, removed, absent, kept)
+	// The late trim finished too, so it makes the same decision as a finished
+	// apply: a stale item goes when the disk it left reads under the percent.
+	d.cacheTrimDiskItem(ctx, claim.ClaimName, namespace)
 	return true
 }
 
-// cacheTrimDiskStillFull replaces the over-the-cap item the claim Job route cannot
-// raise, since it measures nothing: after a finished trim, a sandbox disk at or
-// over the early trim percent raises one low item for the claim. A disk that
-// cannot be read raises nothing (an unreadable disk is not a full one) and says
-// so once an hour.
-func (d *Daemon) cacheTrimDiskStillFull(ctx context.Context, claim, namespace string) {
+// cacheTrimDiskItem decides the claim's cache-trim-noop item by the sandbox disk
+// a finished trim reads: at or over the early trim percent the item is raised,
+// since files younger than the age floor cannot be removed yet and open sandbox
+// paths can hold space; under it a stale item is cleared. A disk that cannot be
+// read leaves the item as it was (an unreadable disk is neither full nor empty)
+// and says so once an hour.
+func (d *Daemon) cacheTrimDiskItem(ctx context.Context, claim, namespace string) {
 	percent, err := diskMaintenanceCacheTrimEarlyPercent(d.patrol())
 	if err != nil {
 		return // the early tick refuses a setting it cannot read
@@ -146,10 +146,11 @@ func (d *Daemon) cacheTrimDiskStillFull(ctx context.Context, claim, namespace st
 	used, err := d.sandboxDiskUsedPct(ctx)
 	if err != nil {
 		d.cacheTrimLogKeyed("cache_trim_disk_unknown:"+namespace+"/"+claim,
-			"disk_maintenance: cache trim %s in %s: the sandbox disk could not be read after the trim: %v; no attention item is raised", claim, namespace, err)
+			"disk_maintenance: cache trim %s in %s: the sandbox disk could not be read after the trim: %v; the attention item is left as it was", claim, namespace, err)
 		return
 	}
 	if used < float64(percent) {
+		d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim))
 		return
 	}
 	d.cacheTrimNoOp.raise(attention.Item{

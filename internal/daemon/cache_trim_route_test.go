@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 )
 
 // TestCacheTrimClaimRoutesToTheClaimJob pins that a daemon with the claim Job
@@ -31,16 +32,18 @@ func TestCacheTrimClaimRoutesToTheClaimJob(t *testing.T) {
 	}
 }
 
-// TestCacheTrimClaimRouteClearsTheNoOpItem pins that the route clears the
-// claim's cache-trim-noop item itself: the claim Job measures nothing, so an
-// item an earlier measure raised for a claim no pod holds describes nothing
-// the pass can judge, and the old route cleared it too.
-func TestCacheTrimClaimRouteClearsTheNoOpItem(t *testing.T) {
+// TestCacheTrimClaimRouteClearsTheNoOpItemAtAFinishedTrimUnderThePercent pins
+// that the route does not clear the item at the start of a pass: a finished trim
+// that leaves the disk under the percent clears the item an earlier pass raised.
+func TestCacheTrimClaimRouteClearsTheNoOpItemAtAFinishedTrimUnderThePercent(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		"get pods -n " + cacheTrimNamespace + " -o json": {stdout: `{"items":[]}`},
 		cacheTrimClaimJobLogVerb:                         {stdout: "removed 0 absent 0 kept 0\n"},
 	})
+	f.d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		return []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 50}}
+	}
 	key := cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)
 	f.d.cacheTrimNoOp.raise(attention.Item{Key: key})
 	f.d.cacheTrimClaim(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
