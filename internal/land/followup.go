@@ -102,6 +102,11 @@ type followupSkips struct {
 	reasons    map[string]bool
 	count      int
 	reasonList []string
+	// failure is the first panic of the landing's FollowupSkip, rendered for the
+	// one log line that reports it: the hook is asked more than once per queued
+	// finding, so a policy that panics every call is still named once per landing
+	// rather than once per call (gt-g97vlb).
+	failure string
 }
 
 func newFollowupSkips() *followupSkips {
@@ -123,14 +128,27 @@ func (s *followupSkips) record(c FollowupCandidate, reason string) {
 // skippedCandidates drops the candidates FollowupSkip names a reason for,
 // before the de-duplication decision, the queue or a bead body sees them, and
 // records each so the feed logs it (gt-3v8jno). A nil hook keeps every
-// candidate, which is how every rig behaves until the daemon sets one.
+// candidate, which is how every rig behaves until the daemon sets one, and a
+// hook that panics keeps the candidate it was asked about too (gt-g97vlb).
 func (l *Lander) skippedCandidates(w Work, cands []FollowupCandidate, skips *followupSkips) []FollowupCandidate {
 	if l.FollowupSkip == nil {
 		return cands
 	}
 	kept := make([]FollowupCandidate, 0, len(cands))
 	for _, c := range cands {
-		reason := l.FollowupSkip(w, c)
+		// The hook is a policy the daemon sets, and the feed goroutine it is
+		// asked on has no recover of its own: a panic must keep the finding
+		// rather than end the landing worker with the landing it was filing for.
+		// It is kept like an empty reason and named once per landing, and the
+		// hook is still asked exactly once per candidate (gt-g97vlb).
+		reason := func() (reason string) {
+			defer func() {
+				if v := recover(); v != nil && skips.failure == "" {
+					skips.failure = fmt.Sprintf("the follow-up skip policy failed (%v); keeping the finding", v)
+				}
+			}()
+			return l.FollowupSkip(w, c)
+		}()
 		if reason == "" {
 			kept = append(kept, c)
 			continue
@@ -204,8 +222,14 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 // lines it wants logged and never returns an error — every failure is a line
 // the caller logs and the landing does not see.
 func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, noted []Finding, skips *followupSkips) (lines []string) {
-	// Logged on every path, including a feed that files nothing (gt-3v8jno).
+	// Logged on every path, including a feed that files nothing (gt-3v8jno), and
+	// through these lines rather than written directly, so a feed the landing
+	// abandons on its timeout cannot interleave with the next landing's log
+	// (gt-g97vlb).
 	defer func() {
+		if skips.failure != "" {
+			lines = append(lines, skips.failure)
+		}
 		if skips.count > 0 {
 			lines = append(lines, fmt.Sprintf("skipped %s: %s", findingsPhrase(skips.count), strings.Join(skips.reasonList, "; ")))
 		}
