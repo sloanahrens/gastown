@@ -1500,11 +1500,12 @@ func (d *Daemon) endSandboxSeatsOfBead(rigName string, landings *land.LandingsFi
 }
 
 // assigneeSeatBranch resolves the branch of a seat only the bead's assignee
-// names: the one its agent bead records, returned only while that agent bead
-// still hooks beadID, because a seat re-slung to other work is not this bead's
-// seat. A reason, not an error, says why a readable agent bead does not resolve
-// a branch; an unreadable one is returned as an error so its caller says which
-// read failed (gt-m1qf31).
+// names: the one its agent bead records. The seat is this bead's seat while
+// that agent bead still hooks beadID, or, after the gt done that cleared the
+// hook, while the bead is its last source issue and the seat is done
+// (gt-m1qf31, gt-xb20n9). A reason, not an error, says why a readable agent
+// bead does not resolve a branch; an unreadable one is returned as an error so
+// its caller says which read failed.
 func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason string, err error) {
 	fields, err := d.sandboxSeatEndHost().seatAgentFields(rig, name)
 	if err != nil {
@@ -1513,13 +1514,38 @@ func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason st
 	if fields == nil {
 		return "", "it has no agent bead", nil
 	}
-	if hook := strings.TrimSpace(fields.HookBead); hook != beadID {
-		return "", fmt.Sprintf("its agent bead hooks %q", hook), nil
+	if reason = seatEndsBead(fields, beadID); reason != "" {
+		return "", reason, nil
 	}
 	if branch = strings.TrimSpace(fields.Branch); branch == "" {
 		return "", "its agent bead records no branch", nil
 	}
 	return branch, "", nil
+}
+
+// seatEndsBead is why an assignee-only seat's agent bead does not name beadID
+// as its own work, or "" when it does. A set hook must be beadID: a seat a
+// sling gave other work is not this bead's seat. An empty hook is the state gt
+// done leaves, and it names the bead only while the seat's last source issue is
+// beadID and the seat is done. "Done" is the agent bead's own record of its
+// finish; a sandbox the gateway still holds is deleted only once its ended
+// marker is set, which endHeldSandboxAtLanding asks, so this offer makes no
+// gateway call (gt-xb20n9).
+func seatEndsBead(fields *beads.AgentFields, beadID string) string {
+	hook := strings.TrimSpace(fields.HookBead)
+	switch {
+	case hook == beadID:
+		return ""
+	case hook != "":
+		return fmt.Sprintf("its agent bead hooks %q", hook)
+	}
+	if source := strings.TrimSpace(fields.LastSourceIssue); source != beadID {
+		return fmt.Sprintf("its agent bead's last source issue is %q, not the landed bead", source)
+	}
+	if state := strings.TrimSpace(fields.AgentState); beads.AgentState(state) != beads.AgentStateDone {
+		return fmt.Sprintf("its agent bead is %q, not done", orMissingText(state))
+	}
+	return ""
 }
 
 // landingSeats maps each polecat seat a landed bead was built on to the branch

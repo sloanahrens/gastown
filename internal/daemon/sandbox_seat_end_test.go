@@ -956,6 +956,64 @@ func TestTakeoverSeatEndEndsTheBeadsSeatNotTheCrewActor(t *testing.T) {
 	}
 }
 
+// A seat that ran gt done has its hook cleared and its last source issue left
+// behind, so an assignee-only name is also the seat that built the landed bead
+// when the hook is empty, the last source issue is the bead, and the seat is
+// done. Any other empty-hook record names no seat of this bead, and the line
+// says which fact refused it (gt-xb20n9).
+func TestTakeoverSeatEndOffersOnlyADoneSeatWithNoReadyBlock(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	const aceBranch = "polecat/ace/" + endBead + "+x1"
+	tests := []struct {
+		name        string
+		fields      beads.AgentFields
+		wantOffered bool
+		wantLog     string
+	}{
+		{"a done seat with an empty hook is offered", beads.AgentFields{
+			LastSourceIssue: endBead, AgentState: string(beads.AgentStateDone), Branch: aceBranch,
+		}, true, ""},
+		{"an empty hook on another bead's seat is not offered", beads.AgentFields{
+			LastSourceIssue: "gt-other1", AgentState: string(beads.AgentStateDone), Branch: aceBranch,
+		}, false, `last source issue is "gt-other1", not the landed bead`},
+		{"an empty hook on a seat that is not done is not offered", beads.AgentFields{
+			LastSourceIssue: endBead, AgentState: string(beads.AgentStateWorking), Branch: aceBranch,
+		}, false, `its agent bead is "working", not done`},
+		{"a seat that still hooks the landed bead is offered as before", beads.AgentFields{
+			HookBead: endBead, Branch: aceBranch,
+		}, true, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			d, got, agents := seatEndCalls(t, &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/ace"}, &logs)
+			seedSeatAgent(t, d, agents, "ace", tt.fields)
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+			if offered := len(*got) > 0; offered != tt.wantOffered {
+				t.Fatalf("seat end offered = %v, want %v (%+v)", offered, tt.wantOffered, *got)
+			}
+			if !tt.wantOffered {
+				if !strings.Contains(logs.String(), "not offered: ") || !strings.Contains(logs.String(), tt.wantLog) {
+					t.Errorf("log = %q, want one line saying the seat is not offered, naming %q", logs.String(), tt.wantLog)
+				}
+				return
+			}
+			if call := (*got)[0]; call.name != "ace" || call.landing.Branch != aceBranch {
+				t.Errorf("offered %s on branch %q, want ace on its own %q", call.name, call.landing.Branch, aceBranch)
+			}
+			if call := (*got)[0]; call.landing.BeadID != endBead || !call.landing.Landed {
+				t.Errorf("landing facts = %+v, want the bead's landed record", call.landing)
+			}
+		})
+	}
+}
+
 // An assignee-only seat is resolved from its agent bead, and only while that
 // bead still hooks the landed bead: a seat re-slung to other work has a branch
 // that is not this bead's work, so it is not offered the end (gt-m1qf31).
@@ -1385,6 +1443,51 @@ func TestSandboxSeatEnderDefaultPathEndsTheSeat(t *testing.T) {
 	}
 	if dirExists(t, dirs.PromptFile) {
 		t.Error("the prompt file the daemon's own end removes is still there")
+	}
+	if len(f.gwAsked) != 1 {
+		t.Errorf("gateway asked %v, want one question", f.gwAsked)
+	}
+}
+
+// A takeover lands a crew branch, and the seat that built the bead has run gt
+// done: its hook is cleared, its last source issue is the landed bead and its
+// state is done, so no READY TO LAND block of its own names it. The bead's
+// assignee is the only name it has left, and the daemon's own end must take it
+// through the real keepReason to the removal of its host directories
+// (gt-xb20n9).
+func TestTakeoverSeatEndEndsADoneSeatWithNoReadyBlock(t *testing.T) {
+	t.Parallel()
+	f := newSeatEndFake(t)
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	f.seatFields.AgentState = string(beads.AgentStateDone)
+	f.seatFields.LastSourceIssue = endBead
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	var logs strings.Builder
+	f.host.d.logger = log.New(&logs, "", 0)
+	landings := &land.LandingsFile{Path: filepath.Join(privateLandingsDir(t), "landings.jsonl")}
+	if err := landings.Append(land.LandingRecord{BeadID: endBead, Head: head, Branch: branch}); err != nil {
+		t.Fatal(err)
+	}
+
+	d := f.host.d
+	d.sandboxExists = f.host.sandboxExists
+	d.openWorkBeads = func([]string, time.Duration) workBeadReader {
+		// The seat's own notes carry no READY TO LAND block: only the bead's
+		// assignee names it.
+		return workBeadStore{endBead: &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/" + endPolecat}}
+	}
+	d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	d.endSandboxSeat = nil
+	d.runSandboxSeatEnd(endRig, landings, land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+	if dirExists(t, dirs.PolecatDir) {
+		t.Errorf("the done seat's directory is still there; log = %q", logs.String())
+	}
+	if dirExists(t, dirs.PromptFile) {
+		t.Errorf("the done seat's prompt file is still there; log = %q", logs.String())
 	}
 	if len(f.gwAsked) != 1 {
 		t.Errorf("gateway asked %v, want one question", f.gwAsked)
