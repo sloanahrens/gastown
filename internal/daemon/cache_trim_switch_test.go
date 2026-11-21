@@ -466,6 +466,7 @@ func TestCacheTrimLateResultIsRead(t *testing.T) {
 		cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
 		cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
 	})
+	f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
 	if !viaJob(t, f, true, map[string]string{}) {
 		t.Fatalf("a pass beside a completed earlier Job = false, want true; log: %s", f.log.String())
 	}
@@ -542,6 +543,7 @@ func TestCacheTrimLateResultMalformedParks(t *testing.T) {
 				cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
 				cacheTrimClaimJobLogVerb: {stdout: log},
 			})
+			f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
 			if viaJob(t, f, true, map[string]string{}) {
 				t.Fatalf("%s: an earlier Job read late = true, want false (a failure)", name)
 			}
@@ -550,6 +552,11 @@ func TestCacheTrimLateResultMalformedParks(t *testing.T) {
 			}
 			if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
 				t.Errorf("%s: the claim is not parked", name)
+			}
+			// A parked claim never reaches the late read again, and every other park
+			// clears the mark, so a failed late read does too.
+			if f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("%s: the failed late read left the pending mark set", name)
 			}
 			calls := len(f.cli.recorded())
 			if !viaJob(t, f, true, map[string]string{}) {
@@ -717,6 +724,7 @@ func TestCacheTrimSwitchDiskItem(t *testing.T) {
 			cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
 			cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
 		})
+		f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
 		// The new Job stays pending, so only the late trim's own decision can
 		// clear the item in this pass.
 		pending(f)
@@ -797,6 +805,7 @@ func TestCacheTrimLateResultDiskItemReadsAfterThePassBudgetEnds(t *testing.T) {
 		}
 		return []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 50}}
 	}
+	f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
 	f.d.cacheTrimNoOp.raise(attention.Item{Key: key})
 	pass, endPass := context.WithCancel(context.Background())
 	endPass()
@@ -884,6 +893,56 @@ func TestCacheTrimSwitchPendingMarkClears(t *testing.T) {
 			viaJob(t, f, tc.apply, map[string]string{})
 			if got := f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName); got != tc.wantMark {
 				t.Errorf("the mark after the pass = %v, want %v; log: %s", got, tc.wantMark, f.log.String())
+			}
+		})
+	}
+	t.Run("a dry run whose manifest is refused keeps the mark", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", nil)
+		f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
+		// A dry run has no wait, so the direct call cannot hang; a negative cap is the
+		// input the manifest builder refuses.
+		if f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
+			"gastown-polecat:dev", cacheTrimNamespace, -1, false, map[string]string{}) {
+			t.Errorf("a refused manifest = true, want false (a failure)")
+		}
+		if !f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+			t.Errorf("a dry run's failure cleared the mark")
+		}
+	})
+}
+
+// TestCacheTrimLateResultOnlyForAPendingClaim pins that the late read runs only
+// for a claim a pass left pending. A finished run leaves its Job in the cluster
+// until the next apply deletes it, so a claim with no mark must not record that
+// Job a second time; a claim with the mark records the Job's run, then the pass's
+// own, and the mark is spent. The late read runs before cacheTrimClaimJobRun, so
+// it sees the mark before any clear ends it: a result is never lost to the order.
+func TestCacheTrimLateResultOnlyForAPendingClaim(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		mark     bool
+		wantRuns int
+	}{
+		{"no mark records only the pass's own run", false, 1},
+		{"the mark records the earlier Job's run and then the pass's own", true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
+				cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
+			})
+			f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, tc.mark)
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("a pass beside a finished Job = false, want true; log: %s", f.log.String())
+			}
+			if runs := f.jobRuns(t); len(runs) != tc.wantRuns {
+				t.Errorf("the ledger holds %d runs, want %d: %+v", len(runs), tc.wantRuns, runs)
+			}
+			if f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("the mark is still set after the pass")
 			}
 		})
 	}

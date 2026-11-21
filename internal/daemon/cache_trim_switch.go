@@ -112,11 +112,24 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 // way a finished trim's is. A Job still running is left to cacheTrimApply, which
 // refuses the apply as pending, and so is a Job that did not complete. It reports
 // false when the Job's state or result line cannot be read: the run is recorded
-// as failed and the claim parked, like any other failure.
+// as failed, the claim parked and its mark cleared, like any other failure.
+//
+// The late read is for a claim a pass left pending (its Job still running at the
+// wait's end): a claim with no mark returns true at once, since a Job that
+// finished inside its own pass was recorded then. The mark is memory only, so a
+// result whose Job completed after its wait and then outlives a daemon restart is
+// not read late; that loss is the accepted cost of recording each Job once, and
+// persisting the mark is gt-d4cxyx.
 func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, started time.Time) bool {
+	// Only a claim a pass left pending has a result to read late: a Job that
+	// finished inside its own pass was recorded then, and is not recorded again.
+	if !d.cacheTrimIsPending(namespace, claim.ClaimName) {
+		return true
+	}
 	jobName := cacheTrimJobName(claim.ClaimName)
 	fail := func(err error) bool {
 		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+		d.cacheTrimSetPending(namespace, claim.ClaimName, false)
 		d.cacheTrimPark(namespace, claim.ClaimName, err)
 		return false
 	}
