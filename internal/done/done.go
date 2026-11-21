@@ -1522,7 +1522,8 @@ func submitForLanding(r *doneRun) error {
 }
 
 // checkBranchForSubmit refuses a rebased branch that reverts work already
-// merged to the target (gt-63sz), adds throwaway files (gt-ozo4), or is
+// merged to the target (gt-63sz), adds throwaway files (gt-ozo4), adds more
+// lines than the bead's declared limit allows a polecat (gt-r160a1), or is
 // byte-identical to a rejected attempt (gt-0jzd5).
 func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error {
 	if r.opts.allowReverts {
@@ -1535,9 +1536,15 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 	} else if err := reportThrowawayPaths(r.g, baseRef); err != nil {
 		return err
 	}
-	var sourceNotes string
+	var sourceNotes, description string
 	if sub.sourceIssue != nil {
 		sourceNotes = sub.sourceIssue.Notes
+		description = sub.sourceIssue.Description
+	}
+	if err := reportLineLimit(r.stdout(), os.Stderr, func() (int, error) {
+		return r.g.AddedLinesSince(baseRef)
+	}, description, r.opts.polecatEnv); err != nil {
+		return err
 	}
 	rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sub.sourceBD, mrID) }
 	return reportUnchangedSinceRejection(r.g, sourceNotes, r.issueID, baseRef, rejectedTip)
