@@ -2,6 +2,7 @@ package testpolicy
 
 import (
 	"bufio"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -36,12 +37,17 @@ func ReadList(path string) (map[string]bool, error) {
 // runs on the resolved root and each directory is returned spelled under the
 // root the caller gave, because callers trim that spelling off the paths.
 func PackageDirs(root string) ([]string, error) {
-	real, err := filepath.EvalSymlinks(root)
+	resolved, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
 	}
+	if fi, err := os.Stat(resolved); err != nil {
+		return nil, err
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("testpolicy: root %s is not a directory", root)
+	}
 	var dirs []string
-	err = filepath.WalkDir(real, func(p string, d fs.DirEntry, err error) error {
+	err = filepath.WalkDir(resolved, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -49,10 +55,10 @@ func PackageDirs(root string) ([]string, error) {
 			return nil
 		}
 		name := d.Name()
-		if p != real && (name == "testdata" || name == "vendor" || name == "node_modules" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+		if p != resolved && (name == "testdata" || name == "vendor" || name == "node_modules" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
 			return filepath.SkipDir
 		}
-		if p != real {
+		if p != resolved {
 			if _, err := os.Stat(filepath.Join(p, "go.mod")); err == nil {
 				return filepath.SkipDir
 			}
@@ -62,7 +68,7 @@ func PackageDirs(root string) ([]string, error) {
 			return err
 		}
 		if len(matches) > 0 {
-			rel, err := filepath.Rel(real, p)
+			rel, err := filepath.Rel(resolved, p)
 			if err != nil {
 				return err
 			}

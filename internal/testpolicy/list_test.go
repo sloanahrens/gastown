@@ -54,15 +54,15 @@ func TestPackageDirsSkipsNestedModules(t *testing.T) {
 // error and failed eight guard tests with unrelated messages (gt-91d613).
 func TestPackageDirsFollowsASymlinkedRoot(t *testing.T) {
 	t.Parallel() // unit tier: a temp tree of one file and a symlink
-	real := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(real, "a"), 0o755); err != nil {
+	target := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(target, "a"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(real, "a", "a.go"), []byte("package a\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(target, "a", "a.go"), []byte("package a\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(t.TempDir(), "checkout")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
 	got, err := PackageDirs(link)
@@ -84,5 +84,20 @@ func TestPackageDirsRefusesAMissingRoot(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), missing) {
 		t.Errorf("the error %q does not name the root %s", err, missing)
+	}
+}
+
+func TestPackageDirsRefusesARootThatIsNotADirectory(t *testing.T) {
+	t.Parallel() // unit tier: one file
+	file := filepath.Join(t.TempDir(), "root.go")
+	if err := os.WriteFile(file, []byte("package a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := PackageDirs(file)
+	if err == nil {
+		t.Fatalf("PackageDirs(%s) = %v with a nil error, want an error: a file is not a root", file, got)
+	}
+	if !strings.Contains(err.Error(), file) {
+		t.Errorf("the error %q does not name the root %s", err, file)
 	}
 }
