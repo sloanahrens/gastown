@@ -189,6 +189,12 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 		t.Fatalf("the Service guard holds no policy or no binding (policy %v, binding %v)", policy != nil, binding != nil)
 	}
 
+	// The count is checked before any subtest is registered: a parallel subtest
+	// that indexes the validations runs after this function returns, so a guard
+	// placed later would not stop it from panicking on a short policy.
+	if n := len(policy.Spec.Validations); n != 3 {
+		t.Fatalf("the policy holds %d validations, want 3", n)
+	}
 	t.Run("the policy matches Service creates and updates in the core group", func(t *testing.T) {
 		t.Parallel()
 		rules := policy.Spec.MatchConstraints.ResourceRules
@@ -228,9 +234,6 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 	})
 	t.Run("each validation has an expression and a message", func(t *testing.T) {
 		t.Parallel()
-		if n := len(policy.Spec.Validations); n != 3 {
-			t.Fatalf("the policy holds %d validations, want 3", n)
-		}
 		for i, v := range policy.Spec.Validations {
 			if strings.TrimSpace(v.Expression) == "" || strings.TrimSpace(v.Message) == "" {
 				t.Errorf("validation %d has an empty expression or message", i+1)
@@ -248,9 +251,6 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 		}
 	})
 	// The other-Service refusal is validation index 2 because the push validation (gt-ozn0j0) sits at index 1.
-	if n := len(policy.Spec.Validations); n != 3 {
-		t.Fatalf("the policy holds %d validations, want 3", n)
-	}
 	t.Run("the two pinned validations match the policy text", func(t *testing.T) {
 		t.Parallel()
 		for _, tc := range []struct {
