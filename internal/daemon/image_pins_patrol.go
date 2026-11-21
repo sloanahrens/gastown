@@ -30,7 +30,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
@@ -540,7 +539,7 @@ func (d *Daemon) imagePinsPathCount(ctx context.Context) PinPathCount {
 // lowercase hex is refused before any git call. A failed git call, a non-numeric
 // answer or a negative age (the pin newer than its tip) is an error (gt-qi51ka).
 func (d *Daemon) imagePinsAge(ctx context.Context) func(url, pin, tip string) (time.Duration, error) {
-	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "devops"))
+	repo := imagePinsScratchRepo(d.config.TownRoot)
 	return func(url, pin, tip string) (time.Duration, error) {
 		// Both shas are refused before any git call: they reach git show below.
 		if !pinShaForm.MatchString(pin) {
@@ -548,6 +547,9 @@ func (d *Daemon) imagePinsAge(ctx context.Context) func(url, pin, tip string) (t
 		}
 		if !pinShaForm.MatchString(tip) {
 			return 0, fmt.Errorf("git show -s --format=%%ct: tip %q is not a full 40-character lowercase hex sha", tip)
+		}
+		if err := d.imagePinsEnsureScratch(ctx, repo); err != nil {
+			return 0, err
 		}
 		if _, err := d.imagePinsGit(ctx, repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"); err != nil {
 			return 0, err
