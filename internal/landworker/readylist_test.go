@@ -158,6 +158,10 @@ func TestLandReadyListsAgainAfterStampOrCeiling(t *testing.T) {
 		// seed first seeds a ready bead before the first pass, so the last list
 		// was not empty.
 		seed bool
+		// landing is whether the seeded bead lands in each pass, which costs
+		// that pass one more list: a pass lists the board again after each
+		// landing attempt (gt-wgvu6p).
+		landing bool
 	}
 
 	rows := []row{
@@ -171,7 +175,7 @@ func TestLandReadyListsAgainAfterStampOrCeiling(t *testing.T) {
 			moveNow: time.Minute,
 		},
 		{name: "a list older than three minutes", moveNow: 3 * time.Minute},
-		{name: "a non-empty last list", seed: true},
+		{name: "a non-empty last list", seed: true, landing: true},
 		{
 			name: "an unreadable stamp",
 			afterFirst: func(t *testing.T, h *harness) {
@@ -200,18 +204,25 @@ func TestLandReadyListsAgainAfterStampOrCeiling(t *testing.T) {
 			if r.seed {
 				h.seedReady(t, "gt-abc")
 			}
+			// A pass lists once, then once more after each landing attempt
+			// (gt-wgvu6p): the seeded bead lands again on the second pass, since
+			// the fake lander leaves its ready label on.
+			perPass := 1
+			if r.landing {
+				perPass = 2
+			}
 			if rep := h.w.Pass(context.Background()); rep.Failed != 0 {
 				t.Fatalf("first pass %v; want a clean list", rep)
 			}
-			if bd.lists != 1 {
-				t.Fatalf("first pass listed the board %d times, want 1", bd.lists)
+			if bd.lists != perPass {
+				t.Fatalf("first pass listed the board %d times, want %d", bd.lists, perPass)
 			}
 			if r.afterFirst != nil {
 				r.afterFirst(t, h)
 			}
 			h.now = h.now.Add(r.moveNow)
 			h.w.Pass(context.Background())
-			if bd.lists != 2 {
+			if bd.lists != 2*perPass {
 				t.Errorf("second pass listed the board %d times in total, want it to list again", bd.lists)
 			}
 		})

@@ -559,8 +559,11 @@ func (w *Worker) landReady(ctx context.Context) Report {
 	// the whole list, not the beads this pass still has to land, because the
 	// column it answers counts what waits.
 	w.Queue.Publish(w.Rig, len(issues))
-	sortByLandingOrder(issues)
-	for _, issue := range issues {
+	// The beads this pass has looked at, whatever it left them on: a bead that
+	// stays ready after its attempt is not tried twice in one pass, and the
+	// loop ends once a fresh list holds nothing outside this set (gt-wgvu6p).
+	handled := make(map[string]bool, len(issues))
+	for {
 		if ctx.Err() != nil {
 			return rep
 		}
@@ -568,11 +571,16 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		if w.draining() {
 			return rep
 		}
+		issue := nextReady(issues, handled)
+		if issue == nil {
+			return rep
+		}
+		handled[issue.ID] = true
 		// IsActionable, not IsTerminal: deferring a submitted bead is the
 		// operator's only hold on it (gt bead reset refuses a ready bead), so
 		// the worker must read the same park the health count reports, or a
 		// "0 pending" field sits over a queue that still lands (gt-y7n1u).
-		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
+		if !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
 			continue
 		}
 		// The operator's retry label starts a parked bead on a new run
@@ -620,8 +628,17 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		}
 		w.process(ctx, issue, &rep)
 		w.rememberOutcome(issue)
+		// A landing takes minutes, and a bead made ready while it ran must land
+		// in this pass's order, not after every bead the pass listed first: the
+		// fresh list is read after each attempt (gt-wgvu6p). The bookkeeping
+		// above stays the first list's; a later list that fails ends the pass.
+		issues, err = w.Beads.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
+		if err != nil {
+			w.logf("listing %s beads: %v", land.LabelReadyToLand, err)
+			rep.Failed++
+			return rep
+		}
 	}
-	return rep
 }
 
 // skipReadyList reports the count to publish and whether this pass can skip
@@ -1845,6 +1862,20 @@ func sortByLandingOrder(issues []*beads.Issue) {
 		}
 		return a.ID < b.ID
 	})
+}
+
+// nextReady returns the first bead of a listed ready board that this pass has
+// not looked at yet, in landing order, or nil when it has looked at every one:
+// the pass takes the next bead from each fresh list the way it lands them, so a
+// P0 made ready mid-pass lands next (gt-wgvu6p).
+func nextReady(issues []*beads.Issue, handled map[string]bool) *beads.Issue {
+	sortByLandingOrder(issues)
+	for _, issue := range issues {
+		if issue != nil && !handled[issue.ID] {
+			return issue
+		}
+	}
+	return nil
 }
 
 func short(sha string) string {
