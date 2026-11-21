@@ -2,9 +2,12 @@ package daemonimage
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
 )
 
 const closureRepo = "/repo"
@@ -148,9 +151,33 @@ import "gt.local/devops/internal/onlytest"
 	}
 }
 
-// TestInputClosureVisitsEachDirectoryOnce pins the visited set: a two-directory
-// import cycle ends, and the walk reads each directory it reaches once, so the
-// cycle neither repeats a read nor keeps the walk going (gt-rblgfn).
+// countListings wraps the fake git to count the ls-tree listing of each
+// directory the walk makes, and returns an error at the second listing of a
+// directory or past 20 listings: a walk with no visited set fails there instead
+// of running on (gt-rblgfn). reads holds the count per directory.
+func countListings(f *pinsGit) (bdbuild.Git, map[string]int) {
+	reads := map[string]int{}
+	total := 0
+	return func(dir string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "ls-tree" {
+			listed := strings.TrimSuffix(args[len(args)-1], "/")
+			reads[listed]++
+			if reads[listed] > 1 {
+				return nil, fmt.Errorf("directory %s was listed twice: no visited set", listed)
+			}
+			total++
+			if total > 20 {
+				return nil, fmt.Errorf("the walk listed more than 20 directories: no visited set")
+			}
+		}
+		return f.run(dir, args...)
+	}, reads
+}
+
+// TestInputClosureVisitsEachDirectoryOnce pins the visited set: a three-directory
+// import cycle ends and the walk lists each directory once, counting the
+// listings as they happen so a walk without the visited set fails at the second
+// read of pkg/patrol rather than running on (gt-rblgfn).
 func TestInputClosureVisitsEachDirectoryOnce(t *testing.T) {
 	t.Parallel()
 	f := newPinsGit()
@@ -159,23 +186,18 @@ func TestInputClosureVisitsEachDirectoryOnce(t *testing.T) {
 		"cmd/release-reporter": "package main\n",
 		"cmd/cloudcheck":       "package main\n",
 		"pkg/patrol":           "package patrol\nimport \"gt.local/devops/pkg/releasebot\"\n",
-		"pkg/releasebot":       "package releasebot\nimport \"gt.local/devops/pkg/patrol\"\n",
+		"pkg/releasebot":       "package releasebot\nimport \"gt.local/devops/pkg/patrol/sub\"\n",
+		"pkg/patrol/sub":       "package sub\nimport \"gt.local/devops/pkg/patrol\"\n",
 	})
-	got, err := inputClosureGaps(f.run, closureRepo, "main")
+	counting, reads := countListings(f)
+	got, err := inputClosureGaps(counting, closureRepo, "main")
 	if err != nil {
 		t.Fatalf("inputClosureGaps: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("gaps = %v, want none: every directory in the cycle is under the input list", got)
 	}
-	const listing = closureRepo + " ls-tree --name-only main "
-	reads := map[string]int{}
-	for _, call := range f.calls {
-		if dir, ok := strings.CutPrefix(call, listing); ok {
-			reads[strings.TrimSuffix(dir, "/")]++
-		}
-	}
-	for _, dir := range []string{"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "pkg/patrol", "pkg/releasebot"} {
+	for _, dir := range []string{"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "pkg/patrol", "pkg/releasebot", "pkg/patrol/sub"} {
 		if reads[dir] != 1 {
 			t.Errorf("ls-tree of %s ran %d times, want 1", dir, reads[dir])
 		}
