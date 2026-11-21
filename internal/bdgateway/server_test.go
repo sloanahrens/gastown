@@ -1599,3 +1599,27 @@ func TestCallActorLineWrite(t *testing.T) {
 		})
 	}
 }
+
+// TestCallWrite: a read verb's call is not a write, and every other class is,
+// including one the policy does not name.
+func TestCallWrite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		class VerbClass
+		want  bool
+	}{
+		{name: "read", class: ClassRead, want: false},
+		{name: "write", class: ClassWrite, want: true},
+		{name: "admin", class: ClassAdmin, want: true},
+		{name: "class the policy does not name", class: VerbClass("bogus"), want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CallWrite(Verb{Class: tc.class}); got != tc.want {
+				t.Errorf("CallWrite(%q verb) = %v, want %v", tc.class, got, tc.want)
+			}
+		})
+	}
+}
