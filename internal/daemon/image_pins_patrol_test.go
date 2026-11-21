@@ -1175,12 +1175,12 @@ func imagePinsPathCountResult(t *testing.T, run cmdRunFunc) (int, error) {
 
 // TestImagePinsPathCountRunsFilteredFetchThenRevList: the production path count
 // fetches the source's main, filtered to no blobs, into the scratch ref of the
-// devops rig clone, reads that it is complete, counts the commits from the pin
+// patrol's scratch repository (created first when missing), reads that it is complete, counts the commits from the pin
 // to the tip that touch the paths (gt-wz5ct4, gt-6bits7).
 func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	repo := filepath.Join(town, "devops", ".repo.git")
+	repo := filepath.Join(town, ".runtime", "image-pins", "count.git")
 	url, pin, tip := pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip
 	paths := []string{"cmd/", "deploy/"}
 	var argv [][]string
@@ -1197,9 +1197,13 @@ func TestImagePinsPathCountRunsFilteredFetchThenRevList(t *testing.T) {
 	if err != nil || got != 1 {
 		t.Fatalf("the path count = %d, %v; want git's answer 1", got, err)
 	}
-	if len(argv) != 3 {
-		t.Fatalf("git ran %d time(s), want the fetch, the is-shallow read and then the count: %v", len(argv), argv)
+	if len(argv) != 4 {
+		t.Fatalf("git ran %d time(s), want the scratch init, the fetch, the is-shallow read and then the count: %v", len(argv), argv)
 	}
+	if want := []string{"git", "init", "--bare", "--quiet", repo}; !slices.Equal(argv[0], want) {
+		t.Errorf("the first git call = %v, want the scratch repository's creation %v", argv[0], want)
+	}
+	argv = argv[1:]
 	wantFetch := []string{"git", "--git-dir=" + repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"}
 	if !slices.Equal(argv[0], wantFetch) {
 		t.Errorf("the first git call = %v, want the filtered fetch %v", argv[0], wantFetch)
@@ -1344,8 +1348,8 @@ func TestImagePinsPathCountFetchFailureIsAnError(t *testing.T) {
 			if !errors.Is(err, boom) || n != 0 || err == nil || err.Error() != tt.want {
 				t.Fatalf("a failed %s = %d, %v; want %q, with no count", tt.fails, n, err, tt.want)
 			}
-			if want := map[string]int{"fetch": 1, "--is-shallow-repository": 2, "--unshallow": 3, "rev-list": 4}[tt.fails]; calls != want {
-				t.Errorf("git ran %d times for a failed %s, want %d and no count", calls, tt.fails, want)
+			if want := map[string]int{"fetch": 2, "--is-shallow-repository": 3, "--unshallow": 4, "rev-list": 5}[tt.fails]; calls != want {
+				t.Errorf("git ran %d times for a failed %s, want %d (the scratch init on a fresh town counts) and no count", calls, tt.fails, want)
 			}
 		})
 	}
@@ -2175,4 +2179,108 @@ func TestImagePinsCompareForBuildsTheViewerClient(t *testing.T) {
 	if cmp == nil {
 		t.Fatal("imagePinsCompareFor built no compare")
 	}
+}
+
+// TestImagePinsScratchRepo_IsCreatedOnceAndNeverTheLandingRepo: the path count
+// fetches in the patrol's own bare repository, created when it is missing and
+// left alone when it exists, and no git call it makes names the devops rig's
+// landing repository: a filtered fetch by URL writes remote.<url>.promisor keys
+// into the repository it runs in, which broke every devops landing.
+func TestImagePinsScratchRepo_IsCreatedOnceAndNeverTheLandingRepo(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		exists    bool
+		wantCalls int
+	}{
+		{"a missing scratch repository is initialised, then fetched", false, 4},
+		{"an existing scratch repository is fetched with no init", true, 3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			scratch := imagePinsScratchRepo(town)
+			if tt.exists {
+				if err := os.MkdirAll(scratch, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var argv [][]string
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+			d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				argv = append(argv, cmd.Args)
+				if slices.Contains(cmd.Args, "--is-shallow-repository") {
+					return []byte("false\n"), nil, nil
+				}
+				return []byte("1\n"), nil, nil
+			}
+			if _, err := d.imagePinsPathCount(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip, []string{"cmd/"}); err != nil {
+				t.Fatal(err)
+			}
+			if len(argv) != tt.wantCalls {
+				t.Errorf("git ran %d time(s), want %d: %v", len(argv), tt.wantCalls, argv)
+			}
+			for _, a := range argv {
+				if strings.Contains(strings.Join(a, " "), filepath.Join("devops", ".repo.git")) {
+					t.Errorf("git call %v names the devops landing repository", a)
+				}
+			}
+		})
+	}
+}
+
+// TestImagePinsScratchRepoRefusesAFailedCreate: a scratch repository that
+// cannot be statted or initialised is an error naming its path, and no fetch
+// runs, so a count never falls back to another repository.
+func TestImagePinsScratchRepoRefusesAFailedCreate(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		stat  bool
+		fail  bool
+		wants string
+	}{
+		{"the path cannot be statted", true, false, "image pins scratch repository"},
+		{"git init fails", false, true, "creating the image pins scratch repository"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			scratch := imagePinsScratchRepo(town)
+			if tt.stat {
+				// A regular file where the parent directory belongs: stat answers
+				// ENOTDIR, not ErrNotExist.
+				if err := os.WriteFile(filepath.Join(town, ".runtime"), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			boom := errors.New("git exited 128")
+			n, err := imagePinsPathCountResultIn(t, town, func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				calls++
+				if tt.fail {
+					return nil, []byte("fatal: cannot mkdir\n"), boom
+				}
+				return []byte("1\n"), nil, nil
+			})
+			if err == nil || n != 0 || !strings.Contains(err.Error(), tt.wants) || !strings.Contains(err.Error(), scratch) {
+				t.Fatalf("the count = %d, %v; want an error with %q naming %s", n, err, tt.wants, scratch)
+			}
+			if tt.fail && !errors.Is(err, boom) {
+				t.Errorf("the init error %v does not wrap git's %v", err, boom)
+			}
+			if want := map[bool]int{true: 1, false: 0}[tt.fail]; calls != want {
+				t.Errorf("git ran %d time(s), want %d and no fetch", calls, want)
+			}
+		})
+	}
+}
+
+// imagePinsPathCountResultIn is imagePinsPathCountResult over a town the caller
+// prepared.
+func imagePinsPathCountResultIn(t *testing.T, town string, run cmdRunFunc) (int, error) {
+	t.Helper()
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+	d.execCmd = run
+	return d.imagePinsPathCount(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip, []string{"cmd/"})
 }
