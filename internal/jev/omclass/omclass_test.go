@@ -246,6 +246,35 @@ func TestOMClassRunCapsAt300(t *testing.T) {
 	}
 }
 
+// TestOMClassRunStopsAtItsOwnMaxFindings: a pass with MaxFindings set stops at it,
+// so a test reaches the cap with a handful of findings; the production cap holds
+// for a pass that sets none (TestOMClassRunCapsAt300).
+func TestOMClassRunStopsAtItsOwnMaxFindings(t *testing.T) {
+	t.Parallel()
+	var findings []land.ReviewFindingText
+	for i := 0; i < 4; i++ {
+		findings = append(findings, land.ReviewFindingText{Title: fmt.Sprintf("finding %d", i), Claim: "claim"})
+	}
+	asker := &fakeAsker{choice: NoneLabel}
+	p := newPass(t, asker, fakeReviews{recs: []land.ReviewRecord{review("gt-small", 1, t0.Add(time.Minute), findings...)}}, t0)
+	p.MaxFindings = 3
+
+	first, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Asked != 3 || !first.Capped {
+		t.Fatalf("first run = %+v, want 3 asked and capped", first)
+	}
+	second, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Asked != 1 || second.Capped {
+		t.Errorf("second run = %+v, want the one finding the cap held back", second)
+	}
+}
+
 // TestOMClassRunRefusals drives each refusal branch. A branch that reads no
 // usable answer skips the finding and moves the cursor past it; a branch that
 // fails the pass leaves the cursor on the finding it could not take.

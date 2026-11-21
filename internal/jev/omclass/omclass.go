@@ -81,6 +81,18 @@ type Pass struct {
 
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+
+	// MaxFindings caps the findings one run takes. Zero means MaxFindingsPerRun;
+	// a test sets a small one to reach the cap with a handful of findings.
+	MaxFindings int
+}
+
+// maxFindings is the cap a run stops at: the pass's own, or the production one.
+func (p *Pass) maxFindings() int {
+	if p.MaxFindings > 0 {
+		return p.MaxFindings
+	}
+	return MaxFindingsPerRun
 }
 
 // Summary says what one pass did.
@@ -224,7 +236,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
-		if sum.Asked+sum.Skipped+sum.Failed >= MaxFindingsPerRun {
+		if sum.Asked+sum.Skipped+sum.Failed >= p.maxFindings() {
 			sum.Capped = true
 			break
 		}
