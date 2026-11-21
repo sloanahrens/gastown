@@ -2,10 +2,13 @@ package landworker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -69,5 +72,79 @@ func TestLandReadyRelistStillReadyBeadAttemptedOnce(t *testing.T) {
 	rep := h.w.Pass(ctx)
 	if rep.Landed != 1 || len(h.lander.calls) != 1 {
 		t.Fatalf("report %v with %s; want the still-ready bead attempted once", rep, landedOrder(h.lander.calls))
+	}
+}
+
+// failAfterFirstListBeads lists the ready board once and fails every later
+// list, the store a pass meets when it re-lists after a landing.
+type failAfterFirstListBeads struct {
+	*beadsfake.Fake
+	lists int
+}
+
+func (b *failAfterFirstListBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	b.lists++
+	if b.lists > 1 {
+		return nil, errors.New("the store dropped the second list")
+	}
+	return b.Fake.List(opts)
+}
+
+// TestLandReadyRelistListFailureEndsPass: a re-list that fails after a landing
+// ends the pass with one failure and no further landing, and lastListAt stays
+// the first list's rather than being cleared or moved (gt-wgvu6p). Clearing it
+// would let the next pass read an idle skip off a list that was never read.
+func TestLandReadyRelistListFailureEndsPass(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-p2a", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-p2b", 2, "2026-09-30T10:01:00Z")
+	h.w.Beads = &failAfterFirstListBeads{Fake: h.bd}
+	listedAt := h.now
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		// The landing takes minutes: a failed re-list that moved lastListAt,
+		// as the first list's failure branch deliberately does, would show it.
+		h.now = h.now.Add(5 * time.Minute)
+		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+	}
+	// A hang guard: only a pass that neither ends on the failed list nor stops
+	// after it reaches the timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	rep := h.w.Pass(ctx)
+	if got := landedOrder(h.lander.calls); got != "gt-p2a" {
+		t.Fatalf("landed %s; want only the landing in progress when the list failed", got)
+	}
+	if rep.Landed != 1 || rep.Failed != 1 {
+		t.Fatalf("report %v; want one landing and one failure from the later list", rep)
+	}
+	if !h.w.lastListAt.Equal(listedAt) {
+		t.Fatalf("lastListAt = %v; want the first list's %v", h.w.lastListAt, listedAt)
+	}
+}
+
+// TestLandReadyRelistDrainStopsAfterLanding: a worker that starts draining
+// while a landing runs finishes that landing and takes no second bead, though
+// the re-list after it still holds one (gt-wgvu6p).
+func TestLandReadyRelistDrainStopsAfterLanding(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReadyAt(t, "gt-p2a", 2, "2026-09-30T10:00:00Z")
+	h.seedReadyAt(t, "gt-p2b", 2, "2026-09-30T10:01:00Z")
+	draining := false
+	h.w.Draining = func() bool { return draining }
+	h.lander.fn = func(int, land.Work) (land.Result, error) {
+		draining = true // the restart marker appears mid-landing
+		return land.Result{LandedCommit: "cccccccc", PatchID: "pppppppp"}, nil
+	}
+	// A hang guard: only a pass that keeps claiming past the drain reaches it.
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	rep := h.w.Pass(ctx)
+	if got := landedOrder(h.lander.calls); got != "gt-p2a" {
+		t.Fatalf("landed %s; want only the landing in progress when the drain began", got)
+	}
+	if rep.Landed != 1 || rep.Failed != 0 {
+		t.Fatalf("report %v; want one landing and no failure", rep)
 	}
 }
