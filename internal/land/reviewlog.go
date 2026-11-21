@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -168,7 +169,7 @@ func reviewFindingTexts(findings []Finding) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, ReviewFindingText{
-			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(f.Detail), Class: f.Class,
+			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(scrubClaim(f.Detail)), Class: f.Class,
 		})
 	}
 	return out
@@ -186,6 +187,45 @@ func boundedClaim(s string) string {
 		cut--
 	}
 	return s[:cut] + truncatedClaim
+}
+
+const redactedWord = "<redacted>"
+
+// scrubClaim replaces every token-shaped word in a finding's claim with
+// redactedWord and keeps every other byte, separators included: om's claim
+// quotes the reviewed code, and a credential-shaped word in it must not reach
+// the review log (gt-uxbi5y). A word is a maximal run of non-separator bytes.
+func scrubClaim(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if !claimSeparator(s[i]) {
+			continue
+		}
+		b.WriteString(scrubWord(s[start:i]))
+		b.WriteByte(s[i])
+		start = i + 1
+	}
+	b.WriteString(scrubWord(s[start:]))
+	return b.String()
+}
+
+// scrubWord is word, or redactedWord when its shape alone marks it a token: a
+// claim names no env key to read the answer from.
+func scrubWord(word string) string {
+	if word != "" && config.LooksLikeSecret("", word) {
+		return redactedWord
+	}
+	return word
+}
+
+func claimSeparator(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\v', '\f', ',', ';', '"', '\'', '(', ')':
+		return true
+	}
+	return false
 }
 
 // FollowupQueue is a queue line's payload: the findings one landing's
