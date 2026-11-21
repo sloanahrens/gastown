@@ -18,6 +18,14 @@ func liveQuiet(env *fakeEnv, p string, quiet time.Duration) {
 	env.work[p] = &Work{ID: "gt-" + p, Status: "in_progress", Assignee: "gastown/polecats/" + p, UpdatedAt: now.Add(-time.Hour)}
 }
 
+// liveQuietStoppedOnEscalation is liveQuiet for a seat whose agent record says
+// its last turn ended on an escalated exit: the record gt done's ESCALATED exit
+// writes, and the one reviveAnswered reads before the escalation list.
+func liveQuietStoppedOnEscalation(env *fakeEnv, p string, quiet time.Duration) {
+	liveQuiet(env, p, quiet)
+	env.agents[p] = AgentRecord{State: "stuck", ExitType: ExitEscalated, CleanupStatus: "has_unpushed"}
+}
+
 // reviveScanner is scanner() with a clock the test can move, for the ticks that
 // must happen minutes apart.
 func reviveScanner(env *fakeEnv, at *time.Time) *Scanner {
@@ -334,7 +342,7 @@ func answeredEscalation(id string, closedAgo time.Duration) Escalation {
 func TestReviveAnsweredSeatIsRestarted(t *testing.T) {
 	t.Parallel()
 	env := newFake()
-	liveQuiet(env, "ruby", 10*time.Minute)
+	liveQuietStoppedOnEscalation(env, "ruby", 10*time.Minute)
 	env.raised = []Escalation{answeredEscalation("hq-7", 6*time.Minute)}
 
 	r := scanner(env, nil).Tick("gastown")
@@ -359,7 +367,8 @@ func TestReviveAnsweredSeatIsRestarted(t *testing.T) {
 // Every other shape of an answered-looking seat is left alone: an escalation
 // closed before the seat's last output (it answered itself, or kept working),
 // one closed under the two-minute grace, one still open beside a closed one, a
-// submitted bead, a heartbeat that says stuck, and a seat with no escalation.
+// submitted bead, a heartbeat that says stuck, a seat with no escalation, and a
+// record that does not say the seat stopped on one.
 func TestReviveAnsweredSeatIsLeftAlone(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -397,12 +406,16 @@ func TestReviveAnsweredSeatIsLeftAlone(t *testing.T) {
 			e.RelatedBead = "gt-other"
 			env.raised = []Escalation{e}
 		}, "", ""},
+		{"record does not say the seat stopped on an escalation", func(env *fakeEnv) {
+			env.raised = []Escalation{answeredEscalation("hq-7", 6*time.Minute)}
+			env.agents["ruby"] = AgentRecord{State: "working"}
+		}, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := newFake()
-			liveQuiet(env, "ruby", 10*time.Minute)
+			liveQuietStoppedOnEscalation(env, "ruby", 10*time.Minute)
 			tc.setup(env)
 
 			r := scanner(env, nil).Tick("gastown")
@@ -421,8 +434,9 @@ func TestReviveAnsweredSeatIsLeftAlone(t *testing.T) {
 	}
 }
 
-// Unmeasured answers act on nothing: an escalation list that cannot be read, and
-// a liveness read that failed, are reported unknown and never restart the seat.
+// Unmeasured answers act on nothing: an escalation list, an agent record or a
+// liveness read that cannot be read are reported unknown for a seat the rule
+// applies to, and never restart it.
 func TestReviveAnsweredUnmeasuredActsOnNothing(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -432,8 +446,12 @@ func TestReviveAnsweredUnmeasuredActsOnNothing(t *testing.T) {
 		detail  string
 	}{
 		{"escalation list unreadable", func(env *fakeEnv) {
+			env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitEscalated}
 			env.raisedErr = errors.New("bd list escalations: connection refused")
 		}, OutcomeUnknown, "escalations unreadable"},
+		{"agent record unreadable", func(env *fakeEnv) {
+			env.stateErr["ruby"] = errors.New("bd show: exit status 1")
+		}, OutcomeUnknown, "agent state unreadable"},
 		{"liveness unknown", func(env *fakeEnv) {
 			env.raised = []Escalation{answeredEscalation("hq-7", 6*time.Minute)}
 			env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Unknown, Err: errors.New("tmux: no server")}
@@ -459,12 +477,38 @@ func TestReviveAnsweredUnmeasuredActsOnNothing(t *testing.T) {
 	}
 }
 
+// The town-wide escalation list is read only for a seat whose record says it
+// stopped on an escalation, so an outage of it is not reported unknown on every
+// other quiet seat (gt-ywpshe).
+func TestReviveAnsweredUnmeasuredActsOnNothingForQuietSeatsThatNeverEscalated(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	liveQuiet(env, "opal", 10*time.Minute)
+	liveQuiet(env, "ruby", 10*time.Minute)
+	env.polecats = []string{"opal", "ruby"}
+	env.raisedErr = errors.New("bd list escalations: connection refused")
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none; report %v", env.restarts, r.Lines())
+	}
+	if got := r.Count(OutcomeUnknown); got != 0 {
+		t.Fatalf("unknown findings = %d, want none for seats that never escalated; report %v", got, r.Lines())
+	}
+	for _, p := range []string{"opal", "ruby"} {
+		if f := seatFinding(t, r, p); f.Outcome != "" {
+			t.Fatalf("finding for %s = %q %q, want none; report %v", p, f.Outcome, f.Detail, r.Lines())
+		}
+	}
+}
+
 // A second firing inside the cooldown is reported and not restarted: the seat
 // was revived for the answer ten minutes ago, and the cooldown stamp holds it.
 func TestReviveAnsweredInsideTheCooldownIsReportedNotRestarted(t *testing.T) {
 	t.Parallel()
 	env := newFake()
-	liveQuiet(env, "ruby", 10*time.Minute)
+	liveQuietStoppedOnEscalation(env, "ruby", 10*time.Minute)
 	env.raised = []Escalation{answeredEscalation("hq-7", 6*time.Minute)}
 	at := now
 	s := reviveScanner(env, &at)
@@ -491,7 +535,7 @@ func TestReviveAnsweredInsideTheCooldownIsReportedNotRestarted(t *testing.T) {
 func TestReviveAnsweredStalledSeatIsRestarted(t *testing.T) {
 	t.Parallel()
 	env := newFake()
-	liveQuiet(env, "ruby", 31*time.Minute)
+	liveQuietStoppedOnEscalation(env, "ruby", 31*time.Minute)
 	env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 31m", QuietFor: 31 * time.Minute}
 	env.raised = []Escalation{answeredEscalation("hq-7", 6*time.Minute)}
 
