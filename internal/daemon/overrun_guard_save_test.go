@@ -1264,3 +1264,44 @@ func TestOverrunSaveStage_StateFollowsTheLastFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestOverrunSaveStage_LateResaveSuccessClearsAPushStage: a late re-save refused
+// on one tick reads stage "push", and the re-save that lands on a later tick
+// clears it.
+func TestOverrunSaveStage_LateResaveSuccessClearsAPushStage(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	refuse := false
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingGit{daemonGit: open(dir), refuse: &refuse, err: errors.New("remote unreachable")}
+	}
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
+		refuse = true
+		return stopSession(seat)
+	}
+	stage := func() string {
+		t.Helper()
+		st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.SaveStage
+	}
+
+	w.d.runOverrunGuard(s)
+	if got := stage(); got != "push" {
+		t.Fatalf("stage after the refused late save = %q, want push", got)
+	}
+	refuse = false
+	w.d.runOverrunGuard(s)
+	if got := stage(); got != "" {
+		t.Errorf("stage after the late save landed = %q, want it cleared", got)
+	}
+}
