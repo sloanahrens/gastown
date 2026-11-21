@@ -108,6 +108,32 @@ func TestStoryPointsEvalSinceFlagReachesTheStep(t *testing.T) {
 	}
 }
 
+// TestStoryPointsEvalJSONFlagReachesTheStep: --json belongs to
+// storypoints-eval alone, and the step it runs sees it.
+func TestStoryPointsEvalJSONFlagReachesTheStep(t *testing.T) {
+	t.Parallel()
+	jsonSeen := false
+	run := func(_ context.Context, _ string, c metrics.Commands) error {
+		jsonSeen = c.StoryPointsJSON
+		return nil
+	}
+	cmd := newTownMetricsCmd(metrics.CommandStoryPointsEval, "short", run)
+	cmd.SetOut(&bytes.Buffer{})
+	if err := cmd.Flags().Set("json", "true"); err != nil {
+		t.Fatalf("set --json: %v", err)
+	}
+	if err := cmd.RunE(cmd, nil); err != nil {
+		t.Fatalf("RunE: %v", err)
+	}
+	if !jsonSeen {
+		t.Error("StoryPointsJSON = false, want the flag passed to the step")
+	}
+	other := newTownMetricsCmd(metrics.CommandExtract, "short", run)
+	if other.Flags().Lookup("json") != nil {
+		t.Error("metrics extract has --json, want the flag on storypoints-eval alone")
+	}
+}
+
 // TestTownMetricsSubcommandsAreRegistered holds gt metrics to carrying each step
 // as a subcommand that refuses a positional argument.
 func TestTownMetricsSubcommandsAreRegistered(t *testing.T) {

@@ -96,6 +96,10 @@ type Commands struct {
 	// the test part is the rows landed at or after it. Empty scores the newest
 	// three rows in ten.
 	StoryPointsSince string
+	// StoryPointsJSON asks storypoints-eval for its --json form: the counts and
+	// the base, capped and split tables as one JSON object instead of text, with
+	// the figures the text tables print.
+	StoryPointsJSON bool
 	// Now is the clock the weekly retrain reads its last run and stamps its own;
 	// nil is the wall clock.
 	Now func() time.Time

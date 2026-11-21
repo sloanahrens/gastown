@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"slices"
@@ -43,7 +44,8 @@ type EvalSplit struct {
 // runStoryPointsEval is main's storypoints-eval step: the join over the wired
 // town, split into the part the figures are read from, printed to Out as the
 // base table, the same table over the capped polecat times (gt-xwqe1r) and the
-// splits.
+// splits. With Commands.StoryPointsJSON the same evaluation is printed as one
+// JSON object instead of the text tables.
 func (c Commands) runStoryPointsEval(real RealTown) error {
 	since, err := storyPointsEvalSince(c.StoryPointsSince)
 	if err != nil {
@@ -53,28 +55,54 @@ func (c Commands) runStoryPointsEval(real RealTown) error {
 	if err != nil {
 		return err
 	}
-	train, test := splitEval(rows, since)
-	enough := len(test) >= storyPointsEvalMinTest
-	var stats []PredictorStats
-	if enough {
-		stats = evalStats(train, test)
+	report := newEvalReport(rows, counts, since)
+	if c.StoryPointsJSON {
+		return writeStoryPointsEvalJSON(c.Out, report)
 	}
-	if err := writeStoryPointsEval(c.Out, counts, len(test), stats); err != nil {
+	if err := writeStoryPointsEval(c.Out, report.Counts, report.TestRows, report.Base); err != nil {
 		return err
 	}
-	if !enough {
+	if report.Base == nil {
 		// The base table printed no figure from a part too small to read, so
 		// the capped table and the splits print none either, from a part or
 		// groups smaller still.
 		return nil
 	}
-	if err := writeEvalCapped(c.Out, evalStats(capEvalRows(train), capEvalRows(test))); err != nil {
+	if err := writeEvalCapped(c.Out, report.Capped); err != nil {
 		return err
 	}
-	if err := writeEvalSplits(c.Out, "by review rounds (the test part)", evalRoundSplits(train, test)); err != nil {
+	if err := writeEvalSplits(c.Out, "by review rounds (the test part)", report.ByRounds); err != nil {
 		return err
 	}
-	return writeEvalSplits(c.Out, "by seat class (the test part)", evalSeatSplits(train, test))
+	return writeEvalSplits(c.Out, "by seat class (the test part)", report.BySeat)
+}
+
+// evalReport is one evaluation's counts and tables, decided once so the text
+// tables and the --json object print the same figures. Base, Capped, ByRounds
+// and BySeat are nil when the test part is under storyPointsEvalMinTest rows: a
+// part too small to read carries no figures in either form.
+type evalReport struct {
+	Counts   EvalCounts
+	TestRows int
+	Base     []PredictorStats
+	Capped   []PredictorStats
+	ByRounds []EvalSplit
+	BySeat   []EvalSplit
+}
+
+// newEvalReport splits rows at since and scores every table the command prints
+// from the parts they are read from.
+func newEvalReport(rows []EvalRow, counts EvalCounts, since time.Time) evalReport {
+	train, test := splitEval(rows, since)
+	report := evalReport{Counts: counts, TestRows: len(test)}
+	if len(test) < storyPointsEvalMinTest {
+		return report
+	}
+	report.Base = evalStats(train, test)
+	report.Capped = evalStats(capEvalRows(train), capEvalRows(test))
+	report.ByRounds = evalRoundSplits(train, test)
+	report.BySeat = evalSeatSplits(train, test)
+	return report
 }
 
 // storyPointsEvalSince reads the --since value. Empty is the zero time, which
@@ -175,16 +203,11 @@ func writePredictorHeader(tw *tabwriter.Writer, indent, actual string) {
 // writePredictorStatRows writes one row per predictor under the header.
 func writePredictorStatRows(tw *tabwriter.Writer, indent string, stats []PredictorStats) {
 	for _, s := range stats {
-		logN := s.N - s.SkippedLog
+		row := evalRowOf(s)
 		fmt.Fprintf(tw, "%s%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			indent, s.Name, s.N,
-			evalFigure(s.N != 0, s.MAE),
-			evalFigure(s.N != 0, s.MedianAE),
-			fmtShare(s.Within, s.WithinOK),
-			evalRank(s),
-			logN,
-			evalFigure(logN != 0, s.LogRMS),
-			evalFigure(logN != 0, s.LogBias))
+			indent, s.Name, row.n,
+			row.mae.text(), row.medianAE.text(), row.within.text(), row.rho.text(),
+			row.logN, row.logRMS.text(), row.logBias.text())
 	}
 }
 
@@ -291,24 +314,214 @@ func evalSplitOf(name string, train, rows []EvalRow) EvalSplit {
 	return split
 }
 
-// evalFigure is one figure as the table prints it: two decimals, or n/a when
-// defined is false, so a figure no row could produce never reads as zero.
-func evalFigure(defined bool, v float64) string {
-	if !defined {
-		return "n/a"
-	}
-	if v == 0 {
-		// The negative zero a log bias can carry prints as 0.00, not -0.00.
-		v = 0
-	}
-	return fmt.Sprintf("%.2f", v)
+// evalColumn is one figure of a predictor's table row: the value the row holds
+// and whether it holds one at all. The text table prints an undefined column as
+// n/a and the --json object as null, both from this one decision, so the two
+// forms never disagree about a row's figures.
+type evalColumn struct {
+	defined bool
+	value   float64
 }
 
-// evalRank is a predictor's rank correlation, or n/a when RhoErr says it has
-// none: too few rows, or no spread in one of the series.
-func evalRank(s PredictorStats) string {
-	if s.RhoErr != nil {
+// text is the cell the text table prints: two decimals, or n/a when the row has
+// no figure, so a figure no row could produce never reads as zero.
+func (c evalColumn) text() string {
+	if !c.defined {
 		return "n/a"
 	}
-	return evalFigure(true, s.Rho)
+	if c.value == 0 {
+		// The negative zero a log bias can carry prints as 0.00, not -0.00.
+		c.value = 0
+	}
+	return fmt.Sprintf("%.2f", c.value)
+}
+
+// number is the figure the --json object carries: the same literal the text
+// cell prints, so a reader compares the object with the table figure for
+// figure. It is nil for n/a, never zero.
+func (c evalColumn) number() *json.Number {
+	if !c.defined {
+		return nil
+	}
+	n := json.Number(c.text())
+	return &n
+}
+
+// evalRowFigures is one predictor's row: the count and the columns it is scored
+// on. Both forms of the table read a row through this, so a column with no
+// figure is n/a as text and null in the JSON object.
+type evalRowFigures struct {
+	n        int
+	mae      evalColumn
+	medianAE evalColumn
+	within   evalColumn
+	rho      evalColumn
+	logN     int
+	logRMS   evalColumn
+	logBias  evalColumn
+}
+
+// evalRowOf decides one predictor's row. A predictor that scored no test row has
+// neither the error figures nor the log ones, and a rank correlation with no
+// spread in either series has none (RhoErr).
+func evalRowOf(s PredictorStats) evalRowFigures {
+	logN := s.N - s.SkippedLog
+	return evalRowFigures{
+		n:        s.N,
+		mae:      evalColumn{s.N != 0, s.MAE},
+		medianAE: evalColumn{s.N != 0, s.MedianAE},
+		within:   evalColumn{s.WithinOK, s.Within},
+		rho:      evalColumn{s.RhoErr == nil, s.Rho},
+		logN:     logN,
+		logRMS:   evalColumn{logN != 0, s.LogRMS},
+		logBias:  evalColumn{logN != 0, s.LogBias},
+	}
+}
+
+// The --json object (gt-99x14w): the counts and the four tables the text prints,
+// as one document whose figures are the text tables' own. A figure the text
+// prints as n/a is null, and a table the text does not print is null too, so a
+// reader is never handed a zero for a figure no row could produce.
+
+// evalJSONReport is the object storypoints-eval --json prints.
+type evalJSONReport struct {
+	// TestRows is the size of the test part every table is read from.
+	TestRows int `json:"test_rows"`
+	// Counts is the join's accounting, the text's opening line.
+	Counts evalJSONCounts `json:"counts"`
+	// Base is the table over the test part as landed, and Capped the same table
+	// over the capped polecat times (gt-xwqe1r). Both are null when the test
+	// part is under storyPointsEvalMinTest rows, where the text prints none.
+	Base   *evalJSONTable       `json:"base"`
+	Capped *evalJSONCappedTable `json:"capped"`
+	// ByRounds and BySeat are the splits (gt-he1f8o), null in the same short
+	// part.
+	ByRounds []evalJSONSplit `json:"by_review_rounds"`
+	BySeat   []evalJSONSplit `json:"by_seat_class"`
+}
+
+// evalJSONCounts is the join's accounting: every landing record read, how many
+// joined, and the reasons the rest were dropped.
+type evalJSONCounts struct {
+	Records      int `json:"records"`
+	Joined       int `json:"joined"`
+	NoEstimate   int `json:"no_estimate"`
+	LowerBound   int `json:"lower_bound"`
+	UpperBound   int `json:"upper_bound"`
+	Absent       int `json:"absent"`
+	MalformedLog int `json:"malformed_log"`
+}
+
+// evalJSONTable is one table of predictor rows.
+type evalJSONTable struct {
+	Predictors []evalJSONPredictor `json:"predictors"`
+}
+
+// evalJSONCappedTable is the capped table: its figures and the minute cap they
+// were scored at.
+type evalJSONCappedTable struct {
+	CapMinutes int                 `json:"cap_minutes"`
+	Predictors []evalJSONPredictor `json:"predictors"`
+}
+
+// evalJSONSplit is one group of a split: its name as the text heads it, the test
+// rows it holds, and the predictor rows. Predictors is null for a group under
+// storyPointsEvalMinGroup rows, which the text prints as a count alone.
+type evalJSONSplit struct {
+	Name       string              `json:"name"`
+	Rows       int                 `json:"rows"`
+	Predictors []evalJSONPredictor `json:"predictors"`
+}
+
+// evalJSONPredictor is one predictor's row: the columns the text table prints,
+// each figure the same literal, and null where the text prints n/a.
+type evalJSONPredictor struct {
+	Name     string       `json:"name"`
+	N        int          `json:"n"`
+	MAE      *json.Number `json:"mae"`
+	MedianAE *json.Number `json:"median_ae"`
+	Within   *json.Number `json:"within_1_5x"`
+	Rho      *json.Number `json:"rank_rho"`
+	LogN     int          `json:"log_n"`
+	LogRMS   *json.Number `json:"log_rms"`
+	LogBias  *json.Number `json:"log_bias"`
+}
+
+// writeStoryPointsEvalJSON prints the evaluation as one JSON object: the counts
+// and the four tables the text prints, each figure the one the text shows. The
+// write is the run's, so one the encoder cannot make fails the run rather than
+// reporting an evaluation nobody received.
+func writeStoryPointsEvalJSON(w io.Writer, report evalReport) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(evalJSONOf(report)); err != nil {
+		return fmt.Errorf("print the evaluation as JSON: %w", err)
+	}
+	return nil
+}
+
+// evalJSONOf is the object for one evaluation, read from the report the text
+// tables are printed from so both carry the same figures.
+func evalJSONOf(report evalReport) evalJSONReport {
+	doc := evalJSONReport{
+		TestRows: report.TestRows,
+		Counts: evalJSONCounts{
+			Records:      report.Counts.Records,
+			Joined:       report.Counts.Joined,
+			NoEstimate:   report.Counts.NoEstimate,
+			LowerBound:   report.Counts.LowerBound,
+			UpperBound:   report.Counts.UpperBound,
+			Absent:       report.Counts.Absent,
+			MalformedLog: report.Counts.MalformedLog,
+		},
+	}
+	if report.Base == nil {
+		return doc
+	}
+	doc.Base = &evalJSONTable{Predictors: evalJSONPredictors(report.Base)}
+	doc.Capped = &evalJSONCappedTable{
+		CapMinutes: storyPointsEvalCapMinutes,
+		Predictors: evalJSONPredictors(report.Capped),
+	}
+	doc.ByRounds = evalJSONSplits(report.ByRounds)
+	doc.BySeat = evalJSONSplits(report.BySeat)
+	return doc
+}
+
+// evalJSONSplits is the splits' rows, a group's figures null when it printed
+// none.
+func evalJSONSplits(splits []EvalSplit) []evalJSONSplit {
+	out := make([]evalJSONSplit, 0, len(splits))
+	for _, s := range splits {
+		out = append(out, evalJSONSplit{
+			Name:       s.Name,
+			Rows:       s.Rows,
+			Predictors: evalJSONPredictors(s.Stats),
+		})
+	}
+	return out
+}
+
+// evalJSONPredictors is a table's predictor rows, or nil for a part or group
+// whose stats the text does not print.
+func evalJSONPredictors(stats []PredictorStats) []evalJSONPredictor {
+	if stats == nil {
+		return nil
+	}
+	out := make([]evalJSONPredictor, 0, len(stats))
+	for _, s := range stats {
+		row := evalRowOf(s)
+		out = append(out, evalJSONPredictor{
+			Name:     s.Name,
+			N:        row.n,
+			MAE:      row.mae.number(),
+			MedianAE: row.medianAE.number(),
+			Within:   row.within.number(),
+			Rho:      row.rho.number(),
+			LogN:     row.logN,
+			LogRMS:   row.logRMS.number(),
+			LogBias:  row.logBias.number(),
+		})
+	}
+	return out
 }
