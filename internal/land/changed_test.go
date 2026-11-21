@@ -207,6 +207,9 @@ var guardTriggers = []struct {
 	{"internal/beads/beadsfake", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/beadsql", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/config", "M\x00cmd/gt/main.go\x00"},
+	// A file added anywhere under internal/ is input to both of the config
+	// package's tree scans, so it must select the entry (gt-re8efj).
+	{"internal/config", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/townconfig", "M\x00cmd/gt/main.go\x00"},
 	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/rig", "M\x00internal/daemon/patrol.go\x00"},
@@ -231,6 +234,19 @@ var guardTriggers = []struct {
 	{"internal/townstate", "M\x00deploy/daemon/secrets.yaml\x00"},
 	{"internal/shelltier", "M\x00scripts/install-local_test.sh\x00"},
 	{"internal/shelltier", "M\x00internal/shelltier/manifest.go\x00"},
+}
+
+// guardRequiredTests names, per guard package, the test functions that must
+// appear in the package's selection whichever path triggered it: a name added
+// to an entry without its selection carrying it is the miss presubmit exists to
+// close (gt-re8efj). Packages absent here only need some test to run.
+var guardRequiredTests = map[string][]string{
+	// Both scan the whole internal/ tree: one every non-test Go file for a
+	// hand-built registry URL, the other every file that names a data file.
+	"internal/config": {
+		"TestImageRegistryBaseNotPrependedInSource",
+		"TestOwnerPlaceholderFilesHaveOnlyKnownReaders",
+	},
 }
 
 // unguarded is a changed path no guard predicate reads: a doc outside every
@@ -338,6 +354,11 @@ func TestGuardSelects(t *testing.T) {
 					if len(s.Tests) == 0 {
 						t.Fatalf("%s triggered with no tests to run", tc.pkg)
 					}
+					for _, name := range guardRequiredTests[tc.pkg] {
+						if !contains(s.Tests, name) {
+							t.Errorf("%s tests = %v; want %s among them", tc.pkg, s.Tests, name)
+						}
+					}
 					return
 				}
 			}
@@ -422,6 +443,13 @@ func TestEveryGuardIsSampled(t *testing.T) {
 	for _, g := range treeWideGuards {
 		if !sampled[g.pkg] {
 			t.Errorf("treeWideGuards names %s, which guardTriggers does not sample", g.pkg)
+		}
+	}
+	// A required test on a package the sampler does not name would never be
+	// checked: the entry could drop the name and no test would see it.
+	for pkg := range guardRequiredTests {
+		if !sampled[pkg] {
+			t.Errorf("guardRequiredTests names %s, which guardTriggers does not sample", pkg)
 		}
 	}
 }
