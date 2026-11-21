@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -230,5 +231,63 @@ func TestDuplicateCustomStatusReadOutsideLock(t *testing.T) {
 		}
 	case <-done.Done():
 		t.Fatal("the first fetch never returned after its read was released")
+	}
+}
+
+// TestDuplicateCustomStatusConcurrentMiss: two fetches of one directory that both
+// miss overlap in their reads (each read waits until both have entered), each
+// caller gets its own read's answer, the held entry is one of the two, and a
+// third fetch inside duplicatePoolTTL is served by it and reads nothing more. Run
+// under -race, the two stores are concurrent, so a store outside the lock fails
+// (gt-18sp1c).
+func TestDuplicateCustomStatusConcurrentMiss(t *testing.T) {
+	t.Parallel()
+	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	c := &duplicateDetailCache{}
+	var reads atomic.Int32
+	entered, release := make(chan struct{}, 2), make(chan struct{})
+	answers := [][]string{{"a"}, {"b"}}
+	got := make(chan []string, 2)
+	for i := range answers {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					got <- []string{fmt.Sprintf("panic: %v", r)}
+				}
+			}()
+			statuses, _ := c.customStatuses("/rig", func() ([]string, error) {
+				reads.Add(1)
+				entered <- struct{}{}
+				<-release
+				return answers[i], nil
+			})
+			got <- statuses
+		}()
+	}
+	for range answers {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("the two reads never overlapped: a fetch was held behind the other's read")
+		}
+	}
+	close(release)
+	var returned [][]string
+	for range answers {
+		select {
+		case s := <-got:
+			returned = append(returned, s)
+		case <-ctx.Done():
+			t.Fatal("a fetch never returned after its read was released")
+		}
+	}
+	if !slices.ContainsFunc(returned, func(s []string) bool { return slices.Equal(s, []string{"a"}) }) ||
+		!slices.ContainsFunc(returned, func(s []string) bool { return slices.Equal(s, []string{"b"}) }) {
+		t.Errorf("the callers returned %v, want each its own read's answer, [a] and [b]", returned)
+	}
+	third, err := c.customStatuses("/rig", func() ([]string, error) { reads.Add(1); return []string{"third"}, nil })
+	if err != nil || !(slices.Equal(third, []string{"a"}) || slices.Equal(third, []string{"b"})) || reads.Load() != 2 {
+		t.Errorf("the third fetch = %v, %v after %d reads, want one of the two held answers and no third read", third, err, reads.Load())
 	}
 }
