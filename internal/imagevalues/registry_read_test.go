@@ -171,6 +171,33 @@ func TestTagDigestRefusesABadTagOrImage(t *testing.T) {
 	}
 }
 
+// TestSameEndpointRedirectStopsAChainAtTenHops: a chain that stays on one
+// endpoint is followed for nine hops and refused at ten, with an error that
+// names the limit, so a redirect loop on the same endpoint cannot run on.
+func TestSameEndpointRedirectStopsAChainAtTenHops(t *testing.T) {
+	t.Parallel()
+	target := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:5001/v2/"+loopbackRegistry.Owner+"/"+imagevalues.DaemonImage+"/manifests/"+testTag, nil)
+	via := func(n int) []*http.Request {
+		v := make([]*http.Request, n)
+		for i := range v {
+			v[i] = target
+		}
+		return v
+	}
+	for _, tc := range []struct {
+		hops    int
+		wantErr string
+	}{{9, ""}, {10, "ten redirects"}} {
+		err := imagevalues.SameEndpointRedirect(target, via(tc.hops))
+		if tc.wantErr == "" {
+			require.NoError(t, err, "via of %d hops", tc.hops)
+			continue
+		}
+		require.Error(t, err, "via of %d hops", tc.hops)
+		assert.Contains(t, err.Error(), tc.wantErr)
+	}
+}
+
 // TestTagDigestErrorNeverCarriesTheToken: a registry that fails names its
 // status, and the viewer's token reaches no error text.
 func TestTagDigestErrorNeverCarriesTheToken(t *testing.T) {
