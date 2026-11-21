@@ -814,7 +814,8 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	// One run of this claim's trim is recorded from here on, on every path: the
 	// figures are the plan's size before the trim, the files a finished Job
 	// removed, and the size du reads after it.
-	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, before: planned.Total}
+	planTotal := planned.Total
+	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, before: &planTotal}
 	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m, cacheTrimWaitTimeout)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the apply failed: %v", claim.ClaimName, namespace, err)
@@ -1012,16 +1013,17 @@ func (s *attentionSources) collectCacheTrimNoOp(context.Context) ([]attention.It
 }
 
 // cacheTrimRun is one claim trim's record for the job ledger, built as the run
-// reaches its figures. before is the plan's listing size, always known; trimmed,
-// absent and kept are the files a finished Job's log reports it removed, found
-// gone and kept, and after is the size du reads once that Job is done. A figure
-// the run did not read is absent, never zero.
+// reaches its figures. before is the plan's listing size, set only by a run the
+// daemon measured before the trim; trimmed, absent and kept are the files a
+// finished Job's log reports it removed, found gone and kept, and after is the
+// size du reads once that Job is done. A figure the run did not read is absent,
+// never zero.
 type cacheTrimRun struct {
 	claim     string
 	namespace string
 	started   time.Time
 	outcome   string
-	before    int64
+	before    *int64
 	trimmed   *int64
 	absent    *int64
 	kept      *int64
@@ -1032,7 +1034,10 @@ type cacheTrimRun struct {
 // ledger records the trim, it does not decide it: an append that fails logs one
 // line, and the trim's result stands.
 func (d *Daemon) cacheTrimRecordRun(run cacheTrimRun) {
-	stats := map[string]int64{cacheTrimStatBytesBefore: run.before}
+	stats := map[string]int64{}
+	if run.before != nil {
+		stats[cacheTrimStatBytesBefore] = *run.before
+	}
 	if run.trimmed != nil {
 		stats[cacheTrimStatTrimmedFiles] = *run.trimmed
 	}
