@@ -174,25 +174,17 @@ func TestSeatFinishedLingeringSkipsSeatsItCannotJudge(t *testing.T) {
 	}
 }
 
-// The agent bead is a read the rule cannot guess at: one that fails and one
-// that reads as no bead each fail the collection with no item, and the caller
-// keeps the previous tick's seat-finished items rather than clearing them.
+// The agent bead is a read the rule cannot guess at: one that reads as no bead
+// fails the collection with no item, and the caller keeps the previous tick's
+// seat-finished items rather than clearing them. A failed read is covered in
+// TestSeatFinishedLingeringFailedReadsAreErrors.
 func TestSeatFinishedLingeringUnreadableAgentBeadKeepsPreviousItems(t *testing.T) {
 	t.Parallel()
-	readFails := errors.New("bedrock: bd unavailable")
 	seat := finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "done", age: 3 * time.Hour}
 	cases := []struct {
 		name string
 		read func(t *testing.T, f *attentionFixture)
 	}{
-		{
-			name: "the agent bead read fails",
-			read: func(t *testing.T, f *attentionFixture) {
-				r := finishedSeatTown(t, f, seat)
-				r.fail = map[string]error{keptSeatAgentID(f, seat.name): readFails}
-				f.d.openWorkBeads = r.open
-			},
-		},
 		{
 			name: "the agent bead reads as no bead",
 			read: func(t *testing.T, f *attentionFixture) {
@@ -292,6 +284,14 @@ func TestSeatFinishedLingeringFailedReadsAreErrors(t *testing.T) {
 			}
 			if len(items) != 0 {
 				t.Errorf("items = %+v, want none beside the error", items)
+			}
+
+			prev := attention.State{Items: []attention.Item{
+				{Key: "seat-finished:gastown/capable", Kind: attention.KindSeatFinishedLingering, Severity: attention.SeverityLow, Rig: attentionRig, Bead: seat.bead},
+			}}
+			got := collectAttention(context.Background(), prev, []attentionCollector{c}, func(string, ...any) {})
+			if len(got) != 1 || got[0].Key != "seat-finished:gastown/capable" {
+				t.Errorf("collectAttention = %+v, want the previous seat-finished item kept", got)
 			}
 		})
 	}
