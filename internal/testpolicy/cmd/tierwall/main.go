@@ -255,6 +255,7 @@ type report struct {
 	last   time.Time
 
 	tests   map[string][]string // output held per running test, keyed by testKey
+	started []string            // testKeys in the order their run events came
 	pkgOut  map[string][]string // package-level output held until the package reports
 	builds  map[string][]string // build-output held per import path
 	elapsed map[string]float64  // each package's pass/fail Elapsed, in seconds
@@ -369,6 +370,10 @@ func (r *report) handle(e event) {
 			key := testKey(e.Package, e.Test)
 			r.tests[key] = append(r.tests[key], e.Output)
 		}
+	case "run":
+		if e.Test != "" {
+			r.started = append(r.started, testKey(e.Package, e.Test))
+		}
 	case "pause":
 		if e.Test != "" {
 			r.paused[testKey(e.Package, e.Test)] = true
@@ -409,6 +414,15 @@ func (r *report) verdict(e event) {
 	r.elapsed[e.Package] = e.Elapsed
 	if e.Action == "fail" {
 		r.failed = true
+		// A binary that panicked from a goroutine or called os.Exit never gave its
+		// running tests a verdict: their held output is the crash, so it prints
+		// first, in the order the tests started.
+		for _, key := range r.started {
+			if strings.HasPrefix(key, e.Package+"\x00") {
+				r.printLines(r.tests[key])
+				delete(r.tests, key)
+			}
+		}
 		r.printLines(lines)
 		r.printLines(r.builds[e.FailedBuild])
 	}

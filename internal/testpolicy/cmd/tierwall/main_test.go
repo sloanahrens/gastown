@@ -1460,3 +1460,56 @@ func TestTierwallPoleWarningQuiet(t *testing.T) {
 		})
 	}
 }
+
+// TestReport_CrashedPackageKeepsTheHeldOutput: a test binary that panics from a
+// goroutine or calls os.Exit gives its package a fail event and its running
+// tests none, so their held output (the panic text, the stack, the last line)
+// must print before the package's FAIL line; a test with its own verdict prints
+// once, and a passing package prints nothing held.
+func TestReport_CrashedPackageKeepsTheHeldOutput(t *testing.T) {
+	t.Parallel()
+	type ev = map[string]any
+	run1 := func(test string) ev { return ev{"Action": "run", "Test": test} }
+	out := func(test, s string) ev { return ev{"Action": "output", "Test": test, "Output": s} }
+	pkgFail := []ev{out("", "FAIL\tp/crash\t0.06s\n"), {"Action": "fail", "Elapsed": 0.06}}
+	tests := []struct {
+		name   string
+		events []ev
+		want   string
+	}{
+		{"a goroutine panic", append([]ev{run1("TestA"), {"Action": "pass", "Test": "TestA"}, run1("TestB"),
+			out("TestB", "panic: late goroutine panic\n"), out("TestB", "goroutine 19 [running]:\n")}, pkgFail...),
+			"panic: late goroutine panic\ngoroutine 19 [running]:\nFAIL\tp/crash\t0.06s\n"},
+		{"os.Exit with two tests open", append([]ev{run1("TestA"), out("TestA", "about to exit\n"), run1("TestB"), out("TestB", "second\n")}, pkgFail...),
+			"about to exit\nsecond\nFAIL\tp/crash\t0.06s\n"},
+		{"a test with its own verdict", []ev{run1("TestA"), out("TestA", "--- FAIL: TestA\n"), {"Action": "fail", "Test": "TestA"},
+			out("", "FAIL\n"), out("", "FAIL\tp/crash\t0.06s\n"), {"Action": "fail", "Elapsed": 0.06}},
+			"--- FAIL: TestA\nFAIL\nFAIL\tp/crash\t0.06s\n"},
+		{"a passing package", []ev{run1("TestA"), out("TestA", "held\n"), out("", "ok  \tp/crash\t0.06s\n"), {"Action": "pass", "Elapsed": 0.06}}, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var in strings.Builder
+			for _, e := range tc.events {
+				e["Package"] = "p/crash"
+				line, err := json.Marshal(e)
+				if err != nil {
+					t.Fatal(err)
+				}
+				in.Write(append(line, '\n'))
+			}
+			var stdout, stderr bytes.Buffer
+			run(nil, strings.NewReader(in.String()), &stdout, &stderr, fixedHost())
+			var got strings.Builder
+			for _, line := range strings.SplitAfter(stdout.String(), "\n") {
+				if !strings.HasPrefix(line, "tierwall:") {
+					got.WriteString(line)
+				}
+			}
+			if got.String() != tc.want {
+				t.Errorf("output = %q, want %q", got.String(), tc.want)
+			}
+		})
+	}
+}
