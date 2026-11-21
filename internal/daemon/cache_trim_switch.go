@@ -1,6 +1,9 @@
 package daemon
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // cacheTrimClaimViaJob trims one claim through the claim Job and nothing else:
 // it reads the pods that mount the claim only for the sandbox count the Job's
@@ -49,5 +52,7 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
 		trimmed: &removed, absent: &absent, kept: &kept}
 	d.cacheTrimRecordRun(run)
+	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
+	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
 	return true
 }
