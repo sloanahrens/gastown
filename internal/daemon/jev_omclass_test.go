@@ -259,10 +259,16 @@ func TestOMClassRunLogsTheStartAndTheCap(t *testing.T) {
 	cases := []struct {
 		name      string
 		cursorSet bool
+		maxFind   int
 		want      string
+		absent    string
 	}{
-		{"first pass names its start", false, "first pass set the cursor"},
-		{"a run at the cap names the rest", true, "stopped at 3 findings this run; the rest wait for the next pass"},
+		{"first pass names its start", false, passCap, "first pass set the cursor", ""},
+		{"a run at the cap names the rest", true, passCap, "stopped at 3 findings this run; the rest wait for the next pass", ""},
+		// The production cap (zero) and a negative one are 300: four findings
+		// do not reach it, so no cap line is written (gt-33gjja).
+		{"a zero cap is the production one", true, 0, "asked 4 findings", "stopped at"},
+		{"a negative cap is the production one", true, -1, "asked 4 findings", "stopped at"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -287,7 +293,7 @@ func TestOMClassRunLogsTheStartAndTheCap(t *testing.T) {
 						LogPath:     omclass.LogPath(town),
 						CursorPath:  omclass.CursorPath(town),
 						Allows:      func() (bool, error) { return true, nil },
-						MaxFindings: passCap,
+						MaxFindings: c.maxFind,
 					}, nil
 				},
 			}
@@ -296,6 +302,9 @@ func TestOMClassRunLogsTheStartAndTheCap(t *testing.T) {
 
 			if !strings.Contains(logs.String(), c.want) {
 				t.Errorf("log = %q, want %q", logs, c.want)
+			}
+			if c.absent != "" && strings.Contains(logs.String(), c.absent) {
+				t.Errorf("log = %q, want no %q line", logs, c.absent)
 			}
 		})
 	}
