@@ -1830,6 +1830,44 @@ func TestImagePinsReadAGoodReadResetsTheFailureCount(t *testing.T) {
 	}
 }
 
+// TestImagePinsReadHoldsOnlyTheSamePinCommit: after the pins file moves a pin, a
+// failed read at the new commit stands at once; it is not replaced by the old
+// commit's good state, which the planner would file a second refresh from (gt-ki0ir9).
+func TestImagePinsReadHoldsOnlyTheSamePinCommit(t *testing.T) {
+	t.Parallel()
+	d, moved := newImagePinsForgejo(t), new(bool)
+	d.logger = log.New(io.Discard, "", 0)
+	// om alone trails its tip, at a head the fixture's compare answers.
+	tips := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadDevopsTip, pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsCommit}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case !slices.Contains(cmd.Args, "ls-remote"):
+			return nil, nil, nil
+		case *moved && cmd.Args[len(cmd.Args)-2] == pinsReadPinURL("organic-mechanic"):
+			return nil, []byte("fatal: unable to access\n"), errors.New("git exited 128")
+		}
+		return []byte(pinsReadLS(tips[cmd.Args[len(cmd.Args)-2]])), nil, nil
+	}
+	at := func(om string) []byte {
+		return pinsReadFileWithLines(func(lines []string) []string {
+			lines[1] = "om " + pinsReadPinURL("organic-mechanic") + " " + om
+			return lines
+		})
+	}
+	good, err := d.readImagePinTips(context.Background(), at(pinsReadOMCommit))
+	if err != nil || good[1].Err != nil || good[1].Behind != pinsReadDevopsTotal {
+		t.Fatalf("the good read = %+v, %v; want om %d behind at its own commit", good, err, pinsReadDevopsTotal)
+	}
+	*moved = true
+	failed, err := d.readImagePinTips(context.Background(), at(pinsReadBDCommit))
+	if err != nil {
+		t.Fatalf("the read after the file moved om: %v", err)
+	}
+	if st := failed[1]; st.Err == nil || !strings.Contains(st.Err.Error(), "git exited 128") || st.Pin != pinsReadBDCommit || st.Behind != 0 {
+		t.Fatalf("om after its pin moved = %+v, want its own Err at the new commit, not the held read at %s %d behind", st, pinsReadOMCommit, pinsReadDevopsTotal)
+	}
+}
+
 // TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin: the age read fetches
 // the filtered main, then answers the tip's committer time minus the pin's.
 func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
