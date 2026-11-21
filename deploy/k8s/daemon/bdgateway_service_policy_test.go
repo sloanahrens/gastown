@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -253,21 +254,12 @@ func TestBdGatewayServicePolicyStructure(t *testing.T) {
 	// The other-Service refusal is validation index 2 because the push validation (gt-ozn0j0) sits at index 1.
 	t.Run("the two pinned validations match the policy text", func(t *testing.T) {
 		t.Parallel()
-		for _, tc := range []struct {
-			index int
-			role  string
-			got   string
-			want  string
-		}{
-			{0, "the Service named bd-gateway", policy.Spec.Validations[0].Expression, bdGatewayShapeExpression},
-			{2, "the other-Service refusal", policy.Spec.Validations[2].Expression, bdGatewayOtherServiceExpression},
-		} {
-			t.Run(tc.role, func(t *testing.T) {
-				t.Parallel()
-				if got := strings.Join(strings.Fields(tc.got), " "); got != tc.want {
-					t.Errorf("spec.validations[%d] (%s) in the policy file is\n%q\nwant the pinned text\n%q; after review, change the pinned text together with the YAML", tc.index, tc.role, got, tc.want)
-				}
-			})
+		exprs := make([]string, len(policy.Spec.Validations))
+		for i, v := range policy.Spec.Validations {
+			exprs[i] = v.Expression
+		}
+		for _, msg := range pinnedExpressionMismatches(exprs, []string{bdGatewayShapeExpression, "", bdGatewayOtherServiceExpression}) {
+			t.Error(msg)
 		}
 	})
 
@@ -327,6 +319,62 @@ func otherServiceGuardAdmits(s serviceFixture, gateway map[string]string) bool {
 		}
 	}
 	return false
+}
+
+// pinnedExpressionMismatches compares each validation expression with the pinned text at
+// the same index (whitespace collapsed on both sides; an empty pin is not checked here)
+// and returns one message per difference, naming spec.validations[i]. A count that differs
+// from the pins is one message, never an index panic.
+func pinnedExpressionMismatches(exprs, pinned []string) []string {
+	if len(exprs) != len(pinned) {
+		return []string{fmt.Sprintf("the policy holds %d validations, the pins cover %d", len(exprs), len(pinned))}
+	}
+	var out []string
+	for i, want := range pinned {
+		if want == "" {
+			continue
+		}
+		if got := strings.Join(strings.Fields(exprs[i]), " "); got != want {
+			out = append(out, fmt.Sprintf("spec.validations[%d] in the policy file is\n%q\nwant the pinned text\n%q; after review, change the pinned text together with the YAML", i, got, want))
+		}
+	}
+	return out
+}
+
+// TestBdGatewayServicePolicyPinMismatch drives the failing branch of the pin: a weakened
+// copy of an expression must be reported, an unchanged one must not.
+func TestBdGatewayServicePolicyPinMismatch(t *testing.T) {
+	t.Parallel()
+	pins := []string{bdGatewayShapeExpression, "", bdGatewayOtherServiceExpression}
+	with := func(i int, expr string) []string {
+		exprs := []string{bdGatewayShapeExpression, bdGatewayPushExpression, bdGatewayOtherServiceExpression}
+		exprs[i] = expr
+		return exprs
+	}
+	for _, tc := range []struct {
+		name  string
+		exprs []string
+		want  string // substring of the one message, empty for none
+	}{
+		{"an unchanged policy reports nothing", with(0, bdGatewayShapeExpression), ""},
+		{"the not-operator removed from the other-Service refusal", with(2, strings.Replace(bdGatewayOtherServiceExpression, "!object.spec.selector.all(", "object.spec.selector.all(", 1)), "spec.validations[2]"},
+		{"the shape expression weakened to ==", with(0, strings.Replace(bdGatewayShapeExpression, "!= 'bd-gateway' ||", "== 'bd-gateway' ||", 1)), "spec.validations[0]"},
+		{"a policy with two validations", []string{bdGatewayShapeExpression, bdGatewayPushExpression}, "validations"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := pinnedExpressionMismatches(tc.exprs, pins)
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("an unchanged policy was reported: %v", got)
+				}
+				return
+			}
+			if len(got) != 1 || !strings.Contains(got[0], tc.want) {
+				t.Fatalf("got %q, want one message containing %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // The Service guard's three validations, with the whitespace the YAML's folded scalars
