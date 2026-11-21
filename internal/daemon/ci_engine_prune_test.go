@@ -1140,9 +1140,63 @@ func TestCIEngineBuildCachePruneArgvUsesADuration(t *testing.T) {
 		48 * time.Hour:   "48h",
 		90 * time.Minute: "90m",
 	} {
-		got := ciEngineBuildCachePruneArgv(age)
-		if wantArgv := []string{"docker", "builder", "prune", "-af", "--filter", "until=" + want}; !slices.Equal(got, wantArgv) {
+		got := ciEngineBuildCachePruneArgv(age, 10<<30)
+		if wantArgv := []string{"docker", "builder", "prune", "-af", "--filter", "until=" + want, ciEngineKeepStorageFlag, "10240MB"}; !slices.Equal(got, wantArgv) {
 			t.Errorf("build cache prune argv for %v = %q, want %q", age, got, wantArgv)
+		}
+	}
+}
+
+// TestCIEngineBuildCachePruneKeepsStorage: the build cache prune keeps at most the
+// configured size: its argv holds the age filter, then the keep flag the engine's
+// gt-85weve record names (--reserved-space), then the size; a keep setting the
+// patrol cannot read prunes nothing.
+func TestCIEngineBuildCachePruneKeepsStorage(t *testing.T) {
+	t.Parallel()
+	t.Run("argv holds the keep flag and size after the age filter", func(t *testing.T) {
+		t.Parallel()
+		got := ciEngineBuildCachePruneArgv(6*time.Hour, 10<<30)
+		want := []string{"docker", "builder", "prune", "-af", "--filter", "until=6h", "--reserved-space", "10240MB"}
+		if !slices.Equal(got, want) {
+			t.Fatalf("build cache prune argv = %q, want %q", got, want)
+		}
+	})
+	t.Run("a refused keep setting prunes nothing", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+		f.d.patrolConfig.Patrols.DiskMaintenance.CIEngineCacheKeepBytes = "lots"
+		f.tick()
+		f.drain()
+
+		for _, c := range f.execs() {
+			if verb := cacheTrimVerb(c.args); strings.Contains(verb, "ci-engine-list") || strings.Contains(verb, "-- docker") {
+				t.Errorf("a refused keep setting ran the engine command %q", verb)
+			}
+		}
+		if !strings.Contains(f.logs.String(), "ci_engine_cache_keep_bytes") {
+			t.Errorf("the refusal does not name ci_engine_cache_keep_bytes:\n%s", f.logs.String())
+		}
+	})
+}
+
+// TestCIEngineBuildCacheZeroReclaimWarn: a build cache prune that reclaims nothing
+// while docker reported reclaimable cache logs one WARN naming the keep size as well
+// as the age filter.
+func TestCIEngineBuildCacheZeroReclaimWarn(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineBuildCacheListing(t), engineRemoveAnswers{})
+	replaceEngineReply(f, "-- docker system df", cliReply{stdout: "Build Cache 88GB 68.8GB (100%)\n"})
+	replaceEngineReply(f, "-- docker builder prune", cliReply{stdout: "Total:\t0B\n"})
+	f.tick()
+	f.drain()
+
+	line := engineLogLine(f.logs.String(), "WARN: the build cache prune reclaimed")
+	if line == "" {
+		t.Fatalf("a zero reclaim logged no WARN:\n%s", f.logs.String())
+	}
+	for _, want := range []string{"until=6h", "keep size was 10240MB"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the zero-reclaim WARN lacks %q:\n%s", want, line)
 		}
 	}
 }
@@ -1434,7 +1488,7 @@ func TestCIEnginePruneBuildCacheWarnsWhenNothingIsReclaimed(t *testing.T) {
 			if len(warns) != 1 {
 				t.Fatalf("logged %d WARN line(s), want one:\n%s", len(warns), logs)
 			}
-			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=6h", "cache younger than the filter is not removed"} {
+			for _, want := range []string{polecatimage.Human(reclaimable), "reclaimed " + polecatimage.Human(0), "until=6h", "keep size was 10240MB", "cache younger than the filter or inside the keep size is not removed"} {
 				if !strings.Contains(warns[0], want) {
 					t.Errorf("the WARN line lacks %q:\n%s", want, warns[0])
 				}
@@ -1611,7 +1665,7 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 			t.Parallel()
 			cfg := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
 			tc.set(cfg.Patrols.DiskMaintenance)
-			_, _, _, _, err := ciEnginePruneSettings(cfg)
+			_, _, _, _, _, err := ciEnginePruneSettings(cfg)
 			if err == nil || !strings.Contains(err.Error(), tc.wantKey) {
 				t.Errorf("ciEnginePruneSettings() error = %v, want one naming %s", err, tc.wantKey)
 			}
