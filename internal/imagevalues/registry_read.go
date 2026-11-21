@@ -68,9 +68,15 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// sameEndpointMaxRedirects bounds a redirect chain that stays on one endpoint,
+// as Go's own default rule does, so a client whose whole rule this is cannot
+// follow a redirect loop without end.
+const sameEndpointMaxRedirects = 10
+
 // SameEndpointRedirect is a client's redirect rule: a redirect that changes the
 // scheme or the host is refused, so the credential attached to the first
-// request never follows a Location to another endpoint.
+// request never follows a Location to another endpoint. A chain that reaches
+// ten redirects is refused too, so a loop on the same endpoint stops.
 func SameEndpointRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) == 0 {
 		return nil
@@ -79,6 +85,9 @@ func SameEndpointRedirect(req *http.Request, via []*http.Request) error {
 	if req.URL.Scheme != prev.Scheme || req.URL.Host != prev.Host {
 		return fmt.Errorf("the endpoint redirected from %s://%s to %s://%s; a redirect that changes the scheme or the host is refused, so the credential stays with the first endpoint",
 			prev.Scheme, prev.Host, req.URL.Scheme, req.URL.Host)
+	}
+	if len(via) >= sameEndpointMaxRedirects {
+		return fmt.Errorf("the endpoint redirected to itself %d times; a chain of ten redirects on the same endpoint is refused, so a redirect loop stops", len(via))
 	}
 	return nil
 }
