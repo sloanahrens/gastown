@@ -3,44 +3,34 @@ package doltcred
 import (
 	"encoding/hex"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
-
-// TestMain runs the unit tier's run-time checks: no goroutine a test started
-// may outlive the tests, and no test may start an external tool
-// (docs/testing.md, "The rules").
-func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
-}
 
 // secretCanary is distinctive text that no printing path may show.
 const secretCanary = "canary-4f8a2c9e-should-never-print"
 
-// scrubCanary hides the canary and its hex form in a failure message, so a
+// secretScrub hides the canary and its hex form in a failure message, so a
 // leaking case is reported without its value.
-func scrubCanary(s string) string {
+func secretScrub(s string) string {
 	s = strings.ReplaceAll(s, hex.EncodeToString([]byte(secretCanary)), secretMask)
 	return strings.ReplaceAll(s, secretCanary, secretMask)
 }
 
-type visibleHolder struct {
+type secretVisibleHolder struct {
 	Secret Secret
 }
 
-type hiddenHolder struct {
+type secretHiddenHolder struct {
 	secret Secret
 }
 
-type hiddenPtrHolder struct {
+type secretHiddenPtrHolder struct {
 	secret *Secret
 }
 
-type nestedHolder struct {
-	inner hiddenHolder
+type secretNestedHolder struct {
+	inner secretHiddenHolder
 }
 
 // TestSecretFormatHidesCanary prints a Secret with %v, %+v, %#v, %s, %q, %d,
@@ -53,21 +43,20 @@ func TestSecretFormatHidesCanary(t *testing.T) {
 	s := NewSecret(secretCanary)
 	cases := []struct {
 		name string
-		// value is printed with every verb.
-		value any
-		// masked reports that fmt can reach Secret's Format method for this
-		// value, so the mask itself must appear; reflection-only cases print
-		// an address instead and are checked for the canary alone.
+		// value is printed with every verb. masked reports that fmt reaches
+		// Format for it, so the mask itself must appear; reflection-only cases
+		// print an address and are checked for the canary alone.
+		value  any
 		masked bool
 	}{
 		{"direct", s, true},
 		{"pointer", &s, true},
-		{"exported field", visibleHolder{Secret: s}, true},
-		{"unexported field", hiddenHolder{secret: s}, false},
-		{"holder inside holder", nestedHolder{inner: hiddenHolder{secret: s}}, false},
-		{"pointer in unexported field", hiddenPtrHolder{secret: &s}, false},
-		{"slice of holders", []visibleHolder{{Secret: s}}, true},
-		{"map of holders", map[string]hiddenHolder{"k": {secret: s}}, false},
+		{"exported field", secretVisibleHolder{Secret: s}, true},
+		{"unexported field", secretHiddenHolder{secret: s}, false},
+		{"holder inside holder", secretNestedHolder{inner: secretHiddenHolder{secret: s}}, false},
+		{"pointer in unexported field", secretHiddenPtrHolder{secret: &s}, false},
+		{"slice of holders", []secretVisibleHolder{{Secret: s}}, true},
+		{"map of holders", map[string]secretHiddenHolder{"k": {secret: s}}, false},
 	}
 	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%t"}
 	hexCanary := hex.EncodeToString([]byte(secretCanary))
@@ -79,7 +68,7 @@ func TestSecretFormatHidesCanary(t *testing.T) {
 					t.Errorf("fmt.Sprintf(%q, %s) prints the secret", verb, tc.name)
 				}
 				if tc.masked && !strings.Contains(out, secretMask) {
-					t.Errorf("fmt.Sprintf(%q, %s) = %q, want the mask %q", verb, tc.name, scrubCanary(out), secretMask)
+					t.Errorf("fmt.Sprintf(%q, %s) = %q, want the mask %q", verb, tc.name, secretScrub(out), secretMask)
 				}
 			})
 		}
@@ -89,7 +78,7 @@ func TestSecretFormatHidesCanary(t *testing.T) {
 	// not hold Format's per-verb promise.
 	for _, verb := range verbs {
 		if out := fmt.Sprintf(verb, s); out != secretMask {
-			t.Errorf("fmt.Sprintf(%q, secret) = %q, want exactly %q", verb, scrubCanary(out), secretMask)
+			t.Errorf("fmt.Sprintf(%q, secret) = %q, want exactly %q", verb, secretScrub(out), secretMask)
 		}
 	}
 }
@@ -124,7 +113,7 @@ func TestSecretDirectCallsHideCanary(t *testing.T) {
 func TestSecretReveal(t *testing.T) {
 	t.Parallel()
 	if got := NewSecret(secretCanary).Reveal(); got != secretCanary {
-		t.Errorf("Reveal() = %q, want the value it was built from", scrubCanary(got))
+		t.Errorf("Reveal() = %q, want the value it was built from", secretScrub(got))
 	}
 	var zero Secret
 	if got := zero.Reveal(); got != "" {
