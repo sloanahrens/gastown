@@ -11,6 +11,7 @@ const refusalWindowLength = time.Minute // a window's span, from its first call
 // refusalWindow bounds the pre-auth refusal lines. The handler is concurrent, so
 // the window carries its own lock.
 type refusalWindow struct {
+	now        func() time.Time // nil is time.Now; a test scripts it
 	mu         sync.Mutex
 	start      time.Time
 	started    bool
@@ -33,4 +34,12 @@ func (w *refusalWindow) allow(now time.Time) (write bool, suppressed uint64) {
 	}
 	w.suppressed++
 	return false, suppressed
+}
+
+// take is allow at the window's own clock.
+func (w *refusalWindow) take() (bool, uint64) {
+	if w.now != nil {
+		return w.allow(w.now())
+	}
+	return w.allow(time.Now())
 }
