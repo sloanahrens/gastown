@@ -1584,3 +1584,40 @@ func TestSpecSplitHysteresis(t *testing.T) {
 		})
 	}
 }
+
+// TestSpecSplitHysteresisTwoLabels: a bead that wears two distinct sp-minutes
+// labels is judged against the larger (specEstimateFromLabels, gt-9bjb3m), so
+// two labels under the trigger keep the band and noise near the trigger does
+// not flip the bead, and a larger label at the trigger drops it (gt-qwqnp8).
+func TestSpecSplitHysteresisTwoLabels(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		labels   []string
+		minutes  float64
+		wantHeld bool
+	}{
+		{name: "two labels under the trigger, re-estimated inside the band", labels: []string{"sp-minutes:10.7", "sp-minutes:10.9"}, minutes: 11.3},
+		{name: "the larger label first", labels: []string{"sp-minutes:10.9", "sp-minutes:10.7"}, minutes: 11.3},
+		{name: "two labels under the trigger, re-estimated past the band", labels: []string{"sp-minutes:10.7", "sp-minutes:10.9"}, minutes: 11.6, wantHeld: true},
+		{name: "the larger label at the trigger", labels: []string{"sp-minutes:10.7", "sp-minutes:11.2"}, minutes: 11.3, wantHeld: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+			spec.Labels = tc.labels
+			f := newFakeSpecTown(spec)
+			env := f.env()
+			env.After = neverTimer
+			env.StoryPointSplitOver = 11
+			env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+				return splitOutcome("estimated", 13, tc.minutes, "all", "nearest beads: gt-b"), nil
+			}
+			runSpecDispatchCycle(env)
+
+			if held := slices.Contains(f.labels["gt-a"], specdispatch.SplitLabel); held != tc.wantHeld {
+				t.Fatalf("held = %v at %.1f minutes with %v, want %v", held, tc.minutes, tc.labels, tc.wantHeld)
+			}
+		})
+	}
+}
