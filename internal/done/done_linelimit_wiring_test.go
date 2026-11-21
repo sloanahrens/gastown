@@ -135,8 +135,9 @@ func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
 
 // TestLineLimitRefusalNamesThePushedSha: a sandbox polecat past twice the
 // declared limit ends its refusal with the short sha its push left on origin and
-// the branch; a failed push, and a bead that already landed (its push does not
-// run), add no such line, so the refusal ends with the split line (gt-s0kxmj).
+// the branch; a failed push ends it with the line saying the work is not pushed
+// (gt-96m2m0), and a bead that already landed (its push does not run) adds no
+// such line, so the refusal ends with the split line (gt-s0kxmj).
 func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -168,11 +169,18 @@ func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 				t.Fatalf("checkBranchForSubmit error = %v, want the size refusal", err)
 			}
 			lines := strings.Split(err.Error(), "\n")
+			last := lines[len(lines)-1]
+			if tt.pushErr != nil {
+				if !strings.HasPrefix(last, "your work is NOT pushed: ") || !strings.Contains(last, tt.pushErr.Error()) || !strings.HasSuffix(last, "; the sandbox holds the only copy") {
+					t.Errorf("last line = %q, want the NOT pushed line naming %q", last, tt.pushErr)
+				}
+				return
+			}
 			want := splitLine
 			if tt.pushedLine {
 				want = "your work is pushed at " + ShortSHA(h.repo.head) + " on " + doneTestBranch
 			}
-			if last := lines[len(lines)-1]; last != want {
+			if last != want {
 				t.Errorf("last line = %q, want %q", last, want)
 			}
 		})

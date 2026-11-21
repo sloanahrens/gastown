@@ -61,6 +61,15 @@ func pushedRefusal(refusal sizeRefusalError, sha, branch string) sizeRefusalErro
 	return sizeRefusalError(string(refusal) + "\n" + fmt.Sprintf("your work is pushed at %s on %s", ShortSHA(sha), branch))
 }
 
+// unpushedRefusal ends a size refusal with the line saying the work is not
+// pushed and the error that stopped the push, so the seat and the overseer know
+// the sandbox holds the only copy (gt-96m2m0). The push error can span several
+// lines, so it is joined into one: the shape of the refusal is its last line.
+func unpushedRefusal(refusal sizeRefusalError, pushErr error) sizeRefusalError {
+	reason := strings.Join(strings.Fields(pushErr.Error()), " ")
+	return sizeRefusalError(string(refusal) + "\n" + fmt.Sprintf("your work is NOT pushed: %s; the sandbox holds the only copy", reason))
+}
+
 // crewWarningPrefix marks a crew's over-limit lines apart from a polecat refusal (gt-zqg4m2).
 const crewWarningPrefix = "warning (crew branch, not refused): "
 

@@ -21,37 +21,40 @@ import (
 // It reuses the landing push (a lease on the tip origin had, the diverged-push
 // recovery for a rebase or a rework, a read-back of what origin holds). Nothing
 // else of a submission runs: no rebase, no gate, no label. A push that fails
-// keeps cleanup_status unpushed and says so, and the exit proceeds as it always
-// did, with the session left up to protect the commits.
+// keeps cleanup_status unpushed, says so, and is returned to the caller; the
+// exit proceeds as it always did, with the session left up to protect the
+// commits.
 //
 // A source bead or target it cannot read still pushes, against the rig
 // default, because a stranded branch is the worse outcome; the warning names
 // the base the push actually compared against.
 func pushSandboxBranchBeforeDeferral(r *doneRun) {
-	pushSandboxBranchBeforeDeferralTo(os.Stderr, r)
+	_, _ = pushSandboxBranchBeforeDeferralTo(os.Stderr, r)
 }
 
 // pushSandboxBranchBeforeDeferralTo is pushSandboxBranchBeforeDeferral warning
 // to warn, so a test reads the warnings. It returns the sha origin holds for
 // the branch, read back by the landing push, or "" when this call pushed
 // nothing (gt-s0kxmj): a skipped state, a failed push, or a bead already
-// landed, where the push does not run.
-func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) string {
+// landed, where the push does not run. The error it returns is the failure
+// that stopped the push and leaves cleanup_status unpushed, so a caller that
+// must refuse (the size refusal, gt-96m2m0) can say the sandbox holds the
+// only copy.
+func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) (string, error) {
 	if r.sessionBackend != backendOpenShell || (r.cleanupStatus != "unpushed" && r.cleanupStatus != "has_unpushed") {
-		return ""
+		return "", nil
 	}
-	fail := func(format string, args ...any) {
-		style.FprintWarning(warn, "could not push %s before deferring: %s; the sandbox keeps the only copy of its commits", r.branch, fmt.Sprintf(format, args...))
+	fail := func(err error) (string, error) {
+		style.FprintWarning(warn, "could not push %s before deferring: %v; the sandbox keeps the only copy of its commits", r.branch, err)
+		return "", err
 	}
 	remote, err := r.resolveLandingRemote()
 	if err != nil {
-		fail("%v", err)
-		return ""
+		return fail(err)
 	}
 	head, err := r.deps.repo.Rev("HEAD")
 	if err != nil {
-		fail("resolving HEAD: %v", err)
-		return ""
+		return fail(fmt.Errorf("resolving HEAD: %w", err))
 	}
 	var sourceIssue *beads.Issue
 	var sourceBD beads.Client
@@ -75,12 +78,11 @@ func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) string {
 	}
 	_, landed := alreadyLandedAt(sourceIssue)
 	if err := pushBranchForLanding(r, sourceBD, sourceIssue, head, baseRef); err != nil {
-		fail("%v", err)
-		return ""
+		return fail(err)
 	}
 	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
 	if landed {
-		return ""
+		return "", nil
 	}
-	return head
+	return head, nil
 }
