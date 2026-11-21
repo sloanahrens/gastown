@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,7 +15,7 @@ import (
 // viaJobWithin runs cacheTrimClaimViaJob on the fixture's claim and returns its
 // result, or an error if the call has not returned within bound: a Job that
 // never finishes must end the call, not hang the test.
-func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed map[string]string) (bool, error) {
+func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed map[string]string) (bool, <-chan bool, error) {
 	done := make(chan bool, 1)
 	go func() {
 		done <- f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
@@ -23,16 +25,16 @@ func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed 
 	defer cancel()
 	select {
 	case ok := <-done:
-		return ok, nil
+		return ok, done, nil
 	case <-ctx.Done():
-		return false, fmt.Errorf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", bound)
+		return false, done, fmt.Errorf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", bound)
 	}
 }
 
 // viaJob is viaJobWithin at the hang guard, failing the test on a hang.
 func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]string) bool {
 	t.Helper()
-	ok, err := viaJobWithin(workspaceHangGuard, f, apply, trimmed)
+	ok, _, err := viaJobWithin(workspaceHangGuard, f, apply, trimmed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,8 +47,19 @@ func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]st
 func TestCacheTrimViaJobHeldWaitFailsTheHelper(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", nil)
+	// The abandoned call finishes once the hold is released, and it writes the run
+	// into the town's temp dir: wait for it before the dir is removed. Registered
+	// before the hold, so it runs after the hold's release (cleanups run last in,
+	// first out) and before the temp dir goes.
+	var finished <-chan bool
+	t.Cleanup(func() {
+		if finished != nil {
+			<-finished
+		}
+	})
 	held := cacheTrimFailWaitHold(t, f, cacheTrimClaimJobWaitVerb)
-	if _, err := viaJobWithin(50*time.Millisecond, f, true, map[string]string{}); err == nil || !strings.Contains(err.Error(), "did not return within 50ms") {
+	var err error
+	if _, finished, err = viaJobWithin(50*time.Millisecond, f, true, map[string]string{}); err == nil || !strings.Contains(err.Error(), "did not return within 50ms") {
 		t.Fatalf("a held wait = %v; want the helper's named error at its bound", err)
 	}
 	held.await(t)
@@ -205,18 +218,20 @@ func TestCacheTrimSwitchRecordsTheRun(t *testing.T) {
 	}
 }
 
-// TestCacheTrimSwitchRecordsNothingUnlessTrimmed pins that a dry run and a Job
-// whose result cannot be read record no run.
-func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
+// TestCacheTrimSwitchRecordsNoRunOnADryRunAndAFailedRunOnAnUnreadableResult pins that a dry run records no
+// run, and that a Job whose result cannot be read records a failed run and never
+// an ok run with zero counts.
+func TestCacheTrimSwitchRecordsNoRunOnADryRunAndAFailedRunOnAnUnreadableResult(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
 		apply     bool
 		wantOK    bool
+		wantRuns  []string
 		overrides map[string]cliReply
 	}{
 		{name: "dry run", apply: false, wantOK: true},
-		{name: "unreadable result", apply: true, wantOK: false, overrides: map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}},
+		{name: "unreadable result", apply: true, wantOK: false, wantRuns: []string{cacheTrimRunFailed}, overrides: map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,8 +240,12 @@ func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
 			if got := viaJob(t, f, tc.apply, map[string]string{}); got != tc.wantOK {
 				t.Errorf("viaJob = %v, want %v; log: %s", got, tc.wantOK, f.log.String())
 			}
-			if runs := f.jobRuns(t); len(runs) != 0 {
-				t.Errorf("the ledger holds %+v, want no run", runs)
+			var outcomes []string
+			for _, run := range f.jobRuns(t) {
+				outcomes = append(outcomes, run.Outcome)
+			}
+			if !slices.Equal(outcomes, tc.wantRuns) {
+				t.Errorf("the ledger holds outcomes %v, want %v", outcomes, tc.wantRuns)
 			}
 		})
 	}
@@ -256,5 +275,105 @@ func TestCacheTrimSwitchLogsTheFinish(t *testing.T) {
 		if got := strings.Contains(f.log.String(), want); got != apply {
 			t.Errorf("apply=%v: the log holds the finish line = %v, want %v; log: %s", apply, got, apply, f.log.String())
 		}
+	}
+}
+
+// TestCacheTrimSwitchParksOnEveryFailure pins that a claim whose trim fails is
+// parked: a failed apply, a failed Job and an unreadable result line each record
+// one failed run, raise the claim's failure item and return false, and the next
+// pass for that claim makes no cluster call, says PARKED and returns true.
+func TestCacheTrimSwitchParksOnEveryFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]cliReply
+		hold      bool
+	}{
+		{"a failed apply", map[string]cliReply{cacheTrimApplyVerb: {stderr: "invalid manifest", code: 1}}, false},
+		{"a failed Job", map[string]cliReply{
+			cacheTrimFailWaitFailedVerb:  {},
+			cacheTrimFailWaitTrimLogVerb: {stdout: "could not remove /claim/x: permission denied\n"},
+		}, true},
+		{"an unreadable result line", map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}, false},
+		{"a pod list that cannot be read", map[string]cliReply{"get pods -n " + cacheTrimNamespace + " -o json": {stderr: "error: connection refused", code: 1}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", tc.overrides)
+			if tc.hold {
+				cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+			}
+			if viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("a failed trim = true, want false; log: %s", f.log.String())
+			}
+			if runs := f.jobRuns(t); len(runs) != 1 || runs[0].Outcome != cacheTrimRunFailed {
+				t.Errorf("the ledger holds %+v, want one run with outcome %q", runs, cacheTrimRunFailed)
+			}
+			if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("the claim is not parked after its trim failed")
+			}
+			if items := f.noOpItems(t); len(items) != 1 || items[0].Key != cacheTrimFailedKey(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("the attention items = %+v, want the claim's one failure item", items)
+			}
+			calls := len(f.cli.recorded())
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Errorf("a parked claim = false, want true (a verdict, no retry)")
+			}
+			if got := len(f.cli.recorded()); got != calls {
+				t.Errorf("the parked claim made %d more cluster calls, want none", got-calls)
+			}
+			if !strings.Contains(f.log.String(), "PARKED after a failure; nothing trimmed until the daemon restarts") {
+				t.Errorf("the parked pass did not say PARKED; log: %s", f.log.String())
+			}
+		})
+	}
+}
+
+// TestCacheTrimSwitchDoesNotParkAPendingJob pins that a Job still running when
+// the wait ends is not a failure: nothing is parked, no run is recorded and the
+// claim is not judged trimmed.
+func TestCacheTrimSwitchDoesNotParkAPendingJob(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	if viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a pending Job = true, want false; log: %s", f.log.String())
+	}
+	if f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+		t.Errorf("a Job still running parked its claim")
+	}
+	if runs := f.jobRuns(t); len(runs) != 0 {
+		t.Errorf("a pending Job recorded %+v, want no run", runs)
+	}
+}
+
+// TestCacheTrimSwitchParkedClaimStillHoldsItsNamespace pins that a parked claim
+// keeps the same-namespace marker: the failed Job and pods of the parked claim
+// may still be there and a trim's labels cannot tell two claims' objects apart,
+// so a second claim in that namespace is refused on the pass after the failure
+// and applies nothing.
+func TestCacheTrimSwitchParkedClaimStillHoldsItsNamespace(t *testing.T) {
+	t.Parallel()
+	const second = "gt-other-cache"
+	f := newCacheTrimFixture(t, "", nil)
+	f.d.cacheTrimPark(cacheTrimNamespace, cacheTrimClaimName, errors.New("an earlier pass failed"))
+	trimmed := map[string]string{} // one pass's ledger, as cacheTrim builds it
+	run := func(claim string) bool {
+		return f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: claim},
+			"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, trimmed)
+	}
+	if !run(cacheTrimClaimName) {
+		t.Fatalf("a parked claim = false, want true (a verdict)")
+	}
+	if !run(second) {
+		t.Fatalf("a second claim in the parked claim's namespace = false, want true (refused)")
+	}
+	if applied := f.applied(t); len(applied) != 0 {
+		t.Errorf("the second claim applied %v, want nothing: the parked claim still holds the namespace", applied)
+	}
+	if !strings.Contains(f.log.String(), "is trimmed in the same namespace") {
+		t.Errorf("the second claim's refusal is not logged; log: %s", f.log.String())
 	}
 }
