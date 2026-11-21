@@ -26,8 +26,9 @@ type importGap struct {
 // failed read or a source that does not parse is an error, not a clean list,
 // and so is a directory with no non-test .go file at main: an empty listing
 // would pass a renamed or removed directory silently (gt-reirlx). The walk
-// queues every import, covered or not, and ends only because Go forbids import
-// cycles; the visited set (gt-rblgfn) and the bound (gt-tly3py) are not here.
+// queues every import, covered or not, and reads each directory once: the
+// visited set ends an import cycle (gt-rblgfn), so the walk does not rely on Go
+// forbidding cycles. The bound (gt-tly3py) is not here.
 func inputClosureGaps(git bdbuild.Git, dir, main string) ([]importGap, error) {
 	type visit struct{ dir, importer string }
 	var queue []visit
@@ -35,9 +36,14 @@ func inputClosureGaps(git bdbuild.Git, dir, main string) ([]importGap, error) {
 		queue = append(queue, visit{dir: tool})
 	}
 	var gaps []importGap
+	visited := make(map[string]bool)
 	for len(queue) > 0 {
 		v := queue[0]
 		queue = queue[1:]
+		if visited[v.dir] {
+			continue
+		}
+		visited[v.dir] = true
 		listing, err := git(dir, "ls-tree", "--name-only", main, v.dir+"/")
 		if err != nil {
 			return nil, err

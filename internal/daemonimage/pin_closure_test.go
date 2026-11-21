@@ -148,6 +148,40 @@ import "gt.local/devops/internal/onlytest"
 	}
 }
 
+// TestInputClosureVisitsEachDirectoryOnce pins the visited set: a two-directory
+// import cycle ends, and the walk reads each directory it reaches once, so the
+// cycle neither repeats a read nor keeps the walk going (gt-rblgfn).
+func TestInputClosureVisitsEachDirectoryOnce(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	closureTree(f, map[string]string{
+		"cmd/reporter":         "package main\nimport \"gt.local/devops/pkg/patrol\"\n",
+		"cmd/release-reporter": "package main\n",
+		"cmd/cloudcheck":       "package main\n",
+		"pkg/patrol":           "package patrol\nimport \"gt.local/devops/pkg/releasebot\"\n",
+		"pkg/releasebot":       "package releasebot\nimport \"gt.local/devops/pkg/patrol\"\n",
+	})
+	got, err := inputClosureGaps(f.run, closureRepo, "main")
+	if err != nil {
+		t.Fatalf("inputClosureGaps: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("gaps = %v, want none: every directory in the cycle is under the input list", got)
+	}
+	const listing = closureRepo + " ls-tree --name-only main "
+	reads := map[string]int{}
+	for _, call := range f.calls {
+		if dir, ok := strings.CutPrefix(call, listing); ok {
+			reads[strings.TrimSuffix(dir, "/")]++
+		}
+	}
+	for _, dir := range []string{"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "pkg/patrol", "pkg/releasebot"} {
+		if reads[dir] != 1 {
+			t.Errorf("ls-tree of %s ran %d times, want 1", dir, reads[dir])
+		}
+	}
+}
+
 func TestInputClosureReportsADeeperImportOutsideTheList(t *testing.T) {
 	t.Parallel()
 	f := newPinsGit()
