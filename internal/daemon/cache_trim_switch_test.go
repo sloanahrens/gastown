@@ -15,7 +15,7 @@ import (
 // viaJobWithin runs cacheTrimClaimViaJob on the fixture's claim and returns its
 // result, or an error if the call has not returned within bound: a Job that
 // never finishes must end the call, not hang the test.
-func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed map[string]string) (bool, error) {
+func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed map[string]string) (bool, <-chan bool, error) {
 	done := make(chan bool, 1)
 	go func() {
 		done <- f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
@@ -25,16 +25,16 @@ func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed 
 	defer cancel()
 	select {
 	case ok := <-done:
-		return ok, nil
+		return ok, done, nil
 	case <-ctx.Done():
-		return false, fmt.Errorf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", bound)
+		return false, done, fmt.Errorf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", bound)
 	}
 }
 
 // viaJob is viaJobWithin at the hang guard, failing the test on a hang.
 func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]string) bool {
 	t.Helper()
-	ok, err := viaJobWithin(workspaceHangGuard, f, apply, trimmed)
+	ok, _, err := viaJobWithin(workspaceHangGuard, f, apply, trimmed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,8 +47,19 @@ func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]st
 func TestCacheTrimViaJobHeldWaitFailsTheHelper(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", nil)
+	// The abandoned call finishes once the hold is released, and it writes the run
+	// into the town's temp dir: wait for it before the dir is removed. Registered
+	// before the hold, so it runs after the hold's release (cleanups run last in,
+	// first out) and before the temp dir goes.
+	var finished <-chan bool
+	t.Cleanup(func() {
+		if finished != nil {
+			<-finished
+		}
+	})
 	held := cacheTrimFailWaitHold(t, f, cacheTrimClaimJobWaitVerb)
-	if _, err := viaJobWithin(50*time.Millisecond, f, true, map[string]string{}); err == nil || !strings.Contains(err.Error(), "did not return within 50ms") {
+	var err error
+	if _, finished, err = viaJobWithin(50*time.Millisecond, f, true, map[string]string{}); err == nil || !strings.Contains(err.Error(), "did not return within 50ms") {
 		t.Fatalf("a held wait = %v; want the helper's named error at its bound", err)
 	}
 	held.await(t)
