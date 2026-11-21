@@ -294,6 +294,27 @@ func eventTime(ev Event) (time.Time, error) {
 	return time.Parse(time.RFC3339, ev.Timestamp)
 }
 
+// LastSpawn is when the latest spawn of rig's seat polecat was written, by the
+// event's timestamp, whatever order the log holds the lines in. A spawn whose
+// timestamp does not parse dates nothing and is skipped, as eventTime skips it
+// elsewhere. The result is zero when no parseable spawn names that seat.
+func LastSpawn(evs []Event, rig, polecat string) time.Time {
+	var last time.Time
+	for _, ev := range evs {
+		if ev.Type != TypeSpawn || ev.Payload["rig"] != rig || ev.Payload["polecat"] != polecat {
+			continue
+		}
+		ts, err := eventTime(ev)
+		if err != nil {
+			continue
+		}
+		if ts.After(last) {
+			last = ts
+		}
+	}
+	return last
+}
+
 // runEndTime is when ev ended the bead's run: its "at" payload when the writer
 // recorded a time of its own, else its timestamp. The overrun guard's stop
 // writes "at", so a record repeated on a later tick (a hand-back that keeps
