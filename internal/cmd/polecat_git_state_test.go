@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // fakeGitState is a worktree as gitStateOf reads it.
@@ -342,5 +343,40 @@ func TestPolecatGitStateUnreadableAgentBeadIsUnknown(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(got), "clean") {
 		t.Errorf("output claims a clean verdict with no readable agent bead:\n%s", got)
+	}
+}
+
+// TestPolecatGitStateWiredProbeReadsSandboxSeat drives the probe that
+// polecatGitStateReadsFor builds, not a stub: a sandbox seat whose registry
+// record says it runs reads unknown, and the pod-side git reader never runs.
+// Only the git reader is replaced. The record answers before the sandbox CLI
+// is asked, so no gateway is reached.
+func TestPolecatGitStateWiredProbeReadsSandboxSeat(t *testing.T) {
+	t.Parallel()
+	const sessionName = "gt-nux"
+	town := sandboxSeatTown(t)
+	if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sessionName, Rig: "gastown", Polecat: "nux"}); err != nil {
+		t.Fatalf("WriteSandboxRecord: %v", err)
+	}
+	bd := beadsfake.New()
+	const beadID = "gt-gastown-polecat-nux"
+	bd.Seed(beads.Issue{ID: beadID, Type: "agent", Description: "agent: " + sandboxSeatAgent + "\n"})
+	reads := polecatGitStateReadsFor(bd, town, beadID)
+	gitCalled := false
+	reads.gitState = func(string) (*GitState, error) {
+		gitCalled = true
+		return nil, errors.New("pod-side git reader ran for a sandbox seat")
+	}
+
+	var out bytes.Buffer
+	if err := reportPolecatGitState(&out, "gastown", "nux", "/stale/host/clone", sessionName, reads, false); err != nil {
+		t.Fatalf("reportPolecatGitState: %v", err)
+	}
+	if gitCalled {
+		t.Error("the pod-side git reader ran for a sandbox seat")
+	}
+	want := "unknown: git state lives in the running sandbox " + sessionName + "; the pod-side worktree is not the seat's work"
+	if got := out.String(); !strings.Contains(got, want) {
+		t.Errorf("output does not carry %q:\n%s", want, got)
 	}
 }
