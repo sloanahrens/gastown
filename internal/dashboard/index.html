@@ -151,7 +151,7 @@ tr.live,.ltrow.live{background:#101a13}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
 .workrow .wnum,.workrow .wpts{text-align:right;color:var(--dim)}
-.workrow .wsub{font-size:11px;white-space:nowrap}
+.workrow .wsub,.workrow .wstart,.workrow .wround{font-size:11px;white-space:nowrap}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
@@ -1282,7 +1282,12 @@ function paintAges(r, now) {
   // The guard counts a seat's gate runs apart from its work, so a seat that
   // has been charged gate time says how its age splits (gt-qjl0ym). textContent
   // above cleared the cell, so the line is drawn again on every pass.
-  if (p.bead && p.gate_sec > 0) r.age.append(el("div", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
+  // A seat still starting has no counted work yet, so its badge stands in place
+  // of the times; a seat refused for review says which round it is on, one above
+  // its refusals (gt-qjl0ym, gt-k9s5lv).
+  if (p.bead && p.phase === "starting") r.age.append(el("div", "wstart", "starting"));
+  else if (p.bead && p.gate_sec > 0) r.age.append(el("div", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
+  if (p.bead && p.reject_count > 0) r.age.append(el("div", "wround", "round " + (p.reject_count + 1)));
   // The Points cell reads the bead's estimate, then the elapsed time since
   // dispatch, which moves with the clock like the age does. A seat holding no
   // bead leaves it empty.
@@ -1515,7 +1520,7 @@ function workQueue(box, s, q, r) {
 // JSON so a comma inside a title or description cannot make two seats read as one
 // key.
 function polecatsKey(s) {
-  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.state_since || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h, p.gate_sec || 0, p.working_sec || 0])).join(";");
+  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.state_since || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h, p.gate_sec || 0, p.working_sec || 0, p.phase || "", p.reject_count || 0])).join(";");
   return [s.summary_at, seats].join("|");
 }
 function beadsKey(s) {
