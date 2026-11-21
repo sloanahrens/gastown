@@ -1880,9 +1880,14 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 // summary names the state it judged. A seat whose bead is open is rework with
 // its branch preserved and never raises.
 //
-// Every read is the error, never a guess (keptSeatReSlung): the previous
-// tick's items are kept rather than read as finished or as rework. The age is
-// the agent bead's last write (polecat.AgentBeadUpdatedAt,
+// A seat's failed read is not the collection's: an unreadable agent bead, a
+// work bead that cannot be shown, and a record with no update time each skip
+// that seat alone, keeping its previous item when the last tick raised one, so
+// the other seats are still judged (gt-ujxfez). The seat walk is the
+// collection's own read, so a walk that cannot be listed still fails it and
+// the queue keeps every previous item.
+//
+// The age is the agent bead's last write (polecat.AgentBeadUpdatedAt,
 // patrolscan.AgentRecord.UpdatedAt), so a later write to the agent bead of a
 // finished seat restarts the window: the item clears and only comes back once
 // that write is itself older than attentionSeatFinishedLinger.
@@ -1898,9 +1903,11 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 		if !named || role != constants.RolePolecat || seat.Rig == "" {
 			continue
 		}
+		key := "seat-finished:" + seat.Rig + "/" + name
 		rec, err := h.AgentRecord(seat.Rig, name)
 		if err != nil {
-			return nil, fmt.Errorf("%s/%s: %w", seat.Rig, name, err)
+			out = keepSeatFinished(s.prev, key, out)
+			continue
 		}
 		state := beads.AgentState(strings.TrimSpace(rec.State))
 		if state != beads.AgentStateDone && state != beads.AgentStateStuck {
@@ -1910,27 +1917,26 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 			continue
 		}
 		issue, err := h.readBeads(seat.Rig).Show(rec.LastSourceIssue)
-		if err != nil {
-			return nil, fmt.Errorf("%s/%s: %w", seat.Rig, name, err)
-		}
-		if issue == nil {
-			return nil, fmt.Errorf("%s/%s: bd show %s: no issue", seat.Rig, name, rec.LastSourceIssue)
+		if err != nil || issue == nil {
+			out = keepSeatFinished(s.prev, key, out)
+			continue
 		}
 		if beads.IssueStatus(issue.Status) != beads.StatusClosed {
 			continue
 		}
 		// The age is the record's last write. A record that carries none cannot
-		// be judged, so it is an error rather than an age read as zero (which
+		// be judged: the seat is skipped rather than its age read as zero (which
 		// would raise every time).
 		if rec.UpdatedAt.IsZero() {
-			return nil, fmt.Errorf("%s/%s: the agent bead carries no update time", seat.Rig, name)
+			out = keepSeatFinished(s.prev, key, out)
+			continue
 		}
 		done := s.now.Sub(rec.UpdatedAt)
 		if done <= attentionSeatFinishedLinger {
 			continue
 		}
 		out = append(out, attention.Item{
-			Key:      "seat-finished:" + seat.Rig + "/" + name,
+			Key:      key,
 			Kind:     attention.KindSeatFinishedLingering,
 			Severity: attention.SeverityLow,
 			Rig:      seat.Rig,
@@ -1939,6 +1945,16 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 		})
 	}
 	return out, nil
+}
+
+// keepSeatFinished is what a seat the rule cannot judge keeps: its own
+// previous item, if the last tick raised one, so a read that breaks does not
+// clear an item already reported (gt-ujxfez).
+func keepSeatFinished(prev attention.State, key string, out []attention.Item) []attention.Item {
+	if it, ok := attention.Find(prev, key); ok {
+		return append(out, it)
+	}
+	return out
 }
 
 // attentionGateRunning adapts the overrun guard's gate read to the seats the
