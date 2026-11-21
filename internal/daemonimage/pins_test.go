@@ -426,6 +426,24 @@ func TestCommitsBehindCountsOnlyInputPaths(t *testing.T) {
 	}
 }
 
+// TestCheckPinsSkipsTheClosureWalkForABdPin checks a source with no input list
+// passes without the closure walk: the fake git records no ls-tree at all and no
+// show of a file under cmd/ at main.
+func TestCheckPinsSkipsTheClosureWalkForABdPin(t *testing.T) {
+	t.Parallel()
+	bd := newPinsGit()
+	bd.pinTable(pinsTestPin, pinsTestMain, 3, time.Hour)
+	if _, err := CheckPins([]Pin{{Name: "bd", URL: testPinURL("beads"), Commit: pinsTestPin}},
+		func(Pin) (string, error) { return pinsTestDir, nil }, pinsTestPath, bd.run); err != nil {
+		t.Fatalf("CheckPins refused a bd pin inside its bounds: %v", err)
+	}
+	for _, call := range bd.calls {
+		if strings.Contains(call, " ls-tree ") || strings.Contains(call, " show "+pinsTestMain+":cmd/") {
+			t.Errorf("the guard walked the closure for a bd pin: %q", call)
+		}
+	}
+}
+
 // hasCall reports whether the fake git was asked key.
 func hasCall(f *pinsGit, key string) bool {
 	for _, call := range f.calls {
