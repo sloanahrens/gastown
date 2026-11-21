@@ -1556,7 +1556,8 @@ func TestImagesFailedRunListErrorKeepsWhatItHeld(t *testing.T) {
 	fx.run(pairT0.Add(pairReadyInterval))
 
 	// observed is ordered by key, so the failed item (images-failed:) precedes
-	// the unknown one (images-unknown:).
+	// the unknown one (images-unknown:); the streak's own failed listing adds no
+	// third item beside the unknown one.
 	items := fx.check.observed()
 	require.Len(t, items, 2, "an unreadable run list cleared the failure it had raised, or raised no unknown item")
 	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
@@ -1708,7 +1709,11 @@ func TestPairReadyDoesNotAskForRunsWhenThePairIsPublished(t *testing.T) {
 	items := fx.check.observed()
 	require.Len(t, items, 1)
 	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
-	assert.Empty(t, fx.api.runsQueries, "a commit whose pair is published had its run read")
+	// The rig's go list streak lists the newest successful images runs, once and
+	// with no commit; no read of the commit's own run is made.
+	require.Len(t, fx.api.runsQueries, 1, "the streak's one listing is the only run read")
+	assert.Empty(t, fx.api.runsQueries[0].HeadSHA, "a commit whose pair is published had its run read")
+	assert.Equal(t, []string{deployRunSucceeded}, fx.api.runsQueries[0].Status)
 }
 
 // TestImagesFailedReadsAFailedRunsLogOnce: a failed run keeps its item across

@@ -384,7 +384,10 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 			next[r.Rig] = fails[r.Rig] + 1
 			out[r.Rig] = pairReadyKept(items, next[r.Rig], pairReadyUnreadableItem(r.Rig, scanErr), refused, running)
 		default:
-			out[r.Rig] = items
+			pinAt := func(sha string) (string, error) {
+				return skew.bdPin(r, pairReadyGreen{sha: sha, sha12: greenRefShortSHA(sha)})
+			}
+			out[r.Rig] = append(items, goListUnreadOnce(items, goListDegradedItems(ctx, r, pinAt, prev[r.Rig]))...)
 		}
 		carryFailedRuns(nextFailed, failed, out[r.Rig])
 	}
@@ -594,12 +597,32 @@ func pairReadyCommitItem(kind attention.Kind) bool {
 		kind == attention.KindImagesFailed || kind == attention.KindImagesUnknown
 }
 
+// goListUnreadOnce drops the unreadable item the go list streak raised when the
+// rig's own scan already raised an images-unknown item: both come from the one run
+// list failing, and one outage is one alert. A rig whose scan raised none keeps it,
+// so an unreadable streak never reads as a healthy rig.
+func goListUnreadOnce(scanned, streak []attention.Item) []attention.Item {
+	for _, it := range scanned {
+		if it.Kind == attention.KindImagesUnknown {
+			var out []attention.Item
+			for _, s := range streak {
+				if s.Kind != attention.KindDeployPairUnreadable {
+					out = append(out, s)
+				}
+			}
+			return out
+		}
+	}
+	return streak
+}
+
 // pairReadyKeptItem reports whether an item the check holds is one it rebuilds
 // with its commit each pass: a per-commit verdict, or the skew guard's
 // per-commit unreadable item, which is re-judged with the commit it names. The
 // rig's own unreadable item is rebuilt beside these and is not one of them.
 func pairReadyKeptItem(it attention.Item) bool {
-	return pairReadyCommitItem(it.Kind) || strings.HasPrefix(it.Key, pairReadySkewUnreadableKeyPrefix)
+	return pairReadyCommitItem(it.Kind) || it.Kind == attention.KindDeployPairGoListDegraded ||
+		strings.HasPrefix(it.Key, pairReadySkewUnreadableKeyPrefix)
 }
 
 // carryFailedRuns keeps the failed-run answer of each images-failed item a rig
@@ -1705,6 +1728,13 @@ func (s *attentionSources) collectPairRefused(context.Context) ([]attention.Item
 // same reason the pair's other kinds are.
 func (s *attentionSources) collectPairSkew(context.Context) ([]attention.Item, error) {
 	return s.pairReadyItemsOfKind(attention.KindDeployPairSkew), nil
+}
+
+// collectPairGoListDegraded returns the degraded-guard items the same read finds:
+// one per rig whose newest images builds ran the pin-drift guard without go list
+// (gt-joa25x). A collector of its own, like the pair's other kinds.
+func (s *attentionSources) collectPairGoListDegraded(context.Context) ([]attention.Item, error) {
+	return s.pairReadyItemsOfKind(attention.KindDeployPairGoListDegraded), nil
 }
 
 // pairReadyItemsOfKind is the pair check's held items of one kind.
