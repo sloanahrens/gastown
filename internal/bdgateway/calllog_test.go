@@ -1240,7 +1240,7 @@ func TestCallLogArgvParse(t *testing.T) {
 		},
 		{
 			name:  "flags read after the command word are named when the verb cannot be placed",
-			argv:  []string{"show", "--json", "--include-comments", "--", "gt-x"},
+			argv:  []string{"show", "--json", "--include-comments", "--db"},
 			verb:  unparsedVerb,
 			flags: []string{"--json", "--include-comments"},
 			beads: []string{},
