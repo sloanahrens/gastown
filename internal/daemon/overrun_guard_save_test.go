@@ -1196,3 +1196,71 @@ func TestOverrunSaveStage_ClassifiesEachReturn(t *testing.T) {
 		}
 	})
 }
+
+// TestOverrunSaveStage_StateFollowsTheLastFailure: the stop's state holds the
+// stage of the latest refusal and no stale one: a push refusal reads "push", a
+// later success clears it, and so does a late check that cannot read the worktree.
+func TestOverrunSaveStage_StateFollowsTheLastFailure(t *testing.T) {
+	t.Parallel()
+	stage := func(t *testing.T, w *resetWorld) string {
+		t.Helper()
+		st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st.SaveStage
+	}
+	t.Run("a later success clears a push stage", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+		writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+		refuse := true
+		open := w.d.openGitFn
+		w.d.openGitFn = func(dir string) daemonGit {
+			return pushRefusingGit{daemonGit: open(dir), refuse: &refuse, err: errors.New("remote unreachable")}
+		}
+		f := newOverrunFake(20*time.Minute, stopSeat)
+		f.removeSandbox = func(overrunSeat) error { return nil }
+		s := f.seams()
+		s.saveWork = w.d.overrunSaveWork
+
+		w.d.runOverrunGuard(s)
+		if got := stage(t, w); got != "push" {
+			t.Fatalf("stage after the refused push = %q, want push", got)
+		}
+		refuse = false
+		w.d.runOverrunGuard(s)
+		if got := stage(t, w); got != "" {
+			t.Errorf("stage after the save landed = %q, want it cleared", got)
+		}
+	})
+	t.Run("a late check that cannot read the worktree clears a push stage", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+		refuse, unreadable := false, false
+		open := w.d.openGitFn
+		w.d.openGitFn = func(dir string) daemonGit {
+			return pushRefusingGit{daemonGit: statusUnreadableAfterStop{daemonGit: open(dir), stopped: &unreadable}, refuse: &refuse, err: errors.New("remote unreachable")}
+		}
+		f := newOverrunFake(20*time.Minute, stopSeat)
+		f.removeSandbox = func(overrunSeat) error { return nil }
+		s := f.seams()
+		s.saveWork = w.d.overrunSaveWork
+		stopSession := s.stopSession
+		s.stopSession = func(seat overrunSeat) error {
+			writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
+			refuse = true
+			return stopSession(seat)
+		}
+
+		w.d.runOverrunGuard(s)
+		if got := stage(t, w); got != "push" {
+			t.Fatalf("stage after the refused late save = %q, want push", got)
+		}
+		refuse, unreadable = false, true
+		w.d.runOverrunGuard(s)
+		if got := stage(t, w); got != "" {
+			t.Errorf("stage after the unreadable late check = %q, want it cleared", got)
+		}
+	})
+}
