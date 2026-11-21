@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -523,11 +524,22 @@ func TestPinsWithBDNamesTheCommit(t *testing.T) {
 	}
 }
 
-// fakeCompare counts no commit that only the floor has, so every commit holds the
-// samples build; the older-build rows make it record its calls.
-type fakeCompare struct{}
+// compareCall is one comparison the fake compare was asked: its base and head.
+type compareCall struct{ base, head string }
 
-func (fakeCompare) CompareCommits(context.Context, string, string, string, string) (*forgejo.CompareInfo, error) {
+// fakeCompare answers the older-build question. A known older build compared
+// with the samples floor has one commit only the floor holds, so it answers 1;
+// every other call answers 0, so the current pin holds the floor. It records
+// each base and head it is asked.
+type fakeCompare struct {
+	calls []compareCall
+}
+
+func (f *fakeCompare) CompareCommits(_ context.Context, _, _, base, head string) (*forgejo.CompareInfo, error) {
+	f.calls = append(f.calls, compareCall{base, head})
+	if head == daemonimage.BDSamplesFloor && slices.Contains(knownOlderBDBuilds, base) {
+		return &forgejo.CompareInfo{TotalCommits: 1}, nil
+	}
 	return &forgejo.CompareInfo{}, nil
 }
 
@@ -551,12 +563,32 @@ func readBDPin(t *testing.T, commit string, cmp daemon.ImagePinCompare) daemon.I
 	return daemon.ImagePinState{}
 }
 
-// TestBDPinReadsWithoutError holds the current bd pin to the production read: it
-// reads with no error and does not lack the samples floor.
-func TestBDPinReadsWithoutError(t *testing.T) {
+// TestBDPinIsNotAnOlderBuild holds the current bd pin and every known older bd
+// build to the production read. Each reads with no error; the pin holds the
+// samples floor and each older build lacks it. Each asks the compare for its
+// commit as base and the floor as head.
+func TestBDPinIsNotAnOlderBuild(t *testing.T) {
 	t.Parallel()
-	got := readBDPin(t, bdPin, fakeCompare{})
-	if got.Err != nil || got.LacksFloor {
-		t.Errorf("bd pin = %+v, want Err nil and LacksFloor false", got)
+	type row struct {
+		name       string
+		commit     string
+		lacksFloor bool
+	}
+	rows := []row{{name: "the bd pin", commit: bdPin}}
+	for _, commit := range knownOlderBDBuilds {
+		rows = append(rows, row{name: "older build " + commit, commit: commit, lacksFloor: true})
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmp := &fakeCompare{}
+			got := readBDPin(t, tc.commit, cmp)
+			if got.Err != nil || got.LacksFloor != tc.lacksFloor {
+				t.Errorf("bd pin = %+v, want Err nil and LacksFloor %v", got, tc.lacksFloor)
+			}
+			if !slices.Contains(cmp.calls, compareCall{tc.commit, daemonimage.BDSamplesFloor}) {
+				t.Errorf("compare was asked %v, want %s as base and the samples floor as head", cmp.calls, tc.commit)
+			}
+		})
 	}
 }
