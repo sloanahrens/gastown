@@ -21,10 +21,11 @@ import (
 )
 
 var (
-	landOmStatsSince   string
-	landOmStatsRecords string
-	landOmStatsLog     string
-	landOmStatsJSON    bool
+	landOmStatsSince      string
+	landOmStatsRecords    string
+	landOmStatsLog        string
+	landOmStatsJSON       bool
+	landOmStatsRecurrence bool
 )
 
 // landOmStatsCmd is the operator's quick view of om's verdicts. Merlin's mango
@@ -66,10 +67,14 @@ func init() {
 	landOmStatsCmd.Flags().StringVar(&landOmStatsRecords, "records", "", "review records file (default: <town>/.runtime/landings/reviews.jsonl)")
 	landOmStatsCmd.Flags().StringVar(&landOmStatsLog, "log", "", "daemon log for the days before the first record (default: <town>/daemon/daemon.log)")
 	landOmStatsCmd.Flags().BoolVar(&landOmStatsJSON, "json", false, "print the report as JSON")
+	landOmStatsCmd.Flags().BoolVar(&landOmStatsRecurrence, "recurrence", false, "add each hold-out class's minor findings a later review restated, and the rates")
 	landCmd.AddCommand(landOmStatsCmd)
 }
 
 func runLandOmStats(cmd *cobra.Command, _ []string) error {
+	if landOmStatsRecurrence {
+		return landOmStatsRecurrenceReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON)
+	}
 	return landOmStatsReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON)
 }
 

@@ -1,13 +1,36 @@
 package cmd
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/omlessons"
 )
+
+// landOmStatsFailIO fails every read and write, standing in for a log whose
+// read fails and an output that refuses the JSON report.
+type landOmStatsFailIO struct{ err error }
+
+func (f landOmStatsFailIO) Read([]byte) (int, error)  { return 0, f.err }
+func (f landOmStatsFailIO) Write([]byte) (int, error) { return 0, f.err }
+
+// landOmStatsWireFS serves empty records and a log whose read fails, so a test
+// reaches land.AggregateOmStats's own error rather than an open failure.
+type landOmStatsWireFS struct{}
+
+func (landOmStatsWireFS) Open(name string) (io.ReadCloser, error) {
+	if name == "/rec" {
+		return io.NopCloser(strings.NewReader("")), nil
+	}
+	return io.NopCloser(landOmStatsFailIO{err: errors.New("the log cannot be read")}), nil
+}
 
 // TestLandOmStatsRecurrenceFollowCounts: generated held-out and filed beads,
 // each with one minor finding, are restated in time by a later record of another
@@ -158,5 +181,98 @@ func TestLandOmStatsRecurrenceTalliesWindow(t *testing.T) {
 		if got := row.HeldOut.Findings + row.Filed.Findings; got != c.want || row.ID != class {
 			t.Errorf("finding at %s: %d counted, want %d", c.at, got, c.want)
 		}
+	}
+}
+
+// landOmStatsRecurrenceJSON runs the report over a held-out bead and a filed
+// bead, each with a minor finding a later record of another bead restates, with
+// a fixed now, as JSON.
+func landOmStatsRecurrenceJSON(t *testing.T) string {
+	t.Helper()
+	in := omlessons.HoldOutStart.Add(time.Hour)
+	doc := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/foo.go", Title: "the documentation says the flag defaults to true"}
+	later := land.ReviewFindingText{Severity: "major", File: doc.File, Title: doc.Title}
+	var lines []string
+	for _, bead := range []string{"gt-rec-0004", "gt-rec-0000"} {
+		for _, rec := range []land.ReviewRecord{{BeadID: bead, At: in, FindingText: []land.ReviewFindingText{doc}}, {BeadID: bead + "-later", At: in.Add(time.Hour), FindingText: []land.ReviewFindingText{later}}} {
+			line, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			lines = append(lines, string(line))
+		}
+	}
+	fake := &landOmStatsFakeFS{files: map[string]string{"/rec": strings.Join(lines, "\n") + "\n", "/log": ""}}
+	var out strings.Builder
+	if err := landOmStatsRecurrenceReportFrom(fake, omStatsNoTown(t), &out, "", "/rec", "/log", true, in.Add(time.Hour)); err != nil {
+		t.Fatalf("the report: %v", err)
+	}
+	return out.String()
+}
+
+// TestLandOmStatsRecurrenceJSONCarriesTheRows: --recurrence --json prints the base
+// report with a "recurrence" key holding each hold-out class's two sides, here
+// one finding and one follow per side on the first class (gt-5hg00y).
+func TestLandOmStatsRecurrenceJSONCarriesTheRows(t *testing.T) {
+	t.Parallel()
+	raw := landOmStatsRecurrenceJSON(t)
+	var doc landOmStatsRecurrenceDoc
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("decoding the JSON: %v", err)
+	}
+	want := landOmStatsRecurrenceSide{Findings: 1, Followed: 1}
+	if len(doc.Recurrence) != len(omlessons.HoldOutClasses) || doc.Recurrence[0].HeldOut != want || doc.Recurrence[0].Filed != want {
+		t.Errorf("recurrence rows = %+v, want one per class with one finding and one follow per side on the first", doc.Recurrence)
+	}
+}
+
+// TestLandOmStatsRecurrenceReportFails drives every failure the recurrence
+// report returns: a bad --since, a town it cannot resolve, unreadable records,
+// an unreadable log, a log whose read fails inside AggregateOmStats, and a
+// writer that refuses the JSON. Each is the report's error with its own reason,
+// and no input failure prints a partial report.
+func TestLandOmStatsRecurrenceReportFails(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	perm := func(path string) error { return &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission} }
+	// Open records the paths it was asked for, so each row gets a fake of its own:
+	// subtests that run in parallel must not share one.
+	empty := func() *landOmStatsFakeFS { return &landOmStatsFakeFS{files: map[string]string{"/rec": "", "/log": ""}} }
+	tests := []struct {
+		name                string
+		fsys                landOmStatsFS
+		town                func() (string, error)
+		since, records, log string
+		json                bool
+		out                 io.Writer
+		want                string
+		errIs               error
+	}{
+		{"bad --since", empty(), omStatsNoTown(t), "not-a-day", "/rec", "/log", false, nil, "--since", nil},
+		{"unresolvable town", empty(), func() (string, error) { return "", boom }, "", "", "", false, nil, "resolving the town:", boom},
+		{"unreadable records", &landOmStatsFakeFS{errs: map[string]error{"/rec": perm("/rec")}}, omStatsNoTown(t), "", "/rec", "/log", false, nil, "opening /rec", fs.ErrPermission},
+		{"records that do not parse", &landOmStatsFakeFS{files: map[string]string{"/rec": "not json\n", "/log": ""}}, omStatsNoTown(t), "", "/rec", "/log", false, nil, "do not parse", nil},
+		{"unreadable log", &landOmStatsFakeFS{files: map[string]string{"/rec": ""}, errs: map[string]error{"/log": perm("/log")}}, omStatsNoTown(t), "", "/rec", "/log", false, nil, "opening /log", fs.ErrPermission},
+		{"log read fails", landOmStatsWireFS{}, omStatsNoTown(t), "", "/rec", "/log", false, nil, "reading the daemon log", nil},
+		{"JSON unwritable", empty(), omStatsNoTown(t), "", "/rec", "/log", true, landOmStatsFailIO{err: boom}, "writing the report", boom},
+	}
+	for _, c := range tests {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			out := io.Writer(&strings.Builder{})
+			if c.out != nil {
+				out = c.out
+			}
+			err := landOmStatsRecurrenceReportFrom(c.fsys, c.town, out, c.since, c.records, c.log, c.json, time.Time{})
+			if err == nil {
+				t.Fatalf("%s read as a report", c.name)
+			}
+			if !strings.Contains(err.Error(), c.want) || (c.errIs != nil && !errors.Is(err, c.errIs)) {
+				t.Errorf("%s: error %q, want %q / %v", c.name, err, c.want, c.errIs)
+			}
+			if b, ok := out.(*strings.Builder); ok && b.Len() != 0 {
+				t.Errorf("printed a report after the error: %s", b)
+			}
+		})
 	}
 }

@@ -1,14 +1,22 @@
 package cmd
 
-// The recurrence comparison behind `gt land om-stats --recurrence` (gt-3ohcu0); the flag and the printing are later beads.
+// The recurrence report behind `gt land om-stats --recurrence`: per hold-out
+// class, the held-out and filed minor findings and how many of them a later
+// review restated (gt-3ohcu0), and the JSON that prints them (gt-5hg00y; the
+// table is the next part).
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/metrics"
 	"github.com/steveyegge/gastown/internal/omlessons"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // landOmStatsRecurrenceFollowDays is how long after a finding's own record a
@@ -108,4 +116,59 @@ func landOmStatsRecurrenceFollowed(f land.ReviewFindingText, rec land.ReviewReco
 		}
 	}
 	return false
+}
+
+// landOmStatsRecurrenceDoc is the --recurrence report as --json prints it.
+type landOmStatsRecurrenceDoc struct {
+	land.OmStats
+	Recurrence []landOmStatsRecurrenceClass `json:"recurrence"`
+}
+
+// landOmStatsRecurrenceReport is the command body with --recurrence set.
+func landOmStatsRecurrenceReport(out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool) error {
+	return landOmStatsRecurrenceReportFrom(landOmStatsDisk{}, workspace.FindFromCwdOrError, out, sinceValue, recordsFlag, logFlag, asJSON, time.Now())
+}
+
+// landOmStatsRecurrenceReportFrom prints the base report and then the
+// recurrence section, both from one read of the records (gt-4be1z5), with now
+// the only clock (gt-c9sr9p).
+func landOmStatsRecurrenceReportFrom(fsys landOmStatsFS, findTown func() (string, error), out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool, now time.Time) error {
+	since, err := parseLandOmStatsSince(sinceValue)
+	if err != nil {
+		return err
+	}
+	inputs, err := landOmStatsResolvePaths(recordsFlag, logFlag, findTown)
+	if err != nil {
+		return err
+	}
+	data, err := readLandOmStatsRecords(fsys, inputs)
+	if err != nil {
+		return err
+	}
+	logFile, closeLog, err := openLandOmStatsSource(fsys, inputs.log, inputs.logNamed)
+	if err != nil {
+		return err
+	}
+	defer closeLog()
+	stats, err := land.AggregateOmStats(bytes.NewReader(data), logFile, since)
+	if err != nil {
+		return err
+	}
+	// The second value counts the lines the reader could not use: the base
+	// report above counts the same lines as its Skipped, so a torn log is said
+	// there and is not a failure here; recurrence reads the records that parsed.
+	records, unusable := readLandOmStatsClassRecords(data)
+	if len(records) == 0 && unusable > 0 {
+		return fmt.Errorf("the review records hold %d lines that do not parse and none that do, so no recurrence can be counted", unusable)
+	}
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(landOmStatsRecurrenceDoc{OmStats: stats, Recurrence: recurrence(records, now)}); err != nil {
+			return fmt.Errorf("writing the report: %w", err)
+		}
+		return nil
+	}
+	writeLandOmStatsTable(out, stats, since)
+	return nil
 }
