@@ -412,8 +412,9 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			{Argv: kubectlArgv(spec, "wait", "--for=condition=Ready", "pod/"+sync.Metadata.Name, "--timeout="+readyTimeout)},
 			// kubectl cp restores the ids the host user's files carried, which
 			// the runner cannot use, so the exec that follows gives the tree to
-			// the runner's user and makes it readable. The copy is retried once:
-			// the bare repository is live, so a landing can change it mid-read.
+			// the runner's user and makes it readable. The copy is retried once for
+			// the transfer itself (the mirror is written only by the daemon's own
+			// sequential launches, so no landing changes it mid-read).
 			{Argv: kubectlArgv(spec, "cp", spec.Snapshot+"/.", sync.Metadata.Name+":"+RepoMount), Retry: true},
 			{Argv: kubectlArgv(spec, "exec", sync.Metadata.Name, "--", "sh", "-c", syncChownCommand())},
 			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found")},

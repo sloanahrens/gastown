@@ -1414,7 +1414,7 @@ func TestK8sPlanNamesTheSweepNamespaceOnEveryCall(t *testing.T) {
 		var clusterWide int
 		for _, step := range steps {
 			argv := step.Argv
-			if argv[0] == "git" { // the mirror's host steps, pinned by TestK8sPlanSyncsAMirrorNotTheLiveRepository
+			if argv[0] == "git" && slices.Contains(argv, spec.Snapshot) { // the mirror's three host steps, pinned by TestK8sPlanSyncsAMirrorNotTheLiveRepository
 				continue
 			}
 			if argv[0] != "kubectl" {

@@ -352,8 +352,9 @@ func plannedKubectlSteps(plan Plan) []Step {
 		steps = append(steps, plan.Poll.Collect...)
 	}
 	// The mirror's git steps run on the host and touch no cluster object:
-	// TestK8sPlanSyncsAMirrorNotTheLiveRepository pins them.
-	return slices.DeleteFunc(steps, func(step Step) bool { return step.Argv[0] != kubectl })
+	// TestK8sPlanSyncsAMirrorNotTheLiveRepository pins them. Only git is left
+	// out, so any other non-kubectl step still reaches the RBAC reader and fails.
+	return slices.DeleteFunc(steps, func(step Step) bool { return step.Argv[0] == "git" })
 }
 
 // renderedReads maps each distinct golden line the plan needs to the first
