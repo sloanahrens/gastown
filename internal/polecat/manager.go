@@ -1240,22 +1240,23 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 			startPoint = fmt.Sprintf("origin/%s", m.rig.DefaultBranch())
 		}
 
-		if exists, err := repoGit.RefExists(startPoint); err != nil {
-			cleanupOnError()
-			return nil, fmt.Errorf("checking ref %s: %w", startPoint, err)
-		} else if !exists {
-			cleanupOnError()
-			return nil, fmt.Errorf("configured default_branch not found as %s in bare repo\n\n"+
-				"Possible causes:\n"+
-				"  - Branch doesn't exist on the remote (create it there first)\n"+
-				"  - default_branch is misconfigured (check %s/config.json)\n"+
-				"  - Bare repo fetch failed (try: git -C %s fetch origin)\n\n"+
-				"Run 'gt doctor' to diagnose.",
-				startPoint, m.rig.Path, filepath.Join(m.rig.Path, ".repo.git"))
-		}
-
+		// The worktree add fails on a missing start point, so the ref is checked
+		// only to name that failure, not on every allocate (gt-dwpx1j).
 		if err := repoGit.WorktreeAddFromRef(clonePath, branchName, startPoint); err != nil {
 			cleanupOnError()
+			exists, refErr := repoGit.RefExists(startPoint)
+			if refErr != nil {
+				return nil, fmt.Errorf("creating worktree from %s: %w (checking the ref afterwards failed too: %v)", startPoint, err, refErr)
+			}
+			if !exists {
+				return nil, fmt.Errorf("configured default_branch not found as %s in bare repo\n\n"+
+					"Possible causes:\n"+
+					"  - Branch doesn't exist on the remote (create it there first)\n"+
+					"  - default_branch is misconfigured (check %s/config.json)\n"+
+					"  - Bare repo fetch failed (try: git -C %s fetch origin)\n\n"+
+					"Run 'gt doctor' to diagnose.",
+					startPoint, m.rig.Path, filepath.Join(m.rig.Path, ".repo.git"))
+			}
 			return nil, fmt.Errorf("creating worktree from %s: %w", startPoint, err)
 		}
 		worktreeCreated = true
