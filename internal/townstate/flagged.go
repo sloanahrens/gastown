@@ -27,10 +27,24 @@ var gzipMagic = []byte{0x1f, 0x8b}
 // Only gzip is read: a credential inside a zip, bzip2, xz or zstd file is not
 // found.
 func FlaggedContent(r io.Reader) guard.Result {
+	_, res := checkedContent(r)
+	return res
+}
+
+// checkedContent is FlaggedContent that also returns the bytes it judged, as
+// read from r and not decompressed: a caller that writes a file out writes
+// these, so what is written is what was checked and no second read can differ.
+// The bytes are meaningful only when the result is Pass.
+func checkedContent(r io.Reader) ([]byte, guard.Result) {
 	data, err := io.ReadAll(io.LimitReader(r, maxFlaggedBytes+1))
 	if err != nil {
-		return guard.Unknown(fmt.Errorf("townstate: reading content: %w", err))
+		return nil, guard.Unknown(fmt.Errorf("townstate: reading content: %w", err))
 	}
+	return data, judgeContent(data)
+}
+
+// judgeContent is the verdict on data already read.
+func judgeContent(data []byte) guard.Result {
 	if len(data) > maxFlaggedBytes {
 		return guard.Fail("the content is over the bound")
 	}

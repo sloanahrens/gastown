@@ -2,6 +2,7 @@ package townstate
 
 import (
 	"archive/tar"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -82,6 +83,11 @@ type ExportSummary struct {
 	// archive lacks because the town's registry names no rig. It is zero for a
 	// town with rigs; non-zero only under ExportOptions.AllowNoRigs.
 	RigRowsDropped int
+	// Omitted are the town-root-relative names of the files a backup export left
+	// out because FlaggedContent flags their content, sorted when the export ends.
+	// String prints their count and never their names; the names are for the
+	// caller's log and alert.
+	Omitted []string
 }
 
 // String renders the summary for the export command's standard error.
@@ -94,6 +100,9 @@ func (s ExportSummary) String() string {
 	}
 	for _, line := range s.LinkRefusals {
 		fmt.Fprintf(&b, "\nskipped link %s", line)
+	}
+	if len(s.Omitted) > 0 {
+		fmt.Fprintf(&b, "\nomitted %d files whose content holds a credential", len(s.Omitted))
 	}
 	if s.RigRowsDropped > 0 {
 		fmt.Fprintf(&b, "\nWARNING: the town registers no rigs, so %d rig-scoped rows are NOT in this archive", s.RigRowsDropped)
@@ -194,6 +203,7 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 	if err := walk.tw.Close(); err != nil {
 		return s, fmt.Errorf("closing the tar stream: %w", err)
 	}
+	slices.Sort(s.Omitted)
 	return s, nil
 }
 
@@ -345,10 +355,30 @@ func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 	if err != nil {
 		return fmt.Errorf("opening %s for the archive: %w", name, err)
 	}
+	size := info.Size()
+	if w.opts.Backup {
+		// The file is read once and the bytes judged are the bytes written: a
+		// second open could return other bytes than the check saw, so a credential
+		// could pass between the two. Only a Pass writes it: a flagged file is
+		// left out and listed, and one that cannot be read to the end is an error,
+		// never an unchecked copy. The header size is the checked length, so a file
+		// that grew or shrank meanwhile is still consistent.
+		data, res := checkedContent(f)
+		_ = f.Close()
+		switch {
+		case res.IsFail():
+			w.sum.Skipped[SkipSecret]++
+			w.sum.Omitted = append(w.sum.Omitted, name)
+			return nil
+		case !res.IsPass():
+			return fmt.Errorf("checking %s for a credential: %w", name, res.Err())
+		}
+		f, size = io.NopCloser(bytes.NewReader(data)), int64(len(data))
+	}
 	hdr := &tar.Header{
 		Name:     name,
 		Mode:     int64(info.Mode().Perm()),
-		Size:     info.Size(),
+		Size:     size,
 		ModTime:  info.ModTime(),
 		Typeflag: tar.TypeReg,
 	}
