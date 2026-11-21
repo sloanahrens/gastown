@@ -628,12 +628,13 @@ func ListAllEscalationsAcrossRigs(c Client) ([]*Issue, error) {
 
 // listEscalationsAcrossRigs reads the escalations at status across databases.
 //
-// A *Beads runs the query through bd's own prefix routing; another Client has
-// only its List, which is one database. The two are not equivalent — Client.List
-// pins BEADS_DIR to the client's database, so it answers with that one
-// database's beads while the routed call lets bd resolve from the working
-// directory — which is why this keeps the routed path for a *Beads rather than
-// quietly narrowing the display view (gt-wbxb).
+// A *Beads reads the town's own store through bd's routed call and every Dolt
+// rig store its routes name pinned to that store's .beads, and merges the rows
+// by id (listEscalationsRouted); another Client has only its List, which is one
+// database. The two are not equivalent — Client.List pins BEADS_DIR to the
+// client's database, so it answers with that one database's beads — which is
+// why a *Beads keeps the multi-store path rather than quietly narrowing the
+// display view (gt-wbxb, gt-lqlupr).
 func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
 	if b, ok := c.(*Beads); ok {
 		return listEscalationsRouted(b, status)
@@ -641,8 +642,11 @@ func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
 	return listEscalationsAtStatus(c, status)
 }
 
-// listEscalationsRouted is the *Beads cross-database read: bd's native prefix
-// routing via routes.jsonl, without the BEADS_DIR pin run/runWithStdin apply.
+// listEscalationsRouted is the *Beads cross-database read: the town store keeps
+// bd's native prefix routing (without the BEADS_DIR pin run/runWithStdin apply)
+// and each Dolt rig store the routes name is read pinned to its own .beads, so
+// an escalation filed in a rig's store is listed; a read failure in any one
+// store fails the whole list, naming that store, and never a partial one.
 //
 // --limit=0 because bd list pages at 50 by default (as buildListArgs does), and
 // the counts behind `gt escalate list`, `gt status` and the dashboard silently
@@ -687,7 +691,8 @@ type escalationStore struct {
 }
 
 // escalationStoreRead is the per-store read, a package seam a test replaces so
-// no bd runs.
+// no bd runs; a package-level function seam is this package's pattern for a bd
+// call (bdContainerRetryBackoffFn is another), restored with t.Cleanup.
 var escalationStoreRead = readEscalationStore
 
 // escalationStores is the town store and every Dolt rig store the town's routes

@@ -97,3 +97,30 @@ func TestListEscalationsAcrossRigsRefusesAStoreItCannotStat(t *testing.T) {
 		t.Errorf("got %v, %v; want no partial list and an error naming afile/mayor/rig", got, err)
 	}
 }
+
+// TestListEscalationsAcrossRigsRefusesARoutesFileItCannotRead pins the routes
+// read: a routes.jsonl that cannot be read (here a directory of that name) is an
+// error naming the routes, never a town read as having only its own store.
+func TestListEscalationsAcrossRigsRefusesARoutesFileItCannotRead(t *testing.T) {
+	townRoot, _ := townWithRoutes(t)
+	routesPath := filepath.Join(townRoot, ".beads", "routes.jsonl")
+	if err := os.RemoveAll(routesPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(routesPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev := escalationStoreRead
+	t.Cleanup(func() { escalationStoreRead = prev })
+	escalationStoreRead = func(*Beads, escalationStore, string) ([]*Issue, error) {
+		return []*Issue{{ID: "hq-wisp1", Labels: []string{"gt:escalation"}}}, nil
+	}
+
+	got, err := ListEscalationsAcrossRigs(New(townRoot))
+	if err == nil {
+		t.Fatalf("ListEscalationsAcrossRigs = %v, want an error naming the routes it could not read", got)
+	}
+	if !strings.Contains(err.Error(), "reading the routes") || got != nil {
+		t.Errorf("got %v, %v; want no list and an error saying it could not read the routes", got, err)
+	}
+}
