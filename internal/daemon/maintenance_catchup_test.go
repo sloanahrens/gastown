@@ -566,6 +566,22 @@ func TestCatchUpGCUnreadableStateRunsNoGC(t *testing.T) {
 	}
 }
 
+// An empty object is as unreadable as a corrupt file: no gc (gt-u43s2r).
+func TestCatchUpGCEmptyObjectStateRunsNoGC(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	if err := os.WriteFile(maintenanceGCStatePath(d.config.TownRoot), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran on a state file holding {}: %v", f.gcCalls)
+	}
+}
+
 // The gc never runs without a backup younger than the catch-up age: a backup
 // that failed leaves nothing on disk, and the next tick retries the backup.
 func TestCatchUpGCSkipsWithoutAFreshBackup(t *testing.T) {

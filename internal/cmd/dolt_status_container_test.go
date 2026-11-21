@@ -120,6 +120,7 @@ func TestDoltStatusContainerPrintsArchiveLines(t *testing.T) {
 	t.Parallel()
 	townRoot := externalContainerTownRoot(t, "gt-dolt")
 	writeStatusFile(t, townRoot, "maintenance_state.json", `{
+  "last_gc": {},
   "archive_watermarks": {
     "gt": {"date": "2026-11-02T09:30:00Z", "hashes": ["abc"]},
     "hq": {"date": "2026-11-01T23:00:00Z", "hashes": ["def"]}
@@ -201,6 +202,25 @@ func TestDoltStatusContainerUnreadableWatermarks(t *testing.T) {
 	}
 	if strings.Contains(out, "0 commits behind") {
 		t.Errorf("status output reads a database as caught up although the watermarks are unreadable:\n%s", out)
+	}
+}
+
+// TestDoltStatusContainerEmptyObjectWatermarks: a state file holding {} is not
+// the daemon's file, so the status reads it as unreadable, not as a town that has
+// archived nothing (gt-u43s2r).
+func TestDoltStatusContainerEmptyObjectWatermarks(t *testing.T) {
+	t.Parallel()
+	townRoot := externalContainerTownRoot(t, "gt-dolt")
+	writeStatusFile(t, townRoot, "maintenance_state.json", "{}")
+	reads := stubStatusReads(townRoot)
+	reads.servedDatabases = func(*doltserver.Config) ([]string, error) { return []string{"gt", "hq"}, nil }
+
+	out, err := runStatusIntoBuffer(t, reads)
+	if err != nil {
+		t.Fatalf("gt dolt status in container mode: %v", err)
+	}
+	if !strings.Contains(out, "Archive watermarks unreadable:") || strings.Count(out, "archive state unreadable") != 2 {
+		t.Errorf("status output over a {} state file does not read it as unreadable:\n%s", out)
 	}
 }
 

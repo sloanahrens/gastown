@@ -1471,6 +1471,36 @@ func TestSquashRecordHoldsTheNextCheckAfterAFailure(t *testing.T) {
 	}
 }
 
+// TestSquashRecordEmptyStateFileFailsClosed: a state file that parses but holds
+// nothing ({} or null) is as unreadable as a corrupt one: the check decides for no
+// database and raises the squash:state alert (gt-u43s2r).
+func TestSquashRecordEmptyStateFileFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{"{}", "null"} {
+		t.Run(content, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			calls := 0
+			scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+			path := maintenanceGCStatePath(d.config.TownRoot)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d.runScheduledMaintenance()
+			if calls != 0 {
+				t.Fatalf("a check over a state file holding %s started %d runs, want 0", content, calls)
+			}
+			if open := d.notify().(*notifyfake.Recorder).OpenEscalations(squashStateAlertKey); len(open) != 1 {
+				t.Fatalf("a state file holding %s left %d open %q alerts, want 1", content, len(open), squashStateAlertKey)
+			}
+		})
+	}
+}
+
 // TestSquashRecordUnreadableStateFailsClosed is the bead's box: a state file
 // the check cannot read is not "no run recorded". The check decides for no
 // database, starts no run and sends no statement, raises one squash:state
