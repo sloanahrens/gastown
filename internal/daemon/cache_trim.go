@@ -788,7 +788,7 @@ func cacheTrimManifestLine(jobName string, m *cachevol.TrimManifest) string {
 // wait bounds the wait for the Job to finish; a wait of zero or less is refused
 // at that wait rather than passed to kubectl as an unbounded wait.
 func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest, wait time.Duration) (bool, error) {
-	existing, running, _, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
+	existing, running, _, _, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
 	if err != nil {
 		return false, err
 	}
@@ -1298,14 +1298,16 @@ func (d *Daemon) cacheTrimJobState(ctx context.Context, kubeconfig, namespace, j
 
 // cacheTrimExisting lists the objects a trim applies in namespace: the Jobs and
 // shard ConfigMaps carrying TrimSelector, the labels only a trim applies, which
-// of the Jobs still run, and which of the Jobs completed.
+// of the Jobs still run, which completed, and which failed (the Failed
+// condition: the Job controller's verdict that the backoff limit is exhausted,
+// not a count of failed pods, which a retried Job that then completed also has).
 //
 // A reply without an item list refuses: an unreadable answer would read as "no
 // trim ran here", and the next apply's Job would be refused by the running one.
-func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace string) ([]cachevol.TrimObject, map[string]bool, map[string]bool, error) {
+func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace string) ([]cachevol.TrimObject, map[string]bool, map[string]bool, map[string]bool, error) {
 	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "get", "job,configmap", "-n", namespace, "-l", cachevol.TrimSelector(), "-o", "json")
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("listing the trim's objects: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("listing the trim's objects: %w", err)
 	}
 	var list struct {
 		Items *[]struct {
@@ -1324,14 +1326,15 @@ func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace st
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(out, &list); err != nil {
-		return nil, nil, nil, fmt.Errorf("decoding the trim's objects: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("decoding the trim's objects: %w", err)
 	}
 	if list.Items == nil {
-		return nil, nil, nil, errors.New("decoding the trim's objects: the reply names no object list")
+		return nil, nil, nil, nil, errors.New("decoding the trim's objects: the reply names no object list")
 	}
 	objects := make([]cachevol.TrimObject, 0, len(*list.Items))
 	running := map[string]bool{}
 	completed := map[string]bool{}
+	failed := map[string]bool{}
 	for _, item := range *list.Items {
 		objects = append(objects, cachevol.TrimObject{Kind: item.Kind, Name: item.Metadata.Name, Labels: item.Metadata.Labels})
 		if item.Kind != "Job" {
@@ -1344,9 +1347,12 @@ func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace st
 			if c.Type == "Complete" && c.Status == "True" {
 				completed[item.Metadata.Name] = true
 			}
+			if c.Type == "Failed" && c.Status == "True" {
+				failed[item.Metadata.Name] = true
+			}
 		}
 	}
-	return objects, running, completed, nil
+	return objects, running, completed, failed, nil
 }
 
 // cacheTrimClaimNamespaces reads the cluster's PersistentVolumeClaims and

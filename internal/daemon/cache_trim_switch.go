@@ -110,7 +110,8 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 // cacheTrimLateResult records the run of the claim's earlier trim Job when that
 // Job completed after its wait ended: its result line is read and recorded the
 // way a finished trim's is. A Job still running is left to cacheTrimApply, which
-// refuses the apply as pending, and so is a Job that did not complete. It reports
+// refuses the apply as pending, and so is a Job that did not complete. A Job the
+// controller marked Failed parks the claim, as a failed read does. It reports
 // false when the Job's state or result line cannot be read: the run is recorded
 // as failed, the claim parked and its mark cleared, like any other failure.
 //
@@ -133,9 +134,17 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 		d.cacheTrimPark(namespace, claim.ClaimName, err)
 		return false
 	}
-	_, running, completed, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
+	_, running, completed, failed, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
 	if err != nil {
 		return fail(err)
+	}
+	// A Job a pass left pending that the controller then failed (past its
+	// deadline or its backoff limit) is read here, before the apply deletes it as
+	// stale: the claim parks. The verdict is the Failed condition alone: a Job that
+	// completed after failing a pod, or sits between two retries, has failed pods
+	// and no such condition, and is read below or left to the apply.
+	if failed[jobName] {
+		return fail(fmt.Errorf("the trim Job %s failed after a pass left it pending", jobName))
 	}
 	if running[jobName] || !completed[jobName] {
 		return true
