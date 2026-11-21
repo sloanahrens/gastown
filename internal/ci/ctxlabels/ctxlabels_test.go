@@ -544,37 +544,50 @@ func (f *fakeCompare) CompareCommits(_ context.Context, _, _, base, head string)
 }
 
 // readBDPin reads the image-pins text whose bd line names commit through
-// daemon.ReadImagePinTips and returns the bd pin's state. Every source's tip is
-// the samples floor, so the bd commit is compared with the floor, not with a tip.
-func readBDPin(t *testing.T, commit string, cmp daemon.ImagePinCompare) daemon.ImagePinState {
+// daemon.ReadImagePinTips and returns the bd pin's state, or the read's error: a
+// commit the file's form check refuses fails the whole read, so no state comes
+// back with it.
+func readBDPin(t *testing.T, commit string, cmp daemon.ImagePinCompare) (daemon.ImagePinState, error) {
 	t.Helper()
 	tipGit := func(string) ([]byte, error) { return []byte(daemonimage.BDSamplesFloor + " refs/heads/main\n"), nil }
 	noPathCount := func(string, string, string, []string) (int, error) { return 0, nil }
 	states, err := daemon.ReadImagePinTips(context.Background(), pinsWithBD(t, commit), nil, tipGit, noPathCount, cmp)
 	if err != nil {
-		t.Fatalf("ReadImagePinTips: %v", err)
+		return daemon.ImagePinState{}, err
 	}
 	for _, s := range states {
 		if s.Name == "bd" {
-			return s
+			return s, nil
 		}
 	}
 	t.Fatal("ReadImagePinTips named no bd pin")
-	return daemon.ImagePinState{}
+	return daemon.ImagePinState{}, nil
 }
 
 // TestBDPinIsNotAnOlderBuild holds the current bd pin and every known older bd
-// build to the production read. Each reads with no error; the pin holds the
-// samples floor and each older build lacks it. Each asks the compare for its
-// commit as base and the floor as head.
+// build to the production read. The pin holds the samples floor and each older
+// build lacks it, each reading with no error and asking the compare for its
+// commit as base and the floor as head. A short sha and the pin in capitals are
+// refused by the read's form check before any bd state is read. The samples
+// floor is in no older-build row, so a list edit cannot make the gate call the
+// floor an older build.
 func TestBDPinIsNotAnOlderBuild(t *testing.T) {
 	t.Parallel()
+	if slices.Contains(knownOlderBDBuilds, daemonimage.BDSamplesFloor) {
+		t.Errorf("knownOlderBDBuilds names the samples floor %s, so the gate would call the floor an older build", daemonimage.BDSamplesFloor)
+	}
 	type row struct {
 		name       string
 		commit     string
 		lacksFloor bool
+		refusal    string
 	}
-	rows := []row{{name: "the bd pin", commit: bdPin}}
+	const formRefusal = "40-character lowercase hex sha"
+	rows := []row{
+		{name: "the bd pin", commit: bdPin},
+		{name: "a short sha", commit: bdPin[:12], refusal: formRefusal},
+		{name: "the bd pin in capitals", commit: strings.ToUpper(bdPin), refusal: formRefusal},
+	}
 	for _, commit := range knownOlderBDBuilds {
 		rows = append(rows, row{name: "older build " + commit, commit: commit, lacksFloor: true})
 	}
@@ -582,9 +595,18 @@ func TestBDPinIsNotAnOlderBuild(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cmp := &fakeCompare{}
-			got := readBDPin(t, tc.commit, cmp)
-			if got.Err != nil || got.LacksFloor != tc.lacksFloor {
-				t.Errorf("bd pin = %+v, want Err nil and LacksFloor %v", got, tc.lacksFloor)
+			got, err := readBDPin(t, tc.commit, cmp)
+			if tc.refusal != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.refusal) {
+					t.Fatalf("ReadImagePinTips error = %v, want it to name %q", err, tc.refusal)
+				}
+				if len(cmp.calls) != 0 {
+					t.Errorf("compare was asked %v for a refused commit, want no call", cmp.calls)
+				}
+				return
+			}
+			if err != nil || got.Err != nil || got.LacksFloor != tc.lacksFloor {
+				t.Errorf("bd pin = %+v, err %v, want Err nil and LacksFloor %v", got, err, tc.lacksFloor)
 			}
 			if !slices.Contains(cmp.calls, compareCall{tc.commit, daemonimage.BDSamplesFloor}) {
 				t.Errorf("compare was asked %v, want %s as base and the samples floor as head", cmp.calls, tc.commit)
