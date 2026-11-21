@@ -72,6 +72,12 @@ func VMCheck(run Runner) Check {
 	}
 }
 
+// HostChecks is the reboot checklist's host checks in the order a person runs
+// them: the databases first, then the VMs (gt-szkklt).
+func HostChecks(run Runner) []Check {
+	return []Check{DatabaseCheck(run), VMCheck(run)}
+}
+
 // parseVMList reads `colima list --json` as one JSON array of instances or as
 // one instance per line, so a Colima release that changes which shape it prints
 // does not turn every run of the check into an unknown. Empty output is an

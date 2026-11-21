@@ -3,6 +3,7 @@ package townreboot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -141,6 +142,50 @@ func TestRebootCheckHostVMsRows(t *testing.T) {
 				t.Errorf("Fix = %q, want %q", row.Fix, tt.wantFix)
 			}
 		})
+	}
+}
+
+// TestRebootCheckHostChecksOrder pins the host checklist's order: the databases
+// check, then the VMs check, and no others. It runs the list over a recording
+// runner too, so a check that merely shares a name with the two is not counted
+// as the read the person expects (gt-szkklt).
+func TestRebootCheckHostChecksOrder(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{name}, args...))
+		switch name {
+		case "docker":
+			return []byte("gt-dolt\nhm-postgres\nforgejo-db-1\n"), nil
+		case "colima":
+			return []byte(`[{"name":"gt-control","status":"Running"},` +
+				`{"name":"gt-sbx","status":"Running"}]`), nil
+		}
+		return nil, fmt.Errorf("unexpected command %q", name)
+	}
+	checks := HostChecks(run)
+	names := make([]string, 0, len(checks))
+	for _, c := range checks {
+		names = append(names, c.Name)
+	}
+	if want := []string{"databases", "vms"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("HostChecks names = %q, want %q", names, want)
+	}
+	rows := RunAll(context.Background(), checks)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	wantCalls := [][]string{
+		{"docker", "--context", "desktop-linux", "ps", "--format", "{{.Names}}"},
+		{"colima", "list", "--json"},
+	}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Errorf("runner calls = %q, want %q", calls, wantCalls)
+	}
+	for _, row := range rows {
+		if !row.OK {
+			t.Errorf("row %q not OK: %q", row.Name, row.Detail)
+		}
 	}
 }
 
