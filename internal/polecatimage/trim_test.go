@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -100,11 +101,23 @@ func TestTrimCacheTreeFallsBackToTheModuleCache(t *testing.T) {
 // mount leaves the atime stale (gt-3g7p2).
 func TestTrimCacheTreeStampsAFileWithTheLaterOfItsTimes(t *testing.T) {
 	t.Parallel()
+	requireLinuxStat(t)
 	if got := lastUsedOf(t, writeWithTimes(t, testTime, testTime.Add(-time.Hour))); !got.Equal(testTime) {
 		t.Errorf("lastUsed = %v, want the later mtime %v", got, testTime)
 	}
 	if got := lastUsedOf(t, writeWithTimes(t, testTime.Add(-time.Hour), testTime)); !got.Equal(testTime) {
 		t.Errorf("lastUsed = %v, want the later atime %v", got, testTime)
+	}
+}
+
+// requireLinuxStat skips a test of the Linux free-space and access-time reads:
+// stat_other.go is the by-design fallback off Linux, where the trim helpers
+// never run since the gt-wrap cutover (gt-qq5kv4).
+func requireLinuxStat(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		//testpolicy:allow no-skip — the contract under test is the Linux kernel's; TestNonLinuxStatFallbacks pins the fallback on the platforms that skip
+		t.Skip("stat_other.go is the by-design fallback; the trim helpers run only in the Linux polecat image (gt-qq5kv4)")
 	}
 }
 
