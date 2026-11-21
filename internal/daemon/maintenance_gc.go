@@ -200,6 +200,13 @@ type maintenanceGCState struct {
 	// (update_alerts.go). A daemon restart reads it, so the same run is not
 	// announced twice (gt-8xjnw).
 	LastUpdateAlertRunID string `json:"last_update_alert_run_id,omitempty"`
+
+	// StateResetAt is when a state write replaced an unreadable file, and
+	// StateResetCopy where the old bytes were kept (or why they were not): the
+	// squash records the file held are gone, and the squash check holds its gate
+	// for a day after the stamp (gt-yvh1vv). Zero and empty on a state never reset.
+	StateResetAt   time.Time `json:"state_reset_at,omitzero"`
+	StateResetCopy string    `json:"state_reset_copy,omitempty"`
 }
 
 // gcDeferral records one window's deferral: when the window closes, why the
@@ -316,6 +323,7 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	}
 	st.LastRequestAnswer = parsed.LastRequestAnswer
 	st.LastUpdateAlertRunID = parsed.LastUpdateAlertRunID
+	st.StateResetAt, st.StateResetCopy = parsed.StateResetAt, parsed.StateResetCopy
 	return st, nil
 }
 
@@ -326,10 +334,20 @@ func updateMaintenanceGCState(townRoot string, fn func(*maintenanceGCState)) (ma
 	maintenanceGCStateMu.Lock()
 	defer maintenanceGCStateMu.Unlock()
 
-	st, _ := loadMaintenanceGCState(townRoot)
+	path := maintenanceGCStatePath(townRoot)
+	st, err := loadMaintenanceGCState(townRoot)
+	if err != nil {
+		// An unreadable file is still replaced, so no writer wedges on it, but
+		// its bytes are kept once and the replacement is stamped: the squash
+		// records it held are gone (gt-yvh1vv).
+		copyPath, copyErr := keepStateCopy(path)
+		if copyErr != nil && !errors.Is(copyErr, errStateCopyStands) {
+			copyPath = "not kept: " + copyErr.Error()
+		}
+		st.StateResetAt, st.StateResetCopy = time.Now().UTC(), copyPath
+	}
 	fn(&st)
 
-	path := maintenanceGCStatePath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return st, err
 	}
