@@ -113,7 +113,9 @@ const (
 	runnerFileName = ".runner"
 
 	runnerContainerName = "runner"
-	dindContainerName   = "dind"
+	// DindContainerName is the engine sidecar's container name, the one the
+	// resize patches and the drift compare reads (gt-c54n1f).
+	DindContainerName = "dind"
 
 	// The pod's volumes: each claim, the certificate directory the sidecar and
 	// the runner share, and the ConfigMap.
@@ -322,7 +324,7 @@ func runnerContainer(v Values) Container {
 // and the engine stays up while the runner drains its jobs.
 func dindContainer(v Values) Container {
 	return Container{
-		Name:  dindContainerName,
+		Name:  DindContainerName,
 		Image: DindImage,
 		// The image's entrypoint generates the CA and a client certificate into
 		// the shared directory and starts dockerd with TLS verification. The
