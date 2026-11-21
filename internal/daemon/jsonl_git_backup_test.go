@@ -4740,3 +4740,28 @@ func TestRecomputeSpikeBaseline_UnversionedCacheIsVersionOne(t *testing.T) {
 		t.Fatalf("baseline = counts %v, rebaselined %v; want hq rebaselined from m%d", sb.Counts, sb.Rebaselined, legacyCountMetricVersion)
 	}
 }
+
+// TestJSONLBackupIssuesBudgetNoSample: the issues export is handed the 60 s floor
+// when the table has no remembered sample, so a town's first cycle runs as it did
+// before the budget followed the table's size (gt-o1euzs).
+func TestJSONLBackupIssuesBudgetNoSample(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC))
+	d.jsonlSupplementalTimeout = time.Hour
+	var issues time.Duration
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _ string, _ string, got time.Duration) (int, error) {
+		if table == "issues" {
+			issues = got
+		}
+		return 0, nil
+	}
+
+	if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+		t.Fatalf("exportDatabaseToJsonl: %v", err)
+	}
+
+	if issues != jsonlExportTimeout {
+		t.Errorf("the issues export was handed %s with no sample, want %s", issues, jsonlExportTimeout)
+	}
+}

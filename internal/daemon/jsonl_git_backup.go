@@ -664,8 +664,12 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 	}
 	exportTable = d.recordJsonlExportSamples(db, exportTable)
 
-	// 1. Export issues table (with scrub filter).
-	n, err := exportTable("issues", backupIssuesQuery(db, scrub), dbDir, dataDir, jsonlExportTimeout)
+	// 1. Export issues table (with scrub filter). Its budget follows the size the
+	// last good export remembered and this cycle's slowdown; a table with no
+	// sample has zero rows and gets the floor, jsonlExportTimeout (gt-o1euzs).
+	issuesRows, issuesPerRow, _ := d.jsonlRates.PerRow(db, "issues")
+	issuesBudget := jsonlTableBudget(issuesRows, issuesPerRow, jsonlSlowdown(d.jsonlRatios), jsonlExportTimeout, jsonlIssuesBudgetCeiling)
+	n, err := exportTable("issues", backupIssuesQuery(db, scrub), dbDir, dataDir, issuesBudget)
 	if err != nil {
 		return 0, fmt.Errorf("issues: %w", err)
 	}
