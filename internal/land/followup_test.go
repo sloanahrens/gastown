@@ -195,6 +195,29 @@ func TestFollowupFeedCommentsTheFiledBeadsOntoTheWorkBead(t *testing.T) {
 	}
 }
 
+// TestFollowupFeedStampsCreatedAt: every bead a pass files carries the Lander
+// clock's time as its CreatedAt, so a later plan in the same pass counts it as
+// filed this week rather than reading the zero time (gt-5as5x1).
+func TestFollowupFeedStampsCreatedAt(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	f := newFollowupFixture(t, 0.8, nil)
+	f.lander.Now = func() time.Time { return at }
+	fresh := []FollowupCandidate{
+		{ID: "a", Path: "docs/reference.md", Title: "name the error"},
+		{ID: "b", Path: "internal/daemon/landing_worker.go", Title: "swap the nil check"},
+	}
+	filed, _, _ := f.lander.fileFollowupBeads(f.work, f.result, fresh, nil)
+	if len(filed) != 2 {
+		t.Fatalf("filed %d entries for findings in two packages, want two", len(filed))
+	}
+	for _, e := range filed {
+		if !e.CreatedAt.Equal(at) {
+			t.Errorf("%s CreatedAt = %v, want the Lander clock %v", e.ID, e.CreatedAt, at)
+		}
+	}
+}
+
 // TestFollowupFeedSplitsAFullLandingByPackage: a landing carrying findings in
 // more than one package files one bead per package, each shaped for the
 // package's own findings, because that is the work one worker takes (gt-4ty22).
