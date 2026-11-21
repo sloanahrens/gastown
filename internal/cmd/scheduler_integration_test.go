@@ -65,7 +65,9 @@ func initBeadsDBForServer(t *testing.T, dir, prefix, homeDir string) {
 
 	args := schedulerInitArgs(prefix, schedulerDoltPort())
 	out, err := beads.RunTestContainerInit(t.Context(), dir, args, schedulerBDInitEnv(homeDir, filepath.Join(dir, ".beads")))
-	t.Logf("bd init --prefix %s in %s: exit=%v\n%s", prefix, dir, err, out)
+	if line, ok := schedulerInitLine(prefix, dir, err, out); ok {
+		t.Logf("%s", line)
+	}
 	if err != nil {
 		t.Fatalf("bd init failed in %s: %v\n%s", dir, err, out)
 	}
