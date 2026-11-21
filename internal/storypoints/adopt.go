@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 )
 
 // AdoptBar is the rank correlation a proposed model must reach on its own holdout
@@ -138,6 +139,26 @@ func AdoptByError(holdout []Holdout) Adoption {
 	n := float64(len(firstRound))
 	proposedRMSE, checkedRMSE := math.Sqrt(proposedSquares/n), math.Sqrt(checkedSquares/n)
 	proposedBias, checkedBias := math.Abs(proposedSum/n), math.Abs(checkedSum/n)
+	// A NaN compares false against everything, so the comparisons below would adopt
+	// weights whose error or bias is NaN; an infinity is not a measure either. Refuse
+	// by name before comparing anything.
+	var notFinite []string
+	for _, q := range []struct {
+		name  string
+		value float64
+	}{
+		{"proposed first-round rmse", proposedRMSE},
+		{"proposed first-round bias", proposedBias},
+		{"current weights' first-round rmse", checkedRMSE},
+		{"current weights' first-round bias", checkedBias},
+	} {
+		if math.IsNaN(q.value) || math.IsInf(q.value, 0) {
+			notFinite = append(notFinite, fmt.Sprintf("%s %v", q.name, q.value))
+		}
+	}
+	if len(notFinite) > 0 {
+		return Adoption{Reason: "rejected: a first-round measure is not a finite number: " + strings.Join(notFinite, ", ")}
+	}
 	if proposedRMSE >= checkedRMSE {
 		return Adoption{Reason: fmt.Sprintf(
 			"rejected: the proposed first-round rmse %.4f is not lower than the current weights' %.4f",

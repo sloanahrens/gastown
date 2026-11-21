@@ -380,3 +380,61 @@ func TestAdoptByErrorRules(t *testing.T) {
 		})
 	}
 }
+
+// nonFiniteHoldout is a passing first-round holdout (rmse 0.1 against 0.2, no bias)
+// with its first bead edited, so each case below puts one non-finite value into the
+// sums the rule compares.
+func nonFiniteHoldout(edit func(h *Holdout)) []Holdout {
+	h := errorHoldout(true, pairs(-0.1, 0.1, 10), pairs(-0.2, 0.2, 10))
+	edit(&h[0])
+	return h
+}
+
+// TestAdoptByErrorRefusesNonFinite: a NaN compares false against everything, so a
+// first-round rmse or bias that is NaN must be refused by name, never adopted through
+// a comparison that fails to reject it. Each row is built from a holdout whose values
+// make the quantity it names NaN or infinite.
+func TestAdoptByErrorRefusesNonFinite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		holdout []Holdout
+		want    []string
+	}{
+		{"NaN proposed estimate: proposed rmse and bias are NaN",
+			nonFiniteHoldout(func(h *Holdout) { h.Proposed = math.NaN() }),
+			[]string{"rejected", "not a finite number", "proposed first-round rmse NaN", "proposed first-round bias NaN"}},
+		{"zero proposed estimate: proposed rmse and bias are +Inf",
+			nonFiniteHoldout(func(h *Holdout) { h.Proposed = 0 }),
+			[]string{"rejected", "not a finite number", "proposed first-round rmse +Inf", "proposed first-round bias +Inf"}},
+		{"NaN current estimate: the current weights' rmse and bias are NaN",
+			nonFiniteHoldout(func(h *Holdout) { h.Checked = math.NaN() }),
+			[]string{"rejected", "not a finite number", "current weights' first-round rmse NaN", "current weights' first-round bias NaN"}},
+		// One bead at +Inf and one at -Inf: the squares sum to +Inf but the sum of
+		// ratios is +Inf plus -Inf, which is NaN, so the bias is NaN.
+		{"opposite infinities: proposed bias is NaN",
+			func() []Holdout {
+				h := nonFiniteHoldout(func(h *Holdout) { h.Proposed = 0 })
+				h[1].Proposed = math.Inf(1)
+				return h
+			}(),
+			[]string{"rejected", "not a finite number", "proposed first-round bias NaN"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := AdoptByError(tc.holdout)
+			if got.Adopted {
+				t.Fatalf("AdoptByError adopted a holdout with a non-finite quantity: %+v", got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got.Reason, want) {
+					t.Errorf("reason %q does not name %q", got.Reason, want)
+				}
+			}
+			if strings.Contains(got.Reason, "\n") {
+				t.Errorf("reason is not one line: %q", got.Reason)
+			}
+		})
+	}
+}
