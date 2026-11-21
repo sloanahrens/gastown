@@ -1447,6 +1447,9 @@ type Daemon struct {
 	imagePinsJoinWait time.Duration
 	// imagePinsAttention is the patrol's last tick (image_pins_patrol.go).
 	imagePinsAttention imagePinsAttention
+	// imagePinsLast and imagePinsFails are each pin's last good read and failed ticks since, memory only (gt-tvtrx1).
+	imagePinsLast  map[string]ImagePinState
+	imagePinsFails map[string]int
 	// newImagePinsTicker is where the image_pins patrol's ticker comes from:
 	// nil is time.NewTicker, and a test sets it to record the cadence.
 	newImagePinsTicker func(interval time.Duration) (ticks <-chan time.Time, stop func())

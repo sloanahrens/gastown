@@ -1578,8 +1578,9 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 		t.Fatalf("the read = %+v, want its four pins with devops as %+v: the patrol must count it through its path count seam", states, want)
 	}
 
-	// A rev-list that fails leaves devops's state with its Err and no count: the
-	// Behind it carries is zero, and the Err is git's first stderr line.
+	// A rev-list that fails leaves devops's state with its Err and no count, since
+	// this daemon has no good state to hold: the error is the read's answer at once.
+	d = newImagePinsForgejo(t)
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		switch {
 		case slices.Contains(cmd.Args, "ls-remote"):
@@ -1753,6 +1754,56 @@ func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 	// A file the parser refuses is the read's error, before any git.
 	if _, err := d.readImagePinTips(context.Background(), []byte("bd "+pinsReadPinURL("beads")+" "+pinsReadBDCommit+"\n")); err == nil || !strings.Contains(err.Error(), "missing pin") {
 		t.Errorf("a file naming one pin = %v, want the parse's refusal", err)
+	}
+}
+
+// imagePinsBDFailureTicks reads ticks times over four pins all at one commit, so no compare is asked, with bd's ls-remote failing from the second read.
+func imagePinsBDFailureTicks(t *testing.T, ticks int, logw io.Writer) [][]ImagePinState {
+	d, fail := newImagePinsForgejo(t), new(bool)
+	d.logger = log.New(logw, "", 0)
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if *fail && slices.Contains(cmd.Args, "ls-remote") && cmd.Args[len(cmd.Args)-2] == pinsReadPinURL("beads") {
+			return nil, []byte("fatal: unable to access\n"), errors.New("git exited 128")
+		}
+		return []byte(pinsReadLS(pinsReadBDCommit)), nil, nil
+	}
+	pins := []byte("bd " + pinsReadPinURL("beads") + " " + pinsReadBDCommit + "\nom " + pinsReadPinURL("organic-mechanic") + " " + pinsReadBDCommit + "\nhm " + pinsReadPinURL("history-man") + " " + pinsReadBDCommit + "\ndevops " + pinsReadPinURL("devops") + " " + pinsReadBDCommit + "\n")
+	reads := make([][]ImagePinState, 0, ticks)
+	for tick := 1; tick <= ticks; tick++ {
+		*fail = tick > 1
+		states, err := d.readImagePinTips(context.Background(), pins)
+		if err != nil {
+			t.Fatalf("readImagePinTips on tick %d: %v", tick, err)
+		}
+		reads = append(reads, states)
+	}
+	return reads
+}
+
+// TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks: a bd pin that reads well
+// and fails twice keeps its good state on both ticks, each logged (gt-tvtrx1).
+func TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	reads := imagePinsBDFailureTicks(t, 3, &logs)
+	if reads[0][0].Err != nil || reads[1][0] != reads[0][0] || reads[2][0] != reads[0][0] {
+		t.Fatalf("the reads = %+v, want bd held at its good read on both failed ticks", reads)
+	}
+	if n := strings.Count(logs.String(), "image pin bd cannot be read"); n != 2 || !strings.Contains(logs.String(), "git exited 128") {
+		t.Errorf("the log = %q, want one line per held tick naming bd and its failure", logs.String())
+	}
+}
+
+// TestImagePinsReadRaisesOnTheThirdConsecutiveFailure: the third failed tick in a
+// row carries the read's error, which raises image-pins-unreadable (gt-tvtrx1).
+func TestImagePinsReadRaisesOnTheThirdConsecutiveFailure(t *testing.T) {
+	t.Parallel()
+	reads := imagePinsBDFailureTicks(t, 4, io.Discard)
+	if reads[0][0].Err != nil || reads[1][0].Err != nil || reads[2][0].Err != nil {
+		t.Fatalf("the reads = %+v, want bd held on the first two failed ticks", reads)
+	}
+	if err := reads[3][0].Err; err == nil || !strings.Contains(err.Error(), "git exited 128") {
+		t.Fatalf("the third failed tick = %+v, want bd's Err carrying its failure", reads[3][0])
 	}
 }
 

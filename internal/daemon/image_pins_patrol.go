@@ -63,6 +63,10 @@ const (
 	// past it only finishes its own reads and the one bead it files, and the
 	// next start needs neither.
 	imagePinsJoinWait = 10 * time.Second
+
+	// imagePinHoldTicks is the consecutive failed ticks a pin reads from its last
+	// good state: two is an hour at the default cadence (gt-tvtrx1).
+	imagePinHoldTicks = 2
 )
 
 // imagePinsInterval is the period between two ticks: the configured
@@ -326,7 +330,8 @@ func (d *Daemon) readImagePinsFile(ctx context.Context) ([]byte, error) {
 // Forgejo and git, then fills each trailing pin's Age through the same git. A
 // compare that cannot be built is the read's error: a tick with no compare
 // cannot tell a fresh pin from a trailing one, so it reports that rather than a
-// file of fresh pins.
+// file of fresh pins. A failed read comes back as its last good state until its
+// failures pass imagePinHoldTicks, so one failed read raises no item.
 func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinState, error) {
 	cmp, err := d.imagePinsCompare()
 	if err != nil {
@@ -346,7 +351,28 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 		urls[pin.Name] = pin.URL
 	}
 	fillImagePinAges(states, func(name string) string { return urls[name] }, d.imagePinsAge(ctx), d.logger)
+	d.holdFailedImagePins(states)
 	return states, nil
+}
+
+// holdFailedImagePins reads a pin whose read failed from its last good state for
+// its first imagePinHoldTicks failures, then keeps the error; a good read starts
+// the count over, a pin with no good read keeps its error at once, and each held
+// pin is logged instead of queued as an item.
+func (d *Daemon) holdFailedImagePins(states []ImagePinState) {
+	if d.imagePinsLast == nil {
+		d.imagePinsLast, d.imagePinsFails = map[string]ImagePinState{}, map[string]int{}
+	}
+	for i := range states {
+		st := &states[i]
+		if st.Err == nil {
+			d.imagePinsLast[st.Name], d.imagePinsFails[st.Name] = *st, 0
+		} else if last, ok := d.imagePinsLast[st.Name]; ok && d.imagePinsFails[st.Name] < imagePinHoldTicks {
+			d.imagePinsFails[st.Name]++
+			d.logger.Printf("image_pins: image pin %s cannot be read (%d of %d held ticks), so this tick reads its last good state: %v", st.Name, d.imagePinsFails[st.Name], imagePinHoldTicks, st.Err)
+			*st = last
+		}
+	}
 }
 
 // fillImagePinAges fills each trailing pin's Age from ageOf: a state read
