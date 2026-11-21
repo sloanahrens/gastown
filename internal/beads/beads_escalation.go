@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -624,12 +628,13 @@ func ListAllEscalationsAcrossRigs(c Client) ([]*Issue, error) {
 
 // listEscalationsAcrossRigs reads the escalations at status across databases.
 //
-// A *Beads runs the query through bd's own prefix routing; another Client has
-// only its List, which is one database. The two are not equivalent — Client.List
-// pins BEADS_DIR to the client's database, so it answers with that one
-// database's beads while the routed call lets bd resolve from the working
-// directory — which is why this keeps the routed path for a *Beads rather than
-// quietly narrowing the display view (gt-wbxb).
+// A *Beads reads the town's own store through bd's routed call and every Dolt
+// rig store its routes name pinned to that store's .beads, and merges the rows
+// by id (listEscalationsRouted); another Client has only its List, which is one
+// database. The two are not equivalent — Client.List pins BEADS_DIR to the
+// client's database, so it answers with that one database's beads — which is
+// why a *Beads keeps the multi-store path rather than quietly narrowing the
+// display view (gt-wbxb, gt-lqlupr).
 func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
 	if b, ok := c.(*Beads); ok {
 		return listEscalationsRouted(b, status)
@@ -637,26 +642,115 @@ func listEscalationsAcrossRigs(c Client, status string) ([]*Issue, error) {
 	return listEscalationsAtStatus(c, status)
 }
 
-// listEscalationsRouted is the *Beads cross-database read: bd's native prefix
-// routing via routes.jsonl, without the BEADS_DIR pin run/runWithStdin apply.
+// listEscalationsRouted is the *Beads cross-database read: the town store keeps
+// bd's native prefix routing (without the BEADS_DIR pin run/runWithStdin apply)
+// and each Dolt rig store the routes name is read pinned to its own .beads, so
+// an escalation filed in a rig's store is listed; a read failure in any one
+// store fails the whole list, naming that store, and never a partial one.
 //
 // --limit=0 because bd list pages at 50 by default (as buildListArgs does), and
 // the counts behind `gt escalate list`, `gt status` and the dashboard silently
 // capped there (gt-mm38p). TestListEscalationsAcrossRigsUncapsBdPage keeps the
 // flag in the call.
 func listEscalationsRouted(b *Beads, status string) ([]*Issue, error) {
-	out, err := b.runWithRouting("list", "--label=gt:escalation", "--status="+status, "--include-infra", "--limit=0", "--json")
+	stores, err := escalationStores(b)
 	if err != nil {
 		return nil, err
 	}
+	byID := map[string]*Issue{}
+	for _, s := range stores {
+		issues, err := escalationStoreRead(b, s, status)
+		if err != nil {
+			return nil, fmt.Errorf("reading escalations from the store %s: %w", s.Name, err)
+		}
+		for _, i := range issues {
+			if _, seen := byID[i.ID]; !seen {
+				byID[i.ID] = i
+			}
+		}
+	}
+	merged := make([]*Issue, 0, len(byID))
+	for _, i := range byID {
+		merged = append(merged, i)
+	}
+	sort.Slice(merged, func(a, c int) bool { return merged[a].ID < merged[c].ID })
 
+	if status == string(StatusOpen) {
+		return filterEscalationRecords(merged), nil
+	}
+	return merged, nil
+}
+
+// escalationStore is one database an escalation can be filed in. Town is the
+// town's own store, which keeps the routed call; any other is a rig's store read
+// pinned to its .beads.
+type escalationStore struct {
+	Name     string
+	BeadsDir string
+	Town     bool
+}
+
+// escalationStoreRead is the per-store read, a package seam a test replaces so
+// no bd runs; a package-level function seam is this package's pattern for a bd
+// call (bdContainerRetryBackoffFn is another), restored with t.Cleanup.
+var escalationStoreRead = readEscalationStore
+
+// escalationStores is the town store and every Dolt rig store the town's routes
+// name (gt-lqlupr). A tracker-backed route is not a Dolt store, and a route
+// whose beads directory is absent on disk (fs.ErrNotExist: an aliased rig never
+// checked out, gt-3vh2) holds no escalation, so neither is read; any other
+// stat error is an error naming the store, never a quiet skip; two routes that resolve to
+// one directory are read once. A routes file that cannot be read is an error.
+func escalationStores(b *Beads) ([]escalationStore, error) {
+	townRoot := b.getTownRoot()
+	if townRoot == "" {
+		return []escalationStore{{Name: "the town", Town: true}}, nil
+	}
+	townBeads := GetTownBeadsPath(townRoot)
+	stores := []escalationStore{{Name: townBeads, BeadsDir: townBeads, Town: true}}
+	routes, err := LoadRoutes(townBeads)
+	if err != nil {
+		return nil, fmt.Errorf("reading the routes of %s: %w", townBeads, err)
+	}
+	seen := map[string]bool{townBeads: true}
+	for _, r := range routes {
+		if r.Path == "." || r.BackendName() != BackendDolt {
+			continue
+		}
+		dir := ResolveBeadsDir(filepath.Join(townRoot, r.Path))
+		if seen[dir] {
+			continue
+		}
+		if _, err := os.Stat(dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("examining the store %s: %w", dir, err)
+		}
+		seen[dir] = true
+		stores = append(stores, escalationStore{Name: dir, BeadsDir: dir})
+	}
+	return stores, nil
+}
+
+// readEscalationStore lists one store's escalations at status. --limit=0
+// because bd list pages at 50 by default (gt-mm38p); the town store keeps the
+// routed call TestListEscalationsAcrossRigsUncapsBdPage and its neighbors pin.
+func readEscalationStore(b *Beads, s escalationStore, status string) ([]*Issue, error) {
+	args := []string{"list", "--label=gt:escalation", "--status=" + status, "--include-infra", "--limit=0", "--json"}
+	var out []byte
+	var err error
+	if s.Town {
+		out, err = b.runWithRouting(args...)
+	} else {
+		out, err = b.pinnedToBeadsDir(s.BeadsDir).run(args...)
+	}
+	if err != nil {
+		return nil, err
+	}
 	var issues []*Issue
 	if err := json.Unmarshal(out, &issues); err != nil {
 		return nil, fmt.Errorf("parsing bd list output: %w", err)
-	}
-
-	if status == string(StatusOpen) {
-		return filterEscalationRecords(issues), nil
 	}
 	return issues, nil
 }
