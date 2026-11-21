@@ -37,6 +37,9 @@ func preflightDigestInstaller(t *testing.T, townRoot string, run func(context.Co
 		},
 		Notifier:  func(string) notify.Notifier { return notifyfake.New() },
 		Preflight: run,
+		// The pair-level check reads agreeing levels, so a row that tests the
+		// town checks is decided by them alone.
+		PairLevel: agreeingPairLevels(),
 	}
 	target := podPairTarget()
 	installer, err := digestInstaller(seams, townRoot, update.Deps{}, path, &target, io.Discard)
@@ -231,7 +234,10 @@ func TestPreRollGuardAPreflightThatCannotRunIsRefused(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			gate := preSwapPreflight(tt.townRoot(t), tt.run)
+			// These rows never reach the pair-level reads: each stops the gate at
+			// the check seam. Zero reads would refuse if one were reached, and the
+			// row's want names the guard it expects instead.
+			gate := preSwapPreflight(tt.townRoot(t), tt.run, pairLevelReads{})
 
 			err := gate(context.Background(), podPairPair)
 			if err == nil {
