@@ -1013,3 +1013,46 @@ func TestImagePinsReadRefusalsAreTyped(t *testing.T) {
 		assert.Contains(t, refused, "devops", "the devops pin counts its lag by path: %v", refused)
 	})
 }
+
+// TestImagePinsReadTransportFailuresAreNotRefusals pins gt-t8phk0: a call that
+// fails (the ls-remote, the path count, the compare) and a compare that answers
+// no comparison are plain errors on that pin, never a refusal. The hold reads a
+// refusal as a judgment that the pin must not move, so a transport error typed
+// as one would be held for the wrong reason.
+func TestImagePinsReadTransportFailuresAreNotRefusals(t *testing.T) {
+	t.Parallel()
+	bdKey := pinsReadCompareKey(pinsReadBDCommit, pinsReadBDTip)
+	bdURL := pinsReadPinURL("beads")
+	transport := errors.New("forgejo: connection reset")
+	tests := []struct {
+		name     string
+		pin      string
+		sentinel error
+		setup    func(*fakePinTips, *fakePinCompare, *fakePinPathCount)
+	}{
+		{name: "the ls-remote fails", pin: "bd", sentinel: transport, setup: func(git *fakePinTips, _ *fakePinCompare, _ *fakePinPathCount) { git.errs[bdURL] = transport }},
+		{name: "the path count fails", pin: "devops", sentinel: transport, setup: func(_ *fakePinTips, _ *fakePinCompare, pc *fakePinPathCount) { pc.err = transport }},
+		{name: "the compare fails", pin: "bd", sentinel: transport, setup: func(_ *fakePinTips, cmp *fakePinCompare, _ *fakePinPathCount) { cmp.errs[bdKey] = transport }},
+		{name: "the compare answers no comparison", pin: "bd", setup: func(_ *fakePinTips, cmp *fakePinCompare, _ *fakePinPathCount) { cmp.nilFor[bdKey] = true }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			git, cmp, pathCount := pinsReadAllHealthy()
+			tt.setup(git, cmp, pathCount)
+			states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+			require.NoError(t, err, "a pin's failed call is not the file's error")
+			require.Len(t, states, 4)
+			for _, st := range states {
+				assert.NotErrorIs(t, st.Err, daemonimage.ErrPinRefused, "pin %s: a failed call is never a refusal: %v", st.Name, st.Err)
+				if st.Name != tt.pin {
+					continue
+				}
+				require.Error(t, st.Err, "the failed call is that pin's error")
+				if tt.sentinel != nil {
+					assert.ErrorIs(t, st.Err, tt.sentinel, "the failed call stays wrapped, so its cause is still visible")
+				}
+			}
+		})
+	}
+}
