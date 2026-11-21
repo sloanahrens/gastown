@@ -1,7 +1,6 @@
 package sling
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -140,25 +139,66 @@ func TestRunHookBranchGuardAllowsOwnResumeAndNonPolecatBranches(t *testing.T) {
 	}
 }
 
-// TestRunHookBranchGuardWarnsAndHooksWhenTheBranchIsUnreadable: a worktree
-// whose branch cannot be read is unknown, and the dispatch keeps the behavior
-// it had before this guard rather than refusing work it cannot judge. The
-// warning is what an operator has to see (gt-u9fqky).
-func TestRunHookBranchGuardWarnsAndHooksWhenTheBranchIsUnreadable(t *testing.T) {
+// TestRunHookUnreadableBranch: a seat whose worktree branch cannot be read is
+// one the guard cannot judge. Hooking anyway would switch the guard off for as
+// long as the read keeps failing, so the dispatch re-reads it a bounded number
+// of times and then refuses with the refusal marker: the automatic dispatcher
+// defers the bead and asks again (gt-5wkraj, gt-u9fqky).
+func TestRunHookUnreadableBranch(t *testing.T) {
 	t.Parallel()
 	f := &fakeSlingDeps{branchErr: errors.New("git rev-parse: not a repository")}
 	d := f.deps()
-	var out bytes.Buffer
-	d.Out = &out
+	reads := 0
+	read := d.WorktreeBranch
+	d.WorktreeBranch = func(dir string) (string, error) {
+		reads++
+		return read(dir)
+	}
 
 	result, err := Run(context.Background(), d, hookBranchTestOptions())
-	if err != nil {
-		t.Fatalf("an unreadable branch refused the dispatch: %v", err)
+	if err == nil {
+		t.Fatalf("an unreadable branch hooked the bead with the guard off (result %+v)", result)
 	}
-	if f.hooks != 1 || result == nil || !result.Success {
-		t.Fatalf("hooks = %d, result %+v, want the dispatch to hook the bead", f.hooks, result)
+	if !strings.Contains(err.Error(), dispatch.SlingRefusalMarker) {
+		t.Errorf("err = %v, want the refusal marker %q: an automatic dispatcher must defer the bead and ask again, not count a failed dispatch",
+			err, dispatch.SlingRefusalMarker)
 	}
-	if !strings.Contains(out.String(), "git rev-parse: not a repository") {
-		t.Errorf("output = %q, want the read error warned", out.String())
+	if reads != 3 {
+		t.Errorf("read the seat's branch %d time(s), want 3: a bounded retry, then a refusal", reads)
+	}
+	if f.hooks != 0 {
+		t.Errorf("the bead was hooked %d time(s), want 0", f.hooks)
+	}
+	if f.started != 0 {
+		t.Errorf("a session was started %d time(s), want 0", f.started)
+	}
+}
+
+// TestRunHookUnreadableBranchRereadsBeforeJudging: a read that fails once and
+// then answers is judged by its answer, so a seat whose worktree holds another
+// bead's branch is still refused by the branch guard (gt-5wkraj).
+func TestRunHookUnreadableBranchRereadsBeforeJudging(t *testing.T) {
+	t.Parallel()
+	const other = "polecat/coma/gt-ug7zed+mwmuimru"
+	f := &fakeSlingDeps{branch: other}
+	d := f.deps()
+	reads := 0
+	d.WorktreeBranch = func(string) (string, error) {
+		reads++
+		if reads == 1 {
+			return "", errors.New("transient read failure")
+		}
+		return other, nil
+	}
+
+	_, err := Run(context.Background(), d, hookBranchTestOptions())
+	if err == nil {
+		t.Fatal("a seat holding another bead's branch was hooked after one failed read")
+	}
+	if !strings.Contains(err.Error(), dispatch.SlingRefusalMarker) || !strings.Contains(err.Error(), "gt-ug7zed") {
+		t.Errorf("err = %v, want the branch-guard refusal naming gt-ug7zed", err)
+	}
+	if f.hooks != 0 {
+		t.Errorf("the bead was hooked %d time(s), want 0", f.hooks)
 	}
 }
