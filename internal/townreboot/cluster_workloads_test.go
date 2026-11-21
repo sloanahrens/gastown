@@ -184,3 +184,130 @@ func TestRebootCheckClusterReplicasCommands(t *testing.T) {
 		})
 	}
 }
+
+// forwardProbeCall is the one read the forward check makes: curl prints the
+// dashboard's status code and nothing else.
+const forwardProbeCall = `curl --max-time 5 -s -o /dev/null -w %{http_code} http://127.0.0.1:8787/api/state`
+
+// wantForwardFix is the Fix text the row carries, written out rather than read
+// from the package's constant so a changed Fix fails here.
+const wantForwardFix = "gt town forward plist"
+
+// forwardRow runs the forward check over run and returns its row, the form the
+// report shows.
+func forwardRow(run Runner) Row {
+	return RunAll(context.Background(), []Check{ForwardCheck(run)})[0]
+}
+
+// TestRebootCheckClusterForwardRows pins the forward check's findings: OK only
+// when the dashboard answers 200; any other status, a failing probe and an
+// answer with no status are not-OK rows carrying the forward plist fix
+// (gt-nxv4vr).
+func TestRebootCheckClusterForwardRows(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		out        string
+		err        error
+		noRunner   bool
+		wantOK     bool
+		wantDetail string
+		wantFix    string
+	}{
+		{
+			name:       "the dashboard answers 200",
+			out:        "200",
+			wantOK:     true,
+			wantDetail: "the dashboard answered 200 on http://127.0.0.1:8787/api/state",
+		},
+		{
+			name:       "the dashboard answers 503",
+			out:        "503",
+			wantDetail: "the dashboard answered 503 on http://127.0.0.1:8787/api/state",
+			wantFix:    wantForwardFix,
+		},
+		{
+			name:       "curl cannot reach the forward",
+			out:        "000",
+			err:        exitStatus(7),
+			wantDetail: "probe http://127.0.0.1:8787/api/state: exit status 7",
+			wantFix:    wantForwardFix,
+		},
+		{
+			name:       "curl times out with no answer",
+			err:        exitStatus(28),
+			wantDetail: "probe http://127.0.0.1:8787/api/state: exit status 28",
+			wantFix:    wantForwardFix,
+		},
+		{
+			name:       "the probe answers no status",
+			wantDetail: "the forward answered no status code",
+			wantFix:    wantForwardFix,
+		},
+		{
+			name:       "no runner",
+			noRunner:   true,
+			wantDetail: "no runner configured",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			run := replicaListing(tt.out)
+			if tt.err != nil {
+				run = func(context.Context, string, ...string) ([]byte, error) {
+					return []byte(tt.out), tt.err
+				}
+			}
+			if tt.noRunner {
+				run = nil
+			}
+			row := forwardRow(run)
+			if row.Name != "9 forward" {
+				t.Errorf("row name = %q, want %q", row.Name, "9 forward")
+			}
+			if row.OK != tt.wantOK {
+				t.Errorf("OK = %v, want %v (detail %q)", row.OK, tt.wantOK, row.Detail)
+			}
+			if row.Detail != tt.wantDetail {
+				t.Errorf("Detail = %q, want %q", row.Detail, tt.wantDetail)
+			}
+			if row.Fix != tt.wantFix {
+				t.Errorf("Fix = %q, want %q", row.Fix, tt.wantFix)
+			}
+		})
+	}
+}
+
+// TestRebootCheckClusterForwardCommands pins that the check only reads the
+// dashboard: the Runner sees the one curl probe and nothing else, whether the
+// dashboard answers or not (gt-nxv4vr).
+func TestRebootCheckClusterForwardCommands(t *testing.T) {
+	t.Parallel()
+	want := []string{"curl", "--max-time", "5", "-s", "-o", "/dev/null",
+		"-w", "%{http_code}", "http://127.0.0.1:8787/api/state"}
+	if got := strings.Join(want, " "); got != forwardProbeCall {
+		t.Fatalf("test fixture command = %q, want %q", got, forwardProbeCall)
+	}
+	tests := []struct {
+		name string
+		out  string
+	}{
+		{name: "the dashboard answers", out: "200"},
+		{name: "the dashboard answers 503", out: "503"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var calls [][]string
+			run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				calls = append(calls, append([]string{name}, args...))
+				return []byte(tt.out), nil
+			}
+			forwardRow(run)
+			if !reflect.DeepEqual(calls, [][]string{want}) {
+				t.Errorf("runner calls = %q, want only %q", calls, want)
+			}
+		})
+	}
+}
