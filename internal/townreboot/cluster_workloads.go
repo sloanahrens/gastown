@@ -32,6 +32,14 @@ type replicasList struct {
 	Items []replicasDeployment `json:"items"`
 }
 
+// forwardProbeURL is the dashboard's state feed on the Mac's local port, the
+// address the forward serves while its job holds it (docs/architecture.md).
+const forwardProbeURL = "http://127.0.0.1:8787/api/state"
+
+// forwardFix is the repair when the forward does not answer: print the job
+// whose reload restarts it; the reload itself runs on the Mac.
+const forwardFix = "gt town forward plist"
+
 // replicasScaleFix is the repair for a Deployment a drained stop scaled to
 // zero: scale it back to one.
 func replicasScaleFix(name string) string {
@@ -97,6 +105,42 @@ func ReplicasCheck(run Runner) Check {
 				return Result{Detail: strings.Join(problems, "; "), Fix: strings.Join(fixes, " && ")}
 			}
 			return Result{OK: true, Detail: strings.Join(healthy, ", ")}
+		},
+	}
+}
+
+// ForwardCheck probes the dashboard's forward and passes when the dashboard
+// answers 200 (gt-nxv4vr).
+func ForwardCheck(run Runner) Check {
+	return Check{
+		Name: "9 forward",
+		Run: func(ctx context.Context) Result {
+			if run == nil {
+				// A check built without a runner is a wiring bug; a panic here
+				// would hide every check after it.
+				return Result{Detail: "no runner configured"}
+			}
+			out, err := run(ctx, "curl", "--max-time", "5", "-s", "-o", "/dev/null",
+				"-w", "%{http_code}", forwardProbeURL)
+			status := strings.TrimSpace(string(out))
+			switch {
+			case err != nil:
+				// A probe that failed says nothing about the dashboard, so the
+				// row reports the failure rather than the forward being up.
+				return Result{
+					Detail: fmt.Sprintf("probe %s: %v", forwardProbeURL, err),
+					Fix:    forwardFix,
+				}
+			case status == "":
+				// curl answered nothing, so the dashboard's status is unknown.
+				return Result{Detail: "the forward answered no status code", Fix: forwardFix}
+			case status != "200":
+				return Result{
+					Detail: fmt.Sprintf("the dashboard answered %s on %s", status, forwardProbeURL),
+					Fix:    forwardFix,
+				}
+			}
+			return Result{OK: true, Detail: "the dashboard answered 200 on " + forwardProbeURL}
 		},
 	}
 }
