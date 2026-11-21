@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+// GoListNoteMarker is the stable text of the note the guard returns when go list
+// could not derive the build's input directories: the daemon's pair check reads
+// the images job logs for it (gt-e3zz79), so the note is built from this constant.
+const GoListNoteMarker = "go list could not derive the build's input directories"
+
 // goListRunner runs go in dir with args and returns its standard output. It is
 // the seam the guard's derivation is tested through.
 type goListRunner func(dir string, args ...string) ([]byte, error)

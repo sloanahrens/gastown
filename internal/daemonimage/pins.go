@@ -261,7 +261,7 @@ func checkPinAgainstMain(git bdbuild.Git, goList goListRunner, dir string, pin P
 		if err != nil {
 			// The derivation is the better check, not the only one: the counts,
 			// the age and the closure walk above decided without it. Say so, loudly.
-			notes = append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s: go list could not derive the build's input directories in %s (%v); the static input list and the closure walk were used instead", pin.Name, short(pin.Commit), dir, err))
+			notes = append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s: %s in %s (%v); the static input list and the closure walk were used instead", pin.Name, short(pin.Commit), GoListNoteMarker, dir, err))
 		} else if missing := missingFromInputList(derivedInputPaths(string(out), dir)); len(missing) != 0 {
 			return nil, fmt.Errorf("pin-drift guard: %s input list lacks %s, which go list derives from the build: add it to PinInputPaths", pin.Name, missing[0])
 		}
