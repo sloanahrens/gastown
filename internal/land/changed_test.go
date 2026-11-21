@@ -712,7 +712,6 @@ func TestGuardCommandTokens(t *testing.T) {
 		{"rename whose base reads back absent", "R100\x00" + path + "\x00" + moved + "\x00", contentReader(nil, map[string]string{moved: none}), true},
 		{"scan error", "M\x00" + path + "\x00", contentReader(map[string]string{path: none}, map[string]string{path: unparsed}), true},
 		{"unreadable file", "M\x00" + path + "\x00", func(string, bool) ([]byte, error) { return nil, errors.New("unreadable") }, true},
-		{"no reader", "M\x00" + path + "\x00", nil, true},
 		{"Makefile still fires on its path", "M\x00Makefile\x00", contentReader(map[string]string{"Makefile": none}, map[string]string{"Makefile": none}), true},
 		{"internal/cmd Go still fires on its path", "M\x00internal/cmd/root.go\x00", contentReader(map[string]string{"internal/cmd/root.go": none}, map[string]string{"internal/cmd/root.go": none}), true},
 		{"a path the judge does not read", "M\x00docs/testing.md\x00", contentReader(nil, nil), false},
@@ -724,6 +723,42 @@ func TestGuardCommandTokens(t *testing.T) {
 			sel, err := GuardSelectsWithContent(tt.diff, hasGo, tt.read)
 			if err != nil {
 				t.Fatalf("GuardSelectsWithContent(%q): %v", tt.diff, err)
+			}
+			if got := commandTokensSelected(sel); got != tt.want {
+				t.Errorf("tokens guard selected = %t, want %t (selection %v)", got, tt.want, sel)
+			}
+		})
+	}
+}
+
+// TestGuardCommandTokensNoReader pins GuardSelects's selection, with no
+// content reader, for each status of a non-cmd Go file: only a path that exists
+// after the change selects the tokens guard, so a deletion and a rename out do
+// not (gt-tcsswq).
+func TestGuardCommandTokensNoReader(t *testing.T) {
+	t.Parallel()
+	const (
+		path  = "internal/daemon/patrol.go"
+		moved = "internal/daemon/moved.go"
+	)
+	tests := []struct {
+		name string
+		diff string
+		want bool
+	}{
+		{"modified", "M\x00" + path + "\x00", true},
+		{"added", "A\x00" + path + "\x00", true},
+		{"renamed to another non-cmd Go path", "R100\x00" + path + "\x00" + moved + "\x00", true},
+		{"deleted", "D\x00" + path + "\x00", false},
+		{"renamed out to a non-Go path", "R100\x00" + path + "\x00docs/testing.txt\x00", false},
+	}
+	hasGo := func(string) bool { return true }
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
 			}
 			if got := commandTokensSelected(sel); got != tt.want {
 				t.Errorf("tokens guard selected = %t, want %t (selection %v)", got, tt.want, sel)
