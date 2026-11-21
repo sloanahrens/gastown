@@ -809,7 +809,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	// figures are the plan's size before the trim, the files a finished Job
 	// removed, and the size du reads after it.
 	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, before: planned.Total}
-	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m)
+	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m, cacheTrimWaitTimeout)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the apply failed: %v", claim.ClaimName, namespace, err)
 		run.outcome = cacheTrimRunFailed
@@ -1132,7 +1132,10 @@ func cacheTrimManifestLine(jobName string, m *cachevol.TrimManifest) string {
 // The deletions are the applier's alone: nothing else may create or delete a
 // shard, so a trim's leftovers go only through the selector the trim's own
 // objects carry (gt-ej1yz).
-func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest) (bool, error) {
+//
+// wait bounds the wait for the Job to finish; a wait of zero or less is refused
+// at that wait rather than passed to kubectl as an unbounded wait.
+func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest, wait time.Duration) (bool, error) {
 	existing, running, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
 	if err != nil {
 		return false, err
@@ -1191,10 +1194,15 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 	}
 	// The claim route waits here too (gt-gg9hv.46): cacheTrimMeasure reads the
 	// claim only once its Job has finished, because a claim still being trimmed
-	// holds what the trim is removing. The wait is bounded by
-	// cacheTrimWaitTimeout (2 minutes); a Job still running then is left for the
-	// next run.
-	if !d.cacheTrimWaitJob(ctx, kubeconfig, namespace, jobName) {
+	// holds what the trim is removing. The wait is bounded by wait; a Job still
+	// running then is left for the next run. A wait that cannot bound anything
+	// is an error, so the run is recorded as failed rather than read as a Job
+	// that simply did not finish.
+	finished, err := d.cacheTrimWaitJob(ctx, kubeconfig, namespace, jobName, wait)
+	if err != nil {
+		return false, err
+	}
+	if !finished {
 		return false, nil
 	}
 	// A completed Job pulled its image, so an alert this process raised for a
@@ -1212,14 +1220,21 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 // ends is reported with why, and the pass carries on, leaving the shards for
 // the next run and the claim unmeasured, since neither can be judged while the
 // Job works.
-func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jobName string) bool {
-	timeout := strconv.Itoa(int(cacheTrimWaitTimeout.Seconds())) + "s"
+//
+// wait is the bound itself; a wait of zero or less is refused, since kubectl
+// reads --timeout=0s as no limit at all.
+func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jobName string, wait time.Duration) (bool, error) {
+	if wait <= 0 {
+		return false, fmt.Errorf("the wait on the trim Job %s is %s; a wait must be a positive duration", jobName, wait)
+	}
+	// Rounded up, so a sub-second wait is 1s rather than the unbounded 0s.
+	timeout := strconv.Itoa(int(math.Ceil(wait.Seconds()))) + "s"
 	_, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout)
 	if err == nil {
-		return true
+		return true, nil
 	}
 	d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; the trim is left for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
-	return false
+	return false, nil
 }
 
 // cacheTrimJobPod is the part of a trim Job's pod the stuck-pull read decides
