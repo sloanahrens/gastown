@@ -48,6 +48,14 @@ const (
 	imagePinsRefreshAcceptance = "- [ ] deploy/daemon/image-pins and deploy/polecat/seed-pins name each source tip named in this bead's Goal, and git diff shows only those commit lines changed\n" +
 		"- [ ] go test ./internal/daemonimage -count=1 passes"
 
+	// imagePinsRefreshGateBD and imagePinsRefreshAcceptanceBD replace the Gate
+	// and the acceptance list once bd is among the pins: a bd move also sets the
+	// bdPin constant the ctxlabels test holds (gt-h51lnb).
+	imagePinsRefreshGateBD = "go test ./internal/daemonimage -count=1 passes, and go test ./internal/ci/ctxlabels -count=1 passes."
+
+	imagePinsRefreshAcceptanceBD = "- [ ] deploy/daemon/image-pins and deploy/polecat/seed-pins name each source tip named in this bead's Goal, and git diff shows only those commit lines and the bdPin constant changed\n" +
+		"- [ ] go test ./internal/daemonimage -count=1 passes"
+
 	// imagePinsRefreshOverseerHeading labels the apply command. It is the
 	// overseer's route, not the seat's: it needs the four source checkouts,
 	// which a sandbox seat does not have, so the goal names it an alternative
@@ -98,7 +106,7 @@ func imagePinsRefreshBead(pins []ImagePinState, filedAt time.Time) (imagePinsRef
 	return imagePinsRefreshDraft{
 		Title:       imagePinsRefreshTitle(pins),
 		Description: imagePinsRefreshDescription(pins, filedAt),
-		Acceptance:  imagePinsRefreshAcceptance,
+		Acceptance:  imagePinsRefreshAcceptanceFor(pins),
 		Labels:      []string{imagePinsRefreshLabel},
 	}, nil
 }
@@ -148,12 +156,35 @@ func imagePinsRefreshTitle(pins []ImagePinState) string {
 func imagePinsRefreshDescription(pins []ImagePinState, filedAt time.Time) string {
 	return strings.Join([]string{
 		"## Goal\n\n" + imagePinsRefreshGoal(pins, filedAt),
-		"## Constraints\n\n" + imagePinsRefreshConstraints,
+		"## Constraints\n\n" + imagePinsRefreshConstraintsFor(pins),
 		"## Out of scope\n\n" + imagePinsRefreshOutOfScope,
-		"## Gate\n\n" + imagePinsRefreshGate,
+		"## Gate\n\n" + imagePinsRefreshGateFor(pins),
 		"## Size\n\n" + imagePinsRefreshSize,
-		"## Acceptance\n\n" + imagePinsRefreshAcceptance,
+		"## Acceptance\n\n" + imagePinsRefreshAcceptanceFor(pins),
 	}, "\n\n") + "\n"
+}
+
+// imagePinsHasBD reports whether the planner named bd, the one pin whose bump
+// also moves the bdPin constant (gt-h51lnb).
+func imagePinsHasBD(pins []ImagePinState) bool {
+	return slices.ContainsFunc(pins, func(pin ImagePinState) bool { return pin.Name == "bd" })
+}
+
+// imagePinsRefreshGateFor is the Gate section for pins.
+func imagePinsRefreshGateFor(pins []ImagePinState) string {
+	if imagePinsHasBD(pins) {
+		return imagePinsRefreshGateBD
+	}
+	return imagePinsRefreshGate
+}
+
+// imagePinsRefreshAcceptanceFor is the acceptance list for pins, in the
+// description's section and the bead's field alike.
+func imagePinsRefreshAcceptanceFor(pins []ImagePinState) string {
+	if imagePinsHasBD(pins) {
+		return imagePinsRefreshAcceptanceBD
+	}
+	return imagePinsRefreshAcceptance
 }
 
 // imagePinsSeedLines names the line in deploy/polecat/seed-pins that pins the
@@ -197,6 +228,9 @@ func imagePinsRefreshGoal(pins []ImagePinState, filedAt time.Time) string {
 		if seed, ok := imagePinsSeedLines[pin.Name]; ok {
 			line += fmt.Sprintf(" and the %s commit column in deploy/polecat/seed-pins", seed)
 		}
+		if pin.Name == "bd" {
+			line += ", and set the `bdPin` constant in internal/ci/ctxlabels/ctxlabels_test.go to the same commit"
+		}
 		b.WriteString(line + ".\n")
 	}
 	b.WriteString("\nSet each commit column named above to its tip, then run `go test ./internal/daemonimage -run TestCommittedPinsAgree -count=1` and the Gate's command.\n\n")
@@ -207,13 +241,27 @@ func imagePinsRefreshGoal(pins []ImagePinState, filedAt time.Time) string {
 	return b.String()
 }
 
-// imagePinsRefreshConstraints are the lines a move must not cross: the two
-// files stay in step, and a pin that is not an ancestor of its tip is not
-// edited into place.
-const imagePinsRefreshConstraints = "- The diff is the commit columns of deploy/daemon/image-pins and deploy/polecat/seed-pins; nothing else in either file changes.\n" +
-	"- A source the two files share must name the same commit in both, or TestCommittedPinsAgree fails.\n" +
-	"- A pin that is not an ancestor of its tip (ahead or diverged) is not a pin to edit: stop and escalate, and leave the guard's 40-commit and 7-day bounds alone.\n" +
-	"- Pin a source's tip even when that source's own CI is red: the guard compares commits, not runs."
+// The Constraints lines a move must not cross. With bd, the diff line widens and
+// one ancestry line is added (gt-5m0vrz).
+const (
+	imagePinsRefreshConstraintDiff = "- The diff is the commit columns of deploy/daemon/image-pins and deploy/polecat/seed-pins; nothing else in either file changes.\n"
+
+	imagePinsRefreshConstraintDiffBD = "- The diff is the commit columns of deploy/daemon/image-pins and deploy/polecat/seed-pins and, for bd, the one `bdPin` constant; nothing else in either file changes.\n"
+
+	imagePinsRefreshConstraintShared = "- A source the two files share must name the same commit in both, or TestCommittedPinsAgree fails.\n" +
+		"- A pin that is not an ancestor of its tip (ahead or diverged) is not a pin to edit: stop and escalate, and leave the guard's 40-commit and 7-day bounds alone.\n" +
+		"- Pin a source's tip even when that source's own CI is red: the guard compares commits, not runs."
+
+	imagePinsRefreshConstraintBDTip = "\n- For bd, a tip that lacks the samples build never reaches this bead: the daemon refused it (gt-5m0vrz), so the seat checks no ancestry for bd."
+)
+
+// imagePinsRefreshConstraintsFor is the Constraints section for pins.
+func imagePinsRefreshConstraintsFor(pins []ImagePinState) string {
+	if imagePinsHasBD(pins) {
+		return imagePinsRefreshConstraintDiffBD + imagePinsRefreshConstraintShared + imagePinsRefreshConstraintBDTip
+	}
+	return imagePinsRefreshConstraintDiff + imagePinsRefreshConstraintShared
+}
 
 // imagePinsRefreshOutOfScope keeps a polecat from widening a pins diff.
 const imagePinsRefreshOutOfScope = "The pins this bead does not name, the pin-drift guard's bounds, and the daemon that files this bead."

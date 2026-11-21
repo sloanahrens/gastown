@@ -220,7 +220,7 @@ func TestImagePinsRefreshBeadNamesTheFilesAndLinesToSetByHand(t *testing.T) {
 		name, pin, tip, columns string
 		behind                  int
 	}{
-		{"bd", pinBD, tipBD, "Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins.", 22},
+		{"bd", pinBD, tipBD, "Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins, and set the `bdPin` constant in internal/ci/ctxlabels/ctxlabels_test.go to the same commit.", 22},
 		{"om", pinOM, tipOM, "Set the om commit column in deploy/daemon/image-pins.", 21},
 		{"hm", pinHM, tipHM, "Set the hm commit column in deploy/daemon/image-pins.", 25},
 		{"devops", pinDevops, tipDevops, "Set the devops commit column in deploy/daemon/image-pins and the devops commit column in deploy/polecat/seed-pins.", 47},
@@ -663,7 +663,7 @@ func TestImagePinsTextKeepsTodaysWordingWithoutATotal(t *testing.T) {
 		title string
 	}{
 		{refreshPin("bd", pinBD, tipBD, 22),
-			"- bd: pinned at " + pinBD + "; its source's origin/main is " + tipBD + ", 22 commits behind. Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins.",
+			"- bd: pinned at " + pinBD + "; its source's origin/main is " + tipBD + ", 22 commits behind. Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins, and set the `bdPin` constant in internal/ci/ctxlabels/ctxlabels_test.go to the same commit.",
 			"bd by 22 commits behind origin/main"},
 		{ImagePinState{Name: "om", Pin: pinOM, Tip: tipOM, Behind: 22, Total: 22},
 			"- om: pinned at " + pinOM + "; its source's origin/main is " + tipOM + ", 22 commits behind. Set the om commit column in deploy/daemon/image-pins.",
@@ -680,5 +680,94 @@ func TestImagePinsTextKeepsTodaysWordingWithoutATotal(t *testing.T) {
 		if !strings.Contains(draft.Title, tt.title) {
 			t.Errorf("title %q does not say %q", draft.Title, tt.title)
 		}
+	}
+}
+
+// sectionBody returns one section of a bead description: the text after its
+// heading, up to the next section, without the trailing newline.
+func sectionBody(description, heading string) string {
+	_, body, _ := strings.Cut(description, "## "+heading+"\n\n")
+	body, _, _ = strings.Cut(body, "\n\n## ")
+	return strings.TrimSuffix(body, "\n")
+}
+
+// TestImagePinsRefreshBeadNamesBDPin: with bd among the pins, alone or with
+// others, the bd Goal line, the Constraints, the Gate and the acceptance field
+// name the bdPin constant and its ctxlabels test, and the field is the
+// description's list (gt-h51lnb).
+func TestImagePinsRefreshBeadNamesBDPin(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		pins []ImagePinState
+	}{
+		{"bd only", []ImagePinState{refreshPin("bd", pinBD, tipBD, 22)}},
+		{"bd with others", []ImagePinState{
+			refreshPin("bd", pinBD, tipBD, 22),
+			refreshPin("om", pinOM, tipOM, 21),
+			refreshPin("devops", pinDevops, tipDevops, 47),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			draft, err := imagePinsRefreshBead(tt.pins, refreshFiledAt)
+			if err != nil {
+				t.Fatalf("imagePinsRefreshBead: %v", err)
+			}
+			wantBD := "- bd: pinned at " + pinBD + "; its source's origin/main is " + tipBD + ", 22 commits behind. Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins, and set the `bdPin` constant in internal/ci/ctxlabels/ctxlabels_test.go to the same commit."
+			if got := goalPinLine(draft.Description, "bd"); got != wantBD {
+				t.Errorf("bd line = %q, want %q", got, wantBD)
+			}
+			constraints := sectionBody(draft.Description, "Constraints")
+			for _, want := range []string{
+				"and, for bd, the one `bdPin` constant; nothing else in either file changes.",
+				"For bd, a tip that lacks the samples build never reaches this bead: the daemon refused it (gt-5m0vrz), so the seat checks no ancestry for bd.",
+			} {
+				if !strings.Contains(constraints, want) {
+					t.Errorf("Constraints do not carry %q:\n%s", want, constraints)
+				}
+			}
+			wantGate := "go test ./internal/daemonimage -count=1 passes, and go test ./internal/ci/ctxlabels -count=1 passes."
+			if got := sectionBody(draft.Description, "Gate"); got != wantGate {
+				t.Errorf("Gate = %q, want %q", got, wantGate)
+			}
+			if !strings.Contains(draft.Acceptance, "git diff shows only those commit lines and the bdPin constant changed") {
+				t.Errorf("acceptance field does not name the bdPin constant:\n%s", draft.Acceptance)
+			}
+			if got := sectionBody(draft.Description, "Acceptance"); draft.Acceptance != got {
+				t.Errorf("acceptance field = %q, want the description's list %q", draft.Acceptance, got)
+			}
+		})
+	}
+}
+
+// TestImagePinsRefreshBeadWithoutBDUnchanged: with no bd among the pins the
+// Constraints, Gate, acceptance and each pin's Goal line are the text the bead
+// carried before the bd move, byte for byte (gt-h51lnb).
+func TestImagePinsRefreshBeadWithoutBDUnchanged(t *testing.T) {
+	t.Parallel()
+	draft, err := imagePinsRefreshBead([]ImagePinState{
+		refreshPin("om", pinOM, tipOM, 21),
+		refreshPin("hm", pinHM, tipHM, 25),
+		refreshPin("devops", pinDevops, tipDevops, 47),
+	}, refreshFiledAt)
+	if err != nil {
+		t.Fatalf("imagePinsRefreshBead: %v", err)
+	}
+	wantConstraints := "- The diff is the commit columns of deploy/daemon/image-pins and deploy/polecat/seed-pins; nothing else in either file changes.\n" +
+		"- A source the two files share must name the same commit in both, or TestCommittedPinsAgree fails.\n" +
+		"- A pin that is not an ancestor of its tip (ahead or diverged) is not a pin to edit: stop and escalate, and leave the guard's 40-commit and 7-day bounds alone.\n" +
+		"- Pin a source's tip even when that source's own CI is red: the guard compares commits, not runs."
+	if got := sectionBody(draft.Description, "Constraints"); got != wantConstraints {
+		t.Errorf("Constraints = %q, want %q", got, wantConstraints)
+	}
+	if got, want := sectionBody(draft.Description, "Gate"), "go test ./internal/daemonimage -count=1 passes."; got != want {
+		t.Errorf("Gate = %q, want %q", got, want)
+	}
+	wantAcceptance := "- [ ] deploy/daemon/image-pins and deploy/polecat/seed-pins name each source tip named in this bead's Goal, and git diff shows only those commit lines changed\n" +
+		"- [ ] go test ./internal/daemonimage -count=1 passes"
+	if draft.Acceptance != wantAcceptance || sectionBody(draft.Description, "Acceptance") != wantAcceptance {
+		t.Errorf("acceptance field = %q, want %q in the field and the section", draft.Acceptance, wantAcceptance)
 	}
 }
