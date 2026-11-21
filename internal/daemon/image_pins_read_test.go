@@ -84,12 +84,12 @@ func pinsReadFileWithLines(mutate func([]string) []string) []byte {
 
 // pinsReadOtherStates is what the reader must report for the fixture's om, hm
 // and devops pins when bd is the only pin that fails: each read its own tip, one
-// commit behind.
+// commit behind, and one commit behind in total.
 func pinsReadOtherStates() []ImagePinState {
 	return []ImagePinState{
-		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip, Behind: 1},
-		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Behind: 1},
-		{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 1},
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip, Behind: 1, Total: 1},
+		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Behind: 1, Total: 1},
+		{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 1, Total: 1},
 	}
 }
 
@@ -183,16 +183,16 @@ func (f *fakePinPathCount) count(url, pin, tip string, paths []string) (int, err
 // om and hm pins, each one commit behind, beside a devops state under test.
 func pinsReadPinsBeforeDevops() []ImagePinState {
 	return []ImagePinState{
-		{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1},
-		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip, Behind: 1},
-		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Behind: 1},
+		{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1, Total: 1},
+		{Name: "om", Pin: pinsReadOMCommit, Tip: pinsReadOMTip, Behind: 1, Total: 1},
+		{Name: "hm", Pin: pinsReadHMCommit, Tip: pinsReadHMTip, Behind: 1, Total: 1},
 	}
 }
 
 // pinsReadAllHealthy is a git, a compare and a path count that answer every
 // fixture source: each pin trails its tip by one commit, the devops pin counted
-// through its inputs and the other three through the compare. The compare
-// answers nothing for devops, so a reader that compared it would fail.
+// through its inputs and compared for its total, the other three through the
+// compare alone.
 func pinsReadAllHealthy() (*fakePinTips, *fakePinCompare, *fakePinPathCount) {
 	git := &fakePinTips{answers: map[string]string{}, errs: map[string]error{}}
 	cmp := &fakePinCompare{behind: map[string]int{}, nilFor: map[string]bool{}, errs: map[string]error{}}
@@ -200,43 +200,42 @@ func pinsReadAllHealthy() (*fakePinTips, *fakePinCompare, *fakePinPathCount) {
 		{"beads", pinsReadBDCommit, pinsReadBDTip},
 		{"organic-mechanic", pinsReadOMCommit, pinsReadOMTip},
 		{"history-man", pinsReadHMCommit, pinsReadHMTip},
+		{"devops", pinsReadDevopsCommit, pinsReadDevopsTip},
 	} {
 		git.answers[pinsReadPinURL(p.repo)] = pinsReadLS(p.tip)
 		cmp.behind[pinsReadCompareKey(p.pin, p.tip)] = 1
 	}
-	git.answers[pinsReadPinURL("devops")] = pinsReadLS(pinsReadDevopsTip)
 	return git, cmp, &fakePinPathCount{behind: 1}
 }
 
 // TestImagePinsReadTipsAndBehind drives the read over the four pins of the
 // fixture file: each row's source answers its own tip and commit count, so the
-// read must report that pin's tip and count, addressing a compare pin's
-// repository and commits through the compare and counting devops through its
-// inputs.
+// read must report that pin's tip, count and total, addressing a compare pin's
+// repository and commits through the compare, counting devops's inputs through
+// the path seam and its total through the compare.
 func TestImagePinsReadTipsAndBehind(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name   string
-		pin    string
-		tip    string
-		repo   string
-		behind int
+		name          string
+		pin           string
+		tip           string
+		repo          string
+		behind, total int
 	}{
-		{"bd", pinsReadBDCommit, pinsReadBDTip, "beads", 12},
-		{"om", pinsReadOMCommit, pinsReadOMTip, "organic-mechanic", 7},
-		{"hm", pinsReadHMCommit, pinsReadHMTip, "history-man", 21},
-		{"devops", pinsReadDevopsCommit, pinsReadDevopsTip, "devops", 34},
+		{"bd", pinsReadBDCommit, pinsReadBDTip, "beads", 12, 12},
+		{"om", pinsReadOMCommit, pinsReadOMTip, "organic-mechanic", 7, 7},
+		{"hm", pinsReadHMCommit, pinsReadHMTip, "history-man", 21, 21},
+		{"devops", pinsReadDevopsCommit, pinsReadDevopsTip, "devops", 34, 54},
 	}
 	git := &fakePinTips{answers: map[string]string{}, errs: map[string]error{}}
 	cmp := &fakePinCompare{behind: map[string]int{}}
 	pathCount := &fakePinPathCount{}
 	for _, tt := range tests {
 		git.answers[pinsReadPinURL(tt.repo)] = pinsReadLS(tt.tip)
+		cmp.behind[pinsReadCompareKey(tt.pin, tt.tip)] = tt.total
 		if tt.name == "devops" {
 			pathCount.behind = tt.behind
-			continue
 		}
-		cmp.behind[pinsReadCompareKey(tt.pin, tt.tip)] = tt.behind
 	}
 
 	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
@@ -244,7 +243,7 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 
 	require.Len(t, states, len(tests))
 	for i, tt := range tests {
-		want := ImagePinState{Name: tt.name, Pin: tt.pin, Tip: tt.tip, Behind: tt.behind}
+		want := ImagePinState{Name: tt.name, Pin: tt.pin, Tip: tt.tip, Behind: tt.behind, Total: tt.total}
 		assert.Equal(t, want, states[i], "%s pin read", tt.name)
 	}
 	assert.Equal(t, []pinsReadCompareCall{
@@ -253,7 +252,8 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 		{owner: pinsReadOwner, repo: "beads", base: pinsReadBDCommit, head: pinsReadBDTip},
 		{owner: pinsReadOwner, repo: "organic-mechanic", base: pinsReadOMCommit, head: pinsReadOMTip},
 		{owner: pinsReadOwner, repo: "history-man", base: pinsReadHMCommit, head: pinsReadHMTip},
-	}, cmp.calls, "bd's tip floor, then its own-commit floor, then each pin's lag compare")
+		{owner: pinsReadOwner, repo: "devops", base: pinsReadDevopsCommit, head: pinsReadDevopsTip},
+	}, cmp.calls, "bd's tip floor, then its own-commit floor, then each pin's lag compare, devops counted for its total")
 	assert.Equal(t, []string{
 		pinsReadPinURL("beads"), pinsReadPinURL("organic-mechanic"),
 		pinsReadPinURL("history-man"), pinsReadPinURL("devops"),
@@ -261,9 +261,10 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 }
 
 // TestImagePinsReadAtTipSkipsCompare: a pin whose commit is its source's tip is
-// read as zero behind, and the compare API counts no lag for it and none for the
-// devops pin, counted through its inputs: only om and hm are lag-compared, and
-// the bd floor is the one other comparison, made whether or not bd is at its tip.
+// read as zero behind, and the compare API counts no lag for it; devops is asked
+// only for its total, which its inputs do not count. Only om and hm are
+// lag-compared, and the bd floor is the one other comparison, made whether or
+// not bd is at its tip.
 func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 	t.Parallel()
 	git, cmp, pathCount := pinsReadAllHealthy()
@@ -275,7 +276,7 @@ func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 	require.Len(t, states, 4)
 	assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDCommit, Behind: 0}, states[0],
 		"a pin at its tip is zero behind")
-	require.Len(t, cmp.calls, 3, "the floor, then only om's and hm's lag: the bd floor call is the one that names bd")
+	require.Len(t, cmp.calls, 4, "the floor, only om's and hm's lag, and devops's total: the bd floor call is the one that names bd")
 	bdFloors := 0
 	for _, call := range cmp.calls {
 		assert.False(t, call.base == pinsReadBDCommit && call.head != daemonimage.BDSamplesFloor,
@@ -341,7 +342,7 @@ func TestReadImagePinTipsBDFloor(t *testing.T) {
 			}
 			if tt.want == "" {
 				assert.NoError(t, states[0].Err, "a bd tip that contains the floor reads clean")
-				assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1}, states[0])
+				assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1, Total: 1}, states[0])
 				return
 			}
 			require.Error(t, states[0].Err, "a bd tip that lacks the floor is that pin's error")
@@ -432,7 +433,7 @@ func TestReadImagePinTipsBDPinFloor(t *testing.T) {
 				return
 			}
 			assert.NoError(t, states[0].Err, "a bd pin's own commit that reads is not an error")
-			assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1, LacksFloor: tt.lacksFloor}, states[0],
+			assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1, Total: 1, LacksFloor: tt.lacksFloor}, states[0],
 				"the pin reads its lag, and LacksFloor says whether its commit holds the floor")
 		})
 	}
@@ -453,7 +454,7 @@ func TestImagePinsReadExpandsTheForgeOwner(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, states, 4)
-	require.Len(t, cmp.calls, 5, "bd's two floor checks and the three lag compares are asked")
+	require.Len(t, cmp.calls, 6, "bd's two floor checks, the three pins with no input list, and devops's total are asked")
 	for i, call := range cmp.calls {
 		assert.Equal(t, pinsReadOwner, call.owner, "comparison %d names the expanded owner", i)
 	}
@@ -802,9 +803,9 @@ func TestImagePinsReadFileShapeAgreesWithTheGuardParser(t *testing.T) {
 
 // TestReadImagePinTipsCountsOnlyInputCommitsForADevopsPin: the devops pin's lag
 // is the path-limited count, asked for its URL, its pin, its tip and the inputs
-// the image builds it from, and the compare API, which cannot name the paths a
-// commit changed, is not asked about it; the three pins with no input list keep
-// the compare count.
+// the image builds it from, while the compare API, which cannot name the paths a
+// commit changed, is asked only for its total; the three pins with no input list
+// keep the compare count for both.
 func TestReadImagePinTipsCountsOnlyInputCommitsForADevopsPin(t *testing.T) {
 	t.Parallel()
 	git, cmp, _ := pinsReadAllHealthy()
@@ -814,16 +815,15 @@ func TestReadImagePinTipsCountsOnlyInputCommitsForADevopsPin(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, states, 4)
-	assert.Equal(t, ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3}, states[3],
+	assert.Equal(t, ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3, Total: 1}, states[3],
 		"a devops pin's Behind is the path-limited count, not the compare answer")
 	assert.Equal(t, []pinsReadPathCountCall{{
 		url: pinsReadPinURL("devops"), pin: pinsReadDevopsCommit, tip: pinsReadDevopsTip,
 		paths: daemonimage.PinInputPaths("devops"),
 	}}, pathCount.calls, "the devops pin is counted once, with its inputs")
-	require.Len(t, cmp.calls, 5, "bd's two floor checks and the three pins with no input list are compared")
-	for _, call := range cmp.calls {
-		assert.NotEqual(t, "devops", call.repo, "the devops pin is counted through its inputs, not the compare")
-	}
+	require.Len(t, cmp.calls, 6, "bd's two floor checks, the three pins with no input list, and devops's total are compared")
+	assert.Equal(t, pinsReadCompareCall{owner: pinsReadOwner, repo: "devops", base: pinsReadDevopsCommit, head: pinsReadDevopsTip}, cmp.calls[5],
+		"the devops pin is compared once, last, for its total")
 }
 
 // TestReadImagePinTipsPathCountFailureIsThePinsErr: a path-limited count that
@@ -876,4 +876,74 @@ func TestReadImagePinTipsNilPathSeamIsThePinsErr(t *testing.T) {
 	assert.Equal(t, pinsReadDevopsTip, states[3].Tip, "the tip read before the count is kept")
 	assert.Equal(t, pinsReadPinsBeforeDevops(), states[:3], "the other three pins are still read")
 	assert.Len(t, cmp.calls, 5, "the devops pin is not compared in place of the missing seam")
+}
+
+// TestReadImagePinTipsDevopsTotalCompareFailureIsThePinsErr: the compare a
+// devops pin's total comes from runs after its path count succeeded, and one
+// that fails, answers no comparison or answers a negative count is that pin's
+// Err: Total is never left at the zero a healthy pin reports.
+func TestReadImagePinTipsDevopsTotalCompareFailureIsThePinsErr(t *testing.T) {
+	t.Parallel()
+	key := pinsReadCompareKey(pinsReadDevopsCommit, pinsReadDevopsTip)
+	tests := []struct {
+		name  string
+		setup func(*fakePinCompare)
+		want  string
+	}{
+		{"a compare that fails", func(cmp *fakePinCompare) { cmp.errs[key] = errors.New("forgejo: server error") }, "cannot compare"},
+		{"a compare that answers no comparison", func(cmp *fakePinCompare) { cmp.nilFor[key] = true }, "answered no comparison"},
+		{"a compare with a negative count", func(cmp *fakePinCompare) { cmp.behind[key] = -1 }, "which is not a count"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			git, cmp, pathCount := pinsReadAllHealthy()
+			tt.setup(cmp)
+
+			states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+			require.NoError(t, err, "a pin's failed total is not the file's error")
+			require.Len(t, states, 4)
+
+			require.Error(t, states[3].Err, "the failed total is the devops pin's error")
+			assert.Contains(t, states[3].Err.Error(), tt.want)
+			assert.Equal(t, pinsReadPinsBeforeDevops(), states[:3], "the other three pins are still read")
+		})
+	}
+}
+
+// TestReadImagePinTipsTotalHoldsTheCompareCountForADevopsPin: a devops pin's
+// Behind is the count of commits that touch its inputs, and its Total is the
+// compare's count of every commit it trails, so a pin 54 commits behind whose
+// inputs one commit touched reads Behind 1 and Total 54 (gt-la59lv).
+func TestReadImagePinTipsTotalHoldsTheCompareCountForADevopsPin(t *testing.T) {
+	t.Parallel()
+	git, cmp, _ := pinsReadAllHealthy()
+	pathCount := &fakePinPathCount{behind: 1}
+	cmp.behind[pinsReadCompareKey(pinsReadDevopsCommit, pinsReadDevopsTip)] = 54
+
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+	require.NoError(t, err)
+
+	require.Len(t, states, 4)
+	assert.Equal(t, ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 1, Total: 54}, states[3],
+		"a devops pin's Behind is the path seam's count and its Total the compare's")
+}
+
+// TestReadImagePinTipsKeepsTheCompareCountForBd: a pin with no input list is
+// counted through the compare alone, so its Total equals its Behind and the path
+// seam is never asked about it (gt-la59lv).
+func TestReadImagePinTipsKeepsTheCompareCountForBd(t *testing.T) {
+	t.Parallel()
+	git, cmp, pathCount := pinsReadAllHealthy()
+	cmp.behind[pinsReadCompareKey(pinsReadBDCommit, pinsReadBDTip)] = 12
+
+	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+	require.NoError(t, err)
+
+	require.Len(t, states, 4)
+	assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 12, Total: 12}, states[0],
+		"a pin with no input list has Total equal to Behind, both the compare count")
+	for _, call := range pathCount.calls {
+		assert.NotEqual(t, pinsReadBDCommit, call.pin, "the bd pin is counted through the compare, never the path seam")
+	}
 }

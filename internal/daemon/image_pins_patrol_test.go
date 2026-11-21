@@ -1454,9 +1454,15 @@ func TestImagePinsPathCountRefusesATipThatIsNotFortyLowercaseHex(t *testing.T) {
 	}
 }
 
+// pinsReadDevopsTotal is the commit count the fake Forgejo answers for the
+// devops pin's total: every commit it trails its tip by, its inputs touched or
+// not.
+const pinsReadDevopsTotal = 54
+
 // newImagePinsForgejo is the httptest Forgejo the patrol tests that read a bd
 // pin point their town at: its viewer token file authenticates the compare, a
-// head at BDSamplesFloor answers zero commits, and an unanswered head is a 404.
+// head at BDSamplesFloor answers zero commits, the devops pin's head answers its
+// total, and an unanswered head is a 404.
 func newImagePinsForgejo(t *testing.T) *Daemon {
 	t.Helper()
 	return newImagePinsForgejoAnswering(t, 0)
@@ -1467,7 +1473,13 @@ func newImagePinsForgejo(t *testing.T) *Daemon {
 // floor, any other count a tip that lacks it.
 func newImagePinsForgejoAnswering(t *testing.T, floorBehind int) *Daemon {
 	t.Helper()
-	compares := map[string]int{daemonimage.BDSamplesFloor: floorBehind}
+	compares := map[string]int{
+		daemonimage.BDSamplesFloor: floorBehind,
+		// The devops pin is compared for its total on every read: the path seam
+		// counts only the commits that touch its inputs, so the fixture answers
+		// the count of all of them.
+		pinsReadDevopsTip: pinsReadDevopsTotal,
+	}
 	//testpolicy:allow no-network — the compare is the subject, an httptest server answers it in-process on loopback, and the daemon reads it through the production client
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "token image-pins-viewer" {
@@ -1561,7 +1573,7 @@ func TestImagePinsPatrolWiresThePathCountSeam(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readImagePinTips: %v", err)
 	}
-	want := ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3, Age: 6 * 24 * time.Hour}
+	want := ImagePinState{Name: "devops", Pin: pinsReadDevopsCommit, Tip: pinsReadDevopsTip, Behind: 3, Total: pinsReadDevopsTotal, Age: 6 * 24 * time.Hour}
 	if len(states) != 4 || states[3] != want {
 		t.Fatalf("the read = %+v, want its four pins with devops as %+v: the patrol must count it through its path count seam", states, want)
 	}

@@ -58,6 +58,12 @@ type ImagePinState struct {
 	Pin    string
 	Tip    string
 	Behind int
+	// Total is every commit the pin trails its source tip by, relevant to its
+	// inputs or not: the compare API's total_commits. A pin with an input list
+	// has Behind counted through its inputs and Total from the compare, so the
+	// planner can say "N touching its inputs of M behind" (gt-a682mo); a pin
+	// with no input list has Total equal to Behind (gt-la59lv).
+	Total int
 	// Age is the tip's committer time minus the pin's, zero where it was not
 	// read. A pin at its tip has not aged against it, so Age files nothing
 	// there however the field reads.
