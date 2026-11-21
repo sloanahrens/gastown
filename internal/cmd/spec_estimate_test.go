@@ -1126,9 +1126,9 @@ func TestSpecEstimateNewTextReadsNoLog(t *testing.T) {
 	}
 }
 
-// TestSpecEstimateNeighborMinutesLedger: a neighbour's landed time reaches the
+// TestSpecEstimateNeighborMinutesLedger: a neighbor's landed time reaches the
 // note through the deps the estimate command builds, read from the rig's
-// landing ledger. The neighbour landed twice, so the newer record's 870s (14.5
+// landing ledger. The neighbor landed twice, so the newer record's 870s (14.5
 // min) is the one the note prints, and a record naming another rig is not its
 // time.
 func TestSpecEstimateNeighborMinutesLedger(t *testing.T) {

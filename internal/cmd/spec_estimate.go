@@ -552,7 +552,7 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 // specEstimateNeighborMinutes is the reader the estimate hands to
 // Deps.NeighborMinutes: the minutes the newest landing of a past bead took,
 // read from that rig's landing ledger the way gt land size-stats reads it. A
-// record naming another rig, and a neighbour with no ledger, an unreadable
+// record naming another rig, and a neighbor with no ledger, an unreadable
 // one, no record, no polecat time or a bound flag, has no time recorded.
 func specEstimateNeighborMinutes(townRoot string) func(rig, id string) (float64, bool) {
 	return func(rig, id string) (float64, bool) {
