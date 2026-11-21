@@ -107,8 +107,9 @@ func TestHelperSubcommandsAreDispatchedByTheImage(t *testing.T) {
 			}
 		}
 	}
-	// Exactly the trim-list and node-prune sites: one that moves or is added must be seen.
-	if sites != 2 {
-		t.Errorf("the scan found %d helper call sites in the daemon, want 2 (trim-list, node-prune)", sites)
+	// Exactly the node-prune site (the trim-list site went with the old listing
+	// route): one that moves or is added must be seen.
+	if sites != 1 {
+		t.Errorf("the scan found %d helper call sites in the daemon, want 1 (node-prune)", sites)
 	}
 }
