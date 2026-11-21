@@ -1944,12 +1944,13 @@ func TestImagePinsReadLogsAFailedReadWithItsFirstErrorLine(t *testing.T) {
 	}
 }
 
-// TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin: the age read fetches
-// the filtered main, then answers the tip's committer time minus the pin's.
+// TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin: the age read creates
+// the patrol's scratch repository when missing, fetches the filtered main into
+// it, then answers the tip's committer time minus the pin's (gt-tb48vu).
 func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	repo := filepath.Join(town, "devops", ".repo.git")
+	repo := imagePinsScratchRepo(town)
 	url, pin, tip := pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip
 	var argv [][]string
 	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
@@ -1967,16 +1968,19 @@ func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
 	if want := 6 * 24 * time.Hour; got != want {
 		t.Errorf("the age = %v, want the tip's committer time minus the pin's, %v", got, want)
 	}
-	if len(argv) != 2 {
-		t.Fatalf("git ran %d time(s), want the fetch and then the show: %v", len(argv), argv)
+	if len(argv) != 3 {
+		t.Fatalf("git ran %d time(s), want the scratch init, the fetch and then the show: %v", len(argv), argv)
+	}
+	if want := []string{"git", "init", "--bare", "--quiet", repo}; !slices.Equal(argv[0], want) {
+		t.Errorf("the first git call = %v, want the scratch repository's creation %v", argv[0], want)
 	}
 	wantFetch := []string{"git", "--git-dir=" + repo, "fetch", "--filter=blob:none", url, "+main:refs/gt/pin-tip"}
-	if !slices.Equal(argv[0], wantFetch) {
-		t.Errorf("the first git call = %v, want the filtered fetch %v", argv[0], wantFetch)
+	if !slices.Equal(argv[1], wantFetch) {
+		t.Errorf("the second git call = %v, want the filtered fetch %v", argv[1], wantFetch)
 	}
 	wantShow := []string{"git", "--git-dir=" + repo, "show", "-s", "--format=%ct", pin, tip}
-	if !slices.Equal(argv[1], wantShow) {
-		t.Errorf("the second git call = %v, want the two commits' committer times %v", argv[1], wantShow)
+	if !slices.Equal(argv[2], wantShow) {
+		t.Errorf("the third git call = %v, want the two commits' committer times %v", argv[2], wantShow)
 	}
 }
 
@@ -2014,6 +2018,7 @@ func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
 	}{
 		{name: "the fetch fails", fails: "fetch", want: "git fetch"},
 		{name: "the show fails", fails: "show", want: "git show"},
+		{name: "the scratch init fails", fails: "init", want: "creating the image pins scratch repository"},
 		{name: "a non-number pin", answer: "yesterday\n100\n", want: "non-number for the pin"},
 		{name: "a non-number tip", answer: "100\nyesterday\n", want: "non-number for the tip"},
 		{name: "one timestamp", answer: "100\n", want: "two commits' committer times"},
@@ -2034,8 +2039,8 @@ func TestImagePinsAgeErrorsOnAFailedOrNonNumericAnswer(t *testing.T) {
 				return nil, nil, nil
 			}
 			got, err := d.imagePinsAge(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip)
-			if tt.fails == "fetch" && calls != 1 {
-				t.Errorf("git ran %d time(s) after the failed fetch, want the failed fetch alone", calls)
+			if tt.fails == "fetch" && calls != 2 {
+				t.Errorf("git ran %d time(s) after the failed fetch, want the scratch init and the failed fetch alone", calls)
 			}
 			if err == nil || got != 0 || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("the age read = %v, %v; want an error naming %q, never a zero age", got, err, tt.want)
