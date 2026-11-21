@@ -3346,6 +3346,7 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 // tierSweepMirrorFS is the filesystem the sweep mirror's marker and rebuild touch.
 type tierSweepMirrorFS struct {
 	exists    func(path string) bool
+	lstat     func(path string) (fs.FileInfo, error)
 	removeAll func(path string) error
 	mkdirAll  func(path string) error
 	create    func(path string) error
@@ -3358,6 +3359,7 @@ func (d *Daemon) mirrorFS() *tierSweepMirrorFS {
 	}
 	return &tierSweepMirrorFS{
 		exists:    func(path string) bool { _, err := os.Lstat(path); return err == nil },
+		lstat:     os.Lstat,
 		removeAll: os.RemoveAll,
 		mkdirAll:  func(path string) error { return os.MkdirAll(path, 0o700) },
 		create:    func(path string) error { return os.WriteFile(path, nil, 0o600) },
@@ -3394,6 +3396,21 @@ func (d *Daemon) tierSweepMirrorPrepare(spec sweeprunner.Spec) (string, error) {
 		return "", fmt.Errorf("the spec's mirror %q is not the rig's built path %q; nothing was removed", spec.Snapshot, mirror)
 	}
 	fsys := d.mirrorFS()
+	// The rebuild is a recursive delete, and RemoveAll follows a symlink in any
+	// ancestor of the path: with sweep-repo a link to another directory it would
+	// delete that directory's mirror. Each ancestor the daemon owns must be a real
+	// directory or missing (it is created below); the town root may be a link, as
+	// /var is on a Mac (gt-6bv58o).
+	for _, dir := range []string{filepath.Join(d.config.TownRoot, ".runtime"), filepath.Dir(mirror)} {
+		info, err := fsys.lstat(dir)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return "", fmt.Errorf("reading %s: %w; nothing was removed", dir, err)
+		case !info.IsDir():
+			return "", fmt.Errorf("%s is not a real directory (%s); nothing was removed", dir, info.Mode().Type())
+		}
+	}
 	marker := mirror + ".updating"
 	if fsys.exists(marker) {
 		d.logger.Printf("tier_sweep: %s: the last update of the mirror did not finish; removing %s and cloning it again", spec.Rig, mirror)

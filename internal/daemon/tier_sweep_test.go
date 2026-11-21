@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"maps"
 	"os"
@@ -4074,5 +4075,94 @@ func TestTierSweepRig_ScriptTreeReadsTheScriptVerdict(t *testing.T) {
 				t.Errorf("shell command on the record = %q, want the script the tree ran", got)
 			}
 		})
+	}
+}
+
+// TestTierSweepMirrorRebuildNeverFollowsALink runs the rebuild over real
+// directories: RemoveAll follows a symlink in an ancestor of the mirror path, so
+// a linked .runtime or sweep-repo must refuse the launch with the other
+// directory's mirror untouched, while a link AT the mirror path is removed as a
+// link and its target stays (gt-6bv58o).
+func TestTierSweepMirrorRebuildNeverFollowsALink(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		link     string // the ancestor made a symlink to other, "" for none
+		atMirror bool   // the mirror path itself is a symlink to other/gastown.git
+		wantErr  string
+	}{
+		{name: "sweep-repo is a link", link: ".runtime/sweep-repo", wantErr: "sweep-repo is not a real directory"},
+		{name: ".runtime is a link", link: ".runtime", wantErr: ".runtime is not a real directory"},
+		{name: "a link at the mirror path", atMirror: true},
+		{name: "a real directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+			town := d.config.TownRoot
+			other := t.TempDir()
+			victim := filepath.Join(other, "gastown.git")
+			if err := os.MkdirAll(victim, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			mirror, err := tierSweepMirrorPath(town, spec.Rig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec.Snapshot = mirror
+			switch {
+			case tc.link == ".runtime":
+				if err := os.MkdirAll(filepath.Join(other, "sweep-repo"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				victim = filepath.Join(other, "sweep-repo", "gastown.git")
+				mustMkdir(t, victim)
+				mustSymlink(t, other, filepath.Join(town, ".runtime"))
+			case tc.link != "":
+				mustMkdir(t, filepath.Join(town, ".runtime"))
+				mustSymlink(t, other, filepath.Join(town, tc.link))
+			case tc.atMirror:
+				mustMkdir(t, filepath.Dir(mirror))
+				mustSymlink(t, victim, mirror)
+			default:
+				mustMkdir(t, mirror)
+			}
+			// The marker says the last update did not finish, so the rebuild runs.
+			if err := os.WriteFile(mirror+".updating", nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = d.tierSweepMirrorPrepare(spec)
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("err = %v, want it to say %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Errorf("err = %v, want none", err)
+			}
+			if _, statErr := os.Stat(victim); statErr != nil {
+				t.Errorf("the other directory's mirror is gone: %v", statErr)
+			}
+			if tc.atMirror || tc.name == "a real directory" {
+				if _, statErr := os.Lstat(mirror); !errors.Is(statErr, fs.ErrNotExist) {
+					t.Errorf("the mirror path survived the rebuild: %v", statErr)
+				}
+			}
+		})
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustSymlink(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
 	}
 }
