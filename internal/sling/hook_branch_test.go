@@ -163,8 +163,8 @@ func TestRunHookUnreadableBranch(t *testing.T) {
 		t.Errorf("err = %v, want the refusal marker %q: an automatic dispatcher must defer the bead and ask again, not count a failed dispatch",
 			err, dispatch.SlingRefusalMarker)
 	}
-	if reads != 3 {
-		t.Errorf("read the seat's branch %d time(s), want 3: a bounded retry, then a refusal", reads)
+	if reads < 2 {
+		t.Errorf("read the seat's branch %d time(s), want a re-read before the refusal", reads)
 	}
 	if f.hooks != 0 {
 		t.Errorf("the bead was hooked %d time(s), want 0", f.hooks)

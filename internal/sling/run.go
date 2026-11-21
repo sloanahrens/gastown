@@ -518,6 +518,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		// is given back and the bead deferred, and the dispatcher asks again
 		// next tick (gt-5wkraj). The read error stays out of the message, since
 		// a git read's output can carry more than the branch.
+		fmt.Fprintf(d.out(), "  %s the worktree branch of seat %s could not be read: %v\n", style.Dim.Render("Warning:"), targetAgent, branchErr)
 		rollbackSpawnedPolecat(beadToHook, "Seat worktree branch unreadable")
 		result.ErrMsg = fmt.Sprintf("seat %s: worktree branch unreadable", targetAgent)
 		return result, fmt.Errorf("%s %s: the worktree branch of seat %s could not be read after %d attempts, so the hook cannot be checked against another bead's branch; the dispatch is deferred until it can be read",
