@@ -2855,17 +2855,24 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 		}
 	})
 
-	// The route clears the item BEFORE it reads the pods, so a pod listing that
-	// fails does not keep it: the item described a measure the claim Job no longer
-	// takes, and a later trim raises its own. The pass says why it trimmed nothing.
+	// A failing read must not look like a clean one: an unreadable pod list is an
+	// unknown reading, and the park raises its failure item for exactly that, so
+	// the route clears a claim's no-op item only AFTER the pod read succeeds (the
+	// old route, which measured, kept the record on a failed read too).
 	t.Run("the pod listing fails", func(t *testing.T) {
 		t.Parallel()
 		f := raised(t)
 		f.answerFrom("get pods ", failWith)
 		f.trimDue()
 		f.d.runDiskMaintenance()
-		if got := f.noOpItems(t); len(got) != 0 {
-			t.Errorf("a pass whose pod listing failed yielded %+v, want the item cleared before the read: the claim Job route measures nothing, so the over-cap alert this would protect is gone from it (gt-uoarca's disk reading replaces it and reads no pods)", got)
+		var noop int
+		for _, it := range f.noOpItems(t) {
+			if it.Key == cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName) {
+				noop++
+			}
+		}
+		if noop != 1 {
+			t.Errorf("a pass whose pod listing failed left %d no-op item(s) for the claim, want the one it had: an unreadable list is an unknown reading, not a vanished claim", noop)
 		}
 		if logged := f.log.String(); !strings.Contains(logged, "the pods that mount it could not be read") {
 			t.Errorf("the failed pass does not say why it trimmed nothing: %s", logged)

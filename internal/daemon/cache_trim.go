@@ -678,9 +678,6 @@ func cacheTrimOverTheCap(used, capBytes int64) bool {
 // claim the config refuses, and a listing at or under the cap, are verdicts.
 func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string, listerDeadline time.Time) bool {
 	if d.cacheTrimClaimJobRoute {
-		// A trim through the claim Job measures nothing, so an item an earlier
-		// measure raised describes nothing this pass can judge.
-		d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim.ClaimName))
 		return d.cacheTrimClaimViaJob(ctx, kubeconfig, claim, image, namespace, capBytes, apply, trimmed)
 	}
 	// started is the start of this claim's run for the job ledger, read from the
