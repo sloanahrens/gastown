@@ -80,7 +80,16 @@ type Hold struct {
 // or malformed. The zero value is no state, so an error's zero HoldView is not HoldMissing.
 type HoldState int
 
-const HoldMissing, HoldOwn, HoldOther, HoldMalformed HoldState = 1, 2, 3, 4
+const (
+	// HoldMissing means no landing.hold file is present, so the landing is free to take.
+	HoldMissing HoldState = 1
+	// HoldOwn means the file carries this Hold's token, so Release can give it back.
+	HoldOwn HoldState = 2
+	// HoldOther means the file is another holder's well-formed hold, and Owner and Reason are set.
+	HoldOther HoldState = 3
+	// HoldMalformed means the file is present but is not a well-formed hold; Reason is its first line.
+	HoldMalformed HoldState = 4
+)
 
 // HoldView is whose hold the file is now, with another holder's owner and reason.
 type HoldView struct {
@@ -89,6 +98,7 @@ type HoldView struct {
 }
 
 // Inspect reports whose hold the landing.hold file is now, from one read of the store.
+// A read error returns the zero HoldView with the wrapped error, never HoldMissing.
 func (h *Hold) Inspect(ctx context.Context) (HoldView, error) {
 	content, present, err := h.store.Read(ctx)
 	if err != nil {
