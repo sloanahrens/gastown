@@ -43,6 +43,13 @@ const specSplitStaleNotePrefix = "SPLIT LABEL STALE v1"
 // dispatchable and held (gt-7dbjk5).
 const specSplitHysteresis = 0.5
 
+// specSplitAutoLabel marks a split label the route itself added. The route adds
+// it first and only together with the split label, so a split label with no
+// marker was put there by a person, another tool, or the route before this
+// marker existed. The marker is what tells the route's split label apart from
+// a person's.
+const specSplitAutoLabel = "sp-split-auto"
+
 // specSPSlungPrefix begins the label the tick writes on a bead it slings at or
 // over the split trigger without holding it. The label's reason says why the
 // route left the bead to a seat instead, so the landing record can read that
@@ -218,14 +225,31 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 		// A note that did not land leaves the bead unlabeled: it is held here,
 		// and the next tick judges it again and writes the note.
 		res.Errors = append(res.Errors, fmt.Sprintf("%s: split note: %v", beadID, err))
-	} else if err := env.AddLabel(beadID, specdispatch.SplitLabel); err != nil {
+	} else if line := specSplitLabels(env, beadID, latest); line != "" {
 		// A label that did not land does not change the estimate: the bead is
-		// held here, and the next tick retries the label.
-		res.Errors = append(res.Errors, fmt.Sprintf("%s: split label: %v", beadID, err))
+		// held here, and the next tick retries the write that failed.
+		res.Errors = append(res.Errors, line)
 	}
 	res.Hold = fmt.Sprintf("%s: %sestimated %s min (sp:%d, rung %s), at or over the %s-minute trigger; held for splitting",
 		beadID, specdispatch.SkipSplitOver, specMinutesText(minutes), points, rung, specTriggerText(splitOver))
 	return res
+}
+
+// specSplitLabels writes the split label the route holds a bead with, marker
+// first, and returns the error line when a write did not land. The split label
+// is never written without its marker, so a failed marker leaves the bead
+// without either label. A marker the bead already wears, from an earlier tick
+// whose split write failed, is not written again.
+func specSplitLabels(env specDispatchEnv, beadID string, latest specdispatch.Spec) string {
+	if !latest.HasLabel(specSplitAutoLabel) {
+		if err := env.AddLabel(beadID, specSplitAutoLabel); err != nil {
+			return fmt.Sprintf("%s: %s label: %v", beadID, specSplitAutoLabel, err)
+		}
+	}
+	if err := env.AddLabel(beadID, specdispatch.SplitLabel); err != nil {
+		return fmt.Sprintf("%s: split label: %v", beadID, err)
+	}
+	return ""
 }
 
 // specSPSlung writes the sp-slung:<reason> label on a bead the tick slings
