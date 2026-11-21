@@ -658,6 +658,7 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 	if d.jsonlTableExportFn != nil {
 		exportTable = d.jsonlTableExportFn
 	}
+	exportTable = d.recordJsonlExportSamples(db, exportTable)
 
 	// 1. Export issues table (with scrub filter).
 	n, err := exportTable("issues", backupIssuesQuery(db, scrub), dbDir, dataDir, jsonlExportTimeout)
@@ -713,6 +714,22 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 
 	d.logger.Printf("jsonl_git_backup: %s: exported %d records across %d tables", db, total, 1+len(supplementalTables))
 	return total, nil
+}
+
+// recordJsonlExportSamples wraps exportTable so a call that returns without an
+// error is remembered as db's last good export of that table, timed by the
+// daemon's clock. A failed export records nothing, so a later cycle's slowdown
+// ratio compares against the last read that completed, not a partial one.
+func (d *Daemon) recordJsonlExportSamples(db string, exportTable jsonlTableExporter) jsonlTableExporter {
+	return func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+		start := d.clk().Now()
+		n, err := exportTable(table, q, dir, dataDir, budget)
+		if err != nil {
+			return n, err
+		}
+		d.jsonlRates.Record(db, table, n, d.clk().Since(start))
+		return n, nil
+	}
 }
 
 // jsonlDoltTarget decides which Dolt one JSONL export reads: the daemon's

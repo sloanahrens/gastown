@@ -3714,6 +3714,106 @@ func TestExportDatabaseToJsonlIssuesFailureIsReported(t *testing.T) {
 	}
 }
 
+// samplesExportFake returns a jsonlTableExportFn that advances clk by took on
+// every call and writes rows[table] lines, so a test can time each export. A
+// table in failing returns the rows it counted before the read failed plus the
+// error, its clock still advanced: an exporter that did positive work is what
+// makes "a failed export records nothing" go red when the guard is removed.
+func samplesExportFake(t *testing.T, clk *clockwork.FakeClock, rows map[string]int, took time.Duration, failing map[string]bool) jsonlTableExporter {
+	t.Helper()
+	return func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
+		clk.Advance(took)
+		if failing[table] {
+			return rows[table], errors.New("signal: killed: context deadline exceeded")
+		}
+		writeNLines(t, filepath.Join(dir, table+".jsonl"), rows[table])
+		return rows[table], nil
+	}
+}
+
+// TestJSONLBackupRecordsSamples: a backup cycle remembers each table export it
+// completed, so a later cycle can compare its own duration against that sample
+// (gt-vnazln). A failed export must record nothing: the sample is the last read
+// that finished, not a partial one.
+func TestJSONLBackupRecordsSamples(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+
+	t.Run("a first export records its sample", func(t *testing.T) {
+		t.Parallel()
+		const (
+			rows = 40
+			took = 2 * time.Second
+		)
+		d, _ := backupTestDaemon(t)
+		clk := clockwork.NewFakeClockAt(start)
+		d.clock = clk
+		d.jsonlTableExportFn = samplesExportFake(t, clk, map[string]int{"issues": rows, "events": 5}, took, nil)
+
+		if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+			t.Fatalf("exportDatabaseToJsonl: %v", err)
+		}
+		gotRows, perRow, ok := d.jsonlRates.PerRow("hq", "issues")
+		if !ok {
+			t.Fatal("the issues export was not recorded")
+		}
+		if gotRows != rows {
+			t.Errorf("recorded rows = %d, want %d", gotRows, rows)
+		}
+		if want := took / rows; perRow != want {
+			t.Errorf("per-row = %s, want %s", perRow, want)
+		}
+	})
+
+	t.Run("a second export replaces the sample", func(t *testing.T) {
+		t.Parallel()
+		d, _ := backupTestDaemon(t)
+		clk := clockwork.NewFakeClockAt(start)
+
+		d.clock = clk
+		d.jsonlTableExportFn = samplesExportFake(t, clk, map[string]int{"issues": 40, "events": 5}, 2*time.Second, nil)
+		if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+			t.Fatalf("first exportDatabaseToJsonl: %v", err)
+		}
+
+		d.jsonlTableExportFn = samplesExportFake(t, clk, map[string]int{"issues": 10, "events": 5}, 3*time.Second, nil)
+		if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+			t.Fatalf("second exportDatabaseToJsonl: %v", err)
+		}
+
+		gotRows, perRow, ok := d.jsonlRates.PerRow("hq", "issues")
+		if !ok {
+			t.Fatal("the second issues export was not recorded")
+		}
+		if gotRows != 10 {
+			t.Errorf("recorded rows = %d, want the second export's 10", gotRows)
+		}
+		if want := 3 * time.Second / 10; perRow != want {
+			t.Errorf("per-row = %s, want the second export's %s", perRow, want)
+		}
+	})
+
+	t.Run("a failed export records nothing", func(t *testing.T) {
+		t.Parallel()
+		d, _ := backupTestDaemon(t)
+		clk := clockwork.NewFakeClockAt(start)
+		d.clock = clk
+		d.jsonlTableExportFn = samplesExportFake(t, clk,
+			map[string]int{"issues": 7, "comments": 3, "events": 5}, time.Second,
+			map[string]bool{"comments": true})
+
+		if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err == nil {
+			t.Fatal("exportDatabaseToJsonl = nil error, want the failed comments export reported")
+		}
+		if _, _, ok := d.jsonlRates.PerRow("hq", "comments"); ok {
+			t.Error("the failed comments export was recorded")
+		}
+		if _, _, ok := d.jsonlRates.PerRow("hq", "issues"); !ok {
+			t.Error("the successful issues export was not recorded")
+		}
+	})
+}
+
 // TestSyncJsonlGitBackupSupplementalFailureNoFalseSpike: a tick whose events
 // export fails raises the export alert, and the rows it lost do not reach the
 // spike guard as "possible data loss".

@@ -678,6 +678,12 @@ type Daemon struct {
 	// jsonl_git_backup goroutine touches it.
 	jsonlTrackerDBs map[string]bool
 
+	// jsonlRates remembers each (database, table) export's last good rows and
+	// duration, so a later cycle can compare it against that sample
+	// (jsonl_export_rates.go). The next bead's ratios read it (gt-d85v5p);
+	// nothing else does.
+	jsonlRates jsonlExportRates
+
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.
 	dogFeedFn func(eventType string, payload map[string]interface{}) error
