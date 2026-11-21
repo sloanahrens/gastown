@@ -340,6 +340,7 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 	ownerOf := func() (string, error) { return config.ResolveForgeOwner(d.config.TownRoot) }
 	pins, err := parseImagePins(data, ownerOf)
 	var states []ImagePinState
+	start := d.clk().Now()
 	if err == nil {
 		states, err = ReadImagePinTips(ctx, data, ownerOf, d.imagePinsTipGit(ctx), d.imagePinsPathCount(ctx), cmp)
 	}
@@ -351,8 +352,22 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 		urls[pin.Name] = pin.URL
 	}
 	fillImagePinAges(states, func(name string) string { return urls[name] }, d.imagePinsAge(ctx), d.logger)
+	d.logImagePinReads(states, d.clk().Now().Sub(start))
 	d.holdFailedImagePins(states)
 	return states, nil
+}
+
+// logImagePinReads logs one line per pin the read answered, so daemon.log shows
+// each pin's first successful read, its count and how long the tick's read took.
+// A pin with an Err has no read to report this tick and is left to
+// holdFailedImagePins, so this runs before it restores the last good state.
+func (d *Daemon) logImagePinReads(states []ImagePinState, took time.Duration) {
+	for _, st := range states {
+		if st.Err != nil {
+			continue
+		}
+		d.logger.Printf("image_pins: read %s pin %s tip %s behind %d in %s", st.Name, shortSHA(st.Pin), shortSHA(st.Tip), st.Behind, took)
+	}
 }
 
 // holdFailedImagePins reads a pin whose read failed from its last good state for
