@@ -34,6 +34,12 @@ type reworkSeat struct {
 // shape is internal/landworker's submittedRE; the branch is all this reads.
 var submittedBranchRE = regexp.MustCompile(`Submitted for landing: (\S+) @ [0-9a-fA-F]{4,40}`)
 
+// handBackBranchRE matches the comment the overrun guard's rework hand-back
+// writes (polecat.HandBackRework): "... is already on origin as branch <branch>.
+// The next polecat ...". The period ends the sentence, so it must be followed by
+// a space: a bead id such as dv-jokk.2 puts a period inside the branch.
+var handBackBranchRE = regexp.MustCompile(`is already on origin as branch (\S+)\.\s`)
+
 // reworkSeatFor reads the polecat and branch a rework bead goes back to. It
 // answers ok=false for a bead that is not rework, that names no submission,
 // or whose submission names a branch no polecat can be read out of — every
@@ -77,12 +83,15 @@ func reworkSeatFrom(issue *beads.Issue, comments []beads.Comment) (*reworkSeat, 
 }
 
 // lastSubmittedBranch is the branch named by the newest "Submitted for
-// landing" comment. A bead resubmitted after a rework carries an older
+// landing" comment or rework hand-back comment. A bead resubmitted after a rework carries an older
 // comment naming the branch that was rejected and a newer one naming the
 // branch that came back, so the newest is the one to read.
 func lastSubmittedBranch(comments []beads.Comment) string {
 	for i := len(comments) - 1; i >= 0; i-- {
 		if m := submittedBranchRE.FindStringSubmatch(comments[i].Text); m != nil {
+			return m[1]
+		}
+		if m := handBackBranchRE.FindStringSubmatch(comments[i].Text); m != nil {
 			return m[1]
 		}
 	}

@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -366,6 +368,70 @@ func TestReworkSeatFrom(t *testing.T) {
 			}
 			if tt.want != nil && (got.PolecatName != tt.want.PolecatName || got.Branch != tt.want.Branch) {
 				t.Fatalf("got %+v; want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// handBackComment is the comment the overrun guard's rework hand-back writes
+// for branch, taken from polecat.HandBackRework itself so the read and the
+// writer cannot drift apart.
+func handBackComment(t *testing.T, branch string) string {
+	t.Helper()
+	w := &handBackCapture{}
+	if err := polecat.HandBackRework(context.Background(), w, reworkBead, "", branch, "0123abcd", 20*time.Minute, ""); err != nil {
+		t.Fatalf("HandBackRework: %v", err)
+	}
+	return w.text
+}
+
+// handBackCapture is a BeadWriter that keeps the comment it was given.
+type handBackCapture struct{ text string }
+
+func (w *handBackCapture) State(context.Context, string) (string, string, error) {
+	return "open", "", nil
+}
+func (w *handBackCapture) SetStatus(context.Context, string, string) error { return nil }
+func (w *handBackCapture) ClearAssignee(context.Context, string) error     { return nil }
+func (w *handBackCapture) AddLabel(context.Context, string, string) error  { return nil }
+func (w *handBackCapture) Comment(_ context.Context, _, text string) error { w.text = text; return nil }
+
+// TestReworkSeatFrom_ReadsAHandBackReworkComment: a bead the overrun guard
+// handed back as rework resumes the branch its comment names, the newest of the
+// two comment forms wins, and a bead without the rework label is left alone.
+func TestReworkSeatFrom_ReadsAHandBackReworkComment(t *testing.T) {
+	t.Parallel()
+	kept := "polecat/anchor/dv-qhnhc+mwq8hx1x"
+	dotted := "polecat/anchor/dv-jokk.2+mwq8hx1x"
+	submitted := "Submitted for landing: polecat/agate/gt-rw1+muu1 @ 1111aaaa onto main (attempt 1)"
+	for _, tt := range []struct {
+		name     string
+		labels   []string
+		comments []string
+		want     string
+	}{
+		{"only the hand-back names the branch", []string{"rework"}, []string{handBackComment(t, kept)}, kept},
+		{"a bead id with a dot keeps its whole branch", []string{"rework"}, []string{handBackComment(t, dotted)}, dotted},
+		{"a newer hand-back wins over a submission", []string{"rework"}, []string{submitted, handBackComment(t, kept)}, kept},
+		{"an older hand-back loses to a submission", []string{"rework"}, []string{handBackComment(t, kept), submitted}, "polecat/agate/gt-rw1+muu1"},
+		{"a branch not followed by a period and space is not read", []string{"rework"}, []string{"its work is already on origin as branch " + kept}, ""},
+		{"no rework label ignores the hand-back", []string{"gt:ready-to-land"}, []string{handBackComment(t, kept)}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			comments := make([]beads.Comment, 0, len(tt.comments))
+			for _, c := range tt.comments {
+				comments = append(comments, beads.Comment{Text: c})
+			}
+			got, ok := reworkSeatFrom(&beads.Issue{ID: reworkBead, Labels: tt.labels}, comments)
+			if tt.want == "" {
+				if ok {
+					t.Fatalf("got %+v; want no rework seat", got)
+				}
+				return
+			}
+			if !ok || got.Branch != tt.want {
+				t.Fatalf("got %+v, ok=%v; want branch %s", got, ok, tt.want)
 			}
 		})
 	}
