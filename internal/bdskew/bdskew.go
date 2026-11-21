@@ -27,7 +27,7 @@ var (
 	// reading it as zero would compare equal to a database before its first
 	// migration.
 	ErrEmptyListing = errors.New("bdskew: empty migration listing")
-	// ErrUnnumbered reports a listing entry whose name does not open with a
+	// ErrUnnumbered reports a .sql listing entry whose name does not open with a
 	// migration number, the run of digits before the first underscore.
 	ErrUnnumbered = errors.New("bdskew: migration name without a leading number")
 	// ErrNumberOutOfRange reports a numbered name whose number is too large for
@@ -45,15 +45,6 @@ var (
 // so an abbreviation another commit can claim never reaches the lister.
 var commitForm = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
-// nonMigrationNames are the files bd keeps in MigrationsDir that are not
-// migrations (README.md, ignored, nondeterminism-allowlist.txt at the pinned
-// commit), skipped by exact whole name; any other unnumbered entry is refused.
-var nonMigrationNames = map[string]struct{}{
-	"README.md":                    {},
-	"ignored":                      {},
-	"nondeterminism-allowlist.txt": {},
-}
-
 // Lister lists the file names a directory holds at one commit of a
 // repository.
 type Lister interface {
@@ -66,17 +57,16 @@ type Lister interface {
 // under MigrationsDir such as 0067_create_samples.up.sql. Both halves of a
 // migration carry the same number, so either one sets it.
 //
-// An empty listing is ErrEmptyListing, an entry that does not start with a
-// number and an underscore is ErrUnnumbered, and one whose number does not fit
-// an int is ErrNumberOutOfRange. The known non-migration files in
-// nonMigrationNames are skipped by exact name; every other entry must be a
-// migration, because skipping a name this function does not understand would
-// let a mistyped migration hide a level. A listing with no migration once the
-// known names are skipped is ErrEmptyListing, never level zero.
+// An entry is a migration file when its name ends in .sql. An entry that does
+// not end in .sql is not a migration (bd keeps README.md, ignored and
+// nondeterminism-allowlist.txt beside them) and is skipped. A .sql entry whose
+// name does not start with a number and an underscore is ErrUnnumbered, and
+// one whose number does not fit an int is ErrNumberOutOfRange. A listing with
+// no .sql entry is ErrEmptyListing, never level zero.
 func MaxMigration(names []string) (int, error) {
 	max := -1
 	for _, name := range names {
-		if _, ok := nonMigrationNames[name]; ok {
+		if !strings.HasSuffix(name, ".sql") {
 			continue
 		}
 		number, err := migrationNumber(name)
