@@ -210,3 +210,36 @@ func TestContainerSuiteGateSeparatorsAndSpellings(t *testing.T) {
 		}
 	}
 }
+
+// TestContainerSuiteGateDockerOff: a whole-package run of a listed package is
+// accepted when the command sets GT_TEST_DOCKER=0, the one value that keeps
+// testutil from starting a container (the runtime guard blocks only a run with
+// GT_TEST_DOCKER=1) and it is the last GT_TEST_DOCKER word that counts; any other prefix, no prefix, a chain whose later command
+// has none and an env word before another program change nothing.
+func TestContainerSuiteGateDockerOff(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		gate   string
+		refuse bool
+	}{
+		{"docker off, whole package", "GT_TEST_DOCKER=0 go test ./internal/cmd -count=1", false},
+		{"docker on", "GT_TEST_DOCKER=1 go test ./internal/cmd -count=1", true},
+		{"no prefix", "go test ./internal/cmd -count=1", true},
+		{"docker off with a run filter", "GT_TEST_DOCKER=0 go test ./internal/cmd -run 'TestX'", false},
+		{"docker off only on the first command", "GT_TEST_DOCKER=0 go test ./internal/cmd && go test ./internal/daemon", true},
+		{"the prefix on another program", "GT_TEST_DOCKER=0 echo go test ./internal/cmd", true},
+		{"docker off then on: the last assignment wins", "GT_TEST_DOCKER=0 GT_TEST_DOCKER=1 go test ./internal/cmd -count=1", true},
+		{"docker on then off", "GT_TEST_DOCKER=1 GT_TEST_DOCKER=0 go test ./internal/cmd -count=1", false},
+		{"docker off twice", "GT_TEST_DOCKER=0 GT_TEST_DOCKER=0 go test ./internal/cmd -count=1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			v := Lint(specWithGate(tt.gate), defaultTemplate())
+			if tt.refuse && v.Route != RouteRefuse || !tt.refuse && !v.Clean() {
+				t.Fatalf("verdict = %s, want refuse=%v", v.Line("gt-good"), tt.refuse)
+			}
+		})
+	}
+}
