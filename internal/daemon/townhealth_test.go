@@ -741,12 +741,16 @@ func promotionsTown(t *testing.T, promoteVia map[string]string) (string, *Daemon
 	}
 }
 
-// PromotionsReleaseDriven pins gt-5w9hx9: a rig with promote_via app-promote
-// comes back marked, a rig with it empty does not (gt-9nigqs awaits a release).
+// PromotionsReleaseDriven pins gt-5w9hx9: only promote_via app-promote comes
+// back marked; empty, "default" and an unrecognised value do not (gt-9nigqs, gt-h8bem3).
 func TestPromotionsReleaseDriven(t *testing.T) {
 	t.Parallel()
-	town, d := promotionsTown(t, map[string]string{"apprig": "app-promote", "plainrig": ""})
-	for _, name := range []string{"apprig", "plainrig"} {
+	via := map[string]string{
+		"apprig": "app-promote", "plainrig": "",
+		"defaultrig": "default", "unknownrig": "app-promote-beta", // a prefix, not the value
+	}
+	town, d := promotionsTown(t, via)
+	for name := range via {
 		writeJSONFile(t, RedMainStatePath(town, name), landworker.MainState{LastGreen: "bbbb", LastRun: "bbbb"})
 	}
 
@@ -754,12 +758,12 @@ func TestPromotionsReleaseDriven(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Promotions: %v", err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("Promotions = %+v, want apprig and plainrig", got)
+	if len(got) != len(via) {
+		t.Fatalf("Promotions = %+v, want a record for each of %d rigs", got, len(via))
 	}
 	for _, p := range got {
 		if want := p.Rig == "apprig"; p.ReleaseDriven != want {
-			t.Errorf("%s ReleaseDriven = %v, want %v", p.Rig, p.ReleaseDriven, want)
+			t.Errorf("%s (promote_via %q) ReleaseDriven = %v, want %v", p.Rig, via[p.Rig], p.ReleaseDriven, want)
 		}
 	}
 }
