@@ -10,6 +10,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 )
 
 // viaJobWithin runs cacheTrimClaimViaJob on the fixture's claim and returns its
@@ -517,6 +520,56 @@ func TestCacheTrimLateResultMalformedParks(t *testing.T) {
 			}
 			if got := len(f.cli.recorded()); got != calls {
 				t.Errorf("%s: the parked claim made %d more cluster calls, want none", name, got-calls)
+			}
+		})
+	}
+}
+
+// TestCacheTrimSwitchRaisesWhenTheDiskStaysFull pins the replacement for the
+// over-the-cap alert the claim Job route cannot raise (it measures nothing): after
+// a finished trim, a sandbox disk at or over the early trim percent raises one
+// low item for the claim; one under it raises none; an unreadable disk raises
+// none and says so once an hour; a dry run reads no disk.
+func TestCacheTrimSwitchRaisesWhenTheDiskStaysFull(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		apply     bool
+		reading   []disks.Reading
+		wantItem  bool
+		wantReads int
+		wantLog   string
+	}{
+		{"at the percent", true, []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 75}}, true, 1, ""},
+		{"under the percent", true, []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 74}}, false, 1, ""},
+		{"an unreadable disk", true, []disks.Reading{{Name: diskMaintDiskColima, Err: errors.New("df failed")}}, false, 1, "the sandbox disk could not be read after the trim"},
+		{"a dry run", false, []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 99}}, false, 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", nil)
+			reads := 0
+			f.d.diskMaint.readDisks = func(context.Context) []disks.Reading { reads++; return tc.reading }
+			if !viaJob(t, f, tc.apply, map[string]string{}) {
+				t.Fatalf("%s: the pass = false, want true; log: %s", tc.name, f.log.String())
+			}
+			if reads != tc.wantReads {
+				t.Errorf("%s: the disk was read %d times, want %d", tc.name, reads, tc.wantReads)
+			}
+			var raised int
+			for _, it := range f.noOpItems(t) {
+				if it.Key == cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName) {
+					raised++
+					if it.Severity != attention.SeverityLow || !strings.Contains(it.Summary, "75%") {
+						t.Errorf("%s: the item is %+v, want a low item naming the 75%% early percent", tc.name, it)
+					}
+				}
+			}
+			if (raised == 1) != tc.wantItem || raised > 1 {
+				t.Errorf("%s: %d item(s) for the claim, want an item = %v", tc.name, raised, tc.wantItem)
+			}
+			if tc.wantLog != "" && !strings.Contains(f.log.String(), tc.wantLog) {
+				t.Errorf("%s: the log lacks %q: %s", tc.name, tc.wantLog, f.log.String())
 			}
 		})
 	}

@@ -3,7 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 // cacheTrimClaimViaJob trims one claim through the claim Job and nothing else:
@@ -91,6 +94,7 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
 	d.logger.Printf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
+	d.cacheTrimDiskStillFull(ctx, claim.ClaimName, namespace)
 	return true
 }
 
@@ -122,4 +126,31 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 		trimmed: &removed, absent: &absent, kept: &kept})
 	d.logger.Printf("disk_maintenance: cache trim %s in %s: the earlier trim Job %s completed after its wait; recorded: removed %d absent %d kept %d", claim.ClaimName, namespace, jobName, removed, absent, kept)
 	return true
+}
+
+// cacheTrimDiskStillFull replaces the over-the-cap item the claim Job route cannot
+// raise, since it measures nothing: after a finished trim, a sandbox disk at or
+// over the early trim percent raises one low item for the claim. A disk that
+// cannot be read raises nothing (an unreadable disk is not a full one) and says
+// so once an hour.
+func (d *Daemon) cacheTrimDiskStillFull(ctx context.Context, claim, namespace string) {
+	percent, err := diskMaintenanceCacheTrimEarlyPercent(d.patrol())
+	if err != nil {
+		return // the early tick refuses a setting it cannot read
+	}
+	used, err := d.sandboxDiskUsedPct(ctx)
+	if err != nil {
+		d.cacheTrimLogKeyed("cache_trim_disk_unknown:"+namespace+"/"+claim,
+			"disk_maintenance: cache trim %s in %s: the sandbox disk could not be read after the trim: %v; no attention item is raised", claim, namespace, err)
+		return
+	}
+	if used < float64(percent) {
+		return
+	}
+	d.cacheTrimNoOp.raise(attention.Item{
+		Key:      cacheTrimNoOpKey(namespace, claim),
+		Kind:     attention.KindCacheTrimNoOp,
+		Severity: attention.SeverityLow,
+		Summary:  fmt.Sprintf("cache trim of %s in %s completed but the sandbox disk still reads %.0f%% against the early trim percent %d%%: files younger than the age floor cannot be removed yet and open sandbox paths can hold space", claim, namespace, used, percent),
+	})
 }
