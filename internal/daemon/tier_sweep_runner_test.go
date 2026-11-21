@@ -1289,15 +1289,21 @@ func syncCreate(plan sweeprunner.Plan) sweeprunner.Step {
 type mirrorFSRecorder struct {
 	paths map[string]bool
 	ops   []string
+	// fail makes the named operation (removeAll, mkdirAll, create, remove) fail.
+	fail map[string]error
 }
 
 func (m *mirrorFSRecorder) fs() *tierSweepMirrorFS {
 	return &tierSweepMirrorFS{
-		exists:    func(p string) bool { return m.paths[p] },
-		removeAll: func(p string) error { m.ops = append(m.ops, "removeAll "+p); delete(m.paths, p); return nil },
-		mkdirAll:  func(p string) error { return nil },
-		create:    func(p string) error { m.ops = append(m.ops, "create "+p); m.paths[p] = true; return nil },
-		remove:    func(p string) error { m.ops = append(m.ops, "remove "+p); delete(m.paths, p); return nil },
+		exists: func(p string) bool { return m.paths[p] },
+		removeAll: func(p string) error {
+			m.ops = append(m.ops, "removeAll "+p)
+			delete(m.paths, p)
+			return m.fail["removeAll"]
+		},
+		mkdirAll: func(p string) error { return m.fail["mkdirAll"] },
+		create:   func(p string) error { m.ops = append(m.ops, "create "+p); m.paths[p] = true; return m.fail["create"] },
+		remove:   func(p string) error { m.ops = append(m.ops, "remove "+p); delete(m.paths, p); return m.fail["remove"] },
 	}
 }
 
@@ -1393,6 +1399,35 @@ func TestTierSweepMirrorRebuildsAfterAnInterruptedUpdate(t *testing.T) {
 			t.Errorf("err %v, operations %q, want the foreign path refused", err, rec.ops)
 		}
 	})
+}
+
+// TestTierSweepMirrorPreparationFailuresAreLoud holds that every filesystem failure of
+// the marker and the rebuild fails the launch with the operation's own error and the
+// path it was about, never a silent skip (gt-kx3plk).
+func TestTierSweepMirrorPreparationFailuresAreLoud(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		op      string
+		marker  bool // the marker is already there, so the rebuild runs
+		wantErr string
+	}{
+		{"removeAll", true, "removing the unfinished mirror"},
+		{"remove", true, "removing the marker"},
+		{"mkdirAll", false, "denied"},
+		{"create", false, "writing the marker"},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			t.Parallel()
+			rec := &mirrorFSRecorder{paths: map[string]bool{}, fail: map[string]error{tc.op: errors.New("denied")}}
+			d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+			d.tierSweepSeams.mirrorFS = rec.fs()
+			spec.Snapshot = filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+			rec.paths[spec.Snapshot+".updating"] = tc.marker
+			if _, err := d.tierSweepMirrorPrepare(spec); err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "denied") && tc.op != "mkdirAll" {
+				t.Errorf("%s failing: err %v, want it naming %q and the cause", tc.op, err, tc.wantErr)
+			}
+		})
+	}
 }
 
 // TestTierSweepMirrorLaunchesAreSequential pins the ordering the shared mirror needs:
