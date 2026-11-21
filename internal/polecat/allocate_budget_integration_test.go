@@ -174,7 +174,7 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 	}
 	table := []commandCount{
 		{"cat-file", 1}, {"config", 2}, {"fetch", 1}, {"rev-parse", 3},
-		{"show-ref", 1}, {"worktree", 2},
+		{"show-ref", 0}, {"worktree", 2},
 	}
 	if msgs := pinProblems(table, rec); len(msgs) > 0 {
 		t.Fatalf("allocate ran git commands the table does not pin:\n%s", strings.Join(msgs, "\n"))

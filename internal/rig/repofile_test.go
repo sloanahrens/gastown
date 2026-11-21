@@ -2,6 +2,7 @@ package rig
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -242,7 +243,10 @@ func TestReadRepoFile_NoFetchedMainIsNotFound(t *testing.T) {
 	rigRepoDir(t, townRoot, "mango-unfetched")
 	cloneFile(t, townRoot, "mango-unfetched", ".om.json", `{"unfetched":true}`)
 
-	got, err := ReadRepoFile(stubOpener(stubRepo{}), townRoot, "mango-unfetched", ".om.json")
+	// ShowFileAtRev reports the unresolved ref as a typed error, so ReadRepoFile
+	// asks nothing else about it (gt-iuzcez).
+	unresolved := stubRepo{refExists: true, fileErr: fmt.Errorf("resolving refs/remotes/origin/main: %w", git.ErrRefNotFound)}
+	got, err := ReadRepoFile(stubOpener(unresolved), townRoot, "mango-unfetched", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
