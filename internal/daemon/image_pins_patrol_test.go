@@ -1868,6 +1868,45 @@ func TestImagePinsReadHoldsOnlyTheSamePinCommit(t *testing.T) {
 	}
 }
 
+// TestImagePinsReadLogsAGoodReadWithItsDuration: each pin a tick read is logged
+// with its count and duration, and a failed read is not logged as a good one (gt-i55nc5).
+func TestImagePinsReadLogsAGoodReadWithItsDuration(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d := newImagePinsForgejo(t)
+	clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+	d.logger, d.clock = log.New(&logs, "", 0), clk
+	atTip := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit,
+		pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsCommit}
+	failBD := false
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		// Four ls-remote calls at 525ms each make one tick read in 2.1s.
+		clk.Advance(525 * time.Millisecond)
+		if failBD && cmd.Args[len(cmd.Args)-2] == pinsReadPinURL("beads") {
+			return nil, []byte("fatal: unable to access\n"), errors.New("git exited 128")
+		}
+		return []byte(pinsReadLS(atTip[cmd.Args[len(cmd.Args)-2]])), nil, nil
+	}
+	if _, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL)); err != nil {
+		t.Fatalf("readImagePinTips: %v", err)
+	}
+	want := "image_pins: read bd pin 11111111 tip 11111111 behind 0 in 2.1s\n" +
+		"image_pins: read om pin 22222222 tip 22222222 behind 0 in 2.1s\n" +
+		"image_pins: read hm pin 33333333 tip 33333333 behind 0 in 2.1s\n" +
+		"image_pins: read devops pin 44444444 tip 44444444 behind 0 in 2.1s\n"
+	if got := logs.String(); got != want {
+		t.Fatalf("daemon.log = %q, want one good-read line per pin, %q", got, want)
+	}
+	logs.Reset()
+	failBD = true
+	if _, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL)); err != nil {
+		t.Fatalf("readImagePinTips with bd failing: %v", err)
+	}
+	if got := logs.String(); strings.Contains(got, "read bd pin") || strings.Count(got, "image_pins: read ") != 3 || !strings.Contains(got, "image pin bd cannot be read") {
+		t.Fatalf("daemon.log = %q, want bd held from its last good state, never logged as a good read, and the other three pins' good reads", got)
+	}
+}
+
 // TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin: the age read fetches
 // the filtered main, then answers the tip's committer time minus the pin's.
 func TestImagePinsAgeRunsFetchThenShowAndReturnsTipMinusPin(t *testing.T) {
