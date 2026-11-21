@@ -54,6 +54,16 @@ const (
 	// ciEngineRoot is the Docker data root the engine's size is read from: the
 	// claim the dind container mounts.
 	ciEngineRoot = ciCacheDindMount
+
+	// ciEngineKeepStorageFlag is the builder prune flag that bounds the build
+	// cache's size; the argument after it is a size such as 10240MB. The runner's
+	// engine takes --reserved-space (gt-85weve: docker 29.9.3 rejects
+	// --keep-storage); this constant is the only place to change the spelling.
+	ciEngineKeepStorageFlag = "--reserved-space"
+
+	// ciEngineMegabyte is the byte count ciEngineKeepStorageSize counts a
+	// megabyte in: 1 MiB, the unit the patrol's size settings are read in.
+	ciEngineMegabyte = 1 << 20
 )
 
 // The outcomes an engine prune run records in the job ledger. A failed run is
@@ -134,9 +144,21 @@ func (r ciEngineRemoval) presenceArgv(ids []string) []string {
 }
 
 // ciEngineBuildCachePruneArgv is the build cache prune: everything unused for
-// unusedAge. docker's until filter takes a duration, not a time.
-func ciEngineBuildCachePruneArgv(unusedAge time.Duration) []string {
-	return []string{"docker", "builder", "prune", "-af", "--filter", "until=" + ciEngineUntil(unusedAge)}
+// unusedAge, keeping at most keepBytes, the least recently used records going
+// first. docker's until filter takes a duration, not a time.
+func ciEngineBuildCachePruneArgv(unusedAge time.Duration, keepBytes int64) []string {
+	return []string{"docker", "builder", "prune", "-af", "--filter", "until=" + ciEngineUntil(unusedAge),
+		ciEngineKeepStorageFlag, ciEngineKeepStorageSize(keepBytes)}
+}
+
+// ciEngineKeepStorageSize spells keepBytes as the size docker's builder flags
+// take: whole megabytes, 1 MiB each, when it divides evenly, otherwise the byte
+// count with B. Neither spelling rounds, so the size never exceeds the limit.
+func ciEngineKeepStorageSize(keepBytes int64) string {
+	if keepBytes%ciEngineMegabyte == 0 {
+		return strconv.FormatInt(keepBytes/ciEngineMegabyte, 10) + "MB"
+	}
+	return strconv.FormatInt(keepBytes, 10) + "B"
 }
 
 // ciEngineUntil spells an age as the duration docker's until filter parses: whole
@@ -189,18 +211,18 @@ func ciEngineBuildCacheTotal(out []byte) (int64, error) {
 // returns the bytes the prune reclaimed and whether docker printed that figure in a
 // size at all (known is false when the Total line could not be read), the verdict
 // line naming them, and the WARN line when the prune reclaimed nothing although
-// docker reported reclaimable cache before it ran; unusedAge is the filter that WARN
-// names. reclaimableKnown is false when that size read failed, which skips the WARN
-// and nothing else. A total that cannot be read is named by docker's last line,
-// bounded, and fails nothing.
-func ciEngineBuildCacheReport(out []byte, reclaimable int64, reclaimableKnown bool, unusedAge time.Duration) (reclaimed int64, known bool, verdict, warn string) {
+// docker reported reclaimable cache before it ran; unusedAge and keepBytes are the
+// filter and the keep size that WARN names. reclaimableKnown is false when that size
+// read failed, which skips the WARN and nothing else. A total that cannot be read is
+// named by docker's last line, bounded, and fails nothing.
+func ciEngineBuildCacheReport(out []byte, reclaimable int64, reclaimableKnown bool, unusedAge time.Duration, keepBytes int64) (reclaimed int64, known bool, verdict, warn string) {
 	n, err := ciEngineBuildCacheTotal(out)
 	if err != nil {
 		return 0, false, fmt.Sprintf("build cache reclaimed unknown (docker's last line was %q)", ciEngineBounded(ciEngineLastLine(out))), ""
 	}
 	if n == 0 && reclaimableKnown && reclaimable > 0 {
-		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s, and cache younger than the filter is not removed",
-			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge))
+		warn = fmt.Sprintf("disk_maintenance: ci engine prune: WARN: the build cache prune reclaimed %s, though docker system df reported %s reclaimable before it ran; the filter was until=%s and the keep size was %s, so cache younger than the filter or inside the keep size is not removed",
+			polecatimage.Human(n), polecatimage.Human(reclaimable), ciEngineUntil(unusedAge), ciEngineKeepStorageSize(keepBytes))
 	}
 	return n, true, "build cache reclaimed " + polecatimage.Human(n), warn
 }
@@ -631,27 +653,30 @@ func ciEngineExitStatus(err error) string {
 	return "no exit status"
 }
 
-// ciEnginePruneSettings reads the engine prune's four settings from the patrol's
+// ciEnginePruneSettings reads the engine prune's five settings from the patrol's
 // block, returning the default for each that is empty. A value the patrol cannot
 // act on is an error naming its key.
-func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, repoList []string, err error) {
+func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (every, imageAge, unusedAge time.Duration, keepBytes int64, repoList []string, err error) {
 	var settings agentconfig.DiskMaintenanceConfig
 	if c := diskMaintenanceSettings(cfg); c != nil {
 		settings = *c
 	}
 	if every, err = settings.CIEnginePruneEvery(); err != nil {
-		return 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, err
 	}
 	if imageAge, err = settings.CIEnginePruneAgeDuration(); err != nil {
-		return 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, err
 	}
 	if unusedAge, err = settings.CIEngineUnusedAgeDuration(); err != nil {
-		return 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, err
+	}
+	if keepBytes, err = settings.CIEngineCacheKeepLimit(); err != nil {
+		return 0, 0, 0, 0, nil, err
 	}
 	if repoList, err = settings.CIEngineKeepRepoList(); err != nil {
-		return 0, 0, 0, nil, err
+		return 0, 0, 0, 0, nil, err
 	}
-	return every, imageAge, unusedAge, repoList, nil
+	return every, imageAge, unusedAge, keepBytes, repoList, nil
 }
 
 // runCIEnginePruneTick is the engine prune's own tick. It runs before the quiet
@@ -670,7 +695,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	every, _, _, _, err := ciEnginePruneSettings(pc)
+	every, _, _, _, _, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -698,7 +723,7 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
-	every, _, _, _, err := ciEnginePruneSettings(d.patrol())
+	every, _, _, _, _, err := ciEnginePruneSettings(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -729,7 +754,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	started := s.now()
-	every, imageAge, unusedAge, keepRepos, err := ciEnginePruneSettings(pc)
+	every, imageAge, unusedAge, keepBytes, keepRepos, err := ciEnginePruneSettings(pc)
 	stats := map[string]int64{}
 	outcome := ciEngineOutcomeFailed
 	// The run is recorded on every return path below, the refusals included, so
@@ -834,12 +859,12 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	}
 	cache := "build cache prune failed"
 	zeroReclaim := false
-	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(unusedAge)...); err != nil {
+	if pruned, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(unusedAge, keepBytes)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineFailure(err, stderr))
 		failed = true
 	} else {
-		reclaimed, known, verdict, warn := ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge)
+		reclaimed, known, verdict, warn := ciEngineBuildCacheReport(pruned, reclaimable, reclaimErr == nil, unusedAge, keepBytes)
 		cache = verdict
 		if known {
 			stats["build_cache_bytes"] = reclaimed

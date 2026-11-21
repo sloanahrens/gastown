@@ -157,14 +157,14 @@ func TestIntegrationCIEngineRemovalsReachDockerAsGiven(t *testing.T) {
 			t.Errorf("the %s removal left %q unreported by docker", r.kind, missing)
 		}
 	}
-	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(24*time.Hour)...); !ok {
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(24*time.Hour, 10<<30)...); !ok {
 		t.Fatalf("the build cache prune failed on a clean engine")
 	}
 	want := []string{
 		"rm c1 c2",
 		"rmi -f sha256:i1",
 		"volume rm v1 v2",
-		"builder prune -af --filter until=24h",
+		"builder prune -af --filter until=24h --reserved-space 10240MB",
 	}
 	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("docker calls = %q, want %q", got, want)
@@ -176,7 +176,7 @@ func TestIntegrationCIEngineRemovalsReachDockerAsGiven(t *testing.T) {
 // with exit 1, so a run that sends one cannot pass.
 func TestIntegrationCIEngineBuildCachePruneRejectsATimestamp(t *testing.T) {
 	f := newFakeDocker(t)
-	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(24*time.Hour)...); !ok {
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(24*time.Hour, 10<<30)...); !ok {
 		t.Fatalf("the build cache prune the daemon builds was refused")
 	}
 	timestamp := []string{"docker", "builder", "prune", "-af", "--filter", "until=2026-11-09T20:03:27-06:00"}
