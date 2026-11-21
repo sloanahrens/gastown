@@ -32,6 +32,11 @@ const maxScanBytes = 64 << 20
 // maxScanBytes. Verify names the entry and the rule when it sees it.
 var errTooLarge = errors.New("content is larger than the scan bound")
 
+// errNestedGzip reports a gzip member whose decompressed content is another gzip
+// stream: a second layer is how a credential would be hidden from the scan, and
+// no real export nests one (townstate.FlaggedContent refuses it too, gt-o6dpg6).
+var errNestedGzip = errors.New("content is a gzip stream inside a gzip stream")
+
 // maxTrailing bounds what Verify reads past the tar stream's end blocks while
 // reaching the gzip trailer, so a decompression bomb cannot run unbounded. An
 // export writes nothing there.
@@ -117,6 +122,9 @@ func Verify(archive string) (res Result, err error) {
 		if errors.Is(err, errTooLarge) {
 			return Result{}, fmt.Errorf("%s: entry %s is a gzip member whose content is too large to scan (over %d bytes)", archive, name, maxScanBytes)
 		}
+		if errors.Is(err, errNestedGzip) {
+			return Result{}, fmt.Errorf("%s: entry %s is a gzip member inside a gzip member, which hides its content from the scan", archive, name)
+		}
 		if err != nil {
 			return Result{}, fmt.Errorf("%s: entry %s: %w", archive, name, err)
 		}
@@ -167,6 +175,9 @@ func scanBody(data []byte) ([]byte, error) {
 	}
 	if len(content) > maxScanBytes {
 		return nil, errTooLarge
+	}
+	if len(content) >= 2 && content[0] == 0x1f && content[1] == 0x8b {
+		return nil, errNestedGzip
 	}
 	return content, nil
 }

@@ -421,6 +421,35 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(member[:len(member)-1])}),
 			"does not decompress", "")
 	})
+	// A second gzip layer is how a credential would be hidden from the scan, and
+	// no real export nests one: Verify refuses it as the export check does
+	// (gt-o6dpg6), whether or not the inner content holds a credential.
+	for _, c := range []struct {
+		name   string
+		layers int
+		inner  string
+	}{
+		{"a gzip member inside a gzip member with a credential", 2, `{"note":"sk-abcdefghijklmnop1234"}`},
+		{"three gzip layers with a credential", 3, `{"note":"sk-abcdefghijklmnop1234"}`},
+		{"a gzip member inside a gzip member, clean", 2, `{"note":"fine"}`},
+	} {
+		t.Run(c.name+" is refused", func(t *testing.T) {
+			t.Parallel()
+			body := c.inner
+			for i := 0; i < c.layers; i++ {
+				body = string(gzipped(t, body))
+			}
+			verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: body}),
+				"entry logs/export.json.gz is a gzip member inside a gzip member", "abcdefghijkl")
+		})
+	}
+	t.Run("a clean single gzip member passes", func(t *testing.T) {
+		t.Parallel()
+		member := gzipped(t, `{"note":"fine"}`)
+		if _, err := Verify(writeArchive(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(member)}))); err != nil {
+			t.Fatalf("Verify refused a clean single-layer member: %v", err)
+		}
+	})
 	t.Run("gzip member whose content is over the bound is refused", func(t *testing.T) {
 		t.Parallel()
 		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(gzipZeros(t, maxScanBytes+1))}),
