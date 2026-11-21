@@ -1581,6 +1581,112 @@ func TestTakeoverSeatEndEndsADoneSeatWithNoReadyBlock(t *testing.T) {
 	}
 }
 
+// A seat the landed bead names can hold another bead by the time the takeover
+// lands: the polecat name was re-slung after it submitted this bead, so its
+// agent bead hooks another open bead and records that bead's branch. Its own
+// READY block still names it, so the landing offers it the end, and the real
+// keepReason must keep it - hook_bead is still set - leaving its host
+// directories where they are and the sandbox that holds the only copy of its
+// outbox undeleted. The control row is the same seat clean and done with its
+// hook cleared by gt done: the same landing offers it and the end removes it
+// (gt-1a1vbu).
+func TestTakeoverSeatEndKeepsAReusedSeat(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	const otherBranch = "polecat/" + endPolecat + "/gt-other1+x1"
+	tests := []struct {
+		name     string
+		seat     func(*seatEndFake)
+		wantGone bool
+		wantLog  string
+	}{
+		{
+			name: "a seat re-slung to another bead keeps its dirs and outbox",
+			seat: func(f *seatEndFake) {
+				f.seatFields.HookBead = "gt-other1"
+				f.seatFields.Branch = otherBranch
+				f.seatFields.AgentState = string(beads.AgentStateWorking)
+			},
+			wantLog: "kept: hook_bead=gt-other1 is still set",
+		},
+		{
+			name: "the same seat clean and done with no hook is removed",
+			seat: func(f *seatEndFake) {
+				f.seatFields.LastSourceIssue = endBead
+				f.seatFields.AgentState = string(beads.AgentStateDone)
+			},
+			wantGone: true,
+			wantLog:  "removed its host directories: the seat is finished",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			tt.seat(f)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			// The seat's sandbox is still there, holding the only copy of what
+			// it wrote, and is in a terminal failure the end deletes only once
+			// every guard lets the seat go.
+			sessionName := f.host.sessionName(endRig, endPolecat)
+			if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+				Session: sessionName, Rig: endRig, Polecat: endPolecat, Gateway: "gw1",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+			f.host.sandboxStatus = func(_, name string) (sandbox.Status, error) {
+				return sandbox.Status{Name: name, Phase: "Error"}, nil
+			}
+			copied := 0
+			f.host.sandboxOutboxCopy = func(string, session.SandboxRecord) error {
+				copied++
+				return nil
+			}
+			var logs strings.Builder
+			d := f.host.d
+			d.logger = log.New(&logs, "", 0)
+			d.openWorkBeads = func([]string, time.Duration) workBeadReader {
+				// The seat's own submission left this READY block on the bead
+				// before the re-sling, so the offer names the seat even though
+				// its agent bead now hooks other work.
+				return workBeadStore{endBead: &beads.Issue{
+					ID: endBead, Assignee: endRig + "/polecats/" + endPolecat,
+					Notes: land.FormatReadyNote(land.Work{
+						Branch: endBranch, Head: head, Target: "main", Worker: endRig + "/polecats/" + endPolecat,
+					}),
+				}}
+			}
+			d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+			// The production end step over the harness's agent-bead and gateway
+			// seams: the offer runs into the real keepReason.
+			d.endSandboxSeat = f.host.endFinishedSandboxSeat
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+			if copied != 1 {
+				t.Errorf("its outbox was copied out %d times, want once before any delete: %s", copied, logs.String())
+			}
+			if gone := !dirExists(t, dirs.PolecatDir); gone != tt.wantGone {
+				t.Errorf("seat directory removed = %v, want %v\nlog:\n%s", gone, tt.wantGone, logs.String())
+			}
+			if gone := !dirExists(t, dirs.PromptFile); gone != tt.wantGone {
+				t.Errorf("prompt file removed = %v, want %v", gone, tt.wantGone)
+			}
+			if !tt.wantGone && len(f.deleted) != 0 {
+				t.Errorf("its sandbox, where its outbox lives, was deleted %v, want it kept", f.deleted)
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log =\n%s\nwant it to carry %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
 // TestSandboxSeatEndHostWiresTheUsageRecordStore: the host the daemon's own
 // seat end runs on carries the town's usage_records store, so a seat's record
 // is filed as a row beside its file and never as a file alone.
