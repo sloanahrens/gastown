@@ -2,6 +2,7 @@ package done
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -62,9 +63,9 @@ func TestLineLimitWiringRefusesAPolecatPastTwiceTheLimit(t *testing.T) {
 }
 
 // pastLimitHarness is a submit harness whose git reports 141 added lines
-// against the 70 its bead declares, so checkBranchForSubmit reaches the size
-// refusal with a fake origin to push to.
-func pastLimitHarness(t *testing.T, backend string, polecat bool) *submitHarness {
+// against the 70 its bead declares (or cannot count them), so checkBranchForSubmit
+// reaches the size check with a fake origin to push to.
+func pastLimitHarness(t *testing.T, backend string, polecat, countFails bool) *submitHarness {
 	t.Helper()
 	h := newSubmitHarness(t)
 	h.r.sessionBackend = backend
@@ -72,6 +73,9 @@ func pastLimitHarness(t *testing.T, backend string, polecat bool) *submitHarness
 	h.r.out = new(bytes.Buffer)
 	h.r.g = git.NewGitWithExec(t.TempDir(), func(c git.ExecCall) (string, string, error) {
 		if args := c.Args(); len(args) >= 2 && args[0] == "diff" && args[1] == "--numstat" {
+			if countFails {
+				return "", "", errors.New("numstat failed")
+			}
 			return "141\t0\tinternal/done/done.go\n", "", nil
 		}
 		return "", "", nil
@@ -80,34 +84,50 @@ func pastLimitHarness(t *testing.T, backend string, polecat bool) *submitHarness
 }
 
 // TestLineLimitRefusalPushesASandboxSeatsBranch: a sandbox polecat refused for a
-// size overrun has its branch pushed to origin before the refusal returns, so the
-// commit does not live only in the sandbox that is about to stop; a crew branch is
-// warned, not refused, and pushes nothing.
+// size overrun has its branch pushed once before the refusal returns, so the
+// commit does not live only in the sandbox that is about to stop; a failed push
+// warns and the refusal still returns; a crew branch past the limit is warned,
+// not refused, and pushes nothing; an added-line count that cannot be read is an
+// error for polecat and crew alike and pushes nothing.
 func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		backend    string
 		polecat    bool
-		wantErr    bool
-		wantPushed bool
+		countFails bool
+		pushErr    error
+		wantErr    string
+		wantPushes int
+		wantWarn   string
 	}{
-		{name: "sandbox_polecat", backend: backendOpenShell, polecat: true, wantErr: true, wantPushed: true},
-		{name: "crew_branch", backend: backendOpenShell, polecat: false},
+		{name: "sandbox_polecat_refused", polecat: true, wantErr: splitLine, wantPushes: 1},
+		{name: "sandbox_polecat_push_fails", polecat: true, pushErr: errors.New("connection reset"), wantErr: splitLine, wantWarn: "could not push " + doneTestBranch},
+		{name: "sandbox_crew_past_limit", polecat: false},
+		{name: "sandbox_polecat_count_fails", polecat: true, countFails: true, wantErr: "added-line check"},
+		{name: "sandbox_crew_count_fails", polecat: false, countFails: true, wantErr: "added-line check"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			h := pastLimitHarness(t, tt.backend, tt.polecat)
+			h := pastLimitHarness(t, backendOpenShell, tt.polecat, tt.countFails)
+			if tt.pushErr != nil {
+				h.repo.pushErrs = []error{tt.pushErr, tt.pushErr}
+			}
 			sub := doneSubmission{sourceIssue: &beads.Issue{Description: "Change: at most 70 added lines in 2 files."}}
 
 			err := checkBranchForSubmit(h.r, sub, "origin/main")
 
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("checkBranchForSubmit error = %v, want error %v", err, tt.wantErr)
+			if tt.wantErr == "" && err != nil || tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("checkBranchForSubmit error = %v, want one containing %q", err, tt.wantErr)
 			}
-			if pushed := h.repo.origin[doneTestBranch] == h.repo.head; pushed != tt.wantPushed {
-				t.Errorf("origin/%s = %q (head %s): pushed = %v, want %v", doneTestBranch, h.repo.origin[doneTestBranch], h.repo.head, pushed, tt.wantPushed)
+			if tt.wantPushes == 1 && h.repo.origin[doneTestBranch] != h.repo.head {
+				t.Errorf("origin/%s = %q, want head %s", doneTestBranch, h.repo.origin[doneTestBranch], h.repo.head)
+			}
+			if len(h.repo.pushes) != tt.wantPushes && tt.pushErr == nil {
+				t.Errorf("pushes = %v, want %d", h.repo.pushes, tt.wantPushes)
+			}
+			if out := h.r.out.(*bytes.Buffer).String(); !strings.Contains(out, tt.wantWarn) {
+				t.Errorf("output %q does not carry %q", out, tt.wantWarn)
 			}
 		})
 	}

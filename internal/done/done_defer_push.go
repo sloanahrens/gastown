@@ -10,7 +10,8 @@ import (
 )
 
 // pushSandboxBranchBeforeDeferral pushes a sandbox seat's branch before a
-// DEFERRED or ESCALATED exit, so the commits the exit leaves behind are on
+// DEFERRED or ESCALATED exit, or before the refusal of a size overrun that
+// stops the seat (gt-5h8lim), so the commits the exit leaves behind are on
 // origin (gt-oq8lc). A host seat's commits survive the exit in its worktree; a
 // sandbox clone is the only copy, and the Stop hook (rightly) keeps a sandbox
 // with unpushed commits alive, so without the push the work is stranded until

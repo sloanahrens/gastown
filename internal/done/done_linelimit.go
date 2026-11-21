@@ -1,7 +1,6 @@
 package done
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -49,6 +48,13 @@ func lineLimitVerdict(limits []int, added int) (refuse bool, lines []string) {
 	return false, nil
 }
 
+// sizeRefusalError is the refusal of a polecat past twice the declared limit,
+// apart from the unreadable added-line count that also stops a run: a caller
+// that acts on the refusal alone asks errors.As for it.
+type sizeRefusalError string
+
+func (e sizeRefusalError) Error() string { return string(e) }
+
 // crewWarningPrefix marks a crew's over-limit lines apart from a polecat refusal (gt-zqg4m2).
 const crewWarningPrefix = "warning (crew branch, not refused): "
 
@@ -77,7 +83,7 @@ func reportLineLimit(out, errOut io.Writer, count func() (int, error), descripti
 		fmt.Fprintln(out, line)
 	}
 	if refuse {
-		return errors.New(strings.Join(lines, "\n"))
+		return sizeRefusalError(strings.Join(lines, "\n"))
 	}
 	return nil
 }
