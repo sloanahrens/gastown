@@ -304,16 +304,13 @@ func TestSeedPinMatchesBDPin(t *testing.T) {
 	}
 }
 
-// TestPreRollGuardPinsNameTheSamplesBuild pins the three files that name the
-// bd commit to the beads build with bd sample and bd mol bond --root-only, so
-// the pre-roll guard (gt-tgje6t) cannot be undone by a pin bump back to the
-// schema-66 build (gt-fenu9p).
+// TestPreRollGuardPinsNameTheSamplesBuild holds the three files that name the
+// bd commit to bdPin, so one constant edit moves the gate. The samples-build
+// equality was dropped (gt-8g3ln9): a bump moves bdPin only, and the ancestry
+// rule is enforced by the refresh path (internal/daemon/image_pins_read.go)
+// and driven by TestBDPinIsNotAnOlderBuild.
 func TestPreRollGuardPinsNameTheSamplesBuild(t *testing.T) {
 	t.Parallel()
-	const samplesBuild = "c1efb992c9ee42046f9a6188625b11fe88e05f53"
-	if bdPin != samplesBuild {
-		t.Errorf("bdPin = %s, want %s", bdPin, samplesBuild)
-	}
 	image, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(daemonimage.PinsPath)))
 	if err != nil {
 		t.Fatalf("reading %s: %v", daemonimage.PinsPath, err)
@@ -322,14 +319,14 @@ func TestPreRollGuardPinsNameTheSamplesBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("%s: %v", daemonimage.PinsPath, err)
 	}
-	if err := bdPinMatches([]byte(text), samplesBuild); err != nil {
+	if err := bdPinMatches([]byte(text), bdPin); err != nil {
 		t.Error(err)
 	}
 	seed, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(seedPinsPath)))
 	if err != nil {
 		t.Fatalf("reading %s: %v", seedPinsPath, err)
 	}
-	if err := seedPinMatchesBDPin(seed, samplesBuild); err != nil {
+	if err := seedPinMatchesBDPin(seed, bdPin); err != nil {
 		t.Error(err)
 	}
 }
