@@ -1,0 +1,148 @@
+package daemon
+
+import (
+	"context"
+	"os/exec"
+	"strings"
+	"testing"
+)
+
+// The waits on the trim Job and the log reads a failed Job's last line comes
+// from, as the fixture's kubectl seam names them.
+const (
+	cacheTrimFailWaitCompleteVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=1200s"
+	cacheTrimFailWaitFailedVerb   = "wait --for=condition=failed job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=1200s"
+	cacheTrimFailWaitTrimLogVerb  = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c trim --tail=1"
+	cacheTrimFailWaitPlanLogVerb  = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c plan --tail=1"
+)
+
+// cacheTrimFailWaitHold makes the kubectl call for verb hang until the test
+// ends, as a wait on a condition the Job never reaches does. The call's start
+// is reported on the returned channel: the fixture records a call only when it
+// answers, so a held call is read from the channel, not from the recorded calls.
+func cacheTrimFailWaitHold(t *testing.T, f *cacheTrimFixture, verb string) <-chan struct{} {
+	t.Helper()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	answer := f.d.execCmd
+	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if len(cmd.Args) > 1 && cacheTrimVerb(cmd.Args[1:]) == verb {
+			close(started)
+			<-release
+			return nil, []byte("error: timed out waiting for the condition\n"), &cliExitError{code: 1}
+		}
+		return answer(cmd)
+	}
+	return started
+}
+
+// TestCacheTrimFailWaitReturnsWhenTheJobFails pins that a Job whose failed
+// condition answers at once ends the wait at once, with the failed error naming
+// the trim container's last log line. The complete wait is held the whole time,
+// as it is for a Job that never completes, so the wait returning shows it did
+// not wait on the bound.
+func TestCacheTrimFailWaitReturnsWhenTheJobFails(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitFailedVerb: {},
+		cacheTrimFailWaitTrimLogVerb: {
+			stdout: "removing 3 files\ncould not remove /claim/x: permission denied\n",
+		},
+	})
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+	finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if finished || err == nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+	}
+	want := "the trim Job " + cacheTrimJob + " failed: could not remove /claim/x: permission denied"
+	if err.Error() != want {
+		t.Errorf("error = %q; want %q", err, want)
+	}
+	if _, ok := f.indexOf(cacheTrimFailWaitFailedVerb); !ok {
+		t.Errorf("the failed wait did not run: calls %v", f.verbs())
+	}
+	if _, ok := f.indexOf(cacheTrimFailWaitPlanLogVerb); ok {
+		t.Errorf("the plan container was read though the trim container had a line: calls %v", f.verbs())
+	}
+	<-held
+}
+
+// TestCacheTrimFailWaitNamesOneCutLine pins the shape of the failed error's
+// line: at most cacheTrimFailLineLimit characters, and no line at all when
+// neither container's log can be read or holds one.
+func TestCacheTrimFailWaitNamesOneCutLine(t *testing.T) {
+	t.Parallel()
+	unreadable := cliReply{stderr: "Error from server: pod is not found\n", code: 1}
+	failed := "the trim Job " + cacheTrimJob + " failed"
+	for _, tc := range []struct {
+		name       string
+		trim, plan cliReply
+		want       string
+	}{
+		{"a long line is cut", cliReply{stdout: strings.Repeat("x", 250) + "\n"}, unreadable, failed + ": " + strings.Repeat("x", cacheTrimFailLineLimit)},
+		{"neither log holds a line", cliReply{stdout: "\n"}, cliReply{stdout: ""}, failed + "; its logs hold no line"},
+		{"neither log can be read", unreadable, unreadable, failed + "; its logs hold no line"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimFailWaitFailedVerb:  {},
+				cacheTrimFailWaitTrimLogVerb: tc.trim,
+				cacheTrimFailWaitPlanLogVerb: tc.plan,
+			})
+			held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+			finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+			if finished || err == nil {
+				t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q; want %q", err, tc.want)
+			}
+			<-held
+		})
+	}
+}
+
+// TestCacheTrimFailWaitReadsThePlanLogAndStillCompletes pins the two outcomes
+// the wait's two legs can reach. A Job whose plan init container failed has no
+// trim log, so the failed error names the plan container's last line. A Job
+// that completes returns true, and the failed wait it leaves running is not
+// read.
+func TestCacheTrimFailWaitReadsThePlanLogAndStillCompletes(t *testing.T) {
+	t.Parallel()
+	t.Run("the plan init container failed", func(t *testing.T) {
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimFailWaitFailedVerb: {},
+			cacheTrimFailWaitTrimLogVerb: {
+				stderr: "Error from server: container \"trim\" is waiting to start: PodInitializing\n",
+				code:   1,
+			},
+			cacheTrimFailWaitPlanLogVerb: {stdout: "the claim list is unreadable\n"},
+		})
+		held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+		finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+		if finished || err == nil {
+			t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+		}
+		want := "the trim Job " + cacheTrimJob + " failed: the claim list is unreadable"
+		if err.Error() != want {
+			t.Errorf("error = %q; want %q", err, want)
+		}
+		<-held
+	})
+	t.Run("the Job completes", func(t *testing.T) {
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimFailWaitCompleteVerb: {},
+		})
+		held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitFailedVerb)
+		finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+		if !finished || err != nil {
+			t.Errorf("cacheTrimWaitJob = %v, %v; want finished with no error", finished, err)
+		}
+		if _, ok := f.indexOf(cacheTrimFailWaitTrimLogVerb); ok {
+			t.Errorf("a completed Job's trim log was read: calls %v", f.verbs())
+		}
+		<-held
+	})
+}

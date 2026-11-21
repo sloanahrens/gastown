@@ -1215,11 +1215,17 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 	return true, nil
 }
 
-// cacheTrimWaitJob waits for the trim Job to complete, and reports whether it
-// did. The wait is the pass's one bound on a Job: a Job still running when it
-// ends is reported with why, and the pass carries on, leaving the shards for
+// cacheTrimWaitJob waits for the trim Job to finish, and reports whether it
+// completed. The wait is the pass's one bound on a Job: a Job still running when
+// it ends is reported with why, and the pass carries on, leaving the shards for
 // the next run and the claim unmeasured, since neither can be judged while the
 // Job works.
+//
+// Two waits run at once, one for the complete condition and one for the failed
+// condition, since a Job that fails never completes and a complete wait alone
+// would hold the pass to its bound. The first to succeed decides: complete
+// reports true, and failed returns an error naming the Job's last log line. The
+// other wait is cancelled when this returns.
 //
 // wait is the bound itself; a wait of zero or less is refused, since kubectl
 // reads --timeout=0s as no limit at all.
@@ -1229,12 +1235,75 @@ func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jo
 	}
 	// Rounded up, so a sub-second wait is 1s rather than the unbounded 0s.
 	timeout := strconv.Itoa(int(math.Ceil(wait.Seconds()))) + "s"
-	_, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout)
-	if err == nil {
-		return true, nil
+	legs, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type outcome struct {
+		condition string
+		stderr    []byte
+		err       error
 	}
-	d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; the trim is left for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
+	outcomes := make(chan outcome, 2)
+	for _, condition := range []string{"complete", "failed"} {
+		go func(condition string) {
+			_, stderr, err := d.cacheTrimKubectlRun(legs, kubeconfig, nil, "wait", "--for=condition="+condition, "job/"+jobName, "-n", namespace, "--timeout="+timeout)
+			outcomes <- outcome{condition, stderr, err}
+		}(condition)
+	}
+	var completeStderr []byte
+	for range 2 {
+		o := <-outcomes
+		if o.err != nil {
+			if o.condition == "complete" {
+				completeStderr = o.stderr
+			}
+			continue
+		}
+		if o.condition == "complete" {
+			return true, nil
+		}
+		// The Job failed: the other wait is cancelled now. The log is read on ctx,
+		// which is not cancelled, so the read runs on its own.
+		cancel()
+		return false, d.cacheTrimFailedJobError(ctx, kubeconfig, namespace, jobName)
+	}
+	d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; the trim is left for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, completeStderr))
 	return false, nil
+}
+
+// cacheTrimFailLineLimit is the longest log line a failed trim Job's error
+// carries, in characters.
+const cacheTrimFailLineLimit = 200
+
+// cacheTrimFailedJobError is the error for a trim Job whose failed condition
+// answered. It names the last line of the trim container's log. A trim container
+// that never started, because the plan init container failed, has no log, so the
+// plan container's last line is named instead. A log that holds no line, or
+// cannot be read, still fails the Job: the error says so, and carries no kubectl
+// output.
+func (d *Daemon) cacheTrimFailedJobError(ctx context.Context, kubeconfig, namespace, jobName string) error {
+	line := d.cacheTrimLogLine(ctx, kubeconfig, namespace, jobName, "trim")
+	if line == "" {
+		line = d.cacheTrimLogLine(ctx, kubeconfig, namespace, jobName, "plan")
+	}
+	if line == "" {
+		return fmt.Errorf("the trim Job %s failed; its logs hold no line", jobName)
+	}
+	return fmt.Errorf("the trim Job %s failed: %s", jobName, line)
+}
+
+// cacheTrimLogLine returns the last line of one container's log of the trim
+// Job, cut at cacheTrimFailLineLimit characters, or "" when the log cannot be
+// read or holds no line.
+func (d *Daemon) cacheTrimLogLine(ctx context.Context, kubeconfig, namespace, jobName, container string) string {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "logs", "job/"+jobName, "-n", namespace, "-c", container, "--tail=1")
+	if err != nil {
+		return ""
+	}
+	line := lastLine(string(out))
+	if r := []rune(line); len(r) > cacheTrimFailLineLimit {
+		line = string(r[:cacheTrimFailLineLimit])
+	}
+	return line
 }
 
 // cacheTrimJobPod is the part of a trim Job's pod the stuck-pull read decides
