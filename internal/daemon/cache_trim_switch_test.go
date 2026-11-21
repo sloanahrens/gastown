@@ -611,3 +611,48 @@ func TestCacheTrimSwitchRaisesWhenTheDiskStaysFull(t *testing.T) {
 		})
 	}
 }
+
+// TestCacheTrimSwitchPendingMark pins the pending mark the claim route keeps: a
+// Job still running when its wait ends sets the claim's mark (and parks nothing),
+// and a dry run neither sets a mark nor clears one the claim already carries.
+func TestCacheTrimSwitchPendingMark(t *testing.T) {
+	t.Parallel()
+	// pendingOverrides answers the claim Job's wait as one that ran out with the
+	// Job still active, the state a pass leaves pending.
+	pendingOverrides := func() map[string]cliReply {
+		return map[string]cliReply{
+			cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition\n", code: 1},
+			cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+		}
+	}
+	t.Run("a pending pass leaves the mark set", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", pendingOverrides())
+		if !viaJob(t, f, true, map[string]string{}) {
+			t.Fatalf("a pending Job = false, want true (a verdict); log: %s", f.log.String())
+		}
+		if !f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+			t.Errorf("a pending Job left no mark")
+		}
+		if f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+			t.Errorf("a pending Job parked its claim")
+		}
+	})
+	t.Run("a dry run sets no mark", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", pendingOverrides())
+		viaJob(t, f, false, map[string]string{})
+		if f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+			t.Errorf("a dry run set a mark")
+		}
+	})
+	t.Run("a dry run leaves a mark the claim already carries", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, "", pendingOverrides())
+		viaJob(t, f, true, map[string]string{})
+		viaJob(t, f, false, map[string]string{})
+		if !f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
+			t.Errorf("a dry run cleared a pending mark")
+		}
+	})
+}
