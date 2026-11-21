@@ -27,16 +27,22 @@ var dryRunTargets = []string{"presubmit", "ci-base-image"}
 // call of the Make one returns is a dry run of the tree the helper was given.
 var dryRunFactory = []string{"RealMake", "defaultsMake"}
 
-// dryRunTargetCall is one refused dry run: the call's position, the helper or
-// variable that ran it, and the target it named.
+// dryRunTargetCall is one finding: the call's position, the helper or variable
+// that ran it, and the target it named. notLiteral records a target the guard
+// could not read.
 type dryRunTargetCall struct {
-	file   string
-	line   int
-	caller string
-	target string
+	file       string
+	line       int
+	caller     string
+	target     string
+	notLiteral bool
 }
 
 func (c dryRunTargetCall) String() string {
+	if c.notLiteral {
+		return fmt.Sprintf("%s:%d: a call through %s passes a target that is not a string literal, so the guard cannot read it; pass the target as a string literal",
+			c.file, c.line, c.caller)
+	}
 	return fmt.Sprintf("%s:%d: %s names %q, whose recipe line holds $(MAKE) and so runs for real under make -n (gt-digv4n)",
 		c.file, c.line, c.caller, c.target)
 }
@@ -74,13 +80,16 @@ func dryRunFileTargetCalls(path string) ([]dryRunTargetCall, error) {
 	return dryRunTargetCalls(path, src)
 }
 
-// dryRunTargetCalls returns one entry per call in src that hands a target in
-// dryRunTargets to dryTarget or to a Make from dryRunFactory. The Make may be
-// the factory call itself (RealMake(root)("presubmit")), the second argument of
-// dryTarget, or a variable assigned from a factory earlier in the file. Only a
-// string literal argument counts. The scratch-checkout runners (runTarget, run,
-// SeedMake) run the recipe for real in a scratch checkout, not on this tree,
-// and are not matched.
+// dryRunTargetCalls returns one finding per call in src that hands a refused or
+// unreadable target to dryTarget or to a Make from dryRunFactory. The Make may
+// be the factory call itself (RealMake(root)("presubmit")), the second argument
+// of dryTarget, or a variable assigned from a factory earlier in the file. The
+// target is the third argument of dryTarget, after t and the Make, and the
+// first argument of a Make call; a target that is not a string literal is a
+// finding too, since a value the guard cannot read must not pass as one it has
+// checked. Arguments after the target are not read. The scratch-checkout
+// runners (runTarget, run, SeedMake) run the recipe for real in a scratch
+// checkout, not on this tree, and are not matched.
 func dryRunTargetCalls(file string, src []byte) ([]dryRunTargetCall, error) {
 	fset := token.NewFileSet()
 	parsed, err := parser.ParseFile(fset, file, src, parser.SkipObjectResolution)
@@ -100,28 +109,29 @@ func dryRunTargetCalls(file string, src []byte) ([]dryRunTargetCall, error) {
 		if !ok {
 			return true
 		}
-		caller := dryRunCaller(call, makes)
-		if caller == "" {
+		caller, index := dryRunCaller(call, makes)
+		if caller == "" || index >= len(call.Args) {
 			return true
 		}
-		for _, arg := range call.Args {
-			lit, ok := arg.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				continue
-			}
-			target, err := literalString(lit)
-			if err != nil {
-				bad = fmt.Errorf("%s: %w", fset.Position(lit.Pos()), err)
-				return false
-			}
-			if slices.Contains(dryRunTargets, target) {
-				calls = append(calls, dryRunTargetCall{
-					file:   file,
-					line:   fset.Position(call.Pos()).Line,
-					caller: caller,
-					target: target,
-				})
-			}
+		finding := dryRunTargetCall{
+			file:   file,
+			line:   fset.Position(call.Pos()).Line,
+			caller: caller,
+		}
+		lit, ok := call.Args[index].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			finding.notLiteral = true
+			calls = append(calls, finding)
+			return true
+		}
+		target, err := literalString(lit)
+		if err != nil {
+			bad = fmt.Errorf("%s: %w", fset.Position(lit.Pos()), err)
+			return false
+		}
+		if slices.Contains(dryRunTargets, target) {
+			finding.target = target
+			calls = append(calls, finding)
 		}
 		return true
 	})
@@ -144,19 +154,24 @@ func literalString(lit *ast.BasicLit) (string, error) {
 
 // dryRunCaller names what ran call, or "" when nothing in this guard's scope
 // did: dryTarget itself, a variable holding a Make from a factory, or a factory
-// whose returned Make the call invokes.
-func dryRunCaller(call *ast.CallExpr, makes map[string]bool) string {
+// whose returned Make the call invokes. The second result is the index of the
+// call's target argument: after t and the Make for dryTarget, and first for a
+// Make.
+func dryRunCaller(call *ast.CallExpr, makes map[string]bool) (string, int) {
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
-		if fn.Name == "dryTarget" || makes[fn.Name] {
-			return fn.Name
+		if fn.Name == "dryTarget" {
+			return fn.Name, 2
+		}
+		if makes[fn.Name] {
+			return fn.Name, 0
 		}
 	case *ast.CallExpr:
 		if id, ok := fn.Fun.(*ast.Ident); ok && slices.Contains(dryRunFactory, id.Name) {
-			return id.Name
+			return id.Name, 0
 		}
 	}
-	return ""
+	return "", -1
 }
 
 // makeVariables returns the identifiers file assigns a Make returned by a
@@ -193,9 +208,9 @@ func makeVariables(file *ast.File) map[string]bool {
 	return makes
 }
 
-// dryRunAlarms returns one message per refused dry run, each naming the file,
-// line, caller and target. The package case in TestIntegrationDryRunCallers
-// reports exactly these.
+// dryRunAlarms returns one message per finding, each naming the file, line and
+// caller. The package case in TestIntegrationDryRunCallers reports exactly
+// these.
 func dryRunAlarms(calls []dryRunTargetCall) []string {
 	alarms := make([]string, 0, len(calls))
 	for _, call := range calls {
@@ -218,8 +233,8 @@ func packageTestDir(t *testing.T) string {
 
 // TestIntegrationDryRunCallers fails any test in this package that dry-runs
 // presubmit or ci-base-image on the real tree, where the recipe runs for real
-// (gt-digv4n, sweep f213fda4). It reads the package's sources, so it starts no
-// make process.
+// (gt-digv4n, sweep f213fda4), and any call whose target it cannot read as a
+// string literal. It reads the package's sources, so it starts no make process.
 //
 // Mutation: add `dryTarget(t, defaultsMake(t, repoRoot(t)), "presubmit")` to a
 // test file, and the package case fails naming that file and line.
@@ -258,32 +273,34 @@ func TestIntegrationDryRunCallers(t *testing.T) {
 		for _, tc := range []struct {
 			name string
 			src  string
-			want []string // "<caller> <target>", one per finding
+			// want holds "<caller> <target> @<line>" per finding, with
+			// "<not a string literal>" where the guard cannot read the target.
+			want []string
 		}{
 			{
 				name: "dryTarget names presubmit",
 				src:  "func TestX(t *testing.T) {\n\tdryTarget(t, defaultsMake(t, root), \"presubmit\")\n}\n",
-				want: []string{"dryTarget presubmit"},
+				want: []string{"dryTarget presubmit @4"},
 			},
 			{
 				name: "dryTarget names ci-base-image",
 				src:  "func TestX(t *testing.T) {\n\tdryTarget(t, RealMake(root), \"ci-base-image\")\n}\n",
-				want: []string{"dryTarget ci-base-image"},
+				want: []string{"dryTarget ci-base-image @4"},
 			},
 			{
 				name: "an invoked defaultsMake call names ci-base-image",
 				src:  "func TestX(t *testing.T) {\n\tout, err := defaultsMake(t, root)(\"ci-base-image\")\n\t_, _ = out, err\n}\n",
-				want: []string{"defaultsMake ci-base-image"},
+				want: []string{"defaultsMake ci-base-image @4"},
 			},
 			{
 				name: "a RealMake variable names ci-base-image",
 				src:  "func TestX(t *testing.T) {\n\tm := RealMake(root)\n\tout, err := m(\"ci-base-image\")\n\t_, _ = out, err\n}\n",
-				want: []string{"m ci-base-image"},
+				want: []string{"m ci-base-image @5"},
 			},
 			{
 				name: "a raw-string target is read, not matched by its quotes",
 				src:  "func TestX(t *testing.T) {\n\tdryTarget(t, defaultsMake(t, root), `presubmit`)\n}\n",
-				want: []string{"dryTarget presubmit"},
+				want: []string{"dryTarget presubmit @4"},
 			},
 			{
 				name: "a single-command target is left alone",
@@ -296,11 +313,33 @@ func TestIntegrationDryRunCallers(t *testing.T) {
 				want: nil,
 			},
 			{
-				// The guard reads string literals only, so a target held in a
-				// variable is not seen. Failing closed on a non-literal target
-				// is gt-xusszl.
-				name: "known limit: a target named through a variable is not seen",
+				name: "a variable as dryTarget's target is reported",
 				src:  "func TestX(t *testing.T) {\n\ttarget := \"presubmit\"\n\tdryTarget(t, defaultsMake(t, root), target)\n}\n",
+				want: []string{"dryTarget <not a string literal> @5"},
+			},
+			{
+				name: "a variable as a Make's target is reported",
+				src:  "func TestX(t *testing.T) {\n\tm := RealMake(root)\n\ttarget := \"presubmit\"\n\tout, err := m(target)\n\t_, _ = out, err\n}\n",
+				want: []string{"m <not a string literal> @6"},
+			},
+			{
+				name: "a variable as an invoked factory's target is reported",
+				src:  "func TestX(t *testing.T) {\n\ttarget := \"presubmit\"\n\tout, err := defaultsMake(t, root)(target)\n\t_, _ = out, err\n}\n",
+				want: []string{"defaultsMake <not a string literal> @5"},
+			},
+			{
+				name: "a non-literal later argument is not flagged",
+				src:  "func TestX(t *testing.T) {\n\tdryTarget(t, defaultsMake(t, root), \"build\", \"BD_SRC=\"+x)\n}\n",
+				want: nil,
+			},
+			{
+				name: "a literal target not on the list is not flagged",
+				src:  "func TestX(t *testing.T) {\n\tdryTarget(t, defaultsMake(t, root), \"build\")\n}\n",
+				want: nil,
+			},
+			{
+				name: "a call with no target argument is not flagged",
+				src:  "func TestX(t *testing.T) {\n\tm := defaultsMake(t, root)\n\t_, _ = m()\n\tdryTarget(t, m)\n}\n",
 				want: nil,
 			},
 		} {
@@ -313,10 +352,22 @@ func TestIntegrationDryRunCallers(t *testing.T) {
 				}
 				var got []string
 				for _, call := range calls {
-					got = append(got, call.caller+" "+call.target)
+					target := call.target
+					if call.notLiteral {
+						target = "<not a string literal>"
+					}
+					got = append(got, fmt.Sprintf("%s %s @%d", call.caller, target, call.line))
 				}
 				if !slices.Equal(got, tc.want) {
 					t.Fatalf("findings = %q, want %q", got, tc.want)
+				}
+				for i, alarm := range dryRunAlarms(calls) {
+					if !strings.Contains(alarm, fmt.Sprintf("snippet_test.go:%d:", calls[i].line)) {
+						t.Errorf("the alarm %q does not name snippet_test.go:%d", alarm, calls[i].line)
+					}
+					if calls[i].notLiteral && !strings.Contains(alarm, "string literal") {
+						t.Errorf("the alarm %q does not ask for the target as a string literal", alarm)
+					}
 				}
 			})
 		}
