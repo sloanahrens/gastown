@@ -263,15 +263,45 @@ func TestCacheTrimClaimJobRunRefusesAnUnsetClock(t *testing.T) {
 	}
 }
 
-// onClaimJobWait runs fn before each wait the run makes for the claim Job, and
-// then the wait's own answer.
-func (f *cacheTrimFixture) onClaimJobWait(fn func()) {
+// onClaimJobCall runs fn before each cluster call whose argv carries verb, and
+// then the call's own answer.
+func (f *cacheTrimFixture) onClaimJobCall(verb string, fn func()) {
 	run := f.d.execCmd
 	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
-		if strings.Contains(strings.Join(cmd.Args, " "), cacheTrimClaimJobWaitVerb) {
+		if strings.Contains(strings.Join(cmd.Args, " "), verb) {
 			fn()
 		}
 		return run(cmd)
+	}
+}
+
+// TestCacheTrimClaimJobBudgetNamesThePhaseThatWasCut pins that a claim run whose
+// budget ends names the phase it ended in, the apply or the wait, and neither
+// says the Job is still running.
+func TestCacheTrimClaimJobBudgetNamesThePhaseThatWasCut(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		phase, cutVerb string
+		overrides      map[string]cliReply
+	}{
+		{"apply", cacheTrimApplyVerb, map[string]cliReply{
+			cacheTrimApplyVerb: {stderr: "context canceled", code: 1},
+		}},
+		{"wait", cacheTrimClaimJobWaitVerb, map[string]cliReply{
+			cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+			cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+		}},
+	} {
+		f := newCacheTrimFixture(t, "", tc.overrides)
+		daemonCtx, stopDaemon := context.WithCancel(context.Background())
+		f.d.ctx = daemonCtx
+		f.onClaimJobCall(tc.cutVerb, stopDaemon)
+		err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+		stopDaemon()
+		want := "the trim Job " + cacheTrimJob + " was cut off during the " + tc.phase + " after "
+		if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "still running") {
+			t.Errorf("a budget cut during the %s = %v; want an error carrying %q and not saying the Job is still running", tc.phase, err, want)
+		}
 	}
 }
 
@@ -304,7 +334,7 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 			t.Errorf("cluster call %d had a deadline %v away; want the wait plus the slack, %v at most", calls, left, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
 		}
 	}
-	f.onClaimJobWait(endPass)
+	f.onClaimJobCall(cacheTrimClaimJobWaitVerb, endPass)
 	removed, absent, kept, err := f.d.cacheTrimClaimJobRun(passCtx, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName}, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, true)
 	if err != nil || removed != 4 || absent != 1 || kept != 2 {
 		t.Fatalf("a run whose pass context ends during the wait = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
@@ -326,7 +356,7 @@ func TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait(t *testing.T) {
 	daemonCtx, stopDaemon := context.WithCancel(context.Background())
 	defer stopDaemon()
 	f.d.ctx = daemonCtx
-	f.onClaimJobWait(stopDaemon)
+	f.onClaimJobCall(cacheTrimClaimJobWaitVerb, stopDaemon)
 	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
 	if err == nil || !strings.Contains(err.Error(), "the trim Job "+cacheTrimJob+" was cut off") {
 		t.Fatalf("a wait its context cut off = %v; want an error naming the Job and the cut-off", err)
