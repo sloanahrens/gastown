@@ -60,3 +60,55 @@ func TestLineLimitWiringRefusesAPolecatPastTwiceTheLimit(t *testing.T) {
 		}
 	}
 }
+
+// pastLimitHarness is a submit harness whose git reports 141 added lines
+// against the 70 its bead declares, so checkBranchForSubmit reaches the size
+// refusal with a fake origin to push to.
+func pastLimitHarness(t *testing.T, backend string, polecat bool) *submitHarness {
+	t.Helper()
+	h := newSubmitHarness(t)
+	h.r.sessionBackend = backend
+	h.r.opts = doneOptions{polecatEnv: polecat, allowReverts: true, allowThrowawayPaths: true}
+	h.r.out = new(bytes.Buffer)
+	h.r.g = git.NewGitWithExec(t.TempDir(), func(c git.ExecCall) (string, string, error) {
+		if args := c.Args(); len(args) >= 2 && args[0] == "diff" && args[1] == "--numstat" {
+			return "141\t0\tinternal/done/done.go\n", "", nil
+		}
+		return "", "", nil
+	})
+	return h
+}
+
+// TestLineLimitRefusalPushesASandboxSeatsBranch: a sandbox polecat refused for a
+// size overrun has its branch pushed to origin before the refusal returns, so the
+// commit does not live only in the sandbox that is about to stop; a crew branch is
+// warned, not refused, and pushes nothing.
+func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		backend    string
+		polecat    bool
+		wantErr    bool
+		wantPushed bool
+	}{
+		{name: "sandbox_polecat", backend: backendOpenShell, polecat: true, wantErr: true, wantPushed: true},
+		{name: "crew_branch", backend: backendOpenShell, polecat: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := pastLimitHarness(t, tt.backend, tt.polecat)
+			sub := doneSubmission{sourceIssue: &beads.Issue{Description: "Change: at most 70 added lines in 2 files."}}
+
+			err := checkBranchForSubmit(h.r, sub, "origin/main")
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkBranchForSubmit error = %v, want error %v", err, tt.wantErr)
+			}
+			if pushed := h.repo.origin[doneTestBranch] == h.repo.head; pushed != tt.wantPushed {
+				t.Errorf("origin/%s = %q (head %s): pushed = %v, want %v", doneTestBranch, h.repo.origin[doneTestBranch], h.repo.head, pushed, tt.wantPushed)
+			}
+		})
+	}
+}

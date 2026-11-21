@@ -1544,6 +1544,9 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 	if err := reportLineLimit(r.stdout(), os.Stderr, func() (int, error) {
 		return r.g.AddedLinesSince(baseRef)
 	}, description, r.opts.polecatEnv); err != nil {
+		// A sandbox seat's clone is the only copy of its commits and the seat
+		// stops on this refusal: push first, as a deferral does (gt-oq8lc).
+		pushSandboxBranchBeforeDeferral(r)
 		return err
 	}
 	rejectedTip := func(mrID string) (string, bool) { return rejectedTipFromMR(sub.sourceBD, mrID) }
