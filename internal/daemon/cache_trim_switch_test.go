@@ -776,6 +776,45 @@ func TestCacheTrimDiskItemReadsAfterThePassBudgetEnds(t *testing.T) {
 	}
 }
 
+// TestCacheTrimLateResultDiskItemReadsAfterThePassBudgetEnds pins that the late
+// result's disk read has its own budget too: a trim that completed after its
+// wait still decides the item once the pass context has ended.
+func TestCacheTrimLateResultDiskItemReadsAfterThePassBudgetEnds(t *testing.T) {
+	t.Parallel()
+	key := cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
+		cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
+		// The new Job stays pending, so only the late trim's own read decides the
+		// item in this pass.
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition\n", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	// A real read handed a context that ended reports no reading.
+	f.d.diskMaint.readDisks = func(ctx context.Context) []disks.Reading {
+		if err := ctx.Err(); err != nil {
+			return []disks.Reading{{Name: diskMaintDiskColima, Err: err}}
+		}
+		return []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 50}}
+	}
+	f.d.cacheTrimNoOp.raise(attention.Item{Key: key})
+	pass, endPass := context.WithCancel(context.Background())
+	endPass()
+	if !f.d.cacheTrimClaimViaJob(pass, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
+		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{}) {
+		t.Fatalf("a pass beside a late-completed trim = false, want true; log: %s", f.log.String())
+	}
+	var got int
+	for _, it := range f.noOpItems(t) {
+		if it.Key == key {
+			got++
+		}
+	}
+	if got != 0 {
+		t.Errorf("a late trim on a disk at 50%% left %d item(s), want the stale item cleared by the late result's own read", got)
+	}
+}
+
 // TestCacheTrimSwitchPendingMark pins the pending mark the claim route keeps: a
 // Job still running when its wait ends sets the claim's mark (and parks nothing),
 // and a dry run neither sets a mark nor clears one the claim already carries.
