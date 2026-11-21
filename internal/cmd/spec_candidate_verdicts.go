@@ -86,6 +86,10 @@ type specCandidateVerdict struct {
 	// Edges is nil in a record written in an earlier format, and such a record is
 	// never served.
 	Edges *specCandidateEdges `json:"edges,omitempty"`
+	// EstimateCurrent reports that the estimate-ahead pass read this row and
+	// found the bead's estimate current, so the pass does not read it again while
+	// the row is served (gt-ldwxio).
+	EstimateCurrent bool `json:"estimate_current,omitempty"`
 }
 
 // specCandidateVerdicts is the candidate scan's verdict memory: the annotated
@@ -180,6 +184,18 @@ func (v *specCandidateVerdicts) record(c specCandidate, verdict specCandidateVer
 	v.memory.verdicts[c.Spec.ID] = verdict
 	v.memory.dirty = true
 	v.memory.mu.Unlock()
+}
+
+// markEstimateCurrent remembers, on c's served verdict, that its estimate is
+// current. A candidate with no served verdict (its row moved since) is left as
+// it is: the next tick decides it fresh.
+func (v *specCandidateVerdicts) markEstimateCurrent(c specCandidate) {
+	entry, ok := v.lookUp(c)
+	if !ok || entry.EstimateCurrent {
+		return
+	}
+	entry.EstimateCurrent = true
+	v.record(c, entry)
 }
 
 // specTemplateKey digests the lint template: the sections it requires, and the

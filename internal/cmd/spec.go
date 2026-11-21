@@ -2299,6 +2299,10 @@ type specDispatchEnv struct {
 	// candidate, which it logs as one line rather than reading as nothing to
 	// estimate.
 	EstimateAheadRead func(ctx context.Context, beadID string) (*beads.Issue, []beads.Comment, error)
+	// EstimateAheadCurrent is called by the pass for each bead it read whose
+	// estimate is current, so the tick can remember it and not read it again
+	// while its board row is unmoved (gt-ldwxio). Nil remembers nothing.
+	EstimateAheadCurrent func(beadID string)
 	// EstimateAheadAfter is the timer the estimate-ahead pass's read phase
 	// waits on; nil is time.After. A test injects one it controls, so a read
 	// phase's timeout is driven with no wall clock, beside the estimate's own
@@ -2704,6 +2708,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// The shaped candidates this tick read, in board order, for the
 	// estimate-ahead pass after the slings (gt-hzb051).
 	var shapedAhead []string
+	// aheadRows are the candidates the estimate-ahead pass may read, by id, so a
+	// bead it finds current is remembered at its own board row (gt-ldwxio).
+	aheadRows := map[string]specCandidate{}
 
 	env.Reads.setPhase(specPhaseCandidates)
 	candidatesAt := env.Now()
@@ -2835,8 +2842,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// A clean verdict is the only shape the estimate-ahead pass reads: the
 		// lint did not clear the others, and a candidate held before this line
 		// never reached it (gt-hzb051).
-		if verdict.Clean() {
+		if verdict.Clean() && !(served && remembered.EstimateCurrent) {
 			shapedAhead = append(shapedAhead, id)
+			aheadRows[id] = c
 		}
 		// An sp-minutes label the gate cannot read leaves it unrun. The sling
 		// decision does not change — an unknown size is never refused — but a
@@ -3131,6 +3139,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	report.SlingTook = env.Now().Sub(slingAt)
 	// The estimate-ahead pass runs after the slings, so no estimate it makes
 	// can delay or change a decision the tick already took (gt-hzb051).
+	env.EstimateAheadCurrent = func(id string) {
+		if c, ok := aheadRows[id]; ok {
+			env.Verdicts.markEstimateCurrent(c)
+		}
+	}
 	report.Notices = append(report.Notices, specEstimateAheadPass(env, shapedAhead, slated)...)
 	return report
 }
