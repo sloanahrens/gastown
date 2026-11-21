@@ -242,17 +242,18 @@ func TestImagePinsReadTipsAndBehind(t *testing.T) {
 	states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
 	require.NoError(t, err)
 
-	require.Len(t, cmp.calls, 4, "the bd floor, then the three compared pins")
 	require.Len(t, states, len(tests))
 	for i, tt := range tests {
 		want := ImagePinState{Name: tt.name, Pin: tt.pin, Tip: tt.tip, Behind: tt.behind}
 		assert.Equal(t, want, states[i], "%s pin read", tt.name)
-		if tt.name == "devops" {
-			continue
-		}
-		wantCall := pinsReadCompareCall{owner: pinsReadOwner, repo: tt.repo, base: tt.pin, head: tt.tip}
-		assert.Equal(t, wantCall, cmp.calls[i+1], "%s pin comparison", tt.name)
 	}
+	assert.Equal(t, []pinsReadCompareCall{
+		{owner: pinsReadOwner, repo: "beads", base: pinsReadBDTip, head: daemonimage.BDSamplesFloor},
+		{owner: pinsReadOwner, repo: "beads", base: pinsReadBDCommit, head: daemonimage.BDSamplesFloor},
+		{owner: pinsReadOwner, repo: "beads", base: pinsReadBDCommit, head: pinsReadBDTip},
+		{owner: pinsReadOwner, repo: "organic-mechanic", base: pinsReadOMCommit, head: pinsReadOMTip},
+		{owner: pinsReadOwner, repo: "history-man", base: pinsReadHMCommit, head: pinsReadHMTip},
+	}, cmp.calls, "bd's tip floor, then its own-commit floor, then each pin's lag compare")
 	assert.Equal(t, []string{
 		pinsReadPinURL("beads"), pinsReadPinURL("organic-mechanic"),
 		pinsReadPinURL("history-man"), pinsReadPinURL("devops"),
@@ -275,17 +276,22 @@ func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 	assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDCommit, Behind: 0}, states[0],
 		"a pin at its tip is zero behind")
 	require.Len(t, cmp.calls, 3, "the floor, then only om's and hm's lag: the bd floor call is the one that names bd")
+	bdFloors := 0
 	for _, call := range cmp.calls {
 		assert.False(t, call.base == pinsReadBDCommit && call.head != daemonimage.BDSamplesFloor,
 			"the bd pin at its tip is not lag-compared")
+		if call.base == pinsReadBDCommit && call.head == daemonimage.BDSamplesFloor {
+			bdFloors++
+		}
 	}
+	assert.Equal(t, 1, bdFloors, "a bd pin at its tip is floor-checked once: its commit is the tip, already checked")
 }
 
 // TestReadImagePinTipsBDFloor: the bd pin's tip is held to the samples build the
 // image needs, whether or not the pin is at it, so a tip that does not contain
 // the floor is that pin's Err naming the floor and no lag is counted; a tip that
-// contains it reads clean. The guard is bd's alone: another pin's tip is never
-// the base of a floor call, only of that pin's own lag compare.
+// contains it reads clean. The guard is bd's alone: another pin's tip or own
+// commit is never the base of a floor call, only of that pin's own lag compare.
 func TestReadImagePinTipsBDFloor(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -312,16 +318,22 @@ func TestReadImagePinTipsBDFloor(t *testing.T) {
 			require.Len(t, states, 4)
 			if tt.pin != "" {
 				assert.Equal(t, pinsReadOtherStates(), states[1:], "the %s pin reads its lag clean beside bd", tt.pin)
-				floor, lag := 0, 0
+				floor, pinFloor, lag := 0, 0, 0
 				for _, call := range cmp.calls {
-					if call.base == tt.tip && call.head == daemonimage.BDSamplesFloor {
-						floor++
+					if call.head == daemonimage.BDSamplesFloor {
+						if call.base == tt.tip {
+							floor++
+						}
+						if call.base == tt.pinCommit {
+							pinFloor++
+						}
 					}
 					if call.base == tt.pinCommit && call.head == tt.tip {
 						lag++
 					}
 				}
 				assert.Zero(t, floor, "the %s pin's tip is never the base of a floor call", tt.pin)
+				assert.Zero(t, pinFloor, "the %s pin's own commit is never the base of a floor call", tt.pin)
 				assert.LessOrEqual(t, lag, 1, "the %s pin's own lag compare is at most one call", tt.pin)
 				assert.Contains(t, cmp.calls, pinsReadCompareCall{owner: pinsReadOwner, repo: "beads", base: pinsReadBDTip, head: daemonimage.BDSamplesFloor},
 					"bd still takes the floor call in this row")
@@ -343,6 +355,89 @@ func TestReadImagePinTipsBDFloor(t *testing.T) {
 	}
 }
 
+// TestReadImagePinTipsBDPinFloor: a bd pin behind its source's tip has its own
+// commit held to the samples build too, after the tip's check passed: a pin that
+// lacks the floor reads LacksFloor with its lag counted and no error, a pin that
+// holds it reads clean, and a comparison that fails or answers no count is that
+// pin's Err. The pin's commit is asked once, as the base of a floor compare.
+func TestReadImagePinTipsBDPinFloor(t *testing.T) {
+	t.Parallel()
+	pinFloorKey := pinsReadCompareKey(pinsReadBDCommit, daemonimage.BDSamplesFloor)
+	tests := []struct {
+		name       string
+		setup      func(*fakePinCompare)
+		lacksFloor bool
+		wantErr    string
+	}{
+		{
+			name:       "a bd pin that lacks the floor",
+			setup:      func(cmp *fakePinCompare) { cmp.behind[pinFloorKey] = 2 },
+			lacksFloor: true,
+		},
+		{name: "a bd pin that holds the floor"},
+		{
+			name:    "a pin comparison that fails",
+			setup:   func(cmp *fakePinCompare) { cmp.errs[pinFloorKey] = errors.New("forgejo: server error") },
+			wantErr: "cannot compare bd tip " + pinsReadBDCommit,
+		},
+		{
+			name:    "a pin comparison that answers no comparison",
+			setup:   func(cmp *fakePinCompare) { cmp.nilFor[pinFloorKey] = true },
+			wantErr: "answered no comparison",
+		},
+		{
+			name:    "a pin comparison with a negative count",
+			setup:   func(cmp *fakePinCompare) { cmp.behind[pinFloorKey] = -1 },
+			wantErr: "is negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			git, cmp, pathCount := pinsReadAllHealthy()
+			if tt.setup != nil {
+				tt.setup(cmp)
+			}
+
+			states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+			require.NoError(t, err, "a pin's floor read is not the file's error")
+			require.Len(t, states, 4)
+
+			pinFloorAt, tipFloorAt := -1, -1
+			for i, call := range cmp.calls {
+				if call.head != daemonimage.BDSamplesFloor {
+					continue
+				}
+				switch call.base {
+				case pinsReadBDTip:
+					tipFloorAt = i
+				case pinsReadBDCommit:
+					pinFloorAt = i
+				}
+			}
+			require.NotEqual(t, -1, tipFloorAt, "the tip's floor check is made")
+			require.NotEqual(t, -1, pinFloorAt, "the pin's own commit is asked")
+			assert.Less(t, tipFloorAt, pinFloorAt, "the pin's commit is asked after the tip's check passed")
+			assert.Equal(t, pinsReadCompareCall{owner: pinsReadOwner, repo: "beads", base: pinsReadBDCommit, head: daemonimage.BDSamplesFloor},
+				cmp.calls[pinFloorAt], "the pin's commit is the base and the floor the head")
+
+			assert.Equal(t, pinsReadOtherStates(), states[1:], "the other three pins are still read")
+			if tt.wantErr != "" {
+				require.Error(t, states[0].Err, "the pin's failed floor read is its error")
+				for _, part := range []string{"bd-floor guard", daemonimage.BDSamplesFloor, pinsReadBDCommit, tt.wantErr} {
+					assert.Contains(t, states[0].Err.Error(), part, "the error names the pin's commit and the floor")
+				}
+				assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Err: states[0].Err}, states[0],
+					"the tip read before the pin's floor read is kept")
+				return
+			}
+			assert.NoError(t, states[0].Err, "a bd pin's own commit that reads is not an error")
+			assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1, LacksFloor: tt.lacksFloor}, states[0],
+				"the pin reads its lag, and LacksFloor says whether its commit holds the floor")
+		})
+	}
+}
+
 // TestImagePinsReadExpandsTheForgeOwner: a file written with {owner} is expanded
 // with the owner the resolver names, and the comparison addresses the expanded
 // owner's repository.
@@ -358,7 +453,7 @@ func TestImagePinsReadExpandsTheForgeOwner(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, states, 4)
-	require.Len(t, cmp.calls, 4, "the bd floor and the three compared pins are asked")
+	require.Len(t, cmp.calls, 5, "bd's two floor checks and the three lag compares are asked")
 	for i, call := range cmp.calls {
 		assert.Equal(t, pinsReadOwner, call.owner, "comparison %d names the expanded owner", i)
 	}
@@ -725,7 +820,7 @@ func TestReadImagePinTipsCountsOnlyInputCommitsForADevopsPin(t *testing.T) {
 		url: pinsReadPinURL("devops"), pin: pinsReadDevopsCommit, tip: pinsReadDevopsTip,
 		paths: daemonimage.PinInputPaths("devops"),
 	}}, pathCount.calls, "the devops pin is counted once, with its inputs")
-	require.Len(t, cmp.calls, 4, "the bd floor and the three pins with no input list are compared")
+	require.Len(t, cmp.calls, 5, "bd's two floor checks and the three pins with no input list are compared")
 	for _, call := range cmp.calls {
 		assert.NotEqual(t, "devops", call.repo, "the devops pin is counted through its inputs, not the compare")
 	}
@@ -780,5 +875,5 @@ func TestReadImagePinTipsNilPathSeamIsThePinsErr(t *testing.T) {
 	assert.Equal(t, "devops", states[3].Name, "the failed state still names its pin")
 	assert.Equal(t, pinsReadDevopsTip, states[3].Tip, "the tip read before the count is kept")
 	assert.Equal(t, pinsReadPinsBeforeDevops(), states[:3], "the other three pins are still read")
-	assert.Len(t, cmp.calls, 4, "the devops pin is not compared in place of the missing seam")
+	assert.Len(t, cmp.calls, 5, "the devops pin is not compared in place of the missing seam")
 }

@@ -70,6 +70,11 @@ type ImagePinState struct {
 	// planner's commit-count rules still apply to it, and it raises an
 	// image-pins-unreadable item naming the age it could not read (gt-0hb3sx).
 	AgeErr error
+	// LacksFloor marks a bd pin whose own commit does not hold the samples
+	// build, read when that commit is not its source's tip (gt-o2hvs3). It is
+	// set before the lag read, so a state with an Err may carry it; the planner
+	// files only on a pin whose Err is nil.
+	LacksFloor bool
 }
 
 // ImagePinRefreshBead is an open refresh bead the planner found: the id the
