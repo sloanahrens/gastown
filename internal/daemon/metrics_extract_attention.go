@@ -27,12 +27,6 @@ const (
 	// day's midnight.
 	metricsExtractStaleAfter = 26 * time.Hour
 
-	// metricsExtractFooterName is the file the extract writes last into a day's
-	// directory, recording the rows it refused. The metrics package names it
-	// metrics.footerName (internal/metrics/load_result.go) and writes it with
-	// writeFooter (internal/metrics/extract.go).
-	metricsExtractFooterName = "footer.json"
-
 	// metricsExtractLandingsName is the day's landings table, the file the
 	// extract writes first. The metrics package names it landingsName
 	// (internal/metrics/analysis.go).
@@ -220,7 +214,7 @@ func readMetricsExtract(townRoot string, now time.Time) (metricsExtractRead, err
 	}
 	read := metricsExtractRead{day: day}
 	dayDir := filepath.Join(root, day.Format(time.DateOnly))
-	path := filepath.Join(dayDir, metricsExtractFooterName)
+	path := filepath.Join(dayDir, metrics.FooterName)
 	// The footer's mtime is when the extract finished the day: written sets the
 	// stale item's age. A footer that cannot be statted leaves it zero, and the
 	// stale item falls back to the day's midnight.

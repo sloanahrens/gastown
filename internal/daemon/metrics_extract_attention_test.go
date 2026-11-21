@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/metrics"
 	"github.com/steveyegge/gastown/internal/storypoints/estlog"
 )
 
@@ -48,7 +49,7 @@ func writeExtractDay(t *testing.T, town, day, footer string) {
 	if err != nil {
 		t.Fatalf("day %q: %v", day, err)
 	}
-	path := filepath.Join(dir, metricsExtractFooterName)
+	path := filepath.Join(dir, metrics.FooterName)
 	if err := os.WriteFile(path, []byte(footer), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +214,7 @@ func TestMetricsExtractStaleIsMeasuredFromTheWrite(t *testing.T) {
 			t.Parallel()
 			f := metricsExtractRig(t, tc.now)
 			writeExtractDay(t, f.d.config.TownRoot, day, cleanFooter)
-			path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metricsExtractFooterName)
+			path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metrics.FooterName)
 			if err := os.Chtimes(path, written, written); err != nil {
 				t.Fatal(err)
 			}
@@ -270,7 +271,7 @@ func TestMetricsExtractStaleIgnoresAFutureWriteTime(t *testing.T) {
 			t.Parallel()
 			f := metricsExtractRig(t, tc.now)
 			writeExtractDay(t, f.d.config.TownRoot, day, cleanFooter)
-			path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metricsExtractFooterName)
+			path := filepath.Join(f.d.config.TownRoot, ".runtime", "metrics", day, metrics.FooterName)
 			if err := os.Chtimes(path, tc.written, tc.written); err != nil {
 				t.Fatal(err)
 			}
@@ -321,7 +322,7 @@ func TestMetricsExtractStaleReadsTheFooterWriteTime(t *testing.T) {
 				t.Fatal(err)
 			}
 			if tc.footer {
-				path := filepath.Join(dir, metricsExtractFooterName)
+				path := filepath.Join(dir, metrics.FooterName)
 				if err := os.WriteFile(path, []byte(cleanFooter), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -388,7 +389,7 @@ func TestMetricsExtractAttentionGaps(t *testing.T) {
 			days: [][2]string{{"2026-11-19", "{not json"}},
 			want: []string{metricsExtractUnreadableKey},
 			summary: []string{
-				metricsExtractFooterName,
+				metrics.FooterName,
 			},
 		},
 		{
