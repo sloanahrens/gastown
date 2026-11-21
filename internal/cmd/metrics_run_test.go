@@ -542,29 +542,29 @@ func TestMetricsRunGapsMessage(t *testing.T) {
 	}
 }
 
-// A footer with no gaps leaves the hour running, and a footer it cannot read is
-// an error rather than a day read as gap-free.
+// A footer with no gaps leaves the hour running.
 func TestMetricsRunGapsClean(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	writeHourFile(t, town, ".runtime/metrics/2026-10-01/weekly.csv",
+		"week,rig,thin,dominant_model\r\n")
+	writeHourFile(t, town, ".runtime/metrics/2026-10-01/footer.json",
+		`{"rows_read":{"ledger":0,"reviews":0,"beads":0,"usage":0},"rows_dropped":[],"gaps":[],"sources_unreadable":[],"model_unknown":0,"stage_stamp_missing_created_at":0,"stage_stamp_missing_dispatched_at":0,"stage_stamp_missing_submitted_at":0}`)
+	if err := runMetricsHourWith(context.Background(), io.Discard, town, footerHourSteps(t, town)); err != nil {
+		t.Fatalf("the hour failed on a footer with no gaps: %v", err)
+	}
+}
+
+// A footer the hour cannot read, or cannot find, fails it rather than passing
+// the day as gap-free.
+func TestMetricsRunGapsFooterErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name    string
-		footer  string
-		wantErr string
+		name   string
+		footer string
 	}{
-		{
-			name:   "no gaps",
-			footer: `{"rows_read":{"ledger":0,"reviews":0,"beads":0,"usage":0},"rows_dropped":[],"gaps":[],"sources_unreadable":[],"model_unknown":0,"stage_stamp_missing_created_at":0,"stage_stamp_missing_dispatched_at":0,"stage_stamp_missing_submitted_at":0}`,
-		},
-		{
-			name:    "an unreadable footer",
-			footer:  "not json",
-			wantErr: "extract footer:",
-		},
-		{
-			name:    "no footer at all",
-			footer:  "",
-			wantErr: "extract footer:",
-		},
+		{name: "an unreadable footer", footer: "not json"},
+		{name: "no footer at all"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -576,13 +576,11 @@ func TestMetricsRunGapsClean(t *testing.T) {
 				writeHourFile(t, town, ".runtime/metrics/2026-10-01/footer.json", tc.footer)
 			}
 			err := runMetricsHourWith(context.Background(), io.Discard, town, footerHourSteps(t, town))
-			switch {
-			case tc.wantErr == "" && err != nil:
-				t.Fatalf("the hour failed on a footer with no gaps: %v", err)
-			case tc.wantErr != "" && err == nil:
+			if err == nil {
 				t.Fatalf("the hour passed over a footer it could not read")
-			case tc.wantErr != "" && !strings.Contains(err.Error(), tc.wantErr):
-				t.Fatalf("err = %q, want it to name %q", err, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), "extract footer:") {
+				t.Fatalf("err = %q, want it to name %q", err, "extract footer:")
 			}
 		})
 	}
