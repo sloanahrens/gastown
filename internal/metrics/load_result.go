@@ -18,6 +18,9 @@ import (
 
 const (
 	footerName = "footer.json"
+	// FooterName is the footer file's name, for callers outside this package
+	// that read what the extract wrote.
+	FooterName = footerName
 	weeklyName = "weekly.csv"
 )
 
