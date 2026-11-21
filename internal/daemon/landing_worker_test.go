@@ -2331,11 +2331,12 @@ func TestFollowupBeadsAppend(t *testing.T) {
 		updateErr   error
 		wantUpdates int
 		wantErr     string
+		wantFull    bool
 	}{
 		{name: "an open bead gets one update", status: "open", body: body, wantUpdates: 1},
 		{name: "a bead that cannot be read is an error", target: "gt-missing", status: "open", body: body, wantErr: "gt-missing"},
 		{name: "an in_progress bead is refused", status: "in_progress", body: body, wantErr: "in_progress"},
-		{name: "a body with no box to place by is refused", status: "open", body: "## Goal\n- a finding\n", wantErr: "no room"},
+		{name: "a body with no box to place by is refused", status: "open", body: "## Goal\n- a finding\n", wantErr: "no room", wantFull: true},
 		{name: "a failing update is returned", status: "open", body: body, updateErr: errors.New("dolt is down"), wantUpdates: 1, wantErr: "dolt is down"},
 	}
 	for _, tt := range tests {
@@ -2353,6 +2354,9 @@ func TestFollowupBeadsAppend(t *testing.T) {
 
 			if tt.wantErr == "" && err != nil || tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("AppendFollowup error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if full := errors.Is(err, land.ErrBundleFull); full != tt.wantFull {
+				t.Errorf("errors.Is(err, land.ErrBundleFull) = %v, want %v for %v", full, tt.wantFull, err)
 			}
 			if len(bd.updates) != tt.wantUpdates {
 				t.Fatalf("updates = %d, want %d", len(bd.updates), tt.wantUpdates)
