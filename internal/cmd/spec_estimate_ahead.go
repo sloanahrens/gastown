@@ -88,6 +88,13 @@ func specEstimateAheadPick(cands []specEstimateAheadBead, limit int) []string {
 // estimate: open, unassigned, shaped, its comments read, no dependency that
 // keeps it off the board, and no estimate of these sections.
 func specEstimateAheadEligible(b specEstimateAheadBead) bool {
+	return specEstimateAheadEstimable(b) && !specEstimateAheadHasCurrentEstimate(b)
+}
+
+// specEstimateAheadEstimable reports whether the pass may estimate b were its
+// estimate not current: open, unassigned, shaped, its comments read and no
+// dependency that keeps it off the board.
+func specEstimateAheadEstimable(b specEstimateAheadBead) bool {
 	if b.Issue == nil || strings.TrimSpace(b.Issue.ID) == "" {
 		return false
 	}
@@ -103,19 +110,20 @@ func specEstimateAheadEligible(b specEstimateAheadBead) bool {
 	if !b.CommentsRead {
 		return false
 	}
-	if specEstimateAheadBlocked(b.Issue) {
-		return false
-	}
-	current := estimate.SectionHash(b.Issue)
+	return !specEstimateAheadBlocked(b.Issue)
+}
+
+// specEstimateAheadHasCurrentEstimate reports whether b's estimate is one the
+// pass leaves alone: its latest note carries the hash of its current sections,
+// or it wears the labels an estimate writes and has no note to date them (only a
+// note dating the labels to other sections proves them stale, and with none the
+// pass would overwrite a label it cannot show to be out of date).
+func specEstimateAheadHasCurrentEstimate(b specEstimateAheadBead) bool {
 	noted := latestEstimateHash(b.Comments)
-	if noted == current {
-		return false
+	if noted == estimate.SectionHash(b.Issue) {
+		return true
 	}
-	// A bead already wearing the labels an estimate writes is left alone when
-	// its note names no hash: only a note dating the labels to other sections
-	// proves them stale, and with none the pass would overwrite a label it
-	// cannot show to be out of date.
-	return noted != "" || !specEstimateAheadLabeled(b.Issue)
+	return noted == "" && specEstimateAheadLabeled(b.Issue)
 }
 
 // specEstimateAheadLabeled reports whether the bead wears any label gt spec

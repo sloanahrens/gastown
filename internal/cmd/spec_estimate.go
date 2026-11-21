@@ -761,6 +761,15 @@ func specEstimateAheadPass(env specDispatchEnv, shaped []string, slung map[strin
 		// it just enforced.
 		return lines
 	}
+	// A bead found estimable with a current estimate is remembered, so the next
+	// tick's window passes it by (gt-ldwxio).
+	if env.EstimateAheadCurrent != nil {
+		for _, b := range cands {
+			if specEstimateAheadEstimable(b) && specEstimateAheadHasCurrentEstimate(b) {
+				env.EstimateAheadCurrent(b.Issue.ID)
+			}
+		}
+	}
 	for _, id := range specEstimateAheadPick(cands, specEstimateAheadLimit) {
 		answer := specStoryPointRun(env, id)
 		if line := specEstimateAheadLine(id, answer); line != "" {

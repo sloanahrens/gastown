@@ -585,3 +585,84 @@ func TestSpecEstimateAheadReadTimeoutEndsThePass(t *testing.T) {
 		t.Errorf("lines = %q, want one saying the reads did not finish", lines)
 	}
 }
+
+// aheadCurrentTick is one tick over the verdict fixture with the estimate-ahead
+// pass on, whose reader counts the beads it reads. The first current beads carry
+// a current estimate (labels and a note holding their sections' hash); the rest
+// carry none. It returns the ids the pass read (gt-ldwxio).
+func aheadCurrentTick(t *testing.T, v *verdictTick, current int) []string {
+	t.Helper()
+	for i := 0; i < current; i++ {
+		id := fmt.Sprintf("gt-cand-%02d", i)
+		spec := v.f.specs[id]
+		spec.Labels = append(spec.Labels, "sp:3", "sp-rung:all", "sp-minutes:5")
+		v.f.specs[id] = spec
+		issue := specAheadIssue(spec)
+		v.f.aheadComments[id] = []beads.Comment{{Text: fmt.Sprintf("%s sp:3 rung:all hash:%s\nminutes: 5.0", specEstimateNotePrefix, estimate.SectionHash(&issue))}}
+	}
+	return aheadTickReads(t, v)
+}
+
+// aheadTickReads runs one more tick over v's town and memory and returns the
+// ids the estimate-ahead pass read.
+func aheadTickReads(t *testing.T, v *verdictTick) []string {
+	t.Helper()
+	env := v.wire(v.f, v.env.Verdicts)
+	env.StoryPointShadow = true
+	var reads []string
+	read := env.EstimateAheadRead
+	env.EstimateAheadRead = func(ctx context.Context, id string) (*beads.Issue, []beads.Comment, error) {
+		reads = append(reads, id)
+		return read(ctx, id)
+	}
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) { return specEstimateOutcome{}, nil }
+	runSpecDispatchCycle(env)
+	return reads
+}
+
+// TestSpecEstimateAheadDoesNotRereadCurrentCandidates: a shaped candidate whose
+// estimate the pass found current is remembered with its board row and not read
+// again while the row is unmoved, so the eight-bead window moves down the board
+// (gt-ldwxio); a candidate whose row moved is read again.
+func TestSpecEstimateAheadDoesNotRereadCurrentCandidates(t *testing.T) {
+	t.Parallel()
+	v := newVerdictTick(t, 10)
+	first := aheadCurrentTick(t, v, 8)
+	if len(first) != specEstimateAheadReadLimit || first[0] != "gt-cand-00" {
+		t.Fatalf("the first tick read %v, want the first %d candidates", first, specEstimateAheadReadLimit)
+	}
+	if second := aheadTickReads(t, v); !slices.Equal(second, []string{"gt-cand-08", "gt-cand-09"}) {
+		t.Fatalf("the second tick read %v, want only the two beyond the window: the eight current ones are remembered", second)
+	}
+	v.rows["gt-cand-00"] = "2026-10-01T00:00:00Z"
+	if third := aheadTickReads(t, v); !slices.Equal(third, []string{"gt-cand-00", "gt-cand-08", "gt-cand-09"}) {
+		t.Errorf("the third tick read %v, want the moved row gt-cand-00 read again beside the two unestimated", third)
+	}
+}
+
+// TestSpecEstimateAheadRemembersOnlyCurrentBeads: the pass reports a bead whose
+// estimate is current and none that it estimates or that is not estimable
+// (gt-ldwxio).
+func TestSpecEstimateAheadRemembersOnlyCurrentBeads(t *testing.T) {
+	t.Parallel()
+	current := cleanSpec("gt-current", 1, "2026-09-29T10:00:00Z")
+	needs := cleanSpec("gt-needs", 1, "2026-09-29T11:00:00Z")
+	assigned := cleanSpec("gt-assigned", 1, "2026-09-29T12:00:00Z")
+	assigned.Assignee = "gastown/polecats/nux"
+	f := newFakeSpecTown(current, needs, assigned)
+	for _, s := range []specdispatch.Spec{current, assigned} {
+		issue := specAheadIssue(s)
+		f.aheadComments[s.ID] = []beads.Comment{{Text: fmt.Sprintf("%s sp:3 rung:all hash:%s\nminutes: 5.0", specEstimateNotePrefix, estimate.SectionHash(&issue))}}
+	}
+	env := f.env()
+	env.StoryPointShadow = true
+	env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) { return specEstimateOutcome{}, nil }
+	var remembered []string
+	env.EstimateAheadCurrent = func(id string) { remembered = append(remembered, id) }
+
+	specEstimateAheadPass(env, []string{"gt-current", "gt-needs", "gt-assigned"}, nil)
+
+	if want := []string{"gt-current"}; !slices.Equal(remembered, want) {
+		t.Errorf("remembered %v, want %v: not the bead that needs an estimate, not the assigned one", remembered, want)
+	}
+}
