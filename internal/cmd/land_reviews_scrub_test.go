@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -73,7 +74,7 @@ func TestLandReviewsScrubDryRunPrintsCountsAndIDs(t *testing.T) {
 		t.Fatalf("reading the fixture log: %v", err)
 	}
 	var out bytes.Buffer
-	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path); err != nil {
+	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, false); err != nil {
 		t.Fatalf("landReviewsScrubReportFrom: %v", err)
 	}
 	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
@@ -120,7 +121,7 @@ func TestLandReviewsScrubOutputHoldsNoToken(t *testing.T) {
 				t.Fatalf("writing the fixture log: %v", err)
 			}
 			var out bytes.Buffer
-			if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path); err != nil {
+			if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, false); err != nil {
 				t.Fatalf("landReviewsScrubReportFrom: %v", err)
 			}
 			assertReviewsScrubNoToken(t, out.String())
@@ -141,7 +142,7 @@ func TestLandReviewsScrubReadsTheTownDefault(t *testing.T) {
 		t.Fatalf("writing the town's log: %v", err)
 	}
 	var out bytes.Buffer
-	if err := landReviewsScrubReportFrom(func() (string, error) { return town, nil }, &out, ""); err != nil {
+	if err := landReviewsScrubReportFrom(func() (string, error) { return town, nil }, &out, "", false); err != nil {
 		t.Fatalf("landReviewsScrubReportFrom: %v", err)
 	}
 	if !strings.Contains(out.String(), "3 rows, 1 would change") {
@@ -153,7 +154,7 @@ func TestLandReviewsScrubReadsTheTownDefault(t *testing.T) {
 func TestLandReviewsScrubSurfacesAnOpenError(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, t.TempDir())
+	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, t.TempDir(), false)
 	if err == nil {
 		t.Fatal("a directory as the records path returned no error")
 	}
@@ -166,7 +167,7 @@ func TestLandReviewsScrubSurfacesAnOpenError(t *testing.T) {
 func TestLandReviewsScrubFailsWhenTheTownCannotBeResolved(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	err := landReviewsScrubReportFrom(func() (string, error) { return "", errors.New("no town") }, &out, "")
+	err := landReviewsScrubReportFrom(func() (string, error) { return "", errors.New("no town") }, &out, "", false)
 	if err == nil {
 		t.Fatal("an unresolvable town returned no error")
 	}
@@ -188,8 +189,51 @@ func (reviewsScrubFailingWriter) Write([]byte) (int, error) { return 0, errors.N
 func TestLandReviewsScrubSurfacesAWriteError(t *testing.T) {
 	t.Parallel()
 	path := writeReviewsScrubFixture(t, t.TempDir())
-	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path)
+	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, false)
 	if err == nil || !strings.Contains(err.Error(), "writing the plan") {
 		t.Fatalf("a failing writer returned %v, want an error naming the write", err)
 	}
+	err = landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, true)
+	if err == nil || !strings.Contains(err.Error(), "writing the plan") {
+		t.Fatalf("a failing writer in JSON returned %v, want an error naming the write", err)
+	}
+}
+
+// TestLandReviewsScrubJSON: --json prints the figures as one object with the bead ids,
+// an empty list as [], and no part of the planted token (gt-2eh81l).
+func TestLandReviewsScrubJSON(t *testing.T) {
+	t.Parallel()
+	clean := filepath.Join(t.TempDir(), land.ReviewsFileName)
+	row, err := json.Marshal(land.ReviewRecord{BeadID: "gt-keep1", Verdict: land.VerdictApprove})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := os.WriteFile(clean, append(row, '\n'), 0o600); err != nil {
+		t.Fatalf("writing the clean log: %v", err)
+	}
+	t.Run("a log with a row to change", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, writeReviewsScrubFixture(t, t.TempDir()), true); err != nil {
+			t.Fatalf("landReviewsScrubReportFrom: %v", err)
+		}
+		assertReviewsScrubNoToken(t, out.String())
+		var plan landReviewsScrubPlan
+		if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
+			t.Fatalf("the JSON output does not parse: %v", err)
+		}
+		if !plan.DryRun || plan.Rows != 3 || plan.WouldChange != 1 || plan.Words != 1 || !slices.Equal(plan.Beads, []string{"gt-slit1"}) {
+			t.Errorf("JSON plan = %+v, want dry_run, 3 rows, 1 changed, 1 word, beads [gt-slit1]", plan)
+		}
+	})
+	t.Run("a log with nothing to change", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, clean, true); err != nil {
+			t.Fatalf("landReviewsScrubReportFrom: %v", err)
+		}
+		if !strings.Contains(out.String(), `"beads": []`) {
+			t.Errorf("JSON plan = %s, want an empty beads list printed as []", out.String())
+		}
+	})
 }
