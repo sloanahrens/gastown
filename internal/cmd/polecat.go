@@ -919,7 +919,7 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 
 	// One probe per seat, fanned out across a bounded pool. Order is preserved,
 	// so this is the serial listing with its measuring overlapped.
-	allPolecats := resolvePolecatSeats(seats)
+	allPolecats := polecatListRows(resolvePolecatSeats(seats))
 
 	// Output
 	if polecatListJSON {
@@ -1156,6 +1156,24 @@ func polecatListRow(reg *session.PrefixRegistry, r *rig.Rig, name string) (Polec
 		return PolecatListItem{}, false
 	}
 	return seats[0].resolve(), true
+}
+
+// polecatAssignedIssue is the issue a polecat's row reports as assigned work:
+// none for a spawning seat. loadFromBeads gives a spawning seat the hook_bead
+// of its claim as Issue, which is a claim and not yet hooked work (gt-9d12ys).
+func polecatAssignedIssue(state polecat.State, issue string) string {
+	if state == polecat.StateSpawning {
+		return ""
+	}
+	return issue
+}
+
+// polecatListRows drops the issue of every spawning row, in place.
+func polecatListRows(rows []PolecatListItem) []PolecatListItem {
+	for i := range rows {
+		rows[i].Issue = polecatAssignedIssue(rows[i].State, rows[i].Issue)
+	}
+	return rows
 }
 
 // reconcilePolecatWithListRow makes p report the state and issue the list row
