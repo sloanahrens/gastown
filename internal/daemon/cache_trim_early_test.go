@@ -56,10 +56,9 @@ func TestCacheTrimEarlyRunsWhenTheDiskIsOverThePercent(t *testing.T) {
 // TestCacheTrimEarlyRespectsTheGapAndTheRunningJob: an early request inside
 // fifteen minutes of the last start does nothing, and a request at exactly
 // fifteen minutes does nothing either, since the gap is more than fifteen. A
-// trim whose run concluded without a verdict, the one an earlier Job still
-// holds, leaves its retry pending, and the early check does not pre-empt that
-// retry or log anything new while it is pending. A trim already holding the
-// guard is never joined.
+// trim whose run concluded without a verdict records the full interval and
+// leaves no retry, so once the gap has passed a hot disk runs it early like any
+// other trim (gt-wkjdql). A trim already holding the guard is never joined.
 func TestCacheTrimEarlyRespectsTheGapAndTheRunningJob(t *testing.T) {
 	t.Parallel()
 
@@ -107,14 +106,14 @@ func TestCacheTrimEarlyRespectsTheGapAndTheRunningJob(t *testing.T) {
 		}
 	})
 
-	t.Run("an earlier Job still running", func(t *testing.T) {
+	t.Run("a failed run leaves no retry", func(t *testing.T) {
 		t.Parallel()
 		d, logs, f := diskMaintTestDaemon(t)
 		now := diskMaintNow.Add(8 * time.Hour) // 12:45
 		d.diskMaint.now = func() time.Time { return now }
 		runs := 0
-		// A trim that runs three minutes and reaches no verdict: the earlier Job
-		// is still running, so the run is left for its retry.
+		// A trim that runs three minutes and reaches no verdict: the failure is
+		// recorded at 12:48 with the full interval, and no retry is left pending.
 		d.diskMaint.trim = func(context.Context, string) bool {
 			runs++
 			now = now.Add(3 * time.Minute)
@@ -122,19 +121,19 @@ func TestCacheTrimEarlyRespectsTheGapAndTheRunningJob(t *testing.T) {
 		}
 		sandboxAt(f, 76)
 
-		d.runDiskMaintenance() // 12:45: due, and it runs; the retry is 12:48 + 15m = 13:03
+		d.runDiskMaintenance() // 12:45: due, and it runs
 		if runs != 1 {
 			t.Fatalf("ran %d times on the first tick, want 1", runs)
 		}
 		logged := logs.Len()
 
-		now = diskMaintNow.Add(8*time.Hour + 16*time.Minute) // 13:01: past the gap, short of the retry
+		now = diskMaintNow.Add(8*time.Hour + 16*time.Minute) // 13:01: past the gap, inside the interval
 		d.runDiskMaintenance()
-		if runs != 1 {
-			t.Fatalf("ran %d times at 13:01, want 1: a pending retry is the trim's next run, not the early check's", runs)
+		if runs != 2 {
+			t.Fatalf("ran %d times at 13:01, want 2: a failed trim leaves no retry, so the hot disk's early check runs it", runs)
 		}
-		if strings.Contains(logs.String()[logged:], "cache trim early:") {
-			t.Errorf("logged an early line while a retry was pending: %q", logs.String()[logged:])
+		if !strings.Contains(logs.String()[logged:], "cache trim early:") {
+			t.Errorf("no early line at 13:01, want the early check's line: %q", logs.String()[logged:])
 		}
 	})
 

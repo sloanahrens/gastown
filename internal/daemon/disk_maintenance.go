@@ -89,10 +89,12 @@ const (
 	// (gt-gg9hv.24.6).
 	diskMaintSandboxContext = diskmaint.SandboxContext
 
-	// cacheTrimRetryInterval is when a cache trim that could not reach a
-	// verdict is tried again. A failed trim records this rather than the full
-	// interval, so a transient refusal costs the next few five-minute ticks
-	// instead of two hours (gt-gg9hv.24.6).
+	// cacheTrimRetryInterval is when a trim that could not reach a verdict is
+	// tried again, for the schedules that keep a retry: the CI cache volume
+	// trim, the engine prune and the sweep-run prune (gt-gg9hv.24.6). The
+	// shared cache trim records a failure at the full interval like a verdict
+	// and leaves a failed claim to the park rather than to a timer (gt-o3jzx7,
+	// gt-wkjdql).
 	cacheTrimRetryInterval = 15 * time.Minute
 
 	// cacheTrimEarlyMinGap is how long after a trim began before the early check
@@ -353,15 +355,17 @@ func (s *diskMaintSchedule) retryAtOf(name string) time.Time {
 	return s.retryAt[name]
 }
 
-// cacheTrimDue reports whether the cache trim is due at now: a failed run's
-// retry comes first, and otherwise the interval runs from the last verdict.
+// cacheTrimDue reports whether the cache trim is due at now: the interval runs
+// from the last conclusion, whether the run reached a verdict or failed. A
+// failed trim is not retried on a timer: a failed claim is the park's to stop
+// (gt-o3jzx7, gt-wkjdql).
 func (s *diskMaintSchedule) cacheTrimDue(now time.Time, every time.Duration) bool {
 	return s.trimDue(diskMaintCacheTrimName, now, every)
 }
 
 // trimDue reports whether the trim named name is due at now, under the rule the
-// cache trim uses: a failed run's retry comes first, and otherwise the interval
-// runs from the last verdict (gt-gg9hv.57).
+// trims with a schedule of their own use: a failed run's retry comes first, and
+// otherwise the interval runs from the last verdict (gt-gg9hv.57).
 func (s *diskMaintSchedule) trimDue(name string, now time.Time, every time.Duration) bool {
 	if retry := s.retryAtOf(name); !retry.IsZero() {
 		return !now.Before(retry)
@@ -520,9 +524,10 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 			}
 		}
 	}
-	// The cache trim is due from its own last run in any window, or from a
-	// failed run's retry. A malformed setting is refused and the trim runs
-	// nothing, as a target's would (gt-gg9hv.24.2).
+	// The cache trim is due from its own last run in any window, at the full
+	// interval whether that run reached a verdict or failed. A malformed
+	// setting is refused and the trim runs nothing, as a target's would
+	// (gt-gg9hv.24.2, gt-wkjdql).
 	if every, err := diskMaintenanceCacheTrimEvery(pc); err != nil {
 		errs = append(errs, err)
 	} else if d.diskMaintSchedule.cacheTrimDue(now, every) {
@@ -815,19 +820,15 @@ func (d *Daemon) runCacheTrimInPass(ctx context.Context, mode string) bool {
 }
 
 // diskMaintenanceTrim is the trim and its schedule record: the start the early
-// check's gap counts from, then the full interval once it reached a verdict, or
-// the short retry when it could not start or conclude. The caller holds the
-// trim's guard.
+// check's gap counts from, then the conclusion at the full interval whatever
+// the trim returned. A failed trim is not retried on a timer: a failed claim is
+// the park's to stop, and the interval sets when the trim looks again
+// (gt-o3jzx7, gt-wkjdql). The caller holds the trim's guard.
 func (d *Daemon) diskMaintenanceTrim(ctx context.Context, mode string) {
 	s := d.diskMaintenanceSeams()
 	d.diskMaintSchedule.recordStart(diskMaintCacheTrimName, s.now())
-	verdict := s.trim(ctx, mode)
-	concluded := s.now()
-	if verdict {
-		d.diskMaintSchedule.record(diskMaintCacheTrimName, concluded)
-	} else {
-		d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, concluded.Add(cacheTrimRetryInterval))
-	}
+	s.trim(ctx, mode)
+	d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
 }
 
 // refuseDiskMaintenance says why a setting the patrol cannot schedule runs

@@ -938,8 +938,8 @@ func TestCacheTrimLeavesAnEarlierJobAloneUnlessItIsStuck(t *testing.T) {
 }
 
 // TestCacheTrimMalformedValuesFile pins the refusal: a values file that is there
-// and does not parse is logged, stops the pass before any cluster call, and is
-// retried in fifteen minutes rather than at the full interval.
+// and does not parse is logged, stops the pass before any cluster call, and
+// records the full interval like a verdict rather than a short retry.
 func TestCacheTrimMalformedValuesFile(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
@@ -973,19 +973,19 @@ func TestCacheTrimMalformedValuesFile(t *testing.T) {
 	}
 
 	now = now.Add(5 * time.Minute)
-	f.d.runDiskMaintenance() // a failed pass is due in fifteen minutes, not now
+	f.d.runDiskMaintenance() // a failed pass records the full interval, not a retry
 	if trims != 1 {
-		t.Fatalf("the trim ran %d times five minutes after the malformed file, want the retry at fifteen", trims)
+		t.Fatalf("the trim ran %d times five minutes after the malformed file, want 1: the failure records the full interval", trims)
 	}
-	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // the retry
+	now = now.Add(2*time.Hour - 5*time.Minute)
+	f.d.runDiskMaintenance() // two hours after the failure
 	if trims != 2 {
-		t.Fatalf("the trim ran %d times fifteen minutes after the malformed file, want a retry", trims)
+		t.Fatalf("the trim ran %d times two hours after the malformed file, want 2: the interval decides", trims)
 	}
 }
 
 // TestCacheTrimMalformedValuesFileWithNoClaims: a malformed values file is named
-// and the pass retried in fifteen minutes even when no profile mounts a claim.
+// and the pass records the full interval even when no profile mounts a claim.
 // The file read once there was a claim to trim made the fault silent in a pass
 // with nothing to trim (gt-714vqw).
 func TestCacheTrimMalformedValuesFileWithNoClaims(t *testing.T) {
@@ -1023,14 +1023,14 @@ func TestCacheTrimMalformedValuesFileWithNoClaims(t *testing.T) {
 	}
 
 	now = now.Add(5 * time.Minute)
-	f.d.runDiskMaintenance() // a failed pass is due in fifteen minutes, not now
+	f.d.runDiskMaintenance() // a failed pass records the full interval, not a retry
 	if passes != 1 {
-		t.Fatalf("the trim ran %d times five minutes after the malformed file, want the retry at fifteen", passes)
+		t.Fatalf("the trim ran %d times five minutes after the malformed file, want 1: the failure records the full interval", passes)
 	}
-	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // the retry
+	now = now.Add(2*time.Hour - 5*time.Minute)
+	f.d.runDiskMaintenance() // two hours after the failure
 	if passes != 2 {
-		t.Fatalf("the trim ran %d times fifteen minutes after the malformed file, want a retry", passes)
+		t.Fatalf("the trim ran %d times two hours after the malformed file, want 2: the interval decides", passes)
 	}
 }
 
@@ -1281,7 +1281,7 @@ func TestCacheTrimListerJobReadsAClaimNoPodMounts(t *testing.T) {
 // the claim route, whose room only df can read through a running pod. With none
 // the room cannot be read, so the claim is refused rather than trimmed unchecked:
 // the lister Job reads the listing, no trim Job is applied, no df or du runs, and
-// the pass retries soon.
+// the pass records the full interval.
 func TestCacheTrimListerJobRefusesTheClaimRouteWithoutRoom(t *testing.T) {
 	t.Parallel()
 	// The room is never read here, so the listing needs only to cross the ceiling;
@@ -1313,23 +1313,24 @@ func TestCacheTrimListerJobRefusesTheClaimRouteWithoutRoom(t *testing.T) {
 	if logged := f.log.String(); !strings.Contains(logged, "no running pod mounts the claim to read its free space through; nothing trimmed") {
 		t.Errorf("the log does not say the room was not read: %s", logged)
 	}
-	// The refusal is a retry, not a verdict: due at fifteen minutes, not five.
-	now = now.Add(5 * time.Minute)
+	// The refusal records the full interval: not due at fifteen minutes, due at
+	// two hours.
+	now = now.Add(15 * time.Minute)
 	f.d.runDiskMaintenance()
 	if passes != 1 {
-		t.Fatalf("the pass ran %d times five minutes after the refusal, want the retry at fifteen minutes", passes)
+		t.Fatalf("the pass ran %d times fifteen minutes after the refusal, want 1: the failure records the full interval", passes)
 	}
-	now = now.Add(10 * time.Minute)
+	now = now.Add(2*time.Hour - 15*time.Minute)
 	f.d.runDiskMaintenance()
 	if passes != 2 {
-		t.Errorf("the pass ran %d times fifteen minutes after the refusal, want 2", passes)
+		t.Errorf("the pass ran %d times two hours after the refusal, want 2", passes)
 	}
 }
 
 // TestCacheTrimListerJobFailureTrimsNothing is the bead's second box: a lister
 // Job that fails, does not finish, or whose log does not parse logs that the
-// listing could not be read, trims nothing, and reports a retry. A claim with no
-// image to run the Job in is refused the same way.
+// listing could not be read, trims nothing, and records the full interval. A
+// claim with no image to run the Job in is refused the same way.
 func TestCacheTrimListerJobFailureTrimsNothing(t *testing.T) {
 	t.Parallel()
 	timedOut := cliReply{stderr: "error: timed out waiting for the condition on jobs/" + cacheTrimListJob, code: 1}
@@ -1410,16 +1411,17 @@ func TestCacheTrimListerJobFailureTrimsNothing(t *testing.T) {
 					t.Errorf("the pass applied %q from a listing it could not read; applied %v", doc, f.applied(t))
 				}
 			}
-			// The failed read reports a retry: due at fifteen minutes, not five.
-			now = now.Add(5 * time.Minute)
+			// The failed read records the full interval: not due at fifteen
+			// minutes, due at two hours.
+			now = now.Add(15 * time.Minute)
 			f.d.runDiskMaintenance()
 			if passes != 1 {
-				t.Fatalf("the pass ran %d times five minutes after a failed read, want the retry at fifteen minutes", passes)
+				t.Fatalf("the pass ran %d times fifteen minutes after a failed read, want 1: the failure records the full interval", passes)
 			}
-			now = now.Add(10 * time.Minute)
+			now = now.Add(2*time.Hour - 15*time.Minute)
 			f.d.runDiskMaintenance()
 			if passes != 2 {
-				t.Errorf("the pass ran %d times fifteen minutes after a failed read, want 2", passes)
+				t.Errorf("the pass ran %d times two hours after a failed read, want 2", passes)
 			}
 		})
 	}
@@ -1817,11 +1819,12 @@ func TestCacheTrimUnderTheCapIsAVerdictNotARetry(t *testing.T) {
 	}
 }
 
-// TestCacheTrimOverTheCapPinnedByASandboxRetriesSoon pins the other side of the
-// cap verdict: a claim over the cap whose only removable files are module cache
-// files, while a sandbox runs, has nothing the trim may remove yet. That clears
-// when the sandbox stops, so it is a failed run, retried in fifteen minutes.
-func TestCacheTrimOverTheCapPinnedByASandboxRetriesSoon(t *testing.T) {
+// TestCacheTrimOverTheCapPinnedByASandboxRecordsTheInterval pins the other side
+// of the cap verdict: a claim over the cap whose only removable files are module
+// cache files, while a sandbox runs, has nothing the trim may remove yet. That
+// clears when the sandbox stops, but until then it is a failed run, which
+// records the full interval like a verdict (gt-wkjdql).
+func TestCacheTrimOverTheCapPinnedByASandboxRecordsTheInterval(t *testing.T) {
 	t.Parallel()
 	const pinned = `[{"path":"gomodcache/aa/a","cache":"module","size":1000,` +
 		`"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"},` +
@@ -1837,22 +1840,22 @@ func TestCacheTrimOverTheCapPinnedByASandboxRetriesSoon(t *testing.T) {
 	if got := f.listReads(); got != 1 {
 		t.Fatalf("the pass read the listing %d times, want 1", got)
 	}
-	now = now.Add(5 * time.Minute)
-	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: the failure records the full interval, not a retry
 	if got := f.listReads(); got != 1 {
-		t.Errorf("the pass retried %d times five minutes after a pinned refusal, want 1: a retry is due at fifteen", got)
+		t.Errorf("the pass retried %d times fifteen minutes after a pinned refusal, want 1: the failure records the full interval", got)
 	}
-	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // 05:00: the short retry
+	now = now.Add(2*time.Hour - 15*time.Minute)
+	f.d.runDiskMaintenance() // 06:45: two hours after the failed run
 	if got := f.listReads(); got != 2 {
-		t.Errorf("the pass read the listing %d times fifteen minutes after a pinned refusal, want 2", got)
+		t.Errorf("the pass read the listing %d times two hours after a pinned refusal, want 2", got)
 	}
 }
 
 // TestCacheTrimKeepsBuildFilesInsideTheMinimumAge pins the floor at the pass: a
 // claim over the cap whose build-cache files are all younger than the build
-// cache's minimum age plans no removal, so the pass applies no Job and
-// retries soon, as it does for a claim the rules can only pin.
+// cache's minimum age plans no removal, so the pass applies no Job and records
+// the full interval, as it does for a claim the rules can only pin.
 func TestCacheTrimKeepsBuildFilesInsideTheMinimumAge(t *testing.T) {
 	t.Parallel()
 	const young = `[{"path":"gocache/aa/a","cache":"build","size":1000,` +
@@ -1872,11 +1875,11 @@ func TestCacheTrimKeepsBuildFilesInsideTheMinimumAge(t *testing.T) {
 	if logged := f.log.String(); !strings.Contains(logged, "would remove nothing") {
 		t.Errorf("the log does not say the trim had nothing it may remove: %s", logged)
 	}
-	// An hour later the older file is past the floor, and the retried pass trims it.
-	now = diskMaintNow.Add(time.Hour)
+	// One interval later the files are past the floor, and the pass trims them.
+	now = diskMaintNow.Add(2 * time.Hour)
 	f.d.runDiskMaintenance()
 	if got := f.applyCalls(); len(got) == 0 {
-		t.Errorf("the pass applied nothing an hour later, when the files are past the minimum age: %v", f.verbs())
+		t.Errorf("the pass applied nothing one interval later, when the files are past the minimum age: %v", f.verbs())
 	}
 }
 
@@ -2435,11 +2438,11 @@ func TestDiskMaintSandboxContextEndToEnd(t *testing.T) {
 	}
 }
 
-// TestCacheTrimFailureRetriesSoonAndLogsOnce pins the schedule: a run that
-// cannot start records a retry fifteen minutes later rather than the full two
-// hours, the same refusal is said once in the hour, and a run that reaches a
-// verdict spends the full interval.
-func TestCacheTrimFailureRetriesSoonAndLogsOnce(t *testing.T) {
+// TestCacheTrimFailedRunRecordsTheIntervalAndLogsOnce pins the schedule: a run
+// that cannot start records its conclusion at the full two hours like a verdict
+// rather than asking to be retried in fifteen minutes, and the same refusal is
+// said once in the hour however often the trim runs in it (gt-wkjdql).
+func TestCacheTrimFailedRunRecordsTheIntervalAndLogsOnce(t *testing.T) {
 	t.Parallel()
 	overrides := map[string]cliReply{cacheTrimPreflightVerb: {stdout: ""}}
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
@@ -2462,51 +2465,57 @@ func TestCacheTrimFailureRetriesSoonAndLogsOnce(t *testing.T) {
 	}
 
 	now = now.Add(5 * time.Minute)
-	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	f.d.runDiskMaintenance() // 04:50: a failed run records the interval, not a retry
 	if trims != 1 {
-		t.Fatalf("trimmed %d times five minutes after a failure, want 1: a retry is due at fifteen", trims)
+		t.Fatalf("trimmed %d times five minutes after a failure, want 1: the failure records the full interval", trims)
 	}
 
 	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // 05:00: the retry
-	if trims != 2 {
-		t.Fatalf("trimmed %d times fifteen minutes after a failure, want 2", trims)
+	f.d.runDiskMaintenance() // 05:00: the retry time a failure used to ask for
+	if trims != 1 {
+		t.Fatalf("trimmed %d times fifteen minutes after a failure, want 1: the failure records the full interval", trims)
 	}
 
-	now = now.Add(30 * time.Minute)
-	f.d.runDiskMaintenance() // 05:30: the next retry, still inside the hour
-	if trims != 3 {
-		t.Fatalf("trimmed %d times at the second retry, want 3", trims)
+	// A second run inside the hour says the same refusal once, not again.
+	f.trimDue()
+	f.d.runDiskMaintenance() // 05:00: a forced second run
+	if trims != 2 {
+		t.Fatalf("trimmed %d times on the forced second run, want 2", trims)
 	}
 	if got := strings.Count(f.log.String(), refusal); got != 1 {
 		t.Errorf("logged the same refusal %d times within the hour, want once: %s", got, f.log.String())
 	}
 
 	// The cluster recovers: a verdict spends the full interval, so the next run
-	// is due two hours later.
+	// is due two hours after the run that concluded at 05:00.
 	delete(overrides, cacheTrimPreflightVerb)
-	now = now.Add(15 * time.Minute)
-	f.d.runDiskMaintenance() // 05:45: the retry after the last failure
-	if trims != 4 {
-		t.Fatalf("trimmed %d times at the retry after the cluster recovered, want 4", trims)
-	}
-
 	now = now.Add(time.Hour + 59*time.Minute)
-	f.d.runDiskMaintenance()
-	if trims != 4 {
-		t.Fatalf("trimmed %d times a minute short of the interval, want 4", trims)
+	f.d.runDiskMaintenance() // 06:59: a minute short of the interval
+	if trims != 2 {
+		t.Fatalf("trimmed %d times a minute short of the interval, want 2", trims)
 	}
 	now = now.Add(time.Minute)
-	f.d.runDiskMaintenance()
-	if trims != 5 {
-		t.Fatalf("trimmed %d times two hours after the verdict, want 5", trims)
+	f.d.runDiskMaintenance() // 07:00: two hours after the failed run, and it reaches a verdict
+	if trims != 3 {
+		t.Fatalf("trimmed %d times two hours after the failed run, want 3", trims)
+	}
+
+	now = now.Add(2*time.Hour - time.Minute)
+	f.d.runDiskMaintenance() // 08:59: a minute short of the verdict's interval
+	if trims != 3 {
+		t.Fatalf("trimmed %d times a minute short of the verdict's interval, want 3", trims)
+	}
+	now = now.Add(time.Minute)
+	f.d.runDiskMaintenance() // 09:00: two hours after the verdict
+	if trims != 4 {
+		t.Fatalf("trimmed %d times two hours after the verdict, want 4", trims)
 	}
 }
 
 // TestCacheTrimRefusesAnUnreadableKubeconfig pins the preflight's other
 // refusal: a kubeconfig kubectl cannot read stops the pass after that one call
 // with a line naming the read, and trims nothing. It is a failure, not a
-// verdict, so the patrol retries it soon.
+// verdict, and the schedule still records the full interval for it (gt-wkjdql).
 func TestCacheTrimRefusesAnUnreadableKubeconfig(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
@@ -2728,12 +2737,11 @@ func TestCacheTrimApplyDocumentLabel(t *testing.T) {
 	}
 }
 
-// TestCacheTrimApplyFailureRetriesSoon pins the retry rule at the apply: a run
-// that fails while applying records the short retry, so the next 5-minute tick
-// at or after fifteen minutes tries again rather than waiting out the full
-// interval; a run that reaches a verdict still spends the interval
-// (gt-gg9hv.40, gt-gg9hv.24.6).
-func TestCacheTrimApplyFailureRetriesSoon(t *testing.T) {
+// TestCacheTrimApplyFailureRecordsTheInterval pins the schedule at the apply: a
+// run that fails while applying records the full interval like a verdict, so no
+// tick inside it tries the apply again; the verdict's own run spends the full
+// interval too (gt-gg9hv.40, gt-wkjdql).
+func TestCacheTrimApplyFailureRecordsTheInterval(t *testing.T) {
 	t.Parallel()
 	overrides := map[string]cliReply{
 		cacheTrimApplyVerb: {stderr: "The server is unavailable", code: 1},
@@ -2748,30 +2756,29 @@ func TestCacheTrimApplyFailureRetriesSoon(t *testing.T) {
 	}
 
 	now = now.Add(5 * time.Minute)
-	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	f.d.runDiskMaintenance() // 04:50: a failed run records the interval, not a retry
 	if got := f.listReads(); got != 1 {
-		t.Fatalf("trimmed %d times five minutes after a failed apply, want 1: a retry is due at fifteen", got)
+		t.Fatalf("trimmed %d times five minutes after a failed apply, want 1: the failure records the full interval", got)
 	}
 
 	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // 05:00: the short retry, not the two-hour interval
-	if got := f.listReads(); got != 2 {
-		t.Fatalf("trimmed %d times fifteen minutes after a failed apply, want 2", got)
+	f.d.runDiskMaintenance() // 05:00: the retry time a failure used to ask for
+	if got := f.listReads(); got != 1 {
+		t.Fatalf("trimmed %d times fifteen minutes after a failed apply, want 1: the failure records the full interval", got)
 	}
 
-	// The cluster recovers: the run reaches a verdict, which spends the full
-	// interval rather than the retry.
+	// The cluster recovers and the run two hours later reaches a verdict.
 	delete(overrides, cacheTrimApplyVerb)
-	now = now.Add(15 * time.Minute)
-	f.d.runDiskMaintenance() // 05:15: the retry after the last failure
-	if got := f.listReads(); got != 3 {
-		t.Fatalf("trimmed %d times at the retry after the cluster recovered, want 3", got)
+	now = now.Add(time.Hour + 45*time.Minute)
+	f.d.runDiskMaintenance() // 06:45: two hours after the failed apply
+	if got := f.listReads(); got != 2 {
+		t.Fatalf("trimmed %d times two hours after a failed apply, want 2", got)
 	}
 
 	now = now.Add(15 * time.Minute)
-	f.d.runDiskMaintenance() // 05:30: fifteen minutes after the verdict, not due
-	if got := f.listReads(); got != 3 {
-		t.Fatalf("trimmed %d times fifteen minutes after a verdict, want 3: a verdict spends the interval", got)
+	f.d.runDiskMaintenance() // 07:00: fifteen minutes after the verdict, not due
+	if got := f.listReads(); got != 2 {
+		t.Fatalf("trimmed %d times fifteen minutes after a verdict, want 2: a verdict spends the interval", got)
 	}
 }
 
@@ -3213,8 +3220,8 @@ func TestCacheTrimLogsItsRoute(t *testing.T) {
 // TestCacheTrimRefusesAListThatDoesNotFitTheClaim pins the claim route's size
 // guard: a list larger than the free space the pod reports is refused before
 // any apply, with both byte counts; a list smaller than the room, and one that
-// exactly fills it, apply. A refused run records the short retry rather than
-// the full interval (gt-gg9hv.41).
+// exactly fills it, apply. A refused run records the full interval like a
+// verdict (gt-gg9hv.41, gt-wkjdql).
 func TestCacheTrimRefusesAListThatDoesNotFitTheClaim(t *testing.T) {
 	t.Parallel()
 	listing, need := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
@@ -3225,8 +3232,7 @@ func TestCacheTrimRefusesAListThatDoesNotFitTheClaim(t *testing.T) {
 		})
 	}
 
-	// The refusal is a failed run: the retry is due in fifteen minutes, not at
-	// the full interval.
+	// The refusal is a failed run: it records the full interval, not a retry.
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
 		cacheTrimListVerb: {stdout: listing},
 		cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, need-1024)},
@@ -3238,15 +3244,15 @@ func TestCacheTrimRefusesAListThatDoesNotFitTheClaim(t *testing.T) {
 	if got := f.listReads(); got != 1 {
 		t.Fatalf("the pass read the listing %d times, want 1", got)
 	}
-	now = now.Add(5 * time.Minute)
-	f.d.runDiskMaintenance() // 04:50: a failed run is due in fifteen minutes, not now
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: the retry time a failure used to ask for
 	if got := f.listReads(); got != 1 {
-		t.Errorf("the pass retried %d times five minutes after a refusal, want 1: a retry is due at fifteen", got)
+		t.Errorf("the pass retried %d times fifteen minutes after a refusal, want 1: the failure records the full interval", got)
 	}
-	now = now.Add(10 * time.Minute)
-	f.d.runDiskMaintenance() // 05:00: the short retry
+	now = now.Add(2*time.Hour - 15*time.Minute)
+	f.d.runDiskMaintenance() // 06:45: two hours after the refusal
 	if got := f.listReads(); got != 2 {
-		t.Errorf("the pass read the listing %d times fifteen minutes after a refusal, want 2", got)
+		t.Errorf("the pass read the listing %d times two hours after a refusal, want 2", got)
 	}
 }
 
