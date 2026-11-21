@@ -402,7 +402,11 @@ type overrunState struct {
 	SaveFailure    string    `json:"save_failure,omitempty"`
 	SaveFailures   int       `json:"save_failures,omitempty"`
 	SaveFailedLate bool      `json:"save_failed_late,omitempty"`
-	SaveGaveUp     bool      `json:"save_gave_up,omitempty"`
+	// SaveStage is the step the last refused save failed at, "commit" or "push"
+	// (overrunFailedStage), and empty when the failure was neither or none is
+	// pending; it is cleared with SaveFailure.
+	SaveStage  string `json:"save_stage,omitempty"`
+	SaveGaveUp bool   `json:"save_gave_up,omitempty"`
 
 	// OriginReadFailures counts the failed reads of origin in the sandbox-gone
 	// path of this stop (overrunStop, step 2b): a read that returned an error,

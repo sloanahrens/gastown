@@ -245,6 +245,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			if err != nil {
 				st.SaveFailures++
 				st.SaveFailure, st.SaveFailedLate = pushFailureReason(err), false
+				st.SaveStage = overrunFailedStage(err)
 				if st.SaveFailures < overrunSaveMaxAttempts {
 					d.logger.Printf("overrun_guard: stop %s on %s: work not saved, retrying next tick (%d of %d): %v",
 						who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
@@ -256,7 +257,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 					who, st.Bead, st.SaveFailures, err)
 			} else {
 				st.SavedAt = now
-				st.SaveFailure, st.SaveFailures, st.SaveFailedLate = "", 0, false
+				st.SaveFailure, st.SaveFailures, st.SaveFailedLate, st.SaveStage = "", 0, false, ""
 				st.SavedHead, st.SaveCommitted, st.SaveRescue = saved.Head, saved.Committed, saved.Rescue
 			}
 			if !save() {
@@ -357,7 +358,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			dirty, err := d.overrunWorktreeDirty(seat)
 			if err != nil {
 				st.SaveFailures++
-				st.SaveFailure, st.SaveFailedLate = pushFailureReason(err), true
+				st.SaveFailure, st.SaveFailedLate, st.SaveStage = pushFailureReason(err), true, ""
 				if st.SaveFailures < overrunSaveMaxAttempts {
 					d.logger.Printf("overrun_guard: stop %s on %s waits: late check of the worktree failed, retrying next tick (%d of %d), sandbox kept: %v",
 						who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
@@ -381,6 +382,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 				if err != nil {
 					st.SaveFailures++
 					st.SaveFailure, st.SaveFailedLate = pushFailureReason(err), false
+					st.SaveStage = overrunFailedStage(err)
 					if st.SaveFailures < overrunSaveMaxAttempts {
 						d.logger.Printf("overrun_guard: stop %s on %s waits: work edited after the save not saved, retrying next tick (%d of %d), sandbox kept: %v",
 							who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
@@ -391,7 +393,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 					d.logger.Printf("overrun_guard: stop %s on %s: work edited after the save not saved after %d attempts, sandbox kept: %v",
 						who, st.Bead, st.SaveFailures, err)
 				} else {
-					st.SaveFailure, st.SaveFailures, st.SaveFailedLate = "", 0, false
+					st.SaveFailure, st.SaveFailures, st.SaveFailedLate, st.SaveStage = "", 0, false, ""
 					if saved.Head != "" {
 						st.SavedHead, st.SaveCommitted, st.SaveRescue = saved.Head, saved.Committed, saved.Rescue
 					}
