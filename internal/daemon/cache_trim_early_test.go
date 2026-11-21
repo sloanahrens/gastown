@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,14 +110,17 @@ func TestCacheTrimEarlyRespectsTheGapAndTheRunningJob(t *testing.T) {
 	t.Run("a failed run leaves no retry", func(t *testing.T) {
 		t.Parallel()
 		d, logs, f := diskMaintTestDaemon(t)
-		now := diskMaintNow.Add(8 * time.Hour) // 12:45
-		d.diskMaint.now = func() time.Time { return now }
+		// The trim seam moves the captured clock while the pass's alert goroutine
+		// reads it, so it holds unix nanoseconds atomically.
+		var now atomic.Int64
+		now.Store(diskMaintNow.Add(8 * time.Hour).UnixNano()) // 12:45
+		d.diskMaint.now = func() time.Time { return time.Unix(0, now.Load()).In(diskMaintNow.Location()) }
 		runs := 0
 		// A trim that runs three minutes and reaches no verdict: the failure is
 		// recorded at 12:48 with the full interval, and no retry is left pending.
 		d.diskMaint.trim = func(context.Context, string) bool {
 			runs++
-			now = now.Add(3 * time.Minute)
+			now.Add(int64(3 * time.Minute))
 			return false
 		}
 		sandboxAt(f, 76)
@@ -127,7 +131,7 @@ func TestCacheTrimEarlyRespectsTheGapAndTheRunningJob(t *testing.T) {
 		}
 		logged := logs.Len()
 
-		now = diskMaintNow.Add(8*time.Hour + 16*time.Minute) // 13:01: past the gap, inside the interval
+		now.Store(diskMaintNow.Add(8*time.Hour + 16*time.Minute).UnixNano()) // 13:01: past the gap, inside the interval
 		d.runDiskMaintenance()
 		if runs != 2 {
 			t.Fatalf("ran %d times at 13:01, want 2: a failed trim leaves no retry, so the hot disk's early check runs it", runs)
