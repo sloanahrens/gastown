@@ -1690,11 +1690,14 @@ func (d *Daemon) cacheTrimExisting(ctx context.Context, kubeconfig, namespace st
 	completed := map[string]bool{}
 	for _, item := range *list.Items {
 		objects = append(objects, cachevol.TrimObject{Kind: item.Kind, Name: item.Metadata.Name, Labels: item.Metadata.Labels})
-		if item.Kind == "Job" && item.Status.Active > 0 {
+		if item.Kind != "Job" {
+			continue
+		}
+		if item.Status.Active > 0 {
 			running[item.Metadata.Name] = true
 		}
 		for _, c := range item.Status.Conditions {
-			if item.Kind == "Job" && c.Type == "Complete" && c.Status == "True" {
+			if c.Type == "Complete" && c.Status == "True" {
 				completed[item.Metadata.Name] = true
 			}
 		}

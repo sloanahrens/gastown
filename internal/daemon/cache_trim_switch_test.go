@@ -463,7 +463,17 @@ func TestCacheTrimLateResultIsNotReadUnlessCompleted(t *testing.T) {
 			f := newCacheTrimFixture(t, "", map[string]cliReply{
 				cacheTrimExistingVerb: {stdout: head + status + `}]}`},
 			})
-			viaJob(t, f, true, map[string]string{})
+			// A Job still running is the pending verdict (no failure, nothing recorded
+			// from it); one not complete has nothing to read and applies the new Job.
+			got := viaJob(t, f, true, map[string]string{})
+			if name == "a Job still running" && !got {
+				t.Errorf("%s: the pass verdict = false, want true (pending is a verdict)", name)
+			}
+			for _, run := range f.jobRuns(t) {
+				if run.Outcome == cacheTrimRunFailed {
+					t.Errorf("%s: a failed run was recorded: %+v", name, run)
+				}
+			}
 			// The new Job's own result line is read after its apply; the earlier
 			// Job's would be read before it. No read before the apply is the
 			// refusal.
@@ -471,6 +481,42 @@ func TestCacheTrimLateResultIsNotReadUnlessCompleted(t *testing.T) {
 			apply, applyOK := f.indexOf(cacheTrimApplyVerb)
 			if readOK && (!applyOK || read < apply) {
 				t.Errorf("%s: the earlier Job's result line was read before the new Job was applied; calls: %v", name, f.verbs())
+			}
+		})
+	}
+}
+
+// TestCacheTrimLateResultMalformedParks pins the alarming branch of the late
+// read: an earlier Job that completed with no result line, or one that cannot be
+// parsed, records one FAILED run and parks the claim, and the next pass for the
+// claim makes no cluster call.
+func TestCacheTrimLateResultMalformedParks(t *testing.T) {
+	t.Parallel()
+	for name, log := range map[string]string{
+		"a missing result line":   "",
+		"a malformed result line": "removed twelve absent 1 kept 3\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
+				cacheTrimClaimJobLogVerb: {stdout: log},
+			})
+			if viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("%s: an earlier Job read late = true, want false (a failure)", name)
+			}
+			if runs := f.jobRuns(t); len(runs) != 1 || runs[0].Outcome != cacheTrimRunFailed {
+				t.Errorf("%s: the ledger holds %+v, want one run with outcome %q", name, runs, cacheTrimRunFailed)
+			}
+			if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("%s: the claim is not parked", name)
+			}
+			calls := len(f.cli.recorded())
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Errorf("%s: a parked claim = false, want true (a verdict)", name)
+			}
+			if got := len(f.cli.recorded()); got != calls {
+				t.Errorf("%s: the parked claim made %d more cluster calls, want none", name, got-calls)
 			}
 		})
 	}
