@@ -79,6 +79,65 @@ func TestSeatFinishedLingeringRaisesAfterTheWindow(t *testing.T) {
 	}
 }
 
+// A seat that ended with a DEFERRED or ESCALATED exit writes agent_state
+// stuck, not done (done.DoneTurnState), so a stuck seat whose bead is closed
+// and whose record has not been written for the window is the same finished
+// seat nobody ended: it raises one item whose summary names the state it
+// judged. A stuck seat whose bead is still open is rework, and a working seat
+// is mid-turn, so neither raises.
+func TestSeatFinishedLingeringRaisesForAStuckSeat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		state   string
+		status  beads.IssueStatus
+		raises  bool
+		summary string
+	}{
+		{
+			name:    "stuck with a closed bead raises",
+			state:   "stuck",
+			status:  beads.StatusClosed,
+			raises:  true,
+			summary: "gastown/capable stuck 31m on gt-abc12",
+		},
+		{name: "stuck with an open bead does not", state: "stuck", status: beads.StatusOpen},
+		{name: "working with a closed bead does not", state: "working", status: beads.StatusClosed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			finishedSeatTown(t, f,
+				finishedSeat{name: "capable", bead: "gt-abc12", status: string(tc.status), state: tc.state, age: 31 * time.Minute},
+			)
+			c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+			items, err := c.collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.raises {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none for a %s seat with a %s bead", items, tc.state, tc.status)
+				}
+				return
+			}
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one for a stuck seat whose bead is closed", items)
+			}
+			it := items[0]
+			if it.Key != "seat-finished:gastown/capable" || it.Kind != attention.KindSeatFinishedLingering ||
+				it.Severity != attention.SeverityLow || it.Rig != attentionRig || it.Bead != "gt-abc12" {
+				t.Errorf("item = %+v, want a low seat-finished item on gastown/capable and gt-abc12", it)
+			}
+			if it.Summary != tc.summary {
+				t.Errorf("summary = %q, want %q", it.Summary, tc.summary)
+			}
+		})
+	}
+}
+
 // A seat that raised the item and has left the walk raises nothing next tick:
 // the item is keyed by the seat, and a key the walk no longer shows is one the
 // queue clears. The previous tick's item is carried in prev, as the daemon
