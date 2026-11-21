@@ -520,3 +520,46 @@ func TestPlanImagePinsAgeIgnoresAPinWhoseReadFailed(t *testing.T) {
 		t.Errorf("Unreadable = %q, want [om]", got.Unreadable)
 	}
 }
+
+// TestPlanImagePinsFilesOnRelevantCommitsOnly: the planner files on Behind, the
+// commits touching a devops pin's inputs, not on Total, every commit it trails
+// by. One relevant commit of 54 files nothing; twenty files one (gt-a682mo).
+func TestPlanImagePinsFilesOnRelevantCommitsOnly(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	for _, tt := range []struct {
+		behind int
+		want   bool
+	}{{1, false}, {20, true}} {
+		pin := ImagePinState{Name: "devops", Pin: "pin-devops", Tip: "tip-devops", Behind: tt.behind, Total: 54}
+		if filed := len(PlanImagePins([]ImagePinState{pin}, nil, at).File) == 1; filed != tt.want {
+			t.Errorf("%d of 54 relevant: filed = %v, want %v", tt.behind, filed, tt.want)
+		}
+	}
+}
+
+// TestPlanImagePinsStaleItemNamesRelevantAndTotalCounts: a devops pin's stale
+// item names both counts; a pin with no Total, or with no input list (whose
+// Total is its Behind), keeps today's text (gt-a682mo).
+func TestPlanImagePinsStaleItemNamesRelevantAndTotalCounts(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	const bound = " its source's origin/main, at or over the 30-commit stale bound"
+	tests := []struct {
+		pin     ImagePinState
+		summary string
+	}{
+		{ImagePinState{Name: "devops", Pin: "pin-devops", Tip: "tip-devops", Behind: 30, Total: 54},
+			"image pin devops is 30 touching its inputs of 54 behind" + bound},
+		{ImagePinState{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: 30},
+			"image pin bd is 30 commits behind" + bound},
+		{ImagePinState{Name: "om", Pin: "pin-om", Tip: "tip-om", Behind: 30, Total: 30},
+			"image pin om is 30 commits behind" + bound},
+	}
+	for _, tt := range tests {
+		want := ImagePinItem{Key: imagePinsStaleKey, Pin: tt.pin.Name, Severity: attention.SeverityMedium, Summary: tt.summary}
+		if got := PlanImagePins([]ImagePinState{tt.pin}, nil, at).Items; !slices.Equal(got, []ImagePinItem{want}) {
+			t.Errorf("%s: Items = %+v, want %+v", tt.pin.Name, got, want)
+		}
+	}
+}

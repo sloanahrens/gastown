@@ -156,7 +156,7 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 				Key:      imagePinsStaleKey,
 				Pin:      pin.Name,
 				Severity: attention.SeverityMedium,
-				Summary:  fmt.Sprintf("image pin %s is %d commits behind its source's origin/main, at or over the %d-commit stale bound", pin.Name, pin.Behind, imagePinsStaleBehind),
+				Summary:  fmt.Sprintf("image pin %s is %s its source's origin/main, at or over the %d-commit stale bound", pin.Name, pinBehindPhrase(pin), imagePinsStaleBehind),
 			})
 		}
 		if pin.AgeErr != nil {
@@ -188,6 +188,24 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 		plan.Items = append(plan.Items, item)
 	}
 	return plan
+}
+
+// pinHasInputCount is whether a pin's distance is said as "N touching its inputs
+// of M behind": the pin has an input list, whose commits Behind counts, and a
+// Total the compare read. A pin with no input list has Total equal to Behind,
+// so "touching its inputs" would be false for it (gt-a682mo).
+func pinHasInputCount(pin ImagePinState) bool {
+	return len(daemonimage.PinInputPaths(pin.Name)) > 0 && pin.Total > 0
+}
+
+// pinBehindPhrase says how far a pin trails its source's origin/main, without
+// the source's name: both counts for a pin pinHasInputCount holds, and today's
+// commit count otherwise.
+func pinBehindPhrase(pin ImagePinState) string {
+	if pinHasInputCount(pin) {
+		return fmt.Sprintf("%d touching its inputs of %d behind", pin.Behind, pin.Total)
+	}
+	return fmt.Sprintf("%d commits behind", pin.Behind)
 }
 
 // unreadableSummary is the image-pins-unreadable item for a pin whose read

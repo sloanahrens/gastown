@@ -130,11 +130,15 @@ func checkImagePinState(pin ImagePinState) error {
 }
 
 // imagePinsRefreshTitle names each pin with how far it trails, so the bead is
-// recognizable in a list without opening it.
+// recognizable in a list without opening it. A pin with an input list and a
+// Total names both counts (gt-a682mo).
 func imagePinsRefreshTitle(pins []ImagePinState) string {
 	counts := make([]string, len(pins))
 	for i, pin := range pins {
 		counts[i] = fmt.Sprintf("%s by %d commits", pin.Name, pin.Behind)
+		if pinHasInputCount(pin) {
+			counts[i] = fmt.Sprintf("%s by %d touching its inputs of %d", pin.Name, pin.Behind, pin.Total)
+		}
 	}
 	return "image-pins refresh: " + joinNaming(counts) + " behind origin/main"
 }
@@ -185,7 +189,7 @@ func imagePinsRefreshGoal(pins []ImagePinState, filedAt time.Time) string {
 	fmt.Fprintf(&b, "These image pins trail their sources' origin/main, and the pin-drift guard refuses an image roll once a pin is more than %d commits behind its tip, or more than %d days older (gt-wmoa0d). A seat has no source checkout, so set each pin named here by hand.\n\n", daemonimage.MaxPinBehind, imagePinsAgeBoundDays)
 	fmt.Fprintf(&b, "These tips were read at %s from each source's origin/main. A source that has moved since is fine: pin the tip named here.\n\n", filedAt.UTC().Format(time.RFC3339))
 	for _, pin := range pins {
-		line := fmt.Sprintf("- %s: pinned at %s; its source's origin/main is %s, %d commits behind", pin.Name, pin.Pin, pin.Tip, pin.Behind)
+		line := fmt.Sprintf("- %s: pinned at %s; its source's origin/main is %s, %s", pin.Name, pin.Pin, pin.Tip, pinBehindPhrase(pin))
 		if pin.Age >= imagePinsFileAge {
 			line += fmt.Sprintf(", and its commit is %d days older than its tip, near the guard's %d-day bound", imagePinsAgeDays(pin.Age), imagePinsAgeBoundDays)
 		}
