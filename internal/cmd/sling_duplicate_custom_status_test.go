@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
@@ -171,4 +174,61 @@ type unconfiguredStore struct {
 func (s *unconfiguredStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	s.lists = append(s.lists, opts.Status)
 	return s.Client.List(opts)
+}
+
+// TestDuplicateCustomStatusReadOutsideLock: a fetch whose read is a bd subprocess
+// does not hold the cache's lock for it, so a fetch of another directory on the
+// same cache is answered while the first read is still blocked (gt-18sp1c).
+func TestDuplicateCustomStatusReadOutsideLock(t *testing.T) {
+	t.Parallel()
+	ctx, stop := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stop()
+	c := &duplicateDetailCache{}
+	entered, release := make(chan struct{}), make(chan struct{})
+	first := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				first <- fmt.Errorf("the first fetch panicked: %v", r)
+			}
+		}()
+		got, err := c.customStatuses("/a", func() ([]string, error) {
+			close(entered)
+			<-release
+			return []string{"a"}, nil
+		})
+		if err == nil && !slices.Equal(got, []string{"a"}) {
+			err = fmt.Errorf("the first fetch returned %v, want [a]", got)
+		}
+		first <- err
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("the first read never started")
+	}
+	second := make(chan []string, 1)
+	go func() {
+		got, _ := c.customStatuses("/b", func() ([]string, error) { return []string{"b"}, nil })
+		second <- got
+	}()
+	select {
+	case got := <-second:
+		if !slices.Equal(got, []string{"b"}) {
+			t.Errorf("the second fetch returned %v, want [b]", got)
+		}
+	case <-ctx.Done():
+		t.Error("a second fetch was blocked while the first read ran: the cache lock is held over the read")
+	}
+	close(release)
+	done, stopDone := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopDone()
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Error(err)
+		}
+	case <-done.Done():
+		t.Fatal("the first fetch never returned after its read was released")
+	}
 }
