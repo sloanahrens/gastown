@@ -1253,8 +1253,8 @@ func TestTierSweepConfigRunnerShellDefaultsFalse(t *testing.T) {
 	}
 }
 
-// TestDiskMaintenanceCacheTrimInterval: the cache trim's cadence is 2h unless the
-// setting names another, and a value the patrol cannot schedule is an error
+// TestDiskMaintenanceCacheTrimInterval: the cache trim's cadence is 15m unless
+// the setting names another, and a value the patrol cannot schedule is an error
 // that names the setting, at decode and when read, never a fallback to the
 // default (gt-gg9hv.24.2).
 func TestDiskMaintenanceCacheTrimInterval(t *testing.T) {
@@ -1265,7 +1265,7 @@ func TestDiskMaintenanceCacheTrimInterval(t *testing.T) {
 		want     time.Duration
 		wantErr  string
 	}{
-		{name: "empty is the 2h default", want: 2 * time.Hour},
+		{name: "empty is the 15m default", want: 15 * time.Minute},
 		{name: "a valid override is read", interval: "45m", want: 45 * time.Minute},
 		{name: "not a duration", interval: "soon", wantErr: "not a Go duration"},
 		{name: "zero", interval: "0s", wantErr: "one-minute minimum"},
@@ -1307,6 +1307,22 @@ func TestDiskMaintenanceCacheTrimInterval(t *testing.T) {
 		if err := json.Unmarshal([]byte(doc), &p); err == nil {
 			t.Errorf("%s cache_trim_interval decoded without an error: %+v", name, p.DiskMaintenance)
 		}
+	}
+}
+
+// TestDiskMaintenanceCacheTrimIntervalDefaultIsPinned: the default is 15m because
+// the steady-state size of the shared Go cache is about the write rate times
+// (the 75-minute age floor plus the trim interval). At 21 GB an hour a 2h default
+// holds about 69 GB and 15m holds about 31 GB. Change this value only with that
+// arithmetic (gt-fa2ihe).
+func TestDiskMaintenanceCacheTrimIntervalDefaultIsPinned(t *testing.T) {
+	t.Parallel()
+	got, err := DiskMaintenanceConfig{}.CacheTrimEvery()
+	if err != nil {
+		t.Fatalf("the default cache trim interval does not parse: %v", err)
+	}
+	if got != 15*time.Minute {
+		t.Errorf("default cache trim interval = %v, want 15m: steady state is rate x (75m floor + interval), so a longer default lets the cache outgrow its cap", got)
 	}
 }
 

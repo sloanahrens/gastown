@@ -1989,10 +1989,12 @@ const (
 	DiskMaintenanceModeDryRun    = "dry_run"
 	DiskMaintenanceModeApply     = "apply"
 	DiskMaintenanceDefaultWindow = "04:30"
-	// DiskMaintenanceDefaultCacheTrimInterval is the shared Go cache's cadence:
-	// it grows about 3 GB an hour, so one trim a day cannot hold the 10 GB cap
-	// (gt-gg9hv.24.2).
-	DiskMaintenanceDefaultCacheTrimInterval = "2h"
+	// DiskMaintenanceDefaultCacheTrimInterval is the cadence of a healthy trim
+	// pass, not a retry. The 75-minute age floor is fixed, so the interval is what
+	// bounds the shared Go cache: its steady state is about the write rate times
+	// (floor plus interval), and the cache grows about 21 to 35 GB an hour
+	// (gt-gg9hv.24.2, gt-fa2ihe).
+	DiskMaintenanceDefaultCacheTrimInterval = "15m"
 	// DiskMaintenanceDefaultCacheTrimEarlyPercent is the sandbox disk usage at
 	// which the cache trim runs before its interval is due, so a saturated pool
 	// cannot outrun the trim between its interval runs (gt-gg9hv.43).
