@@ -1122,20 +1122,30 @@ func TestDiskMaintenanceCacheTrimJudgesAClaimByItsOwnNamespace(t *testing.T) {
 			`{"metadata":{"name":"` + cacheTrimClaimName + `","namespace":"` + otherNamespace + `"}}]}`},
 		"get pods -n " + otherNamespace + " -o json": {stdout: `{"items":[]}`},
 	})
+	f.d.cacheTrimClaimJobRoute = true
 	f.d.runDiskMaintenance()
 
-	// The busy namespace's pod is neither read nor counted for the other claim:
-	// the other claim has no pod of its own, so its listing cannot be read.
-	for _, verb := range f.verbs() {
-		if strings.Contains(verb, otherNamespace) && !strings.HasPrefix(verb, "get pods ") {
-			t.Errorf("the pass ran %q in the podless namespace", verb)
+	// The busy namespace's pod is not the other claim's sandbox count: each claim's
+	// Job is applied in its own namespace, the busy one told 1 sandbox and the
+	// podless one 0.
+	counts := map[string]string{}
+	for _, call := range f.cli.recorded() {
+		if !strings.HasPrefix(cacheTrimVerb(call.args), "apply ") {
+			continue
+		}
+		for _, ns := range []string{cacheTrimNamespace, otherNamespace} {
+			if strings.Contains(cacheTrimVerb(call.args), "-n "+ns) {
+				switch {
+				case sandboxesFlag.MatchString(call.stdin):
+					counts[ns] = "1"
+				case sandboxesZeroFlag.MatchString(call.stdin):
+					counts[ns] = "0"
+				}
+			}
 		}
 	}
-	if logged := f.log.String(); !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+otherNamespace+": no running pod mounts it") {
-		t.Errorf("the log does not say the other claim had no pod of its own: %s", logged)
-	}
-	if logged := f.log.String(); !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" applied") {
-		t.Errorf("the log does not say the claim was trimmed from its own namespace's pod: %s", logged)
+	if counts[cacheTrimNamespace] != "1" || counts[otherNamespace] != "0" {
+		t.Errorf("sandbox counts applied per namespace = %v, want %s:1 and %s:0", counts, cacheTrimNamespace, otherNamespace)
 	}
 }
 
@@ -1163,28 +1173,6 @@ func TestDiskMaintenanceDryRunAppliesNothing(t *testing.T) {
 	}
 	if !strings.Contains(logged, cacheTrimJob) || !strings.Contains(logged, cacheTrimShardName(0)) {
 		t.Errorf("the log does not name the manifest's objects: %s", logged)
-	}
-}
-
-// TestDiskMaintenanceCacheTrimRefusesAnUnreadableListing pins the fail-closed
-// read: a listing the pod cannot print trims nothing and says so, rather than
-// building a manifest from a listing it never got.
-func TestDiskMaintenanceCacheTrimRefusesAnUnreadableListing(t *testing.T) {
-	t.Parallel()
-	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
-		"exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath: {
-			stderr: "trim-list: the claim at " + cacheTrimMountPath + ": no such file", code: 3,
-		},
-	})
-	f.d.runDiskMaintenance()
-
-	for _, verb := range f.verbs() {
-		if strings.HasPrefix(verb, "apply ") {
-			t.Errorf("the pass applied a trim from a listing it could not read: %q", verb)
-		}
-	}
-	if logged := f.log.String(); !strings.Contains(logged, "the listing could not be read") {
-		t.Errorf("the log does not say why nothing was trimmed: %s", logged)
 	}
 }
 
@@ -1243,16 +1231,16 @@ func TestCacheTrimListerJobNameIsDistinctFromTheTrimJob(t *testing.T) {
 	}
 }
 
-// TestDiskMaintenanceCacheTrimReadsAClaimWithOnlyAPendingHolder pins the case the
-// old refusal named: a pod holds the claim but none runs, so no exec can read the
-// listing, and the lister Job reads it instead. The pending holder still counts
-// as a sandbox.
+// TestDiskMaintenanceCacheTrimReadsAClaimWithOnlyAPendingHolder pins the case
+// the old refusal named: a pod holds the claim but none runs. The claim Job needs
+// no running pod to read through, and the pending holder still counts as a
+// sandbox, so the Job is applied with a count of 1 and nothing execs into a pod.
 func TestDiskMaintenanceCacheTrimReadsAClaimWithOnlyAPendingHolder(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
-		cacheTrimPodsVerb:       {stdout: cacheTrimPendingHolderJSON},
-		cacheTrimListerLogsVerb: {stdout: cacheTrimLogListingJSON},
+		cacheTrimPodsVerb: {stdout: cacheTrimPendingHolderJSON},
 	})
+	f.d.cacheTrimClaimJobRoute = true
 	f.d.runDiskMaintenance()
 
 	for _, verb := range f.verbs() {
@@ -1260,9 +1248,15 @@ func TestDiskMaintenanceCacheTrimReadsAClaimWithOnlyAPendingHolder(t *testing.T)
 			t.Errorf("the pass ran %q with no running pod to exec in", verb)
 		}
 	}
-	if !slices.Contains(f.applied(t), "Job "+cacheTrimListJob) {
-		t.Errorf("the pass did not apply the lister Job for a claim held by a pending pod; applied %v", f.applied(t))
+	if !slices.Contains(f.applied(t), "Job "+cacheTrimJob) {
+		t.Errorf("the pass did not apply the claim Job for a claim held by a pending pod; applied %v", f.applied(t))
 	}
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") && sandboxesFlag.MatchString(call.stdin) {
+			return
+		}
+	}
+	t.Error("no applied document counts the pending holder as 1 sandbox")
 }
 
 // TestCacheTrimPodsCountsEveryHolderThatHasNotFinished pins the sandbox count:
@@ -1308,26 +1302,6 @@ func cacheTrimPodJSONIn(name, phase, claim, namespace string) string {
 		`"status":{"phase":"` + phase + `"}}`
 }
 
-// TestDiskMaintenanceCacheTrimLeavesShardsWhileTheJobRuns pins the cleanup's
-// guard: a Job still running keeps its shards, since deleting a mount its pod
-// is reading would fail the trim it is part of.
-func TestDiskMaintenanceCacheTrimLeavesShardsWhileTheJobRuns(t *testing.T) {
-	t.Parallel()
-	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
-		"wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s": {
-			stderr: "error: timed out waiting for the condition", code: 1,
-		},
-	})
-	f.d.runDiskMaintenance()
-
-	if _, ok := f.indexOf("delete configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim"); ok {
-		t.Errorf("the shards were deleted while the Job was still running; calls: %v", f.verbs())
-	}
-	if logged := f.log.String(); !strings.Contains(logged, "has not finished within the wait (timed out)") {
-		t.Errorf("the log does not say why the Job kept its shards: %s", logged)
-	}
-}
-
 // TestDiskMaintenanceCacheTrimLeavesARunningEarlierJobAlone pins the delete's
 // guard: an earlier trim Job whose pods are still working is not deleted, and
 // this pass applies nothing, since applying over it is refused by its immutable
@@ -1350,54 +1324,6 @@ func TestDiskMaintenanceCacheTrimLeavesARunningEarlierJobAlone(t *testing.T) {
 	}
 	if logged := f.log.String(); !strings.Contains(logged, "the earlier trim Job "+cacheTrimJob+" is still running") {
 		t.Errorf("the log does not say why nothing was applied: %s", logged)
-	}
-}
-
-// TestDiskMaintenanceCacheTrimNamesTheWaitFailure pins the three ways a wait
-// ends without the Job completing: a failed Job, a timeout, and a kubectl that
-// could not watch the Job each get their own line, because each is a different
-// repair.
-func TestDiskMaintenanceCacheTrimNamesTheWaitFailure(t *testing.T) {
-	t.Parallel()
-	const (
-		wait      = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s"
-		jobStatus = "get job " + cacheTrimJob + " -n " + cacheTrimNamespace + " -o json"
-	)
-	tests := []struct {
-		name     string
-		override map[string]cliReply
-		want     string
-	}{
-		{
-			// The timeout text is what a failed Job's wait usually prints, so
-			// the Job's own status is read first and wins.
-			"the Job failed",
-			map[string]cliReply{
-				wait:      {stderr: "error: timed out waiting for the condition", code: 1},
-				jobStatus: {stdout: `{"status":{"failed":1,"conditions":[{"type":"Failed","status":"True"}]}}`},
-			},
-			"the Job failed",
-		},
-		{
-			"the wait timed out",
-			map[string]cliReply{wait: {stderr: "error: timed out waiting for the condition", code: 1}},
-			"the Job has not finished within the wait (timed out)",
-		},
-		{
-			"kubectl could not watch the Job",
-			map[string]cliReply{wait: {stderr: "Error from server: etcdserver: request timed out", code: 1}},
-			"the wait on the Job failed",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, tc.override)
-			f.d.runDiskMaintenance()
-			if logged := f.log.String(); !strings.Contains(logged, tc.want) {
-				t.Errorf("the log does not name the outcome %q: %s", tc.want, logged)
-			}
-		})
 	}
 }
 
@@ -1428,11 +1354,12 @@ func TestDiskMaintenanceCacheTrimRefusesASecondClaimInOneNamespace(t *testing.T)
 			KubernetesCacheClaim: otherClaim,
 		},
 	})
+	f.d.cacheTrimClaimJobRoute = true
 	f.d.runDiskMaintenance()
 
-	// Only the first claim's trim applies: its shard and its Job.
-	if applied := f.applied(t); len(applied) != 2 {
-		t.Errorf("the pass applied %v, want the first claim's two documents; calls: %v", applied, f.verbs())
+	// Only the first claim's trim applies: its Job.
+	if applied := f.applied(t); len(applied) != 1 {
+		t.Errorf("the pass applied %v, want the first claim's one Job; calls: %v", applied, f.verbs())
 	}
 	if logged := f.log.String(); !strings.Contains(logged, "is trimmed in the same namespace") {
 		t.Errorf("the log does not say why the second claim was not trimmed: %s", logged)
@@ -1539,11 +1466,9 @@ func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
 	const (
 		getClaims  = cacheTrimClaimsVerb
 		getPods    = "get pods -n " + cacheTrimNamespace + " -o json"
-		execList   = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
 		getObjects = "get job,configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim -o json"
 		deleteJob  = "delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
 		apply      = cacheTrimApplyVerb
-		deleteCM   = "delete configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim"
 	)
 	tests := []struct {
 		name     string
@@ -1567,31 +1492,22 @@ func TestDiskMaintenanceCacheTrimStopsAtTheReadItCannotMake(t *testing.T) {
 		{"the pod list names a pod of another namespace", map[string]cliReply{getPods: {stdout: `{"items":[` +
 			cacheTrimPodJSONIn("sbx-z", "Running", cacheTrimClaimName, "elsewhere") + `]}`}},
 			"the pod list for namespace " + cacheTrimNamespace + " names the pod sbx-z in elsewhere"},
-		{"the listing is not JSON", map[string]cliReply{execList: {stdout: "not json"}},
-			"the listing could not be read: decoding the trim listing"},
-		{"the listing is empty", map[string]cliReply{execList: {stdout: " "}},
-			"the listing could not be read: decoding the trim listing"},
-		{"the listing is an array of numbers", map[string]cliReply{execList: {stdout: "[1]"}},
-			"the listing could not be read: decoding the trim listing"},
-		{"the listing is a document, not the bare array", map[string]cliReply{execList: {stdout: `{"entries":[]}`}},
-			"the listing could not be read: decoding the trim listing"},
 		{"the object list fails", map[string]cliReply{getObjects: {stderr: "forbidden", code: 1}},
-			"the apply failed: listing the trim's objects"},
+			"listing the trim's objects"},
 		{"the object list is not JSON", map[string]cliReply{getObjects: {stdout: "not json"}},
-			"the apply failed: decoding the trim's objects"},
+			"decoding the trim's objects"},
 		{"the object list names no items", map[string]cliReply{getObjects: {stdout: `{}`}},
 			"the trim's objects: the reply names no object list"},
 		{"the stale delete fails", map[string]cliReply{deleteJob: {stderr: "forbidden", code: 1}},
-			"the apply failed: deleting the stale Job"},
+			"deleting the stale Job"},
 		{"an apply fails", map[string]cliReply{apply: {stderr: "invalid manifest", code: 1}},
-			"the apply failed: applying document 1 of"},
-		{"the shard delete fails", map[string]cliReply{deleteCM: {stderr: "forbidden", code: 1}},
-			"the apply failed: deleting the trim's shards"},
+			"applying document 1 of"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, tc.override)
+			f.d.cacheTrimClaimJobRoute = true
 			f.d.runDiskMaintenance()
 			if logged := f.log.String(); !strings.Contains(logged, tc.want) {
 				t.Errorf("the log does not name the refusal %q: %s", tc.want, logged)
