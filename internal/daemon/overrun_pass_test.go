@@ -612,3 +612,72 @@ func TestOverrunPassLine(t *testing.T) {
 		})
 	}
 }
+
+// TestOverrunPassReadDeadline: a per-seat read past its 8 s deadline fails for that
+// seat only, and the other seats are judged as usual (gt-jhthh0). That covers a read
+// whose clock reading ran past the deadline, and one still running at it, which must
+// not hold the pass.
+func TestOverrunPassReadDeadline(t *testing.T) {
+	t.Parallel()
+	slow := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-slow22"}
+	fast := overrunSeat{Rig: "gastown", Polecat: "toast", Bead: "gt-fast22"}
+	const deadline = "seat read ran past its deadline"
+
+	t.Run("a gate read past the deadline on the pass clock", func(t *testing.T) {
+		t.Parallel()
+		d, buf := newOverrunDaemon(t, false)
+		f := newOverrunFake(5*time.Minute, slow, fast)
+		f.gateRunning = func(seat overrunSeat) (bool, error) {
+			if seat.Bead == slow.Bead {
+				f.now = f.now.Add(overrunSeatReadDeadline + time.Second)
+			}
+			return false, nil
+		}
+		var stats passStats
+		s := f.seams()
+		s.readPoolSize = 1
+		s.passDone = func(got passStats) { stats = got }
+		d.runOverrunGuard(s)
+		if log := buf.String(); stats.seats != 2 || stats.failedReads != 1 || strings.Count(log, deadline) != 1 || !strings.Contains(log, "gate state for "+slow.Bead) {
+			t.Errorf("seats %d, failed reads %d; want 2 seats and the slow gate read failed once:\n%s", stats.seats, stats.failedReads, log)
+		}
+	})
+
+	t.Run("a read still running at the deadline", func(t *testing.T) {
+		t.Parallel()
+		d, buf := newOverrunDaemon(t, false)
+		f := newOverrunFake(5*time.Minute, slow, fast)
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		// The slow seat's answer is the first read, so only its timer fires.
+		f.escalationAnsweredAt = func(seat overrunSeat) (time.Time, error) {
+			if seat.Bead == slow.Bead {
+				<-release
+			}
+			return time.Time{}, nil
+		}
+		fired := make(chan time.Time, 1)
+		fired <- time.Time{}
+		calls := 0
+		s := f.seams()
+		s.readPoolSize = 1
+		s.after = func(time.Duration) <-chan time.Time {
+			if calls++; calls == 1 {
+				return fired
+			}
+			return make(chan time.Time)
+		}
+		var stats passStats
+		s.passDone = func(got passStats) { stats = got }
+		done := make(chan struct{})
+		go func() { defer close(done); d.runOverrunGuard(s) }()
+		select {
+		case <-done:
+		case <-time.After(workspaceHangGuard): //testpolicy:allow no-sleep — a hang guard only: the pass returns once every read is answered, so this fires only when a read still running holds it, the failure the test pins
+			t.Fatalf("the pass did not return within %s: a read still running held it", workspaceHangGuard)
+		}
+		if log := buf.String(); stats.seats != 2 || stats.failedReads != 1 || strings.Count(log, deadline) != 1 || !strings.Contains(log, "escalation answer for "+slow.Bead) {
+			t.Errorf("seats %d, failed reads %d; want 2 seats and the slow answer read failed once:\n%s", stats.seats, stats.failedReads, log)
+		}
+	})
+}
