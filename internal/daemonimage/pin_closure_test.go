@@ -167,3 +167,27 @@ func TestInputClosureReportsADeeperImportOutsideTheList(t *testing.T) {
 		t.Errorf("gaps = %v, want %v", got, want)
 	}
 }
+
+// TestInputClosureCoversATwoLevelImportInsideTheList pins that the transitive
+// walk reports no gap for a second-level import the input list covers:
+// cmd/reporter imports pkg/patrol, pkg/patrol imports pkg/releasebot, and
+// pkg/releasebot is in the devops input list, so reaching it deeper is not
+// drift (gt-vkka60).
+func TestInputClosureCoversATwoLevelImportInsideTheList(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	closureTree(f, map[string]string{
+		"cmd/reporter":         "package main\nimport \"gt.local/devops/pkg/patrol\"\n",
+		"cmd/release-reporter": "package main\n",
+		"cmd/cloudcheck":       "package main\n",
+		"pkg/patrol":           "package patrol\nimport \"gt.local/devops/pkg/releasebot\"\n",
+		"pkg/releasebot":       "package releasebot\n",
+	})
+	got, err := inputClosureGaps(f.run, closureRepo, "main")
+	if err != nil {
+		t.Fatalf("inputClosureGaps: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("gaps = %v, want none: pkg/releasebot is in the input list", got)
+	}
+}
