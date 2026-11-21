@@ -499,8 +499,8 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	if len(plan.Apply) != 11 {
-		t.Fatalf("the plan applies %d steps, want the snapshot's init and fetch, the repo claim, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
+	if len(plan.Apply) != 12 {
+		t.Fatalf("the plan applies %d steps, want the snapshot's init and fetch, the repo claim, the wait out of a terminating sync pod, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
 	}
 
 	var repoClaim Claim
@@ -518,7 +518,7 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 
 	var syncPod Pod
-	if err := json.Unmarshal(plan.Apply[3].Stdin, &syncPod); err != nil {
+	if err := json.Unmarshal(plan.Apply[4].Stdin, &syncPod); err != nil {
 		t.Fatalf("the second apply is not a document: %v", err)
 	}
 	if syncPod.Kind != "Pod" || syncPod.Metadata.Name != syncPodName(spec) {
@@ -526,39 +526,67 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 	// Created, not applied: a second sync pod for the rig must fail
 	// AlreadyExists rather than take the claim from a sync already using it.
-	if argv := plan.Apply[3].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
+	if argv := plan.Apply[4].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
 		t.Errorf("the second apply runs %v, want a kubectl create of the sync pod", argv)
 	}
 	if len(syncPod.Spec.Containers) != 1 || syncPod.Spec.Containers[0].Image != spec.Image {
 		t.Errorf("the sync pod's containers are %+v, want one running the Spec's image %q", syncPod.Spec.Containers, spec.Image)
 	}
 
-	if argv := plan.Apply[4].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
+	if argv := plan.Apply[5].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
 		t.Errorf("the third apply runs %v, want a wait for the sync pod %q", argv, syncPodName(spec))
 	}
-	cp := plan.Apply[5].Argv
+	cp := plan.Apply[6].Argv
 	if !slices.Contains(cp, "cp") || !slices.Contains(cp, spec.OutDir+"/repo-snapshot.git/.") || !slices.Contains(cp, syncPodName(spec)+":"+RepoMount) {
 		t.Errorf("the fourth apply runs %v, want the snapshot %q copied into the sync pod at %s", cp, spec.OutDir+"/repo-snapshot.git/.", RepoMount)
 	}
-	exec := strings.Join(plan.Apply[6].Argv, " ")
+	exec := strings.Join(plan.Apply[7].Argv, " ")
 	if !strings.Contains(exec, "exec "+syncPodName(spec)) ||
 		!strings.Contains(exec, "chown -R 10001:10001 "+RepoMount) ||
 		!strings.Contains(exec, "chmod -R a+rX "+RepoMount) {
 		t.Errorf("the fifth apply runs %q, want a chown and chmod of the copied tree", exec)
 	}
-	if argv := plan.Apply[7].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
+	if argv := plan.Apply[8].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
 		t.Errorf("the sixth apply runs %v, want the sync pod %q removed", argv, syncPodName(spec))
 	}
 
 	var outClaim Claim
-	if err := json.Unmarshal(plan.Apply[8].Stdin, &outClaim); err != nil {
+	if err := json.Unmarshal(plan.Apply[9].Stdin, &outClaim); err != nil {
 		t.Fatalf("the seventh apply is not a document: %v", err)
 	}
 	if outClaim.Metadata.Name != OutClaimName(spec) {
 		t.Errorf("the seventh apply is the claim %q, want the output claim %q", outClaim.Metadata.Name, OutClaimName(spec))
 	}
-	if string(plan.Apply[10].Stdin) != string(plan.Job.JSON()) {
+	if string(plan.Apply[11].Stdin) != string(plan.Job.JSON()) {
 		t.Errorf("the last apply does not carry the rendered Job document")
+	}
+}
+
+// TestK8sPlanWaitsOutATerminatingSyncPodBeforeCreate holds the launch to waiting
+// for a sync pod an earlier run left terminating: the create fails AlreadyExists
+// while the pod is being deleted, and the wait never deletes a live one (gt-6k7wah).
+func TestK8sPlanWaitsOutATerminatingSyncPodBeforeCreate(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	createAt := applyDocumentIndex(plan, "Pod", syncPodName(spec))
+	if createAt < 1 {
+		t.Fatalf("the plan creates the sync pod at apply step %d, want a step before it", createAt)
+	}
+	wait := plan.Apply[createAt-1].Argv
+	if !slices.Contains(wait, "wait") || !slices.Contains(wait, "--for=delete") || !slices.Contains(wait, "--timeout="+syncDeleteTimeout) {
+		t.Errorf("the step before the sync pod's create runs %v, want a wait --for=delete with --timeout=%s", wait, syncDeleteTimeout)
+	}
+	for i, step := range plan.Apply[:createAt] {
+		if slices.Contains(step.Argv, "delete") {
+			t.Errorf("apply step %d runs %v, which deletes; the launch waits out a terminating sync pod and never deletes one", i, step.Argv)
+		}
+	}
+	if !slices.Contains(wait, "pod/"+syncPodName(spec)) {
+		t.Errorf("the wait runs %v, want it to name the pod %q the create document carries", wait, syncPodName(spec))
 	}
 }
 
