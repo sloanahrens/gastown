@@ -225,6 +225,32 @@ func TestResolveLandingRemoteIn_ConfiguredRemoteResolution(t *testing.T) {
 	}
 }
 
+// TestResolveLandingRemoteIn_SkipsAUrlNamedSection: a filtered fetch by URL
+// writes a config section named for that URL, and git lists the URL as a remote
+// whose get-url answers with the name itself. That is no remote, so the rig's
+// URL resolves to origin rather than to the URL-named section listed first
+// (gt-dzn1w8).
+func TestResolveLandingRemoteIn_SkipsAUrlNamedSection(t *testing.T) {
+	t.Parallel()
+	const devopsURL = "http://forgejo:3000/acme/devops.git"
+	townRoot := t.TempDir()
+	writeForgejoRigConfig(t, townRoot, "devops", devopsURL)
+	repo := &landingRemotesFake{
+		remotes: []string{devopsURL, "origin"},
+		urls: map[string]string{
+			devopsURL: devopsURL,
+			"origin":  devopsURL,
+		},
+	}
+	got, err := ResolveLandingRemoteIn(repo, townRoot, "devops")
+	if err != nil {
+		t.Fatalf("ResolveLandingRemoteIn() error = %v, want nil", err)
+	}
+	if got != "origin" {
+		t.Errorf("ResolveLandingRemoteIn() = %q, want origin", got)
+	}
+}
+
 // TestLandingRemoteForURL pins the matching rule: the remote whose URL is the
 // configured one, in the repository's own order, with the URL spellings git
 // treats as equal. A missing URL entry is skipped, never guessed at, and no

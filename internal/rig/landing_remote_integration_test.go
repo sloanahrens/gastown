@@ -50,3 +50,31 @@ func TestIntegrationResolveLandingRemote(t *testing.T) {
 		t.Errorf("ResolveLandingRemote() = %q, nil; want an error when no remote carries the URL", got)
 	}
 }
+
+// TestIntegrationResolveLandingRemoteIgnoresAUrlNamedSection runs the resolver
+// against real git on a repository a filtered fetch by URL has written a
+// URL-named config section into: git lists that section as a remote, and the
+// rig's URL must still resolve to origin (gt-dzn1w8).
+func TestIntegrationResolveLandingRemoteIgnoresAUrlNamedSection(t *testing.T) {
+	t.Parallel()
+	const devopsURL = "http://forgejo.example:3000/acme/devops.git"
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "devops")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bare := filepath.Join(rigDir, ".repo.git")
+	gitT(t, townRoot, "init", "-q", "--bare", "-b", "main", bare)
+	gitT(t, bare, "remote", "add", "origin", devopsURL)
+	gitT(t, bare, "config", "remote."+devopsURL+".promisor", "true")
+	gitT(t, bare, "config", "remote."+devopsURL+".partialclonefilter", "blob:none")
+
+	cfg := `{"type":"rig","version":1,"name":"devops","default_branch":"main",` +
+		`"merge_queue":{"forgejo":{"remote_url":"` + devopsURL + `"}}}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ResolveLandingRemote(townRoot, "devops"); err != nil || got != "origin" {
+		t.Errorf("ResolveLandingRemote() = %q, %v; want origin, not the URL-named section", got, err)
+	}
+}
