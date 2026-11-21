@@ -110,6 +110,7 @@ type FollowupCandidate struct {
 	Claim    string
 	Severity string
 	Line     int
+	Class    string
 }
 
 // DedupeAction is what the landing worker does with a finding.
