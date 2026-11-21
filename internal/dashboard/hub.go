@@ -1571,6 +1571,16 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 			if d := now.Sub(when); d > 0 {
 				p.ElapsedSec = int64(d / time.Second)
 			}
+			// The gate time is the overrun guard's own record for the bead, the
+			// time it charges that does not count as work; the rest of the age
+			// is what the guard counted (gt-1887cf).
+			if gate, ok := readSeatGate(h.cfg.BirdsDir, p.Bead); ok {
+				p.GateSec = int64(gate / time.Second)
+			}
+			p.WorkingSec = p.ElapsedSec - p.GateSec
+			if p.WorkingSec < 0 {
+				p.WorkingSec = 0
+			}
 		}
 		if p.LastActive != nil {
 			if d := now.Sub(*p.LastActive); d > 0 {
