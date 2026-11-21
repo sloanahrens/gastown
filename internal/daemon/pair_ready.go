@@ -741,7 +741,8 @@ type pairReadyGreen struct {
 // level: a skew raises the skew item instead of the ready one, and a level the
 // pass cannot read raises the guard's unreadable item beside the ready one, so
 // an unread level never passes for agreement. found is the failed runs this read
-// settled, for the next read to reuse.
+// settled, for the next read to reuse. A missing pair behind a ready green raises
+// nothing, since the roll takes the ready green.
 func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now time.Time, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, skew *pairReadySkewPass, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
@@ -768,6 +769,11 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 	// broke before reaching it leaves the item standing while the ledger names
 	// it.
 	refusedSettled := make(map[string]bool, 1)
+	// ready is the commits whose pair both images answer for, and missing is each
+	// green whose pair is missing with the items the pass raised for it. A missing
+	// pair behind a ready green is superseded after the loop.
+	var ready []string
+	var missing []pairReadyMissing
 	incomplete := scan.err
 	for _, g := range scan.greens {
 		if g.sha == running {
@@ -808,6 +814,7 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 		}
 		mark(g.sha12)
 		if daemonFound && polecatFound {
+			ready = append(ready, g.sha)
 			// The ledger is what says a published pair was not refused. A ledger
 			// the check could not read leaves it unmeasured, so no item that
 			// says the pair is ready is raised from it.
@@ -835,14 +842,45 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 		// commit past the stuck bound raises its stuck item whether or not a run
 		// exists. Only such a commit asks Forgejo about its run, and the check
 		// settles the commit's build items here so the incomplete path never has to.
+		var raised []attention.Item
 		if age, ok := pairReadyGreenAge(r, g, now, logf); ok && age >= pairReadyStuckAfter {
-			out = append(out, pairReadyStuckItem(r.Rig, g, age))
+			raised = append(raised, pairReadyStuckItem(r.Rig, g, age))
 		}
 		items, settled := pairReadyImagesFailed(ctx, r, g, prev, runs, logf)
-		out = append(out, items...)
+		raised = append(raised, items...)
+		out = append(out, raised...)
+		missing = append(missing, pairReadyMissing{sha: g.sha, sha12: g.sha12, items: raised})
 		if settled != nil {
 			found[imagesFailedKey(r.Rig, g.sha12)] = *settled
 		}
+	}
+	// A missing pair behind a ready green can never be rolled: the roll takes the
+	// newer green. Its items and failed-run entry are dropped here, its keys stay
+	// seen, so the previous items clear. An ancestry that cannot be judged keeps
+	// the items and makes the scan incomplete.
+	dropped := make(map[string]bool)
+	for _, m := range missing {
+		behind, err := pairReadyBehindAny(r, m.sha, ready)
+		if err != nil {
+			incomplete = err
+			continue
+		}
+		if !behind {
+			continue
+		}
+		for _, it := range m.items {
+			dropped[it.Key] = true
+		}
+		delete(found, imagesFailedKey(r.Rig, m.sha12))
+	}
+	if len(dropped) > 0 {
+		kept := out[:0]
+		for _, it := range out {
+			if !dropped[it.Key] {
+				kept = append(kept, it)
+			}
+		}
+		out = kept
 	}
 	if incomplete != nil {
 		for _, it := range prev {
@@ -882,6 +920,36 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 		}
 	}
 	return out, found, nil, nil
+}
+
+// pairReadyMissing is a green commit whose pair is missing, with the items the
+// pass raised for it.
+type pairReadyMissing struct {
+	sha   string
+	sha12 string
+	items []attention.Item
+}
+
+// pairReadyBehindAny says whether commit is an ancestor of one of the ready
+// greens, in the rig's local clone. A rig with no clone cannot judge that, so it
+// is an error, not a no.
+func pairReadyBehindAny(r pairReadyRig, commit string, ready []string) (bool, error) {
+	if len(ready) == 0 {
+		return false, nil
+	}
+	if r.Git == nil {
+		return false, fmt.Errorf("green/%s: the rig has no local clone to judge it behind a ready green", greenRefShortSHA(commit))
+	}
+	for _, sha := range ready {
+		behind, err := r.Git.IsAncestor(commit, sha)
+		if err != nil {
+			return false, fmt.Errorf("judging green/%s behind the ready green %s in the local clone: %w", greenRefShortSHA(commit), greenRefShortSHA(sha), err)
+		}
+		if behind {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // pairReadyScan is one rig's branch listing. complete says the listing reached
