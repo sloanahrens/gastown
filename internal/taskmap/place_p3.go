@@ -52,5 +52,6 @@ func init() {
 		Entry{Path: "spec", Group: "dispatch", Use: "Use this to lint a spec bead's shape against the template or to run the spec dispatcher by hand."},
 		Entry{Path: "spec dispatch", Group: "dispatch", Use: "Use this to run one spec-dispatch tick now, rather than waiting for the daemon's next pass."},
 		Entry{Path: "spec estimate", Group: "dispatch", Use: "Use this to estimate a spec bead's size before you dispatch it, so its story points are on the bead."},
+		Entry{Path: "spec split", Group: "dispatch", Use: "Use this to see how a spec bead would split into two pieces by package, before any bead is created."},
 	)
 }
