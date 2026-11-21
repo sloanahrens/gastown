@@ -470,7 +470,7 @@ func (l *Lander) queuedCandidates(q QueuedFollowup, existing []ExistingFollowup,
 func heldFindingTexts(held []FollowupCandidate) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(held))
 	for _, c := range held {
-		out = append(out, ReviewFindingText{ID: c.ID, Severity: c.Severity, File: c.Path, Line: c.Line, Title: c.Title, Claim: boundedClaim(c.Claim)})
+		out = append(out, ReviewFindingText{ID: c.ID, Severity: c.Severity, File: c.Path, Line: c.Line, Title: c.Title, Claim: boundedClaim(c.Claim), Class: c.Class})
 	}
 	return out
 }
@@ -480,7 +480,7 @@ func heldFindingTexts(held []FollowupCandidate) []ReviewFindingText {
 func queuedFindings(texts []ReviewFindingText) []Finding {
 	out := make([]Finding, 0, len(texts))
 	for _, t := range texts {
-		out = append(out, Finding{ID: t.ID, Severity: t.Severity, Path: t.File, Line: t.Line, Title: t.Title, Detail: t.Claim})
+		out = append(out, Finding{ID: t.ID, Severity: t.Severity, Path: t.File, Line: t.Line, Title: t.Title, Detail: t.Claim, Class: t.Class})
 	}
 	return out
 }
@@ -583,7 +583,7 @@ func followupCandidates(findings []Finding) []FollowupCandidate {
 	for _, f := range findings {
 		out = append(out, FollowupCandidate{
 			ID: f.ID, Path: f.Path, Title: f.Title, Severity: f.Severity, Line: f.Line,
-			Detail: findingLine(f), Claim: f.Detail,
+			Detail: findingLine(f), Claim: f.Detail, Class: f.Class,
 		})
 	}
 	return out

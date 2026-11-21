@@ -655,3 +655,28 @@ func TestReviewRecordWithoutFindingTextStillParses(t *testing.T) {
 		t.Errorf("the count-only line was rewritten:\n%s", raw)
 	}
 }
+
+// TestQueueKeepsTheClass: a held finding's class goes through the queue line and
+// reads back with it, and a line written before the chain carried a class reads
+// back empty, which files as behaviour (gt-iwyb13).
+func TestQueueKeepsTheClass(t *testing.T) {
+	t.Parallel()
+	held := followupCandidates([]Finding{{ID: "f1", Severity: "minor", Path: "a.go", Title: "t", Detail: "d", Class: FindingClassTestStyle}})
+	line, err := json.Marshal(heldFindingTexts(held))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := `[{"id":"f0","severity":"minor","file":"a.go","title":"t","claim":"c"}]`
+	for _, tc := range []struct{ name, json, want string }{
+		{"a held test_style finding", string(line), FindingClassTestStyle},
+		{"an old queue line", old, ""},
+	} {
+		var texts []ReviewFindingText
+		if err := json.Unmarshal([]byte(tc.json), &texts); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if got := queuedFindings(texts); len(got) != 1 || got[0].Class != tc.want {
+			t.Errorf("%s: read back %+v, want one finding of class %q", tc.name, got, tc.want)
+		}
+	}
+}
