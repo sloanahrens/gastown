@@ -700,7 +700,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			rigName, filepath.Join(rigPath, "settings", "config.json")))
 		return nil, fmt.Errorf("rig %s has no merge_queue.forgejo block: Forgejo is the only landing path, so the landing worker for this rig is not running until the block is added", rigName)
 	}
-	candidate, merger, lister, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, gateLogDir, cfg)
+	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, gateLogDir, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -805,7 +805,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		isAncestor = d.postLandIsAncestor
 	}
 	postLand := d.newPostLandRunner(rigName, rigPath, newPostLandWiring(
-		merger.Client, lister, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
+		merger.Client, candidate.Client, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
 		isAncestor))
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
@@ -942,8 +942,9 @@ const forgejoVerifyWindow = 20
 // only landing path (gt-fn9e6.32).
 //
 // One client serves both halves — the same landing bot pushes the candidate,
-// posts om's verdict and merges the PR (design, "Bots and tokens") — and it is
-// returned as the run list the post-land orphan check reads.
+// posts om's verdict and merges the PR (design, "Bots and tokens"). The gate
+// carries it as a land.CandidateStatus, so its run list serves the post-land
+// orphan check too.
 //
 // remote is the rig's configured landing remote (gt-fn9e6.9): the candidate
 // has to reach the Forgejo instance whose CI gates it, so an assumed origin
@@ -952,14 +953,14 @@ const forgejoVerifyWindow = 20
 // rejected gate job logs are kept, and the caller resolves it from the town
 // root it already holds: a gate that read the town root itself would keep no
 // log wherever that field is unset.
-func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, gateLogDir string, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, postLandRunLister, error) {
+func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, gateLogDir string, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
 	owner, repoName, err := land.RepoFromRemoteURL(fj.RemoteURL)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	apiBase, err := land.APIBaseFromRemoteURL(fj.RemoteURL)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	// The landing bot's login is the only account the merge trusts to have
 	// posted om / review, so a rig that does not name it has a creator check
@@ -967,11 +968,11 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 	// landing (gt-fn9e6.7).
 	botLogin := fj.BotLogin(config.ForgejoRoleLanding)
 	if botLogin == "" {
-		return nil, nil, nil, fmt.Errorf("rig %s lands through Forgejo CI but merge_queue.forgejo.bots names no %s login; the merge's creator check cannot trust a review status without it", rigName, config.ForgejoRoleLanding)
+		return nil, nil, fmt.Errorf("rig %s lands through Forgejo CI but merge_queue.forgejo.bots names no %s login; the merge's creator check cannot trust a review status without it", rigName, config.ForgejoRoleLanding)
 	}
 	tokenDir, err := cfg.ForgejoTokenDir()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	// The token is read from the role's file, never from config: the key names
 	// the role, and the file is what holds the secret (design, "Bots and
@@ -980,7 +981,7 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 		forgejo.WithBaseURL(apiBase),
 		forgejo.WithTokenFile(filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleLanding+".env")))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
+		return nil, nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
 	}
 	out := landingLogWriter{logf: d.logger.Printf}
 	gate := &land.CandidateGate{
@@ -995,7 +996,7 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
 	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, BotLogin: botLogin, Out: out}
-	return gate, merger, client, nil
+	return gate, merger, nil
 }
 
 // controlClusterExec is the kubectl seam the gate run recorder reads the forgejo
