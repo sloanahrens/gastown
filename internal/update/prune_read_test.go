@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -551,6 +552,77 @@ func TestPruneReadReasonQueryPinned(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "page=1&") {
 		t.Errorf("error %q names page 1, want only the refused page", err)
+	}
+}
+
+// pruneWireServer answers every packages request with the captured two-item
+// listing and a matching X-Total-Count, so Images completes on page 1, and
+// records each request's line as the server received it. A regression that
+// drops the leading slash is invisible here in URL.Path but changes the line
+// to "GET api/v1/...", which a Go server answers 400 before the handler runs
+// (gt-4nxkck).
+func pruneWireServer(t *testing.T, lines *[]string) *httptest.Server {
+	t.Helper()
+	//testpolicy:allow no-network — the test's subject is the request line a server records, which a scripted Doer cannot show; the server is in-process on loopback and sets no dial deadline
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*lines = append(*lines, r.RequestURI)
+		w.Header().Set("X-Total-Count", "2")
+		_, _ = io.WriteString(w, "["+pruneCapturedTag+","+pruneCapturedPlatform+"]")
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// pruneWireReader is the reader under test, wired to srv at base.
+func pruneWireReader(base string, srv *httptest.Server) PruneRegistryReader {
+	return PruneRegistryReader{
+		Base: base, Owner: "bot-registry", Doer: srv.Client(),
+		Credentials: func() (string, string, error) { return "viewer", "t", nil },
+		Digest: func(context.Context, string, string, string, string) (string, bool, error) {
+			return pruneDigest("a"), true, nil
+		},
+	}
+}
+
+// TestPruneReadWireRequestURI holds that every packages request sent to a base
+// with no path is the one Forgejo 16.0.5 accepted: an absolute path and the
+// pinned query, as the server's own request line records it.
+func TestPruneReadWireRequestURI(t *testing.T) {
+	t.Parallel()
+	var lines []string
+	srv := pruneWireServer(t, &lines)
+	if _, err := pruneWireReader(srv.URL, srv).Images(context.Background()); err != nil {
+		t.Fatalf("Images() error = %v", err)
+	}
+	if len(lines) != len(pruneImages) {
+		t.Fatalf("the server received %d requests, want one per image (%d): %q", len(lines), len(pruneImages), lines)
+	}
+	for i, image := range pruneImages {
+		want := "/api/v1/packages/bot-registry?limit=50&page=1&q=" + image + "&type=container"
+		if lines[i] != want {
+			t.Errorf("request %d's line = %q, want %q", i, lines[i], want)
+		}
+	}
+}
+
+// TestPruneReadWireBasePath holds that a base with a path keeps it in the
+// request line: JoinPath joins the base's path and keeps the leading slash, so
+// no gap is documented here.
+func TestPruneReadWireBasePath(t *testing.T) {
+	t.Parallel()
+	var lines []string
+	srv := pruneWireServer(t, &lines)
+	if _, err := pruneWireReader(srv.URL+"/forge", srv).Images(context.Background()); err != nil {
+		t.Fatalf("Images() error = %v", err)
+	}
+	if len(lines) != len(pruneImages) {
+		t.Fatalf("the server received %d requests, want one per image (%d): %q", len(lines), len(pruneImages), lines)
+	}
+	for i, image := range pruneImages {
+		want := "/forge/api/v1/packages/bot-registry?limit=50&page=1&q=" + image + "&type=container"
+		if lines[i] != want {
+			t.Errorf("request %d's line = %q, want %q", i, lines[i], want)
+		}
 	}
 }
 
