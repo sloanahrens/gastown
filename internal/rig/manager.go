@@ -1476,11 +1476,18 @@ func resolveConfiguredLandingRemote(repo LandingRemotes, rigName, want string) (
 	urls := make(map[string]string, len(remotes))
 	var unreadable []string
 	for _, name := range remotes {
-		if url, err := repo.RemoteURL(name); err == nil {
-			urls[name] = url
-		} else {
+		url, err := repo.RemoteURL(name)
+		if err != nil {
 			unreadable = append(unreadable, name)
+			continue
 		}
+		// git lists a config section named for a URL (a filtered fetch by URL
+		// writes one) as a remote, and get-url answers it with the name itself:
+		// that is no remote, so it is neither matched nor reported unreadable.
+		if url == name {
+			continue
+		}
+		urls[name] = url
 	}
 	if name, ok := landingRemoteForURL(remotes, urls, want); ok {
 		return name, nil
