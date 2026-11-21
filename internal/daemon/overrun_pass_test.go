@@ -763,3 +763,45 @@ func TestOverrunPassBudgetStops(t *testing.T) {
 		t.Errorf("the pass line does not name the 15 seats not reached:\n%s", log)
 	}
 }
+
+// TestOverrunPassBudgetResumes: a pass the budget cuts after 5 of 20 seats leaves the next pass
+// to start its reads at the first seat not reached, and a pass that reaches every seat leaves
+// the next to start at the first seat. The order is the order the escalation-answer reads are
+// made in (readPoolSize 1, so one at a time).
+func TestOverrunPassBudgetResumes(t *testing.T) {
+	t.Parallel()
+	seats := make([]overrunSeat, 20)
+	for i := range seats {
+		seats[i] = overrunSeat{Rig: "gastown", Polecat: fmt.Sprintf("r%02d", i), Bead: fmt.Sprintf("gt-res%02d", i)}
+	}
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(5*time.Minute, seats...)
+	var order []string
+	step := 6 * time.Second
+	f.escalationAnsweredAt = func(seat overrunSeat) (time.Time, error) {
+		order = append(order, seat.Bead[len("gt-res"):])
+		f.now = f.now.Add(step)
+		return time.Time{}, nil
+	}
+	f.gateRunning = func(overrunSeat) (bool, error) { f.now = f.now.Add(step); return false, nil }
+	s := f.seams()
+	s.readPoolSize = 1
+	pass := func() string {
+		order = nil
+		runPoolBounded(t, "the pass", 1, 1, func(int) { d.runOverrunGuard(s) })
+		return strings.Join(order, ",")
+	}
+	for i, want := range []string{"00,01,02,03,04", "05,06,07,08,09", "10,11,12,13,14", "15,16,17,18,19", "00,01,02,03,04"} {
+		if got := pass(); got != want {
+			t.Errorf("pass %d read seats %s, want %s", i+1, got, want)
+		}
+	}
+	// Reads that take no time reach every seat from the cursor (seat 05), and clear it.
+	step = 0
+	if got, want := pass(), "05,06,07,08,09,10,11,12,13,14,15,16,17,18,19,00,01,02,03,04"; got != want {
+		t.Errorf("a pass from the cursor read seats %s, want %s", got, want)
+	}
+	if got, want := pass(), "00,01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16,17,18,19"; got != want {
+		t.Errorf("the pass after one that reached every seat read seats %s, want %s", got, want)
+	}
+}
