@@ -29,12 +29,15 @@ const (
 	adminContext = "colima-gt-control"
 )
 
-// Info is one path as Store checks it: its kind and permission bits, and the
-// uid that owns it. Owner is -1 when the platform reports no owner, which Store
-// refuses rather than reading as uid 0.
+// Info is one path as Store or the approval-record reader checks it: its kind and
+// permission bits, the uid that owns it, and its group's gid. Owner is -1
+// when the platform reports no owner, which Store refuses rather than reading as
+// uid 0; Group is -1 when the platform reports no group. Store and Check do not
+// test Group: the reader refuses a file outside the deployer's group (gt-31vzri).
 type Info struct {
 	Mode  fs.FileMode
 	Owner int
+	Group int
 }
 
 // FS is the filesystem Store writes the credentials through: Disk puts the

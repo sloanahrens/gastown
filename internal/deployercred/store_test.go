@@ -29,10 +29,11 @@ const (
 )
 
 // storeEntry is one path of the fake filesystem: its mode (ModeDir set for a
-// directory), the uid that owns it, and its bytes.
+// directory), the uid and gid that own it, and its bytes.
 type storeEntry struct {
 	mode  fs.FileMode
 	owner int
+	group int
 	data  []byte
 }
 
@@ -56,8 +57,9 @@ type fakeStoreFS struct {
 	failNth map[string]int
 	calls   map[string]int
 	opN     map[string]int
-	// owner is the uid of a path the fake creates.
+	// owner is the uid of a path the fake creates, and group its gid.
 	owner int
+	group int
 	// umask is applied by the create, as a host's umask is; Chmod is not
 	// subject to it.
 	umask fs.FileMode
@@ -89,9 +91,11 @@ func newFakeStoreFS(owner int) *fakeStoreFS {
 	}
 }
 
-// put adds a path: ModeDir for a directory, ModeSymlink for a link.
+// put adds a path: ModeDir for a directory, ModeSymlink for a link. It carries
+// the fake's group, so a test sets the group once, as a host's directory
+// inherits its parent's.
 func (f *fakeStoreFS) put(name string, mode fs.FileMode, owner int, data []byte) {
-	f.entries[filepath.Clean(name)] = storeEntry{mode: mode, owner: owner, data: append([]byte(nil), data...)}
+	f.entries[filepath.Clean(name)] = storeEntry{mode: mode, owner: owner, group: f.group, data: append([]byte(nil), data...)}
 }
 
 func (f *fakeStoreFS) putDir(name string, mode fs.FileMode, owner int) {
@@ -127,7 +131,7 @@ func (f *fakeStoreFS) Lstat(name string) (deployercred.Info, error) {
 	if !ok {
 		return deployercred.Info{}, fs.ErrNotExist
 	}
-	return deployercred.Info{Mode: e.mode, Owner: e.owner}, nil
+	return deployercred.Info{Mode: e.mode, Owner: e.owner, Group: e.group}, nil
 }
 
 func (f *fakeStoreFS) MkdirAll(name string, perm fs.FileMode) error {
@@ -149,7 +153,7 @@ func (f *fakeStoreFS) MkdirAll(name string, perm fs.FileMode) error {
 		}
 	}
 	for i := len(missing) - 1; i >= 0; i-- {
-		f.entries[missing[i]] = storeEntry{mode: fs.ModeDir | perm&^f.umask, owner: f.owner}
+		f.entries[missing[i]] = storeEntry{mode: fs.ModeDir | perm&^f.umask, owner: f.owner, group: f.group}
 	}
 	return nil
 }
@@ -161,7 +165,7 @@ func (f *fakeStoreFS) CreateExclusive(name string, perm fs.FileMode) (deployercr
 	}
 	if f.collide && !f.collided {
 		f.collided = true
-		f.entries[name] = storeEntry{mode: perm, owner: f.owner}
+		f.entries[name] = storeEntry{mode: perm, owner: f.owner, group: f.group}
 		return nil, fs.ErrExist
 	}
 	if _, ok := f.entries[name]; ok {
@@ -175,7 +179,7 @@ func (f *fakeStoreFS) CreateExclusive(name string, perm fs.FileMode) (deployercr
 	if f.createOwner != nil {
 		owner = *f.createOwner
 	}
-	f.entries[name] = storeEntry{mode: mode, owner: owner}
+	f.entries[name] = storeEntry{mode: mode, owner: owner, group: f.group}
 	f.created = append(f.created, name)
 	return &fakeFile{fsys: f, name: name}, nil
 }
