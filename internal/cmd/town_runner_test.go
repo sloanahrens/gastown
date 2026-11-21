@@ -694,23 +694,23 @@ func TestTownRunnerRollApplyAndReadyCallInOrder(t *testing.T) {
 	}
 }
 
+// failingKubectl answers a matching call with out and exit, the rest with success.
+func failingKubectl(match func(recordedKubectlCall) bool, out string, exit int) func(recordedKubectlCall) (string, int, error) {
+	return func(call recordedKubectlCall) (string, int, error) {
+		if match(call) {
+			return out, exit, nil
+		}
+		return "", 0, nil
+	}
+}
+
 // TestTownRunnerRollApplyRefuses: each way the build, an apply, the rollout or
 // the readiness read can fail returns an error and stops the call sequence.
 func TestTownRunnerRollApplyRefuses(t *testing.T) {
 	t.Parallel()
-	failing := func(match func(recordedKubectlCall) bool, out string, exit int) func(recordedKubectlCall) (string, int, error) {
-		return func(call recordedKubectlCall) (string, int, error) {
-			if match(call) {
-				return out, exit, nil
-			}
-			return "", 0, nil
-		}
-	}
 	appliesDeployment := func(call recordedKubectlCall) bool {
 		return len(call.args) > 0 && call.args[0] == "apply" && strings.Contains(call.stdin, "kind: Deployment")
 	}
-	isRollout := func(call recordedKubectlCall) bool { return len(call.args) > 0 && call.args[0] == "rollout" }
-	isGet := func(call recordedKubectlCall) bool { return len(call.args) > 0 && call.args[0] == "get" }
 	cases := []struct {
 		name      string
 		mutate    func(*runnerApplier, *recordingKubectl)
@@ -732,8 +732,37 @@ func TestTownRunnerRollApplyRefuses(t *testing.T) {
 			k.answer = func(recordedKubectlCall) (string, int, error) { return "", -1, errors.New("kubectl not found") }
 		}, want: "applying the configmap", wantCalls: 1},
 		{name: "deployment apply exits nonzero", mutate: func(_ *runnerApplier, k *recordingKubectl) {
-			k.answer = failing(appliesDeployment, "", 1)
+			k.answer = failingKubectl(appliesDeployment, "", 1)
 		}, want: "applying the deployment forgejo-runner", wantCalls: 4},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &recordingKubectl{answer: func(recordedKubectlCall) (string, int, error) { return "", 0, nil }}
+			a := testRunnerApplier(k)
+			tc.mutate(&a, k)
+			err := a.Apply(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to name %q", err, tc.want)
+			}
+			if len(k.calls) != tc.wantCalls {
+				t.Errorf("made %d cluster calls, want %d: %v", len(k.calls), tc.wantCalls, k.calls)
+			}
+		})
+	}
+}
+
+// TestTownRunnerRollWaitReadyRefuses: the ready wait, the roll's step 5, has its
+// own refusals, each driven from WaitReady alone.
+func TestTownRunnerRollWaitReadyRefuses(t *testing.T) {
+	t.Parallel()
+	isRollout := func(call recordedKubectlCall) bool { return len(call.args) > 0 && call.args[0] == "rollout" }
+	isGet := func(call recordedKubectlCall) bool { return len(call.args) > 0 && call.args[0] == "get" }
+	cases := []struct {
+		name      string
+		mutate    func(*runnerApplier, *recordingKubectl)
+		want      string
+		wantCalls int
+	}{
 		{name: "rollout cannot start", mutate: func(_ *runnerApplier, k *recordingKubectl) {
 			k.answer = func(call recordedKubectlCall) (string, int, error) {
 				if isRollout(call) {
@@ -741,10 +770,10 @@ func TestTownRunnerRollApplyRefuses(t *testing.T) {
 				}
 				return "", 0, nil
 			}
-		}, want: "waiting for the rollout", wantCalls: 5},
+		}, want: "waiting for the rollout", wantCalls: 1},
 		{name: "rollout not ready", mutate: func(_ *runnerApplier, k *recordingKubectl) {
-			k.answer = failing(isRollout, "", 1)
-		}, want: "did not complete its rollout within", wantCalls: 5},
+			k.answer = failingKubectl(isRollout, "", 1)
+		}, want: "did not complete its rollout within", wantCalls: 1},
 		{name: "readiness cannot start", mutate: func(_ *runnerApplier, k *recordingKubectl) {
 			k.answer = func(call recordedKubectlCall) (string, int, error) {
 				if isGet(call) {
@@ -752,27 +781,20 @@ func TestTownRunnerRollApplyRefuses(t *testing.T) {
 				}
 				return "", 0, nil
 			}
-		}, want: "reading the readiness", wantCalls: 6},
+		}, want: "reading the readiness", wantCalls: 2},
 		{name: "readiness exits nonzero", mutate: func(_ *runnerApplier, k *recordingKubectl) {
-			k.answer = failing(isGet, "", 1)
-		}, want: "reading the readiness", wantCalls: 6},
+			k.answer = failingKubectl(isGet, "", 1)
+		}, want: "reading the readiness", wantCalls: 2},
 		{name: "Available is not True", mutate: func(_ *runnerApplier, k *recordingKubectl) {
-			k.answer = failing(isGet, "False\n", 0)
-		}, want: "is not ready", wantCalls: 6},
+			k.answer = failingKubectl(isGet, "False\n", 0)
+		}, want: "is not ready", wantCalls: 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &recordingKubectl{answer: func(recordedKubectlCall) (string, int, error) { return "", 0, nil }}
 			a := testRunnerApplier(k)
 			tc.mutate(&a, k)
-
-			// The apply and the ready wait are the roll's steps 4 and 5: a failing
-			// apply stops before the wait, as it does in the roll.
-			err := a.Apply(context.Background())
-			if err == nil {
-				err = a.WaitReady(context.Background())
-			}
-
+			err := a.WaitReady(context.Background())
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %v, want it to name %q", err, tc.want)
 			}
