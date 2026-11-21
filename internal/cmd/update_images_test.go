@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -18,10 +19,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 const (
@@ -1871,5 +1874,80 @@ func TestUpdateImagesBdNewCommitDropsTheOldBdKey(t *testing.T) {
 	}
 	if writes != 1 {
 		t.Errorf("the values file was written %d times, want once", writes)
+	}
+}
+
+// TestUpdateImagesPrunePrintsUnknownImage: a planner that names an image outside
+// the three still has every entry printed, and the counts follow the plan, so no
+// entry is dropped from the output or the total.
+func TestUpdateImagesPrunePrintsUnknownImage(t *testing.T) {
+	t.Parallel()
+	const otherImage = "gastown-gateway-other"
+	base := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	reg := pruneTestPopulated()
+	reg.tags[otherImage] = []pruneTestTag{
+		{name: pruneTestName(200), pushed: base},
+		{name: pruneTestName(201), pushed: base},
+	}
+	seams := pruneTestSeams(reg)
+	plan := update.PrunePlan{
+		Keep:   []update.PruneEntry{{Image: otherImage, Tag: pruneTestName(200), Digest: pruneTestDigest(200), Reason: "a test keeps it"}},
+		Delete: []update.PruneEntry{{Image: otherImage, Tag: pruneTestName(201), Digest: pruneTestDigest(201), Reason: "a test deletes it"}},
+	}
+	seams.PlanPrune = func(update.PruneInput) (update.PrunePlan, error) { return plan, nil }
+
+	out, err := runUpdateImagesPruneCmd(t, seams)
+	if err != nil {
+		t.Fatalf("prune over a plan naming another image: %v", err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("keep   %s:%s %s: a test keeps it\n", otherImage, pruneTestName(200), pruneTestDigest(200)),
+		fmt.Sprintf("delete %s:%s %s: a test deletes it\n", otherImage, pruneTestName(201), pruneTestDigest(201)),
+		fmt.Sprintf("%s: keep %d, delete %d\n", otherImage, len(plan.Keep), len(plan.Delete)),
+		fmt.Sprintf("total: keep %d, delete %d; nothing is deleted by this command\n", len(plan.Keep), len(plan.Delete)),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("prune output has no %q line:\n%s", strings.TrimSuffix(want, "\n"), out)
+		}
+	}
+	// Each plan entry is printed once, under its own image and not again under
+	// one of the three gastown images.
+	for _, e := range append(append([]update.PruneEntry{}, plan.Keep...), plan.Delete...) {
+		if n := strings.Count(out, fmt.Sprintf("%s:%s %s: ", e.Image, e.Tag, e.Digest)); n != 1 {
+			t.Fatalf("%s:%s appears %d times, want once:\n%s", e.Image, e.Tag, n, out)
+		}
+	}
+}
+
+// TestUpdateImagesPruneErrorsPrefixOnce: an unwired seam's refusal names the
+// command exactly once, since the caller wraps the seam's error and the seam
+// does not prefix it a second time.
+func TestUpdateImagesPruneErrorsPrefixOnce(t *testing.T) {
+	t.Parallel()
+	const prefix = "gt update images prune: "
+	cases := []struct {
+		name  string
+		unset func(s *updateImagesSeams)
+	}{
+		{"town lookup", func(s *updateImagesSeams) { s.FindTownRoot = nil }},
+		{"registry", func(s *updateImagesSeams) { s.Registry = nil }},
+		{"credentials", func(s *updateImagesSeams) { s.Credentials = nil }},
+		{"HTTP client", func(s *updateImagesSeams) { s.HTTPClient = nil }},
+		{"digest install record", func(s *updateImagesSeams) { s.PruneLedger = nil }},
+		{"green refs reader", func(s *updateImagesSeams) { s.PruneGreen = nil }},
+		{"retention planner", func(s *updateImagesSeams) { s.PlanPrune = nil }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			seams := pruneTestSeams(pruneTestPopulated())
+			tc.unset(&seams)
+			_, err := runUpdateImagesPruneCmd(t, seams)
+			if err == nil {
+				t.Fatal("prune exited zero with a seam unwired")
+			}
+			if got := strings.Count(err.Error(), prefix); got != 1 {
+				t.Fatalf("error names the command %d times, want once: %v", got, err)
+			}
+		})
 	}
 }
