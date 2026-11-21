@@ -496,9 +496,10 @@ type Daemon struct {
 	cacheTrimNoOp cacheTrimNoOp
 	// cacheTrimParks is the claims whose trim failed, parked in memory for the
 	// life of the process: a daemon restart clears it and nothing else does
-	// (gt-o3jzx7). Its caller is bead 9/10, the trim pass, which the trim's
-	// single-flight guard keeps to one goroutine, so it needs no lock.
-	cacheTrimParks map[string]bool
+	// (gt-o3jzx7). The trim pass writes it and a status read may read it, so
+	// cacheTrimParksMu guards every access.
+	cacheTrimParks   map[string]bool
+	cacheTrimParksMu sync.Mutex
 	// doltImage is the Dolt image check's item: the town's Dolt container runs
 	// an image more than one patch release behind the newest release, which the
 	// attention queue raises (gt-goda5m).
