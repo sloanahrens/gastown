@@ -1116,6 +1116,49 @@ func TestOverrunSlungReader_DatesTheBeadsFirstDispatch(t *testing.T) {
 	}
 }
 
+// A seat that ends without a run-end event (a size refusal, a deferral) keeps
+// the bead's run, so a later spawn of the same seat is timed from the spawn,
+// not from the dispatch before it (gt-fv0ezj, dv-s0959). A spawn within the
+// session grace after the sling is the sling's own startup, and only the first
+// spawn beyond it counts, so a later respawn does not move the clock again.
+func TestOverrunSlungReader_ASeatSpawnedAfterTheDispatchIsTimedFromTheSpawn(t *testing.T) {
+	t.Parallel()
+	at := func(hms string) string { return "2026-11-21T" + hms + "Z" }
+	sling := func(ts string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":"sling","actor":%q,"payload":{"bead":"dv-s0959","target":"devops/polecats/anchor"},"visibility":"both"}`, ts, events.SpecDispatchActor)
+	}
+	spawn := func(ts, polecat string) string {
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":"spawn","actor":"gt","payload":{"rig":"devops","polecat":%q},"visibility":"both"}`, ts, polecat)
+	}
+	for _, tt := range []struct {
+		name   string
+		events []string
+		want   string
+	}{
+		{"the live case: the seat spawned again 26 minutes later", []string{spawn(at("07:07:56"), "anchor"), sling(at("07:08:18")), spawn(at("07:33:57"), "anchor"), sling(at("07:34:24"))}, "07:33:57"},
+		{"a spawn 22 s before the sling is the normal startup", []string{spawn(at("07:07:56"), "anchor"), sling(at("07:08:18"))}, "07:08:18"},
+		{"a later spawn of another seat is not this seat's", []string{sling(at("07:08:18")), spawn(at("07:38:18"), "other")}, "07:08:18"},
+		{"a spawn 4 minutes after the sling is inside the grace", []string{sling(at("07:08:18")), spawn(at("07:12:18"), "anchor")}, "07:08:18"},
+		{"a seat respawned again mid-run keeps the first respawn's clock", []string{sling(at("07:08:18")), spawn(at("07:33:57"), "anchor"), spawn(at("07:50:00"), "anchor")}, "07:33:57"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := os.WriteFile(filepath.Join(town, events.EventsFile), []byte(strings.Join(tt.events, "\n")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0)}
+			got, ok := (&overrunSlungReader{d: d}).slungAt(overrunSeat{Rig: "devops", Polecat: "anchor", Bead: "dv-s0959"})
+			if !ok {
+				t.Fatal("slungAt: not found")
+			}
+			if want, _ := time.Parse(time.RFC3339, at(tt.want)); !got.Equal(want) {
+				t.Errorf("slungAt = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 // A submission for landing ends the run it was made in, so the bead's clock is
 // the first sling since the submission, not the dispatch the run began with
 // (gt-chd44). A bead that was never submitted keeps the first dispatch it was
