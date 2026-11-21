@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -185,5 +187,55 @@ func TestEngineDefaultFormulaIsTheRigsDefault(t *testing.T) {
 	}
 	if got, want := d.engineDefaultFormula("/town", "gastown"), "mol-rig-gastown"; got != want {
 		t.Errorf("engineDefaultFormula = %q, want %q", got, want)
+	}
+}
+
+// polecatBranchCheckout lays out the files of an ordinary clone with HEAD on a
+// polecat branch, in a temp dir, with no git process: .git/HEAD names the
+// branch and the branch ref holds a commit id.
+func polecatBranchCheckout(t *testing.T) (dir, branch string) {
+	t.Helper()
+	const name = "polecat/Toast/gt-abc+x1"
+	dir = t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	ref := filepath.Join(gitDir, "refs", "heads", filepath.FromSlash(name))
+	if err := os.MkdirAll(filepath.Dir(ref), 0o755); err != nil { //nolint:gosec // G301: a test's own temp checkout
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/"+name+"\n"), 0o644); err != nil { //nolint:gosec // G306: a test's own temp file
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ref, []byte("0123456789abcdef0123456789abcdef01234567\n"), 0o644); err != nil { //nolint:gosec // G306: a test's own temp file
+		t.Fatal(err)
+	}
+	return dir, name
+}
+
+// TestSlingEngineWorktreeBranch: the production worktreeBranch reads a seat's
+// branch from its checkout's files, and reports an error for a directory that
+// is not there.
+func TestSlingEngineWorktreeBranch(t *testing.T) {
+	t.Parallel()
+	checkout, branch := polecatBranchCheckout(t)
+	cases := []struct {
+		name    string
+		dir     string
+		want    string
+		wantErr bool
+	}{
+		{name: "a files-only checkout reports its polecat branch", dir: checkout, want: branch},
+		{name: "a missing directory is an error", dir: filepath.Join(t.TempDir(), "missing"), wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := realSlingDepsFor(slingStores{}).worktreeBranch(tc.dir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("worktreeBranch(%q) error = %v, want an error: %v", tc.dir, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("worktreeBranch(%q) = %q, want %q", tc.dir, got, tc.want)
+			}
+		})
 	}
 }
