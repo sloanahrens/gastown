@@ -26,6 +26,11 @@ const storyPointsEvalMinTest = 30
 // than a figure an operator would read.
 const storyPointsEvalMinGroup = 5
 
+// storyPointsEvalCapMinutes is the cap the capped table applies to every
+// polecat time (gt-xwqe1r): one first attempt of 103 hours (gt-8r17fp) would
+// otherwise dominate the mean errors the base table prints.
+const storyPointsEvalCapMinutes = 90
+
 // EvalSplit is one group of the test part a split prints, carrying the same
 // predictor figures the base table does when it holds storyPointsEvalMinGroup
 // rows or more and nil figures when it holds fewer.
@@ -36,7 +41,9 @@ type EvalSplit struct {
 }
 
 // runStoryPointsEval is main's storypoints-eval step: the join over the wired
-// town, split into the part the figures are read from, and printed to Out.
+// town, split into the part the figures are read from, printed to Out as the
+// base table, the same table over the capped polecat times (gt-xwqe1r) and the
+// splits.
 func (c Commands) runStoryPointsEval(real RealTown) error {
 	since, err := storyPointsEvalSince(c.StoryPointsSince)
 	if err != nil {
@@ -57,8 +64,12 @@ func (c Commands) runStoryPointsEval(real RealTown) error {
 	}
 	if !enough {
 		// The base table printed no figure from a part too small to read, so
-		// the splits print none either, from groups smaller still.
+		// the capped table and the splits print none either, from a part or
+		// groups smaller still.
 		return nil
+	}
+	if err := writeEvalCapped(c.Out, evalStats(capEvalRows(train), capEvalRows(test))); err != nil {
+		return err
 	}
 	if err := writeEvalSplits(c.Out, "by review rounds (the test part)", evalRoundSplits(train, test)); err != nil {
 		return err
@@ -100,6 +111,35 @@ func writeStoryPointsEval(w io.Writer, counts EvalCounts, testRows int, stats []
 	return err
 }
 
+// capEvalRows returns rows with every polecat time above
+// storyPointsEvalCapMinutes lowered to it. Only the measurement changes: both
+// tables score the same rows, so a difference between them is the cap alone.
+func capEvalRows(rows []EvalRow) []EvalRow {
+	capped := slices.Clone(rows)
+	for i := range capped {
+		if capped[i].ActualMinutes > storyPointsEvalCapMinutes {
+			capped[i].ActualMinutes = storyPointsEvalCapMinutes
+		}
+	}
+	return capped
+}
+
+// writeEvalCapped writes the base table again over the same test part with
+// every polecat time capped at storyPointsEvalCapMinutes (gt-xwqe1r). The
+// heading and the actual-minutes columns name the cap, so neither table reads
+// as the other. The section is built in a strings.Builder and written once, so
+// a refused write is the run's error and a section half printed does not read
+// as a whole.
+func writeEvalCapped(w io.Writer, stats []PredictorStats) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nthe same table with every polecat time capped at %d minutes (the test part)\n", storyPointsEvalCapMinutes)
+	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
+	writeCappedPredictorRows(tw, "", stats)
+	_ = tw.Flush()
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
 // predictorTable is the predictor table as text: the header, then one row per
 // predictor. indent prefixes every line so a table under a group heading stands
 // inside it. The table is built in a strings.Builder, which cannot fail.
@@ -111,10 +151,29 @@ func predictorTable(indent string, stats []PredictorStats) string {
 	return b.String()
 }
 
-// writePredictorRows writes the predictor table to tw, whose writes cannot fail
-// because it wraps a strings.Builder.
+// writePredictorRows writes the predictor table measured against the polecat
+// minutes as landed to tw, whose writes cannot fail because it wraps a
+// strings.Builder.
 func writePredictorRows(tw *tabwriter.Writer, indent string, stats []PredictorStats) {
-	fmt.Fprintf(tw, "%spredictor\tn\tMAE (min)\tmedian AE (min)\twithin 1.5x\trank rho\tlog n\tlog RMS\tlog bias\n", indent)
+	writePredictorHeader(tw, indent, "min")
+	writePredictorStatRows(tw, indent, stats)
+}
+
+// writeCappedPredictorRows writes the predictor table measured against the
+// capped polecat minutes, its header saying so.
+func writeCappedPredictorRows(tw *tabwriter.Writer, indent string, stats []PredictorStats) {
+	writePredictorHeader(tw, indent, fmt.Sprintf("min, capped at %d", storyPointsEvalCapMinutes))
+	writePredictorStatRows(tw, indent, stats)
+}
+
+// writePredictorHeader writes the table's header row, actual naming the
+// minutes column the errors are measured against.
+func writePredictorHeader(tw *tabwriter.Writer, indent, actual string) {
+	fmt.Fprintf(tw, "%spredictor\tn\tMAE (%s)\tmedian AE (%s)\twithin 1.5x\trank rho\tlog n\tlog RMS\tlog bias\n", indent, actual, actual)
+}
+
+// writePredictorStatRows writes one row per predictor under the header.
+func writePredictorStatRows(tw *tabwriter.Writer, indent string, stats []PredictorStats) {
 	for _, s := range stats {
 		logN := s.N - s.SkippedLog
 		fmt.Fprintf(tw, "%s%s\t%d\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
