@@ -417,6 +417,43 @@ const cacheTrimCompletedJSON = `{"items":[{"kind":"Job","metadata":{"name":"` + 
 	`"labels":{"app.kubernetes.io/name":"polecat-cache-trim","app.kubernetes.io/managed-by":"gt"}},` +
 	`"status":{"conditions":[{"type":"Complete","status":"True"}]}}]}`
 
+// TestCacheTrimSwitchParkIsPerClaim pins that a parked claim does not stop
+// another claim's trim: claim A in openshell fails its apply and is parked, and
+// claim B in another namespace, on the same pass, is trimmed and finished. The
+// park is keyed on the namespace and the claim, so B is judged on its own.
+func TestCacheTrimSwitchParkIsPerClaim(t *testing.T) {
+	t.Parallel()
+	const otherNamespace = "openshell-other"
+	const otherClaim = "gt-other-cache"
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimApplyVerb:                           {stderr: "invalid manifest", code: 1},
+		"get pods -n " + otherNamespace + " -o json": {stdout: `{"items":[]}`},
+	})
+	trimmed := map[string]string{} // one pass's ledger, shared by both claims
+	if viaJob(t, f, true, trimmed) {
+		t.Fatalf("claim A's failed trim = true, want false; log: %s", f.log.String())
+	}
+	if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+		t.Fatalf("claim A is not parked after its apply failed")
+	}
+	if !f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: otherClaim},
+		"gastown-polecat:dev", otherNamespace, 1<<30, true, trimmed) {
+		t.Fatalf("claim B = false, want true (trimmed); log: %s", f.log.String())
+	}
+	if f.d.cacheTrimParked(otherNamespace, otherClaim) {
+		t.Errorf("claim B is parked: claim A's park stopped its trim")
+	}
+	if applied := f.applied(t); !slices.Contains(applied, "Job "+cacheTrimJobName(otherClaim)) {
+		t.Errorf("the applied documents = %v, want claim B's trim Job", applied)
+	}
+	if !strings.Contains(f.log.String(), "cache trim "+otherClaim+" in "+otherNamespace+" finished:") {
+		t.Errorf("claim B's trim did not finish; log: %s", f.log.String())
+	}
+	if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+		t.Errorf("claim A lost its park after claim B's trim")
+	}
+}
+
 // TestCacheTrimLateResultIsRead pins that an earlier claim Job which completed
 // after its wait has its result line read and recorded at the next pass, before
 // cacheTrimApply deletes it as stale and applies the new Job.
