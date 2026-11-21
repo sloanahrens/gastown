@@ -63,6 +63,19 @@ func (t runnerTarget) WaitReady(ctx context.Context) error { return t.applier.Wa
 // the API server sets when the Deployment has its minimum availability.
 const readyConditionJSONPath = `jsonpath={.status.conditions[?(@.type=="Available")].status}`
 
+// readinessReadWait bounds the read of the Available condition, a single get
+// that otherwise runs under the roll's signal context with no deadline of its
+// own.
+const readinessReadWait = 30 * time.Second
+
+// appliedRunnerDeployment is the Deployment identity Apply wrote, so the ready wait
+// waits on that one rather than on whatever a second render names (gt-k9fz6p).
+type appliedRunnerDeployment struct {
+	namespace string
+	name      string
+	set       bool
+}
+
 // runnerApplier is the roll's real apply: it builds the runner's manifests from
 // the checked-in control values and applies them through the injected cluster
 // client, then waits for the rollout and the Deployment's readiness.
@@ -78,7 +91,11 @@ type runnerApplier struct {
 	encode func(io.Writer, any) error
 	// rolloutWait bounds the rollout status wait.
 	rolloutWait time.Duration
-	out         io.Writer
+	// applied is where Apply records the Deployment it wrote, so the ready wait
+	// waits on that one. The roll wires it; an applier built without it renders
+	// the manifests again to find the Deployment.
+	applied *appliedRunnerDeployment
+	out     io.Writer
 }
 
 // Wired reports the seam the applier is missing. A roll without one refuses
@@ -134,14 +151,21 @@ func (a runnerApplier) Apply(ctx context.Context) error {
 			return err
 		}
 	}
+	if a.applied != nil {
+		a.applied.namespace = m.Deployment.Metadata.Namespace
+		a.applied.name = m.Deployment.Metadata.Name
+		a.applied.set = true
+	}
 	return nil
 }
 
-// WaitReady waits for the Deployment's rollout within rolloutWait, then reads
-// its Available condition. It renders the manifests again to find the
-// Deployment, so it reads the values a second time and holds no state between
-// the two steps.
+// WaitReady waits for the rollout and the Available condition of the Deployment
+// Apply wrote: a values read again here could name a Deployment Apply did not
+// write. An applier with no apply record renders the manifests to find it.
 func (a runnerApplier) WaitReady(ctx context.Context) error {
+	if a.applied != nil && a.applied.set {
+		return a.waitReady(ctx, a.applied.namespace, a.applied.name)
+	}
 	m, err := a.manifests()
 	if err != nil {
 		return err
@@ -169,9 +193,9 @@ func (a runnerApplier) apply(ctx context.Context, kind, name string, object any)
 }
 
 // waitReady waits for the Deployment's rollout within rolloutWait, then reads
-// its Available condition. A rollout status that exits non-zero, or a condition
-// that is not True, is an error: a Deployment kubectl could not confirm ready is
-// not one, and the roll must not report success.
+// its Available condition within readinessReadWait. A rollout status that exits
+// non-zero, or a condition that is not True, is an error: a Deployment kubectl
+// could not confirm ready is not one, and the roll must not report success.
 func (a runnerApplier) waitReady(ctx context.Context, namespace, name string) error {
 	resource := "deployment/" + name
 	fmt.Fprintf(a.out, "waiting for %s to roll out (bound %s)\n", resource, a.rolloutWait)
@@ -182,9 +206,11 @@ func (a runnerApplier) waitReady(ctx context.Context, namespace, name string) er
 	if exit != 0 {
 		return fmt.Errorf("%s did not complete its rollout within %s: kubectl rollout status exited %d", resource, a.rolloutWait, exit)
 	}
-	out, exit, err := a.kubectl(ctx, "", nil, "kubectl", "get", "deployment", name, "-n", namespace, "-o", readyConditionJSONPath)
+	readCtx, cancel := context.WithTimeout(ctx, readinessReadWait)
+	defer cancel()
+	out, exit, err := a.kubectl(readCtx, "", nil, "kubectl", "get", "deployment", name, "-n", namespace, "-o", readyConditionJSONPath)
 	if err != nil {
-		return fmt.Errorf("reading the readiness of %s: %w", resource, err)
+		return fmt.Errorf("reading the readiness of %s within %s: %w", resource, readinessReadWait, err)
 	}
 	if exit != 0 {
 		return fmt.Errorf("reading the readiness of %s: kubectl exited %d", resource, exit)
@@ -344,6 +370,7 @@ func runnerRollDepsFor(townRoot string, out io.Writer, landingWait, runsWait, ro
 			build:       forgejorunner.Build,
 			encode:      forgejorunner.YAML,
 			rolloutWait: rolloutWait,
+			applied:     &appliedRunnerDeployment{},
 			out:         out,
 		},
 		landingWait: landingWait,
