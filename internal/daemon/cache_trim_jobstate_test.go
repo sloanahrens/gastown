@@ -22,6 +22,8 @@ func TestCacheTrimJobStateReadsTheThreeStates(t *testing.T) {
 		{"active alone", `{"status":{"active":2}}`, cacheTrimJobStateActive},
 		{"failed beats active", `{"status":{"active":2,"failed":1}}`, cacheTrimJobStateFailed},
 		{"complete beats active", `{"status":{"active":2,"conditions":[{"type":"Complete","status":"True"}]}}`, cacheTrimJobStateComplete},
+		{"Failed condition that is not true beside an active pod", `{"status":{"active":1,"conditions":[{"type":"Failed","status":"False"}]}}`, cacheTrimJobStateActive},
+		{"complete beside a Failed condition", `{"status":{"conditions":[{"type":"Complete","status":"True"},{"type":"Failed","status":"True"}]}}`, cacheTrimJobStateComplete},
 	} {
 		f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimJobStateVerb: {stdout: tc.status}})
 		got, err := f.d.cacheTrimJobState(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob)
@@ -47,6 +49,10 @@ func TestCacheTrimJobStateUnreadableIsAnError(t *testing.T) {
 		{"garbled JSON", cliReply{stdout: `{"status":`}, ""},
 		{"active 0 and no condition", cliReply{stdout: `{"status":{"active":0}}`}, ""},
 		{"a Complete condition that is not true", cliReply{stdout: `{"status":{"conditions":[{"type":"Complete","status":"False"}]}}`}, ""},
+		{"a Failed condition that is not true alone", cliReply{stdout: `{"status":{"conditions":[{"type":"Failed","status":"False"}]}}`}, ""},
+		{"an empty body", cliReply{}, ""},
+		{"a null body", cliReply{stdout: `null`}, ""},
+		{"an empty object", cliReply{stdout: `{}`}, ""},
 	} {
 		f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimJobStateVerb: tc.reply})
 		got, err := f.d.cacheTrimJobState(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob)
