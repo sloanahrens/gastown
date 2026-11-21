@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ runs: none in flight
 	}
 }
 
-func TestWaitRunsBoundReturnsTimeoutNamingRuns(t *testing.T) {
+func TestWaitRunsTimeoutNamesTheWait(t *testing.T) {
 	t.Parallel()
 	gate := runAt(7, "gate.yml", "running", runsT0)
 	list, _ := scriptedRuns(listing{runs: []WorkflowRun{gate}})
@@ -67,6 +68,9 @@ func TestWaitRunsBoundReturnsTimeoutNamingRuns(t *testing.T) {
 	err := WaitRunsIdle(context.Background(), list, clock, 25*time.Second, &bytes.Buffer{})
 	if !errors.Is(err, ErrWaitTimeout) {
 		t.Fatalf("WaitRunsIdle() = %v, want ErrWaitTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "runs wait") {
+		t.Errorf("error %q does not name the runs wait", err)
 	}
 	if !strings.Contains(err.Error(), "gastownhall/gastown gate.yml") {
 		t.Errorf("error %q does not name the run still going", err)
@@ -180,13 +184,15 @@ func TestWaitRunsForgejoListerReadsEachWorkflowInFlight(t *testing.T) {
 		t.Fatalf("listed %d times, want 2 (one per workflow)", len(lister.filters))
 	}
 	for i, wf := range []string{"gate.yml", "post-land.yml"} {
-		if got := lister.filters[i].WorkflowID; got != wf {
-			t.Errorf("request %d WorkflowID = %q, want %q", i, got, wf)
+		// The whole filter, not only the workflow: the page limit is what makes
+		// the first page decide idle, and the status set is the in-flight filter.
+		want := forgejo.RunFilter{
+			Status:     []string{forgejo.RunStatusWaiting, forgejo.RunStatusBlocked, forgejo.RunStatusRunning},
+			WorkflowID: wf,
+			Limit:      runsPageLimit,
 		}
-		for _, s := range lister.filters[i].Status {
-			if s == "success" || s == "failure" || s == "cancelled" || s == "skipped" {
-				t.Errorf("request %d asks for ended status %q", i, s)
-			}
+		if got := lister.filters[i]; !reflect.DeepEqual(got, want) {
+			t.Errorf("request %d filter = %+v, want %+v", i, got, want)
 		}
 	}
 	if len(runs) != 2 {

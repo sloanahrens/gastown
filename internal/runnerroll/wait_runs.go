@@ -74,7 +74,7 @@ func WaitRunsIdle(ctx context.Context, list func(ctx context.Context) ([]Workflo
 			return nil
 		}
 		if !now.Before(deadline) {
-			return fmt.Errorf("%w: %d runs still going after %s: %s", ErrWaitTimeout, len(inFlight), bound, runsNames(inFlight))
+			return fmt.Errorf("%w: runs wait: %d runs still going after %s: %s", ErrWaitTimeout, len(inFlight), bound, runsNames(inFlight))
 		}
 		clock.Sleep(ctx, min(deadline.Sub(now), runsPollInterval))
 	}
