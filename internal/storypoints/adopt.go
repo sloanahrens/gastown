@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 )
 
 // AdoptBar is the rank correlation a proposed model must reach on its own holdout
@@ -22,9 +23,14 @@ const AdoptMargin = 0.03
 // measurable and the proposal is refused.
 const MinAdoptHoldout = 10
 
+// AdoptBiasMargin is how much wider than the checked-in weights' the proposed
+// model's first-round bias may be and still be adopted. The bias is the absolute
+// mean log ratio of measured over estimated minutes (gt-qkmi8z).
+const AdoptBiasMargin = 0.02
+
 // marginTolerance absorbs the float error of the two subtractions that compare a
-// correlation with the margin: two near-two-decimal correlations can differ by
-// 0.030000000000000027, which is not more than the 0.03 the rule allows.
+// correlation or a bias with its margin: two near-two-decimal correlations can differ
+// by 0.030000000000000027, which is not more than the 0.03 the rule allows.
 const marginTolerance = 1e-9
 
 // Adoption is the adoption rule's decision and the one-line reason for it. A
@@ -101,6 +107,71 @@ func Adopt(holdout []Holdout) Adoption {
 	return Adoption{Adopted: true, Reason: fmt.Sprintf(
 		"adopted: holdout rank correlation %.3f clears the %.2f bar and is not more than %.2f below the current weights' %.3f",
 		proposedRho, AdoptBar, AdoptMargin, checkedRho)}
+}
+
+// AdoptByError decides whether a retrain's proposed weights replace the checked-in
+// ones by first-round error and bias: over the holdout beads marked FirstRound, the
+// proposed blend's root-mean-square of the log of measured over estimated minutes
+// must fall, and its absolute mean log ratio (the bias) must not exceed the
+// checked-in blend's by more than AdoptBiasMargin. Fewer than MinAdoptHoldout
+// first-round beads is a rejection, not an error: the caller reports the reason and
+// leaves the weights in use unchanged.
+func AdoptByError(holdout []Holdout) Adoption {
+	var firstRound []Holdout
+	for _, h := range holdout {
+		if h.FirstRound {
+			firstRound = append(firstRound, h)
+		}
+	}
+	if len(firstRound) < MinAdoptHoldout {
+		return Adoption{Reason: fmt.Sprintf(
+			"rejected: the first-round holdout has %d beads, fewer than the %d a first-round error is measured from, so the first-round holdout is not measurable",
+			len(firstRound), MinAdoptHoldout)}
+	}
+	var proposedSquares, proposedSum, checkedSquares, checkedSum float64
+	for _, h := range firstRound {
+		p, c := math.Log(h.Actual/h.Proposed), math.Log(h.Actual/h.Checked)
+		proposedSquares += p * p
+		proposedSum += p
+		checkedSquares += c * c
+		checkedSum += c
+	}
+	n := float64(len(firstRound))
+	proposedRMSE, checkedRMSE := math.Sqrt(proposedSquares/n), math.Sqrt(checkedSquares/n)
+	proposedBias, checkedBias := math.Abs(proposedSum/n), math.Abs(checkedSum/n)
+	// A NaN compares false against everything, so the comparisons below would adopt
+	// weights whose error or bias is NaN; an infinity is not a measure either. Refuse
+	// by name before comparing anything.
+	var notFinite []string
+	for _, q := range []struct {
+		name  string
+		value float64
+	}{
+		{"proposed first-round rmse", proposedRMSE},
+		{"proposed first-round bias", proposedBias},
+		{"current weights' first-round rmse", checkedRMSE},
+		{"current weights' first-round bias", checkedBias},
+	} {
+		if math.IsNaN(q.value) || math.IsInf(q.value, 0) {
+			notFinite = append(notFinite, fmt.Sprintf("%s %v", q.name, q.value))
+		}
+	}
+	if len(notFinite) > 0 {
+		return Adoption{Reason: "rejected: a first-round measure is not a finite number: " + strings.Join(notFinite, ", ")}
+	}
+	if proposedRMSE >= checkedRMSE {
+		return Adoption{Reason: fmt.Sprintf(
+			"rejected: the proposed first-round rmse %.4f is not lower than the current weights' %.4f",
+			proposedRMSE, checkedRMSE)}
+	}
+	if wider := proposedBias - checkedBias; wider > AdoptBiasMargin+marginTolerance {
+		return Adoption{Reason: fmt.Sprintf(
+			"rejected: the proposed first-round rmse %.4f is below the current weights' %.4f, but its bias %.4f is wider than theirs %.4f by %.4f, more than the %.2f allowed",
+			proposedRMSE, checkedRMSE, proposedBias, checkedBias, wider, AdoptBiasMargin)}
+	}
+	return Adoption{Adopted: true, Reason: fmt.Sprintf(
+		"adopted: the proposed first-round rmse %.4f is below the current weights' %.4f and its bias %.4f is not more than %.2f above theirs",
+		proposedRMSE, checkedRMSE, proposedBias, AdoptBiasMargin)}
 }
 
 // hasSpread reports whether v holds more than one value. Adopt calls it only after
