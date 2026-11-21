@@ -6,6 +6,8 @@ package cmd
 // without a hand analysis.
 
 import (
+	"bytes"
+	"encoding/json"
 	"sort"
 	"strings"
 	"time"
@@ -94,6 +96,36 @@ func classRates(records []land.ReviewRecord) []landOmStatsClassWeek {
 		out = append(out, tallies[monday].row(monday, ids, names))
 	}
 	return out
+}
+
+// readLandOmStatsClassRecords reads the class report's records from the bytes
+// the report read once, returning them and the number of lines it could not
+// use. A line that does not decode as a land.ReviewRecord, or carries no
+// instant, counts as one line it could not use — the same lines land's own
+// report counts in OmStats.Skipped, so the two reports never disagree about a
+// torn log. A follow-up queue line is the feed's bookkeeping rather than a
+// verdict and is skipped uncounted (gt-3arxj). The returned slice carries the
+// parsed records whatever their attempt or verdict; classRates decides which
+// judged a tree.
+func readLandOmStatsClassRecords(data []byte) ([]land.ReviewRecord, int) {
+	var records []land.ReviewRecord
+	unparseable := 0
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		raw := bytes.TrimSpace(line)
+		if len(raw) == 0 {
+			continue
+		}
+		if land.IsQueueLine(raw) {
+			continue
+		}
+		var rec land.ReviewRecord
+		if json.Unmarshal(raw, &rec) != nil || rec.At.IsZero() {
+			unparseable++
+			continue
+		}
+		records = append(records, rec)
+	}
+	return records, unparseable
 }
 
 // landOmStatsMondayUTC returns the midnight-UTC Monday of the ISO week at falls
