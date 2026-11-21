@@ -182,10 +182,14 @@ func extractGaps(town, dayDir string) error {
 	if len(gaps) == 0 {
 		return nil
 	}
-	if len(gaps[0]) != 2 {
-		return fmt.Errorf("extract left %d gaps, and the first is not a source and a reason: %v", len(gaps), gaps[0])
+	gapWord := "gaps"
+	if len(gaps) == 1 {
+		gapWord = "gap"
 	}
-	return fmt.Errorf("extract left %d gaps, first: %s: %s", len(gaps), gaps[0][0], gaps[0][1])
+	if len(gaps[0]) != 2 {
+		return fmt.Errorf("extract left %d %s, and the first is not a source and a reason: %v", len(gaps), gapWord, gaps[0])
+	}
+	return fmt.Errorf("extract left %d %s, first: %s: %s", len(gaps), gapWord, gaps[0][0], gaps[0][1])
 }
 
 // refreshDatasets refreshes the Jev datasets for period unless the stamp beside

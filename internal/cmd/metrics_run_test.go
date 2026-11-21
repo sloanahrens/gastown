@@ -466,12 +466,12 @@ func TestMetricsRunGapsFail(t *testing.T) {
 		{
 			name: "one gap",
 			gaps: `[["bd","bd show --json was refused (HTTP 403)"]]`,
-			want: "extract left 1 gaps, first: bd: bd show --json was refused (HTTP 403)",
+			want: "extract left 1 gap, first: bd: bd show --json was refused (HTTP 403)",
 		},
 		{
 			name: "a gap row that is not a source and a reason",
 			gaps: `[["bd"]]`,
-			want: "extract left 1 gaps, and the first is not a source and a reason",
+			want: "extract left 1 gap, and the first is not a source and a reason",
 		},
 	}
 	for _, tc := range tests {
@@ -496,6 +496,47 @@ func TestMetricsRunGapsFail(t *testing.T) {
 				if _, statErr := os.Stat(filepath.Join(town, ".runtime", "metrics", "2026-10-01", name)); statErr != nil {
 					t.Errorf("%s is not on disk after the failed run: %v", name, statErr)
 				}
+			}
+		})
+	}
+}
+
+// The gap message counts in the singular for one gap and in the plural above
+// it, so an operator reading a failed hour is not told "1 gaps" (gt-mhzci5).
+func TestMetricsRunGapsMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		gaps string
+		want string
+	}{
+		{
+			name: "one gap",
+			gaps: `[["bd","bd show --json was refused (HTTP 403)"]]`,
+			want: "extract left 1 gap, first: bd: bd show --json was refused (HTTP 403)",
+		},
+		{
+			name: "two gaps",
+			gaps: `[["bd","refused"],["gh","timed out"]]`,
+			want: "extract left 2 gaps, first: bd: refused",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeHourFile(t, town, ".runtime/metrics/2026-10-01/weekly.csv",
+				"week,rig,thin,dominant_model\r\n")
+			writeHourFile(t, town, ".runtime/metrics/2026-10-01/footer.json",
+				`{"rows_read":{"ledger":0,"reviews":0,"beads":0,"usage":0},"rows_dropped":[],"gaps":`+tc.gaps+
+					`,"sources_unreadable":[],"model_unknown":0,"stage_stamp_missing_created_at":0,"stage_stamp_missing_dispatched_at":0,"stage_stamp_missing_submitted_at":0}`)
+
+			err := runMetricsHourWith(context.Background(), io.Discard, town, footerHourSteps(t, town))
+			if err == nil {
+				t.Fatalf("the hour returned no error for a footer with a gap")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %q, want it to read %q", err, tc.want)
 			}
 		})
 	}
