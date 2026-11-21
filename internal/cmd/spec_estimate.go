@@ -29,10 +29,12 @@ import (
 
 // gt spec estimate (gt-5d9k2f.13) writes one bead's story-point estimate: the
 // labels sp:N, sp-rung:<rung> and sp-minutes:<n>, and the estimate's note as a
-// comment. A bead whose sections match the hash in its latest note is left
-// alone unless --force. An estimate that cannot be made writes sp-rung:none and
-// a comment saying why, and exits 0, so a bead the shape cannot judge is never
-// read as a small one.
+// comment. An estimate that predicts a landing over storypoints.SizeFlagLines
+// added lines also gets the label sp-large and a line in the note saying so
+// (gt-ye1cil); no decision reads the label, it is for a person. A bead whose
+// sections match the hash in its latest note is left alone unless --force. An
+// estimate that cannot be made writes sp-rung:none and a comment saying why,
+// and exits 0, so a bead the shape cannot judge is never read as a small one.
 
 // specEstimateNotePrefix begins every comment the estimate writes, and the
 // comment the command reads its hash from.
@@ -63,8 +65,10 @@ patrols.jev_dispatch opens). An input that cannot be built is left out and
 named in the note, and the rung label says which inputs were used.
 
 On success the bead gets sp:N, sp-rung:<rung> and sp-minutes:<n> (the blended
-minutes, one decimal), replacing any earlier sp:, sp-rung: and sp-minutes:
-labels, and the note as a comment. The note's first line is
+minutes, one decimal), replacing any earlier sp:, sp-rung:, sp-minutes: and
+sp-large labels, and the note as a comment. An estimate that predicts a landing
+over 300 added lines also gets sp-large and a note line saying so; an estimate
+that does not loses any earlier sp-large. The note's first line is
 "SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>"; the hash covers the bead's
 Goal, Constraints, Acceptance and Size sections, so a bead rerun without a
 change is skipped.
@@ -314,6 +318,13 @@ func planSpecEstimate(beadID, hash string, existing []string, r estimate.Result,
 	}
 	minutes := specEstimateMinutes(r.Minutes)
 	add := []string{storypoints.SPLabel(r.Points), storypoints.RungLabel(r.Rung), storypoints.MinutesLabel(minutes)}
+	comment := estimate.Note(r)
+	// A bead the estimate predicts will land large carries the flag for a
+	// person reading it, and the note says why. Nothing decides on it.
+	if storypoints.SizeFlag(minutes, r.Rung) {
+		add = append(add, specEstimateSizeLabel)
+		comment = specEstimateWithSizeNote(comment)
+	}
 	return specEstimateOutcome{
 		ID:           beadID,
 		Action:       "estimated",
@@ -324,9 +335,34 @@ func planSpecEstimate(beadID, hash string, existing []string, r estimate.Result,
 		Components:   specEstimateComponentsOf(r.ComponentMinutes),
 		AddLabels:    add,
 		RemoveLabels: staleEstimateLabels(existing, add),
-		Comment:      estimate.Note(r),
+		Comment:      comment,
 		Neighbors:    estimate.NeighborsLine(r),
 	}
+}
+
+// specEstimateSizeLabel marks an estimate that predicts a landing over
+// storypoints.SizeFlagLines added lines. It is a label for a person reading the
+// bead: the dispatcher, the lint exit status and the split route do not read it.
+const specEstimateSizeLabel = "sp-large"
+
+// specEstimateSizeNoteLine is the note line the size flag adds. It sits above
+// the nearest-beads line, so the warning is not buried under that list.
+func specEstimateSizeNoteLine() string {
+	return fmt.Sprintf("predicted to land over %d added lines (about two in three beads estimated this large did); consider splitting by file group",
+		storypoints.SizeFlagLines)
+}
+
+// specEstimateWithSizeNote returns an estimate note with the size flag's line
+// inserted above the nearest-beads line. A note carrying no nearest-beads line
+// gains the line at its end.
+func specEstimateWithSizeNote(note string) string {
+	lines := strings.Split(note, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "nearest beads:") || strings.HasPrefix(line, "nearest beads unavailable:") {
+			return strings.Join(slices.Insert(lines, i, specEstimateSizeNoteLine()), "\n")
+		}
+	}
+	return note + "\n" + specEstimateSizeNoteLine()
 }
 
 // specEstimateComponentsOf copies a result's component minutes into the
@@ -358,13 +394,13 @@ func specEstimateMinutes(m float64) float64 {
 	return math.Round(m*10) / 10
 }
 
-// staleEstimateLabels lists the sp:, sp-rung: and sp-minutes: labels a bead
-// carries that the run is about to replace. A label the run adds again is not
-// removed. sp-actual: is the landing worker's and is never touched here.
+// staleEstimateLabels lists the sp:, sp-rung:, sp-minutes: and sp-large labels
+// a bead carries that the run is about to replace. A label the run adds again
+// is not removed. sp-actual: is the landing worker's and is never touched here.
 func staleEstimateLabels(existing, add []string) []string {
 	var stale []string
 	for _, l := range existing {
-		if !strings.HasPrefix(l, "sp:") && !strings.HasPrefix(l, "sp-rung:") && !strings.HasPrefix(l, "sp-minutes:") {
+		if !strings.HasPrefix(l, "sp:") && !strings.HasPrefix(l, "sp-rung:") && !strings.HasPrefix(l, "sp-minutes:") && l != specEstimateSizeLabel {
 			continue
 		}
 		if slices.Contains(add, l) {

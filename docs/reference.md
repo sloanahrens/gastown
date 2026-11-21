@@ -439,13 +439,16 @@ exceed; an edge belongs to the lower point. The edges are 1 up to 1.5 minutes,
 34 up to 44.5, 55 up to 72, and 89 above 72. A time that is zero, negative or
 NaN has no point (`ErrNoMinutes`) and is never read as 1.
 
-**Labels.** Four labels carry a bead's points:
+**Labels.** Four labels carry a bead's points, and a fifth flags a large one:
 
 - `sp:N` is the estimate. **Shadow mode** below says who writes it.
 - `sp-minutes:<n>` is the blended minutes behind `sp:N`, to one decimal place.
   It is written beside `sp:N`.
 - `sp-rung:<rung>` names the inputs that made the estimate: `all`, `shape-jev`,
   `shape-embed`, `shape`, or `none` when no estimate could be made.
+- `sp-large` marks an estimate that predicts a landing over 300 added lines
+  (10 minutes or more, on a rung other than `shape`). A person reads it; the
+  dispatcher, the lint exit status and the split route do not (gt-ye1cil).
 - `sp-actual:N` is the measure. The landing worker writes it from the landing
   record's `polecat_secs`, and only on a bead that carries an `sp:` label. It is
   not written when the time is a lower bound, an upper bound, absent, or zero. A
@@ -455,12 +458,16 @@ NaN has no point (`ErrNoMinutes`) and is never read as 1.
 bead's Goal, Constraints, Acceptance and Size sections and its Acceptance field.
 When the latest `SP ESTIMATE v1` comment carries the same hash, it writes
 nothing. `--force` estimates again regardless. Otherwise it removes the bead's
-old `sp:`, `sp-rung:` and `sp-minutes:` labels, adds the new ones, and posts the
-note as a comment. `--dry-run` prints the labels and the note and writes nothing.
-`--json` prints the outcome as JSON. The note's first line is
-`SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>`; the rest names the minutes, the
-inputs used, each skipped input with its reason, and the nearest past beads from
-hm. The nearest beads are named for a reader; they do not change the number.
+old `sp:`, `sp-rung:`, `sp-minutes:` and `sp-large` labels, adds the new ones,
+and posts the note as a comment. An estimate that is at or over 10 minutes on a
+rung other than `shape` also gets `sp-large` and a note line saying it is
+predicted to land over 300 added lines and may be worth splitting; an estimate
+under that line loses any earlier `sp-large`. `--dry-run` prints the labels and
+the note and writes nothing. `--json` prints the outcome as JSON. The note's
+first line is `SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>`; the rest names the
+minutes, the inputs used, each skipped input with its reason, and the nearest
+past beads from hm. The nearest beads are named for a reader; they do not change
+the number.
 
 **Inputs and the fallback ladder.** The inputs that could be built are averaged
 on the log scale with equal weight. The rung is set by which inputs were used:
