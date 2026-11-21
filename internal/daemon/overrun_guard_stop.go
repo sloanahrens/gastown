@@ -1051,7 +1051,7 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	case checkpointCreated:
 		committed = true
 	case checkpointRefused:
-		return overrunSave{}, errors.New("uncommitted work could not be committed; it may remain in the worktree")
+		return overrunSave{}, &overrunSaveStageError{Stage: "commit", Err: errors.New("uncommitted work could not be committed; it may remain in the worktree")}
 	}
 	branch := seat.Branch
 	if branch == "" {
@@ -1063,7 +1063,7 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	}
 	if branch == "" || branch == "HEAD" {
 		if committed {
-			return overrunSave{}, errors.New("the worktree is on no branch, so its WIP commit cannot be pushed")
+			return overrunSave{}, &overrunSaveStageError{Stage: "push", Err: errors.New("the worktree is on no branch, so its WIP commit cannot be pushed")}
 		}
 		return overrunSave{}, nil
 	}
@@ -1075,7 +1075,7 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	if committed {
 		// The WIP commit landed on HEAD: it reaches the branch only if HEAD is it.
 		if headErr != nil || head != sha {
-			return overrunSave{}, fmt.Errorf("HEAD is not on branch %s, so the WIP commit cannot be pushed to it", branch)
+			return overrunSave{}, &overrunSaveStageError{Stage: "push", Err: fmt.Errorf("HEAD is not on branch %s, so the WIP commit cannot be pushed to it", branch)}
 		}
 	} else if headErr != nil {
 		return overrunSave{}, fmt.Errorf("read HEAD: %w", headErr)
@@ -1096,7 +1096,7 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	if err := d.overrunPushBranch(pushSeat); err != nil {
 		var diverged *overrunPushDivergedError
 		if !errors.As(err, &diverged) {
-			return overrunSave{}, err
+			return overrunSave{}, &overrunSaveStageError{Stage: "push", Err: err}
 		}
 		// Origin holds a different history for the kept branch, and the push is
 		// never forced: no retry of it can land. The saved head goes instead to
@@ -1107,13 +1107,34 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 		// retries it.
 		rescue := overrunRescueBranch(branch, sha)
 		if rescueErr := g.Push("origin", sha+":refs/heads/"+rescue, false); rescueErr != nil {
-			return overrunSave{}, fmt.Errorf("rescue push of the saved head %s to %s, after origin refused %s: %w", sha, rescue, branch, rescueErr)
+			return overrunSave{}, &overrunSaveStageError{Stage: "push", Err: fmt.Errorf("rescue push of the saved head %s to %s, after origin refused %s: %w", sha, rescue, branch, rescueErr)}
 		}
 		d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as diverged; pushed the saved head %s to the rescue branch %s, kept branch left as it was",
 			seat.Rig, seat.Polecat, branch, sha, rescue)
 		return overrunSave{Head: sha, Committed: committed, Rescue: rescue}, nil
 	}
 	return overrunSave{Head: sha, Committed: committed}, nil
+}
+
+// overrunSaveStageError is a save failure that names the step that failed,
+// "commit" or "push". Unwrap keeps the wrapped error matchable, so
+// pushFailureReason still finds an *overrunPushDivergedError through it.
+type overrunSaveStageError struct {
+	Stage string
+	Err   error
+}
+
+func (e *overrunSaveStageError) Error() string { return e.Err.Error() }
+func (e *overrunSaveStageError) Unwrap() error { return e.Err }
+
+// overrunFailedStage is the step a failed save named, or "" for a failure that is
+// neither the commit nor the push (a read, a refusal of HEAD, a gone sandbox).
+func overrunFailedStage(err error) string {
+	var se *overrunSaveStageError
+	if errors.As(err, &se) {
+		return se.Stage
+	}
+	return ""
 }
 
 // overrunRescueBranch is the branch a diverged saved head is pushed to: the
