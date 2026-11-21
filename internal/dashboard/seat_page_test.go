@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"maps"
 	"testing"
 	"time"
 )
@@ -89,5 +90,59 @@ func TestSeatRowUnchanged(t *testing.T) {
 	callWork(t, dom, workState([]any{seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 12*time.Minute)}, nil))
 	if text, subs := seatAgeCell(t, dom, "agate"); text != "12m" || len(subs) != 0 {
 		t.Errorf("Age cell = %q with %v, want 12m and no child", text, subs)
+	}
+}
+
+// TestSeatRowStartingAndRound: a seat that is still starting draws a starting
+// badge in place of its working time, a seat refused for review draws "round N"
+// with N one above its reject_count, and a poll that changes only the phase
+// redraws the table (polecatsKey, gt-qjl0ym part 2).
+func TestSeatRowStartingAndRound(t *testing.T) {
+	t.Parallel()
+	seatWith := func(fields map[string]any) map[string]any {
+		s := seat("gastown", "agate", "working", "gt-abc", "a title", "flash", 30*time.Minute)
+		s["gate_sec"], s["working_sec"] = 600.0, 1200.0
+		for k, v := range fields {
+			s[k] = v
+		}
+		return s
+	}
+	cases := []struct {
+		name   string
+		fields map[string]any
+		want   map[string]string
+	}{
+		{"starting draws the badge and not the times", map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
+		{"working draws the times and no badge", map[string]any{"phase": "working"}, map[string]string{"wsub": "working 20m, gate 10m"}},
+		{"one rejection is round 2", map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2"}},
+		{"no rejection draws no round", map[string]any{"reject_count": 0.0}, map[string]string{"wsub": "working 20m, gate 10m"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dom := newPageDOM(t)
+			callWork(t, dom, workState([]any{seatWith(c.fields)}, nil))
+			if _, subs := seatAgeCell(t, dom, "agate"); !maps.Equal(subs, c.want) {
+				t.Errorf("Age cell children = %v, want %v", subs, c.want)
+			}
+		})
+	}
+	// Each field the row shows is in polecatsKey on its own: a poll that moves
+	// only that field must redraw.
+	for _, c := range []struct {
+		name         string
+		before, then map[string]any
+		want         map[string]string
+	}{
+		{"phase", map[string]any{"phase": "working"}, map[string]any{"phase": "starting"}, map[string]string{"wstart": "starting"}},
+		{"reject_count", map[string]any{"phase": "working"}, map[string]any{"phase": "working", "reject_count": 1.0}, map[string]string{"wsub": "working 20m, gate 10m", "wround": "round 2"}},
+	} {
+		t.Run("a change in only the "+c.name+" redraws", func(t *testing.T) {
+			dom := newPageDOM(t)
+			callWork(t, dom, workState([]any{seatWith(c.before)}, nil))
+			dom.call(t, "renderPolecats", workState([]any{seatWith(c.then)}, nil))
+			if _, subs := seatAgeCell(t, dom, "agate"); !maps.Equal(subs, c.want) {
+				t.Errorf("after only %s changed the cell has %v, want %v", c.name, subs, c.want)
+			}
+		})
 	}
 }
