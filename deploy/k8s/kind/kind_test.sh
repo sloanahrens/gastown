@@ -677,6 +677,26 @@ check "the failure names GT_K8S_API_PORT" contains "GT_K8S_API_PORT" "$OUT_TEXT"
 check "no cluster is created when the API port equals the registry port" lacks "kind create" "$CALLS_LOG"
 check "no kind config is written when the API port equals the registry port" test ! -e "$S/state/kind-config.yaml"
 
+echo "the API port must be a port number"
+n=0
+for port in '29002&x' '2900a' 0 65536 99999 080; do
+  n=$((n + 1))
+  scenario "api_port_bad_$n"
+  touch "$S/state/colima-running"
+  run "$UP" "GT_K8S_API_PORT=$port" --
+  check "GT_K8S_API_PORT=$port stops the run" test "$RC" -ne 0
+  check "GT_K8S_API_PORT=$port names the variable" contains "GT_K8S_API_PORT" "$OUT_TEXT"
+  check "GT_K8S_API_PORT=$port starts nothing" test -z "$CALLS_LOG"
+  check "GT_K8S_API_PORT=$port writes no kind config" test ! -e "$S/state/kind-config.yaml"
+done
+for port in 1 65535; do
+  scenario "api_port_ok_$port"
+  touch "$S/state/colima-running"
+  run "$UP" "GT_K8S_API_PORT=$port" --
+  check "GT_K8S_API_PORT=$port renders and exits 0" test "$RC" -eq 0
+  check "GT_K8S_API_PORT=$port reaches the kind config" contains "apiServerPort: $port" "$(cat "$S/state/kind-config.yaml" 2>/dev/null || true)"
+done
+
 echo "an existing cluster keeps its API server config"
 scenario rerun_busy_api
 echo 28444 >"$S/state/busy-port"
@@ -689,11 +709,11 @@ check "an existing cluster is not recreated" lacks "kind create" "$CALLS_LOG"
 echo "a setting with sed metacharacters is written literally"
 scenario cluster_escape
 touch "$S/state/colima-running"
-run "$UP" 'GT_K8S_CLUSTER=gt&sbx|x\y' 'GT_K8S_API_PORT=29002&x' --
+run "$UP" 'GT_K8S_CLUSTER=gt&sbx|x\y' GT_K8S_API_PORT=29002 --
 check "up exits 0 with metacharacters in the cluster name" test "$RC" -eq 0
 escaped_cfg="$(cat "$S/state/kind-config.yaml" 2>/dev/null || true)"
 check "the cluster name reaches the kind config literally" contains 'name: gt&sbx|x\y' "$escaped_cfg"
-check "the API port reaches the kind config literally" contains 'apiServerPort: 29002&x' "$escaped_cfg"
+check "the API port reaches the kind config" contains 'apiServerPort: 29002' "$escaped_cfg"
 check "no cluster placeholder survives the render" lacks "__CLUSTER__" "$escaped_cfg"
 check "no gateway placeholder survives the render" lacks "__GATEWAY_PORT__" "$escaped_cfg"
 check "no API placeholder survives the render" lacks "__API_PORT__" "$escaped_cfg"

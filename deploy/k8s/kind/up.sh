@@ -29,6 +29,11 @@ done
 for tool in colima kind kubectl helm docker openssl openshell curl; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH (helm may live in $OUT/bin)"
 done
+# The API port is written into the kind config and probed as a port, so a value
+# that is not a port number is refused before anything is started. A leading
+# zero is refused too, so each port has one spelling in the config.
+[[ "$API_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$API_PORT" -le 65535 ] ||
+  die "GT_K8S_API_PORT must be a port number from 1 to 65535, not \"$API_PORT\""
 mkdir -p "$OUT"
 
 # port_in_use answers whether 127.0.0.1:$1 has a listener. A probe that cannot
