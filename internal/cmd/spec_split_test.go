@@ -181,3 +181,19 @@ func TestSpecSplitReportsAFailedWrite(t *testing.T) {
 		t.Errorf("runSpecSplitOn() error = nil on a refused write, want an error")
 	}
 }
+
+// TestSpecSplitRefusesOutsideATown: when no town can be found, the command
+// refuses with an error and prints nothing.
+func TestSpecSplitRefusesOutsideATown(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	noTown := func() (string, error) { return "", errors.New("no town above the directory") }
+
+	err := runSpecSplitFrom(&out, "gt-split", true, noTown)
+	if err == nil {
+		t.Errorf("runSpecSplitFrom() error = nil with no town, want an error")
+	}
+	if out.Len() != 0 {
+		t.Errorf("runSpecSplitFrom() printed %q before refusing, want nothing", out.String())
+	}
+}

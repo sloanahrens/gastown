@@ -45,11 +45,17 @@ type specSplitRead func(beadID string) (*beads.Issue, error)
 type specSplitTarget func(beadID string) *specdispatch.TargetTree
 
 func runSpecSplit(cmd *cobra.Command, args []string) error {
-	townRoot, err := workspace.FindFromCwd()
+	return runSpecSplitFrom(cmd.OutOrStdout(), args[0], specSplitDryRun, workspace.FindFromCwd)
+}
+
+// runSpecSplitFrom resolves the town with find, then runs runSpecSplitOn on it.
+// find is a parameter so a test can make the town unfindable.
+func runSpecSplitFrom(out io.Writer, beadID string, dryRun bool, find func() (string, error)) error {
+	townRoot, err := find()
 	if err != nil {
 		return fmt.Errorf("cannot find the town: %w", err)
 	}
-	return runSpecSplitOn(cmd.OutOrStdout(), args[0], specSplitDryRun,
+	return runSpecSplitOn(out, beadID, dryRun,
 		func(id string) (*beads.Issue, error) { return showBead(townRoot, id) },
 		func(id string) *specdispatch.TargetTree { return specLintTarget(townRoot, id, openRigTree) })
 }
