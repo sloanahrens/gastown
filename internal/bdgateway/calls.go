@@ -173,28 +173,36 @@ type callLogFile interface {
 	Read(p []byte) (int, error)
 }
 
-// readCallLogTail reads at most the last maxCallReadBytes of f. When the read
-// starts inside a line, the fragment up to its first newline is dropped: a
-// partial line is not an entry.
+// readCallLogTail reads at most the last maxCallReadBytes of f, plus the byte
+// before them. When the read starts inside a line, the fragment up to its first
+// newline is dropped: a partial line is not an entry. When that byte is a
+// newline, the window opens on a whole line and nothing is dropped.
 func readCallLogTail(f callLogFile) ([]byte, error) {
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("bdgateway: measure call log: %w", err)
 	}
 	offset := max(info.Size()-maxCallReadBytes, 0)
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+	lead := min(offset, 1)
+	if _, err := f.Seek(offset-lead, io.SeekStart); err != nil {
 		return nil, fmt.Errorf("bdgateway: seek call log: %w", err)
 	}
-	data, err := io.ReadAll(io.LimitReader(f, maxCallReadBytes))
+	data, err := io.ReadAll(io.LimitReader(f, maxCallReadBytes+lead))
 	if err != nil {
 		return nil, fmt.Errorf("bdgateway: read call log: %w", err)
 	}
-	if offset > 0 {
-		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			data = data[i+1:]
-		} else {
-			data = nil
-		}
+	if lead == 0 {
+		return data, nil
 	}
-	return data, nil
+	if len(data) == 0 {
+		// The log shrank after it was measured; there is no tail left to read.
+		return nil, nil
+	}
+	if data[0] == '\n' {
+		return data[1:], nil
+	}
+	if i := bytes.IndexByte(data, '\n'); i >= 0 {
+		return data[i+1:], nil
+	}
+	return nil, nil
 }
