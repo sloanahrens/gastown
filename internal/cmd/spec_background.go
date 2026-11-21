@@ -199,7 +199,7 @@ func specInFlightAdded(inFlight []specInFlight, seats specSlingSeats) []specInFl
 	}
 	out := make([]specInFlight, 0, len(inFlight))
 	for _, f := range inFlight {
-		if seats.Hooked[f.Bead] || seats.namesLiveSeat(f.Bead) {
+		if seats.hooks(f.Agent, f.Bead) || seats.namesLiveSeat(f.Bead) {
 			continue
 		}
 		out = append(out, f)
