@@ -578,3 +578,110 @@ func TestSweepRunsPruneRealTreeSparesSymlinksAndFiles(t *testing.T) {
 		t.Errorf("apply line missing:\n%s", logs.String())
 	}
 }
+
+// TestSweepRunsPruneRigGoneBeforeItsChildrenStopsTheRun: a rig that is gone when
+// its check runs removes nothing, even though its children were planned, and the
+// apply stops naming the rig.
+func TestSweepRunsPruneRigGoneBeforeItsChildrenStopsTheRun(t *testing.T) {
+	t.Parallel()
+	f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+	f.rigTree()
+	f.fsys.vanish[filepath.Join(f.root, "gastown")] = true
+	f.d.runSweepRunsPruneTick()
+
+	if len(f.fsys.removed) != 0 {
+		t.Fatalf("a rig gone before its check removed %v", f.fsys.removed)
+	}
+	lines := f.logLines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "apply stopped") || !strings.Contains(lines[0], "check rig gastown") {
+		t.Errorf("rig gone logged %q, want one stopped line naming the rig", lines)
+	}
+}
+
+// rigSwapFS is the production filesystem, with one change: the first check the
+// apply makes, after the plan has listed every rig, moves the rig aside and puts
+// a symlink to target in its place. That is the swap between the plan and the
+// apply the rig check catches.
+type rigSwapFS struct {
+	osSweepRunsFS
+	rig, parked, target string
+	swapped             bool
+	swapErr             error
+}
+
+func (f *rigSwapFS) Lstat(path string) (fs.FileInfo, error) {
+	if !f.swapped {
+		f.swapped = true
+		if err := os.Rename(f.rig, f.parked); err != nil {
+			f.swapErr = err
+		} else if err := os.Symlink(f.target, f.rig); err != nil {
+			f.swapErr = err
+		}
+	}
+	return f.osSweepRunsFS.Lstat(path)
+}
+
+// TestSweepRunsPruneRigSwappedForSymlink: a rig replaced by a symlink to a
+// directory outside the root, between the plan and the apply, is not entered. The
+// run the plan named is not removed through the link, and the outside directory
+// keeps what it holds.
+func TestSweepRunsPruneRigSwappedForSymlink(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	root := filepath.Join(town, filepath.FromSlash(sweepRunsRootRel))
+	rig := filepath.Join(root, "gastown")
+	parked := filepath.Join(town, "parked-gastown")
+	outside := filepath.Join(town, "outside")
+	oldRun := sweepRunsName("gastown", "0a1b2c3d")
+	newRun := sweepRunsName("gastown", "1a1b2c3d")
+	if err := os.MkdirAll(rig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// outside holds a directory under the planned run's name, which the apply
+	// would reach through the symlink and remove.
+	if err := os.MkdirAll(filepath.Join(outside, oldRun), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, oldRun, "keep.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range []struct {
+		name string
+		age  time.Duration
+	}{{oldRun, 100 * time.Hour}, {newRun, 5 * time.Hour}} {
+		p := filepath.Join(rig, run.name)
+		if err := os.Mkdir(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "out.log"), []byte("out"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, sweepRunsNow.Add(-run.age), sweepRunsNow.Add(-run.age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fsys := &rigSwapFS{rig: rig, parked: parked, target: outside}
+	var logs bytes.Buffer
+	patrol := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
+	keep := 1
+	patrol.Patrols.DiskMaintenance.SweepRunsKeep = &keep
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0), patrolConfig: patrol}
+	d.diskMaint.now = func() time.Time { return sweepRunsNow }
+	d.diskMaint.dispatch = func(fn func()) { fn() }
+	d.diskMaint.sweepRunsFS = fsys
+	d.runSweepRunsPruneTick()
+
+	if !fsys.swapped || fsys.swapErr != nil {
+		t.Fatalf("the rig was not swapped for a symlink: swapped %v, error %v", fsys.swapped, fsys.swapErr)
+	}
+	if _, err := os.Stat(filepath.Join(outside, oldRun, "keep.txt")); err != nil {
+		t.Errorf("a directory outside the root was removed through the rig symlink: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(parked, oldRun)); err != nil {
+		t.Errorf("the planned run was removed after the rig was swapped: %v", err)
+	}
+	if !strings.Contains(logs.String(), "apply stopped") || !strings.Contains(logs.String(), "removed 0 directories") {
+		t.Errorf("swapped rig logged %q, want the apply stopped before anything is removed", logs.String())
+	}
+}

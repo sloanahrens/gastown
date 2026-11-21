@@ -9,9 +9,10 @@ package daemon
 //
 // Only a real directory that is a direct child of a rig directory is ever
 // planned or removed. A file, a symlink, or a rig entry that is not a directory
-// is never named, and each listed directory is checked again on disk before it is
-// removed. A listing or size failure refuses the whole run before anything is
-// removed; a check or remove that fails during the apply stops it there.
+// is never named, and each listed rig and directory is checked again on disk
+// before it is removed. A listing or size failure refuses the whole run before
+// anything is removed; a check or remove that fails during the apply stops it
+// there.
 
 import (
 	"errors"
@@ -160,12 +161,13 @@ func (d *Daemon) runSweepRunsPrunePass(mode string) {
 	d.diskMaintSchedule.recordRetry(sweepRunsPruneName, concluded.Add(cacheTrimRetryInterval))
 }
 
-// sweepRunsDirectory is one directory the plan lists, with the path it is removed
-// by and the label it is logged under.
+// sweepRunsDirectory is one directory the plan lists, with the rig it is in, the
+// path it is removed by and the label it is logged under.
 type sweepRunsDirectory struct {
-	label string
-	path  string
-	bytes int64
+	label   string
+	rigPath string
+	path    string
+	bytes   int64
 }
 
 // sweepRunsPrune plans every rig's run directories and, in apply mode, removes
@@ -223,9 +225,10 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 		kept += len(entries) - len(plan.Skipped) - len(plan.Remove)
 		for _, r := range plan.Remove {
 			removals = append(removals, sweepRunsDirectory{
-				label: rig.Name() + "/" + r.Name,
-				path:  filepath.Join(rigDir, r.Name),
-				bytes: r.Bytes,
+				label:   rig.Name() + "/" + r.Name,
+				rigPath: rigDir,
+				path:    filepath.Join(rigDir, r.Name),
+				bytes:   r.Bytes,
 			})
 		}
 	}
@@ -243,6 +246,19 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 	removed := 0
 	var freed int64
 	for _, r := range removals {
+		// The rig is checked again on disk before its child is reached through it:
+		// a rig swapped for a symlink would send the name to another directory.
+		rigInfo, err := fsys.Lstat(r.rigPath)
+		if err != nil {
+			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: check rig %s: %v; removed %s, keeping %d",
+				filepath.Base(r.rigPath), err, sweepRunsCounts(removed, freed), kept)
+			return false
+		}
+		if !rigInfo.IsDir() {
+			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: rig %s is no longer a directory; removed %s, keeping %d",
+				filepath.Base(r.rigPath), sweepRunsCounts(removed, freed), kept)
+			return false
+		}
 		// The name is checked again on disk: it must still be a directory, not a
 		// symlink or a file that took its place, when it is removed.
 		info, err := fsys.Lstat(r.path)
