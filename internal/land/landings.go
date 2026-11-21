@@ -30,6 +30,10 @@ type LandingsFile struct {
 	// one worth warning; a reader that builds its own per poll leaves it nil
 	// rather than repeat the same warning every few seconds.
 	Logf func(format string, args ...any)
+	// OnSkipped, when set, receives the number of unparsable lines each read
+	// skipped, so a caller that accounts for its inputs can count them; Logf
+	// carries only the text and stays nil for a reader built per poll.
+	OnSkipped func(n int)
 	// Spans, when set, is the span store each appended record's polecat time
 	// is read from; the landing worker sets the town's store and no other
 	// caller writes. Nil means records carry no polecat time (gt-yxl22).
@@ -516,6 +520,9 @@ func (f *LandingsFile) latest(match func(LandingRecord) bool) (LandingRecord, bo
 // file every pass, so the same set of bad lines logs once; a set that changed
 // warns again.
 func (f *LandingsFile) warnSkipped(n int, first string) {
+	if n > 0 && f.OnSkipped != nil {
+		f.OnSkipped(n)
+	}
 	if n == 0 {
 		f.mu.Lock()
 		f.warned = ""

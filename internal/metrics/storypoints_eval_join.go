@@ -46,6 +46,8 @@ type EvalCounts struct {
 	UpperBound   int // dropped: the polecat time is an upper bound
 	Absent       int // dropped: the record carries no polecat time
 	MalformedLog int // estimate-log lines that did not decode, counted by estlog.Read
+	// MalformedLanding counts landing-ledger lines that did not decode, skipped by the landing reader.
+	MalformedLanding int
 }
 
 // errEvalJoinNoTown reports joinEval with no town root, which names no ledger
@@ -83,7 +85,7 @@ func joinEval(townRoot string) ([]EvalRow, EvalCounts, error) {
 	for _, rec := range logged {
 		latest[rec.BeadID] = rec
 	}
-	landings, err := evalLandings(townRoot)
+	landings, err := evalLandings(townRoot, &counts.MalformedLanding)
 	if err != nil {
 		return nil, counts, err
 	}
@@ -129,7 +131,7 @@ func joinEval(townRoot string) ([]EvalRow, EvalCounts, error) {
 // evalLandings reads every rig's landing record through the landing package's
 // reader, each tagged with the rig of the ledger it came from. Rigs are visited
 // in the order os.ReadDir returns them, which sorts by filename.
-func evalLandings(townRoot string) ([]evalLanding, error) {
+func evalLandings(townRoot string, malformed *int) ([]evalLanding, error) {
 	dir := filepath.Join(constants.TownRuntimePath(townRoot), "landings")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -152,6 +154,7 @@ func evalLandings(townRoot string) ([]evalLanding, error) {
 		if err != nil {
 			return nil, fmt.Errorf("landings file %s: %w", filepath.Join(dir, entry.Name()), err)
 		}
+		file.OnSkipped = func(n int) { *malformed += n }
 		recs, err := file.Since(time.Time{})
 		if err != nil {
 			return nil, fmt.Errorf("landings file %s: %w", file.Path, err)

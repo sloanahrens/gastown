@@ -249,6 +249,41 @@ func TestStoryPointsEvalJoinCountsMalformedLogLines(t *testing.T) {
 	}
 }
 
+// evalJoinAppendRaw appends line to the rig's landing ledger as a torn write
+// leaves it: bytes the landing reader cannot decode.
+func evalJoinAppendRaw(t *testing.T, town, rig, line string) {
+	t.Helper()
+	path := filepath.Join(town, ".runtime", "landings", rig+".jsonl")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatalf("open the %s ledger: %v", rig, err)
+	}
+	if _, err := f.WriteString(line + "\n"); err != nil {
+		t.Fatalf("write the torn line: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close the %s ledger: %v", rig, err)
+	}
+}
+
+// TestStoryPointsEvalJoinCountsMalformedLandingLines: a torn landing line is
+// skipped by the landing reader and counted, as a torn log line is.
+func TestStoryPointsEvalJoinCountsMalformedLandingLines(t *testing.T) {
+	t.Parallel()
+	town := evalJoinTown(t)
+	evalJoinWriteLandings(t, town, "gastown", evalJoinLanding("gt-a", 600, evalJoinAt(1), false, false))
+	evalJoinAppendRaw(t, town, "gastown", "not a landing")
+	evalJoinAppendEstimate(t, town, evalJoinEstimate("gt-a", 10, floatPtr(10), nil, nil))
+
+	_, counts, err := joinEval(town)
+	if err != nil {
+		t.Fatalf("joinEval: %v", err)
+	}
+	if want := (EvalCounts{Records: 1, Joined: 1, MalformedLanding: 1}); counts != want {
+		t.Errorf("counts = %+v, want %+v", counts, want)
+	}
+}
+
 // TestStoryPointsEvalJoinErrorsNameTheFile: every input the join cannot read,
 // and every landing record it cannot place, is an error naming the file or the
 // town root, never an empty answer that reads as a town with nothing to
