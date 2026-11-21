@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -1005,12 +1006,37 @@ func (d *Daemon) controlClusterExec() func(context.Context, ...string) (string, 
 		if err != nil || !ok {
 			return "", errors.Join(err, errors.New("no kubernetes runner names a control cluster"))
 		}
-		stdout, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, args...)
+		stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, args...)
 		if err != nil {
+			if line := controlClusterStderrLine(stderr); line != "" {
+				return "", fmt.Errorf("kubectl on the control cluster: %w: %s", err, line)
+			}
 			return "", fmt.Errorf("kubectl on the control cluster: %w", err)
 		}
 		return string(stdout), nil
 	}
+}
+
+// controlClusterStderrLineMax bounds the stderr text an error carries: enough
+// for kubectl's cause, short enough to stay one log line.
+const controlClusterStderrLineMax = 200
+
+// controlClusterStderrLine is the first line of a failed kubectl's stderr,
+// trimmed and cut to controlClusterStderrLineMax bytes on a rune boundary, so
+// a failed read's error names kubectl's cause without dumping its whole reply.
+// The cut never splits a multi-byte character. An empty or whitespace-only
+// stderr names no cause and returns "".
+func controlClusterStderrLine(stderr []byte) string {
+	line, _, _ := strings.Cut(string(stderr), "\n")
+	line = strings.TrimSpace(line)
+	if len(line) <= controlClusterStderrLineMax {
+		return line
+	}
+	cut := controlClusterStderrLineMax
+	for cut > 0 && !utf8.RuneStart(line[cut]) {
+		cut--
+	}
+	return line[:cut]
 }
 
 // verifyForgejoGate checks the required context the workflow file derives
