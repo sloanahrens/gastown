@@ -354,7 +354,7 @@ func TestCheckPinsRefusesAStalePin(t *testing.T) {
 // answer for the path-limited count.
 var devopsInputs = []string{
 	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/ledgerdb",
-	"pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
+	"pkg/manifest", "pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
 }
 
 // devopsPin is the devops fixture pin the counts below drive.

@@ -6,7 +6,7 @@ package daemonimage
 // outside this list cannot reach the image (gt-f3rjtl).
 var devopsInputPaths = []string{
 	"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck", "internal/ledgerdb",
-	"pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
+	"pkg/manifest", "pkg/patrol", "pkg/releasebot", "ops/cloud-check.apps", "go.mod", "go.sum",
 }
 
 // PinInputPaths returns the repository paths the image builds the named pin
