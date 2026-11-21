@@ -674,6 +674,16 @@ type LandingRecord struct {
 	// landing worker. It is written to the landings file only: a bead with no
 	// estimate, or a read that failed, leaves it nil (gt-cdhagm).
 	SPEstimate *int `json:"sp_estimate,omitempty"`
+	// SPMinutes is the minutes the landed bead's sp: estimate was computed as,
+	// read from the bead by the landing worker. It is written to the landings
+	// file only: a bead that carries none, or a read that failed, leaves it nil
+	// (gt-iwzoje).
+	SPMinutes *float64 `json:"sp_minutes,omitempty"`
+	// SPSlung is the reason a bead at or over the sp: trigger was slung, read
+	// from the bead by the landing worker. It is written to the landings file
+	// only: a bead that carries none leaves it empty and out of the JSON
+	// (gt-iwzoje).
+	SPSlung string `json:"sp_slung,omitempty"`
 	// PolecatSecs, PolecatAttempts and the two bound flags are the time the
 	// bead's polecat seats spent hooked on it, read from the spans log when
 	// the record is written (Append). A crew landing has no seat and a bead
