@@ -2325,6 +2325,7 @@ func TestFollowupBeadsAppend(t *testing.T) {
 	add := land.FollowupAddition{Lines: []string{"- the second finding"}, Boxes: []string{"- [ ] the second box"}, Labels: []string{"fp:second"}}
 	tests := []struct {
 		name        string
+		target      string
 		status      string
 		body        string
 		updateErr   error
@@ -2332,6 +2333,7 @@ func TestFollowupBeadsAppend(t *testing.T) {
 		wantErr     string
 	}{
 		{name: "an open bead gets one update", status: "open", body: body, wantUpdates: 1},
+		{name: "a bead that cannot be read is an error", target: "gt-missing", status: "open", body: body, wantErr: "gt-missing"},
 		{name: "an in_progress bead is refused", status: "in_progress", body: body, wantErr: "in_progress"},
 		{name: "a body with no box to place by is refused", status: "open", body: "## Goal\n- a finding\n", wantErr: "no room"},
 		{name: "a failing update is returned", status: "open", body: body, updateErr: errors.New("dolt is down"), wantUpdates: 1, wantErr: "dolt is down"},
@@ -2342,7 +2344,12 @@ func TestFollowupBeadsAppend(t *testing.T) {
 			bd := &updateRecorder{Fake: beadsfake.New(beadsfake.WithPrefix("gt")), err: tt.updateErr}
 			bd.Seed(beads.Issue{ID: "gt-b", Title: "Found: bundle", Status: tt.status, Type: "task", Description: tt.body, AcceptanceCriteria: "- [ ] the first box"})
 
-			err := followupBeads{client: bd}.AppendFollowup("gt-b", add)
+			id := "gt-b"
+			if tt.target != "" {
+				id = tt.target
+			}
+
+			err := followupBeads{client: bd}.AppendFollowup(id, add)
 
 			if tt.wantErr == "" && err != nil || tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
 				t.Fatalf("AppendFollowup error = %v, want one containing %q", err, tt.wantErr)
