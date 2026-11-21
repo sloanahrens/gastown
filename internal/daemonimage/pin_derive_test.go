@@ -40,3 +40,23 @@ func TestDerivedInputsDropOtherModulesAndStdlib(t *testing.T) {
 		}
 	}
 }
+
+// TestDerivedAndStaticInputListsAgree checks that every derived directory is
+// covered by PinInputPaths("devops"): a directory the static list lacks is named,
+// in order, and a list that covers them all names nothing (gt-tjfeqp).
+func TestDerivedAndStaticInputListsAgree(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		derived []string
+		want    []string
+	}{
+		{"covered", []string{"cmd/reporter", "internal/ledgerdb", "pkg/patrol/sub", "cmd/cloudcheck"}, nil},
+		{"lacks one", []string{"cmd/reporter", "internal/newthing", "pkg/patrol"}, []string{"internal/newthing"}},
+		{"names each gap in order", []string{"pkg/other", "cmd/reporter", "cmd/zeta"}, []string{"pkg/other", "cmd/zeta"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantDirs(t, missingFromInputList(tc.derived), tc.want)
+		})
+	}
+}
