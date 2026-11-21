@@ -6,8 +6,52 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
+
+// countingShow is a bead store that counts the Show calls it answers.
+type countingShow struct {
+	Beads
+	shows *int
+}
+
+func (c countingShow) Show(id string) (*beads.Issue, error) {
+	*c.shows++
+	return c.Beads.Show(id)
+}
+
+// TestWorkerSPMinutesOneShow: the three sp label values a landing carries —
+// its sp: estimate, its sp-minutes:<n> and its sp-slung:<reason> — come from
+// one Show of the bead, so a landing with those labels makes the same Show
+// calls as one without: two, one for the priority and one for the sp labels.
+// A read per value would make the labelled landing cost three or four
+// (gt-fqaj7z).
+func TestWorkerSPMinutesOneShow(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		labels []string
+	}{
+		{"no sp labels", nil},
+		{"sp labels", []string{"sp:3", "sp-minutes:10.8", "sp-slung:rework"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedLabelled(t, "gt-abc", tc.labels...)
+			shows := 0
+			h.w.Beads = countingShow{Beads: h.bd, shows: &shows}
+			if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+				t.Fatalf("report %v; want one landing", rep)
+			}
+			if shows != 2 {
+				t.Fatalf("one landing made %d Show calls; want 2: one for the priority and one for the three sp labels", shows)
+			}
+		})
+	}
+}
 
 // TestWorkerSPMinutesRead: the landing carries the minutes its sp: estimate was
 // computed as and the reason the dispatcher recorded for slinging the bead, so

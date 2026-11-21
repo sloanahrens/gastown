@@ -863,9 +863,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	work.Head = tip
 	work.Agent = w.seatAgent(work.Worker)
 	work.Priority = w.beadPriority(issue.ID)
-	work.SPEstimate = w.beadSPEstimate(issue.ID)
-	work.SPMinutes = w.beadSPMinutes(issue.ID)
-	work.SPSlung = w.beadSPSlung(issue.ID)
+	work.SPEstimate, work.SPMinutes, work.SPSlung = w.beadSPLabels(issue.ID)
 	w.landOne(ctx, work, rep)
 }
 
@@ -992,20 +990,33 @@ func (w *Worker) beadPriority(id string) *int {
 	return &p
 }
 
-// beadSPEstimate is the landed bead's sp: estimate, read from the bead the way
-// beadPriority reads it. A failed read is logged and leaves the estimate nil:
-// the record carries none, and the landing stands. A bead with no estimate, or
-// with two that conflict, has none and is no failure (gt-cdhagm).
-func (w *Worker) beadSPEstimate(id string) *int {
+// beadSPLabels reads the landed bead once for the three sp label values the
+// record carries, so the three cost one Show of the bead and not one each
+// (gt-fqaj7z): its sp: estimate, its sp-minutes:<n> and the sp-slung:<reason>
+// the dispatcher wrote. A failed read is logged once and leaves all three
+// empty: the record carries none, and the landing stands, as it did when each
+// value read the bead alone. A bead with no such label, or with two that
+// disagree, has none and is no failure.
+func (w *Worker) beadSPLabels(id string) (estimate *int, minutes *float64, slung string) {
 	issue, err := w.Beads.Show(id)
 	if err != nil {
-		w.logf("%s: reading the bead's sp: estimate: %v; the landing records no estimate", id, err)
-		return nil
+		w.logf("%s: reading the bead's sp: estimate, sp-minutes and sp-slung reason: %v; the landing records none", id, err)
+		return nil, nil, ""
 	}
 	if issue == nil {
-		return nil
+		return nil, nil, ""
 	}
-	points, ok := storypoints.EstimateOf(issue.Labels)
+	estimate = beadSPEstimate(issue.Labels)
+	if got, ok := spMinutesOf(issue.Labels); ok {
+		minutes = &got
+	}
+	return estimate, minutes, spSlungOf(issue.Labels)
+}
+
+// beadSPEstimate is the sp: estimate among labels. A bead with no estimate, or
+// with two that conflict, has none and is no failure (gt-cdhagm).
+func beadSPEstimate(labels []string) *int {
+	points, ok := storypoints.EstimateOf(labels)
 	if !ok {
 		return nil
 	}
@@ -1017,27 +1028,6 @@ func (w *Worker) beadSPEstimate(id string) *int {
 // worker reads it but cannot import the command package that writes it, so the
 // prefix is repeated here.
 const spSlungPrefix = "sp-slung:"
-
-// beadSPMinutes is the landed bead's sp-minutes:<n> label, read from the bead
-// the way beadSPEstimate reads its sp: label. A failed read is logged and
-// leaves the minutes nil: the record carries none, and the landing stands. A
-// bead with no such label, a label that does not parse, or two that disagree
-// has none and is no failure (gt-5eeqin).
-func (w *Worker) beadSPMinutes(id string) *float64 {
-	issue, err := w.Beads.Show(id)
-	if err != nil {
-		w.logf("%s: reading the bead's sp-minutes: %v; the landing records no minutes", id, err)
-		return nil
-	}
-	if issue == nil {
-		return nil
-	}
-	minutes, ok := spMinutesOf(issue.Labels)
-	if !ok {
-		return nil
-	}
-	return &minutes
-}
 
 // spMinutesOf returns the minutes of the one sp-minutes:<n> label among
 // labels. A label storypoints.ParseLabel refuses is not an estimate; a bead
@@ -1055,24 +1045,6 @@ func spMinutesOf(labels []string) (float64, bool) {
 		minutes, found = label.Minutes, true
 	}
 	return minutes, found
-}
-
-// beadSPSlung is the reason the dispatcher recorded for slinging the landed
-// bead at or over the sp: split trigger, read from the bead the way
-// beadSPEstimate reads its sp: label. A failed read is logged and leaves the
-// reason empty: the record carries none, and the landing stands. A bead with
-// no such label, one whose reason is empty, or two that disagree has none and
-// is no failure (gt-5eeqin).
-func (w *Worker) beadSPSlung(id string) string {
-	issue, err := w.Beads.Show(id)
-	if err != nil {
-		w.logf("%s: reading the bead's sp-slung reason: %v; the landing records none", id, err)
-		return ""
-	}
-	if issue == nil {
-		return ""
-	}
-	return spSlungOf(issue.Labels)
 }
 
 // spSlungOf returns the reason of the one sp-slung:<reason> label among
