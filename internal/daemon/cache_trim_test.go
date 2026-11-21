@@ -13,7 +13,6 @@ import (
 	"log"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -1124,6 +1123,9 @@ func TestDiskMaintenanceDryRunAppliesNothing(t *testing.T) {
 			t.Errorf("a dry run ran %q, want no change", verb)
 		}
 	}
+	if items := f.noOpItems(t); len(items) != 0 {
+		t.Errorf("a dry run raised %+v, want no attention item", items)
+	}
 	logged := f.log.String()
 	if !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" dry_run") {
 		t.Errorf("the log does not name the dry run: %s", logged)
@@ -1154,19 +1156,6 @@ func (f *cacheTrimFixture) appliedContaining(needle string) bool {
 		}
 	}
 	return false
-}
-
-// advanceClockOnPodRead makes the pod read of a pass take step of the daemon's
-// clock, so a test runs the pass's lister budget down without a sleep.
-func (f *cacheTrimFixture) advanceClockOnPodRead(clock *clockwork.FakeClock, step time.Duration) {
-	f.d.clock = clock
-	run := f.d.execCmd
-	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
-		if strings.Contains(strings.Join(cmd.Args, " "), "get pods ") {
-			clock.Advance(step)
-		}
-		return run(cmd)
-	}
 }
 
 // TestCacheTrimListerJobNameIsDistinctFromTheTrimJob pins the lister's name: it
@@ -1831,7 +1820,9 @@ func TestCacheTrimNamesTheContextOnEveryCall(t *testing.T) {
 			t.Errorf("cluster call %v does not start with %v", call.args, wantPrefix)
 		}
 	}
-
+	if !slices.ContainsFunc(calls, func(c cliCall) bool { return strings.HasPrefix(cacheTrimVerb(c.args), "apply ") }) {
+		t.Errorf("no call applied the claim Job; the table of calls checked: %v", f.verbs())
+	}
 }
 
 // TestCacheTrimRefusesAKubeconfigWithNoContext pins the preflight: a kubeconfig
@@ -2491,56 +2482,6 @@ func TestCeilingPadFallsBackToTheSearch(t *testing.T) {
 	})
 }
 
-// cacheTrimFitCase is one room-versus-list case for the claim route's size
-// guard: the room df reports, and whether the pass applies the trim.
-type cacheTrimFitCase struct {
-	name    string
-	free    int64
-	applies bool
-}
-
-// cacheTrimFitCases is the size guard's three cases, each a KiB apart because
-// df -Pk reports whole KiB: a list smaller than the room and one that exactly
-// fills it apply, and one KiB more than the room is refused.
-func cacheTrimFitCases(need int64) []cacheTrimFitCase {
-	return []cacheTrimFitCase{
-		{"a list smaller than the claim's room fits", need + 1024, true},
-		{"a list equal to the claim's room fits", need, true},
-		{"a list larger than the claim's room is refused", need - 1024, false},
-	}
-}
-
-// cacheTrimCheckFitCase runs one room-versus-list case: the claim route applies
-// its one Job when the list fits, and otherwise makes no apply and logs the
-// refusal with both byte counts.
-func cacheTrimCheckFitCase(t *testing.T, listing string, need int64, tc cacheTrimFitCase) {
-	t.Helper()
-	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
-		cacheTrimListVerb: {stdout: listing},
-		cacheTrimFreeVerb: {stdout: cacheTrimDfReply(t, tc.free)},
-	})
-	f.d.runDiskMaintenance()
-
-	applies := len(f.applyCalls())
-	if tc.applies {
-		if applies != 1 {
-			t.Errorf("the pass applied %d documents for a list the claim has room for, want the one Job: %s", applies, f.log.String())
-		}
-		if logged := f.log.String(); strings.Contains(logged, "does not fit") {
-			t.Errorf("the pass refused a list the claim has room for: %s", logged)
-		}
-		return
-	}
-	if applies != 0 {
-		t.Errorf("the pass applied %d documents for a list the claim cannot hold", applies)
-	}
-	want := fmt.Sprintf("cache trim %s in %s: the removal list (%d bytes) needs %d bytes of room to be written with its digest and does not fit the claim's free space (%d); nothing trimmed",
-		cacheTrimClaimName, cacheTrimNamespace, cacheTrimRemovalListBytes(t, listing), need, tc.free)
-	if logged := f.log.String(); !strings.Contains(logged, want) {
-		t.Errorf("the log does not carry the refusal %q: %s", want, logged)
-	}
-}
-
 // cacheTrimHelperSubcommands are the first arguments the image's helper
 // dispatches, read from internal/polecatimage/program.go runProgram at
 // c2bf1bad. The daemon must never pass a helper argument outside them: the
@@ -2560,70 +2501,6 @@ var cacheTrimHelperSubcommands = []string{
 	"seed-clone",
 	"seed-cache",
 	"node-prune",
-}
-
-// cacheTrimHelperSubcommand returns the first argument a trim verb passes the
-// image's helper, and whether the verb runs the helper at all.
-func cacheTrimHelperSubcommand(verb string) (string, bool) {
-	fields := strings.Fields(verb)
-	for i, field := range fields {
-		if field != cachevol.HelperPath {
-			continue
-		}
-		if i+1 == len(fields) {
-			return "", true
-		}
-		return fields[i+1], true
-	}
-	return "", false
-}
-
-// cacheTrimHelperArgs returns the literal each argument list in path passes the
-// image's helper as its first argument, for every list naming
-// cachevol.HelperPath. A helper named without a following literal, or outside an
-// argument list, is reported as a problem rather than skipped.
-func cacheTrimHelperArgs(path string) ([]string, error) {
-	src, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, src, 0)
-	if err != nil {
-		return nil, err
-	}
-	var args []string
-	w := &cacheTrimWalker{visit: func(n ast.Node, ancestors []ast.Node) {
-		sel, ok := n.(*ast.SelectorExpr)
-		if !ok || !cacheTrimIsHelperPath(sel) {
-			return
-		}
-		elements := cacheTrimArgList(ancestors)
-		for i, element := range elements {
-			if element != sel {
-				continue
-			}
-			if i+1 >= len(elements) {
-				args = append(args, "<HelperPath ends the argument list>")
-				return
-			}
-			lit, ok := elements[i+1].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				args = append(args, "<not a string literal>")
-				return
-			}
-			value, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				args = append(args, "<unquotable literal>")
-				return
-			}
-			args = append(args, value)
-			return
-		}
-		args = append(args, "<HelperPath outside an argument list>")
-	}}
-	ast.Walk(w, file)
-	return args, nil
 }
 
 // cacheTrimIsHelperPath reports whether sel names cachevol.HelperPath.
@@ -3023,6 +2900,34 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 		}
 	})
 
+	t.Run("no pod holds the claim", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.answerFrom("get pods ", cliReply{stdout: `{"items":[]}`})
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("a pass that found no pod holding the claim yielded %+v, want no item", got)
+		}
+	})
+
+	// The route clears the item BEFORE it reads the pods, so a pod listing that
+	// fails does not keep it: the item described a measure the claim Job no longer
+	// takes, and a later trim raises its own. The pass says why it trimmed nothing.
+	t.Run("the pod listing fails", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.answerFrom("get pods ", failWith)
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("a pass whose pod listing failed yielded %+v, want the item cleared before the read", got)
+		}
+		if logged := f.log.String(); !strings.Contains(logged, "the pods that mount it could not be read") {
+			t.Errorf("the failed pass does not say why it trimmed nothing: %s", logged)
+		}
+	})
+
 	// A call that fails cannot tell whether the claim is there, so the record is
 	// left as it was: the item survives the claim listing's failure.
 	for _, tc := range []struct {
@@ -3104,35 +3009,6 @@ func newCacheTrimFloorFixture(t *testing.T, used int64) *cacheTrimFixture {
 		cacheTrimFloorYoungSize)
 	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)})
 	f.answerFrom(cacheTrimListVerb, cliReply{stdout: listing})
-	return f
-}
-
-// wantNoOpSummary runs the pass on f and fails unless its one item says want.
-func wantNoOpSummary(t *testing.T, f *cacheTrimFixture, want string) {
-	t.Helper()
-	f.d.runDiskMaintenance()
-	items := f.noOpItems(t)
-	if len(items) != 1 {
-		t.Fatalf("the collector yielded %d items, want one for a claim over the cap: %+v\nlog: %s", len(items), items, f.log.String())
-	}
-	if got := items[0].Summary; got != want {
-		t.Errorf("item summary = %q, want %q", got, want)
-	}
-}
-
-// newCacheTrimPlanCountFixture trims a listing of 1200 old 894784-byte files and
-// the young unit the floor protects, under the 10GB cap, which plans every file
-// for removal. du answers used and the removal Job's log answers log.
-func newCacheTrimPlanCountFixture(t *testing.T, used int64, log cliReply) *cacheTrimFixture {
-	t.Helper()
-	files := make([]string, 0, 1201)
-	for i := 0; i < 1200; i++ {
-		files = append(files, fmt.Sprintf(`{"path":"gocache/f%d/x","cache":"build","size":894784,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}`, i))
-	}
-	files = append(files, fmt.Sprintf(`{"path":"gocache/young/y","cache":"build","size":%d,"atime":"2026-10-29T04:00:00Z","mtime":"2026-10-29T04:00:00Z"}`, cacheTrimFloorYoungSize))
-	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)})
-	f.answerFrom(cacheTrimListVerb, cliReply{stdout: "[" + strings.Join(files, ",") + "]"})
-	f.answerFrom(cacheTrimTrimLogsVerb, log)
 	return f
 }
 
@@ -3321,16 +3197,6 @@ func (f *cacheTrimFixture) moveClockOnPodRead(step time.Duration) {
 // cacheTrimTrimLogsVerb is the pass's read of the removal Job's result line,
 // the log of its trim container.
 const cacheTrimTrimLogsVerb = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c trim"
-
-// cacheTrimThirteenFilesJSON is a listing of thirteen build-cache files of
-// 1000 bytes each: a cap of 999 bytes plans every one of them for removal.
-func cacheTrimThirteenFilesJSON() string {
-	entries := make([]string, 13)
-	for i := range entries {
-		entries[i] = fmt.Sprintf(`{"path":"gocache/f%d/x","cache":"build","size":1000,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}`, i)
-	}
-	return "[" + strings.Join(entries, ",") + "]"
-}
 
 // TestCacheTrimRunWithoutATownRoot drives a run whose ledger cannot be built at
 // all: the trim still reaches its verdict and logs the one line saying the run
