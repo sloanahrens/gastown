@@ -37,8 +37,8 @@ package daemon
 //
 // A pair whose bd pin carries another schema level than the live database would
 // roll a daemon its startup handshake refuses, so the check raises that skew
-// instead of the ready item, and raises an unreadable item beside the ready one
-// when it cannot read the level (gt-5f0kue; "The roll" in docs/architecture.md
+// instead of the ready item, and raises an unreadable item in place of the ready
+// one when it cannot read the level (gt-5f0kue; "The roll" in docs/architecture.md
 // names the items).
 //
 // Whether a green commit is newer than the running one is read from the rig's
@@ -736,8 +736,8 @@ type pairReadyGreen struct {
 // published pair may be the one the pre-swap check refused; a refused item the
 // rig holds stays. A published pair is checked against the bd pin's schema
 // level: a skew raises the skew item instead of the ready one, and a level the
-// pass cannot read raises the guard's unreadable item beside the ready one, so
-// an unread level never passes for agreement. found is the failed runs this read
+// pass cannot read raises the guard's unreadable item in place of the ready one,
+// so an unread level never passes for agreement. found is the failed runs this read
 // settled, for the next read to reuse. A missing pair behind a ready green raises
 // nothing, since the roll takes the ready green.
 func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now time.Time, prev []attention.Item, runs map[string]pairReadyFailedRun, refused pairReadyRefusal, skew *pairReadySkewPass, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
