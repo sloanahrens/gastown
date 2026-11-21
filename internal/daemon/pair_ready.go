@@ -769,9 +769,11 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 	// broke before reaching it leaves the item standing while the ledger names
 	// it.
 	refusedSettled := make(map[string]bool, 1)
-	// ready is the commits whose pair both images answer for, and missing is each
-	// green whose pair is missing with the items the pass raised for it. A missing
-	// pair behind a ready green is superseded after the loop.
+	// ready is the commits that raised their pair-ready item, and missing is each
+	// green whose pair is missing with the items the pass raised for it. A green
+	// that is skewed, whose level cannot be read, or that the ledger does not
+	// clear to raise a pair-ready item is not ready, so it supersedes nothing. A
+	// missing pair behind a ready green is superseded after the loop.
 	var ready []string
 	var missing []pairReadyMissing
 	incomplete := scan.err
@@ -814,7 +816,6 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 		}
 		mark(g.sha12)
 		if daemonFound && polecatFound {
-			ready = append(ready, g.sha)
 			// The ledger is what says a published pair was not refused. A ledger
 			// the check could not read leaves it unmeasured, so no item that
 			// says the pair is ready is raised from it.
@@ -835,6 +836,9 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, now tim
 				out = append(out, pairReadySkewItem(r.Rig, g, pin, *skewed))
 				continue
 			}
+			// Only the pair-ready item makes the green ready: a roll takes it, so a
+			// green that raised no such item must not supersede an older build.
+			ready = append(ready, g.sha)
 			out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, v))
 			continue
 		}
