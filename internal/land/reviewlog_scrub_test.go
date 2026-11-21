@@ -667,6 +667,115 @@ func TestReviewLogScrubRewriteTokenAtEveryOffsetAroundTheLineLimit(t *testing.T)
 	}
 }
 
+// scrubEscapedRow is one row's raw line whose claim holds token with one byte
+// written as a JSON escape: it decodes to the token, and the raw line does not
+// hold it.
+func scrubEscapedRow(t *testing.T, bead, token string) []byte {
+	t.Helper()
+	line := scrubTestLogBytes(t, ReviewRecord{BeadID: bead, Rig: "gastown", Verdict: VerdictApprove,
+		FindingText: []ReviewFindingText{{ID: "f-1", Claim: "it logs " + token}}})
+	mid := len(token) / 2
+	esc := fmt.Sprintf(`\u%04x`, token[mid])
+	return bytes.Replace(line, []byte(token), []byte(token[:mid]+esc+token[mid+1:]), 1)
+}
+
+// TestReviewLogScrubSkippedRowsAreCountedListedAndUnchanged: a row whose flagged
+// word the raw line does not hold is counted, listed by a safe label and left
+// byte for byte, under plan and apply, beside a row the scrub does rewrite.
+func TestReviewLogScrubSkippedRowsAreCountedListedAndUnchanged(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	idToken := scrubTestFamilies["slack"]
+	rewritable := scrubTestLogBytes(t, scrubTestThreeRows(token)[0])
+	rows := []struct {
+		name  string
+		bead  string
+		label string
+	}{
+		{"bead id", "gt-esc1", "gt-esc1"},
+		{"no bead field", "", "line 2"},
+		{"token-shaped bead id", idToken, redactedWord},
+	}
+	for _, row := range rows {
+		for _, apply := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s apply=%v", row.name, apply), func(t *testing.T) {
+				t.Parallel()
+				before := append(slices.Clone(rewritable), scrubEscapedRow(t, row.bead, token)...)
+				logf, path := writeScrubTestLog(t, before)
+				res, err := logf.Scrub(apply)
+				if err != nil {
+					t.Fatalf("Scrub(%v): %v", apply, err)
+				}
+				if res.Skipped != 1 || !slices.Equal(res.SkippedBeads, []string{row.label}) {
+					t.Errorf("Skipped=%d SkippedBeads=%v, want 1 and [%s]", res.Skipped, res.SkippedBeads, row.label)
+				}
+				if res.RowsChanged != 1 || res.Rows != 2 {
+					t.Errorf("RowsChanged=%d Rows=%d, want 1 and 2: the skipped row is read, not changed", res.RowsChanged, res.Rows)
+				}
+				assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
+				assertNoScrubToken(t, fmt.Sprintf("%+v", res), idToken)
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("reading the log: %v", err)
+				}
+				want := before
+				if apply {
+					want = bytes.Replace(before, []byte(token), []byte(redactedWord), 1)
+				}
+				if !bytes.Equal(after, want) {
+					t.Errorf("the log is %q, want %q", after, want)
+				}
+			})
+		}
+	}
+}
+
+// TestReviewLogScrubSkippedWordFoundOnlyInsideALongerWord: a word whose only
+// plain copy sits inside a longer flagged word is missing once that one is
+// replaced, so the row is skipped, not reported clean.
+func TestReviewLogScrubSkippedWordFoundOnlyInsideALongerWord(t *testing.T) {
+	t.Parallel()
+	short := scrubTestFamilies["aws"]
+	long := short + "zzz"
+	rec := ReviewRecord{BeadID: "gt-esc2", Rig: "gastown", Verdict: VerdictApprove, FindingText: []ReviewFindingText{
+		{ID: "f-1", Claim: "a " + long}, {ID: "f-2", Claim: "b " + short}}}
+	raw := bytes.Replace(scrubTestLogBytes(t, rec), []byte("b "+short), []byte(`b \u0041`+short[1:]), 1)
+	logf, _ := writeScrubTestLog(t, raw)
+	res, err := logf.ScrubPlan()
+	if err != nil {
+		t.Fatalf("ScrubPlan: %v", err)
+	}
+	if res.Skipped != 1 || !slices.Equal(res.SkippedBeads, []string{"gt-esc2"}) {
+		t.Errorf("Skipped=%d SkippedBeads=%v, want 1 and [gt-esc2]", res.Skipped, res.SkippedBeads)
+	}
+}
+
+// TestReviewLogScrubSkippedListsNothingForARewrittenLog: an oversize line is
+// rewritten by the raw scan, not skipped, and a log with neither reports empty
+// lists.
+func TestReviewLogScrubSkippedListsNothingForARewrittenLog(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	big := strings.Repeat("x", 200) + " " + token
+	for name, log := range map[string][]byte{
+		"oversize": []byte(big + "\n"),
+		"clean":    scrubTestLogBytes(t, scrubTestThreeRows("none")[1:]...),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			logf, _ := writeScrubTestLog(t, log)
+			logf.lineLimit = 100
+			res, err := logf.ScrubPlan()
+			if err != nil {
+				t.Fatalf("ScrubPlan: %v", err)
+			}
+			if res.Skipped != 0 || len(res.SkippedBeads) != 0 {
+				t.Errorf("Skipped=%d SkippedBeads=%v, want zero and empty", res.Skipped, res.SkippedBeads)
+			}
+		})
+	}
+}
+
 // TestReviewLogScrubRewriteReplaceFailureKeepsTheLog: a failing replace returns
 // its error, which names no value, and leaves the original log.
 func TestReviewLogScrubRewriteReplaceFailureKeepsTheLog(t *testing.T) {

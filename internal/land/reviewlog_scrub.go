@@ -26,9 +26,10 @@ type ScrubResult struct {
 	// Oversize counts the lines past the scrub's byte bound, copied through
 	// unexamined.
 	Oversize int
-	// Skipped and SkippedBeads report the rows the scrub cannot rewrite, by
-	// bead id: zero and empty here, filled by the bead that judges them
-	// (gt-btleae).
+	// Skipped and SkippedBeads report the decodable rows the scrub cannot
+	// rewrite, because a flagged word of a claim is not in the raw line (a
+	// claim JSON escaped a byte of): each is kept byte for byte and listed by
+	// safeBeadID of its bead, or "line N" when it has none (gt-btleae).
 	Skipped      int
 	SkippedBeads []string
 }
@@ -78,7 +79,9 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 		}
 		kept = append(kept, append(out[:len(out):len(out)], term...))
 	}
+	lineNo := 0
 	err = scanScrubLines(fh, func(line, term []byte) {
+		lineNo++
 		if len(bytes.TrimSpace(line)) > limit {
 			res.Oversize++
 			keepRaw(line, term)
@@ -90,7 +93,17 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 			return
 		}
 		res.Rows++
-		scrubbed, words := scrubRawLine(line, rec)
+		scrubbed, words, missing := scrubRawLine(line, rec)
+		if missing > 0 {
+			label := fmt.Sprintf("line %d", lineNo)
+			if rec.BeadID != "" {
+				label = safeBeadID(rec.BeadID)
+			}
+			res.Skipped++
+			res.SkippedBeads = append(res.SkippedBeads, label)
+			kept = append(kept, append(line[:len(line):len(line)], term...))
+			return
+		}
 		if words == 0 {
 			kept = append(kept, append(line[:len(line):len(line)], term...))
 			return
@@ -189,11 +202,11 @@ func isJSONObject(line []byte) bool {
 }
 
 // scrubRawLine replaces in one raw log line each word scrubClaim flags in the
-// row's claims, and reports how many words it replaced. A flagged word holds
-// only characters JSON never escapes, so the raw line holds it as it is; a word
-// the line does not hold (a claim JSON escaped a byte of it) is left for the
-// bead that reports the rows this scrub cannot rewrite (gt-btleae).
-func scrubRawLine(line []byte, rec ReviewRecord) ([]byte, int) {
+// row's claims, and reports how many words it replaced and how many the line
+// did not hold when their turn came (a claim JSON escaped a byte of it, or its
+// only plain copy sat inside a longer word already replaced). The caller skips a
+// row with a missing word (gt-btleae).
+func scrubRawLine(line []byte, rec ReviewRecord) ([]byte, int, int) {
 	seen := make(map[string]bool)
 	var words []string
 	for _, ft := range rec.FindingText {
@@ -207,14 +220,17 @@ func scrubRawLine(line []byte, rec ReviewRecord) ([]byte, int) {
 	// A longer word first, so one flagged word that is another's prefix cannot
 	// leave the tail of the longer one in the line.
 	sort.Slice(words, func(i, j int) bool { return len(words[i]) > len(words[j]) })
-	out, n := line, 0
+	out, n, missing := line, 0, 0
 	for _, w := range words {
-		if c := bytes.Count(out, []byte(w)); c > 0 {
-			out = bytes.ReplaceAll(out, []byte(w), []byte(redactedWord))
-			n += c
+		c := bytes.Count(out, []byte(w))
+		if c == 0 {
+			missing++
+			continue
 		}
+		out = bytes.ReplaceAll(out, []byte(w), []byte(redactedWord))
+		n += c
 	}
-	return out, n
+	return out, n, missing
 }
 
 // flaggedWords is scrubClaim's own walk: the token-shaped runs it replaces, in
