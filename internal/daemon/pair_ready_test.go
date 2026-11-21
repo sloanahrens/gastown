@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/update"
 )
 
 const (
@@ -1867,6 +1868,59 @@ func TestPairReadyDoesNotSupersedeByAGreenWhosePairIsMissing(t *testing.T) {
 	keys := pairItemKeys(fx.check.observed())
 	assert.Contains(t, keys, "images-failed:gastown:"+c[1][:12], "a green with a missing pair superseded the failed build behind it")
 	assert.NotContains(t, keys, "deploy-pair-ready:gastown:"+c[2][:12])
+}
+
+// TestPairReadyUnreadyGreenSupersedesNoFailedBuild: a newer green whose pair is
+// published but whose pair-ready item is withheld, because its level is skewed,
+// its level cannot be read or the ledger cannot be read, is not ready. The failed
+// build behind it keeps its item and failed-run entry beside the green's own
+// item, so a roll that is not ready still names the build that failed. Adding
+// the green to the ready list before those reads turns each row red.
+func TestPairReadyUnreadyGreenSupersedesNoFailedBuild(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	cases := map[string]struct {
+		setup func(fx *pairFixture)
+		own   string
+	}{
+		"skewed": {
+			setup: func(fx *pairFixture) {
+				fx.check.skew = &pairReadySkewReads{
+					LevelAt:  func(context.Context, string) (int, error) { return 67, nil },
+					Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+				}
+			},
+			own: pairReadySkewKey("gastown", c[2][:12]),
+		},
+		"level unreadable": {
+			setup: func(fx *pairFixture) {
+				fx.check.skew = &pairReadySkewReads{
+					LevelAt:  func(context.Context, string) (int, error) { return 0, errors.New("the clone cannot read that commit") },
+					Database: func(context.Context) (int, error) { return pairSchemaLevel, nil },
+				}
+			},
+			own: pairReadySkewUnreadableKey("gastown", c[2][:12]),
+		},
+		"ledger unreadable": {
+			setup: func(fx *pairFixture) {
+				fx.check.ledger = pairRefusedLedger(update.ImageRecord{}, errors.New("the daemon image record images.json is damaged"))
+			},
+			own: "deploy-pair-unreadable:town:update-ledger",
+		},
+	}
+	for name, tt := range cases {
+		fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
+		tt.setup(fx)
+
+		fx.run(pairT0)
+
+		keys := pairItemKeys(fx.check.observed())
+		assert.Contains(t, keys, "images-failed:gastown:"+c[1][:12], name+": the failed build behind an unready green was dropped")
+		assert.Contains(t, keys, tt.own, name+": the green's own item is missing")
+		assert.NotContains(t, keys, "deploy-pair-ready:gastown:"+c[2][:12], name+": the green raised a ready item")
+		_, held := fx.check.failed[imagesFailedKey("gastown", c[1][:12])]
+		assert.True(t, held, name+": the failed build lost its failed-run entry")
+	}
 }
 
 // pairAncestryFailClone is a clone whose ancestry read of failFrom fails, so a
