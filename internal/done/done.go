@@ -1545,11 +1545,16 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 		return r.g.AddedLinesSince(baseRef)
 	}, description, r.opts.polecatEnv); err != nil {
 		// A sandbox seat stops on the size refusal and its clone is the only copy
-		// of its commits, as at a deferral: push first (gt-oq8lc, gt-5h8lim). An
-		// unreadable count is not that refusal and pushes nothing.
+		// of its commits, as at a deferral: push first (gt-oq8lc, gt-5h8lim). A
+		// failed push still refuses, saying the sandbox holds the only copy
+		// (gt-96m2m0). An unreadable count is not that refusal and pushes nothing.
 		var refusal sizeRefusalError
 		if errors.As(err, &refusal) {
-			if sha := pushSandboxBranchBeforeDeferralTo(r.stdout(), r); sha != "" {
+			sha, pushErr := pushSandboxBranchBeforeDeferralTo(r.stdout(), r)
+			if pushErr != nil {
+				return unpushedRefusal(refusal, pushErr)
+			}
+			if sha != "" {
 				return pushedRefusal(refusal, sha, r.branch)
 			}
 		}
