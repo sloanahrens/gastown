@@ -95,14 +95,15 @@ func TestPairGoListDegraded(t *testing.T) {
 	oldHeld := []attention.Item{{Key: oldKey, Kind: attention.KindDeployPairGoListDegraded, Rig: "gastown"}}
 	unreadable := pairReadyUnreadableItem("gastown", errors.New("x")).Key
 	tests := []struct {
-		name     string
-		degraded []bool
-		prev     []attention.Item
-		logErr   error
-		runErr   error
-		nilList  bool
-		pinErr   error
-		want     []string // the keys, in order
+		name      string
+		degraded  []bool
+		prev      []attention.Item
+		logErr    error
+		runErr    error
+		nilList   bool
+		pinErr    error
+		emptyLogs []int    // run indexes (0 = newest) whose job log reads empty with no error
+		want      []string // the keys, in order
 	}{
 		{name: "a full streak raises one item", degraded: []bool{true, true, true}, want: []string{key}},
 		{name: "a streak of two raises none", degraded: []bool{true, true, false}},
@@ -115,6 +116,8 @@ func TestPairGoListDegraded(t *testing.T) {
 		{name: "an unreadable listing leaves the held item", degraded: []bool{true, true, true}, prev: held, runErr: errors.New("boom"), want: []string{key, unreadable}},
 		{name: "a listing with no answer raises the unreadable item", degraded: []bool{true, true, true}, nilList: true, want: []string{unreadable}},
 		{name: "an unreadable pin raises the unreadable item and no degraded one", degraded: []bool{true, true, true}, pinErr: errors.New("boom"), want: []string{unreadable}},
+		{name: "an empty newest log leaves the held item and raises the unreadable item", degraded: []bool{true, true, true}, prev: held, emptyLogs: []int{0}, want: []string{key, unreadable}},
+		{name: "an empty log inside the streak raises no degraded item and the unreadable one", degraded: []bool{true, true, true}, emptyLogs: []int{2}, want: []string{unreadable}},
 		{name: "an unreadable pin leaves the held item", degraded: []bool{true, true, true}, prev: held, pinErr: errors.New("boom"), want: []string{key, unreadable}},
 	}
 	for _, tt := range tests {
@@ -122,6 +125,9 @@ func TestPairGoListDegraded(t *testing.T) {
 			t.Parallel()
 			r, api := goListRig(t, tt.degraded...)
 			api.logErr, api.runErr, api.nilList = tt.logErr, tt.runErr, tt.nilList
+			for _, i := range tt.emptyLogs {
+				api.logs[int64(i+1)*10] = ""
+			}
 			pinAt := goListPinAt
 			if tt.pinErr != nil {
 				pinAt = func(string) (string, error) { return "", tt.pinErr }

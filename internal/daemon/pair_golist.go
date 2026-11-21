@@ -32,6 +32,11 @@ func goListNoteStreak(ctx context.Context, r pairReadyRig, runs []forgejo.Action
 		if err != nil {
 			return streak, false
 		}
+		// A built run always prints output, so an empty log carries no evidence
+		// either way: it is an unread log, never a healthy guard (gt-mm7otm).
+		if strings.TrimSpace(log) == "" {
+			return streak, false
+		}
 		if !strings.Contains(log, daemonimage.GoListNoteMarker) {
 			return streak, true
 		}
