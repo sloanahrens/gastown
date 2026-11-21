@@ -1907,6 +1907,57 @@ func TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild(t *testing.T) {
 	}
 }
 
+// TestPairReadyClearsAStuckPairSupersededByAReadyPair: a stuck pair for a green
+// commit an ancestor of a ready green can never be rolled, so its item is
+// dropped, only the ready item stands, and the next pass does not raise it again.
+func TestPairReadyClearsAStuckPairSupersededByAReadyPair(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	now := pairT0.Add(91 * time.Minute)
+	fx := newPairSupersedeFixture(t, pairDatedClone{pairReadyGit: clone, at: pairT0}, c[0], c[1], c[2])
+
+	fx.run(now)
+
+	stuck := "deploy-pair-stuck:gastown:" + c[1][:12]
+	assert.Equal(t, []string{"deploy-pair-ready:gastown:" + c[2][:12]}, pairItemKeys(fx.check.observed()),
+		"a stuck pair behind the ready green kept an item")
+	fx.run(now.Add(pairReadyInterval))
+	assert.NotContains(t, pairItemKeys(fx.check.observed()), stuck, "the superseded stuck item came back on the next pass")
+}
+
+// TestPairReadySupersedeReadErrorKeepsTheItems: an ancestry the clone cannot
+// judge leaves the stuck and ready items standing and makes the scan incomplete,
+// so a read error is never read as "not behind".
+func TestPairReadySupersedeReadErrorKeepsTheItems(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fail := pairAncestryFailClone{pairReadyGit: clone, failFrom: c[1]}
+	fx := newPairSupersedeFixture(t, pairDatedClone{pairReadyGit: fail, at: pairT0}, c[0], c[1], c[2])
+
+	fx.run(pairT0.Add(91 * time.Minute))
+
+	keys := pairItemKeys(fx.check.observed())
+	assert.Contains(t, keys, "deploy-pair-stuck:gastown:"+c[1][:12], "the stuck item was cleared without a judged ancestry")
+	assert.Contains(t, keys, "deploy-pair-ready:gastown:"+c[2][:12], "the ready item was lost beside a failed ancestry read")
+	assert.Contains(t, keys, "deploy-pair-unreadable:rig:gastown", "the unjudgeable ancestry did not make the scan incomplete")
+}
+
+// TestPairReadyReadyItemClearsOnceTheRunningCommitIsThePair: the ready item names
+// a pair to roll; once the running commit is that green, the next pass raises
+// nothing for it.
+func TestPairReadyReadyItemClearsOnceTheRunningCommitIsThePair(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
+	fx.run(pairT0)
+	require.Equal(t, []string{"deploy-pair-ready:gastown:" + c[2][:12]}, pairItemKeys(fx.check.observed()))
+
+	fx.writeRunning(t, c[2])
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	assert.Empty(t, fx.check.observed(), "the ready item for the commit the daemon runs was not cleared")
+}
+
 // pairItemKeys is the key of each item, for asserting what a pass holds.
 func pairItemKeys(items []attention.Item) []string {
 	keys := make([]string, 0, len(items))
