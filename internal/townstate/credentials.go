@@ -31,6 +31,11 @@ var (
 	// tokensSegment: the plural word as a whole name segment; countOrFlag: a number or a switch.
 	tokensSegment = regexp.MustCompile(`(?i)(^|[^a-z0-9])tokens([^a-z0-9]|$)`)
 	countOrFlag   = regexp.MustCompile(`(?i)^(\d+|on|off|true|false)$`)
+	// envRefOnly: the whole value is one environment reference, the form the town
+	// config uses to name where a token lives instead of holding it. The name
+	// follows config's env var rule, so a leading digit (a shell positional) is
+	// not a reference (gt-t5pxk8).
+	envRefOnly = regexp.MustCompile(`^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$`)
 )
 
 func credentialName(name string) bool {
@@ -49,13 +54,23 @@ func credentialName(name string) bool {
 }
 
 // isSecret reports whether value, held under a credential name, is reportable.
-// Empty values and placeholders are not. The one shape exemption is a setting
-// that counts or switches tokens: the plural word "tokens" as a whole name
-// segment (MAX_OUTPUT_TOKENS) with a number or on/off/true/false, and no other
-// credential word in the name (API_KEY_TOKENS is not exempt). Under key, secret,
-// password or the singular token, no value is exempt by shape.
+// Empty values and placeholders are not. A value that is only an environment
+// reference names where the secret lives, so it is not one. A field named
+// exactly keys lists names, not a credential, unless its value is token-shaped
+// by config.LooksLikeSecret; a longer name (api_keys) gets no such exemption.
+// The one shape exemption is a setting that counts or switches tokens: the
+// plural word "tokens" as a whole name segment (MAX_OUTPUT_TOKENS) with a
+// number or on/off/true/false, and no other credential word in the name
+// (API_KEY_TOKENS is not exempt). Under key, secret, password or the singular
+// token, no value is exempt by shape.
 func isSecret(name, value string) bool {
 	if value == "" || strings.EqualFold(value, redactedMarker) || strings.EqualFold(value, "redacted") {
+		return false
+	}
+	if envRefOnly.MatchString(value) {
+		return false
+	}
+	if strings.EqualFold(name, "keys") && !config.LooksLikeSecret("", value) {
 		return false
 	}
 	return !(tokensSegment.MatchString(name) && countOrFlag.MatchString(value) &&
