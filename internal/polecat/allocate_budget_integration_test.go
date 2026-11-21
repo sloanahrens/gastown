@@ -197,8 +197,14 @@ func TestIntegrationAllocateAndAddGitProcesses(t *testing.T) {
 // its work merges into on every start point. Git records it itself when the
 // start point is a remote-tracking ref (the default), so the pin is not run
 // there; a base that is a local branch is not tracked by git, so the pin still
-// writes it (gt-gol613).
+// writes it, and git's own setup is forced on for the add (gt-gol613).
 func TestIntegrationAllocateAndAddRecordsTheUpstream(t *testing.T) {
+	// The fixture turns git's own upstream setup off in the repository and in
+	// the global config, so the default row proves the worktree add records the
+	// upstream by construction, not through this host's config.
+	global := filepath.Join(privateTempDir(t), "gitconfig")
+	seedFile(t, global, "[branch]\n\tautoSetupMerge = false\n")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
 	for _, tt := range []struct{ name, base, merge string }{
 		{"the default start point", "", "refs/heads/main"},
 		{"a base that is a local branch", "devx", "refs/heads/devx"},
@@ -206,6 +212,7 @@ func TestIntegrationAllocateAndAddRecordsTheUpstream(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			m, rec := newAllocateFixture(t)
 			runGit(t, rec.runIn, "branch", "devx", "origin/main")
+			runGit(t, rec.runIn, "config", "branch.autoSetupMerge", "false")
 			_, p, err := m.AllocateAndAdd(AddOptions{BaseBranch: tt.base})
 			if err != nil {
 				t.Fatalf("AllocateAndAdd: %v", err)

@@ -3784,7 +3784,9 @@ func (g *Git) WorktreeAdd(path, branch string) error {
 // callers can run "git lfs pull" later when LFS content is actually needed.
 func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
 	if _, err := g.runWithEnv(
-		[]string{"worktree", "add", "-b", branch, path, startPoint},
+		// branch.autoSetupMerge=true makes git record the start point's remote as
+		// the new branch's upstream whatever the host's config says (gt-gol613).
+		[]string{"-c", "branch.autoSetupMerge=true", "worktree", "add", "-b", branch, path, startPoint},
 		[]string{"GIT_LFS_SKIP_SMUDGE=1"},
 	); err != nil {
 		return err
