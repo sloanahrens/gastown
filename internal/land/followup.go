@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -81,6 +82,12 @@ type FollowupBeads interface {
 	// a bounded number of them: the set a landing de-duplicates against.
 	ListFollowups(label string) ([]ExistingFollowup, error)
 }
+
+// ErrBundleFull is what appending to an open bundle reports, wrapped, when the
+// bundle has no room for the addition (no Goal bullet, no box to place it by, or
+// the boxes of a landing already there): the feed files a new bundle on it and
+// reports any other error as the failure it is.
+var ErrBundleFull = errors.New("follow-up bundle has no room for the addition")
 
 // followupSkips is what a landing's feed dropped because FollowupSkip named a
 // reason: how many findings, and each reason once (gt-3v8jno). A finding is

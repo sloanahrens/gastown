@@ -1560,7 +1560,7 @@ func (b followupBeads) AppendFollowup(id string, add land.FollowupAddition) erro
 	}
 	body, ok := land.InsertFollowupLines(issue.Description, add)
 	if !ok {
-		return fmt.Errorf("follow-up bundle %s has no room for the addition: nothing appended", id)
+		return fmt.Errorf("follow-up bundle %s: %w: nothing appended", id, land.ErrBundleFull)
 	}
 	boxes := add.Boxes
 	if have := strings.TrimRight(issue.AcceptanceCriteria, "\n"); have != "" {
