@@ -23,9 +23,9 @@ func nodeDiskRowsNamed(rows []Job, prefix string) []Job {
 	return found
 }
 
-// a reading at the staleness bound is still current; one second past it is
-// unknown, so the bound alone decides. The byte counts appear only when the
-// entry holds them.
+// a reading at the staleness bound is still current; one second past it, or
+// dated after now, is unknown, so the bound and the clock alone decide. The
+// byte counts appear only when the entry holds them.
 func TestJobsNodeDisk(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -36,6 +36,7 @@ func TestJobsNodeDisk(t *testing.T) {
 		{name: "a fresh reading is ok", ago: 5 * time.Minute, wantState: StateOK},
 		{name: "a reading at the bound is ok", ago: nodeDiskStaleAfter, wantState: StateOK},
 		{name: "a reading past the bound is unknown", ago: nodeDiskStaleAfter + time.Second, wantState: StateUnknown},
+		{name: "a reading after now is unknown", ago: -time.Second, wantState: StateUnknown},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
