@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +37,41 @@ func landOmStatsClassAssertNoFindings(t *testing.T, week landOmStatsClassWeek) {
 		if c.Majors != 0 || c.Minors != 0 {
 			t.Errorf("class %s counts majors %d minors %d, want none", c.ID, c.Majors, c.Minors)
 		}
+	}
+}
+
+// TestLandOmStatsClassRecordsCountsUnparseableLines: the reader returns every
+// record that decodes, whatever its attempt or verdict, skips a follow-up queue
+// line and a blank line without counting them, and counts the lines it cannot
+// use — one that is not JSON and one that names no instant. That count is the
+// one land's own report gives for the same bytes, so the two reports agree
+// about a torn log.
+func TestLandOmStatsClassRecordsCountsUnparseableLines(t *testing.T) {
+	t.Parallel()
+	lines := []string{
+		`{"bead":"gt-a","attempt":1,"verdict":"request_changes","at":"2026-11-10T10:00:00Z"}`,
+		`{"bead":"gt-b","attempt":1,"verdict":"approve","at":"2026-11-11T10:00:00Z"}`,
+		`{"bead":"gt-e","attempt":0,"at":"2026-11-12T10:00:00Z"}`,
+		`{"bead":"gt-q","at":"2026-11-13T10:00:00Z","followup_queue":{"landed":"abc","score":0.9,"findings":[]}}`,
+		`{"bead":"gt-c",`,
+		`{"bead":"gt-d","attempt":1,"verdict":"approve"}`,
+		`   `,
+	}
+	data := []byte(strings.Join(lines, "\n") + "\n")
+
+	records, unparseable := readLandOmStatsClassRecords(data)
+	if len(records) != 3 || records[0].BeadID != "gt-a" || records[1].BeadID != "gt-b" || records[2].BeadID != "gt-e" {
+		t.Errorf("records = %+v, want gt-a, gt-b and gt-e", records)
+	}
+	if unparseable != 2 {
+		t.Errorf("unparseable = %d, want 2: the non-JSON line and the record with no instant", unparseable)
+	}
+	stats, err := land.AggregateOmStats(bytes.NewReader(data), nil, time.Time{})
+	if err != nil {
+		t.Fatalf("AggregateOmStats: %v", err)
+	}
+	if unparseable != stats.Skipped {
+		t.Errorf("unparseable = %d, OmStats.Skipped = %d for the same bytes", unparseable, stats.Skipped)
 	}
 }
 
