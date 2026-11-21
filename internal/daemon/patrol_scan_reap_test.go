@@ -26,6 +26,9 @@ import (
 // (2026-10-03, 12 seats). It is the shape the host must parse for real.
 const reapGolden = "testdata/polecat_check_recovery_batch_gastown.json"
 
+// reapNukePreserved is a nuke whose push was parked on a <branch>-<sha7> ref.
+const reapNukePreserved = "testdata/polecat_nuke_preserved.txt"
+
 func readGolden(t *testing.T) string {
 	t.Helper()
 	data, err := os.ReadFile(reapGolden)
@@ -191,7 +194,7 @@ func TestReapArgvNeverForces(t *testing.T) {
 	gt := newFakeCLI(func([]string) cliReply { return cliReply{} })
 	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
 
-	if err := h.Reap("gastown", "onyx"); err != nil {
+	if _, err := h.Reap("gastown", "onyx"); err != nil {
 		t.Fatalf("Reap: %v", err)
 	}
 	calls := gt.recorded()
@@ -207,6 +210,65 @@ func TestReapArgvNeverForces(t *testing.T) {
 	}
 }
 
+// The nuke's preserve line names the ref its self-preserve push parked the
+// seat's tip on, read from the captured output (gt-edepiy).
+func TestReapReturnsPreservedRef(t *testing.T) {
+	t.Parallel()
+	out, err := os.ReadFile(reapNukePreserved)
+	if err != nil {
+		t.Fatalf("reading the captured nuke output: %v", err)
+	}
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stdout: string(out)} })
+	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+
+	ref, err := h.Reap("gastown", "onyx")
+	if err != nil {
+		t.Fatalf("Reap: %v", err)
+	}
+	const want = "origin/polecat/onyx/gt-d0glu1+mwnrm11d-301dec4"
+	if ref != want {
+		t.Fatalf("Reap ref = %q, want %q", ref, want)
+	}
+}
+
+// A nuke names no ref when it pushed nothing: the tip was already reachable, or
+// the sandbox seat's branch sits on origin. A refused, failed or unstarted nuke
+// returns its error and no ref, even with a push line in its output (gt-edepiy).
+func TestReapReturnsNoRefWithoutPush(t *testing.T) {
+	t.Parallel()
+	push, err := os.ReadFile(reapNukePreserved)
+	if err != nil {
+		t.Fatalf("reading the captured nuke output: %v", err)
+	}
+	rows := []struct {
+		name     string
+		out      string
+		code     int
+		noBinary bool
+		wantErr  bool
+	}{
+		{"already reachable", "  ✓ polecat/onyx/gt-d0glu1+mwnrm11d already reachable from origin/main — nothing to preserve\n", 0, false, false},
+		{"sandbox seat on origin", "  ✓ the seat's branch is on origin at 301dec4; the host's local ref is a placeholder\n", 0, false, false},
+		{"refused", string(push), nukeRefusedExitCode, false, true},
+		{"failed", string(push), 1, false, true},
+		{"no gt binary", string(push), 0, true, true},
+	}
+	for _, row := range rows {
+		gt := newFakeCLI(func([]string) cliReply { return cliReply{stdout: row.out, stderr: "blocked", code: row.code} })
+		h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+		if row.noBinary {
+			h.d.gtPath = ""
+		}
+		ref, err := h.Reap("gastown", "onyx")
+		if (err != nil) != row.wantErr {
+			t.Errorf("%s: Reap error = %v, want error %v", row.name, err, row.wantErr)
+		}
+		if ref != "" {
+			t.Errorf("%s: Reap ref = %q, want none", row.name, ref)
+		}
+	}
+}
+
 // Exit status 3 is a safety refusal; the tick must read it as blocked, not
 // failed. Every other failure stays a plain error.
 func TestReapRefusalExitIsSentinel(t *testing.T) {
@@ -215,7 +277,7 @@ func TestReapRefusalExitIsSentinel(t *testing.T) {
 		return cliReply{stderr: "blocked: 1 polecat(s) failed nuke safety checks", code: nukeRefusedExitCode}
 	})
 	h := reapHost(t, enabledCleanup("gastown"), nil, refused)
-	err := h.Reap("gastown", "onyx")
+	_, err := h.Reap("gastown", "onyx")
 	if !errors.Is(err, errReapRefused) {
 		t.Fatalf("Reap on exit 3 = %v, want errReapRefused", err)
 	}
@@ -225,7 +287,7 @@ func TestReapRefusalExitIsSentinel(t *testing.T) {
 
 	broken := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "boom", code: 1} })
 	h = reapHost(t, enabledCleanup("gastown"), nil, broken)
-	if err := h.Reap("gastown", "onyx"); err == nil || errors.Is(err, errReapRefused) {
+	if _, err := h.Reap("gastown", "onyx"); err == nil || errors.Is(err, errReapRefused) {
 		t.Fatalf("Reap on exit 1 = %v, want a plain error", err)
 	}
 }
@@ -400,7 +462,7 @@ func TestReapHostRefusesUncoveredRig(t *testing.T) {
 			_, e := h.BranchClaimed("beads", "polecat/onyx/gt-work1+abc")
 			return e
 		}(),
-		"Reap": h.Reap("beads", "onyx"),
+		"Reap": func() error { _, e := h.Reap("beads", "onyx"); return e }(),
 	} {
 		if err == nil {
 			t.Errorf("%s answered for an uncovered rig without error", name)

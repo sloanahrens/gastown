@@ -1,0 +1,3 @@
+  ✓ preserved branch polecat/onyx/gt-d0glu1+mwnrm11d-301dec4 as origin/polecat/onyx/gt-d0glu1+mwnrm11d-301dec4
+  ⚠ origin/polecat/onyx/gt-d0glu1+mwnrm11d was not fast-forwardable; work parked on origin/polecat/onyx/gt-d0glu1+mwnrm11d-301dec4 instead
+  ○ remote ref origin/polecat/onyx/gt-d0glu1+mwnrm11d-301dec4 preserved for the landing worker

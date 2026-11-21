@@ -19,6 +19,7 @@ type fakeReapEnv struct {
 	claimed     map[string]string // branch -> bead
 	claimErr    map[string]error
 	reapErr     map[string]error
+	preserved   map[string]string // seat -> the ref its nuke pushed the tip to
 	reaped      []string
 }
 
@@ -27,12 +28,12 @@ func (f *fakeReapEnv) IdleSince(_, p string) (time.Time, error) {
 	return f.idleSince[p], f.idleErr[p]
 }
 func (f *fakeReapEnv) BranchClaimed(_, b string) (string, error) { return f.claimed[b], f.claimErr[b] }
-func (f *fakeReapEnv) Reap(_, p string) error {
+func (f *fakeReapEnv) Reap(_, p string) (string, error) {
 	if err := f.reapErr[p]; err != nil {
-		return err
+		return "", err
 	}
 	f.reaped = append(f.reaped, p)
-	return nil
+	return f.preserved[p], nil
 }
 
 // eligible returns an env with one seat, "onyx", that passes every veto and is
@@ -92,6 +93,29 @@ func TestReapDryRunNeverRemoves(t *testing.T) {
 	}
 	if len(env.reaped) != 0 {
 		t.Fatalf("dry-run removed %v", env.reaped)
+	}
+}
+
+// A reaped seat's detail names the ref its nuke preserved the tip on, and adds
+// nothing when the nuke pushed nothing (gt-edepiy).
+func TestReapDetailNamesPreservedRef(t *testing.T) {
+	t.Parallel()
+	const ref = "origin/polecat/onyx/gt-1-abc1234"
+	const base = "idle 1h0m0s, SAFE_TO_NUKE, git state live"
+	for _, row := range []struct{ preserved, detail string }{
+		{ref, base + ", preserved as " + ref},
+		{"", base},
+	} {
+		env := eligible()
+		env.preserved = map[string]string{"onyx": row.preserved}
+		r := reapScanner(env, ReapOptions{}).Tick("gastown")
+		f, ok := reapFinding(t, r, "onyx")
+		if !ok || f.Outcome != OutcomeReaped {
+			t.Fatalf("preserved %q: finding = %+v, %v; want reaped", row.preserved, f, ok)
+		}
+		if f.Detail != row.detail {
+			t.Fatalf("preserved %q: detail = %q, want %q", row.preserved, f.Detail, row.detail)
+		}
 	}
 }
 
