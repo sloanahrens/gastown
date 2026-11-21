@@ -1526,6 +1526,8 @@ type followupBeads struct {
 type followupClient interface {
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
 	Create(opts beads.CreateOptions) (*beads.Issue, error)
+	Show(id string) (*beads.Issue, error)
+	Update(id string, opts beads.UpdateOptions) error
 }
 
 var _ land.FollowupBeads = followupBeads{}
@@ -1542,6 +1544,30 @@ func (b followupBeads) CreateFollowup(spec land.FollowupSpec) (string, error) {
 		return "", err
 	}
 	return issue.ID, nil
+}
+
+// AppendFollowup adds a landing's lines, boxes and labels to the open bundle id
+// with one Update. It writes nothing, and says why, when the bead is not open or
+// land.InsertFollowupLines finds no place for the addition (no Goal bullet, no
+// box, or the bundle already holds as many boxes as a landing carries).
+func (b followupBeads) AppendFollowup(id string, add land.FollowupAddition) error {
+	issue, err := b.client.Show(id)
+	if err != nil {
+		return err
+	}
+	if issue.Status != string(beads.StatusOpen) {
+		return fmt.Errorf("follow-up bundle %s is %s, not open: nothing appended", id, issue.Status)
+	}
+	body, ok := land.InsertFollowupLines(issue.Description, add)
+	if !ok {
+		return fmt.Errorf("follow-up bundle %s has no room for the addition: nothing appended", id)
+	}
+	boxes := add.Boxes
+	if have := strings.TrimRight(issue.AcceptanceCriteria, "\n"); have != "" {
+		boxes = append([]string{have}, boxes...)
+	}
+	acceptance := strings.Join(boxes, "\n")
+	return b.client.Update(id, beads.UpdateOptions{Description: &body, Acceptance: &acceptance, AddLabels: add.Labels})
 }
 
 func (b followupBeads) ListFollowups(label string) ([]land.ExistingFollowup, error) {
