@@ -356,9 +356,10 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 }
 
 // holdFailedImagePins reads a pin whose read failed from its last good state for
-// its first imagePinHoldTicks failures, then keeps the error; a good read starts
-// the count over, a pin with no good read keeps its error at once, and each held
-// pin is logged instead of queued as an item.
+// its first imagePinHoldTicks failures at the same pinned commit, then keeps the
+// error; a good read starts the count over, a pin with no good read or a failed
+// read at a moved commit keeps its error at once, and each held pin is logged
+// instead of queued as an item.
 func (d *Daemon) holdFailedImagePins(states []ImagePinState) {
 	if d.imagePinsLast == nil {
 		d.imagePinsLast, d.imagePinsFails = map[string]ImagePinState{}, map[string]int{}
@@ -367,11 +368,22 @@ func (d *Daemon) holdFailedImagePins(states []ImagePinState) {
 		st := &states[i]
 		if st.Err == nil {
 			d.imagePinsLast[st.Name], d.imagePinsFails[st.Name] = *st, 0
-		} else if last, ok := d.imagePinsLast[st.Name]; ok && d.imagePinsFails[st.Name] < imagePinHoldTicks {
-			d.imagePinsFails[st.Name]++
-			d.logger.Printf("image_pins: image pin %s cannot be read (%d of %d held ticks), so this tick reads its last good state: %v", st.Name, d.imagePinsFails[st.Name], imagePinHoldTicks, st.Err)
-			*st = last
+			continue
 		}
+		last, ok := d.imagePinsLast[st.Name]
+		// The held state is the last good read of the commit it was read at: a
+		// failed read after the file moved that pin is kept at once, and its
+		// count starts over, since a count is for one commit (gt-ki0ir9).
+		if !ok || last.Pin != st.Pin {
+			d.imagePinsFails[st.Name] = 0
+			continue
+		}
+		if d.imagePinsFails[st.Name] >= imagePinHoldTicks {
+			continue
+		}
+		d.imagePinsFails[st.Name]++
+		d.logger.Printf("image_pins: image pin %s cannot be read (%d of %d held ticks), so this tick reads its last good state: %v", st.Name, d.imagePinsFails[st.Name], imagePinHoldTicks, st.Err)
+		*st = last
 	}
 }
 
