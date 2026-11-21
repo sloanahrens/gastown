@@ -60,7 +60,10 @@ var pinRepoForm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // and Behind hold, so no caller may take it for a fresh pin.
 //
 // A bd tip that does not contain the samples build is that pin's Err, so a
-// refresh never moves bd back to a build without `bd sample`.
+// refresh never moves bd back to a build without `bd sample`. A bd pin behind
+// that tip has its own commit held to the floor too: one that lacks it reads
+// LacksFloor, which is not an error, so a pin older than the floor is told apart
+// from one that cannot be read.
 func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, error), tipGit PinTipGit, pathCount PinPathCount, cmp ImagePinCompare) ([]ImagePinState, error) {
 	if tipGit == nil {
 		return nil, errors.New("image pins read: no git to read each source's origin/main with")
@@ -81,7 +84,9 @@ func ReadImagePinTips(ctx context.Context, data []byte, ownerOf func() (string, 
 
 // readImagePin reads one pin: its source's tip, and its lag behind that tip. A
 // bd pin's tip is held to the samples build every bd image needs, whether or not
-// the pin is at it (imagePinBDFloor). The first failure is the state's Err, with
+// the pin is at it (imagePinBDFloor), and a bd pin not at that tip has its own
+// commit held to the floor after the tip's check passed: one that lacks it reads
+// LacksFloor, which is not an error. The first failure is the state's Err, with
 // the pin's Name and Pin from the file, so the caller can tell which pin failed
 // and no pin is read with a guessed answer.
 func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pathCount PinPathCount, pin daemonimage.Pin) ImagePinState {
@@ -102,6 +107,14 @@ func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pa
 			state.Err = err
 			return state
 		}
+		if pin.Commit != tip {
+			lacksFloor, err := imagePinCommitLacksBDFloor(ctx, cmp, owner, repo, pin.Commit)
+			if err != nil {
+				state.Err = err
+				return state
+			}
+			state.LacksFloor = lacksFloor
+		}
 	}
 	if pin.Commit != tip {
 		behind, err := imagePinBehind(ctx, cmp, pathCount, pin, owner, repo, tip)
@@ -112,6 +125,27 @@ func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pa
 		state.Behind = behind
 	}
 	return state
+}
+
+// imagePinCommitLacksBDFloor asks the compare whether commit holds the samples
+// build, in the direction imagePinBDFloor uses: the commit as base and the floor
+// as head, so the count is the commits only the floor has. It reports that count
+// as a flag where imagePinBDFloor returns an error for a floor the commit lacks,
+// since this read records that answer on the pin's state. A compare that fails,
+// one that answers no comparison, and a negative count are errors worded as
+// imagePinBDFloor words them, naming the commit and the floor.
+func imagePinCommitLacksBDFloor(ctx context.Context, cmp ImagePinCompare, owner, repo, commit string) (bool, error) {
+	info, err := cmp.CompareCommits(ctx, owner, repo, commit, daemonimage.BDSamplesFloor)
+	if err != nil {
+		return false, daemonimage.CheckBDFloor(commit, 0, err)
+	}
+	if info == nil {
+		return false, daemonimage.CheckBDFloor(commit, 0, errors.New("the compare answered no comparison"))
+	}
+	if info.TotalCommits < 0 {
+		return false, daemonimage.CheckBDFloor(commit, info.TotalCommits, nil)
+	}
+	return info.TotalCommits > 0, nil
 }
 
 // parseImagePins expands the file's {owner} placeholder, as `gt daemon image
