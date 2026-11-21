@@ -492,7 +492,14 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 		pl, name := e.Land, e.Context
 		res := p.readStatus(passCtx, pl, name)
 		if passCtx.Err() != nil {
-			break // the read was cut off by the budget or a stop: nothing learned
+			// The read was cut off: nothing learned. The entry is stamped as read, so
+			// it rests for the interval and the entries behind it get the next pass
+			// instead of starving behind it. A stop of the daemon cuts reads off too,
+			// but returns below before the save, so a restarted runner reads the
+			// entry at once.
+			entries[i].LastRead = now
+			changed = true
+			break
 		}
 		changed = true
 		if res.Verdict != PostLandStatusUnknown && p.timedOut(e, now, timeout) {
