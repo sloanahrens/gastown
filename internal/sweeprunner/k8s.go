@@ -348,6 +348,9 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err := spec.Validate(); err != nil {
 		return Plan{}, err
 	}
+	if spec.Snapshot == "" {
+		return Plan{}, &FieldError{Field: "snapshot", Rule: "the kubernetes backend copies the repository from a mirror and wants its absolute path"}
+	}
 	job, err := renderJob(spec)
 	if err != nil {
 		return Plan{}, err
@@ -380,6 +383,15 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			Refuse: refuseActiveSweepJobs(spec),
 		}, PriorityGuard(spec, spec.ProtectedNamespaces)},
 		Apply: []Step{
+			// The mirror of the live repository, one per rig: cloned the first time
+			// (a later launch finds the directory, which is not a failure), then
+			// updated by git, which reads a repository a landing writes safely, where
+			// a tar of its files breaks (sweep 9ef45e87). Fetch, never retried:
+			// --prune drops refs the live repository deleted; --update-shallow because
+			// the repository is shallow. A full fetch into an EMPTY repository is what
+			// the daemon's 6 GiB cgroup killed (gt-2sylta), so the first copy is a clone.
+			{Argv: []string{"git", "clone", "--mirror", "--quiet", spec.RepoDir, spec.Snapshot}, SkipWhen: "already exists and is not an empty directory"},
+			{Argv: []string{"git", "--git-dir", spec.Snapshot, "fetch", "--quiet", "--force", "--prune", "--no-tags", "--update-shallow", spec.RepoDir, "+refs/*:refs/*"}},
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: repoClaim.JSON()},
@@ -396,7 +408,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			// the runner cannot use, so the exec that follows gives the tree to
 			// the runner's user and makes it readable. The copy is retried once:
 			// the bare repository is live, so a landing can change it mid-read.
-			{Argv: kubectlArgv(spec, "cp", spec.RepoDir+"/.", sync.Metadata.Name+":"+RepoMount), Retry: true},
+			{Argv: kubectlArgv(spec, "cp", spec.Snapshot+"/.", sync.Metadata.Name+":"+RepoMount), Retry: true},
 			{Argv: kubectlArgv(spec, "exec", sync.Metadata.Name, "--", "sh", "-c", syncChownCommand())},
 			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found")},
 			// The claim the Job writes its result to goes before the Job, which

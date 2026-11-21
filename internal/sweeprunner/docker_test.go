@@ -28,6 +28,7 @@ func goldenSpec() Spec {
 		Jobs:     4,
 		OutDir:   "/Users/ops/gt/.runtime/sweep/out",
 		RepoDir:  "/Users/ops/gt/gastown/.repo.git",
+		Snapshot: "/Users/ops/gt/.runtime/sweep-repo/gastown.git",
 		Dind:     true,
 		RunID:    "mvv8asko",
 		Context:  "colima-gt-sbx",

@@ -50,6 +50,11 @@ type Spec struct {
 	// RepoDir is the rig's bare repository, mounted read-only at RepoMount. It
 	// must be absolute.
 	RepoDir string
+	// Snapshot is the rig's persistent mirror of RepoDir that the Kubernetes
+	// backend copies into the sync pod, not RepoDir itself, which a landing
+	// writes while a tar of it reads (gt-4dx0su). It must be absolute; the
+	// Docker backend mounts RepoDir and ignores it.
+	Snapshot string
 	// Dind starts a Docker-in-Docker sidecar for the packages whose tests need a
 	// Docker API (internal/testutil starts Dolt through testcontainers). The
 	// runner never mounts the host's socket.
@@ -148,6 +153,9 @@ func (s Spec) Validate() error {
 	}
 	if !mountPath(s.RepoDir) {
 		return &FieldError{Field: "repoDir", Rule: fmt.Sprintf("%q is not an absolute path without a colon", s.RepoDir)}
+	}
+	if s.Snapshot != "" && !mountPath(s.Snapshot) {
+		return &FieldError{Field: "snapshot", Rule: fmt.Sprintf("%q is not an absolute path without a colon", s.Snapshot)}
 	}
 	if !nameSegment(s.Context) {
 		return &FieldError{Field: "context", Rule: fmt.Sprintf("%q is not one Docker context name", s.Context)}

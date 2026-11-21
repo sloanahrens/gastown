@@ -2138,6 +2138,7 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		Jobs:     cfg.Jobs,
 		OutDir:   filepath.Join(cfg.OutputRoot, st.rig, runID),
 		RepoDir:  constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, st.rig)),
+		Snapshot: filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", st.rig+".git"),
 		Dind:     cfg.Dind,
 		// The sidecar's share; zero renders the default (gt-esfo9p).
 		DindCPUs: cfg.DindCPUs,
