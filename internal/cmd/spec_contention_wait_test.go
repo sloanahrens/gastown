@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,5 +118,47 @@ func TestSpecContentionWaitAWaitingBeadTakesNoSeat(t *testing.T) {
 	}
 	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-resting" {
 		t.Fatalf("skipped = %+v, want only gt-resting", r.Skipped)
+	}
+}
+
+// A dry run predicts the live tick's hold (gt-qjlu07): a bead whose contention
+// retry is still ahead is reported as held with its backoff time, not as
+// would-sling.
+func TestSpecContentionWaitDryRun(t *testing.T) {
+	t.Parallel()
+	retryAt := specTestNow.Add(30 * time.Second)
+	spec := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	spec.Metadata = contentionMetadata(specTestNow.Add(-10*time.Second), 1, retryAt)
+	f := newFakeSpecTown(spec)
+	env := f.env()
+	env.DryRun = true
+	r := runSpecDispatchCycle(env)
+
+	if len(r.Dispatched) != 0 || len(f.slung) != 0 {
+		t.Fatalf("dispatched %+v slung %v, want the waiting bead reported as held", r.Dispatched, f.slung)
+	}
+	want := "gt-a: " + specdispatch.SkipContentionBackoff + retryAt.UTC().Format(time.RFC3339)
+	if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+		t.Fatalf("skipped = %+v, want one line %q", r.Skipped, want)
+	}
+}
+
+// A dry run's re-read can fail; it then reports the bead as held, as the live
+// tick's failed re-read does, rather than as would-sling (gt-qjlu07).
+func TestSpecContentionWaitDryRunRereadFailureHolds(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.DryRun = true
+	env.ShowFresh = func(string) (specdispatch.Spec, error) {
+		return specdispatch.Spec{}, errors.New("bd show: boom")
+	}
+	r := runSpecDispatchCycle(env)
+
+	if len(r.Dispatched) != 0 || len(f.slung) != 0 {
+		t.Fatalf("dispatched %+v, want the unreadable bead held", r.Dispatched)
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "re-read failed") {
+		t.Fatalf("skipped = %+v, want one re-read-failed hold", r.Skipped)
 	}
 }

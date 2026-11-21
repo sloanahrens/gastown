@@ -2398,6 +2398,18 @@ func specContentionOf(metadata []byte) *specdispatch.ContentionState {
 	return &rec
 }
 
+// specContentionSkipLine is the hold line for a bead whose lost bond scheduled
+// a retry still ahead of now, or "" when the bead may go on. The schedule is
+// read from the freshest read of the bead, so a loss written after the
+// candidate read holds too (gt-6kg6xb, gt-qjlu07).
+func specContentionSkipLine(id string, latest specdispatch.Spec, now time.Time) string {
+	rec := specContentionOf(latest.Metadata)
+	if rec == nil || !specdispatch.ContentionWaiting(*rec, now) {
+		return ""
+	}
+	return fmt.Sprintf("%s: %s%s", id, specdispatch.SkipContentionBackoff, rec.RetryAt.UTC().Format(time.RFC3339))
+}
+
 // recordLockTimeout writes a bead's consecutive assignee-lock-timeout count
 // through the env's writer. An env with no writer cannot bound the deferrals,
 // and the caller labels the bead instead (gt-a4cdcd).
@@ -3032,6 +3044,18 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		entry := specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent}
 		if env.DryRun {
+			// A dry run asks the live tick's last-moment question of the same
+			// read, so a contention wait is reported as held and not as
+			// would-sling; a failed read holds too (gt-qjlu07).
+			latest, err := env.showFresh(id)
+			if err != nil {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: re-read failed: %s", id, specStaleReason, firstErrLine(err))})
+				continue
+			}
+			if line := specContentionSkipLine(id, latest, env.Now()); line != "" {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: line})
+				continue
+			}
 			entry.Line = fmt.Sprintf("%s: would sling to %s on %s (%s)", id, c.Rig, seat.Agent, seat.Reason)
 			entry.Line += specFormulaNote(c.Run) + specResumeNote(resume, gone)
 			if shapeNote != "" {
@@ -3066,8 +3090,8 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// the fresh bead, so a loss written after the candidate read holds too. A
 		// schedule that cannot be read has no retry time set and does not hold:
 		// the later beads bound it.
-		if rec := specContentionOf(latest.Metadata); rec != nil && specdispatch.ContentionWaiting(*rec, env.Now()) {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipContentionBackoff, rec.RetryAt.UTC().Format(time.RFC3339))})
+		if line := specContentionSkipLine(id, latest, env.Now()); line != "" {
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: line})
 			continue
 		}
 		// The story-point step (gt-5d9k2f.14, gt-5d9k2f.18) runs on a bead the
