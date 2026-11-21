@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 	"github.com/steveyegge/gastown/internal/storypoints/estlog"
@@ -1122,6 +1123,52 @@ func TestSpecEstimateNewTextReadsNoLog(t *testing.T) {
 				t.Errorf("output = %q, want the fresh estimate", out.String())
 			}
 		})
+	}
+}
+
+// TestSpecEstimateNeighborMinutesLedger: a neighbor's landed time reaches the
+// note through the deps the estimate command builds, read from the rig's
+// landing ledger. The neighbor landed twice, so the newer record's 870s (14.5
+// min) is the one the note prints, and a record naming another rig is not its
+// time.
+func TestSpecEstimateNeighborMinutesLedger(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path, err := landings.Path(town, "gastown")
+	if err != nil {
+		t.Fatalf("landings.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("making the landings directory: %v", err)
+	}
+	ledger := `{"bead":"gt-neighbor","rig":"gastown","landed_at":"2026-11-01T10:00:00Z","polecat_secs":1800}
+{"bead":"gt-neighbor","rig":"gastown","landed_at":"2026-11-02T10:00:00Z","polecat_secs":870}
+{"bead":"gt-foreign","rig":"devops","landed_at":"2026-11-02T10:00:00Z","polecat_secs":600}
+`
+	if err := os.WriteFile(path, []byte(ledger), 0o644); err != nil {
+		t.Fatalf("writing the ledger: %v", err)
+	}
+
+	deps, err := specEstimateDeps(town, "gastown", io.Discard)
+	if err != nil {
+		t.Fatalf("specEstimateDeps: %v", err)
+	}
+	deps.HMRunner = func(context.Context, []string) ([]byte, error) {
+		return []byte(`[{"rank":1,"score":0.9,"kind":"bead","rig":"gastown","id":"gt-neighbor","title":"the neighbor"},` +
+			`{"rank":2,"score":0.8,"kind":"bead","rig":"gastown","id":"gt-foreign","title":"the foreign bead"}]`), nil
+	}
+	issue := &beads.Issue{ID: "gt-est", Title: "estimate me", Status: "open", Description: specEstimateBody}
+	got, err := estimate.Estimate(context.Background(), deps, issue)
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	for _, want := range []string{
+		"gt-neighbor (gastown) the neighbor (took 14.5 min)",
+		"gt-foreign (gastown) the foreign bead (no time recorded)",
+	} {
+		if !strings.Contains(estimate.Note(got), want) {
+			t.Fatalf("note %q does not carry %q", estimate.Note(got), want)
+		}
 	}
 }
 
