@@ -206,3 +206,29 @@ func TestSpecRosterHookedBeadsSkipAParkedStaleSeat(t *testing.T) {
 		t.Fatalf("a parked stale seat's bead reached HookedBeads (%v), want it released with the seat", roster.HookedBeads)
 	}
 }
+
+// TestSpecHookedMatch pins the match the in-flight term uses: a seat's hook
+// covers a running sling only on the same agent and the same bead. The hooked
+// set is built with specHookedKey, as the roster builds it.
+func TestSpecHookedMatch(t *testing.T) {
+	t.Parallel()
+	seats := specSlingSeats{Hooked: map[string]bool{specHookedKey("agent-a", "gt-x"): true}}
+	tests := []struct {
+		name        string
+		agent, bead string
+		want        bool
+	}{
+		{"same agent and bead", "agent-a", "gt-x", true},
+		{"same bead on another agent", "agent-b", "gt-x", false},
+		{"same agent, another bead", "agent-a", "gt-y", false},
+		{"neither", "agent-b", "gt-y", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := seats.hooks(tc.agent, tc.bead); got != tc.want {
+				t.Errorf("hooks(%q, %q) = %v, want %v", tc.agent, tc.bead, got, tc.want)
+			}
+		})
+	}
+}
