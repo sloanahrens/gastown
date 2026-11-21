@@ -67,13 +67,6 @@ const (
 	// cacheTrimPendingHolderJSON): the state the lister Job reads the claim in.
 	cacheTrimPodsVerb = "get pods -n " + cacheTrimNamespace + " -o json"
 
-	// The lister Job's calls after its apply, in the order the pass makes them:
-	// the wait for it to complete, the read of its log, and the delete once the
-	// log is read.
-	cacheTrimListerWaitVerb   = "wait --for=condition=complete job/" + cacheTrimListJob + " -n " + cacheTrimNamespace + " --timeout=120s"
-	cacheTrimListerLogsVerb   = "logs job/" + cacheTrimListJob + " -n " + cacheTrimNamespace
-	cacheTrimListerDeleteVerb = "delete job " + cacheTrimListJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
-
 	// cacheTrimFreeVerb is the pass's read of the claim's free space, made only
 	// when the trim takes the claim route: df in the pod the listing came from,
 	// not a helper subcommand, since an older image sends an unknown subcommand
