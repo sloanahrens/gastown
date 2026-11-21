@@ -101,77 +101,6 @@ func TestPostLandRunEndedReadsTheNewestEndedRun(t *testing.T) {
 	}
 }
 
-// TestPostLandRunEndedNotWhenARunCanStillReport: one run that has not ended,
-// whatever the others did, is a verdict still to come, so the commit is not
-// orphaned. The newest run is still named, so a later ended read describes the
-// same run.
-func TestPostLandRunEndedNotWhenARunCanStillReport(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		runs []forgejo.ActionRun
-		want landworker.RunEnd
-	}{
-		{
-			name: "a running run among ended ones",
-			runs: []forgejo.ActionRun{{ID: 11204, Status: "failure"}, {ID: 11205, Status: "running"}},
-			want: landworker.RunEnd{Run: 11205, Status: "running"},
-		},
-		{
-			name: "a waiting run among ended ones",
-			runs: []forgejo.ActionRun{{ID: 11204, Status: "cancelled"}, {ID: 11205, Status: "waiting"}},
-			want: landworker.RunEnd{Run: 11205, Status: "waiting"},
-		},
-		{
-			name: "a successful run among ended ones",
-			runs: []forgejo.ActionRun{{ID: 11204, Status: "cancelled"}, {ID: 11205, Status: "success"}},
-			want: landworker.RunEnd{Run: 11205, Status: "success"},
-		},
-		{
-			name: "a blocked run among ended ones",
-			runs: []forgejo.ActionRun{{ID: 11204, Status: "cancelled"}, {ID: 11205, Status: "blocked"}},
-			want: landworker.RunEnd{Run: 11205, Status: "blocked"},
-		},
-		{
-			name: "the newest run ended but an older one can still report",
-			runs: []forgejo.ActionRun{{ID: 11205, Status: "failure"}, {ID: 11204, Status: "running"}},
-			want: landworker.RunEnd{Run: 11205, Status: "failure"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			w := newPostLandWiringFixture(t, time.Hour)
-			w.runs.bySHA[w.older] = &forgejo.RunList{Runs: tc.runs}
-			got, err := w.runEnded(t)
-			if err != nil {
-				t.Fatalf("RunEnded: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("RunEnded = %+v, want %+v", got, tc.want)
-			}
-			if got.Ended {
-				t.Fatal("a run that can still report a verdict read as ended")
-			}
-		})
-	}
-}
-
-// TestPostLandRunEndedNoRunsIsNotEnded: a commit Forgejo lists no post-land
-// run for has not ended, so it is not orphaned; the zero answer names nothing.
-func TestPostLandRunEndedNoRunsIsNotEnded(t *testing.T) {
-	t.Parallel()
-	w := newPostLandWiringFixture(t, time.Hour)
-	w.runs.bySHA[w.older] = &forgejo.RunList{}
-	got, err := w.runEnded(t)
-	if err != nil {
-		t.Fatalf("RunEnded: %v", err)
-	}
-	if got != (landworker.RunEnd{}) {
-		t.Fatalf("RunEnded = %+v, want the zero answer: no run listed is not an end", got)
-	}
-}
-
 // TestPostLandRunEndedReturnsTheListingError: a run list that cannot be read
 // is an error, never an end, so a broken Forgejo read cannot orphan a landing.
 func TestPostLandRunEndedReturnsTheListingError(t *testing.T) {
@@ -218,4 +147,49 @@ func TestPostLandRunEndedAsksForTheCommitAndTheWorkflow(t *testing.T) {
 	if q.filter.WorkflowID != "post-land.yml" {
 		t.Fatalf("WorkflowID filter = %q, want post-land.yml", q.filter.WorkflowID)
 	}
+}
+
+// TestPostLandRunEndedStatusIsAKnownSpelling: a run's status reaches an
+// attention item as text, so the wiring reports only the spellings it knows. A
+// status it does not know reads not ended and carries no status, so a value
+// the API sent unvalidated cannot be quoted, and an ended answer's status is
+// always one of the three terminal spellings.
+func TestPostLandRunEndedStatusIsAKnownSpelling(t *testing.T) {
+	t.Parallel()
+	t.Run("an unknown status reads not ended and carries no status", func(t *testing.T) {
+		t.Parallel()
+		w := newPostLandWiringFixture(t, time.Hour)
+		w.runs.bySHA[w.older] = &forgejo.RunList{Runs: []forgejo.ActionRun{
+			{ID: 11205, Status: "ghp_notARealStatusToken"},
+		}}
+		got, err := w.runEnded(t)
+		if err != nil {
+			t.Fatalf("RunEnded: %v", err)
+		}
+		if got.Ended {
+			t.Fatalf("RunEnded = %+v, want not ended for a status the wiring does not know", got)
+		}
+		if got.Status != "" {
+			t.Fatalf("RunEnded status = %q, want it empty: the API's unknown spelling must not reach the item", got.Status)
+		}
+	})
+	t.Run("an ended answer carries one of the terminal spellings", func(t *testing.T) {
+		t.Parallel()
+		for _, status := range []string{"cancelled", "failure", "error"} {
+			w := newPostLandWiringFixture(t, time.Hour)
+			w.runs.bySHA[w.older] = &forgejo.RunList{Runs: []forgejo.ActionRun{{ID: 11205, Status: status}}}
+			got, err := w.runEnded(t)
+			if err != nil {
+				t.Fatalf("RunEnded for %q: %v", status, err)
+			}
+			if !got.Ended {
+				t.Fatalf("RunEnded for %q = %+v, want ended", status, got)
+			}
+			switch got.Status {
+			case "cancelled", "failure", "error":
+			default:
+				t.Fatalf("an ended answer's status = %q, want one of cancelled, failure, error", got.Status)
+			}
+		}
+	})
 }

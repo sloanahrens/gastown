@@ -1367,10 +1367,25 @@ func postLandRunIsEnded(status string) bool {
 		status == string(forgejo.StateFailure) || status == string(forgejo.StateError)
 }
 
+// postLandRunStatusSpelling is the status a RunEnd reports for a run: the
+// spelling the API sent when it is one this package knows, and "" otherwise.
+// RunEnd.Status is the text an attention item names an orphaned verdict by
+// (owl, gt-akljma), so a spelling the API sent unvalidated never leaves this
+// function.
+func postLandRunStatusSpelling(status string) string {
+	switch status {
+	case postLandRunCancelled,
+		string(forgejo.StateFailure), string(forgejo.StateError), string(forgejo.StateSuccess),
+		forgejo.RunStatusRunning, forgejo.RunStatusWaiting, forgejo.RunStatusBlocked:
+		return status
+	}
+	return ""
+}
+
 // postLandRunEnd folds the runs that tested a landed commit into the answer the
-// orphan check reads: the newest run's id and status, and ended only when at
-// least one run is listed and every one of them ended. A run that can still
-// post a verdict, and no run at all, is not an end.
+// orphan check reads: the newest run's id and a known status spelling, and
+// ended only when at least one run is listed and every one of them ended. A
+// run that can still post a verdict, and no run at all, is not an end.
 func postLandRunEnd(runs []forgejo.ActionRun) landworker.RunEnd {
 	if len(runs) == 0 {
 		return landworker.RunEnd{}
@@ -1385,7 +1400,7 @@ func postLandRunEnd(runs []forgejo.ActionRun) landworker.RunEnd {
 			ended = false
 		}
 	}
-	return landworker.RunEnd{Run: newest.ID, Status: newest.Status, Ended: ended}
+	return landworker.RunEnd{Run: newest.ID, Status: postLandRunStatusSpelling(newest.Status), Ended: ended}
 }
 
 // newPostLandWiring is the one place newRigLandingWorker's collaborators become
