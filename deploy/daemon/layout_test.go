@@ -2,7 +2,11 @@ package daemon
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -171,5 +175,78 @@ func TestDockerfileBdLayoutRefusesAnotherPlacement(t *testing.T) {
 				t.Errorf("%s with %s passed the bd layout check; want it refused", dockerfileName, tc.name)
 			}
 		})
+	}
+}
+
+// TestArchitecturePageDocumentsThePushPolicyRefusal holds the paragraph that
+// names the push Service to its two ways out: the values fields that let an
+// operator render a push URL. The page owns the wording; the facts are the
+// contract, so a reword that keeps them still passes.
+func TestArchitecturePageDocumentsThePushPolicyRefusal(t *testing.T) {
+	t.Parallel()
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "architecture.md"))
+	if err != nil {
+		t.Fatalf("reading docs/architecture.md: %v", err)
+	}
+	var block string
+	for _, b := range strings.Split(string(body), "\n\n") {
+		if strings.Contains(b, "`bd-gateway-push`") {
+			block = b
+			break
+		}
+	}
+	if block == "" {
+		t.Fatal("docs/architecture.md has no paragraph naming the bd-gateway-push Service")
+	}
+	for _, want := range []string{"Values.IncludeStatic", "Values.BdGatewayServicePolicyApplied"} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the paragraph naming the bd-gateway-push Service does not name %s, so the page states neither way out of the push URL refusal", want)
+		}
+	}
+}
+
+// TestValuesDocCallsTheAppliedPolicyAnAttestation holds the field's doc to its
+// contract: setting Values.BdGatewayServicePolicyApplied is an operator's
+// attestation that the policy file is applied, and the doc names that file and
+// the other way out.
+func TestValuesDocCallsTheAppliedPolicyAnAttestation(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join("..", "k8s", "daemon", "daemon.go")
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", path, err)
+	}
+	var doc string
+	ast.Inspect(file, func(n ast.Node) bool {
+		spec, ok := n.(*ast.TypeSpec)
+		if !ok || spec.Name.Name != "Values" {
+			return true
+		}
+		structType, ok := spec.Type.(*ast.StructType)
+		if !ok {
+			return false
+		}
+		for _, field := range structType.Fields.List {
+			for _, name := range field.Names {
+				if name.Name == "BdGatewayServicePolicyApplied" && field.Doc != nil {
+					doc = field.Doc.Text()
+				}
+			}
+		}
+		return false
+	})
+	if doc == "" {
+		t.Fatal("daemon.go has no doc comment on Values.BdGatewayServicePolicyApplied")
+	}
+	for _, want := range []string{
+		"attestation",
+		"deploy/k8s/bd-gateway-service-admission.yaml",
+		"Values.IncludeStatic",
+	} {
+		if !strings.Contains(strings.ToLower(doc), strings.ToLower(want)) {
+			t.Errorf("the Values.BdGatewayServicePolicyApplied doc %q does not name %q", doc, want)
+		}
 	}
 }

@@ -2,10 +2,6 @@ package daemon
 
 import (
 	"bytes"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -236,8 +232,8 @@ func TestPushPolicyAttestRefuses(t *testing.T) {
 
 // TestPushPolicyAttestAdmits holds the two ways out: each push URL renders with
 // Values.IncludeStatic and with Values.BdGatewayServicePolicyApplied, and a values
-// file with no push URL renders in all four flag combinations, with the flag
-// alone changing nothing.
+// file with no push URL renders the same stream under all four flag combinations,
+// apart from the static documents Values.IncludeStatic adds.
 func TestPushPolicyAttestAdmits(t *testing.T) {
 	t.Parallel()
 
@@ -339,9 +335,10 @@ func TestPushPolicyAttestAdmits(t *testing.T) {
 					t.Errorf("%s with %s names %s = %q, want none with no push URL set", tc.name, container.name, BdGatewayPushURLEnv, got)
 				}
 			}
-			if tc.include {
-				continue
-			}
+			// Values.IncludeStatic adds the static control-cluster manifests
+			// to the stream, so an include row's only expected difference is
+			// those documents; compare the stream without them.
+			m.Static = nil
 			var buf bytes.Buffer
 			if err := Render(&buf, m); err != nil {
 				t.Fatalf("rendering with %s: %v", tc.name, err)
@@ -351,62 +348,8 @@ func TestPushPolicyAttestAdmits(t *testing.T) {
 				continue
 			}
 			if !bytes.Equal(withoutStatic, buf.Bytes()) {
-				t.Errorf("the render with %s differs from the render with neither flag, though no push URL is set", tc.name)
+				t.Errorf("the render with %s differs from the render with neither flag outside the static documents, though no push URL is set", tc.name)
 			}
-		}
-	})
-}
-
-// TestPushPolicyAttestDocumented holds the attestation's contract to its word: the
-// field's doc comment in daemon.go says it is an attestation, and the architecture
-// page carries the refusal beside the paragraph that names the push Service.
-func TestPushPolicyAttestDocumented(t *testing.T) {
-	t.Parallel()
-
-	t.Run("the field doc says it is an attestation", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(packageDir(t), "daemon.go")
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ParseComments)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", path, err)
-		}
-		var doc string
-		ast.Inspect(file, func(n ast.Node) bool {
-			spec, ok := n.(*ast.TypeSpec)
-			if !ok || spec.Name.Name != "Values" {
-				return true
-			}
-			structType, ok := spec.Type.(*ast.StructType)
-			if !ok {
-				return false
-			}
-			for _, field := range structType.Fields.List {
-				for _, name := range field.Names {
-					if name.Name == "BdGatewayServicePolicyApplied" && field.Doc != nil {
-						doc = field.Doc.Text()
-					}
-				}
-			}
-			return false
-		})
-		if doc == "" {
-			t.Fatal("daemon.go has no doc comment on Values.BdGatewayServicePolicyApplied")
-		}
-		if !strings.Contains(strings.ToLower(doc), "attestation") {
-			t.Errorf("the Values.BdGatewayServicePolicyApplied doc %q does not say it is an attestation", doc)
-		}
-	})
-
-	t.Run("the architecture page carries the refusal", func(t *testing.T) {
-		t.Parallel()
-		path := filepath.Join(packageDir(t), "..", "..", "..", "docs", "architecture.md")
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("reading %s: %v", path, err)
-		}
-		const want = "A push URL is refused at render unless the policy is in the same render or the values file attests it is applied"
-		if !strings.Contains(string(body), want) {
-			t.Errorf("docs/architecture.md does not carry the refusal sentence %q", want)
 		}
 	})
 }
