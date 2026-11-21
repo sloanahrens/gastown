@@ -455,3 +455,67 @@ func TestFullShaProblemsNamesEachFailure(t *testing.T) {
 		})
 	}
 }
+
+// realPinsText is the pins file as the gate reads it, with its forge owner
+// expanded. It is the one reader of the real file: pinsWithBD rewrites its
+// output and the test compares that to a parse of this text, so the other pins
+// are held to the real file and not to the helper's own result.
+func realPinsText(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(daemonimage.PinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", daemonimage.PinsPath, err)
+	}
+	text, err := config.ExpandForgeOwner(string(body), config.DefaultForgeOwner)
+	if err != nil {
+		t.Fatalf("%s: %v", daemonimage.PinsPath, err)
+	}
+	return text
+}
+
+// pinsWithBD returns the image-pins text with its bd line naming commit. It
+// fails the test when the file has no bd line.
+func pinsWithBD(t *testing.T, commit string) []byte {
+	t.Helper()
+	text := realPinsText(t)
+	var out []string
+	var named bool
+	for _, line := range strings.Split(text, "\n") {
+		if f := strings.Fields(line); len(f) == 3 && f[0] == "bd" {
+			line, named = "bd "+f[1]+" "+commit, true
+		}
+		out = append(out, line)
+	}
+	if !named {
+		t.Fatalf("%s names no bd line", daemonimage.PinsPath)
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
+// TestPinsWithBDNamesTheCommit holds the fixture to its contract: its bd pin is
+// the commit given, and its other pins are the real file's.
+func TestPinsWithBDNamesTheCommit(t *testing.T) {
+	t.Parallel()
+	base, err := daemonimage.ParsePins([]byte(realPinsText(t)))
+	if err != nil {
+		t.Fatalf("ParsePins of the real file: %v", err)
+	}
+	for _, commit := range []string{bdPin, "fedcba9876543210fedcba9876543210fedcba98"} {
+		pins, err := daemonimage.ParsePins(pinsWithBD(t, commit))
+		if err != nil {
+			t.Fatalf("ParsePins: %v", err)
+		}
+		if len(pins) != len(base) {
+			t.Fatalf("pinsWithBD(%s) gave %d pins, want %d", commit, len(pins), len(base))
+		}
+		for i, p := range pins {
+			want := base[i]
+			if want.Name == "bd" {
+				want.Commit = commit
+			}
+			if p != want {
+				t.Errorf("pin %s = %+v, want %+v", p.Name, p, want)
+			}
+		}
+	}
+}
