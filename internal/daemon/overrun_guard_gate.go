@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -56,20 +57,38 @@ type overrunGateReader struct {
 	sandboxReads sandboxSessionReads
 
 	// The per-cycle reads, each kept with the error its read failed with so
-	// every seat on this tick gets the same answer.
-	slotReport  slot.Report
-	slotLoaded  bool
-	slotErr     error
-	procs       []polecat.Proc
-	procsLoaded bool
-	procErr     error
-	panesOut    string
-	panesLoaded bool
-	panesErr    error
-	gates       map[string][]polecat.Invocation
+	// every seat on this tick gets the same answer. The seats of a pass are read on
+	// up to overrunReadPoolSize goroutines (overrunReadPool). The three town-wide reads
+	// (slots, process table, pane list) are fetched once, behind a sync.Once each: every
+	// seat needs the same answer, so the other seats wait for that one fetch. The per-rig
+	// and per-session reads are fetched outside mu, so seats do not queue behind each
+	// other's reads (mu guards only the maps).
+	slotOnce   sync.Once
+	slotReport slot.Report
+	slotErr    error
+	procsOnce  sync.Once
+	procs      []polecat.Proc
+	procErr    error
+	panesOnce  sync.Once
+	panesOut   string
+	panesErr   error
+	mu         sync.Mutex
+	gates      map[string]*rigGates
 	// sandboxes is the registry's answer per session, read once per cycle: a
 	// seat's pane and process reads each ask whether it is sandboxed.
 	sandboxes map[string]sandboxAnswer
+
+	// Test seams: nil reads for real. readSlots reads the gate pool, listPanes the tmux
+	// pane list of all sessions, registry whether a session is sandboxed.
+	readSlots func() (slot.Report, error)
+	listPanes func() ([]byte, error)
+	registry  func(sessionName string) (bool, error)
+}
+
+// rigGates is one rig's gate pairs, read once.
+type rigGates struct {
+	once  sync.Once
+	pairs []polecat.Invocation
 }
 
 // sandboxAnswer is one session's registry read, kept with its error.
@@ -89,17 +108,28 @@ type sandboxSessionReads interface {
 // cannot be read is an error, so the caller counts all of the seat's time (the
 // direction that stops) instead of reading the wrong table.
 func (r *overrunGateReader) sandboxed(sessionName string) (bool, error) {
-	if a, ok := r.sandboxes[sessionName]; ok {
+	r.mu.Lock()
+	a, ok := r.sandboxes[sessionName]
+	r.mu.Unlock()
+	if ok {
 		return a.on, a.err
 	}
-	if r.sandboxes == nil {
-		r.sandboxes = map[string]sandboxAnswer{}
+	// Every seat has its own session, so the registry read runs outside mu: two seats
+	// never read the same session, and none waits behind another's read.
+	read := r.registry
+	if read == nil {
+		read = func(name string) (bool, error) { return session.IsSandboxed(r.d.config.TownRoot, name) }
 	}
-	on, err := session.IsSandboxed(r.d.config.TownRoot, sessionName)
+	on, err := read(sessionName)
 	if err != nil {
 		on, err = false, fmt.Errorf("sandbox registry: %w", err)
 	}
+	r.mu.Lock()
+	if r.sandboxes == nil {
+		r.sandboxes = map[string]sandboxAnswer{}
+	}
 	r.sandboxes[sessionName] = sandboxAnswer{on: on, err: err}
+	r.mu.Unlock()
 	return on, err
 }
 
@@ -113,7 +143,7 @@ func (r *overrunGateReader) sandboxSessionReads() sandboxSessionReads {
 // newOverrunGateReader returns the reader for one cycle, with the real ps and
 // tmux.
 func newOverrunGateReader(d *Daemon) *overrunGateReader {
-	return &overrunGateReader{d: d, pool: slot.PoolForTown(d.config.TownRoot), gates: map[string][]polecat.Invocation{}}
+	return &overrunGateReader{d: d, pool: slot.PoolForTown(d.config.TownRoot), gates: map[string]*rigGates{}}
 }
 
 // running reports whether the seat is inside its own gate now. An error means
@@ -140,10 +170,13 @@ func (r *overrunGateReader) running(seat overrunSeat) (bool, error) {
 // shells out to `docker ps`, says nothing about which seat holds what, and
 // would be paid for on every tick.
 func (r *overrunGateReader) Slots() (slot.Report, error) {
-	if !r.slotLoaded {
-		r.slotLoaded = true
+	r.slotOnce.Do(func() {
+		if r.readSlots != nil {
+			r.slotReport, r.slotErr = r.readSlots()
+			return
+		}
 		r.slotReport, r.slotErr = slot.StatusPoolLocksOnly(r.d.config.TownRoot, r.pool)
-	}
+	})
 	return r.slotReport, r.slotErr
 }
 
@@ -176,17 +209,22 @@ func (r *overrunGateReader) PanePIDs(sessionName string) ([]int, error) {
 	if r.panes != nil {
 		return r.panes(sessionName)
 	}
-	if !r.panesLoaded {
-		r.panesLoaded = true
-		ctx, cancel := context.WithTimeout(context.Background(), overrunGateReadTimeout)
-		defer cancel()
-		out, err := tmux.BuildCommandContext(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}").Output()
+	r.panesOnce.Do(func() {
+		var out []byte
+		var err error
+		if r.listPanes != nil {
+			out, err = r.listPanes()
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), overrunGateReadTimeout)
+			defer cancel()
+			out, err = tmux.BuildCommandContext(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}").Output()
+		}
 		if err != nil {
 			r.panesErr = fmt.Errorf("listing tmux panes: %w", err)
 		} else {
 			r.panesOut = string(out)
 		}
-	}
+	})
 	if r.panesErr != nil {
 		return nil, r.panesErr
 	}
@@ -195,12 +233,15 @@ func (r *overrunGateReader) PanePIDs(sessionName string) ([]int, error) {
 
 // gateInvocations is the rig's gate pairs, read once per rig per cycle.
 func (r *overrunGateReader) gateInvocations(rigName string) []polecat.Invocation {
-	if gates, ok := r.gates[rigName]; ok {
-		return gates
+	r.mu.Lock()
+	g := r.gates[rigName]
+	if g == nil {
+		g = &rigGates{}
+		r.gates[rigName] = g
 	}
-	gates := overrunGateInvocations(r.d.config.TownRoot, rigName)
-	r.gates[rigName] = gates
-	return gates
+	r.mu.Unlock()
+	g.once.Do(func() { g.pairs = overrunGateInvocations(r.d.config.TownRoot, rigName) })
+	return g.pairs
 }
 
 // SessionProcessTable is polecat.SessionProcessReads: a sandboxed seat's
@@ -223,10 +264,7 @@ func (r *overrunGateReader) SessionProcessTable(sessionName string) ([]polecat.P
 
 // ProcessTable reads the whole process table once per cycle.
 func (r *overrunGateReader) ProcessTable() ([]polecat.Proc, error) {
-	if !r.procsLoaded {
-		r.procsLoaded = true
-		r.procs, r.procErr = r.readProcessTable()
-	}
+	r.procsOnce.Do(func() { r.procs, r.procErr = r.readProcessTable() })
 	return r.procs, r.procErr
 }
 
