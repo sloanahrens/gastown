@@ -1,7 +1,6 @@
 package land
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"io"
@@ -72,6 +71,17 @@ func TestGateRunStoreErrors(t *testing.T) {
 			t.Errorf("ReadGateRuns = %v, %d, %v; want no runs and no error", runs, unparsed, err)
 		}
 	})
+	t.Run("a log that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		if err := os.MkdirAll(gateRunsPath(town), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runs, unparsed, err := ReadGateRuns(town)
+		if err == nil || !strings.Contains(err.Error(), gateRunsPath(town)) || runs != nil || unparsed != 0 {
+			t.Errorf("ReadGateRuns = %v, %d, %v; want no runs and a read error naming the log", runs, unparsed, err)
+		}
+	})
 	t.Run("a file where the log directory belongs", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
@@ -81,12 +91,64 @@ func TestGateRunStoreErrors(t *testing.T) {
 			t.Errorf("ReadGateRuns = %v, %v; want the open error naming the log", runs, err)
 		}
 	})
-	t.Run("a line past the scanner ceiling", func(t *testing.T) {
+}
+func TestGateRunStoreOverlongLine(t *testing.T) {
+	t.Parallel()
+	first, last := sampleGateRun("gt-first"), sampleGateRun("gt-last")
+	town := t.TempDir()
+	body := mustLine(t, first) + "\n" + strings.Repeat("x", 2<<20) + "\n" + mustLine(t, last) + "\n"
+	writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", body)
+	got, unparsed, err := ReadGateRuns(town)
+	if err != nil {
+		t.Fatalf("ReadGateRuns: %v", err)
+	}
+	if unparsed != 1 || !reflect.DeepEqual(got, []GateRun{first, last}) {
+		t.Errorf("ReadGateRuns = %+v, unparsed %d; want the two runs around the over-long line, 1 unparsed", got, unparsed)
+	}
+	// The limit is on the line without its newline: a row of exactly the limit
+	// reads, one byte more is skipped.
+	fill := gateRunLineMax - len(mustLine(t, sampleGateRun("")))
+	atLimit := sampleGateRun(strings.Repeat("a", fill))
+	if n := len(mustLine(t, atLimit)); n != gateRunLineMax {
+		t.Fatalf("test row is %d bytes, want %d", n, gateRunLineMax)
+	}
+	t.Run("a row of exactly the limit reads", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
-		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", strings.Repeat("x", 1<<20+1)+"\n")
-		if _, _, err := ReadGateRuns(town); !errors.Is(err, bufio.ErrTooLong) {
-			t.Errorf("ReadGateRuns = %v, want bufio.ErrTooLong", err)
+		body := mustLine(t, atLimit) + "\n" + mustLine(t, last) + "\n"
+		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", body)
+		got, unparsed, err := ReadGateRuns(town)
+		if err != nil || unparsed != 0 || !reflect.DeepEqual(got, []GateRun{atLimit, last}) {
+			t.Errorf("ReadGateRuns = %+v, unparsed %d, %v; want both rows, 0 unparsed", got, unparsed, err)
+		}
+	})
+	t.Run("a row one byte past the limit is skipped", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		over := sampleGateRun(strings.Repeat("a", fill+1))
+		body := mustLine(t, over) + "\n" + mustLine(t, last) + "\n"
+		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", body)
+		got, unparsed, err := ReadGateRuns(town)
+		if err != nil || unparsed != 1 || !reflect.DeepEqual(got, []GateRun{last}) {
+			t.Errorf("ReadGateRuns = %+v, unparsed %d, %v; want the last row, 1 unparsed", got, unparsed, err)
+		}
+	})
+	t.Run("a last row without a newline reads", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", mustLine(t, first)+"\n"+mustLine(t, last))
+		got, unparsed, err := ReadGateRuns(town)
+		if err != nil || unparsed != 0 || !reflect.DeepEqual(got, []GateRun{first, last}) {
+			t.Errorf("ReadGateRuns = %+v, unparsed %d, %v; want both rows, 0 unparsed", got, unparsed, err)
+		}
+	})
+	t.Run("an over-long last line without a newline is skipped", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", mustLine(t, first)+"\n"+strings.Repeat("x", 2<<20))
+		got, unparsed, err := ReadGateRuns(town)
+		if err != nil || unparsed != 1 || !reflect.DeepEqual(got, []GateRun{first}) {
+			t.Errorf("ReadGateRuns = %+v, unparsed %d, %v; want the first row, 1 unparsed", got, unparsed, err)
 		}
 	})
 }
