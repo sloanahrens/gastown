@@ -2,6 +2,7 @@ package rig
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,17 +17,13 @@ func fakeRepoOpener(f *gitfake.Fake) RepoFileOpener {
 	return func(repoPath string) RepoFileReader { return f.Open(repoPath) }
 }
 
-// stubRepo answers ReadRepoFile's two reads with what a test set, so the
+// stubRepo answers ReadRepoFile's read with what a test set, so the
 // branches that need a repo failure are driven on purpose rather than by a
 // fake world's accident of a directory with no repository behind it.
 type stubRepo struct {
-	refExists bool
-	existsErr error
-	data      string
-	fileErr   error
+	data    string
+	fileErr error
 }
-
-func (s stubRepo) RefExists(string) (bool, error) { return s.refExists, s.existsErr }
 
 func (s stubRepo) ShowFileAtRev(string, string) (string, error) { return s.data, s.fileErr }
 
@@ -182,7 +179,7 @@ func TestReadRepoFile_UnreadableRepoFailsClosed(t *testing.T) {
 	cloneFile(t, townRoot, "mango", ".om.json", `{"stale":true}`)
 
 	refErr := errors.New("fatal: not a git repository")
-	got, err := ReadRepoFile(stubOpener(stubRepo{existsErr: refErr}), townRoot, "mango", ".om.json")
+	got, err := ReadRepoFile(stubOpener(stubRepo{fileErr: refErr}), townRoot, "mango", ".om.json")
 	if err == nil {
 		t.Fatalf("ReadRepoFile = %+v, want an error for an unreadable repo", got)
 	}
@@ -205,7 +202,7 @@ func TestReadRepoFile_UnreadableShowFailsClosed(t *testing.T) {
 
 	showErr := errors.New("fatal: bad object refs/remotes/origin/main")
 	got, err := ReadRepoFile(
-		stubOpener(stubRepo{refExists: true, fileErr: showErr}), townRoot, "mango", ".om.json")
+		stubOpener(stubRepo{fileErr: showErr}), townRoot, "mango", ".om.json")
 	if err == nil {
 		t.Fatalf("ReadRepoFile = %+v, want an error for a repo that cannot read its own main", got)
 	}
@@ -224,7 +221,7 @@ func TestReadRepoFile_FileNotOnMainIsNotFound(t *testing.T) {
 	cloneFile(t, townRoot, "mango-deleted-on-main", ".om.json", `{"deleted":true}`)
 
 	got, err := ReadRepoFile(
-		stubOpener(stubRepo{refExists: true, fileErr: git.ErrNotAtRef}), townRoot, "mango-deleted-on-main", ".om.json")
+		stubOpener(stubRepo{fileErr: git.ErrNotAtRef}), townRoot, "mango-deleted-on-main", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
@@ -242,7 +239,10 @@ func TestReadRepoFile_NoFetchedMainIsNotFound(t *testing.T) {
 	rigRepoDir(t, townRoot, "mango-unfetched")
 	cloneFile(t, townRoot, "mango-unfetched", ".om.json", `{"unfetched":true}`)
 
-	got, err := ReadRepoFile(stubOpener(stubRepo{}), townRoot, "mango-unfetched", ".om.json")
+	// ShowFileAtRev reports the unresolved ref as a typed error, so ReadRepoFile
+	// asks nothing else about it (gt-iuzcez).
+	unresolved := stubRepo{fileErr: fmt.Errorf("resolving refs/remotes/origin/main: %w", git.ErrRefNotFound)}
+	got, err := ReadRepoFile(stubOpener(unresolved), townRoot, "mango-unfetched", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestReadRepoFile_MainAnswersWithMainsSource(t *testing.T) {
 	cloneFile(t, townRoot, "mango-on-main", ".om.json", `{"stale":true}`)
 
 	got, err := ReadRepoFile(
-		stubOpener(stubRepo{refExists: true, data: `{"from":"main"}`}), townRoot, "mango-on-main", ".om.json")
+		stubOpener(stubRepo{data: `{"from":"main"}`}), townRoot, "mango-on-main", ".om.json")
 	if err != nil {
 		t.Fatalf("ReadRepoFile: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestResolveMergeQueueConfig_UnreadableRepoDropsRepoTier(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, rigName, "config.json"), []byte(rigConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	unreadable := stubOpener(stubRepo{existsErr: errors.New("fatal: not a git repository")})
+	unreadable := stubOpener(stubRepo{fileErr: errors.New("fatal: not a git repository")})
 
 	mq := ResolveMergeQueueConfigIn(unreadable, townRoot, rigName)
 	if mq == nil {
@@ -343,7 +343,7 @@ func TestResolveMergeQueueConfig_RepoReadingAgainReportsTheNextDrop(t *testing.T
 	townRoot := t.TempDir()
 	rigName := "mango-repo-flaps"
 	rigRepoDir(t, townRoot, rigName)
-	unreadable := stubOpener(stubRepo{existsErr: errors.New("fatal: not a git repository")})
+	unreadable := stubOpener(stubRepo{fileErr: errors.New("fatal: not a git repository")})
 
 	ResolveMergeQueueConfigIn(unreadable, townRoot, rigName)
 	if !RepoFileUnreadableWarned(rigName) {
@@ -351,7 +351,7 @@ func TestResolveMergeQueueConfig_RepoReadingAgainReportsTheNextDrop(t *testing.T
 	}
 
 	// A read that answers proves the repo is readable again.
-	readable := stubOpener(stubRepo{refExists: true, fileErr: git.ErrNotAtRef})
+	readable := stubOpener(stubRepo{fileErr: git.ErrNotAtRef})
 	ResolveMergeQueueConfigIn(readable, townRoot, rigName)
 	if RepoFileUnreadableWarned(rigName) {
 		t.Error("the rig is still reported unreadable after a read that answered")
@@ -374,7 +374,7 @@ func TestResolveLandingRemoteWith_MalformedRepoSettingsFallsBack(t *testing.T) {
 	rigName := "mango-malformed-landing"
 	rigRepoDir(t, townRoot, rigName)
 	repo := &landingRemotesFake{remotes: []string{"origin"}, urls: map[string]string{"origin": "https://github.com/acme/mango.git"}}
-	malformed := stubOpener(stubRepo{refExists: true, data: `{"type":"rig-settings","merge_queue":{`})
+	malformed := stubOpener(stubRepo{data: `{"type":"rig-settings","merge_queue":{`})
 
 	got, err := ResolveLandingRemoteWith(malformed, repo, townRoot, rigName)
 	if err != nil {
@@ -397,7 +397,7 @@ func TestResolveMergeQueueConfig_MalformedRepoTierIsReportedOnce(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "mango-malformed-once"
 	rigRepoDir(t, townRoot, rigName)
-	malformed := stubOpener(stubRepo{refExists: true, data: `{"type":"rig-settings","merge_queue":{`})
+	malformed := stubOpener(stubRepo{data: `{"type":"rig-settings","merge_queue":{`})
 
 	ResolveMergeQueueConfigIn(malformed, townRoot, rigName)
 	if !RepoFileUnreadableWarned(rigName) {
@@ -423,7 +423,7 @@ func TestReadRepoFile_AnsweringReadKeepsTheDropReported(t *testing.T) {
 	rigRepoDir(t, townRoot, rigName)
 	WarnRepoFileUnreadable(rigName, errors.New("parsing: invalid character"))
 
-	open := stubOpener(stubRepo{refExists: true, data: `{}`})
+	open := stubOpener(stubRepo{data: `{}`})
 	if _, err := ReadRepoFile(open, townRoot, rigName, ".gastown/settings.json"); err != nil {
 		t.Fatalf("ReadRepoFile() error = %v", err)
 	}
@@ -448,7 +448,7 @@ func TestResolveLandingRemoteWith_UnreadableRepoFailsClosed(t *testing.T) {
 			"forgejo": "https://forgejo.example/acme/mango.git",
 		},
 	}
-	unreadable := stubOpener(stubRepo{existsErr: errors.New("fatal: not a git repository")})
+	unreadable := stubOpener(stubRepo{fileErr: errors.New("fatal: not a git repository")})
 
 	got, err := ResolveLandingRemoteWith(unreadable, repo, townRoot, rigName)
 	if err == nil {

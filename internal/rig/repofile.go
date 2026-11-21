@@ -14,7 +14,6 @@ import (
 // through (docs/testing.md, "Seams for external tools"): *git.Git in
 // production, gitfake in the unit tier.
 type RepoFileReader interface {
-	RefExists(ref string) (bool, error)
 	ShowFileAtRev(ref, path string) (string, error)
 }
 
@@ -74,13 +73,6 @@ func ReadRepoFile(open RepoFileOpener, townRoot, rigName, relPath string) (RepoF
 	unreadable := func(err error) (RepoFile, error) {
 		return RepoFile{}, fmt.Errorf("rig %s: reading %s at origin/%s in %s: %w", rigName, relPath, branch, repoDir, err)
 	}
-	exists, err := repo.RefExists(ref)
-	if err != nil {
-		return unreadable(err)
-	}
-	if !exists {
-		return RepoFile{}, nil
-	}
 	data, err := repo.ShowFileAtRev(ref, relPath)
 	switch {
 	case err == nil:
@@ -92,6 +84,10 @@ func ReadRepoFile(open RepoFileOpener, townRoot, rigName, relPath string) (RepoF
 	case errors.Is(err, git.ErrNotAtRef):
 		// main answered for this path, and its answer is that it holds no such
 		// file.
+		return RepoFile{}, nil
+	case errors.Is(err, git.ErrRefNotFound):
+		// no fetched main: ShowFileAtRev names the unresolved ref itself, so the
+		// reader asks no second question about it (gt-iuzcez).
 		return RepoFile{}, nil
 	default:
 		// Any other failure is a repo this run cannot read, which no answer
