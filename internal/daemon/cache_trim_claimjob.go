@@ -31,13 +31,16 @@ var errCacheTrimJobPending = errors.New("the trim Job is still running")
 // pending (errCacheTrimJobPending), and a status that cannot be read is an
 // ordinary error, never pending, so a failed Job never passes as a healthy run.
 //
-// The Job runs under its own budget, not the pass's (diskMaintRunTimeout is
-// shorter than the wait): the daemon's context, bounded by the wait and
-// cacheTrimClaimSlack. A wait the budget cuts off is an error, never pending.
+// The Job runs under its own budget, not the pass's: it takes no caller
+// context and runs on the daemon's own, d.ctx. A pass context ends after
+// diskMaintRunTimeout (five minutes) while the Job's wait is
+// cacheTrimClaimWaitTimeout (twenty), so a caller context would cut the run
+// short; the budget is the wait and cacheTrimClaimSlack instead. A wait the
+// budget cuts off is an error, never pending.
 //
 // Nothing calls it yet (cache trim, bead 7/10: the chain's later beads are its
 // callers).
-func (d *Daemon) cacheTrimClaimJobRun(_ context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) (removed, absent, kept int64, err error) {
+func (d *Daemon) cacheTrimClaimJobRun(kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) (removed, absent, kept int64, err error) {
 	jobName := cacheTrimJobName(claim.ClaimName)
 	m, err := cachevol.BuildClaimTrimManifest(cachevol.TrimJobInput{
 		Name:             jobName,
