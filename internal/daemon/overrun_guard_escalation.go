@@ -25,12 +25,19 @@ import (
 // the same answer.
 type overrunEscalationReader struct {
 	d *Daemon
-	// mu guards raised: the seats of a pass are read on up to overrunReadPoolSize
-	// goroutines (overrunReadPool), and two seats of one rig write the same entry.
+	// mu guards the map only. A rig's escalations are fetched once per cycle behind that
+	// rig's sync.Once, outside mu: the seats of the rig wait for the one fetch (they all
+	// need the same answer), and the seats of another rig are not held up by it.
 	mu     sync.Mutex
-	raised map[string]overrunRaised
+	raised map[string]*rigRaisedRead
 	// readRaised reads a rig's escalations; nil reads them for real. Tests set it.
 	readRaised func(rig string) ([]patrolscan.Escalation, error)
+}
+
+// rigRaisedRead is one rig's escalations, read once.
+type rigRaisedRead struct {
+	once sync.Once
+	val  overrunRaised
 }
 
 // overrunRaised is one rig's escalations as this cycle read them, or the error
@@ -42,25 +49,28 @@ type overrunRaised struct {
 
 // newOverrunEscalationReader returns the reader for one cycle.
 func newOverrunEscalationReader(d *Daemon) *overrunEscalationReader {
-	return &overrunEscalationReader{d: d, raised: map[string]overrunRaised{}}
+	return &overrunEscalationReader{d: d, raised: map[string]*rigRaisedRead{}}
 }
 
 // rigRaised returns the rig's escalations as this cycle reads them, read once
 // and kept for the cycle's other seats of the rig.
 func (r *overrunEscalationReader) rigRaised(rig string) overrunRaised {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	raised, ok := r.raised[rig]
-	if !ok {
+	e := r.raised[rig]
+	if e == nil {
+		e = &rigRaisedRead{}
+		r.raised[rig] = e
+	}
+	r.mu.Unlock()
+	e.once.Do(func() {
 		read := r.readRaised
 		if read == nil {
 			read = (&patrolScanHost{d: r.d}).PolecatEscalations
 		}
 		escalations, err := read(rig)
-		raised = overrunRaised{escalations: escalations, err: err}
-		r.raised[rig] = raised
-	}
-	return raised
+		e.val = overrunRaised{escalations: escalations, err: err}
+	})
+	return e.val
 }
 
 // waiting reports whether the seat is stopped on an open escalation it raised for

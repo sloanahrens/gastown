@@ -6,12 +6,15 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // The pool never has more than its limit of reads in flight and runs each job once
@@ -168,7 +171,9 @@ func TestOverrunPassSeatLoopPooled(t *testing.T) {
 	}
 	f := newOverrunFake(defaultOverrunGuardNudgeAfter+time.Minute, seats...)
 	s := f.seams()
-	var judged, inFlight, maxInFlight atomic.Int32
+	var inFlight, maxInFlight atomic.Int32
+	var judgedMu sync.Mutex
+	var judged []string
 	started := make(chan struct{}, seatCount)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -189,7 +194,9 @@ func TestOverrunPassSeatLoopPooled(t *testing.T) {
 	}
 	nudged := s.nudged
 	s.nudged = func(seat overrunSeat, at time.Time) {
-		judged.Add(1)
+		judgedMu.Lock()
+		judged = append(judged, seat.Bead)
+		judgedMu.Unlock()
 		if nudged != nil {
 			nudged(seat, at)
 		}
@@ -209,8 +216,11 @@ func TestOverrunPassSeatLoopPooled(t *testing.T) {
 			t.Fatalf("fewer than %d seat reads in flight within %s: the seats are read one at a time", overrunReadPoolSize, workspaceHangGuard)
 		}
 	}
-	if n := judged.Load(); n != 0 {
-		t.Errorf("%d seats judged while reads were still in flight, want none", n)
+	judgedMu.Lock()
+	early := len(judged)
+	judgedMu.Unlock()
+	if early != 0 {
+		t.Errorf("%d seats judged while reads were still in flight, want none", early)
 	}
 	releaseAll()
 	select {
@@ -218,17 +228,56 @@ func TestOverrunPassSeatLoopPooled(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("the pass did not finish within %s", workspaceHangGuard)
 	}
+	judgedMu.Lock()
+	order := slices.Clone(judged)
+	judgedMu.Unlock()
+	var want []string
+	for _, seat := range seats {
+		want = append(want, seat.Bead)
+	}
+	if !slices.Equal(order, want) {
+		t.Errorf("seats judged in order %v, want the seat order %v", order, want)
+	}
 	if m := maxInFlight.Load(); m != overrunReadPoolSize {
 		t.Errorf("%d seat reads in flight at most, want %d", m, overrunReadPoolSize)
 	}
 }
 
-// The production readers behind the seams keep per-cycle caches (a rig's escalations, the
-// process table, the pane list, the rig's gate pairs, the sandbox answer), and the seats
-// of a pass are read on overrunReadPoolSize goroutines. Several seats of ONE rig, read
-// with the default pool, must not write those caches at the same time (gt-5ngy14): run
-// under -race, a cache without its lock is a data race, and a plain map written by two
-// seats ends the process. The fake reads are slow enough to overlap on the test's yields.
+// readBarrier lets the reads of a test block until n of them have arrived, so concurrency
+// is proved and not hoped for: a read that is serialized behind another never sees n
+// arrivals, and the hang guard ends the wait with a message (like runPoolBounded).
+type readBarrier struct {
+	n       int32
+	arrived atomic.Int32
+	gate    chan struct{}
+	once    sync.Once
+}
+
+func newReadBarrier(n int) *readBarrier { return &readBarrier{n: int32(n), gate: make(chan struct{})} }
+
+func (b *readBarrier) wait(t *testing.T, what string) {
+	t.Helper()
+	if b.arrived.Add(1) == b.n {
+		b.once.Do(func() { close(b.gate) })
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
+	select {
+	case <-b.gate:
+	case <-ctx.Done():
+		t.Errorf("%s: only %d of %d reads in flight at once within %s", what, b.arrived.Load(), b.n, workspaceHangGuard)
+		b.once.Do(func() { close(b.gate) })
+	}
+}
+
+// The production readers behind the seams keep per-cycle caches, and the seats of a pass
+// are read on overrunReadPoolSize goroutines (gt-5ngy14). Twelve seats of ONE rig, read
+// with the default pool through the real reader types, must (a) fetch each town-wide or
+// per-rig read exactly once (slots, process table, pane list, the rig's gate pairs and
+// escalations) and (b) read each seat's own session registry entry concurrently with the
+// others: the registry reads meet at a barrier of overrunReadPoolSize, so one that waits
+// behind another's read fails with 'only 1 of 4'. Under -race an unguarded cache is a
+// data race, and a plain map written by two seats ends the process.
 func TestOverrunPassSeatReadersSharedCaches(t *testing.T) {
 	t.Parallel()
 	const seatCount = 12
@@ -238,19 +287,27 @@ func TestOverrunPassSeatReadersSharedCaches(t *testing.T) {
 	}
 	f := newOverrunFake(defaultOverrunGuardNudgeAfter-time.Minute, seats...)
 	d, _ := newOverrunDaemon(t, false)
+	var slots, procs, panes, raised, registry atomic.Int32
+	registryBarrier := newReadBarrier(overrunReadPoolSize)
 	gate := newOverrunGateReader(d)
 	gate.run = func(*exec.Cmd) ([]byte, []byte, error) {
-		runtime.Gosched()
+		procs.Add(1)
 		return []byte("  PID  PPID ARGS\n"), nil, nil
 	}
-	gate.panes = func(string) ([]int, error) { runtime.Gosched(); return nil, nil }
-	var raised atomic.Int32
-	esc := newOverrunEscalationReader(d)
-	esc.readRaised = func(string) ([]patrolscan.Escalation, error) {
-		raised.Add(1)
-		runtime.Gosched()
-		return nil, nil
+	gate.readSlots = func() (slot.Report, error) { slots.Add(1); return slot.Report{}, nil }
+	// Every seat's session has one pane, so each seat's gate read goes on to the process table.
+	var paneList strings.Builder
+	for i, seat := range seats {
+		fmt.Fprintf(&paneList, "%s\t%d\n", session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat), 1000+i)
 	}
+	gate.listPanes = func() ([]byte, error) { panes.Add(1); return []byte(paneList.String()), nil }
+	gate.registry = func(string) (bool, error) {
+		registry.Add(1)
+		registryBarrier.wait(t, "the sandbox registry reads")
+		return false, nil
+	}
+	esc := newOverrunEscalationReader(d)
+	esc.readRaised = func(string) ([]patrolscan.Escalation, error) { raised.Add(1); return nil, nil }
 	s := f.seams()
 	s.gateRunning = gate.running
 	s.escalationWaiting = esc.waiting
@@ -260,14 +317,27 @@ func TestOverrunPassSeatReadersSharedCaches(t *testing.T) {
 		defer close(done)
 		d.runOverrunGuard(s)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	// Longer than a barrier's own wait, so a serialized read is reported by the barrier.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*workspaceHangGuard)
 	defer cancel()
 	select {
 	case <-done:
 	case <-ctx.Done():
 		t.Fatalf("the pass did not finish within %s", workspaceHangGuard)
 	}
-	if n := raised.Load(); n != 1 {
-		t.Errorf("the rig's escalations were read %d times, want once for its %d seats", n, seatCount)
+	for _, c := range []struct {
+		name string
+		got  int32
+		want int32
+	}{
+		{"the slot report", slots.Load(), 1},
+		{"the process table", procs.Load(), 1},
+		{"the pane list", panes.Load(), 1},
+		{"the rig's escalations", raised.Load(), 1},
+		{"the sandbox registry (once per seat's session)", registry.Load(), seatCount},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s was read %d times, want %d", c.name, c.got, c.want)
+		}
 	}
 }
