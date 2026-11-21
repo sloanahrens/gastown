@@ -121,6 +121,15 @@ type Work struct {
 	// failed, or the worker did not read it; the record then leaves it out
 	// (gt-cdhagm).
 	SPEstimate *int
+	// SPMinutes is the minutes the bead's sp: estimate was computed as, read
+	// from the bead by the landing worker before the landing. Nil when the bead
+	// carries none, the read failed, or the worker did not read it; the record
+	// then leaves it out (gt-iwzoje).
+	SPMinutes *float64
+	// SPSlung is the reason a bead at or over the sp: trigger was slung, read
+	// from the bead by the landing worker before the landing. Empty when the
+	// bead carries none; the record then leaves it out (gt-iwzoje).
+	SPSlung string
 	// Submitted is when the bead was submitted for landing, and is what the
 	// landing worker orders the ready queue by: a comment on the bead is not
 	// a submission and does not move it (gt-t2jhf). Zero on a bead submitted

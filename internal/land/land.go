@@ -2679,7 +2679,8 @@ func (l *Lander) record(g Repo, w Work, res Result) error {
 		BeadID: w.BeadID, Rig: w.Rig, Branch: w.Branch, Head: w.Head, Target: w.Target, Base: res.Base,
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
-		Route: route, Agent: w.Agent, Priority: w.Priority, SPEstimate: w.SPEstimate, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
+		Route: route, Agent: w.Agent, Priority: w.Priority, SPEstimate: w.SPEstimate,
+		SPMinutes: w.SPMinutes, SPSlung: w.SPSlung, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
 		RiskPathReviewSkippedBy: res.RiskPathReviewSkippedBy,
 	}
 	l.landingSize(g, &rec, res.Base, res.LandedCommit)
