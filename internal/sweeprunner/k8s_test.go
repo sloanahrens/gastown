@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/templates"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -499,8 +500,8 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	if len(plan.Apply) != 13 {
-		t.Fatalf("the plan applies %d steps, want the mirror's clone, its HEAD check and fetch, the repo claim, the wait out of a terminating sync pod, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
+	if len(plan.Apply) != 14 {
+		t.Fatalf("the plan applies %d steps, want the mirror's clone, its HEAD check and fetch, the repo claim, the wait out of a terminating sync pod, the sync pod, its Ready wait, the copy, the chown, its removal, the stale output claims' removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
 	}
 
 	var repoClaim Claim
@@ -551,13 +552,13 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 
 	var outClaim Claim
-	if err := json.Unmarshal(plan.Apply[10].Stdin, &outClaim); err != nil {
+	if err := json.Unmarshal(plan.Apply[11].Stdin, &outClaim); err != nil {
 		t.Fatalf("the seventh apply is not a document: %v", err)
 	}
 	if outClaim.Metadata.Name != OutClaimName(spec) {
 		t.Errorf("the seventh apply is the claim %q, want the output claim %q", outClaim.Metadata.Name, OutClaimName(spec))
 	}
-	if string(plan.Apply[12].Stdin) != string(plan.Job.JSON()) {
+	if string(plan.Apply[13].Stdin) != string(plan.Job.JSON()) {
 		t.Errorf("the last apply does not carry the rendered Job document")
 	}
 }
@@ -626,6 +627,38 @@ func TestK8sPlanSyncsAMirrorNotTheLiveRepository(t *testing.T) {
 	bad.Snapshot = ""
 	if _, err := (Kubernetes{}).Render(bad); err == nil || !strings.Contains(err.Error(), "snapshot") {
 		t.Errorf("a spec with no mirror path renders (err %v), want it refused naming the snapshot", err)
+	}
+}
+
+// TestK8sOutputClaimIsLabelledAndStaleOnesAreDeleted holds the output claim to a
+// label a later launch can find it by, and the launch to removing the rig's other
+// output claims: a run abandoned by a replaced daemon never tears its claim down
+// (gt-2zl428).
+func TestK8sOutputClaimIsLabelledAndStaleOnesAreDeleted(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	claimAt := applyDocumentIndex(plan, "PersistentVolumeClaim", OutClaimName(spec))
+	var out Claim
+	if err := json.Unmarshal(plan.Apply[claimAt].Stdin, &out); err != nil {
+		t.Fatalf("the output claim apply is not a document: %v", err)
+	}
+	want := map[string]string{"gt.dev/kind": "sweep-out", "gt.dev/rig": rigLabelValue(spec.Rig), runLabelKey: runLabelValue(spec.RunID)}
+	if !maps.Equal(out.Metadata.Labels, want) {
+		t.Errorf("the output claim's labels are %v, want %v", out.Metadata.Labels, want)
+	}
+	selector := "gt.dev/kind=sweep-out,gt.dev/rig=" + spec.Rig + ",gt.dev/run!=" + runLabelValue(spec.RunID)
+	if got := strings.Join(plan.Apply[claimAt-1].Argv, " "); !strings.HasSuffix(got, "delete persistentvolumeclaim -l "+selector+" --ignore-not-found --wait=false") {
+		t.Errorf("the step before the output claim runs %q, want a delete of the rig's other output claims by %q", got, selector)
+	}
+	for _, name := range []string{RepoClaimName(spec.Rig), CacheClaimName(spec.Rig)} {
+		var c Claim
+		if err := json.Unmarshal(plan.Apply[applyDocumentIndex(plan, "PersistentVolumeClaim", name)].Stdin, &c); err != nil || len(c.Metadata.Labels) != 0 {
+			t.Errorf("claim %s carries labels %v (%v), want none: the selector must never reach it", name, c.Metadata.Labels, err)
+		}
 	}
 }
 

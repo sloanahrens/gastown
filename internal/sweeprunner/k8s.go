@@ -118,6 +118,12 @@ const (
 	// lost the create race removes no other run's pod in its teardown.
 	runLabelKey = "gt.dev/run"
 
+	// kindLabelKey and sweepOutKind label a run's output claim, with the rig and
+	// run labels, so a later launch finds the claims of runs that never tore
+	// theirs down (a daemon replaced mid-run, gt-2zl428).
+	kindLabelKey = "gt.dev/kind"
+	sweepOutKind = "sweep-out"
+
 	// syncJobsJSONPath prints one "<name> <true condition>..." line per Job,
 	// for the sync guard to read: a Job whose line names no true Complete or
 	// Failed condition is still running.
@@ -337,8 +343,8 @@ type EmptyDirVolumeSource struct{}
 // headroom (gt-gg9hv.38). The guard refuses while another sweep Job of the rig
 // is still active, because every run of the rig reads the one repo claim.
 // Apply then creates the repo claim, fills it through a short-lived root sync pod
-// (cleared, copied into, chowned to the runner, removed), and only then creates
-// the output claim, the cache claim and the Job. The teardown removes the sync
+// (cleared, copied into, chowned to the runner, removed), and only then removes the
+// rig's other runs' output claims and creates this run's output claim, the cache claim and the Job. The teardown removes the sync
 // pod, the Job, the reader pod and the output claim, in that order, and never the
 // repo claim or the cache claim, which every run reuses. Poll reports when the
 // run has ended and copies its result and its per-unit logs out of the output
@@ -358,6 +364,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	repoClaim := renderClaim(spec, RepoClaimName(spec.Rig), repoClaimStorage)
 	cacheClaim := renderClaim(spec, CacheClaimName(spec.Rig), cacheClaimStorage)
 	claim := renderClaim(spec, OutClaimName(spec), outClaimStorage)
+	claim.Metadata.Labels = map[string]string{kindLabelKey: sweepOutKind, rigLabelKey: rigLabelValue(spec.Rig), runLabelKey: runLabelValue(spec.RunID)}
 	reader := renderReader(spec)
 	sync := renderSyncPod(spec)
 	return Plan{
@@ -418,6 +425,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			{Argv: kubectlArgv(spec, "cp", spec.Snapshot+"/.", sync.Metadata.Name+":"+RepoMount), Retry: true},
 			{Argv: kubectlArgv(spec, "exec", sync.Metadata.Name, "--", "sh", "-c", syncChownCommand())},
 			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found")},
+			// The guard has shown no active Job of the rig, so every other run's
+			// output claim is abandoned. --wait=false: one an old pod still
+			// mounts is removed when that pod ends and never holds the launch.
+			{Argv: kubectlArgv(spec, "delete", "persistentvolumeclaim", "-l", kindLabelKey+"="+sweepOutKind+","+rigLabelKey+"="+rigLabelValue(spec.Rig)+","+runLabelKey+"!="+runLabelValue(spec.RunID), "--ignore-not-found", "--wait=false")},
 			// The claim the Job writes its result to goes before the Job, which
 			// has nothing to write to otherwise.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: claim.JSON()},

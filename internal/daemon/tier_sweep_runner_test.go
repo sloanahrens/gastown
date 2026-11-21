@@ -1517,10 +1517,11 @@ func TestTierSweepRunnerKubernetesTeardown(t *testing.T) {
 			}
 			lastCopy := copies[len(copies)-1]
 			deletes := runnerCalls(cmds.ran, "delete")
-			// The sync stage removes its pod itself, and the teardown removes
-			// it again with --ignore-not-found along with the rest.
-			if len(deletes) != 5 {
-				t.Fatalf("removals = %d, want the sync stage's and the teardown's four: %q", len(deletes), cmds.ran)
+			// The sync stage removes its pod itself, the launch removes the rig's
+			// stale output claims, and the teardown removes the sync pod again
+			// with --ignore-not-found along with the rest.
+			if len(deletes) != 6 {
+				t.Fatalf("removals = %d, want the sync stage's, the stale claims' and the teardown's four: %q", len(deletes), cmds.ran)
 			}
 			teardown := deletes[len(deletes)-4:]
 			for i, word := range []string{"pod", "job", "pod", "persistentvolumeclaim"} {
@@ -1557,19 +1558,19 @@ func TestTierSweepRunnerKubernetesRedAndTornDown(t *testing.T) {
 		failSyncCreate bool
 		failApply      int
 		// wantDeletes is the teardown's four removals, plus the sync stage's
-		// own removal when the launch reached it.
+		// own removal and the stale output claims' when the launch reached them.
 		wantDeletes int
 	}{
-		{name: "the Job ended with no result", status: "Failed", noResult: true, wantDeletes: 5},
-		{name: "the status cannot be read", statusErr: true, wantDeletes: 5},
-		{name: "the copy succeeds and writes nothing", status: "Complete", skipWrite: true, wantDeletes: 5},
-		{name: "the copy fails", status: "Complete", failCopy: true, wantDeletes: 5},
-		{name: "the reader pod never becomes ready", status: "Complete", failWait: true, wantDeletes: 5},
+		{name: "the Job ended with no result", status: "Failed", noResult: true, wantDeletes: 6},
+		{name: "the status cannot be read", statusErr: true, wantDeletes: 6},
+		{name: "the copy succeeds and writes nothing", status: "Complete", skipWrite: true, wantDeletes: 6},
+		{name: "the copy fails", status: "Complete", failCopy: true, wantDeletes: 6},
+		{name: "the reader pod never becomes ready", status: "Complete", failWait: true, wantDeletes: 6},
 		{name: "the repo claim cannot be applied", status: "Complete", failApply: 1, wantDeletes: 4},
 		{name: "the sync pod already exists", status: "Complete", failSyncCreate: true, wantDeletes: 4},
-		{name: "the output claim cannot be applied", status: "Complete", failApply: 2, wantDeletes: 5},
-		{name: "the Job cannot be applied", status: "Complete", failApply: 3, wantDeletes: 5},
-		{name: "the reader pod cannot be applied", status: "Complete", failApply: 4, wantDeletes: 5},
+		{name: "the output claim cannot be applied", status: "Complete", failApply: 2, wantDeletes: 6},
+		{name: "the Job cannot be applied", status: "Complete", failApply: 3, wantDeletes: 6},
+		{name: "the reader pod cannot be applied", status: "Complete", failApply: 4, wantDeletes: 6},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1630,8 +1631,8 @@ func TestTierSweepRunnerKubernetesStatusReadRetried(t *testing.T) {
 	if !strings.Contains(stage.output, "integration GREEN passed=66") {
 		t.Errorf("stage output does not carry the copied verdict:\n%s", stage.output)
 	}
-	if n := len(runnerCalls(cmds.ran, "delete")); n != 5 {
-		t.Errorf("removals = %d, want the sync pod, the Job, the reader pod and the claim once the result was read, plus the sync stage's own removal: %q", n, cmds.ran)
+	if n := len(runnerCalls(cmds.ran, "delete")); n != 6 {
+		t.Errorf("removals = %d, want the sync pod, the Job, the reader pod and the claim once the result was read, plus the sync stage's own removal and the stale claims': %q", n, cmds.ran)
 	}
 }
 
