@@ -1171,6 +1171,39 @@ func TestTickEffNoSeatReadsNoChildren(t *testing.T) {
 	}
 }
 
+// With one free seat the first clean candidate takes it, so only its children
+// are read and the other two carry the per-tick-limit line (gt-lm5ni3).
+func TestTickEffOneSeatReadsOneChildren(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-c00", 2, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-c01", 2, "2026-09-29T10:01:00Z"),
+		cleanSpec("gt-c02", 2, "2026-09-29T10:02:00Z"),
+	)
+	env := f.env()
+	env.PerTick = 1
+	var read []string
+	env.Children = func(id string) ([]specdispatch.Child, error) {
+		read = append(read, id)
+		return nil, nil
+	}
+	r := runSpecDispatchCycle(env)
+	if len(read) != 1 || read[0] != "gt-c00" {
+		t.Fatalf("children read for %v, want only gt-c00", read)
+	}
+	if len(f.slung) != 1 || f.slung[0] != "gt-c00" {
+		t.Fatalf("slung %v, want only gt-c00", f.slung)
+	}
+	if len(r.Skipped) != 2 {
+		t.Fatalf("skipped %d candidates, want 2: %+v", len(r.Skipped), r.Skipped)
+	}
+	for _, s := range r.Skipped {
+		if !strings.Contains(s.Line, specdispatch.SkipPerTickLimit) {
+			t.Errorf("%s: line %q, want the per-tick-limit line", s.Bead, s.Line)
+		}
+	}
+}
+
 // The chunk starts at the asked id, not at the head of the wanted list, so the
 // loop pays for the candidate it reached and the ones after it (gt-8gvizh).
 func TestTickEffChunkSelection(t *testing.T) {
