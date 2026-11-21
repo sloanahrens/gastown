@@ -1,52 +1,38 @@
 package land
 
 import (
+	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // The tokens are built from parts so this file holds no token-shaped literal.
-var (
-	awsKey    = "AK" + "IA" + strings.Repeat("Q", 16)
-	googleKey = "AI" + "za" + strings.Repeat("b", 35)
-	slackKey  = "xo" + "xb-" + strings.Repeat("9", 24)
-)
-
-func TestReviewLogScrubReplacesTokenShapedWords(t *testing.T) {
-	t.Parallel()
-	claim := "the config holds " + awsKey + " and " + googleKey + ", plus " + slackKey + " (leaked)"
-	want := "the config holds <redacted> and <redacted>, plus <redacted> (leaked)"
-	if got := scrubClaim(claim); got != want {
-		t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
-	}
+var scrubTestFamilies = map[string]string{
+	"aws":    "AK" + "IA" + strings.Repeat("Q", 16),
+	"google": "AI" + "za" + strings.Repeat("b", 35),
+	"slack":  "xo" + "xb-" + strings.Repeat("9", 24),
+	"asia":   "AS" + "IA" + strings.Repeat("Z", 16),
 }
 
-func TestReviewLogScrubKeepsProseURLAndPath(t *testing.T) {
-	t.Parallel()
-	claim := "see https://example.com/docs/retry-and-timeouts and internal/land/reviewlog.go:180; the retry counter never resets"
-	if got := scrubClaim(claim); got != claim {
-		t.Errorf("scrubClaim(%q) = %q, want it unchanged", claim, got)
-	}
+// scrubTestWrappers are the forms a token is quoted in: each is a format with the
+// token at %s, and the want is the same format with the marker in its place.
+var scrubTestWrappers = map[string]string{
+	"bare": "%s", "backtick": "`%s`", "square": "[%s]", "angle": "<%s>", "star": "*%s*",
+	"brace": "{%s}", "paren": "(%s)", "dquote": `"%s"`, "squote": "'%s'",
+	"equals": "KEY_NAME=%s", "colon": "name:%s", "slash": "dir/%s", "hyphen": "NAME-%s",
+	"query": "https://host/x?a=1&token=%s", "newline": `a\n%s`, "percent": "token%%3D%s",
 }
 
-// scrubTestFamilies are the token families the rule's prefix list names, one for
-// each provider the log saw: AWS, Google and Slack.
-var scrubTestFamilies = map[string]string{"aws": awsKey, "google": googleKey, "slack": slackKey}
-
-// TestReviewLogScrubJoinedTokens: a token joined to a key name, a label or a path
-// by '=', ':', '/' or '-' is one run of bytes that does not start like a token, so each
-// part of the run is checked as well as the whole. The joined text is kept and
-// only the token is replaced.
-func TestReviewLogScrubJoinedTokens(t *testing.T) {
+// TestReviewLogScrubEveryFamilyInEveryWrapper: a token is replaced and the text
+// around it kept, whatever the token is wrapped or joined with.
+func TestReviewLogScrubEveryFamilyInEveryWrapper(t *testing.T) {
 	t.Parallel()
 	for family, token := range scrubTestFamilies {
-		for _, joiner := range []string{"=", ":", "/", "-"} {
-			t.Run(family+joiner, func(t *testing.T) {
+		for name, wrap := range scrubTestWrappers {
+			t.Run(family+"/"+name, func(t *testing.T) {
 				t.Parallel()
-				claim := "it logs KEY_NAME" + joiner + token + " verbatim"
-				want := "it logs KEY_NAME" + joiner + "<redacted> verbatim"
+				claim := "it logs " + fmt.Sprintf(wrap, token) + " verbatim"
+				want := "it logs " + fmt.Sprintf(wrap, redactedWord) + " verbatim"
 				if got := scrubClaim(claim); got != want {
 					t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
 				}
@@ -55,9 +41,38 @@ func TestReviewLogScrubJoinedTokens(t *testing.T) {
 	}
 }
 
-// TestReviewLogScrubTokenHoldingAJoiner: a token whose own bytes include a joiner
-// is replaced whole, not left with its tail after the first joiner (base64
-// secrets hold '/', Slack tokens hold '-').
+// TestReviewLogScrubKeepsWhatIsNoSecret: prose, a hash, a UUID, an import path, a
+// URL and a path with a line number come out unchanged, including words that
+// contain a token prefix inside them (risk-assessment-framework holds sk-).
+func TestReviewLogScrubKeepsWhatIsNoSecret(t *testing.T) {
+	t.Parallel()
+	for _, claim := range []string{
+		"the retry counter never resets, see risk-assessment-framework and task-based-approaches",
+		"commit 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b and id 123e4567-e89b-12d3-a456-426614174000",
+		"import github.com/steveyegge/gastown/internal/land at https://example.com/docs/retry-and-timeouts",
+		"see internal/land/reviewlog.go:180; the ASIA-PACIFIC-EAST-1 region name stays",
+	} {
+		if got := scrubClaim(claim); got != claim {
+			t.Errorf("scrubClaim(%q) = %q, want it unchanged", claim, got)
+		}
+	}
+}
+
+// TestReviewLogScrubATokenFollowedByTokenBytes: the ASIA shape is whole-value, so a
+// key id followed by '+x', '-x', '.x' or '/x' is cut at the joiner and replaced,
+// and what follows is kept.
+func TestReviewLogScrubATokenFollowedByTokenBytes(t *testing.T) {
+	t.Parallel()
+	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x"} {
+		claim := "id " + scrubTestFamilies["asia"] + tail + " end"
+		if got, want := scrubClaim(claim), "id <redacted>"+tail+" end"; got != want {
+			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+		}
+	}
+}
+
+// TestReviewLogScrubTokenHoldingAJoiner: a token whose own bytes include '/', as a
+// base64 secret does, is replaced whole and not left with its tail.
 func TestReviewLogScrubTokenHoldingAJoiner(t *testing.T) {
 	t.Parallel()
 	token := "s" + "k-" + strings.Repeat("a", 8) + "/" + strings.Repeat("b", 8)
@@ -66,27 +81,26 @@ func TestReviewLogScrubTokenHoldingAJoiner(t *testing.T) {
 	}
 }
 
-// scrubTestSeparator is every byte the scrub splits on, words and joiners alike.
-func scrubTestSeparator(r rune) bool {
-	return r < 256 && (claimSeparator(byte(r)) || claimJoiner(byte(r)))
-}
-
-// TestReviewLogScrubBoundHoldsNoSecret: a token of each family straddles the
-// bound, so a scrub after boundedClaim would keep its head. Every part of the
-// recorded claim is held to the rule alone.
-func TestReviewLogScrubBoundHoldsNoSecret(t *testing.T) {
+// TestReviewLogScrubTheCutHoldsNoTokenAndNoMarkerPart: a token straddling the
+// bound leaves none of itself, a marker straddling it is not split, and the
+// recorded claim is a fixed point of the scrub (the rule alone finds nothing in it).
+func TestReviewLogScrubTheCutHoldsNoTokenAndNoMarkerPart(t *testing.T) {
 	t.Parallel()
 	for family, token := range scrubTestFamilies {
 		t.Run(family, func(t *testing.T) {
 			t.Parallel()
-			claim := strings.Repeat("x", maxRecordedClaimBytes-9) + " k=" + token + " trailing words"
-			got := reviewFindingTexts([]Finding{{Detail: claim}})[0].Claim
-			if !strings.Contains(got, truncatedClaim) {
-				t.Fatalf("the claim was not cut at the bound, so the test does not reach it:\n%q", got)
-			}
-			for _, part := range strings.FieldsFunc(got, scrubTestSeparator) {
-				if config.LooksLikeSecret("", part) {
-					t.Errorf("the recorded claim keeps %q", part)
+			for back := 0; back <= len(redactedWord)+2; back++ {
+				claim := strings.Repeat("x", maxRecordedClaimBytes-back) + " `" + token + "` trailing words"
+				got := reviewFindingTexts([]Finding{{Detail: claim}})[0].Claim
+				if !strings.Contains(got, truncatedClaim) {
+					t.Fatalf("back %d: the claim was not cut at the bound:\n%q", back, got)
+				}
+				body := strings.TrimSuffix(got, truncatedClaim)
+				if scrubClaim(body) != body {
+					t.Errorf("back %d: the recorded claim keeps a token-shaped run", back)
+				}
+				if i := strings.LastIndex(body, "<"); i >= 0 && body[i:] != redactedWord && strings.HasPrefix(redactedWord, body[i:]) {
+					t.Errorf("back %d: the cut split a marker: %q", back, body[i:])
 				}
 			}
 		})
@@ -98,13 +112,13 @@ func TestReviewLogScrubRecordedFindingText(t *testing.T) {
 	findings := []Finding{{
 		ID: "f-1", Severity: omSeverityMajor, Path: "internal/land/note.go", Line: 12,
 		Title:  "the refusal has no test",
-		Detail: "the branch returns nil for " + awsKey + " instead of refusing",
+		Detail: "the branch returns nil for `" + scrubTestFamilies["aws"] + "` instead of refusing",
 	}}
 	rec := reviewFindingTexts(findings)
 	if len(rec) != 1 {
 		t.Fatalf("reviewFindingTexts kept %d findings, want 1", len(rec))
 	}
-	if want := "the branch returns nil for <redacted> instead of refusing"; rec[0].Claim != want {
+	if want := "the branch returns nil for `<redacted>` instead of refusing"; rec[0].Claim != want {
 		t.Errorf("recorded claim = %q, want %q", rec[0].Claim, want)
 	}
 }
@@ -112,11 +126,11 @@ func TestReviewLogScrubRecordedFindingText(t *testing.T) {
 // TestReviewLogScrubHeldFinding: a held finding's claim reaches the log through a queue line.
 func TestReviewLogScrubHeldFinding(t *testing.T) {
 	t.Parallel()
-	held := heldFindingTexts([]FollowupCandidate{{Title: "name the error", Claim: "the token " + slackKey + " is logged"}})
+	held := heldFindingTexts([]FollowupCandidate{{Title: "name the error", Claim: "the token [" + scrubTestFamilies["slack"] + "] is logged"}})
 	if len(held) != 1 {
 		t.Fatalf("heldFindingTexts kept %d findings, want 1", len(held))
 	}
-	if want := "the token <redacted> is logged"; held[0].Claim != want {
+	if want := "the token [<redacted>] is logged"; held[0].Claim != want {
 		t.Errorf("queued claim = %q, want %q", held[0].Claim, want)
 	}
 }

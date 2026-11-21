@@ -186,68 +186,79 @@ func boundedClaim(s string) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
+	// A cut inside a <redacted> marker would leave part of one: back up to its start.
+	if i := strings.LastIndex(s[:cut], "<"); i >= 0 && s[i:cut] != redactedWord && strings.HasPrefix(redactedWord, s[i:cut]) {
+		cut = i
+	}
 	return s[:cut] + truncatedClaim
 }
 
 const redactedWord = "<redacted>"
 
-// scrubClaim replaces every token-shaped word in a finding's claim with
-// redactedWord and keeps every other byte, separators included: om's claim
-// quotes the reviewed code, and a credential-shaped word in it must not reach
-// the review log (gt-uxbi5y). A word is a maximal run of non-separator bytes.
-// It runs before boundedClaim, so the cut can fall inside a <redacted> marker;
-// that leaves a fragment of the marker and never part of a token.
+// scrubClaim replaces every token-shaped run in a finding's claim with
+// redactedWord and keeps every other byte: om's claim quotes the reviewed code,
+// and a credential in it must not reach the review log (gt-uxbi5y). It decides
+// no boundaries by word: at each letter or digit not glued to one before it, it
+// takes the run of token bytes that starts there and asks the rule, which is
+// anchored at the start of what it is given, so a token in backticks, brackets,
+// quotes, a URL query or after any name or joiner starts at its own offset. A
+// token glued to a letter before it (`keyAKIA...`) is not found, unless the
+// letter ends an escape (`\n`, `%3D`): that is the boundary kept, since the rule's prefixes (`sk-`) occur inside ordinary words.
+// The scrub cannot consult config.IsSecretKey (it needs a key name), so only
+// token shape counts. It runs before boundedClaim, which never cuts a marker.
 func scrubClaim(s string) string {
-	return scrubRuns(s, claimSeparator, scrubWord)
-}
-
-// scrubRuns applies fix to each run of bytes between separators and keeps every
-// separator byte.
-func scrubRuns(s string, separator func(byte) bool, fix func(string) string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if !separator(s[i]) {
+	for i := 0; i < len(s); {
+		if end := tokenEnd(s, i); end > i {
+			b.WriteString(redactedWord)
+			i = end
 			continue
 		}
-		b.WriteString(fix(s[start:i]))
 		b.WriteByte(s[i])
-		start = i + 1
+		i++
 	}
-	b.WriteString(fix(s[start:]))
 	return b.String()
 }
 
-// scrubWord is word with a token replaced by redactedWord. A token can follow a
-// key name or a path joined by '=', ':', '/' or '-' (`KEY=token`, `NAME-token`),
-// and can hold those bytes itself (`xoxb-...`), so the word is read from its start
-// and from each byte after a joiner: the first suffix whose shape alone marks it a
-// token is replaced whole and what precedes it is kept. A claim names no env key
-// to read the answer from.
-func scrubWord(word string) string {
-	for i := 0; i < len(word); i++ {
-		if (i == 0 || claimJoiner(word[i-1])) && secretShaped(word[i:]) {
-			return word[:i] + redactedWord
+// tokenEnd is the end of the token-shaped run of token bytes that starts at i,
+// or i when none does. A trailing '.' or ':' is the sentence's, not the token's.
+func tokenEnd(s string, i int) int {
+	if !isAlnum(s[i]) || i > 0 && isAlnum(s[i-1]) && !escapedBefore(s, i) {
+		return i
+	}
+	end := i
+	for end < len(s) && (isAlnum(s[end]) || strings.IndexByte(tokenJoiners, s[end]) >= 0) {
+		end++
+	}
+	run := strings.TrimRight(s[i:end], ".:")
+	// The rule's ASIA shape takes the whole value, so a token followed by more
+	// token bytes (`ASIA...+x`) is also tried cut at each joiner, longest first.
+	for n := len(run); n > 0; n = strings.LastIndexAny(run[:n], tokenJoiners) {
+		if config.LooksLikeSecret("", run[:n]) {
+			return i + n
 		}
 	}
-	return word
+	return i
 }
 
-func secretShaped(s string) bool { return s != "" && config.LooksLikeSecret("", s) }
+// tokenJoiners are the non-alphanumeric bytes a token run holds.
+const tokenJoiners = "-_.+/=:"
 
-// claimJoiner is a byte that joins a token to a key name, a label or a path:
-// `KEY=token`, `token:value`, `dir/token`, `NAME-token`. A run holding one is read
-// from its start and from each byte after one, because a run that starts with the
-// name never starts like a token.
-func claimJoiner(c byte) bool { return c == '=' || c == ':' || c == '/' || c == '-' }
-
-func claimSeparator(c byte) bool {
-	switch c {
-	case ' ', '\t', '\n', '\r', '\v', '\f', ',', ';', '"', '\'', '(', ')':
+// escapedBefore reports whether the letter before i belongs to an escape that
+// ends at i: a backslash escape (`\n`, `\t`) or a percent-encoded byte (`%3D`),
+// the two ways code and URLs put a token right behind a letter.
+func escapedBefore(s string, i int) bool {
+	if i >= 2 && s[i-2] == '\\' && strings.IndexByte("ntrbfv", s[i-1]) >= 0 {
 		return true
 	}
-	return false
+	return i >= 3 && s[i-3] == '%' && isHex(s[i-2]) && isHex(s[i-1])
+}
+
+func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
+
+func isAlnum(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // FollowupQueue is a queue line's payload: the findings one landing's
