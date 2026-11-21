@@ -4,6 +4,6 @@
 # The pin-drift guard refuses a pin that is not an ancestor of the source's origin/main, more than 40 commits
 # behind it, or more than 7 days older than its tip.
 bd http://forgejo:3000/{owner}/beads.git c1efb992c9ee42046f9a6188625b11fe88e05f53
-om http://forgejo:3000/{owner}/organic-mechanic.git e1c478fe74e2bdd4807672c538df4ee06748d691
+om http://forgejo:3000/{owner}/organic-mechanic.git 253ab362496e4374be2ae205f183e44bf3e0a4d3
 hm http://forgejo:3000/{owner}/history-man.git c94ae1d1f6b08685408c311d1ddf0eacdbb3095c
 devops http://forgejo:3000/{owner}/devops.git 352c90e76fd0f36e7135946b42afaaddd742f2eb
