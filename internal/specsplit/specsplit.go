@@ -25,6 +25,10 @@ type Spec struct {
 	// such as "internal/config" and "cmd/gt", with "." for the root package.
 	// They are the only authority on what a token may name as a package.
 	Dirs []string
+	// BaseFiles are the repo-relative slash paths of the files that exist on the
+	// base branch, supplied by the caller: Plan reads no file system. A file in
+	// it is never "created by" a piece, whoever edits it.
+	BaseFiles map[string]bool
 }
 
 // Box is one acceptance box.

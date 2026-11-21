@@ -44,8 +44,8 @@ func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 	}
 	half := (len(groups) + 1) / 2
 	return SplitPlan{
-		A: buildPiece("A", groups[:half], groups, nil, ""),
-		B: buildPiece("B", groups[half:], groups, groups[:half], "A"),
+		A: buildPiece("A", groups[:half], groups, nil, "", spec.BaseFiles),
+		B: buildPiece("B", groups[half:], groups, groups[:half], "A", spec.BaseFiles),
 	}, nil
 }
 
@@ -89,8 +89,9 @@ func checkGroups(spec Spec, groups []FileGroup) error {
 }
 
 // buildPiece shapes one piece from its groups, reading allGroups for the guard
-// commands and createdFrom for the files and symbols the piece depends on.
-func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string) Piece {
+// commands and createdFrom for the files and symbols the piece depends on. A file
+// in baseFiles exists on the base branch, so no piece creates it.
+func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, dependsOn string, baseFiles map[string]bool) Piece {
 	var packages []string
 	var ownBoxes []Box
 	var constraints []string
@@ -100,7 +101,7 @@ func buildPiece(name string, groups, allGroups, createdFrom []FileGroup, depends
 		constraints = append(constraints, group.Constraints...)
 	}
 	if dependsOn != "" {
-		constraints = append(constraints, createdNotes(createdFrom, groups)...)
+		constraints = append(constraints, createdNotes(createdFrom, groups, baseFiles)...)
 	}
 	piece := Piece{
 		Name:      name,
@@ -195,8 +196,9 @@ func groupNoun(n int) string {
 }
 
 // createdNotes returns a note for each file or symbol the aGroups name that a
-// bGroups bullet cites.
-func createdNotes(aGroups, bGroups []FileGroup) []string {
+// bGroups bullet cites. A file that exists on the base branch (baseFiles) gets
+// no note: a created-by note on an existing path is the spec lint's trap.
+func createdNotes(aGroups, bGroups []FileGroup, baseFiles map[string]bool) []string {
 	aPackages := map[string]bool{}
 	var aBullets []string
 	for _, group := range aGroups {
@@ -210,6 +212,9 @@ func createdNotes(aGroups, bGroups []FileGroup) []string {
 	var notes []string
 	for _, bullet := range aBullets {
 		for _, name := range createdNames(bullet, aPackages) {
+			if !name.symbol && baseFiles[name.text] {
+				continue
+			}
 			cited := citesPath(bBullets, name.text)
 			if name.symbol {
 				cited = citesSymbol(bBullets, name.text)

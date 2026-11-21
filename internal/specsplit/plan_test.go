@@ -269,3 +269,39 @@ func TestSplitPlanRefuses(t *testing.T) {
 		})
 	}
 }
+
+// TestSplitPlanCreatedByNeedsACreation: B says a file "is created by bead
+// PIECE_A" only when the file is absent from the base branch. A note on a file
+// that already exists is the spec lint's trap, so an edited file gets none.
+func TestSplitPlanCreatedByNeedsACreation(t *testing.T) {
+	t.Parallel()
+	const note = "internal/config/env.go is created by bead PIECE_A."
+	tests := []struct {
+		name      string
+		baseFiles map[string]bool
+		wantNote  bool
+	}{
+		{"a file absent from the base branch is created", map[string]bool{}, true},
+		{"no base file list reads every file as absent", nil, true},
+		{"a file A edits that exists on the base branch is not created", map[string]bool{"internal/config/env.go": true}, false},
+		{"another existing file does not hide the creation", map[string]bool{"internal/specsplit/specsplit.go": true}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := twoPieceSpec()
+			spec.BaseFiles = tc.baseFiles
+			groups, err := Group(spec)
+			if err != nil {
+				t.Fatalf("Group() error = %v, want none", err)
+			}
+			plan, err := Plan(spec, groups)
+			if err != nil {
+				t.Fatalf("Plan() error = %v, want none", err)
+			}
+			if got := strings.Contains(plan.B.Text, note); got != tc.wantNote {
+				t.Errorf("piece B created-by note for internal/config/env.go = %v, want %v:\n%s", got, tc.wantNote, plan.B.Text)
+			}
+		})
+	}
+}
