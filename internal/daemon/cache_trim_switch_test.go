@@ -410,3 +410,114 @@ func TestCacheTrimSwitchParkedClaimStillHoldsItsNamespace(t *testing.T) {
 		t.Errorf("the second claim's refusal is not logged; log: %s", f.log.String())
 	}
 }
+
+// cacheTrimCompletedJSON is the earlier trim Job as a finished one: its Complete
+// condition is true and it is not active.
+const cacheTrimCompletedJSON = `{"items":[{"kind":"Job","metadata":{"name":"` + cacheTrimJob + `","namespace":"` + cacheTrimNamespace + `",` +
+	`"labels":{"app.kubernetes.io/name":"polecat-cache-trim","app.kubernetes.io/managed-by":"gt"}},` +
+	`"status":{"conditions":[{"type":"Complete","status":"True"}]}}]}`
+
+// TestCacheTrimLateResultIsRead pins that an earlier claim Job which completed
+// after its wait has its result line read and recorded at the next pass, before
+// cacheTrimApply deletes it as stale and applies the new Job.
+func TestCacheTrimLateResultIsRead(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
+		cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
+	})
+	if !viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a pass beside a completed earlier Job = false, want true; log: %s", f.log.String())
+	}
+	read, ok := f.indexOf(cacheTrimClaimJobLogVerb)
+	if !ok {
+		t.Fatalf("the earlier Job's result line was never read; calls: %v", f.verbs())
+	}
+	deleteVerb := "delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
+	deleted, ok := f.indexAfter(deleteVerb, read)
+	if !ok {
+		t.Fatalf("the stale Job was not deleted after its result was read; calls: %v", f.verbs())
+	}
+	if _, ok := f.indexAfter(cacheTrimApplyVerb, deleted); !ok {
+		t.Errorf("the new Job was not applied after the stale one was deleted; calls: %v", f.verbs())
+	}
+	runs := f.jobRuns(t)
+	if len(runs) == 0 || runs[0].Outcome != cacheTrimRunOK || runs[0].Stats[cacheTrimStatTrimmedFiles] != 3 {
+		t.Errorf("the ledger holds %+v, want the earlier Job's run first, with outcome %q and 3 trimmed files", runs, cacheTrimRunOK)
+	}
+}
+
+// TestCacheTrimLateResultIsNotReadUnlessCompleted pins the two refusals: an
+// earlier Job still running and one that has not completed leave their result
+// unread, so no run is recorded from a log that is not there yet.
+func TestCacheTrimLateResultIsNotReadUnlessCompleted(t *testing.T) {
+	t.Parallel()
+	const head = `{"items":[{"kind":"Job","metadata":{"name":"` + cacheTrimJob + `","namespace":"` + cacheTrimNamespace + `",` +
+		`"labels":{"app.kubernetes.io/name":"polecat-cache-trim","app.kubernetes.io/managed-by":"gt"}},"status":`
+	for name, status := range map[string]string{
+		"a Job still running":          `{"active":1}`,
+		"a Job that has not completed": `{"conditions":[{"type":"Complete","status":"False"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimExistingVerb: {stdout: head + status + `}]}`},
+			})
+			// A Job still running is the pending verdict (no failure, nothing recorded
+			// from it); one not complete has nothing to read and applies the new Job.
+			got := viaJob(t, f, true, map[string]string{})
+			if name == "a Job still running" && !got {
+				t.Errorf("%s: the pass verdict = false, want true (pending is a verdict)", name)
+			}
+			for _, run := range f.jobRuns(t) {
+				if run.Outcome == cacheTrimRunFailed {
+					t.Errorf("%s: a failed run was recorded: %+v", name, run)
+				}
+			}
+			// The new Job's own result line is read after its apply; the earlier
+			// Job's would be read before it. No read before the apply is the
+			// refusal.
+			read, readOK := f.indexOf(cacheTrimClaimJobLogVerb)
+			apply, applyOK := f.indexOf(cacheTrimApplyVerb)
+			if readOK && (!applyOK || read < apply) {
+				t.Errorf("%s: the earlier Job's result line was read before the new Job was applied; calls: %v", name, f.verbs())
+			}
+		})
+	}
+}
+
+// TestCacheTrimLateResultMalformedParks pins the alarming branch of the late
+// read: an earlier Job that completed with no result line, or one that cannot be
+// parsed, records one FAILED run and parks the claim, and the next pass for the
+// claim makes no cluster call.
+func TestCacheTrimLateResultMalformedParks(t *testing.T) {
+	t.Parallel()
+	for name, log := range map[string]string{
+		"a missing result line":   "",
+		"a malformed result line": "removed twelve absent 1 kept 3\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimExistingVerb:    {stdout: cacheTrimCompletedJSON},
+				cacheTrimClaimJobLogVerb: {stdout: log},
+			})
+			if viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("%s: an earlier Job read late = true, want false (a failure)", name)
+			}
+			if runs := f.jobRuns(t); len(runs) != 1 || runs[0].Outcome != cacheTrimRunFailed {
+				t.Errorf("%s: the ledger holds %+v, want one run with outcome %q", name, runs, cacheTrimRunFailed)
+			}
+			if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("%s: the claim is not parked", name)
+			}
+			calls := len(f.cli.recorded())
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Errorf("%s: a parked claim = false, want true (a verdict)", name)
+			}
+			if got := len(f.cli.recorded()); got != calls {
+				t.Errorf("%s: the parked claim made %d more cluster calls, want none", name, got-calls)
+			}
+		})
+	}
+}
