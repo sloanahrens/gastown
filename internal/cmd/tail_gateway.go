@@ -158,7 +158,7 @@ func (s *tailGatewaySource) Poll() []tailLine {
 	// a line of its own, so it is never counted as a read.
 	reads := 0
 	for _, f := range batch {
-		if !f.call.Write && f.call.ExitCode == 0 {
+		if (f.call.Write == nil || !*f.call.Write) && f.call.ExitCode == 0 {
 			reads++
 			continue
 		}

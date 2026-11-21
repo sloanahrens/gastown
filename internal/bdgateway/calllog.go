@@ -349,7 +349,7 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 		Caller:      boundText(rec.Caller),
 		Actor:       boundText(rec.Actor),
 		Verb:        parsed.verb,
-		Write:       rec.Write,
+		Write:       &rec.Write,
 		Flags:       parsed.flags,
 		Beads:       parsed.beads,
 		ExitCode:    rec.ExitCode,

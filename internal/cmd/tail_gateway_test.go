@@ -44,7 +44,7 @@ func gatewayTestNow() time.Time { return tailNow }
 // reach a line.
 func gatewayWriteAndFailedRead() bdgateway.CallsPage {
 	return bdgateway.CallsPage{Entries: []bdgateway.CallEntry{
-		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: true, Flags: []string{"--status=open"}, DurationMS: 12},
+		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: ptr(true), Flags: []string{"--status=open"}, DurationMS: 12},
 		{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, ExitCode: 1, DurationMS: 40, Error: "bd: no such bead"},
 	}}
 }
@@ -57,7 +57,7 @@ func gatewayReadsWriteAndFailedRead() bdgateway.CallsPage {
 		{TS: "2026-09-30T13:49:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-aaa"}, DurationMS: 5},
 		{TS: "2026-09-30T13:49:30Z", Caller: "witness", Verb: "list", Flags: []string{"--json"}, DurationMS: 6},
 		{TS: "2026-09-30T13:49:45Z", Caller: "mayor", Verb: "ready", DurationMS: 7},
-		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: true, Flags: []string{"--status=open"}, DurationMS: 12},
+		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: ptr(true), Flags: []string{"--status=open"}, DurationMS: 12},
 		{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, ExitCode: 1, DurationMS: 40, Error: "bd: no such bead"},
 	}}
 }
@@ -108,7 +108,7 @@ func TestGatewaySourceSecondPollRepeatsNothing(t *testing.T) {
 func TestGatewaySourceKeepsTheCallsAtTheCursorStamp(t *testing.T) {
 	t.Parallel()
 	shown := gatewayWriteAndFailedRead()
-	later := bdgateway.CallEntry{TS: "2026-09-30T13:51:00Z", Caller: "mayor", Verb: "close", Beads: []string{"gt-ghi"}, Write: true}
+	later := bdgateway.CallEntry{TS: "2026-09-30T13:51:00Z", Caller: "mayor", Verb: "close", Beads: []string{"gt-ghi"}, Write: ptr(true)}
 	reader := &fakeGatewayReader{answers: []gatewayAnswer{
 		{page: shown},
 		{page: bdgateway.CallsPage{Entries: append(shown.Entries, later)}},
@@ -182,9 +182,9 @@ func TestGatewaySourceSummaryCountsOnlySuccessfulReads(t *testing.T) {
 func TestGatewaySourceUnreadableTimeDoesNotPinTheCursor(t *testing.T) {
 	t.Parallel()
 	page := bdgateway.CallsPage{Entries: []bdgateway.CallEntry{
-		{TS: "not-a-time", Caller: "daemon", Verb: "update", Write: true},
-		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: true},
-		{TS: "2026-09-30T13:51:00Z", Caller: "mayor", Verb: "close", Beads: []string{"gt-ghi"}, Write: true},
+		{TS: "not-a-time", Caller: "daemon", Verb: "update", Write: ptr(true)},
+		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: ptr(true)},
+		{TS: "2026-09-30T13:51:00Z", Caller: "mayor", Verb: "close", Beads: []string{"gt-ghi"}, Write: ptr(true)},
 	}}
 	reader := &fakeGatewayReader{answers: []gatewayAnswer{{page: page}}}
 	s := newTailGatewaySource(reader, at("2026-09-30T13:00:00Z"), gatewayTestNow)
@@ -212,7 +212,7 @@ func TestGatewaySourceUnreadableTimeDoesNotPinTheCursor(t *testing.T) {
 func TestGatewaySourceUnreadableOnlyPageMovesCursorToThePollClock(t *testing.T) {
 	t.Parallel()
 	reader := &fakeGatewayReader{answers: []gatewayAnswer{{page: bdgateway.CallsPage{Entries: []bdgateway.CallEntry{
-		{TS: "not-a-time", Caller: "daemon", Verb: "update", Write: true},
+		{TS: "not-a-time", Caller: "daemon", Verb: "update", Write: ptr(true)},
 	}}}}}
 	s := newTailGatewaySource(reader, at("2026-09-30T13:00:00Z"), gatewayTestNow)
 
@@ -234,7 +234,7 @@ func TestGatewaySourceFullPageSaysMoreCallsWait(t *testing.T) {
 	for i := range entries {
 		entries[i] = bdgateway.CallEntry{
 			TS:     base.Add(time.Duration(i+1) * time.Second).Format(time.RFC3339Nano),
-			Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: true,
+			Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: ptr(true),
 		}
 	}
 	reader := &fakeGatewayReader{answers: []gatewayAnswer{{page: bdgateway.CallsPage{Entries: entries}}}}
