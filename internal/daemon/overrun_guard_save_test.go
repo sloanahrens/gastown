@@ -1105,3 +1105,94 @@ func TestOverrunWorktreeDirty_UnresolvableWorktreeIsAnError(t *testing.T) {
 		t.Fatal("dirty = nil error, want the unresolvable worktree refused")
 	}
 }
+
+// TestOverrunSaveStage_ClassifiesEachReturn: the save names the step that failed
+// through an overrunSaveStageError: "commit" for a refused WIP commit, "push" for
+// a WIP commit that cannot reach the kept branch and for a refused push or rescue
+// push, and no stage for a failure that is neither (gt-98tbow).
+func TestOverrunSaveStage_ClassifiesEachReturn(t *testing.T) {
+	t.Parallel()
+	refuse := func(w *resetWorld, git func(daemonGit) daemonGit) {
+		open := w.d.openGitFn
+		w.d.openGitFn = func(dir string) daemonGit { return git(open(dir)) }
+	}
+	detach := func(t *testing.T, w *resetWorld) {
+		t.Helper()
+		if err := w.git().CheckoutDetach(w.tip); err != nil {
+			t.Fatal(err)
+		}
+		writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+	}
+	for _, tc := range []struct {
+		name  string
+		want  string
+		setup func(t *testing.T, w *resetWorld, seat *overrunSeat)
+	}{
+		{name: "a worktree mid-merge", want: "commit", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) {
+			writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+			if err := os.WriteFile(filepath.Join(w.work, ".git", "MERGE_HEAD"), []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a WIP commit off the kept branch", want: "push", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) { detach(t, w) }},
+		{name: "a WIP commit on no branch", want: "push", setup: func(t *testing.T, w *resetWorld, seat *overrunSeat) { detach(t, w); seat.Branch = "" }},
+		{name: "a refused push", want: "push", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) {
+			refuse(w, func(g daemonGit) daemonGit {
+				return pushRefusingGit{daemonGit: g, err: errors.New("remote unreachable")}
+			})
+		}},
+		{name: "a refused rescue push", want: "push", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) {
+			w.divergeOriginBranch(t)
+			suffix := ":refs/heads/" + stopSeat.Branch + "-" + w.tip[:7]
+			refuse(w, func(g daemonGit) daemonGit {
+				return pushRefusingRefGit{daemonGit: g, suffix: suffix, err: errors.New("refused")}
+			})
+		}},
+		{name: "an unreadable current branch", setup: func(t *testing.T, w *resetWorld, seat *overrunSeat) {
+			refuse(w, func(g daemonGit) daemonGit { return unreadableRefGit{daemonGit: g, failCurrentBranch: true} })
+			seat.Branch = ""
+		}},
+		{name: "an unreadable kept branch head", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) {
+			refuse(w, func(g daemonGit) daemonGit {
+				return unreadableRefGit{daemonGit: g, failRev: "refs/heads/" + stopSeat.Branch}
+			})
+		}},
+		{name: "commits only HEAD holds", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) {
+			w.pushKeptBranch(t)
+			detach(t, w)
+			w.d.checkpointWorktreeAs(w.work, stopSeat.Rig, stopSeat.Polecat, "work on a detached head")
+		}},
+		{name: "an unresolvable worktree", setup: func(t *testing.T, w *resetWorld, _ *overrunSeat) {
+			if err := os.RemoveAll(w.work); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newResetWorld(t)
+			seat := stopSeat
+			tc.setup(t, w, &seat)
+
+			_, err := w.d.overrunSaveWork(seat)
+
+			if err == nil {
+				t.Fatal("save = nil, want the failure")
+			}
+			if got := overrunFailedStage(err); got != tc.want {
+				t.Errorf("stage = %q, want %q (error %v)", got, tc.want, err)
+			}
+			if tc.want != "" && errors.Unwrap(err) == nil {
+				t.Errorf("the stage error does not unwrap to the failure it names: %v", err)
+			}
+		})
+	}
+	t.Run("a vanished sandbox keeps errSandboxGone and no stage", func(t *testing.T) {
+		t.Parallel()
+		d, _ := overrunSandboxGoneFixture(t)
+		_, err := d.overrunSaveWork(stopSeat)
+		if !errors.Is(err, errSandboxGone) || overrunFailedStage(err) != "" {
+			t.Errorf("save error = %v with stage %q, want errSandboxGone and no stage", err, overrunFailedStage(err))
+		}
+	})
+}
