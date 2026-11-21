@@ -14,11 +14,12 @@ import (
 const cacheTrimClaimWaitTimeout = 15 * time.Minute
 
 // cacheTrimClaimJobRun applies one claim's trim through the claim Job and
-// reports whether the Job finished: nil once it did, and an error when the
-// manifest was refused, the apply failed, or the Job was still running at
-// cacheTrimClaimWaitTimeout. Nothing calls it yet (cache trim, bead 7/10: the
-// chain's later beads are its callers).
-func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) error {
+// returns the counts of the files it removed, found absent and kept. A Job
+// whose result line is missing or malformed is an error and never zero counts
+// with nil, as a line read as zero would record a run that trimmed nothing. A
+// dry run is zero counts and nil. Nothing calls it yet (cache trim, bead 7/10:
+// the chain's later beads are its callers).
+func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) (removed, absent, kept int64, err error) {
 	jobName := cacheTrimJobName(claim.ClaimName)
 	m, err := cachevol.BuildClaimTrimManifest(cachevol.TrimJobInput{
 		Name:             jobName,
@@ -32,18 +33,22 @@ func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, cl
 		Tolerations:      claim.Tolerations,
 	})
 	if err != nil {
-		return err
+		return 0, 0, 0, err
 	}
 	if !apply {
 		d.logger.Printf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
-		return nil
+		return 0, 0, 0, nil
 	}
 	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m, cacheTrimClaimWaitTimeout)
 	if err != nil {
-		return fmt.Errorf("applying the trim Job %s: %w", jobName, err)
+		return 0, 0, 0, fmt.Errorf("applying the trim Job %s: %w", jobName, err)
 	}
 	if !finished {
-		return fmt.Errorf("the trim Job %s did not finish within %s", jobName, cacheTrimClaimWaitTimeout)
+		return 0, 0, 0, fmt.Errorf("the trim Job %s did not finish within %s", jobName, cacheTrimClaimWaitTimeout)
 	}
-	return nil
+	removed, absent, kept, err = d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return removed, absent, kept, nil
 }
