@@ -1027,6 +1027,7 @@ func TestRemoveTrimPathsOnDiskRefusesADirectorySwappedForALinkOutOfTheClaim(t *t
 // run consumes it rather than that a writer never wrote one.
 func TestClaimRouteOnDiskWritesThenTrimsThenRefusesAReplay(t *testing.T) {
 	t.Parallel()
+	requireLinuxStat(t)
 	claim := t.TempDir()
 	gone := plantCacheFile(t, filepath.Join(claim, cachevol.SeedBuildCacheDir, "ab", "gone"), 10, testTime)
 	stays := plantCacheFile(t, filepath.Join(claim, cachevol.SeedBuildCacheDir, "ab", "stays"), 10, testTime)

@@ -573,6 +573,7 @@ func TestTrimListPathsRefusesAZeroClock(t *testing.T) {
 // reads them, and says which file it wrote.
 func TestTrimListWriteHelperWritesThePlannedListIntoTheClaim(t *testing.T) {
 	t.Parallel()
+	requireLinuxStat(t)
 	root := t.TempDir()
 	plantCacheFile(t, filepath.Join(root, cachevol.SeedBuildCacheDir, "ab", "cdef"), 100, testTime)
 	plantCacheFile(t, filepath.Join(root, cachevol.SeedModuleCacheDir, "mod", "x"), 100, testTime)
@@ -728,6 +729,7 @@ func TestTrimListWriteRefusesAClaimWhoseDirectoryLeavesIt(t *testing.T) {
 // list lands at its destination.
 func TestTrimListWriteDoesNotWriteThroughAStaleTemporary(t *testing.T) {
 	t.Parallel()
+	requireLinuxStat(t)
 	base := t.TempDir()
 	claim := filepath.Join(base, "claim")
 	victim := filepath.Join(base, "victim")
