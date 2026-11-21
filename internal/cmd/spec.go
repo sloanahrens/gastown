@@ -277,7 +277,8 @@ func init() {
 	specLintCmd.Flags().BoolVar(&specLintAllowUnestimated, "allow-unestimated", false, "Accept a bead carrying no readable sp-minutes label instead of refusing it: for a caller that lints a bead which cannot have an estimate yet")
 	specDispatchCmd.Flags().BoolVar(&specDispatchJSON, "json", false, "Output the tick report as JSON")
 	specDispatchCmd.Flags().BoolVar(&specDispatchDryRun, "dry-run", false, "Decide and report without slinging, labeling or commenting")
-	specCmd.AddCommand(specLintCmd, specDispatchCmd)
+	specSplitCmd.Flags().BoolVar(&specSplitDryRun, "dry-run", false, "Print the two piece drafts and write nothing")
+	specCmd.AddCommand(specLintCmd, specDispatchCmd, specSplitCmd)
 	rootCmd.AddCommand(specCmd)
 }
 
