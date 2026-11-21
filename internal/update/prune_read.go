@@ -99,8 +99,9 @@ type PruneRegistryReader struct {
 	// PlaintextHost is the one non-loopback host the credential may reach over
 	// http, as imagevalues.CheckCredentialTransport takes it; "" is https only.
 	PlaintextHost string
-	// Doer sends the requests. Its client must refuse a redirect that leaves the
-	// first endpoint, as imagevalues.SameEndpointRedirect does.
+	// Doer sends the requests. A *http.Client is given the endpoint's redirect
+	// rule, as imagevalues.SameEndpointRedirect states it; any other Doer must
+	// not follow a redirect off the first endpoint itself.
 	Doer PruneDoer
 	// Credentials returns the viewer's login and token. Neither reaches an error.
 	Credentials func() (user, token string, err error)
@@ -227,6 +228,30 @@ func (r PruneRegistryReader) imageTags(ctx context.Context, user, token, image s
 	return tags, nil
 }
 
+// endpointDoer is the Doer a listing page is sent through. A *http.Client is
+// copied with imagevalues.SameEndpointRedirect ahead of its own redirect rule,
+// so a redirect that leaves the first endpoint is refused before the next
+// request carries the credential there. Any other Doer cannot be changed, so
+// page checks the endpoint its answer came from instead.
+func (r PruneRegistryReader) endpointDoer() PruneDoer {
+	c, ok := r.Doer.(*http.Client)
+	if !ok {
+		return r.Doer
+	}
+	cc := *c
+	own := cc.CheckRedirect
+	cc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := imagevalues.SameEndpointRedirect(req, via); err != nil {
+			return err
+		}
+		if own != nil {
+			return own(req, via)
+		}
+		return nil
+	}
+	return &cc
+}
+
 // page reads one page of image's packages and the total the answer reports. A
 // refused answer's body reaches an error only as its reason, through
 // pruneRefusal, which redacts the viewer's credential and bounds the text.
@@ -241,11 +266,16 @@ func (r PruneRegistryReader) page(ctx context.Context, user, token, image string
 	req := (&http.Request{Method: http.MethodGet, URL: u, Header: http.Header{}}).WithContext(ctx)
 	req.SetBasicAuth(user, token)
 	req.Header.Set("Accept", "application/json")
-	resp, err := r.Doer.Do(req)
+	resp, err := r.endpointDoer().Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("asking the Forgejo packages API for %s: %w", image, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// An answer that names no request, or names another endpoint, is refused: the
+	// credential may have been sent off the endpoint to get it.
+	if answered := resp.Request; answered == nil || answered.URL == nil || answered.URL.Scheme != u.Scheme || answered.URL.Host != u.Host {
+		return nil, 0, fmt.Errorf("the Forgejo packages API for %s did not answer from the endpoint it was asked, so its answer is refused", image)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, 0, pruneRefusal(resp, u, user, token, image)
 	}
