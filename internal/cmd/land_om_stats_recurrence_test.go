@@ -184,17 +184,25 @@ func TestLandOmStatsRecurrenceTalliesWindow(t *testing.T) {
 	}
 }
 
-// landOmStatsRecurrenceJSON runs the report over a held-out bead and a filed
-// bead, each with a minor finding a later record of another bead restates, with
-// a fixed now, as JSON.
-func landOmStatsRecurrenceJSON(t *testing.T) string {
+// landOmStatsRecurrenceOutputs runs the report over a held-out bead and a filed
+// bead, each with a minor finding a later record of another bead restates, and
+// one more minor finding on the first bead that nothing restates, so the two
+// sides differ (the held side two findings and one follow, the filed side one and
+// one, or the reverse): a table that swapped the sides' columns would then fail.
+// The fixed now is the only clock; the report is returned as text and as JSON.
+func landOmStatsRecurrenceOutputs(t *testing.T) (text, raw string) {
 	t.Helper()
 	in := omlessons.HoldOutStart.Add(time.Hour)
 	doc := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/foo.go", Title: "the documentation says the flag defaults to true"}
+	alone := land.ReviewFindingText{Severity: "minor", File: "internal/cmd/bar.go", Title: "the documentation says the flag is required"}
 	later := land.ReviewFindingText{Severity: "major", File: doc.File, Title: doc.Title}
 	var lines []string
-	for _, bead := range []string{"gt-rec-0004", "gt-rec-0000"} {
-		for _, rec := range []land.ReviewRecord{{BeadID: bead, At: in, FindingText: []land.ReviewFindingText{doc}}, {BeadID: bead + "-later", At: in.Add(time.Hour), FindingText: []land.ReviewFindingText{later}}} {
+	for i, bead := range []string{"gt-rec-0004", "gt-rec-0000"} {
+		found := []land.ReviewFindingText{doc}
+		if i == 0 {
+			found = append(found, alone)
+		}
+		for _, rec := range []land.ReviewRecord{{BeadID: bead, At: in, FindingText: found}, {BeadID: bead + "-later", At: in.Add(time.Hour), FindingText: []land.ReviewFindingText{later}}} {
 			line, err := json.Marshal(rec)
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
@@ -203,11 +211,24 @@ func landOmStatsRecurrenceJSON(t *testing.T) string {
 		}
 	}
 	fake := &landOmStatsFakeFS{files: map[string]string{"/rec": strings.Join(lines, "\n") + "\n", "/log": ""}}
-	var out strings.Builder
-	if err := landOmStatsRecurrenceReportFrom(fake, omStatsNoTown(t), &out, "", "/rec", "/log", true, in.Add(time.Hour)); err != nil {
-		t.Fatalf("the report: %v", err)
+	report := func(asJSON bool) string {
+		var out strings.Builder
+		if err := landOmStatsRecurrenceReportFrom(fake, omStatsNoTown(t), &out, "", "/rec", "/log", asJSON, in.Add(time.Hour)); err != nil {
+			t.Fatalf("the report: %v", err)
+		}
+		return out.String()
 	}
-	return out.String()
+	return report(false), report(true)
+}
+
+// landOmStatsRecurrenceTableLine is the table row of class id in text.
+func landOmStatsRecurrenceTableLine(text, id string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, id+" ") {
+			return line
+		}
+	}
+	return ""
 }
 
 // TestLandOmStatsRecurrenceJSONCarriesTheRows: --recurrence --json prints the base
@@ -215,14 +236,15 @@ func landOmStatsRecurrenceJSON(t *testing.T) string {
 // one finding and one follow per side on the first class (gt-5hg00y).
 func TestLandOmStatsRecurrenceJSONCarriesTheRows(t *testing.T) {
 	t.Parallel()
-	raw := landOmStatsRecurrenceJSON(t)
+	_, raw := landOmStatsRecurrenceOutputs(t)
 	var doc landOmStatsRecurrenceDoc
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		t.Fatalf("decoding the JSON: %v", err)
 	}
-	want := landOmStatsRecurrenceSide{Findings: 1, Followed: 1}
-	if len(doc.Recurrence) != len(omlessons.HoldOutClasses) || doc.Recurrence[0].HeldOut != want || doc.Recurrence[0].Filed != want {
-		t.Errorf("recurrence rows = %+v, want one per class with one finding and one follow per side on the first", doc.Recurrence)
+	first := doc.Recurrence[0]
+	one, two := landOmStatsRecurrenceSide{Findings: 1, Followed: 1, Rate: 1}, landOmStatsRecurrenceSide{Findings: 2, Followed: 1, Rate: 0.5}
+	if len(doc.Recurrence) != len(omlessons.HoldOutClasses) || !((first.HeldOut == one && first.Filed == two) || (first.HeldOut == two && first.Filed == one)) {
+		t.Errorf("recurrence rows = %+v, want one per class and, on the first, one side with %+v and the other with %+v", doc.Recurrence, one, two)
 	}
 }
 
@@ -274,5 +296,25 @@ func TestLandOmStatsRecurrenceReportFails(t *testing.T) {
 				t.Errorf("printed a report after the error: %s", b)
 			}
 		})
+	}
+}
+
+// TestLandOmStatsRecurrenceTextAndJSONAgree: each class's table row carries the
+// counts and rates its JSON "recurrence" row carries, on a fixture whose two sides
+// differ, so a table that swapped the held and filed columns fails (gt-2xv79k).
+func TestLandOmStatsRecurrenceTextAndJSONAgree(t *testing.T) {
+	t.Parallel()
+	text, raw := landOmStatsRecurrenceOutputs(t)
+	var doc landOmStatsRecurrenceDoc
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("decoding the JSON: %v", err)
+	}
+	for _, row := range doc.Recurrence {
+		want := fmt.Sprintf("%s %d %d %s %d %d %s", row.ID,
+			row.HeldOut.Findings, row.HeldOut.Followed, landOmStatsPercent(row.HeldOut.Rate),
+			row.Filed.Findings, row.Filed.Followed, landOmStatsPercent(row.Filed.Rate))
+		if got := strings.Join(strings.Fields(landOmStatsRecurrenceTableLine(text, row.ID)), " "); got != want {
+			t.Errorf("table row %q, want %q", got, want)
+		}
 	}
 }
