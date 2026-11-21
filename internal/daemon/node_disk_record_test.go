@@ -3,7 +3,9 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -133,15 +135,11 @@ func TestHostNodeDiskRecordWriteFailure(t *testing.T) {
 		d.diskMaint.getenv = func(string) string { return "" }
 		d.diskMaint.environ = func() []string { return []string{"PATH=/usr/bin", "HOME=/home/polecat"} }
 		if breakJobs {
-			// A town root that cannot be written makes the record's directory
-			// fail to be created; the record itself is still missing, so the
-			// read starts an empty one and only the write fails.
-			//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
-			if err := os.Chmod(d.config.TownRoot, 0o555); err != nil {
-				t.Fatal(err)
-			}
-			//testpolicy:allow no-exec-files — the target is the fixture directory: restores its write bit for t.TempDir cleanup
-			t.Cleanup(func() { _ = os.Chmod(d.config.TownRoot, 0o755) })
+			// The record's directory cannot be created: the real function runs and
+			// its mkdir fails, as it does for a read-only town root, as root too.
+			d.diskMaint.nodeDiskFS = nodeDiskFS{mkdirAll: func(string, os.FileMode) error {
+				return &fs.PathError{Op: "mkdir", Path: d.config.TownRoot, Err: fs.ErrPermission}
+			}}
 		}
 		f.src.host = newFileHostProbes(d.config.TownRoot, nil, d.controlNodeDisk)
 		return f.collect(t, f.src.collectHostNodeDisk), f.logs.String()
@@ -160,8 +158,32 @@ func TestHostNodeDiskRecordWriteFailure(t *testing.T) {
 		t.Errorf("items with an unwritable record = %+v, want the same as with a writable one: %+v", broken, items)
 	}
 	lines := strings.Split(strings.TrimSpace(brokenLogs), "\n")
-	if len(lines) != 1 || !strings.Contains(lines[0], "not recorded") {
-		t.Errorf("log = %q, want one line saying the readings were not recorded", brokenLogs)
+	if len(lines) != 1 || !strings.Contains(lines[0], "not recorded") || !strings.Contains(lines[0], "permission denied") {
+		t.Errorf("log = %q, want one line saying the readings were not recorded and why", brokenLogs)
+	}
+}
+
+// recordNodeDiskIn is the real function: a failing mkdir or a failing write
+// reaches it through the seam and comes back as the error the step returned.
+func TestRecordNodeDiskStepFailures(t *testing.T) {
+	t.Parallel()
+	denied := func(op string) error { return &fs.PathError{Op: op, Path: "x", Err: fs.ErrPermission} }
+	for _, tc := range []struct {
+		name string
+		fs   nodeDiskFS
+		op   string
+	}{
+		{"mkdir", nodeDiskFS{mkdirAll: func(string, os.FileMode) error { return denied("mkdir") }}, "mkdir"},
+		{"write", nodeDiskFS{writeJSON: func(string, any) error { return denied("open") }}, "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := recordNodeDiskIn(t.TempDir(), map[string]nodeDiskEntry{"n": {UsedPercent: 1}}, tc.fs)
+			var pe *fs.PathError
+			if !errors.Is(err, fs.ErrPermission) || !errors.As(err, &pe) || pe.Op != tc.op {
+				t.Fatalf("recordNodeDiskIn = %v, want the %s step's permission error", err, tc.name)
+			}
+		})
 	}
 }
 
