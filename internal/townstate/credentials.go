@@ -8,6 +8,9 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"unicode"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // redactedMarker replaces a credential value; a value that is already the
@@ -65,8 +68,30 @@ type hit struct {
 	from, to int
 }
 
+// valueShapeRule names a token-shaped word in a string value, whatever its key.
+// RedactJSON never rewrites it: the document is refused instead.
+const valueShapeRule = "value:shape"
+
+// isValueShapeSplit separates the words of a string value that a token can hide in.
+func isValueShapeSplit(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(`,;"'()`, r)
+}
+
+// appendValueShape adds one hit per word of s that is a token by shape. The span
+// is the string literal that ends before end, and no word is kept, so no part of a
+// token can reach a finding.
+func appendValueShape(out []hit, data []byte, s string, end int) []hit {
+	for _, word := range strings.FieldsFunc(s, isValueShapeSplit) {
+		if config.LooksLikeSecret("", word) {
+			out = append(out, hit{rule: valueShapeRule, from: stringStart(data, end), to: end})
+		}
+	}
+	return out
+}
+
 // jsonHits walks valid JSON token by token, so every occurrence of a key is seen
-// (duplicates included); only string members of objects are findings.
+// (duplicates included). A string under a credential name is a key hit; every
+// other string value, in an object, an array or at the top, is checked by shape.
 func jsonHits(data []byte) ([]hit, error) {
 	type frame struct {
 		object  bool
@@ -105,13 +130,17 @@ func jsonHits(data []byte) ([]hit, error) {
 		}
 		s, isString := tok.(string)
 		switch {
-		case top == nil:
-		case !top.object:
+		case top == nil || !top.object:
+			if isString {
+				out = appendValueShape(out, data, s, end)
+			}
 		case top.wantKey:
 			top.key, top.cred, top.wantKey = s, credentialName(s), false
 		default:
 			if isString && top.cred && isSecret(top.key, s) {
 				out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
+			} else if isString {
+				out = appendValueShape(out, data, s, end)
 			}
 			top.wantKey = true
 		}
@@ -136,7 +165,9 @@ func stringStart(data []byte, end int) int {
 }
 
 // FindCredentials returns one rule name per credential in data, never a value.
-// Valid JSON is walked; anything else is scanned for NAME=value and "key": "value".
+// Valid JSON is walked: a credential-named key's value is a json:key finding, and
+// a token-shaped word in any other string value is a value:shape finding. Anything
+// else is scanned for NAME=value and "key": "value".
 func FindCredentials(data []byte) []string {
 	var found []string
 	if hits, err := jsonHits(data); err == nil {
@@ -159,8 +190,10 @@ func FindCredentials(data []byte) []string {
 }
 
 // RedactJSON replaces every credential value with the marker, leaving every other
-// byte alone, and returns the count. It refuses input that is not valid JSON, and
-// its own output if a finding or a syntax error survives.
+// byte alone, and returns the count. A token-shaped word in a value that is not
+// under a credential name is not rewritten, so it survives into the output and
+// the check below refuses the document. It refuses input that is not valid JSON,
+// and its own output if a finding or a syntax error survives.
 func RedactJSON(data []byte) (out []byte, n int, err error) {
 	if !json.Valid(data) {
 		return nil, 0, errors.New("townstate: input is not valid JSON, refusing to redact it")
@@ -172,14 +205,18 @@ func RedactJSON(data []byte) (out []byte, n int, err error) {
 	var buf bytes.Buffer
 	last := 0
 	for _, h := range hits {
+		if h.rule == valueShapeRule {
+			continue
+		}
 		buf.Write(data[last:h.from])
 		buf.WriteString(`"` + redactedMarker + `"`)
 		last = h.to
+		n++
 	}
 	buf.Write(data[last:])
 	out = buf.Bytes()
 	if !json.Valid(out) || len(FindCredentials(out)) > 0 {
 		return nil, 0, errors.New("townstate: redaction left a credential or broke the document, refusing the output")
 	}
-	return out, len(hits), nil
+	return out, n, nil
 }
