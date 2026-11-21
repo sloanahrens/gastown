@@ -175,10 +175,25 @@ func repeatWords(text string) map[string]struct{} {
 
 var repeatWordRe = regexp.MustCompile(`[\p{L}\p{N}]+`)
 
+// SimilarFindings reports whether two findings name the same file and share at
+// least RepeatSimilarityThreshold of the words of their title and claim.
+//
+// It is the match RepeatedFindings counts a repeat by, exported so the
+// recurrence comparison reuses it instead of copying the rule (gt-3ohcu0).
+func SimilarFindings(a, b land.ReviewFindingText) bool {
+	return similarFindings(newRepeatFinding(a), newRepeatFinding(b))
+}
+
+// similarFindings is the one match rule both RepeatedFindings and
+// SimilarFindings apply.
+func similarFindings(a, b repeatFinding) bool {
+	return a.file == b.file && repeatJaccard(a.words, b.words) >= RepeatSimilarityThreshold
+}
+
 // repeatMatch reports whether f restates any finding of the earlier rounds.
 func repeatMatch(f repeatFinding, earlier []repeatFinding) bool {
 	for _, prev := range earlier {
-		if prev.file == f.file && repeatJaccard(f.words, prev.words) >= RepeatSimilarityThreshold {
+		if similarFindings(prev, f) {
 			return true
 		}
 	}
