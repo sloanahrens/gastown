@@ -284,16 +284,20 @@ func TestImagePinsReadAtTipSkipsCompare(t *testing.T) {
 // TestReadImagePinTipsBDFloor: the bd pin's tip is held to the samples build the
 // image needs, whether or not the pin is at it, so a tip that does not contain
 // the floor is that pin's Err naming the floor and no lag is counted; a tip that
-// contains it reads clean.
+// contains it reads clean. The guard is bd's alone: another pin's tip is never
+// the base of a floor call, only of that pin's own lag compare.
 func TestReadImagePinTipsBDFloor(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		only int
-		want string
+		name           string
+		only           int
+		pin            string // the pin this row is about; empty means bd
+		pinCommit, tip string
+		want           string
 	}{
 		{name: "a bd tip that contains the samples build"},
 		{name: "a bd tip that lacks the samples build", only: 3, want: "does not contain the samples build"},
+		{name: "another pin's tip never makes the floor call", pin: "om", pinCommit: pinsReadOMCommit, tip: pinsReadOMTip},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -304,6 +308,23 @@ func TestReadImagePinTipsBDFloor(t *testing.T) {
 			states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
 			require.NoError(t, err)
 			require.Len(t, states, 4)
+			if tt.pin != "" {
+				assert.Equal(t, pinsReadOtherStates(), states[1:], "the %s pin reads its lag clean beside bd", tt.pin)
+				floor, lag := 0, 0
+				for _, call := range cmp.calls {
+					if call.base == tt.tip && call.head == daemonimage.BDSamplesFloor {
+						floor++
+					}
+					if call.base == tt.pinCommit && call.head == tt.tip {
+						lag++
+					}
+				}
+				assert.Zero(t, floor, "the %s pin's tip is never the base of a floor call", tt.pin)
+				assert.LessOrEqual(t, lag, 1, "the %s pin's own lag compare is at most one call", tt.pin)
+				assert.Contains(t, cmp.calls, pinsReadCompareCall{owner: pinsReadOwner, repo: "beads", base: pinsReadBDTip, head: daemonimage.BDSamplesFloor},
+					"bd still takes the floor call in this row")
+				return
+			}
 			if tt.want == "" {
 				assert.NoError(t, states[0].Err, "a bd tip that contains the floor reads clean")
 				assert.Equal(t, ImagePinState{Name: "bd", Pin: pinsReadBDCommit, Tip: pinsReadBDTip, Behind: 1}, states[0])
