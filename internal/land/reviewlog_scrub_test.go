@@ -55,6 +55,17 @@ func TestReviewLogScrubJoinedTokens(t *testing.T) {
 	}
 }
 
+// TestReviewLogScrubTokenHoldingAJoiner: a token whose own bytes include a joiner
+// is replaced whole by the whole-run check, not left with its tail after the
+// first joiner (base64 secrets hold '/').
+func TestReviewLogScrubTokenHoldingAJoiner(t *testing.T) {
+	t.Parallel()
+	token := "s" + "k-" + strings.Repeat("a", 8) + "/" + strings.Repeat("b", 8)
+	if got, want := scrubClaim("the key "+token+" leaks"), "the key <redacted> leaks"; got != want {
+		t.Errorf("scrubClaim = %q, want %q", got, want)
+	}
+}
+
 // scrubTestSeparator is every byte the scrub splits on, words and joiners alike.
 func scrubTestSeparator(r rune) bool {
 	return r < 256 && (claimSeparator(byte(r)) || claimJoiner(byte(r)))
