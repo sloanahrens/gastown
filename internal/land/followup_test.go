@@ -77,6 +77,10 @@ type followupFixture struct {
 
 const followupThreshold = 0.6
 
+// followupDay is the feed's clock in the fixture: a bead it files is a bundle
+// of this UTC day (gt-n9v7r7).
+var followupDay = time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+
 func newFollowupFixture(t *testing.T, score float64, findings []Finding) *followupFixture {
 	t.Helper()
 	// The band's floor is the rig's own .om.json threshold at the landing's
@@ -91,7 +95,7 @@ func newFollowupFixture(t *testing.T, score float64, findings []Finding) *follow
 	reviews := reviewsFileIn(t)
 	return &followupFixture{
 		t: t, bd: bd, fake: fake, repo: repo, reviews: reviews,
-		lander: &Lander{Beads: bd, Followups: fake, Reviews: reviews, sleep: func(time.Duration) {}},
+		lander: &Lander{Beads: bd, Followups: fake, Reviews: reviews, sleep: func(time.Duration) {}, Now: func() time.Time { return followupDay }},
 		work:   Work{BeadID: "gt-abc", Rig: "gastown", Branch: fixtureBranch, Head: "aaa1111", Target: "main"},
 		result: Result{LandedCommit: "0123456789abcdef0123456789abcdef01234567",
 			Verdict: Verdict{Verdict: VerdictApprove, Score: score, Findings: findings}},
@@ -165,13 +169,14 @@ func TestFollowupFeedBeadShape(t *testing.T) {
 		t.Fatalf("filed %d beads, want one:\n%s", len(f.fake.created), log)
 	}
 	spec := f.fake.created[0]
-	wantTitle := "Found: swap the nil check and 1 more in internal/land (om minor on gt-abc approved at 0.80)"
+	wantTitle := "Follow-ups in internal/land for 2026-11-21"
 	if spec.Title != wantTitle {
 		t.Errorf("title = %q, want %q", spec.Title, wantTitle)
 	}
 	want := []string{FollowUpLabel,
 		Fingerprint("internal/land/note.go", "swap the nil check"),
 		Fingerprint("internal/land/note.go", "name the error")}
+	want = append(want, BundleLabels(followupDay, "internal/land")...)
 	if !slices.Equal(spec.Labels, want) {
 		t.Errorf("labels = %v, want %v", spec.Labels, want)
 	}
@@ -338,11 +343,7 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 		{"internal/land", findings[:3]},
 	} {
 		spec := f.fake.created[i]
-		more := ""
-		if n := len(tc.findings) - 1; n > 0 {
-			more = fmt.Sprintf(" and %d more", n)
-		}
-		wantTitle := fmt.Sprintf("Found: %s%s in %s (om minor on gt-abc approved at 0.80)", tc.findings[0].Title, more, tc.pkg)
+		wantTitle := fmt.Sprintf("Follow-ups in %s for 2026-11-21", tc.pkg)
 		if spec.Title != wantTitle {
 			t.Errorf("bead %d title = %q, want %q", i, spec.Title, wantTitle)
 		}
@@ -350,6 +351,7 @@ func TestFollowupFeedSplitsAFullLandingByPackage(t *testing.T) {
 		for _, fd := range tc.findings {
 			wantLabels = append(wantLabels, Fingerprint(fd.Path, fd.Title))
 		}
+		wantLabels = append(wantLabels, BundleLabels(followupDay, tc.pkg)...)
 		if !slices.Equal(spec.Labels, wantLabels) {
 			t.Errorf("bead %d labels = %v, want %v", i, spec.Labels, wantLabels)
 		}
@@ -383,7 +385,7 @@ func TestFollowupFeedTreatsARootFileAsHavingNoPackage(t *testing.T) {
 	}
 	// Packages file in sorted order, and no package sorts before a named one.
 	root := f.fake.created[0]
-	if want := "Found: name the error (om minor on gt-abc approved at 0.80)"; root.Title != want {
+	if want := "Follow-ups in the repository root for 2026-11-21"; root.Title != want {
 		t.Errorf("title = %q, want %q", root.Title, want)
 	}
 	if strings.Contains(root.Title+root.Body, "in .") {
@@ -645,7 +647,7 @@ func TestFollowupFeedKeepsFilingTheFreshFindingsOfARepeatLanding(t *testing.T) {
 	if len(f.fake.created) != 1 {
 		t.Fatalf("filed %d beads, want one for the fresh finding", len(f.fake.created))
 	}
-	want := []string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")}
+	want := append([]string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")}, BundleLabels(followupDay, "internal/land")...)
 	if got := f.fake.created[0].Labels; !slices.Equal(got, want) {
 		t.Errorf("labels = %v, want only the filed finding's fingerprint", got)
 	}

@@ -843,7 +843,8 @@ func TestFollowupBeadsFilesTheAcceptanceField(t *testing.T) {
 // go through the feed's own spec path and the daemon's bead client, and the bead
 // the store holds carries the acceptance field its body's Acceptance section
 // lists. The two halves of gt-ejsl5v each have a test; this is the join between
-// them (gt-4unmqk).
+// them (gt-4unmqk). It checks FollowupPlans' Spec, the old per-landing shape the
+// feed no longer files (it files bundleSpec); gt-4x669z makes the two one value.
 func TestFollowupFindingsReachTheStoredAcceptanceField(t *testing.T) {
 	t.Parallel()
 	bd := beadsfake.New(beadsfake.WithPrefix("gt"))

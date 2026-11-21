@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -411,24 +412,50 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	if budget == 0 {
 		budget = DefaultFollowupBudgetPercent
 	}
-	var ids []string
+	var ids, appended []string
+	// stop is the line that says why the feed stopped creating beads, once it has:
+	// an append never counts against the bound or the budget, so the plans below
+	// the stop that have an open bundle still append (gt-n9v7r7).
+	var stop func(held int) string
+	day := l.now().UTC()
+	groups := followupGroups(fresh)
 	for i, p := range plans {
-		if open+len(ids) >= bound {
-			for _, rest := range plans[i:] {
-				held = append(held, rest.Findings...)
+		g := groups[i]
+		if bundle, ok := FindOpenBundle(existing, day, g.Package); ok {
+			add := bundleAddition(w, res, g)
+			if err := l.Followups.AppendFollowup(bundle.ID, add); err != nil {
+				// The group is held, not dropped: the feed's queue keeps held
+				// findings for a later landing (gt-ntkwh0 queues a failed write
+				// itself and supersedes this).
+				held = append(held, p.Findings...)
+				lines = append(lines, fmt.Sprintf("could not append %s to the follow-up bead %s (%v)", findingsPhrase(len(p.Findings)), bundle.ID, err))
+				continue
 			}
-			lines = append(lines, l.holdBack(open+len(ids), bound, len(held)))
-			break
-		}
-		if !BudgetAllows(filedThisWeek+len(ids), landedThisWeek, budget) {
-			for _, rest := range plans[i:] {
-				held = append(held, rest.Findings...)
+			for j := range existing {
+				if existing[j].ID == bundle.ID {
+					existing[j].Labels = append(slices.Clone(existing[j].Labels), add.Labels...)
+				}
 			}
-			lines = append(lines, fmt.Sprintf("%d %s beads for %d landings in the last 7 days, at the %d-percent weekly budget; held back %s for this landing",
-				filedThisWeek+len(ids), FollowUpLabel, landedThisWeek, budget, findingsPhrase(len(held))))
-			break
+			appended = append(appended, bundle.ID)
+			lines = append(lines, fmt.Sprintf("appended %s of the landing at %.2f to %s", findingsPhrase(len(p.Findings)), res.Verdict.Score, bundle.ID))
+			continue
 		}
-		spec := p.Spec
+		if stop == nil && open+len(ids) >= bound {
+			at := open + len(ids)
+			stop = func(held int) string { return l.holdBack(at, bound, held) }
+		}
+		if stop == nil && !BudgetAllows(filedThisWeek+len(ids), landedThisWeek, budget) {
+			at := filedThisWeek + len(ids)
+			stop = func(held int) string {
+				return fmt.Sprintf("%d %s beads for %d landings in the last 7 days, at the %d-percent weekly budget; held back %s for this landing",
+					at, FollowUpLabel, landedThisWeek, budget, findingsPhrase(held))
+			}
+		}
+		if stop != nil {
+			held = append(held, p.Findings...)
+			continue
+		}
+		spec := bundleSpec(w, res, day, g)
 		id, err := l.Followups.CreateFollowup(spec)
 		if err != nil {
 			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(p.Findings)), err))
@@ -440,12 +467,16 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 		filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels, CreatedAt: l.now()})
 		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(p.Findings)), res.Verdict.Score))
 	}
-	if len(ids) == 0 {
+	if stop != nil {
+		lines = append(lines, stop(len(held)))
+	}
+	if len(ids)+len(appended) == 0 {
 		return filed, held, lines
 	}
 	// The work bead is where a reader of the landing finds what its minors
-	// became, so the filed beads are named there and nowhere else (gt-4ty22).
-	if err := l.Beads.AddComment(w.BeadID, followupFiledComment(ids, res)); err != nil {
+	// became, so the beads filed or appended to are named there and nowhere else
+	// (gt-4ty22).
+	if err := l.Beads.AddComment(w.BeadID, followupFiledComment(ids, appended, res)); err != nil {
 		lines = append(lines, fmt.Sprintf("could not comment the filed follow-up onto %s (%v)", w.BeadID, err))
 	}
 	return filed, held, lines
@@ -657,9 +688,11 @@ type FollowupPlan struct {
 }
 
 // FollowupPlans is the follow-up beads for the fresh findings of a landing, one
-// per group, in the order the feed files them. The feed files these plans, and
-// the daemon test drives its findings through the same function to the bead the
-// store holds (gt-4unmqk).
+// per group, in the order the feed visits them. The feed no longer files these
+// specs: since gt-n9v7r7 it files bundleSpec (a bundle of the package and UTC
+// day) or appends to the open one, and a plan's Spec keeps the old per-landing
+// shape until gt-4x669z makes the two one value. A plan's Findings are what the
+// feed uses from it (gt-4unmqk).
 func FollowupPlans(w Work, res Result, fresh []FollowupCandidate) []FollowupPlan {
 	groups := followupGroups(fresh)
 	plans := make([]FollowupPlan, 0, len(groups))
@@ -823,12 +856,19 @@ func location(path string, line int) string {
 // followupFiledComment is the line the feed leaves on the work bead naming the
 // beads this landing earned, so a reader of the landed work finds its minors
 // without reading the follow-up beads themselves.
-func followupFiledComment(ids []string, res Result) string {
-	what := "follow-up"
-	if len(ids) > 1 {
-		what = "follow-ups"
+func followupFiledComment(ids, appended []string, res Result) string {
+	var parts []string
+	if len(ids) > 0 {
+		what := "follow-up"
+		if len(ids) > 1 {
+			what = "follow-ups"
+		}
+		parts = append(parts, fmt.Sprintf("%s filed for this landing: %s", what, strings.Join(ids, ", ")))
 	}
-	return fmt.Sprintf("%s filed for this landing: %s (om approved at %.2f)", what, strings.Join(ids, ", "), res.Verdict.Score)
+	if len(appended) > 0 {
+		parts = append(parts, fmt.Sprintf("appended to the open follow-up for this landing: %s", strings.Join(appended, ", ")))
+	}
+	return fmt.Sprintf("%s (om approved at %.2f)", strings.Join(parts, "; "), res.Verdict.Score)
 }
 
 // followupComment is the line a repeat leaves on the bead that already filed

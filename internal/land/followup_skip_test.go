@@ -30,7 +30,7 @@ func TestFollowupSkipDropsTheNamedFinding(t *testing.T) {
 	if len(f.fake.created) != 1 {
 		t.Fatalf("filed %d beads, want one for the finding the policy kept:\n%s", len(f.fake.created), log)
 	}
-	want := []string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")}
+	want := append([]string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")}, BundleLabels(followupDay, "internal/land")...)
 	if got := f.fake.created[0].Labels; !slices.Equal(got, want) {
 		t.Errorf("labels = %v, want only the kept finding's fingerprint", got)
 	}
