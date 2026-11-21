@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -469,32 +470,58 @@ func recordSquashRun(townRoot, db string, started time.Time, outcome string) err
 // original file is only read here, never written. A copy that already exists is
 // the first refusal's and is left as it is.
 func squashRecordRefusal(path string, stateErr error) error {
-	copyPath := path + squashStateCorruptSuffix
 	refuse := func(note string) error {
 		return fmt.Errorf("squash: %s is unreadable, so the run is not recorded and the file is left as it is (%v); %s",
 			maintenanceGCStateFileName, stateErr, note)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return refuse(fmt.Sprintf("keeping a copy at %s failed: %v", copyPath, err))
-	}
-	f, err := os.OpenFile(copyPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	copyPath, err := keepStateCopy(path)
 	switch {
-	case errors.Is(err, os.ErrExist):
+	case errors.Is(err, errStateCopyStands):
 		return refuse(fmt.Sprintf("the copy kept at %s stands", copyPath))
 	case err != nil:
-		return refuse(fmt.Sprintf("keeping a copy at %s failed: %v", copyPath, err))
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(copyPath)
-		return refuse(fmt.Sprintf("writing the copy at %s failed: %v", copyPath, err))
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(copyPath)
-		return refuse(fmt.Sprintf("closing the copy at %s failed: %v", copyPath, err))
+		return refuse(err.Error())
 	}
 	return refuse(fmt.Sprintf("its bytes are kept at %s", copyPath))
+}
+
+// errStateCopyStands reports that the first copy of an unreadable state file is
+// already there and is left as it is.
+var errStateCopyStands = errors.New("the first copy stands")
+
+// keepStateCopy keeps one copy of the state file at path+squashStateCorruptSuffix
+// and returns its path. The copy is created exclusively, so the first one stands
+// (errStateCopyStands) and a later corruption never overwrites it. The original
+// is only read. Every other error names the copy's path and never the bytes.
+func keepStateCopy(path string) (string, error) {
+	return keepStateCopyWith(path, func(name string) (io.WriteCloser, error) {
+		return os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	})
+}
+
+// keepStateCopyWith is keepStateCopy over the function that creates the copy, so
+// a test can fail the create, the write and the close.
+func keepStateCopyWith(path string, create func(name string) (io.WriteCloser, error)) (string, error) {
+	copyPath := path + squashStateCorruptSuffix
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return copyPath, fmt.Errorf("keeping a copy at %s failed: %v", copyPath, err)
+	}
+	f, err := create(copyPath)
+	switch {
+	case errors.Is(err, os.ErrExist):
+		if fi, statErr := os.Lstat(copyPath); statErr == nil && !fi.Mode().IsRegular() {
+			return copyPath, fmt.Errorf("keeping a copy at %s failed: something that is not a file is there", copyPath)
+		}
+		return copyPath, errStateCopyStands
+	case err != nil:
+		return copyPath, fmt.Errorf("keeping a copy at %s failed: %v", copyPath, err)
+	}
+	_, writeErr := f.Write(data)
+	if err := errors.Join(writeErr, f.Close()); err != nil {
+		os.Remove(copyPath)
+		return copyPath, fmt.Errorf("writing the copy at %s failed: %v", copyPath, err)
+	}
+	return copyPath, nil
 }
 
 // squashLedgerEntry is one run's line in daemon/squash_ledger.jsonl: commits

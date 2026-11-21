@@ -262,6 +262,145 @@ func TestMaintenanceGCStateCorruptIsAnErrorAndRepairable(t *testing.T) {
 	}
 }
 
+// TestMaintenanceGCStateReplacementKeepsACopy: a state write over an unreadable
+// file still lands (no writer wedges), keeps one copy of the old bytes beside
+// the file, and stamps when and where, so the squash gate it lost is known to be
+// lost; a second corruption keeps the first copy (gt-yvh1vv).
+func TestMaintenanceGCStateReplacementKeepsACopy(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := maintenanceGCStatePath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first, second := []byte("{first corrupt"), []byte("{second corrupt")
+	if err := os.WriteFile(path, first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now().UTC()
+	if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+		t.Fatalf("record over corrupt file: %v", err)
+	}
+	after := time.Now().UTC()
+	st, err := loadMaintenanceGCState(town)
+	if err != nil || st.PostGCBytes["hq"] != mib {
+		t.Fatalf("after the replacement: state=%v err=%v", st, err)
+	}
+	if st.StateResetAt.Before(before) || st.StateResetAt.After(after) || st.StateResetCopy != path+squashStateCorruptSuffix {
+		t.Errorf("the stamp = %v and copy %q, want a time in [%v, %v] and %q", st.StateResetAt, st.StateResetCopy, before, after, path+squashStateCorruptSuffix)
+	}
+	if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, first) {
+		t.Errorf("the kept copy = %q, %v, want the first corrupt bytes", got, err)
+	}
+	if err := os.WriteFile(path, second, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+		t.Fatalf("record over a second corrupt file: %v", err)
+	}
+	if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || !bytes.Equal(got, first) {
+		t.Errorf("after a second corruption the copy = %q, %v, want the first copy to stand", got, err)
+	}
+}
+
+// TestMaintenanceGCStateReplacementEdges: a copy that cannot be kept does not stop
+// the record and the state says so; a fresh town sets no stamp; a readable file
+// keeps the stamp it has across a write.
+func TestMaintenanceGCStateReplacementEdges(t *testing.T) {
+	t.Parallel()
+	t.Run("a copy that cannot be kept", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		path := maintenanceGCStatePath(town)
+		if err := os.MkdirAll(path+squashStateCorruptSuffix, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{corrupt"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+			t.Fatalf("a copy that cannot be kept stopped the record: %v", err)
+		}
+		st, err := loadMaintenanceGCState(town)
+		if err != nil || st.PostGCBytes["hq"] != mib || st.StateResetAt.IsZero() || !strings.Contains(st.StateResetCopy, "not kept") {
+			t.Errorf("state=%+v err=%v, want the record, a stamp and a copy field saying it was not kept", st, err)
+		}
+	})
+	t.Run("a fresh town sets no stamp", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+			t.Fatal(err)
+		}
+		if st, err := loadMaintenanceGCState(town); err != nil || !st.StateResetAt.IsZero() || st.StateResetCopy != "" {
+			t.Errorf("state=%+v err=%v, want no stamp", st, err)
+		}
+	})
+	t.Run("a readable file keeps its stamp", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		stamp := gcTestNow.Add(-time.Hour)
+		if _, err := updateMaintenanceGCState(town, func(st *maintenanceGCState) { st.StateResetAt, st.StateResetCopy = stamp, "kept" }); err != nil {
+			t.Fatal(err)
+		}
+		if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+			t.Fatal(err)
+		}
+		if st, err := loadMaintenanceGCState(town); err != nil || !st.StateResetAt.Equal(stamp) || st.StateResetCopy != "kept" {
+			t.Errorf("state=%+v err=%v, want the stamp kept across a write", st, err)
+		}
+	})
+}
+
+// stateCopyFault is a copy file whose write or close fails.
+type stateCopyFault struct{ writeErr, closeErr error }
+
+func (f stateCopyFault) Write(p []byte) (int, error) { return len(p), f.writeErr }
+func (f stateCopyFault) Close() error                { return f.closeErr }
+
+// create leaves a partial copy at name, as a failing write would, and hands back f.
+func (f stateCopyFault) create(name string) (io.WriteCloser, error) {
+	return f, os.WriteFile(name, []byte("partial"), 0o644)
+}
+
+// TestKeepStateCopyFailures: every way the copy can fail is an error naming the
+// copy's path, leaves no partial copy, and carries none of the file's bytes
+// (gt-yvh1vv).
+func TestKeepStateCopyFailures(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		create func(string) (io.WriteCloser, error)
+		noFile bool
+	}{
+		{"the state file cannot be read", nil, true},
+		{"the copy cannot be created", func(string) (io.WriteCloser, error) { return nil, errors.New("no room") }, false},
+		{"the write fails", stateCopyFault{writeErr: errors.New("disk full")}.create, false},
+		{"the close fails", stateCopyFault{closeErr: errors.New("disk full")}.create, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), maintenanceGCStateFileName)
+			if !tc.noFile {
+				if err := os.WriteFile(path, []byte("{SECRETBYTES"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			create := tc.create
+			if create == nil {
+				create = func(string) (io.WriteCloser, error) { return nil, errors.New("not reached") }
+			}
+			copyPath, err := keepStateCopyWith(path, create)
+			if err == nil || !strings.Contains(err.Error(), copyPath) || strings.Contains(err.Error(), "SECRETBYTES") {
+				t.Fatalf("error = %v, want one naming %s and none of the file's bytes", err, copyPath)
+			}
+			if _, statErr := os.Stat(copyPath); statErr == nil {
+				t.Errorf("a partial copy was left at %s", copyPath)
+			}
+		})
+	}
+}
+
 // --- size probe --------------------------------------------------------------
 
 func TestMaintenanceMeasure(t *testing.T) {
