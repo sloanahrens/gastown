@@ -93,8 +93,10 @@ case "$inotify_limit" in
 esac
 if [ "$inotify_limit" -lt "$inotify_min" ]; then
   say "raising fs.inotify.max_user_instances in $PROFILE to $inotify_min"
-  # ssh joins the words after -- and the VM's shell parses that line, so the write is one quoted word; tee, not a redirect, writes the file as root.
-  colima ssh -p "$PROFILE" -- "printf 'fs.inotify.max_user_instances = $inotify_min\n' | sudo tee /etc/sysctl.d/99-gt-inotify.conf >/dev/null && sudo sysctl --system >/dev/null" ||
+  # colima ssh joins its words with spaces and the VM's login shell re-parses the result, so the
+  # privileged script is one remote string run by sudo sh -c: the redirect runs in sudo's shell.
+  script="printf \"fs.inotify.max_user_instances = $inotify_min\\n\" >/etc/sysctl.d/99-gt-inotify.conf && sysctl --system >/dev/null"
+  colima ssh -p "$PROFILE" -- "sudo sh -c '$script'" ||
     die "cannot raise fs.inotify.max_user_instances in the $PROFILE VM (writing /etc/sysctl.d/99-gt-inotify.conf and sysctl --system)"
 fi
 

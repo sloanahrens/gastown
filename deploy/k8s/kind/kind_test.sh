@@ -80,8 +80,10 @@ case "$1" in
     rm -f "$STATE/colima-running"; exit 0 ;;
   ssh)
     # The VM's inotify limit: the read answers from $STATE/inotify-max (128, the
-    # kernel default, when absent). The write runs the line ssh is given the way the
-    # VM's shell parses it, with its /etc/sysctl.d kept in $STATE.
+    # kernel default, when absent). The write runs the line ssh is given, joined with
+    # spaces as ssh does, in the login shell. The login shell sees /etc/sysctl.d as a
+    # path that does not exist, so a redirect outside sudo fails and never reaches the
+    # host; the stub sudo maps that path to $STATE/sysctl.d for the root side only.
     case "$*" in
       *"sysctl -n fs.inotify.max_user_instances"*)
         [ -n "${STUB_SYSCTL_READ_FAILS:-}" ] && exit 1
@@ -91,12 +93,18 @@ case "$1" in
         mkdir -p "$STATE/sysctl.d"
         line="$*"
         remote="${line#*-- }"
-        remote="${remote//sudo /}"
-        sh -c "${remote//\/etc\/sysctl.d/$STATE\/sysctl.d}"
+        sh -c "${remote//\/etc\/sysctl.d/\/gt-absent-sysctl.d}"
         exit $? ;;
     esac
     exit 0 ;;
 esac
+STUB
+cat >"$TMP/bin/sudo" <<'STUB'
+#!/usr/bin/env bash
+# The root side: the absent path the login shell was given lands in $STATE.
+args=()
+for a in "$@"; do args+=("${a//\/gt-absent-sysctl.d/$STATE\/sysctl.d}"); done
+exec "${args[@]}"
 STUB
 cat >"$TMP/bin/sysctl" <<'STUB'
 #!/usr/bin/env bash
