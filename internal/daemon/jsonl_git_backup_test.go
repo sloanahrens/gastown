@@ -4765,3 +4765,34 @@ func TestJSONLBackupIssuesBudgetNoSample(t *testing.T) {
 		t.Errorf("the issues export was handed %s with no sample, want %s", issues, jsonlExportTimeout)
 	}
 }
+
+// TestJSONLBackupIssuesBudgetSeededSample: the issues export's budget follows
+// the table's remembered size and this cycle's slowdown — 10,886 rows at 150µs
+// under a median slowdown of 140 is 457.212 s (gt-qgg9x1).
+func TestJSONLBackupIssuesBudgetSeededSample(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC))
+	d.jsonlSupplementalTimeout = time.Hour
+	const rows = 10886
+	const perRow = 150 * time.Microsecond
+	d.jsonlRates.Record("hq", "issues", rows, perRow*rows)
+	d.jsonlRatios = append(d.jsonlRatios, 88, 140, 143)
+	var issues time.Duration
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _ string, _ string, got time.Duration) (int, error) {
+		if table == "issues" {
+			issues = got
+		}
+		return 0, nil
+	}
+
+	if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+		t.Fatalf("exportDatabaseToJsonl: %v", err)
+	}
+
+	// rows * perRow * median slowdown (140) * jsonlBudgetMargin.
+	want := 457*time.Second + 212*time.Millisecond
+	if diff := issues - want; diff < -time.Second || diff > time.Second {
+		t.Errorf("the issues export was handed %s with a seeded sample, want about %s", issues, want)
+	}
+}
