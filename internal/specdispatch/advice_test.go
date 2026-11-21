@@ -327,3 +327,57 @@ func TestAdviceFailureWordNeedsReadOrStep(t *testing.T) {
 		})
 	}
 }
+
+// adviceLintLine is the advisory for a box that demands lint passes.
+const adviceLintLine = "an acceptance box demands that lint passes: a seat cannot run lint and the landing gate does; drop the box or say go vet"
+
+// TestAdviceLintBoxRows pins which acceptance boxes demand lint pass: a lint
+// word and a pass word near each other, in either order, and not "spec lint".
+func TestAdviceLintBoxRows(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		box  string
+		want bool
+	}{
+		{"the landing gate's lint passes (a seat does not run make lint)", true},
+		{"lint passes", true},
+		{"passes lint", true},
+		{"lint passed on the branch", true},
+		{"go vet passes", false},
+		{"gt spec lint passes", false},
+		{"the landing gate runs lint", false},
+		{"the lint output is kept in the bead and the step is listed in the log, and the review then passes", false},
+	} {
+		t.Run(row.box, func(t *testing.T) {
+			t.Parallel()
+			s := adviceSpec("Add a column to the board.", "Go.", "- [ ] "+row.box)
+			got := Advice(s)
+			if row.want && (len(got) != 1 || got[0] != adviceLintLine) {
+				t.Fatalf("Advice() = %q, want the lint line", got)
+			}
+			if !row.want && len(got) != 0 {
+				t.Fatalf("Advice() = %q, want none", got)
+			}
+		})
+	}
+}
+
+// TestAdviceLintBoxOnceForTwoBoxes pins that two matching boxes give one line.
+func TestAdviceLintBoxOnceForTwoBoxes(t *testing.T) {
+	t.Parallel()
+	s := adviceSpec("Add a column to the board.", "Go.",
+		"- [ ] lint passes on the branch\n- [ ] the landing gate's lint passes")
+	if got := Advice(s); len(got) != 1 || got[0] != adviceLintLine {
+		t.Fatalf("Advice() = %q, want one lint line", got)
+	}
+}
+
+// TestAdviceLintBoxNoBoxesSilent pins that a spec with no acceptance boxes
+// gets no lint line.
+func TestAdviceLintBoxNoBoxesSilent(t *testing.T) {
+	t.Parallel()
+	s := adviceSpec("Add a column to the board.", "Go.", "")
+	if got := Advice(s); len(got) != 0 {
+		t.Fatalf("Advice() = %q, want none", got)
+	}
+}
