@@ -260,6 +260,45 @@ func TestInsideModule(t *testing.T) {
 	})
 }
 
+// TestRacePackages: RacePackages lists the root module's test packages, as
+// ./dir with "." for the root. A file under testdata/ or vendor/, or inside a
+// nested module, is left out, and only *_test.go files count.
+func TestRacePackages(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		tracked []string
+		want    []string
+	}{
+		{
+			name:    "two root packages and a nested module, sorted and once each",
+			tracked: []string{"b/x_test.go", "a/z_test.go", "a/a_test.go", "tracker/y_test.go", "tracker/go.mod"},
+			want:    []string{"./a", "./b"},
+		},
+		{
+			name:    "a test file at the repo root gives .",
+			tracked: []string{"root_test.go"},
+			want:    []string{"."},
+		},
+		{
+			name:    "testdata, vendor and nested-module files are left out",
+			tracked: []string{"a/testdata/x_test.go", "vendor/x/y_test.go", "tracker/y_test.go", "tracker/go.mod"},
+			want:    nil,
+		},
+		{
+			name:    "a non-test go file adds no directory",
+			tracked: []string{"a/main.go"},
+			want:    nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			equalList(t, RacePackages(tc.tracked), tc.want)
+		})
+	}
+}
+
 // TestDockerPackages: comments, blank lines, trailing comments and extra
 // fields are handled as the script's sed and awk handle them.
 func TestDockerPackages(t *testing.T) {
