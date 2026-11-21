@@ -310,6 +310,9 @@ type PostLandUnknown struct {
 	Context string
 	State   string
 	At      time.Time
+	// Orphan is the run found ended without a verdict, such as "11205
+	// failure"; empty for a verdict that only timed out.
+	Orphan string
 }
 
 // Key is the attention queue's stable identity for the record: one per rig
@@ -319,8 +322,12 @@ func (u PostLandUnknown) Key() string {
 }
 
 // Summary is the attention item's one line, naming the context and the last
-// state seen.
+// state seen. For an orphaned verdict it names the run that ended instead.
 func (u PostLandUnknown) Summary() string {
+	if u.Orphan != "" {
+		return fmt.Sprintf("post-land verdict unknown for %s (%s): the run %s ended and the %q status is still %s",
+			short(u.SHA), u.Rig, u.Orphan, u.Context, u.State)
+	}
 	return fmt.Sprintf("post-land verdict unknown for %s (%s): the %q status is %s",
 		short(u.SHA), u.Rig, u.Context, u.State)
 }
@@ -654,7 +661,13 @@ func (p *PostLandRunner) Alarms(now time.Time) (PostLandAlarms, error) {
 	timeout := p.statusTimeout()
 	var out PostLandAlarms
 	for _, e := range st.PostLandPending {
+		// An entry whose run was found ended raises its item at once, counted
+		// from that moment, rather than waiting out post_land_timeout: no run
+		// is left to report, so the silence is already known.
 		at := e.Since.Add(timeout)
+		if !e.OrphanedAt.IsZero() {
+			at = e.OrphanedAt
+		}
 		if now.Before(at) || !now.Before(at.Add(PostLandAlarmWindow)) {
 			continue
 		}
@@ -663,7 +676,7 @@ func (p *PostLandRunner) Alarms(now time.Time) (PostLandAlarms, error) {
 			state = "unread"
 		}
 		out.Unknown = append(out.Unknown, PostLandUnknown{
-			Rig: p.Rig, SHA: e.Land.Commit, Context: e.Context, State: state, At: at,
+			Rig: p.Rig, SHA: e.Land.Commit, Context: e.Context, State: state, At: at, Orphan: e.OrphanRun,
 		})
 	}
 	if d := st.PostLandDropped; d != nil && now.Before(d.At.Add(PostLandAlarmWindow)) {
