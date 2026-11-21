@@ -7,6 +7,7 @@ import (
 )
 
 func TestGateRunRotationDecisions(t *testing.T) {
+	t.Parallel()
 	due := func(size int64) bool { return gateRunRotationDue(size, gateRunRotateLimit) }
 	if due(50<<20-1) || !due(50<<20) || !due(50<<20+1) {
 		t.Error("gateRunRotationDue: want false one byte under the 50 MiB limit, true at and over it")
