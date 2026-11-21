@@ -16,7 +16,7 @@ import (
 // read when each push happened as well as that it happened.
 type driftRun struct {
 	d      *Daemon
-	clk    *clockwork.FakeClock
+	clk    *driftSpyClock
 	pusher *fakeWorkspacePusher
 	at     []time.Time
 }
@@ -26,7 +26,7 @@ type driftRun struct {
 // and sets the tick, so the wait for the tick comes before any clock move.
 func startDriftRun(t *testing.T) *driftRun {
 	t.Helper()
-	r := &driftRun{clk: newFixedClock()}
+	r := &driftRun{clk: newDriftSpyClock()}
 	r.pusher = &fakeWorkspacePusher{calls: make(chan int, 10)}
 	r.pusher.onCall = func(int) { r.at = append(r.at, r.clk.Now()) }
 	r.d = newWorkspaceDaemon(t, gatewayEnv(), r.clk, r.pusher, &lockedBuffer{}, nil)
@@ -36,7 +36,7 @@ func startDriftRun(t *testing.T) *driftRun {
 	if got := awaitPush(t, r.pusher.calls); got != 1 {
 		t.Fatalf("start push = call %d, want 1", got)
 	}
-	awaitWaits(t, r.clk, 1)
+	awaitWaits(t, r.clk.FakeClock, 1)
 	return r
 }
 
@@ -114,7 +114,7 @@ func TestWorkspaceDriftPushesBeforeNextTick(t *testing.T) {
 			r.clk.Advance(tt.sinceLast)
 			r.d.workspaceDrift.observe(tt.answer)
 			if tt.wantAt > tt.sinceLast {
-				awaitWaits(t, r.clk, 2)
+				awaitWaits(t, r.clk.FakeClock, 2)
 				r.clk.Advance(tt.wantAt - tt.sinceLast)
 			}
 			if got := awaitPush(t, r.pusher.calls); got != 2 {
@@ -140,11 +140,18 @@ func TestWorkspaceDriftCoalesces(t *testing.T) {
 	r := startDriftRun(t)
 	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Hash: "other"})
 	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Absent: true})
-	awaitWaits(t, r.clk, 2)
+	awaitWaits(t, r.clk.FakeClock, 2)
 	r.clk.Advance(workspaceDriftGap)
 	if got := awaitPush(t, r.pusher.calls); got != 2 {
 		t.Fatalf("push = call %d, want the one drift push 2", got)
 	}
+	// awaitWaits cannot stand here: the old tick and the tick push 2 re-arms are
+	// each one wait, so it cannot see that pushNow has stopped the old tick and
+	// armed the new one. A clock move that lands first fires the old tick, which
+	// the loop no longer reads, and the new tick is armed at the moved time, so
+	// push 3 never comes. The count reaches three only once pushNow has re-armed
+	// the tick: the start tick, the deferred wait, and the new tick.
+	awaitDriftTimers(t, r.clk, 3)
 	r.clk.Advance(config.DefaultWorkspaceReconcileInterval)
 	if got := awaitPush(t, r.pusher.calls); got != 3 {
 		t.Fatalf("push = call %d, want the tick push 3", got)
@@ -221,11 +228,11 @@ func TestWorkspaceDriftAbsentFloor(t *testing.T) {
 		t.Fatalf("push = call %d, want the absent push 2", got)
 	}
 	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Absent: true})
-	awaitWaits(t, r.clk, 2)
+	awaitWaits(t, r.clk.FakeClock, 2)
 	r.clk.Advance(workspaceDriftGap)
 	// The drift gap has ended but the floor has not: the reconcile still holds its
 	// deferred wait, so it has not pushed.
-	awaitWaits(t, r.clk, 2)
+	awaitWaits(t, r.clk.FakeClock, 2)
 	r.clk.Advance(workspaceAbsentFloor - workspaceDriftGap)
 	if got := awaitPush(t, r.pusher.calls); got != 3 {
 		t.Fatalf("push = call %d, want the floored absent push 3", got)
@@ -254,10 +261,10 @@ func TestWorkspaceDriftFailedPushFloor(t *testing.T) {
 		t.Fatalf("push = call %d, want the failing push 2", got)
 	}
 	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Hash: "other"})
-	awaitWaits(t, r.clk, 2)
+	awaitWaits(t, r.clk.FakeClock, 2)
 	r.clk.Advance(workspaceDriftGap)
 	// The drift gap has ended but the floor from the failed push has not.
-	awaitWaits(t, r.clk, 2)
+	awaitWaits(t, r.clk.FakeClock, 2)
 	r.clk.Advance(workspaceAbsentFloor - workspaceDriftGap)
 	if got := awaitPush(t, r.pusher.calls); got != 3 {
 		t.Fatalf("push = call %d, want the floored push 3", got)
@@ -267,7 +274,7 @@ func TestWorkspaceDriftFailedPushFloor(t *testing.T) {
 	}
 	// Push 3 succeeded, so the floor is cleared: the next drift needs only the gap.
 	r.d.workspaceDrift.observe(bdgateway.WorkspaceAnswer{Hash: "another"})
-	awaitWaits(t, r.clk, 2)
+	awaitWaits(t, r.clk.FakeClock, 2)
 	r.clk.Advance(workspaceDriftGap)
 	if got := awaitPush(t, r.pusher.calls); got != 4 {
 		t.Fatalf("push = call %d, want the unfloored push 4", got)
