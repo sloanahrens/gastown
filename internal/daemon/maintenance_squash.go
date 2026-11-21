@@ -101,6 +101,14 @@ const (
 	// stays unreadable leaves exactly one escalation behind.
 	squashStateAlertKey = "squash:state"
 
+	// squashStateResetAlertKey is the alert a held gate after a state reset
+	// raises: a state write replaced an unreadable file, the squash records it
+	// held are gone, and every database's gate is held for squashResetHold from
+	// the stamp (gt-cbm58l).
+	squashStateResetAlertKey = "squash:state-reset"
+	// squashResetHold is how long the stamp holds every database's gate.
+	squashResetHold = 24 * time.Hour
+
 	// squashAlertSource labels every item a run raises, as the state check's
 	// alert does.
 	squashAlertSource = "squash"
@@ -292,7 +300,35 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 			maintenanceGCStateFileName, err))
 		return
 	}
+	// A replaced state file has lost the records the gate reads, so for a day
+	// after the stamp every database counts as having run at the stamp, and one
+	// alert says so. When the day ends each database reads its own record, and a
+	// record lost in the reset is none: every database is due on the first check
+	// past the day. Restoring the squash records from the kept copy before the day
+	// ends is the operator's mitigation. The alert clears at the first check past
+	// the day, which is up to one squash interval later. A stamp ahead of the
+	// check's clock is a fault, never a hold to that date: the check decides for
+	// no database and the fault alert replaces the reset alert.
+	reset, held := st.StateResetAt, false
+	if !reset.IsZero() {
+		if reset.After(now.Add(time.Minute)) {
+			undecided = true
+			d.logger.Printf("squash: WARNING: the state reset stamp %s is in the future — the check ran no database", reset.UTC().Format(time.RFC3339))
+			d.escalateAlert(squashStateAlertKey, "squash", fmt.Sprintf(
+				"the squash check ran no database: %s holds a state reset stamp %s that is ahead of the clock, so the gate cannot be judged", maintenanceGCStateFileName, reset.UTC().Format(time.RFC3339)))
+			d.clearAlerts("the squash state reset stamp is a fault, reported by squash:state", squashStateResetAlertKey)
+			return
+		}
+		held = now.Sub(reset) < squashResetHold
+	}
 	d.clearAlerts("the squash check read the run record", squashStateAlertKey)
+	if held {
+		d.escalateAlert(squashStateResetAlertKey, "squash", fmt.Sprintf(
+			"the squash gate was held after a state reset: %s was replaced at %s, and a hold runs %s from the stamp; its old bytes: %s",
+			maintenanceGCStateFileName, reset.UTC().Format(time.RFC3339), squashResetHold, st.StateResetCopy))
+	} else {
+		d.clearAlerts("the squash state reset is more than a day old", squashStateResetAlertKey)
+	}
 
 	settings := doltsquash.Settings{
 		Thresholds: doltsquash.Thresholds{
@@ -324,7 +360,16 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 				db, strings.Join(names, ", "), readings.describe())
 			continue
 		}
-		dec, err := doltsquash.Decide(now, st.Squash[db].LastRun, readings.inputs, settings)
+		lastRun := st.Squash[db].LastRun
+		if held && reset.After(lastRun) {
+			lastRun = reset
+			// A stamp up to a minute ahead of the clock is a hold, and Decide opens
+			// the gate for a last run after now, so the stamp counts as now.
+			if lastRun.After(now) {
+				lastRun = now
+			}
+		}
+		dec, err := doltsquash.Decide(now, lastRun, readings.inputs, settings)
 		if err != nil {
 			undecided = true
 			d.logger.Printf("squash: WARNING: %s: %v — the check did not decide", db, err)
