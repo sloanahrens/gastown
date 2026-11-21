@@ -33,6 +33,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -358,12 +359,14 @@ func (d *Daemon) readImagePinTips(ctx context.Context, data []byte) ([]ImagePinS
 }
 
 // logImagePinReads logs one line per pin the read answered, so daemon.log shows
-// each pin's first successful read, its count and how long the tick's read took.
-// A pin with an Err has no read to report this tick and is left to
-// holdFailedImagePins, so this runs before it restores the last good state.
+// each pin's first successful read, its count and how long the tick's read took,
+// and each failed read with the tick's duration and the first line of its error.
+// A failed pin is still left to holdFailedImagePins, so this runs before it
+// restores the last good state.
 func (d *Daemon) logImagePinReads(states []ImagePinState, took time.Duration) {
 	for _, st := range states {
 		if st.Err != nil {
+			d.logger.Printf("image_pins: read %s failed after %s: %s", st.Name, took, util.FirstLine(st.Err.Error()))
 			continue
 		}
 		d.logger.Printf("image_pins: read %s pin %s tip %s behind %d in %s", st.Name, shortSHA(st.Pin), shortSHA(st.Tip), st.Behind, took)

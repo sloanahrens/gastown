@@ -1902,8 +1902,41 @@ func TestImagePinsReadLogsAGoodReadWithItsDuration(t *testing.T) {
 	if _, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL)); err != nil {
 		t.Fatalf("readImagePinTips with bd failing: %v", err)
 	}
-	if got := logs.String(); strings.Contains(got, "read bd pin") || strings.Count(got, "image_pins: read ") != 3 || !strings.Contains(got, "image pin bd cannot be read") {
-		t.Fatalf("daemon.log = %q, want bd held from its last good state, never logged as a good read, and the other three pins' good reads", got)
+	if got := logs.String(); strings.Contains(got, "read bd pin") || strings.Count(got, "image_pins: read ") != 4 || !strings.Contains(got, "image pin bd cannot be read") {
+		t.Fatalf("daemon.log = %q, want bd's one failed-read line, never a good read of it, the other three pins' good reads and its held tick", got)
+	}
+}
+
+// TestImagePinsReadLogsAFailedReadWithItsFirstErrorLine: a pin whose read fails
+// is logged with its name, the tick's duration and the first line of its error,
+// so every failure is in daemon.log, one line each (gt-t0qdx4).
+func TestImagePinsReadLogsAFailedReadWithItsFirstErrorLine(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d := newImagePinsForgejo(t)
+	clk := clockwork.NewFakeClockAt(time.Unix(0, 0))
+	d.logger, d.clock = log.New(&logs, "", 0), clk
+	atTip := map[string]string{pinsReadPinURL("beads"): pinsReadBDCommit, pinsReadPinURL("organic-mechanic"): pinsReadOMCommit,
+		pinsReadPinURL("history-man"): pinsReadHMCommit, pinsReadPinURL("devops"): pinsReadDevopsCommit}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		// Four ls-remote calls at 30s each make one tick read in 2m0s.
+		clk.Advance(30 * time.Second)
+		if cmd.Args[len(cmd.Args)-2] == pinsReadPinURL("devops") {
+			return nil, nil, errors.New("git exited 128\nhint: check the URL\nhint: retry later")
+		}
+		return []byte(pinsReadLS(atTip[cmd.Args[len(cmd.Args)-2]])), nil, nil
+	}
+	if _, err := d.readImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL)); err != nil {
+		t.Fatalf("readImagePinTips with devops failing: %v", err)
+	}
+	want := "image_pins: read devops failed after 2m0s: image pins read: devops pin: cannot read refs/heads/main of " +
+		pinsReadPinURL("devops") + ": git ls-remote refs/heads/main: git exited 128\n"
+	got := logs.String()
+	if !strings.Contains(got, want) {
+		t.Fatalf("daemon.log = %q, want devops's failed read with its name, its duration and its first error line, %q", got, want)
+	}
+	if strings.Contains(got, "hint:") {
+		t.Errorf("daemon.log = %q, want only the first line of a three-line error", got)
 	}
 }
 
