@@ -410,6 +410,9 @@ func TestAdoptByErrorRefusesNonFinite(t *testing.T) {
 		{"NaN current estimate: the current weights' rmse and bias are NaN",
 			nonFiniteHoldout(func(h *Holdout) { h.Checked = math.NaN() }),
 			[]string{"rejected", "not a finite number", "current weights' first-round rmse NaN", "current weights' first-round bias NaN"}},
+		{"zero current estimate: the current weights' rmse and bias are +Inf",
+			nonFiniteHoldout(func(h *Holdout) { h.Checked = 0 }),
+			[]string{"rejected", "not a finite number", "current weights' first-round rmse +Inf", "current weights' first-round bias +Inf"}},
 		// One bead at +Inf and one at -Inf: the squares sum to +Inf but the sum of
 		// ratios is +Inf plus -Inf, which is NaN, so the bias is NaN.
 		{"opposite infinities: proposed bias is NaN",
