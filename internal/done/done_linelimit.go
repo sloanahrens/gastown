@@ -55,6 +55,12 @@ type sizeRefusalError string
 
 func (e sizeRefusalError) Error() string { return string(e) }
 
+// pushedRefusal ends a size refusal with the line naming where origin now holds
+// a sandbox seat's work, so the seat and the overseer read the sha (gt-s0kxmj).
+func pushedRefusal(refusal sizeRefusalError, sha, branch string) sizeRefusalError {
+	return sizeRefusalError(string(refusal) + "\n" + fmt.Sprintf("your work is pushed at %s on %s", ShortSHA(sha), branch))
+}
+
 // crewWarningPrefix marks a crew's over-limit lines apart from a polecat refusal (gt-zqg4m2).
 const crewWarningPrefix = "warning (crew branch, not refused): "
 

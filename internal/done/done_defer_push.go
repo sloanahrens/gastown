@@ -32,10 +32,13 @@ func pushSandboxBranchBeforeDeferral(r *doneRun) {
 }
 
 // pushSandboxBranchBeforeDeferralTo is pushSandboxBranchBeforeDeferral warning
-// to warn, so a test reads the warnings.
-func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) {
+// to warn, so a test reads the warnings. It returns the sha origin holds for
+// the branch, read back by the landing push, or "" when this call pushed
+// nothing (gt-s0kxmj): a skipped state, a failed push, or a bead already
+// landed, where the push does not run.
+func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) string {
 	if r.sessionBackend != backendOpenShell || (r.cleanupStatus != "unpushed" && r.cleanupStatus != "has_unpushed") {
-		return
+		return ""
 	}
 	fail := func(format string, args ...any) {
 		style.FprintWarning(warn, "could not push %s before deferring: %s; the sandbox keeps the only copy of its commits", r.branch, fmt.Sprintf(format, args...))
@@ -43,12 +46,12 @@ func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) {
 	remote, err := r.resolveLandingRemote()
 	if err != nil {
 		fail("%v", err)
-		return
+		return ""
 	}
 	head, err := r.deps.repo.Rev("HEAD")
 	if err != nil {
 		fail("resolving HEAD: %v", err)
-		return
+		return ""
 	}
 	var sourceIssue *beads.Issue
 	var sourceBD beads.Client
@@ -70,9 +73,14 @@ func pushSandboxBranchBeforeDeferralTo(warn io.Writer, r *doneRun) {
 	if fetchErr := r.deps.repo.Fetch(remote); fetchErr != nil {
 		style.FprintWarning(warn, "could not refresh %s before pushing %s: %v; the push compares against the base this clone last fetched", remote, r.branch, fetchErr)
 	}
+	_, landed := alreadyLandedAt(sourceIssue)
 	if err := pushBranchForLanding(r, sourceBD, sourceIssue, head, baseRef); err != nil {
 		fail("%v", err)
-		return
+		return ""
 	}
 	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
+	if landed {
+		return ""
+	}
+	return head
 }
