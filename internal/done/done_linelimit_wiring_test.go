@@ -132,3 +132,44 @@ func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
 		})
 	}
 }
+
+// TestLineLimitRefusalNamesThePushedSha: a sandbox polecat past twice the
+// declared limit ends its refusal with the short sha its push left on origin and
+// the branch; a failed push adds no such line, so the refusal ends with the split
+// line (gt-s0kxmj).
+func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		pushErr    error
+		pushedLine bool
+	}{
+		{name: "push_succeeds", pushedLine: true},
+		{name: "push_fails", pushErr: errors.New("connection reset")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := pastLimitHarness(t, backendOpenShell, true, false)
+			if tt.pushErr != nil {
+				h.repo.pushErrs = []error{tt.pushErr, tt.pushErr}
+			}
+			sub := doneSubmission{sourceIssue: &beads.Issue{Description: "Change: at most 70 added lines in 2 files."}}
+
+			err := checkBranchForSubmit(h.r, sub, "origin/main")
+
+			var refusal sizeRefusalError
+			if !errors.As(err, &refusal) {
+				t.Fatalf("checkBranchForSubmit error = %v, want the size refusal", err)
+			}
+			lines := strings.Split(err.Error(), "\n")
+			want := splitLine
+			if tt.pushedLine {
+				want = "your work is pushed at " + ShortSHA(h.repo.head) + " on " + doneTestBranch
+			}
+			if last := lines[len(lines)-1]; last != want {
+				t.Errorf("last line = %q, want %q", last, want)
+			}
+		})
+	}
+}

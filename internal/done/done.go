@@ -1549,7 +1549,9 @@ func checkBranchForSubmit(r *doneRun, sub doneSubmission, baseRef string) error 
 		// unreadable count is not that refusal and pushes nothing.
 		var refusal sizeRefusalError
 		if errors.As(err, &refusal) {
-			pushSandboxBranchBeforeDeferralTo(r.stdout(), r)
+			if sha := pushSandboxBranchBeforeDeferralTo(r.stdout(), r); sha != "" {
+				return pushedRefusal(refusal, sha, r.branch)
+			}
 		}
 		return err
 	}
