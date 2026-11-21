@@ -238,14 +238,39 @@ func TestReviewLogScrubLongRunsAreBounded(t *testing.T) {
 	}
 }
 
-// TestReviewLogScrubATokenRunIsTriedUpToMaxTokenRun: no real token is longer than
-// maxTokenRun, so a longer run is taken in pieces: the first piece is replaced
-// and the rest, which starts no prefix, is kept.
-func TestReviewLogScrubATokenRunIsTriedUpToMaxTokenRun(t *testing.T) {
+// TestReviewLogScrubATokenBesideAScheme: the rule refuses any value containing
+// "://", so a token followed by a joiner and a URL, or by "://" itself, is cut
+// before the scheme: the token goes and the URL stays.
+func TestReviewLogScrubATokenBesideAScheme(t *testing.T) {
 	t.Parallel()
-	claim := scrubTestFamilies["aws"] + strings.Repeat("Q", maxTokenRun)
-	got := scrubBounded(t, claim)
-	if want := redactedWord + strings.Repeat("Q", len(claim)-maxTokenRun); got != want {
-		t.Errorf("scrubClaim of a %d-byte run kept %d bytes after the marker, want %d", len(claim), len(got)-len(redactedWord), len(claim)-maxTokenRun)
+	aws, sk, ghp := scrubTestFamilies["aws"], "s"+"k-"+"abcdefghijklmnop1234", "gh"+"p_"+strings.Repeat("a", 20)
+	for claim, want := range map[string]string{
+		aws + "/https://x.test":     "<redacted>/https://x.test",
+		sk + "/https://x.test/path": "<redacted>/https://x.test/path",
+		ghp + ":https://x":          "<redacted>:https://x",
+		aws + "://x":                "<redacted>://x",
+		"see (" + sk + "://host)":   "see (<redacted>://host)",
+		"sk-" + strings.Repeat("a", 6) + "/" + strings.Repeat("b", 12) + "://x": "<redacted>://x",
+	} {
+		if got := scrubBounded(t, claim); got != want {
+			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+		}
+	}
+}
+
+// TestReviewLogScrubATokenPastTheRunCapLeavesNoTail: a token longer than
+// maxTokenRun is replaced through the whole contiguous run of token bytes, not
+// only its first maxTokenRun: the rest of it is credential bytes too.
+func TestReviewLogScrubATokenPastTheRunCapLeavesNoTail(t *testing.T) {
+	t.Parallel()
+	for _, n := range []int{maxTokenRun + 88, 5000} {
+		claim := "key gh" + "p_" + strings.Repeat("a", n) + " end"
+		if got, want := scrubBounded(t, claim), "key <redacted> end"; got != want {
+			t.Errorf("a %d-byte token: scrubClaim = %.40q, want %q", n, got, want)
+		}
+	}
+	million := scrubBounded(t, strings.Repeat("a-", 500000))
+	if len(million) > scrubInputBound {
+		t.Errorf("a million bytes returned %d, more than the %d read", len(million), scrubInputBound)
 	}
 }

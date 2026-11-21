@@ -208,7 +208,8 @@ const redactedWord = "<redacted>"
 // The scrub cannot consult config.IsSecretKey (it needs a key name), so only
 // token shape counts. It runs before boundedClaim, which never cuts a marker.
 // It reads at most scrubInputBound bytes and tries a run of at most maxTokenRun,
-// so its cost is bounded whatever the claim: O(scrubInputBound x maxTokenRun).
+// so its cost is bounded whatever the claim: O(scrubInputBound x maxTokenRun) for
+// the tries, plus one forward pass past the cap for the tail of a longer token.
 func scrubClaim(s string) string {
 	s = cutAtRune(s, scrubInputBound)
 	var b strings.Builder
@@ -262,24 +263,53 @@ func tokenEnd(s string, i int) int {
 		return i
 	}
 	end := i
-	for end < len(s) && end-i < maxTokenRun && (isAlnum(s[end]) || strings.IndexByte(tokenJoiners, s[end]) >= 0) {
+	for end < len(s) && end-i < maxTokenRun && tokenByte(s[end]) {
 		end++
 	}
+	capped := end < len(s) && tokenByte(s[end])
 	run := strings.TrimRight(s[i:end], ".:")
-	if config.LooksLikeSecret("", run) {
-		return i + len(run)
-	}
-	if !strings.HasPrefix(run, "ASIA") {
+	n := acceptedLen(run)
+	if n == 0 {
 		return i
 	}
-	// The ASIA shape takes the whole value, so a key id followed by more token
-	// bytes (`ASIA...+x`, `ASIA...z9`) is tried cut where its upper-case and digit
-	// bytes end: the longest cut the shape can accept.
-	if n := upperDigitPrefix(run); n < len(run) && config.LooksLikeSecret("", run[:n]) {
-		return i + n
+	if capped && n == len(run) {
+		// A token longer than the cap: the rest of the contiguous run is its
+		// tail, taken in one forward pass.
+		for end < len(s) && tokenByte(s[end]) {
+			end++
+		}
+		return i + len(strings.TrimRight(s[i:end], ".:"))
 	}
-	return i
+	return i + n
 }
+
+// acceptedLen is the length of the longest start of run the rule accepts that
+// this scan tries, or 0. The rule refuses a value that contains "://", so a token
+// followed by a URL is tried cut before the scheme: at the joiner before the
+// scheme word, then at the "://". The ASIA shape takes the whole value, so a key
+// id followed by more token bytes (`ASIA...+x`, `ASIA...z9`) is tried cut where
+// its upper-case and digit bytes end. Two cuts at most: the cost stays linear.
+func acceptedLen(run string) int {
+	if config.LooksLikeSecret("", run) {
+		return len(run)
+	}
+	if at := strings.Index(run, "://"); at > 0 {
+		if p := strings.LastIndexAny(run[:at], tokenJoiners); p > 0 && config.LooksLikeSecret("", run[:p]) {
+			return p
+		}
+		if config.LooksLikeSecret("", run[:at]) {
+			return at
+		}
+	}
+	if strings.HasPrefix(run, "ASIA") {
+		if n := upperDigitPrefix(run); n < len(run) && config.LooksLikeSecret("", run[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+func tokenByte(c byte) bool { return isAlnum(c) || strings.IndexByte(tokenJoiners, c) >= 0 }
 
 // tokenJoiners are the non-alphanumeric bytes a token run holds.
 const tokenJoiners = "-_.+/=:"
