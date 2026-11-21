@@ -723,18 +723,21 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 // replaces the old, so it compares against the previous read that completed,
 // not a partial one. A failed export records nothing and adds no ratio.
 //
-// The events table is skipped: it is read both whole and from a boundary (only
-// the rows after it), and the two are not the same quantity, so their ratio is
-// not a slowdown. gt-mzkucw records its full reads only.
+// An events read from a boundary (only the rows after it) is neither sampled
+// nor compared: the events table is read whole by a full export and from a
+// boundary by an incremental one, and the two durations are not the same
+// quantity, so their ratio is not a slowdown. Only the whole-table read counts
+// (gt-mzkucw).
 func (d *Daemon) recordJsonlExportSamples(db string, exportTable jsonlTableExporter) jsonlTableExporter {
+	fullEvents := beadsql.BackupEvents(db, "").String()
 	return func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+		if table == "events" && q.String() != fullEvents {
+			return exportTable(table, q, dir, dataDir, budget)
+		}
 		start := d.clk().Now()
 		n, err := exportTable(table, q, dir, dataDir, budget)
 		if err != nil {
 			return n, err
-		}
-		if table == "events" {
-			return n, nil
 		}
 		took := d.clk().Since(start)
 		if ratio, ok := d.jsonlRates.Ratio(db, table, took); ok {

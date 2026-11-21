@@ -3848,9 +3848,8 @@ func ratioExportFake(t *testing.T, clk *clockwork.FakeClock, rows map[string]int
 // TestJSONLBackupCollectsRatios: each successful table export records the ratio
 // of its duration to the table's previous sample, so the budget bead can tell
 // how much slower than normal the cycle ran (gt-d85v5p). A first export and a
-// failed export add nothing. Any events read adds nothing: the table is read
-// whole and from a boundary, the two are not the same quantity, so it is
-// neither sampled nor compared here.
+// failed export add nothing. The events table's ratios are in
+// TestJSONLBackupEventsRatios.
 func TestJSONLBackupCollectsRatios(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
@@ -3895,12 +3894,14 @@ func TestJSONLBackupCollectsRatios(t *testing.T) {
 		if err := export(t, d, clk, tookFor(20*time.Second), nil, t.TempDir(), t.TempDir()); err != nil {
 			t.Fatalf("second cycle: %v", err)
 		}
-		want := make([]float64, len(tables)-1) // every table but events
+		// Each cycle reads into a fresh directory, so the events table is a
+		// full read both times and its ratio is collected like the others'.
+		want := make([]float64, len(tables))
 		for i := range want {
 			want[i] = 20
 		}
 		if !slices.Equal(d.jsonlRatios, want) {
-			t.Errorf("ratios = %v, want %v (one per non-events table, all 20)", d.jsonlRatios, want)
+			t.Errorf("ratios = %v, want %v (one per table, all 20)", d.jsonlRatios, want)
 		}
 	})
 
@@ -3941,8 +3942,75 @@ func TestJSONLBackupCollectsRatios(t *testing.T) {
 			t.Errorf("comments sample = (%d rows, %s/row), want the first cycle's (%d, %s)", gotRows, perRow, rows["comments"], want)
 		}
 	})
+}
 
-	t.Run("an events read adds no ratio and no sample", func(t *testing.T) {
+// TestJSONLBackupEventsRatios: the events table is read whole by a full export
+// and from a boundary by an incremental one. Only the whole read is remembered
+// as a sample, and only it is compared with a later one: the two durations are
+// not the same quantity, so an incremental read's ratio is not a slowdown
+// (gt-mzkucw).
+func TestJSONLBackupEventsRatios(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	tables := append([]string{"issues"}, supplementalTables...)
+	rows := make(map[string]int, len(tables))
+	for _, table := range tables {
+		rows[table] = 10
+	}
+	tookFor := func(d time.Duration) map[string]time.Duration {
+		out := make(map[string]time.Duration, len(tables))
+		for _, table := range tables {
+			out[table] = d
+		}
+		return out
+	}
+	newDaemon := func(t *testing.T) (*Daemon, *clockwork.FakeClock) {
+		t.Helper()
+		d, _ := backupTestDaemon(t)
+		clk := clockwork.NewFakeClockAt(start)
+		d.clock = clk
+		d.jsonlSupplementalTimeout = time.Hour
+		return d, clk
+	}
+
+	t.Run("a full events read records its sample, and a later one 20 times slower adds the ratio 20", func(t *testing.T) {
+		t.Parallel()
+		d, clk := newDaemon(t)
+		d.jsonlTableExportFn = ratioExportFake(t, clk, rows, tookFor(time.Second), nil)
+		if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+			t.Fatalf("first cycle: %v", err)
+		}
+		gotRows, perRow, ok := d.jsonlRates.PerRow("hq", "events")
+		if !ok {
+			t.Fatal("the full events read was not recorded as a sample")
+		}
+		if want := time.Second / time.Duration(rows["events"]); gotRows != rows["events"] || perRow != want {
+			t.Errorf("events sample = (%d rows, %s/row), want (%d, %s)", gotRows, perRow, rows["events"], want)
+		}
+		if len(d.jsonlRatios) != 0 {
+			t.Fatalf("first cycle collected ratios %v, want none: no table had a sample yet", d.jsonlRatios)
+		}
+
+		// Each cycle reads into a fresh directory, so this events read is whole.
+		slow := tookFor(time.Second)
+		slow["events"] = 20 * time.Second
+		d.jsonlTableExportFn = ratioExportFake(t, clk, rows, slow, nil)
+		if _, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false); err != nil {
+			t.Fatalf("second cycle: %v", err)
+		}
+		want := make([]float64, len(tables))
+		for i, table := range tables {
+			want[i] = 1
+			if table == "events" {
+				want[i] = 20
+			}
+		}
+		if !slices.Equal(d.jsonlRatios, want) {
+			t.Errorf("ratios = %v, want %v (the events 20 among the other tables' 1s)", d.jsonlRatios, want)
+		}
+	})
+
+	t.Run("an incremental events read adds no ratio and keeps the full read's sample", func(t *testing.T) {
 		t.Parallel()
 		d, clk := newDaemon(t)
 		gitRepo, dataDir := t.TempDir(), t.TempDir()
@@ -3961,14 +4029,12 @@ func TestJSONLBackupCollectsRatios(t *testing.T) {
 			return err
 		}
 
-		// The first cycle reads the whole events table.
+		// The first cycle reads the whole events table and records its sample.
 		if err := cycle(tookFor(time.Second)); err != nil {
 			t.Fatalf("full-events cycle: %v", err)
 		}
-		if _, _, ok := d.jsonlRates.PerRow("hq", "events"); ok {
-			t.Fatal("the full events read was recorded as a sample")
-		}
-		// The second cycle, on the same export, reads events from its boundary.
+		// The second cycle, on the same export, reads events from its boundary,
+		// 20 times slower than the full read.
 		slow := tookFor(time.Second)
 		slow["events"] = 20 * time.Second
 		if err := cycle(slow); err != nil {
@@ -3977,16 +4043,21 @@ func TestJSONLBackupCollectsRatios(t *testing.T) {
 		if len(bounds) != 2 || bounds[0] != "" || bounds[1] != "2026-10-21 12:00:00" {
 			t.Fatalf("events read bounds = %v, want the whole table then its recorded boundary", bounds)
 		}
-		if _, _, ok := d.jsonlRates.PerRow("hq", "events"); ok {
-			t.Error("an events read was recorded as a sample")
+
+		gotRows, perRow, ok := d.jsonlRates.PerRow("hq", "events")
+		if !ok {
+			t.Fatal("the incremental cycle erased the full read's events sample")
 		}
-		if slices.Contains(d.jsonlRatios, 20) {
-			t.Errorf("ratios = %v hold an events read's 20", d.jsonlRatios)
+		if want := time.Second / time.Duration(rows["events"]); gotRows != rows["events"] || perRow != want {
+			t.Errorf("events sample = (%d rows, %s/row), want the full read's (%d, %s)", gotRows, perRow, rows["events"], want)
 		}
-		for _, ratio := range d.jsonlRatios {
-			if ratio != 1 {
-				t.Errorf("ratio %v collected, want only the other tables' 1", ratio)
-			}
+		// Only the other tables' ratios, each 1, were collected in the second cycle.
+		want := make([]float64, len(tables)-1)
+		for i := range want {
+			want[i] = 1
+		}
+		if !slices.Equal(d.jsonlRatios, want) {
+			t.Errorf("ratios = %v, want %v: an incremental events read adds no ratio", d.jsonlRatios, want)
 		}
 	})
 }
