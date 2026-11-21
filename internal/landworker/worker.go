@@ -742,8 +742,10 @@ func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {
 	// so the repair writes it back rather than asking the agent bead again,
 	// which a seat reset since may answer differently (gt-mukgk.6).
 	// The repair rewrites the record from this work, so the estimate the record
-	// holds is carried too, or the repair would drop it (gt-cdhagm).
-	work := land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Agent: rec.Agent, SPEstimate: rec.SPEstimate}
+	// holds is carried too, or the repair would drop it (gt-cdhagm), and so are
+	// the minutes behind it and the route's reason (gt-5eeqin).
+	work := land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Agent: rec.Agent,
+		SPEstimate: rec.SPEstimate, SPMinutes: rec.SPMinutes, SPSlung: rec.SPSlung}
 	if ready, ok := land.ParseReadyNote(issue.Notes); ok {
 		work.Worker = ready.Worker
 	} else {
@@ -862,6 +864,8 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	work.Agent = w.seatAgent(work.Worker)
 	work.Priority = w.beadPriority(issue.ID)
 	work.SPEstimate = w.beadSPEstimate(issue.ID)
+	work.SPMinutes = w.beadSPMinutes(issue.ID)
+	work.SPSlung = w.beadSPSlung(issue.ID)
 	w.landOne(ctx, work, rep)
 }
 
@@ -1006,6 +1010,87 @@ func (w *Worker) beadSPEstimate(id string) *int {
 		return nil
 	}
 	return &points
+}
+
+// spSlungPrefix begins the label the dispatcher writes on a bead it slings at
+// or over the sp: split trigger, sp-slung:<reason> (gt-l04nj0). The landing
+// worker reads it but cannot import the command package that writes it, so the
+// prefix is repeated here.
+const spSlungPrefix = "sp-slung:"
+
+// beadSPMinutes is the landed bead's sp-minutes:<n> label, read from the bead
+// the way beadSPEstimate reads its sp: label. A failed read is logged and
+// leaves the minutes nil: the record carries none, and the landing stands. A
+// bead with no such label, a label that does not parse, or two that disagree
+// has none and is no failure (gt-5eeqin).
+func (w *Worker) beadSPMinutes(id string) *float64 {
+	issue, err := w.Beads.Show(id)
+	if err != nil {
+		w.logf("%s: reading the bead's sp-minutes: %v; the landing records no minutes", id, err)
+		return nil
+	}
+	if issue == nil {
+		return nil
+	}
+	minutes, ok := spMinutesOf(issue.Labels)
+	if !ok {
+		return nil
+	}
+	return &minutes
+}
+
+// spMinutesOf returns the minutes of the one sp-minutes:<n> label among
+// labels. A label storypoints.ParseLabel refuses is not an estimate; a bead
+// with none, or with two that disagree, has none.
+func spMinutesOf(labels []string) (float64, bool) {
+	minutes, found := 0.0, false
+	for _, l := range labels {
+		label, err := storypoints.ParseLabel(l)
+		if err != nil || label.Kind != storypoints.KindMinutes {
+			continue
+		}
+		if found && label.Minutes != minutes {
+			return 0, false
+		}
+		minutes, found = label.Minutes, true
+	}
+	return minutes, found
+}
+
+// beadSPSlung is the reason the dispatcher recorded for slinging the landed
+// bead at or over the sp: split trigger, read from the bead the way
+// beadSPEstimate reads its sp: label. A failed read is logged and leaves the
+// reason empty: the record carries none, and the landing stands. A bead with
+// no such label, one whose reason is empty, or two that disagree has none and
+// is no failure (gt-5eeqin).
+func (w *Worker) beadSPSlung(id string) string {
+	issue, err := w.Beads.Show(id)
+	if err != nil {
+		w.logf("%s: reading the bead's sp-slung reason: %v; the landing records none", id, err)
+		return ""
+	}
+	if issue == nil {
+		return ""
+	}
+	return spSlungOf(issue.Labels)
+}
+
+// spSlungOf returns the reason of the one sp-slung:<reason> label among
+// labels. A label with an empty reason carries no reason; a bead with none, or
+// with two that disagree, has none.
+func spSlungOf(labels []string) string {
+	reason, found := "", false
+	for _, l := range labels {
+		rest, ok := strings.CutPrefix(l, spSlungPrefix)
+		if !ok || rest == "" {
+			continue
+		}
+		if found && rest != reason {
+			return ""
+		}
+		reason, found = rest, true
+	}
+	return reason
 }
 
 // polecatFromAssignee is the polecat name in "<rig>/polecats/<name>".
