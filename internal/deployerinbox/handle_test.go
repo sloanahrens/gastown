@@ -34,6 +34,9 @@ func handlePlan() clusterapproval.Plan {
 	}
 }
 
+// handleToken is built from parts: no token-shaped literal in this file.
+var handleToken = "AK" + "IA" + strings.Repeat("Q", 16)
+
 // handleRecord returns the broker's approval record for plan, valid at
 // handleNow.
 func handleRecord(plan clusterapproval.Plan) clusterapproval.Record {
@@ -285,8 +288,8 @@ func TestDeployerInboxHandlePlanChangesBetweenVerifyAndApply(t *testing.T) {
 	if answer.Status != deployerinbox.StatusRefused {
 		t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusRefused, answer.Detail)
 	}
-	if !strings.Contains(answer.Detail, "the files' digest is no longer") {
-		t.Errorf("detail = %q, want the reason Apply refused", answer.Detail)
+	if answer.Detail != deployerinbox.ErrApplyRefused.Error() {
+		t.Errorf("detail = %q, want the fixed refusal %q, not the callee's text", answer.Detail, deployerinbox.ErrApplyRefused.Error())
 	}
 	planCalls := 0
 	for _, call := range steps.calls {
@@ -317,31 +320,36 @@ func TestDeployerInboxHandleApplyFails(t *testing.T) {
 		name   string
 		steps  *fakeSteps
 		calls  []string
-		reason string
+		detail string
+		cause  string
 	}{
 		{
 			name:   "the plan step errors",
 			steps:  &fakeSteps{planErr: errors.New("read the plan directory")},
 			calls:  []string{"Plan p"},
-			reason: "read the plan directory",
+			detail: "the plan step failed",
+			cause:  "read the plan directory",
 		},
 		{
 			name:   "the record cannot be read",
 			steps:  &fakeSteps{plan: plan, recordErr: errors.New("open the record")},
 			calls:  []string{"Plan p", "ReadRecord " + id},
-			reason: "open the record",
+			detail: "reading the approval record failed",
+			cause:  "open the record",
 		},
 		{
 			name:   "the live versions cannot be read",
 			steps:  &fakeSteps{plan: plan, record: handleRecord(plan), liveErr: errors.New("list the objects")},
 			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
-			reason: "list the objects",
+			detail: "reading the live versions failed",
+			cause:  "list the objects",
 		},
 		{
 			name:   "the apply fails",
-			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan), applyErr: errors.New("the gateway never became Ready")},
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan), applyErr: errors.New("kubectl: " + handleToken)},
 			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions", "Apply"},
-			reason: "the gateway never became Ready",
+			detail: "the apply failed",
+			cause:  handleToken,
 		},
 	}
 	for _, tc := range cases {
@@ -356,8 +364,8 @@ func TestDeployerInboxHandleApplyFails(t *testing.T) {
 			if answer.Status != deployerinbox.StatusFailed {
 				t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusFailed, answer.Detail)
 			}
-			if !strings.Contains(answer.Detail, tc.reason) {
-				t.Errorf("detail = %q, want it to name the reason %q", answer.Detail, tc.reason)
+			if answer.Detail != tc.detail || strings.Contains(answer.Detail, tc.cause) {
+				t.Errorf("detail = %q, want the fixed text %q and none of the step's error", answer.Detail, tc.detail)
 			}
 			if !slices.Equal(tc.steps.calls, tc.calls) {
 				t.Errorf("calls = %v, want %v: no step runs after a failure", tc.steps.calls, tc.calls)
@@ -409,19 +417,22 @@ func TestDeployerInboxHandleFails(t *testing.T) {
 		name   string
 		steps  *fakeSteps
 		calls  []string
-		reason string
+		detail string
+		cause  string
 	}{
 		{
 			name:   "the plan step errors",
 			steps:  &fakeSteps{planErr: errors.New("read the plan directory")},
 			calls:  []string{"Plan p"},
-			reason: "read the plan directory",
+			detail: "the plan step failed",
+			cause:  "read the plan directory",
 		},
 		{
 			name:   "the proposal write errors",
 			steps:  &fakeSteps{plan: handlePlan(), writeErr: errors.New("write the proposal file")},
 			calls:  []string{"Plan p", "WriteProposal p"},
-			reason: "write the proposal file",
+			detail: "writing the proposal failed",
+			cause:  "write the proposal file",
 		},
 	}
 	for _, tc := range cases {
@@ -436,8 +447,8 @@ func TestDeployerInboxHandleFails(t *testing.T) {
 			if answer.Status != deployerinbox.StatusFailed {
 				t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusFailed, answer.Detail)
 			}
-			if !strings.Contains(answer.Detail, tc.reason) {
-				t.Errorf("detail = %q, want it to name the reason %q", answer.Detail, tc.reason)
+			if answer.Detail != tc.detail || strings.Contains(answer.Detail, tc.cause) {
+				t.Errorf("detail = %q, want the fixed text %q and none of the step's error", answer.Detail, tc.detail)
 			}
 			if !slices.Equal(tc.steps.calls, tc.calls) {
 				t.Errorf("calls = %v, want %v: no step runs after a failure", tc.steps.calls, tc.calls)
@@ -462,6 +473,7 @@ func TestDeployerInboxHandleApplyRefusesAnUnverifiedPlan(t *testing.T) {
 		calls []string
 	}{
 		{"no record is written", &fakeSteps{plan: plan, recordErr: deployerinbox.ErrNoApproval}, []string{"Plan p", "ReadRecord " + id}},
+		{"no record is written, the callee wraps its path and a token", &fakeSteps{plan: plan, recordErr: fmt.Errorf("%w: reading /secret/path token=%s", deployerinbox.ErrNoApproval, handleToken)}, []string{"Plan p", "ReadRecord " + id}},
 		{"the record approves another digest", &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: other}, []string{"Plan p", "ReadRecord " + id, "LiveVersions"}},
 	}
 	for _, tc := range cases {
@@ -474,6 +486,9 @@ func TestDeployerInboxHandleApplyRefusesAnUnverifiedPlan(t *testing.T) {
 			}
 			if !slices.Equal(tc.steps.calls, tc.calls) {
 				t.Errorf("calls = %v, want %v: Apply is not reached", tc.steps.calls, tc.calls)
+			}
+			if strings.Contains(answer.Detail, "/secret/path") || strings.Contains(answer.Detail, handleToken) {
+				t.Errorf("detail = %q, want none of the callee's path or token", answer.Detail)
 			}
 		})
 	}
