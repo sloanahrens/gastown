@@ -4,10 +4,10 @@ package testutil
 
 import (
 	"os"
-	"runtime"
 	"strconv"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -28,12 +28,15 @@ func TestDoltContainerOpts_LabelsOwnerProcess(t *testing.T) {
 	if got := req.Labels[slot.OwnerHostLabel]; got != host {
 		t.Errorf("Labels[%s] = %q, want %q", slot.OwnerHostLabel, got, host)
 	}
-	// On darwin and linux the owner's start time is readable, and it is what
-	// tells a reused pid apart from the owner.
-	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
-		if req.Labels[slot.OwnerStartLabel] == "" {
-			t.Errorf("Labels[%s] is empty, want the test process's start time", slot.OwnerStartLabel)
+	// The start time tells a reused pid apart from the owner, and it is stamped
+	// exactly when the same reader the gate uses can read it. Where it cannot,
+	// the label must be absent: a made-up value would misjudge ownership.
+	if want, ok := procid.StartToken(os.Getpid()); ok {
+		if got := req.Labels[slot.OwnerStartLabel]; got != want {
+			t.Errorf("Labels[%s] = %q, want this test process's start token %q", slot.OwnerStartLabel, got, want)
 		}
+	} else if got, present := req.Labels[slot.OwnerStartLabel]; present {
+		t.Errorf("Labels[%s] = %q, want it absent: this platform has no start-token reader", slot.OwnerStartLabel, got)
 	}
 	if req.Env["DOLT_ROOT_HOST"] != "%" {
 		t.Errorf("labels displaced the env: DOLT_ROOT_HOST is not the expected value")
