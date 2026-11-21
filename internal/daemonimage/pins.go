@@ -145,6 +145,11 @@ type MainOf func(pin Pin) (dir string, err error)
 // "pin-drift guard:" error naming the rig, the pin, main and the line to edit.
 // A pin inside both bounds passes with one note.
 func CheckPins(pins []Pin, mainOf MainOf, pinsPath string, git bdbuild.Git) (notes []string, err error) {
+	return checkPins(pins, mainOf, pinsPath, git, execGoList)
+}
+
+// checkPins is CheckPins over the go runner the devops derivation uses.
+func checkPins(pins []Pin, mainOf MainOf, pinsPath string, git bdbuild.Git, goList goListRunner) (notes []string, err error) {
 	if git == nil {
 		return nil, errors.New("pin-drift guard: no git to read origin/main with")
 	}
@@ -157,7 +162,7 @@ func CheckPins(pins []Pin, mainOf MainOf, pinsPath string, git bdbuild.Git) (not
 		if err != nil {
 			return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through its remote, then rerun", pin.Name, dir, err)
 		}
-		pinNotes, err := checkPinAgainstMain(git, dir, pin, strings.TrimSpace(string(out)), pinsPath)
+		pinNotes, err := checkPinAgainstMain(git, goList, dir, pin, strings.TrimSpace(string(out)), pinsPath)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +188,7 @@ const fetchTipDepth = MaxPinBehind + 1
 // errors: a fetched pin with no main to compare against is refused, never
 // passed. Its caller has refused a nil git, as FetchSource does before the
 // fetch runs.
-func checkFetchedPin(git bdbuild.Git, dir string, pin Pin, pinsPath string) error {
+func checkFetchedPin(git bdbuild.Git, goList goListRunner, dir string, pin Pin, pinsPath string) error {
 	argv := []string{"fetch"}
 	if len(PinInputPaths(pin.Name)) != 0 {
 		argv = append(argv, "--filter=blob:none")
@@ -198,7 +203,7 @@ func checkFetchedPin(git bdbuild.Git, dir string, pin Pin, pinsPath string) erro
 	if err != nil {
 		return fmt.Errorf("pin-drift guard: cannot read the main tip fetched for the %s pin: %w", pin.Name, err)
 	}
-	_, err = checkPinAgainstMain(git, dir, pin, strings.TrimSpace(string(out)), pinsPath)
+	_, err = checkPinAgainstMain(git, goList, dir, pin, strings.TrimSpace(string(out)), pinsPath)
 	return err
 }
 
@@ -209,7 +214,7 @@ func checkFetchedPin(git bdbuild.Git, dir string, pin Pin, pinsPath string) erro
 // MaxPinAge older than main's tip is refused; one inside both bounds passes with
 // one note. The note and each refusal print both the commits it is behind main by
 // and how many of them touch its inputs.
-func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath string) (notes []string, err error) {
+func checkPinAgainstMain(git bdbuild.Git, goList goListRunner, dir string, pin Pin, main, pinsPath string) (notes []string, err error) {
 	if pin.Commit == main {
 		return nil, nil
 	}
@@ -247,6 +252,13 @@ func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath st
 		}
 		if len(gaps) != 0 {
 			return nil, fmt.Errorf("pin-drift guard: %s input list lacks %s, imported by %s: add it to PinInputPaths", pin.Name, gaps[0].Dir, gaps[0].Importer)
+		}
+		out, err := runGoList(goList, dir)
+		if err != nil {
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot derive the build's input directories with go list in %s (%v): fix that checkout or its toolchain, then rerun", pin.Name, short(pin.Commit), dir, err)
+		}
+		if missing := missingFromInputList(derivedInputPaths(string(out), dir)); len(missing) != 0 {
+			return nil, fmt.Errorf("pin-drift guard: %s input list lacks %s, which go list derives from the build: add it to PinInputPaths", pin.Name, missing[0])
 		}
 	}
 	return []string{fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), touching, MaxPinBehind, MaxPinAge)}, nil

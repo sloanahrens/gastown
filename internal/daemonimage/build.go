@@ -128,6 +128,8 @@ type Builder struct {
 	// Go runs go version -m on the release-reporter binary BuildTools builds, to
 	// read the version the go command stamped into it.
 	Go bdbuild.Go
+	// goList runs the devops derivation of the pin-drift guard; nil runs go.
+	goList goListRunner
 	// Environ is the host environment the builds start from; nil reads the
 	// host's. bdbuild.Env keeps the variables that locate the toolchain and drops
 	// the ones that would change what is compiled.
@@ -498,7 +500,7 @@ func (b Builder) source(ctx context.Context, name, src string) (string, func(), 
 		cleanup()
 		return "", nil, err
 	}
-	if err := checkFetchedPin(b.Git, dir, pin, b.pinsFile()); err != nil {
+	if err := checkFetchedPin(b.Git, b.goListRunner(), dir, pin, b.pinsFile()); err != nil {
 		cleanup()
 		return "", nil, err
 	}

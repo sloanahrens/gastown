@@ -260,6 +260,7 @@ func TestFetchedPinsAreStalenessChecked(t *testing.T) {
 		b := Builder{
 			Run: run.run, Git: guardGit(run, run.git(known), guard),
 			Go: versionGo(versionInfo(testReleaseVersion)), Environ: testEnv, Out: t.TempDir(),
+			goList:   coveredGoList,
 			GTSrc:    "/src/gt",
 			BDCommit: testBDCommit, OMCommit: testOMCommit,
 			HMCommit: testHMCommit, HMVersionVar: testHMVersionVar, DevopsCommit: testDevopsCommit,

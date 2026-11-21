@@ -39,3 +39,11 @@ func execGoList(dir string, args ...string) ([]byte, error) {
 func goListFailure(dir string, args []string, err error, stderr string) error {
 	return fmt.Errorf("go %s in %s: %w: %s", strings.Join(args, " "), dir, err, strings.TrimSpace(stderr))
 }
+
+// goListRunner is the go runner the builder's guard uses: its own, or the host's.
+func (b Builder) goListRunner() goListRunner {
+	if b.goList != nil {
+		return b.goList
+	}
+	return execGoList
+}
