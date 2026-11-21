@@ -52,6 +52,11 @@ const (
 	// full name.
 	trimCacheVolume = "cache"
 	trimShardVolume = "trim-list-"
+	// TrimClaimJobDeadlineSeconds is the claim trim Job's activeDeadlineSeconds: the hand-run Jobs
+	// took about 2 minutes on a 53 GB claim and 5m25s on a 70 GB claim under five seats compiling on
+	// the same disk (gt-xwer1l). 30 minutes leaves better than five times the longest run, so a
+	// healthy run is never cut off while a wedged pod stops holding the claim's pods for ever.
+	TrimClaimJobDeadlineSeconds = 1800
 )
 
 // TrimJobInput is what the trim Job is built from: the polecat image its container runs, the claim
@@ -295,14 +300,17 @@ func trimJob(in TrimJobInput, name string, annotations map[string]string, shards
 // claimTrimJob is the Job document for the claim route: the claim alone is mounted, an init container
 // plans the removal list from the claim and writes it into the claim, and the trim container then
 // reads it from there. The init container runs first and the Job's pod stops if it fails, so the trim
-// container never runs without a list of its own pod's writing.
+// container never runs without a list of its own pod's writing. Its plan stage is the long one, so
+// the Job carries TrimClaimJobDeadlineSeconds.
 func claimTrimJob(in TrimJobInput, name string, annotations map[string]string) *TrimJob {
 	volumes := []Volume{
 		{Name: trimCacheVolume, PersistentVolumeClaim: &PersistentVolumeClaimRef{ClaimName: in.ClaimName}},
 	}
 	mounts := []VolumeMount{{Name: trimCacheVolume, MountPath: SeedCacheRoot}}
-	return trimJobDocument(in, name, annotations, claimRemoveContainer(in.Image, mounts), volumes,
+	job := trimJobDocument(in, name, annotations, claimRemoveContainer(in.Image, mounts), volumes,
 		claimWriteContainer(in.Image, mounts, in.CapBytes, in.SandboxesRunning, in.Now))
+	job.Spec.ActiveDeadlineSeconds = int64Ptr(TrimClaimJobDeadlineSeconds)
+	return job
 }
 
 // trimJobDocument is the Job both routes apply: the cache user's trim container, with the volumes and
