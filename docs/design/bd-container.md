@@ -297,7 +297,7 @@ renames a verb fails the gate instead of the daemon.
 
 ### The call log
 
-One JSON line per call to a file in a mounted log volume, rotated at 50 MB with
+One JSON line per call to a file in a mounted log volume, rotated at 50 MiB with
 seven files kept: time, token class, `X-Gt-Caller`, `BD_ACTOR`, rig, the verb
 path, the flag names (not values) and bead ids found in argv, stdin byte count,
 stdout and stderr byte counts, exit status and duration. Free-text values
@@ -311,7 +311,7 @@ survives a pod replacement. `bdgw serve` runs with `--log-per-pod`, which puts
 each pod's log under `/var/log/bdgw/<pod>/`, the directory named for the pod's
 hostname, so the old and new pods of a roll keep separate `call.log` files
 instead of appending to one (gt-sbzzro). Each directory keeps its own 350 MiB of
-rotation (50 MB times seven files), so two pods want 700 MiB of the claim;
+rotation (50 MiB times seven files), so two pods want 700 MiB of the claim;
 `local-path` does not enforce the 512Mi request, so the volume grows to fit, and
 a log write the volume refuses drops its line and counts it in `dropped`.
 The claim is separate from `bd-gateway-workspace` (1Gi), so a full log cannot
