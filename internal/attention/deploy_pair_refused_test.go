@@ -31,6 +31,7 @@ func TestPreRollGuardDeployPairKindsResolveToTheirRulesAndOverseer(t *testing.T)
 		{"ready", KindDeployPairReady, RuleDeployPairReady, true, HandledOperatorAction, OwnerOverseer},
 		{"unreadable", KindDeployPairUnreadable, RuleDeployPairUnreadable, false, HandledOperatorAction, OwnerOverseer},
 		{"refused", KindDeployPairRefused, RuleDeployPairRefused, true, HandledOperatorAction, OwnerOverseer},
+		{"golist degraded", KindDeployPairGoListDegraded, RuleDeployPairGoListDegraded, false, HandledInfo, OwnerOverseer},
 	} {
 		it := Item{Kind: tc.kind, Key: string(tc.kind) + ":gastown:0123456789ab"}
 		rule := RuleFor(it)
