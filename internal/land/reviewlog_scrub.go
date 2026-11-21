@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"sort"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // ScrubResult is what one scrub of the review log did, or would do.
@@ -36,7 +38,18 @@ type ScrubResult struct {
 // and counted in Oversize. The result carries each changed row's bead id and
 // never a claim's text, and every error names the file only. The log is opened
 // for reading alone.
-func (f *ReviewsFile) ScrubPlan() (ScrubResult, error) {
+func (f *ReviewsFile) ScrubPlan() (ScrubResult, error) { return f.scrub(false) }
+
+// Scrub is ScrubPlan that, with apply true and at least one changed row, writes
+// the rewritten log through the replace seam in the file's own mode (gt-9h1asy,
+// part 2): each flagged word in a changed row's raw line becomes redactedWord, so
+// every other byte of the line stays, and a line that is not a JSON object or is
+// past the bound is copied through. The write is atomic, so a replace error
+// leaves the original log, and a second run finds nothing. With apply false
+// nothing is written.
+func (f *ReviewsFile) Scrub(apply bool) (ScrubResult, error) { return f.scrub(apply) }
+
+func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 	reviewsMu.Lock()
 	defer reviewsMu.Unlock()
 	fh, err := os.OpenFile(f.Path, os.O_RDONLY|oNoFollow, 0)
@@ -51,29 +64,93 @@ func (f *ReviewsFile) ScrubPlan() (ScrubResult, error) {
 		limit = maxCompactLineBytes
 	}
 	var res ScrubResult
+	var kept [][]byte
+	// A line the scrub cannot decode, or one past the bound, is scanned over its
+	// raw bytes: a token run in it is replaced too (gt-9h1asy), and only that run
+	// changes a byte.
+	keepRaw := func(line []byte) {
+		out, words := scrubRawBytes(line)
+		if words > 0 {
+			res.RowsChanged++
+			res.Words += words
+		}
+		kept = append(kept, out)
+	}
 	err = scanLogLines(fh, func(line []byte) {
 		if len(bytes.TrimSpace(line)) > limit {
 			res.Oversize++
+			keepRaw(line)
 			return
 		}
 		var rec ReviewRecord
 		if !isJSONObject(line) || json.Unmarshal(line, &rec) != nil {
+			keepRaw(line)
 			return
 		}
 		res.Rows++
-		if _, words := scrubRawLine(line, rec); words > 0 {
-			res.RowsChanged++
-			res.Words += words
-			res.Beads = append(res.Beads, safeBeadID(rec.BeadID))
+		scrubbed, words := scrubRawLine(line, rec)
+		if words == 0 {
+			kept = append(kept, line)
+			return
 		}
+		res.RowsChanged++
+		res.Words += words
+		res.Beads = append(res.Beads, safeBeadID(rec.BeadID))
+		kept = append(kept, scrubbed)
 	})
+	// The mode is the open file's, read once the rows are, so the rewrite keeps
+	// the file it read and a failed stat is a failed read.
+	var info os.FileInfo
+	if err == nil {
+		info, err = fh.Stat()
+	}
 	if cerr := fh.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		return ScrubResult{}, fmt.Errorf("reading reviews file %s: %w", f.Path, err)
 	}
+	if !apply || res.RowsChanged == 0 {
+		return res, nil
+	}
+	var buf bytes.Buffer
+	for _, line := range kept {
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	replace := f.replace
+	if replace == nil {
+		replace = config.ReplaceFile
+	}
+	if err := replace(f.Path, buf.Bytes(), info.Mode().Perm()); err != nil {
+		return ScrubResult{}, fmt.Errorf("replacing reviews file: %w", err)
+	}
 	return res, nil
+}
+
+// scrubRawBytes replaces each token-shaped run in the raw bytes of a line with
+// redactedWord, keeping every other byte, and reports how many it replaced. It
+// is scrubClaim's offset scan over the whole line, with no input cut: tokenEnd
+// tries a run of at most maxTokenRun bytes only where a prefix starts, so the
+// scan stays linear in the line (gt-9h1asy).
+func scrubRawBytes(line []byte) ([]byte, int) {
+	s := string(line)
+	var out []byte
+	words, last := 0, 0
+	for i := 0; i < len(s); {
+		if end := tokenEnd(s, i); end > i {
+			out = append(out, s[last:i]...)
+			out = append(out, redactedWord...)
+			last, i = end, end
+			words++
+			continue
+		}
+		i++
+	}
+	if words == 0 {
+		return line, 0
+	}
+	return append(out, s[last:]...), words
 }
 
 // safeBeadID is the only way a bead id enters a ScrubResult: the log's bead
