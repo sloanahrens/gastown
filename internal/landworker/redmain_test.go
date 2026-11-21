@@ -279,6 +279,96 @@ func TestRedMainRerunThatCouldNotRunRecordsNoVerdict(t *testing.T) {
 	}
 }
 
+// gt-4nz0bj: a main that cannot be judged for several runs in a row is
+// counted, so an attention item can see a streak instead of one log line.
+func TestRedMainUnknownRunsAreCounted(t *testing.T) {
+	t.Parallel()
+	h := newRedMainHarness(t)
+	store := &MemoryMainState{}
+	h.r.State = store
+	// The state keeps the first line only, bounded to 160 bytes.
+	h.rerunErr[pkgA] = errors.New(strings.Repeat("x", 200) + "\nthe rest of the stack")
+	for i, commit := range []string{"c1", "c2", "c3"} {
+		h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: fmt.Sprintf("gt-l%d", i+1), Commit: commit},
+			PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+	}
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.UnknownRuns != 3 {
+		t.Fatalf("unknown runs %d; want 3 consecutive UNKNOWNs counted", st.UnknownRuns)
+	}
+	if st.UnknownCommit != "c3" {
+		t.Fatalf("unknown commit %q; want the third run's commit", st.UnknownCommit)
+	}
+	if want := strings.Repeat("x", 160); st.UnknownCause != want {
+		t.Fatalf("cause %q; want the first line cut to 160 bytes", st.UnknownCause)
+	}
+}
+
+// gt-4nz0bj: the recorded cause is scrubbed, so a rerun error that quotes a
+// credential never reaches the main state.
+func TestRedMainUnknownCauseIsScrubbed(t *testing.T) {
+	t.Parallel()
+	h := newRedMainHarness(t)
+	store := &MemoryMainState{}
+	h.r.State = store
+	h.rerunErr[pkgA] = errors.New("go test: token=ghp_0123456789abcdefghij failed")
+	h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1"},
+		PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(st.UnknownCause, "ghp_0123456789") || !strings.Contains(st.UnknownCause, "[redacted]") {
+		t.Fatalf("cause %q; want the credential masked", st.UnknownCause)
+	}
+}
+
+// gt-4nz0bj: a decided verdict after UNKNOWNs clears the streak, so only
+// consecutive UNKNOWNs are counted.
+func TestRedMainDecidedVerdictResetsUnknownRuns(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		decide func(h *redMainHarness)
+	}{
+		{name: "red", decide: func(h *redMainHarness) {
+			delete(h.rerunErr, pkgA)
+			h.rerunExit[pkgA] = 1
+			h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l3", Commit: "c3"},
+				PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+		}},
+		{name: "green", decide: func(h *redMainHarness) {
+			h.r.Green(context.Background(), "make post-land", PostLand{BeadID: "gt-l3", Commit: "c3"}, PostLandResult{})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRedMainHarness(t)
+			store := &MemoryMainState{}
+			h.r.State = store
+			h.rerunErr[pkgA] = errors.New("slot wait timed out")
+			for i, commit := range []string{"c1", "c2"} {
+				h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: fmt.Sprintf("gt-l%d", i+1), Commit: commit},
+					PostLandResult{ExitCode: 2, Packages: pkgs(map[string]bool{pkgA: false})})
+			}
+			if st, err := store.Load(); err != nil || st.UnknownRuns != 2 {
+				t.Fatalf("after two UNKNOWNs: %+v, %v; want UnknownRuns 2", st, err)
+			}
+			tc.decide(h)
+			st, err := store.Load()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.UnknownRuns != 0 || st.UnknownCause != "" || st.UnknownCommit != "" {
+				t.Fatalf("state %+v after a decided verdict; want the UNKNOWN streak cleared", st)
+			}
+		})
+	}
+}
+
 // gt-7t9zrm: a package that did rerun and failed still files its bead while
 // another package's rerun could not run, and the commit is red.
 func TestRedMainRerunThatCouldNotRunStillFilesTheOneThatFailed(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/promote"
+	"github.com/steveyegge/gastown/internal/report"
 )
 
 // LabelRedMain marks a bead the red-main owner filed for one package that
@@ -90,6 +91,29 @@ func RedMainTitle(rig, pkg string) string {
 	return fmt.Sprintf("red main (%s): %s", rig, pkg)
 }
 
+// unknownCauseMax bounds the cause a MainState keeps: enough to name why a
+// rerun could not run, never a whole error chain (gt-4nz0bj).
+const unknownCauseMax = 160
+
+// unknownCause is the first line of a rerun error with the credential shapes
+// report.Scrub removes taken out (the same scrub the overseer digest puts on
+// every error it shows), cut to unknownCauseMax bytes at a rune boundary so
+// the state stays valid UTF-8.
+func unknownCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	line := err.Error()
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+	line = report.Scrub(line)
+	if len(line) > unknownCauseMax {
+		line = strings.ToValidUTF8(line[:unknownCauseMax], "")
+	}
+	return line
+}
+
 // failingPackages is each package res reported as FAIL, once, in order.
 func failingPackages(res PostLandResult) []string {
 	var out []string
@@ -109,6 +133,7 @@ func failingPackages(res PostLandResult) []string {
 func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLandResult) {
 	pkgs := failingPackages(res)
 	var stillRed, flaky, couldNotRun []string
+	var firstRerunErr error
 	tails := map[string]string{}
 	if len(pkgs) == 0 {
 		// Nothing to rerun: the whole command is the failing unit.
@@ -130,6 +155,9 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 		case rr.Err != nil:
 			r.logf("rerun of %s at %s could not run (%v); no bead for it", pkg, short(pl.Commit), rr.Err)
 			couldNotRun = append(couldNotRun, pkg)
+			if firstRerunErr == nil {
+				firstRerunErr = rr.Err
+			}
 		case rr.ExitCode == 0:
 			r.logf("%s passed its rerun at %s: flaky, no bead", pkg, short(pl.Commit))
 			flaky = append(flaky, pkg)
@@ -143,7 +171,9 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 	// record no verdict and let the next post-land run decide; a package that
 	// did rerun and fail still makes the commit red.
 	noVerdict := len(couldNotRun) > 0 && len(stillRed) == 0
-	if !noVerdict {
+	if noVerdict {
+		r.recordUnknown(pl, unknownCause(firstRerunErr))
+	} else {
 		r.recordVerdict(pl, len(stillRed) == 0)
 	}
 	open := r.openBeads()
