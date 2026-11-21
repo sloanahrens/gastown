@@ -204,12 +204,15 @@ func cacheTrimFailWaitAnswerAfter(f *cacheTrimFixture, verb string, started <-ch
 // cacheTrimFailWaitCtxs records the context each kubectl call runs under. A wait
 // leg runs on a context derived from the parent; a log read runs on the parent
 // itself. completeLiveAtLog is set at the first log read: whether the complete
-// wait's context was still live then. legs[0] is the complete wait, because the
-// test answers the failed wait only once the complete call has begun.
+// wait's context was still live then. errsAtCall holds, per call in call order,
+// the context's Err at the moment the seam handed it over, before the call ran.
+// legs[0] is the complete wait, because the test answers the failed wait only
+// once the complete call has begun.
 type cacheTrimFailWaitCtxs struct {
 	parent            context.Context
 	mu                sync.Mutex
 	legs              []context.Context
+	errsAtCall        []error
 	logReads          int
 	completeLiveAtLog bool
 }
@@ -217,6 +220,7 @@ type cacheTrimFailWaitCtxs struct {
 func (c *cacheTrimFailWaitCtxs) record(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.errsAtCall = append(c.errsAtCall, ctx.Err())
 	if ctx != c.parent {
 		c.legs = append(c.legs, ctx)
 		return
@@ -268,6 +272,46 @@ func TestCacheTrimFailWaitCancelsTheCompleteLegWhenTheJobFails(t *testing.T) {
 		if leg.Err() == nil {
 			t.Errorf("wait leg %d is live once the wait returned; want it canceled", i)
 		}
+	}
+}
+
+// TestCacheTrimFailWaitReadsTheLogOnALiveContext pins that every cluster call
+// the failed Job's wait makes, and so its log read, runs on a context that is
+// live at the moment of the call. The wait cancels its two legs as soon as the
+// failed condition answers and reads the log after that; a read handed a leg
+// would see a canceled context. The fixture's kubectl ignores its context, so
+// only the Err sampled when each call is made shows it.
+func TestCacheTrimFailWaitReadsTheLogOnALiveContext(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitFailedVerb:  {},
+		cacheTrimFailWaitTrimLogVerb: {stdout: "could not remove /claim/x: permission denied\n"},
+	})
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	ctxs := cacheTrimFailWaitRecordCtxs(f, parent)
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+	cacheTrimFailWaitAnswerAfter(f, cacheTrimFailWaitFailedVerb, held.started)
+	finished, err := f.d.cacheTrimWaitJob(parent, "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if finished || err == nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+	}
+	held.await(t)
+	if _, ok := f.indexOf(cacheTrimFailWaitTrimLogVerb); !ok {
+		t.Fatalf("the failed Job's log was not read: calls %v", f.verbs())
+	}
+	ctxs.mu.Lock()
+	defer ctxs.mu.Unlock()
+	if len(ctxs.errsAtCall) == 0 {
+		t.Fatalf("the seam saw no cluster call")
+	}
+	for i, errAtCall := range ctxs.errsAtCall {
+		if errAtCall != nil {
+			t.Errorf("cluster call %d was made on a context that had already ended (%v); want a live context", i, errAtCall)
+		}
+	}
+	if ctxs.logReads == 0 {
+		t.Errorf("no call ran on the parent context; the log read must not run on a canceled leg")
 	}
 }
 
