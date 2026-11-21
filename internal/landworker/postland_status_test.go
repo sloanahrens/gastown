@@ -633,6 +633,141 @@ func TestPostLandStatusTimeoutRaisesOneAttentionItem(t *testing.T) {
 	})
 }
 
+// orphanAlarmCase is a status-mode runner over an empty memory store whose one
+// pending entry reads PENDING, with the clock at statusT0.
+func orphanAlarmCase(timeout time.Duration) (*statusVerdicts, *MemoryMainState, *manualClock, *PostLandRunner) {
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: statusT0}
+	reads := &fakeStatusReads{responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StatePending)}}}
+	return v, store, clk, v.runner(reads.read, store, clk, timeout)
+}
+
+// markStoreOrphan records on the store's only pending entry that its run ended
+// without a verdict, as the runner's RunEnded seam records it.
+func markStoreOrphan(t *testing.T, store MainStateStore, clk *manualClock) PendingPostLand {
+	t.Helper()
+	st, err := store.Load()
+	if err != nil {
+		t.Fatalf("loading the main state: %v", err)
+	}
+	if len(st.PostLandPending) != 1 {
+		t.Fatalf("pending entries = %d, want one", len(st.PostLandPending))
+	}
+	if !st.PostLandPending[0].markOrphan(clk.Now(), RunEnd{Run: 11205, Status: "cancelled", Ended: true}) {
+		t.Fatalf("the ended run did not mark the entry")
+	}
+	if err := store.Save(st); err != nil {
+		t.Fatalf("saving the main state: %v", err)
+	}
+	return st.PostLandPending[0]
+}
+
+// TestPostLandStatusOrphanedAlarmRaisesAtOnce: an entry whose run was found
+// ended without a verdict raises its item as soon as it is marked, naming the
+// run, instead of waiting out post_land_timeout; an entry that is not orphaned
+// still waits for the timeout (gt-akljma).
+func TestPostLandStatusOrphanedAlarmRaisesAtOnce(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+	const timeout = time.Hour
+
+	t.Run("an orphaned entry raises one item naming the run", func(t *testing.T) {
+		t.Parallel()
+		v, store, clk, r := orphanAlarmCase(timeout)
+		r.Trigger(ctx, pl)
+		r.PollPending(ctx)
+		clk.Advance(PostLandOrphanAfter)
+		if n := v.unknownCount(); n != 0 {
+			t.Fatalf("unknown items before the run ended = %d, want none: the timeout has not passed", n)
+		}
+
+		markStoreOrphan(t, store, clk)
+		if n := v.unknownCount(); n != 1 {
+			t.Fatalf("unknown items once orphaned = %d, want one before the timeout", n)
+		}
+		u := v.alarms(t).Unknown[0]
+		if want := "post-land-unknown:gastown:" + pl.Commit; u.Key() != want {
+			t.Fatalf("key = %q, want %q: one commit is one item", u.Key(), want)
+		}
+		if u.Orphan != "11205 cancelled" || !u.At.Equal(clk.Now()) {
+			t.Fatalf("record = %+v, want the run 11205 cancelled at %v", u, clk.Now())
+		}
+		want := fmt.Sprintf("post-land verdict unknown for %s (gastown): the run 11205 cancelled ended and the %q status is still pending",
+			short(pl.Commit), statusContext)
+		if got := u.Summary(); got != want {
+			t.Fatalf("summary = %q, want %q", got, want)
+		}
+
+		// The timeout passing adds no second item.
+		clk.Advance(timeout)
+		r.PollPending(ctx)
+		if n := v.unknownCount(); n != 1 {
+			t.Fatalf("unknown items past the timeout = %d, want still the one", n)
+		}
+	})
+
+	t.Run("an entry that is not orphaned waits for the timeout", func(t *testing.T) {
+		t.Parallel()
+		v, _, clk, r := orphanAlarmCase(timeout)
+		r.Trigger(ctx, pl)
+		r.PollPending(ctx)
+		clk.Advance(timeout - time.Second)
+		if n := v.unknownCount(); n != 0 {
+			t.Fatalf("unknown items one second before the timeout = %d, want none", n)
+		}
+		clk.Advance(time.Second)
+		r.PollPending(ctx)
+		if n := v.unknownCount(); n != 1 {
+			t.Fatalf("unknown items at the timeout = %d, want one", n)
+		}
+		if u := v.alarms(t).Unknown[0]; u.Orphan != "" {
+			t.Fatalf("record %+v names a run though none ended", u)
+		}
+	})
+}
+
+// TestPostLandStatusOrphanedAlarmEndsWithItsWindow: the orphaned item's window
+// is counted from OrphanedAt, so it is gone when that window ends even though
+// the window counted from Since+timeout is still running (gt-akljma).
+func TestPostLandStatusOrphanedAlarmEndsWithItsWindow(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
+	const timeout = time.Hour
+	v, store, clk, r := orphanAlarmCase(timeout)
+	r.Trigger(ctx, pl)
+	r.PollPending(ctx)
+	clk.Advance(PostLandOrphanAfter)
+	entry := markStoreOrphan(t, store, clk)
+	orphanedAt := clk.Now()
+
+	clk.Advance(PostLandAlarmWindow - time.Second)
+	alarms := v.alarms(t)
+	if len(alarms.Unknown) != 1 {
+		t.Fatalf("unknown items one second before the orphan's window ends = %d, want one", len(alarms.Unknown))
+	}
+	if want := "post-land-unknown:gastown:" + pl.Commit; alarms.Unknown[0].Key() != want {
+		t.Fatalf("key = %q, want %q: one commit is one item", alarms.Unknown[0].Key(), want)
+	}
+
+	clk.Advance(2 * time.Second)
+	if n := v.unknownCount(); n != 0 {
+		t.Fatalf("unknown items after the orphan's window = %d, want none", n)
+	}
+	// The timeout window is still running, so the drop is the orphan's window
+	// ending rather than the timeout's: this test could not tell them apart
+	// otherwise.
+	if !clk.Now().Before(entry.Since.Add(timeout).Add(PostLandAlarmWindow)) {
+		t.Fatalf("the clock is past the timeout window too at %v", clk.Now())
+	}
+	if !orphanedAt.Before(entry.Since.Add(timeout)) {
+		t.Fatalf("the orphan was marked at %v, after the timeout %v: the test cannot tell the windows apart",
+			orphanedAt, entry.Since.Add(timeout))
+	}
+}
+
 func TestPostLandStatusUnrecordedReportsTheStoreAtOnce(t *testing.T) {
 	t.Parallel()
 	pl := PostLand{BeadID: "gt-abc", Commit: "abc1234567890", Target: "main"}
