@@ -1,12 +1,15 @@
 package townstate
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFindCredentials(t *testing.T) {
@@ -69,6 +72,67 @@ func TestFindCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The name rule is exempt at exactly two JSON paths: a Kubernetes toleration's
+// key under any parent, and the daemon's om_token_meta at the document root.
+// The json:key and json:om_token_meta rows are the ones a widened shape turns
+// red (matching any key, or om_token_meta at any depth); that mutation was run
+// by hand and its failing lines are in the commit body, nothing here runs it.
+func TestFindCredentialsExemptPaths(t *testing.T) {
+	t.Parallel()
+	// Built from parts so this file holds no token-shaped literal.
+	const token = "sk-" + "abcdefghijklmnop1234"
+	exempt := `{"sandboxes":{` +
+		`"polecat-k8s":{"tolerations":[{"key":"node.kubernetes.io/unreachable","operator":"Exists"}]},` +
+		`"sbx-haiku":{"spec":{"tolerations":[{"key":"dedicated","value":"gpu-train"}]}}},` +
+		`"list":[{"tolerations":[{"key":"pool"}]}],` +
+		`"daemon":{"om_token_meta":"provider=deepseek; model=flash; window=200000; scope=town"}}`
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"toleration keys under three parents and the root descriptor", exempt, nil},
+		{"a token-shaped toleration key is still found", `{"tolerations":[{"key":"` + token + `"}]}`, []string{"value:shape"}},
+		{"a token-shaped om_token_meta is still found", `{"daemon":{"om_token_meta":"` + token + `"}}`, []string{"value:shape"}},
+		{"a key under any other parent is found", `{"other":{"key":"abc"}}`, []string{"json:key"}},
+		{"a key at the document root is found", `{"key":"abc"}`, []string{"json:key"}},
+		{"a key deeper under a toleration is found", `{"tolerations":[{"metadata":{"key":"abc"}}]}`, []string{"json:key"}},
+		{"another credential-named field of a toleration is found", `{"tolerations":[{"token":"abc"}]}`, []string{"json:token"}},
+		{"a key in an array under another name is found", `{"items":[{"key":"abc"}]}`, []string{"json:key"}},
+		{"a key in a root array is found", `[{"key":"abc"}]`, []string{"json:key"}},
+		{"tolerations as an object is not exempt", `{"tolerations":{"key":"abc"}}`, []string{"json:key"}},
+		{"an om_token_meta under another parent is found", `{"x":{"om_token_meta":"abc"}}`, []string{"json:om_token_meta"}},
+		{"an om_token_meta below daemon at another depth is found", `{"x":{"daemon":{"om_token_meta":"abc"}}}`, []string{"json:om_token_meta"}},
+		{"api_keys is not exempt", `{"api_keys":"abc"}`, []string{"json:api_keys"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+	// An object member whose key is spelled like an array position is not one: the
+	// path keeps a key and an index apart by type, so none of these is a toleration.
+	for _, forged := range []string{"[*]", "[0]", "*", "[ * ]", "[]"} {
+		for _, shape := range []string{`{"tolerations":{%q:{"key":"abc"}}}`, `{"x":{"tolerations":{%q:{"key":"abc"}}}}`} {
+			in := fmt.Sprintf(shape, forged)
+			t.Run("a forged key "+forged+" in "+in, func(t *testing.T) {
+				if got := FindCredentials([]byte(in)); !reflect.DeepEqual(got, []string{"json:key"}) {
+					t.Fatalf("FindCredentials(%q) = %q, want the name rule to find the key", in, got)
+				}
+			})
+		}
+	}
+	t.Run("redaction leaves exempt fields unchanged", func(t *testing.T) {
+		out, n, err := RedactJSON([]byte(exempt))
+		if err != nil || n != 0 || string(out) != exempt {
+			t.Fatalf("RedactJSON(exempt document) = %q, %d, %v; want it unchanged with no error", out, n, err)
+		}
+	})
 }
 
 // TestValueShape: a token joined to its name or set in brackets is found, and
@@ -176,5 +240,30 @@ func TestFindCredentialsLivetownSettings(t *testing.T) {
 		if _, n, err := RedactJSON(data); json.Valid(data) && (err != nil || n != 0) {
 			t.Errorf("%s: RedactJSON = %d, %v; want 0 and no error", f, n, err)
 		}
+	}
+}
+
+// TestFindCredentialsDeepNestingIsLinear: a document nested to the decoder's
+// limit with a few hundred thousand empty arrays at that depth (about 1 MB) is
+// scanned in time proportional to its size: the walk keeps a parent link and a
+// depth for each container and compares the last three steps, instead of copying
+// the whole path for each container it opens (which took seconds per megabyte).
+func TestFindCredentialsDeepNestingIsLinear(t *testing.T) {
+	t.Parallel()
+	const depth = 9990
+	doc := strings.Repeat("[", depth) + strings.TrimSuffix(strings.Repeat("[],", 330000), ",") + strings.Repeat("]", depth)
+	// The 5 s bound is a hang guard, not a measure of linearity: the quadratic walk
+	// takes about 10 s on this shape, so a return inside the bound is the evidence.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan []string, 1)
+	go func() { done <- FindCredentials([]byte(doc)) }()
+	select {
+	case got := <-done:
+		if len(got) != 0 {
+			t.Errorf("FindCredentials found %q in a document with no strings", got)
+		}
+	case <-ctx.Done():
+		t.Fatalf("FindCredentials did not return within the bound on a %d-byte document nested %d deep", len(doc), depth)
 	}
 }

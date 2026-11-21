@@ -77,6 +77,29 @@ func isSecret(name, value string) bool {
 		!credentialName(tokensSegment.ReplaceAllString(name, "_")))
 }
 
+// nameRuleExempt reports whether the string value held under top's current key
+// is a field whose name reads as a credential but is not one: a Kubernetes
+// toleration's key under any parent, and the daemon's om_token_meta descriptor at
+// the document root. The path is matched exactly, by the last three steps and the
+// depth, never by walking from the root; no other key, depth or name shape is
+// exempt. Only the name rule is skipped, so a token-shaped value in either field
+// is still a value:shape finding. By design a real password that is not
+// token-shaped, held in one of those two fields, passes the name rule.
+func nameRuleExempt(top *jsonFrame) bool {
+	if top.key == "om_token_meta" && top.depth == 1 && top.seg == (pathSeg{key: "daemon"}) {
+		return true
+	}
+	return top.key == "key" && top.seg == (pathSeg{index: true}) && top.parent != nil && top.parent.seg == (pathSeg{key: "tolerations"})
+}
+
+// pathSeg is one step of a JSON path: an object member's key, or an array
+// position. They are told apart by type, not by spelling: an object whose member
+// is named "[*]" is a key, and no key equals an index.
+type pathSeg struct {
+	key   string
+	index bool
+}
+
 // hit is one credential value in valid JSON: its rule and the byte span of its string literal.
 type hit struct {
 	rule     string
@@ -105,17 +128,36 @@ func appendValueShape(out []hit, data []byte, s string, end int) []hit {
 	return out
 }
 
-// jsonHits walks valid JSON token by token, so every occurrence of a key is seen
-// (duplicates included). A string under a credential name is a key hit; every
-// other string value, in an object, an array or at the top, is checked by shape.
-func jsonHits(data []byte) ([]hit, error) {
-	type frame struct {
-		object  bool
-		wantKey bool
-		key     string
-		cred    bool // the current key (object) or the key that opened the array
+// jsonFrame is one object or array the walk is inside. Its place in the document
+// is a parent link, its depth and the step that led into it, not a copied path:
+// opening a container is O(1), so a document nested to the decoder's limit is
+// scanned in time proportional to its size.
+type jsonFrame struct {
+	object  bool
+	wantKey bool
+	key     string
+	cred    bool // the current key (object) or the key that opened the array
+	parent  *jsonFrame
+	depth   int     // containers above this one
+	seg     pathSeg // the step from the parent into this container
+}
+
+// stepInto is the step a value held by f takes: its member key in an object, an
+// index in an array.
+func (f *jsonFrame) stepInto() pathSeg {
+	if f.object {
+		return pathSeg{key: f.key}
 	}
-	var stack []*frame
+	return pathSeg{index: true}
+}
+
+// jsonHits walks valid JSON token by token, so every occurrence of a key is seen
+// (duplicates included). A string under a credential name is a key hit, unless the
+// name rule is exempt at its path; every other string value, in an object, an array
+// or at the top, is checked by shape. The walk is linear in the document: opening a
+// container costs O(1) and the path test reads three steps.
+func jsonHits(data []byte) ([]hit, error) {
+	var stack []*jsonFrame
 	var out []hit
 	dec := json.NewDecoder(bytes.NewReader(data))
 	for {
@@ -127,14 +169,17 @@ func jsonHits(data []byte) ([]hit, error) {
 			return nil, err
 		}
 		end := int(dec.InputOffset())
-		var top *frame
+		var top *jsonFrame
 		if len(stack) > 0 {
 			top = stack[len(stack)-1]
 		}
 		if d, ok := tok.(json.Delim); ok {
 			switch d {
 			case '{', '[':
-				f := &frame{object: d == '{', wantKey: d == '{'}
+				f := &jsonFrame{object: d == '{', wantKey: d == '{', parent: top}
+				if top != nil {
+					f.depth, f.seg = top.depth+1, top.stepInto()
+				}
 				stack = append(stack, f)
 			default:
 				stack = stack[:len(stack)-1]
@@ -153,7 +198,7 @@ func jsonHits(data []byte) ([]hit, error) {
 		case top.wantKey:
 			top.key, top.cred, top.wantKey = s, credentialName(s), false
 		default:
-			if isString && top.cred && isSecret(top.key, s) {
+			if isString && top.cred && !nameRuleExempt(top) && isSecret(top.key, s) {
 				out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
 			} else if isString {
 				out = appendValueShape(out, data, s, end)
@@ -181,9 +226,9 @@ func stringStart(data []byte, end int) int {
 }
 
 // FindCredentials returns one rule name per credential in data, never a value.
-// Valid JSON is walked: a credential-named key's value is a json:key finding, and
-// a token-shaped word in any other string value is a value:shape finding. Anything
-// else is scanned for NAME=value and "key": "value".
+// Valid JSON is walked: a credential-named key's value is a json:key finding unless
+// its path is exempt, and a token-shaped word in any other string value is a
+// value:shape finding. Anything else is scanned for NAME=value and "key": "value".
 func FindCredentials(data []byte) []string {
 	var found []string
 	if hits, err := jsonHits(data); err == nil {
