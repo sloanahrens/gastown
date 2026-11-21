@@ -1059,7 +1059,9 @@ func TestNoBeadAccessOutboxPollRestartedPollDoesNotRefile(t *testing.T) {
 // builds a new poll for every tick, so a request whose record cannot be written
 // (a read-only .runtime/outbox-poll) must still count as filed for the daemon's
 // life, not for one tick's poll. Three ticks over one read-only record directory,
-// with the overseer closing the escalation between ticks, file it once (gt-93p10b).
+// with the overseer closing the escalation between ticks, file it once (gt-93p10b);
+// the write failure is logged with its consequence, and a restarted daemon, whose
+// record file was never written, files the request again (gt-k19lql).
 func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -1106,6 +1108,23 @@ func TestNoBeadAccessOutboxPollFailedRecordDoesNotRefileAcrossTicks(t *testing.T
 	}
 	if got := outboxPollEscalations(t, bd); len(got) != 1 {
 		t.Errorf("three ticks over a read-only record directory filed %d escalation beads, want one: %+v", len(got), got)
+	}
+	if want := "could not record it, so a restarted poll files it again"; !strings.Contains(logged.String(), want) {
+		t.Errorf("the failed record write was logged as %q, want it to carry %q", logged.String(), want)
+	}
+	// A restart is a new daemon with a fresh record, and the file was never
+	// written: it files the request again, which is the loss the log line names.
+	restarted := outboxPollTestDaemon(t, true, io.Discard)
+	restarted.config.TownRoot, restarted.clock = town, d.clock
+	restarted.prefixRegistryFn = rigPrefixes("gastown")
+	restarted.openRecoveryBeads = func([]string) beads.Client { return bd }
+	poll := restarted.liveOutboxPoll()
+	poll.exec = exec
+	if err := poll.tick(context.Background()); err != nil {
+		t.Fatalf("the restarted daemon's tick: %v", err)
+	}
+	if got := outboxPollEscalations(t, bd); len(got) != 2 {
+		t.Errorf("after a restart the request was filed %d times in all, want two: %+v", len(got), got)
 	}
 }
 
