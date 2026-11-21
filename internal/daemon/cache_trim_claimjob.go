@@ -2,23 +2,34 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
-// cacheTrimClaimWaitTimeout bounds the wait on a claim-carried trim Job: its pod
-// walks 1.16 million files in 7 s, a first trim of a 90 GB claim is unmeasured,
-// and bead 4/10 sets the bound again from the elapsed time it logs.
-const cacheTrimClaimWaitTimeout = 15 * time.Minute
+// cacheTrimClaimWaitTimeout bounds the wait on a claim-carried trim Job: more
+// than three times a loaded run of the Job, and shorter than the Job's own
+// 30-minute deadline (gt-uatljg), so a Job it leaves running is slow, not hung.
+const cacheTrimClaimWaitTimeout = 20 * time.Minute
+
+// errCacheTrimJobPending marks a trim Job still running when the wait ends: its
+// result line is read at a later pass, so the claim is not a failed trim.
+var errCacheTrimJobPending = errors.New("the trim Job is still running")
 
 // cacheTrimClaimJobRun applies one claim's trim through the claim Job and
 // returns the counts of the files it removed, found absent and kept. A Job
 // whose result line is missing or malformed is an error and never zero counts
 // with nil, as a line read as zero would record a run that trimmed nothing. A
-// dry run is zero counts and nil. Nothing calls it yet (cache trim, bead 7/10:
-// the chain's later beads are its callers).
+// dry run is zero counts and nil.
+//
+// A Job still running when the wait ends is decided by its status: active is
+// pending (errCacheTrimJobPending), and a status that cannot be read is an
+// ordinary error, never pending, so a failed Job never passes as a healthy run.
+//
+// Nothing calls it yet (cache trim, bead 7/10: the chain's later beads are its
+// callers).
 func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) (removed, absent, kept int64, err error) {
 	jobName := cacheTrimJobName(claim.ClaimName)
 	m, err := cachevol.BuildClaimTrimManifest(cachevol.TrimJobInput{
@@ -44,7 +55,17 @@ func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, cl
 		return 0, 0, 0, fmt.Errorf("applying the trim Job %s: %w", jobName, err)
 	}
 	if !finished {
-		return 0, 0, 0, fmt.Errorf("the trim Job %s did not finish within %s", jobName, cacheTrimClaimWaitTimeout)
+		state, err := d.cacheTrimJobState(ctx, kubeconfig, namespace, jobName)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf("reading the status of the trim Job %s: %s", jobName, cacheTrimFirstLine(err.Error()))
+		}
+		switch state {
+		case cacheTrimJobStateFailed:
+			return 0, 0, 0, fmt.Errorf("the trim Job %s failed", jobName)
+		case cacheTrimJobStateActive:
+			return 0, 0, 0, fmt.Errorf("the trim Job %s is still running; its result is read at a later pass: %w", jobName, errCacheTrimJobPending)
+		}
+		// A Job that completed after the wait is read as a finished one.
 	}
 	removed, absent, kept, err = d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName)
 	if err != nil {

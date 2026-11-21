@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,8 +11,8 @@ import (
 )
 
 // cacheTrimClaimJobWaitVerb is the wait a claim-Job run makes for its Job, at
-// the fifteen-minute bound the claim route allows the walk of a large claim.
-const cacheTrimClaimJobWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=900s"
+// the twenty-minute bound the claim route allows the walk of a large claim.
+const cacheTrimClaimJobWaitVerb = "wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=1200s"
 
 // cacheTrimClaimJobLogVerb is the read of the claim Job's trim container log,
 // the one cacheTrimRemovedCounts parses.
@@ -129,49 +130,62 @@ func TestCacheTrimClaimJobRunReturnsTheApplyError(t *testing.T) {
 	}
 }
 
-// TestCacheTrimClaimJobRunReportsAnUnfinishedJob pins that a Job still running
-// at the bound is an error naming the Job and the wait, not a nil return.
-func TestCacheTrimClaimJobRunReportsAnUnfinishedJob(t *testing.T) {
+// TestCacheTrimClaimJobPendingIsNotFailure is the bead's first acceptance: a
+// Job still running when the wait ends, with no Failed condition, is pending; a
+// Failed Job is not, and nor is one found complete, read as a finished Job's.
+func TestCacheTrimClaimJobPendingIsNotFailure(t *testing.T) {
 	t.Parallel()
-	f := newCacheTrimFixture(t, "", map[string]cliReply{
-		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
-	})
-	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
-	want := "the trim Job " + cacheTrimJob + " did not finish within 15m0s"
-	if err == nil || !strings.Contains(err.Error(), want) {
-		t.Errorf("a Job still running at the bound = %v, want an error carrying %q", err, want)
+	for _, tc := range []struct {
+		name, status string
+		pending      bool
+		wantErr      bool
+		removed      int64
+	}{
+		{"still running", `{"status":{"active":1}}`, true, true, 0},
+		{"a Failed condition", `{"status":{"conditions":[{"type":"Failed","status":"True"}]}}`, false, true, 0},
+		{"complete after the wait", `{"status":{"conditions":[{"type":"Complete","status":"True"}]}}`, false, false, 4},
+	} {
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+			cacheTrimJobStateVerb:     {stdout: tc.status},
+			cacheTrimClaimJobLogVerb:  {stdout: "removed 4 absent 0 kept 1\n"},
+		})
+		removed, _, _, err := cacheTrimClaimJobCounts(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+		if got := errors.Is(err, errCacheTrimJobPending); got != tc.pending || (err != nil) != tc.wantErr || removed != tc.removed {
+			t.Errorf("%s: the run = %d removed, %v (pending %v); want %d removed, pending %v, an error %v", tc.name, removed, err, got, tc.removed, tc.pending, tc.wantErr)
+		}
 	}
 }
 
-// TestCacheTrimClaimJobApplyErrorsAreReturned is the bead's acceptance: an apply
-// the cluster refuses and a Job still running at the wait each come back as an
-// error, the second naming the Job and the wait.
-func TestCacheTrimClaimJobApplyErrorsAreReturned(t *testing.T) {
+// TestCacheTrimClaimJobPendingNeedsAReadableActiveStatus is the bead's second
+// acceptance: only a status read as active is pending. A failed read, garbled
+// JSON and a status that is none of the three are ordinary, parked errors.
+func TestCacheTrimClaimJobPendingNeedsAReadableActiveStatus(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name      string
-		overrides map[string]cliReply
-		want      string
+		name    string
+		reply   cliReply
+		pending bool
 	}{
-		{
-			name:      "the cluster refuses the apply",
-			overrides: map[string]cliReply{cacheTrimApplyVerb: {stderr: "Error from server: forbidden", code: 1}},
-			want:      "Error from server: forbidden",
-		},
-		{
-			name:      "the Job is still running at the wait",
-			overrides: map[string]cliReply{cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1}},
-			want:      "the trim Job " + cacheTrimJob + " did not finish within 15m0s",
-		},
+		{"a failed status read", cliReply{stderr: "Error from server (NotFound): jobs.batch \"x\" not found\nthe rest", code: 1}, false},
+		{"garbled JSON", cliReply{stdout: `{"status":`}, false},
+		{"active 0 and no condition", cliReply{stdout: `{"status":{"active":0}}`}, false},
+		{"active 1 and no condition", cliReply{stdout: `{"status":{"active":1}}`}, true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			f := newCacheTrimFixture(t, "", tc.overrides)
-			err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("the run = %v, want an error carrying %q", err, tc.want)
-			}
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+			cacheTrimJobStateVerb:     tc.reply,
 		})
+		err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+		if got := errors.Is(err, errCacheTrimJobPending); err == nil || got != tc.pending {
+			t.Fatalf("%s: the run = %v; errors.Is(err, errCacheTrimJobPending) = %v, want an error with %v", tc.name, err, got, tc.pending)
+		}
+		if !tc.pending && !strings.Contains(err.Error(), "reading the status of the trim Job "+cacheTrimJob) {
+			t.Errorf("%s: the error %q does not name the status read of the Job", tc.name, err)
+		}
+		if strings.Contains(err.Error(), "the rest") {
+			t.Errorf("%s: the error %q carries stderr past its first line", tc.name, err)
+		}
 	}
 }
 
