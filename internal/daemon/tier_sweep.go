@@ -3332,9 +3332,12 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	if code != 0 {
 		launch.err = fmt.Errorf("the run did not start (exit %d)", code)
 	} else if marker != "" {
-		// The mirror steps and the copy succeeded: the update is finished.
+		// The mirror steps and the copy succeeded: the update is finished. A marker
+		// that cannot be removed fails the launch loud: the next launch then sees it
+		// and rebuilds the mirror, which is the safe direction.
 		if err := d.mirrorFS().remove(marker); err != nil {
-			d.logger.Printf("tier_sweep: %s: the mirror's updating marker %s could not be removed: %v; the next launch rebuilds the mirror", spec.Rig, marker, err)
+			launch.exitCode, launch.err = -1, fmt.Errorf("the mirror's updating marker %s could not be removed: %w; the next launch rebuilds the mirror", marker, err)
+			launch.output += "sweep-run: " + launch.err.Error() + "\n"
 		}
 	}
 	return launch
@@ -3402,7 +3405,7 @@ func (d *Daemon) tierSweepMirrorPrepare(spec sweeprunner.Spec) (string, error) {
 		}
 	}
 	if err := fsys.mkdirAll(filepath.Dir(mirror)); err != nil {
-		return "", err
+		return "", fmt.Errorf("creating %s: %w", filepath.Dir(mirror), err)
 	}
 	if err := fsys.create(marker); err != nil {
 		return "", fmt.Errorf("writing the marker %s: %w", marker, err)

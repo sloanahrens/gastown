@@ -1374,6 +1374,29 @@ func TestTierSweepMirrorRebuildsAfterAnInterruptedUpdate(t *testing.T) {
 			t.Errorf("second launch err %v, operations %q, want %q: the failed one's marker stays and the next removes the mirror, then updates", errs[1], rec.ops, want)
 		}
 	})
+	t.Run("an active sweep Job refuses the launch before anything is removed", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}}
+		d, spec, st := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		d.tierSweepSeams.mirrorFS = rec.fs()
+		mirror := filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
+		spec.Snapshot = mirror
+		rec.paths[mirror], rec.paths[mirror+".updating"] = true, true // a marker, and a Job still reading the mirror
+		cluster := &runnerCluster{t: t, jobs: "gt-sweep-gastown-deadbeef-otherrun\n", status: "Complete"}
+		d.execCmd = (&runnerFakeCmds{answer: cluster.answer}).run
+		var busy *sweeprunner.ActiveJob
+		if got := d.tierSweepLaunchRunner(context.Background(), st, spec); !errors.As(got.err, &busy) || len(rec.ops) != 0 {
+			t.Errorf("err %v, operations %q, want the launch refused for the running Job with nothing removed", got.err, rec.ops)
+		}
+	})
+	t.Run("a marker that cannot be removed after a good run fails the launch loud", func(t *testing.T) {
+		t.Parallel()
+		rec := &mirrorFSRecorder{paths: map[string]bool{}, fail: map[string]error{"remove": errors.New("denied")}}
+		errs, _ := run(t, rec, false)
+		if errs[0] == nil || !strings.Contains(errs[0].Error(), "could not be removed") {
+			t.Errorf("err %v, want the launch failed naming the marker", errs[0])
+		}
+	})
 	for _, rig := range []string{"a/b", "..", ".", "", "x\\y"} {
 		t.Run("the rig name "+rig+" is refused before any removal", func(t *testing.T) {
 			t.Parallel()
@@ -1413,7 +1436,7 @@ func TestTierSweepMirrorPreparationFailuresAreLoud(t *testing.T) {
 	}{
 		{"removeAll", true, "removing the unfinished mirror"},
 		{"remove", true, "removing the marker"},
-		{"mkdirAll", false, "denied"},
+		{"mkdirAll", false, "creating"},
 		{"create", false, "writing the marker"},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
@@ -1423,7 +1446,7 @@ func TestTierSweepMirrorPreparationFailuresAreLoud(t *testing.T) {
 			d.tierSweepSeams.mirrorFS = rec.fs()
 			spec.Snapshot = filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", "gastown.git")
 			rec.paths[spec.Snapshot+".updating"] = tc.marker
-			if _, err := d.tierSweepMirrorPrepare(spec); err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "denied") && tc.op != "mkdirAll" {
+			if _, err := d.tierSweepMirrorPrepare(spec); err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "denied") || (tc.op == "mkdirAll" && !strings.Contains(err.Error(), "sweep-repo")) {
 				t.Errorf("%s failing: err %v, want it naming %q and the cause", tc.op, err, tc.wantErr)
 			}
 		})
@@ -1443,22 +1466,36 @@ func TestTierSweepMirrorLaunchesAreSequential(t *testing.T) {
 	spec.Snapshot = mirror
 	cmds := &runnerFakeCmds{answer: (&runnerCluster{t: t, status: "Complete"}).answer}
 	d.execCmd = cmds.run
+	firstEnd := 0
 	for i := 0; i < 2; i++ {
 		if got := d.tierSweepLaunchRunner(context.Background(), st, spec); got.err != nil {
 			t.Fatalf("launch %d failed: %v", i+1, got.err)
 		}
-	}
-	cp, fetch := -1, []int{}
-	for i, c := range cmds.ran {
-		if strings.Contains(c, " cp ") && strings.Contains(c, mirror) && cp < 0 {
-			cp = i
-		}
-		if strings.Contains(c, " fetch ") {
-			fetch = append(fetch, i)
+		if i == 0 {
+			firstEnd = len(cmds.ran)
 		}
 	}
-	if len(fetch) != 2 || cp < fetch[0] || cp > fetch[1] {
-		t.Errorf("the first copy is at command %d and the fetches at %v, want the copy between the first fetch and the second", cp, fetch)
+	plan, err := sweeprunner.Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the spec: %v", err)
+	}
+	var copyArgv, fetchArgv string
+	for _, step := range plan.Apply {
+		joined := strings.Join(step.Argv, " ")
+		if slices.Contains(step.Argv, "cp") {
+			copyArgv = joined
+		}
+		if slices.Contains(step.Argv, "fetch") {
+			fetchArgv = joined
+		}
+	}
+	// The fake records the exact argv of each command; launch one's commands end at
+	// firstEnd, so a copy found before it is launch one's and a fetch found after it
+	// is launch two's.
+	cp, fetch1 := slices.Index(cmds.ran[:firstEnd], copyArgv), slices.Index(cmds.ran[:firstEnd], fetchArgv)
+	fetch2 := slices.Index(cmds.ran[firstEnd:], fetchArgv)
+	if copyArgv == "" || fetchArgv == "" || fetch1 < 0 || cp < fetch1 || fetch2 < 0 {
+		t.Errorf("copy %d and first fetch %d in launch one (of %d commands), second fetch %d in launch two: want launch one's fetch, then its copy, then launch two's fetch", cp, fetch1, firstEnd, fetch2)
 	}
 	want := []string{"create " + mirror + ".updating", "remove " + mirror + ".updating", "create " + mirror + ".updating", "remove " + mirror + ".updating"}
 	if !slices.Equal(rec.ops, want) {
