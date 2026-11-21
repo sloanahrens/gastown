@@ -55,6 +55,35 @@ func TestFindCredentials(t *testing.T) {
 	}
 }
 
+// TestValueShape: a token joined to its name or set in brackets is found, and
+// a string with no token-shaped word is not. Each finding is the rule name alone,
+// so an exact match also shows that no part of the token reaches a finding.
+func TestValueShape(t *testing.T) {
+	t.Parallel()
+	const token = "sk-abcdefghijklmnop1234"
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"KEY=value", `{"note":"OPENAI_API_KEY=` + token + `"}`, []string{"value:shape"}},
+		{"key:value", `{"note":"token:` + token + `"}`, []string{"value:shape"}},
+		{"[token]", `{"note":"[` + token + `]"}`, []string{"value:shape"}},
+		{"{token}", `{"note":"{` + token + `}"}`, []string{"value:shape"}},
+		{"<token>", `{"note":"<` + token + `>"}`, []string{"value:shape"}},
+		{"URL with the token in its query", `{"note":"curl https://x/?k=` + token + `"}`, []string{"value:shape"}},
+		{"no token-shaped word: URL, path and sentence", `{"note":"see https://example.com/guide?lang=en and ~/notes/[draft]: ok"}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 func TestRedactJSON(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
