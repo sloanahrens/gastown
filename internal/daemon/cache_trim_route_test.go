@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 )
@@ -17,9 +16,8 @@ func TestCacheTrimClaimRoutesToTheClaimJob(t *testing.T) {
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
 	})
-	f.d.cacheTrimClaimJobRoute = true
 	ok := f.d.cacheTrimClaim(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
-		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{}, time.Time{})
+		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{})
 	if !ok {
 		t.Fatalf("a claim trimmed through the claim Job = false, want true; log: %s", f.log)
 	}
@@ -43,11 +41,10 @@ func TestCacheTrimClaimRouteClearsTheNoOpItem(t *testing.T) {
 		"get pods -n " + cacheTrimNamespace + " -o json": {stdout: `{"items":[]}`},
 		cacheTrimClaimJobLogVerb:                         {stdout: "removed 0 absent 0 kept 0\n"},
 	})
-	f.d.cacheTrimClaimJobRoute = true
 	key := cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)
 	f.d.cacheTrimNoOp.raise(attention.Item{Key: key})
 	f.d.cacheTrimClaim(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
-		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{}, time.Time{})
+		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{})
 	for _, it := range f.d.cacheTrimNoOp.observed() {
 		if it.Key == key {
 			t.Fatalf("the claim's no-op item %q is still raised after the route ran", key)
