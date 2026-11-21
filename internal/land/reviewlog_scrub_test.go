@@ -59,14 +59,24 @@ func TestReviewLogScrubKeepsWhatIsNoSecret(t *testing.T) {
 }
 
 // TestReviewLogScrubATokenFollowedByTokenBytes: the ASIA shape is whole-value, so a
-// key id followed by '+x', '-x', '.x' or '/x' is cut at the joiner and replaced,
-// and what follows is kept.
+// key id followed by token bytes ('+x', '-x', '.x', '/x', '=x', ':x') is cut at
+// the joiner and replaced with the tail kept; a prefix token takes such a tail
+// with it (more redaction, never less); a sentence's '.' or ':' after any token
+// is not part of it.
 func TestReviewLogScrubATokenFollowedByTokenBytes(t *testing.T) {
 	t.Parallel()
-	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x", ".", ":"} {
+	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x"} {
 		claim := "id " + scrubTestFamilies["asia"] + tail + " end"
 		if got, want := scrubClaim(claim), "id <redacted>"+tail+" end"; got != want {
 			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+		}
+	}
+	for _, family := range []string{"asia", "aws"} {
+		for _, tail := range []string{".", ":"} {
+			claim := "id " + scrubTestFamilies[family] + tail + " end"
+			if got, want := scrubClaim(claim), "id <redacted>"+tail+" end"; got != want {
+				t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+			}
 		}
 	}
 }
