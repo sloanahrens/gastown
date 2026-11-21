@@ -3991,6 +3991,48 @@ func TestJSONLBackupCollectsRatios(t *testing.T) {
 	})
 }
 
+// TestJSONLBackupRatiosResetEachCycle: the ratio list belongs to one cycle, so
+// a cycle starts with it empty and its budget never reads the last cycle's
+// slowdown. The test reads the list at the first export, so the reset must have
+// happened by then (gt-sctvqf).
+func TestJSONLBackupRatiosResetEachCycle(t *testing.T) {
+	t.Parallel()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	townRoot := filepath.Join(root, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", seedSubjectPrefix+"hq=3", map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+
+	d.config = &Config{TownRoot: townRoot}
+	d.notifier = notifyfake.New()
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq"}},
+	}}
+	// Three ratios the previous cycle collected.
+	d.jsonlRatios = []float64{2, 5, 20}
+
+	var atFirstExport []float64
+	d.jsonlExportFn = func(db, repo, dataDir string, scrub bool) (int, error) {
+		atFirstExport = slices.Clone(d.jsonlRatios)
+		return 3, nil
+	}
+
+	d.syncJsonlGitBackup()
+
+	if len(atFirstExport) != 0 {
+		t.Errorf("the cycle's first export saw ratios %v, want none: the last cycle's list must be emptied at the start", atFirstExport)
+	}
+	if len(d.jsonlRatios) != 0 {
+		t.Errorf("ratios after the cycle = %v, want none until this cycle collects one", d.jsonlRatios)
+	}
+}
+
 // TestSyncJsonlGitBackupSupplementalFailureNoFalseSpike: a tick whose events
 // export fails raises the export alert, and the rows it lost do not reach the
 // spike guard as "possible data loss".

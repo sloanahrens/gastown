@@ -693,10 +693,9 @@ type Daemon struct {
 
 	// jsonlRatios holds the slowdown ratios the current backup cycle has
 	// collected, one per (database, table) export that completed and had an
-	// earlier sample to compare against (recordJsonlExportSamples). It grows
-	// until a cycle starts: gt-sctvqf empties it there, and gt-o1euzs's budget
-	// reads it. Until those land nothing empties or reads it. Only the
-	// jsonl_git_backup goroutine touches it.
+	// earlier sample to compare against (recordJsonlExportSamples). A cycle
+	// starts with it empty (gt-sctvqf); the budget reads it once it lands
+	// (gt-o1euzs). Only the jsonl_git_backup goroutine touches it.
 	jsonlRatios []float64
 
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
