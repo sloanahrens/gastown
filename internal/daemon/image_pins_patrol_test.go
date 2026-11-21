@@ -2289,3 +2289,37 @@ func imagePinsPathCountResultIn(t *testing.T, town string, run cmdRunFunc) (int,
 	d.execCmd = run
 	return d.imagePinsPathCount(context.Background())(pinsReadPinURL("devops"), pinsReadDevopsCommit, pinsReadDevopsTip, []string{"cmd/"})
 }
+
+// TestImagePinsReadDoesNotHoldARefusal: a failed read that is a refusal (the bd
+// tip lacks the samples build) is kept at once, not read as the last good state,
+// and it does not use up the hold a transport failure gets (gt-rtxkwt).
+func TestImagePinsReadDoesNotHoldARefusal(t *testing.T) {
+	t.Parallel()
+	good := ImagePinState{Name: "bd", Pin: "p1", Tip: "t1", Behind: 2}
+	refused := ImagePinState{Name: "bd", Pin: "p1", Err: daemonimage.Refusef("the bd tip lacks the samples build")}
+	transport := ImagePinState{Name: "bd", Pin: "p1", Err: errors.New("git exited 128")}
+	for _, tc := range []struct {
+		name string
+		seq  []ImagePinState
+		held []bool // per tick: the read came back as the last good state
+	}{
+		{"a refusal after a good read keeps its error", []ImagePinState{good, refused}, []bool{false, false}},
+		{"a refusal uses none of the hold a transport failure gets", []ImagePinState{good, refused, transport, transport, transport}, []bool{false, false, true, true, false}},
+		{"a transport failure after a good read is held", []ImagePinState{good, transport}, []bool{false, true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{logger: log.New(io.Discard, "", 0)}
+			for i, st := range tc.seq {
+				states := []ImagePinState{st}
+				d.holdFailedImagePins(states)
+				if got := states[0] == good; got != tc.held[i] && i > 0 {
+					t.Errorf("tick %d read as the last good state = %v, want %v (state %+v)", i, got, tc.held[i], states[0])
+				}
+				if i > 0 && st.Err != nil && errors.Is(st.Err, daemonimage.ErrPinRefused) && !errors.Is(states[0].Err, daemonimage.ErrPinRefused) {
+					t.Errorf("tick %d lost the refusal: %+v", i, states[0])
+				}
+			}
+		})
+	}
+}
