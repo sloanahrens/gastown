@@ -182,3 +182,51 @@ func TestCacheTrimViaJobAppliesWithZeroSandboxes(t *testing.T) {
 	}
 	t.Error("no applied document carries --sandboxes 0 for a claim no pod mounts")
 }
+
+// TestCacheTrimSwitchRecordsTheRun pins that a finished claim trim appends one
+// run with outcome ok and the Job's counts.
+func TestCacheTrimSwitchRecordsTheRun(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
+	})
+	if !viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a finished claim Job = false, want true; log: %s", f.log.String())
+	}
+	runs := f.jobRuns(t)
+	if len(runs) != 1 || runs[0].Outcome != cacheTrimRunOK {
+		t.Fatalf("the ledger holds %+v, want one run with outcome %q", runs, cacheTrimRunOK)
+	}
+	for stat, n := range map[string]int64{cacheTrimStatTrimmedFiles: 4, cacheTrimStatAbsentFiles: 1, cacheTrimStatKeptFiles: 2} {
+		if got := runs[0].Stats[stat]; got != n {
+			t.Errorf("the run's %s = %d, want %d", stat, got, n)
+		}
+	}
+}
+
+// TestCacheTrimSwitchRecordsNothingUnlessTrimmed pins that a dry run and a Job
+// whose result cannot be read record no run.
+func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		apply     bool
+		wantOK    bool
+		overrides map[string]cliReply
+	}{
+		{name: "dry run", apply: false, wantOK: true},
+		{name: "unreadable result", apply: true, wantOK: false, overrides: map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", tc.overrides)
+			if got := viaJob(t, f, tc.apply, map[string]string{}); got != tc.wantOK {
+				t.Errorf("viaJob = %v, want %v; log: %s", got, tc.wantOK, f.log.String())
+			}
+			if runs := f.jobRuns(t); len(runs) != 0 {
+				t.Errorf("the ledger holds %+v, want no run", runs)
+			}
+		})
+	}
+}

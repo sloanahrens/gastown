@@ -12,9 +12,13 @@ import "context"
 //
 // The pods are read before the same-namespace refusal, in the order of the old
 // body, and the pod-read block below is copied from the old body of cacheTrimClaim and
-// dies with it (bead gt-4bgici). Nothing calls this yet: bead gt-zc1d92 routes
-// cacheTrimClaim to it.
+// dies with it (bead gt-4bgici). cacheTrimClaim routes to it (bead gt-zc1d92).
+//
+// A finished apply is recorded as one run with the Job's counts. A dry run
+// applies nothing, so it records no run. The no-op item is cleared by the route
+// that calls this, not here.
 func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
+	started := d.diskMaintenanceSeams().now()
 	sandboxes, _, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
 		// A read the cluster refuses names the verb in an alert, and the pass
@@ -34,9 +38,16 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		return true
 	}
 	trimmed[namespace] = claim.ClaimName
-	if _, _, _, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply); err != nil {
+	removed, absent, kept, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply)
+	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: failed: %v", claim.ClaimName, namespace, err)
 		return false
 	}
+	if !apply {
+		return true
+	}
+	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
+		trimmed: &removed, absent: &absent, kept: &kept}
+	d.cacheTrimRecordRun(run)
 	return true
 }
