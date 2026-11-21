@@ -14,11 +14,13 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/metrics"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -1872,13 +1874,21 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 }
 
 // collectSeatFinishedLingering raises one low item per seat whose agent bead
-// says done or stuck, whose last work bead reads closed, and which has stood
-// that way longer than attentionSeatFinishedLinger (gt-klpqb3, gt-qj3fvz): the
-// turn ended and its work landed, yet the walk still lists the seat. Done is
-// the state a COMPLETED exit writes; stuck is the state a DEFERRED or
-// ESCALATED exit writes (done.DoneTurnState), so either ends a turn. The item's
-// summary names the state it judged. A seat whose bead is open is rework with
-// its branch preserved and never raises.
+// says done, whose last work bead reads closed, and which has stood that way
+// longer than attentionSeatFinishedLinger (gt-klpqb3, gt-qj3fvz): the turn
+// ended and its work landed, yet the walk still lists the seat. Done is the
+// state a COMPLETED exit writes; stuck is the state a DEFERRED or ESCALATED
+// exit writes (done.DoneTurnState), so either ends a turn.
+//
+// A seat whose intent record is held (desired park, or frozen) is judged the
+// same way whatever its agent state (gt-s4ywbt): the overrun guard parks a
+// seat by writing that record and leaves the state as the turn left it, so a
+// seat the town parked and never ended is a finished seat nobody ended too.
+// Its last bead closed and its record old enough is the item, and its summary
+// says parked, whatever the state. The intent is read for every seat that
+// reaches the judgment: one small file read per seat per tick. The item's
+// summary otherwise names the state it judged. A seat
+// whose bead is open is rework with its branch preserved and never raises.
 //
 // A seat's failed read is not the collection's: an unreadable agent bead, a
 // work bead that cannot be shown, and a record with no update time each skip
@@ -1910,7 +1920,18 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 			continue
 		}
 		state := beads.AgentState(strings.TrimSpace(rec.State))
-		if state != beads.AgentStateDone && state != beads.AgentStateStuck {
+		// The intent is read for every seat that reaches the judgment: a held
+		// seat is judged whatever its state, and an unreadable record skips this
+		// seat alone, keeping its previous item (gt-s4ywbt).
+		irec, err := intent.Read(s.d.config.TownRoot, supervisor.IntentSeat(supervisor.SeatFor(seat.Rig, constants.RolePolecat, name)))
+		if err != nil {
+			out = keepSeatFinished(s.prev, key, out)
+			continue
+		}
+		judged := string(state)
+		if irec.Held() {
+			judged = "parked"
+		} else if state != beads.AgentStateDone && state != beads.AgentStateStuck {
 			continue
 		}
 		if rec.LastSourceIssue == "" {
@@ -1941,7 +1962,7 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 			Severity: attention.SeverityLow,
 			Rig:      seat.Rig,
 			Bead:     rec.LastSourceIssue,
-			Summary:  fmt.Sprintf("%s/%s %s %s on %s", seat.Rig, name, state, townhealth.Short(done), rec.LastSourceIssue),
+			Summary:  fmt.Sprintf("%s/%s %s %s on %s", seat.Rig, name, judged, townhealth.Short(done), rec.LastSourceIssue),
 		})
 	}
 	return out, nil

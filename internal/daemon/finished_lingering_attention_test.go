@@ -3,11 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
 
@@ -135,6 +140,108 @@ func TestSeatFinishedLingeringRaisesForAStuckSeat(t *testing.T) {
 				t.Errorf("summary = %q, want %q", it.Summary, tc.summary)
 			}
 		})
+	}
+}
+
+// A parked seat whose bead is closed is the same finished seat nobody ended.
+// The overrun guard parks a seat by writing a held intent record (desired park
+// or frozen) and leaves its agent state as the turn left it — the keeper of
+// gt-sof0lm was idle — so the state alone never says done, and the rule judges
+// a held seat whatever its state names. A parked seat whose bead is open is
+// rework, and an idle seat nothing holds is a free seat the walk has no reason
+// to judge: neither raises.
+func TestSeatFinishedLingeringRaisesForAParkedSeat(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		held    bool
+		state   string
+		status  beads.IssueStatus
+		raises  bool
+		summary string
+	}{
+		{
+			name:    "parked with a closed bead raises",
+			held:    true,
+			state:   "idle",
+			status:  beads.StatusClosed,
+			raises:  true,
+			summary: "gastown/capable parked 31m on gt-abc12",
+		},
+		{name: "parked with an open bead does not", held: true, state: "idle", status: beads.StatusOpen},
+		{name: "an unheld idle seat with a closed bead does not", held: false, state: "idle", status: beads.StatusClosed},
+		{name: "a held done seat raises as parked", held: true, state: "done", status: beads.StatusClosed, raises: true, summary: "gastown/capable parked 31m on gt-abc12"},
+		{name: "a held stuck seat raises as parked", held: true, state: "stuck", status: beads.StatusClosed, raises: true, summary: "gastown/capable parked 31m on gt-abc12"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			finishedSeatTown(t, f,
+				finishedSeat{name: "capable", bead: "gt-abc12", status: string(tc.status), state: tc.state, age: 31 * time.Minute},
+			)
+			if tc.held {
+				seat := intent.Seat{Rig: attentionRig, Role: constants.RolePolecat, Name: "capable"}
+				writeJSONFile(t, seat.Path(f.d.config.TownRoot), intent.Record{Desired: intent.DesiredPark})
+			}
+			c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+			items, err := c.collect(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.raises {
+				if len(items) != 0 {
+					t.Fatalf("items = %+v, want none for %s", items, tc.name)
+				}
+				return
+			}
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one for a parked seat whose bead is closed", items)
+			}
+			it := items[0]
+			if it.Key != "seat-finished:gastown/capable" || it.Kind != attention.KindSeatFinishedLingering ||
+				it.Severity != attention.SeverityLow || it.Rig != attentionRig || it.Bead != "gt-abc12" {
+				t.Errorf("item = %+v, want a low seat-finished item on gastown/capable and gt-abc12", it)
+			}
+			if it.Summary != tc.summary {
+				t.Errorf("summary = %q, want %q", it.Summary, tc.summary)
+			}
+		})
+	}
+}
+
+// gt-s4ywbt: an unreadable intent record skips that seat alone.
+func TestSeatFinishedLingeringUnreadableIntentSkipsThatSeat(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, keptSeatAttentionNow)
+	finishedSeatTown(t, f,
+		finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "idle", age: 31 * time.Minute},
+		finishedSeat{name: "nux", bead: "gt-abc13", status: string(beads.StatusClosed), state: "idle", age: 31 * time.Minute},
+	)
+	broken := intent.Seat{Rig: attentionRig, Role: constants.RolePolecat, Name: "capable"}
+	if err := os.MkdirAll(filepath.Dir(broken.Path(f.d.config.TownRoot)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(broken.Path(f.d.config.TownRoot), []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, intent.Seat{Rig: attentionRig, Role: constants.RolePolecat, Name: "nux"}.Path(f.d.config.TownRoot), intent.Record{Desired: intent.DesiredPark})
+	f.src.prev = attention.State{Items: []attention.Item{
+		{Key: "seat-finished:gastown/capable", Kind: attention.KindSeatFinishedLingering, Severity: attention.SeverityLow, Rig: attentionRig, Bead: "gt-abc12"},
+	}}
+	c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+	items, err := c.collect(context.Background())
+	if err != nil {
+		t.Fatalf("collect = %+v, %v; want no error for one seat's unreadable record", items, err)
+	}
+	keys := make([]string, 0, len(items))
+	for _, it := range items {
+		keys = append(keys, it.Key)
+	}
+	if want := []string{"seat-finished:gastown/capable", "seat-finished:gastown/nux"}; !slices.Equal(keys, want) {
+		t.Fatalf("item keys = %v, want the unreadable seat's previous item and the good parked seat's own", keys)
 	}
 }
 
