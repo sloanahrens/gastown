@@ -485,7 +485,12 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 			// as a seat carries its breakdown: the note is not the count, and
 			// the note's commas sit inside its parentheses. Left in, the list
 			// would make a picture above its cap unreadable (gt-5y87fp).
-			if i := strings.IndexByte(part, '('); i >= 0 {
+			// Only that note is stripped: any other parenthetical, or text
+			// after the note, stays in so the count fails to parse and the
+			// total reads as unreadable, not as a full town (gt-n2x6cl).
+			const heldNote = " (held: "
+			if i := strings.Index(part, heldNote); i >= 0 && strings.HasSuffix(part, ")") &&
+				!strings.ContainsAny(part[i+len(heldNote):len(part)-1], "()") {
 				part = strings.TrimSpace(part[:i])
 			}
 			total, ok := parseRosterCount(strings.TrimPrefix(part, "total "))

@@ -362,7 +362,12 @@ func TestDispatchRosterSeats(t *testing.T) {
 		// seat carries its breakdown; the note is not the count, and its commas
 		// sit inside its parentheses (gt-5y87fp).
 		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session, gastown/b:claim)", []townhealth.DispatchSeat{{Live: 9, Cap: 8}}, false},
-		{"claude-sonnet 2/2, total 2/10 (extra)", []townhealth.DispatchSeat{{Live: 2, Cap: 2}}, false},
+		// Only the held-seat note is stripped from a total. Any other
+		// parenthetical, or text after the note, leaves the total unreadable
+		// (gt-n2x6cl).
+		{"claude-sonnet 2/2, total 2/10 (extra)", nil, true},
+		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session) (extra)", nil, true},
+		{"claude-sonnet 9/8, total 10/8 (held: gastown/a:session", nil, true},
 		// The tick appends the pool reconciliation's notes after "; ". The notes
 		// are not seats, and their commas sit outside any parentheses, so they
 		// are cut before the seats are split (gt-nsbeg9).
