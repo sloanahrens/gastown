@@ -330,7 +330,8 @@ type EmptyDirVolumeSource struct{}
 // unless at least one eligible node can hold the run beside the control plane's
 // headroom (gt-gg9hv.38). The guard refuses while another sweep Job of the rig
 // is still active, because every run of the rig reads the one repo claim.
-// Apply then creates the repo claim, fills it through a short-lived root sync pod
+// Apply first snapshots the live bare repository with git, then creates the repo
+// claim, fills it from the snapshot through a short-lived root sync pod
 // (cleared, copied into, chowned to the runner, removed), and only then creates
 // the output claim, the cache claim and the Job. The teardown removes the sync
 // pod, the Job, the reader pod and the output claim, in that order, and never the
@@ -351,6 +352,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	claim := renderClaim(spec, OutClaimName(spec), outClaimStorage)
 	reader := renderReader(spec)
 	sync := renderSyncPod(spec)
+	snapshot := spec.OutDir + "/repo-snapshot.git"
 	return Plan{
 		Job: job,
 		// One kubectl call lists every node and pod: the preflight decides from
@@ -374,6 +376,12 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			Refuse: refuseActiveSweepJobs(spec),
 		}, PriorityGuard(spec, spec.ProtectedNamespaces)},
 		Apply: []Step{
+			// A git snapshot of the live bare repository: a tar of its files breaks
+			// while a landing writes it (sweep 9ef45e87, gt-9bgjx7). Init and
+			// fetch, since a rerun reuses the directory; --update-shallow, since
+			// the repository is shallow.
+			{Argv: []string{"git", "init", "--bare", "--quiet", snapshot}},
+			{Argv: []string{"git", "--git-dir", snapshot, "fetch", "--quiet", "--force", "--no-tags", "--update-shallow", spec.RepoDir, "+refs/*:refs/*"}},
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: repoClaim.JSON()},
@@ -386,9 +394,8 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			{Argv: kubectlArgv(spec, "wait", "--for=condition=Ready", "pod/"+sync.Metadata.Name, "--timeout="+readyTimeout)},
 			// kubectl cp restores the ids the host user's files carried, which
 			// the runner cannot use, so the exec that follows gives the tree to
-			// the runner's user and makes it readable. The copy is retried once:
-			// the bare repository is live, so a landing can change it mid-read.
-			{Argv: kubectlArgv(spec, "cp", spec.RepoDir+"/.", sync.Metadata.Name+":"+RepoMount), Retry: true},
+			// the runner's user and makes it readable. The snapshot is the source.
+			{Argv: kubectlArgv(spec, "cp", snapshot+"/.", sync.Metadata.Name+":"+RepoMount), Retry: true},
 			{Argv: kubectlArgv(spec, "exec", sync.Metadata.Name, "--", "sh", "-c", syncChownCommand())},
 			{Argv: kubectlArgv(spec, "delete", "pod", sync.Metadata.Name, "--ignore-not-found")},
 			// The claim the Job writes its result to goes before the Job, which
