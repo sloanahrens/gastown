@@ -1872,15 +1872,20 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 }
 
 // collectSeatFinishedLingering raises one low item per seat whose agent bead
-// says done, whose last work bead reads closed, and which has stood that way
-// longer than attentionSeatFinishedLinger (gt-klpqb3): the turn ended and its
-// work landed, yet the walk still lists the seat. A seat whose bead is open is
-// rework with its branch preserved and never raises.
+// says done or stuck, whose last work bead reads closed, and which has stood
+// that way longer than attentionSeatFinishedLinger (gt-klpqb3, gt-qj3fvz): the
+// turn ended and its work landed, yet the walk still lists the seat. Done is
+// the state a COMPLETED exit writes; stuck is the state a DEFERRED or
+// ESCALATED exit writes (done.DoneTurnState), so either ends a turn. The item's
+// summary names the state it judged. A seat whose bead is open is rework with
+// its branch preserved and never raises.
 //
 // Every read is the error, never a guess (keptSeatReSlung): the previous
 // tick's items are kept rather than read as finished or as rework. The age is
-// the agent bead's last write, which for a done seat is gt done's write
-// (polecat.AgentBeadUpdatedAt, patrolscan.AgentRecord.UpdatedAt).
+// the agent bead's last write (polecat.AgentBeadUpdatedAt,
+// patrolscan.AgentRecord.UpdatedAt), so a later write to the agent bead of a
+// finished seat restarts the window: the item clears and only comes back once
+// that write is itself older than attentionSeatFinishedLinger.
 func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]attention.Item, error) {
 	seats, err := s.seats()
 	if err != nil {
@@ -1897,7 +1902,8 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 		if err != nil {
 			return nil, fmt.Errorf("%s/%s: %w", seat.Rig, name, err)
 		}
-		if beads.AgentState(strings.TrimSpace(rec.State)) != beads.AgentStateDone {
+		state := beads.AgentState(strings.TrimSpace(rec.State))
+		if state != beads.AgentStateDone && state != beads.AgentStateStuck {
 			continue
 		}
 		if rec.LastSourceIssue == "" {
@@ -1929,7 +1935,7 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 			Severity: attention.SeverityLow,
 			Rig:      seat.Rig,
 			Bead:     rec.LastSourceIssue,
-			Summary:  fmt.Sprintf("%s/%s done %s on %s", seat.Rig, name, townhealth.Short(done), rec.LastSourceIssue),
+			Summary:  fmt.Sprintf("%s/%s %s %s on %s", seat.Rig, name, state, townhealth.Short(done), rec.LastSourceIssue),
 		})
 	}
 	return out, nil
