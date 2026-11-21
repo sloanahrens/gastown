@@ -40,10 +40,11 @@ func goListFailure(dir string, args []string, err error, stderr string) error {
 	return fmt.Errorf("go %s in %s: %w: %s", strings.Join(args, " "), dir, err, strings.TrimSpace(stderr))
 }
 
-// goListRunner is the go runner the builder's guard uses: its own, or the host's.
+// goListRunner is the go runner the builder's guard uses: its own Go seam, with
+// its environment, or the host's go when it has none.
 func (b Builder) goListRunner() goListRunner {
-	if b.goList != nil {
-		return b.goList
+	if b.Go == nil {
+		return execGoList
 	}
-	return execGoList
+	return func(dir string, args ...string) ([]byte, error) { return b.Go(dir, b.Environ, args...) }
 }
