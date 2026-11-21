@@ -79,6 +79,11 @@ import (
 // This is recovery-focused: normal wake is handled by feed subscription (bd activity --follow).
 // The daemon is the safety net for dead sessions, GUPP violations, and orphaned work.
 type Daemon struct {
+	// overrunCursorBead is the first seat the last overrun pass's budget did not reach, whose
+	// bead the next pass starts its reads at; empty starts at the first seat (gt-va12ze). Only
+	// the overrun pass, one at a time, reads and writes it.
+	overrunCursorBead string
+
 	// sweepInClusterFn decides whether the sweep's kubectl steps use the pod's
 	// service account; nil reads this process (sweeprunner.HostInClusterWithoutContext).
 	// sweepInClusterLog logs that decision once (gt-2by0ke).

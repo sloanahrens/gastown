@@ -796,14 +796,25 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	// A seat whose read would start after the pass budget is left unread and counted; it
 	// is not judged this pass.
 	budget := overrunPassBudget(overrunGuardInterval(pc))
-	overrunReadPool(len(seats), poolSize, func(i int) {
+	// The reads start at the seat the last pass's budget stopped before, wrapping around, so
+	// no seat is starved; the judging below stays in seat order.
+	first := 0
+	if d.overrunCursorBead != "" {
+		first = max(slices.IndexFunc(seats, func(seat overrunSeat) bool { return seat.Bead == d.overrunCursorBead }), 0)
+	}
+	overrunReadPool(len(seats), poolSize, func(k int) {
+		i := (first + k) % len(seats)
 		if slots[i].take && s.now().Sub(passStart) < budget {
 			slots[i].reads = overrunReadSeat(s, seats[i])
 			slots[i].read = true
 		}
 	})
-	for _, slot := range slots {
-		if slot.take && !slot.read {
+	d.overrunCursorBead = ""
+	for k := range seats {
+		if i := (first + k) % len(seats); slots[i].take && !slots[i].read {
+			if stats.notReached == 0 {
+				d.overrunCursorBead = seats[i].Bead
+			}
 			stats.notReached++
 		}
 	}
