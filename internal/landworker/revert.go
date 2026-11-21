@@ -60,6 +60,17 @@ type MainState struct {
 	// PostLandDropped records pending entries the bound dropped, so the
 	// attention queue can say verdicts were lost instead of a log line only.
 	PostLandDropped *PostLandDropped `json:"post_land_dropped,omitempty"`
+	// UnknownRuns counts the consecutive post-landing runs that reached no
+	// verdict because a rerun could not run and none that ran failed
+	// (gt-4nz0bj). The attention item in gt-8ceklp reads the streak; this
+	// record only keeps it.
+	UnknownRuns int `json:"unknown_runs,omitempty"`
+	// UnknownCommit is the newest commit an UNKNOWN run could not judge.
+	UnknownCommit string `json:"unknown_commit,omitempty"`
+	// UnknownCause is the first line of the first rerun error behind the
+	// newest UNKNOWN, scrubbed of credential shapes and cut to 160 bytes, so
+	// an attention item can say why main stayed unjudged.
+	UnknownCause string `json:"unknown_cause,omitempty"`
 	// promote.State is the rig's GitHub promotion record (gt-fn9e6.37),
 	// embedded so it lands in this same file: one rig, one main record, read
 	// by the red-main owner, the tier sweep and town health alike
@@ -165,12 +176,38 @@ func (r *RedMain) recordVerdict(pl PostLand, green bool) {
 		return
 	}
 	st.LastRun = pl.Commit
+	// A decided verdict ends any UNKNOWN streak (gt-4nz0bj).
+	st.UnknownRuns = 0
+	st.UnknownCommit = ""
+	st.UnknownCause = ""
 	if green {
 		if st.LastGreen != pl.Commit {
 			st.LastGreenAt = time.Now().UTC()
 		}
 		st.LastGreen = pl.Commit
 	}
+	if err := r.State.Save(st); err != nil {
+		r.logf("saving the main state: %v", err)
+	}
+}
+
+// recordUnknown remembers that a run at pl.Commit reached no verdict: a rerun
+// could not run and none that ran failed (gt-4nz0bj). It counts the streak and
+// keeps the newest commit with the first line of the first rerun error, so an
+// attention item can say why main stayed unjudged. LastRun is left alone: an
+// UNKNOWN is not a verdict.
+func (r *RedMain) recordUnknown(pl PostLand, cause string) {
+	if r.State == nil {
+		return
+	}
+	st, err := r.State.Load()
+	if err != nil {
+		r.logf("reading the main state: %v", err)
+		return
+	}
+	st.UnknownRuns++
+	st.UnknownCommit = pl.Commit
+	st.UnknownCause = cause
 	if err := r.State.Save(st); err != nil {
 		r.logf("saving the main state: %v", err)
 	}
