@@ -13,6 +13,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -1135,11 +1136,6 @@ func TestDiskMaintenanceDryRunAppliesNothing(t *testing.T) {
 	}
 }
 
-// cacheTrimLogListingJSON is a listing of one file over the fixture's cap on its
-// own, so the trim removes exactly it. It is not the exec route's listing, so a
-// test can tell which listing the trim was built from.
-const cacheTrimLogListingJSON = `[{"path":"gocache/ll/x","cache":"build","size":3000,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}]`
-
 // cacheTrimPendingHolderJSON is the pod list of a claim whose one holder is
 // pending: the claim is held, and no pod can answer an exec.
 const cacheTrimPendingHolderJSON = `{"items":[{"metadata":{"name":"sbx-b","namespace":"` + cacheTrimNamespace + `"},` +
@@ -2159,18 +2155,6 @@ func cacheTrimDfReply(t *testing.T, free int64) string {
 		fmt.Sprintf("overlay 1000000 1 %d 1%% /", free/1024)
 }
 
-// cacheTrimAppliedLine is the pass's applied line from the log.
-func cacheTrimAppliedLine(t *testing.T, logged string) string {
-	t.Helper()
-	for _, line := range strings.Split(logged, "\n") {
-		if strings.Contains(line, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" applied") {
-			return line
-		}
-	}
-	t.Fatalf("the log carries no applied line: %s", logged)
-	return ""
-}
-
 // cacheTrimRemovalListSize is the byte size of the removal list a listing plans,
 // encoded as the claim-carried writer encodes it.
 func cacheTrimRemovalListSize(listing string) (int, error) {
@@ -2482,27 +2466,6 @@ func TestCeilingPadFallsBackToTheSearch(t *testing.T) {
 	})
 }
 
-// cacheTrimHelperSubcommands are the first arguments the image's helper
-// dispatches, read from internal/polecatimage/program.go runProgram at
-// c2bf1bad. The daemon must never pass a helper argument outside them: the
-// shipped runProgram sends any other first argument to runMain, a full plugin
-// run -- image refresh and cache work -- so an older image would not answer the
-// daemon's ask (gt-gg9hv.41).
-//
-// node-prune joins the list at c2bf1bad (gt-kpc4tp). Its Job runs the running
-// pair's image, which is the daemon's own commit, and every daemon that carries
-// the node-prune Job descends from c2bf1bad, so that image dispatches it. The
-// Job image must be the running pair, never a pinned older image.
-var cacheTrimHelperSubcommands = []string{
-	"trim-cache",
-	"trim-paths",
-	"trim-list",
-	"trim-list-write",
-	"seed-clone",
-	"seed-cache",
-	"node-prune",
-}
-
 // cacheTrimIsHelperPath reports whether sel names cachevol.HelperPath.
 func cacheTrimIsHelperPath(sel *ast.SelectorExpr) bool {
 	pkg, ok := sel.X.(*ast.Ident)
@@ -2769,18 +2732,6 @@ func TestCacheTrimFitCheckAgreesWithTheWriter(t *testing.T) {
 // so a claim each test fills reads as a figure the reader knows.
 const cacheTrimNoOpCap = 10 << 30
 
-// cacheTrimDfUsedReply is df -Pk's reply for a claim holding used bytes and
-// leaving free: the header df -Pk prints and one data row, Used and Available
-// each in whole KiB.
-func cacheTrimDfUsedReply(t *testing.T, used, free int64) string {
-	t.Helper()
-	if used%1024 != 0 || free%1024 != 0 {
-		t.Fatalf("cacheTrimDfUsedReply(%d, %d): df -Pk reports whole KiB", used, free)
-	}
-	return "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
-		fmt.Sprintf("overlay 1000000 %d %d 1%% /", used/1024, free/1024)
-}
-
 // cacheTrimNoOpListingJSON is a listing the 10GB cap has something to trim: the
 // fixture's three build-cache files are tiny, and a cap they fit under leaves
 // the Job nothing to remove, so no trim is applied to judge.
@@ -2921,15 +2872,19 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 		f.trimDue()
 		f.d.runDiskMaintenance()
 		if got := f.noOpItems(t); len(got) != 0 {
-			t.Errorf("a pass whose pod listing failed yielded %+v, want the item cleared before the read", got)
+			t.Errorf("a pass whose pod listing failed yielded %+v, want the item cleared before the read: the claim Job route measures nothing, so the over-cap alert this would protect is gone from it (gt-uoarca's disk reading replaces it and reads no pods)", got)
 		}
 		if logged := f.log.String(); !strings.Contains(logged, "the pods that mount it could not be read") {
 			t.Errorf("the failed pass does not say why it trimmed nothing: %s", logged)
 		}
 	})
 
-	// A call that fails cannot tell whether the claim is there, so the record is
-	// left as it was: the item survives the claim listing's failure.
+	// The old route measured the claim and left its record alone when a read
+	// failed, because an unreadable claim is not thereby under the cap. The claim
+	// route clears the item BEFORE its pod read, by design (gt-zc1d92): it
+	// measures nothing, so nothing here raises the over-cap item a failed read
+	// would have to protect. Only the claim listing's failure, which happens
+	// before the route, leaves the item in place.
 	for _, tc := range []struct {
 		name    string
 		prefix  string
@@ -2948,6 +2903,48 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 			}
 			if logged := f.log.String(); !strings.Contains(logged, tc.survive) {
 				t.Errorf("the failed pass does not say %q: %s", tc.survive, logged)
+			}
+		})
+	}
+}
+
+// TestCacheTrimNoOpNeverFailsATrim keeps, on the OLD route (the route field
+// false, the fixture's default), the two cases of the claim's measurement alarm
+// that the claim Job route has no equivalent for yet: a failed apply and a Job
+// that did not finish raise no no-op item. The other cases of the test it
+// replaces are not kept: the du-unreadable rows pinned cacheTrimMeasure, whose
+// only caller is the old body of cacheTrimClaim; a dry run raising nothing is
+// TestDiskMaintenanceDryRunAppliesNothing on the claim route; a refused listing
+// went with the lister Job. The park (gt-iwn0nx) owns the failed-apply and
+// unfinished-Job outcomes on the claim route; gt-wnet9c deletes this test with
+// the old body.
+func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		match string
+		reply cliReply
+	}{
+		// A failed apply raises nothing: the trim never ran, so the claim was not
+		// left over the cap by it.
+		{"a failed apply", "apply ", cliReply{stderr: "Error from server: the server does not allow this", code: 1}},
+		// A Job still running when the wait ends is not measured: the claim holds
+		// what the Job is removing, so a reading then would raise a false item.
+		{"a Job that did not finish", "wait ", cliReply{stderr: "error: timed out waiting for the condition", code: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
+			inner := f.cli.answer
+			f.cli.answer = func(c cliCall) cliReply {
+				if strings.HasPrefix(cacheTrimVerb(c.args), tc.match) {
+					return tc.reply
+				}
+				return inner(c)
+			}
+			f.d.runDiskMaintenance()
+			if got := f.noOpItems(t); len(got) != 0 {
+				t.Errorf("%s yielded %+v, want no item", tc.name, got)
 			}
 		})
 	}
@@ -3193,10 +3190,6 @@ func (f *cacheTrimFixture) moveClockOnPodRead(step time.Duration) {
 		return run(cmd)
 	}
 }
-
-// cacheTrimTrimLogsVerb is the pass's read of the removal Job's result line,
-// the log of its trim container.
-const cacheTrimTrimLogsVerb = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c trim"
 
 // TestCacheTrimRunWithoutATownRoot drives a run whose ledger cannot be built at
 // all: the trim still reaches its verdict and logs the one line saying the run
