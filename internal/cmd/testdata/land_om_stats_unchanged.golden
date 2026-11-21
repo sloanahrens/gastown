@@ -1,0 +1,21 @@
+om landings, all days
+Day          Approvals  Rejections  Rate   Mean findings  Mean score
+2026-10-14*  1          1           50.0%  3.0            0.55
+2026-10-16   1          1           50.0%  2.0            0.40
+2026-10-17   1          0           0.0%   0.0            0.00
+
+* filled from the daemon log: no review record for the day
+
+Rig      Approvals  Rejections  Rate
+gastown  1          1           50.0%
+longeye  1          0           0.0%
+
+Agent   Approvals  Rejections  Rate
+opus    1          1           50.0%
+sonnet  1          0           0.0%
+
+Rounds per bead: 1 took one, 1 two, 0 three or more
+
+Beads rejected most
+Bead  Rig      Rejections
+gt-a  gastown  1
