@@ -700,7 +700,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			rigName, filepath.Join(rigPath, "settings", "config.json")))
 		return nil, fmt.Errorf("rig %s has no merge_queue.forgejo block: Forgejo is the only landing path, so the landing worker for this rig is not running until the block is added", rigName)
 	}
-	candidate, merger, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, gateLogDir, cfg)
+	candidate, merger, lister, err := d.newForgejoLanding(rigName, landingRemote, forgejoCfg, repo, landings, gateLogDir, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -805,7 +805,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		isAncestor = d.postLandIsAncestor
 	}
 	postLand := d.newPostLandRunner(rigName, rigPath, newPostLandWiring(
-		merger.Client, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
+		merger.Client, lister, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
 		isAncestor))
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
@@ -942,7 +942,8 @@ const forgejoVerifyWindow = 20
 // only landing path (gt-fn9e6.32).
 //
 // One client serves both halves — the same landing bot pushes the candidate,
-// posts om's verdict and merges the PR (design, "Bots and tokens").
+// posts om's verdict and merges the PR (design, "Bots and tokens") — and it is
+// returned as the run list the post-land orphan check reads.
 //
 // remote is the rig's configured landing remote (gt-fn9e6.9): the candidate
 // has to reach the Forgejo instance whose CI gates it, so an assumed origin
@@ -951,14 +952,14 @@ const forgejoVerifyWindow = 20
 // rejected gate job logs are kept, and the caller resolves it from the town
 // root it already holds: a gate that read the town root itself would keep no
 // log wherever that field is unset.
-func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, gateLogDir string, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, error) {
+func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoConfig, repo string, landings *land.LandingsFile, gateLogDir string, cfg *LandingWorkerConfig) (*land.CandidateGate, *land.ForgejoMerger, postLandRunLister, error) {
 	owner, repoName, err := land.RepoFromRemoteURL(fj.RemoteURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	apiBase, err := land.APIBaseFromRemoteURL(fj.RemoteURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// The landing bot's login is the only account the merge trusts to have
 	// posted om / review, so a rig that does not name it has a creator check
@@ -966,11 +967,11 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 	// landing (gt-fn9e6.7).
 	botLogin := fj.BotLogin(config.ForgejoRoleLanding)
 	if botLogin == "" {
-		return nil, nil, fmt.Errorf("rig %s lands through Forgejo CI but merge_queue.forgejo.bots names no %s login; the merge's creator check cannot trust a review status without it", rigName, config.ForgejoRoleLanding)
+		return nil, nil, nil, fmt.Errorf("rig %s lands through Forgejo CI but merge_queue.forgejo.bots names no %s login; the merge's creator check cannot trust a review status without it", rigName, config.ForgejoRoleLanding)
 	}
 	tokenDir, err := cfg.ForgejoTokenDir()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// The token is read from the role's file, never from config: the key names
 	// the role, and the file is what holds the secret (design, "Bots and
@@ -979,7 +980,7 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 		forgejo.WithBaseURL(apiBase),
 		forgejo.WithTokenFile(filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleLanding+".env")))
 	if err != nil {
-		return nil, nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
+		return nil, nil, nil, fmt.Errorf("rig %s lands through Forgejo CI and its %s bot token is unusable: %w", rigName, config.ForgejoRoleLanding, err)
 	}
 	out := landingLogWriter{logf: d.logger.Printf}
 	gate := &land.CandidateGate{
@@ -994,7 +995,7 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
 	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, BotLogin: botLogin, Out: out}
-	return gate, merger, nil
+	return gate, merger, client, nil
 }
 
 // controlClusterExec is the kubectl seam the gate run recorder reads the forgejo
@@ -1323,9 +1324,12 @@ func rigPostLandStatusContextErr(rigPath string) (string, error) {
 // collaborators newRigLandingWorker builds. newPostLandRunner takes them, so
 // the one place the runner is wired is the place a test drives.
 type postLandWiring struct {
-	Status  func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error)
-	State   landworker.MainStateStore
-	Timeout time.Duration
+	Status func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error)
+	// RunEnded reads whether the runs behind a pending commit's check all
+	// ended without posting a verdict; nil leaves the orphan check off.
+	RunEnded func(ctx context.Context, pl landworker.PostLand) (landworker.RunEnd, error)
+	State    landworker.MainStateStore
+	Timeout  time.Duration
 	// IsAncestor orders status verdicts: an older commit's verdict moves nothing
 	// once a newer one stands.
 	IsAncestor func(ancestor, descendant string) (bool, error)
@@ -1342,18 +1346,74 @@ type postLandStatusClient interface {
 	CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error)
 }
 
+// postLandRunLister is the Forgejo read the RunEnded closure makes.
+type postLandRunLister interface {
+	ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error)
+}
+
+// postLandWorkflowID is the workflow whose runs carry a landing's post-land
+// verdict. Forgejo matches a run filter's workflow on the workflow's path in
+// the repository, so its base name answers.
+const postLandWorkflowID = "post-land.yml"
+
+// postLandRunCancelled is the status Forgejo reports for a cancelled run.
+const postLandRunCancelled = "cancelled" //nolint:misspell // the run status Forgejo reports
+
+// postLandRunIsEnded reports whether a run status means the run can no longer
+// post the verdict its check waits for: a cancelled, failed or errored run
+// never reports one.
+func postLandRunIsEnded(status string) bool {
+	return status == postLandRunCancelled ||
+		status == string(forgejo.StateFailure) || status == string(forgejo.StateError)
+}
+
+// postLandRunEnd folds the runs that tested a landed commit into the answer the
+// orphan check reads: the newest run's id and status, and ended only when at
+// least one run is listed and every one of them ended. A run that can still
+// post a verdict, and no run at all, is not an end.
+func postLandRunEnd(runs []forgejo.ActionRun) landworker.RunEnd {
+	if len(runs) == 0 {
+		return landworker.RunEnd{}
+	}
+	newest := runs[0]
+	ended := true
+	for _, run := range runs {
+		if run.ID > newest.ID {
+			newest = run
+		}
+		if !postLandRunIsEnded(run.Status) {
+			ended = false
+		}
+	}
+	return landworker.RunEnd{Run: newest.ID, Status: newest.Status, Ended: ended}
+}
+
 // newPostLandWiring is the one place newRigLandingWorker's collaborators become
 // the post-land runner's wiring, so a test drives the same assembly production
 // does. The status it reads is the LANDED commit's (a landing's verdict is never
-// the verdict of whatever main is by then). Every parameter is positional, so a
-// piece left out of the call does not compile.
-func newPostLandWiring(client postLandStatusClient, owner, repo string, state landworker.MainStateStore, timeout time.Duration,
+// the verdict of whatever main is by then), and so are the runs whose end the
+// orphan check reads. Every parameter is positional, so a piece left out of the
+// call does not compile.
+func newPostLandWiring(client postLandStatusClient, runs postLandRunLister, owner, repo string, state landworker.MainStateStore, timeout time.Duration,
 	run func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult,
 	beads interface{ AddComment(id, text string) error }, redMain *landworker.RedMain,
 	isAncestor func(ancestor, descendant string) (bool, error)) postLandWiring {
 	return postLandWiring{
 		Status: func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error) {
 			return client.CombinedStatus(ctx, owner, repo, pl.Commit)
+		},
+		RunEnded: func(ctx context.Context, pl landworker.PostLand) (landworker.RunEnd, error) {
+			list, err := runs.ListRuns(ctx, owner, repo, forgejo.RunFilter{HeadSHA: pl.Commit, WorkflowID: postLandWorkflowID})
+			if err != nil {
+				return landworker.RunEnd{}, err
+			}
+			if list == nil {
+				// A client that answers no list on no error did not answer:
+				// refusing it keeps a broken read from passing for the
+				// commit Forgejo holds no runs for.
+				return landworker.RunEnd{}, fmt.Errorf("listing the runs of %s: the client returned no list", pl.Commit)
+			}
+			return postLandRunEnd(list.Runs), nil
 		},
 		State:      state,
 		Timeout:    timeout,
@@ -1381,6 +1441,7 @@ func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *l
 			return name
 		},
 		Status:     w.Status,
+		RunEnded:   w.RunEnded,
 		State:      w.State,
 		IsAncestor: w.IsAncestor,
 		Clock:      d.clk(),
