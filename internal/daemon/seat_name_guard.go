@@ -152,7 +152,7 @@ func (g *SeatNameGuard) Items(now time.Time) []attention.Item {
 			Key:      seatSandboxStaleKeyPrefix + f.Sandbox,
 			Kind:     attention.KindSeatSandboxStale,
 			Severity: attention.SeverityHigh,
-			Summary: fmt.Sprintf("seat sandbox %s has been in phase %s for %s; the spec dispatcher slings to no seat name whose sandbox is stale, so the name stays unusable until the sandbox is deleted (%s)",
+			Summary: fmt.Sprintf("seat sandbox %s has been in phase %s for %s; the spec dispatcher slings to no seat name whose sandbox is stale, so the name stays unusable until the sandbox is deleted: check its seat with gt polecat check-recovery <rig>/<seat> and docs/sandbox-rescue-runbook.md, and delete it only when check-recovery reads clean (%s)",
 				f.Sandbox, f.Phase, parkedAge(age), seatSandboxDeleteCommand(f.Sandbox)),
 		})
 	}
