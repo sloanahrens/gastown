@@ -192,7 +192,7 @@ func TestRenderDeploymentGolden(t *testing.T) {
 		t.Fatalf("the pod has %d containers and %d init containers, want the runner and the engine as a native sidecar", len(pod.Containers), len(pod.InitContainers))
 	}
 	runner := containerNamed(t, pod, runnerContainerName)
-	dind := containerNamed(t, pod, dindContainerName)
+	dind := containerNamed(t, pod, DindContainerName)
 	if want := "data.forgejo.org/forgejo/runner:13.2.0"; runner.Image != want {
 		t.Errorf("runner image = %q, want %q", runner.Image, want)
 	}
@@ -219,7 +219,7 @@ func TestDindIsANativeSidecar(t *testing.T) {
 	t.Parallel()
 	pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
 
-	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != dindContainerName {
+	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != DindContainerName {
 		t.Fatalf("init containers = %+v, want the engine alone", pod.InitContainers)
 	}
 	dind := pod.InitContainers[0]
@@ -250,7 +250,7 @@ func TestDindIsANativeSidecar(t *testing.T) {
 // privilege and mounts are the ones the previous golden recorded.
 func TestDindKeepsItsRenderedContainer(t *testing.T) {
 	t.Parallel()
-	dind := containerNamed(t, mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec, dindContainerName)
+	dind := containerNamed(t, mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec, DindContainerName)
 
 	if want := "data.forgejo.org/oci/docker:dind"; dind.Image != want {
 		t.Errorf("engine image = %q, want %q", dind.Image, want)
@@ -292,7 +292,7 @@ func TestGoldenDeploymentIsASidecarPod(t *testing.T) {
 		t.Fatalf("decoding %s: %v", path, err)
 	}
 	pod := golden.Spec.Template.Spec
-	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != dindContainerName {
+	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != DindContainerName {
 		t.Fatalf("%s has init containers %+v, want the engine alone", path, pod.InitContainers)
 	}
 	if got := pod.InitContainers[0]; got.RestartPolicy != "Always" || got.StartupProbe == nil {
@@ -552,7 +552,7 @@ func TestRenderConfigMapGolden(t *testing.T) {
 func TestDindArgsInsecureRegistry(t *testing.T) {
 	t.Parallel()
 	pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
-	dind := containerNamed(t, pod, dindContainerName)
+	dind := containerNamed(t, pod, DindContainerName)
 	if want := "--insecure-registry=forgejo:3000"; !slices.Contains(dind.Args, want) {
 		t.Errorf("the engine args = %q, want them to carry %q", dind.Args, want)
 	}
@@ -657,7 +657,7 @@ func TestRunnerConfigCPUQuota(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("runner.envs CI_CPU_QUOTA = %q, want %q", got, tt.want)
 			}
-			limit := containerNamed(t, m.Deployment.Spec.Template.Spec, dindContainerName).Resources.Limits.CPU
+			limit := containerNamed(t, m.Deployment.Spec.Template.Spec, DindContainerName).Resources.Limits.CPU
 			if want := strconv.Itoa(roundedUpCPUs(t, limit)); got != want {
 				t.Errorf("runner.envs CI_CPU_QUOTA = %q, want the dind limit %q rounded up: %q", got, limit, want)
 			}
@@ -778,7 +778,7 @@ func TestRenderClaimsAndLimits(t *testing.T) {
 			want ResourceList
 		}{
 			{"runner", containerNamed(t, pod, runnerContainerName).Resources.Requests, ResourceList{CPU: DefaultRunnerCPU, Memory: DefaultRunnerMemory}},
-			{"engine", containerNamed(t, pod, dindContainerName).Resources.Requests, ResourceList{CPU: DefaultDindCPU, Memory: DefaultDindMemory}},
+			{"engine", containerNamed(t, pod, DindContainerName).Resources.Requests, ResourceList{CPU: DefaultDindCPU, Memory: DefaultDindMemory}},
 		} {
 			if tc.got != tc.want {
 				t.Errorf("the %s container requests %+v, want %+v", tc.name, tc.got, tc.want)
@@ -814,7 +814,7 @@ func TestRenderClaimsAndLimits(t *testing.T) {
 		if got, want := containerNamed(t, pod, runnerContainerName).Resources.Requests, (ResourceList{CPU: "2", Memory: "3Gi"}); got != want {
 			t.Errorf("the runner container requests %+v, want %+v", got, want)
 		}
-		if got, want := containerNamed(t, pod, dindContainerName).Resources.Requests, (ResourceList{CPU: "8", Memory: "16Gi"}); got != want {
+		if got, want := containerNamed(t, pod, DindContainerName).Resources.Requests, (ResourceList{CPU: "8", Memory: "16Gi"}); got != want {
 			t.Errorf("the engine container requests %+v, want %+v", got, want)
 		}
 	})
@@ -993,7 +993,7 @@ func TestImagesArePinned(t *testing.T) {
 		t.Errorf("DindImage = %q, want the registry's dind tag", DindImage)
 	}
 	pod := mustBuild(t, goldenValues()).Deployment.Spec.Template.Spec
-	if got := containerNamed(t, pod, dindContainerName).Image; got != DindImage {
+	if got := containerNamed(t, pod, DindContainerName).Image; got != DindImage {
 		t.Errorf("engine image = %q, want %q", got, DindImage)
 	}
 }
@@ -1197,7 +1197,7 @@ func TestDindCPUShare(t *testing.T) {
 			values := goldenValues()
 			values.DindResources = Share{CPU: tc.cpu}
 			pod := mustBuild(t, values).Deployment.Spec.Template.Spec
-			dind := containerNamed(t, pod, dindContainerName)
+			dind := containerNamed(t, pod, DindContainerName)
 			if got := dind.Resources.Limits.CPU; got != tc.want {
 				t.Errorf("the engine CPU limit = %q, want %q", got, tc.want)
 			}
