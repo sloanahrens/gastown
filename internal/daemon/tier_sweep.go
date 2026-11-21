@@ -3346,7 +3346,6 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 
 // tierSweepMirrorFS is the filesystem the sweep mirror's marker and rebuild touch.
 type tierSweepMirrorFS struct {
-	exists    func(path string) bool
 	lstat     func(path string) (fs.FileInfo, error)
 	removeAll func(path string) error
 	mkdirAll  func(path string) error
@@ -3359,7 +3358,6 @@ func (d *Daemon) mirrorFS() *tierSweepMirrorFS {
 		return d.tierSweepSeams.mirrorFS
 	}
 	return &tierSweepMirrorFS{
-		exists:    func(path string) bool { _, err := os.Lstat(path); return err == nil },
 		lstat:     os.Lstat,
 		removeAll: os.RemoveAll,
 		mkdirAll:  func(path string) error { return os.MkdirAll(path, 0o700) },
@@ -3415,7 +3413,20 @@ func (d *Daemon) tierSweepMirrorPrepare(spec sweeprunner.Spec) (string, error) {
 		}
 	}
 	marker := mirror + ".updating"
-	if fsys.exists(marker) {
+	// The marker's type and its Lstat error are read before anything is removed:
+	// an Lstat that fails for any reason but absence must not read as "no marker"
+	// (a mirror an interrupted update broke would skip its rebuild), and a marker
+	// that is not a regular file (a directory) would fail its own removal after the
+	// mirror was already gone, wedging every later launch (gt-art4s6).
+	info, err := fsys.lstat(marker)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return "", fmt.Errorf("reading the marker %s: %w; nothing was removed", marker, err)
+	case !info.Mode().IsRegular():
+		return "", fmt.Errorf("the marker %s is not a regular file (%s); remove it by hand; the mirror was left as it is", marker, info.Mode().Type())
+	}
+	if err == nil {
 		d.logger.Printf("tier_sweep: %s: the last update of the mirror did not finish; removing %s and cloning it again", spec.Rig, mirror)
 		if err := fsys.removeAll(mirror); err != nil {
 			return "", fmt.Errorf("removing the unfinished mirror %s: %w", mirror, err)
