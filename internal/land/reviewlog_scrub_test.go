@@ -580,6 +580,93 @@ func TestReviewLogScrubRewriteKeepsEachLinesTerminator(t *testing.T) {
 	}
 }
 
+// TestReviewLogScrubRewriteNothingFlaggedWritesNothing: an apply over a log with
+// no token-shaped word never calls the replace seam and leaves the file as it
+// is (bytes, inode, modification time), whatever its line endings.
+func TestReviewLogScrubRewriteNothingFlaggedWritesNothing(t *testing.T) {
+	t.Parallel()
+	clean := scrubTestLogBytes(t, scrubTestThreeRows("no token here")[1:]...)
+	rows := map[string][]byte{
+		"lf":       clean,
+		"crlf":     bytes.ReplaceAll(clean, []byte("\n"), []byte("\r\n")),
+		"no final": bytes.TrimSuffix(clean, []byte("\n")),
+	}
+	for name, before := range rows {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			logf, path := writeScrubTestLog(t, before)
+			logf.replace = func(string, []byte, os.FileMode) error {
+				t.Error("the replace seam was called for a log with nothing flagged")
+				return nil
+			}
+			infoBefore, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stating the test log: %v", err)
+			}
+			res, err := logf.Scrub(true)
+			if err != nil {
+				t.Fatalf("Scrub(true): %v", err)
+			}
+			if res.RowsChanged != 0 || res.Words != 0 {
+				t.Errorf("reported RowsChanged=%d Words=%d, want zero", res.RowsChanged, res.Words)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading the log: %v", err)
+			}
+			infoAfter, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stating the log after: %v", err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Errorf("the log is %q, want %q", after, before)
+			}
+			if !os.SameFile(infoBefore, infoAfter) || !infoBefore.ModTime().Equal(infoAfter.ModTime()) {
+				t.Error("the log's inode or modification time changed")
+			}
+		})
+	}
+}
+
+// TestReviewLogScrubRewriteTokenAtEveryOffsetAroundTheLineLimit: an oversize
+// line is scanned in one pass, so a token is replaced at every offset from just
+// under the limit to just past it, for four families.
+func TestReviewLogScrubRewriteTokenAtEveryOffsetAroundTheLineLimit(t *testing.T) {
+	t.Parallel()
+	const limit = 100
+	families := map[string]string{
+		"sk":   "s" + "k-" + "abcdefghijklmnop1234",
+		"ghp":  "gh" + "p_" + strings.Repeat("a", 20),
+		"akia": scrubTestFamilies["aws"],
+		"xoxb": scrubTestFamilies["slack"],
+	}
+	for family, token := range families {
+		t.Run(family, func(t *testing.T) {
+			t.Parallel()
+			for pad := limit - 2; pad <= limit+len(token)+2; pad++ {
+				line := strings.Repeat("x", pad) + " " + token + " tail\n"
+				logf, path := writeScrubTestLog(t, []byte(line))
+				logf.lineLimit = limit
+				res, err := logf.Scrub(true)
+				if err != nil {
+					t.Fatalf("pad %d: Scrub(true): %v", pad, err)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatalf("pad %d: reading the log: %v", pad, err)
+				}
+				if res.RowsChanged != 1 || res.Oversize != 1 {
+					t.Errorf("pad %d: reported RowsChanged=%d Oversize=%d, want 1 and 1", pad, res.RowsChanged, res.Oversize)
+				}
+				assertNoScrubToken(t, string(after), token)
+				if want := strings.Repeat("x", pad) + " " + redactedWord + " tail\n"; string(after) != want {
+					t.Errorf("pad %d: the line is %q, want %q", pad, after, want)
+				}
+			}
+		})
+	}
+}
+
 // TestReviewLogScrubRewriteReplaceFailureKeepsTheLog: a failing replace returns
 // its error, which names no value, and leaves the original log.
 func TestReviewLogScrubRewriteReplaceFailureKeepsTheLog(t *testing.T) {
