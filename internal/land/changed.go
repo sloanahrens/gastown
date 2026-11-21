@@ -346,6 +346,17 @@ var treeWideGuards = []treeWideGuard{
 		judges:  func(rel string) bool { return rel == "deploy/daemon/secrets.yaml" },
 		removal: true,
 	},
+	{
+		// TestTierResultCarriesTheDaemonShape parses tierSweepTierResult out of the
+		// daemon's tier_sweep.go and holds sweeprunner.TierResult to its fields, so a
+		// field added there fails a package the change does not touch: gt-jie24r
+		// passed presubmit twice and failed the gate. Deleting the file fails the
+		// test too (gt-vfdp6c).
+		pkg:     "internal/sweeprunner",
+		tests:   []string{"TestTierResultCarriesTheDaemonShape"},
+		judges:  func(rel string) bool { return rel == "internal/daemon/tier_sweep.go" },
+		removal: true,
+	},
 	// The always entries: guards that scan the whole tree, so no path
 	// predicate can name their input, and a new file is exactly the change
 	// that breaks them. Every non-empty diff runs them.

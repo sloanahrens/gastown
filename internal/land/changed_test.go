@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -210,6 +211,7 @@ var guardTriggers = []struct {
 	{"internal/beads", "M\x00internal/plugin/dispatch.go\x00"},
 	{"internal/beads/beadsfake", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/beadsql", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/sweeprunner", "M\x00internal/daemon/tier_sweep.go\x00"},
 	{"internal/config", "M\x00cmd/gt/main.go\x00"},
 	// A file added anywhere under internal/ is input to both of the config
 	// package's tree scans, so it must select the entry (gt-re8efj).
@@ -393,6 +395,40 @@ func TestGuardSelectsAVMStartChangeRunsTheImageRegistryGuard(t *testing.T) {
 		t.Fatalf("%s tests = %v; want TestImageRegistryBaseNotPrependedInSource among them", s.Package, s.Tests)
 	}
 	t.Fatalf("GuardSelects = %v; want internal/config among them", got)
+}
+
+// TestGuardSelectsATierSweepChangeRunsTheSweeprunnerShapeGuard: the daemon's
+// tier_sweep.go is the file TestTierResultCarriesTheDaemonShape parses, so a
+// change to it, or its deletion, selects the sweeprunner test; another daemon
+// file does not (gt-vfdp6c).
+func TestGuardSelectsATierSweepChangeRunsTheSweeprunnerShapeGuard(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	for _, tc := range []struct {
+		name, diff string
+		want       bool
+	}{
+		{"a change to tier_sweep.go", "M\x00internal/daemon/tier_sweep.go\x00", true},
+		{"another daemon file", "M\x00internal/daemon/patrol.go\x00", false},
+		{"a deletion of tier_sweep.go", "D\x00internal/daemon/tier_sweep.go\x00", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := GuardSelects(tc.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects: %v", err)
+			}
+			selected := false
+			for _, s := range got {
+				if s.Package == "internal/sweeprunner" && slices.Contains(s.Tests, "TestTierResultCarriesTheDaemonShape") {
+					selected = true
+				}
+			}
+			if selected != tc.want {
+				t.Errorf("GuardSelects(%q) = %v; sweeprunner shape guard selected = %v, want %v", tc.diff, got, selected, tc.want)
+			}
+		})
+	}
 }
 
 // TestGuardSelectsADocsOnlyChangeSkipsTheImageRegistryGuard: a docs-only diff
