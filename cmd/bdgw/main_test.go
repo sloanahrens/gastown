@@ -18,7 +18,11 @@ func TestMain(m *testing.M) {
 	if filepath.Base(os.Args[0]) == "bd-standin" {
 		args := append(os.Args[1:], "", "") // pads: a missing argument refuses, not panics
 		if status, err := strconv.Atoi(args[1]); err == nil {
-			fmt.Fprintln(os.Stderr, args[0])
+			line := args[0]
+			if len(os.Args) > 3 {
+				line = os.Args[3] // an optional third argument is the stderr line
+			}
+			fmt.Fprintln(os.Stderr, line)
 			syscall.Exit(status)
 		}
 		syscall.Exit(exitUsage)

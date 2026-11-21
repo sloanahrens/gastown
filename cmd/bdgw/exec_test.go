@@ -51,12 +51,11 @@ func TestBdgwStandIn(t *testing.T) {
 // frameRunner answers a call with the frames it was given, as the executor
 // would after bd ran.
 type frameRunner struct {
-	req        bdgateway.Request
-	frames     []bdgateway.Frame
-	err        error
-	tailErr    error
-	calls      int
-	stderrHead string
+	req     bdgateway.Request
+	frames  []bdgateway.Frame
+	err     error
+	tailErr error
+	calls   int
 }
 
 func (r *frameRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.Reader, frames io.Writer) error {
@@ -64,11 +63,6 @@ func (r *frameRunner) Exec(ctx context.Context, req bdgateway.Request, stdin io.
 	r.req = req
 	if r.err != nil {
 		return r.err
-	}
-	if r.stderrHead != "" {
-		if sink, ok := frames.(bdgateway.StderrHeadSink); ok {
-			sink.SetStderrHead(r.stderrHead)
-		}
 	}
 	for _, f := range r.frames {
 		if err := bdgateway.WriteFrame(frames, f); err != nil {
@@ -166,23 +160,32 @@ func TestBdgwExec(t *testing.T) {
 	}
 }
 
-// TestBdgwExecStderrHeadIsLogged: bdgw exec's line carries bd's first stderr
-// line for a call bd failed, as the HTTP handler's line does (gt-hbhi39).
-func TestBdgwExecStderrHeadIsLogged(t *testing.T) {
+// TestBdgwExecStderrHeadThroughThePump: the real Executor runs the stand-in as
+// bd, its stderr pump keeps the first line, and bdgw exec's call log line
+// carries it with the exit status, as the HTTP handler's line does (gt-hbhi39).
+// The stand-in exits with its second argument and writes its third to stderr.
+const stderrToken = "stderr-head-7f3"
+
+func TestBdgwExecStderrHeadThroughThePump(t *testing.T) {
 	t.Parallel()
+	//testpolicy:allow no-subprocess — the Executor's contract is spawning bd, and the stand-in is the fake bd: hermetic, no network and no repository
 	policy, log, ec := newExecFixture(t)
-	const bdError = "Error resolving gt-x: no issue found"
-	runner := &frameRunner{
-		stderrHead: bdError + "\n",
-		frames: []bdgateway.Frame{
-			{Kind: bdgateway.FrameStderr, Payload: []byte(bdError + "\n")},
-			{Kind: bdgateway.FrameExit, Payload: []byte("1")},
-		},
+	workspace := t.TempDir()
+	if err := os.Mkdir(filepath.Join(workspace, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	status := execCall(context.Background(), policy, log, runner, ec, []string{"show", "gt-x"},
-		map[string]string{}, nil, io.Discard, io.Discard)
+	runner, err := bdgateway.New(bdgateway.Options{
+		Binary: bdStandIn(t), WorkspaceRoot: workspace, Home: t.TempDir(), Path: "/usr/bin",
+		DoltHost: "dolt.invalid", DoltPort: "1",
+	})
+	if err != nil {
+		t.Fatalf("bdgateway.New: %v", err)
+	}
+	var stderr bytes.Buffer
+	status := execCall(context.Background(), policy, log, runner, ec, []string{"show", "1", stderrToken},
+		map[string]string{}, nil, io.Discard, &stderr)
 	if status != 1 {
-		t.Errorf("status = %d, want bd's 1", status)
+		t.Errorf("status = %d, want the stand-in's 1; stderr %q", status, stderr.String())
 	}
 	if err := log.Close(); err != nil {
 		t.Fatalf("log.Close: %v", err)
@@ -192,8 +195,8 @@ func TestBdgwExecStderrHeadIsLogged(t *testing.T) {
 		t.Fatalf("read call log: %v", err)
 	}
 	line := strings.TrimSpace(string(data))
-	if !strings.Contains(line, `"exit_code":1`) || !strings.Contains(line, `"error":"`+bdError+`"`) {
-		t.Errorf("call log line = %s, want exit 1 and error naming bd's first stderr line", line)
+	if !strings.Contains(line, `"exit_code":1`) || !strings.Contains(line, `"error":"`+stderrToken+`"`) {
+		t.Errorf("call log line = %s, want exit 1 and error naming the stand-in's stderr line", line)
 	}
 }
 
