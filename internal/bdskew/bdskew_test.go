@@ -80,6 +80,19 @@ func TestPreRollGuardMaxMigration(t *testing.T) {
 			names:  []string{"0001_initial.up.sql"},
 			want:   1,
 		},
+		{
+			reason: "the real bd listing beside README.md, nondeterminism-allowlist.txt and the ignored directory",
+			names: []string{
+				"0066_a.up.sql",
+				"0066_a.down.sql",
+				"0067_b.up.sql",
+				"0067_b.down.sql",
+				"README.md",
+				"ignored",
+				"nondeterminism-allowlist.txt",
+			},
+			want: 67,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.reason, func(t *testing.T) {
@@ -106,13 +119,13 @@ func TestPreRollGuardMaxMigrationRefuses(t *testing.T) {
 	}{
 		{reason: "a nil listing", want: ErrEmptyListing},
 		{reason: "a listing with no entries", names: []string{}, want: ErrEmptyListing},
-		{reason: "a name with no number", names: []string{"notes.txt"}, want: ErrUnnumbered},
-		{reason: "a name with no underscore after its number", names: []string{"0067"}, want: ErrUnnumbered},
+		{reason: "a .sql name with no number", names: []string{"notes.sql"}, want: ErrUnnumbered},
+		{reason: "a .sql name with no underscore after its number", names: []string{"0067.sql"}, want: ErrUnnumbered},
 		{reason: "a name whose number is empty", names: []string{"_0067_create_samples.up.sql"}, want: ErrUnnumbered},
 		{reason: "a name whose number holds a letter", names: []string{"00a7_create_samples.up.sql"}, want: ErrUnnumbered},
 		{reason: "a name whose number is signed", names: []string{"-0067_create_samples.up.sql"}, want: ErrUnnumbered},
 		{reason: "a number too large for an int", names: []string{"99999999999999999999_create_samples.up.sql"}, want: ErrNumberOutOfRange},
-		{reason: "an unnumbered name after a numbered one", names: []string{"0067_create_samples.up.sql", "notes.txt"}, want: ErrUnnumbered},
+		{reason: "an unnumbered .sql name after a numbered one", names: []string{"0067_create_samples.up.sql", "notes.sql"}, want: ErrUnnumbered},
 	}
 	for _, tt := range tests {
 		t.Run(tt.reason, func(t *testing.T) {
@@ -128,29 +141,38 @@ func TestPreRollGuardMaxMigrationRefuses(t *testing.T) {
 	}
 }
 
-// TestMaxMigrationSkipsTheKnownNonMigrationNames: the three files bd keeps in
-// its migrations directory that are not migrations are skipped by name, and
-// the migration beside them still sets the level.
-func TestMaxMigrationSkipsTheKnownNonMigrationNames(t *testing.T) {
+// TestMaxMigrationSkipsEntriesThatAreNotSQL: an entry whose name does not end in
+// .sql is not a migration, so it is skipped and the migration beside it still
+// sets the level. CHANGELOG.md is a name no list knows, and it reads 67.
+func TestMaxMigrationSkipsEntriesThatAreNotSQL(t *testing.T) {
 	t.Parallel()
-	names := []string{
-		"README.md", "ignored", "nondeterminism-allowlist.txt",
-		"0067_create_samples.up.sql",
-	}
-	got, err := MaxMigration(names)
-	if err != nil {
-		t.Fatalf("MaxMigration(%v) returned error %v", names, err)
-	}
-	if got != 67 {
-		t.Errorf("MaxMigration(%v) = %d, want 67", names, got)
+	for _, name := range []string{
+		"README.md",
+		"ignored",
+		"nondeterminism-allowlist.txt",
+		"CHANGELOG.md",
+		"README.md.bak",
+		"readme.md",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			names := []string{"0067_create_samples.up.sql", name}
+			got, err := MaxMigration(names)
+			if err != nil {
+				t.Fatalf("MaxMigration(%v) returned error %v", names, err)
+			}
+			if got != 67 {
+				t.Errorf("MaxMigration(%v) = %d, want 67", names, got)
+			}
+		})
 	}
 }
 
-// TestMaxMigrationListingOfOnlyKnownNamesIsEmpty: a directory holding only the
-// non-migration files has no level, and is refused rather than read as zero.
-func TestMaxMigrationListingOfOnlyKnownNamesIsEmpty(t *testing.T) {
+// TestMaxMigrationListingWithNoSQLEntryIsEmpty: a directory holding no .sql
+// entry has no level, and is refused rather than read as zero.
+func TestMaxMigrationListingWithNoSQLEntryIsEmpty(t *testing.T) {
 	t.Parallel()
-	names := []string{"README.md", "ignored", "nondeterminism-allowlist.txt"}
+	names := []string{"README.md", "ignored", "nondeterminism-allowlist.txt", "CHANGELOG.md"}
 	got, err := MaxMigration(names)
 	if !errors.Is(err, ErrEmptyListing) {
 		t.Fatalf("MaxMigration(%v) error = %v, want %v", names, err, ErrEmptyListing)
@@ -160,16 +182,16 @@ func TestMaxMigrationListingOfOnlyKnownNamesIsEmpty(t *testing.T) {
 	}
 }
 
-// TestMaxMigrationStillRefusesOtherUnnumberedNames: the skip is the whole name,
-// case included, so a near miss is still refused.
-func TestMaxMigrationStillRefusesOtherUnnumberedNames(t *testing.T) {
+// TestMaxMigrationRefusesUnnumberedSQLNames: a .sql entry that does not open
+// with a migration number is refused, however close its name is to a migration.
+func TestMaxMigrationRefusesUnnumberedSQLNames(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{
-		"notes.txt",
-		"README.md.bak",
-		"readme.md",
+		"notes.sql",
 		"ignored.sql",
-		"nondeterminism-allowlist.txt.old",
+		"readme.sql",
+		"README.md.sql",
+		"0067.sql",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -212,8 +234,8 @@ func TestPreRollGuardLevelAtCommit(t *testing.T) {
 			wantErr: ErrEmptyListing,
 		},
 		{
-			reason:  "an unnumbered entry is an error",
-			names:   []string{"notes.txt"},
+			reason:  "an unnumbered .sql entry is an error",
+			names:   []string{"notes.sql"},
 			wantErr: ErrUnnumbered,
 		},
 	}

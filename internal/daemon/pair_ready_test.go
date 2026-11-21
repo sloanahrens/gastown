@@ -563,8 +563,8 @@ func pairTreeRun(t *testing.T, names []string) func(context.Context, string, ...
 
 // TestPairReadyReadsTheLevelOfARealBdTree: the level of the real bd tree, read
 // through the pass, is 67 with bd's three non-migration files beside it, so the
-// pair at a database of 67 raises the ready item and no unreadable item. Removing
-// README.md from the skip list in bdskew turns it red, since the file then has no
+// pair at a database of 67 raises the ready item and no unreadable item. Making
+// bdskew read README.md as a migration turns it red, since the file then has no
 // leading number. Changing the pass to ignore the level turns it red too.
 func TestPairReadyReadsTheLevelOfARealBdTree(t *testing.T) {
 	t.Parallel()
@@ -580,13 +580,13 @@ func TestPairReadyReadsTheLevelOfARealBdTree(t *testing.T) {
 	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
 }
 
-// TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnlistedName: the same bd tree
-// with one more unnumbered name is not a known non-migration file, so the pass
-// raises the unreadable item naming that file and no ready item.
-func TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnlistedName(t *testing.T) {
+// TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnnumberedSQLName: the same bd
+// tree with one more .sql name that has no migration number is refused, so the
+// pass raises the unreadable item naming that file and no ready item.
+func TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnnumberedSQLName(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
-	names := append(pairBdTree(67), "notes.txt")
+	names := append(pairBdTree(67), "notes.sql")
 	fx.check.skew = pairReadySkewReadsAt(fx.town, pairTreeRun(t, names), func(context.Context) (pairReadySchemaStore, error) {
 		return fakeSkewStore{level: 67}, nil
 	})
@@ -594,9 +594,9 @@ func TestPairReadyReadsTheLevelOfARealBdTreeRefusesAnUnlistedName(t *testing.T) 
 	fx.run(pairT0)
 
 	items := fx.check.observed()
-	require.Len(t, items, 1, "a bd tree with an unlisted name raised %v; want the unreadable item only", pairSkewItemKinds(items))
+	require.Len(t, items, 1, "a bd tree with an unnumbered .sql name raised %v; want the unreadable item only", pairSkewItemKinds(items))
 	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
-	assert.Contains(t, items[0].Summary, "notes.txt", "the item does not name the entry it refused")
+	assert.Contains(t, items[0].Summary, "notes.sql", "the item does not name the entry it refused")
 }
 
 // pairReadyTownDaemon is a daemon over town whose git seam records every
