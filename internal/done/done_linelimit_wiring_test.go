@@ -135,17 +135,19 @@ func TestLineLimitRefusalPushesASandboxSeatsBranch(t *testing.T) {
 
 // TestLineLimitRefusalNamesThePushedSha: a sandbox polecat past twice the
 // declared limit ends its refusal with the short sha its push left on origin and
-// the branch; a failed push adds no such line, so the refusal ends with the split
-// line (gt-s0kxmj).
+// the branch; a failed push, and a bead that already landed (its push does not
+// run), add no such line, so the refusal ends with the split line (gt-s0kxmj).
 func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
 		pushErr    error
+		landed     bool
 		pushedLine bool
 	}{
 		{name: "push_succeeds", pushedLine: true},
 		{name: "push_fails", pushErr: errors.New("connection reset")},
+		{name: "bead_already_landed", landed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -153,6 +155,9 @@ func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 			h := pastLimitHarness(t, backendOpenShell, true, false)
 			if tt.pushErr != nil {
 				h.repo.pushErrs = []error{tt.pushErr, tt.pushErr}
+			}
+			if tt.landed {
+				h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusHooked), Notes: alreadyLandedNotes})
 			}
 			sub := doneSubmission{sourceIssue: &beads.Issue{Description: "Change: at most 70 added lines in 2 files."}}
 
