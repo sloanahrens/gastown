@@ -1078,3 +1078,33 @@ func TestHubPolecatWorkingTime(t *testing.T) {
 		})
 	}
 }
+
+// TestHubPolecatPhase: a seat with a session and no activity since its sling is
+// starting, one with activity after the sling is working, and a seat with
+// neither a session nor activity has no phase (gt-1887cf, part 2).
+func TestHubPolecatPhase(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	slung := now.Add(-30 * time.Minute)
+	before, after := slung.Add(-time.Minute), slung.Add(time.Minute)
+	cases := []struct {
+		name    string
+		session bool
+		active  *time.Time
+		want    string
+	}{
+		{name: "session and no activity", session: true, want: PhaseStarting},
+		{name: "session and activity before the sling", session: true, active: &before, want: PhaseStarting},
+		{name: "session and activity at the instant of the sling", session: true, active: &slung, want: PhaseStarting},
+		{name: "session and activity after the sling", session: true, active: &after, want: PhaseWorking},
+		{name: "no session and no activity", want: ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			seat := Polecat{Rig: "gastown", Name: "agate", Bead: "gt-abc", State: StateWorking, Hooked: &slung, HasSession: c.session, LastActive: c.active}
+			if got := hubSeat(t, now, seat, nil)[0].Phase; got != c.want {
+				t.Errorf("Phase = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
