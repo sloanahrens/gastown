@@ -33,10 +33,12 @@ func cacheTrimFailedKey(namespace, claim string) string {
 // it to the queue; its own key keeps it out of the no-op sweeps. Nothing calls
 // it yet (bead 9/10 is the caller).
 func (d *Daemon) cacheTrimPark(namespace, claim string, cause error) {
+	d.cacheTrimParksMu.Lock()
 	if d.cacheTrimParks == nil {
 		d.cacheTrimParks = map[string]bool{}
 	}
 	d.cacheTrimParks[cacheTrimParkKey(namespace, claim)] = true
+	d.cacheTrimParksMu.Unlock()
 	line := cacheTrimCauseLine(cause)
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      cacheTrimFailedKey(namespace, claim),
@@ -51,6 +53,8 @@ func (d *Daemon) cacheTrimPark(namespace, claim string, cause error) {
 // cacheTrimParked reports whether the claim's trim is parked. Nothing calls it
 // yet (bead 9/10 is the caller, at the top of cacheTrimClaim).
 func (d *Daemon) cacheTrimParked(namespace, claim string) bool {
+	d.cacheTrimParksMu.Lock()
+	defer d.cacheTrimParksMu.Unlock()
 	return d.cacheTrimParks[cacheTrimParkKey(namespace, claim)]
 }
 

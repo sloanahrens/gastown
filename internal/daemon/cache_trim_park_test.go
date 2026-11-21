@@ -2,15 +2,20 @@ package daemon
 
 import (
 	"errors"
+	"io"
 	"log"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 // TestCacheTrimParkRaisesAndParks is the bead's box: a failed trim's claim is
 // parked, the store holds one item under the failure key with the cause's first
-// line and PARKED, the log names the failed stage, and cacheTrimParked reports
-// the failed claim parked and another claim, and another namespace, not.
+// line and PARKED and the failure's kind and severity, the log names the failed
+// stage, and cacheTrimParked reports the failed claim parked and another claim,
+// and another namespace, not.
 func TestCacheTrimParkRaisesAndParks(t *testing.T) {
 	t.Parallel()
 	var logs strings.Builder
@@ -38,6 +43,12 @@ func TestCacheTrimParkRaisesAndParks(t *testing.T) {
 		t.Fatalf("the store holds %d items, want the failure: %+v", len(items), items)
 	}
 	it := items[0]
+	if it.Kind != attention.KindCacheTrimNoOp {
+		t.Errorf("item kind = %q, want %q: the kind is what serves it to the queue", it.Kind, attention.KindCacheTrimNoOp)
+	}
+	if it.Severity != attention.SeverityMedium {
+		t.Errorf("item severity = %q, want %q: the severity decides whether the operator is woken", it.Severity, attention.SeverityMedium)
+	}
 	if want := "cache-trim-failed:" + cacheTrimNamespace + "/" + cacheTrimClaimName; it.Key != want {
 		t.Errorf("item key = %q, want %q", it.Key, want)
 	}
@@ -77,4 +88,33 @@ func TestCacheTrimParkWithoutACauseStillParks(t *testing.T) {
 	if !strings.Contains(items[0].Summary, "the failure named no cause") {
 		t.Errorf("item summary %q does not name the missing cause", items[0].Summary)
 	}
+}
+
+// TestCacheTrimParkRaces pins that the park map is safe to write and read from
+// two goroutines: eight goroutines park and read the same claim, which -race
+// reports as a data race when the lock around the map is removed.
+func TestCacheTrimParkRaces(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	cause := errors.New("applying the trim Job gt-shared-cache-trim: the server refused")
+	const goroutines = 8
+	const rounds = 16
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range rounds {
+				d.cacheTrimPark(cacheTrimNamespace, cacheTrimClaimName, cause)
+				if !d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+					t.Error("the claim is not parked after cacheTrimPark")
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
 }
