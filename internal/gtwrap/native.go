@@ -23,8 +23,16 @@ const (
 // Mac's ~/gt/daemon. maint plan reads the Mac's Docker contexts, worktrees,
 // backups and disk, and maint apply changes them, so it runs in the caller's
 // directory with the caller's whole environment and acts on the caller's town
-// (gt-aea89k).
-var gtHostCommands = []string{"town forward plist", "maint plan", "maint apply"}
+// (gt-aea89k). town runner roll and town runner resize change the gate runner on
+// the control cluster from the Mac, whose kubeconfig reaches it, rather than from
+// the daemon pod, which would use the pod's own kubeconfig (gt-3xtvjx).
+var gtHostCommands = []string{
+	"town forward plist",
+	"maint plan",
+	"maint apply",
+	"town runner roll",
+	"town runner resize",
+}
 
 // Native is a tool the config runs on the Mac instead of in the daemon image. The
 // Mac has what the image does not: the tool's own credentials, the caller's

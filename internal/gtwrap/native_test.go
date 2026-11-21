@@ -69,6 +69,13 @@ func TestNativeCoversGtHostCommands(t *testing.T) {
 		{name: "maint plan baks", args: []string{"maint", "plan", "baks"}, want: true},
 		{name: "the maint group alone", args: []string{"maint"}, want: false},
 		{name: "an unknown maint leaf", args: []string{"maint", "report"}, want: false},
+		{name: "town runner roll", args: []string{"town", "runner", "roll"}, want: true},
+		{name: "town runner roll with flags", args: []string{"town", "runner", "roll", "--dry-run", "--landing-wait", "5m"}, want: true},
+		{name: "town runner resize", args: []string{"town", "runner", "resize", "--dind-cpu", "12"}, want: true},
+		{name: "town runner resize with millicores", args: []string{"town", "runner", "resize", "--dind-cpu", "6000m"}, want: true},
+		{name: "the town runner group alone", args: []string{"town", "runner"}, want: false},
+		{name: "an unlisted town runner leaf", args: []string{"town", "runner", "logs"}, want: false},
+		{name: "an unlisted town subcommand", args: []string{"town", "status"}, want: false},
 		{name: "no arguments", args: nil, want: false},
 	}
 	for _, tt := range tests {
