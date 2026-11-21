@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -113,6 +114,12 @@ var secretValuePrefixes = []string{
 	"sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "glpat-",
 	"xoxb-", "xoxp-", "xapp-", "AKIA", "AIza", "ya29.",
 }
+
+// SecretValuePrefixes returns the token prefixes LooksLikeSecret accepts a value
+// by, so a caller that must find a token inside text can tell the prefixes
+// apart (a short one such as "sk-" occurs inside ordinary words) without a copy
+// of the list that drifts from it.
+func SecretValuePrefixes() []string { return slices.Clone(secretValuePrefixes) }
 
 // temporaryKeyIDShape is an AWS temporary access key ID: ASIA and then only upper-case
 // letters and digits. The dashes in region names such as ASIA-PACIFIC-EAST-1 keep them out.

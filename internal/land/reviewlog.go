@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -168,7 +169,7 @@ func reviewFindingTexts(findings []Finding) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, ReviewFindingText{
-			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(f.Detail), Class: f.Class,
+			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(scrubClaim(f.Detail)), Class: f.Class,
 		})
 	}
 	return out
@@ -185,7 +186,189 @@ func boundedClaim(s string) string {
 	for cut > 0 && !utf8.RuneStart(s[cut]) {
 		cut--
 	}
+	// A cut inside a <redacted> marker would leave part of one: back up to its start.
+	if i := strings.LastIndex(s[:cut], "<"); i >= 0 && s[i:cut] != redactedWord && strings.HasPrefix(redactedWord, s[i:cut]) {
+		cut = i
+	}
 	return s[:cut] + truncatedClaim
+}
+
+const redactedWord = "<redacted>"
+
+// scrubClaim replaces every token-shaped run in a finding's claim with
+// redactedWord and keeps every other byte: om's claim quotes the reviewed code,
+// and a credential in it must not reach the review log (gt-uxbi5y). It decides
+// no boundaries by word: at each letter or digit not glued to one before it (or
+// starting a distinctive prefix, glued or not), it takes the run of token bytes that starts there and asks the rule, which is
+// anchored at the start of what it is given, so a token in backticks, brackets,
+// quotes, a URL query or after any name or joiner starts at its own offset. A
+// token with an ambiguous short prefix (`sk-`) glued to a letter before it is not
+// found, unless the letter ends an escape (`\n`, `%3D`): that is the one residual,
+// kept because the rule's prefixes (`sk-`) occur inside ordinary words.
+// The scrub cannot consult config.IsSecretKey (it needs a key name), so only
+// token shape counts. It runs before boundedClaim, which never cuts a marker.
+// It reads at most scrubInputBound bytes and tries a run of at most maxTokenRun,
+// so its cost is bounded whatever the claim: O(scrubInputBound x maxTokenRun) for
+// the tries, plus one forward pass past the cap for the tail of a longer token.
+func scrubClaim(s string) string {
+	s = cutAtRune(s, scrubInputBound)
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if end := tokenEnd(s, i); end > i {
+			b.WriteString(redactedWord)
+			i = end
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// scrubInputBound is how much of a claim the scrub reads. A recorded claim is cut
+// to maxRecordedClaimBytes after the scrub and a marker (10 bytes) stands for a
+// token of at least 16, so the scrubbed text is never under 5/8 of what was read:
+// the first maxRecordedClaimBytes of the output come from the first 8/5 of that
+// in the input, and twice the bound reads everything that is recorded. The bound
+// fixes the cost: the scrub is O(scrubInputBound x maxTokenRun) however long om's
+// detail is.
+const scrubInputBound = 2 * maxRecordedClaimBytes
+
+// maxTokenRun is the longest run of token bytes tried as one token; no real
+// token is longer, and a longer run is tried in pieces from each later offset.
+const maxTokenRun = 512
+
+// cutAtRune is s cut to at most n bytes on a rune boundary.
+func cutAtRune(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// tokenEnd is the end of the token-shaped run of token bytes that starts at i,
+// or i when none does. A trailing '.' or ':' is the sentence's, not the token's.
+// Only a run that starts with one of the rule's prefixes can be accepted (the
+// rule is called with no key name), so every other offset is refused by one
+// prefix test and the run is built only where a prefix starts.
+func tokenEnd(s string, i int) int {
+	if !isAlnum(s[i]) || i > 0 && isAlnum(s[i-1]) && !escapedBefore(s, i) && !startsDistinctivePrefix(s[i:]) {
+		return i
+	}
+	if !startsKnownPrefix(s[i:]) {
+		return i
+	}
+	end := i
+	for end < len(s) && end-i < maxTokenRun && tokenByte(s[end]) {
+		end++
+	}
+	capped := end < len(s) && tokenByte(s[end])
+	run := strings.TrimRight(s[i:end], ".:")
+	n := acceptedLen(run)
+	if n == 0 {
+		return i
+	}
+	if capped && n == len(run) {
+		// A token longer than the cap: the rest of the contiguous run is its
+		// tail, taken in one forward pass.
+		for end < len(s) && tokenByte(s[end]) {
+			end++
+		}
+		return i + len(strings.TrimRight(s[i:end], ".:"))
+	}
+	return i + n
+}
+
+// acceptedLen is the length of the longest start of run the rule accepts that
+// this scan tries, or 0. The rule refuses a value that contains "://", so a token
+// followed by a URL is tried cut before the scheme: at the joiner before the
+// scheme word, then at the "://". The ASIA shape takes the whole value, so a key
+// id followed by more token bytes (`ASIA...+x`, `ASIA...z9`) is tried cut where
+// its upper-case and digit bytes end. Two cuts at most: the cost stays linear.
+func acceptedLen(run string) int {
+	if config.LooksLikeSecret("", run) {
+		return len(run)
+	}
+	if at := strings.Index(run, "://"); at > 0 {
+		if p := strings.LastIndexAny(run[:at], tokenJoiners); p > 0 && config.LooksLikeSecret("", run[:p]) {
+			return p
+		}
+		if config.LooksLikeSecret("", run[:at]) {
+			return at
+		}
+	}
+	if strings.HasPrefix(run, "ASIA") {
+		if n := upperDigitPrefix(run); n < len(run) && config.LooksLikeSecret("", run[:n]) {
+			return n
+		}
+	}
+	return 0
+}
+
+func tokenByte(c byte) bool { return isAlnum(c) || strings.IndexByte(tokenJoiners, c) >= 0 }
+
+// tokenJoiners are the non-alphanumeric bytes a token run holds.
+const tokenJoiners = "-_.+/=:"
+
+func upperDigitPrefix(s string) int {
+	n := 0
+	for n < len(s) && (s[n] >= '0' && s[n] <= '9' || s[n] >= 'A' && s[n] <= 'Z') {
+		n++
+	}
+	return n
+}
+
+// escapedBefore reports whether the letter before i belongs to an escape that
+// ends at i: a backslash escape (`\n`, `\t`) or a percent-encoded byte (`%3D`),
+// the two ways code and URLs put a token right behind a letter.
+func escapedBefore(s string, i int) bool {
+	if i >= 2 && s[i-2] == '\\' && strings.IndexByte("ntrbfv", s[i-1]) >= 0 {
+		return true
+	}
+	return i >= 3 && s[i-3] == '%' && isHex(s[i-2]) && isHex(s[i-1])
+}
+
+func isHex(c byte) bool { return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' }
+
+// distinctivePrefixLen is the length from which a token prefix is taken not to
+// occur inside ordinary words: AKIA, AIza, xoxb-, ghp_ do not, sk- and sk_ do
+// (risk-assessment-framework, ask_user_for_input).
+const distinctivePrefixLen = 4
+
+// knownPrefixes are all the rule's prefixes and the ASIA of its temporary-key
+// shape: the only starts a token the rule accepts can have; distinctivePrefixes
+// are those of them long enough to be found at any offset, glued or not.
+var knownPrefixes, distinctivePrefixes = func() (all, distinctive []string) {
+	all = []string{"ASIA"}
+	distinctive = []string{"ASIA"}
+	for _, p := range config.SecretValuePrefixes() {
+		all = append(all, p)
+		if len(p) >= distinctivePrefixLen {
+			distinctive = append(distinctive, p)
+		}
+	}
+	return all, distinctive
+}()
+
+func startsKnownPrefix(s string) bool { return startsWithAny(s, knownPrefixes) }
+
+func startsDistinctivePrefix(s string) bool { return startsWithAny(s, distinctivePrefixes) }
+
+func startsWithAny(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAlnum(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
 // FollowupQueue is a queue line's payload: the findings one landing's

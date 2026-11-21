@@ -268,3 +268,23 @@ func TestSpawnEnvShellWordEscapesLiteralText(t *testing.T) {
 		t.Errorf("word = %s\nwant   %s", got, want)
 	}
 }
+
+// TestSecretValuePrefixesAreTheRulesOwn: every prefix the accessor returns marks a
+// value LooksLikeSecret accepts, and the slice is a copy the caller cannot change
+// the rule through.
+func TestSecretValuePrefixesAreTheRulesOwn(t *testing.T) {
+	t.Parallel()
+	prefixes := SecretValuePrefixes()
+	if len(prefixes) == 0 {
+		t.Fatal("SecretValuePrefixes is empty")
+	}
+	for _, p := range prefixes {
+		if !LooksLikeSecret("", p+strings.Repeat("q", 16)) {
+			t.Errorf("the rule does not accept a value that starts with its prefix %q", p)
+		}
+	}
+	prefixes[0] = "zz"
+	if SecretValuePrefixes()[0] == "zz" {
+		t.Error("SecretValuePrefixes returned the rule's own slice")
+	}
+}
