@@ -168,6 +168,11 @@ const (
 	// RuleHoldStale is a bead held for the overseer that nobody has released:
 	// the hold must say why, and a stale one must be seen (gt-j669b4.19).
 	RuleHoldStale = "hold.stale"
+	// RuleStoryPoints is the weekly step changing the story-point weights by
+	// itself: an adoption, a revert, or a second refusal in a row, each a
+	// record that the estimate the town dispatches by moved or stopped moving
+	// (gt-g2dgme).
+	RuleStoryPoints = "story_points.weights"
 	// RuleOverrunBlind is the overrun guard's blind read: it could not read
 	// beads for three ticks in a row, so no seat was judged against the
 	// overrun bound (gt-uor98u).
@@ -350,6 +355,11 @@ var ruleFlags = map[string]RuleFlags{
 	// A held bead nobody has released is the overseer's to release or act on:
 	// the overseer is woken, so a hold cannot sit forgotten (gt-j669b4.19).
 	RuleHoldStale: flagsWake,
+	// An adoption or a revert is the weekly step doing its job, and a second
+	// refusal is a reading for the overseer's next look: the queue records
+	// both rather than waking anyone, the way a drift reading is queued
+	// (gt-my0o23, gt-g2dgme).
+	RuleStoryPoints: flagsInfo,
 	// A guard that cannot read beads is a measurement that stopped, not a
 	// failure: the item records that no seat was judged, and it waits for the
 	// overseer's next look rather than waking anyone (gt-uor98u).
@@ -520,6 +530,7 @@ var kindRules = map[Kind]string{
 	KindSandboxSeatKept:               RuleSandboxSeatKept,
 	KindUpdateRolledBack:              RuleUpdateRolledBack,
 	KindHoldStale:                     RuleHoldStale,
+	KindStoryPoints:                   RuleStoryPoints,
 	KindOverrunBlind:                  RuleOverrunBlind,
 	KindJobOverdue:                    RuleJobOverdue,
 	KindMetricsExtract:                RuleMetricsExtract,

@@ -157,6 +157,10 @@ var ruleOwners = map[string]Owner{
 	// A stale hold is the overseer's to release: it reads the hold's reason and
 	// releases the label or closes the bead (gt-j669b4.19).
 	RuleHoldStale: OwnerOverseer,
+	// A story-point weights change is the town's own estimator to watch: the
+	// overseer reads why a weight moved by itself, or why adoption keeps
+	// refusing, before a person is woken (gt-g2dgme).
+	RuleStoryPoints: OwnerOverseer,
 	// A guard that cannot read beads is the town's own dependency to look at:
 	// the overseer finds what bd could not answer before a person is woken
 	// (gt-uor98u).

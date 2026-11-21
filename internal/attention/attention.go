@@ -174,6 +174,11 @@ const (
 	// held) and nobody has released it: over one day with every dependency
 	// closed, or over three days whatever its dependencies (gt-j669b4.19).
 	KindHoldStale Kind = "hold-stale"
+	// KindStoryPoints: the weekly step adopted or reverted the story-point
+	// weights, or refused to adopt twice in a row, so the estimate the town
+	// dispatches by changed, or stopped changing, with no person in the loop
+	// (gt-g2dgme).
+	KindStoryPoints Kind = "storypoints-weights"
 	// KindOverrunBlind: the overrun guard could not read beads for three ticks
 	// in a row, so whether any seat passed its overrun bound is unknown
 	// (gt-uor98u).
@@ -245,7 +250,7 @@ func Kinds() []Kind {
 		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
-		KindHoldStale, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
+		KindHoldStale, KindStoryPoints, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow, KindSeatFinishedLingering,
