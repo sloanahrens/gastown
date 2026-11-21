@@ -63,6 +63,11 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		return true
 	}
 	trimmed[namespace] = claim.ClaimName
+	// An earlier Job that completed after its wait is recorded before the stale
+	// Job is deleted and the new one applied, so its result is not lost.
+	if apply && !d.cacheTrimLateResult(ctx, kubeconfig, claim, namespace, started) {
+		return false
+	}
 	removed, absent, kept, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply)
 	if err != nil {
 		// A Job still running at the wait's end is a verdict, not a failure: its
@@ -86,5 +91,35 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
 	d.logger.Printf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
+	return true
+}
+
+// cacheTrimLateResult records the run of the claim's earlier trim Job when that
+// Job completed after its wait ended: its result line is read and recorded the
+// way a finished trim's is. A Job still running is left to cacheTrimApply, which
+// refuses the apply as pending, and so is a Job that did not complete. It reports
+// false when the Job's state or result line cannot be read: the run is recorded
+// as failed and the claim parked, like any other failure.
+func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, started time.Time) bool {
+	jobName := cacheTrimJobName(claim.ClaimName)
+	fail := func(err error) bool {
+		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+		d.cacheTrimPark(namespace, claim.ClaimName, err)
+		return false
+	}
+	_, running, completed, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
+	if err != nil {
+		return fail(err)
+	}
+	if running[jobName] || !completed[jobName] {
+		return true
+	}
+	removed, absent, kept, err := d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName)
+	if err != nil {
+		return fail(err)
+	}
+	d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
+		trimmed: &removed, absent: &absent, kept: &kept})
+	d.logger.Printf("disk_maintenance: cache trim %s in %s: the earlier trim Job %s completed after its wait; recorded: removed %d absent %d kept %d", claim.ClaimName, namespace, jobName, removed, absent, kept)
 	return true
 }
