@@ -296,9 +296,12 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 			t.Errorf("cluster call %d ran on a context already ended (%v); want the claim's own live budget", calls, err)
 		}
 		deadline, ok := ctx.Deadline()
-		left := time.Until(deadline)
-		if !ok || left < cacheTrimClaimWaitTimeout-5*time.Minute || left > cacheTrimClaimWaitTimeout+cacheTrimClaimSlack {
-			t.Errorf("cluster call %d had a deadline %v away (set %v); want the wait plus the slack, %v at most", calls, left, ok, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
+		if !ok {
+			t.Errorf("cluster call %d had no deadline; want the claim's own, the wait plus the slack", calls)
+			return
+		}
+		if left := time.Until(deadline); left < cacheTrimClaimWaitTimeout-5*time.Minute || left > cacheTrimClaimWaitTimeout+cacheTrimClaimSlack {
+			t.Errorf("cluster call %d had a deadline %v away; want the wait plus the slack, %v at most", calls, left, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
 		}
 	}
 	f.onClaimJobWait(endPass)
