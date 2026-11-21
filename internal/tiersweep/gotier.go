@@ -73,7 +73,9 @@ type Runner struct {
 	Timeout string
 	// SkipList is TIER_SWEEP_SKIP, read by SkipFor.
 	SkipList string
-	// Label, when not empty, is appended as " [label]" to each package's name.
+	// Label, when not empty, is appended as "~label" to each package's name, so
+	// two runs of one package keep their own log and resume key. The skip list
+	// names the labelled entry; a record for the unlabelled name is not matched.
 	Label string
 	// Env is the environment each package's command runs in. Nil inherits the
 	// process's environment.
@@ -220,7 +222,7 @@ func (r *Runner) tasks(tier, dir string, pkgs []string, passed map[string]bool) 
 	for _, pkg := range pkgs {
 		t := &task{pkg: pkg, name: packageName(dir, pkg)}
 		if r.Label != "" {
-			t.name += " [" + r.Label + "]"
+			t.name += "~" + r.Label
 		}
 		switch whole, pattern := SkipFor(r.SkipList, tier, t.name); {
 		case strings.HasPrefix(pkg, "-"):

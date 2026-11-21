@@ -112,7 +112,7 @@ func TestTierTimingsComeFromTheSweepClock(t *testing.T) {
 		{
 			name: "race", tier: TierRace,
 			want: []Timing{{
-				Tier: TierRace, Package: "./internal/cmd [integration walk]", WallMS: 45000, Exit: 0,
+				Tier: TierRace, Package: "./internal/cmd~integration-walk", WallMS: 45000, Exit: 0,
 				Start: "2026-10-30T00:00:00Z",
 			}},
 		},
