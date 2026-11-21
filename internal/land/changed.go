@@ -483,6 +483,10 @@ var treeWideGuards = []treeWideGuard{
 			// Walks every non-test Go file under internal/ for a hand-built
 			// registry URL, so any such file is its input (gt-9grbnj).
 			"TestImageRegistryBaseNotPrependedInSource",
+			// Walks the tree for every file that names a data file and holds
+			// the list of known readers, so a new file that names one is its
+			// input too (gt-re8efj).
+			"TestOwnerPlaceholderFilesHaveOnlyKnownReaders",
 		},
 		judges:  underInternalOrCmd,
 		removal: true,
