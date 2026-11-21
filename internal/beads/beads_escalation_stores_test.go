@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -122,5 +123,38 @@ func TestListEscalationsAcrossRigsRefusesARoutesFileItCannotRead(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "reading the routes") || got != nil {
 		t.Errorf("got %v, %v; want no list and an error saying it could not read the routes", got, err)
+	}
+}
+
+// TestListEscalationsAcrossRigsFailedStoreNamesIt pins that one store that
+// cannot be read fails the whole read: the town store answered, the gt rig
+// store did not, and the list is not the town's alone with the rig's
+// escalations silently missing (gt-3zz0el). The error names the rig store's
+// beads directory and wraps the read's own error.
+func TestListEscalationsAcrossRigsFailedStoreNamesIt(t *testing.T) {
+	townRoot, _ := townWithRoutes(t)
+	rigStore := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
+	errDolt := errors.New("dolt: connection refused")
+	prev := escalationStoreRead
+	t.Cleanup(func() { escalationStoreRead = prev })
+	escalationStoreRead = func(_ *Beads, s escalationStore, _ string) ([]*Issue, error) {
+		if s.Town {
+			return []*Issue{{ID: "hq-wisp1", Labels: []string{"gt:escalation"}}}, nil
+		}
+		return nil, errDolt
+	}
+
+	got, err := ListEscalationsAcrossRigs(New(townRoot))
+	if err == nil {
+		t.Fatalf("ListEscalationsAcrossRigs = %v, want an error: the rig store could not be read", got)
+	}
+	if !strings.Contains(err.Error(), rigStore) {
+		t.Errorf("error = %q, want it to name the store %s", err, rigStore)
+	}
+	if !errors.Is(err, errDolt) {
+		t.Errorf("error = %q, want it to wrap the read's own error", err)
+	}
+	if got != nil {
+		t.Errorf("got the partial list %v, want none", got)
 	}
 }
