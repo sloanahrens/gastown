@@ -195,6 +195,8 @@ const redactedWord = "<redacted>"
 // redactedWord and keeps every other byte, separators included: om's claim
 // quotes the reviewed code, and a credential-shaped word in it must not reach
 // the review log (gt-uxbi5y). A word is a maximal run of non-separator bytes.
+// It runs before boundedClaim, so the cut can fall inside a <redacted> marker;
+// that leaves a fragment of the marker and never part of a token.
 func scrubClaim(s string) string {
 	return scrubRuns(s, claimSeparator, scrubWord)
 }
@@ -217,29 +219,28 @@ func scrubRuns(s string, separator func(byte) bool, fix func(string) string) str
 	return b.String()
 }
 
-// scrubWord is word, or redactedWord when its shape alone marks it a token: a
-// claim names no env key to read the answer from. A word joined by '=', ':' or
-// '/' is checked whole and then part by part, so `KEY=token` keeps its name.
+// scrubWord is word with a token replaced by redactedWord. A token can follow a
+// key name or a path joined by '=', ':', '/' or '-' (`KEY=token`, `NAME-token`),
+// and can hold those bytes itself (`xoxb-...`), so the word is read from its start
+// and from each byte after a joiner: the first suffix whose shape alone marks it a
+// token is replaced whole and what precedes it is kept. A claim names no env key
+// to read the answer from.
 func scrubWord(word string) string {
-	if secretShaped(word) {
-		return redactedWord
+	for i := 0; i < len(word); i++ {
+		if (i == 0 || claimJoiner(word[i-1])) && secretShaped(word[i:]) {
+			return word[:i] + redactedWord
+		}
 	}
-	return scrubRuns(word, claimJoiner, scrubPart)
-}
-
-func scrubPart(part string) string {
-	if secretShaped(part) {
-		return redactedWord
-	}
-	return part
+	return word
 }
 
 func secretShaped(s string) bool { return s != "" && config.LooksLikeSecret("", s) }
 
 // claimJoiner is a byte that joins a token to a key name, a label or a path:
-// `KEY=token`, `token:value`, `dir/token`. A run holding one is checked whole and
-// part by part, because a run that starts with the name never starts like a token.
-func claimJoiner(c byte) bool { return c == '=' || c == ':' || c == '/' }
+// `KEY=token`, `token:value`, `dir/token`, `NAME-token`. A run holding one is read
+// from its start and from each byte after one, because a run that starts with the
+// name never starts like a token.
+func claimJoiner(c byte) bool { return c == '=' || c == ':' || c == '/' || c == '-' }
 
 func claimSeparator(c byte) bool {
 	switch c {

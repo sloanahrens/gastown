@@ -36,13 +36,13 @@ func TestReviewLogScrubKeepsProseURLAndPath(t *testing.T) {
 var scrubTestFamilies = map[string]string{"aws": awsKey, "google": googleKey, "slack": slackKey}
 
 // TestReviewLogScrubJoinedTokens: a token joined to a key name, a label or a path
-// by '=', ':' or '/' is one run of bytes that does not start like a token, so each
+// by '=', ':', '/' or '-' is one run of bytes that does not start like a token, so each
 // part of the run is checked as well as the whole. The joined text is kept and
 // only the token is replaced.
 func TestReviewLogScrubJoinedTokens(t *testing.T) {
 	t.Parallel()
 	for family, token := range scrubTestFamilies {
-		for _, joiner := range []string{"=", ":", "/"} {
+		for _, joiner := range []string{"=", ":", "/", "-"} {
 			t.Run(family+joiner, func(t *testing.T) {
 				t.Parallel()
 				claim := "it logs KEY_NAME" + joiner + token + " verbatim"
@@ -56,8 +56,8 @@ func TestReviewLogScrubJoinedTokens(t *testing.T) {
 }
 
 // TestReviewLogScrubTokenHoldingAJoiner: a token whose own bytes include a joiner
-// is replaced whole by the whole-run check, not left with its tail after the
-// first joiner (base64 secrets hold '/').
+// is replaced whole, not left with its tail after the first joiner (base64
+// secrets hold '/', Slack tokens hold '-').
 func TestReviewLogScrubTokenHoldingAJoiner(t *testing.T) {
 	t.Parallel()
 	token := "s" + "k-" + strings.Repeat("a", 8) + "/" + strings.Repeat("b", 8)
