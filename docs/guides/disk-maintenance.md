@@ -270,8 +270,9 @@ interval (`ci_engine_prune_interval`), under the same patrol, the same exec into
 the `dind` container and the same `dry_run` default as the cache trim above.
 
 - The settings sit under `patrols.disk_maintenance`: `ci_engine_prune_interval`
-  (default `1h`), `ci_engine_prune_age` (default `48h`) and `ci_engine_keep_repos`
-  (default `["ci-base"]`). An empty setting is the default. A zero or negative
+  (default `1h`), `ci_engine_prune_age` (default `48h`), `ci_engine_cache_keep_bytes`
+  (default `10GB`) and `ci_engine_keep_repos` (default `["ci-base"]`). An empty
+  setting is the default. A zero or negative
   interval or age is refused, and an explicit empty keep list is refused, since it
   would leave the base images unprotected. A keep name that is not a repository
   name is refused. Each error names its setting.
@@ -306,7 +307,8 @@ the `dind` container and the same `dry_run` default as the cache trim above.
     `ci_engine_unused_age` ago. A volume's own name and mounts decide it; no
     companion volume is consulted;
   - build cache unused for `ci_engine_unused_age`, pruned by docker itself in an
-    apply.
+    apply, and that prune keeps at most `ci_engine_cache_keep_bytes` (default
+    `10GB`), the least recently used records going first, besides the age filter.
 - What stays: any image a container that stays uses; any image that is a parent
   of an image that stays, which docker would refuse to remove; named volumes, so
   `ci-gocache`, `ci-gomod` and `ci-npm` are never candidates.

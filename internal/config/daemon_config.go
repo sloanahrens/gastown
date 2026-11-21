@@ -1602,6 +1602,10 @@ type DiskMaintenanceConfig struct {
 	// removes them. Empty means DiskMaintenanceDefaultCIEngineUnusedAge; a value
 	// under DiskMaintenanceMinCIEngineUnusedAge is refused, never read as the age.
 	CIEngineUnusedAge string `json:"ci_engine_unused_age,omitempty"` // Go duration such as "6h"
+	// CIEngineCacheKeepBytes is the size the engine prune's build cache step
+	// keeps at most, least recently used records going first, besides the
+	// unused age above. Empty means DiskMaintenanceDefaultCIEngineCacheKeepBytes.
+	CIEngineCacheKeepBytes string `json:"ci_engine_cache_keep_bytes,omitempty"` // size such as "10GB"
 	// CIEngineKeepRepos names the image repositories the engine prune never
 	// removes, an image also tagged with one included. ci-base's own rule is in
 	// docs/guides/disk-maintenance.md. Nil means
@@ -1857,6 +1861,22 @@ func (c DiskMaintenanceConfig) CIEngineUnusedAgeDuration() (time.Duration, error
 	return age, nil
 }
 
+// CIEngineCacheKeepLimit returns the size the engine prune's build cache step
+// keeps at most: the default when the setting is empty, and an error naming the
+// setting for a value that is not a positive size. It never falls back to the
+// default on an error.
+func (c DiskMaintenanceConfig) CIEngineCacheKeepLimit() (int64, error) {
+	raw := c.CIEngineCacheKeepBytes
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCIEngineCacheKeepBytes
+	}
+	limit, err := parseDiskMaintenanceSize(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_cache_keep_bytes: %w", err)
+	}
+	return limit, nil
+}
+
 // CIEngineKeepRepoList returns the repositories the engine prune keeps: the
 // default when the setting is absent, and an error naming the setting for an
 // explicit empty list or a name that is not a repository name. It never falls
@@ -2043,6 +2063,11 @@ const (
 	// DiskMaintenanceMinCIEngineUnusedAge is the lowest accepted unused age: below
 	// it a job that just stopped would lose what it could resume from (gt-w9nv86).
 	DiskMaintenanceMinCIEngineUnusedAge = time.Hour
+	// DiskMaintenanceDefaultCIEngineCacheKeepBytes is the size the engine prune's
+	// build cache step keeps at most when the setting is empty: the age filter
+	// alone does not bound the cache, since the gates keep re-using its records
+	// (gt-mwlgcy).
+	DiskMaintenanceDefaultCIEngineCacheKeepBytes = "10GB"
 	// DiskMaintenanceDefaultActionsRetentionDays is how old a Forgejo Actions run
 	// must be before the retention step may delete it: the runs table grows
 	// without bound otherwise (gt-573420).
@@ -2136,6 +2161,9 @@ func (c *DiskMaintenanceConfig) validate() error {
 		return err
 	}
 	if _, err := c.CIEngineUnusedAgeDuration(); err != nil {
+		return err
+	}
+	if _, err := c.CIEngineCacheKeepLimit(); err != nil {
 		return err
 	}
 	if _, err := c.CIEngineKeepRepoList(); err != nil {
