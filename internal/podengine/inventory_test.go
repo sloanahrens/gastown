@@ -851,6 +851,9 @@ func updateEngineDocLines(root string, w io.Writer) error {
 	lines := strings.Split(string(src), "\n")
 	changed := false
 	for _, r := range doc.Rows {
+		if row, ok := renumberGated(root, r, lines[r.DocLine-1], w); ok {
+			lines[r.DocLine-1], changed = row, true
+		}
 		to, problem := uniqueLineInFunc(root, r)
 		if problem != "" {
 			if rowHoldsText(root, r) {
@@ -874,6 +877,41 @@ func updateEngineDocLines(root string, w io.Writer) error {
 		return nil
 	}
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// renumberGated moves a `gated <file>:<line> when <condition>` citation to the one
+// line of its file that holds the condition. A citation that still holds it is
+// left in silence; a condition on no line or on two is reported and left, so the
+// strict run still fails on it rather than the rewrite picking one. A degrades
+// citation has no condition to search for and is not touched (gt-6nvne7).
+func renumberGated(root string, r engineRow, row string, w io.Writer) (string, bool) {
+	f := strings.Fields(r.Disposition)
+	if len(f) < 4 || f[0] != "gated" || f[2] != "when" {
+		return row, false
+	}
+	m := citeRE.FindStringSubmatch(f[1])
+	if m == nil || m[0] != f[1] {
+		return row, false
+	}
+	n, _ := strconv.Atoi(m[2])
+	condition := strings.Join(f[3:], " ")
+	if text, err := lineOf(root, m[1], n); err == nil && strings.Contains(text, condition) {
+		return row, false
+	}
+	var at []int
+	if src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(m[1]))); err == nil {
+		for i, l := range strings.Split(string(src), "\n") {
+			if strings.Contains(normalize(l), condition) {
+				at = append(at, i+1)
+			}
+		}
+	}
+	if len(at) != 1 {
+		fmt.Fprintf(w, "pod-engine: left row %d: the gate condition %q is on %d lines of %s, so its citation cannot be chosen\n", r.DocLine, condition, len(at), m[1])
+		return row, false
+	}
+	fmt.Fprintf(w, "pod-engine: gated %s:%d -> %d (row %d)\n", m[1], n, at[0], r.DocLine)
+	return strings.Replace(row, "gated "+f[1], "gated "+m[1]+":"+strconv.Itoa(at[0]), 1), true
 }
 
 // rowHoldsText reports whether the row's cited line still holds its quoted text,
@@ -1703,6 +1741,57 @@ const updateFixtureSource = "package x\n\nimport \"os/exec\"\n\nfunc Run() error
 // column set by the caller.
 func updateFixtureRow(line int) engineRow {
 	return engineRow{File: "internal/x/x.go", Symbol: "Run", Line: line, Source: `exec.Command("docker", "ps").Run()`, Asks: "ps", Disposition: "mac-job", Evidence: "`internal/x/x.go:6`"}
+}
+
+// TestUpdateEngineDocLinesRenumbersGatedCitations holds the second half of the
+// -update-lines rewrite: a `gated <file>:<line> when <condition>` citation moves
+// to the one line of its file that holds the condition and the change is printed;
+// one that still holds it is left in silence; a condition on no line or on two is
+// left and reported, so the strict run still fails on it; a degrades citation has
+// no condition to search for and is left (gt-6nvne7).
+func TestUpdateEngineDocLinesRenumbersGatedCitations(t *testing.T) {
+	t.Parallel()
+	const gate = "func Gate(cfg Cfg) bool {\n\treturn cfg.On != \"\"\n}\n"
+	withGate := func(cite string) engineRow {
+		r := updateFixtureRow(6)
+		r.Disposition = "gated internal/x/x.go:" + cite + ` when cfg.On != ""`
+		r.Evidence = "`internal/x/x.go:3`" // an unchecked hand number: never rewritten
+		return r
+	}
+	for _, tc := range []struct{ name, src, from, to, out string }{
+		{"a moved condition is renumbered", updateFixtureSource + gate, "3", "9", "gated internal/x/x.go:3 -> 9 (row 7)"},
+		{"a citation that holds its condition is left", updateFixtureSource + gate, "9", "9", ""},
+		{"a condition on two lines is left and reported", updateFixtureSource + gate + gate, "3", "3", "is on 2 lines"},
+		{"a condition on no line is left and reported", updateFixtureSource, "3", "3", "is on 0 lines"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixtureTree(t, map[string]string{"internal/x/x.go": tc.src, engineDoc: renderEngineDoc(withGate(tc.from))})
+			var out bytes.Buffer
+			if err := updateEngineDocLines(root, &out); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := os.ReadFile(filepath.Join(root, engineDoc))
+			if want := renderEngineDoc(withGate(tc.to)); string(got) != want {
+				t.Errorf("the document after the rewrite:\n%s\nwant:\n%s", got, want)
+			}
+			if tc.out == "" && strings.Contains(out.String(), "gated") || !strings.Contains(out.String(), tc.out) {
+				t.Errorf("the report is %q, want it to hold %q (and nothing about a gated row when empty)", out.String(), tc.out)
+			}
+		})
+	}
+	t.Run("a degrades citation is left", func(t *testing.T) {
+		t.Parallel()
+		r := updateFixtureRow(6)
+		r.Disposition = "degrades internal/x/x.go:3 skips the pull"
+		root := fixtureTree(t, map[string]string{"internal/x/x.go": updateFixtureSource + gate, engineDoc: renderEngineDoc(r)})
+		if err := updateEngineDocLines(root, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := os.ReadFile(filepath.Join(root, engineDoc)); string(got) != renderEngineDoc(r) {
+			t.Errorf("a degrades row changed:\n%s", got)
+		}
+	})
 }
 
 // TestUpdateEngineDocLines holds the -update-lines rewrite: a row whose quoted
