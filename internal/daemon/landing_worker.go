@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1567,7 +1569,14 @@ func (b followupBeads) AppendFollowup(id string, add land.FollowupAddition) erro
 		boxes = append([]string{have}, boxes...)
 	}
 	acceptance := strings.Join(boxes, "\n")
-	return b.client.Update(id, beads.UpdateOptions{Description: &body, Acceptance: &acceptance, AddLabels: add.Labels})
+	// The guard is the hash of the block read: a seat that ticked a box between the
+	// read and this write makes bd write nothing, and the bundle is left as it is.
+	sum := sha256.Sum256([]byte(issue.AcceptanceCriteria))
+	err = b.client.Update(id, beads.UpdateOptions{Description: &body, Acceptance: &acceptance, AddLabels: add.Labels, IfAcceptance: hex.EncodeToString(sum[:])})
+	if errors.Is(err, beads.ErrGuardNotHeld) {
+		return fmt.Errorf("follow-up bundle %s changed since it was read: nothing appended: %w", id, err)
+	}
+	return err
 }
 
 func (b followupBeads) ListFollowups(label string) ([]land.ExistingFollowup, error) {

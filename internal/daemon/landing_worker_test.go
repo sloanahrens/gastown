@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -2332,11 +2334,13 @@ func TestFollowupBeadsAppend(t *testing.T) {
 		wantUpdates int
 		wantErr     string
 		wantFull    bool
+		wantGuard   bool
 	}{
 		{name: "an open bead gets one update", status: "open", body: body, wantUpdates: 1},
 		{name: "a bead that cannot be read is an error", target: "gt-missing", status: "open", body: body, wantErr: "gt-missing"},
 		{name: "an in_progress bead is refused", status: "in_progress", body: body, wantErr: "in_progress"},
 		{name: "a body with no box to place by is refused", status: "open", body: "## Goal\n- a finding\n", wantErr: "no room", wantFull: true},
+		{name: "a guard that is not held says the bundle changed", status: "open", body: body, updateErr: beads.ErrGuardNotHeld, wantUpdates: 1, wantErr: "changed since it was read", wantGuard: true},
 		{name: "a failing update is returned", status: "open", body: body, updateErr: errors.New("dolt is down"), wantUpdates: 1, wantErr: "dolt is down"},
 	}
 	for _, tt := range tests {
@@ -2360,6 +2364,15 @@ func TestFollowupBeadsAppend(t *testing.T) {
 			}
 			if len(bd.updates) != tt.wantUpdates {
 				t.Fatalf("updates = %d, want %d", len(bd.updates), tt.wantUpdates)
+			}
+			if tt.wantGuard && !errors.Is(err, beads.ErrGuardNotHeld) {
+				t.Errorf("AppendFollowup error = %v, want it to wrap beads.ErrGuardNotHeld", err)
+			}
+			if tt.wantUpdates > 0 {
+				sum := sha256.Sum256([]byte("- [ ] the first box"))
+				if got := bd.updates[0].IfAcceptance; got != hex.EncodeToString(sum[:]) {
+					t.Errorf("IfAcceptance = %q, want the sha256 of the block read", got)
+				}
 			}
 			if tt.wantUpdates == 0 || tt.updateErr != nil {
 				return
