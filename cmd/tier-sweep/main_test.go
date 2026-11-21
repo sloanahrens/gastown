@@ -51,8 +51,10 @@ func TestMainOutputStreams(t *testing.T) {
 	}
 	d.Now = func() time.Time { return time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC) }
 	// The sweep's go build goes through the fake Exec below: this test is about
-	// which stream each line reaches, and the real seam would start a build.
+	// which stream each line reaches, and the real seam would start a build. The
+	// cgo seam is answered for the same reason: its default runs brew on a Mac.
 	d.BuildExec = nil
+	d.CgoEnv = func([]string) []string { return nil }
 	d.ReadFile = func(name string) ([]byte, error) {
 		if strings.HasSuffix(name, "r/r_test.go") {
 			return []byte("//go:build integration\n\npackage r\n"), nil
