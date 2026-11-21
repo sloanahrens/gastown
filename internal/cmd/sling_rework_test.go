@@ -398,12 +398,14 @@ func (w *handBackCapture) Comment(_ context.Context, _, text string) error { w.t
 
 // TestReworkSeatFrom_ReadsAHandBackReworkComment: a bead the overrun guard
 // handed back as rework resumes the branch its comment names, the newest of the
-// two comment forms wins, and a bead without the rework label is left alone.
+// two comment forms wins, ordinary prose is neither of them, and a bead without
+// the rework label is left alone.
 func TestReworkSeatFrom_ReadsAHandBackReworkComment(t *testing.T) {
 	t.Parallel()
 	kept := "polecat/anchor/dv-qhnhc+mwq8hx1x"
 	dotted := "polecat/anchor/dv-jokk.2+mwq8hx1x"
 	submitted := "Submitted for landing: polecat/agate/gt-rw1+muu1 @ 1111aaaa onto main (attempt 1)"
+	submittedDotted := "Submitted for landing: " + dotted + " @ 2222bbbb onto main (attempt 1)"
 	for _, tt := range []struct {
 		name     string
 		labels   []string
@@ -416,6 +418,9 @@ func TestReworkSeatFrom_ReadsAHandBackReworkComment(t *testing.T) {
 		{"an older hand-back loses to a submission", []string{"rework"}, []string{handBackComment(t, kept), submitted}, "polecat/agate/gt-rw1+muu1"},
 		{"a branch not followed by a period and space is not read", []string{"rework"}, []string{"its work is already on origin as branch " + kept}, ""},
 		{"no rework label ignores the hand-back", []string{"gt:ready-to-land"}, []string{handBackComment(t, kept)}, ""},
+		// Ordinary prose ("merged. next") holds a word, a period and a space;
+		// only the hand-back phrase's leading words make it a hand-back.
+		{"an ordinary newest comment does not hide the submission", []string{"rework"}, []string{submittedDotted, "thanks, merged. next"}, dotted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
