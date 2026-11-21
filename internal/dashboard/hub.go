@@ -1581,6 +1581,15 @@ func (h *Hub) polecatsLocked(now time.Time) []Polecat {
 			if p.WorkingSec < 0 {
 				p.WorkingSec = 0
 			}
+			// A seat with a session is starting until its first activity after
+			// the sling, and working once it has one; a seat with neither a
+			// session nor activity has no phase (gt-1887cf).
+			switch {
+			case p.LastActive != nil && p.LastActive.After(when):
+				p.Phase = PhaseWorking
+			case p.HasSession:
+				p.Phase = PhaseStarting
+			}
 		}
 		if p.LastActive != nil {
 			if d := now.Sub(*p.LastActive); d > 0 {
