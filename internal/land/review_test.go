@@ -89,12 +89,12 @@ func TestOMReviewerApprove(t *testing.T) {
 	t.Parallel()
 	var argv []string
 	r := OMReviewer{OutDir: t.TempDir()}
-	r.run = fakeOM(t, `{"score":0.91,"verdict":"approve","findings":[{"id":"f1","severity":"minor","path":"a.go","line":3,"title":"nit"}]}`, 0, nil, &argv)
+	r.run = fakeOM(t, `{"score":0.91,"verdict":"approve","findings":[{"id":"f1","severity":"minor","path":"a.go","line":3,"title":"nit","class":"comment"}]}`, 0, nil, &argv)
 	v, err := reviewAt(context.Background(), r, "", "/wt", "aaa", "bbb")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.Verdict != VerdictApprove || v.Score != 0.91 || len(v.Findings) != 1 || v.Findings[0].Path != "a.go" {
+	if v.Verdict != VerdictApprove || v.Score != 0.91 || len(v.Findings) != 1 || v.Findings[0].Path != "a.go" || v.Findings[0].Class != FindingClassComment {
 		t.Fatalf("verdict = %+v", v)
 	}
 	got := strings.Join(argv[:len(argv)-1], " ")

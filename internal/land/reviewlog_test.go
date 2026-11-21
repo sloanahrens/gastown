@@ -371,6 +371,38 @@ func TestLandLogsEachOMVerdict(t *testing.T) {
 	}
 }
 
+// A landing record keeps each finding's class through the review log (gt-617dce).
+func TestReviewLogKeepsTheClass(t *testing.T) {
+	t.Parallel()
+	f := barFixture(t, "0.8")
+	reviews := reviewsFileIn(t)
+	l := f.lander()
+	l.Reviews = reviews
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictApprove, Score: 0.92, Findings: []Finding{
+			{ID: "f-1", Severity: "minor", Path: "b.txt", Line: 1, Title: "name", Class: FindingClassComment},
+			{ID: "f-2", Severity: "minor", Path: "b.txt", Line: 2, Title: "comment"},
+		}}, nil
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	recs, err := reviews.Since(time.Time{})
+	if err != nil || len(recs) != 1 || len(recs[0].FindingText) != 2 {
+		t.Fatalf("review log = %+v, %v; want the landing's one record with both findings", recs, err)
+	}
+	raw, err := os.ReadFile(reviews.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := []string{recs[0].FindingText[0].Class, recs[0].FindingText[1].Class}; !reflect.DeepEqual(got, []string{FindingClassComment, ""}) {
+		t.Errorf("finding classes read back = %q, want [comment \"\"]", got)
+	}
+	if n, empty := strings.Count(string(raw), `"class":"comment"`), strings.Contains(string(raw), `"class":""`); n != 1 || empty {
+		t.Errorf("the log carries %d comment class fields and an empty one = %v:\n%s", n, empty, raw)
+	}
+}
+
 // A review that judged nothing is not a verdict to count, and a log that cannot
 // be written never holds a landing.
 func TestLandLogsNothingForAReviewThatJudgedNothingAndSurvivesALogFailure(t *testing.T) {
