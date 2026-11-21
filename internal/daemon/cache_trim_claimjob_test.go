@@ -21,7 +21,7 @@ const cacheTrimClaimJobLogVerb = "logs job/" + cacheTrimJob + " -n " + cacheTrim
 
 // cacheTrimClaimJobCounts calls the claim-Job run on the fixture's claim.
 func cacheTrimClaimJobCounts(f *cacheTrimFixture, claim cacheTrimClaim, apply bool) (removed, absent, kept int64, err error) {
-	return f.d.cacheTrimClaimJobRun(context.Background(), "/kubeconfig", claim, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, apply)
+	return f.d.cacheTrimClaimJobRun("/kubeconfig", claim, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, apply)
 }
 
 // cacheTrimClaimJobRun calls the claim-Job run on the fixture's claim and keeps
@@ -307,17 +307,17 @@ func TestCacheTrimClaimJobBudgetNamesThePhaseThatWasCut(t *testing.T) {
 
 // TestCacheTrimClaimJobBudgetOutlivesThePassContext pins that every cluster call
 // of a claim run (the apply, the wait, the result read) is made on the claim's
-// own budget and not on the pass context handed in: each call's context is
-// still live after the stand-in pass context ends during the wait, and carries
-// its own deadline of the wait plus the slack. The budget is read from the
-// context the call reaches exec.CommandContext with (cacheTrimCtxSeen), the
+// own budget: the run takes no caller context, so a caller-held context ends
+// during the wait without reaching it, and each call's context is still live,
+// carrying its own deadline of the wait plus the slack. The budget is read from
+// the context the call reaches exec.CommandContext with (cacheTrimCtxSeen), the
 // only place the kill a pass context causes can be seen.
 func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
 	})
-	passCtx, endPass := context.WithCancel(context.Background())
+	_, endPass := context.WithCancel(context.Background())
 	defer endPass()
 	calls := 0
 	f.d.cacheTrimCtxSeen = func(ctx context.Context) {
@@ -335,7 +335,7 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 		}
 	}
 	f.onClaimJobCall(cacheTrimClaimJobWaitVerb, endPass)
-	removed, absent, kept, err := f.d.cacheTrimClaimJobRun(passCtx, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName}, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, true)
+	removed, absent, kept, err := f.d.cacheTrimClaimJobRun("/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName}, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, true)
 	if err != nil || removed != 4 || absent != 1 || kept != 2 {
 		t.Fatalf("a run whose pass context ends during the wait = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
 	}
