@@ -285,7 +285,7 @@ type PendingPostLand struct {
 	// OrphanedAt is when the run behind the check was found ended without a
 	// verdict; zero while the run may still report.
 	OrphanedAt time.Time `json:"orphaned_at,omitzero"`
-	// OrphanRun is that run: its id and status, such as "11205 cancelled".
+	// OrphanRun is that run: its id and status, such as "11205 failure".
 	OrphanRun string `json:"orphan_run,omitempty"`
 }
 

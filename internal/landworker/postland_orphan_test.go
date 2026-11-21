@@ -6,63 +6,39 @@ import (
 	"time"
 )
 
-var orphanT0 = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
-
-func TestPostLandOrphanEndedMarks(t *testing.T) {
+func TestPostLandOrphanMark(t *testing.T) {
 	t.Parallel()
-	var e PendingPostLand
-	end := RunEnd{Run: 11205, Status: "cancelled", Ended: true}
-
-	if !e.markOrphan(orphanT0, end) {
-		t.Fatal("an ended answer did not mark the entry")
+	t0 := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		ends   []RunEnd
+		marked []bool
+		at     time.Time
+		run    string
+	}{
+		{"an ended answer marks once", []RunEnd{{Run: 11205, Status: "cancelled", Ended: true}}, []bool{true}, t0, "11205 cancelled"},
+		{"a second ended answer keeps the first", []RunEnd{{Run: 11205, Status: "cancelled", Ended: true}, {Run: 11206, Status: "failure", Ended: true}}, []bool{true, false}, t0, "11205 cancelled"},
+		{"an unended answer marks nothing", []RunEnd{{Run: 11205, Status: "running"}}, []bool{false}, time.Time{}, ""},
 	}
-	if !e.OrphanedAt.Equal(orphanT0) {
-		t.Errorf("OrphanedAt = %v, want %v", e.OrphanedAt, orphanT0)
-	}
-	if got, want := e.OrphanRun, "11205 cancelled"; got != want {
-		t.Errorf("OrphanRun = %q, want %q", got, want)
-	}
-}
-
-func TestPostLandOrphanSecondEndedKeepsFirst(t *testing.T) {
-	t.Parallel()
-	var e PendingPostLand
-	e.markOrphan(orphanT0, RunEnd{Run: 11205, Status: "cancelled", Ended: true})
-	later := orphanT0.Add(time.Minute)
-
-	if e.markOrphan(later, RunEnd{Run: 11206, Status: "failure", Ended: true}) {
-		t.Fatal("a second ended answer marked the entry again")
-	}
-	if !e.OrphanedAt.Equal(orphanT0) {
-		t.Errorf("OrphanedAt = %v, want the first mark %v", e.OrphanedAt, orphanT0)
-	}
-	if got, want := e.OrphanRun, "11205 cancelled"; got != want {
-		t.Errorf("OrphanRun = %q, want the first run %q", got, want)
-	}
-}
-
-func TestPostLandOrphanNotEndedDoesNotMark(t *testing.T) {
-	t.Parallel()
-	var e PendingPostLand
-
-	if e.markOrphan(orphanT0, RunEnd{Run: 11205, Status: "running"}) {
-		t.Fatal("a run still reporting marked the entry")
-	}
-	if !e.OrphanedAt.IsZero() || e.OrphanRun != "" {
-		t.Errorf("an unended answer marked the entry: OrphanedAt %v, OrphanRun %q", e.OrphanedAt, e.OrphanRun)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var e PendingPostLand
+			for i, end := range tt.ends {
+				if got := e.markOrphan(t0.Add(time.Duration(i)*time.Minute), end); got != tt.marked[i] {
+					t.Fatalf("answer %d marked = %v, want %v", i+1, got, tt.marked[i])
+				}
+			}
+			if !e.OrphanedAt.Equal(tt.at) || e.OrphanRun != tt.run {
+				t.Errorf("marked at %v as %q, want %v as %q", e.OrphanedAt, e.OrphanRun, tt.at, tt.run)
+			}
+		})
 	}
 }
 
 func TestPostLandOrphanFieldsSurviveJSON(t *testing.T) {
 	t.Parallel()
-	e := PendingPostLand{
-		Land:       PostLand{BeadID: "gt-c2es4c", Commit: "abc1234"},
-		Context:    "ci / post-land (push)",
-		Since:      orphanT0,
-		OrphanedAt: orphanT0.Add(10 * time.Minute),
-		OrphanRun:  "11205 cancelled",
-	}
-
+	e := PendingPostLand{Land: PostLand{Commit: "abc1234"}, OrphanedAt: time.Date(2026, 11, 21, 12, 10, 0, 0, time.UTC), OrphanRun: "11205 cancelled"}
 	data, err := json.Marshal(e)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -71,10 +47,7 @@ func TestPostLandOrphanFieldsSurviveJSON(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !got.OrphanedAt.Equal(e.OrphanedAt) {
-		t.Errorf("OrphanedAt = %v after a round trip, want %v", got.OrphanedAt, e.OrphanedAt)
-	}
-	if got.OrphanRun != e.OrphanRun {
-		t.Errorf("OrphanRun = %q after a round trip, want %q", got.OrphanRun, e.OrphanRun)
+	if !got.OrphanedAt.Equal(e.OrphanedAt) || got.OrphanRun != e.OrphanRun {
+		t.Errorf("after a round trip: OrphanedAt %v, OrphanRun %q; want %v and %q", got.OrphanedAt, got.OrphanRun, e.OrphanedAt, e.OrphanRun)
 	}
 }
