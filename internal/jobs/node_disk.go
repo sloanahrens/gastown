@@ -122,7 +122,11 @@ func nodeDiskRow(key string, rec nodeDiskRecord, now time.Time) Job {
 	case rec.ReadAt != nil:
 		j.Outcome = OutcomeOK
 	}
-	if rec.ReadAt == nil || now.Sub(*rec.ReadAt) > nodeDiskStaleAfter {
+	// A reading dated after now has no age this list can vouch for (clock
+	// skew or a bad write), so it is unknown like a stale one.
+	if rec.ReadAt == nil {
+		j.State = StateUnknown
+	} else if age := now.Sub(*rec.ReadAt); age < 0 || age > nodeDiskStaleAfter {
 		j.State = StateUnknown
 	} else {
 		j.State = StateOK
