@@ -125,7 +125,8 @@ var ruleOwners = map[string]Owner{
 	// A pair the pre-swap check refused is the town's own update to fix: the
 	// overseer finds what failed the check before a person is woken
 	// (gt-d6ok4r).
-	RuleDeployPairRefused: OwnerOverseer,
+	RuleDeployPairRefused:        OwnerOverseer,
+	RuleDeployPairGoListDegraded: OwnerOverseer,
 	// A pair whose bd schema level the database does not carry is the town's own
 	// pin or migration to fix: the overseer acts on it before a person is woken
 	// (gt-qnjuqp).

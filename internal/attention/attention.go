@@ -137,6 +137,10 @@ const (
 	// refused by the pre-swap check, so no roll can start from that commit and
 	// nothing retries it (gt-d6ok4r, gt-t8vf15).
 	KindDeployPairRefused Kind = "deploy-pair-refused"
+	// KindDeployPairGoListDegraded: the pin-drift guard ran without go list for
+	// several consecutive images builds of a rig's pin, so it checked the pin
+	// against its static input list alone (gt-z3q7eh).
+	KindDeployPairGoListDegraded Kind = "deploy-pair-golist-degraded"
 	// KindDeployPairSkew: the bd commit a green commit's deploy image pins
 	// carries a schema level the live database does not, so the daemon the roll
 	// starts would be refused at its startup handshake (gt-qnjuqp).
@@ -255,7 +259,7 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindDeployPairStuck,
-		KindDeployPairRefused, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
+		KindDeployPairRefused, KindDeployPairGoListDegraded, KindDeployPairSkew, KindImagesFailed, KindImagesUnknown,
 		KindTierSweepImagesRetryExhausted,
 		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 		KindHoldStale, KindStoryPoints, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,

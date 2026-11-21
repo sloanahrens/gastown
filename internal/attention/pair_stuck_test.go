@@ -26,6 +26,7 @@ func TestDeployPairStuckKindIsInTheKindsListAndOverseers(t *testing.T) {
 		{"stuck", KindDeployPairStuck, RuleDeployPairStuck},
 		{"refused", KindDeployPairRefused, RuleDeployPairRefused},
 		{"skew", KindDeployPairSkew, RuleDeployPairSkew},
+		{"golist degraded", KindDeployPairGoListDegraded, RuleDeployPairGoListDegraded},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !listed[tc.kind] {
@@ -73,6 +74,7 @@ func TestDeployPairStuckRaisesTheWakingRule(t *testing.T) {
 		{"stuck", RuleDeployPairStuck, true, HandledOperatorAction},
 		{"refused", RuleDeployPairRefused, true, HandledOperatorAction},
 		{"skew", RuleDeployPairSkew, true, HandledOperatorAction},
+		{"golist degraded", RuleDeployPairGoListDegraded, false, HandledInfo},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f, ok := Flags(tc.rule)
