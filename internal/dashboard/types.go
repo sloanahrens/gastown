@@ -75,6 +75,12 @@ const (
 	StateUnknown = "unknown"
 )
 
+// Polecat phases are the values Polecat.Phase carries, finer than State (gt-h9qvuc).
+const (
+	PhaseStarting = "starting"
+	PhaseWorking  = "working"
+)
+
 // DescriptionCap is how many characters of a bead's description a seat row
 // carries: enough for the hover to say what the bead is, short enough that a
 // poll of twenty seats stays small.
@@ -131,6 +137,13 @@ type Polecat struct {
 	// (gt-iv7jf). A kept seat entered kept at its submit, the stamp its record
 	// holds (gt-ddg96x). Empty for every other state, whose clock is Slung.
 	StateSince *time.Time `json:"state_since,omitempty"`
+	// GateSec is the time the seat's bead spent inside its own gate and
+	// WorkingSec the time it counted as work, from the overrun guard's record
+	// for the bead. Phase is PhaseStarting or PhaseWorking; all three are zero
+	// until a reader fills them (gt-h9qvuc).
+	GateSec    int64  `json:"gate_sec,omitempty"`
+	WorkingSec int64  `json:"working_sec,omitempty"`
+	Phase      string `json:"phase,omitempty"`
 	// Hooked is when the seat's bead was dispatched: the bead's first sling
 	// since its last run-end event (gt done, a hand close through gt bead
 	// close, or the overrun guard's stop), the overrun guard's clock for the
