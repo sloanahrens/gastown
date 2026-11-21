@@ -569,8 +569,10 @@ func TestUpdateImagesFlagInstallsThePairThroughRunUpdate(t *testing.T) {
 			return lateSwap{swap: f.swap("town"), daemon: daemon}, nil
 		},
 		Notifier: func(string) notify.Notifier { return notifyfake.New() },
-		// The pre-swap gate is not what this test drives: its checks pass.
+		// The pre-swap gate is not what this test drives: its checks pass, the
+		// pair-level check included.
 		Preflight: preflightPassing,
+		PairLevel: agreeingPairLevels(),
 	}
 	c := newUpdateCmdWith(seams)
 	c.SetArgs([]string{"--images", values})

@@ -19,7 +19,10 @@ import (
 	"github.com/spf13/cobra"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/bdskew"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/installer"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -328,6 +331,10 @@ type updateSeams struct {
 	// builds with no seam wired, and its pre-swap gate refuses when it runs: a
 	// skipped preflight lets a pair the checks refuse be installed.
 	Preflight func(ctx context.Context, townRoot string) []PreflightResult
+	// PairLevel is the pre-swap gate's pair-level check reads: the bd pin level
+	// the pair's commit carries and the live database's level. A gate with a read
+	// unwired refuses its pair rather than swapping a pair it did not check.
+	PairLevel pairLevelReads
 }
 
 // inPod reports whether the run's process is in a pod: a nil InPod is not.
@@ -356,6 +363,12 @@ func productionUpdateSeams() updateSeams {
 		// so the town's readers see it without an overseer copying the file.
 		WriteTownValues: imagevalues.Write,
 		Preflight:       runPreflightChecks,
+		// The pair-level check reads the pair's bd pin and level from the rigs'
+		// bare clones and the database's level through the town's own store.
+		PairLevel: pairLevelReads{
+			PinLevel: daemon.PairBdLevel,
+			Database: townDatabaseLevel,
+		},
 		Notifier: func(townRoot string) notify.Notifier {
 			return &notify.CLI{Dir: townRoot}
 		},
@@ -889,8 +902,9 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 		Images: images,
 		// The town's pre-roll checks gate the install: they run before anything is
 		// installed or swapped, in this process, which is the new image's own gt
-		// and bd.
-		PreSwap: preSwapPreflight(townRoot, seams.Preflight),
+		// and bd. The pair-level check reads the bd pin the pair installs, which
+		// the preflight's own checks, run by the image that is running now, do not.
+		PreSwap: preSwapPreflight(townRoot, seams.Preflight, seams.PairLevel),
 	}
 	if pod != nil {
 		// The pod's pair is checked once the swap reports it: its daemon's image
@@ -907,13 +921,27 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	return install, nil
 }
 
+// pairLevelReads is the pair-level pre-swap check's two reads: the bd pin a
+// commit's image pins name and the schema level that pin carries, and the live
+// database's schema level. A nil read is unwired, and the gate refuses rather
+// than passing a pair it could not check.
+type pairLevelReads struct {
+	// PinLevel returns the bd pin the image pins at commit name and the schema
+	// level that bd commit carries.
+	PinLevel func(ctx context.Context, townRoot, commit string) (pin string, level int, err error)
+	// Database returns the live database's schema level.
+	Database func(ctx context.Context, townRoot string) (int, error)
+}
+
 // preSwapPreflight is a digest install's pre-swap gate: it runs the daemon's
 // pre-roll checks over townRoot through run and refuses the pair when any check
-// failed, naming every failed check and its message. A gate that cannot run — no
-// town root, no check seam, or a seam that reports no results — is a failure,
-// never a pass: an install nothing checked is not an install the checks passed.
-func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult) func(context.Context, update.ImagePair) error {
-	return func(ctx context.Context, _ update.ImagePair) error {
+// failed, naming every failed check and its message, and then refuses a pair
+// whose bd pin carries another schema level than the live database. A gate that
+// cannot run — no town root, no check seam, or a seam that reports no results —
+// is a failure, never a pass: an install nothing checked is not an install the
+// checks passed.
+func preSwapPreflight(townRoot string, run func(context.Context, string) []PreflightResult, reads pairLevelReads) func(context.Context, update.ImagePair) error {
+	return func(ctx context.Context, pair update.ImagePair) error {
 		switch {
 		case townRoot == "":
 			return update.PairCheckError{Check: update.CheckPreflight, Err: errors.New("the preflight has no town root to check")}
@@ -923,8 +951,47 @@ func preSwapPreflight(townRoot string, run func(context.Context, string) []Prefl
 		if err := preflightFailure(run(ctx, townRoot)); err != nil {
 			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
 		}
+		if err := pairLevelSkew(ctx, townRoot, pair, reads); err != nil {
+			return update.PairCheckError{Check: update.CheckPreflight, Err: err}
+		}
 		return nil
 	}
+}
+
+// pairLevelSkew refuses a pair whose bd pin carries another schema level than
+// the live database. The preflight's own checks run the image that is running
+// now, so they test the old gt and bd against a database the pair has not
+// reached; this check reads the level the pair itself carries, from the same
+// pin and lister reads the pair-ready check uses. A pair that names no commit, an
+// unwired read, and a failed read are refusals, never a pass.
+func pairLevelSkew(ctx context.Context, townRoot string, pair update.ImagePair, reads pairLevelReads) error {
+	switch {
+	case pair.Commit == "":
+		return errors.New("the pair names no commit to read the bd pin at")
+	case reads.PinLevel == nil:
+		return errors.New("the pair check has no read of the pair's bd pin level")
+	case reads.Database == nil:
+		return errors.New("the pair check has no read of the database's schema level")
+	}
+	pin, pinLevel, err := reads.PinLevel(ctx, townRoot, pair.Commit)
+	if err != nil {
+		return fmt.Errorf("the pair at %s: %w", pair.Commit, err)
+	}
+	database, err := reads.Database(ctx, townRoot)
+	if err != nil {
+		return fmt.Errorf("the database's schema level: %w", err)
+	}
+	if skew := bdskew.Compare(pinLevel, database); skew != nil {
+		return fmt.Errorf("the pair at %s pins bd %s at schema level %d, but the database is at %d, so a roll would start a daemon its startup handshake refuses",
+			pair.Commit, pin, skew.Pin, skew.Database)
+	}
+	return nil
+}
+
+// townDatabaseLevel reads the live database's schema level the way the bd
+// handshake reads it, through the town's own store.
+func townDatabaseLevel(ctx context.Context, townRoot string) (int, error) {
+	return deps.NewHandshakeStore(ctx, townRoot).SchemaLevel()
 }
 
 // preflightFailure names every check that failed and its message, so one pass
