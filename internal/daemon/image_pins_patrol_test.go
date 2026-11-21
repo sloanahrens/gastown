@@ -1757,8 +1757,8 @@ func TestReadImagePinTipsFillsTheAgeThroughTheProductionRead(t *testing.T) {
 	}
 }
 
-// imagePinsBDFailureTicks reads ticks times over four pins all at one commit, so no compare is asked, with bd's ls-remote failing from the second read.
-func imagePinsBDFailureTicks(t *testing.T, ticks int, logw io.Writer) [][]ImagePinState {
+// imagePinsBDFailureTicks reads one tick per entry of fails, each true failing bd's ls-remote, over four pins all at one commit, so no compare is asked.
+func imagePinsBDFailureTicks(t *testing.T, fails []bool, logw io.Writer) [][]ImagePinState {
 	d, fail := newImagePinsForgejo(t), new(bool)
 	d.logger = log.New(logw, "", 0)
 	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
@@ -1768,12 +1768,12 @@ func imagePinsBDFailureTicks(t *testing.T, ticks int, logw io.Writer) [][]ImageP
 		return []byte(pinsReadLS(pinsReadBDCommit)), nil, nil
 	}
 	pins := []byte("bd " + pinsReadPinURL("beads") + " " + pinsReadBDCommit + "\nom " + pinsReadPinURL("organic-mechanic") + " " + pinsReadBDCommit + "\nhm " + pinsReadPinURL("history-man") + " " + pinsReadBDCommit + "\ndevops " + pinsReadPinURL("devops") + " " + pinsReadBDCommit + "\n")
-	reads := make([][]ImagePinState, 0, ticks)
-	for tick := 1; tick <= ticks; tick++ {
-		*fail = tick > 1
+	reads := make([][]ImagePinState, 0, len(fails))
+	for _, f := range fails {
+		*fail = f
 		states, err := d.readImagePinTips(context.Background(), pins)
 		if err != nil {
-			t.Fatalf("readImagePinTips on tick %d: %v", tick, err)
+			t.Fatalf("readImagePinTips on a tick failing=%t: %v", f, err)
 		}
 		reads = append(reads, states)
 	}
@@ -1785,7 +1785,7 @@ func imagePinsBDFailureTicks(t *testing.T, ticks int, logw io.Writer) [][]ImageP
 func TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks(t *testing.T) {
 	t.Parallel()
 	var logs strings.Builder
-	reads := imagePinsBDFailureTicks(t, 3, &logs)
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true}, &logs)
 	if reads[0][0].Err != nil || reads[1][0] != reads[0][0] || reads[2][0] != reads[0][0] {
 		t.Fatalf("the reads = %+v, want bd held at its good read on both failed ticks", reads)
 	}
@@ -1798,12 +1798,35 @@ func TestImagePinsReadKeepsALastGoodStateForTwoFailedTicks(t *testing.T) {
 // row carries the read's error, which raises image-pins-unreadable (gt-tvtrx1).
 func TestImagePinsReadRaisesOnTheThirdConsecutiveFailure(t *testing.T) {
 	t.Parallel()
-	reads := imagePinsBDFailureTicks(t, 4, io.Discard)
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, true}, io.Discard)
 	if reads[0][0].Err != nil || reads[1][0].Err != nil || reads[2][0].Err != nil {
 		t.Fatalf("the reads = %+v, want bd held on the first two failed ticks", reads)
 	}
 	if err := reads[3][0].Err; err == nil || !strings.Contains(err.Error(), "git exited 128") {
 		t.Fatalf("the third failed tick = %+v, want bd's Err carrying its failure", reads[3][0])
+	}
+}
+
+// TestImagePinsReadWithNoGoodStateRaisesAtOnce: a pin whose first read fails has no good state to hold, so that tick carries its error at once (gt-81kpyv).
+func TestImagePinsReadWithNoGoodStateRaisesAtOnce(t *testing.T) {
+	t.Parallel()
+	reads := imagePinsBDFailureTicks(t, []bool{true}, io.Discard)
+	if err := reads[0][0].Err; err == nil || !strings.Contains(err.Error(), "git exited 128") {
+		t.Fatalf("the first failed read = %+v, want bd's Err at once with no good state to hold", reads[0])
+	}
+}
+
+// TestImagePinsReadAGoodReadResetsTheFailureCount: two failed ticks after a good read are held again, and the third raises, so the good read in between started the count over (gt-81kpyv).
+func TestImagePinsReadAGoodReadResetsTheFailureCount(t *testing.T) {
+	t.Parallel()
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, false, true, true, true}, io.Discard)
+	for _, tick := range []int{1, 2, 4, 5} {
+		if reads[tick][0] != reads[0][0] {
+			t.Fatalf("tick %d = %+v, want bd held at its good read after the count reset", tick, reads[tick])
+		}
+	}
+	if err := reads[6][0].Err; err == nil || !strings.Contains(err.Error(), "git exited 128") {
+		t.Fatalf("the third failure since the good read = %+v, want bd's Err carrying it", reads[6][0])
 	}
 }
 
