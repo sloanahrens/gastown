@@ -500,6 +500,9 @@ type Daemon struct {
 	// cacheTrimParksMu guards every access.
 	cacheTrimParks   map[string]bool
 	cacheTrimParksMu sync.Mutex
+	// cacheTrimCtxSeen is a test seam: the context each cache trim cluster call
+	// runs under, handed over just before the call runs. nil in production.
+	cacheTrimCtxSeen func(ctx context.Context)
 	// doltImage is the Dolt image check's item: the town's Dolt container runs
 	// an image more than one patch release behind the newest release, which the
 	// attention queue raises (gt-goda5m).

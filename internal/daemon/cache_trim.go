@@ -2084,5 +2084,8 @@ func (d *Daemon) cacheTrimKubectlRun(ctx context.Context, kubeconfig string, std
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
+	if d.cacheTrimCtxSeen != nil {
+		d.cacheTrimCtxSeen(ctx)
+	}
 	return d.runCmd(cmd)
 }
