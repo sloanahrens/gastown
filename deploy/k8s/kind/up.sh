@@ -82,6 +82,21 @@ if ! colima status -p "$PROFILE" >/dev/null 2>&1; then
 fi
 restore_context "$original_context"
 
+# A rebuilt VM starts at the kernel's inotify instance limit (128), which
+# containerd's OOM watches exhaust (gt-sr6ubn). Every run reads the limit and
+# raises it to 1024 when it is lower; a read or write that fails stops the run.
+inotify_min=1024
+inotify_limit="$(colima ssh -p "$PROFILE" -- sysctl -n fs.inotify.max_user_instances 2>/dev/null)" ||
+  die "cannot read fs.inotify.max_user_instances in the $PROFILE VM"
+case "$inotify_limit" in
+  '' | *[!0-9]*) die "fs.inotify.max_user_instances in the $PROFILE VM is not a number" ;;
+esac
+if [ "$inotify_limit" -lt "$inotify_min" ]; then
+  say "raising fs.inotify.max_user_instances in $PROFILE to $inotify_min"
+  colima ssh -p "$PROFILE" -- sudo sh -c "printf 'fs.inotify.max_user_instances = $inotify_min\n' >/etc/sysctl.d/99-gt-inotify.conf && sysctl --system >/dev/null" ||
+    die "cannot raise fs.inotify.max_user_instances in the $PROFILE VM (writing /etc/sysctl.d/99-gt-inotify.conf and sysctl --system)"
+fi
+
 # The registry is ensured on every run, so a lost registry is repaired even
 # when the cluster already exists.
 if ! vmdocker inspect "$REGISTRY_NAME" >/dev/null 2>&1; then

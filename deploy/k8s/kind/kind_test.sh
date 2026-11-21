@@ -78,6 +78,18 @@ case "$1" in
   stop)
     [ -n "${STUB_CTX_FLIP:-}" ] && echo "$STUB_CTX_FLIP" >"$STATE/ctx"
     rm -f "$STATE/colima-running"; exit 0 ;;
+  ssh)
+    # The VM's inotify limit: the read answers from $STATE/inotify-max (128, the
+    # kernel default, when absent); a sysctl --system applies the raised value.
+    case "$*" in
+      *"sysctl -n fs.inotify.max_user_instances"*)
+        [ -n "${STUB_SYSCTL_READ_FAILS:-}" ] && exit 1
+        cat "$STATE/inotify-max" 2>/dev/null || echo 128 ;;
+      *"sysctl --system"*)
+        [ -n "${STUB_SYSCTL_WRITE_FAILS:-}" ] && exit 1
+        echo 1024 >"$STATE/inotify-max" ;;
+    esac
+    exit 0 ;;
 esac
 STUB
 cat >"$TMP/bin/kind" <<'STUB'
@@ -993,6 +1005,46 @@ run "$UP" STUB_GATEWAY_CONTAINERS= --
 check "the run stops on an empty container list" test "$RC" -ne 0
 check "the failure says the pod has no containers to size" contains "has no containers to size" "$OUT_TEXT"
 check "no gateway patch is applied to an empty list" test ! -e "$S/state/patch-gateway"
+
+echo "the VM's inotify instance limit (a rebuilt VM starts at the kernel default of 128)"
+scenario inotify_raise
+run "$UP" --
+# The read, then the sysctl.d write and sysctl --system, after the profile starts and before the cluster is created.
+raised() {
+  contains "sysctl -n fs.inotify.max_user_instances" "$CALLS_LOG" &&
+    contains "/etc/sysctl.d/99-gt-inotify.conf" "$CALLS_LOG" &&
+    before "colima start gt-sbx" "sysctl --system" &&
+    before "sysctl --system" "kind create cluster"
+}
+check "inotify instances are raised after the VM profile starts" raised
+scenario inotify_high
+echo 1024 >"$S/state/inotify-max"
+run "$UP" --
+# A limit already at or above 1024 is read and left alone: no sysctl.d write, no sysctl --system.
+left_alone() {
+  contains "sysctl -n fs.inotify.max_user_instances" "$CALLS_LOG" &&
+    lacks "/etc/sysctl.d" "$CALLS_LOG" && lacks "sysctl --system" "$CALLS_LOG"
+}
+check "inotify instances already high are left alone" left_alone
+scenario inotify_write_fails
+run "$UP" STUB_SYSCTL_WRITE_FAILS=1 --
+named_write() { # up stops before the cluster and names the sysctl
+  test "$RC" -ne 0 && contains "fs.inotify.max_user_instances" "$OUT_TEXT" && lacks "kind create" "$CALLS_LOG"
+}
+check "a failed inotify write stops up with the sysctl named" named_write
+scenario inotify_read_fails
+run "$UP" STUB_SYSCTL_READ_FAILS=1 --
+named_read() {
+  test "$RC" -ne 0 && contains "cannot read fs.inotify.max_user_instances" "$OUT_TEXT" && lacks "kind create" "$CALLS_LOG"
+}
+check "a failed inotify read stops up with the sysctl named" named_read
+scenario inotify_not_number
+echo junk >"$S/state/inotify-max"
+run "$UP" --
+named_number() {
+  test "$RC" -ne 0 && contains "fs.inotify.max_user_instances" "$OUT_TEXT" && lacks "kind create" "$CALLS_LOG"
+}
+check "an inotify read that is not a number stops up with the sysctl named" named_number
 
 if [ "$FAIL" -eq 0 ]; then
   echo "kind_test.sh: all $PASS cases passed"
