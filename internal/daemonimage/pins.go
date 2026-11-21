@@ -240,6 +240,15 @@ func checkPinAgainstMain(git bdbuild.Git, dir string, pin Pin, main, pinsPath st
 	if age > MaxPinAge {
 		return nil, fmt.Errorf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, and its commit is %s older than main's tip, over the %s bound: %s", pin.Name, short(pin.Commit), behind, short(main), touching, age.Round(time.Hour), MaxPinAge, pinEdit(pin, pinsPath, main))
 	}
+	if len(PinInputPaths(pin.Name)) != 0 {
+		gaps, err := inputClosureGaps(git, dir, main)
+		if err != nil {
+			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot read the imports of its inputs at main %s in %s (%v): fetch or fix that checkout, then rerun", pin.Name, short(pin.Commit), short(main), dir, err)
+		}
+		if len(gaps) != 0 {
+			return nil, fmt.Errorf("pin-drift guard: %s input list lacks %s, imported by %s: add it to PinInputPaths", pin.Name, gaps[0].Dir, gaps[0].Importer)
+		}
+	}
 	return []string{fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), touching, MaxPinBehind, MaxPinAge)}, nil
 }
 

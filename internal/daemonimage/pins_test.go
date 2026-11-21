@@ -370,6 +370,10 @@ func inputCountKey() string {
 func devopsCounts(f *pinsGit, behind, touching int, pinAge time.Duration) {
 	f.pinTable(pinsTestPin, pinsTestMain, behind, pinAge)
 	f.answer[inputCountKey()] = strconv.Itoa(touching) + "\n"
+	for _, tool := range devopsToolDirs {
+		f.answer[pinsTestDir+" ls-tree --name-only "+pinsTestMain+" "+tool+"/"] = tool + "/main.go\n"
+		f.answer[pinsTestDir+" show "+pinsTestMain+":"+tool+"/main.go"] = "package main\n"
+	}
 }
 
 // checkDevopsPins runs the guard on the devops fixture pin.
@@ -495,6 +499,39 @@ func TestCheckPinsRefusesAnInputCountItCannotRead(t *testing.T) {
 				t.Fatalf("CheckPins error = %v, want a refusal naming the count", err)
 			}
 		})
+	}
+}
+
+// TestCheckPinsFailsLoudlyOnAnImportOutsideTheDevopsList: a tool that imports a
+// directory the input list lacks is a refusal naming the directory and the
+// importer, not a pass the path-limited count undercounts (gt-oi66kl).
+func TestCheckPinsFailsLoudlyOnAnImportOutsideTheDevopsList(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	devopsCounts(f, 54, 1, time.Hour)
+	f.answer[pinsTestDir+" show "+pinsTestMain+":cmd/reporter/main.go"] = "package main\nimport \"gt.local/devops/internal/newthing\"\n"
+	f.answer[pinsTestDir+" ls-tree --name-only "+pinsTestMain+" internal/newthing/"] = "internal/newthing/x.go\n"
+	f.answer[pinsTestDir+" show "+pinsTestMain+":internal/newthing/x.go"] = "package newthing\n"
+	_, err := checkDevopsPins(f)
+	if err == nil {
+		t.Fatal("CheckPins passed a devops pin whose tool imports a directory outside the input list")
+	}
+	for _, want := range []string{"pin-drift guard:", "devops input list lacks internal/newthing", "imported by cmd/reporter", "add it to PinInputPaths"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("CheckPins error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
+// TestCheckPinsRefusesAnImportWalkItCannotRead: a tool directory git cannot
+// list is a refusal naming the failure, never a pass over an unread list.
+func TestCheckPinsRefusesAnImportWalkItCannotRead(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	devopsCounts(f, 54, 1, time.Hour)
+	f.errs[pinsTestDir+" ls-tree --name-only "+pinsTestMain+" cmd/reporter/"] = errors.New("bad tree")
+	if _, err := checkDevopsPins(f); err == nil || !strings.Contains(err.Error(), "cannot read the imports of its inputs") {
+		t.Fatalf("CheckPins error = %v, want a refusal naming the unread imports", err)
 	}
 }
 
