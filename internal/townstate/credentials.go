@@ -73,8 +73,9 @@ type hit struct {
 const valueShapeRule = "value:shape"
 
 // isValueShapeSplit separates the words of a string value that a token can hide in.
+// A token joined to its name by = or :, or set in brackets, is its own word.
 func isValueShapeSplit(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(`,;"'()`, r)
+	return unicode.IsSpace(r) || strings.ContainsRune(`,;"'()=:[]{}<>`, r)
 }
 
 // appendValueShape adds one hit per word of s that is a token by shape. The span
