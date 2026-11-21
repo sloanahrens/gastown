@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -1018,4 +1020,61 @@ func TestFollowupsEveryDefaultsToAMinute(t *testing.T) {
 	var c Config
 	c.defaults()
 	assert.Equal(t, time.Minute, c.FollowupsEvery)
+}
+
+// hubSeat runs polecatsLocked over one seat, with the overrun guard's state file
+// for its bead written under a temporary BirdsDir when gateSpent is non-nil.
+func hubSeat(t *testing.T, now time.Time, p Polecat, gateSpent *time.Duration) []Polecat {
+	t.Helper()
+	birds := t.TempDir()
+	if !filepath.IsAbs(birds) {
+		t.Fatalf("BirdsDir %q is not absolute", birds)
+	}
+	if gateSpent != nil {
+		dir := filepath.Join(birds, "overrun-guard")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(struct {
+			GateSpent time.Duration `json:"gate_spent"`
+		}{*gateSpent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, p.Bead+".json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := NewHub(Config{BirdsDir: birds, Now: func() time.Time { return now }})
+	h.polecats = []Polecat{p}
+	return h.polecatsLocked(now)
+}
+
+// The seat's gate time is the overrun guard's record for its bead, and the time
+// it counted as work is the seat's age minus that gate, never below zero.
+func TestHubPolecatWorkingTime(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	slung := now.Add(-30 * time.Minute)
+	seat := Polecat{Rig: "gastown", Name: "agate", Bead: "gt-abc", State: StateWorking, Hooked: &slung}
+	fifteen, fortyFive := 15*time.Minute, 45*time.Minute
+	cases := []struct {
+		name     string
+		gate     *time.Duration
+		wantGate int64
+		wantWork int64
+	}{
+		{name: "gate charged", gate: &fifteen, wantGate: 900, wantWork: 900},
+		{name: "no guard file", wantGate: 0, wantWork: 1800},
+		{name: "gate longer than elapsed", gate: &fortyFive, wantGate: 2700, wantWork: 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := hubSeat(t, now, seat, c.gate)[0]
+			if p.ElapsedSec != 1800 || p.GateSec != c.wantGate || p.WorkingSec != c.wantWork {
+				t.Errorf("seat = elapsed %d, gate %d, working %d; want 1800, %d, %d",
+					p.ElapsedSec, p.GateSec, p.WorkingSec, c.wantGate, c.wantWork)
+			}
+		})
+	}
 }
