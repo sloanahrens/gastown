@@ -97,3 +97,21 @@ func TestCacheTrimViaJobDryRunAppliesNothing(t *testing.T) {
 		t.Errorf("a dry run logged no dry_run line; log: %s", f.log)
 	}
 }
+
+// TestCacheTrimViaJobPassesTheSandboxCount pins that the Job's planner is told
+// how many sandboxes mount the claim: the fixture's one running pod is `1`.
+func TestCacheTrimViaJobPassesTheSandboxCount(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobLogVerb: {stdout: "removed 0 absent 0 kept 0\n"},
+	})
+	if !viaJob(f, true, map[string]string{}) {
+		t.Fatalf("a finished claim Job = false, want true; log: %s", f.log)
+	}
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") && strings.Contains(call.stdin, `"--sandboxes","1"`) {
+			return
+		}
+	}
+	t.Error("no applied document carries --sandboxes 1; the planner was not told the sandbox count")
+}
