@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 	"github.com/steveyegge/gastown/internal/sling"
 )
@@ -39,9 +38,7 @@ func (d *slingDeps) engineDeps() *sling.Deps {
 
 		// The seat's worktree branch, read at the claim so a reused seat whose
 		// worktree still sits on another bead's branch is refused (gt-u9fqky).
-		WorktreeBranch: func(dir string) (string, error) {
-			return git.NewGit(dir).CurrentBranch()
-		},
+		WorktreeBranch: d.worktreeBranch,
 
 		SpawnPolecat: d.engineSpawnPolecat,
 		StartSession: d.engineStartSession,

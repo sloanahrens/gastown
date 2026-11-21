@@ -512,12 +512,17 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// bead — unless the sling is deliberately resuming it. The error carries
 	// dispatch.SlingRefusalMarker, so an automatic dispatcher defers the bead
 	// and asks again next tick.
-	if branch, branchErr := d.WorktreeBranch(hookWorkDir); branchErr != nil {
-		// A branch the dispatch cannot judge keeps the behavior it had before
-		// this guard: warn, so an operator sees it, and hook as before
-		// (gt-u9fqky).
-		fmt.Fprintf(d.out(), "  %s Could not read the worktree branch of %s: %v; hooking the bead anyway\n",
-			style.Warning.Render("⚠"), targetAgent, branchErr)
+	if branch, branchErr := readWorktreeBranch(d.WorktreeBranch, hookWorkDir); branchErr != nil {
+		// A branch the dispatch cannot judge is not hooked past: that would
+		// switch the guard off for as long as the read keeps failing. The spawn
+		// is given back and the bead deferred, and the dispatcher asks again
+		// next tick (gt-5wkraj). The read error stays out of the message, since
+		// a git read's output can carry more than the branch.
+		fmt.Fprintf(d.out(), "  %s the worktree branch of seat %s could not be read: %v\n", style.Dim.Render("Warning:"), targetAgent, branchErr)
+		rollbackSpawnedPolecat(beadToHook, "Seat worktree branch unreadable")
+		result.ErrMsg = fmt.Sprintf("seat %s: worktree branch unreadable", targetAgent)
+		return result, fmt.Errorf("%s %s: the worktree branch of seat %s could not be read after %d attempts, so the hook cannot be checked against another bead's branch; the dispatch is deferred until it can be read",
+			dispatch.SlingRefusalMarker, opts.BeadID, targetAgent, worktreeBranchReadAttempts)
 	} else if other := branchBead(branch); other != "" && other != opts.BeadID && branch != opts.ResumeBranch {
 		rollbackSpawnedPolecat(beadToHook, "Seat worktree holds another bead's branch")
 		result.ErrMsg = fmt.Sprintf("seat %s has %s checked out, named for %s", targetAgent, branch, other)
@@ -682,6 +687,25 @@ func canceled(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+
+// worktreeBranchReadAttempts bounds the reads of a seat's branch before the
+// dispatch refuses. A read that fails once and answers on the next try is
+// judged by its answer; one that keeps failing is refused (gt-5wkraj).
+const worktreeBranchReadAttempts = 3
+
+// readWorktreeBranch reads the branch of the worktree at dir, up to
+// worktreeBranchReadAttempts times, and returns the last error when none of the
+// reads answers.
+func readWorktreeBranch(read func(dir string) (string, error), dir string) (string, error) {
+	var err error
+	for range worktreeBranchReadAttempts {
+		var branch string
+		if branch, err = read(dir); err == nil {
+			return branch, nil
+		}
+	}
+	return "", err
 }
 
 // branchBead is the bead a polecat branch names: the <bead> of
