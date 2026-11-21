@@ -5,6 +5,8 @@ package doltcred
 
 import (
 	"bufio"
+	"encoding"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,11 +25,35 @@ type Credential struct {
 // redacted stands in for the password in every rendering of a Credential.
 const redacted = "<redacted>"
 
-// String implements fmt.Stringer: %v and %+v name the user and never print the
-// password.
+// String implements fmt.Stringer and names the user and never the password.
 func (c Credential) String() string {
 	return fmt.Sprintf("doltcred.Credential{User:%q, Password:%s}", c.User, redacted)
 }
+
+// Format implements fmt.Formatter and writes the same redaction for every verb.
+// Without it fmt reaches the Password field directly for %#v, %d and any other
+// verb that does not call String, so a Credential never prints its password
+// however it is formatted, whether directly, through a pointer, as a struct
+// field or in a slice.
+func (c Credential) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, c.String())
+}
+
+// GoString implements fmt.GoStringer, so the %#v form is the redaction too.
+func (c Credential) GoString() string { return c.String() }
+
+// MarshalJSON implements json.Marshaler and encodes the user with the
+// password replaced by the redaction.
+func (c Credential) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		User     string `json:"user"`
+		Password string `json:"password"`
+	}{c.User, redacted})
+}
+
+// MarshalText implements encoding.TextMarshaler and writes the redaction, so a
+// text encoder never reaches the password either.
+func (c Credential) MarshalText() ([]byte, error) { return []byte(c.String()), nil }
 
 // LogValue implements slog.LogValuer, so a structured log line redacts the
 // password as String does.
@@ -39,8 +65,12 @@ func (c Credential) LogValue() slog.Value {
 }
 
 var (
-	_ fmt.Stringer   = Credential{}
-	_ slog.LogValuer = Credential{}
+	_ fmt.Stringer           = Credential{}
+	_ fmt.Formatter          = Credential{}
+	_ fmt.GoStringer         = Credential{}
+	_ json.Marshaler         = Credential{}
+	_ encoding.TextMarshaler = Credential{}
+	_ slog.LogValuer         = Credential{}
 )
 
 // Read returns the credential the file at path holds. An empty path, or a path

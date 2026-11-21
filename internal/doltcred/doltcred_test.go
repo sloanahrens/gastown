@@ -3,6 +3,7 @@ package doltcred
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
@@ -251,13 +252,54 @@ func TestReadRefusesAnOverlongLine(t *testing.T) {
 	}
 }
 
+// leakSecret is distinctive enough that a substring match cannot be an accident.
+const leakSecret = "pw-9f3c1d7a-leak-canary"
+
+// TestCredentialFormattingHidesPassword formats a Credential with every verb a
+// log line can reach, directly and through a pointer, a struct field and a
+// slice, and fails on any output that holds the password or drops the user.
 func TestCredentialFormattingHidesPassword(t *testing.T) {
 	t.Parallel()
-	const secret = "s3cr3t-value"
-	c := Credential{User: "gt", Password: secret}
-	for _, format := range []string{"%v", "%+v", "%s"} {
-		if out := fmt.Sprintf(format, c); strings.Contains(out, secret) {
-			t.Errorf("%s printed the password: %q", format, out)
+	c := Credential{User: "gt-user", Password: leakSecret}
+	type holder struct{ Cred Credential }
+	values := map[string]any{
+		"value":   c,
+		"pointer": &c,
+		"field":   holder{Cred: c},
+		"slice":   []Credential{c},
+	}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x"} {
+		for name, v := range values {
+			t.Run(verb+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				out := fmt.Sprintf(verb, v)
+				if strings.Contains(out, leakSecret) || strings.Contains(out, hex.EncodeToString([]byte(leakSecret))) {
+					t.Errorf("Sprintf(%q) of the %s printed the password: %s", verb, name, out)
+				}
+				if !strings.Contains(out, "gt-user") {
+					t.Errorf("Sprintf(%q) of the %s dropped the user: %s", verb, name, out)
+				}
+			})
+		}
+	}
+}
+
+// TestCredentialRedactingMethodsHideThePassword calls the redacting methods
+// directly: fmt prefers Format, so only a direct call reaches GoString and
+// MarshalText.
+func TestCredentialRedactingMethodsHideThePassword(t *testing.T) {
+	t.Parallel()
+	c := Credential{User: "gt-user", Password: leakSecret}
+	text, err := c.MarshalText()
+	if err != nil {
+		t.Fatalf("MarshalText: %v", err)
+	}
+	for name, out := range map[string]string{"String": c.String(), "GoString": c.GoString(), "MarshalText": string(text)} {
+		if strings.Contains(out, leakSecret) {
+			t.Errorf("%s printed the password: %s", name, out)
+		}
+		if !strings.Contains(out, "gt-user") {
+			t.Errorf("%s dropped the user: %s", name, out)
 		}
 	}
 }
