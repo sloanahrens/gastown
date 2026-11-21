@@ -32,11 +32,13 @@ type RemoteRef struct {
 // that landed. Best effort: a failed list or delete is logged, and the
 // landing's record is already written, so nothing here fails or re-delays it.
 //
-// A branch another open ready-to-land bead names in its READY TO LAND block
-// is kept, on origin and in the rig repository alike: that bead's work is on
-// it, and the landed bead's id in the name proves nothing about whose commits
-// it holds (gt-9c46mz). A ready list that cannot be read keeps every branch of
-// the reap, because an answer that was not read cannot clear a branch.
+// A branch another open ready-to-land bead names is kept, on origin and in the
+// rig repository alike: that bead's work is on it, and the landed bead's id in
+// the name proves nothing about whose commits it holds (gt-9c46mz). The name
+// is read from the bead's READY TO LAND block, or, when that block is absent or
+// does not parse, from its notes (gt-ebg6yx). A ready list that cannot be read
+// keeps every branch of the reap, because an answer that was not read cannot
+// clear a branch.
 //
 // It returns every branch it found for the bead, deleted or not, so the
 // landing path can also refresh the seat of each polecat that authored one
@@ -90,9 +92,12 @@ func (w *Worker) reapBeadBranches(beadID string) []string {
 }
 
 // readyBranchHolders maps each polecat branch an open ready-to-land bead other
-// than beadID names in its last READY TO LAND block to that bead's id. The
-// list is the landing pass's own (the label, every status but closed), so a
-// deferred bead that still waits to land holds its branch too.
+// than beadID holds to that bead's id. A bead holds the branch its last READY
+// TO LAND block names, and — when that block is absent or does not parse — any
+// polecat branch its notes name, because the notes are then the only place the
+// branch is written and the work is still on it (gt-ebg6yx). The list is the
+// landing pass's own (the label, every status but closed), so a deferred bead
+// that still waits to land holds its branch too.
 func (w *Worker) readyBranchHolders(beadID string) (map[string]string, error) {
 	issues, err := w.Beads.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
 	if err != nil {
@@ -105,9 +110,37 @@ func (w *Worker) readyBranchHolders(beadID string) (map[string]string, error) {
 		}
 		if work, ok := land.ParseReadyNote(issue.Notes); ok {
 			holders[work.Branch] = issue.ID
+			continue
+		}
+		for _, branch := range polecatBranchesIn(issue.Notes) {
+			holders[branch] = issue.ID
 		}
 	}
 	return holders, nil
+}
+
+// polecatBranchesIn returns each polecat branch the free text notes names, once
+// each, in the order it first appears. A branch name carries no space, so each
+// whitespace-separated field is read with the punctuation prose wraps a name in
+// trimmed off, and only a name shaped like a polecat branch — the rule
+// beadForBranch reads a branch by — is returned.
+func polecatBranchesIn(notes string) []string {
+	var found []string
+	seen := map[string]bool{}
+	for _, field := range strings.Fields(notes) {
+		field = strings.Trim(field, "`'\"()[]<>{},;:.*")
+		i := strings.Index(field, polecatBranchPrefix)
+		if i < 0 {
+			continue
+		}
+		name := field[i:]
+		if seen[name] || beadForBranch(name) == "" {
+			continue
+		}
+		seen[name] = true
+		found = append(found, name)
+	}
+	return found
 }
 
 // deleteLocalBranch deletes the rig repository's copy of a polecat branch
