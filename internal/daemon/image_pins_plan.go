@@ -114,7 +114,8 @@ type ImagePinPlan struct {
 // imagePinsFileBehind commits behind its source tip, below the pins command's
 // threshold so the refresh lands before the guard; a pin that is not at its tip
 // also files once its commit is imagePinsFileAge older than the tip, whatever
-// its count. A pin whose read failed never files and is named in Unreadable,
+// its count, and a pin whose own commit lacks the samples build files at once.
+// A pin whose read failed never files and is named in Unreadable,
 // and raises image-pins-unreadable: its distance is unknown, so it is never
 // treated as fresh. A pin whose age read failed keeps its count rules and
 // raises image-pins-unreadable naming its unreadable age. A pin
@@ -159,8 +160,10 @@ func PlanImagePins(pins []ImagePinState, open *ImagePinRefreshBead, now time.Tim
 		}
 		// A source that moves rarely ages past the guard's bound with few
 		// commits behind it, so an old commit files too; a pin at its tip has
-		// not aged against it.
-		if pin.Behind >= imagePinsFileBehind || (pin.Tip != pin.Pin && pin.Age >= imagePinsFileAge) {
+		// not aged against it. A bd pin whose own commit lacks the samples build
+		// files whatever its count and age (gt-o2hvs3). Err was handled above, so
+		// a failed read never reaches this rule.
+		if pin.Behind >= imagePinsFileBehind || (pin.Tip != pin.Pin && pin.Age >= imagePinsFileAge) || pin.LacksFloor {
 			plan.File = append(plan.File, pin)
 		}
 	}
