@@ -56,6 +56,55 @@ func callers(entries []CallEntry) []string {
 	return out
 }
 
+// TestCallEntryWrite is the bead's box: a line written before the write key
+// existed decodes to an unknown write, and a line carrying the key decodes to
+// its value.
+func TestCallEntryWrite(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "no write key is unknown",
+			line: `{"ts":"2026-11-18T10:00:00Z","class":"read","caller":"pre-change","verb":"show","flags":[],"beads":[],"exit_code":0,"duration_ms":5}`,
+			want: "unknown",
+		},
+		{
+			name: "write true",
+			line: `{"ts":"2026-11-18T10:00:00Z","class":"write","caller":"wrote","verb":"create","write":true,"flags":[],"beads":[],"exit_code":0,"duration_ms":5}`,
+			want: "true",
+		},
+		{
+			name: "write false",
+			line: `{"ts":"2026-11-18T10:00:00Z","class":"read","caller":"read","verb":"show","write":false,"flags":[],"beads":[],"exit_code":0,"duration_ms":5}`,
+			want: "false",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			writeCallLog(t, dir, tc.line)
+			got, err := ReadCalls(dir, time.Time{}, 10)
+			if err != nil {
+				t.Fatalf("ReadCalls: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("entries = %d, want 1", len(got))
+			}
+			gotWrite := "unknown"
+			if w := got[0].Write; w != nil {
+				gotWrite = fmt.Sprint(*w)
+			}
+			if gotWrite != tc.want {
+				t.Errorf("Write = %s, want %s", gotWrite, tc.want)
+			}
+		})
+	}
+}
+
 // TestReadCallsQuery is acceptance box 1: the entries after since, oldest
 // first, at most limit, with a malformed line skipped.
 func TestReadCallsQuery(t *testing.T) {

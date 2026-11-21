@@ -29,8 +29,10 @@ type CallEntry struct {
 	Actor string `json:"actor,omitempty"`
 	Verb  string `json:"verb"`
 	// Write reports whether the verb is one that may change beads, so a line
-	// says whether the call wrote without the reader knowing the policy.
-	Write      bool     `json:"write"`
+	// says whether the call wrote without the reader knowing the policy. A line
+	// written before the key existed decodes to nil: its write is unknown, not
+	// a read.
+	Write      *bool    `json:"write"`
 	Flags      []string `json:"flags"`
 	Beads      []string `json:"beads"`
 	ExitCode   int      `json:"exit_code"`
