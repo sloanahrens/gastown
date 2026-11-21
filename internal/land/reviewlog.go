@@ -285,18 +285,18 @@ func tokenEnd(s string, i int) int {
 
 // acceptedLen is the length of the longest start of run the rule accepts that
 // this scan tries, or 0. The rule refuses a value that contains "://", so a token
-// followed by a URL is tried cut before the scheme: at the joiner before the
-// scheme word, then at the "://". The ASIA shape takes the whole value, so a key
+// followed by a URL is cut at the "://". The ASIA shape takes the whole value, so a key
 // id followed by more token bytes (`ASIA...+x`, `ASIA...z9`) is tried cut where
-// its upper-case and digit bytes end. Two cuts at most: the cost stays linear.
+// its upper-case and digit bytes end. One cut each: the cost stays linear.
 func acceptedLen(run string) int {
 	if config.LooksLikeSecret("", run) {
 		return len(run)
 	}
 	if at := strings.Index(run, "://"); at > 0 {
-		if p := strings.LastIndexAny(run[:at], tokenJoiners); p > 0 && config.LooksLikeSecret("", run[:p]) {
-			return p
-		}
+		// Cut at the "://": a token that holds a joiner of its own is cut at its
+		// end, not at the joiner before the scheme word, which would land inside it
+		// and leave its tail. The scheme word may go with the token. (An ASIA key
+		// id, which the rule takes whole, is cut below where its upper-case bytes end.)
 		if config.LooksLikeSecret("", run[:at]) {
 			return at
 		}

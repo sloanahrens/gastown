@@ -239,21 +239,44 @@ func TestReviewLogScrubLongRunsAreBounded(t *testing.T) {
 }
 
 // TestReviewLogScrubATokenBesideAScheme: the rule refuses any value containing
-// "://", so a token followed by a joiner and a URL, or by "://" itself, is cut
-// before the scheme: the token goes and the URL stays.
+// "://", so a token followed by a joiner and a URL, or by "://" itself, is cut at
+// the "://": the longest cut the rule accepts, so no byte of a token that holds a
+// joiner of its own survives (the scheme word before "://" may go with it); the
+// ASIA shape, which the rule takes whole, falls back to the joiner cut and keeps
+// the scheme word. The URL's own tail stays.
 func TestReviewLogScrubATokenBesideAScheme(t *testing.T) {
 	t.Parallel()
 	aws, sk, ghp := scrubTestFamilies["aws"], "s"+"k-"+"abcdefghijklmnop1234", "gh"+"p_"+strings.Repeat("a", 20)
 	for claim, want := range map[string]string{
-		aws + "/https://x.test":     "<redacted>/https://x.test",
-		sk + "/https://x.test/path": "<redacted>/https://x.test/path",
-		ghp + ":https://x":          "<redacted>:https://x",
-		aws + "://x":                "<redacted>://x",
-		"see (" + sk + "://host)":   "see (<redacted>://host)",
+		aws + "/https://x.test":                  "<redacted>://x.test",
+		sk + "/https://x.test/path":              "<redacted>://x.test/path",
+		ghp + ":https://x":                       "<redacted>://x",
+		aws + "://x":                             "<redacted>://x",
+		scrubTestFamilies["asia"] + "/https://x": "<redacted>/https://x",
+		"see (" + sk + "://host)":                "see (<redacted>://host)",
 		"sk-" + strings.Repeat("a", 6) + "/" + strings.Repeat("b", 12) + "://x": "<redacted>://x",
 	} {
 		if got := scrubBounded(t, claim); got != want {
 			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+		}
+	}
+}
+
+// TestReviewLogScrubATokenWithAnInnerJoinerBesideAScheme: a token whose own body
+// holds a joiner, followed by each form of scheme, loses every byte: no 12-byte
+// window of it is in the output. A cut at the joiner before the scheme word would
+// land inside the token and leave its tail.
+func TestReviewLogScrubATokenWithAnInnerJoinerBesideAScheme(t *testing.T) {
+	t.Parallel()
+	token := "github" + "_pat_" + "11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz"
+	for _, shape := range []string{"%s://x", "(%s://host)", "%s/https://x", "%s:https://x", "k=%s://x", "%s.https://x", "%s-https://x"} {
+		claim := fmt.Sprintf(shape, token)
+		got := scrubBounded(t, claim)
+		for i := 0; i+12 <= len(token); i++ {
+			if strings.Contains(got, token[i:i+12]) {
+				t.Errorf("scrubClaim(%q) = %q keeps the credential bytes %q", claim, got, token[i:i+12])
+				break
+			}
 		}
 	}
 }
