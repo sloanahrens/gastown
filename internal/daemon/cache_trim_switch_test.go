@@ -7,11 +7,25 @@ import (
 	"testing"
 )
 
-// viaJob runs cacheTrimClaimViaJob on the fixture's claim with an empty
-// namespace ledger, the way one pass calls it for its first claim.
-func viaJob(f *cacheTrimFixture, apply bool, trimmed map[string]string) bool {
-	return f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
-		"gastown-polecat:dev", cacheTrimNamespace, 1<<30, apply, trimmed)
+// viaJob runs cacheTrimClaimViaJob on the fixture's claim and returns its
+// result, or fails the test if the call has not returned within the hang guard:
+// a Job that never finishes must end the call, not hang the test.
+func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]string) bool {
+	t.Helper()
+	done := make(chan bool, 1)
+	go func() {
+		done <- f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
+			"gastown-polecat:dev", cacheTrimNamespace, 1<<30, apply, trimmed)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
+	select {
+	case ok := <-done:
+		return ok
+	case <-ctx.Done():
+		t.Fatalf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", workspaceHangGuard)
+		return false
+	}
 }
 
 // TestCacheTrimViaJobUsesTheClaimJobOnly pins that the claim is trimmed by the
@@ -22,7 +36,7 @@ func TestCacheTrimViaJobUsesTheClaimJobOnly(t *testing.T) {
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
 	})
-	if !viaJob(f, true, map[string]string{}) {
+	if !viaJob(t, f, true, map[string]string{}) {
 		t.Fatalf("a finished claim Job = false, want true; log: %s", f.log)
 	}
 	if applied := f.applied(t); len(applied) != 1 || applied[0] != "Job "+cacheTrimJob {
@@ -43,7 +57,7 @@ func TestCacheTrimViaJobFailureReturnsFalse(t *testing.T) {
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobLogVerb: {stdout: ""},
 	})
-	if viaJob(f, true, map[string]string{}) {
+	if viaJob(t, f, true, map[string]string{}) {
 		t.Fatalf("a claim Job with no result line = true, want false")
 	}
 	if want := "cache trim " + cacheTrimClaimName + " in " + cacheTrimNamespace + ": failed: "; !strings.Contains(f.log.String(), want) {
@@ -57,7 +71,7 @@ func TestCacheTrimViaJobFailureReturnsFalse(t *testing.T) {
 func TestCacheTrimViaJobRefusesASecondClaimInANamespace(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", nil)
-	if !viaJob(f, true, map[string]string{cacheTrimNamespace: "gt-cache-other"}) {
+	if !viaJob(t, f, true, map[string]string{cacheTrimNamespace: "gt-cache-other"}) {
 		t.Fatalf("a second claim in one namespace = false, want true (a verdict, not a retry)")
 	}
 	if applied := f.applied(t); len(applied) != 0 {
@@ -75,7 +89,7 @@ func TestCacheTrimViaJobStopsAtAPodReadItCannotMake(t *testing.T) {
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		"get pods -n " + cacheTrimNamespace + " -o json": {stderr: "error: connection refused", code: 1},
 	})
-	if viaJob(f, true, map[string]string{}) {
+	if viaJob(t, f, true, map[string]string{}) {
 		t.Fatalf("an unreadable pod list = true, want false")
 	}
 	if applied := f.applied(t); len(applied) != 0 {
@@ -88,7 +102,7 @@ func TestCacheTrimViaJobStopsAtAPodReadItCannotMake(t *testing.T) {
 func TestCacheTrimViaJobDryRunAppliesNothing(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", nil)
-	if !viaJob(f, false, map[string]string{}) {
+	if !viaJob(t, f, false, map[string]string{}) {
 		t.Fatalf("a dry run = false, want true; log: %s", f.log)
 	}
 	if applied := f.applied(t); len(applied) != 0 {
@@ -106,7 +120,7 @@ func TestCacheTrimViaJobPassesTheSandboxCount(t *testing.T) {
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobLogVerb: {stdout: "removed 0 absent 0 kept 0\n"},
 	})
-	if !viaJob(f, true, map[string]string{}) {
+	if !viaJob(t, f, true, map[string]string{}) {
 		t.Fatalf("a finished claim Job = false, want true; log: %s", f.log)
 	}
 	// The applied document is indented JSON, so the flag and its value are
@@ -122,3 +136,26 @@ func TestCacheTrimViaJobPassesTheSandboxCount(t *testing.T) {
 // sandboxesFlag is the claim Job's `--sandboxes 1` argument pair in an applied
 // JSON document, whatever its indentation.
 var sandboxesFlag = regexp.MustCompile(`"--sandboxes",\s*"1"`)
+
+// sandboxesZeroFlag is the same pair for a claim no pod mounts.
+var sandboxesZeroFlag = regexp.MustCompile(`"--sandboxes",\s*"0"`)
+
+// TestCacheTrimViaJobAppliesWithZeroSandboxes pins that a readable pod list with
+// no pod mounting the claim is not a refusal: the claim Job mounts the claim
+// itself, so it is applied with a sandbox count of 0.
+func TestCacheTrimViaJobAppliesWithZeroSandboxes(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		"get pods -n " + cacheTrimNamespace + " -o json": {stdout: `{"items":[]}`},
+		cacheTrimClaimJobLogVerb:                         {stdout: "removed 0 absent 0 kept 0\n"},
+	})
+	if !viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a claim no pod mounts = false, want true; log: %s", f.log)
+	}
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") && sandboxesZeroFlag.MatchString(call.stdin) {
+			return
+		}
+	}
+	t.Error("no applied document carries --sandboxes 0 for a claim no pod mounts")
+}

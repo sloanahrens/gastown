@@ -4,14 +4,15 @@ import "context"
 
 // cacheTrimClaimViaJob trims one claim through the claim Job and nothing else:
 // it reads the pods that mount the claim only for the sandbox count the Job's
-// planner needs, and never lists the claim, never execs into a seat pod, and
-// never reads a listing through a Job log. It reports whether the claim is
-// judged for this pass: false is a failure the pass retries or parks, true a
-// trim that ran or a verdict. The run and park records are the beads that
-// follow the switch.
+// planner needs, and never lists the claim, never execs into a seat pod and
+// never reads a listing through a Job log. A count of zero is a valid input (no
+// running pod mounts the claim; the Job mounts it itself) and is applied as
+// such. It reports whether the claim is judged for this pass: false is a
+// failure, true a trim that ran or a verdict.
 //
-// Nothing calls it yet (cache trim, bead 7/10: cacheTrimClaim is routed to it
-// by the next bead).
+// The pod-read block below is copied from the old body of cacheTrimClaim and
+// dies with it (bead gt-4bgici). Nothing calls this yet: bead gt-zc1d92 routes
+// cacheTrimClaim to it.
 func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
 	sandboxes, _, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
