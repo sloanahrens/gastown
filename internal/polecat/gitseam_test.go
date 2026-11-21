@@ -88,4 +88,22 @@ func TestGitOpenerExecAnswersWorktreeRoot(t *testing.T) {
 			}
 		})
 	}
+
+	// A runner that fails to answer says nothing about the tree, so the
+	// worktree is not a root: the fail-closed branch of isWorktreeRoot.
+	t.Run("runner fails", func(t *testing.T) {
+		t.Parallel()
+		var calls []git.ExecCall
+		rec := func(c git.ExecCall) (string, string, error) {
+			calls = append(calls, c)
+			return "", "", errors.New("git did not run")
+		}
+
+		if got := isWorktreeRoot(gitOpener{exec: rec}, dir); got {
+			t.Fatal("isWorktreeRoot = true when the runner failed, want false")
+		}
+		if len(calls) != 1 || strings.Join(calls[0].Args(), " ") != "rev-parse --show-toplevel" {
+			t.Fatalf("runner saw %v, want one rev-parse --show-toplevel call", calls)
+		}
+	})
 }
