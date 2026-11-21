@@ -22,6 +22,20 @@ func derivedInputPaths(out, root string) []string {
 	return paths
 }
 
+// missingFromInputList returns, in order, each derived directory that no path of
+// PinInputPaths("devops") covers, and nil when the list covers them all, so the
+// guard can name the directory a static list lacks (gt-tjfeqp).
+func missingFromInputList(derived []string) []string {
+	paths := PinInputPaths("devops")
+	var missing []string
+	for _, dir := range derived {
+		if !coveredBy(paths, dir) {
+			missing = append(missing, dir)
+		}
+	}
+	return missing
+}
+
 // moduleRelative returns dir relative to root, with the root itself as ".", and
 // false when dir is neither root nor under it.
 func moduleRelative(dir, root string) (string, bool) {
