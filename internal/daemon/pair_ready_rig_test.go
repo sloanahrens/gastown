@@ -166,7 +166,7 @@ func TestPairReadyViewerTokenNeverCrossesPlaintext(t *testing.T) {
 	require.NotNil(t, got.API)
 
 	ctx := context.Background()
-	_, err := got.API.ListBranches(ctx, "town", "gastown", 1, 10)
+	_, err := got.API.ListRefs(ctx, "town", "gastown", "green/")
 	require.Error(t, err, "a plain http read of a public host was not refused")
 	assert.Contains(t, err.Error(), "refusing to send the viewer credential over http to forgejo.example.invalid")
 	assert.NotContains(t, err.Error(), token)

@@ -85,11 +85,6 @@ const (
 	// pairReadyBudget bounds one read of every image rig, so the heartbeat is
 	// held for at most this long. A rig that runs past it keeps what it held.
 	pairReadyBudget = time.Minute
-	// pairReadyBranchLimit is how many branches one listing page asks for, and
-	// pairReadyBranchPages the most pages one rig's listing may run to. A listing
-	// that has not ended by then cannot be known to hold every green branch.
-	pairReadyBranchLimit = 50
-	pairReadyBranchPages = 20
 	// pairReadyBranchPrefix is the branch namespace the image build reads.
 	pairReadyBranchPrefix = "green/"
 	// pairReadyKeyPrefix keys one item: deploy-pair-ready:<rig>:<sha12>.
@@ -140,10 +135,12 @@ const (
 )
 
 // pairReadyAPI is the viewer's read of a rig's Forgejo repository: its green
-// branches, the comparison that says whether a green commit is newer, and the
-// images workflow run for that commit with the log of the job it ran.
+// branches, the repository itself (the confirmation a 404 from the green refs
+// is checked with), the comparison that says whether a green commit is newer,
+// and the images workflow run for that commit with the log of the job it ran.
 type pairReadyAPI interface {
-	ListBranches(ctx context.Context, owner, repo string, page, limit int) ([]forgejo.Branch, error)
+	ListRefs(ctx context.Context, owner, repo, prefix string) ([]forgejo.Ref, error)
+	Repository(ctx context.Context, owner, repo string) (*forgejo.Repository, error)
 	CompareCommits(ctx context.Context, owner, repo, base, head string) (*forgejo.CompareInfo, error)
 	ListRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error)
 	ListRunJobs(ctx context.Context, owner, repo string, runID int64) ([]forgejo.ActionRunJob, error)
@@ -956,43 +953,46 @@ func pairReadyBehindAny(r pairReadyRig, commit string, ready []string) (bool, er
 	return false, nil
 }
 
-// pairReadyScan is one rig's branch listing. complete says the listing reached
-// its end. An incomplete listing raises the branches it read and cannot clear a
-// pair on one it did not reach; err says why it ended early.
+// pairReadyScan is one rig's green listing. complete says the listing was read
+// to its answer; err says why it was not, and a failed listing reads nothing.
 type pairReadyScan struct {
 	greens   []pairReadyGreen
 	complete bool
 	err      error
 }
 
-// pairReadyGreenCommits lists every green/<sha12> branch of the rig's
-// repository. A branch whose name does not match the commit it points at is an
-// error: the stamp the registry is read by would be wrong. A listing that fails
-// on a page, or runs past pairReadyBranchPages, is incomplete rather than
-// failed: the pages already read are kept, and the ones not reached are named
-// in the scan's err.
+// pairReadyGreenCommits lists every green/<sha12> ref of the rig's repository
+// in one call. A ref whose name does not match the commit it points at is an
+// error: the stamp the registry is read by would be wrong. A 404 is ambiguous,
+// since a wrong or moved repository name answers it too, so one read of the
+// repository decides: a readable repository has no green refs, which is a
+// complete and empty scan; an unreadable one leaves the scan incomplete naming
+// the repository. Any other failed listing leaves the scan incomplete with
+// nothing read.
 func pairReadyGreenCommits(ctx context.Context, r pairReadyRig) (pairReadyScan, error) {
-	var out []pairReadyGreen
-	for page := 1; page <= pairReadyBranchPages; page++ {
-		branches, err := r.API.ListBranches(ctx, r.Owner, r.Repo, page, pairReadyBranchLimit)
-		if err != nil {
-			return pairReadyScan{greens: out, err: fmt.Errorf("listing page %d of %s/%s: %w", page, r.Owner, r.Repo, err)}, nil
-		}
-		for _, b := range branches {
-			stamp, ok := strings.CutPrefix(b.Name, pairReadyBranchPrefix)
-			if !ok {
-				continue
+	refs, err := r.API.ListRefs(ctx, r.Owner, r.Repo, pairReadyBranchPrefix)
+	if err != nil {
+		var apiErr *forgejo.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			if _, repoErr := r.API.Repository(ctx, r.Owner, r.Repo); repoErr != nil {
+				return pairReadyScan{err: fmt.Errorf("the green refs of %s/%s answered 404 and the repository is not readable: %w", r.Owner, r.Repo, repoErr)}, nil
 			}
-			if !imagevalues.ValidCommit(b.Commit.ID) || greenRefShortSHA(b.Commit.ID) != stamp {
-				return pairReadyScan{}, fmt.Errorf("the branch %s points at commit %q, which its name does not carry", b.Name, b.Commit.ID)
-			}
-			out = append(out, pairReadyGreen{sha: b.Commit.ID, sha12: stamp})
+			return pairReadyScan{complete: true}, nil
 		}
-		if len(branches) < pairReadyBranchLimit {
-			return pairReadyScan{greens: out, complete: true}, nil
-		}
+		return pairReadyScan{err: fmt.Errorf("listing the green refs of %s/%s: %w", r.Owner, r.Repo, err)}, nil
 	}
-	return pairReadyScan{greens: out, err: fmt.Errorf("the branch listing of %s/%s runs past %d pages", r.Owner, r.Repo, pairReadyBranchPages)}, nil
+	var out []pairReadyGreen
+	for _, ref := range refs {
+		stamp, ok := strings.CutPrefix(ref.Name, pairReadyBranchPrefix)
+		if !ok {
+			continue
+		}
+		if !imagevalues.ValidCommit(ref.SHA) || greenRefShortSHA(ref.SHA) != stamp {
+			return pairReadyScan{}, fmt.Errorf("the branch %s points at commit %q, which its name does not carry", ref.Name, ref.SHA)
+		}
+		out = append(out, pairReadyGreen{sha: ref.SHA, sha12: stamp})
+	}
+	return pairReadyScan{greens: out, complete: true}, nil
 }
 
 // pairReadyKey is one pair item's key: deploy-pair-ready:<rig>:<sha12>.

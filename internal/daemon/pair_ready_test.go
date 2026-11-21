@@ -52,20 +52,20 @@ func digestOf(body []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// fakePairAPI is the viewer's Forgejo read: the branches a listing returns, the
-// commit counts a comparison returns (keyed "base...head"), and the images
-// workflow runs with their jobs and logs. A comparison with no entry is an
-// error, so a test that drops one exercises that refusal.
+// fakePairAPI is the viewer's Forgejo read: the branches a refs listing answers
+// from, the commit counts a comparison returns (keyed "base...head"), and the
+// images workflow runs with their jobs and logs. A comparison with no entry is
+// an error, so a test that drops one exercises that refusal.
 type fakePairAPI struct {
 	branches  []forgejo.Branch
 	branchErr error
-	// pageErrAt makes the listing fail on that page, after the pages before it
-	// answered: a scan that ended early, not one that never started.
-	pageErrAt int
-	// endless makes every listing page a full page of branches that are not
-	// green, so the listing never ends.
-	endless  bool
-	compares map[string]int
+	// repoErr fails the repository read a 404 from the refs listing is checked
+	// with, so a test drives an unreadable repository.
+	repoErr error
+	// refsQueries records the prefix of each refs listing, so a test can count
+	// the listing's calls and see which namespace it asked for.
+	refsQueries []string
+	compares    map[string]int
 	// compareCalls counts the comparisons made, so a test can assert the check
 	// judged a commit without asking Forgejo.
 	compareCalls int
@@ -91,24 +91,29 @@ type fakePairAPI struct {
 	jobReads    int
 }
 
-func (f *fakePairAPI) ListBranches(_ context.Context, _, _ string, page, limit int) ([]forgejo.Branch, error) {
+// ListRefs answers the refs under prefix in one call, as Forgejo does: only the
+// branches whose names start with it.
+func (f *fakePairAPI) ListRefs(_ context.Context, _, _, prefix string) ([]forgejo.Ref, error) {
+	f.refsQueries = append(f.refsQueries, prefix)
 	if f.branchErr != nil {
 		return nil, f.branchErr
 	}
-	if f.pageErrAt != 0 && page == f.pageErrAt {
-		return nil, errors.New("forgejo answered 500 on that page")
-	}
-	if f.endless {
-		out := make([]forgejo.Branch, limit)
-		for i := range out {
-			out[i].Name = "feature/" + strconv.Itoa(page*limit+i)
+	var out []forgejo.Ref
+	for _, b := range f.branches {
+		if strings.HasPrefix(b.Name, prefix) {
+			out = append(out, forgejo.Ref{Name: b.Name, SHA: b.Commit.ID})
 		}
-		return out, nil
 	}
-	if page > 1 {
-		return nil, nil
+	return out, nil
+}
+
+// Repository answers the repository read a 404 from the refs listing is
+// checked with. repoErr is that read's failure.
+func (f *fakePairAPI) Repository(_ context.Context, owner, repo string) (*forgejo.Repository, error) {
+	if f.repoErr != nil {
+		return nil, f.repoErr
 	}
-	return f.branches, nil
+	return &forgejo.Repository{FullName: owner + "/" + repo}, nil
 }
 
 func (f *fakePairAPI) CompareCommits(_ context.Context, _, _, base, head string) (*forgejo.CompareInfo, error) {
@@ -833,14 +838,6 @@ func TestPairReadyFailedReadAlarmsTheQueue(t *testing.T) {
 			want:    "HTTP 503",
 		},
 		{
-			name: "the branch listing never ends",
-			apply: func(_ *testing.T, fx *pairFixture) {
-				fx.api.endless = true
-			},
-			wantKey: "deploy-pair-unreadable:rig:gastown",
-			want:    "runs past",
-		},
-		{
 			name: "the values file does not parse",
 			apply: func(t *testing.T, fx *pairFixture) {
 				path := imagevalues.PathIn(filepath.Join(fx.town, "gastown"))
@@ -983,78 +980,88 @@ func TestPairReadyFailedReadsForgetWhatItHeld(t *testing.T) {
 	})
 }
 
-// TestPairReadyPartialScanRaisesWhatItRead: a listing that fills its first page
-// and then fails leaves the scan incomplete, not failed. The pairs it read are
-// still raised, so a slow listing cannot discard the whole rig's scan.
-func TestPairReadyPartialScanRaisesWhatItRead(t *testing.T) {
+// TestPairReadyReadsTheGreensWithOneRefsCall: a repository holds 300 branches
+// that are not green beside two green ones. The check reads the greens with one
+// refs call under the green/ prefix, not by paging every branch, and judges both.
+func TestPairReadyReadsTheGreensWithOneRefsCall(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
-	pages := make([]forgejo.Branch, pairReadyBranchLimit)
-	pages[0] = fx.api.branches[0]
-	for i := 1; i < len(pages); i++ {
-		pages[i].Name = "feature/" + strconv.Itoa(i)
+	for i := range 300 {
+		fx.api.branches = append(fx.api.branches, forgejo.Branch{Name: "feature/" + strconv.Itoa(i)})
 	}
-	fx.api.branches = pages
-	fx.api.pageErrAt = 2
+	fx.api.branches = append(fx.api.branches, pairBranch(pairOther))
+	fx.api.compares[pairOther+"..."+pairRunning] = 0
+	fx.api.compares[pairRunning+"..."+pairOther] = 7
+	reg := fx.reg.(*fakePairRegistry)
+	reg.digests[imagevalues.DaemonImage+"@"+pairOther12] = digestOf([]byte("other daemon"))
+	reg.digests[imagevalues.PolecatImage+"@"+pairOther12] = digestOf([]byte("other polecat"))
 
 	fx.run(pairT0)
 
-	items := fx.check.observed()
-	require.Len(t, items, 2)
-	assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key, "a pair read before the listing failed was discarded")
-	assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
-	assert.Contains(t, items[1].Summary, "listing page 2")
-	require.NotEmpty(t, fx.logs)
-	assert.Contains(t, fx.logs[0], "listing page 2")
+	assert.Equal(t, []string{"green/"}, fx.api.refsQueries, "the greens were not read with one refs call under green/")
+	var keys []string
+	for _, item := range fx.check.observed() {
+		keys = append(keys, item.Key)
+	}
+	assert.ElementsMatch(t, []string{
+		"deploy-pair-ready:gastown:" + pairGreen12,
+		"deploy-pair-ready:gastown:" + pairOther12,
+	}, keys, "a green the refs call returned was not judged")
 }
 
-// TestPairReadyPartialScanKeepsThePairItDidNotReach: an incomplete scan says
-// nothing about a branch it never read, so the pair last raised for that branch
-// stays until a scan reaches it.
-func TestPairReadyPartialScanKeepsThePairItDidNotReach(t *testing.T) {
+// TestPairReadyA404ReadsAsNoGreenRefs: a repository with no green refs answers
+// 404 to the refs call. A wrong or moved repository name answers it too, so the
+// answer is believed only when a read of the repository succeeds: then the pair
+// the rig held is cleared and no unreadable item is raised. An unreadable
+// repository, and any other refusal, keeps the pair and raises the unreadable
+// item.
+func TestPairReadyA404ReadsAsNoGreenRefs(t *testing.T) {
 	t.Parallel()
-	fx := newPairFixture(t)
-	fx.run(pairT0)
-	require.Len(t, fx.check.observed(), 1)
-
-	// The next listing reads one full page of non-green branches and never
-	// reaches the green one.
-	pages := make([]forgejo.Branch, pairReadyBranchLimit)
-	for i := range pages {
-		pages[i].Name = "feature/" + strconv.Itoa(i)
+	refusal := func(status int) error {
+		return &forgejo.APIError{Method: http.MethodGet, Path: "/repos/town/gastown/git/refs/heads/green/", StatusCode: status, Body: "refused"}
 	}
-	fx.api.branches = pages
-	fx.api.pageErrAt = 2
-	fx.run(pairT0.Add(pairReadyInterval))
+	t.Run("a 404 reads as no green refs", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 1)
 
-	items := fx.check.observed()
-	require.Len(t, items, 2)
-	assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key, "a pair the partial scan did not reach was cleared")
-	assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
-}
+		fx.api.branchErr = refusal(http.StatusNotFound)
+		fx.run(pairT0.Add(pairReadyInterval))
 
-// TestPairReadyPartialScanClearsThePairItReached: a branch the incomplete scan
-// did reach is judged. Its polecat image gone, the pair item clears even though
-// the listing ended early, because the scan looked at that branch.
-func TestPairReadyPartialScanClearsThePairItReached(t *testing.T) {
-	t.Parallel()
-	fx := newPairFixture(t)
-	fx.run(pairT0)
-	require.Len(t, fx.check.observed(), 1)
+		assert.Empty(t, fx.check.observed(), "a repository with no green refs kept the pair it held or raised an item")
+	})
+	t.Run("a 404 for a repository that is not readable raises the unreadable item and does not clear the held pair", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 1)
 
-	pages := make([]forgejo.Branch, pairReadyBranchLimit)
-	pages[0] = fx.api.branches[0]
-	for i := 1; i < len(pages); i++ {
-		pages[i].Name = "feature/" + strconv.Itoa(i)
-	}
-	fx.api.branches = pages
-	fx.api.pageErrAt = 2
-	delete(fx.reg.(*fakePairRegistry).digests, imagevalues.PolecatImage+"@"+pairGreen12)
-	fx.run(pairT0.Add(pairReadyInterval))
+		fx.api.branchErr = refusal(http.StatusNotFound)
+		fx.api.repoErr = refusal(http.StatusNotFound)
+		fx.run(pairT0.Add(pairReadyInterval))
 
-	items := fx.check.observed()
-	require.Len(t, items, 1, "a pair the incomplete scan reached was not cleared")
-	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+		items := fx.check.observed()
+		require.Len(t, items, 2, "an unreadable repository cleared the pair the rig held")
+		assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+		assert.Equal(t, "deploy-pair-unreadable:rig:gastown", items[1].Key)
+		assert.Contains(t, items[1].Summary, "town/gastown")
+	})
+	t.Run("any other status is an unreadable listing", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 1)
+
+		fx.api.branchErr = refusal(http.StatusForbidden)
+		fx.run(pairT0.Add(pairReadyInterval))
+
+		items := fx.check.observed()
+		require.Len(t, items, 2, "a refused listing cleared the pair the rig held")
+		assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+		assert.Equal(t, "deploy-pair-unreadable:rig:gastown", items[1].Key)
+		assert.Contains(t, items[1].Summary, "403")
+	})
 }
 
 // TestPairReadyOneBranchsFailedReadKeepsThePass: a comparison or image read
