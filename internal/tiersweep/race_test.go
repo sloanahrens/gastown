@@ -124,4 +124,11 @@ func TestRaceTierRunsEveryEntryAndSumsTheirCounts(t *testing.T) {
 	if w := fmt.Sprintf("tier-sweep: race RED passed=1 failed=1 skipped=0 failed: ./two (logs %s) in 0s", s.Opts.LogDir); line != w || !red {
 		t.Errorf("raceTier() = %q, %v; want %q, true", line, red, w)
 	}
+	// A RED in the first entry is not masked by a later pass (gt-uqklea).
+	fake = &fakeTier{codes: map[string]int{". ./one": 1}}
+	s = raceSweep(t, fake)
+	line, red = s.raceTier(runs)
+	if w := fmt.Sprintf("tier-sweep: race RED passed=1 failed=1 skipped=0 failed: ./one (logs %s) in 0s", s.Opts.LogDir); line != w || !red {
+		t.Errorf("raceTier() = %q, %v; want %q, true", line, red, w)
+	}
 }
