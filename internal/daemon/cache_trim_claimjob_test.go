@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
@@ -276,22 +275,39 @@ func (f *cacheTrimFixture) onClaimJobWait(fn func()) {
 	}
 }
 
-// TestCacheTrimClaimJobBudgetOutlivesThePassContext pins that the claim Job's
-// wait runs under the claim's own budget: the pass context ends at five minutes,
-// the wait runs to six, and the Job's counts are still returned.
+// TestCacheTrimClaimJobBudgetOutlivesThePassContext pins that every cluster call
+// of a claim run (the apply, the wait, the result read) is made on the claim's
+// own budget and not on the pass context handed in: each call's context is
+// still live after the stand-in pass context ends during the wait, and carries
+// its own deadline of the wait plus the slack. The budget is read from the
+// context the call reaches exec.CommandContext with (cacheTrimCtxSeen), the
+// only place the kill a pass context causes can be seen.
 func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
 	})
-	clock := clockwork.NewFakeClockAt(diskMaintNow)
-	f.d.clock = clock
 	passCtx, endPass := context.WithCancel(context.Background())
 	defer endPass()
-	f.onClaimJobWait(func() { clock.Advance(5 * time.Minute); endPass(); clock.Advance(time.Minute) })
+	calls := 0
+	f.d.cacheTrimCtxSeen = func(ctx context.Context) {
+		calls++
+		if err := ctx.Err(); err != nil {
+			t.Errorf("cluster call %d ran on a context already ended (%v); want the claim's own live budget", calls, err)
+		}
+		deadline, ok := ctx.Deadline()
+		left := time.Until(deadline)
+		if !ok || left < cacheTrimClaimWaitTimeout-5*time.Minute || left > cacheTrimClaimWaitTimeout+cacheTrimClaimSlack {
+			t.Errorf("cluster call %d had a deadline %v away (set %v); want the wait plus the slack, %v at most", calls, left, ok, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
+		}
+	}
+	f.onClaimJobWait(endPass)
 	removed, absent, kept, err := f.d.cacheTrimClaimJobRun(passCtx, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName}, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, true)
 	if err != nil || removed != 4 || absent != 1 || kept != 2 {
-		t.Fatalf("a wait that outlives the pass context = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
+		t.Fatalf("a run whose pass context ends during the wait = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
+	}
+	if calls < 3 {
+		t.Errorf("the probe saw %d cluster calls; want the apply, the wait and the result read at least", calls)
 	}
 }
 
@@ -304,12 +320,10 @@ func TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait(t *testing.T) {
 		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
 		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
 	})
-	clock := clockwork.NewFakeClockAt(diskMaintNow)
-	f.d.clock = clock
 	daemonCtx, stopDaemon := context.WithCancel(context.Background())
 	defer stopDaemon()
 	f.d.ctx = daemonCtx
-	f.onClaimJobWait(func() { clock.Advance(5 * time.Minute); stopDaemon() })
+	f.onClaimJobWait(stopDaemon)
 	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
 	if err == nil || !strings.Contains(err.Error(), "the trim Job "+cacheTrimJob+" was cut off") {
 		t.Fatalf("a wait its context cut off = %v; want an error naming the Job and the cut-off", err)
