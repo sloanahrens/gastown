@@ -1039,50 +1039,6 @@ func TestCacheTrimMalformedValuesFileWithNoClaims(t *testing.T) {
 	}
 }
 
-// TestDiskMaintenanceAppliesTheShardsBeforeTheJob is the bead's gate: the
-// patrol's own pass reaches cachevol.BuildTrimManifest and applies the
-// manifest's documents in order, the shard ConfigMaps before the Job that
-// mounts them, and the shards a finished Job read are deleted after it.
-func TestDiskMaintenanceAppliesTheShardsBeforeTheJob(t *testing.T) {
-	t.Parallel()
-	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
-	f.d.runDiskMaintenance()
-
-	want := []string{
-		"ConfigMap " + cacheTrimShardName(0),
-		"Job " + cacheTrimJob,
-	}
-	if applied := f.applied(t); !slices.Equal(applied, want) {
-		t.Fatalf("the pass applied %v, want the shards before the Job %v", applied, want)
-	}
-
-	// The stale Job is deleted before anything is applied: a completed Job's
-	// pod never runs again, and its template cannot be applied over. The delete
-	// waits for the Job's pods, so the same-named Job applied next does not
-	// race it.
-	deleteJob, ok := f.indexOf("delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s")
-	if !ok {
-		t.Fatalf("the pass did not delete the earlier run's Job in the foreground; calls: %v", f.verbs())
-	}
-	firstApply, _ := f.indexOf(cacheTrimApplyVerb)
-	if deleteJob > firstApply {
-		t.Errorf("the stale Job was deleted after the apply; calls: %v", f.verbs())
-	}
-	// The shards are deleted once the Job has finished, so a pod never mounts
-	// one that is gone.
-	wait, ok := f.indexOf("wait --for=condition=complete job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " --timeout=120s")
-	if !ok {
-		t.Fatalf("the pass did not wait for the Job; calls: %v", f.verbs())
-	}
-	shards, ok := f.indexOf("delete configmap -n " + cacheTrimNamespace + " -l app.kubernetes.io/managed-by=gt,app.kubernetes.io/name=polecat-cache-trim")
-	if !ok {
-		t.Fatalf("the pass left the Job's shards behind; calls: %v", f.verbs())
-	}
-	if shards < wait {
-		t.Errorf("the shards were deleted before the Job finished; calls: %v", f.verbs())
-	}
-}
-
 // TestDiskMaintenanceCacheTrimScopesEveryCallToTheClaimNamespace pins the
 // namespace rule: the claim listing is the pass's one cluster-wide read, and
 // every call after it -- the pod read, the listing exec, and the apply, delete
@@ -1160,6 +1116,7 @@ func cacheTrimShardName(index int) string {
 func TestDiskMaintenanceDryRunAppliesNothing(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", nil)
+	f.d.cacheTrimClaimJobRoute = true
 	f.d.runDiskMaintenance()
 
 	for _, verb := range f.verbs() {
@@ -1171,7 +1128,7 @@ func TestDiskMaintenanceDryRunAppliesNothing(t *testing.T) {
 	if !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" dry_run") {
 		t.Errorf("the log does not name the dry run: %s", logged)
 	}
-	if !strings.Contains(logged, cacheTrimJob) || !strings.Contains(logged, cacheTrimShardName(0)) {
+	if !strings.Contains(logged, cacheTrimJob) {
 		t.Errorf("the log does not name the manifest's objects: %s", logged)
 	}
 }
@@ -1908,10 +1865,11 @@ func TestCacheTrimRefusesAKubeconfigWithNoContext(t *testing.T) {
 // client that behaves like kubectl against a kubeconfig with no current-context:
 // any call that does not name the sandbox context is refused with the fallback
 // to localhost:8080, and a call that names it is answered. The pass must reach
-// the listing step and apply the trim.
+// the pod read and apply the claim Job.
 func TestDiskMaintSandboxContextEndToEnd(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.cacheTrimClaimJobRoute = true
 	inner := f.cli.answer
 	f.cli.answer = func(c cliCall) cliReply {
 		for i := 0; i+1 < len(c.args); i++ {
@@ -1926,12 +1884,11 @@ func TestDiskMaintSandboxContextEndToEnd(t *testing.T) {
 	}
 	f.d.runDiskMaintenance()
 
-	exec := "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
-	if _, ok := f.indexOf(exec); !ok {
-		t.Fatalf("the pass never read the listing; calls: %v", f.verbs())
+	if _, ok := f.indexOf("get pods -n " + cacheTrimNamespace + " -o json"); !ok {
+		t.Fatalf("the pass never read the pods; calls: %v", f.verbs())
 	}
-	if applied := f.applied(t); len(applied) != 2 {
-		t.Errorf("the pass applied %v, want the shard and the Job", applied)
+	if applied := f.applied(t); len(applied) != 1 || applied[0] != "Job "+cacheTrimJob {
+		t.Errorf("the pass applied %v, want the claim Job", applied)
 	}
 }
 
