@@ -498,7 +498,7 @@ func (b Builder) source(ctx context.Context, name, src string) (string, func(), 
 		cleanup()
 		return "", nil, err
 	}
-	if err := checkFetchedPin(b.Git, dir, pin, b.pinsFile()); err != nil {
+	if err := checkFetchedPin(b.Git, b.goListRunner(), dir, pin, b.pinsFile()); err != nil {
 		cleanup()
 		return "", nil, err
 	}

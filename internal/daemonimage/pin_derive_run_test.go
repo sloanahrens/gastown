@@ -52,3 +52,25 @@ func TestGoListFailureCarriesTheCallAndStderr(t *testing.T) {
 		}
 	}
 }
+
+// TestBuilderGoListRunnerUsesItsGoSeamAndEnvironment: the builder's guard runs the
+// derivation through the builder's own Go seam with its environment, so a test
+// that fakes go answers the guard too.
+func TestBuilderGoListRunnerUsesItsGoSeamAndEnvironment(t *testing.T) {
+	t.Parallel()
+	var gotDir string
+	var gotEnv, gotArgs []string
+	b := Builder{Environ: []string{"A=1"}, Go: func(dir string, env []string, args ...string) ([]byte, error) {
+		gotDir, gotEnv, gotArgs = dir, env, args
+		return []byte("ok"), nil
+	}}
+
+	out, err := b.goListRunner()("/d", "list")
+
+	if err != nil || string(out) != "ok" || gotDir != "/d" || !reflect.DeepEqual(gotArgs, []string{"list"}) {
+		t.Errorf("runner = %q, %v; Go saw dir %q args %v", out, err, gotDir, gotArgs)
+	}
+	if !reflect.DeepEqual(gotEnv, []string{"A=1"}) {
+		t.Errorf("Go saw an environment of %d entries, want the builder's one", len(gotEnv))
+	}
+}
