@@ -90,3 +90,4 @@ The delete answered `Deleted sandbox gt-cheedo` and takes the volume through the
 - The copy is taken from the node's disk while the pod is gone; a running pod needs the sandbox stopped first, so nothing writes the volume mid-copy.
 - The PV name, node, path, size and commits are gt-cheedo's readings; re-read each for the next seat.
 - Whether the daemon pod is allowed to push the branch its nuke preserves; a refused push stops the nuke with the branch and verified bundle intact.
+- Step 4 is one hand push because the nuke's preserve step reads only the seat's own worktree, which holds none of the commits copied out of the volume (`gt polecat nuke --help`: it "pushes the polecat's branch"). Whether the copied commits could instead be fetched into that worktree's branch, so the plain nuke pushes them and no second push path exists, has not been tried: the worktree sits in the daemon pod's town copy while the bundle sits on the Mac, and the nuke deletes it.
