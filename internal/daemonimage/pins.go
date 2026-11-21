@@ -3,6 +3,7 @@ package daemonimage
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -188,7 +189,7 @@ const fetchTipDepth = MaxPinBehind + 1
 // errors: a fetched pin with no main to compare against is refused, never
 // passed. Its caller has refused a nil git, as FetchSource does before the
 // fetch runs.
-func checkFetchedPin(git bdbuild.Git, goList goListRunner, dir string, pin Pin, pinsPath string) error {
+func checkFetchedPin(git bdbuild.Git, goList goListRunner, notes io.Writer, dir string, pin Pin, pinsPath string) error {
 	argv := []string{"fetch"}
 	if len(PinInputPaths(pin.Name)) != 0 {
 		argv = append(argv, "--filter=blob:none")
@@ -203,7 +204,10 @@ func checkFetchedPin(git bdbuild.Git, goList goListRunner, dir string, pin Pin, 
 	if err != nil {
 		return fmt.Errorf("pin-drift guard: cannot read the main tip fetched for the %s pin: %w", pin.Name, err)
 	}
-	_, err = checkPinAgainstMain(git, goList, dir, pin, strings.TrimSpace(string(out)), pinsPath)
+	checked, err := checkPinAgainstMain(git, goList, dir, pin, strings.TrimSpace(string(out)), pinsPath)
+	for _, note := range checked {
+		fmt.Fprintln(notes, note)
+	}
 	return err
 }
 
@@ -255,13 +259,14 @@ func checkPinAgainstMain(git bdbuild.Git, goList goListRunner, dir string, pin P
 		}
 		out, err := runGoList(goList, dir)
 		if err != nil {
-			return nil, fmt.Errorf("pin-drift guard: rig %s pin %s: cannot derive the build's input directories with go list in %s (%v): fix that checkout or its toolchain, then rerun", pin.Name, short(pin.Commit), dir, err)
-		}
-		if missing := missingFromInputList(derivedInputPaths(string(out), dir)); len(missing) != 0 {
+			// The derivation is the better check, not the only one: the counts,
+			// the age and the closure walk above decided without it. Say so, loudly.
+			notes = append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s: go list could not derive the build's input directories in %s (%v); the static input list and the closure walk were used instead", pin.Name, short(pin.Commit), dir, err))
+		} else if missing := missingFromInputList(derivedInputPaths(string(out), dir)); len(missing) != 0 {
 			return nil, fmt.Errorf("pin-drift guard: %s input list lacks %s, which go list derives from the build: add it to PinInputPaths", pin.Name, missing[0])
 		}
 	}
-	return []string{fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), touching, MaxPinBehind, MaxPinAge)}, nil
+	return append(notes, fmt.Sprintf("pin-drift guard: rig %s pin %s is %d commits behind main %s, %d touching its inputs, within the %d-commit and %s bounds", pin.Name, short(pin.Commit), behind, short(main), touching, MaxPinBehind, MaxPinAge)), nil
 }
 
 // pinEdit is the exact edit a refused pin needs, for the reader to paste from
