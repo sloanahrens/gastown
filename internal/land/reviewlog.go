@@ -196,29 +196,50 @@ const redactedWord = "<redacted>"
 // quotes the reviewed code, and a credential-shaped word in it must not reach
 // the review log (gt-uxbi5y). A word is a maximal run of non-separator bytes.
 func scrubClaim(s string) string {
+	return scrubRuns(s, claimSeparator, scrubWord)
+}
+
+// scrubRuns applies fix to each run of bytes between separators and keeps every
+// separator byte.
+func scrubRuns(s string, separator func(byte) bool, fix func(string) string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	start := 0
 	for i := 0; i < len(s); i++ {
-		if !claimSeparator(s[i]) {
+		if !separator(s[i]) {
 			continue
 		}
-		b.WriteString(scrubWord(s[start:i]))
+		b.WriteString(fix(s[start:i]))
 		b.WriteByte(s[i])
 		start = i + 1
 	}
-	b.WriteString(scrubWord(s[start:]))
+	b.WriteString(fix(s[start:]))
 	return b.String()
 }
 
 // scrubWord is word, or redactedWord when its shape alone marks it a token: a
-// claim names no env key to read the answer from.
+// claim names no env key to read the answer from. A word joined by '=', ':' or
+// '/' is checked whole and then part by part, so `KEY=token` keeps its name.
 func scrubWord(word string) string {
-	if word != "" && config.LooksLikeSecret("", word) {
+	if secretShaped(word) {
 		return redactedWord
 	}
-	return word
+	return scrubRuns(word, claimJoiner, scrubPart)
 }
+
+func scrubPart(part string) string {
+	if secretShaped(part) {
+		return redactedWord
+	}
+	return part
+}
+
+func secretShaped(s string) bool { return s != "" && config.LooksLikeSecret("", s) }
+
+// claimJoiner is a byte that joins a token to a key name, a label or a path:
+// `KEY=token`, `token:value`, `dir/token`. A run holding one is checked whole and
+// part by part, because a run that starts with the name never starts like a token.
+func claimJoiner(c byte) bool { return c == '=' || c == ':' || c == '/' }
 
 func claimSeparator(c byte) bool {
 	switch c {

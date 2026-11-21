@@ -31,19 +31,54 @@ func TestReviewLogScrubKeepsProseURLAndPath(t *testing.T) {
 	}
 }
 
-// TestReviewLogScrubBoundHoldsNoSecret: the token straddles the bound, so a
-// scrub after boundedClaim would keep its head.
+// scrubTestFamilies are the token families the rule's prefix list names, one for
+// each provider the log saw: AWS, Google and Slack.
+var scrubTestFamilies = map[string]string{"aws": awsKey, "google": googleKey, "slack": slackKey}
+
+// TestReviewLogScrubJoinedTokens: a token joined to a key name, a label or a path
+// by '=', ':' or '/' is one run of bytes that does not start like a token, so each
+// part of the run is checked as well as the whole. The joined text is kept and
+// only the token is replaced.
+func TestReviewLogScrubJoinedTokens(t *testing.T) {
+	t.Parallel()
+	for family, token := range scrubTestFamilies {
+		for _, joiner := range []string{"=", ":", "/"} {
+			t.Run(family+joiner, func(t *testing.T) {
+				t.Parallel()
+				claim := "it logs KEY_NAME" + joiner + token + " verbatim"
+				want := "it logs KEY_NAME" + joiner + "<redacted> verbatim"
+				if got := scrubClaim(claim); got != want {
+					t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
+				}
+			})
+		}
+	}
+}
+
+// scrubTestSeparator is every byte the scrub splits on, words and joiners alike.
+func scrubTestSeparator(r rune) bool {
+	return r < 256 && (claimSeparator(byte(r)) || claimJoiner(byte(r)))
+}
+
+// TestReviewLogScrubBoundHoldsNoSecret: a token of each family straddles the
+// bound, so a scrub after boundedClaim would keep its head. Every part of the
+// recorded claim is held to the rule alone.
 func TestReviewLogScrubBoundHoldsNoSecret(t *testing.T) {
 	t.Parallel()
-	claim := strings.Repeat("x", maxRecordedClaimBytes-9) + " " + awsKey + " trailing words"
-	got := reviewFindingTexts([]Finding{{Detail: claim}})[0].Claim
-	if !strings.Contains(got, truncatedClaim) {
-		t.Fatalf("the claim was not cut at the bound, so the test does not reach it:\n%q", got)
-	}
-	for _, word := range strings.FieldsFunc(got, func(r rune) bool { return r < 256 && claimSeparator(byte(r)) }) {
-		if config.LooksLikeSecret("", word) || strings.Contains(word, "AK"+"IA") {
-			t.Errorf("the recorded claim keeps %q", word)
-		}
+	for family, token := range scrubTestFamilies {
+		t.Run(family, func(t *testing.T) {
+			t.Parallel()
+			claim := strings.Repeat("x", maxRecordedClaimBytes-9) + " k=" + token + " trailing words"
+			got := reviewFindingTexts([]Finding{{Detail: claim}})[0].Claim
+			if !strings.Contains(got, truncatedClaim) {
+				t.Fatalf("the claim was not cut at the bound, so the test does not reach it:\n%q", got)
+			}
+			for _, part := range strings.FieldsFunc(got, scrubTestSeparator) {
+				if config.LooksLikeSecret("", part) {
+					t.Errorf("the recorded claim keeps %q", part)
+				}
+			}
+		})
 	}
 }
 
