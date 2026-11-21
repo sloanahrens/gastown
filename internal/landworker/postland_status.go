@@ -51,6 +51,12 @@ const PostLandAlarmWindow = 7 * 24 * time.Hour
 // the live rate. Entries stay readable for PostLandAlarmWindow.
 const PostLandLateReadInterval = 10 * time.Minute
 
+// PostLandOrphanAfter is how long a pending verdict waits before the runner
+// asks whether the run behind its check ended without one. The check normally
+// ends in about 1.3 minutes, so a run silent this long is gone rather than
+// slow (gt-c2es4c).
+const PostLandOrphanAfter = 10 * time.Minute
+
 // postLandPendingLimit is how many pending entries a rig keeps. An entry past it
 // is dropped oldest first, and the drop is recorded in the same state
 // (MainState.PostLandDropped), so the attention queue says entries were lost
@@ -252,6 +258,15 @@ func sanitizeStatusText(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// RunEnd is a check run's end as the runner behind a pending verdict reports
+// it: Run and Status name the run, and Ended is true only when it can no
+// longer report a verdict.
+type RunEnd struct {
+	Run    int64
+	Status string
+	Ended  bool
+}
+
 // PendingPostLand is a landed commit whose status-mode verdict is still
 // waiting on CI. It lives in the rig's MainState, so a daemon restart resumes
 // the wait (gt-gg9hv.7.1).
@@ -267,6 +282,23 @@ type PendingPostLand struct {
 	// LastState and LastDescription are what that read found.
 	LastState       string `json:"last_state,omitempty"`
 	LastDescription string `json:"last_description,omitempty"`
+	// OrphanedAt is when the run behind the check was found ended without a
+	// verdict; zero while the run may still report.
+	OrphanedAt time.Time `json:"orphaned_at,omitzero"`
+	// OrphanRun is that run: its id and status, such as "11205 failure".
+	OrphanRun string `json:"orphan_run,omitempty"`
+}
+
+// markOrphan records that the run behind e's verdict ended without one, and
+// reports whether it marked: only the first ended answer marks, so a later
+// read keeps the run first seen gone.
+func (e *PendingPostLand) markOrphan(now time.Time, end RunEnd) bool {
+	if !end.Ended || !e.OrphanedAt.IsZero() {
+		return false
+	}
+	e.OrphanedAt = now
+	e.OrphanRun = fmt.Sprintf("%d %s", end.Run, end.Status)
+	return true
 }
 
 // PostLandUnknown is a landed commit whose post-land status context never
