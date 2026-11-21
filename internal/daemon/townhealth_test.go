@@ -720,6 +720,73 @@ func TestWriteTownHealth_PromotionField(t *testing.T) {
 	}
 }
 
+// promotionsTown is a town whose landing worker serves each named rig, each
+// promoting to a target with the given promote_via.
+func promotionsTown(t *testing.T, promoteVia map[string]string) (string, *Daemon) {
+	t.Helper()
+	town := t.TempDir()
+	reg := map[string]any{}
+	for name, via := range promoteVia {
+		reg[name] = map[string]any{}
+		writeDaemonRigConfigFile(t, filepath.Join(town, name),
+			`{"type":"rig","version":1,"name":"`+name+`","default_branch":"main","merge_queue":{"forgejo":{"promote_target":"git@github.com:acme/`+name+`.git","promote_via":"`+via+`"}}}`)
+	}
+	writeJSONFile(t, filepath.Join(town, "mayor", "rigs.json"), map[string]any{"version": 1, "rigs": reg})
+	return town, &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(io.Discard, "", 0),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			LandingWorker: &LandingWorkerConfig{Enabled: true},
+		}},
+	}
+}
+
+// PromotionsReleaseDriven pins gt-5w9hx9: a rig with promote_via app-promote
+// comes back marked, a rig with it empty does not (gt-9nigqs awaits a release).
+func TestPromotionsReleaseDriven(t *testing.T) {
+	t.Parallel()
+	town, d := promotionsTown(t, map[string]string{"apprig": "app-promote", "plainrig": ""})
+	for _, name := range []string{"apprig", "plainrig"} {
+		writeJSONFile(t, RedMainStatePath(town, name), landworker.MainState{LastGreen: "bbbb", LastRun: "bbbb"})
+	}
+
+	got, err := (&healthSources{d: d}).Promotions()
+	if err != nil {
+		t.Fatalf("Promotions: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Promotions = %+v, want apprig and plainrig", got)
+	}
+	for _, p := range got {
+		if want := p.Rig == "apprig"; p.ReleaseDriven != want {
+			t.Errorf("%s ReleaseDriven = %v, want %v", p.Rig, p.ReleaseDriven, want)
+		}
+	}
+}
+
+// A promotion record this run cannot read is still reported with its Err set,
+// even when the rig is release-driven: the claim never hides a failed read.
+func TestPromotionsReleaseDrivenUnreadableRecord(t *testing.T) {
+	t.Parallel()
+	town, d := promotionsTown(t, map[string]string{"apprig": "app-promote"})
+	// A directory where the record belongs: reading it fails, so the promotion
+	// is unknown even though the rig is release-driven.
+	if err := os.MkdirAll(RedMainStatePath(town, "apprig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := (&healthSources{d: d}).Promotions()
+	if err != nil {
+		t.Fatalf("Promotions: %v", err)
+	}
+	if len(got) != 1 || got[0].Rig != "apprig" {
+		t.Fatalf("Promotions = %+v, want the one release-driven rig", got)
+	}
+	if got[0].Err == nil {
+		t.Fatalf("apprig with an unreadable record = %+v, want its Err set", got[0])
+	}
+}
+
 // A parked decision is not a pending one: deferring gt-v4ssj.7 held needs-human
 // at 1 and hid the beads that arrived after it (gt-tk2xd).
 func TestWriteTownHealth_NeedsHumanCountsOnlyPendingBeads(t *testing.T) {
