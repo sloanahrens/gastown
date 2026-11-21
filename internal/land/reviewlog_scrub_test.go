@@ -63,7 +63,7 @@ func TestReviewLogScrubKeepsWhatIsNoSecret(t *testing.T) {
 // and what follows is kept.
 func TestReviewLogScrubATokenFollowedByTokenBytes(t *testing.T) {
 	t.Parallel()
-	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x"} {
+	for _, tail := range []string{"+x", "-x", ".x", "/x", "=x", ":x", ".", ":"} {
 		claim := "id " + scrubTestFamilies["asia"] + tail + " end"
 		if got, want := scrubClaim(claim), "id <redacted>"+tail+" end"; got != want {
 			t.Errorf("scrubClaim(%q) = %q, want %q", claim, got, want)
