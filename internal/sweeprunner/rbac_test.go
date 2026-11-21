@@ -351,7 +351,9 @@ func plannedKubectlSteps(plan Plan) []Step {
 		steps = append(steps, plan.Poll.Status)
 		steps = append(steps, plan.Poll.Collect...)
 	}
-	return steps
+	// The snapshot's two git steps run on the host and touch no cluster object:
+	// TestK8sPlanSyncsASnapshotNotTheLiveRepository pins them.
+	return slices.DeleteFunc(steps, func(step Step) bool { return step.Argv[0] != kubectl })
 }
 
 // renderedReads maps each distinct golden line the plan needs to the first

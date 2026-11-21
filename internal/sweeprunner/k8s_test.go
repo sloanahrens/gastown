@@ -488,8 +488,8 @@ func TestTeardownRemovesTheSyncPodButNotTheRepoClaim(t *testing.T) {
 }
 
 // TestRenderPlanSyncsTheRepoClaimFirst holds the launch to the sync stage's
-// order: the repo claim is applied, a sync pod is applied and waited for, the
-// host bare repository's contents are copied in, the copy is chowned to the
+// order: the host bare repository is snapshotted by git, the repo claim is
+// applied, a sync pod is applied and waited for, the snapshot's contents are copied in, the copy is chowned to the
 // runner, the sync pod is removed, and only then are the output claim and the
 // Job applied.
 func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
@@ -499,12 +499,12 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	if len(plan.Apply) != 9 {
-		t.Fatalf("the plan applies %d steps, want the repo claim, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
+	if len(plan.Apply) != 11 {
+		t.Fatalf("the plan applies %d steps, want the snapshot's init and fetch, the repo claim, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
 	}
 
 	var repoClaim Claim
-	if err := json.Unmarshal(plan.Apply[0].Stdin, &repoClaim); err != nil {
+	if err := json.Unmarshal(plan.Apply[2].Stdin, &repoClaim); err != nil {
 		t.Fatalf("the first apply is not a document: %v", err)
 	}
 	if repoClaim.Kind != "PersistentVolumeClaim" || repoClaim.Metadata.Name != RepoClaimName(spec.Rig) {
@@ -518,7 +518,7 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 
 	var syncPod Pod
-	if err := json.Unmarshal(plan.Apply[1].Stdin, &syncPod); err != nil {
+	if err := json.Unmarshal(plan.Apply[3].Stdin, &syncPod); err != nil {
 		t.Fatalf("the second apply is not a document: %v", err)
 	}
 	if syncPod.Kind != "Pod" || syncPod.Metadata.Name != syncPodName(spec) {
@@ -526,39 +526,69 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 	// Created, not applied: a second sync pod for the rig must fail
 	// AlreadyExists rather than take the claim from a sync already using it.
-	if argv := plan.Apply[1].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
+	if argv := plan.Apply[3].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
 		t.Errorf("the second apply runs %v, want a kubectl create of the sync pod", argv)
 	}
 	if len(syncPod.Spec.Containers) != 1 || syncPod.Spec.Containers[0].Image != spec.Image {
 		t.Errorf("the sync pod's containers are %+v, want one running the Spec's image %q", syncPod.Spec.Containers, spec.Image)
 	}
 
-	if argv := plan.Apply[2].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
+	if argv := plan.Apply[4].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
 		t.Errorf("the third apply runs %v, want a wait for the sync pod %q", argv, syncPodName(spec))
 	}
-	cp := plan.Apply[3].Argv
-	if !slices.Contains(cp, "cp") || !slices.Contains(cp, spec.RepoDir+"/.") || !slices.Contains(cp, syncPodName(spec)+":"+RepoMount) {
-		t.Errorf("the fourth apply runs %v, want the repo contents %q copied into the sync pod at %s", cp, spec.RepoDir+"/.", RepoMount)
+	cp := plan.Apply[5].Argv
+	if !slices.Contains(cp, "cp") || !slices.Contains(cp, spec.OutDir+"/repo-snapshot.git/.") || !slices.Contains(cp, syncPodName(spec)+":"+RepoMount) {
+		t.Errorf("the fourth apply runs %v, want the snapshot %q copied into the sync pod at %s", cp, spec.OutDir+"/repo-snapshot.git/.", RepoMount)
 	}
-	exec := strings.Join(plan.Apply[4].Argv, " ")
+	exec := strings.Join(plan.Apply[6].Argv, " ")
 	if !strings.Contains(exec, "exec "+syncPodName(spec)) ||
 		!strings.Contains(exec, "chown -R 10001:10001 "+RepoMount) ||
 		!strings.Contains(exec, "chmod -R a+rX "+RepoMount) {
 		t.Errorf("the fifth apply runs %q, want a chown and chmod of the copied tree", exec)
 	}
-	if argv := plan.Apply[5].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
+	if argv := plan.Apply[7].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
 		t.Errorf("the sixth apply runs %v, want the sync pod %q removed", argv, syncPodName(spec))
 	}
 
 	var outClaim Claim
-	if err := json.Unmarshal(plan.Apply[6].Stdin, &outClaim); err != nil {
+	if err := json.Unmarshal(plan.Apply[8].Stdin, &outClaim); err != nil {
 		t.Fatalf("the seventh apply is not a document: %v", err)
 	}
 	if outClaim.Metadata.Name != OutClaimName(spec) {
 		t.Errorf("the seventh apply is the claim %q, want the output claim %q", outClaim.Metadata.Name, OutClaimName(spec))
 	}
-	if string(plan.Apply[8].Stdin) != string(plan.Job.JSON()) {
+	if string(plan.Apply[10].Stdin) != string(plan.Job.JSON()) {
 		t.Errorf("the last apply does not carry the rendered Job document")
+	}
+}
+
+// TestK8sPlanSyncsASnapshotNotTheLiveRepository holds the repo sync to a copy git
+// made: a tar of the live repository breaks while a landing writes it (sweep
+// 9ef45e87), so git snapshots it first and the copy reads the snapshot (gt-9bgjx7).
+func TestK8sPlanSyncsASnapshotNotTheLiveRepository(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	snap := spec.OutDir + "/repo-snapshot.git"
+	at := func(want string) int {
+		for i, s := range plan.Apply {
+			if strings.Contains(strings.Join(s.Argv, " "), want) {
+				return i
+			}
+		}
+		return -1
+	}
+	if init, fetch := at("git init --bare --quiet "+snap), at(snap+" fetch --quiet --force --no-tags --update-shallow "+spec.RepoDir+" +refs/*:refs/*"); init != 0 || fetch != 1 {
+		t.Errorf("the git init is at step %d and the fetch at %d, want the first two steps", init, fetch)
+	}
+	if cp := at(" cp "); cp < 0 || at(" cp "+snap+"/.") != cp || at(" cp "+spec.RepoDir) >= 0 {
+		t.Errorf("the copy at step %d does not read the snapshot %q, or reads the live repository", cp, snap)
+	}
+	if fetch, create := at("--update-shallow"), at(" create "); fetch > create {
+		t.Errorf("the fetch is at step %d, after the sync pod's create at %d", fetch, create)
 	}
 }
 
@@ -1347,6 +1377,9 @@ func TestK8sPlanNamesTheSweepNamespaceOnEveryCall(t *testing.T) {
 		var clusterWide int
 		for _, step := range steps {
 			argv := step.Argv
+			if argv[0] == "git" { // the snapshot's host steps, pinned by TestK8sPlanSyncsASnapshotNotTheLiveRepository
+				continue
+			}
 			if argv[0] != "kubectl" {
 				t.Errorf("inCluster=%v: step %v does not run kubectl", inCluster, argv)
 				continue
