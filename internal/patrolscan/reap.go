@@ -27,8 +27,10 @@ type ReapEnv interface {
 	// BranchClaimed returns the ID of a non-terminal bead whose notes name
 	// branch (including resume_branch), "" for none.
 	BranchClaimed(rig, branch string) (string, error)
-	// Reap removes the seat through `gt polecat nuke`, never with --force.
-	Reap(rig, polecat string) error
+	// Reap removes the seat through `gt polecat nuke`, never with --force. It
+	// returns the remote ref the nuke pushed the seat's tip to, "" when it
+	// pushed nothing; an error leaves no ref.
+	Reap(rig, polecat string) (string, error)
 }
 
 // SingleUseEnv is the optional half of ReapEnv naming the rig's sandbox seats,
@@ -236,7 +238,8 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 		f.Outcome, f.Detail = OutcomeSkipped, "per-tick removal cap reached"
 		return f, true
 	}
-	if err := s.reapEnv.Reap(rig, name); err != nil {
+	preserved, err := s.reapEnv.Reap(rig, name)
+	if err != nil {
 		if s.o.IsRefusal(err) {
 			f.Outcome, f.Detail = OutcomeBlocked, "nuke refused: "+err.Error()
 			return f, true
@@ -246,6 +249,9 @@ func (s *Scanner) reap(rig, name string, left *int, trim *trimSeat) (Finding, bo
 	}
 	*left--
 	f.Outcome, f.Detail = OutcomeReaped, removedDetail()
+	if preserved != "" {
+		f.Detail += ", preserved as " + preserved
+	}
 	return f, true
 }
 

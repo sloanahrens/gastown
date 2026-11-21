@@ -287,27 +287,49 @@ func (h *patrolScanHost) SandboxSeat(rig, polecat string) (bool, error) {
 
 // Reap removes one seat through `gt polecat nuke <rig>/<name>`, never with
 // --force: the check-recovery verdict authorized it, and a nuke that refuses
-// anyway is a blocked seat.
-func (h *patrolScanHost) Reap(rig, polecat string) error {
+// anyway is a blocked seat. It returns the ref the nuke pushed the tip to, from
+// the nuke's own output (nukePreservedRef).
+func (h *patrolScanHost) Reap(rig, polecat string) (string, error) {
 	if !h.reapCoversRig(rig) {
-		return h.reapNotCovered(rig)
+		return "", h.reapNotCovered(rig)
 	}
 	if h.d.gtPath == "" {
-		return fmt.Errorf("%w: no gt binary resolved", errNoDaemonStarter)
+		return "", fmt.Errorf("%w: no gt binary resolved", errNoDaemonStarter)
 	}
 	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), patrolScanReapTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.d.gtPath, "polecat", "nuke", rig+"/"+polecat) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = h.town()
 	cmd.Env = daemonGTEnv(os.Environ())
-	_, stderr, err := h.d.runCmd(cmd)
+	stdout, stderr, err := h.d.runCmd(cmd)
 	if err == nil {
-		return nil
+		return nukePreservedRef(stdout), nil
 	}
 	if exitCodeOf(err) == nukeRefusedExitCode {
-		return fmt.Errorf("%w: %s", errReapRefused, lastLine(string(stderr)))
+		return "", fmt.Errorf("%w: %s", errReapRefused, lastLine(string(stderr)))
 	}
-	return fmt.Errorf("gt polecat nuke %s/%s: %w: %s", rig, polecat, err, lastLine(string(stderr)))
+	return "", fmt.Errorf("gt polecat nuke %s/%s: %w: %s", rig, polecat, err, lastLine(string(stderr)))
+}
+
+// nukePreservedPrefix opens the line `gt polecat nuke` prints when its
+// self-preserve push put the branch's tip on a remote ref (internal/cmd,
+// "preserved branch %s as %s"). That line is printed only when the run pushed.
+const nukePreservedPrefix = "✓ preserved branch "
+
+// nukePreservedRef is the remote ref in a nuke's output that its self-preserve
+// push pushed the tip to, "" when no such line is there (the tip was already on
+// the remote, or nothing was pushed).
+func nukePreservedRef(stdout []byte) string {
+	for _, line := range strings.Split(string(stdout), "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), nukePreservedPrefix)
+		if !ok {
+			continue
+		}
+		if _, ref, found := strings.Cut(rest, " as "); found {
+			return strings.TrimSpace(ref)
+		}
+	}
+	return ""
 }
 
 // exitCodeOf returns the process exit status an error carries, or -1.
