@@ -2908,6 +2908,53 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 	}
 }
 
+// TestCacheTrimLogsEverySuccessfulTrim pins that a success is not held back by
+// the once-an-hour hold on refusals: the same trim run twice in one hour says it
+// finished both times (the claim Job route's line, which replaces the old
+// route's 'applied' line).
+func TestCacheTrimLogsEverySuccessfulTrim(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.cacheTrimClaimJobRoute = true
+	for range 2 {
+		f.d.cacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply)
+	}
+	finished := "cache trim " + cacheTrimClaimName + " in " + cacheTrimNamespace + " finished"
+	if got := strings.Count(f.log.String(), finished); got != 2 {
+		t.Errorf("logged the finished trim %d times in one hour, want 2: %s", got, f.log.String())
+	}
+}
+
+// TestCacheTrimUnderTheCapIsAVerdictNotARetry pins that a trim that removed
+// nothing (the Job prints removed 0: the claim was under the cap) is a verdict:
+// the pass judges the claim again at the full interval, not in fifteen minutes.
+// Retries after a failure do not exist on the claim route: a failed trim parks
+// the claim (TestCacheTrimSwitchParksOnEveryFailure).
+func TestCacheTrimUnderTheCapIsAVerdictNotARetry(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimClaimJobLogVerb: {stdout: "removed 0 absent 0 kept 0\n"},
+	})
+	f.d.cacheTrimClaimJobRoute = true
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+
+	f.d.runDiskMaintenance() // 04:45: the Job removes nothing
+	if got := len(f.applyCalls()); got != 1 {
+		t.Fatalf("the pass applied %d documents, want the one Job", got)
+	}
+	now = now.Add(15 * time.Minute)
+	f.d.runDiskMaintenance() // 05:00: a verdict spends the full interval
+	if got := len(f.applyCalls()); got != 1 {
+		t.Errorf("the pass applied %d documents fifteen minutes after a clean verdict, want 1: nothing to trim is not a retry", got)
+	}
+	now = now.Add(105 * time.Minute)
+	f.d.runDiskMaintenance() // 06:45: two hours after the verdict
+	if got := len(f.applyCalls()); got != 2 {
+		t.Errorf("the pass applied %d documents two hours after the verdict, want 2", got)
+	}
+}
+
 // TestCacheTrimNoOpNeverFailsATrim keeps, on the OLD route (the route field
 // false, the fixture's default), the two cases of the claim's measurement alarm
 // that the claim Job route has no equivalent for yet: a failed apply and a Job
@@ -2994,20 +3041,6 @@ func TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim(t *testing.T) {
 // younger than the age floor, so the plan reports it as Protected and the 10GB
 // cap cannot remove it: it renders as 13.6GB.
 const cacheTrimFloorYoungSize = 14602889216
-
-// newCacheTrimFloorFixture trims a listing of one old 1GB unit, which the plan
-// removes, and one unit of cacheTrimFloorYoungSize younger than the floor, under
-// the 10GB cap in apply mode, answering the post-trim du with used.
-func newCacheTrimFloorFixture(t *testing.T, used int64) *cacheTrimFixture {
-	t.Helper()
-	listing := fmt.Sprintf(`[`+
-		`{"path":"gocache/aa/old","cache":"build","size":1073741824,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"},`+
-		`{"path":"gocache/bb/young","cache":"build","size":%d,"atime":"2026-10-29T04:00:00Z","mtime":"2026-10-29T04:00:00Z"}]`,
-		cacheTrimFloorYoungSize)
-	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, used)})
-	f.answerFrom(cacheTrimListVerb, cliReply{stdout: listing})
-	return f
-}
 
 // jobRuns reads the cache trim's runs from the town's job ledger, the file the
 // trim writes through the production ledger the job list reads.

@@ -80,7 +80,9 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
 		trimmed: &removed, absent: &absent, kept: &kept}
 	d.cacheTrimRecordRun(run)
+	// A success is logged every time: the once-an-hour hold of cacheTrimLogf is for
+	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
-	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
+	d.logger.Printf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
 	return true
 }
