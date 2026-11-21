@@ -209,6 +209,40 @@ func TestCacheTrimClaimJobPendingEarlierJobRunning(t *testing.T) {
 	}
 }
 
+// TestCacheTrimClaimJobNotPending pins that only the refusal for an earlier Job
+// read as running is pending. A listing that cannot be read or decoded, the
+// running Job's pod read that fails, and a stale object's delete that fails are
+// ordinary errors: a later bead parks on pending, so an error wrapped by
+// mistake would hide a failed trim as a healthy one.
+func TestCacheTrimClaimJobNotPending(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]cliReply
+	}{
+		{"the listing read fails", map[string]cliReply{
+			cacheTrimExistingVerb: {stderr: "Error from server: forbidden", code: 1},
+		}},
+		{"the listing names no items list", map[string]cliReply{
+			cacheTrimExistingVerb: {stdout: `{}`},
+		}},
+		{"the running Job's pod read fails", map[string]cliReply{
+			cacheTrimExistingVerb:              {stdout: cacheTrimRunningJobJSON},
+			cacheTrimJobPodsVerb(cacheTrimJob): {stderr: "Error from server: forbidden", code: 1},
+		}},
+		{"the stale object's delete fails", map[string]cliReply{
+			cacheTrimExistingVerb: {stdout: cacheTrimExistingJSON},
+			"delete job " + cacheTrimJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s": {stderr: "Error from server: forbidden", code: 1},
+		}},
+	} {
+		f := newCacheTrimFixture(t, "", tc.overrides)
+		err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+		if err == nil || errors.Is(err, errCacheTrimJobPending) {
+			t.Errorf("%s: the run = %v; want an error that is not errCacheTrimJobPending", tc.name, err)
+		}
+	}
+}
+
 // TestCacheTrimClaimJobRunRefusesAnUnsetClock pins that the manifest's refusal
 // is returned before any cluster call: the pod's plan judges file ages by the
 // clock, so a Job built without one would remove files by an unknown age.
