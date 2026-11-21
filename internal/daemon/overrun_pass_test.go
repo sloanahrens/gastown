@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -724,5 +725,41 @@ func TestOverrunPassJudgesInSeatOrder(t *testing.T) {
 	}
 	if out := buf.String(); strings.Count(out, "cannot read the escalation state") != 1 || !strings.Contains(out, "for gt-ord0,") {
 		t.Errorf("escalation read not logged once, for the first seat in seat order:\n%s", out)
+	}
+}
+
+// TestOverrunPassBudgetStops: a pass starts no seat read once its budget (the interval less
+// a margin: 50 s) has passed on the pass clock, and logs how many seats it did not reach
+// (gt-gn4roo). Each seat's two timed reads advance the fake clock 6 s each, under the read
+// deadline, so a seat costs 12 s: the reads that begin at 0, 12, 24, 36 and 48 s run, the
+// rest do not. The reads run one at a time (readPoolSize 1) because the clock is shared.
+func TestOverrunPassBudgetStops(t *testing.T) {
+	t.Parallel()
+	const seatCount = 20
+	seats := make([]overrunSeat, seatCount)
+	for i := range seats {
+		seats[i] = overrunSeat{Rig: "gastown", Polecat: fmt.Sprintf("b%02d", i), Bead: fmt.Sprintf("gt-bud%02d", i)}
+	}
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(5*time.Minute, seats...)
+	read := 0
+	f.escalationAnsweredAt = func(overrunSeat) (time.Time, error) {
+		read++
+		f.now = f.now.Add(6 * time.Second)
+		return time.Time{}, nil
+	}
+	f.gateRunning = func(overrunSeat) (bool, error) {
+		f.now = f.now.Add(6 * time.Second)
+		return false, nil
+	}
+	s := f.seams()
+	s.readPoolSize = 1
+	s.passDone = func(stats passStats) { d.logger.Printf("%s", overrunPassLine(stats)) }
+	runPoolBounded(t, "the pass", 1, 1, func(int) { d.runOverrunGuard(s) })
+	if read != 5 {
+		t.Errorf("%d seats read, want the 5 whose reads begin within 50 s", read)
+	}
+	if log := buf.String(); !strings.Contains(log, "15 seats not reached") {
+		t.Errorf("the pass line does not name the 15 seats not reached:\n%s", log)
 	}
 }
