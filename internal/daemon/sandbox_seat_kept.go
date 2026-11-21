@@ -88,6 +88,16 @@ func removeKeptSandboxSeat(townRoot, rig, name string) error {
 	return nil
 }
 
+// ForgetKeptSandboxSeat removes the kept record of rig/name for a caller outside
+// the daemon: the nuke of a seat the daemon's end never cleared. A record that is
+// not there is no error; no town root is one, since a relative path is no record.
+func ForgetKeptSandboxSeat(townRoot, rig, name string) error {
+	if townRoot == "" {
+		return errors.New("no town root to forget the kept sandbox seat under")
+	}
+	return removeKeptSandboxSeat(townRoot, rig, name)
+}
+
 // readKeptSandboxSeatRecord reads one record. A file that is not there returns
 // an error that matches os.ErrNotExist; any other error means the file exists
 // and cannot be read or decoded.

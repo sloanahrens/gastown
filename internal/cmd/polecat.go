@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
@@ -3242,6 +3243,9 @@ type nukeDeps struct {
 	// and, if so, the tip of its branch on origin. nil: the production read,
 	// wired where the preserve step runs.
 	SeatOrigin nukeSeatOrigin
+	// ForgetKept removes the nuked seat's kept sandbox-seat record. nil: the
+	// daemon's removal under the rig's town root.
+	ForgetKept func(rig, name string) error
 	// Out receives the nuke's own step lines (session, preserve, worktree,
 	// branch); the helpers it calls keep their writers. nil: os.Stdout.
 	Out io.Writer
@@ -3638,6 +3642,20 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// Step 4.5: Report the hooked work bead's final state; a kept hook gets the
 	// resume comment now that removal can no longer change it.
 	hookedWork.finish()
+
+	// Step 4.6: Forget the seat's kept sandbox-seat record. Only the daemon's end
+	// clears it, so a nuke left it to raise sandbox.seat_kept and to be read by a
+	// new seat of the same name (gt-0qrsul). The seat is already reset: a failed
+	// removal is a warning.
+	forgetKept := deps.ForgetKept
+	if forgetKept == nil {
+		forgetKept = func(rig, name string) error {
+			return daemon.ForgetKeptSandboxSeat(beads.FindTownRoot(r.Path), rig, name)
+		}
+	}
+	if err := forgetKept(rigName, polecatName); err != nil {
+		fmt.Fprintf(out, "  %s kept sandbox-seat record: %v\n", style.Warning.Render("⚠"), err)
+	}
 
 	// Step 5: Purge closed ephemeral beads (wisps) accumulated during sessions.
 	// Without this, closed wisps from mol-polecat-work steps, mol-witness-patrol

@@ -430,3 +430,32 @@ func TestSeatEndPartialRemovalKeptRecord(t *testing.T) {
 		}
 	})
 }
+
+// TestForgetKeptSandboxSeat pins the exported removal the nuke calls: it
+// deletes the named seat's record, leaves another seat's record alone, and a
+// record that is not there is no error (gt-0qrsul).
+func TestForgetKeptSandboxSeat(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rec := keptSandboxSeatRecord{Bead: endBead, Reason: keptSeatReason, Since: time.Date(2026, 11, 12, 14, 0, 0, 0, time.UTC)}
+	for _, name := range []string{"basalt", "onyx"} {
+		if err := writeKeptSandboxSeat(town, endRig, name, rec); err != nil {
+			t.Fatalf("writing the record of %s: %v", name, err)
+		}
+	}
+	if err := ForgetKeptSandboxSeat(town, endRig, "basalt"); err != nil {
+		t.Fatalf("forgetting basalt's record: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(town, ".runtime", "sandbox-seat-kept", endRig, "basalt.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("basalt's record is still there (stat error %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(town, ".runtime", "sandbox-seat-kept", endRig, "onyx.json")); err != nil {
+		t.Errorf("onyx's record is gone: %v", err)
+	}
+	if err := ForgetKeptSandboxSeat(town, endRig, "basalt"); err != nil {
+		t.Errorf("forgetting a record that is not there = %v, want nil", err)
+	}
+	if err := ForgetKeptSandboxSeat("", endRig, "onyx"); err == nil {
+		t.Error("forgetting a record under no town root = nil, want an error")
+	}
+}

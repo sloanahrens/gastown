@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -120,6 +121,9 @@ type nukeE2E struct {
 	rigPath   string
 	polecatAt string
 	store     *stubStore
+	// forgetKept is the nuke's kept-record removal; nil leaves the production one.
+	forgetKept func(rig, name string) error
+	out        strings.Builder
 }
 
 func newNukeE2E(t *testing.T) *nukeE2E {
@@ -167,7 +171,7 @@ func (f *nukeE2E) nuke(survives func(beadID string) (string, error), opts nukePo
 		},
 	}
 	sessions := &noSession{}
-	opts.Deps = &nukeDeps{Sessions: sessions, Releaser: releaser, SurvivingWork: survives, MoleculeBeads: f.store, SeatOrigin: nukeE2EHostSeat}
+	opts.Deps = &nukeDeps{Sessions: sessions, Releaser: releaser, SurvivingWork: survives, MoleculeBeads: f.store, SeatOrigin: nukeE2EHostSeat, ForgetKept: f.forgetKept, Out: &f.out}
 
 	r := &rig.Rig{Name: nukeE2ERig, Path: f.rigPath}
 	mgr := polecat.NewManagerWithStore(r, nil, nil, townRegistry(), f.store)
@@ -511,5 +515,44 @@ func TestNukeThatProceedsBurnsTheMolecule(t *testing.T) {
 	}
 	if attached := beads.ParseAttachmentFields(work); attached != nil && attached.AttachedMolecule != "" {
 		t.Errorf("work bead still attached to %s after the burn", attached.AttachedMolecule)
+	}
+}
+
+// TestPolecatNukeForgetsTheKeptSeatRecord drives the nuke with a kept record
+// for the nuked seat and one for another seat: the nuke removes the first and
+// leaves the second (gt-0qrsul).
+func TestPolecatNukeForgetsTheKeptSeatRecord(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+	town := t.TempDir()
+	dir := filepath.Join(town, ".runtime", "sandbox-seat-kept", nukeE2ERig)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{nukeE2EPolecat, "onyx"} {
+		if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(`{"bead":"gt-x"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.forgetKept = func(rig, name string) error { return daemon.ForgetKeptSandboxSeat(town, rig, name) }
+	f.nuke(func(string) (string, error) { return "", nil }, nukePolecatOptions{})
+	if _, err := os.Stat(filepath.Join(dir, nukeE2EPolecat+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the nuked seat's kept record is still there (stat error %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "onyx.json")); err != nil {
+		t.Errorf("another seat's kept record is gone: %v", err)
+	}
+}
+
+// TestPolecatNukeWarnsWhenTheKeptRecordCannotBeRemoved pins that a failing
+// removal is a warning on the nuke's output and the nuke still succeeds: the
+// seat is already reset (gt-0qrsul).
+func TestPolecatNukeWarnsWhenTheKeptRecordCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+	f.forgetKept = func(string, string) error { return errors.New("permission denied") }
+	f.nuke(func(string) (string, error) { return "", nil }, nukePolecatOptions{})
+	if got := f.out.String(); !strings.Contains(got, "kept sandbox-seat record") || !strings.Contains(got, "permission denied") {
+		t.Errorf("the nuke's output = %q, want a warning naming the kept record and the error", got)
 	}
 }
