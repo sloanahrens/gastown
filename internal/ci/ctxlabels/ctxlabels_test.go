@@ -1,6 +1,7 @@
 package ctxlabels_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/daemonimage"
+	"github.com/steveyegge/gastown/internal/forgejo"
 	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
 )
 
@@ -517,5 +520,43 @@ func TestPinsWithBDNamesTheCommit(t *testing.T) {
 				t.Errorf("pin %s = %+v, want %+v", p.Name, p, want)
 			}
 		}
+	}
+}
+
+// fakeCompare counts no commit that only the floor has, so every commit holds the
+// samples build; the older-build rows make it record its calls.
+type fakeCompare struct{}
+
+func (fakeCompare) CompareCommits(context.Context, string, string, string, string) (*forgejo.CompareInfo, error) {
+	return &forgejo.CompareInfo{}, nil
+}
+
+// readBDPin reads the image-pins text whose bd line names commit through
+// daemon.ReadImagePinTips and returns the bd pin's state. Every source's tip is
+// the samples floor, so the bd commit is compared with the floor, not with a tip.
+func readBDPin(t *testing.T, commit string, cmp daemon.ImagePinCompare) daemon.ImagePinState {
+	t.Helper()
+	tipGit := func(string) ([]byte, error) { return []byte(daemonimage.BDSamplesFloor + " refs/heads/main\n"), nil }
+	noPathCount := func(string, string, string, []string) (int, error) { return 0, nil }
+	states, err := daemon.ReadImagePinTips(context.Background(), pinsWithBD(t, commit), nil, tipGit, noPathCount, cmp)
+	if err != nil {
+		t.Fatalf("ReadImagePinTips: %v", err)
+	}
+	for _, s := range states {
+		if s.Name == "bd" {
+			return s
+		}
+	}
+	t.Fatal("ReadImagePinTips named no bd pin")
+	return daemon.ImagePinState{}
+}
+
+// TestBDPinReadsWithoutError holds the current bd pin to the production read: it
+// reads with no error and does not lack the samples floor.
+func TestBDPinReadsWithoutError(t *testing.T) {
+	t.Parallel()
+	got := readBDPin(t, bdPin, fakeCompare{})
+	if got.Err != nil || got.LacksFloor {
+		t.Errorf("bd pin = %+v, want Err nil and LacksFloor false", got)
 	}
 }
