@@ -143,6 +143,19 @@ type specSlingSeats struct {
 	Assignee func(bead string) string // "" when none or unreadable; nil names none
 }
 
+// specHookedKey is the key of one seat's hook in specSlingSeats.Hooked: the
+// agent the seat runs on and the bead its hook names. A bead id alone is not
+// enough, since a seat on agent A hooking gt-x says nothing of a running sling
+// for gt-x on agent B (gt-s0p4q0).
+func specHookedKey(agent, bead string) string {
+	return agent + "\x00" + bead
+}
+
+// hooks reports whether a roster seat on agent hooks bead.
+func (s specSlingSeats) hooks(agent, bead string) bool {
+	return s.Hooked[specHookedKey(agent, bead)]
+}
+
 // namesLiveSeat reports whether a sling's bead is assigned to a polecat with a
 // live session: the sling took that seat, which the roster counts (gt-7vmtta).
 func (s specSlingSeats) namesLiveSeat(bead string) bool {
