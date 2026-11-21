@@ -3,6 +3,7 @@ package daemonimage
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -410,20 +411,52 @@ func TestCheckPinsRefusesWhenTheStaticListLacksADerivedDirectory(t *testing.T) {
 	}
 }
 
-// TestCheckPinsRefusesWhenGoListFails: a derivation that cannot run is a
-// refusal naming the failure, never a pass; gt-z3q7eh turns it into the
-// static-list fallback with a note.
-func TestCheckPinsRefusesWhenGoListFails(t *testing.T) {
+// failingGoList is a go list that cannot run.
+func failingGoList(string, ...string) ([]byte, error) { return nil, errors.New("go: no module") }
+
+// TestCheckPinsFallsBackToTheStaticListWithANoteWhenGoListFails: a derivation that
+// cannot run does not refuse the pin and does not pass it silently: the guard
+// returns a note naming the failure and the static list in force, and the checks
+// that need no go (the counts, the age, the closure walk) still decide.
+func TestCheckPinsFallsBackToTheStaticListWithANoteWhenGoListFails(t *testing.T) {
 	t.Parallel()
-	f := newPinsGit()
-	devopsCounts(f, 3, 1, time.Hour)
-	goList := func(string, ...string) ([]byte, error) { return nil, errors.New("go: no module") }
-
-	_, err := checkPins([]Pin{devopsPin}, func(Pin) (string, error) { return pinsTestDir, nil }, pinsTestPath, f.run, goList)
-
-	if err == nil || !strings.Contains(err.Error(), "cannot derive") || !strings.Contains(err.Error(), "go: no module") {
-		t.Fatalf("checkPins = %v, want a refusal naming the go list failure", err)
-	}
+	mainOf := func(Pin) (string, error) { return pinsTestDir, nil }
+	t.Run("a healthy pin passes with the note", func(t *testing.T) {
+		t.Parallel()
+		f := newPinsGit()
+		devopsCounts(f, 3, 1, time.Hour)
+		notes, err := checkPins([]Pin{devopsPin}, mainOf, pinsTestPath, f.run, failingGoList)
+		if err != nil {
+			t.Fatalf("checkPins = %v, want the static list to stand in", err)
+		}
+		if len(notes) != 2 || !strings.Contains(notes[0], "go list could not derive") || !strings.Contains(notes[0], "go: no module") || !strings.Contains(notes[0], "static input list") {
+			t.Errorf("notes = %q, want the go list failure and the static list first", notes)
+		}
+	})
+	t.Run("the closure walk still refuses a gap", func(t *testing.T) {
+		t.Parallel()
+		f := newPinsGit()
+		devopsCounts(f, 54, 1, time.Hour)
+		f.answer[pinsTestDir+" show "+pinsTestMain+":cmd/reporter/main.go"] = "package main\nimport \"gt.local/devops/internal/newthing\"\n"
+		f.answer[pinsTestDir+" ls-tree --name-only "+pinsTestMain+" internal/newthing/"] = "internal/newthing/x.go\n"
+		f.answer[pinsTestDir+" show "+pinsTestMain+":internal/newthing/x.go"] = "package newthing\n"
+		if _, err := checkPins([]Pin{devopsPin}, mainOf, pinsTestPath, f.run, failingGoList); err == nil || !strings.Contains(err.Error(), "internal/newthing") {
+			t.Fatalf("checkPins = %v, want the closure walk's refusal naming internal/newthing", err)
+		}
+	})
+	t.Run("a fetched pin writes the note where the build prints it", func(t *testing.T) {
+		t.Parallel()
+		f := newPinsGit()
+		devopsCounts(f, 54, 1, time.Hour)
+		f.answer[fetchedMainKey(devopsPin.URL, "--filter=blob:none")] = ""
+		var out strings.Builder
+		if err := checkFetchedPin(f.run, failingGoList, &out, pinsTestDir, devopsPin, pinsTestPath); err != nil {
+			t.Fatalf("checkFetchedPin: %v", err)
+		}
+		if !strings.Contains(out.String(), "go list could not derive") {
+			t.Errorf("the fetched path wrote %q, want the go list failure", out.String())
+		}
+	})
 }
 
 // newPinsGit is a fake git a test has planned no answer for.
@@ -614,7 +647,7 @@ func TestCheckFetchedPinFetchesFilteredFullHistoryForAPinWithPaths(t *testing.T)
 	devopsCounts(f, 54, 1, time.Hour)
 	want := fetchedMainKey(devopsPin.URL, "--filter=blob:none")
 	f.answer[want] = ""
-	if err := checkFetchedPin(f.run, coveredGoList, pinsTestDir, devopsPin, pinsTestPath); err != nil {
+	if err := checkFetchedPin(f.run, coveredGoList, io.Discard, pinsTestDir, devopsPin, pinsTestPath); err != nil {
 		t.Fatalf("checkFetchedPin: %v", err)
 	}
 	if !hasCall(f, want) {
@@ -636,7 +669,7 @@ func TestCheckFetchedPinKeepsTheDepthLimitForAPinWithoutPaths(t *testing.T) {
 	f.pinTable(pinsTestPin, pinsTestMain, 3, time.Hour)
 	want := fetchedMainKey(pin.URL, "--depth", strconv.Itoa(MaxPinBehind+1))
 	f.answer[want] = ""
-	if err := checkFetchedPin(f.run, coveredGoList, pinsTestDir, pin, pinsTestPath); err != nil {
+	if err := checkFetchedPin(f.run, coveredGoList, io.Discard, pinsTestDir, pin, pinsTestPath); err != nil {
 		t.Fatalf("checkFetchedPin: %v", err)
 	}
 	if !hasCall(f, want) {
@@ -657,7 +690,7 @@ func TestCheckFetchedPinFetchFailureIsStillRefused(t *testing.T) {
 	devopsCounts(f, 54, 1, time.Hour)
 	f.answer[fetchedMainKey(devopsPin.URL, "--depth", strconv.Itoa(MaxPinBehind+1))] = ""
 	f.errs[fetchedMainKey(devopsPin.URL, "--filter=blob:none")] = errors.New("no such ref")
-	err := checkFetchedPin(f.run, coveredGoList, pinsTestDir, devopsPin, pinsTestPath)
+	err := checkFetchedPin(f.run, coveredGoList, io.Discard, pinsTestDir, devopsPin, pinsTestPath)
 	if err == nil {
 		t.Fatal("checkFetchedPin passed a pin whose main fetch failed")
 	}
