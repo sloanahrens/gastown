@@ -112,10 +112,14 @@ func ContentionWaiting(rec ContentionState, now time.Time) bool {
 }
 
 // ContentionPauseOver reports whether the wait a labeled bead holds has passed,
-// at RetryAt and after. It does not report exhaustion: a spent record reads as
-// over here too, so a caller retries a labeled bead only after ContentionNext
-// reports it not exhausted.
+// at RetryAt and after. A spent record is never over: it carries no retry time
+// to pass, so it reports false. Exhaustion is not this function's answer: a
+// caller retries a labeled bead only after ContentionNext reports it not
+// exhausted.
 func ContentionPauseOver(rec ContentionState, now time.Time) bool {
+	if rec.Spent {
+		return false
+	}
 	return !ContentionWaiting(rec, now)
 }
 

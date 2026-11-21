@@ -145,8 +145,9 @@ func TestContentionRecordReads(t *testing.T) {
 }
 
 // A retry is waiting before its retry_at and due at it: ContentionWaiting is true
-// strictly before, and ContentionPauseOver is its exact complement, true at and
-// after it. A record with no retry set is not waiting.
+// strictly before, and ContentionPauseOver is its exact complement for a record
+// that is not spent, true at and after it. A record with no retry set is not
+// waiting.
 func TestContentionWaitingBoundary(t *testing.T) {
 	t.Parallel()
 	retryAt := time.Date(2026, 11, 19, 0, 0, 5, 0, time.UTC)
@@ -170,6 +171,45 @@ func TestContentionWaitingBoundary(t *testing.T) {
 			}
 			if got := ContentionPauseOver(c.rec, c.now); got != c.pauseIsOver {
 				t.Errorf("ContentionPauseOver at %v = %v, want %v", c.now, got, c.pauseIsOver)
+			}
+		})
+	}
+}
+
+// A record ContentionRecord cannot read is spent, and a spent record is neither
+// waiting nor over its pause: it carries no retry time to pass, so
+// ContentionPauseOver is false and a caller retries a spent bead only through
+// ContentionNext's exhausted answer (gt-7z6wtu).
+func TestContentionSpentRecord(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 19, 0, 0, 0, 0, time.UTC)
+	unreadableRetryAt, err := json.Marshal(map[string]any{
+		ContentionFirstKey:    "2026-11-19T00:00:00Z",
+		ContentionAttemptsKey: "1",
+		ContentionRetryAtKey:  "soon",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	cases := []struct {
+		name string
+		meta []byte
+	}{
+		{"metadata that is not JSON", []byte("{not json")},
+		{"a retry_at that is not RFC 3339", unreadableRetryAt},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			rec, ok := ContentionRecord(c.meta)
+			if !ok || !rec.Spent {
+				t.Fatalf("ContentionRecord(%s) = %+v, ok = %v; want a spent record", c.meta, rec, ok)
+			}
+			if ContentionWaiting(rec, now) {
+				t.Errorf("ContentionWaiting on a spent record = true, want false")
+			}
+			if ContentionPauseOver(rec, now) {
+				t.Errorf("ContentionPauseOver on a spent record = true, want false")
 			}
 		})
 	}
