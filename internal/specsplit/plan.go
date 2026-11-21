@@ -35,6 +35,13 @@ type SplitPlan struct {
 // go test commands plus the guard commands the original boxes carry. A group
 // that cannot become a tested piece is refused, and so are groups that do not
 // hold each of the spec's boxes exactly once.
+//
+// spec.BaseFiles must be supplied (nil is an error; an empty map means nothing
+// exists yet): B says a file "is created by" A only when A's bullets cite it
+// and it is absent from BaseFiles. A symbol is cited only from a declaration
+// code span in A's bullets. Known limit: the planner is not told which symbols
+// already exist on the base, so a symbol A's bullets declare is always noted
+// "created by", even if it exists (a BaseSymbols input would close this).
 func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 	if spec.BaseFiles == nil {
 		return SplitPlan{}, fmt.Errorf("BaseFiles not supplied: the planner needs the files that exist on the base branch to say which files a piece creates; pass an empty map when none exists")
