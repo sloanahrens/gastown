@@ -407,9 +407,10 @@ func (r ReviewRecord) IsRejection() bool {
 type ReviewsFile struct {
 	Path string
 
-	// replace writes a compacted log over Path; nil means config.ReplaceFile,
-	// which writes beside the log and renames it into place. It is a seam: the
-	// compaction's failure path is a filesystem error a test cannot provoke.
+	// replace writes a compacted or scrubbed log over Path; nil means
+	// config.ReplaceFile, which writes beside the log and renames it into place.
+	// It is a seam: the write's failure path is a filesystem error a test cannot
+	// provoke.
 	replace func(path string, data []byte, mode os.FileMode) error
 
 	// lineLimit overrides maxCompactLineBytes; a test sets a small bound here
