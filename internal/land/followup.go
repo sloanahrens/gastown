@@ -14,7 +14,8 @@ import (
 // The post-landing follow-up feed: after a landing om approved at or above the
 // rig's own bar, the worker files shaped beads for the minor findings om raised
 // and did not block on, de-duplicated against the beads earlier landings filed
-// (gt-s01pn). A finding that really must be fixed refuses the landing instead;
+// (gt-s01pn); a comment or test_style minor becomes one note on the bead instead
+// (gt-u643bb). A finding that really must be fixed refuses the landing instead;
 // this feed is for the ones worth fixing and not worth holding the queue for
 // (gt-4ty22).
 
@@ -158,14 +159,21 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 		l.logf("%s: could not read the .om.json threshold the follow-up feed floors on (%v); reading it as 0", w.BeadID, err)
 	}
 	var findings []FollowupCandidate
+	var noted []Finding
 	skips := newFollowupSkips()
 	if res.Verdict.Score >= threshold {
-		findings = l.skippedCandidates(w, followupCandidates(followupFindings(res.Verdict.Findings)), skips)
+		// A comment or test_style minor is a note on this landing's own bead
+		// rather than a follow-up bead, and the split comes before the
+		// de-duplication, so it is never filed and never queued (gt-u643bb).
+		filed, notes := splitNoted(followupFindings(res.Verdict.Findings))
+		noted = notes
+		findings = l.skippedCandidates(w, followupCandidates(filed), skips)
 	}
 	// The feed runs for a landing with nothing of its own to file too, because
 	// that landing is the room a held landing was waiting for (gt-3arxj), and
 	// when the policy skipped everything: the line is the only record (gt-3v8jno).
-	if len(findings) == 0 && l.Reviews == nil && skips.count == 0 {
+	// A landing whose minors are all notes runs for the note alone (gt-u643bb).
+	if len(findings) == 0 && len(noted) == 0 && l.Reviews == nil && skips.count == 0 {
 		return
 	}
 	// The feed runs on its own goroutine so its timeout can abandon it, and it
@@ -173,7 +181,7 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 	// outlives the timeout cannot interleave with the next landing's log
 	// (gt-s01pn).
 	done := make(chan []string, 1)
-	go func() { done <- l.followupFeed(w, res, findings, skips) }()
+	go func() { done <- l.followupFeed(w, res, findings, noted, skips) }()
 	select {
 	case lines := <-done:
 		for _, line := range lines {
@@ -188,7 +196,7 @@ func (l *Lander) fileFollowups(repo Repo, base string, w Work, res Result) {
 // comments a repeat earns, and the beads the new findings earn. It returns the
 // lines it wants logged and never returns an error — every failure is a line
 // the caller logs and the landing does not see.
-func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, skips *followupSkips) (lines []string) {
+func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, noted []Finding, skips *followupSkips) (lines []string) {
 	// Logged on every path, including a feed that files nothing (gt-3v8jno).
 	defer func() {
 		if skips.count > 0 {
@@ -202,7 +210,7 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	if err != nil {
 		lines = append(lines, fmt.Sprintf("could not read the %s queue the reviews log keeps (%v); filing nothing from it for this landing", FollowUpLabel, err))
 	}
-	if len(findings) == 0 && len(queued) == 0 {
+	if len(findings) == 0 && len(noted) == 0 && len(queued) == 0 {
 		return lines
 	}
 	issue, err := l.Beads.Show(w.BeadID)
@@ -214,6 +222,13 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate, 
 	}
 	if beads.HasLabel(issue, FollowUpLabel) {
 		return append(lines, fmt.Sprintf("the bead is a %s follow-up itself, and a follow-up of a follow-up never drains the feed; filing nothing", FollowUpLabel))
+	}
+	if len(noted) > 0 {
+		// The note needs no de-duplication read, and a failed write is a line
+		// and nothing else (gt-u643bb).
+		if err := l.Beads.AddComment(w.BeadID, followupNoteComment(w, res, noted)); err != nil {
+			lines = append(lines, fmt.Sprintf("could not note the %s on %s (%v)", findingsPhrase(len(noted)), w.BeadID, err))
+		}
 	}
 	existing, err := l.Followups.ListFollowups(FollowUpLabel)
 	if err != nil {
@@ -450,11 +465,13 @@ func (l *Lander) queueHeld(w Work, res Result, held []FollowupCandidate) []strin
 }
 
 // queuedCandidates is a queue line's findings as the feed files them: the
-// minors om raised that FollowupSkip keeps and that no bead already carries
-// (gt-3arxj, gt-3v8jno).
+// minors om raised that file a bead at all, that FollowupSkip keeps and that no
+// bead already carries (gt-3arxj, gt-3v8jno). A noted finding is dropped here
+// too, so an old queue line never files one (gt-u643bb).
 func (l *Lander) queuedCandidates(q QueuedFollowup, existing []ExistingFollowup, skips *followupSkips) []FollowupCandidate {
 	// The queue line keeps the landing's bead and rig, not its branch or head.
-	cands := l.skippedCandidates(Work{BeadID: q.Bead, Rig: q.Rig}, followupCandidates(followupFindings(queuedFindings(q.Findings))), skips)
+	filed, _ := splitNoted(followupFindings(queuedFindings(q.Findings)))
+	cands := l.skippedCandidates(Work{BeadID: q.Bead, Rig: q.Rig}, followupCandidates(filed), skips)
 	var fresh []FollowupCandidate
 	for _, c := range cands {
 		if Decide(c, existing, 0).Action == DedupeComment {
