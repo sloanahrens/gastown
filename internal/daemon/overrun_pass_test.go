@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -680,4 +681,48 @@ func TestOverrunPassReadDeadline(t *testing.T) {
 			t.Errorf("seats %d, failed reads %d; want 2 seats and the slow answer read failed once:\n%s", stats.seats, stats.failedReads, log)
 		}
 	})
+}
+
+// TestOverrunPassJudgesInSeatOrder: a pass whose six gate reads finish last
+// seat first still nudges and logs in seat order, as a serial pass did (gt-n742vz).
+func TestOverrunPassJudgesInSeatOrder(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	seats := make([]overrunSeat, 6)
+	release := make([]chan struct{}, len(seats))
+	at := map[string]int{}
+	var want []string
+	for i := range seats {
+		seats[i] = overrunSeat{Rig: "gastown", Polecat: "p" + strconv.Itoa(i), Bead: "gt-ord" + strconv.Itoa(i)}
+		release[i] = make(chan struct{})
+		at[seats[i].Bead] = i
+		want = append(want, seats[i].Rig+"/"+seats[i].Polecat)
+	}
+	f := newOverrunFake(13*time.Minute, seats...)
+	stuck := make(chan struct{}, len(seats))
+	f.gateRunning = func(seat overrunSeat) (bool, error) {
+		select {
+		case <-release[at[seat.Bead]]:
+		case <-time.After(workspaceHangGuard): //testpolicy:allow no-sleep — the hang guard: a read never released is reported, not waited on
+			stuck <- struct{}{}
+		}
+		if i := at[seat.Bead]; i > 0 {
+			close(release[i-1]) // release the seat before this one, so the reads finish last seat first
+		}
+		return false, nil
+	}
+	f.escalationWaiting = func(overrunSeat) (bool, error) { return false, errors.New("escalation unreadable") }
+	s := f.seams()
+	s.readPoolSize = len(seats)
+	close(release[len(seats)-1])
+	runPoolBounded(t, "the judging pass", 1, 1, func(int) { d.runOverrunGuard(s) })
+	if n := len(stuck); n != 0 {
+		t.Fatalf("%d gate reads were never released within %s", n, workspaceHangGuard)
+	}
+	if got := strings.Join(f.nudges, ","); got != strings.Join(want, ",") {
+		t.Errorf("judged in order %q, want seat order %q", got, strings.Join(want, ","))
+	}
+	if out := buf.String(); strings.Count(out, "cannot read the escalation state") != 1 || !strings.Contains(out, "for gt-ord0,") {
+		t.Errorf("escalation read not logged once, for the first seat in seat order:\n%s", out)
+	}
 }
