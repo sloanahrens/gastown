@@ -1439,6 +1439,28 @@ func TestBdGatewayErrors(t *testing.T) {
 	}
 }
 
+// TestGatewayRefusalWordingBeadsReads: beads tells a gateway refusal of
+// --allow-stale apart by two substrings of the one-line error Launch returns,
+// "refused the call with HTTP 403" and "--allow-stale" (beads allowStaleAnswer,
+// gt-d3v0iu). The body is the policy's forbidden payload for that flag.
+func TestGatewayRefusalWordingBeadsReads(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	beadsDir := filepath.Join(town, "gastown", ".beads")
+	g, _, _, _ := gatewayTarget(t, town, writeGatewayToken(t, "t"), doerFunc(func(*http.Request) (*http.Response, error) {
+		return statusResponse(http.StatusForbidden, `{"code":"forbidden","message":"bdgateway: cannot tell which verb these arguments run: \"--allow-stale\" is not a bd root flag the policy can place"}`), nil
+	}))
+	_, err := g.Launch(Call{Argv: []string{"bd", "--allow-stale", "version"}, Env: []string{"BEADS_DIR=" + beadsDir}, Dir: town})
+	if err == nil {
+		t.Fatal("Launch returned no error for a refused --allow-stale call")
+	}
+	for _, want := range []string{"refused the call with HTTP 403", "--allow-stale"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q, the substring beads reads", err, want)
+		}
+	}
+}
+
 // TestBdGatewayDoctor: the doctor names the URL, the token file and the first
 // step that fails, and asks /readyz with the token, never /v1/exec.
 func TestBdGatewayDoctor(t *testing.T) {
