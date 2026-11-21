@@ -154,6 +154,9 @@ func TestCacheTrimClaimJobPendingIsNotFailure(t *testing.T) {
 		if got := errors.Is(err, errCacheTrimJobPending); got != tc.pending || (err != nil) != tc.wantErr || removed != tc.removed {
 			t.Errorf("%s: the run = %d removed, %v (pending %v); want %d removed, pending %v, an error %v", tc.name, removed, err, got, tc.removed, tc.pending, tc.wantErr)
 		}
+		if tc.pending && (err == nil || !strings.Contains(err.Error(), "still running after the 20m0s wait")) {
+			t.Errorf("%s: the pending error %v does not name the wait that ended", tc.name, err)
+		}
 	}
 }
 

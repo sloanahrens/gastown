@@ -63,7 +63,7 @@ func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, cl
 		case cacheTrimJobStateFailed:
 			return 0, 0, 0, fmt.Errorf("the trim Job %s failed", jobName)
 		case cacheTrimJobStateActive:
-			return 0, 0, 0, fmt.Errorf("the trim Job %s is still running; its result is read at a later pass: %w", jobName, errCacheTrimJobPending)
+			return 0, 0, 0, fmt.Errorf("the trim Job %s is still running after the %s wait; its result is read at a later pass: %w", jobName, cacheTrimClaimWaitTimeout, errCacheTrimJobPending)
 		}
 		// A Job that completed after the wait is read as a finished one.
 	}
