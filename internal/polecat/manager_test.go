@@ -4000,3 +4000,74 @@ func TestFreshClaim(t *testing.T) {
 		})
 	}
 }
+
+// assignedLookupFails is a work-bead store whose assigned-issue query fails, as
+// during a Dolt or bd outage, while every other read still answers: the agent
+// bead is read through the Manager's agent client, not this store.
+type assignedLookupFails struct{ polecatBeads }
+
+func (assignedLookupFails) GetAssignedIssue(string) (*beads.Issue, error) {
+	return nil, errors.New("bd: dolt unreachable")
+}
+
+// TestLoadFromBeadsClaimSurvivesOutage pins that a sling's fresh claim on the
+// agent bead (spawning, hook_bead set, inside the spawn grace) is honoured when
+// the assigned-issue query fails: the seat reads spawning and carries the
+// claimed bead, with the session down or up, so a second sling is not handed a
+// seat the first was given. The claim is the agent bead's own evidence and was
+// read without the failed query, so it wins over the review-needed fallback.
+func TestLoadFromBeadsClaimSurvivesOutage(t *testing.T) {
+	t.Parallel()
+	const (
+		agentName   = "basalt"
+		rigName     = "testrig"
+		agentBeadID = "gt-testrig-polecat-basalt"
+		workID      = "gt-testrig-work"
+	)
+	fresh := time.Now().UTC().Truncate(time.Second).Add(-30 * time.Second).Format(time.RFC3339)
+	for _, liveSession := range []bool{false, true} {
+		name := "session down"
+		if liveSession {
+			name = "session up"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			rigPath := filepath.Join(root, rigName)
+			for _, dir := range []string{filepath.Join(rigPath, "polecats", agentName), filepath.Join(rigPath, "mayor", "rig")} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", dir, err)
+				}
+			}
+			db := newPolecatDB()
+			db.Seed(
+				beads.Issue{
+					ID: agentBeadID, Title: "agent", Labels: []string{"gt:agent"}, Status: "open", UpdatedAt: fresh,
+					Description: beads.FormatAgentDescription("agent", &beads.AgentFields{
+						RoleType: "polecat", Rig: rigName, AgentState: "spawning", HookBead: workID, CleanupStatus: "clean",
+					}),
+				},
+				beads.Issue{ID: workID, Title: "work", Status: "open", UpdatedAt: fresh},
+			)
+			tm := newFakeProbe()
+			mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, nil, tm, db)
+			mgr.spawnGraceWindow = 5 * time.Minute
+			mgr.beads = assignedLookupFails{mgr.beads}
+			if liveSession {
+				sessionName := mgr.sessionName(agentName)
+				if err := tm.NewSessionWithCommandAndEnv(sessionName, rigPath, "sleep 300", nil); err != nil {
+					t.Fatalf("create session: %v", err)
+				}
+				TouchSessionHeartbeat(root, sessionName)
+			}
+
+			p, err := mgr.loadFromBeads(agentName, nil)
+			if err != nil {
+				t.Fatalf("loadFromBeads: %v", err)
+			}
+			if p.State != StateSpawning || p.Issue != workID {
+				t.Errorf("seat = state %q issue %q, want %q and %q: the claim was not honoured beside the beads error", p.State, p.Issue, StateSpawning, workID)
+			}
+		})
+	}
+}
