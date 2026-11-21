@@ -18,6 +18,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltsquash"
 	"github.com/steveyegge/gastown/internal/lock"
@@ -345,6 +346,7 @@ func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
 	})
 	root := squashBackupRoot(t, d)
 	writeSquashBackup(t, root, squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, squashTestNow.Add(-time.Hour))
 
 	d.runScheduledMaintenance()
 
@@ -368,14 +370,31 @@ func TestSquashCheckTrippedRunsTheDatabase(t *testing.T) {
 }
 
 // squashDueDaemon is a daemon the next tick finds due: the backup-bytes trigger
-// sits below the 1 MiB backup the caller writes.
+// sits below the 1 MiB backup the caller writes. Its history archive records
+// cover the cut, as the design's step 2 requires before a run, so the tests that
+// drive the run, the marker and the record reach them; the archive's own step
+// has its tests beside them and resets this record where it needs it behind.
 func squashDueDaemon(t *testing.T) (*Daemon, *squashFakeServer, *bytes.Buffer) {
 	t.Helper()
 	small := int64(100)
 	d, server, _, logs := squashTickDaemon(t, &agentconfig.SquashConfig{
 		Enabled: true, Databases: []string{"gt"}, TriggerBackupBytes: &small,
 	})
+	seedSquashArchiveThrough(t, d, squashTestNow.Add(-time.Hour))
 	return d, server, logs
+}
+
+// seedSquashArchiveThrough records gt's history archive as through at. A zero
+// time writes an empty watermark, which puts the archive behind every cut.
+func seedSquashArchiveThrough(t *testing.T, d *Daemon, at time.Time) {
+	t.Helper()
+	wm := ArchiveWatermark{}
+	if !at.IsZero() {
+		wm = ArchiveWatermark{Date: at, Hashes: []string{"seed"}}
+	}
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+		t.Fatalf("seeding the archive's through-date: %v", err)
+	}
 }
 
 // TestSquashMarkerRefusesASecondDaemon is the bead's first box: another
@@ -561,6 +580,452 @@ func TestSquashMarkerHoldsWithoutAFreshBackup(t *testing.T) {
 	}
 	if len(server.queries) != squashP95Rounds+1 {
 		t.Errorf("a held run sent %d statements, want only the readings (%d)", len(server.queries), squashP95Rounds+1)
+	}
+}
+
+// withSquashArchive turns the daemon's history archive on at dir and serves its
+// commit reads from commits, oldest first, truncated to limit the way the
+// production read truncates to the batch bound. A limit of zero leaves the
+// configured default bound and serves every commit. The events export serves
+// nothing. It returns the commit fake, whose reads count, so a test can see
+// whether the pass ran at all.
+func withSquashArchive(t *testing.T, d *Daemon, dir string, commits []archiveCommit, limit int) *commitFake {
+	t.Helper()
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveDir = dir
+	if limit > 0 {
+		c := limit
+		d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &c
+	}
+	fake := &commitFake{commits: map[string][]archiveCommit{"gt": commits}}
+	d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+		out, err := fake.read(ctx, dm, db, archived)
+		if err != nil {
+			return nil, err
+		}
+		if limit > 0 && len(out) > limit {
+			out = out[:limit]
+		}
+		return out, nil
+	}
+	withEventsFake(d, nil, nil, nil)
+	return fake
+}
+
+// TestSquashArchiveShortOfTheCutDefersTheRun is the bead's first box: the pass
+// stops at its per-cycle batch bound with its through-date still behind the cut,
+// so no run starts, no run is recorded, and the check keeps its daily gate — the
+// run waits for the next day's check, which continues from the watermark the
+// stopped pass recorded.
+func TestSquashArchiveShortOfTheCutDefersTheRun(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	cut := squashTestNow.AddDate(0, 0, -7)
+	commits := []archiveCommit{
+		{Hash: "a1", Committer: "gastown/crew/overseer", Date: cut.Add(-3 * time.Hour), Message: "older"},
+		{Hash: "a2", Committer: "gastown/crew/overseer", Date: cut.Add(-2 * time.Hour), Message: "older still"},
+		{Hash: "a3", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "older too"},
+	}
+	seedSquashArchiveThrough(t, d, time.Time{})
+	withSquashArchive(t, d, t.TempDir(), commits, 2)
+	d.maint.archiveMaxBatches = 1
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	want := "squash: gt: the run waits for the next day's check: the history archive is through " +
+		commits[1].Date.UTC().Format(time.RFC3339) + ", short of the cut " + cut.UTC().Format(time.RFC3339)
+	if !strings.Contains(got, want) {
+		t.Errorf("the short archive was not deferred naming its through-date and the cut: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started on an archive short of the cut: %q", got)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Squash["gt"].LastRun.IsZero() {
+		t.Errorf("a deferred run recorded a run: %+v", st.Squash["gt"])
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); due.due {
+		t.Error("a deferred run made the check due again before the next day")
+	}
+}
+
+// TestSquashArchiveAlreadyPastTheCutIsNotArchivedAgain is the bead's second box:
+// the archive's record is already past the cut, so the pass is not run at all —
+// the commit read is never made — and the run starts.
+func TestSquashArchiveAlreadyPastTheCutIsNotArchivedAgain(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	fake := withSquashArchive(t, d, t.TempDir(), nil, 0)
+
+	d.runScheduledMaintenance()
+
+	if fake.reads != 0 {
+		t.Errorf("the pass read dolt_log %d time(s) for a database already past the cut", fake.reads)
+	}
+	got := logs.String()
+	want := "squash: gt: the history archive is through " +
+		squashTestNow.Add(-time.Hour).UTC().Format(time.RFC3339) + ", past the cut"
+	if !strings.Contains(got, want) {
+		t.Errorf("the check did not say the archive already covered the cut: %q", got)
+	}
+	if !strings.Contains(got, "reading the branches") {
+		t.Errorf("the run did not start on an archive past the cut: %q", got)
+	}
+}
+
+// TestSquashArchiveRunsWhileTheTownIsHeld is the bead's third box: the archive
+// pass takes no dispatch hold. The operator's dispatch hold is in place and the
+// gc's quiet-work guard reports the daemon busy, yet neither is asked or waited
+// on: the pass writes, the run starts under the hold. (The pass does take the
+// maintenance gc flag, which is free here; TestSquashArchiveWaitsForTheScheduledPass
+// drives the held case.)
+func TestSquashArchiveRunsWhileTheTownIsHeld(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	commits := []archiveCommit{
+		{Hash: "b1", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-time.Hour), Message: "fresh"},
+	}
+	withSquashArchive(t, d, t.TempDir(), commits, 0)
+	if err := os.WriteFile(dispatch.HoldFilePath(d.config.TownRoot), []byte("held\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	quietCalls := 0
+	d.maint.quiet = func(*Daemon) (bool, string) {
+		quietCalls++
+		return false, "daemon has work in flight"
+	}
+
+	d.runScheduledMaintenance()
+
+	if quietCalls != 0 {
+		t.Errorf("the archive step asked the gc's hold guard %d time(s): the pass takes no dispatch hold", quietCalls)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: the history archive is through "+
+		commits[0].Date.UTC().Format(time.RFC3339)+", past the cut") {
+		t.Errorf("the archive did not run under the hold: %q", got)
+	}
+	if !strings.Contains(got, "reading the branches") {
+		t.Errorf("the run did not start under the hold: %q", got)
+	}
+}
+
+// TestSquashArchiveWaitsForTheScheduledPass is the rework's first box: the
+// scheduled archive pass holds the maintenance gc flag while it runs, so the
+// squash path must not run a second pass beside it. The check defers the run to
+// the next day's check — the pass reads no Dolt, no run starts, no run is
+// recorded and the daily gate holds — and the flag stays the scheduled pass's to
+// release.
+func TestSquashArchiveWaitsForTheScheduledPass(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	fake := withSquashArchive(t, d, t.TempDir(), []archiveCommit{
+		{Hash: "g1", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-time.Hour), Message: "fresh"},
+	}, 0)
+	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+		t.Fatal("the maintenance gc flag was already held")
+	}
+	defer d.maintenanceGCRunning.Store(false)
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	want := "squash: gt: the run waits for the next day's check: the scheduled archive pass is running"
+	if !strings.Contains(got, want) {
+		t.Errorf("the held flag was not named as the reason the run waits: %q", got)
+	}
+	if fake.reads != 0 {
+		t.Errorf("the squash path ran the archive pass %d time(s) while the scheduled pass held the flag", fake.reads)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started while the scheduled archive pass held the flag: %q", got)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Squash["gt"].LastRun.IsZero() {
+		t.Errorf("a deferred run recorded a run: %+v", st.Squash["gt"])
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); due.due {
+		t.Error("a deferred run made the check due again before the next day")
+	}
+}
+
+// TestSquashArchiveFreesTheFlagWhenThePassEnds is the rework's second box: with
+// the flag free the squash path's own pass runs, and the flag is free when it
+// ends, so the cycle after it is not refused a pass that is no longer running.
+func TestSquashArchiveFreesTheFlagWhenThePassEnds(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	fake := withSquashArchive(t, d, t.TempDir(), []archiveCommit{
+		{Hash: "h1", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-time.Hour), Message: "fresh"},
+	}, 0)
+
+	d.runScheduledMaintenance()
+
+	if fake.reads == 0 {
+		t.Errorf("the pass did not run with the flag free: %q", logs.String())
+	}
+	if d.maintenanceGCRunning.Load() {
+		t.Error("the squash path left the maintenance gc flag held after the pass ended")
+	}
+}
+
+// TestSquashArchiveThroughDateIsTheArchivesRecord is the bead's fourth box: the
+// through-date is read from the archive's own record, not taken from the cut or
+// the clock. The pass writes three commits, and the check's line and the state
+// both name the newest commit it wrote.
+func TestSquashArchiveThroughDateIsTheArchivesRecord(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	dir := t.TempDir()
+	commits := []archiveCommit{
+		{Hash: "d1", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-2 * time.Hour), Message: "one"},
+		{Hash: "d2", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-90 * time.Minute), Message: "two"},
+		{Hash: "d3", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-time.Hour), Message: "three"},
+	}
+	withSquashArchive(t, d, dir, commits, 0)
+
+	d.runScheduledMaintenance()
+
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wm := st.ArchiveWatermarks["gt"]; !wm.Date.Equal(commits[2].Date) || !slices.Equal(wm.Hashes, []string{"d3"}) {
+		t.Errorf("the archive's record is %+v, want the newest commit written %v with its hash", wm, commits[2].Date)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: the history archive is through "+
+		commits[2].Date.UTC().Format(time.RFC3339)+", past the cut") {
+		t.Errorf("the check did not read the archive's through-date: %q", got)
+	}
+	if !strings.Contains(got, "reading the branches") {
+		t.Errorf("the run did not start once the archive covered the cut: %q", got)
+	}
+	rows := readArchiveCSV(t, filepath.Join(dir, archiveFileName("dolt-log", "gt", squashTestNow)))
+	if len(rows) != len(commits)+1 {
+		t.Errorf("the archive holds %d row(s) and a header, want the pass's %d rows", len(rows)-1, len(commits))
+	}
+}
+
+// TestSquashArchiveRanDryShortOfTheCutStillRuns: a database whose newest commit
+// is older than the cut can never move its through-date to it. A short batch
+// means the whole log is written out, so every commit the cut discards is
+// archived and the run goes ahead rather than waiting forever for a date the
+// archive cannot reach.
+func TestSquashArchiveRanDryShortOfTheCutStillRuns(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	cut := squashTestNow.AddDate(0, 0, -7)
+	commits := []archiveCommit{
+		{Hash: "e1", Committer: "gastown/crew/overseer", Date: cut.Add(-48 * time.Hour), Message: "quiet"},
+		{Hash: "e2", Committer: "gastown/crew/overseer", Date: cut.Add(-24 * time.Hour), Message: "quieter"},
+	}
+	seedSquashArchiveThrough(t, d, time.Time{})
+	// Two commits are short of the default batch bound: the pass runs dry.
+	withSquashArchive(t, d, t.TempDir(), commits, 0)
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	want := "squash: gt: the history archive is through " + commits[1].Date.UTC().Format(time.RFC3339) +
+		", short of the cut " + cut.UTC().Format(time.RFC3339) + ", and its log has nothing more to write"
+	if !strings.Contains(got, want) {
+		t.Errorf("a pass that ran dry short of the cut was not read as covering it: %q", got)
+	}
+	if !strings.Contains(got, "reading the branches") {
+		t.Errorf("the run did not start on an archive that wrote its whole log: %q", got)
+	}
+}
+
+// TestSquashArchivePassWithNoOutcomeIsRefused guards the boundary after the
+// pass: maintenanceArchive reports an outcome for every database it is given, so
+// a report that lost the database is refused here, never read as "ran dry". The
+// zero archiveExportOutcome's stop is archiveStopShort, so the absent outcome
+// read as one would start a run on an archive nobody reported on.
+func TestSquashArchivePassWithNoOutcomeIsRefused(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+
+	out, err := d.squashArchiveAfterPass("gt", squashTestNow.AddDate(0, 0, -7), map[string]archiveDatabaseOutcome{})
+
+	if err == nil || !strings.Contains(err.Error(), "reported no outcome for gt") {
+		t.Errorf("a pass with no outcome for gt returned %v, want the refusal naming it", err)
+	}
+	if out.Reached {
+		t.Error("a pass with no outcome for gt was read as covering the cut")
+	}
+}
+
+// TestSquashArchiveRefusesAFailedExportEvenWhenTheStopReadsShort: the error is
+// read before the stop. archiveStopShort is the zero stop, so an outcome that
+// carries a failed export and no stop of its own would otherwise be read as
+// "the whole log was written out" and start the run on an archive nobody
+// reported a working pass for.
+func TestSquashArchiveRefusesAFailedExportEvenWhenTheStopReadsShort(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		stop archiveStop
+	}{
+		{"a failed export whose zero stop reads short", archiveStopShort},
+		{"a failed export's own stop", archiveStopFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			seedSquashArchiveThrough(t, d, time.Time{})
+			out, err := d.squashArchiveAfterPass("gt", squashTestNow.AddDate(0, 0, -7), map[string]archiveDatabaseOutcome{
+				"gt": {commits: archiveExportOutcome{stop: tc.stop, err: errors.New("dolt_log read failed")}},
+			})
+			if err == nil || !strings.Contains(err.Error(), "commit export failed") {
+				t.Errorf("an outcome with a failed export returned %v, want the export's failure", err)
+			}
+			if out.Reached {
+				t.Error("an outcome with a failed export was read as covering the cut")
+			}
+		})
+	}
+}
+
+// TestSquashArchiveOffDefersTheRun: a town whose history archive is off cannot
+// prove the archive covers the cut, so the run is refused and the check names
+// why. An unarchived database must never be squashed.
+func TestSquashArchiveOffDefersTheRun(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, time.Time{})
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	want := "squash: gt: the run waits for the next day's check: the history archive did not reach the cut " +
+		squashTestNow.AddDate(0, 0, -7).UTC().Format(time.RFC3339) +
+		": the history archive's commit export failed: patrols.scheduled_maintenance.archive_dir is unset in the daemon config — history archiving is off"
+	if !strings.Contains(got, want) {
+		t.Errorf("a run on a town that does not archive was not deferred naming why: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started with history archiving off: %q", got)
+	}
+}
+
+// TestSquashArchiveRefusesAThroughDateItCannotBound: a through-date with no
+// hashes at it cannot say which commits were written, so it is refused rather
+// than read as coverage — even when the date itself is past the cut.
+func TestSquashArchiveRefusesAThroughDateItCannotBound(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	through := squashTestNow.Add(-time.Hour)
+	if err := recordArchiveWatermark(d.config.TownRoot, "gt", ArchiveWatermark{Date: through}); err != nil {
+		t.Fatal(err)
+	}
+	withSquashArchive(t, d, t.TempDir(), nil, 0)
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "the run waits for the next day's check") || !strings.Contains(got, "lists no hashes") {
+		t.Errorf("an unboundable through-date was not refused: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started on a through-date it could not bound: %q", got)
+	}
+}
+
+// corruptMaintenanceState replaces the maintenance state file with bytes no
+// reader can parse.
+func corruptMaintenanceState(t *testing.T, d *Daemon) {
+	t.Helper()
+	path := maintenanceGCStatePath(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSquashArchiveRefusesAStateFileItCannotRead: the check reads the state
+// file before its readings and the archive step reads it again. A file that
+// turns unreadable between the two stops the run, because no through-date can
+// be read from it — not read as an archive that is behind or ahead.
+func TestSquashArchiveRefusesAStateFileItCannotRead(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	withSquashArchive(t, d, t.TempDir(), nil, 0)
+	// The readings open the connection after the check's own state read and
+	// before the archive step: break the file there.
+	open := d.maint.squashOpenDB
+	d.maint.squashOpenDB = func(dsn string) (*sql.DB, error) {
+		corruptMaintenanceState(t, d)
+		return open(dsn)
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	want := "squash: gt: the run waits for the next day's check: the history archive did not reach the cut " +
+		squashTestNow.AddDate(0, 0, -7).UTC().Format(time.RFC3339) +
+		": reading the history archive's through-date for gt: parse " + maintenanceGCStateFileName
+	if !strings.Contains(got, want) {
+		t.Errorf("an unreadable through-date was not refused: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started on an archive record it could not read: %q", got)
+	}
+}
+
+// TestSquashArchiveRefusesAStateFileThatBreaksDuringThePass: the pass writes its
+// watermark, then the record breaks before the check re-reads it. The coverage is
+// unknown, so the run waits rather than reading the record the pass started
+// from. The events read runs after the commit export in the same pass, which is
+// where the file breaks here.
+func TestSquashArchiveRefusesAStateFileThatBreaksDuringThePass(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	commits := []archiveCommit{
+		{Hash: "f1", Committer: "gastown/crew/overseer", Date: squashTestNow.Add(-time.Hour), Message: "fresh"},
+	}
+	withSquashArchive(t, d, t.TempDir(), commits, 0)
+	d.maint.archiveEventsRead = func(context.Context, *Daemon, string, string) (archiveEvents, error) {
+		corruptMaintenanceState(t, d)
+		return archiveEvents{}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	want := "squash: gt: the run waits for the next day's check: the history archive did not reach the cut " +
+		squashTestNow.AddDate(0, 0, -7).UTC().Format(time.RFC3339) +
+		": reading the history archive's through-date for gt: parse " + maintenanceGCStateFileName
+	if !strings.Contains(got, want) {
+		t.Errorf("a record that broke during the pass was not refused: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started on a through-date it could not re-read: %q", got)
 	}
 }
 
@@ -960,8 +1425,14 @@ func TestSquashRecordRefusedRunWritesNothing(t *testing.T) {
 	if !strings.Contains(logs.String(), "another daemon holds the run marker") {
 		t.Fatalf("the run was not refused by the marker: %q", logs.String())
 	}
-	if _, err := readMaintenanceGCState(d.config.TownRoot); !errors.Is(err, errMaintenanceGCStateAbsent) {
-		t.Errorf("a refused run wrote the state file: %v", err)
+	// The state file already holds the archive through-date squashDueDaemon
+	// seeded; what a refused run must not write is a run record.
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading the state: %v", err)
+	}
+	if !st.Squash["gt"].LastRun.IsZero() {
+		t.Errorf("a refused run wrote a run record: %+v", st.Squash["gt"])
 	}
 	if entries := readSquashLedger(t, d.config.TownRoot); len(entries) != 0 {
 		t.Errorf("a refused run wrote %d ledger lines: %+v", len(entries), entries)

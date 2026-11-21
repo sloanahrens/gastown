@@ -28,9 +28,12 @@ import (
 // Once a day the check reads four numbers per database the squash block
 // enables — the last nightly backup's size and duration, the round-trip p95 of
 // the reads bd issues, and main's commit count — and doltsquash.Decide turns
-// them into a decision the check logs. A database Decide finds due is run by
-// doltsquash.Run, which holds the town's run marker for its whole length so
-// two daemons cannot run it at once. Each run is recorded in
+// them into a decision the check logs. A database Decide finds due has its
+// history archive run to the cut first, so the rebase never discards a commit
+// no archive holds; an archive that cannot reach the cut within its budget
+// leaves the run to the next day's check (squashArchiveToCut, gt-kq95uc). It is
+// then run by doltsquash.Run, which holds the town's run marker for its whole
+// length so two daemons cannot run it at once. Each run is recorded in
 // maintenance_state.json and in one daemon/squash_ledger.jsonl line (gt-5v1fye),
 // and a failed run or a swap that kept both branches raises one attention item
 // (gt-0g4yoa).
@@ -342,6 +345,27 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 				db, readings.backupAge.Round(time.Minute), squashRunBackupFreshness)
 			continue
 		}
+		// Design step 2: the history archive must cover the cut before the run
+		// records its BEFORE (step 3), or the rebase discards commits that were
+		// never written out. A run deferred here is not a failed decision: the
+		// check records its completion, and the next day's check decides again
+		// from the archive the deferral left further along (gt-kq95uc).
+		archive, err := d.squashArchiveToCut(db, dec.Cut)
+		switch {
+		case errors.Is(err, errSquashArchiveScheduledPass):
+			d.logger.Printf("squash: %s: the run waits for the next day's check: %s", db, err)
+			continue
+		case err != nil:
+			d.logger.Printf("squash: %s: the run waits for the next day's check: the history archive did not reach the cut %s: %v",
+				db, dec.Cut.UTC().Format(time.RFC3339), err)
+			continue
+		case !archive.Reached:
+			d.logger.Printf("squash: %s: the run waits for the next day's check: the history archive is %s, short of the cut %s",
+				db, archive.describe(), dec.Cut.UTC().Format(time.RFC3339))
+			continue
+		default:
+			d.logger.Printf("squash: %s: %s", db, archive.covered(dec.Cut))
+		}
 		res, err := d.runSquashDatabase(ctx, db, dec.Cut, step.settings)
 		switch {
 		case errors.Is(err, doltsquash.ErrRunMarkerHeld):
@@ -432,6 +456,137 @@ func (d *Daemon) recoverSquashDatabase(ctx context.Context, db string, now time.
 		Marker: &squashMarker{path: squashMarkerPath(d.config.TownRoot)},
 		Cut:    now.Add(-time.Duration(settings.KeepDays) * 24 * time.Hour),
 	})
+}
+
+// squashArchiveCut is the history archive's answer for one database the check
+// found due: the through-date its commit archive records, and whether that
+// covers the run's cut.
+type squashArchiveCut struct {
+	// Through is the newest commit date the archive has written out, read from
+	// the archive's own record in maintenance_state.json. It is the zero time
+	// when nothing has been archived yet.
+	Through time.Time
+	// Reached reports that the archive covers the cut: its through-date is at
+	// or after it, or the pass ran dry with the whole log written out.
+	Reached bool
+}
+
+// describe renders the through-date for the check's log line.
+func (c squashArchiveCut) describe() string {
+	if c.Through.IsZero() {
+		return "nothing archived yet"
+	}
+	return "through " + c.Through.UTC().Format(time.RFC3339)
+}
+
+// covered renders how a reached archive covers the cut for the check's log
+// line. A through-date at or after the cut covers it on its own. One short of
+// it covers it only because the pass ran dry, and the line says so rather than
+// showing a date beside a cut it does not reach.
+func (c squashArchiveCut) covered(cut time.Time) string {
+	if c.Through.Before(cut) {
+		return fmt.Sprintf("the history archive is %s, short of the cut %s, and its log has nothing more to write",
+			c.describe(), cut.UTC().Format(time.RFC3339))
+	}
+	return fmt.Sprintf("the history archive is %s, past the cut %s",
+		c.describe(), cut.UTC().Format(time.RFC3339))
+}
+
+// errSquashArchiveScheduledPass reports that the check found the maintenance gc
+// flag held, so the scheduled archive pass (or a maintenance cycle, or an
+// archive request) is already running one. The check defers the run to the next
+// day's check instead of running a second pass beside it.
+var errSquashArchiveScheduledPass = errors.New("the scheduled archive pass is running")
+
+// squashArchiveThrough reads one database's commit-archive through-date: the
+// newest commit date its archive has written out, from the archive's own record
+// in maintenance_state.json (ArchiveWatermark, scheduled_maintenance_archive.go).
+// A missing record is the zero date — nothing archived yet — but an unreadable
+// state file or a watermark that cannot bound a read is an error, never a date
+// a later read could take for coverage: the run must not start on an archive
+// position nobody can read.
+func (d *Daemon) squashArchiveThrough(db string) (time.Time, error) {
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading the history archive's through-date for %s: %w", db, err)
+	}
+	wm := st.ArchiveWatermarks[db]
+	if err := wm.Validate(); err != nil {
+		return time.Time{}, fmt.Errorf("the history archive's through-date for %s: %w", db, err)
+	}
+	return wm.Date, nil
+}
+
+// squashArchiveToCut runs the design's step 2 for one due database (D10 of
+// docs/plans/2026-11-15-dolt-squash-plan.md, gt-kq95uc): before the run records
+// its BEFORE, the history archive has to cover the cut, because the rebase
+// discards every commit at or before it.
+//
+// The through-date is the archive's own record, so a database already past the
+// cut is not archived again: the pass runs only when the record is behind it.
+// The pass is the scheduled_maintenance one (maintenanceArchive) with its own
+// batch bounds and budget. It writes the same archive files and watermark the
+// scheduled pass does, so it runs under the same maintenance gc flag: when the
+// flag is already held, no pass runs and the run is deferred rather than
+// duplicated beside the one in flight.
+//
+// The archive covers the cut when the re-read through-date is at or after it.
+// It also covers it when the commit export ran dry: a short batch means the
+// whole log is written out, so every commit the cut discards is archived even
+// when the newest commit is older than the cut and the through-date can never
+// reach it. A pass stopped short by its budget or its batch bound, or one that
+// failed, returns Reached false — with the error when the failure is what kept
+// it from covering the cut, so the check can name why. The caller leaves the
+// run to the next day's check, which continues the pass from the watermark the
+// stopped one recorded.
+func (d *Daemon) squashArchiveToCut(db string, cut time.Time) (squashArchiveCut, error) {
+	through, err := d.squashArchiveThrough(db)
+	if err != nil {
+		return squashArchiveCut{}, err
+	}
+	if !through.Before(cut) {
+		return squashArchiveCut{Through: through, Reached: true}, nil
+	}
+	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+		return squashArchiveCut{}, errSquashArchiveScheduledPass
+	}
+	defer d.maintenanceGCRunning.Store(false)
+	// The pass's unarchived set also speaks for the events export, which the
+	// cut does not bear on: what the run waits for is the commit archive's
+	// through-date, read from the record below.
+	_, outcomes := d.maintenanceArchive([]string{db})
+	return d.squashArchiveAfterPass(db, cut, outcomes)
+}
+
+// squashArchiveAfterPass reads the archive's through-date once the pass has run
+// and says whether it covers the cut. A pass that reported no outcome for db is
+// an error rather than "ran dry": archiveStopShort is the zero archiveStop, so
+// an absent outcome read as one would start a run on an archive nobody
+// reported on.
+func (d *Daemon) squashArchiveAfterPass(db string, cut time.Time, outcomes map[string]archiveDatabaseOutcome) (squashArchiveCut, error) {
+	export, ok := outcomes[db]
+	if !ok {
+		return squashArchiveCut{}, fmt.Errorf("the history archive reported no outcome for %s", db)
+	}
+	// Re-read the record rather than the export's own return: the through-date
+	// is what the archive wrote down, and a pass that stopped part way may have
+	// advanced it past the cut before it ran out.
+	through, err := d.squashArchiveThrough(db)
+	if err != nil {
+		return squashArchiveCut{}, err
+	}
+	out := squashArchiveCut{Through: through}
+	// The export's error is read before its stop: archiveStopShort is the zero
+	// stop, so an outcome that carries an error and no stop would otherwise be
+	// read as "the whole log was written out" and the run would start on an
+	// archive nobody reported a working pass for. The through-date still covers
+	// the cut on its own: it is the archive's own record of what was written.
+	out.Reached = !through.Before(cut) ||
+		(export.commits.err == nil && export.commits.stop == archiveStopShort)
+	if !out.Reached && export.commits.err != nil {
+		return out, fmt.Errorf("the history archive's commit export failed: %w", export.commits.err)
+	}
+	return out, nil
 }
 
 // squashRunRecord is, per database, the rolling squash's last run: the start
