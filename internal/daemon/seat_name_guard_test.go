@@ -366,6 +366,147 @@ func TestSeatNameGuardCollectorLeavesAHostOnlyTownAlone(t *testing.T) {
 	}
 }
 
+// seatNameGuardListing is one gateway listing of sandboxes in phase.
+func seatNameGuardListing(phase string, names ...string) []sandbox.Entry {
+	out := make([]sandbox.Entry, 0, len(names))
+	for _, n := range names {
+		out = append(out, sandbox.Entry{Name: n, Phase: phase})
+	}
+	return out
+}
+
+// seatNameGuardTick is one listing the guard reads, at tick at.
+type seatNameGuardTick struct {
+	at      time.Time
+	entries []sandbox.Entry
+}
+
+// TestSeatNameGuardObserve is the guard's picture across listings: a name is
+// trimmed, an empty name is ignored, a phase change starts the clock again, the
+// same failure keeps it, and a Since later than now is replaced by now
+// (gt-xtwkwg).
+func TestSeatNameGuardObserve(t *testing.T) {
+	t.Parallel()
+	now := seatNameGuardNow
+	for _, tc := range []struct {
+		name      string
+		ticks     []seatNameGuardTick
+		wantNames []string
+		wantSince time.Time
+	}{
+		{"a padded name is keyed trimmed", []seatNameGuardTick{{now, seatNameGuardListing("Error", " gt-dag ")}}, []string{"gt-dag"}, now},
+		{"an empty name is ignored", []seatNameGuardTick{{now, seatNameGuardListing("Error", "", "   ")}}, nil, time.Time{}},
+		{"a phase change to another failure starts the clock again", []seatNameGuardTick{
+			{now, seatNameGuardListing("Error", "gt-dag")},
+			{now.Add(5 * time.Minute), seatNameGuardListing("Failed", "gt-dag")},
+		}, []string{"gt-dag"}, now.Add(5 * time.Minute)},
+		{"the same failure keeps the first reading's time", []seatNameGuardTick{
+			{now, seatNameGuardListing("Error", "gt-dag")},
+			{now.Add(5 * time.Minute), seatNameGuardListing("Error", "gt-dag")},
+		}, []string{"gt-dag"}, now},
+		{"a Since later than now is replaced by now", []seatNameGuardTick{
+			{now.Add(10 * time.Minute), seatNameGuardListing("Error", "gt-dag")},
+			{now, seatNameGuardListing("Error", "gt-dag")},
+		}, []string{"gt-dag"}, now},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			guard := &SeatNameGuard{}
+			for _, tick := range tc.ticks {
+				guard.Observe(tick.entries, tick.at)
+			}
+			var got []string
+			for _, f := range guard.Findings() {
+				got = append(got, f.Sandbox)
+			}
+			if !slices.Equal(got, tc.wantNames) {
+				t.Fatalf("findings = %v, want %v", got, tc.wantNames)
+			}
+			if len(tc.wantNames) > 0 {
+				if f, _ := guard.Stale(tc.wantNames[0]); !f.Since.Equal(tc.wantSince) {
+					t.Errorf("Since = %s, want %s", f.Since, tc.wantSince)
+				}
+			}
+		})
+	}
+}
+
+// TestSeatNameGuardPolecats is the pool's refusal: only a sandbox named for a
+// polecat of the rig's prefix, with one name after the prefix and no slash,
+// keeps that polecat out of the draw (gt-xtwkwg).
+func TestSeatNameGuardPolecats(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		prefix    string
+		sandboxes []string
+		want      []string
+	}{
+		{"a seat of the rig is named", "gt", []string{"gt-dag"}, []string{"dag"}},
+		{"a name with a slash names no polecat", "gt", []string{"gt-a/b"}, nil},
+		{"an empty name after the prefix names no polecat", "gt", []string{"gt-"}, nil},
+		{"a name outside the prefix is left alone", "gt", []string{"xx-dag"}, nil},
+		{"an empty rig prefix names no seat", "", []string{"-dag", "gt-dag"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			guard := NewSeatNameGuard(seatNameGuardListing("Error", tc.sandboxes...), seatNameGuardNow)
+			if got := guard.Polecats(tc.prefix); !slices.Equal(got, tc.want) {
+				t.Errorf("Polecats(%q) = %v, want %v", tc.prefix, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSeatNameGuardFindings: findings come back sorted by name whichever order
+// the listing named the sandboxes in (gt-xtwkwg).
+func TestSeatNameGuardFindings(t *testing.T) {
+	t.Parallel()
+	want := []string{"gt-dag", "gt-nux"}
+	for _, tc := range []struct {
+		name    string
+		listing []sandbox.Entry
+	}{
+		{"listed in name order", seatNameGuardListing("Error", "gt-dag", "gt-nux")},
+		{"listed in reverse name order", seatNameGuardListing("Failed", "gt-nux", "gt-dag")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, f := range NewSeatNameGuard(tc.listing, seatNameGuardNow).Findings() {
+				got = append(got, f.Sandbox)
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("Findings() = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestSeatNameGuardItems: an item's age runs from the first reading in the
+// current phase, and a reading in the future is an age of zero, not a negative
+// one (gt-xtwkwg).
+func TestSeatNameGuardItems(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		since   time.Time
+		wantAge string
+	}{
+		{"a reading six minutes old is six minutes old", seatNameGuardNow.Add(-6 * time.Minute), "for 6m"},
+		{"a reading in the future is zero minutes old", seatNameGuardNow.Add(5 * time.Minute), "for 0m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			guard := NewSeatNameGuard(seatNameGuardListing("Error", "gt-dag"), tc.since)
+			items := guard.Items(seatNameGuardNow)
+			if len(items) != 1 || !strings.Contains(items[0].Summary, tc.wantAge) {
+				t.Errorf("items = %+v, want one whose summary says %q", items, tc.wantAge)
+			}
+		})
+	}
+}
+
 // seatNameGuardDaemon is the daemon these collectors run against: a town whose
 // settings name one sandbox profile, so the collector reaches the gateway.
 func seatNameGuardDaemon(t *testing.T) *Daemon {
