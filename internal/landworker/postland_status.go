@@ -311,7 +311,7 @@ type PostLandUnknown struct {
 	State   string
 	At      time.Time
 	// Orphan is the run found ended without a verdict, such as "11205
-	// cancelled"; empty for a verdict that only timed out.
+	// failure"; empty for a verdict that only timed out.
 	Orphan string
 }
 
