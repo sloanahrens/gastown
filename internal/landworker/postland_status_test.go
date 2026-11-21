@@ -1364,3 +1364,79 @@ func TestPassReadsPendingVerdictsBetweenLandings(t *testing.T) {
 		}
 	})
 }
+
+// TestPostLandStatusCutOffReadRestsForTheInterval: an entry whose read the pass
+// budget cuts off is stamped as read, so it rests for the interval and the
+// entries behind it get their turn instead of starving behind it (gt-4cl42n).
+func TestPostLandStatusCutOffReadRestsForTheInterval(t *testing.T) {
+	t.Parallel()
+	// stalledFirst is two pending entries: commit00 never answers within the
+	// pass budget (it counts its reads), commit01 answers green.
+	stalledFirst := func(first func(context.Context) (*forgejo.CombinedStatus, error)) (*PostLandRunner, *statusVerdicts, *manualClock, *atomic.Int32) {
+		v, clk, reads := &statusVerdicts{}, &manualClock{now: statusT0}, &atomic.Int32{}
+		r := v.runner(func(ctx context.Context, pl PostLand) (*forgejo.CombinedStatus, error) {
+			if pl.Commit != "commit00" {
+				return combinedFor(statusContext, forgejo.StateSuccess), nil
+			}
+			reads.Add(1)
+			return first(ctx)
+		}, &MemoryMainState{}, clk, time.Hour)
+		r.readTimeoutOverride, r.passBudgetOverride = 500*time.Millisecond, 50*time.Millisecond
+		for _, c := range []string{"commit00", "commit01"} {
+			r.Trigger(context.Background(), PostLand{Commit: c, Target: "main"})
+		}
+		return r, v, clk, reads
+	}
+	stall := func(ctx context.Context) (*forgejo.CombinedStatus, error) { <-ctx.Done(); return nil, ctx.Err() }
+	t.Run("the entry behind a stalled one is read and its green fires", func(t *testing.T) {
+		t.Parallel()
+		r, v, _, reads := stalledFirst(stall)
+		r.PollPending(context.Background())
+		r.PollPending(context.Background())
+		if greens, _, _ := v.counts(); greens != 1 || reads.Load() != 1 {
+			t.Fatalf("after two polls green %d, stalled entry read %d times, want 1 and 1: the stalled entry rests", greens, reads.Load())
+		}
+	})
+	t.Run("the stalled entry is read again after the interval", func(t *testing.T) {
+		t.Parallel()
+		r, _, clk, reads := stalledFirst(stall)
+		r.PollPending(context.Background())
+		clk.Advance(PostLandStatusPollInterval)
+		r.PollPending(context.Background())
+		if reads.Load() != 2 {
+			t.Fatalf("the stalled entry was read %d times across an interval, want 2", reads.Load())
+		}
+	})
+	t.Run("an entry whose read finishes unknown still rests for the interval", func(t *testing.T) {
+		t.Parallel()
+		r, _, _, reads := stalledFirst(func(context.Context) (*forgejo.CombinedStatus, error) {
+			return combinedFor(statusContext, forgejo.StatePending), nil
+		})
+		r.PollPending(context.Background())
+		r.PollPending(context.Background())
+		if reads.Load() != 1 {
+			t.Fatalf("an unknown entry was read %d times inside its interval, want 1", reads.Load())
+		}
+	})
+}
+
+// TestPostLandStatusStopDuringReadDoesNotStamp: a stop of the daemon that cuts a
+// read off is not the pass budget, so the entry is not stamped: the restarted
+// runner reads it at once instead of resting it for an interval (gt-4cl42n).
+func TestPostLandStatusStopDuringReadDoesNotStamp(t *testing.T) {
+	t.Parallel()
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	store := &MemoryMainState{}
+	r := (&statusVerdicts{}).runner(func(readCtx context.Context, _ PostLand) (*forgejo.CombinedStatus, error) {
+		stop() // the daemon stops while the read is in flight
+		<-readCtx.Done()
+		return nil, readCtx.Err()
+	}, store, &manualClock{now: statusT0}, time.Hour)
+	r.Trigger(context.Background(), PostLand{Commit: "commit00", Target: "main"})
+	r.PollPending(ctx)
+	pending := pendingOf(t, store)
+	if len(pending) != 1 || !pending[0].LastRead.IsZero() {
+		t.Fatalf("pending after a stop mid-read = %+v, want the one entry unstamped (LastRead zero)", pending)
+	}
+}
