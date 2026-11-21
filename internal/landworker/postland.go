@@ -100,6 +100,9 @@ type PostLandRunner struct {
 	// mode. It is read at most once per PostLandStatusPollInterval per pending
 	// commit.
 	Status func(ctx context.Context, pl PostLand) (*forgejo.CombinedStatus, error)
+	// RunEnded reports whether the run behind a pending commit's check ended
+	// without a verdict; nil disables the check, and an error is not an end.
+	RunEnded func(ctx context.Context, pl PostLand) (RunEnd, error)
 	// State holds the pending status-mode verdicts, so a restarted daemon
 	// resumes them; nil disables status mode.
 	State MainStateStore
