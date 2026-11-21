@@ -44,13 +44,13 @@ func TestResolveForgejoConfigWithError(t *testing.T) {
 		{
 			name:    "a repo tier that cannot be read",
 			repoDir: true,
-			repo:    stubRepo{existsErr: errors.New("git: reading refs: corrupt repository")},
+			repo:    stubRepo{fileErr: errors.New("git: reading refs: corrupt repository")},
 			wantErr: "reading",
 		},
 		{
 			name:    "a repo tier that reads but does not parse is the absence it cannot carry",
 			repoDir: true,
-			repo:    stubRepo{refExists: true, data: "{not json"},
+			repo:    stubRepo{data: "{not json"},
 		},
 	}
 	for _, tt := range tests {
