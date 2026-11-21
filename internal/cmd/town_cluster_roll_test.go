@@ -782,6 +782,35 @@ func TestTownClusterRollStopsBeforeAnyApplyWhenARevisionIsUnreadable(t *testing.
 	}
 }
 
+// TestLiveDeploymentRevision: the undo line names the recorded revision as a
+// normalised positive integer, and a value that names none is refused.
+func TestLiveDeploymentRevision(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, answer, want, wantErr string
+	}{
+		{name: "a plain revision", answer: "7", want: "7"},
+		{name: "a signed revision", answer: "+7", want: "7"},
+		{name: "a zero-padded revision", answer: "07", want: "7"},
+		{name: "a revision with whitespace", answer: " 7\n", want: "7"},
+		{name: "a zero revision", answer: "0", wantErr: "not a positive number"},
+		{name: "a negative revision", answer: "-1", wantErr: "not a positive number"},
+		{name: "a non-numeric revision", answer: "x", wantErr: "not a positive number"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			kubectl := clusterRollAnsweringRevisions(t, nil, func(string) (string, int, error) { return tc.answer, 0, nil })
+			got, err := liveDeploymentRevision(context.Background(), kubectl, "gt", "bd-gateway")
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("err = %v, want one naming %q", err, tc.wantErr)
+			} else if tc.wantErr == "" && (err != nil || got != tc.want) {
+				t.Fatalf("revision = %q, err = %v, want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 // TestTownClusterRollUnreadableCompareTakesNoHold: a diff the cluster cannot
 // answer stops the roll before the hold is taken, since an unread cluster is not
 // one in step.
