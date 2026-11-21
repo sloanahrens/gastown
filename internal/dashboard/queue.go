@@ -39,6 +39,11 @@ type QueueBead struct {
 	// the bead has none or two that conflict (gt-cdhagm).
 	SPEstimate *int `json:"sp_estimate,omitempty"`
 
+	// PolecatSecs is the time the bead's polecat seats spent hooked on it, read
+	// from the spans log when the bead waits to land; absent when the log holds
+	// no closed span (gt-du2p9d).
+	PolecatSecs *float64 `json:"polecat_secs,omitempty"`
+
 	// UpdatedAt is the bead's last write: for a bead waiting to land, the label
 	// write gt done makes is normally its last write, so this is when the wait
 	// started, which is how the Landings pane ages it.

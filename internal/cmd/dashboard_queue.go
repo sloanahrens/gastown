@@ -30,11 +30,19 @@ var _ dashQueueStore = (*beads.Beads)(nil)
 // ("hq") and one per rig.
 type dashQueueReader struct {
 	townRoot string
-	template specdispatch.Template                               // the shape the dispatcher lints against
-	parked   func(rig string) bool                               // whether a store's rig is parked (nil: none is)
-	stores   func() (map[string]dashQueueStore, []string, error) // store by name, in order
-	prefixes func(names []string) map[string]string              // beads prefix to store name
-	verdicts func() (*specdispatch.Ledger, error)                // the dispatcher's verdict ledger (nil: none to read)
+	template specdispatch.Template                                                    // the shape the dispatcher lints against
+	parked   func(rig string) bool                                                    // whether a store's rig is parked (nil: none is)
+	stores   func() (map[string]dashQueueStore, []string, error)                      // store by name, in order
+	prefixes func(names []string) map[string]string                                   // beads prefix to store name
+	verdicts func() (*specdispatch.Ledger, error)                                     // the dispatcher's verdict ledger (nil: none to read)
+	polecat  func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool) // a waiting bead's polecat time (nil: none read)
+}
+
+// withPolecatTimes wires the spans-log reader the Landings table already reads a
+// rejected row with, so a bead waiting to land takes the same reading (gt-du2p9d).
+func (r *dashQueueReader) withPolecatTimes(polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool)) *dashQueueReader {
+	r.polecat = polecat
+	return r
 }
 
 // storePrefixes maps each store's beads prefix back to the store's name, so a
@@ -331,6 +339,17 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 	q.Ready, q.ReadyTotal, q.ReadyRigs = dashboard.CapQueueRows(kept)
 	q.Landing, q.LandingTotal, q.LandingRigs = dashboard.CapQueueRows(landing)
 	q.Blocked, q.BlockedTotal, q.BlockedRigs = dashboard.CapQueueRows(blocked)
+	// A waiting bead's seat has finished, so its spans log reads the way a
+	// rejected row's does: asOf zero, the whole attempt. Only the rows the
+	// table keeps are read, the same bound the trend table puts on its own.
+	if r.polecat != nil {
+		for i := range q.Landing {
+			if secs, _, _ := r.polecat(q.Landing[i].ID, time.Time{}); secs > 0 {
+				s := secs
+				q.Landing[i].PolecatSecs = &s
+			}
+		}
+	}
 	// The per-store totals the capping above just computed are exact, so the
 	// rows take their counts from them rather than counting again.
 	for i := range rigs {
