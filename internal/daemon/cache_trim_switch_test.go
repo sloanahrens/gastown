@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -108,10 +109,16 @@ func TestCacheTrimViaJobPassesTheSandboxCount(t *testing.T) {
 	if !viaJob(f, true, map[string]string{}) {
 		t.Fatalf("a finished claim Job = false, want true; log: %s", f.log)
 	}
+	// The applied document is indented JSON, so the flag and its value are
+	// matched through whitespace.
 	for _, call := range f.cli.recorded() {
-		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") && strings.Contains(call.stdin, `"--sandboxes","1"`) {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") && sandboxesFlag.MatchString(call.stdin) {
 			return
 		}
 	}
 	t.Error("no applied document carries --sandboxes 1; the planner was not told the sandbox count")
 }
+
+// sandboxesFlag is the claim Job's `--sandboxes 1` argument pair in an applied
+// JSON document, whatever its indentation.
+var sandboxesFlag = regexp.MustCompile(`"--sandboxes",\s*"1"`)
