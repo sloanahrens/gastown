@@ -214,15 +214,81 @@ type failingCommentStore struct {
 
 func (s failingCommentStore) AddComment(string, string) error { return s.err }
 
+// readyListLimit is the number of ready-board lists one test may make before
+// the harness reports that a pass's loop does not end. A correct pass lists
+// once, and once more per landing attempt; a loop that never ends lists
+// without bound. The limit sits far above any real pass and far below the
+// package's test timeout (gt-ek7hmt).
+const readyListLimit = 200
+
+// guardedBeads is the harness's beads fake with the pass's list guard: a pass
+// whose loop does not end lists the ready board forever, so past
+// readyListLimit calls the guard fails the test once and returns an error,
+// which the pass's own relist branch turns into a failure and a return
+// instead of a spin to the package timeout (gt-ek7hmt).
+type guardedBeads struct {
+	*beadsfake.Fake
+	t      testing.TB
+	lists  int
+	failed bool
+}
+
+func (b *guardedBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if opts.Label == land.LabelReadyToLand {
+		b.lists++
+		if b.lists > readyListLimit {
+			msg := fmt.Sprintf("the pass listed the ready board %d times: its loop does not end", readyListLimit)
+			if !b.failed {
+				b.failed = true
+				b.t.Errorf("%s", msg)
+			}
+			return nil, errors.New(msg)
+		}
+	}
+	return b.Fake.List(opts)
+}
+
+// passIterationLimit is the number of times one pass may read the drain flag
+// before the harness reports that its loop does not end. The pass reads the
+// flag at the top of every iteration of that loop, so a loop that never ends
+// reads it without bound. The limit is twice readyListLimit, so a loop that
+// re-lists the ready board is named by the List guard's line first; this one
+// is the backstop for a loop that only skips a bead its store keeps refusing
+// and so never lists again (gt-ek7hmt).
+const passIterationLimit = 2 * readyListLimit
+
+// drainGuard is the harness's Draining hook with the pass's iteration guard. A
+// pass test that leaves the hook alone inherits it, including the ones that
+// swap the worker's store for their own: a loop that does not end reads the
+// flag forever, so past passIterationLimit reads the guard fails the test once
+// and answers true, which ends the pass at its next iteration (gt-ek7hmt).
+func (h *harness) drainGuard() bool {
+	h.loopReads++
+	if h.loopReads <= passIterationLimit {
+		return false
+	}
+	if !h.loopFailed {
+		h.loopFailed = true
+		h.t.Errorf("the pass read its drain flag %d times: its loop does not end", passIterationLimit)
+	}
+	return true
+}
+
 type harness struct {
 	w         *Worker
 	bd        *beadsfake.Fake
+	guard     *guardedBeads
+	t         testing.TB
 	remote    *fakeRemote
 	lander    *fakeLander
 	files     *fakeLandings
 	cleared   []string
 	afterLand []string
 	now       time.Time
+
+	// The drain guard's count of one test's reads and whether it reported.
+	loopReads  int
+	loopFailed bool
 }
 
 const branch = "polecat/opal/gt-abc+x1"
@@ -231,22 +297,25 @@ const branch = "polecat/opal/gt-abc+x1"
 // the name a submission this worker refuses carries.
 const humanActor = "Test Operator"
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t testing.TB) *harness {
 	t.Helper()
 	h := &harness{
 		bd:     beadsfake.New(beadsfake.WithPrefix("gt")),
+		t:      t,
 		remote: &fakeRemote{tips: map[string]string{branch: tipHead}, contains: map[string]bool{}},
 		lander: &fakeLander{},
 		files:  &fakeLandings{},
 		now:    time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC),
 	}
+	h.guard = &guardedBeads{Fake: h.bd, t: t}
 	h.w = &Worker{
-		Rig: "gastown", HumanActor: humanActor, Beads: h.bd, Remote: h.remote, Lander: h.lander, Landings: h.files,
+		Rig: "gastown", HumanActor: humanActor, Beads: h.guard, Remote: h.remote, Lander: h.lander, Landings: h.files,
 		ClearIntent: func(w land.Work) error { h.cleared = append(h.cleared, w.BeadID+"@"+w.Worker); return nil },
 		AfterLanded: func(w land.Work) { h.afterLand = append(h.afterLand, w.BeadID+"@"+w.Worker) },
 		Now:         func() time.Time { return h.now },
 		Logf:        t.Logf,
 	}
+	h.w.Draining = h.drainGuard
 	return h
 }
 
