@@ -101,6 +101,21 @@ func TestReviewLogScrubTokenHoldingAJoiner(t *testing.T) {
 	}
 }
 
+// TestScrubTextIsScrubClaim: the export a caller outside this package records and
+// shows text through is this package's scrub, not a copy of it (gt-v90ftl).
+func TestScrubTextIsScrubClaim(t *testing.T) {
+	t.Parallel()
+	token := "ghp_" + strings.Repeat("a", 36)
+	line := "fatal: could not read from https://bot:" + token + "@forgejo:3000/o/r.git"
+	got := ScrubText(line)
+	if want := scrubClaim(line); got != want {
+		t.Errorf("ScrubText(%q) = %q, want scrubClaim's %q", line, got, want)
+	}
+	if strings.Contains(got, token[:12]) {
+		t.Errorf("ScrubText keeps the token: %q", got)
+	}
+}
+
 // TestReviewLogScrubTheCutHoldsNoTokenAndNoMarkerPart: a token straddling the
 // bound leaves none of itself, a marker straddling it is not split, and the
 // recorded claim is a fixed point of the scrub (the rule alone finds nothing in it).
