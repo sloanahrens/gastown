@@ -6,12 +6,47 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/bdgateway"
 )
+
+// bdStandIn returns bd-standin, a symlink to this test binary in a 0o700
+// TempDir, under which name TestMain acts as bd for the Executor.
+func bdStandIn(t *testing.T) string {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "bd-standin")
+	if err := os.Symlink(self, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
+}
+
+// TestBdgwStandIn: the given line lands on the stand-in's stderr, the given status is its exit.
+func TestBdgwStandIn(t *testing.T) {
+	t.Parallel()
+	standin := bdStandIn(t)
+	const line = "Error resolving gt-x: no issue found"
+	for _, status := range []int{0, 3} {
+		var stderr bytes.Buffer
+		//testpolicy:allow no-subprocess — the stand-in must be a process of its own: the Executor starts it as bd, so its stderr and status are the assertion
+		cmd := exec.Command(standin, line, strconv.Itoa(status))
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); cmd.ProcessState == nil {
+			t.Fatalf("run the stand-in: %v", err)
+		}
+		if code, got := cmd.ProcessState.ExitCode(), stderr.String(); code != status || got != line+"\n" {
+			t.Errorf("exit status %d and stderr %q, want %d and %q", code, got, status, line+"\n")
+		}
+	}
+}
 
 // frameRunner answers a call with the frames it was given, as the executor
 // would after bd ran.
