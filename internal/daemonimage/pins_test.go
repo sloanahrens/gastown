@@ -459,6 +459,39 @@ func TestCheckPinsFallsBackToTheStaticListWithANoteWhenGoListFails(t *testing.T)
 	})
 }
 
+// TestCheckPinsDerivesOnlyForAPinWithPaths: the go list derivation is the devops
+// build's: a pin the image builds from its whole repository (bd) never starts go,
+// and a pin with input paths (devops) starts it once.
+func TestCheckPinsDerivesOnlyForAPinWithPaths(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		pin       Pin
+		fill      func(*pinsGit)
+		wantCalls int
+	}{
+		{"a pin with no input paths", Pin{Name: "bd", URL: testPinURL("beads"), Commit: pinsTestPin}, func(f *pinsGit) { f.pinTable(pinsTestPin, pinsTestMain, 3, time.Hour) }, 0},
+		{"a pin with input paths", devopsPin, func(f *pinsGit) { devopsCounts(f, 3, 1, time.Hour) }, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPinsGit()
+			tc.fill(f)
+			calls := 0
+			goList := func(dir string, args ...string) ([]byte, error) {
+				calls++
+				return coveredGoList(dir, args...)
+			}
+			if _, err := checkPins([]Pin{tc.pin}, func(Pin) (string, error) { return pinsTestDir, nil }, pinsTestPath, f.run, goList); err != nil {
+				t.Fatalf("checkPins: %v", err)
+			}
+			if calls != tc.wantCalls {
+				t.Errorf("go list ran %d times for %s, want %d", calls, tc.pin.Name, tc.wantCalls)
+			}
+		})
+	}
+}
+
 // newPinsGit is a fake git a test has planned no answer for.
 func newPinsGit() *pinsGit { return &pinsGit{answer: map[string]string{}, errs: map[string]error{}} }
 
