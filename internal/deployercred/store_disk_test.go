@@ -3,6 +3,8 @@
 package deployercred_test
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -107,4 +109,137 @@ func TestDeployerCredStoreDisk(t *testing.T) {
 			t.Fatalf("the credential %s holds %q, want %q", target, got, data)
 		}
 	}
+}
+
+// sameInfo fails when an open handle reports other attributes than the OS does
+// for the same path. The OS's report is the reference, never a constant: a
+// created directory's group follows the host's setgid state.
+func sameInfo(t *testing.T, what, path string, got deployercred.Info) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("could not stat %s: %v", path, err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("the host reports no Unix stat for %s", path)
+	}
+	want := deployercred.Info{Mode: fi.Mode(), Owner: int(st.Uid), Group: int(st.Gid)}
+	if got != want {
+		t.Fatalf("%s of %s reports %+v, want the OS's %+v", what, path, got, want)
+	}
+}
+
+// openDir opens dir as a handle, failing the test on an error.
+func openDir(t *testing.T, dir string) deployercred.Dir {
+	t.Helper()
+	handle, err := (deployercred.Disk{}).OpenDir(dir)
+	if err != nil {
+		t.Fatalf("Disk.OpenDir of %s: %v", dir, err)
+	}
+	return handle
+}
+
+// closeDir closes a handle at the test's end, failing it when the close does.
+func closeDir(t *testing.T, handle deployercred.Dir) {
+	t.Helper()
+	if err := handle.Close(); err != nil {
+		t.Errorf("could not close the directory handle: %v", err)
+	}
+}
+
+// TestDeployerCredReadFS: a directory handle and a file opened through it report
+// what the OS reports for the same paths, and a read through the handle returns
+// the file's bytes.
+func TestDeployerCredReadFS(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// The CI runner's umask is 000, so TempDir does not leave the directory in
+	// the 0700 a credential directory has.
+	//testpolicy:allow no-exec-files — the rule flags any literal mode with an execute bit; this chmod sets a test directory to 0700, and no file becomes executable
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("could not set the test directory to 0700: %v", err)
+	}
+	const name = "approval.json"
+	want := []byte(`{"plan":"example"}`)
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatalf("could not write %s: %v", path, err)
+	}
+	handle := openDir(t, dir)
+	defer closeDir(t, handle)
+	dirInfo, err := handle.Stat()
+	if err != nil {
+		t.Fatalf("Dir.Stat of %s: %v", dir, err)
+	}
+	sameInfo(t, "Dir.Stat", dir, dirInfo)
+	file, err := handle.Open(name)
+	if err != nil {
+		t.Fatalf("Dir.Open of %s: %v", name, err)
+	}
+	fileInfo, err := file.Stat()
+	if err != nil {
+		t.Fatalf("ReadFile.Stat of %s: %v", path, err)
+	}
+	sameInfo(t, "ReadFile.Stat", path, fileInfo)
+	got, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("reading %s through the handle: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("could not close %s: %v", path, err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the read through the handle returned %q, want %q", got, want)
+	}
+}
+
+// TestDeployerCredReadFSErrors: each failure path of the read side returns its
+// error rather than an empty report.
+func TestDeployerCredReadFSErrors(t *testing.T) {
+	t.Parallel()
+	t.Run("open a directory that does not exist", func(t *testing.T) {
+		t.Parallel()
+		if _, err := (deployercred.Disk{}).OpenDir(filepath.Join(t.TempDir(), "absent")); err == nil {
+			t.Fatal("Disk.OpenDir opened a directory that does not exist")
+		}
+	})
+	t.Run("stat a closed directory handle", func(t *testing.T) {
+		t.Parallel()
+		handle := openDir(t, t.TempDir())
+		if err := handle.Close(); err != nil {
+			t.Fatalf("could not close the directory handle: %v", err)
+		}
+		if _, err := handle.Stat(); err == nil {
+			t.Fatal("Dir.Stat of a closed handle reported attributes")
+		}
+	})
+	t.Run("open a name that does not exist", func(t *testing.T) {
+		t.Parallel()
+		handle := openDir(t, t.TempDir())
+		defer closeDir(t, handle)
+		if _, err := handle.Open("absent"); err == nil {
+			t.Fatal("Dir.Open opened a name that does not exist")
+		}
+	})
+	t.Run("stat a closed file", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		const name = "approval.json"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatalf("could not write %s: %v", name, err)
+		}
+		handle := openDir(t, dir)
+		defer closeDir(t, handle)
+		file, err := handle.Open(name)
+		if err != nil {
+			t.Fatalf("Dir.Open of %s: %v", name, err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatalf("could not close %s: %v", name, err)
+		}
+		if _, err := file.Stat(); err == nil {
+			t.Fatal("ReadFile.Stat of a closed file reported attributes")
+		}
+	})
 }

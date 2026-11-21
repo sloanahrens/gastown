@@ -95,6 +95,83 @@ func (Disk) Remove(name string) error { return os.Remove(name) }
 // interface fails to compile here rather than at the command.
 var _ FS = Disk{}
 
+// ReadFS is the filesystem the approval-record reader reads a directory and a
+// file through. A Stat on an open handle describes the bytes its Read returns,
+// not a path checked a moment earlier (gt-31vzri).
+type ReadFS interface {
+	Lstat(name string) (Info, error)
+	OpenDir(name string) (Dir, error)
+}
+
+// Dir is an open directory handle: Stat reports the handle's attributes, and
+// Open opens a name inside it rather than along the path it was opened by.
+type Dir interface {
+	Stat() (Info, error)
+	Open(name string) (ReadFile, error)
+	Close() error
+}
+
+// ReadFile is a file opened inside a Dir: Stat reports the opened descriptor,
+// so it describes the bytes Read returns.
+type ReadFile interface {
+	Stat() (Info, error)
+	Read(p []byte) (int, error)
+	Close() error
+}
+
+// OpenDir is os.OpenRoot: every later name resolves inside the directory the
+// handle was opened on, so a symlink swapped onto the path after the open
+// cannot redirect a read through the handle.
+func (Disk) OpenDir(name string) (Dir, error) {
+	root, err := os.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	return diskDir{root: root}, nil
+}
+
+// diskDir is Dir through a directory descriptor, which outlives a rename of the
+// path it was opened by.
+type diskDir struct{ root *os.Root }
+
+func (d diskDir) Stat() (Info, error) {
+	fi, err := d.root.Stat(".")
+	if err != nil {
+		return Info{}, err
+	}
+	return infoOf(fi), nil
+}
+
+func (d diskDir) Open(name string) (ReadFile, error) {
+	f, err := d.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return diskFile{f: f}, nil
+}
+
+func (d diskDir) Close() error { return d.root.Close() }
+
+// diskFile is ReadFile through the opened descriptor, so a Stat on it describes
+// the bytes Read returns.
+type diskFile struct{ f *os.File }
+
+func (d diskFile) Stat() (Info, error) {
+	fi, err := d.f.Stat()
+	if err != nil {
+		return Info{}, err
+	}
+	return infoOf(fi), nil
+}
+
+func (d diskFile) Read(p []byte) (int, error) { return d.f.Read(p) }
+
+func (d diskFile) Close() error { return d.f.Close() }
+
+// Disk is the read side the deployer command runs on the host; a drift from the
+// interface fails to compile here rather than at the command.
+var _ ReadFS = Disk{}
+
 // Store writes files into dir, a directory in exactly 0700 held by uid, and
 // refuses anything it cannot verify: a symlink at dir or on the way to it, a
 // directory with another mode or owner, a name that is not one plain file, a
