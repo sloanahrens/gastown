@@ -495,9 +495,12 @@ func latestEstimateHash(comments []beads.Comment) string {
 }
 
 // specEstimateFromLabels fills an outcome whose estimate already stood from the
-// labels the command wrote on an earlier run. A value the bead's labels disagree
-// on is left unset, so a caller reads the estimate as absent rather than
-// guessing between two.
+// labels the command wrote on an earlier run. A rung or a point count the bead's
+// labels disagree on is left unset, so a caller reads the estimate as absent
+// rather than guessing between two. Two or more distinct sp-minutes labels give
+// the larger: a bead that once read over the split trigger stays held until it
+// reads clearly under it, where leaving the minutes unset would let the guard
+// fall back to the bare trigger and flip on estimator noise (gt-9bjb3m).
 func specEstimateFromLabels(o *specEstimateOutcome, labels []string) {
 	if points, ok := storypoints.EstimateOf(labels); ok {
 		o.Points = points
@@ -518,10 +521,8 @@ func specEstimateFromLabels(o *specEstimateOutcome, labels []string) {
 			o.Rung = rung
 		}
 	}
-	if len(minutes) == 1 {
-		for m := range minutes {
-			o.Minutes = m
-		}
+	for m := range minutes {
+		o.Minutes = max(o.Minutes, m)
 	}
 }
 
