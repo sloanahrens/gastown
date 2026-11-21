@@ -548,6 +548,38 @@ func TestReviewLogScrubRewriteApplyRewritesOnlyTheFlaggedRow(t *testing.T) {
 	assertNoScrubToken(t, fmt.Sprintf("%+v", res2), token)
 }
 
+// TestReviewLogScrubRewriteKeepsEachLinesTerminator: an apply writes each line
+// back with the terminator it read, so only the token's bytes change in a CRLF
+// log, a log whose last line has no newline, and a log with a lone \r in a line.
+func TestReviewLogScrubRewriteKeepsEachLinesTerminator(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	plain := scrubTestLogBytes(t, scrubTestThreeRows(token)...)
+	rows := map[string][]byte{
+		"crlf":          bytes.ReplaceAll(plain, []byte("\n"), []byte("\r\n")),
+		"no final":      bytes.TrimSuffix(plain, []byte("\n")),
+		"lone carriage": append(slices.Clone(plain), "odd\rline\n"...),
+	}
+	for name, before := range rows {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			logf, path := writeScrubTestLog(t, before)
+			res, err := logf.Scrub(true)
+			if err != nil {
+				t.Fatalf("Scrub(true): %v", err)
+			}
+			assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading the rewritten log: %v", err)
+			}
+			if want := bytes.ReplaceAll(before, []byte(token), []byte(redactedWord)); !bytes.Equal(after, want) {
+				t.Errorf("the log is %q, want %q", after, want)
+			}
+		})
+	}
+}
+
 // TestReviewLogScrubRewriteReplaceFailureKeepsTheLog: a failing replace returns
 // its error, which names no value, and leaves the original log.
 func TestReviewLogScrubRewriteReplaceFailureKeepsTheLog(t *testing.T) {

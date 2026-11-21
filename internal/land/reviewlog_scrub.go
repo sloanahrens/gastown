@@ -1,10 +1,12 @@
 package land
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 
@@ -68,35 +70,35 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 	// A line the scrub cannot decode, or one past the bound, is scanned over its
 	// raw bytes: a token run in it is replaced too (gt-9h1asy), and only that run
 	// changes a byte.
-	keepRaw := func(line []byte) {
+	keepRaw := func(line, term []byte) {
 		out, words := scrubRawBytes(line)
 		if words > 0 {
 			res.RowsChanged++
 			res.Words += words
 		}
-		kept = append(kept, out)
+		kept = append(kept, append(out[:len(out):len(out)], term...))
 	}
-	err = scanLogLines(fh, func(line []byte) {
+	err = scanScrubLines(fh, func(line, term []byte) {
 		if len(bytes.TrimSpace(line)) > limit {
 			res.Oversize++
-			keepRaw(line)
+			keepRaw(line, term)
 			return
 		}
 		var rec ReviewRecord
 		if !isJSONObject(line) || json.Unmarshal(line, &rec) != nil {
-			keepRaw(line)
+			keepRaw(line, term)
 			return
 		}
 		res.Rows++
 		scrubbed, words := scrubRawLine(line, rec)
 		if words == 0 {
-			kept = append(kept, line)
+			kept = append(kept, append(line[:len(line):len(line)], term...))
 			return
 		}
 		res.RowsChanged++
 		res.Words += words
 		res.Beads = append(res.Beads, safeBeadID(rec.BeadID))
-		kept = append(kept, scrubbed)
+		kept = append(kept, append(scrubbed[:len(scrubbed):len(scrubbed)], term...))
 	})
 	// The mode is the open file's, read once the rows are, so the rewrite keeps
 	// the file it read and a failed stat is a failed read.
@@ -116,7 +118,6 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 	var buf bytes.Buffer
 	for _, line := range kept {
 		buf.Write(line)
-		buf.WriteByte('\n')
 	}
 	replace := f.replace
 	if replace == nil {
@@ -126,6 +127,26 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 		return ScrubResult{}, fmt.Errorf("replacing reviews file: %w", err)
 	}
 	return res, nil
+}
+
+// scanScrubLines is scanLogLines that also hands fn each line's own terminator
+// (\n, \r\n, or none for an unterminated last line), so a rewrite writes every
+// line back as it read it and only a token run changes a byte.
+func scanScrubLines(r io.Reader, fn func(line, term []byte)) error {
+	br := bufio.NewReader(r)
+	for {
+		raw, err := br.ReadBytes('\n')
+		if len(raw) > 0 {
+			body := bytes.TrimRight(raw, "\r\n")
+			fn(body, raw[len(body):])
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // scrubRawBytes replaces each token-shaped run in the raw bytes of a line with
