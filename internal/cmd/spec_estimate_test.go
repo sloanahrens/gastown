@@ -268,6 +268,133 @@ func TestSpecEstimateForceDoesNotRemoveLabelsItSetsAgain(t *testing.T) {
 	}
 }
 
+// specEstimateSizeStub is a result the size flag can judge: the minutes and the
+// rung SizeFlag reads, and an estimate whose labels parse.
+func specEstimateSizeStub(points int, minutes float64, rung string) *specEstimateStub {
+	return &specEstimateStub{result: estimate.Result{
+		Points:  points,
+		Minutes: minutes,
+		Inputs:  []string{"shape", "jev"},
+		Rung:    rung,
+	}}
+}
+
+// A bead the estimate predicts will land over 300 added lines gets sp-large and
+// the note's warning line. An estimate under that line gets neither, and an old
+// sp-large is removed; a shape-only estimate never flags, whatever its minutes.
+func TestSpecEstimateSizeFlagLabel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		stub      *specEstimateStub
+		seed      []string
+		wantLabel bool
+	}{
+		{"over the line", specEstimateSizeStub(8, 10.4, "all"), []string{"sp:3", "sp-rung:shape", "sp-minutes:2.5"}, true},
+		{"under the line", specEstimateSizeStub(8, 9.4, "all"), []string{"sp-large"}, false},
+		{"the shape rung never flags", specEstimateSizeStub(13, 10.8, "shape"), []string{"sp-large"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := specEstimateSeed(tc.seed...)
+			if err := runSpecEstimateOn(&bytes.Buffer{}, "gt-est", db, specEstimateOpts{}, specEstimateRunnerFor(tc.stub)); err != nil {
+				t.Fatalf("runSpecEstimateOn: %v", err)
+			}
+			labels := specEstimateLabelsOn(t, db)
+			if got := slices.Contains(labels, "sp-large"); got != tc.wantLabel {
+				t.Errorf("labels = %v, sp-large present = %v, want %v", labels, got, tc.wantLabel)
+			}
+			comments := specEstimateCommentsOn(t, db)
+			if len(comments) != 1 {
+				t.Fatalf("comments = %d, want the one estimate note", len(comments))
+			}
+			line := "predicted to land over 300 added lines"
+			if got := strings.Contains(comments[0], line); got != tc.wantLabel {
+				t.Errorf("note carries the size line = %v, want %v:\n%s", got, tc.wantLabel, comments[0])
+			}
+		})
+	}
+}
+
+// The size flag changes no other label and no other line of the note: the
+// flagged run's note is the estimate's own note with the size line added.
+func TestSpecEstimateSizeFlagUnchanged(t *testing.T) {
+	t.Parallel()
+	db := specEstimateSeed("sp:3", "sp-rung:shape", "sp-minutes:2.5", "gt:task")
+	stub := specEstimateSizeStub(8, 10.4, "all")
+	if err := runSpecEstimateOn(&bytes.Buffer{}, "gt-est", db, specEstimateOpts{}, specEstimateRunnerFor(stub)); err != nil {
+		t.Fatalf("runSpecEstimateOn: %v", err)
+	}
+	labels := specEstimateLabelsOn(t, db)
+	for _, want := range []string{"sp:8", "sp-rung:all", "sp-minutes:10.4", "sp-large", "gt:task"} {
+		if !slices.Contains(labels, want) {
+			t.Errorf("labels = %v, want %s", labels, want)
+		}
+	}
+	comments := specEstimateCommentsOn(t, db)
+	if len(comments) != 1 {
+		t.Fatalf("comments = %d, want the one estimate note", len(comments))
+	}
+	note := comments[0]
+	if !strings.Contains(note, specEstimateSizeNoteLine()) {
+		t.Fatalf("note = %q, want the size line", note)
+	}
+	first, _, _ := strings.Cut(note, "\n")
+	wantFirst := "SP ESTIMATE v1 sp:8 rung:all hash:" + specEstimateHashOf(t, db)
+	if first != wantFirst {
+		t.Errorf("note first line = %q, want %q", first, wantFirst)
+	}
+	r := stub.result
+	r.Hash = specEstimateHashOf(t, db)
+	plain := estimate.Note(r)
+	if got := strings.Replace(note, specEstimateSizeNoteLine()+"\n", "", 1); got != plain {
+		t.Errorf("note without the size line = %q, want the estimate's note %q", got, plain)
+	}
+}
+
+// The size line sits above the nearest-beads line, which the note always ends
+// with; a note without one gains the line at the end.
+func TestSpecEstimateWithSizeNote(t *testing.T) {
+	t.Parallel()
+	line := specEstimateSizeNoteLine()
+	tests := []struct {
+		name string
+		note string
+		want string
+	}{
+		{"above the nearest beads", "header\nminutes: 1.0\nnearest beads: none", "header\nminutes: 1.0\n" + line + "\nnearest beads: none"},
+		{"at the end when there are none", "header\nminutes: 1.0", "header\nminutes: 1.0\n" + line},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := specEstimateWithSizeNote(tc.note); got != tc.want {
+				t.Errorf("note = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An estimate that cannot be made removes a stale sp-large with the rest of the
+// sp: family, and its note carries no size line.
+func TestSpecEstimateNoneRemovesSizeFlag(t *testing.T) {
+	t.Parallel()
+	db := specEstimateSeed("sp:8", "sp-rung:all", "sp-minutes:10.4", "sp-large")
+	stub := &specEstimateStub{err: errors.New("storypoints/estimate: bead has no text to estimate")}
+	if err := runSpecEstimateOn(&bytes.Buffer{}, "gt-est", db, specEstimateOpts{}, specEstimateRunnerFor(stub)); err != nil {
+		t.Fatalf("an estimate error must exit 0, got %v", err)
+	}
+	if labels := specEstimateLabelsOn(t, db); slices.Contains(labels, "sp-large") {
+		t.Errorf("labels = %v, want no sp-large after no estimate", labels)
+	}
+	for _, c := range specEstimateCommentsOn(t, db) {
+		if strings.Contains(c, "predicted to land over") {
+			t.Errorf("note = %q, want no size line", c)
+		}
+	}
+}
+
 func TestSpecEstimateDryRunWritesNothing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
