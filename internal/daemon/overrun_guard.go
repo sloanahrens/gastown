@@ -442,6 +442,8 @@ type passStats struct {
 	slowest passSeatReads
 	// failedReads counts the per-seat reads that answered an error.
 	failedReads int
+	// notReached counts the seats left unread because the pass budget had passed.
+	notReached int
 }
 
 // passSeatReads names the seat whose reads took longest in a pass, and those
@@ -476,6 +478,9 @@ func overrunPassLine(stats passStats) string {
 	}
 	if stats.failedReads > 0 {
 		line += fmt.Sprintf("; %s failed", countNoun(stats.failedReads, "read"))
+	}
+	if stats.notReached > 0 {
+		line += fmt.Sprintf("; %s not reached", countNoun(stats.notReached, "seat"))
 	}
 	return line
 }
@@ -559,6 +564,17 @@ func overrunBoundedRead[T any](s overrunSeams, clock func() time.Time, read func
 	case <-after(overrunSeatReadDeadline):
 		return zero, errOverrunSeatReadDeadline
 	}
+}
+
+// overrunPassBudgetMargin is what a pass leaves of its interval: it starts no seat read
+// once the interval less this margin has passed, so a pass ends within the interval plus
+// one read deadline (gt-gn4roo).
+const overrunPassBudgetMargin = 10 * time.Second
+
+// overrunPassBudget is how long a pass may keep starting seat reads: the interval less
+// the margin, and never less than the margin itself.
+func overrunPassBudget(interval time.Duration) time.Duration {
+	return max(interval-overrunPassBudgetMargin, overrunPassBudgetMargin)
 }
 
 // overrunGuardConfig returns the patrol's config, or nil when absent.
@@ -751,6 +767,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		slung time.Time
 		state overrunState
 		reads overrunSeatReads
+		read  bool
 	}
 	slots := make([]seatSlot, len(seats))
 	for i, seat := range seats {
@@ -776,14 +793,23 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if poolSize == 0 {
 		poolSize = overrunReadPoolSize
 	}
+	// A seat whose read would start after the pass budget is left unread and counted; it
+	// is not judged this pass.
+	budget := overrunPassBudget(overrunGuardInterval(pc))
 	overrunReadPool(len(seats), poolSize, func(i int) {
-		if slots[i].take {
+		if slots[i].take && s.now().Sub(passStart) < budget {
 			slots[i].reads = overrunReadSeat(s, seats[i])
+			slots[i].read = true
 		}
 	})
+	for _, slot := range slots {
+		if slot.take && !slot.read {
+			stats.notReached++
+		}
+	}
 
 	for i, seat := range seats {
-		if !slots[i].take {
+		if !slots[i].take || !slots[i].read {
 			continue
 		}
 		who := seat.Rig + "/" + seat.Polecat
