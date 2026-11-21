@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1101,4 +1102,98 @@ func TestLocalDeleteKeepsTheBranchItCannotRead(t *testing.T) {
 	if !logged(logs, "repository is locked") {
 		t.Fatalf("logs %q; want one naming the unreadable branch", logs)
 	}
+}
+
+// sweepFixture seeds n closed, merged leftover branches (gt-sw00 ... ) and
+// returns the harness: the sweep's reads of their beads are the subject of the
+// rows below (gt-f5os6z).
+func sweepFixture(t *testing.T, n int) *harness {
+	t.Helper()
+	h := newHarness(t)
+	for i := 0; i < n; i++ {
+		bead := fmt.Sprintf("gt-sw%02d", i)
+		h.seedLeftover(t, "polecat/opal/"+bead+"+x1", bead, "closed", true, 2*time.Hour)
+	}
+	return h
+}
+
+// TestSweepReadsBeadsInOneBatch: the sweep reads its branches' beads with one
+// ShowMultiple and no Show, leaves a bead with a landing record out of the
+// batch, and falls back to one Show per branch for a store without ShowMultiple
+// or a batch that fails; every row still deletes the finished branches
+// (gt-f5os6z).
+func TestSweepReadsBeadsInOneBatch(t *testing.T) {
+	t.Parallel()
+	const branches = 10
+	t.Run("one batch and no show", func(t *testing.T) {
+		t.Parallel()
+		h := sweepFixture(t, branches)
+		store := &batchStore{Beads: h.bd, fake: h.bd}
+		h.w.Beads = store
+
+		h.w.Pass(context.Background())
+
+		if len(store.batches) != 1 || len(store.batches[0]) != branches || len(store.shows) != 0 {
+			t.Errorf("batches %v and shows %v, want one batch of %d ids and no show", store.batches, store.shows, branches)
+		}
+		if len(h.remote.deleted) != branches {
+			t.Errorf("deleted %d branches, want %d", len(h.remote.deleted), branches)
+		}
+	})
+	t.Run("a landing record is not read", func(t *testing.T) {
+		t.Parallel()
+		h := sweepFixture(t, branches)
+		h.files.recs = []land.LandingRecord{{BeadID: "gt-sw03", LandedCommit: tipHead, Target: "main"}}
+		store := &batchStore{Beads: h.bd, fake: h.bd}
+		h.w.Beads = store
+
+		h.w.Pass(context.Background())
+
+		// The startup repair reads the record's bead in a batch of its own; the
+		// sweep's batch is the one of the other nine.
+		sweep := 0
+		for _, b := range store.batches {
+			if len(b) == branches-1 && !slices.Contains(b, "gt-sw03") {
+				sweep++
+			}
+		}
+		if sweep != 1 || len(store.shows) != 0 {
+			t.Errorf("batches %v and shows %v, want one sweep batch of the nine beads without a landing record and no show", store.batches, store.shows)
+		}
+	})
+	t.Run("a store without ShowMultiple reads one at a time", func(t *testing.T) {
+		t.Parallel()
+		h := sweepFixture(t, branches)
+		store := &perRecordStore{Beads: h.bd, fake: h.bd}
+		h.w.Beads = store
+
+		h.w.Pass(context.Background())
+
+		if len(store.shows) != branches || len(h.remote.deleted) != branches {
+			t.Errorf("shows %d, deleted %d, want %d each", len(store.shows), len(h.remote.deleted), branches)
+		}
+	})
+	t.Run("an unreadable landings file keeps every branch", func(t *testing.T) {
+		t.Parallel()
+		h := sweepFixture(t, branches)
+		h.files.err = errors.New("the landings file cannot be read")
+
+		h.w.Pass(context.Background())
+
+		if len(h.remote.deleted) != 0 {
+			t.Errorf("deleted %v, want every branch kept while the landings file cannot be read", h.remote.deleted)
+		}
+	})
+	t.Run("a failed batch reads one at a time", func(t *testing.T) {
+		t.Parallel()
+		h := sweepFixture(t, branches)
+		store := &batchStore{Beads: h.bd, fake: h.bd, batchErr: errors.New("bd show: context deadline exceeded")}
+		h.w.Beads = store
+
+		h.w.Pass(context.Background())
+
+		if len(store.batches) != 1 || len(store.shows) != branches || len(h.remote.deleted) != branches {
+			t.Errorf("batches %d, shows %d, deleted %d, want 1, %d and %d", len(store.batches), len(store.shows), len(h.remote.deleted), branches, branches)
+		}
+	})
 }

@@ -3,6 +3,7 @@ package landworker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -342,6 +343,19 @@ func (w *Worker) sweepLeftoverBranches(ctx context.Context) {
 		w.logf("sweeping the leftover polecat branches: listing: %v", err)
 		return
 	}
+	// The beads of the branches with no landing record are read in one batch: one
+	// show per branch was about a hundred sequential reads after every start.
+	// A store that cannot batch, or a batch that fails, leaves the map empty and
+	// sweepBeadDone reads one at a time as before (gt-f5os6z).
+	var ids []string
+	for _, ref := range refs {
+		bead := beadForBranch(strings.TrimPrefix(ref.Name, "refs/heads/"))
+		if landed, _ := w.sweepLanded(bead); bead == "" || landed || slices.Contains(ids, bead) {
+			continue
+		}
+		ids = append(ids, bead)
+	}
+	batch, _ := w.showMultiple(ids)
 	deleted := 0
 	for _, ref := range refs {
 		if ctx.Err() != nil {
@@ -352,7 +366,7 @@ func (w *Worker) sweepLeftoverBranches(ctx context.Context) {
 		if bead == "" {
 			continue
 		}
-		done, err := w.sweepBeadDone(bead)
+		done, err := w.sweepBeadDone(bead, batch)
 		if err != nil {
 			w.sweepLog(branch, "leftover polecat branch %s: reading bead %s: %v", branch, bead, err)
 			continue
@@ -396,21 +410,32 @@ func (w *Worker) sweepLeftoverBranches(ctx context.Context) {
 	}
 }
 
+// sweepLanded reports whether the landings file records a landing for the bead.
+func (w *Worker) sweepLanded(beadID string) (bool, error) {
+	if w.Landings == nil {
+		return false, nil
+	}
+	_, found, err := w.Landings.LatestForBead(beadID)
+	return found, err
+}
+
 // sweepBeadDone reports whether a bead's origin branches are the sweep's
 // business: the bead is closed, or the landings file records a landing for
 // it. Every other state — open, in progress, blocked, deferred, hooked, or
-// one bd cannot answer for — keeps its branches.
-func (w *Worker) sweepBeadDone(beadID string) (bool, error) {
-	if w.Landings != nil {
-		if _, found, err := w.Landings.LatestForBead(beadID); err != nil {
-			return false, err
-		} else if found {
-			return true, nil
-		}
-	}
-	issue, err := w.Beads.Show(beadID)
-	if err != nil {
+// one bd cannot answer for — keeps its branches. batch holds the beads the
+// sweep read in one call; a bead it lacks is read with Show.
+func (w *Worker) sweepBeadDone(beadID string, batch map[string]*beads.Issue) (bool, error) {
+	if landed, err := w.sweepLanded(beadID); err != nil {
 		return false, err
+	} else if landed {
+		return true, nil
+	}
+	issue, ok := batch[beadID]
+	if !ok {
+		var err error
+		if issue, err = w.Beads.Show(beadID); err != nil {
+			return false, err
+		}
 	}
 	if issue == nil {
 		return false, nil
