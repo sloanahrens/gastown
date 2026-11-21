@@ -46,9 +46,12 @@ var pinRepoForm = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // origin/main tip through tipGit, and how many commits the pin trails that tip,
 // through pathCount limited to the pin's inputs when it has a list (devops) and
 // through cmp otherwise, neither of which is called for a pin already at its
-// tip. ownerOf names the Forgejo owner a {owner} placeholder expands to and is
-// called only when the file holds one; the owner and repository the comparison
-// addresses are read from the expanded pin URL.
+// tip. A pin with an input list is compared as well, since pathCount counts only
+// the commits that touch them: Total is that compare's count, the commits the
+// pin trails, its inputs or not (gt-a682mo). ownerOf names the Forgejo owner a
+// {owner} placeholder expands to and is called only when the file holds one; the
+// owner and repository the comparison addresses are read from the expanded pin
+// URL.
 //
 // Each pin is read on its own. A pin's URL that does not name one usable,
 // credential-free http(s) repository, a tip read that fails, a path-limited
@@ -117,12 +120,13 @@ func readImagePin(ctx context.Context, cmp ImagePinCompare, tipGit PinTipGit, pa
 		}
 	}
 	if pin.Commit != tip {
-		behind, err := imagePinBehind(ctx, cmp, pathCount, pin, owner, repo, tip)
+		behind, total, err := imagePinCounts(ctx, cmp, pathCount, pin, owner, repo, tip)
 		if err != nil {
 			state.Err = err
 			return state
 		}
 		state.Behind = behind
+		state.Total = total
 	}
 	return state
 }
@@ -288,36 +292,41 @@ func imagePinTip(tipGit PinTipGit, pin daemonimage.Pin) (string, error) {
 	return tips[0], nil
 }
 
-// imagePinBehind counts the commits the tip has and the pin does not: through
-// pathCount, limited to the inputs the image builds the pin's source from, for a
-// pin with such a list; through the compare API, which cannot name the paths a
-// commit changed, for a pin without one. A failed count, a missing pathCount
-// where a pin needs one, an answer with no body, and a negative count are
-// errors: the reader reports a count it was given, never the zero a healthy pin
-// reports.
-func imagePinBehind(ctx context.Context, cmp ImagePinCompare, pathCount PinPathCount, pin daemonimage.Pin, owner, repo, tip string) (int, error) {
-	if paths := daemonimage.PinInputPaths(pin.Name); len(paths) != 0 {
+// imagePinCounts counts the commits the tip has and the pin does not: Behind is
+// the pathCount count limited to the inputs the image builds the pin's source
+// from, for a pin with such a list; Total is the compare API's count of all of
+// them, which cannot name the paths a commit changed. A pin with no input list
+// has Behind and Total both the one compare count. A failed count, a missing
+// pathCount where a pin needs one, an answer with no body, and a negative count
+// are errors: the reader reports a count it was given, never the zero a healthy
+// pin reports.
+func imagePinCounts(ctx context.Context, cmp ImagePinCompare, pathCount PinPathCount, pin daemonimage.Pin, owner, repo, tip string) (behind, total int, err error) {
+	paths := daemonimage.PinInputPaths(pin.Name)
+	if len(paths) != 0 {
 		if pathCount == nil {
-			return 0, fmt.Errorf("image pins read: %s pin %s: no path count to count the commits it trails %s by that touch its inputs", pin.Name, sha12(pin.Commit), pinTipRef)
+			return 0, 0, fmt.Errorf("image pins read: %s pin %s: no path count to count the commits it trails %s by that touch its inputs", pin.Name, sha12(pin.Commit), pinTipRef)
 		}
 		n, err := pathCount(pin.URL, pin.Commit, tip, paths)
 		if err != nil {
-			return 0, fmt.Errorf("image pins read: %s pin %s: cannot count the commits it trails %s of %s that touch its inputs: %w", pin.Name, sha12(pin.Commit), pinTipRef, pin.URL, err)
+			return 0, 0, fmt.Errorf("image pins read: %s pin %s: cannot count the commits it trails %s of %s that touch its inputs: %w", pin.Name, sha12(pin.Commit), pinTipRef, pin.URL, err)
 		}
 		if n < 0 {
-			return 0, fmt.Errorf("image pins read: %s pin %s: counting the commits it trails %s by that touch its inputs answered %d, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, n)
+			return 0, 0, fmt.Errorf("image pins read: %s pin %s: counting the commits it trails %s by that touch its inputs answered %d, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, n)
 		}
-		return n, nil
+		behind = n
 	}
 	info, err := cmp.CompareCommits(ctx, owner, repo, pin.Commit, tip)
 	if err != nil {
-		return 0, fmt.Errorf("image pins read: %s pin %s: cannot compare it with %s of %s/%s: %w", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, err)
+		return 0, 0, fmt.Errorf("image pins read: %s pin %s: cannot compare it with %s of %s/%s: %w", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, err)
 	}
 	if info == nil {
-		return 0, fmt.Errorf("image pins read: %s pin %s: comparing it with %s of %s/%s answered no comparison", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo)
+		return 0, 0, fmt.Errorf("image pins read: %s pin %s: comparing it with %s of %s/%s answered no comparison", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo)
 	}
 	if info.TotalCommits < 0 {
-		return 0, fmt.Errorf("image pins read: %s pin %s: comparing it with %s of %s/%s answered %d commits, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, info.TotalCommits)
+		return 0, 0, fmt.Errorf("image pins read: %s pin %s: comparing it with %s of %s/%s answered %d commits, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, info.TotalCommits)
 	}
-	return info.TotalCommits, nil
+	if len(paths) == 0 {
+		behind = info.TotalCommits
+	}
+	return behind, info.TotalCommits, nil
 }
