@@ -77,7 +77,7 @@ func TestFileHostProbesServeAFreshFile(t *testing.T) {
 		ExecTaxMS:  hostprobe.Field[float64]{Value: 5},
 	})
 	p.now = func() time.Time { return now.Add(time.Second) }
-	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
+	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "inactive_file 0\n"})
 	p.meminfoPath = meminfoFile(t, meminfoTable)
 
 	disk, err := p.Disk()
@@ -143,7 +143,7 @@ func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 		Disk:       hostprobe.Field[hostprobe.Disk]{Err: recorded},
 	})
 	p.now = func() time.Time { return now }
-	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
+	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "inactive_file 0\n"})
 	p.meminfoPath = meminfoFile(t, meminfoTable)
 
 	if _, err := p.Disk(); err == nil || !strings.Contains(err.Error(), recorded) {
@@ -179,10 +179,9 @@ func TestFileHostProbesMemoryNeedsItsSources(t *testing.T) {
 	}
 }
 
-// The memory reading is the pod's cgroup: the free share of memory.max less
-// memory.current. When the cgroup has no limit the share comes from the memory
-// table instead (TestMemFreePctFallsBackToMeminfoWhenNoLimit). Anything that
-// cannot be measured is an error, never a reading of 0 or 100.
+// The memory reading is the pod's cgroup: memory.max less the working set,
+// memory.current less inactive_file in memory.stat, or the memory table when
+// there is no limit. Anything unmeasurable is an error, never 0 or 100.
 func TestMemFreePctFromCgroup(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -194,10 +193,15 @@ func TestMemFreePctFromCgroup(t *testing.T) {
 	}{
 		// The table would give 10% if it were read, so a 75 shows the cgroup
 		// alone answered.
-		{"limit set", map[string]string{"memory.max": "1000", "memory.current": "250"}, meminfoTable, 75, false},
-		{"limit set, trailing newline", map[string]string{"memory.max": "1000\n", "memory.current": "250\n"}, meminfoTable, 75, false},
-		{"limit set, nothing free", map[string]string{"memory.max": "1000", "memory.current": "1000"}, meminfoTable, 0, false},
-		{"limit set, over the limit is nothing free", map[string]string{"memory.max": "1000", "memory.current": "1200"}, meminfoTable, 0, false},
+		{"limit set", map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "inactive_file 0\n"}, meminfoTable, 75, false},
+		{"limit set, trailing newline", map[string]string{"memory.max": "1000\n", "memory.current": "250\n", "memory.stat": "inactive_file 0\n"}, meminfoTable, 75, false},
+		{"limit set, nothing free", map[string]string{"memory.max": "1000", "memory.current": "1000", "memory.stat": "inactive_file 0\n"}, meminfoTable, 0, false},
+		{"limit set, over the limit is nothing free", map[string]string{"memory.max": "1000", "memory.current": "1200", "memory.stat": "inactive_file 0\n"}, meminfoTable, 0, false},
+		{"limit set, page cache reclaimed", map[string]string{"memory.max": "1000", "memory.current": "900", "memory.stat": "inactive_file 600\n"}, meminfoTable, 70, false},
+		{"torn read: inactive_file above current is no used memory", map[string]string{"memory.max": "1000", "memory.current": "400", "memory.stat": "inactive_file 900\n"}, meminfoTable, 100, false},
+		{"memory.stat unreadable", map[string]string{"memory.max": "1000", "memory.current": "250"}, meminfoTable, 0, true},
+		{"memory.stat without inactive_file", map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "anon 1\n"}, meminfoTable, 0, true},
+		{"memory.stat inactive_file not a count", map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "inactive_file lots\n"}, meminfoTable, 0, true},
 		{"limit max, memory table has no MemAvailable", map[string]string{"memory.max": "max", "memory.current": "250"}, "MemTotal: 1000 kB\n", 0, true},
 		{"limit max, memory table has no MemTotal", map[string]string{"memory.max": "max", "memory.current": "250"}, "MemAvailable: 100 kB\n", 0, true},
 		{"limit max, memory table unreadable", map[string]string{"memory.max": "max", "memory.current": "250"}, "", 0, true},
@@ -208,7 +212,7 @@ func TestMemFreePctFromCgroup(t *testing.T) {
 		{"limit neither a count nor max", map[string]string{"memory.max": "lots", "memory.current": "250"}, meminfoTable, 0, true},
 		{"current neither a count nor max", map[string]string{"memory.max": "1000", "memory.current": "lots"}, meminfoTable, 0, true},
 		{"current reads max", map[string]string{"memory.max": "1000", "memory.current": "max"}, meminfoTable, 0, true},
-		{"zero limit is no measure", map[string]string{"memory.max": "0", "memory.current": "0"}, meminfoTable, 0, true},
+		{"zero limit is no measure", map[string]string{"memory.max": "0", "memory.current": "0", "memory.stat": "inactive_file 0\n"}, meminfoTable, 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,6 +224,89 @@ func TestMemFreePctFromCgroup(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("memFreePctFromCgroup = %v; want %v", got, tt.want)
 			}
+		})
+	}
+}
+
+// The live pod on 2026-11-19 had memory.current at 99.2% of its limit but
+// inactive_file over half of it, so its working set left about 57% free and the
+// rule must stay silent. A pod whose working set fills the limit still raises
+// it.
+func TestAttentionHostMemReadsTheWorkingSet(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		pod     map[string]string
+		lo, hi  float64
+		summary string
+	}{
+		{"live pod filled with reclaimable cache", map[string]string{
+			"memory.max": "6442450944", "memory.current": "6390337536",
+			"memory.stat": "anon 163340288\nfile 6107734016\ninactive_file 3605524480\nactive_file 2502209536\n",
+		}, 56, 58, ""},
+		{"working set at the limit", map[string]string{
+			"memory.max": "1000", "memory.current": "1000", "memory.stat": "inactive_file 0\n",
+		}, 0, 0, "memory 0% free"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			p := fileHostProbes{cgroupDir: cgroupFiles(t, tt.pod), meminfoPath: meminfoFile(t, meminfoTable)}
+			free, err := p.MemFreePct(context.Background())
+			if err != nil {
+				t.Fatalf("MemFreePct: %v", err)
+			}
+			if free < tt.lo || free > tt.hi {
+				t.Errorf("MemFreePct = %v; want %v..%v", free, tt.lo, tt.hi)
+			}
+			f := newAttentionFixture(t, time.Date(2026, 11, 19, 16, 53, 30, 0, time.UTC))
+			f.src.host = p
+			items := f.collect(t, f.src.collectHostMem)
+			if tt.summary == "" {
+				if len(items) != 0 {
+					t.Errorf("items = %+v; want none: the working set leaves memory free", items)
+				}
+				return
+			}
+			if len(items) != 1 || items[0].Key != hostRuleMemLow || items[0].Summary != tt.summary {
+				t.Errorf("items = %+v; want one %s with summary %q", items, hostRuleMemLow, tt.summary)
+			}
+		})
+	}
+}
+
+// A memory.stat that is missing, unreadable, or without inactive_file is a
+// failed read: the item an earlier tick raised stays, and a probe line names it.
+func TestAttentionHostMemUnreadableStatKeepsTheItem(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 19, 16, 53, 30, 0, time.UTC)
+	unreadable := cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "1000"})
+	if err := os.Mkdir(filepath.Join(unreadable, "memory.stat"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	broken := map[string]string{
+		"missing memory.stat":               cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "1000"}),
+		"memory.stat without inactive_file": cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "1000", "memory.stat": "anon 1\n"}),
+		"memory.stat unreadable":            unreadable,
+	}
+	for name, dir := range broken {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			p := newFileHostProbes(t.TempDir(), nil, nil)
+			p.now = func() time.Time { return now }
+			p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "1000", "memory.stat": "inactive_file 0\n"})
+			p.meminfoPath = meminfoFile(t, meminfoTable)
+			f := newAttentionFixture(t, now)
+			f.src.host = p
+			first := itemByKey(t, f.tick(t, now), hostRuleMemLow)
+			p.cgroupDir = dir
+			f.src.host = p
+			st := f.tick(t, now.Add(time.Minute))
+			kept := itemByKey(t, st, hostRuleMemLow)
+			if !kept.FirstSeen.Equal(first.FirstSeen) {
+				t.Errorf("FirstSeen = %v; want the original %v", kept.FirstSeen, first.FirstSeen)
+			}
+			itemByKey(t, st, hostProbeFailedPrefix+hostProbeMem)
 		})
 	}
 }
@@ -267,7 +354,7 @@ func TestHostDiskStillReadsTheProbeFile(t *testing.T) {
 		Launchd:      &hostprobe.Field[hostprobe.Launchd]{Err: notProbed},
 	})
 	p.now = func() time.Time { return now.Add(time.Second) }
-	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
+	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "inactive_file 0\n"})
 	p.meminfoPath = meminfoFile(t, meminfoTable)
 
 	f := newAttentionFixture(t, now)
@@ -317,7 +404,7 @@ func TestAttentionHostRefusedProbeFileRaisesProbeAlarms(t *testing.T) {
 	}
 	// Memory is read from the cgroup, which this test points at a healthy one
 	// so the memory reading is served and cannot stand in for the refusal.
-	fp.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
+	fp.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250", "memory.stat": "inactive_file 0\n"})
 	fp.meminfoPath = meminfoFile(t, meminfoTable)
 	d.hostProbes = fp
 

@@ -142,12 +142,12 @@ func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {
 }
 
 // memFreePctFromCgroup is the free share of the pod's memory as a percentage of
-// its limit: the limit less memory.current, over the limit, read from the
+// its limit: the limit less memory.current's working set (memory.current less
+// inactive_file, the cache the kernel reclaims), over the limit, read from the
 // cgroup in cgroupDir. When the cgroup's memory.max reads max it has no limit,
 // and the share is taken from meminfoPath instead: MemAvailable over MemTotal,
 // which is the memory the kernel reports as free for new work. A file that is
-// unreadable, or that holds neither a byte count nor max, is an error, never a
-// free share of 0 or 100.
+// unreadable or lacks its value is an error, never a free share of 0 or 100.
 func memFreePctFromCgroup(cgroupDir, meminfoPath string) (float64, error) {
 	limitPath := filepath.Join(cgroupDir, "memory.max")
 	limit, unlimited, err := readCgroupValue(limitPath)
@@ -161,9 +161,16 @@ func memFreePctFromCgroup(cgroupDir, meminfoPath string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	inactive, err := readCgroupStatField(filepath.Join(cgroupDir, "memory.stat"), "inactive_file")
+	if err != nil {
+		return 0, err
+	}
 	if limit == 0 {
 		return 0, fmt.Errorf("%s reads a zero limit, so there is no free share to measure", limitPath)
 	}
+	// A torn read of the two files can put inactive_file above current; that
+	// reads as no used memory, so the share stays within 0..100.
+	current -= min(current, inactive)
 	if current >= limit {
 		return 0, nil
 	}
@@ -206,6 +213,26 @@ func meminfoKiB(path string, raw []byte, field string) (uint64, error) {
 			return 0, fmt.Errorf("%s holds a %s that is not a kibibyte count", path, field)
 		}
 		return n, nil
+	}
+	return 0, fmt.Errorf("%s has no %s field", path, field)
+}
+
+// readCgroupStatField reads one field of a cgroup memory.stat file, whose lines
+// are a name and a byte count. An unreadable file, a count that is not a number,
+// or a missing field is an error, never a zero.
+func readCgroupStatField(path, field string) (uint64, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("reading the cgroup memory stat file %s: %w", path, err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.Fields(line); len(f) == 2 && f[0] == field {
+			n, err := strconv.ParseUint(f[1], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("%s holds a %s that is not a byte count", path, field)
+			}
+			return n, nil
+		}
 	}
 	return 0, fmt.Errorf("%s has no %s field", path, field)
 }
