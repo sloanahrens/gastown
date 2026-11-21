@@ -3974,3 +3974,29 @@ func TestDetectStalePolecats_UnjudgeableComparisonReportsWork(t *testing.T) {
 	}
 	t.Fatalf("DetectStalePolecats reported no polecat named toast: %+v", infos)
 }
+
+// TestFreshClaim pins the decision loadFromBeads makes from the agent bead's
+// claim: only a spawning bead inside the spawn grace that names a hook_bead is
+// a claim, and the claim is that bead.
+func TestFreshClaim(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		spawning bool
+		fields   *beads.AgentFields
+		want     string
+	}{
+		{"fresh claim", true, &beads.AgentFields{HookBead: "gt-x"}, "gt-x"},
+		{"past the grace", false, &beads.AgentFields{HookBead: "gt-x"}, ""},
+		{"no hook_bead", true, &beads.AgentFields{}, ""},
+		{"no agent fields", true, nil, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := freshClaim(tc.spawning, tc.fields); got != tc.want {
+				t.Errorf("freshClaim(%v, %+v) = %q, want %q", tc.spawning, tc.fields, got, tc.want)
+			}
+		})
+	}
+}
