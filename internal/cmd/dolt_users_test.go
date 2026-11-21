@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -15,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // fakeUsersReader answers a read from a scripted list. With err set, every
@@ -546,5 +549,52 @@ func TestDoltUsersBuildsTheRealDSN(t *testing.T) {
 		if !tc.want.MatchString(rest) {
 			t.Errorf("%s: the DSN after its user part is %q, want it to match %s", tc.name, rest, tc.want)
 		}
+	}
+}
+
+// TestDoltUsersFindsTheTownFromTheWorkingDirectory drives the opener through
+// workspace.FindFromCwdOrError, the lookup production hands it: inside a town
+// it reaches the driver, outside any it fails with the workspace error first.
+func TestDoltUsersFindsTheTownFromTheWorkingDirectory(t *testing.T) { //testpolicy:allow parallel — the working directory is process-wide and is the input under test
+	t.Setenv("GT_TOWN_ROOT", "") //testpolicy:allow no-env — the lookup falls back to GT_TOWN_ROOT, so the outside-a-town row needs it empty
+	town, bare := t.TempDir(), t.TempDir()
+	marker := filepath.Join(town, workspace.PrimaryMarker)
+	mkdirErr := os.MkdirAll(filepath.Dir(marker), 0o700)
+	if err := errors.Join(mkdirErr, os.WriteFile(marker, []byte("{}"), 0o600)); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, dir string
+		wantTown  bool
+	}{{"inside a town", town, true}, {"outside any town", bare, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(tc.dir) //testpolicy:allow no-chdir — the working directory is the input under test: the lookup walks up from it
+			var dsn, found string
+			opener := doltUsersOpener{
+				findTownRoot: func() (string, error) {
+					root, err := workspace.FindFromCwdOrError()
+					found = root
+					return root, err
+				},
+				openDB: capturingUsersDB(t, &dsn),
+			}
+			reader, err := opener.open(context.Background())
+			if err == nil {
+				_ = reader.Close()
+			}
+			want, _ := filepath.EvalSymlinks(town)
+			got, _ := filepath.EvalSymlinks(found)
+			// What the opener derives from the root it was given; never printed (the DSN holds the credential).
+			var wantDSN string
+			if found != "" {
+				wantDSN = buildDoltDSNFromConfig(doltserver.DefaultConfig(found), "", dsnOpts{Timeout: "5s", ReadTimeout: "30s"})
+			}
+			switch {
+			case tc.wantTown && (err != nil || got != want || dsn != wantDSN):
+				t.Errorf("inside the town: err = %v, found %q, DSN is the one derived from it = %v; want the town %q and its DSN", err, found, dsn == wantDSN, town)
+			case !tc.wantTown && (!errors.Is(err, workspace.ErrNotFound) || dsn != ""):
+				t.Errorf("outside a town: err = %v, reached the driver = %v; want %v and no driver (the walk climbs to /: no ancestor of the temp directory may hold mayor/town.json)", err, dsn != "", workspace.ErrNotFound)
+			}
+		})
 	}
 }
