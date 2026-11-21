@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -691,8 +692,9 @@ var escalationStoreRead = readEscalationStore
 
 // escalationStores is the town store and every Dolt rig store the town's routes
 // name (gt-lqlupr). A tracker-backed route is not a Dolt store, and a route
-// whose beads directory is absent on disk (an aliased rig never checked out,
-// gt-3vh2) holds no escalation, so neither is read; two routes that resolve to
+// whose beads directory is absent on disk (fs.ErrNotExist: an aliased rig never
+// checked out, gt-3vh2) holds no escalation, so neither is read; any other
+// stat error is an error naming the store, never a quiet skip; two routes that resolve to
 // one directory are read once. A routes file that cannot be read is an error.
 func escalationStores(b *Beads) ([]escalationStore, error) {
 	townRoot := b.getTownRoot()
@@ -711,8 +713,14 @@ func escalationStores(b *Beads) ([]escalationStore, error) {
 			continue
 		}
 		dir := ResolveBeadsDir(filepath.Join(townRoot, r.Path))
-		if _, err := os.Stat(dir); err != nil || seen[dir] {
+		if seen[dir] {
 			continue
+		}
+		if _, err := os.Stat(dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("examining the store %s: %w", dir, err)
 		}
 		seen[dir] = true
 		stores = append(stores, escalationStore{Name: dir, BeadsDir: dir})
