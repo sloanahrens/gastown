@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +260,75 @@ func TestCacheTrimClaimJobRunRefusesAnUnsetClock(t *testing.T) {
 	}
 	if calls := f.verbs(); len(calls) != 0 {
 		t.Errorf("a run with no clock made cluster calls %v; want none", calls)
+	}
+}
+
+// onClaimJobWait runs fn before each wait the run makes for the claim Job, and
+// then the wait's own answer.
+func (f *cacheTrimFixture) onClaimJobWait(fn func()) {
+	run := f.d.execCmd
+	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(cmd.Args, " "), cacheTrimClaimJobWaitVerb) {
+			fn()
+		}
+		return run(cmd)
+	}
+}
+
+// TestCacheTrimClaimJobBudgetOutlivesThePassContext pins that every cluster call
+// of a claim run (the apply, the wait, the result read) is made on the claim's
+// own budget and not on the pass context handed in: each call's context is
+// still live after the stand-in pass context ends during the wait, and carries
+// its own deadline of the wait plus the slack. The budget is read from the
+// context the call reaches exec.CommandContext with (cacheTrimCtxSeen), the
+// only place the kill a pass context causes can be seen.
+func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
+	})
+	passCtx, endPass := context.WithCancel(context.Background())
+	defer endPass()
+	calls := 0
+	f.d.cacheTrimCtxSeen = func(ctx context.Context) {
+		calls++
+		if err := ctx.Err(); err != nil {
+			t.Errorf("cluster call %d ran on a context already ended (%v); want the claim's own live budget", calls, err)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("cluster call %d had no deadline; want the claim's own, the wait plus the slack", calls)
+			return
+		}
+		if left := time.Until(deadline); left < cacheTrimClaimWaitTimeout-5*time.Minute || left > cacheTrimClaimWaitTimeout+cacheTrimClaimSlack {
+			t.Errorf("cluster call %d had a deadline %v away; want the wait plus the slack, %v at most", calls, left, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
+		}
+	}
+	f.onClaimJobWait(endPass)
+	removed, absent, kept, err := f.d.cacheTrimClaimJobRun(passCtx, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName}, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, true)
+	if err != nil || removed != 4 || absent != 1 || kept != 2 {
+		t.Fatalf("a run whose pass context ends during the wait = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
+	}
+	if calls < 3 {
+		t.Errorf("the probe saw %d cluster calls; want the apply, the wait and the result read at least", calls)
+	}
+}
+
+// TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait pins that a wait the
+// daemon's context cuts off is an error naming that context, not a Job still
+// running, though the Job's status reads active.
+func TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	daemonCtx, stopDaemon := context.WithCancel(context.Background())
+	defer stopDaemon()
+	f.d.ctx = daemonCtx
+	f.onClaimJobWait(stopDaemon)
+	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+	if err == nil || !strings.Contains(err.Error(), "the trim Job "+cacheTrimJob+" was cut off") {
+		t.Fatalf("a wait its context cut off = %v; want an error naming the Job and the cut-off", err)
 	}
 }
