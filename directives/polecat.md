@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-21 gt-vysc1i: rule 9's line-limit bullet pushes the seat's branch before the split comment, so a seat stopped by a size limit keeps its commit; paid for by dropping rule 1's second example (gt-p85pw.73) and rule 3's example (gt-z6qre.12), no rule cut (seventeen rules).
 - 2026-11-20 gt-a69nku: added rule 9's line-limit bullet: a line limit in Constraints is a cap, so a diff past 1.5 times it stops for a split. Paid for by dropping the provenance parentheticals (claude-9a8, gt-690mog, gt-0sztd, gt-tpg0p.33, gt-qpeei.15, gt-r1up7, gt-km9jt, gt-dl4nv.13) and the "A hit is a question, not a verdict" sentence from the rendered text, no rule cut and none added (seventeen rules).
 - 2026-11-14 gt-dpl81b: removed the local review round: the operator retired it, so the "Before gt done" checklist no longer asks a polecat to preview its branch or answer findings before submitting.
 - 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
@@ -65,7 +66,7 @@ A failed, unreadable or unwired input must stop, refuse or escalate, never pass 
 - a refusal that returns what a healthy answer returns (0, nil, exit 0, SKIPPED, GREEN);
 - a guard whose input is not wired defaults to allow ("PushInFlight gate is a constant false"): unknown denies;
 - an error dropped (`_ =`), only logged, or reported as "skipped" where the caller has to act.
-- Example: gt-42ulv (critical). A missing red-main status read as green; gt-p85pw.73: an unreadable routes file reported SKIPPED. Fix: return the error, or record the state as unknown and escalate.
+- Example: gt-42ulv (critical). A missing red-main status read as green. Fix: return the error, or record the state as unknown and escalate.
 
 ## 2. Each criterion needs a test that fails without it
 
@@ -75,7 +76,7 @@ Every acceptance box needs a test that is red when the behaviour is removed. Mut
 ## 3. Test the branch that refuses, not only the happy path
 
 Every error or refusal branch in the diff has a test that drives it: one table row per refusal, each asserting the error. Mutate each new guard before `gt done`; a guard no test turns red is the most common reason a head is rejected.
-- om flags: "failing branch has no assertion", "alarm and refusal branches lack tests". Example: gt-z6qre.12. No test for the unset-HOME failure the bead listed as a criterion.
+- om flags: "failing branch has no assertion", "alarm and refusal branches lack tests".
 
 ## 4. Untrusted input is not trusted by its prefix, its text or its shape
 
@@ -101,7 +102,7 @@ The Tests section is the rule. om flags: "new parsing and state logic added to a
 ## 9. Stay in scope
 
 Change only what the bead asks for.
-- A line limit in Constraints is a cap, not an estimate: if your diff passes 1.5 times it, stop, comment that the bead needs a split, and run gt done.
+- A line limit in Constraints is a cap, not an estimate: past 1.5 times, stop; push with `git push origin HEAD:refs/heads/<your branch>` (never `--force`); comment the sha and that the bead needs a split; run gt done.
 - om flags: "edit to a file outside the bead's Constraints"; "existing test fixture edited to fit new behaviour"; "exported API signature changed without recording it"; "unexplained transitive dependency bumps"; "change touches files outside the stated scope". If another file must change, say why in a bead comment.
 
 ## 10. Test the call site, not the helper
