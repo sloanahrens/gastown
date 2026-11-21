@@ -137,8 +137,10 @@ func TestTownStateBackupRedactLogsOnACleanTick(t *testing.T) {
 
 	d.syncTownStateBackup()
 
-	if len(rec.Escalations()) != 0 {
-		t.Fatalf("a successful tick raised an alert")
+	for _, c := range rec.Escalations() {
+		if c.Escalation.Fingerprint == alertKeyTownStateBackup {
+			t.Fatalf("a successful tick raised the sync failure alert")
+		}
 	}
 	if strings.Contains(logs.String(), "PLANTED-123") {
 		t.Errorf("the log holds the planted credential")

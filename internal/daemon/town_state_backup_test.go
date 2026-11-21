@@ -434,7 +434,7 @@ func TestTownStateBackupRefusesForeignStagedFile(t *testing.T) {
 	}
 	before := townStateHead(t, f, gitRepo)
 
-	err := d.runTownStateBackup(gitRepo)
+	_, err := d.runTownStateBackup(gitRepo)
 	if err == nil || !strings.Contains(err.Error(), "outside town-state/") {
 		t.Fatalf("runTownStateBackup = %v, want a refusal naming the foreign staged file", err)
 	}

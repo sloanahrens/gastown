@@ -1421,6 +1421,7 @@ type Daemon struct {
 	rebuildHMRun       patrolLastRunMemory
 	jsonlGitBackupRun  patrolLastRunMemory
 	townStateBackupRun patrolLastRunMemory
+	townStateRaised    map[string]struct{} // paths whose refusal item stands
 	overrunGuardRun    patrolLastRunMemory
 	eventsPruneRun     patrolLastRunMemory
 	gitHygieneRun      patrolLastRunMemory
