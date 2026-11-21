@@ -393,21 +393,65 @@ var knownOlderBDBuilds = []string{
 
 // TestKnownOlderBDBuildsAreFullShas holds the list to 40 lowercase hex commits
 // with no repeats, so the image-pins read is never handed a bad or duplicate sha.
-func TestKnownOlderBDBuildsAreFullShas(t *testing.T) {
-	t.Parallel()
-	seen := make(map[string]bool, len(knownOlderBDBuilds))
-	for _, sha := range knownOlderBDBuilds {
+// fullShaProblems names each way a list of commit ids is not a list of distinct
+// full lowercase shas: a wrong length, a character outside 0-9a-f, a repeat.
+func fullShaProblems(entries []string) []string {
+	var problems []string
+	seen := make(map[string]bool, len(entries))
+	for _, sha := range entries {
 		if len(sha) != 40 {
-			t.Errorf("knownOlderBDBuilds entry %q has %d characters, want 40", sha, len(sha))
+			problems = append(problems, fmt.Sprintf("%q has %d characters, want 40", sha, len(sha)))
 		}
 		for _, r := range sha {
 			if !('0' <= r && r <= '9' || 'a' <= r && r <= 'f') {
-				t.Errorf("knownOlderBDBuilds entry %q holds %q, want only lowercase hex", sha, r)
+				problems = append(problems, fmt.Sprintf("%q holds %q, want only lowercase hex", sha, r))
+				break
 			}
 		}
 		if seen[sha] {
-			t.Errorf("knownOlderBDBuilds names %s twice", sha)
+			problems = append(problems, fmt.Sprintf("%q is named twice", sha))
 		}
 		seen[sha] = true
+	}
+	return problems
+}
+
+func TestKnownOlderBDBuildsAreFullShas(t *testing.T) {
+	t.Parallel()
+	for _, p := range fullShaProblems(knownOlderBDBuilds) {
+		t.Errorf("knownOlderBDBuilds entry %s", p)
+	}
+}
+
+// TestFullShaProblemsNamesEachFailure drives every branch of the entry check:
+// the real list passes, so only a case that breaks the rule shows the check can fail.
+func TestFullShaProblemsNamesEachFailure(t *testing.T) {
+	t.Parallel()
+	good := "b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f"
+	for _, tc := range []struct {
+		name    string
+		entries []string
+		want    []string
+	}{
+		{"a full lowercase sha passes", []string{good}, nil},
+		{"a 39 character sha is short", []string{good[:39]}, []string{"has 39 characters, want 40"}},
+		{"a 41 character sha is long", []string{good + "0"}, []string{"has 41 characters, want 40"}},
+		{"an uppercase sha is refused", []string{strings.ToUpper(good)}, []string{"want only lowercase hex"}},
+		{"a non-hex character is refused", []string{good[:39] + "g"}, []string{"want only lowercase hex"}},
+		{"a repeated sha is refused", []string{good, good}, []string{"is named twice"}},
+		{"an empty entry is short", []string{""}, []string{"has 0 characters, want 40"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := fullShaProblems(tc.entries)
+			if len(got) != len(tc.want) {
+				t.Fatalf("fullShaProblems(%q) = %q, want %d problem(s)", tc.entries, got, len(tc.want))
+			}
+			for i, w := range tc.want {
+				if !strings.Contains(got[i], w) {
+					t.Errorf("problem %d = %q, want it to contain %q", i, got[i], w)
+				}
+			}
+		})
 	}
 }
