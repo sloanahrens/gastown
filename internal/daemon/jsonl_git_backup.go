@@ -223,6 +223,10 @@ func (d *Daemon) syncJsonlGitBackup() {
 	cycle := d.startDogCycle("jsonl_git_backup")
 	defer cycle.close()
 
+	// The ratios belong to one cycle: start this one with none, so a budget
+	// reading it never sees the last cycle's slowdown (gt-sctvqf).
+	d.jsonlRatios = nil
+
 	config := pc.Patrols.JsonlGitBackup
 
 	// Resolve git repo path. Default lives under TownRoot (matches vitals.go's
