@@ -421,23 +421,48 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 	groups := followupGroups(fresh)
 	for i, p := range plans {
 		g := groups[i]
-		if bundle, ok := FindOpenBundle(existing, day, g.Package); ok {
+		// A bundle that refuses an append (ErrBundleFull: no room, or a body
+		// InsertFollowupLines cannot place the addition in) is dropped from the
+		// candidates and the lookup asked again, so a refusing older bundle never
+		// shadows a newer one; a new bundle is filed only when none is left
+		// (gt-hx4s0j).
+		done := false
+		for candidates := existing; !done; {
+			bundle, ok := FindOpenBundle(candidates, day, g.Package)
+			if !ok {
+				break
+			}
 			add := bundleAddition(w, res, g)
-			if err := l.Followups.AppendFollowup(bundle.ID, add); err != nil {
+			err := l.Followups.AppendFollowup(bundle.ID, add)
+			switch {
+			case errors.Is(err, ErrBundleFull):
+				// An empty addition fits any body that has a Goal bullet and an
+				// Acceptance box, so false means the body is malformed.
+				why := "full"
+				if _, fits := InsertFollowupLines(bundle.Description, FollowupAddition{}); !fits {
+					why = "malformed"
+				}
+				lines = append(lines, fmt.Sprintf("the follow-up bead %s refused an append (%s); trying the next open bundle", bundle.ID, why))
+				candidates = slices.DeleteFunc(slices.Clone(candidates), func(e ExistingFollowup) bool { return e.ID == bundle.ID })
+			case err != nil:
 				// The group is held, not dropped: the feed's queue keeps held
 				// findings for a later landing (gt-ntkwh0 queues a failed write
 				// itself and supersedes this).
 				held = append(held, p.Findings...)
 				lines = append(lines, fmt.Sprintf("could not append %s to the follow-up bead %s (%v)", findingsPhrase(len(p.Findings)), bundle.ID, err))
-				continue
-			}
-			for j := range existing {
-				if existing[j].ID == bundle.ID {
-					existing[j].Labels = append(slices.Clone(existing[j].Labels), add.Labels...)
+				done = true
+			default:
+				for j := range existing {
+					if existing[j].ID == bundle.ID {
+						existing[j].Labels = append(slices.Clone(existing[j].Labels), add.Labels...)
+					}
 				}
+				appended = append(appended, bundle.ID)
+				lines = append(lines, fmt.Sprintf("appended %s of the landing at %.2f to %s", findingsPhrase(len(p.Findings)), res.Verdict.Score, bundle.ID))
+				done = true
 			}
-			appended = append(appended, bundle.ID)
-			lines = append(lines, fmt.Sprintf("appended %s of the landing at %.2f to %s", findingsPhrase(len(p.Findings)), res.Verdict.Score, bundle.ID))
+		}
+		if done {
 			continue
 		}
 		if stop == nil && open+len(ids) >= bound {

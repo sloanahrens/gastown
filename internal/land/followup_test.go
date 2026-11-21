@@ -17,12 +17,13 @@ import (
 // followupFake is the feed's beads surface in memory: what a landing
 // de-duplicates against, and what it filed.
 type followupFake struct {
-	existing  []ExistingFollowup
-	created   []FollowupSpec
-	listErr   error
-	createErr error
-	appended  []followupAppend // each AppendFollowup call, in order
-	appendErr error            // returned by every AppendFollowup call
+	existing   []ExistingFollowup
+	created    []FollowupSpec
+	listErr    error
+	createErr  error
+	appended   []followupAppend // each AppendFollowup call, in order
+	appendErr  error            // returned by every AppendFollowup call
+	appendErrs map[string]error // returned for one bundle id, before appendErr
 }
 
 // followupAppend is one AppendFollowup call the fake recorded.
@@ -33,6 +34,9 @@ type followupAppend struct {
 
 func (f *followupFake) AppendFollowup(id string, add FollowupAddition) error {
 	f.appended = append(f.appended, followupAppend{ID: id, Add: add})
+	if err, ok := f.appendErrs[id]; ok {
+		return err
+	}
 	return f.appendErr
 }
 
