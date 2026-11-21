@@ -4202,6 +4202,22 @@ func (m *Manager) loadFromBeads(name string, batch *beadsBatch) (*Polecat, error
 	// or with empty hook_bead)
 	issue, beadsErr := m.lookupAssignedIssue(assignee, batch)
 	if beadsErr != nil {
+		// A fresh claim on the agent bead wins over the fallback below. The
+		// claim was read without the failed query, and a sling's claim must
+		// hold the seat through a Dolt or bd outage, else a second sling takes
+		// it (gt-lgcwd6). Past the spawn grace freshClaim reads none (its
+		// past-the-grace row in TestFreshClaim) and the fallback decides as
+		// before.
+		if claim := freshClaim(spawning, fields); claim != "" {
+			return &Polecat{
+				Name:      name,
+				Rig:       m.rig.Name,
+				State:     StateSpawning,
+				ClonePath: clonePath,
+				Branch:    branchName,
+				Issue:     claim,
+			}, nil
+		}
 		// If beads query fails, cross-check tmux session state.
 		// Avoid synthesizing working with no issue when we cannot verify active work.
 		state := StateWorking
