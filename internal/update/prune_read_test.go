@@ -775,8 +775,96 @@ func TestPruneReadGreenRefsDoesNotEchoAnAnswerBody(t *testing.T) {
 	if err == nil {
 		t.Fatal("ReadGreenRefs() = nil error, want a refusal")
 	}
+	if !strings.Contains(err.Error(), "HTTP 500") {
+		t.Errorf("error %q does not name HTTP 500", err)
+	}
 	if strings.Contains(err.Error(), pruneReadMarker) {
 		t.Errorf("error %q echoes the response body", err)
+	}
+}
+
+// pruneDoerFunc is a PruneDoer that answers each request with the function.
+type pruneDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f pruneDoerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+// TestPruneReadRefusesARedirectOffTheEndpoint holds that a redirect from the
+// first endpoint to another scheme or host is refused, and the viewer's
+// credential is never sent to where it points. The Doer is a plain *http.Client,
+// which follows a redirect and keeps the Authorization header on the same host.
+func TestPruneReadRefusesARedirectOffTheEndpoint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		location string
+		target   *url.URL
+	}{
+		{"https to http on the same host", "http://forgejo.example/api/v1/packages/gastown", &url.URL{Scheme: "http", Host: "forgejo.example"}},
+		{"https to another host", "https://elsewhere.example/api/v1/packages/gastown", &url.URL{Scheme: "https", Host: "elsewhere.example"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var sent []*http.Request
+			rt := pruneRoundTrip(func(req *http.Request) (*http.Response, error) {
+				sent = append(sent, req)
+				if req.URL.Scheme == "https" && req.URL.Host == "forgejo.example" {
+					return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {tc.location}}, Body: io.NopCloser(strings.NewReader(""))}, nil
+				}
+				return pruneResponse(pruneAnswer{status: http.StatusOK, total: "0", body: "[]"}), nil
+			})
+			reg := PruneRegistryReader{
+				Digest: pruneFixtureDigest,
+				Base:   "https://forgejo.example", Owner: "gastown", Doer: &http.Client{Transport: rt},
+				Credentials: func() (string, string, error) { return "viewer", "t", nil },
+			}
+			if _, err := reg.Images(context.Background()); err == nil {
+				t.Error("Images() = nil error, want a refusal of the redirect")
+			}
+			for _, req := range sent {
+				if req.URL.Scheme == tc.target.Scheme && req.URL.Host == tc.target.Host {
+					t.Errorf("request sent to %s://%s after the redirect; the credential must stay with the first endpoint", tc.target.Scheme, tc.target.Host)
+				}
+			}
+		})
+	}
+}
+
+// TestPruneReadRefusesAnAnswerFromOffTheEndpoint holds that a Doer which is not
+// an *http.Client, and so cannot be told to refuse a redirect, is refused when
+// its answer comes from an endpoint other than the one the listing asked.
+func TestPruneReadRefusesAnAnswerFromOffTheEndpoint(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, scheme, host string
+		noRequest          bool
+	}{
+		{"answer over http on the same host", "http", "forgejo.example", false},
+		{"answer from another host", "https", "elsewhere.example", false},
+		{"answer that names no request", "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			doer := pruneDoerFunc(func(req *http.Request) (*http.Response, error) {
+				resp := pruneResponse(pruneAnswer{status: http.StatusOK, total: "0", body: "[]"})
+				if tc.noRequest {
+					return resp, nil
+				}
+				answered := req.Clone(req.Context())
+				answered.URL = &url.URL{Scheme: tc.scheme, Host: tc.host, Path: req.URL.Path, RawQuery: req.URL.RawQuery}
+				resp.Request = answered
+				return resp, nil
+			})
+			reg := PruneRegistryReader{
+				Digest: pruneFixtureDigest,
+				Base:   "https://forgejo.example", Owner: "gastown", Doer: doer,
+				Credentials: func() (string, string, error) { return "viewer", "t", nil },
+			}
+			if _, err := reg.Images(context.Background()); err == nil {
+				t.Fatal("Images() = nil error, want a refusal of the answer")
+			}
+		})
 	}
 }
 
