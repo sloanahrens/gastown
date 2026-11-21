@@ -499,12 +499,12 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	if len(plan.Apply) != 12 {
-		t.Fatalf("the plan applies %d steps, want the mirror's clone and fetch, the repo claim, the wait out of a terminating sync pod, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
+	if len(plan.Apply) != 13 {
+		t.Fatalf("the plan applies %d steps, want the mirror's clone, its HEAD check and fetch, the repo claim, the wait out of a terminating sync pod, the sync pod, its Ready wait, the copy, the chown, its removal, the output claim, the cache claim and the Job: %v", len(plan.Apply), plan.Apply)
 	}
 
 	var repoClaim Claim
-	if err := json.Unmarshal(plan.Apply[2].Stdin, &repoClaim); err != nil {
+	if err := json.Unmarshal(plan.Apply[3].Stdin, &repoClaim); err != nil {
 		t.Fatalf("the first apply is not a document: %v", err)
 	}
 	if repoClaim.Kind != "PersistentVolumeClaim" || repoClaim.Metadata.Name != RepoClaimName(spec.Rig) {
@@ -518,7 +518,7 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 
 	var syncPod Pod
-	if err := json.Unmarshal(plan.Apply[4].Stdin, &syncPod); err != nil {
+	if err := json.Unmarshal(plan.Apply[5].Stdin, &syncPod); err != nil {
 		t.Fatalf("the second apply is not a document: %v", err)
 	}
 	if syncPod.Kind != "Pod" || syncPod.Metadata.Name != syncPodName(spec) {
@@ -526,38 +526,38 @@ func TestRenderPlanSyncsTheRepoClaimFirst(t *testing.T) {
 	}
 	// Created, not applied: a second sync pod for the rig must fail
 	// AlreadyExists rather than take the claim from a sync already using it.
-	if argv := plan.Apply[4].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
+	if argv := plan.Apply[5].Argv; !slices.Contains(argv, "create") || slices.Contains(argv, "apply") {
 		t.Errorf("the second apply runs %v, want a kubectl create of the sync pod", argv)
 	}
 	if len(syncPod.Spec.Containers) != 1 || syncPod.Spec.Containers[0].Image != spec.Image {
 		t.Errorf("the sync pod's containers are %+v, want one running the Spec's image %q", syncPod.Spec.Containers, spec.Image)
 	}
 
-	if argv := plan.Apply[5].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
+	if argv := plan.Apply[6].Argv; !slices.Contains(argv, "wait") || !slices.Contains(argv, "pod/"+syncPodName(spec)) {
 		t.Errorf("the third apply runs %v, want a wait for the sync pod %q", argv, syncPodName(spec))
 	}
-	cp := plan.Apply[6].Argv
+	cp := plan.Apply[7].Argv
 	if !slices.Contains(cp, "cp") || !slices.Contains(cp, spec.Snapshot+"/.") || !slices.Contains(cp, syncPodName(spec)+":"+RepoMount) {
 		t.Errorf("the fourth apply runs %v, want the mirror %q copied into the sync pod at %s", cp, spec.Snapshot+"/.", RepoMount)
 	}
-	exec := strings.Join(plan.Apply[7].Argv, " ")
+	exec := strings.Join(plan.Apply[8].Argv, " ")
 	if !strings.Contains(exec, "exec "+syncPodName(spec)) ||
 		!strings.Contains(exec, "chown -R 10001:10001 "+RepoMount) ||
 		!strings.Contains(exec, "chmod -R a+rX "+RepoMount) {
 		t.Errorf("the fifth apply runs %q, want a chown and chmod of the copied tree", exec)
 	}
-	if argv := plan.Apply[8].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
+	if argv := plan.Apply[9].Argv; !slices.Contains(argv, "delete") || !slices.Contains(argv, "pod") || !slices.Contains(argv, syncPodName(spec)) {
 		t.Errorf("the sixth apply runs %v, want the sync pod %q removed", argv, syncPodName(spec))
 	}
 
 	var outClaim Claim
-	if err := json.Unmarshal(plan.Apply[9].Stdin, &outClaim); err != nil {
+	if err := json.Unmarshal(plan.Apply[10].Stdin, &outClaim); err != nil {
 		t.Fatalf("the seventh apply is not a document: %v", err)
 	}
 	if outClaim.Metadata.Name != OutClaimName(spec) {
 		t.Errorf("the seventh apply is the claim %q, want the output claim %q", outClaim.Metadata.Name, OutClaimName(spec))
 	}
-	if string(plan.Apply[11].Stdin) != string(plan.Job.JSON()) {
+	if string(plan.Apply[12].Stdin) != string(plan.Job.JSON()) {
 		t.Errorf("the last apply does not carry the rendered Job document")
 	}
 }
@@ -602,12 +602,15 @@ func TestK8sPlanSyncsAMirrorNotTheLiveRepository(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rendering the golden spec: %v", err)
 	}
-	clone, fetch := plan.Apply[0], plan.Apply[1]
+	clone, check, fetch := plan.Apply[0], plan.Apply[1], plan.Apply[2]
+	if got, want := strings.Join(check.Argv, " "), "git --git-dir "+spec.Snapshot+" rev-parse --verify --quiet HEAD"; got != want || check.Retry || check.SkipWhen != "" {
+		t.Errorf("the second apply is %q (retry %v, skip %q), want %q between the clone and the fetch, unretried and skipping nothing", got, check.Retry, check.SkipWhen, want)
+	}
 	if got, want := strings.Join(clone.Argv, " "), "git clone --mirror --quiet "+spec.RepoDir+" "+spec.Snapshot; got != want || clone.SkipWhen != "already exists and is not an empty directory" {
 		t.Errorf("the first apply is %q (SkipWhen %q), want %q skipping only an existing mirror", got, clone.SkipWhen, want)
 	}
 	if got, want := strings.Join(fetch.Argv, " "), "git --git-dir "+spec.Snapshot+" fetch --quiet --force --prune --no-tags --update-shallow "+spec.RepoDir+" +refs/*:refs/*"; got != want || fetch.Retry || fetch.SkipWhen != "" {
-		t.Errorf("the second apply is %q (retry %v, skip %q), want %q, unretried and skipping nothing", got, fetch.Retry, fetch.SkipWhen, want)
+		t.Errorf("the third apply is %q (retry %v, skip %q), want %q, unretried and skipping nothing", got, fetch.Retry, fetch.SkipWhen, want)
 	}
 	for i, step := range plan.Apply {
 		if joined := strings.Join(step.Argv, " "); strings.Contains(joined, " cp ") {
@@ -615,7 +618,7 @@ func TestK8sPlanSyncsAMirrorNotTheLiveRepository(t *testing.T) {
 				t.Errorf("the copy at step %d is %q, want the mirror as its source and never %q", i, joined, spec.RepoDir)
 			}
 		}
-		if strings.Contains(strings.Join(step.Argv, " "), " create ") && i < 2 {
+		if strings.Contains(strings.Join(step.Argv, " "), " create ") && i < 3 {
 			t.Errorf("the sync pod is created at step %d, before the mirror is ready", i)
 		}
 	}

@@ -973,6 +973,7 @@ type runnerCluster struct {
 	noLogs         bool
 	failSyncCopy   bool
 	failSyncCreate bool
+	failRevParse   bool
 	failWait       bool
 	failApply      int
 	applies        int
@@ -1067,6 +1068,10 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 			return nil, []byte("Error from server (NotFound): jobs.batch not found\n"), errors.New("exit status 1")
 		}
 		return []byte(c.status), nil, nil
+	case slices.Contains(argv, "rev-parse"):
+		if c.failRevParse {
+			return nil, nil, errors.New("exit status 1")
+		}
 	case slices.Contains(argv, "create"):
 		if c.failSyncCreate {
 			return nil, []byte("Error from server (AlreadyExists): pods \"gt-sweep-sync-gastown\" already exists\n"), errors.New("exit status 1")
@@ -1166,7 +1171,7 @@ func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 			claimAt = i
 		case jobAt < 0 && bytes.Equal(cmds.stdin[i], plan.Job.JSON()):
 			jobAt = i
-		case syncAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[4].Stdin):
+		case syncAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[5].Stdin):
 			syncAt = i
 		}
 	}
@@ -1239,6 +1244,32 @@ func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
 		if bytes.Equal(cmds.stdin[i], plan.Job.JSON()) {
 			t.Errorf("the Job was applied at command %q after the sync copy failed", cmds.ran[i])
 		}
+	}
+}
+
+// TestSweepMirrorWithNoRefsFailsBeforeTheFetch drives a mirror a killed clone left
+// behind (HEAD resolves to nothing): the HEAD check fails, the stage is RED naming
+// that step, and neither the fetch nor anything after it runs, so no full fetch
+// reaches an empty repository (gt-4dx0su).
+func TestSweepMirrorWithNoRefsFailsBeforeTheFetch(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, failRevParse: true}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	if stage.reason != tierSweepRunnerNoResult || stage.exitCode == 0 {
+		t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+	}
+	if !strings.Contains(stage.output, "rev-parse --verify --quiet HEAD failed") {
+		t.Errorf("stage output does not name the HEAD check:\n%s", stage.output)
+	}
+	if n := len(runnerCalls(cmds.ran, "fetch")) + len(runnerCalls(cmds.ran, "create")); n != 0 {
+		t.Errorf("%d fetch or create commands ran after the failed check: %q", n, cmds.ran)
 	}
 }
 
