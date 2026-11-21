@@ -1,7 +1,6 @@
 package land
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +60,7 @@ func TestFollowupBudgetFiledSince(t *testing.T) {
 func TestFollowupBudgetLandedSince(t *testing.T) {
 	t.Parallel()
 	cutoff := time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC)
-	f := &LandingsFile{Path: filepath.Join(t.TempDir(), "landings.jsonl")}
+	f := &LandingsFile{Path: privateLandingsPath(t)}
 	for _, rec := range []LandingRecord{
 		{BeadID: "gt-before", LandedAt: cutoff.Add(-time.Hour)},
 		{BeadID: "gt-at", LandedAt: cutoff},

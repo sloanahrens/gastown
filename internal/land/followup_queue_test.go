@@ -411,11 +411,24 @@ func TestFollowupFeedKeepsAnOverlongLineAndStillCompacts(t *testing.T) {
 	}
 }
 
+// privateLandingsPath is the path of a landings file in a directory only this
+// account can write: t.TempDir is 0777 under the runner's open umask, and
+// ensureLandingsDir refuses a landings dir other accounts can write.
+func privateLandingsPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	//testpolicy:allow no-exec-files — a directory, not a file: t.TempDir is 0777 under the runner's open umask, so it is made private
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "landings.jsonl")
+}
+
 // budgetWeek is a landings file with n records landed inside the seven-day
 // window the follow-up budget counts.
 func budgetWeek(t *testing.T, n int) *LandingsFile {
 	t.Helper()
-	f := &LandingsFile{Path: filepath.Join(t.TempDir(), "landings.jsonl")}
+	f := &LandingsFile{Path: privateLandingsPath(t)}
 	at := time.Now().UTC().Add(-time.Hour)
 	for i := 0; i < n; i++ {
 		if err := f.Append(LandingRecord{BeadID: fmt.Sprintf("gt-week-%d", i), LandedAt: at}); err != nil {
