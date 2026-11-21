@@ -182,3 +182,119 @@ func TestCacheTrimFailWaitReadsThePlanLogAndStillCompletes(t *testing.T) {
 		held.await(t)
 	})
 }
+
+// cacheTrimFailWaitAnswerAfter holds the answer to verb until started closes, so
+// the verb answers only once the other leg's call has begun. The complete wait
+// then always has its context recorded before the failed wait's answer lands.
+func cacheTrimFailWaitAnswerAfter(f *cacheTrimFixture, verb string, started <-chan struct{}) {
+	answer := f.d.execCmd
+	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if len(cmd.Args) > 1 && cacheTrimVerb(cmd.Args[1:]) == verb {
+			ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+			defer cancel()
+			select {
+			case <-started:
+			case <-ctx.Done():
+			}
+		}
+		return answer(cmd)
+	}
+}
+
+// cacheTrimFailWaitCtxs records the context each kubectl call runs under. A wait
+// leg runs on a context derived from the parent; a log read runs on the parent
+// itself. completeLiveAtLog is set at the first log read: whether the complete
+// wait's context was still live then. legs[0] is the complete wait, because the
+// test answers the failed wait only once the complete call has begun.
+type cacheTrimFailWaitCtxs struct {
+	parent            context.Context
+	mu                sync.Mutex
+	legs              []context.Context
+	logReads          int
+	completeLiveAtLog bool
+}
+
+func (c *cacheTrimFailWaitCtxs) record(ctx context.Context) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ctx != c.parent {
+		c.legs = append(c.legs, ctx)
+		return
+	}
+	if c.logReads == 0 && len(c.legs) > 0 {
+		c.completeLiveAtLog = c.legs[0].Err() == nil
+	}
+	c.logReads++
+}
+
+// cacheTrimFailWaitRecordCtxs hands the fixture's seam to a recorder for parent.
+func cacheTrimFailWaitRecordCtxs(f *cacheTrimFixture, parent context.Context) *cacheTrimFailWaitCtxs {
+	c := &cacheTrimFailWaitCtxs{parent: parent}
+	f.d.cacheTrimCtxSeen = c.record
+	return c
+}
+
+// TestCacheTrimFailWaitCancelsTheCompleteLegWhenTheJobFails pins that a Job whose
+// failed condition answers cancels the complete wait it leaves held before it
+// reads the log, and that both wait legs are canceled once the wait returns.
+func TestCacheTrimFailWaitCancelsTheCompleteLegWhenTheJobFails(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitFailedVerb:  {},
+		cacheTrimFailWaitTrimLogVerb: {stdout: "could not remove /claim/x: permission denied\n"},
+	})
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	ctxs := cacheTrimFailWaitRecordCtxs(f, parent)
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+	cacheTrimFailWaitAnswerAfter(f, cacheTrimFailWaitFailedVerb, held.started)
+	finished, err := f.d.cacheTrimWaitJob(parent, "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if finished || err == nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+	}
+	held.await(t)
+	ctxs.mu.Lock()
+	defer ctxs.mu.Unlock()
+	if ctxs.logReads == 0 {
+		t.Fatalf("no log read ran: calls %v", f.verbs())
+	}
+	if len(ctxs.legs) != 2 {
+		t.Fatalf("the pass ran %d wait legs on derived contexts; want the complete and the failed wait", len(ctxs.legs))
+	}
+	if ctxs.completeLiveAtLog {
+		t.Errorf("the complete wait was live when the log was read; want it canceled before the read")
+	}
+	for i, leg := range ctxs.legs {
+		if leg.Err() == nil {
+			t.Errorf("wait leg %d is live once the wait returned; want it canceled", i)
+		}
+	}
+}
+
+// TestCacheTrimFailWaitCancelsTheFailedLegWhenTheJobCompletes pins that a Job
+// whose complete condition answers cancels the failed wait it leaves held.
+func TestCacheTrimFailWaitCancelsTheFailedLegWhenTheJobCompletes(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitCompleteVerb: {},
+	})
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	ctxs := cacheTrimFailWaitRecordCtxs(f, parent)
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitFailedVerb)
+	finished, err := f.d.cacheTrimWaitJob(parent, "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if !finished || err != nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want finished with no error", finished, err)
+	}
+	held.await(t)
+	ctxs.mu.Lock()
+	defer ctxs.mu.Unlock()
+	if len(ctxs.legs) != 2 {
+		t.Fatalf("the pass ran %d wait legs on derived contexts; want the complete and the failed wait", len(ctxs.legs))
+	}
+	for i, leg := range ctxs.legs {
+		if leg.Err() == nil {
+			t.Errorf("wait leg %d is live once the wait returned; want it canceled", i)
+		}
+	}
+}
