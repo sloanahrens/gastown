@@ -429,7 +429,7 @@ func TestCheckPinsFallsBackToTheStaticListWithANoteWhenGoListFails(t *testing.T)
 		if err != nil {
 			t.Fatalf("checkPins = %v, want the static list to stand in", err)
 		}
-		if len(notes) != 2 || !strings.Contains(notes[0], "go list could not derive") || !strings.Contains(notes[0], "go: no module") || !strings.Contains(notes[0], "static input list") {
+		if len(notes) != 2 || !strings.Contains(notes[0], GoListNoteMarker) || !strings.Contains(notes[0], "go: no module") || !strings.Contains(notes[0], "static input list") {
 			t.Errorf("notes = %q, want the go list failure and the static list first", notes)
 		}
 	})
@@ -453,7 +453,7 @@ func TestCheckPinsFallsBackToTheStaticListWithANoteWhenGoListFails(t *testing.T)
 		if err := checkFetchedPin(f.run, failingGoList, &out, pinsTestDir, devopsPin, pinsTestPath); err != nil {
 			t.Fatalf("checkFetchedPin: %v", err)
 		}
-		if !strings.Contains(out.String(), "go list could not derive") {
+		if !strings.Contains(out.String(), GoListNoteMarker) {
 			t.Errorf("the fetched path wrote %q, want the go list failure", out.String())
 		}
 	})
