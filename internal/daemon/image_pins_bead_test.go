@@ -632,3 +632,53 @@ func TestImagePinsFileRefreshBeadFilesTheDraft(t *testing.T) {
 		t.Errorf("priority = %d, want 0", got.Priority)
 	}
 }
+
+// TestImagePinsRefreshBeadNamesRelevantAndTotalCounts: a devops pin with an input
+// list and a Total says both counts in its Goal bullet and its title (gt-a682mo).
+func TestImagePinsRefreshBeadNamesRelevantAndTotalCounts(t *testing.T) {
+	t.Parallel()
+	pin := refreshPin("devops", pinDevops, tipDevops, 1)
+	pin.Total = 54
+	draft, err := imagePinsRefreshBead([]ImagePinState{pin}, refreshFiledAt)
+	if err != nil {
+		t.Fatalf("imagePinsRefreshBead: %v", err)
+	}
+	want := "- devops: pinned at " + pinDevops + "; its source's origin/main is " + tipDevops + ", 1 touching its inputs of 54 behind. Set the devops commit column in deploy/daemon/image-pins and the devops commit column in deploy/polecat/seed-pins."
+	if got := goalPinLine(draft.Description, "devops"); got != want {
+		t.Errorf("devops line = %q, want %q", got, want)
+	}
+	if !strings.Contains(draft.Title, "devops by 1 touching its inputs of 54 behind origin/main") {
+		t.Errorf("title %q does not name both counts", draft.Title)
+	}
+}
+
+// TestImagePinsTextKeepsTodaysWordingWithoutATotal: a pin with no Total, and a
+// pin with no input list whose Total is its Behind, keep today's Goal bullet and
+// title (gt-a682mo).
+func TestImagePinsTextKeepsTodaysWordingWithoutATotal(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pin   ImagePinState
+		line  string
+		title string
+	}{
+		{refreshPin("bd", pinBD, tipBD, 22),
+			"- bd: pinned at " + pinBD + "; its source's origin/main is " + tipBD + ", 22 commits behind. Set the bd commit column in deploy/daemon/image-pins and the beads commit column in deploy/polecat/seed-pins.",
+			"bd by 22 commits behind origin/main"},
+		{ImagePinState{Name: "om", Pin: pinOM, Tip: tipOM, Behind: 22, Total: 22},
+			"- om: pinned at " + pinOM + "; its source's origin/main is " + tipOM + ", 22 commits behind. Set the om commit column in deploy/daemon/image-pins.",
+			"om by 22 commits behind origin/main"},
+	}
+	for _, tt := range tests {
+		draft, err := imagePinsRefreshBead([]ImagePinState{tt.pin}, refreshFiledAt)
+		if err != nil {
+			t.Fatalf("imagePinsRefreshBead: %v", err)
+		}
+		if got := goalPinLine(draft.Description, tt.pin.Name); got != tt.line {
+			t.Errorf("%s line = %q, want %q", tt.pin.Name, got, tt.line)
+		}
+		if !strings.Contains(draft.Title, tt.title) {
+			t.Errorf("title %q does not say %q", draft.Title, tt.title)
+		}
+	}
+}
