@@ -214,6 +214,38 @@ func TestReapBeadBranchesDeletesOnlyTheBranchNoReadyBeadNames(t *testing.T) {
 	}
 }
 
+// TestReapBeadBranchesSparesAnUnparsedHolder: a ready-to-land bead whose READY
+// TO LAND block cannot be parsed still names its branch in its notes, and the
+// landed bead's reap must keep that branch on origin (gt-ebg6yx).
+func TestReapBeadBranchesSparesAnUnparsedHolder(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	const held = "polecat/coma/gt-ug7zed+mwmuimru"
+	// A block with no Head line: ParseReadyNote finds it and refuses it.
+	h.bd.Seed(beads.Issue{ID: "gt-wlrgk8", Title: "work", Status: "hooked", Type: "task",
+		Assignee: "gastown/polecats/coma", Labels: []string{land.LabelReadyToLand},
+		Notes: "READY TO LAND\nBranch: " + held + "\nTarget: main\n", UpdatedAt: seededRowAt})
+	h.remote.remoteRefs = map[string]string{
+		"refs/heads/polecat/opal/gt-ug7zed+x1": tipHead,
+		"refs/heads/" + held:                   noteHead,
+	}
+	var logs []string
+	h.w.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	h.w.reapBeadBranches("gt-ug7zed")
+
+	if _, ok := h.remote.remoteRefs["refs/heads/"+held]; !ok {
+		t.Fatal("the branch the unparsed ready bead's notes name was deleted; want it kept")
+	}
+	want := []string{"polecat/opal/gt-ug7zed+x1"}
+	if strings.Join(h.remote.deleted, ",") != strings.Join(want, ",") {
+		t.Fatalf("deleted %v; want %v", h.remote.deleted, want)
+	}
+	if !logged(logs, "gt-wlrgk8") {
+		t.Fatalf("logs %q; want one naming the holding bead", logs)
+	}
+}
+
 // TestReapDeletesNothingWhenTheReadyListFails: an unread ready list cannot
 // show which branch a bead holds, so the reap keeps every branch it found.
 func TestReapBeadBranchesDeletesNothingWhenTheReadyListFails(t *testing.T) {
@@ -644,6 +676,29 @@ func TestBeadForBranch(t *testing.T) {
 	for _, c := range cases {
 		if got := beadForBranch(c.branch); got != c.want {
 			t.Errorf("beadForBranch(%q) = %q; want %q", c.branch, got, c.want)
+		}
+	}
+}
+
+// TestPolecatBranchesIn: a branch named in free text is read with the
+// punctuation around it trimmed, under its full ref name too, and a field that
+// is not shaped like a polecat branch yields nothing (gt-ebg6yx).
+func TestPolecatBranchesIn(t *testing.T) {
+	t.Parallel()
+	const b = "polecat/coma/gt-abc+x1"
+	cases := []struct{ notes, want string }{
+		{"work pushed to " + b + " for review", b},      // prose
+		{"the tip of refs/heads/" + b + " is green", b}, // a full ref
+		{"(see `" + b + "`).", b},                       // wrapped in prose
+		{"- **" + b + "**", b},                          // bold in a list
+		{"grep polecat/coma/gt-abc fails", ""},          // no mutation suffix
+		{"polecat/coma/-h+x1", ""},                      // a flag is not an id
+		{"README: " + b + ", then " + b, b},             // named twice, read once
+		{"nothing to see", ""},                          // none
+	}
+	for _, c := range cases {
+		if got := polecatBranchesIn(c.notes); strings.Join(got, ",") != c.want {
+			t.Errorf("polecatBranchesIn(%q) = %v; want %q", c.notes, got, c.want)
 		}
 	}
 }
