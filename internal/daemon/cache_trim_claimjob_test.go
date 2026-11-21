@@ -3,10 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
 
@@ -259,5 +261,57 @@ func TestCacheTrimClaimJobRunRefusesAnUnsetClock(t *testing.T) {
 	}
 	if calls := f.verbs(); len(calls) != 0 {
 		t.Errorf("a run with no clock made cluster calls %v; want none", calls)
+	}
+}
+
+// onClaimJobWait runs fn before each wait the run makes for the claim Job, and
+// then the wait's own answer.
+func (f *cacheTrimFixture) onClaimJobWait(fn func()) {
+	run := f.d.execCmd
+	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		if strings.Contains(strings.Join(cmd.Args, " "), cacheTrimClaimJobWaitVerb) {
+			fn()
+		}
+		return run(cmd)
+	}
+}
+
+// TestCacheTrimClaimJobBudgetOutlivesThePassContext pins that the claim Job's
+// wait runs under the claim's own budget: the pass context ends at five minutes,
+// the wait runs to six, and the Job's counts are still returned.
+func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
+	})
+	clock := clockwork.NewFakeClockAt(diskMaintNow)
+	f.d.clock = clock
+	passCtx, endPass := context.WithCancel(context.Background())
+	defer endPass()
+	f.onClaimJobWait(func() { clock.Advance(5 * time.Minute); endPass(); clock.Advance(time.Minute) })
+	removed, absent, kept, err := f.d.cacheTrimClaimJobRun(passCtx, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName}, "gastown-polecat:dev", cacheTrimNamespace, 1<<30, 0, true)
+	if err != nil || removed != 4 || absent != 1 || kept != 2 {
+		t.Fatalf("a wait that outlives the pass context = %d, %d, %d, %v; want 4, 1, 2, nil", removed, absent, kept, err)
+	}
+}
+
+// TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait pins that a wait the
+// daemon's context cuts off is an error naming that context, not a Job still
+// running, though the Job's status reads active.
+func TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	clock := clockwork.NewFakeClockAt(diskMaintNow)
+	f.d.clock = clock
+	daemonCtx, stopDaemon := context.WithCancel(context.Background())
+	defer stopDaemon()
+	f.d.ctx = daemonCtx
+	f.onClaimJobWait(func() { clock.Advance(5 * time.Minute); stopDaemon() })
+	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+	if err == nil || !strings.Contains(err.Error(), "the trim Job "+cacheTrimJob+" was cut off") {
+		t.Fatalf("a wait its context cut off = %v; want an error naming the Job and the cut-off", err)
 	}
 }

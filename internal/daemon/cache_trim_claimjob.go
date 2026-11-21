@@ -14,6 +14,9 @@ import (
 // 30-minute deadline (gt-uatljg), so a Job it leaves running is slow, not hung.
 const cacheTrimClaimWaitTimeout = 20 * time.Minute
 
+// cacheTrimClaimSlack is the room a claim's budget adds to its wait, for the apply.
+const cacheTrimClaimSlack = 2 * time.Minute
+
 // errCacheTrimJobPending marks a trim Job still running when the wait ends: its
 // result line is read at a later pass, so the claim is not a failed trim.
 var errCacheTrimJobPending = errors.New("the trim Job is still running")
@@ -28,9 +31,13 @@ var errCacheTrimJobPending = errors.New("the trim Job is still running")
 // pending (errCacheTrimJobPending), and a status that cannot be read is an
 // ordinary error, never pending, so a failed Job never passes as a healthy run.
 //
+// The Job runs under its own budget, not the pass's (diskMaintRunTimeout is
+// shorter than the wait): the daemon's context, bounded by the wait and
+// cacheTrimClaimSlack. A wait the budget cuts off is an error, never pending.
+//
 // Nothing calls it yet (cache trim, bead 7/10: the chain's later beads are its
 // callers).
-func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) (removed, absent, kept int64, err error) {
+func (d *Daemon) cacheTrimClaimJobRun(_ context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, sandboxes int, apply bool) (removed, absent, kept int64, err error) {
 	jobName := cacheTrimJobName(claim.ClaimName)
 	m, err := cachevol.BuildClaimTrimManifest(cachevol.TrimJobInput{
 		Name:             jobName,
@@ -50,12 +57,24 @@ func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, cl
 		d.logger.Printf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
 		return 0, 0, 0, nil
 	}
-	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m, cacheTrimClaimWaitTimeout)
+	base := d.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	budget, cancel := context.WithTimeout(base, cacheTrimClaimWaitTimeout+cacheTrimClaimSlack)
+	defer cancel()
+	start := d.clk().Now()
+	finished, err := d.cacheTrimApply(budget, kubeconfig, namespace, jobName, m, cacheTrimClaimWaitTimeout)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("applying the trim Job %s: %w", jobName, err)
 	}
 	if !finished {
-		state, err := d.cacheTrimJobState(ctx, kubeconfig, namespace, jobName)
+		// A budget that ended before the wait cut it short: not pending.
+		if err := budget.Err(); err != nil {
+			return 0, 0, 0, fmt.Errorf("the trim Job %s was cut off after %s by its context (%v), before the %s wait ended",
+				jobName, d.clk().Now().Sub(start).Round(time.Second), err, cacheTrimClaimWaitTimeout)
+		}
+		state, err := d.cacheTrimJobState(budget, kubeconfig, namespace, jobName)
 		if err != nil {
 			return 0, 0, 0, fmt.Errorf("reading the status of the trim Job %s: %s", jobName, cacheTrimFirstLine(err.Error()))
 		}
@@ -67,7 +86,7 @@ func (d *Daemon) cacheTrimClaimJobRun(ctx context.Context, kubeconfig string, cl
 		}
 		// A Job that completed after the wait is read as a finished one.
 	}
-	removed, absent, kept, err = d.cacheTrimRemovedCounts(ctx, kubeconfig, namespace, jobName)
+	removed, absent, kept, err = d.cacheTrimRemovedCounts(budget, kubeconfig, namespace, jobName)
 	if err != nil {
 		return 0, 0, 0, err
 	}
