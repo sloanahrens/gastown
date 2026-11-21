@@ -20,6 +20,40 @@ import (
 // output or its logs.
 const doltUsersQuery = "SELECT user, host, authentication_string = '' FROM mysql.user ORDER BY user, host"
 
+// emptyPasswordFlag is the answer to the empty-password predicate. The server
+// types the comparison TINY and go-sql-driver/mysql (textRows.readRow, packets.go
+// lines 854 to 862) hands an integer column to database/sql as int64, or uint64
+// for an unsigned BIGINT, so only those two shapes with the value 0 or 1 are
+// read. Every other shape is refused on purpose, a []byte and a string included,
+// even when bool parsing would accept it ("1", "true", "0"): a statement changed
+// to select the authentication string then fails to scan instead of reporting
+// the account as weak or strong. A NULL leaves Valid false, so the reader can
+// tell "the server did not say" from "password set".
+type emptyPasswordFlag struct {
+	Bool  bool
+	Valid bool
+}
+
+func (f *emptyPasswordFlag) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		// Valid stays false, so ReadAccounts refuses the row and names the
+		// account instead of reading an unknown answer as "password set".
+		return nil
+	case int64:
+		if v == 0 || v == 1 {
+			f.Bool, f.Valid = v == 1, true
+			return nil
+		}
+	case uint64:
+		if v == 0 || v == 1 {
+			f.Bool, f.Valid = v == 1, true
+			return nil
+		}
+	}
+	return errors.New("the empty-password predicate answered with something other than 0 or 1")
+}
+
 // doltUserAccount is one account the server holds. EmptyPassword is whether the
 // server says the password is empty; it is never the password or its hash.
 type doltUserAccount struct {
@@ -58,12 +92,12 @@ func (r *mysqlUsersReader) ReadAccounts(ctx context.Context) ([]doltUserAccount,
 	var accounts []doltUserAccount
 	for rows.Next() {
 		var user, host sql.NullString
-		var empty sql.NullBool
+		var empty emptyPasswordFlag
 		if err := rows.Scan(&user, &host, &empty); err != nil {
-			// database/sql puts the value it could not convert in its error,
-			// so a statement changed to select the authentication string
-			// would copy the hash into this error. The driver's message is
-			// dropped and the shape of the row is named instead.
+			// The scan target refuses any string, so a statement changed to
+			// select the authentication string fails here. database/sql puts
+			// the value it could not convert in its error, so the driver's
+			// message is dropped and the shape of the row is named instead.
 			return nil, errors.New("a row from mysql.user did not scan into a user, a host and an empty-password flag")
 		}
 		account := doltUserAccount{User: user.String, Host: host.String}
