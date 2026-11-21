@@ -8,8 +8,11 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"sort"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
@@ -180,4 +183,28 @@ func (t *landOmStatsWeekTally) row(monday time.Time, ids []string, names map[str
 		ISOYear: year, ISOWeek: week,
 		Reviews: t.reviews, NoFindingText: t.noFindingText, Classes: classes,
 	}
+}
+
+// writeLandOmStatsClassesTable prints the class-rate table: a row per ISO week
+// and a cell per class in the row's order, each its majors and minors per 100
+// reviews of that week. The counts before the cells are the week's reviews and
+// the reviews that carried no finding text. Every line holds more than one cell,
+// so the tabwriter writes the whole table from Flush, whose error is returned.
+func writeLandOmStatsClassesTable(w io.Writer, weeks []landOmStatsClassWeek) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	header := "Week\tReviews\tNo-text"
+	if len(weeks) > 0 {
+		for _, class := range weeks[0].Classes {
+			header += "\t" + class.ID
+		}
+	}
+	fmt.Fprintln(tw, header)
+	for _, week := range weeks {
+		fmt.Fprintf(tw, "%d-W%02d\t%d\t%d", week.ISOYear, week.ISOWeek, week.Reviews, week.NoFindingText)
+		for _, class := range week.Classes {
+			fmt.Fprintf(tw, "\t%.1f/%.1f", week.ratePer100(class.Majors), week.ratePer100(class.Minors))
+		}
+		fmt.Fprintln(tw)
+	}
+	return tw.Flush()
 }
