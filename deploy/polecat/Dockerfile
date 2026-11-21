@@ -24,7 +24,7 @@
 # Only the client binary reaches the image below, so a sandbox gets a CLI and
 # no daemon (gt-9lmam). TestPolecatImageInstallsDockerCLIPinned keeps this digest
 # equal to SweepDindImage's.
-ARG DOCKER_CLI_DIGEST=sha256:7bf70dcb85c822e3fa6f2d332143e474b99147b9d7b39102b0cfe8b04a7dd61b
+ARG DOCKER_CLI_DIGEST=sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
 FROM data.forgejo.org/oci/docker@${DOCKER_CLI_DIGEST} AS docker-cli
 
 # GNU Make 4.4.1 built from source: Ubuntu's Make 4.3 fails inside OpenShell
