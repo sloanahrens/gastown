@@ -233,30 +233,30 @@ func isImagePinName(name string) bool {
 func pinRepo(pin daemonimage.Pin) (owner, repo string, err error) {
 	u, err := url.Parse(pin.URL)
 	if err != nil {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL does not parse", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL does not parse", pin.Name)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL is not http:// or https://", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL is not http:// or https://", pin.Name)
 	}
 	if u.Host == "" {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL names no host", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL names no host", pin.Name)
 	}
 	if u.User != nil {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL carries a credential: name the repository URL without one", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL carries a credential: name the repository URL without one", pin.Name)
 	}
 	if u.RawQuery != "" || u.Fragment != "" || u.ForceQuery {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL carries a query or fragment: name the repository URL without one, since a token can sit there", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL carries a query or fragment: name the repository URL without one, since a token can sit there", pin.Name)
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL does not name exactly one owner and one repository", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL does not name exactly one owner and one repository", pin.Name)
 	}
 	owner, repo = parts[0], strings.TrimSuffix(parts[1], ".git")
 	if err := config.ValidForgeOwner(owner); err != nil {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL names no usable owner: %w", pin.Name, err)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL names no usable owner: %v", pin.Name, err)
 	}
 	if !pinRepoForm.MatchString(repo) {
-		return "", "", fmt.Errorf("image pins read: %s pin: its URL names no usable repository: want letters, digits, '.', '_' or '-', starting with a letter or digit", pin.Name)
+		return "", "", daemonimage.Refusef("image pins read: %s pin: its URL names no usable repository: want letters, digits, '.', '_' or '-', starting with a letter or digit", pin.Name)
 	}
 	return owner, repo, nil
 }
@@ -277,17 +277,17 @@ func imagePinTip(tipGit PinTipGit, pin daemonimage.Pin) (string, error) {
 			continue
 		}
 		if len(fields) != 2 || fields[1] != pinTipRef {
-			return "", fmt.Errorf("image pins read: %s pin: cannot read %s of %s: git answered a line that is not \"<sha> %s\"", pin.Name, pinTipRef, pin.URL, pinTipRef)
+			return "", daemonimage.Refusef("image pins read: %s pin: cannot read %s of %s: git answered a line that is not \"<sha> %s\"", pin.Name, pinTipRef, pin.URL, pinTipRef)
 		}
 		tips = append(tips, fields[0])
 	}
 	switch {
 	case len(tips) == 0:
-		return "", fmt.Errorf("image pins read: %s pin: %s of %s named no commit", pin.Name, pinTipRef, pin.URL)
+		return "", daemonimage.Refusef("image pins read: %s pin: %s of %s named no commit", pin.Name, pinTipRef, pin.URL)
 	case len(tips) > 1:
-		return "", fmt.Errorf("image pins read: %s pin: %s of %s was answered %d times: want one commit", pin.Name, pinTipRef, pin.URL, len(tips))
+		return "", daemonimage.Refusef("image pins read: %s pin: %s of %s was answered %d times: want one commit", pin.Name, pinTipRef, pin.URL, len(tips))
 	case !pinShaForm.MatchString(tips[0]):
-		return "", fmt.Errorf("image pins read: %s pin: %s of %s answered %q, not a full 40-character lowercase hex sha", pin.Name, pinTipRef, pin.URL, tips[0])
+		return "", daemonimage.Refusef("image pins read: %s pin: %s of %s answered %q, not a full 40-character lowercase hex sha", pin.Name, pinTipRef, pin.URL, tips[0])
 	}
 	return tips[0], nil
 }
@@ -311,7 +311,7 @@ func imagePinCounts(ctx context.Context, cmp ImagePinCompare, pathCount PinPathC
 			return 0, 0, fmt.Errorf("image pins read: %s pin %s: cannot count the commits it trails %s of %s that touch its inputs: %w", pin.Name, sha12(pin.Commit), pinTipRef, pin.URL, err)
 		}
 		if n < 0 {
-			return 0, 0, fmt.Errorf("image pins read: %s pin %s: counting the commits it trails %s by that touch its inputs answered %d, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, n)
+			return 0, 0, daemonimage.Refusef("image pins read: %s pin %s: counting the commits it trails %s by that touch its inputs answered %d, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, n)
 		}
 		behind = n
 	}
@@ -323,7 +323,7 @@ func imagePinCounts(ctx context.Context, cmp ImagePinCompare, pathCount PinPathC
 		return 0, 0, fmt.Errorf("image pins read: %s pin %s: comparing it with %s of %s/%s answered no comparison", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo)
 	}
 	if info.TotalCommits < 0 {
-		return 0, 0, fmt.Errorf("image pins read: %s pin %s: comparing it with %s of %s/%s answered %d commits, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, info.TotalCommits)
+		return 0, 0, daemonimage.Refusef("image pins read: %s pin %s: comparing it with %s of %s/%s answered %d commits, which is not a count", pin.Name, sha12(pin.Commit), pinTipRef, owner, repo, info.TotalCommits)
 	}
 	if len(paths) == 0 {
 		behind = info.TotalCommits

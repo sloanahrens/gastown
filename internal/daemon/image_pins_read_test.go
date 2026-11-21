@@ -947,3 +947,69 @@ func TestReadImagePinTipsKeepsTheCompareCountForBd(t *testing.T) {
 		assert.NotEqual(t, pinsReadBDCommit, call.pin, "the bd pin is counted through the compare, never the path seam")
 	}
 }
+
+// TestImagePinsReadRefusalsAreTyped: every answer the read judges (a pin URL that is wrong, a
+// tip answer that is not a sha, a count that is not a count, a bd tip without the samples
+// build) is a refusal, so errors.Is(err, daemonimage.ErrPinRefused) holds and its text is
+// unchanged (gt-0ykf85).
+func TestImagePinsReadRefusalsAreTyped(t *testing.T) {
+	t.Parallel()
+	bdKey := pinsReadCompareKey(pinsReadBDCommit, pinsReadBDTip)
+	bdURL := pinsReadPinURL("beads")
+	tip := func(answer string) func(*fakePinTips, *fakePinCompare) {
+		return func(git *fakePinTips, _ *fakePinCompare) { git.answers[bdURL] = answer }
+	}
+	tests := []struct {
+		name  string
+		file  []byte
+		setup func(*fakePinTips, *fakePinCompare)
+		want  string
+	}{
+		{name: "a URL that does not parse", file: pinsReadFixtureWithBDURL("http://forgejo:3000/%zz/beads.git"), want: "its URL does not parse"},
+		{name: "a URL that is not http(s)", file: pinsReadFixtureWithBDURL("ssh://forgejo:3000/owner/beads.git"), want: "not http:// or https://"},
+		{name: "a URL that names no host", file: pinsReadFixtureWithBDURL("http:///owner/beads.git"), want: "names no host"},
+		{name: "a URL that carries a credential", file: pinsReadFixtureWithBDURL("http://user:pass@forgejo:3000/owner/beads.git"), want: "carries a credential"},
+		{name: "a URL that carries a query", file: pinsReadFixtureWithBDURL("http://forgejo:3000/owner/beads.git?token=x"), want: "carries a query or fragment"},
+		{name: "a URL without an owner and repository", file: pinsReadFixtureWithBDURL("http://forgejo:3000/beads.git"), want: "exactly one owner and one repository"},
+		{name: "a URL whose owner traverses", file: pinsReadFixtureWithBDURL("http://forgejo:3000/../beads.git"), want: "no usable owner"},
+		{name: "a URL whose repository is empty", file: pinsReadFixtureWithBDURL("http://forgejo:3000/owner/.git"), want: "no usable repository"},
+		{name: "a tip answer with no main ref", setup: tip(""), want: "named no commit"},
+		{name: "a tip answered as a short sha", setup: tip(pinsReadLS("abc123")), want: "not a full 40-character"},
+		{name: "a tip answer naming another ref", setup: tip(pinsReadBDTip + "\trefs/heads/other\n"), want: "a line that is not"},
+		{name: "a tip answer naming two commits", setup: tip(pinsReadLS(pinsReadBDTip) + pinsReadLS(pinsReadOtherTip)), want: "was answered 2 times"},
+		{name: "a compare answering a negative count", setup: func(_ *fakePinTips, cmp *fakePinCompare) { cmp.behind[bdKey] = -1 }, want: "which is not a count"},
+		{name: "a bd tip the compare says lacks the samples build", setup: func(_ *fakePinTips, cmp *fakePinCompare) { cmp.floor = 3 }, want: "does not contain the samples build"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			git, cmp, pathCount := pinsReadAllHealthy()
+			file := tt.file
+			if file == nil {
+				file = pinsReadFixture(pinsReadPinURL)
+			}
+			if tt.setup != nil {
+				tt.setup(git, cmp)
+			}
+			states, err := ReadImagePinTips(context.Background(), file, nil, git.read, pathCount.count, cmp)
+			require.NoError(t, err)
+			require.Error(t, states[0].Err)
+			assert.ErrorIs(t, states[0].Err, daemonimage.ErrPinRefused)
+			assert.Contains(t, states[0].Err.Error(), tt.want)
+		})
+	}
+	t.Run("a path count answering a negative number", func(t *testing.T) {
+		t.Parallel()
+		git, cmp, pathCount := pinsReadAllHealthy()
+		pathCount.behind = -1
+		states, err := ReadImagePinTips(context.Background(), pinsReadFixture(pinsReadPinURL), nil, git.read, pathCount.count, cmp)
+		require.NoError(t, err)
+		var refused []string
+		for _, st := range states {
+			if errors.Is(st.Err, daemonimage.ErrPinRefused) {
+				refused = append(refused, st.Name)
+			}
+		}
+		assert.Contains(t, refused, "devops", "the devops pin counts its lag by path: %v", refused)
+	})
+}
