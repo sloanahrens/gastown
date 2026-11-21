@@ -12,8 +12,9 @@ import (
 const noLimitLine = "no limit declared in the bead's Size or Constraints: the added-line check did not run"
 
 // splitLine is what a refusal past twice the limit tells the seat to do
-// instead of trimming (gt-wxpd0y).
-const splitLine = "This needs a split, not a trim: comment on the bead that it needs a split and stop; do not run gt done again with the same change."
+// instead of trimming (gt-wxpd0y): push the commit first so it outlives the
+// seat and a split can be built from it (gt-574kps).
+const splitLine = "This needs a split, not a trim: push the branch first with a plain git push origin HEAD:refs/heads/<your branch> (never --force), read git ls-remote origin <your branch> and check the tip is your HEAD, comment both shas on the bead, then comment that the bead needs a split and stop; do not run gt done again with the same change."
 
 // lineLimitVerdict decides whether added is too many for the limit the bead
 // declares, checked at the largest of several numbers, and returns the lines
