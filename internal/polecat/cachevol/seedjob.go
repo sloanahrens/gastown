@@ -89,6 +89,9 @@ type ObjectMeta struct {
 
 // JobSpec is the subset of a Job's spec the seed sets.
 type JobSpec struct {
+	// ActiveDeadlineSeconds caps how long a Job may run, counted from its start; a Job that leaves it
+	// unset runs until its containers finish.
+	ActiveDeadlineSeconds   *int64      `json:"activeDeadlineSeconds,omitempty"`
 	BackoffLimit            *int32      `json:"backoffLimit,omitempty"`
 	TTLSecondsAfterFinished *int32      `json:"ttlSecondsAfterFinished,omitempty"`
 	Template                PodTemplate `json:"template"`
