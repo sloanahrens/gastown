@@ -91,3 +91,37 @@ func TestRaceSummary(t *testing.T) {
 		})
 	}
 }
+
+func TestRaceTierRunsEveryEntryAndSumsTheirCounts(t *testing.T) {
+	t.Parallel()
+	runs := []raceRun{
+		{pkg: "./one", args: []string{"-race", "-run", "One"}},
+		{pkg: "./two", args: []string{"-race", "-run", "Two"}},
+	}
+	head := []string{"gt", "slot", "run", "--", "env", "GT_TEST_DOCKER=1",
+		"go", "test", "-count=1", "-timeout", "7m"}
+	want := [][]string{
+		append(append(append([]string{}, head...), runs[0].args...), "./one"),
+		append(append(append([]string{}, head...), runs[1].args...), "./two"),
+	}
+	fake := &fakeTier{}
+	s := raceSweep(t, fake)
+	line, red := s.raceTier(runs)
+	if w := fmt.Sprintf("tier-sweep: race GREEN passed=2 failed=0 skipped=0 (logs %s) in 0s", s.Opts.LogDir); line != w || red {
+		t.Errorf("raceTier() = %q, %v; want %q, false", line, red, w)
+	}
+	if len(fake.calls) != 2 {
+		t.Fatalf("race ran %d commands, want 2", len(fake.calls))
+	}
+	for i := range want {
+		if got := fake.calls[i].argv; !reflect.DeepEqual(got, want[i]) {
+			t.Errorf("race call %d ran %q, want %q", i, got, want[i])
+		}
+	}
+	fake = &fakeTier{codes: map[string]int{". ./two": 1}}
+	s = raceSweep(t, fake)
+	line, red = s.raceTier(runs)
+	if w := fmt.Sprintf("tier-sweep: race RED passed=1 failed=1 skipped=0 failed: ./two (logs %s) in 0s", s.Opts.LogDir); line != w || !red {
+		t.Errorf("raceTier() = %q, %v; want %q, true", line, red, w)
+	}
+}
