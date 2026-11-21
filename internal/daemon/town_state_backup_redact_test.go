@@ -307,3 +307,49 @@ func TestTownStateBackupRedactLogAndAlertHoldNoValue(t *testing.T) {
 		}
 	}
 }
+
+// TestTownStateBackupRedactRefusesFreeTextCredential: a JSON export whose
+// free-text string holds a token-shaped word is refused, not stored, and the log
+// and the note name it without any part of the value.
+func TestTownStateBackupRedactRefusesFreeTextCredential(t *testing.T) {
+	t.Parallel()
+	const token = "sk-abcdefghijklmnopqrst"
+	const refused = "settings/themes/notes.json"
+	d, f, town := townStateDaemon(t)
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+	rec := notifyfake.New()
+	d.notifier = rec
+	tree := townStateRedactTree()
+	delete(tree, "settings/themes/notes.txt")
+	tree[refused] = &fstest.MapFile{Data: []byte(`{"note":"use ` + token + ` for the build"}`)}
+	d.townStateFS = func(string) fs.FS { return tree }
+	gitRepo := filepath.Join(town, ".dolt-archive", "git")
+	seedTownStateOrigin(t, f, town, gitRepo)
+
+	snap, err := collectTownState(tree, []string{"gastown"})
+	if err != nil {
+		t.Fatalf("collectTownState: %v", err)
+	}
+	if _, ok := snap.Files[refused]; ok {
+		t.Errorf("%s was stored; a free-text credential must be refused", refused)
+	}
+	if !containsString(snap.Refused, refused) {
+		t.Errorf("refused = %v, want %s among them", snap.Refused, refused)
+	}
+	note := townStateCredentialNote(snap)
+	if !strings.Contains(note, "refused 1 secret-bearing file(s): "+refused) {
+		t.Errorf("note = %q, want it to count and name the refused file", note)
+	}
+
+	d.syncTownStateBackup()
+
+	if !strings.Contains(logs.String(), "refused 1 secret-bearing file(s): "+refused) {
+		t.Errorf("log = %q, want it to count and name the refused file", logs.String())
+	}
+	for name, text := range map[string]string{"log": logs.String(), "note": note} {
+		if strings.Contains(text, "abcdefghijklmnopqrst") {
+			t.Errorf("%s holds part of the token", name)
+		}
+	}
+}

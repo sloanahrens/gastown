@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -36,6 +37,13 @@ func TestFindCredentials(t *testing.T) {
 		{"content after a valid document is still scanned", `{"api_key":"abc"} trailing`, []string{"json:api_key"}},
 		{"truncated JSON is still scanned", `{"api_key":"abc"`, []string{"json:api_key"}},
 		{"not JSON, no credentials", "hello\nworld\n", nil},
+		{"free text holds a token-shaped word", `{"note":"use sk-abcdefghijklmnopqrst for the build"}`, []string{"value:shape"}},
+		{"token-shaped words in a string and an array, one finding each", `{"a":"ghp_abcdefghijklmnopqr and AKIAABCDEFGHIJKLMNOP","list":["sk-abcdefghijklmnopqrst"]}`, []string{"value:shape", "value:shape", "value:shape"}},
+		{"top-level string holding a token-shaped word", `"sk-abcdefghijklmnopqrst"`, []string{"value:shape"}},
+		{"a sentence with no token-shaped word is not found", `{"note":"the build ran for twenty minutes without any error"}`, nil},
+		{"a URL is not found", `{"docs":"https://example.com/guide/getting-started"}`, nil},
+		{"a short prefix is not a token", `{"note":"sk-abc"}`, nil},
+		{"a credential key with a token value is one finding", `{"api_key":"sk-abcdefghijklmnopqrst"}`, []string{"json:api_key"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -85,6 +93,21 @@ func TestRedactJSONRefusesWhatIsNotJSON(t *testing.T) {
 		if err == nil || out != nil || n != 0 {
 			t.Fatalf("RedactJSON(%q) = %q, %d, %v; want an error and no output", in, out, n, err)
 		}
+	}
+}
+
+// A free-text string holding a token-shaped word is not rewritten (its key is not a
+// credential name), so the redactor refuses the whole document and names no part of it.
+func TestRedactJSONRefusesFreeTextCredential(t *testing.T) {
+	t.Parallel()
+	const token = "sk-abcdefghijklmnopqrst"
+	in := `{"note":"use ` + token + ` for the build","model":"m"}`
+	out, n, err := RedactJSON([]byte(in))
+	if err == nil || out != nil || n != 0 {
+		t.Fatalf("RedactJSON = %q, %d, %v; want an error and no output", out, n, err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("error %q holds the token", err)
 	}
 }
 
