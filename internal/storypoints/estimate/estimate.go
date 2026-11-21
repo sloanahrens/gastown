@@ -63,6 +63,10 @@ type Deps struct {
 	// caller reads it from the bead's ID prefix (specBeadRig); empty is unknown,
 	// as it is for every bead estimated before a rig is known.
 	Rig string
+	// NeighborMinutes returns the polecat minutes a completed past bead took,
+	// or ok false when none is recorded. A nil func records no time for any
+	// neighbor, and so does a value that is not a finite, non-negative number.
+	NeighborMinutes func(rig, id string) (float64, bool)
 	// Prior returns the component minutes an earlier estimate of the bead
 	// recorded for the same SectionHash. A nil Prior, or ok false, estimates as
 	// usual, and so does a Prior with either minutes value not valid.
@@ -211,7 +215,7 @@ func estimateWith(ctx context.Context, deps Deps, issue *beads.Issue, blend func
 		blended.Inputs = append(append([]string(nil), blended.Inputs...), "size")
 	}
 
-	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue)
+	neighbors, neighborsSkipped := neighborsOf(ctx, deps.HMRunner, issue, deps.NeighborMinutes)
 
 	// A dependency that saw the context end returns an error, which the input
 	// builders above record as a skip. Reporting that as a lower-rung result
@@ -408,10 +412,11 @@ func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Ski
 	return p, nil
 }
 
-// neighborsOf asks hm for the past beads nearest the issue. A nil runner or an
-// hm failure returns no neighbors and the reason, and the estimate proceeds
+// neighborsOf asks hm for the past beads nearest the issue, then records each
+// one's actual polecat minutes when minutes answers. A nil runner or an hm
+// failure returns no neighbors and the reason, and the estimate proceeds
 // without them.
-func neighborsOf(ctx context.Context, run hmhints.Runner, issue *beads.Issue) ([]nearest.Neighbor, string) {
+func neighborsOf(ctx context.Context, run hmhints.Runner, issue *beads.Issue, minutes func(rig, id string) (float64, bool)) ([]nearest.Neighbor, string) {
 	if run == nil {
 		return nil, "no hm runner"
 	}
@@ -419,16 +424,40 @@ func neighborsOf(ctx context.Context, run hmhints.Runner, issue *beads.Issue) ([
 	if err != nil {
 		return nil, err.Error()
 	}
+	if minutes != nil {
+		for i := range found {
+			if m, ok := minutes(found[i].Rig, found[i].ID); ok && displayableMinutes(m) {
+				found[i].Minutes = &m
+			}
+		}
+	}
 	return found, ""
 }
 
-// neighborList renders neighbors as "id (rig) title" entries on one line.
+// displayableMinutes reports whether m names a time the note can print. A
+// value that is not a finite, non-negative number is treated as no time
+// recorded, so a broken reader cannot write NaN or a negative into the note.
+func displayableMinutes(m float64) bool {
+	return m >= 0 && !math.IsNaN(m) && !math.IsInf(m, 0)
+}
+
+// neighborList renders neighbors as "id (rig) title (took 14 min)" entries on
+// one line, or "(no time recorded)" for a neighbor with no known minutes.
 func neighborList(found []nearest.Neighbor) string {
 	parts := make([]string, 0, len(found))
 	for _, n := range found {
-		parts = append(parts, fmt.Sprintf("%s (%s) %s", n.ID, n.Rig, oneLine(n.Title)))
+		parts = append(parts, fmt.Sprintf("%s (%s) %s (%s)", n.ID, n.Rig, oneLine(n.Title), neighborTime(n.Minutes)))
 	}
 	return strings.Join(parts, "; ")
+}
+
+// neighborTime renders a neighbor's actual polecat minutes, or says none is
+// recorded.
+func neighborTime(minutes *float64) string {
+	if minutes == nil {
+		return "no time recorded"
+	}
+	return "took " + strconv.FormatFloat(*minutes, 'f', -1, 64) + " min"
 }
 
 // oneLine collapses whitespace in a dependency's text, so a title or an error

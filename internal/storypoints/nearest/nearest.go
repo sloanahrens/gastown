@@ -17,6 +17,10 @@ type Neighbor struct {
 	ID    string
 	Rig   string
 	Title string
+	// Minutes is the polecat minutes the neighbor actually took, nil when none
+	// is recorded and always nil from Nearest, whose caller fills it from the
+	// ledger.
+	Minutes *float64
 }
 
 // neighborKind is the hm record kind of a bead. hm also ranks docs and other
