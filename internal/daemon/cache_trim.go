@@ -1156,7 +1156,7 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 			return false, fmt.Errorf("reading the pods of the earlier trim Job %s: %w", o.Name, err)
 		}
 		if !ok {
-			return false, fmt.Errorf("the earlier trim Job %s is still running; its pods mount the claim, so it is left to finish", o.Name)
+			return false, fmt.Errorf("the earlier trim Job %s is still running; its pods mount the claim, so it is left to finish: %w", o.Name, errCacheTrimJobPending)
 		}
 		stuck[o.Name] = image
 	}
