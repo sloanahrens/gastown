@@ -30,7 +30,7 @@ func TestLandOmStatsOutputUnchanged(t *testing.T) {
 			}
 			fsys := &landOmStatsFakeFS{files: map[string]string{"/town/reviews.jsonl": records, "/town/daemon.log": log}}
 			var got bytes.Buffer
-			if err := landOmStatsReportFrom(fsys, omStatsNoTown(t), &got, "", "/town/reviews.jsonl", "/town/daemon.log", tt.asJSON); err != nil {
+			if err := landOmStatsReportFrom(fsys, omStatsNoTown(t), &got, "", "/town/reviews.jsonl", "/town/daemon.log", tt.asJSON, false); err != nil {
 				t.Fatalf("landOmStatsReportFrom: %v", err)
 			}
 			if !bytes.Equal(got.Bytes(), want) {

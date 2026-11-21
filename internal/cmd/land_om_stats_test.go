@@ -136,7 +136,7 @@ func omStatsNoTown(t *testing.T) func() (string, error) {
 func runLandOmStatsOutput(t *testing.T, recordsPath, logPath, since string, asJSON bool) string {
 	t.Helper()
 	var out bytes.Buffer
-	if err := landOmStatsReport(&out, since, recordsPath, logPath, asJSON); err != nil {
+	if err := landOmStatsReport(&out, since, recordsPath, logPath, asJSON, false); err != nil {
 		t.Fatalf("landOmStatsReport: %v", err)
 	}
 	return out.String()
@@ -268,7 +268,7 @@ func TestLandOmStatsWritesNothing(t *testing.T) {
 		asJSON bool
 	}{{"", false}, {"2026-10-16", true}} {
 		var out bytes.Buffer
-		if err := landOmStatsReport(&out, tc.since, recordsPath, logPath, tc.asJSON); err != nil {
+		if err := landOmStatsReport(&out, tc.since, recordsPath, logPath, tc.asJSON, false); err != nil {
 			t.Fatalf("landOmStatsReport: %v", err)
 		}
 	}
@@ -284,7 +284,7 @@ func TestLandOmStatsWritesNothing(t *testing.T) {
 		townLog:     log,
 	}}
 	var out bytes.Buffer
-	if err := landOmStatsReportFrom(fake, func() (string, error) { return dir, nil }, &out, "", "", "", false); err != nil {
+	if err := landOmStatsReportFrom(fake, func() (string, error) { return dir, nil }, &out, "", "", "", false, false); err != nil {
 		t.Fatalf("landOmStatsReportFrom: %v", err)
 	}
 
@@ -337,7 +337,7 @@ func TestLandOmStatsNamedSourceMustExist(t *testing.T) {
 		{"log", "/town/reviews.jsonl", "/town/no-daemon.log", "/town/no-daemon.log"},
 	} {
 		var out bytes.Buffer
-		err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, "", tc.recordsPath, tc.logPath, false)
+		err := landOmStatsReportFrom(fake, omStatsNoTown(t), &out, "", tc.recordsPath, tc.logPath, false, false)
 		if err == nil {
 			t.Errorf("%s: missing explicit %s read as a report:\n%s", tc.name, tc.name, out.String())
 			continue
@@ -360,7 +360,7 @@ func TestLandOmStatsFailsWhenTheTownCannotBeResolved(t *testing.T) {
 	findTown := func() (string, error) { return "", boom }
 
 	var out bytes.Buffer
-	err := landOmStatsReportFrom(&landOmStatsFakeFS{files: map[string]string{}}, findTown, &out, "", "", "", false)
+	err := landOmStatsReportFrom(&landOmStatsFakeFS{files: map[string]string{}}, findTown, &out, "", "", "", false, false)
 	if err == nil {
 		t.Fatalf("a failed town resolution read as a report:\n%s", out.String())
 	}
@@ -395,7 +395,7 @@ func TestLandOmStatsSurfacesAnOpenError(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
 			err := landOmStatsReportFrom(&landOmStatsFakeFS{files: tc.files, errs: tc.errs}, omStatsNoTown(t),
-				&out, "", recordsPath, logPath, false)
+				&out, "", recordsPath, logPath, false, false)
 			if err == nil {
 				t.Fatalf("an open that failed with %v read as a report:\n%s", fs.ErrPermission, out.String())
 			}
@@ -441,7 +441,7 @@ func TestLandOmStatsResolvesTheTownFromCwd(t *testing.T) {
 	t.Chdir(town)
 
 	var out bytes.Buffer
-	if err := landOmStatsReport(&out, "", "", "", false); err != nil {
+	if err := landOmStatsReport(&out, "", "", "", false, false); err != nil {
 		t.Fatalf("landOmStatsReport with empty flags: %v", err)
 	}
 	for _, want := range []string{"2026-10-14*", "2026-10-16", "2026-10-17"} {
@@ -461,7 +461,7 @@ func TestLandOmStatsReadsAndToleratesTheTownDefaults(t *testing.T) {
 	report := func(fake *landOmStatsFakeFS) string {
 		t.Helper()
 		var out bytes.Buffer
-		if err := landOmStatsReportFrom(fake, findTown, &out, "", "", "", false); err != nil {
+		if err := landOmStatsReportFrom(fake, findTown, &out, "", "", "", false, false); err != nil {
 			t.Fatalf("landOmStatsReportFrom: %v", err)
 		}
 		return out.String()

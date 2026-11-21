@@ -26,6 +26,7 @@ var (
 	landOmStatsLog        string
 	landOmStatsJSON       bool
 	landOmStatsRecurrence bool
+	landOmStatsClasses    bool
 )
 
 // landOmStatsCmd is the operator's quick view of om's verdicts. Merlin's mango
@@ -51,6 +52,10 @@ A path given with --records or --log must exist, so a typo is an error. The
 town's two defaults may be absent — a town that has not landed yet has
 neither — and that is an empty report, not a failure.
 
+With --classes the report is followed by the table of how often each class of
+the om-lessons table turns up in the reviews, per ISO week, over all weeks on
+record (--since does not narrow it).
+
 The command reads only: it writes no file. --json prints the same data as the
 table.
 
@@ -67,6 +72,7 @@ func init() {
 	landOmStatsCmd.Flags().StringVar(&landOmStatsRecords, "records", "", "review records file (default: <town>/.runtime/landings/reviews.jsonl)")
 	landOmStatsCmd.Flags().StringVar(&landOmStatsLog, "log", "", "daemon log for the days before the first record (default: <town>/daemon/daemon.log)")
 	landOmStatsCmd.Flags().BoolVar(&landOmStatsJSON, "json", false, "print the report as JSON")
+	landOmStatsCmd.Flags().BoolVar(&landOmStatsClasses, "classes", false, "after the report, the table of how often each om-lessons class turns up per ISO week, over all weeks on record (text report; --recurrence takes precedence)")
 	landOmStatsCmd.Flags().BoolVar(&landOmStatsRecurrence, "recurrence", false, "add each hold-out class's minor findings a later review restated, and the rates")
 	landCmd.AddCommand(landOmStatsCmd)
 }
@@ -75,7 +81,7 @@ func runLandOmStats(cmd *cobra.Command, _ []string) error {
 	if landOmStatsRecurrence {
 		return landOmStatsRecurrenceReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON)
 	}
-	return landOmStatsReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON)
+	return landOmStatsReport(cmd.OutOrStdout(), landOmStatsSince, landOmStatsRecords, landOmStatsLog, landOmStatsJSON, landOmStatsClasses)
 }
 
 // landOmStatsFS is the read-only filesystem the report reads its two sources
@@ -91,11 +97,11 @@ func (landOmStatsDisk) Open(name string) (io.ReadCloser, error) { return os.Open
 
 // landOmStatsReport is the command body over explicitly named inputs, so a
 // test drives every path without swapping the shared flag variables.
-func landOmStatsReport(out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool) error {
-	return landOmStatsReportFrom(landOmStatsDisk{}, workspace.FindFromCwdOrError, out, sinceValue, recordsFlag, logFlag, asJSON)
+func landOmStatsReport(out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON, classes bool) error {
+	return landOmStatsReportFrom(landOmStatsDisk{}, workspace.FindFromCwdOrError, out, sinceValue, recordsFlag, logFlag, asJSON, classes)
 }
 
-func landOmStatsReportFrom(fsys landOmStatsFS, findTown func() (string, error), out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON bool) error {
+func landOmStatsReportFrom(fsys landOmStatsFS, findTown func() (string, error), out io.Writer, sinceValue, recordsFlag, logFlag string, asJSON, classes bool) error {
 	since, err := parseLandOmStatsSince(sinceValue)
 	if err != nil {
 		return err
@@ -104,7 +110,7 @@ func landOmStatsReportFrom(fsys landOmStatsFS, findTown func() (string, error), 
 	if err != nil {
 		return err
 	}
-	stats, err := landOmStatsFromFiles(fsys, inputs, since)
+	stats, data, err := landOmStatsFromFiles(fsys, inputs, since)
 	if err != nil {
 		return err
 	}
@@ -112,7 +118,15 @@ func landOmStatsReportFrom(fsys landOmStatsFS, findTown func() (string, error), 
 		return writeLandOmStatsJSON(out, stats)
 	}
 	writeLandOmStatsTable(out, stats, since)
-	return nil
+	if !classes {
+		return nil
+	}
+	// The records the report aggregated are the ones the class table reads: one
+	// snapshot, one open. The lines that do not parse are the report's Skipped,
+	// printed above.
+	records, _ := readLandOmStatsClassRecords(data)
+	fmt.Fprintln(out)
+	return writeLandOmStatsClassesTable(out, classRates(records))
 }
 
 // landOmStatsInputs is the two files a report reads, and whether the operator
@@ -161,18 +175,20 @@ func parseLandOmStatsSince(value string) (time.Time, error) {
 	return at, nil
 }
 
-// landOmStatsFromFiles opens both sources and aggregates them.
-func landOmStatsFromFiles(fsys landOmStatsFS, in landOmStatsInputs, since time.Time) (land.OmStats, error) {
+// landOmStatsFromFiles opens both sources and aggregates them, and returns the
+// records it read so the class table can read the same bytes.
+func landOmStatsFromFiles(fsys landOmStatsFS, in landOmStatsInputs, since time.Time) (land.OmStats, []byte, error) {
 	records, err := readLandOmStatsRecords(fsys, in)
 	if err != nil {
-		return land.OmStats{}, err
+		return land.OmStats{}, nil, err
 	}
 	logFile, closeLog, err := openLandOmStatsSource(fsys, in.log, in.logNamed)
 	if err != nil {
-		return land.OmStats{}, err
+		return land.OmStats{}, nil, err
 	}
 	defer closeLog()
-	return land.AggregateOmStats(bytes.NewReader(records), logFile, since)
+	stats, err := land.AggregateOmStats(bytes.NewReader(records), logFile, since)
+	return stats, records, err
 }
 
 // readLandOmStatsRecords reads the records source into memory once, so one
