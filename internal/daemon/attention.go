@@ -766,6 +766,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// live database is a sixth kind from the same read, with a collector of
 		// its own (gt-5f0kue).
 		{kind: attention.KindDeployPairSkew, collect: s.collectPairSkew},
+		{kind: attention.KindDeployPairGoListDegraded, collect: s.collectPairGoListDegraded},
 		{kind: attention.KindConfigEnvShadowed, collect: s.collectConfigEnvShadowed},
 		// The patrol config that does not load is raised beside the env item
 		// (gt-6frjqf).
