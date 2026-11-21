@@ -195,6 +195,83 @@ func TestFollowupFeedCommentsTheFiledBeadsOntoTheWorkBead(t *testing.T) {
 	}
 }
 
+// TestFeedNotesDocWordingAndFilesNothing: a comment minor files and queues nothing, and leaves one note (gt-u643bb).
+func TestFeedNotesDocWordingAndFilesNothing(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{{ID: "3", Severity: "minor", Path: "internal/land/followup.go",
+		Line: 14, Title: "the doc wording repeats the function name", Class: FindingClassComment}})
+	f.fake.existing = openFollowupBeads(DefaultFollowupBackpressure) // no room to file
+	log := f.run()
+	if len(f.fake.created) != 0 {
+		t.Fatalf("filed %d beads for a comment minor:\n%s", len(f.fake.created), log)
+	}
+	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
+		t.Fatalf("queue = %+v, %v; want the finding queued nowhere", queued, err)
+	}
+	comments, err := f.bd.Comments("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0].Text, "the doc wording repeats the function name") ||
+		!strings.Contains(comments[0].Text, "internal/land/followup.go:14, comment") {
+		t.Fatalf("comments on gt-abc = %v, want exactly one note naming the finding", commentTexts(comments))
+	}
+}
+
+// TestFeedSplitsNotesFromBeads: one bead for the behaviour minor and one note
+// for the comment minor (gt-u643bb).
+func TestFeedSplitsNotesFromBeads(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{
+		{ID: "3", Severity: "minor", Path: "internal/land/followup.go", Line: 14, Title: "the doc wording repeats the function name", Class: FindingClassComment},
+		{ID: "2", Severity: "minor", Path: "internal/land/note.go", Line: 260, Title: "name the error", Class: FindingClassBehaviour},
+	})
+	log := f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads, want one for the behaviour finding:\n%s", len(f.fake.created), log)
+	}
+	spec := f.fake.created[0]
+	beadText := spec.Title + "\n" + spec.Body + "\n" + spec.Acceptance
+	if !strings.Contains(beadText, "name the error") || strings.Contains(beadText, "the doc wording repeats the function name") {
+		t.Errorf("the bead carries the wrong findings:\n%s", beadText)
+	}
+	comments, err := f.bd.Comments("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := strings.Join(commentTexts(comments), "\n"); strings.Count(text, "the doc wording repeats the function name") != 1 ||
+		!strings.Contains(text, "minor notes om raised on gt-abc") {
+		t.Errorf("comments = %v, want one note naming the comment finding", commentTexts(comments))
+	}
+}
+
+// TestFeedNotesWithoutAReviewsLog: a feed with no reviews log still leaves the
+// note, which needs no queue or de-duplication read (gt-u643bb).
+func TestFeedNotesWithoutAReviewsLog(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{{ID: "3", Severity: "minor", Path: "internal/land/followup.go", Line: 14, Title: "the doc wording repeats the function name", Class: FindingClassComment}})
+	f.lander.Reviews = nil
+	f.run()
+	if comments, err := f.bd.Comments("gt-abc"); err != nil || len(comments) != 1 ||
+		!strings.HasPrefix(strings.TrimSpace(comments[0].Text), "minor notes om raised on gt-abc") {
+		t.Fatalf("comments = %v, %v; want the one note", comments, err)
+	}
+}
+
+// TestFollowupFeedQueueFilesNoBeadForANotedFinding: an old queue line files nothing for a noted finding (gt-u643bb).
+func TestFollowupFeedQueueFilesNoBeadForANotedFinding(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil) // nothing of its own to file
+	held := queuedFinding
+	held.Class = FindingClassComment
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, held)); err != nil {
+		t.Fatal(err)
+	}
+	if log := f.run(); len(f.fake.created) != 0 {
+		t.Fatalf("filed %d beads for a comment queue line:\n%s", len(f.fake.created), log)
+	}
+}
+
 // TestFollowupFeedStampsCreatedAt: every bead a pass files carries the Lander
 // clock's time as its CreatedAt, so a later plan in the same pass counts it as
 // filed this week rather than reading the zero time (gt-5as5x1).
@@ -491,11 +568,14 @@ func TestFollowupFeedIgnoresInfoAndUnapprovedLandings(t *testing.T) {
 }
 
 // TestFollowupFeedSkipsAFollowUpLanding: a bead that is itself a follow-up
-// files nothing, because a fix's own minors would feed the feed forever and it
-// would never drain (gt-4ty22).
+// files and notes nothing, because a fix's own minors would feed the feed
+// forever and it would never drain (gt-4ty22, gt-u643bb).
 func TestFollowupFeedSkipsAFollowUpLanding(t *testing.T) {
 	t.Parallel()
-	f := newFollowupFixture(t, 0.8, []Finding{minorFinding("name the error")})
+	f := newFollowupFixture(t, 0.8, []Finding{
+		minorFinding("name the error"),
+		{ID: "3", Severity: "minor", Path: "internal/land/followup.go", Line: 14, Title: "the doc wording repeats the function name", Class: FindingClassComment},
+	})
 	if err := f.bd.Update("gt-abc", beads.UpdateOptions{AddLabels: []string{FollowUpLabel}}); err != nil {
 		t.Fatal(err)
 	}
@@ -505,6 +585,9 @@ func TestFollowupFeedSkipsAFollowUpLanding(t *testing.T) {
 	}
 	if !strings.Contains(log, "the bead is a "+FollowUpLabel+" follow-up itself") {
 		t.Errorf("log = %q, want the rule named", log)
+	}
+	if comments, err := f.bd.Comments("gt-abc"); err != nil || len(comments) != 0 {
+		t.Errorf("comments = %v, %v; want a follow-up landing noted nothing", comments, err)
 	}
 }
 
@@ -828,6 +911,14 @@ func TestFollowupFeedFailuresAreLoggedAndDropped(t *testing.T) {
 		}
 		if !strings.Contains(log, "could not comment the filed follow-up onto gt-abc") {
 			t.Errorf("log = %q, want the failed comment named", log)
+		}
+	})
+	t.Run("the note fails", func(t *testing.T) {
+		t.Parallel()
+		f := newFollowupFixture(t, 0.8, []Finding{{ID: "3", Severity: "minor", Path: "internal/land/followup.go", Line: 14, Title: "the doc wording repeats the function name", Class: FindingClassComment}})
+		f.lander.Beads = &commentBeads{Fake: f.bd, failComment: true}
+		if log := f.run(); len(f.fake.created) != 0 || !strings.Contains(log, "could not note the 1 finding on gt-abc") {
+			t.Fatalf("filed %d beads, log = %q; want no bead and the failed note named", len(f.fake.created), log)
 		}
 	})
 }
