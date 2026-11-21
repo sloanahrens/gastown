@@ -12,7 +12,7 @@ func TestCacheTrimCtxSeamSeesTheCallsContext(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", map[string]cliReply{"get namespace": {stdout: "ns-a\n"}})
 	var seen []context.Context
-	f.d.cacheTrimCtxSeen = func(ctx context.Context) { seen = append(seen, ctx) }
+	f.d.cacheTrimCtxSeen = func(ctx context.Context, _ string) { seen = append(seen, ctx) }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	for range 2 {

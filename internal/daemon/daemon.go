@@ -506,8 +506,10 @@ type Daemon struct {
 	cacheTrimParks   map[string]bool
 	cacheTrimParksMu sync.Mutex
 	// cacheTrimCtxSeen is a test seam: the context each cache trim cluster call
-	// runs under, handed over just before the call runs. nil in production.
-	cacheTrimCtxSeen func(ctx context.Context)
+	// runs under and the call's verb (its arguments after the shared prefix, the
+	// text cacheTrimVerb returns), handed over just before the call runs. nil in
+	// production.
+	cacheTrimCtxSeen func(ctx context.Context, verb string)
 	// cacheTrimClaimJobRoute routes cacheTrimClaim to the claim Job. It is true
 	// in production; false keeps the old listing route reachable for the tests
 	// that still drive it, until bead gt-wnet9c deletes both.
