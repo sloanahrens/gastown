@@ -456,14 +456,15 @@ type scanResult struct {
 // cannot be told from a verb word, so the call is refused. Once the verb is
 // settled, it is read as a boolean: it consumes nothing, and the next token is
 // scanned on its own. That cannot change the verb, since no later word is a
-// command word once no listed path extends. It also cannot hide a flag behind
-// a later dash token, which is scanned as a flag in its own right, with two
-// exceptions that swallowsNextFlag names: if the flag takes a value, "--" is
-// that value rather than the end of the options, and a value-taking root flag
-// without an attached value ("--db", "-C", "--format") is that value rather
-// than a flag taking the token after it. bd then reads the following tokens as
-// flags, while the boolean reading calls them operands or a root flag's value.
-// A settled unknown flag followed by either is therefore refused too.
+// command word once no listed path extends, and a later dash token is scanned
+// as a flag in its own right. Two next tokens are refused instead. A
+// value-taking root flag without an attached value ("--db", "-C", "--format")
+// is refused because bd would take it as the unknown flag's value and then
+// read the token after it as a flag, while the boolean reading gives the root
+// flag that token's value. A "--" is placed when every token after it is an
+// operand: bd reading the unknown flag as value-taking takes "--" as its value
+// and still sees only operands, so the same command runs and no flag can hide;
+// a dash-prefixed token after the "--" is therefore refused too (gt-1s9gas).
 func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 	var res scanResult
 	res.words = make([]string, 0, maxPathWords)
@@ -502,9 +503,15 @@ func (p *Policy) scanArgs(argv []string) (scanResult, error) {
 		case i+1 < len(argv) && swallowsNextFlag(argv[i+1]):
 			// If the unknown flag takes a value, bd takes this next token as
 			// that value and still reads the tokens after it as flags. Read as
-			// boolean, the scan would let the token end the options ("--") or
-			// take the following token as its own value (a root flag without an
-			// attached value), and miss a refused flag behind it.
+			// boolean, the scan would let the token take the following token as
+			// its own value (a root flag without an attached value), and miss a
+			// flag behind it. "--" is the one exception: with only operands
+			// after it, both readings run the same command and nothing can hide
+			// (gt-1s9gas).
+			if argv[i+1] == "--" && !holdsFlagToken(argv[i+2:]) {
+				res.operands = append(res.operands, argv[i+2:]...)
+				return res, nil
+			}
 			res.refusedFlag = refusedFlagName(arg)
 			return res, ambiguousFlag(arg)
 		}
@@ -526,6 +533,18 @@ func swallowsNextFlag(next string) bool {
 	}
 	kind, known, attached := rootFlag(next)
 	return known && kind == flagValue && !attached
+}
+
+// holdsFlagToken reports whether rest holds a token bd would parse as a flag
+// after a separator the unknown flag before it consumed as its value. A lone
+// "-" and the empty string are operands to bd, not flags.
+func holdsFlagToken(rest []string) bool {
+	for _, arg := range rest {
+		if arg != "-" && strings.HasPrefix(arg, "-") {
+			return true
+		}
+	}
+	return false
 }
 
 // ambiguousFlag is the refusal for a flag the scan cannot place.

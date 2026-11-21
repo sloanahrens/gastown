@@ -196,9 +196,9 @@ func TestPolicyVerbResolution(t *testing.T) {
 // scan reads such a flag as a boolean that consumes nothing. That is what lets
 // the escalation collector's and the plugin run ledger's calls through, while
 // before the verb is settled the same flag is still refused and a refused flag
-// behind it is still caught. One shape is still refused after the verb: an
-// unknown flag followed by "--", because if the flag takes a value then "--"
-// is that value and bd reads the flags after it as flags.
+// behind it is still caught. An unknown flag followed by "--" is refused after
+// the verb only when a flag follows the separator, because bd could read that
+// flag while the boolean reading calls it an operand.
 func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 	t.Parallel()
 
@@ -236,16 +236,25 @@ func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 		}
 	}
 
-	// After the verb is settled an unknown flag is boolean except before "--":
-	// if the flag takes a value, "--" is that value and bd reads the flags
-	// after it as flags, so a boolean reading would end the options early and
-	// hide them. The call is refused rather than guessed.
+	// After the verb is settled an unknown flag before "--" is placed when
+	// every token after the separator is an operand: both readings run the same
+	// command, so nothing can hide. A flag after the separator is still refused
+	// rather than guessed, because bd could read it while the boolean reading
+	// calls it an operand.
 	for _, argv := range [][]string{
 		{"list", "--include-infra", "--", "--force"},
-		{"list", "--include-infra", "--"},
+		{"list", "--include-infra", "--", "--db=/x"},
 	} {
 		if _, err := deploy.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
 			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
+	}
+	for _, argv := range [][]string{
+		{"list", "--include-infra", "--"},
+		{"list", "--include-infra", "--", "gt-abc"},
+	} {
+		if _, err := deploy.Authorize(TokenRead, argv); err != nil {
+			t.Errorf("Authorize(read, %q) = %v, want it placed with only operands after the separator", argv, err)
 		}
 	}
 
@@ -350,6 +359,52 @@ func TestUnknownCommandFlagAfterVerb(t *testing.T) {
 				t.Errorf("Authorize(read, %q) matched %q, want list", tc.argv, v.Name())
 			}
 		})
+	}
+}
+
+// TestPolicyShowFlagsPlaced: show's boolean command flags (gt-1s9gas) may come
+// before "--", which ends the options so the id after it is an operand.
+func TestPolicyShowFlagsPlaced(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+
+	for _, flag := range []string{"--include-comments", "--include-dependents", "--brief-deps"} {
+		argv := []string{"show", "--json", flag, "--", "gt-x"}
+		v, err := p.Authorize(TokenRead, argv)
+		if err != nil {
+			t.Fatalf("Authorize(read, %q) = %v, want it placed as the read verb show", argv, err)
+		}
+		if v.Name() != "show" || v.Class != ClassRead {
+			t.Errorf("Authorize(read, %q) matched %q (%s), want show (read)", argv, v.Name(), v.Class)
+		}
+	}
+}
+
+// TestPolicyShowFlagsStillRefused: placing a settled boolean flag before "--"
+// still refuses a flag the policy refuses, and a value-taking flag before the
+// verb is still an error because the scan cannot tell it from a verb word.
+func TestPolicyShowFlagsStillRefused(t *testing.T) {
+	t.Parallel()
+	p := loadDeployPolicy(t)
+
+	if _, err := p.Authorize(TokenRead, []string{"show", "--include-comments", "--db=beads", "--", "gt-x"}); !errors.Is(err, ErrFlagRefused) {
+		t.Errorf("Authorize(read, show --include-comments --db=beads -- gt-x) = %v, want ErrFlagRefused", err)
+	}
+	// A refused flag after the separator could be hidden by a value-taking
+	// reading of the flag before it, so the call is refused as unplaceable.
+	if _, err := p.Authorize(TokenRead, []string{"show", "--include-comments", "--", "--db=beads", "gt-x"}); !errors.Is(err, ErrAmbiguousVerb) {
+		t.Errorf("Authorize(read, show --include-comments -- --db=beads gt-x) = %v, want ErrAmbiguousVerb", err)
+	}
+	// Before the verb is settled an unknown flag could be taking the next word
+	// as its value, so a value-taking command flag is refused rather than read
+	// as boolean.
+	for _, argv := range [][]string{
+		{"--id", "gt-x", "show"},
+		{"--as-of", "main", "show"},
+	} {
+		if _, err := p.Authorize(TokenRead, argv); !errors.Is(err, ErrAmbiguousVerb) {
+			t.Errorf("Authorize(read, %q) = %v, want ErrAmbiguousVerb", argv, err)
+		}
 	}
 }
 

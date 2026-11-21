@@ -89,7 +89,7 @@ func TestServeRefusalRecordForbidden(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	log := newTestCallLogWithDir(t, dir)
-	argv := []string{"show", "--json", "--include-comments", "--", "gt-x"}
+	argv := []string{"show", "--json", "--include-comments", "--db"}
 	g := newTestGateway(t, mustStore(t), log, &stubRunner{})
 	rec := httptest.NewRecorder()
 	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: argv}, ""))
@@ -139,7 +139,7 @@ func TestServeRefusalRecordCountsStats(t *testing.T) {
 	t.Parallel()
 	log := newTestCallLog(t)
 	g := newTestGateway(t, mustStore(t), log, &stubRunner{})
-	g.ServeHTTP(httptest.NewRecorder(), execRequest(t, testReadToken, Request{Argv: []string{"show", "--json", "--include-comments", "--", "gt-x"}}, ""))
+	g.ServeHTTP(httptest.NewRecorder(), execRequest(t, testReadToken, Request{Argv: []string{"show", "--json", "--include-comments", "--db"}}, ""))
 	g.ServeHTTP(httptest.NewRecorder(), execRequest(t, "", Request{Argv: []string{"show", "gt-x"}}, ""))
 
 	got := log.Stats()
