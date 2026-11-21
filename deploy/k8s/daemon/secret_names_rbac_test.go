@@ -6,7 +6,6 @@ import (
 	"io"
 	"path/filepath"
 	"slices"
-	"sort"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -27,19 +26,6 @@ func bulkSecretVerbs(m Manifests) []string {
 		}
 	}
 	return verbs
-}
-
-// secretNameList returns the names of secrets, sorted and without duplicates,
-// as the grant's resourceNames must hold them.
-func secretNameList(secrets []Secret) []string {
-	names := make([]string, 0, len(secrets))
-	for _, s := range secrets {
-		if !slices.Contains(names, s.Metadata.Name) {
-			names = append(names, s.Metadata.Name)
-		}
-	}
-	sort.Strings(names)
-	return names
 }
 
 // TestSecretNamesSortsAndDeduplicates holds the list the grant is built from,
@@ -88,7 +74,26 @@ func TestRenderSecretNamesRoleGolden(t *testing.T) {
 	if bulk := bulkSecretVerbs(m); len(bulk) != 0 {
 		t.Errorf("the rule carries the bulk verbs %q, want only get", bulk)
 	}
-	wantNames := secretNameList(m.Secrets)
+	// The literal names are the goldenValues render's Secrets, sorted, as the
+	// role golden records them.
+	wantNames := []string{
+		"daemon-dolt-archive.key",
+		"daemon-forgejo-landing.env",
+		"daemon-forgejo-registry.env",
+		"daemon-forgejo-viewer.env",
+		"daemon-jev.env",
+		"daemon-ledger-reader.dsn",
+		"daemon-om-daemon-token",
+		"daemon-om-daemon-token.meta",
+		"daemon-openshell",
+		"daemon-promote-beads.key",
+		"daemon-promote-fractals.key",
+		"daemon-promote-gastown.key",
+		"daemon-promote-hm.key",
+		"daemon-promote-mango.key",
+		"daemon-promote-om.key",
+		"gt-cloud-check-gcp",
+	}
 	if !slices.Equal(rule.ResourceNames, wantNames) {
 		t.Errorf("the rule names %q, want the render's Secrets sorted %q", rule.ResourceNames, wantNames)
 	}
