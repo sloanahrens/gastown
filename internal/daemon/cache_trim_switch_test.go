@@ -331,21 +331,54 @@ func TestCacheTrimSwitchParksOnEveryFailure(t *testing.T) {
 
 // TestCacheTrimSwitchDoesNotParkAPendingJob pins that a Job still running when
 // the wait ends is not a failure: nothing is parked, no run is recorded and the
-// claim is not judged trimmed.
+// claim is a verdict, so the pass returns true.
 func TestCacheTrimSwitchDoesNotParkAPendingJob(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, "", map[string]cliReply{
 		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
 		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
 	})
-	if viaJob(t, f, true, map[string]string{}) {
-		t.Fatalf("a pending Job = true, want false; log: %s", f.log.String())
+	if !viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a pending Job = false, want true (a verdict); log: %s", f.log.String())
 	}
 	if f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
 		t.Errorf("a Job still running parked its claim")
 	}
 	if runs := f.jobRuns(t); len(runs) != 0 {
 		t.Errorf("a pending Job recorded %+v, want no run", runs)
+	}
+}
+
+// TestCacheTrimPendingJobStartsNothingAndDoesNotPark pins that a claim Job still
+// running at the wait is a verdict: logged as still running, no run recorded,
+// not parked, and the pass returns true. A second pass while it runs applies
+// no second Job.
+func TestCacheTrimPendingJobStartsNothingAndDoesNotPark(t *testing.T) {
+	t.Parallel()
+	replies := map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	}
+	f := newCacheTrimFixture(t, "", replies)
+	if !viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a pending Job = false, want true (a verdict); log: %s", f.log.String())
+	}
+	want := "cache trim " + cacheTrimClaimName + " in " + cacheTrimNamespace + ": the trim Job " + cacheTrimJob + " is still running; its result is read at the next pass"
+	if !strings.Contains(f.log.String(), want) || strings.Contains(f.log.String(), "failed:") {
+		t.Errorf("the log lacks the still-running line or logs a failure; log: %s", f.log.String())
+	}
+	if runs := f.jobRuns(t); len(runs) != 0 || f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+		t.Errorf("a pending Job recorded %+v or parked the claim; want neither", runs)
+	}
+	// The Job the first pass applied is running now: the next pass must read it
+	// as running and apply nothing.
+	replies[cacheTrimExistingVerb] = cliReply{stdout: cacheTrimRunningJobJSON}
+	replies[cacheTrimJobPodsVerb(cacheTrimJob)] = cacheTrimPodsReply(cacheTrimJobPodJSON("Running", diskMaintNow, "", cacheTrimForgejoPolecat))
+	if !viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a second pass while the Job runs = false, want true (a verdict); log: %s", f.log.String())
+	}
+	if applied := f.applied(t); len(applied) != 1 || applied[0] != "Job "+cacheTrimJob {
+		t.Errorf("the applied Jobs = %v; want only the first pass's %s, no second Job", applied, cacheTrimJob)
 	}
 }
 
