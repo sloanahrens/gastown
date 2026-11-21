@@ -517,8 +517,15 @@ func TestJobsDoltGC(t *testing.T) {
 			name: "no state file is no row",
 		},
 		{
-			name:        "state file with no gc recorded has no last run",
+			name:        "a state file the daemon never writes (no last_gc) is failed and unknown, not never-run",
 			state:       `{"consecutive_deferred_windows":0}`,
+			wantRow:     true,
+			wantOutcome: OutcomeFailed,
+			wantState:   StateUnknown,
+		},
+		{
+			name:        "state file with no gc recorded has no last run",
+			state:       `{"consecutive_deferred_windows":0,"last_gc":{}}`,
 			wantRow:     true,
 			wantOutcome: "",
 			wantState:   StateNeverRun,

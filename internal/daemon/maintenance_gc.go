@@ -293,6 +293,21 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return st, fmt.Errorf("parse %s: %w", maintenanceGCStateFileName, err)
 	}
+	// A file that parses but holds nothing the daemon writes ({} or null) is as
+	// unreadable as one that does not parse: the daemon always writes last_gc as
+	// an object (squash is omitted until a run is recorded), and a size is never
+	// below zero (gt-u43s2r).
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil || len(keys["last_gc"]) == 0 || string(keys["last_gc"]) == "null" {
+		return st, fmt.Errorf("parse %s: not the state object the daemon writes (last_gc is missing)", maintenanceGCStateFileName)
+	}
+	for _, sizes := range []map[string]int64{parsed.PostGCBytes, parsed.PostGCOldGenBytes} {
+		for db, n := range sizes {
+			if n < 0 {
+				return st, fmt.Errorf("parse %s: the size recorded for %s is below zero", maintenanceGCStateFileName, db)
+			}
+		}
+	}
 	for k, v := range parsed.PostGCBytes {
 		st.PostGCBytes[k] = v
 	}

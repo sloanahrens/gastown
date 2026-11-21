@@ -176,7 +176,12 @@ func TestReadMaintenanceGC(t *testing.T) {
 		},
 		{
 			name:  "state file with no gc recorded",
-			state: `{}`,
+			state: `{"last_gc":{}}`,
+		},
+		{
+			name:    "an empty object is a read error, not no gc recorded",
+			state:   `{}`,
+			wantErr: true,
 		},
 		{
 			name:        "no state file is missing",
@@ -398,6 +403,54 @@ func TestKeepStateCopyFailures(t *testing.T) {
 				t.Errorf("a partial copy was left at %s", copyPath)
 			}
 		})
+	}
+}
+
+// TestMaintenanceGCStateRefusesAFileThatIsNotTheDaemonsState: a file that parses
+// but holds nothing the daemon writes ({} or null, a size below zero, no last_gc)
+// is refused like an unparseable one, so the squash check does not read it as 'no
+// run recorded'; the file the daemon writes for 'none yet' (every always-written
+// key, empty maps, no squash key), an unknown extra key and an absent file are
+// not refused (gt-u43s2r).
+func TestMaintenanceGCStateRefusesAFileThatIsNotTheDaemonsState(t *testing.T) {
+	t.Parallel()
+	fresh, err := json.Marshal(maintenanceGCState{
+		PostGCBytes: map[string]int64{}, PostGCOldGenBytes: map[string]int64{}, ReclaimedBytes: map[string]int64{}, LastGC: map[string]time.Time{},
+		StaleGCAlerts: map[string]bool{}, ArchiveWatermarks: map[string]ArchiveWatermark{}, ArchiveEventsWatermarks: map[string]EventsArchiveWatermark{}, Squash: map[string]squashRunRecord{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		content string
+		refused bool
+	}{
+		{"an empty object", `{}`, true},
+		{"null", `null`, true},
+		{"a size below zero", `{"post_gc_bytes":{"hq":-5},"last_gc":{}}`, true},
+		{"no last_gc", `{"post_gc_bytes":{}}`, true},
+		{"last_gc null", `{"last_gc":null}`, true},
+		{"the state the daemon writes with no database yet", string(fresh), false},
+		{"an unknown extra key", `{"post_gc_bytes":{},"last_gc":{},"future_key":1}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := maintenanceGCStatePath(town)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadMaintenanceGCState(town); (err != nil) != tc.refused {
+				t.Fatalf("loading %s = %v, want refused=%v", tc.content, err, tc.refused)
+			}
+		})
+	}
+	if _, err := readMaintenanceGCState(t.TempDir()); !errors.Is(err, errMaintenanceGCStateAbsent) {
+		t.Errorf("an absent file read = %v, want errMaintenanceGCStateAbsent", err)
 	}
 }
 

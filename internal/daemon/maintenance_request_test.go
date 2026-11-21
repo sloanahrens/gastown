@@ -949,6 +949,29 @@ func TestMaintenanceRequestUnreadableStateDefers(t *testing.T) {
 	}
 }
 
+// A state file holding {} is not the daemon's: the remembered-answer read refuses
+// it like an unparseable one, so the request is answered failed and the cycle is
+// not run (gt-u43s2r).
+func TestMaintenanceRequestEmptyObjectStateDefers(t *testing.T) {
+	t.Parallel()
+	d, f := requestDaemon(t, gcTestNow)
+	recordCatchUpGC(t, d, "hq", gcTestNow.Add(-8*24*time.Hour))
+	d.lastMaintenanceRun = gcTestNow.Add(-48 * time.Hour)
+	if err := os.WriteFile(maintenanceGCStatePath(d.config.TownRoot), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRequestFile(t, d, "run-empty", gcTestNow)
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Fatalf("gc calls = %v over a {} state file, want none", f.gcCalls)
+	}
+	if res := readRequestResult(t, d); res.RunID != "run-empty" || res.Outcome != "failed" || !strings.Contains(res.Detail, "maintenance state") {
+		t.Errorf("result = %+v, want run-empty failed naming the unreadable state", res)
+	}
+}
+
 // Every way an answer can fail leaves an alarm in the log; a silent failure
 // would read exactly like an answered request.
 func TestMaintenanceRequestAnswerFailuresAreLogged(t *testing.T) {

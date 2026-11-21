@@ -202,6 +202,29 @@ func TestCheckStaleMaintenanceGCRaisesOneKeyAndClearsItAfterAGc(t *testing.T) {
 	}
 }
 
+// A file that parses but holds nothing the daemon writes ({}) is unreadable here
+// too: the check raises the one unreadable-state item and judges no database
+// (gt-u43s2r).
+func TestCheckStaleMaintenanceGCEmptyObjectStateIsTheUnreadableItem(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d, rec := staleGCTestDaemon(t, town)
+	discoverStaleGCDatabases(d, "gt", "hq")
+	path := maintenanceGCStatePath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.checkStaleMaintenanceGC(gcTestNow)
+
+	if esc := rec.Escalations(); len(esc) != 1 || esc[0].Escalation.Fingerprint != doltGCStateUnreadableAlertKey {
+		t.Fatalf("escalations = %+v, want the one unreadable-state item", esc)
+	}
+}
+
 func TestCheckStaleMaintenanceGCUnreadableStateIsOneItem(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
