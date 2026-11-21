@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -23,8 +24,13 @@ import (
 // by its seats. A failed read is kept with them, so every seat of the rig gets
 // the same answer.
 type overrunEscalationReader struct {
-	d      *Daemon
+	d *Daemon
+	// mu guards raised: the seats of a pass are read on up to overrunReadPoolSize
+	// goroutines (overrunReadPool), and two seats of one rig write the same entry.
+	mu     sync.Mutex
 	raised map[string]overrunRaised
+	// readRaised reads a rig's escalations; nil reads them for real. Tests set it.
+	readRaised func(rig string) ([]patrolscan.Escalation, error)
 }
 
 // overrunRaised is one rig's escalations as this cycle read them, or the error
@@ -42,10 +48,15 @@ func newOverrunEscalationReader(d *Daemon) *overrunEscalationReader {
 // rigRaised returns the rig's escalations as this cycle reads them, read once
 // and kept for the cycle's other seats of the rig.
 func (r *overrunEscalationReader) rigRaised(rig string) overrunRaised {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	raised, ok := r.raised[rig]
 	if !ok {
-		h := &patrolScanHost{d: r.d}
-		escalations, err := h.PolecatEscalations(rig)
+		read := r.readRaised
+		if read == nil {
+			read = (&patrolScanHost{d: r.d}).PolecatEscalations
+		}
+		escalations, err := read(rig)
 		raised = overrunRaised{escalations: escalations, err: err}
 		r.raised[rig] = raised
 	}

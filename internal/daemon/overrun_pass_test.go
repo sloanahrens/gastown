@@ -469,6 +469,8 @@ func TestOverrunPassStats(t *testing.T) {
 		var got passStats
 		calls := 0
 		s := f.seams()
+		// The fake clock is shared, so the reads run one at a time (gt-5ngy14).
+		s.readPoolSize = 1
 		s.passDone = func(stats passStats) { calls++; got = stats }
 		d.runOverrunGuard(s)
 

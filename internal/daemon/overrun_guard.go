@@ -378,6 +378,11 @@ type overrunSeams struct {
 	// once the bead is handed back, in the give-up branch as well, and its
 	// failure is logged and never fails the stop. nil records nothing.
 	spanEnd func(seat overrunSeat, at time.Time) error
+
+	// readPoolSize is TEST-ONLY: how many per-seat reads run at once, 0 meaning
+	// overrunReadPoolSize. Production never sets it. A test whose fake clock is shared by
+	// the seats' reads sets 1 so their times are not mixed.
+	readPoolSize int
 }
 
 // overrunSeatReads is one seat's per-seat reads for a pass (overrunReadSeat):
@@ -690,7 +695,18 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		return
 	}
 
-	for _, seat := range seats {
+	// Every working seat's state and per-seat reads are made before any seat is
+	// judged: the reads cross the sandbox transport, so they run overrunReadPoolSize at
+	// a time (overrunReadPool) and each answer waits in its seat's slot. A seat that is
+	// skipped, or whose state cannot be read, leaves its slot empty and makes no read.
+	type seatSlot struct {
+		take  bool
+		slung time.Time
+		state overrunState
+		reads overrunSeatReads
+	}
+	slots := make([]seatSlot, len(seats))
+	for i, seat := range seats {
 		if seat.Submitted || seat.Parked || (seat.Scheduled && scheduledStopAfter <= 0) || seat.Bead == "" || resumed[seat.Bead] {
 			continue
 		}
@@ -707,9 +723,27 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			d.logger.Printf("overrun_guard: %s: cannot read state for %s: %v", who, seat.Bead, err)
 			continue
 		}
-		// The three per-seat reads of the pass, made once for a seat whose state
-		// is known to be readable, and folded into the pass's own stats.
-		reads := overrunReadSeat(s, seat)
+		slots[i] = seatSlot{take: true, slung: slung, state: state}
+	}
+	poolSize := s.readPoolSize
+	if poolSize == 0 {
+		poolSize = overrunReadPoolSize
+	}
+	overrunReadPool(len(seats), poolSize, func(i int) {
+		if slots[i].take {
+			slots[i].reads = overrunReadSeat(s, seats[i])
+		}
+	})
+
+	for i, seat := range seats {
+		if !slots[i].take {
+			continue
+		}
+		who := seat.Rig + "/" + seat.Polecat
+		slung, state := slots[i].slung, slots[i].state
+		// The three per-seat reads of the pass, made before the loop for a seat whose
+		// state is known to be readable, and folded into the pass's own stats.
+		reads := slots[i].reads
 		stats.add(seat, reads)
 		// A seat whose ESCALATED stop was answered could not resume before the
 		// answer, so its clock starts there (gt-bdlg6o). An answer that cannot be

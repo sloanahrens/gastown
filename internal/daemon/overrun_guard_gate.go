@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -55,6 +56,10 @@ type overrunGateReader struct {
 	// client that routes. Tests set it.
 	sandboxReads sandboxSessionReads
 
+	// mu guards the per-cycle reads below: the seats of a pass are read on up to
+	// overrunReadPoolSize goroutines (overrunReadPool), so each lazy read is made once
+	// under it and every seat gets the same answer.
+	mu sync.Mutex
 	// The per-cycle reads, each kept with the error its read failed with so
 	// every seat on this tick gets the same answer.
 	slotReport  slot.Report
@@ -89,6 +94,8 @@ type sandboxSessionReads interface {
 // cannot be read is an error, so the caller counts all of the seat's time (the
 // direction that stops) instead of reading the wrong table.
 func (r *overrunGateReader) sandboxed(sessionName string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if a, ok := r.sandboxes[sessionName]; ok {
 		return a.on, a.err
 	}
@@ -140,6 +147,8 @@ func (r *overrunGateReader) running(seat overrunSeat) (bool, error) {
 // shells out to `docker ps`, says nothing about which seat holds what, and
 // would be paid for on every tick.
 func (r *overrunGateReader) Slots() (slot.Report, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.slotLoaded {
 		r.slotLoaded = true
 		r.slotReport, r.slotErr = slot.StatusPoolLocksOnly(r.d.config.TownRoot, r.pool)
@@ -176,6 +185,8 @@ func (r *overrunGateReader) PanePIDs(sessionName string) ([]int, error) {
 	if r.panes != nil {
 		return r.panes(sessionName)
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.panesLoaded {
 		r.panesLoaded = true
 		ctx, cancel := context.WithTimeout(context.Background(), overrunGateReadTimeout)
@@ -195,6 +206,8 @@ func (r *overrunGateReader) PanePIDs(sessionName string) ([]int, error) {
 
 // gateInvocations is the rig's gate pairs, read once per rig per cycle.
 func (r *overrunGateReader) gateInvocations(rigName string) []polecat.Invocation {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if gates, ok := r.gates[rigName]; ok {
 		return gates
 	}
@@ -223,6 +236,8 @@ func (r *overrunGateReader) SessionProcessTable(sessionName string) ([]polecat.P
 
 // ProcessTable reads the whole process table once per cycle.
 func (r *overrunGateReader) ProcessTable() ([]polecat.Proc, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if !r.procsLoaded {
 		r.procsLoaded = true
 		r.procs, r.procErr = r.readProcessTable()

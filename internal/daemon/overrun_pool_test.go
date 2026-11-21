@@ -3,10 +3,15 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/patrolscan"
 )
 
 // The pool never has more than its limit of reads in flight and runs each job once
@@ -147,5 +152,122 @@ func runPoolBounded(t *testing.T, row string, n, limit int, read func(i int)) {
 		}
 	case <-ctx.Done():
 		t.Fatalf("overrunReadPool (%s) did not return within %s", row, workspaceHangGuard)
+	}
+}
+
+// A pass reads its seats through the pool before it judges any: with 12 seats whose gate
+// reads block until released, 4 reads are in flight and no seat has been judged yet
+// (gt-5ngy14). Every wait is bounded, so a pass that reads one seat at a time fails here
+// instead of hanging.
+func TestOverrunPassSeatLoopPooled(t *testing.T) {
+	t.Parallel()
+	const seatCount = 12
+	seats := make([]overrunSeat, seatCount)
+	for i := range seats {
+		seats[i] = overrunSeat{Rig: "gastown", Polecat: fmt.Sprintf("p%02d", i), Bead: fmt.Sprintf("gt-pool%02d", i)}
+	}
+	f := newOverrunFake(defaultOverrunGuardNudgeAfter+time.Minute, seats...)
+	s := f.seams()
+	var judged, inFlight, maxInFlight atomic.Int32
+	started := make(chan struct{}, seatCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAll)
+	s.gateRunning = func(overrunSeat) (bool, error) {
+		n := inFlight.Add(1)
+		for {
+			m := maxInFlight.Load()
+			if n <= m || maxInFlight.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		inFlight.Add(-1)
+		return false, nil
+	}
+	nudged := s.nudged
+	s.nudged = func(seat overrunSeat, at time.Time) {
+		judged.Add(1)
+		if nudged != nil {
+			nudged(seat, at)
+		}
+	}
+	d, _ := newOverrunDaemon(t, false)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.runOverrunGuard(s)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
+	for range overrunReadPoolSize {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatalf("fewer than %d seat reads in flight within %s: the seats are read one at a time", overrunReadPoolSize, workspaceHangGuard)
+		}
+	}
+	if n := judged.Load(); n != 0 {
+		t.Errorf("%d seats judged while reads were still in flight, want none", n)
+	}
+	releaseAll()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("the pass did not finish within %s", workspaceHangGuard)
+	}
+	if m := maxInFlight.Load(); m != overrunReadPoolSize {
+		t.Errorf("%d seat reads in flight at most, want %d", m, overrunReadPoolSize)
+	}
+}
+
+// The production readers behind the seams keep per-cycle caches (a rig's escalations, the
+// process table, the pane list, the rig's gate pairs, the sandbox answer), and the seats
+// of a pass are read on overrunReadPoolSize goroutines. Several seats of ONE rig, read
+// with the default pool, must not write those caches at the same time (gt-5ngy14): run
+// under -race, a cache without its lock is a data race, and a plain map written by two
+// seats ends the process. The fake reads are slow enough to overlap on the test's yields.
+func TestOverrunPassSeatReadersSharedCaches(t *testing.T) {
+	t.Parallel()
+	const seatCount = 12
+	seats := make([]overrunSeat, seatCount)
+	for i := range seats {
+		seats[i] = overrunSeat{Rig: "gastown", Polecat: fmt.Sprintf("p%02d", i), Bead: fmt.Sprintf("gt-cache%02d", i), EscalatedEnd: overrunSlung}
+	}
+	f := newOverrunFake(defaultOverrunGuardNudgeAfter-time.Minute, seats...)
+	d, _ := newOverrunDaemon(t, false)
+	gate := newOverrunGateReader(d)
+	gate.run = func(*exec.Cmd) ([]byte, []byte, error) {
+		runtime.Gosched()
+		return []byte("  PID  PPID ARGS\n"), nil, nil
+	}
+	gate.panes = func(string) ([]int, error) { runtime.Gosched(); return nil, nil }
+	var raised atomic.Int32
+	esc := newOverrunEscalationReader(d)
+	esc.readRaised = func(string) ([]patrolscan.Escalation, error) {
+		raised.Add(1)
+		runtime.Gosched()
+		return nil, nil
+	}
+	s := f.seams()
+	s.gateRunning = gate.running
+	s.escalationWaiting = esc.waiting
+	s.escalationAnsweredAt = esc.answeredAt
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.runOverrunGuard(s)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatalf("the pass did not finish within %s", workspaceHangGuard)
+	}
+	if n := raised.Load(); n != 1 {
+		t.Errorf("the rig's escalations were read %d times, want once for its %d seats", n, seatCount)
 	}
 }
