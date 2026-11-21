@@ -217,6 +217,11 @@ type Step struct {
 	// only a failure whose output names this source; any other failure is
 	// still the run's (gt-4lj2q).
 	MissingSourcePath string
+	// SkipWhen names text whose presence in a failed step's output, compared
+	// case-insensitively, the step declares is not a failure: the mirror clone
+	// reports an existing directory on a later launch. Empty tolerates none;
+	// any other failure of the step still stops the run (gt-4dx0su).
+	SkipWhen string
 }
 
 // missingSourceMarker is what a failed copy prints when its source is not
@@ -238,6 +243,16 @@ func (s Step) MissingSource(output []byte) bool {
 		}
 	}
 	return false
+}
+
+// SkippedFailure reports whether a failed step's output holds the text its
+// SkipWhen declares is not a failure, compared case-insensitively. A step that
+// names no text, or whose output does not hold it, reports false.
+func (s Step) SkippedFailure(output []byte) bool {
+	if s.SkipWhen == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(output)), strings.ToLower(s.SkipWhen))
 }
 
 // namesPath reports whether line names path as a whole path, rather than a

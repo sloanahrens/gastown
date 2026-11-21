@@ -255,6 +255,42 @@ func TestSweepSyncCopyFailureTailIsLastEightLines(t *testing.T) {
 	}
 }
 
+// TestStepSkipWhen: a step that names a SkipWhen tolerates only a failure whose
+// output holds that text, case-insensitively, and the run goes on; any other
+// failure stops it, and a step that names nothing is unchanged (gt-i5h7vc).
+func TestStepSkipWhen(t *testing.T) {
+	t.Parallel()
+	const skip = "already exists and is not an empty directory"
+	for _, tc := range []struct {
+		name     string
+		step     Step
+		output   string
+		wantCode int
+	}{
+		{"the named failure is skipped", Step{Argv: []string{"clone"}, SkipWhen: skip}, "fatal: destination path 'dst' " + skip + "\n", 0},
+		{"another failure stops the run", Step{Argv: []string{"clone"}, SkipWhen: skip}, "fatal: unable to access 'src'\n", 128},
+		{"no SkipWhen is unchanged", Step{Argv: []string{"clone"}}, "fatal: destination path 'dst' " + skip + "\n", 128},
+		{"the match ignores case", Step{Argv: []string{"clone"}, SkipWhen: strings.ToUpper(skip)}, "fatal: destination path 'dst' " + skip + "\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := &fakeSteps{answer: func(argv []string) stepAnswer {
+				if argv[0] == "clone" {
+					return stepAnswer{stderr: tc.output, err: exitError{code: 128}}
+				}
+				return stepAnswer{}
+			}}
+			out, code := RunSteps(context.Background(), newPauseClock(), fake.run, []Step{tc.step, {Argv: []string{"next"}}})
+			if ran := verbCount(fake.calls, "next") == 1; ran != (tc.wantCode == 0) || code != tc.wantCode {
+				t.Errorf("next step ran = %v, exit code = %d, want the run to go on = %v:\n%s", ran, code, tc.wantCode == 0, out)
+			}
+			if tc.wantCode != 0 && !strings.Contains(out, "clone failed (exit 128)") {
+				t.Errorf("the output lacks the step's own failure line:\n%s", out)
+			}
+		})
+	}
+}
+
 // TestSweepSyncCopyFailureRedactsTokens: a token-looking value in the copy's
 // output is left out of the failure message, and the rest of its line is kept.
 func TestSweepSyncCopyFailureRedactsTokens(t *testing.T) {
