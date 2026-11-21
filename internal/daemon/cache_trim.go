@@ -1225,7 +1225,7 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 // condition, since a Job that fails never completes and a complete wait alone
 // would hold the pass to its bound. The first to succeed decides: complete
 // reports true, and failed returns an error naming the Job's last log line. The
-// other wait is cancelled when this returns.
+// other wait is canceled when this returns.
 //
 // wait is the bound itself; a wait of zero or less is refused, since kubectl
 // reads --timeout=0s as no limit at all.
@@ -1261,8 +1261,8 @@ func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jo
 		if o.condition == "complete" {
 			return true, nil
 		}
-		// The Job failed: the other wait is cancelled now. The log is read on ctx,
-		// which is not cancelled, so the read runs on its own.
+		// The Job failed: the other wait is canceled now. The log is read on ctx,
+		// which is not canceled, so the read runs on its own.
 		cancel()
 		return false, d.cacheTrimFailedJobError(ctx, kubeconfig, namespace, jobName)
 	}
