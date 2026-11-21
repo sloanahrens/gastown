@@ -232,8 +232,8 @@ func TestReapReturnsPreservedRef(t *testing.T) {
 }
 
 // A nuke names no ref when it pushed nothing: the tip was already reachable, or
-// the sandbox seat's branch sits on origin. A refused or failed nuke returns its
-// error and no ref, even with a push line in its output (gt-edepiy).
+// the sandbox seat's branch sits on origin. A refused, failed or unstarted nuke
+// returns its error and no ref, even with a push line in its output (gt-edepiy).
 func TestReapReturnsNoRefWithoutPush(t *testing.T) {
 	t.Parallel()
 	push, err := os.ReadFile(reapNukePreserved)
@@ -241,19 +241,24 @@ func TestReapReturnsNoRefWithoutPush(t *testing.T) {
 		t.Fatalf("reading the captured nuke output: %v", err)
 	}
 	rows := []struct {
-		name    string
-		out     string
-		code    int
-		wantErr bool
+		name     string
+		out      string
+		code     int
+		noBinary bool
+		wantErr  bool
 	}{
-		{"already reachable", "  ✓ polecat/onyx/gt-d0glu1+mwnrm11d already reachable from origin/main — nothing to preserve\n", 0, false},
-		{"sandbox seat on origin", "  ✓ the seat's branch is on origin at 301dec4; the host's local ref is a placeholder\n", 0, false},
-		{"refused", string(push), nukeRefusedExitCode, true},
-		{"failed", string(push), 1, true},
+		{"already reachable", "  ✓ polecat/onyx/gt-d0glu1+mwnrm11d already reachable from origin/main — nothing to preserve\n", 0, false, false},
+		{"sandbox seat on origin", "  ✓ the seat's branch is on origin at 301dec4; the host's local ref is a placeholder\n", 0, false, false},
+		{"refused", string(push), nukeRefusedExitCode, false, true},
+		{"failed", string(push), 1, false, true},
+		{"no gt binary", string(push), 0, true, true},
 	}
 	for _, row := range rows {
 		gt := newFakeCLI(func([]string) cliReply { return cliReply{stdout: row.out, stderr: "blocked", code: row.code} })
 		h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+		if row.noBinary {
+			h.d.gtPath = ""
+		}
 		ref, err := h.Reap("gastown", "onyx")
 		if (err != nil) != row.wantErr {
 			t.Errorf("%s: Reap error = %v, want error %v", row.name, err, row.wantErr)
