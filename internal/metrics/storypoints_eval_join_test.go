@@ -249,20 +249,20 @@ func TestStoryPointsEvalJoinCountsMalformedLogLines(t *testing.T) {
 	}
 }
 
-// evalJoinAppendRaw appends line to the rig's landing ledger as a torn write
-// leaves it: bytes the landing reader cannot decode.
-func evalJoinAppendRaw(t *testing.T, town, rig, line string) {
+// evalJoinAppendRaw appends line to a file under the town's .runtime as a torn
+// write leaves it: bytes its reader cannot decode.
+func evalJoinAppendRaw(t *testing.T, town, rel, line string) {
 	t.Helper()
-	path := filepath.Join(town, ".runtime", "landings", rig+".jsonl")
+	path := filepath.Join(town, ".runtime", rel)
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		t.Fatalf("open the %s ledger: %v", rig, err)
+		t.Fatalf("open %s: %v", rel, err)
 	}
 	if _, err := f.WriteString(line + "\n"); err != nil {
 		t.Fatalf("write the torn line: %v", err)
 	}
 	if err := f.Close(); err != nil {
-		t.Fatalf("close the %s ledger: %v", rig, err)
+		t.Fatalf("close %s: %v", rel, err)
 	}
 }
 
@@ -272,7 +272,7 @@ func TestStoryPointsEvalJoinCountsMalformedLandingLines(t *testing.T) {
 	t.Parallel()
 	town := evalJoinTown(t)
 	evalJoinWriteLandings(t, town, "gastown", evalJoinLanding("gt-a", 600, evalJoinAt(1), false, false))
-	evalJoinAppendRaw(t, town, "gastown", "not a landing")
+	evalJoinAppendRaw(t, town, "landings/gastown.jsonl", "not a landing")
 	evalJoinAppendEstimate(t, town, evalJoinEstimate("gt-a", 10, floatPtr(10), nil, nil))
 
 	_, counts, err := joinEval(town)
@@ -281,6 +281,59 @@ func TestStoryPointsEvalJoinCountsMalformedLandingLines(t *testing.T) {
 	}
 	if want := (EvalCounts{Records: 1, Joined: 1, MalformedLanding: 1}); counts != want {
 		t.Errorf("counts = %+v, want %+v", counts, want)
+	}
+}
+
+// TestStoryPointsEvalJoinCountsMalformedLines pins how the two malformed counts
+// are taken: a torn landing line among good ones is counted and the good ones
+// still join, each torn line counts, the counts of two ledgers add, and a torn
+// line in one input never lands in the other's count.
+func TestStoryPointsEvalJoinCountsMalformedLines(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		ledgers map[string][]string // rig -> its lines: a bead id, or "torn"
+		logTorn int                 // torn lines appended to the estimate log
+		want    EvalCounts
+	}{
+		{"one torn among good", map[string][]string{"gastown": {"gt-a", "torn", "gt-b"}}, 0, EvalCounts{Records: 2, Joined: 2, MalformedLanding: 1}},
+		{"two torn", map[string][]string{"gastown": {"gt-a", "torn", "torn"}}, 0, EvalCounts{Records: 1, Joined: 1, MalformedLanding: 2}},
+		{"torn log only", map[string][]string{"gastown": {"gt-a"}}, 1, EvalCounts{Records: 1, Joined: 1, MalformedLog: 1}},
+		{"torn in both", map[string][]string{"gastown": {"gt-a", "torn"}}, 1, EvalCounts{Records: 1, Joined: 1, MalformedLog: 1, MalformedLanding: 1}},
+		{"two ledgers add", map[string][]string{"gastown": {"gt-a", "torn"}, "beaver": {"gt-b", "torn", "torn"}}, 0, EvalCounts{Records: 2, Joined: 2, MalformedLanding: 3}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := evalJoinTown(t)
+			for rig, lines := range tc.ledgers {
+				var b bytes.Buffer
+				for i, line := range lines {
+					if line == "torn" {
+						b.WriteString("not a landing\n")
+						continue
+					}
+					data, err := json.Marshal(evalJoinLanding(line, 600, evalJoinAt(i+1), false, false))
+					if err != nil {
+						t.Fatalf("marshal landing %s: %v", line, err)
+					}
+					b.Write(append(data, '\n'))
+					evalJoinAppendEstimate(t, town, evalJoinEstimate(line, 10, floatPtr(10), nil, nil))
+				}
+				if err := os.WriteFile(filepath.Join(town, ".runtime", "landings", rig+".jsonl"), b.Bytes(), 0o600); err != nil {
+					t.Fatalf("write %s ledger: %v", rig, err)
+				}
+			}
+			for range tc.logTorn {
+				evalJoinAppendRaw(t, town, "storypoints/estimates.jsonl", "not an estimate")
+			}
+			_, counts, err := joinEval(town)
+			if err != nil {
+				t.Fatalf("joinEval: %v", err)
+			}
+			if counts != tc.want {
+				t.Errorf("counts = %+v, want %+v", counts, tc.want)
+			}
+		})
 	}
 }
 
