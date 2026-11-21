@@ -376,8 +376,8 @@ func TestCacheTrimPendingJobStartsNothingAndDoesNotPark(t *testing.T) {
 	}
 	// The Job the first pass applied is running now: the next pass must read it
 	// as running and apply nothing.
-	replies[cacheTrimExistingVerb] = cliReply{stdout: cacheTrimRunningJobJSON}
-	replies[cacheTrimJobPodsVerb(cacheTrimJob)] = cacheTrimPodsReply(cacheTrimJobPodJSON("Running", diskMaintNow, "", cacheTrimForgejoPolecat))
+	f.setOverride(cacheTrimExistingVerb, cliReply{stdout: cacheTrimRunningJobJSON})
+	f.setOverride(cacheTrimJobPodsVerb(cacheTrimJob), cacheTrimPodsReply(cacheTrimJobPodJSON("Running", diskMaintNow, "", cacheTrimForgejoPolecat)))
 	if !viaJob(t, f, true, map[string]string{}) {
 		t.Fatalf("a second pass while the Job runs = false, want true (a verdict); log: %s", f.log.String())
 	}
