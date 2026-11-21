@@ -960,6 +960,57 @@ func TestServePushListenerRoutes(t *testing.T) {
 	}
 }
 
+// TestServePushListenerRefuses: the push listener authenticates as the gateway
+// does, so PUT /v1/workspace with no token is 401 and with the read token, which
+// may not write, is 403. The gateway is the production one; only the listener is
+// in memory, so a regression that drops either check fails here.
+func TestServePushListenerRefuses(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+
+	sc := newServeTestConfig(t)
+	mainPl, pushPl := newPipeListener(), newPipeListener()
+	sc.listen = listenByAddr(sc.addr, mainPl, sc.pushAddr, pushPl)
+	pushClient := dialClient(t, pushPl)
+
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan error, 1)
+	go func() { served <- serve(ctx, sc) }()
+	waitFor(t, bound, "both listeners accept", func() bool {
+		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+	})
+
+	body := pushBody(t)
+	cases := []struct {
+		name  string
+		token string
+		want  int
+	}{
+		{name: "no token", token: "", want: http.StatusUnauthorized},
+		{name: "read token may not write", token: testReadToken, want: http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := send(bound, pushClient, http.MethodPut, "/v1/workspace", tc.token, strings.NewReader(body))
+			if got.err != nil || got.status != tc.want {
+				t.Fatalf("push listener PUT /v1/workspace with %s = %d (%v), want %d; body %s", tc.name, got.status, got.err, tc.want, got.body)
+			}
+		})
+	}
+
+	stop()
+	select {
+	case err := <-served:
+		if err != nil {
+			t.Errorf("serve after the drain = %v, want nil", err)
+		}
+	case <-bound.Done():
+		t.Fatal("serve did not return after the drain")
+	}
+}
+
 // TestServePushListenerOff: --push-addr "" binds the main listener only.
 func TestServePushListenerOff(t *testing.T) {
 	t.Parallel()
