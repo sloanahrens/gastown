@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/storypoints"
 	"github.com/steveyegge/gastown/internal/storypoints/estimate"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1712,13 +1714,66 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 		code = specLintExitNeedsPlan
 	}
 	// Advice and the hint are asked for only after the code is decided: both
-	// are advice, so neither changes the verdict line nor the exit code.
+	// are advice, so neither changes the verdict line nor the exit code. The
+	// size advice reads the spec after --estimate's run, so the sp-large label
+	// that run wrote — or removed — is the one the author is told about
+	// (gt-9poneu).
 	report.Advice = specdispatch.Advice(spec)
+	if advice := specLintSizeAdvice(spec); advice != "" {
+		report.Advice = append(report.Advice, advice)
+	}
 	report.Hints = specSlowHints(spec, hint)
 	if !asJSON {
 		writeSpecHints(errOut, report.Hints)
 	}
 	return verdict, emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
+}
+
+// specEstimateMinutesLabelPrefix is the label prefix the estimate writes a
+// bead's minutes under.
+const specEstimateMinutesLabelPrefix = "sp-minutes:"
+
+// specLintSizeAdvice is the advisory line a bead the estimate flagged sp-large
+// gets: the flag marks an estimate that predicts a landing over
+// storypoints.SizeFlagLines added lines, and the line names the minutes the
+// estimate was made from so a filer sees both where they file (gt-9poneu).
+// Empty when the bead carries no sp-large label, so a bead the
+// estimate did not flag prints nothing extra. It is advice: it changes no
+// verdict and no exit code.
+func specLintSizeAdvice(s specdispatch.Spec) string {
+	if !s.HasLabel(specEstimateSizeLabel) {
+		return ""
+	}
+	estimate := "estimate unreadable"
+	if minutes, ok := specLintSizeMinutes(s.Labels); ok {
+		estimate = "estimate " + strconv.FormatFloat(minutes, 'f', -1, 64) + " min"
+	}
+	return fmt.Sprintf("predicted to land over %d added lines (%s); consider splitting by file group", storypoints.SizeFlagLines, estimate)
+}
+
+// specLintSizeMinutes returns the one sp-minutes:<n> value among labels. A
+// label with that prefix that does not parse, or two labels that disagree,
+// yields false: the advice names the estimate unreadable rather than picking a
+// number the bead never declared, the reading the lint's own size gate makes
+// (storyPointsMinutes in internal/specdispatch).
+func specLintSizeMinutes(labels []string) (float64, bool) {
+	found := false
+	var minutes float64
+	for _, raw := range labels {
+		l := strings.TrimSpace(raw)
+		if len(l) < len(specEstimateMinutesLabelPrefix) || !strings.EqualFold(l[:len(specEstimateMinutesLabelPrefix)], specEstimateMinutesLabelPrefix) {
+			continue
+		}
+		parsed, err := storypoints.ParseLabel(strings.ToLower(l))
+		if err != nil || parsed.Kind != storypoints.KindMinutes {
+			return 0, false
+		}
+		if found && parsed.Minutes != minutes {
+			return 0, false
+		}
+		found, minutes = true, parsed.Minutes
+	}
+	return minutes, found
 }
 
 // runSpecLintAt is the gt spec lint run with the town root and clock given, so
