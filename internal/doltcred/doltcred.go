@@ -16,10 +16,15 @@ import (
 	"strings"
 )
 
-// Credential is a Dolt user and password read from a credential file.
+// Credential is a Dolt user and password read from a credential file. The
+// password is a Secret, so a Credential held in an unexported struct field,
+// where fmt cannot call a method, still prints an address and never the bytes;
+// read the password with Password.Reveal() at the point of use and never keep
+// it in a field or a log line. A dumper that follows pointers by reflection
+// (go-spew style) would still read the bytes: fmt, the encoders and slog do not.
 type Credential struct {
 	User     string
-	Password string
+	Password Secret
 }
 
 // redacted stands in for the password in every rendering of a Credential.
@@ -31,10 +36,9 @@ func (c Credential) String() string {
 }
 
 // Format implements fmt.Formatter and writes the same redaction for every verb.
-// Without it fmt reaches the Password field directly for %#v, %d and any other
-// verb that does not call String, so a Credential never prints its password
-// however it is formatted, whether directly, through a pointer, as a struct
-// field or in a slice.
+// Without it fmt would walk the fields for %#v, %d and any other verb that does
+// not call String, so every verb prints the same redaction, directly, through a
+// pointer, as an exported struct field or in a slice.
 func (c Credential) Format(f fmt.State, _ rune) {
 	_, _ = io.WriteString(f, c.String())
 }
@@ -143,7 +147,7 @@ func parse(path string, r io.Reader) (Credential, error) {
 				return Credential{}, fmt.Errorf("%s:%d: the credential file sets \"password\" twice", path, n)
 			}
 			seenPassword = true
-			c.Password = value
+			c.Password = NewSecret(value)
 		default:
 			return Credential{}, fmt.Errorf("%s:%d: a credential line uses an unknown key, and only user and password are read", path, n)
 		}

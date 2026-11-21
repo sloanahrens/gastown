@@ -11,13 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
-
-func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
-}
 
 // writeCredential writes body as a 0600 credential file in a temp dir and
 // returns its path.
@@ -40,27 +34,27 @@ func TestReadReadsCredential(t *testing.T) {
 		{
 			name: "user and password",
 			body: "user=gt\npassword=hunter2\n",
-			want: Credential{User: "gt", Password: "hunter2"},
+			want: Credential{User: "gt", Password: NewSecret("hunter2")},
 		},
 		{
 			name: "comments and blank lines",
 			body: "# the dolt user\n\nuser=gt\n\n  # an indented comment\npassword=p=a=s=s\n",
-			want: Credential{User: "gt", Password: "p=a=s=s"},
+			want: Credential{User: "gt", Password: NewSecret("p=a=s=s")},
 		},
 		{
 			name: "value keeps spaces up to the line end",
 			body: "user=gt\npassword=  two  spaces  \n",
-			want: Credential{User: "gt", Password: "  two  spaces  "},
+			want: Credential{User: "gt", Password: NewSecret("  two  spaces  ")},
 		},
 		{
 			name: "CRLF line ends",
 			body: "user=gt\r\npassword=secret\r\n",
-			want: Credential{User: "gt", Password: "secret"},
+			want: Credential{User: "gt", Password: NewSecret("secret")},
 		},
 		{
 			name: "no trailing newline",
 			body: "user=gt\npassword=secret",
-			want: Credential{User: "gt", Password: "secret"},
+			want: Credential{User: "gt", Password: NewSecret("secret")},
 		},
 	}
 	for _, tt := range tests {
@@ -70,8 +64,8 @@ func TestReadReadsCredential(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Read: %v", err)
 			}
-			if got != tt.want {
-				t.Fatalf("Read = %+v, want %+v", got, tt.want)
+			if got.User != tt.want.User || got.Password.Reveal() != tt.want.Password.Reveal() {
+				t.Fatalf("Read = %+v (password %q), want %+v (password %q)", got, got.Password.Reveal(), tt.want, tt.want.Password.Reveal())
 			}
 		})
 	}
@@ -194,7 +188,7 @@ func TestReadRefusesAFileItCannotOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Read failed on a file root can read: %v", err)
 		}
-		if got.Password != secret {
+		if got.Password.Reveal() != secret {
 			t.Fatalf("Read = %+v, want the password root can read", got)
 		}
 		return
@@ -255,28 +249,47 @@ func TestReadRefusesAnOverlongLine(t *testing.T) {
 // leakSecret is distinctive enough that a substring match cannot be an accident.
 const leakSecret = "pw-9f3c1d7a-leak-canary"
 
+// credHolder and the types after it hold a Credential where fmt cannot call a
+// method on it: an unexported field, which fmt reaches by reflection.
+type credHolder struct{ c Credential }
+
+type credPtrHolder struct{ c *Credential }
+
+type credNestedHolder struct{ inner credHolder }
+
 // TestCredentialFormattingHidesPassword formats a Credential with every verb a
-// log line can reach, directly and through a pointer, a struct field and a
-// slice, and fails on any output that holds the password or drops the user.
+// log line can reach: directly, through a pointer, as an exported field, in an
+// unexported field (the case fmt cannot reach a method for), as a pointer in an
+// unexported field, in a holder inside a holder, and in a slice and a map. It
+// fails on any output that holds the password or its hex form, or drops the
+// user.
 func TestCredentialFormattingHidesPassword(t *testing.T) {
 	t.Parallel()
-	c := Credential{User: "gt-user", Password: leakSecret}
+	c := Credential{User: "gt-user", Password: NewSecret(leakSecret)}
 	type holder struct{ Cred Credential }
 	values := map[string]any{
-		"value":   c,
-		"pointer": &c,
-		"field":   holder{Cred: c},
-		"slice":   []Credential{c},
+		"value":                      c,
+		"pointer":                    &c,
+		"exported field":             holder{Cred: c},
+		"unexported field":           credHolder{c: c},
+		"pointer in unexported":      credPtrHolder{c: &c},
+		"holder in a holder":         credNestedHolder{inner: credHolder{c: c}},
+		"slice":                      []Credential{c},
+		"slice of unexported fields": []credHolder{{c: c}},
+		"map of unexported fields":   map[string]credHolder{"k": {c: c}},
 	}
-	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x"} {
+	user, secretHex := "gt-user", hex.EncodeToString([]byte(leakSecret))
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%t"} {
 		for name, v := range values {
 			t.Run(verb+"/"+name, func(t *testing.T) {
 				t.Parallel()
 				out := fmt.Sprintf(verb, v)
-				if strings.Contains(out, leakSecret) || strings.Contains(out, hex.EncodeToString([]byte(leakSecret))) {
+				if strings.Contains(out, leakSecret) || strings.Contains(out, secretHex) {
 					t.Errorf("Sprintf(%q) of the %s printed the password: %s", verb, name, out)
 				}
-				if !strings.Contains(out, "gt-user") {
+				// fmt prints a pointer in an unexported field as an address, so
+				// neither the user nor the password is in that output.
+				if name != "pointer in unexported" && !strings.Contains(out, user) && !strings.Contains(out, hex.EncodeToString([]byte(user))) {
 					t.Errorf("Sprintf(%q) of the %s dropped the user: %s", verb, name, out)
 				}
 			})
@@ -289,7 +302,7 @@ func TestCredentialFormattingHidesPassword(t *testing.T) {
 // MarshalText.
 func TestCredentialRedactingMethodsHideThePassword(t *testing.T) {
 	t.Parallel()
-	c := Credential{User: "gt-user", Password: leakSecret}
+	c := Credential{User: "gt-user", Password: NewSecret(leakSecret)}
 	text, err := c.MarshalText()
 	if err != nil {
 		t.Fatalf("MarshalText: %v", err)
@@ -310,7 +323,7 @@ func TestCredentialLogValueHidesPassword(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	rec := slog.NewRecord(time.Unix(0, 0), slog.LevelInfo, "connecting", 0)
-	rec.AddAttrs(slog.Any("credential", Credential{User: "gt", Password: secret}))
+	rec.AddAttrs(slog.Any("credential", Credential{User: "gt", Password: NewSecret(secret)}))
 	if err := log.Handler().Handle(context.Background(), rec); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
