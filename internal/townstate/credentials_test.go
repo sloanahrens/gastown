@@ -11,6 +11,8 @@ import (
 
 func TestFindCredentials(t *testing.T) {
 	t.Parallel()
+	// Built from parts so this file holds no token-shaped literal.
+	const token = "sk-" + "abcdefghijklmnop1234"
 	cases := []struct {
 		name string
 		in   string
@@ -44,6 +46,20 @@ func TestFindCredentials(t *testing.T) {
 		{"a URL is not found", `{"docs":"https://example.com/guide/getting-started"}`, nil},
 		{"a short prefix is not a token", `{"note":"sk-abc"}`, nil},
 		{"a credential key with a token value is one finding", `{"api_key":"sk-abcdefghijklmnopqrst"}`, []string{"json:api_key"}},
+		// A ${NAME} reference was a finding before the reference rule; it names
+		// where the token lives, as the town config does.
+		{"env reference ${NAME} was a finding, now exempt", `{"ANTHROPIC_AUTH_TOKEN":"${GT_X}"}`, nil},
+		{"env reference $NAME was a finding, now exempt", `{"api_key":"$GT_X"}`, nil},
+		{"truncated JSON: env reference was a finding, now exempt", `{"api_key":"$GT_X"`, nil},
+		// A field named keys holds names, not a credential, unless the value is
+		// token-shaped; a longer name such as api_keys keeps the old behaviour.
+		{"keys with a plain value was a finding, now exempt", `{"keys":"abc-def-123"}`, nil},
+		{"keys is exempt in any case", `{"KEYS":"abc-def-123"}`, nil},
+		{"truncated JSON: keys with a plain value was a finding, now exempt", `{"keys":"abc-def-123"`, nil},
+		{"api_keys is not exempt", `{"api_keys":"abc"}`, []string{"json:api_keys"}},
+		{"keys holding a token-shaped value is found", `{"keys":"` + token + `"}`, []string{"json:keys"}},
+		{"a bare dollar is not a reference", `{"api_key":"$"}`, []string{"json:api_key"}},
+		{"a value with a space is not a reference", `{"password":"$ab cd"}`, []string{"json:password"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -98,6 +114,9 @@ func TestRedactJSON(t *testing.T) {
 		{"escaped quote and backslash in the value", `{"password":"p\"q\\","k":"v"}`, `{"password":"<redacted>","k":"v"}`, 1},
 		{"strings in an array are not members", `{"tokens":["a","b"]}`, `{"tokens":["a","b"]}`, 0},
 		{"nothing to redact", `{"api_key_file":"/x","n":1}`, `{"api_key_file":"/x","n":1}`, 0},
+		{"a reference and a plain keys field are left alone",
+			`{"ANTHROPIC_AUTH_TOKEN":"${GT_X}","api_key":"$GT_X","keys":"abc-def-123"}`,
+			`{"ANTHROPIC_AUTH_TOKEN":"${GT_X}","api_key":"$GT_X","keys":"abc-def-123"}`, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
