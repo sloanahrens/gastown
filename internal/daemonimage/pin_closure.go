@@ -16,18 +16,29 @@ type importGap struct {
 	Dir, Importer string
 }
 
-// inputClosureGaps reads the non-test .go files of each devops tool at main
-// through git, one level deep, and returns each directory they import that
-// PinInputPaths("devops") does not cover, with its importer. dir is the root of
-// the pin's checkout (MainOf in CheckPins, checkFetchedPin), so the names that
-// ls-tree prints are repository paths, valid in `main:<file>`. A failed read or
-// a source that does not parse is an error, not a clean list, and so is a tool
-// with no non-test .go file at main: an empty listing would pass a renamed or
-// removed tool silently (gt-reirlx).
+// inputClosureGaps walks the devops imports breadth first from each tool at
+// main through git and returns each directory it reaches that
+// PinInputPaths("devops") does not cover, with the directory that imported it:
+// a deeper import (pkg/patrol importing the unlisted pkg/other) names
+// pkg/patrol. It reads the non-test .go files of each directory. dir is the
+// root of the pin's checkout (MainOf in CheckPins, checkFetchedPin), so the
+// names that ls-tree prints are repository paths, valid in `main:<file>`. A
+// failed read or a source that does not parse is an error, not a clean list,
+// and so is a directory with no non-test .go file at main: an empty listing
+// would pass a renamed or removed directory silently (gt-reirlx). The walk
+// queues every import, covered or not, and ends only because Go forbids import
+// cycles; the visited set (gt-rblgfn) and the bound (gt-tly3py) are not here.
 func inputClosureGaps(git bdbuild.Git, dir, main string) ([]importGap, error) {
-	var gaps []importGap
+	type visit struct{ dir, importer string }
+	var queue []visit
 	for _, tool := range devopsToolDirs {
-		listing, err := git(dir, "ls-tree", "--name-only", main, tool+"/")
+		queue = append(queue, visit{dir: tool})
+	}
+	var gaps []importGap
+	for len(queue) > 0 {
+		v := queue[0]
+		queue = queue[1:]
+		listing, err := git(dir, "ls-tree", "--name-only", main, v.dir+"/")
 		if err != nil {
 			return nil, err
 		}
@@ -47,12 +58,13 @@ func inputClosureGaps(git bdbuild.Git, dir, main string) ([]importGap, error) {
 			}
 			for _, imp := range imports {
 				if !coveredBy(PinInputPaths("devops"), imp) {
-					gaps = append(gaps, importGap{Dir: imp, Importer: tool})
+					gaps = append(gaps, importGap{Dir: imp, Importer: v.dir})
 				}
+				queue = append(queue, visit{dir: imp})
 			}
 		}
 		if sources == 0 {
-			return nil, fmt.Errorf("pin-drift guard: devops tool %s has no .go files at main: renamed or removed?", tool)
+			return nil, fmt.Errorf("pin-drift guard: devops directory %s has no .go files at main: renamed or removed?", v.dir)
 		}
 	}
 	return gaps, nil

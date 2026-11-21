@@ -16,6 +16,16 @@ func answerTool(f *pinsGit, tool, file, src string) {
 	f.answer[closureRepo+" show main:"+file] = src
 }
 
+// closureTree answers the reads the walk makes for every directory in files
+// (directory to the source of its one file, <dir>/main.go), so a test is one map
+// literal; the walk reads each directory it reaches, an unanswered one fails the
+// fake and not the assertion (gt-rxxk4s).
+func closureTree(f *pinsGit, files map[string]string) {
+	for dir, src := range files {
+		answerTool(f, dir, dir+"/main.go", src)
+	}
+}
+
 func TestInputClosureOneLevelCoveredByTheList(t *testing.T) {
 	t.Parallel()
 	f := newPinsGit()
@@ -29,6 +39,7 @@ import "gt.local/devops/pkg/patrol"
 	answerTool(f, "cmd/cloudcheck", "cmd/cloudcheck/main.go", `package main
 import "gt.local/devops/internal/ledgerdb"
 `)
+	closureTree(f, map[string]string{"pkg/releasebot/sub": "package sub\n", "internal/ledgerdb": "package ledgerdb\n", "pkg/patrol": "package patrol\n"})
 	got, err := inputClosureGaps(f.run, closureRepo, "main")
 	if err != nil {
 		t.Fatalf("inputClosureGaps: %v", err)
@@ -50,6 +61,7 @@ import "gt.local/devops/pkg/patrol"
 	answerTool(f, "cmd/cloudcheck", "cmd/cloudcheck/main.go", `package main
 import "gt.local/devops/pkg/patrol"
 `)
+	closureTree(f, map[string]string{"internal/newthing": "package newthing\n", "pkg/patrol": "package patrol\n"})
 	got, err := inputClosureGaps(f.run, closureRepo, "main")
 	if err != nil {
 		t.Fatalf("inputClosureGaps: %v", err)
@@ -133,5 +145,25 @@ import "gt.local/devops/internal/onlytest"
 	}
 	if len(got) != 0 {
 		t.Errorf("gaps = %v, want none: a test file's import is not built into the image", got)
+	}
+}
+
+func TestInputClosureReportsADeeperImportOutsideTheList(t *testing.T) {
+	t.Parallel()
+	f := newPinsGit()
+	closureTree(f, map[string]string{
+		"cmd/reporter":         "package main\nimport \"gt.local/devops/pkg/patrol\"\n",
+		"cmd/release-reporter": "package main\n",
+		"cmd/cloudcheck":       "package main\n",
+		"pkg/patrol":           "package patrol\nimport \"gt.local/devops/pkg/other\"\n",
+		"pkg/other":            "package other\n",
+	})
+	got, err := inputClosureGaps(f.run, closureRepo, "main")
+	if err != nil {
+		t.Fatalf("inputClosureGaps: %v", err)
+	}
+	want := []importGap{{Dir: "pkg/other", Importer: "pkg/patrol"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("gaps = %v, want %v", got, want)
 	}
 }
