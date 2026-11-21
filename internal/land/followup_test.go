@@ -21,6 +21,19 @@ type followupFake struct {
 	created   []FollowupSpec
 	listErr   error
 	createErr error
+	appended  []followupAppend // each AppendFollowup call, in order
+	appendErr error            // returned by every AppendFollowup call
+}
+
+// followupAppend is one AppendFollowup call the fake recorded.
+type followupAppend struct {
+	ID  string
+	Add FollowupAddition
+}
+
+func (f *followupFake) AppendFollowup(id string, add FollowupAddition) error {
+	f.appended = append(f.appended, followupAppend{ID: id, Add: add})
+	return f.appendErr
 }
 
 func (f *followupFake) ListFollowups(string) ([]ExistingFollowup, error) {
