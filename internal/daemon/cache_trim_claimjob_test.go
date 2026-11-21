@@ -344,6 +344,43 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	}
 }
 
+// TestCacheTrimClaimJobBudgetNamesTheBoundThatCutIt is the bead's acceptance: a
+// wait the claim Job's own context ends five minutes in, before the wait bound,
+// is an error naming the elapsed time and that context, never the pending text.
+// The status reads active on purpose: without the budget's own verdict the run
+// would report the Job pending.
+func TestCacheTrimClaimJobBudgetNamesTheBoundThatCutIt(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	clk := newFixedClock()
+	f.d.clock = clk
+	daemonCtx, endContext := context.WithCancel(context.Background())
+	defer endContext()
+	f.d.ctx = daemonCtx
+	// The Job's budget is a child of d.ctx, so ending the daemon's context
+	// during the wait ends the Job's own context; the fake clock dates the cut.
+	f.onClaimJobCall(cacheTrimClaimJobWaitVerb, func() {
+		clk.Advance(5 * time.Minute)
+		endContext()
+	})
+	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+	if err == nil {
+		t.Fatalf("a wait its own context cut off = nil, want the cut-off error")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "cut off during the wait after 5m0s") || !strings.Contains(got, "by its context") {
+		t.Errorf("the cut-off error %q does not name the elapsed time and the context that cut it", got)
+	}
+	for _, pending := range []string{"did not finish within", "still running after"} {
+		if strings.Contains(got, pending) {
+			t.Errorf("the cut-off error %q carries the pending text %q", got, pending)
+		}
+	}
+}
+
 // TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait pins that a wait the
 // daemon's context cuts off is an error naming that context, not a Job still
 // running, though the Job's status reads active.
