@@ -378,10 +378,10 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 		Apply: []Step{
 			// A git snapshot of the live bare repository: a tar of its files breaks
 			// while a landing writes it (sweep 9ef45e87, gt-9bgjx7). Init and
-			// fetch, since a rerun reuses the directory; --update-shallow, since
+			// fetch --prune, since a rerun reuses the directory; --update-shallow, since
 			// the repository is shallow.
 			{Argv: []string{"git", "init", "--bare", "--quiet", snapshot}},
-			{Argv: []string{"git", "--git-dir", snapshot, "fetch", "--quiet", "--force", "--no-tags", "--update-shallow", spec.RepoDir, "+refs/*:refs/*"}},
+			{Argv: []string{"git", "--git-dir", snapshot, "fetch", "--quiet", "--force", "--no-tags", "--prune", "--update-shallow", spec.RepoDir, "+refs/*:refs/*"}},
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: repoClaim.JSON()},
