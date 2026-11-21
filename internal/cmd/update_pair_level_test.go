@@ -3,9 +3,11 @@ package cmd
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -49,6 +51,10 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 		PinLevel: func(context.Context, string, string) (string, int, error) { return pairLevelBdPin, 67, nil },
 		Database: func(context.Context, string) (int, error) { return 66, nil },
 	}
+	reverse := pairLevelReads{
+		PinLevel: func(context.Context, string, string) (string, int, error) { return pairLevelBdPin, 66, nil },
+		Database: func(context.Context, string) (int, error) { return 67, nil },
+	}
 	pinFails := pairLevelReads{
 		PinLevel: func(context.Context, string, string) (string, int, error) {
 			return "", 0, errors.New("no such path")
@@ -74,6 +80,12 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 			pair:  update.ImagePair{Commit: pairLevelCommit},
 			reads: skewed,
 			want:  []string{pairLevelCommit, pairLevelBdPin, "schema level 67", "database is at 66"},
+		},
+		{
+			name:  "a pin at 66 against a database at 67 refuses",
+			pair:  update.ImagePair{Commit: pairLevelCommit},
+			reads: reverse,
+			want:  []string{pairLevelCommit, pairLevelBdPin, "schema level 66", "database is at 67"},
 		},
 		{
 			name:  "equal levels pass",
@@ -139,8 +151,10 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 }
 
 // TestPreRollGuardProductionWiresThePairLevel pins that the production seams
-// carry both pair-level reads: a digest install built from them would refuse
-// every pair with a read unwired otherwise.
+// carry both pair-level reads, and that they are the real ones: daemon.PairBdLevel
+// and townDatabaseLevel, compared by function value because calling the database
+// read would open the town's store. A stub or another function wired in their
+// place would pass a bare non-nil check.
 func TestPreRollGuardProductionWiresThePairLevel(t *testing.T) {
 	t.Parallel()
 	reads := productionUpdateSeams().PairLevel
@@ -149,5 +163,11 @@ func TestPreRollGuardProductionWiresThePairLevel(t *testing.T) {
 	}
 	if reads.Database == nil {
 		t.Error("productionUpdateSeams wires no database level read: every digest install would be refused")
+	}
+	if got, want := reflect.ValueOf(reads.PinLevel).Pointer(), reflect.ValueOf(daemon.PairBdLevel).Pointer(); got != want {
+		t.Error("productionUpdateSeams wires a bd pin level read other than daemon.PairBdLevel")
+	}
+	if got, want := reflect.ValueOf(reads.Database).Pointer(), reflect.ValueOf(townDatabaseLevel).Pointer(); got != want {
+		t.Error("productionUpdateSeams wires a database level read other than townDatabaseLevel")
 	}
 }
