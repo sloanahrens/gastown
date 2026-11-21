@@ -1,8 +1,13 @@
 package land
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -295,5 +300,162 @@ func TestReviewLogScrubATokenPastTheRunCapLeavesNoTail(t *testing.T) {
 	million := scrubBounded(t, strings.Repeat("a-", 500000))
 	if len(million) > scrubInputBound {
 		t.Errorf("a million bytes returned %d, more than the %d read", len(million), scrubInputBound)
+	}
+}
+
+// scrubTestThreeRows is a log of three rows: one whose finding text quotes the
+// token, one quoting prose, and a count-only verdict.
+func scrubTestThreeRows(token string) []ReviewRecord {
+	return []ReviewRecord{
+		{BeadID: "gt-slit1", Rig: "gastown", Verdict: VerdictApprove, Score: 0.9,
+			FindingText: []ReviewFindingText{{ID: "f-1", Title: "the key leaks", Claim: "it logs `" + token + "` verbatim"}}},
+		{BeadID: "gt-slit2", Rig: "gastown", Verdict: VerdictApprove, Score: 0.8,
+			FindingText: []ReviewFindingText{{ID: "f-1", Claim: "the retry counter never resets"}}},
+		{BeadID: "gt-slit3", Rig: "gastown", Verdict: VerdictRequestChanges, Score: 0.3, Findings: 2},
+	}
+}
+
+// scrubTestLogBytes encodes rows as the log's own lines.
+func scrubTestLogBytes(t *testing.T, recs ...ReviewRecord) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, rec := range recs {
+		line, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatalf("encoding a test row: %v", err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
+}
+
+// writeScrubTestLog writes a log and returns a ReviewsFile over it.
+func writeScrubTestLog(t *testing.T, data []byte) (*ReviewsFile, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), ReviewsFileName)
+	if err := os.WriteFile(path, data, 0o640); err != nil {
+		t.Fatalf("writing the test log: %v", err)
+	}
+	return &ReviewsFile{Path: path}, path
+}
+
+// assertNoScrubToken fails if text holds the token or a run of its bytes long
+// enough to be a value: a report and an error name rows, never a value.
+func assertNoScrubToken(t *testing.T, text, token string) {
+	t.Helper()
+	if strings.Contains(text, token) {
+		t.Fatal("the text holds the planted token")
+	}
+	if n := len(token) / 2; n >= 8 && strings.Contains(text, token[:n]) {
+		t.Fatalf("the text holds the first %d bytes of the planted token", n)
+	}
+}
+
+// TestReviewLogScrubPlanDryRunReportsAndLeavesTheFile: a plan reports the
+// one changed row by bead id and word count and leaves the log byte for byte.
+func TestReviewLogScrubPlanDryRunReportsAndLeavesTheFile(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	before := scrubTestLogBytes(t, scrubTestThreeRows(token)...)
+	logf, path := writeScrubTestLog(t, before)
+	res, err := logf.ScrubPlan()
+	if err != nil {
+		t.Fatalf("ScrubPlan: %v", err)
+	}
+	if res.Rows != 3 || res.RowsChanged != 1 {
+		t.Errorf("plan reported Rows=%d RowsChanged=%d, want 3 and 1", res.Rows, res.RowsChanged)
+	}
+	if res.Words != 1 {
+		t.Errorf("plan reported Words=%d, want 1", res.Words)
+	}
+	if len(res.Beads) != 1 || res.Beads[0] != "gt-slit1" {
+		t.Errorf("plan reported Beads=%v, want [gt-slit1]", res.Beads)
+	}
+	if res.Oversize != 0 || res.Skipped != 0 || len(res.SkippedBeads) != 0 {
+		t.Errorf("plan reported Oversize=%d Skipped=%d SkippedBeads=%v, want zero", res.Oversize, res.Skipped, res.SkippedBeads)
+	}
+	assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the log after the plan: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Error("the plan changed the log")
+	}
+}
+
+// TestReviewLogScrubPlanCountsWhatItCannotDecode: a line that is not a JSON
+// object and one past the byte bound are copied through untouched and counted
+// while the scrub rewrites a row beside them.
+func TestReviewLogScrubPlanCountsWhatItCannotDecode(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	longLine := strings.Repeat("y", 600)
+	before := append(scrubTestLogBytes(t, scrubTestThreeRows(token)...), []byte("not a JSON row\nnull\n"+longLine+"\n")...)
+	logf, path := writeScrubTestLog(t, before)
+	logf.lineLimit = 512
+	res, err := logf.ScrubPlan()
+	if err != nil {
+		t.Fatalf("ScrubPlan: %v", err)
+	}
+	if res.Rows != 3 || res.RowsChanged != 1 || res.Oversize != 1 {
+		t.Errorf("Rows=%d RowsChanged=%d Oversize=%d, want 3, 1 and 1", res.Rows, res.RowsChanged, res.Oversize)
+	}
+	assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the log after the plan: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Error("the plan changed the log")
+	}
+}
+
+// TestReviewLogScrubPlanMissingLogIsNoOp: a missing log is nothing to scrub,
+// and the plan creates no file.
+func TestReviewLogScrubPlanMissingLogIsNoOp(t *testing.T) {
+	t.Parallel()
+	logf := &ReviewsFile{Path: filepath.Join(t.TempDir(), ReviewsFileName)}
+	res, err := logf.ScrubPlan()
+	if err != nil {
+		t.Fatalf("ScrubPlan on a missing log: %v", err)
+	}
+	if res.Rows != 0 || res.RowsChanged != 0 || len(res.Beads) != 0 {
+		t.Errorf("a missing log reported Rows=%d RowsChanged=%d Beads=%v, want zero", res.Rows, res.RowsChanged, res.Beads)
+	}
+	if _, err := os.Stat(logf.Path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the scrub touched a missing log: stat error %v", err)
+	}
+}
+
+// TestReviewLogScrubPlanErrorsNameTheFileOnly: a log that cannot be opened and
+// one that cannot be read return an error that names the file and holds none of
+// a row's text.
+func TestReviewLogScrubPlanErrorsNameTheFileOnly(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	for name, mkPath := range map[string]func(t *testing.T) string{
+		"a path under a regular file cannot be opened": func(t *testing.T) string {
+			file := filepath.Join(t.TempDir(), "plain")
+			if err := os.WriteFile(file, scrubTestLogBytes(t, scrubTestThreeRows(token)...), 0o640); err != nil {
+				t.Fatalf("writing the plain file: %v", err)
+			}
+			return filepath.Join(file, ReviewsFileName)
+		},
+		"a directory opens and cannot be read": func(t *testing.T) string { return t.TempDir() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := mkPath(t)
+			res, err := (&ReviewsFile{Path: path}).ScrubPlan()
+			if err == nil {
+				t.Fatalf("ScrubPlan on %s returned no error", name)
+			}
+			if res.Rows != 0 || res.RowsChanged != 0 {
+				t.Errorf("a failed plan reported Rows=%d RowsChanged=%d, want zero", res.Rows, res.RowsChanged)
+			}
+			assertNoScrubToken(t, err.Error(), token)
+		})
 	}
 }
