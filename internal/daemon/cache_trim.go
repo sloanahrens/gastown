@@ -1931,10 +1931,11 @@ func (d *Daemon) cacheTrimRemovedCounts(ctx context.Context, kubeconfig, namespa
 }
 
 // cacheTrimParseRemoved reads the removal Job's result line -- "removed N
-// absent M kept K", or an older image's line without the kept count -- as its
-// counts. The last non-empty line is the one read, and it must be exactly one
-// of those shapes: any other text is refused, quoting its first 80 characters,
-// because a line read as zero would record a run that trimmed nothing.
+// absent M kept K" -- as its counts. The last non-empty line must be exactly
+// that shape and the log must end in a newline: a cut container log has none
+// and its counts may be a prefix of the real ones (gt-go4dk3). Any other text
+// is refused, quoting its first 80 characters, because a line read as zero
+// would record a run that trimmed nothing.
 func cacheTrimParseRemoved(out string) (removed, absent, kept int64, err error) {
 	line := ""
 	for _, l := range strings.Split(out, "\n") {
@@ -1947,12 +1948,12 @@ func cacheTrimParseRemoved(out string) (removed, absent, kept int64, err error) 
 		if r := []rune(shown); len(r) > 80 {
 			shown = string(r[:80])
 		}
-		return fmt.Errorf("the removal Job's result line %q is not \"removed N absent M kept K\" or an older image's \"removed N absent M\"", shown)
+		return fmt.Errorf("the removal Job's result line %q is not \"removed N absent M kept K\"", shown)
+	}
+	if !strings.HasSuffix(out, "\n") {
+		return 0, 0, 0, refuse()
 	}
 	fields := strings.Split(line, " ")
-	if len(fields) == 4 {
-		fields = append(fields, "kept", "0")
-	}
 	if len(fields) != 6 || fields[0] != "removed" || fields[2] != "absent" || fields[4] != "kept" {
 		return 0, 0, 0, refuse()
 	}
