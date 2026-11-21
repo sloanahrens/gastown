@@ -1605,6 +1605,11 @@ func (d *Daemon) cacheTrimJobState(ctx context.Context, kubeconfig, namespace, j
 	if err != nil {
 		return 0, fmt.Errorf("reading the Job %s: %w: %s", jobName, err, cacheTrimFirstLine(string(stderr)))
 	}
+	// The runner kills a read whose context ended, but a runner that ignores the
+	// context can still answer. Such an answer says nothing about the Job.
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("reading the Job %s: %w", jobName, err)
+	}
 	var job struct {
 		Status struct {
 			Active     int `json:"active"`
