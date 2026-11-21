@@ -95,7 +95,7 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)
 	d.logger.Printf("disk_maintenance: cache trim %s in %s finished: removed %d absent %d kept %d elapsed %s", claim.ClaimName, namespace, removed, absent, kept, elapsed)
-	d.cacheTrimDiskItem(ctx, claim.ClaimName, namespace)
+	d.cacheTrimDiskItem(claim.ClaimName, namespace)
 	return true
 }
 
@@ -128,7 +128,7 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 	d.logger.Printf("disk_maintenance: cache trim %s in %s: the earlier trim Job %s completed after its wait; recorded: removed %d absent %d kept %d", claim.ClaimName, namespace, jobName, removed, absent, kept)
 	// The late trim finished too, so it makes the same decision as a finished
 	// apply: a stale item goes when the disk it left reads under the percent.
-	d.cacheTrimDiskItem(ctx, claim.ClaimName, namespace)
+	d.cacheTrimDiskItem(claim.ClaimName, namespace)
 	return true
 }
 
@@ -137,8 +137,11 @@ func (d *Daemon) cacheTrimLateResult(ctx context.Context, kubeconfig string, cla
 // since files younger than the age floor cannot be removed yet and open sandbox
 // paths can hold space; under it a stale item is cleared. A disk that cannot be
 // read leaves the item as it was (an unreadable disk is neither full nor empty)
-// and says so once an hour.
-func (d *Daemon) cacheTrimDiskItem(ctx context.Context, claim, namespace string) {
+// and says so once an hour. The read has its own diskMaintenanceContext, because
+// the pass context can end during a trim the claim Job runs under a longer one.
+func (d *Daemon) cacheTrimDiskItem(claim, namespace string) {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
 	percent, err := diskMaintenanceCacheTrimEarlyPercent(d.patrol())
 	if err != nil {
 		return // the early tick refuses a setting it cannot read
