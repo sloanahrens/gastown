@@ -4,6 +4,8 @@ import (
 	"context"
 	"os/exec"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -16,25 +18,59 @@ const (
 	cacheTrimFailWaitPlanLogVerb  = "logs job/" + cacheTrimJob + " -n " + cacheTrimNamespace + " -c plan --tail=1"
 )
 
+// heldLeg is a kubectl call the fixture holds, as a wait on a condition the Job
+// never reaches does. started closes when the call begins; stuck is set when
+// the hold ran to the hang guard, which is how a wait that wrongly waits on
+// this leg shows: as a failure, not as a hang.
+type heldLeg struct {
+	started <-chan struct{}
+	stuck   *atomic.Bool
+}
+
+// await fails the test if the held call never began within the hang guard or
+// if the wait under test sat on it until the guard ended it.
+func (h heldLeg) await(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	defer cancel()
+	select {
+	case <-h.started:
+	case <-ctx.Done():
+		t.Fatalf("the held leg never started within %s", workspaceHangGuard)
+	}
+	if h.stuck.Load() {
+		t.Fatalf("the wait sat on the held leg for %s: it must end without it", workspaceHangGuard)
+	}
+}
+
 // cacheTrimFailWaitHold makes the kubectl call for verb hang until the test
-// ends, as a wait on a condition the Job never reaches does. The call's start
-// is reported on the returned channel: the fixture records a call only when it
-// answers, so a held call is read from the channel, not from the recorded calls.
-func cacheTrimFailWaitHold(t *testing.T, f *cacheTrimFixture, verb string) <-chan struct{} {
+// ends or the hang guard does, as a wait on a condition the Job never reaches
+// does. The call's start is reported on the returned leg: the fixture records
+// a call only when it answers, so a held call is read from the leg, not from
+// the recorded calls.
+func cacheTrimFailWaitHold(t *testing.T, f *cacheTrimFixture, verb string) heldLeg {
 	t.Helper()
 	started := make(chan struct{})
 	release := make(chan struct{})
+	var once sync.Once
+	stuck := &atomic.Bool{}
 	t.Cleanup(func() { close(release) })
 	answer := f.d.execCmd
 	f.d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
 		if len(cmd.Args) > 1 && cacheTrimVerb(cmd.Args[1:]) == verb {
-			close(started)
-			<-release
+			once.Do(func() { close(started) })
+			ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+			defer cancel()
+			select {
+			case <-release:
+			case <-ctx.Done():
+				stuck.Store(true)
+			}
 			return nil, []byte("error: timed out waiting for the condition\n"), &cliExitError{code: 1}
 		}
 		return answer(cmd)
 	}
-	return started
+	return heldLeg{started: started, stuck: stuck}
 }
 
 // TestCacheTrimFailWaitReturnsWhenTheJobFails pins that a Job whose failed
@@ -65,7 +101,7 @@ func TestCacheTrimFailWaitReturnsWhenTheJobFails(t *testing.T) {
 	if _, ok := f.indexOf(cacheTrimFailWaitPlanLogVerb); ok {
 		t.Errorf("the plan container was read though the trim container had a line: calls %v", f.verbs())
 	}
-	<-held
+	held.await(t)
 }
 
 // TestCacheTrimFailWaitNamesOneCutLine pins the shape of the failed error's
@@ -99,7 +135,7 @@ func TestCacheTrimFailWaitNamesOneCutLine(t *testing.T) {
 			if err.Error() != tc.want {
 				t.Errorf("error = %q; want %q", err, tc.want)
 			}
-			<-held
+			held.await(t)
 		})
 	}
 }
@@ -129,7 +165,7 @@ func TestCacheTrimFailWaitReadsThePlanLogAndStillCompletes(t *testing.T) {
 		if err.Error() != want {
 			t.Errorf("error = %q; want %q", err, want)
 		}
-		<-held
+		held.await(t)
 	})
 	t.Run("the Job completes", func(t *testing.T) {
 		f := newCacheTrimFixture(t, "", map[string]cliReply{
@@ -143,6 +179,6 @@ func TestCacheTrimFailWaitReadsThePlanLogAndStillCompletes(t *testing.T) {
 		if _, ok := f.indexOf(cacheTrimFailWaitTrimLogVerb); ok {
 			t.Errorf("a completed Job's trim log was read: calls %v", f.verbs())
 		}
-		<-held
+		held.await(t)
 	})
 }
