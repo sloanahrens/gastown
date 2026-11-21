@@ -609,7 +609,7 @@ func TestK8sPlanSyncsASnapshotNotTheLiveRepository(t *testing.T) {
 		}
 		return -1
 	}
-	if init, fetch := at("git init --bare --quiet "+snap), at(snap+" fetch --quiet --force --no-tags --update-shallow "+spec.RepoDir+" +refs/*:refs/*"); init != 0 || fetch != 1 {
+	if init, fetch := at("git init --bare --quiet "+snap), at(snap+" fetch --quiet --force --no-tags --prune --update-shallow "+spec.RepoDir+" +refs/*:refs/*"); init != 0 || fetch != 1 {
 		t.Errorf("the git init is at step %d and the fetch at %d, want the first two steps", init, fetch)
 	}
 	if cp := at(" cp "); cp < 0 || at(" cp "+snap+"/.") != cp || at(" cp "+spec.RepoDir) >= 0 {
