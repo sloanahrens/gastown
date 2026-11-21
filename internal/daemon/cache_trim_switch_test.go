@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/jobledger"
 )
 
 // viaJobWithin runs cacheTrimClaimViaJob on the fixture's claim and returns its
@@ -943,6 +944,59 @@ func TestCacheTrimLateResultOnlyForAPendingClaim(t *testing.T) {
 			}
 			if f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName) {
 				t.Errorf("the mark is still set after the pass")
+			}
+		})
+	}
+}
+
+// TestCacheTrimSwitchParksAWedgedJob pins that a Job a pass left pending and that
+// the Job controller then marked Failed (its backoff limit is exhausted) parks its
+// claim instead of being deleted as stale and applied again. The rule reads the
+// Job's conditions, never its failed-pod count: a Job retried and then Completed
+// carries failed pods and is read, and a Job between two retries has failed pods,
+// no active pod and no verdict, so neither parks.
+func TestCacheTrimSwitchParksAWedgedJob(t *testing.T) {
+	t.Parallel()
+	const head = `{"items":[{"kind":"Job","metadata":{"name":"` + cacheTrimJob + `","namespace":"` + cacheTrimNamespace + `",` +
+		`"labels":{"app.kubernetes.io/name":"polecat-cache-trim","app.kubernetes.io/managed-by":"gt"}},"status":`
+	const (
+		failedCond   = `{"conditions":[{"type":"Failed","status":"True"}]}`
+		retriedThenC = `{"failed":1,"conditions":[{"type":"Complete","status":"True"}]}`
+	)
+	for _, tc := range []struct {
+		name      string
+		mark      bool
+		status    string
+		wantPark  bool
+		wantApply bool
+	}{
+		{"a marked claim's Job with the Failed condition parks it", true, failedCond, true, false},
+		{"an unmarked claim's Job with the Failed condition is still replaced", false, failedCond, false, true},
+		{"a marked claim's Job that failed a pod and then Completed is read, not parked", true, retriedThenC, false, true},
+		{"a marked claim's Job between two retries is not parked", true, `{"failed":1}`, false, true},
+		{"a marked claim's Job whose Failed condition is not True is not parked", true, `{"conditions":[{"type":"Failed","status":"False"}]}`, false, true},
+		{"a marked claim's Job with failed pods that still runs is left to finish", true, `{"active":1,"failed":1}`, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", map[string]cliReply{
+				cacheTrimExistingVerb:    {stdout: head + tc.status + `}]}`},
+				cacheTrimClaimJobLogVerb: {stdout: "removed 3 absent 1 kept 2\n"},
+			})
+			f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, tc.mark)
+			viaJob(t, f, true, map[string]string{})
+			if got := f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName); got != tc.wantPark {
+				t.Errorf("parked = %v, want %v; log: %s", got, tc.wantPark, f.log.String())
+			}
+			if _, applied := f.indexOf(cacheTrimApplyVerb); applied != tc.wantApply {
+				t.Errorf("the Job was applied again = %v, want %v; calls: %v", applied, tc.wantApply, f.verbs())
+			}
+			runs := f.jobRuns(t)
+			if tc.wantPark && (len(runs) != 1 || runs[0].Outcome != cacheTrimRunFailed) {
+				t.Errorf("the ledger holds %+v, want one run with outcome %q", runs, cacheTrimRunFailed)
+			}
+			if !tc.wantPark && slices.ContainsFunc(runs, func(r jobledger.Run) bool { return r.Outcome == cacheTrimRunFailed }) {
+				t.Errorf("a failed run was recorded for a Job that did not fail: %+v", runs)
 			}
 		})
 	}
