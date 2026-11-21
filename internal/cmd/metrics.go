@@ -47,11 +47,12 @@ var townMetricsCommands = []struct{ name, short string }{
 
 // newTownMetricsCmd is one town-metrics step as a subcommand; the step itself is
 // run, so the command carries no behavior of its own. storypoints-adopt alone
-// takes --revert and storypoints-eval alone takes --since; no other step has an
-// option.
+// takes --revert and storypoints-eval alone takes --since and --json; no other
+// step has an option.
 func newTownMetricsCmd(name, short string, run func(context.Context, string, metrics.Commands) error) *cobra.Command {
 	var revert bool
 	var since string
+	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   name,
 		Short: short,
@@ -65,6 +66,7 @@ func newTownMetricsCmd(name, short string, run func(context.Context, string, met
 			}
 			if name == metrics.CommandStoryPointsEval {
 				c.StoryPointsSince = since
+				c.StoryPointsJSON = asJSON
 			}
 			return run(cmd.Context(), name, c)
 		},
@@ -74,6 +76,7 @@ func newTownMetricsCmd(name, short string, run func(context.Context, string, met
 	}
 	if name == metrics.CommandStoryPointsEval {
 		cmd.Flags().StringVar(&since, "since", "", "Score the beads landed at or after this YYYY-MM-DD day instead of the newest three rows in ten")
+		cmd.Flags().BoolVar(&asJSON, "json", false, "Print the counts and the base, capped, review-round and seat-class tables as one JSON object instead of text")
 	}
 	return cmd
 }
