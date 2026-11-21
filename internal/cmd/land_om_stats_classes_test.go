@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -198,5 +199,47 @@ func TestLandOmStatsClassRatesNoReviewsHasNoRate(t *testing.T) {
 	t.Parallel()
 	if rate := (landOmStatsClassWeek{}).ratePer100(4); rate != 0 {
 		t.Errorf("rate = %v for a week with no reviews, want 0", rate)
+	}
+}
+
+// TestLandOmStatsClassesTable: two ISO weeks print as a row each — the week and
+// its counts, then a cell per class: its majors and minors per 100 reviews.
+func TestLandOmStatsClassesTable(t *testing.T) {
+	t.Parallel()
+	weeks := classRates([]land.ReviewRecord{
+		landOmStatsClassReview("gt-a", 1, land.VerdictRequestChanges, time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC),
+			landOmStatsClassFinding("major", "the change reaches outside the scope")),
+		landOmStatsClassReview("gt-b", 1, land.VerdictRequestChanges, time.Date(2026, 11, 16, 10, 0, 0, 0, time.UTC),
+			landOmStatsClassFinding("minor", "the comment names a line number")),
+	})
+	var out bytes.Buffer
+	if err := writeLandOmStatsClassesTable(&out, weeks); err != nil {
+		t.Fatalf("writeLandOmStatsClassesTable: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	header := strings.Fields(lines[0])
+	if len(lines) != 1+len(weeks) || len(header) != 3+len(weeks[0].Classes) || strings.Join(header[:3], " ") != "Week Reviews No-text" {
+		t.Fatalf("table = %q, want a header of three counts and a cell per class, then a row per week", out.String())
+	}
+	for i, week := range weeks {
+		cells := strings.Fields(lines[i+1])
+		want := fmt.Sprintf("%d-W%02d %d %d", week.ISOYear, week.ISOWeek, week.Reviews, week.NoFindingText)
+		if len(cells) != len(header) || strings.Join(cells[:3], " ") != want {
+			t.Fatalf("row %d = %q, want %q and a cell per class", i+1, cells, want)
+		}
+		for j, class := range week.Classes {
+			if got, want := cells[3+j], fmt.Sprintf("%.1f/%.1f", week.ratePer100(class.Majors), week.ratePer100(class.Minors)); got != want || header[3+j] != class.ID {
+				t.Errorf("%d-W%02d column %q: cell %q under header %q, want %q under the class id", week.ISOYear, week.ISOWeek, class.ID, got, header[3+j], want)
+			}
+		}
+	}
+}
+
+// TestLandOmStatsClassesTableReturnsTheWriteError: a failing writer's error is
+// returned, not read as a written table.
+func TestLandOmStatsClassesTableReturnsTheWriteError(t *testing.T) {
+	t.Parallel()
+	if err := writeLandOmStatsClassesTable(failingWriter{}, nil); err == nil {
+		t.Fatal("a failed write returned no error")
 	}
 }
