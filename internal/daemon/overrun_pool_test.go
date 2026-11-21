@@ -82,3 +82,38 @@ func TestOverrunPassPanicReachesTheCaller(t *testing.T) {
 		}
 	}
 }
+
+// The pool's edges (gt-fc1n18): a limit below one runs one read at a time, no reads call
+// nothing, and a limit of one starts the reads in index order.
+func TestOverrunPassEdges(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int{0, -1} {
+		var mu sync.Mutex
+		ran := make([]int, 5)
+		overrunReadPool(5, limit, func(i int) {
+			mu.Lock()
+			ran[i]++
+			mu.Unlock()
+		})
+		for i, n := range ran {
+			if n != 1 {
+				t.Errorf("limit %d: job %d ran %d times, want once", limit, i, n)
+			}
+		}
+	}
+	for _, n := range []int{0, -3} {
+		overrunReadPool(n, overrunReadPoolSize, func(i int) {
+			t.Errorf("n %d: read %d was called, want no read", n, i)
+		})
+	}
+	var order []int
+	overrunReadPool(5, 1, func(i int) { order = append(order, i) })
+	for i, got := range order {
+		if got != i {
+			t.Fatalf("a limit of 1 started the reads in order %v, want 0 to 4", order)
+		}
+	}
+	if len(order) != 5 {
+		t.Fatalf("a limit of 1 ran %d reads, want 5", len(order))
+	}
+}

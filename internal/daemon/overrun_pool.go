@@ -7,9 +7,12 @@ import "sync"
 const overrunReadPoolSize = 4
 
 // overrunReadPool calls read for every i in 0..n-1 with at most limit calls in flight at
-// once, and returns when all have returned. A read that panics is recovered in its own
-// goroutine; once every read has returned, the first recovered panic is raised again in the
-// caller, so the caller's recover sees it.
+// once, and returns when all have returned. A limit below one runs one read at a time; an n
+// of zero or less calls nothing. Reads start in index order and finish in any order. The pool
+// returns nothing: a caller keeps each read's result in a slot of its own, by index. The pool
+// adds no deadline, so a read that never returns holds its caller (gt-jhthh0 bounds a read).
+// A read that panics is recovered in its own goroutine; once every read has returned, the
+// first recovered panic is raised again in the caller, so the caller's recover sees it.
 func overrunReadPool(n, limit int, read func(i int)) {
 	if limit < 1 {
 		limit = 1
