@@ -128,7 +128,20 @@ type Finding struct {
 	Title    string `json:"title,omitempty"`
 	// Detail is om's longer account of the finding (gt-q52sv).
 	Detail string `json:"detail,omitempty"`
+	// Class is what om decided the finding is about; an older om writes none (gt-617dce).
+	Class string `json:"class,omitempty"`
 }
+
+// The classes a Finding's Class carries, spelled as om's verdict package spells
+// them; gastown does not import om (gt-617dce).
+const (
+	FindingClassBehaviour   = "behaviour" //nolint:misspell // om's own spelling of the class
+	FindingClassDesign      = "design"
+	FindingClassMissingTest = "missing_test"
+	FindingClassTestStyle   = "test_style"
+	FindingClassComment     = "comment"
+	FindingClassProcess     = "process"
+)
 
 // The severities a Finding's Severity carries, as the review reads them. A
 // severity outside this list blocks nothing and counts as nothing (gt-oi4je).

@@ -136,6 +136,8 @@ type ReviewFindingText struct {
 	// Claim is om's own account of the finding, which no other field of the
 	// record carries (gt-3arxj).
 	Claim string `json:"claim,omitempty"`
+	// Class is the finding's class as om gave it; a record logged before om carried one reads back without (gt-617dce).
+	Class string `json:"class,omitempty"`
 }
 
 // IsQueueLine reports whether raw is a follow-up queue line: a record whose
@@ -166,7 +168,7 @@ func reviewFindingTexts(findings []Finding) []ReviewFindingText {
 	out := make([]ReviewFindingText, 0, len(findings))
 	for _, f := range findings {
 		out = append(out, ReviewFindingText{
-			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(f.Detail),
+			ID: f.ID, Severity: f.Severity, File: f.Path, Line: f.Line, Title: f.Title, Claim: boundedClaim(f.Detail), Class: f.Class,
 		})
 	}
 	return out
