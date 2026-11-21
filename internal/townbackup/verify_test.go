@@ -64,6 +64,46 @@ func gzipTarFlushed(t *testing.T, entries ...arcEntry) []byte {
 	return buf.Bytes()
 }
 
+// gzipTarDeclared builds a gzip tar archive holding the identity file and then
+// hdr, without hdr's body: Verify refuses an entry whose declared size is over
+// the scan bound before it reads the body, so the fixture need not carry it.
+func gzipTarDeclared(t *testing.T, hdr *tar.Header) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	writeEntries(t, tw, identity)
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("writing header %s: %v", hdr.Name, err)
+	}
+	// The tar stream is not closed and no body follows: it stops after the
+	// header, which is where Verify refuses.
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing the gzip stream: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// gzipZeros returns a gzip member that decompresses to size zero bytes,
+// written in chunks so the fixture never holds the whole body in memory.
+func gzipZeros(t *testing.T, size int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	chunk := make([]byte, 1<<20)
+	for written := 0; written < size; {
+		n := min(size-written, len(chunk))
+		if _, err := zw.Write(chunk[:n]); err != nil {
+			t.Fatalf("writing zeros: %v", err)
+		}
+		written += n
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("closing the gzip stream: %v", err)
+	}
+	return buf.Bytes()
+}
+
 // writeEntries writes each entry in the shape its type calls for.
 func writeEntries(t *testing.T, tw *tar.Writer, entries ...arcEntry) {
 	t.Helper()
@@ -255,12 +295,6 @@ func TestVerifyRefuses(t *testing.T) {
 			wantErr: "settings/x.conf carries a credential (env:API_TOKEN)",
 			notIn:   "abc",
 		},
-		{
-			name:    "credential at the scan limit",
-			data:    gzipTar(t, identity, arcEntry{name: "settings/x.json", data: paddedCredential(maxScannedSize)}),
-			wantErr: "settings/x.json carries a credential",
-			notIn:   "abc",
-		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -315,20 +349,83 @@ func TestVerifyRefusesEntryTypes(t *testing.T) {
 	}
 }
 
-// TestVerifySkipsLargeFiles pins the scan limit: a file one byte over
-// maxScannedSize is counted but not read, so a credential in it is not looked
-// for.
-func TestVerifySkipsLargeFiles(t *testing.T) {
+// largeBody is a regular file size over the 256 KiB the old skip used, so a
+// body this size went unscanned before gt-m5rofa.
+const largeBody = 300 << 10
+
+// verifyRefused builds an archive from data and requires Verify to refuse it
+// with an error naming wantErr and never printing notIn (a credential value).
+func verifyRefused(t *testing.T, data []byte, wantErr, notIn string) {
+	t.Helper()
+	got, err := Verify(writeArchive(t, data))
+	if err == nil {
+		t.Fatalf("Verify accepted the archive (Result %+v)", got)
+	}
+	if got != (Result{}) {
+		t.Errorf("Result = %+v on refusal, want the zero Result", got)
+	}
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Errorf("error %q does not name %q", err, wantErr)
+	}
+	if notIn != "" && strings.Contains(err.Error(), notIn) {
+		t.Errorf("error %q prints the credential value %q", err, notIn)
+	}
+}
+
+// TestVerifyScansLargeFiles pins that a regular file over 256 KiB is scanned
+// whole, that a file over the scan bound is refused, and that a gzip member is
+// decompressed and scanned through the same bound.
+func TestVerifyScansLargeFiles(t *testing.T) {
 	t.Parallel()
-	body := paddedCredential(maxScannedSize + 1)
-	got, err := Verify(writeArchive(t, gzipTar(t, identity, arcEntry{name: "settings/x.json", data: body})))
-	if err != nil {
-		t.Fatalf("Verify refused a file beyond the scan limit: %v", err)
-	}
-	want := Result{Files: 2, Bytes: int64(len(identity.data) + len(body))}
-	if got != want {
-		t.Errorf("Result = %+v, want %+v", got, want)
-	}
+	t.Run("clean file of the same size passes", func(t *testing.T) {
+		t.Parallel()
+		body := strings.Repeat("x", largeBody)
+		got, err := Verify(writeArchive(t, gzipTar(t, identity, arcEntry{name: "settings/x.json", data: body})))
+		if err != nil {
+			t.Fatalf("Verify refused a clean %d-byte file: %v", len(body), err)
+		}
+		want := Result{Files: 2, Bytes: int64(len(identity.data) + len(body))}
+		if got != want {
+			t.Errorf("Result = %+v, want %+v", got, want)
+		}
+	})
+	t.Run("credential near its end is refused", func(t *testing.T) {
+		t.Parallel()
+		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "settings/x.json", data: paddedCredential(largeBody)}),
+			"settings/x.json carries a credential", "abc")
+	})
+	t.Run("over the scan bound is refused", func(t *testing.T) {
+		t.Parallel()
+		hdr := &tar.Header{Name: "settings/big.log", Mode: 0o644, Typeflag: tar.TypeReg, Size: maxScanBytes + 1}
+		verifyRefused(t, gzipTarDeclared(t, hdr), "entry settings/big.log is too large to scan", "")
+	})
+	t.Run("gzip member carrying a credential is refused", func(t *testing.T) {
+		t.Parallel()
+		// A compressible body, so the member's own bytes do not hold the
+		// credential's text: only a scan of the decompressed content finds it.
+		member := gzipped(t, strings.Repeat("x", 4<<10)+"\nAPI_TOKEN=abc\n")
+		if bytes.Contains(member, []byte("API_TOKEN")) {
+			t.Fatal("fixture: the compressed member holds the credential text, so this test would not prove decompression")
+		}
+		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(member)}),
+			"logs/export.json.gz carries a credential", "abc")
+	})
+	t.Run("gzip member that does not decompress is refused", func(t *testing.T) {
+		t.Parallel()
+		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: "\x1f\x8bnot a gzip stream"}),
+			"does not decompress", "")
+	})
+	t.Run("gzip member cut short is refused", func(t *testing.T) {
+		t.Parallel()
+		member := gzipped(t, strings.Repeat("x", 4<<10))
+		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(member[:len(member)-1])}),
+			"does not decompress", "")
+	})
+	t.Run("gzip member whose content is over the bound is refused", func(t *testing.T) {
+		t.Parallel()
+		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(gzipZeros(t, maxScanBytes+1))}),
+			"entry logs/export.json.gz is a gzip member whose content is too large to scan", "")
+	})
 }
 
 // TestVerifyRefusesAMissingArchive pins that an archive that cannot be read is
@@ -367,11 +464,11 @@ func shortBody(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// paddedCredential is a valid JSON document holding a credential, padded with
-// spaces to size bytes.
+// paddedCredential is a valid JSON document padded with spaces to size bytes,
+// with the credential at its end so a scan that stopped early would miss it.
 func paddedCredential(size int) string {
-	head := `{"api_key":"abc"}`
-	return head + strings.Repeat(" ", size-len(head))
+	tail := `{"api_key":"abc"}`
+	return strings.Repeat(" ", size-len(tail)) + tail
 }
 
 // cutInHalf cuts data in half, as a transfer that stopped midway would.

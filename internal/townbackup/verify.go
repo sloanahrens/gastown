@@ -23,10 +23,14 @@ const identityFile = "mayor/town.json"
 // keeps the last two blocks to tell a closed archive from a truncated one.
 const blockSize = 512
 
-// maxScannedSize bounds the regular files Verify reads for credentials: a
-// larger file is only counted, since scanning it would take longer than the
-// night is worth.
-const maxScannedSize = 256 << 10
+// maxScanBytes bounds the content Verify scans for credentials: a regular file
+// larger than this, or a gzip member whose content is, is refused rather than
+// scanned in full, since that could take longer than the night is worth.
+const maxScanBytes = 64 << 20
+
+// errTooLarge reports a gzip member whose decompressed content passes
+// maxScanBytes. Verify names the entry and the rule when it sees it.
+var errTooLarge = errors.New("content is larger than the scan bound")
 
 // maxTrailing bounds what Verify reads past the tar stream's end blocks while
 // reaching the gzip trailer, so a decompression bomb cannot run unbounded. An
@@ -41,7 +45,8 @@ type Result struct {
 
 // Verify reads the gzip tar archive at archive and reports the regular files
 // it holds, refusing one it cannot read in full, one with no regular file or
-// no mayor/town.json, and one carrying a secret-shaped name or a credential.
+// no mayor/town.json, and one carrying a secret-shaped name, a credential, or
+// a regular file too large to scan.
 func Verify(archive string) (res Result, err error) {
 	f, err := os.Open(archive)
 	if err != nil {
@@ -99,14 +104,23 @@ func Verify(archive string) (res Result, err error) {
 		if name == identityFile {
 			identity = true
 		}
-		if hdr.Size > maxScannedSize {
-			continue
+		// The declared size is what the tar reader will yield, so a file over
+		// the bound is refused before a byte of its body is read.
+		if hdr.Size > maxScanBytes {
+			return Result{}, fmt.Errorf("%s: entry %s is too large to scan (%d bytes, over the %d-byte limit)", archive, name, hdr.Size, maxScanBytes)
 		}
-		data, err := io.ReadAll(tr)
+		data, err := io.ReadAll(io.LimitReader(tr, maxScanBytes))
 		if err != nil {
 			return Result{}, fmt.Errorf("%s: reading entry %s: %w", archive, name, err)
 		}
-		if findings := townstate.FindCredentials(data); len(findings) > 0 {
+		content, err := scanBody(data)
+		if errors.Is(err, errTooLarge) {
+			return Result{}, fmt.Errorf("%s: entry %s is a gzip member whose content is too large to scan (over %d bytes)", archive, name, maxScanBytes)
+		}
+		if err != nil {
+			return Result{}, fmt.Errorf("%s: entry %s: %w", archive, name, err)
+		}
+		if findings := townstate.FindCredentials(content); len(findings) > 0 {
 			return Result{}, fmt.Errorf("%s: entry %s carries a credential (%s)", archive, name, strings.Join(findings, ", "))
 		}
 	}
@@ -130,6 +144,31 @@ func Verify(archive string) (res Result, err error) {
 		return Result{}, fmt.Errorf("%s: has no %s", archive, identityFile)
 	}
 	return res, nil
+}
+
+// scanBody returns the bytes to scan for an entry's data: data itself, or, for
+// a gzip member (first bytes 1f 8b), its decompressed content, read through a
+// reader bounded to maxScanBytes+1 so one byte past the bound is detected. It
+// returns errTooLarge for content over that bound and another error for a
+// member that does not decompress.
+func scanBody(data []byte) ([]byte, error) {
+	if len(data) < 2 || data[0] != 0x1f || data[1] != 0x8b {
+		return data, nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("gzip member does not decompress: %w", err)
+	}
+	// Reading to the end is what verifies the member's checksum, so a corrupt
+	// one is refused here; the reader is over memory and has nothing to close.
+	content, err := io.ReadAll(io.LimitReader(zr, maxScanBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("gzip member does not decompress: %w", err)
+	}
+	if len(content) > maxScanBytes {
+		return nil, errTooLarge
+	}
+	return content, nil
 }
 
 // tailBuffer keeps the last len(b) bytes written through it, so Verify can
