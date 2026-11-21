@@ -601,17 +601,17 @@ tier-check:
 # gate runs, gt-w3aby), and tests the packages the branch changed and their
 # direct importers
 # (internal/land/cmd/changedpkgs, unit-tested in internal/land/changed_test.go
-# and internal/land/importers_test.go; the heavy importers are left out and
-# named, gt-cwkzxk). It skips the budget runner, the
+# and internal/land/importers_test.go; an importer listed in heavyImporters is
+# left out and named, gt-cwkzxk). It skips the budget runner, the
 # drift guard and the shell tests. Judged by exit code alone, like the gate. A
 # package the branch deleted is not tested: there is nothing to run.
 #
 # It then runs the tree-wide guard tests the branch's changed paths trigger and
 # the guards that always run (gt-t4rchq), under -run so the whole suite of the
 # package hosting one stays out of it:
-# internal/cmd and internal/polecat take minutes each, the guard test inside
-# them a second. Otherwise a branch that breaks a guard learns it from the
-# landing gate minutes later, which is what gt-ydzwb exists to stop.
+# the guard test inside a large package such as internal/cmd or
+# internal/polecat is a second of it. Otherwise a branch that breaks a guard
+# learns it from the landing gate minutes later, which is what gt-ydzwb exists to stop.
 #
 # The profile the changed packages' test run writes is judged too
 # (internal/presubmit, gt-b9j3o.5): an error return the branch adds that no

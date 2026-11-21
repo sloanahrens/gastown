@@ -22,15 +22,11 @@ type LeftOut struct {
 }
 
 // heavyImporters are the direct importers presubmit leaves out of its test run
-// because each takes minutes to compile and run in full. This map is the only
-// list: SelectImporters reports a match in LeftOut, and presubmit prints it with
-// this reason so the missed tests get run narrowed with -run. A direct importer
-// not listed here is tested.
-var heavyImporters = map[string]string{
-	"internal/cmd":     "takes minutes to run in full; run its tests the diff can affect, narrowed with -run",
-	"internal/daemon":  "takes minutes to run in full; run its tests the diff can affect, narrowed with -run",
-	"internal/polecat": "takes minutes to run in full; run its tests the diff can affect, narrowed with -run",
-}
+// because they are too slow to run in full: SelectImporters reports a match in
+// LeftOut, and presubmit prints it with this reason so the missed tests get run
+// narrowed with -run. An entry needs a measured full-run time and the reason
+// (gt-cfc6wh).
+var heavyImporters = map[string]string{}
 
 // SelectImporters returns the direct importers of the changed package
 // directories, split into the ones presubmit tests and the heavy ones it leaves
@@ -39,13 +35,19 @@ var heavyImporters = map[string]string{
 // affected.DirectImporters). A graph that cannot be read fails the selection,
 // with the cause: presubmit must not test the changed packages alone and pass.
 func SelectImporters(run affected.Runner, wd, head string, changed []string) (ImporterSelection, error) {
+	return selectImporters(run, wd, head, changed, heavyImporters)
+}
+
+// selectImporters is SelectImporters over an explicit heavy map, so a test
+// drives the left-out path without swapping the package variable.
+func selectImporters(run affected.Runner, wd, head string, changed []string, heavy map[string]string) (ImporterSelection, error) {
 	importers, err := affected.DirectImporters(run, wd, head, changed)
 	if err != nil {
 		return ImporterSelection{}, fmt.Errorf("direct importers of the changed packages: %w", err)
 	}
 	var sel ImporterSelection
 	for _, dir := range importers {
-		if reason, heavy := heavyImporters[dir]; heavy {
+		if reason, isHeavy := heavy[dir]; isHeavy {
 			sel.LeftOut = append(sel.LeftOut, LeftOut{Dir: dir, Reason: reason})
 			continue
 		}

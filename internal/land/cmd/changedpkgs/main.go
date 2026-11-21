@@ -29,8 +29,8 @@
 // (gt-cwkzxk): a change to internal/rig tests internal/townstate, whose test
 // imports it, so a break in an importer fails presubmit rather than the
 // landing gate.
-// The heavy packages among them (land.SelectImporters) are left out and named
-// on stderr with the reason. A graph that cannot be read fails the run.
+// A heavy package among them (land.SelectImporters) is left out and named on
+// stderr with the reason. A graph that cannot be read fails the run.
 package main
 
 import (

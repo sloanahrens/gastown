@@ -76,19 +76,20 @@ func (r importRunner) run(argv []string) ([]byte, error) {
 	return nil, fmt.Errorf("unexpected command %q", argv)
 }
 
-// importFixture is a small module: rig is imported by townstate and by the
-// heavy internal/cmd; townview reaches rig only through townstate; tools
+// importFixture is a small module: rig is imported by townstate, by
+// internal/cmd and by internal/daemon; townview reaches rig only through townstate; tools
 // imports nothing in the module.
 var importFixture = map[string][]string{
 	"internal/rig":       nil,
 	"internal/townstate": {"internal/rig"},
 	"internal/townview":  {"internal/townstate"},
 	"internal/cmd":       {"internal/rig"},
+	"internal/daemon":    {"internal/rig"},
 	"internal/polecat":   {"internal/townstate"},
 	"internal/tools":     nil,
 }
 
-func TestSelectImportersAddsDirectImportersAndLeavesHeavyOnesOut(t *testing.T) {
+func TestSelectImportersAddsDirectImportersWhateverTheirSize(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name     string
@@ -97,26 +98,23 @@ func TestSelectImportersAddsDirectImportersAndLeavesHeavyOnesOut(t *testing.T) {
 		wantLeft []string
 	}{
 		{
-			name:     "a leaf's direct importers, heavy one left out",
-			changed:  []string{"internal/rig"},
-			wantAdd:  []string{"internal/townstate"},
-			wantLeft: []string{"internal/cmd"},
+			name:    "a leaf's direct importers, internal/cmd and internal/daemon among them",
+			changed: []string{"internal/rig"},
+			wantAdd: []string{"internal/cmd", "internal/daemon", "internal/townstate"},
 		},
 		{
-			name:     "the direct importers of a middle package, not of its importers",
-			changed:  []string{"internal/townstate"},
-			wantAdd:  []string{"internal/townview"},
-			wantLeft: []string{"internal/polecat"},
+			name:    "the direct importers of a middle package, not of its importers",
+			changed: []string{"internal/townstate"},
+			wantAdd: []string{"internal/polecat", "internal/townview"},
 		},
 		{
 			name:    "a package nothing imports adds nothing",
 			changed: []string{"internal/tools"},
 		},
 		{
-			name:     "changed packages are not added as importers of each other",
-			changed:  []string{"internal/rig", "internal/townstate"},
-			wantAdd:  []string{"internal/townview"},
-			wantLeft: []string{"internal/cmd", "internal/polecat"},
+			name:    "changed packages are not added as importers of each other",
+			changed: []string{"internal/rig", "internal/townstate"},
+			wantAdd: []string{"internal/cmd", "internal/daemon", "internal/polecat", "internal/townview"},
 		},
 	}
 	for _, tc := range cases {
@@ -141,6 +139,25 @@ func TestSelectImportersAddsDirectImportersAndLeavesHeavyOnesOut(t *testing.T) {
 				t.Errorf("LeftOut = %v, want %v", left, tc.wantLeft)
 			}
 		})
+	}
+}
+
+// TestSelectImportersLeavesOutAListedHeavyImporter: the mechanism stays for a
+// package that is really too slow: one listed in the heavy map is reported in
+// LeftOut with its reason and is not added.
+func TestSelectImportersLeavesOutAListedHeavyImporter(t *testing.T) {
+	t.Parallel()
+	r := importRunner{list: importGraphList(t, importFixture)}
+	heavy := map[string]string{"internal/cmd": "measured 600 s"}
+	sel, err := selectImporters(r.run, importFixtureRoot, "HEAD", []string{"internal/rig"}, heavy)
+	if err != nil {
+		t.Fatalf("selectImporters: %v", err)
+	}
+	if want := []string{"internal/daemon", "internal/townstate"}; !slices.Equal(sel.Add, want) {
+		t.Errorf("Add = %v, want %v", sel.Add, want)
+	}
+	if len(sel.LeftOut) != 1 || sel.LeftOut[0].Dir != "internal/cmd" || sel.LeftOut[0].Reason != "measured 600 s" {
+		t.Errorf("LeftOut = %+v, want internal/cmd with its reason", sel.LeftOut)
 	}
 }
 
