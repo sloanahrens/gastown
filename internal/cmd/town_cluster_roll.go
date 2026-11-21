@@ -654,10 +654,11 @@ func liveDeploymentRevision(ctx context.Context, kubectl update.RunFunc, namespa
 	if revision == "" {
 		return "", fmt.Errorf("%s records no revision, so its undo command would name none: deployment.kubernetes.io/revision is unset; nothing was applied", resource)
 	}
-	if n, convErr := strconv.Atoi(revision); convErr != nil || n < 1 {
+	n, convErr := strconv.Atoi(revision)
+	if convErr != nil || n < 1 {
 		return "", fmt.Errorf("%s records a revision that is not a positive number, so its undo command would name none; nothing was applied", resource)
 	}
-	return revision, nil
+	return strconv.Itoa(n), nil
 }
 
 // applyObject encodes one manifest and hands it to kubectl on stdin. The error
