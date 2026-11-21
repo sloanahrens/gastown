@@ -33,15 +33,16 @@ const (
 // The refusal codes a JSON refusal carries. The forwarder shows them to the
 // caller, so they are stable names, not sentences.
 const (
-	codeUnauthorized  = "unauthorized"
-	codeForbidden     = "forbidden"
-	codeBadRequest    = "bad_request"
-	codeStdinTooLarge = "stdin_too_large"
-	codeTooManyCalls  = "too_many_calls"
-	codeUnavailable   = "unavailable"
-	codeMethod        = "method_not_allowed"
-	codeNotFound      = "not_found"
-	codeInternal      = "gateway_failed"
+	codeUnauthorized       = "unauthorized"
+	codeRefusalsSuppressed = "refusals_suppressed"
+	codeForbidden          = "forbidden"
+	codeBadRequest         = "bad_request"
+	codeStdinTooLarge      = "stdin_too_large"
+	codeTooManyCalls       = "too_many_calls"
+	codeUnavailable        = "unavailable"
+	codeMethod             = "method_not_allowed"
+	codeNotFound           = "not_found"
+	codeInternal           = "gateway_failed"
 )
 
 const (
@@ -121,6 +122,8 @@ type Gateway struct {
 	caps       CapCounters
 	doltProbe  func(context.Context) error
 	closing    atomic.Bool
+	// preAuth bounds the refusal lines a request that has not authenticated writes.
+	preAuth refusalWindow
 }
 
 // NewGateway builds a Gateway. A missing piece is refused by name: an unwired
@@ -306,12 +309,12 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	caller := r.Header.Get("X-Gt-Caller")
 	if g.closing.Load() {
-		g.refuseLogged(w, CallRecord{Caller: caller}, start, http.StatusServiceUnavailable, codeUnavailable, "the gateway is shutting down")
+		g.refuseLogged(w, true, CallRecord{Caller: caller}, start, http.StatusServiceUnavailable, codeUnavailable, "the gateway is shutting down")
 		return
 	}
 	req, stdin, err := ReadRequest(r.Body)
 	if err != nil {
-		g.refuseLogged(w, CallRecord{Caller: caller}, start, http.StatusBadRequest, codeBadRequest, err.Error())
+		g.refuseLogged(w, true, CallRecord{Caller: caller}, start, http.StatusBadRequest, codeBadRequest, err.Error())
 		return
 	}
 	ident, err := g.auth.Authenticate(r.Header.Get("Authorization"))
@@ -322,12 +325,12 @@ func (g *Gateway) serveExec(w http.ResponseWriter, r *http.Request) {
 			refuseAuth(w, err)
 			return
 		}
-		g.refuseLogged(w, CallRecord{Caller: caller, Argv: req.Argv}, start, http.StatusUnauthorized, codeUnauthorized, err.Error())
+		g.refuseLogged(w, true, CallRecord{Caller: caller, Argv: req.Argv}, start, http.StatusUnauthorized, codeUnauthorized, err.Error())
 		return
 	}
 	verb, err := g.policy.Authorize(ident.Class, req.Argv)
 	if err != nil {
-		g.refuseLogged(w, CallRecord{Class: string(ident.Class), Caller: caller, Actor: CallActor(req.Env), Argv: req.Argv}, start, http.StatusForbidden, codeForbidden, err.Error())
+		g.refuseLogged(w, false, CallRecord{Class: string(ident.Class), Caller: caller, Actor: CallActor(req.Env), Argv: req.Argv}, start, http.StatusForbidden, codeForbidden, err.Error())
 		return
 	}
 	req.TimeoutMS = CapTimeout(req.TimeoutMS, verb)
@@ -535,17 +538,27 @@ func refuseAuth(w http.ResponseWriter, err error) {
 	refuse(w, status, code, err.Error())
 }
 
-// refuseLogged answers a refusal the gateway makes before bd runs, and writes the
-// call's line first, with the refusal's code as its reason. rec holds only what
-// the gateway knows at that point: a request that never authenticated has no
-// class and no actor, and an argv the scan could not place carries no flags but
-// the one flag it refused. The line keeps no error text, so the log never
-// repeats the request.
-func (g *Gateway) refuseLogged(w http.ResponseWriter, rec CallRecord, start time.Time, status int, code, message string) {
+// refuseLogged answers a refusal the gateway makes before bd runs. A pre-auth
+// refusal (preAuth) is bounded per window: its line is written for the first few
+// and only counted for the rest, and the refusal that finds the window turned
+// writes one line first naming how many the last window dropped; the 403, which
+// follows authentication, is always written. The line keeps no request text.
+func (g *Gateway) refuseLogged(w http.ResponseWriter, preAuth bool, rec CallRecord, start time.Time, status int, code, message string) {
 	rec.ExitCode = ExitRefused
 	rec.Duration = time.Since(start)
 	rec.Refusal = code
-	g.log.Log(rec)
+	write, suppressed := true, uint64(0)
+	if preAuth {
+		write, suppressed = g.preAuth.take()
+	}
+	if suppressed > 0 {
+		g.log.LogUncounted(CallRecord{ExitCode: ExitRefused, Refusal: codeRefusalsSuppressed, Error: fmt.Sprintf("%d pre-auth refusal lines were not written in the last window", suppressed)})
+	}
+	if write {
+		g.log.Log(rec)
+	} else {
+		g.log.CountOnly(rec)
+	}
 	refuse(w, status, code, message)
 }
 

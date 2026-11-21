@@ -328,7 +328,7 @@ var (
 // buffer or a closed log drops the line and counts the drop, and a line is
 // discarded rather than delay the call (gt-itjuwu).
 func (l *CallLog) Log(rec CallRecord) {
-	l.log(rec, true)
+	l.log(rec, true, true)
 }
 
 // LogUncounted records a call's line without moving the counters Log keeps for
@@ -336,12 +336,17 @@ func (l *CallLog) Log(rec CallRecord) {
 // executor's too_many_calls instead. A line this log cannot store still counts
 // as dropped, which is the log's health and not the call's.
 func (l *CallLog) LogUncounted(rec CallRecord) {
-	l.log(rec, false)
+	l.log(rec, false, true)
+}
+
+// CountOnly counts a call exactly as Log does and writes no line.
+func (l *CallLog) CountOnly(rec CallRecord) {
+	l.log(rec, true, false)
 }
 
 // log writes rec's line and, when counted, moves the call, error and verb
 // counters with it.
-func (l *CallLog) log(rec CallRecord, counted bool) {
+func (l *CallLog) log(rec CallRecord, counted, write bool) {
 	parsed := l.parseArgv(rec.Argv)
 	e := entry{
 		TS:          l.now().UTC().Format(time.RFC3339Nano),
@@ -381,6 +386,11 @@ func (l *CallLog) log(rec CallRecord, counted bool) {
 			countRefusal(l.refusals, e.Refusal)
 		}
 		l.countActor(e.Actor, rec.Write, rec.Conflict)
+	}
+	if !write {
+		l.mu.Unlock()
+		l.sendMu.RUnlock()
+		return
 	}
 	if marshalErr != nil {
 		l.dropped++
