@@ -304,6 +304,8 @@ type tierSweepTierResult struct {
 	// forward (gt-euxf1). It, not the record's LastSHA, is what a verdict's
 	// failing names belong to.
 	SHA string `json:"sha,omitempty"`
+	// Cause names the step that stopped a no-result stage, from its output (gt-jie24r).
+	Cause string `json:"cause,omitempty"`
 }
 
 func tierSweepStatePath(townRoot, rig string) string {
@@ -1652,8 +1654,8 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 				} else if res.exitCode == 0 {
 					reason = "no verdict line"
 				}
-				ts = tierSweepTierResult{Verdict: tierSweepRed, Failed: 1, FailedNames: []string{reason}}
-				d.logger.Printf("tier_sweep: %s: %s %s: %s", rig, tier, tierSweepRed, reason)
+				ts = tierSweepTierResult{Verdict: tierSweepRed, Failed: 1, FailedNames: []string{reason}, Cause: tierSweepNoResultCause(res.output)}
+				d.logger.Printf("tier_sweep: %s: %s %s: %s%s", rig, tier, tierSweepRed, reason, tierSweepCauseNote(ts.Cause))
 			}
 			ts.Log = logPath
 			// The command that ran for this tier in this rig's tree, which the
@@ -3952,7 +3954,7 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			// attention item; the next sweep re-runs the tip and files a bead
 			// only if a run actually fails (gt-856oaq).
 			tierSweepCloseNoRunBead(d, bd, rig, tier, sha, existing)
-			d.logger.Printf("tier_sweep: %s: %s %s: no run result, no bead filed; the attention item stands until the next sweep", rig, tier, tierSweepRed)
+			d.logger.Printf("tier_sweep: %s: %s %s: no run result, no bead filed; the attention item stands until the next sweep%s", rig, tier, tierSweepRed, tierSweepCauseNote(ts.Cause))
 			continue
 		}
 		names := ts.FailedNames
@@ -3972,6 +3974,27 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 // failure and files as before.
 func tierSweepNoRunResult(ts tierSweepTierResult) bool {
 	return len(ts.FailedNames) == 1 && ts.FailedNames[0] == tierSweepRunnerNoResult
+}
+
+// tierSweepNoResultCause names the step that stopped a no-result stage, without the runner's prefix (gt-jie24r).
+func tierSweepNoResultCause(output string) string {
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line, ok := strings.CutPrefix(lines[i], "sweep-run: "); ok && strings.Contains(line, " failed") {
+			if i+1 == len(lines) {
+				return line
+			}
+			return line + "; " + strings.TrimSpace(lines[i+1])
+		}
+	}
+	return ""
+}
+
+func tierSweepCauseNote(cause string) string {
+	if cause == "" {
+		return ""
+	}
+	return ": " + cause
 }
 
 // tierSweepCloseNoRunBead closes the open bead an earlier sweep filed under the
