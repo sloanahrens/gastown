@@ -316,7 +316,7 @@ func TestFollowupFeedDrainsAQueueLineInParts(t *testing.T) {
 		Title: "count the row", Claim: "the row is skipped"}
 	// A line the bound can file whole, so the compaction runs in the same pass.
 	if err := f.reviews.AppendQueue(queueLine("gt-drained", f.work.Rig, ReviewFindingText{
-		ID: "f-3", Severity: "minor", File: "internal/land/note.go", Line: 30,
+		ID: "f-3", Severity: "minor", File: "internal/cmd/note.go", Line: 30,
 		Title: "swap the nil check", Claim: "the map is never nil"})); err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +349,7 @@ func TestFollowupFeedDrainsAQueueLineInParts(t *testing.T) {
 	if len(f.fake.created) != 3 {
 		t.Fatalf("filed %d beads over both landings, want the second finding filed too:\n%s", len(f.fake.created), log)
 	}
-	if got := f.fake.created[2].Title; !strings.Contains(got, "count the row") {
+	if got := f.fake.created[2].Body; !strings.Contains(got, "count the row") {
 		t.Errorf("the last bead is %q, want the finding the first landing left", got)
 	}
 	queued, err = f.reviews.Queued()
