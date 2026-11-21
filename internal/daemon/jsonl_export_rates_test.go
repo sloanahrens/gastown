@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+	"math"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -140,5 +142,44 @@ func TestJSONLExportRatesConcurrent(t *testing.T) {
 	rows, perRow, ok := r.PerRow("gastown", "issues")
 	if !ok || rows < 1000 || rows > 1000*workers || rows%1000 != 0 || perRow != time.Microsecond {
 		t.Fatalf("shared PerRow = (%d, %v, %v), want one of the recorded samples at 1µs per row", rows, perRow, ok)
+	}
+}
+
+// TestJSONLSlowdown: the slowdown is the median of the usable ratios, never
+// below 1. NaN, infinite and non-positive ratios are ignored.
+func TestJSONLSlowdown(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		ratios []float64
+		want   float64
+	}{
+		{"three values give the middle one", []float64{88, 140, 143}, 140},
+		{"four values give the mean of the middle two", []float64{88, 140, 143, 200}, 141.5},
+		{"no ratios give 1", nil, 1},
+		{"all under 1 give 1", []float64{0.5, 0.8}, 1},
+		{"NaN is ignored", []float64{88, 140, 143, math.NaN()}, 140},
+		{"a single Inf gives 1", []float64{math.Inf(1)}, 1},
+		{"non-positive values are ignored", []float64{0, -3, 88, 140, 143}, 140},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := jsonlSlowdown(tc.ratios); got != tc.want {
+				t.Errorf("jsonlSlowdown(%v) = %v, want %v", tc.ratios, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJSONLSlowdownLeavesInputUnsorted: the caller's slice keeps its order
+// after the median is taken.
+func TestJSONLSlowdownLeavesInputUnsorted(t *testing.T) {
+	t.Parallel()
+	ratios := []float64{143, 88, 140}
+	want := []float64{143, 88, 140}
+	jsonlSlowdown(ratios)
+	if !slices.Equal(ratios, want) {
+		t.Errorf("caller's slice became %v, want %v", ratios, want)
 	}
 }

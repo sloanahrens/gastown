@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"math"
+	"slices"
 	"sync"
 	"time"
 )
@@ -61,4 +63,28 @@ func (r *jsonlExportRates) Ratio(db, table string, took time.Duration) (ratio fl
 		return 0, false
 	}
 	return float64(took) / float64(s.took), true
+}
+
+// jsonlSlowdown returns the median of the ratios of this cycle's exports to
+// their remembered samples, and never less than 1. NaN, infinite and
+// non-positive ratios are ignored, and 1 is returned when none remain. The
+// caller's slice is not reordered: the median is taken from a sorted copy.
+func jsonlSlowdown(ratios []float64) float64 {
+	kept := make([]float64, 0, len(ratios))
+	for _, r := range ratios {
+		if math.IsNaN(r) || math.IsInf(r, 0) || r <= 0 {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if len(kept) == 0 {
+		return 1
+	}
+	slices.Sort(kept)
+	n := len(kept)
+	median := kept[n/2]
+	if n%2 == 0 {
+		median = (kept[n/2-1] + kept[n/2]) / 2
+	}
+	return max(median, 1)
 }
