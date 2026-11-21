@@ -157,6 +157,10 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return cliReply{stdout: diskMaintSandboxContext + "\n"}
 		case verb == cacheTrimClaimsVerb:
 			return cliReply{stdout: cacheTrimClaimsJSON}
+		case strings.HasPrefix(verb, "wait --for=condition=failed "):
+			// A Job that has not failed: kubectl's wait for the failed condition
+			// runs out its bound, so the complete wait decides the pass.
+			return cliReply{stderr: "error: timed out waiting for the condition\n", code: 1}
 		case strings.HasPrefix(verb, "get pods "):
 			return cliReply{stdout: cacheTrimPodsJSON}
 		case strings.Contains(verb, " "+cachevol.HelperPath+" trim-list "):
