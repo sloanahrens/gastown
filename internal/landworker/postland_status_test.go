@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // statusContext is the context every status-mode test configures.
@@ -1238,4 +1239,128 @@ func TestPostLandStatusDoneMarkerIsClearedWhenItsEntryGoes(t *testing.T) {
 	if greens, _, _ := v.counts(); greens != 1 {
 		t.Errorf("green fired %d times, want once", greens)
 	}
+}
+
+// eventTrigger records, in one log with the lander, when the pending verdicts
+// are polled, and what each poll costs on the worker's clock: a stalled remote
+// uses its whole budget before PollPending returns, a healthy one costs nothing.
+type eventTrigger struct {
+	log  *[]string
+	cost func()
+}
+
+func (e eventTrigger) Trigger(context.Context, PostLand) {}
+func (e eventTrigger) PollPending(context.Context) {
+	*e.log = append(*e.log, "poll")
+	if e.cost != nil {
+		e.cost()
+	}
+}
+
+// TestPassReadsPendingVerdictsBetweenLandings: the pending verdicts are read
+// before a landing, not only once at the end of a pass that lasts as long as all
+// its landings, but at most once per PostLandStatusPollInterval: a stalled remote
+// costs one budget per interval and never one per landing (gt-2eub2x). A draining
+// worker polls nothing, and a pass with nothing ready still polls once at its end.
+func TestPassReadsPendingVerdictsBetweenLandings(t *testing.T) {
+	t.Parallel()
+	landTwo := func(h *harness, events *[]string, landingTakes time.Duration) {
+		h.lander.fn = func(_ int, w land.Work) (land.Result, error) {
+			*events = append(*events, "land")
+			h.now = h.now.Add(landingTakes)
+			return land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"}, nil
+		}
+		h.seedReadyAt(t, "gt-a", 2, "2026-09-30T11:00:00Z")
+		h.seedReadyAt(t, "gt-b", 2, "2026-09-30T11:01:00Z")
+	}
+	t.Run("a landing that outlasts the interval is followed by a poll", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var events []string
+		h.w.PostLand = eventTrigger{log: &events}
+		landTwo(h, &events, PostLandStatusPollInterval+time.Second)
+
+		h.w.Pass(context.Background())
+
+		if got, want := strings.Join(events, ","), "poll,land,poll,land,poll"; got != want {
+			t.Fatalf("events = %s, want %s: a poll before each landing once the interval has passed, and the pass-end poll", got, want)
+		}
+	})
+	t.Run("a poll that completed is not repeated inside the interval", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var events []string
+		h.w.PostLand = eventTrigger{log: &events}
+		landTwo(h, &events, time.Second)
+
+		h.w.Pass(context.Background())
+
+		if got, want := strings.Join(events, ","), "poll,land,land,poll"; got != want {
+			t.Fatalf("events = %s, want %s: one poll before the landings, none inside the interval, the pass-end poll", got, want)
+		}
+	})
+	t.Run("a stalled remote costs one budget, not one per landing", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var events []string
+		stalled := func() { h.now = h.now.Add(PostLandStatusPassBudget) }
+		h.w.PostLand = eventTrigger{log: &events, cost: stalled}
+		h.lander.fn = func(_ int, w land.Work) (land.Result, error) {
+			events = append(events, "land")
+			return land.Result{LandedCommit: "cccccccccc", PatchID: "pppppppppp"}, nil
+		}
+		h.seedReadyAt(t, "gt-a", 2, "2026-09-30T11:00:00Z")
+		h.seedReadyAt(t, "gt-b", 2, "2026-09-30T11:01:00Z")
+		h.seedReadyAt(t, "gt-c", 2, "2026-09-30T11:02:00Z")
+		start := h.now
+
+		h.w.Pass(context.Background())
+
+		polls := 0
+		for _, e := range events {
+			if e == "poll" {
+				polls++
+			}
+		}
+		if polls != 2 {
+			t.Fatalf("events = %v: %d polls, want 2 (one before the landings, one at the pass end)", events, polls)
+		}
+		if paid := h.now.Sub(start); paid != 2*PostLandStatusPassBudget {
+			t.Fatalf("the pass paid %s of poll budget, want 2 x %s", paid, PostLandStatusPassBudget)
+		}
+	})
+	t.Run("a draining worker polls nothing", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var events []string
+		h.w.PostLand = eventTrigger{log: &events}
+		h.w.Draining = func() bool { return true }
+		h.seedReady(t, "gt-a")
+		// A repair of an earlier landing is finished even while draining, so its
+		// landOne runs: the poll before it must obey the drain as the pass-end one does.
+		h.w.pendingRepair = map[string]land.Work{"gt-r": {BeadID: "gt-r", Branch: branch, Head: noteHead, Target: "main", Worker: "opal"}}
+		h.w.startupDone = true
+
+		h.w.Pass(context.Background())
+		if len(h.lander.calls) == 0 {
+			t.Fatal("no landing ran while draining, so the row does not reach landOne")
+		}
+		for _, e := range events {
+			if e == "poll" {
+				t.Fatalf("events = %v: a draining worker polled", events)
+			}
+		}
+	})
+	t.Run("a pass with nothing ready polls once at its end", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		var events []string
+		h.w.PostLand = eventTrigger{log: &events}
+
+		h.w.Pass(context.Background())
+
+		if got := strings.Join(events, ","); got != "poll" {
+			t.Fatalf("events = %s, want one poll", got)
+		}
+	})
 }

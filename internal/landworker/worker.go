@@ -285,7 +285,10 @@ type Worker struct {
 	// call so a label written during it is not missed; lastListEmpty is whether
 	// that list held nothing, and lastListCount is what it held, the count a
 	// skipped pass republishes (gt-flo7a).
-	lastListAt    time.Time
+	lastListAt time.Time
+	// lastPollEnd is when the pending post-land verdicts were last read, whether the
+	// read finished or ran out of its budget.
+	lastPollEnd   time.Time
 	lastListEmpty bool
 	lastListCount int
 	// stampUnreadable is true while the last ready-stamp read failed, so the
@@ -455,7 +458,7 @@ func (w *Worker) Pass(ctx context.Context) Report {
 		// by PostLandStatusReadTimeout), so a stalled remote cannot hold the
 		// pass either (gt-gg9hv.7.1).
 		if w.PostLand != nil {
-			w.PostLand.PollPending(ctx)
+			w.pollPending(ctx)
 		}
 		// Last, so a slow or failing sweep never holds up a landing this
 		// pass.
@@ -465,6 +468,20 @@ func (w *Worker) Pass(ctx context.Context) Report {
 	// following pass will act on.
 	w.writeBackoff()
 	return rep
+}
+
+// pollPending reads the pending post-land verdicts and records when the read
+// ended, however it ended: a read cut off by its budget counts, so a stalled
+// remote is not tried again before pollDue says the interval has passed.
+func (w *Worker) pollPending(ctx context.Context) {
+	w.PostLand.PollPending(ctx)
+	w.lastPollEnd = w.now()
+}
+
+// pollDue reports whether the pending verdicts are due before a landing: the
+// last poll ended at least PostLandStatusPollInterval ago, or none ran yet.
+func (w *Worker) pollDue() bool {
+	return w.lastPollEnd.IsZero() || w.now().Sub(w.lastPollEnd) >= PostLandStatusPollInterval
 }
 
 // writeBackoff records the beads whose landing is failing and waiting for a
@@ -1127,6 +1144,14 @@ func classify(ctx context.Context, err error) outcome {
 
 // landOne calls Land once and acts on the outcome.
 func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
+	// A pass lasts as long as all its landings, so the pending verdicts are read
+	// before a landing and not only at the pass's end: a red status is acted on, and
+	// a green one read, about every interval. The poll is rate-limited here because
+	// PollPending's budget is per call and a read it cuts off learns nothing: a
+	// stalled remote would otherwise cost the whole budget at every landing start.
+	if w.PostLand != nil && !w.draining() && w.pollDue() {
+		w.pollPending(ctx)
+	}
 	timeout := w.LandTimeout
 	if timeout <= 0 {
 		timeout = DefaultLandTimeout

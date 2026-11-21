@@ -48,7 +48,7 @@ type PostLandResult struct {
 }
 
 // PostLandTrigger starts the post-landing verdict for a landing, and reads the
-// verdicts still waiting on CI once per worker pass.
+// verdicts still waiting on CI once per worker pass and before each landing.
 type PostLandTrigger interface {
 	Trigger(ctx context.Context, pl PostLand)
 	PollPending(ctx context.Context)
