@@ -268,7 +268,7 @@ func (d *Daemon) recordNodeDiskReads(reads []hostNodeRead) {
 			ReadAt:        now,
 		}
 	}
-	if err := recordNodeDisk(d.config.TownRoot, entries); err != nil {
+	if err := recordNodeDiskIn(d.config.TownRoot, entries, d.diskMaintenanceSeams().nodeDiskFS); err != nil {
 		d.logger.Printf("control node disk: the readings were not recorded (%v)", err)
 	}
 }

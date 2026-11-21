@@ -167,6 +167,9 @@ type diskMaintSeams struct {
 	// recordNodeDisk writes a pass's node disk entries into the town's record;
 	// nil is recordNodeDisk against the town root.
 	recordNodeDisk func(townRoot string, entries map[string]nodeDiskEntry) error
+	// nodeDiskFS replaces the directory creation and the write of the node disk
+	// record the node readings are recorded through; the zero value is the real ones.
+	nodeDiskFS nodeDiskFS
 }
 
 // jobRunAppender appends one maintenance job run to the ledger. It is an

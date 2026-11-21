@@ -83,6 +83,25 @@ type nodeDiskState struct {
 // that cannot be read is an error and nothing is written, so one pass's
 // readings never stand in for a record that could not be read.
 func recordNodeDisk(townRoot string, entries map[string]nodeDiskEntry) error {
+	return recordNodeDiskIn(townRoot, entries, nodeDiskFS{})
+}
+
+// nodeDiskFS is the two steps of recordNodeDiskIn that touch the disk; a nil
+// field is the real step (os.MkdirAll, atomicfile.WriteJSON), so a test can
+// make either fail as root too.
+type nodeDiskFS struct {
+	mkdirAll  func(path string, perm os.FileMode) error
+	writeJSON func(path string, v any) error
+}
+
+// recordNodeDiskIn is recordNodeDisk over the steps in ops.
+func recordNodeDiskIn(townRoot string, entries map[string]nodeDiskEntry, ops nodeDiskFS) error {
+	if ops.mkdirAll == nil {
+		ops.mkdirAll = os.MkdirAll
+	}
+	if ops.writeJSON == nil {
+		ops.writeJSON = func(path string, v any) error { return atomicfile.WriteJSON(path, v) }
+	}
 	nodeDiskWriteMu.Lock()
 	defer nodeDiskWriteMu.Unlock()
 
@@ -105,10 +124,10 @@ func recordNodeDisk(townRoot string, entries map[string]nodeDiskEntry) error {
 		state.Nodes[name] = mergedNodeDiskRecord(state.Nodes[name], entry)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := ops.mkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	return atomicfile.WriteJSON(path, state)
+	return ops.writeJSON(path, state)
 }
 
 // recordSandboxDiskReading writes one pass's sandbox cluster disk reading into
