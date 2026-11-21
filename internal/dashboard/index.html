@@ -2728,7 +2728,7 @@ function renderDisk(s) {
     // with under a week left is warned on its days left, so either takes the
     // page's warning colour; any other line is plain.
     const warn = r.used_pct >= 90 || (r.days_left_ok && r.days_left < 7);
-    box.append(el("div", warn ? "warnc" : "", r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes) + " GiB), " + diskGrowthText(r)));
+    box.append(el("div", warn ? "warnc" : "", r.name + " disk " + r.used_pct + "% used (" + diskGiB(r.used_bytes || 0) + " of " + diskGiB(r.total_bytes || 0) + " GiB), " + diskGrowthText(r)));
   }
 }
 
