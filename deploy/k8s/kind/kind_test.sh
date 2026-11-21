@@ -80,17 +80,30 @@ case "$1" in
     rm -f "$STATE/colima-running"; exit 0 ;;
   ssh)
     # The VM's inotify limit: the read answers from $STATE/inotify-max (128, the
-    # kernel default, when absent); a sysctl --system applies the raised value.
+    # kernel default, when absent). The write runs the line ssh is given the way the
+    # VM's shell parses it, with its /etc/sysctl.d kept in $STATE.
     case "$*" in
       *"sysctl -n fs.inotify.max_user_instances"*)
         [ -n "${STUB_SYSCTL_READ_FAILS:-}" ] && exit 1
         cat "$STATE/inotify-max" 2>/dev/null || echo 128 ;;
       *"sysctl --system"*)
         [ -n "${STUB_SYSCTL_WRITE_FAILS:-}" ] && exit 1
-        echo 1024 >"$STATE/inotify-max" ;;
+        mkdir -p "$STATE/sysctl.d"
+        line="$*"
+        remote="${line#*-- }"
+        remote="${remote//sudo /}"
+        sh -c "${remote//\/etc\/sysctl.d/$STATE\/sysctl.d}"
+        exit $? ;;
     esac
     exit 0 ;;
 esac
+STUB
+cat >"$TMP/bin/sysctl" <<'STUB'
+#!/usr/bin/env bash
+"$(dirname "$0")/_log" sysctl "$@"
+# --system applies the value the sysctl.d file holds, as the VM's sysctl does.
+[ "$1" = --system ] && sed -n 's/^fs.inotify.max_user_instances = //p' "$STATE/sysctl.d/99-gt-inotify.conf" >"$STATE/inotify-max"
+exit 0
 STUB
 cat >"$TMP/bin/kind" <<'STUB'
 #!/usr/bin/env bash
@@ -1009,10 +1022,11 @@ check "no gateway patch is applied to an empty list" test ! -e "$S/state/patch-g
 echo "the VM's inotify instance limit (a rebuilt VM starts at the kernel default of 128)"
 scenario inotify_raise
 run "$UP" --
-# The read, then the sysctl.d write and sysctl --system, after the profile starts and before the cluster is created.
+# The sysctl.d file holds the value, sysctl applied it, and both come after the profile start and before the cluster.
 raised() {
-  contains "sysctl -n fs.inotify.max_user_instances" "$CALLS_LOG" &&
-    contains "/etc/sysctl.d/99-gt-inotify.conf" "$CALLS_LOG" &&
+  test "$RC" -eq 0 &&
+    test "$(cat "$S/state/sysctl.d/99-gt-inotify.conf")" = "fs.inotify.max_user_instances = 1024" &&
+    test "$(cat "$S/state/inotify-max")" = 1024 &&
     before "colima start gt-sbx" "sysctl --system" &&
     before "sysctl --system" "kind create cluster"
 }
