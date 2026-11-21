@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"sync/atomic"
@@ -306,6 +307,16 @@ func TestCacheTrimClaimJobBudgetNamesThePhaseThatWasCut(t *testing.T) {
 	}
 }
 
+// probeVerdict is the probe's decision for one call: a context that has ended is
+// an error, except for the failed-condition wait, whose context ends when the
+// complete leg wins, by design.
+func probeVerdict(verb string, ctxErr error) error {
+	if ctxErr == nil || strings.HasPrefix(verb, "wait --for=condition=failed ") {
+		return nil
+	}
+	return fmt.Errorf("%q ran on a context already ended (%v)", verb, ctxErr)
+}
+
 // TestCacheTrimClaimJobBudgetOutlivesThePassContext pins that every cluster call
 // of a claim run (the apply, the wait, the result read) is made on the claim's
 // own budget: the run takes no caller context, so a caller-held context ends
@@ -325,10 +336,10 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	// bound read from the constants would move with a changed slack and pass.
 	const wantBudget = 20*time.Minute + 2*time.Minute
 	var calls atomic.Int32
-	f.d.cacheTrimCtxSeen = func(ctx context.Context) {
+	f.d.cacheTrimCtxSeen = func(ctx context.Context, verb string) {
 		n := calls.Add(1)
-		if err := ctx.Err(); err != nil {
-			t.Errorf("cluster call %d ran on a context already ended (%v); want the claim's own live budget", n, err)
+		if err := probeVerdict(verb, ctx.Err()); err != nil {
+			t.Errorf("cluster call %d: %v; want the claim's own live budget", n, err)
 		}
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -402,5 +413,39 @@ func TestCacheTrimClaimJobBudgetNamesTheContextThatCutsTheWait(t *testing.T) {
 	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
 	if err == nil || !strings.Contains(err.Error(), "the trim Job "+cacheTrimJob+" was cut off") {
 		t.Fatalf("a wait its context cut off = %v; want an error naming the Job and the cut-off", err)
+	}
+}
+
+// TestProbeVerdictFailsOnlyOnANonFailedWaitOnACancelledContext pins the probe's
+// decision, so a typo in the verb it exempts cannot silently disable it: a
+// context that has ended is an error for every call except the failed-condition
+// wait, whose context ends when the complete leg wins, and a live one never is.
+func TestProbeVerdictFailsOnlyOnANonFailedWaitOnACancelledContext(t *testing.T) {
+	t.Parallel()
+	const (
+		complete = "wait --for=condition=complete job/trim -n ns --timeout=1200s"
+		apply    = "apply -f -"
+		failed   = "wait --for=condition=failed job/trim -n ns --timeout=1200s"
+	)
+	for _, row := range []struct {
+		name      string
+		verb      string
+		cancelled bool
+		wantErr   bool
+	}{
+		{"complete wait, cancelled", complete, true, true},
+		{"apply, cancelled", apply, true, true},
+		{"failed-condition wait, cancelled", failed, true, false},
+		{"complete wait, live", complete, false, false},
+		{"apply, live", apply, false, false},
+		{"failed-condition wait, live", failed, false, false},
+	} {
+		var ctxErr error
+		if row.cancelled {
+			ctxErr = context.Canceled
+		}
+		if err := probeVerdict(row.verb, ctxErr); (err != nil) != row.wantErr {
+			t.Errorf("%s: probeVerdict = %v, want error %v", row.name, err, row.wantErr)
+		}
 	}
 }

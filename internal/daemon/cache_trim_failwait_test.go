@@ -217,7 +217,7 @@ type cacheTrimFailWaitCtxs struct {
 	completeLiveAtLog bool
 }
 
-func (c *cacheTrimFailWaitCtxs) record(ctx context.Context) {
+func (c *cacheTrimFailWaitCtxs) record(ctx context.Context, _ string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.errsAtCall = append(c.errsAtCall, ctx.Err())
