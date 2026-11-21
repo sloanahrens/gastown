@@ -184,8 +184,9 @@ const (
 	// read the render's own Secrets by name, and DeployerGroup is the group its
 	// binding grants it to. The rule names exactly the Secrets the render writes,
 	// because RBAC cannot grant existence without data: the deployer's Secret
-	// preflight gets each name, and list or watch would return the data itself
-	// (gt-uoju5c).
+	// preflight gets each name, and get returns the Secret object, values included,
+	// so the group can read the values of those Secrets. list or watch would read
+	// every Secret in the namespace, so the rule carries get alone (gt-uoju5c).
 	SecretNamesRole = "deployer-secret-names"
 	DeployerGroup   = "gt-deployers"
 	// terminationGraceMargin keeps the pod alive past the drain, so the kubelet's
