@@ -66,12 +66,19 @@ func (d *Daemon) cacheTrimClaimJobRun(_ context.Context, kubeconfig string, clai
 	start := d.clk().Now()
 	finished, err := d.cacheTrimApply(budget, kubeconfig, namespace, jobName, m, cacheTrimClaimWaitTimeout)
 	if err != nil {
+		// A wait the budget cuts is not an error from cacheTrimApply, so an error
+		// with the budget over is the apply's; a failed Job's log read the budget
+		// ends is read the same way.
+		if cut := budget.Err(); cut != nil {
+			return 0, 0, 0, fmt.Errorf("the trim Job %s was cut off during the apply after %s by its context (%v)",
+				jobName, d.clk().Now().Sub(start).Round(time.Second), cut)
+		}
 		return 0, 0, 0, fmt.Errorf("applying the trim Job %s: %w", jobName, err)
 	}
 	if !finished {
 		// A budget that ended before the wait cut it short: not pending.
 		if err := budget.Err(); err != nil {
-			return 0, 0, 0, fmt.Errorf("the trim Job %s was cut off after %s by its context (%v), before the %s wait ended",
+			return 0, 0, 0, fmt.Errorf("the trim Job %s was cut off during the wait after %s by its context (%v), before the %s wait ended",
 				jobName, d.clk().Now().Sub(start).Round(time.Second), err, cacheTrimClaimWaitTimeout)
 		}
 		state, err := d.cacheTrimJobState(budget, kubeconfig, namespace, jobName)
