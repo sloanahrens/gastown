@@ -2138,6 +2138,7 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		Jobs:     cfg.Jobs,
 		OutDir:   filepath.Join(cfg.OutputRoot, st.rig, runID),
 		RepoDir:  constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, st.rig)),
+		Snapshot: filepath.Join(d.config.TownRoot, ".runtime", "sweep-repo", st.rig+".git"),
 		Dind:     cfg.Dind,
 		// The sidecar's share; zero renders the default (gt-esfo9p).
 		DindCPUs: cfg.DindCPUs,
@@ -3548,7 +3549,37 @@ func (d *Daemon) tierSweepRunnerTeardown(ctx context.Context, spec sweeprunner.S
 // and failed. The step loop, its retry and its failure message are
 // sweeprunner.RunSteps's (gt-d6hfcc).
 func tierSweepRunSteps(ctx context.Context, d *Daemon, steps []sweeprunner.Step) (string, int) {
-	return sweeprunner.RunSteps(ctx, d.clk(), d.runCmd, steps)
+	return sweeprunner.RunSteps(ctx, d.clk(), d.timedMirrorCmd, steps)
+}
+
+// timedMirrorCmd is runCmd, and for the sweep mirror's clone and fetch it logs one
+// line each naming the rig and the seconds the command took, so the cost of a
+// delta fetch is read from the daemon log (gt-4dx0su).
+func (d *Daemon) timedMirrorCmd(cmd *exec.Cmd) ([]byte, []byte, error) {
+	kind, mirror := tierSweepMirrorStep(cmd.Args)
+	if kind == "" {
+		return d.runCmd(cmd)
+	}
+	start := d.clk().Now()
+	stdout, stderr, err := d.runCmd(cmd)
+	outcome := "ok"
+	if err != nil {
+		outcome = "failed"
+	}
+	d.logger.Printf("tier_sweep: %s: mirror %s took %s (%s)", strings.TrimSuffix(filepath.Base(mirror), ".git"), kind, d.clk().Now().Sub(start).Round(100*time.Millisecond), outcome)
+	return stdout, stderr, err
+}
+
+// tierSweepMirrorStep names a mirror command, "clone" or "fetch", and the mirror
+// directory it works on, from its argv; an empty kind is any other command.
+func tierSweepMirrorStep(argv []string) (kind, mirror string) {
+	switch {
+	case len(argv) >= 3 && argv[0] == "git" && argv[1] == "clone" && slices.Contains(argv, "--mirror"):
+		return "clone", argv[len(argv)-1]
+	case len(argv) >= 4 && argv[0] == "git" && argv[1] == "--git-dir" && slices.Contains(argv, "fetch"):
+		return "fetch", argv[2]
+	}
+	return "", ""
 }
 
 // tierSweepResumeEnableEnv is the daemon environment switch that lets a

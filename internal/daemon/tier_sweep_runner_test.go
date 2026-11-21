@@ -973,6 +973,7 @@ type runnerCluster struct {
 	noLogs         bool
 	failSyncCopy   bool
 	failSyncCreate bool
+	failRevParse   bool
 	failWait       bool
 	failApply      int
 	applies        int
@@ -1067,6 +1068,10 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 			return nil, []byte("Error from server (NotFound): jobs.batch not found\n"), errors.New("exit status 1")
 		}
 		return []byte(c.status), nil, nil
+	case slices.Contains(argv, "rev-parse"):
+		if c.failRevParse {
+			return nil, nil, errors.New("exit status 1")
+		}
 	case slices.Contains(argv, "create"):
 		if c.failSyncCreate {
 			return nil, []byte("Error from server (AlreadyExists): pods \"gt-sweep-sync-gastown\" already exists\n"), errors.New("exit status 1")
@@ -1166,7 +1171,7 @@ func TestTierSweepRunnerKubernetesLaunchesJob(t *testing.T) {
 			claimAt = i
 		case jobAt < 0 && bytes.Equal(cmds.stdin[i], plan.Job.JSON()):
 			jobAt = i
-		case syncAt < 0 && bytes.Equal(cmds.stdin[i], plan.Apply[2].Stdin):
+		case syncAt < 0 && bytes.Equal(cmds.stdin[i], syncCreate(plan).Stdin):
 			syncAt = i
 		}
 	}
@@ -1239,6 +1244,84 @@ func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
 		if bytes.Equal(cmds.stdin[i], plan.Job.JSON()) {
 			t.Errorf("the Job was applied at command %q after the sync copy failed", cmds.ran[i])
 		}
+	}
+}
+
+// TestSweepMirrorWithNoRefsFailsBeforeTheFetch drives a mirror a killed clone left
+// behind (HEAD resolves to nothing): the HEAD check fails, the stage is RED naming
+// that step, and neither the fetch nor anything after it runs, so no full fetch
+// reaches an empty repository (gt-4dx0su).
+func TestSweepMirrorWithNoRefsFailsBeforeTheFetch(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, spec, st := runnerKubernetesDaemon(t, now)
+	result := runnerTestResult(spec, now)
+	cluster := &runnerCluster{t: t, status: "Complete", result: &result, failRevParse: true}
+	cmds := &runnerFakeCmds{answer: cluster.answer}
+	d.execCmd = cmds.run
+
+	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+
+	if stage.reason != tierSweepRunnerNoResult || stage.exitCode == 0 {
+		t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+	}
+	if !strings.Contains(stage.output, "rev-parse --verify --quiet HEAD failed") {
+		t.Errorf("stage output does not name the HEAD check:\n%s", stage.output)
+	}
+	if n := len(runnerCalls(cmds.ran, "fetch")) + len(runnerCalls(cmds.ran, "create")); n != 0 {
+		t.Errorf("%d fetch or create commands ran after the failed check: %q", n, cmds.ran)
+	}
+}
+
+// syncCreate is the plan's step that creates the sync pod, found by what it runs
+// and not by its place in the plan, which every new first step moves.
+func syncCreate(plan sweeprunner.Plan) sweeprunner.Step {
+	for _, step := range plan.Apply {
+		if slices.Contains(step.Argv, "create") {
+			return step
+		}
+	}
+	return sweeprunner.Step{}
+}
+
+// TestSweepMirrorStepsLogTheirSeconds holds the log line the delta-fetch reading
+// depends on: the mirror's clone and its fetch each log the rig and the seconds
+// the command took, and no other command does (gt-4dx0su).
+func TestSweepMirrorStepsLogTheirSeconds(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+	clk, ok := d.clock.(*clockwork.FakeClock)
+	if !ok {
+		t.Fatalf("the daemon's clock is %T, want the fake", d.clock)
+	}
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch {
+		case slices.Contains(cmd.Args, "clone"):
+			clk.Advance(8 * time.Second)
+		case slices.Contains(cmd.Args, "fetch"):
+			clk.Advance(2 * time.Second)
+			return nil, []byte("fatal: boom\n"), errors.New("exit status 128")
+		}
+		return nil, nil, nil
+	}
+	mirror := "/town/.runtime/sweep-repo/gastown.git"
+	steps := []sweeprunner.Step{
+		{Argv: []string{"git", "clone", "--mirror", "--quiet", "/town/gastown/.repo.git", mirror}},
+		{Argv: []string{"git", "--git-dir", mirror, "rev-parse", "--verify", "--quiet", "HEAD"}},
+		{Argv: []string{"git", "--git-dir", mirror, "fetch", "--quiet", "--prune", "/town/gastown/.repo.git", "+refs/*:refs/*"}},
+	}
+	if _, code := tierSweepRunSteps(context.Background(), d, steps); code == 0 {
+		t.Fatal("the failing fetch ended the run with exit 0")
+	}
+	got := logs.String()
+	for _, want := range []string{"tier_sweep: gastown: mirror clone took 8s (ok)", "tier_sweep: gastown: mirror fetch took 2s (failed)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the log lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, "mirror ") != 2 {
+		t.Errorf("the HEAD check logged a line too, want one line each for the clone and the fetch:\n%s", got)
 	}
 }
 

@@ -393,7 +393,9 @@ func parseArgs(args, env []string) (options, error) {
 // this runner starts and each rule lives in one place (gt-dibnm). The fields
 // the container never receives — the image, the CPU and memory limits, the
 // context and the run id — are filled with the values the result records, so
-// Validate rules only what the entrypoint was given.
+// Validate rules only what the entrypoint was given. It sets no Snapshot: the
+// entrypoint runs inside the sweep's container and never renders the Kubernetes
+// plan that copies the mirror, so Validate accepts a spec with none (gt-4dx0su).
 func (o options) validate() error {
 	if o.Rig == "" {
 		return fmt.Errorf("--rig is required (or %s)", sweeprunner.EnvRig)
