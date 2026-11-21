@@ -128,6 +128,12 @@ type cacheTrimFixture struct {
 	d   *Daemon
 	cli *fakeCLI
 	log *bytes.Buffer
+
+	// mu guards answer and overrides, which a wait leg's goroutine still reads
+	// after its pass returned while the test installs the next pass's reply.
+	mu        sync.Mutex
+	answer    func(c cliCall) cliReply
+	overrides map[string]cliReply
 }
 
 // newCacheTrimFixture builds the patrol's daemon for mode ("", the dry-run
@@ -136,13 +142,13 @@ type cacheTrimFixture struct {
 func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliReply) *cacheTrimFixture {
 	t.Helper()
 	var logs bytes.Buffer
-	var cli *fakeCLI
-	cli = newFakeCLIFor(func(c cliCall) cliReply {
+	f := &cacheTrimFixture{log: &logs, overrides: overrides}
+	f.answer = func(c cliCall) cliReply {
 		if reply, refused := cacheTrimClientSideApplyRefusal(c); refused {
 			return reply
 		}
 		verb := cacheTrimVerb(c.args)
-		if reply, ok := overrides[verb]; ok {
+		if reply, ok := f.overrides[verb]; ok {
 			return reply
 		}
 		switch {
@@ -172,7 +178,8 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			return cliReply{stdout: cacheTrimExistingJSON}
 		}
 		return cliReply{}
-	})
+	}
+	cli := newFakeCLIFor(f.reply)
 
 	d := &Daemon{
 		config:       &Config{TownRoot: t.TempDir()},
@@ -211,7 +218,7 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 			},
 		}, nil
 	}
-	f := &cacheTrimFixture{d: d, cli: cli, log: &logs}
+	f.d, f.cli = d, cli
 	d.diskMaint.targets = func(context.Context, *Daemon, string) (map[string]diskmaint.Target, error) {
 		return map[string]diskmaint.Target{}, nil
 	}
@@ -559,8 +566,8 @@ func TestCacheTrimPodListAlertClearsWhenThePodsAreReadable(t *testing.T) {
 		t.Fatalf("after the refusal, open alerts = %d, want one", n)
 	}
 
-	delete(overrides, cacheTrimPodsVerb)
-	delete(overrides, cacheTrimCanListVerb)
+	f.clearOverride(cacheTrimPodsVerb)
+	f.clearOverride(cacheTrimCanListVerb)
 	f.trimDue()
 	f.d.runDiskMaintenance()
 
@@ -603,7 +610,7 @@ func TestCacheTrimUndeliveredStuckAlertIsClearedLater(t *testing.T) {
 	}
 
 	rec.Fail(notifyfake.KindEscalate, nil)
-	delete(overrides, cacheTrimReplacementWaitVerb)
+	f.clearOverride(cacheTrimReplacementWaitVerb)
 	f.trimDue()
 	runOnClock(t, clk, time.Second, f.d.runDiskMaintenance)
 	if clears := rec.Clears(); len(clears) == 0 || !slices.Contains(clears[len(clears)-1].Fingerprints, key) {
@@ -1799,18 +1806,17 @@ func TestCacheTrimRefusesAKubeconfigWithNoContext(t *testing.T) {
 func TestDiskMaintSandboxContextEndToEnd(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
-	inner := f.cli.answer
-	f.cli.answer = func(c cliCall) cliReply {
+	f.prependAnswer(func(c cliCall) bool {
 		for i := 0; i+1 < len(c.args); i++ {
 			if c.args[i] == "--context" && c.args[i+1] == diskMaintSandboxContext {
-				return inner(c)
+				return false
 			}
 		}
-		return cliReply{
-			stderr: "The connection to the server localhost:8080 was refused - did you specify the right host or port?",
-			code:   1,
-		}
-	}
+		return true
+	}, cliReply{
+		stderr: "The connection to the server localhost:8080 was refused - did you specify the right host or port?",
+		code:   1,
+	})
 	f.d.runDiskMaintenance()
 
 	if _, ok := f.indexOf("get pods -n " + cacheTrimNamespace + " -o json"); !ok {
@@ -1871,7 +1877,7 @@ func TestCacheTrimFailedRunRecordsTheIntervalAndLogsOnce(t *testing.T) {
 
 	// The cluster recovers: a verdict spends the full interval, so the next run
 	// is due two hours after the run that concluded at 05:00.
-	delete(overrides, cacheTrimPreflightVerb)
+	f.clearOverride(cacheTrimPreflightVerb)
 	now = now.Add(time.Hour + 59*time.Minute)
 	f.d.runDiskMaintenance() // 06:59: a minute short of the interval
 	if trims != 2 {
@@ -2630,40 +2636,56 @@ func newCacheTrimNoOpFixture(t *testing.T, mode string, reply cliReply) *cacheTr
 	return f
 }
 
-// setDfReply answers the pass's df read with reply, in place of the fixture's
-// default room.
-func (f *cacheTrimFixture) setDfReply(reply cliReply) {
-	inner := f.cli.answer
-	f.cli.answer = func(c cliCall) cliReply {
-		if strings.Contains(cacheTrimVerb(c.args), " df -Pk ") {
+// reply answers one fakeCLI call under the lock, so a wait leg cannot race the next reply.
+func (f *cacheTrimFixture) reply(c cliCall) cliReply {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.answer(c)
+}
+
+// prependAnswer answers every later call match accepts with reply, ahead of the
+// seam's answer and under the lock, so a test changes one kind of call.
+func (f *cacheTrimFixture) prependAnswer(match func(cliCall) bool, reply cliReply) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	inner := f.answer
+	f.answer = func(c cliCall) cliReply {
+		if match(c) {
 			return reply
 		}
 		return inner(c)
 	}
+}
+
+// setOverride makes reply the fixture's answer for verb; clearOverride drops it.
+func (f *cacheTrimFixture) setOverride(verb string, reply cliReply) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.overrides[verb] = reply
+}
+
+func (f *cacheTrimFixture) clearOverride(verb string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.overrides, verb)
+}
+
+// setDfReply answers the pass's df read with reply, in place of the fixture's
+// default room.
+func (f *cacheTrimFixture) setDfReply(reply cliReply) {
+	f.prependAnswer(func(c cliCall) bool { return strings.Contains(cacheTrimVerb(c.args), " df -Pk ") }, reply)
 }
 
 // setDuReply answers the pass's du read -- the claim's size after a trim --
 // with reply, in place of the fixture's default.
 func (f *cacheTrimFixture) setDuReply(reply cliReply) {
-	inner := f.cli.answer
-	f.cli.answer = func(c cliCall) cliReply {
-		if cacheTrimVerb(c.args) == cacheTrimDuVerb {
-			return reply
-		}
-		return inner(c)
-	}
+	f.prependAnswer(func(c cliCall) bool { return cacheTrimVerb(c.args) == cacheTrimDuVerb }, reply)
 }
 
 // answerFrom makes reply the answer for every later call whose verb starts with
 // prefix, so a test changes one kind of call between passes.
 func (f *cacheTrimFixture) answerFrom(prefix string, reply cliReply) {
-	inner := f.cli.answer
-	f.cli.answer = func(c cliCall) cliReply {
-		if strings.HasPrefix(cacheTrimVerb(c.args), prefix) {
-			return reply
-		}
-		return inner(c)
-	}
+	f.prependAnswer(func(c cliCall) bool { return strings.HasPrefix(cacheTrimVerb(c.args), prefix) }, reply)
 }
 
 // trimDue puts the cache trim back in the due state, so a test can run a second
