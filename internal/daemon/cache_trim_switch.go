@@ -51,6 +51,10 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		// retried on the next pass. A refused read above is the exception: its alert
 		// clears on its own when the sandbox may list pods.
 		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+		// The run ended, so the mark it carried is spent; a dry run touches no mark.
+		if apply {
+			d.cacheTrimSetPending(namespace, claim.ClaimName, false)
+		}
 		d.cacheTrimPark(namespace, claim.ClaimName, err)
 		return false
 	}
@@ -82,6 +86,9 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: failed: %v", claim.ClaimName, namespace, err)
 		d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+		if apply {
+			d.cacheTrimSetPending(namespace, claim.ClaimName, false)
+		}
 		d.cacheTrimPark(namespace, claim.ClaimName, err)
 		return false
 	}
@@ -91,6 +98,7 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	run := cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunOK,
 		trimmed: &removed, absent: &absent, kept: &kept}
 	d.cacheTrimRecordRun(run)
+	d.cacheTrimSetPending(namespace, claim.ClaimName, false)
 	// A success is logged every time: the once-an-hour hold of cacheTrimLogf is for
 	// refusals, and would hide the second of two trims with the same counts.
 	elapsed := d.diskMaintenanceSeams().now().Sub(started).Round(time.Second)

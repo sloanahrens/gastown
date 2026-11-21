@@ -820,3 +820,32 @@ func TestCacheTrimSwitchPendingMark(t *testing.T) {
 		}
 	})
 }
+
+// TestCacheTrimSwitchPendingMarkClears pins that the mark a pending pass left
+// clears when the claim's run ends: a finished apply, a failed apply and an
+// unreadable pod list each clear it, and a dry run clears nothing.
+func TestCacheTrimSwitchPendingMarkClears(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		apply     bool
+		overrides map[string]cliReply
+		wantMark  bool
+	}{
+		{"a finished pass clears the mark", true, nil, false},
+		{"a failed apply clears the mark", true, map[string]cliReply{cacheTrimApplyVerb: {stderr: "invalid manifest", code: 1}}, false},
+		{"an unreadable pod list clears the mark", true, map[string]cliReply{cacheTrimPodsVerb: {stderr: "error: connection refused", code: 1}}, false},
+		{"a dry run keeps the mark", false, nil, true},
+		{"a dry run with an unreadable pod list keeps the mark", false, map[string]cliReply{cacheTrimPodsVerb: {stderr: "error: connection refused", code: 1}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", tc.overrides)
+			f.d.cacheTrimSetPending(cacheTrimNamespace, cacheTrimClaimName, true)
+			viaJob(t, f, tc.apply, map[string]string{})
+			if got := f.d.cacheTrimIsPending(cacheTrimNamespace, cacheTrimClaimName); got != tc.wantMark {
+				t.Errorf("the mark after the pass = %v, want %v; log: %s", got, tc.wantMark, f.log.String())
+			}
+		})
+	}
+}
