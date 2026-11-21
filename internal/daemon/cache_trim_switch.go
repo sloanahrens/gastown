@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -21,6 +22,12 @@ import (
 // applies nothing, so it records no run. The no-op item is cleared by the route
 // that calls this, not here.
 func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
+	// A claim whose trim failed stays parked until the daemon restarts: a
+	// verdict, no retry and no cluster call.
+	if d.cacheTrimParked(namespace, claim.ClaimName) {
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: PARKED after a failure; nothing trimmed until the daemon restarts", claim.ClaimName, namespace)
+		return true
+	}
 	started := d.diskMaintenanceSeams().now()
 	sandboxes, _, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
@@ -44,6 +51,12 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 	removed, absent, kept, err := d.cacheTrimClaimJobRun(kubeconfig, claim, image, namespace, capBytes, sandboxes, apply)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: failed: %v", claim.ClaimName, namespace, err)
+		// A Job still running at the wait's end is no failure: it is read at a
+		// later pass, so nothing is recorded or parked.
+		if !errors.Is(err, errCacheTrimJobPending) {
+			d.cacheTrimRecordRun(cacheTrimRun{claim: claim.ClaimName, namespace: namespace, started: started, outcome: cacheTrimRunFailed})
+			d.cacheTrimPark(namespace, claim.ClaimName, err)
+		}
 		return false
 	}
 	if !apply {

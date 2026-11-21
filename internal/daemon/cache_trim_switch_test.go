@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -205,18 +206,20 @@ func TestCacheTrimSwitchRecordsTheRun(t *testing.T) {
 	}
 }
 
-// TestCacheTrimSwitchRecordsNothingUnlessTrimmed pins that a dry run and a Job
-// whose result cannot be read record no run.
+// TestCacheTrimSwitchRecordsNothingUnlessTrimmed pins that a dry run records no
+// run, and that a Job whose result cannot be read records a failed run and never
+// an ok run with zero counts.
 func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
 		apply     bool
 		wantOK    bool
+		wantRuns  []string
 		overrides map[string]cliReply
 	}{
 		{name: "dry run", apply: false, wantOK: true},
-		{name: "unreadable result", apply: true, wantOK: false, overrides: map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}},
+		{name: "unreadable result", apply: true, wantOK: false, wantRuns: []string{cacheTrimRunFailed}, overrides: map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -225,8 +228,12 @@ func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
 			if got := viaJob(t, f, tc.apply, map[string]string{}); got != tc.wantOK {
 				t.Errorf("viaJob = %v, want %v; log: %s", got, tc.wantOK, f.log.String())
 			}
-			if runs := f.jobRuns(t); len(runs) != 0 {
-				t.Errorf("the ledger holds %+v, want no run", runs)
+			var outcomes []string
+			for _, run := range f.jobRuns(t) {
+				outcomes = append(outcomes, run.Outcome)
+			}
+			if !slices.Equal(outcomes, tc.wantRuns) {
+				t.Errorf("the ledger holds outcomes %v, want %v", outcomes, tc.wantRuns)
 			}
 		})
 	}
@@ -256,5 +263,75 @@ func TestCacheTrimSwitchLogsTheFinish(t *testing.T) {
 		if got := strings.Contains(f.log.String(), want); got != apply {
 			t.Errorf("apply=%v: the log holds the finish line = %v, want %v; log: %s", apply, got, apply, f.log.String())
 		}
+	}
+}
+
+// TestCacheTrimSwitchParksOnEveryFailure pins that a claim whose trim fails is
+// parked: a failed apply, a failed Job and an unreadable result line each record
+// one failed run, raise the claim's failure item and return false, and the next
+// pass for that claim makes no cluster call, says PARKED and returns true.
+func TestCacheTrimSwitchParksOnEveryFailure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]cliReply
+		hold      bool
+	}{
+		{"a failed apply", map[string]cliReply{cacheTrimApplyVerb: {stderr: "invalid manifest", code: 1}}, false},
+		{"a failed Job", map[string]cliReply{
+			cacheTrimFailWaitFailedVerb:  {},
+			cacheTrimFailWaitTrimLogVerb: {stdout: "could not remove /claim/x: permission denied\n"},
+		}, true},
+		{"an unreadable result line", map[string]cliReply{cacheTrimClaimJobLogVerb: {stdout: ""}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", tc.overrides)
+			if tc.hold {
+				cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+			}
+			if viaJob(t, f, true, map[string]string{}) {
+				t.Fatalf("a failed trim = true, want false; log: %s", f.log.String())
+			}
+			if runs := f.jobRuns(t); len(runs) != 1 || runs[0].Outcome != cacheTrimRunFailed {
+				t.Errorf("the ledger holds %+v, want one run with outcome %q", runs, cacheTrimRunFailed)
+			}
+			if !f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("the claim is not parked after its trim failed")
+			}
+			if items := f.noOpItems(t); len(items) != 1 || items[0].Key != cacheTrimFailedKey(cacheTrimNamespace, cacheTrimClaimName) {
+				t.Errorf("the attention items = %+v, want the claim's one failure item", items)
+			}
+			calls := len(f.cli.recorded())
+			if !viaJob(t, f, true, map[string]string{}) {
+				t.Errorf("a parked claim = false, want true (a verdict, no retry)")
+			}
+			if got := len(f.cli.recorded()); got != calls {
+				t.Errorf("the parked claim made %d more cluster calls, want none", got-calls)
+			}
+			if !strings.Contains(f.log.String(), "PARKED after a failure; nothing trimmed until the daemon restarts") {
+				t.Errorf("the parked pass did not say PARKED; log: %s", f.log.String())
+			}
+		})
+	}
+}
+
+// TestCacheTrimSwitchDoesNotParkAPendingJob pins that a Job still running when
+// the wait ends is not a failure: nothing is parked, no run is recorded and the
+// claim is not judged trimmed.
+func TestCacheTrimSwitchDoesNotParkAPendingJob(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	if viaJob(t, f, true, map[string]string{}) {
+		t.Fatalf("a pending Job = true, want false; log: %s", f.log.String())
+	}
+	if f.d.cacheTrimParked(cacheTrimNamespace, cacheTrimClaimName) {
+		t.Errorf("a Job still running parked its claim")
+	}
+	if runs := f.jobRuns(t); len(runs) != 0 {
+		t.Errorf("a pending Job recorded %+v, want no run", runs)
 	}
 }
