@@ -956,6 +956,70 @@ func TestTakeoverSeatEndEndsTheBeadsSeatNotTheCrewActor(t *testing.T) {
 	}
 }
 
+// A seat that ran gt done has its hook cleared and its last source issue left
+// behind, so an assignee-only name is also the seat that built the landed bead
+// when the hook is empty and the last source issue is the bead. Any other
+// empty-hook record names no seat of this bead, and the line says which fact
+// refused it (gt-xb20n9).
+func TestTakeoverSeatEndOffersASeatWhoseHookWasCleared(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	const aceBranch = "polecat/ace/" + endBead + "+x1"
+	tests := []struct {
+		name        string
+		fields      beads.AgentFields
+		wantOffered bool
+		wantLog     string
+		notDone     bool
+	}{
+		{"a done seat with an empty hook is offered", beads.AgentFields{
+			LastSourceIssue: endBead, AgentState: string(beads.AgentStateDone), Branch: aceBranch,
+		}, true, "", false},
+		{"an empty hook on another bead's seat is not offered", beads.AgentFields{
+			LastSourceIssue: "gt-other1", AgentState: string(beads.AgentStateDone), Branch: aceBranch,
+		}, false, `last source issue is "gt-other1", not the landed bead`, false},
+		// The offer does not ask the gateway: a seat the bead has not marked
+		// done is offered, flagged, and the end decides on its sandbox.
+		{"an empty hook on a seat that is not done is still offered", beads.AgentFields{
+			LastSourceIssue: endBead, AgentState: string(beads.AgentStateWorking), Branch: aceBranch,
+		}, true, "", true},
+		{"a seat that still hooks the landed bead is offered as before", beads.AgentFields{
+			HookBead: endBead, Branch: aceBranch,
+		}, true, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var logs strings.Builder
+			d, got, agents := seatEndCalls(t, &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/ace"}, &logs)
+			seedSeatAgent(t, d, agents, "ace", tt.fields)
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+			if offered := len(*got) > 0; offered != tt.wantOffered {
+				t.Fatalf("seat end offered = %v, want %v (%+v)", offered, tt.wantOffered, *got)
+			}
+			if !tt.wantOffered {
+				if !strings.Contains(logs.String(), "not offered: ") || !strings.Contains(logs.String(), tt.wantLog) {
+					t.Errorf("log = %q, want one line saying the seat is not offered, naming %q", logs.String(), tt.wantLog)
+				}
+				return
+			}
+			if call := (*got)[0]; call.name != "ace" || call.landing.Branch != aceBranch {
+				t.Errorf("offered %s on branch %q, want ace on its own %q", call.name, call.landing.Branch, aceBranch)
+			}
+			if call := (*got)[0]; call.landing.AgentNotDone != tt.notDone {
+				t.Errorf("landing AgentNotDone = %v, want %v: the end must know the offer rests on a sandbox marker", call.landing.AgentNotDone, tt.notDone)
+			}
+			if call := (*got)[0]; call.landing.BeadID != endBead || !call.landing.Landed {
+				t.Errorf("landing facts = %+v, want the bead's landed record", call.landing)
+			}
+		})
+	}
+}
+
 // An assignee-only seat is resolved from its agent bead, and only while that
 // bead still hooks the landed bead: a seat re-slung to other work has a branch
 // that is not this bead's work, so it is not offered the end (gt-m1qf31).
@@ -1388,6 +1452,132 @@ func TestSandboxSeatEnderDefaultPathEndsTheSeat(t *testing.T) {
 	}
 	if len(f.gwAsked) != 1 {
 		t.Errorf("gateway asked %v, want one question", f.gwAsked)
+	}
+}
+
+// A takeover lands a crew branch, and the seat that built the bead has run gt
+// done: its hook is cleared and its last source issue is the landed bead, so no
+// READY TO LAND block of its own names it. The bead's assignee is the only name
+// it has left, and the end must take it through the real keepReason to the
+// removal of its host directories - whether the agent bead reached "done" or
+// its sandbox reports its ended marker, which the end reads itself. The other
+// facts keepReason and the end read still keep a seat that is not finished
+// (gt-xb20n9).
+func TestTakeoverSeatEndEndsADoneSeatWithNoReadyBlock(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	work := land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"}
+	tests := []struct {
+		name       string
+		state      string
+		hook       string
+		lastSource string
+		held       bool
+		errored    bool
+		marker     bool
+		wantGone   bool
+		wantLog    string
+	}{
+		{
+			name:  "a done seat with no READY block is ended",
+			state: string(beads.AgentStateDone), lastSource: endBead,
+			wantGone: true, wantLog: "removed its host directories: the seat is finished",
+		},
+		{
+			// The ended-marker branch of the rule: the agent bead has not
+			// reached "done", but its sandbox reports that its seat ended.
+			name:  "a seat whose sandbox reports ended with the agent bead not yet done is ended",
+			state: string(beads.AgentStateWorking), lastSource: endBead,
+			held: true, marker: true,
+			wantGone: true, wantLog: "deleted its held sandbox at the landing, not at the next patrol tick",
+		},
+		{
+			// The offer lets a not-done seat through, and the end's own marker
+			// read is what keeps one whose sandbox has not ended.
+			name:  "a seat whose sandbox has not ended is kept",
+			state: string(beads.AgentStateWorking), lastSource: endBead,
+			held:    true,
+			wantLog: "kept: its ended marker is not set",
+		},
+		{
+			// The offer lets a not-done seat through, and only a held sandbox's
+			// ended marker shows it finished: with no sandbox, or one in a
+			// terminal failure, nothing does, and the seat is kept.
+			name:  "a working seat whose sandbox the gateway no longer has is kept",
+			state: string(beads.AgentStateWorking), lastSource: endBead,
+			wantLog: "kept: its agent bead is not done",
+		},
+		{
+			name:  "a working seat whose sandbox is in a terminal failure is kept",
+			state: string(beads.AgentStateWorking), lastSource: endBead,
+			held: true, errored: true,
+			wantLog: "kept: its agent bead is not done",
+		},
+		{
+			// Offered as before, and kept by keepReason's own hook rule: an
+			// offer is not a removal.
+			name:  "a seat that still hooks the landed bead is offered and kept by the hook",
+			state: string(beads.AgentStateWorking), hook: endBead,
+			wantLog: "kept: hook_bead=" + endBead + " is still set",
+		},
+		{
+			name:  "a seat hooked to another bead is not offered",
+			state: string(beads.AgentStateDone), hook: "gt-other1", lastSource: endBead,
+			wantLog: `not offered: its agent bead hooks "gt-other1"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seatFields.AgentState = tt.state
+			f.seatFields.HookBead = tt.hook
+			f.seatFields.LastSourceIssue = tt.lastSource
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			if tt.held {
+				sessionName := f.host.sessionName(endRig, endPolecat)
+				if err := session.WriteSandboxRecord(f.town, session.SandboxRecord{
+					Session: sessionName, Rig: endRig, Polecat: endPolecat, Gateway: "k8s",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				f.host.sandboxExists = func(string, string) (bool, error) { return true, nil }
+			}
+			f.host.sandboxEndedMarker = func(string, string) (bool, error) { return tt.marker, nil }
+			if tt.errored {
+				f.host.sandboxStatus = func(_, name string) (sandbox.Status, error) {
+					return sandbox.Status{Name: name, Phase: "Error"}, nil
+				}
+			}
+			var logs strings.Builder
+			d := f.host.d
+			d.logger = log.New(&logs, "", 0)
+			d.openWorkBeads = func([]string, time.Duration) workBeadReader {
+				// The seat's own notes carry no READY TO LAND block: only the
+				// bead's assignee names it.
+				return workBeadStore{endBead: &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/" + endPolecat}}
+			}
+			d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+			// The production end step over the harness's agent-bead and gateway
+			// seams: the harness answers the ended marker, which a unit test
+			// must not put to a real gateway.
+			d.endSandboxSeat = f.host.endFinishedSandboxSeat
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch), work)
+
+			if gone := !dirExists(t, dirs.PolecatDir); gone != tt.wantGone {
+				t.Errorf("seat directory removed = %v, want %v\nlog:\n%s", gone, tt.wantGone, logs.String())
+			}
+			if gone := !dirExists(t, dirs.PromptFile); gone != tt.wantGone {
+				t.Errorf("prompt file removed = %v, want %v", gone, tt.wantGone)
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log =\n%s\nwant it to carry %q", logs.String(), tt.wantLog)
+			}
+		})
 	}
 }
 

@@ -48,6 +48,10 @@ type sandboxSeatLanding struct {
 	// submission stamp.
 	Submitted time.Time
 	Landed    bool
+	// AgentNotDone is set on an assignee-only offer whose agent bead had not
+	// reached "done": only a held sandbox's ended marker shows such a seat
+	// finished, so the end keeps it when no held sandbox can say so (gt-xb20n9).
+	AgentNotDone bool
 }
 
 // sandboxSeatEnd is what the daemon measured about a seat before deciding
@@ -248,6 +252,14 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		end, unmeasuredReason := h.measureSandboxSeatEnd(rig, name, landing)
 		if unmeasuredReason != "" {
 			unmeasured = unmeasuredReason
+			return nil
+		}
+		// An offer that rests on no "done" state is finished only when a held
+		// sandbox's ended marker says so, which endHeldSandboxAtLanding reads
+		// below; a sandbox that is gone or failed has no marker to read (gt-xb20n9).
+		if landing.AgentNotDone && (end.SandboxGone || end.SandboxErrored) {
+			kept = "its agent bead is not done, and no held sandbox's ended marker shows the seat finished"
+			h.clearPendingSeatEnd(rig, name)
 			return nil
 		}
 		// Everything the seat wrote leaves the sandbox before the sandbox does:
@@ -1478,11 +1490,12 @@ func (d *Daemon) endSandboxSeatsOfBead(rigName string, landings *land.LandingsFi
 		return
 	}
 	for name, branch := range seats {
+		agentNotDone := false
 		if branch == "" {
 			// Only the assignee names this seat: its own branch is the one its
 			// agent bead records, and only while that bead still hooks this
 			// bead. A seat re-slung to other work is not this bead's seat.
-			resolved, reason, err := d.assigneeSeatBranch(rigName, name, w.BeadID)
+			resolved, reason, notDone, err := d.assigneeSeatBranch(rigName, name, w.BeadID)
 			switch {
 			case err != nil:
 				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: cannot read its agent bead: %v", w.BeadID, name, err)
@@ -1491,35 +1504,59 @@ func (d *Daemon) endSandboxSeatsOfBead(rigName string, landings *land.LandingsFi
 				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: %s", w.BeadID, name, reason)
 				continue
 			}
-			branch = resolved
+			branch, agentNotDone = resolved, notDone
 		}
 		d.sandboxSeatEnder()(rigName, name, sandboxSeatLanding{
-			BeadID: w.BeadID, Branch: branch, Submitted: w.Submitted, Landed: landed,
+			BeadID: w.BeadID, Branch: branch, Submitted: w.Submitted, Landed: landed, AgentNotDone: agentNotDone,
 		})
 	}
 }
 
 // assigneeSeatBranch resolves the branch of a seat only the bead's assignee
-// names: the one its agent bead records, returned only while that agent bead
-// still hooks beadID, because a seat re-slung to other work is not this bead's
-// seat. A reason, not an error, says why a readable agent bead does not resolve
-// a branch; an unreadable one is returned as an error so its caller says which
-// read failed (gt-m1qf31).
-func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason string, err error) {
+// names: the one its agent bead records. The seat is this bead's seat while
+// that agent bead still hooks beadID, or, after the gt done that cleared the
+// hook, while the bead is its last source issue: the seat's own finish is a
+// fact the end settles, not the offer (gt-m1qf31, gt-xb20n9). A reason, not an
+// error, says why a readable agent bead does not resolve a branch; an
+// unreadable one is returned as an error so its caller says which read failed.
+func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason string, notDone bool, err error) {
 	fields, err := d.sandboxSeatEndHost().seatAgentFields(rig, name)
 	if err != nil {
-		return "", "", fmt.Errorf("reading the agent bead: %w", err)
+		return "", "", false, fmt.Errorf("reading the agent bead: %w", err)
 	}
 	if fields == nil {
-		return "", "it has no agent bead", nil
+		return "", "it has no agent bead", false, nil
 	}
-	if hook := strings.TrimSpace(fields.HookBead); hook != beadID {
-		return "", fmt.Sprintf("its agent bead hooks %q", hook), nil
+	if reason = seatEndsBead(fields, beadID); reason != "" {
+		return "", reason, false, nil
 	}
 	if branch = strings.TrimSpace(fields.Branch); branch == "" {
-		return "", "its agent bead records no branch", nil
+		return "", "its agent bead records no branch", false, nil
 	}
-	return branch, "", nil
+	notDone = strings.TrimSpace(fields.HookBead) == "" && fields.AgentState != string(beads.AgentStateDone)
+	return branch, "", notDone, nil
+}
+
+// seatEndsBead is why an assignee-only seat's agent bead does not name beadID
+// as its own work, or "" when it does. A set hook must be beadID: a seat a
+// sling gave other work is not this bead's seat. An empty hook is the state gt
+// done leaves, and it names the bead while the seat's last source issue is
+// beadID. The offer makes no gateway call and does not ask the agent state: a
+// seat that has not reached "done" is offered with the AgentNotDone flag, and
+// endFinishedSandboxSeat keeps it unless its held sandbox's ended marker shows
+// it finished (gt-xb20n9).
+func seatEndsBead(fields *beads.AgentFields, beadID string) string {
+	hook := strings.TrimSpace(fields.HookBead)
+	switch {
+	case hook == beadID:
+		return ""
+	case hook != "":
+		return fmt.Sprintf("its agent bead hooks %q", hook)
+	}
+	if source := strings.TrimSpace(fields.LastSourceIssue); source != beadID {
+		return fmt.Sprintf("its agent bead's last source issue is %q, not the landed bead", source)
+	}
+	return ""
 }
 
 // landingSeats maps each polecat seat a landed bead was built on to the branch
