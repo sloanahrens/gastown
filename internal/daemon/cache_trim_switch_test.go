@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -228,5 +229,32 @@ func TestCacheTrimSwitchRecordsNothingUnlessTrimmed(t *testing.T) {
 				t.Errorf("the ledger holds %+v, want no run", runs)
 			}
 		})
+	}
+}
+
+// TestCacheTrimSwitchLogsTheFinish pins that a finished claim trim logs one line
+// with the Job's counts and the time since its start, and a dry run logs none.
+func TestCacheTrimSwitchLogsTheFinish(t *testing.T) {
+	t.Parallel()
+	for _, apply := range []bool{true, false} {
+		f := newCacheTrimFixture(t, "", map[string]cliReply{
+			cacheTrimClaimJobLogVerb: {stdout: "removed 4 absent 1 kept 2\n"},
+		})
+		// The first reading of the clock is the run's start; every later one is
+		// ninety seconds on.
+		var read atomic.Bool
+		f.d.diskMaint.now = func() time.Time {
+			if read.Swap(true) {
+				return diskMaintNow.Add(90 * time.Second)
+			}
+			return diskMaintNow
+		}
+		if !viaJob(t, f, apply, map[string]string{}) {
+			t.Fatalf("apply=%v: a claim Job = false, want true; log: %s", apply, f.log.String())
+		}
+		want := "cache trim " + cacheTrimClaimName + " in " + cacheTrimNamespace + " finished: removed 4 absent 1 kept 2 elapsed 1m30s"
+		if got := strings.Contains(f.log.String(), want); got != apply {
+			t.Errorf("apply=%v: the log holds the finish line = %v, want %v; log: %s", apply, got, apply, f.log.String())
+		}
 	}
 }
