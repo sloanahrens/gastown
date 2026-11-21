@@ -10,7 +10,8 @@ import "context"
 // such. It reports whether the claim is judged for this pass: false is a
 // failure, true a trim that ran or a verdict.
 //
-// The pod-read block below is copied from the old body of cacheTrimClaim and
+// The pods are read before the same-namespace refusal, in the order of the old
+// body, and the pod-read block below is copied from the old body of cacheTrimClaim and
 // dies with it (bead gt-4bgici). Nothing calls this yet: bead gt-zc1d92 routes
 // cacheTrimClaim to it.
 func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {

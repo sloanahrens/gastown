@@ -2,30 +2,53 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
-// viaJob runs cacheTrimClaimViaJob on the fixture's claim and returns its
-// result, or fails the test if the call has not returned within the hang guard:
-// a Job that never finishes must end the call, not hang the test.
-func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]string) bool {
-	t.Helper()
+// viaJobWithin runs cacheTrimClaimViaJob on the fixture's claim and returns its
+// result, or an error if the call has not returned within bound: a Job that
+// never finishes must end the call, not hang the test.
+func viaJobWithin(bound time.Duration, f *cacheTrimFixture, apply bool, trimmed map[string]string) (bool, error) {
 	done := make(chan bool, 1)
 	go func() {
 		done <- f.d.cacheTrimClaimViaJob(context.Background(), "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
 			"gastown-polecat:dev", cacheTrimNamespace, 1<<30, apply, trimmed)
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
 	defer cancel()
 	select {
 	case ok := <-done:
-		return ok
+		return ok, nil
 	case <-ctx.Done():
-		t.Fatalf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", workspaceHangGuard)
-		return false
+		return false, fmt.Errorf("cacheTrimClaimViaJob did not return within %s: a Job the fake never finishes hung the call", bound)
 	}
+}
+
+// viaJob is viaJobWithin at the hang guard, failing the test on a hang.
+func viaJob(t *testing.T, f *cacheTrimFixture, apply bool, trimmed map[string]string) bool {
+	t.Helper()
+	ok, err := viaJobWithin(workspaceHangGuard, f, apply, trimmed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
+// TestCacheTrimViaJobHeldWaitFailsTheHelper pins that a claim Job wait the fake
+// never finishes ends the helper with its named error at the bound it is given,
+// so the guard the other tests rely on is driven.
+func TestCacheTrimViaJobHeldWaitFailsTheHelper(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", nil)
+	held := cacheTrimFailWaitHold(t, f, cacheTrimClaimJobWaitVerb)
+	if _, err := viaJobWithin(50*time.Millisecond, f, true, map[string]string{}); err == nil || !strings.Contains(err.Error(), "did not return within 50ms") {
+		t.Fatalf("a held wait = %v; want the helper's named error at its bound", err)
+	}
+	held.await(t)
 }
 
 // TestCacheTrimViaJobUsesTheClaimJobOnly pins that the claim is trimmed by the
