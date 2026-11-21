@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"runtime"
 	"sync"
 	"testing"
@@ -90,16 +91,30 @@ func TestOverrunPassEdges(t *testing.T) {
 	for _, limit := range []int{0, -1} {
 		var mu sync.Mutex
 		ran := make([]int, 5)
-		overrunReadPool(5, limit, func(i int) {
-			mu.Lock()
-			ran[i]++
-			mu.Unlock()
-		})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			overrunReadPool(5, limit, func(i int) {
+				mu.Lock()
+				ran[i]++
+				mu.Unlock()
+			})
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), workspaceHangGuard)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			cancel()
+			t.Fatalf("overrunReadPool(limit %d) did not return within %s: the clamp is gone", limit, workspaceHangGuard)
+		}
+		cancel()
+		mu.Lock()
 		for i, n := range ran {
 			if n != 1 {
 				t.Errorf("limit %d: job %d ran %d times, want once", limit, i, n)
 			}
 		}
+		mu.Unlock()
 	}
 	for _, n := range []int{0, -3} {
 		overrunReadPool(n, overrunReadPoolSize, func(i int) {
