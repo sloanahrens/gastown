@@ -143,6 +143,37 @@ func TestSeatNameGuardLineWarnsBeforeTheDeleteCommand(t *testing.T) {
 	}
 }
 
+// TestSeatNameGuardItemWarnsBeforeTheDeleteCommand: the attention item's summary
+// names the check and the runbook before the delete command; key and severity
+// are unchanged (gt-h88z0p).
+func TestSeatNameGuardItemWarnsBeforeTheDeleteCommand(t *testing.T) {
+	t.Parallel()
+	guard := NewSeatNameGuard([]sandbox.Entry{{Name: "gt-dag", Phase: "Error"}}, seatNameGuardNow)
+	items := guard.Items(seatNameGuardNow)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one for the stale sandbox", items)
+	}
+	it := items[0]
+	if it.Key != "seat-sandbox-stale:gt-dag" || it.Kind != attention.KindSeatSandboxStale ||
+		it.Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want a high seat-sandbox-stale:gt-dag item", it)
+	}
+	del := strings.Index(it.Summary, "openshell sandbox delete 'gt-dag'")
+	if del < 0 {
+		t.Fatalf("summary %q, want the quoted delete command", it.Summary)
+	}
+	for _, want := range []string{"gt polecat check-recovery", "docs/sandbox-rescue-runbook.md", "delete it only when check-recovery reads clean"} {
+		at := strings.Index(it.Summary, want)
+		if at < 0 {
+			t.Errorf("summary %q, want it to name %q", it.Summary, want)
+			continue
+		}
+		if at > del {
+			t.Errorf("summary names %q after the delete command; want the check and runbook first: %q", want, it.Summary)
+		}
+	}
+}
+
 // TestGatewaySandboxListingBoundsTheReadWithTheCallersTimeout: the one listing
 // the attention collector and the sling tick share applies the caller's bound
 // to the gateway call (gt-xrt3pb).
