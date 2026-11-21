@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -44,5 +45,44 @@ func TestPackageDirsSkipsNestedModules(t *testing.T) {
 	want := []string{"a", "plugins/shared"}
 	if !reflect.DeepEqual(rel, want) {
 		t.Errorf("PackageDirs = %v, want %v: directories of a nested module belong to that module", rel, want)
+	}
+}
+
+// The guard tests build root lexically (filepath.Abs of "../.."), so a checkout
+// reached through a symlink hands PackageDirs a symlink. filepath.WalkDir does
+// not follow a symlinked root, which once made the tree look empty with a nil
+// error and failed eight guard tests with unrelated messages (gt-91d613).
+func TestPackageDirsFollowsASymlinkedRoot(t *testing.T) {
+	t.Parallel() // unit tier: a temp tree of one file and a symlink
+	real := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(real, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "a", "a.go"), []byte("package a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "checkout")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := PackageDirs(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(link, "a")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("PackageDirs(symlinked root) = %v, want %v: the root must be followed and the paths spelled under the root given", got, want)
+	}
+}
+
+func TestPackageDirsRefusesAMissingRoot(t *testing.T) {
+	t.Parallel() // unit tier: no files
+	missing := filepath.Join(t.TempDir(), "no-such-root")
+	got, err := PackageDirs(missing)
+	if err == nil {
+		t.Fatalf("PackageDirs(%s) = %v with a nil error, want an error naming the root", missing, got)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("the error %q does not name the root %s", err, missing)
 	}
 }
