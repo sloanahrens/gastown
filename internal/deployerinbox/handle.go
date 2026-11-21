@@ -48,14 +48,14 @@ func Handle(ctx context.Context, steps Steps, req Request, now time.Time) Answer
 	case KindPlan:
 		plan, err := steps.Plan(ctx, req.Plan)
 		if err != nil {
-			return answerFailed(answer, fmt.Errorf("plan %q: %w", req.Plan, err))
+			return answerFailed(answer, detailPlanFailed)
 		}
 		proposal, id, err := clusterapproval.NewProposal(plan)
 		if err != nil {
 			return answerRefused(answer, err)
 		}
 		if err := steps.WriteProposal(ctx, req.Plan, proposal, id); err != nil {
-			return answerFailed(answer, fmt.Errorf("write the proposal %s: %w", id, err))
+			return answerFailed(answer, detailWriteFailed)
 		}
 		answer.Status = StatusProposed
 		answer.PlanSHA256 = plan.SHA256
@@ -74,7 +74,7 @@ func Handle(ctx context.Context, steps Steps, req Request, now time.Time) Answer
 func handleApply(ctx context.Context, steps Steps, req Request, answer Answer, now time.Time) Answer {
 	plan, err := steps.Plan(ctx, req.Plan)
 	if err != nil {
-		return answerFailed(answer, fmt.Errorf("plan %q: %w", req.Plan, err))
+		return answerFailed(answer, detailPlanFailed)
 	}
 	_, id, err := clusterapproval.NewProposal(plan)
 	if err != nil {
@@ -83,32 +83,44 @@ func handleApply(ctx context.Context, steps Steps, req Request, answer Answer, n
 	record, err := steps.ReadRecord(ctx, id)
 	if err != nil {
 		if errors.Is(err, ErrNoApproval) {
-			return answerRefused(answer, fmt.Errorf("the plan %q is not approved yet: %w", req.Plan, err))
+			// ErrNoApproval's own text, never the callee's wrapping of it.
+			return answerRefused(answer, fmt.Errorf("the plan %q is not approved yet: %w", req.Plan, ErrNoApproval))
 		}
-		return answerFailed(answer, fmt.Errorf("read the approval record for proposal %s: %w", id, err))
+		return answerFailed(answer, detailRecordFailed)
 	}
 	live, err := steps.LiveVersions(ctx, plan)
 	if err != nil {
-		return answerFailed(answer, fmt.Errorf("read the live versions of the plan %q: %w", req.Plan, err))
+		return answerFailed(answer, detailLiveFailed)
 	}
 	if err := clusterapproval.Verify(record, plan, live, now); err != nil {
 		return answerRefused(answer, err)
 	}
 	if err := steps.Apply(ctx, req.Plan, plan, live); err != nil {
 		if errors.Is(err, ErrApplyRefused) {
-			return answerRefused(answer, err)
+			return answerRefused(answer, ErrApplyRefused)
 		}
-		return answerFailed(answer, fmt.Errorf("apply the plan %q: %w", req.Plan, err))
+		return answerFailed(answer, detailApplyFailed)
 	}
 	answer.Status = StatusApplied
 	answer.PlanSHA256 = plan.SHA256
 	return answer
 }
 
+// The detail of a failed step is fixed text naming the step, never the step's
+// own error: the answer file sits in a directory others read, and a callee's
+// error can carry what it was handling (a kubectl stderr, a path, a token).
+const (
+	detailPlanFailed   = "the plan step failed"
+	detailWriteFailed  = "writing the proposal failed"
+	detailRecordFailed = "reading the approval record failed"
+	detailLiveFailed   = "reading the live versions failed"
+	detailApplyFailed  = "the apply failed"
+)
+
 // answerFailed records that a step errored and nothing further ran.
-func answerFailed(answer Answer, cause error) Answer {
+func answerFailed(answer Answer, detail string) Answer {
 	answer.Status = StatusFailed
-	answer.Detail = cause.Error()
+	answer.Detail = detail
 	return answer
 }
 
