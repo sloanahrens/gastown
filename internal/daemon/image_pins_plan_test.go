@@ -80,6 +80,20 @@ func TestPlanImagePins(t *testing.T) {
 			wantItems: []string{imagePinsUnreadableKey},
 		},
 		{
+			name:     "a bd pin lacking the samples build files at one behind",
+			pins:     []ImagePinState{{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: 1, LacksFloor: true}},
+			wantFile: []string{"bd"},
+		},
+		{
+			name: "the same pin holding the samples build files nothing at one behind",
+			pins: []ImagePinState{{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: 1}},
+		},
+		{
+			name:      "a lacking pin with a failed read files nothing and raises unreadable",
+			pins:      []ImagePinState{{Name: "bd", Pin: "pin-bd", Tip: "tip-bd", Behind: 1, LacksFloor: true, Err: errors.New("ls-remote exited 128")}},
+			wantItems: []string{imagePinsUnreadableKey},
+		},
+		{
 			name: "an open bead blocks a second",
 			pins: []ImagePinState{state("bd", 25)},
 			open: &ImagePinRefreshBead{ID: "gt-refresh7", OpenedAt: at.Add(-time.Hour)},
