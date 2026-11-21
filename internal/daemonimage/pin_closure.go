@@ -10,6 +10,10 @@ import (
 // devopsToolDirs are the devops commands the image builds (tools.go).
 var devopsToolDirs = []string{"cmd/reporter", "cmd/release-reporter", "cmd/cloudcheck"}
 
+// maxWalkDirs bounds the closure walk: the walk reads at most this many
+// directories and refuses the next one (gt-tly3py).
+const maxWalkDirs = 200
+
 // importGap is a devops directory a tool imports that the input list lacks, and
 // the tool that imports it.
 type importGap struct {
@@ -27,7 +31,8 @@ type importGap struct {
 // and so is a directory with no non-test .go file at main: an empty listing
 // would pass a renamed or removed directory silently (gt-reirlx). The walk
 // queues every import, covered or not, and reads each directory once (gt-rblgfn),
-// so it does not rely on Go forbidding cycles; the bound (gt-tly3py) is not here.
+// so it does not rely on Go forbidding cycles. Past maxWalkDirs directories the
+// walk stops with an error rather than returning a partial list (gt-tly3py).
 func inputClosureGaps(git bdbuild.Git, dir, main string) ([]importGap, error) {
 	type visit struct{ dir, importer string }
 	var queue []visit
@@ -41,6 +46,9 @@ func inputClosureGaps(git bdbuild.Git, dir, main string) ([]importGap, error) {
 		queue = queue[1:]
 		if visited[v.dir] {
 			continue
+		}
+		if len(visited) >= maxWalkDirs {
+			return nil, fmt.Errorf("pin-drift guard: the walk passed %d directories at %s: the list is too deep to check", maxWalkDirs, v.dir)
 		}
 		visited[v.dir] = true
 		listing, err := git(dir, "ls-tree", "--name-only", main, v.dir+"/")

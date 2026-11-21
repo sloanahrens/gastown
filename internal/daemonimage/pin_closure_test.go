@@ -247,3 +247,46 @@ func TestInputClosureCoversATwoLevelImportInsideTheList(t *testing.T) {
 		t.Errorf("gaps = %v, want none: pkg/releasebot is in the input list", got)
 	}
 }
+
+// chainTree answers a chain of n directories under pkg/chain: cmd/reporter
+// imports pkg/chain/d0 and each d<i> imports d<i+1>, the last imports nothing.
+// With the two leaf tools the walk visits n+3 directories (gt-tly3py).
+func chainTree(f *pinsGit, n int) {
+	closureTree(f, map[string]string{"cmd/release-reporter": "package main\n", "cmd/cloudcheck": "package main\n"})
+	answerTool(f, "cmd/reporter", "cmd/reporter/main.go", "package main\nimport \"gt.local/devops/pkg/chain/d0\"\n")
+	for i := range n {
+		next := ""
+		if i+1 < n {
+			next = fmt.Sprintf("import \"gt.local/devops/pkg/chain/d%d\"\n", i+1)
+		}
+		dir := fmt.Sprintf("pkg/chain/d%d", i)
+		answerTool(f, dir, dir+"/main.go", "package chain\n"+next)
+	}
+}
+
+// TestInputClosureErrorsAtTheDirectoryBound pins the bound: 200 directories
+// finish, and the 201st ends the walk with an error naming it (gt-tly3py).
+func TestInputClosureErrorsAtTheDirectoryBound(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		chain   int
+		wantErr bool
+	}{
+		{"200 directories finish", 197, false},
+		{"201 directories end at the bound", 198, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newPinsGit()
+			chainTree(f, tc.chain)
+			got, err := inputClosureGaps(f.run, closureRepo, "main")
+			if !tc.wantErr && err != nil {
+				t.Fatalf("inputClosureGaps: %v", err)
+			}
+			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), "the walk passed 200 directories") || got != nil) {
+				t.Errorf("gaps = %v, err = %v; want nil gaps and an error naming the 200-directory bound", got, err)
+			}
+		})
+	}
+}
