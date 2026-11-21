@@ -94,6 +94,27 @@ func InsideModule(dir string, modules []string) bool {
 	return false
 }
 
+// RacePackages returns the directories of the root module's test packages, as
+// ./dir with "." for the module root, leaving out files under testdata/ or
+// vendor/ and files inside a nested module. The result is sorted bytewise and
+// holds each directory once.
+func RacePackages(files []string) []string {
+	nested := NestedModules(files)
+	var dirs []string
+	for _, f := range files {
+		dir := path.Dir(f)
+		if !strings.HasSuffix(f, "_test.go") || inTestdataOrVendor(f) || InsideModule(dir, nested) {
+			continue
+		}
+		if dir == "." {
+			dirs = append(dirs, ".")
+		} else {
+			dirs = append(dirs, "./"+dir)
+		}
+	}
+	return sortedUnique(dirs)
+}
+
 // cleanDir puts a directory in the bare form NestedModules prints: no leading
 // ./, no trailing slash, and path.Clean applied. The root comes back as ".".
 func cleanDir(p string) string {
