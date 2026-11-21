@@ -148,6 +148,23 @@ func TestSlingGiveBackReasonAnchored(t *testing.T) {
 			err:  errors.New("starting polecat session: session already running with a stale agent left over by the last tick"),
 		},
 		{
+			name: "a session phrase with a word before it and no separator",
+			err:  errors.New("no session already running"),
+		},
+		{
+			name: "a session phrase after a colon with no space",
+			err:  errors.New("x:session already running"),
+		},
+		{
+			name: "a healthy agent followed by other words",
+			err:  errors.New("starting polecat session: session already running with healthy agent and a dead bead"),
+		},
+		{
+			name:     "a session already running alone as the whole message",
+			err:      errors.New("session already running"),
+			giveBack: true,
+		},
+		{
 			name:     "a bd gateway that did not answer as the town prints it",
 			err:      errors.New("gtwrap: the bd gateway at http://bd-gateway.gt.svc:7440 did not answer, so the call did not run: connection refused"),
 			giveBack: true,
