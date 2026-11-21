@@ -451,6 +451,12 @@ func (p *PostLandRunner) unrecorded(pl PostLand, err error) {
 // alarm window has ended, or, past postLandPendingLimit, oldest first with the
 // drop recorded in the same state.
 //
+// An entry that has waited PostLandOrphanAfter and whose read still says
+// pending is asked about through RunEnded: when the run behind the check ended
+// without a verdict, the pass marks the entry orphaned and logs it once. The
+// mark follows only that pending read, so a green or red read in the same pass
+// decides the entry and nothing is marked (gt-xgjwe0).
+//
 // The pass reads at most PostLandStatusPassBudget in all, entries least
 // recently read first, so a long list neither holds the worker pass nor starves
 // its newest entries. A store that cannot be read keeps every entry; after
@@ -523,6 +529,9 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 	defer cancel()
 	removed := map[int]bool{}
 	var fires []func()
+	// The orphaned lines wait for the save: a mark lives in this slice until it, so
+	// a line logged at the mark would be logged again by the next pass when the save fails.
+	var orphanLines []string
 	for _, i := range order {
 		if passCtx.Err() != nil {
 			break
@@ -575,6 +584,12 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 			p.logf("waiting at %s (%s): status %q is now %s: %s", short(pl.Commit), pl.by(), name, res.State, res.Description)
 		}
 		entries[i].LastRead, entries[i].LastState, entries[i].LastDescription = now, res.State, res.Description
+		// Only this read's own answer counts: a green or red read returned
+		// above, so the entry is marked orphaned only when the read that found
+		// it waiting is the one past the orphan window (gt-xgjwe0).
+		if line := p.checkOrphan(passCtx, &entries[i], res, now); line != "" {
+			orphanLines = append(orphanLines, line)
+		}
 	}
 	// A done entry whose removal save failed earlier is finished here.
 	keep := make([]PendingPostLand, 0, len(entries))
@@ -621,6 +636,9 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 	for _, sha := range decided {
 		delete(p.done, sha)
 	}
+	for _, line := range orphanLines {
+		p.logf("%s", line)
+	}
 	p.storeOK()
 }
 
@@ -628,6 +646,33 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 // durable entry, derived from its Since and the configured timeout.
 func (p *PostLandRunner) timedOut(e PendingPostLand, now time.Time, timeout time.Duration) bool {
 	return !now.Before(e.Since.Add(timeout))
+}
+
+// checkOrphan asks the runner behind res whether the check's run ended without
+// a verdict, once the pending entry has waited PostLandOrphanAfter, and marks
+// the entry when it did. It asks only about the read that found the status
+// pending: any other state this pass is not evidence the run is silent. A zero
+// now is no clock to mark by and asks nothing, and a marked entry is not asked
+// about again, so the run is named once. It returns the line to log once the mark is
+// saved, or "" when it marked nothing.
+func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, res PostLandStatusResult, now time.Time) string {
+	if p.RunEnded == nil || res.Verdict != PostLandStatusUnknown || res.State != string(forgejo.StatePending) {
+		return ""
+	}
+	if now.IsZero() || now.Sub(e.Since) < PostLandOrphanAfter || !e.OrphanedAt.IsZero() {
+		return ""
+	}
+	askCtx, cancel := context.WithTimeout(ctx, p.readTimeout())
+	defer cancel()
+	end, err := p.RunEnded(askCtx, e.Land)
+	if err != nil {
+		p.logf("WARNING asking whether the run behind %s (%s) ended: %v; the entry keeps waiting", short(e.Land.Commit), e.Land.by(), sanitizeStatusText(err.Error()))
+		return ""
+	}
+	if e.markOrphan(now, end) {
+		return fmt.Sprintf("orphaned at %s: run %s ended with the status still pending", short(e.Land.Commit), sanitizeStatusText(e.OrphanRun))
+	}
+	return ""
 }
 
 // passBudget bounds one pass's reads: a test's override, else
