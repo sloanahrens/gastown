@@ -255,6 +255,9 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		if _, err := g.ShowFileAtRev("no-such-ref", "b.txt"); err == nil || errors.Is(err, git.ErrNotAtRef) {
 			t.Errorf("ShowFileAtRev of an unknown ref = %v; want a real error", err)
 		}
+		if _, err := g.ShowFileAtRev("no-such-ref", "b.txt"); !errors.Is(err, git.ErrRefNotFound) {
+			t.Errorf("ShowFileAtRev of an unknown ref = %v; want it to wrap ErrRefNotFound", err)
+		}
 	})
 
 	t.Run("DiffNumstat counts the lines each changed file adds and removes", func(t *testing.T) {

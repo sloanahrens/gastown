@@ -2195,6 +2195,11 @@ func (g *Git) ShowFile(ref, path string) (string, error) {
 // both into one error.
 var ErrNotAtRef = errors.New("path does not exist at ref")
 
+// ErrRefNotFound is wrapped in the error ShowFileAtRev and ShowFileBytesAtRev
+// return when the ref does not resolve (rev-parse exits 1), so a caller can tell
+// a missing ref from a repository git cannot read (gt-69zakz).
+var ErrRefNotFound = errors.New("ref does not resolve")
+
 // ShowFileAtRev returns path's contents at ref, or ErrNotAtRef when path is
 // not in ref's tree. Unlike ShowFile, an absent file is an answer, and a ref
 // that does not resolve or an unreadable object stays a real error: the ref
@@ -2210,6 +2215,9 @@ func (g *Git) ShowFileAtRev(ref, path string) (string, error) {
 // The same ErrNotAtRef and resolve-error split applies.
 func (g *Git) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
 	if _, err := g.run("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+		if exitCode(err) == 1 {
+			return nil, fmt.Errorf("resolving %s: %w: %w", ref, ErrRefNotFound, err)
+		}
 		return nil, fmt.Errorf("resolving %s: %w", ref, err)
 	}
 	if _, err := g.run("cat-file", "-e", ref+":"+path); err != nil {
