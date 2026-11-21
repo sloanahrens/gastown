@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltbackup"
@@ -679,7 +680,7 @@ func (s *healthSources) Promotions() ([]townhealth.RigPromotion, error) {
 		if cfg == nil || cfg.PromoteTarget == "" {
 			continue
 		}
-		p := townhealth.RigPromotion{Rig: rigName}
+		p := townhealth.RigPromotion{Rig: rigName, ReleaseDriven: cfg.PromoteVia == config.PromoteViaAppPromote}
 		st, err := fileMainState{path: RedMainStatePath(s.townRoot(), rigName)}.Load()
 		if err != nil {
 			p.Err = err
