@@ -1356,12 +1356,13 @@ type postLandRunLister interface {
 // the repository, so its base name answers.
 const postLandWorkflowID = "post-land.yml"
 
-// postLandRunCancelled is the status Forgejo reports for a cancelled run.
+// postLandRunCancelled is the run status Forgejo reports when a run is stopped
+// before it finishes.
 const postLandRunCancelled = "cancelled" //nolint:misspell // the run status Forgejo reports
 
 // postLandRunIsEnded reports whether a run status means the run can no longer
-// post the verdict its check waits for: a cancelled, failed or errored run
-// never reports one.
+// post the verdict its check waits for: a run stopped before it finished, a
+// failed one or an errored one never reports one.
 func postLandRunIsEnded(status string) bool {
 	return status == postLandRunCancelled ||
 		status == string(forgejo.StateFailure) || status == string(forgejo.StateError)
