@@ -1834,6 +1834,31 @@ func TestImagePinsReadAGoodReadResetsTheFailureCount(t *testing.T) {
 	}
 }
 
+// TestImagePinsReadHoldsATransportErrorForExactlyTwoTicks: a bd pin that reads
+// well and then fails to transport on three ticks keeps its last good state on
+// the first two and carries its transport Err on the third: a refusal is the
+// only failure the hold skips (gt-rtxkwt), and a failed call is still held
+// (gt-p1bm5i).
+func TestImagePinsReadHoldsATransportErrorForExactlyTwoTicks(t *testing.T) {
+	t.Parallel()
+	reads := imagePinsBDFailureTicks(t, []bool{false, true, true, true}, io.Discard)
+	if reads[0][0].Err != nil {
+		t.Fatalf("the good read = %+v, want bd at a good state", reads[0][0])
+	}
+	for _, tick := range []int{1, 2} {
+		if reads[tick][0] != reads[0][0] {
+			t.Errorf("tick %d = %+v, want bd held at its last good state", tick, reads[tick][0])
+		}
+	}
+	err := reads[3][0].Err
+	if err == nil || !strings.Contains(err.Error(), "git exited 128") {
+		t.Fatalf("the third failed tick = %+v, want bd's transport Err", reads[3][0])
+	}
+	if errors.Is(err, daemonimage.ErrPinRefused) {
+		t.Errorf("the third failed tick's error = %v, want a transport failure, not a refusal", err)
+	}
+}
+
 // TestImagePinsReadHoldsOnlyTheSamePinCommit: after the pins file moves a pin, a
 // failed read at the new commit stands at once; it is not replaced by the old
 // commit's good state, which the planner would file a second refresh from (gt-ki0ir9).
