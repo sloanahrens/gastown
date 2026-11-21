@@ -1230,6 +1230,148 @@ func TestSpecDispatchSplitRouteNoteFailureRetriesNextTick(t *testing.T) {
 	}
 }
 
+// labelCount returns how many times label appears in labels.
+func labelCount(labels []string, label string) int {
+	n := 0
+	for _, l := range labels {
+		if l == label {
+			n++
+		}
+	}
+	return n
+}
+
+// TestSpecStoryPointSplitMarkerAdds: the route gives a bead it holds for
+// splitting the sp-split-auto marker before the split label, so a later
+// re-estimate can tell the route's split from a person's. A failed add of
+// either is reported, and the bead is retried on the next tick.
+func TestSpecStoryPointSplitMarkerAdds(t *testing.T) {
+	t.Parallel()
+	held := func(f *fakeSpecTown) specDispatchEnv {
+		env := f.env()
+		env.StoryPointSplitOver = 15
+		env.StoryPointEstimate = func(context.Context, string) (specEstimateOutcome, error) {
+			return splitOutcome("estimated", 13, 20, "all", "nearest beads: none"), nil
+		}
+		return env
+	}
+	t.Run("the marker lands before the split label", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		r := runSpecDispatchCycle(held(f))
+
+		labels := f.labels["gt-a"]
+		marker, split := slices.Index(labels, specSplitAutoLabel), slices.Index(labels, specdispatch.SplitLabel)
+		if marker < 0 || split < 0 || marker > split {
+			t.Fatalf("labels = %v, want %s then %s", labels, specSplitAutoLabel, specdispatch.SplitLabel)
+		}
+		if len(r.Errors) != 0 {
+			t.Errorf("errors = %q, want none", r.Errors)
+		}
+		if len(f.slung) != 0 {
+			t.Errorf("slung %v, want the bead held", f.slung)
+		}
+	})
+	t.Run("a failed marker add is reported and the split label waits for the retry", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		env := held(f)
+		addLabel := env.AddLabel
+		env.AddLabel = func(id, label string) error {
+			if label == specSplitAutoLabel {
+				return errors.New("bd refused")
+			}
+			return addLabel(id, label)
+		}
+		r := runSpecDispatchCycle(env)
+
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "gt-a") ||
+			!strings.Contains(r.Errors[0], specSplitAutoLabel) || !strings.Contains(r.Errors[0], "bd refused") {
+			t.Errorf("errors = %q, want one naming the bead, the marker and the failed write", r.Errors)
+		}
+		if slices.Contains(f.labels["gt-a"], specdispatch.SplitLabel) {
+			t.Fatalf("labels = %v: the split label was written without its marker", f.labels["gt-a"])
+		}
+		if lines := splitHoldLines(r.Skipped); len(lines) != 1 {
+			t.Errorf("split hold lines = %q, want the bead still reported held", lines)
+		}
+
+		env.AddLabel = addLabel
+		r = runSpecDispatchCycle(env)
+
+		if len(r.Errors) != 0 {
+			t.Errorf("errors after the retry = %q, want none", r.Errors)
+		}
+		if got := labelCount(f.labels["gt-a"], specSplitAutoLabel); got != 1 {
+			t.Errorf("marker written %d time(s) after the retry, want once: %v", got, f.labels["gt-a"])
+		}
+		if got := labelCount(f.labels["gt-a"], specdispatch.SplitLabel); got != 1 {
+			t.Errorf("split label written %d time(s) after the retry, want once: %v", got, f.labels["gt-a"])
+		}
+	})
+	t.Run("a failed split add is reported and the retry writes only the split label", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		env := held(f)
+		addLabel := env.AddLabel
+		env.AddLabel = func(id, label string) error {
+			if label == specdispatch.SplitLabel {
+				return errors.New("bd refused")
+			}
+			return addLabel(id, label)
+		}
+		r := runSpecDispatchCycle(env)
+
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "gt-a") ||
+			!strings.Contains(r.Errors[0], "split label") || !strings.Contains(r.Errors[0], "bd refused") {
+			t.Errorf("errors = %q, want one naming the bead, the split label and the failed write", r.Errors)
+		}
+		if got := labelCount(f.labels["gt-a"], specSplitAutoLabel); got != 1 {
+			t.Errorf("marker written %d time(s) before the retry, want once: %v", got, f.labels["gt-a"])
+		}
+
+		env.AddLabel = addLabel
+		r = runSpecDispatchCycle(env)
+
+		if len(r.Errors) != 0 {
+			t.Errorf("errors after the retry = %q, want none", r.Errors)
+		}
+		if got := labelCount(f.labels["gt-a"], specSplitAutoLabel); got != 1 {
+			t.Errorf("marker written %d time(s) after the retry, want still once: %v", got, f.labels["gt-a"])
+		}
+		if got := labelCount(f.labels["gt-a"], specdispatch.SplitLabel); got != 1 {
+			t.Errorf("split label written %d time(s) after the retry, want once: %v", got, f.labels["gt-a"])
+		}
+		if len(f.slung) != 0 {
+			t.Errorf("slung %v after the retry, want the bead held", f.slung)
+		}
+	})
+}
+
+// TestSpecStoryPointSplitMarkerHuman: a bead a person or another tool already
+// labeled split is held as before and is given no sp-split-auto marker, so the
+// route never claims a split it did not make.
+func TestSpecStoryPointSplitMarkerHuman(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.StoryPointSplitOver = 15
+	latest := cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z")
+	latest.Labels = []string{specdispatch.SplitLabel}
+
+	step := specStoryPointStep(env, "gt-a", latest)
+
+	if step.Hold == "" {
+		t.Error("hold = empty, want the bead held as before")
+	}
+	if len(step.Errors) != 0 {
+		t.Errorf("errors = %q, want none", step.Errors)
+	}
+	if got := f.labels["gt-a"]; len(got) != 0 {
+		t.Errorf("labels written = %v, want none: the bead already carries split", got)
+	}
+}
+
 // TestSpecDispatchSplitRouteVerdictRefusals: every estimate the route cannot
 // judge returns a reason, and the caller says so and slings; the shape-only
 // rung is a verdict the route reads and leaves alone.
