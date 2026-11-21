@@ -87,8 +87,10 @@ type Pass struct {
 	MaxFindings int
 }
 
-// maxFindings is the cap a run stops at: the pass's own, or the production one.
-func (p *Pass) maxFindings() int {
+// Cap is the cap a run stops at: the pass's own when above zero, else the
+// production one. It is exported so the daemon logs the cap the run used and
+// keeps no copy of the rule (gt-tu7psu).
+func (p *Pass) Cap() int {
 	if p.MaxFindings > 0 {
 		return p.MaxFindings
 	}
@@ -236,7 +238,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
-		if sum.Asked+sum.Skipped+sum.Failed >= p.maxFindings() {
+		if sum.Asked+sum.Skipped+sum.Failed >= p.Cap() {
 			sum.Capped = true
 			break
 		}
