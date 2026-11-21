@@ -203,6 +203,13 @@ var ruleOwners = map[string]Owner{
 	// A finished seat left in the walk is the town's own seat to end: the
 	// overseer reads why the end did not happen and ends it (gt-klpqb3).
 	RuleSeatFinishedLingering: OwnerOverseer,
+	// A drifted cluster is the town's own deploy to put back in step: the
+	// overseer rolls it or reads the hand edit against the render (gt-y705n1).
+	RuleClusterDrift: OwnerOverseer,
+	// An unreadable cluster is the town's own read to unblock: the overseer
+	// finds the grant or the object the compare could not read before a person
+	// is woken (gt-y705n1).
+	RuleClusterDriftUnreadable: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
