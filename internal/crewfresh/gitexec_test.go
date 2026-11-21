@@ -374,20 +374,22 @@ func TestGitEveryCallRunsUnderADeadline(t *testing.T) {
 // reads (gt-vpj84).
 func TestGitHungCallEndsWithTheDeadline(t *testing.T) {
 	t.Parallel()
-	hung := &gitExec{dir: testDir, command: (&fakeCommand{hang: true}).run, localTimeout: time.Millisecond}
-	calls := map[string]func() error{
+	calls := map[string]func(*gitExec) error{
 		// The fetch takes its own timeout from the caller.
-		"fetch":        func() error { return hung.Fetch(time.Millisecond) },
-		"branch":       func() error { _, err := hung.Branch(); return err },
-		"clean":        func() error { _, err := hung.Clean(); return err },
-		"behind":       func() error { _, err := hung.Behind(); return err },
-		"ancestor":     func() error { _, err := hung.HeadIsAncestorOfOriginMain(); return err },
-		"fast-forward": hung.FastForwardMain,
+		"fetch":        func(g *gitExec) error { return g.Fetch(time.Millisecond) },
+		"branch":       func(g *gitExec) error { _, err := g.Branch(); return err },
+		"clean":        func(g *gitExec) error { _, err := g.Clean(); return err },
+		"behind":       func(g *gitExec) error { _, err := g.Behind(); return err },
+		"ancestor":     func(g *gitExec) error { _, err := g.HeadIsAncestorOfOriginMain(); return err },
+		"fast-forward": (*gitExec).FastForwardMain,
 	}
 	for name, call := range calls {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if err := call(); !errors.Is(err, context.DeadlineExceeded) {
+			// Each subtest owns its fake: the parallel calls would otherwise
+			// race on one fakeCommand's slices (gt-7ild3d).
+			g := &gitExec{dir: testDir, command: (&fakeCommand{hang: true}).run, localTimeout: time.Millisecond}
+			if err := call(g); !errors.Is(err, context.DeadlineExceeded) {
 				t.Errorf("hung call error = %v, want it to wrap context.DeadlineExceeded", err)
 			}
 		})
