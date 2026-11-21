@@ -505,6 +505,11 @@ type Daemon struct {
 	// cacheTrimParksMu guards every access.
 	cacheTrimParks   map[string]bool
 	cacheTrimParksMu sync.Mutex
+	// cacheTrimPendingClaims is the claims whose trim Job was still running when a
+	// pass's wait ended, so the pass left it to finish. The claim route sets it
+	// under cacheTrimPendingMu (gt-iwunf8).
+	cacheTrimPendingClaims map[string]bool
+	cacheTrimPendingMu     sync.Mutex
 	// cacheTrimCtxSeen is a test seam: the context each cache trim cluster call
 	// runs under and the call's verb (its arguments after the shared prefix, the
 	// text cacheTrimVerb returns), handed over just before the call runs. nil in

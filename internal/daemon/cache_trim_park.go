@@ -69,3 +69,27 @@ func cacheTrimCauseLine(cause error) string {
 	}
 	return "the failure named no cause"
 }
+
+// cacheTrimSetPending records, or clears, that claim's trim Job was still running
+// when its pass's wait ended. It writes nothing else: a park and a run are the
+// caller's.
+func (d *Daemon) cacheTrimSetPending(namespace, claim string, pending bool) {
+	d.cacheTrimPendingMu.Lock()
+	defer d.cacheTrimPendingMu.Unlock()
+	if !pending {
+		delete(d.cacheTrimPendingClaims, cacheTrimParkKey(namespace, claim))
+		return
+	}
+	if d.cacheTrimPendingClaims == nil {
+		d.cacheTrimPendingClaims = map[string]bool{}
+	}
+	d.cacheTrimPendingClaims[cacheTrimParkKey(namespace, claim)] = true
+}
+
+// cacheTrimIsPending reports whether an earlier pass left the claim's trim Job
+// pending and nothing has cleared the mark since.
+func (d *Daemon) cacheTrimIsPending(namespace, claim string) bool {
+	d.cacheTrimPendingMu.Lock()
+	defer d.cacheTrimPendingMu.Unlock()
+	return d.cacheTrimPendingClaims[cacheTrimParkKey(namespace, claim)]
+}

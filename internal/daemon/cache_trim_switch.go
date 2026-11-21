@@ -76,6 +76,11 @@ func (d *Daemon) cacheTrimClaimViaJob(ctx context.Context, kubeconfig string, cl
 		// A Job still running at the wait's end is a verdict, not a failure: its
 		// result is read at a later pass, so nothing is recorded or parked.
 		if errors.Is(err, errCacheTrimJobPending) {
+			// An apply marks the claim for the pass that reads it; a dry run touches no
+			// mark.
+			if apply {
+				d.cacheTrimSetPending(namespace, claim.ClaimName, true)
+			}
 			d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the trim Job %s is still running; its result is read at the next pass", claim.ClaimName, namespace, cacheTrimJobName(claim.ClaimName))
 			return true
 		}
