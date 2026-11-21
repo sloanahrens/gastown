@@ -81,6 +81,14 @@ func RunSteps(ctx context.Context, clock clockwork.Clock, run StepRunFunc, steps
 				b.Write(stderr)
 				break
 			}
+			if step.SkippedFailure(output) {
+				// The failure this step names is not the run's: a mirror clone
+				// reports an existing directory on a later launch. Any other
+				// failure of the step still stops the run.
+				b.Write(stdout)
+				b.Write(stderr)
+				break
+			}
 			code := exitStatus(err)
 			failedCode = code
 			if step.Retry {
