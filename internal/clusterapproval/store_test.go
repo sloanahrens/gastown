@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/deployercred"
 )
@@ -29,11 +30,11 @@ func recordPath() string { return filepath.Join(recordDir, goodID+".json") }
 // fails the one call whose path is errPath. dirs and files show that an id
 // ReadRecord refuses reached the filesystem not at all.
 type fakeReadFS struct {
-	modes               map[string]fs.FileMode
-	data                map[string][]byte
-	errPath             string
-	openDirErr, openErr error
-	dirs, files         int
+	modes                        map[string]fs.FileMode
+	data                         map[string][]byte
+	errPath                      string
+	openDirErr, openErr, readErr error
+	dirs, files                  int
 }
 
 var _ deployercred.ReadFS = (*fakeReadFS)(nil)
@@ -103,7 +104,12 @@ func (f *fakeFile) Stat() (deployercred.Info, error) { return f.fs.Lstat(f.name)
 
 func (f *fakeFile) Close() error { return nil }
 
-func (f *fakeFile) Read(p []byte) (int, error) { return f.r.Read(p) }
+func (f *fakeFile) Read(p []byte) (int, error) {
+	if f.name == f.fs.errPath && f.fs.readErr != nil {
+		return 0, f.fs.readErr
+	}
+	return f.r.Read(p)
+}
 
 func TestClusterApprovalStoreReads(t *testing.T) {
 	t.Parallel()
@@ -190,5 +196,77 @@ func TestClusterApprovalStoreID(t *testing.T) {
 				t.Fatalf("a refused id reached the filesystem: %d OpenDir calls and %d Open calls, want none", fsys.dirs, fsys.files)
 			}
 		})
+	}
+}
+
+func TestClusterApprovalStoreReadsRecord(t *testing.T) {
+	t.Parallel()
+	approved := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	want := Record{Act: ActApplyPlan, Cluster: ClusterControl, PlanSHA256: goodSHA, ProposalID: goodID, ApprovedAt: approved, ExpiresAt: approved.Add(6 * time.Hour)}
+	tests := []struct {
+		name   string
+		settle func(*fakeReadFS)
+		wantNo bool
+		want   string
+	}{
+		{"a good record", func(f *fakeReadFS) {
+			f.putDir(recordDir, 0o750)
+			f.putFile(recordPath(), 0o640, recordText(goodRecord()))
+		}, false, ""},
+		{"a missing record", func(f *fakeReadFS) { f.putDir(recordDir, 0o750) }, true, ""},
+		{"a record that cannot be read", func(f *fakeReadFS) {
+			f.putDir(recordDir, 0o750)
+			f.putFile(recordPath(), 0o640, recordText(goodRecord()))
+			f.errPath, f.readErr = recordPath(), fs.ErrPermission
+		}, false, "could not read the approval record"},
+		{"a record larger than 4096 bytes", func(f *fakeReadFS) {
+			f.putDir(recordDir, 0o750)
+			f.putFile(recordPath(), 0o640, recordText(goodRecord())+strings.Repeat(" ", maxRecordBytes))
+		}, false, "larger than 4096 bytes"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newFakeReadFS()
+			tt.settle(fsys)
+			got, err := ReadRecord(fsys, brokerUID, deployerGID, recordDir, goodID)
+			switch {
+			case tt.wantNo:
+				if !errors.Is(err, ErrNoApproval) || got != (Record{}) {
+					t.Fatalf("ReadRecord on a record that is not there returned %+v, %v, want ErrNoApproval and no record", got, err)
+				}
+			case tt.want != "":
+				if err == nil || !strings.Contains(err.Error(), tt.want) || errors.Is(err, ErrNoApproval) {
+					t.Fatalf("ReadRecord returned %v, want a refusal stating %q that is not ErrNoApproval", err, tt.want)
+				}
+			default:
+				if err != nil || got != want {
+					t.Fatalf("ReadRecord read %+v, %v, want %+v", got, err, want)
+				}
+			}
+		})
+	}
+}
+
+// A record that does not parse is reported without ParseRecord's error, which
+// can carry a key or a value from the record.
+func TestClusterApprovalStoreErrorsNameNoContent(t *testing.T) {
+	t.Parallel()
+	const secretKey, secretValue = "secret_token", "s3cr3t-value-that-must-not-leak"
+	fields := goodRecord()
+	fields[secretKey] = secretValue
+	fsys := newFakeReadFS()
+	fsys.putDir(recordDir, 0o750)
+	fsys.putFile(recordPath(), 0o640, recordText(fields))
+	_, err := ReadRecord(fsys, brokerUID, deployerGID, recordDir, goodID)
+	if err == nil {
+		t.Fatal("ReadRecord accepted a record with an unknown key")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, recordPath()) || !strings.Contains(msg, "not a valid approval record") {
+		t.Fatalf("the refusal %q does not name the path %s and say the record is not valid", msg, recordPath())
+	}
+	if strings.Contains(msg, secretKey) || strings.Contains(msg, secretValue) {
+		t.Fatalf("the refusal %q carries the record's key or value", msg)
 	}
 }

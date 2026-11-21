@@ -3,6 +3,7 @@ package clusterapproval
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"path/filepath"
 
@@ -57,4 +58,37 @@ func isRecordID(id string) bool {
 		}
 	}
 	return true
+}
+
+// maxRecordBytes bounds the record ReadRecord reads: the broker's record is a
+// few hundred bytes, and a file far larger than one is refused rather than read
+// whole.
+const maxRecordBytes = 4096
+
+// ReadRecord reads and parses the approval record OpenRecord opens. ownerUID
+// and groupGID are the ids bead gt-0grfdc compares the opened handles against;
+// this reader does not use them yet. A refusal names the path and the check and
+// never a byte of the record: a record that does not parse is reported without
+// ParseRecord's error, which can carry a key or a value from it.
+func ReadRecord(fsys deployercred.ReadFS, ownerUID, groupGID int, dir, id string) (Record, error) {
+	f, err := OpenRecord(fsys, dir, id)
+	if err != nil {
+		return Record{}, err
+	}
+	defer func() { _ = f.Close() }() // read-only: a close error cannot change the record
+	target := filepath.Join(dir, id+".json")
+	// Read one byte past the bound, so a record that fills it is refused rather
+	// than parsed from a truncated prefix.
+	data, err := io.ReadAll(io.LimitReader(f, maxRecordBytes+1))
+	if err != nil {
+		return Record{}, fmt.Errorf("could not read the approval record %s: %w", target, err)
+	}
+	if len(data) > maxRecordBytes {
+		return Record{}, fmt.Errorf("the approval record %s is larger than %d bytes", target, maxRecordBytes)
+	}
+	record, err := ParseRecord(data)
+	if err != nil {
+		return Record{}, fmt.Errorf("approval record %s: not a valid approval record", target)
+	}
+	return record, nil
 }
