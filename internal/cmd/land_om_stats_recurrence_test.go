@@ -34,6 +34,34 @@ func TestLandOmStatsRecurrenceTalliesCounts(t *testing.T) {
 	}
 }
 
+// TestLandOmStatsRecurrenceClock: a finding recorded after now is not tallied,
+// one at now is, and an earlier now counts fewer than a later one, because a
+// record the report cannot yet have seen is no evidence (gt-c9sr9p).
+func TestLandOmStatsRecurrenceClock(t *testing.T) {
+	t.Parallel()
+	doc := land.ReviewFindingText{Severity: "minor", Title: "the documentation says the flag defaults to true"}
+	now := omlessons.HoldOutStart.Add(48 * time.Hour)
+	records := []land.ReviewRecord{
+		{BeadID: "gt-rec-0000", At: now.Add(-49 * time.Hour), FindingText: []land.ReviewFindingText{doc}}, // before the window
+		{BeadID: "gt-rec-0000", At: now.Add(-time.Hour), FindingText: []land.ReviewFindingText{doc}},      // before now
+		{BeadID: "gt-rec-0000", At: now, FindingText: []land.ReviewFindingText{doc}},                      // at now
+		{BeadID: "gt-rec-0000", At: now.Add(time.Hour), FindingText: []land.ReviewFindingText{doc}},       // after now
+	}
+	count := func(at time.Time) int {
+		row := recurrence(records, at)[0]
+		return row.HeldOut.Findings + row.Filed.Findings
+	}
+	if got := count(now); got != 2 {
+		t.Errorf("at now: %d tallied, want 2 (one before and one at now, none after)", got)
+	}
+	if got := count(now.Add(-2 * time.Hour)); got != 0 {
+		t.Errorf("two hours earlier: %d tallied, want 0", got)
+	}
+	if earlier, later := count(now.Add(-time.Hour)), count(now.Add(time.Hour)); earlier >= later {
+		t.Errorf("earlier now tallied %d, later now %d; want earlier < later", earlier, later)
+	}
+}
+
 // TestLandOmStatsRecurrenceTalliesWindow: a finding counts from the window's
 // first instant up to but not including its end.
 func TestLandOmStatsRecurrenceTalliesWindow(t *testing.T) {
