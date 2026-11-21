@@ -67,7 +67,10 @@ func TestBuilderGoListRunnerUsesItsGoSeamAndEnvironment(t *testing.T) {
 
 	out, err := b.goListRunner()("/d", "list")
 
-	if err != nil || string(out) != "ok" || gotDir != "/d" || !reflect.DeepEqual(gotEnv, []string{"A=1"}) || !reflect.DeepEqual(gotArgs, []string{"list"}) {
-		t.Errorf("runner = %q, %v; Go saw dir %q env %v args %v", out, err, gotDir, gotEnv, gotArgs)
+	if err != nil || string(out) != "ok" || gotDir != "/d" || !reflect.DeepEqual(gotArgs, []string{"list"}) {
+		t.Errorf("runner = %q, %v; Go saw dir %q args %v", out, err, gotDir, gotArgs)
+	}
+	if !reflect.DeepEqual(gotEnv, []string{"A=1"}) {
+		t.Errorf("Go saw an environment of %d entries, want the builder's one", len(gotEnv))
 	}
 }
