@@ -43,6 +43,29 @@ const specSplitStaleNotePrefix = "SPLIT LABEL STALE v1"
 // dispatchable and held (gt-7dbjk5).
 const specSplitHysteresis = 0.5
 
+// specSPSlungPrefix begins the label the tick writes on a bead it slings at or
+// over the split trigger without holding it. The label's reason says why the
+// route left the bead to a seat instead, so the landing record can read that
+// reason rather than infer it from what the route happened to be doing
+// (gt-l04nj0). The label is written once and never removed.
+const specSPSlungPrefix = "sp-slung:"
+
+// The reasons the sp-slung label records, one for each way the split route
+// leaves a bead at or over its trigger to a seat.
+const (
+	// specSPSlungRework marks a bead sent back for rework: its work is already
+	// on a branch, so the route neither judges nor holds it (gt-bj22wp).
+	specSPSlungRework = "rework"
+	// specSPSlungShape marks a bead whose estimate came from the shape-only
+	// rung, the weakest one, which the route never acts on.
+	specSPSlungShape = "shape"
+	// specSPSlungUnjudged marks a bead whose estimate named no value the route
+	// can read, so the route could not judge it.
+	specSPSlungUnjudged = "unjudged"
+	// specSPSlungOff marks a bead slung while the split route's trigger was 0.
+	specSPSlungOff = "off"
+)
+
 // errNoStoryPointEstimator reports a tick that has the setting on and no
 // estimate wired.
 var errNoStoryPointEstimator = errors.New("no estimator is wired")
@@ -94,11 +117,19 @@ func specStoryPointRun(env specDispatchEnv, beadID string) specStoryPointAnswer 
 // that read it. It writes nothing when both settings are off.
 func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.Spec) specStoryPointStepResult {
 	var res specStoryPointStepResult
+	// The earlier estimate is read from the labels the board gave, before this
+	// run writes a new sp-minutes label over it.
+	var earlier specEstimateOutcome
+	specEstimateFromLabels(&earlier, latest.Labels)
 	// A bead sent back for rework already has its work on a branch, and the
 	// findings a rejection appends can raise its estimate over the trigger the
 	// first pass stayed under: splitting it would lose that branch, so the
-	// route neither judges nor holds it (gt-bj22wp).
+	// route neither judges nor holds it (gt-bj22wp). The label the bead is
+	// slung with says the rework is why (gt-l04nj0).
 	if latest.HasLabel(reworkLabel) {
+		if line := specSPSlung(env, beadID, latest, earlier.Minutes, 0, specSPSlungRework); line != "" {
+			res.Errors = append(res.Errors, line)
+		}
 		return res
 	}
 	splitOver := env.StoryPointSplitOver
@@ -122,10 +153,6 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 		}
 		return res
 	}
-	// The earlier estimate is read from the labels the board gave, before this
-	// run writes a new sp-minutes label over it.
-	var earlier specEstimateOutcome
-	specEstimateFromLabels(&earlier, latest.Labels)
 	answer := specStoryPointRun(env, beadID)
 	// The estimate appends its log line whatever the settings read next, so a
 	// failed append is reported even when the shadow setting is off.
@@ -138,12 +165,23 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 		}
 	}
 	if splitOver <= 0 {
+		// The route is off, so it judged no bead: a bead whose estimate is at
+		// or over the trigger records the off route as the reason it was slung
+		// (gt-l04nj0).
+		if line := specSPSlung(env, beadID, latest, earlier.Minutes, answer.outcome.Minutes, specSPSlungOff); line != "" {
+			res.Errors = append(res.Errors, line)
+		}
 		return res
 	}
 	minutes, rung, reason := specSplitVerdict(answer)
 	if reason != "" {
 		res.Notices = append(res.Notices, fmt.Sprintf("%s: %s%s; slung because the route cannot judge it",
 			beadID, specdispatch.SkipSplitOver, reason))
+		// The route can read no verdict from the fresh estimate, so the bead's
+		// own labels carry its estimate for the record (gt-l04nj0).
+		if line := specSPSlung(env, beadID, latest, earlier.Minutes, answer.outcome.Minutes, specSPSlungUnjudged); line != "" {
+			res.Errors = append(res.Errors, line)
+		}
 		return res
 	}
 	// A bead already under the trigger is held only past the band, so noise near
@@ -154,7 +192,14 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 	}
 	if rung == "shape" || minutes < hold {
 		// A shape-only estimate is the weakest rung and is never acted on; an
-		// estimate under the trigger is a bead the seat can take.
+		// estimate under the trigger is a bead the seat can take. A shape-only
+		// bead at or over the trigger records the rung as the reason it was
+		// slung (gt-l04nj0).
+		if rung == "shape" {
+			if line := specSPSlung(env, beadID, latest, earlier.Minutes, minutes, specSPSlungShape); line != "" {
+				res.Errors = append(res.Errors, line)
+			}
+		}
 		return res
 	}
 	points := answer.outcome.Points
@@ -181,6 +226,43 @@ func specStoryPointStep(env specDispatchEnv, beadID string, latest specdispatch.
 	res.Hold = fmt.Sprintf("%s: %sestimated %s min (sp:%d, rung %s), at or over the %s-minute trigger; held for splitting",
 		beadID, specdispatch.SkipSplitOver, specMinutesText(minutes), points, rung, specTriggerText(splitOver))
 	return res
+}
+
+// specSPSlung writes the sp-slung:<reason> label on a bead the tick slings
+// without holding it, when the estimate the bead's labels record or the one
+// this tick made is at or over the split trigger, and returns the error line
+// when that write failed. The label records why the route left a bead at or
+// over its trigger to a seat. A bead under the trigger gets none, and neither
+// does a bead the hysteresis band keeps under the trigger it is judged against.
+// A bead that already wears an sp-slung label is left alone, so a second tick
+// adds no second reason.
+func specSPSlung(env specDispatchEnv, beadID string, latest specdispatch.Spec, stored, fresh float64, reason string) string {
+	if !specSPSlungAtOrOver(stored, fresh, env.StoryPointSplitOver) {
+		return ""
+	}
+	for _, label := range latest.Labels {
+		if strings.HasPrefix(label, specSPSlungPrefix) {
+			return ""
+		}
+	}
+	label := specSPSlungPrefix + reason
+	// A seam that is not wired cannot write the reason, and the tick must not
+	// read the missing label as a bead that was never at or over the trigger.
+	if env.AddLabel == nil {
+		return fmt.Sprintf("%s: %s label: no label writer is wired", beadID, label)
+	}
+	if err := env.AddLabel(beadID, label); err != nil {
+		return fmt.Sprintf("%s: %s label: %v", beadID, label, err)
+	}
+	return ""
+}
+
+// specSPSlungAtOrOver reports whether the estimate the bead's labels record, or
+// the one this tick made, is at or over the trigger. A value of 0 is an
+// estimate absent or one the route could not read, not a reading of 0 minutes
+// that clears a zero trigger.
+func specSPSlungAtOrOver(stored, fresh, trigger float64) bool {
+	return (stored > 0 && stored >= trigger) || (fresh > 0 && fresh >= trigger)
 }
 
 // specStoryPointShadowLine is the one line the shadow setting logs for a
