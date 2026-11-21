@@ -689,13 +689,11 @@ func failCall(match func(recordedKubectlCall) bool, out string, exit int, err er
 	}
 }
 
-// TestTownRunnerResizeWiredRefusesAMissingSeam: every seam the resize reads
-// refuses when it is missing, instead of panicking partway through.
+// TestTownRunnerResizeWiredRefusesAMissingSeam: the resize refuses when a seam
+// it reads is missing, before its first cluster call, instead of panicking
+// partway through.
 func TestTownRunnerResizeWiredRefusesAMissingSeam(t *testing.T) {
 	t.Parallel()
-	if err := resizeDeps(io.Discard, &recordingKubectl{}, "4").Wired(); err != nil {
-		t.Fatalf("the complete resize refuses: %v", err)
-	}
 	cases := []struct {
 		name   string
 		mutate func(*runnerResizeDeps)
@@ -710,11 +708,18 @@ func TestTownRunnerResizeWiredRefusesAMissingSeam(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			deps := resizeDeps(io.Discard, &recordingKubectl{}, "4")
+			k := &recordingKubectl{answer: func(call recordedKubectlCall) (string, int, error) {
+				t.Errorf("the resize read the cluster before refusing: %v", call.args)
+				return "", 0, nil
+			}}
+			deps := resizeDeps(io.Discard, k, "4")
 			tc.mutate(&deps)
-			err := deps.Wired()
+			err := runTownRunnerResize(context.Background(), deps)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("Wired() = %v, want it to name %q", err, tc.want)
+				t.Errorf("runTownRunnerResize() = %v, want it to name %q", err, tc.want)
+			}
+			if len(k.calls) != 0 {
+				t.Errorf("the resize made %d cluster calls before refusing: %v", len(k.calls), k.calls)
 			}
 		})
 	}
