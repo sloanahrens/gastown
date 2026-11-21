@@ -1552,6 +1552,77 @@ func TestDiskMaintenanceCIGocacheCapRefuses(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceCIEngineCacheKeep: the CI engine build cache's size bound is
+// the 10GB default when unset and the parsed size otherwise, at the accessor and
+// at config load alike, so an empty setting is never an error (gt-mwlgcy).
+func TestDiskMaintenanceCIEngineCacheKeep(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+		doc   string
+		want  int64
+	}{
+		{name: "empty is the 10GB default", doc: `{"disk_maintenance": {}}`, want: 10 << 30},
+		{name: "an explicit size is read", value: "20GB", doc: `{"disk_maintenance": {"ci_engine_cache_keep_bytes": "20GB"}}`, want: 20 << 30},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := (DiskMaintenanceConfig{CIEngineCacheKeepBytes: tt.value}).CIEngineCacheKeepLimit()
+			if err != nil {
+				t.Fatalf("CIEngineCacheKeepLimit(%q): %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("CIEngineCacheKeepLimit(%q) = %d, want %d", tt.value, got, tt.want)
+			}
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(tt.doc), &p); err != nil {
+				t.Fatalf("config load with ci_engine_cache_keep_bytes %q: %v", tt.value, err)
+			}
+			got, err = p.DiskMaintenance.CIEngineCacheKeepLimit()
+			if err != nil {
+				t.Fatalf("config load with ci_engine_cache_keep_bytes %q: CIEngineCacheKeepLimit: %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("config load with ci_engine_cache_keep_bytes %q = %d, want %d", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiskMaintenanceCIEngineCacheKeepRefuses: a build cache bound the prune
+// cannot act on is refused naming its own key, from the accessor and at config
+// load, and is never read as the default (gt-mwlgcy).
+func TestDiskMaintenanceCIEngineCacheKeepRefuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr string
+	}{
+		{name: "zero is refused", value: "0", wantErr: "zero"},
+		{name: "negative is refused", value: "-1GB", wantErr: "not a size"},
+		{name: "malformed is refused", value: "lots", wantErr: "not a size"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := (DiskMaintenanceConfig{CIEngineCacheKeepBytes: tt.value}).CIEngineCacheKeepLimit(); err == nil ||
+				!strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_cache_keep_bytes") ||
+				!strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("CIEngineCacheKeepLimit(%q) = %v; want an error naming the key and %q", tt.value, err, tt.wantErr)
+			}
+			doc := `{"disk_maintenance": {"ci_engine_cache_keep_bytes": "` + tt.value + `"}}`
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil ||
+				!strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_cache_keep_bytes") {
+				t.Errorf("config load with ci_engine_cache_keep_bytes %q = %v; want an error naming the key", tt.value, err)
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceCIEnginePruneSettings: the CI engine prune's settings default
 // to 1h, 48h, 6h and ["ci-base"]; a value the patrol cannot act on is refused naming
 // its own key, and an explicit empty keep list is refused rather than read as
