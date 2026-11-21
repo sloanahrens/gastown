@@ -1518,6 +1518,58 @@ func (d *Daemon) cacheTrimJobFailed(ctx context.Context, kubeconfig, namespace, 
 	return false
 }
 
+// cacheTrimJobStateKind is what a trim Job's status says: complete, failed or
+// still active. The values start at one, so a zero kind is never complete.
+type cacheTrimJobStateKind int
+
+const (
+	cacheTrimJobStateComplete cacheTrimJobStateKind = iota + 1
+	cacheTrimJobStateFailed
+	cacheTrimJobStateActive
+)
+
+// cacheTrimJobState reads one trim Job's status as complete, failed or active.
+// A status it cannot read is an error, never active: an unreadable Job must
+// park, not be waited on as a healthy run (gt-oxws5x).
+func (d *Daemon) cacheTrimJobState(ctx context.Context, kubeconfig, namespace, jobName string) (cacheTrimJobStateKind, error) {
+	out, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "get", "job", jobName, "-n", namespace, "-o", "json")
+	if err != nil {
+		return 0, fmt.Errorf("reading the Job %s: %w: %s", jobName, err, cacheTrimFirstLine(string(stderr)))
+	}
+	var job struct {
+		Status struct {
+			Active     int `json:"active"`
+			Failed     int `json:"failed"`
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(out, &job); err != nil {
+		return 0, fmt.Errorf("decoding the Job %s status: %w", jobName, err)
+	}
+	// A finished Job wins over one that still has an active pod: a retried
+	// Job can carry both a failed count and a Complete condition.
+	var complete, failed bool
+	for _, c := range job.Status.Conditions {
+		if c.Status == "True" {
+			complete = complete || c.Type == "Complete"
+			failed = failed || c.Type == "Failed"
+		}
+	}
+	if complete {
+		return cacheTrimJobStateComplete, nil
+	}
+	if job.Status.Failed > 0 || failed {
+		return cacheTrimJobStateFailed, nil
+	}
+	if job.Status.Active > 0 {
+		return cacheTrimJobStateActive, nil
+	}
+	return 0, fmt.Errorf("the Job %s status is none of active, failed or complete", jobName)
+}
+
 // cacheTrimExisting lists the objects a trim applies in namespace: the Jobs and
 // shard ConfigMaps carrying TrimSelector, the labels only a trim applies, and
 // which of the Jobs still run.
