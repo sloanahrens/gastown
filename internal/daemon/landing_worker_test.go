@@ -845,8 +845,8 @@ func TestFollowupBeadsFilesTheAcceptanceField(t *testing.T) {
 // go through the feed's own spec path and the daemon's bead client, and the bead
 // the store holds carries the acceptance field its body's Acceptance section
 // lists. The two halves of gt-ejsl5v each have a test; this is the join between
-// them (gt-4unmqk). It checks FollowupPlans' Spec, the old per-landing shape the
-// feed no longer files (it files bundleSpec); gt-4x669z makes the two one value.
+// them (gt-4unmqk). It checks FollowupPlans' Spec, which is the bundleSpec the
+// feed files (gt-4x669z).
 func TestFollowupFindingsReachTheStoredAcceptanceField(t *testing.T) {
 	t.Parallel()
 	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
@@ -859,7 +859,7 @@ func TestFollowupFindingsReachTheStoredAcceptanceField(t *testing.T) {
 		{ID: "4", Severity: "minor", Path: "internal/land/hook.go", Title: "document the hook",
 			Detail: "internal/land/hook.go document the hook"},
 	}
-	plans := land.FollowupPlans(work, res, findings)
+	plans := land.FollowupPlans(work, res, time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC), findings)
 	if len(plans) != 1 {
 		t.Fatalf("FollowupPlans built %d plans, want one for two findings in one package", len(plans))
 	}
