@@ -246,6 +246,26 @@ func TestOMClassRunCapsAt300(t *testing.T) {
 	}
 }
 
+// TestOMClassPassCap: the cap a run stops at is the pass's own MaxFindings when
+// it is above zero, else MaxFindingsPerRun, so a zero or negative one never
+// reads as "no cap" (gt-tu7psu).
+func TestOMClassPassCap(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		max  int
+		want int
+	}{
+		{"zero is the production cap", 0, MaxFindingsPerRun},
+		{"negative is the production cap", -5, MaxFindingsPerRun},
+		{"positive is the pass's own", 3, 3},
+	} {
+		if got := (&Pass{MaxFindings: tt.max}).Cap(); got != tt.want {
+			t.Errorf("%s: Cap() = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
 // TestOMClassRunStopsAtItsOwnMaxFindings: a pass with MaxFindings set stops at it,
 // so a test reaches the cap with a handful of findings; the production cap holds
 // for a pass that sets none (TestOMClassRunCapsAt300).
