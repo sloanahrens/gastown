@@ -2453,7 +2453,7 @@ const gastownIntegrationLog = "" +
 	"tier-sweep: integration ./internal/daemon ...\n" +
 	"tier-sweep: integration ./internal/repoguard ...\n" +
 	"tier-sweep: integration RED passed=124 failed=1 skipped=0 failed: ./internal/repoguard (logs /tmp/tier-sweep.2f9c)\n" +
-	"tier-sweep: race ./internal/cmd ...\n" +
+	"tier-sweep: race ./internal/cmd~integration-walk ...\n" +
 	"tier-sweep: race GREEN passed=1 failed=0 skipped=0 (logs /tmp/tier-sweep.71bd)\n"
 
 // gt-xyigz: the Go command runs the integration and race tiers in one process
@@ -2581,7 +2581,7 @@ func TestTierSweepRigCycleStarvedTierTakesNoVerdict(t *testing.T) {
 		integrationGreen  = "tier-sweep: integration GREEN passed=4 failed=0 skipped=0 (logs /tmp/tier-sweep.y)\n"
 		integrationRed    = "tier-sweep: integration RED passed=3 failed=1 skipped=0 failed: ./internal/repoguard (logs /tmp/tier-sweep.y)\n"
 		integrationMarker = "tier-sweep: integration ./internal/cmd ...\n"
-		raceMarker        = "tier-sweep: race ./internal/cmd ...\n"
+		raceMarker        = "tier-sweep: race ./internal/cmd~integration-walk ...\n"
 	)
 	tests := []struct {
 		name     string

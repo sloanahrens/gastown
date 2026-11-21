@@ -976,14 +976,14 @@ func TestTierSweepBead_ReadsOnlyItsOwnUnitsFailures(t *testing.T) {
 		"    --- FAIL: TestIntegrationOnly (0.01s)\n"+
 		"tier-sweep: integration ./internal/other ...\n"+
 		"    --- FAIL: TestOtherPackage (0.01s)\n"+
-		"tier-sweep: race ./internal/cmd ...\n"+
+		"tier-sweep: race ./internal/cmd~integration-walk ...\n"+
 		"    --- FAIL: TestRaceOnly (0.01s)\n")
 	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
 
 	red := map[string]tierSweepTierResult{
 		"integration": {Verdict: tierSweepRed, Failed: 2, FailedNames: []string{"./internal/cmd", "./internal/other"}, Log: logPath},
-		"race":        {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: logPath},
+		"race":        {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/cmd~integration-walk"}, Log: logPath},
 	}
 	d.tierSweepRecordBeads("gastown", "abc1234", red)
 
@@ -992,9 +992,9 @@ func TestTierSweepBead_ReadsOnlyItsOwnUnitsFailures(t *testing.T) {
 		byTitle[c.Title] = c.Acceptance
 	}
 	cases := map[string]string{
-		"tier sweep (gastown): integration: ./internal/cmd":   "TestIntegrationOnly",
-		"tier sweep (gastown): integration: ./internal/other": "TestOtherPackage",
-		"tier sweep (gastown): race: ./internal/cmd":          "TestRaceOnly",
+		"tier sweep (gastown): integration: ./internal/cmd":           "TestIntegrationOnly",
+		"tier sweep (gastown): integration: ./internal/other":         "TestOtherPackage",
+		"tier sweep (gastown): race: ./internal/cmd~integration-walk": "TestRaceOnly",
 	}
 	for title, want := range cases {
 		acceptance, ok := byTitle[title]
@@ -1016,8 +1016,33 @@ func TestTierSweepBead_ReadsOnlyItsOwnUnitsFailures(t *testing.T) {
 			}
 		}
 	}
-	if got := byTitle["tier sweep (gastown): race: ./internal/cmd"]; !strings.Contains(got, "go test -race -tags integration") {
+	if got := byTitle["tier sweep (gastown): race: ./internal/cmd~integration-walk"]; !strings.Contains(got, "go test -race -tags integration") {
 		t.Errorf("the race tier's re-run dropped -race: %q", got)
+	}
+}
+
+// A race failure's unit carries the entry's label, so the daemon finds the log
+// the sweep wrote under the labeled name and quotes the failing test from it
+// (gt-lzqiin).
+func TestTierSweepBead_ReadsTheLabelledRaceLog(t *testing.T) {
+	t.Parallel()
+	const unit = "./internal/cmd~integration-walk"
+	dir := t.TempDir()
+	unitLog := "--- FAIL: TestRaceOnly (0.01s)\n    walk_test.go:9: nope\n"
+	if err := os.WriteFile(filepath.Join(dir, tiersweep.LogName("race", unit)), []byte(unitLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: race "+unit+" ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	d.tierSweepRecordBeads("gastown", "abc1234", map[string]tierSweepTierResult{
+		"race": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{unit}, Log: stageLog, LogDir: dir},
+	})
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	if want := "  --- FAIL: TestRaceOnly\n      walk_test.go:9: nope"; !strings.Contains(bd.created[0].Description, want) {
+		t.Errorf("description does not quote the labeled unit's log:\n%s", bd.created[0].Description)
 	}
 }
 

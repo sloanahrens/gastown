@@ -84,7 +84,7 @@ func TestMainOutputStreams(t *testing.T) {
 	if stdout.String() != wantOut {
 		t.Errorf("stdout = %q, want %q", stdout.String(), wantOut)
 	}
-	for _, want := range []string{"tier-sweep: integration ./r ...", "tier-sweep: race ./internal/cmd ...", "tier-sweep: unknown tier nope (want shell, integration or race)"} {
+	for _, want := range []string{"tier-sweep: integration ./r ...", "tier-sweep: race ./internal/cmd~integration-walk ...", "tier-sweep: unknown tier nope (want shell, integration or race)"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
 		}
