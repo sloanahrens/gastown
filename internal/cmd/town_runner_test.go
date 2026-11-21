@@ -268,6 +268,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 		wantErr     error
 		wantRunErr  bool
 		wantNoApply bool // a cancel means nothing is applied after it
+		wantStop    bool // the row delivers a signal, so stop must run exactly once
 	}{
 		{
 			name: "landing read fails",
@@ -341,6 +342,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			wantErr:     context.Canceled,
 			wantRunErr:  true,
 			wantNoApply: true,
+			wantStop:    true,
 		},
 		{
 			// A SIGINT while the runs wait sleeps: the gate run in flight is left
@@ -357,6 +359,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			wantErr:     context.Canceled,
 			wantRunErr:  true,
 			wantNoApply: true,
+			wantStop:    true,
 		},
 		{
 			// A SIGINT during the apply step: the roll fails, and the release still
@@ -369,6 +372,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			wantCalls:  []string{"hold:create", "landing", "runs", "apply", "hold:remove"},
 			wantErr:    context.Canceled,
 			wantRunErr: true,
+			wantStop:   true,
 		},
 		{
 			// A SIGINT during the apply step that still finishes: by the time the
@@ -378,6 +382,7 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 				d.apply.(*rollApply).cancel = cancel
 			},
 			wantCalls: []string{"hold:create", "landing", "runs", "apply", "ready", "hold:remove"},
+			wantStop:  true,
 		},
 	}
 	for _, tc := range cases {
@@ -407,9 +412,18 @@ func TestTownRunnerRollReleasesHoldOnEveryExitPath(t *testing.T) {
 			if f.store.releaseCtxErr != nil {
 				t.Errorf("the release ran on a cancelled context (%v); the hold could outlive the roll", f.store.releaseCtxErr)
 			}
-			if f.apply.cancel != nil {
-				if !f.apply.sawStop {
-					t.Error("the roll did not stop listening while it still ran: a second Ctrl-C would be swallowed")
+			if f.apply.cancel != nil && !f.apply.sawStop {
+				t.Error("the roll did not stop listening while it still ran: a second Ctrl-C would be swallowed")
+			}
+			if tc.wantStop {
+				// The stop for the first signal may run on the context's AfterFunc
+				// goroutine, so wait for it to reach stopCh with a bound.
+				waitCtx, waitCancel := context.WithTimeout(context.Background(), stopWaitBound)
+				defer waitCancel()
+				select {
+				case <-f.signals.stopCh:
+				case <-waitCtx.Done():
+					t.Fatal("stop was not called within the bound after the signal cancelled the roll")
 				}
 				if got := f.signals.stops.Load(); got != 1 {
 					t.Errorf("stop was called %d times, want once after the signal", got)
