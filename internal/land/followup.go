@@ -39,10 +39,6 @@ const (
 	// touch for a rig that configures none (gt-eyum7q).
 	DefaultFollowupMaxFiles = 3
 
-	// followUpGroupFindings is the finding count above which a landing's
-	// findings file one bead per package rather than one bead in all.
-	followUpGroupFindings = 6
-
 	// followUpPriority is the priority a filed bead takes: every finding a
 	// passing review leaves is a minor, which is work nobody is waiting on, so
 	// it sorts below the queue's own beads.
@@ -531,18 +527,16 @@ func (l *Lander) followupBackpressure() int {
 }
 
 // followupGroup is one bead's worth of a landing's findings. Package is the
-// package the bead was filed for, and "" when the bead carries a landing whose
-// findings all sit in one place.
+// package the bead was filed for, and "" for a finding om named no path for or
+// one in a file at the repository root.
 type followupGroup struct {
 	Package  string
 	Findings []FollowupCandidate
 }
 
 // followupGroups splits a landing's findings into the beads they file: one bead
-// for the landing, or one per package when the landing carries more than
-// followUpGroupFindings findings or its findings reach more than one package. A
-// package's findings are work one worker takes; a landing spread across three
-// packages is not.
+// per package, in sorted package order. A package's findings are work one
+// worker takes; a landing spread across three packages is not (gt-mew3vm).
 func followupGroups(findings []FollowupCandidate) []followupGroup {
 	byPackage := map[string][]FollowupCandidate{}
 	var order []string
@@ -553,11 +547,8 @@ func followupGroups(findings []FollowupCandidate) []followupGroup {
 		}
 		byPackage[pkg] = append(byPackage[pkg], c)
 	}
-	if len(order) <= 1 && len(findings) <= followUpGroupFindings {
-		return []followupGroup{{Findings: findings}}
-	}
 	sort.Strings(order)
-	out := make([]followupGroup, 0, len(order))
+	var out []followupGroup
 	for _, pkg := range order {
 		out = append(out, followupGroup{Package: pkg, Findings: byPackage[pkg]})
 	}

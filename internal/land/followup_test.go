@@ -152,7 +152,7 @@ func TestFollowupFeedBeadShape(t *testing.T) {
 		t.Fatalf("filed %d beads, want one:\n%s", len(f.fake.created), log)
 	}
 	spec := f.fake.created[0]
-	wantTitle := "Found: swap the nil check and 1 more (om minor on gt-abc approved at 0.80)"
+	wantTitle := "Found: swap the nil check and 1 more in internal/land (om minor on gt-abc approved at 0.80)"
 	if spec.Title != wantTitle {
 		t.Errorf("title = %q, want %q", spec.Title, wantTitle)
 	}
