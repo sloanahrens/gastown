@@ -101,6 +101,12 @@ const (
 	// race a delete that is still removing the previous run's objects.
 	syncReadyFile = "/tmp/sync-ready"
 
+	// syncDeleteTimeout bounds the launch's wait for a sync pod an earlier run
+	// left terminating: the create is refused while the pod is being deleted,
+	// and a pod that is not being deleted is a live sync of another launcher,
+	// whose claim this run must not take, so the wait times out and fails loud.
+	syncDeleteTimeout = "60s"
+
 	// sweepJobLabel and rigLabelKey label every sweep Job with the backend and
 	// rig that made it. The sync guard finds the rig's Jobs by name, not label,
 	// because a Job that lost its labels still reads the claim.
@@ -385,6 +391,8 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 			// The repo claim is created before the sync pod mounts it, and stays
 			// for the next run: only its contents change per run.
 			{Argv: kubectlArgv(spec, "apply", "-f", "-"), Stdin: repoClaim.JSON()},
+			// A sync pod an earlier run left terminating is waited out, never deleted.
+			{Argv: kubectlArgv(spec, "wait", "--for=delete", "pod/"+sync.Metadata.Name, "--timeout="+syncDeleteTimeout)},
 			// Created, not applied: there is one sync pod per rig, so a second
 			// sync started while this one runs fails AlreadyExists instead of
 			// clearing the claim under it.
