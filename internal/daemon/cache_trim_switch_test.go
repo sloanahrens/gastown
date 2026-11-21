@@ -731,6 +731,51 @@ func TestCacheTrimSwitchDiskItem(t *testing.T) {
 	})
 }
 
+// TestCacheTrimDiskItemReadsAfterThePassBudgetEnds pins that a finished trim's
+// disk read has its own budget: the item follows the disk after the pass ends.
+func TestCacheTrimDiskItemReadsAfterThePassBudgetEnds(t *testing.T) {
+	t.Parallel()
+	key := cacheTrimNoOpKey(cacheTrimNamespace, cacheTrimClaimName)
+	for _, tc := range []struct {
+		name string
+		used float64
+		want int
+	}{
+		{"under the percent clears a raised item", 40, 0},
+		{"at the percent raises the item", 80, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCacheTrimFixture(t, "", nil)
+			// A real read handed a context that ended reports no reading.
+			f.d.diskMaint.readDisks = func(ctx context.Context) []disks.Reading {
+				if err := ctx.Err(); err != nil {
+					return []disks.Reading{{Name: diskMaintDiskColima, Err: err}}
+				}
+				return []disks.Reading{{Name: diskMaintDiskColima, UsedPct: tc.used}}
+			}
+			if tc.want == 0 {
+				f.d.cacheTrimNoOp.raise(attention.Item{Key: key})
+			}
+			pass, endPass := context.WithCancel(context.Background())
+			endPass()
+			if !f.d.cacheTrimClaimViaJob(pass, "/kubeconfig", cacheTrimClaim{ClaimName: cacheTrimClaimName},
+				"gastown-polecat:dev", cacheTrimNamespace, 1<<30, true, map[string]string{}) {
+				t.Fatalf("%s: the pass = false, want true; log: %s", tc.name, f.log.String())
+			}
+			var got int
+			for _, it := range f.noOpItems(t) {
+				if it.Key == key {
+					got++
+				}
+			}
+			if got != tc.want {
+				t.Errorf("%s: %d item(s) after the trim, want %d", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCacheTrimSwitchPendingMark pins the pending mark the claim route keeps: a
 // Job still running when its wait ends sets the claim's mark (and parks nothing),
 // and a dry run neither sets a mark nor clears one the claim already carries.
