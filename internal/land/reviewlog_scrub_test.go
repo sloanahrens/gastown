@@ -507,6 +507,7 @@ func TestReviewLogScrubRewriteApplyRewritesOnlyTheFlaggedRow(t *testing.T) {
 	if res.RowsChanged != 1 || len(res.Beads) != 1 || res.Beads[0] != "gt-slit1" {
 		t.Fatalf("apply reported RowsChanged=%d Beads=%v, want 1 and [gt-slit1]", res.RowsChanged, res.Beads)
 	}
+	assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
 	if gotMode != info.Mode().Perm() {
 		t.Errorf("the replace seam got mode %v, want the file's %v", gotMode, info.Mode().Perm())
 	}
@@ -606,4 +607,73 @@ func TestReviewLogScrubRewriteCopiesWhatItCannotDecode(t *testing.T) {
 			t.Errorf("line %d changed to %q, want the same bytes", i+1, afterLines[i])
 		}
 	}
+}
+
+// TestReviewLogScrubRewriteScansWhatItCannotDecode: a line past the bound and a
+// line that is not an object are scanned over their raw bytes, so a token in
+// either is replaced and every other byte kept; the plan counts them as changed
+// the same way, Oversize still counts the oversize line, and a line with no
+// token stays byte for byte (gt-9h1asy, om c1f06be4c163).
+func TestReviewLogScrubRewriteScansWhatItCannotDecode(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	tokens := map[string]string{"oversize": strings.Repeat("y", 300) + " " + token + " " + strings.Repeat("z", 300),
+		"not an object": "not a JSON row " + token + " tail"}
+	lines := [][]byte{
+		scrubTestLogBytes(t, scrubTestThreeRows(token)[0]),
+		[]byte(tokens["oversize"] + "\n"), []byte(tokens["not an object"] + "\n"),
+		[]byte("a plain line with no token\n"), []byte(strings.Repeat("q", 600) + "\n"),
+	}
+	before := bytes.Join(lines, nil)
+	plan, _ := writeScrubTestLog(t, before)
+	plan.lineLimit = 512
+	pres, err := plan.ScrubPlan()
+	if err != nil {
+		t.Fatalf("ScrubPlan: %v", err)
+	}
+	logf, path := writeScrubTestLog(t, before)
+	logf.lineLimit = 512
+	res, err := logf.Scrub(true)
+	if err != nil {
+		t.Fatalf("Scrub(true): %v", err)
+	}
+	for label, r := range map[string]ScrubResult{"plan": pres, "apply": res} {
+		if r.Rows != 1 || r.RowsChanged != 3 || r.Words != 3 || r.Oversize != 2 {
+			t.Errorf("%s: Rows=%d RowsChanged=%d Words=%d Oversize=%d, want 1, 3, 3 and 2", label, r.Rows, r.RowsChanged, r.Words, r.Oversize)
+		}
+		assertNoScrubToken(t, fmt.Sprintf("%+v", r), token)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the rewritten log: %v", err)
+	}
+	if want := bytes.ReplaceAll(before, []byte(token), []byte(redactedWord)); !bytes.Equal(after, want) {
+		t.Errorf("the rewrite changed more than the token runs:\n got: %q\nwant: %q", after, want)
+	}
+}
+
+// TestReviewLogScrubRewriteScansAMillionByteLine: an oversize line of a million
+// bytes, dense with prefixes, is scanned in full and its token replaced, in time
+// bounded by the line, not by its square (gt-9h1asy).
+func TestReviewLogScrubRewriteScansAMillionByteLine(t *testing.T) {
+	t.Parallel()
+	token := scrubTestFamilies["aws"]
+	line := strings.Repeat("ASIAa-", 170000) + " " + token + " end"
+	logf, path := writeScrubTestLog(t, []byte(line+"\n"))
+	logf.lineLimit = 512
+	res, err := logf.Scrub(true)
+	if err != nil {
+		t.Fatalf("Scrub(true): %v", err)
+	}
+	if res.Oversize != 1 || res.RowsChanged != 1 || res.Words != 1 {
+		t.Errorf("Oversize=%d RowsChanged=%d Words=%d, want 1, 1 and 1", res.Oversize, res.RowsChanged, res.Words)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the rewritten log: %v", err)
+	}
+	if bytes.Contains(after, []byte(token)) {
+		t.Error("the million-byte line still holds the token")
+	}
+	assertNoScrubToken(t, fmt.Sprintf("%+v", res), token)
 }

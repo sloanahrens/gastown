@@ -65,15 +65,26 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 	}
 	var res ScrubResult
 	var kept [][]byte
+	// A line the scrub cannot decode, or one past the bound, is scanned over its
+	// raw bytes: a token run in it is replaced too (gt-9h1asy), and only that run
+	// changes a byte.
+	keepRaw := func(line []byte) {
+		out, words := scrubRawBytes(line)
+		if words > 0 {
+			res.RowsChanged++
+			res.Words += words
+		}
+		kept = append(kept, out)
+	}
 	err = scanLogLines(fh, func(line []byte) {
 		if len(bytes.TrimSpace(line)) > limit {
 			res.Oversize++
-			kept = append(kept, line)
+			keepRaw(line)
 			return
 		}
 		var rec ReviewRecord
 		if !isJSONObject(line) || json.Unmarshal(line, &rec) != nil {
-			kept = append(kept, line)
+			keepRaw(line)
 			return
 		}
 		res.Rows++
@@ -115,6 +126,31 @@ func (f *ReviewsFile) scrub(apply bool) (ScrubResult, error) {
 		return ScrubResult{}, fmt.Errorf("replacing reviews file: %w", err)
 	}
 	return res, nil
+}
+
+// scrubRawBytes replaces each token-shaped run in the raw bytes of a line with
+// redactedWord, keeping every other byte, and reports how many it replaced. It
+// is scrubClaim's offset scan over the whole line, with no input cut: tokenEnd
+// tries a run of at most maxTokenRun bytes only where a prefix starts, so the
+// scan stays linear in the line (gt-9h1asy).
+func scrubRawBytes(line []byte) ([]byte, int) {
+	s := string(line)
+	var out []byte
+	words, last := 0, 0
+	for i := 0; i < len(s); {
+		if end := tokenEnd(s, i); end > i {
+			out = append(out, s[last:i]...)
+			out = append(out, redactedWord...)
+			last, i = end, end
+			words++
+			continue
+		}
+		i++
+	}
+	if words == 0 {
+		return line, 0
+	}
+	return append(out, s[last:]...), words
 }
 
 // safeBeadID is the only way a bead id enters a ScrubResult: the log's bead
