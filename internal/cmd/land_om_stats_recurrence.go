@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
@@ -24,11 +25,19 @@ import (
 // withholds the follow-up for four weeks (Q37).
 const landOmStatsRecurrenceFollowDays = 28
 
-// landOmStatsRecurrenceSide is one side's tally: findings and how many a later
-// review restated.
+// landOmStatsRecurrenceSide is one side's tally and the figures derived from it.
 type landOmStatsRecurrenceSide struct {
-	Findings int `json:"findings"`
-	Followed int `json:"followed"`
+	Findings int     `json:"findings"`
+	Followed int     `json:"followed"`
+	Rate     float64 `json:"rate"`
+}
+
+// finish derives a side's rate inside recurrence, so the table and the JSON read
+// one filled row and cannot disagree.
+func (s *landOmStatsRecurrenceSide) finish() {
+	if s.Findings > 0 {
+		s.Rate = float64(s.Followed) / float64(s.Findings)
+	}
 }
 
 // landOmStatsRecurrenceClass is one hold-out class's two sides.
@@ -71,6 +80,8 @@ func recurrence(records []land.ReviewRecord, now time.Time) []landOmStatsRecurre
 				}
 			}
 		}
+		row.HeldOut.finish()
+		row.Filed.finish()
 		rows = append(rows, row)
 	}
 	return rows
@@ -170,5 +181,18 @@ func landOmStatsRecurrenceReportFrom(fsys landOmStatsFS, findTown func() (string
 		return nil
 	}
 	writeLandOmStatsTable(out, stats, since)
-	return nil
+	return writeLandOmStatsRecurrenceTable(out, recurrence(records, now))
+}
+
+// writeLandOmStatsRecurrenceTable prints each hold-out class's two sides.
+func writeLandOmStatsRecurrenceTable(w io.Writer, rows []landOmStatsRecurrenceClass) error {
+	fmt.Fprintln(w, "\nRecurrence of minor findings within 28 days of their own review")
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "Class\tHeld out\tHeld followed\tHeld rate\tFiled\tFiled followed\tFiled rate")
+	for _, row := range rows {
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%s\t%d\t%d\t%s\n", row.ID,
+			row.HeldOut.Findings, row.HeldOut.Followed, landOmStatsPercent(row.HeldOut.Rate),
+			row.Filed.Findings, row.Filed.Followed, landOmStatsPercent(row.Filed.Rate))
+	}
+	return tw.Flush()
 }
