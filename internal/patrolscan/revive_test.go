@@ -627,6 +627,45 @@ func TestReviveCutFuncLeavesTheOtherSeatsAlone(t *testing.T) {
 	}
 }
 
+// gt-hd29ip: the Alive tick runs reviveCut after revivePushed and before
+// reviveAnswered, so a cut seat is restarted and a pushed one is revived first.
+func TestReviveCutTickAliveCallsTheRule(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name           string
+		pushed         string
+		escalated, cut bool
+		want           Outcome // "" = no finding
+		detail         string
+	}{
+		{"cut stream, nothing pushed", "", false, true, OutcomeRevived, "model stream was cut"},
+		{"cut stream and a pushed branch: revivePushed first", "abc1234", false, true, OutcomeRevived, "abc1234"},
+		{"cut stream after an answered escalation: reviveCut first", "", true, true, OutcomeRevived, "model stream was cut"},
+		{"stream not cut", "", false, false, "", ""},
+		{"stream not cut, answered escalation: reviveAnswered restarts", "", true, false, OutcomeRevived, "hq-7"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := newFake()
+			liveQuiet(base, "ruby", reviveQuiet)
+			base.pushed["ruby"] = tc.pushed
+			if tc.escalated {
+				liveQuietStoppedOnEscalation(base, "ruby", 10*time.Minute)
+				base.raised = []Escalation{answeredEscalation("hq-7", 6*time.Minute)}
+			}
+			s := scanner(base, nil)
+			s.env = &cutFake{fakeEnv: base, cut: map[string]bool{"ruby": tc.cut}}
+			r := s.Tick("gastown")
+			f := seatFinding(t, r, "ruby")
+			restarted := len(base.restarts) > 0
+			if restarted != (tc.want == OutcomeRevived) || f.Outcome != tc.want || !strings.Contains(f.Detail, tc.detail) {
+				t.Fatalf("restarted %v, finding %q %q; want outcome %q with %q. report %v", restarted, f.Outcome, f.Detail, tc.want, tc.detail, r.Lines())
+			}
+		})
+	}
+}
+
 // A stall after an answered escalation is the same waiting seat, only quieter,
 // so the rule fires before the stall is reported.
 func TestReviveAnsweredStalledSeatIsRestarted(t *testing.T) {
