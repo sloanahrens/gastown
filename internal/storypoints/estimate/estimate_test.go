@@ -542,6 +542,28 @@ func TestEstimateSkippedInputs(t *testing.T) {
 	}
 }
 
+// TestEstimateJevMedianDrops: out-of-range answers are dropped and the rest take
+// the median; none left is false.
+func TestEstimateJevMedianDrops(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		answers []float64
+		want    float64
+		wantOK  bool
+	}{
+		{[]float64{0.2, 0.9, 0.5}, 0.5, true},
+		{[]float64{0.2, 0.4}, 0.3, true},
+		{[]float64{0.7}, 0.7, true},
+		{[]float64{-0.1, 0.3, 1.2}, 0.3, true},
+		{[]float64{-0.1, 1.2}, 0, false},
+	} {
+		got, ok := jevMedian(tt.answers)
+		if ok != tt.wantOK || (ok && math.Abs(got-tt.want) > 1e-9) {
+			t.Fatalf("jevMedian(%v) = %v, %v, want %v, %v", tt.answers, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
 // TestEstimateNeighborsSkipped drives the one input whose loss is recorded
 // separately: hm names past beads, so a missing hm leaves an estimate without
 // neighbors and the note says why.
