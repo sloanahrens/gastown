@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -394,9 +395,21 @@ func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *be
 	return minutes, vec, nil
 }
 
+// jevMedian drops answers outside 0 to 1 and returns the median of the rest, or
+// false when none are left. An even count takes the mean of the middle two.
+func jevMedian(answers []float64) (float64, bool) {
+	valid := slices.DeleteFunc(slices.Clone(answers), func(a float64) bool { return !(a >= 0 && a <= 1) })
+	if len(valid) == 0 {
+		return 0, false
+	}
+	slices.Sort(valid)
+	n := len(valid)
+	return (valid[(n-1)/2] + valid[n/2]) / 2, true
+}
+
 // jevInput asks the battery for the fits_twenty_minutes probability, or returns
 // the skip that says why not. A probability outside 0 to 1 is a failed input,
-// not a failed estimate: the blend drops it as it drops an asker error.
+// not a failed estimate: jevMedian drops it as the blend drops an asker error.
 func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Skip) {
 	if deps.JevAsk == nil {
 		return 0, &Skip{Input: "jev", Reason: "no Jev asker"}
@@ -406,10 +419,11 @@ func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Ski
 		return 0, &Skip{Input: "jev", Reason: err.Error()}
 	}
 	p := ans.FitsTwentyMinutes
-	if !(p >= 0 && p <= 1) {
+	m, ok := jevMedian([]float64{p})
+	if !ok {
 		return 0, &Skip{Input: "jev", Reason: fmt.Sprintf("fits_twenty_minutes %v is outside 0 to 1", p)}
 	}
-	return p, nil
+	return m, nil
 }
 
 // neighborsOf asks hm for the past beads nearest the issue, then records each
