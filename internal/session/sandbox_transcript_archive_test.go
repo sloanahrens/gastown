@@ -389,3 +389,24 @@ func TestTranscriptArchiveRealStepFailuresKeepTheSource(t *testing.T) {
 		})
 	}
 }
+
+// TestTranscriptArchiveAPartialItCannotClearFailsTheMove: a leftover .partial
+// that cannot be removed (here a directory with a file in it) fails the move at
+// the create step naming it, and the source stays (gt-1xoiib).
+func TestTranscriptArchiveAPartialItCannotClearFailsTheMove(t *testing.T) {
+	t.Parallel()
+	root, own, dest, _, _ := archiveFixture(t)
+	if err := os.MkdirAll(dest+".partial", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dest+".partial", "x"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := moveConfined(root, "ses-1.jsonl", dest)
+	if err == nil || !strings.Contains(err.Error(), "(create)") {
+		t.Fatalf("err = %v, want the create step to fail", err)
+	}
+	if _, serr := os.Stat(own); serr != nil {
+		t.Errorf("the source left the copy: %v", serr)
+	}
+}
