@@ -2337,19 +2337,25 @@ func (d *Daemon) overrunUnsavedWorkLocation(seat overrunSeat) (session, workDir 
 }
 
 // overrunUnsavedWorkText is the note of a save that gave up on a sandbox seat:
-// the sandbox is not to be removed, where the clone is, and the push that
-// rescues it. The step comes from SaveStage and is unknown when it is empty.
+// the sandbox is not to be removed, where the clone is, and the commands that
+// rescue it. The step comes from SaveStage and is unknown when it is empty; a
+// failed commit is rescued by staging and committing the work before the push.
 func overrunUnsavedWorkText(st overrunState, session, workDir, branch, seat, bead string) string {
 	step := "The save did not complete and the step is unknown"
+	exec := func(git string) string {
+		return fmt.Sprintf("openshell sandbox exec -n %s --no-tty --no-login-shell -- %s", session, git)
+	}
+	rescue := exec(fmt.Sprintf("git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue", workDir, seat, bead))
 	switch st.SaveStage {
 	case "commit":
 		step = "The commit failed"
+		rescue = exec(fmt.Sprintf("git -C %s add -A", workDir)) + "; " +
+			exec(fmt.Sprintf("git -C %s commit -m \"overrun save: the stopped seat's work\"", workDir)) + "; " + rescue
 	case "push":
 		step = "The push failed"
 	}
 	return fmt.Sprintf("UNSAVED WORK: sandbox %s may hold work origin lacks: do not remove it. %s (%s). The clone is %s, branch %s. "+
-		"To rescue it: openshell sandbox exec -n %s --no-tty --no-login-shell -- git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue",
-		session, step, st.SaveFailure, workDir, branch, session, workDir, seat, bead)
+		"To rescue it: %s", session, step, st.SaveFailure, workDir, branch, rescue)
 }
 
 // unsavedWorkNote is that text for the seat's sandbox, or one line saying the
