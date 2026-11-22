@@ -124,8 +124,9 @@ func diskmaintLedgerRow(skipped int) Job {
 
 // readDiskmaintLedger reads the ledger's rotation and its live file through
 // fsys. A file that does not exist holds nothing; a file that cannot be read is
-// an error. The rotation is read first, so the last applied entry for a target
-// in file order is its newest, as an append-only ledger writes them.
+// an error. The rotation is read first, so an entry later in file order is the
+// later append; a target's newest applied entry is chosen by timestamp, with
+// that order settling a tie or a zero timestamp.
 func readDiskmaintLedger(fsys fs.FS, rel string) (diskmaintRead, error) {
 	var read diskmaintRead
 	for _, name := range []string{rel + ".1", rel} {
@@ -161,6 +162,21 @@ func readDiskmaintLines(read *diskmaintRead, data []byte) {
 		if read.newest == nil {
 			read.newest = make(map[string]diskmaint.LedgerEntry)
 		}
+		if prev, ok := read.newest[e.Target]; ok && !newerApplied(prev, e) {
+			continue
+		}
 		read.newest[e.Target] = e
 	}
+}
+
+// newerApplied reports whether candidate is the newer applied run for its
+// target. A later timestamp wins; a candidate that is not later (an equal
+// timestamp, or a zero one on either side) is not older, so the entry that
+// appears later in the ledger wins. An undated entry therefore keeps its place
+// against an older dated one instead of losing merely for having no time.
+func newerApplied(current, candidate diskmaint.LedgerEntry) bool {
+	if current.TS.IsZero() || candidate.TS.IsZero() {
+		return true
+	}
+	return !candidate.TS.Before(current.TS)
 }
