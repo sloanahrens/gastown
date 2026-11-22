@@ -318,7 +318,12 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		}
 		for _, i := range ln {
 			if beads.HasLabel(i, land.LabelReadyToLand) && beads.IssueStatus(i.Status).IsActionable() {
-				landing = append(landing, dashQueueRow(name, i))
+				row := dashQueueRow(name, i)
+				// The ready-to-land list carries each issue's notes, so the
+				// refusals a resubmission took are counted from the row the
+				// list already returned (gt-vg3rjz).
+				row.RejectCount = land.CountRejections(i.Notes)
+				landing = append(landing, row)
 			}
 		}
 	}
