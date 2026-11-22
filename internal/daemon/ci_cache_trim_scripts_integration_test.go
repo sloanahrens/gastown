@@ -1892,3 +1892,58 @@ func TestIntegrationCICacheTrimLRUContract(t *testing.T) {
 		}
 	})
 }
+
+// TestIntegrationCICacheTrimSweepsOnlyWhatItEmptiedOrWhatIsOld: a concurrent Go
+// build makes a directory and writes into it a moment later, so the apply must
+// not remove an empty directory younger than the age. Each apply program removes
+// the directory its removal emptied and an empty directory past the age, and
+// keeps a fresh empty one below the top level (gt-m01xle).
+func TestIntegrationCICacheTrimSweepsOnlyWhatItEmptiedOrWhatIsOld(t *testing.T) {
+	t.Parallel()
+	runs := map[string]func(t *testing.T, root string) (string, int){
+		"age rule": func(t *testing.T, root string) (string, int) {
+			_, stderr, status := ciCacheScriptRun(t, ciCacheTrimScript, root, ciCacheScriptAgeMinutes)
+			return stderr, status
+		},
+		"capped": func(t *testing.T, root string) (string, int) {
+			_, stderr, status := ciCacheScriptRun(t, ciCacheCappedTrimScript, root, ciCacheScriptAgeMinutes, "1")
+			return stderr, status
+		},
+		"lru": func(t *testing.T, root string) (string, int) {
+			_, stderr, status := ciCacheLRURun(t, ciCacheLRUTrimScript, "apply", root, ciCacheScriptAgeMinutes, "1000000", "1")
+			return stderr, status
+		},
+	}
+	for name, run := range runs {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			ciCacheScriptTree(t, root)
+			fresh := filepath.Join(root, "ef", "just-made")
+			old := filepath.Join(root, "ef", "left-empty")
+			for _, d := range []string{fresh, old} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatalf("making %s: %v", d, err)
+				}
+			}
+			aged := time.Now().Add(-ciCacheScriptOldAge)
+			if err := os.Chtimes(old, aged, aged); err != nil {
+				t.Fatalf("dating %s: %v", old, err)
+			}
+
+			if stderr, status := run(t, root); status != 0 {
+				t.Fatalf("the apply exited %d: %s", status, stderr)
+			}
+
+			if _, err := os.Stat(fresh); err != nil {
+				t.Errorf("the apply removed the empty directory made just now: %v", err)
+			}
+			if _, err := os.Stat(old); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the empty directory past the age is still present (stat error %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(root, "ab", "cd")); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the directory the removal emptied is still present (stat error %v)", err)
+			}
+		})
+	}
+}
