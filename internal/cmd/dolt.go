@@ -666,10 +666,12 @@ func runDoltStatusWith(w io.Writer, reads doltStatusReads) error {
 		// dolt.external_container was resolved above and host and remote modes
 		// report no error, so this is the container's failed SQL ping: report
 		// it as the status it is, with the failure named, rather than failing
-		// the command (gt-0v0bg).
+		// the command (gt-0v0bg). A failed ping says the server did not
+		// answer, not that the container is stopped (gt-1zklt8).
 		fmt.Fprintf(w, "%s Dolt server is %s (container %s)\n",
-			style.Dim.Render("○"), "not running", container)
+			style.Dim.Render("○"), "unreachable", container)
 		fmt.Fprintf(w, "  Ping: %s\n", style.Dim.Render(err.Error()))
+		fmt.Fprintf(w, "  The container may still be running; a failed ping says only that no SQL answer came within 2 s\n")
 		fmt.Fprintf(w, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
 		reads.beadsRuntimeConfig(w, townRoot)
 		printArchiveCheckUnavailable(w, archiveUnavailableContainerPing)
