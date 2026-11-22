@@ -71,10 +71,14 @@ func TestGateRunRecorderAppends(t *testing.T) {
 	t.Parallel()
 	root := gateRunRecorderRoot(t)
 	var log recorderLog
+	var reports []error
 	rec := NewGateRunRecorder(func(context.Context, ...string) (string, error) {
 		return "nr_periods 40\nnr_throttled 7\nthrottled_usec 3100\n", nil
-	}, root, log.logf, nil)
+	}, root, log.logf, func(err error) { reports = append(reports, err) })
 	rec(land.GateRun{Rig: "gastown", Bead: "gt-a", SHA: "c0ffee", RunID: "bob/42", Passed: true})
+	if len(reports) != 1 || reports[0] != nil {
+		t.Errorf("the recorder reported %v after a successful append, want one nil (the attention item is cleared by it, gt-nwea8n)", reports)
+	}
 	runs := gateRunRecorderRows(t, root)
 	if len(runs) != 1 {
 		t.Fatalf("the recorder appended %d row(s), want 1", len(runs))
