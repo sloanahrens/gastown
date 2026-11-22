@@ -93,6 +93,32 @@ func TestSpecLintEvidenceAllows(t *testing.T) {
 	}
 }
 
+// A usable fenced block holds at least one non-blank line between its markers;
+// a lone fence marker and an empty pair show no command, so the refusal stands.
+func TestSpecLintEvidenceFence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, section string
+		blocked       bool
+	}{
+		{"content fenced block", "```\ngo test ./internal/specdispatch\nok\n```", false},
+		{"dollar line", "$ go test ./internal/specdispatch\nok", false},
+		{"empty section", "", true},
+		{"lone fence marker", "```", true},
+		{"empty fenced block", "```\n```", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := evidenceBoxSpec("zero findings on internal/specdispatch/testdata/ok.yaml")
+			r, blocked := evidenceRefusal(s, map[string]string{"evidence": tc.section})
+			if blocked != tc.blocked {
+				t.Fatalf("evidenceRefusal(section %q) blocked = %v (%q), want %v", tc.section, blocked, r.Reason, tc.blocked)
+			}
+		})
+	}
+}
+
 // A usable Evidence section suppresses the refusal; a section that shows no
 // command does not.
 func TestSpecLintEvidenceSection(t *testing.T) {
