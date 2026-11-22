@@ -621,6 +621,84 @@ func TestPoolSeatBatchReportsABeadThatIsNotAnAgentBead(t *testing.T) {
 	}
 }
 
+// seatReadCounts is the calls a countingStore was asked for, so a test can
+// hold two seat reads to the same reads.
+type seatReadCounts struct {
+	shows    map[string]int
+	multis   [][]string
+	lists    int
+	assigned int
+}
+
+// seatReadCountsOf is the counting store's calls, by kind.
+func seatReadCountsOf(store *countingStore) seatReadCounts {
+	return seatReadCounts{shows: store.shows, multis: store.multis, lists: store.lists, assigned: store.assigned}
+}
+
+// TestPoolHookRetireDispositionUncached is gt-ac14z9: a seat nobody asked
+// hookHeld about takes the batch's uncached branch, and the state and the
+// reads it spends are the per-seat read's. The right-hand read is the one
+// disposition made before the change: the batch's own reads, handed whole to
+// poolPolecatSeatStateWith.
+func TestPoolHookRetireDispositionUncached(t *testing.T) {
+	t.Parallel()
+	town, db, _ := seatTown(t, 2)
+
+	beforeStore := newCountingStore(db)
+	before := batchOver(town, beforeStore)
+	want, err := poolPolecatSeatStateWith(town, "gastown", "p01", before.seatReads("gastown"))
+	if err != nil {
+		t.Fatalf("per-seat read before the change: %v", err)
+	}
+
+	store := newCountingStore(db)
+	got, err := batchOver(town, store).disposition("gastown", "p01")
+	if err != nil {
+		t.Fatalf("disposition: %v", err)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("disposition = %+v, want the per-seat read's %+v", got, want)
+	}
+	gotReads, wantReads := seatReadCountsOf(store), seatReadCountsOf(beforeStore)
+	if gotReads.lists == 0 && len(gotReads.multis) == 0 && len(gotReads.shows) == 0 && gotReads.assigned == 0 {
+		t.Fatal("the seat read spent no store calls; the read comparison would be vacuous")
+	}
+	if !reflect.DeepEqual(gotReads, wantReads) {
+		t.Errorf("disposition reads = %+v, want the per-seat read's %+v", gotReads, wantReads)
+	}
+}
+
+// TestPoolHookRetireDispositionReadError is gt-ac14z9's refusal branch: a seat
+// whose bead read fails answers the error disposition returned before the
+// change, spending the same reads. A task bead where the seat's agent bead
+// goes fails the read the way a live read does.
+func TestPoolHookRetireDispositionReadError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+	db := beadsfake.New()
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p01")
+	db.Seed(beads.Issue{ID: id, Title: id, Type: "task"})
+
+	beforeStore := newCountingStore(db)
+	before := batchOver(town, beforeStore)
+	_, wantErr := poolPolecatSeatStateWith(town, "gastown", "p01", before.seatReads("gastown"))
+	if wantErr == nil {
+		t.Fatal("the per-seat read answered a task bead as a seat; the fixture does not fail the bead read")
+	}
+
+	store := newCountingStore(db)
+	_, gotErr := batchOver(town, store).disposition("gastown", "p01")
+	if gotErr == nil || gotErr.Error() != wantErr.Error() {
+		t.Fatalf("disposition error = %v, want the per-seat read's %v", gotErr, wantErr)
+	}
+	if gotReads, wantReads := seatReadCountsOf(store), seatReadCountsOf(beforeStore); !reflect.DeepEqual(gotReads, wantReads) {
+		t.Errorf("disposition reads = %+v, want the per-seat read's %+v", gotReads, wantReads)
+	}
+}
+
 // showMultipleFails is a store whose ShowMultiple fails for the ids fail names,
 // so a test can lose one batched read and leave the others answering.
 type showMultipleFails struct {
