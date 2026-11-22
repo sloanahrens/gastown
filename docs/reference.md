@@ -512,7 +512,8 @@ A bead with no text has no estimate, and a canceled run has none either.
   gate did not run.
 
 - `auto_adopt` lets the weekly retrain adopt its proposed weights. Off, the
-  default, the weekly run writes the proposal and adopts nothing. On, it adopts
+  default, the weekly run adopts by the rank rule alone, as before the key
+  existed. On, it adopts
   only when the rank rule and the first-round error rule both pass. The
   first-round holdout is the landings with one om round and one polecat attempt,
   read from the `om_rounds` and `polecat_attempts` cells; an empty or non-integer

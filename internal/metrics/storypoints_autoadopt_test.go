@@ -110,7 +110,7 @@ func TestStoryPointsAutoAdoptAdopts(t *testing.T) {
 		}
 	})
 
-	t.Run("key off adopts nothing", func(t *testing.T) {
+	t.Run("key off adopts by the rank rule as before", func(t *testing.T) {
 		t.Parallel()
 		fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
 		writeAt(t, adoptRuntimePath(fix.town), previous)
@@ -121,10 +121,11 @@ func TestStoryPointsAutoAdoptAdopts(t *testing.T) {
 			t.Fatalf("RunStoryPointsWeekly: %v", err)
 		}
 		requireWeeklyProposal(t, fix.outDir)
-		requireNoRuntimeWrite(t, fix.town, previous)
-		want := "story points weekly: not adopted: story_points.auto_adopt is off, so the proposed weights were written and nothing was adopted\n"
-		if got := out.String(); got != want {
-			t.Errorf("out = %q, want %q", got, want)
+		if got := readAt(t, adoptRuntimePath(fix.town)); got == previous {
+			t.Errorf("runtime weights unchanged with the key off: the weekly run must still adopt by the rank rule")
+		}
+		if got := out.String(); strings.Contains(got, "story_points.auto_adopt is off") {
+			t.Errorf("out = %q, want the rank rule's decision, not a key-off refusal", got)
 		}
 		if stamp := weeklyLastRun(t, fix.town); stamp != weeklyNow.Format(time.RFC3339) {
 			t.Errorf("last run = %q, want the run that decided, %s", stamp, weeklyNow.Format(time.RFC3339))
@@ -345,8 +346,8 @@ func TestStoryPointsAutoAdoptOffPathIgnoresFirstRoundCells(t *testing.T) {
 	if err := c.RunStoryPointsWeekly(context.Background()); err != nil {
 		t.Fatalf("RunStoryPointsWeekly with the key off: %v", err)
 	}
-	if !strings.HasPrefix(weeklyOut.String(), "story points weekly: not adopted: ") {
-		t.Errorf("out = %q, want the key-off line", weeklyOut.String())
+	if !strings.HasPrefix(weeklyOut.String(), "story points weekly: ") || strings.Contains(weeklyOut.String(), "story_points.auto_adopt is off") {
+		t.Errorf("out = %q, want the rank rule's weekly line", weeklyOut.String())
 	}
 }
 
