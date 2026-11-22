@@ -2,12 +2,16 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // doltTopSectionDepsFor builds the section's deps around reader, with a sleep
@@ -217,5 +221,53 @@ func TestDoltTopSectionOneIdleConnection(t *testing.T) {
 	}
 	if section.Err != "" {
 		t.Errorf("the idle section carries Err %q, want none", section.Err)
+	}
+}
+
+// An open error reaches the page as the section's Err naming the address the
+// panel dialed, and neither a DSN nor a credential a driver error quotes
+// reaches it (gt-kdwc1e).
+func TestDoltTopSectionOpenErrorNamesTheAddressAndHoldsNoCredential(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	addr := doltserver.DefaultConfig(root).HostPort()
+
+	cases := []struct {
+		name   string
+		openDB func(dsn string) (*sql.DB, error)
+		// secret is text a driver error carries that the page must not show.
+		secret string
+	}{
+		{"no detail", func(string) (*sql.DB, error) { return nil, errors.New("connection refused") }, ""},
+		{"a quoted credential", func(string) (*sql.DB, error) {
+			return nil, errors.New("Access denied for mysql://root:hunter2@" + addr + "/gt")
+		}, "hunter2"},
+		{"a DSN echoed", func(string) (*sql.DB, error) {
+			return nil, errors.New("invalid DSN: root:hunter2@tcp(" + addr + ")/gt")
+		}, "hunter2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opener := doltTopOpener{
+				findTownRoot: func() (string, error) { return root, nil },
+				openDB:       tc.openDB,
+			}
+			read := func(ctx context.Context, _ time.Time) (dashboard.DoltSection, error) {
+				return readDoltTopSection(ctx, doltTopSectionDeps{open: opener.open, sleep: func(context.Context, time.Duration) error { return nil }})
+			}
+			section := doltPanel([]doltSectionReader{{key: "top", read: read}}, root, time.Minute)().Sections[0]
+
+			if section.Err == "" {
+				t.Fatal("a failed open left the section with no Err")
+			}
+			if !strings.Contains(section.Err, addr) {
+				t.Errorf("the Err %q does not name the address %s", section.Err, addr)
+			}
+			if tc.secret != "" && strings.Contains(section.Err, tc.secret) {
+				t.Errorf("the Err carries the credential: %q", section.Err)
+			}
+		})
 	}
 }
