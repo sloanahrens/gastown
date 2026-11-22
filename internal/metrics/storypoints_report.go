@@ -496,8 +496,13 @@ const storyPointsDriftWindow = 100
 // it the reading is unmeasurable, and no number is reported.
 const storyPointsDriftMin = 30
 
+// storyPointsLongMinutes is the measured minutes over which a landing ran long:
+// the threshold of the reading's AUC.
+const storyPointsLongMinutes = 20.0
+
 // StoryPointsDriftReading is one rank correlation of an estimate series against
-// the measured polecat time, over the drift window.
+// the measured polecat time, over the drift window, with the AUC of the estimate
+// for the landings measured over storyPointsLongMinutes beside it.
 type StoryPointsDriftReading struct {
 	// N is the landings in the window the reading covers.
 	N int
@@ -511,8 +516,19 @@ type StoryPointsDriftReading struct {
 	// Measurable is false when the window is under storyPointsDriftMin, a series
 	// has no spread, or the interval cannot be taken.
 	Measurable bool
-	// Why says why the reading is unmeasurable, empty when it is measurable.
+	// Why says why the rank reading is unmeasurable, empty when it is measurable.
+	// An absent AUC leaves it empty: the two readings are independent.
 	Why string
+	// LongAUC is the area under the ROC curve of the estimate for the landings
+	// measured over storyPointsLongMinutes, and LongLo and LongHi are its 95%
+	// percentile interval. All three are NaN unless LongMeasurable is true, so a
+	// caller that ignores LongMeasurable cannot print a zero as a result.
+	LongAUC, LongLo, LongHi float64
+	// LongMeasurable is true when the window has landed beads on both sides of
+	// storyPointsLongMinutes and the interval over them could be taken. It is
+	// false when a window has no bead over the threshold, every bead is over it,
+	// or too few resamples held both classes: the rank reading is untouched.
+	LongMeasurable bool
 }
 
 // StoryPointsDriftPrevious scores one landing in minutes under the previous
@@ -672,23 +688,39 @@ func measuredMinutesCell(secs, lowerBound string) (float64, bool, error) {
 	return seconds / 60, true, nil
 }
 
+// newDriftReading is a reading of n landings with no measure yet: every number
+// NaN and both Measurable flags false.
+func newDriftReading(n int) StoryPointsDriftReading {
+	return StoryPointsDriftReading{
+		N:       n,
+		Rho:     math.NaN(), Lo: math.NaN(), Hi: math.NaN(),
+		LongAUC: math.NaN(), LongLo: math.NaN(), LongHi: math.NaN(),
+	}
+}
+
 // rankReading is the rank correlation of the estimate and measured series with
-// its bootstrap interval: a window under storyPointsDriftMin, or a series with
-// no spread, is unmeasurable rather than a number.
+// its bootstrap interval, and the AUC of the estimate for the landings measured
+// over storyPointsLongMinutes with its interval. A window under
+// storyPointsDriftMin, or a series with no spread, is unmeasurable rather than a
+// number. The two readings are independent: a window with no landing over the
+// long threshold still carries its rank reading.
 func rankReading(est, measured []float64) StoryPointsDriftReading {
-	r := StoryPointsDriftReading{N: len(est), Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
+	r := newDriftReading(len(est))
 	if r.N < storyPointsDriftMin {
 		r.Why = driftTooFew(r.N)
 		return r
 	}
-	return intervalReading(est, measured)
+	rank := intervalReading(est, measured)
+	r.Rho, r.Lo, r.Hi, r.Measurable, r.Why = rank.Rho, rank.Lo, rank.Hi, rank.Measurable, rank.Why
+	setLongReading(&r, est, measured)
+	return r
 }
 
 // intervalReading is the reading of two series: the rank correlation and the 95%
 // bootstrap interval under it. The interval is taken first, so a series that has
 // no interval is refused by its error rather than carrying a number with none.
 func intervalReading(est, measured []float64) StoryPointsDriftReading {
-	r := StoryPointsDriftReading{N: len(est), Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
+	r := newDriftReading(len(est))
 	lo, hi, err := BootstrapSpearman(est, measured, bootstrapResamples, bootstrapSeed)
 	if err != nil {
 		r.Why = err.Error()
@@ -703,18 +735,35 @@ func intervalReading(est, measured []float64) StoryPointsDriftReading {
 	return r
 }
 
+// setLongReading fills a reading's AUC fields from the estimate and measured
+// series over storyPointsLongMinutes. A window with no landing on one side of
+// the threshold, or one whose interval cannot be taken, has no AUC: the three
+// values stay NaN and LongMeasurable stays false, and the rank reading beside
+// them is untouched.
+func setLongReading(r *StoryPointsDriftReading, est, measured []float64) {
+	auc, err := LongAUC(est, measured, storyPointsLongMinutes)
+	if err != nil {
+		return
+	}
+	lo, hi, err := LongAUCInterval(est, measured, storyPointsLongMinutes, bootstrapResamples, bootstrapSeed)
+	if err != nil {
+		return
+	}
+	r.LongAUC, r.LongLo, r.LongHi, r.LongMeasurable = auc, lo, hi, true
+}
+
 // driftTooFew is why a window of n landings is not read.
 func driftTooFew(n int) string {
 	return fmt.Sprintf("%d landings with both an estimate and a measured time, need %d", n, storyPointsDriftMin)
 }
 
 // previousReading scores the window with the previous adopted weights and
-// correlates those minutes with the same measured series. It reads the window
-// in full or not at all: a landing the previous weights cannot score makes the
-// reading unmeasurable, and a score that is not a finite positive number is an
-// error.
+// correlates those minutes with the same measured series, taking the same AUC
+// reading over them. It reads the window in full or not at all: a landing the
+// previous weights cannot score makes the reading unmeasurable, and a score that
+// is not a finite positive number is an error.
 func previousReading(window []driftLanding, measured []float64, previous StoryPointsDriftPrevious) (StoryPointsDriftReading, error) {
-	r := StoryPointsDriftReading{N: len(window), Rho: math.NaN(), Lo: math.NaN(), Hi: math.NaN()}
+	r := newDriftReading(len(window))
 	if r.N < storyPointsDriftMin {
 		r.Why = driftTooFew(r.N)
 		return r, nil
