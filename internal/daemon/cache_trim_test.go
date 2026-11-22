@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -36,6 +35,7 @@ import (
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecatimage"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 const (
@@ -2452,11 +2452,7 @@ var cacheTrimSmallApplies = map[string]string{
 // directory is audited like a top-level one.
 func TestCacheTrimNoOtherLargeClientSideApply(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	root := modroot.Root(t)
 
 	seen := map[string]bool{}
 	serverSide := 0
