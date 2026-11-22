@@ -454,8 +454,12 @@ const (
 	maxCallsLimit = 500
 	// callsLogUnreadableMessage is what GET /v1/calls answers when the log
 	// exists but cannot be read. It is fixed: the read error names the log's
-	// host path, which the caller does not carry.
+	// host path, which the caller does not carry. The operator reads the cause
+	// in the gateway's call log instead.
 	callsLogUnreadableMessage = "the gateway could not read its call log"
+	// callsLogReadFailurePrefix introduces the cause GET /v1/calls records for
+	// a log it could not read; fsMsg drops the filesystem error's path.
+	callsLogReadFailurePrefix = "reading the call log: "
 )
 
 // callsBody is GET /v1/calls's answer: the entries ReadCalls returned and the
@@ -488,6 +492,10 @@ func (g *Gateway) serveCalls(w http.ResponseWriter, r *http.Request) {
 	}
 	calls, err := ReadCalls(g.callsDir, since, limit)
 	if err != nil {
+		// The caller reads the fixed message; the operator reads the cause in
+		// the call log, uncounted because no bd call ran. fsMsg drops the host
+		// path: GET /v1/calls serves this same log.
+		g.log.LogUncounted(CallRecord{ExitCode: ExitRefused, Error: callsLogReadFailurePrefix + fsMsg(err)})
 		refuse(w, http.StatusInternalServerError, codeInternal, callsLogUnreadableMessage)
 		return
 	}
