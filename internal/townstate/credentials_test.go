@@ -105,6 +105,10 @@ func TestCredentialNameWholeWords(t *testing.T) {
 		{"a camel-case hump separates words", `{"apiKey":"x"}`, []string{"json:apiKey"}},
 		{"a hyphen separates words", `{"X-Authorization":"Bearer z"}`, []string{"json:X-Authorization"}},
 		{"a dot separates words", `{"db.passwd":"x"}`, []string{"json:db.passwd"}},
+		{"an acronym run splits before its last upper", `{"DBPasswd":"x"}`, []string{"json:DBPasswd"}},
+		{"an acronym prefix splits from the word", `{"XAuthorization":"Bearer z"}`, []string{"json:XAuthorization"}},
+		{"an acronym prefix that is not a credential word", `{"HTTPSProxy":"http://proxy.example:3128"}`, nil},
+		{"OAuthScope is not authorization", `{"OAuthScope":"read"}`, nil},
 		{"author is not authorization", `{"author":"x"}`, nil},
 		{"authors is not authorization", `{"authors":"x"}`, nil},
 		{"oauth_scope is not authorization", `{"oauth_scope":"x"}`, nil},
@@ -125,7 +129,8 @@ func TestCredentialNameWholeWords(t *testing.T) {
 
 // A string value that is a URL with a non-empty password in its userinfo is a
 // finding under any key, and the rule carries the key and never the value
-// (gt-06nqnk). A URL with a user and no password, or no userinfo, is not.
+// (gt-06nqnk). A URL with a user and no password, or no userinfo, is not. A URL
+// url.Parse rejects or leaves without a userinfo still fails closed on its shape.
 func TestFindCredentialsUserinfoURL(t *testing.T) {
 	t.Parallel()
 	const url = "https://user:pw@host/x.git"
@@ -138,6 +143,9 @@ func TestFindCredentialsUserinfoURL(t *testing.T) {
 		{"under another key", `{"origin":"` + url + `"}`, []string{"json:origin"}},
 		{"under a credential key the name rule reports once", `{"token":"` + url + `"}`, []string{"json:token"}},
 		{"a percent-encoded password", `{"repo":"https://user:p%40ss@host/x.git"}`, []string{"json:repo"}},
+		{"an invalid percent escape in the password fails closed", `{"repo":"https://user:p%zz@host/x.git"}`, []string{"json:repo"}},
+		{"an unescaped slash in the password fails closed", `{"repo":"https://user:pa/ss@host/x.git"}`, []string{"json:repo"}},
+		{"an env value with an invalid percent escape", "GIT_URL=https://user:p%zz@host/x.git\n", []string{"env:GIT_URL"}},
 		{"an element of an array names the array's key", `{"repos":["` + url + `"]}`, []string{"json:repos"}},
 		{"an element of a nested array names the outer key", `{"repos":[["` + url + `"]]}`, []string{"json:repos"}},
 		{"a top-level string has no key", `"` + url + `"`, []string{"json:"}},
@@ -147,6 +155,7 @@ func TestFindCredentialsUserinfoURL(t *testing.T) {
 		{"truncated JSON is still scanned", `{"repo":"` + url + `"`, []string{"json:repo"}},
 		{"no password", `{"repo":"https://user@host/x.git"}`, nil},
 		{"no userinfo", `{"repo":"https://host/x.git"}`, nil},
+		{"a userinfo-shaped value with no scheme", `{"repo":"user:pw@host/x.git"}`, nil},
 		{"an empty password part", `{"repo":"https://user:@host/x.git"}`, nil},
 	}
 	for _, c := range cases {
@@ -362,6 +371,8 @@ func TestRedactJSON(t *testing.T) {
 		{"escaped quote and backslash in the value", `{"password":"p\"q\\","k":"v"}`, `{"password":"<redacted>","k":"v"}`, 1},
 		{"a credential-named array redacts each element", `{"tokens":["a","b"]}`, `{"tokens":["<redacted>","<redacted>"]}`, 2},
 		{"a URL with a password is redacted under any key", `{"repo":"https://user:pw@host/x.git","n":1}`,
+			`{"repo":"<redacted>","n":1}`, 1},
+		{"a URL with an unparseable password is redacted under any key", `{"repo":"https://user:p%zz@host/x.git","n":1}`,
 			`{"repo":"<redacted>","n":1}`, 1},
 		{"nothing to redact", `{"api_key_file":"/x","n":1}`, `{"api_key_file":"/x","n":1}`, 0},
 		{"a reference and a plain keys field are left alone",

@@ -46,6 +46,11 @@ var (
 	// follows config's env var rule, so a leading digit (a shell positional) is
 	// not a reference (gt-t5pxk8).
 	envRefOnly = regexp.MustCompile(`^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$`)
+	// userinfoPasswordShape: scheme://user:password@ at the start of the value. It
+	// is the fail-closed reading of a URL url.Parse rejects or leaves without a
+	// userinfo, so a literal password in the text is still a finding; the user has
+	// no @, /, colon or space, and the password is non-empty.
+	userinfoPasswordShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://[^@/\s:]+:[^@\s]+@`)
 )
 
 // lastSegment returns the last dotted segment of a YAML key. Only that segment
@@ -89,33 +94,36 @@ func yamlValue(raw string) (value string, quoted bool) {
 }
 
 // splitNameWords splits a name into lower-case words at an underscore, a hyphen
-// or a dot and at a camel-case hump (an upper-case letter after a lower-case one
-// or a digit): apiKey is api and key, DB_PASSWD is db and passwd, X-Authorization
-// is x and authorization.
+// or a dot, at a lower-case or digit followed by an upper-case letter (apiKey is
+// api and key), and before the last upper-case letter of an upper-case run that
+// a lower-case letter follows (DBPasswd is db and passwd, HTTPSProxy is https and
+// proxy). X-Authorization is x and authorization.
 func splitNameWords(name string) []string {
+	runes := []rune(name)
 	var (
 		words []string
 		cur   []rune
-		prev  rune
 	)
 	flush := func() {
 		if len(cur) > 0 {
 			words = append(words, strings.ToLower(string(cur)))
-			cur = cur[:0]
+			cur = nil
 		}
 	}
-	for _, r := range name {
-		switch {
-		case r == '_' || r == '-' || r == '.':
+	for i, r := range runes {
+		if r == '_' || r == '-' || r == '.' {
 			flush()
-			prev = 0
-		case unicode.IsUpper(r) && (unicode.IsLower(prev) || unicode.IsDigit(prev)):
-			flush()
-			fallthrough
-		default:
-			cur = append(cur, r)
-			prev = r
+			continue
 		}
+		if i > 0 && unicode.IsUpper(r) {
+			prev := runes[i-1]
+			lowerToUpper := unicode.IsLower(prev) || unicode.IsDigit(prev)
+			acronymBreak := unicode.IsUpper(prev) && i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if lowerToUpper || acronymBreak {
+				flush()
+			}
+		}
+		cur = append(cur, r)
 	}
 	flush()
 	return words
@@ -146,17 +154,19 @@ func credentialName(name string) bool {
 // urlCarriesPassword reports whether a string value is a URL whose userinfo holds
 // a password (scheme://user:password@host). It judges the value alone, so the
 // finding holds under any key; a URL with a user and no password, or no userinfo,
-// is not one.
+// is not one. It fails closed: url.Parse rejects an invalid percent escape and
+// ends the authority at an unescaped slash, so a value shaped like a userinfo
+// password is a finding even when the parsed URL shows none (gt-vvuewi).
 func urlCarriesPassword(s string) bool {
 	if !strings.Contains(s, "://") {
 		return false
 	}
-	u, err := url.Parse(s)
-	if err != nil || u.Scheme == "" || u.User == nil {
-		return false
+	if u, err := url.Parse(s); err == nil && u.User != nil {
+		if password, ok := u.User.Password(); ok && password != "" {
+			return true
+		}
 	}
-	password, ok := u.User.Password()
-	return ok && password != ""
+	return userinfoPasswordShape.MatchString(s)
 }
 
 // isSecret reports whether value, held under a credential name, is reportable.
