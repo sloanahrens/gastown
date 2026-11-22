@@ -239,6 +239,11 @@ const scrubInputBound = 2 * maxRecordedClaimBytes
 // token is longer, and a longer run is tried in pieces from each later offset.
 const maxTokenRun = 512
 
+// ScrubText is the town's content scrub for text a caller records or shows: it
+// is scrubClaim, so the review log and every other reader share one rule
+// (gt-v90ftl).
+func ScrubText(s string) string { return scrubClaim(s) }
+
 // cutAtRune is s cut to at most n bytes on a rune boundary.
 func cutAtRune(s string, n int) string {
 	if len(s) <= n {

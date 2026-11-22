@@ -1492,6 +1492,87 @@ Error from server (AlreadyExists): error when creating "STDIN": object is being 
 	}
 }
 
+// The no-result cause loses its credentials before it is kept: a URL word drops
+// its userinfo to util.RedactURL, a bare token goes to land.ScrubText, and only
+// then is the cause cut to tierSweepCauseLimit runes, so a cut cannot slice a
+// token past the detector (gt-v90ftl).
+func TestTierSweepNoResultCauseIsScrubbedAndBounded(t *testing.T) {
+	t.Parallel()
+	token := "ghp_" + strings.Repeat("a", 36)
+	const failed = "kubectl cp x y failed (exit 1): exit status 1"
+	url := "https://bot:" + token + "@forgejo:3000/o/r.git"
+	clean := strings.Repeat("y", tierSweepCauseLimit)
+	for _, tc := range []struct{ name, in, want string }{
+		{"the fatal line after the failed step loses the token", "sweep-run: " + failed + "\nfatal: could not read from " + url + "\n",
+			failed + "; fatal: could not read from https://forgejo:3000/o/r.git"},
+		{"a step's argv loses the userinfo and keeps the step name and the exit", "sweep-run: git clone https://bot:" + token + "@forgejo/x failed (exit 128)\n",
+			"git clone https://forgejo/x failed (exit 128)"},
+		{"a bare token is replaced by the content scrub", "sweep-run: kubectl cp failed (exit 1)\nid " + token + "\n",
+			"kubectl cp failed (exit 1); id <redacted>"},
+		{"a clean short cause is returned unchanged", "sweep-run: kubectl cp: context deadline exceeded\n", "kubectl cp: context deadline exceeded"},
+		{"a cause of exactly the limit is unchanged", "sweep-run: " + clean + "\n", clean},
+		{"one rune over the limit is cut and marked", "sweep-run: " + clean + "y\n", clean + "..."},
+		{"no sweep-run line still names no cause", "no output at all\n", ""},
+	} {
+		if got := tierSweepNoResultCause(tc.in); got != tc.want {
+			t.Errorf("%s: tierSweepNoResultCause(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+	// A token straddling the cut is scrubbed first, so no part of it survives: a
+	// cut first would leave the part before rune 240 for the detector to miss.
+	straddling := "ghp_" + strings.Repeat("0123456789", 3)
+	straddle := "sweep-run: " + strings.Repeat("y", tierSweepCauseLimit-10) + " " + straddling + "\n"
+	got := tierSweepNoResultCause(straddle)
+	for i := 0; i+8 <= len(straddling); i++ {
+		if strings.Contains(got, straddling[i:i+8]) {
+			t.Errorf("a token straddling the cut left %q in the cause: %q", straddling[i:i+8], got)
+			break
+		}
+	}
+	if n := len([]rune(got)); n != tierSweepCauseLimit+3 {
+		t.Errorf("straddle cause is %d runes, want the %d-rune cut and the marker", n, tierSweepCauseLimit)
+	}
+}
+
+// The stage record, both RED log lines and the attention item carry the one
+// scrubbed cause: a credential a step printed reaches none of them (gt-v90ftl).
+func TestTierSweepNoResultCauseIsScrubbedOnEveryCopy(t *testing.T) {
+	t.Parallel()
+	token := "ghp_" + strings.Repeat("b", 36)
+	const failed = "kubectl cp x y failed (exit 1): exit status 1"
+	const cause = failed + "; fatal: could not read from https://forgejo:3000/o/r.git"
+	output := "sweep-run: " + failed + "\nfatal: could not read from https://bot:" + token + "@forgejo:3000/o/r.git\n"
+	d, rec, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	rec.result = func(tierSweepStage) tierSweepStageResult {
+		return tierSweepStageResult{output: output, exitCode: -1, ran: true, reason: tierSweepRunnerNoResult}
+	}
+	if !d.runTierSweep() {
+		t.Fatal("the cycle did not judge every rig")
+	}
+	if ts := tierSweepTestState(t, d, "gastown").Tiers["integration"]; ts.Cause != cause {
+		t.Errorf("integration cause = %q, want %q", ts.Cause, cause)
+	}
+	if !strings.Contains(logs.String(), "runner: no result: "+cause) || !strings.Contains(logs.String(), "next sweep: "+cause) {
+		t.Errorf("the RED log lines do not carry the scrubbed cause; logs:\n%s", logs.String())
+	}
+	src := &attentionSources{tierSweepRigs: func() []string { return []string{"gastown"} },
+		tierSweep: func(rig string) (tierSweepState, error) { return tierSweepTestState(t, d, rig), nil }}
+	items, err := src.collectTierSweepRed(context.Background())
+	want := "tier sweep gastown integration RED (1 failed: runner: no result): " + cause
+	found := false
+	for _, item := range items {
+		if strings.Contains(item.Summary, "bot:") {
+			t.Errorf("item %q carries the credential: %q", item.Key, item.Summary)
+		}
+		found = found || item.Summary == want
+	}
+	if err != nil || !found {
+		t.Errorf("items = %+v, err = %v, want one with the scrubbed cause %q", items, err, want)
+	}
+}
+
 // A failing package still files its bead when another tier in the same cycle
 // has no run result: the no-result tier files nothing, the failed package files
 // exactly the bead it did before (gt-856oaq).

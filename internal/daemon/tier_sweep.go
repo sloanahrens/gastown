@@ -32,6 +32,7 @@ import (
 	"github.com/steveyegge/gastown/internal/promote"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 	"github.com/steveyegge/gastown/internal/tiersweep"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 // The tier_sweep job runs origin/main's shell tests through the Go runner
@@ -4095,23 +4096,50 @@ func tierSweepNoRunResult(ts tierSweepTierResult) bool {
 
 // tierSweepNoResultCause names the step that stopped a no-result stage, without the runner's prefix (gt-jie24r).
 // With no failed step in the output it falls back to the stage's own error, the first sweep-run line, so a
-// no-result stage never names no cause.
+// no-result stage never names no cause. Every caller takes the cause from here, scrubbed, so a credential a step
+// printed reaches neither the stage record, the RED item nor the log (gt-v90ftl).
 func tierSweepNoResultCause(output string) string {
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		if line, ok := strings.CutPrefix(lines[i], "sweep-run: "); ok && strings.Contains(line, " failed") {
 			if i+1 == len(lines) {
-				return line
+				return tierSweepScrubCause(line)
 			}
-			return line + "; " + strings.TrimSpace(lines[i+1])
+			return tierSweepScrubCause(line + "; " + strings.TrimSpace(lines[i+1]))
 		}
 	}
 	for _, line := range lines {
 		if why, ok := strings.CutPrefix(line, "sweep-run: "); ok {
-			return why
+			return tierSweepScrubCause(why)
 		}
 	}
 	return ""
+}
+
+// tierSweepCauseLimit bounds a no-result cause: a step's failed line and the line after it, not a whole log.
+const tierSweepCauseLimit = 240
+
+// tierSweepScrubCause removes the cause's credentials, then cuts it to tierSweepCauseLimit runes with a trailing
+// "...": a '://' word loses its userinfo to util.RedactURL (config.LooksLikeSecret refuses any value holding
+// "://", so the content scrub alone misses it), then land.ScrubText takes a bare token. The cut is last because
+// cutting first could slice a token past the detector (gt-v90ftl).
+func tierSweepScrubCause(cause string) string {
+	cause = land.ScrubText(tierSweepRedactURLs(cause))
+	if r := []rune(cause); len(r) > tierSweepCauseLimit {
+		cause = string(r[:tierSweepCauseLimit]) + "..."
+	}
+	return cause
+}
+
+// tierSweepRedactURLs strips the userinfo from each whitespace-separated word of s that holds '://'.
+func tierSweepRedactURLs(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if strings.Contains(w, "://") {
+			words[i] = util.RedactURL(w)
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 func tierSweepCauseNote(cause string) string {
