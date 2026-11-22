@@ -725,6 +725,51 @@ func TestSquashArchiveBudgetShortOfTheCutDefersTheRun(t *testing.T) {
 	}
 }
 
+// TestSquashArchiveFailedExportDefersTheRunNamingTheError: a commit export that
+// failed with its through-date behind the cut does not cover it. At the seam the
+// result is not Reached and the error carries the export's own error; through
+// the check the deferral names that error and no run starts.
+func TestSquashArchiveFailedExportDefersTheRunNamingTheError(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	cut := squashTestNow.AddDate(0, 0, -7)
+	seedSquashArchiveThrough(t, d, time.Time{})
+	exportErr := errors.New("dolt_log read failed")
+
+	out, err := d.squashArchiveAfterPass("gt", cut, map[string]archiveDatabaseOutcome{
+		"gt": {commits: archiveExportOutcome{stop: archiveStopFailed, err: exportErr}},
+	})
+	if err == nil || !errors.Is(err, exportErr) {
+		t.Fatalf("a failed commit export returned %v, want the export's error", err)
+	}
+	if out.Reached {
+		t.Error("a failed commit export was read as reaching the cut")
+	}
+
+	// The check drives the same stop from the read failing, as production does.
+	withSquashArchive(t, d, t.TempDir(), nil, 0)
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		return nil, exportErr
+	}
+	ran := false
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		ran = true
+		return doltsquash.RunResult{}, nil
+	}
+	d.runScheduledMaintenance()
+
+	want := "squash: gt: the run waits for the next day's check: the history archive did not reach the cut " +
+		cut.UTC().Format(time.RFC3339) +
+		": the history archive's commit export failed: reading dolt_log: " + exportErr.Error()
+	if got := logs.String(); !strings.Contains(got, want) {
+		t.Errorf("the failed export was not deferred naming its error: %q", got)
+	}
+	if ran {
+		t.Error("a run started on an archive whose commit export failed")
+	}
+}
+
 // TestSquashArchiveNextDayContinuesFromTheWatermark: a short pass records its
 // through-date, and the next day's check reads only the commits after it, then
 // the run starts. Restarting the pass from the beginning re-reads archived
