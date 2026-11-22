@@ -140,6 +140,36 @@ func TestCacheTrimFailWaitNamesOneCutLine(t *testing.T) {
 	}
 }
 
+// TestCacheTrimFailWaitMakesTheLinePrintable pins that the failed error's line
+// is printable text: the container's own output can hold an escape sequence or
+// a carriage return, and each control character in it becomes a space, so the
+// line reaches the daemon's log and the park's summary as one line of printable
+// text.
+func TestCacheTrimFailWaitMakesTheLinePrintable(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimFailWaitFailedVerb: {},
+		cacheTrimFailWaitTrimLogVerb: {
+			stdout: "removing 3 files\n\x1b[31mcould not remove /claim/x\r\x7f: permission denied\x1b[0m\n",
+		},
+	})
+	held := cacheTrimFailWaitHold(t, f, cacheTrimFailWaitCompleteVerb)
+	finished, err := f.d.cacheTrimWaitJob(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimJob, cacheTrimClaimWaitTimeout)
+	if finished || err == nil {
+		t.Fatalf("cacheTrimWaitJob = %v, %v; want the failed error", finished, err)
+	}
+	want := "the trim Job " + cacheTrimJob + " failed:  [31mcould not remove /claim/x  : permission denied [0m"
+	if err.Error() != want {
+		t.Errorf("error = %q; want %q", err, want)
+	}
+	for _, r := range err.Error() {
+		if r < 0x20 || r == 0x7f {
+			t.Errorf("the error holds control character %U; want printable text only", r)
+		}
+	}
+	held.await(t)
+}
+
 // TestCacheTrimFailWaitReadsThePlanLogAndStillCompletes pins the two outcomes
 // the wait's two legs can reach. A Job whose plan init container failed has no
 // trim log, so the failed error names the plan container's last line. A Job
