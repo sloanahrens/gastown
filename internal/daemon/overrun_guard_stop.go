@@ -2256,14 +2256,19 @@ func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]atten
 		if bead == "" {
 			bead = "no recorded bead"
 		}
+		summary := fmt.Sprintf("%s paused by the overrun guard %s ago on %s; recover with gt polecat check-recovery %s, then gt polecat nuke %s after a live git check",
+			seat, parkedAge(parked), bead, seat, seat)
+		// A seat with no bead has no stop state to read.
+		if rec.WorkBead != "" {
+			summary += s.d.overrunParkedUnsavedText(rig, name, rec.WorkBead)
+		}
 		out = append(out, attention.Item{
 			Key:      "overrun-parked:" + seat,
 			Kind:     attention.KindOverrunStopped,
 			Severity: attention.SeverityLow,
 			Rig:      rig,
 			Bead:     rec.WorkBead,
-			Summary: fmt.Sprintf("%s paused by the overrun guard %s ago on %s; recover with gt polecat check-recovery %s, then gt polecat nuke %s after a live git check",
-				seat, parkedAge(parked), bead, seat, seat),
+			Summary:  summary,
 		})
 		return nil
 	})
@@ -2271,6 +2276,26 @@ func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]atten
 		return nil, err
 	}
 	return out, nil
+}
+
+// overrunParkedUnsavedText is what the parked-seat item adds when the seat's
+// save gave up: the same UNSAVED WORK sentence as the hand-back note. A stop
+// state or a sandbox location that cannot be read says so, never today's text
+// alone, which says nothing of unsaved work. Empty for a save that did not give
+// up.
+func (d *Daemon) overrunParkedUnsavedText(rig, polecat, bead string) string {
+	st, err := readOverrunState(d.config.TownRoot, bead)
+	if err != nil {
+		return ". UNSAVED WORK status unknown: " + err.Error()
+	}
+	if !st.SaveGaveUp {
+		return ""
+	}
+	sessionName, workDir, err := d.overrunUnsavedWorkLocation(overrunSeat{Rig: rig, Polecat: polecat})
+	if err != nil {
+		return ". UNSAVED WORK status unknown: " + err.Error()
+	}
+	return ". " + overrunUnsavedWorkText(st, sessionName, workDir, st.Branch, polecat, bead)
 }
 
 // overrunGuardParked reports whether rec is the park the overrun guard writes,

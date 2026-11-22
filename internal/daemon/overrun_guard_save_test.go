@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1476,6 +1477,110 @@ func TestOverrunFailureReason_ScrubsBeforeCut(t *testing.T) {
 			t.Parallel()
 			if got := pushFailureReason(errors.New(tc.err)); got != tc.want {
 				t.Errorf("pushFailureReason() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// parkedItemSummary is the Summary of the overrun-parked item for a seat that
+// has been parked two hours, whose bead's stop state is st and whose sandbox
+// record names the clone; tweak, when set, changes the daemon last.
+func parkedItemSummary(t *testing.T, st overrunState, tweak func(d *Daemon)) string {
+	t.Helper()
+	d, _ := newOverrunDaemon(t, false)
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		return *overrunStopSandboxRecord(overrunGoneClone), true, nil
+	}
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	parkSeatAs(t, d.config.TownRoot, stopSeat.Rig, stopSeat.Polecat, st.Bead, overrunActor, now.Add(-2*time.Hour))
+	if st.Bead != "" {
+		if err := writeOverrunState(d.config.TownRoot, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if tweak != nil {
+		tweak(d)
+	}
+	items, err := (&attentionSources{d: d, now: now}).collectOverrunParkedSeats(context.Background())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %+v, %v; want the one parked item", items, err)
+	}
+	return items[0].Summary
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemNamesThePushStage: the parked-seat item of
+// a seat whose save gave up at the push carries the same UNSAVED WORK sentence
+// as the hand-back note, after today's.
+func TestOverrunSaveGaveUpText_ParkedItemNamesThePushStage(t *testing.T) {
+	t.Parallel()
+	st := overrunState{Bead: "gt-aaa11", Branch: stopSeat.Branch, SaveGaveUp: true, SaveFailure: "remote unreachable", SaveStage: "push"}
+	summary := parkedItemSummary(t, st, nil)
+	checkUnsavedText(t, summary, "The push failed", "remote unreachable", "/sandbox/gt/gastown/polecats/capable/gastown",
+		"push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+	if !strings.Contains(summary, "gt polecat check-recovery gastown/capable") {
+		t.Errorf("summary = %q, want today's recovery commands kept", summary)
+	}
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemSaysTheStepIsUnknown: a give-up with no
+// recorded stage still says UNSAVED WORK and that the step is unknown.
+func TestOverrunSaveGaveUpText_ParkedItemSaysTheStepIsUnknown(t *testing.T) {
+	t.Parallel()
+	st := overrunState{Bead: "gt-aaa11", Branch: stopSeat.Branch, SaveGaveUp: true, SaveFailure: "late check failed"}
+	checkUnsavedText(t, parkedItemSummary(t, st, nil), "the step is unknown")
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemIsUnchangedWhenTheSaveDidNotGiveUp: a
+// parked seat whose state records a failure but no give-up keeps today's item.
+func TestOverrunSaveGaveUpText_ParkedItemIsUnchangedWhenTheSaveDidNotGiveUp(t *testing.T) {
+	t.Parallel()
+	summary := parkedItemSummary(t, overrunState{Bead: "gt-aaa11", SaveFailure: "remote unreachable", SaveStage: "push"}, nil)
+	if strings.Contains(summary, "UNSAVED WORK") {
+		t.Errorf("summary = %q, want no UNSAVED WORK for a save that did not give up", summary)
+	}
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemWithUnreadableStateSaysSo: a parked seat
+// whose stop state or sandbox record cannot be read says so after today's text,
+// which never stands in for an unreadable state; a seat with no bead has no
+// state to read and keeps today's item.
+func TestOverrunSaveGaveUpText_ParkedItemWithUnreadableStateSaysSo(t *testing.T) {
+	t.Parallel()
+	gaveUp := overrunState{Bead: "gt-aaa11", Branch: stopSeat.Branch, SaveGaveUp: true, SaveFailure: "remote unreachable", SaveStage: "push"}
+	today := parkedItemSummary(t, overrunState{Bead: "gt-aaa11"}, nil)
+	for _, tc := range []struct {
+		name  string
+		st    overrunState
+		tweak func(d *Daemon)
+		want  string
+	}{
+		{"a state file that does not parse", overrunState{Bead: "gt-aaa11"}, func(d *Daemon) {
+			path, _ := overrunStatePath(d.config.TownRoot, "gt-aaa11")
+			if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "UNSAVED WORK status unknown: parse overrun state"},
+		{"a sandbox record that cannot be read", gaveUp, func(d *Daemon) {
+			d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+				return session.SandboxRecord{}, false, errors.New("record unreadable")
+			}
+		}, "UNSAVED WORK status unknown: record unreadable"},
+		{"a seat with no bead", overrunState{}, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := parkedItemSummary(t, tc.st, tc.tweak)
+			if tc.want == "" {
+				if strings.Contains(got, "UNSAVED WORK") {
+					t.Errorf("summary = %q, want today's item for a seat with no bead", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) || !strings.Contains(got, "gt polecat check-recovery") || got == today {
+				t.Errorf("summary = %q, want today's text and %q, and not today's text alone", got, tc.want)
 			}
 		})
 	}
