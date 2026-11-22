@@ -205,6 +205,9 @@ var ruleOwners = map[string]Owner{
 	// A slow gate is the town's own run to look at: the overseer reads the pole
 	// package and the tier seconds before a person is woken (gt-l0t2tg).
 	RuleGateSlow: OwnerOverseer,
+	// A failing gate-run log is the town's own file to read and repair: the
+	// overseer reads the error before a person is woken (gt-nwea8n).
+	RuleGateRunLog: OwnerOverseer,
 	// A finished seat left in the walk is the town's own seat to end: the
 	// overseer reads why the end did not happen and ends it (gt-klpqb3).
 	RuleSeatFinishedLingering: OwnerOverseer,

@@ -992,7 +992,7 @@ func (d *Daemon) newForgejoLanding(rigName, remote string, fj *config.ForgejoCon
 		Remote:     remote,
 		Out:        out,
 		GateLogDir: gateLogDir,
-		Recorder:   NewGateRunRecorder(d.controlClusterExec(), d.config.TownRoot, d.logger.Printf),
+		Recorder:   NewGateRunRecorder(d.controlClusterExec(), d.config.TownRoot, d.logger.Printf, d.gateRunLog.record),
 	}
 	d.verifyForgejoGate(rigName, gate, repo, fj.GateWorkflowName(), landings)
 	merger := &land.ForgejoMerger{Client: client, Owner: owner, RepoName: repoName, BotLogin: botLogin, Out: out}

@@ -241,6 +241,11 @@ const (
 	// (gt-l0t2tg).
 	RuleGateSlow = "gate.slow"
 
+	// RuleGateRunLog is a gate-run log whose last append failed: every gate run
+	// after it may be missing from the log the metrics and the gate-slow check read,
+	// so the overseer is woken to read the error (gt-nwea8n).
+	RuleGateRunLog = "gate.run_log"
+
 	// RuleSeatFinishedLingering is a finished seat the town still wants
 	// running: its last turn ended and its bead is closed, and it has been left
 	// in recovery past the linger bound (gt-klpqb3).
@@ -469,6 +474,9 @@ var ruleFlags = map[string]RuleFlags{
 	// The last runs of a rig were slow for the same reason: the overseer is
 	// woken to read the pole package (gt-l0t2tg).
 	RuleGateSlow: flagsWake,
+	// The gate-run log failing is loud for the same reason: runs go unrecorded
+	// until someone reads the error (gt-nwea8n).
+	RuleGateRunLog: flagsWake,
 	// A drifted cluster is the overseer's next look, not a page: it rolls the
 	// cluster or reads the hand edit against the render, and no image roll is
 	// blocked while it waits (gt-y705n1).
@@ -581,6 +589,7 @@ var kindRules = map[Kind]string{
 	KindImagePinsRefreshStuck:         RuleImagePinsRefreshStuck,
 	KindImagePinsDeadLayer:            RuleImagePinsDeadLayer,
 	KindGateSlow:                      RuleGateSlow,
+	KindGateRunLog:                    RuleGateRunLog,
 	KindClusterDrift:                  RuleClusterDrift,
 	KindClusterDriftUnreadable:        RuleClusterDriftUnreadable,
 	KindMainUnknown:                   RuleMainUnknown,

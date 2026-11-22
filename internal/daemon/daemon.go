@@ -79,6 +79,10 @@ import (
 // This is recovery-focused: normal wake is handled by feed subscription (bd activity --follow).
 // The daemon is the safety net for dead sessions, GUPP violations, and orphaned work.
 type Daemon struct {
+	// gateRunLog is the last failed append to the gate-run log, which the
+	// gate-run-log attention item reads (gt-nwea8n).
+	gateRunLog gateRunLogFailure
+
 	// overrunCursorBead is the first seat the last overrun pass's budget did not reach, whose
 	// bead the next pass starts its reads at; empty starts at the first seat (gt-va12ze). Only
 	// the overrun pass, one at a time, reads and writes it.
