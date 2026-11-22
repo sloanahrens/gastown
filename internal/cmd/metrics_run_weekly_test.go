@@ -53,22 +53,20 @@ func TestWeeklyAutoAdoptClosureReadsTheConfigLazily(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("write patrol config: %v", err)
 	}
-	// The last run was an hour before the fixed clock, so the retrain is not due. No export of
-	// internal/metrics writes the stamp, so this names its layout: weekly.stamp beside the runtime
-	// weights, an RFC 3339 time.
-	now := time.Date(2026, 11, 22, 6, 0, 0, 0, time.UTC)
+	// The last run is stamped one hour before the host's clock, so the week (seven days) is not
+	// due for as long as this test runs. No export of internal/metrics writes the stamp, so this
+	// names its layout: weekly.stamp beside the runtime weights, an RFC 3339 time.
+	now := time.Now().Add(-time.Hour)
 	stamp := filepath.Join(filepath.Dir(storypoints.RuntimeWeightsPath(town)), "weekly.stamp")
 	if err := os.MkdirAll(filepath.Dir(stamp), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(stamp, []byte(now.Add(-time.Hour).Format(time.RFC3339)+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(stamp, []byte(now.Format(time.RFC3339)+"\n"), 0o644); err != nil {
 		t.Fatalf("write stamp: %v", err)
 	}
 
 	var out strings.Builder
-	c := hostWeeklyCommands(town, &out)
-	c.Now = func() time.Time { return now }
-	if err := c.RunStoryPointsWeekly(context.Background()); err != nil {
+	if err := hostMetricsHourSteps().weekly(context.Background(), &out, town); err != nil {
 		t.Fatalf("weekly err = %v, want a green hour on a week that is not due", err)
 	}
 	if !strings.Contains(out.String(), "not due") {
