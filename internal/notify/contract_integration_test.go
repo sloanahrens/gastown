@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -18,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -32,13 +32,8 @@ var (
 // installed on PATH.
 func builtGT(t *testing.T) string {
 	t.Helper()
+	root := modroot.Root(t)
 	gtOnce.Do(func() {
-		_, file, _, ok := runtime.Caller(0)
-		if !ok {
-			gtErr = os.ErrNotExist
-			return
-		}
-		root := filepath.Join(filepath.Dir(file), "..", "..")
 		dir, err := os.MkdirTemp("", "gt-notify-contract-")
 		if err != nil {
 			gtErr = err
