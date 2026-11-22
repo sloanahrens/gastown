@@ -15,6 +15,14 @@ import (
 // polecat time does, so the estimator has drifted from the work (gt-my0o23).
 const storyPointsDriftBar = 0.5
 
+// storyPointsLongAUCBar is the bar the upper bound of the AUC for beads over 20
+// minutes must lie under for the drift decision to fail. The rank correlation
+// alone reads low on the newest 100 landings (0.34, interval 0.16 to 0.50)
+// because beads are cut to land under the trigger and the estimates cover a
+// narrow band; there the AUC for beads over 20 minutes read 0.71 (interval 0.60
+// to 0.82), so the estimates still tell the long beads apart (gt-61owu9).
+const storyPointsLongAUCBar = 0.65
+
 // storyPointsDriftKey is the one item the drift measure raises. A second
 // reading under the bar is the same condition, so it keeps this key and with it
 // the item's first_seen and ack.
@@ -31,13 +39,17 @@ const storyPointsDriftUnreadableKey = "storypoints-drift:unreadable"
 // storyPointsDriftBar. The point reading alone is mostly noise, since it fires
 // on the windows whose interval straddles the bar; the cost is that a true rank
 // correlation of 0.40 reads as failing only on the windows where the point
-// reading is near 0.33 (gt-7gzf3g). An unmeasurable reading is not failing: a
-// measurement not taken says nothing about whether the drift stands.
+// reading is near 0.33 (gt-7gzf3g). The rank rule also needs the AUC for beads
+// over 20 minutes to be low, when that AUC was measured: its 95% interval must
+// end under storyPointsLongAUCBar. A reading with no such AUC (no bead over 20
+// minutes in the window) is decided by the rank rule alone, so the missing figure
+// never silences it. An unmeasurable reading is not failing: a measurement not
+// taken says nothing about whether the drift stands.
 func storyPointsDriftFailing(r metrics.StoryPointsDriftReading) bool {
 	if !r.Measurable {
 		return false
 	}
-	return r.Hi < storyPointsDriftBar
+	return r.Hi < storyPointsDriftBar && (!r.LongMeasurable || r.LongHi < storyPointsLongAUCBar)
 }
 
 // collectStoryPointsDrift raises the drift item when the whole 95% interval of
