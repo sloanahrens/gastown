@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -154,9 +155,34 @@ func (s *doltWritesSection) read(ctx context.Context, _ time.Time) (dashboard.Do
 	if other != nil {
 		rows = append(rows, *other)
 	}
-	out := dashboard.DoltSection{Title: "bd writes by caller and verb", Head: []string{"actor", "writes/min"}}
+	hour, peak := doltWritesHourAndPeak(&s.buckets, now)
+	out := dashboard.DoltSection{Title: "bd writes by caller and verb", Head: []string{"actor", "writes/min"},
+		Note: fmt.Sprintf("last hour: %d writes; peak 10-minute bucket of the last 24 hours: %d", hour, peak)}
 	for _, r := range rows {
 		out.Rows = append(out.Rows, []string{r.actor, strconv.FormatFloat(r.rate, 'f', 1, 64)})
 	}
 	return out, nil
+}
+
+// doltWritesHourAndPeak totals the writes of every key (the overflow "(other)"
+// included) per bucket: the hour is the six newest buckets and the peak the
+// largest bucket of the 24 hours (gt-tq82en).
+func doltWritesHourAndPeak(b *dashboard.Buckets, now time.Time) (hour, peak int) {
+	var totals []int
+	for _, key := range b.Keys() {
+		series := b.Series(now, key)
+		if totals == nil {
+			totals = make([]int, len(series))
+		}
+		for i, n := range series {
+			totals[i] += n
+		}
+	}
+	for i, n := range totals {
+		if i >= len(totals)-6 {
+			hour += n
+		}
+		peak = max(peak, n)
+	}
+	return hour, peak
 }

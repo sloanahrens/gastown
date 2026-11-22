@@ -105,3 +105,56 @@ func TestDoltWritesSectionRanksTheSixBusiestActors(t *testing.T) {
 		t.Error("no writes section is registered")
 	})
 }
+
+// TestDoltWritesSectionCarriesTheHourAndThePeak: the writes of the six newest
+// buckets, every actor together, are the hour, and the largest bucket of the 24
+// hours is the peak (gt-tq82en).
+func TestDoltWritesSectionCarriesTheHourAndThePeak(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 22, 12, 5, 0, 0, time.UTC)
+	type add struct {
+		ago time.Duration
+		key string
+		n   int
+	}
+	for _, tc := range []struct {
+		name       string
+		adds       []add
+		hour, peak int
+	}{
+		{"the three newest buckets and one 20 hours old", []add{{0, "a", 30}, {10 * time.Minute, "a", 4}, {20 * time.Minute, "a", 6}, {20 * time.Hour, "a", 90}}, 40, 90},
+		{"two actors in one bucket add up to the peak", []add{{3 * time.Hour, "a", 50}, {3 * time.Hour, "b", 45}}, 0, 95},
+		{"the sixth bucket is in the hour and the seventh is not", []add{{0, "a", 7}, {50 * time.Minute, "a", 5}, {60 * time.Minute, "a", 100}}, 12, 100},
+		{"nothing counted reads zero", nil, 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var buckets dashboard.Buckets
+			// newest first: Buckets drops a count dated over a minute after its latest time
+			for _, a := range tc.adds {
+				buckets.Add(now.Add(-a.ago), a.key, a.n)
+			}
+			if hour, peak := doltWritesHourAndPeak(&buckets, now); hour != tc.hour || peak != tc.peak {
+				t.Errorf("hour, peak = %d, %d, want %d, %d", hour, peak, tc.hour, tc.peak)
+			}
+		})
+	}
+	t.Run("the section's note carries both", func(t *testing.T) {
+		t.Parallel()
+		reads := []map[string]uint64{{"a": 0}, {"a": 60}}
+		times := []time.Time{now, now.Add(10 * time.Minute)}
+		i := 0
+		s := newDoltWritesSection(func(context.Context) (map[string]uint64, error) { i++; return reads[i-1], nil },
+			func() time.Time { return times[i-1] })
+		var got dashboard.DoltSection
+		for range reads {
+			var err error
+			if got, err = s.read(context.Background(), time.Time{}); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+		}
+		if want := "last hour: 60 writes; peak 10-minute bucket of the last 24 hours: 60"; got.Note != want {
+			t.Errorf("note = %q, want %q", got.Note, want)
+		}
+	})
+}
