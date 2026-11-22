@@ -308,6 +308,38 @@ func TestDeployerInboxHandlePlanChangesBetweenVerifyAndApply(t *testing.T) {
 	}
 }
 
+// TestDeployerInboxHandleLiveChangesBeforeApply: a live version that moves after Verify read it is refused by Apply, and Apply is handed the verified live versions, not a re-read map.
+func TestDeployerInboxHandleLiveChangesBeforeApply(t *testing.T) {
+	t.Parallel()
+
+	plan := handlePlan()
+	_, id, err := clusterapproval.NewProposal(plan)
+	if err != nil {
+		t.Fatalf("NewProposal(%+v) = %v, want a valid plan to have a proposal", plan, err)
+	}
+	steps := &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan)}
+	// The object moves after LiveVersions has returned the value Verify checks,
+	// so Verify passes and Apply sees the moved version.
+	steps.afterLive = func() { steps.live["Deployment/control/gt"] = "8" }
+	req := deployerinbox.Request{ID: handleRequestID, Kind: deployerinbox.KindApply, Plan: "p"}
+
+	answer := deployerinbox.Handle(context.Background(), steps, req, handleNow)
+
+	if answer.Status != deployerinbox.StatusRefused {
+		t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusRefused, answer.Detail)
+	}
+	if answer.Detail != deployerinbox.ErrApplyRefused.Error() {
+		t.Errorf("detail = %q, want the fixed refusal %q, not the callee's text", answer.Detail, deployerinbox.ErrApplyRefused.Error())
+	}
+	wantCalls := []string{"Plan p", "ReadRecord " + id, "LiveVersions", "Apply"}
+	if !slices.Equal(steps.calls, wantCalls) {
+		t.Errorf("calls = %v, want %v: live versions are read once, and Apply refuses the move", steps.calls, wantCalls)
+	}
+	if !maps.Equal(steps.appliedLive, plan.Versions) {
+		t.Errorf("Apply was handed the live versions %v, want the verified %v, not a re-read map", steps.appliedLive, plan.Versions)
+	}
+}
+
 func TestDeployerInboxHandleApplyFails(t *testing.T) {
 	t.Parallel()
 
