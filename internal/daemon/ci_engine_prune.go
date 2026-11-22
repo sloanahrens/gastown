@@ -733,13 +733,7 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 	}
 	verdict := d.ciEnginePrune(ctx, mode)
 	concluded := s.now()
-	if verdict {
-		d.diskMaintSchedule.record(ciEnginePruneName, concluded)
-		return
-	}
-	// A run that could not reach a verdict is tried again soon, not after the full
-	// interval, as the cache trim's failed run is.
-	d.diskMaintSchedule.recordRetry(ciEnginePruneName, concluded.Add(cacheTrimRetryInterval))
+	d.diskMaintConclude(ctx, ciEnginePruneName, "CI engine prune", verdict, concluded, every, "the run reached no verdict: its reason is the patrol's disk_maintenance log line at that time")
 }
 
 // ciEnginePrune runs the engine prune once and reports whether it reached a
