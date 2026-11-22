@@ -1216,6 +1216,47 @@ func TestCacheTrimPodsCountsEveryHolderThatHasNotFinished(t *testing.T) {
 	}
 }
 
+// TestCacheTrimPodsSkipsATerminatingSource pins a pod on its way out: it still
+// holds the claim, so it counts, but an exec in it dies with the pod, so it is
+// not a source.
+func TestCacheTrimPodsSkipsATerminatingSource(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimPodsVerb: cacheTrimPodsReply(
+		cacheTrimPodJSON("sbx-live", "Running", cacheTrimClaimName),
+		cacheTrimDeletingPodJSON("sbx-going", cacheTrimClaimName))})
+	holders, sources, err := f.d.cacheTrimPods(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimClaimName)
+	if err != nil {
+		t.Fatalf("cacheTrimPods: %v", err)
+	}
+	if holders != 2 || len(sources) != 1 || sources[0].Pod != "sbx-live" {
+		t.Errorf("cacheTrimPods counted %d holders and read through %+v, want 2 holders and sbx-live alone", holders, sources)
+	}
+}
+
+// TestCacheTrimPodsOnlyTerminating pins a deleting pod as the claim's only
+// holder: one sandbox, and no source to read a listing through.
+func TestCacheTrimPodsOnlyTerminating(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{cacheTrimPodsVerb: cacheTrimPodsReply(
+		cacheTrimDeletingPodJSON("sbx-going", cacheTrimClaimName))})
+	holders, sources, err := f.d.cacheTrimPods(context.Background(), "/kubeconfig", cacheTrimNamespace, cacheTrimClaimName)
+	if err != nil {
+		t.Fatalf("cacheTrimPods: %v", err)
+	}
+	if holders != 1 || len(sources) != 0 {
+		t.Errorf("cacheTrimPods counted %d holders and read through %+v, want 1 holder and no source", holders, sources)
+	}
+}
+
+// cacheTrimDeletingPodJSON is cacheTrimPodJSON's running pod once it is being
+// deleted: it still mounts the claim until the kubelet takes it away.
+func cacheTrimDeletingPodJSON(name, claim string) string {
+	return `{"metadata":{"name":"` + name + `","namespace":"` + cacheTrimNamespace + `","deletionTimestamp":"2026-11-19T17:59:18Z"},` +
+		`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
+		`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + claim + `"}}]},` +
+		`"status":{"phase":"Running"}}`
+}
+
 // cacheTrimPodJSON is one pod of a fixture's pod list in the claim's
 // namespace, mounting claim.
 func cacheTrimPodJSON(name, phase, claim string) string {
