@@ -68,7 +68,16 @@ const (
 // than showing none.
 var errDoltWritesNoStats = errors.New("the gateway's per-actor stats are not readable yet (gt-yg7xjl)")
 
+// doltWritesTitle and doltWritesNoActorsNote are the section's title and the note it
+// carries when the stats answer has no per-actor counts.
+const (
+	doltWritesTitle        = "bd writes by caller and verb"
+	doltWritesNoActorsNote = "the gateway's stats carry no per-actor counts, so the actor rows are left out"
+)
+
 // doltWritesStats reads the gateway's writes per actor, cumulative since its start.
+// A nil map means the answer carried no actors; an empty one, actors that wrote
+// nothing.
 type doltWritesStats func(ctx context.Context) (map[string]uint64, error)
 
 // doltWritesSection is the panel's "writes" section: the busiest actors by writes
@@ -107,6 +116,12 @@ func (s *doltWritesSection) read(ctx context.Context, _ time.Time) (dashboard.Do
 	writes, err := s.stats(ctx)
 	if err != nil {
 		return dashboard.DoltSection{}, err
+	}
+	if writes == nil {
+		// The answer carried no per-actor counts (a gateway from before they
+		// existed): there are no actor rows to draw, and the note says why rather
+		// than showing an empty table as a quiet gateway (gt-usakr9).
+		return dashboard.DoltSection{Title: doltWritesTitle, Note: doltWritesNoActorsNote}, nil
 	}
 	now := s.now()
 	s.mu.Lock()
@@ -156,7 +171,7 @@ func (s *doltWritesSection) read(ctx context.Context, _ time.Time) (dashboard.Do
 		rows = append(rows, *other)
 	}
 	hour, peak := doltWritesHourAndPeak(&s.buckets, now)
-	out := dashboard.DoltSection{Title: "bd writes by caller and verb", Head: []string{"actor", "writes/min"},
+	out := dashboard.DoltSection{Title: doltWritesTitle, Head: []string{"actor", "writes/min"},
 		Note: fmt.Sprintf("last hour: %d writes; peak 10-minute bucket of the last 24 hours: %d", hour, peak)}
 	for _, r := range rows {
 		out.Rows = append(out.Rows, []string{r.actor, strconv.FormatFloat(r.rate, 'f', 1, 64)})
