@@ -262,7 +262,7 @@ func TestUnnamedEscalationMarkIsNotPrunedByAnotherSeat(t *testing.T) {
 	}
 	tick()
 	if len(env.filed) != 2 {
-		t.Errorf("filed = %v on day 8, want the seat still stuck reminded once", env.filed)
+		t.Errorf("filed = %v on day 8, want the weekly reminder: a seat still stuck after the 7-day keep window is reminded once", env.filed)
 	}
 	tick()
 	if len(env.filed) != 2 {

@@ -69,6 +69,15 @@ func (l *FileLedger) LastReported(key string) (time.Time, bool) {
 	return t, ok
 }
 
+// LoadErrorer is a Ledger that can say its store is unreadable. A rule that must not read the
+// unreadable-ledger answer of LastReported ("just reported") as "already done" asks it first
+// (the unnamed-escalation filing). A ledger that wraps FileLedger must implement it too, or the
+// rule reads the wrapped ledger as readable: the assertion below makes FileLedger's part of it
+// compile-visible.
+type LoadErrorer interface{ LoadError() error }
+
+var _ LoadErrorer = (*FileLedger)(nil)
+
 // LoadError is why the ledger file could not be read, nil when it was read or does not exist.
 // LastReported answers every key as just reported while it is set; a rule that must not read
 // that answer as "already done" asks here first.

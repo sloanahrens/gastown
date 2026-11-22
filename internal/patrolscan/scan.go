@@ -806,7 +806,8 @@ type Options struct {
 	HoldReason func(Work) string
 	// MemoryLedger stands in for the ledger file when it cannot be read, for the rules that must
 	// not read an unreadable ledger as "already done" (the unnamed-escalation filing). It must
-	// outlive a tick to do its job; nil gives each Scanner its own.
+	// outlive a tick to do its job, so a caller that rebuilds the Scanner each tick passes one it
+	// keeps (the daemon does); New gives a nil one a private ledger, which lasts one Scanner.
 	MemoryLedger *MemoryLedger
 	// IsRefusal reports whether a Restart or Kill error is the supervisor
 	// refusing (parked, frozen, e-stop, budget) rather than failing.
@@ -1650,7 +1651,7 @@ func (s *Scanner) fileUnnamed(rig, name, bead string, agent AgentRecord, now tim
 	// and say it was filed when nothing was: the rule marks in memory instead, once per exit per
 	// daemon run, and says so on every tick.
 	ledger := s.ledger
-	if le, ok := s.ledger.(interface{ LoadError() error }); ok {
+	if le, ok := s.ledger.(LoadErrorer); ok {
 		if err := le.LoadError(); err != nil {
 			ledger = s.o.MemoryLedger
 			why += "; the ledger is unreadable (" + err.Error() + "): marked in memory only, a daemon restart files again"
