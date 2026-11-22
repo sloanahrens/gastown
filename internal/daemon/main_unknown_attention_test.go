@@ -117,6 +117,54 @@ func TestMainUnknownUnreadableStateIsAnError(t *testing.T) {
 	}
 }
 
+// gt-m0ohe7 pins gt-8ceklp's collector below the streak: two UNKNOWN runs raise
+// nothing, and a previous item clears when the landing worker's count is back at
+// zero, because the collector rebuilds the queue from the state each tick rather
+// than keeping what it raised before.
+func TestCollectMainUnknownBelowThresholdAndClearing(t *testing.T) {
+	t.Parallel()
+	prevItem := attention.Item{
+		Key: "main-unknown:" + attentionRig, Kind: attention.KindMainUnknown,
+		Severity: attention.SeverityHigh, Rig: attentionRig, SHA: mainUnknownCommit,
+		Summary: "main UNKNOWN for 3 runs at 1a2b3c4d: go: module lookup disabled; the rerun could not run",
+	}
+	cases := []struct {
+		name  string
+		state landworker.MainState
+		prev  []attention.Item
+	}{
+		{
+			name: "two UNKNOWN runs raise nothing",
+			state: landworker.MainState{
+				UnknownRuns:   2,
+				UnknownCommit: mainUnknownCommit,
+				UnknownCause:  "go: module lookup disabled",
+			},
+		},
+		{
+			name: "a count back at zero clears the item",
+			state: landworker.MainState{
+				LastGreen: mainUnknownCommit,
+				LastRun:   mainUnknownCommit,
+			},
+			prev: []attention.Item{prevItem},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAttentionFixture(t, mainUnknownNow)
+			writeJSONFile(t, RedMainStatePath(f.d.config.TownRoot, attentionRig), tc.state)
+			prev := attention.State{Updated: mainUnknownNow, Items: tc.prev}
+			collectors := []attentionCollector{collectorFor(t, f.src, attention.KindMainUnknown)}
+
+			observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+			if len(observed) != 0 {
+				t.Errorf("observed = %+v, want no main-unknown item", observed)
+			}
+		})
+	}
+}
+
 // gt-gcp5sp: through the queue's own collectAttention, an unreadable main state
 // keeps the previous tick's main-unknown item, and a missing state file raises
 // nothing, so the item clears.
