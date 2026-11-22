@@ -2,6 +2,8 @@ package land
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,14 +29,79 @@ func AppendGateRun(root string, r GateRun) error { return appendGateRun(osGateRu
 type gateRunFS interface {
 	MkdirAll(dir string, perm os.FileMode) error
 	OpenAppend(path string) (io.WriteCloser, error)
+	// Size is the file's length, 0 when it does not exist.
+	Size(path string) (int64, error)
+	ReadFile(path string) ([]byte, error)
+	Remove(path string) error
 }
 type osGateRunFS struct{}
+
+func (osGateRunFS) Size(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+func (osGateRunFS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) } //nolint:gosec // G304: the path is under the town root
+func (osGateRunFS) Remove(path string) error             { return os.Remove(path) }
 
 func (osGateRunFS) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
 func (osGateRunFS) OpenAppend(path string) (io.WriteCloser, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
 }
 func appendGateRun(fsys gateRunFS, townRoot string, r GateRun) error {
+	return appendGateRunLimit(fsys, townRoot, r, gateRunRotateLimit)
+}
+
+// rotateGateRuns moves the rows of the current log into one gzipped file per
+// month beside it, a month file that exists gaining a further gzip member, and
+// removes the current log only once every month file is written, so a failure
+// leaves the rows where they were. It assumes one writer, the daemon's recorder.
+// A line that does not parse is not carried over: ReadGateRuns skips it already.
+func rotateGateRuns(fsys gateRunFS, path string) error {
+	data, err := fsys.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("land: reading %s to rotate it: %w", path, err)
+	}
+	var rows []GateRun
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		var r *GateRun
+		if json.Unmarshal(line, &r) == nil && r != nil {
+			rows = append(rows, *r)
+		}
+	}
+	for _, group := range groupGateRunsByMonth(rows) {
+		month := filepath.Join(filepath.Dir(path), group.File)
+		f, err := fsys.OpenAppend(month)
+		if err != nil {
+			return fmt.Errorf("land: opening %s: %w", month, err)
+		}
+		var batch bytes.Buffer
+		for _, row := range group.Rows {
+			line, _ := json.Marshal(row) // a row that decoded encodes
+			batch.Write(append(line, '\n'))
+		}
+		zw := gzip.NewWriter(f)
+		_, werr := zw.Write(batch.Bytes())
+		werr = errors.Join(werr, zw.Close(), f.Close())
+		if werr != nil {
+			return fmt.Errorf("land: writing %s: %w", month, werr)
+		}
+	}
+	if err := fsys.Remove(path); err != nil {
+		return fmt.Errorf("land: removing %s after rotating it: %w", path, err)
+	}
+	return nil
+}
+
+// appendGateRunLimit appends r, rotating the log first when it has reached limit.
+// A rotation that fails is returned after the row is appended, never before, so
+// the row is not lost.
+func appendGateRunLimit(fsys gateRunFS, townRoot string, r GateRun, limit int64) error {
 	path := gateRunsPath(townRoot)
 	if path == "" {
 		return ErrNoGateRunRoot
@@ -47,23 +114,29 @@ func appendGateRun(fsys gateRunFS, townRoot string, r GateRun) error {
 	if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("land: creating the directory for %s: %w", path, err)
 	}
+	var rotateErr error
+	if size, err := fsys.Size(path); err != nil {
+		rotateErr = fmt.Errorf("land: sizing %s: %w", path, err)
+	} else if gateRunRotationDue(size, limit) {
+		rotateErr = rotateGateRuns(fsys, path)
+	}
 	f, err := fsys.OpenAppend(path)
 	if err != nil {
-		return fmt.Errorf("land: opening %s: %w", path, err)
+		return errors.Join(fmt.Errorf("land: opening %s: %w", path, err), rotateErr)
 	}
 	n, writeErr := f.Write(line)
 	closeErr := f.Close()
 	if writeErr != nil {
-		return fmt.Errorf("land: writing %s: %w", path, errors.Join(writeErr, closeErr))
+		return errors.Join(fmt.Errorf("land: writing %s: %w", path, errors.Join(writeErr, closeErr)), rotateErr)
 	}
 	if n != len(line) {
 		short := fmt.Errorf("short write (%d of %d bytes): %w", n, len(line), io.ErrShortWrite)
-		return fmt.Errorf("land: writing %s: %w", path, errors.Join(short, closeErr))
+		return errors.Join(fmt.Errorf("land: writing %s: %w", path, errors.Join(short, closeErr)), rotateErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("land: closing %s: %w", path, closeErr)
+		return errors.Join(fmt.Errorf("land: closing %s: %w", path, closeErr), rotateErr)
 	}
-	return nil
+	return rotateErr
 }
 func ReadGateRuns(townRoot string) ([]GateRun, int, error) {
 	path := gateRunsPath(townRoot)
