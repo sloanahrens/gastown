@@ -118,9 +118,18 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 // archive, and returns the export's counts and the archive's hex sha256. A
 // caller removes archive's directory when it reports an error.
 func (d *Daemon) exportTownStateArchive(archive string) (townstate.ExportSummary, string, error) {
-	f, err := os.Create(archive)
+	// The archive holds the town's state, so it is 0600 under any umask. The
+	// create mode alone misses a file that already exists, so the chmod narrows
+	// a partial a dead run left wider, which the umask never widens.
+	f, err := os.OpenFile(archive, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return townstate.ExportSummary{}, "", err
+	}
+	if err := os.Chmod(archive, 0o600); err != nil {
+		if cerr := f.Close(); cerr != nil {
+			return townstate.ExportSummary{}, "", fmt.Errorf("setting the mode of %s: %w (and closing it: %v)", archive, err, cerr)
+		}
+		return townstate.ExportSummary{}, "", fmt.Errorf("setting the mode of %s: %w", archive, err)
 	}
 	digest := sha256.New()
 	gz := gzip.NewWriter(io.MultiWriter(f, digest))
