@@ -19,7 +19,21 @@ const sandboxTranscriptArchiveCap int64 = 512 << 20
 // directory left empty. A missing root holds none; an entry that is not a
 // directory where a rig or seat belongs is an error naming it, not skipped.
 func pruneTranscriptArchive(root string, now time.Time, keep time.Duration, capBytes int64) error {
-	rigs, err := os.ReadDir(root)
+	return pruneTranscriptArchiveWith(archiveFS{os.ReadDir, os.Remove, fs.DirEntry.Info}, root, now, keep, capBytes)
+}
+
+// archiveFS is the filesystem the prune reads and removes through, so a test
+// can fail one call, which no real directory state does as root on every host.
+type archiveFS struct {
+	readDir func(name string) ([]os.DirEntry, error)
+	remove  func(name string) error
+	info    func(e fs.DirEntry) (fs.FileInfo, error)
+}
+
+// pruneTranscriptArchiveWith is pruneTranscriptArchive over fsys. A file whose
+// removal fails still exists, so it stays in the total the cap is held to.
+func pruneTranscriptArchiveWith(fsys archiveFS, root string, now time.Time, keep time.Duration, capBytes int64) error {
+	rigs, err := fsys.readDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -40,7 +54,7 @@ func pruneTranscriptArchive(root string, now time.Time, keep time.Duration, capB
 			errs = append(errs, fmt.Errorf("%s is not a directory", rigDir))
 			continue
 		}
-		seatEntries, err := os.ReadDir(rigDir)
+		seatEntries, err := fsys.readDir(rigDir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("reading %s: %w", rigDir, err))
 			continue
@@ -51,25 +65,26 @@ func pruneTranscriptArchive(root string, now time.Time, keep time.Duration, capB
 				errs = append(errs, fmt.Errorf("%s is not a directory", seatDir))
 				continue
 			}
-			seats = append(seats, seatDir)
-			entries, err := os.ReadDir(seatDir)
+			entries, err := fsys.readDir(seatDir)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("reading %s: %w", seatDir, err))
 				continue
 			}
+			seats = append(seats, seatDir)
 			for _, e := range entries {
 				if !e.Type().IsRegular() {
 					continue
 				}
 				p := filepath.Join(seatDir, e.Name())
-				info, err := e.Info()
+				info, err := fsys.info(e)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("reading %s: %w", p, err))
 					continue
 				}
 				if now.Sub(info.ModTime()) > keep {
-					if err := os.Remove(p); err != nil {
-						errs = append(errs, err)
+					if err := fsys.remove(p); err != nil {
+						errs = append(errs, fmt.Errorf("removing %s: %w", p, err))
+						kept = append(kept, transcript{p, info.ModTime(), info.Size()})
 					}
 					continue
 				}
@@ -86,21 +101,21 @@ func pruneTranscriptArchive(root string, now time.Time, keep time.Duration, capB
 		if total <= capBytes {
 			break
 		}
-		if err := os.Remove(f.path); err != nil {
-			errs = append(errs, err)
+		if err := fsys.remove(f.path); err != nil {
+			errs = append(errs, fmt.Errorf("removing %s: %w", f.path, err))
 			continue
 		}
 		total -= f.size
 	}
 	for _, seatDir := range seats {
-		entries, err := os.ReadDir(seatDir)
+		entries, err := fsys.readDir(seatDir)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("reading %s: %w", seatDir, err))
 			continue
 		}
 		if len(entries) == 0 {
-			if err := os.Remove(seatDir); err != nil {
-				errs = append(errs, err)
+			if err := fsys.remove(seatDir); err != nil {
+				errs = append(errs, fmt.Errorf("removing %s: %w", seatDir, err))
 			}
 		}
 	}

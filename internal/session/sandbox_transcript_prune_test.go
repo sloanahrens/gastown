@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,16 +102,23 @@ func TestTranscriptArchivePrune(t *testing.T) {
 // path that is not a directory where one belongs is an error naming it.
 func TestTranscriptArchivePruneErrors(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	if err := pruneTranscriptArchive(filepath.Join(t.TempDir(), "gone"), now, sandboxTranscriptKeep, 1<<20); err != nil {
 		t.Errorf("prune of a missing root: %v", err)
 	}
-	for _, name := range []string{"root", "rig"} {
+	for _, name := range []string{"root", "rig", "seat"} {
 		root := filepath.Join(t.TempDir(), "archive")
 		want := root
-		if name == "rig" {
+		switch name {
+		case "rig":
 			root = t.TempDir()
 			want = filepath.Join(root, "rig")
+		case "seat":
+			root = t.TempDir()
+			if err := os.MkdirAll(filepath.Join(root, "rig"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want = filepath.Join(root, "rig", "seat")
 		}
 		if err := os.WriteFile(want, []byte("not a directory"), 0o644); err != nil {
 			t.Fatal(err)
@@ -152,5 +161,157 @@ func TestTranscriptArchivePruneLeavesLinksAlone(t *testing.T) {
 	}
 	if got, err := os.ReadFile(outside); err != nil || string(got) != "target" {
 		t.Errorf("the link's target = %q, %v; want it untouched", got, err)
+	}
+}
+
+// failingArchiveFS is the real filesystem with chosen calls failed: readDir of
+// readFail on its nth call (1 is the first), info of the file named infoFail,
+// remove of the paths in removeFail. Each failure is a named error, so a row
+// can assert the report names the path.
+type failingArchiveFS struct {
+	readFail   string
+	readOn     int
+	infoFail   string
+	removeFail map[string]bool
+	reads      map[string]int
+}
+
+func (f *failingArchiveFS) fs() archiveFS {
+	f.reads = map[string]int{}
+	return archiveFS{
+		readDir: func(name string) ([]os.DirEntry, error) {
+			f.reads[name]++
+			if name == f.readFail && f.reads[name] >= f.readOn {
+				return nil, errors.New("read refused")
+			}
+			return os.ReadDir(name)
+		},
+		remove: func(name string) error {
+			if f.removeFail[name] {
+				return errors.New("remove refused")
+			}
+			return os.Remove(name)
+		},
+		info: func(e fs.DirEntry) (fs.FileInfo, error) {
+			if e.Name() == f.infoFail {
+				return nil, errors.New("info refused")
+			}
+			return e.Info()
+		},
+	}
+}
+
+// TestTranscriptArchivePruneReportsEachFailureOnce: every failing call of the
+// prune is reported once, naming its path, and the prune goes on with the rest
+// (gt-w8rs2l).
+func TestTranscriptArchivePruneReportsEachFailureOnce(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	build := func(t *testing.T) (root string, files map[string]string) {
+		root = t.TempDir()
+		files = map[string]string{
+			"old":   filepath.Join(root, "rig", "seat", "old.jsonl"),
+			"young": filepath.Join(root, "rig", "seat", "young.jsonl"),
+			"other": filepath.Join(root, "rig2", "seat2", "x.jsonl"),
+		}
+		ages := map[string]time.Duration{"old": 2 * sandboxTranscriptKeep, "young": time.Hour, "other": 2 * time.Hour}
+		for k, p := range files {
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, make([]byte, 50), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(p, now.Add(-ages[k]), now.Add(-ages[k])); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return root, files
+	}
+	cases := []struct {
+		name string
+		cap  int64
+		set  func(f *failingArchiveFS, root string, files map[string]string)
+		want func(root string, files map[string]string) string // the path the one error names
+	}{
+		{"the rig directory cannot be read", 1 << 20,
+			func(f *failingArchiveFS, root string, _ map[string]string) {
+				f.readFail, f.readOn = filepath.Join(root, "rig"), 1
+			},
+			func(root string, _ map[string]string) string { return filepath.Join(root, "rig") }},
+		{"the seat directory cannot be read in the first pass, reported once", 1 << 20,
+			func(f *failingArchiveFS, root string, _ map[string]string) {
+				f.readFail, f.readOn = filepath.Join(root, "rig", "seat"), 1
+			},
+			func(root string, _ map[string]string) string { return filepath.Join(root, "rig", "seat") }},
+		{"the seat directory cannot be read in the last pass", 1 << 20,
+			func(f *failingArchiveFS, root string, _ map[string]string) {
+				f.readFail, f.readOn = filepath.Join(root, "rig", "seat"), 2
+			},
+			func(root string, _ map[string]string) string { return filepath.Join(root, "rig", "seat") }},
+		{"a file's info cannot be read", 1 << 20,
+			func(f *failingArchiveFS, _ string, _ map[string]string) { f.infoFail = "young.jsonl" },
+			func(_ string, files map[string]string) string { return files["young"] }},
+		{"an old file cannot be removed", 1 << 20,
+			func(f *failingArchiveFS, _ string, files map[string]string) {
+				f.removeFail = map[string]bool{files["old"]: true}
+			},
+			func(_ string, files map[string]string) string { return files["old"] }},
+		{"a file the cap evicts cannot be removed", 60,
+			func(f *failingArchiveFS, _ string, files map[string]string) {
+				f.removeFail = map[string]bool{files["other"]: true}
+			},
+			func(_ string, files map[string]string) string { return files["other"] }},
+		{"an emptied seat directory cannot be removed", 1 << 20,
+			func(f *failingArchiveFS, root string, files map[string]string) {
+				f.removeFail = map[string]bool{files["old"]: false, filepath.Join(root, "rig3", "seat3"): true}
+			},
+			func(root string, _ map[string]string) string { return filepath.Join(root, "rig3", "seat3") }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root, files := build(t)
+			if err := os.MkdirAll(filepath.Join(root, "rig3", "seat3"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f := &failingArchiveFS{}
+			c.set(f, root, files)
+			err := pruneTranscriptArchiveWith(f.fs(), root, now, sandboxTranscriptKeep, c.cap)
+			want := c.want(root, files)
+			if err == nil || strings.Count(err.Error(), want) != 1 {
+				t.Errorf("err = %v, want exactly one report naming %s", err, want)
+			}
+		})
+	}
+}
+
+// TestTranscriptArchivePruneCountsAFileItCannotRemove: a file whose removal
+// fails still exists, so the total the cap is held to still counts it (gt-w8rs2l).
+func TestTranscriptArchivePruneCountsAFileItCannotRemove(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	seat := filepath.Join(root, "rig", "seat")
+	if err := os.MkdirAll(seat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old, young := filepath.Join(seat, "old.jsonl"), filepath.Join(seat, "young.jsonl")
+	for p, age := range map[string]time.Duration{old: 2 * sandboxTranscriptKeep, young: time.Hour} {
+		if err := os.WriteFile(p, make([]byte, 100), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, now.Add(-age), now.Add(-age)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f := &failingArchiveFS{removeFail: map[string]bool{old: true}}
+	// Cap 150: the old file (100) is past the keep but cannot go; with it still
+	// counted the total is 200 and the young file (100) must be evicted.
+	if err := pruneTranscriptArchiveWith(f.fs(), root, now, sandboxTranscriptKeep, 150); err == nil {
+		t.Fatal("the failed removal was not reported")
+	}
+	if _, err := os.Stat(young); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the young file stayed although the unremovable one still counts toward the cap: %v", err)
 	}
 }
