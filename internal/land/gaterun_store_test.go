@@ -3,15 +3,20 @@ package land
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -394,5 +399,121 @@ func TestOSGateRunFSSize(t *testing.T) {
 		if got != tc.size || (err != nil) != tc.wantErr {
 			t.Errorf("%s: Size = %d, %v; want %d, error %t", tc.name, got, err, tc.size, tc.wantErr)
 		}
+	}
+}
+
+// holdingGateRunFS blocks the rotation's read of the log until released, and
+// counts the Size calls so a second append that got past the lock shows.
+type holdingGateRunFS struct {
+	*memGateRunFS
+	inRead  chan struct{}
+	release chan struct{}
+	once    sync.Once
+	sizes   atomic.Int32
+}
+
+func (h *holdingGateRunFS) Size(p string) (int64, error) {
+	h.sizes.Add(1)
+	return h.memGateRunFS.Size(p)
+}
+
+func (h *holdingGateRunFS) ReadFile(p string) ([]byte, error) {
+	h.once.Do(func() { close(h.inRead) })
+	<-h.release
+	return h.memGateRunFS.ReadFile(p)
+}
+
+// awaitGateRun waits for ch and fails the test rather than hang when it does not
+// close within the deadline.
+func awaitGateRun(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	select {
+	case <-ch:
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// TestGateRunStoreAnAppendDuringARotationIsNotLost: a second append started while
+// the first holds a rotation open (its read of the log blocked) does not get past
+// the lock until the rotation is done, and afterwards every row is in the log or a
+// month file exactly once (gt-6wfk0k). The test is not parallel, so no other test
+// holds the log's mutex while it runs.
+//
+//testpolicy:allow parallel — holds the package-wide gate-run mutex that every other append in this package also takes
+func TestGateRunStoreAnAppendDuringARotationIsNotLost(t *testing.T) {
+	h := &holdingGateRunFS{memGateRunFS: newMemGateRunFS(), inRead: make(chan struct{}), release: make(chan struct{})}
+	cur := gateRunsPath("/town")
+	old := sampleGateRun("gt-old")
+	old.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	h.files[cur] = []byte(mustLine(t, old) + "\n")
+	appendRow := func(bead string, done chan<- struct{}) {
+		r := sampleGateRun(bead)
+		r.TS = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+		if err := appendGateRunLimit(h, "/town", r, 1); err != nil {
+			t.Errorf("append %s: %v", bead, err)
+		}
+		close(done)
+	}
+	aDone, bDone := make(chan struct{}), make(chan struct{})
+	go appendRow("gt-a", aDone)
+	awaitGateRun(t, h.inRead, "the first append's rotation to read the log")
+	go appendRow("gt-b", bDone)
+	// B gets a bounded number of chances to reach the filesystem; with the lock
+	// held by A's rotation it never does.
+	for i := 0; i < 20000 && h.sizes.Load() < 2; i++ {
+		runtime.Gosched()
+	}
+	if n := h.sizes.Load(); n != 1 {
+		t.Errorf("%d appends reached the filesystem while the first held a rotation open, want 1", n)
+	}
+	close(h.release)
+	awaitGateRun(t, aDone, "the first append")
+	awaitGateRun(t, bDone, "the second append")
+	got := beadsIn(t, h.files[cur], false)
+	for path, month := range h.files {
+		if path != cur {
+			got = append(got, beadsIn(t, month, true)...)
+		}
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"gt-a", "gt-b", "gt-old"}) {
+		t.Errorf("rows after both appends = %v, want gt-a, gt-b and gt-old once each", got)
+	}
+}
+
+// TestGateRunStoreConcurrentAppendsLoseNothing: appends from many goroutines over a
+// log that rotates leave every row exactly once, in the log or the month file
+// (gt-6wfk0k; run with -race).
+//
+//testpolicy:allow parallel — takes the package-wide gate-run mutex, which the lock-held test above must find free of other tests
+func TestGateRunStoreConcurrentAppendsLoseNothing(t *testing.T) {
+	fsys := newMemGateRunFS()
+	var wg sync.WaitGroup
+	var want []string
+	for i := range 12 {
+		bead := fmt.Sprintf("gt-%02d", i)
+		want = append(want, bead)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := sampleGateRun(bead)
+			r.TS = time.Date(2026, 10, 1, 12, 0, i, 0, time.UTC)
+			if err := appendGateRunLimit(fsys, "/town", r, rotateLimit); err != nil {
+				t.Errorf("append %s: %v", bead, err)
+			}
+		}()
+	}
+	wg.Wait()
+	cur := gateRunsPath("/town")
+	got := beadsIn(t, fsys.files[cur], false)
+	if month := fsys.files[filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")]; month != nil {
+		got = append(got, beadsIn(t, month, true)...)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("rows after the appends = %v, want each of %v exactly once", got, want)
 	}
 }
