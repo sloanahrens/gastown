@@ -102,6 +102,9 @@ type ExtractEnv struct {
 	// HandoffCache is the bead-to-bytes map the wiring loaded; the extract
 	// fills it as it fetches, so the caller can save it back.
 	HandoffCache map[string]int
+	// EstimateCache is the bead-to-estimate-time map the wiring loaded; the
+	// extract fills it as it reads, so the caller can save it back.
+	EstimateCache map[string]string
 	// BdShowCap bounds how many beads the handoff reader fetches; zero is the
 	// ported default of 150.
 	BdShowCap int
@@ -202,7 +205,7 @@ func Extract(ctx context.Context, env ExtractEnv) (ExtractResult, error) {
 	rowDrops := dropped.Count()
 
 	failedBefore := len(dropped.Failed)
-	beads := LoadBeads(env.RunBd, env.BeadDirs, dropped)
+	beads := LoadBeadsCached(env.RunBd, env.BeadDirs, dropped, env.EstimateCache)
 	for i := range beads {
 		// The loader attributes a bead to its id's prefix; every table carries
 		// the rig's name instead.
