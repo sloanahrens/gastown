@@ -681,6 +681,44 @@ func (f *ReviewsFile) Since(t time.Time) ([]ReviewRecord, error) {
 	return recs, nil
 }
 
+// SkipCounts counts the findings the skip policy dropped at or after since, keyed
+// reason/class, each fingerprint once per bead (gt-aknjq7). A line it cannot parse
+// is counted in no key and does not fail the read, as Queued reads one; a finding
+// with no fingerprint is counted as it comes, and a nil file is an error naming it. A
+// skips line past the line cap is not counted, as Queued does not count one.
+func (f *ReviewsFile) SkipCounts(since time.Time) (map[string]int, error) {
+	if f == nil {
+		return nil, errors.New("reviews file is nil, so SkipCounts cannot count the skipped findings")
+	}
+	fh, err := os.Open(f.Path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]int{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("opening reviews file: %w", err)
+	}
+	defer func() { _ = fh.Close() }()
+	counts, seen := map[string]int{}, map[string]bool{}
+	_, err = ScanReviewLines(fh, func(raw []byte) {
+		var rec ReviewRecord
+		if json.Unmarshal(raw, &rec) != nil || rec.Skips == nil || rec.At.Before(since) {
+			return
+		}
+		for _, s := range rec.Skips.Findings {
+			key := rec.BeadID + "\x00" + s.Fingerprint
+			if s.Fingerprint != "" && seen[key] {
+				continue
+			}
+			seen[key] = true
+			counts[s.Reason+"/"+s.Class]++
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading reviews file %s: %w", f.Path, err)
+	}
+	return counts, nil
+}
+
 // CompactResult is what one compaction did.
 type CompactResult struct {
 	// Dropped counts the consumed queue lines it left out of the new log.
