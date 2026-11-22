@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -184,5 +185,44 @@ func TestLineLimitRefusalNamesThePushedSha(t *testing.T) {
 				t.Errorf("last line = %q, want %q", last, want)
 			}
 		})
+	}
+}
+
+// TestLineLimitWiringCrewContinues pins the crew path: past twice the declared
+// limit a crew submission is warned on stderr and carries on, never refused
+// (gt-dinxpm). Not parallel: it swaps os.Stderr.
+//
+//testpolicy:allow parallel — captures the process-wide stderr the crew warning is written to
+func TestLineLimitWiringCrewContinues(t *testing.T) {
+	h := pastLimitHarness(t, backendOpenShell, false, false)
+	sub := doneSubmission{sourceIssue: &beads.Issue{Description: "Change: at most 70 added lines in 2 files."}}
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatalf("temp stderr file: %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = f                      //testpolicy:allow no-global-swap — the warning goes to the process's os.Stderr
+	defer func() { os.Stderr = old }() //testpolicy:allow no-global-swap — restores stderr for later tests
+	checkErr := checkBranchForSubmit(h.r, sub, "origin/main")
+	_ = f.Close()
+	warned, readErr := os.ReadFile(f.Name())
+	want := crewWarningPrefix + "Change exceeds the 70-added-line constraint: 141 added lines"
+	if readErr != nil || checkErr != nil || !strings.Contains(string(warned), want) {
+		t.Fatalf("crew past twice the limit: read stderr %v, err %v, stderr %q; want no error and %q", readErr, checkErr, warned, want)
+	}
+}
+
+// TestLineLimitWiringNoLimitContinues pins the no-limit path: a bead declaring
+// no limit prints the no-limit line and carries on without reading the
+// added-line count (gt-dinxpm).
+func TestLineLimitWiringNoLimitContinues(t *testing.T) {
+	t.Parallel()
+	h := pastLimitHarness(t, backendOpenShell, true, true)
+	sub := doneSubmission{sourceIssue: &beads.Issue{Description: "Change: at most 2 files."}}
+	if err := checkBranchForSubmit(h.r, sub, "origin/main"); err != nil {
+		t.Fatalf("checkBranchForSubmit refused a bead with no declared limit: %v", err)
+	}
+	if out := h.r.out.(*bytes.Buffer).String(); !strings.Contains(out, noLimitLine) {
+		t.Errorf("output %q does not carry the no-limit line", out)
 	}
 }
