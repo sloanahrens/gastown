@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -24,22 +25,33 @@ var townRebootCheckCmd = &cobra.Command{
 	Use:   "reboot-check",
 	Short: "Check a rebooted Mac against the operations doc, changing nothing",
 	Long: `Print the operations doc's reboot checks in order, each as ok or FAIL with what was
-seen and the repair to run. Nothing is changed. The command exits 0 whatever the rows say.`,
+seen and the repair to run. Nothing is changed. Text output exits 0 whatever the rows say.
+--json prints the same rows as one JSON array and exits 1 when any row is not OK.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		return runTownRebootCheck(cmd.Context(), hostTownRebootCheckEnv(cmd.OutOrStdout()))
+		asJSON, err := cmd.Flags().GetBool("json")
+		if err != nil {
+			return err
+		}
+		env := hostTownRebootCheckEnv(cmd.OutOrStdout())
+		env.asJSON = asJSON
+		return runTownRebootCheck(cmd.Context(), env)
 	},
 }
 
-func init() { townCmd.AddCommand(townRebootCheckCmd) }
+func init() {
+	townRebootCheckCmd.Flags().Bool("json", false, "print the rows as one JSON array")
+	townCmd.AddCommand(townRebootCheckCmd)
+}
 
 // townRebootCheckEnv is what the command runs on: the town, the settings lookup, the check
-// lists and the output, so a test supplies each.
+// lists, the output and the output form, so a test supplies each.
 type townRebootCheckEnv struct {
 	town   func() (string, error)
 	getenv func(string) string
 	checks func(run townreboot.Runner, registryBase string) []townreboot.Check
 	out    io.Writer
+	asJSON bool
 }
 
 // hostTownRebootCheckEnv is the environment on the Mac.
@@ -68,7 +80,8 @@ func rebootExecRunner(ctx context.Context, name string, args ...string) ([]byte,
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// runTownRebootCheck runs every check and prints the rows. It returns nil whatever they say.
+// runTownRebootCheck runs every check and prints the rows. Text output returns nil whatever the
+// rows say; JSON output returns exit 1 when any row is not OK, after printing the array.
 func runTownRebootCheck(ctx context.Context, env townRebootCheckEnv) error {
 	town, err := env.town()
 	if err != nil {
@@ -84,8 +97,33 @@ func runTownRebootCheck(ctx context.Context, env townRebootCheckEnv) error {
 		return err
 	}
 	rows := townreboot.RunAll(ctx, env.checks(rebootExecRunner, config.ImageRegistryBase(cfg.Registry)))
+	if env.asJSON {
+		return printRebootRowsJSON(env.out, rows)
+	}
 	if _, err := fmt.Fprint(env.out, townreboot.Format(rows, false)); err != nil {
 		return fmt.Errorf("printing the reboot checks: %w", err)
+	}
+	return nil
+}
+
+// printRebootRowsJSON prints the rows as one JSON array, then returns exit 1 when any row is not
+// OK. The array is printed first, so a script reads every row, its fix and the status together.
+func printRebootRowsJSON(out io.Writer, rows []townreboot.Row) error {
+	data, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding the reboot checks: %w", err)
+	}
+	if _, err := fmt.Fprintf(out, "%s\n", data); err != nil {
+		return fmt.Errorf("printing the reboot checks: %w", err)
+	}
+	failed := 0
+	for _, r := range rows {
+		if !r.OK {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("gt town reboot-check: %d of %d checks failed", failed, len(rows))}
 	}
 	return nil
 }
