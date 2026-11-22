@@ -1307,8 +1307,7 @@ func TestOverrunSaveStage_LateResaveSuccessClearsAPushStage(t *testing.T) {
 	}
 }
 
-// gaveUpNote drives a stop whose save gave up (the push refused) to its
-// hand-back, with where as the seat's sandbox lookup, and returns the note.
+// gaveUpNote drives a stop whose push was refused to its hand-back note, with where as the sandbox lookup.
 func gaveUpNote(t *testing.T, where func(overrunSeat) (string, string, error)) string {
 	t.Helper()
 	w := newResetWorld(t)
@@ -1329,9 +1328,8 @@ func gaveUpNote(t *testing.T, where func(overrunSeat) (string, string, error)) s
 	return f.handBackNotes[0]
 }
 
-// checkUnsavedText reads the sentence the note adds after today's, from
-// UNSAVED WORK on, and checks it holds each want and names no lowercase "saved"
-// or "safe", which the stop's own sentence may.
+// checkUnsavedText checks the added sentence, from UNSAVED WORK on, holds each want and names no
+// lowercase "saved" or "safe" (the stop's own sentence may).
 func checkUnsavedText(t *testing.T, note string, wants ...string) {
 	t.Helper()
 	i := strings.Index(note, "UNSAVED WORK")
@@ -1349,9 +1347,8 @@ func checkUnsavedText(t *testing.T, note string, wants ...string) {
 	}
 }
 
-// TestOverrunSaveGaveUpText_NoteNamesThePushStage: a save that gave up at the
-// push says the work may be only in the sandbox, which not to remove, where the
-// clone is and the command that pushes it to a rescue branch.
+// TestOverrunSaveGaveUpText_NoteNamesThePushStage: a push that gave up says the work may be only in
+// the sandbox, not to remove it, where the clone is and the rescue push.
 func TestOverrunSaveGaveUpText_NoteNamesThePushStage(t *testing.T) {
 	t.Parallel()
 	checkUnsavedText(t, gaveUpNote(t, func(overrunSeat) (string, string, error) { return "gt-sbx", "/sandbox/clone", nil }),
@@ -1359,9 +1356,8 @@ func TestOverrunSaveGaveUpText_NoteNamesThePushStage(t *testing.T) {
 		"openshell sandbox exec -n gt-sbx --no-tty --no-login-shell -- git -C /sandbox/clone push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
 }
 
-// TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown: a late check that failed
-// leaves SaveStage empty, so the note says the step is unknown and keeps the
-// command, since keyed on the stage it would miss this seat.
+// TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown: a failed late check leaves SaveStage empty;
+// the note says the step is unknown and keeps the command.
 func TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
@@ -1385,9 +1381,8 @@ func TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown(t *testing.T) {
 	checkUnsavedText(t, f.handBackNotes[0], "the step is unknown", "push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
 }
 
-// TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown: when the clone cannot
-// be found the note keeps today's sentence, says the work may exist only in its
-// worktree or sandbox, and names no command built from a record it did not trust.
+// TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown: with no clone found the note keeps today's
+// sentence, says where the work may be, and names no command built from an untrusted record.
 func TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown(t *testing.T) {
 	t.Parallel()
 	reg := session.NewPrefixRegistry()
@@ -1395,13 +1390,15 @@ func TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		listed   bool
+		blocked  bool
 		readErr  error
 		workDir  string
 		wantPart string
 	}{
-		{"the sandbox lookup errors", true, errors.New("record unreadable"), overrunGoneClone, "record unreadable"},
-		{"a host seat has no sandbox record", false, nil, overrunGoneClone, "host seat"},
-		{"a clone directory the runner would refuse", true, nil, "/sandbox/../escape", "no usable clone directory"},
+		{"the sandbox lookup errors", true, false, errors.New("record unreadable"), overrunGoneClone, "record unreadable"},
+		{"a host seat has no sandbox record", false, false, nil, overrunGoneClone, "host seat"},
+		{"the sandbox records cannot be listed", false, true, nil, overrunGoneClone, "cannot list the sandbox records"},
+		{"a clone directory the runner would refuse", true, false, nil, "/sandbox/../escape", "no usable clone directory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1409,6 +1406,12 @@ func TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown(t *testing.T) {
 			d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
 			if tc.listed {
 				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+			}
+			if tc.blocked {
+				dir := session.SandboxRegistryDir(d.config.TownRoot)
+				if err := errors.Join(os.MkdirAll(filepath.Dir(dir), 0o755), os.WriteFile(dir, nil, 0o600)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
 				return *overrunStopSandboxRecord(tc.workDir), true, tc.readErr
