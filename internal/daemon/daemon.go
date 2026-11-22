@@ -1161,8 +1161,11 @@ type Daemon struct {
 	postLandRunners postLandRunnerSet
 	// postLandSettingsErr remembers, per rig, the last reason an unreadable rig
 	// settings file turned status mode off, so it is logged once per reason.
-	postLandSettingsMu  sync.Mutex
-	postLandSettingsErr map[string]string
+	// postLandOrphanDisabled remembers the rigs whose built runner had no run
+	// seam, so that is said once per rig (gt-tcnmb8).
+	postLandSettingsMu     sync.Mutex
+	postLandSettingsErr    map[string]string
+	postLandOrphanDisabled map[string]bool
 
 	// jsonlGitBackupRunning, wispReaperRunning, and checkpointDogRunning are
 	// the single-flight guards for their patrols, on their own goroutines —

@@ -311,3 +311,37 @@ func TestPostLandWiringRigWorkerOrdersByItsReader(t *testing.T) {
 		t.Fatalf("green fired for %v, want only the newer commit %s", green, newer)
 	}
 }
+
+// TestPostLandOrphanDisabledLineOncePerRig: a wiring with no run seam leaves the
+// orphan check off, and the daemon says so once per rig however many times the
+// landing manager builds that rig's runner, so it is not mistaken for a daemon
+// with no orphans (gt-tcnmb8).
+func TestPostLandOrphanDisabledLineOncePerRig(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	const line = "post-land orphan check disabled: no run seam"
+	seamless := postLandWiring{State: &landworker.MemoryMainState{}}
+	rigPath := t.TempDir()
+	for i := 0; i < 3; i++ {
+		f.d.newPostLandRunner(attentionRig, rigPath, seamless)
+	}
+	if got := strings.Count(f.logs.String(), line); got != 1 {
+		t.Fatalf("logged %q %d times building one rig's runner three times, want once: %s", line, got, f.logs)
+	}
+	f.d.newPostLandRunner("otherrig", t.TempDir(), seamless)
+	if got := strings.Count(f.logs.String(), line); got != 2 {
+		t.Fatalf("logged %q %d times after a second rig's runner, want once per rig (2): %s", line, got, f.logs)
+	}
+}
+
+// TestPostLandOrphanDisabledLineQuietWithTheSeam: a wiring with the run seam
+// logs nothing, so a daemon whose orphan check is on is never told it is off.
+func TestPostLandOrphanDisabledLineQuietWithTheSeam(t *testing.T) {
+	t.Parallel()
+	w := newPostLandWiringFixture(t, time.Hour)
+	w.f.d.newPostLandRunner(attentionRig, t.TempDir(), w.wiring)
+	if got := strings.Count(w.f.logs.String(), "post-land orphan check disabled: no run seam"); got != 0 {
+		t.Fatalf("logged the disabled line %d times for a wiring with the seam: %s", got, w.f.logs)
+	}
+}
