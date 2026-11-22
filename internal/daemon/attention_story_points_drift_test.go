@@ -399,6 +399,7 @@ func TestStoryPointsDriftAttentionRefusesAnIntervalThatIsNotAnInterval(t *testin
 		{"a +Inf Hi", driftReadingWithInterval(0.4, 0.35, math.Inf(1), "v1"), false, "Hi is not a number"},
 		{"a Lo above Hi", driftReadingWithInterval(0.4, 0.47, 0.35, "v1"), false, "Lo is above Hi"},
 		{"a NaN Hi with a drift item held", driftReadingWithInterval(0.4, 0.35, math.NaN(), "v1"), true, "Hi is not a number"},
+		{"a NaN Lo with a drift item held", driftReadingWithInterval(0.4, math.NaN(), 0.47, "v1"), true, "Lo is not a number"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
