@@ -189,12 +189,12 @@ func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string) (bool, er
 		return false, fmt.Errorf("cannot list the files between %s and %s: %w",
 			shortOMSHA(installed), shortOMSHA(remote), err)
 	}
-	// A binary path can change the hm binary. A test file or a testdata path only
-	// can when a //go:embed directive of the hm source at remote names it, which the
-	// clone is asked, as the sibling om check asks its own (gt-8n9hj): an exclusion
-	// resting on a one-time look at the embed targets would go quiet on the day a
-	// directive carried one in. A clone that cannot answer is an error, not a skew.
-	return d.hmSkewReachesBinary(src, remote, strings.Split(out, "\x00"))
+	// A binary path can change the hm binary (a test file or testdata path only when a
+	// //go:embed directive names it: hmSkewReachesBinary), and the installed hm is behind
+	// only once it is as far behind as the image-pins planner files a refresh at, so a
+	// single landing raises no second alarm for a state the planner owns (gt-g7tfxp).
+	// A clone that cannot answer, or a lag that cannot be measured, is an error, not a skew.
+	return d.hmSkewPastThresholds(src, installed, remote, strings.Split(out, "\x00"))
 }
 
 // hmSkewCloneLacks reports whether the clone has no commit for sha. A rev-parse

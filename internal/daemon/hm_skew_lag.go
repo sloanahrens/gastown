@@ -50,3 +50,20 @@ func (d *Daemon) skewCommitTime(src, rev string) (time.Time, error) {
 	}
 	return time.Unix(secs, 0), nil
 }
+
+// hmSkewPastThresholds reports whether the changed paths can change the hm binary
+// and the installed hm is imagePinsFileBehind commits or imagePinsFileAge behind
+// remote, the planner's two measures. The lag is read only for a diff that can change
+// the binary; below both measures the reading is not behind. A lag that cannot be
+// measured is an error and so no skew (gt-g7tfxp).
+func (d *Daemon) hmSkewPastThresholds(src, installed, remote string, changed []string) (bool, error) {
+	reaches, err := d.hmSkewReachesBinary(src, remote, changed)
+	if err != nil || !reaches {
+		return false, err
+	}
+	commits, age, err := d.skewLag(src, installed, remote)
+	if err != nil {
+		return false, fmt.Errorf("cannot measure how far behind the installed hm is: %w", err)
+	}
+	return commits >= imagePinsFileBehind || age >= imagePinsFileAge, nil
+}

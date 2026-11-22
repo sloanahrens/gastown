@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -174,6 +175,11 @@ func (r *rebuildHMRig) run(cmd *exec.Cmd) ([]byte, []byte, error) {
 		for _, p := range a.changed {
 			out += p + "\x00"
 		}
+	case strings.Contains(joined, " rev-list --count "):
+		// The skew reading measures the lag: the cases here are as far behind as the planner's threshold.
+		out = strconv.Itoa(imagePinsFileBehind) + "\n"
+	case strings.Contains(joined, " show -s --format=%ct "):
+		out = "100\n"
 	case strings.Contains(joined, " rev-parse --verify -q "):
 		out = a.installedSHA
 	case strings.Contains(joined, " rev-parse origin/main"):

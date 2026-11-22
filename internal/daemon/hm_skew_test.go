@@ -58,6 +58,9 @@ func hmSkewBehindAnswers() hmSkewAnswers {
 		version:  "hm " + hmSkewTestInstalled + "\n",
 		lsRemote: hmSkewTestRemote + "\trefs/heads/main\n",
 		changed:  []string{"internal/cli/cmd_query.go"},
+		// Behind by exactly the planner's commit threshold, no time: a skew it files at.
+		lagCount: fmt.Sprintf("%d\n", imagePinsFileBehind),
+		lagTimes: map[string]string{hmSkewTestInstalled: "100\n", hmSkewTestRemote: "100\n"},
 	}
 }
 
@@ -311,6 +314,68 @@ func TestHMSkewBinaryPathTestOnlyDiffIsNotASkew(t *testing.T) {
 
 	if esc := rec.Escalations(); len(esc) != 0 {
 		t.Errorf("escalations = %+v, want none for a diff over a test file and a testdata file", esc)
+	}
+}
+
+// TestHMSkewEscalatesOnlyAtThePlannersThresholds: a code-path diff escalates only
+// when the installed hm is imagePinsFileBehind commits or imagePinsFileAge behind,
+// the two measures the image-pins planner files its refresh at, so one landing in
+// the hm rig raises no second alarm for a state the planner already owns
+// (gt-g7tfxp). A commit the clone lacks stays a skew by itself.
+func TestHMSkewEscalatesOnlyAtThePlannersThresholds(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		commits int
+		age     time.Duration
+		lacks   bool
+		want    bool
+	}{
+		{"one commit behind and a day", 1, 24 * time.Hour, false, false},
+		{"one commit under the threshold and four days", imagePinsFileBehind - 1, 4 * 24 * time.Hour, false, false},
+		{"one commit under the threshold, one second under the age", imagePinsFileBehind - 1, imagePinsFileAge - time.Second, false, false},
+		{"the commit threshold", imagePinsFileBehind, 0, false, true},
+		{"the age threshold at three commits", 3, imagePinsFileAge, false, true},
+		{"a commit the clone lacks, with no lag at all", 0, 0, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := hmSkewBehindAnswers()
+			a.lagCount = fmt.Sprintf("%d\n", tc.commits)
+			a.lagTimes = map[string]string{hmSkewTestInstalled: "100\n", hmSkewTestRemote: fmt.Sprintf("%d\n", 100+int64(tc.age.Seconds()))}
+			a.lacksInstall = tc.lacks
+			d, rec, _ := hmSkewDaemon(t, a)
+
+			d.hmSkewOnce()
+
+			if got := len(rec.Escalations()) == 1; got != tc.want {
+				t.Errorf("escalated = %t, want %t at %d commits and %s (escalations %+v)", got, tc.want, tc.commits, tc.age, rec.Escalations())
+			}
+		})
+	}
+}
+
+// TestHMSkewLagFailureRaisesNoEscalation: a skewLag that fails makes the reading an
+// error and raises no escalation: a reading that cannot be taken is a log line, not
+// an alarm (gt-g7tfxp).
+func TestHMSkewLagFailureRaisesNoEscalation(t *testing.T) {
+	t.Parallel()
+	for _, call := range []string{"rev-list", "show"} {
+		t.Run(call, func(t *testing.T) {
+			t.Parallel()
+			a := hmSkewBehindAnswers()
+			a.lagErr = call
+			d, rec, logs := hmSkewDaemon(t, a)
+
+			d.hmSkewOnce()
+
+			if len(rec.Escalations()) != 0 {
+				t.Errorf("escalations = %+v, want none when the lag cannot be measured", rec.Escalations())
+			}
+			if !strings.Contains(logs.String(), "how far behind") {
+				t.Errorf("log = %q, want a line saying the lag could not be measured", logs.String())
+			}
+		})
 	}
 }
 
