@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -95,6 +96,13 @@ func (s *doltLostSection) read(ctx context.Context, _ time.Time) (dashboard.Dolt
 	}
 	out.Note = fmt.Sprintf("last 10 minutes: %d; last hour: %d; last 24 hours: %d; peak bucket: %d at %s",
 		last, hour, day, peak, peakAt.UTC().Format("2006-01-02 15:04 UTC"))
+	// The newest six buckets, oldest first: the series ends with the bucket now.
+	newest := buckets[max(0, len(buckets)-lostHour):]
+	parts := make([]string, len(newest))
+	for i, b := range newest {
+		parts[i] = fmt.Sprintf("%s=%d", b.At.UTC().Format("15:04"), b.Total)
+	}
+	out.Note += "; newest six buckets, oldest first: " + strings.Join(parts, " ")
 	dbs := make([]string, 0, len(byDB))
 	for db := range byDB {
 		dbs = append(dbs, db)
