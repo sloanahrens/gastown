@@ -98,6 +98,11 @@ var ErrBundleFull = errors.New("follow-up bundle has no room for the addition")
 // keyed by its fingerprint because the feed reads a queue line more than once
 // while it decides whether the line is covered.
 type followupSkips struct {
+	// answers is the hook's answer for each finding of a landing's pass, by the
+	// finding's bead and fingerprint: the drain and the compaction read a queue
+	// line up to three times, and a stateful hook that answered differently on a
+	// second ask left the line half consumed (gt-r66hk7).
+	answers    map[string]string
 	findings   map[string]bool
 	reasons    map[string]bool
 	count      int
@@ -110,7 +115,7 @@ type followupSkips struct {
 }
 
 func newFollowupSkips() *followupSkips {
-	return &followupSkips{findings: map[string]bool{}, reasons: map[string]bool{}}
+	return &followupSkips{answers: map[string]string{}, findings: map[string]bool{}, reasons: map[string]bool{}}
 }
 
 // record counts a finding the policy skipped and keeps its reason once.
@@ -140,15 +145,21 @@ func (l *Lander) skippedCandidates(w Work, cands []FollowupCandidate, skips *fol
 		// asked on has no recover of its own: a panic must keep the finding
 		// rather than end the landing worker with the landing it was filing for.
 		// It is kept like an empty reason and named once per landing, and the
-		// hook is still asked exactly once per candidate (gt-g97vlb).
-		reason := func() (reason string) {
-			defer func() {
-				if v := recover(); v != nil && skips.failure == "" {
-					skips.failure = fmt.Sprintf("the follow-up skip policy failed (%v); keeping the finding", v)
-				}
+		// hook is still asked exactly once per candidate (gt-g97vlb), and once
+		// per finding in a pass: the answer, a panic's included, is kept.
+		key := w.BeadID + "\x00" + Fingerprint(c.Path, c.Title)
+		reason, asked := skips.answers[key]
+		if !asked {
+			reason = func() (reason string) {
+				defer func() {
+					if v := recover(); v != nil && skips.failure == "" {
+						skips.failure = fmt.Sprintf("the follow-up skip policy failed (%v); keeping the finding", v)
+					}
+				}()
+				return l.FollowupSkip(w, c)
 			}()
-			return l.FollowupSkip(w, c)
-		}()
+			skips.answers[key] = reason
+		}
 		if reason == "" {
 			kept = append(kept, c)
 			continue
