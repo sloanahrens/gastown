@@ -143,6 +143,50 @@ func TestJobOverdueWake(t *testing.T) {
 	}
 }
 
+// A job whose newest outcome failed raises one item even when it is not
+// overdue; a job both overdue and failed raises one item, not two; a later ok
+// outcome clears it, and a row neither overdue nor failed raises nothing.
+func TestJobOverdueAttentionFailed(t *testing.T) {
+	t.Parallel()
+	f := newAttentionFixture(t, jobOverdueNow)
+	failed := JobReading{Name: "cache_trim", State: "ok", Outcome: "failed", LastRun: jobOverdueNow.Add(-2 * time.Hour), Cadence: 24 * time.Hour}
+	for _, tc := range []struct {
+		name    string
+		reading JobReading
+		want    int
+	}{
+		{"failed not overdue", failed, 1},
+		{"overdue and failed", JobReading{Name: "cache_trim", State: jobStateOverdue, Outcome: "failed", LastRun: jobOverdueNow.Add(-3 * time.Hour), Cadence: 24 * time.Hour}, 1},
+		{"ok outcome", JobReading{Name: "cache_trim", State: "ok", Outcome: "ok", LastRun: jobOverdueNow.Add(-time.Minute), Cadence: 24 * time.Hour}, 0},
+		{"refused outcome", JobReading{Name: "cache_trim", State: "ok", Outcome: "refused", LastRun: jobOverdueNow.Add(-time.Minute), Cadence: 24 * time.Hour}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := jobOverdueItems(t, f, []JobReading{tc.reading})
+			if len(items) != tc.want {
+				t.Fatalf("items = %+v, want %d", items, tc.want)
+			}
+			if tc.want == 1 && (items[0].Key != "job-overdue:cache_trim" || items[0].Kind != attention.KindJobOverdue || items[0].Severity != attention.SeverityLow) {
+				t.Errorf("item = %+v, want a low job-overdue item keyed job-overdue:cache_trim", items[0])
+			}
+		})
+	}
+
+	// The failed text says the job failed and when it ran; a failed row with no
+	// run time says so rather than naming a bogus age.
+	for _, tc := range []struct {
+		reading JobReading
+		want    string
+	}{
+		{failed, "2h0m"},
+		{JobReading{Name: "cache_trim", State: "unknown", Outcome: jobOutcomeFailed}, "no run time recorded"},
+	} {
+		items := jobOverdueItems(t, f, []JobReading{tc.reading})
+		if len(items) != 1 || !strings.Contains(items[0].Summary, "failed") || !strings.Contains(items[0].Summary, tc.want) {
+			t.Errorf("items = %+v, want one summary naming failed and %q", items, tc.want)
+		}
+	}
+}
+
 // With no list source wired the collector raises nothing and no error; a source
 // that fails gives the error back, so the previous items stay (collectAttention).
 func TestJobOverdueAttentionSource(t *testing.T) {
