@@ -8,13 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 func TestSlingNoteShowsGitCallsOnTheStepThatMadeThem(t *testing.T) {
@@ -644,11 +644,7 @@ func parseSpawnSource(t *testing.T, src string) *ast.File {
 // parseSpawnFile parses the spawn file beside this test.
 func parseSpawnFile(t *testing.T) *ast.File {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	path := filepath.Join(filepath.Dir(thisFile), "polecat_spawn.go")
+	path := filepath.Join(modroot.Root(t), "internal", "cmd", "polecat_spawn.go")
 	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)

@@ -3,11 +3,11 @@ package cmd
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // cmdTestRegistry maps the rig prefixes the agents tests use.
@@ -27,11 +27,7 @@ func TestStatusLineAvoidsBeadsHotPath(t *testing.T) {
 	if !branchCheckExemptCommands["status-line"] {
 		t.Fatal("status-line must be exempt from git branch/stale checks")
 	}
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "statusline.go"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "internal", "cmd", "statusline.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
