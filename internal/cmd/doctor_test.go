@@ -117,6 +117,29 @@ func TestDoctorRegistersTrackerCheck(t *testing.T) {
 	t.Fatal("expected the tracker check in the default doctor set")
 }
 
+// Nothing copies a rig's tracked .beads/config.yaml to its live store after
+// 'gt rig add', so a landed settings change is silently ignored unless doctor
+// reports the drift (gt-z4mlnf).
+func TestDoctorRegistersBeadsConfigDriftCheck(t *testing.T) {
+	t.Parallel()
+	var names []string
+	for _, check := range newDoctorForCommand("").Checks() {
+		names = append(names, check.Name())
+	}
+	var at []int
+	for i, name := range names {
+		if name == "beads-config-drift" {
+			at = append(at, i)
+		}
+	}
+	if len(at) != 1 {
+		t.Fatalf("beads-config-drift registered %d times, want once: %v", len(at), names)
+	}
+	if i := at[0]; i == 0 || names[i-1] != "events-journal" {
+		t.Errorf("beads-config-drift registered at position %d, want directly after events-journal: %v", i, names)
+	}
+}
+
 // TestDoctorHelpListsOnlyRegisteredChecks ties the check names `gt doctor
 // --help` prints to the checks the command registers (om finding ff39e1346648).
 // The list is hand-written, so a renamed or retired check leaves its line

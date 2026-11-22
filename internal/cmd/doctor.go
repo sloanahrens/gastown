@@ -407,6 +407,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewPrefixConflictCheck())
 	d.Register(doctor.NewRigNameMismatchCheck())
 	d.Register(doctor.NewEventsJournalCheck())      // gt tail needs the events journal on in every store (gt-7iwy0.7)
+	d.Register(doctor.NewBeadsConfigDriftCheck())   // A tracked .beads/config.yaml change never reaches the live store (gt-z4mlnf)
 	d.Register(doctor.NewRigConfigSyncCheck())      // Check all registered rigs have config.json
 	d.Register(doctor.NewStaleDoltPortCheck())      // Check for stale Dolt port files
 	d.Register(doctor.NewStaleSQLServerInfoCheck()) // Check for stale sql-server.info files (GH#2770)
