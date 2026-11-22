@@ -111,7 +111,10 @@ type clusterRenderFlags struct {
 	openShellConfigDir string
 	forgeHost          string
 	doltBackupHostPath string
-	dashboard          bool
+	// The cloud reports and releases host directories the pod mounts read-only, empty by default (gt-9gcfj3).
+	cloudReportsHostPath  string
+	cloudReleasesHostPath string
+	dashboard             bool
 	// dashboardClaudeDir and daemonClaudeDir are the retired Mac-directory
 	// mounts. The flags stay registered so naming one is refused with the rows
 	// that replaced it, never read as an unknown flag; validate refuses either
@@ -260,6 +263,10 @@ func init() {
 		"the forge's host:port the pod's git asks for a credential (required for a live render, the flag `gt daemon compose write` takes); a rehearsal takes none")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.doltBackupHostPath, "dolt-backup-host-path", "",
 		"the host directory the live pod mounts at the Dolt backup path, read-write, in place of the dolt-backup claim; it must be "+k8sdaemon.DoltBackupPath+" (a live render only)")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.cloudReportsHostPath, "cloud-reports-host-path", "",
+		"the host directory the cloud patrol writes its reports to, mounted read-only at the same path in the pod; empty mounts nothing, and the cloud step reads the Postgres source")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.cloudReleasesHostPath, "cloud-releases-host-path", "",
+		"the host directory the release bot writes its ledger to, mounted read-only at the same path in the pod; empty mounts nothing, and the cloud step reads the Postgres source")
 	townClusterRenderCmd.Flags().BoolVar(&clusterRender.dashboard, "dashboard", false,
 		"also write the dashboard's Service and Deployment beside the daemon's; the secrets manifest must name "+k8sdaemon.ViewerTokenFile+" (a live render only)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardClaudeDir, "dashboard-claude-dir", "",
@@ -420,6 +427,8 @@ func (f clusterRenderFlags) withRecorded(r clusterRenderFlags, named func(flag s
 		{"openshell-config-dir", &f.openShellConfigDir, r.openShellConfigDir},
 		{"forge-host", &f.forgeHost, r.forgeHost},
 		{"dolt-backup-host-path", &f.doltBackupHostPath, r.doltBackupHostPath},
+		{"cloud-reports-host-path", &f.cloudReportsHostPath, r.cloudReportsHostPath},
+		{"cloud-releases-host-path", &f.cloudReleasesHostPath, r.cloudReleasesHostPath},
 		{"bd-gateway-url", &f.bdGatewayURL, r.bdGatewayURL},
 		{"bd-gateway-token-secret", &f.bdGatewayTokenSecret, r.bdGatewayTokenSecret},
 		{"tracker-dsn-secret", &f.trackerDSNSecret, r.trackerDSNSecret},
@@ -770,6 +779,10 @@ func clusterRenderValues(d clusterRenderDeps, f clusterRenderFlags, findTown fun
 		v.ForgeHost = strings.TrimSpace(f.forgeHost)
 		v.DoltBackupHostPath = f.doltBackupHostPath
 	}
+	// The daemon mounts both cloud directories read-only in a rehearsal too, so a
+	// named flag reaches Values in either render (gt-9gcfj3).
+	v.CloudReportsHostPath = f.cloudReportsHostPath
+	v.CloudReleasesHostPath = f.cloudReleasesHostPath
 	// A values file that names a bd image renders the gateway, and points its clients
 	// at the gateway's Service and its push Service. A flag that names a URL wins. A
 	// rehearsal renders no gateway: it mounts no token and builds no hostAliases

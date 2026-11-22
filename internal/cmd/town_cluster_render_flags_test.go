@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
@@ -32,6 +34,8 @@ func renderFlagsFixture() clusterRenderFlags {
 		openShellConfigDir:    "/host/.config/openshell",
 		forgeHost:             "forge.internal.test:3000",
 		doltBackupHostPath:    "/host/dolt-backup",
+		cloudReportsHostPath:  "/host/gt-cloud/reports",
+		cloudReleasesHostPath: "/host/gt-cloud/releases",
 		dashboard:             true,
 		bdGatewayURL:          "http://127.0.0.1:8080",
 		bdGatewayReplicas:     2,
@@ -439,6 +443,8 @@ var renderFlagRecordNames = map[string]string{
 	"openShellConfigDir":            "OpenShellConfigDir",
 	"forgeHost":                     "ForgeHost",
 	"doltBackupHostPath":            "DoltBackupHostPath",
+	"cloudReportsHostPath":          "CloudReportsHostPath",
+	"cloudReleasesHostPath":         "CloudReleasesHostPath",
 	"dashboard":                     "Dashboard",
 	"bdGatewayServicePolicyApplied": "BdGatewayServicePolicyApplied",
 	"bdGatewayURL":                  "BdGatewayURL",
@@ -504,5 +510,99 @@ func TestRenderFlagsRecordCoversTheFlagStruct(t *testing.T) {
 		if name := recordType.Field(i).Name; !recorded[name] {
 			t.Errorf("renderFlagsRecord.%s holds no clusterRenderFlags field, so it is written and never replayed", name)
 		}
+	}
+}
+
+// TestTownClusterRenderFlagsCloudHostPathsAreRegistered: both cloud directory
+// flags exist and are empty by default, so a render that names neither mounts
+// nothing (gt-s8yd4x).
+func TestTownClusterRenderFlagsCloudHostPathsAreRegistered(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"cloud-reports-host-path", "cloud-releases-host-path"} {
+		if flag := townClusterRenderCmd.Flags().Lookup(name); flag == nil || flag.DefValue != "" {
+			t.Errorf("--%s = %v, want a flag whose default is the empty string", name, flag)
+		}
+	}
+}
+
+// TestTownClusterRenderFlagsCarryTheCloudHostPaths holds the two cloud
+// directory flags to the places DoltBackupHostPath reaches, one table of rows over
+// one render: Values (in a live and in a rehearsal render, since the daemon mounts
+// both directories in either), the recorded-flags mirror and a replay from it. The
+// two mirror keys are written only when set, so a render with neither flag writes
+// the mirror file it wrote before: its mirror has no cloud_ key at all, and its
+// Values leave both fields empty, the input the daemon package's own goldens pin
+// (gt-s8yd4x).
+func TestTownClusterRenderFlagsCarryTheCloudHostPaths(t *testing.T) {
+	t.Parallel()
+	const reports = "/Users/Shared/gt-cloud/reports"
+	const releases = "/Users/Shared/gt-cloud/releases"
+	for _, tc := range []struct {
+		name              string
+		rehearsal         bool
+		reports, releases string
+	}{
+		{"both, a live render", false, reports, releases},
+		{"both, a rehearsal", true, reports, releases},
+		{"only the reports directory", false, reports, ""},
+		{"neither: the mirror and Values are as before", false, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			f.rehearsal, f.cloudReportsHostPath, f.cloudReleasesHostPath = tc.rehearsal, tc.reports, tc.releases
+			town := clusterRenderTestTown(t)
+			got, _, _, err := clusterRenderValues(clusterRenderDepsAt(t, town, io.Discard), f,
+				func() (string, error) { return town, nil })
+			if err != nil {
+				t.Fatalf("clusterRenderValues: %v", err)
+			}
+			if got.CloudReportsHostPath != tc.reports || got.CloudReleasesHostPath != tc.releases {
+				t.Errorf("Values carries %q/%q, want %q/%q", got.CloudReportsHostPath, got.CloudReleasesHostPath, tc.reports, tc.releases)
+			}
+			// The manifests the Values render: the cloud mounts appear exactly when a
+			// path is set, so a render with neither flag carries no cloud volume.
+			built := got
+			if tc.rehearsal {
+				built.Namespace = "gt-rehearsal-test" // a rehearsal names its own namespace; the flags carry none here
+			}
+			manifests, err := k8sdaemon.Build(built)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			var rendered strings.Builder
+			if err := k8sdaemon.Render(&rendered, manifests); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if mounted := strings.Contains(rendered.String(), k8sdaemon.CloudReportsVolume); mounted != (tc.reports != "") {
+				t.Errorf("the rendered manifests mount %s = %t for the reports path %q", k8sdaemon.CloudReportsVolume, mounted, tc.reports)
+			}
+			path := filepath.Join(t.TempDir(), "render-flags.json")
+			m := renderFlagsFixture()
+			m.cloudReportsHostPath, m.cloudReleasesHostPath = tc.reports, tc.releases
+			if err := saveRenderFlags(path, m); err != nil {
+				t.Fatalf("saveRenderFlags: %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range map[string]string{"cloud_reports_host_path": tc.reports, "cloud_releases_host_path": tc.releases} {
+				if listed := strings.Contains(string(data), `"`+key+`"`); listed != (want != "") {
+					t.Errorf("the mirror lists %s = %t for the value %q:\n%s", key, listed, want, data)
+				}
+			}
+			loaded, ok, err := loadRenderFlags(path)
+			if err != nil || !ok {
+				t.Fatalf("loadRenderFlags = %v, ok = %t", err, ok)
+			}
+			replayed, err := clusterRenderFlags{}.withRecorded(loaded, func(string) bool { return false })
+			if err != nil {
+				t.Fatalf("withRecorded: %v", err)
+			}
+			if replayed.cloudReportsHostPath != tc.reports || replayed.cloudReleasesHostPath != tc.releases {
+				t.Errorf("the replayed flags = %q/%q, want %q/%q", replayed.cloudReportsHostPath, replayed.cloudReleasesHostPath, tc.reports, tc.releases)
+			}
+		})
 	}
 }
