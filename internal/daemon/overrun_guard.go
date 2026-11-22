@@ -287,6 +287,9 @@ type overrunSeams struct {
 	saveWork      func(seat overrunSeat) (overrunSave, error)
 	removeSandbox func(seat overrunSeat) error
 	checkpoint    func(seat overrunSeat) error
+	// unsavedWork finds the sandbox session and clone of a seat whose save gave up
+	// (nil or an error: unknown), for the hand-back note.
+	unsavedWork func(seat overrunSeat) (session, workDir string, err error)
 	// stillOurs reports whether the bead is still hooked to the stopped seat:
 	// the stop reads again just before it ends the run, because a bead closed,
 	// or re-slung to another polecat, since the seat list was read is that
