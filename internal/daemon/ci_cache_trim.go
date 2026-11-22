@@ -208,6 +208,21 @@ echo "removed=$removed"
 echo "after_kib=$before"
 `
 
+// ciCacheRmEmptied removes the directories a removal emptied, from the file
+// list named by $emptied: each removed file's parent, then its parent's parent,
+// while the directory is below the top level and rmdir finds it empty. It never
+// walks the cache for empty directories, so a directory a concurrent Go build
+// has made and not yet written into is not its to remove (gt-m01xle).
+const ciCacheRmEmptied = `while IFS= read -r f; do
+d=${f%/*}
+while :; do
+case "${d#"$root"/}" in */*) ;; *) break;; esac
+rmdir "$d" 2>/dev/null || break
+d=${d%/*}
+done
+done < "$emptied"
+`
+
 // ciCacheAgeRemoval is the removal both apply programs share. It reads root and
 // age, and before, the size before the removal, which the program that includes
 // it sets: it removes the files past the age, then the empty directories the
@@ -218,7 +233,8 @@ echo "after_kib=$before"
 const ciCacheAgeRemoval = `list=$(mktemp)
 trap 'rm -f "$list"' EXIT
 find "$root" -mindepth 2 -type f -mmin +"$age" -print -delete > "$list"
-find "$root" -mindepth 2 -type d -empty -delete
+emptied=$list
+` + ciCacheRmEmptied + `find "$root" -mindepth 2 -type d -empty -mmin +"$age" -delete
 removed=$(wc -l < "$list" | tr -d ' ')
 after=$(du -sk "$root" | cut -f1)
 echo "before_kib=$before"
@@ -343,8 +359,9 @@ find "$p" -maxdepth 0 -type f -mmin +"$floor" -print
 done < "$tmp/selected" > "$tmp/again"
 removed=$(wc -l < "$tmp/again" | tr -d ' ')
 if [ "$removed" -gt 0 ]; then tr '\n' '\000' < "$tmp/again" | xargs -0 rm -f; fi
-fi
-find "$root" -mindepth 2 -type d -empty -delete
+emptied=$tmp/again
+` + ciCacheRmEmptied + `fi
+find "$root" -mindepth 2 -type d -empty -mmin +"$floor" -delete
 after=$(du -sk "$root" | cut -f1)
 fi
 echo "before_kib=$before"
