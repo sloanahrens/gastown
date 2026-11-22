@@ -44,20 +44,25 @@ var _ nodePruneKube = kubectlNodePrune{}
 const nodePruneErrHeadMax = 300
 
 // nodePruneErrHead returns the head of kubectl's answer for an error: at most
-// nodePruneErrHeadMax bytes, newlines and tabs turned to spaces, cut at a rune
+// nodePruneErrHeadMax bytes, every control byte turned to a space, cut at a rune
 // boundary with "..." where it was cut. The reason kubectl gave tells a Forbidden,
 // an AlreadyExists and a policy denial apart in the log; the ledger records no error
 // text (gt-eg0ji0).
 func nodePruneErrHead(out string) string {
-	head := strings.NewReplacer("\n", " ", "\t", " ").Replace(out)
+	head := []byte(out)
+	for i, c := range head {
+		if c < 0x20 || c == 0x7f {
+			head[i] = ' '
+		}
+	}
 	if len(head) <= nodePruneErrHeadMax {
-		return head
+		return string(head)
 	}
 	cut := nodePruneErrHeadMax
 	for cut > 0 && !utf8.RuneStart(head[cut]) {
 		cut--
 	}
-	return head[:cut] + "..."
+	return string(head[:cut]) + "..."
 }
 
 // ListJSON returns the gt namespace's Jobs, Deployments and Pods as kubectl's JSON
