@@ -34,3 +34,16 @@ func groupGateRunsByMonth(rows []GateRun) []gateRunMonthGroup {
 	}
 	return groups
 }
+
+// gateRunMonthExpired reports whether name is a month file, named as
+// gateRunMonthFile names one, whose month ended more than keepDays days before
+// now. A month ends at the first instant of the next UTC month; exactly keepDays
+// days after that is not yet expired. Any other name, the current log and the
+// rejects file included, is never expired.
+func gateRunMonthExpired(name string, now time.Time, keepDays int) bool {
+	month, err := time.Parse("gate-runs-2006-01.jsonl.gz", name)
+	if err != nil {
+		return false
+	}
+	return now.Sub(month.AddDate(0, 1, 0)) > time.Duration(keepDays)*24*time.Hour
+}
