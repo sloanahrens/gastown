@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 )
 
 const (
@@ -40,6 +41,15 @@ var (
 	// eight hex digits.
 	requestID = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
 )
+
+// IsRequestName reports whether name is a request file's name: a request id and ".json". The
+// inbox reader skips every other entry (a .DS_Store, a temporary file, a directory's name that
+// is not a request's), and ParseRequest then holds a request-named file to its content
+// (gt-fqsb68).
+func IsRequestName(name string) bool {
+	stem, ok := strings.CutSuffix(name, ".json")
+	return ok && requestID.MatchString(stem)
+}
 
 // requestKeys is the exact key set a request file may carry.
 var requestKeys = map[string]bool{"id": true, "kind": true, "plan": true}

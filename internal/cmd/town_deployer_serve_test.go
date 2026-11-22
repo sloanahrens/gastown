@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,53 @@ func TestTownDeployerServeOnce(t *testing.T) {
 		})
 	}
 
+	t.Run("skips a dotfile and a directory ahead of a valid request and leaves them alone", func(t *testing.T) {
+		t.Parallel()
+		inbox, answers, state := newServeTestDirs(t)
+		if err := os.WriteFile(filepath.Join(inbox, ".DS_Store"), []byte("junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// A directory that sorts before the request and even carries a request's name.
+		if err := os.Mkdir(filepath.Join(inbox, "00000000T000000Z-00000000.json"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeServeRequest(t, inbox, serveOlderID)
+		steps := &serveFakeSteps{}
+		env := townDeployerServeEnv{once: true, inbox: inbox, answers: answers, state: state, steps: steps, now: serveClock, out: &bytes.Buffer{}}
+
+		if err := runTownDeployerServeIn(context.Background(), env); err != nil {
+			t.Fatalf("runTownDeployerServeIn = %v, want the valid request answered", err)
+		}
+		if steps.calls != 1 {
+			t.Errorf("the steps planned %d times, want 1", steps.calls)
+		}
+		if got := serveNames(t, inbox); !slices.Equal(got, []string{".DS_Store", "00000000T000000Z-00000000.json"}) {
+			t.Errorf("the inbox holds %v, want the dotfile and the directory untouched", got)
+		}
+		if got := serveNames(t, filepath.Join(state, "done")); !slices.Equal(got, []string{serveOlderID + ".json"}) {
+			t.Errorf("done holds %v, want only the valid request", got)
+		}
+	})
+	t.Run("an inbox of nothing that is a request says so and answers nothing", func(t *testing.T) {
+		t.Parallel()
+		inbox, answers, state := newServeTestDirs(t)
+		if err := os.WriteFile(filepath.Join(inbox, ".DS_Store"), []byte("junk"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		steps := &serveFakeSteps{}
+		var out bytes.Buffer
+		env := townDeployerServeEnv{once: true, inbox: inbox, answers: answers, state: state, steps: steps, now: serveClock, out: &out}
+
+		if err := runTownDeployerServeIn(context.Background(), env); err != nil {
+			t.Fatalf("runTownDeployerServeIn = %v, want nil for an inbox with no request", err)
+		}
+		if out.String() != "deployer: no request in the inbox\n" {
+			t.Errorf("output = %q, want the no-request line, so a caller tells nothing-to-answer from a silent success", out.String())
+		}
+		if steps.calls != 0 || len(serveNames(t, answers)) != 0 {
+			t.Errorf("the steps planned %d times and answers %v, want nothing", steps.calls, serveNames(t, answers))
+		}
+	})
 	t.Run("answers nothing from an empty inbox", func(t *testing.T) {
 		t.Parallel()
 		inbox, answers, state := newServeTestDirs(t)
@@ -218,13 +266,7 @@ func TestTownDeployerServeOnceFails(t *testing.T) {
 			env.inbox = filepath.Join(filepath.Dir(env.inbox), "no-such-inbox")
 		}, "reading the inbox"},
 		{"a request that cannot be read", func(t *testing.T, env *townDeployerServeEnv) {
-			// A directory where the oldest request should be: it lists, and cannot be read as a file.
-			if err := os.Remove(filepath.Join(env.inbox, serveOlderID+".json")); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(filepath.Join(env.inbox, serveOlderID+".json"), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			env.readFile = func(string) ([]byte, error) { return nil, errors.New("disk gone") }
 		}, "reading the request"},
 		{"an answer that cannot be written", func(t *testing.T, env *townDeployerServeEnv) {
 			env.answers = filepath.Join(filepath.Dir(env.answers), "no-such-answers", "deeper")
@@ -236,6 +278,12 @@ func TestTownDeployerServeOnceFails(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "moving the request"},
+		{"a no-request line that cannot be printed", func(t *testing.T, env *townDeployerServeEnv) {
+			if err := os.Remove(filepath.Join(env.inbox, serveOlderID+".json")); err != nil {
+				t.Fatal(err)
+			}
+			env.out = serveFailingWriter{}
+		}, "printing the no-request line"},
 		{"a status line that cannot be printed", func(t *testing.T, env *townDeployerServeEnv) {
 			env.out = serveFailingWriter{}
 		}, "is answered, but printing its status failed"},

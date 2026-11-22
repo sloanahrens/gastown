@@ -22,6 +22,9 @@ type townDeployerServeEnv struct {
 	steps   deployerinbox.Steps
 	now     func() time.Time
 	out     io.Writer
+	// readFile reads a request file; nil is os.ReadFile. A test fails it, since a regular file
+	// the inbox lists and the daemon cannot read is a race or a permission no unit test may make.
+	readFile func(string) ([]byte, error)
 }
 
 // runTownDeployerServeIn is what `gt town deployer serve` runs. Every refusal
@@ -42,18 +45,32 @@ func runTownDeployerServeIn(ctx context.Context, env townDeployerServeEnv) error
 		return fmt.Errorf("gt town deployer serve needs %s to be a directory to move a request into", done)
 	}
 
-	// os.ReadDir returns the entries sorted by name, and a request's name is
-	// its UTC stamp, so the first entry is the oldest.
+	// os.ReadDir returns the entries sorted by name, and a request's name is its UTC stamp, so
+	// the first request-named regular file is the oldest. A dotfile, a directory or any name that
+	// is not a request's is not one, and stays where it is.
 	entries, err := os.ReadDir(env.inbox)
 	if err != nil {
 		return fmt.Errorf("reading the inbox %s: %w", env.inbox, err)
 	}
-	if len(entries) == 0 {
+	name := ""
+	for _, e := range entries {
+		if e.Type().IsRegular() && deployerinbox.IsRequestName(e.Name()) {
+			name = e.Name()
+			break
+		}
+	}
+	if name == "" {
+		if _, err := fmt.Fprintln(env.out, "deployer: no request in the inbox"); err != nil {
+			return fmt.Errorf("printing the no-request line: %w", err)
+		}
 		return nil
 	}
-	name := entries[0].Name()
 	path := filepath.Join(env.inbox, name)
-	data, err := os.ReadFile(path)
+	read := env.readFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
 	if err != nil {
 		return fmt.Errorf("reading the request %s: %w", path, err)
 	}
