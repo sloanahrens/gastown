@@ -32,3 +32,11 @@ func SpecSlingCensusPath(townRoot, run string) string {
 func SpecSlingCensusGlob(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", specSlingCensusPrefix+"*"+specSlingCensusSuffix)
 }
+
+// PluginCensusPath is where a script plugin's child process writes the bd census
+// rows it made: `gt metrics run --census-path` writes it, and the daemon reads
+// and removes it after the plugin's run, folding the rows into its census line.
+// Each plugin has its own file, so two plugins never share a sink.
+func PluginCensusPath(townRoot, plugin string) string {
+	return filepath.Join(townRoot, "daemon", "plugin_census_"+plugin+".txt")
+}
