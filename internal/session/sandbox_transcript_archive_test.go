@@ -235,7 +235,7 @@ func TestTranscriptArchiveEveryFailedStepKeepsTheSource(t *testing.T) {
 			t.Parallel()
 			root, own, dest, _, _ := archiveFixture(t)
 			injected := errors.New("injected " + step)
-			err := moveConfinedWith(root, "ses-1.jsonl", dest, func(s string) error {
+			err := moveConfinedWith(root, "ses-1.jsonl", dest, func(s string, _ *os.File) error {
 				if s == step {
 					return injected
 				}
@@ -274,7 +274,7 @@ func TestTranscriptArchiveRefusesALeafSwappedAfterTheLstat(t *testing.T) {
 			root, own, dest, copyDir, _ := archiveFixture(t)
 			other := filepath.Join(copyDir, "other.jsonl")
 			writeTranscript(t, other)
-			swap := func(step string) error {
+			swap := func(step string, _ *os.File) error {
 				if step != "open" {
 					return nil
 				}
@@ -352,5 +352,40 @@ func TestTranscriptArchiveClearsALeftoverPartial(t *testing.T) {
 	}
 	if _, err := os.Stat(dest + ".partial"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the leftover partial is still there: %v", err)
+	}
+}
+
+// TestTranscriptArchiveRealStepFailuresKeepTheSource: the steps that read the
+// leaf fail for real states the hook arranges before them: a leaf gone before
+// the Lstat, a handle closed before its Stat, a leaf gone between the open and
+// the second Lstat. Each is an error naming the step, and nothing is archived
+// (gt-1xoiib).
+func TestTranscriptArchiveRealStepFailuresKeepTheSource(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, at string
+		arrange  func(own string, src *os.File)
+	}{
+		{"lstat", "lstat", func(own string, _ *os.File) { _ = os.Remove(own) }},
+		{"fstat on a closed handle", "fstat", func(_ string, src *os.File) { _ = src.Close() }},
+		{"second lstat", "fstat", func(own string, _ *os.File) { _ = os.Remove(own) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			root, own, dest, _, _ := archiveFixture(t)
+			err := moveConfinedWith(root, "ses-1.jsonl", dest, func(step string, src *os.File) error {
+				if step == c.at {
+					c.arrange(own, src)
+				}
+				return nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "ses-1.jsonl") {
+				t.Fatalf("err = %v, want a failure naming the file", err)
+			}
+			if _, serr := os.Stat(dest); !errors.Is(serr, fs.ErrNotExist) {
+				t.Errorf("a failed move reached the archive: %v", serr)
+			}
+		})
 	}
 }

@@ -78,7 +78,7 @@ func moveConfined(root *os.Root, rel, dest string) error {
 }
 
 // moveConfinedWith is moveConfined with a hook called before each step with the
-// step's name; an error it returns is that step's failure, and it may change the
+// step's name and the source handle opened so far (nil before "open"); an error it returns is that step's failure, and it may change the
 // copy first (a test swaps a leaf for a FIFO at "open"). The steps are: lstat,
 // exists, open, fstat, mkdir, create, copy, close, chtimes, link, unpartial,
 // remove. Root.Lstat, Root.OpenFile and Root.Remove refuse a path that escapes
@@ -91,7 +91,7 @@ func moveConfined(root *os.Root, rel, dest string) error {
 // crash mid-copy leaves a .partial the next run clears, never a truncated dest.
 // Whatever fails, the source stays in the copy and the partial is removed; a
 // failure after the link leaves a complete dest beside the source.
-func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string) error) error {
+func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string, src *os.File) error) error {
 	partial := dest + ".partial"
 	var src, out *os.File
 	var mod time.Time
@@ -166,7 +166,7 @@ func moveConfinedWith(root *os.Root, rel, dest string, hook func(step string) er
 	for _, st := range steps {
 		err := error(nil)
 		if hook != nil {
-			err = hook(st.name)
+			err = hook(st.name, src)
 		}
 		if err == nil {
 			err = st.do()
