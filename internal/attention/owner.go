@@ -215,6 +215,10 @@ var ruleOwners = map[string]Owner{
 	// finds the grant or the object the compare could not read before a person
 	// is woken (gt-y705n1).
 	RuleClusterDriftUnreadable: OwnerOverseer,
+	// An unjudged main is the town's own check to unblock: the overseer finds
+	// what the red-main run could not read before a person is woken
+	// (gt-glc2yh).
+	RuleMainUnknown: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
