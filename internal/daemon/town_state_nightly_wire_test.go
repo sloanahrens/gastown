@@ -24,6 +24,10 @@ func wireTestDaemon(t *testing.T, patrol *DaemonPatrolConfig, logs *strings.Buil
 	return d, rec
 }
 
+// nightlyRoot is a present town_state_backup_root value: nil leaves the key
+// out of the section, the empty string is the off state, and a path is a root.
+func nightlyRoot(value string) *string { return &value }
+
 // TestTownStateNightlyWireCountsTheStepThroughTheSeam is this bead's
 // acceptance box: with the patrol config present and a root set, one run calls
 // the seam once with that root, so "the step did not run" is observed at the
@@ -33,7 +37,7 @@ func TestTownStateNightlyWireCountsTheStepThroughTheSeam(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "town-state")
 	var logs strings.Builder
 	d, _ := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: root},
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot(root)},
 	}}, &logs)
 	now := nightlyTestNow()
 	var calls int
@@ -58,16 +62,16 @@ func TestTownStateNightlyWireCountsTheStepThroughTheSeam(t *testing.T) {
 	}
 }
 
-// TestTownStateNightlyWireEmptyRootSkipsTheStep is the first acceptance box's
-// seam-observed half: an empty root is the operator's off state, so the step is
-// not called at all, the off reason is logged, and no alert is raised. The
-// clear of an earlier alert on the off branch belongs to gt-5dgbcy, so this
-// test starts with none to clear and does not assert on clears.
+// TestTownStateNightlyWireEmptyRootSkipsTheStep is the second acceptance box's
+// seam-observed half: an explicit empty string is the operator's off state, so
+// the step is not called at all, the off reason is logged, and no alert is
+// raised. The clear of an earlier alert on the off branch belongs to gt-5dgbcy,
+// so this test starts with none to clear and does not assert on clears.
 func TestTownStateNightlyWireEmptyRootSkipsTheStep(t *testing.T) {
 	t.Parallel()
 	var logs strings.Builder
 	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		ScheduledMaintenance: &ScheduledMaintenanceConfig{},
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot("")},
 	}}, &logs)
 	var calls int
 	d.townStateNightlyStep = func(string, time.Time) error {
@@ -82,11 +86,57 @@ func TestTownStateNightlyWireEmptyRootSkipsTheStep(t *testing.T) {
 		t.Errorf("seam calls = %d, want 0: an empty root must not reach the step", calls)
 	}
 	if got := logs.String(); !strings.Contains(got, "town-state backup is off") ||
-		!strings.Contains(got, config.MaintenanceTownStateBackupRootKey) {
+		!strings.Contains(got, config.MaintenanceTownStateBackupRootKey+" is explicitly empty") {
 		t.Errorf("log missing the off reason naming %s:\n%s", config.MaintenanceTownStateBackupRootKey, got)
 	}
 	if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 0 {
 		t.Errorf("an empty root escalated: %+v", open)
+	}
+}
+
+// TestTownStateNightlyWireUnsetRootAlerts is the first acceptance box: a
+// present scheduled_maintenance section whose town_state_backup_root key is
+// absent alerts under town_state_backup:nightly and names the key, and the step
+// never runs. Only an explicit empty string is the off state, so reading a nil
+// pointer as off would silence a backup nobody configured.
+func TestTownStateNightlyWireUnsetRootAlerts(t *testing.T) {
+	t.Parallel()
+	var logs strings.Builder
+	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{},
+	}}, &logs)
+	var calls int
+	d.townStateNightlyStep = func(string, time.Time) error {
+		calls++
+		return nil
+	}
+
+	if got := d.runTownStateBackupStep(nightlyTestNow()); got != townStateNightlyFailed {
+		t.Fatalf("outcome = %v, want failed: an unset key must alert, not read as off", got)
+	}
+	if calls != 0 {
+		t.Errorf("seam calls = %d, want 0: an unset root must not reach the step", calls)
+	}
+	open := rec.OpenEscalations(alertKeyTownStateNightly)
+	if len(open) != 1 {
+		t.Fatalf("open escalations under %s = %+v, want one", alertKeyTownStateNightly, open)
+	}
+	if !strings.Contains(open[0].Reason, config.MaintenanceTownStateBackupRootKey) ||
+		!strings.Contains(open[0].Reason, "unset") {
+		t.Errorf("alert reason = %q, want it to name the unset %s", open[0].Reason, config.MaintenanceTownStateBackupRootKey)
+	}
+	if got := logs.String(); !strings.Contains(got, config.MaintenanceTownStateBackupRootKey) ||
+		!strings.Contains(got, "WARNING") {
+		t.Errorf("log missing the unset-root warning naming %s:\n%s", config.MaintenanceTownStateBackupRootKey, got)
+	}
+
+	// A second run the same night leaves the one escalation open rather than
+	// filing another.
+	if got := d.runTownStateBackupStep(nightlyTestNow()); got != townStateNightlyFailed {
+		t.Fatalf("second run outcome = %v, want failed", got)
+	}
+	if open := rec.OpenEscalations(alertKeyTownStateNightly); len(open) != 1 {
+		t.Errorf("open escalations after two runs the same night = %+v, want one", open)
 	}
 }
 
@@ -180,7 +230,7 @@ func TestTownStateNightlyWireRootEmptyIsOffOncePerDay(t *testing.T) {
 	if err := os.WriteFile(root, []byte("not a directory"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	section := &ScheduledMaintenanceConfig{TownStateBackupRoot: root}
+	section := &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot(root)}
 	var logs strings.Builder
 	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		ScheduledMaintenance: section,
@@ -195,7 +245,7 @@ func TestTownStateNightlyWireRootEmptyIsOffOncePerDay(t *testing.T) {
 	}
 
 	// The operator turns the step off in the same, present config.
-	section.TownStateBackupRoot = ""
+	section.TownStateBackupRoot = nightlyRoot("")
 	for run := 0; run < 2; run++ {
 		if got := d.runTownStateBackupStep(day); got != townStateNightlyOff {
 			t.Fatalf("off run %d outcome = %v, want off", run+1, got)
@@ -235,7 +285,7 @@ func TestTownStateNightlyWireFailureAlertsThenSuccessClears(t *testing.T) {
 	}
 	var logs strings.Builder
 	d, rec := wireTestDaemon(t, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: root},
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot(root)},
 	}}, &logs)
 	now := nightlyTestNow()
 
@@ -298,11 +348,11 @@ func TestTownStateNightlyWireRootComesFromDaemonJSON(t *testing.T) {
 func TestTownStateNightlyWireRefusedRoots(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
-		root string
+		root *string
 		want townStateNightlyOutcome
 	}{
-		"relative root is refused": {root: "backups/town-state", want: townStateNightlyFailed},
-		"blank root is off":        {root: "   ", want: townStateNightlyOff},
+		"relative root is refused": {root: nightlyRoot("backups/town-state"), want: townStateNightlyFailed},
+		"blank root is off":        {root: nightlyRoot("   "), want: townStateNightlyOff},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -342,7 +392,7 @@ func TestTownStateNightlyWireDoltBackupFailureStillTakesTheNight(t *testing.T) {
 	f.backupErr = map[string]error{"gt": errors.New("injected: backup")}
 	root := t.TempDir()
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: root},
+		ScheduledMaintenance: &ScheduledMaintenanceConfig{TownStateBackupRoot: nightlyRoot(root)},
 	}}
 
 	d.startMaintenanceGC([]string{"gt"}, time.Time{}, nil, true)

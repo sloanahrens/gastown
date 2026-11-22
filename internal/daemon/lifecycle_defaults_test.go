@@ -24,6 +24,12 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 
 	p := config.Patrols
 
+	// The default maintenance section names the town-state backup root as
+	// explicitly empty: an unset key alerts every night (gt-l9qnva).
+	if p.ScheduledMaintenance == nil || p.ScheduledMaintenance.TownStateBackupRoot == nil || *p.ScheduledMaintenance.TownStateBackupRoot != "" {
+		t.Errorf("scheduled_maintenance.town_state_backup_root = %v, want explicitly empty", p.ScheduledMaintenance)
+	}
+
 	// Verify all patrols are enabled with expected defaults
 	if p.WispReaper == nil || !p.WispReaper.Enabled {
 		t.Error("expected wisp_reaper to be enabled")
