@@ -144,6 +144,11 @@ func (b *openshellBackend) saveSeatTranscripts(rec SandboxRecord) error {
 	if err := pruneTranscriptCopies(filepath.Dir(filepath.Dir(dest)), b.clock()); err != nil {
 		b.warn("sandbox %s: pruning old transcript copies failed: %v", rec.Session, err)
 	}
+	// The archive keeps what the seat ends archive, so it is pruned by age and size here.
+	archiveRoot := filepath.Dir(filepath.Dir(SandboxTranscriptArchiveDir(b.townRoot, rec.Rig, rec.Polecat)))
+	if err := pruneTranscriptArchiveWith(b.archiveFSOrReal(), archiveRoot, b.clock(), sandboxTranscriptKeep, sandboxTranscriptArchiveCap); err != nil {
+		b.warn("sandbox %s: pruning the transcript archive failed: %v", rec.Session, err)
+	}
 	if err := os.RemoveAll(dest); err != nil {
 		return fmt.Errorf("sandbox %s: clearing its transcript copy failed, so it is not copied: %w", rec.Session, err)
 	}
@@ -384,4 +389,20 @@ func pruneTranscriptCopies(root string, now time.Time) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// archiveFSOrReal is the filesystem the transcript archive is pruned through: the backend's
+// archiveFS with each call it leaves unset taken from the real filesystem.
+func (b *openshellBackend) archiveFSOrReal() archiveFS {
+	fsys := b.archiveFS
+	if fsys.readDir == nil {
+		fsys.readDir = osArchiveFS.readDir
+	}
+	if fsys.remove == nil {
+		fsys.remove = osArchiveFS.remove
+	}
+	if fsys.info == nil {
+		fsys.info = osArchiveFS.info
+	}
+	return fsys
 }
