@@ -255,6 +255,11 @@ const (
 	// not read an object or the recorded render flags, so it judged no object
 	// (gt-y705n1).
 	RuleClusterDriftUnreadable = "cluster.drift_unreadable"
+
+	// RuleMainUnknown is a rig's red-main check that could not judge main for
+	// several runs in a row: the verdict is unknown, and no red-main bead can
+	// say so (gt-glc2yh).
+	RuleMainUnknown = "main.unknown"
 )
 
 var (
@@ -472,6 +477,10 @@ var ruleFlags = map[string]RuleFlags{
 	// failure: it queues beside the drift row, and an unread cluster is not
 	// reported as one in step (gt-y705n1).
 	RuleClusterDriftUnreadable: flagsAsk,
+	// A main nobody could judge blocks the landings a red one does: it carries
+	// main.red's class, and the overseer is woken to find what the check could
+	// not read (gt-glc2yh).
+	RuleMainUnknown: flagsWake,
 }
 
 // DiskWarnPromoteBeats is how many consecutive heartbeats host.disk_warn must
@@ -574,6 +583,7 @@ var kindRules = map[Kind]string{
 	KindGateSlow:                      RuleGateSlow,
 	KindClusterDrift:                  RuleClusterDrift,
 	KindClusterDriftUnreadable:        RuleClusterDriftUnreadable,
+	KindMainUnknown:                   RuleMainUnknown,
 }
 
 // jobOverdueWakePrefix is the key a job that missed two cadences raises under

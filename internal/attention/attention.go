@@ -243,6 +243,9 @@ const (
 	// the recorded render flags, so whether the cluster is in step is unknown
 	// (gt-y705n1).
 	KindClusterDriftUnreadable Kind = "cluster-drift-unreadable"
+	// KindMainUnknown: the rig's red-main check could not judge main for
+	// several runs in a row, so whether main is red is unknown (gt-glc2yh).
+	KindMainUnknown Kind = "main-unknown"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -267,6 +270,7 @@ func Kinds() []Kind {
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
 		KindImagePinsDeadLayer, KindGateSlow, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
+		KindMainUnknown,
 	}
 }
 
