@@ -1990,25 +1990,43 @@ func (c pairAncestryFailClone) IsAncestor(ancestor, descendant string) (bool, er
 
 // TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild: when ancestry cannot be
 // judged, a clone read that fails or a rig with no clone at all, the failed build
-// stands and the scan says it is incomplete rather than clearing the item.
+// stands and the scan says it is incomplete, naming the green it could not judge
+// and why.
 func TestPairReadySupersedeCannotJudgeKeepsTheFailedBuild(t *testing.T) {
 	t.Parallel()
 	clone, c := pairCloneHistory(t)
-	cases := map[string]func(fx *pairFixture){
-		"clone read fails": func(fx *pairFixture) { fx.git = pairAncestryFailClone{pairReadyGit: clone, failFrom: c[1]} },
-		"no clone": func(fx *pairFixture) {
-			fx.git = nil
-			fx.api.compares = map[string]int{c[1] + "..." + c[0]: 0, c[0] + "..." + c[1]: 1, c[2] + "..." + c[0]: 0, c[0] + "..." + c[2]: 2}
+	cases := map[string]struct {
+		setup  func(fx *pairFixture)
+		reason string
+	}{
+		"clone read fails": {
+			setup:  func(fx *pairFixture) { fx.git = pairAncestryFailClone{pairReadyGit: clone, failFrom: c[1]} },
+			reason: "the clone could not judge the ancestry",
+		},
+		"no clone": {
+			setup: func(fx *pairFixture) {
+				fx.git = nil
+				fx.api.compares = map[string]int{c[1] + "..." + c[0]: 0, c[0] + "..." + c[1]: 1, c[2] + "..." + c[0]: 0, c[0] + "..." + c[2]: 2}
+			},
+			reason: "the rig has no local clone to judge it behind a ready green",
 		},
 	}
-	for name, setup := range cases {
+	for name, tt := range cases {
 		fx := newPairSupersedeFixture(t, clone, c[0], c[1], c[2])
-		setup(fx)
+		tt.setup(fx)
 
 		fx.run(pairT0)
 
-		assert.Contains(t, pairItemKeys(fx.check.observed()), "images-failed:gastown:"+c[1][:12], name+": the failed build was cleared without a judged ancestry")
-		assert.NotEmpty(t, fx.logs, name+": the incomplete scan was not logged")
+		items := fx.check.observed()
+		assert.Contains(t, pairItemKeys(items), "images-failed:gastown:"+c[1][:12], name+": the failed build was cleared without a judged ancestry")
+		var incomplete string
+		for _, it := range items {
+			if it.Key == "deploy-pair-unreadable:rig:gastown" {
+				incomplete = it.Summary
+			}
+		}
+		assert.Contains(t, incomplete, "green/"+c[1][:12], name+": the incomplete scan did not name the green it could not judge")
+		assert.Contains(t, incomplete, tt.reason, name+": the incomplete scan did not name why it could not judge the green")
 	}
 }
 
