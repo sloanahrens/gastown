@@ -4,23 +4,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 	"gopkg.in/yaml.v3"
 )
 
 // polecatPolicy reads deploy/polecat/policy.yaml, the sandbox policy the
-// openshell backend sends with every sandbox, relative to this source file.
+// openshell backend sends with every sandbox, from the module root.
 func polecatPolicy(t *testing.T) map[string]any {
 	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "deploy", "polecat", "policy.yaml"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "deploy", "polecat", "policy.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}

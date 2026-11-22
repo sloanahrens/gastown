@@ -9,10 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // GNU Make 4.3 cannot spawn recipes in an OpenShell sandbox (its recipe child's
@@ -31,11 +32,7 @@ import (
 // instruction that touches /usr/bin/make.
 func makeInstruction(t *testing.T) string {
 	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "deploy", "polecat", "Dockerfile"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "deploy", "polecat", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
