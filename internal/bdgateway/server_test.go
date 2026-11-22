@@ -1073,6 +1073,92 @@ func TestBdgwStatsCPUMS(t *testing.T) {
 	}
 }
 
+// TestServeCallsLogsReadFailure: a call log the endpoint cannot read answers
+// the caller the fixed message, while the log it also serves keeps the cause
+// with no host path, and no bd call ran to move a counter.
+func TestServeCallsLogsReadFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		// broken is the log path under the calls root made a directory, which
+		// opens but cannot be read.
+		broken string
+	}{
+		{name: "the root log", broken: DefaultCallLogName},
+		{name: "a sibling pod log", broken: filepath.Join("other-pod", DefaultCallLogName)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			// The writing log is its own pod, so the broken path stays writable.
+			log := newTestCallLogWithDir(t, filepath.Join(root, "pod-a"))
+			g, err := NewGateway(GatewayOptions{
+				Auth:       testAuthenticator(t),
+				Policy:     mustPolicy(t),
+				Workspaces: mustStore(t),
+				Log:        log,
+				CallsDir:   root,
+				Runner:     exitByVerb{"show": 0},
+				Caps:       fixedCaps{},
+			})
+			if err != nil {
+				t.Fatalf("NewGateway: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Join(root, tc.broken), 0o700); err != nil {
+				t.Fatalf("mkdir log path: %v", err)
+			}
+			rec := getCalls(t, g, testReadToken, "")
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500; body %s", rec.Code, rec.Body.String())
+			}
+			var refused ErrorPayload
+			if err := json.Unmarshal(rec.Body.Bytes(), &refused); err != nil {
+				t.Fatalf("decode refusal: %v", err)
+			}
+			if refused.Code != codeInternal || refused.Message != callsLogUnreadableMessage {
+				t.Errorf("refusal = %+v, want code %q and the fixed message", refused, codeInternal)
+			}
+			if strings.Contains(rec.Body.String(), root) {
+				t.Errorf("body %q carries the log's path", rec.Body.String())
+			}
+
+			// Flush the refused line, repair the log, and serve it back.
+			if err := log.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if err := os.RemoveAll(filepath.Join(root, tc.broken)); err != nil {
+				t.Fatalf("repair log path: %v", err)
+			}
+			served := getCalls(t, g, testReadToken, "")
+			if served.Code != http.StatusOK {
+				t.Fatalf("served status = %d, want 200; body %s", served.Code, served.Body.String())
+			}
+			if strings.Contains(served.Body.String(), root) {
+				t.Errorf("served body %q carries the log's host path", served.Body.String())
+			}
+			var body callsBody
+			if err := json.Unmarshal(served.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode calls: %v", err)
+			}
+			if len(body.Calls) != 1 {
+				t.Fatalf("served calls = %+v, want the one read-failure line", body.Calls)
+			}
+			line := body.Calls[0]
+			if line.ExitCode != ExitRefused {
+				t.Errorf("served exit code = %d, want the refused code", line.ExitCode)
+			}
+			if cause, ok := strings.CutPrefix(line.Error, callsLogReadFailurePrefix); !ok || cause == "" {
+				t.Errorf("served error = %q, want the read cause after %q", line.Error, callsLogReadFailurePrefix)
+			}
+			// The counters describe bd calls; none ran.
+			if stats := log.Stats(); stats.Calls != 0 || stats.Errors != 0 {
+				t.Errorf("stats = calls %d, errors %d, want both 0", stats.Calls, stats.Errors)
+			}
+		})
+	}
+}
+
 // brokenResponse is a client that stops reading after the first frame.
 type brokenResponse struct {
 	header  http.Header
