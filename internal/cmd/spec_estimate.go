@@ -582,23 +582,33 @@ func specEstimateDeps(townRoot, rig string, errw io.Writer) (estimate.Deps, erro
 		JevAsk:          specEstimateJev(townRoot, errw),
 		HMRunner:        hmhints.ExecRunner,
 		Rig:             rig,
-		NeighborMinutes: specEstimateNeighborMinutes(townRoot),
+		NeighborMinutes: specEstimateNeighborMinutes(readSpecLedger, townRoot, errw),
 	}, nil
 }
 
+// readSpecLedger reads rig's landing ledger the way gt land size-stats does.
+func readSpecLedger(townRoot, rig string) ([]landings.Record, error) {
+	path, err := landings.Path(townRoot, rig)
+	if err != nil {
+		return nil, err
+	}
+	recs, _, err := (&landings.Reader{Path: path}).ReadNew()
+	return recs, err
+}
+
 // specEstimateNeighborMinutes is the reader the estimate hands to
-// Deps.NeighborMinutes: the minutes the newest landing of a past bead took,
-// read from that rig's landing ledger the way gt land size-stats reads it. A
-// record naming another rig, and a neighbor with no ledger, an unreadable
-// one, no record, no polecat time or a bound flag, has no time recorded.
-func specEstimateNeighborMinutes(townRoot string) func(rig, id string) (float64, bool) {
+// Deps.NeighborMinutes: the minutes the newest landing of a past bead took, read
+// through read. A neighbor with no such record, or a rig whose ledger cannot be
+// read, has no time; an unreadable rig logs one line to errw and fails nothing.
+func specEstimateNeighborMinutes(read func(townRoot, rig string) ([]landings.Record, error), townRoot string, errw io.Writer) func(rig, id string) (float64, bool) {
+	unreadable := map[string]bool{}
 	return func(rig, id string) (float64, bool) {
-		path, err := landings.Path(townRoot, rig)
+		recs, err := read(townRoot, rig)
 		if err != nil {
-			return 0, false
-		}
-		recs, _, err := (&landings.Reader{Path: path}).ReadNew()
-		if err != nil {
+			if !unreadable[rig] {
+				unreadable[rig] = true
+				fmt.Fprintf(errw, "gt spec estimate: landing ledger of rig %s is unreadable, its neighbors have no time recorded: %v\n", rig, err)
+			}
 			return 0, false
 		}
 		var newest *landings.Record
