@@ -1715,6 +1715,29 @@ func TestIntegrationCICacheTrimLRUHelpers(t *testing.T) {
 	})
 }
 
+// TestIntegrationCICacheTrimLRURunEnvironment pins the environment ciCacheLRURun
+// gives the program: a TMPDIR and exactly PATH=/usr/bin:/bin, and none of the
+// variables the caller's process carries. A runner that handed the program
+// os.Environ() would put a tool from the caller's PATH — a Homebrew GNU find or
+// stat on a Mac — where the fixed PATH keeps the system's.
+func TestIntegrationCICacheTrimLRURunEnvironment(t *testing.T) {
+	// Not parallel: t.Setenv writes the process environment the script
+	// must be shown not to inherit.
+	t.Setenv("GASTOWN_LRU_RUNNER_SENTINEL", "leaked")
+
+	script := `printf 'sentinel=%s\npath=%s\n' "${GASTOWN_LRU_RUNNER_SENTINEL-unset}" "$PATH"`
+	stdout, stderr, status := ciCacheLRURun(t, script, "list", t.TempDir(), "120", "0", "60")
+	if want := "sentinel=unset\npath=/usr/bin:/bin\n"; stdout != want {
+		t.Errorf("the script read %q, want %q", stdout, want)
+	}
+	if stderr != "" {
+		t.Errorf("the script wrote %q to stderr, want nothing", stderr)
+	}
+	if status != 0 {
+		t.Errorf("the script exited %d, want 0", status)
+	}
+}
+
 // TestIntegrationCICacheTrimLRUArguments: the program computes with its three
 // numbers in shell arithmetic, so a value that is not digits is refused with exit
 // 2 before anything is computed or printed. A path that holds a newline is left
