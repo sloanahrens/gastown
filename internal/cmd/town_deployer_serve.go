@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -77,6 +78,23 @@ func runTownDeployerServeIn(ctx context.Context, env townDeployerServeEnv) error
 	req, err := deployerinbox.ParseRequest(name, data)
 	if err != nil {
 		return fmt.Errorf("the oldest request is not valid, so it is left in the inbox: %w", err)
+	}
+
+	// An answer already published for this request means an earlier run answered it and its move
+	// into done failed: running the steps again would plan or apply a second time and WriteAnswer
+	// would refuse to publish over the first answer, so the request would be answered on every
+	// run. Finish the move and run no step.
+	answerPath := filepath.Join(env.answers, req.ID+".json")
+	if _, err := os.Stat(answerPath); err == nil {
+		if err := os.Rename(path, filepath.Join(done, name)); err != nil {
+			return fmt.Errorf("moving the already answered request %s into %s: %w", path, done, err)
+		}
+		if _, err := fmt.Fprintf(env.out, "deployer: request %s was already answered at %s; moved to done\n", req.ID, answerPath); err != nil {
+			return fmt.Errorf("the request %s was already answered and is moved, but printing that failed: %w", req.ID, err)
+		}
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("checking whether the request %s already has an answer at %s: %w", req.ID, answerPath, err)
 	}
 
 	answer := deployerinbox.Handle(ctx, env.steps, req, env.now())

@@ -60,6 +60,17 @@ func writeServeRequest(t *testing.T, inbox, id string) {
 	}
 }
 
+// writeServeAnswer puts an answer file in place, as an earlier run that answered the request but
+// failed to move it would have left it.
+func writeServeAnswer(t *testing.T, answers, id string) string {
+	t.Helper()
+	path := filepath.Join(answers, id+".json")
+	if err := os.WriteFile(path, []byte(`{"id":"`+id+`","status":"proposed"}`), 0o644); err != nil {
+		t.Fatalf("writing the earlier answer: %v", err)
+	}
+	return path
+}
+
 func serveNames(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -114,6 +125,40 @@ func TestTownDeployerServeOnce(t *testing.T) {
 		wantOut := "id: " + serveOlderID + "\nstatus: proposed\nanswer: " + filepath.Join(answers, serveOlderID+".json") + "\n"
 		if out.String() != wantOut {
 			t.Errorf("the command printed %q, want %q", out.String(), wantOut)
+		}
+	})
+
+	t.Run("a request whose answer is already published is moved to done and no step runs again", func(t *testing.T) {
+		t.Parallel()
+		inbox, answers, state := newServeTestDirs(t)
+		writeServeRequest(t, inbox, serveOlderID)
+		answerPath := writeServeAnswer(t, answers, serveOlderID)
+		before, err := os.ReadFile(answerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		steps := &serveFakeSteps{}
+		var out bytes.Buffer
+		env := townDeployerServeEnv{once: true, inbox: inbox, answers: answers, state: state, steps: steps, now: serveClock, out: &out}
+
+		if err := runTownDeployerServeIn(context.Background(), env); err != nil {
+			t.Fatalf("runTownDeployerServeIn = %v", err)
+		}
+		if steps.calls != 0 {
+			t.Errorf("the steps ran %d times for an already answered request, want 0", steps.calls)
+		}
+		if got := serveNames(t, inbox); len(got) != 0 {
+			t.Errorf("the inbox holds %v, want it empty", got)
+		}
+		if got := serveNames(t, filepath.Join(state, "done")); len(got) != 1 || got[0] != serveOlderID+".json" {
+			t.Errorf("done holds %v, want the request", got)
+		}
+		after, err := os.ReadFile(answerPath)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Errorf("the earlier answer changed: %v, %q to %q", err, before, after)
+		}
+		if !strings.Contains(out.String(), "was already answered") {
+			t.Errorf("the command printed %q, want it to say the request was already answered", out.String())
 		}
 	})
 
@@ -278,6 +323,25 @@ func TestTownDeployerServeOnceFails(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "moving the request"},
+		{"an already answered request that cannot be moved", func(t *testing.T, env *townDeployerServeEnv) {
+			writeServeAnswer(t, env.answers, serveOlderID)
+			target := filepath.Join(env.state, "done", serveOlderID+".json")
+			if err := os.MkdirAll(filepath.Join(target, "x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "moving the already answered request"},
+		{"an already answered request whose move cannot be printed", func(t *testing.T, env *townDeployerServeEnv) {
+			writeServeAnswer(t, env.answers, serveOlderID)
+			env.out = serveFailingWriter{}
+		}, "was already answered and is moved, but printing that failed"},
+		{"an answer whose existence cannot be checked", func(t *testing.T, env *townDeployerServeEnv) {
+			// A path under a regular file: Stat answers ENOTDIR, which is not "no answer yet".
+			blocker := filepath.Join(filepath.Dir(env.answers), "answers-file")
+			if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			env.answers = filepath.Join(blocker, "answers")
+		}, "already has an answer"},
 		{"a no-request line that cannot be printed", func(t *testing.T, env *townDeployerServeEnv) {
 			if err := os.Remove(filepath.Join(env.inbox, serveOlderID+".json")); err != nil {
 				t.Fatal(err)
