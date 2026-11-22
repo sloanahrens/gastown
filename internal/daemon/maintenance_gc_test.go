@@ -308,6 +308,32 @@ func TestMaintenanceGCStateReplacementKeepsACopy(t *testing.T) {
 	}
 }
 
+// TestKeptStateCopyIsOwnerOnly: the copy of an unparseable state file is created
+// 0600, beside a state file of that mode, whatever the daemon's umask allows (the
+// gate runs at 0022, a bare shell at 0000: 0644 shows as 0644 under both); the
+// first copy stands and keeps its mode (gt-wr0yww).
+func TestKeptStateCopyIsOwnerOnly(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := maintenanceGCStatePath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	copyPath, err := keepStateCopy(path)
+	if err != nil {
+		t.Fatalf("keepStateCopy: %v", err)
+	}
+	if fi, err := os.Stat(copyPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the copy's mode = %v, err %v, want -rw-------", fi.Mode().Perm(), err)
+	}
+	if _, err := keepStateCopy(path); !errors.Is(err, errStateCopyStands) {
+		t.Errorf("a second copy = %v, want the first to stand", err)
+	}
+}
+
 // TestMaintenanceGCStateReplacementEdges: a copy that cannot be kept does not stop
 // the record and the state says so; a fresh town sets no stamp; a readable file
 // keeps the stamp it has across a write.
