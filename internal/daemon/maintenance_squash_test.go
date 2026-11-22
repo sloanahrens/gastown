@@ -2423,3 +2423,56 @@ func TestSquashStampToleranceIsOneMinute(t *testing.T) {
 		})
 	}
 }
+
+// TestSquashResetHoldDatesFromTheNewerInstant: while a state reset holds the
+// gate, a database's last run is the later of its own record and the stamp. The
+// gate itself holds either way for the day, so the instant that gated shows in
+// the check's log line: "started 1h0m0s ago" is the record, "20h0m0s ago" the
+// stamp (gt-n0oake).
+func TestSquashResetHoldDatesFromTheNewerInstant(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		stamp  time.Duration // from now
+		record time.Duration // from now; zero is none
+		want   string
+	}{
+		{"a record newer than the stamp gates on the record", -20 * time.Hour, -time.Hour, "last run started 1h0m0s ago"},
+		{"a record older than the stamp gates on the stamp", -2 * time.Hour, -30 * time.Hour, "last run started 2h0m0s ago"},
+		{"no record gates on the stamp", -5 * time.Hour, 0, "last run started 5h0m0s ago"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _, logs := squashDueDaemon(t)
+			writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+			calls := 0
+			scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900, AfterRead: true}}, nil)
+			var record time.Time
+			if tc.record != 0 {
+				record = squashTestNow.Add(tc.record)
+			}
+			resetState(t, d, squashTestNow.Add(tc.stamp), "kept", record)
+
+			d.runScheduledMaintenance()
+
+			if calls != 0 {
+				t.Errorf("the check started %d runs inside the hold, want none", calls)
+			}
+			if !strings.Contains(logs.String(), tc.want) {
+				t.Errorf("the check's log lacks %q: %q", tc.want, logs.String())
+			}
+		})
+	}
+}
+
+// TestSquashResetHoldEqualsTheRunInterval: the hold a reset stamp puts on a
+// gate is the gate itself, one rule in two places; doltsquash.RunInterval is the
+// source (squashCheckInterval already follows it) and a hold of another length
+// would open a database's gate early or keep it shut past its own interval
+// (gt-n0oake).
+func TestSquashResetHoldEqualsTheRunInterval(t *testing.T) {
+	t.Parallel()
+	if squashResetHold != doltsquash.RunInterval {
+		t.Errorf("squashResetHold = %v, want doltsquash.RunInterval %v", squashResetHold, doltsquash.RunInterval)
+	}
+}
