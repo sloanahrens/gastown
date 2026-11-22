@@ -225,6 +225,27 @@ func TestOMSkewMismatchRaisesOnceThenClears(t *testing.T) {
 	}
 }
 
+// TestOMSkewMessageNamesThePinRefresh: the escalation names the image pin the
+// image-pins planner refreshes, not an install from the rig (gt-d216w1).
+func TestOMSkewMessageNamesThePinRefresh(t *testing.T) {
+	t.Parallel()
+	d, rec := omSkewDaemon(t)
+	d.omSkewOnce()
+	esc := rec.Escalations()
+	if len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want one for a skew", esc)
+	}
+	msg := esc[0].Escalation.Reason
+	for _, want := range []string{omSkewInstalledSHA[:8], omSkewRemoteSHA[:8], "image pin", "image-pins-refresh"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("alert reason %q does not name %q", msg, want)
+		}
+	}
+	if strings.Contains(msg, "install om from") {
+		t.Errorf("alert reason %q still tells the operator to install om from the rig", msg)
+	}
+}
+
 // TestOMSkewEqualReadsLeaveNoAlert: an om in step with origin/main raises
 // nothing, and clears once, on the process's first reading, for an alert a
 // previous process may have left open (gt-pdyzk acceptance 1, gt-rg2xc).

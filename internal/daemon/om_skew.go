@@ -50,8 +50,8 @@ const (
 	// omSkewRig is the om rig's directory under the town; its bare repository
 	// (<rig>/.repo.git) is where the origin url is read from.
 	omSkewRig = "om"
-	// omSkewRigWorktree is the om rig's canonical worktree. The skew message
-	// names it as the place to install om from, and rebuild_om builds from it.
+	// omSkewRigWorktree is the om rig's canonical worktree. rebuild_om builds
+	// from it; the skew message names the image pin instead (gt-d216w1).
 	omSkewRigWorktree = omSkewRig + "/mayor/rig"
 	// omSkewRemoteRef is the branch the installed om is meant to come from.
 	omSkewRemoteRef = "refs/heads/main"
@@ -493,8 +493,8 @@ func (d *Daemon) omSkewJudge(r omSkewReading) {
 // version` and a git log, and the alert is a pointer to a condition, not a
 // log line.
 func omSkewMessage(installed, remote string) string {
-	return fmt.Sprintf("the installed om is %s but the om rig's origin/main is %s: landings run the older binary against the flags and gates of the newer one; install om from %s to clear this",
-		shortOMSHA(installed), shortOMSHA(remote), omSkewRigWorktree)
+	return fmt.Sprintf("the installed om is %s but the om rig's origin/main is %s: landings run the older binary against the flags and gates of the newer one; the installed om is the image pin in deploy/daemon/image-pins, and the image-pins planner files its refresh bead (label image-pins-refresh); act only if no such bead is open",
+		shortOMSHA(installed), shortOMSHA(remote))
 }
 
 // shortOMSHA is the first 8 characters of a commit sha, for a message a human
