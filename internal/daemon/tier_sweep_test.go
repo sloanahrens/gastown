@@ -4087,12 +4087,11 @@ func TestTierSweepMirrorRebuildNeverFollowsALink(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name     string
-		link     string // the ancestor made a symlink to other, "" for none
-		atMirror bool   // the mirror path itself is a symlink to other/gastown.git
-		wantErr  string
+		link     string // the ancestor, under the town, made a symlink to the other directory; "" for none
+		atMirror bool   // the mirror path itself is a symlink to the other directory's gastown.git
 	}{
-		{name: "sweep-repo is a link", link: ".runtime/sweep-repo", wantErr: "sweep-repo is not a real directory"},
-		{name: ".runtime is a link", link: ".runtime", wantErr: ".runtime is not a real directory"},
+		{name: "sweep-repo is a link", link: ".runtime/sweep-repo"},
+		{name: ".runtime is a link", link: ".runtime"},
 		{name: "a link at the mirror path", atMirror: true},
 		{name: "a real directory"},
 	} {
@@ -4101,22 +4100,19 @@ func TestTierSweepMirrorRebuildNeverFollowsALink(t *testing.T) {
 			d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
 			town := d.config.TownRoot
 			other := t.TempDir()
-			victim := filepath.Join(other, "gastown.git")
-			if err := os.MkdirAll(victim, 0o700); err != nil {
-				t.Fatal(err)
-			}
 			mirror, err := tierSweepMirrorPath(town, spec.Rig)
 			if err != nil {
 				t.Fatal(err)
 			}
 			spec.Snapshot = mirror
+			// victim is the mirror another directory holds: a refusal must leave it.
+			victim := filepath.Join(other, "gastown.git")
+			if tc.link == ".runtime" {
+				victim = filepath.Join(other, "sweep-repo", "gastown.git")
+			}
+			mustMkdir(t, victim)
 			switch {
 			case tc.link == ".runtime":
-				if err := os.MkdirAll(filepath.Join(other, "sweep-repo"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				victim = filepath.Join(other, "sweep-repo", "gastown.git")
-				mustMkdir(t, victim)
 				mustSymlink(t, other, filepath.Join(town, ".runtime"))
 			case tc.link != "":
 				mustMkdir(t, filepath.Join(town, ".runtime"))
@@ -4134,9 +4130,10 @@ func TestTierSweepMirrorRebuildNeverFollowsALink(t *testing.T) {
 
 			_, err = d.tierSweepMirrorPrepare(spec)
 
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("err = %v, want it to say %q", err, tc.wantErr)
+			if tc.link != "" {
+				wantPath := filepath.Join(town, tc.link)
+				if err == nil || !strings.HasPrefix(err.Error(), wantPath+" is not a real directory") || !strings.HasSuffix(err.Error(), "nothing was removed") {
+					t.Errorf("err = %v, want it to start with %q and end with 'nothing was removed'", err, wantPath+" is not a real directory")
 				}
 			} else if err != nil {
 				t.Errorf("err = %v, want none", err)

@@ -3400,7 +3400,9 @@ func (d *Daemon) tierSweepMirrorPrepare(spec sweeprunner.Spec) (string, error) {
 	// ancestor of the path: with sweep-repo a link to another directory it would
 	// delete that directory's mirror. Each ancestor the daemon owns must be a real
 	// directory or missing (it is created below); the town root may be a link, as
-	// /var is on a Mac (gt-6bv58o).
+	// /var is on a Mac (gt-6bv58o). The check assumes no concurrent writer replaces
+	// an ancestor between it and the removal: the daemon owns .runtime, and launches
+	// run one at a time.
 	for _, dir := range []string{filepath.Join(d.config.TownRoot, ".runtime"), filepath.Dir(mirror)} {
 		info, err := fsys.lstat(dir)
 		switch {
