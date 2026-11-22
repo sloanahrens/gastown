@@ -79,8 +79,8 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 		Kind:     attention.KindStoryPointsDrift,
 		Severity: attention.SeverityMedium,
 		Summary: fmt.Sprintf(
-			"story points estimate drift: rank correlation %.2f over the last %d landings of the %s extract is below %.2f; weights %s",
-			reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
+			"story points estimate drift: rank correlation %.2f (95%% interval %.2f to %.2f) over the last %d landings of the %s extract is below %.2f; weights %s",
+			reading.Rho, reading.Lo, reading.Hi, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
 	}}, nil
 }
 
