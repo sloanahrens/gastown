@@ -43,11 +43,10 @@ func storyPointsDriftFailing(r metrics.StoryPointsDriftReading) bool {
 // collectStoryPointsDrift raises the drift item when the whole 95% interval of
 // the newest extract's rank correlation lies under storyPointsDriftBar, and the
 // unreadable item when no measure could be taken. A reading whose interval
-// straddles or ends at the bar raises nothing, and it drops a drift item already
-// held, since the reading is not failing. A reading nobody could measure raises
-// nothing either, and it keeps a drift item already held, since a measurement
-// not taken says nothing about whether the drift stands. A failed read keeps it
-// too, beside the unreadable item.
+// straddles or ends at the bar raises nothing and drops a drift item already
+// held. A reading nobody could measure raises nothing either and keeps a drift
+// item already held, since a measurement not taken says nothing about whether
+// the drift stands. A failed read keeps it too, beside the unreadable item.
 func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention.Item, error) {
 	// The production sources always carry the read (attentionSources, pinned by
 	// TestStoryPointsDriftAttentionIsWiredAndRegistered). A hand-built sources

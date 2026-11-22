@@ -149,69 +149,47 @@ func TestStoryPointsDriftAttentionSummaryNamesTheInterval(t *testing.T) {
 }
 
 // TestStoryPointsDriftAttentionIntervalDecidesTheItem: the item is raised by
-// the whole interval, so a reading whose Rho is under the bar but whose interval
-// straddles it raises nothing, and one whose interval lies wholly under the bar
-// raises the item naming that interval.
+// the whole interval: a straddling one raises nothing, one wholly under the bar
+// raises the item, and a straddling reading clears the item a failing one raised.
 func TestStoryPointsDriftAttentionIntervalDecidesTheItem(t *testing.T) {
 	t.Parallel()
+	under := driftReadingWithInterval(0.41, 0.35, 0.47, "v1")
+	straddle := driftReadingWithInterval(0.45, 0.38, 0.55, "v1")
 	tests := []struct {
-		name string
-		rho  float64
-		lo   float64
-		hi   float64
-		want int
+		name    string
+		reads   []metrics.StoryPointsDriftRead
+		want    int
+		cleared bool
 	}{
-		{name: "an interval straddling the bar", rho: 0.45, lo: 0.38, hi: 0.55, want: 0},
-		{name: "an interval wholly under the bar", rho: 0.41, lo: 0.35, hi: 0.47, want: 1},
+		{"an interval wholly under the bar raises one", []metrics.StoryPointsDriftRead{under}, 1, false},
+		{"a straddling interval raises nothing", []metrics.StoryPointsDriftRead{straddle}, 0, false},
+		{"a straddling interval clears the held item", []metrics.StoryPointsDriftRead{under, straddle}, 0, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			i := 0
 			f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
-				return driftReadingWithInterval(tc.rho, tc.lo, tc.hi, "v1"), nil
+				read := tc.reads[i]
+				if i+1 < len(tc.reads) {
+					i++
+				}
+				return read, nil
 			})
-			items := f.collect(t, f.src.collectStoryPointsDrift)
-			if len(items) != tc.want {
-				t.Fatalf("reading rho %v interval %v to %v raised %+v, want %d", tc.rho, tc.lo, tc.hi, items, tc.want)
+			st := f.tick(t, driftTick)
+			for n := 1; n < len(tc.reads); n++ {
+				st = f.tickFrom(t, st, driftTick.Add(time.Duration(n)*time.Minute))
 			}
-			if tc.want != 1 {
-				return
+			if got := countKind(st.Items, attention.KindStoryPointsDrift); got != tc.want {
+				t.Errorf("items = %d, want %d", got, tc.want)
 			}
-			if got := items[0].Key; got != storyPointsDriftKey {
-				t.Errorf("key = %q, want %q", got, storyPointsDriftKey)
-			}
-			for _, want := range []string{"0.35", "0.47", "lies wholly under 0.50"} {
-				if !strings.Contains(items[0].Summary, want) {
-					t.Errorf("summary %q does not name %q", items[0].Summary, want)
+			if tc.cleared {
+				events := storyPointEvents(t, f, storyPointsDriftKey)
+				if len(events) != 2 || events[1].State != attention.EventCleared {
+					t.Errorf("events = %+v, want a raised and a cleared line", events)
 				}
 			}
 		})
-	}
-}
-
-// TestStoryPointsDriftAttentionStraddlingReadingClearsTheHeldItem: a held item
-// is dropped by the tick whose reading straddles the bar, since that reading is
-// not failing.
-func TestStoryPointsDriftAttentionStraddlingReadingClearsTheHeldItem(t *testing.T) {
-	t.Parallel()
-	straddle := false
-	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
-		if straddle {
-			return driftReadingWithInterval(0.45, 0.38, 0.55, "v1"), nil
-		}
-		return driftReadingWithInterval(0.41, 0.35, 0.47, "v1"), nil
-	})
-	first := f.tick(t, driftTick)
-	itemByKey(t, first, storyPointsDriftKey)
-
-	straddle = true
-	second := f.tickFrom(t, first, driftTick.Add(time.Minute))
-	if _, ok := attention.Find(second, storyPointsDriftKey); ok {
-		t.Errorf("the item is still queued after a straddling reading: %+v", second.Items)
-	}
-	events := storyPointEvents(t, f, storyPointsDriftKey)
-	if len(events) != 2 || events[1].State != attention.EventCleared {
-		t.Errorf("events = %+v, want a raised and a cleared line", events)
 	}
 }
 
