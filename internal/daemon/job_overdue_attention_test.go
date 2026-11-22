@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +66,13 @@ func TestJobOverdueAttention(t *testing.T) {
 // job.overdue_wake. Every other key resolves to the info rule (gt-obe5qp).
 func TestJobOverdueWake(t *testing.T) {
 	t.Parallel()
+
+	// The table is pinned whole: a job added to or removed from it needs this
+	// list and its row changed together, or the job silently loses the wake
+	// key and the overseer is never woken (gt-eajich).
+	if got, want := slices.Sorted(maps.Keys(jobOverdueWakeJobs)), []string{"dolt_backup", "dolt_gc"}; !slices.Equal(got, want) {
+		t.Fatalf("jobOverdueWakeJobs names %q, want %q: a job added to or removed from the table needs this list and its row changed together", got, want)
+	}
 
 	// The row per entry of the wake table, at the cadence each job runs at:
 	// dolt_gc is the weekly maintenance gc and dolt_backup the nightly one.
