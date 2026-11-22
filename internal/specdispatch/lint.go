@@ -367,8 +367,9 @@ type LintVerdict struct {
 	Refusals []Refusal
 	// Warnings are advisory lines that change neither the route nor the exit
 	// code: the risk-path warning, the note that its read did not run, the
-	// story-point size gate's unread label, and the change-budget warning for
-	// a budget under twenty lines per acceptance box. A work bead's warnings
+	// story-point size gate's unread label, the change-budget warning for
+	// a budget under twenty lines per acceptance box, and the acceptance-count
+	// warning for a bead with five or more items. A work bead's warnings
 	// are populated on every route, so a refused bead still learns its text
 	// names too many risk paths.
 	Warnings []string
@@ -798,8 +799,9 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //
 // The shape decides the route and nothing else: the risk-path warning is
 // computed beside it and changes neither the route nor the exit code
-// (docs/design/rework-program.md, lever 2), and so is the change-budget
-// warning for a budget under twenty lines per acceptance box (gt-ed0hjd).
+// (docs/design/rework-program.md, lever 2), and so are the change-budget
+// warning for a budget under twenty lines per acceptance box (gt-ed0hjd) and
+// the acceptance-count warning for five or more items (gt-7hrz5i).
 func Lint(s Spec, t Template) LintVerdict {
 	return LintWith(s, t, LintOptions{})
 }
@@ -837,6 +839,7 @@ func lint(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 		if w := changeBudgetWarning(sections["size"], CountAcceptance(acceptanceText(s, sections))); w != "" {
 			v.Warnings = append(v.Warnings, w)
 		}
+		v.Warnings = append(v.Warnings, acceptanceWarnings(s, sections)...)
 	}
 	return v
 }
