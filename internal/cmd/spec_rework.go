@@ -42,7 +42,7 @@ type reworkLandingReader interface {
 // open is the read seam so a test supplies a fake with no file and no clock. The
 // production caller passes a closure wrapping land.RigLandingsFile, which returns
 // a *LandingsFile and not this interface (function types are invariant); see
-// gt-ntel2p, and openRigLandings in the test for the shape. A read that fails returns the
+// gt-ntel2p and openRigLandings. A read that fails returns the
 // error with the rig named and the underlying record's path text kept, never an
 // empty list the advisory would count as no landings (gt-wihqmh).
 func reworkLandings(open func(townRoot, rig string) (reworkLandingReader, error), townRoot, rig string, now time.Time) ([]land.LandingRecord, error) {
@@ -55,4 +55,17 @@ func reworkLandings(open func(townRoot, rig string) (reworkLandingReader, error)
 		return nil, fmt.Errorf("rework landings for rig %s: %w", rig, err)
 	}
 	return recs, nil
+}
+
+// openRigLandings is the closure the production caller passes (gt-ntel2p):
+// land.RigLandingsFile returns a *LandingsFile, not a reworkLandingReader, and
+// function types are invariant, so it is wrapped. On error it returns a nil
+// interface and not a nil *LandingsFile inside one, which a caller testing the
+// reader for nil would take for a reader.
+func openRigLandings(townRoot, rig string) (reworkLandingReader, error) {
+	f, err := land.RigLandingsFile(townRoot, rig)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
 }

@@ -1525,6 +1525,9 @@ type specLintOpts struct {
 	// EstimateWait bounds the lint's wait for Estimate; zero is
 	// specLintEstimateWait, and a test sets it short (gt-floskq).
 	EstimateWait time.Duration
+	// ReworkLandings reads a rig's landings of the advisory window, set with
+	// --estimate; nil prints no rework advice (gt-ntel2p).
+	ReworkLandings func(rig string) ([]land.LandingRecord, error)
 }
 
 // specLintEstimateWait is the longest the lint waits for --estimate's run: the
@@ -1563,6 +1566,9 @@ func specLintOptsFor(sd *config.SpecDispatchConfig, townRoot string, withEstimat
 	opts.RequireEstimate = !allowUnestimated
 	if withEstimate {
 		opts.Estimate = specLintEstimateRun(townRoot, errw)
+		opts.ReworkLandings = func(rig string) ([]land.LandingRecord, error) {
+			return reworkLandings(openRigLandings, townRoot, rig, time.Now())
+		}
 	}
 	return opts, nil
 }
@@ -1723,11 +1729,32 @@ func specLintVerdict(out, errOut io.Writer, beadID string, spec specdispatch.Spe
 	if advice := specLintSizeAdvice(spec); advice != "" {
 		report.Advice = append(report.Advice, advice)
 	}
+	if advice := specLintReworkAdvice(spec, opts.ReworkLandings); advice != "" {
+		report.Advice = append(report.Advice, advice)
+	}
 	report.Hints = specSlowHints(spec, hint)
 	if !asJSON {
 		writeSpecHints(errOut, report.Hints)
 	}
 	return verdict, emitSpecLint(out, errOut, tmpl, report, verdict.Line(beadID), code, asJSON)
+}
+
+// specLintReworkAdvice is the line that says how often beads at the bead's
+// estimate needed a second attempt, from the rig's landings. Empty when the
+// bead has no sp estimate or the ledger holds too few landings at it; a ledger
+// that cannot be read says so, so the missing figure is seen (gt-ntel2p).
+func specLintReworkAdvice(s specdispatch.Spec, read func(rig string) ([]land.LandingRecord, error)) string {
+	points, ok := storypoints.EstimateOf(s.Labels)
+	if !ok || read == nil {
+		return ""
+	}
+	recs, err := read(s.Rig)
+	if err != nil {
+		return "the rework rate could not be read: " + err.Error()
+	}
+	share, n := land.ReworkRate(recs, points)
+	line, _ := reworkAdvice(points, share, n)
+	return strings.TrimPrefix(line, "advice: ")
 }
 
 // specEstimateMinutesLabelPrefix is the label prefix the estimate writes a
