@@ -93,13 +93,19 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 	if !storyPointsDriftFailing(reading) {
 		return nil, nil
 	}
+	// The AUC for beads over 20 minutes is named beside the rank interval when it
+	// was measured, so the reader sees both signals that raised the item.
+	auc := ""
+	if reading.LongMeasurable {
+		auc = fmt.Sprintf("; AUC for over 20 minutes %.2f (95%% interval %.2f to %.2f)", reading.LongAUC, reading.LongLo, reading.LongHi)
+	}
 	return []attention.Item{{
 		Key:      storyPointsDriftKey,
 		Kind:     attention.KindStoryPointsDrift,
 		Severity: attention.SeverityMedium,
 		Summary: fmt.Sprintf(
-			"story points estimate drift: the 95%% interval %.2f to %.2f of the rank correlation %.2f over the last %d landings of the %s extract lies wholly under %.2f; weights %s",
-			reading.Lo, math.Floor(reading.Hi*100)/100, reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
+			"story points estimate drift: the 95%% interval %.2f to %.2f of the rank correlation %.2f over the last %d landings of the %s extract lies wholly under %.2f%s; weights %s",
+			reading.Lo, math.Floor(reading.Hi*100)/100, reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, auc, read.Weights),
 	}}, nil
 }
 
