@@ -7,9 +7,11 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// RecordQueue holds the landing records a pass has yet to write: Pending lists
-// them, and Remove drops one once it is written or its bead already carries it.
+// RecordQueue holds the landing records a pass has yet to write: Enqueue adds
+// one, Pending lists them, and Remove drops one once it is written or its bead
+// already carries it.
 type RecordQueue interface {
+	Enqueue(land.PendingRecord) error
 	Pending() ([]land.PendingRecord, error)
 	Remove(land.PendingRecord) error
 }
