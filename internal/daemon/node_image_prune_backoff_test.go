@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,4 +39,27 @@ func TestNodePruneBackoffDecides(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Failed and Allowed run from several goroutines at once for one shared id and
+// for several distinct ids, so the race detector sees an entries map read and
+// written without its lock.
+func TestNodePruneBackoffIsRaceClean(t *testing.T) {
+	t.Parallel()
+	var b nodePruneBackoff
+	ids := []string{"shared", "run-a", "run-b", "run-c", "run-d"}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 20 {
+				for _, id := range ids {
+					b.Failed(id, time.Time{})
+					b.Allowed(id, time.Time{})
+				}
+			}
+		})
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	awaitNodePruneFlight(t, done, "every goroutine to finish calling Failed and Allowed")
 }
