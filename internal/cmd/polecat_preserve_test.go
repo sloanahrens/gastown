@@ -394,3 +394,54 @@ func TestNukeSeatOriginReadsTheAgentBeadKindAndOrigin(t *testing.T) {
 		})
 	}
 }
+
+// A tip on the branch's own remote copy is not a landing: the line says it is
+// on origin and never that it is "reachable from" a ref (gt-wz5ct4).
+func TestNukePreserveLineSaysOnOriginForTheBranchsOwnRef(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/slit/gt-wz5ct4+mwodhucg"
+	for _, tc := range []struct{ branch, ref, target string }{
+		{branch, "origin/" + branch, "main"},
+	} {
+		got := preservedRefWords(tc.branch, tc.ref, tc.target)
+		want := "already on origin as " + tc.ref + " (the branch's own remote copy)"
+		if got != want {
+			t.Errorf("preservedRefWords(%q, %q, %q) = %q, want %q", tc.branch, tc.ref, tc.target, got, want)
+		}
+		if strings.Contains(got, "reachable from") || strings.Contains(got, "merged") {
+			t.Errorf("wording %q reads as a merge", got)
+		}
+	}
+}
+
+// A tip another branch holds is neither this branch's copy nor its landing.
+func TestNukePreserveLineNamesAnotherBranchThatHoldsTheTip(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ branch, ref, target string }{
+		{"polecat/slit/gt-wz5ct4+mwodhucg", "origin/polecat/nux/gt-1k27vl", "main"},
+	} {
+		got := preservedRefWords(tc.branch, tc.ref, tc.target)
+		want := "already on origin in " + tc.ref + " (another branch holds it)"
+		if got != want {
+			t.Errorf("preservedRefWords(%q, %q, %q) = %q, want %q", tc.branch, tc.ref, tc.target, got, want)
+		}
+		if strings.Contains(got, "merged") {
+			t.Errorf("wording %q says merged for a ref that is not the target branch", got)
+		}
+	}
+}
+
+// "merged" belongs only to the rig's target branch: the same ref reads as
+// merged when it is the target and as another branch when it is not.
+func TestNukePreserveLineSaysMergedOnlyForTheTargetBranch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ ref, target, want string }{
+		{"origin/main", "main", "already merged into origin/main"},
+		{"origin/main", "dev", "already on origin in origin/main (another branch holds it)"},
+	} {
+		got := preservedRefWords("polecat/slit/gt-wz5ct4+mwodhucg", tc.ref, tc.target)
+		if got != tc.want {
+			t.Errorf("preservedRefWords(%q, %q) = %q, want %q", tc.ref, tc.target, got, tc.want)
+		}
+	}
+}
