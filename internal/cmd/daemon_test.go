@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/jobs"
 )
 
 // TestRunDaemonEnableSupervisor_RefusesWhenDaemonLockHeld verifies that
@@ -137,5 +140,44 @@ func TestDaemonScratchIsNotRegistered(t *testing.T) {
 		if c.Name() == "scratch" {
 			t.Fatalf("gt daemon scratch is registered; the command should have been deleted")
 		}
+	}
+}
+
+// TestDaemonJobListSourceMaps pins that the mapping copies every field the
+// collector judges, including an unknown state and an unrecorded run.
+func TestDaemonJobListSourceMaps(t *testing.T) {
+	t.Parallel()
+	lastRun := time.Date(2026, 11, 20, 3, 0, 0, 0, time.UTC)
+	list := []jobs.Job{
+		{Name: "dolt_backup", State: jobs.StateOverdue, Outcome: jobs.OutcomeFailed, LastRun: &lastRun, Cadence: 24 * time.Hour},
+		{Name: "future_step", State: jobs.State("a_later_state")},
+	}
+	want := []daemon.JobReading{
+		{Name: "dolt_backup", State: "overdue", Outcome: "failed", LastRun: lastRun, Cadence: 24 * time.Hour},
+		{Name: "future_step", State: "a_later_state"},
+	}
+	if got := jobReadingsFromJobs(list); !reflect.DeepEqual(got, want) {
+		t.Errorf("jobReadingsFromJobs() = %+v, want %+v", got, want)
+	}
+}
+
+// TestDaemonJobListSourceIsWired pins that the daemon start code installs the
+// jobs.List-backed source and that a failed read comes back as its error, never
+// as an empty list the collector reads as clean.
+func TestDaemonJobListSourceIsWired(t *testing.T) {
+	t.Parallel()
+
+	noHome := errors.New("no home directory")
+	wireJobListSource(func() (string, error) { return "", noHome })
+	if daemon.JobListSource == nil {
+		t.Fatal("wireJobListSource left daemon.JobListSource nil, so the collector raises nothing")
+	}
+	if _, err := daemon.JobListSource(t.TempDir(), time.Now()); !errors.Is(err, noHome) {
+		t.Errorf("source with no backup root = %v, want %v", err, noHome)
+	}
+
+	wireJobListSource(func() (string, error) { return t.TempDir(), nil })
+	if _, err := daemon.JobListSource("", time.Now()); err == nil {
+		t.Error("source on an empty town root = nil error, want jobs.List's refusal")
 	}
 }
