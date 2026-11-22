@@ -105,3 +105,42 @@ func TestFollowupSkipAnswersAreKeptPerBead(t *testing.T) {
 		t.Errorf("created %d beads, want one for the landing whose finding was kept:\n%s", len(f.fake.created), log)
 	}
 }
+
+// TestFollowupSkipAnswersAreKeyedByTheWholeCandidate: two candidates whose
+// fingerprints match (the fingerprint normalizes the title) but whose raw titles
+// the hook answers differently each get their own answer, each is asked once
+// however many passes read it, and a hook that panics on one keeps that finding
+// and is not asked about it again (gt-5evt7q).
+func TestFollowupSkipAnswersAreKeyedByTheWholeCandidate(t *testing.T) {
+	t.Parallel()
+	a := FollowupCandidate{Path: "a.go", Title: "Comment wording (a.go)"}
+	b := FollowupCandidate{Path: "a.go", Title: "Comment wording a go"}
+	if Fingerprint(a.Path, a.Title) != Fingerprint(b.Path, b.Title) {
+		t.Fatalf("fixture: the fingerprints differ, so the row proves nothing")
+	}
+	boom := FollowupCandidate{Path: "b.go", Title: "panics"}
+	asked := map[string]int{}
+	l := &Lander{FollowupSkip: func(_ Work, c FollowupCandidate) string {
+		asked[c.Title]++
+		switch c.Title {
+		case a.Title:
+			return "doc-nit"
+		case boom.Title:
+			panic("the policy broke")
+		}
+		return ""
+	}}
+	skips := newFollowupSkips()
+	w := Work{BeadID: "gt-x"}
+	for pass := 1; pass <= 2; pass++ {
+		kept := l.skippedCandidates(w, []FollowupCandidate{a, b, boom}, skips)
+		if len(kept) != 2 || kept[0] != b || kept[1] != boom {
+			t.Errorf("pass %d: kept %+v, want the title the hook keeps and the one it panicked on", pass, kept)
+		}
+	}
+	for _, c := range []FollowupCandidate{a, b, boom} {
+		if asked[c.Title] != 1 {
+			t.Errorf("%q was asked %d times over two passes, want once", c.Title, asked[c.Title])
+		}
+	}
+}
