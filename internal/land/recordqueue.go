@@ -30,7 +30,7 @@ type PendingRecord struct {
 const (
 	RecordKindNotes      = "notes"      // append Text to the bead's notes
 	RecordKindComment    = "comment"    // add Text as a comment on the bead
-	RecordKindAnnotation = "annotation" // post Text as a comment on the bead
+	RecordKindAnnotation = "annotation" // an annotation the landing worker could not post: posted once as a comment (AnnotationQueued)
 )
 
 // RecordQueue is a JSON-lines queue of landing records at the caller's Path.
@@ -163,6 +163,9 @@ func (l *Lander) queueRecord(rec PendingRecord) error {
 // twice (gt-xickh9).
 func AnnotationQueued(comments []beads.Comment, rec PendingRecord) bool {
 	text := strings.TrimSpace(rec.Text)
+	if text == "" {
+		return false // a blank annotation would match any blank comment
+	}
 	return slices.ContainsFunc(comments, func(c beads.Comment) bool { return strings.TrimSpace(c.Text) == text })
 }
 

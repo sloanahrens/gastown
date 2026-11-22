@@ -83,6 +83,14 @@ func TestAnnotationQueued(t *testing.T) {
 	}
 }
 
+func TestAnnotationQueuedBlankTextMatchesNothing(t *testing.T) {
+	t.Parallel()
+	rec := PendingRecord{Bead: "gt-a", Kind: RecordKindAnnotation, Key: "k", Text: " \n"}
+	if AnnotationQueued([]beads.Comment{{Text: ""}, {Text: "  "}}, rec) {
+		t.Error("a blank annotation matched a blank comment")
+	}
+}
+
 func TestRecordQueueRemoveMissing(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "gone", "q.jsonl")
