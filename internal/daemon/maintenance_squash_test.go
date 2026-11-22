@@ -1365,6 +1365,109 @@ func TestSquashRecordFailedRunWritesFailedStateAndLine(t *testing.T) {
 	}
 }
 
+// TestSquashRecordRedactsTheRunError is the bead's boxes for the ledger's
+// message: the error strings a Dolt or driver error produces (a MySQL DSN, a
+// NAME=value word, a URL with a user and password) are redacted word by word, a
+// plain message keeps its words, and a 400-character message is cut to
+// ledgerErrorLimit runes ending in "...".
+func TestSquashRecordRedactsTheRunError(t *testing.T) {
+	t.Parallel()
+	const dsn = "user:hunter2@tcp(127.0.0.1:3307)/db"
+	long := strings.Repeat("word ", 80)
+	cases := []struct{ name, in, want string }{
+		{"a Go MySQL DSN", "doltsquash: open " + dsn + " failed", "doltsquash: open <redacted> failed"},
+		{"a NAME=value word", "doltsquash: login password=hunter2 refused", "doltsquash: login <redacted> refused"},
+		{"a URL with a user and password", "doltsquash: GET https://user:pw@localhost/api failed", "doltsquash: GET <redacted> failed"},
+		{"a URL without a user", "doltsquash: GET https://db.example.com/api failed", "doltsquash: GET <redacted> failed"},
+		{"a token word", "doltsquash: auth with sk-ant-api03-AbCdEfGhIjKlMnOp failed", "doltsquash: auth with <redacted> failed"},
+		{"a plain message", "doltsquash: the catch-up: read failed", "doltsquash: the catch-up: read failed"},
+		{"a 400-character message", long, string([]rune(strings.TrimSpace(long))[:ledgerErrorLimit-3]) + "..."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, errors.New(tc.in))
+			if e.Error != tc.want {
+				t.Errorf("the ledger line holds error %q, want %q", e.Error, tc.want)
+			}
+			for _, secret := range []string{"hunter2", dsn, "user:pw@"} {
+				if strings.Contains(e.Error, secret) {
+					t.Errorf("the ledger line holds %q: %q", secret, e.Error)
+				}
+			}
+		})
+	}
+}
+
+// TestSquashRecordClassifiesTheRunError: error_class names a deadline run
+// timeout, a canceled run canceled and any other failure other, and the field is
+// absent when the run had no error.
+func TestSquashRecordClassifiesTheRunError(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"a deadline", errors.Join(errors.New("doltsquash: the rebase stopped"), context.DeadlineExceeded), squashErrorClassTimeout},
+		{"a cancellation", errors.Join(errors.New("doltsquash: the rebase stopped"), context.Canceled), squashErrorClassCanceled},
+		{"another failure", errors.New("doltsquash: the rebase: read failed"), squashErrorClassOther},
+		{"no error", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newSquashLedgerEntry("gt", squashTestNow, squashTestNow, doltsquash.RunResult{}, tc.err)
+			if e.ErrorClass != tc.want {
+				t.Errorf("the ledger line holds class %q, want %q", e.ErrorClass, tc.want)
+			}
+			line, err := json.Marshal(e)
+			if err != nil {
+				t.Fatalf("the ledger line does not marshal: %v", err)
+			}
+			if tc.want == "" && strings.Contains(string(line), "error_class") {
+				t.Errorf("a run with no error recorded an error_class: %s", line)
+			}
+			if tc.want != "" && !strings.Contains(string(line), `"error_class":"`+tc.want+`"`) {
+				t.Errorf("the ledger line does not carry error_class %q: %s", tc.want, line)
+			}
+		})
+	}
+}
+
+// TestSquashRecordRedactsTheFailedRunLine is the bead's end-to-end box: a failed
+// run whose error quotes the connection string back writes a line that holds
+// neither the DSN nor its password.
+func TestSquashRecordRedactsTheFailedRunLine(t *testing.T) {
+	t.Parallel()
+	d, _, _ := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	const dsn = "user:hunter2@tcp(127.0.0.1:3307)/db"
+	calls := 0
+	scriptSquashRun(d, &calls, doltsquash.RunResult{Summary: doltsquash.RunSummary{CommitsBefore: 900}},
+		errors.New("doltsquash: open "+dsn+" failed"))
+
+	d.runScheduledMaintenance()
+
+	data, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", squashLedgerFile))
+	if err != nil {
+		t.Fatalf("reading the ledger: %v", err)
+	}
+	for _, secret := range []string{"hunter2", dsn} {
+		if strings.Contains(string(data), secret) {
+			t.Errorf("the ledger line holds %q: %q", secret, data)
+		}
+	}
+	entries := readSquashLedger(t, d.config.TownRoot)
+	if len(entries) != 1 {
+		t.Fatalf("the ledger holds %d lines, want 1: %+v", len(entries), entries)
+	}
+	if entries[0].Error != "doltsquash: open <redacted> failed" || entries[0].ErrorClass != squashErrorClassOther {
+		t.Errorf("the ledger line holds error %q classed %q, want the DSN redacted and classed %q",
+			entries[0].Error, entries[0].ErrorClass, squashErrorClassOther)
+	}
+}
+
 // TestSquashRecordConflictedRunNamesTheConflict: a swap that kept both branches
 // is not an error, so its record says "conflict" and names the commits, which
 // is what the item D9b-3 raises from it reads.

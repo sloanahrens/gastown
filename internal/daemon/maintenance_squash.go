@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltsquash"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/townstate"
 )
 
 // The rolling Dolt squash's daemon step (D9a and D9b-1 of
@@ -748,8 +749,13 @@ type squashLedgerEntry struct {
 	// Recovered is the recovery table's row when the run settled a dead run's
 	// branches before its own first step.
 	Recovered string `json:"recovered,omitempty"`
-	// Error is why a failed run stopped.
+	// Error is why a failed run stopped, with each credential-shaped word
+	// replaced and the message cut to ledgerErrorLimit runes.
 	Error string `json:"error,omitempty"`
+	// ErrorClass is how the failed run ended: squashErrorClassTimeout,
+	// squashErrorClassCanceled or squashErrorClassOther. It is absent when the
+	// run had no error.
+	ErrorClass string `json:"error_class,omitempty"`
 	// Conflict is the swap conflict a conflicted run left, naming its commits.
 	Conflict string `json:"conflict,omitempty"`
 }
@@ -778,13 +784,68 @@ func newSquashLedgerEntry(db string, started, finished time.Time, res doltsquash
 	}
 	switch {
 	case runErr != nil:
-		e.Outcome, e.Error = squashOutcomeFailed, runErr.Error()
+		e.Outcome, e.Error = squashOutcomeFailed, redactLedgerError(runErr.Error())
+		e.ErrorClass = squashErrorClass(runErr)
 	case res.Swap.Conflict != nil:
 		e.Outcome, e.Conflict = squashOutcomeConflict, res.Swap.Conflict.String()
 	default:
 		e.Outcome = squashOutcomeCompleted
 	}
 	return e
+}
+
+// ledgerErrorLimit is the longest run error a ledger line carries, in runes,
+// counting the "..." a cut adds. The nightly backup archives the ledger.
+const ledgerErrorLimit = 256
+
+// ledgerRedactedMarker replaces a word of a run error that could hold a
+// credential.
+const ledgerRedactedMarker = "<redacted>"
+
+// squashErrorClass names, in the ledger's error_class, how a failed run ended:
+// the classes a reader tells apart without parsing the message.
+const (
+	squashErrorClassTimeout  = "timeout"
+	squashErrorClassCanceled = "canceled"
+	squashErrorClassOther    = "other"
+)
+
+// squashErrorClass is the ledger's error_class for runErr: timeout for a run
+// that hit its deadline, canceled for one whose context was canceled, and other
+// for every other error.
+func squashErrorClass(runErr error) string {
+	switch {
+	case errors.Is(runErr, context.DeadlineExceeded):
+		return squashErrorClassTimeout
+	case errors.Is(runErr, context.Canceled):
+		return squashErrorClassCanceled
+	default:
+		return squashErrorClassOther
+	}
+}
+
+// redactLedgerError is what the ledger records for a failed run's error. The
+// message is split into words and each word is replaced with
+// ledgerRedactedMarker when it could hold a credential: it contains an @ or a
+// ://, townstate.FindCredentials flags it (a NAME=value pair), or
+// config.LooksLikeSecret finds a token in it. A Dolt or driver error that
+// quotes the connection string back therefore reaches neither the ledger nor
+// the nightly backup that archives it. The result is cut to ledgerErrorLimit
+// runes, ending in "..." when the message was longer.
+func redactLedgerError(msg string) string {
+	words := strings.Fields(msg)
+	for i, word := range words {
+		if strings.Contains(word, "@") || strings.Contains(word, "://") ||
+			len(townstate.FindCredentials([]byte(word))) > 0 ||
+			agentconfig.LooksLikeSecret("", word) {
+			words[i] = ledgerRedactedMarker
+		}
+	}
+	out := strings.Join(words, " ")
+	if r := []rune(out); len(r) > ledgerErrorLimit {
+		out = string(r[:ledgerErrorLimit-3]) + "..."
+	}
+	return out
 }
 
 // squashRunItem is the item a failed or escalated run raises. Its first line
