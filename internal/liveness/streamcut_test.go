@@ -46,8 +46,9 @@ func TestStreamCutTailRealRecord(t *testing.T) {
 		t.Fatalf("the cut record followed by the seat's next ordinary record read as a cut")
 	}
 	// The harness writes a system turn_duration record at once after the cut
-	// (the record right after this fixture's line in the transcript it comes
-	// from), so a cut is never the literal last record. A seat that logs a
+	// (record 165 of the seat transcript on gt-efj3xs that record 164, this
+	// fixture, comes from: gt-6i52o7 holds the observation), so a cut is never
+	// the literal last record. A seat that logs a
 	// retry as a system record also reads cut while retrying; the revival
 	// rule's five-minute quiet window absorbs that (gt-ze3t74).
 	systemRecord := []byte(`{"type":"system","subtype":"turn_duration"}` + "\n")
