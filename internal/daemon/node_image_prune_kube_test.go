@@ -512,7 +512,7 @@ func TestNodeImagePruneKubeListJSONToleratesWarnings(t *testing.T) {
 }
 
 // TestNodeImagePruneKubeErrorsCarryTheHead: a non-zero exit carries the verb, the
-// exit status and the first 300 bytes of kubectl's answer, newlines turned to spaces
+// exit status and the first 300 bytes of kubectl's answer, control bytes turned to spaces
 // and "..." where it was cut, so a Forbidden, an AlreadyExists and a policy refusal
 // read apart in the log (gt-d4zhkq). Every verb's exit branch asserts the head in its
 // own table above.
@@ -532,6 +532,11 @@ func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
 	}{
 		{name: "answer past the bound", out: answer, want: strings.ReplaceAll(answer[:300], "\n", " ") + "...", cut: true},
 		{name: "answer under the bound", out: short, want: strings.NewReplacer("\n", " ", "\t", " ").Replace(short)},
+		// Control bytes are spaces before the cut; a CR rewrites a tailed log line (gt-favssx).
+		{name: "carriage return", out: "a\rb", want: "a b"},
+		{name: "escape byte", out: "\x1b[31mred\x1b[0m done", want: " [31mred [0m done"},
+		{name: "NUL", out: "a\x00b", want: "a b"},
+		{name: "DEL", out: "a\x7fb", want: "a b"},
 		// Byte 300 falls inside the hundredth three-byte rune, so the head ends a
 		// rune early and stays valid UTF-8.
 		{name: "cut inside a rune", out: "a" + strings.Repeat("世", 100), want: "a" + strings.Repeat("世", 99) + "...", cut: true},
@@ -552,6 +557,10 @@ func TestNodeImagePruneKubeErrorsCarryTheHead(t *testing.T) {
 			assert.NotContains(t, err.Error(), tail, "the error carries the answer past the 300-byte head")
 			assert.NotContains(t, err.Error(), "\n", "a newline reached the log line")
 			assert.NotContains(t, err.Error(), "\t", "a tab reached the log line")
+			assert.NotContains(t, err.Error(), "\r", "a carriage return reached the log line")
+			assert.NotContains(t, err.Error(), "\x1b", "an escape byte reached the log line")
+			assert.NotContains(t, err.Error(), "\x00", "a NUL reached the log line")
+			assert.NotContains(t, err.Error(), "\x7f", "a DEL reached the log line")
 			assert.True(t, utf8.ValidString(err.Error()), "the cut left half a rune")
 		})
 	}
