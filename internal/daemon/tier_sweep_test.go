@@ -4244,3 +4244,75 @@ func mustSymlink(t *testing.T, target, link string) {
 		t.Fatal(err)
 	}
 }
+
+// TestTierSweepMirrorRefusesAMarkerItCannotRead holds the marker's two rules: a
+// marker that is not a regular file refuses the launch, twice over, with the
+// mirror left as it is (it used to remove the mirror first and then fail its own
+// removal of the marker); a marker whose Lstat fails for a reason other than
+// absence refuses it too, never reading as "no marker"; a regular-file marker is
+// rebuilt as before (gt-art4s6).
+func TestTierSweepMirrorRefusesAMarkerItCannotRead(t *testing.T) {
+	t.Parallel()
+	t.Run("a marker that is a directory holding a file", func(t *testing.T) {
+		t.Parallel()
+		d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		mirror, err := tierSweepMirrorPath(d.config.TownRoot, spec.Rig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec.Snapshot = mirror
+		kept := filepath.Join(mirror, "HEAD")
+		mustMkdir(t, mirror)
+		if err := os.WriteFile(kept, []byte("ref"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		marker := mirror + ".updating"
+		mustMkdir(t, marker)
+		if err := os.WriteFile(filepath.Join(marker, "x"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for launch := 1; launch <= 2; launch++ {
+			if _, err := d.tierSweepMirrorPrepare(spec); err == nil || !strings.Contains(err.Error(), marker) || !strings.Contains(err.Error(), "remove it by hand") {
+				t.Fatalf("launch %d: err = %v, want it naming %s and 'remove it by hand'", launch, err, marker)
+			}
+			for _, p := range []string{kept, filepath.Join(marker, "x")} {
+				if _, err := os.Lstat(p); err != nil {
+					t.Errorf("launch %d: %s was touched: %v", launch, p, err)
+				}
+			}
+		}
+	})
+	t.Run("a regular-file marker is rebuilt as before", func(t *testing.T) {
+		t.Parallel()
+		d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		mirror, err := tierSweepMirrorPath(d.config.TownRoot, spec.Rig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec.Snapshot = mirror
+		mustMkdir(t, mirror)
+		if err := os.WriteFile(mirror+".updating", nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.tierSweepMirrorPrepare(spec); err != nil {
+			t.Fatalf("err = %v, want none", err)
+		}
+		if _, err := os.Lstat(mirror); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the mirror survived the rebuild: %v", err)
+		}
+	})
+	t.Run("an Lstat that fails for another reason than absence", func(t *testing.T) {
+		t.Parallel()
+		d, spec, _ := runnerKubernetesDaemon(t, atHour(time.Now(), 15))
+		mirror, err := tierSweepMirrorPath(d.config.TownRoot, spec.Rig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec.Snapshot = mirror
+		rec := &mirrorFSRecorder{paths: map[string]bool{mirror: true}, lstatFail: map[string]error{mirror + ".updating": fs.ErrPermission}}
+		d.tierSweepSeams.mirrorFS = rec.fs()
+		if _, err := d.tierSweepMirrorPrepare(spec); !errors.Is(err, fs.ErrPermission) || !strings.Contains(err.Error(), mirror+".updating") || len(rec.ops) != 0 {
+			t.Errorf("err = %v, operations %q, want the marker's Lstat error naming it and nothing removed", err, rec.ops)
+		}
+	})
+}

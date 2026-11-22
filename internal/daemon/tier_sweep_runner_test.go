@@ -1293,14 +1293,29 @@ type mirrorFSRecorder struct {
 	ops   []string
 	// fail makes the named operation (lstat, removeAll, mkdirAll, create, remove) fail.
 	fail map[string]error
+	// lstatFail makes the lstat of one path fail, the marker's and not an ancestor's.
+	lstatFail map[string]error
 }
+
+// regularInfo is the FileInfo of a recorded path: a regular file.
+type regularInfo struct{ fs.FileInfo }
+
+func (regularInfo) Mode() fs.FileMode { return 0o600 }
 
 func (m *mirrorFSRecorder) fs() *tierSweepMirrorFS {
 	return &tierSweepMirrorFS{
-		exists: func(p string) bool { return m.paths[p] },
-		// The recorder models no directories: every ancestor is missing, so the
-		// preparation creates it, unless the row makes the lstat fail.
-		lstat: func(string) (fs.FileInfo, error) { return nil, cmp.Or(m.fail["lstat"], fs.ErrNotExist) },
+		// The recorder models no directories: an ancestor is missing, so the
+		// preparation creates it; a recorded path is a regular file (the marker,
+		// or the half-written mirror, whose type nothing here reads).
+		lstat: func(p string) (fs.FileInfo, error) {
+			if err := cmp.Or(m.lstatFail[p], m.fail["lstat"]); err != nil {
+				return nil, err
+			}
+			if m.paths[p] {
+				return regularInfo{}, nil
+			}
+			return nil, fs.ErrNotExist
+		},
 		removeAll: func(p string) error {
 			m.ops = append(m.ops, "removeAll "+p)
 			delete(m.paths, p)
