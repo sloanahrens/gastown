@@ -203,6 +203,11 @@ type Lander struct {
 	// call. It runs in the feed path: keep it cheap and free of state. Nil skips
 	// nothing.
 	FollowupSkip func(w Work, c FollowupCandidate) string
+	// FollowupClass names the class of a finding the skip hook dropped, for the
+	// skips audit line. Nil gives the empty class (the daemon sets it in a later
+	// bead). It is called once per skipped finding of a pass and must be safe to
+	// call from the feed goroutine, which has no recover of its own (gt-xwdiiy).
+	FollowupClass func(c FollowupCandidate) string
 	// AcceptedRiskAlert, when set, raises the attention item the overseer sees
 	// for a review that was given an accepted risk (gt-tvhg8): key names the
 	// work bead and the head reviewed, so a repeat of the same review keeps
