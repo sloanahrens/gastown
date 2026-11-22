@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -176,8 +175,9 @@ func (r *rebuildHMRig) run(cmd *exec.Cmd) ([]byte, []byte, error) {
 			out += p + "\x00"
 		}
 	case strings.Contains(joined, " rev-list --count "):
-		// The skew reading measures the lag: the cases here are as far behind as the planner's threshold.
-		out = strconv.Itoa(imagePinsFileBehind) + "\n"
+		// A lag below the planner's thresholds: one commit, no time. rebuild_hm keeps its own
+		// bar (the first code-path difference), so a rebuild that used the planner's would not install.
+		out = "1\n"
 	case strings.Contains(joined, " show -s --format=%ct "):
 		out = "100\n"
 	case strings.Contains(joined, " rev-parse --verify -q "):
@@ -326,6 +326,29 @@ func TestRebuildHMInstallsWhenBehind(t *testing.T) {
 	}
 	if esc := r.rec.Escalations(); len(esc) != 0 {
 		t.Errorf("escalations = %+v, want none after a successful install", esc)
+	}
+}
+
+// TestRebuildHMOneCommitDifferenceStillRebuilds: the installed hm one commit behind
+// origin's main on a code path, far below the planner's thresholds for escalating to
+// a human, is still rebuilt and installed: rebuild_hm keeps the installed hm current
+// by itself, and the thresholds are the escalation's bar, not its (gt-72jahw).
+func TestRebuildHMOneCommitDifferenceStillRebuilds(t *testing.T) {
+	t.Parallel()
+	r := newRebuildHMRig(t, rebuildHMBehindAnswers())
+
+	if !r.d.runRebuildHM() {
+		t.Fatal("the cycle reached no verdict for a one-commit difference")
+	}
+
+	wantRenames := [][2]string{{r.installPath, r.prev}, {r.built, r.installPath}}
+	if !slices.Equal(r.renames, wantRenames) {
+		t.Errorf("renames = %v, want the build installed: %v", r.renames, wantRenames)
+	}
+	for _, call := range r.order {
+		if strings.Contains(call, " rev-list --count ") || strings.Contains(call, " show -s --format=%ct ") {
+			t.Errorf("rebuild_hm read the lag (%s), want no lag read at its own bar", call)
+		}
 	}
 }
 
