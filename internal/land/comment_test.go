@@ -422,3 +422,53 @@ func TestCommentVerdictTimeoutLogs(t *testing.T) {
 		t.Errorf("log = %q, want %q", out.String(), want)
 	}
 }
+
+// TestQueueVerdictComment: queueVerdictComment queues one comment record keyed
+// by the head marker, a nil queue keeps nothing, and a queue that refuses is
+// logged once (gt-yz041f).
+func TestQueueVerdictComment(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		queued  bool // l.Records is set
+		blocked bool // and it cannot be written
+		logged  bool
+	}{
+		{"a comment is queued under its head marker", true, false, false},
+		{"a nil queue keeps nothing", false, false, false},
+		{"a queue that refuses is logged once", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			l := newLandFixture(t).lander()
+			var log strings.Builder
+			l.Out = &log
+			if tc.queued {
+				q := queueAt(t, tc.blocked)
+				l.Records = &q
+			}
+			l.queueVerdictComment("gt-abc", "om approve 0.91 [head 12345678]", "12345678abcdef")
+			if tc.logged {
+				if n := strings.Count(log.String(), "could not queue the om verdict comment"); n != 1 {
+					t.Errorf("logged the queue failure %d times in %q; want once", n, log.String())
+				}
+				return
+			}
+			if log.Len() != 0 {
+				t.Errorf("log = %q; want nothing", log.String())
+			}
+			if !tc.queued {
+				return
+			}
+			got, err := l.Records.Pending()
+			if err != nil || len(got) != 1 {
+				t.Fatalf("Pending = %+v, %v; want one entry", got, err)
+			}
+			want := PendingRecord{Bead: "gt-abc", Kind: RecordKindComment, Key: verdictCommentHead("12345678abcdef"), Text: "om approve 0.91 [head 12345678]"}
+			got[0].At = want.At // queueRecord stamps the clock; every other field is the record's
+			if got[0] != want {
+				t.Errorf("queued %+v; want %+v", got[0], want)
+			}
+		})
+	}
+}
