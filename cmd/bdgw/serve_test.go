@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -394,7 +395,7 @@ func TestReadyDoltServe(t *testing.T) {
 			served := make(chan error, 1)
 			go func() { served <- serve(ctx, sc) }()
 			waitFor(t, bound, "both listeners accept", func() bool {
-				return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+				return acceptsNow(mainPl) && acceptsNow(pushPl)
 			})
 			pushed := send(bound, pushClient, http.MethodPut, "/v1/workspace", testDaemonToken, strings.NewReader(pushBody(t)))
 			if pushed.err != nil || pushed.status != http.StatusOK {
@@ -546,6 +547,10 @@ type pipeListener struct {
 	conns chan net.Conn
 	done  chan struct{}
 	once  sync.Once
+	// parked counts the Accept calls blocked in the select, and accepted the
+	// connections Accept has handed to a server.
+	parked   atomic.Int32
+	accepted atomic.Int32
 }
 
 func newPipeListener() *pipeListener {
@@ -553,11 +558,26 @@ func newPipeListener() *pipeListener {
 }
 
 func (l *pipeListener) Accept() (net.Conn, error) {
+	l.parked.Add(1)
+	defer l.parked.Add(-1)
 	select {
 	case c := <-l.conns:
+		l.accepted.Add(1)
 		return c, nil
 	case <-l.done:
 		return nil, net.ErrClosed
+	}
+}
+
+// closed reports whether the listener has closed. It reads the listener's own
+// state, so an accept loop that is merely between Accept calls does not read as
+// closed.
+func (l *pipeListener) closed() bool {
+	select {
+	case <-l.done:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -627,17 +647,6 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return pl.dial(ctx) },
 	}}
 	t.Cleanup(client.CloseIdleConnections)
-	// accepts reports whether the listener takes a new connection right now.
-	accepts := func() bool {
-		c, err := pl.dial(bound)
-		if err != nil {
-			return false
-		}
-		if err := c.Close(); err != nil {
-			t.Errorf("close the probe connection: %v", err)
-		}
-		return true
-	}
 
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
@@ -656,7 +665,7 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 		return finished
 	}
 	waitFor(t, bound, "the server listens", func() bool {
-		return returned() || accepts()
+		return returned() || acceptsNow(pl)
 	})
 	if returned() {
 		t.Fatalf("serve returned before any shutdown: %v", serveErr)
@@ -696,9 +705,7 @@ func TestBdgwServeDrainsInFlightCall(t *testing.T) {
 
 	stop()
 	// The listener closes as the drain begins, while the call is still held.
-	waitFor(t, bound, "the drain closes the listener", func() bool {
-		return !accepts()
-	})
+	waitFor(t, bound, "the drain closes the listener", pl.closed)
 	if returned() {
 		t.Fatal("serve returned while a call was still in flight")
 	}
@@ -848,17 +855,55 @@ func dialClient(t *testing.T, pl *pipeListener) *http.Client {
 	return client
 }
 
-// acceptsNow reports whether the listener takes a new connection right now.
-func acceptsNow(t *testing.T, bound context.Context, pl *pipeListener) bool {
-	t.Helper()
-	c, err := pl.dial(bound)
-	if err != nil {
-		return false
+// acceptsNow reports whether a dial would be taken right now, without opening a
+// connection: an Accept call parked on the unbuffered connection channel is
+// committed to taking the next dial.
+func acceptsNow(pl *pipeListener) bool {
+	return pl.parked.Load() > 0
+}
+
+// TestPipeListenerOpenWithoutAccept: a listener whose accept loop is between
+// Accept calls is open but not accepting. A wait on closure must read the
+// listener's state, since a moment with no parked Accept is not a closure.
+func TestPipeListenerOpenWithoutAccept(t *testing.T) {
+	t.Parallel()
+	pl := newPipeListener()
+	if pl.closed() {
+		t.Fatal("a new listener reads as closed")
 	}
-	if err := c.Close(); err != nil {
-		t.Errorf("close the probe connection: %v", err)
+	if acceptsNow(pl) {
+		t.Fatal("a listener with no parked Accept reads as accepting")
 	}
-	return true
+	if err := pl.Close(); err != nil {
+		t.Fatalf("close the listener: %v", err)
+	}
+	if !pl.closed() {
+		t.Fatal("a closed listener does not read as closed")
+	}
+}
+
+// TestWaitForProbeOpensNoConnection: waitFor polls acceptsNow until the listener
+// is ready, and the probe hands the listener nothing, so a wait costs it no
+// connection.
+func TestWaitForProbeOpensNoConnection(t *testing.T) {
+	t.Parallel()
+	bound, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	pl := newPipeListener()
+	t.Cleanup(func() { _ = pl.Close() })
+	// Park one Accept so the probe has a listener ready to take a connection.
+	go func() {
+		if c, err := pl.Accept(); err == nil {
+			_ = c.Close()
+		}
+	}()
+
+	waitFor(t, bound, "the listener accepts", func() bool {
+		return acceptsNow(pl)
+	})
+	if got := pl.accepted.Load(); got != 0 {
+		t.Fatalf("the probe opened %d connection(s) while waiting, want 0", got)
+	}
 }
 
 // execHead is a valid POST /v1/exec head for the read verb show.
@@ -933,7 +978,7 @@ func TestServePushListenerRoutes(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- serve(ctx, sc) }()
 	waitFor(t, bound, "both listeners accept", func() bool {
-		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+		return acceptsNow(mainPl) && acceptsNow(pushPl)
 	})
 
 	pushed := send(bound, pushClient, http.MethodPut, "/v1/workspace", testDaemonToken, strings.NewReader(pushBody(t)))
@@ -979,7 +1024,7 @@ func TestServePushListenerRefuses(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- serve(ctx, sc) }()
 	waitFor(t, bound, "both listeners accept", func() bool {
-		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+		return acceptsNow(mainPl) && acceptsNow(pushPl)
 	})
 
 	body := pushBody(t)
@@ -1045,7 +1090,7 @@ func TestServePushListenerOff(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- serve(ctx, sc) }()
 	waitFor(t, bound, "the main listener accepts", func() bool {
-		return acceptsNow(t, bound, mainPl)
+		return acceptsNow(mainPl)
 	})
 
 	stop()
@@ -1088,7 +1133,7 @@ func TestServePushListenerDrain(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- serve(ctx, sc) }()
 	waitFor(t, bound, "both listeners accept", func() bool {
-		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+		return acceptsNow(mainPl) && acceptsNow(pushPl)
 	})
 
 	inFlight := make(chan httpReply, 1)
@@ -1103,7 +1148,7 @@ func TestServePushListenerDrain(t *testing.T) {
 
 	stop()
 	waitFor(t, bound, "the drain closes both listeners", func() bool {
-		return !acceptsNow(t, bound, mainPl) && !acceptsNow(t, bound, pushPl)
+		return mainPl.closed() && pushPl.closed()
 	})
 	select {
 	case err := <-served:
@@ -1155,7 +1200,7 @@ func TestServePushListenerDrainTimesOut(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- serve(ctx, sc) }()
 	waitFor(t, bound, "both listeners accept", func() bool {
-		return acceptsNow(t, bound, mainPl) && acceptsNow(t, bound, pushPl)
+		return acceptsNow(mainPl) && acceptsNow(pushPl)
 	})
 
 	inFlight := make(chan httpReply, 1)
@@ -1417,7 +1462,7 @@ func TestServeCallsPodsWiring(t *testing.T) {
 	served := make(chan error, 1)
 	go func() { served <- serve(ctx, sc) }()
 	waitFor(t, bound, "the listener accepts", func() bool {
-		return acceptsNow(t, bound, pl)
+		return acceptsNow(pl)
 	})
 
 	calls := send(bound, client, http.MethodGet, "/v1/calls", testReadToken, nil)
