@@ -240,6 +240,59 @@ func (u *unreadableQueueSpans) EndOpen(string, string, spans.Reason, time.Time) 
 	return false, u.err
 }
 
+// A queued (waiting to land) row carries how many review rejections its bead
+// has taken, so a resubmission reads as a retry. The count comes from the
+// ready-to-land list's own rows: st.List with land.LabelReadyToLand runs
+// `bd list --flat --json`, whose rows carry the issue's notes when it has any
+// (an absent notes field is an empty one, which counts 0), so no per-row read
+// is added (gt-vg3rjz).
+func TestDashboardQueuedRowRejectCountFromNotes(t *testing.T) {
+	t.Parallel()
+	two := land.FormatRejectionNote(land.RejectionNote{Attempt: 1, Kind: string(land.RejectReview), Reason: "fix the guard", Branch: "polecat/x/gt-queued"}) +
+		"\n" + land.FormatRejectionNote(land.RejectionNote{Attempt: 2, Kind: string(land.RejectReview), Reason: "still open", Branch: "polecat/x/gt-queued"})
+	for _, c := range []struct {
+		name  string
+		notes string
+		want  int
+	}{
+		{"two review rejections", two, 2},
+		{"no rejections", "", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			st := &fakeQueueStore{landing: []*beads.Issue{{
+				ID: "gt-queued", Title: "waits to land", Status: "open", Notes: c.notes, Labels: []string{land.LabelReadyToLand},
+			}}}
+			q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+			if q == nil || len(q.Landing) != 1 {
+				t.Fatalf("landing = %+v", q)
+			}
+			if got := q.Landing[0].RejectCount; got != c.want {
+				t.Errorf("reject_count = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// A queued row's count reads the notes with the rejection parser, not by
+// looking for the marker text: a reason that quotes a cut-off
+// "MERGE REJECTION (attempt" mid-line, with junk bytes around it, is content
+// and leaves the row built at 0 (gt-vg3rjz).
+func TestDashboardQueuedRowRejectCountGarbledNotes(t *testing.T) {
+	t.Parallel()
+	garbled := "work in progress\nsee reason: MERGE REJECTION (attempt\n\xff\xfe junk \x80"
+	st := &fakeQueueStore{landing: []*beads.Issue{{
+		ID: "gt-queued", Title: "waits to land", Status: "open", Notes: garbled, Labels: []string{land.LabelReadyToLand},
+	}}}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+	if q == nil || len(q.Landing) != 1 {
+		t.Fatalf("a row whose notes are garbled must still be built: %+v", q)
+	}
+	if got := q.Landing[0].RejectCount; got != 0 {
+		t.Errorf("reject_count = %d, want 0: a quoted cut-off marker is content, not a rejection block", got)
+	}
+}
+
 // A store that cannot be read is named, never shown as an empty queue.
 func TestQueueReadNamesAnUnreadableStore(t *testing.T) {
 	t.Parallel()
