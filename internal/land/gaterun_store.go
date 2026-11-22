@@ -37,6 +37,8 @@ type gateRunFS interface {
 	EndsInNewline(path string) (bool, error)
 	ReadFile(path string) ([]byte, error)
 	Remove(path string) error
+	// ReadDir lists the names of the files directly under dir.
+	ReadDir(dir string) ([]string, error)
 	Rename(from, to string) error
 }
 type osGateRunFS struct{}
@@ -73,7 +75,15 @@ func (osGateRunFS) EndsInNewline(path string) (bool, error) {
 }
 func (osGateRunFS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) } //nolint:gosec // G304: the path is under the town root
 func (osGateRunFS) Remove(path string) error             { return os.Remove(path) }
-func (osGateRunFS) Rename(from, to string) error         { return os.Rename(from, to) }
+func (osGateRunFS) ReadDir(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names, err
+}
+func (osGateRunFS) Rename(from, to string) error { return os.Rename(from, to) }
 
 func (osGateRunFS) MkdirAll(dir string, perm os.FileMode) error { return os.MkdirAll(dir, perm) }
 func (osGateRunFS) OpenAppend(path string) (io.WriteCloser, error) {
@@ -171,6 +181,27 @@ func appendGateRunRejects(fsys gateRunFS, path string, lines []byte) error {
 	return nil
 }
 
+// pruneGateRunMonths deletes the month files in dir that are past the retention.
+// It runs after a rotation has moved the rows, treats a month file as a whole
+// (it never reads or counts rows) and keeps deleting after a delete fails, so one
+// stuck file does not hold the rest; every failure is returned.
+func pruneGateRunMonths(fsys gateRunFS, dir string, now time.Time) error {
+	names, err := fsys.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("land: listing %s for the expired month files: %w", dir, err)
+	}
+	var failed error
+	for _, name := range names {
+		if !gateRunMonthExpired(name, now, gateRunRetentionDays) {
+			continue
+		}
+		if err := fsys.Remove(filepath.Join(dir, name)); err != nil {
+			failed = errors.Join(failed, fmt.Errorf("land: deleting the expired %s: %w", name, err))
+		}
+	}
+	return failed
+}
+
 // rotateGateRuns moves the rows of the current log into one gzipped file per
 // month beside it, a month file that exists being rewritten whole with its rows
 // kept, and removes the current log only once every month file is written, so a
@@ -242,6 +273,12 @@ var gateRunMu sync.Mutex
 // A rotation that fails is returned after the row is appended, never before, so
 // the row is not lost.
 func appendGateRunLimit(fsys gateRunFS, townRoot string, r GateRun, limit int64) error {
+	return appendGateRunAt(fsys, townRoot, r, limit, time.Now())
+}
+
+// appendGateRunAt is appendGateRunLimit with the retention clock a parameter, so a
+// test sets it; production passes the time of the append.
+func appendGateRunAt(fsys gateRunFS, townRoot string, r GateRun, limit int64, now time.Time) error {
 	gateRunMu.Lock()
 	defer gateRunMu.Unlock()
 	path := gateRunsPath(townRoot)
@@ -260,7 +297,9 @@ func appendGateRunLimit(fsys gateRunFS, townRoot string, r GateRun, limit int64)
 	if size, err := fsys.Size(path); err != nil {
 		rotateErr = fmt.Errorf("land: sizing %s: %w", path, err)
 	} else if gateRunRotationDue(size, limit) {
-		rotateErr = rotateGateRuns(fsys, path)
+		if rotateErr = rotateGateRuns(fsys, path); rotateErr == nil {
+			rotateErr = pruneGateRunMonths(fsys, filepath.Dir(path), now)
+		}
 	}
 	// A short write can leave a line with no newline. The row then starts a line
 	// of its own, in the same write, so it does not glue onto the fragment
