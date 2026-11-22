@@ -1212,6 +1212,10 @@ type fakeProcess struct {
 	// kill did not reach.
 	stubborn bool
 	bound    context.Context
+	// cpuUser and cpuSys stand in for the user and system times a process
+	// state reports after Wait; cpuKnown is false when the fake has none.
+	cpuUser, cpuSys time.Duration
+	cpuKnown        bool
 }
 
 func newExitedFake(status int, stdout, stderr string) *fakeProcess {
@@ -1311,6 +1315,15 @@ func (p *fakeProcess) Wait() (int, error) {
 	case <-p.bound.Done():
 		return -1, fmt.Errorf("fakeProcess.Wait: no end within the test's bound: %w", p.bound.Err())
 	}
+}
+
+// CPUTime reports the injected user and system times, as a real process state
+// would after Wait; a fake with none injected has no reading.
+func (p *fakeProcess) CPUTime() (time.Duration, bool) {
+	if !p.cpuKnown {
+		return 0, false
+	}
+	return p.cpuUser + p.cpuSys, true
 }
 
 func (p *fakeProcess) Kill() error {
@@ -1873,4 +1886,59 @@ func TestStderrHeadIsValidUTF8(t *testing.T) {
 		t.Errorf("line error = %q, want the %d-byte prefix that ends on the rune boundary",
 			errText, len(want))
 	}
+}
+
+// resultFrames is the test's frames writer that keeps the executor's result.
+type resultFrames struct {
+	bytes.Buffer
+	result ExecResult
+	set    bool
+}
+
+func (f *resultFrames) SetExecResult(res ExecResult) {
+	f.result, f.set = res, true
+}
+
+// TestTickEffExecutorCPU: the executor reports the CPU time of the bd child it
+// ran, user plus system in milliseconds, and reports none for a call that
+// started no child.
+func TestTickEffExecutorCPU(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a child that ran reports its CPU time", func(t *testing.T) {
+		t.Parallel()
+		proc := newExitedFake(0, "", "")
+		proc.cpuUser, proc.cpuSys, proc.cpuKnown = 30*time.Millisecond, 20*time.Millisecond, true
+		runner := &fakeRunner{queue: []Process{proc}}
+		e := newTestExecutor(t, testWorkspace(t), runner)
+		var frames resultFrames
+		if err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &frames); err != nil {
+			t.Fatalf("Exec: %v", err)
+		}
+		if !frames.set {
+			t.Fatal("the executor reported no result for a call that ran a child")
+		}
+		if frames.result.CPUMS == nil {
+			t.Fatal("the result carries no CPU time for a child that ran")
+		}
+		if got := *frames.result.CPUMS; got != 50 {
+			t.Errorf("result CPU time = %d ms, want 50 (30 user + 20 system)", got)
+		}
+	})
+
+	t.Run("a call that started no child reports none", func(t *testing.T) {
+		t.Parallel()
+		runner := &fakeRunner{err: errors.New("no such binary")}
+		e := newTestExecutor(t, testWorkspace(t), runner)
+		var frames resultFrames
+		if err := e.Exec(context.Background(), Request{Argv: []string{"list"}, Rig: "gastown"}, nil, &frames); err == nil {
+			t.Fatal("Exec started no child but returned no error")
+		}
+		if !frames.set {
+			t.Fatal("the executor reported no result for a call it refused")
+		}
+		if frames.result.CPUMS != nil {
+			t.Errorf("result CPU time = %d ms for a call that started no child, want none", *frames.result.CPUMS)
+		}
+	})
 }
