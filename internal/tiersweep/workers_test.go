@@ -516,10 +516,12 @@ func TestSerialPackagesRunAlone(t *testing.T) {
 	if got := waitOrFail(t, finished, "the tier to count its packages"); !reflect.DeepEqual(got, Counts{Passed: len(pkgs)}) {
 		t.Errorf("Tier() = %+v, want all %d passed", got, len(pkgs))
 	}
-	// The two beside it start first, in list order, and the serial package only
-	// once both are done.
-	if order, want := fake.startOrder(), []string{"./a", "./b", serial}; !reflect.DeepEqual(order, want) {
-		t.Errorf("start order = %q, want %q", order, want)
+	// The two beside it start first, in whichever order their own workers take
+	// them, and the serial package only once both are done (gt-tvjkzv).
+	order := fake.startOrder()
+	sort.Strings(order[:2])
+	if want := []string{"./a", "./b", serial}; !reflect.DeepEqual(order, want) {
+		t.Errorf("start order = %q, want the pair as a set then %s", order, serial)
 	}
 }
 
