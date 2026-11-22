@@ -271,6 +271,7 @@ type memGateRunFS struct {
 	opened                         []string // every path OpenAppend was asked for
 	halfWriteOn                    string   // a write to paths holding this stores half its bytes, then fails
 	readDirErr                     error
+	reverseDir                     bool   // ReadDir lists in reverse name order
 	removeFailOn                   string // a remove error applies to paths holding this ("" = all)
 	readFailOn                     string // a read error applies to paths holding this ("" = all)
 	err                            error
@@ -314,6 +315,9 @@ func (m *memGateRunFS) ReadDir(dir string) ([]string, error) {
 		}
 	}
 	slices.Sort(names)
+	if m.reverseDir {
+		slices.Reverse(names)
+	}
 	return names, nil
 }
 func (m *memGateRunFS) Rename(from, to string) error {
@@ -1028,7 +1032,7 @@ func TestGateRunStoreRetention(t *testing.T) {
 			tc.setup(fsys)
 			row := sampleGateRun("gt-new")
 			row.TS = now
-			err := appendGateRunAt(fsys, "/town", row, tc.limit, now)
+			err := appendGateRunAt(fsys, "/town", row, tc.limit, now, io.Discard)
 			if (err != nil) != tc.wantError || tc.wantError && !errors.Is(err, boom) {
 				t.Fatalf("error = %v, want error %t wrapping %v", err, tc.wantError, boom)
 			}
@@ -1086,7 +1090,7 @@ func TestGateRunStoreRetentionQuarantine(t *testing.T) {
 	fsys.files[cur] = []byte(mustLine(t, old) + "\n")
 	row := sampleGateRun("gt-new")
 	row.TS = now
-	err := appendGateRunAt(fsys, "/town", row, 1, now)
+	err := appendGateRunAt(fsys, "/town", row, 1, now, io.Discard)
 	if err == nil {
 		t.Fatal("a rotation with quarantined month files returned no error")
 	}
@@ -1108,5 +1112,59 @@ func TestGateRunStoreRetentionQuarantine(t *testing.T) {
 	}
 	if _, ok := fsys.files[file("2027-02")]; !ok {
 		t.Error("the newer month 2027-02 was deleted")
+	}
+}
+
+// TestGateRunStoreRetentionReport: a rotation that deletes expired month files
+// says so in one line, with the sorted names, through the writer it is given; one
+// that deletes nothing says nothing; a delete that fails is returned and its file
+// is not named as deleted (gt-89vazh).
+func TestGateRunStoreRetentionReport(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk says no")
+	cur := gateRunsPath("/town")
+	dir := filepath.Dir(cur)
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	file := func(month string) string { return filepath.Join(dir, "gate-runs-"+month+".jsonl.gz") }
+	for _, tc := range []struct {
+		name    string
+		months  []string // month files already on disk
+		logTS   time.Time
+		setup   func(*memGateRunFS)
+		want    string
+		wantErr bool
+	}{
+		{"a month file written and expired in the same rotation is reported", nil, time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC), func(*memGateRunFS) {},
+			"gate runs: deleted 1 expired month file(s): gate-runs-2026-06.jsonl.gz\n", false},
+		{"two expired files are named in one sorted line", []string{"2026-06", "2026-05"}, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), func(m *memGateRunFS) { m.reverseDir = true },
+			"gate runs: deleted 2 expired month file(s): gate-runs-2026-05.jsonl.gz, gate-runs-2026-06.jsonl.gz\n", false},
+		{"a rotation that deletes nothing reports nothing", []string{"2026-10"}, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), func(*memGateRunFS) {}, "", false},
+		{"a delete that fails is not named as deleted", []string{"2026-05", "2026-06"}, time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+			func(m *memGateRunFS) { m.removeErr, m.removeFailOn = boom, "2026-05" },
+			"gate runs: deleted 1 expired month file(s): gate-runs-2026-06.jsonl.gz\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newMemGateRunFS()
+			for _, m := range tc.months {
+				r := sampleGateRun("gt-" + m)
+				r.TS = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+				fsys.files[file(m)] = gzipRows(t, r)
+			}
+			old := sampleGateRun("gt-log")
+			old.TS = tc.logTS
+			fsys.files[cur] = []byte(mustLine(t, old) + "\n")
+			tc.setup(fsys)
+			row := sampleGateRun("gt-new")
+			row.TS = now
+			var report bytes.Buffer
+			err := appendGateRunAt(fsys, "/town", row, 1, now, &report)
+			if (err != nil) != tc.wantErr || tc.wantErr && !errors.Is(err, boom) {
+				t.Errorf("error = %v, want error %t wrapping %v", err, tc.wantErr, boom)
+			}
+			if report.String() != tc.want {
+				t.Errorf("report = %q, want %q", report.String(), tc.want)
+			}
+		})
 	}
 }
