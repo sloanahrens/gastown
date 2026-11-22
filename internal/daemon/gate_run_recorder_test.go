@@ -73,7 +73,7 @@ func TestGateRunRecorderAppends(t *testing.T) {
 	var log recorderLog
 	rec := NewGateRunRecorder(func(context.Context, ...string) (string, error) {
 		return "nr_periods 40\nnr_throttled 7\nthrottled_usec 3100\n", nil
-	}, root, log.logf)
+	}, root, log.logf, nil)
 	rec(land.GateRun{Rig: "gastown", Bead: "gt-a", SHA: "c0ffee", RunID: "bob/42", Passed: true})
 	runs := gateRunRecorderRows(t, root)
 	if len(runs) != 1 {
@@ -102,7 +102,7 @@ func TestGateRunRecorderBlockedRead(t *testing.T) {
 	rec := newGateRunRecorder(func(context.Context, ...string) (string, error) {
 		<-release
 		return "", errors.New("the read was released")
-	}, root, log.logf, time.Millisecond)
+	}, root, log.logf, time.Millisecond, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -147,7 +147,7 @@ func TestGateRunRecorderFailures(t *testing.T) {
 				root = gateRunRecorderRoot(t)
 			}
 			var log recorderLog
-			newGateRunRecorder(tc.exec, root, log.logf, time.Second)(land.GateRun{Bead: "gt-a"})
+			newGateRunRecorder(tc.exec, root, log.logf, time.Second, nil)(land.GateRun{Bead: "gt-a"})
 			if !log.contains(tc.wantLog) {
 				t.Errorf("the failure was not logged as %q: %v", tc.wantLog, log.lines)
 			}

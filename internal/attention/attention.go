@@ -231,6 +231,9 @@ const (
 	// KindGateSlow: the newest gate runs of a rig were all over their tier bar,
 	// or all pole-bound (gt-l0t2tg).
 	KindGateSlow Kind = "gate-slow"
+	// KindGateRunLog: the last append to the gate-run log failed, a write or a
+	// rotation error, and no later append has succeeded (gt-nwea8n).
+	KindGateRunLog Kind = "gate-run-log"
 	// KindSeatFinishedLingering: a seat whose last turn ended and whose bead is
 	// closed is still in the walk past the linger bound, so the town wants it
 	// running and nothing is running it (gt-klpqb3).
@@ -268,7 +271,7 @@ func Kinds() []Kind {
 		KindHoldStale, KindStoryPoints, KindOverrunBlind, KindJobOverdue, KindMetricsExtract, KindSandboxPending, KindSandboxSilent, KindSeatSandboxStale, KindSeatUnreachable,
 		KindUpdateRolledBack, KindStoryPointsDrift,
 		KindImagePinsStale, KindImagePinsUnreadable, KindImagePinsRefreshStuck,
-		KindImagePinsDeadLayer, KindGateSlow, KindSeatFinishedLingering,
+		KindImagePinsDeadLayer, KindGateSlow, KindGateRunLog, KindSeatFinishedLingering,
 		KindClusterDrift, KindClusterDriftUnreadable,
 		KindMainUnknown,
 	}
