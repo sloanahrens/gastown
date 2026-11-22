@@ -24,6 +24,7 @@ type followupFake struct {
 	appended   []followupAppend // each AppendFollowup call, in order
 	appendErr  error            // returned by every AppendFollowup call
 	appendErrs map[string]error // returned for one bundle id, before appendErr
+	failFrom   int              // when above 0, creates numbered failFrom and later fail with createErr
 }
 
 // followupAppend is one AppendFollowup call the fake recorded.
@@ -48,7 +49,7 @@ func (f *followupFake) ListFollowups(string) ([]ExistingFollowup, error) {
 }
 
 func (f *followupFake) CreateFollowup(spec FollowupSpec) (string, error) {
-	if f.createErr != nil {
+	if f.createErr != nil && (f.failFrom == 0 || len(f.created)+1 >= f.failFrom) {
 		return "", f.createErr
 	}
 	// One landing can file several beads, and a bead's id is what a comment
@@ -430,40 +431,45 @@ func TestFollowupFeedBodyLintsClean(t *testing.T) {
 	}
 }
 
-// TestFollowupFeedFoldsAcceptancePastTheLintMaximum: a landing's findings all
-// land in one bead's acceptance list, folded into the last item past the
-// dispatcher's max, because no worker takes a bead with more (gt-s01pn).
-func TestFollowupFeedFoldsAcceptancePastTheLintMaximum(t *testing.T) {
+// TestFollowupFeedFilesALargeGroupInBundlesOfAtMostMaxAcceptance: a package's
+// findings past the lint maximum are filed in bundles of at most MaxAcceptance
+// findings each, not in one bead with the boxes folded: 13 findings with no open
+// bundle file 6, 6 and 1, every bundle lints as shaped with a box per finding, no
+// bundle carries more than MaxAcceptance fingerprints, and every finding is named
+// under exactly one Goal. This replaces the gt-4ty22 rule that one package stays
+// one bead however many findings there are (gt-ntkwh0).
+func TestFollowupFeedFilesALargeGroupInBundlesOfAtMostMaxAcceptance(t *testing.T) {
 	t.Parallel()
 	var findings []Finding
-	for i := 0; i < specdispatch.MaxAcceptance+2; i++ {
+	for i := 0; i < 2*specdispatch.MaxAcceptance+1; i++ {
 		findings = append(findings, minorFinding(string(rune('a'+i))+" finding"))
 	}
 	f := newFollowupFixture(t, 0.8, findings)
 	f.run()
-	// One package, so the landing's findings stay in one bead however many
-	// there are: the split is by package, not by count (gt-4ty22).
-	if len(f.fake.created) != 1 {
-		t.Fatalf("filed %d beads, want one", len(f.fake.created))
+	want := []int{specdispatch.MaxAcceptance, specdispatch.MaxAcceptance, 1}
+	if len(f.fake.created) != len(want) {
+		t.Fatalf("filed %d beads, want %d", len(f.fake.created), len(want))
 	}
-	body := f.fake.created[0].Body
-	acceptance := specdispatch.Sections(body)["acceptance"]
-	if got := specdispatch.CountAcceptance(acceptance); got != specdispatch.MaxAcceptance {
-		t.Errorf("acceptance items = %d, want the max %d:\n%s", got, specdispatch.MaxAcceptance, acceptance)
+	named := 0
+	for i, spec := range f.fake.created {
+		fps := 0
+		for _, l := range spec.Labels {
+			if strings.HasPrefix(l, FingerprintPrefix) {
+				fps++
+			}
+		}
+		boxes := specdispatch.CountAcceptance(specdispatch.Sections(spec.Body)["acceptance"])
+		if fps != want[i] || boxes != want[i] {
+			t.Errorf("bundle %d carries %d fingerprints and %d boxes, want %d of each", i, fps, boxes, want[i])
+		}
+		if v := specdispatch.Lint(specdispatch.Spec{ID: "gt-b", Title: spec.Title, Type: "task", Status: "open", Description: spec.Body}, specdispatch.LoadTemplate("")); !v.Clean() {
+			t.Errorf("bundle %d does not lint clean: %s", i, v.Line("gt-b"))
+		}
+		goal, _, _ := strings.Cut(spec.Body, "\n## Constraints")
+		named += strings.Count(goal, "\n- ")
 	}
-	if !strings.Contains(acceptance, "- [ ] Finding resolved: the remaining 3 findings under Goal") {
-		t.Errorf("the folded item does not name what it covers:\n%s", acceptance)
-	}
-	// The folded bead still lints as shaped.
-	spec := specdispatch.Spec{ID: "gt-filed-0", Title: f.fake.created[0].Title, Type: "task",
-		Status: "open", Description: body}
-	if v := specdispatch.Lint(spec, specdispatch.LoadTemplate("")); !v.Clean() {
-		t.Errorf("the folded body does not lint clean: %s\n%s", v.Line(spec.ID), body)
-	}
-	// Every finding is still named under Goal, so none is silently dropped.
-	goal, _, _ := strings.Cut(body, "\n## Constraints")
-	if got := strings.Count(goal, "\n- "); got != len(findings) {
-		t.Errorf("Goal lists %d findings, want %d:\n%s", got, len(findings), body)
+	if named != len(findings) {
+		t.Errorf("the Goals name %d findings, want %d: none dropped and none twice", named, len(findings))
 	}
 }
 

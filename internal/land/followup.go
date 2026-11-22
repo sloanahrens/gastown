@@ -448,15 +448,25 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 		// A bundle that refuses an append (ErrBundleFull: no room, or a body
 		// InsertFollowupLines cannot place the addition in) is dropped from the
 		// candidates and the lookup asked again, so a refusing older bundle never
-		// shadows a newer one; a new bundle is filed only when none is left
-		// (gt-hx4s0j).
-		done := false
-		for candidates := existing; !done; {
+		// shadows a newer one; a new bundle is filed when none is left, and for
+		// the rest of a group that overflowed the one it appended to
+		// (gt-hx4s0j, gt-ntkwh0).
+		done, remaining := false, p.Findings
+	lookup:
+		for candidates := existing; ; {
 			bundle, ok := FindOpenBundle(candidates, day, g.Package)
 			if !ok {
 				break
 			}
-			add := bundleAddition(w, res, g)
+			// A group larger than the room left in the bundle fills it and
+			// files the rest as bundles of their own, at most MaxAcceptance
+			// findings each (gt-ntkwh0).
+			take, rest := g, []FollowupCandidate(nil)
+			if room := specdispatch.MaxAcceptance - fingerprintLabelCount(bundle.Labels); len(g.Findings) > room {
+				take = followupGroup{Package: g.Package, Findings: g.Findings[:room]}
+				rest = g.Findings[room:]
+			}
+			add := bundleAddition(w, res, take)
 			err := l.Followups.AppendFollowup(bundle.ID, add)
 			switch {
 			case errors.Is(err, ErrBundleFull):
@@ -475,6 +485,7 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 				held = append(held, p.Findings...)
 				lines = append(lines, fmt.Sprintf("could not append %s to the follow-up bead %s (%v)", findingsPhrase(len(p.Findings)), bundle.ID, err))
 				done = true
+				break lookup
 			default:
 				for j := range existing {
 					if existing[j].ID == bundle.ID {
@@ -482,39 +493,54 @@ func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate
 					}
 				}
 				appended = append(appended, bundle.ID)
-				lines = append(lines, fmt.Sprintf("appended %s of the landing at %.2f to %s", findingsPhrase(len(p.Findings)), res.Verdict.Score, bundle.ID))
-				done = true
+				lines = append(lines, fmt.Sprintf("appended %s of the landing at %.2f to %s", findingsPhrase(len(take.Findings)), res.Verdict.Score, bundle.ID))
+				if len(rest) == 0 {
+					done = true
+				} else {
+					remaining = rest
+				}
+				break lookup
 			}
 		}
 		if done {
 			continue
 		}
-		if stop == nil && open+len(ids) >= bound {
-			at := open + len(ids)
-			stop = func(held int) string { return l.holdBack(at, bound, held) }
-		}
-		if stop == nil && !BudgetAllows(filedThisWeek+len(ids), landedThisWeek, budget) {
-			at := filedThisWeek + len(ids)
-			stop = func(held int) string {
-				return fmt.Sprintf("%d %s beads for %d landings in the last 7 days, at the %d-percent weekly budget; held back %s for this landing",
-					at, FollowUpLabel, landedThisWeek, budget, findingsPhrase(held))
+		// What is left of the group is filed in bundles of at most MaxAcceptance
+		// findings each, the number of boxes one worker's landing carries, so a
+		// group of 13 files 6, 6 and 1 and no bundle is born over the cap. Each
+		// bundle counts against the bound and the budget; one that cannot be
+		// filed holds its findings and every later one's, which the feed's queue
+		// keeps for a later landing, and the appended part is never queued again.
+		for from := 0; from < len(remaining); from += specdispatch.MaxAcceptance {
+			chunk := remaining[from:min(from+specdispatch.MaxAcceptance, len(remaining))]
+			if stop == nil && open+len(ids) >= bound {
+				at := open + len(ids)
+				stop = func(held int) string { return l.holdBack(at, bound, held) }
 			}
+			if stop == nil && !BudgetAllows(filedThisWeek+len(ids), landedThisWeek, budget) {
+				at := filedThisWeek + len(ids)
+				stop = func(held int) string {
+					return fmt.Sprintf("%d %s beads for %d landings in the last 7 days, at the %d-percent weekly budget; held back %s for this landing",
+						at, FollowUpLabel, landedThisWeek, budget, findingsPhrase(held))
+				}
+			}
+			if stop != nil {
+				held = append(held, remaining[from:]...)
+				break
+			}
+			spec := bundleSpec(w, res, day, followupGroup{Package: g.Package, Findings: chunk})
+			id, err := l.Followups.CreateFollowup(spec)
+			if err != nil {
+				held = append(held, remaining[from:]...)
+				lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(chunk)), err))
+				break
+			}
+			ids = append(ids, id)
+			// CreatedAt is the feed's clock, so a later call in this same feed
+			// counts this bead in the week's filed total (gt-y5wvum).
+			filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels, CreatedAt: l.now()})
+			lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(chunk)), res.Verdict.Score))
 		}
-		if stop != nil {
-			held = append(held, p.Findings...)
-			continue
-		}
-		spec := p.Spec
-		id, err := l.Followups.CreateFollowup(spec)
-		if err != nil {
-			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(p.Findings)), err))
-			continue
-		}
-		ids = append(ids, id)
-		// CreatedAt is the feed's clock, so a later call in this same feed
-		// counts this bead in the week's filed total (gt-y5wvum).
-		filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels, CreatedAt: l.now()})
-		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(p.Findings)), res.Verdict.Score))
 	}
 	if stop != nil {
 		lines = append(lines, stop(len(held)))
