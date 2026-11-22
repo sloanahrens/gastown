@@ -532,11 +532,19 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	adopt.Embedder = embedder
 	// Off, the key leaves the weekly adoption as it was: the rank rule on the day's
 	// proposal. On, the stronger rule decides.
-	var adoptErr error
+	rule, firstRound := storypoints.Adopt, false
 	if c.StoryPointsAutoAdopt {
-		adoptErr = adopt.decideStoryPoints(ctx, real, env, storypoints.AdoptAuto, true)
-	} else {
-		adoptErr = adopt.runStoryPointsAdopt(ctx, real, env)
+		rule, firstRound = storypoints.AdoptAuto, true
+	}
+	written, adoptErr := adopt.decideStoryPointsWrite(ctx, real, env, rule, firstRound)
+	// An adoption is logged even when a later step of it failed, since the weights
+	// were written; an unlogged adoption would never be checked.
+	if written.adopted {
+		if err := c.appendStoryPointsAdoption(env, storyPointsAdoptionsPath(real.Town), storyPointsAdoption{
+			Event: "adopted", At: now, Version: written.version, Previous: written.previous,
+		}); err != nil {
+			adoptErr = errors.Join(adoptErr, fmt.Errorf("the adoption of %s is not logged, so it is not checked: %w", written.version, err))
+		}
 	}
 	if adoptErr != nil {
 		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, adoptErr)
