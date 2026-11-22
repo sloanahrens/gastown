@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/steveyegge/gastown/internal/doltcred"
 )
 
 const (
@@ -104,6 +106,10 @@ type Options struct {
 	// never the caller's. Either may be empty when the town runs no tracker.
 	TrackerURL       string
 	TrackerTokenFile string
+	// DoltCredentialFile is the file bd's Dolt user and password are read
+	// from; empty means no credential. It is read on every call, so a rotated
+	// credential reaches the next call without a restart.
+	DoltCredentialFile string
 	// MaxConcurrent caps bd processes running at once; 0 means
 	// DefaultMaxConcurrent.
 	MaxConcurrent int
@@ -122,17 +128,18 @@ type Options struct {
 // policy, authentication and call log decide whether a call reaches Exec
 // (G2-G4); Exec maps the call to the workspace and runs it.
 type Executor struct {
-	binary         string
-	workspaceRoot  string
-	home           string
-	searchPath     string
-	doltHost       string
-	doltPort       string
-	trackerURL     string
-	trackerToken   string
-	defaultTimeout time.Duration
-	killGrace      time.Duration
-	slots          chan struct{}
+	binary             string
+	workspaceRoot      string
+	home               string
+	searchPath         string
+	doltHost           string
+	doltPort           string
+	trackerURL         string
+	trackerToken       string
+	doltCredentialFile string
+	defaultTimeout     time.Duration
+	killGrace          time.Duration
+	slots              chan struct{}
 	// capRefusals, peakInFlight and windowPeak are atomics rather than a lock:
 	// the stats route reads them while calls run, and the refusal path must not
 	// take a lock per call the cap turns away. peakInFlight is the peak since
@@ -190,18 +197,19 @@ func New(opts Options) (*Executor, error) {
 		runner = realRunner{}
 	}
 	return &Executor{
-		binary:         opts.Binary,
-		workspaceRoot:  root,
-		home:           opts.Home,
-		searchPath:     opts.Path,
-		doltHost:       opts.DoltHost,
-		doltPort:       opts.DoltPort,
-		trackerURL:     opts.TrackerURL,
-		trackerToken:   opts.TrackerTokenFile,
-		defaultTimeout: limit,
-		killGrace:      grace,
-		slots:          make(chan struct{}, max),
-		runner:         runner,
+		binary:             opts.Binary,
+		workspaceRoot:      root,
+		home:               opts.Home,
+		searchPath:         opts.Path,
+		doltHost:           opts.DoltHost,
+		doltPort:           opts.DoltPort,
+		trackerURL:         opts.TrackerURL,
+		trackerToken:       opts.TrackerTokenFile,
+		doltCredentialFile: opts.DoltCredentialFile,
+		defaultTimeout:     limit,
+		killGrace:          grace,
+		slots:              make(chan struct{}, max),
+		runner:             runner,
 	}, nil
 }
 
@@ -802,6 +810,12 @@ func noSymlinkBelow(root, path string) error {
 //
 // GT_TOWN_ROOT names the workspace root, where the push carries the town's
 // formulas a cook needs (gt-x49njj).
+//
+// The Dolt credential file is read on every call, so a rotated credential
+// reaches the next call without a restart, and its values reach bd through the
+// environment alone, never argv. A file that cannot be read refuses the call
+// before bd starts: a credential the gateway cannot read must not fall back to
+// an unauthenticated bd.
 func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]string, error) {
 	env := []string{
 		"HOME=" + e.home,
@@ -814,6 +828,16 @@ func (e *Executor) buildEnv(beadsDir string, fromCaller map[string]string) ([]st
 	}
 	if e.workspaceRoot != "" {
 		env = append(env, "GT_TOWN_ROOT="+e.workspaceRoot)
+	}
+	cred, err := doltcred.Read(e.doltCredentialFile)
+	if err != nil {
+		return nil, fmt.Errorf("the Dolt credential file: %w", err)
+	}
+	if cred.User != "" {
+		env = append(env, "BEADS_DOLT_SERVER_USER="+cred.User)
+	}
+	if password := cred.Password.Reveal(); password != "" {
+		env = append(env, "BEADS_DOLT_PASSWORD="+password)
 	}
 	keys := make([]string, 0, len(fromCaller))
 	for k := range fromCaller {
