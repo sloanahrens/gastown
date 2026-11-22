@@ -26,9 +26,9 @@
 // with every name decided for a pod by podEnvDecisions: the pod sets its
 // container-mode pair, its stable owner name and its clock, keeps the Dolt
 // endpoint and the provider settings, and drops the engine, the Mac's
-// kubeconfig, the host wrapper's cloud directories and the takeover switch. It
-// also sets FORGEJO_API_URL from Values.ForgeHost and TRACKER_URL from
-// Values.Tracker.
+// kubeconfig and the takeover switch. It also sets FORGEJO_API_URL from
+// Values.ForgeHost, TRACKER_URL from Values.Tracker, and the cloud directory
+// names from the host paths Values mounts.
 // TestPodEnvDecisions holds a decision for every live name,
 // TestPodEnvEqualsTheComposeEnv holds the two services equal but for the names
 // composeOnlyEnv lists, and TestPodCommandEqualsTheComposeCommand holds the
@@ -580,13 +580,14 @@ var podEnvDecisions = map[string]podEnvDecision{
 	ContainerNameEnv: {value: Name},
 	// The engine, the Mac's kubeconfig, the derived hm config, the host
 	// wrapper's cloud directories and the takeover switch describe the
-	// container on the Mac, not a pod.
+	// container on the Mac, not a pod; of these the pod sets hm and cloud
+	// itself only when the Values mount what they point at.
 	dockerHostEnv:    {drop: "the pod has no Docker engine; the tier sweep runs as a gt-sweeps Job (gt-cd5rqa)"},
 	TakeoverEnv:      {drop: "the pod's rollout is the Deployment's, and a standing takeover would pass an owner the pod's probe cannot ask an engine about (gt-wgr6ck)"},
 	kubeconfigEnv:    {drop: "the files are written on the Mac under the town root and point at Mac-side API addresses; the pod uses its service account"},
 	hmConfigEnv:      {drop: "the Mac's HM_CONFIG names a Mac path the pod does not mount; the pod sets it to the gt-hm-config Secret's file only when Values.HMConfig mounts it"},
-	cloudReportsEnv:  {drop: "the pod mounts no /Users/Shared/gt-cloud directory; the cloud step selects the Postgres source (gt-nlf1i6)"},
-	cloudReleasesEnv: {drop: "the pod mounts no /Users/Shared/gt-cloud directory; the cloud step selects the Postgres source (gt-nlf1i6)"},
+	cloudReportsEnv:  {drop: "the Mac's GT_CLOUD_REPORTS_DIR names the host wrapper's directory; the pod sets it to the mounted directory only when Values.CloudReportsHostPath mounts it, and otherwise the cloud step selects the Postgres source (gt-nlf1i6, gt-9936jc)"},
+	cloudReleasesEnv: {drop: "the Mac's GT_CLOUD_RELEASES_DIR names the host wrapper's directory; the pod sets it to the mounted directory only when Values.CloudReleasesHostPath mounts it, and otherwise the cloud step selects the Postgres source (gt-nlf1i6, gt-9936jc)"},
 	cloudOffEnv:      {drop: "the off markers belong to the host wrapper's directory, which the pod does not mount"},
 	// The clock the maintenance windows read, and the town root and config
 	// home the render mounts.
@@ -1504,7 +1505,8 @@ func daemonArgs(v Values) []string {
 
 // daemonEnvironment is the daemon container's environment: the shared pod
 // environment, the daemon's own bd gateway pair and push URL, then the caller's
-// names, and last the Ollama endpoint its weekly story-points retrain embeds with.
+// names, the cloud directories the render mounts, and last the Ollama endpoint
+// its weekly story-points retrain embeds with.
 // The dashboard runs no retrain and reads no daemon gateway, so its container takes
 // containerEnvironment and its own pair (dashboardContainer) (gt-mu7e87,
 // gt-2bi7es).
@@ -1528,6 +1530,14 @@ func daemonEnvironment(v Values) []EnvVar {
 		env = append(env, BdGatewayPushEnv(v.DaemonBdGatewayPushURL)...)
 	}
 	env = append(env, callerEnvironment(v)...)
+	// The cloud reporters read the directories this render mounts; naming neither
+	// mounts nothing, so the cloud step selects the Postgres source (gt-9936jc).
+	if v.CloudReportsHostPath != "" {
+		env = append(env, EnvVar{Name: cloudReportsEnv, Value: v.CloudReportsHostPath})
+	}
+	if v.CloudReleasesHostPath != "" {
+		env = append(env, EnvVar{Name: cloudReleasesEnv, Value: v.CloudReleasesHostPath})
+	}
 	if len(hostAliases(v)) == 0 {
 		return env
 	}
