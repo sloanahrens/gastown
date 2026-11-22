@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -128,5 +130,52 @@ func TestPatrolScanStreamCutAnswers(t *testing.T) {
 				t.Errorf("backend asked about %v, want %v", *f.asked, tc.wantAsked)
 			}
 		})
+	}
+}
+
+// TestPatrolScanStreamCutOnARigTheRegistryDoesNotList: a rig with no prefix is found by scanning
+// the sandbox records. No record names the seat: a host seat, false, nothing asked; the records
+// directory cannot be listed: an error naming the seat, never an intact stream (gt-jpmj3s).
+func TestPatrolScanStreamCutOnARigTheRegistryDoesNotList(t *testing.T) {
+	t.Parallel()
+	seat := stopSeat.Rig + "/" + stopSeat.Polecat
+	unlisted := func(t *testing.T) streamCutFixture {
+		f := newStreamCutFixture(t, nil, nil, true, nil)
+		f.h.d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+		return f
+	}
+	t.Run("no record names the seat", func(t *testing.T) {
+		t.Parallel()
+		f := unlisted(t)
+		got, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat)
+		if err != nil || got || len(*f.asked) != 0 {
+			t.Errorf("StreamCut = %v, %v, asked %v; want false, no error, backend not asked", got, err, *f.asked)
+		}
+	})
+	t.Run("the records directory cannot be listed", func(t *testing.T) {
+		t.Parallel()
+		f := unlisted(t)
+		dir := session.SandboxRegistryDir(f.h.d.config.TownRoot)
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat)
+		if err == nil || !strings.Contains(err.Error(), seat) || !strings.Contains(err.Error(), "find the sandbox") || got {
+			t.Errorf("StreamCut = %v, %v; want false and an error naming %s and the sandbox lookup", got, err, seat)
+		}
+	})
+}
+
+// TestPatrolScanStreamCutWrapsTheBackendError: a failing backend's error is wrapped, so a caller
+// can still ask errors.Is of its cause (gt-jpmj3s).
+func TestPatrolScanStreamCutWrapsTheBackendError(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("tail read timed out")
+	f := newStreamCutFixture(t, streamCutRecord(), nil, false, cause)
+	if _, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat); !errors.Is(err, cause) {
+		t.Errorf("StreamCut error = %v, want it to wrap %v", err, cause)
 	}
 }
