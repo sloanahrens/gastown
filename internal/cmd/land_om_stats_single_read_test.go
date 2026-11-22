@@ -38,7 +38,7 @@ func TestLandOmStatsReadsRecordsOnce(t *testing.T) {
 			}
 			fake := &landOmStatsFakeFS{files: map[string]string{in.records: records, in.log: log}}
 			var out strings.Builder
-			if err := landOmStatsReportFrom(fake, town, &out, "", tt.recordsFlag, "/town/daemon.log", false); err != nil {
+			if err := landOmStatsReportFrom(fake, town, &out, "", tt.recordsFlag, "/town/daemon.log", false, false); err != nil {
 				t.Fatalf("landOmStatsReportFrom: %v", err)
 			}
 			opens := 0
@@ -54,7 +54,7 @@ func TestLandOmStatsReadsRecordsOnce(t *testing.T) {
 	}
 	t.Run("a records file that cannot be read", func(t *testing.T) {
 		t.Parallel()
-		err := landOmStatsReportFrom(landOmStatsBrokenRead{}, omStatsNoTown(t), io.Discard, "", "/named/reviews.jsonl", "/named/daemon.log", false)
+		err := landOmStatsReportFrom(landOmStatsBrokenRead{}, omStatsNoTown(t), io.Discard, "", "/named/reviews.jsonl", "/named/daemon.log", false, false)
 		if err == nil || !strings.Contains(err.Error(), "/named/reviews.jsonl") || !strings.Contains(err.Error(), "the disk went away") {
 			t.Errorf("error = %v, want one naming the path and the read failure", err)
 		}
