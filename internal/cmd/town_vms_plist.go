@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/spf13/cobra"
@@ -97,6 +98,12 @@ func newTownVMsPlistCmd() *cobra.Command {
 		// A refusal prints no usage: stdout carries the plist and nothing else.
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := checkTownVMsPlistPath("--gt", gt); err != nil {
+				return err
+			}
+			if err := checkTownVMsPlistPath("--home", home); err != nil {
+				return err
+			}
 			if out == "" {
 				return writeTownVMsPlist(cmd.OutOrStdout(), gt, home)
 			}
@@ -116,4 +123,17 @@ func newTownVMsPlistCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("gt")
 	_ = cmd.MarkFlagRequired("home")
 	return cmd
+}
+
+// checkTownVMsPlistPath refuses a value that would render a broken launchd job: an
+// empty or relative path (an empty one is not absolute, so the one check covers both), or one
+// holding a line break (gt-i6d00y). It runs before anything is printed or written.
+func checkTownVMsPlistPath(flag, value string) error {
+	switch {
+	case strings.ContainsAny(value, "\r\n"):
+		return fmt.Errorf("%s holds a line break: %q", flag, value)
+	case !filepath.IsAbs(value):
+		return fmt.Errorf("%s must be an absolute path, got %q", flag, value)
+	}
+	return nil
 }

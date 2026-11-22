@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/xml"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,5 +173,97 @@ func TestTownVMsPlistCommandOutErrorNamesPath(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 		t.Errorf("the target directory holds %d entries after a failed write, want none", len(entries))
+	}
+}
+
+// TestTownVMsPlistRefuses: arguments that would render a broken launchd job are
+// refused with an error naming the flag and nothing printed or written: a relative
+// or empty --gt, a relative or empty --home, and a newline or carriage return in
+// either (gt-i6d00y).
+func TestTownVMsPlistRefuses(t *testing.T) {
+	t.Parallel()
+	const goodGT, goodHome = "/Users/x/.local/bin/gt", "/Users/x"
+	for _, tc := range []struct {
+		name     string
+		gt, home string
+		want     string // the flag the error names
+	}{
+		{"a relative --gt", "bin/gt", goodHome, "--gt"},
+		{"an empty --gt", "", goodHome, "--gt"},
+		{"a newline in --gt", "/Users/x/.local/bin/gt\n", goodHome, "--gt"},
+		{"a carriage return in --gt", "/Users/x/.local/bin\r/gt", goodHome, "--gt"},
+		{"a relative --home", goodGT, "Users/x", "--home"},
+		{"an empty --home", goodGT, "", "--home"},
+		{"a newline in --home", goodGT, "/Users/x\n/evil", "--home"},
+		{"a carriage return in --home", goodGT, "/Users/x\r", "--home"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out := filepath.Join(t.TempDir(), "colima-vms.plist")
+			for _, withOut := range []bool{false, true} {
+				cmd := newTownVMsPlistCmd()
+				var stdout bytes.Buffer
+				cmd.SetOut(&stdout)
+				cmd.SetErr(&bytes.Buffer{})
+				args := []string{"--gt", tc.gt, "--home", tc.home}
+				if withOut {
+					args = append(args, "--out", out)
+				}
+				cmd.SetArgs(args)
+				err := cmd.Execute()
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Errorf("--out %t: err = %v, want a refusal naming %s", withOut, err, tc.want)
+				}
+				if stdout.Len() != 0 {
+					t.Errorf("--out %t: stdout = %q, want nothing printed on a refusal", withOut, stdout.String())
+				}
+				if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+					t.Errorf("--out %t: a file was written on a refusal (%v)", withOut, statErr)
+				}
+			}
+		})
+	}
+}
+
+// TestTownVMsPlistKeys: the rendered job is XML and carries RunAtLoad true and
+// KeepAlive false, the two keys that decide when launchd starts it and whether it
+// restarts it, so a failed start is read in its log rather than retried in a loop
+// (gt-i6d00y).
+func TestTownVMsPlistKeys(t *testing.T) {
+	t.Parallel()
+	got, err := renderTownVMsPlist("/Users/x/.local/bin/gt", "/Users/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	dec := xml.NewDecoder(bytes.NewReader(got))
+	var lastKey string
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			if err.Error() != "EOF" {
+				t.Fatalf("the rendered plist is not XML: %v", err)
+			}
+			break
+		}
+		el, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		if el.Name.Local == "key" {
+			var k string
+			if err := dec.DecodeElement(&k, &el); err != nil {
+				t.Fatal(err)
+			}
+			lastKey = k
+			continue
+		}
+		if lastKey != "" && (el.Name.Local == "true" || el.Name.Local == "false") {
+			values[lastKey] = el.Name.Local
+			lastKey = ""
+		}
+	}
+	if values["RunAtLoad"] != "true" || values["KeepAlive"] != "false" {
+		t.Errorf("RunAtLoad = %q, KeepAlive = %q; want true and false", values["RunAtLoad"], values["KeepAlive"])
 	}
 }
