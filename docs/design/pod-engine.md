@@ -167,6 +167,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/cmd/metrics_questions.go` `questionsExec`
 - `internal/cmd/prime.go` `execPrimeExternalCommand`
 - `internal/cmd/rig.go` `runRigMenu`
+- `internal/cmd/town_reboot_check.go` `rebootExecRunner`
 - `internal/cmd/town_state_check.go` `runDayOneCommand`
 - `internal/cmd/town_vms_start.go` `execRunner`
 - `internal/cmd/update_effects.go` `buildCommand`
