@@ -6,7 +6,6 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -14,15 +13,16 @@ import (
 	"testing"
 )
 
-// packageDir is the directory of this package's source, found from this file
-// rather than from the working directory a test may be run in.
+// packageDir is the directory of this package's source: the working directory
+// go test sets to the package's directory. That is a source directory, not a
+// build path, so it does not move under go test -trimpath.
 func packageDir(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller cannot locate this test file")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("reading this package's working directory: %v", err)
 	}
-	return filepath.Dir(file)
+	return dir
 }
 
 // goFiles lists the package's non-test Go files, the ones the import check
