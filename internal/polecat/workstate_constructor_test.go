@@ -6,9 +6,10 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // TestNoWorkstateInputLiteralsOutsideConstructor is the gt-hsg structural
@@ -30,11 +31,7 @@ import (
 // exempt from the "elsewhere" check trivially.
 func TestNoWorkstateInputLiteralsOutsideConstructor(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := modroot.Root(t)
 	packages := []string{
 		"internal/polecat",
 		"internal/cmd",
@@ -148,11 +145,7 @@ func directFuncCallViolations(t *testing.T, repoRoot, funcName string) []string 
 // polecat.CanIgnoreStaleCleanupStatus.
 func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := modroot.Root(t)
 	if violations := directFuncCallViolations(t, repoRoot, "CanIgnoreStaleCleanupStatus"); len(violations) > 0 {
 		t.Fatalf("do not call CanIgnoreStaleCleanupStatus outside internal/polecat; gather a polecat.WorkstateFacts and use its CanIgnoreStaleCleanupStatusForNuke or polecat.NewWorkstateInput:\n%s", strings.Join(violations, "\n"))
 	}
@@ -166,11 +159,7 @@ func TestNoCanIgnoreStaleCleanupStatusCallsOutsidePolecat(t *testing.T) {
 // derived from the same facts the classifier reads.
 func TestNoResolveIgnoreCleanupStatusCallsOutsidePolecat(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := modroot.Root(t)
 	if violations := directFuncCallViolations(t, repoRoot, "ResolveIgnoreCleanupStatus"); len(violations) > 0 {
 		t.Fatalf("do not call ResolveIgnoreCleanupStatus outside internal/polecat; gather a polecat.WorkstateFacts and let polecat.NewWorkstateInput resolve IgnoreCleanupStatus from the facts:\n%s", strings.Join(violations, "\n"))
 	}

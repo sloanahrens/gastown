@@ -3,10 +3,11 @@ package polecat
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // make lint runs shellcheck, and a sandbox polecat has no host tools, so the
@@ -14,11 +15,7 @@ import (
 // discarded and ships only its make binary, so an install there does not count.
 func TestPolecatDockerfileInstallsShellcheckInTheFinalStage(t *testing.T) {
 	t.Parallel()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(here), "..", "..", "deploy", "polecat", "Dockerfile"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "deploy", "polecat", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
