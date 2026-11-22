@@ -1132,7 +1132,7 @@ func TestTreeWideGuardsCoverEverySourceReadingTest(t *testing.T) {
 		{"a path built by Join", pk + "func f() { os.ReadFile(filepath.Join(root, \"internal\", \"other\", \"o.go\")) }\n", nil, pair, nil},
 		{"a Join with a const segment", pk + "const dir = \"other\"\nfunc f() { os.ReadFile(filepath.Join(root, \"internal\", dir, \"o.go\")) }\n", nil, pair, nil},
 		{"a literal that is data, never read", pk + "var fixture = \"internal/other/o.go\"\n", nil, nil, nil},
-		{"a file of the test's own package", pk + "func f() { os.ReadFile(\"own.go\") }\n", nil, nil, nil},
+		{"a file of the test's own package", pk + "func f() { os.ReadFile(\"internal/reader/own.go\") }\n", nil, nil, nil},
 		{"a path named in a comment only", pk + "// reads ../other/o.go\nfunc f() { os.ReadFile(\"x\") }\n", nil, nil, nil},
 		{"an integration-tier file", "//go:build integration\n\n" + pk + "func f() { os.ReadFile(\"../other/o.go\") }\n", nil, nil, pair},
 	} {
