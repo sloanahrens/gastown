@@ -527,7 +527,12 @@ type Daemon struct {
 	// cacheTrimCtxSeen is a test seam: the context each cache trim cluster call
 	// runs under and the call's verb (its arguments after the shared prefix, the
 	// text cacheTrimVerb returns), handed over just before the call runs. nil in
-	// production.
+	// production, where it costs one nil check. The fixture answers a kubectl call
+	// by its verb and never sees whether a context ended the process, so a test of
+	// the context a call is made under cannot go red without it. A package-level
+	// hook in test code is refused by the test policy (no-global-swap), and a
+	// per-Daemon field is how the file's other seams, the exec runner and the
+	// clock, are shaped.
 	cacheTrimCtxSeen func(ctx context.Context, verb string)
 	// doltImage is the Dolt image check's item: the town's Dolt container runs
 	// an image more than one patch release behind the newest release, which the
