@@ -32,9 +32,10 @@ type boxPhrase struct {
 // lint, test or gate (gt-o9jb9a).
 const makeTargetHint = "name the narrow go test -run or go vet command; the landing gate runs lint, test and gate after the seat submits, so they are not boxes"
 
-// makeTargetEnd ends a make command: whitespace, the end of text, or punctuation.
+// makeTargetEnd ends a make command: whitespace, the end of text, or punctuation
+// (a closing backtick too: a box quotes the command as code, \x60 in the class).
 // A hyphen or a letter continues the target, so make lint-tools is another target.
-const makeTargetEnd = `(?:$|[\s.,;:!?()\[\]{}'"])`
+const makeTargetEnd = `(?:$|[\s.,;:!?()\[\]{}'"\x60])`
 
 // makeNegations end a phrase that says the seat does not run the target; an
 // occurrence one introduces is a statement, not a command (gt-o9jb9a).

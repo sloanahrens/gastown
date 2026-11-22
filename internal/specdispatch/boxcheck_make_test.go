@@ -22,6 +22,7 @@ func TestSpecLintMakeBox(t *testing.T) {
 		{"test after a doubled space", "- [ ] the seat runs make  test passes", "make test"},
 		{"second occurrence after a negation", "- [ ] the seat does not run make test; make test passes", "make test"},
 		{"nested test", "- [ ] a named test passes\n  - [ ] make test passes", "make test"},
+		{"lint quoted as code", "- [ ] `make lint` exits 0", "make lint"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +52,7 @@ func TestSpecLintMakeBoxAllowed(t *testing.T) {
 		"a seat does not run make lint and will never run make test",
 		"make lint-tools is installed",
 		"make testdata is regenerated",
+		"`make lint-tools` is installed",
 	} {
 		t.Run(item, func(t *testing.T) {
 			t.Parallel()
