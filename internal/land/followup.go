@@ -103,7 +103,7 @@ type followupSkips struct {
 	// finding's bead and fingerprint: the drain and the compaction read a queue
 	// line up to three times, and a stateful hook that answered differently on a
 	// second ask left the line half consumed (gt-r66hk7).
-	answers    map[string]string
+	answers    map[followupAnswerKey]string
 	entries    []FollowupSkipped // one per skipped finding, in the order skipped (gt-xwdiiy)
 	findings   map[string]bool
 	reasons    map[string]bool
@@ -133,8 +133,18 @@ func (s *followupSkips) guarded(what, then string, call func() string) (answer s
 	return call()
 }
 
+// followupAnswerKey is what the skip hook is asked about: the landing and the whole
+// candidate, every field the hook can read. A coarser key (the fingerprint
+// normalizes the title) let two candidates the hook answers differently share the
+// first one's answer; the candidate is strings and an int, so it is a valid key and
+// one hook input is one answer (gt-5evt7q).
+type followupAnswerKey struct {
+	bead string
+	cand FollowupCandidate
+}
+
 func newFollowupSkips() *followupSkips {
-	return &followupSkips{answers: map[string]string{}, findings: map[string]bool{}, reasons: map[string]bool{}}
+	return &followupSkips{answers: map[followupAnswerKey]string{}, findings: map[string]bool{}, reasons: map[string]bool{}}
 }
 
 // record counts a finding the policy skipped, keeps its reason once and, the first
@@ -172,7 +182,7 @@ func (l *Lander) skippedCandidates(w Work, cands []FollowupCandidate, skips *fol
 		// It is kept like an empty reason and named once per landing, and the
 		// hook is still asked exactly once per candidate (gt-g97vlb), and once
 		// per finding in a pass: the answer, a panic's included, is kept.
-		key := w.BeadID + "\x00" + Fingerprint(c.Path, c.Title)
+		key := followupAnswerKey{bead: w.BeadID, cand: c}
 		reason, asked := skips.answers[key]
 		if !asked {
 			reason = skips.guarded("skip policy", "keeping the finding", func() string { return l.FollowupSkip(w, c) })
