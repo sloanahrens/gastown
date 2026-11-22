@@ -1573,29 +1573,35 @@ func TestPostLandStatusCutOffReadRestsForTheInterval(t *testing.T) {
 	})
 }
 
-// TestPostLandStatusPassContextNilEndsThePassAtTheBudget: without a passContext a
-// pass still ends at passBudget, so a stalled read is cut off and the entry behind
-// it waits for the next pass. The read timeout is long, so only the budget can
-// end the pass in time.
+// TestPostLandStatusPassContextNilEndsThePassAtTheBudget: without a passContext the pass budget
+// still applies, so a stalled read is cut off by the budget, long before the read's own timeout,
+// and the entry behind it waits for the next pass. Nothing here counts reads: whether the budget
+// fires before or after the stalled read starts depends on the host, and the pass ends and the
+// entry behind the stalled one is left unread either way (gt-8si6co).
 func TestPostLandStatusPassContextNilEndsThePassAtTheBudget(t *testing.T) {
 	t.Parallel()
-	v, clk, reads := &statusVerdicts{}, &manualClock{now: statusT0}, &atomic.Int32{}
+	v, clk := &statusVerdicts{}, &manualClock{now: statusT0}
 	r := v.runner(func(ctx context.Context, pl PostLand) (*forgejo.CombinedStatus, error) {
 		if pl.Commit != "commit00" {
 			return combinedFor(statusContext, forgejo.StateSuccess), nil
 		}
-		reads.Add(1)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}, &MemoryMainState{}, clk, time.Hour)
+	// The read timeout is the longer bound: only the pass budget can end the pass before it.
 	r.readTimeoutOverride, r.passBudgetOverride = 5*time.Second, 50*time.Millisecond
 	for _, c := range []string{"commit00", "commit01"} {
 		r.Trigger(context.Background(), PostLand{Commit: c, Target: "main"})
 	}
-	r.PollPending(context.Background())
-	if reads.Load() != 1 {
-		t.Fatalf("the stalled entry was read %d times in one pass, want 1", reads.Load())
+
+	done := make(chan struct{})
+	go func() { defer close(done); r.PollPending(context.Background()) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second): //testpolicy:allow no-sleep — a hang guard only: a pass that never ends fails the test here instead of hanging it
+		t.Fatal("the pass did not end within 30s")
 	}
+
 	if greens, _, _ := v.counts(); greens != 0 {
 		t.Fatalf("the pass the budget ended read the entry behind the stalled one: %d greens, want 0", greens)
 	}
