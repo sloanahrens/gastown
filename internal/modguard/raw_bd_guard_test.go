@@ -231,6 +231,34 @@ func TestRawBdSharedTreeSkips(t *testing.T) {
 	}
 }
 
+// TestRawBdSharedTreeParity checks the two scans of the module root agree: the
+// shared tree's walk and source count the same raw bd sites in the same Go
+// files as the plain walk. TestNoNewRawBdSites may switch to the shared scan
+// only while they do.
+func TestRawBdSharedTreeParity(t *testing.T) {
+	t.Parallel()
+	// Walk takes the physical root: a symlinked checkout path would stop at
+	// the first entry, as filepath.WalkDir does.
+	root, err := filepath.EvalSymlinks(moduleRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, wantFiles, err := scanRawBdTree(os.DirFS(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, files, err := scanRawBdSharedTree(root, tree.Walk, tree.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != wantFiles {
+		t.Errorf("shared tree read %d Go files, plain walk %d", files, wantFiles)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("shared tree counts = %v, plain walk = %v", got, want)
+	}
+}
+
 // TestNoNewRawBdSites is the ratchet half of the one-interface rule
 // (gt-7iwy0.4.1): outside internal/beads, code reaches bd through
 // beads.Client and the other typed methods, not argv. The sites still
