@@ -74,7 +74,7 @@ func TestLandReviewsScrubDryRunPrintsCountsAndIDs(t *testing.T) {
 		t.Fatalf("reading the fixture log: %v", err)
 	}
 	var out bytes.Buffer
-	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, false); err != nil {
+	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, false, false); err != nil {
 		t.Fatalf("landReviewsScrubReportFrom: %v", err)
 	}
 	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
@@ -99,7 +99,70 @@ func TestLandReviewsScrubDryRunPrintsCountsAndIDs(t *testing.T) {
 	}
 }
 
-// TestLandReviewsScrubOutputHoldsNoToken: no part of the token, in a finding or as a bead id (scrubbed first).
+// TestLandReviewsScrubApplyRewritesTheLog: --apply rewrites the flagged word out
+// of the log, and a second run finds nothing to change.
+func TestLandReviewsScrubApplyRewritesTheLog(t *testing.T) {
+	t.Parallel()
+	path := writeReviewsScrubFixture(t, t.TempDir())
+	var first bytes.Buffer
+	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &first, path, true, false); err != nil {
+		t.Fatalf("the first --apply run: %v", err)
+	}
+	if want := "reviews-scrub (applied): 3 rows, 1 would change, 1 words, oversize 0, skipped 0\nbeads: gt-slit1\n"; first.String() != want {
+		t.Errorf("the first --apply run printed %q, want %q", first.String(), want)
+	}
+	rewritten, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the rewritten log: %v", err)
+	}
+	assertReviewsScrubNoToken(t, string(rewritten))
+	if n := bytes.Count(rewritten, []byte("\n")); n != 3 {
+		t.Errorf("the rewritten log has %d line(s), want 3", n)
+	}
+
+	var second bytes.Buffer
+	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &second, path, true, false); err != nil {
+		t.Fatalf("the second --apply run: %v", err)
+	}
+	if !strings.Contains(second.String(), "3 rows, 0 would change, 0 words") {
+		t.Errorf("the second --apply run printed %q, want zero changes", second.String())
+	}
+	again, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the log after the second run: %v", err)
+	}
+	if !bytes.Equal(again, rewritten) {
+		t.Error("the second --apply run changed the log")
+	}
+}
+
+// TestLandReviewsScrubMissingLogIsAnError: a missing log is an error naming its
+// path in both modes, prints nothing, and the run creates no file.
+func TestLandReviewsScrubMissingLogIsAnError(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []struct {
+		name  string
+		apply bool
+	}{{"dry run", false}, {"apply", true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+			var out bytes.Buffer
+			err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, mode.apply, false)
+			if err == nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("a missing log returned %v, want an error naming %s", err, path)
+			}
+			if out.Len() != 0 {
+				t.Errorf("a failed run printed %q", out.String())
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the run created the missing log: stat error %v", err)
+			}
+		})
+	}
+}
+
+// TestLandReviewsScrubOutputHoldsNoToken: no part of the token, in a finding or as a bead id (scrubbed first), in either mode.
 func TestLandReviewsScrubOutputHoldsNoToken(t *testing.T) {
 	t.Parallel()
 	idRow, err := json.Marshal(land.ReviewRecord{BeadID: reviewsScrubToken, Verdict: land.VerdictRequestChanges, Findings: 1,
@@ -114,18 +177,23 @@ func TestLandReviewsScrubOutputHoldsNoToken(t *testing.T) {
 		{"in the finding text", reviewsScrubLogBytes(t)},
 		{"as the bead id", append(idRow, '\n')},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			path := filepath.Join(t.TempDir(), land.ReviewsFileName)
-			if err := os.WriteFile(path, tc.log, 0o600); err != nil {
-				t.Fatalf("writing the fixture log: %v", err)
-			}
-			var out bytes.Buffer
-			if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, false); err != nil {
-				t.Fatalf("landReviewsScrubReportFrom: %v", err)
-			}
-			assertReviewsScrubNoToken(t, out.String())
-		})
+		for _, mode := range []struct {
+			name  string
+			apply bool
+		}{{"dry run", false}, {"apply", true}} {
+			t.Run(tc.name+", "+mode.name, func(t *testing.T) {
+				t.Parallel()
+				path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+				if err := os.WriteFile(path, tc.log, 0o600); err != nil {
+					t.Fatalf("writing the fixture log: %v", err)
+				}
+				var out bytes.Buffer
+				if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, path, mode.apply, false); err != nil {
+					t.Fatalf("landReviewsScrubReportFrom: %v", err)
+				}
+				assertReviewsScrubNoToken(t, out.String())
+			})
+		}
 	}
 }
 
@@ -142,7 +210,7 @@ func TestLandReviewsScrubReadsTheTownDefault(t *testing.T) {
 		t.Fatalf("writing the town's log: %v", err)
 	}
 	var out bytes.Buffer
-	if err := landReviewsScrubReportFrom(func() (string, error) { return town, nil }, &out, "", false); err != nil {
+	if err := landReviewsScrubReportFrom(func() (string, error) { return town, nil }, &out, "", false, false); err != nil {
 		t.Fatalf("landReviewsScrubReportFrom: %v", err)
 	}
 	if !strings.Contains(out.String(), "3 rows, 1 would change") {
@@ -154,7 +222,7 @@ func TestLandReviewsScrubReadsTheTownDefault(t *testing.T) {
 func TestLandReviewsScrubSurfacesAnOpenError(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, t.TempDir(), false)
+	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, t.TempDir(), false, false)
 	if err == nil {
 		t.Fatal("a directory as the records path returned no error")
 	}
@@ -167,7 +235,7 @@ func TestLandReviewsScrubSurfacesAnOpenError(t *testing.T) {
 func TestLandReviewsScrubFailsWhenTheTownCannotBeResolved(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	err := landReviewsScrubReportFrom(func() (string, error) { return "", errors.New("no town") }, &out, "", false)
+	err := landReviewsScrubReportFrom(func() (string, error) { return "", errors.New("no town") }, &out, "", false, false)
 	if err == nil {
 		t.Fatal("an unresolvable town returned no error")
 	}
@@ -185,17 +253,21 @@ type reviewsScrubFailingWriter struct{}
 func (reviewsScrubFailingWriter) Write([]byte) (int, error) { return 0, errors.New("write failed") }
 
 // TestLandReviewsScrubSurfacesAWriteError: a report the writer refuses is the
-// run's error.
+// run's error, in the dry run, in --json, and after an --apply.
 func TestLandReviewsScrubSurfacesAWriteError(t *testing.T) {
 	t.Parallel()
 	path := writeReviewsScrubFixture(t, t.TempDir())
-	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, false)
+	err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, false, false)
 	if err == nil || !strings.Contains(err.Error(), "writing the plan") {
 		t.Fatalf("a failing writer returned %v, want an error naming the write", err)
 	}
-	err = landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, true)
+	err = landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, false, true)
 	if err == nil || !strings.Contains(err.Error(), "writing the plan") {
 		t.Fatalf("a failing writer in JSON returned %v, want an error naming the write", err)
+	}
+	err = landReviewsScrubReportFrom(reviewsScrubNoTown(t), reviewsScrubFailingWriter{}, path, true, false)
+	if err == nil || !strings.Contains(err.Error(), "writing the plan") {
+		t.Fatalf("a failing writer after --apply returned %v, want an error naming the write", err)
 	}
 }
 
@@ -214,7 +286,7 @@ func TestLandReviewsScrubJSON(t *testing.T) {
 	t.Run("a log with a row to change", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, writeReviewsScrubFixture(t, t.TempDir()), true); err != nil {
+		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, writeReviewsScrubFixture(t, t.TempDir()), false, true); err != nil {
 			t.Fatalf("landReviewsScrubReportFrom: %v", err)
 		}
 		assertReviewsScrubNoToken(t, out.String())
@@ -226,10 +298,25 @@ func TestLandReviewsScrubJSON(t *testing.T) {
 			t.Errorf("JSON plan = %+v, want dry_run, 3 rows, 1 changed, 1 word, beads [gt-slit1]", plan)
 		}
 	})
+	t.Run("an apply reports dry_run false", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, writeReviewsScrubFixture(t, t.TempDir()), true, true); err != nil {
+			t.Fatalf("landReviewsScrubReportFrom: %v", err)
+		}
+		assertReviewsScrubNoToken(t, out.String())
+		var plan landReviewsScrubPlan
+		if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
+			t.Fatalf("the JSON output does not parse: %v", err)
+		}
+		if plan.DryRun || plan.Rows != 3 || plan.WouldChange != 1 || plan.Words != 1 || !slices.Equal(plan.Beads, []string{"gt-slit1"}) {
+			t.Errorf("JSON plan = %+v, want dry_run false, 3 rows, 1 changed, 1 word, beads [gt-slit1]", plan)
+		}
+	})
 	t.Run("a log with nothing to change", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
-		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, clean, true); err != nil {
+		if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &out, clean, false, true); err != nil {
 			t.Fatalf("landReviewsScrubReportFrom: %v", err)
 		}
 		if !strings.Contains(out.String(), `"beads": []`) {
