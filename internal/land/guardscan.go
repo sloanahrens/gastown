@@ -106,32 +106,54 @@ func isRunTest(fn *ast.FuncDecl) bool {
 	return !unicode.IsLower(r)
 }
 
+// ScanningTest names one test function that scans the source tree across a
+// directory: Pkg is its slash-separated package directory, Name the function.
 type ScanningTest struct{ Pkg, Name string }
 
-// ScanningTests returns the tests in fsys whose own body walks a parent, sorted by
-// package then name, skipping testdata/vendor/node_modules/dot dirs and returning any error.
-func ScanningTests(fsys fs.FS) (g []ScanningTest, err error) {
-	if err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+// scanSkipDirs are the directory names ScanningTests never descends into.
+var scanSkipDirs = map[string]bool{"testdata": true, "vendor": true, "node_modules": true}
+
+// ScanningTests returns, sorted by package then name, the tests in fsys whose own
+// body walks the tree from a parent. It reads every _test.go file except under
+// testdata, vendor, node_modules and dot directories, and returns the first error
+// from reading a file or from scanFile.
+func ScanningTests(fsys fs.FS) ([]ScanningTest, error) {
+	var found []ScanningTest
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if n := d.Name(); d.IsDir() && p != "." && (n == "testdata" || n == "vendor" || n == "node_modules" || n[0] == '.') {
-			return fs.SkipDir
-		} else if d.IsDir() || !strings.HasSuffix(n, "_test.go") {
+		name := d.Name()
+		if d.IsDir() {
+			if p != "." && (scanSkipDirs[name] || strings.HasPrefix(name, ".")) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
 		src, err := fs.ReadFile(fsys, p)
-		if err == nil {
-			var names []string
-			names, err = scanFile(p, src)
-			for _, name := range names {
-				g = append(g, ScanningTest{path.Dir(p), name})
-			}
+		if err != nil {
+			return err
 		}
-		return err
-	}); err != nil {
+		names, err := scanFile(p, src)
+		if err != nil {
+			return err
+		}
+		for _, n := range names {
+			found = append(found, ScanningTest{Pkg: path.Dir(p), Name: n})
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	sort.Slice(g, func(i, j int) bool { return g[i].Pkg < g[j].Pkg || g[i].Pkg == g[j].Pkg && g[i].Name < g[j].Name })
-	return g, nil
+	sort.Slice(found, func(i, j int) bool {
+		if found[i].Pkg != found[j].Pkg {
+			return found[i].Pkg < found[j].Pkg
+		}
+		return found[i].Name < found[j].Name
+	})
+	return found, nil
 }
