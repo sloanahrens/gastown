@@ -206,95 +206,54 @@ func TestBirdReportsMarksTheHeadlineReporter(t *testing.T) {
 	}
 }
 
-// A bird's row carries when the bird was last active, from the source the reader
-// is given: the instant WithActivity answers for that bird, left zero when the
-// source has no answer, and dropped when it leads the reader's clock. The
-// report's own age still decides State and Stale, so a bird working today with
-// a report days old reads as stale and recently active (gt-1v8ex4).
+// A row carries WithActivity's instant as its bird's last activity, zero when
+// the source has no answer, and drops an answer ahead of the reader's clock;
+// the report's own age still decides State and Stale (gt-1v8ex4).
 func TestBirdReportsLastActive(t *testing.T) {
 	t.Parallel()
 
 	now := birdReportsNow
 	root := t.TempDir()
-	for _, name := range []string{"busybird", "silentbird", "futurebird"} {
+	for _, name := range []string{"activebird", "silentbird", "futurebird"} {
 		writeBird(t, root, name, birdWrites{
 			json: birdSidecarJSON(t, birdSidecarFor(name, now.Add(-48*time.Hour), "title", "summary")),
 		})
 	}
 	activeAt := now.Add(-2 * time.Hour)
-	// The source has an instant for silentbird but does not claim it, so a
-	// reader that ignores the answer's ok would show it.
+	// silentbird gets an instant but ok=false; futurebird's answer is an hour ahead.
 	source := func(bird string) (time.Time, bool) {
 		switch bird {
-		case "busybird":
+		case "activebird":
 			return activeAt, true
 		case "silentbird":
 			return activeAt, false
-		default:
-			return time.Time{}, false
+		}
+		return now.Add(time.Hour), true
+	}
+	rows := birdByName(NewBirdReportsReader(root).WithActivity(source).Read(now))
+	if got := rows["activebird"].LastActive; !got.Equal(activeAt) {
+		t.Errorf("activebird last active %v, want the source's answer %v", got, activeAt)
+	}
+	for _, bird := range []string{"silentbird", "futurebird"} {
+		if got := rows[bird].LastActive; !got.IsZero() {
+			t.Errorf("%s last active %v, want zero: no answer is shown and a future one is dropped", bird, got)
 		}
 	}
+	if r := rows["activebird"]; r.State != BirdReportStale || !r.Stale {
+		t.Errorf("activebird state %q stale %v, want %q and true: its report is two days old", r.State, r.Stale, BirdReportStale)
+	}
 
-	t.Run("the answer is the row's last activity", func(t *testing.T) {
-		t.Parallel()
-
-		got := birdByName(NewBirdReportsReader(root).WithActivity(source).Read(now))["busybird"]
-		if !got.LastActive.Equal(activeAt) {
-			t.Errorf("busybird last active %v, want the source's answer %v", got.LastActive, activeAt)
+	plain := NewBirdReportsReader(root).Read(now)
+	withSource := NewBirdReportsReader(root).WithActivity(source).Read(now)
+	if len(withSource) != len(plain) {
+		t.Fatalf("reader with a source returned %d rows, reader without %d", len(withSource), len(plain))
+	}
+	for i := range plain {
+		withSource[i].LastActive = time.Time{}
+		if !plain[i].LastActive.IsZero() || !reflect.DeepEqual(withSource[i], plain[i]) {
+			t.Errorf("%s: a source changed the row from %+v to %+v", plain[i].Bird, plain[i], withSource[i])
 		}
-	})
-
-	t.Run("a recent last activity leaves a stale report stale", func(t *testing.T) {
-		t.Parallel()
-
-		got := birdByName(NewBirdReportsReader(root).WithActivity(source).Read(now))["busybird"]
-		if got.State != BirdReportStale || !got.Stale {
-			t.Errorf("busybird state %q stale %v, want %q and true: its report is two days old",
-				got.State, got.Stale, BirdReportStale)
-		}
-	})
-
-	t.Run("a bird the source has no answer for has no last activity", func(t *testing.T) {
-		t.Parallel()
-
-		got := birdByName(NewBirdReportsReader(root).WithActivity(source).Read(now))["silentbird"]
-		if !got.LastActive.IsZero() {
-			t.Errorf("silentbird last active %v, want the zero time: the source did not answer for it", got.LastActive)
-		}
-	})
-
-	t.Run("a time ahead of the reader's clock is dropped", func(t *testing.T) {
-		t.Parallel()
-
-		rows := NewBirdReportsReader(root).WithActivity(func(bird string) (time.Time, bool) {
-			if bird == "futurebird" {
-				return now.Add(time.Hour), true
-			}
-			return time.Time{}, false
-		}).Read(now)
-		if got := birdByName(rows)["futurebird"].LastActive; !got.IsZero() {
-			t.Errorf("futurebird last active %v, want the zero time: an hour ahead of now is dropped", got)
-		}
-	})
-
-	t.Run("no source leaves every other field as it was", func(t *testing.T) {
-		t.Parallel()
-
-		plain := NewBirdReportsReader(root).Read(now)
-		withSource := NewBirdReportsReader(root).WithActivity(source).Read(now)
-		if len(withSource) != len(plain) {
-			t.Fatalf("reader with a source returned %d rows, reader without %d", len(withSource), len(plain))
-		}
-		for i := range plain {
-			if !plain[i].LastActive.IsZero() {
-				t.Errorf("%s: no source, yet last active %v", plain[i].Bird, plain[i].LastActive)
-			}
-			withSource[i].LastActive = time.Time{}
-			if !reflect.DeepEqual(withSource[i], plain[i]) {
-				t.Errorf("%s: giving a source changed the row from %+v to %+v", plain[i].Bird, plain[i], withSource[i])
-			}
-		}
-	})
+	}
 }
 
 // Only a real directory, named like a bird, whose reports directory holds a

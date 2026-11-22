@@ -79,9 +79,8 @@ const (
 
 	// birdFutureSlack is how far a written instant may lead the reader's clock
 	// before the reader drops it: a sidecar's written_at is refused, and a
-	// last-activity time is not shown. A bird writes on the machine the reader
-	// runs on, and an activity source reads that machine too, so an instant
-	// minutes ahead is not two clocks apart; further ahead names no real time.
+	// last-activity time is not shown. The bird writes on the reader's own
+	// machine, so an instant minutes ahead is fine; further ahead names no time.
 	birdFutureSlack = 5 * time.Minute
 
 	// birdPageLag is how much older than its sidecar a page may be before the
@@ -159,12 +158,10 @@ type BirdReport struct {
 	// written_at. A bird with a page and no sidecar has no written_at to
 	// show, so Written is the page's own mtime.
 	Written time.Time `json:"written,omitzero"`
-	// LastActive is when the bird was last active, from the source
-	// WithActivity gives. It is the zero time when the reader was given no
-	// source, the source had no answer for this bird, or the answer led the
-	// reader's clock by more than birdFutureSlack. It is not the report's age:
-	// a summary days old can carry a recent LastActive, because a bird works
-	// without rewriting its daily report.
+	// LastActive is when the bird was last active, from the WithActivity
+	// source: zero when there is no source or no answer, or when the answer
+	// leads the reader's clock by more than birdFutureSlack. It is not the
+	// report's age, which a working bird may leave days old.
 	LastActive time.Time `json:"last_active,omitzero"`
 	// Stale marks a summary older than birdStaleAfter. The page sorts these
 	// after the rows that need the operator.
@@ -238,12 +235,9 @@ func (r *BirdReportsReader) WithHeadline(name string) *BirdReportsReader {
 	return r
 }
 
-// WithActivity gives the reader the source of each bird's last activity: fn is
-// asked with a row's bird name and answers when that bird was last active. A
-// row carries the answer as LastActive; a bird fn does not answer for, or a
-// reader given no fn, carries the zero time. The source is asked once per row
-// and only after the row is read, so it cannot change a row's State, Stale or
-// any other field.
+// WithActivity gives the reader each bird's last activity: fn is asked with a
+// row's bird name, and its answer becomes that row's LastActive. A reader
+// given no fn, or a bird fn answers false for, carries the zero time.
 func (r *BirdReportsReader) WithActivity(fn func(bird string) (time.Time, bool)) *BirdReportsReader {
 	r.activity = fn
 	return r
@@ -258,10 +252,9 @@ func NewBirdReportsReader(runtimeDir string) *BirdReportsReader {
 
 // Read returns one row per bird that has a daily report as it stands at now, in
 // the order the operator should see the rows: the ones a bird asked for
-// attention on, then the stale ones, then by name. A row carries the bird's
-// last activity when the reader was given a source for it, and a runtime
-// directory the reader cannot read is one row in error rather than no birds at
-// all, so a failed read never draws as an empty page.
+// attention on, then the stale ones, then by name. A row also carries its last
+// activity when the reader has a source, and a runtime directory the reader
+// cannot read is one row in error rather than no birds at all.
 func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 	entries, err := os.ReadDir(r.runtimeDir)
 	if err != nil {
@@ -299,10 +292,9 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 	return r.fillActivity(rows, now)
 }
 
-// fillActivity gives each row the last activity the reader's source answers for
-// its bird, and returns rows. A reader given no source, or a bird the source has
-// no answer for, leaves LastActive zero; an answer that leads now by more than
-// birdFutureSlack is dropped rather than shown. Only LastActive is written.
+// fillActivity gives each row the last activity the source answers for its
+// bird: no source or no answer leaves LastActive zero, and an answer further
+// than birdFutureSlack ahead of now is dropped. Only LastActive is written.
 func (r *BirdReportsReader) fillActivity(rows []BirdReport, now time.Time) []BirdReport {
 	if r.activity == nil {
 		return rows
