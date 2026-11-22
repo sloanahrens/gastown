@@ -243,3 +243,63 @@ func TestDeployerCredReadFSErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestDeployerCredReadFSSwap: a directory handle keeps reading the file it was
+// opened on after its path is renamed away and a symlink to another directory,
+// holding a file of the same name, is put at that path. A Dir.Open that
+// re-resolves the path turns this red: it would read the swapped-in file.
+func TestDeployerCredReadFSSwap(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	// The CI runner's umask is 000, so TempDir does not leave the directory in
+	// the 0700 a credential directory has.
+	//testpolicy:allow no-exec-files — the rule flags any literal mode with an execute bit; this chmod sets a test directory to 0700, and no file becomes executable
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatalf("could not set the test directory to 0700: %v", err)
+	}
+	const name = "gt-deployer-apply.key"
+	dir := filepath.Join(root, "credentials")
+	moved := filepath.Join(root, "moved")
+	other := filepath.Join(root, "other")
+	for _, d := range []string{dir, other} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatalf("could not create %s: %v", d, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("original"), 0o600); err != nil {
+		t.Fatalf("could not write the original %s: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(other, name), []byte("swapped"), 0o600); err != nil {
+		t.Fatalf("could not write the swapped-in %s: %v", name, err)
+	}
+	handle := openDir(t, dir)
+	defer closeDir(t, handle)
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatalf("could not rename %s away: %v", dir, err)
+	}
+	if err := os.Symlink(other, dir); err != nil {
+		t.Fatalf("could not put a symlink at %s: %v", dir, err)
+	}
+	// The swap is in place, so a swap that never happened cannot pass below.
+	swapped, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatalf("could not read %s through the swapped path: %v", name, err)
+	}
+	if string(swapped) != "swapped" {
+		t.Fatalf("the swapped path reads %q, want the other directory's %q", swapped, "swapped")
+	}
+	file, err := handle.Open(name)
+	if err != nil {
+		t.Fatalf("Dir.Open of %s after the swap: %v", name, err)
+	}
+	got, err := io.ReadAll(file)
+	if err != nil {
+		t.Fatalf("reading %s through the handle after the swap: %v", name, err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("could not close %s: %v", name, err)
+	}
+	if string(got) != "original" {
+		t.Fatalf("the handle opened before the swap read %q, want the original %q", got, "original")
+	}
+}
