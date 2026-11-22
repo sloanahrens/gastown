@@ -73,7 +73,8 @@ func TestClusterShapeDriftObjectsHoldsAClusterInStep(t *testing.T) {
 
 // TestClusterShapeDriftObjectsReportsADifference moves one field of a rendered
 // namespaced object in the live one, so the run must exit 1 and name the
-// resource and the path (gt-03u02a).
+// resource and the path. A row whose mutation once set a literal renders it, so
+// the derived value changes a render carrying it (gt-03u02a, gt-d6izyk).
 func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -81,7 +82,8 @@ func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 		resource string
 		path     string
 		rendered func(m k8sdaemon.Manifests) any
-		observed any
+		observed func(m k8sdaemon.Manifests) any
+		literal  func(m *k8sdaemon.Manifests) // sets the value the mutation once set
 		mutate   func(t *testing.T, live map[string]any)
 	}{
 		{
@@ -89,12 +91,14 @@ func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 			resource: "service/" + k8sdaemon.DashboardName,
 			path:     "spec.ports[0].port",
 			rendered: func(m k8sdaemon.Manifests) any { return m.DashboardService.Spec.Ports[0].Port },
-			observed: 9000,
+			observed: func(m k8sdaemon.Manifests) any { return m.DashboardService.Spec.Ports[0].Port + 1 },
+			literal:  func(m *k8sdaemon.Manifests) { m.DashboardService.Spec.Ports[0].Port = 9000 },
 			mutate: func(_ *testing.T, live map[string]any) {
 				if live["kind"] != "Service" || live["metadata"].(map[string]any)["name"] != k8sdaemon.DashboardName {
 					return
 				}
-				driftObjectAt(live, "spec")["ports"].([]any)[0].(map[string]any)["port"] = 9000
+				port := driftObjectAt(live, "spec")["ports"].([]any)[0].(map[string]any)
+				port["port"] = port["port"].(float64) + 1
 			},
 		},
 		{
@@ -102,12 +106,14 @@ func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 			resource: "persistentvolumeclaim/" + k8sdaemon.TownStateClaim,
 			path:     "spec.resources.requests.storage",
 			rendered: func(m k8sdaemon.Manifests) any { return m.TownStateClaim.Spec.Resources.Requests["storage"] },
-			observed: "21Gi",
+			observed: func(m k8sdaemon.Manifests) any { return m.TownStateClaim.Spec.Resources.Requests["storage"] + "x" },
+			literal:  func(m *k8sdaemon.Manifests) { m.TownStateClaim.Spec.Resources.Requests["storage"] = "21Gi" },
 			mutate: func(_ *testing.T, live map[string]any) {
 				if live["kind"] != "PersistentVolumeClaim" || live["metadata"].(map[string]any)["name"] != k8sdaemon.TownStateClaim {
 					return
 				}
-				driftObjectAt(live, "spec", "resources", "requests")["storage"] = "21Gi"
+				requests := driftObjectAt(live, "spec", "resources", "requests")
+				requests["storage"] = requests["storage"].(string) + "x"
 			},
 		},
 		{
@@ -115,7 +121,7 @@ func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 			resource: "cronjob/" + k8sdaemon.TrackerBackupName,
 			path:     "spec.schedule",
 			rendered: func(m k8sdaemon.Manifests) any { return m.TrackerBackupCronJob.Spec.Schedule },
-			observed: "0 4 * * *",
+			observed: func(k8sdaemon.Manifests) any { return "0 4 * * *" },
 			mutate: func(_ *testing.T, live map[string]any) {
 				if live["kind"] != "CronJob" {
 					return
@@ -128,13 +134,23 @@ func TestClusterShapeDriftObjectsReportsADifference(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d, out, town := driftEveryObjectSeams(t)
+			if tc.literal != nil {
+				build := d.render.build
+				d.render.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+					m, err := build(v)
+					if err == nil {
+						tc.literal(&m)
+					}
+					return m, err
+				}
+			}
 			m := driftTestRendered(t, d, driftTestFlags(t, town))
 			d.kubectl = driftAnswering(t, m, tc.mutate)
 			err := runClusterDrift(context.Background(), d)
 			if got := driftExit(err); got != 1 {
 				t.Fatalf("exit = %d, want 1 (err: %v); printed:\n%s", got, err, out.String())
 			}
-			wantLines := []string{tc.resource + ": " + driftWantDifference(t, tc.path, tc.rendered(m), tc.observed)}
+			wantLines := []string{tc.resource + ": " + driftWantDifference(t, tc.path, tc.rendered(m), tc.observed(m))}
 			if got := driftLines(out); !slices.Equal(got, wantLines) {
 				t.Errorf("printed\n%q\nwant\n%q", got, wantLines)
 			}
