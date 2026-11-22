@@ -28,24 +28,27 @@ const (
 // hmSkewAnswers is what the fake hm and git answer. The zero value answers
 // nothing useful; hmSkewBehindAnswers is the town the tests start from.
 type hmSkewAnswers struct {
-	version      string    // stdout of `hm version`
-	versionErr   bool      // `hm version` fails to run
-	originErr    bool      // the rig's origin url cannot be read
-	noOrigin     bool      // the rig's origin url is empty
-	originURL    string    // the origin url the rig prints, when set
-	lsRemoteErr  bool      // the ls-remote call fails
-	lsRemote     string    // stdout of ls-remote
-	lsRemoteArgs *[]string // when set, receives the ls-remote call's argv
-	diffErr      bool      // the clone's diff fails
-	changed      []string  // the paths the clone's diff names
-	lacksInstall bool      // the clone has no commit for the installed sha
-	probeErr     bool      // the clone cannot answer whether it has the installed sha
-	noClone      bool      // the job-owned clone does not exist yet, so the monitor clones it
-	cloneErr     bool      // the clone fails, leaving a partial directory behind
-	fetchErr     bool      // the fetch of origin's main into the clone fails
-	cloneIsFile  bool      // the clone's path is a regular file, not a directory
-	embedGrep    string    // stdout of the clone's git grep for //go:embed directives
-	grepErr      bool      // that grep fails
+	version      string            // stdout of `hm version`
+	versionErr   bool              // `hm version` fails to run
+	originErr    bool              // the rig's origin url cannot be read
+	noOrigin     bool              // the rig's origin url is empty
+	originURL    string            // the origin url the rig prints, when set
+	lsRemoteErr  bool              // the ls-remote call fails
+	lsRemote     string            // stdout of ls-remote
+	lsRemoteArgs *[]string         // when set, receives the ls-remote call's argv
+	diffErr      bool              // the clone's diff fails
+	changed      []string          // the paths the clone's diff names
+	lacksInstall bool              // the clone has no commit for the installed sha
+	probeErr     bool              // the clone cannot answer whether it has the installed sha
+	noClone      bool              // the job-owned clone does not exist yet, so the monitor clones it
+	cloneErr     bool              // the clone fails, leaving a partial directory behind
+	fetchErr     bool              // the fetch of origin's main into the clone fails
+	cloneIsFile  bool              // the clone's path is a regular file, not a directory
+	embedGrep    string            // stdout of the clone's git grep for //go:embed directives
+	lagCount     string            // stdout of rev-list --count
+	lagTimes     map[string]string // stdout of show --format=%ct, by revision
+	lagErr       string            // the git call named here fails: "rev-list" or "show"
+	grepErr      bool              // that grep fails
 }
 
 // hmSkewBehindAnswers is an hm at installed sha A, origin's main at B, and a diff
@@ -138,6 +141,20 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 				err = errors.New("fatal: bad revision")
 			}
 			out = a.embedGrep
+		case strings.Contains(joined, " rev-list --count "):
+			if a.lagErr == "rev-list" {
+				err = errors.New("fatal: bad revision range")
+			}
+			out = a.lagCount
+		case strings.Contains(joined, " show -s --format=%ct "):
+			if a.lagErr == "show" {
+				err = errors.New("fatal: bad object")
+			}
+			for rev, ct := range a.lagTimes {
+				if strings.Contains(joined, " "+rev+" ") {
+					out = ct
+				}
+			}
 		case strings.Contains(joined, " rev-parse --verify -q "):
 			switch {
 			case a.probeErr:
