@@ -6,10 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
-// TestRootFromFindsGoModAbove: a nested start resolves up to the go.mod file,
-// and a directory named go.mod is not one.
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
+
 func TestRootFromFindsGoModAbove(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -26,8 +30,6 @@ func TestRootFromFindsGoModAbove(t *testing.T) {
 	}
 }
 
-// TestRootFromErrorsWithNoGoMod: a tree with no go.mod above the start fails
-// with an error naming that start, not with the absence of any one go.mod.
 func TestRootFromErrorsWithNoGoMod(t *testing.T) {
 	t.Parallel()
 	start := t.TempDir()
@@ -36,8 +38,6 @@ func TestRootFromErrorsWithNoGoMod(t *testing.T) {
 	}
 }
 
-// TestRootFromReturnsStatErrors: a start that cannot be read returns the stat
-// error about it, rather than reporting that no module was found.
 func TestRootFromReturnsStatErrors(t *testing.T) {
 	t.Parallel()
 	file := filepath.Join(t.TempDir(), "file")
