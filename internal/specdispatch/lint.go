@@ -765,31 +765,34 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //  4. at least one acceptance item, and no item naming a step only the
 //     overseer can run: the whole gate, a container suite, a cluster or the
 //     live town (gt-hgt9j.3)
-//  5. a bead carrying both an acceptance field and a description acceptance
+//  5. an acceptance item claiming a zero result on a fixture path with no
+//     usable Evidence section is refused: nothing at landing can check the
+//     claim (gt-1adj4k)
+//  6. a bead carrying both an acceptance field and a description acceptance
 //     section lists the same criteria in both: gt done reads the field while
 //     filers edit the description, so the two drift and hold a polecat to
 //     criteria nobody can see (gt-hgt9j.2)
-//  6. every repo file the Constraints names as a file it changes exists on the
+//  7. every repo file the Constraints names as a file it changes exists on the
 //     target branch; a path the spec introduces, reads only, or that is not a
 //     literal repo file, is passed. A bead with a Files section is checked from
 //     that section alone: every modify or read path must exist, a create path
 //     need not, and a section that does not parse is refused
 //     (gt-7t1im, gt-hgt9j.10)
-//  7. no Goal, Constraints, Gate or acceptance text names a path inside another
+//  8. no Goal, Constraints, Gate or acceptance text names a path inside another
 //     rig's directory: a polecat's sandbox holds only its own rig. The rig list
 //     narrows the segments read as rigs; without it every other rig-shaped
 //     segment is refused (gt-qotsst)
-//  8. a bead whose own sp-minutes label is at or over LintOptions'
+//  9. a bead whose own sp-minutes label is at or over LintOptions'
 //     LintOverMinutes is refused, with the label, the setting and the split
 //     rule named; a label that does not read, or two that disagree, leaves the
 //     gate unrun and says so in Warnings, and a bead labeled size-ok or whose
 //     rung is none passes (gt-mtzx6s)
-//  9. a bead carrying no sp-minutes label at all is refused when
+//  10. a bead carrying no sp-minutes label at all is refused when
 //     LintOptions.RequireEstimate asks for one, naming the two commands that
 //     write it; a bead whose label does not read, or whose labels disagree, is
 //     refused too, naming the estimate run that rewrites it; a bead whose rung
 //     is none with no sp-minutes label passes (gt-1cx0o0, gt-uffeik)
-//  10. size: needs-planning label, a Size that says planning, or more than
+//  11. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused. A bead labeled overseer-only or operator-only may
 //     say one session of its owner instead (gt-hgt9j.13)
@@ -881,6 +884,12 @@ func lintShape(s Spec, t Template, paths bool, opts LintOptions) LintVerdict {
 	// A nested item is a sub-step under a criterion the polecat runs, so the same
 	// refusal holds for it (gt-hgt9j.3).
 	if r, blocked := nestedAcceptanceBoxRefusal(acceptanceText(s, sections)); blocked {
+		failures = append(failures, r)
+	}
+	// An acceptance item claiming a zero result on a fixture path proves
+	// nothing at landing unless the bead shows the command and its output:
+	// it is refused here, beside the other acceptance checks (gt-1adj4k).
+	if r, blocked := evidenceRefusal(s, sections); blocked {
 		failures = append(failures, r)
 	}
 	// Both sides present is the only case where drift is visible: one alone is
