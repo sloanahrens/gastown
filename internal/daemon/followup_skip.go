@@ -114,10 +114,14 @@ func (p followupPolicy) clock() func() time.Time {
 // the rest of the daemon reads, so it judges the hold-out window (gt-l0q48h).
 var policyFor = newFollowupPolicy
 
-// applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built.
+// applyFollowupPolicy sets the follow-up skip policy on a Lander as it is built,
+// with the class function the skips line records (gt-xwdiiy).
 func applyFollowupPolicy(l *land.Lander) {
 	p := policyFor()
 	l.FollowupSkip = p.reason
+	l.FollowupClass = func(c land.FollowupCandidate) string {
+		return omlessons.Classify(land.ReviewFindingText{Title: c.Title, Claim: c.Claim})
+	}
 }
 
 // reason is the skip policy: the reason a minor finding is filed nowhere, or
