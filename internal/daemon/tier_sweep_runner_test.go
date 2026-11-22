@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1289,13 +1291,16 @@ func syncCreate(plan sweeprunner.Plan) sweeprunner.Step {
 type mirrorFSRecorder struct {
 	paths map[string]bool
 	ops   []string
-	// fail makes the named operation (removeAll, mkdirAll, create, remove) fail.
+	// fail makes the named operation (lstat, removeAll, mkdirAll, create, remove) fail.
 	fail map[string]error
 }
 
 func (m *mirrorFSRecorder) fs() *tierSweepMirrorFS {
 	return &tierSweepMirrorFS{
 		exists: func(p string) bool { return m.paths[p] },
+		// The recorder models no directories: every ancestor is missing, so the
+		// preparation creates it, unless the row makes the lstat fail.
+		lstat: func(string) (fs.FileInfo, error) { return nil, cmp.Or(m.fail["lstat"], fs.ErrNotExist) },
 		removeAll: func(p string) error {
 			m.ops = append(m.ops, "removeAll "+p)
 			delete(m.paths, p)
@@ -1434,6 +1439,7 @@ func TestTierSweepMirrorPreparationFailuresAreLoud(t *testing.T) {
 		marker  bool // the marker is already there, so the rebuild runs
 		wantErr string
 	}{
+		{"lstat", false, "reading"},
 		{"removeAll", true, "removing the unfinished mirror"},
 		{"remove", true, "removing the marker"},
 		{"mkdirAll", false, "creating"},
