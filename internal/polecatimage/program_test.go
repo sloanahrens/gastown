@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // envMap is a get function over a fixed environment, so a test reads no
@@ -674,11 +674,7 @@ func TestRunProgramKeepsTheKnownEntries(t *testing.T) {
 // a verb no handler carries fails here before an image runs it (gt-gg9hv.47).
 func TestEveryHelperCallerNamesAKnownVerb(t *testing.T) {
 	t.Parallel()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
+	repoRoot := modroot.Root(t)
 
 	checked := 0
 	for _, job := range pinRenderedJobs(t) {
