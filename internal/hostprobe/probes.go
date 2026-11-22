@@ -100,6 +100,10 @@ type Probes struct {
 	// Launchd is a pointer so a file with no launchd key decodes to nil, which a
 	// reader takes as unknown; a zero Field would read as a job that is not running.
 	Launchd *Field[Launchd] `json:"launchd"`
+	// DoltConflicts is a pointer for the same reason as Launchd: a file written
+	// before the field decodes to nil, which a reader takes as unknown, not as
+	// zero lost commits.
+	DoltConflicts *Field[DoltConflicts] `json:"dolt_conflicts"`
 }
 
 // Path is the probe file under townRoot: the host agent writes it there and a

@@ -116,6 +116,122 @@ func TestDockerDiskRoundTripsAndBumpsTheSchema(t *testing.T) {
 	}
 }
 
+// TestDoltConflictsIsNilWhenTheFileHasNoKey: a v3 file written before the
+// dolt_conflicts field decodes with the field nil, which a reader takes as
+// unknown rather than as zero lost commits.
+func TestDoltConflictsIsNilWhenTheFileHasNoKey(t *testing.T) {
+	t.Parallel()
+	now := testAt()
+	path := filepath.Join(t.TempDir(), "probes.json")
+	body := fmt.Sprintf(`{"v":3,"at":%q,"mem_free_pct":{"value":94}}`, now.Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+
+	got, err := Read(path, now, 3*time.Minute)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.DoltConflicts != nil {
+		t.Errorf("DoltConflicts = %+v, want nil for a file without the key", *got.DoltConflicts)
+	}
+}
+
+// TestDoltConflictsRoundTrips: a reading the parser filled survives a write and
+// a read, bucket by bucket, with its per-database counts.
+func TestDoltConflictsRoundTrips(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "probes.json")
+	at := testAt().Truncate(10 * time.Minute)
+	want := Field[DoltConflicts]{Value: DoltConflicts{Buckets: []DoltBucket{
+		{At: at.Add(-10 * time.Minute), ByDB: map[string]int{}},
+		{At: at, Total: 3, ByDB: map[string]int{"P2": 2, "unknown": 1}},
+	}}}
+	in := fullProbes()
+	in.DoltConflicts = &want
+	if err := Write(path, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// The key is what the host agent's file carries, so a rename of the tag
+	// is caught here even though the round trip alone would still pass.
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), `"dolt_conflicts":{`) {
+		t.Errorf("file = %.120q, want the reading under the dolt_conflicts key (read error %v)", data, err)
+	}
+
+	got, err := Read(path, testAt().Add(30*time.Second), 3*time.Minute)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.DoltConflicts == nil {
+		t.Fatal("DoltConflicts = nil, want the reading that was written")
+	}
+	if len(got.DoltConflicts.Value.Buckets) != len(want.Value.Buckets) {
+		t.Fatalf("buckets = %d, want %d", len(got.DoltConflicts.Value.Buckets), len(want.Value.Buckets))
+	}
+	for i, b := range got.DoltConflicts.Value.Buckets {
+		w := want.Value.Buckets[i]
+		if !b.At.Equal(w.At) || b.Total != w.Total || !reflect.DeepEqual(b.ByDB, w.ByDB) {
+			t.Errorf("bucket %d = %+v, want %+v", i, b, w)
+		}
+	}
+}
+
+// TestDoltConflictsKeepsSchemaVersion3: the field is optional, so adding it
+// does not bump the schema. A file written with the field says version 3.
+func TestDoltConflictsKeepsSchemaVersion3(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "probes.json")
+	in := fullProbes()
+	in.DoltConflicts = &Field[DoltConflicts]{}
+	if err := Write(path, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the written file: %v", err)
+	}
+	if !strings.HasPrefix(string(data), `{"v":3,`) {
+		t.Errorf("file = %.60q, want it stamped schema version 3", data)
+	}
+}
+
+// TestDoltConflictsZeroReadingIsNotUnknown is the point of the optional field: a
+// reading that found no conflicts (a zero value, no error) reads back as a reading,
+// and only a key that is absent or null reads back as unknown.
+func TestDoltConflictsZeroReadingIsNotUnknown(t *testing.T) {
+	t.Parallel()
+	now := testAt()
+	path := filepath.Join(t.TempDir(), "probes.json")
+	in := fullProbes()
+	in.DoltConflicts = &Field[DoltConflicts]{}
+	if err := Write(path, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got, err := Read(path, now.Add(30*time.Second), 3*time.Minute)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if got.DoltConflicts == nil {
+		t.Fatal("a zero reading read back as unknown (nil)")
+	}
+	if got.DoltConflicts.Err != "" || len(got.DoltConflicts.Value.Buckets) != 0 {
+		t.Errorf("zero reading read back as %+v", *got.DoltConflicts)
+	}
+
+	body := fmt.Sprintf(`{"v":3,"at":%q,"mem_free_pct":{"value":94},"dolt_conflicts":null}`, now.Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write the fixture: %v", err)
+	}
+	null, err := Read(path, now, 3*time.Minute)
+	if err != nil {
+		t.Fatalf("Read of a null key: %v", err)
+	}
+	if null.DoltConflicts != nil {
+		t.Errorf("a null key read back as %+v, want unknown (nil)", *null.DoltConflicts)
+	}
+}
+
 // TestReadRefusesUnusableFile covers the refusals that do not depend on the
 // clock: no file, no JSON, and a schema version this binary does not know.
 func TestReadRefusesUnusableFile(t *testing.T) {
