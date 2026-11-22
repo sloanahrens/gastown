@@ -54,14 +54,15 @@ func handleRecord(plan clusterapproval.Plan) clusterapproval.Record {
 // it handed Apply and the proposal it wrote, so a test sees the sequence and
 // every step it skips.
 type fakeSteps struct {
-	plan      clusterapproval.Plan
-	planErr   error
-	writeErr  error
-	live      map[string]string
-	liveErr   error
-	applyErr  error
-	record    clusterapproval.Record
-	recordErr error
+	plan        clusterapproval.Plan
+	planErr     error
+	writeErr    error
+	live        map[string]string
+	liveErr     error
+	applyErr    error
+	record      clusterapproval.Record
+	recordErr   error
+	rollbackErr error
 
 	// afterLive runs at the end of LiveVersions, so a test can move the files or
 	// the live versions between the verify and the apply.
@@ -117,6 +118,11 @@ func (f *fakeSteps) ReadRecord(_ context.Context, id string) (clusterapproval.Re
 	f.calls = append(f.calls, "ReadRecord "+id)
 	f.recordID = id
 	return f.record, f.recordErr
+}
+
+func (f *fakeSteps) Rollback(_ context.Context, name string) error {
+	f.calls = append(f.calls, "Rollback "+name)
+	return f.rollbackErr
 }
 
 func TestDeployerInboxHandlePlan(t *testing.T) {
@@ -413,7 +419,6 @@ func TestDeployerInboxHandleRefuses(t *testing.T) {
 		name string
 		kind string
 	}{
-		{name: "the rollback kind, which is gt-iiccy3", kind: deployerinbox.KindRollback},
 		{name: "an empty kind", kind: ""},
 	}
 	for _, tc := range cases {
@@ -598,6 +603,223 @@ func TestDeployerInboxHandleApplyRefusesAnUnverifiedPlan(t *testing.T) {
 			}
 			if strings.Contains(answer.Detail, "/secret/path") || strings.Contains(answer.Detail, handleToken) {
 				t.Errorf("detail = %q, want none of the callee's path or token", answer.Detail)
+			}
+		})
+	}
+}
+
+// TestDeployerInboxRollbackRuns: a rollback request with a verified record calls Rollback once, never Apply, and answers rolled-back.
+func TestDeployerInboxRollbackRuns(t *testing.T) {
+	t.Parallel()
+
+	plan := handlePlan()
+	_, id, err := clusterapproval.NewProposal(plan)
+	if err != nil {
+		t.Fatalf("NewProposal(%+v) = %v, want a valid plan to have a proposal", plan, err)
+	}
+	steps := &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan)}
+	req := deployerinbox.Request{ID: handleRequestID, Kind: deployerinbox.KindRollback, Plan: "p"}
+
+	answer := deployerinbox.Handle(context.Background(), steps, req, handleNow)
+
+	if answer.ID != req.ID || !answer.At.Equal(handleNow) {
+		t.Errorf("answer names %q at %s, want %q at %s", answer.ID, answer.At, req.ID, handleNow)
+	}
+	if answer.Status != deployerinbox.StatusRolledBack {
+		t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusRolledBack, answer.Detail)
+	}
+	if answer.PlanSHA256 != plan.SHA256 {
+		t.Errorf("plan_sha256 = %q, want the plan's full hash %q", answer.PlanSHA256, plan.SHA256)
+	}
+	wantCalls := []string{"Plan p", "ReadRecord " + id, "LiveVersions", "Rollback p"}
+	if !slices.Equal(steps.calls, wantCalls) {
+		t.Errorf("calls = %v, want %v: the rollback checks the same record as apply, then undoes once and applies nothing", steps.calls, wantCalls)
+	}
+}
+
+// TestDeployerInboxRollbackRefuses: a missing, mismatched or expired record, or a live version that moved, leaves Rollback uncalled and answers refused with the reason.
+func TestDeployerInboxRollbackRefuses(t *testing.T) {
+	t.Parallel()
+
+	plan := handlePlan()
+	_, id, err := clusterapproval.NewProposal(plan)
+	if err != nil {
+		t.Fatalf("NewProposal(%+v) = %v, want a valid plan to have a proposal", plan, err)
+	}
+	mismatched := handleRecord(plan)
+	mismatched.PlanSHA256 = strings.Repeat("0", len(plan.SHA256))
+	expired := handleRecord(plan)
+	expired.ExpiresAt = handleNow.Add(-time.Second)
+	movedLive := maps.Clone(plan.Versions)
+	movedLive["Deployment/control/gt"] = "8"
+	cases := []struct {
+		name   string
+		steps  *fakeSteps
+		calls  []string
+		reason string
+	}{
+		{
+			name:   "the record is missing",
+			steps:  &fakeSteps{plan: plan, recordErr: deployerinbox.ErrNoApproval},
+			calls:  []string{"Plan p", "ReadRecord " + id},
+			reason: fmt.Sprintf("the plan %q is not approved yet: %s", "p", deployerinbox.ErrNoApproval),
+		},
+		{
+			name:   "the record approves another digest",
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: mismatched},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			reason: refusedByVerify(t, mismatched, plan, plan.Versions),
+		},
+		{
+			name:   "the record expired",
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: expired},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			reason: refusedByVerify(t, expired, plan, plan.Versions),
+		},
+		{
+			name:   "a live version moved before the verify",
+			steps:  &fakeSteps{plan: plan, live: movedLive, record: handleRecord(plan)},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			reason: refusedByVerify(t, handleRecord(plan), plan, movedLive),
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := deployerinbox.Request{ID: handleRequestID, Kind: deployerinbox.KindRollback, Plan: "p"}
+
+			answer := deployerinbox.Handle(context.Background(), tc.steps, req, handleNow)
+
+			if answer.Status != deployerinbox.StatusRefused {
+				t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusRefused, answer.Detail)
+			}
+			if answer.Detail != tc.reason {
+				t.Errorf("detail = %q, want the reason %q", answer.Detail, tc.reason)
+			}
+			if !slices.Equal(tc.steps.calls, tc.calls) {
+				t.Errorf("calls = %v, want %v: Rollback is not reached", tc.steps.calls, tc.calls)
+			}
+			if answer.PlanSHA256 != "" {
+				t.Errorf("plan_sha256 = %q, want none for a refused rollback", answer.PlanSHA256)
+			}
+		})
+	}
+}
+
+// TestDeployerInboxRollbackNotAuto: a rollback never follows an apply, so a failed or refused apply leaves Rollback uncalled.
+func TestDeployerInboxRollbackNotAuto(t *testing.T) {
+	t.Parallel()
+
+	plan := handlePlan()
+	_, id, err := clusterapproval.NewProposal(plan)
+	if err != nil {
+		t.Fatalf("NewProposal(%+v) = %v, want a valid plan to have a proposal", plan, err)
+	}
+	// The live version moves after Verify read it, so Apply refuses it.
+	moving := &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan)}
+	moving.afterLive = func() { moving.live["Deployment/control/gt"] = "8" }
+	cases := []struct {
+		name   string
+		steps  *fakeSteps
+		status string
+	}{
+		{
+			name:   "the apply fails",
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan), applyErr: errors.New("kubectl apply")},
+			status: deployerinbox.StatusFailed,
+		},
+		{
+			name:   "the apply refuses a moved live version",
+			steps:  moving,
+			status: deployerinbox.StatusRefused,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := deployerinbox.Request{ID: handleRequestID, Kind: deployerinbox.KindApply, Plan: "p"}
+
+			answer := deployerinbox.Handle(context.Background(), tc.steps, req, handleNow)
+
+			if answer.Status != tc.status {
+				t.Errorf("status = %q, want %q; detail %q", answer.Status, tc.status, answer.Detail)
+			}
+			if slices.Contains(tc.steps.calls, "Rollback p") {
+				t.Errorf("calls = %v, want no Rollback after a failed or refused apply", tc.steps.calls)
+			}
+			if !slices.Contains(tc.steps.calls, "Apply") || !slices.Contains(tc.steps.calls, "ReadRecord "+id) {
+				t.Errorf("calls = %v, want the apply to have been reached", tc.steps.calls)
+			}
+		})
+	}
+}
+
+// TestDeployerInboxRollbackFails: a failed step answers failed with fixed text, never its own error, and no step runs after it.
+func TestDeployerInboxRollbackFails(t *testing.T) {
+	t.Parallel()
+
+	plan := handlePlan()
+	_, id, err := clusterapproval.NewProposal(plan)
+	if err != nil {
+		t.Fatalf("NewProposal(%+v) = %v, want a valid plan to have a proposal", plan, err)
+	}
+	cases := []struct {
+		name   string
+		steps  *fakeSteps
+		calls  []string
+		detail string
+		cause  string
+	}{
+		{
+			name:   "the plan step errors",
+			steps:  &fakeSteps{planErr: errors.New("read the plan directory")},
+			calls:  []string{"Plan p"},
+			detail: "the plan step failed",
+			cause:  "read the plan directory",
+		},
+		{
+			name:   "the record cannot be read",
+			steps:  &fakeSteps{plan: plan, recordErr: errors.New("open the record")},
+			calls:  []string{"Plan p", "ReadRecord " + id},
+			detail: "reading the approval record failed",
+			cause:  "open the record",
+		},
+		{
+			name:   "the live versions cannot be read",
+			steps:  &fakeSteps{plan: plan, record: handleRecord(plan), liveErr: errors.New("list the objects")},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions"},
+			detail: "reading the live versions failed",
+			cause:  "list the objects",
+		},
+		{
+			name:   "the rollback fails",
+			steps:  &fakeSteps{plan: plan, live: maps.Clone(plan.Versions), record: handleRecord(plan), rollbackErr: errors.New("kubectl: " + handleToken)},
+			calls:  []string{"Plan p", "ReadRecord " + id, "LiveVersions", "Rollback p"},
+			detail: "the rollback failed",
+			cause:  handleToken,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := deployerinbox.Request{ID: handleRequestID, Kind: deployerinbox.KindRollback, Plan: "p"}
+
+			answer := deployerinbox.Handle(context.Background(), tc.steps, req, handleNow)
+
+			if answer.Status != deployerinbox.StatusFailed {
+				t.Errorf("status = %q, want %q; detail %q", answer.Status, deployerinbox.StatusFailed, answer.Detail)
+			}
+			if answer.Detail != tc.detail || strings.Contains(answer.Detail, tc.cause) {
+				t.Errorf("detail = %q, want the fixed text %q and none of the step's error", answer.Detail, tc.detail)
+			}
+			if !slices.Equal(tc.steps.calls, tc.calls) {
+				t.Errorf("calls = %v, want %v: no step runs after a failure", tc.steps.calls, tc.calls)
 			}
 		})
 	}
