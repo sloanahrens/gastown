@@ -454,6 +454,23 @@ NaN has no point (`ErrNoMinutes`) and is never read as 1.
   not written when the time is a lower bound, an upper bound, absent, or zero. A
   failed label write is logged and not retried; the landing stands.
 
+**What the estimate predicts.** The estimate is the expected polecat minutes for
+a bead's first review round. The figures below were measured on 2026-11-18. On
+325 first-round beads its median error is 2.5 minutes, and it runs about 19
+percent high. A bead that takes two review rounds runs about twice the estimate,
+and one that takes three runs about three times. The median polecat minutes are
+6.1 for one review round, 17.4 for two and 28.4 for three (427 beads). The
+estimate cannot see rework: it is made before the first review round.
+
+**Chance of a second round.** On 2854 beads measured on 2026-11-18, a bead took
+a second review round 8 percent of the time under 100 added lines, 22 percent
+for 100 to 300 added lines, 41 percent for 300 to 500 and 66 percent over 500.
+
+**Measure.** `sp-actual:N` is the time the bead's polecat seats spent hooked on
+it, the `polecat_secs` of its landing record. `gt metrics storypoints-eval` sets
+the estimate against that measure and prints its error in minutes, by review
+rounds and seat class. It is how the error above is measured.
+
 **`gt spec estimate <bead-id> [--force] [--dry-run] [--json]`.** It hashes the
 bead's Goal, Constraints, Acceptance and Size sections and its Acceptance field.
 When the latest `SP ESTIMATE v1` comment carries the same hash, it writes
