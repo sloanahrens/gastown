@@ -1,12 +1,14 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -209,5 +211,146 @@ func TestTranscriptArchiveListReportsAnUnreadableDirectory(t *testing.T) {
 	}
 	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "reading the transcript copy bad") {
 		t.Errorf("errors = %v, want one naming the directory bad", errs)
+	}
+}
+
+// archiveFixture is a copy holding one transcript and the paths a move uses.
+func archiveFixture(t *testing.T) (root *os.Root, own, dest, copyDir, archiveDir string) {
+	t.Helper()
+	base := t.TempDir()
+	copyDir, archiveDir = filepath.Join(base, "copy"), filepath.Join(base, "archive")
+	own = filepath.Join(copyDir, "ses-1.jsonl")
+	writeTranscript(t, own)
+	return mustRoot(t, copyDir), own, filepath.Join(archiveDir, "ses-1.jsonl"), copyDir, archiveDir
+}
+
+// TestTranscriptArchiveEveryFailedStepKeepsTheSource: each step of a move can
+// fail; the error names the file and the step, the source stays in the copy,
+// no .partial is left, and a truncated final name never exists. A failure after
+// the link leaves a complete archived file beside the kept source (gt-1xoiib).
+func TestTranscriptArchiveEveryFailedStepKeepsTheSource(t *testing.T) {
+	t.Parallel()
+	for _, step := range []string{"open", "fstat", "mkdir", "create", "copy", "close", "chtimes", "link", "unpartial", "remove"} {
+		t.Run(step, func(t *testing.T) {
+			t.Parallel()
+			root, own, dest, _, _ := archiveFixture(t)
+			injected := errors.New("injected " + step)
+			err := moveConfinedWith(root, "ses-1.jsonl", dest, func(s string) error {
+				if s == step {
+					return injected
+				}
+				return nil
+			})
+			if !errors.Is(err, injected) || !strings.Contains(err.Error(), "ses-1.jsonl") || !strings.Contains(err.Error(), "("+step+")") {
+				t.Fatalf("err = %v, want the %s failure naming the file and the step", err, step)
+			}
+			if _, serr := os.Stat(own); serr != nil {
+				t.Errorf("the source left the copy after a failed %s: %v", step, serr)
+			}
+			if _, serr := os.Stat(dest + ".partial"); !errors.Is(serr, fs.ErrNotExist) {
+				t.Errorf("a .partial is left after a failed %s: %v", step, serr)
+			}
+			_, derr := os.Stat(dest)
+			afterLink := step == "unpartial" || step == "remove"
+			if afterLink && derr != nil {
+				t.Errorf("after the link the archived file must be complete and present: %v", derr)
+			}
+			if !afterLink && !errors.Is(derr, fs.ErrNotExist) {
+				t.Errorf("a failed %s left a final-name file: %v", step, derr)
+			}
+		})
+	}
+}
+
+// TestTranscriptArchiveRefusesALeafSwappedAfterTheLstat: the copy is written by
+// an untrusted sandbox, so the leaf can change between the Lstat and the open. A
+// FIFO must not hang the open and a link must not be read under its own name;
+// each is an error and the source stays (gt-1xoiib).
+func TestTranscriptArchiveRefusesALeafSwappedAfterTheLstat(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"fifo", "link"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			root, own, dest, copyDir, _ := archiveFixture(t)
+			other := filepath.Join(copyDir, "other.jsonl")
+			writeTranscript(t, other)
+			swap := func(step string) error {
+				if step != "open" {
+					return nil
+				}
+				if err := os.Remove(own); err != nil {
+					return err
+				}
+				if kind == "fifo" {
+					return syscall.Mkfifo(own, 0o600)
+				}
+				return os.Symlink(filepath.Base(other), own)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- moveConfinedWith(root, "ses-1.jsonl", dest, swap) }()
+			var err error
+			select {
+			case err = <-done:
+			case <-ctx.Done():
+				t.Fatal("the move hung on a leaf swapped for a " + kind)
+			}
+			if err == nil || !strings.Contains(err.Error(), "ses-1.jsonl") {
+				t.Fatalf("err = %v, want the swapped %s refused naming the file", err, kind)
+			}
+			if _, serr := os.Lstat(own); serr != nil {
+				t.Errorf("the swapped leaf left the copy: %v", serr)
+			}
+			if _, serr := os.Stat(dest); !errors.Is(serr, fs.ErrNotExist) {
+				t.Errorf("the swapped %s reached the archive: %v", kind, serr)
+			}
+		})
+	}
+}
+
+// TestTranscriptArchiveARepeatedNameIsAnError: two files of one base name in
+// different folders are an error naming both, the second stays in the copy, and
+// the first is archived; a name the archive already held stays silently
+// "already archived" (gt-1xoiib).
+func TestTranscriptArchiveARepeatedNameIsAnError(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	copyDir, archiveDir := filepath.Join(root, "copy"), filepath.Join(root, "archive")
+	first, second := filepath.Join(copyDir, "a", "agent-1.jsonl"), filepath.Join(copyDir, "b", "agent-1.jsonl")
+	writeTranscript(t, first)
+	writeTranscript(t, second)
+	err := archiveCopiedTranscripts(copyDir, archiveDir)
+	if err == nil || !strings.Contains(err.Error(), "a/agent-1.jsonl") || !strings.Contains(err.Error(), "b/agent-1.jsonl") {
+		t.Fatalf("err = %v, want an error naming both paths", err)
+	}
+	if _, serr := os.Stat(second); serr != nil {
+		t.Errorf("the second file left the copy: %v", serr)
+	}
+	if got, serr := os.ReadFile(filepath.Join(archiveDir, "agent-1.jsonl")); serr != nil || string(got) != first {
+		t.Errorf("archived = %q, %v; want the first file's content", got, serr)
+	}
+}
+
+// TestTranscriptArchiveClearsALeftoverPartial: a kill mid-copy leaves a
+// .partial; the next run overwrites it and archives the whole file, and no
+// truncated final name exists in between (gt-1xoiib).
+func TestTranscriptArchiveClearsALeftoverPartial(t *testing.T) {
+	t.Parallel()
+	_, own, dest, copyDir, archiveDir := archiveFixture(t)
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dest+".partial", []byte("trunc"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveCopiedTranscripts(copyDir, archiveDir); err != nil {
+		t.Fatalf("archiveCopiedTranscripts: %v", err)
+	}
+	if got, err := os.ReadFile(dest); err != nil || string(got) != own {
+		t.Errorf("archived = %q, %v; want the whole source", got, err)
+	}
+	if _, err := os.Stat(dest + ".partial"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the leftover partial is still there: %v", err)
 	}
 }
