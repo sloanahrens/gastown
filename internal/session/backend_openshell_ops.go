@@ -525,6 +525,27 @@ func parseTranscriptStat(out string) (string, time.Time, int64, error) {
 	return fields[2], time.Unix(epoch, 0), size, nil
 }
 
+// StreamCut reports whether session's newest transcript ends in a model stream
+// the harness cut short (liveness.StreamCutTail): the seat is alive but cannot
+// answer until restarted. No transcript answers false; a failed read is an error.
+func (b *openshellBackend) StreamCut(session string) (bool, error) {
+	path, _, _, err := b.transcript(session)
+	if err != nil {
+		return false, fmt.Errorf("sandbox %s: finding its newest transcript: %w", session, err)
+	}
+	if path == "" {
+		return false, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxDownloadTimeout)
+	defer cancel()
+	tail, err := b.transcriptTail(ctx, session, path)
+	if err != nil {
+		// transcriptTail's read error names the session.
+		return false, err
+	}
+	return liveness.StreamCutTail(tail), nil
+}
+
 // endedMarkerScript prints "present" when the ended marker is under the sandbox
 // home and "absent" when it is not. The test runs inside the sandbox's shell, so
 // a missing marker is an answer, and only a failed exec is an error.

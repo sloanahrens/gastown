@@ -1,8 +1,10 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -794,6 +796,50 @@ func TestOpenShellOpsIsSandboxNotFound(t *testing.T) {
 			}
 		})
 	}
+}
+
+const streamCutStat = "1760000000 4 " + sandboxProjectsDir + "/p/a.jsonl"
+
+// streamCutBackend answers StreamCut's stat ("sh") and tail execs with the arguments.
+func streamCutBackend(t *testing.T, stat string, statErr error, tail string, tailErr error) *openshellBackend {
+	t.Helper()
+	b, _ := openshellTestBackend(t.TempDir(), openshellTestProfile, &sandbox.Fake{})
+	b.cli.Run = func(_ context.Context, argv []string, _ []byte, _ []string) ([]byte, []byte, error) {
+		if slices.Contains(argv, "tail") {
+			return []byte(tail), nil, tailErr
+		}
+		return []byte(stat), nil, statErr
+	}
+	return b
+}
+
+func TestBackendStreamCutAnswers(t *testing.T) {
+	t.Parallel()
+	cut := `{"type":"assistant","isApiErrorMessage":true,"streamCutCause":"stale_connection"}` + "\n"
+	answers := func(t *testing.T, stat, tail string, want bool) {
+		t.Helper()
+		got, err := streamCutBackend(t, stat, nil, tail, nil).StreamCut(openshellTestSession)
+		if err != nil || got != want {
+			t.Fatalf("StreamCut = %v, %v, want %v", got, err, want)
+		}
+	}
+	t.Run("cut stream", func(t *testing.T) { answers(t, streamCutStat, cut, true) })
+	t.Run("normal tail", func(t *testing.T) { answers(t, streamCutStat, `{"type":"assistant"}`+"\n", false) })
+	t.Run("no transcript", func(t *testing.T) { answers(t, "", "", false) })
+}
+
+func TestBackendStreamCutReadErrorIsAnError(t *testing.T) {
+	t.Parallel()
+	sentinel := errors.New("sandbox unreachable")
+	fails := func(t *testing.T, statErr, tailErr error) {
+		t.Helper()
+		got, err := streamCutBackend(t, streamCutStat, statErr, "", tailErr).StreamCut(openshellTestSession)
+		if got || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), openshellTestSession) {
+			t.Fatalf("StreamCut = %v, %v, want false and the read error naming the session", got, err)
+		}
+	}
+	t.Run("transcript stat fails", func(t *testing.T) { fails(t, sentinel, nil) })
+	t.Run("tail read fails", func(t *testing.T) { fails(t, nil, sentinel) })
 }
 
 func writeOpsRecord(t *testing.T, b *openshellBackend) {
