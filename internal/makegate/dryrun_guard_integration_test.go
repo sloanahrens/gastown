@@ -9,11 +9,12 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // dryRunTargets names the Makefile targets whose recipe line holds $(MAKE), so
@@ -219,16 +220,14 @@ func dryRunAlarms(calls []dryRunTargetCall) []string {
 	return alarms
 }
 
-// packageTestDir is the directory holding this file, read from the compiled
-// path so the guard checks the package it was built in rather than the working
-// directory.
+// packageTestDir is the directory of the package under test. It starts from the
+// module root, which modroot finds by walking up from go test's working
+// directory (the package directory, with or without -trimpath), and appends
+// this package's path, so the guard checks this package even when a caller
+// starts the binary from elsewhere in the module (gt-fb04i3).
 func packageTestDir(t *testing.T) string {
 	t.Helper()
-	_, here, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Dir(here)
+	return filepath.Join(modroot.Root(t), "internal", "makegate")
 }
 
 // TestIntegrationDryRunCallers fails any test in this package that dry-runs
@@ -246,6 +245,13 @@ func TestIntegrationDryRunCallers(t *testing.T) {
 		}
 		for _, alarm := range dryRunAlarms(calls) {
 			t.Error(alarm)
+		}
+	})
+
+	t.Run("the package directory holds this test file", func(t *testing.T) {
+		dir := packageTestDir(t)
+		if _, err := os.Stat(filepath.Join(dir, "dryrun_guard_integration_test.go")); err != nil {
+			t.Fatalf("packageTestDir = %q, which does not hold this test file, so the guard would scan another tree: %v", dir, err)
 		}
 	})
 

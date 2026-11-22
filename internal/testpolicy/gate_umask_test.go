@@ -4,9 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // gateRecipe matches the gate-test target's recipe. gateGoCommand finds a go
@@ -47,11 +48,7 @@ func gateUmaskProblem(makefile string) string {
 // TestGateUmask holds the Makefile's gate-test recipe to gateUmaskProblem's rule (gt-nmd2xg).
 func TestGateUmask(t *testing.T) {
 	t.Parallel()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller: no path to the Makefile")
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "..", "Makefile"))
+	data, err := os.ReadFile(filepath.Join(modroot.Root(t), "Makefile"))
 	if err != nil {
 		t.Fatalf("read the Makefile: %v", err)
 	}
