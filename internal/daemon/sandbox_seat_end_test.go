@@ -1687,6 +1687,75 @@ func TestTakeoverSeatEndKeepsAReusedSeat(t *testing.T) {
 	}
 }
 
+// A seat that ran gt done on the bead the takeover lands did not always leave
+// its work safe: its agent bead is done, its hook is empty and its last source
+// issue is the landed bead, but its cleanup status says the worktree still
+// holds uncommitted or unpushed work. The landing offers it through the bead's
+// assignee, and the real keepReason must keep it with the cleanup_status
+// reason, leaving its host directories - the only host copy of that work -
+// where they are. With keepReason's cleanup-status rule removed the same seat
+// is removed and this test fails (gt-123qat); the push_failed row is bead
+// gt-2gdiax.
+func TestTakeoverSeatEndKeepsAnUncommittedOrUnpushedDoneSeat(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	tests := []struct {
+		name    string
+		cleanup polecat.CleanupStatus
+		wantLog string
+	}{
+		{
+			name:    "a done seat with uncommitted work keeps its dirs",
+			cleanup: polecat.CleanupUncommitted,
+			wantLog: "kept: cleanup_status=has_uncommitted",
+		},
+		{
+			name:    "a done seat with unpushed work keeps its dirs",
+			cleanup: polecat.CleanupUnpushed,
+			wantLog: "kept: cleanup_status=has_unpushed",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			// gt done left the hook empty and the landed bead as the seat's last
+			// source issue; the cleanup status is the one fact that still says
+			// its work is not safe to drop from the host.
+			f.seatFields.AgentState = string(beads.AgentStateDone)
+			f.seatFields.LastSourceIssue = endBead
+			f.seatFields.CleanupStatus = string(tt.cleanup)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			var logs strings.Builder
+			d := f.host.d
+			d.logger = log.New(&logs, "", 0)
+			d.openWorkBeads = func([]string, time.Duration) workBeadReader {
+				return workBeadStore{endBead: &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/" + endPolecat}}
+			}
+			d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+			// The production end step over the harness's agent-bead and gateway
+			// seams: the offer runs into the real keepReason.
+			d.endSandboxSeat = f.host.endFinishedSandboxSeat
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+			if !dirExists(t, dirs.PolecatDir) {
+				t.Errorf("seat directory removed, want it kept\nlog:\n%s", logs.String())
+			}
+			if !dirExists(t, dirs.PromptFile) {
+				t.Error("prompt file removed, want it kept")
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log =\n%s\nwant it to carry %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
 // TestSandboxSeatEndHostWiresTheUsageRecordStore: the host the daemon's own
 // seat end runs on carries the town's usage_records store, so a seat's record
 // is filed as a row beside its file and never as a file alone.
