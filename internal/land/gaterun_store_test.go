@@ -685,3 +685,63 @@ func TestGateRunStoreRotationIsIdempotent(t *testing.T) {
 		})
 	}
 }
+
+// TestGateRunStoreKeepsWhatItCannotDecode: a line the rotation cannot decode is
+// appended byte for byte, with its newline, to gate-runs-rejects.jsonl before the
+// log is removed, the good rows are archived as before, and a rejects write that
+// fails (open, write or close) is an error that removes nothing (gt-a78yu0).
+func TestGateRunStoreKeepsWhatItCannotDecode(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("disk says no")
+	cur := gateRunsPath("/town")
+	rejects := filepath.Join(filepath.Dir(cur), "gate-runs-rejects.jsonl")
+	month := filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")
+	good := sampleGateRun("gt-good")
+	good.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	// A whole gate run whose ts has no zone, a line that is not JSON, and a torn last line.
+	noZone := strings.Replace(mustLine(t, good), `"ts":"2026-10-01T12:00:00Z"`, `"ts":"2026-10-01T12:00:00"`, 1)
+	const plain, torn = "not json at all", `{"ts":"2026-10-01T12:00:00Z","bead":"gt-to`
+	if noZone == mustLine(t, good) {
+		t.Fatal("the fixture's ts was not rewritten")
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(*memGateRunFS)
+		fail  bool
+	}{
+		{"every line it cannot decode is kept and the log removed", func(*memGateRunFS) {}, false},
+		{"a rejects file that cannot be opened", func(m *memGateRunFS) { m.openFailOn, m.err = "rejects", boom }, true},
+		{"a rejects write that fails", func(m *memGateRunFS) { m.writeFailOn, m.err = "rejects", boom }, true},
+		{"a rejects file that cannot be closed", func(m *memGateRunFS) { m.clsOn, m.err = "rejects", boom }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newMemGateRunFS()
+			log := mustLine(t, good) + "\n" + noZone + "\n" + plain + "\n" + torn
+			fsys.files[cur] = []byte(log)
+			tc.setup(fsys)
+			err := rotateGateRuns(fsys, cur)
+			if got := beadsIn(t, fsys.files[month], true); !slices.Equal(got, []string{"gt-good"}) {
+				t.Errorf("month file = %v, want the good row archived", got)
+			}
+			if tc.fail {
+				if !errors.Is(err, boom) || !strings.Contains(err.Error(), "rejects") {
+					t.Errorf("error = %v, want it to name the rejects file and wrap %v", err, boom)
+				}
+				if string(fsys.files[cur]) != log {
+					t.Errorf("the log was changed by a failed rejects write: %q", fsys.files[cur])
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("rotateGateRuns: %v", err)
+			}
+			if want := noZone + "\n" + plain + "\n" + torn + "\n"; string(fsys.files[rejects]) != want {
+				t.Errorf("rejects file = %q, want the three lines byte for byte with their newlines %q", fsys.files[rejects], want)
+			}
+			if _, ok := fsys.files[cur]; ok {
+				t.Error("the log was not removed after the rotation")
+			}
+		})
+	}
+}
