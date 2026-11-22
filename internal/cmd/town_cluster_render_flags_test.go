@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
@@ -558,6 +559,23 @@ func TestTownClusterRenderFlagsCarryTheCloudHostPaths(t *testing.T) {
 			}
 			if got.CloudReportsHostPath != tc.reports || got.CloudReleasesHostPath != tc.releases {
 				t.Errorf("Values carries %q/%q, want %q/%q", got.CloudReportsHostPath, got.CloudReleasesHostPath, tc.reports, tc.releases)
+			}
+			// The manifests the Values render: the cloud mounts appear exactly when a
+			// path is set, so a render with neither flag carries no cloud volume.
+			built := got
+			if tc.rehearsal {
+				built.Namespace = "gt-rehearsal-test" // a rehearsal names its own namespace; the flags carry none here
+			}
+			manifests, err := k8sdaemon.Build(built)
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+			var rendered strings.Builder
+			if err := k8sdaemon.Render(&rendered, manifests); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			if mounted := strings.Contains(rendered.String(), k8sdaemon.CloudReportsVolume); mounted != (tc.reports != "") {
+				t.Errorf("the rendered manifests mount %s = %t for the reports path %q", k8sdaemon.CloudReportsVolume, mounted, tc.reports)
 			}
 			path := filepath.Join(t.TempDir(), "render-flags.json")
 			m := renderFlagsFixture()
