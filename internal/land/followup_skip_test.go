@@ -187,11 +187,19 @@ func TestFollowupSkipAPanickingHookKeepsTheFinding(t *testing.T) {
 func TestFollowupSkipDropsAQueuedFindingItNames(t *testing.T) {
 	t.Parallel()
 	f := newFollowupFixture(t, 0.8, nil)
-	f.lander.FollowupSkip = skipByTitle("wording nit (Q34)", "name the error")
+	skip := skipByTitle("wording nit (Q34)", "name the error")
+	var asked Work
+	f.lander.FollowupSkip = func(w Work, c FollowupCandidate) string {
+		asked = w
+		return skip(w, c)
+	}
 	if err := f.reviews.AppendQueue(queueLine("gt-queued", f.work.Rig, queuedFinding)); err != nil {
 		t.Fatal(err)
 	}
 	log := f.run()
+	if want := (Work{BeadID: "gt-queued", Rig: f.work.Rig}); asked != want {
+		t.Errorf("the queued finding was asked with %+v, want only its bead and rig %+v", asked, want)
+	}
 	if len(f.fake.created) != 0 {
 		t.Fatalf("filed %d beads for a queued finding the policy skipped:\n%s", len(f.fake.created), log)
 	}
@@ -204,5 +212,60 @@ func TestFollowupSkipDropsAQueuedFindingItNames(t *testing.T) {
 	}
 	if !strings.Contains(log, "skipped 1 finding: wording nit (Q34)") {
 		t.Errorf("log = %q, want the queued finding's skip named", log)
+	}
+}
+
+// TestFollowupSkipQueuedWork: the hook is asked about a landing's own finding
+// with the landing's whole Work, and about one read back from a queue line with
+// only its bead and rig — the queue keeps no branch, head or target — and the
+// FollowupSkip doc says so, because a policy that switches on a Work field reads
+// it to know a queue line cannot carry one (gt-u7qgi0, om finding on gt-8fdomo).
+func TestFollowupSkipQueuedWork(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{minorAt("internal/land/other.go", 40, "the fresh finding")})
+	asked := map[string]Work{}
+	f.lander.FollowupSkip = func(w Work, c FollowupCandidate) string {
+		asked[c.Title] = w
+		return ""
+	}
+	if err := f.reviews.AppendQueue(queueLine("gt-queued", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	f.run()
+	wantQueued := Work{BeadID: "gt-queued", Rig: f.work.Rig}
+	if got := asked[queuedFinding.Title]; got != wantQueued {
+		t.Errorf("the queued finding was asked with %+v, want only the line's bead and rig %+v", got, wantQueued)
+	}
+	if got := asked["the fresh finding"]; got != f.work {
+		t.Errorf("the landing's own finding was asked with %+v, want the landing's whole Work %+v", got, f.work)
+	}
+}
+
+// TestFollowupSkipConsistentAcrossPasses: the drain and the compaction judge one
+// queue line in the same feed pass, so a hook that would keep the finding on a
+// second ask still leaves the line one outcome: skipped by the drain, consumed,
+// dropped by the compaction, and asked once (gt-u7qgi0, om finding on gt-8fdomo).
+func TestFollowupSkipConsistentAcrossPasses(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil) // nothing of its own to file
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	skip := &scriptedSkip{reply: func(_ string, n int) string {
+		if n == 1 {
+			return "wording nit (Q34)"
+		}
+		return "" // a second ask would keep the finding the first skipped
+	}}
+	f.lander.FollowupSkip = skip.ask
+	log := f.run()
+	if left, err := f.reviews.Queued(); err != nil || len(left) != 0 {
+		t.Errorf("the queue holds %d line(s) (%v), want none: the compaction must drop the line the drain consumed", len(left), err)
+	}
+	if !strings.Contains(log, "dropped 1 consumed queue line(s)") {
+		t.Errorf("log = %q, want the compaction's drop named", log)
+	}
+	if !strings.Contains(log, "skipped 1 finding: wording nit (Q34)") || skip.calls["name the error"] != 1 {
+		t.Errorf("log = %q, asked = %v; want the skip named once and the hook asked once", log, skip.calls)
 	}
 }
