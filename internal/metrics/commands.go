@@ -509,6 +509,11 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 		embedder = storyPointsEmbedder(base, os.Getenv)
 	}
 	embedder = weeklyEmbedder{inner: embedder}
+	// The week-after check judges the last adoption before this week's proposal can
+	// replace the weights it kept.
+	if err := c.checkStoryPointsAdoption(ctx, real, env, embedder, now); err != nil {
+		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
+	}
 	// The retrain's report goes to the day's directory; Out carries the hour's one
 	// line and not the report beside it.
 	train := c

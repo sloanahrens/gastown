@@ -94,17 +94,15 @@ func TestStoryPointsAdoptionLogFailures(t *testing.T) {
 	t.Parallel()
 	previous := adoptTestWeights{boxes: 0.05, intercept: 1}.JSON()
 
-	t.Run("an unreadable log fails the run and keeps the adoption", func(t *testing.T) {
+	t.Run("a log that cannot be appended to fails the run and keeps the adoption", func(t *testing.T) {
 		t.Parallel()
 		fix := newTrainTestFixture(t, trainTestBeads(90, 1, true))
 		writeAt(t, adoptRuntimePath(fix.town), previous)
 		writeWeeklyLastRun(t, fix.town, weeklyNow.Add(-8*24*time.Hour))
-		// A directory where the log should be: reading it is an error that is not "absent".
-		if err := os.MkdirAll(storyPointsAdoptionsPath(fix.town), 0o755); err != nil {
-			t.Fatal(err)
-		}
 		var out strings.Builder
 		c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+		// The week-after check reads the log first and finds none; the append's own read of it fails.
+		c.Env.ReadFile = failNthRead("adoptions.jsonl", 2)
 		err := c.RunStoryPointsWeekly(context.Background())
 		if err == nil || !strings.Contains(err.Error(), "is not logged, so it is not checked") {
 			t.Fatalf("err = %v, want the unlogged adoption named", err)
