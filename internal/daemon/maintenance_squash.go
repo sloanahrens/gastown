@@ -109,8 +109,9 @@ const (
 	// held are gone, and every database's gate is held for squashResetHold from
 	// the stamp (gt-cbm58l).
 	squashStateResetAlertKey = "squash:state-reset"
-	// squashResetHold is how long the stamp holds every database's gate.
-	squashResetHold = 24 * time.Hour
+	// squashResetHold is how long the stamp holds every database's gate: the gate's own
+	// interval, which squashCheckInterval follows too, so the two cannot drift apart.
+	squashResetHold = doltsquash.RunInterval
 
 	// squashAlertSource labels every item a run raises, as the state check's
 	// alert does.
