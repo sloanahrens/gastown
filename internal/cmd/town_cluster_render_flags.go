@@ -52,6 +52,8 @@ type renderFlagsRecord struct {
 	OpenShellConfigDir            string `json:"openshell_config_dir"`
 	ForgeHost                     string `json:"forge_host"`
 	DoltBackupHostPath            string `json:"dolt_backup_host_path"`
+	CloudReportsHostPath          string `json:"cloud_reports_host_path,omitempty"`
+	CloudReleasesHostPath         string `json:"cloud_releases_host_path,omitempty"`
 	Dashboard                     bool   `json:"dashboard"`
 	BdGatewayServicePolicyApplied bool   `json:"bd_gateway_service_policy_applied"`
 	BdGatewayURL                  string `json:"bd_gateway_url"`
@@ -100,6 +102,8 @@ func (f clusterRenderFlags) record() renderFlagsRecord {
 		OpenShellConfigDir:            f.openShellConfigDir,
 		ForgeHost:                     f.forgeHost,
 		DoltBackupHostPath:            f.doltBackupHostPath,
+		CloudReportsHostPath:          f.cloudReportsHostPath,
+		CloudReleasesHostPath:         f.cloudReleasesHostPath,
 		Dashboard:                     f.dashboard,
 		BdGatewayServicePolicyApplied: f.bdGatewayServicePolicyApplied,
 		BdGatewayURL:                  f.bdGatewayURL,
@@ -136,6 +140,8 @@ func (r renderFlagsRecord) flags() clusterRenderFlags {
 		openShellConfigDir:            r.OpenShellConfigDir,
 		forgeHost:                     r.ForgeHost,
 		doltBackupHostPath:            r.DoltBackupHostPath,
+		cloudReportsHostPath:          r.CloudReportsHostPath,
+		cloudReleasesHostPath:         r.CloudReleasesHostPath,
 		dashboard:                     r.Dashboard,
 		bdGatewayServicePolicyApplied: r.BdGatewayServicePolicyApplied,
 		bdGatewayURL:                  r.BdGatewayURL,
