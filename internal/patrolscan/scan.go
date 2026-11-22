@@ -750,6 +750,17 @@ type Env interface {
 	Comment(beadID, text string) error
 }
 
+// StreamCutter is the optional Env extension that answers whether a seat's
+// newest transcript ends in a cut model stream: true when it does. An error
+// means the read could not answer, and the rule acts on nothing. A host that
+// does not implement it has no such rule.
+type StreamCutter interface {
+	// StreamCut reports whether the seat's newest transcript ends in a cut
+	// model stream: its last complete user-or-assistant record has
+	// isApiErrorMessage true and a streamCutCause (liveness.StreamCutTail).
+	StreamCut(rig, polecat string) (bool, error)
+}
+
 // SpanEnv is the optional Env extension that closes the attempt a confirmed
 // dead seat left open. gt sling opens an attempt and gt done ends one, so a
 // seat that dies without either leaves its bead looking unfinished; a host
@@ -1548,6 +1559,49 @@ func (s *Scanner) revivePushed(rig, name string, res liveness.Result) (Finding, 
 	}
 	quiet := res.QuietFor.Round(time.Second)
 	return s.reviveRestart(rig, name, work, now, quiet, revivalReason(work.ID, head, quiet)), true
+}
+
+// reviveCut restarts a LIVE seat whose model stream was cut before it pushed:
+// its transcript's last complete user-or-assistant record is a cut stream, so
+// it matches neither
+// revivePushed (no pushed branch) nor reviveAnswered (no escalation), and the
+// pane idles at its prompt until the overrun guard stops it at 20 minutes. It
+// asks the optional StreamCutter extension; a host without it has no such rule.
+//
+// It shares the revival rule's guards and cooldown: a quiet under reviveQuiet,
+// a heartbeat that says stuck or is inside gt done, work that is submitted,
+// held or not assigned, and a cut of false leave the seat alone. A StreamCut
+// read that fails is Unknown and nothing is acted on.
+func (s *Scanner) reviveCut(rig, name string, res liveness.Result) (Finding, bool) {
+	cutter, ok := s.env.(StreamCutter)
+	if !ok || res.QuietFor < reviveQuiet {
+		return Finding{}, false
+	}
+	f := Finding{Kind: "seat", Subject: name}
+	now := s.o.Now()
+	if why, held := s.reviveHeldByHeartbeat(rig, name, now); held {
+		f.Outcome, f.Detail = OutcomeSkipped, why
+		return f, true
+	}
+	work, err := s.reviveWork(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "quiet seat's work unreadable: "+err.Error()
+		return f, true
+	}
+	if work == nil {
+		return Finding{}, false
+	}
+	cut, err := cutter.StreamCut(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "model stream unreadable: "+err.Error()
+		return f, true
+	}
+	if !cut {
+		return Finding{}, false
+	}
+	quiet := res.QuietFor.Round(time.Second)
+	reason := fmt.Sprintf("patrol scan: revived %s after %s quiet: its model stream was cut and the seat never resumed; the preserved worktree resumes the bead", work.ID, quiet)
+	return s.reviveRestart(rig, name, work, now, quiet, reason), true
 }
 
 // reviveAnswered restarts a LIVE seat that stopped on an escalation of its own
