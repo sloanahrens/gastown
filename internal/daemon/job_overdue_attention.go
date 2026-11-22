@@ -21,9 +21,12 @@ type JobReading struct {
 	Cadence time.Duration
 }
 
-// jobStateOverdue is the state internal/jobs gives a job past its cadence and
-// grace. It is spelled here for the reason JobReading exists.
-const jobStateOverdue = "overdue"
+// jobStateOverdue and jobOutcomeFailed are the state and outcome internal/jobs
+// spells; both are named here for the reason JobReading exists.
+const (
+	jobStateOverdue  = "overdue"
+	jobOutcomeFailed = "failed"
+)
 
 // jobOverdueWakePrefix is the key prefix attention.RuleFor reads as
 // RuleJobOverdueWake; the job's name follows it (gt-toiff6, gt-obe5qp).
@@ -42,9 +45,11 @@ var jobOverdueWakeJobs = map[string]bool{
 // daemon's start code sets it; the collector then raises nothing.
 var JobListSource func(townRoot string, now time.Time) ([]JobReading, error)
 
-// collectJobOverdue raises one item per job whose state is overdue; its key
-// (jobOverdueKey) names the job, so one job has one item however many ticks it
-// stays overdue, and the item clears on the tick after the job runs again.
+// collectJobOverdue raises one item per job whose state is overdue or whose
+// newest outcome failed; its key (jobOverdueKey) names the job, so one job has
+// one item however many ticks it stays overdue or failed, and a job both
+// overdue and failed raises one item, not two. The item clears on the tick
+// after the job runs again and its outcome is no longer failed.
 // A job list that cannot be read returns the source's error, so the previous
 // items stay (collectAttention); with no source wired it raises nothing.
 func (s *attentionSources) collectJobOverdue(context.Context) ([]attention.Item, error) {
@@ -57,18 +62,30 @@ func (s *attentionSources) collectJobOverdue(context.Context) ([]attention.Item,
 	}
 	var out []attention.Item
 	for _, r := range readings {
-		if r.State != jobStateOverdue {
+		if r.State != jobStateOverdue && r.Outcome != jobOutcomeFailed {
 			continue
 		}
 		out = append(out, attention.Item{
 			Key:      jobOverdueKey(r, s.now),
 			Kind:     attention.KindJobOverdue,
 			Severity: attention.SeverityLow,
-			Summary: fmt.Sprintf("maintenance job %s is overdue: last run %s ago, cadence %s",
-				r.Name, parkedAge(s.now.Sub(r.LastRun)), r.Cadence),
+			Summary:  jobOverdueSummary(r, s.now),
 		})
 	}
 	return out, nil
+}
+
+// jobOverdueSummary is the item's text: a newest failed run says so and when
+// it ran; an overdue job names its last run age and cadence.
+func jobOverdueSummary(r JobReading, now time.Time) string {
+	if r.Outcome == jobOutcomeFailed {
+		if r.LastRun.IsZero() {
+			return fmt.Sprintf("maintenance job %s failed: no run time recorded", r.Name)
+		}
+		return fmt.Sprintf("maintenance job %s failed: last run %s ago", r.Name, parkedAge(now.Sub(r.LastRun)))
+	}
+	return fmt.Sprintf("maintenance job %s is overdue: last run %s ago, cadence %s",
+		r.Name, parkedAge(now.Sub(r.LastRun)), r.Cadence)
 }
 
 // jobOverdueKey is the item key one overdue job raises. A job in
