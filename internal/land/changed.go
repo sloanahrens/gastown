@@ -424,7 +424,9 @@ var treeWideGuards = []treeWideGuard{
 		// the bd gateway workload and its token secret). -run keeps the run to
 		// these three tests; the cost is compiling the internal/cmd test
 		// binary (about 10 to 30 seconds), paid only by a diff under these two
-		// paths. The rest of internal/cmd's guard tests stay out.
+		// paths. A deletion counts too: the tests import the Go packages under
+		// both paths, so a removed file there can break their build (gt-kymmes).
+		// The rest of internal/cmd's guard tests stay out.
 		pkg: "internal/cmd",
 		tests: []string{
 			"TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota",
@@ -434,6 +436,7 @@ var treeWideGuards = []treeWideGuard{
 		judges: func(rel string) bool {
 			return strings.HasPrefix(rel, "deploy/k8s/") || strings.HasPrefix(rel, "internal/imagevalues/")
 		},
+		removal: true,
 	},
 	{
 		// TestGTPinMatchesTheSharedBuildArgv pins the daemon image's gt build

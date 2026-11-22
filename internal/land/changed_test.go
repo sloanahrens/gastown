@@ -505,12 +505,40 @@ func TestGuardSelectsAClusterRenderChangeRunsTheBdGatewayRenderTests(t *testing.
 		if !reflect.DeepEqual(g.tests, required) {
 			t.Errorf("internal/cmd cluster-render entry tests = %v, want %v in that order", g.tests, required)
 		}
-		if g.removal {
-			t.Errorf("internal/cmd cluster-render entry carries removal; a rendered path is judged only as it stands after the change")
-		}
+		// A deletion selects it too: TestGuardSelectsDeletedDeployFile (gt-kymmes).
 		return
 	}
 	t.Error("no internal/cmd entry judges deploy/k8s/forgejo-runner/runner.go")
+}
+
+// TestGuardSelectsDeletedDeployFile: the cluster-render and runner-drift tests
+// import the Go packages under deploy/k8s and internal/imagevalues, so deleting
+// a Go file there breaks their build. A deletion must select the same three
+// tests a modification does (gt-kymmes).
+func TestGuardSelectsDeletedDeployFile(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	const diff = "D\x00deploy/k8s/forgejo-runner/runner.go\x00"
+	sel, err := GuardSelects(diff, hasGo)
+	if err != nil {
+		t.Fatalf("GuardSelects(%q): %v", diff, err)
+	}
+	var tests []string
+	for _, s := range sel {
+		if s.Package == "internal/cmd" {
+			tests = s.Tests
+			break
+		}
+	}
+	for _, name := range []string{
+		"TestTownClusterDriftReportsTheGateRunnersDindShareAndItsQuota",
+		"TestClusterRenderBdGatewayWorkload",
+		"TestClusterRenderBdGatewayTokenSecret",
+	} {
+		if !contains(tests, name) {
+			t.Errorf("GuardSelects(%q) internal/cmd tests = %v; want %s among them", diff, tests, name)
+		}
+	}
 }
 
 // TestShellScriptAllowlistChangeRunsTheAllowlistControl: the clean-tree guard
