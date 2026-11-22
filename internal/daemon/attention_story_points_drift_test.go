@@ -50,6 +50,14 @@ func driftReadingWithAUC(rho, lo, hi, aucLo, aucHi float64) metrics.StoryPointsD
 	return read
 }
 
+// driftReadingWithAUCPoint is driftReadingWithAUC with the AUC's point reading
+// set to auc, so a case can give the point its own value.
+func driftReadingWithAUCPoint(rho, lo, hi, auc, aucLo, aucHi float64) metrics.StoryPointsDriftRead {
+	read := driftReadingWithAUC(rho, lo, hi, aucLo, aucHi)
+	read.Drift.Current.LongAUC = auc
+	return read
+}
+
 // TestStoryPointsDriftAttentionUsesTheFailingDecision: the collector raises the
 // item by storyPointsDriftFailing, through both signals: an interval that
 // reaches the bar raises nothing whatever the AUC says, a rank interval under
@@ -460,6 +468,67 @@ func TestStoryPointsDriftAttentionRefusesAnIntervalThatIsNotAnInterval(t *testin
 				t.Errorf("items = %+v, want the unreadable item and %d drift item(s)", items, wantDrift)
 			}
 		})
+	}
+}
+
+// TestStoryPointsDriftAttentionRefusesAMeasurableBoundWithNoNumber: a measurable
+// reading whose rank interval or measurable AUC has a bound that is not a number
+// is a fault in the read: it raises the unreadable item and keeps a drift item
+// held, since NaN under the AUC bar would otherwise silence a live item. An AUC
+// the measure did not take (LongMeasurable false, NaN fields) is not a fault: the
+// rank rule decides and raises the drift item alone (gt-7g4dgz).
+func TestStoryPointsDriftAttentionRefusesAMeasurableBoundWithNoNumber(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		read metrics.StoryPointsDriftRead
+		want string
+	}{
+		{"a NaN Hi", driftReadingWithInterval(0.25, 0.10, math.NaN(), "v1"), "Hi is not a number"},
+		{"a NaN LongHi", driftReadingWithAUCPoint(0.25, 0.10, 0.40, 0.55, 0.44, math.NaN()), "the measurable reading bound NaN is not a number"},
+		{"a +Inf LongHi", driftReadingWithAUCPoint(0.25, 0.10, 0.40, 0.55, 0.44, math.Inf(1)), "the measurable reading bound +Inf is not a number"},
+		{"a NaN LongLo", driftReadingWithAUCPoint(0.25, 0.10, 0.40, 0.55, math.NaN(), 0.63), "the measurable reading bound NaN is not a number"},
+		{"a NaN LongAUC", driftReadingWithAUCPoint(0.25, 0.10, 0.40, math.NaN(), 0.44, 0.63), "the measurable reading bound NaN is not a number"},
+	} {
+		for _, held := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s held=%v", tc.name, held), func(t *testing.T) {
+				t.Parallel()
+				f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) { return tc.read, nil })
+				if held {
+					f.src.prev = attention.State{Items: []attention.Item{{Key: storyPointsDriftKey, Kind: attention.KindStoryPointsDrift}}}
+				}
+				items := f.collect(t, f.src.collectStoryPointsDrift)
+				var unreadable, drift int
+				for _, it := range items {
+					switch it.Key {
+					case storyPointsDriftUnreadableKey:
+						unreadable++
+						if !strings.Contains(it.Summary, tc.want) {
+							t.Errorf("summary %q does not name %q", it.Summary, tc.want)
+						}
+					case storyPointsDriftKey:
+						drift++
+					}
+				}
+				wantDrift := 0
+				if held {
+					wantDrift = 1
+				}
+				if unreadable != 1 || drift != wantDrift {
+					t.Errorf("items = %+v, want the unreadable item and %d drift item(s)", items, wantDrift)
+				}
+			})
+		}
+	}
+	// An AUC the measure did not take is NaN with LongMeasurable false: no
+	// unreadable item, and the failing rank raises the drift item alone.
+	read := driftReadingWithInterval(0.25, 0.10, 0.40, "v1")
+	cur := &read.Drift.Current
+	cur.LongAUC, cur.LongLo, cur.LongHi = math.NaN(), math.NaN(), math.NaN()
+	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) { return read, nil })
+	items := f.collect(t, f.src.collectStoryPointsDrift)
+	if len(items) != 1 || items[0].Key != storyPointsDriftKey {
+		t.Errorf("items = %+v, want the drift item and no unreadable item", items)
 	}
 }
 
