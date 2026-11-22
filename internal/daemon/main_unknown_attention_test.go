@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -113,5 +114,53 @@ func TestMainUnknownUnreadableStateIsAnError(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Errorf("items = %+v on a failed read, want none", items)
+	}
+}
+
+// gt-gcp5sp: through the queue's own collectAttention, an unreadable main state
+// keeps the previous tick's main-unknown item, and a missing state file raises
+// nothing, so the item clears.
+func TestCollectMainUnknownStateErrors(t *testing.T) {
+	t.Parallel()
+	prevItem := attention.Item{
+		Key: "main-unknown:" + attentionRig, Kind: attention.KindMainUnknown,
+		Severity: attention.SeverityHigh, Rig: attentionRig, SHA: mainUnknownCommit,
+		Summary: "main UNKNOWN for 3 runs at 1a2b3c4d: go: module lookup disabled; the rerun could not run",
+	}
+	cases := []struct {
+		name  string
+		write func(t *testing.T, path string)
+		want  []attention.Item
+	}{
+		{
+			name: "unreadable state keeps the previous item",
+			write: func(t *testing.T, path string) {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: []attention.Item{prevItem},
+		},
+		{
+			name:  "missing state raises nothing",
+			write: func(*testing.T, string) {},
+			want:  nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAttentionFixture(t, mainUnknownNow)
+			tc.write(t, RedMainStatePath(f.d.config.TownRoot, attentionRig))
+			prev := attention.State{Updated: mainUnknownNow, Items: []attention.Item{prevItem}}
+			collectors := []attentionCollector{collectorFor(t, f.src, attention.KindMainUnknown)}
+
+			observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+			if !reflect.DeepEqual(observed, tc.want) {
+				t.Errorf("observed = %+v, want %+v", observed, tc.want)
+			}
+		})
 	}
 }
