@@ -488,6 +488,39 @@ func TestSweepRunsPruneFailureRaisesOnce(t *testing.T) {
 	}
 }
 
+// TestSweepRunsPruneFailureItemCarriesTheReason: a failed sweep-run prune raises
+// one item whose text holds the first line of the failure it logged, not the
+// fixed sentence; a refusal that carries no Go error raises its own sentence.
+func TestSweepRunsPruneFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	for name, breakTree := range map[string]func(f *sweepRunsFixture) string{
+		"the failure's own error": func(f *sweepRunsFixture) string {
+			f.fsys.readErr[f.root] = errors.New("input/output error\nio timeout on the second line")
+			return "cannot list " + f.root + ": input/output error"
+		},
+		"a refusal with no error": func(f *sweepRunsFixture) string {
+			f.fsys.lstatMode[filepath.Join(f.root, "gastown", sweepRunsName("gastown", "0a1b2c3d"))] = fs.ModeSymlink | 0o777
+			return "gastown/" + sweepRunsName("gastown", "0a1b2c3d") + " is no longer a directory"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newSweepRunsFixture(t, agentconfig.DiskMaintenanceModeApply, 2)
+			f.rigTree()
+			alerts := notifyfake.New()
+			f.d.notifier = alerts
+			why := breakTree(f)
+			f.d.runSweepRunsPrunePass(agentconfig.DiskMaintenanceModeApply)
+			open := alerts.OpenEscalations(diskMaintFailedKey(sweepRunsPruneName))
+			if len(open) != 1 || !strings.Contains(open[0].Reason, why) ||
+				strings.Contains(open[0].Reason, diskMaintNoReason) ||
+				strings.Contains(open[0].Reason, "io timeout on the second line") {
+				t.Fatalf("item = %+v, want one carrying %q alone", open, why)
+			}
+		})
+	}
+}
+
 // TestSweepRunsPruneDryRunWithNothingOldEnoughNamesNothing: a dry run whose plan
 // is empty still logs its line, with zero directories and no list after it.
 func TestSweepRunsPruneDryRunWithNothingOldEnoughNamesNothing(t *testing.T) {
