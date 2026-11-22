@@ -235,6 +235,12 @@ type brokenIdleReclaimer interface {
 // a rig sling allocates. A named sling touches no polecat but its own
 // (gt-2w4f9), so it skips the sweep.
 func reclaimBrokenIdleUnlessNamed(polecatMgr brokenIdleReclaimer, opts SlingSpawnOptions) {
+	// The reclaim is its own stage on the sling's note: it reads every seat and
+	// runs before the admission lock, so its cost is charged apart from the lock
+	// wait and the capacity scan that follow (gt-2y9m8r). Recorded on every
+	// return, a named sling's skipped sweep included, so each note has the same
+	// stage list.
+	defer opts.step("reclaim")
 	if opts.Name != "" {
 		return
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -451,4 +452,73 @@ func callPassesStoreOptions(call *ast.CallExpr) bool {
 		})
 	}
 	return found
+}
+
+// reclaimCountingFake is the reclaim sweep's manager surface, counting the
+// listing and reclaim a real manager makes on the sling's trace.
+type reclaimCountingFake struct {
+	trace    *session.SandboxTrace
+	polecats []*polecat.Polecat
+}
+
+func (f *reclaimCountingFake) List() ([]*polecat.Polecat, error) {
+	f.trace.CountBD()
+	return f.polecats, nil
+}
+
+func (f *reclaimCountingFake) ReclaimBrokenIdlePolecat(string) error {
+	f.trace.CountBD()
+	f.trace.CountGit()
+	return nil
+}
+
+// TestSlingNoteNamesTheReclaimStep: the note of a spawn names the broken-idle
+// reclaim as its own stage, ahead of admission, each with its own call counts
+// (gt-2y9m8r).
+func TestSlingNoteNamesTheReclaimStep(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_000_000, 0)
+	trace := session.NewSandboxTrace(func() time.Time { return clock })
+	fake := &reclaimCountingFake{
+		trace:    trace,
+		polecats: []*polecat.Polecat{{Name: "agate", State: polecat.StateIdle, ClonePath: filepath.Join(t.TempDir(), "gone")}},
+	}
+	s := slingSeatSpawn{
+		backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+		resolvePool:  func(_, _ string) (string, string, error) { return "", "", nil },
+		releaseSeat:  func() {},
+		// The reclaim the spawn runs, then the admission mark prepareSlingPolecat
+		// records; the fake stands in for the rest, which needs a Dolt server.
+		prepare: func(_, rigName string, opts SlingSpawnOptions, _ slingStores) (*SpawnedPolecatInfo, error) {
+			reclaimBrokenIdleUnlessNamed(fake, opts)
+			opts.step("admission")
+			return &SpawnedPolecatInfo{RigName: rigName}, nil
+		},
+	}
+
+	if _, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: "gt-a", trace: trace, Steps: trace.Steps()}); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	// The counts prove the sweep ran and that its calls are charged to reclaim.
+	want := "backpressure 0s, seat decision 0s, reclaim 0s [bd 2, git 1], admission 0s, total 0s"
+	if got := trace.Summary(); got != want {
+		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+// TestSlingNoteReclaimIsRecordedWhenANameSkipsIt: a named sling skips the sweep
+// but still records the stage (gt-2y9m8r).
+func TestSlingNoteReclaimIsRecordedWhenANameSkipsIt(t *testing.T) {
+	t.Parallel()
+	trace := session.NewSandboxTrace(func() time.Time { return time.Unix(1_000_000, 0) })
+	fake := &brokenIdleReclaimerFake{}
+
+	reclaimBrokenIdleUnlessNamed(fake, SlingSpawnOptions{Name: "garnet", Steps: trace.Steps()})
+
+	if fake.listCalls != 0 || len(fake.reclaimed) != 0 {
+		t.Errorf("named sling swept the pool: list=%d reclaimed=%v", fake.listCalls, fake.reclaimed)
+	}
+	if got, want := trace.Summary(), "reclaim 0s, total 0s"; got != want {
+		t.Fatalf("Summary() = %q, want %q: a skipped reclaim is still named", got, want)
+	}
 }
