@@ -60,7 +60,10 @@ func TestDoltWritesSectionRanksTheSixBusiestActors(t *testing.T) {
 		{"seven actors list six, the quietest left out", []map[string]uint64{seven(0), seven(10)}, []time.Time{at(12, 0), at(12, 10)}, [][]string{{"g7", "7.0"}, {"g6", "6.0"}, {"g5", "5.0"}, {"g4", "4.0"}, {"g3", "3.0"}, {"g2", "2.0"}}},
 		{"equal rates list by name", []map[string]uint64{{"b": 0, "a": 0}, {"b": 20, "a": 20}}, []time.Time{at(12, 0), at(12, 10)}, [][]string{{"a", "2.0"}, {"b", "2.0"}}},
 		{"a write in the previous bucket still counts", []map[string]uint64{{"a": 0}, {"a": 60}, {"a": 60}}, []time.Time{at(12, 5), at(12, 15), at(12, 25)}, [][]string{{"a", "4.0"}}},
-		{"an actor quiet for two buckets drops out", []map[string]uint64{{"a": 0}, {"a": 60}, {"a": 60}}, []time.Time{at(12, 0), at(12, 10), at(12, 40)}, nil},
+		{"an actor quiet for two buckets drops out", []map[string]uint64{{"a": 0}, {"a": 60}, {"a": 60}, {"a": 60}, {"a": 60}}, []time.Time{at(12, 0), at(12, 10), at(12, 20), at(12, 30), at(12, 40)}, nil},
+		{"reads five minutes apart keep counting", []map[string]uint64{{"a": 0}, {"a": 30}, {"a": 60}}, []time.Time{at(12, 0), at(12, 5), at(12, 10)}, [][]string{{"a", "6.0"}}},
+		{"a read after a gap counts nothing and restarts the span", []map[string]uint64{{"a": 0}, {"a": 60}, {"a": 90}}, []time.Time{at(12, 0), at(12, 35), at(12, 40)}, [][]string{{"a", "6.0"}}},
+		{"the overflow aggregate follows the six real actors", []map[string]uint64{{"g1": 0, "g2": 0, "g3": 0, "g4": 0, "g5": 0, "g6": 0, "g7": 0, "(other)": 0}, {"g1": 10, "g2": 20, "g3": 30, "g4": 40, "g5": 50, "g6": 60, "g7": 70, "(other)": 500}}, []time.Time{at(12, 0), at(12, 10)}, [][]string{{"g7", "7.0"}, {"g6", "6.0"}, {"g5", "5.0"}, {"g4", "4.0"}, {"g3", "3.0"}, {"g2", "2.0"}, {"(other)", "50.0"}}},
 		{"nothing written lists nothing", []map[string]uint64{{"a": 4}, {"a": 4}}, []time.Time{at(12, 0), at(12, 10)}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
