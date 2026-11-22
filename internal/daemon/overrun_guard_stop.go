@@ -2258,13 +2258,9 @@ func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]atten
 		}
 		summary := fmt.Sprintf("%s paused by the overrun guard %s ago on %s; recover with gt polecat check-recovery %s, then gt polecat nuke %s after a live git check",
 			seat, parkedAge(parked), bead, seat, seat)
-		// A save that gave up leaves the work only in the sandbox: say so, as the
-		// hand-back note does. A state or record that cannot be read leaves the
-		// summary as it was (gt-nlefu7 words that case).
-		if st, serr := readOverrunState(s.d.config.TownRoot, rec.WorkBead); serr == nil && st.SaveGaveUp {
-			if session, workDir, lerr := s.d.overrunUnsavedWorkLocation(overrunSeat{Rig: rig, Polecat: name}); lerr == nil {
-				summary += ". " + overrunUnsavedWorkText(st, session, workDir, st.Branch, name, rec.WorkBead)
-			}
+		// A seat with no bead has no stop state to read.
+		if rec.WorkBead != "" {
+			summary += s.d.overrunParkedUnsavedText(rig, name, rec.WorkBead)
 		}
 		out = append(out, attention.Item{
 			Key:      "overrun-parked:" + seat,
@@ -2280,6 +2276,26 @@ func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]atten
 		return nil, err
 	}
 	return out, nil
+}
+
+// overrunParkedUnsavedText is what the parked-seat item adds when the seat's
+// save gave up: the same UNSAVED WORK sentence as the hand-back note. A stop
+// state or a sandbox location that cannot be read says so, never today's text
+// alone, which says nothing of unsaved work. Empty for a save that did not give
+// up.
+func (d *Daemon) overrunParkedUnsavedText(rig, polecat, bead string) string {
+	st, err := readOverrunState(d.config.TownRoot, bead)
+	if err != nil {
+		return ". UNSAVED WORK status unknown: " + err.Error()
+	}
+	if !st.SaveGaveUp {
+		return ""
+	}
+	sessionName, workDir, err := d.overrunUnsavedWorkLocation(overrunSeat{Rig: rig, Polecat: polecat})
+	if err != nil {
+		return ". UNSAVED WORK status unknown: " + err.Error()
+	}
+	return ". " + overrunUnsavedWorkText(st, sessionName, workDir, st.Branch, polecat, bead)
 }
 
 // overrunGuardParked reports whether rec is the park the overrun guard writes,
