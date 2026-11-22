@@ -725,6 +725,58 @@ func TestSquashArchiveBudgetShortOfTheCutDefersTheRun(t *testing.T) {
 	}
 }
 
+// TestSquashArchiveNextDayContinuesFromTheWatermark: a short pass records its
+// through-date, and the next day's check reads only the commits after it, then
+// the run starts. Restarting the pass from the beginning re-reads archived
+// commits and fails here.
+func TestSquashArchiveNextDayContinuesFromTheWatermark(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	cut := squashTestNow.AddDate(0, 0, -7)
+	commits := []archiveCommit{
+		{Hash: "n1", Committer: "gastown/crew/overseer", Date: cut.Add(-3 * time.Hour), Message: "older"},
+		{Hash: "n2", Committer: "gastown/crew/overseer", Date: cut.Add(-2 * time.Hour), Message: "older still"},
+		{Hash: "n3", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "older too"},
+	}
+	seedSquashArchiveThrough(t, d, time.Time{})
+	withSquashArchive(t, d, t.TempDir(), commits, 2)
+	d.maint.archiveMaxBatches = 1
+	clock := squashTestNow
+	d.maint.now = func() time.Time { return clock }
+	read := d.maint.archiveRead
+	var reads []archiveCommit
+	d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+		out, err := read(ctx, dm, db, archived)
+		reads = append(reads, out...)
+		return out, err
+	}
+	d.runScheduledMaintenance()
+
+	watermark, err := d.squashArchiveThrough("gt")
+	if err != nil || !watermark.Equal(commits[1].Date) {
+		t.Fatalf("the short pass recorded through %s (%v), want %s", watermark, err, commits[1].Date)
+	}
+
+	// The first night's backup is over a day old by the next check: write one.
+	clock = squashTestNow.AddDate(0, 0, 1)
+	writeSquashBackup(t, squashBackupRoot(t, d), clock.Add(-6*time.Hour), clock.Add(-6*time.Hour+7*time.Second), 1<<20)
+	reads = nil
+	d.runScheduledMaintenance()
+
+	if len(reads) == 0 {
+		t.Fatal("the next day's check read no commit")
+	}
+	for _, c := range reads {
+		if !c.Date.After(watermark) {
+			t.Errorf("the next day's pass re-read commit %s dated %s, at or before the watermark %s", c.Hash, c.Date, watermark)
+		}
+	}
+	if !strings.Contains(logs.String(), "reading the branches") {
+		t.Errorf("the run did not start on the next day's check: %q", logs.String())
+	}
+}
+
 // TestSquashArchiveAlreadyPastTheCutIsNotArchivedAgain is the bead's second box:
 // the archive's record is already past the cut, so the pass is not run at all —
 // the commit read is never made — and the run starts.
