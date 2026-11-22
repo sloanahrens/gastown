@@ -5,8 +5,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
+	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestCallWalksParent(t *testing.T) {
@@ -113,6 +116,29 @@ func TestIsRunTest(t *testing.T) {
 		}
 		if got := isRunTest(f.Decls[0].(*ast.FuncDecl)); got != want {
 			t.Errorf("isRunTest(%s) = %v, want %v", decl, got, want)
+		}
+	}
+}
+
+type unreadableDir struct{ fstest.MapFS }
+
+func (unreadableDir) ReadDir(string) ([]fs.DirEntry, error) { return nil, errors.New("no listing") }
+func walkTest(n string) []byte {
+	return []byte("package p\n\nfunc Test" + n + "(t *testing.T) { os.ReadDir(\"..\") }")
+}
+func TestScanningTestsWalksFS(t *testing.T) {
+	t.Parallel()
+	got, err := ScanningTests(fstest.MapFS{"root_test.go": {Data: walkTest("R")}, "a/a_test.go": {Data: walkTest("B")}, "a/b_test.go": {Data: walkTest("A")}, "z/z_test.go": {Data: walkTest("Z")}, "testdata/t_test.go": {}, "vendor/v_test.go": {}, "node_modules/n_test.go": {}, ".git/g_test.go": {}})
+	if want := []ScanningTest{{".", "TestR"}, {"a", "TestA"}, {"a", "TestB"}, {"z", "TestZ"}}; err != nil || !slices.Equal(got, want) {
+		t.Fatalf("ScanningTests = %v, %v; want %v", got, err, want)
+	}
+	for want, fsys := range map[string]fs.FS{
+		"a/bad_test.go":  fstest.MapFS{"a/bad_test.go": {Data: []byte("package p\n\nfunc (")}},
+		"open a_test.go": fstest.MapFS{"a_test.go": {Mode: fs.ModeSymlink, Data: []byte("gone")}},
+		"no listing":     unreadableDir{fstest.MapFS{"a_test.go": {Data: walkTest("A")}}},
+	} {
+		if _, err := ScanningTests(fsys); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ScanningTests(%v) error = %v, want one holding %q", fsys, err, want)
 		}
 	}
 }

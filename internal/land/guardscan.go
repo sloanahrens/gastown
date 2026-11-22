@@ -5,6 +5,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
+	"path"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -101,4 +104,34 @@ func isRunTest(fn *ast.FuncDecl) bool {
 	}
 	r, _ := utf8.DecodeRuneInString(rest)
 	return !unicode.IsLower(r)
+}
+
+type ScanningTest struct{ Pkg, Name string }
+
+// ScanningTests returns the tests in fsys whose own body walks a parent, sorted by
+// package then name, skipping testdata/vendor/node_modules/dot dirs and returning any error.
+func ScanningTests(fsys fs.FS) (g []ScanningTest, err error) {
+	if err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if n := d.Name(); d.IsDir() && p != "." && (n == "testdata" || n == "vendor" || n == "node_modules" || n[0] == '.') {
+			return fs.SkipDir
+		} else if d.IsDir() || !strings.HasSuffix(n, "_test.go") {
+			return nil
+		}
+		src, err := fs.ReadFile(fsys, p)
+		if err == nil {
+			var names []string
+			names, err = scanFile(p, src)
+			for _, name := range names {
+				g = append(g, ScanningTest{path.Dir(p), name})
+			}
+		}
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	sort.Slice(g, func(i, j int) bool { return g[i].Pkg < g[j].Pkg || g[i].Pkg == g[j].Pkg && g[i].Name < g[j].Name })
+	return g, nil
 }
