@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,25 @@ func TestBdgwConfigRequire(t *testing.T) {
 				t.Fatalf("require(%v) = %v, want a refusal naming %q", tc.names, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestBdgwDoltCredentialFile: the Dolt credential file is empty by default, and
+// a value given on the command line reaches the executor's Options.
+func TestBdgwDoltCredentialFile(t *testing.T) {
+	t.Parallel()
+	// A zero config keeps this test off the host environment.
+	var c config
+	fs := flag.NewFlagSet("bdgw", flag.ContinueOnError)
+	bindShared(fs, &c)
+	if err := fs.Parse([]string{"--dolt-credential-file=/run/secrets/dolt.cred"}); err != nil {
+		t.Fatalf("parsing the flag: %v", err)
+	}
+	if got := c.options().DoltCredentialFile; got != "/run/secrets/dolt.cred" {
+		t.Errorf("Options.DoltCredentialFile = %q, want the flag's value", got)
+	}
+	if got := (config{}).options().DoltCredentialFile; got != "" {
+		t.Errorf("Options.DoltCredentialFile with no flag = %q, want empty", got)
 	}
 }
 
