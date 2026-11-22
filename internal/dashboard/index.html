@@ -2059,12 +2059,28 @@ function landingAgentCell(row, queued) {
   return c;
 }
 
+// landingRejectPill is the refusal count a landings row wears beside its state.
+// A landed row says where it ended ("landed · after 2 rejections"), unless its
+// State cell already wears a pill (no review, om error), which keeps its own
+// word for the outcome. From the second refusal on the pill warns: a bead
+// refused twice has been through an overseer's decision, not only the worker's
+// own retry (gt-x8oh0q).
+function landingRejectPill(n, landed, stateHasPill) {
+  if (!(n > 0)) return null;
+  const count = n === 1 ? "1 rejection" : n + " rejections";
+  const g = el("span", "tag" + (n >= 2 ? " warnc" : ""), landed ? (stateHasPill ? "" : "landed · ") + "after " + count : "rejected ×" + n);
+  g.title = landed ? "landed after " + count : n + (n === 1 ? " rejection" : " rejections") + " before this attempt";
+  return g;
+}
+
 // landingStateCell is the Landings table's State column: the pill a landing
 // wears — queued, running, rejected and why, failing at which stage, no review
 // or an om error — and on its hover the detail the row used to print on a second
-// line (gt-ultode). A landed landing whose review approved it draws no pill, as
-// it drew none beside its id. A queued row's pill is drawn by the caller, which
-// knows the bead came from the Queue reader rather than from a landing record.
+// line (gt-ultode). A landed landing whose review approved it draws no state
+// pill, as it drew none beside its id, so a refusal count it carries is the
+// cell's only pill. A queued row's state pill is drawn by the caller, which knows the
+// bead came from the Queue reader rather than from a landing record; its
+// refusal count comes through the same helper.
 function landingStateCell(r) {
   const c = el("span", "lstate");
   if (r.outcome === "running") { const g = el("span", "tag live", "running"); g.title = "merged; the worker is gating the merged tree and running the om review"; c.append(g); }
@@ -2072,6 +2088,8 @@ function landingStateCell(r) {
   else if (r.outcome === "backoff") { const g = el("span", "tag badc", "failing · " + (r.stage || "?")); g.title = "the landing worker keeps retrying this landing and losing; the stage is where the last attempt failed · " + backoffDetail(r); c.append(g); }
   else if (r.verdict === "skipped") c.append(el("span", "tag", "no review"));
   else if (r.verdict === "error") { const g = el("span", "tag warnc", "om error"); g.title = r.detail || ""; c.append(g); }
+  const rej = landingRejectPill(r.reject_count, r.outcome === "landed", c.children.length > 0);
+  if (rej) c.append(rej);
   return c;
 }
 
@@ -2188,6 +2206,8 @@ function landingTable(s, names, rows, waiting) {
     const tag = el("span", "tag", "queued");
     tag.title = "submitted; the landing worker has not taken it yet";
     st.append(tag);
+    const rej = landingRejectPill(b.reject_count, false, true);
+    if (rej) st.append(rej);
     tr.append(st, polecatTimeCell(b), landingPointsCell(b.sp_estimate, null), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"), el("span", "n", "–"));
     labelCells(tr, LT_COLS, LT_BEAD);
     tbl.append(tr);
