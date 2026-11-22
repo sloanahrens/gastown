@@ -401,7 +401,12 @@ func TestRedMainSupersededAndUnreadableState(t *testing.T) {
 	t.Run("a superseded run between two UNKNOWNs neither counts nor resets", func(t *testing.T) {
 		t.Parallel()
 		h := newRedMainHarness(t)
+		var logs []string
+		h.r.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 		store := &MemoryMainState{}
+		if err := store.Save(MainState{LastRun: "g0", LastGreen: "g0"}); err != nil {
+			t.Fatal(err)
+		}
 		h.r.State = store
 		h.rerunErr[pkgA] = errors.New("slot wait timed out")
 		h.r.Red(context.Background(), "make test-slow", PostLand{BeadID: "gt-l1", Commit: "c1"}, res)
@@ -425,8 +430,19 @@ func TestRedMainSupersededAndUnreadableState(t *testing.T) {
 		if st.UnknownRuns != 2 || st.UnknownCommit != "c3" {
 			t.Fatalf("state %+v after UNKNOWN, superseded, UNKNOWN; want UnknownRuns 2 at c3", st)
 		}
-		if st.LastRun != "" || st.LastGreen != "" {
-			t.Fatalf("state %+v; want no verdict recorded for the superseded run", st)
+		if st.LastRun != "g0" || st.LastGreen != "g0" {
+			t.Fatalf("state %+v; want the seeded verdict untouched by the superseded run", st)
+		}
+		// UNKNOWN runs file nothing, and the superseded run emits no status
+		// line: the first and third UNKNOWN are the only ones.
+		if open := h.open(t); len(open) != 0 {
+			t.Fatalf("open red-main beads %v; want none", open)
+		}
+		if len(h.status) != 2 || !strings.HasPrefix(h.status[1], "main UNKNOWN at c3 ") {
+			t.Fatalf("status lines %q; want the first and third UNKNOWN only", h.status)
+		}
+		if all := strings.Join(logs, "\n"); !strings.Contains(all, "superseded") {
+			t.Fatalf("log does not record the supersede:\n%s", all)
 		}
 	})
 	t.Run("an unreadable or unsavable state changes no verdict", func(t *testing.T) {
@@ -435,20 +451,21 @@ func TestRedMainSupersededAndUnreadableState(t *testing.T) {
 		saveErr := errors.New("write main state: disk full")
 		for _, tc := range []struct {
 			name       string
-			store      MainStateStore
+			loadErr    error
+			saveErr    error
 			rerunErr   bool // the rerun could not run: UNKNOWN; otherwise it failed: RED
 			green      bool // a green verdict, which has no rerun
 			wantStatus string
 			wantLog    string
 			wantOpen   int
 		}{
-			{name: "unreadable on UNKNOWN", store: failingMainState{loadErr: readErr}, rerunErr: true,
+			{name: "unreadable on UNKNOWN", loadErr: readErr, rerunErr: true,
 				wantStatus: "main UNKNOWN at c1 ", wantLog: "reading the main state"},
-			{name: "unsavable on UNKNOWN", store: failingMainState{saveErr: saveErr}, rerunErr: true,
+			{name: "unsavable on UNKNOWN", saveErr: saveErr, rerunErr: true,
 				wantStatus: "main UNKNOWN at c1 ", wantLog: "saving the main state"},
-			{name: "unreadable on RED", store: failingMainState{loadErr: readErr},
+			{name: "unreadable on RED", loadErr: readErr,
 				wantStatus: "main RED at c1 ", wantLog: "reading the main state", wantOpen: 1},
-			{name: "unsavable on GREEN", store: failingMainState{saveErr: saveErr}, green: true,
+			{name: "unsavable on GREEN", saveErr: saveErr, green: true,
 				wantStatus: "main GREEN at c1 ", wantLog: "saving the main state"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -456,7 +473,15 @@ func TestRedMainSupersededAndUnreadableState(t *testing.T) {
 				h := newRedMainHarness(t)
 				var logs []string
 				h.r.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-				h.r.State = tc.store
+				// A working store holding the seeded verdict: the failing read or
+				// write must leave it as it was.
+				store := &flakyMainState{}
+				if err := store.inner.Save(MainState{LastRun: "g0", LastGreen: "g0"}); err != nil {
+					t.Fatal(err)
+				}
+				store.failLoad(tc.loadErr)
+				store.failSave(tc.saveErr)
+				h.r.State = store
 				pl := PostLand{BeadID: "gt-l1", Commit: "c1"}
 				ctx := context.Background()
 				switch {
@@ -477,6 +502,17 @@ func TestRedMainSupersededAndUnreadableState(t *testing.T) {
 				}
 				if got := len(h.open(t)); got != tc.wantOpen {
 					t.Fatalf("open red-main beads %d; want %d", got, tc.wantOpen)
+				}
+				// Reads and writes are checked on the working store once the
+				// failures are cleared: it still holds the seeded verdict.
+				store.failLoad(nil)
+				store.failSave(nil)
+				st, err := store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if st.LastRun != "g0" || st.LastGreen != "g0" || st.UnknownRuns != 0 {
+					t.Fatalf("state %+v after the failed run; want the seeded verdict untouched", st)
 				}
 			})
 		}
