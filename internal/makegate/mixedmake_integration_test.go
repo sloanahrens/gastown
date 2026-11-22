@@ -3,6 +3,7 @@
 package makegate
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -25,13 +26,21 @@ import (
 // above it, found as a line starting in column one whose first colon is not
 // part of an assignment; a conditional such as `ifeq` between two recipe lines
 // leaves that rule line the nearest one, as it does for make.
-func mixedMakeTargets(makefile string) map[string]int {
+//
+// A text that is empty or only whitespace, or one holding no rule line, is an
+// error: a set computed from nothing must not read as a clean tree (gt-3hdoli).
+func mixedMakeTargets(makefile string) (map[string]int, error) {
+	if strings.TrimSpace(makefile) == "" {
+		return nil, errors.New("the Makefile is empty")
+	}
 	mixed := map[string]int{}
 	var targets []string
+	ruleFound := false
 	for _, line := range mixedMakeLogicalLines(makefile) {
 		if !strings.HasPrefix(line.text, "\t") {
 			if names := mixedMakeRuleTargets(line.text); names != nil {
 				targets = names
+				ruleFound = true
 			}
 			continue
 		}
@@ -44,7 +53,10 @@ func mixedMakeTargets(makefile string) map[string]int {
 			}
 		}
 	}
-	return mixed
+	if !ruleFound {
+		return nil, errors.New("no rule found in the Makefile")
+	}
+	return mixed, nil
 }
 
 // mixedMakeLogical is one Makefile logical line: its text, and the 1-based
@@ -107,13 +119,18 @@ func mixedMakeLine(line string) bool {
 // mixedGuardFindings returns one alarm per disagreement between the mixed
 // targets in root's Makefile and guarded, bead gt-az0vxj's list. A computed
 // target missing from the list names itself and its line; a listed name with no
-// mixed line is stale; a Makefile that cannot be read is an error (gt-jiwfzd).
+// mixed line is stale; a Makefile that cannot be read is an error (gt-jiwfzd),
+// and so is one the reader finds empty or rule-less (gt-3hdoli).
 func mixedGuardFindings(root string, guarded []string) ([]string, error) {
-	text, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	path := filepath.Join(root, "Makefile")
+	text, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read the Makefile under %s: %w", root, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	mixed := mixedMakeTargets(string(text))
+	mixed, err := mixedMakeTargets(string(text))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
 	var alarms []string
 	for _, target := range slices.Sorted(maps.Keys(mixed)) {
 		if !slices.Contains(guarded, target) {
@@ -174,11 +191,40 @@ func TestIntegrationMixedMakeScratchCopy(t *testing.T) {
 		root := scratchMakefile(t, "presubmit:\n\t@$(MAKE) a && b\nci-base-image:\n\t@$(MAKE) --no-print-directory build\n")
 		checkMixedGuard(t, root, []string{"ci-base-image is on the guarded dry-run list but no recipe line under it mixes $(MAKE) with another command: remove the stale name from the list"})
 	})
-	t.Run("a Makefile that cannot be read is an error", func(t *testing.T) {
-		if _, err := mixedGuardFindings(t.TempDir(), dryRunTargets); err == nil {
-			t.Fatal("mixedGuardFindings on a directory with no Makefile returned no error: a guard that read nothing has not cleared the tree")
-		}
-	})
+}
+
+// TestIntegrationMixedMakeUnreadable requires a Makefile the guard cannot read
+// to fail it instead of passing it (gt-3hdoli). Mutation: return an empty set
+// and no error from mixedMakeTargets for either cause and its row passes.
+func TestIntegrationMixedMakeUnreadable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write bool
+		text  string
+		want  string
+	}{
+		{name: "no Makefile", want: "no such file"},
+		{name: "a zero-byte Makefile", write: true, want: "the Makefile is empty"},
+		{name: "a Makefile of only comments and blank lines", write: true, text: "# a comment\n\n# another\n", want: "no rule found in the Makefile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.write {
+				root = scratchMakefile(t, tc.text)
+			}
+			path := filepath.Join(root, "Makefile")
+			alarms, err := mixedGuardFindings(root, dryRunTargets)
+			if err == nil {
+				t.Fatalf("mixedGuardFindings(%s) returned %q and no error: a guard that read nothing has cleared the tree", path, alarms)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("mixedGuardFindings(%s) error = %q, want one holding %q", path, err, tc.want)
+			}
+			if !strings.Contains(err.Error(), path) {
+				t.Fatalf("mixedGuardFindings(%s) error = %q, want the path in it", path, err)
+			}
+		})
+	}
 }
 
 // TestIntegrationMixedMakeReader checks the reader the guarded-list comparison
@@ -192,6 +238,7 @@ func TestIntegrationMixedMakeReader(t *testing.T) {
 			name     string
 			makefile string
 			want     map[string]int
+			wantErr  string
 		}{
 			{
 				// The continued line holds the separator and the line it
@@ -264,33 +311,58 @@ func TestIntegrationMixedMakeReader(t *testing.T) {
 				want:     map[string]int{"one": 3},
 			},
 			{
-				name:     "a line with no colon is not a rule line",
+				name:     "an empty Makefile is an error",
+				makefile: "",
+				wantErr:  "the Makefile is empty",
+			},
+			{
+				name:     "a whitespace-only Makefile is an error",
+				makefile: " \n\t\n\n",
+				wantErr:  "the Makefile is empty",
+			},
+			{
+				name:     "a line with no colon is not a rule line, so no rule is found",
 				makefile: "VAR ?= x\n\t$(MAKE) a; b\n",
-				want:     map[string]int{},
+				wantErr:  "no rule found in the Makefile",
 			},
 			{
-				name:     "an assignment holding a colon is not a rule line",
+				name:     "an assignment holding a colon is not a rule line, so no rule is found",
 				makefile: "URL = https://example.com\n\t$(MAKE) a; b\n",
-				want:     map[string]int{},
+				wantErr:  "no rule found in the Makefile",
 			},
 			{
-				name:     "a := assignment is not a rule line",
+				name:     "a := assignment is not a rule line, so no rule is found",
 				makefile: "X := y\n\t$(MAKE) a; b\n",
-				want:     map[string]int{},
+				wantErr:  "no rule found in the Makefile",
 			},
 			{
-				name:     "a ::= assignment is not a rule line",
+				name:     "a ::= assignment is not a rule line, so no rule is found",
 				makefile: "X ::= y\n\t$(MAKE) a; b\n",
-				want:     map[string]int{},
+				wantErr:  "no rule found in the Makefile",
 			},
 			{
-				name:     "a recipe line with no rule line above it is not recorded",
+				name:     "a recipe line with no rule line above it is an error",
 				makefile: "\t$(MAKE) a; b\n",
-				want:     map[string]int{},
+				wantErr:  "no rule found in the Makefile",
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				got := mixedMakeTargets(tc.makefile)
+				got, err := mixedMakeTargets(tc.makefile)
+				if tc.wantErr != "" {
+					if err == nil {
+						t.Fatalf("mixedMakeTargets(%q) = %v and no error, want the error %q", tc.makefile, got, tc.wantErr)
+					}
+					if !strings.Contains(err.Error(), tc.wantErr) {
+						t.Fatalf("mixedMakeTargets(%q) error = %q, want one holding %q", tc.makefile, err, tc.wantErr)
+					}
+					if got != nil {
+						t.Fatalf("mixedMakeTargets(%q) = %v beside an error, want no set", tc.makefile, got)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("mixedMakeTargets(%q) failed: %v", tc.makefile, err)
+				}
 				if !maps.Equal(got, tc.want) {
 					t.Fatalf("mixedMakeTargets(%q) = %v, want %v", tc.makefile, got, tc.want)
 				}
@@ -301,7 +373,10 @@ func TestIntegrationMixedMakeReader(t *testing.T) {
 	t.Run("the checkout Makefile holds exactly the two mixed targets", func(t *testing.T) {
 		// Every other $(MAKE) recipe line in the Makefile runs one command, so
 		// make -n skips it.
-		got := mixedMakeTargets(makefileText(t, repoRoot(t)))
+		got, err := mixedMakeTargets(makefileText(t, repoRoot(t)))
+		if err != nil {
+			t.Fatalf("mixedMakeTargets(the Makefile): %v", err)
+		}
 		want := []string{"ci-base-image", "presubmit"}
 		if keys := slices.Sorted(maps.Keys(got)); !slices.Equal(keys, want) {
 			t.Fatalf("mixedMakeTargets(the Makefile) = %v, want exactly %v", got, want)
@@ -311,7 +386,11 @@ func TestIntegrationMixedMakeReader(t *testing.T) {
 	t.Run("a recorded line number is a recipe line", func(t *testing.T) {
 		text := makefileText(t, repoRoot(t))
 		physical := strings.Split(text, "\n")
-		for target, number := range mixedMakeTargets(text) {
+		mixed, err := mixedMakeTargets(text)
+		if err != nil {
+			t.Fatalf("mixedMakeTargets(the Makefile): %v", err)
+		}
+		for target, number := range mixed {
 			if number < 1 || number > len(physical) {
 				t.Fatalf("%s: line %d is outside the Makefile, which has %d lines", target, number, len(physical))
 			}
