@@ -47,10 +47,11 @@ var (
 	// not a reference (gt-t5pxk8).
 	envRefOnly = regexp.MustCompile(`^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$`)
 	// userinfoPasswordShape: scheme://user:password@ at the start of the value. It
-	// is the fail-closed reading of a URL url.Parse rejects or leaves without a
-	// userinfo, so a literal password in the text is still a finding; the user has
-	// no @, /, colon or space, and the password is non-empty.
-	userinfoPasswordShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://[^@/\s:]+:[^@\s]+@`)
+	// is the fail-closed reading of a URL url.Parse REJECTS, so a literal password
+	// in the text is still a finding: the user has no @, /, colon or space, and
+	// the password is non-empty and may hold a slash or a space (the characters
+	// that make url.Parse fail). It is never applied to a URL that parses.
+	userinfoPasswordShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://[^@/\s:]+:[^@]+@`)
 )
 
 // lastSegment returns the last dotted segment of a YAML key. Only that segment
@@ -161,12 +162,18 @@ func urlCarriesPassword(s string) bool {
 	if !strings.Contains(s, "://") {
 		return false
 	}
-	if u, err := url.Parse(s); err == nil && u.User != nil {
+	u, err := url.Parse(s)
+	if err != nil {
+		return userinfoPasswordShape.MatchString(s)
+	}
+	if u.User != nil {
 		if password, ok := u.User.Password(); ok && password != "" {
 			return true
 		}
 	}
-	return userinfoPasswordShape.MatchString(s)
+	// A URL that parses is judged by what it parsed to: https://host:443/@scope/pkg
+	// has a port and an @ in its path and no userinfo, so it is not a finding.
+	return false
 }
 
 // isSecret reports whether value, held under a credential name, is reportable.

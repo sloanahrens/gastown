@@ -145,6 +145,8 @@ func TestFindCredentialsUserinfoURL(t *testing.T) {
 		{"a percent-encoded password", `{"repo":"https://user:p%40ss@host/x.git"}`, []string{"json:repo"}},
 		{"an invalid percent escape in the password fails closed", `{"repo":"https://user:p%zz@host/x.git"}`, []string{"json:repo"}},
 		{"an unescaped slash in the password fails closed", `{"repo":"https://user:pa/ss@host/x.git"}`, []string{"json:repo"}},
+		{"a literal space in the password fails closed", `{"repo":"https://user:pa ss@host/x.git"}`, []string{"json:repo"}},
+		{"a URL with a port and an @ in its path has no userinfo", `{"repo":"https://registry.npmjs.org:443/@scope/pkg"}`, nil},
 		{"an env value with an invalid percent escape", "GIT_URL=https://user:p%zz@host/x.git\n", []string{"env:GIT_URL"}},
 		{"an element of an array names the array's key", `{"repos":["` + url + `"]}`, []string{"json:repos"}},
 		{"an element of a nested array names the outer key", `{"repos":[["` + url + `"]]}`, []string{"json:repos"}},
