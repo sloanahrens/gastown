@@ -640,6 +640,9 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
 			st.SaveFailure, branch, who))
 	}
+	if saveKept {
+		notes = append(notes, s.unsavedWorkNote(st, seat, branch))
+	}
 	if st.SandboxDiverged != "" {
 		notes = append(notes, st.SandboxDiverged)
 	} else if originReadGaveUp != "" {
@@ -855,6 +858,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	s.removeSandbox = func(seat overrunSeat) error {
 		return d.overrunRemoveSandbox(seat, session.SandboxPusher, session.SandboxDeleter)
 	}
+	s.unsavedWork = d.overrunUnsavedWorkLocation
 	s.submittedNow = d.overrunSubmittedNow
 	s.checkpoint = func(seat overrunSeat) error {
 		polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
@@ -2272,4 +2276,55 @@ func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]atten
 // this collector can age.
 func overrunGuardParked(rec intent.Record) bool {
 	return !rec.Frozen && rec.Desired == intent.DesiredPark && rec.PausedBy == overrunActor && !rec.PausedAt.IsZero()
+}
+
+// overrunUnsavedWorkLocation is the sandbox session and clone of seat's work, from its record; an error says why it is unknown.
+func (d *Daemon) overrunUnsavedWorkLocation(seat overrunSeat) (session, workDir string, err error) {
+	sb, err := d.overrunSandboxSession(seat)
+	if err != nil {
+		return "", "", err
+	}
+	if sb.Session == "" {
+		return "", "", errors.New("the seat has no sandbox record, so it is a host seat")
+	}
+	rec, sandboxed := sb.Record, true
+	if !sb.Read {
+		if rec, sandboxed, err = d.readSandboxRecordFor(d.config.TownRoot, sb.Session); err != nil {
+			return "", "", err
+		}
+	}
+	if !sandboxed || !validSandboxCloneDir(rec.WorkDir) {
+		return "", "", fmt.Errorf("sandbox %s has no usable clone directory in its record", sb.Session)
+	}
+	return sb.Session, rec.WorkDir, nil
+}
+
+// overrunUnsavedWorkText is the note of a save that gave up on a sandbox seat:
+// the sandbox is not to be removed, where the clone is, and the push that
+// rescues it. The step comes from SaveStage and is unknown when it is empty.
+func overrunUnsavedWorkText(st overrunState, session, workDir, branch, seat, bead string) string {
+	step := "The save did not complete and the step is unknown"
+	switch st.SaveStage {
+	case "commit":
+		step = "The commit failed"
+	case "push":
+		step = "The push failed"
+	}
+	return fmt.Sprintf("UNSAVED WORK: sandbox %s may hold work origin lacks: do not remove it. %s (%s). The clone is %s, branch %s. "+
+		"To rescue it: openshell sandbox exec -n %s --no-tty --no-login-shell -- git -C %s push origin HEAD:refs/heads/polecat/%s/%s+rescue",
+		session, step, st.SaveFailure, workDir, branch, session, workDir, seat, bead)
+}
+
+// unsavedWorkNote is that text for the seat's sandbox, or one line saying the
+// clone could not be found.
+func (s overrunSeams) unsavedWorkNote(st overrunState, seat overrunSeat, branch string) string {
+	lookup := s.unsavedWork
+	if lookup == nil {
+		lookup = func(overrunSeat) (string, string, error) { return "", "", errors.New("no lookup is wired") }
+	}
+	session, workDir, err := lookup(seat)
+	if err != nil {
+		return fmt.Sprintf("UNSAVED WORK: the seat's work may exist only in its worktree or sandbox: do not remove either. The location of the clone could not be read (%v).", err)
+	}
+	return overrunUnsavedWorkText(st, session, workDir, branch, seat.Polecat, st.Bead)
 }

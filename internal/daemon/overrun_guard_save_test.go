@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // The save step (overrunSaveWork) runs on newResetWorld: the seat's worktree
@@ -1303,5 +1304,127 @@ func TestOverrunSaveStage_LateResaveSuccessClearsAPushStage(t *testing.T) {
 	w.d.runOverrunGuard(s)
 	if got := stage(); got != "" {
 		t.Errorf("stage after the late save landed = %q, want it cleared", got)
+	}
+}
+
+// gaveUpNote drives a stop whose push was refused to its hand-back note, with where as the sandbox lookup.
+func gaveUpNote(t *testing.T, where func(overrunSeat) (string, string, error)) string {
+	t.Helper()
+	w := newResetWorld(t)
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRefusingGit{daemonGit: open(dir), err: errors.New("remote unreachable")}
+	}
+	writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	s.unsavedWork = where
+	tickUntilSaveCap(t, w, f, s)
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-back notes = %q, want the seat parked with one note", f.handBackNotes)
+	}
+	return f.handBackNotes[0]
+}
+
+// checkUnsavedText checks the added sentence, from UNSAVED WORK on, holds each want and names no
+// lowercase "saved" or "safe" (the stop's own sentence may).
+func checkUnsavedText(t *testing.T, note string, wants ...string) {
+	t.Helper()
+	i := strings.Index(note, "UNSAVED WORK")
+	if i < 0 {
+		t.Fatalf("hand-back note = %q, want UNSAVED WORK", note)
+	}
+	text := note[i:]
+	for _, want := range append(wants, "do not remove") {
+		if !strings.Contains(text, want) {
+			t.Errorf("added text = %q, want it to contain %q", text, want)
+		}
+	}
+	if strings.Contains(text, "saved") || strings.Contains(text, "safe") {
+		t.Errorf("added text = %q, want no \"saved\" or \"safe\"", text)
+	}
+}
+
+// TestOverrunSaveGaveUpText_NoteNamesThePushStage: a push that gave up says the work may be only in
+// the sandbox, not to remove it, where the clone is and the rescue push.
+func TestOverrunSaveGaveUpText_NoteNamesThePushStage(t *testing.T) {
+	t.Parallel()
+	checkUnsavedText(t, gaveUpNote(t, func(overrunSeat) (string, string, error) { return "gt-sbx", "/sandbox/clone", nil }),
+		"sandbox gt-sbx", "/sandbox/clone", stopSeat.Branch, "The push failed", "remote unreachable",
+		"openshell sandbox exec -n gt-sbx --no-tty --no-login-shell -- git -C /sandbox/clone push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+}
+
+// TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown: a failed late check leaves SaveStage empty;
+// the note says the step is unknown and keeps the command.
+func TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	s.unsavedWork = func(overrunSeat) (string, string, error) { return "gt-sbx", "/sandbox/clone", nil }
+	stopped := false
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit { return statusUnreadableAfterStop{daemonGit: open(dir), stopped: &stopped} }
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		stopped = true
+		return stopSession(seat)
+	}
+	tickUntilSaveCap(t, w, f, s)
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-back notes = %q, want the seat parked with one note", f.handBackNotes)
+	}
+	checkUnsavedText(t, f.handBackNotes[0], "the step is unknown", "push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+}
+
+// TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown: with no clone found the note keeps today's
+// sentence, says where the work may be, and names no command built from an untrusted record.
+func TestOverrunSaveGaveUpText_NoteSaysTheLocationIsUnknown(t *testing.T) {
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	for _, tc := range []struct {
+		name     string
+		listed   bool
+		blocked  bool
+		readErr  error
+		workDir  string
+		wantPart string
+	}{
+		{"the sandbox lookup errors", true, false, errors.New("record unreadable"), overrunGoneClone, "record unreadable"},
+		{"a host seat has no sandbox record", false, false, nil, overrunGoneClone, "host seat"},
+		{"the sandbox records cannot be listed", false, true, nil, overrunGoneClone, "cannot list the sandbox records"},
+		{"a clone directory the runner would refuse", true, false, nil, "/sandbox/../escape", "no usable clone directory"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+			if tc.listed {
+				d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+			}
+			if tc.blocked {
+				dir := session.SandboxRegistryDir(d.config.TownRoot)
+				if err := errors.Join(os.MkdirAll(filepath.Dir(dir), 0o755), os.WriteFile(dir, nil, 0o600)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+				return *overrunStopSandboxRecord(tc.workDir), true, tc.readErr
+			}
+			note := gaveUpNote(t, d.overrunUnsavedWorkLocation)
+			for _, want := range []string{"could not be read", "do not remove either", "could not be saved before the stop", tc.wantPart} {
+				if !strings.Contains(note, want) {
+					t.Errorf("note = %q, want it to contain %q", note, want)
+				}
+			}
+			if strings.Contains(note, "openshell") {
+				t.Errorf("note = %q, want no openshell command", note)
+			}
+		})
 	}
 }
