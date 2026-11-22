@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1228,6 +1229,34 @@ func TestOverrunSaveStage_ClassifiesEachReturn(t *testing.T) {
 			t.Errorf("save error = %v with stage %q, want errSandboxGone and no stage", err, overrunFailedStage(err))
 		}
 	})
+}
+
+// TestOverrunSaveStageError_ErrorIsTheWrappedText: the stage error's text is the
+// failure it wraps, unchanged. The stop logs Error(), and the hand-back note
+// quotes it for the same failure, so a stage prefixed onto the text would report
+// one failure two ways (gt-5cpjpt).
+func TestOverrunSaveStageError_ErrorIsTheWrappedText(t *testing.T) {
+	t.Parallel()
+	err := &overrunSaveStageError{Stage: "push", Err: errors.New("origin refused")}
+	if got := err.Error(); got != "origin refused" {
+		t.Errorf("Error() = %q, want the wrapped text %q", got, "origin refused")
+	}
+}
+
+// TestOverrunSaveStageError_StageSurvivesASecondWrap: a caller may wrap a save
+// failure again with %w before it reaches the note, and the stage is still read
+// through both wraps; a plain error names no stage (gt-5cpjpt).
+func TestOverrunSaveStageError_StageSurvivesASecondWrap(t *testing.T) {
+	t.Parallel()
+	se := &overrunSaveStageError{Stage: "push", Err: errors.New("origin refused")}
+	wrapped := fmt.Errorf("saving %s: %w", "nux", se)
+	wrapped = fmt.Errorf("stopping %s: %w", "nux", wrapped)
+	if got := overrunFailedStage(wrapped); got != "push" {
+		t.Errorf("overrunFailedStage(twice wrapped) = %q, want %q", got, "push")
+	}
+	if got := overrunFailedStage(errors.New("plain")); got != "" {
+		t.Errorf("overrunFailedStage(plain) = %q, want no stage", got)
+	}
 }
 
 // TestOverrunSaveStage_StateFollowsTheLastFailure: the stop's state holds the
