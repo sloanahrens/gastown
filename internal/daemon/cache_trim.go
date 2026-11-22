@@ -91,8 +91,8 @@ const (
 	cacheTrimJobNameDigest = 8
 
 	// cacheTrimRefusalLogInterval is how long the same cache trim line is held
-	// back. A trim that cannot start is retried every fifteen minutes, so one
-	// line an hour says the refusal without repeating it four times.
+	// back. The pass meets the same refusal again at the full interval, so one
+	// line an hour says it once without repeating it on every run.
 	cacheTrimRefusalLogInterval = time.Hour
 
 	// cacheTrimPreflightVerb is the preflight's kubectl arguments after the
@@ -332,13 +332,13 @@ func cacheTrimObjectName(prefix, claim string) string {
 // mounts, in each namespace that holds it, trimmed in the mode the patrol runs
 // in.
 //
-// It reports whether the pass reached a verdict: trimmed, or nothing to trim.
-// A pass that could not start -- unreadable profiles, values file or cap, a
-// kubeconfig that names no sandbox context, an unreadable claim list -- or a
-// claim whose trim failed for a reason the next run may clear reports false, and
-// the patrol retries it soon rather than after the full interval. A refusal the
-// config or the listing decides is a verdict: the next run judges it again at
-// the full interval.
+// It reports whether the pass reached a verdict for every claim: true when it
+// trimmed or found nothing to trim, false when it could not start -- unreadable
+// profiles, values file or cap, a kubeconfig that names no sandbox context, an
+// unreadable claim list -- or a claim whose trim failed. The return does not set
+// the schedule: diskMaintenanceTrim records the full interval from the pass's
+// conclusion whatever it returned, and a failed claim is parked, not retried on
+// the next pass. A refusal the config or the listing decides is a verdict.
 func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	profiles, err := s.sandboxes()
@@ -498,9 +498,9 @@ func (d *Daemon) cacheTrimPreflight(ctx context.Context, kubeconfig string) erro
 }
 
 // cacheTrimLogf logs one refusal or failure line, at most once an hour for the
-// same line: a trim that cannot start is retried in fifteen minutes, and saying
-// the same refusal on every retry would be four lines an hour for one fault. A
-// success is not a repeat to hold back, so it is logged through d.logger.
+// same line: the pass meets the same refusal again at the full interval, and the
+// hour-long hold keeps one fault to one line. A success is not a repeat to hold
+// back, so it is logged through d.logger.
 func (d *Daemon) cacheTrimLogf(format string, args ...any) {
 	line := fmt.Sprintf(format, args...)
 	if d.diskMaintSchedule.allowLog(line, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
