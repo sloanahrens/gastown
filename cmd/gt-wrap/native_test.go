@@ -497,6 +497,58 @@ func TestRunGtHostCommandsUseNativePath(t *testing.T) {
 	}
 }
 
+// TestNativeToolsHostCommands shows the config accepts a gt entry naming each
+// reboot-recovery command path, so that call runs on the Mac, and refuses a path
+// outside the host command set.
+func TestNativeToolsHostCommands(t *testing.T) {
+	t.Parallel()
+	accepted := []struct {
+		name string
+		path string
+		args []string
+	}{
+		{name: "town vms start", path: "town vms start", args: []string{"town", "vms", "start", "--home", "/Users/operator"}},
+		{name: "town vms plist", path: "town vms plist", args: []string{"town", "vms", "plist", "--gt", "/usr/local/bin/gt", "--home", "/Users/operator"}},
+		{name: "town reboot-check", path: "town reboot-check", args: []string{"town", "reboot-check", "--json"}},
+	}
+	for _, tt := range accepted {
+		t.Run("accepts "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			native, err := nativeTools(map[string]nativeEntry{gtTool: {Path: nativeGt, Subcommands: []string{tt.path}}}, "config.json")
+			if err != nil {
+				t.Fatalf("nativeTools refused %q: %v", tt.path, err)
+			}
+			gt, ok := native[gtTool]
+			if !ok {
+				t.Fatalf("nativeTools returned no native gt for %q", tt.path)
+			}
+			if !gt.Covers(tt.args) {
+				t.Fatalf("the native gt entry for %q does not cover %q", tt.path, tt.args)
+			}
+		})
+	}
+
+	refused := []struct {
+		name string
+		path string
+	}{
+		{name: "the town vms group alone", path: "town vms"},
+		{name: "a status call", path: "status"},
+	}
+	for _, tt := range refused {
+		t.Run("refuses "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := nativeTools(map[string]nativeEntry{gtTool: {Path: nativeGt, Subcommands: []string{tt.path}}}, "config.json")
+			if err == nil {
+				t.Fatalf("nativeTools accepted %q", tt.path)
+			}
+			if !strings.Contains(err.Error(), "native.gt.subcommands") || !strings.Contains(err.Error(), `"`+tt.path+`"`) {
+				t.Fatalf("error %q does not name native.gt.subcommands and %q", err, tt.path)
+			}
+		})
+	}
+}
+
 func TestConfigNativeRefusesAGtPathOutsideTheHostSet(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

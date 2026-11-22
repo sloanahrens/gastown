@@ -88,6 +88,35 @@ func TestNativeCoversGtHostCommands(t *testing.T) {
 	}
 }
 
+// TestGTHostCommandRebootRecovery shows the reboot-recovery commands run on the
+// Mac and the commands the set held before them still do, while a group alone
+// does not.
+func TestGTHostCommandRebootRecovery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "town vms start", path: "town vms start", want: true},
+		{name: "town vms plist", path: "town vms plist", want: true},
+		{name: "town reboot-check", path: "town reboot-check", want: true},
+		{name: "town forward plist", path: "town forward plist", want: true},
+		{name: "maint plan", path: "maint plan", want: true},
+		{name: "maint apply", path: "maint apply", want: true},
+		{name: "the town vms group alone", path: "town vms", want: false},
+		{name: "town vms stop", path: "town vms stop", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := GTHostCommand(tt.path); got != tt.want {
+				t.Fatalf("GTHostCommand(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNativeGtEntryCannotNameAPathOutsideTheHostSet(t *testing.T) {
 	t.Parallel()
 	n := Native{Tool: "gt", Path: "/usr/local/bin/gt", Subcommands: []string{"status"}}
