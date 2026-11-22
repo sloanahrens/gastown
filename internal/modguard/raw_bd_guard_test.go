@@ -186,6 +186,51 @@ func rawBdProblems(fsys fs.FS, baseline map[rawBdKey]int, floor int) []string {
 	return problems
 }
 
+// scanRawBdSharedTree counts the raw bd sites the way scanRawBdTree does, with
+// the same skips, over the shared tree's walk and source; keys are relative to root.
+func scanRawBdSharedTree(root string, walk func(string, fs.WalkDirFunc) error, source func(string) ([]byte, error)) (map[rawBdKey]int, int, error) {
+	counts, files := map[rawBdKey]int{}, 0
+	err := walk(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		switch {
+		case d.IsDir() && (rel == "internal/beads" || d.Name() == ".git" || d.Name() == "testdata" || d.Name() == "vendor" || d.Name() == "node_modules"):
+			return fs.SkipDir
+		case d.IsDir() || filepath.Ext(rel) != ".go":
+			return nil
+		}
+		src, err := source(path)
+		if err != nil {
+			return err
+		}
+		files++
+		return scanRawBd(rel, src, counts)
+	})
+	return counts, files, err
+}
+
+// TestRawBdSharedTreeSkips drives the shared tree's scan over an in-memory tree:
+// internal/beads and testdata are skipped and other Go files are counted.
+func TestRawBdSharedTreeSkips(t *testing.T) {
+	t.Parallel()
+	site := "package p\n\nfunc f() {\n\texec.Command(\"bd\", \"list\")\n}\n"
+	fsys := memTree("internal/beads/seam.go", site, "internal/cmd/testdata/x.go", site, "internal/cmd/run.go", site)
+	counts, files, err := scanRawBdSharedTree(".", func(start string, fn fs.WalkDirFunc) error { return fs.WalkDir(fsys, start, fn) },
+		func(path string) ([]byte, error) { return fs.ReadFile(fsys, path) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != 1 || fmt.Sprint(counts) != fmt.Sprint(map[rawBdKey]int{{"internal/cmd/run.go", "argv"}: 1}) {
+		t.Errorf("files = %d, counts = %v; want one file and internal/cmd/run.go's one argv site", files, counts)
+	}
+}
+
 // TestNoNewRawBdSites is the ratchet half of the one-interface rule
 // (gt-7iwy0.4.1): outside internal/beads, code reaches bd through
 // beads.Client and the other typed methods, not argv. The sites still
