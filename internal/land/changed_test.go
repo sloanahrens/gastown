@@ -214,7 +214,7 @@ var guardTriggers = []struct {
 	{"internal/bdgate", "M\x00internal/session/lifecycle.go\x00"},
 	{"internal/polecat", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/beads", "M\x00internal/plugin/dispatch.go\x00"},
-	{"internal/beads/beadsfake", "A\x00internal/newpkg/new.go\x00"},
+	{"internal/modguard", "A\x00internal/newpkg/new.go\x00"},
 	{"internal/beadsql", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/sweeprunner", "M\x00internal/daemon/tier_sweep.go\x00"},
 	{"internal/config", "M\x00cmd/gt/main.go\x00"},

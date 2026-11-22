@@ -496,7 +496,7 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
-		pkg:     "internal/beads/beadsfake",
+		pkg:     "internal/modguard",
 		tests:   []string{"TestNoNewRawBdSites"},
 		judges:  goFile,
 		removal: true,
