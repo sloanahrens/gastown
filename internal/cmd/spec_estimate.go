@@ -600,17 +600,29 @@ func readSpecLedger(townRoot, rig string) ([]landings.Record, error) {
 // Deps.NeighborMinutes: the minutes the newest landing of a past bead took, read
 // through read. A neighbor with no such record, or a rig whose ledger cannot be
 // read, has no time; an unreadable rig logs one line to errw and fails nothing.
+// Each rig's ledger is read once, at its first neighbor, and the records or the
+// read error are kept for the rest of the run, so a rig with many neighbors is
+// read once.
 func specEstimateNeighborMinutes(read func(townRoot, rig string) ([]landings.Record, error), townRoot string, errw io.Writer) func(rig, id string) (float64, bool) {
-	unreadable := map[string]bool{}
+	type ledgerRead struct {
+		recs []landings.Record
+		err  error
+	}
+	ledgers := map[string]ledgerRead{}
 	return func(rig, id string) (float64, bool) {
-		recs, err := read(townRoot, rig)
-		if err != nil {
-			if !unreadable[rig] {
-				unreadable[rig] = true
+		l, ok := ledgers[rig]
+		if !ok {
+			recs, err := read(townRoot, rig)
+			l = ledgerRead{recs: recs, err: err}
+			ledgers[rig] = l
+			if err != nil {
 				fmt.Fprintf(errw, "gt spec estimate: landing ledger of rig %s is unreadable, its neighbors have no time recorded: %v\n", rig, err)
 			}
+		}
+		if l.err != nil {
 			return 0, false
 		}
+		recs := l.recs
 		var newest *landings.Record
 		for i := range recs {
 			// The ledger is append-ordered, so the last record for the bead is

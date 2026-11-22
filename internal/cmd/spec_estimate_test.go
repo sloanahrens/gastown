@@ -1337,6 +1337,48 @@ func TestSpecEstimateNeighborMinutesUnreadable(t *testing.T) {
 	}
 }
 
+// TestSpecEstimateNeighborMinutesReadOnce: each rig's ledger is read once for all
+// of its neighbors, and an unreadable one is logged once.
+func TestSpecEstimateNeighborMinutesReadOnce(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path, err := landings.Path(town, "gastown")
+	if err != nil {
+		t.Fatalf("landings.Path: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("making the landings directory: %v", err)
+	}
+	ledger := `{"bead":"gt-neighbor","rig":"gastown","landed_at":"2026-11-02T10:00:00Z","polecat_secs":870}` + "\n"
+	if err := os.WriteFile(path, []byte(ledger), 0o644); err != nil {
+		t.Fatalf("writing the ledger: %v", err)
+	}
+	reads := map[string]int{}
+	read := func(townRoot, rig string) ([]landings.Record, error) {
+		reads[rig]++
+		if rig == "devops" {
+			return nil, errors.New("landings file is locked")
+		}
+		return readSpecLedger(townRoot, rig)
+	}
+	var logged bytes.Buffer
+	minutes := specEstimateNeighborMinutes(read, town, &logged)
+	for _, id := range []string{"gt-neighbor", "gt-other", "gt-third"} {
+		minutes("gastown", id)
+	}
+	minutes("devops", "dv-1")
+	minutes("devops", "dv-2")
+	if reads["gastown"] != 1 || reads["devops"] != 1 {
+		t.Errorf("reads = %v, want one read of each rig", reads)
+	}
+	if got, ok := minutes("gastown", "gt-neighbor"); !ok || got != 14.5 {
+		t.Errorf("gt-neighbor = %v, %v, want 14.5 minutes from the cached ledger", got, ok)
+	}
+	if n := strings.Count(logged.String(), "\n"); n != 1 || !strings.Contains(logged.String(), "rig devops") {
+		t.Errorf("log = %q, want one line for the unreadable rig devops", logged.String())
+	}
+}
+
 // writeSpecEstimateRuntimeWeights writes f as town's runtime weights file.
 func writeSpecEstimateRuntimeWeights(t *testing.T, town string, f map[string]any) {
 	t.Helper()
