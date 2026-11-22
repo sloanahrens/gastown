@@ -65,8 +65,25 @@ func bodyWalksParent(body *ast.BlockStmt) bool {
 	return found
 }
 
+// bodyListsFiles reports whether any string literal in body, including inside a
+// function literal, contains "ls-files". A command held in a variable or built
+// by concatenation is not seen, and a nil body is false.
+func bodyListsFiles(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		lit, ok := n.(*ast.BasicLit)
+		found = found || ok && lit.Kind == token.STRING && strings.Contains(lit.Value, "ls-files")
+		return !found
+	})
+	return found
+}
+
 // scanFile returns, in source order, the names of the top-level test functions
-// in src whose own body walks the tree from a parent. A root reached through a
+// in src whose own body walks the tree from a parent or holds a string literal
+// containing "ls-files". A root or command reached through a variable or a
 // helper is not seen here: a helper in the same file is followed by a later
 // bead, and a helper in another file is never seen.
 func scanFile(name string, src []byte) ([]string, error) {
@@ -76,7 +93,7 @@ func scanFile(name string, src []byte) ([]string, error) {
 	}
 	var names []string
 	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && isRunTest(fn) && bodyWalksParent(fn.Body) {
+		if fn, ok := d.(*ast.FuncDecl); ok && isRunTest(fn) && (bodyWalksParent(fn.Body) || bodyListsFiles(fn.Body)) {
 			names = append(names, fn.Name.Name)
 		}
 	}
@@ -114,9 +131,10 @@ type ScanningTest struct{ Pkg, Name string }
 var scanSkipDirs = map[string]bool{"testdata": true, "vendor": true, "node_modules": true}
 
 // ScanningTests returns, sorted by package then name, the tests in fsys whose own
-// body walks the tree from a parent. It reads every _test.go file except under
-// testdata, vendor, node_modules and dot directories, and returns the first error
-// from reading a file or from scanFile.
+// body walks the tree from a parent or holds a string literal containing
+// "ls-files". It reads every _test.go file except under testdata, vendor,
+// node_modules and dot directories, and returns the first error from reading a
+// file or from scanFile.
 func ScanningTests(fsys fs.FS) ([]ScanningTest, error) {
 	var found []ScanningTest
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {

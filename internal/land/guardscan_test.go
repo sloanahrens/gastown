@@ -149,6 +149,21 @@ func TestScanningTestsWalksFS(t *testing.T) {
 	}
 }
 
+// TestScanningTestsFindsGitFileListings checks that a body naming ls-files is
+// found and one naming ls-tree is not.
+func TestScanningTestsFindsGitFileListings(t *testing.T) {
+	t.Parallel()
+	fsys := fstest.MapFS{
+		"list_test.go": {Data: []byte("package p\n\nfunc TestList(t *testing.T) { exec.Command(\"git\", \"ls-files\") }")},
+		"tree_test.go": {Data: []byte("package p\n\nfunc TestTree(t *testing.T) { exec.Command(\"git\", \"ls-tree\") }")},
+	}
+	got, err := ScanningTests(fsys)
+	want := []ScanningTest{{".", "TestList"}}
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("ScanningTests = %v, %v; want %v", got, err, want)
+	}
+}
+
 func TestScanningTestsReturnsTheFirstError(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
