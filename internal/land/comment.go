@@ -121,6 +121,22 @@ func verdictCommentHead(head string) string {
 	return "[head " + shortSHA(head) + "]"
 }
 
+// verdictCommentRecord is the landing record a verdict comment that could not
+// be written becomes: one comment on the work bead, keyed by the head marker so
+// that one landing attempt holds at most one queued entry (gt-yz041f).
+func verdictCommentRecord(bead, text, head string) PendingRecord {
+	return PendingRecord{Bead: bead, Kind: RecordKindComment, Key: verdictCommentHead(head), Text: text}
+}
+
+// queueVerdictComment keeps a verdict comment whose write gave up for a later
+// pass, logging a queue that refuses. A nil queue keeps nothing and logs
+// nothing, as queueRecord does (gt-yz041f).
+func (l *Lander) queueVerdictComment(bead, text, head string) {
+	if err := l.queueRecord(verdictCommentRecord(bead, text, head)); err != nil {
+		l.logf("%s: could not queue the om verdict comment for a later pass (%v)", bead, err)
+	}
+}
+
 // verdictCommented reports whether comments already carry this landing
 // attempt's verdict. The window in the text is not part of the key — a retry
 // renders it from its own clock — so the head marker and the verdict are.
