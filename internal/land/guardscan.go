@@ -82,22 +82,54 @@ func bodyListsFiles(body *ast.BlockStmt) bool {
 }
 
 // scanFile returns, in source order, the names of the top-level test functions
-// in src whose own body walks the tree from a parent or holds a string literal
-// containing "ls-files". A root or command reached through a variable or a
-// helper is not seen here: a helper in the same file is followed by a later
-// bead, and a helper in another file is never seen.
+// in src that walk the tree from a parent or hold a string literal containing
+// "ls-files", directly or through a plain-named same-file function, each
+// function once. Names resolve by spelling: a selector call, an undefined name
+// or another file's helper is not followed.
 func scanFile(name string, src []byte) ([]string, error) {
 	f, err := parseGoFile(name, src)
 	if err != nil {
 		return nil, err
 	}
+	same := map[string]*ast.FuncDecl{}
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil {
+			same[fn.Name.Name] = fn
+		}
+	}
 	var names []string
 	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && isRunTest(fn) && (bodyWalksParent(fn.Body) || bodyListsFiles(fn.Body)) {
+		if fn, ok := d.(*ast.FuncDecl); ok && isRunTest(fn) && scansTree(fn, same) {
 			names = append(names, fn.Name.Name)
 		}
 	}
 	return names, nil
+}
+
+// scansTree reports whether fn's body, or a plain-named function in same that fn
+// reaches transitively, holds what bodyWalksParent or bodyListsFiles matches. A
+// function is visited once, so a recursive helper pair ends.
+func scansTree(fn *ast.FuncDecl, same map[string]*ast.FuncDecl) bool {
+	seen := map[string]bool{}
+	for todo := []*ast.FuncDecl{fn}; len(todo) > 0; todo = todo[1:] {
+		f := todo[0]
+		if f == nil || f.Body == nil || seen[f.Name.Name] {
+			continue
+		}
+		seen[f.Name.Name] = true
+		if bodyWalksParent(f.Body) || bodyListsFiles(f.Body) {
+			return true
+		}
+		ast.Inspect(f.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok {
+					todo = append(todo, same[id.Name])
+				}
+			}
+			return true
+		})
+	}
+	return false
 }
 
 func parseGoFile(name string, src []byte) (*ast.File, error) {
@@ -130,11 +162,11 @@ type ScanningTest struct{ Pkg, Name string }
 // scanSkipDirs are the directory names ScanningTests never descends into.
 var scanSkipDirs = map[string]bool{"testdata": true, "vendor": true, "node_modules": true}
 
-// ScanningTests returns, sorted by package then name, the tests in fsys whose own
-// body walks the tree from a parent or holds a string literal containing
-// "ls-files". It reads every _test.go file except under testdata, vendor,
-// node_modules and dot directories, and returns the first error from reading a
-// file or from scanFile.
+// ScanningTests returns, sorted by package then name, the tests in fsys that
+// walk the tree from a parent or hold a string literal containing "ls-files",
+// directly or through a same-file helper. It reads every _test.go file except
+// under testdata, vendor, node_modules and dot directories, and returns the
+// first error from reading a file or from scanFile.
 func ScanningTests(fsys fs.FS) ([]ScanningTest, error) {
 	var found []ScanningTest
 	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
