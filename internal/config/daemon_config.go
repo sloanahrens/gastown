@@ -3426,6 +3426,12 @@ type StoryPointsConfig struct {
 	// section, so the ceiling above has a number to judge (gt-j0xfx5). Absent
 	// is off. Read it through StoryPointsLintBudgetRequired.
 	LintBudgetRequired bool `json:"lint_budget_required,omitempty"`
+
+	// AutoAdopt lets the weekly retrain adopt its proposed weights by the stronger
+	// rule: the rank rule and the first-round error rule both have to pass
+	// (gt-4p24dc). Off, the weekly run writes the proposal and adopts nothing. Read
+	// it through StoryPointsAutoAdopt.
+	AutoAdopt bool `json:"auto_adopt,omitempty"`
 }
 
 // DefaultSpecMaxInFlight is the sling concurrency of a spec_dispatch block that
@@ -3483,6 +3489,13 @@ func (c *SpecDispatchConfig) StoryPointsLintBudgetMaxLines() (int, error) {
 		return 0, fmt.Errorf("daemon.patrols.spec_dispatch.story_points.lint_budget_max_lines %d: want zero or more added lines, or absent for off", n)
 	}
 	return n, nil
+}
+
+// StoryPointsAutoAdopt reports whether the weekly retrain adopts its proposal by
+// the stronger rule (story_points.auto_adopt). A nil block, or one that leaves the
+// key unset, is off.
+func (c *SpecDispatchConfig) StoryPointsAutoAdopt() bool {
+	return c != nil && c.StoryPoints != nil && c.StoryPoints.AutoAdopt
 }
 
 // StoryPointsLintBudgetRequired reports whether a bead must declare its Change

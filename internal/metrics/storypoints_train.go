@@ -115,13 +115,15 @@ func (f trainFallback) count(counts *trainCounts) {
 }
 
 // trainCandidate is one landed row that passed the row filters, waiting for its
-// bead's text.
+// bead's text. firstRound is the row's first-round flag when the read asked for
+// it, false otherwise.
 type trainCandidate struct {
-	bead    string
-	rig     string
-	seat    storypoints.Seat
-	minutes float64
-	landed  time.Time
+	bead       string
+	rig        string
+	seat       storypoints.Seat
+	minutes    float64
+	landed     time.Time
+	firstRound bool
 }
 
 // runStoryPointsTrain is main's storypoints-train step: the proposed weights and
@@ -182,7 +184,13 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 	return err
 }
 
-// trainingSamples reads the rows the retrain fits. A row is read when it came
+// trainingSamples reads the rows the retrain fits: trainingSamplesWith without the
+// first-round flags, so the retrain never reads the om columns.
+func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder) ([]storypoints.Sample, trainCounts, error) {
+	return trainingSamplesWith(ctx, env, town, rows, base, embedder, false)
+}
+
+// trainingSamplesWith reads the rows the retrain fits. A row is read when it came
 // through a polecat seat, its seat class is haiku or flash, its polecat time is
 // present, and its rig names a directory. A lower-bound time is read at its
 // floor: dropping it would remove the long beads, which are the ones the bound
@@ -196,7 +204,12 @@ func (c Commands) runStoryPointsTrain(ctx context.Context, real RealTown, env En
 // it supplies the shape features' is_haiku mean. An embedder error fails the
 // whole step: a bead the embedder could not read is not a bead the fit may
 // leave out without saying so.
-func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder) ([]storypoints.Sample, trainCounts, error) {
+//
+// With firstRound, each row read also carries its first-round flag, read from its
+// om_rounds and polecat_attempts cells (firstRoundCells); a cell that is not an
+// integer fails the read. Without it those cells are not read at all, so a
+// malformed one cannot fail a retrain that does not use them.
+func trainingSamplesWith(ctx context.Context, env Env, town string, rows []Row, base storypoints.Weights, embedder storypoints.Embedder, firstRound bool) ([]storypoints.Sample, trainCounts, error) {
 	var counts trainCounts
 	// The size check below reads the embedding ridge's dimension, which is 0
 	// when the base weights carry no ridge. Weights that are not loaded would
@@ -233,7 +246,13 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 			counts.skips.badRig++
 			continue
 		}
-		cands = append(cands, trainCandidate{bead: row["bead"], rig: row["rig"], seat: seat, minutes: secs / 60, landed: landed})
+		var first bool
+		if firstRound {
+			if first, err = firstRoundCells(row); err != nil {
+				return nil, counts, fmt.Errorf("bead %s: %w", row["bead"], err)
+			}
+		}
+		cands = append(cands, trainCandidate{bead: row["bead"], rig: row["rig"], seat: seat, minutes: secs / 60, landed: landed, firstRound: first})
 		byDir[dir] = append(byDir[dir], row["bead"])
 	}
 
@@ -281,10 +300,11 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 			default:
 				counts.logged++
 				samples = append(samples, storypoints.Sample{
-					Shape:    loggedShape(rec.Shape),
-					Vector:   rec.Embedding,
-					Minutes:  c.minutes,
-					LandedAt: c.landed,
+					Shape:      loggedShape(rec.Shape),
+					Vector:     rec.Embedding,
+					Minutes:    c.minutes,
+					LandedAt:   c.landed,
+					FirstRound: c.firstRound,
 				})
 				continue
 			}
@@ -304,10 +324,11 @@ func trainingSamples(ctx context.Context, env Env, town string, rows []Row, base
 		}
 		fallback.count(&counts)
 		samples = append(samples, storypoints.Sample{
-			Shape:    storypoints.Features(storypoints.EstimateText(issue), c.rig, c.seat, base),
-			Vector:   vec,
-			Minutes:  c.minutes,
-			LandedAt: c.landed,
+			Shape:      storypoints.Features(storypoints.EstimateText(issue), c.rig, c.seat, base),
+			Vector:     vec,
+			Minutes:    c.minutes,
+			LandedAt:   c.landed,
+			FirstRound: c.firstRound,
 		})
 	}
 	return samples, counts, nil

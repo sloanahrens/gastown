@@ -92,6 +92,11 @@ type Commands struct {
 	// StoryPointsRevert asks storypoints-adopt to restore the newest runtime
 	// weights version instead of adopting the day's proposal.
 	StoryPointsRevert bool
+	// StoryPointsAutoAdopt is story_points.auto_adopt: the weekly run adopts its
+	// proposal only when the rank rule and the error rule both pass. Off, the
+	// weekly run adopts by the rank rule alone, as it did before the key existed.
+	// The manual storypoints-adopt does not read it.
+	StoryPointsAutoAdopt bool
 	// StoryPointsSince is storypoints-eval's --since DATE: a YYYY-MM-DD day, and
 	// the test part is the rows landed at or after it. Empty scores the newest
 	// three rows in ten.
@@ -425,9 +430,10 @@ const StoryPointsWeeklyEvery = 7 * 24 * time.Hour
 const storyPointsWeeklyStampName = "weekly.stamp"
 
 // RunStoryPointsWeekly is the hour's weekly story-points job: when a week has
-// passed since the last retrain reached a decision it runs the retrain and then
-// the adoption, and it writes one line to Out naming the outcome. A run inside
-// the week writes the line saying so and reads nothing else.
+// passed since the last retrain reached a decision it runs the retrain and then,
+// the adoption: by the stronger rule with StoryPointsAutoAdopt on, by the rank rule alone with it off.
+// It writes one line to Out naming the outcome. A run inside the week writes the
+// line saying so and reads nothing else.
 //
 // The week is kept in Commands.Town, which must be named: the guard is read
 // before the town is wired, because wiring runs git over every rig and an hour
@@ -506,13 +512,22 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 		return c.receipt("story points weekly: skipped: %v", err)
 	}
 	// The adoption step's own line is the decision, reason and file; the week's
-	// line is that decision under the weekly run's name.
+	// line is that decision under the weekly run's name. The holdout's first-round
+	// flags come from the landing record, and the rule is the stronger one.
 	var decision bytes.Buffer
 	adopt := c
 	adopt.Out = &decision
 	adopt.Embedder = embedder
-	if err := adopt.runStoryPointsAdopt(ctx, real, env); err != nil {
-		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, err)
+	// Off, the key leaves the weekly adoption as it was: the rank rule on the day's
+	// proposal. On, the stronger rule decides.
+	var adoptErr error
+	if c.StoryPointsAutoAdopt {
+		adoptErr = adopt.decideStoryPoints(ctx, real, env, storypoints.AdoptAuto, true)
+	} else {
+		adoptErr = adopt.runStoryPointsAdopt(ctx, real, env)
+	}
+	if adoptErr != nil {
+		return c.weeklyFailure(env, real.Extract.OutDir, stampPath, now, adoptErr)
 	}
 	if err := c.recordStoryPointsWeeklyRun(stampPath, now); err != nil {
 		return err

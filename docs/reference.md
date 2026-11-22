@@ -511,6 +511,15 @@ A bead with no text has no estimate, and a canceled run has none either.
   be read (malformed, or two that disagree) passes with a `WARN` line saying the
   gate did not run.
 
+- `auto_adopt` lets the weekly retrain adopt its proposed weights. Off, the
+  default, the weekly run adopts by the rank rule alone, as before the key
+  existed. On, it adopts
+  only when the rank rule and the first-round error rule both pass. The
+  first-round holdout is the landings with one om round and one polecat attempt,
+  read from the `om_rounds` and `polecat_attempts` cells; an empty or non-integer
+  cell refuses the adoption and the weekly line says why. The manual
+  `storypoints-adopt` keeps the rank rule alone (gt-4p24dc).
+
 **Weights.** The model is `internal/storypoints/weights.json`, embedded in the
 binary. It holds the shape model, the Jev probability-to-minutes table, and the
 embedding ridge. The checked-in file changes only by a commit.

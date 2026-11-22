@@ -34,11 +34,14 @@ var retrainAlphas = []float64{0.1, 1, 10, 100, 1000}
 
 // Sample is one landed bead the retrain fits: its shape features, the embedding
 // of its section text, its measured polecat minutes and when it landed.
+// FirstRound marks a landing that took one om round and one polecat attempt; the
+// adoption rule's first-round error reads only those (gt-4p24dc).
 type Sample struct {
-	Shape    Shape
-	Vector   []float32
-	Minutes  float64
-	LandedAt time.Time
+	Shape      Shape
+	Vector     []float32
+	Minutes    float64
+	LandedAt   time.Time
+	FirstRound bool
 }
 
 // Holdout is one holdout sample: its measured minutes, and the minutes the

@@ -2250,6 +2250,42 @@ func TestSpecDispatchStoryPointsShadowDecodes(t *testing.T) {
 	}
 }
 
+// story_points.auto_adopt decodes to the accessor the weekly run reads: on only
+// when set true, and a misspelt key is refused by the strict walk (gt-4p24dc).
+func TestSpecDispatchStoryPointsAutoAdoptDecodes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"set on", `{"patrols":{"spec_dispatch":{"story_points":{"auto_adopt":true}}}}`, true},
+		{"set off", `{"patrols":{"spec_dispatch":{"story_points":{"auto_adopt":false}}}}`, false},
+		{"absent", `{"patrols":{"spec_dispatch":{"story_points":{"shadow":true}}}}`, false},
+		{"no block", `{"patrols":{"spec_dispatch":{"enabled":true}}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tc.body), &cfg); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if got := cfg.Patrols.SpecDispatch.StoryPointsAutoAdopt(); got != tc.want {
+				t.Errorf("StoryPointsAutoAdopt() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	var typo DaemonPatrolConfig
+	typoBody := `{"patrols":{"spec_dispatch":{"story_points":{"auto_adpot":true}}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(typoBody), &typo); err == nil {
+		t.Error("a misspelt story_points.auto_adopt key decoded without an error")
+	}
+	var nilBlock *SpecDispatchConfig
+	if nilBlock.StoryPointsAutoAdopt() {
+		t.Error("nil spec_dispatch block reads auto_adopt on")
+	}
+}
+
 // story_points.split_over_minutes decodes to the accessor the tick reads; a
 // zero or negative value is off, so the route ships disabled (gt-5d9k2f.18).
 func TestSpecDispatchStoryPointsSplitOverDecodes(t *testing.T) {

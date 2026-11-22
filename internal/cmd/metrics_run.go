@@ -71,9 +71,9 @@ type metricsHourSteps struct {
 	// dataset refreshes every enabled battery's Jev dataset and returns how many
 	// it wrote and each failure.
 	dataset func(ctx context.Context, town string) (int, []error)
-	// weekly runs the story-points retrain and then its adoption when a week has
-	// passed. It runs after the analysis, so a day the analysis extracts has the
-	// landings table the retrain reads.
+	// weekly runs the story-points retrain when a week has passed, and then its
+	// adoption when story_points.auto_adopt is on. It runs after the analysis, so a
+	// day the analysis extracts has the landings table the retrain reads.
 	weekly func(ctx context.Context, out io.Writer, town string) error
 }
 
@@ -91,11 +91,18 @@ func hostMetricsHourSteps() metricsHourSteps {
 		},
 		dataset: jevDatasetHour,
 		weekly: func(ctx context.Context, out io.Writer, town string) error {
+			// The key is read per hour, and a patrol block that does not parse fails
+			// the hour: an unknown setting is not read as off or on.
+			sd, err := readSpecDispatchConfig(town)
+			if err != nil {
+				return fmt.Errorf("story points weekly: read story_points.auto_adopt: %w", err)
+			}
 			return metrics.Commands{
-				Today:     time.Now().Format(time.DateOnly),
-				Town:      town,
-				Out:       out,
-				BdGateway: hostBdGateway(),
+				Today:                time.Now().Format(time.DateOnly),
+				Town:                 town,
+				Out:                  out,
+				BdGateway:            hostBdGateway(),
+				StoryPointsAutoAdopt: sd.StoryPointsAutoAdopt(),
 			}.RunStoryPointsWeekly(ctx)
 		},
 	}
