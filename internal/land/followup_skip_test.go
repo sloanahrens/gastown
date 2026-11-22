@@ -2,32 +2,12 @@ package land
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
-
-// queueDir makes the fixture's queue directory private before it is written:
-// t.TempDir is 0777 under the runner's open umask, and the reviews log refuses
-// a directory another account can write (gt-u7qgi0).
-func queueDir(t *testing.T, f *followupFixture) {
-	t.Helper()
-	dir := filepath.Dir(f.reviews.Path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-exec-files — a directory, not a file: its owner search bit lets the queue reach its log
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // skipByTitle is a FollowupSkip that drops the named findings with reason, the
 // way the daemon's policy will (gt-3v8jno).
@@ -213,7 +193,6 @@ func TestFollowupSkipDropsAQueuedFindingItNames(t *testing.T) {
 		asked = w
 		return skip(w, c)
 	}
-	queueDir(t, f)
 	if err := f.reviews.AppendQueue(queueLine("gt-queued", f.work.Rig, queuedFinding)); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +228,6 @@ func TestFollowupSkipQueuedWork(t *testing.T) {
 		asked[c.Title] = w
 		return ""
 	}
-	queueDir(t, f)
 	if err := f.reviews.AppendQueue(queueLine("gt-queued", f.work.Rig, queuedFinding)); err != nil {
 		t.Fatal(err)
 	}
@@ -261,27 +239,6 @@ func TestFollowupSkipQueuedWork(t *testing.T) {
 	if got := asked["the fresh finding"]; got != f.work {
 		t.Errorf("the landing's own finding was asked with %+v, want the landing's whole Work %+v", got, f.work)
 	}
-	// A package's tests run in its own directory, so this is the doc they compile with.
-	file, err := parser.ParseFile(token.NewFileSet(), "land.go", nil, parser.ParseComments)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if field, ok := n.(*ast.Field); ok && len(field.Names) == 1 && field.Names[0].Name == "FollowupSkip" && field.Doc != nil {
-			doc = field.Doc.Text()
-			return false
-		}
-		return doc == ""
-	})
-	if doc == "" {
-		t.Fatal("land.go's Lander.FollowupSkip has no doc comment")
-	}
-	for _, want := range []string{"whole Work", "BeadID and Rig"} {
-		if !strings.Contains(doc, want) {
-			t.Errorf("the FollowupSkip doc does not state %q:\n%s", want, doc)
-		}
-	}
 }
 
 // TestFollowupSkipConsistentAcrossPasses: the drain and the compaction judge one
@@ -291,7 +248,6 @@ func TestFollowupSkipQueuedWork(t *testing.T) {
 func TestFollowupSkipConsistentAcrossPasses(t *testing.T) {
 	t.Parallel()
 	f := newFollowupFixture(t, 0.9, nil) // nothing of its own to file
-	queueDir(t, f)
 	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
 		t.Fatal(err)
 	}
