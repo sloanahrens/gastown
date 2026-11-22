@@ -182,18 +182,11 @@ func TestReadRefusesAFileItCannotOpen(t *testing.T) {
 	if err := os.Chmod(path, 0o000); err != nil {
 		t.Fatalf("Chmod: %v", err)
 	}
-	got, err := Read(path)
 	if os.Geteuid() == 0 {
-		// Root bypasses the permission bits, so the file opens and reads: the
-		// refusal below is what a non-root reader must get.
-		if err != nil {
-			t.Fatalf("Read failed on a file root can read: %v", err)
-		}
-		if got.Password.Reveal() != secret {
-			t.Fatalf("Read = %+v, want the password root can read", got)
-		}
-		return
+		//testpolicy:allow no-skip — root bypasses the permission bits, so a 0000 file opens for root and the refusal has no case to drive
+		t.Skip("running as root: root reads a 0000 file, so the refusal to open it cannot be tested")
 	}
+	got, err := Read(path)
 	if err == nil {
 		t.Fatalf("Read returned the credential of a file it cannot open: %+v", got)
 	}
@@ -338,19 +331,25 @@ func TestCredentialRedactingMethodsHideThePassword(t *testing.T) {
 
 func TestCredentialLogValueHidesPassword(t *testing.T) {
 	t.Parallel()
-	const secret = "s3cr3t-value"
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	rec := slog.NewRecord(time.Unix(0, 0), slog.LevelInfo, "connecting", 0)
-	rec.AddAttrs(slog.Any("credential", Credential{User: "gt", Password: NewSecret(secret)}))
+	rec.AddAttrs(slog.Any("credential", Credential{User: "gt-user", Password: NewSecret(leakSecret)}))
 	if err := log.Handler().Handle(context.Background(), rec); err != nil {
 		t.Fatalf("Handle: %v", err)
 	}
-	if strings.Contains(buf.String(), secret) {
-		t.Errorf("the log line printed the password: %s", buf.String())
+	line := buf.String()
+	var userField string
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "credential.user=") {
+			userField = field
+		}
 	}
-	if !strings.Contains(buf.String(), "gt") {
-		t.Errorf("the log line dropped the user: %s", buf.String())
+	if userField != "credential.user=gt-user" {
+		t.Errorf("the log line's user field = %q, want %q: %s", userField, "credential.user=gt-user", line)
+	}
+	if strings.Contains(line, leakSecret) {
+		t.Errorf("the log line printed the password: %s", line)
 	}
 }
 
