@@ -57,6 +57,16 @@ func TestReadReadsCredential(t *testing.T) {
 			body: "user=gt\npassword=secret",
 			want: Credential{User: "gt", Password: NewSecret("secret")},
 		},
+		{
+			name: "only a user line",
+			body: "user=gt\n",
+			want: Credential{User: "gt"},
+		},
+		{
+			name: "only a password line",
+			body: "password=secret\n",
+			want: Credential{Password: NewSecret("secret")},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -69,6 +79,41 @@ func TestReadReadsCredential(t *testing.T) {
 				t.Fatalf("Read = %+v (password %q), want %+v (password %q)", got, got.Password.Reveal(), tt.want, tt.want.Password.Reveal())
 			}
 		})
+	}
+}
+
+// TestReadRefusesAFileWithNoCredential: a 0600 file present with neither a
+// user= nor a password= line is misprovisioned, not absent.
+func TestReadRefusesAFileWithNoCredential(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"empty file":    "",
+		"comments only": "# the dolt credential lives here\n  # and nowhere else\n",
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := writeCredential(t, body)
+			got, err := Read(path)
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "holds no credential") || got != (Credential{}) {
+				t.Errorf("Read = %+v, %v; want no value and an error naming %q and saying the file holds no credential", got, err, path)
+			}
+		})
+	}
+}
+
+// TestReadRefusesADanglingSymlink: the open of a link to a missing target fails
+// with ENOENT while the path itself exists, so it is a broken credential link.
+func TestReadRefusesADanglingSymlink(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	link := filepath.Join(dir, "dolt-credential")
+	if err := os.Symlink(filepath.Join(dir, "missing-target"), link); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	got, err := Read(link)
+	if err == nil || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "symlink to nothing") || got != (Credential{}) {
+		t.Errorf("Read = %+v, %v; want no value and an error naming %q and saying it is a symlink to nothing", got, err, link)
 	}
 }
 
