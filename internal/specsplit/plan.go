@@ -39,9 +39,9 @@ type SplitPlan struct {
 // spec.BaseFiles and spec.BaseSymbols must be supplied (nil is an error; an
 // empty map means nothing exists yet): B says a file "is created by" A only
 // when A's bullets cite it and it is absent from BaseFiles, and says a symbol
-// is created by A only when A's bullets declare it in a declaration code span
-// and it is absent from BaseSymbols, keyed by the declaring group's package, a
-// dot and the symbol's name ("internal/config.Read").
+// is created by A only when A's bullets declare it in a declaration code span,
+// B cites it as "<package's last segment>.<name>" ("config.Read"), and it is
+// absent from BaseSymbols (keyed "internal/config.Read").
 func Plan(spec Spec, groups []FileGroup) (SplitPlan, error) {
 	if spec.BaseFiles == nil {
 		return SplitPlan{}, fmt.Errorf("BaseFiles not supplied: the planner needs the files that exist on the base branch to say which files a piece creates; pass an empty map when none exists")
@@ -226,7 +226,7 @@ func createdNotes(aGroups, bGroups []FileGroup, baseFiles, baseSymbols map[strin
 	var notes []string
 	for _, group := range aGroups {
 		for _, bullet := range group.Constraints {
-			for _, name := range createdNames(bullet, aPackages) {
+			for _, name := range createdNames(bullet, aPackages, group.Package) {
 				if name.symbol && baseSymbols[symbolKey(group.Package, name.text)] {
 					continue
 				}
@@ -235,7 +235,7 @@ func createdNotes(aGroups, bGroups []FileGroup, baseFiles, baseSymbols map[strin
 				}
 				cited := citesPath(bBullets, name.text)
 				if name.symbol {
-					cited = citesSymbol(bBullets, name.text)
+					cited = citesSymbol(bBullets, name.qualified)
 				}
 				if cited {
 					notes = append(notes, name.note())
@@ -253,8 +253,11 @@ func symbolKey(pkg, name string) string {
 
 // createdName is a file or symbol a bullet names.
 type createdName struct {
-	// text is the path or symbol as written.
+	// text is the path, or the symbol's bare name as A declares it.
 	text string
+	// qualified is the symbol as B cites it: its package's last path segment,
+	// a dot and the name ("config.Read"). Empty for a file.
+	qualified string
 	// symbol marks a backticked identifier rather than a repo path.
 	symbol bool
 }
@@ -262,9 +265,14 @@ type createdName struct {
 // note is the Constraints sentence that records which piece created the name.
 func (n createdName) note() string {
 	if n.symbol {
-		return "`" + n.text + "` is created by bead PIECE_A."
+		return "`" + n.qualified + "` is created by bead PIECE_A."
 	}
 	return n.text + " is created by bead PIECE_A."
+}
+
+// packageBase is a package directory's last path segment: "config" for internal/config.
+func packageBase(pkg string) string {
+	return pkg[strings.LastIndexByte(pkg, '/')+1:]
 }
 
 var (
@@ -276,8 +284,8 @@ var (
 )
 
 // createdNames returns the files, in aPackages, and the symbols one bullet
-// names.
-func createdNames(bullet string, aPackages map[string]bool) []createdName {
+// names, the symbols qualified by the package they are declared in.
+func createdNames(bullet string, aPackages map[string]bool, pkg string) []createdName {
 	var names []createdName
 	for _, token := range strings.FieldsFunc(bullet, splitToken) {
 		path, ok := pathToken(token)
@@ -288,7 +296,7 @@ func createdNames(bullet string, aPackages map[string]bool) []createdName {
 	}
 	for _, span := range backtickSpanRe.FindAllStringSubmatch(bullet, -1) {
 		if m := declSpanRe.FindStringSubmatch(strings.TrimSpace(span[1])); m != nil {
-			names = append(names, createdName{text: m[1], symbol: true})
+			names = append(names, createdName{text: m[1], qualified: packageBase(pkg) + "." + m[1], symbol: true})
 		}
 	}
 	return names
@@ -320,9 +328,8 @@ func citesPath(bullets []string, path string) bool {
 	return false
 }
 
-// citesSymbol reports whether any of the bullets cites the symbol in a code
-// span: the symbol as a whole identifier inside backticks. The same word in prose
-// cites nothing.
+// citesSymbol reports whether any bullet cites the qualified symbol as a whole
+// identifier in a code span; a bare name in B's code and the word in prose cite nothing.
 func citesSymbol(bullets []string, symbol string) bool {
 	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(symbol) + `\b`)
 	for _, bullet := range bullets {
