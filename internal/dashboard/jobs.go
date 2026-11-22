@@ -52,6 +52,12 @@ type Jobs struct {
 	// failed, never_run, no_cadence, refused, deferred, ok. It is empty when
 	// the array held no rows, since nothing was read to judge.
 	Worst string `json:"worst"`
+	// ReadFailed and Stale say the rows are the last good ones rather than
+	// current: the hub sets both on the list it keeps across a failed read, and
+	// a good read clears them. They are never read as JSON, so the report
+	// cannot set them (gt-16wpss).
+	ReadFailed bool `json:"-"`
+	Stale      bool `json:"-"`
 }
 
 // JobRow is one job as the section carries it.

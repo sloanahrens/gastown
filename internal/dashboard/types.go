@@ -994,7 +994,9 @@ type State struct {
 	// and says so in Reads.
 	JevScorecard *JevScorecard `json:"jev_scorecard,omitempty"`
 	// Jobs is the maintenance job list the last good read of `gt jobs --json`
-	// folded; nil until a read has succeeded.
+	// folded. A failed read keeps that list marked failed and stale, and
+	// leaves an empty marked list when no read has succeeded, so the pane can
+	// say why rather than draw an old or blank list as current (gt-16wpss).
 	Jobs *Jobs `json:"jobs,omitempty"`
 	// Dolt is the Dolt panel's sections from the last good read. It is nil
 	// until the reader first reports; a failed read keeps it and says so in
