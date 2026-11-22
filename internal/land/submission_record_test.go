@@ -21,6 +21,13 @@ type fakeSubmissionGit struct {
 	err      error
 	numErr   error
 	logged   []string
+	// lacks is the head of each branch the clone cannot read until it is
+	// fetched: a read of that head fails, and a successful fetch of the
+	// branch brings it into the clone.
+	lacks    map[string]string
+	fetchErr error
+	// fetches is every branch fetch asked for, as "remote branch".
+	fetches []string
 }
 
 func (f *fakeSubmissionGit) CommitMessages(base, head string) ([]git.CommitMessage, error) {
@@ -28,7 +35,21 @@ func (f *fakeSubmissionGit) CommitMessages(base, head string) ([]git.CommitMessa
 	if f.err != nil {
 		return nil, f.err
 	}
+	for _, missing := range f.lacks {
+		if missing == head {
+			return nil, fmt.Errorf("bad revision '%s'", head)
+		}
+	}
 	return f.messages[head], nil
+}
+
+func (f *fakeSubmissionGit) FetchBranch(remote, branch string) error {
+	f.fetches = append(f.fetches, remote+" "+branch)
+	if f.fetchErr != nil {
+		return f.fetchErr
+	}
+	delete(f.lacks, branch)
+	return nil
 }
 
 func (f *fakeSubmissionGit) DiffNumstat(base, head string) (string, error) {
@@ -147,6 +168,129 @@ func TestSubmissionRecorderWritesARecordWithoutSubjectsWhenTheCloneLacksTheCommi
 		if strings.HasPrefix(call, "numstat") {
 			t.Errorf("the stat was read after the subjects failed: %v", g.logged)
 		}
+	}
+	if len(g.fetches) != 1 {
+		t.Errorf("fetches = %v, want one attempt to bring the head in", g.fetches)
+	}
+}
+
+// TestSubmissionRecordFetchesAHeadTheCloneLacks: a submission that lands in the
+// pass that first sees it is not in the clone yet, so the recorder fetches the
+// work's branch once from the landing remote and reads the commits again
+// (gt-d87ubg).
+func TestSubmissionRecordFetchesAHeadTheCloneLacks(t *testing.T) {
+	t.Parallel()
+	w := recordWork("gt-a", "h1")
+	g := &fakeSubmissionGit{
+		messages: map[string][]git.CommitMessage{"h1": {{SHA: "a", Message: "fix: it (gt-a)"}}},
+		numstat:  map[string]string{"h1": "3\t1\tinternal/x.go\n"},
+		lacks:    map[string]string{w.Branch: "h1"},
+	}
+	rec, path := newRecorder(t, g)
+	rec.Remote = "upstream"
+
+	if wrote, err := rec.Record(w); err != nil || !wrote {
+		t.Fatalf("Record = %v, %v; want a record written", wrote, err)
+	}
+	if len(g.fetches) != 1 || g.fetches[0] != "upstream "+w.Branch {
+		t.Errorf("fetches = %v, want exactly one of the work's branch from the landing remote", g.fetches)
+	}
+	recs := readRecords(t, path)
+	if len(recs) != 1 {
+		t.Fatalf("log holds %d records, want 1", len(recs))
+	}
+	if len(recs[0].Subjects) != 1 || recs[0].Subjects[0] != "fix: it (gt-a)" {
+		t.Errorf("subjects = %q, want the subject read after the fetch", recs[0].Subjects)
+	}
+	if recs[0].Numstat != "3\t1\tinternal/x.go" {
+		t.Errorf("numstat = %q, want the stat read after the fetch", recs[0].Numstat)
+	}
+}
+
+// TestSubmissionRecordReadsWithoutAFetchWhenTheCloneHasTheHead: a first read
+// that works is not paid for with a fetch (gt-d87ubg).
+func TestSubmissionRecordReadsWithoutAFetchWhenTheCloneHasTheHead(t *testing.T) {
+	t.Parallel()
+	g := &fakeSubmissionGit{messages: map[string][]git.CommitMessage{"h1": {{Message: "fix: a"}}}}
+	rec, _ := newRecorder(t, g)
+
+	if _, err := rec.Record(recordWork("gt-a", "h1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(g.fetches) != 0 {
+		t.Errorf("fetches = %v, want none when the first read works", g.fetches)
+	}
+}
+
+// TestSubmissionRecordDoesNotFetchWithoutABranch: a submission that names no
+// branch has nothing to fetch, so a failed read falls back to a record without
+// commits (gt-d87ubg).
+func TestSubmissionRecordDoesNotFetchWithoutABranch(t *testing.T) {
+	t.Parallel()
+	w := recordWork("gt-a", "h1")
+	w.Branch = ""
+	g := &fakeSubmissionGit{err: errors.New("bad revision 'h1'")}
+	rec, path := newRecorder(t, g)
+
+	if wrote, err := rec.Record(w); err != nil || !wrote {
+		t.Fatalf("Record = %v, %v; want a record written", wrote, err)
+	}
+	if len(g.fetches) != 0 {
+		t.Errorf("fetches = %v, want none with no branch to fetch", g.fetches)
+	}
+	if recs := readRecords(t, path); len(recs) != 1 || len(recs[0].Subjects) != 0 {
+		t.Errorf("records = %+v, want one record with no subjects", recs)
+	}
+}
+
+// TestSubmissionRecordDoesNotFetchABranchGitWouldMisread: the branch comes from
+// the bead's agent-written note, so a value git would read as an option or a
+// refspec destination is not fetched, and the record falls back to no commits
+// (gt-d87ubg).
+func TestSubmissionRecordDoesNotFetchABranchGitWouldMisread(t *testing.T) {
+	t.Parallel()
+	for _, branch := range []string{"-oProxyCommand=touch /tmp/x", "polecat/x:refs/heads/main", "refs/heads/*", "a b"} {
+		t.Run(branch, func(t *testing.T) {
+			t.Parallel()
+			w := recordWork("gt-a", "h1")
+			w.Branch = branch
+			g := &fakeSubmissionGit{err: errors.New("bad revision 'h1'")}
+			rec, path := newRecorder(t, g)
+
+			if wrote, err := rec.Record(w); err != nil || !wrote {
+				t.Fatalf("Record = %v, %v; want a record written", wrote, err)
+			}
+			if len(g.fetches) != 0 {
+				t.Errorf("fetches = %v, want none for branch %q", g.fetches, branch)
+			}
+			if recs := readRecords(t, path); len(recs) != 1 || len(recs[0].Subjects) != 0 {
+				t.Errorf("records = %+v, want one record with no subjects", recs)
+			}
+		})
+	}
+}
+
+// TestSubmissionRecordFallsBackWhenTheFetchFails: a fetch that fails still
+// writes a record without commits, and the warning reports the fetch, so the
+// daemon log shows why the battery will read its own clone (gt-d87ubg).
+func TestSubmissionRecordFallsBackWhenTheFetchFails(t *testing.T) {
+	t.Parallel()
+	g := &fakeSubmissionGit{err: errors.New("bad revision 'h1'"), fetchErr: errors.New("could not resolve host")}
+	rec, path := newRecorder(t, g)
+	var warned []string
+	rec.Warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if wrote, err := rec.Record(recordWork("gt-a", "h1")); err != nil || !wrote {
+		t.Fatalf("Record = %v, %v; want a record written", wrote, err)
+	}
+	if len(g.fetches) != 1 {
+		t.Errorf("fetches = %v, want one", g.fetches)
+	}
+	if recs := readRecords(t, path); len(recs) != 1 || len(recs[0].Subjects) != 0 || recs[0].Numstat != "" {
+		t.Errorf("records = %+v, want one record with no subjects or stat", recs)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "could not resolve host") {
+		t.Errorf("warnings = %q, want one naming the failed fetch", warned)
 	}
 }
 
