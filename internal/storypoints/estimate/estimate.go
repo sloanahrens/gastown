@@ -5,6 +5,7 @@
 package estimate
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -395,8 +396,8 @@ func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *be
 	return minutes, vec, nil
 }
 
-// JevCalls is how many times jevInput asks the battery for a new text.
-const JevCalls = 3
+// jevCalls is how many times jevInput asks the battery for a new text.
+const jevCalls = 3
 
 // jevMedian drops answers outside 0 to 1 and returns the median of the rest, or
 // false when none are left. An even count takes the mean of the middle two.
@@ -410,33 +411,35 @@ func jevMedian(answers []float64) (float64, bool) {
 	return (valid[(n-1)/2] + valid[n/2]) / 2, true
 }
 
-// jevInput asks the battery JevCalls times for the fits_twenty_minutes
-// probability and returns the median of the answers, or the skip that says why
-// not. A failed call and an answer outside 0 to 1 are dropped as a failed input,
-// not a failed estimate; no answer left skips the input.
+// jevInput asks the battery jevCalls times and returns the median of the
+// answers, or the skip that says why not. A failed call or an out-of-range
+// answer is dropped, a cap-reached ask ends the calls, and with no answer left
+// the first error, or the out-of-range answers, names the skip.
 func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Skip) {
 	if deps.JevAsk == nil {
 		return 0, &Skip{Input: "jev", Reason: "no Jev asker"}
 	}
-	answers := make([]float64, 0, JevCalls)
+	answers := make([]float64, 0, jevCalls)
 	var firstErr error
-	for range JevCalls {
+	for range jevCalls {
 		ans, err := deps.JevAsk(ctx, issue)
-		if err != nil && firstErr == nil {
-			firstErr = err
+		if err != nil {
+			firstErr = cmp.Or(firstErr, err)
+			if errors.Is(err, dispatch.ErrCapReached) {
+				break
+			}
+			continue
 		}
-		if err == nil {
-			answers = append(answers, ans.FitsTwentyMinutes)
-		}
+		answers = append(answers, ans.FitsTwentyMinutes)
 	}
 	m, ok := jevMedian(answers)
-	if !ok && firstErr != nil {
+	if ok {
+		return m, nil
+	}
+	if firstErr != nil {
 		return 0, &Skip{Input: "jev", Reason: firstErr.Error()}
 	}
-	if !ok {
-		return 0, &Skip{Input: "jev", Reason: "all answers are outside 0 to 1"}
-	}
-	return m, nil
+	return 0, &Skip{Input: "jev", Reason: fmt.Sprintf("fits_twenty_minutes %v is outside 0 to 1", answers)}
 }
 
 // neighborsOf asks hm for the past beads nearest the issue, then records each

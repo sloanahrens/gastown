@@ -314,19 +314,24 @@ func (e *embedCounter) Embed(context.Context, string) ([]float32, error) {
 }
 
 // jevCounter is a Jev asker that answers with the probability fits gives for
-// its call number (from 1), fails the calls fail names, and counts the asks.
+// its call number (from 1): a negative fits fails the call, and calls from
+// capFrom on report the spend cap. It counts the asks.
 type jevCounter struct {
-	fits  func(call int) float64
-	fail  func(call int) bool
-	calls int
+	fits    func(call int) float64
+	capFrom int
+	calls   int
 }
 
 func (j *jevCounter) ask(context.Context, *beads.Issue) (dispatch.Answers, error) {
 	j.calls++
-	if j.fail != nil && j.fail(j.calls) {
+	if j.capFrom > 0 && j.calls >= j.capFrom {
 		return dispatch.Answers{}, dispatch.ErrCapReached
 	}
-	return dispatch.Answers{FitsTwentyMinutes: j.fits(j.calls)}, nil
+	fits := j.fits(j.calls)
+	if fits < 0 {
+		return dispatch.Answers{}, errors.New("ask failed")
+	}
+	return dispatch.Answers{FitsTwentyMinutes: fits}, nil
 }
 
 // TestEstimateReusesPriorMinutes: a bead whose text an earlier estimate priced
@@ -395,8 +400,8 @@ func TestEstimateIgnoresAbsentPrior(t *testing.T) {
 			if got.res.Minutes != base.res.Minutes {
 				t.Fatalf("minutes = %v, want %v as with no prior", got.res.Minutes, base.res.Minutes)
 			}
-			if got.embedCalls != 1 || got.jevCalls != JevCalls {
-				t.Fatalf("embedder calls = %d, Jev calls = %d, want one embed and %d Jev", got.embedCalls, got.jevCalls, JevCalls)
+			if got.embedCalls != 1 || got.jevCalls != jevCalls {
+				t.Fatalf("embedder calls = %d, Jev calls = %d, want one embed and %d Jev", got.embedCalls, got.jevCalls, jevCalls)
 			}
 			if got.res.Embedding == nil {
 				t.Fatal("Embedding is nil; the estimate built its embed input")
@@ -546,49 +551,55 @@ func TestEstimateSkippedInputs(t *testing.T) {
 	}
 }
 
-// TestEstimateJevCallCount: a new text makes exactly JevCalls calls, and an
-// unchanged text served by Prior makes none.
+// TestEstimateJevCallCount: a new text makes exactly jevCalls calls and a
+// cap-reached ask ends the asks; TestEstimateReusesPriorMinutes covers the none
+// a Prior-served text makes.
 func TestEstimateJevCallCount(t *testing.T) {
 	t.Parallel()
-	if got := estimateCounted(t, nil); got.jevCalls != JevCalls {
-		t.Fatalf("Jev calls = %d, want %d", got.jevCalls, JevCalls)
+	if got := estimateCounted(t, nil); got.jevCalls != jevCalls {
+		t.Fatalf("Jev calls = %d, want %d", got.jevCalls, jevCalls)
 	}
-	prior := func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 12, Jev: 8}, true }
-	if got := estimateCounted(t, prior); got.jevCalls != 0 {
-		t.Fatalf("Jev calls = %d for a Prior-served text, want 0", got.jevCalls)
+	jev := &jevCounter{fits: func(int) float64 { return 0.5 }, capFrom: 2}
+	if _, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead()); skip != nil || jev.calls != 2 {
+		t.Fatalf("Jev calls = %d, skip = %v after the cap, want 2 and no skip", jev.calls, skip)
 	}
 }
 
-// TestEstimateJevMedianDrops: a new text makes JevCalls calls, a failed or
-// out-of-range answer is dropped from the median, and no answer left skips the
-// input. The surviving median reaches the blend's Jev minutes.
+// TestJevMedianDrops: out-of-range answers are dropped and the rest take the
+// median; none left is false.
+func TestJevMedianDrops(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		answers []float64
+		want    float64
+		wantOK  bool
+	}{
+		{[]float64{0.2, 0.9, 0.5}, 0.5, true},
+		{[]float64{0.2, 0.4}, 0.3, true},
+		{[]float64{0.7}, 0.7, true},
+		{[]float64{-0.1, 0.3, 1.2}, 0.3, true},
+		{[]float64{-0.1, 1.2}, 0, false},
+	} {
+		got, ok := jevMedian(tt.answers)
+		if ok != tt.wantOK || (ok && math.Abs(got-tt.want) > 1e-9) {
+			t.Fatalf("jevMedian(%v) = %v, %v, want %v, %v", tt.answers, got, ok, tt.want, tt.wantOK)
+		}
+	}
+}
+
+// TestEstimateJevMedianDrops: a new text makes jevCalls calls; a failed answer is
+// dropped so the median of the rest is the input, and no answer left skips the
+// input with the value named.
 func TestEstimateJevMedianDrops(t *testing.T) {
 	t.Parallel()
-	// answers[call-1] is the call's answer; -1 fails the call.
-	run := func(answers []float64) Result {
-		jev := &jevCounter{fits: func(call int) float64 { return answers[call-1] },
-			fail: func(call int) bool { return answers[call-1] == -1 }}
-		deps := workingDeps()
-		deps.JevAsk = jev.ask
-		got, err := Estimate(context.Background(), deps, sampleBead())
-		if err != nil {
-			t.Fatalf("Estimate: %v", err)
-		}
-		if jev.calls != JevCalls {
-			t.Fatalf("Jev calls = %d, want %d", jev.calls, JevCalls)
-		}
-		return got
+	// Call 2 fails; 0.2 and 0.6 remain, and their median is 0.4.
+	jev := &jevCounter{fits: func(call int) float64 { return []float64{0.2, -1, 0.6}[call-1] }}
+	got, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead())
+	if skip != nil || jev.calls != jevCalls || math.Abs(got-0.4) > 1e-9 {
+		t.Fatalf("jevInput = %v, %v after %d calls, want the median 0.4", got, skip, jev.calls)
 	}
-	want, err := storypoints.Default().JevMinutes(0.2)
-	if err != nil {
-		t.Fatalf("JevMinutes: %v", err)
-	}
-	// Call 2 fails and 1.5 is out of range, leaving 0.2 as the only answer.
-	if got := run([]float64{0.2, -1, 1.5}); got.ComponentMinutes.Jev == nil || *got.ComponentMinutes.Jev != want {
-		t.Fatalf("component jev minutes = %v, want the 0.2 median's %v", got.ComponentMinutes.Jev, want)
-	}
-	if got := run([]float64{-0.1, -1, 1.2}); got.ComponentMinutes.Jev != nil || slices.Contains(got.Inputs, "jev") {
-		t.Fatalf("component jev = %v inputs = %v, want the input skipped", got.ComponentMinutes.Jev, got.Inputs)
+	if _, skip := jevInput(context.Background(), Deps{JevAsk: fakeJev(1.5, nil)}, sampleBead()); skip == nil || !strings.Contains(skip.Reason, "1.5") {
+		t.Fatalf("jevInput skip = %v, want the out-of-range 1.5 named", skip)
 	}
 }
 
