@@ -968,6 +968,51 @@ func TestSquashRunInFlightRefusesAGCCycle(t *testing.T) {
 	}
 }
 
+// TestSquashRunWaitsForADoltTask is the bead's first box: a daemon Dolt task
+// holds the read side of doltMaintMu, so no run starts, the maintenance gc flag
+// the check took is released, and the check is due again after
+// squashCheckRetryAfter. With the take removed the run starts and the run count
+// assertion fails.
+func TestSquashRunWaitsForADoltTask(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	var calls int
+	scriptSquashRun(d, &calls, doltsquash.RunResult{}, nil)
+	d.doltMaintMu.RLock() // a daemon Dolt task in flight
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: a daemon Dolt task or the gc holds the Dolt maintenance mutex — the run waits for the next check") {
+		t.Errorf("the held mutex was not named as the reason the run waits: %q", got)
+	}
+	if calls != 0 {
+		t.Errorf("the check started %d run(s) while a Dolt task held the mutex", calls)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Squash["gt"].LastRun.IsZero() {
+		t.Errorf("a deferred run recorded a run: %+v", st.Squash["gt"])
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a run deferred by a Dolt task did not make the check due again after the retry delay")
+	}
+	if d.maintenanceGCRunning.Load() {
+		t.Error("the check left the maintenance gc flag it took held after the run deferred")
+	}
+	// The deferred check took no write side, so the mutex is free once the task
+	// releases its read side.
+	d.doltMaintMu.RUnlock()
+	if !d.doltMaintMu.TryLock() {
+		t.Error("the check left the Dolt maintenance mutex write-locked after the run deferred")
+		return
+	}
+	d.doltMaintMu.Unlock()
+}
+
 // TestSquashArchiveThroughDateIsTheArchivesRecord is the bead's fourth box: the
 // through-date is read from the archive's own record, not taken from the cut or
 // the clock. The pass writes three commits, and the check's line and the state
