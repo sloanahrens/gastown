@@ -156,7 +156,7 @@ func TestEstimateAllInputs(t *testing.T) {
 	if !regexp.MustCompile(`^SP ESTIMATE v1 sp:\d+ rung:[a-z-]+ hash:[0-9a-f]{64}$`).MatchString(first) {
 		t.Fatalf("first line %q is not the note's format", first)
 	}
-	wantInputs := fmt.Sprintf("inputs: shape %.1f, embed %.1f, jev %.1f", shape, embed, jev)
+	wantInputs := fmt.Sprintf("inputs: shape %.1f, embed %.1f, jev %.1f (median of %d)", shape, embed, jev, jevCalls)
 	for _, line := range []string{
 		wantInputs,
 		"nearest beads: gt-a (gastown) first neighbor (no time recorded); dv-b (devops) second neighbor (no time recorded)",
@@ -560,7 +560,7 @@ func TestEstimateJevCallCount(t *testing.T) {
 		t.Fatalf("Jev calls = %d, want %d", got.jevCalls, jevCalls)
 	}
 	jev := &jevCounter{fits: func(int) float64 { return 0.5 }, capFrom: 2}
-	if _, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead()); skip != nil || jev.calls != 2 {
+	if _, _, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead()); skip != nil || jev.calls != 2 {
 		t.Fatalf("Jev calls = %d, skip = %v after the cap, want 2 and no skip", jev.calls, skip)
 	}
 }
@@ -594,12 +594,48 @@ func TestEstimateJevMedianDrops(t *testing.T) {
 	t.Parallel()
 	// Call 2 fails; 0.2 and 0.6 remain, and their median is 0.4.
 	jev := &jevCounter{fits: func(call int) float64 { return []float64{0.2, -1, 0.6}[call-1] }}
-	got, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead())
+	got, _, skip := jevInput(context.Background(), Deps{JevAsk: jev.ask}, sampleBead())
 	if skip != nil || jev.calls != jevCalls || math.Abs(got-0.4) > 1e-9 {
 		t.Fatalf("jevInput = %v, %v after %d calls, want the median 0.4", got, skip, jev.calls)
 	}
-	if _, skip := jevInput(context.Background(), Deps{JevAsk: fakeJev(1.5, nil)}, sampleBead()); skip == nil || !strings.Contains(skip.Reason, "1.5") {
+	if _, _, skip := jevInput(context.Background(), Deps{JevAsk: fakeJev(1.5, nil)}, sampleBead()); skip == nil || !strings.Contains(skip.Reason, "1.5") {
 		t.Fatalf("jevInput skip = %v, want the out-of-range 1.5 named", skip)
+	}
+}
+
+// TestEstimateNoteNamesJevAnswers: the result counts the answers the Jev median
+// used, not the calls made, and the inputs line names the count.
+func TestEstimateNoteNamesJevAnswers(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		fits func(int) float64
+		want int
+	}{
+		{func(int) float64 { return 0.5 }, jevCalls},
+		{func(call int) float64 { return []float64{0.5, -1, 0.5}[call-1] }, 2},
+		{func(call int) float64 { return []float64{0.5, 0.5, 1.5}[call-1] }, 2},
+	} {
+		deps := workingDeps()
+		deps.JevAsk = (&jevCounter{fits: c.fits}).ask
+		got, err := Estimate(context.Background(), deps, sampleBead())
+		if err != nil || got.JevAnswers != c.want || !regexp.MustCompile(fmt.Sprintf(`jev [0-9.]+ \(median of %d\)`, c.want)).MatchString(Note(got)) {
+			t.Fatalf("err %v, JevAnswers %d, note %q; want %d answers named", err, got.JevAnswers, Note(got), c.want)
+		}
+	}
+}
+
+// TestEstimateNoteNoJevAnswers: a Prior-served estimate and one with Jev skipped
+// report no answers and no median.
+func TestEstimateNoteNoJevAnswers(t *testing.T) {
+	t.Parallel()
+	prior, skipped := workingDeps(), workingDeps()
+	prior.Prior = func(string, string) (PriorMinutes, bool) { return PriorMinutes{Embed: 12, Jev: 8}, true }
+	skipped.JevAsk = nil
+	for _, deps := range []Deps{prior, skipped} {
+		got, err := Estimate(context.Background(), deps, sampleBead())
+		if err != nil || got.JevAnswers != 0 || strings.Contains(Note(got), "median of") {
+			t.Fatalf("err %v, JevAnswers %d, note %q; want none", err, got.JevAnswers, Note(got))
+		}
 	}
 }
 
