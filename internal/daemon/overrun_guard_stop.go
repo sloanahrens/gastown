@@ -2256,14 +2256,23 @@ func (s *attentionSources) collectOverrunParkedSeats(_ context.Context) ([]atten
 		if bead == "" {
 			bead = "no recorded bead"
 		}
+		summary := fmt.Sprintf("%s paused by the overrun guard %s ago on %s; recover with gt polecat check-recovery %s, then gt polecat nuke %s after a live git check",
+			seat, parkedAge(parked), bead, seat, seat)
+		// A save that gave up leaves the work only in the sandbox: say so, as the
+		// hand-back note does. A state or record that cannot be read leaves the
+		// summary as it was (gt-nlefu7 words that case).
+		if st, serr := readOverrunState(s.d.config.TownRoot, rec.WorkBead); serr == nil && st.SaveGaveUp {
+			if session, workDir, lerr := s.d.overrunUnsavedWorkLocation(overrunSeat{Rig: rig, Polecat: name}); lerr == nil {
+				summary += ". " + overrunUnsavedWorkText(st, session, workDir, st.Branch, name, rec.WorkBead)
+			}
+		}
 		out = append(out, attention.Item{
 			Key:      "overrun-parked:" + seat,
 			Kind:     attention.KindOverrunStopped,
 			Severity: attention.SeverityLow,
 			Rig:      rig,
 			Bead:     rec.WorkBead,
-			Summary: fmt.Sprintf("%s paused by the overrun guard %s ago on %s; recover with gt polecat check-recovery %s, then gt polecat nuke %s after a live git check",
-				seat, parkedAge(parked), bead, seat, seat),
+			Summary:  summary,
 		})
 		return nil
 	})

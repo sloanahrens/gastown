@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -1478,5 +1479,61 @@ func TestOverrunFailureReason_ScrubsBeforeCut(t *testing.T) {
 				t.Errorf("pushFailureReason() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// parkedItemSummary is the Summary of the overrun-parked item for a seat that
+// has been parked two hours, whose bead's stop state is st and whose sandbox
+// record names the clone.
+func parkedItemSummary(t *testing.T, st overrunState) string {
+	t.Helper()
+	d, _ := newOverrunDaemon(t, false)
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	d.readSandboxRecord = func(string, string) (session.SandboxRecord, bool, error) {
+		return *overrunStopSandboxRecord(overrunGoneClone), true, nil
+	}
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	parkSeatAs(t, d.config.TownRoot, stopSeat.Rig, stopSeat.Polecat, st.Bead, overrunActor, now.Add(-2*time.Hour))
+	if err := writeOverrunState(d.config.TownRoot, st); err != nil {
+		t.Fatal(err)
+	}
+	items, err := (&attentionSources{d: d, now: now}).collectOverrunParkedSeats(context.Background())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("items = %+v, %v; want the one parked item", items, err)
+	}
+	return items[0].Summary
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemNamesThePushStage: the parked-seat item of
+// a seat whose save gave up at the push carries the same UNSAVED WORK sentence
+// as the hand-back note, after today's.
+func TestOverrunSaveGaveUpText_ParkedItemNamesThePushStage(t *testing.T) {
+	t.Parallel()
+	st := overrunState{Bead: "gt-aaa11", Branch: stopSeat.Branch, SaveGaveUp: true, SaveFailure: "remote unreachable", SaveStage: "push"}
+	summary := parkedItemSummary(t, st)
+	checkUnsavedText(t, summary, "The push failed", "remote unreachable", "/sandbox/gt/gastown/polecats/capable/gastown",
+		"push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
+	if !strings.Contains(summary, "gt polecat check-recovery gastown/capable") {
+		t.Errorf("summary = %q, want today's recovery commands kept", summary)
+	}
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemSaysTheStepIsUnknown: a give-up with no
+// recorded stage still says UNSAVED WORK and that the step is unknown.
+func TestOverrunSaveGaveUpText_ParkedItemSaysTheStepIsUnknown(t *testing.T) {
+	t.Parallel()
+	st := overrunState{Bead: "gt-aaa11", Branch: stopSeat.Branch, SaveGaveUp: true, SaveFailure: "late check failed"}
+	checkUnsavedText(t, parkedItemSummary(t, st), "the step is unknown")
+}
+
+// TestOverrunSaveGaveUpText_ParkedItemIsUnchangedWhenTheSaveDidNotGiveUp: a
+// parked seat whose state records a failure but no give-up keeps today's item.
+func TestOverrunSaveGaveUpText_ParkedItemIsUnchangedWhenTheSaveDidNotGiveUp(t *testing.T) {
+	t.Parallel()
+	summary := parkedItemSummary(t, overrunState{Bead: "gt-aaa11", SaveFailure: "remote unreachable", SaveStage: "push"})
+	if strings.Contains(summary, "UNSAVED WORK") {
+		t.Errorf("summary = %q, want no UNSAVED WORK for a save that did not give up", summary)
 	}
 }
