@@ -232,8 +232,12 @@ func TestStoryPointsAutoRevertFailures(t *testing.T) {
 			}}, "bead "},
 		{"runtime weights that do not load", autoRevertCheckCase{adopted: "{not weights", previous: good, now: due}, "weights.json:"},
 		{"no runtime weights file", autoRevertCheckCase{previous: good, now: due}, "weights.json"},
+		// A previous version file that is MISSING is a revert whose check was not recorded
+		// (TestWeeklyRunRecordsAnUnrecordedRevert); one that is there and does not load is
+		// the loud failure this row keeps (gt-skeyaw).
 		{"an unreadable previous version", autoRevertCheckCase{adopted: worse, now: due,
-			log: fmt.Sprintf(`{"event":"adopted","at":%q,"version":"v1","previous":"weights.v7.json"}`+"\n", autoRevertCheckAdoptedAt.Format(time.RFC3339))}, "weights.v7.json"},
+			log:     fmt.Sprintf(`{"event":"adopted","at":%q,"version":"v1","previous":"weights.v7.json"}`+"\n", autoRevertCheckAdoptedAt.Format(time.RFC3339)),
+			prepare: func(fix trainTestFixture) { writeAt(t, adoptVersionPath(fix.town, 7), "{not weights") }}, "weights.v7.json"},
 		{"a previous version whose embedding the samples cannot use", autoRevertCheckCase{adopted: worse, previous: adoptTestWeights{boxes: 0.25, intercept: 3.5, dim: 5}.JSON(), now: due}, "weights.v1.json"},
 		{"a revert that cannot read the version it restores", autoRevertCheckCase{adopted: worse, previous: good, now: due,
 			readFile: failNthRead("weights.v1.json", 2)}, "could not be reverted"},
