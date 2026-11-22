@@ -1756,6 +1756,108 @@ func TestTakeoverSeatEndKeepsAnUncommittedOrUnpushedDoneSeat(t *testing.T) {
 	}
 }
 
+// A seat that ran gt done on the landed bead can still have its work under
+// review: its agent bead names an active merge request, and gt done cleared the
+// hook, so the takeover landing's assignee-only offer is the only offer that
+// seat gets. An MR bead that is not closed keeps the seat and its host
+// directories, the only copy a rework may need; a closed MR lets the end go on.
+// The MR bead is read through the same bead reader the landing resolves its
+// seats from; a read that fails, or answers no bead, keeps the seat rather than
+// end work it cannot account for (gt-vpskhx).
+func TestTakeoverSeatEndKeepsASeatWithAnOpenMR(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	const mrID = "gt-mr-open1"
+	tests := []struct {
+		name     string
+		read     func(id string) (*beads.Issue, error)
+		wantGone bool
+		wantLog  string
+	}{
+		{
+			name: "a seat whose MR is still open keeps its host directories",
+			read: func(id string) (*beads.Issue, error) {
+				return &beads.Issue{ID: id, Status: string(beads.StatusOpen)}, nil
+			},
+			wantLog: "not offered: its work is still under review: active_mr=" + mrID + " status=open",
+		},
+		{
+			name: "a closed MR does not keep the seat",
+			read: func(id string) (*beads.Issue, error) {
+				return &beads.Issue{ID: id, Status: string(beads.StatusClosed)}, nil
+			},
+			wantGone: true,
+			wantLog:  "removed its host directories: the seat is finished",
+		},
+		{
+			name: "an MR bead that cannot be read keeps the seat",
+			read: func(string) (*beads.Issue, error) {
+				return nil, errors.New("bd show: store unavailable")
+			},
+			wantLog: "not offered: cannot read its MR bead " + mrID,
+		},
+		{
+			name:    "an MR bead the reader answers with nothing keeps the seat",
+			read:    func(string) (*beads.Issue, error) { return nil, nil },
+			wantLog: "not offered: its MR bead " + mrID + " cannot be read",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			// gt done left the hook empty and the landed bead as the seat's last
+			// source issue; the open MR is the one fact that still says its work
+			// is not finished.
+			f.seatFields.AgentState = string(beads.AgentStateDone)
+			f.seatFields.LastSourceIssue = endBead
+			f.seatFields.ActiveMR = mrID
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			var logs strings.Builder
+			d := f.host.d
+			d.logger = log.New(&logs, "", 0)
+			d.openWorkBeads = func([]string, time.Duration) workBeadReader {
+				return seatMRReader{read: tt.read}
+			}
+			d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+			// The production end step over the harness's agent-bead and gateway
+			// seams: the offer runs into the real keepReason.
+			d.endSandboxSeat = f.host.endFinishedSandboxSeat
+
+			d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+				land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+			if gone := !dirExists(t, dirs.PolecatDir); gone != tt.wantGone {
+				t.Errorf("seat directory removed = %v, want %v\nlog:\n%s", gone, tt.wantGone, logs.String())
+			}
+			if gone := !dirExists(t, dirs.PromptFile); gone != tt.wantGone {
+				t.Errorf("prompt file removed = %v, want %v", gone, tt.wantGone)
+			}
+			if !strings.Contains(logs.String(), tt.wantLog) {
+				t.Errorf("log =\n%s\nwant it to carry %q", logs.String(), tt.wantLog)
+			}
+		})
+	}
+}
+
+// seatMRReader is a rig bead store that answers the landed bead for the
+// landing's seat resolution and lets four rows decide the seat's MR answer.
+type seatMRReader struct {
+	read func(id string) (*beads.Issue, error)
+}
+
+func (r seatMRReader) Show(id string) (*beads.Issue, error) {
+	if id == endBead {
+		return &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/" + endPolecat}, nil
+	}
+	return r.read(id)
+}
+
+func (seatMRReader) List(beads.ListOptions) ([]*beads.Issue, error) { return nil, nil }
+
 // TestSandboxSeatEndHostWiresTheUsageRecordStore: the host the daemon's own
 // seat end runs on carries the town's usage_records store, so a seat's record
 // is filed as a row beside its file and never as a file alone.

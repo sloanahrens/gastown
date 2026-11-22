@@ -171,7 +171,7 @@ func (e sandboxSeatEnd) keepReason() string {
 	return ""
 }
 
-// orMissingText names a branch nothing recorded, as orMissing does a status.
+// orMissingText names a text fact nothing recorded, as orMissing does a status.
 func orMissingText(text string) string {
 	if strings.TrimSpace(text) == "" {
 		return "<missing>"
@@ -1498,7 +1498,7 @@ func (d *Daemon) endSandboxSeatsOfBead(rigName string, landings *land.LandingsFi
 			resolved, reason, notDone, err := d.assigneeSeatBranch(rigName, name, w.BeadID)
 			switch {
 			case err != nil:
-				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: cannot read its agent bead: %v", w.BeadID, name, err)
+				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: %v", w.BeadID, name, err)
 				continue
 			case reason != "":
 				d.logger.Printf("sandbox seat end bead %s: seat %s not offered: %s", w.BeadID, name, reason)
@@ -1516,13 +1516,15 @@ func (d *Daemon) endSandboxSeatsOfBead(rigName string, landings *land.LandingsFi
 // names: the one its agent bead records. The seat is this bead's seat while
 // that agent bead still hooks beadID, or, after the gt done that cleared the
 // hook, while the bead is its last source issue: the seat's own finish is a
-// fact the end settles, not the offer (gt-m1qf31, gt-xb20n9). A reason, not an
-// error, says why a readable agent bead does not resolve a branch; an
-// unreadable one is returned as an error so its caller says which read failed.
+// fact the end settles, not the offer (gt-m1qf31, gt-xb20n9). A seat whose
+// active merge request is still open is not offered: its work is under review,
+// so the host directories a rework may need stay (gt-vpskhx). A reason, not an
+// error, says why a readable agent bead does not resolve a branch; a read that
+// failed is returned as an error so its caller says which read failed.
 func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason string, notDone bool, err error) {
 	fields, err := d.sandboxSeatEndHost().seatAgentFields(rig, name)
 	if err != nil {
-		return "", "", false, fmt.Errorf("reading the agent bead: %w", err)
+		return "", "", false, fmt.Errorf("cannot read its agent bead: %w", err)
 	}
 	if fields == nil {
 		return "", "it has no agent bead", false, nil
@@ -1530,11 +1532,39 @@ func (d *Daemon) assigneeSeatBranch(rig, name, beadID string) (branch, reason st
 	if reason = seatEndsBead(fields, beadID); reason != "" {
 		return "", reason, false, nil
 	}
+	if reason, err = mrUnderReview(d.rigWorkBeads(rig), fields.ActiveMR); err != nil {
+		return "", "", false, err
+	} else if reason != "" {
+		return "", reason, false, nil
+	}
 	if branch = strings.TrimSpace(fields.Branch); branch == "" {
 		return "", "its agent bead records no branch", false, nil
 	}
 	notDone = strings.TrimSpace(fields.HookBead) == "" && fields.AgentState != string(beads.AgentStateDone)
 	return branch, "", notDone, nil
+}
+
+// mrUnderReview names the seat's active merge request as the reason it is kept
+// while that bead is not terminal, or "" when there is none to wait for. The
+// MR bead is read through the bead reader the landing's seats are resolved
+// from; a read that fails or answers no bead is an error, so the caller keeps
+// the seat rather than end work it cannot account for (gt-vpskhx).
+func mrUnderReview(reader beadReader, activeMR string) (string, error) {
+	id := strings.TrimSpace(activeMR)
+	if id == "" {
+		return "", nil
+	}
+	mr, err := reader.Show(id)
+	if err != nil {
+		return "", fmt.Errorf("cannot read its MR bead %s: %w", id, err)
+	}
+	if mr == nil {
+		return "", fmt.Errorf("its MR bead %s cannot be read: the bead reader answered with no bead", id)
+	}
+	if beads.IssueStatus(mr.Status).IsTerminal() {
+		return "", nil
+	}
+	return "its work is still under review: active_mr=" + id + " status=" + orMissingText(mr.Status), nil
 }
 
 // seatEndsBead is why an assignee-only seat's agent bead does not name beadID
