@@ -868,6 +868,29 @@ func TestRunOverrunGuard_GateTimeBeforeARestartIsNotCarried(t *testing.T) {
 	}
 }
 
+// A seat whose gate state was never read successfully has nothing to carry: the
+// first failed read counts all of its time, as it did before the carry existed.
+// Only an in-gate answer that a successful read saw is ever carried (gt-9ju7cf).
+func TestTickEffGateReadFailureWithoutState(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-nostate1"})
+	// Every gate read fails, so the seat never has an answer to carry.
+	f.gateRunning = scriptedGateReads()
+
+	stoppedAt := tickUntilStop(d, f, 60)
+	if want := overrunSlung.Add(20 * time.Minute); !stoppedAt.Equal(want) {
+		t.Errorf("stopped at %v, want %v: a never-read seat counts all of its time at the first failed read",
+			stoppedAt.Sub(overrunSlung), want.Sub(overrunSlung))
+	}
+	if strings.Contains(buf.String(), "carrying its last gate answer") {
+		t.Errorf("a seat never read in its gate carried an answer:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "(failure 1 in a row), counting all of its time") {
+		t.Errorf("log does not say the first failed read counts all of its time:\n%s", buf.String())
+	}
+}
+
 // The guard judges the bead's clock, not the seat's: a bead handed on by a
 // seat to a second seat is nudged or stopped on the dispatch it first went out
 // on, even though that seat has held it only a few minutes. A done event ends
