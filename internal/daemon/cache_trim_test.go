@@ -1680,11 +1680,15 @@ func TestCacheTrimParseRemoved(t *testing.T) {
 		{"text after the counts", "removed 1 absent 0 kept 0 extra\n", [3]int64{}, true},
 		{"a label that is not the result line's", "removed 8 absent 1 trimmed 3\n", [3]int64{}, true},
 		{"a second label that is not absent", "removed 1 trimmed 0 kept 0\n", [3]int64{}, true},
+		{"a second label that is trimmed", "removed 8 trimmed 1 kept 3\n", [3]int64{}, true},
+		{"a first label that is not removed", "kept 8 absent 1 kept 3\n", [3]int64{}, true},
 		{"a removed count past an int64", "removed 9223372036854775808 absent 0 kept 0\n", [3]int64{}, true},
+		{"a count of 20 digits", "removed 99999999999999999999 absent 0 kept 0\n", [3]int64{}, true},
 		{"an absent count past an int64", "removed 0 absent 9223372036854775808 kept 0\n", [3]int64{}, true},
 		{"a kept count past an int64", "removed 0 absent 0 kept 9223372036854775808\n", [3]int64{}, true},
 		{"the largest count an int64 holds", "removed 9223372036854775807 absent 0 kept 0\n", [3]int64{9223372036854775807, 0, 0}, false},
 		{"a carriage return before the newline", "removed 12 absent 1 kept 3\r\n", [3]int64{12, 1, 3}, false},
+		{"a carriage return after eight removed", "removed 8 absent 1 kept 3\r\n", [3]int64{8, 1, 3}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
