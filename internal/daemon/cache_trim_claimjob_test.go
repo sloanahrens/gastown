@@ -360,6 +360,50 @@ func TestCacheTrimClaimJobBudgetOutlivesThePassContext(t *testing.T) {
 	}
 }
 
+// TestCacheTrimClaimJobStatusReadHasABudget pins that the status read that
+// decides a Job still running at the wait runs on the claim's own budget: the
+// wait times out and the status reads active, so the read of the Job's state is
+// made, and every cluster call, that read included, carries a deadline of the
+// wait plus the slack and a live context.
+func TestCacheTrimClaimJobStatusReadHasABudget(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, "", map[string]cliReply{
+		cacheTrimClaimJobWaitVerb: {stderr: "error: timed out waiting for the condition", code: 1},
+		cacheTrimJobStateVerb:     {stdout: `{"status":{"active":1}}`},
+	})
+	// The wait legs run on two goroutines, so the counts are atomic. The budget
+	// is the twenty-minute wait plus the two-minute slack, written as literals: a
+	// bound read from the constants would move with a changed slack and pass.
+	const wantBudget = 20*time.Minute + 2*time.Minute
+	var calls, stateReads atomic.Int32
+	f.d.cacheTrimCtxSeen = func(ctx context.Context, verb string) {
+		n := calls.Add(1)
+		if verb == cacheTrimJobStateVerb {
+			stateReads.Add(1)
+		}
+		if err := probeVerdict(verb, ctx.Err()); err != nil {
+			t.Errorf("cluster call %d: %v; want the claim's own live budget", n, err)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Errorf("cluster call %d (%s) carried no deadline; want the claim's own, the wait plus the slack", n, verb)
+			return
+		}
+		if left := time.Until(deadline); left < wantBudget-time.Minute || left > wantBudget {
+			t.Errorf("cluster call %d (%s) carried a deadline %v away; want the wait plus the slack, %v within a minute", n, verb, left, wantBudget)
+		}
+	}
+	err := cacheTrimClaimJobRun(f, cacheTrimClaim{ClaimName: cacheTrimClaimName}, true)
+	if !errors.Is(err, errCacheTrimJobPending) {
+		t.Fatalf("a Job still running at the wait = %v, want an error wrapping errCacheTrimJobPending", err)
+	}
+	// The pending path reads the Job's status twice: once to say why the wait
+	// ended, then to decide the Job. The second is the read this test pins.
+	if n := stateReads.Load(); n != 2 {
+		t.Errorf("the probe saw %d Job status reads; want the wait diagnosis's read and the deciding read", n)
+	}
+}
+
 // TestCacheTrimClaimJobBudgetNamesTheBoundThatCutIt is the bead's acceptance: a
 // wait the claim Job's own context ends five minutes in, before the wait bound,
 // is an error naming the elapsed time and that context, never the pending text.
