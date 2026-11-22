@@ -1445,8 +1445,13 @@ func newPostLandWiring(client postLandStatusClient, runs postLandRunLister, owne
 // newPostLandRunner builds a rig's post-land runner. The command and the
 // status context are read from the rig's own settings at every use. An UNKNOWN
 // status verdict is recorded where the attention queue reads it, and a
-// command run holds an upgrade restart while it is in flight (gt-gb4ij).
+// command run holds an upgrade restart while it is in flight (gt-gb4ij). A
+// wiring with no run seam leaves the orphan check off, and the daemon says so
+// once per rig so it is not mistaken for one with no orphans (gt-tcnmb8).
 func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *landworker.PostLandRunner {
+	if w.RunEnded == nil && d.postLandOrphanDisabledLogged(rigName) {
+		d.logger.Printf("%s: post-land orphan check disabled: no run seam", rigName)
+	}
 	runner := &landworker.PostLandRunner{
 		Rig:     rigName,
 		Command: func() string { return rigPostLandCommand(rigPath) },
@@ -2151,5 +2156,21 @@ func (d *Daemon) postLandSettingsErrLogged(rig string, err error) bool {
 		return false
 	}
 	d.postLandSettingsErr[rig] = err.Error()
+	return true
+}
+
+// postLandOrphanDisabledLogged reports whether rig's missing run seam is new,
+// so the daemon says the orphan check is off once per rig rather than on every
+// build the landing manager retries (gt-tcnmb8).
+func (d *Daemon) postLandOrphanDisabledLogged(rig string) bool {
+	d.postLandSettingsMu.Lock()
+	defer d.postLandSettingsMu.Unlock()
+	if d.postLandOrphanDisabled == nil {
+		d.postLandOrphanDisabled = map[string]bool{}
+	}
+	if d.postLandOrphanDisabled[rig] {
+		return false
+	}
+	d.postLandOrphanDisabled[rig] = true
 	return true
 }
