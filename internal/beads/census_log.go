@@ -63,15 +63,15 @@ func CensusRowsTotal(rows []CensusRow) int {
 	return total
 }
 
-// CensusTopRows renders rows as the "top: verb@caller=count ..." text a census
-// line carries, naming the censusLogRows busiest; it is empty for no rows.
+// CensusTopRows renders rows under the "top" label a census line carries; it is
+// empty for no rows.
 func CensusTopRows(rows []CensusRow) string {
 	return CensusTopLabeled("top", rows)
 }
 
-// CensusTopLabeled renders the censusLogRows busiest rows as the
-// "label: verb@caller=count ..." text a census line carries, so a second set of
-// rows joins the line under its own label; it is empty for no rows.
+// CensusTopLabeled renders the censusLogRows busiest rows under label, so a
+// second set of rows joins the line under its own label as "verb@caller=count",
+// appending "/<ms>ms" to a row the census timed; it is empty for no rows.
 func CensusTopLabeled(label string, rows []CensusRow) string {
 	if len(rows) == 0 {
 		return ""
@@ -83,6 +83,10 @@ func CensusTopLabeled(label string, rows []CensusRow) string {
 	b.WriteString(label)
 	b.WriteString(":")
 	for _, row := range rows {
+		if row.Ms > 0 {
+			fmt.Fprintf(&b, " %s@%s=%d/%dms", row.Verb, row.Caller, row.Count, row.Ms)
+			continue
+		}
 		fmt.Fprintf(&b, " %s@%s=%d", row.Verb, row.Caller, row.Count)
 	}
 	return b.String()
@@ -261,9 +265,22 @@ func censusRow(token string) (CensusRow, bool) {
 	if at <= 0 || eq <= at+1 {
 		return CensusRow{}, false
 	}
-	count, err := strconv.Atoi(token[eq+1:])
+	row := CensusRow{Verb: token[:at], Caller: token[at+1 : eq]}
+	value := token[eq+1:]
+	if slash := strings.LastIndexByte(value, '/'); slash >= 0 {
+		// A timed row prints its milliseconds after the count; refusing the
+		// suffix would make every record the daemon writes read as torn.
+		text, found := strings.CutSuffix(value[slash+1:], "ms")
+		ms, err := strconv.ParseInt(text, 10, 64)
+		if !found || err != nil || ms < 0 {
+			return CensusRow{}, false
+		}
+		row.Ms, value = ms, value[:slash]
+	}
+	count, err := strconv.Atoi(value)
 	if err != nil || count < 0 {
 		return CensusRow{}, false
 	}
-	return CensusRow{Verb: token[:at], Caller: token[at+1 : eq], Count: count}, true
+	row.Count = count
+	return row, true
 }
