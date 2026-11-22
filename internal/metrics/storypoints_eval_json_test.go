@@ -304,6 +304,56 @@ func TestStoryPointsEvalJSONShortPart(t *testing.T) {
 	}
 }
 
+// evalJSONSmallSplit is one split group as the object carries it. Predictors is
+// kept raw so a null (no figures) reads apart from an empty array.
+type evalJSONSmallSplit struct {
+	Name       string          `json:"name"`
+	Rows       int             `json:"rows"`
+	Predictors json.RawMessage `json:"predictors"`
+}
+
+// TestStoryPointsEvalJSONSmallGroup: a split group under five test rows is in
+// the object with its name and row count and predictors null, while a group of
+// five or more carries its figures. The fixture holds a four-row group, so the
+// null case is exercised, and the figure case keeps the null from being
+// returned for every group.
+func TestStoryPointsEvalJSONSmallGroup(t *testing.T) {
+	t.Parallel()
+	raw := evalJSONRun(t, evalJSONTown(t), true)
+	var doc struct {
+		ByRounds []evalJSONSmallSplit `json:"by_review_rounds"`
+		BySeat   []evalJSONSmallSplit `json:"by_seat_class"`
+	}
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("--json did not print one JSON object: %v\n%s", err, raw)
+	}
+	small, figured := 0, 0
+	check := func(splits []evalJSONSmallSplit) {
+		for _, s := range splits {
+			carries := string(s.Predictors) != "null"
+			if s.Rows < storyPointsEvalMinGroup {
+				small++
+				if carries {
+					t.Errorf("group %q with %d test rows carries %s, want null", s.Name, s.Rows, s.Predictors)
+				}
+				continue
+			}
+			if !carries {
+				t.Errorf("group %q with %d test rows carries null, want its figures", s.Name, s.Rows)
+			}
+			figured++
+		}
+	}
+	check(doc.ByRounds)
+	check(doc.BySeat)
+	if small == 0 {
+		t.Fatal("the fixture has no split group under five test rows")
+	}
+	if figured == 0 {
+		t.Fatal("the fixture has no split group of five or more test rows to compare against")
+	}
+}
+
 // TestStoryPointsEvalJSONReportsAFailedWrite: a write the JSON object cannot
 // make fails the run, rather than reporting an evaluation nobody received.
 func TestStoryPointsEvalJSONReportsAFailedWrite(t *testing.T) {
