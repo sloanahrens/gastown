@@ -1596,9 +1596,13 @@ func TestPostLandStatusPassContextNilEndsThePassAtTheBudget(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() { defer close(done); r.PollPending(context.Background()) }()
+	// A hang guard on a context deadline, not a sleep: a pass that never ends fails the
+	// test here instead of hanging it.
+	guard, stop := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stop()
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second): //testpolicy:allow no-sleep — a hang guard only: a pass that never ends fails the test here instead of hanging it
+	case <-guard.Done():
 		t.Fatal("the pass did not end within 30s")
 	}
 
