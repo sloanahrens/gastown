@@ -213,8 +213,33 @@ func TestNukePreserveForAHostSeatIsUnchanged(t *testing.T) {
 	if hostPreserveRuns != 1 {
 		t.Errorf("host preserve ran %d time(s), want once", hostPreserveRuns)
 	}
-	if report := out.String(); !strings.Contains(report, "already reachable from origin/main — nothing to preserve") {
+	if report := out.String(); !strings.Contains(report, "already merged into origin/main") {
 		t.Errorf("host seat report lost its preserve line:\n%s", report)
+	}
+}
+
+// The preserve step's line goes through preservedRefWords: a branch whose own
+// remote copy holds the tip is a backup, so the operator must never read it as
+// "reachable from" a ref. Only the rig's target branch reads as a merge
+// (gt-1k27vl).
+func TestNukePreservePrintsTheClassifiedLine(t *testing.T) {
+	t.Parallel()
+	f := newNukeE2E(t)
+	deps, out := preserveDeps(f, nukeE2EHostSeat,
+		func(string) (preserveOutcome, error) {
+			return preserveOutcome{RemoteRef: "origin/" + preserveBranch, AlreadyThere: true}, nil
+		},
+	)
+	if err := runPreserveNuke(f, deps); err != nil {
+		t.Fatalf("nuke returned %v, want nil", err)
+	}
+	report := out.String()
+	want := "already on origin as origin/" + preserveBranch + " (the branch's own remote copy)"
+	if !strings.Contains(report, want) {
+		t.Errorf("report does not classify the branch's own remote copy as such:\n%s", report)
+	}
+	if strings.Contains(report, "reachable from") {
+		t.Errorf("report still prints the unclassified preserve line:\n%s", report)
 	}
 }
 
