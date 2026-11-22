@@ -29,6 +29,11 @@ type Spec struct {
 	// base branch, supplied by the caller: Plan reads no file system. A file in
 	// it is never "created by" a piece, whoever edits it.
 	BaseFiles map[string]bool
+	// BaseSymbols are the symbols that exist on the base branch, supplied by the
+	// caller, keyed by the package directory, a dot and the symbol's name, such
+	// as "internal/config.Read". A symbol in it is never "created by" a piece,
+	// whoever declares it.
+	BaseSymbols map[string]bool
 }
 
 // Box is one acceptance box.

@@ -138,6 +138,9 @@ func runSpecSplitOn(out io.Writer, beadID string, dryRun bool, read specSplitRea
 		Acceptance:  beads.AcceptanceText(issue),
 		Dirs:        specSplitPackageDirs(tree.Files),
 		BaseFiles:   specSplitBaseFiles(tree.Files),
+		// The target inventory lists files, not symbols, so the command knows
+		// of no existing symbol and every symbol A declares keeps its note.
+		BaseSymbols: map[string]bool{},
 	}
 	groups, err := specsplit.Group(spec)
 	if err != nil {
