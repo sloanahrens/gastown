@@ -609,15 +609,46 @@ func TestOverrunStop_CleanPushedSeatAddsNoSaveNote(t *testing.T) {
 }
 
 // pushRecordingGit records every refspec the seat's git pushed, then delegates:
-// a test reads which refs the save sent, and how many times.
+// a test reads which refs the save sent, and how many times. When refuseSuffix
+// is set, a refspec ending with it answers err instead of delegating, so a test
+// can fail one push alone.
 type pushRecordingGit struct {
 	daemonGit
-	refspecs *[]string
+	refspecs     *[]string
+	refuseSuffix string
+	err          error
 }
 
 func (g pushRecordingGit) Push(remote, refspec string, force bool) error {
 	*g.refspecs = append(*g.refspecs, refspec)
+	if g.refuseSuffix != "" && strings.HasSuffix(refspec, g.refuseSuffix) {
+		return g.err
+	}
 	return g.daemonGit.Push(remote, refspec, force)
+}
+
+// A push that fails for any reason but a divergence is not rescued: only a
+// non-fast-forward refusal sends the saved head to a rescue branch, so a plain
+// failure is an error the stop retries (gt-louinm).
+func TestOverrunSaveWork_PlainPushFailureIsNotRescued(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	var refspecs []string
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return pushRecordingGit{daemonGit: open(dir), refspecs: &refspecs,
+			refuseSuffix: ":refs/heads/" + stopSeat.Branch, err: errors.New("remote unreachable")}
+	}
+
+	if _, err := w.d.overrunSaveWork(stopSeat); err == nil {
+		t.Fatal("save = nil; want the plain push failure named")
+	}
+	rescue := ":refs/heads/" + overrunRescueBranch(stopSeat.Branch, w.tip)
+	for _, refspec := range refspecs {
+		if strings.HasSuffix(refspec, rescue) {
+			t.Errorf("refspecs pushed = %q, want no push of %s: a plain push error is not a divergence", refspecs, rescue)
+		}
+	}
 }
 
 // pushForceRecordingGit records every push's refspec and force flag, then
