@@ -55,6 +55,35 @@ func TestBodyWalksParent(t *testing.T) {
 	}
 }
 
+func TestScanFile(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, src string
+		want      []string
+	}{
+		{"walks a parent", "package p\n\nfunc TestA(t *testing.T) { filepath.WalkDir(\"../..\", f) }", []string{"TestA"}},
+		{"walks a TempDir", "package p\n\nfunc TestA(t *testing.T) { filepath.WalkDir(t.TempDir(), f) }", nil},
+		{"non-test helper", "package p\n\nfunc helper() { filepath.WalkDir(\"../..\", f) }", nil},
+		{"source order", "package p\n\nfunc TestB(t *testing.T) { os.ReadDir(\"..\") }\n\nfunc TestA(t *testing.T) { filepath.Walk(\"../x\", f) }", []string{"TestB", "TestA"}},
+	} {
+		got, err := scanFile("x_test.go", []byte(tc.src))
+		if err != nil {
+			t.Fatalf("%s: scanFile: %v", tc.name, err)
+		}
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s: scanFile = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestScanFileParseError(t *testing.T) {
+	t.Parallel()
+	_, err := scanFile("bad.go", []byte("package p\n\nfunc ("))
+	if err == nil || !strings.HasPrefix(err.Error(), "bad.go") {
+		t.Fatalf("scanFile error = %v, want one starting with bad.go", err)
+	}
+}
+
 func TestParseGoFile(t *testing.T) {
 	t.Parallel()
 	for src, wantErr := range map[string]bool{
