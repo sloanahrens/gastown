@@ -1492,8 +1492,17 @@ func runDoltDump(cmd *cobra.Command, args []string) error {
 	return dumpDoltDiagnostics(townRoot, cmd.OutOrStdout(), cmd.ErrOrStderr(), doltserver.IsRunning, liveDoltLogReads())
 }
 
+// writeDoltDumpContainerSection writes the dump's account of a town whose Dolt
+// runs in a Docker container: the log is read from the container, and the host
+// files a local server writes are not there to read (gt-h0v2nw).
+func writeDoltDumpContainerSection(w io.Writer, container string) {
+	fmt.Fprintf(w, "  Container mode (%s): the server's log is read on the host with the command docker logs %s --since <time>; the host files a local server writes (pid, sql-server.info, dolt.log) do not exist for it\n", container, container)
+}
+
 // dumpDoltDiagnostics is the body of gt dolt dump: running reports the live
-// server, and reads dates the stale-log notice and prints the log tail.
+// server, and reads dates the stale-log notice and prints the log tail. A town
+// whose Dolt runs in a container is shown the container's log command in place
+// of the host pid, metadata and log tail it cannot read.
 func dumpDoltDiagnostics(townRoot string, out, errw io.Writer, running func(string) (bool, int, error), reads doltLogReads) error {
 	isRunning, pid, err := running(townRoot)
 	if err != nil {
@@ -1504,37 +1513,51 @@ func dumpDoltDiagnostics(townRoot string, out, errw io.Writer, running func(stri
 	}
 
 	config := doltserver.DefaultConfig(townRoot)
-
-	fmt.Fprintf(out, "Dolt diagnostic snapshot (non-fatal)\n")
-	fmt.Fprintf(out, "  Live PID:   %d\n", pid)
-	fmt.Fprintf(out, "  Port:       %d\n", config.Port)
-	fmt.Fprintf(out, "  Data dir:   %s\n", config.DataDir)
-	fmt.Fprintf(out, "  Log file:   %s\n", config.LogFile)
-	fmt.Fprintf(out, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
-
-	if info, err := doltserver.ReadSQLServerInfo(townRoot); err == nil {
-		fmt.Fprintf(out, "  SQL metadata: %s\n", info.Path)
-		fmt.Fprintf(out, "    PID:       %d\n", info.PID)
-		fmt.Fprintf(out, "    Port:      %d\n", info.Port)
-		if info.ServerID != "" {
-			fmt.Fprintf(out, "    Server ID: %s\n", info.ServerID)
-		}
-	} else {
-		fmt.Fprintf(out, "  SQL metadata: unavailable (%v)\n", err)
+	// A container that does not parse is the dump's error: reading it as a
+	// host town would dump host files the container never writes.
+	container, err := config.ExternalContainerSetting()
+	if err != nil {
+		return fmt.Errorf("reading dolt.external_container: %w", err)
 	}
 
-	if state, err := doltserver.LoadState(townRoot); err == nil && state.PID > 0 {
-		fmt.Fprintf(out, "  Daemon state: %s\n", doltserver.StateFile(townRoot))
-		fmt.Fprintf(out, "    PID:       %d", state.PID)
-		if state.PID != pid {
-			fmt.Fprintf(out, " (stale; live PID is %d)", pid)
+	fmt.Fprintf(out, "Dolt diagnostic snapshot (non-fatal)\n")
+	if container == "" {
+		fmt.Fprintf(out, "  Live PID:   %d\n", pid)
+	}
+	fmt.Fprintf(out, "  Port:       %d\n", config.Port)
+	fmt.Fprintf(out, "  Data dir:   %s\n", config.DataDir)
+	if container == "" {
+		fmt.Fprintf(out, "  Log file:   %s\n", config.LogFile)
+	}
+	fmt.Fprintf(out, "  Connection: %s\n", doltserver.GetConnectionString(townRoot))
+
+	if container != "" {
+		writeDoltDumpContainerSection(out, container)
+	} else {
+		if info, err := doltserver.ReadSQLServerInfo(townRoot); err == nil {
+			fmt.Fprintf(out, "  SQL metadata: %s\n", info.Path)
+			fmt.Fprintf(out, "    PID:       %d\n", info.PID)
+			fmt.Fprintf(out, "    Port:      %d\n", info.Port)
+			if info.ServerID != "" {
+				fmt.Fprintf(out, "    Server ID: %s\n", info.ServerID)
+			}
+		} else {
+			fmt.Fprintf(out, "  SQL metadata: unavailable (%v)\n", err)
 		}
-		fmt.Fprintln(out)
-		if !state.StartedAt.IsZero() {
-			fmt.Fprintf(out, "    Started:   %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
-		}
-		if state.DataDir != "" {
-			fmt.Fprintf(out, "    Data dir:  %s\n", state.DataDir)
+
+		if state, err := doltserver.LoadState(townRoot); err == nil && state.PID > 0 {
+			fmt.Fprintf(out, "  Daemon state: %s\n", doltserver.StateFile(townRoot))
+			fmt.Fprintf(out, "    PID:       %d", state.PID)
+			if state.PID != pid {
+				fmt.Fprintf(out, " (stale; live PID is %d)", pid)
+			}
+			fmt.Fprintln(out)
+			if !state.StartedAt.IsZero() {
+				fmt.Fprintf(out, "    Started:   %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
+			}
+			if state.DataDir != "" {
+				fmt.Fprintf(out, "    Data dir:  %s\n", state.DataDir)
+			}
 		}
 	}
 
@@ -1542,9 +1565,11 @@ func dumpDoltDiagnostics(townRoot string, out, errw io.Writer, running func(stri
 		fmt.Fprintf(errw, "dolt.log age unknown: %v\n", err)
 	}
 
-	fmt.Fprintf(out, "\nRecent Dolt log lines:\n")
-	if err := reads.tail([]string{"-n", "200", config.LogFile}, out, errw); err != nil {
-		fmt.Fprintf(out, "  (unable to read recent logs: %v)\n", err)
+	if container == "" {
+		fmt.Fprintf(out, "\nRecent Dolt log lines:\n")
+		if err := reads.tail([]string{"-n", "200", config.LogFile}, out, errw); err != nil {
+			fmt.Fprintf(out, "  (unable to read recent logs: %v)\n", err)
+		}
 	}
 
 	fmt.Fprintf(out, "\nNo signal was sent. Do not use kill -QUIT for routine diagnostics unless the Dolt version has been verified not to terminate on SIGQUIT.\n")
