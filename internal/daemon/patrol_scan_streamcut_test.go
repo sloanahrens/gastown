@@ -1,0 +1,216 @@
+package daemon
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/session"
+)
+
+// streamCutFixture is a patrol host over a rig whose registry lists its prefix,
+// so the seat's sandbox session is named from the prefix. record is what the
+// sandbox record read answers (nil: no record, a host seat); readErr, when set,
+// is the error that read answers. cutAnswer and cutErr are what the sandbox
+// backend's StreamCut answers, and asked records every session it is asked
+// about.
+type streamCutFixture struct {
+	h     *patrolScanHost
+	asked *[]string
+}
+
+func newStreamCutFixture(t *testing.T, record *session.SandboxRecord, readErr error, cut bool, cutErr error) streamCutFixture {
+	t.Helper()
+	d, _ := newOverrunDaemon(t, false)
+	reg := session.NewPrefixRegistry()
+	reg.Register(overrunStopPrefix, stopSeat.Rig)
+	d.prefixRegistryFn = func() *session.PrefixRegistry { return reg }
+	d.readSandboxRecord = func(townRoot, name string) (session.SandboxRecord, bool, error) {
+		if readErr != nil {
+			return session.SandboxRecord{}, false, readErr
+		}
+		if record == nil {
+			return session.SandboxRecord{}, false, nil
+		}
+		return *record, true, nil
+	}
+	var asked []string
+	d.sandboxStreamCutFn = func(townRoot string, rec session.SandboxRecord) (bool, error) {
+		asked = append(asked, rec.Session)
+		return cut, cutErr
+	}
+	return streamCutFixture{h: &patrolScanHost{d: d}, asked: &asked}
+}
+
+func streamCutRecord() *session.SandboxRecord {
+	return &session.SandboxRecord{
+		Session: overrunStopSessionName,
+		Rig:     stopSeat.Rig,
+		Polecat: stopSeat.Polecat,
+		WorkDir: "/work/gastown/capable",
+	}
+}
+
+// TestPatrolScanStreamCutAnswers pins what the patrol scan's revive reads: a
+// sandbox seat answers its backend's answer for its record's session, a host
+// seat and a seat whose backend says intact answer false, and a failed read is
+// an error naming the seat and its cause.
+func TestPatrolScanStreamCutAnswers(t *testing.T) {
+	t.Parallel()
+	seat := stopSeat.Rig + "/" + stopSeat.Polecat
+	cases := []struct {
+		name      string
+		record    *session.SandboxRecord
+		readErr   error
+		cut       bool
+		cutErr    error
+		want      bool
+		wantErr   string
+		wantAsked []string
+	}{
+		{
+			name:      "sandbox seat whose stream was cut answers true",
+			record:    streamCutRecord(),
+			cut:       true,
+			want:      true,
+			wantAsked: []string{overrunStopSessionName},
+		},
+		{
+			name:      "sandbox seat whose stream is intact answers false",
+			record:    streamCutRecord(),
+			cut:       false,
+			want:      false,
+			wantAsked: []string{overrunStopSessionName},
+		},
+		{
+			name:      "host seat with no sandbox record answers false without asking the backend",
+			record:    nil,
+			want:      false,
+			wantAsked: nil,
+		},
+		{
+			name:      "failing backend is an error naming the seat and its cause",
+			record:    streamCutRecord(),
+			cutErr:    errors.New("tail read timed out"),
+			wantErr:   "tail read timed out",
+			wantAsked: []string{overrunStopSessionName},
+		},
+		{
+			name:    "unreadable sandbox record is an error naming the seat and its cause",
+			readErr: errors.New("record file is corrupt"),
+			wantErr: "record file is corrupt",
+		},
+		{
+			name: "record that names no session is an error naming the seat",
+			record: &session.SandboxRecord{
+				Rig:     stopSeat.Rig,
+				Polecat: stopSeat.Polecat,
+			},
+			wantErr: "names no session",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newStreamCutFixture(t, tc.record, tc.readErr, tc.cut, tc.cutErr)
+			got, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), seat) || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("StreamCut error = %v, want an error naming %s and containing %q", err, seat, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("StreamCut error = %v, want none", err)
+			}
+			if got != tc.want {
+				t.Errorf("StreamCut = %v, want %v", got, tc.want)
+			}
+			if strings.Join(*f.asked, ",") != strings.Join(tc.wantAsked, ",") {
+				t.Errorf("backend asked about %v, want %v", *f.asked, tc.wantAsked)
+			}
+		})
+	}
+}
+
+// TestPatrolScanStreamCutOnARigTheRegistryDoesNotList: a rig with no prefix is found by scanning
+// the sandbox records. No record names the seat: a host seat, false, nothing asked; the records
+// directory cannot be listed: an error naming the seat, never an intact stream (gt-jpmj3s).
+func TestPatrolScanStreamCutOnARigTheRegistryDoesNotList(t *testing.T) {
+	t.Parallel()
+	seat := stopSeat.Rig + "/" + stopSeat.Polecat
+	unlisted := func(t *testing.T) streamCutFixture {
+		f := newStreamCutFixture(t, nil, nil, true, nil)
+		f.h.d.prefixRegistryFn = func() *session.PrefixRegistry { return session.NewPrefixRegistry() }
+		return f
+	}
+	t.Run("no record names the seat", func(t *testing.T) {
+		t.Parallel()
+		f := unlisted(t)
+		got, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat)
+		if err != nil || got || len(*f.asked) != 0 {
+			t.Errorf("StreamCut = %v, %v, asked %v; want false, no error, backend not asked", got, err, *f.asked)
+		}
+	})
+	t.Run("the records directory cannot be listed", func(t *testing.T) {
+		t.Parallel()
+		f := unlisted(t)
+		dir := session.SandboxRegistryDir(f.h.d.config.TownRoot)
+		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat)
+		if err == nil || !strings.Contains(err.Error(), seat) || !strings.Contains(err.Error(), "find the sandbox") || got {
+			t.Errorf("StreamCut = %v, %v; want false and an error naming %s and the sandbox lookup", got, err, seat)
+		}
+	})
+}
+
+// TestPatrolScanStreamCutWrapsTheBackendError: a failing backend's error is wrapped, so a caller
+// can still ask errors.Is of its cause (gt-jpmj3s).
+func TestPatrolScanStreamCutWrapsTheBackendError(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("tail read timed out")
+	f := newStreamCutFixture(t, streamCutRecord(), nil, false, cause)
+	if _, err := f.h.StreamCut(stopSeat.Rig, stopSeat.Polecat); !errors.Is(err, cause) {
+		t.Errorf("StreamCut error = %v, want it to wrap %v", err, cause)
+	}
+}
+
+// streamCutAnswerer is a backend that answers StreamCut, as the openshell one does.
+type streamCutAnswerer struct {
+	session.Backend
+	cut bool
+}
+
+func (s streamCutAnswerer) StreamCut(string) (bool, error) { return s.cut, nil }
+
+// TestSandboxStreamCutOverTheBackend: the real read builds the backend from the record's profile,
+// returns its construction error, refuses a backend that cannot answer StreamCut as an error and
+// never as an intact stream, and otherwise passes the backend's answer through (gt-jpmj3s).
+func TestSandboxStreamCutOverTheBackend(t *testing.T) {
+	t.Parallel()
+	rec := session.SandboxRecord{Session: "gt-x", Profile: "p", Gateway: "g", Image: "i"}
+	build := errors.New("no gateway profile")
+	if _, err := sandboxStreamCutOver(func(string, session.Profile) (session.Backend, error) { return nil, build }, "town", rec); !errors.Is(err, build) {
+		t.Errorf("a backend that cannot be built: err = %v, want %v", err, build)
+	}
+	var gotProfile session.Profile
+	_, err := sandboxStreamCutOver(func(_ string, p session.Profile) (session.Backend, error) {
+		gotProfile = p
+		return nil, nil
+	}, "town", rec)
+	if err == nil || !strings.Contains(err.Error(), "cannot read a stream cut") {
+		t.Errorf("a backend without StreamCut: err = %v, want the refusal, never false with no error", err)
+	}
+	if gotProfile.Name != "p" || gotProfile.Gateway != "g" || gotProfile.Image != "i" {
+		t.Errorf("backend built from %+v, want the record's profile", gotProfile)
+	}
+	got, err := sandboxStreamCutOver(func(string, session.Profile) (session.Backend, error) { return streamCutAnswerer{cut: true}, nil }, "town", rec)
+	if err != nil || !got {
+		t.Errorf("an answering backend = %v, %v; want its true passed through", got, err)
+	}
+}
