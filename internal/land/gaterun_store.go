@@ -347,21 +347,29 @@ func appendGateRunAt(fsys gateRunFS, townRoot string, r GateRun, limit int64, no
 	return rotateErr
 }
 func ReadGateRuns(townRoot string) ([]GateRun, int, error) {
+	return readGateRuns(osGateRunFS{}, townRoot)
+}
+
+// readGateRuns reads the log's bytes under gateRunMu, so it never sees the log
+// between a rotation's removal of it and the new row's append, and parses them
+// after the lock is released (gt-vaakuz).
+func readGateRuns(fsys gateRunFS, townRoot string) ([]GateRun, int, error) {
 	path := gateRunsPath(townRoot)
 	if path == "" {
 		return nil, 0, ErrNoGateRunRoot
 	}
-	f, err := os.Open(path) //nolint:gosec // G304: the path is under the town root
+	gateRunMu.Lock()
+	data, err := fsys.ReadFile(path)
+	gateRunMu.Unlock()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, 0, nil
 		}
-		return nil, 0, fmt.Errorf("land: opening %s: %w", path, err)
+		return nil, 0, fmt.Errorf("land: reading %s: %w", path, err)
 	}
-	defer func() { _ = f.Close() }() // read-only: a close error cannot lose a run
 	var runs []GateRun
 	unparsed := 0
-	br := bufio.NewReaderSize(f, 64*1024)
+	br := bufio.NewReaderSize(bytes.NewReader(data), 64*1024)
 	for {
 		raw, over, err := readGateRunLine(br)
 		if errors.Is(err, io.EOF) {

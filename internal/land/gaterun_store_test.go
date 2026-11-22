@@ -543,6 +543,7 @@ type holdingGateRunFS struct {
 	once    sync.Once
 	relOnce sync.Once
 	sizes   atomic.Int32
+	reads   atomic.Int32
 }
 
 // open releases the blocked read; safe to call more than once, so a Cleanup can
@@ -556,6 +557,7 @@ func (h *holdingGateRunFS) Size(p string) (int64, error) {
 }
 
 func (h *holdingGateRunFS) ReadFile(p string) ([]byte, error) {
+	h.reads.Add(1)
 	h.once.Do(func() { close(h.inRead) })
 	<-h.release
 	return h.memGateRunFS.ReadFile(p)
@@ -1166,5 +1168,51 @@ func TestGateRunStoreRetentionReport(t *testing.T) {
 				t.Errorf("report = %q, want %q", report.String(), tc.want)
 			}
 		})
+	}
+}
+
+// TestGateRunStoreAReadDuringARotationWaitsForIt: a reader started while a rotation
+// is open (its read of the log blocked) does not reach the filesystem until the
+// rotation is done, and then sees the log the rotation left, so it never reads the
+// log between the rotation's removal and the new row's append (gt-vaakuz). The test
+// is not parallel: it holds the package-wide gate-run mutex.
+//
+//testpolicy:allow parallel — holds the package-wide gate-run mutex that every other append in this package also takes
+func TestGateRunStoreAReadDuringARotationWaitsForIt(t *testing.T) {
+	h := &holdingGateRunFS{memGateRunFS: newMemGateRunFS(), inRead: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(h.open)
+	cur := gateRunsPath("/town")
+	old := sampleGateRun("gt-old")
+	old.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	h.files[cur] = []byte(mustLine(t, old) + "\n")
+	aDone, bDone := make(chan struct{}), make(chan struct{})
+	go func() {
+		row := sampleGateRun("gt-a")
+		row.TS = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+		if err := appendGateRunLimit(h, "/town", row, 1); err != nil {
+			t.Errorf("append: %v", err)
+		}
+		close(aDone)
+	}()
+	awaitGateRun(t, h.inRead, "the append's rotation to read the log")
+	var runs []GateRun
+	var readErr error
+	go func() {
+		runs, _, readErr = readGateRuns(h, "/town")
+		close(bDone)
+	}()
+	// The reader gets a bounded number of chances to reach the filesystem; with the
+	// lock held by the rotation it never does, so only the rotation's read was made.
+	for i := 0; i < 20000 && h.reads.Load() < 2; i++ {
+		runtime.Gosched()
+	}
+	if n := h.reads.Load(); n != 1 {
+		t.Errorf("%d reads reached the filesystem while a rotation was open, want only the rotation's", n)
+	}
+	h.open()
+	awaitGateRun(t, aDone, "the append")
+	awaitGateRun(t, bDone, "the read")
+	if readErr != nil || len(runs) != 1 || runs[0].Bead != "gt-a" {
+		t.Errorf("read = %+v, %v; want the one row the rotation left in the log, gt-a", runs, readErr)
 	}
 }
