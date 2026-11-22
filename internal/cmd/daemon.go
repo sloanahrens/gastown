@@ -14,6 +14,8 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/doltbackup"
+	"github.com/steveyegge/gastown/internal/jobs"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/util"
@@ -645,6 +647,7 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	// that derives sender identity from ambient env vars (e.g. gt mail send)
 	// would then be misattributed to the launching agent. GH#3006.
 	daemon.PublishIdentity()
+	wireJobListSource(doltbackup.DefaultRoot)
 
 	config := daemon.DefaultConfig(townRoot)
 	d, err := daemon.New(config)
@@ -658,6 +661,47 @@ func runDaemonRun(cmd *cobra.Command, args []string) error {
 	d.SetSchedulerDeps(schedulerDeps())
 
 	return daemonRunExit(d.Run(), os.Exit)
+}
+
+// wireJobListSource installs the collector's job list, which only this package
+// can pair with jobs.List: internal/jobs imports internal/daemon (gt-poy10l).
+func wireJobListSource(backupRoot func() (string, error)) {
+	daemon.JobListSource = func(townRoot string, now time.Time) ([]daemon.JobReading, error) {
+		return jobListSource(backupRoot, townRoot, now)
+	}
+}
+
+// jobListSource lists the town's maintenance jobs at now. A backup root the
+// host cannot name is an error, never an empty one that kills the backup wake.
+func jobListSource(backupRoot func() (string, error), townRoot string, now time.Time) ([]daemon.JobReading, error) {
+	root, err := backupRoot()
+	if err != nil {
+		return nil, fmt.Errorf("resolving the Dolt backup root: %w", err)
+	}
+	list, err := jobs.List(townRoot, jobs.Options{BackupRoot: root}, now)
+	if err != nil {
+		return nil, err
+	}
+	return jobReadingsFromJobs(list), nil
+}
+
+// jobReadingsFromJobs maps each job onto the fields the collector judges; state
+// and outcome are strings, so a state jobs gains later passes through unchanged.
+func jobReadingsFromJobs(list []jobs.Job) []daemon.JobReading {
+	readings := make([]daemon.JobReading, 0, len(list))
+	for _, j := range list {
+		r := daemon.JobReading{
+			Name:    j.Name,
+			State:   string(j.State),
+			Outcome: string(j.Outcome),
+			Cadence: j.Cadence,
+		}
+		if j.LastRun != nil {
+			r.LastRun = *j.LastRun
+		}
+		readings = append(readings, r)
+	}
+	return readings
 }
 
 func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
