@@ -309,7 +309,6 @@ func TestLandSurvivesAVerdictCommentFailure(t *testing.T) {
 			f := newLandFixture(t)
 			l := f.lander()
 			l.Beads = tc.beads(f.bd)
-			l.sleep = func(time.Duration) {}
 			var log strings.Builder
 			l.Out = &log
 			res, err := l.Land(context.Background(), f.work)
@@ -331,13 +330,15 @@ func TestLandSurvivesAVerdictCommentFailure(t *testing.T) {
 }
 
 // commentBeads is a beads fake whose comments can fail: the reads a duplicate
-// check makes, or the write itself.
+// check makes, or the write itself. calls counts the write attempts, so a test
+// can tell one try from a retry.
 type commentBeads struct {
 	*beadsfake.Fake
 	failComments bool
 	failComment  bool
 	failShow     bool
 	flaky        int
+	calls        int
 }
 
 func (b *commentBeads) Show(id string) (*beads.Issue, error) {
@@ -355,6 +356,7 @@ func (b *commentBeads) Comments(id string) ([]beads.Comment, error) {
 }
 
 func (b *commentBeads) AddComment(id, text string) error {
+	b.calls++
 	if b.flaky > 0 {
 		b.flaky--
 		return errors.New("dolt: connection refused")
@@ -365,33 +367,44 @@ func (b *commentBeads) AddComment(id, text string) error {
 	return b.Fake.AddComment(id, text)
 }
 
-// TestCommentVerdictRetries: a comment that fails twice is written; one that
-// fails three times is left off and logged (gt-y82k93).
-func TestCommentVerdictRetries(t *testing.T) {
+// TestCommentVerdictTriesOnce: the verdict comment's write is tried once. A
+// write that fails is left off the bead, logged and queued for a later pass; a
+// write that succeeds is the only attempt and queues nothing (gt-emlnzk).
+func TestCommentVerdictTriesOnce(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name  string
-		fails int
-		want  int
-		alarm bool
+		name   string
+		fails  int // the first write fails
+		want   int // comments on the bead
+		queued int
+		alarm  bool
 	}{
-		{"a comment that fails twice is written", 2, 1, false},
-		{"a comment that fails three times is logged", 3, 0, true},
+		{"a comment that fails once is logged and queued", 1, 0, 1, true},
+		{"a comment that is written queues nothing", 0, 1, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newLandFixture(t)
 			l := f.lander()
-			l.Beads = &commentBeads{Fake: f.bd, flaky: tc.fails}
-			l.sleep = func(time.Duration) {}
+			beads := &commentBeads{Fake: f.bd, flaky: tc.fails}
+			l.Beads = beads
+			q := queueAt(t, false)
+			l.Records = &q
 			var log strings.Builder
 			l.Out = &log
 			l.commentVerdict(f.work, Verdict{Verdict: VerdictApprove, Score: 0.91, Version: "v1"}, time.Now(), time.Now())
+			if beads.calls != 1 {
+				t.Errorf("AddComment calls = %d; want one try", beads.calls)
+			}
 			if got := len(f.beadComments()); got != tc.want {
 				t.Errorf("%d comment(s) on the bead; want %d", got, tc.want)
 			}
 			if got := strings.Contains(log.String(), "could not comment the om verdict"); got != tc.alarm {
 				t.Errorf("logged %q; want the alarm %v", log.String(), tc.alarm)
+			}
+			got, err := q.Pending()
+			if err != nil || len(got) != tc.queued {
+				t.Errorf("Pending = %+v, %v; want %d queued", got, err, tc.queued)
 			}
 		})
 	}
@@ -429,20 +442,20 @@ func TestCommentVerdictTimeoutLogs(t *testing.T) {
 	}
 }
 
-// TestCommentVerdictCommentQueue: a comment that fails all its tries is
-// queued under the candidate head's marker; one that is written queues
-// nothing, and a nil queue keeps today's behaviour (gt-bqnv54).
+// TestCommentVerdictCommentQueue: a comment whose write fails is queued under
+// the candidate head's marker; one that is written queues nothing, and a nil
+// queue keeps today's behaviour (gt-bqnv54).
 func TestCommentVerdictCommentQueue(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name   string
-		fails  int  // tries the write fails before it is left off
+		fails  int  // the write fails
 		queue  bool // l.Records is set
 		queued int
 	}{
-		{"a comment that fails all its tries is queued", 3, true, 1},
+		{"a comment whose write fails is queued", 1, true, 1},
 		{"a comment that is written queues nothing", 0, true, 0},
-		{"a nil queue behaves as today", 3, false, 0},
+		{"a nil queue behaves as today", 1, false, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
