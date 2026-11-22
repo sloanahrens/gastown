@@ -34,3 +34,15 @@ internal/hygiene TestTreeScanWorksInLinkedWorktree # a temp repo or a fixture gi
 internal/hygiene/cmd/scan TestRunRefusesGitAnswersItCannotUse # a fake git answers the listing of a temp tree; it walks no real tree
 internal/land TestScanningTestsFindsGitFileListings # a scratch fixture file system holds the source the finder reads; it walks no real tree
 internal/land TestScanningTestsFollowsSameFileHelpers # a scratch fixture file system holds the source the finder reads; it walks no real tree
+internal/repoguard TestCLIExecRunDropsHookVariables # a fake exec start seam captures the command; it walks no real tree
+internal/repoguard TestCLIGitIsTrackedTable # a fake exec answers the git ls-files call from a table; it walks no real tree
+internal/repoguard TestCLIGitLsDeletedTable # a fake exec answers the git ls-files --deleted call from a table; it walks no real tree
+internal/repoguard TestCLIGitLsFilesTable # a fake exec answers the git ls-files call from a table; it walks no real tree
+internal/repoguard TestCheckGofmtTable # a fake git and a fake gofmt answer the listing and the format check; it walks no real tree
+internal/repoguard TestIntegrationTrackedShellScriptsFailsOutsideGit # walks a temp dir that is not a git repository; it walks no real tree
+internal/shelltier TestGitListerAsksGitForTheShellTests # an injected run answers the git ls-files listing; it walks no real tree
+internal/tiersweep TestIntegrationUnreadableListIsRed # a fake repo answers the test-file listings; it walks no real tree
+internal/tiersweep TestSweepDefaultsReadFileToTheDisk # a temp root holds the fixture test files the tier reads; it walks no real tree
+internal/tiersweep TestSweepGitSource # an injected exec answers the git ls-files listing; it walks no real tree
+internal/tiersweep TestSweepProductionWiringHonorsRoot # a fake git answers the ls-files listing under a written-in root; it walks no real tree
+internal/ui TestNoTerminalBackgroundProbe # walks every non-test Go file under internal/, the real tree; it is an unregistered guard, follow-up gt-kfde9l registers it in treeWideGuards
