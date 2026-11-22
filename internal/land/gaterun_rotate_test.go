@@ -37,3 +37,33 @@ func TestGateRunRotationDecisions(t *testing.T) {
 		t.Errorf("groupGateRunsByMonth() = %+v, want %+v", got, want)
 	}
 }
+
+// TestGateRunMonthExpired: a month file is expired once its month ended more than
+// keepDays days before now, a month ends at the first instant of the next UTC
+// month, exactly keepDays days is not expired, and a name that is not a month file
+// is never expired (gt-1khwlf).
+func TestGateRunMonthExpired(t *testing.T) {
+	t.Parallel()
+	utc := func(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 0, 0, 0, 0, time.UTC) }
+	cutoff := utc(2027, time.April, 1) // the end of 2026-12 plus 90 days
+	for _, tc := range []struct {
+		name string
+		file string
+		now  time.Time
+		want bool
+	}{
+		{"a month that ended long before", "gate-runs-2026-10.jsonl.gz", utc(2027, time.March, 15), true},
+		{"exactly the kept days after the month ended", "gate-runs-2026-12.jsonl.gz", cutoff, false},
+		{"one nanosecond past the kept days", "gate-runs-2026-12.jsonl.gz", cutoff.Add(time.Nanosecond), true},
+		{"a newer month", "gate-runs-2027-02.jsonl.gz", utc(2027, time.March, 15), false},
+		{"the current log", "gate-runs.jsonl", utc(2027, time.March, 15), false},
+		{"the rejects file", "gate-runs-rejects.jsonl", utc(2030, time.January, 1), false},
+		{"a month that does not exist", "gate-runs-2026-13.jsonl.gz", utc(2030, time.January, 1), false},
+		{"a month file without the gz suffix", "gate-runs-2026-10.jsonl", utc(2030, time.January, 1), false},
+		{"a now in another zone is read as the instant it is", "gate-runs-2026-12.jsonl.gz", cutoff.In(time.FixedZone("x", 5*3600)), false},
+	} {
+		if got := gateRunMonthExpired(tc.file, tc.now, 90); got != tc.want {
+			t.Errorf("%s: gateRunMonthExpired(%q, %s, 90) = %t, want %t", tc.name, tc.file, tc.now.Format(time.RFC3339Nano), got, tc.want)
+		}
+	}
+}
