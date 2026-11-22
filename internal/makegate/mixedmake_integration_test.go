@@ -3,7 +3,10 @@
 package makegate
 
 import (
+	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -99,6 +102,83 @@ func mixedMakeLine(line string) bool {
 	}
 	rest := strings.NewReplacer("$(MAKE)", "", "${MAKE}", "").Replace(line)
 	return strings.ContainsAny(rest, ";|") || strings.Contains(rest, "&&")
+}
+
+// mixedGuardFindings returns one alarm per disagreement between the mixed
+// targets in root's Makefile and guarded, bead gt-az0vxj's list. A computed
+// target missing from the list names itself and its line; a listed name with no
+// mixed line is stale; a Makefile that cannot be read is an error (gt-jiwfzd).
+func mixedGuardFindings(root string, guarded []string) ([]string, error) {
+	text, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		return nil, fmt.Errorf("read the Makefile under %s: %w", root, err)
+	}
+	mixed := mixedMakeTargets(string(text))
+	var alarms []string
+	for _, target := range slices.Sorted(maps.Keys(mixed)) {
+		if !slices.Contains(guarded, target) {
+			alarms = append(alarms, fmt.Sprintf("Makefile:%d: %s holds $(MAKE) beside another command, so make -n runs it for real: keep the target's tests off make -n on the real tree and list it with the guarded dry-run targets, or split the $(MAKE) call onto its own line", mixed[target], target))
+		}
+	}
+	for _, target := range guarded {
+		if _, ok := mixed[target]; !ok {
+			alarms = append(alarms, fmt.Sprintf("%s is on the guarded dry-run list but no recipe line under it mixes $(MAKE) with another command: remove the stale name from the list", target))
+		}
+	}
+	return alarms, nil
+}
+
+// scratchMakefile writes text as root/Makefile under a fresh temporary
+// directory and returns it, so a case reads a copy of the checkout.
+func scratchMakefile(t *testing.T, text string) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Makefile"), []byte(text), 0o644); err != nil {
+		t.Fatalf("write the scratch Makefile: %v", err)
+	}
+	return root
+}
+
+// checkMixedGuard fails unless root's Makefile yields exactly want.
+func checkMixedGuard(t *testing.T, root string, want []string) {
+	t.Helper()
+	alarms, err := mixedGuardFindings(root, dryRunTargets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(alarms, want) {
+		t.Fatalf("mixedGuardFindings(%s) = %q, want %q", root, alarms, want)
+	}
+}
+
+// TestIntegrationMixedMakeTargetsAreGuarded requires the computed mixed-target
+// set to equal the guarded list exactly (gt-jiwfzd). Mutation: add a mixed
+// recipe line to any target and it fails naming it and its line; remove one
+// from a listed target and it fails naming that name as stale.
+func TestIntegrationMixedMakeTargetsAreGuarded(t *testing.T) {
+	checkMixedGuard(t, repoRoot(t), nil)
+}
+
+// TestIntegrationMixedMakeScratchCopy drives both disagreements on scratch
+// Makefiles (gt-jiwfzd). Mutation: drop either check and its case passes.
+func TestIntegrationMixedMakeScratchCopy(t *testing.T) {
+	base := makefileText(t, repoRoot(t))
+	t.Run("an added mixed rule is named with its line", func(t *testing.T) {
+		root := scratchMakefile(t, base+"zz-mixed:\n\t@$(MAKE) y && true\n")
+		want := fmt.Sprintf("Makefile:%d: zz-mixed holds $(MAKE) beside another command, so make -n runs it for real: keep the target's tests off make -n on the real tree and list it with the guarded dry-run targets, or split the $(MAKE) call onto its own line",
+			len(strings.Split(base, "\n"))+1)
+		checkMixedGuard(t, root, []string{want})
+	})
+	t.Run("a listed name no longer mixed is stale", func(t *testing.T) {
+		// Presubmit stays mixed; ci-base-image's call is alone on its line.
+		root := scratchMakefile(t, "presubmit:\n\t@$(MAKE) a && b\nci-base-image:\n\t@$(MAKE) --no-print-directory build\n")
+		checkMixedGuard(t, root, []string{"ci-base-image is on the guarded dry-run list but no recipe line under it mixes $(MAKE) with another command: remove the stale name from the list"})
+	})
+	t.Run("a Makefile that cannot be read is an error", func(t *testing.T) {
+		if _, err := mixedGuardFindings(t.TempDir(), dryRunTargets); err == nil {
+			t.Fatal("mixedGuardFindings on a directory with no Makefile returned no error: a guard that read nothing has not cleared the tree")
+		}
+	})
 }
 
 // TestIntegrationMixedMakeReader checks the reader the guarded-list comparison
