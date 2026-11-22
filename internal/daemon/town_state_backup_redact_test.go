@@ -81,6 +81,38 @@ func TestTownStateBackupRedactRefusesCredentialText(t *testing.T) {
 	}
 }
 
+// TestTownStateBackupRedactRefusesAYAMLConfigWithACredential: a rig's
+// .beads/config.yaml holding a password line is refused by the YAML rule, never
+// copied, and the note names the path only.
+func TestTownStateBackupRedactRefusesAYAMLConfigWithACredential(t *testing.T) {
+	t.Parallel()
+	const (
+		exported = "gastown/.beads/config.yaml"
+		secret   = "PLANTED-123"
+	)
+	tree := fstest.MapFS{
+		"mayor/town.json": {Data: []byte(`{"name":"town"}`)},
+		exported:          {Data: []byte("prefix: gt\npassword: " + secret + "\n")},
+	}
+	snap, err := collectTownState(tree, []string{"gastown"})
+	if err != nil {
+		t.Fatalf("collectTownState: %v", err)
+	}
+	if _, ok := snap.Files[exported]; ok {
+		t.Errorf("%s was copied; a YAML password line must refuse the file", exported)
+	}
+	if !reflect.DeepEqual(snap.Refused, []string{exported}) {
+		t.Errorf("refused = %v, want [%s]", snap.Refused, exported)
+	}
+	note := townStateCredentialNote(snap)
+	if want := "refused 1 secret-bearing file(s): " + exported; note != want {
+		t.Errorf("note = %q, want %q", note, want)
+	}
+	if strings.Contains(note, secret) {
+		t.Errorf("the note holds the planted credential")
+	}
+}
+
 // TestTownStateBackupRedactCopiesCleanFileVerbatim: a file without credentials
 // is copied byte for byte, JSON and non-JSON alike.
 func TestTownStateBackupRedactCopiesCleanFileVerbatim(t *testing.T) {
