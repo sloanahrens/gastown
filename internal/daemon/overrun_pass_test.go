@@ -563,6 +563,55 @@ func TestOverrunPassStats(t *testing.T) {
 		}
 	})
 
+	t.Run("a failed escalation-wait read counts as one failed read", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		f := newOverrunFake(5*time.Minute, overrunSeat{Rig: "gastown", Polecat: "nux", Bead: "gt-wait11"})
+		// The seat is outside its gate, so its escalation-wait read is made and fails.
+		f.escalationWaiting = func(overrunSeat) (bool, error) { return false, errors.New("bd list: connection refused") }
+		var got passStats
+		s := f.seams()
+		s.passDone = func(stats passStats) { got = stats }
+		d.runOverrunGuard(s)
+		if got.seats != 1 || got.failedReads != 1 {
+			t.Errorf("seats %d, failedReads %d; want 1 seat and the failed wait read", got.seats, got.failedReads)
+		}
+	})
+
+	t.Run("a failed answered-time and gate read count both", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		f := newOverrunFake(5*time.Minute, overrunSeat{Rig: "gastown", Polecat: "nux", Bead: "gt-both11"})
+		f.escalationAnsweredAt = func(overrunSeat) (time.Time, error) { return time.Time{}, errors.New("escalation store unreadable") }
+		f.gateRunning = func(overrunSeat) (bool, error) { return false, errors.New("container-gate slot status: boom") }
+		var got passStats
+		s := f.seams()
+		s.passDone = func(stats passStats) { got = stats }
+		d.runOverrunGuard(s)
+		if got.seats != 1 || got.failedReads != 2 {
+			t.Errorf("seats %d, failedReads %d; want 1 seat and both failed reads", got.seats, got.failedReads)
+		}
+	})
+
+	t.Run("a tie for the slowest seat keeps the earlier seat", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		first := overrunSeat{Rig: "gastown", Polecat: "furiosa", Bead: "gt-tie111"}
+		f := newOverrunFake(5*time.Minute, first, overrunSeat{Rig: "gastown", Polecat: "toast", Bead: "gt-tie222"})
+		// Every seat's timed reads take 2 s answering and 1 s reading its gate
+		// state, so the two seats tie at 3 s and the earlier one is the slowest.
+		f.escalationAnsweredAt = func(overrunSeat) (time.Time, error) { f.now = f.now.Add(2 * time.Second); return time.Time{}, nil }
+		f.gateRunning = func(overrunSeat) (bool, error) { f.now = f.now.Add(time.Second); return false, nil }
+		var got passStats
+		s := f.seams()
+		s.readPoolSize = 1 // the fake clock is shared (gt-5ngy14)
+		s.passDone = func(stats passStats) { got = stats }
+		d.runOverrunGuard(s)
+		if got.seats != 2 || got.slowest.bead != first.Bead {
+			t.Errorf("seats %d, slowest %q; want 2 seats and the earlier seat %q", got.seats, got.slowest.bead, first.Bead)
+		}
+	})
+
 	t.Run("a seat list that cannot be read still reports", func(t *testing.T) {
 		t.Parallel()
 		d, _ := newOverrunDaemon(t, false)
