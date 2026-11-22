@@ -423,6 +423,27 @@ func TestMaintenanceGCStateUpdateLeavesAFileItCannotRead(t *testing.T) {
 			t.Errorf("the kept copy = %q, %v, want the unparseable bytes", got, err)
 		}
 	})
+	// The reader refuses these as it does an unparseable file (gt-u43s2r), so the
+	// write replaces them too: one definition of unparseable, or {} wedges forever.
+	for _, body := range []string{`{}`, `null`, `{"post_gc_bytes":{"hq":-5},"last_gc":{}}`} {
+		t.Run("a file the reader refuses as unparseable: "+body, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			path := maintenanceGCStatePath(town)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := recordMaintenanceGCRun(town, "hq", gcMeasure{total: 2 * mib}, gcMeasure{total: mib}, gcTestNow); err != nil {
+				t.Fatalf("record over %s: %v", body, err)
+			}
+			if got, err := os.ReadFile(path + squashStateCorruptSuffix); err != nil || string(got) != body {
+				t.Errorf("the kept copy = %q, %v, want %q", got, err, body)
+			}
+		})
+	}
 }
 
 // stateCopyFault is a copy file whose write or close fails.

@@ -312,12 +312,12 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 	// below zero (gt-u43s2r).
 	var keys map[string]json.RawMessage
 	if err := json.Unmarshal(data, &keys); err != nil || len(keys["last_gc"]) == 0 || string(keys["last_gc"]) == "null" {
-		return st, fmt.Errorf("parse %s: not the state object the daemon writes (last_gc is missing)", maintenanceGCStateFileName)
+		return st, fmt.Errorf("parse %s: %w: not the state object the daemon writes (last_gc is missing)", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable)
 	}
 	for _, sizes := range []map[string]int64{parsed.PostGCBytes, parsed.PostGCOldGenBytes} {
 		for db, n := range sizes {
 			if n < 0 {
-				return st, fmt.Errorf("parse %s: the size recorded for %s is below zero", maintenanceGCStateFileName, db)
+				return st, fmt.Errorf("parse %s: %w: the size recorded for %s is below zero", maintenanceGCStateFileName, errMaintenanceGCStateUnparseable, db)
 			}
 		}
 	}
