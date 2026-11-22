@@ -28,6 +28,15 @@ var (
 	envLine = regexp.MustCompile(`(?m)^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
 	// jsonMember scans text that is not valid JSON, so a truncated document is never skipped.
 	jsonMember = regexp.MustCompile(`"((?:[^"\\]|\\.)*)"[ \t\r\n]*:[ \t\r\n]*"((?:[^"\\]|\\.)*)"`)
+	// yamlLine matches a mapping entry in text that is not valid JSON: an
+	// optional list marker and a key, a colon and a space, then the rest of the
+	// line as the value. The key starts with a letter or underscore, so a JSON
+	// member, whose key is quoted, is left to jsonMember.
+	yamlLine = regexp.MustCompile(`(?m)^[ \t]*(?:-[ \t]+)?([A-Za-z_][A-Za-z0-9_.-]*)[ \t]*:[ \t]+(.*)$`)
+	// blockScalarHeader is a mapping value that opens a block scalar: | or > with
+	// an optional indentation digit and chomping sign, in either order. The header
+	// states how the lines below are read, so it is not a value.
+	blockScalarHeader = regexp.MustCompile(`^[|>](?:[1-9][+-]?|[+-][1-9]?)?$`)
 	// tokensSegment: the plural word as a whole name segment; countOrFlag: a number or a switch.
 	tokensSegment = regexp.MustCompile(`(?i)(^|[^a-z0-9])tokens([^a-z0-9]|$)`)
 	countOrFlag   = regexp.MustCompile(`(?i)^(\d+|on|off|true|false)$`)
@@ -37,6 +46,46 @@ var (
 	// not a reference (gt-t5pxk8).
 	envRefOnly = regexp.MustCompile(`^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$`)
 )
+
+// lastSegment returns the last dotted segment of a YAML key. Only that segment
+// decides whether the key is a credential, so dolt.password is a password while
+// password.count is a count.
+func lastSegment(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
+// yamlValue returns the value of a mapping entry and whether it was quoted: a
+// quoted string without its quotes, or the text up to a trailing # comment. A
+// line in a block scalar is read like any other, so a continuation line shaped
+// like an entry is a finding on its own.
+func yamlValue(raw string) (value string, quoted bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", false
+	}
+	if q := v[0]; q == '"' || q == '\'' {
+		for i := 1; i < len(v); i++ {
+			if q == '"' && v[i] == '\\' {
+				i++
+				continue
+			}
+			if v[i] == q {
+				return v[1:i], true
+			}
+		}
+		return v[1:], true
+	}
+	for i := 0; i < len(v); i++ {
+		if v[i] == '#' && (i == 0 || v[i-1] == ' ' || v[i-1] == '\t') {
+			v = v[:i]
+			break
+		}
+	}
+	return strings.TrimSpace(v), false
+}
 
 func credentialName(name string) bool {
 	lower := strings.ToLower(name)
@@ -241,7 +290,8 @@ func stringStart(data []byte, end int) int {
 // FindCredentials returns one rule name per credential in data, never a value.
 // Valid JSON is walked: a credential-named key's value is a json:key finding unless
 // its path is exempt, and a token-shaped word in any other string value is a
-// value:shape finding. Anything else is scanned for NAME=value and "key": "value".
+// value:shape finding. Anything else is scanned for NAME=value, "key": "value"
+// and a YAML name: value entry, whose last dotted segment decides the name.
 func FindCredentials(data []byte) []string {
 	var found []string
 	if hits, err := jsonHits(data); err == nil {
@@ -258,6 +308,18 @@ func FindCredentials(data []byte) []string {
 	for _, m := range jsonMember.FindAllSubmatch(data, -1) {
 		if credentialName(string(m[1])) && isSecret(string(m[1]), string(m[2])) {
 			found = append(found, "json:"+string(m[1]))
+		}
+	}
+	for _, m := range yamlLine.FindAllSubmatch(data, -1) {
+		name := lastSegment(string(m[1]))
+		value, quoted := yamlValue(string(m[2]))
+		// An unquoted | or > opens a block scalar, so it says nothing about a
+		// secret; the block's own lines go through this loop as ordinary lines.
+		if !quoted && blockScalarHeader.MatchString(value) {
+			continue
+		}
+		if credentialName(name) && isSecret(name, value) {
+			found = append(found, "yaml:"+string(m[1]))
 		}
 	}
 	return found

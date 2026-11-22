@@ -83,6 +83,97 @@ func TestFindCredentials(t *testing.T) {
 	}
 }
 
+// A YAML mapping entry in text that is not valid JSON is a finding when the
+// last dotted segment of its key is a credential name and its value is a
+// secret (gt-b4uopc). The rule names the key, never the value.
+func TestFindCredentialsReadsYAMLLines(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"a plain entry", "password: hunter2\n", []string{"yaml:password"}},
+		{"an unquoted api key", "api_key: sk-live-123\n", []string{"yaml:api_key"}},
+		{"a double-quoted token", "token: \"abc123\"\n", []string{"yaml:token"}},
+		{"a single-quoted token", "token: 'abc123'\n", []string{"yaml:token"}},
+		{"an indented nested key", "  dolt.password: hunter2\n", []string{"yaml:dolt.password"}},
+		{"a list item", "- api_key: abc123\n", []string{"yaml:api_key"}},
+		{"an indented list item", "  - api_key: abc123\n", []string{"yaml:api_key"}},
+		{"only the last dotted segment decides", "password.count: 3\n", nil},
+		{"the last segment is a credential", "vault.secret: abc123\n", []string{"yaml:vault.secret"}},
+		{"a trailing comment is cut", "token: abc123 # rotate monthly\n", []string{"yaml:token"}},
+		{"a quoted value keeps its hashes", "token: \"abc#123\"\n", []string{"yaml:token"}},
+		{"a commented-out line is not a finding", "# password: hunter2\n", nil},
+		{"an indented commented-out line is not a finding", "  # password: hunter2\n", nil},
+		{"an empty value is not a finding", "password:\npassword: \"\"\n", nil},
+		{"an environment reference is not a finding", "password: ${DOLT_PASSWORD}\n", nil},
+		{"a _file name is not a finding", "api_key_file: /run/key\n", nil},
+		{"a value that is only a comment is not a finding", "password: # none\n", nil},
+		{"a config with no credential key", "prefix: gt\nport: 3307\n", nil},
+		{"a block scalar header is not a value", "password: |\n  hunter2\n", nil},
+		{"a folded block header with a chomping sign is not a value", "password: >-\n  hunter2\n", nil},
+		{"a block header with a comment is not a value", "token: | # rotate quarterly\n  abc123\n", nil},
+		{"a mapping entry inside a block scalar is a finding", "password: |\n  token: abc123\n", []string{"yaml:token"}},
+		{"a quoted bar is a value", "password: \"|\"\n", []string{"yaml:password"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+	t.Run("a rule names the key and never the value", func(t *testing.T) {
+		got := FindCredentials([]byte("password: hunter2\napi_key: sk-live-123\n"))
+		for _, rule := range got {
+			if strings.Contains(rule, "hunter2") || strings.Contains(rule, "sk-live-123") {
+				t.Fatalf("rule %q holds a value", rule)
+			}
+		}
+	})
+}
+
+// TestFlaggedContentRefusesYAMLCredential walks the new rule through a caller:
+// FlaggedContent is the check the export and the backup archive verifier share,
+// so a YAML config must be omitted there, not only found by FindCredentials. It
+// runs the production entry point, so deleting the yamlLine loop turns every
+// refusal row red.
+func TestFlaggedContentRefusesYAMLCredential(t *testing.T) {
+	t.Parallel()
+	refused := []struct {
+		name string
+		in   string
+	}{
+		{"a plain password", "prefix: gt\npassword: hunter2\n"},
+		{"an indented nested key", "dolt:\n  password: hunter2\n"},
+		{"a quoted token", "token: \"abc123\"\n"},
+	}
+	for _, c := range refused {
+		t.Run(c.name, func(t *testing.T) {
+			if res := FlaggedContent(strings.NewReader(c.in)); !res.IsFail() {
+				t.Fatalf("FlaggedContent(%q) = %v, want a refusal", c.in, res)
+			}
+		})
+	}
+	clean := []struct {
+		name string
+		in   string
+	}{
+		{"a commented-out line", "prefix: gt\n# password: hunter2\n"},
+		{"an environment reference", "password: ${DOLT_PASSWORD}\n"},
+		{"a block scalar header", "password: |\n  hunter2\n"},
+	}
+	for _, c := range clean {
+		t.Run(c.name, func(t *testing.T) {
+			if res := FlaggedContent(strings.NewReader(c.in)); !res.IsPass() {
+				t.Fatalf("FlaggedContent(%q) = %v, want a pass", c.in, res)
+			}
+		})
+	}
+}
+
 // The name rule is exempt at exactly two JSON paths: a Kubernetes toleration's
 // key under any parent, and the daemon's om_token_meta at the document root.
 // The json:key and json:om_token_meta rows are the ones a widened shape turns
@@ -253,7 +344,7 @@ func TestRedactJSONRedactsEveryStringInAnArrayUnderACredentialKey(t *testing.T) 
 
 func TestRedactJSONRefusesWhatIsNotJSON(t *testing.T) {
 	t.Parallel()
-	for _, in := range []string{"API_KEY=abc\n", `{"api_key":"abc"`, ""} {
+	for _, in := range []string{"API_KEY=abc\n", "password: hunter2\n", `{"api_key":"abc"`, ""} {
 		out, n, err := RedactJSON([]byte(in))
 		if err == nil || out != nil || n != 0 {
 			t.Fatalf("RedactJSON(%q) = %q, %d, %v; want an error and no output", in, out, n, err)
