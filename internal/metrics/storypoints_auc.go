@@ -3,6 +3,8 @@ package metrics
 import (
 	"fmt"
 	"math"
+	"math/rand/v2"
+	"slices"
 )
 
 // LongAUC returns the area under the ROC curve of est for beads measured over
@@ -51,6 +53,35 @@ func LongAUC(est, measured []float64, longMinutes float64) (float64, error) {
 		}
 	}
 	return wins / float64(longs*others), nil
+}
+
+// LongAUCInterval is the 95% percentile interval of LongAUC over resamples of
+// the pairs drawn with replacement from a generator seeded with seed, so one
+// series and seed give one interval. A resample that drew only one class has no
+// AUC and is skipped; when no resample is usable the error says so.
+func LongAUCInterval(est, measured []float64, longMinutes float64, resamples int, seed uint64) (lo, hi float64, err error) {
+	if len(est) != len(measured) {
+		return 0, 0, fmt.Errorf("long auc interval: %d estimates, %d measured minutes", len(est), len(measured))
+	}
+	rng := rand.New(rand.NewPCG(seed, seed))
+	be, bm := make([]float64, len(est)), make([]float64, len(measured))
+	aucs := make([]float64, 0, resamples)
+	for range resamples {
+		for i := range be {
+			j := rng.IntN(len(est))
+			be[i], bm[i] = est[j], measured[j]
+		}
+		auc, err := LongAUC(be, bm, longMinutes)
+		if err != nil {
+			continue
+		}
+		aucs = append(aucs, auc)
+	}
+	if len(aucs) == 0 {
+		return 0, 0, fmt.Errorf("long auc interval: no usable resample of %d, so no interval", resamples)
+	}
+	slices.Sort(aucs)
+	return percentile(aucs, 0.025), percentile(aucs, 0.975), nil
 }
 
 // finite reports whether v is neither NaN nor infinite.
