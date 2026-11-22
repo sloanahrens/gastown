@@ -1631,7 +1631,12 @@ func TestPushWorkspaceNoPusher(t *testing.T) {
 // or a huge file is refused before the read and before the push slot is taken.
 func TestReadTownFileChecksTheFileBeforeReadingIt(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
+	// Resolve the root: townFileLink compares resolved paths, and macOS's
+	// TempDir is under /var, a symlink to /private/var.
+	town, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	good := filepath.Join(town, "routes.jsonl")
 	if err := os.WriteFile(good, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
