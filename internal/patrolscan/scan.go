@@ -1080,10 +1080,13 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		if f, ok := s.releaseStalled(rig, name, res); ok {
 			return f, true
 		}
-		// A stall on a pushed branch, or after an answered escalation, is the
-		// same finished or waiting work, only quieter, so the revival is tried
-		// before the stall is reported.
+		// A stall on a pushed branch, on a cut model stream, or after an answered
+		// escalation is the same finished or waiting work, only quieter, so the
+		// revival is tried before the stall is reported (gt-1ytjck).
 		if f, ok := s.revivePushed(rig, name, res); ok {
+			return f, true
+		}
+		if f, ok := s.reviveCut(rig, name, res); ok {
 			return f, true
 		}
 		if f, ok := s.reviveAnswered(rig, name, res); ok {
