@@ -494,6 +494,40 @@ func TestRedactJSONRedactsANumberUnderACredentialKey(t *testing.T) {
 	}
 }
 
+// The exemptions of the number rule, pinned from the value that stays: the tokens
+// segment exemption in isSecret leaves a token count whole, a number under a
+// non-credential key is never owned, and a boolean or null under a credential key
+// never reaches numberHit. Each row checks the input as well as the output, so a
+// row that starts redacting cannot pass on a clean-looking document (gt-sqxfuc).
+func TestRedactJSONNumberExemptions(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"a max_tokens count is exempt by shape", `{"max_tokens":4096}`},
+		{"a number under a non-credential key stays", `{"n":1,"count":42}`},
+		{"a boolean and a null under a credential key stay", `{"password":true,"secret":null}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := FindCredentials([]byte(c.in)); len(got) != 0 {
+				t.Fatalf("FindCredentials(%q) = %q, want no findings", c.in, got)
+			}
+			out, n, err := RedactJSON([]byte(c.in))
+			if err != nil {
+				t.Fatalf("RedactJSON(%q): %v", c.in, err)
+			}
+			if string(out) != c.in || n != 0 {
+				t.Fatalf("RedactJSON(%q) = %q, %d; want the input untouched, 0", c.in, out, n)
+			}
+			if got := FindCredentials(out); len(got) != 0 {
+				t.Fatalf("output %q still holds credentials: %q", out, got)
+			}
+		})
+	}
+}
+
 // A credential-named key owns the whole value under it, nested objects and arrays
 // included: every string and number leaf is a json:key finding and is replaced by
 // the marker, whatever the name of the key that holds it. A boolean, a null, an
