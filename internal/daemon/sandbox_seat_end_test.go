@@ -1694,8 +1694,7 @@ func TestTakeoverSeatEndKeepsAReusedSeat(t *testing.T) {
 // assignee, and the real keepReason must keep it with the cleanup_status
 // reason, leaving its host directories - the only host copy of that work -
 // where they are. With keepReason's cleanup-status rule removed the same seat
-// is removed and this test fails (gt-123qat); the push_failed row is bead
-// gt-2gdiax.
+// is removed and this test fails (gt-123qat).
 func TestTakeoverSeatEndKeepsAnUncommittedOrUnpushedDoneSeat(t *testing.T) {
 	t.Parallel()
 	const head = "0123456789abcdef"
@@ -1753,6 +1752,53 @@ func TestTakeoverSeatEndKeepsAnUncommittedOrUnpushedDoneSeat(t *testing.T) {
 				t.Errorf("log =\n%s\nwant it to carry %q", logs.String(), tt.wantLog)
 			}
 		})
+	}
+}
+
+// A seat that ran gt done on the landed bead can have lost its push: its agent
+// bead is done, its hook is empty and its last source issue is the landed bead,
+// but the push_failed gt done recorded says its branch never reached origin.
+// The landing offers it through the bead's assignee, and the real keepReason
+// must keep it with the push_failed reason, leaving its host directories - the
+// only host copy of that work - where they are. With keepReason's push_failed
+// rule removed the same seat is removed and this test fails (gt-2gdiax).
+func TestTakeoverSeatEndKeepsADoneSeatWhosePushFailed(t *testing.T) {
+	t.Parallel()
+	const head = "0123456789abcdef"
+	const branch = "crew/overseer/" + endBead
+	f := newSeatEndFake(t)
+	// gt done left the hook empty and the landed bead as the seat's last
+	// source issue; the recorded push failure is the one fact that still says
+	// its work never reached origin. The cleanup status stays clean, the
+	// harness default, so the cleanup-status rule cannot answer first.
+	f.seatFields.AgentState = string(beads.AgentStateDone)
+	f.seatFields.LastSourceIssue = endBead
+	f.seatFields.PushFailed = true
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	var logs strings.Builder
+	d := f.host.d
+	d.logger = log.New(&logs, "", 0)
+	d.openWorkBeads = func([]string, time.Duration) workBeadReader {
+		return workBeadStore{endBead: &beads.Issue{ID: endBead, Assignee: endRig + "/polecats/" + endPolecat}}
+	}
+	d.openRecoveryBeads = func([]string) beads.Client { return f.agentDB }
+	// The production end step over the harness's agent-bead and gateway
+	// seams: the offer runs into the real keepReason.
+	d.endSandboxSeat = f.host.endFinishedSandboxSeat
+
+	d.runSandboxSeatEnd(endRig, landingRecord(t, head, branch),
+		land.Work{BeadID: endBead, Head: head, Branch: branch, Worker: "town/crew/overseer"})
+
+	if !dirExists(t, dirs.PolecatDir) {
+		t.Errorf("seat directory removed, want it kept\nlog:\n%s", logs.String())
+	}
+	if !dirExists(t, dirs.PromptFile) {
+		t.Error("prompt file removed, want it kept")
+	}
+	if want := "kept: push_failed=true: the seat's branch never reached origin"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log =\n%s\nwant it to carry %q", logs.String(), want)
 	}
 }
 
