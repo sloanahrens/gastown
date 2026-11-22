@@ -81,9 +81,19 @@ func newClusterRollFixture(t *testing.T, render clusterRenderDeps, answer update
 }
 
 // isRevisionRead reports whether a call reads a Deployment's recorded revision,
-// the read the rollback lines make before the first apply.
+// the rollback lines' read before the first apply: a get of one Deployment by
+// name printing a jsonpath of its metadata, not the readiness wait's read of the
+// status. The annotation key's spelling is never read (gt-d6izyk).
 func isRevisionRead(args []string) bool {
-	return strings.Contains(strings.Join(args, " "), "deployment\\.kubernetes\\.io/revision")
+	if len(args) < 5 || args[0] != "get" || args[1] != "deployment" || strings.HasPrefix(args[2], "-") {
+		return false
+	}
+	for i := 3; i+1 < len(args); i++ {
+		if args[i] == "-o" {
+			return strings.HasPrefix(args[i+1], "jsonpath") && strings.Contains(args[i+1], ".metadata")
+		}
+	}
+	return false
 }
 
 // clusterRollAnswering answers the cluster calls a roll makes beyond the diff's
@@ -808,6 +818,20 @@ func TestLiveDeploymentRevision(t *testing.T) {
 				t.Fatalf("revision = %q, err = %v, want %q", got, err, tc.want)
 			}
 		})
+	}
+}
+
+// TestTownClusterRollRevisionReadRoutesOnTheCallShape: a reworded revision
+// annotation's key is still a revision read, and the readiness read is not
+// (gt-d6izyk).
+func TestTownClusterRollRevisionReadRoutesOnTheCallShape(t *testing.T) {
+	t.Parallel()
+	reworded := []string{"get", "deployment", "bd-gateway", "-n", "gt", "-o", `jsonpath={.metadata.annotations.gt\.io/rev}`}
+	if !isRevisionRead(reworded) {
+		t.Errorf("a reworded revision read is not one: %q", reworded)
+	}
+	if readiness := []string{"get", "deployment", "bd-gateway", "-n", "gt", "-o", readyConditionJSONPath}; isRevisionRead(readiness) {
+		t.Errorf("the readiness read is a revision read: %q", readiness)
 	}
 }
 
