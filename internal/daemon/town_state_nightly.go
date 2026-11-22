@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/townbackup"
 	"github.com/steveyegge/gastown/internal/townstate"
@@ -25,6 +27,8 @@ const (
 	// omittedNamesShown bounds the paths one omission log line carries, so a
 	// night that omits a directory of files still logs one short line.
 	omittedNamesShown = 20
+	// omittedNameMax bounds one name in that line, in bytes.
+	omittedNameMax = 80
 )
 
 // The nightly town-state backup (gt-xg1avw): one date's backup set, exported
@@ -153,10 +157,35 @@ func failedTownStateNight(partial string, cause error) error {
 // townStateOmittedNames renders the names of a night's omitted files for the
 // log: the first omittedNamesShown paths, then the count left out.
 func townStateOmittedNames(omitted []string) string {
-	if len(omitted) <= omittedNamesShown {
-		return strings.Join(omitted, ", ")
+	shown := omitted[:min(len(omitted), omittedNamesShown)]
+	names := make([]string, len(shown))
+	for i, name := range shown {
+		names[i] = townStateOmittedName(name)
 	}
-	return fmt.Sprintf("%s, and %d more", strings.Join(omitted[:omittedNamesShown], ", "), len(omitted)-omittedNamesShown)
+	if len(omitted) <= omittedNamesShown {
+		return strings.Join(names, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(names, ", "), len(omitted)-omittedNamesShown)
+}
+
+// townStateOmittedName is one omitted file name as the log line carries it: a name
+// is a file's own string and not a trusted one, so it is quoted (a newline, a
+// carriage return, an escape sequence or a NUL shows escaped and one name is one
+// token, never a second log line), cut to omittedNameMax bytes, and withheld
+// altogether when it holds a credential-shaped value, judged on the whole name
+// before the cut (gt-ea3yjo).
+func townStateOmittedName(name string) string {
+	if townstate.NameHoldsCredential(name) {
+		return `"<name withheld: credential-shaped>"`
+	}
+	if len(name) > omittedNameMax {
+		n := omittedNameMax
+		for n > 0 && !utf8.RuneStart(name[n]) {
+			n--
+		}
+		name = name[:n] + "..."
+	}
+	return strconv.Quote(name)
 }
 
 // townStateBackupCounts renders an export's counts for the daemon log.

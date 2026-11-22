@@ -194,3 +194,82 @@ func TestTownStateNightlyOmittedAlertThatDoesNotLandFailsTheNight(t *testing.T) 
 		t.Errorf("the credential's value reached the error or the log")
 	}
 }
+
+// TestTownStateNightlyOmittedNamesAreQuoted: a file name is not a trusted string, so
+// the omission line carries each name quoted and cut, and withholds a
+// credential-shaped one: a newline, a carriage return, an escape and a NUL are
+// shown escaped (no raw control byte reaches the line), a 200-character name is
+// cut at 80 bytes inside its quotes, a token-shaped name is withheld, and the
+// cap of twenty names keeps its "and K more" tail (gt-ea3yjo).
+func TestTownStateNightlyOmittedNamesAreQuoted(t *testing.T) {
+	t.Parallel()
+	token := "settings/ghp_" + strings.Repeat("a", 36) + ".json"
+	long := "settings/" + strings.Repeat("n", 200) + ".json"
+	for _, tc := range []struct {
+		name    string
+		names   []string
+		want    string
+		notWant []string
+	}{
+		{"a plain name", []string{"settings/a.json"}, `"settings/a.json"`, nil},
+		{"a newline that forges a line", []string{"settings/x\n2026/11/21 [daemon] night omitted 0 file(s): "}, `\n2026/11/21`, []string{"\n"}},
+		{"a carriage return, an escape and a NUL", []string{"settings/a\r\x1b[31m\x00.json"}, `\r\x1b[31m\x00`, []string{"\r", "\x1b", "\x00"}},
+		{"a 200-character name", []string{long}, `..."`, []string{strings.Repeat("n", 100)}},
+		{"a credential-shaped name", []string{token}, `"<name withheld: credential-shaped>"`, []string{"ghp_"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := townStateOmittedNames(tc.names)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("townStateOmittedNames = %q, want it to contain %q", got, tc.want)
+			}
+			for _, bad := range tc.notWant {
+				if strings.Contains(got, bad) {
+					t.Errorf("townStateOmittedNames = %q, must not contain %q", got, bad)
+				}
+			}
+		})
+	}
+	t.Run("more than twenty names", func(t *testing.T) {
+		t.Parallel()
+		var names []string
+		for i := 0; i < omittedNamesShown+1; i++ {
+			names = append(names, fmt.Sprintf("settings/n-%02d.json", i))
+		}
+		got := townStateOmittedNames(names)
+		if !strings.HasSuffix(got, ", and 1 more") || strings.Count(got, `"settings/`) != omittedNamesShown {
+			t.Errorf("townStateOmittedNames = %q, want twenty quoted names and an \"and 1 more\" tail", got)
+		}
+	})
+}
+
+// TestTownStateNightlyOmittedNamesEndToEnd: a night that omits a file named with a
+// newline and a forged daemon line, and one named with a token, logs ONE omission
+// line, and the token is nowhere in the log (gt-ea3yjo).
+func TestTownStateNightlyOmittedNamesEndToEnd(t *testing.T) {
+	t.Parallel()
+	town := nightlyTestTown(t)
+	forged := "settings/x\n2026/11/21 03:00:00 [daemon] town_state_backup: night omitted 0 file(s): \n.json"
+	named := "settings/ghp_" + strings.Repeat("a", 36) + ".json"
+	for _, name := range []string{forged, named} {
+		writeTownFile(t, town, name, `{"note":"`+omittedNightlyToken+`"}`)
+	}
+	var logs strings.Builder
+	d, _ := nightlyOmittedDaemon(t, town, &logs)
+	if err := d.maintenanceTownStateBackup(t.TempDir(), nightlyTestNow()); err != nil {
+		t.Fatalf("maintenanceTownStateBackup = %v", err)
+	}
+	logged := logs.String()
+	lines := 0
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, "night omitted") {
+			lines++
+		}
+	}
+	if lines != 1 {
+		t.Errorf("the log has %d lines naming an omission, want one:\n%s", lines, logged)
+	}
+	if strings.Contains(logged, "ghp_") {
+		t.Errorf("the log carries the credential-shaped name:\n%s", logged)
+	}
+}
