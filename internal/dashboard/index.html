@@ -151,7 +151,7 @@ tr.live,.ltrow.live{background:#101a13}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
 .workrow .wnum,.workrow .wpts{text-align:right;color:var(--dim)}
-.workrow .wsub,.workrow .wstart,.workrow .wround{font-size:11px;white-space:nowrap}
+.workrow .wsub,.workrow .wstart,.workrow .wround,.workrow .wrework{font-size:11px;white-space:nowrap}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
@@ -1288,6 +1288,9 @@ function paintAges(r, now) {
   if (p.bead && p.phase === "starting") r.age.append(el("div", "wstart", "starting"));
   else if (p.bead && p.gate_sec > 0) r.age.append(el("div", "wsub", "working " + fmtDur(p.working_sec || 0) + ", gate " + fmtDur(p.gate_sec)));
   if (p.bead && p.reject_count > 0) r.age.append(el("div", "wround", "round " + (p.reject_count + 1)));
+  // The count itself, warned from the second refusal on so a repeat stands out
+  // (gt-addb76).
+  if (p.bead && p.reject_count >= 1) r.age.append(el("div", "wrework" + (p.reject_count >= 2 ? " warnc" : ""), "rework ×" + p.reject_count));
   // The Points cell reads the bead's estimate, then the elapsed time since
   // dispatch, which moves with the clock like the age does. A seat holding no
   // bead leaves it empty.
