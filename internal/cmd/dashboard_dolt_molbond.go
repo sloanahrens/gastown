@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -48,7 +49,13 @@ func init() {
 // counts the calls logged since the dashboard started.
 func newDoltMolBondReader(getenv func(string) string, now func() time.Time) doltSectionRead {
 	pusher := bdGatewayPusherFromEnv(getenv)
-	counter := newDoltMolBondCounter(pusher.Calls, now, doltMolBondLimit)
+	// The error a failed read returns names the gateway it read. Host leaves out
+	// any credentials the URL carries, so they do not reach the error.
+	host := ""
+	if u, err := url.Parse(getenv(bdgateway.WorkspaceURLEnv)); err == nil {
+		host = u.Host
+	}
+	counter := newDoltMolBondCounter(pusher.Calls, now, doltMolBondLimit, host)
 	return counter.read
 }
 
@@ -62,6 +69,9 @@ type doltMolBondCounter struct {
 	// test passes a fake.
 	calls func(ctx context.Context, since time.Time, limit int) (bdgateway.CallsPage, error)
 	limit int
+	// host is the gateway the calls go to, named in the error a failed read
+	// returns: the gateway's own errors need not name it.
+	host string
 	// cursor is the newest stamp counted, and the start the first read asks
 	// from; it never moves back.
 	cursor time.Time
@@ -72,9 +82,10 @@ type doltMolBondCounter struct {
 }
 
 // newDoltMolBondCounter starts a counter at now: the first read counts the
-// calls logged after that instant.
-func newDoltMolBondCounter(calls func(ctx context.Context, since time.Time, limit int) (bdgateway.CallsPage, error), now func() time.Time, limit int) *doltMolBondCounter {
-	return &doltMolBondCounter{calls: calls, limit: limit, cursor: now()}
+// calls logged after that instant. host names the gateway a failed read's
+// error is about.
+func newDoltMolBondCounter(calls func(ctx context.Context, since time.Time, limit int) (bdgateway.CallsPage, error), now func() time.Time, limit int, host string) *doltMolBondCounter {
+	return &doltMolBondCounter{calls: calls, limit: limit, host: host, cursor: now()}
 }
 
 // read polls the gateway, counts the calls past the cursor, and draws the
@@ -86,7 +97,12 @@ func (c *doltMolBondCounter) read(ctx context.Context, now time.Time) (dashboard
 
 	page, err := c.calls(ctx, c.cursor, c.limit)
 	if err != nil {
-		return dashboard.DoltSection{}, fmt.Errorf("reading the gateway's calls: %w", err)
+		// A failed read fails the section, and the error names the gateway it
+		// reads through: the gateway's own error need not name it.
+		if c.host == "" {
+			return dashboard.DoltSection{}, fmt.Errorf("reading the gateway's calls: %w", err)
+		}
+		return dashboard.DoltSection{}, fmt.Errorf("reading the gateway's calls at %s: %w", c.host, err)
 	}
 	newest := c.cursor
 	unreadable := 0

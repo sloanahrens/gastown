@@ -3,6 +3,10 @@ package cmd
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -54,7 +58,7 @@ func TestDoltMolBondSectionCountsAttemptsAndFailures(t *testing.T) {
 		molBondEntry(start.Add(50*time.Second), "update", 0),
 		molBondEntry(start.Add(50*time.Second), "close", 1),
 	}}}
-	counter := newDoltMolBondCounter(calls.Calls, func() time.Time { return start }, 500)
+	counter := newDoltMolBondCounter(calls.Calls, func() time.Time { return start }, 500, "")
 
 	section, err := counter.read(context.Background(), start.Add(time.Minute))
 	if err != nil {
@@ -105,7 +109,7 @@ func TestDoltMolBondSectionCountsACallOnce(t *testing.T) {
 		molBondEntry(start.Add(30*time.Second), "create", 0),
 	}
 	calls := &fakeDoltMolBondCalls{page: bdgateway.CallsPage{Entries: entries}}
-	counter := newDoltMolBondCounter(calls.Calls, func() time.Time { return start }, len(entries))
+	counter := newDoltMolBondCounter(calls.Calls, func() time.Time { return start }, len(entries), "")
 
 	first, err := counter.read(context.Background(), start.Add(5*time.Minute))
 	if err != nil {
@@ -132,21 +136,43 @@ func TestDoltMolBondSectionCountsACallOnce(t *testing.T) {
 }
 
 // A gateway that cannot be read fails the section: an empty table would read as
-// a gateway with no mol bond calls.
+// a gateway with no mol bond calls. The Err names the gateway host and never the
+// bearer token: a refusal's own error names only its status, and the credential
+// the read used must not be repeated.
 func TestDoltMolBondSectionRefusesAFailedRead(t *testing.T) {
 	t.Parallel()
 
-	boom := errors.New("the gateway at bd-gateway:7440 did not answer the calls read")
+	const token = "molbond-token-value"
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the token file: %v", err)
+	}
+	pusher := bdgateway.GatewayPusher{
+		URL:       "http://bd-gateway.gt.svc:7440",
+		TokenFile: tokenFile,
+		HTTP: doerFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Body:       io.NopCloser(strings.NewReader(`{"code":"unavailable","message":"down"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
 	now := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
-	calls := &fakeDoltMolBondCalls{err: boom}
-	counter := newDoltMolBondCounter(calls.Calls, func() time.Time { return now }, 500)
+	counter := newDoltMolBondCounter(pusher.Calls, func() time.Time { return now }, 500, "bd-gateway.gt.svc:7440")
 
 	section, err := counter.read(context.Background(), now)
 	if err == nil {
 		t.Fatalf("a failed read answered section %+v", section)
 	}
-	if !strings.Contains(err.Error(), "bd-gateway:7440") {
+	if !strings.Contains(err.Error(), "bd-gateway.gt.svc:7440") {
 		t.Errorf("the error %q does not name the gateway host", err)
+	}
+	if !errors.Is(err, bdgateway.ErrGatewayRefused) {
+		t.Errorf("the error %q does not keep the gateway's refusal", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("the error %q holds the bearer token", err)
 	}
 	if section.Head != nil || section.Rows != nil {
 		t.Errorf("the failed read carries a table: %+v", section)
@@ -161,8 +187,12 @@ func TestDoltMolBondSectionReadRefusesNoGateway(t *testing.T) {
 	now := time.Date(2026, 11, 20, 15, 0, 0, 0, time.UTC)
 	read := newDoltMolBondReader(func(string) string { return "" }, func() time.Time { return now })
 
-	if _, err := read(context.Background(), now); err == nil || !strings.Contains(err.Error(), "no gateway url") {
+	_, err := read(context.Background(), now)
+	if err == nil || !strings.Contains(err.Error(), "no gateway url") {
 		t.Errorf("a read with no gateway configured answered %v, want the missing-URL refusal", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "reading the gateway's calls at") {
+		t.Errorf("the error %q names a host the settings do not", err)
 	}
 }
 
