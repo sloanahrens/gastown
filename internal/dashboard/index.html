@@ -2080,10 +2080,10 @@ function landingStateCell(r) {
 // (gt-90wi1). A bird or crew branch's landing has no polecat, so its cell
 // names the branch's agent ("crew/<agent>/...") or, when the branch names none,
 // says bird — never a dash, which would look like missing data (gt-kmp7c); the
-// tooltip says why there is no polecat time (gt-rxs7w, gt-830fd). A row that
-// carries no reading — a queued bead, whose queue reading (QueueBead) has no
-// polecat time — reads the dash, never a figure guessed from its wait
-// (gt-duuq1).
+// tooltip says why there is no polecat time (gt-rxs7w, gt-830fd). A queued bead
+// draws the reading its QueueBead carries — polecat_secs, the + of a lower
+// bound, and the dash when the spans log gave it none, never a figure guessed
+// from its wait (gt-p77nun).
 function polecatTimeCell(row) {
   const pc = el("span", "n", row.crew ? (row.crew_agent || "bird") : polecatDur(row.polecat_secs, row.polecat_lower_bound, row.polecat_upper_bound));
   const attempts = row.polecat_attempts || [];
@@ -2166,11 +2166,8 @@ function landingTable(s, names, rows, waiting) {
   // and every reading then sit in the column the running and finished rows put
   // them. The wait is aged from the bead's last update — the label write gt done
   // makes is normally its last write. No stage has run, so Score, Gate, om and
-  // Ship hold the empty-column dash a running row draws. The queue reading
-  // carries no polecat time, so the Polecat time cell reads the dash
-  // polecatTimeCell draws for a row with none, never a time guessed from the
-  // wait. The worker's order is not known to this page, so a row says waiting
-  // and nothing about position.
+  // Ship hold the empty-column dash a running row draws. The worker's order is
+  // not known to this page, so a row says waiting and nothing about position.
   for (const b of shown) {
     const tr = el("div", "ltrow");
     const when = el("span", "when title", b.updated_at ? "waiting " + age(b.updated_at) : "waiting");

@@ -521,8 +521,9 @@ func TestAQueuedRowWithNoHolderDrawsTheDash(t *testing.T) {
 
 // The Polecat column's dev time is one computation, polecatTimeCell, over the
 // reading a row carries: a running row's polecat_secs renders through polecatDur,
-// its floor keeping the + (gt-duuq1). A queued row takes the same cell, but its
-// queue reading carries no polecat time; see TestAQueuedRowWithNoDevTimeReadsTheDash.
+// its floor keeping the + (gt-duuq1). A queued row takes the same cell over its
+// QueueBead, so its reading draws there too
+// (TestQueuedRowPolecatTimeDrawsTheTime).
 // Mutation: hard-code the cell's dash and this row reads "–" where the reading
 // says "13m+".
 func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
@@ -551,14 +552,15 @@ func TestTheRunningRowsPolecatCellDrawsTheSharedDevTime(t *testing.T) {
 	}
 }
 
-// A queued row's queue reading is a QueueBead, which carries no polecat time: the
-// wait is aged from updated_at, and that is not a start the polecat worked from.
-// So the Polecat cell reads the dash the shared cell draws for a row with no
-// reading, never a figure guessed from the wait (gt-duuq1). The payload's keys
-// are QueueBead's json tags, so the page reads the shape production sends.
+// A queued row whose queue reading carries no polecat time — the spans log held
+// no closed span for the bead, so PolecatSecs is absent — reads the dash the
+// shared cell draws for a row with no reading. The wait is aged from updated_at,
+// and that is not a start the polecat worked from, so the cell never shows a
+// figure guessed from the wait (gt-duuq1, gt-p77nun). The payload's keys are
+// QueueBead's json tags, so the page reads the shape production sends.
 // Mutation: derive the cell from updated_at and this row reads an age where the
 // dash belongs.
-func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
+func TestQueuedRowPolecatTimeReadsTheDashWhenAbsent(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
@@ -579,6 +581,59 @@ func TestAQueuedRowWithNoDevTimeReadsTheDash(t *testing.T) {
 	}
 	if got := cells[5].Title; got != "" {
 		t.Errorf("the queued row's Polecat cell carries the hover %q, want none for a row with no reading", got)
+	}
+}
+
+// A queued bead's queue reading carries the time its polecat seats spent hooked
+// on it when the spans log holds a closed span (QueueBead.PolecatSecs,
+// gt-du2p9d), and the shared Polecat time cell draws it through polecatDur in
+// the column a running row's reading sits in — never the dash a row with no
+// reading draws (gt-p77nun).
+// Mutation: hard-code the queued cell's dash, or stop handing the cell the
+// QueueBead, and this row reads "–" where the reading says 9m.
+func TestQueuedRowPolecatTimeDrawsTheTime(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{map[string]any{
+			"id": "gt-timed", "rig": "gastown", "title": "a queued bead with its time",
+			"status": "open", "assignee": "gastown/polecats/dag", "priority": 2,
+			"updated_at":   now.Add(-2 * time.Minute).Format(time.RFC3339),
+			"polecat_secs": 540.0,
+		}}},
+	})
+
+	cells := landingsRows(t, p)[0].Cells
+	if got := cells[5].Text; got != "9m" {
+		t.Errorf("the queued row's Polecat time cell reads %q, want 9m as polecatDur reads 540s", got)
+	}
+}
+
+// A queued row whose PolecatSecs is a lower bound keeps the + polecatDur draws
+// for it (QueueBead.PolecatLowerBound, gt-v1a0zo): the mark that says the time
+// may understate the work reaches the page with the figure (gt-p77nun).
+// Mutation: drop row.polecat_lower_bound from the shared cell and this row
+// reads 9m where the reading says 9m+.
+func TestQueuedRowPolecatTimeKeepsTheLowerBoundMark(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 31, 16, 0, 0, 0, time.Local)
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{map[string]any{
+			"id": "gt-timed-floor", "rig": "gastown", "title": "a queued bead with a floor",
+			"status": "open", "assignee": "gastown/polecats/dag", "priority": 2,
+			"updated_at":          now.Add(-2 * time.Minute).Format(time.RFC3339),
+			"polecat_secs":        540.0,
+			"polecat_lower_bound": true,
+		}}},
+	})
+
+	cells := landingsRows(t, p)[0].Cells
+	if got := cells[5].Text; got != "9m+" {
+		t.Errorf("the queued row's Polecat time cell reads %q, want 9m+ as polecatDur marks a lower bound", got)
 	}
 }
 
