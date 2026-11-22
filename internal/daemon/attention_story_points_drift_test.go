@@ -41,6 +41,41 @@ func driftReadingWithInterval(rho, lo, hi float64, weights string) metrics.Story
 }
 
 // driftRig is the fixture with the measure answering read.
+// driftReadingWithAUC is driftReadingWithInterval with the AUC for beads over 20
+// minutes measured, its 95% interval aucLo to aucHi.
+func driftReadingWithAUC(rho, lo, hi, aucLo, aucHi float64) metrics.StoryPointsDriftRead {
+	read := driftReadingWithInterval(rho, lo, hi, "v1")
+	cur := &read.Drift.Current
+	cur.LongMeasurable, cur.LongAUC, cur.LongLo, cur.LongHi = true, (aucLo+aucHi)/2, aucLo, aucHi
+	return read
+}
+
+// TestStoryPointsDriftAttentionUsesTheFailingDecision: the collector raises the
+// item by storyPointsDriftFailing, through both signals: an interval that
+// reaches the bar raises nothing whatever the AUC says, a rank interval under
+// the bar raises nothing while the AUC for over 20 minutes is not low, and one
+// raises when both are (gt-o0brow).
+func TestStoryPointsDriftAttentionUsesTheFailingDecision(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		read   metrics.StoryPointsDriftRead
+		raised int
+	}{
+		{"rank 0.16 to 0.50 with AUC 0.60 to 0.82", driftReadingWithAUC(0.34, 0.16, 0.50, 0.60, 0.82), 0},
+		{"rank 0.10 to 0.40 with AUC 0.60 to 0.82", driftReadingWithAUC(0.25, 0.10, 0.40, 0.60, 0.82), 0},
+		{"rank 0.10 to 0.40 with AUC 0.44 to 0.63", driftReadingWithAUC(0.25, 0.10, 0.40, 0.44, 0.63), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) { return tc.read, nil })
+			if items := f.collect(t, f.src.collectStoryPointsDrift); len(items) != tc.raised {
+				t.Errorf("raised %+v, want %d", items, tc.raised)
+			}
+		})
+	}
+}
+
 func driftRig(t *testing.T, read func(time.Time) (metrics.StoryPointsDriftRead, error)) *attentionFixture {
 	t.Helper()
 	f := newAttentionFixture(t, driftTick)
