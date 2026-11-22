@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 var ErrNoGateRunRoot = errors.New("land: the gate run log needs a town root")
@@ -58,6 +59,39 @@ func appendGateRun(fsys gateRunFS, townRoot string, r GateRun) error {
 	return appendGateRunLimit(fsys, townRoot, r, gateRunRotateLimit)
 }
 
+// gateRunKey is a row's identity: the four fields a run is told apart by.
+func gateRunKey(r GateRun) string {
+	return r.TS.UTC().Format(time.RFC3339Nano) + "\x00" + r.Bead + "\x00" + r.SHA + "\x00" + r.RunID
+}
+
+// archivedGateRunKeys reads every gzip member of a month file and returns the
+// identities of its rows; a month file that does not exist has none.
+func archivedGateRunKeys(fsys gateRunFS, month string) (map[string]bool, error) {
+	data, err := fsys.ReadFile(month)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("land: reading %s: %w", month, err)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("land: decoding %s: %w", month, err)
+	}
+	plain, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, fmt.Errorf("land: decoding %s: %w", month, err)
+	}
+	keys := map[string]bool{}
+	for _, line := range bytes.Split(plain, []byte{'\n'}) {
+		var r *GateRun
+		if json.Unmarshal(line, &r) == nil && r != nil {
+			keys[gateRunKey(*r)] = true
+		}
+	}
+	return keys, nil
+}
+
 // rotateGateRuns moves the rows of the current log into one gzipped file per
 // month beside it, a month file that exists gaining a further gzip member, and
 // removes the current log only once every month file is written, so a failure
@@ -77,14 +111,26 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 	}
 	for _, group := range groupGateRunsByMonth(rows) {
 		month := filepath.Join(filepath.Dir(path), group.File)
-		f, err := fsys.OpenAppend(month)
+		// A rotation retried after a failed removal meets rows it already
+		// archived: only the rows the month file lacks are written.
+		have, err := archivedGateRunKeys(fsys, month)
 		if err != nil {
-			return fmt.Errorf("land: opening %s: %w", month, err)
+			return err
 		}
 		var batch bytes.Buffer
 		for _, row := range group.Rows {
+			if have[gateRunKey(row)] {
+				continue
+			}
 			line, _ := json.Marshal(row) // a row that decoded encodes
 			batch.Write(append(line, '\n'))
+		}
+		if batch.Len() == 0 {
+			continue
+		}
+		f, err := fsys.OpenAppend(month)
+		if err != nil {
+			return fmt.Errorf("land: opening %s: %w", month, err)
 		}
 		zw := gzip.NewWriter(f)
 		_, werr := zw.Write(batch.Bytes())
