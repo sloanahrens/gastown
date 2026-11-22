@@ -40,12 +40,13 @@ func storyPointsDriftFailing(r metrics.StoryPointsDriftReading) bool {
 	return r.Hi < storyPointsDriftBar
 }
 
-// collectStoryPointsDrift raises the drift item when the newest extract's
-// landings rank below storyPointsDriftBar, and the unreadable item when no
-// measure could be taken. A reading at or above the bar raises nothing. A
-// reading nobody could measure raises nothing either, and it keeps a drift item
-// already held, since a measurement not taken says nothing about whether the
-// drift stands. A failed read keeps it too, beside the unreadable item.
+// collectStoryPointsDrift raises the drift item when the whole 95% interval of
+// the newest extract's rank correlation lies under storyPointsDriftBar, and the
+// unreadable item when no measure could be taken. A reading whose interval
+// straddles or ends at the bar raises nothing and drops a drift item already
+// held. A reading nobody could measure raises nothing either and keeps a drift
+// item already held, since a measurement not taken says nothing about whether
+// the drift stands. A failed read keeps it too, beside the unreadable item.
 func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention.Item, error) {
 	// The production sources always carry the read (attentionSources, pinned by
 	// TestStoryPointsDriftAttentionIsWiredAndRegistered). A hand-built sources
@@ -71,7 +72,13 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 	if !reading.Measurable {
 		return s.keepHeldDrift(), nil
 	}
-	if reading.Rho >= storyPointsDriftBar {
+	// An interval end that is not a number reads as "not failing" in the rule
+	// below and would clear a live item: keep the held item and raise nothing,
+	// until the unreadable item (gt-jo1lnr) takes this case.
+	if math.IsNaN(reading.Lo) || math.IsInf(reading.Lo, 0) || math.IsNaN(reading.Hi) || math.IsInf(reading.Hi, 0) {
+		return s.keepHeldDrift(), nil
+	}
+	if !storyPointsDriftFailing(reading) {
 		return nil, nil
 	}
 	return []attention.Item{{
@@ -79,8 +86,8 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 		Kind:     attention.KindStoryPointsDrift,
 		Severity: attention.SeverityMedium,
 		Summary: fmt.Sprintf(
-			"story points estimate drift: rank correlation %.2f (95%% interval %.2f to %.2f) over the last %d landings of the %s extract is below %.2f; weights %s",
-			reading.Rho, reading.Lo, reading.Hi, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
+			"story points estimate drift: the 95%% interval %.2f to %.2f of the rank correlation %.2f over the last %d landings of the %s extract lies wholly under %.2f; weights %s",
+			reading.Lo, math.Floor(reading.Hi*100)/100, reading.Rho, read.Drift.N, filepath.Base(read.Dir), storyPointsDriftBar, read.Weights),
 	}}, nil
 }
 

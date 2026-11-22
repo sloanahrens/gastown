@@ -142,9 +142,73 @@ func TestStoryPointsDriftAttentionSummaryNamesTheInterval(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("items = %+v, want one", items)
 	}
-	const want = "story points estimate drift: rank correlation 0.31 (95% interval 0.17 to 0.47) over the last 100 landings of the 2026-11-14 extract is below 0.50; weights v1"
+	const want = "story points estimate drift: the 95% interval 0.17 to 0.47 of the rank correlation 0.31 over the last 100 landings of the 2026-11-14 extract lies wholly under 0.50; weights v1"
 	if got := items[0].Summary; got != want {
 		t.Errorf("summary = %q, want %q", got, want)
+	}
+}
+
+// TestStoryPointsDriftAttentionSummaryRoundsHiDown: Hi prints rounded down, so
+// an interval that ends at 0.4996 reads 0.49 and never 0.50 under the wording
+// "wholly under 0.50".
+func TestStoryPointsDriftAttentionSummaryRoundsHiDown(t *testing.T) {
+	t.Parallel()
+	f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+		return driftReadingWithInterval(0.42, 0.35, 0.4996, "v1"), nil
+	})
+	items := f.collect(t, f.src.collectStoryPointsDrift)
+	if len(items) != 1 || !strings.Contains(items[0].Summary, "interval 0.35 to 0.49 ") {
+		t.Errorf("items = %+v, want one naming the interval 0.35 to 0.49", items)
+	}
+}
+
+// TestStoryPointsDriftAttentionIntervalDecidesTheItem: the item is raised by
+// the whole interval: a straddling one raises nothing, one wholly under the bar
+// raises the item, and a straddling reading clears the item a failing one raised.
+func TestStoryPointsDriftAttentionIntervalDecidesTheItem(t *testing.T) {
+	t.Parallel()
+	under := driftReadingWithInterval(0.41, 0.35, 0.47, "v1")
+	straddle := driftReadingWithInterval(0.45, 0.38, 0.55, "v1")
+	nanHi := driftReadingWithInterval(0.41, 0.35, math.NaN(), "v1")
+	nanLo := driftReadingWithInterval(0.41, math.NaN(), 0.47, "v1")
+	tests := []struct {
+		name    string
+		reads   []metrics.StoryPointsDriftRead
+		want    int
+		cleared bool
+	}{
+		{"an interval wholly under the bar raises one", []metrics.StoryPointsDriftRead{under}, 1, false},
+		{"a straddling interval raises nothing", []metrics.StoryPointsDriftRead{straddle}, 0, false},
+		{"a straddling interval clears the held item", []metrics.StoryPointsDriftRead{under, straddle}, 0, true},
+		{"a NaN Hi keeps the held item", []metrics.StoryPointsDriftRead{under, nanHi}, 1, false},
+		{"a NaN Lo keeps the held item", []metrics.StoryPointsDriftRead{under, nanLo}, 1, false},
+		{"a NaN Lo raises nothing when none is held", []metrics.StoryPointsDriftRead{nanLo}, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			i := 0
+			f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+				read := tc.reads[i]
+				if i+1 < len(tc.reads) {
+					i++
+				}
+				return read, nil
+			})
+			st := f.tick(t, driftTick)
+			for n := 1; n < len(tc.reads); n++ {
+				st = f.tickFrom(t, st, driftTick.Add(time.Duration(n)*time.Minute))
+			}
+			if got := countKind(st.Items, attention.KindStoryPointsDrift); got != tc.want {
+				t.Errorf("items = %d, want %d", got, tc.want)
+			}
+			if tc.cleared {
+				events := storyPointEvents(t, f, storyPointsDriftKey)
+				if len(events) != 2 || events[1].State != attention.EventCleared {
+					t.Errorf("events = %+v, want a raised and a cleared line", events)
+				}
+			}
+		})
 	}
 }
 
