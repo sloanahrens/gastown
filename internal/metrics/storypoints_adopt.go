@@ -469,6 +469,26 @@ func (c Commands) revertStoryPoints(real RealTown, env Env) error {
 	return c.receipt("%srestored %s from %s", storyPointsAdoptReceipt, path, name)
 }
 
+// revertToCheckedInStoryPoints reverts a town's first adoption: it keeps the runtime weights as
+// the next numbered version and removes the runtime file, so the estimator runs the checked-in
+// weights again, as a town that adopted none does.
+func (c Commands) revertToCheckedInStoryPoints(real RealTown, env Env) error {
+	path := storypoints.RuntimeWeightsPath(real.Town)
+	data, err := env.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	kept, err := storyPointsSaveVersion(c.storyPointsStore.withHost(), dir, strings.TrimSuffix(filepath.Base(path), ".json"), data)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+	return c.receipt("%srestored the checked-in weights; kept the adopted weights as %s", storyPointsAdoptReceipt, kept)
+}
+
 // storyPointsAdoptionsName is the log, beside the runtime weights, of each adoption
 // the weekly run makes, for the week-after check of the next bead (gt-q2rrvb).
 const storyPointsAdoptionsName = "adoptions.jsonl"
@@ -540,4 +560,118 @@ func (c Commands) appendStoryPointsAdoption(env Env, path string, a storyPointsA
 		_, err := w.Write(buf.Bytes())
 		return err
 	})
+}
+
+// storyPointsCheckAge is how old an adoption is before the weekly run checks it: a
+// week after it, the next weekly run.
+const storyPointsCheckAge = 6 * 24 * time.Hour
+
+// storyPointsReadWeights loads the weights file at path. A file that cannot be read
+// or does not load is an error.
+func storyPointsReadWeights(env Env, path string) (storypoints.Weights, error) {
+	data, err := env.ReadFile(path)
+	if err != nil {
+		return storypoints.Weights{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	w, err := storypoints.LoadWeights(bytes.NewReader(data))
+	if err != nil {
+		return storypoints.Weights{}, fmt.Errorf("weights %s: %w", path, err)
+	}
+	return w, nil
+}
+
+// checkStoryPointsAdoption is the week-after check of the newest adoption. Once that
+// adoption is storyPointsCheckAge old and has no check, it judges the weights it
+// adopted against the ones they replaced on the landings since
+// (judgeStoryPointsAdoption), reverts the adoption as --revert does when they did
+// worse, and records the check as kept or reverted. A holdout too small to rank
+// waits: the receipt says so and nothing is recorded, so a later week checks again.
+func (c Commands) checkStoryPointsAdoption(ctx context.Context, real RealTown, env Env, embedder storypoints.Embedder, now time.Time) error {
+	logPath := storyPointsAdoptionsPath(real.Town)
+	log, err := readStoryPointsAdoptions(env, logPath)
+	if err != nil {
+		return err
+	}
+	var adopted *storyPointsAdoption
+	for i := len(log) - 1; i >= 0 && adopted == nil; i-- {
+		if log[i].Event == "adopted" {
+			adopted = &log[i]
+		}
+	}
+	if adopted == nil || now.Sub(adopted.At) < storyPointsCheckAge {
+		return nil
+	}
+	for _, a := range log {
+		if a.Event == "checked" && a.Adopted != nil && a.Adopted.Equal(adopted.At) {
+			return nil
+		}
+	}
+	dir, landings, err := storyPointsExtract(env, real.Extract.OutDir)
+	if err != nil {
+		return err
+	}
+	header, rows, err := ReadLandings(bytes.NewReader(landings))
+	if err != nil {
+		return err
+	}
+	var missing []string
+	if !slices.Contains(header, "polecat_work") {
+		missing = append(missing, "polecat_work")
+	}
+	missing = append(missing, missingFirstRoundColumns(header)...)
+	if len(missing) > 0 {
+		return fmt.Errorf("%s: no %s column (run %s first): the adoption cannot be checked on its holdout",
+			filepath.Join(dir, landingsName), strings.Join(missing, " and "), CommandExtract)
+	}
+	runtimePath := storypoints.RuntimeWeightsPath(real.Town)
+	adoptedWeights, err := storyPointsReadWeights(env, runtimePath)
+	if err != nil {
+		return err
+	}
+	previous, previousName := storypoints.Default(), "the checked-in weights"
+	if c.StoryPointsBase != nil {
+		previous = *c.StoryPointsBase
+	}
+	if adopted.Previous != "" {
+		if p := adopted.Previous; filepath.Base(p) != p || p == "." || p == ".." {
+			return fmt.Errorf("%s: the previous version %q is not a bare file name, so it is not read", logPath, p)
+		}
+		previousName = adopted.Previous
+		if previous, err = storyPointsReadWeights(env, filepath.Join(filepath.Dir(runtimePath), adopted.Previous)); err != nil {
+			return err
+		}
+	}
+	samples, _, err := trainingSamplesWith(ctx, env, real.Town, rows, adoptedWeights, embedder, true)
+	if err != nil {
+		return err
+	}
+	verdict, err := judgeStoryPointsAdoption(samples, adoptedWeights, previous, adopted.At)
+	if err != nil {
+		return fmt.Errorf("judging the adoption of %s against %s: %w", adopted.Version, previousName, err)
+	}
+	if verdict.Waits {
+		return c.receipt("story points weekly: the adoption of %s waits: %s, so it is not checked yet", adopted.Version, verdict.Why)
+	}
+	outcome := "kept"
+	if verdict.Revert {
+		outcome = "reverted"
+		quiet := c
+		quiet.Out = io.Discard
+		// A first adoption replaced the checked-in weights, which are no file to restore: the
+		// way back is the town with no runtime weights, so the adopted file is kept as a
+		// version and removed.
+		revert := quiet.revertStoryPoints
+		if adopted.Previous == "" {
+			revert = quiet.revertToCheckedInStoryPoints
+		}
+		if err := revert(real, env); err != nil {
+			return fmt.Errorf("the adoption of %s is %s and could not be reverted: %w", adopted.Version, verdict.Why, err)
+		}
+	}
+	at := adopted.At
+	check := storyPointsAdoption{Event: "checked", At: now, Adopted: &at, Outcome: outcome, Reason: verdict.Why}
+	if err := c.appendStoryPointsAdoption(env, logPath, check); err != nil {
+		return fmt.Errorf("the adoption of %s was checked and %s, but the check was not recorded: %w", adopted.Version, outcome, err)
+	}
+	return c.receipt("story points weekly: checked the adoption of %s: %s: %s", adopted.Version, outcome, verdict.Why)
 }
