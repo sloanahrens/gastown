@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -398,8 +399,11 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 	})
 	t.Run("over the scan bound is refused", func(t *testing.T) {
 		t.Parallel()
-		hdr := &tar.Header{Name: "settings/big.log", Mode: 0o644, Typeflag: tar.TypeReg, Size: maxScanBytes + 1}
-		verifyRefused(t, gzipTarDeclared(t, hdr), "entry settings/big.log is too large to scan", "")
+		// The size is the export's own bound plus one, not this package's
+		// constant, so a bound that drifts from the rule's turns this row red.
+		hdr := &tar.Header{Name: "settings/big.log", Mode: 0o644, Typeflag: tar.TypeReg, Size: townstate.MaxFlaggedBytes + 1}
+		verifyRefused(t, gzipTarDeclared(t, hdr),
+			fmt.Sprintf("(%d bytes, over the %d-byte limit)", townstate.MaxFlaggedBytes+1, townstate.MaxFlaggedBytes), "")
 	})
 	t.Run("gzip member carrying a credential is refused", func(t *testing.T) {
 		t.Parallel()
@@ -454,7 +458,7 @@ func TestVerifyScansLargeFiles(t *testing.T) {
 	})
 	t.Run("gzip member whose content is over the bound is refused", func(t *testing.T) {
 		t.Parallel()
-		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(gzipZeros(t, maxScanBytes+1))}),
+		verifyRefused(t, gzipTar(t, identity, arcEntry{name: "logs/export.json.gz", data: string(gzipZeros(t, townstate.MaxFlaggedBytes+1))}),
 			"entry logs/export.json.gz: the decompressed content is over the bound", "")
 	})
 }

@@ -23,11 +23,11 @@ const identityFile = "mayor/town.json"
 // keeps the last two blocks to tell a closed archive from a truncated one.
 const blockSize = 512
 
-// maxScanBytes bounds the content Verify has the content rule judge: a regular
-// file larger than this is refused rather than read in full, since that could
-// take longer than the night is worth. It is the bound the backup export's rule
-// reads under (townstate.FlaggedContent), so a file it refuses is refused here.
-const maxScanBytes = 64 << 20
+// maxScanBytes is the bound townstate.FlaggedContent reads under: a regular file
+// larger than this is refused here before its body is read, and the rule would
+// refuse its content at the same size, so what the backup export writes and what
+// Verify accepts agree.
+const maxScanBytes = townstate.MaxFlaggedBytes
 
 // maxTrailing bounds what Verify reads past the tar stream's end blocks while
 // reaching the gzip trailer, so a decompression bomb cannot run unbounded. An
@@ -115,7 +115,8 @@ func Verify(archive string) (res Result, err error) {
 		// Only a Pass is clean: FlaggedContent fails content it cannot show to be
 		// clean too (a member that does not decompress, a nested member, content
 		// over the bound), so a file the export would leave out is refused here.
-		// The reason is the shared rule's and never holds a value.
+		// The reason is the shared rule's fixed phrase: it names no value and no
+		// detector family, so the entry and that phrase are the whole refusal.
 		if verdict := townstate.FlaggedContent(bytes.NewReader(data)); !verdict.IsPass() {
 			return Result{}, fmt.Errorf("%s: entry %s: %w", archive, name, verdict.Err())
 		}
