@@ -52,3 +52,26 @@ func TestCacheTrimNoRetryAfterAFailedTrim(t *testing.T) {
 		t.Errorf("trimmed %d times one interval after the failed run, want 2: the full interval decides", got)
 	}
 }
+
+// TestCacheTrimNoRetryRecordsTheConclusionWhenTheRunEnds pins gt-ummt9: the
+// cache trim's conclusion is the clock read after the trim returned, so a run
+// that takes minutes does not shorten the wait before the next one. A failed
+// run and a finished one both record the instant they ended (gt-wkjdql).
+func TestCacheTrimNoRetryRecordsTheConclusionWhenTheRunEnds(t *testing.T) {
+	t.Parallel()
+	for _, verdict := range []bool{false, true} {
+		d, _, _ := diskMaintTestDaemon(t)
+		now := diskMaintNow
+		d.diskMaint.now = func() time.Time { return now }
+		d.diskMaint.trim = func(context.Context, string) bool {
+			now = now.Add(10 * time.Minute) // the trim takes ten minutes
+			return verdict
+		}
+
+		d.runDiskMaintenance()
+
+		if got, want := d.diskMaintSchedule.lastRunAt(diskMaintCacheTrimName), diskMaintNow.Add(10*time.Minute); !got.Equal(want) {
+			t.Fatalf("trim returning %v recorded its last run at %v, want %v, the clock after it returned: a run that takes minutes records when it ended", verdict, got, want)
+		}
+	}
+}
