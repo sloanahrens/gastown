@@ -1000,8 +1000,8 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 			// releasing the seat loses no work; a tip that does add one keeps the
 			// seat paused (gt-ao7zh).
 			if overrunTipAddsNothing(g, sha, originSHA) {
-				d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s as non-fast-forward, but its tip %s adds nothing origin lacks; treating the push as done (in the %s)",
-					seat.Rig, seat.Polecat, branch, sha, overrunWorktreeLabel(g))
+				d.logger.Printf("overrun_guard: %s/%s: origin refused the push of %s at %s as non-fast-forward (origin has %s), but that tip adds nothing origin lacks; treating the push as done (in the %s)",
+					seat.Rig, seat.Polecat, branch, sha, overrunOriginTipLabel(originSHA), overrunWorktreeLabel(g))
 				return nil
 			}
 			return &overrunPushDivergedError{Branch: branch, OriginSHA: originSHA, Err: err}
@@ -1517,7 +1517,7 @@ func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
 	// confirmation.
 	origin := originBranchSHA(g, branch)
 	if origin == "" || (origin != tip && !overrunOriginCommitHeld(g, branch, origin)) || !overrunTipInHistory(g, tip, origin) {
-		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s; worktree left as it is (in the %s)", who, branch, tip, overrunWorktreeLabel(g))
+		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s (origin has %s); worktree left as it is (in the %s)", who, branch, tip, overrunOriginTipLabel(origin), overrunWorktreeLabel(g))
 		return nil
 	}
 	contained := overrunTipContained(g, tip, origin)
@@ -1670,6 +1670,15 @@ func originBranchSHA(g daemonGit, branch string) string {
 		return ""
 	}
 	return sha
+}
+
+// overrunOriginTipLabel is origin's tip as a log line prints it: "none" when
+// origin holds no commit for the branch, so the line never reads "(origin has )".
+func overrunOriginTipLabel(origin string) string {
+	if origin == "" {
+		return "none"
+	}
+	return origin
 }
 
 // errOriginNoCommit is originBranchRead's error for a listing that names the ref

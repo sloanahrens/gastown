@@ -323,6 +323,59 @@ func TestOverrunResetOriginPatchEquivalentKeepsTheBranch(t *testing.T) {
 	}
 }
 
+// The lines that refuse or treat a push as done name the tip the check judged
+// and origin's tip, so a log reader sees whether both checks looked at the same
+// commit (gt-iqe0v7).
+func TestOverrunResetOriginLinesNameBothTips(t *testing.T) {
+	t.Parallel()
+	t.Run("reset, origin holds another commit", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+		other := w.f.Commit(t, w.origin, stopSeat.Branch, "someone else's", map[string]string{"x.txt": "x\n"})
+
+		if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+			t.Fatalf("reset: %v, want nil", err)
+		}
+		want := "origin does not hold " + stopSeat.Branch + " at " + w.tip + " (origin has " + other + ")"
+		if !strings.Contains(w.log.String(), want) {
+			t.Errorf("log does not name both tips, want a line containing %q:\n%s", want, w.log.String())
+		}
+	})
+	t.Run("reset, origin lacks the branch", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+
+		if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+			t.Fatalf("reset: %v, want nil", err)
+		}
+		want := "origin does not hold " + stopSeat.Branch + " at " + w.tip + " (origin has none)"
+		if !strings.Contains(w.log.String(), want) {
+			t.Errorf("log does not name the tip and origin's absence, want a line containing %q:\n%s", want, w.log.String())
+		}
+	})
+	t.Run("push, origin holds a descendant of the tip", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+		if err := w.git().Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
+			t.Fatal(err)
+		}
+		later := w.f.Commit(t, w.origin, stopSeat.Branch, "someone's later work", map[string]string{"later.txt": "later\n"})
+		// The tip is only known to be in origin's history once the seat's clone
+		// holds origin's commit, so the clone fetches it first.
+		if err := w.git().FetchRefspecWithTimeout("origin", "refs/heads/"+stopSeat.Branch, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := w.d.overrunPushBranch(stopSeat); err != nil {
+			t.Fatalf("push = %v, want the refused push treated as done", err)
+		}
+		want := "origin refused the push of " + stopSeat.Branch + " at " + w.tip + " as non-fast-forward (origin has " + later + ")"
+		if !strings.Contains(w.log.String(), want) {
+			t.Errorf("log does not name both tips, want a line containing %q:\n%s", want, w.log.String())
+		}
+	})
+}
+
 // An ancestry test that cannot answer is not a confirmation the branch can be
 // dropped on: the patch test that confirms origin may still be answered, and git
 // cherry speaks to patch identity, which a forced delete drops. The worktree is
