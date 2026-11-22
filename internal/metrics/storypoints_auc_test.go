@@ -51,54 +51,45 @@ func TestLongAUC(t *testing.T) {
 	}
 }
 
-// TestLongAUCInterval: a resample that drew one class is skipped rather than
-// scored 0.5, one seed gives one interval, and a series it cannot resample is
-// an error naming the cause.
+// TestLongAUCInterval: a perfect estimate gives the interval 1..1 (a one-class
+// resample is skipped, not scored 0.5), one seed gives one interval, and a
+// series it cannot resample is an error naming the cause.
 func TestLongAUCInterval(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
 		est      []float64
 		measured []float64
-		wantLo   float64
-		wantHi   float64
 		wantErr  string
 	}{
-		{name: "perfect ordering skips the one-class resamples", est: []float64{9, 2, 1, 0.5}, measured: []float64{30, 10, 5, 3}, wantLo: 1, wantHi: 1},
+		{name: "perfect ordering skips the one-class resamples", est: []float64{9, 2, 1, 0.5}, measured: []float64{30, 10, 5, 3}},
 		{name: "no resample drew both classes", est: []float64{1, 2}, measured: []float64{20, 10}, wantErr: "no usable resample"},
 		{name: "unequal lengths", est: []float64{1, 2}, measured: []float64{30}, wantErr: "2 estimates, 1 measured"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			lo, hi, err := LongAUCInterval(tt.est, tt.measured, 20, 400, 1)
+			lo, hi, err := LongAUCInterval(tt.est, tt.measured, 20, 40, 1)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("LongAUCInterval error = %v, want it to name %q", err, tt.wantErr)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("LongAUCInterval: %v", err)
-			}
-			if math.Abs(lo-tt.wantLo) > 1e-9 || math.Abs(hi-tt.wantHi) > 1e-9 {
-				t.Errorf("LongAUCInterval = %v..%v, want %v..%v", lo, hi, tt.wantLo, tt.wantHi)
+			if err != nil || lo != 1 || hi != 1 {
+				t.Fatalf("LongAUCInterval = %v..%v, %v, want 1..1", lo, hi, err)
 			}
 		})
 	}
-	t.Run("one seed gives one interval", func(t *testing.T) {
-		t.Parallel()
-		est := []float64{5, 4, 3, 2, 1, 1, 1}
-		measured := []float64{40, 10, 30, 5, 25, 22, 21}
-		lo, hi, err := LongAUCInterval(est, measured, 20, 40, 7)
-		for range 3 {
-			lo2, hi2, err2 := LongAUCInterval(est, measured, 20, 40, 7)
-			if err != nil || err2 != nil {
-				t.Fatalf("LongAUCInterval: %v, %v", err, err2)
-			}
-			if lo2 != lo || hi2 != hi {
-				t.Fatalf("LongAUCInterval with one seed = %v..%v then %v..%v, want the same", lo, hi, lo2, hi2)
-			}
+	est, measured := []float64{5, 4, 3, 2, 1, 1, 1}, []float64{40, 10, 30, 5, 25, 22, 21}
+	lo, hi, err := LongAUCInterval(est, measured, 20, 40, 7)
+	if err != nil {
+		t.Fatalf("LongAUCInterval: %v", err)
+	}
+	for range 3 {
+		lo2, hi2, err2 := LongAUCInterval(est, measured, 20, 40, 7)
+		if err2 != nil || lo2 != lo || hi2 != hi {
+			t.Fatalf("LongAUCInterval with one seed = %v..%v then %v..%v, %v, want the same", lo, hi, lo2, hi2, err2)
 		}
-	})
+	}
 }
