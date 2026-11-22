@@ -13,6 +13,7 @@ import (
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/jobledger"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
@@ -428,6 +429,9 @@ func engineDockerIDs(args []string) []string {
 func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engineRemoveAnswers) *ciCacheFixture {
 	t.Helper()
 	f := newCICacheFixture(t, mode)
+	// A failed run raises its attention item through the notifier, so the fixture
+	// records the sends rather than running gt.
+	f.d.notifier = notifyfake.New()
 	// held is the set of ids the fake engine still has after a removal that did not
 	// take them; the presence inspect echoes the requested ids it holds.
 	var heldMu sync.Mutex
@@ -536,6 +540,38 @@ func engineExecs(f *ciCacheFixture, name string) []cliCall {
 	return out
 }
 
+// engineAlerts is the recorder the fixture's notifier is.
+func engineAlerts(f *ciCacheFixture) *notifyfake.Recorder {
+	return f.d.notifier.(*notifyfake.Recorder)
+}
+
+// enginePruneItems is the escalations in f that name the CI engine prune: the
+// fixture's cache trim volumes fail too and raise their own items (gt-76cz9d).
+func enginePruneItems(f *ciCacheFixture) []notifyfake.Call {
+	var items []notifyfake.Call
+	for _, e := range engineAlerts(f).Escalations() {
+		if strings.Contains(e.Escalation.Description, "CI engine prune") {
+			items = append(items, e)
+		}
+	}
+	return items
+}
+
+// engineConcludedAt asserts the engine prune's last run concluded at at, asked
+// for no retry, and left its failure item open.
+func engineConcludedAt(t *testing.T, f *ciCacheFixture, at time.Time) {
+	t.Helper()
+	if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); !last.Equal(at) {
+		t.Errorf("last run = %v, want the conclusion %v", last, at)
+	}
+	if retry := f.d.diskMaintSchedule.retryAtOf(ciEnginePruneName); !retry.IsZero() {
+		t.Errorf("retry at = %v, want none: a failure is not retried on a timer", retry)
+	}
+	if open := engineAlerts(f).OpenEscalations(diskMaintFailedKey(ciEnginePruneName)); len(open) != 1 {
+		t.Errorf("open items = %+v, want the one a failure raises", open)
+	}
+}
+
 // TestCIEnginePruneDryRunRemovesNothing: a dry run lists the engine once and runs
 // no removal, and names what it would remove in its log.
 func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
@@ -614,8 +650,9 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		}
 	})
 
-	// A removal docker leaves in place is a failed run: no verdict, a retry soon, and
-	// a line that says which kind and how the removal ended. Every kind still ran.
+	// A removal docker leaves in place is a failed run: no verdict, its conclusion at
+	// the full interval, and a line that says which kind and how the removal ended.
+	// Every kind still ran.
 	for name, tc := range map[string]struct {
 		remove  engineRemoveAnswers
 		wantLog string
@@ -633,17 +670,12 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 			wantLog: "presence check could not run",
 		},
 	} {
-		t.Run(name+" is a failed run, tried again soon", func(t *testing.T) {
+		t.Run(name+" is a failed run, concluded at the full interval", func(t *testing.T) {
 			t.Parallel()
 			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, tc.remove)
 			f.tick()
 			f.drain()
-			if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); !last.IsZero() {
-				t.Errorf("a failed remove was recorded as a verdict at %v", last)
-			}
-			if retry := f.d.diskMaintSchedule.retryAtOf(ciEnginePruneName); retry.IsZero() {
-				t.Errorf("a failed remove left no retry")
-			}
+			engineConcludedAt(t, f, ciCacheTestStart)
 			if !strings.Contains(f.logs.String(), tc.wantLog) {
 				t.Errorf("the failed run does not name %q:\n%s", tc.wantLog, f.logs.String())
 			}
@@ -760,8 +792,9 @@ func TestCIEngineRemovedReadsDockersOutput(t *testing.T) {
 }
 
 // TestCIEnginePruneFailsWhenTheEngineIsNotRunning: a runner pod whose dind
-// container is not running is a failed run: nothing is listed or removed, and the
-// run is tried again soon rather than read as an engine with nothing to prune.
+// container is not running is a failed run: nothing is listed or removed, the
+// conclusion is the full interval, and its item is raised rather than the run read
+// as an engine with nothing to prune.
 func TestCIEnginePruneFailsWhenTheEngineIsNotRunning(t *testing.T) {
 	t.Parallel()
 	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
@@ -772,20 +805,15 @@ func TestCIEnginePruneFailsWhenTheEngineIsNotRunning(t *testing.T) {
 	if n := len(engineExecs(f, "ci-engine-list")) + len(engineExecs(f, "ci-engine-remove")); n != 0 {
 		t.Fatalf("a stopped engine ran %d exec(s), want none", n)
 	}
-	if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); !last.IsZero() {
-		t.Errorf("a stopped engine was recorded as a verdict at %v", last)
-	}
-	if retry := f.d.diskMaintSchedule.retryAtOf(ciEnginePruneName); retry.IsZero() {
-		t.Errorf("a stopped engine left no retry")
-	}
+	engineConcludedAt(t, f, ciCacheTestStart)
 	if !strings.Contains(f.logs.String(), "not running") {
 		t.Errorf("the failed run did not say the engine is not running:\n%s", f.logs.String())
 	}
 }
 
 // TestCIEnginePruneFailedListingRemovesNothing: a listing that does not decode,
-// and a list exec that fails, are failed runs. Neither removes anything, and the
-// run is tried again soon.
+// and a list exec that fails, are failed runs. Neither removes anything, each
+// concludes at the full interval, and each raises its item.
 func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 	t.Parallel()
 	for name, list := range map[string]cliReply{
@@ -810,13 +838,56 @@ func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 			if n := len(engineExecs(f, "ci-engine-remove")); n != 0 {
 				t.Fatalf("a failed listing ran the remove program %d time(s)", n)
 			}
-			if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); !last.IsZero() {
-				t.Errorf("a failed listing was recorded as a verdict at %v", last)
-			}
-			if retry := f.d.diskMaintSchedule.retryAtOf(ciEnginePruneName); retry.IsZero() {
-				t.Errorf("a failed listing left no retry")
-			}
+			engineConcludedAt(t, f, ciCacheTestStart)
 		})
+	}
+}
+
+// TestCIEnginePruneFailureRaisesOnce pins gt-3e23rz: a failed engine prune records
+// the full interval with no retry time and raises one attention item, so the next
+// attempt is the patrol's normal cadence; a second consecutive failure keeps the one
+// item, and a success clears it.
+func TestCIEnginePruneFailureRaisesOnce(t *testing.T) {
+	t.Parallel()
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
+	f.pods = cliReply{stdout: ciCachePodsDindWaitingJSON}
+	every, _, _, _, _, err := ciEnginePruneSettings(f.d.patrol())
+	if err != nil {
+		t.Fatalf("reading the engine prune's interval: %v", err)
+	}
+
+	f.tick()
+	f.drain()
+	engineConcludedAt(t, f, ciCacheTestStart)
+
+	// The retry's own instant is not an attempt: the failure waits its full interval.
+	f.at(cacheTrimRetryInterval)
+	f.tick()
+	f.drain()
+	engineConcludedAt(t, f, ciCacheTestStart)
+	if got := len(enginePruneItems(f)); got != 1 {
+		t.Errorf("escalations = %d before the full interval, want the one already open", got)
+	}
+
+	// A second consecutive failure keeps the one item.
+	f.at(every)
+	f.tick()
+	f.drain()
+	engineConcludedAt(t, f, ciCacheTestStart.Add(every))
+	if got := len(enginePruneItems(f)); got != 1 {
+		t.Errorf("escalations = %d after a second failure, want the one already open", got)
+	}
+
+	// A run that reaches a verdict clears the item.
+	f.pods = cliReply{stdout: ciCachePodsRunningJSON}
+	f.at(2 * every)
+	f.tick()
+	f.drain()
+	if last := f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName); !last.Equal(f.now) {
+		t.Errorf("last run = %v, want the successful conclusion %v", last, f.now)
+	}
+	if open := engineAlerts(f).OpenEscalations(diskMaintFailedKey(ciEnginePruneName)); len(open) != 0 {
+		t.Errorf("open items after a success = %+v, want none", open)
 	}
 }
 
@@ -1746,9 +1817,7 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 			if !strings.Contains(logs, "the data root's size after could not be read") || !strings.Contains(logs, tc.wantLog) {
 				t.Errorf("the log does not name an unreadable size (%q):\n%s", tc.wantLog, logs)
 			}
-			if !f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
-				t.Errorf("an unreadable size was recorded as a verdict")
-			}
+			engineConcludedAt(t, f, ciCacheTestStart)
 			if len(engineDockerExecs(f, "rm")) != 1 {
 				t.Errorf("the container removal did not run before du")
 			}
