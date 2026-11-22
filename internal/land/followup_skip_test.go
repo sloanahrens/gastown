@@ -1,7 +1,11 @@
 package land
 
 import (
+	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"slices"
 	"strings"
 	"testing"
@@ -238,6 +242,98 @@ func TestFollowupSkipQueuedWork(t *testing.T) {
 	}
 	if got := asked["the fresh finding"]; got != f.work {
 		t.Errorf("the landing's own finding was asked with %+v, want the landing's whole Work %+v", got, f.work)
+	}
+}
+
+// followupSkipFieldDoc is the FollowupSkip field's doc comment in land.go, as
+// its text reads.
+func followupSkipFieldDoc(t *testing.T) string {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "land.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatalf("parse land.go: %v", err)
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok || ts.Name.Name != "Lander" {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+			for _, field := range st.Fields.List {
+				for _, name := range field.Names {
+					if name.Name == "FollowupSkip" && field.Doc != nil {
+						return field.Doc.Text()
+					}
+				}
+			}
+		}
+	}
+	t.Fatal("land.go has no FollowupSkip field doc")
+	return ""
+}
+
+// TestFollowupSkipFieldDocSaysPure: a held queue line is asked again on every
+// later pass until it is consumed, so the hook must give the same answer each
+// time. The field's doc says so, because that is where a policy's author learns
+// the contract (gt-qlzw66).
+func TestFollowupSkipFieldDocSaysPure(t *testing.T) {
+	t.Parallel()
+	doc := followupSkipFieldDoc(t)
+	if !strings.Contains(doc, "must be pure") {
+		t.Errorf("the FollowupSkip doc does not say it must be pure:\n%s", doc)
+	}
+}
+
+// TestFollowupSkipIsAskedOncePerPassWithTheSameArguments: a queue line the feed
+// cannot consume stays held, and the next feed pass asks the hook about its
+// finding again. A pure hook has one answer to give, so the feed hands it the
+// same Work and the same candidate on every pass (gt-qlzw66).
+func TestFollowupSkipIsAskedOncePerPassWithTheSameArguments(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.9, nil) // nothing of its own to file
+	if err := f.reviews.AppendQueue(queueLine("gt-held", f.work.Rig, queuedFinding)); err != nil {
+		t.Fatal(err)
+	}
+	type ask struct {
+		work      Work
+		candidate FollowupCandidate
+	}
+	var asks []ask
+	f.lander.FollowupSkip = func(w Work, c FollowupCandidate) string {
+		asks = append(asks, ask{w, c})
+		return ""
+	}
+	// The first pass cannot file, so the line is held rather than consumed and a
+	// later pass asks about the same finding again.
+	f.fake.createErr = errors.New("the beads store is unavailable")
+	log := f.run()
+	if len(asks) != 1 {
+		t.Fatalf("the first pass asked the hook %d time(s), want once:\n%s", len(asks), log)
+	}
+	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 1 {
+		t.Fatalf("after the failed pass the queue holds %d line(s) (%v), want the line still held", len(queued), err)
+	}
+	first := asks[0]
+	// The second pass files, so the line is consumed and dropped.
+	f.fake.createErr = nil
+	log = f.run()
+	if len(asks) != 2 {
+		t.Fatalf("the two passes asked the hook %d time(s), want once each:\n%s", len(asks), log)
+	}
+	if queued, err := f.reviews.Queued(); err != nil || len(queued) != 0 {
+		t.Errorf("the queue holds %d line(s) (%v), want the filed line consumed", len(queued), err)
+	}
+	if asks[1] != first {
+		t.Errorf("the second pass asked about %+v, want the first pass's %+v: the same finding must get the same arguments", asks[1], first)
 	}
 }
 
