@@ -485,6 +485,9 @@ func TestNodeImagePruneKubeListJSONToleratesWarnings(t *testing.T) {
 	}{
 		{name: "warning before and after", out: warning + "\n" + list + "\nWarning: another\n", wantOut: list},
 		{name: "pretty list", out: warning + "\n{\n  \"kind\": \"List\"\n}\n", wantOut: "{\n  \"kind\": \"List\"\n}"},
+		{name: "warning with a brace in the middle", out: "Warning: see {docs} for the move\n" + list, wantOut: list},
+		{name: "two objects in a row", out: list + "\n" + `{"kind":"List","items":[1]}` + "\n", wantOut: list},
+		{name: "list then a line of text", out: list + "\nWarning: another\n", wantOut: list},
 		{name: "no JSON", out: warning + "\n", wantErr: true},
 		{name: "empty answer", out: "", wantErr: true},
 		{name: "truncated", out: warning + "\n" + `{"kind":"List","items":[` + "\n", wantErr: true},
