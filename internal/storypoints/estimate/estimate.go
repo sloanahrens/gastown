@@ -395,6 +395,9 @@ func embedInput(ctx context.Context, deps Deps, w storypoints.Weights, issue *be
 	return minutes, vec, nil
 }
 
+// JevCalls is how many times jevInput asks the battery for a new text.
+const JevCalls = 3
+
 // jevMedian drops answers outside 0 to 1 and returns the median of the rest, or
 // false when none are left. An even count takes the mean of the middle two.
 func jevMedian(answers []float64) (float64, bool) {
@@ -407,21 +410,31 @@ func jevMedian(answers []float64) (float64, bool) {
 	return (valid[(n-1)/2] + valid[n/2]) / 2, true
 }
 
-// jevInput asks the battery for the fits_twenty_minutes probability, or returns
-// the skip that says why not. A probability outside 0 to 1 is a failed input,
-// not a failed estimate: jevMedian drops it as the blend drops an asker error.
+// jevInput asks the battery JevCalls times for the fits_twenty_minutes
+// probability and returns the median of the answers, or the skip that says why
+// not. A failed call and an answer outside 0 to 1 are dropped as a failed input,
+// not a failed estimate; no answer left skips the input.
 func jevInput(ctx context.Context, deps Deps, issue *beads.Issue) (float64, *Skip) {
 	if deps.JevAsk == nil {
 		return 0, &Skip{Input: "jev", Reason: "no Jev asker"}
 	}
-	ans, err := deps.JevAsk(ctx, issue)
-	if err != nil {
-		return 0, &Skip{Input: "jev", Reason: err.Error()}
+	answers := make([]float64, 0, JevCalls)
+	var firstErr error
+	for range JevCalls {
+		ans, err := deps.JevAsk(ctx, issue)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err == nil {
+			answers = append(answers, ans.FitsTwentyMinutes)
+		}
 	}
-	p := ans.FitsTwentyMinutes
-	m, ok := jevMedian([]float64{p})
+	m, ok := jevMedian(answers)
+	if !ok && firstErr != nil {
+		return 0, &Skip{Input: "jev", Reason: firstErr.Error()}
+	}
 	if !ok {
-		return 0, &Skip{Input: "jev", Reason: fmt.Sprintf("fits_twenty_minutes %v is outside 0 to 1", p)}
+		return 0, &Skip{Input: "jev", Reason: "all answers are outside 0 to 1"}
 	}
 	return m, nil
 }
