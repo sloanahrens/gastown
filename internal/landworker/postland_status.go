@@ -533,7 +533,7 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 		}
 	}
 	sort.SliceStable(order, func(a, b int) bool { return entries[order[a]].LastRead.Before(entries[order[b]].LastRead) })
-	passCtx, cancel := context.WithTimeout(ctx, p.passBudget())
+	passCtx, cancel := p.newPassContext(ctx)
 	defer cancel()
 	removed := map[int]bool{}
 	var fires []func()
@@ -692,6 +692,15 @@ func (p *PostLandRunner) checkOrphan(ctx context.Context, e *PendingPostLand, re
 		return fmt.Sprintf("orphaned at %s: run %s ended with the status still pending", short(e.Land.Commit), sanitizeStatusText(e.OrphanRun))
 	}
 	return ""
+}
+
+// newPassContext makes one pass's context: a test's passContext, else a context
+// that the pass budget ends.
+func (p *PostLandRunner) newPassContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if p.passContext != nil {
+		return p.passContext(parent)
+	}
+	return context.WithTimeout(parent, p.passBudget())
 }
 
 // passBudget bounds one pass's reads: a test's override, else

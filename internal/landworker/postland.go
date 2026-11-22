@@ -159,6 +159,9 @@ type PostLandRunner struct {
 	// passBudgetOverride bounds a pass's reads in place of
 	// PostLandStatusPassBudget; a test sets it.
 	passBudgetOverride time.Duration
+	// passContext returns the context one pass reads under and its cancel function;
+	// nil means a context the pass budget ends, which production uses.
+	passContext func(parent context.Context) (context.Context, context.CancelFunc)
 	// handling holds the landed commits whose red verdict is being rerun on a
 	// goroutine of its own. Their entries stay in the store until the handler
 	// finishes, so a daemon that stops mid-rerun reads the status again and
