@@ -449,72 +449,38 @@ func TestNodeImagePruneOnceRefuses(t *testing.T) {
 	}
 }
 
-// TestNodeImagePruneOnceNotStartedLogsTheReason: a run id nodePruneJobName refuses
-// and a town with no running polecat image each log one line naming why, record no
-// ledger row (nothing ran) and return the error.
+// TestNodeImagePruneOnceNotStartedLogsTheReason: a refused run id and a town with no
+// running polecat image each return the error, log why on one line and record nothing.
 func TestNodeImagePruneOnceNotStartedLogsTheReason(t *testing.T) {
 	t.Parallel()
-	for _, row := range []struct {
-		name    string
-		runID   string
-		noImage bool
-		wantErr string
-	}{
-		{name: "run id refused", runID: "20261104T20", wantErr: "does not give a lower-case DNS-1123 Job name"},
-		{name: "no running polecat image", runID: nodeImagePruneRunID, noImage: true, wantErr: "no running polecat image"},
+	for _, row := range []struct{ name, runID, wantErr string }{
+		{"run id refused", "20261104T20", "does not give a lower-case DNS-1123 Job name"},
+		{"no running polecat image", nodeImagePruneRunID, "no running polecat image"},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			t.Parallel()
-			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
-			if row.noImage {
-				require.NoError(t, os.Remove(imagevalues.PathIn(filepath.Join(r.town, "gastown"))))
-			}
-			kube := &fakeKube{list: nodeImagePruneKubeList()}
-
-			err := r.d.nodeImagePruneOnce(context.Background(), kube, row.runID, false, nodeImagePruneStart)
-
-			require.Error(t, err)
-			assert.ErrorContains(t, err, row.wantErr)
-			lines := strings.Split(strings.TrimSuffix(r.logs.String(), "\n"), "\n")
-			require.Len(t, lines, 1, "a prune that cannot start logs one line")
-			assert.Equal(t, "node_image_prune: not started: "+err.Error(), lines[0],
-				"the line names the reason the prune did not start")
-			_, ok := lastNodeImagePruneRun(t, r.town)
-			assert.False(t, ok, "nothing ran, so no ledger row is recorded")
-			assert.Empty(t, kube.calls, "a prune that cannot start touches no cluster")
-		})
+		d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+		kube := &fakeKube{list: nodeImagePruneKubeList()}
+		err := d.nodeImagePruneOnce(context.Background(), kube, row.runID, false, nodeImagePruneStart)
+		require.ErrorContains(t, err, row.wantErr, row.name)
+		assert.Equal(t, "node_image_prune: not started: "+err.Error()+"\n", logs.String(), row.name)
+		_, ok := lastNodeImagePruneRun(t, d.config.TownRoot)
+		assert.False(t, ok, "nothing ran, so no ledger row is recorded")
+		assert.Empty(t, kube.calls, "a prune that cannot start touches no cluster")
 	}
 }
 
-// TestNodeImagePruneOnceNotStartedCutsTheText: the line carries the error's first
-// line, cut at 200 bytes without splitting a rune, on one line. The two errors
-// nodeImagePruneOnce logs are the daemon's own single-line text, so the cut is
-// driven with synthetic errors of 500 bytes over several lines.
+// TestNodeImagePruneOnceNotStartedCutsTheText: the line is the error's first line,
+// cut at 200 bytes without splitting a rune. The daemon's own errors are single-line,
+// so synthetic errors of over 500 bytes drive the cut.
 func TestNodeImagePruneOnceNotStartedCutsTheText(t *testing.T) {
 	t.Parallel()
-	longLine := "the reason " + strings.Repeat("a", 400)
-	for _, row := range []struct {
-		name, text, want string
-	}{
-		{name: "first line kept", text: "the reason: " + strings.Repeat("a", 100) + "\n" + strings.Repeat("b", 400), want: "the reason: " + strings.Repeat("a", 100)},
-		{name: "cut at 200 bytes", text: longLine + "\n" + strings.Repeat("b", 100), want: longLine[:200]},
-		{name: "no split rune", text: strings.Repeat("a", 199) + "é" + strings.Repeat("b", 400), want: strings.Repeat("a", 199)},
+	for _, row := range []struct{ name, text, want string }{
+		{"first line kept", "the reason: " + strings.Repeat("a", 100) + "\n" + strings.Repeat("b", 400), "the reason: " + strings.Repeat("a", 100)},
+		{"cut at 200 bytes", "the reason " + strings.Repeat("a", 400) + "\n" + strings.Repeat("b", 100), "the reason " + strings.Repeat("a", 189)},
+		{"no split rune", strings.Repeat("a", 199) + "é" + strings.Repeat("b", 400), strings.Repeat("a", 199)},
 	} {
-		t.Run(row.name, func(t *testing.T) {
-			t.Parallel()
-			require.GreaterOrEqual(t, len(row.text), 500)
-			r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
-
-			r.d.nodeImagePruneNotStarted(errors.New(row.text))
-
-			const prefix = "node_image_prune: not started: "
-			got := r.logs.String()
-			require.Equal(t, 1, strings.Count(got, "\n"), "one logger call is one line")
-			require.True(t, strings.HasPrefix(got, prefix), "the line opens with the prefix, got %q", got)
-			assert.Equal(t, row.want, strings.TrimSuffix(strings.TrimPrefix(got, prefix), "\n"),
-				"the text after the prefix is the error's first line, at most 200 bytes")
-			assert.LessOrEqual(t, len(row.want), 200)
-		})
+		d, logs, _, _ := newUpdateTriggerTestDaemon(t, nil)
+		d.nodeImagePruneNotStarted(errors.New(row.text))
+		assert.Equal(t, "node_image_prune: not started: "+row.want+"\n", logs.String(), row.name)
 	}
 }
 

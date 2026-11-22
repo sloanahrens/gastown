@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/jobledger"
 )
@@ -86,26 +85,20 @@ func (d *Daemon) nodeImagePruneReport(rep nodePruneReport, runErr error, started
 	return runErr
 }
 
-// nodeImagePruneNotStartedMax is the longest error text a "not started" line
-// carries, in bytes.
+// nodeImagePruneNotStartedMax is the longest error text a "not started" line carries.
 const nodeImagePruneNotStartedMax = 200
 
 // nodeImagePruneNotStarted logs why a prune that never reached the cluster did not
-// start, so it is not silent until the hook acts (bead gt-gejrwk). Both errors it
-// logs are the daemon's own text, not command output. The text is the error's first
-// line, cut at nodeImagePruneNotStartedMax bytes without splitting a rune: one
-// logger call is one line. Nothing ran, so no ledger row is recorded; returning the
-// error leaves the failure count to the caller (bead gt-ypnfzq).
+// start: the error's first line, cut at nodeImagePruneNotStartedMax bytes, since one
+// logger call is one line. Both errors are the daemon's own text, and nothing ran,
+// so no ledger row is recorded (bead gt-gejrwk).
 func (d *Daemon) nodeImagePruneNotStarted(err error) {
 	msg := err.Error()
 	if i := strings.IndexByte(msg, '\n'); i >= 0 {
 		msg = msg[:i]
 	}
 	if len(msg) > nodeImagePruneNotStartedMax {
-		msg = msg[:nodeImagePruneNotStartedMax]
-		for len(msg) > 0 && !utf8.ValidString(msg) {
-			msg = msg[:len(msg)-1]
-		}
+		msg = strings.ToValidUTF8(msg[:nodeImagePruneNotStartedMax], "")
 	}
 	d.logger.Printf("node_image_prune: not started: %s", msg)
 }
