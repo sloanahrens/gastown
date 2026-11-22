@@ -188,7 +188,15 @@ func appendGateRunRejects(fsys gateRunFS, path string, lines []byte) error {
 // It runs after a rotation has moved the rows, treats a month file as a whole
 // (it never reads or counts rows) and keeps deleting after a delete fails, so one
 // stuck file does not hold the rest; every failure is returned.
-func pruneGateRunMonths(fsys gateRunFS, dir string, now time.Time) ([]string, error) {
+func pruneGateRunMonths(fsys gateRunFS, dir string, now, newest time.Time) ([]string, error) {
+	// A clock far ahead of the data is a clock that jumped, not a quiet gate: refuse
+	// the whole prune, loudly, once. The rotation that refuses has removed the log
+	// and the append then writes its row at the clock, so the next rotation's newest
+	// row is that one and prunes: do not "fix" the single refusal (gt-bta40p).
+	if !newest.IsZero() && now.Sub(newest) > gateRunClockBound {
+		return nil, fmt.Errorf("land: retention clock %s is more than %d days after the newest gate run %s: no month file was deleted",
+			now.UTC().Format(time.RFC3339), gateRunClockBoundDays, newest.UTC().Format(time.RFC3339))
+	}
 	names, err := fsys.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("land: listing %s for the expired month files: %w", dir, err)
@@ -218,10 +226,10 @@ func pruneGateRunMonths(fsys gateRunFS, dir string, now time.Time) ([]string, er
 // kept, and removes the current log only once every month file is written, so a
 // failure leaves the rows where they were. It assumes one writer, the daemon's recorder.
 // A line that does not parse is not carried over: ReadGateRuns skips it already.
-func rotateGateRuns(fsys gateRunFS, path string) error {
+func rotateGateRuns(fsys gateRunFS, path string) (newest time.Time, err error) {
 	data, err := fsys.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("land: reading %s to rotate it: %w", path, err)
+		return time.Time{}, fmt.Errorf("land: reading %s to rotate it: %w", path, err)
 	}
 	var rows []GateRun
 	var rejects []byte // every line that did not decode, as it was read, each with its newline
@@ -230,6 +238,9 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		switch {
 		case json.Unmarshal(line, &r) == nil && r != nil:
 			rows = append(rows, *r)
+			if r.TS.After(newest) {
+				newest = r.TS
+			}
 		case len(bytes.TrimSpace(line)) > 0:
 			rejects = append(append(rejects, line...), '\n')
 		}
@@ -240,7 +251,7 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		// archived: only the rows the month file lacks are written.
 		archived, have, err := readMonthFile(fsys, month)
 		if err != nil {
-			return err
+			return newest, err
 		}
 		var batch bytes.Buffer
 		for _, row := range group.Rows {
@@ -256,7 +267,7 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		// The month file is rewritten whole, never appended to: a member that a
 		// failed write left half-written would make the whole file unreadable.
 		if err := writeMonthFile(fsys, month, append(archived, batch.Bytes()...)); err != nil {
-			return err
+			return newest, err
 		}
 	}
 	if len(rejects) > 0 {
@@ -265,13 +276,13 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 		// failed write removes nothing; a retry archives the month files again
 		// idempotently, and the rejects file is plain text that is never rotated.
 		if err := appendGateRunRejects(fsys, filepath.Join(filepath.Dir(path), gateRunRejectsFile), rejects); err != nil {
-			return err
+			return newest, err
 		}
 	}
 	if err := fsys.Remove(path); err != nil {
-		return fmt.Errorf("land: removing %s after rotating it: %w", path, err)
+		return newest, fmt.Errorf("land: removing %s after rotating it: %w", path, err)
 	}
-	return nil
+	return newest, nil
 }
 
 // gateRunMu serializes every append and rotation of the gate-run log: the
@@ -310,9 +321,10 @@ func appendGateRunAt(fsys gateRunFS, townRoot string, r GateRun, limit int64, no
 	if size, err := fsys.Size(path); err != nil {
 		rotateErr = fmt.Errorf("land: sizing %s: %w", path, err)
 	} else if gateRunRotationDue(size, limit) {
-		if rotateErr = rotateGateRuns(fsys, path); rotateErr == nil {
+		var newest time.Time
+		if newest, rotateErr = rotateGateRuns(fsys, path); rotateErr == nil {
 			var deleted []string
-			deleted, rotateErr = pruneGateRunMonths(fsys, filepath.Dir(path), now)
+			deleted, rotateErr = pruneGateRunMonths(fsys, filepath.Dir(path), now, newest)
 			if len(deleted) > 0 {
 				_, _ = fmt.Fprintf(report, "gate runs: deleted %d expired month file(s): %s\n", len(deleted), strings.Join(deleted, ", "))
 			}

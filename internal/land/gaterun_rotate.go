@@ -6,7 +6,14 @@ import (
 )
 
 const gateRunRotateLimit int64 = 50 << 20 // bytes: 50 MiB
-const gateRunRetentionDays = 90           // days a month file is kept
+// gateRunClockBoundDays is how far past the newest rotated row the retention clock
+// may be before the prune refuses to delete anything.
+const gateRunClockBoundDays = 400
+
+// gateRunClockBound is gateRunClockBoundDays as a duration.
+const gateRunClockBound = gateRunClockBoundDays * 24 * time.Hour
+
+const gateRunRetentionDays = 90 // days a month file is kept
 
 type gateRunMonthGroup struct {
 	File string

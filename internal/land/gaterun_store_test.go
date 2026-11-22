@@ -846,7 +846,7 @@ func TestGateRunStoreKeepsWhatItCannotDecode(t *testing.T) {
 			log := mustLine(t, good) + "\n" + noZone + "\n" + plain + "\n" + torn
 			fsys.files[cur] = []byte(log)
 			tc.setup(fsys)
-			err := rotateGateRuns(fsys, cur)
+			_, err := rotateGateRuns(fsys, cur)
 			if got := beadsIn(t, fsys.files[month], true); !slices.Equal(got, []string{"gt-good"}) {
 				t.Errorf("month file = %v, want the good row archived", got)
 			}
@@ -882,7 +882,7 @@ func TestGateRunStoreACleanLogMakesNoRejectsFile(t *testing.T) {
 	r := sampleGateRun("gt-clean")
 	r.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	fsys.files[cur] = []byte(mustLine(t, r) + "\n")
-	if err := rotateGateRuns(fsys, cur); err != nil {
+	if _, err := rotateGateRuns(fsys, cur); err != nil {
 		t.Fatalf("rotateGateRuns: %v", err)
 	}
 	rejects := filepath.Join(filepath.Dir(cur), gateRunRejectsFile)
@@ -1214,5 +1214,55 @@ func TestGateRunStoreAReadDuringARotationWaitsForIt(t *testing.T) {
 	awaitGateRun(t, bDone, "the read")
 	if readErr != nil || len(runs) != 1 || runs[0].Bead != "gt-a" {
 		t.Errorf("read = %+v, %v; want the one row the rotation left in the log, gt-a", runs, readErr)
+	}
+}
+
+// TestGateRunStoreRetentionClockBound: a rotation whose clock is more than 400 days
+// after the newest row it rotated deletes no month file and returns an error naming
+// both times, however far ahead the clock is; the row is still appended (gt-bta40p).
+func TestGateRunStoreRetentionClockBound(t *testing.T) {
+	t.Parallel()
+	cur := gateRunsPath("/town")
+	dir := filepath.Dir(cur)
+	newest := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	file := func(month string) string { return filepath.Join(dir, "gate-runs-"+month+".jsonl.gz") }
+	for _, tc := range []struct {
+		name string
+		now  time.Time
+	}{
+		{"a clock three years ahead of the newest row", newest.AddDate(3, 0, 0)},
+		{"a clock 401 days ahead of the newest row", newest.Add(401 * 24 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fsys := newMemGateRunFS()
+			for _, m := range []string{"2026-05", "2026-06"} {
+				r := sampleGateRun("gt-" + m)
+				r.TS = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+				fsys.files[file(m)] = gzipRows(t, r)
+			}
+			old := sampleGateRun("gt-log")
+			old.TS = newest
+			fsys.files[cur] = []byte(mustLine(t, old) + "\n")
+			row := sampleGateRun("gt-new")
+			row.TS = tc.now
+			var report bytes.Buffer
+			err := appendGateRunAt(fsys, "/town", row, 1, tc.now, &report)
+			want := "retention clock " + tc.now.UTC().Format(time.RFC3339) + " is more than 400 days after the newest gate run " + newest.UTC().Format(time.RFC3339) + ": no month file was deleted"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to say %q", err, want)
+			}
+			for _, m := range []string{"2026-05", "2026-06"} {
+				if _, ok := fsys.files[file(m)]; !ok {
+					t.Errorf("gate-runs-%s was deleted by a rotation whose clock disagrees with the data", m)
+				}
+			}
+			if report.Len() != 0 {
+				t.Errorf("report = %q, want nothing deleted and nothing reported", report.String())
+			}
+			if got := beadsIn(t, fsys.files[cur], false); !slices.Contains(got, "gt-new") {
+				t.Errorf("log = %v, want the appended row in it", got)
+			}
+		})
 	}
 }
