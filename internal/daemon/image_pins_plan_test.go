@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/daemonimage"
@@ -230,7 +231,9 @@ func TestPlanImagePinsNamesAPinWhoseReadFailed(t *testing.T) {
 // TestPlanImagePinsUnreadableItemCarriesThePinReadError: the unreadable item
 // carries the pin's whole read error, its line breaks turned to spaces and cut
 // to 300 characters, so the next flap says why the pin cannot be read
-// (gt-s0x1bk). An error whose text is empty keeps the generic line.
+// (gt-s0x1bk). The cut is by characters, not bytes, so a multi-byte error keeps
+// whole characters and the item stays valid UTF-8. An error whose text is empty
+// keeps the generic line.
 func TestPlanImagePinsUnreadableItemCarriesThePinReadError(t *testing.T) {
 	t.Parallel()
 	const (
@@ -259,6 +262,13 @@ func TestPlanImagePinsUnreadableItemCarriesThePinReadError(t *testing.T) {
 			want: head + strings.Repeat("x", 300) + tail,
 		},
 		{
+			// 400 three-byte characters: a cut by bytes at 300 would keep only
+			// 100 of them, and one landing mid-character would break the string.
+			name: "a multi-byte error over 300 characters is cut on a character boundary",
+			err:  strings.Repeat("日", 400),
+			want: head + strings.Repeat("日", 300) + tail,
+		},
+		{
 			name: "an empty error keeps the generic line",
 			err:  "",
 			want: generic,
@@ -276,8 +286,15 @@ func TestPlanImagePinsUnreadableItemCarriesThePinReadError(t *testing.T) {
 
 			got := PlanImagePins([]ImagePinState{failed}, nil, time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC))
 
-			if len(got.Items) != 1 || got.Items[0].Summary != tt.want {
-				t.Fatalf("Items = %+v, want one unreadable item with Summary %q", got.Items, tt.want)
+			if len(got.Items) != 1 {
+				t.Fatalf("Items = %+v, want one unreadable item", got.Items)
+			}
+			summary := got.Items[0].Summary
+			if !utf8.ValidString(summary) {
+				t.Fatalf("Summary = %q, want valid UTF-8: the cut must land on a character boundary", summary)
+			}
+			if summary != tt.want {
+				t.Fatalf("Summary = %q, want %q", summary, tt.want)
 			}
 		})
 	}
