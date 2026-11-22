@@ -97,6 +97,11 @@ type Commands struct {
 	// weekly run adopts by the rank rule alone, as it did before the key existed.
 	// The manual storypoints-adopt does not read it.
 	StoryPointsAutoAdopt bool
+	// AutoAdoptReader answers story_points.auto_adopt lazily: the weekly run calls it once,
+	// after its week guard says the retrain is due, and its answer replaces
+	// StoryPointsAutoAdopt. A week that is not due never calls it; an error stops the run
+	// before the retrain. Nil keeps StoryPointsAutoAdopt (off by default).
+	AutoAdoptReader func() (bool, error)
 	// StoryPointsSince is storypoints-eval's --since DATE: a YYYY-MM-DD day, and
 	// the test part is the rows landed at or after it. Empty scores the newest
 	// three rows in ten.
@@ -475,6 +480,13 @@ func (c Commands) RunStoryPointsWeekly(ctx context.Context) error {
 	now := c.now().UTC()
 	if !Due(last, now, StoryPointsWeeklyEvery) {
 		return c.receipt("story points weekly: not due, the last run is under %s old", StoryPointsWeeklyEvery)
+	}
+	if c.AutoAdoptReader != nil {
+		on, err := c.AutoAdoptReader()
+		if err != nil {
+			return fmt.Errorf("story points weekly: reading story_points.auto_adopt: %w", err)
+		}
+		c.StoryPointsAutoAdopt = on
 	}
 	real, env, err := c.wire(ctx)
 	if err != nil {
