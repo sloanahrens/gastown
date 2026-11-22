@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 var ErrNoGateRunRoot = errors.New("land: the gate run log needs a town root")
@@ -98,10 +99,18 @@ func rotateGateRuns(fsys gateRunFS, path string) error {
 	return nil
 }
 
+// gateRunMu serializes every append and rotation of the gate-run log: the
+// daemon's landing workers, one per rig, all append to the one town-wide file,
+// and an append that landed between a rotation's read and its removal of the log
+// would be deleted with it (gt-6wfk0k).
+var gateRunMu sync.Mutex
+
 // appendGateRunLimit appends r, rotating the log first when it has reached limit.
 // A rotation that fails is returned after the row is appended, never before, so
 // the row is not lost.
 func appendGateRunLimit(fsys gateRunFS, townRoot string, r GateRun, limit int64) error {
+	gateRunMu.Lock()
+	defer gateRunMu.Unlock()
 	path := gateRunsPath(townRoot)
 	if path == "" {
 		return ErrNoGateRunRoot
