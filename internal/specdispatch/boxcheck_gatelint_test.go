@@ -30,8 +30,8 @@ func TestBoxCheckRefusesGateLint(t *testing.T) {
 	}
 }
 
-// A box naming a lint the seat runs itself, or no lint at all, passes, and a
-// phrase with no hint keeps the reason it printed before the field (gt-n9p12q).
+// A box naming a lint the seat runs itself, or none, passes; an existing phrase
+// keeps its wording plus the hint, and a hint-less one keeps its reason (gt-n9p12q).
 func TestBoxCheckGateLintAllowed(t *testing.T) {
 	t.Parallel()
 	for _, item := range []string{
@@ -46,10 +46,17 @@ func TestBoxCheckGateLintAllowed(t *testing.T) {
 			}
 		})
 	}
-	t.Run("existing phrase keeps its reason", func(t *testing.T) {
+	t.Run("existing phrase keeps its wording", func(t *testing.T) {
 		t.Parallel()
-		want := `item "make gate passes" names "make gate", a step a polecat cannot run; the overseer-run steps belong in the Gate, as owed by the overseer`
+		want := `item "make gate passes" names "make gate", a step a polecat cannot run; the overseer-run steps belong in the Gate, as owed by the overseer; ` + makeTargetHint
 		if got := lintAcceptance("- [ ] make gate passes").Reason; got != want {
+			t.Errorf("reason = %q, want %q", got, want)
+		}
+	})
+	t.Run("phrase with no hint keeps its reason", func(t *testing.T) {
+		t.Parallel()
+		want := `item "docker ps shows the pool" names "docker", a step a polecat cannot run; the overseer-run steps belong in the Gate, as owed by the overseer`
+		if got := lintAcceptance("- [ ] docker ps shows the pool").Reason; got != want {
 			t.Errorf("reason = %q, want %q", got, want)
 		}
 	})
