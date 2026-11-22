@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1784,6 +1785,179 @@ func TestGatewayPusherReportedHash(t *testing.T) {
 			}
 			if auth := got.Header.Get("Authorization"); auth != "Bearer "+token {
 				t.Errorf("Authorization = %q, want the bearer token from the token file", auth)
+			}
+		})
+	}
+}
+
+// statsTestURL is the pusher's URL in the stats tests: a loopback address, which
+// a plain-http gateway URL may name.
+const statsTestURL = "http://127.0.0.1:7440"
+
+// u64ptr is a pointer to v, for the stats fields the decoder leaves nil when the
+// body does not carry them.
+func u64ptr(v uint64) *uint64 { return &v }
+
+// TestGatewayPusherStatsReadsTheCounters is acceptance box 1: a 200 answer with
+// the call counters, the three cap fields and the optional conflict, actor and
+// lane fields comes back through Stats as the typed fields, and the request is a
+// GET to the stats path with the bearer token and no body.
+func TestGatewayPusherStatsReadsTheCounters(t *testing.T) {
+	t.Parallel()
+	const token = "s3cret"
+	const answer = `{"calls":7,"errors":2,"dropped":1,"verbs":{"show":5,"list":2},"too_many_calls":3,"in_flight":4,"peak_in_flight":9,"conflicts":1,"conflict_verbs":{"update":1},"actors":{"mayor":{"reads":3,"writes":2,"conflicts":0}},"lane_waits":2,"lane_cap_hits":1}`
+	var got *http.Request
+	pusher := GatewayPusher{
+		URL:       statsTestURL,
+		TokenFile: clientToken(t, "  "+token+" \n"),
+		HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+			got = req
+			return jsonResponse(http.StatusOK, answer), nil
+		}),
+		Observe: func(WorkspaceAnswer) {
+			t.Error("a stats read observed the workspace; the reconcile's probe is its observer")
+		},
+	}
+	stats, err := pusher.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if got == nil {
+		t.Fatal("the stats read sent no request")
+	}
+	if got.Method != http.MethodGet || got.URL.String() != statsTestURL+statsPath {
+		t.Errorf("request = %s %s, want GET %s%s", got.Method, got.URL, statsTestURL, statsPath)
+	}
+	if auth := got.Header.Get("Authorization"); auth != "Bearer "+token {
+		t.Errorf("Authorization = %q, want the bearer token from the token file", auth)
+	}
+	if got.ContentLength > 0 {
+		t.Errorf("the stats read sent a %d-byte body, want none", got.ContentLength)
+	}
+	want := GatewayStats{
+		Calls: 7, Errors: 2, Dropped: 1,
+		Verbs:        map[string]uint64{"show": 5, "list": 2},
+		TooManyCalls: 3, InFlight: 4, PeakInFlight: 9, CapsPresent: true,
+		Conflicts:     u64ptr(1),
+		ConflictVerbs: map[string]uint64{"update": 1},
+		Actors:        map[string]ActorStats{"mayor": {Reads: 3, Writes: 2}},
+		LaneWaits:     u64ptr(2),
+		LaneCapHits:   u64ptr(1),
+	}
+	if !reflect.DeepEqual(stats, want) {
+		t.Errorf("Stats = %+v, want %+v", stats, want)
+	}
+}
+
+// TestGatewayPusherStatsRefusalHidesTheToken is acceptance box 2: a 401 answer
+// returns the gateway's refusal error, no token text, and no counters.
+func TestGatewayPusherStatsRefusalHidesTheToken(t *testing.T) {
+	t.Parallel()
+	const token = "s3cret-token-value"
+	pusher := GatewayPusher{
+		URL:       statsTestURL,
+		TokenFile: clientToken(t, token+"\n"),
+		HTTP: doerFunc(func(*http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusUnauthorized, `{"code":"unauthorized","message":"unknown token"}`), nil
+		}),
+	}
+	stats, err := pusher.Stats(context.Background())
+	if err == nil {
+		t.Fatalf("Stats = %+v, nil error; want the refusal", stats)
+	}
+	if !errors.Is(err, ErrGatewayRefused) {
+		t.Errorf("error = %v, want %v", err, ErrGatewayRefused)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Errorf("error = %q carries the token", err)
+	}
+	if !reflect.DeepEqual(stats, GatewayStats{}) {
+		t.Errorf("Stats = %+v with a refusal, want no counters", stats)
+	}
+}
+
+// TestGatewayPusherStatsFailures is acceptance box 3: a 500, a timeout and an
+// unparsable body each return an error and no counters, and so does an answer
+// that cannot be read. The two pre-send refusals are here too, and send nothing.
+func TestGatewayPusherStatsFailures(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		url      string
+		noToken  bool
+		do       func(*http.Request) (*http.Response, error)
+		wantErr  error
+		wantText string
+	}{
+		{
+			name: "a 500 is an error with no counters",
+			url:  statsTestURL,
+			do: func(*http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusInternalServerError, `{"code":"internal","message":"boom"}`), nil
+			},
+			wantErr: ErrGatewayRefused, wantText: "HTTP 500",
+		},
+		{
+			name: "a timeout is an error with no counters",
+			url:  statsTestURL,
+			do: func(*http.Request) (*http.Response, error) {
+				return nil, context.DeadlineExceeded
+			},
+			wantErr: context.DeadlineExceeded, wantText: "did not answer the stats read",
+		},
+		{
+			name: "an unparsable body is an error with no counters",
+			url:  statsTestURL,
+			do: func(*http.Request) (*http.Response, error) {
+				return jsonResponse(http.StatusOK, "<html>a proxy page</html>"), nil
+			},
+			wantText: "not the stats body",
+		},
+		{
+			name: "an unreadable body is an error with no counters",
+			url:  statsTestURL,
+			do: func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: failingBody{errors.New("reset")}, Header: make(http.Header)}, nil
+			},
+			wantText: "reading the gateway's stats answer",
+		},
+		{
+			name:    "no gateway url is refused before sending",
+			wantErr: ErrNoGatewayURL,
+		},
+		{
+			name:    "no token file is refused before sending",
+			url:     statsTestURL,
+			noToken: true,
+			wantErr: ErrNoTokenFile,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pusher := GatewayPusher{URL: tt.url}
+			if !tt.noToken {
+				pusher.TokenFile = clientToken(t, "s3cret")
+			}
+			pusher.HTTP = doerFunc(func(req *http.Request) (*http.Response, error) {
+				if tt.do == nil {
+					t.Error("a refused stats read sent a request")
+					return nil, errors.New("sent")
+				}
+				return tt.do(req)
+			})
+			stats, err := pusher.Stats(context.Background())
+			if err == nil {
+				t.Fatalf("Stats = %+v, nil error; want an error", stats)
+			}
+			if !reflect.DeepEqual(stats, GatewayStats{}) {
+				t.Errorf("Stats = %+v with an error, want no counters", stats)
+			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Errorf("error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+				t.Errorf("error = %q, want it to contain %q", err, tt.wantText)
 			}
 		})
 	}

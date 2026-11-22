@@ -59,8 +59,10 @@ const (
 	// deadline around the request, so a gateway that accepts and never answers
 	// cannot hold a writer open.
 	pushTimeout = 30 * time.Second
-	// pushResponseLimit bounds the gateway's answer read for its manifest hash
-	// or its refusal: one small JSON object either way.
+	// pushResponseLimit bounds the gateway's answer read for its manifest hash,
+	// its stats counters or its refusal: one small JSON object either way. The
+	// stats body adds only the gateway's bounded verb and actor maps to the
+	// counters.
 	pushResponseLimit = 64 << 10
 	// callsResponseLimit bounds the gateway's calls answer read. GET /v1/calls
 	// answers at most maxCallsLimit entries, and one entry is bounded by the log
@@ -772,7 +774,7 @@ type GatewayPusher struct {
 	// URL is the gateway's base URL, such as http://host.docker.internal:7440.
 	URL string
 	// PushURL is the base URL Push goes to when it is non-empty. Probe,
-	// ReportedHash and the calls read go to URL, so an empty PushURL leaves Push
+	// ReportedHash, Calls and Stats go to URL, so an empty PushURL leaves Push
 	// on URL and an empty URL leaves the reads on PushURL.
 	PushURL string
 	// TokenFile is the file holding the pusher's bearer token. It is read on
@@ -890,6 +892,51 @@ func (g GatewayPusher) Probe(ctx context.Context) error {
 		return g.refusal(resp.StatusCode, data)
 	}
 	return nil
+}
+
+// Stats reads the gateway's counters with GET /v1/stats, through the same
+// endpoint, token file, client and timeout as Probe, and returns them as the
+// typed view decodeGatewayStats builds. A non-200 answer is the gateway's
+// refusal, a gateway that does not answer is an error, and a body that is not
+// the stats answer is an error: none of them is a result with zero counters.
+//
+// A stats read observes nothing. Probe is the reconcile's observer of the
+// workspace hash, and a panel's poll of the counters must not wake it.
+func (g GatewayPusher) Stats(ctx context.Context) (GatewayStats, error) {
+	endpoint, err := g.endpoint(statsPath, purposeRead)
+	if err != nil {
+		return GatewayStats{}, err
+	}
+	token, err := readTokenFile(g.TokenFile)
+	if err != nil {
+		return GatewayStats{}, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
+	// endpoint checked the URL and the method is fixed, so building the request
+	// cannot fail, as in Probe.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := g.doer().Do(req)
+	if err != nil {
+		return GatewayStats{}, fmt.Errorf("bdgateway: the gateway at %s did not answer the stats read: %w", shown(redactedURL(g.effectiveURL(purposeRead))), err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, pushResponseLimit))
+	if err != nil {
+		return GatewayStats{}, fmt.Errorf("bdgateway: reading the gateway's stats answer: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return GatewayStats{}, g.refusal(resp.StatusCode, data)
+	}
+	stats, err := decodeGatewayStats(data)
+	if err != nil {
+		return GatewayStats{}, fmt.Errorf("bdgateway: the gateway's stats answer is not the stats body: %w", err)
+	}
+	return stats, nil
 }
 
 // CallsPage is a calls read's answer: the log's recent entries, oldest first,
@@ -1027,14 +1074,14 @@ type requestPurpose int
 const (
 	// purposePush is Push: it may use PushURL and the push Service.
 	purposePush requestPurpose = iota
-	// purposeRead is Probe, ReportedHash and the calls read: they never use the
+	// purposeRead is Probe, ReportedHash, Calls and Stats: they never use the
 	// push Service over plain http, whichever field named it.
 	purposeRead
 )
 
 // effectiveURL is the base URL a request for purpose goes to. Push goes to
 // PushURL when set, else URL: the push Service exists for the write. Probe,
-// ReportedHash and the calls read go to URL when set, else PushURL, so a pusher
+// ReportedHash, Calls and Stats go to URL when set, else PushURL, so a pusher
 // configured with only a PushURL still reads.
 func (g GatewayPusher) effectiveURL(purpose requestPurpose) string {
 	if purpose == purposePush {
