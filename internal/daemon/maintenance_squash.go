@@ -36,9 +36,8 @@ import (
 // leaves the run to the next day's check (squashArchiveToCut, gt-kq95uc). It is
 // then run by doltsquash.Run, which holds the town's run marker for its whole
 // length so two daemons cannot run it at once, the maintenance gc flag so a gc
-// cycle cannot run beside it (gt-bufge0), and the write side of doltMaintMu so
-// neither a gc call nor a daemon Dolt task runs beside it (gt-g0lds7). Each run
-// is recorded in
+// cycle cannot run beside it (gt-bufge0), and doltMaintMu's write side so no gc
+// call or Dolt task runs beside it (gt-g0lds7). Each run is recorded in
 // maintenance_state.json and in one daemon/squash_ledger.jsonl line (gt-5v1fye),
 // and a failed run or a swap that kept both branches raises one attention item
 // (gt-0g4yoa).
@@ -265,11 +264,10 @@ func (d *Daemon) triggerSquashCheck() {
 // doltsquash.Decide's answer with the cut, and runs a due database through
 // doltsquash.Run. A check that finished every database records its completion,
 // so it is not due again for a day. A check that could not decide, could not
-// run, found the run marker held, found the maintenance gc flag held, or found
-// the Dolt maintenance mutex held is NOT recorded as completed: it is due again
-// after squashCheckRetryAfter, so a day of unreadable inputs or a run a second
-// daemon, a gc cycle or a Dolt task holds does not set the daily gate (overseer
-// decision, gt-g4iwk0).
+// run, or found the run marker, the maintenance gc flag or doltMaintMu held is
+// NOT recorded as completed: it is due again after squashCheckRetryAfter, so a
+// day of unreadable inputs or a run a second daemon, a gc cycle or a Dolt task
+// holds does not set the daily gate (overseer decision, gt-g4iwk0).
 //
 // A number that cannot be read is a WARNING naming it, and no verdict is
 // logged for that database: a quiet-day line over an unreadable input would
@@ -449,25 +447,15 @@ func (d *Daemon) runSquashCheck(step *squashStep, now time.Time) {
 // takes is its own bound, and nothing here alarms a flag held for many retries.
 var errSquashGCRunning = errors.New("the maintenance gc flag is held")
 
-// errSquashDoltTaskInFlight reports that a daemon Dolt task, or a gc call,
-// holds doltMaintMu, so the run did not start. The check is due again after
-// squashCheckRetryAfter; the task or call releases the mutex when its own work
-// returns.
+// errSquashDoltTaskInFlight reports that doltMaintMu is held, so the run did not start.
 var errSquashDoltTaskInFlight = errors.New("a daemon Dolt task or the gc holds the Dolt maintenance mutex")
 
 // runSquashDatabaseExclusive runs one due database through runSquashDatabase
-// while holding the maintenance gc flag the gc cycle takes in
-// startMaintenanceGC, so a cycle started during the run is refused by its own
-// CompareAndSwap instead of squashing beside it. It also takes the write side of
-// doltMaintMu, which the gc call takes per database and the daemon's Dolt tasks
-// take the read side of through tryDoltTask, so neither runs beside the squash
-// (gt-g0lds7). The archive pass above has released the flag by the time this
-// takes it, so the two takes never nest.
-//
-// A flag already held returns errSquashGCRunning, and a mutex already held
-// returns errSquashDoltTaskInFlight; either way nothing runs, and the deferred
-// release frees only a flag this call took, so a deferred run never frees a
-// cycle's flag. The write side is released when the run ends.
+// while holding the maintenance gc flag and doltMaintMu's write side, so no gc
+// cycle or Dolt task runs beside the squash: the gc takes the side per database
+// and Dolt tasks hold its read side through tryDoltTask. A held flag or mutex
+// returns an error and starts nothing; each is released by the take that ended,
+// so a deferred run never frees a cycle's flag (gt-g0lds7).
 func (d *Daemon) runSquashDatabaseExclusive(ctx context.Context, db string, cut time.Time, settings *agentconfig.SquashSettings) (doltsquash.RunResult, error) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		return doltsquash.RunResult{}, errSquashGCRunning
