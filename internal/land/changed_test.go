@@ -600,22 +600,22 @@ func TestEveryPathGuardHasAPredicate(t *testing.T) {
 	}
 }
 
-// TestAlwaysGuardsNameTestsTheirPackageHolds fails when an always entry names
-// a test function its package does not hold: a rename would otherwise turn the
-// guard into a silent no-op that presubmit runs on every diff (gt-t4rchq).
-func TestAlwaysGuardsNameTestsTheirPackageHolds(t *testing.T) {
+// TestGuardTable fails when an entry names a test function its package does
+// not hold. A rename would otherwise turn the guard into a silent no-op: a
+// presubmit run whose -run pattern matches no test passes with "no tests to
+// run". The always entries had this check alone (gt-t4rchq); a misspelled
+// internal/config name in a path-selected entry showed it must cover every
+// entry (gt-g4662m).
+func TestGuardTable(t *testing.T) {
 	t.Parallel()
 	held := map[string]map[string]bool{}
 	for _, g := range treeWideGuards {
-		if !g.always {
-			continue
-		}
 		if held[g.pkg] == nil {
 			held[g.pkg] = testFunctionsIn(t, g.pkg)
 		}
 		for _, name := range g.tests {
 			if !held[g.pkg][name] {
-				t.Errorf("%s is always and names %s, which its test files do not hold", g.pkg, name)
+				t.Errorf("%s names %s, which its test files do not hold", g.pkg, name)
 			}
 		}
 	}
