@@ -52,9 +52,10 @@ A path given with --records or --log must exist, so a typo is an error. The
 town's two defaults may be absent — a town that has not landed yet has
 neither — and that is an empty report, not a failure.
 
-With --classes the report is followed by the table of how often each class of
-the om-lessons table turns up in the reviews, per ISO week, over all weeks on
-record (--since does not narrow it).
+With --classes the report carries how often each class of the om-lessons table
+turns up in the reviews, per ISO week, over all weeks on record (--since does
+not narrow it): the text table follows the report, and --json adds a "classes"
+key to the same document.
 
 The command reads only: it writes no file. --json prints the same data as the
 table.
@@ -72,7 +73,7 @@ func init() {
 	landOmStatsCmd.Flags().StringVar(&landOmStatsRecords, "records", "", "review records file (default: <town>/.runtime/landings/reviews.jsonl)")
 	landOmStatsCmd.Flags().StringVar(&landOmStatsLog, "log", "", "daemon log for the days before the first record (default: <town>/daemon/daemon.log)")
 	landOmStatsCmd.Flags().BoolVar(&landOmStatsJSON, "json", false, "print the report as JSON")
-	landOmStatsCmd.Flags().BoolVar(&landOmStatsClasses, "classes", false, "after the report, the table of how often each om-lessons class turns up per ISO week, over all weeks on record (text report; --recurrence takes precedence)")
+	landOmStatsCmd.Flags().BoolVar(&landOmStatsClasses, "classes", false, "add how often each om-lessons class turns up per ISO week, over all weeks on record: a table after the report, or a \"classes\" JSON key (--recurrence takes precedence)")
 	landOmStatsCmd.Flags().BoolVar(&landOmStatsRecurrence, "recurrence", false, "add each hold-out class's minor findings a later review restated, and the rates")
 	landCmd.AddCommand(landOmStatsCmd)
 }
@@ -115,6 +116,10 @@ func landOmStatsReportFrom(fsys landOmStatsFS, findTown func() (string, error), 
 		return err
 	}
 	if asJSON {
+		if classes {
+			records, _ := readLandOmStatsClassRecords(data)
+			return writeLandOmStatsClassesJSON(out, landOmStatsClassesReport{OmStats: stats, Classes: classRates(records)})
+		}
 		return writeLandOmStatsJSON(out, stats)
 	}
 	writeLandOmStatsTable(out, stats, since)
