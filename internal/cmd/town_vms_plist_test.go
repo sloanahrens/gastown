@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -117,4 +119,58 @@ func TestTownVMsPlistCommandRefusals(t *testing.T) {
 			t.Error("a failed write of the plist to stdout was reported as success")
 		}
 	})
+}
+
+// TestTownVMsPlistCommandOutWritesFile: with --out the command writes exactly the
+// bytes the print form gives to that file with mode 0644, replacing an existing file
+// of another mode, and prints nothing to stdout (gt-9tan46).
+func TestTownVMsPlistCommandOutWritesFile(t *testing.T) {
+	t.Parallel()
+	const gt, home = "/Users/x/.local/bin/gt", "/Users/x"
+	want, err := renderTownVMsPlist(gt, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "colima-vms.plist")
+	if err := os.WriteFile(path, []byte("an older job"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newTownVMsPlistCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--gt", gt, "--home", home, "--out", path})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("plist --out: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != string(want) {
+		t.Errorf("file = %q (%v), want the rendered plist", got, err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %v (%v), want 0644", info, err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing printed with --out", out.String())
+	}
+}
+
+// TestTownVMsPlistCommandOutErrorNamesPath: an --out under a missing directory is an
+// error naming the path, and leaves no file (gt-9tan46).
+func TestTownVMsPlistCommandOutErrorNamesPath(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing", "colima-vms.plist")
+	cmd := newTownVMsPlistCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--gt", "/Users/x/.local/bin/gt", "--home", "/Users/x", "--out", path})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Errorf("err = %v, want it to name %q", err, path)
+	}
+	if _, statErr := os.Stat(filepath.Dir(path)); !os.IsNotExist(statErr) {
+		t.Errorf("the missing directory exists (%v): the command made it or a file", statErr)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("the target directory holds %d entries after a failed write, want none", len(entries))
+	}
 }
