@@ -38,8 +38,9 @@ func NewBeadsConfigDriftCheck() *BeadsConfigDriftCheck {
 }
 
 // Run reads each registered rig's tracked .beads/config.yaml at the rig repo's
-// default branch and compares every top-level scalar key with what bd reports
-// for that rig's store. The check changes nothing.
+// default branch and compares every top-level scalar key, except the per-town
+// ones beadsConfigPerTownKey names, with what bd reports for that rig's store.
+// The check changes nothing.
 func (c *BeadsConfigDriftCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsConfig, err := config.LoadRigsConfig(filepath.Join(ctx.TownRoot, "mayor", "rigs.json"))
 	if err != nil {
@@ -81,6 +82,9 @@ func (c *BeadsConfigDriftCheck) Run(ctx *CheckContext) *CheckResult {
 		bd := ctx.bd(filepath.Dir(beadsDir), doctorConfigEnv(beadsDir))
 		rigDrifted := false
 		for _, setting := range settings {
+			if beadsConfigPerTownKey(setting.Key) {
+				continue
+			}
 			live, err := bd.ConfigGet(setting.Key)
 			if err != nil {
 				problems = append(problems, fmt.Sprintf("rig %s: cannot read %s from the live store: %s", rigName, setting.Key, bdOutput(err)))
@@ -124,6 +128,17 @@ func (c *BeadsConfigDriftCheck) Run(ctx *CheckContext) *CheckResult {
 		Status:  StatusOK,
 		Message: fmt.Sprintf("Tracked %s matches the live store in %d rig(s)", beadsConfigTrackedPath, checked),
 	}
+}
+
+// beadsConfigPerTownKey reports whether key is a setting each town's store keeps
+// for itself (its issue prefix, its sync remote, its Dolt server): a tracked
+// value for it differs from the live store by design, so it is never compared.
+func beadsConfigPerTownKey(key string) bool {
+	switch key {
+	case "issue-prefix", "prefix", "sync.remote":
+		return true
+	}
+	return strings.HasPrefix(key, "dolt.")
 }
 
 // beadsConfigSetting is one top-level scalar setting of a bd config.yaml.
