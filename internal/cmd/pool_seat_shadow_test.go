@@ -242,6 +242,100 @@ func TestAgentBeadRetireDeadHookedDoesNotReadWithoutATown(t *testing.T) {
 	}
 }
 
+// cacheSeatRead fills the batch's seat cache with the read hookHeld makes,
+// without the line hookHeld logs, so a test can drive disposition's cached
+// branch alone.
+func cacheSeatRead(t *testing.T, town string, batch *poolSeatBatch, rigName, polecatName string) {
+	t.Helper()
+	seat, _, err := poolReadSeatBeads(town, rigName, polecatName, batch.seatReads(rigName))
+	if err != nil {
+		t.Fatalf("read the seat for the cache: %v", err)
+	}
+	rb := batch.rig(rigName)
+	rb.seatMu.Lock()
+	defer rb.seatMu.Unlock()
+	if rb.seats == nil {
+		rb.seats = make(map[string]poolSeatBeadRead)
+	}
+	rb.seats[polecatName] = seat
+}
+
+// TestPoolHookRetireShadowFromDisposition is P1.7's evidence surviving the hook
+// read's retirement: with hookHeld never called, disposition alone logs the one
+// disagreement line with both values, from the read it makes and from the seat
+// already in the batch's cache (gt-9h7c2n).
+func TestPoolHookRetireShadowFromDisposition(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		cached bool
+	}{
+		{name: "the read it makes"},
+		{name: "the seat already read", cached: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, _, batch, lines := seatShadowTown(t, "ember", "gt-bead-hook")
+			writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town,
+				intent.Record{WorkBead: "gt-intent-bead"})
+			if tc.cached {
+				cacheSeatRead(t, town, batch, "gastown", "ember")
+			}
+
+			if _, err := batch.disposition("gastown", "ember"); err != nil {
+				t.Fatalf("disposition: %v", err)
+			}
+			want := []string{"agentbead_shadow: gastown/ember hook intent=gt-intent-bead bead=gt-bead-hook"}
+			if got := shadowLines(lines); !reflect.DeepEqual(got, want) {
+				t.Fatalf("shadow lines = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestPoolHookRetireShadowOnce: a seat asked through both reads logs one line,
+// not two, while the comparison lives in both — and a seat whose two sources
+// agree still logs none (gt-9h7c2n).
+func TestPoolHookRetireShadowOnce(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		hook string
+		rec  intent.Record
+		want []string
+	}{
+		{
+			name: "both readers of a disagreeing seat",
+			hook: "gt-bead-hook",
+			rec:  intent.Record{WorkBead: "gt-intent-bead"},
+			want: []string{"agentbead_shadow: gastown/ember hook intent=gt-intent-bead bead=gt-bead-hook"},
+		},
+		{
+			name: "the two sources agree",
+			hook: "gt-same",
+			rec:  intent.Record{WorkBead: "gt-same"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, _, batch, lines := seatShadowTown(t, "ember", tc.hook)
+			writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town, tc.rec)
+
+			if _, err := batch.hookHeld("gastown", "ember"); err != nil {
+				t.Fatalf("hookHeld: %v", err)
+			}
+			if _, err := batch.disposition("gastown", "ember"); err != nil {
+				t.Fatalf("disposition: %v", err)
+			}
+			if got := shadowLines(lines); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("shadow lines = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // rosterOverShadowBatch is the seat picture the roster reads, over the batch
 // whose shadow lines a test captures.
 func rosterOverShadowBatch(lister sessionLister, town string, batch *poolSeatBatch) ([]poolSession, int, error) {

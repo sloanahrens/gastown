@@ -407,7 +407,9 @@ func (b *poolSeatBatch) seatReads(rigName string) poolSeatReads {
 // the dead-hooked walk's second read costs no bd call of its own.
 //
 // Both branches hold the seat's bead read in hand, so a comparison of the
-// seat's hook needs no second read of the beads.
+// seat's hook needs no second read of the beads: each logs the seat's shadow
+// line before it returns, so the evidence P1.7 reads no longer depends on
+// hookHeld's own call.
 func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
 	rb := b.rig(rigName)
 	reads := b.seatReads(rigName)
@@ -415,12 +417,14 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 	seat, ok := rb.seats[polecatName]
 	rb.seatMu.Unlock()
 	if ok {
+		b.shadowSeatHook(rigName, polecatName, seat.hookBead)
 		return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, rb.store, seat)
 	}
 	seat, bd, err := poolReadSeatBeads(b.townRoot, rigName, polecatName, reads)
 	if err != nil {
 		return poolSeatState{}, err
 	}
+	b.shadowSeatHook(rigName, polecatName, seat.hookBead)
 	return poolPolecatSeatStateFromBeadRead(b.townRoot, rigName, polecatName, reads, bd, seat)
 }
 
@@ -1172,8 +1176,8 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // per pass. Keeping the probe behind the hook read cut a probe per dead
 // directory (gt-gg9hv.73) until this parity fix; the hook read is kept as the
 // cheap primer that fills the batch's bead cache for the full read, and its
-// answer no longer decides the seat. Dropping it and moving the
-// agentbead_shadow comparison into the batch disposition read is gt-9h7c2n.
+// answer no longer decides the seat. The agentbead_shadow comparison runs from
+// the full read as well, so it survives the primer's removal (gt-9h7c2n).
 // The count returned beside the seats is how many ran the full read, which the
 // roster logs.
 //
@@ -1225,9 +1229,9 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				continue
 			}
 			// The primer: it fills the batch's bead cache for the full read
-			// below. Its answer no longer decides the seat (gt-v5n2be); the
-			// read itself stays until gt-9h7c2n moves the shadow comparison
-			// into the disposition read.
+			// below. Its answer no longer decides the seat (gt-v5n2be), and the
+			// shadow comparison runs from the full read too; the read itself
+			// stays until a later bead removes it (gt-j8elkb).
 			if _, err := hookHeld(rigName, name); err != nil {
 				// A seat whose hold cannot be read is not proven free, so it
 				// stays counted; the read error goes back beside the seats.
