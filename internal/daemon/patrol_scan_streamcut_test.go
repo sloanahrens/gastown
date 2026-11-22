@@ -179,3 +179,38 @@ func TestPatrolScanStreamCutWrapsTheBackendError(t *testing.T) {
 		t.Errorf("StreamCut error = %v, want it to wrap %v", err, cause)
 	}
 }
+
+// streamCutAnswerer is a backend that answers StreamCut, as the openshell one does.
+type streamCutAnswerer struct {
+	session.Backend
+	cut bool
+}
+
+func (s streamCutAnswerer) StreamCut(string) (bool, error) { return s.cut, nil }
+
+// TestSandboxStreamCutOverTheBackend: the real read builds the backend from the record's profile,
+// returns its construction error, refuses a backend that cannot answer StreamCut as an error and
+// never as an intact stream, and otherwise passes the backend's answer through (gt-jpmj3s).
+func TestSandboxStreamCutOverTheBackend(t *testing.T) {
+	t.Parallel()
+	rec := session.SandboxRecord{Session: "gt-x", Profile: "p", Gateway: "g", Image: "i"}
+	build := errors.New("no gateway profile")
+	if _, err := sandboxStreamCutOver(func(string, session.Profile) (session.Backend, error) { return nil, build }, "town", rec); !errors.Is(err, build) {
+		t.Errorf("a backend that cannot be built: err = %v, want %v", err, build)
+	}
+	var gotProfile session.Profile
+	_, err := sandboxStreamCutOver(func(_ string, p session.Profile) (session.Backend, error) {
+		gotProfile = p
+		return nil, nil
+	}, "town", rec)
+	if err == nil || !strings.Contains(err.Error(), "cannot read a stream cut") {
+		t.Errorf("a backend without StreamCut: err = %v, want the refusal, never false with no error", err)
+	}
+	if gotProfile.Name != "p" || gotProfile.Gateway != "g" || gotProfile.Image != "i" {
+		t.Errorf("backend built from %+v, want the record's profile", gotProfile)
+	}
+	got, err := sandboxStreamCutOver(func(string, session.Profile) (session.Backend, error) { return streamCutAnswerer{cut: true}, nil }, "town", rec)
+	if err != nil || !got {
+		t.Errorf("an answering backend = %v, %v; want its true passed through", got, err)
+	}
+}

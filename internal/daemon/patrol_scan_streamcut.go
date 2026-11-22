@@ -56,7 +56,13 @@ func (d *Daemon) sandboxStreamCutFor(rec session.SandboxRecord) (bool, error) {
 // profile alone, so no seat lifecycle is needed. A backend that does not answer
 // StreamCut is an error, never false.
 func sandboxStreamCut(townRoot string, rec session.SandboxRecord) (bool, error) {
-	b, err := session.NewOpenShellBackend(townRoot, session.Profile{Name: rec.Profile, Gateway: rec.Gateway, Image: rec.Image})
+	return sandboxStreamCutOver(session.NewOpenShellBackend, townRoot, rec)
+}
+
+// sandboxStreamCutOver is sandboxStreamCut over newBackend, so a test can fail the
+// backend's construction or hand it a backend that cannot answer.
+func sandboxStreamCutOver(newBackend func(townRoot string, p session.Profile) (session.Backend, error), townRoot string, rec session.SandboxRecord) (bool, error) {
+	b, err := newBackend(townRoot, session.Profile{Name: rec.Profile, Gateway: rec.Gateway, Image: rec.Image})
 	if err != nil {
 		return false, err
 	}
