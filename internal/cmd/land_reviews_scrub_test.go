@@ -109,7 +109,7 @@ func TestLandReviewsScrubApplyRewritesTheLog(t *testing.T) {
 	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &first, path, true, false); err != nil {
 		t.Fatalf("the first --apply run: %v", err)
 	}
-	if want := "reviews-scrub (applied): 3 rows, 1 would change, 1 words, oversize 0, skipped 0\nbeads: gt-slit1\n"; first.String() != want {
+	if want := "reviews-scrub (applied): 3 rows, 1 changed, 1 words, oversize 0, skipped 0\nbeads: gt-slit1\n"; first.String() != want {
 		t.Errorf("the first --apply run printed %q, want %q", first.String(), want)
 	}
 	rewritten, err := os.ReadFile(path)
@@ -125,7 +125,7 @@ func TestLandReviewsScrubApplyRewritesTheLog(t *testing.T) {
 	if err := landReviewsScrubReportFrom(reviewsScrubNoTown(t), &second, path, true, false); err != nil {
 		t.Fatalf("the second --apply run: %v", err)
 	}
-	if !strings.Contains(second.String(), "3 rows, 0 would change, 0 words") {
+	if !strings.Contains(second.String(), "3 rows, 0 changed, 0 words") {
 		t.Errorf("the second --apply run printed %q, want zero changes", second.String())
 	}
 	again, err := os.ReadFile(path)
@@ -361,7 +361,7 @@ func TestLandReviewsScrubSkippedRowNamedAndFailsApply(t *testing.T) {
 		exit  int
 	}{
 		{"dry run", false, "reviews-scrub (dry run): 4 rows, 1 would change, 1 words, oversize 0, skipped 1\nbeads: gt-slit1\nskipped beads: gt-esc1\n", 0},
-		{"apply", true, "reviews-scrub (applied): 4 rows, 1 would change, 1 words, oversize 0, skipped 1\nbeads: gt-slit1\nskipped beads: gt-esc1\n", 1},
+		{"apply", true, "reviews-scrub (applied): 4 rows, 1 changed, 1 words, oversize 0, skipped 1\nbeads: gt-slit1\nskipped beads: gt-esc1\n", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
