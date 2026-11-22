@@ -45,7 +45,7 @@ func gatewayTestNow() time.Time { return tailNow }
 func gatewayWriteAndFailedRead() bdgateway.CallsPage {
 	return bdgateway.CallsPage{Entries: []bdgateway.CallEntry{
 		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: ptr(true), Flags: []string{"--status=open"}, DurationMS: 12},
-		{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, ExitCode: 1, DurationMS: 40, Error: "bd: no such bead"},
+		{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, Write: ptr(false), ExitCode: 1, DurationMS: 40, Error: "bd: no such bead"},
 	}}
 }
 
@@ -54,11 +54,11 @@ func gatewayWriteAndFailedRead() bdgateway.CallsPage {
 // read each get a line.
 func gatewayReadsWriteAndFailedRead() bdgateway.CallsPage {
 	return bdgateway.CallsPage{Entries: []bdgateway.CallEntry{
-		{TS: "2026-09-30T13:49:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-aaa"}, DurationMS: 5},
-		{TS: "2026-09-30T13:49:30Z", Caller: "witness", Verb: "list", Flags: []string{"--json"}, DurationMS: 6},
-		{TS: "2026-09-30T13:49:45Z", Caller: "mayor", Verb: "ready", DurationMS: 7},
+		{TS: "2026-09-30T13:49:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-aaa"}, Write: ptr(false), DurationMS: 5},
+		{TS: "2026-09-30T13:49:30Z", Caller: "witness", Verb: "list", Write: ptr(false), Flags: []string{"--json"}, DurationMS: 6},
+		{TS: "2026-09-30T13:49:45Z", Caller: "mayor", Verb: "ready", Write: ptr(false), DurationMS: 7},
 		{TS: "2026-09-30T13:50:00Z", Caller: "daemon", Verb: "update", Beads: []string{"gt-abc"}, Write: ptr(true), Flags: []string{"--status=open"}, DurationMS: 12},
-		{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, ExitCode: 1, DurationMS: 40, Error: "bd: no such bead"},
+		{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, Write: ptr(false), ExitCode: 1, DurationMS: 40, Error: "bd: no such bead"},
 	}}
 }
 
@@ -82,6 +82,29 @@ func TestGatewaySourcePollReturnsWriteFailureAndSummary(t *testing.T) {
 		if l.Rig != "town" || l.Kind != tailKindGateway {
 			t.Fatalf("line %q is %s/%s, want town/gateway", l.Text, l.Rig, l.Kind)
 		}
+	}
+}
+
+// TestGatewaySourceUnknownWriteIsNotARead: a call whose line has no write key
+// has an unknown write, so it is shown on its own line with the unknown marked
+// and is not counted as a read. It holds whether the call succeeded or failed.
+func TestGatewaySourceUnknownWriteIsNotARead(t *testing.T) {
+	t.Parallel()
+	page := bdgateway.CallsPage{Entries: []bdgateway.CallEntry{
+		{TS: "2026-09-30T13:49:00Z", Caller: "witness", Verb: "show", Write: ptr(false), DurationMS: 5},
+		{TS: "2026-09-30T13:50:00Z", Caller: "prechange", Verb: "update", Beads: []string{"gt-old"}, DurationMS: 12},
+		{TS: "2026-09-30T13:51:00Z", Caller: "prechange", Verb: "close", Beads: []string{"gt-old2"}, ExitCode: 1, DurationMS: 40},
+	}}
+	reader := &fakeGatewayReader{answers: []gatewayAnswer{{page: page}}}
+	s := newTailGatewaySource(reader, at("2026-09-30T13:00:00Z"), gatewayTestNow)
+
+	want := []string{
+		"town gateway prechange update gt-old write unknown",
+		"town gateway prechange close gt-old2 failed exit 1, 40ms write unknown",
+		"town gateway 1 gateway reads",
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("lines = %q, want %q", got, want)
 	}
 }
 
@@ -153,7 +176,7 @@ func TestGatewaySourceErrorsOnePerDistinctText(t *testing.T) {
 // calls has none either.
 func TestGatewaySourceSummaryCountsOnlySuccessfulReads(t *testing.T) {
 	t.Parallel()
-	failedRead := bdgateway.CallEntry{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, ExitCode: 1, DurationMS: 40}
+	failedRead := bdgateway.CallEntry{TS: "2026-09-30T13:51:00Z", Caller: "witness", Verb: "show", Beads: []string{"gt-def"}, Write: ptr(false), ExitCode: 1, DurationMS: 40}
 	cases := []struct {
 		name string
 		page bdgateway.CallsPage
