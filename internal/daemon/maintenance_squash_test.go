@@ -2477,6 +2477,39 @@ func TestSquashCheckLogsTheRecovery(t *testing.T) {
 	}
 }
 
+// TestSquashCheckSkipsRecoveryOnAHeldMarker: a live run holds the town's run
+// marker, so the recovery seam returns doltsquash.ErrRunMarkerHeld. The check
+// logs that once, sends no statement for the database — the readings and Decide
+// would only end at the same marker — and is due again after the retry delay
+// rather than for a day, the way a run refused by the marker is.
+func TestSquashCheckSkipsRecoveryOnAHeldMarker(t *testing.T) {
+	t.Parallel()
+	d, server, _, logs := squashTickDaemon(t, squashEnabled())
+	d.maint.squashRecover = func(context.Context, *Daemon, string, time.Time, *agentconfig.SquashSettings) (*doltsquash.Recovery, error) {
+		return nil, fmt.Errorf("doltsquash: the recovery's run marker: %w", doltsquash.ErrRunMarkerHeld)
+	}
+	d.maint.squashRun = func(context.Context, doltsquash.RunInput) (doltsquash.RunResult, error) {
+		t.Error("the run was started while another daemon held the marker")
+		return doltsquash.RunResult{}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "squash: gt: another daemon holds the run marker — skipping the recovery and this check") {
+		t.Errorf("the check did not skip the recovery on a held marker: %q", got)
+	}
+	if lines := strings.Count(got, "another daemon holds the run marker"); lines != 1 {
+		t.Errorf("the held marker was logged %d times, want one line: %q", lines, got)
+	}
+	if len(server.queries) != 0 {
+		t.Errorf("the check sent %d statements after a held-marker recovery, want none: %q", len(server.queries), server.queries)
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); !due.due {
+		t.Error("a held-marker recovery set the daily gate: the check is not due again after the retry delay")
+	}
+}
+
 // squashFakeServer answers the check's statements without a server: the commit
 // count statement returns count, and every other statement one row of rowValue
 // ("1" unless a case sets it).
