@@ -37,7 +37,11 @@ type CallEntry struct {
 	Beads      []string `json:"beads"`
 	ExitCode   int      `json:"exit_code"`
 	DurationMS int64    `json:"duration_ms"`
-	Error      string   `json:"error,omitempty"`
+	// CPUMS is the CPU time bd's child used, user plus system in milliseconds.
+	// A line written before the key existed, or for a call that started no
+	// child, omits it.
+	CPUMS *int64 `json:"cpu_ms,omitempty"`
+	Error string `json:"error,omitempty"`
 	// Refusal is the reason code of a call the gateway refused before exec. A
 	// call that ran carries none.
 	Refusal string `json:"refusal,omitempty"`
