@@ -323,6 +323,56 @@ func TestTickEffCallRecordCPU(t *testing.T) {
 	}
 }
 
+// TestTickEffCallRecordNoChild: a call whose bd child fails to start logs one
+// record with no cpu_ms — no child ran to measure — and keeps the error it
+// carried before cpu_ms existed: the 125 ending and no error text, since the
+// gateway's cause stays in the error frame the caller reads.
+func TestTickEffCallRecordNoChild(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	store, err := OpenWorkspaceStore(root)
+	if err != nil {
+		t.Fatalf("OpenWorkspaceStore: %v", err)
+	}
+	doc := WorkspaceDocument{Files: map[string]string{"gastown/.beads/metadata.json": "{}", ".beads/routes.jsonl": `{"prefix":"gt","path":"gastown/.beads"}`}}
+	doc.ManifestSHA = WorkspaceManifest(doc.Files)
+	if _, err := store.Put(doc); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	runner := &fakeRunner{err: errors.New("the machine gave up")}
+	exec := newTestExecutor(t, root, runner)
+	logDir := t.TempDir()
+	log := newTestCallLogWithDir(t, logDir)
+	g := newTestGateway(t, store, log, exec)
+
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, execRequest(t, testReadToken, Request{Argv: []string{"show", "gt-abc"}, Rig: "gastown"}, ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("start-failed call status = %d, want 200: the error frame begins the stream; body %s", rec.Code, rec.Body.String())
+	}
+	frames := readFrames(t, rec.Body.Bytes())
+	if len(frames) == 0 {
+		t.Fatalf("frames = 0, want the start failure's error and exit frames")
+	}
+	refusal, err := frames[0].GatewayError()
+	if err != nil || refusal.Code != CodeStartFailed || refusal.Message != messageStartFailed {
+		t.Errorf("error frame = %+v (%v), want the start failure %q unchanged", refusal, err, messageStartFailed)
+	}
+
+	lines := closedCallLines(t, log, logDir)
+	if len(lines) != 1 {
+		t.Fatalf("call log lines = %d, want 1", len(lines))
+	}
+	e := decodeEntry(t, lines[0])
+	if e.CPUMS != nil {
+		t.Errorf("start-failed call cpu_ms = %d, want none: no child ran to measure", *e.CPUMS)
+	}
+	if e.ExitCode != ExitRefused || e.Error != "" {
+		t.Errorf("call log line = %+v, want exit %d and no error text", e, ExitRefused)
+	}
+}
+
 // postExec runs one exec request and returns its status.
 func postExec(t *testing.T, g *Gateway, token string, head Request) int {
 	t.Helper()
