@@ -105,6 +105,60 @@ func TestCallEntryWrite(t *testing.T) {
 	}
 }
 
+// TestTickEffCallEntryCPU is the bead's box: ReadCalls returns a line's cpu_ms
+// and none for an older line without the key, and GET /v1/calls carries the
+// key only on the entry that wrote it.
+func TestTickEffCallEntryCPU(t *testing.T) {
+	t.Parallel()
+	// Literal lines: a fixture marshaled through the tag under test would stay
+	// green when that tag is ignored.
+	older := `{"ts":"2026-11-18T10:00:00Z","class":"read","caller":"older","verb":"show","flags":[],"beads":[],"exit_code":0,"duration_ms":5}`
+	newer := `{"ts":"2026-11-18T10:00:01Z","class":"read","caller":"newer","verb":"show","flags":[],"beads":[],"exit_code":0,"duration_ms":5,"cpu_ms":50}`
+	dir := t.TempDir()
+	writeCallLog(t, dir, older, newer)
+
+	t.Run("ReadCalls returns 50 and none", func(t *testing.T) {
+		got, err := ReadCalls(dir, callLogBase.Add(-time.Second), 10)
+		if err != nil {
+			t.Fatalf("ReadCalls: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("entries = %d, want 2", len(got))
+		}
+		if got[0].CPUMS != nil {
+			t.Errorf("older line cpu_ms = %d, want none", *got[0].CPUMS)
+		}
+		if ms := got[1].CPUMS; ms == nil {
+			t.Fatal("newer line carries no cpu_ms")
+		} else if *ms != 50 {
+			t.Errorf("newer line cpu_ms = %d, want 50", *ms)
+		}
+	})
+
+	t.Run("the endpoint's answer carries the key once", func(t *testing.T) {
+		g, err := NewGateway(GatewayOptions{
+			Auth:       testAuthenticator(t),
+			Policy:     mustPolicy(t),
+			Workspaces: mustStore(t),
+			Log:        newTestCallLog(t),
+			CallsDir:   dir,
+			Runner:     exitByVerb{"show": 0},
+			Caps:       fixedCaps{},
+		})
+		if err != nil {
+			t.Fatalf("NewGateway: %v", err)
+		}
+		rec := getCalls(t, g, testReadToken, "")
+		body := decodeCalls(t, rec)
+		if n := strings.Count(rec.Body.String(), `"cpu_ms"`); n != 1 {
+			t.Errorf(`the answer carries "cpu_ms" %d times, want once (the newer entry)`, n)
+		}
+		if body.Calls[1].CPUMS == nil || *body.Calls[1].CPUMS != 50 {
+			t.Errorf("newer entry cpu_ms = %v, want 50", body.Calls[1].CPUMS)
+		}
+	})
+}
+
 // TestReadCallsQuery is acceptance box 1: the entries after since, oldest
 // first, at most limit, with a malformed line skipped.
 func TestReadCallsQuery(t *testing.T) {
