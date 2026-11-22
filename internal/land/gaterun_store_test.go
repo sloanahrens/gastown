@@ -442,12 +442,16 @@ func awaitGateRun(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-// assertSecondAppendHeld gives a second append a bounded number of scheduler
-// yields to reach the filesystem while the first holds a rotation open, then
-// asserts that only the first did: with the lock held by that rotation the second
-// is blocked on it, which is what the release that follows relies on.
-func assertSecondAppendHeld(t *testing.T, h *holdingGateRunFS) {
+// assertSecondAppendHeld waits (bounded) for the second append to have started,
+// then gives it a bounded number of scheduler yields to reach the filesystem while
+// the first holds a rotation open, and asserts that only the first did: with the
+// lock held by that rotation the second is blocked on it. Waiting for the start
+// means the second goroutine has run up to its call, so a window spent before it
+// was scheduled cannot pass this check; the rows read after the release are what
+// fail a removed lock, and this check only names the cause earlier.
+func assertSecondAppendHeld(t *testing.T, h *holdingGateRunFS, started <-chan struct{}) {
 	t.Helper()
+	awaitGateRun(t, started, "the second append to start")
 	for i := 0; i < 20000 && h.sizes.Load() < 2; i++ {
 		runtime.Gosched()
 	}
@@ -470,9 +474,13 @@ func TestGateRunStoreAnAppendDuringARotationIsNotLost(t *testing.T) {
 	old := sampleGateRun("gt-old")
 	old.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	h.files[cur] = []byte(mustLine(t, old) + "\n")
+	bStarted := make(chan struct{})
 	appendRow := func(bead string, done chan<- struct{}) {
 		r := sampleGateRun(bead)
 		r.TS = time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+		if bead == "gt-b" {
+			close(bStarted)
+		}
 		if err := appendGateRunLimit(h, "/town", r, 1); err != nil {
 			t.Errorf("append %s: %v", bead, err)
 		}
@@ -482,7 +490,7 @@ func TestGateRunStoreAnAppendDuringARotationIsNotLost(t *testing.T) {
 	go appendRow("gt-a", aDone)
 	awaitGateRun(t, h.inRead, "the first append's rotation to read the log")
 	go appendRow("gt-b", bDone)
-	assertSecondAppendHeld(t, h)
+	assertSecondAppendHeld(t, h, bStarted)
 	h.open()
 	awaitGateRun(t, aDone, "the first append")
 	awaitGateRun(t, bDone, "the second append")
@@ -551,7 +559,11 @@ func TestGateRunStoreTwoAppendsAtTheLimitRotateOnce(t *testing.T) {
 	h.files[cur] = []byte(mustLine(t, row("gt-o1", 1)) + "\n" + mustLine(t, row("gt-o2", 1)) + "\n")
 	limit := int64(oneRow + oneRow/2) // the two old rows reach it; one new row does not
 	done := map[string]chan struct{}{"gt-n1": make(chan struct{}), "gt-n2": make(chan struct{})}
+	n2Started := make(chan struct{})
 	appendRow := func(bead string) {
+		if bead == "gt-n2" {
+			close(n2Started)
+		}
 		if err := appendGateRunLimit(h, "/town", row(bead, 2), limit); err != nil {
 			t.Errorf("append %s: %v", bead, err)
 		}
@@ -560,7 +572,7 @@ func TestGateRunStoreTwoAppendsAtTheLimitRotateOnce(t *testing.T) {
 	go appendRow("gt-n1")
 	awaitGateRun(t, h.inRead, "the first append's rotation to read the log")
 	go appendRow("gt-n2")
-	assertSecondAppendHeld(t, h)
+	assertSecondAppendHeld(t, h, n2Started)
 	h.open()
 	awaitGateRun(t, done["gt-n1"], "the first append")
 	awaitGateRun(t, done["gt-n2"], "the second append")
