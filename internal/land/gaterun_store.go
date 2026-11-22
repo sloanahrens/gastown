@@ -192,6 +192,10 @@ func pruneGateRunMonths(fsys gateRunFS, dir string, now time.Time) error {
 	}
 	var failed error
 	for _, name := range names {
+		if gateRunMonthQuarantined(name, now) {
+			failed = errors.Join(failed, fmt.Errorf("land: %s: month outside the retained years, kept for an operator", name))
+			continue
+		}
 		if !gateRunMonthExpired(name, now, gateRunRetentionDays) {
 			continue
 		}
