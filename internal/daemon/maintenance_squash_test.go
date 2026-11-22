@@ -917,23 +917,18 @@ func TestSquashRunHoldsTheFlagForItsLength(t *testing.T) {
 	}
 }
 
-// TestSquashRunReleasesTheDoltMaintMutex is the bead's box: the run takes
-// doltMaintMu's write side and gives it back however it ends — a completed run
-// and a failed one — while a call the read side refuses starts no run, keeps
-// the Dolt task's hold and leaves the gc flag free. A release lost on the
-// normal path, or one a refused call made on a hold it never took, would stop
-// every Dolt task and gc call for the life of the process without a deadlock:
-// each takes the mutex with TryLock or TryRLock and never blocks, so nothing
-// runs again and nothing says so.
+// TestSquashRunReleasesTheDoltMaintMutex pins that a lost doltMaintMu release would silently stop every Dolt task and gc (gt-f6fo2i).
 func TestSquashRunReleasesTheDoltMaintMutex(t *testing.T) {
 	t.Parallel()
+	failed := errors.New("doltsquash: the catch-up: read failed")
 	cases := map[string]struct {
-		runErr  error
-		refused bool
+		runErr, wantErr error
+		holdReader      bool
+		wantCalls       int
 	}{
-		"a completed run":               {},
-		"a failed run":                  {runErr: errors.New("doltsquash: the catch-up: read failed")},
-		"a call refused by a Dolt task": {refused: true},
+		"a completed run":        {wantCalls: 1},
+		"a failed run":           {runErr: failed, wantErr: failed, wantCalls: 1},
+		"refused by a Dolt task": {wantErr: errSquashDoltTaskInFlight, holdReader: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -941,51 +936,33 @@ func TestSquashRunReleasesTheDoltMaintMutex(t *testing.T) {
 			d, _, _ := squashDueDaemon(t)
 			var calls int
 			scriptSquashRun(d, &calls, doltsquash.RunResult{}, tc.runErr)
-			var release func()
-			if tc.refused {
+			release := func() {}
+			if tc.holdReader {
 				var ok bool
-				release, ok = d.tryDoltTask("doctor_dog") // a daemon Dolt task in flight
-				if !ok {
+				if release, ok = d.tryDoltTask("doctor_dog"); !ok {
 					t.Fatal("the Dolt task could not take the read side")
 				}
 			}
-
 			_, err := d.runSquashDatabaseExclusive(context.Background(), "gt", squashTestNow, &agentconfig.SquashSettings{MaxRuntime: time.Minute})
-
-			if tc.refused {
-				if !errors.Is(err, errSquashDoltTaskInFlight) {
-					t.Fatalf("the refused call returned %v, want errSquashDoltTaskInFlight", err)
-				}
-				if calls != 0 {
-					t.Errorf("the refused call started %d run(s), want 0", calls)
-				}
+			if !errors.Is(err, tc.wantErr) || calls != tc.wantCalls {
+				t.Fatalf("returned %v after %d run(s), want %v after %d", err, calls, tc.wantErr, tc.wantCalls)
+			}
+			if tc.holdReader {
 				if d.maintenanceGCRunning.Load() {
-					t.Error("the refused call left the maintenance gc flag held")
+					t.Error("the refused call left the gc flag held")
 				}
 				if d.doltMaintMu.TryLock() {
 					d.doltMaintMu.Unlock()
 					t.Fatal("the refused call released the Dolt task's hold")
 				}
-				release()
-				assertSquashMaintMuFree(t, d)
-				return
 			}
-			if calls != 1 {
-				t.Fatalf("the run ran %d time(s), want 1", calls)
-			}
-			if tc.runErr != nil && !errors.Is(err, tc.runErr) {
-				t.Fatalf("the run returned %v, want %v", err, tc.runErr)
-			}
-			if tc.runErr == nil && err != nil {
-				t.Fatalf("the completed run returned an error: %v", err)
-			}
+			release()
 			assertSquashMaintMuFree(t, d)
 		})
 	}
 }
 
-// assertSquashMaintMuFree fails when the squash path left doltMaintMu held, and
-// releases the probe take it made so the assertion leaves nothing held itself.
+// assertSquashMaintMuFree fails when doltMaintMu is left held, releasing its probe.
 func assertSquashMaintMuFree(t *testing.T, d *Daemon) {
 	t.Helper()
 	if !d.doltMaintMu.TryLock() {
