@@ -1204,6 +1204,31 @@ func TestTickEffOneSeatReadsOneChildren(t *testing.T) {
 	}
 }
 
+// A container at the head of the board does not take the one free seat: its
+// open child holds it, so the next clean candidate is dispatched (gt-o9bp0s).
+func TestTickEffContainerKeepsTheSlot(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(
+		cleanSpec("gt-c00", 2, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-c01", 2, "2026-09-29T10:01:00Z"),
+		cleanSpec("gt-c02", 2, "2026-09-29T10:02:00Z"),
+	)
+	f.children["gt-c00"] = []specdispatch.Child{{ID: "gt-c00.1", Status: "open"}}
+	env := f.env()
+	env.PerTick = 1
+	r := runSpecDispatchCycle(env)
+	if len(f.slung) != 1 || f.slung[0] != "gt-c01" {
+		t.Fatalf("slung %v, want only gt-c01", f.slung)
+	}
+	wantHeld := "gt-c00: held: container: open child gt-c00.1"
+	if len(r.Skipped) != 2 || r.Skipped[0].Line != wantHeld {
+		t.Fatalf("skipped = %+v, want %q then the per-tick-limit line for gt-c02", r.Skipped, wantHeld)
+	}
+	if !strings.Contains(r.Skipped[1].Line, specdispatch.SkipPerTickLimit) {
+		t.Errorf("gt-c02: line %q, want the per-tick-limit line", r.Skipped[1].Line)
+	}
+}
+
 // The chunk starts at the asked id, not at the head of the wanted list, so the
 // loop pays for the candidate it reached and the ones after it (gt-8gvizh).
 func TestTickEffChunkSelection(t *testing.T) {
