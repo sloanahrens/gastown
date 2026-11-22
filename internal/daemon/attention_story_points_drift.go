@@ -81,6 +81,19 @@ func (s *attentionSources) collectStoryPointsDrift(context.Context) ([]attention
 			storyPointsDriftUnreadableItem(fmt.Sprintf("the measurable reading %v is not a number", reading.Rho)),
 		), nil
 	}
+	// The AUC's point and interval are named in the summary, and its upper bound is
+	// read by the rule below: a NaN there reads as not failing and would silence a
+	// live item, so a bound that is not a number is the same fault as a Rho that is
+	// not one (gt-7g4dgz).
+	if reading.LongMeasurable {
+		for _, bound := range []float64{reading.LongLo, reading.LongHi, reading.LongAUC} {
+			if math.IsNaN(bound) || math.IsInf(bound, 0) {
+				return s.keepHeldDrift(
+					storyPointsDriftUnreadableItem(fmt.Sprintf("the measurable reading bound %v is not a number", bound)),
+				), nil
+			}
+		}
+	}
 	if !reading.Measurable {
 		return s.keepHeldDrift(), nil
 	}
