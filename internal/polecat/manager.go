@@ -987,6 +987,11 @@ func (m *Manager) Add(name string) (*Polecat, error) {
 // This eliminates the TOCTOU race between AllocateName and AddWithOptions
 // (GH#2215) by holding the pool lock through directory creation, ensuring
 // no concurrent process can allocate the same name.
+//
+// The git processes one allocate starts, and how many of each, are pinned by
+// TestIntegrationAllocateAndAddGitProcesses in
+// allocate_budget_integration_test.go, whose table is the one place the counts
+// are stated.
 func (m *Manager) AllocateAndAdd(opts AddOptions) (string, *Polecat, error) {
 	name, p, err := m.allocateAndAddPoolLocked(opts)
 	// The pruned worktree entries are git work, run after the lock is back: a
