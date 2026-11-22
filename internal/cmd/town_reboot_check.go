@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/gtwrap"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 	"github.com/steveyegge/gastown/internal/townreboot"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -96,8 +97,12 @@ func rebootExecRunner(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 // runTownRebootCheck runs every check and prints the rows. Text output returns nil whatever the
-// rows say; JSON output returns exit 1 when any row is not OK, after printing the array.
+// rows say; JSON output returns exit 1 when any row is not OK, after printing the array. In a pod
+// it refuses before the runner is built: the checks read the Mac's VMs and processes.
 func runTownRebootCheck(ctx context.Context, env townRebootCheckEnv) error {
+	if env.getenv(podEnv) != "" {
+		return fmt.Errorf("gt town reboot-check reads the Mac's VMs and processes, and this is a pod (%s is set); run it on the Mac instead, where the host command set runs: %s", podEnv, gtwrap.GTHostCommandList())
+	}
 	town, err := env.town()
 	if err != nil {
 		return err
