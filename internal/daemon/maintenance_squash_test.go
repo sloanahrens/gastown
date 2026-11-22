@@ -984,6 +984,55 @@ func assertSquashMaintMuFree(t *testing.T, d *Daemon) {
 	d.doltMaintMu.Unlock()
 }
 
+// TestSquashRunFreesBothGuardsOnEveryEnd: a finished run, a failed run and a run
+// the run marker refuses each leave the gc flag and doltMaintMu free, so a
+// following take of either succeeds. The marker row holds the real marker with
+// another daemon's flock, so doltsquash.Run refuses it before any statement.
+func TestSquashRunFreesBothGuardsOnEveryEnd(t *testing.T) {
+	t.Parallel()
+	failed := errors.New("doltsquash: the catch-up: read failed")
+	cases := map[string]struct {
+		runErr, wantErr error
+		holdMarker      bool
+		wantCalls       int
+	}{
+		"a finished run":           {wantCalls: 1},
+		"a failed run":             {runErr: failed, wantErr: failed, wantCalls: 1},
+		"a run the marker refuses": {wantErr: doltsquash.ErrRunMarkerHeld, holdMarker: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			d, _, _ := squashDueDaemon(t)
+			var calls int
+			if tc.holdMarker {
+				path := squashMarkerPath(d.config.TownRoot)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				release, ok, err := lock.FlockTryAcquire(path)
+				if err != nil || !ok {
+					t.Fatalf("taking the other daemon's marker: ok=%v err=%v", ok, err)
+				}
+				defer release()
+			} else {
+				scriptSquashRun(d, &calls, doltsquash.RunResult{}, tc.runErr)
+			}
+
+			_, err := d.runSquashDatabaseExclusive(context.Background(), "gt", squashTestNow, &agentconfig.SquashSettings{MaxRuntime: time.Minute})
+
+			if !errors.Is(err, tc.wantErr) || calls != tc.wantCalls {
+				t.Fatalf("returned %v after %d run(s), want %v after %d", err, calls, tc.wantErr, tc.wantCalls)
+			}
+			if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
+				t.Fatal("the squash path left the maintenance gc flag held")
+			}
+			d.maintenanceGCRunning.Store(false)
+			assertSquashMaintMuFree(t, d)
+		})
+	}
+}
+
 // TestSquashRunInFlightRefusesAGCCycle is the bead's second box for the other
 // direction: a gc cycle started while a squash run is in flight is refused by
 // its own CompareAndSwap, so nothing is dispatched beside the run and the run
