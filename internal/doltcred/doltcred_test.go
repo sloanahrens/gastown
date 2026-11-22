@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -332,5 +333,75 @@ func TestCredentialLogValueHidesPassword(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "gt") {
 		t.Errorf("the log line dropped the user: %s", buf.String())
+	}
+}
+
+// TestCredentialJSONEncodingHidesPassword marshals a Credential as a value, a
+// pointer, an exported field of a struct and an element of a slice: no output
+// holds the password, and every output still names the user.
+func TestCredentialJSONEncodingHidesPassword(t *testing.T) {
+	t.Parallel()
+	c := Credential{User: "gt-user", Password: NewSecret(leakSecret)}
+	type holder struct {
+		Cred Credential `json:"credential"`
+	}
+	tests := []struct {
+		name string
+		v    any
+	}{
+		{name: "value", v: c},
+		{name: "pointer", v: &c},
+		{name: "exported field", v: holder{Cred: c}},
+		{name: "slice", v: []Credential{c}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := json.Marshal(tt.v)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if strings.Contains(string(out), leakSecret) {
+				t.Errorf("Marshal of the %s printed the password: %s", tt.name, out)
+			}
+			if !strings.Contains(string(out), c.User) {
+				t.Errorf("Marshal of the %s dropped the user: %s", tt.name, out)
+			}
+		})
+	}
+}
+
+// TestCredentialSlogHandlersHidePassword logs a Credential through the text and
+// JSON handlers, as an attribute and inside a group: no line holds the
+// password, and every line still names the user.
+func TestCredentialSlogHandlersHidePassword(t *testing.T) {
+	t.Parallel()
+	c := Credential{User: "gt-user", Password: NewSecret(leakSecret)}
+	handlers := map[string]func(*bytes.Buffer) slog.Handler{
+		"text": func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) },
+		"json": func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) },
+	}
+	placements := map[string]func(*slog.Record){
+		"attribute": func(r *slog.Record) { r.AddAttrs(slog.Any("credential", c)) },
+		"group":     func(r *slog.Record) { r.AddAttrs(slog.Group("creds", slog.Any("credential", c))) },
+	}
+	for hname, handler := range handlers {
+		for pname, add := range placements {
+			t.Run(hname+"/"+pname, func(t *testing.T) {
+				t.Parallel()
+				var buf bytes.Buffer
+				rec := slog.NewRecord(time.Unix(0, 0), slog.LevelInfo, "connecting", 0)
+				add(&rec)
+				if err := handler(&buf).Handle(context.Background(), rec); err != nil {
+					t.Fatalf("Handle: %v", err)
+				}
+				if strings.Contains(buf.String(), leakSecret) {
+					t.Errorf("the %s handler with the credential as %s printed the password: %s", hname, pname, buf.String())
+				}
+				if !strings.Contains(buf.String(), c.User) {
+					t.Errorf("the %s handler with the credential as %s dropped the user: %s", hname, pname, buf.String())
+				}
+			})
+		}
 	}
 }
