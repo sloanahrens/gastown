@@ -155,9 +155,9 @@ func (d *Daemon) runSweepRunsPrunePass(mode string) {
 	if !d.diskMaintSchedule.trimDue(sweepRunsPruneName, s.now(), every) {
 		return
 	}
-	verdict := d.sweepRunsPrune(mode, keep, minAge)
+	verdict, why := d.sweepRunsPrune(mode, keep, minAge)
 	concluded := s.now()
-	d.diskMaintConclude(ctx, sweepRunsPruneName, "sweep-run prune", verdict, concluded, every, diskMaintNoReason)
+	d.diskMaintConclude(ctx, sweepRunsPruneName, "sweep-run prune", verdict, concluded, every, why)
 }
 
 // sweepRunsDirectory is one directory the plan lists, with the rig it is in, the
@@ -170,10 +170,12 @@ type sweepRunsDirectory struct {
 }
 
 // sweepRunsPrune plans every rig's run directories and, in apply mode, removes
-// the planned ones. It reports whether the run reached a verdict. A listing, size
-// or check that fails refuses the run before anything is removed; a remove error
-// stops it at that directory, and the name is logged. Neither is a verdict.
-func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) bool {
+// the planned ones. It reports whether the run reached a verdict and, when it did
+// not, the failure it logged: the error's message or the refusal's sentence, which
+// the failure item cuts to its first line. A listing, size or check that fails
+// refuses the run before anything is removed; a remove error stops it at that
+// directory, and the name is logged. Neither is a verdict.
+func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) (bool, string) {
 	s := d.diskMaintenanceSeams()
 	fsys := s.sweepRunsFS
 	now := s.now()
@@ -183,10 +185,9 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 	// it: the sweep has not run in this town.
 	rigs, err := fsys.ReadDir(root)
 	if errors.Is(err, fs.ErrNotExist) {
-		return true
+		return true, ""
 	} else if err != nil {
-		d.sweepRunsPruneLogf("list", "disk_maintenance: sweep runs prune: cannot list %s: %v; nothing removed", root, err)
-		return false
+		return d.sweepRunsPruneRefuse("list", fmt.Sprintf("cannot list %s: %v", root, err))
 	}
 
 	// Every rig is planned before anything is removed, so a failure in any one
@@ -200,8 +201,7 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 		rigDir := filepath.Join(root, rig.Name())
 		children, err := fsys.ReadDir(rigDir)
 		if err != nil {
-			d.sweepRunsPruneLogf("list", "disk_maintenance: sweep runs prune: cannot list %s: %v; nothing removed", rigDir, err)
-			return false
+			return d.sweepRunsPruneRefuse("list", fmt.Sprintf("cannot list %s: %v", rigDir, err))
 		}
 		var entries []sweepRunEntry
 		for _, child := range children {
@@ -210,13 +210,11 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 			}
 			info, err := child.Info()
 			if err != nil {
-				d.sweepRunsPruneLogf("stat", "disk_maintenance: sweep runs prune: cannot read %s: %v; nothing removed", filepath.Join(rigDir, child.Name()), err)
-				return false
+				return d.sweepRunsPruneRefuse("stat", fmt.Sprintf("cannot read %s: %v", filepath.Join(rigDir, child.Name()), err))
 			}
 			bytes, err := sweepRunsTreeBytes(fsys, filepath.Join(rigDir, child.Name()))
 			if err != nil {
-				d.sweepRunsPruneLogf("size", "disk_maintenance: sweep runs prune: cannot size %s: %v; nothing removed", filepath.Join(rigDir, child.Name()), err)
-				return false
+				return d.sweepRunsPruneRefuse("size", fmt.Sprintf("cannot size %s: %v", filepath.Join(rigDir, child.Name()), err))
 			}
 			entries = append(entries, sweepRunEntry{Name: child.Name(), ModTime: info.ModTime(), Bytes: bytes})
 		}
@@ -239,7 +237,7 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		d.logger.Printf("disk_maintenance: sweep runs prune dry_run: would remove %s, keeping %d%s",
 			sweepRunsCounts(len(removals), total), kept, sweepRunsLabels(removals))
-		return true
+		return true, ""
 	}
 
 	removed := 0
@@ -249,39 +247,44 @@ func (d *Daemon) sweepRunsPrune(mode string, keep int, minAge time.Duration) boo
 		// a rig swapped for a symlink would send the name to another directory.
 		rigInfo, err := fsys.Lstat(r.rigPath)
 		if err != nil {
-			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: check rig %s: %v; removed %s, keeping %d",
-				filepath.Base(r.rigPath), err, sweepRunsCounts(removed, freed), kept)
-			return false
+			return d.sweepRunsPruneStop(fmt.Sprintf("check rig %s: %v", filepath.Base(r.rigPath), err), removed, freed, kept)
 		}
 		if !rigInfo.IsDir() {
-			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: rig %s is no longer a directory; removed %s, keeping %d",
-				filepath.Base(r.rigPath), sweepRunsCounts(removed, freed), kept)
-			return false
+			return d.sweepRunsPruneStop(fmt.Sprintf("rig %s is no longer a directory", filepath.Base(r.rigPath)), removed, freed, kept)
 		}
 		// The name is checked again on disk: it must still be a directory, not a
 		// symlink or a file that took its place, when it is removed.
 		info, err := fsys.Lstat(r.path)
 		if err != nil {
-			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: check %s: %v; removed %s, keeping %d",
-				r.label, err, sweepRunsCounts(removed, freed), kept)
-			return false
+			return d.sweepRunsPruneStop(fmt.Sprintf("check %s: %v", r.label, err), removed, freed, kept)
 		}
 		if !info.IsDir() {
-			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: %s is no longer a directory; removed %s, keeping %d",
-				r.label, sweepRunsCounts(removed, freed), kept)
-			return false
+			return d.sweepRunsPruneStop(fmt.Sprintf("%s is no longer a directory", r.label), removed, freed, kept)
 		}
 		if err := fsys.RemoveAll(r.path); err != nil {
-			d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: remove %s: %v; removed %s, keeping %d",
-				r.label, err, sweepRunsCounts(removed, freed), kept)
-			return false
+			return d.sweepRunsPruneStop(fmt.Sprintf("remove %s: %v", r.label, err), removed, freed, kept)
 		}
 		removed++
 		freed += r.bytes
 	}
 	d.logger.Printf("disk_maintenance: sweep runs prune apply: removed %s, keeping %d",
 		sweepRunsCounts(removed, freed), kept)
-	return true
+	return true, ""
+}
+
+// sweepRunsPruneRefuse logs a refusal of the prune once per refusal window and
+// returns the refusal as the run's non-verdict reason.
+func (d *Daemon) sweepRunsPruneRefuse(kind, why string) (bool, string) {
+	d.sweepRunsPruneLogf(kind, "disk_maintenance: sweep runs prune: %s; nothing removed", why)
+	return false, why
+}
+
+// sweepRunsPruneStop logs the apply stopping at one directory and returns the
+// stop as the run's non-verdict reason.
+func (d *Daemon) sweepRunsPruneStop(why string, removed int, freed int64, kept int) (bool, string) {
+	d.logger.Printf("disk_maintenance: sweep runs prune apply stopped: %s; removed %s, keeping %d",
+		why, sweepRunsCounts(removed, freed), kept)
+	return false, why
 }
 
 // sweepRunsCounts is the count and size a sweep runs line states.
