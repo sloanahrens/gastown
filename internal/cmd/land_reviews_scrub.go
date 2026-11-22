@@ -95,12 +95,13 @@ func writeLandReviewsScrubReport(out io.Writer, res land.ScrubResult, apply, asJ
 		}
 		return landReviewsScrubApplyExit(res, apply)
 	}
-	mode := "dry run"
+	// A dry run reports rows that would change; an applied run already rewrote them.
+	mode, changed := "dry run", "would change"
 	if apply {
-		mode = "applied"
+		mode, changed = "applied", "changed"
 	}
-	_, err := fmt.Fprintf(out, "reviews-scrub (%s): %d rows, %d would change, %d words, oversize %d, skipped %d\nbeads: %s\n",
-		mode, res.Rows, res.RowsChanged, res.Words, res.Oversize, res.Skipped, strings.Join(res.Beads, ", "))
+	_, err := fmt.Fprintf(out, "reviews-scrub (%s): %d rows, %d %s, %d words, oversize %d, skipped %d\nbeads: %s\n",
+		mode, res.Rows, res.RowsChanged, changed, res.Words, res.Oversize, res.Skipped, strings.Join(res.Beads, ", "))
 	if err != nil {
 		return fmt.Errorf("writing the plan: %w", err)
 	}
