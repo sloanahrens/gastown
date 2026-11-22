@@ -57,22 +57,29 @@ func TestLongAUC(t *testing.T) {
 func TestLongAUCInterval(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		est      []float64
-		measured []float64
-		wantErr  string
+		name      string
+		est       []float64
+		measured  []float64
+		wantErr   string
+		resamples int
 	}{
 		{name: "perfect ordering skips the one-class resamples", est: []float64{9, 2, 1, 0.5}, measured: []float64{30, 10, 5, 3}},
 		{name: "no resample drew both classes", est: []float64{1, 2}, measured: []float64{20, 10}, wantErr: "no usable resample"},
 		{name: "unequal lengths", est: []float64{1, 2}, measured: []float64{30}, wantErr: "2 estimates, 1 measured"},
+		{name: "a NaN estimate is refused", est: []float64{9, 2, math.NaN(), 0.5}, measured: []float64{30, 10, 5, 3}, wantErr: "not finite"},
+		{name: "negative resamples", est: []float64{9, 2, 1, 0.5}, measured: []float64{30, 10, 5, 3}, resamples: -1, wantErr: "resamples"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			lo, hi, err := LongAUCInterval(tt.est, tt.measured, 20, 40, 1)
+			n := 40
+			if tt.resamples != 0 {
+				n = tt.resamples
+			}
+			lo, hi, err := LongAUCInterval(tt.est, tt.measured, 20, n, 1)
 			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("LongAUCInterval error = %v, want it to name %q", err, tt.wantErr)
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) || lo != 0 || hi != 0 {
+					t.Fatalf("LongAUCInterval = %v..%v, %v, want 0..0 and an error naming %q", lo, hi, err, tt.wantErr)
 				}
 				return
 			}
@@ -85,6 +92,10 @@ func TestLongAUCInterval(t *testing.T) {
 	lo, hi, err := LongAUCInterval(est, measured, 20, 40, 7)
 	if err != nil {
 		t.Fatalf("LongAUCInterval: %v", err)
+	}
+	point, perr := LongAUC(est, measured, 20)
+	if perr != nil || lo < 0 || hi > 1 || lo > hi || point < lo || point > hi {
+		t.Fatalf("interval %v..%v, want 0 <= lo <= hi <= 1 around the point %v (%v)", lo, hi, point, perr)
 	}
 	for range 3 {
 		lo2, hi2, err2 := LongAUCInterval(est, measured, 20, 40, 7)

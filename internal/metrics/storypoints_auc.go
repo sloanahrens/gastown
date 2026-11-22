@@ -58,10 +58,13 @@ func LongAUC(est, measured []float64, longMinutes float64) (float64, error) {
 // LongAUCInterval is the 95% percentile interval of LongAUC over resamples of
 // the pairs drawn with replacement from a generator seeded with seed, so one
 // series and seed give one interval. A resample that drew only one class has no
-// AUC and is skipped; when no resample is usable the error says so.
+// AUC and is skipped; any other error is returned; when no resample is usable the error says so.
 func LongAUCInterval(est, measured []float64, longMinutes float64, resamples int, seed uint64) (lo, hi float64, err error) {
 	if len(est) != len(measured) {
 		return 0, 0, fmt.Errorf("long auc interval: %d estimates, %d measured minutes", len(est), len(measured))
+	}
+	if resamples < 1 {
+		return 0, 0, fmt.Errorf("long auc interval: %d resamples, want at least 1", resamples)
 	}
 	rng := rand.New(rand.NewPCG(seed, seed))
 	be, bm := make([]float64, len(est)), make([]float64, len(measured))
@@ -71,9 +74,18 @@ func LongAUCInterval(est, measured []float64, longMinutes float64, resamples int
 			j := rng.IntN(len(est))
 			be[i], bm[i] = est[j], measured[j]
 		}
+		longs := 0
+		for _, m := range bm {
+			if m > longMinutes {
+				longs++
+			}
+		}
+		if longs == 0 || longs == len(bm) {
+			continue
+		}
 		auc, err := LongAUC(be, bm, longMinutes)
 		if err != nil {
-			continue
+			return 0, 0, err
 		}
 		aucs = append(aucs, auc)
 	}
