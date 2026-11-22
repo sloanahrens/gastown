@@ -183,6 +183,38 @@ func TestStoryPointsDriftAttentionSummaryNamesTheInterval(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftAttentionSummaryNamesTheAUC: an AUC for beads over 20
+// minutes follows the rank interval; a reading with no AUC keeps its summary
+// (gt-yy8e7t).
+func TestStoryPointsDriftAttentionSummaryNamesTheAUC(t *testing.T) {
+	t.Parallel()
+	const rank = "story points estimate drift: the 95% interval 0.17 to 0.47 of the rank correlation 0.31 over the last 100 landings of the 2026-11-14 extract lies wholly under 0.50"
+	withAUC := driftReadingWithAUC(0.31, 0.17, 0.47, 0.44, 0.63)
+	withAUC.Drift.Current.LongAUC = 0.58
+	for _, tc := range []struct {
+		name string
+		read metrics.StoryPointsDriftRead
+		want string
+	}{
+		{"with an AUC", withAUC, rank + "; AUC for over 20 minutes 0.58 (95% interval 0.44 to 0.63); weights v1"},
+		{"with no AUC", driftReadingWithInterval(0.31, 0.17, 0.47, "v1"), rank + "; weights v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := driftRig(t, func(time.Time) (metrics.StoryPointsDriftRead, error) {
+				return tc.read, nil
+			})
+			items := f.collect(t, f.src.collectStoryPointsDrift)
+			if len(items) != 1 {
+				t.Fatalf("items = %+v, want one", items)
+			}
+			if got := items[0].Summary; got != tc.want {
+				t.Errorf("summary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestStoryPointsDriftAttentionSummaryRoundsHiDown: Hi prints rounded down, so
 // an interval that ends at 0.4996 reads 0.49 and never 0.50 under the wording
 // "wholly under 0.50".
