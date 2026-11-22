@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -963,7 +964,7 @@ var sourceReadCalls = map[string]bool{
 // read: an argument of a sourceReadCalls call, or a const or var identifier
 // holding a literal that is one (a filepath.Join's segments are joined, since the
 // path is built from them). A literal in a comment is not in the AST. Known
-// misses, not holes: a := variable, a path built by concatenation or read through a
+// misses, not holes: a := variable, a name shadowed in an inner block, a path built by concatenation or read through a
 // helper, and a table-struct field passed to a read in a loop; the next such miss
 // gets a row.
 func sourceReadLiterals(f *ast.File) []string {
@@ -975,46 +976,63 @@ func sourceReadLiterals(f *ast.File) []string {
 		v, err := strconv.Unquote(lit.Value)
 		return v, err == nil
 	}
-	held := map[string]string{} // identifier -> the literal it holds
-	ast.Inspect(f, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.ValueSpec:
-			for i, name := range n.Names {
-				if i < len(n.Values) {
-					if v, ok := unquote(n.Values[i]); ok {
-						held[name.Name] = v
+	// held maps an identifier to the literal it holds, per scope: a function's own
+	// consts and vars first, then the package-level ones, so two functions that
+	// each declare p do not read each other's (gt-561mum).
+	declared := func(held map[string]string, n ast.Node) map[string]string {
+		scope := maps.Clone(held)
+		ast.Inspect(n, func(n ast.Node) bool {
+			if spec, ok := n.(*ast.ValueSpec); ok {
+				for i, name := range spec.Names {
+					if i < len(spec.Values) {
+						if v, ok := unquote(spec.Values[i]); ok {
+							scope[name.Name] = v
+						}
 					}
 				}
 			}
+			return true
+		})
+		return scope
+	}
+	pkgLevel := map[string]string{}
+	for _, decl := range f.Decls {
+		if _, isFunc := decl.(*ast.FuncDecl); !isFunc {
+			pkgLevel = declared(pkgLevel, decl)
 		}
-		return true
-	})
+	}
 	var out []string
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+	for _, decl := range f.Decls {
+		held := pkgLevel
+		if fn, isFunc := decl.(*ast.FuncDecl); isFunc {
+			held = declared(pkgLevel, fn)
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || !sourceReadCalls[sel.Sel.Name] {
-			return true
-		}
-		var segs []string
-		for _, arg := range call.Args {
-			v, ok := unquote(arg)
-			if id, isID := arg.(*ast.Ident); isID {
-				v, ok = held[id.Name]
+		ast.Inspect(decl, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-			if ok {
-				out = append(out, v)
-				segs = append(segs, v)
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || !sourceReadCalls[sel.Sel.Name] {
+				return true
 			}
-		}
-		if sel.Sel.Name == "Join" {
-			out = append(out, path.Join(segs...))
-		}
-		return true
-	})
+			var segs []string
+			for _, arg := range call.Args {
+				v, ok := unquote(arg)
+				if id, isID := arg.(*ast.Ident); isID {
+					v, ok = held[id.Name]
+				}
+				if ok {
+					out = append(out, v)
+					segs = append(segs, v)
+				}
+			}
+			if sel.Sel.Name == "Join" {
+				out = append(out, path.Join(segs...))
+			}
+			return true
+		})
+	}
 	return out
 }
 
@@ -1131,6 +1149,7 @@ func TestTreeWideGuardsCoverEverySourceReadingTest(t *testing.T) {
 		{"a read through a const", pk + "const p = \"../other/o.go\"\nfunc f() { parser.ParseFile(nil, p, nil, 0) }\n", nil, pair, nil},
 		{"a path built by Join", pk + "func f() { os.ReadFile(filepath.Join(root, \"internal\", \"other\", \"o.go\")) }\n", nil, pair, nil},
 		{"a Join with a const segment", pk + "const dir = \"other\"\nfunc f() { os.ReadFile(filepath.Join(root, \"internal\", dir, \"o.go\")) }\n", nil, pair, nil},
+		{"two functions each declaring p", pk + "func a() { const p = \"../other/o.go\"; os.ReadFile(p) }\nfunc b() { const p = \"../reader/own.go\"; os.ReadFile(p) }\n", nil, pair, nil},
 		{"a literal that is data, never read", pk + "var fixture = \"internal/other/o.go\"\n", nil, nil, nil},
 		{"a file of the test's own package", pk + "func f() { os.ReadFile(\"internal/reader/own.go\") }\n", nil, nil, nil},
 		{"a path named in a comment only", pk + "// reads ../other/o.go\nfunc f() { os.ReadFile(\"x\") }\n", nil, nil, nil},
