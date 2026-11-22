@@ -3542,8 +3542,8 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 				preservedRef = outcome.RemoteRef
 				alreadyOnRemote = outcome.AlreadyThere
 				if outcome.AlreadyThere {
-					fmt.Fprintf(out, "  %s %s already reachable from %s — nothing to preserve\n",
-						style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
+					words := preservedRefWords(branchToDelete, outcome.RemoteRef, r.DefaultBranch())
+					fmt.Fprintf(out, "  %s %s %s\n", style.Success.Render("✓"), branchToDelete, words)
 				} else {
 					fmt.Fprintf(out, "  %s preserved branch %s as %s\n", style.Success.Render("✓"), branchToDelete, outcome.RemoteRef)
 					if outcome.RemoteRef != "origin/"+branchToDelete {
