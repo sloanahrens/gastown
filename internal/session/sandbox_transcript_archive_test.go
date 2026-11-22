@@ -64,6 +64,23 @@ func TestTranscriptArchiveMovesTheCopy(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(copyDir, "ses-9.jsonl")); err != nil {
 		t.Errorf("the skipped transcript left the copy: %v", err)
 	}
+	// The copy comes from an untrusted sandbox: a link named like a transcript is
+	// not a regular file, so it stays in the copy and never enters the archive.
+	outside := filepath.Join(root, "outside.jsonl")
+	writeTranscript(t, outside)
+	linked := filepath.Join(copyDir, "linked.jsonl")
+	if err := os.Symlink(outside, linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := archiveCopiedTranscripts(copyDir, archiveDir); err != nil {
+		t.Fatalf("archiveCopiedTranscripts with a link: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(archiveDir, "linked.jsonl")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a link entered the archive: %v", err)
+	}
+	if _, err := os.Lstat(linked); err != nil {
+		t.Errorf("the link left the copy: %v", err)
+	}
 	// A missing copy archives nothing and makes no archive.
 	if err := archiveCopiedTranscripts(filepath.Join(root, "missing"), filepath.Join(root, "missing-archive")); err != nil {
 		t.Fatalf("archiveCopiedTranscripts on a missing copy: %v", err)
