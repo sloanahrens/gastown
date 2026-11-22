@@ -38,6 +38,48 @@ func TestContentionNextSchedule(t *testing.T) {
 	}
 }
 
+// The metadata contract is RFC 3339 UTC, so a loss dated on a caller's clock in
+// another location returns First and RetryAt in UTC, at the same instant
+// (gt-zkuid5).
+func TestContentionNextUTC(t *testing.T) {
+	t.Parallel()
+	zone := time.FixedZone("IST", 5*60*60+30*60)
+	now := time.Date(2026, 11, 19, 5, 30, 0, 0, zone)
+	first := now.UTC()
+	cases := []struct {
+		name string
+		rec  ContentionState
+	}{
+		{"a first loss", ContentionState{}},
+		{"a later loss", ContentionState{First: first, Attempts: 1, RetryAt: first.Add(5 * time.Second)}},
+		{"a later loss whose record carries another location", ContentionState{
+			First: now, Attempts: 1, RetryAt: now.Add(5 * time.Second),
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			next, _ := ContentionNext(c.rec, now)
+			wantRetryAt := now.Add(contentionDelay(c.rec.Attempts + 1))
+			for _, f := range []struct {
+				name string
+				got  time.Time
+				want time.Time
+			}{
+				{"First", next.First, first},
+				{"RetryAt", next.RetryAt, wantRetryAt},
+			} {
+				if !f.got.Equal(f.want) {
+					t.Errorf("%s = %v, want the instant %v", f.name, f.got, f.want)
+				}
+				if f.got.Location() != time.UTC {
+					t.Errorf("%s location = %v, want UTC", f.name, f.got.Location())
+				}
+			}
+		})
+	}
+}
+
 // The window runs from the first loss: a later loss does not restart it, and the
 // schedule is spent once ContentionWindow has passed since that first loss.
 func TestContentionNextExhaustedAtWindow(t *testing.T) {
