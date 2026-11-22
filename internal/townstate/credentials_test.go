@@ -83,6 +83,99 @@ func TestFindCredentials(t *testing.T) {
 	}
 }
 
+// The detector treats passwd, pwd, authorization, credentials and dsn as a
+// credential only when one whole word of the name equals it, the name split on
+// underscores, hyphens, dots and camel-case humps, while key, token, secret and
+// password keep matching anywhere (gt-06nqnk).
+func TestCredentialNameWholeWords(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"the document the bead names", `{"passwd":"x","pwd":"x","authorization":"Bearer z","credentials":"x","dsn":"postgres://u:p@h/db"}`,
+			[]string{"json:passwd", "json:pwd", "json:authorization", "json:credentials", "json:dsn"}},
+		{"passwd", `{"passwd":"x"}`, []string{"json:passwd"}},
+		{"pwd", `{"pwd":"x"}`, []string{"json:pwd"}},
+		{"authorization", `{"authorization":"Bearer z"}`, []string{"json:authorization"}},
+		{"credentials", `{"credentials":"x"}`, []string{"json:credentials"}},
+		{"dsn", `{"dsn":"postgres://u@host/db"}`, []string{"json:dsn"}},
+		{"an underscore separates words", `{"DB_PASSWD":"x"}`, []string{"json:DB_PASSWD"}},
+		{"a camel-case hump separates words", `{"apiKey":"x"}`, []string{"json:apiKey"}},
+		{"a hyphen separates words", `{"X-Authorization":"Bearer z"}`, []string{"json:X-Authorization"}},
+		{"a dot separates words", `{"db.passwd":"x"}`, []string{"json:db.passwd"}},
+		{"an acronym run splits before its last upper", `{"DBPasswd":"x"}`, []string{"json:DBPasswd"}},
+		{"an acronym prefix splits from the word", `{"XAuthorization":"Bearer z"}`, []string{"json:XAuthorization"}},
+		{"an acronym prefix that is not a credential word", `{"HTTPSProxy":"http://proxy.example:3128"}`, nil},
+		{"OAuthScope is not authorization", `{"OAuthScope":"read"}`, nil},
+		{"author is not authorization", `{"author":"x"}`, nil},
+		{"authors is not authorization", `{"authors":"x"}`, nil},
+		{"oauth_scope is not authorization", `{"oauth_scope":"x"}`, nil},
+		{"authority is not authorization", `{"authority":"x"}`, nil},
+		{"pwdx is not pwd", `{"pwdx":"x"}`, nil},
+		{"dsn_file is exempt by suffix", `{"dsn_file":"/run/dsn"}`, nil},
+		{"a token count is still exempt by shape", `{"max_tokens":"8192"}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// A string value that is a URL with a non-empty password in its userinfo is a
+// finding under any key, and the rule carries the key and never the value
+// (gt-06nqnk). A URL with a user and no password, or no userinfo, is not. A URL
+// url.Parse rejects or leaves without a userinfo still fails closed on its shape.
+func TestFindCredentialsUserinfoURL(t *testing.T) {
+	t.Parallel()
+	const url = "https://user:pw@host/x.git"
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"a repository URL under one key", `{"repo":"` + url + `"}`, []string{"json:repo"}},
+		{"under another key", `{"origin":"` + url + `"}`, []string{"json:origin"}},
+		{"under a credential key the name rule reports once", `{"token":"` + url + `"}`, []string{"json:token"}},
+		{"a percent-encoded password", `{"repo":"https://user:p%40ss@host/x.git"}`, []string{"json:repo"}},
+		{"an invalid percent escape in the password fails closed", `{"repo":"https://user:p%zz@host/x.git"}`, []string{"json:repo"}},
+		{"an unescaped slash in the password fails closed", `{"repo":"https://user:pa/ss@host/x.git"}`, []string{"json:repo"}},
+		{"a literal space in the password fails closed", `{"repo":"https://user:pa ss@host/x.git"}`, []string{"json:repo"}},
+		{"a URL with a port and an @ in its path has no userinfo", `{"repo":"https://registry.npmjs.org:443/@scope/pkg"}`, nil},
+		{"an env value with an invalid percent escape", "GIT_URL=https://user:p%zz@host/x.git\n", []string{"env:GIT_URL"}},
+		{"an element of an array names the array's key", `{"repos":["` + url + `"]}`, []string{"json:repos"}},
+		{"an element of a nested array names the outer key", `{"repos":[["` + url + `"]]}`, []string{"json:repos"}},
+		{"a top-level string has no key", `"` + url + `"`, []string{"json:"}},
+		{"an exempt field's value is still a finding", `{"tolerations":[{"key":"` + url + `"}]}`, []string{"json:key"}},
+		{"an env value", "GIT_URL=" + url + "\n", []string{"env:GIT_URL"}},
+		{"a quoted env value", "GIT_URL=\"" + url + "\"\n", []string{"env:GIT_URL"}},
+		{"truncated JSON is still scanned", `{"repo":"` + url + `"`, []string{"json:repo"}},
+		{"no password", `{"repo":"https://user@host/x.git"}`, nil},
+		{"no userinfo", `{"repo":"https://host/x.git"}`, nil},
+		{"a userinfo-shaped value with no scheme", `{"repo":"user:pw@host/x.git"}`, nil},
+		{"an empty password part", `{"repo":"https://user:@host/x.git"}`, nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindCredentials([]byte(c.in))
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("FindCredentials(%q) = %q, want %q", c.in, got, c.want)
+			}
+			// A rule names the key, never any part of the value.
+			for _, rule := range got {
+				if strings.Contains(rule, "pw@") || strings.Contains(rule, "host") {
+					t.Fatalf("rule %q holds part of the URL's value", rule)
+				}
+			}
+		})
+	}
+}
+
 // A YAML mapping entry in text that is not valid JSON is a finding when the
 // last dotted segment of its key is a credential name and its value is a
 // secret (gt-b4uopc). The rule names the key, never the value.
@@ -279,6 +372,10 @@ func TestRedactJSON(t *testing.T) {
 		{"duplicate keys", `{"api_key":"one","api_key":"two"}`, `{"api_key":"<redacted>","api_key":"<redacted>"}`, 2},
 		{"escaped quote and backslash in the value", `{"password":"p\"q\\","k":"v"}`, `{"password":"<redacted>","k":"v"}`, 1},
 		{"a credential-named array redacts each element", `{"tokens":["a","b"]}`, `{"tokens":["<redacted>","<redacted>"]}`, 2},
+		{"a URL with a password is redacted under any key", `{"repo":"https://user:pw@host/x.git","n":1}`,
+			`{"repo":"<redacted>","n":1}`, 1},
+		{"a URL with an unparseable password is redacted under any key", `{"repo":"https://user:p%zz@host/x.git","n":1}`,
+			`{"repo":"<redacted>","n":1}`, 1},
 		{"nothing to redact", `{"api_key_file":"/x","n":1}`, `{"api_key_file":"/x","n":1}`, 0},
 		{"a reference and a plain keys field are left alone",
 			`{"ANTHROPIC_AUTH_TOKEN":"${GT_X}","api_key":"$GT_X","keys":"abc-def-123"}`,

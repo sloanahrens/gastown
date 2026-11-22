@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"strings"
 	"unicode"
@@ -17,11 +18,15 @@ import (
 // marker is not a finding, so RedactJSON can check its own output.
 const redactedMarker = "<redacted>"
 
-// A name marks a credential when it contains a credential word in any case,
-// unless it ends in an exempt suffix (a place or an indirection, not the secret).
+// A name marks a credential when it contains key, token, secret or password in
+// any case, or when one of its words, split on underscores, hyphens, dots and
+// camel-case humps, equals passwd, pwd, authorization, credentials or dsn. The
+// whole-word rule keeps author, authority, oauth_scope and pwdx out. An exempt
+// suffix (a place or an indirection, not the secret) wins over both.
 var (
-	credentialWords = []string{"key", "token", "secret", "password"}
-	exemptSuffixes  = []string{"_file", "_path", "_env", "_name"}
+	credentialWords      = []string{"key", "token", "secret", "password"}
+	credentialWholeWords = []string{"passwd", "pwd", "authorization", "credentials", "dsn"}
+	exemptSuffixes       = []string{"_file", "_path", "_env", "_name"}
 )
 
 var (
@@ -41,6 +46,12 @@ var (
 	// follows config's env var rule, so a leading digit (a shell positional) is
 	// not a reference (gt-t5pxk8).
 	envRefOnly = regexp.MustCompile(`^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$`)
+	// userinfoPasswordShape: scheme://user:password@ at the start of the value. It
+	// is the fail-closed reading of a URL url.Parse REJECTS, so a literal password
+	// in the text is still a finding: the user has no @, /, colon or space, and
+	// the password is non-empty and may hold a slash or a space (the characters
+	// that make url.Parse fail). It is never applied to a URL that parses.
+	userinfoPasswordShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*://[^@/\s:]+:[^@]+@`)
 )
 
 // lastSegment returns the last dotted segment of a YAML key. Only that segment
@@ -83,6 +94,42 @@ func yamlValue(raw string) (value string, quoted bool) {
 	return strings.TrimSpace(v), false
 }
 
+// splitNameWords splits a name into lower-case words at an underscore, a hyphen
+// or a dot, at a lower-case or digit followed by an upper-case letter (apiKey is
+// api and key), and before the last upper-case letter of an upper-case run that
+// a lower-case letter follows (DBPasswd is db and passwd, HTTPSProxy is https and
+// proxy). X-Authorization is x and authorization.
+func splitNameWords(name string) []string {
+	runes := []rune(name)
+	var (
+		words []string
+		cur   []rune
+	)
+	flush := func() {
+		if len(cur) > 0 {
+			words = append(words, strings.ToLower(string(cur)))
+			cur = nil
+		}
+	}
+	for i, r := range runes {
+		if r == '_' || r == '-' || r == '.' {
+			flush()
+			continue
+		}
+		if i > 0 && unicode.IsUpper(r) {
+			prev := runes[i-1]
+			lowerToUpper := unicode.IsLower(prev) || unicode.IsDigit(prev)
+			acronymBreak := unicode.IsUpper(prev) && i+1 < len(runes) && unicode.IsLower(runes[i+1])
+			if lowerToUpper || acronymBreak {
+				flush()
+			}
+		}
+		cur = append(cur, r)
+	}
+	flush()
+	return words
+}
+
 func credentialName(name string) bool {
 	lower := strings.ToLower(name)
 	for _, s := range exemptSuffixes {
@@ -95,6 +142,37 @@ func credentialName(name string) bool {
 			return true
 		}
 	}
+	for _, word := range splitNameWords(name) {
+		for _, w := range credentialWholeWords {
+			if word == w {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// urlCarriesPassword reports whether a string value is a URL whose userinfo holds
+// a password (scheme://user:password@host). It judges the value alone, so the
+// finding holds under any key; a URL with a user and no password, or no userinfo,
+// is not one. It fails closed: url.Parse rejects an invalid percent escape and
+// ends the authority at an unescaped slash, so a value shaped like a userinfo
+// password is a finding even when the parsed URL shows none (gt-vvuewi).
+func urlCarriesPassword(s string) bool {
+	if !strings.Contains(s, "://") {
+		return false
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return userinfoPasswordShape.MatchString(s)
+	}
+	if u.User != nil {
+		if password, ok := u.User.Password(); ok && password != "" {
+			return true
+		}
+	}
+	// A URL that parses is judged by what it parsed to: https://host:443/@scope/pkg
+	// has a port and an @ in its path and no userinfo, so it is not a finding.
 	return false
 }
 
@@ -180,8 +258,8 @@ func appendValueShape(out []hit, data []byte, s string, end int) []hit {
 type jsonFrame struct {
 	object  bool
 	wantKey bool
-	key     string
-	cred    bool // the current key (object) or the key that opened the array
+	key     string // the current key (object) or the member key that opened the array
+	cred    bool   // the current key or the opening key names a credential
 	parent  *jsonFrame
 	depth   int     // containers above this one
 	seg     pathSeg // the step from the parent into this container
@@ -199,9 +277,10 @@ func (f *jsonFrame) stepInto() pathSeg {
 // jsonHits walks valid JSON token by token, so every occurrence of a key is seen
 // (duplicates included). A string under a credential name is a key hit, and so is
 // every string element of an array that key opened, nested arrays included, unless
-// the name rule is exempt at its path; every other string value, in an object, an
-// array or at the top, is checked by shape. The walk is linear in the document:
-// opening a container costs O(1) and the path test reads three steps.
+// the name rule is exempt at its path. Every other string value, in an object, an
+// array or at the top, is a key hit when it is a URL with a userinfo password, and
+// is otherwise checked by shape. The walk is linear in the document: opening a
+// container costs O(1) and the path test reads three steps.
 func jsonHits(data []byte) ([]hit, error) {
 	var stack []*jsonFrame
 	var out []hit
@@ -226,13 +305,19 @@ func jsonHits(data []byte) ([]hit, error) {
 				if top != nil {
 					f.depth, f.seg = top.depth+1, top.stepInto()
 				}
+				// An array's elements name the member key that opened it, carried
+				// through nested arrays, so a URL with a password in an element is
+				// a finding under that key.
+				if d == '[' && top != nil {
+					f.key = top.key
+				}
 				// A credential-named key owns its array value, so each string element
 				// is a finding like a direct value; without this the key list was
 				// copied into the backup unredacted. The name exemption is decided
 				// once, where the key is read, since the element's frame is the
 				// array, not the member that holds it.
 				if d == '[' && top != nil && top.cred && (!top.object || !nameRuleExempt(top)) {
-					f.key, f.cred = top.key, true
+					f.cred = true
 				}
 				stack = append(stack, f)
 			default:
@@ -247,19 +332,32 @@ func jsonHits(data []byte) ([]hit, error) {
 		switch {
 		case top == nil || !top.object:
 			if isString {
-				if top != nil && top.cred && isSecret(top.key, s) {
+				switch {
+				case top != nil && top.cred && isSecret(top.key, s):
 					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
-				} else {
+				case urlCarriesPassword(s):
+					// A top-level string has no key, so its rule names an empty one.
+					key := ""
+					if top != nil {
+						key = top.key
+					}
+					out = append(out, hit{rule: "json:" + key, from: stringStart(data, end), to: end})
+				default:
 					out = appendValueShape(out, data, s, end)
 				}
 			}
 		case top.wantKey:
 			top.key, top.cred, top.wantKey = s, credentialName(s), false
 		default:
-			if isString && top.cred && !nameRuleExempt(top) && isSecret(top.key, s) {
-				out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
-			} else if isString {
-				out = appendValueShape(out, data, s, end)
+			if isString {
+				switch {
+				case top.cred && !nameRuleExempt(top) && isSecret(top.key, s):
+					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
+				case urlCarriesPassword(s):
+					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
+				default:
+					out = appendValueShape(out, data, s, end)
+				}
 			}
 			top.wantKey = true
 		}
@@ -285,9 +383,12 @@ func stringStart(data []byte, end int) int {
 
 // FindCredentials returns one rule name per credential in data, never a value.
 // Valid JSON is walked: a credential-named key's value is a json:key finding unless
-// its path is exempt, and a token-shaped word in any other string value is a
-// value:shape finding. Anything else is scanned for NAME=value, "key": "value"
-// and a YAML name: value entry, whose last dotted segment decides the name.
+// its path is exempt, a string value that is a URL with a userinfo password is a
+// json:key finding under any key, and a token-shaped word in any other string value
+// is a value:shape finding. Anything else is scanned for NAME=value, "key": "value"
+// and a YAML name: value entry, whose last dotted segment decides the name; an env
+// value or a quoted JSON member that is a URL with a userinfo password is a finding
+// under env:name or json:key as well.
 func FindCredentials(data []byte) []string {
 	var found []string
 	if hits, err := jsonHits(data); err == nil {
@@ -297,13 +398,16 @@ func FindCredentials(data []byte) []string {
 		return found
 	}
 	for _, m := range envLine.FindAllSubmatch(data, -1) {
-		if credentialName(string(m[1])) && isSecret(string(m[1]), strings.Trim(strings.TrimSpace(string(m[2])), `"'`)) {
-			found = append(found, "env:"+string(m[1]))
+		name := string(m[1])
+		value := strings.Trim(strings.TrimSpace(string(m[2])), `"'`)
+		if (credentialName(name) && isSecret(name, value)) || urlCarriesPassword(value) {
+			found = append(found, "env:"+name)
 		}
 	}
 	for _, m := range jsonMember.FindAllSubmatch(data, -1) {
-		if credentialName(string(m[1])) && isSecret(string(m[1]), string(m[2])) {
-			found = append(found, "json:"+string(m[1]))
+		name, value := string(m[1]), string(m[2])
+		if (credentialName(name) && isSecret(name, value)) || urlCarriesPassword(value) {
+			found = append(found, "json:"+name)
 		}
 	}
 	for _, m := range yamlLine.FindAllSubmatch(data, -1) {
@@ -320,8 +424,9 @@ func FindCredentials(data []byte) []string {
 }
 
 // RedactJSON replaces every credential value with the marker, leaving every other
-// byte alone, and returns the count. A token-shaped word in a value that is not
-// under a credential name is not rewritten, so it survives into the output and
+// byte alone, and returns the count. That includes a URL with a userinfo password,
+// whatever its key. A token-shaped word in a value that is not under a credential
+// name and is not such a URL is not rewritten, so it survives into the output and
 // the check below refuses the document. It refuses input that is not valid JSON,
 // and its own output if a finding or a syntax error survives.
 func RedactJSON(data []byte) (out []byte, n int, err error) {
