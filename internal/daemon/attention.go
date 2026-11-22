@@ -1894,9 +1894,10 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 // A seat's failed read is not the collection's: an unreadable agent bead, a
 // work bead that cannot be shown, and a record with no update time each skip
 // that seat alone, keeping its previous item when the last tick raised one, so
-// the other seats are still judged (gt-ujxfez). The seat walk is the
-// collection's own read, so a walk that cannot be listed still fails it and
-// the queue keeps every previous item.
+// the other seats are still judged (gt-ujxfez). A tick that skips any seat logs
+// one line naming each skipped seat and the read that failed (gt-w797qr). The
+// seat walk is the collection's own read, so a walk that cannot be listed still
+// fails it and the queue keeps every previous item.
 //
 // The age is the agent bead's last write (polecat.AgentBeadUpdatedAt,
 // patrolscan.AgentRecord.UpdatedAt), so a later write to the agent bead of a
@@ -1909,15 +1910,22 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 	}
 	h := &patrolScanHost{d: s.d}
 	var out []attention.Item
+	// unjudged names each seat this tick skipped and the read that failed: the
+	// one line the tick logs (gt-w797qr).
+	var unjudged []string
 	for _, seat := range seats {
 		role, name, named := strings.Cut(seat.Name, "/")
 		if !named || role != constants.RolePolecat || seat.Rig == "" {
 			continue
 		}
 		key := "seat-finished:" + seat.Rig + "/" + name
+		skip := func(why error) {
+			unjudged = append(unjudged, seat.Rig+"/"+name+" not judged: "+why.Error())
+			out = keepSeatFinished(s.prev, key, out)
+		}
 		rec, err := h.AgentRecord(seat.Rig, name)
 		if err != nil {
-			out = keepSeatFinished(s.prev, key, out)
+			skip(err)
 			continue
 		}
 		state := beads.AgentState(strings.TrimSpace(rec.State))
@@ -1926,7 +1934,7 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 		// seat alone, keeping its previous item (gt-s4ywbt).
 		irec, err := intent.Read(s.d.config.TownRoot, supervisor.IntentSeat(supervisor.SeatFor(seat.Rig, constants.RolePolecat, name)))
 		if err != nil {
-			out = keepSeatFinished(s.prev, key, out)
+			skip(err)
 			continue
 		}
 		judged := string(state)
@@ -1939,8 +1947,11 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 			continue
 		}
 		issue, err := h.readBeads(seat.Rig).Show(rec.LastSourceIssue)
-		if err != nil || issue == nil {
-			out = keepSeatFinished(s.prev, key, out)
+		if err == nil && issue == nil {
+			err = fmt.Errorf("%s reads as no bead", rec.LastSourceIssue)
+		}
+		if err != nil {
+			skip(err)
 			continue
 		}
 		if beads.IssueStatus(issue.Status) != beads.StatusClosed {
@@ -1950,7 +1961,7 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 		// be judged: the seat is skipped rather than its age read as zero (which
 		// would raise every time).
 		if rec.UpdatedAt.IsZero() {
-			out = keepSeatFinished(s.prev, key, out)
+			skip(errors.New("agent bead has no update time"))
 			continue
 		}
 		done := s.now.Sub(rec.UpdatedAt)
@@ -1965,6 +1976,9 @@ func (s *attentionSources) collectSeatFinishedLingering(_ context.Context) ([]at
 			Bead:     rec.LastSourceIssue,
 			Summary:  fmt.Sprintf("%s/%s %s %s on %s", seat.Rig, name, judged, townhealth.Short(done), rec.LastSourceIssue),
 		})
+	}
+	if len(unjudged) > 0 {
+		s.d.logger.Printf("attention: seat-finished: %s; the others are judged", strings.Join(unjudged, "; "))
 	}
 	return out, nil
 }

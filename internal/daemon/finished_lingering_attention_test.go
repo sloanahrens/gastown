@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -479,4 +480,137 @@ func TestSeatFinishedLingeringWalkFailureStillFailsTheCollection(t *testing.T) {
 	if len(got) != 1 || got[0].Key != "seat-finished:gastown/capable" {
 		t.Errorf("collectAttention = %+v, want the previous seat-finished item kept", got)
 	}
+}
+
+// gt-w797qr: a tick that skips seats says so in one log line, naming each
+// skipped seat and the read that failed, and a tick with no broken seat logs
+// none. The walk's own failure is the collection's error, not a line here.
+func TestSeatFinishedLingeringLogsTheSkippedSeats(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		breakRead func(t *testing.T, f *attentionFixture, r *keptSeatHookReader)
+		reason    string
+	}{
+		{
+			name: "the agent bead read fails",
+			breakRead: func(t *testing.T, f *attentionFixture, r *keptSeatHookReader) {
+				r.fail = map[string]error{keptSeatAgentID(f, "capable"): errors.New("bd show: agent bead unavailable")}
+			},
+			reason: "bd show: agent bead unavailable",
+		},
+		{
+			name: "the agent bead reads as no issue",
+			breakRead: func(t *testing.T, f *attentionFixture, r *keptSeatHookReader) {
+				r.noBead = map[string]bool{keptSeatAgentID(f, "capable"): true}
+			},
+			reason: "bd show {agent}: no issue",
+		},
+		{
+			name: "the work bead read fails",
+			breakRead: func(t *testing.T, f *attentionFixture, r *keptSeatHookReader) {
+				r.fail = map[string]error{"gt-abc12": errors.New("bd show: work bead unavailable")}
+			},
+			reason: "bd show: work bead unavailable",
+		},
+		{
+			name: "the work bead reads as no bead",
+			breakRead: func(t *testing.T, f *attentionFixture, r *keptSeatHookReader) {
+				r.noBead = map[string]bool{"gt-abc12": true}
+			},
+			reason: "gt-abc12 reads as no bead",
+		},
+		{
+			name: "the agent bead has no update time",
+			breakRead: func(t *testing.T, f *attentionFixture, r *keptSeatHookReader) {
+				r.issues[keptSeatAgentID(f, "capable")].UpdatedAt = ""
+			},
+			reason: "agent bead has no update time",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, keptSeatAttentionNow)
+			r := finishedSeatTown(t, f,
+				finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+				finishedSeat{name: "nux", bead: "gt-abc13", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+			)
+			tc.breakRead(t, f, &r)
+			f.d.openWorkBeads = r.open
+			c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+			items, err := c.collect(context.Background())
+			if err != nil {
+				t.Fatalf("collect = %+v, %v; want no error for one skipped seat", items, err)
+			}
+			if len(items) != 1 || items[0].Key != "seat-finished:gastown/nux" {
+				t.Fatalf("items = %+v, want the judged seat's item", items)
+			}
+			reason := strings.ReplaceAll(tc.reason, "{agent}", keptSeatAgentID(f, "capable"))
+			want := "attention: seat-finished: gastown/capable not judged: " + reason + "; the others are judged"
+			if got := seatFinishedLines(f.logs.String()); !slices.Equal(got, []string{want}) {
+				t.Errorf("log lines = %q, want one line %q", got, want)
+			}
+		})
+	}
+
+	t.Run("two skipped seats share one line", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, keptSeatAttentionNow)
+		r := finishedSeatTown(t, f,
+			finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+			finishedSeat{name: "nux", bead: "gt-abc13", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+			finishedSeat{name: "opal", bead: "gt-abc14", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+		)
+		r.fail = map[string]error{
+			keptSeatAgentID(f, "capable"): errors.New("bd show: agent bead unavailable"),
+			"gt-abc13":                    errors.New("bd show: work bead unavailable"),
+		}
+		f.d.openWorkBeads = r.open
+		c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+		items, err := c.collect(context.Background())
+		if err != nil {
+			t.Fatalf("collect = %+v, %v; want no error for two skipped seats", items, err)
+		}
+		if len(items) != 1 || items[0].Key != "seat-finished:gastown/opal" {
+			t.Fatalf("items = %+v, want only the judged seat's item", items)
+		}
+		want := "attention: seat-finished: gastown/capable not judged: bd show: agent bead unavailable; " +
+			"gastown/nux not judged: bd show: work bead unavailable; the others are judged"
+		if got := seatFinishedLines(f.logs.String()); !slices.Equal(got, []string{want}) {
+			t.Errorf("log lines = %q, want one line %q", got, want)
+		}
+	})
+
+	t.Run("a tick with no broken seat logs none", func(t *testing.T) {
+		t.Parallel()
+		f := newAttentionFixture(t, keptSeatAttentionNow)
+		finishedSeatTown(t, f,
+			finishedSeat{name: "capable", bead: "gt-abc12", status: string(beads.StatusClosed), state: "done", age: 31 * time.Minute},
+			finishedSeat{name: "nux", bead: "gt-abc13", status: string(beads.StatusOpen), state: "done", age: 3 * time.Hour},
+		)
+		c := collectorFor(t, f.src, attention.KindSeatFinishedLingering)
+
+		items, err := c.collect(context.Background())
+		if err != nil || len(items) != 1 {
+			t.Fatalf("collect = %+v, %v; want the one judged seat's item", items, err)
+		}
+		if got := seatFinishedLines(f.logs.String()); len(got) != 0 {
+			t.Errorf("log lines = %q, want none for a tick with no broken seat", got)
+		}
+	})
+}
+
+// seatFinishedLines is the log lines the seat-finished collector wrote; the
+// daemon's other lines (the agent bead shadow) are left out.
+func seatFinishedLines(logs string) []string {
+	var lines []string
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.HasPrefix(line, "attention: seat-finished:") {
+			lines = append(lines, line)
+		}
+	}
+	return lines
 }
