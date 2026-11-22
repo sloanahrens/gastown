@@ -484,10 +484,13 @@ generation stay until a `--full` pass.
 Settings (`daemon.patrols.scheduled_maintenance` in `settings/config.json`):
 
 ```json
-"scheduled_maintenance": { "enabled": true, "window": "03:00" }
+"scheduled_maintenance": { "enabled": true, "window": "03:00", "town_state_backup_root": "" }
 ```
 
-or `gt config set maintenance.window 03:00`. Before
+`town_state_backup_root` must be present: an empty string leaves the nightly
+town-state backup off, and a path there turns it on (a section without the key
+raises the `town_state_backup:nightly` alert every night). Set the window with
+`gt config set maintenance.window 03:00`. Before
 `gt config migrate` (historical layout) that patrol block lived in `mayor/daemon.json`. The
 schedule and trigger are
 policy, not settings. The retired keys (`interval`, `threshold`, `mode`,
