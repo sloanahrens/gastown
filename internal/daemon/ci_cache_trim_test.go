@@ -493,7 +493,8 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			row := ciCacheVolume{name: ciCacheGocacheVolume, root: ciCacheTestGocacheRoot, lru: true, capKiB: -1}
 			at := ciCacheExecTarget{kubeconfig: "kubeconfig", kubeContext: ciCacheTestContext, pod: ciCacheTestPod}
 
-			if ok := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour, 30<<20); ok {
+			ok, why := f.d.ciCacheTrimVolume(context.Background(), mode, at, row, 12*time.Hour, 30<<20)
+			if ok {
 				t.Errorf("a row whose LRU arguments cannot be built reached a verdict")
 			}
 			if n := len(f.execs()); n != 0 {
@@ -501,6 +502,9 @@ func TestCICacheTrimGocacheRefusesAnArgvItCannotBuild(t *testing.T) {
 			}
 			if want := "the volume's program could not be built"; !strings.Contains(f.logs.String(), want) {
 				t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
+			}
+			if want := "the volume's program could not be built: "; !strings.Contains(why, want) {
+				t.Errorf("the refusal's reason = %q, want it to carry %q", why, want)
 			}
 		})
 	}
@@ -905,6 +909,44 @@ func TestCICacheTrimPassFailureItemCarriesTheReason(t *testing.T) {
 				if len(open) != 1 || !strings.Contains(open[0].Reason, tt.want) || strings.Contains(open[0].Reason, ciCacheTrimNoReason) {
 					t.Fatalf("%s's item = %+v, want one carrying %q and not the fixed sentence", v.name, open, tt.want)
 				}
+			}
+		})
+	}
+}
+
+// TestCICacheTrimVolumeFailureItemCarriesTheReason pins gt-u8n4tx: a volume's own
+// failed trim puts its failure's first line, not the fixed sentence, into that
+// volume's item; a refusal with no error text to show carries its own sentence.
+func TestCICacheTrimVolumeFailureItemCarriesTheReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		exec cliReply
+		want string
+	}{
+		{"an exec failure carries its error's first line", cliReply{startErr: errors.New("fork/exec /usr/bin/kubectl: no such file or directory\na later line")}, "the exec into the dind container failed: fork/exec /usr/bin/kubectl: no such file or directory"},
+		{"a missing path carries the refusal's sentence", cliReply{stderr: "volume path not found\n", code: ciCacheMissingPathExit}, "the volume path " + ciCacheTestGocacheRoot + " is not in the " + ciCacheContainer + " container"},
+		{"an unreadable reply carries its refusal", cliReply{stdout: "du: cannot access the path\n"}, "the volume's reply could not be read: the reply has 1 line(s), want three"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			f.exec = tt.exec
+			f.tick()
+			f.drain()
+
+			failed := ciCacheVolumes[0]
+			open := f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(failed)))
+			if len(open) != 1 || !strings.Contains(open[0].Reason, tt.want) {
+				t.Fatalf("%s's items = %+v, want one carrying %q", failed.name, open, tt.want)
+			}
+			if strings.Contains(open[0].Reason, ciCacheTrimNoReason) || strings.Contains(open[0].Reason, "a later line") {
+				t.Errorf("%s's item carries more than its failure's first line: %q", failed.name, open[0].Reason)
+			}
+			// The other due volumes reached a verdict: their items are unchanged.
+			if other := ciCacheVolumes[1]; len(f.notify.OpenEscalations(diskMaintFailedKey(ciCacheVolumeSchedule(other)))) != 0 {
+				t.Errorf("%s raised an item, want none: another volume's item is unchanged", other.name)
 			}
 		})
 	}
