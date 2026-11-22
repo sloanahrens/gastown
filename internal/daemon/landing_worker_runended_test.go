@@ -101,6 +101,70 @@ func TestPostLandRunEndedReadsTheNewestEndedRun(t *testing.T) {
 	}
 }
 
+// TestPostLandRunEndedNotWhenARunCanStillReport: the end is all-or-nothing. A
+// running, waiting, successful or blocked run among ended ones, and an older
+// run that can still report behind a newest one that ended, each read not
+// ended: while any run can still post the verdict the check waits for, the
+// verdict is not orphaned.
+func TestPostLandRunEndedNotWhenARunCanStillReport(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		runs []forgejo.ActionRun
+	}{
+		{
+			name: "a running run among ended ones",
+			runs: []forgejo.ActionRun{{ID: 11205, Status: "failure"}, {ID: 11206, Status: forgejo.RunStatusRunning}},
+		},
+		{
+			name: "a waiting run among ended ones",
+			runs: []forgejo.ActionRun{{ID: 11205, Status: "cancelled"}, {ID: 11206, Status: forgejo.RunStatusWaiting}},
+		},
+		{
+			name: "a successful run among ended ones",
+			runs: []forgejo.ActionRun{{ID: 11205, Status: "error"}, {ID: 11206, Status: string(forgejo.StateSuccess)}},
+		},
+		{
+			name: "a blocked run among ended ones",
+			runs: []forgejo.ActionRun{{ID: 11205, Status: "failure"}, {ID: 11206, Status: forgejo.RunStatusBlocked}},
+		},
+		{
+			name: "a newest run ended with an older one that can still report",
+			runs: []forgejo.ActionRun{{ID: 11204, Status: forgejo.RunStatusRunning}, {ID: 11205, Status: "failure"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newPostLandWiringFixture(t, time.Hour)
+			w.runs.bySHA[w.older] = &forgejo.RunList{Runs: tc.runs}
+			got, err := w.runEnded(t)
+			if err != nil {
+				t.Fatalf("RunEnded: %v", err)
+			}
+			if got.Ended {
+				t.Fatalf("RunEnded = %+v, want not ended: a run that can still report leaves the verdict unorphaned", got)
+			}
+		})
+	}
+}
+
+// TestPostLandRunEndedNoRunsIsNotEnded: a commit Forgejo holds no runs for is
+// not an end. No run can have been orphaned, and marking it ended would orphan
+// a verdict after the wait and name run 0.
+func TestPostLandRunEndedNoRunsIsNotEnded(t *testing.T) {
+	t.Parallel()
+	w := newPostLandWiringFixture(t, time.Hour)
+	w.runs.bySHA[w.older] = &forgejo.RunList{}
+	got, err := w.runEnded(t)
+	if err != nil {
+		t.Fatalf("RunEnded: %v", err)
+	}
+	if got.Ended {
+		t.Fatalf("RunEnded = %+v, want not ended for a commit with no runs", got)
+	}
+}
+
 // TestPostLandRunEndedReturnsTheListingError: a run list that cannot be read
 // is an error, never an end, so a broken Forgejo read cannot orphan a landing.
 func TestPostLandRunEndedReturnsTheListingError(t *testing.T) {
