@@ -260,10 +260,29 @@ type jsonFrame struct {
 	object  bool
 	wantKey bool
 	key     string // the current key (object) or the member key that opened the array
-	cred    bool   // the current key or the opening key names a credential
+	cred    bool   // the current key of an object names a credential
+	owned   bool   // the value this container holds sits under a credential-named key
+	owner   string // that credential key, when owned
 	parent  *jsonFrame
 	depth   int     // containers above this one
 	seg     pathSeg // the step from the parent into this container
+}
+
+// ownerKey reports the credential-named key that owns the value f holds next, and
+// whether there is one. That is the member key an object is positioned on, or, for
+// a value inside a credential's value, the key that owns the whole value. A nil f
+// (the top level) owns nothing.
+func (f *jsonFrame) ownerKey() (string, bool) {
+	if f == nil {
+		return "", false
+	}
+	if f.owned {
+		return f.owner, true
+	}
+	if f.object && f.cred && !nameRuleExempt(f) {
+		return f.key, true
+	}
+	return "", false
 }
 
 // stepInto is the step a value held by f takes: its member key in an object, an
@@ -277,12 +296,13 @@ func (f *jsonFrame) stepInto() pathSeg {
 
 // jsonHits walks valid JSON token by token, so every occurrence of a key is seen
 // (duplicates included). A string under a credential name is a key hit, and so is
-// every string element of an array that key opened, nested arrays included, unless
-// the name rule is exempt at its path. A number in either place is a key hit too,
-// under the value rules isSecret applies; a boolean and a null are not. Every other
-// string value, in an object, an array or at the top, is a key hit when it is a URL
-// with a userinfo password, and is otherwise checked by shape. The walk is linear in
-// the document: opening a container costs O(1) and the path test reads three steps.
+// every string leaf of the value that key owns: each string in a nested object or
+// array under it, at any depth, is a hit under that key, unless the name rule is
+// exempt at the key's path. A number in either place is a key hit too, under the
+// value rules isSecret applies; a boolean and a null are not. Every other string
+// value, in an object, an array or at the top, is a key hit when it is a URL with a
+// userinfo password, and is otherwise checked by shape. The walk is linear in the
+// document: opening a container costs O(1) and the path test reads three steps.
 func jsonHits(data []byte) ([]hit, error) {
 	var stack []*jsonFrame
 	var out []hit
@@ -313,13 +333,14 @@ func jsonHits(data []byte) ([]hit, error) {
 				if d == '[' && top != nil {
 					f.key = top.key
 				}
-				// A credential-named key owns its array value, so each string or
-				// number element is a finding like a direct value; without this the
-				// key list was copied into the backup unredacted. The name exemption
-				// is decided once, where the key is read, since the element's frame is
-				// the array, not the member that holds it.
-				if d == '[' && top != nil && top.cred && (!top.object || !nameRuleExempt(top)) {
-					f.cred = true
+				// A credential-named key owns the whole value under it, so a nested
+				// object or array inside that value is owned by the same key and its
+				// leaves are findings like a direct value; without this the key list
+				// was copied into the backup unredacted (gt-ourmlj, gt-pwfy1z). The
+				// name exemption is applied by ownerKey at the key's position, so an
+				// exempt key owns nothing and its nested values are not owned either.
+				if owner, ok := top.ownerKey(); ok {
+					f.owned, f.owner = true, owner
 				}
 				stack = append(stack, f)
 			default:
@@ -335,10 +356,11 @@ func jsonHits(data []byte) ([]hit, error) {
 		_, isNumber := tok.(float64)
 		switch {
 		case top == nil || !top.object:
+			owner, owned := top.ownerKey()
 			if isString {
 				switch {
-				case top != nil && top.cred && isSecret(top.key, s):
-					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
+				case owned && isSecret(owner, s):
+					out = append(out, hit{rule: "json:" + owner, from: stringStart(data, end), to: end})
 				case urlCarriesPassword(s):
 					// A top-level string has no key, so its rule names an empty one.
 					key := ""
@@ -349,25 +371,26 @@ func jsonHits(data []byte) ([]hit, error) {
 				default:
 					out = appendValueShape(out, data, s, end)
 				}
-			} else if isNumber && top != nil && top.cred {
-				if h, ok := numberHit(top, data, end); ok {
+			} else if isNumber && owned {
+				if h, ok := numberHit(owner, data, end); ok {
 					out = append(out, h)
 				}
 			}
 		case top.wantKey:
 			top.key, top.cred, top.wantKey = s, credentialName(s), false
 		default:
+			owner, owned := top.ownerKey()
 			if isString {
 				switch {
-				case top.cred && !nameRuleExempt(top) && isSecret(top.key, s):
-					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
+				case owned && isSecret(owner, s):
+					out = append(out, hit{rule: "json:" + owner, from: stringStart(data, end), to: end})
 				case urlCarriesPassword(s):
 					out = append(out, hit{rule: "json:" + top.key, from: stringStart(data, end), to: end})
 				default:
 					out = appendValueShape(out, data, s, end)
 				}
-			} else if isNumber && top.cred && !nameRuleExempt(top) {
-				if h, ok := numberHit(top, data, end); ok {
+			} else if isNumber && owned {
+				if h, ok := numberHit(owner, data, end); ok {
 					out = append(out, h)
 				}
 			}
@@ -391,16 +414,16 @@ func numberStart(data []byte, end int) int {
 	return start
 }
 
-// numberHit reports a number literal held under f's credential key as a finding,
-// unless isSecret refuses the value. It is judged on the literal text, so a number
-// is exempt exactly where a string under the same key is (a token count, a field
-// named keys). Booleans and null never reach it (gt-6seq32).
-func numberHit(f *jsonFrame, data []byte, end int) (hit, bool) {
+// numberHit reports a number literal held under the credential key owner as a
+// finding, unless isSecret refuses the value. It is judged on the literal text, so a
+// number is exempt exactly where a string under the same key is (a token count, a
+// field named keys). Booleans and null never reach it (gt-6seq32).
+func numberHit(owner string, data []byte, end int) (hit, bool) {
 	start := numberStart(data, end)
-	if !isSecret(f.key, string(data[start:end])) {
+	if !isSecret(owner, string(data[start:end])) {
 		return hit{}, false
 	}
-	return hit{rule: "json:" + f.key, from: start, to: end}, true
+	return hit{rule: "json:" + owner, from: start, to: end}, true
 }
 
 // stringStart returns the offset of the opening quote of the string ending before end.
@@ -421,10 +444,11 @@ func stringStart(data []byte, end int) int {
 }
 
 // FindCredentials returns one rule name per credential in data, never a value.
-// Valid JSON is walked: a string or a number under a credential-named key is a
-// json:key finding unless its path is exempt, a string value that is a URL with a
-// userinfo password is a json:key finding under any key, and a token-shaped word in
-// any other string value is a value:shape finding. Anything else is scanned for
+// Valid JSON is walked: a string or a number under a credential-named key, or nested
+// anywhere inside the value that key owns, is a json:key finding unless its path is
+// exempt, a string value that is a URL with a userinfo password is a json:key finding
+// under any key, and a token-shaped word in any other string value is a value:shape
+// finding. Anything else is scanned for
 // NAME=value, "key": "value" and a YAML name: value entry, whose last dotted segment
 // decides the name; an env value or a quoted JSON member that is a URL with a userinfo
 // password is a finding under env:name or json:key as well.
@@ -463,9 +487,10 @@ func FindCredentials(data []byte) []string {
 }
 
 // RedactJSON replaces every credential value with the marker, leaving every other
-// byte alone, and returns the count. That includes a number under a credential name
-// and a URL with a userinfo password, whatever its key. A token-shaped word in a
-// value that is not under a credential name and is not such a URL is not rewritten,
+// byte alone, and returns the count. That includes a number under a credential name,
+// every string and number leaf nested inside the value of one, and a URL with a
+// userinfo password, whatever its key. A token-shaped word in a value that is not
+// under a credential name and is not such a URL is not rewritten,
 // so it survives into the output and the check below refuses the document. It
 // refuses input that is not valid JSON, and its own output if a finding or a syntax
 // error survives.
