@@ -163,10 +163,43 @@ func TestGateRunStoreOverlongLine(t *testing.T) {
 		}
 	})
 }
+
+// TestGateRunStoreTornTail: a short write leaves a line with no newline. The next
+// append starts its row on a line of its own, so the row reads back and only the
+// fragment is skipped (gt-7i2okn).
+func TestGateRunStoreTornTail(t *testing.T) {
+	t.Parallel()
+	first, last := sampleGateRun("gt-first"), sampleGateRun("gt-last")
+	t.Run("after a good row", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", mustLine(t, first)+"\n"+`{"bead":"gt-torn"`)
+		if err := AppendGateRun(town, last); err != nil {
+			t.Fatalf("AppendGateRun: %v", err)
+		}
+		got, unparsed, err := ReadGateRuns(town)
+		if err != nil || unparsed != 1 || !reflect.DeepEqual(got, []GateRun{first, last}) {
+			t.Errorf("ReadGateRuns = %+v, unparsed %d, %v; want the two good runs, 1 unparsed", got, unparsed, err)
+		}
+	})
+	t.Run("on a log that is only a fragment", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeFile(t, town, ".runtime/metrics/gate-runs.jsonl", `{"bead":"gt-torn"`)
+		if err := AppendGateRun(town, last); err != nil {
+			t.Fatalf("AppendGateRun: %v", err)
+		}
+		got, unparsed, err := ReadGateRuns(town)
+		if err != nil || unparsed != 1 || !reflect.DeepEqual(got, []GateRun{last}) {
+			t.Errorf("ReadGateRuns = %+v, unparsed %d, %v; want the new run, 1 unparsed", got, unparsed, err)
+		}
+	})
+}
 func TestGateRunStoreFailures(t *testing.T) {
 	t.Parallel()
 	dirErr, openErr := errors.New("mkdir refused"), errors.New("open refused")
 	writeErr, closeErr := errors.New("disk full"), errors.New("close failed")
+	endsErr := errors.New("read refused")
 	tests := []struct {
 		name string
 		fsys *fakeGateRunFS
@@ -174,6 +207,7 @@ func TestGateRunStoreFailures(t *testing.T) {
 		want []error
 	}{
 		{"directory", &fakeGateRunFS{mkdirErr: dirErr}, sampleGateRun("gt-a"), []error{dirErr}},
+		{"newline check", &fakeGateRunFS{endsErr: endsErr}, sampleGateRun("gt-a"), []error{endsErr}},
 		{"open", &fakeGateRunFS{openErr: openErr}, sampleGateRun("gt-a"), []error{openErr}},
 		{"write and close", &fakeGateRunFS{writeErr: writeErr, closeErr: closeErr}, sampleGateRun("gt-a"), []error{writeErr, closeErr}},
 		{"short write", &fakeGateRunFS{shortBy: 3}, sampleGateRun("gt-a"), []error{io.ErrShortWrite}},
@@ -197,8 +231,8 @@ func TestGateRunStoreFailures(t *testing.T) {
 }
 
 type fakeGateRunFS struct {
-	mkdirErr, openErr, writeErr, closeErr error
-	shortBy                               int
+	mkdirErr, openErr, writeErr, closeErr, endsErr error
+	shortBy                                        int
 }
 
 func (f *fakeGateRunFS) MkdirAll(string, os.FileMode) error { return f.mkdirErr }
@@ -214,8 +248,14 @@ func (f *fakeGateRunFS) Write(p []byte) (int, error) {
 	}
 	return max(0, len(p)-f.shortBy), nil
 }
-func (f *fakeGateRunFS) Close() error                    { return f.closeErr }
-func (f *fakeGateRunFS) Size(string) (int64, error)      { return 0, nil }
+func (f *fakeGateRunFS) Close() error               { return f.closeErr }
+func (f *fakeGateRunFS) Size(string) (int64, error) { return 0, nil }
+func (f *fakeGateRunFS) EndsInNewline(string) (bool, error) {
+	if f.endsErr != nil {
+		return false, f.endsErr
+	}
+	return true, nil
+}
 func (f *fakeGateRunFS) ReadFile(string) ([]byte, error) { return nil, nil }
 func (f *fakeGateRunFS) Remove(string) error             { return nil }
 func (f *fakeGateRunFS) Rename(string, string) error     { return nil }
@@ -246,6 +286,10 @@ func (m *memGateRunFS) ReadFile(p string) ([]byte, error) {
 		return nil, fs.ErrNotExist
 	}
 	return data, nil
+}
+func (m *memGateRunFS) EndsInNewline(p string) (bool, error) {
+	b := m.files[p]
+	return len(b) == 0 || b[len(b)-1] == '\n', nil
 }
 func (m *memGateRunFS) Remove(p string) error {
 	if m.removeErr == nil {
@@ -432,6 +476,37 @@ func TestOSGateRunFSSize(t *testing.T) {
 		got, err := osGateRunFS{}.Size(tc.path)
 		if got != tc.size || (err != nil) != tc.wantErr {
 			t.Errorf("%s: Size = %d, %v; want %d, error %t", tc.name, got, err, tc.size, tc.wantErr)
+		}
+	}
+}
+
+// TestOSGateRunFSEndsInNewline: a missing or empty log ends in a newline, a log
+// is read by its last byte, and a log that cannot be read is an error, never a
+// clean answer (gt-7i2okn).
+func TestOSGateRunFSEndsInNewline(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, "whole.jsonl", "{\"bead\":\"gt-a\"}\n")
+	writeFile(t, dir, "torn.jsonl", `{"bead":"gt-a"`)
+	writeFile(t, dir, "empty.jsonl", "")
+	if err := os.Mkdir(filepath.Join(dir, "a-dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, path string
+		want       bool
+		wantErr    bool
+	}{
+		{"a log ending in a newline", filepath.Join(dir, "whole.jsonl"), true, false},
+		{"a torn log", filepath.Join(dir, "torn.jsonl"), false, false},
+		{"an empty log", filepath.Join(dir, "empty.jsonl"), true, false},
+		{"a missing log", filepath.Join(dir, "none.jsonl"), true, false},
+		{"a path under a file", filepath.Join(dir, "whole.jsonl", "x"), false, true},
+		{"a directory", filepath.Join(dir, "a-dir"), false, true},
+	} {
+		got, err := osGateRunFS{}.EndsInNewline(tc.path)
+		if got != tc.want || (err != nil) != tc.wantErr {
+			t.Errorf("%s: EndsInNewline = %t, %v; want %t, error %t", tc.name, got, err, tc.want, tc.wantErr)
 		}
 	}
 }
