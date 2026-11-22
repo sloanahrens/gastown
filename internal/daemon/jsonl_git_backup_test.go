@@ -2316,41 +2316,57 @@ func TestDefaultEscalationTimeout(t *testing.T) {
 // TestMaxEscalationRetries verifies the retry budget.
 func TestMaxEscalationRetries(t *testing.T) {
 	t.Parallel()
-	if maxEscalationRetries != 3 {
-		t.Errorf("maxEscalationRetries = %d, want 3", maxEscalationRetries)
+	if maxEscalationRetries != 1 {
+		t.Errorf("maxEscalationRetries = %d, want 1", maxEscalationRetries)
 	}
 }
 
-// TestEscalate_RetriesOnTimeout verifies that escalate retries when gt
-// escalate fails, and eventually succeeds on a later attempt. We verify the
-// retry logic by using a fake gt that succeeds on the 3rd call — calls 1-2
-// exit 1 immediately, confirming the function retries transient failures
-// instead of giving up after one attempt.
-func TestEscalate_RetriesOnTimeout(t *testing.T) {
+// TestEscalateMakesOneAttempt verifies that a notifier that fails its first call
+// gives the returned error after exactly one attempt: no retry, no time passing on
+// the daemon's clock, and one escalation_dropped feed line holding the message
+// (the operator's 2026-11-20 rule: a retry on a timer is a defect).
+func TestEscalateMakesOneAttempt(t *testing.T) {
 	t.Parallel()
-	flaky := &flakyEscalations{Recorder: notifyfake.New(), failures: 2}
+	flaky := &flakyEscalations{Recorder: notifyfake.New(), failures: 1}
 	clk := newFixedClock()
+	townRoot := t.TempDir()
 	d := &Daemon{
 		logger:   log.New(io.Discard, "", 0),
-		config:   &Config{TownRoot: t.TempDir()},
+		config:   &Config{TownRoot: townRoot},
 		notifier: flaky,
 		clock:    clk,
 	}
 
+	// The clock is advanced by runOnClock, so a retry that slept on it would run to
+	// its end and fail the assertions below instead of hanging the test.
 	var err error
 	runOnClock(t, clk, time.Second, func() { err = d.escalateAlertErr("k", "main_branch_test", "test failed") })
+	if err == nil || !strings.Contains(err.Error(), "exit status 1") {
+		t.Fatalf("escalateAlertErr = %v, want the notifier's error", err)
+	}
+	if flaky.attempts != 1 {
+		t.Errorf("escalation attempts = %d, want 1", flaky.attempts)
+	}
+	if waited := clk.Since(testEpoch); waited != 0 {
+		t.Errorf("time passed on the daemon's clock = %s, want none (no backoff)", waited)
+	}
+	data, err := os.ReadFile(filepath.Join(townRoot, ".events.jsonl"))
 	if err != nil {
-		t.Fatalf("escalateAlertErr = %v, want success on the third attempt", err)
+		t.Fatalf("read events: %v", err)
 	}
-	// The retries back off 1 s, then 2 s, on the daemon's clock.
-	if waited := clk.Since(testEpoch); waited != 3*time.Second {
-		t.Errorf("backoff before the third attempt = %s, want 3s (1s then 2s)", waited)
+	var dropped []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("event line %q: %v", line, err)
+		}
+		if record["type"] == events.TypeEscalationDropped {
+			payload, _ := record["payload"].(map[string]any)
+			dropped = append(dropped, payload)
+		}
 	}
-	if flaky.attempts != 3 {
-		t.Errorf("escalation attempts = %d, want 3", flaky.attempts)
-	}
-	if got := flaky.Escalations(); len(got) != 1 {
-		t.Errorf("delivered escalations = %d, want 1", len(got))
+	if len(dropped) != 1 || dropped[0]["message"] != "test failed" {
+		t.Errorf("escalation_dropped lines = %v, want one holding the message", dropped)
 	}
 }
 
