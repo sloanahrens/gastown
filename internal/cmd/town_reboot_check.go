@@ -29,13 +29,7 @@ seen and the repair to run. Nothing is changed. Text output exits 0 whatever the
 --json prints the same rows as one JSON array and exits 1 when any row is not OK.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		asJSON, err := townRebootCheckJSONFlag(cmd)
-		if err != nil {
-			return err
-		}
-		env := hostTownRebootCheckEnv(cmd.OutOrStdout())
-		env.asJSON = asJSON
-		return runTownRebootCheck(cmd.Context(), env)
+		return runTownRebootCheckCmd(cmd)
 	},
 }
 
@@ -44,8 +38,19 @@ func init() {
 	townCmd.AddCommand(townRebootCheckCmd)
 }
 
-// townRebootCheckJSONFlag reads --json from the command. A command without the flag is an
-// error, not a text run.
+// runTownRebootCheckCmd reads --json and runs the check on the Mac. A command without the flag
+// is an error before any check runs, not a text run.
+func runTownRebootCheckCmd(cmd *cobra.Command) error {
+	asJSON, err := townRebootCheckJSONFlag(cmd)
+	if err != nil {
+		return err
+	}
+	env := hostTownRebootCheckEnv(cmd.OutOrStdout())
+	env.asJSON = asJSON
+	return runTownRebootCheck(cmd.Context(), env)
+}
+
+// townRebootCheckJSONFlag reads --json from the command.
 func townRebootCheckJSONFlag(cmd *cobra.Command) (bool, error) {
 	asJSON, err := cmd.Flags().GetBool("json")
 	if err != nil {

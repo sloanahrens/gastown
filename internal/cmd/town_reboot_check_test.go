@@ -338,3 +338,14 @@ func TestTownRebootCheckJSONFlagMissingIsError(t *testing.T) {
 		t.Errorf("townRebootCheckJSONFlag = %v, want an error naming --json", err)
 	}
 }
+
+// TestTownRebootCheckCmdNeedsTheFlag: the command run without its --json flag is an error that
+// names the flag, before any host check runs (gt-ukmp5e).
+func TestTownRebootCheckCmdNeedsTheFlag(t *testing.T) {
+	t.Parallel()
+	err := runTownRebootCheckCmd(&cobra.Command{})
+
+	if err == nil || !strings.Contains(err.Error(), "--json") {
+		t.Errorf("runTownRebootCheckCmd = %v, want an error naming --json", err)
+	}
+}
