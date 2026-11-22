@@ -62,18 +62,18 @@ func TestTownRebootCheckOK(t *testing.T) {
 	}
 }
 
-// TestTownRebootCheckFailingRowStillExitsZero: a failing row is printed with its repair and the
-// command still returns nil; the non-zero exit is bead gt-nrxgxr's (gt-9lciim).
-func TestTownRebootCheckFailingRowStillExitsZero(t *testing.T) {
+// TestTownRebootCheckFails: a failing row is printed with its repair, and the command returns the
+// exit-1 error naming the one failed check (gt-nrxgxr).
+func TestTownRebootCheckFails(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	bad := townreboot.Check{Name: "3 vms", Run: func(context.Context) townreboot.Result {
-		return townreboot.Result{Detail: "colima is stopped", Fix: "gt town vms start"}
-	}}
-	env := fakeRebootEnv(t, &out, []townreboot.Check{bad})
+	env := fakeRebootEnv(t, &out, []townreboot.Check{rebootFailingCheck("3 vms")})
 
-	if err := runTownRebootCheck(context.Background(), env); err != nil {
-		t.Fatalf("runTownRebootCheck = %v, want nil whatever the rows say", err)
+	err := runTownRebootCheck(context.Background(), env)
+
+	var exit *ExitCodeError
+	if !errors.As(err, &exit) || exit.Code != 1 || !strings.Contains(err.Error(), "1 of 1 checks failed") {
+		t.Errorf("runTownRebootCheck = %v, want an exit-1 error naming 1 of 1 checks failed", err)
 	}
 	if !strings.Contains(out.String(), "FAIL 3 vms: colima is stopped (fix: gt town vms start)") {
 		t.Errorf("output = %q, want the failing row with its repair", out.String())
@@ -273,15 +273,15 @@ func TestTownRebootCheckJSONRows(t *testing.T) {
 		return []townreboot.Check{rebootOKCheck("1 docker"), rebootFailingCheck("2 cluster")}
 	}
 	var textOut, jsonOut bytes.Buffer
-	if err := runTownRebootCheck(context.Background(), fakeRebootEnv(t, &textOut, checks())); err != nil {
-		t.Fatalf("text run = %v, want nil", err)
+	var textExit, exit *ExitCodeError
+	if err := runTownRebootCheck(context.Background(), fakeRebootEnv(t, &textOut, checks())); !errors.As(err, &textExit) {
+		t.Fatalf("text run = %v, want the exit-1 error for the failing row", err)
 	}
 	jsonEnv := fakeRebootEnv(t, &jsonOut, checks())
 	jsonEnv.asJSON = true
 
 	err := runTownRebootCheck(context.Background(), jsonEnv)
 
-	var exit *ExitCodeError
 	if !errors.As(err, &exit) {
 		t.Fatalf("json run = %v, want the exit-1 error for the failing row", err)
 	}

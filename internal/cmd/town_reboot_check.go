@@ -26,8 +26,8 @@ var townRebootCheckCmd = &cobra.Command{
 	Use:   "reboot-check",
 	Short: "Check a rebooted Mac against the operations doc, changing nothing",
 	Long: `Print the operations doc's reboot checks in order, each as ok or FAIL with what was
-seen and the repair to run. Nothing is changed. Text output exits 0 whatever the rows say.
---json prints the same rows as one JSON array and exits 1 when any row is not OK.`,
+seen and the repair to run. Nothing is changed. Text and --json output both exit 1 when any
+row is not OK; --json prints the same rows as one JSON array.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		return runTownRebootCheckCmd(cmd)
@@ -96,9 +96,9 @@ func rebootExecRunner(ctx context.Context, name string, args ...string) ([]byte,
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
-// runTownRebootCheck runs every check and prints the rows. Text output returns nil whatever the
-// rows say; JSON output returns exit 1 when any row is not OK, after printing the array. In a pod
-// it refuses before the runner is built: the checks read the Mac's VMs and processes.
+// runTownRebootCheck runs every check and prints the rows, then returns exit 1 when any row is not
+// OK, in either form: the text or the JSON array is printed before the error. In a pod it refuses
+// before the runner is built: the checks read the Mac's VMs and processes.
 func runTownRebootCheck(ctx context.Context, env townRebootCheckEnv) error {
 	if env.getenv(podEnv) != "" {
 		return fmt.Errorf("gt town reboot-check reads the Mac's VMs and processes, and this is a pod (%s is set); run it on the Mac instead, where the host command set runs: %s", podEnv, gtwrap.GTHostCommandList())
@@ -123,7 +123,7 @@ func runTownRebootCheck(ctx context.Context, env townRebootCheckEnv) error {
 	if _, err := fmt.Fprint(env.out, townreboot.Format(rows, false)); err != nil {
 		return fmt.Errorf("printing the reboot checks: %w", err)
 	}
-	return nil
+	return rebootFailureError(rows)
 }
 
 // printRebootRowsJSON prints the rows as one JSON array, then returns exit 1 when any row is not
@@ -134,6 +134,11 @@ func printRebootRowsJSON(out io.Writer, rows []townreboot.Row) error {
 	if err := enc.Encode(rows); err != nil {
 		return fmt.Errorf("printing the reboot checks: %w", err)
 	}
+	return rebootFailureError(rows)
+}
+
+// rebootFailureError is exit 1 naming how many rows are not OK, or nil when every row is OK.
+func rebootFailureError(rows []townreboot.Row) error {
 	failed := 0
 	for _, r := range rows {
 		if !r.OK {
