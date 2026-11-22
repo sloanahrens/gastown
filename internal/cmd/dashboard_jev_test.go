@@ -6,7 +6,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // The flag's default is the documented command, word for word.
@@ -470,11 +470,7 @@ func sourceFunc(t *testing.T, src, name string) string {
 func TestDashboardJevScorecardWiringStartsNoProcess(t *testing.T) {
 	t.Parallel()
 
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	dir := filepath.Dir(file)
+	dir := filepath.Join(modroot.Root(t), "internal", "cmd")
 	self, err := os.ReadFile(filepath.Join(dir, "dashboard.go"))
 	if err != nil {
 		t.Fatalf("reading dashboard.go: %v", err)
