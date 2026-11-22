@@ -195,7 +195,10 @@ type Lander struct {
 	// FollowupSkip, when set, is asked about every minor finding the feed is
 	// about to file; a non-empty reason drops it before the de-duplication
 	// decision, the queue and the bead body, and the feed logs the reasons
-	// once (gt-3v8jno). It runs in the feed path: keep it cheap and free of
+	// once (gt-3v8jno). A landing's own finding is asked with the landing's
+	// whole Work; a finding read back from a queue line is asked with only
+	// its BeadID and Rig, because the queue keeps no branch or head
+	// (gt-u7qgi0). It runs in the feed path: keep it cheap and free of
 	// state. Nil skips nothing.
 	FollowupSkip func(w Work, c FollowupCandidate) string
 	// AcceptedRiskAlert, when set, raises the attention item the overseer sees
