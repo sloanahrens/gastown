@@ -654,6 +654,63 @@ func TestSquashArchiveShortOfTheCutDefersTheRun(t *testing.T) {
 	}
 }
 
+// TestSquashArchiveBudgetShortOfTheCutDefersTheRun: the pass's commit export
+// ends on its archive_budget with its through-date still behind the cut. A
+// budget stop leaves the database possibly behind, so it does not cover the
+// cut: no run starts, no run is recorded, and the check keeps its daily gate.
+// The stop here is the budget's, not the per-cycle batch bound's (which stays at
+// its default), so reading a spent budget as coverage is what this test holds.
+func TestSquashArchiveBudgetShortOfTheCutDefersTheRun(t *testing.T) {
+	t.Parallel()
+	d, _, logs := squashDueDaemon(t)
+	writeSquashBackup(t, squashBackupRoot(t, d), squashTestNow.Add(-6*time.Hour), squashTestNow.Add(-6*time.Hour+7*time.Second), 1<<20)
+	cut := squashTestNow.AddDate(0, 0, -7)
+	commits := []archiveCommit{
+		{Hash: "f1", Committer: "gastown/crew/overseer", Date: cut.Add(-3 * time.Hour), Message: "older"},
+		{Hash: "f2", Committer: "gastown/crew/overseer", Date: cut.Add(-2 * time.Hour), Message: "older still"},
+		{Hash: "f3", Committer: "gastown/crew/overseer", Date: cut.Add(-time.Hour), Message: "older too"},
+	}
+	seedSquashArchiveThrough(t, d, time.Time{})
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveBudget = "10m"
+	// Every batch is full at this bound, so the export could keep going: only
+	// the budget ends it.
+	withSquashArchive(t, d, t.TempDir(), commits, 1)
+	clock := squashTestNow
+	d.maint.now = func() time.Time { return clock }
+	read := d.maint.archiveRead
+	d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+		out, err := read(ctx, dm, db, archived)
+		// The first batch is full; the budget runs out before the next one.
+		clock = squashTestNow.Add(11 * time.Minute)
+		return out, err
+	}
+
+	d.runScheduledMaintenance()
+
+	got := logs.String()
+	if !strings.Contains(got, "scheduled_maintenance: archive gt dolt_log: stopped at the cycle's 10m0s archive_budget, still behind") {
+		t.Errorf("the commit export did not stop on its budget: %q", got)
+	}
+	want := "squash: gt: the run waits for the next day's check: the history archive is through " +
+		commits[0].Date.UTC().Format(time.RFC3339) + ", short of the cut " + cut.UTC().Format(time.RFC3339)
+	if !strings.Contains(got, want) {
+		t.Errorf("the budget-stopped archive was not deferred naming its through-date and the cut: %q", got)
+	}
+	if strings.Contains(got, "reading the branches") {
+		t.Errorf("a run started on an archive that ran out of budget short of the cut: %q", got)
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Squash["gt"].LastRun.IsZero() {
+		t.Errorf("a deferred run recorded a run: %+v", st.Squash["gt"])
+	}
+	if due := evaluatePatrolDue(d.config.TownRoot, squashCheckPatrol, d.squashCheckRun.last(), squashTestNow.Add(squashCheckRetryAfter+time.Minute), squashCheckInterval); due.due {
+		t.Error("a deferred run made the check due again before the next day")
+	}
+}
+
 // TestSquashArchiveAlreadyPastTheCutIsNotArchivedAgain is the bead's second box:
 // the archive's record is already past the cut, so the pass is not run at all —
 // the commit read is never made — and the run starts.
