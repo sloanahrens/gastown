@@ -431,6 +431,17 @@ func TestMaintenanceGCStateRefusesAFileThatIsNotTheDaemonsState(t *testing.T) {
 		{"a size below zero", `{"post_gc_bytes":{"hq":-5},"last_gc":{}}`, true},
 		{"no last_gc", `{"post_gc_bytes":{}}`, true},
 		{"last_gc null", `{"last_gc":null}`, true},
+		{"a squash record that is null", `{"last_gc":{},"squash":{"db":null}}`, true},
+		{"a squash record that is an empty object", `{"last_gc":{},"squash":{"db":{}}}`, true},
+		{"a squash record whose last_run is null", `{"last_gc":{},"squash":{"db":{"last_run":null,"outcome":"ok"}}}`, true},
+		{"a squash record whose last_run is the zero time", `{"last_gc":{},"squash":{"db":{"last_run":"0001-01-01T00:00:00Z"}}}`, true},
+		{"the zero time written with a +01:00 offset", `{"last_gc":{},"squash":{"db":{"last_run":"0001-01-01T00:00:00+01:00"}}}`, true},
+		{"the zero time written with a -05:00 offset", `{"last_gc":{},"squash":{"db":{"last_run":"0001-01-01T00:00:00-05:00"}}}`, true},
+		{"a last_run in year 1", `{"last_gc":{},"squash":{"db":{"last_run":"0001-06-01T12:00:00Z"}}}`, true},
+		{"a last_run in 1999", `{"last_gc":{},"squash":{"db":{"last_run":"1999-12-31T23:59:59Z"}}}`, true},
+		{"a last_run on the floor day", `{"last_gc":{},"squash":{"db":{"last_run":"2000-01-01T00:00:00Z"}}}`, false},
+		{"a squash record with a real last_run", `{"last_gc":{},"squash":{"db":{"last_run":"2026-11-21T12:00:00Z","outcome":"completed"}}}`, false},
+		{"a null squash map", `{"last_gc":{},"squash":null}`, false},
 		{"the state the daemon writes with no database yet", string(fresh), false},
 		{"an unknown extra key", `{"post_gc_bytes":{},"last_gc":{},"future_key":1}`, false},
 	} {
@@ -444,8 +455,16 @@ func TestMaintenanceGCStateRefusesAFileThatIsNotTheDaemonsState(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := loadMaintenanceGCState(town); (err != nil) != tc.refused {
+			_, err := loadMaintenanceGCState(town)
+			if (err != nil) != tc.refused {
 				t.Fatalf("loading %s = %v, want refused=%v", tc.content, err, tc.refused)
+			}
+			// A refused squash record names the file and the database, never the value.
+			if err != nil && strings.Contains(tc.content, `"squash":{"db"`) {
+				msg := err.Error()
+				if !strings.Contains(msg, maintenanceGCStateFileName) || !strings.Contains(msg, "db") || strings.Contains(msg, "0001") || strings.Contains(msg, "1999") {
+					t.Errorf("refusal %q must name the file and the database and carry no value", msg)
+				}
 			}
 		})
 	}

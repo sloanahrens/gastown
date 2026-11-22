@@ -267,6 +267,11 @@ func ReadMaintenanceGC(townRoot string) (lastGC time.Time, reclaimedBytes int64,
 	return lastGC, reclaimedBytes, nil
 }
 
+// squashRecordFloor is the earliest last_run a squash record can hold: the year
+// 2000 is long before the squash feature existed, so any earlier time is an
+// absent or zero value, in whatever offset it was written.
+var squashRecordFloor = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+
 // readMaintenanceGCState reads the state file. A missing file reports
 // errMaintenanceGCStateAbsent, so a caller can tell no state from an unreadable
 // one; a file that exists but cannot be read or parsed is its error, never
@@ -306,6 +311,17 @@ func readMaintenanceGCState(townRoot string) (maintenanceGCState, error) {
 			if n < 0 {
 				return st, fmt.Errorf("parse %s: the size recorded for %s is below zero", maintenanceGCStateFileName, db)
 			}
+		}
+	}
+	// A squash record the daemon wrote always holds the run's start, long after
+	// squashRecordFloor. A last_run before it reads to doltsquash.Decide as no run
+	// recorded or as an age far beyond the gate, and opens the 24-hour gate: the
+	// hole the checks above close for the file as a whole. The zero time written
+	// with a UTC offset is a different instant from time.Time{}, so IsZero alone is
+	// not enough (gt-53x4vs).
+	for db, rec := range parsed.Squash {
+		if rec.LastRun.Before(squashRecordFloor) {
+			return st, fmt.Errorf("parse %s: the squash record of %s has no plausible last run", maintenanceGCStateFileName, db)
 		}
 	}
 	for k, v := range parsed.PostGCBytes {
