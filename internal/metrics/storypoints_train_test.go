@@ -99,6 +99,10 @@ type trainTestBead struct {
 	notPolecat bool   // the landing did not come through a polecat seat
 	// sameTimeAsPrev gives the bead the landing time of the bead before it.
 	sameTimeAsPrev bool
+	// rounds and attempts are the om_rounds and polecat_attempts cells. Empty is
+	// "1" for both, so a bead the case does not name is a first-round landing.
+	rounds   string
+	attempts string
 }
 
 // badTimeBeads is a measured fixture whose first landing time does not parse.
@@ -183,6 +187,7 @@ func newTrainTestFixture(t *testing.T, beadsIn []trainTestBead) trainTestFixture
 		if b.notPolecat {
 			polecatWork = "0"
 		}
+		rounds, attempts := cellOr(b.rounds, "1"), cellOr(b.attempts, "1")
 		rows = append(rows, Row{
 			"bead":                b.id,
 			"rig":                 "gastown",
@@ -191,6 +196,8 @@ func newTrainTestFixture(t *testing.T, beadsIn []trainTestBead) trainTestFixture
 			"polecat_secs":        fmt.Sprintf("%g", b.minutes*60),
 			"polecat_lower_bound": b.bound,
 			"polecat_work":        polecatWork,
+			"om_rounds":           rounds,
+			"polecat_attempts":    attempts,
 		})
 	}
 	var csvBuf strings.Builder

@@ -89,6 +89,7 @@ func TestStoryPointsWeeklyRunsTheRetrainAndTheAdoption(t *testing.T) {
 	writeWeeklyLastRun(t, fix.town, weeklyNow.Add(-8*24*time.Hour))
 	var out strings.Builder
 	c := weeklyCommands(t, fix, &out, weeklyNow, weeklyBase(t), trainTestEmbedder{})
+	c.StoryPointsAutoAdopt = true
 	if err := c.RunStoryPointsWeekly(context.Background()); err != nil {
 		t.Fatalf("RunStoryPointsWeekly: %v", err)
 	}

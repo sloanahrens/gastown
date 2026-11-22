@@ -71,10 +71,20 @@ func (c Commands) runStoryPointsAdopt(ctx context.Context, real RealTown, env En
 	return c.adoptStoryPoints(ctx, real, env)
 }
 
-// adoptStoryPoints decides the day's proposal and writes it when adopted. A
-// rejection is a decision: it prints the rule's reason and returns nil, so the
-// hour run carries on.
+// adoptStoryPoints decides the day's proposal by the rank rule and writes it when
+// adopted. A rejection is a decision: it prints the rule's reason and returns nil,
+// so the hour run carries on.
 func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) error {
+	return c.decideStoryPoints(ctx, real, env, storypoints.Adopt, false)
+}
+
+// decideStoryPoints reads the day's proposal and the weights in use, decides it by
+// rule and writes it when rule adopts. firstRound says the holdout's first-round
+// flags are read from the landing record, which refuses the decision when the
+// table lacks those columns or a candidate row's cell is not an integer. Only the
+// weekly run's auto-adoption asks for it, so the rank-rule path reads no first-round
+// cell.
+func (c Commands) decideStoryPoints(ctx context.Context, real RealTown, env Env, rule func([]storypoints.Holdout) storypoints.Adoption, firstRound bool) error {
 	store := c.storyPointsStore.withHost()
 	dir, landings, err := storyPointsExtract(env, real.Extract.OutDir)
 	if err != nil {
@@ -96,6 +106,12 @@ func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) 
 		return fmt.Errorf("%s: no polecat_work column (run %s first): the table is from an older extract",
 			filepath.Join(dir, landingsName), CommandExtract)
 	}
+	if firstRound {
+		if missing := missingFirstRoundColumns(header); len(missing) > 0 {
+			return fmt.Errorf("%s: no %s column (run %s first): the first-round holdout cannot be read, so the adoption is refused",
+				filepath.Join(dir, landingsName), strings.Join(missing, " and "), CommandExtract)
+		}
+	}
 	currentPath := storypoints.RuntimeWeightsPath(real.Town)
 	if currentPath == "" {
 		return errors.New("no town root, so no runtime weights path")
@@ -111,7 +127,7 @@ func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) 
 	if embedder == nil {
 		embedder = storyPointsEmbedder(proposed, os.Getenv)
 	}
-	samples, _, err := trainingSamples(ctx, env, real.Town, rows, proposed, embedder)
+	samples, _, err := trainingSamplesWith(ctx, env, real.Town, rows, proposed, embedder, firstRound)
 	if err != nil {
 		return err
 	}
@@ -119,7 +135,7 @@ func (c Commands) adoptStoryPoints(ctx context.Context, real RealTown, env Env) 
 	if err != nil {
 		return err
 	}
-	decision := storypoints.Adopt(holdout)
+	decision := rule(holdout)
 	if !decision.Adopted {
 		return c.receipt("%s%s", storyPointsAdoptReceipt, decision.Reason)
 	}
@@ -241,12 +257,41 @@ func storyPointsHoldout(samples []storypoints.Sample, proposed, current storypoi
 			return nil, fmt.Errorf("weights in use, holdout bead %d: %w", i, err)
 		}
 		holdout = append(holdout, storypoints.Holdout{
-			Actual:   s.Minutes,
-			Proposed: proposedMinutes,
-			Checked:  currentMinutes,
+			Actual:     s.Minutes,
+			Proposed:   proposedMinutes,
+			Checked:    currentMinutes,
+			FirstRound: s.FirstRound,
 		})
 	}
 	return holdout, nil
+}
+
+// missingFirstRoundColumns names the landing columns the first-round flag reads
+// that header does not carry, in omLandingColumns' order.
+func missingFirstRoundColumns(header []string) []string {
+	var missing []string
+	for _, col := range omLandingColumns {
+		if !slices.Contains(header, col) {
+			missing = append(missing, col)
+		}
+	}
+	return missing
+}
+
+// firstRoundCells reads one landing's first-round flag: the landing took one om
+// round and one polecat attempt. A cell that is not an integer is an error rather
+// than a landing that is not first round, so a table the holdout cannot be read
+// from is refused and not read as all later rounds.
+func firstRoundCells(row Row) (bool, error) {
+	rounds, err := strconv.Atoi(row["om_rounds"])
+	if err != nil {
+		return false, fmt.Errorf("om_rounds %q is not an integer", row["om_rounds"])
+	}
+	attempts, err := strconv.Atoi(row["polecat_attempts"])
+	if err != nil {
+		return false, fmt.Errorf("polecat_attempts %q is not an integer", row["polecat_attempts"])
+	}
+	return rounds == 1 && attempts == 1, nil
 }
 
 // storyPointsBlend is one model's prediction for a sample: the shape and
