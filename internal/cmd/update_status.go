@@ -82,7 +82,7 @@ func writeUpdateStatusText(w io.Writer, st update.State, now time.Time) {
 	} else {
 		fmt.Fprintf(w, "ended %s\n", formatUpdateStatusTime(st.EndedAt))
 	}
-	fmt.Fprintf(w, "target %s (installed %s)\n",
+	fmt.Fprintf(w, "target %s (was %s when the run planned)\n",
 		shortUpdateStatusSHA(st.Target.SHA), shortUpdateStatusSHA(st.Target.InstalledSHA))
 	if st.Hold.Owned {
 		fmt.Fprintf(w, "hold: %s\n", st.Hold.Note)

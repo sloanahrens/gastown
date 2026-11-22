@@ -85,7 +85,7 @@ func TestUpdateStatusTextForARunningRun(t *testing.T) {
 	}
 	want := `run 20261103T195300Z-1a2b3c4d (manual): running
 started 2026-11-03T19:53:00Z, last heartbeat 1m30s ago
-target 01234567 (installed fedcba98)
+target 01234567 (was fedcba98 when the run planned)
   drain: ok - 3 seats drained
   install: running - make gt-installer
 `
@@ -127,7 +127,7 @@ func TestUpdateStatusTextForAFinishedRun(t *testing.T) {
 		}
 		want := `run 20261103T195300Z-9f8e7d6c (daemon): ok
 ended 2026-11-03T19:58:00Z
-target 01234567 (installed dev)
+target 01234567 (was dev when the run planned)
 hold: gt update run 20261103T195300Z-9f8e7d6c
   verify: ok
 `
@@ -177,6 +177,54 @@ func TestUpdateStatusJSONRoundTrips(t *testing.T) {
 	want.V = 1 // the store stamps the record version on write
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("decoded state = %+v\nwant %+v", got, want)
+	}
+}
+
+// TestUpdateStatusTextNamesThePlanTimeBuildAsWas proves the report does not
+// call the plan-time build "installed": the run read that build before it
+// installed anything, so the line says what it was when the run planned.
+func TestUpdateStatusTextNamesThePlanTimeBuildAsWas(t *testing.T) {
+	t.Parallel()
+	st := runningUpdateStatusState()
+	st.Target = update.Target{SHA: "fe633c9ea1b2c3d4", InstalledSHA: "c0ece702f9e8d7c6"}
+	townRoot := writeUpdateStatusState(t, st)
+
+	code, stdout, stderr := runUpdateStatusCommand(t, updateStatusSeamsFor(townRoot, nil))
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	wantLine := "target fe633c9e (was c0ece702 when the run planned)\n"
+	if !strings.Contains(stdout, wantLine) {
+		t.Errorf("status report:\n%s\nwant the line %q", stdout, wantLine)
+	}
+	if strings.Contains(stdout, "installed") {
+		t.Errorf("status report still calls the plan-time build installed:\n%s", stdout)
+	}
+}
+
+// TestUpdateStatusJSONKeepsTheInstalledSHAField proves --json still names the
+// plan-time build's field installed_sha: readers parse that name.
+func TestUpdateStatusJSONKeepsTheInstalledSHAField(t *testing.T) {
+	t.Parallel()
+	fixture := runningUpdateStatusState()
+	townRoot := writeUpdateStatusState(t, fixture)
+
+	code, stdout, stderr := runUpdateStatusCommand(t, updateStatusSeamsFor(townRoot, nil), "--json")
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr:\n%s", code, stderr)
+	}
+	var got struct {
+		Target map[string]any `json:"target"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("stdout is not the state JSON: %v\n%s", err, stdout)
+	}
+	sha, ok := got.Target["installed_sha"]
+	if !ok {
+		t.Fatalf("target has no installed_sha field: %v", got.Target)
+	}
+	if sha != fixture.Target.InstalledSHA {
+		t.Errorf("installed_sha = %v, want %q", sha, fixture.Target.InstalledSHA)
 	}
 }
 
@@ -291,7 +339,7 @@ func TestUpdateStatusTextEscapesControlCharacters(t *testing.T) {
 	}
 	want := `run 20261103T195300Z-1a2b3c4d (manual\x1b[31m): running
 started 2026-11-03T19:53:00Z, last heartbeat 1m30s ago
-target 01234567 (installed fedcba98)
+target 01234567 (was fedcba98 when the run planned)
 hold: hold\rover
   drain: ok - 3 seats\x1b[2J drained\nforged: ok
   install: running - make gt-installer
