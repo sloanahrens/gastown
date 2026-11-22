@@ -1357,6 +1357,51 @@ func TestOverrunSaveGaveUpText_NoteNamesThePushStage(t *testing.T) {
 		"openshell sandbox exec -n gt-sbx --no-tty --no-login-shell -- git -C /sandbox/clone push origin HEAD:refs/heads/polecat/capable/gt-aaa11+rescue")
 }
 
+// TestOverrunSaveGaveUpText_NoteAddsTheCommitStageCommands: a stop whose
+// mid-merge worktree gave up at the commit says the commit failed and puts the
+// add and commit commands before the push, because a push alone leaves that
+// work behind.
+func TestOverrunSaveGaveUpText_NoteAddsTheCommitStageCommands(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	if err := os.WriteFile(filepath.Join(w.work, ".git", "MERGE_HEAD"), []byte(strings.Repeat("0", 40)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	s := f.seams()
+	s.saveWork, s.unsavedWork = w.d.overrunSaveWork, func(overrunSeat) (string, string, error) { return "gt-sbx", "/sandbox/clone", nil }
+	tickUntilSaveCap(t, w, f, s)
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-back notes = %q, want one note", f.handBackNotes)
+	}
+	note := f.handBackNotes[0]
+	add, commit, push := "git -C /sandbox/clone add -A", "git -C /sandbox/clone commit -m ", "git -C /sandbox/clone push"
+	checkUnsavedText(t, note, "The commit failed", add, commit, push)
+	if i, j, k := strings.Index(note, add), strings.Index(note, commit), strings.Index(note, push); i < 0 || j < i || k < j {
+		t.Errorf("note = %q, want the add, then the commit, then the push command", note)
+	}
+}
+
+// TestOverrunSaveGaveUpText_NoteOfASavedSeatNamesNoCommitFailure: a stop whose
+// save landed names neither the commit failure nor the commands that rescue it,
+// and carries no UNSAVED WORK text at all.
+func TestOverrunSaveGaveUpText_NoteOfASavedSeatNamesNoCommitFailure(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	w.d.runOverrunGuard(s)
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-back notes = %q, want one note", f.handBackNotes)
+	}
+	for _, phrase := range []string{"UNSAVED WORK", "The commit failed", "add -A", "commit -m"} {
+		if strings.Contains(f.handBackNotes[0], phrase) {
+			t.Errorf("hand-back note = %q, want no %q", f.handBackNotes[0], phrase)
+		}
+	}
+}
+
 // TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown: a failed late check leaves SaveStage empty;
 // the note says the step is unknown and keeps the command.
 func TestOverrunSaveGaveUpText_NoteSaysTheStepIsUnknown(t *testing.T) {
