@@ -569,6 +569,15 @@ var treeWideGuards = []treeWideGuard{
 		judges: underInternal,
 	},
 	{
+		// TestNoTerminalBackgroundProbe parses every non-test Go file under
+		// internal/ for a direct termenv or lipgloss terminal background
+		// query, so any such file is its input (gt-kfde9l). A deletion cannot
+		// add a call, so it sets no removal rule.
+		pkg:    "internal/ui",
+		tests:  []string{"TestNoTerminalBackgroundProbe"},
+		judges: underInternal,
+	},
+	{
 		pkg:    "internal/testdb",
 		tests:  []string{"TestOneDefinition"},
 		judges: nonTestGo,
