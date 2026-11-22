@@ -5,3 +5,32 @@ internal/affected TestAffectedWorkingTreeOutsideHeadIsAll # a fake git answers t
 internal/cmd TestRepoGuardCommandFlagsDriveTheRun # a fake git answers every call against an allowlist written in a temp dir
 internal/cmd TestRepoGuardRunClean # a fake git answers the five calls of a clean run against an allowlist in a temp dir
 internal/cmd TestRepoGuardRunGitRefusals # a fake git refuses each call against an allowlist in a temp dir
+internal/daemon TestOverrunSandboxCloneDirtyCheckReadsTheCloneNotTheCleanStub # a stubbed git runner answers the git ls-files listing of an overrun sandbox clone; it walks no real tree
+internal/daemon TestOverrunSandboxCloneMarkerProbeFailureRefusesTheSave # a stubbed git runner answers the git ls-files listing of an overrun sandbox clone; it walks no real tree
+internal/daemon TestOverrunSandboxCloneMidRebaseIsRefusedByTheCheckpointGuard # a stubbed git runner answers the git ls-files listing of an overrun sandbox clone; it walks no real tree
+internal/daemon TestOverrunSandboxCloneMidRebaseKeepsTheSandbox # a stubbed git runner answers the git ls-files listing of an overrun sandbox clone; it walks no real tree
+internal/daemon TestOverrunSandboxGitSaveCommitsAndPushesTheDirtyClone # a stubbed git runner answers the git ls-files listing of an overrun sandbox clone; it walks no real tree
+internal/daemon TestRunawayBeadAddedLinesReadsTheSeatsHandle # a stubbed git runner answers the git ls-files listing of an overrun sandbox clone; it walks no real tree
+internal/done TestLineLimitWiringRefusesAPolecatPastTwiceTheLimit # a stubbed git exec answers the git ls-files call for a temp dir; it walks no real tree
+internal/git TestCheckUncommittedWorkExcludesMarkerBearingCLAUDEmd # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestInitSubmodules # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestPathQueries # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceBatchesUntrackedPaths # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceCleanCloneIsZero # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceCountsTrackedAndUntracked # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceEmptyUntrackedFileCountsZero # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceFailsWithoutCount # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSincePathWithNewlineCounts # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceRejectsBadOutput # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceSplitsBatchAtByteBound # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRunawayBeadAddedLinesSinceUntrackedPathsAreLiteral # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRuntimeArtifactPathspecs_ReadsEachRootOnce # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestRuntimeArtifactPathspecs_UnbornHeadKeepsOutput # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestStatusIgnoresSkipWorktreeDeletions # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestStatusParsesPorcelain # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/git TestWorktreeAddSubmodulesHaveNoReference # a stubbed git runner answers the git ls-files call from a table; it walks no real tree
+internal/hygiene TestLoadRepoTreeRefusesAnUnusableGit # a temp repo or a fixture git answers the listing; it walks no real tree
+internal/hygiene TestTreeScanWorksInLinkedWorktree # a temp repo or a fixture git answers the listing; it walks no real tree
+internal/hygiene/cmd/scan TestRunRefusesGitAnswersItCannotUse # a fake git answers the listing of a temp tree; it walks no real tree
+internal/land TestScanningTestsFindsGitFileListings # a scratch fixture file system holds the source the finder reads; it walks no real tree
+internal/land TestScanningTestsFollowsSameFileHelpers # a scratch fixture file system holds the source the finder reads; it walks no real tree
