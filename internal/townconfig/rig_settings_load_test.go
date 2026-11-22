@@ -5,21 +5,17 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
-// repoRoot is the module root, taken from this file's path so the shipped
-// example files resolve whatever directory the test runs from.
+// repoRoot is the module root, found from the test's working directory so the
+// shipped example files resolve under go test -trimpath.
 func repoRoot(t *testing.T) string {
 	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	return modroot.Root(t)
 }
 
 // TestLoadRejectsRigSettingsThatDoNotParse: a registered rig whose
