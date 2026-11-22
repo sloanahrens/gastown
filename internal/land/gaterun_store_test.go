@@ -225,7 +225,8 @@ type memGateRunFS struct {
 	files                          map[string][]byte
 	sizeErr, readErr, removeErr    error
 	openFailOn, writeFailOn, clsOn string
-	readFailOn                     string // a read error applies to paths holding this ("" = all)
+	opened                         []string // every path OpenAppend was asked for
+	readFailOn                     string   // a read error applies to paths holding this ("" = all)
 	err                            error
 }
 
@@ -250,6 +251,7 @@ func (m *memGateRunFS) Remove(p string) error {
 	return m.removeErr
 }
 func (m *memGateRunFS) OpenAppend(p string) (io.WriteCloser, error) {
+	m.opened = append(m.opened, p)
 	if m.openFailOn != "" && strings.Contains(p, m.openFailOn) {
 		return nil, m.err
 	}
@@ -743,5 +745,27 @@ func TestGateRunStoreKeepsWhatItCannotDecode(t *testing.T) {
 				t.Error("the log was not removed after the rotation")
 			}
 		})
+	}
+}
+
+// TestGateRunStoreACleanLogMakesNoRejectsFile: a rotation of a log whose lines all
+// decode never opens the rejects file, so no empty one is left beside the month
+// files (gt-pvw9j1).
+func TestGateRunStoreACleanLogMakesNoRejectsFile(t *testing.T) {
+	t.Parallel()
+	fsys := newMemGateRunFS()
+	cur := gateRunsPath("/town")
+	r := sampleGateRun("gt-clean")
+	r.TS = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	fsys.files[cur] = []byte(mustLine(t, r) + "\n")
+	if err := rotateGateRuns(fsys, cur); err != nil {
+		t.Fatalf("rotateGateRuns: %v", err)
+	}
+	rejects := filepath.Join(filepath.Dir(cur), gateRunRejectsFile)
+	if slices.Contains(fsys.opened, rejects) || fsys.files[rejects] != nil {
+		t.Errorf("the rejects file was opened or written for a clean log: opened %v", fsys.opened)
+	}
+	if got := beadsIn(t, fsys.files[filepath.Join(filepath.Dir(cur), "gate-runs-2026-10.jsonl.gz")], true); !slices.Equal(got, []string{"gt-clean"}) {
+		t.Errorf("month file = %v, want the clean row archived", got)
 	}
 }
