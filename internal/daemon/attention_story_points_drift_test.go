@@ -662,6 +662,33 @@ func TestStoryPointsDriftFailingBothSignals(t *testing.T) {
 	}
 }
 
+// TestStoryPointsDriftFailingBoundary: both bars are strict. The rank rule fails
+// on an upper bound under storyPointsDriftBar and not on one at it, and the AUC
+// rule fails on an upper bound under storyPointsLongAUCBar and not on one at it.
+func TestStoryPointsDriftFailingBoundary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		reading metrics.StoryPointsDriftReading
+		want    bool
+	}{
+		{"a rank upper bound 0.49 with no AUC is failing", metrics.StoryPointsDriftReading{N: 100, Rho: 0.42, Lo: 0.30, Hi: 0.49, Measurable: true}, true},
+		{"a rank upper bound at the 0.5 bar with no AUC is not failing", metrics.StoryPointsDriftReading{N: 100, Rho: 0.42, Lo: 0.30, Hi: 0.5, Measurable: true}, false},
+		{"an AUC upper bound 0.64 under the 0.65 bar is failing", metrics.StoryPointsDriftReading{N: 100, Rho: 0.35, Lo: 0.30, Hi: 0.40, Measurable: true, LongMeasurable: true, LongAUC: 0.55, LongLo: 0.45, LongHi: 0.64}, true},
+		{"an AUC upper bound 0.64999 under the 0.65 bar is failing", metrics.StoryPointsDriftReading{N: 100, Rho: 0.35, Lo: 0.30, Hi: 0.40, Measurable: true, LongMeasurable: true, LongAUC: 0.55, LongLo: 0.45, LongHi: 0.64999}, true},
+		{"an AUC upper bound at the 0.65 bar is not failing", metrics.StoryPointsDriftReading{N: 100, Rho: 0.35, Lo: 0.30, Hi: 0.40, Measurable: true, LongMeasurable: true, LongAUC: 0.55, LongLo: 0.45, LongHi: 0.65}, false},
+		{"an AUC upper bound 0.82 over the 0.65 bar is not failing", metrics.StoryPointsDriftReading{N: 100, Rho: 0.35, Lo: 0.30, Hi: 0.40, Measurable: true, LongMeasurable: true, LongAUC: 0.71, LongLo: 0.60, LongHi: 0.82}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := storyPointsDriftFailing(tc.reading); got != tc.want {
+				t.Errorf("storyPointsDriftFailing(%+v) = %v, want %v", tc.reading, got, tc.want)
+			}
+		})
+	}
+}
+
 // countKind is the items of one kind.
 func countKind(items []attention.Item, kind attention.Kind) int {
 	n := 0
