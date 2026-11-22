@@ -15,6 +15,17 @@ func TestCallWalksParent(t *testing.T) {
 		`filepath.WalkDir("../..", f)`: true, `filepath.Walk("..", f)`: true, `os.ReadDir("../sibling")`: true,
 		`fs.WalkDir(fsys, "../..", f)`: true, `fs.WalkDir("../..", fsys, f)`: false,
 		`filepath.WalkDir(t.TempDir(), f)`: false, `filepath.WalkDir("internal", f)`: false,
+		// ".." is a parent only as a whole path element.
+		`filepath.WalkDir("..", f)`: true, `filepath.WalkDir("../x", f)`: true,
+		`filepath.WalkDir("..foo", f)`: false, `filepath.WalkDir(".", f)`: false,
+		`filepath.WalkDir(".hidden", f)`: false,
+		// A raw-string literal is read like an interpreted one.
+		"filepath.WalkDir(`../x`, f)": true,
+		// A call with fewer arguments than the walker takes is false, not a panic.
+		`filepath.WalkDir()`: false, `os.ReadDir()`: false, `fs.WalkDir(fsys)`: false,
+		// fp aliases path/filepath, but callWalksParent reads the package name
+		// as spelled and does not resolve imports: an aliased walk is not seen.
+		`fp.WalkDir("..", f)`: false,
 	} {
 		call, err := parser.ParseExpr(expr)
 		if err != nil {

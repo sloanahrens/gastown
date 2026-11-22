@@ -17,8 +17,9 @@ var walkerRoots = map[string]int{
 }
 
 // callWalksParent reports whether call is a filepath.Walk, filepath.WalkDir,
-// os.ReadDir or fs.WalkDir whose root argument holds a string literal starting
-// "..". A root reached through a variable or a helper is not seen.
+// os.ReadDir or fs.WalkDir whose root argument holds a string literal that is
+// ".." or begins "../". A root reached through a variable, a helper or an
+// aliased import is not seen.
 func callWalksParent(call *ast.CallExpr) bool {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
@@ -36,7 +37,14 @@ func callWalksParent(call *ast.CallExpr) bool {
 	if !ok || len(lit.Value) < 2 || (lit.Value[0] != '"' && lit.Value[0] != '`') {
 		return false
 	}
-	return strings.HasPrefix(lit.Value[1:], "..")
+	text := lit.Value[1:]
+	if !strings.HasPrefix(text, "..") {
+		return false
+	}
+	// ".." must be a whole path element: the literal ends or a separator
+	// follows. "..foo" names a sibling, not the parent.
+	rest := text[2:]
+	return rest == lit.Value[:1] || strings.HasPrefix(rest, "/")
 }
 
 // bodyWalksParent reports whether any call in body, at any depth including
