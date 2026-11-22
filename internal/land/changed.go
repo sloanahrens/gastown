@@ -607,6 +607,19 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestEveryTreeScanningTestIsRegistered walks the tree for tests that
+		// scan it and holds each to a treeWideGuards entry or an exemption
+		// line, so a new scanner in any package, a _test.go file included, is
+		// its input. The exemption list is its other input. A deletion counts:
+		// a removed file leaves its test's exemption line stale (gt-xr4eke).
+		pkg:   "internal/land",
+		tests: []string{"TestEveryTreeScanningTestIsRegistered"},
+		judges: func(rel string) bool {
+			return goFile(rel) || rel == "internal/land/testdata/unregistered-scanners.txt"
+		},
+		removal: true,
+	},
+	{
 		// Any .sh file is the guard's input: it holds the tracked scripts to
 		// the shrinking allowlist in internal/repoguard/shell-scripts.txt
 		// (gt-lpm8b). The real listing is git ls-files, so the tree check is
