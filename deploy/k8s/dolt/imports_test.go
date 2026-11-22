@@ -11,16 +11,18 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
-// packageDir is the directory of this package's source: the module root, found
-// from the working directory go test sets to this package's directory, and this
-// package's path beneath it. Neither moves under go test -trimpath.
+// packageDir is the directory of this package's source: the working directory
+// go test sets to the package's directory. That is a source directory, not a
+// build path, so it does not move under go test -trimpath.
 func packageDir(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(modroot.Root(t), "deploy", "k8s", "dolt")
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("reading this package's working directory: %v", err)
+	}
+	return dir
 }
 
 // goFiles lists the package's non-test Go files, the ones the import check

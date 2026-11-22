@@ -6,10 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // TestIntegrationWrapperRunsGTInTheDaemon builds the wrapper as gt and runs
@@ -51,6 +50,30 @@ func TestIntegrationWrapperRunsGTInTheDaemon(t *testing.T) {
 	}
 }
 
+// TestIntegrationWrapperEnvFindsTheTown covers wrapperEnv's town lookup with no
+// cluster: from a directory nested in a temp town, it must name that town.
+func TestIntegrationWrapperEnvFindsTheTown(t *testing.T) {
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, filepath.Dir(townMarker)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(town, townMarker), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(town, "cmd", "gt-wrap")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(work)
+	resolved, err := filepath.EvalSymlinks(town)
+	if err != nil {
+		t.Fatalf("resolve the temp town: %v", err)
+	}
+	if want := "GT_TOWN_ROOT=" + resolved; !slices.Contains(wrapperEnv(t), want) {
+		t.Fatalf("wrapperEnv does not name %s", want)
+	}
+}
+
 // buildWrapper builds the wrapper the test runs. CGO_ENABLED=0 keeps it static
 // and keeps the build off the cgo path: the wrapper's dependency graph holds no
 // cgo package, so the icu4c headers AGENTS.md warns about for a bare `go build`
@@ -73,10 +96,13 @@ func buildWrapper(t *testing.T) string {
 // in the pod resolves the town this test runs in.
 func wrapperEnv(t *testing.T) []string {
 	t.Helper()
-	// The town is the one this checkout sits in: the module root, found from the
-	// working directory go test sets to this package's directory, and the walk
-	// up from it to the directory holding the town marker.
-	dir := modroot.Root(t)
+	// go test runs the binary in the package's source directory; the town is
+	// the first directory above it holding the marker. -trimpath leaves the
+	// working directory alone, unlike this source file's path.
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("reading this package's working directory: %v", err)
+	}
 	town := ""
 	for {
 		if _, err := os.Stat(filepath.Join(dir, townMarker)); err == nil {
@@ -90,7 +116,7 @@ func wrapperEnv(t *testing.T) []string {
 		dir = parent
 	}
 	if town == "" {
-		t.Fatalf("no town root above %s, so there is no town to run against", dir)
+		t.Fatal("no town root above the package directory, so there is no town to run against")
 	}
 	home := t.TempDir()
 	configDir := filepath.Join(home, ".config", "gt")
