@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -69,8 +68,16 @@ func TestIntegrationWrapperEnvFindsTheTown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve the temp town: %v", err)
 	}
-	if want := "GT_TOWN_ROOT=" + resolved; !slices.Contains(wrapperEnv(t), want) {
-		t.Fatalf("wrapperEnv does not name %s", want)
+	// t.Chdir keeps the path as given, so on a host whose temp directory sits
+	// behind a symlink (macOS /var) the env names it unresolved: compare resolved.
+	named := ""
+	for _, kv := range wrapperEnv(t) {
+		if v, ok := strings.CutPrefix(kv, "GT_TOWN_ROOT="); ok {
+			named = v
+		}
+	}
+	if got, err := filepath.EvalSymlinks(named); err != nil || got != resolved {
+		t.Fatalf("wrapperEnv names GT_TOWN_ROOT=%q (resolved %q, err %v), want %s", named, got, err, resolved)
 	}
 }
 
