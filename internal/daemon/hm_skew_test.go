@@ -379,6 +379,28 @@ func TestHMSkewLagFailureRaisesNoEscalation(t *testing.T) {
 	}
 }
 
+// TestHMSkewUnderThresholdLogNamesTheLag: a code-path diff 14 commits and 96 hours behind logs one line naming both once; a docs-only diff logs none (gt-foq47k).
+func TestHMSkewUnderThresholdLogNamesTheLag(t *testing.T) {
+	t.Parallel()
+	a := hmSkewBehindAnswers()
+	a.lagCount = "14\n"
+	a.lagTimes = map[string]string{hmSkewTestInstalled: "100\n", hmSkewTestRemote: fmt.Sprintf("%d\n", 100+4*24*3600)}
+	d, rec, logs := hmSkewDaemon(t, a)
+
+	d.hmSkewOnce()
+	d.hmSkewOnce()
+	if got := strings.Count(logs.String(), "planner's thresholds"); got != 1 || !strings.Contains(logs.String(), "14 commits") || !strings.Contains(logs.String(), "96 whole hours") || len(rec.Escalations()) != 0 {
+		t.Fatalf("log lines = %d, log = %q, escalations = %+v; want one naming 14 commits and 96 whole hours and no escalation", got, logs.String(), rec.Escalations())
+	}
+
+	a.lagCount, a.changed = "1\n", []string{"README.md"}
+	d.execCmd = hmSkewRunner(t, a)
+	d.hmSkewOnce()
+	if got := strings.Count(logs.String(), "planner's thresholds"); got != 1 {
+		t.Errorf("under-threshold log lines = %d after a docs-only diff, want one", got)
+	}
+}
+
 // TestSkewLagFailureAndMissingCommitEscalates: a commit the clone lacks is a skew
 // by itself, judged before any lag, so it escalates even at a one-commit,
 // one-hour lag that is under the planner's thresholds (gt-g7tfxp).

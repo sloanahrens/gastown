@@ -74,9 +74,9 @@ type hmSkewMonitor struct {
 	// process left open. raised lives only in memory, so a fresh daemon clears
 	// once on its first clean reading and never after.
 	settled bool
-	// lastReadErr is the error last logged, so a town where the check cannot
-	// answer logs once per change rather than once an hour.
-	lastReadErr string
+	// lastReadErr and lastUnderThreshold are the error and lag line last logged;
+	// only the monitor writes the latter, so it needs no lock.
+	lastReadErr, lastUnderThreshold string
 }
 
 // startHMSkewMonitor starts the check, once per daemon, from the landing worker
@@ -194,7 +194,7 @@ func (d *Daemon) hmSkewBehind(townRoot, url, installed, remote string, minCommit
 	// only once it is minCommits or minAge behind: the escalation passes the image-pins
 	// planner's thresholds, rebuild_hm 0 and 0, its own bar (gt-g7tfxp, gt-72jahw).
 	// A clone that cannot answer, or a lag that cannot be measured, is an error, not a skew.
-	return d.hmSkewPastThresholds(src, installed, remote, strings.Split(out, "\x00"), minCommits, minAge)
+	return d.hmSkewLogUnderThreshold(src, installed, remote, strings.Split(out, "\x00"), minCommits, minAge)
 }
 
 // hmSkewCloneLacks reports whether the clone has no commit for sha. A rev-parse
@@ -417,4 +417,27 @@ func (d *Daemon) hmSkewRemote(townRoot string) (url, sha string, err error) {
 		return "", "", fmt.Errorf("git ls-remote %s %s: no tip", url, omSkewRemoteRef)
 	}
 	return url, sha, nil
+}
+
+// hmSkewLogUnderThreshold logs a lag under the planner's thresholds once per
+// change, so a quiet check reads as working; a docs-only diff and rebuild_hm's
+// 0 and 0 bar read no lag (gt-foq47k, gt-72jahw). The lag is read here for the
+// figures; hmSkewPastThresholds reads the same two commits again to decide.
+func (d *Daemon) hmSkewLogUnderThreshold(src, installed, remote string, changed []string, minCommits int, minAge time.Duration) (bool, error) {
+	if reaches, err := d.hmSkewReachesBinary(src, remote, changed); err != nil || !reaches || (minCommits == 0 && minAge == 0) {
+		return reaches, err
+	}
+	commits, age, err := d.skewLag(src, installed, remote)
+	if err != nil {
+		return false, fmt.Errorf("cannot measure how far behind the installed hm is: %w", err)
+	}
+	if past, err := d.hmSkewPastThresholds(src, installed, remote, changed, minCommits, minAge); err != nil || past {
+		return past, err
+	}
+	line := fmt.Sprintf("hm_skew: %d commits and %d whole hours behind, under the image-pins planner's thresholds; no escalation", commits, int(age/time.Hour))
+	if line != d.hmSkew.lastUnderThreshold {
+		d.hmSkew.lastUnderThreshold = line
+		d.logger.Printf("%s", line)
+	}
+	return false, nil
 }
