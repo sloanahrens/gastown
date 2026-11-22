@@ -5,10 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testutil/modroot"
 )
 
 // The dashboard's jobs source is configured with the command gt jobs --json on
@@ -47,11 +48,7 @@ func TestDashboardJobsCommand(t *testing.T) {
 	// newDashboardHub is the only place the source is configured, and the hub
 	// hides its config, so the assignments are read from its body, as
 	// TestDashboardHubReadsTitlesThroughOpenDashboardBeads reads the reader.
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	src, err := os.ReadFile(filepath.Join(filepath.Dir(file), "dashboard.go"))
+	src, err := os.ReadFile(filepath.Join(modroot.Root(t), "internal", "cmd", "dashboard.go"))
 	if err != nil {
 		t.Fatalf("reading dashboard.go: %v", err)
 	}
