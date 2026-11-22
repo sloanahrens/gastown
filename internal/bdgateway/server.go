@@ -419,7 +419,7 @@ func (g *Gateway) serveWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 // statsBody is GET /v1/stats's answer. Both parts are embedded, so the log's
-// four counters keep their names and values and the executor's three are added
+// counters keep their names and values and the executor's three are added
 // beside them.
 type statsBody struct {
 	Stats
