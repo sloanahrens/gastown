@@ -33,6 +33,18 @@ const (
 // load with launchctl (gt-6111kv); and town reboot-check reads the Mac's VMs,
 // processes, Docker, cluster and registry without changing anything (gt-9lciim).
 // town vms start and town reboot-check also refuse inside a pod by themselves.
+// The five deployer commands need the Mac's users and files the same way: town
+// deployer csr writes the deployer user's client key and prints its signing
+// request, and town deployer kubeconfig stores the signed certificate and writes
+// the kubeconfig beside the key, both only in a directory owned by that user
+// (gt-5wyd9y, gt-1n7lhr); town deployer admin-check reads the host's admin
+// kubeconfig, $KUBECONFIG else $HOME/.kube/config (gt-jqwtzl); town deployer
+// request writes a plan,
+// apply or rollback request into the inbox the deployer's LaunchDaemon reads
+// (gt-v5dblz); and town deployer serve is the run that LaunchDaemon starts on
+// WatchPaths, so without the entry the Mac's gt would send it into the daemon
+// pod (gt-fqsb68). csr, kubeconfig, admin-check and request also refuse inside a
+// pod by themselves.
 var gtHostCommands = []string{
 	"town forward plist",
 	"maint plan",
@@ -42,6 +54,11 @@ var gtHostCommands = []string{
 	"town vms start",
 	"town vms plist",
 	"town reboot-check",
+	"town deployer csr",
+	"town deployer kubeconfig",
+	"town deployer admin-check",
+	"town deployer request",
+	"town deployer serve",
 }
 
 // Native is a tool the config runs on the Mac instead of in the daemon image. The
