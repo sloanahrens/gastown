@@ -1299,6 +1299,44 @@ func TestSpecEstimateNeighborMinutesLedger(t *testing.T) {
 	}
 }
 
+// TestSpecEstimateNeighborMinutesUnreadable: a ledger that cannot be read, or a
+// rig name that names none, leaves the estimate as it is and logs one line per rig.
+func TestSpecEstimateNeighborMinutesUnreadable(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	reads := 0
+	read := func(townRoot, rig string) ([]landings.Record, error) {
+		reads++
+		if rig == "devops" {
+			return nil, errors.New("landings file is locked")
+		}
+		return readSpecLedger(townRoot, rig)
+	}
+	deps, err := specEstimateDeps(town, "gastown", io.Discard)
+	if err != nil {
+		t.Fatalf("specEstimateDeps: %v", err)
+	}
+	deps.HMRunner = func(context.Context, []string) ([]byte, error) {
+		return []byte(`[{"rank":1,"score":0.9,"kind":"bead","rig":"devops","id":"dv-1","title":"first"},{"rank":2,"score":0.8,"kind":"bead","rig":"devops","id":"dv-2","title":"second"},{"rank":3,"score":0.7,"kind":"bead","rig":"a/b","id":"x-1","title":"third"}]`), nil
+	}
+	base, err := estimate.Estimate(context.Background(), deps, &beads.Issue{ID: "gt-est", Title: "estimate me", Status: "open", Description: specEstimateBody})
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	var logged bytes.Buffer
+	deps.NeighborMinutes = specEstimateNeighborMinutes(read, town, &logged)
+	got, err := estimate.Estimate(context.Background(), deps, &beads.Issue{ID: "gt-est", Title: "estimate me", Status: "open", Description: specEstimateBody})
+	if err != nil {
+		t.Fatalf("Estimate: %v", err)
+	}
+	if reads == 0 || estimate.Note(got) != estimate.Note(base) {
+		t.Errorf("reads = %d, note %q, want the reader called and the note %q", reads, estimate.Note(got), estimate.Note(base))
+	}
+	if lines := strings.Count(logged.String(), "\n"); lines != 2 || !strings.Contains(logged.String(), "rig devops") || !strings.Contains(logged.String(), "rig a/b") {
+		t.Errorf("log = %q, want one line each for rig devops and rig a/b", logged.String())
+	}
+}
+
 // writeSpecEstimateRuntimeWeights writes f as town's runtime weights file.
 func writeSpecEstimateRuntimeWeights(t *testing.T, town string, f map[string]any) {
 	t.Helper()
