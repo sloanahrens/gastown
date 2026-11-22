@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,9 @@ func TestTownDeployerServeOnce(t *testing.T) {
 		if answer.ID != serveOlderID || answer.Status != deployerinbox.StatusProposed {
 			t.Errorf("the answer is %q %q, want %q proposed", answer.ID, answer.Status, serveOlderID)
 		}
+		if !answer.At.Equal(serveClock()) {
+			t.Errorf("the answer is stamped %s, want the injected clock's %s", answer.At, serveClock())
+		}
 		wantOut := "id: " + serveOlderID + "\nstatus: proposed\nanswer: " + filepath.Join(answers, serveOlderID+".json") + "\n"
 		if out.String() != wantOut {
 			t.Errorf("the command printed %q, want %q", out.String(), wantOut)
@@ -193,6 +197,63 @@ func TestTownDeployerServeOnce(t *testing.T) {
 			t.Errorf("the steps planned %d times for an empty inbox, want 0", steps.calls)
 		}
 	})
+}
+
+// serveFailingWriter is an output that cannot be written.
+type serveFailingWriter struct{}
+
+func (serveFailingWriter) Write([]byte) (int, error) { return 0, errors.New("pipe closed") }
+
+// TestTownDeployerServeOnceFails: each step of the run that can fail is an error naming its own
+// cause: an inbox that cannot be read, a request that cannot be read, an answer that cannot be
+// written, a request that cannot be moved, and a status line that cannot be printed (gt-fqsb68).
+func TestTownDeployerServeOnceFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, env *townDeployerServeEnv)
+		wantErr string
+	}{
+		{"an inbox that cannot be read", func(t *testing.T, env *townDeployerServeEnv) {
+			env.inbox = filepath.Join(filepath.Dir(env.inbox), "no-such-inbox")
+		}, "reading the inbox"},
+		{"a request that cannot be read", func(t *testing.T, env *townDeployerServeEnv) {
+			// A directory where the oldest request should be: it lists, and cannot be read as a file.
+			if err := os.Remove(filepath.Join(env.inbox, serveOlderID+".json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(env.inbox, serveOlderID+".json"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "reading the request"},
+		{"an answer that cannot be written", func(t *testing.T, env *townDeployerServeEnv) {
+			env.answers = filepath.Join(filepath.Dir(env.answers), "no-such-answers", "deeper")
+		}, "writing the answer to the request"},
+		{"a request that cannot be moved", func(t *testing.T, env *townDeployerServeEnv) {
+			// The name it moves to is a non-empty directory already.
+			target := filepath.Join(env.state, "done", serveOlderID+".json")
+			if err := os.MkdirAll(filepath.Join(target, "x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "moving the request"},
+		{"a status line that cannot be printed", func(t *testing.T, env *townDeployerServeEnv) {
+			env.out = serveFailingWriter{}
+		}, "is answered, but printing its status failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			inbox, answers, state := newServeTestDirs(t)
+			writeServeRequest(t, inbox, serveOlderID)
+			env := townDeployerServeEnv{once: true, inbox: inbox, answers: answers, state: state, steps: &serveFakeSteps{}, now: serveClock, out: &bytes.Buffer{}}
+			tc.prepare(t, &env)
+
+			err := runTownDeployerServeIn(context.Background(), env)
+
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("runTownDeployerServeIn = %v, want an error containing %q", err, tc.wantErr)
+			}
+		})
+	}
 }
 
 func serveClock() time.Time {
