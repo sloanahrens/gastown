@@ -137,3 +137,24 @@ func TestCensusMsEndAfterResetAddsNoRow(t *testing.T) {
 		t.Fatalf("rows = %+v, want none after the reset", rows)
 	}
 }
+
+// TestTickEffCensusMsStraddlesReset: a call that straddles a census reset is
+// counted in the window it started in and its time is lost, so a same-key call
+// that starts and ends in the next window reports its own time alone (the end of
+// the first call must not be added to the row the second one created).
+func TestTickEffCensusMsStraddlesReset(t *testing.T) {
+	resetCensus(t)
+	// Both calls start in this function, so they share a verb and a caller.
+	a := censusRecord([]string{"list", "--json"})
+	if rows := CensusSnapshotAndReset(); len(rows) != 1 || rows[0].Count != 1 {
+		t.Fatalf("window 1 rows = %+v, want call A counted once", rows)
+	}
+	b := censusRecord([]string{"list", "--json"})
+	censusRecordEnd(b, 40*time.Millisecond)
+	censusRecordEnd(a, 250*time.Millisecond)
+
+	rows := CensusSnapshotAndReset()
+	if len(rows) != 1 || rows[0].Count != 1 || rows[0].Ms != 40 {
+		t.Fatalf("window 2 rows = %+v, want one row of count 1 and 40 ms (call B alone)", rows)
+	}
+}

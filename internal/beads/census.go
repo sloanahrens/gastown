@@ -49,15 +49,25 @@ type censusStat struct {
 	ms    int64
 }
 
+// censusTicket names the row a counted subprocess belongs to and the window
+// that counted it, so the end of the call adds its time to that window only.
+type censusTicket struct {
+	key censusKey
+	gen uint64
+}
+
 var (
 	censusMu     sync.Mutex
 	censusCounts = make(map[censusKey]censusStat)
 	censusTotal  int
+	// censusGen is the window number: CensusSnapshotAndReset adds one, so a
+	// ticket from an earlier window no longer matches.
+	censusGen uint64
 )
 
 // censusRecord counts one bd subprocess about to start with args and returns
-// the row key censusRecordEnd adds its time under.
-func censusRecord(args []string) censusKey {
+// the ticket censusRecordEnd adds its time under.
+func censusRecord(args []string) censusTicket {
 	verb, caller := censusVerb(args), censusCaller()
 	key := censusKey{verb: verb, caller: caller}
 	censusMu.Lock()
@@ -65,23 +75,28 @@ func censusRecord(args []string) censusKey {
 	stat.count++
 	censusCounts[key] = stat
 	censusTotal++
+	gen := censusGen
 	censusMu.Unlock()
-	return key
+	return censusTicket{key: key, gen: gen}
 }
 
 // censusRecordEnd adds d, the wall time the counted subprocess spent, to the
-// row censusRecord returned. A snapshot taken in between already reported the
-// call's count and cleared its row, so the time is dropped rather than carried
-// into a row that would name time for no calls.
-func censusRecordEnd(key censusKey, d time.Duration) {
+// row of the window that counted it. A call can end after a snapshot took its
+// count and cleared the row, and a same-key call of the next window may have
+// made a new row by then: the ticket's window no longer matches, so the time is
+// dropped. A call that straddles a reset is counted in the window it started in
+// and its time is lost, so each window reports only the time of calls that
+// started in it.
+func censusRecordEnd(ticket censusTicket, d time.Duration) {
 	ms := d.Milliseconds()
 	if ms <= 0 {
 		return
 	}
 	censusMu.Lock()
-	if stat, ok := censusCounts[key]; ok {
+	if ticket.gen == censusGen {
+		stat := censusCounts[ticket.key]
 		stat.ms += ms
-		censusCounts[key] = stat
+		censusCounts[ticket.key] = stat
 	}
 	censusMu.Unlock()
 }
@@ -96,6 +111,7 @@ func CensusSnapshotAndReset() []CensusRow {
 	}
 	clear(censusCounts)
 	censusTotal = 0
+	censusGen++
 	censusMu.Unlock()
 
 	SortCensusRows(rows)
