@@ -2831,6 +2831,53 @@ func TestOverrunGuardStop_UnreadableEstopHoldsTheStop(t *testing.T) {
 	}
 }
 
+// A tip that adds a patch origin lacks is not finished work, and an origin that
+// cannot be asked is no confirmation either: both leave the worktree as it is,
+// on the seat's branch at its tip, so the branch stays the ref that keeps those
+// commits reachable (gt-zwh9r4).
+func TestOverrunResetOriginDivergedStays(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		prep func(t *testing.T, w *resetWorld)
+	}{
+		{"origin holds a sibling commit", func(t *testing.T, w *resetWorld) {
+			w.f.Commit(t, w.origin, stopSeat.Branch, "someone else's", map[string]string{"x.txt": "x\n"})
+		}},
+		{"origin cannot be asked", func(t *testing.T, w *resetWorld) {
+			w.f.RemoveRemote(t, w.work, "origin")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newResetWorld(t)
+			tc.prep(t, w)
+
+			if err := w.d.overrunResetWorktree(stopSeat); err != nil {
+				t.Fatalf("reset: %v, want nil (nothing to reset is not a failure)", err)
+			}
+
+			want := "origin does not hold " + stopSeat.Branch + " at " + w.tip
+			if !strings.Contains(w.log.String(), want) {
+				t.Errorf("log does not carry the refusal %q:\n%s", want, w.log.String())
+			}
+			g := w.git()
+			if branch, err := g.CurrentBranch(); err != nil || branch != stopSeat.Branch {
+				t.Errorf("worktree is on branch %q (%v), want %s still checked out", branch, err, stopSeat.Branch)
+			}
+			if head, err := g.Rev("HEAD"); err != nil || head != w.tip {
+				t.Errorf("HEAD = %q (%v), want the seat's tip %s", head, err, w.tip)
+			}
+			if head, err := g.Rev("refs/heads/" + stopSeat.Branch); err != nil || head != w.tip {
+				t.Errorf("branch %s = %q (%v), want the seat's tip %s kept", stopSeat.Branch, head, err, w.tip)
+			}
+			if _, err := os.Stat(filepath.Join(w.work, "work.txt")); err != nil {
+				t.Errorf("the seat's file is gone: %v", err)
+			}
+		})
+	}
+}
+
 // An e-stop that lands after the seat is parked, between the check and the
 // kill, is still refused by the supervisor: the session keeps running, the
 // refusal is logged with the supervisor's text, the park is cleared so the live
