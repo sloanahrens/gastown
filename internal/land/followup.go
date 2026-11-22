@@ -94,15 +94,17 @@ type FollowupBeads interface {
 var ErrBundleFull = errors.New("follow-up bundle has no room for the addition")
 
 // followupSkips is what a landing's feed dropped because FollowupSkip named a
-// reason: how many findings, and each reason once (gt-3v8jno). A finding is
-// keyed by its fingerprint because the feed reads a queue line more than once
-// while it decides whether the line is covered.
+// reason: how many findings, each reason once (gt-3v8jno), and one audit entry per
+// finding, with its class, file, reason and fingerprint, in the order skipped
+// (gt-xwdiiy). A finding is keyed by its fingerprint because the feed reads a queue
+// line more than once while it decides whether the line is covered.
 type followupSkips struct {
 	// answers is the hook's answer for each finding of a landing's pass, by the
 	// finding's bead and fingerprint: the drain and the compaction read a queue
 	// line up to three times, and a stateful hook that answered differently on a
 	// second ask left the line half consumed (gt-r66hk7).
 	answers    map[string]string
+	entries    []FollowupSkipped // one per skipped finding, in the order skipped (gt-xwdiiy)
 	findings   map[string]bool
 	reasons    map[string]bool
 	count      int
@@ -114,15 +116,38 @@ type followupSkips struct {
 	failure string
 }
 
+// skipped is the audit entry of each finding the hook dropped this pass, in the
+// order they were dropped (gt-xwdiiy).
+func (s *followupSkips) skipped() []FollowupSkipped { return s.entries }
+
+// guarded runs one call of a policy function the daemon sets, on the feed
+// goroutine, which has no recover of its own: a panic must end neither the feed nor
+// the landing worker, so it gives the empty answer, and the first panic of the
+// landing is kept as the one line that reports it (gt-g97vlb, gt-xwdiiy).
+func (s *followupSkips) guarded(what, then string, call func() string) (answer string) {
+	defer func() {
+		if v := recover(); v != nil && s.failure == "" {
+			s.failure = fmt.Sprintf("the follow-up %s failed (%v); %s", what, v, then)
+		}
+	}()
+	return call()
+}
+
 func newFollowupSkips() *followupSkips {
 	return &followupSkips{answers: map[string]string{}, findings: map[string]bool{}, reasons: map[string]bool{}}
 }
 
-// record counts a finding the policy skipped and keeps its reason once.
-func (s *followupSkips) record(c FollowupCandidate, reason string) {
+// record counts a finding the policy skipped, keeps its reason once and, the first
+// time it sees the finding's fingerprint, keeps its audit entry: classOf is called
+// only then, so the class function is asked once per skipped finding of a pass
+// (gt-xwdiiy).
+func (s *followupSkips) record(c FollowupCandidate, reason string, classOf func() string) {
 	if key := Fingerprint(c.Path, c.Title); !s.findings[key] {
 		s.findings[key] = true
 		s.count++
+		// The entry names the finding by its fingerprint and file, never its title
+		// or its claim: the text stays in the landing that raised it (gt-xwdiiy).
+		s.entries = append(s.entries, FollowupSkipped{Class: classOf(), File: c.Path, Reason: reason, Fingerprint: key})
 	}
 	if !s.reasons[reason] {
 		s.reasons[reason] = true
@@ -150,21 +175,19 @@ func (l *Lander) skippedCandidates(w Work, cands []FollowupCandidate, skips *fol
 		key := w.BeadID + "\x00" + Fingerprint(c.Path, c.Title)
 		reason, asked := skips.answers[key]
 		if !asked {
-			reason = func() (reason string) {
-				defer func() {
-					if v := recover(); v != nil && skips.failure == "" {
-						skips.failure = fmt.Sprintf("the follow-up skip policy failed (%v); keeping the finding", v)
-					}
-				}()
-				return l.FollowupSkip(w, c)
-			}()
+			reason = skips.guarded("skip policy", "keeping the finding", func() string { return l.FollowupSkip(w, c) })
 			skips.answers[key] = reason
 		}
 		if reason == "" {
 			kept = append(kept, c)
 			continue
 		}
-		skips.record(c, reason)
+		skips.record(c, reason, func() string {
+			if l.FollowupClass == nil {
+				return ""
+			}
+			return skips.guarded("class function", "recording the empty class", func() string { return l.FollowupClass(c) })
+		})
 	}
 	return kept
 }
