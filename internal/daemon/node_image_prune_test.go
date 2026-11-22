@@ -303,6 +303,36 @@ func TestNodeImagePruneOnceApplyZeroRemovalDeleteFailureRecords(t *testing.T) {
 	assert.Equal(t, map[string]int64{"planned": 0, "removed": 0, "failed": 0, "apply": 1}, run.Stats)
 }
 
+// TestNodeImagePruneOnceDryKeepsReportOnDeleteFailure: a dry run keeps its report beside its failed Job delete.
+func TestNodeImagePruneOnceDryKeepsReportOnDeleteFailure(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDry), fail: "Delete"}
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart)
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "a dry run whose Job delete failed appended no ledger row")
+	assert.Equal(t, nodeImagePruneOutcomeOK, run.Outcome)
+	assert.Equal(t, map[string]int64{"planned": 2, "removed": 0, "failed": 0, "apply": 0}, run.Stats)
+	assert.Equal(t, "node_image_prune: dry run planned 2 images\n"+
+		"node-prune: would remove sha256:bbb gastown-polecat created 2026-11-20T03:00:00Z\n"+
+		"node-prune: would remove sha256:ccc gastown-bd created 2026-11-20T03:02:00Z\n"+
+		"node_image_prune: node-prune: delete job gt-node-prune-20261104t200: Delete refused\n", r.logs.String())
+	require.ErrorContains(t, err, "delete job")
+}
+
+// TestNodeImagePruneOnceDryKeepsReportOtherErrorFails: a non-log-read error records the failed row alone.
+func TestNodeImagePruneOnceDryKeepsReportOtherErrorFails(t *testing.T) {
+	t.Parallel()
+	r := newUpdateJobRig(t, &config.UpdateConfig{Enabled: true, Window: "03:00"})
+	kube := &fakeKube{list: nodeImagePruneKubeList(), logs: []byte(nodePruneLogDry), fail: "Apply"}
+	err := r.d.nodeImagePruneOnce(context.Background(), kube, nodeImagePruneRunID, false, nodeImagePruneStart)
+	require.ErrorContains(t, err, "apply job")
+	run, ok := lastNodeImagePruneRun(t, r.town)
+	require.True(t, ok, "the failed dry run appended no ledger row")
+	assert.Equal(t, nodeImagePruneOutcomeFailed, run.Outcome)
+	assert.Equal(t, map[string]int64{"apply": 0}, run.Stats)
+}
+
 // TestNodeImagePruneOnceApplyMalformedLogRecordsTheFailedRow: a log that does not
 // parse gives no report to record even when the Job delete fails too: the run records
 // the figures-free failed row of its parse step, logs no summary line, and returns the
