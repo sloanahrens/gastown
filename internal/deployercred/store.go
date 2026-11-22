@@ -132,7 +132,18 @@ func (Disk) OpenDir(name string) (Dir, error) {
 
 // diskDir is Dir through a directory descriptor, which outlives a rename of the
 // path it was opened by.
-type diskDir struct{ root *os.Root }
+type diskDir struct {
+	root *os.Root
+	// same replaces os.SameFile when set; a test names two files that differ without a race.
+	same func(a, b fs.FileInfo) bool
+}
+
+func (d diskDir) sameFile() func(a, b fs.FileInfo) bool {
+	if d.same != nil {
+		return d.same
+	}
+	return os.SameFile
+}
 
 func (d diskDir) Stat() (Info, error) {
 	fi, err := d.root.Stat(".")
@@ -144,8 +155,9 @@ func (d diskDir) Stat() (Info, error) {
 
 // Open refuses a name that is not one plain file in the directory. os.Root
 // follows an in-root symlink, so the last element is lstat'd and refused before
-// anything is opened (a link to a FIFO would block the open). The lstat and the
-// open are two calls: a symlink swapped in between is followed inside the root.
+// anything is opened (a link to a FIFO would block the open), and the handle that
+// was opened is then compared with that lstat: a name swapped for another file or
+// a link between the two calls is not the file that was checked, and is refused.
 func (d diskDir) Open(name string) (ReadFile, error) {
 	if err := checkName(name); err != nil {
 		return nil, err
@@ -161,7 +173,27 @@ func (d diskDir) Open(name string) (ReadFile, error) {
 	if err != nil {
 		return nil, err
 	}
+	opened, err := f.Stat()
+	if err == nil {
+		err = confirmOpened(name, info, opened, d.sameFile())
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 	return diskFile{f: f}, nil
+}
+
+// confirmOpened refuses an opened handle that is not the file lstat described, or is not a
+// regular file; same is os.SameFile, a parameter so a test can name two files that differ.
+func confirmOpened(name string, lstat, opened fs.FileInfo, same func(a, b fs.FileInfo) bool) error {
+	if !same(lstat, opened) {
+		return fmt.Errorf("the credential %s opened is not the file that was lstat'd: it was replaced while it was opened", name)
+	}
+	if !opened.Mode().IsRegular() {
+		return fmt.Errorf("the credential %s is not a regular file", name)
+	}
+	return nil
 }
 
 func (d diskDir) Close() error { return d.root.Close() }
