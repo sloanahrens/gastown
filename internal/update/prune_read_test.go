@@ -655,51 +655,36 @@ func TestPruneReadRegistryRefusesBeforeSending(t *testing.T) {
 	}
 }
 
-// pruneBranchFake lists a repository's branches one scripted page at a time.
-// Page errAt fails with err; a page past the script is empty.
-type pruneBranchFake struct {
-	pages [][]forgejo.Branch
-	errAt int
+// pruneRefsFake answers a repository's refs in one call and records the prefix
+// each call asked for. err, when set, fails the call.
+type pruneRefsFake struct {
+	refs  []forgejo.Ref
 	err   error
-	asked []int
+	calls []string
 }
 
-func (f *pruneBranchFake) ListBranches(_ context.Context, _, _ string, page, _ int) ([]forgejo.Branch, error) {
-	f.asked = append(f.asked, page)
-	if page == f.errAt {
+func (f *pruneRefsFake) ListRefs(_ context.Context, _, _, prefix string) ([]forgejo.Ref, error) {
+	f.calls = append(f.calls, prefix)
+	if f.err != nil {
 		return nil, f.err
 	}
-	if page > len(f.pages) {
-		return nil, nil
-	}
-	return f.pages[page-1], nil
+	return f.refs, nil
 }
 
-// pruneBranch is a branch named name.
-func pruneBranch(name string) forgejo.Branch {
-	var b forgejo.Branch
-	b.Name = name
-	return b
-}
-
-// TestPruneReadGreenRefsReturnsTheSha12Set holds that the green-ref reader
-// returns the sha12 of every green/<sha12> branch across a full page and a short
-// one, and names no other branch.
-func TestPruneReadGreenRefsReturnsTheSha12Set(t *testing.T) {
+// TestPruneReadGreenRefsReadsOnePrefixedCall holds that the green-ref reader
+// asks once for green/ and returns the sha12 of every green/<sha12> ref it is
+// answered, naming no other ref.
+func TestPruneReadGreenRefsReadsOnePrefixedCall(t *testing.T) {
 	t.Parallel()
-	var first []forgejo.Branch
-	for i := 0; i < pruneBranchLimit-1; i++ {
-		first = append(first, pruneBranch(fmt.Sprintf("land/bead-%03d", i)))
-	}
-	first = append(first, pruneBranch("green/aaaaaaaaaaaa"))
-	branches := &pruneBranchFake{pages: [][]forgejo.Branch{first, {
-		pruneBranch("green/bbbbbbbbbbbb"),
-		pruneBranch("green/short"),
-		pruneBranch("green/ABCDEF123456"),
-		pruneBranch("green/cccccccccccc0"),
-		pruneBranch("main"),
-	}}}
-	got, err := ReadGreenRefs(context.Background(), branches, "gastown", "gastown")
+	refs := &pruneRefsFake{refs: []forgejo.Ref{
+		{Name: "green/aaaaaaaaaaaa"},
+		{Name: "green/bbbbbbbbbbbb"},
+		{Name: "green/short"},
+		{Name: "green/ABCDEF123456"},
+		{Name: "green/cccccccccccc0"},
+		{Name: "main"},
+	}}
+	got, err := ReadGreenRefs(context.Background(), refs, "gastown", "gastown")
 	if err != nil {
 		t.Fatalf("ReadGreenRefs() error = %v", err)
 	}
@@ -712,32 +697,44 @@ func TestPruneReadGreenRefsReturnsTheSha12Set(t *testing.T) {
 	if !slices.Equal(keys, want) {
 		t.Errorf("green refs = %v, want %v", keys, want)
 	}
-	if !slices.Equal(branches.asked, []int{1, 2, 3}) {
-		t.Errorf("pages asked = %v, want [1 2 3]: the listing must be followed to its empty page", branches.asked)
+	if !slices.Equal(refs.calls, []string{"green/"}) {
+		t.Errorf("prefixes asked = %q, want [green/]: one call reads the refs", refs.calls)
 	}
 }
 
-// TestPruneReadGreenRefsReadsACappedListingToItsEnd holds that a server which
-// answers fewer branches than the page size asks for is still read to its
-// empty page, so no green ref past the first short answer is left out.
-func TestPruneReadGreenRefsReadsACappedListingToItsEnd(t *testing.T) {
+// TestPruneReadGreenRefsKeepsEveryRefOfOneAnswer holds that the one answer is
+// read whole: 303 green refs, the count the pair check read in seven pages,
+// come back from a single GET with no page or limit and none is dropped at a
+// page boundary.
+func TestPruneReadGreenRefsKeepsEveryRefOfOneAnswer(t *testing.T) {
 	t.Parallel()
-	const capped = 50
-	var pages [][]forgejo.Branch
-	for p := 0; p < 2; p++ {
-		var page []forgejo.Branch
-		for i := 0; i < capped; i++ {
-			page = append(page, pruneBranch(fmt.Sprintf("green/%012x", p*capped+i)))
+	const count = 303
+	var answer strings.Builder
+	answer.WriteString("[")
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			answer.WriteString(",")
 		}
-		pages = append(pages, page)
+		fmt.Fprintf(&answer, `{"ref":"refs/heads/green/%012x","object":{"sha":%q,"type":"commit"}}`, i, strings.Repeat("a", 40))
 	}
-	branches := &pruneBranchFake{pages: pages}
-	got, err := ReadGreenRefs(context.Background(), branches, "gastown", "gastown")
+	answer.WriteString("]")
+	var sent []*http.Request
+	client := pruneForgejoClient(t, func(req *http.Request) (*http.Response, error) {
+		sent = append(sent, req)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(answer.String()))}, nil
+	})
+	got, err := ReadGreenRefs(context.Background(), client, "gastown", "gastown")
 	if err != nil {
 		t.Fatalf("ReadGreenRefs() error = %v", err)
 	}
-	if len(got) != 2*capped {
-		t.Errorf("green refs = %d, want %d: a capped page must not end the listing", len(got), 2*capped)
+	if len(got) != count {
+		t.Errorf("green refs = %d, want %d: the whole answer is the listing", len(got), count)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("requests sent = %d, want 1", len(sent))
+	}
+	if q := sent[0].URL.RawQuery; q != "" {
+		t.Errorf("request query = %q, want none: the refs route takes no page or limit", q)
 	}
 }
 
@@ -760,33 +757,26 @@ func TestPruneReadRegistryRefusesARequestWithNoAnswer(t *testing.T) {
 	}
 }
 
-// pruneBranchEndless answers every page with the same full page of branches, so
-// a listing never comes back short or empty.
-type pruneBranchEndless struct{ page []forgejo.Branch }
-
-func (b pruneBranchEndless) ListBranches(context.Context, string, string, int, int) ([]forgejo.Branch, error) {
-	return b.page, nil
-}
-
-// TestPruneReadGreenRefsRefusesAListingPastItsPageBound holds that a branch
-// listing that never ends is an error with no set returned.
-func TestPruneReadGreenRefsRefusesAListingPastItsPageBound(t *testing.T) {
+// TestPruneReadGreenRefsRefusesA404 holds that a 404 from the refs listing is
+// an error with no set, never an empty set: a wrong repository name answers 404
+// too, and an empty set would let the planner delete every green image.
+func TestPruneReadGreenRefsRefusesA404(t *testing.T) {
 	t.Parallel()
-	full := make([]forgejo.Branch, pruneBranchLimit)
-	for i := range full {
-		full[i] = pruneBranch("land/bead")
-	}
-	got, err := ReadGreenRefs(context.Background(), pruneBranchEndless{page: full}, "gastown", "gastown")
+	refs := &pruneRefsFake{err: &forgejo.APIError{StatusCode: http.StatusNotFound}}
+	got, err := ReadGreenRefs(context.Background(), refs, "gastown", "gastown")
 	if err == nil {
 		t.Fatalf("ReadGreenRefs() = %v, nil error; want a refusal", got)
 	}
 	if got != nil {
 		t.Errorf("ReadGreenRefs() returned set %v with its error", got)
 	}
+	if !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("error %q does not name HTTP 404", err)
+	}
 }
 
 // TestPruneReadGreenRefsRefusesAMissingListing holds that a green-ref read with
-// no branch listing wired is an error, not an empty set.
+// no ref listing wired is an error, not an empty set.
 func TestPruneReadGreenRefsRefusesAMissingListing(t *testing.T) {
 	t.Parallel()
 	got, err := ReadGreenRefs(context.Background(), nil, "gastown", "gastown")
@@ -798,17 +788,13 @@ func TestPruneReadGreenRefsRefusesAMissingListing(t *testing.T) {
 	}
 }
 
-// TestPruneReadGreenRefsRefusesAFailedListing holds that a listing that fails on
-// any page is an error with no set returned, since a set missing a ref would let
+// TestPruneReadGreenRefsRefusesAFailedListing holds that a refs listing that
+// fails is an error with no set returned, since a set missing a ref would let
 // the planner delete that ref's image.
 func TestPruneReadGreenRefsRefusesAFailedListing(t *testing.T) {
 	t.Parallel()
-	var first []forgejo.Branch
-	for i := 0; i < pruneBranchLimit; i++ {
-		first = append(first, pruneBranch("green/aaaaaaaaaaaa"))
-	}
-	branches := &pruneBranchFake{pages: [][]forgejo.Branch{first}, errAt: 2, err: errors.New("connection reset")}
-	got, err := ReadGreenRefs(context.Background(), branches, "gastown", "gastown")
+	refs := &pruneRefsFake{err: errors.New("connection reset")}
+	got, err := ReadGreenRefs(context.Background(), refs, "gastown", "gastown")
 	if err == nil {
 		t.Fatalf("ReadGreenRefs() = %v, nil error; want a refusal", got)
 	}
@@ -836,7 +822,7 @@ func pruneForgejoClient(t *testing.T, rt pruneRoundTrip) *forgejo.Client {
 	return c
 }
 
-// TestPruneReadGreenRefsDoesNotEchoAnAnswerBody holds that a branch listing
+// TestPruneReadGreenRefsDoesNotEchoAnAnswerBody holds that a refs listing
 // refused with a non-200 answer names the status and never the body.
 func TestPruneReadGreenRefsDoesNotEchoAnAnswerBody(t *testing.T) {
 	t.Parallel()
@@ -941,8 +927,8 @@ func TestPruneReadRefusesAnAnswerFromOffTheEndpoint(t *testing.T) {
 }
 
 // TestPruneReadRequestsAreGET holds that every request the readers send is a
-// GET: the packages listing through its doer, and the branch listing through
-// the production client.
+// GET: the packages listing through its doer, and the refs listing through the
+// production client.
 func TestPruneReadRequestsAreGET(t *testing.T) {
 	t.Parallel()
 	fake := &pruneForgejoFake{answers: map[string][]pruneAnswer{
@@ -960,10 +946,7 @@ func TestPruneReadRequestsAreGET(t *testing.T) {
 	var branchMethods []string
 	client := pruneForgejoClient(t, func(req *http.Request) (*http.Response, error) {
 		branchMethods = append(branchMethods, req.Method)
-		body := "[]"
-		if req.URL.Query().Get("page") == "1" {
-			body = "[" + `{"name":"green/aaaaaaaaaaaa","commit":{"id":"` + strings.Repeat("a", 40) + `"}}` + "]"
-		}
+		body := "[" + `{"ref":"refs/heads/green/aaaaaaaaaaaa","object":{"sha":"` + strings.Repeat("a", 40) + `","type":"commit"}}` + "]"
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
 	if _, err := ReadGreenRefs(context.Background(), client, "gastown", "gastown"); err != nil {
