@@ -50,6 +50,24 @@ func TestTranscriptArchivePrune(t *testing.T) {
 				"rig/seat/a.jsonl": false, "rig/seat/b.jsonl": true, "rig/new/c.jsonl": true,
 			},
 		},
+		{
+			name: "a file exactly at the keep stays and one past it goes",
+			cap:  1 << 20,
+			files: map[string]transcriptArchiveFile{
+				"rig/seat/at.jsonl":   {sandboxTranscriptKeep, 1},
+				"rig/seat/past.jsonl": {sandboxTranscriptKeep + time.Second, 1},
+			},
+			want: map[string]bool{"rig/seat/at.jsonl": true, "rig/seat/past.jsonl": false},
+		},
+		{
+			name: "a total exactly at the cap evicts nothing",
+			cap:  60,
+			files: map[string]transcriptArchiveFile{
+				"rig/seat/a.jsonl": {2 * hour, 30},
+				"rig/seat/b.jsonl": {hour, 30},
+			},
+			want: map[string]bool{"rig/seat/a.jsonl": true, "rig/seat/b.jsonl": true},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -100,5 +118,39 @@ func TestTranscriptArchivePruneErrors(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("prune with the %s not a directory = %v, want an error naming %s", name, err, want)
 		}
+	}
+}
+
+// TestTranscriptArchivePruneLeavesLinksAlone: the archive's files are regular
+// files; a link in a seat directory is neither followed nor removed nor counted,
+// whatever its target's age or the cap, and what it points at is untouched.
+func TestTranscriptArchivePruneLeavesLinksAlone(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	root, outside := t.TempDir(), filepath.Join(t.TempDir(), "target.jsonl")
+	if err := os.WriteFile(outside, []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-2 * sandboxTranscriptKeep)
+	if err := os.Chtimes(outside, old, old); err != nil {
+		t.Fatal(err)
+	}
+	seat := filepath.Join(root, "rig", "seat")
+	if err := os.MkdirAll(seat, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(seat, "link.jsonl")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	// A cap smaller than the link's own size: counting the link would evict it.
+	if err := pruneTranscriptArchive(root, now, sandboxTranscriptKeep, 1); err != nil {
+		t.Fatalf("pruneTranscriptArchive: %v", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Errorf("the link was removed: %v", err)
+	}
+	if got, err := os.ReadFile(outside); err != nil || string(got) != "target" {
+		t.Errorf("the link's target = %q, %v; want it untouched", got, err)
 	}
 }
