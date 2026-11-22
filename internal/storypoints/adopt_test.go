@@ -390,6 +390,79 @@ func nonFiniteHoldout(edit func(h *Holdout)) []Holdout {
 	return h
 }
 
+// risingHoldout builds one bead per log ratio given, with measured minutes rising by
+// one from 10 so the rank rule has spread to read. Each bead's estimate is those
+// minutes over e raised to its ratio, and every bead is first-round.
+func risingHoldout(proposed, checked []float64) []Holdout {
+	h := make([]Holdout, len(proposed))
+	for i := range h {
+		measured := 10 + float64(i)
+		h[i] = Holdout{Actual: measured, Proposed: measured / math.Exp(proposed[i]), Checked: measured / math.Exp(checked[i]), FirstRound: true}
+	}
+	return h
+}
+
+// notFirstRound clears the first-round flag on the last k beads.
+func notFirstRound(h []Holdout, k int) []Holdout {
+	for i := len(h) - k; i < len(h); i++ {
+		h[i].FirstRound = false
+	}
+	return h
+}
+
+// TestAdoptAutoRules: the combined rule adopts only when the rank rule and the error
+// rule both adopt, and a rejection names the rule that failed. pairs gives log ratios
+// whose mean is (a+b)/2 and root mean square is sqrt((a²+b²)/2), and risingHoldout
+// gives measured minutes that rise, so each row's decision follows from its numbers.
+func TestAdoptAutoRules(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		holdout     []Holdout
+		wantAdopted bool
+		wantReason  []string
+	}{
+		// Rank: proposed 0.867 against the current 0.673. Error: rmse falls from 0.2
+		// to 0.1, both biases zero.
+		{"both rules pass", risingHoldout(pairs(-0.1, 0.1, 10), pairs(-0.2, 0.2, 10)), true,
+			[]string{"adopted", "both rules pass", "0.867", "0.1000"}},
+		// Log ratios that grow with position make the proposed estimates fall as the
+		// measured minutes rise, so the rank rule refuses before the error rule is read.
+		{"the rank rule fails",
+			risingHoldout([]float64{-0.7, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 1.1}, pairs(-0.2, 0.2, 10)), false,
+			[]string{"rejected", "rank rule", "below the 0.40 bar"}},
+		// Both blends rise with the measured minutes. Error: rmse stays 0.3 against
+		// the current weights' 0.2.
+		{"the first-round rmse is not lower", risingHoldout(pairs(0.3, 0.3, 10), pairs(-0.2, -0.2, 10)), false,
+			[]string{"rejected", "error rule", "first-round rmse", "not lower"}},
+		// Rank: proposed 0.673 against the current 0.333. Error: rmse falls from 0.5
+		// to 0.3606, but the bias grows from 0 to 0.3.
+		{"the bias widens by more than the margin", risingHoldout(pairs(0.1, 0.5, 10), pairs(-0.5, 0.5, 10)), false,
+			[]string{"rejected", "error rule", "bias", "0.02"}},
+		// Twelve beads, three not first-round: the rank rule passes, the error rule refuses on nine.
+		{"the first-round holdout is too small",
+			notFirstRound(risingHoldout(pairs(-0.1, 0.1, 12), pairs(-0.2, 0.2, 12)), 3), false,
+			[]string{"rejected", "error rule", "first-round holdout", "9 beads"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := AdoptAuto(tc.holdout)
+			if got.Adopted != tc.wantAdopted {
+				t.Fatalf("AdoptAuto = %+v, want adopted %v", got, tc.wantAdopted)
+			}
+			for _, want := range tc.wantReason {
+				if !strings.Contains(got.Reason, want) {
+					t.Errorf("reason %q does not name %q", got.Reason, want)
+				}
+			}
+			if strings.Contains(got.Reason, "\n") {
+				t.Errorf("reason is not one line: %q", got.Reason)
+			}
+		})
+	}
+}
+
 // TestAdoptByErrorRefusesNonFinite: a NaN compares false against everything, so a
 // first-round rmse or bias that is NaN must be refused by name, never adopted through
 // a comparison that fails to reject it. Each row is built from a holdout whose values

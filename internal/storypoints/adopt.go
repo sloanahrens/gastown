@@ -174,6 +174,22 @@ func AdoptByError(holdout []Holdout) Adoption {
 		proposedRMSE, checkedRMSE, proposedBias, AdoptBiasMargin)}
 }
 
+// AdoptAuto adopts a proposal only when the rank rule and the error rule both adopt.
+// A rejection names the rule that failed and carries that rule's own reason, which
+// names the measure and its numbers; an adoption carries both measures' reasons.
+func AdoptAuto(holdout []Holdout) Adoption {
+	rank := Adopt(holdout)
+	if !rank.Adopted {
+		return Adoption{Reason: "rejected: the rank rule failed: " + strings.TrimPrefix(rank.Reason, "rejected: ")}
+	}
+	errRule := AdoptByError(holdout)
+	if !errRule.Adopted {
+		return Adoption{Reason: "rejected: the error rule failed: " + strings.TrimPrefix(errRule.Reason, "rejected: ")}
+	}
+	return Adoption{Adopted: true, Reason: "adopted: both rules pass: " +
+		strings.TrimPrefix(rank.Reason, "adopted: ") + "; " + strings.TrimPrefix(errRule.Reason, "adopted: ")}
+}
+
 // hasSpread reports whether v holds more than one value. Adopt calls it only after
 // rejecting values that are not positive finite numbers, so a NaN is not read here
 // as a value that spreads.
