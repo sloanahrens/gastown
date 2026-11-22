@@ -481,6 +481,34 @@ type storyPointsAdoption struct {
 	At       time.Time `json:"at"`
 	Version  string    `json:"version,omitempty"`
 	Previous string    `json:"previous,omitempty"`
+	// Adopted, Outcome and Reason are a "checked" line's: the time of the adoption it
+	// judged, "kept" or "reverted", and why.
+	Adopted *time.Time `json:"adopted_at,omitempty"`
+	Outcome string     `json:"outcome,omitempty"`
+	Reason  string     `json:"reason,omitempty"`
+}
+
+// readStoryPointsAdoptions reads the adoptions log in order. No file is no adoption
+// yet. A file that cannot be read, or a line that does not parse, is an error: the
+// check does not read it as an empty log.
+func readStoryPointsAdoptions(env Env, path string) ([]storyPointsAdoption, error) {
+	data, err := env.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var log []storyPointsAdoption
+	dec := json.NewDecoder(bytes.NewReader(data))
+	for dec.More() {
+		var a storyPointsAdoption
+		if err := dec.Decode(&a); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		log = append(log, a)
+	}
+	return log, nil
 }
 
 // storyPointsAdoptionsPath is the adoptions log beside the runtime weights of town.
