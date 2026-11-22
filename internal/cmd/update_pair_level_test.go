@@ -61,6 +61,14 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 		},
 		Database: func(context.Context, string) (int, error) { return pairLevelSchema, nil },
 	}
+	// levelFails reads the pin and then fails on the level it carries. The
+	// database is at 0, so a swallowed level error compares 0 with 0 and passes.
+	levelFails := pairLevelReads{
+		PinLevel: func(context.Context, string, string) (string, int, error) {
+			return pairLevelBdPin, 0, errors.New("bd carries no migrations")
+		},
+		Database: func(context.Context, string) (int, error) { return 0, nil },
+	}
 	databaseFails := pairLevelReads{
 		PinLevel: func(context.Context, string, string) (string, int, error) {
 			return pairLevelBdPin, pairLevelSchema, nil
@@ -97,6 +105,12 @@ func TestPreRollGuardPairLevel(t *testing.T) {
 			pair:  update.ImagePair{Commit: pairLevelCommit},
 			reads: pinFails,
 			want:  []string{pairLevelCommit, "no such path"},
+		},
+		{
+			name:  "a pin level that cannot be read refuses, even against a database at zero",
+			pair:  update.ImagePair{Commit: pairLevelCommit},
+			reads: levelFails,
+			want:  []string{pairLevelCommit, "bd carries no migrations"},
 		},
 		{
 			name:  "a database level that cannot be read refuses",
