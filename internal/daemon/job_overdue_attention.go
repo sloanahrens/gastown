@@ -21,12 +21,19 @@ type JobReading struct {
 	Cadence time.Duration
 }
 
-// jobStateOverdue and jobOutcomeFailed are the state and outcome internal/jobs
-// spells; both are named here for the reason JobReading exists.
+// These are the states and the outcome internal/jobs spells, named here for
+// the reason JobReading exists.
 const (
-	jobStateOverdue  = "overdue"
-	jobOutcomeFailed = "failed"
+	jobStateOverdue   = "overdue"
+	jobStateNeverRun  = "never_run"
+	jobStateNoCadence = "no_cadence"
+	jobStateUnknown   = "unknown"
+	jobOutcomeFailed  = "failed"
 )
+
+// jobOverdueListKey is the one item a list that cannot be read raises, so the
+// queue never reads a broken read as a list with no overdue jobs (gt-1ytq9f).
+const jobOverdueListKey = "job-overdue:list"
 
 // jobOverdueWakePrefix is the key prefix attention.RuleFor reads as
 // RuleJobOverdueWake; the job's name follows it (gt-toiff6, gt-obe5qp).
@@ -45,24 +52,30 @@ var jobOverdueWakeJobs = map[string]bool{
 // daemon's start code sets it; the collector then raises nothing.
 var JobListSource func(townRoot string, now time.Time) ([]JobReading, error)
 
-// collectJobOverdue raises one item per job whose state is overdue or whose
-// newest outcome failed; its key (jobOverdueKey) names the job, so one job has
-// one item however many ticks it stays overdue or failed, and a job both
-// overdue and failed raises one item, not two. The item clears on the tick
-// after the job runs again and its outcome is no longer failed.
-// A job list that cannot be read returns the source's error, so the previous
-// items stay (collectAttention); with no source wired it raises nothing.
+// collectJobOverdue raises one item per job jobOverdueRaises admits; its key
+// (jobOverdueKey) names the job, so one job has one item however many ticks it
+// stays overdue or failed, and a job both overdue and failed raises one item,
+// not two. The item clears on the tick after the job runs again and its
+// outcome is no longer failed.
+// A list that cannot be read raises one item keyed jobOverdueListKey naming
+// the failure, and no error, so the item clears on the next tick the list
+// reads. With no source wired it raises nothing.
 func (s *attentionSources) collectJobOverdue(context.Context) ([]attention.Item, error) {
 	if s.jobList == nil {
 		return nil, nil
 	}
 	readings, err := s.jobList(s.now)
 	if err != nil {
-		return nil, fmt.Errorf("reading the maintenance job list: %w", err)
+		return []attention.Item{{
+			Key:      jobOverdueListKey,
+			Kind:     attention.KindJobOverdue,
+			Severity: attention.SeverityLow,
+			Summary:  "maintenance job list cannot be read: " + err.Error(),
+		}}, nil
 	}
 	var out []attention.Item
 	for _, r := range readings {
-		if r.State != jobStateOverdue && r.Outcome != jobOutcomeFailed {
+		if !jobOverdueRaises(r) {
 			continue
 		}
 		out = append(out, attention.Item{
@@ -73,6 +86,23 @@ func (s *attentionSources) collectJobOverdue(context.Context) ([]attention.Item,
 		})
 	}
 	return out, nil
+}
+
+// jobOverdueRaises reports whether one reading raises an item: the job is
+// overdue, or its newest outcome failed whatever its state (gt-utf4tf). The
+// rest are named skips: no_cadence, never_run (a patrol the town has disabled
+// stays here), and unknown with no failed outcome.
+func jobOverdueRaises(r JobReading) bool {
+	if r.Outcome == jobOutcomeFailed {
+		return true
+	}
+	switch r.State {
+	case jobStateOverdue:
+		return true
+	case jobStateNeverRun, jobStateNoCadence, jobStateUnknown:
+		return false
+	}
+	return false
 }
 
 // jobOverdueSummary is the item's text: a newest failed run says so and when

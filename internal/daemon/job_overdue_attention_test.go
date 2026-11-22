@@ -187,8 +187,8 @@ func TestJobOverdueAttentionFailed(t *testing.T) {
 	}
 }
 
-// With no list source wired the collector raises nothing and no error; a source
-// that fails gives the error back, so the previous items stay (collectAttention).
+// With no list source wired the collector raises nothing and no error: only
+// the daemon start code's wiring (gt-poy10l) can supply the list.
 func TestJobOverdueAttentionSource(t *testing.T) {
 	t.Parallel()
 	f := newAttentionFixture(t, jobOverdueNow)
@@ -196,9 +196,61 @@ func TestJobOverdueAttentionSource(t *testing.T) {
 	if items, err := c.collect(context.Background()); err != nil || len(items) != 0 {
 		t.Errorf("no source: items %+v, err %v, want neither", items, err)
 	}
-	boom := errors.New("ledger unreadable")
-	f.src.jobList = func(time.Time) ([]JobReading, error) { return nil, boom }
-	if items, err := c.collect(context.Background()); !errors.Is(err, boom) || len(items) != 0 {
-		t.Errorf("failing source: items %+v, err %v, want the source's error and no item", items, err)
+}
+
+// An unreadable list raises one item keyed job-overdue:list naming the read
+// failure, never a list with no overdue jobs, and the item clears on the tick
+// the list reads again. The states that raise nothing are named rows, each
+// with the reason it is silent (gt-1ytq9f).
+func TestJobOverdueAttentionRefusals(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		reading JobReading
+	}{
+		{"no_cadence", JobReading{Name: "cache_trim", State: jobStateNoCadence}},
+		{"never_run on a disabled patrol", JobReading{Name: "cloud_check", State: jobStateNeverRun, Cadence: time.Hour}},
+		{"unknown with an absent source", JobReading{Name: "dolt_backup", State: jobStateUnknown, Cadence: 24 * time.Hour}},
+	} {
+		t.Run("silent/"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, jobOverdueNow)
+			if items := jobOverdueItems(t, f, []JobReading{tc.reading}); len(items) != 0 {
+				t.Errorf("items = %+v, want none: %s raises nothing", items, tc.name)
+			}
+		})
 	}
+
+	t.Run("unreadable list", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("patrol config: unexpected end of JSON")
+		f := newAttentionFixture(t, jobOverdueNow)
+		f.src.jobList = func(time.Time) ([]JobReading, error) { return nil, boom }
+		c := collectorFor(t, f.src, attention.KindJobOverdue)
+		items, err := c.collect(context.Background())
+		if err != nil {
+			t.Fatalf("collector: %v, a failed read is the item", err)
+		}
+		if len(items) != 1 {
+			t.Fatalf("items = %+v, want one for the unreadable list", items)
+		}
+		it := items[0]
+		if it.Key != jobOverdueListKey || it.Kind != attention.KindJobOverdue || it.Severity != attention.SeverityLow {
+			t.Errorf("item = %+v, want a low job-overdue item keyed %q", it, jobOverdueListKey)
+		}
+		for _, want := range []string{"cannot be read", boom.Error()} {
+			if !strings.Contains(it.Summary, want) {
+				t.Errorf("summary %q does not name %q", it.Summary, want)
+			}
+		}
+
+		// The next tick reads the list again, so the queue replaces the item.
+		f.src.jobList = func(time.Time) ([]JobReading, error) { return nil, nil }
+		next := collectAttention(context.Background(), attention.State{Items: items},
+			[]attentionCollector{c}, func(string, ...any) {})
+		if got, ok := attention.Find(attention.State{Items: next}, jobOverdueListKey); ok {
+			t.Errorf("the list item survived a readable tick: %+v", got)
+		}
+	})
 }
