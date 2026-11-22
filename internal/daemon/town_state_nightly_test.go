@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/townbackup"
 )
 
@@ -37,9 +38,10 @@ func nightlyTestTown(t *testing.T) string {
 	return town
 }
 
-// nightlyTestDaemon is a daemon whose town root is town, logging to logs.
+// nightlyTestDaemon is a daemon whose town root is town, logging to logs. Its
+// alerts and clears go to a recorder, so the unit tier never runs `gt escalate`.
 func nightlyTestDaemon(town string, logs *strings.Builder) *Daemon {
-	return &Daemon{config: &Config{TownRoot: town}, logger: log.New(logs, "", 0)}
+	return &Daemon{config: &Config{TownRoot: town}, logger: log.New(logs, "", 0), notifier: notifyfake.New()}
 }
 
 // TestTownStateNightlyWritesVerifiedNight is the first acceptance box: a run

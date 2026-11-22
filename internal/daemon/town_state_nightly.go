@@ -7,11 +7,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/townbackup"
 	"github.com/steveyegge/gastown/internal/townstate"
+)
+
+const (
+	// alertKeyTownStateConfigOmitted is the alert a night raises when its export
+	// left the town config out for holding a credential-shaped value (gt-zz76o8).
+	alertKeyTownStateConfigOmitted = "town_state_nightly:config-omitted"
+	// townStateConfigName is the town-root-relative name the alert watches, as
+	// the export reports it in ExportSummary.Omitted.
+	townStateConfigName = "settings/config.json"
+	// omittedNamesShown bounds the paths one omission log line carries, so a
+	// night that omits a directory of files still logs one short line.
+	omittedNamesShown = 20
 )
 
 // The nightly town-state backup (gt-xg1avw): one date's backup set, exported
@@ -44,6 +57,29 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 	}
 	// Counts only: the log never carries the town's file names.
 	d.logger.Printf("scheduled_maintenance: town-state backup export: %s", townStateBackupCounts(sum))
+	// An omission is reported, never fatal: the night still commits what the
+	// export wrote, and a lost town config is the one omission that is alerted.
+	// The names are logged because a backup that silently lacks a file is what
+	// this line exists to prevent (gt-zz76o8).
+	if len(sum.Omitted) > 0 {
+		d.logger.Printf("town_state_backup: night omitted %d file(s): %s",
+			len(sum.Omitted), townStateOmittedNames(sum.Omitted))
+	}
+	// A lost town config is the one omission that must be loud, so a delivery that
+	// fails is not read as raised: the night still commits and verifies, then
+	// reports the failure, which the scheduled step alerts on itself. A clean night
+	// clears the alert on every run (an idempotent call, once a day): no record of
+	// "raised" survives a restart, and a restart-proof one is out of scope.
+	var alertErr error
+	if slices.Contains(sum.Omitted, townStateConfigName) {
+		if err := d.escalateAlertErr(alertKeyTownStateConfigOmitted, "town_state_nightly",
+			"the town config was left out of tonight's backup because it holds a credential-shaped value; the town config is not backed up"); err != nil {
+			d.logger.Printf("town_state_backup: the config-omitted alert did not reach the town: %v", err)
+			alertErr = fmt.Errorf("town-state backup: the town config was left out of tonight's backup and the alert did not reach the town: %w", err)
+		}
+	} else {
+		d.clearAlerts("the night carries the town config", alertKeyTownStateConfigOmitted)
+	}
 
 	verified, err := townbackup.Verify(archive)
 	if err != nil {
@@ -71,7 +107,7 @@ func (d *Daemon) maintenanceTownStateBackup(root string, now time.Time) error {
 		// space, as the Dolt nightly backup treats it.
 		d.logger.Printf("scheduled_maintenance: WARNING: town-state backup rotation: %v", err)
 	}
-	return nil
+	return alertErr
 }
 
 // exportTownStateArchive writes the town root's backup set into a gzip tar at
@@ -112,6 +148,15 @@ func failedTownStateNight(partial string, cause error) error {
 		cause = fmt.Errorf("%w (and the partial directory %s could not be removed: %v)", cause, partial, err)
 	}
 	return fmt.Errorf("town-state backup: %w", cause)
+}
+
+// townStateOmittedNames renders the names of a night's omitted files for the
+// log: the first omittedNamesShown paths, then the count left out.
+func townStateOmittedNames(omitted []string) string {
+	if len(omitted) <= omittedNamesShown {
+		return strings.Join(omitted, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(omitted[:omittedNamesShown], ", "), len(omitted)-omittedNamesShown)
 }
 
 // townStateBackupCounts renders an export's counts for the daemon log.
