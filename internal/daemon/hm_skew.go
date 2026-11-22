@@ -41,8 +41,7 @@ const (
 	// hmSkewRig is the hm rig's directory under the town; its bare repository
 	// (<rig>/.repo.git) is where the origin url is read from.
 	hmSkewRig = "hm"
-	// hmSkewRigWorktree is the hm rig's canonical worktree, which the skew
-	// message names as the place to install hm from.
+	// hmSkewRigWorktree is the hm rig's canonical worktree under the town.
 	hmSkewRigWorktree = hmSkewRig + "/mayor/rig"
 	// hmSkewCloneDir is the job-owned clone the diff runs in, relative to the
 	// town. The monitor clones it from the rig's origin on first use and fetches
@@ -329,10 +328,11 @@ func (d *Daemon) hmSkewJudge(r hmSkewReading) {
 }
 
 // hmSkewMessage names both shas short, so the operator matches them by eye
-// against `hm version` and a git log, and says what clears it.
+// against `hm version` and a git log, and says what clears it: the image pin
+// the planner refreshes, not an install in the rig.
 func hmSkewMessage(installed, remote string) string {
-	return fmt.Sprintf("the installed hm is %s but the hm rig's origin/main is %s: the difference can change the hm binary; run `make install` in the hm rig (%s) to clear this",
-		shortOMSHA(installed), shortOMSHA(remote), hmSkewRigWorktree)
+	return fmt.Sprintf("the installed hm is %s but the hm rig's origin/main is %s: the difference can change the hm binary; the installed hm is the image pin in deploy/daemon/image-pins, and the image-pins planner files its refresh bead (label image-pins-refresh); act only if no such bead is open",
+		shortOMSHA(installed), shortOMSHA(remote))
 }
 
 // hmSkewPath is the installed hm the check reads (see hmSkewPathOf).
