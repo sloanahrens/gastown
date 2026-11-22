@@ -48,6 +48,7 @@ type recordReapOpts struct {
 	deleterErr error         // the record deleter fails
 	noDeleter  bool          // neither a seam nor a linked deleter exists
 	copyErr    error         // the outbox copy fails
+	noOutbox   bool          // the outbox copy succeeds but the seat wrote no file
 	hook       string        // the seat's agent bead hook
 	agentErr   error         // the seat's agent bead cannot be read
 }
@@ -108,6 +109,9 @@ func newRecordReap(t *testing.T, o recordReapOpts) *recordReap {
 		r.copied = append(r.copied, rec)
 		if o.copyErr != nil {
 			return o.copyErr
+		}
+		if o.noOutbox {
+			return nil // the seat wrote no outbox file: nothing to copy, no failure
 		}
 		dir := session.SandboxOutboxCopyDir(town, rec.Rig, rec.Polecat)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -284,6 +288,38 @@ func TestPatrolScanSandboxRecordsKeepsASandboxWhoseOutboxCopyFailed(t *testing.T
 	}
 	if !strings.Contains(r.logs.String(), outboxNotCopiedReason) || !strings.Contains(r.logs.String(), "transport error") {
 		t.Errorf("log = %q, want the kept reason and the copy's own error", r.logs.String())
+	}
+}
+
+// A seat that wrote no outbox is deleted as it was before the copy-out: the
+// copy succeeds with nothing in it, the sandbox and its record go, and the seat
+// end that reads the host copy later applies nothing to the bead (gt-zcky7n).
+func TestPatrolScanSandboxRecordsDeletesASeatWithNoOutboxAsBefore(t *testing.T) {
+	t.Parallel()
+	r := newRecordReap(t, recordReapOpts{age: sandboxRecordGrace + time.Minute, gateway: "gw1", exists: true, marker: true, noOutbox: true})
+	r.host.patrolScanSandboxRecords()
+	if got, want := strings.Join(r.order, ","), "copy,delete"; got != want {
+		t.Fatalf("order of the copy and the delete = %q, want %q", got, want)
+	}
+	if len(r.copied) != 1 {
+		t.Errorf("the outbox copy was asked %d times, want once", len(r.copied))
+	}
+	if r.recorded() {
+		t.Error("the record survived a seat that wrote no outbox")
+	}
+	// The seat end, landing after the patrol, finds an empty copy: it reports
+	// nothing and records nothing applied.
+	if reason := r.host.applySeatOutbox("gastown", "capable", "gt-x"); reason != "" {
+		t.Errorf("applySeatOutbox kept the seat for an outbox that was never written: %s", reason)
+	}
+	if _, have, err := readAppliedSeatOutbox(r.town, "gastown", "capable"); err != nil || have {
+		t.Errorf("applied record (have=%v, err=%v) after an empty outbox, want none written", have, err)
+	}
+	dir := session.SandboxOutboxCopyDir(r.town, "gastown", "capable")
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) != 0 {
+		t.Errorf("the copy directory holds %v, want nothing for a seat that wrote no outbox", entries)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("reading the copy directory: %v", err)
 	}
 }
 
